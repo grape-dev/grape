@@ -203,10 +203,15 @@ def _resolve_uid_by_platform_login(login: str, provider: str) -> int:
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        row = c.execute(
-            "SELECT ei.grape_user_id FROM external_identities ei "
-            "WHERE ei.provider=? AND ei.external_login=? AND ei.status=1 LIMIT 1",
-            (provider, login)).fetchone()
+        from src.kernel.domain_read import mgmt_lib as _mg_lib_eil
+        _eil_lib = _mg_lib_eil(foreign_only=True)
+        if _eil_lib is not None:
+            row = _eil_lib.read_one("grape_user_id_by_external_login", (provider, login))
+        else:
+            row = c.execute(
+                "SELECT ei.grape_user_id FROM external_identities ei "
+                "WHERE ei.provider=? AND ei.external_login=? AND ei.status=1 LIMIT 1",
+                (provider, login)).fetchone()
         return row[0] if row else 0
 
 class FeishuAsync:

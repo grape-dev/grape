@@ -40,36 +40,64 @@ def failed_result_gap(user: Dict[str, Any], limit: int = 20) -> Dict[str, Any]:
         }
 
     placeholders = ",".join("?" * len(repos))
+
+    def _fg_lib():
+        from src.kernel.domain_read import runtime_lib
+        return runtime_lib()
+
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(
-                f"SELECT COUNT(*) FROM events WHERE status='failed' AND repo_key IN ({placeholders})",
-                repos)
-            total_failed = c.fetchone()[0] or 0
+            _lib = _fg_lib()
+            if _lib is not None:
+                total_failed = _lib.count_events(
+                    f"status='failed' AND repo_key IN ({placeholders})", tuple(repos))
+            else:
+                c.execute(
+                    f"SELECT COUNT(*) FROM events WHERE status='failed' AND repo_key IN ({placeholders})",
+                    repos)
+                total_failed = c.fetchone()[0] or 0
 
             # 真空：result 空（不含 legacy 前缀，legacy 有内容但无诊断意义）
-            c.execute(
-                f"SELECT COUNT(*) FROM events WHERE status='failed' AND repo_key IN ({placeholders}) "
-                f"AND (result IS NULL OR TRIM(result)='')",
-                repos)
-            empty_result = c.fetchone()[0] or 0
+            if _lib is not None:
+                empty_result = _lib.count_events(
+                    f"status='failed' AND repo_key IN ({placeholders}) "
+                    f"AND (result IS NULL OR TRIM(result)='')", tuple(repos))
+            else:
+                c.execute(
+                    f"SELECT COUNT(*) FROM events WHERE status='failed' AND repo_key IN ({placeholders}) "
+                    f"AND (result IS NULL OR TRIM(result)='')",
+                    repos)
+                empty_result = c.fetchone()[0] or 0
 
             # legacy：result 以 [legacy] 开头（存量标记）
-            c.execute(
-                f"SELECT COUNT(*) FROM events WHERE status='failed' AND repo_key IN ({placeholders}) "
-                f"AND result LIKE ?",
-                repos + [LEGACY_PREFIX + "%"])
-            legacy = c.fetchone()[0] or 0
+            if _lib is not None:
+                legacy = _lib.count_events(
+                    f"status='failed' AND repo_key IN ({placeholders}) AND result LIKE ?",
+                    tuple(repos) + (LEGACY_PREFIX + "%",))
+            else:
+                c.execute(
+                    f"SELECT COUNT(*) FROM events WHERE status='failed' AND repo_key IN ({placeholders}) "
+                    f"AND result LIKE ?",
+                    repos + [LEGACY_PREFIX + "%"])
+                legacy = c.fetchone()[0] or 0
 
             with_diag = max(0, total_failed - empty_result - legacy)
 
-            c.execute(
-                f"SELECT seq, repo_key, event_type, agent_type, issue_id, result, created_at "
-                f"FROM events WHERE status='failed' AND repo_key IN ({placeholders}) "
-                f"AND (result IS NULL OR TRIM(result)='' OR result LIKE ?) "
-                f"ORDER BY seq DESC LIMIT ?",
-                repos + [LEGACY_PREFIX + "%", int(limit)])
+            if _lib is not None:
+                _rows_fg = _lib.query_events(
+                    "seq, repo_key, event_type, agent_type, issue_id, result, created_at",
+                    f"status='failed' AND repo_key IN ({placeholders}) "
+                    f"AND (result IS NULL OR TRIM(result)='' OR result LIKE ?)",
+                    tuple(repos) + (LEGACY_PREFIX + "%",), "seq DESC", int(limit))
+            else:
+                c.execute(
+                    f"SELECT seq, repo_key, event_type, agent_type, issue_id, result, created_at "
+                    f"FROM events WHERE status='failed' AND repo_key IN ({placeholders}) "
+                    f"AND (result IS NULL OR TRIM(result)='' OR result LIKE ?) "
+                    f"ORDER BY seq DESC LIMIT ?",
+                    repos + [LEGACY_PREFIX + "%", int(limit)])
+                _rows_fg = c.fetchall()
             samples = [
                 {
                     "seq": r[0], "repo_key": r[1], "event_type": r[2] or "",
@@ -78,7 +106,7 @@ def failed_result_gap(user: Dict[str, Any], limit: int = 20) -> Dict[str, Any]:
                     "created_at": r[6] or "",
                     "legacy": bool(r[5] and str(r[5]).startswith(LEGACY_PREFIX)),
                 }
-                for r in c.fetchall()
+                for r in _rows_fg
             ]
         except Exception as e:
             log.warning(f"failed_result_gap query failed: {e}")

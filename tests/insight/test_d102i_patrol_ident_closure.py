@@ -34,7 +34,7 @@ def test_d102i_patrol_module_imports():
 
 def test_d102i_cache_version_bumped():
     """index.html 资源版本 ≥218（app.js 变更未 bump 的部署缓存问题防复发）。"""
-    html = (_REPO_ROOT / "src" / "api" / "static" / "index.html").read_text(encoding="utf-8")
+    html = (_REPO_ROOT / "src" / "api" / "frontend" / "shell" / "index.html").read_text(encoding="utf-8")
     import re
     m = re.search(r"app\.js\?v=(\d+)", html)
     assert m, "index.html 缺 app.js 版本参数"

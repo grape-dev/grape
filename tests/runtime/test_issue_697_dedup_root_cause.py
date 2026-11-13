@@ -107,7 +107,7 @@ class TestSchedulerDedupRule:
 
 @pytest.fixture(scope="module")
 def ap():
-    from src.domains.runtime.routes import autopilot
+    from src.domains.mgmt.routes import autopilot
     return autopilot
 
 

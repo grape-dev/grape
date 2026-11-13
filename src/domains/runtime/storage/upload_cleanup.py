@@ -61,7 +61,7 @@ def _cleanup_temp_files():
                     storage.delete_object(file_key)
                 else:
                     # 非 OBS 模式：删本地文件
-                    static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "api", "static", "uploads", "scene-icons")
+                    static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "api", "frontend", "shell", "uploads", "scene-icons")
                     local_path = os.path.join(static_dir, os.path.basename(file_key))
                     if os.path.exists(local_path):
                         os.remove(local_path)

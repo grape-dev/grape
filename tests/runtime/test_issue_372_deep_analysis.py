@@ -492,8 +492,8 @@ class TestErrorCodeI18n:
     def test_locale_files_have_error_namespace(self):
         """en/zh app.json 都有 error namespace。"""
         import os
-        en_path = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "static", "locales", "en", "app.json")
-        zh_path = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "static", "locales", "zh", "app.json")
+        en_path = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "shell", "locales", "en", "app.json")
+        zh_path = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "shell", "locales", "zh", "app.json")
         with open(en_path) as f:
             en = json.load(f)
         with open(zh_path) as f:

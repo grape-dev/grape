@@ -298,15 +298,24 @@ def _write_to_obs(repo_key: str, name: str, content: str):
             storage_key = f"{knowledge_obs_prefix(repo_key)}/project-info/{name}"
             storage.save_bytes(storage_key, content.encode("utf-8"))
         # 无论 OBS 是否启用，都写 DB
+        # P3-5b：知识表是 mgmt 基表；runtime 进程写入走 mgmt lib + 幂等意图
+        if _write_baseline_db_via_lib(repo_key, display_name, name, file_path,
+                                      storage_key, content_hash):
+            return
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             # Issue #190：查重改用 name（不受 file_path 格式变化影响）
-            existing = c.execute(
-                "SELECT id FROM agent_shared_knowledge "
-                "WHERE repo_key=? AND scope='baseline' AND name=? AND archived=0",
-                (repo_key, display_name)
-            ).fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_kn
+            _kn_lib = _mg_lib_kn(foreign_only=True)
+            if _kn_lib is not None:
+                existing = _kn_lib.read_one("knowledge_id_baseline", (repo_key, display_name))
+            else:
+                existing = c.execute(
+                    "SELECT id FROM agent_shared_knowledge "
+                    "WHERE repo_key=? AND scope='baseline' AND name=? AND archived=0",
+                    (repo_key, display_name)
+                ).fetchone()
             if existing:
                 # 已存在 → UPDATE（保留原 id，ref 不失效）
                 kid = existing[0]
@@ -345,6 +354,47 @@ def _write_to_obs(repo_key: str, name: str, content: str):
                     pass
     except Exception as e:
         log.warning(f"project-info OBS write failed {repo_key}/{name}: {e}")
+
+
+def _write_baseline_db_via_lib(repo_key: str, display_name: str, name: str, file_path: str,
+                               storage_key: str, content_hash: str) -> bool:
+    """lib 模式写 baseline 知识 + ref（两条幂等意图）。
+
+    返回 True = 已由 lib 处理（含已排队补偿）；False = lib 不可用或失败，调用方回落原 SQL。
+    """
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_kb
+    _mg = _mgmt_lib_kb(foreign_only=True)
+    if _mg is None:
+        return False
+    try:
+        from src.kernel import cross_write as _xw
+        _desc = BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)
+        _out: dict = {}
+
+        def _apply_upsert() -> None:
+            _out.update(_mg.upsert_baseline_knowledge(
+                repo_key, display_name, _desc, file_path, storage_key, content_hash))
+
+        _res = _xw.submit(
+            "mgmt", "knowledge_baseline_upsert",
+            _xw.unique_key(f"knowledge-baseline:{repo_key}:{display_name}:{(content_hash or '')[:12]}"),
+            {"repo_key": repo_key, "display_name": display_name, "description": _desc,
+             "file_path": file_path, "obs_key": storage_key, "content_hash": content_hash},
+            _apply_upsert)
+        if _res.get("status") == "failed":
+            log.warning(f"knowledge baseline upsert queued for retry ({repo_key}/{name}): "
+                        f"{_res.get('error')}")
+            return False
+        kid = int(_out.get("id") or 0)
+        if kid:
+            # ref 用独立意图（key 按 id 幂等）；主表写入失败时不会留下无主 ref
+            _xw.submit("mgmt", "knowledge_ref_ensure", _xw.unique_key(f"knowledge-ref:{kid}"),
+                       {"knowledge_id": kid},
+                       lambda: _mg.ensure_scene_knowledge_ref(kid))
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"knowledge baseline lib path failed, fallback to local SQL: {e}")
+        return False
 
 
 def _run(cmd: list, cwd: str = None, timeout: int = 300) -> tuple[int, str, str]:

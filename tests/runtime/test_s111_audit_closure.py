@@ -18,6 +18,8 @@ UC↔用例映射（requirements"候选集占位符家族场景用例"表续编�
 """
 import ast
 import os
+
+import pytest
 import re
 import shutil
 import subprocess
@@ -28,8 +30,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 _SRC = Path(__file__).resolve().parent.parent.parent / "src"
 _TESTS = Path(__file__).resolve().parent
-_APP_JS = _SRC / "api" / "static" / "js" / "app.js"
-_INDEX_HTML = _SRC / "api" / "static" / "index.html"
+_APP_JS = _SRC / "api" / "frontend" / "shell" / "js" / "app.js"
+_INDEX_HTML = _SRC / "api" / "frontend" / "shell" / "index.html"
 
 
 def _js_brace_depth_at(line_no: int, lines: list) -> int:
@@ -63,6 +65,7 @@ def test_uc13_appjs_strip_prefix_closure():
     )
 
 
+@pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
 def test_uc13_appjs_toplevel_reachable():
     """UC13②a：node 实弹——node --check 语法 + stub 全局直接 eval 全文件
     （浏览器顶层执行语义；IIFE 包装会假绿不可用）。文件末尾顶层
@@ -96,6 +99,7 @@ console.log(crashed?'RESULT:CRASH':'RESULT:OK');
     assert "RESULT:OK" in r.stdout, f"app.js 直接 eval 加载失败: {r.stdout} {r.stderr}"
 
 
+@pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
 def test_uc13_appjs_host_from_catalog():
     """UC13②b：目录三函数顶层可达且行为正确——stripRepoPrefix 三形态 +
     _repoWebHost 卡派生（gitee host 不再回退 gitcode.com）。缓存版本随

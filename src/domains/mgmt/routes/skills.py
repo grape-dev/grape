@@ -380,13 +380,18 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
     # 1. 先按 skill_name 精确匹配
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "SELECT id, skill_name, display_name, description, agent_type, category_id "
-            "FROM skill WHERE is_active=1 AND scope='official' "
-            "AND (skill_name=? OR display_name=?) ORDER BY skill_name",
-            (q, q),
-        )
-        exact_rows = c.fetchall()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_4e3919_f
+        _ru_lib_4e3919 = _ru_lib_4e3919_f(foreign_only=True)
+        if _ru_lib_4e3919 is not None:
+            exact_rows = _ru_lib_4e3919.read_all("skill_4e3919", (q, q),)
+        else:
+            c.execute(
+                "SELECT id, skill_name, display_name, description, agent_type, category_id "
+                "FROM skill WHERE is_active=1 AND scope='official' "
+                "AND (skill_name=? OR display_name=?) ORDER BY skill_name",
+                (q, q),
+            )
+            exact_rows = c.fetchall()
 
     if exact_rows:
         return {"skills": [
@@ -406,12 +411,17 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
 
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "SELECT id, skill_name, display_name, description, agent_type, category_id "
-            "FROM skill WHERE is_active=1 AND scope='official' "
-            "ORDER BY agent_type, skill_name",
-        )
-        all_skills = c.fetchall()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_ded9f4_f
+        _ru_lib_ded9f4 = _ru_lib_ded9f4_f(foreign_only=True)
+        if _ru_lib_ded9f4 is not None:
+            all_skills = _ru_lib_ded9f4.read_all("skill_ded9f4", ())
+        else:
+            c.execute(
+                "SELECT id, skill_name, display_name, description, agent_type, category_id "
+                "FROM skill WHERE is_active=1 AND scope='official' "
+                "ORDER BY agent_type, skill_name",
+            )
+            all_skills = c.fetchall()
 
     results = []
     for r in all_skills:
@@ -813,11 +823,16 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
 
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "SELECT skill_name, owner_id, skill_path, scope FROM skill WHERE id=? AND is_active=1",
-            (skill_id,)
-        )
-        row = c.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_f41425_f
+        _ru_lib_f41425 = _ru_lib_f41425_f(foreign_only=True)
+        if _ru_lib_f41425 is not None:
+            row = _ru_lib_f41425.read_one("skill_f41425", (skill_id,))
+        else:
+            c.execute(
+                "SELECT skill_name, owner_id, skill_path, scope FROM skill WHERE id=? AND is_active=1",
+                (skill_id,)
+            )
+            row = c.fetchone()
 
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
@@ -851,10 +866,23 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
             pass
 
     # 物理删除（按主键 id）
-    with db_lock:
-        c = db.cursor()
-        c.execute("DELETE FROM skill WHERE id=?", (skill_id,))
-        db.commit()
+    # P3-5f：skill 在 runtime 域；lib 不可用回落本地 SQL
+    from src.kernel.config import log as _log_dsk
+    from src.kernel.domain_read import runtime_lib as _rt_lib_dsk
+    from src.kernel import cross_write as _xw_dsk
+    _dsk_done = False
+    _rt_dsk = _rt_lib_dsk(foreign_only=True)
+    if _rt_dsk is not None:
+        _rt_dsk_ok = _rt_dsk
+        _dsk_done = _xw_dsk.submit_if_lib(
+            _rt_dsk_ok, "runtime", "skill_delete_by_id", f"skill-del-id:{skill_id}",
+            {"skill_id": int(skill_id)},
+            lambda: _rt_dsk_ok.delete_skill_by_id(int(skill_id)), _log_dsk)
+    if not _dsk_done:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE id=?", (skill_id,))
+            db.commit()
 
     if storage is None:
         from src.kernel.config import log
@@ -891,11 +919,16 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
     # 1. 查既有记录（按主键 id 精确）
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "SELECT skill_name, scope, owner_id, agent_type, category_id FROM skill WHERE id=? AND is_active=1",
-            (skill_id,)
-        )
-        row = c.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_9f2ee7_f
+        _ru_lib_9f2ee7 = _ru_lib_9f2ee7_f(foreign_only=True)
+        if _ru_lib_9f2ee7 is not None:
+            row = _ru_lib_9f2ee7.read_one("skill_9f2ee7", (skill_id,))
+        else:
+            c.execute(
+                "SELECT skill_name, scope, owner_id, agent_type, category_id FROM skill WHERE id=? AND is_active=1",
+                (skill_id,)
+            )
+            row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
@@ -1056,11 +1089,17 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         # 仓库技能 → 个人技能：从 skill 表查
         with db_lock:
             c = db.cursor()
-            row = c.execute(
-                "SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id "
-                "FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1",
-                (skill_name, repo_key),
+            from src.kernel.domain_read import runtime_lib as _ru_lib_21ba32_f
+            _ru_lib_21ba32 = _ru_lib_21ba32_f(foreign_only=True)
+            if _ru_lib_21ba32 is not None:
+                c = _ru_lib_21ba32.read_one("skill_21ba32", (skill_name, repo_key),
             ).fetchone()
+            else:
+                row = c.execute(
+                    "SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id "
+                    "FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1",
+                    (skill_name, repo_key),
+                ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库技能未找到或不属于该仓库"})
         skill_rec = {
@@ -1275,8 +1314,13 @@ def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_curre
 
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT skill_name, skill_path, scope FROM skill WHERE id=? AND is_active=1", (pkg_id,))
-        row = c.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_8d3c93_f
+        _ru_lib_8d3c93 = _ru_lib_8d3c93_f(foreign_only=True)
+        if _ru_lib_8d3c93 is not None:
+            row = _ru_lib_8d3c93.read_one("skill_8d3c93", (pkg_id,))
+        else:
+            c.execute("SELECT skill_name, skill_path, scope FROM skill WHERE id=? AND is_active=1", (pkg_id,))
+            row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "父技能未找到"})
 

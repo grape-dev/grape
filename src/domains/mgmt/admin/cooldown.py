@@ -112,10 +112,30 @@ def _anonymize_account(user_id: str):
                 c.execute("DELETE FROM org_member WHERE org_id=?", (org_id,))
                 c.execute("DELETE FROM organization WHERE id=?", (org_id,))
             c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
-            c.execute("DELETE FROM agent_tasks WHERE user_id=?", (user_id,))
-            c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (user_id,))
-            c.execute("DELETE FROM chat_conversations WHERE user_id=?", (user_id,))
-            c.execute("DELETE FROM issue WHERE user_id=?", (user_id,))
+            # P3-5g：以下四表在 runtime 域；跨域删除收成**一个原语**（保住"一起删"语义）
+            from src.kernel.domain_read import runtime_lib as _rt_lib_purge
+            _rt_purge = _rt_lib_purge(foreign_only=True)
+            if _rt_purge is not None:
+                try:
+                    from src.kernel import cross_write as _xw_purge
+                    _rt_purge_ok = _rt_purge          # 绑定局部名：lambda 不随后续置 None 变化
+                    _res_purge = _xw_purge.submit(
+                        "runtime", "user_rows_purge",
+                        _xw_purge.unique_key(f"user-purge:{user_id}"),
+                        {"user_id": str(user_id)},
+                        lambda: _rt_purge_ok.purge_user_rows(str(user_id)))
+                    if _res_purge.get("status") == "failed":
+                        log.warning(f"anonymize: runtime purge queued for retry: "
+                                    f"{_res_purge.get('error')}")
+                except Exception as _e_purge:
+                    log.warning(f"anonymize: runtime purge via lib failed, fallback to local SQL: "
+                                f"{_e_purge}")
+                    _rt_purge = None
+            if _rt_purge is None:
+                c.execute("DELETE FROM agent_tasks WHERE user_id=?", (user_id,))
+                c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (user_id,))
+                c.execute("DELETE FROM chat_conversations WHERE user_id=?", (user_id,))
+                c.execute("DELETE FROM issue WHERE user_id=?", (user_id,))
             c.execute("DELETE FROM user_feedback WHERE user_id=?", (user_id,))
             c.execute("DELETE FROM user_credentials WHERE user_id=?", (user_id,))
             c.execute("DELETE FROM api_tokens WHERE user_id=?", (user_id,))

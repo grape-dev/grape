@@ -36,7 +36,10 @@ def _load_error_code_i18n() -> dict:
         return _ERROR_CODE_I18N_CACHE
     import json as _json, os
     _result = {}
-    _locales_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "api", "static", "locales")
+    _api_root = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api")
+    _locales_dir = os.path.join(_api_root, "frontend", "shell", "locales")
+    if not os.path.isdir(_locales_dir):
+        _locales_dir = os.path.join(_api_root, "static", "locales")
     for _lang in ("zh", "en"):
         _path = os.path.join(_locales_dir, _lang, "app.json")
         try:
@@ -890,8 +893,13 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     _cred_scope = ''
                     _cred_owner = ''
                     try:
-                        c.execute("SELECT scope, owner_name FROM runtime_credentials WHERE id=?", (cid,))
-                        _cr = c.fetchone()
+                        from src.kernel.domain_read import runtime_lib as _ru_lib_aff203_f
+                        _ru_lib_aff203 = _ru_lib_aff203_f(foreign_only=True)
+                        if _ru_lib_aff203 is not None:
+                            _cr = _ru_lib_aff203.read_one("runtime_credentials_aff203", (cid,))
+                        else:
+                            c.execute("SELECT scope, owner_name FROM runtime_credentials WHERE id=?", (cid,))
+                            _cr = c.fetchone()
                         if _cr:
                             _cred_scope, _cred_owner = _cr[0] or '', _cr[1] or ''
                     except Exception:
@@ -942,8 +950,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                         "error": rprobe_error or "",
                     }
                 # 本机直连引擎的 device_name 用 host_name（区分多台主控机）
-                # 远端引擎优先用户自定义凭据名 rc.name（与 Agent 运行时页 Workers 卡片一致），
-                # 为空回退边端自报 device_name（Issue #465，避免存量空名出现空列）
+                # 远端引擎 device_name = 凭据自定义名 rc.name 唯一来源（Issue #701 收口）：
+                # 为空下发空值，前端统一占位「未命名设备」，不回退边端自报 device_name
                 if (cid or 0) == 0:
                     _dev_name = rhost or "本机直连"
                 else:
@@ -1052,8 +1060,13 @@ async def get_error_log_sources(user: dict = Depends(require_org_member)):
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (_cred_id,))
-                row = c.fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_911d7f_f
+                _ru_lib_911d7f = _ru_lib_911d7f_f(foreign_only=True)
+                if _ru_lib_911d7f is not None:
+                    row = _ru_lib_911d7f.read_one("runtime_credentials_911d7f", (_cred_id,))
+                else:
+                    c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (_cred_id,))
+                    row = c.fetchone()
                 if row:
                     _wname = row[1] or row[0] or _wname
         except Exception:
@@ -1283,18 +1296,22 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
 
     with db_lock:
         c = db.cursor()
+        _COLS_A = ("seq, event_type, issue_id, title, actor, agent_type, skill, status, "
+                   "duration, created_at, payload, repo_key")
         if _repo_keys:
-            c.execute(
-                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload, repo_key "
-                "FROM events WHERE repo_key IN (" + ",".join("?" * len(_repo_keys)) + ") AND issue_id IS NOT NULL AND issue_id <> '' ORDER BY created_at",
-                _repo_keys
-            )
+            _where_A = ("repo_key IN (" + ",".join("?" * len(_repo_keys)) +
+                        ") AND issue_id IS NOT NULL AND issue_id <> ''")
+            _params_A = tuple(_repo_keys)
         else:
-            c.execute(
-                "SELECT seq, event_type, issue_id, title, actor, agent_type, skill, status, duration, created_at, payload, repo_key "
-                "FROM events WHERE issue_id IS NOT NULL AND issue_id <> '' ORDER BY created_at"
-            )
-        rows = c.fetchall()
+            _where_A = "issue_id IS NOT NULL AND issue_id <> ''"
+            _params_A = ()
+        from src.kernel.domain_read import runtime_lib as _rt_ev_a
+        _rt_a = _rt_ev_a()
+        if _rt_a is not None:
+            rows = _rt_a.query_events(_COLS_A, _where_A, _params_A, "created_at")
+        else:
+            c.execute(f"SELECT {_COLS_A} FROM events WHERE {_where_A} ORDER BY created_at", _params_A)
+            rows = c.fetchall()
 
         # 查 agent_tasks 建立 (issue_id, event_seq) → (task_id, runtime_id) 映射
         c.execute(
@@ -1409,12 +1426,20 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT seq, event_type, repo_key, issue_id, status, created_at, payload "
-                "FROM events WHERE event_type LIKE '%a2a%' OR event_type LIKE '%A2A%' "
-                "ORDER BY created_at DESC LIMIT 10"
-            )
-            for row in c.fetchall():
+            _COLS_B = "seq, event_type, repo_key, issue_id, status, created_at, payload"
+            _where_B = "(event_type LIKE ? OR event_type LIKE ?)"
+            _params_B = ("%a2a%", "%A2A%")
+            from src.kernel.domain_read import runtime_lib as _rt_ev_b
+            _rt_b = _rt_ev_b()
+            if _rt_b is not None:
+                _rows_B = _rt_b.query_events(_COLS_B, _where_B, _params_B, "created_at DESC", 10)
+            else:
+                c.execute(
+                    f"SELECT {_COLS_B} FROM events WHERE {_where_B} ORDER BY created_at DESC LIMIT 10",
+                    _params_B
+                )
+                _rows_B = c.fetchall()
+            for row in _rows_B:
                 result["recent_a2a"].append({
                     "seq": row[0], "event_type": row[1] or "", "repo_key": row[2] or "",
                     "issue_id": row[3] or "", "status": row[4] or "",
@@ -1501,14 +1526,22 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
 
         recent_events = []
         try:
-            c.execute(
-                "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") ORDER BY seq DESC LIMIT 5",
-                (_repo_keys)
-            )
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_d1
+            _rt_d1 = _runtime_lib_d1()
+            if _rt_d1 is not None:
+                _rows_d1 = _rt_d1.query_events(
+                    "seq, event_type, agent_type, title, summary, status, created_at",
+                    f"repo_key IN ({_rk_placeholders})", tuple(_repo_keys), "seq DESC", 5)
+            else:
+                c.execute(
+                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") ORDER BY seq DESC LIMIT 5",
+                    (_repo_keys)
+                )
+                _rows_d1 = c.fetchall()
             recent_events = [
                 {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
                  "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
-                for r in c.fetchall()
+                for r in _rows_d1
             ]
         except Exception:
             pass
@@ -1538,15 +1571,24 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         # 每个 Agent 的最近 2 个事件（供 Dashboard Agent 卡片展示，替代假数据）
         agent_recent_events = {}
         try:
+            from src.kernel.domain_read import runtime_lib as _rt_ev_c
+            _rt_c = _rt_ev_c()
             for atype in ["vod", "issue", "coding", "qa", "sre"]:
-                c.execute(
-                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND agent_type=? ORDER BY seq DESC LIMIT 2",
-                    (_repo_keys + [atype])
-                )
+                if _rt_c is not None:
+                    _rows_C = _rt_c.query_events(
+                        "seq, event_type, agent_type, title, summary, status, created_at",
+                        f"repo_key IN ({_rk_placeholders}) AND agent_type=?",
+                        tuple(_repo_keys) + (atype,), "seq DESC", 2)
+                else:
+                    c.execute(
+                        "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND agent_type=? ORDER BY seq DESC LIMIT 2",
+                        (_repo_keys + [atype])
+                    )
+                    _rows_C = c.fetchall()
                 agent_recent_events[atype] = [
                     {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
                      "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
-                    for r in c.fetchall()
+                    for r in _rows_C
                 ]
         except Exception:
             pass
@@ -1600,11 +1642,17 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     # 查 DB 中实际使用的 repo_key（可能是 github: 前缀）
     _actual_repo_key = repo_key
     try:
-        with db_lock:
-            c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (" + _rk_placeholders + ") LIMIT 1", _repo_keys)
-            _row = c.fetchone()
-            if _row:
-                _actual_repo_key = _row[0]
+        from src.kernel.domain_read import mgmt_lib
+        _mg = mgmt_lib()
+        _hit = _mg.find_repo_key_in(list(_repo_keys)) if _mg is not None else None
+        if _hit is not None:
+            _actual_repo_key = _hit
+        else:
+            with db_lock:
+                c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (" + _rk_placeholders + ") LIMIT 1", _repo_keys)
+                _row = c.fetchone()
+                if _row:
+                    _actual_repo_key = _row[0]
     except Exception:
         pass
     try:
@@ -1681,8 +1729,13 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             try:
                 with db_lock:
                     _cc = db.cursor()
-                    _cc.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
-                    _cr = _cc.fetchone()
+                    from src.kernel.domain_read import runtime_lib as _ru_lib_f8ea2f_f
+                    _ru_lib_f8ea2f = _ru_lib_f8ea2f_f(foreign_only=True)
+                    if _ru_lib_f8ea2f is not None:
+                        _cr = _ru_lib_f8ea2f.read_one("runtime_credentials_f8ea2f", (_cid,))
+                    else:
+                        _cc.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
+                        _cr = _cc.fetchone()
                     _n = (_cr[0] or "") if _cr else ""
             except Exception:
                 _n = ""

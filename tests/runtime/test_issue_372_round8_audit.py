@@ -185,7 +185,7 @@ class TestT27FrontendVersionSync:
     def test_t27_01_api_js_version_consistent(self):
         """T27-01: api.js 版本号在所有 HTML 中一致"""
         import re
-        base = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "static")
+        base = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "shell")
         versions = set()
         for html_file in ("index.html", "register.html", "forgot.html"):
             path = os.path.join(base, html_file)
@@ -200,7 +200,7 @@ class TestT27FrontendVersionSync:
     def test_t27_02_app_css_version_consistent(self):
         """T27-02: app.css 版本号在所有 HTML 中一致"""
         import re
-        base = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "static")
+        base = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "shell")
         versions = set()
         for html_file in ("index.html", "register.html", "forgot.html"):
             path = os.path.join(base, html_file)

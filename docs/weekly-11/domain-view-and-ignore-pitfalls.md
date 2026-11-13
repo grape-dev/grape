@@ -96,7 +96,10 @@ git ls-files --others --exclude-standard  # 真正的未跟踪清单（应为空
    （本轮：base 占 `202611120001-5`，本线阶段一用 `202611140001-4`，阶段二预留给 `202611150001+`）。
 2. 幂等：fn 里一律 `IF NOT EXISTS` / 先查后加；`_ensure_column` 带 DEFAULT 的 TEXT 列会有 MySQL 限制，
    用 `TEXT`（无默认）或 `allow_copy=True`；对盖章后补效果的场景加 `strict=True`。
-3. 视图：涉及 owner 基表的加列/建表 → 跟跑 `scripts/sync_domain_views.py`。
+3. 视图（发布步骤）：涉及 owner 基表的加列/删列/建表/删表 → 迁移后执行
+   `bash scripts/deploy-after-migrate.sh`（内部：迁移 → `domain_view_freshness.py --repair` → 复核；
+   **非 0 不得重启进程**）。它覆盖缺列 / 视图多余列 / 缺视图 / 孤儿视图 / 列类型漂移。
+   `scripts/sync_domain_views.py` 不再是发布步骤，仅作为**手工应急工具**（固定表清单的快速重建）。
 4. 干跑：隔离 schema（`CREATE DATABASE grape_mig_probe`）用本仓 DDL 初始化后，每条迁移跑**两遍**，
    第二遍不得报错、不得产生新告警；断言 `SHOW COLUMNS` 效果。
 5. 备份：`mysqldump --single-transaction` 三库后再重启落地。

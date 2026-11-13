@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title data-i18n-title="admin.title">Grape Admin — Config Center</title>
+<link rel="icon" type="image/png" href="/static/logo-64.png">
+<script>
+(function(){
+  // P2-6: 主题默认值与主应用对齐——未设置时默认 apple
+  // 2026-11-12 默认风格退役：老用户的 'default' 就地迁移成 apple
+  var t = localStorage.getItem('grapeTheme');
+  if (t !== 'apple') { t = 'apple'; localStorage.setItem('grapeTheme', 'apple'); }
+  document.documentElement.setAttribute('data-theme','apple');
+  var m = localStorage.getItem('grapeThemeMode') || 'light';
+  if (m) document.documentElement.setAttribute('data-theme-mode', m);
+  var lang = localStorage.getItem('grapeLang') || 'zh';
+  document.documentElement.setAttribute('lang', lang === 'en' ? 'en' : 'zh-CN');
+
+})();
+</script>
+<link rel="stylesheet" href="/static-vue/assets/css/tokens.css?v=1">
+<style>
+/* Batch 17: page shell only — all view styles now live in the Vue chunk (viewcss/admin-view.css).
+   Kept: :root auth vars + body base + toast styles (toasts are appended to document.body by the component). */
+:root{--auth-text:var(--t,#f5f5f7);--auth-text-secondary:var(--t2,#86868b);--auth-accent:var(--a,#0071e3);--auth-border:var(--glass-border,rgba(255,255,255,0.1));--auth-bg-surface:var(--glass,rgba(255,255,255,0.05));--auth-error:var(--r,#ff3b30);--auth-accent-hover:var(--ah,#0077ed)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:var(--bg,#f5f6f8);color:var(--t,#101724);min-height:100vh}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#d2d6de;border-radius:3px}
+.toast-wrap{position:fixed;top:18px;right:18px;z-index:400;display:flex;flex-direction:column;gap:8px}
+.toast{padding:12px 18px;border-radius:10px;color:#fff;font-size:13px;box-shadow:0 6px 20px rgba(0,0,0,0.18);animation:fadeIn .25s}
+.toast.ok{background:var(--g,#1ca44c)}.toast.err{background:var(--r,#dc2828)}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1}}
+</style>
+</head>
+<body>
+
+<!-- Batch 17: whole admin site (login + config center + users + whitelists) rendered by AdminView.vue -->
+<div id="adminVueHost"></div>
+
+<script src="/static/js/i18n.js?v=20261113-1"></script>
+<script>I18N.init('20261113-2');</script>
+<script src="/static/js/pwd-blocklist.js?v=3" defer></script>
+  <script type="module" src="/static-vue/viewjs/admin-view.js?v=11"></script>
+</body>
+</html>

@@ -139,7 +139,7 @@ def _pick_platform_token(user: dict) -> tuple[str, str]:
     - token 统一走 get_user_token_for（provider 传参，PAT > OAuth）。
     """
     from src.api.deps import get_user_token_for
-    from src.domains.mgmt.auth.grape_account_db import get_user_identities
+    from src.domains.mgmt.auth.grape_account_db import list_platform_links
     from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
     _uid = str(user.get("id") or "")
     _uname = user.get("username") or ""
@@ -148,7 +148,8 @@ def _pick_platform_token(user: dict) -> tuple[str, str]:
     except Exception:
         _catalog = []
     try:
-        _bound = {i.get("provider") for i in (get_user_identities(_uid) or []) if i.get("provider")}
+        # A 批：模板按"可操作平台"过滤 = 身份行 ∪ PAT 凭据域（只配 PAT 也能选该平台模板）
+        _bound = {i.get("provider") for i in (list_platform_links(_uid) or []) if i.get("provider")}
     except Exception:
         _bound = set()
     _login = (user.get("login_provider") or "").strip()

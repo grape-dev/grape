@@ -108,8 +108,9 @@ def _scene_user_provider(user: dict) -> str:
     except Exception:
         _catalog = []
     try:
-        from src.domains.mgmt.auth.grape_account_db import get_user_identities
-        _bound = {i.get("provider") for i in (get_user_identities(str(user.get("id") or "")) or [])
+        from src.domains.mgmt.auth.grape_account_db import list_platform_links
+        # A 批：场景可用平台 = 身份行 ∪ PAT 凭据域（只配 PAT 也视为该平台可用）
+        _bound = {i.get("provider") for i in (list_platform_links(str(user.get("id") or "")) or [])
                   if i.get("provider")}
     except Exception:
         _bound = set()
@@ -211,10 +212,15 @@ def _resolve_session_bound_scene(scene_id: str, user: dict):
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT issue_id, repo_key FROM agent_tasks WHERE id=? LIMIT 1",
-                (_session_key,))
-            _row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_6e9804_f
+            _ru_lib_6e9804 = _ru_lib_6e9804_f(foreign_only=True)
+            if _ru_lib_6e9804 is not None:
+                _row = _ru_lib_6e9804.read_one("agent_tasks_6e9804", (_session_key,))
+            else:
+                c.execute(
+                    "SELECT issue_id, repo_key FROM agent_tasks WHERE id=? LIMIT 1",
+                    (_session_key,))
+                _row = c.fetchone()
         if _row:
             _issue_id = _row[0] or ""
             # agent_tasks 绑定仓库为权威（issue 归属仓库；跨流水线/关联仓库信任域
@@ -448,6 +454,26 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
             pass
     return {"scenes": result, "total": total, "page": page, "page_size": page_size}
 
+def _pick_node_skill_id(node: dict, ref_map: dict) -> int:
+    """节点技能 id 的唯一取法（三档同名防覆盖，2026-11-13）。
+
+    节点自带 skill_id 即用户实际选中的档位（#979 权威）；没有才回退 scene_skill_ref
+    （老场景/老前端产物）。ref 表是按名字重建的，可能已被解析成别的档位，
+    所以**不能**反过来用它覆盖节点上的 id。
+    """
+    node = node if isinstance(node, dict) else {}
+    try:
+        sid = int(node.get("skill_id") or 0)
+    except (TypeError, ValueError):
+        sid = 0
+    if sid:
+        return sid
+    try:
+        return int((ref_map or {}).get(node.get("skill", ""), 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 @router.get("/market/{market_id}", operation_id="scenes_market_detail", summary="Get market scene detail", description="Scene market detail: full intro + skill chain + recommended template + used repo list.")
 def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_session_token)):
     """场景详情：完整介绍 + 技能链路详解 + 推荐模板 + 在用仓库列表"""
@@ -494,7 +520,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
             skill_name = node.get("skill", "")
             if not skill_name:
                 continue
-            skill_id = ref_map.get(skill_name, 0)
+            skill_id = _pick_node_skill_id(node, ref_map)
             row = skill_by_id.get(skill_id) if skill_id else None
             skills_detail.append({
                 "skill_id": (row[0] if row else skill_id),
@@ -1340,7 +1366,7 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     # 重建 scene_skill_ref（仓库场景也需要）
     try:
         from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref
-        _rebuild_scene_skill_ref(market_id, body.nodes, body.name)
+        _rebuild_scene_skill_ref(market_id, body.nodes, body.name, repo_key)
     except Exception as e:
         log.warning(f"create_market_scene: rebuild scene_skill_ref failed: {e}")
 
@@ -1422,7 +1448,8 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
     # 重建 scene_skill_ref
     try:
         from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref
-        _rebuild_scene_skill_ref(market_id, body.nodes, body.name or scene.get("name", ""))
+        _rebuild_scene_skill_ref(market_id, body.nodes, body.name or scene.get("name", ""),
+                                  scene.get("repo_key", "") or "")
     except Exception as e:
         log.warning(f"update_market_scene: rebuild scene_skill_ref failed: {e}")
 
@@ -1519,7 +1546,7 @@ async def upload_scene_icon(file: UploadFile = File(...),
         obs_icon_key = file_key
     else:
         # 非 OBS 模式：写本地
-        static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api", "static", "uploads", "scene-icons")
+        static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api", "frontend", "shell", "uploads", "scene-icons")
         os.makedirs(static_dir, exist_ok=True)
         local_path = os.path.join(static_dir, f"tmp-{tmp_uuid}{ext}")
         with open(local_path, "wb") as f:
@@ -1566,7 +1593,7 @@ def _finalize_scene_icon(file_id: int, market_id: int, obs_icon_key: str, user: 
         final_obs_key = new_key
     else:
         # 非 OBS 模式：重命名本地文件
-        static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api", "static", "uploads", "scene-icons")
+        static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api", "frontend", "shell", "uploads", "scene-icons")
         old_path = os.path.join(static_dir, os.path.basename(old_key))
         new_path = os.path.join(static_dir, f"{market_id}{ext}")
         try:
@@ -1597,7 +1624,7 @@ def _delete_scene_icon_file(file_key: str):
             log.warning(f"Scene icon delete (OBS): {e}")
     else:
         # 非 OBS 模式
-        static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api", "static", "uploads", "scene-icons")
+        static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api", "frontend", "shell", "uploads", "scene-icons")
         local_path = os.path.join(static_dir, os.path.basename(file_key))
         try:
             if os.path.exists(local_path):
@@ -1882,11 +1909,16 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
             with db_lock:
                 c = db.cursor()
                 # 查引擎 + credential scope/owner_id
-                c.execute(
-                    "SELECT r.credential_id, rc.scope, rc.owner_id "
-                    "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                    "WHERE r.id=?", (_eid,))
-                row = c.fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_62d4e0_f
+                _ru_lib_62d4e0 = _ru_lib_62d4e0_f(foreign_only=True)
+                if _ru_lib_62d4e0 is not None:
+                    row = _ru_lib_62d4e0.read_one("agent_runtimes_62d4e0", (_eid,))
+                else:
+                    c.execute(
+                        "SELECT r.credential_id, rc.scope, rc.owner_id "
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.id=?", (_eid,))
+                    row = c.fetchone()
             if not row:
                 # Issue #250: 失效 runtime_id 优雅降级——跳过而非 400
                 log.warning(f"_validate_scene_engine_ids: 节点 {tag} 的引擎 ID {_eid} 不存在（已跳过）")
@@ -1912,16 +1944,23 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
                         "message": f"节点 {tag} 的引擎 {_eid} 属于仓库 {_owner_norm}，不是当前仓库 {_repo_norm}"})
             # 校验角色能力（Issue #955 follow-up：按节点角色匹配，'all' 通配放行——
             # 存量引擎能力表仅 'all' 行，严格匹配误杀，恢复宽匹配待角色数据面补齐后再收紧）
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT 1 FROM engine_capabilities "
-                    "WHERE runtime_id=? AND enabled=1 AND (tag=? OR tag='all') LIMIT 1",
-                    (_eid, tag))
-                if not c.fetchone():
-                    raise HTTPException(status_code=400, detail={
-                        "code": 400,
-                        "message": f"节点 {tag} 的引擎 {_eid} 没有该角色能力标签（{tag}），请重新选择"})
+            # P4：删视图后能力校验走 lib 读（白名单查询 capability_tag_hit）
+            from src.kernel.domain_read import runtime_lib as _rt_lib_cap
+            _cap_lib = _rt_lib_cap(foreign_only=True)
+            if _cap_lib is not None:
+                _cap_hit = _cap_lib.read_one("capability_tag_hit", (_eid, tag)) is not None
+            else:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT 1 FROM engine_capabilities "
+                        "WHERE runtime_id=? AND enabled=1 AND (tag=? OR tag='all') LIMIT 1",
+                        (_eid, tag))
+                    _cap_hit = c.fetchone() is not None
+            if not _cap_hit:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"节点 {tag} 的引擎 {_eid} 没有该角色能力标签（{tag}），请重新选择"})
 
 @router.post("", operation_id="scenes_create", summary="Create scene", description="Creates a custom scene (associated only with the repo, no user-level).")
 def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
@@ -2531,9 +2570,14 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                     _declared_state = ""
                     for eid in declared_ids:
                         try:
-                            _row = c.execute(
-                                "SELECT status, healthy FROM agent_runtimes WHERE id=?",
-                                (eid,)).fetchone()
+                            from src.kernel.domain_read import runtime_lib as _ru_lib_5fd717_f
+                            _ru_lib_5fd717 = _ru_lib_5fd717_f(foreign_only=True)
+                            if _ru_lib_5fd717 is not None:
+                                c = _ru_lib_5fd717.read_one("agent_runtimes_5fd717", (eid,)).fetchone()
+                            else:
+                                _row = c.execute(
+                                    "SELECT status, healthy FROM agent_runtimes WHERE id=?",
+                                    (eid,)).fetchone()
                             if _row and _row[0] == "online" and _row[1] == 1:
                                 runtime_id = eid
                                 break
@@ -2565,9 +2609,14 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                 else:
                     # 场景未声明引擎 → 旧回退链：session 旧绑定 → 默认引擎
                     try:
-                        _cur = c.execute(
-                            "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-                            (repo_key, agent_type)).fetchone()
+                        from src.kernel.domain_read import runtime_lib as _ru_lib_a36e5f_f
+                        _ru_lib_a36e5f = _ru_lib_a36e5f_f(foreign_only=True)
+                        if _ru_lib_a36e5f is not None:
+                            c = _ru_lib_a36e5f.read_one("devops_agent_session_a36e5f", (repo_key, agent_type)).fetchone()
+                        else:
+                            _cur = c.execute(
+                                "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                                (repo_key, agent_type)).fetchone()
                         if _cur and _cur[0]:
                             runtime_id = _cur[0]
                     except Exception:

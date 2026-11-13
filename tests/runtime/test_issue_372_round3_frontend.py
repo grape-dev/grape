@@ -20,7 +20,7 @@ import os
 import pytest
 
 
-_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "static")
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "shell")
 
 
 def _read_file(rel_path):
@@ -37,6 +37,7 @@ def _read_file(rel_path):
 class TestRenderOAuthButtonsNotHide:
     """T3-01, T3-02: 未配 OAuth App 时不隐藏按钮，oauthLogin 用新提示文案。"""
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_t3_01_render_oauth_buttons_not_hide_when_no_configured(self):
         """T3-01: 渠道列表为空时不得隐藏 oauth section。
 
@@ -136,6 +137,7 @@ class TestStartCountdownEndText:
 class TestAccountBindProviderR74:
     """T3-06, T3-07: 未配 OAuth App 时只显示手动令牌输入。"""
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_t3_06_bind_provider_checks_configured(self):
         """T3-06: _accountBindProvider 检查 provider configured 状态。"""
         source = _read_file("js/pages/account.js")
@@ -147,6 +149,7 @@ class TestAccountBindProviderR74:
         assert "bindPanelToken" in source, \
             "_accountBindProvider should have bindPanelToken for manual token input"
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_t3_07_bind_provider_configured_true_shows_oauth_tab(self):
         """T3-07: _accountBindProvider configured=true 时生成 OAuth tab（回归保护）。"""
         source = _read_file("js/pages/account.js")
@@ -224,6 +227,7 @@ class TestStartCountdownDataI18nProtection:
 class TestProviderAlwaysVisible:
     """T6-01, T6-02: 账户设置页 provider 列表不过滤 configured。"""
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_t6_01_account_provider_list_no_configured_filter(self):
         """T6-01: account.js provider 列表渲染不过滤 configured（所有 provider 都显示）。"""
         source = _read_file("js/pages/account.js")
@@ -236,6 +240,7 @@ class TestProviderAlwaysVisible:
         assert "providersData.providers || []" in source, \
             "account.js should use all providers without filtering"
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_t6_02_unconfigured_provider_still_visible(self):
         """T6-02: 未配 OAuth App 时 GitCode/GitHub 仍出现在第三方账号列表中。"""
         source = _read_file("js/pages/account.js")
@@ -315,6 +320,7 @@ class TestUnifiedUserMenu:
         assert "_buildUserMenuItems(true)" in func_source, \
             "_loadLobbyUserMenu should call _buildUserMenuItems(true)"
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_t7_03_organizations_page_uses_toolbar_user_dropdown(self):
         """T7-03: 组织管理页不重复渲染用户下拉（toolbar 全局用户下拉已覆盖）。
 
@@ -368,6 +374,7 @@ class TestUnifiedUserMenu:
 class TestOrganizationsNoDuplicateUserMenu:
     """测试 organizations.js 不再重复渲染用户下拉（ID 冲突修复）。"""
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_t3_12_no_duplicate_tbUserMenu_in_organizations(self):
         """T3-12: organizations.js 不再渲染 id="tbUserMenu"（toolbar 已有全局用户下拉）。
 
@@ -383,6 +390,7 @@ class TestOrganizationsNoDuplicateUserMenu:
         assert 'id="orgUserDropdown"' not in org_js, \
             "organizations.js should not render orgUserDropdown (removed)"
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_t3_13_no_toggleTbUserMenu_in_organizations(self):
         """T3-13: organizations.js 不再调 app._toggleTbUserMenu()（toolbar 全局用户下拉已覆盖）。"""
         org_js = _read_file("js/pages/organizations.js")
@@ -455,6 +463,7 @@ class TestRegisterPageNoFlicker:
         assert "display=''" in html or "display = ''" in html, \
             "forgotLink should be shown when email_configured=true (remove display:none)"
 
+    @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_t3_20_account_email_configured_initially_false(self):
         """T3-20: account.js _emailConfigured 初始 false（无邮箱模式默认）。"""
         js = _read_file("js/pages/account.js")

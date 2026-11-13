@@ -97,17 +97,25 @@ class IdentityRepository:
 
 
 class UserCredentialRepository:
-    def get(self, session: Session, user_id: str, provider: str) -> "UserCredentialDTO | None":
+    def get(self, session: Session, user_id: str, provider: str,
+            kind: str = "") -> "UserCredentialDTO | None":
+        # A2b（QA I3）：主键扩为 (user_id, provider, kind) 后，同平台多 kind 各一行，
+        # 不传 kind 的 .first() 结果不确定 → 默认 '' 显式定位未分类行。
+        # ⚠️ 边界：kind='' 的默认值意味着**只取未分类行**，不是「任意行」。拿它读
+        # PAT/OAuth 归位行（kind='pat'/'oauth'）会拿不到；需要具体类型时必须显式传
+        # kind，需要模糊读走 get_credentials()（带双读回落）。
         m = session.query(UserCredentialModel).filter_by(
-            user_id=str(user_id), provider=provider).first()  # D105：id 列入 PK 后不再用复合 get
+            user_id=str(user_id), provider=provider, kind=kind or "").first()
         return _cred_dto(m) if m else None
 
-    def set(self, session: Session, user_id: str, provider: str, config_json: str) -> None:
+    def set(self, session: Session, user_id: str, provider: str, config_json: str,
+            kind: str = "") -> None:
         m = session.query(UserCredentialModel).filter_by(
-            user_id=str(user_id), provider=provider).first()
+            user_id=str(user_id), provider=provider, kind=kind or "").first()
         if m is None:
             from src.kernel.id_gen import uuid7_str  # D105：新行补 UUID 主键
-            m = UserCredentialModel(id=uuid7_str(), user_id=str(user_id), provider=provider)
+            m = UserCredentialModel(id=uuid7_str(), user_id=str(user_id), provider=provider,
+                                    kind=kind or "")
             session.add(m)
         m.config_json = config_json or "{}"
         m.updated_at = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -201,6 +209,14 @@ class IdentityAdminRepository:
         m.updated_at = updated_at
         m.status = status
         session.flush()
+
+    @staticmethod
+    def delete_by_id(session: Session, identity_id: str) -> None:
+        """按 id 硬删一行（仅用于同用户同平台换账号时腾出唯一约束位）。"""
+        m = session.get(ExternalIdentityModel, str(identity_id))
+        if m is not None:
+            session.delete(m)
+            session.flush()
 
     @staticmethod
     def create(session: Session, grape_user_id: str, provider: str,

@@ -80,10 +80,12 @@ def test_provider_from_hint_gitee_prefix():
 
 
 def test_hosting_unsupported_platform_is_explicit():
-    """非 github/gitcode 不被兜底成两平台（避免 webhook/前缀错配）。"""
+    """托管能力位驱动：已接入平台在列，未接入平台不被兜底（避免 webhook/前缀错配）。"""
     impl = repos_mod._hosting_implemented_providers()
-    assert "gitee" not in impl
-    assert {"gitcode", "github"} == set(impl)   # 由 provider 模块 HOSTING_FULL_FLOW 声明
+    # 2026-11-13 B 批：gitee 接入（gitee_v5 方言，api_base 卡派生，实弹 host/repair/remove 200）
+    assert {"gitcode", "github", "gitee"} <= set(impl)
+    # 未声明 HOSTING_FULL_FLOW 的平台必须仍在集合外（host 走 422 显式拒绝）
+    assert "gitlab" not in impl
 
 
 # ─────────── 3. git 传输：平台集合/域名卡驱动 ───────────

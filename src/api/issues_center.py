@@ -161,8 +161,9 @@ def _get_gitcode_user_by_user_id(user_id) -> str:
         return ""
     # ① 身份域（权威）
     try:
-        from src.domains.mgmt.auth.grape_account_db import get_user_identities, get_grape_account_by_id
-        _idents = [i for i in (get_user_identities(uid) or [])
+        from src.domains.mgmt.auth.grape_account_db import list_platform_links, get_grape_account_by_id
+        # A 批：平台登录名解析取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
+        _idents = [i for i in (list_platform_links(uid) or [])
                    if i.get("provider") and (i.get("external_login") or "").strip()]
         if _idents:
             try:
@@ -2256,9 +2257,10 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 单独解析 _creator_login，绝不回填到 assignee（Issue #343: external_login 优先）。
     _creator_login = user["username"]
     try:
-        from src.domains.mgmt.auth.grape_account_db import get_user_identities
+        from src.domains.mgmt.auth.grape_account_db import list_platform_links
         _provider_name = _provider
-        for ident in get_user_identities(user["id"]):
+        # A 批：创建者平台登录名取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
+        for ident in list_platform_links(user["id"]):
             if ident.get("provider") == _provider_name and ident.get("external_login"):
                 _creator_login = ident["external_login"]
                 break

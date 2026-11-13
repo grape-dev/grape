@@ -112,16 +112,25 @@ def _start_server_metrics_task():
         try:
             from src.kernel.session_manager import db, db_lock
             _token_hash = _hl.sha256(_hostname.encode()).hexdigest()
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT id FROM runtime_credentials WHERE device_name=? AND scope='global'", (_hostname,))
-                if not c.fetchone():
-                    c.execute(
-                        "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, last_ip) "
-                        "VALUES (?, ?, ?, 'global', 'active', ?)",
-                        (_token_hash, _hostname, _hostname, _local_ip))
-                    db.commit()
+            # P3-5f-3：runtime_credentials 在 runtime 域。**同步直连、不入意图队列**——
+            # 这是启动注册 + 15s 心跳，落成意图会每天写几千条日志；循环本身就是重试机制。
+            from src.kernel.domain_read import runtime_lib as _rt_lib_dev
+            _rt_dev = _rt_lib_dev(foreign_only=True)
+            if _rt_dev is not None:
+                _dev_out = _rt_dev.ensure_device_credential(_hostname, _token_hash, _local_ip)
+                if _dev_out.get("action") == "inserted":
                     log.info(f"Server metrics: registered {_hostname}")
+            else:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT id FROM runtime_credentials WHERE device_name=? AND scope='global'", (_hostname,))
+                    if not c.fetchone():
+                        c.execute(
+                            "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, last_ip) "
+                            "VALUES (?, ?, ?, 'global', 'active', ?)",
+                            (_token_hash, _hostname, _hostname, _local_ip))
+                        db.commit()
+                        log.info(f"Server metrics: registered {_hostname}")
         except Exception as e:
             log.warning(f"Server metrics: register failed: {e}")
         while True:
@@ -185,15 +194,23 @@ def _start_server_metrics_task():
                     pass
                 _now = datetime.now(timezone.utc).isoformat()
                 from src.kernel.session_manager import db, db_lock
-                with db_lock:
-                    c = db.cursor()
-                    c.execute(
-                        "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
-                        "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, "
-                        "bandwidth_percent=?, bandwidth_mbps=?, load_avg=? "
-                        "WHERE device_name=? AND scope='global'",
-                        (_now, _local_ip, _cpu, _mem, _disk, _tmp, _bw_pct, _bw_mbps, _load, _hostname))
-                    db.commit()
+                from src.kernel.domain_read import runtime_lib as _rt_lib_met
+                _rt_met = _rt_lib_met(foreign_only=True)
+                if _rt_met is not None:
+                    # 同步直连：15s 心跳写意图会淹没日志，循环即重试机制
+                    _rt_met.touch_credential_metrics(
+                        _hostname, _now, _local_ip, _cpu, _mem, _disk, _tmp,
+                        _bw_pct, _bw_mbps, _load)
+                else:
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute(
+                            "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
+                            "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, "
+                            "bandwidth_percent=?, bandwidth_mbps=?, load_avg=? "
+                            "WHERE device_name=? AND scope='global'",
+                            (_now, _local_ip, _cpu, _mem, _disk, _tmp, _bw_pct, _bw_mbps, _load, _hostname))
+                        db.commit()
             except Exception as e:
                 log.warning(f"Server metrics: upload failed: {e}")
             await asyncio.sleep(15)
@@ -348,7 +365,7 @@ def _start_active_user_tracker_task():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bot_manager
+    global bot_manager, im_engine
     from src.kernel.config import log
 
     # 卡死诊断（2026-11-05 事故）：SIGUSR1 手动 dump + 事件循环 stall 自动 dump
@@ -372,6 +389,14 @@ async def lifespan(app: FastAPI):
 
     _mgmt_h = await server_tasks.start_mgmt_tasks(app)
     bot_manager = _mgmt_h.get("bot_manager")
+
+    # Issue #2261 B1：通知 outbox 消费者（单进程并集模式与四进程 A 进程同款接线）。
+    # 先停消费者、再停引擎（关停侧见下方 lifespan 尾部）。无运行 loop/无引擎时静默跳过。
+    try:
+        from src.domains.runtime.im import outbox as _outbox_mod
+        _outbox_mod.attach_outbox_consumer(app, getattr(app.state, "im_engine", None))
+    except Exception as _oe:
+        log.warning(f"IM outbox consumer start failed: {_oe}")
     _event_h = await server_tasks.start_event_tasks(app, include_sweep_events=False)
     _worker_h = await server_tasks.start_worker_tasks(app, include_sweep_tasks=False, include_table_maintenance=False)
     _insight_h = await server_tasks.start_insight_tasks(app, include_table_maintenance=False)
@@ -384,6 +409,29 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         from src.kernel.config import log as _log
         _log.warning(f"pat identity backfill skipped (non-fatal): {_e}")
+
+    # ===== IM 引擎（2026-11-13 补齐）=====
+    # weekly-11 退役 legacy BotManager 后，server_tasks 在 engine_mode=on 时直接 skip；
+    # 而新引擎原先只在 grape_server.py（四进程 A 进程）里启动 → 单进程入口出现
+    # "谁也不起" 的空档（安装行 active 但 connected 恒 false）。
+    # 这里与 grape_server 对齐补启，失败只告警不阻断主服务。
+    try:
+        from src.domains.runtime.im import engine_wiring as _im_wiring
+
+        if _im_wiring.engine_mode() == "on":
+            _im_engine = await _im_wiring.start_im_engine()
+            if _im_engine is not None:
+                # 路由侧（routes/im.py:_engine）优先读模块全局，再读 app.state → 两处都挂
+                im_engine = _im_engine
+                app.state.im_engine = _im_engine
+                log.info("IM engine started (mode=on, instance=%s)",
+                         getattr(_im_engine, "instance_id", ""))
+            else:
+                log.warning("IM engine: start failed (legacy fallback retired)")
+        else:
+            log.info("IM engine mode=off: IM 总开关关闭，不启动任何 IM 链路")
+    except Exception as _im_err:
+        log.warning(f"IM engine startup failed: {_im_err}")
 
     # Issue #455：对外基址未配置告警——OAuth 回调/安装命令依赖 server_base_url，
     # 未显式配置时默认 localhost，第三方平台无法回访（登录/托管不可用）。
@@ -500,12 +548,29 @@ async def lifespan(app: FastAPI):
     yield
 
     log.info("Process tasks: stopping...")
+    # Issue #2261 B1：先停通知 outbox 消费者（cancel+await），再停各域任务/引擎——
+    # 反序会让消费者在 await 途中拿到已停的引擎（发给死渠道）。
+    try:
+        from src.domains.runtime.im import outbox as _outbox_mod
+        if getattr(app.state, "outbox_consumer", None) is not None:
+            await app.state.outbox_consumer.stop()
+        _outbox_mod.stop_outbox_consumer(app)
+    except Exception as _oe:
+        log.warning(f"IM outbox consumer stop failed: {_oe}")
     await server_tasks.stop_insight_tasks(app, _insight_h)
     await server_tasks.stop_worker_tasks(app, _worker_h)
     await server_tasks.stop_event_tasks(app, _event_h)
     await server_tasks.stop_mgmt_tasks(app, _mgmt_h)
     if _sweep_task:
         _sweep_task.cancel()
+    # IM 引擎优雅停机（渠道长轮询/Socket 协程跟着收）
+    try:
+        _im = getattr(app.state, "im_engine", None)
+        if _im is not None:
+            await _im.stop()
+            log.info("IM engine stopped")
+    except Exception as _e:
+        log.warning(f"IM engine stop failed: {_e}")
     log.info("Process tasks stopped")
 
 
@@ -603,7 +668,9 @@ server_common.attach_health(app, service_name="server", readiness=True)
 # Issue #825 修复（PR #1231 深度审查）：im 路由必须在 SPA catch-all（/{path:path} GET）
 # 之前注册，否则 GET /api/im/*（status/installations/dingtalk/card-setup）被
 # catch_all 吞掉返回 404。import 在此处无环（im.py 顶层仅依赖 api.deps/kernel.config）。
-from src.domains.runtime.routes import im as im_api
+# 单进程入口与四进程 A 面同一份 IM 路由（含 /outbound、/retry 与 status 的 outbox 段）；
+# 此前挂 runtime 版，两个新增端点只在四进程 A 上存在（架构守护 Medium-2）。
+from src.domains.mgmt.routes import im as im_api
 app.include_router(im_api.router)
 server_common.attach_frontend(app)
 

@@ -151,14 +151,26 @@ def providers_catalog() -> "list[dict]":
     _ORDER = {"gitcode": 0, "github": 1, "gitee": 2, "gitlab": 3, "hwcloud": 4}
     keys = sorted(list_providers(), key=lambda k: (_ORDER.get(k, 99), k))
     result = []
+    # 2026-11-13：手动绑定令牌弹窗需要「前往令牌创建页面」的直达链接。
+    # 单一来源=平台卡 pat_create_url（gitee/gitlab 等按卡派生）；取不到就返回空串，
+    # 由前端对 github/gitcode 用官方预选参数链接兜底（见 AccountView.patCreateUrl）。
+    from src.domains.runtime.vcs.platform_card import get_platform_card
+
     for key in keys:
         cfg = get_provider(key) or {}
         client_id = get_meta_value(f"oauth_{key}_client_id") or ""
+        pat_url = ""
+        try:
+            card = get_platform_card(key)
+            pat_url = (getattr(card, "pat_create_url", "") or "") if card else ""
+        except Exception:
+            pat_url = ""
         result.append({
             "provider": key,
             "name": cfg.get("name", key),
             "configured": bool(client_id),
             "brand_color": cfg.get("brand_color", ""),
+            "pat_create_url": pat_url,
         })
     return result
 

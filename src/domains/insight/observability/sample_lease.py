@@ -82,9 +82,14 @@ def lease_status() -> Optional[Dict[str, Any]]:
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            row = c.execute(
-                "SELECT holder, expires_at FROM distributed_locks WHERE lock_key=?",
-                (LEASE_KEY,)).fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_4e8732_f
+            _ru_lib_4e8732 = _ru_lib_4e8732_f(foreign_only=True)
+            if _ru_lib_4e8732 is not None:
+                c = _ru_lib_4e8732.read_one("distributed_locks_4e8732", (LEASE_KEY,)).fetchone()
+            else:
+                row = c.execute(
+                    "SELECT holder, expires_at FROM distributed_locks WHERE lock_key=?",
+                    (LEASE_KEY,)).fetchone()
         if not row:
             return None
         return {"holder": row[0], "expires_at": int(row[1] or 0)}

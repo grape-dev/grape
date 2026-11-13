@@ -1,6 +1,6 @@
 # Spec: Issue #418 — A2A 派发早退裸置 failed，事件零诊断
 
-> Coding Agent | 基于 Issue Agent 已发布 Spec 执行 | 目标分支: weekly-clean-mys | 开发分支: feat/issue-418
+> Coding Agent | 基于 Issue Agent 已发布 Spec 执行 | 目标分支: 集成线（分支名已脱敏） | 开发分支: feat/issue-418
 
 ## Objective
 统一 `src/api/routes/webhook.py` A2A 路径 4 处早退分支（pick_engine=None / auto-select 空集 /

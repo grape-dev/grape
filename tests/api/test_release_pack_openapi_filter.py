@@ -1,7 +1,9 @@
-"""Issue #1931 A 项：发布包不得携带 openapi.json 契约生成物单测（新架构移植版）。
+"""Issue #1931 A 项：发布包只过滤「启动期生成物」，入库的契约副本必须打包。
 
-`src/api/static/openapi.json` 与 `help/api/openapi.json` 都是服务启动时落盘的生成物
-（在 .gitignore 里），但打包按目录遍历，gitignore 不生效——必须由 _tar_filter() 显式过滤。
+口径（静态根迁移后）：`help/api/openapi.json` 是服务启动时落盘、被 .gitignore 的生成物，
+打包按目录遍历、gitignore 不生效 → 必须由 `_tar_filter()` 显式过滤；
+`src/api/frontend/shell/openapi.json` 是**入仓的部署即用副本**（/static/openapi.json 的
+实际下载源），必须留在包里，否则新装环境拿不到契约。
 """
 import importlib.util
 import os
@@ -17,35 +19,39 @@ _spec = importlib.util.spec_from_file_location("release_pack", _SCRIPT)
 rp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rp)
 
-
-def test_tar_filter_excludes_static_openapi_json():
-    assert rp._tar_filter(tarfile.TarInfo("src/api/static/openapi.json")) is None
+SHELL_OPENAPI = "src/api/frontend/shell/openapi.json"
 
 
-def test_tar_filter_excludes_help_openapi_json():
+def test_tar_filter_excludes_generated_help_openapi_json():
     assert rp._tar_filter(tarfile.TarInfo("help/api/openapi.json")) is None
 
 
+def test_tar_filter_keeps_checked_in_shell_openapi_json():
+    ti = rp._tar_filter(tarfile.TarInfo(SHELL_OPENAPI))
+    assert ti is not None and ti.name == SHELL_OPENAPI
+
+
 def test_tar_filter_keeps_normal_files():
-    for name in ("src/api/static/app.js", "src/api/main.py",
+    for name in ("src/api/frontend/shell/js/app.js", "src/api/main.py",
                  "src/kernel/help_page_gen.py", "help/api/usage.md"):
         ti = rp._tar_filter(tarfile.TarInfo(name))
         assert ti is not None and ti.name == name
 
 
-def test_packed_tar_contains_no_openapi_json(tmp_path):
+def test_packed_tar_filters_generated_but_keeps_checked_in_copy(tmp_path):
     src_dir = tmp_path / "tree"
-    (src_dir / "src/api/static").mkdir(parents=True)
+    (src_dir / "src/api/frontend/shell").mkdir(parents=True)
     (src_dir / "help/api").mkdir(parents=True)
-    (src_dir / "src/api/static/openapi.json").write_text("{}", encoding="utf-8")
     (src_dir / "help/api/openapi.json").write_text("{}", encoding="utf-8")
-    (src_dir / "src/api/static/app.js").write_text("// js", encoding="utf-8")
+    (src_dir / SHELL_OPENAPI).write_text("{}", encoding="utf-8")
+    (src_dir / "src/api/frontend/shell/js").mkdir(parents=True)
+    (src_dir / "src/api/frontend/shell/js/app.js").write_text("// js", encoding="utf-8")
     (src_dir / "help/api/usage.md").write_text("# md", encoding="utf-8")
 
     out = tmp_path / "pkg.tar.gz"
     rp.make_subtar_gz(str(src_dir), str(out))
     with tarfile.open(out, "r:gz") as tar:
         names = tar.getnames()
-    assert not [n for n in names if n.endswith("openapi.json")], \
-        f"release package must not contain generated openapi.json, got {names}"
-    assert "src/api/static/app.js" in names
+    assert "help/api/openapi.json" not in names, f"生成物不该入包: {names}"
+    assert SHELL_OPENAPI in names, f"入库契约副本必须入包: {names}"
+    assert "src/api/frontend/shell/js/app.js" in names

@@ -389,13 +389,26 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
             from src.domains.mgmt.user.db import _decrypt_repo_secret as _dec_rs
             # D99：cred_type 归一='bot'（值域 {'bot','webhook'}）；token 本身
             # 平台专属（同一 token 不会跨平台有效），解密等值即平台定界
-            c.execute(
-                "SELECT rc.repo_key, mr.bot_username, rc.value FROM grape_t_repo_credentials rc "
-                "JOIN managed_repos mr ON mr.repo_key = rc.repo_key "
-                "WHERE rc.cred_type='bot' "
-                "AND (mr.host_user_id IS NULL OR mr.host_user_id='' OR mr.host_user_id='0')",
-            )
-            for row in c.fetchall():
+            # P4：这条是**跨域 JOIN**（runtime 的 rc + mgmt 的 managed_repos），删视图后不能一条 SQL 走完 →
+            # 拆成「rc 走 lib 读 + managed_repos 本地读 + Python 内连接」，语义是 INNER JOIN，按 repo_key 求交。
+            from src.kernel.domain_read import runtime_lib as _rt_lib_j
+            _j_lib = _rt_lib_j(foreign_only=True)
+            if _j_lib is not None:
+                _rc_rows = _j_lib.read_all("repo_bot_credentials_all", ())
+                c.execute(
+                    "SELECT repo_key, bot_username FROM managed_repos "
+                    "WHERE (host_user_id IS NULL OR host_user_id='' OR host_user_id='0')")
+                _mr_map = {r[0]: r[1] for r in c.fetchall()}
+                _rows_join = [(rk, _mr_map[rk], val) for (rk, val) in _rc_rows if rk in _mr_map]
+            else:
+                c.execute(
+                    "SELECT rc.repo_key, mr.bot_username, rc.value FROM grape_t_repo_credentials rc "
+                    "JOIN managed_repos mr ON mr.repo_key = rc.repo_key "
+                    "WHERE rc.cred_type='bot' "
+                    "AND (mr.host_user_id IS NULL OR mr.host_user_id='' OR mr.host_user_id='0')",
+                )
+                _rows_join = c.fetchall()
+            for row in _rows_join:
                 _raw_val = row[2] or ""
                 try:
                     _val = _dec_rs(_raw_val)
@@ -468,7 +481,26 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
                 # D99：cred_type 归一 {'bot','webhook'}；两步法 UPDATE→INSERT
                 # （双方言一致，无 ON CONFLICT/REPLACE 方言分支）
                 from src.domains.mgmt.user.db import _encrypt_repo_secret as _enc_rs
+                # P3-5f-3：grape_t_repo_credentials 在 runtime 域（两步法 UPDATE→INSERT 收成一个原语）
+                import time as _t_gb
+                from src.kernel.domain_read import runtime_lib as _rt_lib_gb
+                from src.kernel import cross_write as _xw_gb
+                _rt_gb = _rt_lib_gb(foreign_only=True)
+                _gb_ts = _t_gb.strftime("%Y-%m-%d %H:%M:%S")
                 for _ct in ("bot", "webhook"):
+                    _gb_done = False
+                    if _rt_gb is not None:
+                        _rt_gb_ok = _rt_gb
+                        _gb_val = _enc_rs(new_token)
+                        _gb_done = _xw_gb.submit_if_lib(
+                            _rt_gb_ok, "runtime", "repo_credential_upsert",
+                            f"repo-cred:{repo_key}:{_ct}",
+                            {"repo_key": repo_key, "cred_type": _ct, "value": _gb_val,
+                             "updated_at": _gb_ts},
+                            lambda ct=_ct, v=_gb_val: _rt_gb_ok.upsert_repo_credential(
+                                repo_key, ct, v, _gb_ts), log)
+                    if _gb_done:
+                        continue
                     _cur2 = c.execute(
                         "UPDATE grape_t_repo_credentials SET value=?, updated_at=(datetime('now')) "
                         "WHERE repo_key=? AND cred_type=?",

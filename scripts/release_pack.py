@@ -15,10 +15,14 @@
   - skills 已独立项目 (grape-dev/grape-skills)，打包时从独立仓库读取
   - examples/templates 已独立项目 (grape-dev/grape-template)，打包时从独立仓库读取
 """
-import hashlib, os, subprocess, sys, tarfile, io, shutil, datetime, gzip, json
+import hashlib, os, re, subprocess, sys, tarfile, io, shutil, datetime, gzip, json
 
 ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
-OUT_DIR = "/root/release"
+# 输出目录可用环境变量覆盖；默认放在仓库同级目录（不在脚本里写死部署机绝对路径）
+OUT_DIR = os.environ.get(
+    "GRAPE_RELEASE_OUT_DIR",
+    os.path.abspath(os.path.join(ROOT, os.pardir, "grape-release-out")),
+)
 BUCKET = "obs-grape-release"
 PREFIX = "release"
 
@@ -53,9 +57,11 @@ def _tar_filter(ti):
         return None
     if ".venv" in ti.name:
         return None
-    # help/api/openapi.json 与 src/api/static/openapi.json 都是生成物（服务启动时落盘，
-    # gitignore）——打包跳过，避免把构建机上的旧契约带进发行包（Issue #1931 A 项）
-    if ti.name.endswith("help/api/openapi.json") or ti.name.endswith("src/api/static/openapi.json"):
+    # Vue 前端依赖目录：npm ci 产物，体积大且与平台无关——打包跳过（static-dist 构建产物保留，运行时要 /static-vue）
+    if "/node_modules/" in ti.name or ti.name.endswith("/node_modules"):
+        return None
+    # help/api/openapi.json 是生成物（服务启动时落盘，gitignore）——打包跳过
+    if ti.name.endswith("help/api/openapi.json"):
         return None
     return ti
 
@@ -74,27 +80,53 @@ def make_subtar_gz(src_dir_or_files, out_path, base_dir=""):
 # ---- 子包构建 ----
 
 def pack_backend(ts):
-    """后端: src/ (含 api/static) + scripts/ + 仓库根文件 + configs example + requirements"""
+    """后端: src/ (含 api/frontend shell 前端) + scripts/ + 仓库根文件 + configs example + requirements"""
     out = os.path.join(OUT_DIR, f"staging/backend/grape-backend-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
     # src/ 目录
     src_dir = os.path.join(ROOT, "src")
+    # R-2：Vue 前端产物（src/api/frontend/static-dist/）是本目录的一部分，但它由
+    # `npm run build` 生成且被 .gitignore 忽略——干净 checkout/构建机必须先构建。
+    # 缺它出包不会报错，只会让 shell/index.html 引用的 /static-vue/** 全部 404
+    # （页面退回空壳），属静默缺件，故这里 fail-loud。
+    dist_index = os.path.join(ROOT, "src", "api", "frontend", "static-dist", "index.html")
+    if not os.path.isfile(dist_index):
+        print("[FATAL] 缺少 Vue 前端构建产物: src/api/frontend/static-dist/index.html")
+        print("        打包前请先构建：cd src/api/frontend/app && npm ci && npm run build")
+        sys.exit(1)
+    # N-3：不止断言 index.html —— shell/index.html 引用的每个 /static-vue/** 都必须
+    # 在 static-dist 里存在，否则陈旧构建（缺新 chunk）会静默打出「半套 UI」的包。
+    dist_root = os.path.join(ROOT, "src", "api", "frontend", "static-dist")
+    shell_index = os.path.join(ROOT, "src", "api", "frontend", "shell", "index.html")
+    if os.path.isfile(shell_index):
+        with open(shell_index, encoding="utf-8") as fh:
+            refs = set(re.findall(r'(?:src|href)="(/static-vue/[^"?]+)', fh.read()))
+        missing = sorted(r for r in refs
+                         if not os.path.isfile(os.path.join(dist_root, r[len("/static-vue/"):])))
+        if missing:
+            print(f"[FATAL] static-dist 缺 {len(missing)} 个被 shell 引用的产物（构建过期）：")
+            for r in missing[:10]:
+                print(f"        {r}")
+            print("        请重新构建：cd src/api/frontend/app && npm ci && npm run build")
+            sys.exit(1)
     items.append((src_dir, "src"))
     # scripts/ 目录 (install-worker.sh, sync_templates.sh, sync_skills.sh 等)
     scripts_dir = os.path.join(ROOT, "scripts")
     if os.path.isdir(scripts_dir):
         items.append((scripts_dir, "scripts"))
     # help/ 帮助文档源目录（usage + api + reference + developer markdown）
-    # ⚠️ 必须打入：服务重启时 src/kernel/help_page_gen.py 依据 help/ 渲染 src/api/static/help.html；
-    #    缺失则升级后文档无法再生成（一直用渲染旧内容的 help.html，升级总缺新文档的根因，
-    #    2026-10-12 修复）。openapi.json 生成物已被 _tar_filter 过滤。
+    # ⚠️ 必须打入：服务重启时 src/kernel/help_page_gen.py 依据 help/ 渲染
+    #    src/api/frontend/shell/help.html；缺失则升级后文档无法再生成（一直用渲染旧内容的
+    #    help.html，升级总缺新文档的根因，2026-10-12 修复）。
+    #    仅 help/api/openapi.json（启动时落盘的生成物、gitignore）被 _tar_filter 跳过；
+    #    shell/openapi.json 是入仓的部署即用副本，正常打入。
     help_dir = os.path.join(ROOT, "help")
     if os.path.isdir(help_dir):
         items.append((help_dir, "help"))
     # 仓库根文件 (pyproject.toml, README 等)
     # ⚠️ start-worker.sh 不打入服务端包：install-worker.sh 会按实际安装目录动态生成，
-    #    打入反而可能把模板/脏文件覆盖到 worker 本地脚本（历史事故：/home/mys 硬编码版）。
+    #    打入反而可能把模板/脏文件覆盖到 worker 本地脚本（历史事故：硬编码本机绝对路径版）。
     # Issue #699 Phase 0: requirements*.txt merged into pyproject.toml;
     #   Dockerfile/docker-compose.yml/nginx moved to deploy/
     for rf in ["pyproject.toml", "Makefile",

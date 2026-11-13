@@ -15,14 +15,21 @@ GADB = Path(__file__).resolve().parent.parent.parent / "src" / "auth" / "grape_a
 
 
 def test_pat_write_does_not_enter_ei_token():
+    """A 批：PAT 不再触碰身份行（结构守卫随对象模型更新）。
+
+    原断言为「归属行存在但 access_token 恒空 + mark_identity_pat 打标」。
+    PAT = 仓库执行凭据归位后，PR 保不变量的加强形态是：泛型段内不得出现任何
+    身份行写入 / 票据生成，且凭据域写入必须在场。
+    """
     src = SETTINGS.read_text(encoding="utf-8")
     i = src.find("_platform_tokens = explicit.get")
     j = src.find("# 绑定/解绑平台后清理 user_repos 缓存", i)
     seg = src[i:j]
-    assert 'access_token=""' in seg, "PAT 归属行仍携带 token（应恒空，PAT 归凭据域）"
-    assert "access_token=_tok" not in seg, "PAT token 泄漏进 ei 归属行"
-    assert "mark_identity_pat" in seg, "PAT 归属未打标 metadata.source=pat"
     assert "set_credential" in seg, "PAT 权威存储缺失（凭据域 <p>_pat）"
+    for banned in ("create_external_identity", "update_external_identity_tokens",
+                   "mark_identity_pat", "save_binding_ticket"):
+        assert banned not in seg, f"PAT 泛型段仍触碰身份行/票据: {banned}"
+    assert "access_token=_tok" not in seg, "PAT token 泄漏进 ei 归属行"
 
 
 def test_pat_supply_chain_is_credential_domain_first():

@@ -1,6 +1,6 @@
 """Tests for src/help_page_gen.py (v2: help.html SPA shell; content from help/ dir).
 
-Verifies the generator renders help/usage + help/api markdown into src/api/static/help.html:
+Verifies the generator renders help/usage + help/api markdown into src/api/frontend/shell/help.html:
 - output is UTF-8 without BOM, cleanly decodable
 - embedded data parses; usage + api docs with html/toc/title/id
 - landing offers 使用文档 / API 文档 ; section scoping labels present
@@ -19,7 +19,7 @@ import pytest
 import src.kernel.help_page_gen as gen
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-HELP_HTML = REPO_ROOT / "src" / "api" / "static" / "help.html"
+HELP_HTML = REPO_ROOT / "src" / "api" / "frontend" / "shell" / "help.html"
 API_FILES = sorted(p.name for p in gen.API_DIR.glob("*.md"))
 
 

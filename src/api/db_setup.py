@@ -1766,6 +1766,8 @@ _SEED_FILES = [
 def _create_tables():
     """幂等创建新表"""
     for name, ddl in _NEW_TABLES:
+        if _owned_skip(name, "create table"):
+            continue
         try:
             with db_lock:
                 db.execute(ddl)
@@ -1776,10 +1778,14 @@ def _create_tables():
 
     # IM 渠道 4 表（Issue #742 §5.1）：DDL 与引擎启动迁移共用 scripts/migrations/001_channel_tables，
     # 在此统一建/补（幂等），保证 MySQL 后端下即使 IM 引擎模式为 off 也表示层完整（P1 回填/对账依赖）。
+    # Issue #2261：通知 outbox 新增列（004_notify_outbox）也挂在这里——四进程都会跑 db_setup，
+    # 而 run_startup_migration 只在 A 进程 start_im_engine(mode=on) 时跑；挂在引擎启动上会让
+    # mode=off / A 未起时旧库缺列，B/C 进程入队直接异常（通知静默丢失）。
     try:
-        from src.domains.runtime.im.engine_wiring import ensure_channel_schema
+        from src.domains.runtime.im.engine_wiring import ensure_channel_schema, ensure_notify_outbox_schema
         with db_lock:
             ensure_channel_schema(db)
+            ensure_notify_outbox_schema(db)
             db.commit()
         log.info("IM channel tables ready "
                  "(grape_t_channel_installation / session_binding / inbound_dedup / sender_identity)")
@@ -1994,8 +2000,40 @@ def _is_base_table(c, tbl: str) -> bool:
         return True   # 查询失败按基表处理，保持既有行为
 
 
+def _owned_skip(table: str, what: str = "") -> bool:
+    """表归属守卫：别家域的表不建/不改（防止拆库后四进程各建一份全量表）。
+
+    见 src/kernel/table_ownership.py；`GRAPE_DDL_OWNER_GUARD=0` 可关闭。
+    守卫自身异常一律放行（不能因守卫故障阻断启动）。
+    """
+    try:
+        from src.kernel import table_ownership as _own
+        owner = _own.foreign_owner(table)
+        if owner:
+            log.info(f"[DDL_SKIP] {what} `{table}`: owner={owner} current={_own.current_domain()}")
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[DDL_SKIP] ownership guard error on `{table}`: {exc}")
+    return False
+
+
+def _index_table(ddl: str) -> str:
+    """从 ``CREATE [UNIQUE] INDEX ... ON <table>(...)`` 取表名。"""
+    try:
+        low = ddl.lower()
+        i = low.find(" on ")
+        if i < 0:
+            return ""
+        name = ddl[i + 4:].strip().split("(")[0].strip().strip('`"')
+        return name.split()[0] if name else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
                    strict: bool = False):
+    if _owned_skip(tbl, "ensure column"):
+        return False
     """Idempotent column add: PRAGMA check if column missing then ALTER.
 
     Column name wrapped in backticks for MySQL compatibility (e.g. `binary` is reserved).
@@ -2272,6 +2310,9 @@ def _create_indexes():
         log.warning(f"ensure unique idx_tasks_repo_issue prep failed: {e}")
 
     for idx in indexes:
+        _idx_tbl = _index_table(idx)
+        if _idx_tbl and _owned_skip(_idx_tbl, "create index"):
+            continue
         try:
             with db_lock:
                 db.execute(idx)
@@ -3137,7 +3178,7 @@ def _rebuild_table_text_columns(c, table, cols, text_cols) -> None:
         if _n != 1:
             raise ValueError(f"{table}: DDL 中未找到 {col} INTEGER 列声明，重建中止")
     c.execute(f"DROP TABLE IF EXISTS {old}")
-    c.execute(f"ALTER TABLE {table} RENAME TO {old}")
+    _destructive_ddl(c, f"ALTER TABLE {table} RENAME TO {old}", kind_hint="cleanup")
     c.execute(new_create)
     _names = ", ".join(r[1] for r in cols)
     _sel = ", ".join(f"CAST({col} AS TEXT)" if col in text_cols else col for col in (r[1] for r in cols))
@@ -3345,7 +3386,7 @@ def _rebuild_issue_ident_columns_integer(c, cols, ident_cols) -> None:
         if _n != 1:
             raise ValueError(f"{table}: DDL 中未找到 {col} TEXT 列声明，重建中止")
     c.execute(f"DROP TABLE IF EXISTS {old}")
-    c.execute(f"ALTER TABLE {table} RENAME TO {old}")
+    _destructive_ddl(c, f"ALTER TABLE {table} RENAME TO {old}", kind_hint="cleanup")
     c.execute(new_create)
     _names = ", ".join(r[1] for r in cols)
     c.execute(f"INSERT INTO {table} ({_names}) SELECT {_names} FROM {old}")
@@ -4148,7 +4189,13 @@ def _fn_add_agent_runtimes_role_tags() -> None:
 
 
 register_migration(
-    version="202611030001",
+    # 2026-11-13 撞号修复：库内 202611030001 早已被历史遗留的
+    # create-merge-gate-log-table（当年用 0001、后改号 202611100002 的正身）盖章，
+    # 与本次注册同号异名 → 启动打 ERROR 且该迁移被永久跳过。
+    # 存量库 role_tags 列已由 legacy 建表（db_setup.py 的 agent_runtimes DDL）带上，
+    # 但新库/生产库若无该列就会静默缺列，故 renumber 到独立号段重跑一次；
+    # fn 幂等（先查列存在才 ALTER），重跑无损。
+    version="202611160001",
     name="issue658_agent_runtimes_role_tags",
     kind="safe",
     fn=_fn_add_agent_runtimes_role_tags,
@@ -8128,4 +8175,421 @@ register_migration(
     name="seed-event-action-filter-defaults",
     kind="safe",
     fn=_fn_seed_event_action_filter_once,
+)
+
+
+# ── A2（2026-11-13）：凭据类型归位——provider 存纯名，类型进 kind 列
+def _fn_user_credentials_kind_model() -> None:
+    """user_credentials 加 kind 列 + 存量 `<p>_pat/_oauth` 复合键回填归位行。
+
+    幂等三态：列已存在 → _ensure_column no-op；归位行已存在 → backfill 跳过；
+    旧复合键行保留（双写期，老实例按 `<p>_pat` 仍可读），收口迁移再删。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "user_credentials", "kind", "TEXT NOT NULL DEFAULT ''",
+                       allow_copy=True, strict=True)  # TEXT + 非 NULL DEFAULT：MySQL 需 COPY
+        # QA N3（2026-11-13）：注册式迁移必须 strict=True——静默失败也会盖章，
+        # 下次启动不再重试，线上表现为查询该列 1054（与既有 10 处 strict 用法一致）。
+        db.commit()
+    from src.domains.mgmt.user.db import backfill_credential_kind
+    backfill_credential_kind()
+
+
+register_migration(
+    version="202611170006",
+    name="user-credentials-kind-model",
+    kind="safe",
+    fn=_fn_user_credentials_kind_model,
+)
+
+
+def _table_present(c, tbl: str) -> bool:
+    """表或视图是否存在于当前库（双后端）。"""
+    if _mysql_backend():
+        row = c.execute("SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema=DATABASE() AND table_name=?", (tbl,)).fetchone()
+    else:
+        row = c.execute("SELECT 1 FROM sqlite_master WHERE name=? "
+                        "AND type IN ('table','view')", (tbl,)).fetchone()
+    return bool(row)
+
+
+def _uc_unique_key_columns(c) -> set:
+    """user_credentials 当前唯一键的列集合（SQLite: PRAGMA / MySQL: SHOW INDEX）。"""
+    if _mysql_backend():
+        try:
+            rows = c.execute("SHOW INDEX FROM user_credentials").fetchall()
+        except Exception:
+            return set()
+        by_key: dict = {}
+        for r in rows:
+            # MySQL 列序：Table, Non_unique, Key_name, Seq_in_index, Column_name, ...
+            if str(r[1]) in ("0", "0.0"):
+                by_key.setdefault(r[2], set()).add(str(r[4]))
+        for cols in by_key.values():
+            if {"user_id", "provider"} <= cols:
+                return cols
+        return set()
+    for row in c.execute("PRAGMA index_list('user_credentials')").fetchall():
+        name, unique = row[1], row[2]
+        if not unique:
+            continue
+        info = c.execute(f"PRAGMA index_info('{name}')").fetchall()
+        cols = {str(r[2]) for r in info}
+        if {"user_id", "provider"} <= cols:
+            return cols
+    return set()
+
+
+# ⚠️ 列清单在这里与 src/domains/mgmt/user/db.py 的 _CREDENTIALS_DDL **各持一份**
+# （QA I1 已记录）：给 user_credentials 增删列必须两处同步，否则重建会静默丢列。
+_UC_REBUILD_DDL = """CREATE TABLE user_credentials__uqkind (
+    id VARCHAR(191) NOT NULL DEFAULT '',
+    user_id VARCHAR(191) NOT NULL,
+    provider VARCHAR(191) NOT NULL,
+    kind VARCHAR(191) NOT NULL DEFAULT '',
+    config_json MEDIUMTEXT NOT NULL,
+    created_at VARCHAR(191) DEFAULT '',
+    updated_at VARCHAR(191) DEFAULT '',
+    PRIMARY KEY (user_id, provider, kind)
+)"""
+
+_UC_COPY_SQL = ("INSERT INTO user_credentials__uqkind "
+                "(id, user_id, provider, kind, config_json, created_at, updated_at) "
+                "SELECT COALESCE(id,''), user_id, provider, COALESCE(kind,''), "
+                "config_json, COALESCE(created_at,''), COALESCE(updated_at,'') "
+                "FROM user_credentials")
+
+
+_UC_TMP_TABLE = "user_credentials__uqkind"
+_UC_BAK_TABLE = "user_credentials__old_backup"
+
+
+def _uc_table_rows(c, table: str) -> int:
+    """表存在则返回行数，不存在返回 -1（用于区分「表不存在」与「表为空」）。"""
+    if not _table_present(c, table):
+        return -1
+    return int(c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def _uc_plain_config(value) -> str:
+    """config_json 的可比形态：密文先解密再比。
+
+    AES-GCM 每次加密用随机 nonce，**同一明文两次加密得到的密文不同** —— 直接比
+    密文会把「启动期加密回填」（对本表 UPDATE 重加密）误判成窗口丢写。明文/解密
+    失败按原值返回（decrypt 本身兼容明文）。
+    """
+    raw = "" if value is None else str(value)
+    try:
+        from src.domains.mgmt.auth.credential_crypto import decrypt as _dec
+        return _dec(raw)
+    except Exception:
+        return raw
+
+
+def _uc_has_column(c, table: str, column: str) -> bool:
+    """表是否含某列（MySQL: information_schema / SQLite: PRAGMA）。"""
+    try:
+        if _mysql_backend():
+            row = c.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() "
+                "AND table_name=? AND column_name=?", (table, column)).fetchone()
+            return bool(row)
+        return any(str(r[1]) == column
+                   for r in c.execute(f"PRAGMA table_info('{table}')").fetchall())
+    except Exception:
+        return False
+
+
+def _uc_rows_by_key(c, table: str) -> dict:
+    """按 (user_id, provider, kind) 取 (解密后 config_json, updated_at)；表不存在返回空 dict。
+
+    config_json 必须先解密再比：AES-GCM 每次加密用随机 nonce，同一明文两次加密的密文
+    不同 —— 直接比密文会把「启动期加密回填」误判成丢写。
+    没有 updated_at 列的历史/中转形态按空串处理（键级判定退化为「缺键才算丢」）。
+    """
+    if not _table_present(c, table):
+        return {}
+    ts_col = "COALESCE(updated_at,'')" if _uc_has_column(c, table, "updated_at") else "''"
+    # ⚠️ MySQL 后端返回的是 MySQLCompatCursor，不可直接迭代（SQLite 可以）→ 必须 fetchall
+    rows = c.execute(
+        f"SELECT user_id, provider, COALESCE(kind,''), config_json, {ts_col} "
+        f"FROM {table}").fetchall()
+    return {(str(r[0]), str(r[1]), str(r[2])): (_uc_plain_config(r[3]), str(r[4]))
+            for r in rows}
+
+
+def _uc_lost_keys(bak: dict, live: dict) -> list:
+    """真丢写的键（评审 M-1：不能只比内容集合差，否则「存活表被更新覆盖」会误报）。
+
+    判定：
+    - 存活表**缺键** ⇒ 真丢（该行只存在于备份表）；
+    - 键在、但备份行的 updated_at **更新** ⇒ 真丢（存活表拿的是旧值）；
+    - 键在、存活行更新/相同 ⇒ 不丢（多实例刷新把旧值覆盖成新值，数据没丢）。
+    updated_at 为空串时按最小时间处理（空 < 非空）。
+    """
+    lost = []
+    for key, (_cfg_b, ts_b) in bak.items():
+        hit = live.get(key)
+        if hit is None:
+            lost.append(key)
+            continue
+        if ts_b and ts_b > hit[1]:
+            lost.append(key)
+    return lost
+
+
+def _uc_backfill_kind_rows() -> None:
+    """扩键后补一次 kind 归位（幂等）。
+
+    必须挂在**所有** return 之前：`(gitee,'pat')` 这类归位行只由 006 的回填产出，
+    而 006 在所有已升级库上早已盖章，本调用是「扩键之后再归位」的唯一入口。
+    早退路径漏调（交换成功但进程在回填前退出、或键已扩却未盖章）会让 A2 收口
+    删掉旧键行时 PAT 丢失。
+    """
+    from src.domains.mgmt.user.db import backfill_credential_kind
+    backfill_credential_kind()
+
+
+def _uc_cleanup_gate_strict() -> None:
+    """重建表之前，要求运维显式声明「已无旧实例在写」。
+
+    为什么不能只用 `_destructive_ddl` 的全局门槛：那个门槛服务全仓历史迁移，口径是
+    「meta.min_code_version 未设置就放行」。而本迁移把整张表换掉，滚动窗口里旧实例
+    仍在用 `ON CONFLICT(user_id, provider)` 写凭据 —— 交换后冲突目标失配，异常被
+    `set_credential` 的 `except Exception` 吞成 `return False`，凭据静默不落库且没有
+    失败信号。门槛比的是「本实例版本 vs meta」，识别不到「另一侧还有旧代码实例在跑」，
+    所以这一层只能由部署前提承担：meta.min_code_version 必须先写上（停机/停写窗口，
+    值 ≤ 本次部署版本），未设置即拒绝。
+
+    拒绝 = raise → 执行器不盖章、下次启动重试，不会静默跳过。
+    SQLite 是单进程单库、没有跨实例滚动窗口，直接放行；单机/测试可用
+    GRAPE_ALLOW_UNGUARDED_CLEANUP=1 显式跳过（MySQL 门禁沙盒库即用此口）。
+    """
+    if not _mysql_backend():
+        return
+    if os.environ.get("GRAPE_ALLOW_UNGUARDED_CLEANUP") == "1":
+        return
+    min_ver = get_min_code_version()
+    self_ver = current_code_version()
+    if not min_ver:
+        raise RuntimeError(
+            "202611170007 拒绝重建 user_credentials：meta.min_code_version 未设置。"
+            "本迁移会在滚动窗口内把整张表换掉，旧实例写凭据会静默失败。"
+            "请确认已停写/全集群已升级，再执行 "
+            "`python3 scripts/set_min_code_version.py <目标版本>`；"
+            "单机或测试环境可设 GRAPE_ALLOW_UNGUARDED_CLEANUP=1。")
+    if not _version_ge(self_ver, min_ver):
+        _hint = ""
+        if self_ver.startswith("fp-"):
+            _hint = ("；当前是无 .git 部署（fp- 内容指纹），与日期式 min_code_version 不可比。"
+                     "请用 GRAPE_DEPLOY_VERSION 注入可比版本（镜像 build 时 ENV），"
+                     "或把 min_code_version 写成目标代码 current_code_version() 的 fp- 原值")
+        raise RuntimeError(
+            f"202611170007 拒绝重建 user_credentials：本实例版本 {self_ver!r} < "
+            f"meta.min_code_version {min_ver!r}（落后节点不执行破坏性 DDL）{_hint}")
+
+
+def _fn_user_credentials_unique_kind() -> None:
+    """主键扩为 (user_id, provider, kind)（A2b 2026-11-13）。
+
+    为什么必须：OAuth 刷新是现役写路径（refresh_oauth_token → set_credential(kind="oauth")），
+    旧唯一键 (user_id, provider) 会把同平台 PAT 的归位行 upsert 成覆盖。滚动期靠双写
+    `<p>_pat` 旧键行兜住，A2 收口删旧键行后 PAT 直接丢失（DB 副本实弹复现）。
+
+    执行安全（C1/C2 + C-1/C-2/M-1/M-3 回修）：
+    - 不做「异常回滚」假设：MySQL 的 DROP/ALTER 隐式提交。顺序固定为
+      「搬数 → 行数守恒 → 原子交换 → 交换后复核 → 删备份」。
+    - **每个 return 都是盖章路口**：早退分支先做残留验收 —— 存活表缺失而备份/中转表
+      仍有数据 → raise（半交换态不能被当成新装库，否则空表被造出来、数据滞留备份表、
+      迁移永不重试）。
+    - DROP/RENAME 全部走 `_destructive_ddl(kind_hint="cleanup")`，被门槛拦截即 raise。
+    - 重建前再过一层 `_uc_cleanup_gate_strict()`：meta.min_code_version 未设置时
+      MySQL 侧拒绝（门槛拦不住「另一侧还在跑的旧实例」，只能靠部署前提）。
+    - 回填 `_uc_backfill_kind_rows()` 挂在所有 return 之前（M-1）。
+    - 先 `_is_base_table` 判形态：非 owner 域库看到的是跨库视图，不扩键、不盖章；
+      该库靠 owner 库迁移后重建视图获得新列（本库每次启动都会重试并跳过，属设计）。
+    """
+    with db_lock:
+        c = db.cursor()
+        # ── 早退 A：存活表不存在 —— 新装库，或半交换态（C-1）───────────────
+        if not _table_present(c, "user_credentials"):
+            _leftover = {}
+            for _t in (_UC_TMP_TABLE, _UC_BAK_TABLE):
+                _n = _uc_table_rows(c, _t)
+                if _n > 0:
+                    _leftover[_t] = _n
+            if _leftover:
+                # 人工介入态：执行器只会降级成 warning，这里显式打 error 供巡检（评审 M-4）
+                log.error(f"202611170007 半交换残留，需人工恢复: {_leftover}")
+                raise RuntimeError(
+                    f"202611170007 半交换残留：user_credentials 不存在，但 {_leftover} "
+                    f"仍有数据（{_UC_BAK_TABLE}=旧表副本 / {_UC_TMP_TABLE}=新表副本）。"
+                    "需人工核对后再恢复；不盖章、下次启动重试")
+            for _t in (_UC_TMP_TABLE, _UC_BAK_TABLE):
+                if _table_present(c, _t):
+                    _destructive_ddl(c, f"DROP TABLE IF EXISTS {_t}", kind_hint="cleanup")
+                    # _destructive_ddl 对执行失败只 warning 返回 True → 复查（评审 I-1）
+                    if _table_present(c, _t):
+                        log.warning(f"202611170007: 空残留表 {_t} 未清理（下次启动重试）")
+            # 不调回填：表不存在=新装库，没有历史行可归位；此时 backfill 会
+            # SELECT 一张不存在的表并 raise，把「表缺失 + 无残留」的库卡成
+            # 每次启动失败（评审 I-1）。
+            return
+        if not _is_base_table(c, "user_credentials"):
+            raise _NonOwnerObject(
+                "user_credentials: 当前库中是视图（非 owner 域库），扩主键必须由 owner "
+                "库执行；本库永不盖章，列形态靠 owner 库迁移后重建视图保证")
+        cols = _uc_unique_key_columns(c)
+        if "kind" in cols:
+            # ── 早退 B：键已扩 —— 迁移已完成，或只差清理/回填 ─────────────────
+            _live = _uc_table_rows(c, "user_credentials")
+            _bak = _uc_table_rows(c, _UC_BAK_TABLE)
+            _tmp = _uc_table_rows(c, _UC_TMP_TABLE)
+            if _tmp > 0:
+                raise RuntimeError(
+                    f"202611170007 中断残留：{_UC_TMP_TABLE} 尚有 {_tmp} 行而存活表已扩键，"
+                    "两次搬迁结果冲突，需人工核对（不盖章）")
+            # 按键级判定（M-1）：缺键才是真丢；键在但内容不同要看 updated_at 谁更新，
+            # 否则「存活表已被刷新覆盖」会被误判成丢写、迁移永久停滞。
+            _lost = _uc_lost_keys(_uc_rows_by_key(c, _UC_BAK_TABLE),
+                                  _uc_rows_by_key(c, "user_credentials"))
+            if _lost:
+                log.error(f"202611170007 备份表有存活表没有的行，需人工回收: {len(_lost)} 行")
+                raise RuntimeError(
+                    f"202611170007 备份表存在存活表没有的行：live={_live} backup={_bak}，"
+                    f"丢失 {len(_lost)} 行（如 {sorted(_lost)[:3]}）。"
+                    "交换窗口内可能有写入只落旧表，备份表保留待人工回收（不盖章）")
+            for _t in (_UC_TMP_TABLE, _UC_BAK_TABLE):
+                if _table_present(c, _t):
+                    try:
+                        if _destructive_ddl(c, f"DROP TABLE {_t}", kind_hint="cleanup"):
+                            log.info(f"202611170007: 清理残留表 {_t}")
+                    except Exception as _e:
+                        log.warning(f"202611170007: 残留表 {_t} 未清理（数据安全）: {_e}")
+            _uc_backfill_kind_rows()
+            return
+        # ── 重建路径 ────────────────────────────────────────────────────────
+        _uc_cleanup_gate_strict()
+        # 1) 上次中断留下的中转表：有数据即冲突（不能盲删），空表才清
+        _tmp_rows = _uc_table_rows(c, _UC_TMP_TABLE)
+        if _tmp_rows > 0:
+            # 存活表仍是旧键：中转表是上次中断留下的纯派生数据（本次会重新搬数），
+            # 丢弃重建是幂等的；硬 raise 只留给「存活表缺失」与「存活表已扩键」两个
+            # 真危险态 —— 否则一次无害中断就变成必须人工 DROP 救火。
+            log.warning(f"202611170007: 丢弃上次中断留下的中转表 {_UC_TMP_TABLE}"
+                        f"（{_tmp_rows} 行，派生数据，将重新搬数）")
+        if _table_present(c, _UC_TMP_TABLE):
+            if not _destructive_ddl(c, f"DROP TABLE {_UC_TMP_TABLE}", kind_hint="cleanup"):
+                raise RuntimeError("202611170007 被 cleanup 门槛拦截（不盖章，下版本重试）")
+        # 2) 建新表 + 搬数 + 行数守恒（此时尚未动旧表）
+        c.execute(_UC_REBUILD_DDL)
+        c.execute(_UC_COPY_SQL)
+        _n_old = _uc_table_rows(c, "user_credentials")
+        _n_new = _uc_table_rows(c, _UC_TMP_TABLE)
+        if _n_old != _n_new:
+            raise RuntimeError(
+                f"202611170007 搬数不守恒 old={_n_old} new={_n_new}（不盖章，下次重试）")
+        # 3) 原子交换：MySQL 单条 RENAME TABLE 两表互换；SQLite 两步 RENAME 无事务
+        #    保护，每步后复查（C-1：不能信 _destructive_ddl 的返回值）
+        if _mysql_backend():
+            if not _destructive_ddl(
+                    c, "RENAME TABLE user_credentials TO user_credentials__old_backup, "
+                       "user_credentials__uqkind TO user_credentials", kind_hint="cleanup"):
+                raise RuntimeError("202611170007 被 cleanup 门槛拦截（不盖章，下版本重试）")
+        else:
+            for _src, _dst in (("user_credentials", _UC_BAK_TABLE),
+                               (_UC_TMP_TABLE, "user_credentials")):
+                if not _destructive_ddl(c, f"ALTER TABLE {_src} RENAME TO {_dst}",
+                                        kind_hint="cleanup"):
+                    raise RuntimeError("202611170007 被 cleanup 门槛拦截（不盖章）")
+                if _table_present(c, _src) or not _table_present(c, _dst):
+                    log.error(f"202611170007 交换未生效，半交换态: {_src} → {_dst}")
+                    raise RuntimeError(
+                        f"202611170007 交换未完成：{_src} → {_dst} 未生效（半交换态，"
+                        "下次启动按残留验收处理，不盖章）")
+        db.commit()
+        # 交换后结构复核：不信任 _destructive_ddl 的返回值 —— 它对非 MDL 失败
+        # 一律 log.warning 后返回 True（被门槛拦是 False，执行失败也是 True），
+        # 所以「没抛错」不等于「交换生效」。主键不含 kind 即 raise，不盖章。
+        _post_cols = _uc_unique_key_columns(c)
+        if "kind" not in _post_cols:
+            raise RuntimeError(
+                f"202611170007 交换后主键仍不含 kind（唯一键列={sorted(_post_cols) or '无'}）："
+                "RENAME 未生效，需人工核对（不盖章、下次启动重试）")
+        log.info("migration 202611170007: user_credentials 主键扩为 "
+                 "(user_id, provider, kind)")
+        # 4) 交换后复核（M-3）：备份表里不得有存活表没有的行（内容级），否则窗口内
+        #    有写入只落在旧表 —— 保留备份供人工回收，不删、不盖章
+        _bak_rows = _uc_table_rows(c, _UC_BAK_TABLE)
+        # 按键级复核（M-3 + M-1）：缺键=真丢；键在但备份的 updated_at 更新=真丢；
+        # 键在且存活行更新=多实例刷新覆盖，不算丢（否则会误报并永久停滞）。
+        _lost_after = _uc_lost_keys(_uc_rows_by_key(c, _UC_BAK_TABLE),
+                                    _uc_rows_by_key(c, "user_credentials"))
+        if _lost_after:
+            log.error(f"202611170007 交换窗口丢写 {len(_lost_after)} 行，备份表已保留")
+            raise RuntimeError(
+                f"202611170007 交换窗口内有写入落在旧表：备份 {_bak_rows} 行 / 搬数 "
+                f"{_n_old} 行，丢失 {len(_lost_after)} 行"
+                f"（如 {sorted(_lost_after)[:3]}）。"
+                f"备份表 {_UC_BAK_TABLE} 已保留待人工回收（不盖章）")
+        # 5) 结论一致才删备份（失败只告警：数据仍在备份表里，可人工回收）
+        try:
+            if not _destructive_ddl(c, f"DROP TABLE {_UC_BAK_TABLE}", kind_hint="cleanup"):
+                raise RuntimeError("cleanup 门槛拦截")
+            db.commit()
+        except Exception as _e:
+            log.warning(f"202611170007: 备份表 {_UC_BAK_TABLE} 未删除"
+                        f"（{_n_old} 行，数据安全，可手工清理）: {_e}")
+    # 6) 扩键后补一次归位（M-1）：006 已盖章的库不会再跑 006，这一步是唯一入口
+    _uc_backfill_kind_rows()
+
+
+register_migration(
+    version="202611170007",
+    name="user-credentials-unique-kind",
+    kind="cleanup",  # 重建表（DROP/RENAME）= 破坏性 DDL 语义，受 min_code_version 门槛
+    fn=_fn_user_credentials_unique_kind,
+)
+
+
+# ── 扩键之后的 kind 归位补跑（202611170007 的配套，M-1）───────────────────
+def _fn_user_credentials_kind_backfill() -> None:
+    """扩键后再跑一次 kind 归位（幂等）。
+
+    为什么单独注册而不是只挂在 007 末尾：007 的版本号在「已用旧版 007 跑过」的库上
+    已经盖章，改 007 的函数体只会触发 checksum 漂移告警（不重跑）。凡是「键已扩、
+    归位行仍缺」的库都要靠这条新号补一次；006/007 的归位本身幂等，重复执行零写入。
+
+    视图守卫与 007 同口径：非 owner 域库里 user_credentials 是跨库视图，回填 INSERT
+    在此必然失败 → 每次启动重试且永不盖章（纯日志噪声）。所以先判形态，视图库抛
+    `_NonOwnerObject` 让执行器跳过（不盖章），回归位由「本库永不执行」这条口径驱动。
+    """
+    with db_lock:
+        c = db.cursor()
+        _present = _table_present(c, "user_credentials")
+        _is_base = _is_base_table(c, "user_credentials") if _present else True
+        _cols = _uc_unique_key_columns(c) if (_present and _is_base) else set()
+    if not _present:
+        return                      # 新装库：建表路径已含三列主键，无需回填
+    if not _is_base:
+        raise _NonOwnerObject(
+            "user_credentials: 当前库中是视图（非 owner 域库），回填归位必须由 owner 库执行")
+    if "kind" not in _cols:
+        # 依赖隔离（评审 M-1）：007 未完成时（门槛拒跑 / 半交换残留 / 中断残留），
+        # 唯一键仍是两列 —— 此时补 (纯名, kind) 归位行必撞旧 UNIQUE(user_id, provider)，
+        # 变成每次启动一条 IntegrityError。跳过不盖章，等 007 扩键后的下次启动再来。
+        raise RuntimeError(
+            "202611170008 跳过：user_credentials 唯一键仍不含 kind（007 未完成）。"
+            "补归位行会撞旧两列 UNIQUE(user_id, provider)，不执行、不盖章，"
+            "等 007 扩键后的下次启动重试")
+    _uc_backfill_kind_rows()
+
+
+register_migration(
+    version="202611170008",
+    name="user-credentials-kind-backfill-after-widen",
+    kind="backfill",  # 纯回填、无 DDL：不受 min_code_version 门槛约束
+    fn=_fn_user_credentials_kind_backfill,
 )

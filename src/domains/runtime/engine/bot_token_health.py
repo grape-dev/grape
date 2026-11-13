@@ -162,11 +162,18 @@ async def _verify_repo_bot_tokens():
             # bot 凭据族过滤保留（webhook_token 不是 bot token，不进巡检）
             from src.kernel.repo_key import parse_repo_key as _prk_health
             # D99：cred_type 归一——bot 凭据族='bot' 精确匹配（LIKE 反模式消除）
-            c.execute(
-                "SELECT repo_key, cred_type FROM grape_t_repo_credentials "
-                "WHERE value IS NOT NULL AND value != '' AND cred_type = 'bot'"
-            )
-            for row in c.fetchall():
+            from src.domains.runtime import public as _rt_health
+            _rows_cred = None
+            if _rt_health.available():
+                _rows_cred = [(r[1], r[2]) for r in _rt_health.list_repo_credentials()
+                              if r[3] and r[2] == "bot"]
+            if _rows_cred is None:
+                c.execute(
+                    "SELECT repo_key, cred_type FROM grape_t_repo_credentials "
+                    "WHERE value IS NOT NULL AND value != '' AND cred_type = 'bot'"
+                )
+                _rows_cred = c.fetchall()
+            for row in _rows_cred:
                 repos_to_check.append((row[0], _prk_health(row[0])[0]))
     except Exception as e:
         log.warning(f"_verify_repo_bot_tokens: query failed: {e}")
@@ -255,6 +262,28 @@ def _verify_single_repo_token(repo_key: str, provider: str):
 
 def _set_repo_bot_token_status(repo_key: str, status: str):
     """更新 managed_repos.bot_token_status。"""
+    # P3-5a：managed_repos 是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_bts
+    _mg_bts = _mgmt_lib_bts(foreign_only=True)
+    if _mg_bts is not None:
+        try:
+            from src.kernel import cross_write as _xw_bts
+            _out_bts: dict = {}
+
+            def _apply_bts() -> None:
+                _out_bts["changed"] = _mg_bts.set_repo_fields(
+                    repo_key, {"bot_token_status": status})
+
+            _res_bts = _xw_bts.submit(
+                "mgmt", "repo_field_update",
+                _xw_bts.unique_key(f"repo-bot-token-status:{repo_key}:{status or 'ok'}"),
+                {"repo_key": repo_key, "fields": {"bot_token_status": status}}, _apply_bts)
+            if _res_bts.get("status") == "failed":
+                log.warning(f"_set_repo_bot_token_status: queued for retry ({repo_key}): "
+                            f"{_res_bts.get('error')}")
+            return
+        except Exception as _e:
+            log.warning(f"_set_repo_bot_token_status: lib path failed, fallback to local SQL: {_e}")
     from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:

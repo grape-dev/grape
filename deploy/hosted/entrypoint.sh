@@ -317,5 +317,18 @@ else
   echo "[entrypoint] LLM_API_KEY not provided: skipping engine config; tasks will report \"no available engine\"" >&2
 fi
 
+# ---------- 4.5) 跨库视图体检（只检查、不修复）----------
+# 迁移在应用 import 期执行，启动前无法正确处理"本次发布新增的列/表"，
+# 因此这里只体检并显式告警；真正的修复请在重启前跑 scripts/deploy-after-migrate.sh
+# （顺序：迁移 → 修复 → 复核 → 重启）。
+if [ -n "${DEVOPS_DB_HOST:-}" ] && [ "${DEVOPS_DB_BACKEND:-mysql}" = "mysql" ] \
+   && [ -f scripts/domain_view_freshness.py ]; then
+  _vf_args=(--check --skip-if-unavailable)
+  [ -f scripts/view_owner_known_duplicates.txt ] && \
+    _vf_args+=(--known-duplicates scripts/view_owner_known_duplicates.txt)
+  python3 scripts/domain_view_freshness.py "${_vf_args[@]}" \
+    || echo "[entrypoint] WARN: 跨域视图存在漂移（见上）；请在重启前执行 scripts/deploy-after-migrate.sh" >&2
+fi
+
 # ---------- 5) 交回原始 CMD ----------
 exec "$@"

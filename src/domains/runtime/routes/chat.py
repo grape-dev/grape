@@ -453,10 +453,11 @@ def _build_web_user_info(user: dict, acc: dict | None = None) -> str:
         lines.append(f"  Grape 账号：{username}")
         # 平台登录名（按卡目录顺序，身份域权威）
         try:
-            from src.domains.mgmt.auth.grape_account_db import get_user_identities
+            from src.domains.mgmt.auth.grape_account_db import list_platform_links
             from src.domains.runtime.vcs.platform_card import (
                 list_vcs_platforms as _lvp, display_name_for_repo_key as _dname)
-            _idents = [i for i in (get_user_identities(str(user.get("id") or "")) or [])
+            # A 批：注入登录名清单取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
+            _idents = [i for i in (list_platform_links(str(user.get("id") or "")) or [])
                        if (i.get("external_login") or "").strip()]
             _order = {p: n for n, p in enumerate(_lvp())}
             _idents.sort(key=lambda i: _order.get(i.get("provider") or "", len(_order)))
@@ -1567,16 +1568,43 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str,
                 log.warning(f"Chat IM: installation ref check failed: {e}")
             _now = _dt.now().isoformat()
             is_feishu = (provider or "feishu").strip().lower() == "feishu"
-            if other_refs == 0:
-                if is_feishu:
-                    c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE app_id=?",
-                              (_now, old_app_id))
-            elif gitcode_user and is_feishu:
-                # FR-21.10: 按 user_id 精确清当前用户的飞书映射——不按用户名扫列
-                # 原代码 WHERE gitcode_user=? 用注册名扫列，存量 um 行可能存注册名也可能存平台真 login
-                # 用 OR github_login=? 会误清同名 GitHub 用户；用 user_id 精确匹配无歧义
-                c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE user_id=?",
-                          (_now, user_id))
+            # P3-5c：unified_user_mapping / feishu_onboard_task 是 mgmt 基表；
+            # runtime 进程（worker 或 mgmt 自身）写入走 mgmt lib + 幂等意图
+            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_ct
+            _mg_ct = _mgmt_lib_ct(foreign_only=True)
+            _um_via_lib = False
+            _res_ct: dict = {}
+            if _mg_ct is not None and is_feishu:
+                try:
+                    from src.kernel import cross_write as _xw_ct
+                    if other_refs == 0:
+                        _res_ct = _xw_ct.submit(
+                            "mgmt", "user_mapping_feishu_clear",
+                            _xw_ct.unique_key(f"um-clear-app:{old_app_id}"), {"app_id": old_app_id},
+                            lambda: _mg_ct.clear_user_mapping_feishu(app_id=old_app_id))
+                        _um_via_lib = True
+                    elif gitcode_user:
+                        _res_ct = _xw_ct.submit(
+                            "mgmt", "user_mapping_feishu_clear",
+                            _xw_ct.unique_key(f"um-clear-user:{user_id}"), {"user_id": str(user_id)},
+                            lambda: _mg_ct.clear_user_mapping_feishu(user_id=str(user_id)))
+                        _um_via_lib = True
+                    if _um_via_lib and _res_ct.get("status") == "failed":
+                        log.warning(f"Chat IM: user mapping clear queued for retry: {_res_ct.get('error')}")
+                except Exception as _e_ct:
+                    _um_via_lib = False
+                    log.warning(f"Chat IM: user mapping clear via lib failed, fallback to local SQL: {_e_ct}")
+            if not _um_via_lib:
+                if other_refs == 0:
+                    if is_feishu:
+                        c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE app_id=?",
+                                  (_now, old_app_id))
+                elif gitcode_user and is_feishu:
+                    # FR-21.10: 按 user_id 精确清当前用户的飞书映射——不按用户名扫列
+                    # 原代码 WHERE gitcode_user=? 用注册名扫列，存量 um 行可能存注册名也可能存平台真 login
+                    # 用 OR github_login=? 会误清同名 GitHub 用户；用 user_id 精确匹配无歧义
+                    c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE user_id=?",
+                              (_now, user_id))
             c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
             # 解绑干净：该 bot 名下的群绑定（repo_im_group_binding）一并清空，避免残留脏数据
             # 导致后续 resolve_repo 仍命中旧仓库（chat-config-duplicate-row-unbind-fix-design.md）
@@ -1584,7 +1612,22 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str,
             # 解绑干净：消息去重缓存一并清，避免该 app 的历史数据残留
             #（bot_seen_messages=去重 ID；feishu_onboard_task 含 app_secret/qr_url 敏感信息，飞书专属）
             c.execute("DELETE FROM bot_seen_messages WHERE app_id=?", (old_app_id,))
-            if is_feishu:
+            _ot_via_lib = False
+            if is_feishu and _mg_ct is not None:
+                try:
+                    from src.kernel import cross_write as _xw_ot
+                    _res_ot = _xw_ot.submit(
+                        "mgmt", "feishu_onboard_task_delete",
+                        _xw_ot.unique_key(f"onboard-task-delete:{old_app_id}"), {"app_id": old_app_id},
+                        lambda: _mg_ct.delete_feishu_onboard_task(old_app_id))
+                    _ot_via_lib = True
+                    if _res_ot.get("status") == "failed":
+                        log.warning(f"Chat IM: feishu_onboard_task delete queued for retry: "
+                                    f"{_res_ot.get('error')}")
+                except Exception as _e_ot:
+                    _ot_via_lib = False
+                    log.warning(f"Chat IM: feishu_onboard_task delete via lib failed, fallback: {_e_ot}")
+            if is_feishu and not _ot_via_lib:
                 c.execute("DELETE FROM feishu_onboard_task WHERE app_id=?", (old_app_id,))
             _db.commit()
         log.info(f"Chat IM: unbound old app_id={_safe_im_app_ref(old_app_id, provider)} provider={provider} user={user_id} (other_refs={other_refs})")

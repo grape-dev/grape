@@ -72,18 +72,45 @@ def stamp_missing(limit: int = 5000) -> int:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, repo_key, issue_id FROM agent_tasks"
-                      " WHERE trace_id IS NULL OR trace_id='' LIMIT ?", (int(limit),))
-            rows = c.fetchall()
-            for tid, rk, iss in rows:
-                try:
-                    c.execute("UPDATE agent_tasks SET trace_id=?, pipeline_trace_id=? WHERE id=?",
-                              (task_trace_id(tid), pipeline_trace_id(rk or "", iss or "", tid), tid))
-                    done += 1
-                except Exception:
-                    pass
-            if done:
-                db.commit()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_3e8d71_f
+            _ru_lib_3e8d71 = _ru_lib_3e8d71_f(foreign_only=True)
+            if _ru_lib_3e8d71 is not None:
+                rows = _ru_lib_3e8d71.read_all("agent_tasks_3e8d71", (int(limit),))
+            else:
+                c.execute("SELECT id, repo_key, issue_id FROM agent_tasks"
+                          " WHERE trace_id IS NULL OR trace_id='' LIMIT ?", (int(limit),))
+                rows = c.fetchall()
+            # P3-5g：agent_tasks 在 runtime 域；insight 进程整批补写收成一条意图
+            # （逐行 submit 会产生上千条意图行，且丢失"一批补完"的语义）
+            from src.kernel.domain_read import runtime_lib as _rt_lib_sm
+            from src.kernel import cross_write as _xw_sm
+            _sm_done = False
+            _rt_sm = _rt_lib_sm(foreign_only=True)
+            if _rt_sm is not None and rows:
+                _rt_sm_ok = _rt_sm
+                _pairs = [(tid, task_trace_id(tid),
+                           pipeline_trace_id(rk or "", iss or "", tid)) for tid, rk, iss in rows]
+                _sm_n: dict = {}
+
+                def _apply_sm() -> None:
+                    _sm_n["n"] = _rt_sm_ok.stamp_task_traces(_pairs)
+
+                _sm_done = _xw_sm.submit_if_lib(
+                    _rt_sm_ok, "runtime", "agent_tasks_stamp_traces",
+                    f"agent-traces:{len(_pairs)}:{_pairs[0][0]}",
+                    {"pairs": [[str(p[0]), p[1], p[2]] for p in _pairs]}, _apply_sm, log)
+                if _sm_done:
+                    done = int(_sm_n.get("n") or 0)
+            if not _sm_done:
+                for tid, rk, iss in rows:
+                    try:
+                        c.execute("UPDATE agent_tasks SET trace_id=?, pipeline_trace_id=? WHERE id=?",
+                                  (task_trace_id(tid), pipeline_trace_id(rk or "", iss or "", tid), tid))
+                        done += 1
+                    except Exception:
+                        pass
+                if done:
+                    db.commit()
     except Exception as e:
         log.warning(f"obs trace stamp_missing failed: {e}")
         return 0
@@ -147,11 +174,16 @@ def _engine_label(runtime_id: int) -> str:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT COALESCE(NULLIF(r.name,''), NULLIF(r.provider,''), ''),"
-                      " COALESCE(rc.device_name, rc.name, '')"
-                      " FROM agent_runtimes r LEFT JOIN runtime_credentials rc"
-                      " ON rc.id = r.credential_id WHERE r.id=?", (int(runtime_id),))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_7776a6_f
+            _ru_lib_7776a6 = _ru_lib_7776a6_f(foreign_only=True)
+            if _ru_lib_7776a6 is not None:
+                row = _ru_lib_7776a6.read_one("agent_runtimes_7776a6", (int(runtime_id),))
+            else:
+                c.execute("SELECT COALESCE(NULLIF(r.name,''), NULLIF(r.provider,''), ''),"
+                          " COALESCE(rc.device_name, rc.name, '')"
+                          " FROM agent_runtimes r LEFT JOIN runtime_credentials rc"
+                          " ON rc.id = r.credential_id WHERE r.id=?", (int(runtime_id),))
+                row = c.fetchone()
             if not row:
                 return f"#{runtime_id}"
             eng = row[0] or ""
@@ -205,8 +237,13 @@ def resolve_tasks(trace: str) -> List[Dict[str, Any]]:
             c = db.cursor()
             if t.startswith("t_"):
                 # 先按任务号定位，再用它的 pipeline_trace_id 取同流程全部任务
-                c.execute("SELECT trace_id, pipeline_trace_id FROM agent_tasks WHERE id=?", (t,))
-                got = c.fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_3b1cff_f
+                _ru_lib_3b1cff = _ru_lib_3b1cff_f(foreign_only=True)
+                if _ru_lib_3b1cff is not None:
+                    got = _ru_lib_3b1cff.read_one("agent_tasks_3b1cff", (t,))
+                else:
+                    c.execute("SELECT trace_id, pipeline_trace_id FROM agent_tasks WHERE id=?", (t,))
+                    got = c.fetchone()
                 if not got:
                     return []
                 keys = [t, got[0] or "", got[1] or ""]
@@ -272,12 +309,19 @@ def timeline(user: Dict[str, Any], trace: str, with_steps: bool = True) -> Dict[
     if seqs:
         ph2 = ",".join("?" * len(seqs))
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT seq, event_type, actor, issue_id, title, status, created_at"
-                          f" FROM events WHERE seq IN ({ph2}) ORDER BY seq", tuple(seqs))
-                cols = [d[0] for d in c.description]
-                events = [dict(zip(cols, r)) for r in c.fetchall()]
+            _COLS = ["seq", "event_type", "actor", "issue_id", "title", "status", "created_at"]
+            _where = f"seq IN ({ph2})"
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_tr
+            _rt_tr = _runtime_lib_tr()
+            if _rt_tr is not None:
+                _rows = _rt_tr.query_events(", ".join(_COLS), _where, tuple(seqs), "seq")
+            else:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT seq, event_type, actor, issue_id, title, status, created_at"
+                              f" FROM events WHERE seq IN ({ph2}) ORDER BY seq", tuple(seqs))
+                    _rows = list(c.fetchall())
+            events = [dict(zip(_COLS, r)) for r in _rows]
         except Exception as e:
             log.warning(f"obs trace events failed: {e}")
 

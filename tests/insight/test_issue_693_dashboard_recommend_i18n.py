@@ -14,7 +14,7 @@ import re
 
 import pytest
 
-_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "static")
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "shell")
 
 REQUIRED_KEYS = (
     "recommend_load_failed",
@@ -65,6 +65,7 @@ class TestLocaleParity:
 class TestDashboardsJsConsumesKeys:
     """T3: dashboard.js 仍引用这 3 键（防止误删消费侧）。"""
 
+    @pytest.mark.skip(reason="legacy 静态页模块已随 Vue 迁移删除（本 PR 移除 src/api/static/js/pages/*）：被测对象不存在，断言改写到 Vue 源需另立专项")
     def test_t3_01_dashboard_js_references_required_keys(self):
         src = _read_file("js/pages/dashboard.js")
         for k in REQUIRED_KEYS:

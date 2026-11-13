@@ -116,8 +116,8 @@ def test_token_invalid_i18n_key_exists():
     """T15-03: TOKEN_INVALID i18n key 在 en/zh locale 文件中都存在。"""
     import json as _json
 
-    en_path = os.path.join(ROOT, "src/api/static/locales/en/app.json")
-    zh_path = os.path.join(ROOT, "src/api/static/locales/zh/app.json")
+    en_path = os.path.join(ROOT, "src/api/frontend/shell/locales/en/app.json")
+    zh_path = os.path.join(ROOT, "src/api/frontend/shell/locales/zh/app.json")
 
     with open(en_path, encoding="utf-8") as f:
         en = _json.load(f)

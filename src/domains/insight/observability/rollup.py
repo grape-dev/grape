@@ -59,12 +59,17 @@ def snapshot_runtimes() -> Dict[str, int]:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT rc.id, rc.device_name, rc.cpu_percent, rc.memory_percent, rc.disk_percent,"
-                      " rc.bandwidth_percent, COALESCE(hs.health_score, 0), rc.status, rc.last_seen_at"
-                      " FROM runtime_credentials rc"
-                      " LEFT JOIN runtime_health_scores hs ON hs.runtime_id = rc.id"
-                      " WHERE rc.status != 'revoked'")
-            rows = c.fetchall()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_619821_f
+            _ru_lib_619821 = _ru_lib_619821_f(foreign_only=True)
+            if _ru_lib_619821 is not None:
+                rows = _ru_lib_619821.read_all("runtime_credentials_619821", ())
+            else:
+                c.execute("SELECT rc.id, rc.device_name, rc.cpu_percent, rc.memory_percent, rc.disk_percent,"
+                          " rc.bandwidth_percent, COALESCE(hs.health_score, 0), rc.status, rc.last_seen_at"
+                          " FROM runtime_credentials rc"
+                          " LEFT JOIN runtime_health_scores hs ON hs.runtime_id = rc.id"
+                          " WHERE rc.status != 'revoked'")
+                rows = c.fetchall()
             for rid, device, cpu, mem, disk, bw, health, status, last_seen in rows:
                 try:
                     # 在线信号（SLO 可用率）：采样时刻心跳是否新鲜。时间口径按 UTC 解析，

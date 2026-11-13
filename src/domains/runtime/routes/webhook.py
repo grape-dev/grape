@@ -82,9 +82,14 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
     try:
         with db_lock:
             c = _db.cursor()
-            c.execute("SELECT repo_owner, repo_name FROM managed_repos WHERE repo_key=?",
-                      (repo_key,))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_b939bc_f
+            _mg_lib_b939bc = _mg_lib_b939bc_f(foreign_only=True)
+            if _mg_lib_b939bc is not None:
+                row = _mg_lib_b939bc.read_one("managed_repos_b939bc", (repo_key,))
+            else:
+                c.execute("SELECT repo_owner, repo_name FROM managed_repos WHERE repo_key=?",
+                          (repo_key,))
+                row = c.fetchone()
             if row and row[0] and row[1]:
                 _owner, _repo_name = row[0], row[1]
     except Exception:
@@ -887,9 +892,12 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
             # Issue #372: 检查 1b: 两仓 host_user_id 相同（路径 B 用户 token 托管场景）
             try:
                 from src.domains.mgmt.user.db import get_host_user_id
-                _session_host = get_host_user_id(_session_repo)
-                _target_host = get_host_user_id(repo_key)
-                if _session_host > 0 and _session_host == _target_host:
+                # D105 后 host_user_id 是 UUID TEXT（get_host_user_id 返回 str）——
+                # 原 `_session_host > 0` 会对 str 抛 TypeError 并被下面的 except 吞掉，
+                # 导致 A2A 同信任域判定恒不成立（静默）。按该函数文档口径字符串判定。
+                _session_host = str(get_host_user_id(_session_repo) or "")
+                _target_host = str(get_host_user_id(repo_key) or "")
+                if _session_host not in ("", "0") and _session_host == _target_host:
                     log.info(f"A2A: trust domain (same host_user_id={_session_host}) session_repo={_session_repo} → target_repo={repo_key}")
                     return None
             except Exception:
@@ -1012,11 +1020,16 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT scene_id FROM devops_pipeline_scene "
-                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
-                (target_scene_id, repo_key))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_8c7c25_f
+            _mg_lib_8c7c25 = _mg_lib_8c7c25_f(foreign_only=True)
+            if _mg_lib_8c7c25 is not None:
+                row = _mg_lib_8c7c25.read_one("devops_pipeline_scene_8c7c25", (target_scene_id, repo_key))
+            else:
+                c.execute(
+                    "SELECT scene_id FROM devops_pipeline_scene "
+                    "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                    (target_scene_id, repo_key))
+                row = c.fetchone()
         if row and row[0]:
             effective_scene_id = row[0]
     except Exception as _e:
@@ -1641,6 +1654,31 @@ def _a2a_register_repo(repo_key: str) -> bool:
     """Issue #671：回退放行后幂等补录 managed_repos（最小行，INSERT OR IGNORE，不覆盖既有配置）。"""
     from src.kernel.repo_key import parse_repo_key
     _provider, _owner, _name = parse_repo_key(repo_key)
+    # P3-5a：managed_repos 是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_a2a
+    _mg_a2a = _mgmt_lib_a2a(foreign_only=True)
+    if _mg_a2a is not None:
+        try:
+            from src.kernel import cross_write as _xw_a2a
+            _full = f"{_owner}/{_name}"
+            _out_a2a: dict = {}
+
+            def _apply_a2a() -> None:
+                _out_a2a["changed"] = _mg_a2a.ensure_repo_row(repo_key, _owner, _name, _full)
+
+            _res_a2a = _xw_a2a.submit(
+                "mgmt", "repo_ensure", _xw_a2a.unique_key(f"repo-ensure:{repo_key}"),
+                {"repo_key": repo_key,
+                 "fields": {"repo_owner": _owner, "repo_name": _name, "full_name": _full}},
+                _apply_a2a)
+            if _res_a2a.get("status") == "failed":
+                log.warning(f"A2A: fallback registration queued for retry for {repo_key}: "
+                            f"{_res_a2a.get('error')}")
+                return False
+            log.info(f"A2A: fallback registered managed_repos row: {repo_key}")
+            return True
+        except Exception as _e:
+            log.warning(f"A2A: fallback registration via lib failed, fallback to local SQL: {_e}")
     try:
         from src.kernel.session_manager import db as _reg_db, db_lock as _reg_lock
         with _reg_lock:

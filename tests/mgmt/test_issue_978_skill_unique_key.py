@@ -1,24 +1,18 @@
 """Issue #978: 场景编辑技能下拉三档同名技能无法区分 — 前端源码验证测试。
 
-验证 dashboard.js / scenes.py / help/api/06-scenes.md 中：
-- _skillKeyOf 唯一键（skill_id 优先，回退 (scope, skill_name)）已落地
-- 下拉选中高亮按唯一键精确命中（同名多行不再全勾选）
-- _skillPickCache 缓存结构改为 唯一键 -> {name, display}（同名不互相覆盖）
-- 两处 selectAgentSkill（编辑+创建）接受唯一键参数并按其命中缓存条目
-- 行元素携带 data-key，选中回写 data-current 为唯一键
-- 后端契约注释（scenes.py + OpenAPI description）与接口文档固化唯一键
-- 保存 payload 不含唯一键字段（不改保存语义）
-- dashboard.js 无语法错误（node 解析）
+静态根迁移（2026-11-13）：旧 `static/js/pages/dashboard.js` 已随 Vue 迁移删除，被测对象
+改为 Vue 源 `app/src/views/DashboardView.vue`；DOM 层的断言（data-key / window.selectAgentSkill
+签名 / _skillPickCache 结构）随组件化失效，改为显式退役（见 SKIP_LEGACY 原因），
+Vue 侧等价断言只保留组件里真实存在的唯一键语义。
 
-参考 Spec：Issue #978 issue agent 评论。
+后端契约（scenes.py 注释 + help/api/06-scenes.md）不依赖前端文件，继续校验。
 """
 import os
-import subprocess
 
 import pytest
 
-JS_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "src", "api", "static", "js", "pages", "dashboard.js"
+VIEW = os.path.join(
+    os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "app", "src", "views", "DashboardView.vue"
 )
 SCENES_PY = os.path.join(
     os.path.dirname(__file__), "..", "..", "src", "domains", "mgmt", "routes", "scenes.py"
@@ -27,72 +21,65 @@ SCENES_MD = os.path.join(
     os.path.dirname(__file__), "..", "..", "help", "api", "06-scenes.md"
 )
 
+LEGACY = ("legacy dashboard.js 已随 Vue 迁移删除；该 DOM/闭包级断言在组件化后无对应实现"
+          "（Vue 侧等价断言见本文件保留项）")
+
 
 @pytest.fixture(scope="module")
 def js_content():
-    with open(JS_PATH, "r", encoding="utf-8") as f:
+    with open(VIEW, "r", encoding="utf-8") as f:
         return f.read()
 
 
 class TestSkillUniqueKeyFunction:
-    """_skillKeyOf 唯一键函数。"""
+    """唯一键函数（Vue：skillKeyOf）。"""
 
     def test_skill_key_of_defined(self, js_content):
-        """dashboard.js 应定义 _skillKeyOf（skill_id 优先，回退 (scope, skill_name)）。"""
-        assert "function _skillKeyOf(s)" in js_content
-        assert "return 'id:' + id;" in js_content
-        assert "return (s.scope || 'official') + ':' + (s.skill_name || '');" in js_content
+        """DashboardView 应定义 skillKeyOf（skill_id 优先，回退 scope:skill_name）。"""
+        assert "function skillKeyOf(s)" in js_content
+        assert "return s.skill_id || (s.scope || 'official') + ':' + s.skill_name" in js_content
 
 
 class TestDropdownSelection:
     """下拉选中高亮按唯一键命中。"""
 
     def test_selection_uses_unique_key(self, js_content):
-        """sel 判定应优先唯一键精确命中。"""
-        assert "var sel = (_skillKeyOf(s) === current)" in js_content
+        """skillIsSelected 应优先按唯一键精确命中。"""
+        assert "skillPanel.currentKey && skillKeyOf(s) === skillPanel.currentKey" in js_content
 
     def test_legacy_name_fallback_requires_unique(self, js_content):
         """旧裸 skill_name 值仅在名字唯一时回退命中（同名计数守卫）。"""
-        assert "_nameCount[s.skill_name] === 1" in js_content
+        assert "(skillPanel.nameCounts[s.skill_name] || 0) === 1" in js_content
 
+    @pytest.mark.skip(reason=LEGACY)
     def test_row_carries_data_key(self, js_content):
-        """行元素应携带 data-key，选中后 data-current 回写唯一键。"""
-        assert 'data-key="\' + _skillEsc(_skillKeyOf(s)) + \'"' in js_content
-        assert "btn.setAttribute('data-current', key || nm);" in js_content
+        assert 'data-key=' in js_content
 
+    @pytest.mark.skip(reason=LEGACY)
     def test_name_count_computed(self, js_content):
-        """同名计数应在渲染前计算。"""
         assert "var _nameCount = {};" in js_content
 
 
 class TestSkillPickCache:
-    """缓存结构以唯一键索引。"""
-
+    @pytest.mark.skip(reason=LEGACY)
     def test_cache_indexed_by_unique_key(self, js_content):
-        """_openSkillDropdown 缓存应以唯一键索引 {name, display}。"""
-        assert "cache[_skillKeyOf(s)] = { name: s.skill_name, display: s.display_name || s.skill_name }" in js_content
+        assert "cache[_skillKeyOf(s)]" in js_content
 
 
 class TestSelectAgentSkill:
-    """两处 selectAgentSkill 接受唯一键参数。"""
-
+    @pytest.mark.skip(reason=LEGACY)
     def test_signature_has_skill_key(self, js_content):
-        """两处实现签名应为 (agentType, skillName, skillKey)。"""
-        assert js_content.count(
-            "window.selectAgentSkill = function(agentType, skillName, skillKey)"
-        ) == 2
+        assert "window.selectAgentSkill" in js_content
 
+    @pytest.mark.skip(reason=LEGACY)
     def test_entry_lookup_by_key_then_name(self, js_content):
-        """应先按 skillKey 命中缓存条目，再按 name 兜底。"""
-        assert js_content.count("var entry = skillKey ? cache[skillKey] : null;") == 2
-        assert js_content.count("if (cache[k] && cache[k].name === skillName)") == 2
+        assert "cache[skillKey]" in js_content
 
 
 class TestEchoAfterSave:
-    """保存后回显展平映射适配新缓存结构。"""
-
+    @pytest.mark.skip(reason=LEGACY)
     def test_flatten_reads_name_display(self, js_content):
-        assert "if (_c[k] && _c[k].name) skillDisplayMap[_c[k].name] = _c[k].display;" in js_content
+        assert "skillDisplayMap" in js_content
 
 
 class TestBackendContract:
@@ -111,27 +98,25 @@ class TestBackendContract:
         assert "`(skill_id, scope, skill_name)` 共同构成前端选择的唯一键" in md
 
 
-class TestSavePayloadUnchanged:
-    """保存 payload 不含唯一键字段（不改保存语义）。"""
+class TestSavePayload:
+    """保存 payload 的 skill_id 透传（#979，base 分支在 legacy 页落地）。
 
-    def test_payload_excludes_skill_key(self, js_content):
-        import re
-        payload_pattern = re.compile(
-            r"\{\s*id:\s*n\.id,\s*tag:\s*n\.tag,\s*skill:\s*n\.skill\s*\|\|\s*''[^}]*\}"
-        )
-        matches = payload_pattern.findall(js_content)
-        assert len(matches) >= 2
-        for i, p in enumerate(matches):
-            assert "skill_key" not in p and "skill_id" not in p, (
-                f"第 {i + 1} 处 nodesPayload 不应含唯一键字段"
-            )
+    Vue 视图侧尚未接线（skill_id 未写入节点、payload 未带）——显式退役，登记为
+    Vue 线待补项；不得以「跳过」冒充已覆盖。
+    """
+
+    @pytest.mark.skip(reason="Vue 线未实现 #979 的 skill_id 透传（payload 不带 skill_id）；"
+                             "base 分支的实现只在已删除的 legacy dashboard.js 中，需在 Vue 视图补接线")
+    def test_payload_carries_skill_id(self, js_content):
+        assert "skill_id: n.skill_id || 0" in js_content
 
 
-class TestJsSyntax:
-    """dashboard.js 无语法错误（node 解析）。"""
+class TestSkillIdCarriedToBackend:
+    @pytest.mark.skip(reason="Vue 线未实现 #979 链路（data-skill-id → node.skill_id → payload）；"
+                             "需在 Vue 视图补接线后恢复断言")
+    def test_button_carries_skill_id(self, js_content):
+        assert "data-skill-id=" in js_content
 
-    def test_no_syntax_errors(self):
-        result = subprocess.run(
-            ["node", "--check", JS_PATH], capture_output=True, text=True
-        )
-        assert result.returncode == 0, result.stderr
+    @pytest.mark.skip(reason="Vue 线未实现 #979 链路；需补接线")
+    def test_dropdown_prefers_node_skill_id(self, js_content):
+        assert "_curId > 0) current = 'id:' + _curId" in js_content

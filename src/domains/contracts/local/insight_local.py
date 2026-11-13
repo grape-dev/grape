@@ -11,8 +11,15 @@ import json
 import time
 from typing import Any
 
+from src.kernel import db_registry, session_manager
 from src.kernel.db import t_insight, t_runtime
-from src.kernel import session_manager
+
+_DOMAIN = "insight"
+
+
+def _t(name: str) -> str:
+    """表名：自有 DSN → 裸名；共享进程库 → 跨 schema 前缀（与 RuntimeServiceLocal 同口径）。"""
+    return name if db_registry.uses_own_dsn(_DOMAIN) else t_insight(name)
 from src.domains.contracts.insight_service import InsightService
 
 
@@ -20,12 +27,16 @@ class InsightServiceLocal(InsightService):
     """同实例模式：直接查 grape_insight schema（SQLite 用 ins_ 前缀）。"""
 
     @property
+    def _own_dsn(self) -> bool:
+        return db_registry.uses_own_dsn(_DOMAIN)
+
+    @property
     def _db(self):
-        return session_manager.db
+        return db_registry.domain_db(_DOMAIN) or session_manager.db
 
     @property
     def _lock(self):
-        return session_manager.db_lock
+        return db_registry.domain_lock(_DOMAIN) if self._own_dsn else session_manager.db_lock
 
     def log_obs(self, entry: dict) -> Any:
         """Runtime 写可观测性日志（obs_log）。"""
@@ -33,7 +44,7 @@ class InsightServiceLocal(InsightService):
             c = self._db.cursor()
             dedup_key = entry.get("dedup_key") or f"{entry.get('source', '')}:{entry.get('task_id', '')}:{time.time()}"
             c.execute(
-                f"INSERT OR IGNORE INTO {t_insight('obs_log')} "
+                f"INSERT OR IGNORE INTO {_t('obs_log')} "
                 f"(dedup_key, ts, level, component, source, trace_id, task_id, "
                 f"repo_key, runtime_id, msg, extra_json) "
                 f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -60,7 +71,7 @@ class InsightServiceLocal(InsightService):
             c = self._db.cursor()
             dedup_key = usage.get("dedup_key") or f"{usage.get('task_id', '')}:{usage.get('seq', 0)}"
             c.execute(
-                f"INSERT OR IGNORE INTO {t_insight('obs_llm_usage')} "
+                f"INSERT OR IGNORE INTO {_t('obs_llm_usage')} "
                 f"(dedup_key, task_id, seq, turn, source, repo_key, scene_id, "
                 f"agent_type, engine_id, user_id, provider_raw, model_raw, model_key, "
                 f"run_id, run_kind, input_tokens, output_tokens, "
@@ -97,7 +108,7 @@ class InsightServiceLocal(InsightService):
         with self._lock:
             c = self._db.cursor()
             c.execute(
-                f"INSERT INTO {t_insight('api_latency_log')} "
+                f"INSERT INTO {_t('api_latency_log')} "
                 f"(request_id, method, path, status, duration_ms, "
                 f"repo_key, user_id, source) "
                 f"VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -121,7 +132,7 @@ class InsightServiceLocal(InsightService):
             c = self._db.cursor()
             c.execute(
                 f"SELECT metric_name, metric_value, labels, ts "
-                f"FROM {t_insight('obs_metric_rollup')} "
+                f"FROM {_t('obs_metric_rollup')} "
                 f"WHERE repo_key=? ORDER BY ts DESC LIMIT 100",
                 (repo_key,),
             )
@@ -136,7 +147,7 @@ class InsightServiceLocal(InsightService):
         with self._lock:
             c = self._db.cursor()
             c.execute(
-                f"SELECT * FROM {t_insight('obs_slo')} WHERE repo_key=?",
+                f"SELECT * FROM {_t('obs_slo')} WHERE repo_key=?",
                 (repo_key,),
             )
             rows = c.fetchall()
@@ -150,7 +161,7 @@ class InsightServiceLocal(InsightService):
         with self._lock:
             c = self._db.cursor()
             c.execute(
-                f"SELECT * FROM {t_insight('obs_alert_events')} "
+                f"SELECT * FROM {_t('obs_alert_events')} "
                 f"WHERE repo_key=? AND status='active' "
                 f"ORDER BY created_at DESC",
                 (repo_key,),
@@ -162,7 +173,14 @@ class InsightServiceLocal(InsightService):
             return [dict(zip(cols, r)) for r in rows] if cols else [dict(r) for r in rows]
 
     def aggregate_runtime_stats(self) -> dict:
-        """聚合 grape_runtime 数据（events/agent_tasks 维度，供看板）。"""
+        """聚合 runtime 数据（events/agent_tasks/agent_runtimes）。
+
+        lib 模式：跨域读必须走 runtime 域 lib（insight 连接在自己库里，读不到 runtime 表）；
+        共享模式：沿用跨 schema SQL（t_runtime 前缀）。
+        """
+        from src.domains.runtime import public as _rt
+        if _rt.available():
+            return _rt.aggregate_counts()
         with self._lock:
             c = self._db.cursor()
             stats: dict[str, Any] = {}

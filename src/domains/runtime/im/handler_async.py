@@ -374,10 +374,22 @@ def _autopilot_exec_row(exec_id: int):
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        row = c.execute(
-            "SELECT t.repo_key, t.name, e.findings_json, e.result, e.status "
-            "FROM autopilot_executions e JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
-            (exec_id,)).fetchone()
+        from src.kernel.domain_read import mgmt_lib as _mgmt_lib_ap
+        from src.kernel.domain_read import runtime_lib as _runtime_lib_ap
+        _rt_ap = _runtime_lib_ap()
+        _mg_ap = _mgmt_lib_ap()
+        row = None
+        if _rt_ap is not None and _mg_ap is not None:
+            _exec = _rt_ap.get_autopilot_execution(exec_id)
+            if _exec:
+                _task = _mg_ap.get_autopilot_task_brief(_exec[0])
+                if _task:
+                    row = (_task[0], _task[1], _exec[1], _exec[2], _exec[3])
+        if row is None:
+            row = c.execute(
+                "SELECT t.repo_key, t.name, e.findings_json, e.result, e.status "
+                "FROM autopilot_executions e JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
+                (exec_id,)).fetchone()
         if not row:
             return None
         # 同一事务查场景列表（省一次 db_lock + 往返）
@@ -410,9 +422,14 @@ def _autopilot_get_scenes(repo_key: str) -> list:
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            rows = c.execute(
-                "SELECT scene_id, name FROM devops_pipeline_scene "
-                "WHERE repo_key=? AND is_active=1 ORDER BY name", (repo_key,)).fetchall()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_b5f6ee_f
+            _mg_lib_b5f6ee = _mg_lib_b5f6ee_f(foreign_only=True)
+            if _mg_lib_b5f6ee is not None:
+                c = _mg_lib_b5f6ee.read_all("devops_pipeline_scene_b5f6ee", (repo_key,)).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT scene_id, name FROM devops_pipeline_scene "
+                    "WHERE repo_key=? AND is_active=1 ORDER BY name", (repo_key,)).fetchall()
         return [{"scene_id": r[0], "name": r[1] or r[0]} for r in rows]
     except Exception as e:
         log.warning(f"[finding-card] get scenes failed: {e}")

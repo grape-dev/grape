@@ -331,24 +331,35 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                 # 2. 二级回退：查 grape_accounts（D32-补丁）
                 # FR-18.3/FR-25.2: EXISTS 用 external_identities 验证平台 login，
                 # 不再用 ga.username 匹配注册名（注册名≠平台 login 时会误杀）
-                c.execute(
-                    "SELECT ga.id FROM grape_accounts ga "
-                    "WHERE ga.id IS NOT NULL AND ga.id NOT IN ('', '0') AND ga.status=1 "
-                    "AND EXISTS (SELECT 1 FROM external_identities ei "
-                    "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
-                    "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') "
-                    "LIMIT 1",
-                    (_provider, issue_creator))
-                row = c.fetchone()
+                from src.kernel.domain_read import mgmt_lib as _mg_lib_3dd020_f
+                _mg_lib_3dd020 = _mg_lib_3dd020_f(foreign_only=True)
+                if _mg_lib_3dd020 is not None:
+                    row = _mg_lib_3dd020.read_one("grape_accounts_3dd020", (_provider, issue_creator))
+                else:
+                    c.execute(
+                        "SELECT ga.id FROM grape_accounts ga "
+                        "WHERE ga.id IS NOT NULL AND ga.id NOT IN ('', '0') AND ga.status=1 "
+                        "AND EXISTS (SELECT 1 FROM external_identities ei "
+                        "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
+                        "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') "
+                        "LIMIT 1",
+                        (_provider, issue_creator))
+                    row = c.fetchone()
                 if row:
                     return row[0]
                 # 按 external_id 查（issue_creator 可能是平台数字 ID）
                 # FR-18.3: 按 provider 动态查（原硬编码 gitcode）
-                c.execute(
-                    "SELECT ei.grape_user_id FROM external_identities ei "
-                    "WHERE ei.provider=? AND ei.status=1 AND ei.external_id=? LIMIT 1",
-                    (_provider, issue_creator))
-                row = c.fetchone()
+                # P4：external_identities 在 mgmt 域，删视图后走 mgmt lib 读
+                from src.kernel.domain_read import mgmt_lib as _mg_lib_ei
+                _ei_lib = _mg_lib_ei(foreign_only=True)
+                if _ei_lib is not None:
+                    row = _ei_lib.read_one("grape_user_id_by_external_id", (_provider, issue_creator))
+                else:
+                    c.execute(
+                        "SELECT ei.grape_user_id FROM external_identities ei "
+                        "WHERE ei.provider=? AND ei.status=1 AND ei.external_id=? LIMIT 1",
+                        (_provider, issue_creator))
+                    row = c.fetchone()
                 if row:
                     return row[0]
                 # 3. user_repos 回退：按创建者过滤（JOIN grape_accounts）
@@ -367,10 +378,16 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                 row = c.fetchone()
                 return row[0] if row else 0
             # issue_creator 为空：保留原逻辑（取第一个 join 用户）
-            c.execute(
-                "SELECT user_id FROM user_repos WHERE (repo_key=? OR repo_key=?) AND is_join=1 ORDER BY user_id LIMIT 1",
-                (repo, f"gitcode:{repo}"))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_fj
+            _fj = _mg_fj(foreign_only=True)
+            if _fj is not None:
+                row = _fj.read_one("first_join_user_by_repo", (repo, f"gitcode:{repo}"))
+            else:
+                c.execute(
+                    "SELECT user_id FROM user_repos WHERE (repo_key=? OR repo_key=?) AND is_join=1 "
+                    "ORDER BY user_id LIMIT 1",
+                    (repo, f"gitcode:{repo}"))
+                row = c.fetchone()
             return row[0] if row else 0
         except Exception:
             return 0
@@ -818,7 +835,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
 # = 连续 ~1920 个心跳周期全丢，机器不会自己回来）。
 _ENGINE_DETACH_AFTER_SECONDS = int(os.environ.get("ENGINE_DETACH_AFTER_SECONDS", "0"))
 
-def cleanup_scene_engine_bindings(rid_list: list) -> int:
+def cleanup_scene_engine_bindings(rid_list: list, commit: bool = True) -> int:
     """从所有活跃场景的 nodes_json 中移除对 rid_list 引擎的绑定（Issue #250 原逻辑抽出共享）。
 
     返回被修改的场景数。供两处调用：
@@ -857,13 +874,23 @@ def cleanup_scene_engine_bindings(rid_list: list) -> int:
                     changed = True
             if changed:
                 try:
-                    c.execute(
-                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
-                        (_json.dumps(nodes, ensure_ascii=False), now, row_id))
-                    changed_rows.append(row_id)
+                    # P3-4b：场景节点写走 mgmt lib（幂等意图 + expected_hash 防并发覆盖）
+                    from src.domains.runtime.engine.scene_nodes_write import (
+                        write_scene_nodes as _wsn_cl, content_hash as _ch_cl)
+                    _rc_cl = _wsn_cl(_json.dumps(nodes, ensure_ascii=False), row_id,
+                                     _ch_cl(nodes_str or ""), c, now, log)
+                    if _rc_cl in ("updated", "local", "skipped"):
+                        changed_rows.append(row_id)
+                    elif _rc_cl == "mismatch":
+                        log.warning(f"cleanup_scene_engine_bindings: scene {row_id} "
+                                    f"changed concurrently, transform skipped")
+                    else:
+                        log.warning(f"cleanup_scene_engine_bindings: scene {row_id} "
+                                    f"lib write failed, intent queued for retry")
                 except Exception as _e:
                     log.warning(f"cleanup_scene_engine_bindings: update scene {row_id} failed: {_e}")
-        db.commit()
+        if commit:
+            db.commit()
     return len(changed_rows)
 
 def _find_scene_bindings_for_runtime(c, runtime_id: int) -> list:
@@ -874,8 +901,13 @@ def _find_scene_bindings_for_runtime(c, runtime_id: int) -> list:
     import json as _json
     hits = []
     try:
-        c.execute("SELECT id, repo_key, scene_id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
-        rows = c.fetchall()
+        from src.kernel.domain_read import mgmt_lib as _mg_lib_9bcf48_f
+        _mg_lib_9bcf48 = _mg_lib_9bcf48_f(foreign_only=True)
+        if _mg_lib_9bcf48 is not None:
+            rows = _mg_lib_9bcf48.read_all("devops_pipeline_scene_9bcf48", ())
+        else:
+            c.execute("SELECT id, repo_key, scene_id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
+            rows = c.fetchall()
     except Exception as _e:
         log.warning(f"_find_scene_bindings_for_runtime: query failed: {_e}")
         return hits
@@ -896,8 +928,13 @@ def _find_autopilot_tasks_for_runtime(c, runtime_id: int) -> list:
     import json as _json
     out = []
     try:
-        c.execute("SELECT id, name, engine_runtime_ids FROM autopilot_tasks WHERE enabled=1")
-        rows = c.fetchall()
+        from src.kernel.domain_read import mgmt_lib as _mg_apb
+        _apb = _mg_apb(foreign_only=True)
+        if _apb is not None:
+            rows = _apb.read_all("autopilot_tasks_enabled_brief", ())
+        else:
+            c.execute("SELECT id, name, engine_runtime_ids FROM autopilot_tasks WHERE enabled=1")
+            rows = c.fetchall()
     except Exception as _e:
         log.warning(f"_find_autopilot_tasks_for_runtime: query failed: {_e}")
         return out
@@ -1328,10 +1365,19 @@ def remap_scene_engine_bindings(rid_map: dict) -> int:
                     changed = True
             if changed:
                 try:
-                    c.execute(
-                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
-                        (_json.dumps(nodes, ensure_ascii=False), now, row_id))
-                    changed_rows.append(row_id)
+                    # P3-4b：场景节点写走 mgmt lib（幂等意图 + expected_hash 防并发覆盖）
+                    from src.domains.runtime.engine.scene_nodes_write import (
+                        write_scene_nodes as _wsn_rm, content_hash as _ch_rm)
+                    _rc_rm = _wsn_rm(_json.dumps(nodes, ensure_ascii=False), row_id,
+                                     _ch_rm(nodes_str or ""), c, now, log)
+                    if _rc_rm in ("updated", "local", "skipped"):
+                        changed_rows.append(row_id)
+                    elif _rc_rm == "mismatch":
+                        log.warning(f"remap_scene_engine_bindings: scene {row_id} "
+                                    f"changed concurrently, transform skipped")
+                    else:
+                        log.warning(f"remap_scene_engine_bindings: scene {row_id} "
+                                    f"lib write failed, intent queued for retry")
                 except Exception as _e:
                     log.warning(f"remap_scene_engine_bindings: update scene {row_id} failed: {_e}")
         db.commit()
@@ -1366,6 +1412,8 @@ def remap_engine_references(rid_map: dict, cid: int = 0, reason: str = "engine_r
             log.warning(f"remap_engine_references: remap scenes failed: {_e}")
         # 2. autopilot_tasks.engine_runtime_ids（JSON 列表字符串）
         try:
+            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_at
+            _mg_at = _mgmt_lib_at(foreign_only=True)
             c.execute(f"SELECT id, engine_runtime_ids FROM autopilot_tasks WHERE engine_runtime_ids != ''")
             for tid, eids_str in c.fetchall():
                 try:
@@ -1376,9 +1424,33 @@ def remap_engine_references(rid_map: dict, cid: int = 0, reason: str = "engine_r
                     continue
                 new_eids = [rid_map.get(eid, eid) for eid in eids]
                 if new_eids != eids:
-                    c.execute("UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
-                              (_json.dumps(new_eids), tid))
-                    stats["autopilot_tasks"] += 1
+                    _new_json = _json.dumps(new_eids)
+                    if _mg_at is not None:
+                        # P3-5d：mgmt 基表，跨域写走 lib；同域（mgmt 进程）自动回落本地 SQL
+                        try:
+                            import hashlib as _hl_at
+                            from src.kernel import cross_write as _xw_at
+                            _sig_at = _hl_at.sha1(_new_json.encode("utf-8")).hexdigest()[:12]
+                            _res_at = _xw_at.submit(
+                                "mgmt", "autopilot_engine_ids_set",
+                                _xw_at.unique_key(f"autopilot-eids:{tid}:{_sig_at}"),
+                                {"task_id": int(tid), "engine_runtime_ids": _new_json},
+                                lambda t=tid, j=_new_json: _mg_at.set_autopilot_engine_ids(int(t), j))
+                            if _res_at.get("status") == "failed":
+                                log.warning(f"remap_engine_references: autopilot task {tid} "
+                                            f"queued for retry: {_res_at.get('error')}")
+                            else:
+                                stats["autopilot_tasks"] += 1
+                        except Exception as _e_at:
+                            log.warning(f"remap_engine_references: autopilot task {tid} lib path "
+                                        f"failed, fallback to local SQL: {_e_at}")
+                            c.execute("UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
+                                      (_new_json, tid))
+                            stats["autopilot_tasks"] += 1
+                    else:
+                        c.execute("UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
+                                  (_new_json, tid))
+                        stats["autopilot_tasks"] += 1
         except Exception as _e:
             log.warning(f"remap_engine_references: remap autopilot_tasks failed: {_e}")
         # 3. agent backend 引用（整型列，CASE 批量替换）

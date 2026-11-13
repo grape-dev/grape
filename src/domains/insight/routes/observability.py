@@ -217,8 +217,13 @@ def obs_logs_ingest(body: LogIngestBody, credential_id: int = Depends(_require_c
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (credential_id,))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_911d7f_f
+            _ru_lib_911d7f = _ru_lib_911d7f_f(foreign_only=True)
+            if _ru_lib_911d7f is not None:
+                row = _ru_lib_911d7f.read_one("runtime_credentials_911d7f", (credential_id,))
+            else:
+                c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (credential_id,))
+                row = c.fetchone()
             if row:
                 src = row[1] or row[0] or src
     except Exception:

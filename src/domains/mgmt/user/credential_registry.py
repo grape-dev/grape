@@ -109,7 +109,14 @@ def _known_platforms() -> tuple:
 def _pat_specs() -> tuple:
     """PAT 段规格生成：内置平台显式登记 + 卡驱动动态平台按规则匹配。
 
-    为什么混合式：settings.py L552 set_credential(user_id, f"{_p}_pat")
+    A2（2026-11-13）：落库形态已归位为 provider=<平台纯名> + kind='pat'
+    （user_credentials.kind 列）；本注册表的 key `<p>_pat` 保留为**逻辑名**
+    （审计/守卫读起来仍是"某平台的 PAT"）。
+    注意 lookup() 只认这套逻辑名：`lookup("gitee")` 返回 None（QA N2 2026-11-13
+    指出原注释"两种形态都接受"与实现不符）——按归位形态查询要先拼回 `<p>_pat`。
+    迁移期旧复合键行仍在库中（双写），收口后删除。
+
+    为什么混合式：settings.py set_credential(user_id, p, cfg, kind="pat")
     的 _p 来自 platform_card 平台清单（动态）。纯静态枚举会在新平台接入
     时漏登记（守卫误报）；纯动态匹配则丢失"显式清单"的可审计性。
     折中：实锚平台经 _known_platforms()（卡驱动 + 内置兜底）显式列出

@@ -1,4 +1,4 @@
-"""帮助文档静态页生成器（v2）：将 help/usage + help/api + help/reference + help/developer 的 markdown 渲染为 src/api/static/help.html。
+"""帮助文档静态页生成器（v2）：将 help/usage + help/api + help/reference + help/developer 的 markdown 渲染为 src/api/frontend/shell/help.html。
 
 v2 设计（见 docs/weekly-02/help-page-prototype.md）：
 - help.html 为轻量 SPA 壳：入口页(帮助中心)→ 使用文档 / Git事件统一模型 / API 文档 / 开发者文档 四个独立区块
@@ -20,13 +20,12 @@ from pathlib import Path
 
 import markdown
 
-_log = logging.getLogger(__name__)
-
 _REPO_ROOT = Path(os.path.dirname(os.path.abspath(__file__))).parent.parent
 HELP_DIR = _REPO_ROOT / "help"
 USAGE_DIR = HELP_DIR / "usage"
 API_DIR = HELP_DIR / "api"
-OUT_PATH = _REPO_ROOT / "src" / "api" / "static" / "help.html"
+# 本仓布局（Vue 迁移后）：静态产物落在 src/api/frontend/shell/help.html
+OUT_PATH = _REPO_ROOT / "src" / "api" / "frontend" / "shell" / "help.html"
 
 # 章节顺序与 tests/test_help_directory.py 的 EXPECTED_USAGE_FILES / EXPECTED_API_FILES 保持一致
 USAGE_ORDER = [
@@ -37,12 +36,10 @@ USAGE_ORDER = [
     "pipeline.md",
     "skills.md",
     "runtimes.md",
-    "atomcode.md",
     "ai-shell-devbridge-deploy.md",
     "monitoring.md",
     "knowledge-base.md",
     "faq.md",
-    "server-environment-variables.md",
 ]
 
 # 独立参考文档（首页独立入口，不归入使用文档或 API 文档）
@@ -74,12 +71,13 @@ _MD_EXTENSIONS = ["fenced_code", "tables", "toc", "sane_lists", "nl2br"]
 
 # OpenAPI 契约下载：固定 URL（内容随 API 版本刷新，路径不变）
 OPENAPI_STATIC_URL = "/static/openapi.json"
-OPENAPI_STATIC_PATH = _REPO_ROOT / "src" / "api" / "static" / "openapi.json"
+OPENAPI_STATIC_PATH = _REPO_ROOT / "src" / "api" / "frontend" / "shell" / "openapi.json"
 OPENAPI_HELP_PATH = HELP_DIR / "api" / "openapi.json"
 
 _CSS = """\
-:root{--bg:#fff;--c:#f7f8fa;--b:#e2e8f0;--t1:#1a202c;--t2:#4a5568;--t3:#a0aec0;--a:#3b82f6;--g:#22c55e;--y:#eab308;--r:#ef4444;--pk:#ec4899;--pu:#8b5cf6;--or:#f97316}
-html[data-mode="dark"]{--bg:#0f1117;--c:#1a1d28;--b:#2d3142;--t1:#f1f5f9;--t2:#94a3b8;--t3:#64748b}
+/* Liquid Glass (twin themes) — aligned with frontend/app tokens.css */
+:root{--bg:#f5f5f7;--c:rgba(255,255,255,.6);--b:rgba(0,0,0,.06);--t1:#1d1d1f;--t2:#6e6e73;--t3:#aeaeb2;--a:#0071e3;--g:#34c759;--y:#ff9500;--r:#ff3b30;--pk:#c4718a;--pu:#8e7bb5;--or:#c77f3b;--blur:blur(16px);--shadow:0 1px 4px rgba(0,0,0,.06)}
+html[data-mode="dark"]{--bg:#1c1c1e;--c:rgba(44,44,46,.6);--b:rgba(255,255,255,.08);--t1:#f5f5f7;--t2:#a1a1a6;--t3:#636366;--a:#0a84ff;--g:#30d158;--y:#ff9f0a;--r:#ff453a;--pk:#d98aa5;--pu:#a99ac7;--or:#d69559;--shadow:0 1px 4px rgba(0,0,0,.3)}
 *{box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--t1);margin:0;line-height:1.7;font-size:15px}
 h1{font-size:25px;border-bottom:1px solid var(--b);padding-bottom:8px;margin-top:8px}
@@ -98,19 +96,19 @@ table{width:100%;border-collapse:collapse;margin:12px 0}
 th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--b)}
 th{background:var(--c);font-weight:600}
 /* ── 壳 ── */
-.topnav{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:6px;padding:10px 18px;background:var(--bg);border-bottom:1px solid var(--b)}
+.topnav{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:6px;padding:10px 18px;background:var(--c);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);border-bottom:1px solid var(--b)}
 .brand{font-weight:700;font-size:15px;color:var(--t1);text-decoration:none;margin-right:10px}
 .link{color:var(--t2);text-decoration:none;font-size:13px;padding:4px 12px;border-radius:6px}
 .link:hover{color:var(--a)}
 .link.active{background:var(--c);color:var(--a);font-weight:600}
 .spacer{flex:1}
-.btn{border:1px solid var(--b);background:var(--c);color:var(--t1);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px}
+.btn{border:1px solid var(--b);background:var(--c);color:var(--t1);border-radius:999px;padding:4px 12px;cursor:pointer;font-size:13px}
 .burger{display:none}
 /* 入口 */
 .home{max-width:860px;margin:44px auto;padding:0 20px}
 .home h1{font-size:28px;border-bottom:3px solid var(--a)}
 .cards{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:30px}
-.card{display:block;background:var(--c);border:1px solid var(--b);border-radius:12px;padding:26px;text-decoration:none;color:var(--t1)}
+.card{display:block;background:var(--c);border:1px solid var(--b);border-radius:18px;padding:26px;text-decoration:none;color:var(--t1);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);box-shadow:var(--shadow)}
 .card:hover{border-color:var(--a);box-shadow:0 6px 20px rgba(0,0,0,.08)}
 .card .big{font-size:22px;font-weight:700;margin-bottom:8px}
 .card .go{margin-top:16px;color:var(--a);font-weight:600}
@@ -135,15 +133,15 @@ th{background:var(--c);font-weight:600}
 .ds:hover{color:var(--a)}
 .ds.active{background:var(--c);color:var(--a);font-weight:600}
 .content{flex:1;min-width:0;max-width:min(940px,100%);padding:26px 32px 90px;overflow-x:auto}
-.contract{display:flex;align-items:center;gap:14px;background:var(--c);border:1px solid var(--b);border-radius:10px;padding:14px 18px;margin-bottom:24px}
+.contract{display:flex;align-items:center;gap:14px;background:var(--c);border:1px solid var(--b);border-radius:18px;padding:14px 18px;margin-bottom:24px;backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur)}
 .contract .ct-info{flex:1;font-size:13px}
 .contract .ct-info b{font-size:14px}
 .contract .ct-info small{display:block;color:var(--t3);margin-top:2px}
-.contract .dl{background:var(--a);color:#fff;text-decoration:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;white-space:nowrap}
+.contract .dl{background:var(--a);color:#fff;text-decoration:none;border-radius:999px;padding:8px 16px;font-size:13px;font-weight:600;white-space:nowrap}
 .contract .dl:hover{opacity:.9}
 .back-top{position:fixed;bottom:26px;right:26px;background:var(--a);color:#fff;width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;border:none;font-size:18px;box-shadow:0 4px 12px rgba(0,0,0,.15)}
 /* ── API 端点卡片（标准化字段：接口说明/请求方法=路径/请求参数/响应示例/错误码说明） ── */
-.ep-card{border:1px solid var(--b);border-radius:10px;margin:26px 0;padding:16px 20px;background:linear-gradient(180deg,rgba(59,130,246,.05),transparent)}
+.ep-card{border:1px solid var(--b);border-radius:18px;margin:26px 0;padding:16px 20px;background:var(--c);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);box-shadow:var(--shadow)}
 .ep-card .ep-h{border-left:4px solid var(--a);padding-left:12px}
 .ep-card .ep-h h2{border:0;margin:0;padding:0;display:flex;align-items:center;flex-wrap:wrap;gap:10px;font-size:15px}
 .ep-method{display:inline-block;background:var(--a);color:#fff;border-radius:6px;font-size:12px;font-weight:700;padding:3px 10px;letter-spacing:.5px;flex:0 0 auto}
@@ -174,7 +172,7 @@ th{background:var(--c);font-weight:600}
 """
 
 _MIGRATION_COMMENT = """<!--
-  ⚠️ 迁移说明：本文件为生成产物（v2 SPA 壳），内容由 src/kernel/help_page_gen.py 依据 help/usage + help/api + help/reference + help/developer 渲染。
+  ⚠️ 迁移说明：本文件为生成产物（v2 SPA 壳），内容由 src/help_page_gen.py 依据 help/usage + help/api + help/reference + help/developer 渲染。
   如需更新任何内容，请编辑 help/ 目录下对应 markdown 文件后重启服务（help.html 自动重新生成）。
 -->"""
 
@@ -581,23 +579,29 @@ def build_help_html(data: dict | None = None) -> str:
 
 
 def generate() -> int:
-    """生成并覆写 src/api/static/help.html；返回渲染的 markdown 文件数。"""
+    """生成并覆写 src/api/frontend/shell/help.html；返回渲染的 markdown 文件数。"""
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = build_data()
     OUT_PATH.write_text(build_help_html(data), encoding="utf-8")
     return len(data["usage"]) + len(data["api"]) + len(data.get("reference", [])) + len(data.get("developer", []))
 
 
+_log = logging.getLogger(__name__)
+
+
 def write_openapi_contract(schema: dict, help_path: Path | None = None,
                            static_path: Path | None = None, allow_partial: bool = False) -> int:
     """把 OpenAPI 契约 schema 落盘（固定下载 URL=/static/openapi.json）。
 
-    规范副本写 help/api/openapi.json（需求要求），提供副本写 static 目录供下载。
+    规范副本写 help/api/openapi.json（需求要求），提供副本写 frontend/shell/（= STATIC_DIR，
+    /static/openapi.json 实际由这里服务；写成 src/api/static/ 会让下载的契约永远是旧的）。
     返回写入的架构 paths 数；被完整性保护拒绝时返回 0。
 
-    完整性保护（Issue #1931）：四进程拆分后，任一进程的 schema 都只是并集的子集。
-    若调用方误用单进程 schema 覆盖，磁盘上的全量契约会被静默缩小（CLI 随之丢命令组）。
-    规则：**磁盘已有契约里存在本次 schema 缺失的路径时不覆盖**（allow_partial=True 显式放行并告警）。
+    完整性保护（Issue #1931 / #897，架构守护 BLOCKED-1 回归）：四进程拆分后，任一进程的
+    schema 都只是并集的子集。若调用方误用单进程 schema 覆盖，磁盘上的全量契约会被静默缩小
+    （CLI 随之丢命令组、/static/openapi.json 缺端点）。
+    规则：**磁盘已有契约里存在本次 schema 缺失的路径时不覆盖**
+    （allow_partial=True 显式放行并告警）。
     """
     import json as _json
 

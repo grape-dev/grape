@@ -173,6 +173,16 @@ async def lifespan(app: FastAPI):
                 log.warning("IM engine: start failed (legacy fallback retired)")
         else:
             log.info("IM engine mode=off: IM 总开关关闭，不启动任何 IM 链路")
+
+        # Issue #2261 B1：通知 outbox 消费者（跨进程投递——持有租约的安装由本实例投）。
+        # engine 为 None 时也起：resolve_engine 多源解析兜底（消费者引擎为 None 跳过本轮）。
+        # 接线收敛到 outbox.attach_outbox_consumer（QA #1314 S3：双入口不再各写 40 行）。
+        _outbox_consumer = None
+        try:
+            from src.domains.runtime.im import outbox
+            _outbox_consumer = outbox.attach_outbox_consumer(app, im_engine)
+        except Exception as e:
+            log.warning(f"IM outbox consumer start failed: {e}")
     except Exception as e:
         log.warning(f"IM WS startup failed: {e}")
 
@@ -367,6 +377,23 @@ async def lifespan(app: FastAPI):
 
     # ===== 优雅关闭 =====
     log.info("A process (server) stopping...")
+    # Issue #2261 B1：先停 outbox 消费者（cancel+await），再停引擎——
+    # 反过来会在消费者 await 途中拿到已 stop 的引擎（竞态：发给死渠道）。
+    _consumer = getattr(app.state, "outbox_consumer", None)
+    if _consumer is not None:
+        try:
+            await _consumer.stop()
+        except Exception as _e:
+            log.warning(f"IM outbox consumer stop failed: {_e}")
+        try:
+            app.state.outbox_consumer = None
+        except Exception:
+            pass
+    try:
+        from src.domains.runtime.im.notify import set_running_app
+        set_running_app(None)
+    except Exception:
+        pass
     if im_engine is not None:
         try:
             await im_engine.stop()
@@ -468,6 +495,12 @@ app.include_router(community.router)
 
 # 巡检（Issue: 4 进程拆分时漏挂，导致 /api/patrol/* 404 且契约丢失）
 app.include_router(patrol.router)
+
+# IM 渠道路由（/api/im/*）——4 进程拆分时同样漏挂：唯一挂载点曾留在单进程 main.py，
+# 四进程部署下整张 IM 渠道页 404（Issue #2261 移植时补挂；引擎/outbox 状态只属 A 进程）。
+from src.domains.mgmt.routes import im as im_router
+
+app.include_router(im_router.router)
 
 # Admin 管理后台（/api/admin/*）
 from src.domains.mgmt.admin.routes import router as admin_router

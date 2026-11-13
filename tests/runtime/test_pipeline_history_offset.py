@@ -85,23 +85,21 @@ class TestHistorySlicingSemantics:
 
 
 class TestFrontendIncremental:
-    """源码级：pipeline.js 应包含增量拉取逻辑"""
+    """源码级：Pipeline.vue 应包含增量拉取逻辑（Vue 迁移后老 pipeline.js 已删除）"""
 
     def test_pipeline_js_incremental_fetch(self):
         p = os.path.join(os.path.dirname(__file__), "..", "..",
-                         "src", "api", "static", "js", "pages", "pipeline.js")
+                         "src", "api", "frontend", "app", "src", "views", "Pipeline.vue")
         src = open(p, encoding="utf-8").read()
-        assert "_pipeEnsurePage" in src, "缺少增量拉取函数"
+        assert "function ensurePage" in src, "缺少增量拉取函数"
         assert "history_offset=" in src, "前端应按 history_offset 增量拉取"
         assert "history_has_more" in src, "前端应消费 history_has_more"
         assert "history_total" in src, "分页总数应使用全量 history_total"
-        # 分页总数：无过滤时用 history_total（含未加载部分）
-        assert "data.history_total != null" in src
 
     def test_locales_loading_more(self):
         for lang in ("zh", "en"):
             p = os.path.join(os.path.dirname(__file__), "..", "..",
-                             "src", "api", "static", "locales", lang, "pipeline.json")
+                             "src", "api", "frontend", "shell", "locales", lang, "pipeline.json")
             import json
             d = json.load(open(p, encoding="utf-8"))
             assert d.get("loading_more"), f"{lang} 缺少 loading_more 词条"

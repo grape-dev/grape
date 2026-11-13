@@ -1,0 +1,14 @@
+# 已知「同名表在多个域库都是基表」的登记清单（owner 不确定 → 脚本不判定、不修复）
+#
+# 用途：domain_view_freshness.py --known-duplicates 本文件 --strict-owner
+#       出现在此清单里的表只告警；**不在**清单里的多份基表会让检查以 exit 2 失败。
+#
+# 2026-11-13 清理：11 张已裁决 owner=runtime，其中 9 张的副本已删除；
+#   剩余 2 张因 mgmt 代码仍直接读写自己库的副本，待 P3（改走 runtime lib）后删除。
+# 2026-11-13 偏差：grape_t_channel_lease 的 mgmt 副本已恢复 —— src/domains/runtime/im/bot_lease.py
+#   会被 mgmt 进程加载执行（代码目录 ≠ 运行进程），删掉后稳定报 1146。待 P3 迁到 runtime lib 再删。
+grape_t_channel_installation
+grape_t_channel_lease
+takeover_sessions
+# P3 跨域写日志表：每个域库各一份（同名不同库，有意为之）
+grape_t_xwrite_log

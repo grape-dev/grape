@@ -2,7 +2,7 @@
 """校验 zh/en 语言包 key 集合一致。"""
 import json, sys, os
 
-LOCALES_DIR = 'src/api/static/locales'
+LOCALES_DIR = 'src/api/frontend/shell/locales'
 MODULES = sorted(f[:-5] for f in os.listdir(f'{LOCALES_DIR}/zh') if f.endswith('.json'))  # 目录派生：全模块覆盖（QA M-3）
 
 def flat_keys(obj, prefix=''):

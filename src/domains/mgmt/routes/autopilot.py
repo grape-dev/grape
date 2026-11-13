@@ -75,11 +75,17 @@ def _check_exec_access(user: dict, exec_id: int) -> dict:
     """校验 execution 归属并返回 dict（含 task_id, repo_key）。"""
     with db_lock:
         c = db.cursor()
-        row = c.execute(
-            "SELECT e.id, e.task_id, t.repo_key FROM autopilot_executions e "
-            "JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
-            (exec_id,)
+        from src.kernel.domain_read import runtime_lib as _ru_lib_80b975_f
+        _ru_lib_80b975 = _ru_lib_80b975_f(foreign_only=True)
+        if _ru_lib_80b975 is not None:
+            c = _ru_lib_80b975.read_one("autopilot_executions_80b975", (exec_id,)
         ).fetchone()
+        else:
+            row = c.execute(
+                "SELECT e.id, e.task_id, t.repo_key FROM autopilot_executions e "
+                "JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
+                (exec_id,)
+            ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "execution not found"})
     repo_key = row[2] or ""
@@ -431,7 +437,19 @@ def delete_task(task_id: int, user: dict = Depends(get_current_user)):
     _check_task_access(user, task_id)
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM autopilot_executions WHERE task_id=?", (task_id,))
+        # P3-5h：autopilot_executions 在 runtime 域（task 本身是 mgmt 域，仍本地删）
+        from src.kernel.domain_read import runtime_lib as _rt_lib_dt
+        from src.kernel import cross_write as _xw_dt
+        _dt_done = False
+        _rt_dt = _rt_lib_dt(foreign_only=True)
+        if _rt_dt is not None:
+            _rt_dt_ok = _rt_dt
+            _dt_done = _xw_dt.submit_if_lib(
+                _rt_dt_ok, "runtime", "autopilot_executions_delete",
+                f"autopilot-exec-del:{task_id}", {"task_id": int(task_id)},
+                lambda: _rt_dt_ok.delete_autopilot_executions(int(task_id)), log)
+        if not _dt_done:
+            c.execute("DELETE FROM autopilot_executions WHERE task_id=?", (task_id,))
         c.execute("DELETE FROM autopilot_tasks WHERE id=?", (task_id,))
         db.commit()
     log.info(f"Autopilot: task {task_id} deleted by user={user.get('username', '')}")
@@ -558,10 +576,16 @@ def get_findings(exec_id: int, user: dict = Depends(get_current_user)):
     _check_exec_access(user, exec_id)
     with db_lock:
         c = db.cursor()
-        row = c.execute(
-            "SELECT findings_json, result FROM autopilot_executions WHERE id=?",
-            (exec_id,)
+        from src.kernel.domain_read import runtime_lib as _ru_lib_018f03_f
+        _ru_lib_018f03 = _ru_lib_018f03_f(foreign_only=True)
+        if _ru_lib_018f03 is not None:
+            c = _ru_lib_018f03.read_one("autopilot_executions_018f03", (exec_id,)
         ).fetchone()
+        else:
+            row = c.execute(
+                "SELECT findings_json, result FROM autopilot_executions WHERE id=?",
+                (exec_id,)
+            ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "execution not found"})
     findings_json = row[0] or ""
@@ -649,11 +673,25 @@ def _append_dedup_note(description: str, finding: dict) -> str:
 
 def _save_findings_json(exec_id: int, findings_data: dict) -> None:
     """Issue #697：findings_json 回写（确认标记/派发号共用，统一加锁提交）。"""
+    _fj = json.dumps(findings_data, ensure_ascii=False)
+    # P3-5h：autopilot_executions 在 runtime 域
+    from src.kernel.domain_read import runtime_lib as _rt_lib_fj
+    from src.kernel import cross_write as _xw_fj
+    _fj_done = False
+    _rt_fj = _rt_lib_fj(foreign_only=True)
+    if _rt_fj is not None:
+        _rt_fj_ok = _rt_fj
+        _fj_done = _xw_fj.submit_if_lib(
+            _rt_fj_ok, "runtime", "autopilot_findings_set",
+            f"autopilot-findings:{exec_id}", {"exec_id": int(exec_id), "findings_json": _fj},
+            lambda: _rt_fj_ok.set_autopilot_findings(int(exec_id), _fj), log)
+    if _fj_done:
+        return
     with db_lock:
         c = db.cursor()
         c.execute(
             "UPDATE autopilot_executions SET findings_json=? WHERE id=?",
-            (json.dumps(findings_data, ensure_ascii=False), exec_id)
+            (_fj, exec_id)
         )
         db.commit()
 
@@ -671,10 +709,15 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
     """
     with db_lock:
         c = db.cursor()
-        row = c.execute(
-            "SELECT t.repo_key, e.findings_json FROM autopilot_executions e "
-            "JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
-            (exec_id,)).fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_88bc87_f
+        _ru_lib_88bc87 = _ru_lib_88bc87_f(foreign_only=True)
+        if _ru_lib_88bc87 is not None:
+            c = _ru_lib_88bc87.read_one("autopilot_executions_88bc87", (exec_id,)).fetchone()
+        else:
+            row = c.execute(
+                "SELECT t.repo_key, e.findings_json FROM autopilot_executions e "
+                "JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
+                (exec_id,)).fetchone()
     if not row or not row[1]:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无 findings 可派发"})
     repo_key = row[0]
@@ -925,10 +968,15 @@ def _skill_display_name(skill_name: str) -> str:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
-                (skill_name,))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_1abf56_f
+            _ru_lib_1abf56 = _ru_lib_1abf56_f(foreign_only=True)
+            if _ru_lib_1abf56 is not None:
+                row = _ru_lib_1abf56.read_one("skill_1abf56", (skill_name,))
+            else:
+                c.execute(
+                    "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
+                    (skill_name,))
+                row = c.fetchone()
         return (row[0] or "") if row else ""
     except Exception:
         return ""

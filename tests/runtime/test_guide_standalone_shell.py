@@ -13,7 +13,7 @@ import json
 import subprocess
 from pathlib import Path
 
-APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "static" / "js" / "app.js"
+APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell" / "js" / "app.js"
 
 _RUNNER = r'''
 const fnSrc = JSON.parse(require('fs').readFileSync(__FN_FILE__, 'utf8'));

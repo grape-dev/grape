@@ -406,7 +406,7 @@ class TestGithubHostPermissionPrecheck:
         import json as _json
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         for lang in ("zh", "en"):
-            with open(os.path.join(root, "src", "api", "static", "locales", lang, "repos.json"), encoding="utf-8") as f:
+            with open(os.path.join(root, "src", "api", "frontend", "shell", "locales", lang, "repos.json"), encoding="utf-8") as f:
                 data = _json.load(f)
             assert data["host"]["permission_denied"]
             assert data["host"]["upstream_error"]

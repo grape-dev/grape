@@ -108,7 +108,19 @@ def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
             c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', "
                       "updated_at=? WHERE app_id=?",
                       (datetime.now(timezone.utc).isoformat(), old_app_id))
-        c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (session_id,))
+        # P3-5g：vod_conversations 在 runtime 域
+        from src.kernel.domain_read import runtime_lib as _rt_lib_vd
+        from src.kernel import cross_write as _xw_vd
+        _vd_done = False
+        _rt_vd = _rt_lib_vd(foreign_only=True)
+        if _rt_vd is not None:
+            _rt_vd_ok = _rt_vd
+            _vd_done = _xw_vd.submit_if_lib(
+                _rt_vd_ok, "runtime", "vod_conversations_delete",
+                f"vod-conv-del:{session_id}", {"agent_session_ids": [str(session_id)]},
+                lambda: _rt_vd_ok.delete_vod_conversations(agent_session_ids=[str(session_id)]), log)
+        if not _vd_done:
+            c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (session_id,))
         db.commit()
 
     log.info(f"VOD IM: unbound app_id={old_app_id[:30]} repo={repo_key} (released={released})")
@@ -126,11 +138,16 @@ def _get_agent_type_meta(agent_type: str) -> dict | None:
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(
-                "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type WHERE agent_type=?",
-                (agent_type,)
-            )
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_b07f0c_f
+            _ru_lib_b07f0c = _ru_lib_b07f0c_f(foreign_only=True)
+            if _ru_lib_b07f0c is not None:
+                row = _ru_lib_b07f0c.read_one("agent_type_b07f0c", (agent_type,))
+            else:
+                c.execute(
+                    "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type WHERE agent_type=?",
+                    (agent_type,)
+                )
+                row = c.fetchone()
             if row:
                 return {"agent_type": row[0], "display_name": row[1], "description": row[2],
                         "default_backend": row[3] or "", "icon": row[4] or "", "order_num": row[5] or 0,
@@ -151,10 +168,15 @@ def list_agent_types():
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(
-                "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type ORDER BY order_num, agent_type"
-            )
-            rows = c.fetchall()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_7eae90_f
+            _ru_lib_7eae90 = _ru_lib_7eae90_f(foreign_only=True)
+            if _ru_lib_7eae90 is not None:
+                rows = _ru_lib_7eae90.read_all("agent_type_7eae90", ())
+            else:
+                c.execute(
+                    "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type ORDER BY order_num, agent_type"
+                )
+                rows = c.fetchall()
         except Exception as e:
             # Issue #2091/#2096：返回 200 空数组会把「查询失败」伪装成「还没有数据」
             log.error(f"agent_type list query failed: {e}")
@@ -237,8 +259,14 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                 backend_name = ""
                 instance_name_val = ""
                 if row[1]:
-                    c.execute("SELECT name, credential_id FROM agent_runtimes WHERE id=?", (row[1],))
-                    brow = c.fetchone()
+                    # P4：删视图后 agent_runtimes 只能走 lib 读（白名单查询，未知名会抛错）
+                    from src.kernel.domain_read import runtime_lib as _rt_lib_rn
+                    _rn_lib = _rt_lib_rn(foreign_only=True)
+                    if _rn_lib is not None:
+                        brow = _rn_lib.read_one("runtime_name_cred", (row[1],))
+                    else:
+                        c.execute("SELECT name, credential_id FROM agent_runtimes WHERE id=?", (row[1],))
+                        brow = c.fetchone()
                     if brow and brow[0]:
                         backend_name = brow[0]
                         _dev = ""
@@ -301,18 +329,31 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         _evt_where_sql = " AND ".join(_evt_where)
 
         try:
-            c.execute(f"SELECT COUNT(*) FROM events WHERE {_evt_where_sql}", _evt_params)
-            events_total = c.fetchone()[0]
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_ev
+            _rt_ev = _runtime_lib_ev()
+            if _rt_ev is not None:
+                events_total = _rt_ev.count_events(_evt_where_sql, tuple(_evt_params))
+            else:
+                c.execute(f"SELECT COUNT(*) FROM events WHERE {_evt_where_sql}", _evt_params)
+                events_total = c.fetchone()[0]
         except Exception as e:
             log.warning(f"agent events search count failed (keyword={keyword!r}): {e}")
             events_total = 0
 
         try:
             _offset = (page - 1) * page_size
-            c.execute(
-                f"SELECT seq, event_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at, issue_id, repo_key FROM events WHERE {_evt_where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
-                _evt_params + [page_size, _offset]
-            )
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_ev2
+            _rt_ev2 = _runtime_lib_ev2()
+            if _rt_ev2 is not None:
+                _rows_ev = _rt_ev2.query_events(
+                    "seq, event_type, title, actor, summary, status, created_at, runtime, "
+                    "skill, exit_code, duration, started_at, completed_at, issue_id, repo_key",
+                    _evt_where_sql, tuple(_evt_params), "seq DESC", int(page_size), int(_offset))
+            else:
+                _rows_ev = c.execute(
+                    f"SELECT seq, event_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at, issue_id, repo_key FROM events WHERE {_evt_where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                    _evt_params + [page_size, _offset]
+                ).fetchall()
             recent_events = [
                 {"seq": r[0], "event_type": r[1], "title": r[2] or r[1], "actor": r[3] or "",
                  "summary": r[4] or r[2] or r[1],
@@ -321,7 +362,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                  "exit_code": r[9], "duration": r[10],
                  "started_at": normalize_event_time(r[11] or ""), "completed_at": normalize_event_time(r[12] or ""),
                  "issue_id": r[13] or "", "repo_key": r[14] or ""}
-                for r in c.fetchall()
+                for r in _rows_ev
             ]
         except Exception as e:
             log.warning(f"agent events search query failed (keyword={keyword!r}): {e}")
@@ -355,12 +396,22 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                 with db_lock:
                     c = db.cursor()
                     if _cid:
-                        c.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
-                        _wr = c.fetchone()
+                        from src.kernel.domain_read import runtime_lib as _ru_lib_f8ea2f_f
+                        _ru_lib_f8ea2f = _ru_lib_f8ea2f_f(foreign_only=True)
+                        if _ru_lib_f8ea2f is not None:
+                            _wr = _ru_lib_f8ea2f.read_one("runtime_credentials_f8ea2f", (_cid,))
+                        else:
+                            c.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
+                            _wr = c.fetchone()
                         _wname = (_wr[0] or "") if _wr else ""
                     else:
-                        c.execute("SELECT host_name FROM agent_runtimes WHERE id=?", (_p.get("runtime_id") or 0,))
-                        _wr = c.fetchone()
+                        from src.kernel.domain_read import runtime_lib as _rt_lib_wn
+                        _wn_lib = _rt_lib_wn(foreign_only=True)
+                        if _wn_lib is not None:
+                            _wr = _wn_lib.read_one("runtime_host_name", (_p.get("runtime_id") or 0,))
+                        else:
+                            c.execute("SELECT host_name FROM agent_runtimes WHERE id=?", (_p.get("runtime_id") or 0,))
+                            _wr = c.fetchone()
                         _wname = (_wr[0] or "") if _wr else ""
             except Exception:
                 _wname = ""
@@ -377,6 +428,29 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         except Exception:
             pass
         _uid = user.get("id", 0) if isinstance(user, dict) else 0
+        def _lookup_worker_name(_p):
+            """Issue #1310：凭据名（runtime_credentials.name）；本机直连回退 host_name。"""
+            _cid = _p.get("credential_id") or 0
+            _wname = ""
+            try:
+                if not _cid:
+                    from src.kernel.domain_read import runtime_lib as _rt_lib_wn2
+                    _wn2_lib = _rt_lib_wn2(foreign_only=True)
+                    if _wn2_lib is not None:
+                        _wr = _wn2_lib.read_one("runtime_host_name", (_p.get("runtime_id") or 0,))
+                        _wname = (_wr[0] or "") if _wr else ""
+                        return _wname
+                with db_lock:
+                    c.execute(
+                        "SELECT name FROM runtime_credentials WHERE id=?" if _cid
+                        else "SELECT host_name FROM agent_runtimes WHERE id=?",
+                        (_cid,) if _cid else (_p.get("runtime_id") or 0,))
+                    _wr = c.fetchone()
+                    _wname = (_wr[0] or "") if _wr else ""
+            except Exception:
+                _wname = ""
+            return _wname
+
         _eids = get_scene_engine_ids(_scene_id, name, repo_key=repo_key, user_id=_uid)
         if _eids:
             from src.domains.runtime.engine.engine_select import _engines_by_ids, load_engine_selection, _norm_repo
@@ -385,6 +459,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             pool = _engines_by_ids(_eids, _repo, _cfg)
             for _p in pool:
                 _p["instance_name"] = instance_name(_p.get("name") or "engine", _p.get("device_name") or "", _p.get("credential_id") or 0)
+                _p["worker_name"] = _lookup_worker_name(_p)  # Issue #1310：引擎 chip 显示「引擎名（凭据名）」
     except Exception:
         pass
 
@@ -476,9 +551,28 @@ def clean_agent_session(name: str, owner: str, repo: str,
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE devops_agent_session SET runtime_session_id='' WHERE repo_key=? AND agent_type=?",
-                  (repo_key, name))
-        updated = c.rowcount
+        # P3-5g：devops_agent_session 在 runtime 域；需要 rowcount 判"是否清理了会话"
+        from src.kernel.domain_read import runtime_lib as _rt_lib_cs
+        from src.kernel import cross_write as _xw_cs
+        _cs_n: dict = {}
+        _rt_cs = _rt_lib_cs(foreign_only=True)
+        _cs_done = False
+        if _rt_cs is not None:
+            _rt_cs_ok = _rt_cs
+
+            def _apply_cs() -> None:
+                _cs_n["n"] = _rt_cs_ok.clear_agent_session_runtime(repo_key, name)
+
+            _cs_done = _xw_cs.submit_if_lib(
+                _rt_cs_ok, "runtime", "agent_session_runtime_clear",
+                f"agent-sess-clear:{repo_key}:{name}", {"repo_key": repo_key, "agent_type": name},
+                _apply_cs, log)
+        if _cs_done:
+            updated = int(_cs_n.get("n") or 0)
+        else:
+            c.execute("UPDATE devops_agent_session SET runtime_session_id='' WHERE repo_key=? AND agent_type=?",
+                      (repo_key, name))
+            updated = c.rowcount
         db.commit()
     log.info(f"Agent session cleaned: repo={repo_key}, agent={name}, rows={updated}")
     return {"message": "Agent 会话已清理（runtime_session_id 已置空）", "cleaned": updated > 0, "agent_type": name}
@@ -531,12 +625,24 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             if any(str(r[0]) == "user" for r in _holders):
                 raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 Chat Agent 使用，不能同时绑定 VOD Agent 和 Chat Agent"})
             if old_app_id and old_app_id != body.im_app_id:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("DELETE FROM vod_conversations WHERE agent_session_id IN "
-                              "(SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod')",
-                              (repo_key,))
-                    db.commit()
+                # P3-5g：vod_conversations 在 runtime 域
+                from src.kernel.domain_read import runtime_lib as _rt_lib_vr
+                from src.kernel import cross_write as _xw_vr
+                _vc_done = False
+                _rt_vr = _rt_lib_vr(foreign_only=True)
+                if _rt_vr is not None:
+                    _rt_vr_ok = _rt_vr
+                    _vc_done = _xw_vr.submit_if_lib(
+                        _rt_vr_ok, "runtime", "vod_conversations_delete",
+                        f"vod-conv-del-repo:{repo_key}", {"repo_key": repo_key},
+                        lambda: _rt_vr_ok.delete_vod_conversations(repo_key=repo_key), log)
+                if not _vc_done:
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute("DELETE FROM vod_conversations WHERE agent_session_id IN "
+                                  "(SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod')",
+                                  (repo_key,))
+                        db.commit()
                 log.info(f"VOD IM: cleaned conversations for {repo_key}")
 
     # Issue #294：解绑-only 请求（未带引擎/技能/订阅信息）→ 仅清 IM 三字段，保留其余 Agent 配置
@@ -563,11 +669,17 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             try:
                 _rid = int(bn)
                 # 校验 ID 存在
-                with db_lock:
-                    c2 = db.cursor()
-                    c2.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (_rid,))
-                    if not c2.fetchone():
+                from src.kernel.domain_read import runtime_lib as _rt_lib_ex
+                _ex_lib = _rt_lib_ex(foreign_only=True)
+                if _ex_lib is not None:
+                    if not _ex_lib.read_one("runtime_exists", (_rid,)):
                         _rid = None
+                else:
+                    with db_lock:
+                        c2 = db.cursor()
+                        c2.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (_rid,))
+                        if not c2.fetchone():
+                            _rid = None
             except (ValueError, TypeError):
                 pass
             if _rid is None:
@@ -599,13 +711,32 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     _sr = c3.fetchone()
                 if _sr:
                     _now = datetime.now(timezone.utc).isoformat()
+                    # P3-5h：scene_engine_detach_log 在 runtime 域
+                    from src.kernel.domain_read import runtime_lib as _rt_lib_dl
+                    from src.kernel import cross_write as _xw_dl
+                    _dl_n: dict = {}
+                    _dl_done = False
+                    _rt_dl = _rt_lib_dl(foreign_only=True)
                     with db_lock:
-                        c3.execute(
-                            "UPDATE scene_engine_detach_log SET rebound_at=? "
-                            "WHERE scene_row_id=? AND node_tag=? AND (rebound_at='' OR rebound_at IS NULL)",
-                            (_now, _sr[0], name))
-                    if c3.rowcount:
-                        log.info(f"Agent engine rebind: marked {c3.rowcount} detach hints rebound (scene={_dev_scene}, node={name})")
+                        if _rt_dl is not None:
+                            _rt_dl_ok = _rt_dl
+
+                            def _apply_dl() -> None:
+                                _dl_n["n"] = _rt_dl_ok.mark_detach_rebound(_sr[0], name, _now)
+
+                            _dl_done = _xw_dl.submit_if_lib(
+                                _rt_dl_ok, "runtime", "detach_log_rebound",
+                                f"detach-rebound:{_sr[0]}:{name}", {"scene_row_id": _sr[0],
+                                                                    "node_tag": name, "rebound_at": _now},
+                                _apply_dl, log)
+                        if not _dl_done:
+                            c3.execute(
+                                "UPDATE scene_engine_detach_log SET rebound_at=? "
+                                "WHERE scene_row_id=? AND node_tag=? AND (rebound_at='' OR rebound_at IS NULL)",
+                                (_now, _sr[0], name))
+                            _dl_n["n"] = c3.rowcount
+                    if _dl_n.get("n"):
+                        log.info(f"Agent engine rebind: marked {_dl_n['n']} detach hints rebound (scene={_dev_scene}, node={name})")
         except Exception as _re:
             log.warning(f"Agent engine rebind: mark rebound failed: {_re}")
         log.info(f"Agent engine configured: {repo_key}:{name} -> {rids}")
@@ -660,8 +791,13 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                                 (body.skill, scope, *_owners),
                             ).fetchone()
                         else:
-                            row = _c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1",
-                                             (body.skill, scope)).fetchone()
+                            from src.kernel.domain_read import runtime_lib as _ru_lib_d40f5e_f
+                            _ru_lib_d40f5e = _ru_lib_d40f5e_f(foreign_only=True)
+                            if _ru_lib_d40f5e is not None:
+                                _c = _ru_lib_d40f5e.read_one("skill_d40f5e", (body.skill, scope)).fetchone()
+                            else:
+                                row = _c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1",
+                                                 (body.skill, scope)).fetchone()
                         return row[0] if row else 0
 
                 if getattr(body, "skill_scope", "") == "repo":

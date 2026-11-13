@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the Grape cross-domain write compensation drain every 5 minutes
+
+[Timer]
+# 与 runtime 排水单元错开 2 分钟（:00/05/10… vs :02/07/12…）。
+# 原因：两个排水进程启动时都会跑 session_manager 的 unified_user_mapping 回填，
+# runtime 侧是经视图写同一张 mgmt 表 → 同时执行会 1213 死锁（实测 3 次中 2 次）。
+OnBootSec=3min
+OnCalendar=*:0/5:00
+AccuracySec=30s
+Unit=grape-xwrite-drain.service
+
+[Install]
+WantedBy=timers.target

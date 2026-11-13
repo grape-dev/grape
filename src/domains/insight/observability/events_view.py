@@ -299,9 +299,9 @@ def _change_events(user: Dict[str, Any], state: str, repo: str, limit: int,
     from src.kernel.session_manager import db, db_lock
     if not all_repos and not repo_keys:
         return []
-    sql = ("SELECT seq, repo_key, event_type, issue_id, title, actor, duration, started_at,"
-           " completed_at, created_at, entity_type FROM events"
-           " WHERE event_type='pull_request_merged'")
+    _COLS = ("seq, repo_key, event_type, issue_id, title, actor, duration, started_at,"
+             " completed_at, created_at, entity_type")
+    sql = "event_type='pull_request_merged'"
     params: List[Any] = []
     if not all_repos:
         ph = ",".join("?" * len(repo_keys))
@@ -310,14 +310,18 @@ def _change_events(user: Dict[str, Any], state: str, repo: str, limit: int,
     if q:
         sql += " AND (title LIKE ? OR actor LIKE ? OR issue_id LIKE ?)"
         params.extend([_like(q)] * 3)
-    sql += " ORDER BY seq DESC LIMIT ?"
-    params.append(int(limit))
     rows: List[tuple] = []
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(sql, tuple(params))
-            rows = list(c.fetchall())
+        from src.kernel.domain_read import runtime_lib as _runtime_lib_eview
+        _rt_eview = _runtime_lib_eview()
+        if _rt_eview is not None:
+            rows = _rt_eview.query_events(_COLS, sql, tuple(params), "seq DESC", int(limit))
+        else:
+            with db_lock:
+                c = db.cursor()
+                c.execute(f"SELECT {_COLS} FROM events WHERE {sql} ORDER BY seq DESC LIMIT ?",
+                          tuple(params) + (int(limit),))
+                rows = list(c.fetchall())
     except Exception as e:
         log.warning(f"obs events: change source failed: {e}")
         return []

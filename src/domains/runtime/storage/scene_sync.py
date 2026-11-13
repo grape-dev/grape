@@ -308,49 +308,126 @@ async def _download_repo_zip(client: httpx.AsyncClient, token: str) -> str:
     return repo_root
 
 
-def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = ""):
-    """重建 scene_skill_ref：DELETE + INSERT，用 is_active=1 查 skill_id（优先 official，其次 repo）。
+def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
+                             repo_key: str = ""):
+    """重建 scene_skill_ref（DELETE + INSERT）。
 
-    P46.2：存在性判定与 _check_skills_exist 统一为 _query_active_skill_names 口径。
+    解析顺序（2026-11-13 修，三档同名不再错配）：
+      1. 节点带 skill_id 且 is_active=1 → **直接用它**（Issue #979 权威语义：
+         三档同名时锁定用户实际选中的那一条）；
+      2. 否则按名字回落：repo_key 给定先查本仓 repo 档（owner_id=repo_key），再 official，
+         再任意 repo，最后 user（user 场景/市场模板才可能命中）。
+
+    与原实现的两处差异：
+      · 不再无条件按名字重解析——那会把用户选的 repo/user 档覆盖成 official 档；
+      · repo 档查询带 owner_id=repo_key 过滤——避免跨仓同名技能被本仓场景认领。
     """
     from src.kernel.session_manager import db, db_lock
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_ssr
+    _mg_ssr = _mgmt_lib_ssr(foreign_only=True)
+    refs: list = []
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
+        # lib 模式：先解析完再一次性重建（避免先 DELETE 再远端失败留下空引用）
+        if _mg_ssr is None:
+            c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
         for n in nodes:
-            skill_name = n.get("skill", "")
-            if skill_name:
-                # 优先查 official，其次 repo（仓库场景可能引用 repo scope 技能）
-                c.execute(
-                    "SELECT id FROM skill WHERE skill_name=? AND is_active=1 AND scope='official' LIMIT 1",
-                    (skill_name,),
-                )
-                sk_row = c.fetchone()
-                if not sk_row:
-                    c.execute(
-                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 AND scope='repo' LIMIT 1",
-                        (skill_name,),
-                    )
-                    sk_row = c.fetchone()
-                skill_id = sk_row[0] if sk_row else 0
-                if skill_id == 0:
-                    logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active skills, skill_id=0")
+            skill_name = (n.get("skill", "") or "").strip()
+            try:
+                skill_id = int(n.get("skill_id") or 0)
+            except (TypeError, ValueError):
+                skill_id = 0
+            if not skill_name and not skill_id:
+                continue
+
+            resolved = 0
+            if skill_id:
+                row = c.execute(
+                    "SELECT id FROM skill WHERE id=? AND is_active=1", (skill_id,)).fetchone()
+                if row:
+                    resolved = skill_id
+                else:
+                    logger.warning(
+                        f"Scene sync: {scene_name} node skill_id={skill_id} inactive/missing, "
+                        f"fallback to name '{skill_name}'")
+            if not resolved and skill_name:
+                if repo_key:
+                    row = c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 "
+                        "AND scope='repo' AND owner_id=? LIMIT 1",
+                        (skill_name, repo_key)).fetchone()
+                    resolved = row[0] if row else 0
+                if not resolved:
+                    row = c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 "
+                        "AND scope='official' LIMIT 1", (skill_name,)).fetchone()
+                    resolved = row[0] if row else 0
+                if not resolved:
+                    row = c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 "
+                        "AND scope='repo' LIMIT 1", (skill_name,)).fetchone()
+                    resolved = row[0] if row else 0
+                if not resolved:
+                    row = c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 "
+                        "AND scope='user' LIMIT 1", (skill_name,)).fetchone()
+                    resolved = row[0] if row else 0
+            if resolved == 0:
+                logger.warning(f"Scene sync: {scene_name} skill '{skill_name}' not found in active skills, skill_id=0")
+            if _mg_ssr is not None:
+                refs.append({"skill_id": int(resolved), "skill_name": skill_name})
+            else:
                 c.execute(
                     "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
-                    (market_id, skill_id, skill_name),
+                    (market_id, resolved, skill_name),
                 )
-        db.commit()
+        if _mg_ssr is None:
+            db.commit()
+    if _mg_ssr is not None:
+        _write_scene_skill_ref_via_lib(_mg_ssr, market_id, refs, scene_name)
 
 
-def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list):
-    """通过场景名查 market_id 后重建 scene_skill_ref。"""
+def _write_scene_skill_ref_via_lib(_mg, market_id: int, refs: list, scene_name: str = "") -> None:
+    """lib 模式重建 scene_skill_ref：一条幂等意图，payload 带完整 refs（可重放）。"""
+    from src.kernel import cross_write as _xw
+    _ordered = sorted(refs, key=lambda r: (int(r.get("skill_id") or 0), str(r.get("skill_name") or "")))
+    _sig = hashlib.sha1(json.dumps(_ordered, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+    _out: dict = {}
+    try:
+        _res = _xw.submit(
+            "mgmt", "scene_skill_ref_replace",
+            _xw.unique_key(f"scene-skill-ref:{int(market_id)}:{_sig}"),
+            {"scene_id": int(market_id), "refs": refs},
+            lambda: _out.update(_mg.replace_scene_skill_ref(int(market_id), refs)))
+        if _res.get("status") == "failed":
+            logger.warning(f"Scene sync: {scene_name} scene_skill_ref queued for retry: "
+                           f"{_res.get('error')}")
+        else:
+            logger.info(f"Scene sync: {scene_name} scene_skill_ref rebuilt via lib "
+                        f"(deleted={_out.get('deleted')}, inserted={_out.get('inserted')})")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Scene sync: {scene_name} scene_skill_ref lib path failed: {e}")
+
+
+def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list, repo_key: str = ""):
+    """通过场景名查 market_id（official 模板）后重建 scene_skill_ref。"""
     from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1", (scene_name,))
-        row = c.fetchone()
-    if row:
-        _rebuild_scene_skill_ref(row[0], nodes, scene_name)
+    from src.kernel.domain_read import mgmt_lib
+    _mg_scene = mgmt_lib()
+    _scene_id = _mg_scene.get_official_scene_id(scene_name) if _mg_scene is not None else None
+    if _mg_scene is None:
+        with db_lock:
+            c = db.cursor()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_0d2dd0_f
+            _mg_lib_0d2dd0 = _mg_lib_0d2dd0_f(foreign_only=True)
+            if _mg_lib_0d2dd0 is not None:
+                row = _mg_lib_0d2dd0.read_one("scene_market_0d2dd0", (scene_name,))
+            else:
+                c.execute("SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1", (scene_name,))
+                row = c.fetchone()
+        _scene_id = row[0] if row else None
+    if _scene_id:
+        _rebuild_scene_skill_ref(_scene_id, nodes, scene_name, repo_key)
 
 
 def _init_featured_scenes_if_empty():
@@ -359,10 +436,30 @@ def _init_featured_scenes_if_empty():
     独立于远端同步——即使没有 token 无法拉远端场景包，本地已有 official 场景也需要精选标记。
     """
     default_featured = ("default", "cloud-native", "iac")
+    from src.kernel.domain_read import mgmt_lib as _mg_lib_feat
+    _mg_feat = _mg_lib_feat()
+    if _mg_feat is not None:
+        _featured = _mg_feat.count_official_scenes(featured_only=True)
+        if _featured == 0:
+            from src.kernel import cross_write as _xw_feat
+            _xw_feat.submit("mgmt", "scene_featured_init", "scene-featured-init:v1",
+                            {"names": list(default_featured)},
+                            lambda: _mg_feat.mark_default_featured(list(default_featured)))
+            log.info(f"Scene sync: initialized featured scenes (lib): {', '.join(default_featured)}")
+        else:
+            log.info(f"Scene sync: {_featured} featured scenes already exist, skip init")
+        return
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1")
-        featured_count = c.fetchone()[0]
+        # P4：scene_market 在 mgmt 域，删视图后走 mgmt lib 读
+        from src.kernel.domain_read import mgmt_lib as _mg_lib_fc
+        _fc_lib = _mg_lib_fc(foreign_only=True)
+        if _fc_lib is not None:
+            _fc = _fc_lib.read_one("scene_market_featured_count", ())
+            featured_count = int(_fc[0]) if _fc else 0
+        else:
+            c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1")
+            featured_count = c.fetchone()[0]
         if featured_count == 0:
             placeholders = ",".join("?" * len(default_featured))
             c.execute(
@@ -412,11 +509,21 @@ def _detect_stale_official_scenes(repo_scene_names: set, traversal_complete: boo
         return 0
     try:
         from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            stale = [name for (_id, name) in
-                     c.execute("SELECT id, name FROM scene_market WHERE source='official'").fetchall()
-                     if name not in repo_scene_names]
+        from src.kernel.domain_read import mgmt_lib as _mgmt_lib_stale
+        _mg_stale = _mgmt_lib_stale()
+        if _mg_stale is not None:
+            _rows_stale = _mg_stale.fetch_rows("scene_market", ["id", "name"], "source='official'")
+        else:
+            with db_lock:
+                c = db.cursor()
+                from src.kernel.domain_read import mgmt_lib as _mg_lib_c969bb_f
+                _mg_lib_c969bb = _mg_lib_c969bb_f(foreign_only=True)
+                if _mg_lib_c969bb is not None:
+                    c = _mg_lib_c969bb.read_all("scene_market_c969bb", ).fetchall()
+                else:
+                    _rows_stale = c.execute(
+                        "SELECT id, name FROM scene_market WHERE source='official'").fetchall()
+        stale = [name for (_id, name) in _rows_stale if name not in repo_scene_names]
     except Exception:
         logger.exception("Scene sync: stale detection query failed")
         return 0
@@ -557,89 +664,16 @@ async def sync_official_scenes(repo_root: str | None = None):
                 nodes_json = json.dumps(nodes, ensure_ascii=False)
                 preset_custom_fields = json.dumps(scene_data.get("custom_fields", []), ensure_ascii=False)
 
-                with db_lock:
-                    c = db.cursor()
-                    c.execute(
-                        "SELECT id, version, content_hash, is_active FROM scene_market "
-                        "WHERE name=? AND source='official' LIMIT 1",
-                        (name,),
-                    )
-                    row = c.fetchone()
-
-                    if row:
-                        scene_id, old_version, old_hash, preserved_active = row
-                        if old_hash == content_hash:
-                            stats["skipped"] += 1
-                            continue
-
-                        # hash 变了
-                        if _parse_version(version) <= _parse_version(old_version or "0.0.0"):
-                            logger.warning(
-                                f"Scene sync: {name} content changed but version not updated "
-                                f"(old={old_version}, new={version}), updating anyway"
-                            )
-
-                        # 先 UPDATE 不带 icon（icon 等 OBS 上传后单独 UPDATE）
-                        # 保留 admin 设置的 is_active（SELECT 读回写），is_featured 不在 SET 中所以不被覆盖
-                        c.execute(
-                            "UPDATE scene_market SET "
-                            "display_name=?, version=?, description=?, market_description=?, "
-                            "category_id=?, recommended_template=?, nodes_json=?, "
-                            "onboarding=?, tags=?, author=?, content_hash=?, preset_custom_fields=?, "
-                            "is_active=?, updated_at=datetime('now') "
-                            "WHERE id=?",
-                            (display_name, version, description, market_desc,
-                             category_id, recommended_template, nodes_json,
-                             onboarding, tags_str, author, content_hash,
-                             preset_custom_fields, preserved_active if preserved_active is not None else 1, scene_id),
-                        )
-                        db.commit()
-                        market_id = scene_id
-                        stats["updated"] += 1
-                        log.info(f"Scene sync: updated '{name}' v{version}")
-                    else:
-                        c.execute(
-                            "INSERT INTO scene_market "
-                            "(name, display_name, version, description, market_description, icon, obs_icon_key, "
-                            "category_id, is_featured, like_count, source, source_user_id, "
-                            "recommended_template, nodes_json, onboarding, tags, author, "
-                            "content_hash, preset_custom_fields, is_active, created_at, updated_at) "
-                            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
-                            (name, display_name, version, description, market_desc,
-                             "", "", category_id, recommended_template, nodes_json,
-                             onboarding, tags_str, author, content_hash,
-                             preset_custom_fields),
-                        )
-                        db.commit()
-                        market_id = c.lastrowid
-                        stats["added"] += 1
-                        log.info(f"Scene sync: added '{name}' v{version}")
-
-                    # icon 上传：用 market_id 作为 OBS key（全局唯一）
-                    if icon_file_data:
-                        try:
-                            from src.domains.runtime.storage import get_storage
-                            storage = get_storage()
-                            icon_key = f"scene-icons/{market_id}{icon_file_ext}"
-                            if storage:
-                                storage.save_bytes(icon_key, icon_file_data)
-                                icon_val = storage.temporary_url(icon_key) if hasattr(storage, 'temporary_url') else ""
-                                obs_icon_key = icon_key
-                            else:
-                                static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "api", "static", "img", "scenes")
-                                os.makedirs(static_dir, exist_ok=True)
-                                dest = os.path.join(static_dir, f"{market_id}{icon_file_ext}")
-                                with open(dest, "wb") as f:
-                                    f.write(icon_file_data)
-                                icon_val = f"/static/img/scenes/{market_id}{icon_file_ext}"
-                                obs_icon_key = ""
-                            # UPDATE icon 字段
-                            with db_lock:
-                                cur = db.cursor()
-                                cur.execute("UPDATE scene_market SET icon=?, obs_icon_key=? WHERE id=?", (icon_val, obs_icon_key, market_id))
-                                db.commit()
-                        except Exception as e:
-                            logger.warning(f"Scene sync: {name} icon storage failed: {e}")
+                action, market_id = _persist_scene_row(name, {
+                    "display_name": display_name, "version": version, "description": description,
+                    "market_desc": market_desc, "category_id": category_id,
+                    "recommended_template": recommended_template, "nodes_json": nodes_json,
+                    "onboarding": onboarding, "tags_str": tags_str, "author": author,
+                    "content_hash": content_hash, "preset_custom_fields": preset_custom_fields,
+                }, stats)
+                if action == "skipped":
+                    continue
+                _apply_scene_icon(name, market_id, icon_file_data, icon_file_ext)
 
                 # g. 重建 scene_skill_ref（含 skill_id）
                 _rebuild_scene_skill_ref_by_name(name, nodes)
@@ -668,3 +702,133 @@ async def sync_official_scenes(repo_root: str | None = None):
             # （与 skill_sync 原有泄漏同款）。删除父目录。
             shutil.rmtree(os.path.dirname(tmp_dir), ignore_errors=True)
 
+
+def _persist_scene_row(name: str, fields: dict, stats: dict) -> tuple[int, str]:
+    """写入/更新场景内容，返回 (scene_id, action)。
+
+    action ∈ {"skipped", "updated", "added"}；skipped 时 scene_id 为已存在的行 id。
+    只更新内容列，`is_active` 保留库内既有值（admin 设置不被覆盖）。
+    """
+    content_hash = fields["content_hash"]
+
+    # lib 模式（三库三机）：跨域写走 mgmt lib + 幂等键；hash 未变时 upsert 内部直接 skipped
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_scene
+    _mg_scene = _mgmt_lib_scene(foreign_only=True)
+    if _mg_scene is not None:
+        from src.kernel import cross_write as _xw_scene
+        _out: dict = {}
+
+        def _apply_scene() -> None:
+            _out.update(_mg_scene.upsert_scene_content(name, fields))
+
+        # payload 必须带完整 fields：失败意图要能被 drain 按幂等内容重放
+        # （只带 name/hash 时补偿端无内容可写，等于登记了一条永远补不了的意图）
+        _res = _xw_scene.submit(
+            "mgmt", "scene_upsert", f"scene-upsert:{name}:{content_hash}",
+            {"name": name, "content_hash": content_hash, "fields": fields}, _apply_scene)
+        if _res.get("status") == "failed":
+            # 与原路径失败语义一致：抛出去由调用方计 failed 并跳过 icon/ref 重建
+            raise RuntimeError(f"scene upsert via lib failed: {_res.get('error')}")
+        if _res.get("status") == "duplicate":
+            stats["skipped"] += 1
+            return int(_out.get("id") or 0) or int(_mg_scene.get_official_scene_id(name) or 0), "skipped"
+        _action = {"inserted": "added", "updated": "updated",
+                   "skipped": "skipped"}.get(str(_out.get("action") or ""), "updated")
+        stats[_action] += 1
+        _sid = int(_out.get("id") or 0) or int(_mg_scene.get_official_scene_id(name) or 0)
+        log.info(f"Scene sync: {_action} '{name}' v{fields['version']} (lib)")
+        return _sid, _action
+
+    with db_lock:
+        c = db.cursor()
+        from src.kernel.domain_read import mgmt_lib as _mg_lib_ap
+        _ap_lib = _mg_lib_ap(foreign_only=True)
+        if _ap_lib is not None:
+            row = _ap_lib.read_one("scene_market_official_by_name", (name,))
+        else:
+            c.execute(
+                "SELECT id, version, content_hash, is_active FROM scene_market "
+                "WHERE name=? AND source='official' LIMIT 1",
+                (name,),
+            )
+            row = c.fetchone()
+
+        if row:
+            scene_id, old_version, old_hash, preserved_active = row
+            if old_hash == content_hash:
+                stats["skipped"] += 1
+                return scene_id, "skipped"
+
+            if _parse_version(fields["version"]) <= _parse_version(old_version or "0.0.0"):
+                logger.warning(
+                    f"Scene sync: {name} content changed but version not updated "
+                    f"(old={old_version}, new={fields['version']}), updating anyway"
+                )
+
+            c.execute(
+                "UPDATE scene_market SET "
+                "display_name=?, version=?, description=?, market_description=?, "
+                "category_id=?, recommended_template=?, nodes_json=?, "
+                "onboarding=?, tags=?, author=?, content_hash=?, preset_custom_fields=?, "
+                "is_active=?, updated_at=datetime('now') "
+                "WHERE id=?",
+                (fields["display_name"], fields["version"], fields["description"],
+                 fields["market_desc"], fields["category_id"],
+                 fields["recommended_template"], fields["nodes_json"],
+                 fields["onboarding"], fields["tags_str"], fields["author"],
+                 content_hash, fields["preset_custom_fields"],
+                 preserved_active if preserved_active is not None else 1, scene_id),
+            )
+            db.commit()
+            stats["updated"] += 1
+            log.info(f"Scene sync: updated '{name}' v{fields['version']}")
+            return scene_id, "updated"
+
+        c.execute(
+            "INSERT INTO scene_market "
+            "(name, display_name, version, description, market_description, icon, obs_icon_key, "
+            "category_id, is_featured, like_count, source, source_user_id, "
+            "recommended_template, nodes_json, onboarding, tags, author, "
+            "content_hash, preset_custom_fields, is_active, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
+            (name, fields["display_name"], fields["version"], fields["description"],
+             fields["market_desc"], "", "", fields["category_id"],
+             fields["recommended_template"], fields["nodes_json"],
+             fields["onboarding"], fields["tags_str"], fields["author"],
+             content_hash, fields["preset_custom_fields"]),
+        )
+        db.commit()
+        new_id = c.lastrowid
+        stats["added"] += 1
+        log.info(f"Scene sync: added '{name}' v{fields['version']}")
+        return new_id, "added"
+
+
+def _apply_scene_icon(name: str, market_id: int, icon_file_data, icon_file_ext: str) -> None:
+    """上传图标并回写 icon 列（OBS key 以 market_id 生成，故必须在落库之后调用）。"""
+    if not icon_file_data:
+        return
+    try:
+        from src.domains.runtime.storage import get_storage
+        storage = get_storage()
+        icon_key = f"scene-icons/{market_id}{icon_file_ext}"
+        if storage:
+            storage.save_bytes(icon_key, icon_file_data)
+            icon_val = storage.temporary_url(icon_key) if hasattr(storage, 'temporary_url') else ""
+            obs_icon_key = icon_key
+        else:
+            static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                      "api", "frontend", "shell", "img", "scenes")
+            os.makedirs(static_dir, exist_ok=True)
+            dest = os.path.join(static_dir, f"{market_id}{icon_file_ext}")
+            with open(dest, "wb") as f:
+                f.write(icon_file_data)
+            icon_val = f"/static/img/scenes/{market_id}{icon_file_ext}"
+            obs_icon_key = ""
+        with db_lock:
+            cur = db.cursor()
+            cur.execute("UPDATE scene_market SET icon=?, obs_icon_key=? WHERE id=?",
+                        (icon_val, obs_icon_key, market_id))
+            db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Scene sync: {name} icon storage failed: {e}")

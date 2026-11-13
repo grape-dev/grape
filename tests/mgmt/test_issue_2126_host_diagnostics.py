@@ -215,6 +215,9 @@ def _patch_repair(monkeypatch, state, calls, setup_exc=None, bot_token="bot-toke
         return True
 
     monkeypatch.setattr(deps, "get_user_token_with_refresh", lambda *_a, **_k: "tok")
+    # B 批接缝迁移：token 解析已统一到 repos.get_user_token_for（模块级绑定）
+    import src.domains.mgmt.routes.repos as _repos_mod
+    monkeypatch.setattr(_repos_mod, "get_user_token_for", lambda *_a, **_k: "tok")
     monkeypatch.setattr(deps, "check_repo_access", lambda *_a, **_k: None)
     monkeypatch.setattr(udb, "get_webhook_url", lambda: "https://x.example/webhook/gitcode")
     monkeypatch.setattr(udb, "get_webhook_secret", lambda *_a, **_k: secret)
@@ -232,6 +235,9 @@ def _patch_repair(monkeypatch, state, calls, setup_exc=None, bot_token="bot-toke
         "webhook_url_suffix": "/webhook/gitcode",
         "db_token_field": "gitcode_webhook_token",
         "db_bot_token_field": "bot_gitcode_token",
+        # B 批契约新增：建 hook 鉴权参数按方言派生（gitee 系=webhook_password）
+        "setup_webhook_kwargs": lambda secret, wh_token, use_path_b: {
+            "webhook_password": (secret if use_path_b else wh_token)},
     })
 
 

@@ -1,0 +1,89 @@
+/*
+ * @apple-ui tokens — Apple Liquid Glass, light & dark as twin variants of one language.
+ * Extracted from legacy css/tokens.css + apple-theme.css; components must reference
+ * variables only — no handwritten magic values.
+ */
+
+:root,
+:root[data-theme='light'] {
+  /* palette */
+  --c-bg: #f5f5f7;
+  --c-bg-elevated: #ffffff;
+  --c-text: #1d1d1f;
+  --c-text-2: #6e6e73;
+  --c-text-3: #aeaeb2;
+  --c-accent: #0071e3;
+  --c-accent-soft: rgba(0, 113, 227, 0.12);
+  --c-danger: #ff3b30;
+  --c-danger-soft: rgba(255, 59, 48, 0.12);
+  --c-success: #34c759;
+  --c-warning: #ff9500;
+
+  /* liquid glass surface */
+  --glass-bg: rgba(255, 255, 255, 0.6);
+  --glass-bg-strong: rgba(255, 255, 255, 0.78);
+  --glass-blur: 10px;
+  --glass-border: rgba(255, 255, 255, 0.35);
+
+  /* morandi category colors (scene taxonomy — keep parity with legacy) */
+  --c-vod: #b07a8b;
+  --c-issue: #b8857a;
+  --c-coding: #7a92b0;
+  --c-qa: #9a85a8;
+  --c-sre: #b89b6a;
+
+  /* radii */
+  --r-card: 18px;
+  --r-pill: 999px;
+  --r-control: 12px;
+
+  /* spacing ladder */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+
+  /* type scale */
+  --f-caption: 12px;
+  --f-body: 14px;
+  --f-head-3: 16px;
+  --f-head-2: 20px;
+  --f-head-1: 28px;
+  --f-family:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Helvetica Neue', sans-serif;
+
+  /* elevation — Apple-subtle: very light, no border ring */
+  --shadow-1: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.08);
+
+  /* controls */
+  --btn-outline: rgba(0, 113, 227, 0.3);
+}
+
+:root[data-theme='dark'] {
+  --c-bg: #1e1e20;
+  --c-bg-elevated: #2c2c2e;
+  --c-bg-float: #3a3a3c;
+  --c-text: #ffffff;
+  --c-text-2: rgba(235, 235, 245, 0.62);
+  --c-text-3: rgba(235, 235, 245, 0.55);
+  --c-accent: #0a84ff;
+  --c-accent-soft: rgba(10, 132, 255, 0.18);
+  --c-danger: #ff453a;
+  --c-danger-soft: rgba(255, 69, 58, 0.18);
+  --c-success: #30d158;
+  --c-warning: #ff9f0a;
+
+  --glass-bg: rgba(44, 44, 46, 0.62);
+  --glass-bg-strong: rgba(58, 58, 60, 0.82);
+  --glass-blur: 10px;
+  --glass-border: rgba(255, 255, 255, 0.08);
+
+  --shadow-1: 0 1px 4px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.4);
+
+  --btn-outline: rgba(10, 132, 255, 0.4);
+}

@@ -351,9 +351,14 @@ def _scene_qa_skill(repo_key: str, scene_id: str, matches: list) -> str:
         import json as _json
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT nodes_json FROM devops_pipeline_scene WHERE repo_key=? AND scene_id=?",
-                      (repo_key, scene_id))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_8b6d22_f
+            _mg_lib_8b6d22 = _mg_lib_8b6d22_f(foreign_only=True)
+            if _mg_lib_8b6d22 is not None:
+                row = _mg_lib_8b6d22.read_one("devops_pipeline_scene_8b6d22", (repo_key, scene_id))
+            else:
+                c.execute("SELECT nodes_json FROM devops_pipeline_scene WHERE repo_key=? AND scene_id=?",
+                          (repo_key, scene_id))
+                row = c.fetchone()
         if row:
             nodes = _json.loads(row[0] or "[]")
             qa_node = next((n for n in nodes if n.get("tag") == "qa" and n.get("enabled", True)), None)
@@ -406,11 +411,16 @@ def _match_pr_subscription(repo_key: str, evt: dict, event_type: str, pr_branch:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT scene_id, nodes_json, advanced_options FROM devops_pipeline_scene "
-                "WHERE repo_key=? AND pr_subscription_enabled=1 AND is_active=1",
-                (repo_key,))
-            rows = c.fetchall()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_7a48a2_f
+            _mg_lib_7a48a2 = _mg_lib_7a48a2_f(foreign_only=True)
+            if _mg_lib_7a48a2 is not None:
+                rows = _mg_lib_7a48a2.read_all("devops_pipeline_scene_7a48a2", (repo_key,))
+            else:
+                c.execute(
+                    "SELECT scene_id, nodes_json, advanced_options FROM devops_pipeline_scene "
+                    "WHERE repo_key=? AND pr_subscription_enabled=1 AND is_active=1",
+                    (repo_key,))
+                rows = c.fetchall()
         matches = []
         for scene_id, nodes_json, adv_opts_json in rows:
             # 匹配 work_branch
@@ -859,11 +869,22 @@ def _resolve_bot_username(repo_key: str) -> str:
         from src.kernel.session_manager import db, db_lock
         from src.kernel.repo_key import to_repo_key
         _rk = to_repo_key(repo_key)
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
-            row = c.fetchone()
-            _bot_name = row[0] if row else ""
+        from src.kernel.domain_read import mgmt_lib as _mgmt_lib_bot
+        _bot_name = ""
+        _mg_bot = _mgmt_lib_bot()
+        if _mg_bot is not None:
+            _bot_name = _mg_bot.get_repo_field(_rk, "bot_username") or ""
+        if not _bot_name:
+            with db_lock:
+                c = db.cursor()
+                from src.kernel.domain_read import mgmt_lib as _mg_lib_3564e6_f
+                _mg_lib_3564e6 = _mg_lib_3564e6_f(foreign_only=True)
+                if _mg_lib_3564e6 is not None:
+                    row = _mg_lib_3564e6.read_one("managed_repos_3564e6", (_rk,))
+                else:
+                    c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
+                    row = c.fetchone()
+                _bot_name = row[0] if row else ""
         if _bot_name:
             return _bot_name
         # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
@@ -882,10 +903,13 @@ def _resolve_bot_username(repo_key: str) -> str:
         # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名
         from src.domains.mgmt.user.db import get_host_user_id
         _hid = get_host_user_id(_rk)
-        if _hid > 0:
+        # D105 后 host_user_id 是 UUID TEXT，返回 str —— `_hid > 0` 会对 str 抛
+        # TypeError 并被外层 except 吞掉（登录名解析恒空）。按文档口径字符串判定。
+        if str(_hid or "") not in ("", "0"):
             try:
-                from src.domains.mgmt.auth.grape_account_db import get_user_identities
-                for _ident in get_user_identities(_hid):
+                from src.domains.mgmt.auth.grape_account_db import list_platform_links
+                # A 批：host 平台登录名取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
+                for _ident in list_platform_links(_hid):
                     if _ident.get("provider") == _prov:
                         return _ident.get("external_login") or ""
             except Exception:
@@ -1447,11 +1471,16 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
         # 从 devops_pipeline_scene 查 scene_id 对应的 QA 节点 skill
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT scene_id, nodes_json FROM devops_pipeline_scene "
-                "WHERE repo_key=? AND scene_id=? AND is_active=1",
-                (repo_key, scene_id))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_b1eaa2_f
+            _mg_lib_b1eaa2 = _mg_lib_b1eaa2_f(foreign_only=True)
+            if _mg_lib_b1eaa2 is not None:
+                row = _mg_lib_b1eaa2.read_one("devops_pipeline_scene_b1eaa2", (repo_key, scene_id))
+            else:
+                c.execute(
+                    "SELECT scene_id, nodes_json FROM devops_pipeline_scene "
+                    "WHERE repo_key=? AND scene_id=? AND is_active=1",
+                    (repo_key, scene_id))
+                row = c.fetchone()
         if not row:
             log.warning(f"Pipeline: PR subscription redispatch: scene={scene_id} not found")
             return False
@@ -2892,11 +2921,22 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 from src.kernel.session_manager import db as _db, db_lock as _dbl
                 from src.domains.mgmt.user.org_db import is_org_personal
                 log.info(f"Pipeline: acquiring db_lock for engine query, seq={seq}")
+                from src.kernel.domain_read import mgmt_lib as _mgmt_lib_org
+                _mg_org = _mgmt_lib_org()
                 with _dbl:
                     _c = _db.cursor()
-                    # 推断仓库关联的 org_id
-                    _c.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
-                    _mr = _c.fetchone()
+                    # 推断仓库关联的 org_id（lib 模式由 mgmt 域直接给；否则走原查询）
+                    if _mg_org is not None:
+                        _mr_org = _mg_org.get_repo_org_id(repo_key)
+                        _mr = (_mr_org,) if _mr_org else None
+                    else:
+                        from src.kernel.domain_read import mgmt_lib as _mg_lib_e9a379_f
+                        _mg_lib_e9a379 = _mg_lib_e9a379_f(foreign_only=True)
+                        if _mg_lib_e9a379 is not None:
+                            _mr = _mg_lib_e9a379.read_one("managed_repos_e9a379", (repo_key,))
+                        else:
+                            _c.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
+                            _mr = _c.fetchone()
                     _mr_org_id = (_mr[0] if _mr and _mr[0] else 0)
                     _is_personal = is_org_personal(_mr_org_id) if _mr_org_id else True
                     if _mr_org_id and not _is_personal:
@@ -3817,11 +3857,16 @@ def _read_scene_linked_repos(repo_key: str, issue_id: str = "") -> list:
         import json as _json
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT linked_repos, advanced_options FROM devops_pipeline_scene "
-                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
-                (scene_id, repo_key))
-            row = c.fetchone()
+            from src.kernel.domain_read import mgmt_lib as _mg_lib_ab0110_f
+            _mg_lib_ab0110 = _mg_lib_ab0110_f(foreign_only=True)
+            if _mg_lib_ab0110 is not None:
+                row = _mg_lib_ab0110.read_one("devops_pipeline_scene_ab0110", (scene_id, repo_key))
+            else:
+                c.execute(
+                    "SELECT linked_repos, advanced_options FROM devops_pipeline_scene "
+                    "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                    (scene_id, repo_key))
+                row = c.fetchone()
         if not row:
             return []
         # 优先读独立列
@@ -4334,6 +4379,33 @@ def register_sre_deploy_url(repo_key: str, result_text: str) -> str:
     url = _extract_deploy_url(result_text)
     if not url:
         return ""
+    # P3-5a：managed_repos 是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_sru
+    _mg_sru = _mgmt_lib_sru(foreign_only=True)
+    if _mg_sru is not None:
+        try:
+            import hashlib as _hl_sru
+            from src.kernel import cross_write as _xw_sru
+            _out_sru: dict = {}
+
+            def _apply_sru() -> None:
+                _out_sru["changed"] = _mg_sru.set_repo_fields(repo_key, {"deploy_url": url})
+
+            _key_sru = _xw_sru.unique_key(
+                f"repo-deploy-url:{repo_key}:"
+                f"{_hl_sru.sha1(url.encode('utf-8')).hexdigest()[:12]}")
+            _res_sru = _xw_sru.submit(
+                "mgmt", "repo_field_update", _key_sru,
+                {"repo_key": repo_key, "fields": {"deploy_url": url}}, _apply_sru)
+            if _res_sru.get("status") == "failed":
+                log.warning(f"SRE deploy_url register queued for retry: {_res_sru.get('error')}")
+                return ""
+            if int(_out_sru.get("changed") or 0) > 0:
+                log.info(f"SRE deploy_url auto-registered: {url} for {repo_key}")
+                return url
+            return ""
+        except Exception as _e:
+            log.warning(f"SRE deploy_url register via lib failed, fallback to local SQL: {_e}")
     # 登记（repo 不存在时 rowcount=0，不写库）
     try:
         with db_lock:
@@ -4370,6 +4442,35 @@ def register_scene_deploy_url(repo_key: str, issue_id: str, result_text: str) ->
     url = _extract_deploy_url(result_text)
     if not url:
         return ""
+    # P3-4b：场景表是 mgmt 基表，runtime 进程写入走 mgmt lib + 幂等意图；
+    # lib 不可用（开关未开/DSN 未配）时回落原本地 SQL，行为与原路径一致。
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_sdu
+    _mg_sdu = _mgmt_lib_sdu(foreign_only=True)
+    if _mg_sdu is not None:
+        try:
+            import hashlib as _hl_sdu
+            from src.kernel import cross_write as _xw_sdu
+            _out_sdu: dict = {}
+
+            def _apply_sdu() -> None:
+                _out_sdu["changed"] = _mg_sdu.set_scene_deploy_url(
+                    url, scene_id=scene_id, repo_key=repo_key, require_active=True)
+
+            _key_sdu = _xw_sdu.unique_key(
+                f"scene-deploy-url:{scene_id}:{repo_key}:"
+                f"{_hl_sdu.sha1(url.encode('utf-8')).hexdigest()[:12]}")
+            _res_sdu = _xw_sdu.submit(
+                "mgmt", "scene_deploy_url", _key_sdu,
+                {"url": url, "scene_id": scene_id, "repo_key": repo_key}, _apply_sdu)
+            if _res_sdu.get("status") == "failed":
+                log.warning(f"scene deploy_url register queued for retry: {_res_sdu.get('error')}")
+                return ""
+            if int(_out_sdu.get("changed") or 0) > 0:
+                log.info(f"scene deploy_url auto-registered: {url} for scene {scene_id} ({repo_key})")
+                return url
+            return ""
+        except Exception as _e:
+            log.warning(f"scene deploy_url register via lib failed, fallback to local SQL: {_e}")
     try:
         with db_lock:
             c = db.cursor()
@@ -5308,6 +5409,10 @@ def _repo_dev_scene(repo_key: str):
         return None
     try:
         from src.kernel.session_manager import db, db_lock
+        from src.kernel.domain_read import mgmt_lib
+        _mg = mgmt_lib()
+        if _mg is not None:
+            return _mg.get_repo_field(repo_key, "dev_scene") or ""
         with db_lock:
             row = db.cursor().execute(
                 "SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,)).fetchone()

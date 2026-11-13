@@ -85,7 +85,7 @@ def _ensure_test_db():
 
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_help_page_generated():
-    """测试前先把 help/ markdown 渲染为 src/api/static/help.html。
+    """测试前先把 help/ markdown 渲染为 src/api/frontend/shell/help.html。
 
     help.html 已是生成物（.gitignore）；全新检查/克隆环境未启动服务时文件可能缺失，
     测试前调用生成器保证 test_help_directory.py 等对 help.html 的断言有确定输入。

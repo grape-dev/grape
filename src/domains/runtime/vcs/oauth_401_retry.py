@@ -104,6 +104,24 @@ def oauth_401_retry(user_id: str, provider: str, current_token: str, api_call,
 
 def _mark_credential_expired(user_id: str, provider: str) -> None:
     """凭据失效流程：external_identities.status → 4（过期标记，R10 语义）。"""
+    # P3-5c：external_identities 是 mgmt 基表；runtime 进程写入走 mgmt lib + 幂等意图
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_xp
+    _mg_xp = _mgmt_lib_xp(foreign_only=True)
+    if _mg_xp is not None:
+        try:
+            from src.kernel import cross_write as _xw_xp
+            _res_xp = _xw_xp.submit(
+                "mgmt", "external_identity_expire",
+                _xw_xp.unique_key(f"ext-ident-expired:{user_id}:{provider}"),
+                {"grape_user_id": str(user_id), "provider": provider},
+                lambda: _mg_xp.mark_external_identity_expired(str(user_id), provider))
+            if _res_xp.get("status") == "failed":
+                log.warning(f"mark credential expired queued for retry: {_res_xp.get('error')}")
+            else:
+                log.info(f"credential marked expired (status=4): user={user_id} provider={provider}")
+            return
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"mark credential expired lib path failed, fallback to local SQL: {e}")
     try:
         from src.kernel.session_manager import db, db_lock
         with db_lock:

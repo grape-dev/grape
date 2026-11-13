@@ -21,6 +21,21 @@ from src.api.deps import (
 from src.kernel.config import log
 from src.kernel.session_manager import db, db_lock
 
+
+def _task_via_lib():
+    """GRAPE_TASKS_VIA_LIB=1 且 runtime lib 可用时走 lib（三库三机模式）。"""
+    import os as _os
+
+    if _os.environ.get("GRAPE_TASKS_VIA_LIB") != "1":
+        return None
+    try:
+        from src.domains.runtime import public as _rt
+
+        return _rt if _rt.available() else None
+    except Exception as _exc:  # noqa: BLE001
+        log.warning(f"task read via lib unavailable: {_exc}")
+        return None
+
 # 每个 Agent 任务（tk_ / session_key）最大反馈条数（feedback-openapi-expose-design.md §四.9）
 FEEDBACK_MAX_PER_AGENT_TASK = 2
 
@@ -60,11 +75,16 @@ def _resolve_skill(skill_name: str):
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT id, skill_name, scope FROM skill WHERE skill_name=? AND is_active=1 "
-                "ORDER BY CASE scope WHEN 'official' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END LIMIT 1",
-                (skill_name,))
-            r = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_820107_f
+            _ru_lib_820107 = _ru_lib_820107_f(foreign_only=True)
+            if _ru_lib_820107 is not None:
+                r = _ru_lib_820107.read_one("skill_820107", (skill_name,))
+            else:
+                c.execute(
+                    "SELECT id, skill_name, scope FROM skill WHERE skill_name=? AND is_active=1 "
+                    "ORDER BY CASE scope WHEN 'official' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END LIMIT 1",
+                    (skill_name,))
+                r = c.fetchone()
         if r:
             return r[0], r[1] or '', r[2] or ''
         return None, skill_name, ''
@@ -86,11 +106,16 @@ def _collect_feedback_context(event_seq: int, user: dict):
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result "
-                "FROM events WHERE seq=?",
-                (event_seq,))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_a24eb5_f
+            _ru_lib_a24eb5 = _ru_lib_a24eb5_f(foreign_only=True)
+            if _ru_lib_a24eb5 is not None:
+                row = _ru_lib_a24eb5.read_one("events_a24eb5", (event_seq,))
+            else:
+                c.execute(
+                    "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result "
+                    "FROM events WHERE seq=?",
+                    (event_seq,))
+                row = c.fetchone()
         if not row:
             return None
         repo_key = row[1] or ''
@@ -110,9 +135,14 @@ def _collect_feedback_context(event_seq: int, user: dict):
         try:
             with db_lock:
                 c2 = db.cursor()
-                c2.execute("SELECT id FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
-                           (repo_key, issue_number))
-                ir = c2.fetchone()
+                from src.kernel.domain_read import runtime_lib as _rt_lib_is
+                _is_lib = _rt_lib_is(foreign_only=True)
+                if _is_lib is not None:
+                    ir = _is_lib.read_one("issue_id_by_repo_number", (repo_key, issue_number))
+                else:
+                    c2.execute("SELECT id FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
+                               (repo_key, issue_number))
+                    ir = c2.fetchone()
                 if ir:
                     issue_id_int = ir[0]
         except Exception:
@@ -125,14 +155,18 @@ def _collect_feedback_context(event_seq: int, user: dict):
         skill_name = ''
         skill_scope = ''
         try:
-            with db_lock:
-                c3 = db.cursor()
-                c3.execute(
-                    "SELECT id, status, runtime_id, exit_code, started_at, completed_at, "
-                    "result_text, skill FROM agent_tasks WHERE event_seq=? "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    (event_seq,))
-                tr = c3.fetchone()
+            _rt = _task_via_lib()
+            if _rt is not None:
+                tr = _rt.latest_task_for_event(event_seq)
+            else:
+                with db_lock:
+                    c3 = db.cursor()
+                    c3.execute(
+                        "SELECT id, status, runtime_id, exit_code, started_at, completed_at, "
+                        "result_text, skill FROM agent_tasks WHERE event_seq=? "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (event_seq,))
+                    tr = c3.fetchone()
             if tr:
                 task = {
                     "task_id": tr[0], "task_status": tr[1] or '', "runtime_id": tr[2] or 0,
@@ -161,13 +195,18 @@ def _collect_feedback_context(event_seq: int, user: dict):
             try:
                 with db_lock:
                     c5 = db.cursor()
-                    c5.execute(
-                        "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), "
-                        "COALESCE(rc.last_ip,''), COALESCE(ar.provider,'') "
-                        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc "
-                        "ON rc.id=ar.credential_id WHERE ar.id=?",
-                        (runtime_id,))
-                    ar = c5.fetchone()
+                    from src.kernel.domain_read import runtime_lib as _ru_lib_a4f724_f
+                    _ru_lib_a4f724 = _ru_lib_a4f724_f(foreign_only=True)
+                    if _ru_lib_a4f724 is not None:
+                        ar = _ru_lib_a4f724.read_one("agent_runtimes_a4f724", (runtime_id,))
+                    else:
+                        c5.execute(
+                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), "
+                            "COALESCE(rc.last_ip,''), COALESCE(ar.provider,'') "
+                            "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc "
+                            "ON rc.id=ar.credential_id WHERE ar.id=?",
+                            (runtime_id,))
+                        ar = c5.fetchone()
                 if ar:
                     from src.domains.runtime.engine.instances import instance_name
                     engine = {
@@ -222,13 +261,22 @@ def _resolve_token_task_context(user: dict) -> dict:
     runtime_id = 0
     if task_id:
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT event_seq, agent_type, skill, runtime_id, repo_key "
-                    "FROM agent_tasks WHERE id=? LIMIT 1",
-                    (task_id,))
-                r = c.fetchone()
+            _rt2 = _task_via_lib()
+            if _rt2 is not None:
+                r = _rt2.task_brief(task_id)
+            else:
+                with db_lock:
+                    c = db.cursor()
+                    from src.kernel.domain_read import runtime_lib as _ru_lib_b6b789_f
+                    _ru_lib_b6b789 = _ru_lib_b6b789_f(foreign_only=True)
+                    if _ru_lib_b6b789 is not None:
+                        r = _ru_lib_b6b789.read_one("agent_tasks_b6b789", (task_id,))
+                    else:
+                        c.execute(
+                            "SELECT event_seq, agent_type, skill, runtime_id, repo_key "
+                            "FROM agent_tasks WHERE id=? LIMIT 1",
+                            (task_id,))
+                        r = c.fetchone()
             if r:
                 event_seq = r[0]
                 agent_type = agent_type or (r[1] or '')
@@ -632,7 +680,7 @@ async def upload_feedback_attachment(file: UploadFile = File(...),
         log.info(f"feedback upload: OBS key={file_key} size={len(content)} by={user.get('username')}")
     else:
         # 非 OBS 模式：存到本地
-        static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api", "static", "uploads", "feedback")
+        static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "api", "frontend", "shell", "uploads", "feedback")
         os.makedirs(static_dir, exist_ok=True)
         local_name = file_key.replace("feedback/", "")
         local_path = os.path.join(static_dir, local_name)

@@ -45,6 +45,9 @@ CORE_WORKFLOW_PREFIXES = (
     "/api/a2a",
     "/api/tasks",
     "/api/runtime/tasks",
+    # I-1（架构守护）：IM 通道端点（installations / outbound / retry / status）此前不在
+    # 守护面内，四进程分流把它挂错版本时基线比对拦不住（#1363 C-3 正是这样漏掉的）。
+    "/api/im",
 )
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.|$)")
@@ -186,6 +189,38 @@ def build_current_contract() -> dict:
     return custom_openapi(app)
 
 
+def check_checked_in_copy(current_paths: dict, copy_path: str) -> list:
+    """库内契约副本（/static/openapi.json 的实际下载源）必须与当前渲染一致。
+
+    G6 回归背景（PR #1363 第 3 轮 QA）：新增 17 个端点后忘了重跑生成器，
+    库内副本仍是旧契约 → 用户下载到的 openapi.json 缺 takeover/IM/pin/copy/readd。
+    比对口径取路径集合（版本/描述差异由生成器负责刷新）。
+    """
+    if not os.path.isfile(copy_path):
+        return [f"checked-in contract copy missing: {copy_path}"]
+    try:
+        with open(copy_path, encoding="utf-8") as f:
+            copy_paths = json.load(f).get("paths", {})
+    except Exception as e:  # noqa: BLE001 - 契约文件损坏要 fail-loud
+        return [f"cannot read checked-in contract copy {copy_path}: {e}"]
+
+    added = sorted(set(current_paths) - set(copy_paths))
+    removed = sorted(set(copy_paths) - set(current_paths))
+    if not added and not removed:
+        return []
+    detail = []
+    if added:
+        detail.append(f"{len(added)} missing (e.g. {', '.join(added[:5])})")
+    if removed:
+        detail.append(f"{len(removed)} stale (e.g. {', '.join(removed[:5])})")
+    return [
+        f"checked-in contract copy is stale: {copy_path} "
+        f"({len(copy_paths)} paths) vs rendered ({len(current_paths)} paths): "
+        + "; ".join(detail)
+        + " — run `python scripts/regenerate_openapi.py` and commit the copy"
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="CI OpenAPI contract endpoint completeness check (Issue #897)")
@@ -210,6 +245,9 @@ def main() -> int:
     errors.extend(check_operation_id_unique(current_paths))
     from src.api.main import app as _app
     errors.extend(check_route_registration_unique(_app.routes))
+    # G6 守卫：库内契约副本（/static/openapi.json 下载源）不得与代码漂移
+    errors.extend(check_checked_in_copy(
+        current_paths, os.path.join("src", "api", "frontend", "shell", "openapi.json")))
 
     baseline_paths, baseline_version = load_baseline(args.baseline)
     if baseline_paths:

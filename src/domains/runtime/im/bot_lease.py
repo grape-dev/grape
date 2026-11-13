@@ -39,6 +39,14 @@ class BotLeaseStore:
     def try_acquire(self, key: str, steal_after: int = 60,
                     instance_timeout: float = 45.0) -> str | None:
         token = secrets.token_hex(16)
+        from src.kernel.domain_read import runtime_lib as _rt_lib_soon
+        _rt_soon = _rt_lib_soon()
+        if _rt_soon is not None:
+            _ct, _inst = split_lease_key(key)
+            if not self._installation_active(_inst):
+                return None
+            return token if _rt_soon.acquire_channel_lease(
+                key, token, self.instance_id, self.ttl) else None
         expires_at = _future(self.ttl)
         channel_type, installation_id = split_lease_key(key)
         try:
@@ -126,6 +134,11 @@ class BotLeaseStore:
         return True
 
     def renew(self, key: str, token: str) -> bool | None:
+        from src.kernel.domain_read import runtime_lib as _rt_lib_soon
+        _rt_soon = _rt_lib_soon()
+        if _rt_soon is not None:
+            return _rt_soon.renew_channel_lease(
+                key, token, self.instance_id, self.ttl, expected_token=token)
         expires_at = _future(self.ttl)
         try:
             from src.kernel.session_manager import db, db_lock
@@ -145,6 +158,11 @@ class BotLeaseStore:
             return None
 
     def release(self, key: str, token: str) -> None:
+        from src.kernel.domain_read import runtime_lib as _rt_lib_soon
+        _rt_soon = _rt_lib_soon()
+        if _rt_soon is not None:
+            _rt_soon.release_channel_lease(key, token)
+            return
         try:
             from src.kernel.session_manager import db, db_lock
             with db_lock:
@@ -161,6 +179,11 @@ class BotLeaseStore:
             log.warning(f"[lease] release error: {e}")
 
     def release_all(self, held_bots: dict[str, str]) -> None:
+        from src.kernel.domain_read import runtime_lib as _rt_lib_soon
+        _rt_soon = _rt_lib_soon()
+        if _rt_soon is not None:
+            _rt_soon.release_all_leases(list((held_bots or {}).items()))
+            return
         for key, token in held_bots.items():
             self.release(key, token)
 
@@ -278,6 +301,11 @@ class BotLeaseStore:
     # ── 实例注册表 / 心跳（cluster-im-lease-stability-design.md §2.1）──
 
     def heartbeat(self, hostname: str = "", ip: str = "") -> None:
+        from src.kernel.domain_read import runtime_lib as _rt_lib_soon
+        _rt_soon = _rt_lib_soon()
+        if _rt_soon is not None:
+            _rt_soon.heartbeat_instance(self.instance_id, hostname, ip)
+            return
         """上报本实例心跳（UPSERT grape_im_instance），供环 owner 计算与接管判定。
 
         **时间基准必须与读侧一致**：`list_active_instances` 用 Python 的 UTC 计算 cutoff，
@@ -332,6 +360,10 @@ class BotLeaseStore:
         return low, high
 
     def list_active_instances(self, timeout: float = 45.0, now_dt=None) -> list[str]:
+        from src.kernel.domain_read import runtime_lib as _rt_lib_soon
+        _rt_soon = _rt_lib_soon()
+        if _rt_soon is not None:
+            return _rt_soon.list_active_instances(timeout)
         """返回心跳存活（last_heartbeat 距今 < timeout）且 im_enabled=1 的实例 id 列表。
 
         上下界都要判：下界=失联超时，上界=忽略"未来时间"的心跳（CST 口径脏行/未修实例）。

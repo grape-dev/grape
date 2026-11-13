@@ -123,7 +123,7 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
                 {"exists": True, "login": (_cred or {}).get("login", ""),
                  **({"workflows_write": _cred["workflows_write"]}
                     if isinstance(_cred, dict) and "workflows_write" in _cred else {})}
-                if (_cred := user_db.get_credential(user["id"], f"{_p}_pat"))
+                if (_cred := user_db.get_credential(user["id"], _p, kind="pat"))
                 # 存量专用字段平台（契约开关派生）：PAT 走专用字段（token 存 ei），
                 # 存在性对齐专用键——泛型 <p>_pat 凭据域未命中时回退
                 else (
@@ -315,67 +315,14 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                     _gh_user = _resp.json()
                     gh_id = str(_gh_user.get("id", ""))
                     gh_login = _gh_user.get("login", "")
-                    # 写入 external_identities（D32: 不再写 user_accounts）
-                    from src.domains.mgmt.auth.grape_account_db import get_external_identity, get_external_identity_any_status, create_external_identity, update_external_identity_tokens, save_binding_ticket
-                    existing = get_external_identity("github", gh_id)
-                    if existing:
-                        if str(existing["grape_user_id"] or "") != str(user["id"] or ""):
-                            raise HTTPException(
-                                status_code=409,
-                                detail={"code": 409, "message": "该平台账号已被其他 Grape 账号绑定"},
-                            )
-                        # D105k 解耦收口：PAT 权威存储=凭据域 <p>_pat，ei 只落归属行
-                        #（access_token 置空清残留）——ei.access_token 从此 OAuth 独占
-                        from src.domains.mgmt.user.db import set_credential as _sc
-                        _sc(user["id"], "github_pat", {"token": _gh_tok, "login": gh_login})
-                        _ok = update_external_identity_tokens(existing["grape_user_id"], "github",
-                                                               access_token="",
-                                                               external_name=_gh_user.get("name", ""))
-                        # D105k：不 clear ei token——OAuth+PAT 共存时 ei.token 是
-                        # OAuth 回落凭据，清掉=清除 PAT 后无回落（能力丢失）。
-                        # 历史 PAT 残留由启动回填搬家逻辑按证据分级处理。
-                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
-                        mark_identity_pat(existing["grape_user_id"], "github", pat_login=gh_login)
-                        if not _ok:
-                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
-                    else:
-                        # 检查是否存在解绑记录（status=0）属于其他用户
-                        any_status = get_external_identity_any_status("github", gh_id)
-                        if any_status and any_status["status"] == 0 and str(any_status["grape_user_id"] or "") != str(user["id"] or ""):
-                            # 解绑记录属于其他用户 → 生成转移票据，要求前端确认
-                            _ticket = save_binding_ticket(
-                                initiating_user_id=user["id"],
-                                provider="github",
-                                external_id=gh_id,
-                                external_login=gh_login,
-                                external_name=_gh_user.get("name", ""),
-                                original_user_id=any_status["grape_user_id"],
-                            )
-                            if not _ticket:
-                                raise HTTPException(status_code=500, detail={"code": 500, "message": "生成转移票据失败"})
-                            raise HTTPException(
-                                status_code=409,
-                                detail={
-                                    "code": 409,
-                                    "message": "该平台账号曾绑定过其他账号，是否转移到当前账号？",
-                                    "binding_ticket": _ticket,
-                                    "need_transfer": True,
-                                },
-                            )
-                        # 无解绑记录或解绑记录属于当前用户 → 正常创建（create_internal 自动恢复同账号解绑记录）
-                        # D105k：归属行不带 token，PAT 进凭据域
-                        from src.domains.mgmt.user.db import set_credential as _sc
-                        _sc(user["id"], "github_pat", {"token": _gh_tok, "login": gh_login})
-                        _ok = create_external_identity(
-                            grape_user_id=user["id"], provider="github",
-                            external_id=gh_id, external_login=gh_login,
-                            external_name=_gh_user.get("name", ""),
-                            access_token="",
-                        )
-                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
-                        mark_identity_pat(user["id"], "github", pat_login=gh_login)
-                        if not _ok:
-                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+                    # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，
+                    # 不是身份绑定——只落凭据域 github_pat，不建/不激活身份行。
+                    # 身份行（external_identities）只由 OAuth 首登或设置页 OAuth
+                    # 绑定产生，因此这里不再有 409 / 转移票据分支。
+                    from src.domains.mgmt.user.db import set_credential as _sc
+                    # 写失败必须 loud：静默 False 会留下「前端看到成功、凭据没落库」
+                    if not _sc(user["id"], "github", {"token": _gh_tok, "login": gh_login}, kind="pat"):
+                        raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     log.info(f"GitHub token saved for user={user['username']}, github_login={gh_login}")
                     # Issue #372 §12.8: 同步写入 unified_user_mapping.github_login
                     # 用 INSERT OR IGNORE + UPDATE（不用 INSERT OR REPLACE，避免覆盖 gitcode_user 等其他平台字段）
@@ -436,72 +383,13 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校
                     _gc_user = _resp.json()
                     gc_id = str(_gc_user.get("id", ""))
                     gc_login = _gc_user.get("login", "")
-                    from src.domains.mgmt.auth.grape_account_db import (
-                        get_external_identity, get_external_identity_any_status,
-                        create_external_identity, save_binding_ticket,
-                        update_external_identity_tokens, delete_external_identity,
-                    )
-                    existing = get_external_identity("gitcode", gc_id)
-                    if existing:
-                        if str(existing["grape_user_id"] or "") != str(user["id"] or ""):
-                            raise HTTPException(
-                                status_code=409,
-                                detail={"code": 409, "message": "该平台账号已被其他 Grape 账号绑定"},
-                            )
-                        # D105k 解耦收口：PAT 权威存储=凭据域 <p>_pat，ei 只落归属行
-                        from src.domains.mgmt.user.db import set_credential as _sc
-                        _sc(user["id"], "gitcode_pat", {"token": _gc_tok, "login": gc_login})
-                        _ok = update_external_identity_tokens(
-                            existing["grape_user_id"], "gitcode",
-                            access_token="",
-                            external_name=_gc_user.get("name", ""),
-                        )
-                        # D105k：不 clear ei token——OAuth+PAT 共存时 ei.token 是
-                        # OAuth 回落凭据，清掉=清除 PAT 后无回落（能力丢失）。
-                        # 历史 PAT 残留由启动回填搬家逻辑按证据分级处理。
-                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
-                        mark_identity_pat(existing["grape_user_id"], "gitcode", pat_login=gc_login)
-                        if not _ok:
-                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
-                    else:
-                        # 检查是否存在解绑记录（status=0）属于其他用户
-                        any_status = get_external_identity_any_status("gitcode", gc_id)
-                        if any_status and any_status["status"] == 0 and str(any_status["grape_user_id"] or "") != str(user["id"] or ""):
-                            # 解绑记录属于其他用户 → 生成转移票据，要求前端确认
-                            _ticket = save_binding_ticket(
-                                initiating_user_id=user["id"],
-                                provider="gitcode",
-                                external_id=gc_id,
-                                external_login=gc_login,
-                                external_name=_gc_user.get("name", ""),
-                                original_user_id=any_status["grape_user_id"],
-                            )
-                            if not _ticket:
-                                raise HTTPException(status_code=500, detail={"code": 500, "message": "生成转移票据失败"})
-                            raise HTTPException(
-                                status_code=409,
-                                detail={
-                                    "code": 409,
-                                    "message": "该平台账号曾绑定过其他账号，是否转移到当前账号？",
-                                    "binding_ticket": _ticket,
-                                    "need_transfer": True,
-                                },
-                            )
-                        # 无解绑记录或解绑记录属于当前用户 → 正常创建
-                        # D105k：归属行不带 token，PAT 进凭据域
-                        from src.domains.mgmt.user.db import set_credential as _sc
-                        _sc(user["id"], "gitcode_pat", {"token": _gc_tok, "login": gc_login})
-                        _ok = create_external_identity(
-                            grape_user_id=user["id"], provider="gitcode",
-                            external_id=gc_id, external_login=gc_login,
-                            external_name=_gc_user.get("name", ""),
-                            access_token="",
-                        )
-                        from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
-                        mark_identity_pat(user["id"], "gitcode", pat_login=gc_login)
-                        if not _ok:
-                            log.error(f"GitCode bind FAILED: create_external_identity returned False for user={user['id']}, gc_id={gc_id}, gc_login={gc_login}")
-                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+                    # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，
+                    # 不是身份绑定——只落凭据域 gitcode_pat，不建/不激活身份行。
+                    # 身份行只由 OAuth 首登或设置页 OAuth 绑定产生，故无 409/票据。
+                    from src.domains.mgmt.user.db import set_credential as _sc
+                    # 写失败必须 loud（同 github 分支口径）
+                    if not _sc(user["id"], "gitcode", {"token": _gc_tok, "login": gc_login}, kind="pat"):
+                        raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     log.info(f"GitCode token saved for user={user['username']}, gitcode_login={gc_login}")
                     # Issue #372 §12.8: 同步写入 unified_user_mapping
                     # PAT 绑定的用户 username ≠ GitCode login，启动时回填写入的是 username 而非 gc_login
@@ -542,15 +430,13 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # D32/S52：config-only 平台 PAT 绑定（泛型 platform_tokens）。github/gitcode
     # 走上方既有专用字段路径（零改动）；新平台验证后双写
     # user_credentials <p>_pat（UserToken 级）+ external_identities（D31 归属源）。
-    # 边界：新平台暂不含跨用户转移票据流（冲突直接 409，文档已注明）；
-    # 空值=清除 PAT 凭据（identity 解绑走既有解绑流程，不在此处删）。
+    # 边界（A 批 2026-11-13）：PAT = 仓库执行凭据，不写身份行、不参与归属冲突，
+    # 因此没有 409/转移票据；空值=清除 PAT 凭据（identity 解绑走既有解绑流程）。
     _platform_tokens = explicit.get("platform_tokens") or {}
     if _platform_tokens:
         from src.domains.runtime.vcs.platform_card import list_vcs_platforms
         _known_platforms = set(list_vcs_platforms())
         from src.domains.mgmt.user.db import set_credential
-        from src.domains.mgmt.auth.grape_account_db import (
-            get_external_identity, create_external_identity, update_external_identity_tokens)
         for _p, _raw_tok in (_platform_tokens.items() if isinstance(_platform_tokens, dict) else []):
             _p = str(_p or "").strip()
             # D105-18：值支持对象形态 {"token":..., "workflows_write": bool}
@@ -587,45 +473,33 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                         "message": f"{_p} token 校验失败（无用户信息），请检查 token 有效性"})
                 _ext_id = str(_info.get("id"))
                 _ext_login = str(_info.get("login", ""))
-                _existing = get_external_identity(_p, _ext_id)
-                if _existing and str(_existing.get("grape_user_id") or "") != str(user["id"] or ""):
-                    raise HTTPException(status_code=409, detail={
-                        "code": 409, "message": f"该 {_p} 账号已被其他 Grape 账号绑定"})
-                # D102-P 职责分域（2026-11-08 用户裁定）：PAT 与 OAuth token 是
-                # 两种东西——归属行只记身份（external_id/login/name），不承载
-                # token（access_token 恒空）；PAT 权威存储=凭据域 <p>_pat，
-                # 供给链 fetch_user_token ① 命中凭据域（token_resolver）。
-                # 历史形态（PAT 写 identity.access_token）由启动回填迁移。
-                if _existing:
-                    _ok = update_external_identity_tokens(
-                        user["id"], _p, access_token="",
-                        external_name=str(_info.get("name", "")))
-                else:
-                    _ok = create_external_identity(
-                        grape_user_id=user["id"], provider=_p,
-                        external_id=_ext_id, external_login=_ext_login,
-                        external_name=str(_info.get("name", "")),
-                        access_token="")
-                if not _ok:
-                    raise HTTPException(status_code=500, detail={
-                        "code": 500, "message": "凭据保存失败"})
-                from src.domains.mgmt.auth.grape_account_db import mark_identity_pat
-                mark_identity_pat(user["id"], _p, pat_login=_ext_login)
+                # A 批对象模型（2026-11-13 用户裁定）：PAT = 仓库执行凭据，不是
+                # 身份绑定。external_identities 只由 OAuth 首登或设置页 OAuth
+                # 绑定产生；这里不再建/改身份行，于是不会出现「身份留在 A 账号、
+                # 凭据写进 B 账号」的半转移态，也就不再需要 409 与转移票据。
+                # 平台登录名来源 = 凭据域 config.login（list_platform_links 并集读）。
                 _pat_cfg = {"token": _tok, "login": _ext_login}
                 if _wf_declared:
                     _pat_cfg["workflows_write"] = _wf_write  # 显式 False 也落库（三态）
-                set_credential(user["id"], f"{_p}_pat", _pat_cfg)
+                # 写失败必须 loud（2026-11-13 复核）：原实现丢弃返回值，凭据没写成
+                # 也照样打 "PAT bound" 成功日志。PAT 不碰身份行后无需补偿身份。
+                if not set_credential(user["id"], _p, _pat_cfg, kind="pat"):
+                    raise HTTPException(status_code=500, detail={
+                        "code": 500, "message": "凭据保存失败"})
                 log.info(f"platform_tokens: {_p} PAT bound for user={user['id']} login={_ext_login}")
             elif not _tok:
                 # D105k：清除 = 级联按 OAuth 共存与否分流（四象限）——
                 # 无 OAuth 平台级解绑（ei 归属行+凭据+user_repos 全清，
                 # 修复"清 PAT 后仓库列表残留"）；有 OAuth 只清 PAT 供给 ② 接管
-                set_credential(user["id"], f"{_p}_pat", {})
+                set_credential(user["id"], _p, {}, kind="pat")
                 _cascade_pat_clear(user, _p)
 
     # 绑定/解绑平台后清理 user_repos 缓存——下次 /repos/member 会从 VCS 重新拉取
-    # 卡驱动：任意平台凭据键（<p>_token / <p>_pat）变更都失效缓存，无平台名分支。
-    if any(k.endswith(("_token", "_pat")) for k in explicit):
+    # 卡驱动：任意平台凭据键变更都失效缓存，无平台名分支。
+    # 2026-11-13 补泛型入口：新平台 PAT 走 body.platform_tokens（复数），键名结尾
+    # 是 `_tokens` 不是 `_token` —— 只看旧键会让「配完 PAT 项目页看不到列表」复现
+    # （缓存 30min 内直接返回旧的、不含新平台的快照）。清除路径用的是同一个泛型键。
+    if any(k.endswith(("_token", "_pat")) for k in explicit) or explicit.get("platform_tokens"):
 
         try:
             from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
@@ -772,8 +646,14 @@ def get_notifications(user: dict = Depends(require_no_session_token)):
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding ORDER BY id DESC LIMIT 1")
-            row = c.fetchone()
+            # P4：repo_im_group_binding 在 runtime 域，删视图后走 lib 读
+            from src.kernel.domain_read import runtime_lib as _rt_lib_imf
+            _imf = _rt_lib_imf(foreign_only=True)
+            if _imf is not None:
+                row = _imf.read_one("repo_im_flags_latest", ())
+            else:
+                c.execute("SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding ORDER BY id DESC LIMIT 1")
+                row = c.fetchone()
             auto_impl = bool(row[0]) if row else True
             notify = bool(row[1]) if row else True
         except Exception:
@@ -798,14 +678,28 @@ class NotificationPrefs(BaseModel):
 @router.put("/notifications", operation_id="settings_notifications_update", summary="Update notification preferences", description="Updates notification preferences.")
 def update_notifications(body: NotificationPrefs, user: dict = Depends(require_no_session_token)):
     from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=?, notify_enabled=?",
-                      (1 if body.vod else 0, 1 if body.notifications_enabled else 0))
-            db.commit()
-        except Exception:
-            pass
+    _ai = 1 if body.vod else 0
+    _nt = 1 if body.notifications_enabled else 0
+    # P3-5h：repo_im_group_binding 在 runtime 域
+    from src.kernel.domain_read import runtime_lib as _rt_lib_np
+    from src.kernel import cross_write as _xw_np
+    _np_done = False
+    _rt_np = _rt_lib_np(foreign_only=True)
+    if _rt_np is not None:
+        _rt_np_ok = _rt_np
+        _np_done = _xw_np.submit_if_lib(
+            _rt_np_ok, "runtime", "repo_im_notifications_set", "repo-im-notify",
+            {"auto_impl_enabled": _ai, "notify_enabled": _nt},
+            lambda: _rt_np_ok.set_repo_im_notifications(_ai, _nt), log)
+    if not _np_done:
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=?, notify_enabled=?",
+                          (_ai, _nt))
+                db.commit()
+            except Exception:
+                pass
     return {"message": "通知偏好已更新", "prefs": body.model_dump()}
 
 @router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo.")
@@ -1288,11 +1182,13 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         _page = max(page, 1)
         _offset = (_page - 1) * page_size
         paged_runtimes = visible_runtimes[_offset:_offset + page_size]
+        _attach_engine_models(paged_runtimes)  # Issue #865：附加配置模型/最近使用模型
         return {"runtimes": paged_runtimes, "devices": devices,
                 "total": total_runtimes, "page": _page, "page_size": page_size,
                 "avail_scopes": _avail_scopes, "avail_types": _avail_types,
                 "avail_scenes": _avail_scenes, "avail_tags": _avail_tags,
                 "health_stats": health_stats}
+    _attach_engine_models(visible_runtimes)  # Issue #865：附加配置模型/最近使用模型
     return {"runtimes": visible_runtimes, "devices": devices, "total": total_runtimes,
             "avail_scopes": _avail_scopes, "avail_types": _avail_types,
             "avail_scenes": _avail_scenes, "avail_tags": _avail_tags,
@@ -1377,19 +1273,48 @@ def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
         return "about_to_gc"
     return "offline"
 
+def _creds_via_lib():
+    """GRAPE_CREDENTIALS_VIA_LIB=1 且 runtime lib 可用时返回 lib 模块（三库三机模式）。"""
+    import os as _os
+
+    if _os.environ.get("GRAPE_CREDENTIALS_VIA_LIB") != "1":
+        return None
+    try:
+        from src.domains.runtime import public as _rt
+
+        return _rt if _rt.available() else None
+    except Exception as _exc:  # noqa: BLE001
+        log.warning(f"credentials via lib unavailable: {_exc}")
+        return None
+
+
 def _build_cred_map(db, db_lock) -> dict:
-    """构建 credential_id -> 凭据信息映射，两个端点共用。"""
+    """构建 credential_id -> 凭据信息映射，两个端点共用。
+
+    只读取**密文/元数据列**（不涉及解密）；lib 模式下由 runtime 自己的连接取数。
+    """
+    _rt = _creds_via_lib()
+    if _rt is not None:
+        rows = _rt.list_credential_rows()
+    else:
+        with db_lock:
+            c = db.cursor()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_5b448f_f
+            _ru_lib_5b448f = _ru_lib_5b448f_f(foreign_only=True)
+            if _ru_lib_5b448f is not None:
+                rows = _ru_lib_5b448f.read_all("runtime_credentials_5b448f", ())
+            else:
+                c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, "
+                          "last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials")
+                rows = c.fetchall()
     cred_map = {}
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials")
-        for r in c.fetchall():
-            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id, cspec = r
-            cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
-                             "owner_id": cowner_id or "", "owner_name": cowner_name or "",
-                             "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
-                             "repo_key": crepo_key or "", "org_id": corg_id or "",
-                             "spec": cspec or ""}
+    for r in rows:
+        cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id, cspec = r
+        cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
+                         "owner_id": cowner_id or "", "owner_name": cowner_name or "",
+                         "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
+                         "repo_key": crepo_key or "", "org_id": corg_id or "",
+                         "spec": cspec or ""}
     return cred_map
 
 def _make_visible_credential_fn(uname: str, user_repos: set, repo_filter: str = ""):
@@ -1476,7 +1401,14 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                 continue  # cred_map 已被组织过滤 — 不在 map 中的凭据跳过
             if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", ""), from_repo_key(cred.get("repo_key", ""))):
                 continue
-            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?", (cid,))
+            # P4：删视图后 agent_runtimes 走 lib 读
+            from src.kernel.domain_read import runtime_lib as _rt_lib_lr
+            _lr_lib = _rt_lib_lr(foreign_only=True)
+            if _lr_lib is not None:
+                _lr_rows = _lr_lib.read_all("runtimes_by_credential", (cid,))
+            else:
+                c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?", (cid,))
+                _lr_rows = c.fetchall()
             # AIShell 显示名（2026-10-13 收口补漏）：worker 设备视图的承载引擎列表
             from src.domains.runtime.engine.instances import to_display as _td2
             runtimes = [
@@ -1487,9 +1419,14 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                  "local_skills": _json.loads(x[7] or "[]") if x[7] else [],
                  "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else [],
                  "worker_version": x[9] or "" if len(x) > 9 else ""}
-                for x in c.fetchall()
+                for x in _lr_rows
             ]
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_tags
+            _rtl = _runtime_lib_tags()
             for rt in runtimes:
+                if _rtl is not None:
+                    rt["agent_tags"] = _rtl.list_engine_tags(rt["id"], enabled_only=True)
+                    continue
                 _tc = db.cursor()
                 _tc.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
                 rt["agent_tags"] = [r[0] for r in _tc.fetchall()]
@@ -1895,20 +1832,46 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _cred_org_id = "" if _is_personal else _org_id
     token = "rta_" + secrets.token_urlsafe(32)
-    with db_lock:
-        c = db.cursor()
+    # P3-5f-3：runtime_credentials 在 runtime 域；重名判定由原语以返回值上报
+    # （若让唯一约束异常冒泡，意图会被判为可重试失败而无限重放）
+    from src.kernel.domain_read import runtime_lib as _rt_lib_cc
+    from src.kernel import cross_write as _xw_cc
+    _cc_out: dict = {}
+    _cc_done = False
+    _rt_cc = _rt_lib_cc(foreign_only=True)
+    if _rt_cc is not None:
+        _rt_cc_ok = _rt_cc
+        _cc_hash = hashlib.sha256(token.encode()).hexdigest()
+        _cc_owner_id = repo_key if scope == "repo" else ""
+
+        # 同步直连，**不进幂等意图队列**：token 明文只在本次响应里出现一次，
+        # 若落成可重放意图，排水重放时会造出无主凭据（孤儿 token，无法对账）。
         try:
-            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key, org_id) VALUES (?,?,?,?,?,?,?)",
-                      (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key, _cred_org_id))
-            cred_id = c.lastrowid
-            db.commit()
-        except Exception as e:
-            msg = str(e)
-            if ("UNIQUE" in msg or "1062" in msg or "Duplicate" in msg) and "runtime_credentials.name" in msg:
-                # sqlite: "UNIQUE constraint failed: ..."; MySQL: (1062, "Duplicate entry ... for key 'runtime_credentials.name'")
-                # 只认 "UNIQUE" 字样在 MySQL 下匹配不到 → 误报 500（2026-08-17 实测）
-                raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
-            raise HTTPException(status_code=500, detail={"code": 500, "message": f"生成失败: {e}"})
+            _cc_out.update(_rt_cc_ok.insert_runtime_credential(
+                _cc_hash, name, scope, _cc_owner_id, owner, repo_key, _cred_org_id))
+            _cc_done = True
+        except Exception as _e_cc:
+            log.warning(f"create_runtime_credential via lib failed, fallback to local SQL: {_e_cc}")
+            _cc_done = False
+    if _cc_done:
+        if _cc_out.get("action") == "duplicate":
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
+        cred_id = int(_cc_out.get("id") or 0)
+    else:
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key, org_id) VALUES (?,?,?,?,?,?,?)",
+                          (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key, _cred_org_id))
+                cred_id = c.lastrowid
+                db.commit()
+            except Exception as e:
+                msg = str(e)
+                if ("UNIQUE" in msg or "1062" in msg or "Duplicate" in msg) and "runtime_credentials.name" in msg:
+                    # sqlite: "UNIQUE constraint failed: ..."; MySQL: (1062, "Duplicate entry ... for key 'runtime_credentials.name'")
+                    # 只认 "UNIQUE" 字样在 MySQL 下匹配不到 → 误报 500（2026-08-17 实测）
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
+                raise HTTPException(status_code=500, detail={"code": 500, "message": f"生成失败: {e}"})
     # 预构建 worker 安装包（异步）：凭据生成后即可一键安装，避免首次下载才打包
     # （首次构建含依赖 wheels 下载，耗时数秒至数分钟，放后台不阻塞响应）
     try:
@@ -1928,12 +1891,35 @@ def rename_runtime_credential(cid: str, body: RuntimeCredBody, user: dict = Depe
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("UPDATE runtime_credentials SET name=? WHERE id=? AND status='active'", (name, cid))
-            if c.rowcount == 0:
-                row = c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,)).fetchone()
-                if not row:
-                    raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
-                raise HTTPException(status_code=400, detail={"code": 400, "message": "仅 active 凭据可改名"})
+            # P3-5f-3：runtime_credentials 在 runtime 域（改名仅动 active 行）
+            from src.kernel.domain_read import runtime_lib as _rt_lib_rn
+            from src.kernel import cross_write as _xw_rn
+            _rn_n: dict = {}
+            _rn_done = False
+            _rt_rn = _rt_lib_rn(foreign_only=True)
+            if _rt_rn is not None:
+                _rt_rn_ok = _rt_rn
+
+                def _apply_rn() -> None:
+                    _rn_n["n"] = _rt_rn_ok.rename_runtime_credential(str(cid), name)
+
+                _rn_done = _xw_rn.submit_if_lib(
+                    _rt_rn_ok, "runtime", "runtime_credential_rename", f"rc-rename:{cid}:{name}",
+                    {"cid": str(cid), "name": name}, _apply_rn, log)
+            if _rn_done:
+                _rn_rc = int(_rn_n.get("n") or 0)
+                if _rn_rc == 0:
+                    row = c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,)).fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": "仅 active 凭据可改名"})
+            else:
+                c.execute("UPDATE runtime_credentials SET name=? WHERE id=? AND status='active'", (name, cid))
+                if c.rowcount == 0:
+                    row = c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,)).fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": "仅 active 凭据可改名"})
             db.commit()
         except HTTPException:
             raise
@@ -1978,8 +1964,13 @@ def change_credential_scope(cid: str, body: CredScopeBody, user: dict = Depends(
         _new_org_id = user.get("org_id") or ""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
-        row = c.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_ff9c0b_f
+        _ru_lib_ff9c0b = _ru_lib_ff9c0b_f(foreign_only=True)
+        if _ru_lib_ff9c0b is not None:
+            row = _ru_lib_ff9c0b.read_one("runtime_credentials_ff9c0b", (cid,))
+        else:
+            c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
+            row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
         _owner, _status = row[0] or "", row[1] or ""
@@ -1993,6 +1984,16 @@ def change_credential_scope(cid: str, body: CredScopeBody, user: dict = Depends(
         #   判断走 from_repo_key(owner_id) in user_repos，owner_id 为空 → 同仓库其他成员永远看不到）；
         # - user scope：owner_id 清空（user scope 注册时按 owner_name 从 grape_accounts 重算，不依赖此字段）。
         _new_owner_id = repo_key if (scope == "repo" and repo_key) else ""
+        # P3-5f-2：凭据行 + 引擎行 + 重名合并全在 runtime 域 → 一个组合原语（同步直连，切 scope 要立刻生效）
+        from src.kernel.domain_read import runtime_lib as _rt_lib_csc
+        _rt_csc = _rt_lib_csc(foreign_only=True)
+        if _rt_csc is not None:
+            _csc = _rt_csc.change_credential_scope(str(cid), scope, repo_key or "",
+                                                   _new_owner_id, _new_org_id)
+            log.info(f"Credential scope changed via lib: cid={cid} scope={scope} "
+                     f"repo_key={repo_key} org_id={_new_org_id} engines={_csc.get('engines')} "
+                     f"merged={_csc.get('merged')}")
+            return {"scope": scope, "repo_key": repo_key}
         c.execute("UPDATE runtime_credentials SET scope=?, repo_key=?, owner_id=?, org_id=? WHERE id=?",
                   (scope, repo_key or None, _new_owner_id, _new_org_id, cid))
         # 切换 scope 后同步更新引擎行（保留引擎信息，避免 worker 需要重新注册）。
@@ -2063,29 +2064,72 @@ def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT owner_name FROM runtime_credentials WHERE id=?", (cid,))
-        _row = c.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_3cd287_f
+        _ru_lib_3cd287 = _ru_lib_3cd287_f(foreign_only=True)
+        if _ru_lib_3cd287 is not None:
+            _row = _ru_lib_3cd287.read_one("runtime_credentials_3cd287", (cid,))
+        else:
+            c.execute("SELECT owner_name FROM runtime_credentials WHERE id=?", (cid,))
+            _row = c.fetchone()
         if not _row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
         # 扫雷⑨-H2：仅凭据 owner 可吊销（对齐同文件 scope 端点的 owner 校验范式）
         _owner = _row[0] or ""
         if _owner != (user.get("username") or ""):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "仅凭据 owner 可吊销"})
+        # P3-5f-2：吊销是安全动作，必须**立刻**生效（token 不能有窗口期）→ 同步直连组合原语，
+        # 不排队等排水。runtime 半区（会话摘绑 + 能力 + 引擎行 + 凭据行）一次事务完成；
+        # mgmt 半区（场景 nodes_json 悬空引用）由本函数收尾提交。
+        from src.kernel.domain_read import runtime_lib as _rt_lib_purge
+        _rt_purge = _rt_lib_purge(foreign_only=True)
+        if _rt_purge is not None:
+            _purged = _rt_purge.purge_runtime_credential(str(cid))
+            _purged_rids = [int(x) for x in (_purged.get("rids") or [])]
+            if _purged_rids:
+                from src.domains.runtime.engine.engine_select import cleanup_scene_engine_bindings as _csb_purge
+                # commit=False：修掉"在调用方事务中途提前提交"的旧缺陷
+                _csb_purge(_purged_rids, commit=False)
+            db.commit()
+            log.info(f"revoke {cid} via lib: engines={_purged.get('engines')} "
+                     f"sessions={_purged.get('sessions')} caps={_purged.get('caps')}")
+            return {"message": f"凭据 {cid} 已吊销并删除"}
         c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
         rid_list = [r[0] for r in c.fetchall()]
         if rid_list:
             ph = ",".join("?" for _ in rid_list)
-            try:
-                c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
-            except Exception as _e:
-                log.warning(f"revoke {cid}: 清理 session 失败: {_e}")
+            # P3-5g：devops_agent_session 在 runtime 域；lib 可用走跨域写
+            from src.kernel.domain_read import runtime_lib as _rt_lib_rv
+            from src.kernel import cross_write as _xw_rv
+            _rv_done = False
+            _rt_rv = _rt_lib_rv(foreign_only=True)
+            if _rt_rv is not None:
+                _rt_rv_ok = _rt_rv
+                _rv_done = _xw_rv.submit_if_lib(
+                    _rt_rv_ok, "runtime", "agent_sessions_detach",
+                    f"agent-sess-detach:{sorted(int(x) for x in rid_list)}",
+                    {"runtime_ids": [int(x) for x in rid_list]},
+                    lambda: _rt_rv_ok.detach_agent_sessions([int(x) for x in rid_list]), log)
+            if not _rv_done:
+                try:
+                    c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
+                except Exception as _e:
+                    log.warning(f"revoke {cid}: 清理 session 失败: {_e}")
         # Issue #250: 物理删除 agent_runtimes 前清理场景配置 engine_runtime_ids 悬空引用
         _cleanup_scene_engine_runtime_ids(rid_list)
         # Issue #417：级联清理 engine_capabilities（否则悬空能力标签残留）
         if rid_list:
             try:
-                _ph_ec = ",".join("?" for _ in rid_list)
-                c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({_ph_ec})", rid_list)
+                from src.kernel.domain_read import runtime_lib as _rt_blk
+                _rtb = _rt_blk()
+                if _rtb is not None:
+                    from src.kernel import cross_write as _xw_blk
+                    for _rid in rid_list:
+                        _xw_blk.submit("runtime", "engine_cap_delete_all",
+                                       f"cap-del-all:{cid}:{_rid}", {"rid": _rid},
+                                       lambda r=_rid: _rtb.delete_engine_capability(r))
+                else:
+                    _ph_ec = ",".join("?" for _ in rid_list)
+                    c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({_ph_ec})", rid_list)
             except Exception as _ece:
                 log.warning(f"revoke {cid}: 清理 engine_capabilities 失败: {_ece}")
         c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
@@ -2137,8 +2181,24 @@ def _sync_agent_tags(rid: int, cursor):
     agent_tags 是 engine_capabilities 中 enabled=1 的 tag 列表的 JSON 表示，
     供前端展示用。此函数确保两表一致。
     """
-    cursor.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rid,))
-    tags = [r[0] for r in cursor.fetchall()]
+    from src.kernel.domain_read import runtime_lib as _runtime_lib_sync
+    _rtl_sync = _runtime_lib_sync()
+    if _rtl_sync is not None:
+        tags = _rtl_sync.list_engine_tags(rid, enabled_only=True)
+    else:
+        cursor.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rid,))
+        tags = [r[0] for r in cursor.fetchall()]
+    # P3-5f-2：agent_tags 写在 runtime 域（同域进程或 lib 不可用时回落调用方 cursor）
+    from src.kernel.domain_read import runtime_lib as _rt_lib_tags
+    from src.kernel import cross_write as _xw_tags
+    _rt_tags = _rt_lib_tags(foreign_only=True)
+    if _rt_tags is not None:
+        _rt_tags_ok = _rt_tags
+        if _xw_tags.submit_if_lib(
+                _rt_tags_ok, "runtime", "agent_tags_set", f"agent-tags:{rid}",
+                {"runtime_id": int(rid), "tags": list(tags)},
+                lambda: _rt_tags_ok.set_agent_tags(int(rid), list(tags)), log):
+            return
     cursor.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (json.dumps(tags, ensure_ascii=False), rid))
 
 @router.get("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tags", summary="List engine tags", description="Lists an engine's tags.")
@@ -2148,12 +2208,23 @@ def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(
-                "SELECT id, tag, priority, enabled, created_at, updated_at "
-                "FROM engine_capabilities WHERE runtime_id=? ORDER BY tag",
-                (rid,)
-            )
-            rows = c.fetchall()
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_et
+            _rtl_et = _runtime_lib_et()
+            if _rtl_et is not None:
+                rows = [(r[0], r[1], r[2], r[3], None, None)
+                        for r in _rtl_et.list_engine_capabilities(rid)]
+            else:
+                from src.kernel.domain_read import runtime_lib as _ru_lib_440c87_f
+                _ru_lib_440c87 = _ru_lib_440c87_f(foreign_only=True)
+                if _ru_lib_440c87 is not None:
+                    rows = _ru_lib_440c87.read_all("engine_capabilities_440c87", (rid,))
+                else:
+                    c.execute(
+                        "SELECT id, tag, priority, enabled, created_at, updated_at "
+                        "FROM engine_capabilities WHERE runtime_id=? ORDER BY tag",
+                        (rid,)
+                    )
+                    rows = c.fetchall()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"tags": [
@@ -2174,15 +2245,28 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_n
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (rid,))
-            if not c.fetchone():
+            from src.kernel.domain_read import runtime_lib as _rt_lib_ex2
+            _ex2 = _rt_lib_ex2(foreign_only=True)
+            _ex_hit = (_ex2.read_one("runtime_exists", (rid,)) is not None) if _ex2 is not None else None
+            if _ex_hit is None:
+                c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (rid,))
+                _ex_hit = c.fetchone() is not None
+            if not _ex_hit:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在"})
-            c.execute(
-                "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                "VALUES (?,?,1,?,1,?,?) "
-                "ON DUPLICATE KEY UPDATE priority=VALUES(priority), updated_at=VALUES(updated_at)",
-                (rid, tag, body.priority, now, now)
-            )
+            from src.kernel.domain_read import runtime_lib as _rt_ins
+            _rti = _rt_ins()
+            if _rti is not None:
+                from src.kernel import cross_write as _xw_ins
+                _xw_ins.submit("runtime", "engine_cap_upsert", f"cap-upsert:{rid}:{tag}",
+                               {"rid": rid, "tag": tag, "priority": body.priority},
+                               lambda: _rti.upsert_engine_capability(rid, tag, priority=body.priority))
+            else:
+                c.execute(
+                    "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                    "VALUES (?,?,1,?,1,?,?) "
+                    "ON DUPLICATE KEY UPDATE priority=VALUES(priority), updated_at=VALUES(updated_at)",
+                    (rid, tag, body.priority, now, now)
+                )
             _sync_agent_tags(rid, c)
             db.commit()
         except HTTPException:
@@ -2215,12 +2299,27 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(
-                "UPDATE engine_capabilities SET priority=?, enabled=?, updated_at=? "
-                "WHERE runtime_id=? AND tag=?",
-                (body.priority, body.enabled, now, rid, tag)
-            )
-            if c.rowcount == 0:
+            from src.kernel.domain_read import runtime_lib as _rt_upd
+            _rtu = _rt_upd()
+            if _rtu is not None:
+                from src.kernel import cross_write as _xw_upd
+                _updated = {"n": 0}
+
+                def _apply_upd():
+                    _updated["n"] = _rtu.update_engine_capability(rid, tag, body.priority, body.enabled)
+
+                _xw_upd.submit("runtime", "engine_cap_update", f"cap-upd:{rid}:{tag}",
+                               {"rid": rid, "tag": tag, "priority": body.priority,
+                                "enabled": body.enabled}, _apply_upd)
+                _rowcount_upd = _updated["n"]
+            else:
+                c.execute(
+                    "UPDATE engine_capabilities SET priority=?, enabled=?, updated_at=? "
+                    "WHERE runtime_id=? AND tag=?",
+                    (body.priority, body.enabled, now, rid, tag)
+                )
+                _rowcount_upd = c.rowcount
+            if _rowcount_upd == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
             _sync_agent_tags(rid, c)
             db.commit()
@@ -2239,8 +2338,22 @@ def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_sessio
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag=?", (rid, tag))
-            if c.rowcount == 0:
+            from src.kernel.domain_read import runtime_lib as _rt_del
+            _rtd = _rt_del()
+            if _rtd is not None:
+                from src.kernel import cross_write as _xw
+                _deleted = {"n": 0}
+
+                def _apply_del():
+                    _deleted["n"] = _rtd.delete_engine_capability(rid, tag)
+
+                _xw.submit("runtime", "engine_cap_delete",
+                           f"cap-del:{rid}:{tag}", {"rid": rid, "tag": tag}, _apply_del)
+                _rowcount_del = _deleted["n"]
+            else:
+                c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag=?", (rid, tag))
+                _rowcount_del = c.rowcount
+            if _rowcount_del == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
             _sync_agent_tags(rid, c)
             db.commit()
@@ -2285,9 +2398,14 @@ def list_event_action_filters(user: dict = Depends(require_no_session_token)):
                 c.execute("SELECT id, event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, "
                           "priority, enabled FROM event_action_filter ORDER BY event_type, action")
             else:
-                c.execute("SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, "
-                          "priority, enabled FROM event_action_filter ORDER BY event_type, action")
-            rows = c.fetchall()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_3d22a6_f
+                _ru_lib_3d22a6 = _ru_lib_3d22a6_f(foreign_only=True)
+                if _ru_lib_3d22a6 is not None:
+                    rows = _ru_lib_3d22a6.read_all("event_action_filter_3d22a6", ())
+                else:
+                    c.execute("SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, "
+                              "priority, enabled FROM event_action_filter ORDER BY event_type, action")
+                rows = c.fetchall()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"rules": [
@@ -2309,11 +2427,31 @@ def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(requ
             c.execute("SELECT 1 FROM event_action_filter WHERE event_type=? AND action=?", (body.event_type, body.action))
             if c.fetchone():
                 raise HTTPException(status_code=409, detail={"code": 409, "message": "该事件/动作规则已存在"})
-            c.execute(
-                "INSERT INTO event_action_filter (event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, priority, enabled, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (body.event_type, body.action, body.allow, body.actor, body.require_changes,
-                 body.block_changes, body.handle_side_effect, body.priority, body.enabled, now, now))
+            # P3-5h：event_action_filter 在 runtime 域
+            from src.kernel.domain_read import runtime_lib as _rt_lib_ar
+            from src.kernel import cross_write as _xw_ar
+            _ar_done = False
+            _ar_fields = {
+                "event_type": body.event_type, "action": body.action, "allow": body.allow,
+                "actor": body.actor, "require_changes": body.require_changes,
+                "block_changes": body.block_changes,
+                "handle_side_effect": body.handle_side_effect,
+                "priority": body.priority, "enabled": body.enabled,
+            }
+            _rt_ar = _rt_lib_ar(foreign_only=True)
+            if _rt_ar is not None:
+                _rt_ar_ok = _rt_ar
+                _ar_done = _xw_ar.submit_if_lib(
+                    _rt_ar_ok, "runtime", "event_action_filter_add",
+                    f"eaf-add:{body.event_type}:{body.action}",
+                    {**_ar_fields, "created_at": now},
+                    lambda: _rt_ar_ok.add_event_action_filter(_ar_fields, now), log)
+            if not _ar_done:
+                c.execute(
+                    "INSERT INTO event_action_filter (event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, priority, enabled, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (body.event_type, body.action, body.allow, body.actor, body.require_changes,
+                     body.block_changes, body.handle_side_effect, body.priority, body.enabled, now, now))
             db.commit()
         except HTTPException:
             raise
@@ -2340,19 +2478,43 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
     sets.append("updated_at=?")
     params.append(now)
     params.append(rule_id)
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(f"UPDATE event_action_filter SET {', '.join(sets)} WHERE id=?", params)
-            if c.rowcount == 0:
-                raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
-            db.commit()
-        except HTTPException:
-            raise
-        except Exception as e:
-            db.rollback()
-            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
-    # 失效缓存，让新规则立即生效
+    # P3-5h：event_action_filter 在 runtime 域（写走 lib 时仍要 rowcount 判 404）
+    from src.kernel.domain_read import runtime_lib as _rt_lib_ur
+    from src.kernel import cross_write as _xw_ur
+    _ur_fields = {f: getattr(body, f) for f in
+                  ("allow", "actor", "require_changes", "block_changes",
+                   "handle_side_effect", "priority", "enabled")
+                  if getattr(body, f) is not None}
+    _ur_n: dict = {}
+    _ur_done = False
+    _rt_ur = _rt_lib_ur(foreign_only=True)
+    if _rt_ur is not None:
+        _rt_ur_ok = _rt_ur
+
+        def _apply_ur() -> None:
+            _ur_n["n"] = _rt_ur_ok.update_event_action_filter(int(rule_id), _ur_fields, now)
+
+        _ur_done = _xw_ur.submit_if_lib(
+            _rt_ur_ok, "runtime", "event_action_filter_update",
+            f"eaf-upd:{rule_id}", {"rule_id": int(rule_id), "fields": _ur_fields,
+                                   "updated_at": now}, _apply_ur, log)
+    if _ur_done:
+        if int(_ur_n.get("n") or 0) == 0:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
+    else:
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute(f"UPDATE event_action_filter SET {', '.join(sets)} WHERE id=?", params)
+                if c.rowcount == 0:
+                    raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
+                db.commit()
+            except HTTPException:
+                raise
+            except Exception as e:
+                db.rollback()
+                raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+
     try:
         from src.api import event_rule
         event_rule.load_event_action_rule(force=True)
@@ -2364,18 +2526,37 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
 def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_session_token)):
     """删除事件 action 过滤规则（删除后无规则=放行）。"""
     from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("DELETE FROM event_action_filter WHERE id=?", (rule_id,))
-            if c.rowcount == 0:
-                raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
-            db.commit()
-        except HTTPException:
-            raise
-        except Exception as e:
-            db.rollback()
-            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+    # P3-5h：event_action_filter 在 runtime 域（写走 lib 时仍要 rowcount 判 404）
+    from src.kernel.domain_read import runtime_lib as _rt_lib_dr
+    from src.kernel import cross_write as _xw_dr
+    _dr_n: dict = {}
+    _dr_done = False
+    _rt_dr = _rt_lib_dr(foreign_only=True)
+    if _rt_dr is not None:
+        _rt_dr_ok = _rt_dr
+
+        def _apply_dr() -> None:
+            _dr_n["n"] = _rt_dr_ok.delete_event_action_filter(int(rule_id))
+
+        _dr_done = _xw_dr.submit_if_lib(
+            _rt_dr_ok, "runtime", "event_action_filter_delete", f"eaf-del:{rule_id}",
+            {"rule_id": int(rule_id)}, _apply_dr, log)
+    if _dr_done:
+        if int(_dr_n.get("n") or 0) == 0:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
+    else:
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute("DELETE FROM event_action_filter WHERE id=?", (rule_id,))
+                if c.rowcount == 0:
+                    raise HTTPException(status_code=404, detail={"code": 404, "message": "规则不存在"})
+                db.commit()
+            except HTTPException:
+                raise
+            except Exception as e:
+                db.rollback()
+                raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     try:
         from src.api import event_rule
         event_rule.load_event_action_rule(force=True)

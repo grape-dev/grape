@@ -100,8 +100,6 @@ scripts/clear_*.py
 scripts/find_*.py
 scripts/phase1_*.py
 scripts/sync_*.py
-# 例外：领域库视图同步工具是迁移落地的一部分（基表加列/建表后必须跑），需入库
-!scripts/sync_domain_views.py
 scripts/trigger_*.py
 scripts/upgrade_*.py
 scripts/verify_*.py
@@ -125,21 +123,18 @@ diag_*.py
 configs/scene-sync.json
 .coverage
 
-# help.html 为生成物（由 src/help_page_gen.py 依据 help/ 渲染，启动时生成）
-src/api/static/help.html
-# OpenAPI 契约生成物（启动期由 custom_openapi(app) 落盘；固定 URL=/static/openapi.json）
+# help.html / openapi.json 生成物现在落 src/api/frontend/shell/（= STATIC_DIR，服务从这里出）
+# 这两份直接入仓（部署即用），启动期就地刷新；旧的 src/api/static/ 已删除
 help/api/openapi.json
-src/api/static/openapi.json
 
-# grape-cli 已拆为独立仓库管理（D:/Developer/grape-dev/grape/cli）
+# grape-cli 已拆为独立仓库管理（本地 clone 目录不入仓）
 cli/
-src/api/static/uploads/
+src/api/frontend/shell/uploads/
 *.log
 
 # git askpass credential script (outputs token env vars, must not be committed)
 .git-askpass.sh
 venv/
-venv
 
 # review bot temp drafts
 .review-body-*.json
@@ -154,17 +149,19 @@ _e2e_test.py
 configs/oauth-providers.json
 .upgrade-backup/
 .project-info/
+# Vue refactor
+src/api/frontend/app/node_modules/
+src/api/frontend/static-dist/
 _uid_backup*.json
 
-# 域内运行时状态目录（服务运行期写入，不入库）：
-#   src/domains/runtime/data/im_dingtalk_card_mode  ← 钉钉互动卡片全局开关
-# 根目录 data/ 由上面的 data/* 覆盖；这里覆盖 src/ 下的域内 data/。
-src/**/data/
 
-# 凭据与构建产物（§3-4 承前遗留项一并收口；.env 已在上方，这里覆盖 .env.local/.env.* 变体）
+# ── 合入 arch-weekly-11 新增忽略项（2026-11-13）──
+# 只保留既有规则未覆盖的项；指向已删除目录（src/api/static/）的条目已移除，
+# 与上文重复的 venv / dist/ 也已移除。
+!scripts/sync_domain_views.py
+src/**/data/
 *.pem
 *.key
-dist/
 build/
 .env*
 !.env.example

@@ -46,6 +46,11 @@ test-domains: ## Run tests per domain in isolated processes (stable order; see t
 		$(TEST_PYTHON) -m pytest tests/$$d -q --continue-on-collection-errors || rc=1; \
 	done; exit $$rc
 
+test-js: ## Run the node test suite (tests/js/**) — 此前无执行入口（复审 N-4）
+	@rc=0; for f in tests/js/test_*.js; do \
+		echo "== $$f"; node "$$f" >/dev/null || { rc=1; echo "FAILED: $$f"; }; \
+	done; exit $$rc
+
 test-fast: ## Run pytest (fast: skip slow/e2e markers)
 	$(PYTHON) -m pytest tests/ -v -m "not e2e_ui and not atomic"
 

@@ -126,16 +126,21 @@ class TestSceneMarketGlobalExceptionSanitized:
 
     def test_global_handler_returns_generic_message(self):
         import asyncio
-        from src.api.main import global_exception_handler
+        from fastapi import FastAPI
+        from src.api.exception_handlers import install_exception_handlers
         from starlette.requests import Request
 
+        # Issue #596 重构后处理器由 install_exception_handlers 注册（main.py 不再单独导出）
+        app = FastAPI()
+        install_exception_handlers(app)
+        handler = app.exception_handlers[Exception]
         scope = {
             "type": "http", "headers": [], "request_id": "req-test-411",
             "method": "GET", "path": "/api/scenes/market", "query_string": b"",
             "scheme": "http", "server": ("testserver", 80), "root_path": "",
         }
         req = Request(scope=scope)
-        resp = asyncio.run(global_exception_handler(
+        resp = asyncio.run(handler(
             req, RuntimeError('near "LIMIT": syntax error ... OFFSET must not be negative ... scene_market')))
         assert resp.status_code == 500
         body = resp.body.decode() if isinstance(resp.body, bytes) else str(resp.body)

@@ -2024,25 +2024,53 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
         storage = get_storage()
         if storage is not None:
             from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                obs_rows = db.cursor().execute(
-                    "SELECT obs_key FROM agent_shared_knowledge "
-                    "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
-                    "AND obs_key!='' AND obs_key IS NOT NULL",
-                    (evt["repo_key"], scope, _ag, _in)
-                ).fetchall()
+            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_obs
+            _mg_obs = _mgmt_lib_obs()
+            if _mg_obs is not None:
+                obs_rows = [(k,) for k in
+                            _mg_obs.list_knowledge_obs_keys(evt["repo_key"], scope, _ag, _in)]
+            else:
+                with db_lock:
+                    obs_rows = db.cursor().execute(
+                        "SELECT obs_key FROM agent_shared_knowledge "
+                        "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
+                        "AND obs_key!='' AND obs_key IS NOT NULL",
+                        (evt["repo_key"], scope, _ag, _in)
+                    ).fetchall()
             for (obs_key,) in obs_rows:
                 storage.delete_object(obs_key)
     except Exception:
         pass
 
     # 3. 删 DB 记录（agent_shared_knowledge + scene_knowledge_ref）
+    # P3-5b：知识表是 mgmt 基表；runtime 进程写入走 mgmt lib + 幂等意图
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_kdel
+    _mg_kdel = _mgmt_lib_kdel(foreign_only=True)
+    if _mg_kdel is not None:
+        try:
+            from src.kernel import cross_write as _xw_kdel
+            _res_kdel = _xw_kdel.submit(
+                "mgmt", "knowledge_event_delete",
+                _xw_kdel.unique_key(f"knowledge-event-delete:{evt['repo_key']}:{scope}:{_ag}:{_in}"),
+                {"repo_key": evt["repo_key"], "scope": scope, "agent_type": _ag,
+                 "issue_num": int(_in)},
+                lambda: _mg_kdel.delete_event_knowledge(evt["repo_key"], scope, _ag, int(_in)))
+            if _res_kdel.get("status") == "failed":
+                log.warning(f"event knowledge delete queued for retry: {_res_kdel.get('error')}")
+            return {"ok": True, "scope": scope, "message": "知识已删除"}
+        except Exception as _e_kdel:
+            log.warning(f"event knowledge delete via lib failed, fallback to local SQL: {_e_kdel}")
     with db_lock:
         c = db.cursor()
-        rows = c.execute(
-            "SELECT id FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
-            (evt["repo_key"], scope, _ag, _in)
-        ).fetchall()
+        from src.kernel.domain_read import mgmt_lib as _mg_lib_kids
+        _kids_lib = _mg_lib_kids(foreign_only=True)
+        if _kids_lib is not None:
+            rows = _kids_lib.read_all("knowledge_ids_scoped", (evt["repo_key"], scope, _ag, _in))
+        else:
+            rows = c.execute(
+                "SELECT id FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
+                (evt["repo_key"], scope, _ag, _in)
+            ).fetchall()
         for (kid,) in rows:
             c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,))
         c.execute(

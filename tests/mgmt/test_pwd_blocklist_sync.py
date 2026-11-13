@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """弱密码黑名单前后端同步对账（随 CI 跑的机制性校验）。
 
-背景：前端 src/api/static/js/pwd-blocklist.js 由 scripts/gen-pwd-blocklist.py
+背景：前端 src/api/frontend/shell/js/pwd-blocklist.js 由 scripts/gen-pwd-blocklist.py
 从后端 src/domains/mgmt/auth/password.py _WEAK_PASSWORDS 生成。两份真源靠纪律维持会漂移
 （后端改了黑名单忘记重新生成 → 前端三条件全绿、后端悄悄拒绝，错位回归）。
 本测试把"纪律"变成"机制"：现场按生成器同款逻辑生成期望内容，与磁盘产物
@@ -14,8 +14,8 @@ import re
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
-PRODUCT = ROOT / "src" / "api" / "static" / "js" / "pwd-blocklist.js"
-REGISTER_HTML = ROOT / "src" / "api" / "static" / "register.html"
+PRODUCT = ROOT / "src" / "api" / "frontend" / "shell" / "js" / "pwd-blocklist.js"
+REGISTER_HTML = ROOT / "src" / "api" / "frontend" / "shell" / "register.html"
 
 HEADER = (
     "// 自动生成：与后端 src/domains/mgmt/auth/password.py _WEAK_PASSWORDS 同源（后端更新后须重新生成，scripts/gen-pwd-blocklist.py）\n"

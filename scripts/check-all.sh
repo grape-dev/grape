@@ -27,9 +27,18 @@ echo "=== Running all contract checks ==="
 # --require-baseline：基线快照（help/api/openapi-baseline.json）缺失时 FAIL，
 # 版本间比对不再静默跳过（QA 审查修复项）。
 "$PY" scripts/check-openapi-endpoints.py --require-baseline || exit 1
+# 跨库视图新鲜度（缺列 1054 / 视图多余列 / 孤儿视图 1146 / 列类型漂移；
+# 缺视图默认只报告（owner-only 新表不卡门禁），需要跨域的表登记在 create-missing 清单；
+# 未配置 DB_HOST 时跳过，配置了但连不上则失败）
+"$PY" scripts/domain_view_freshness.py --check --skip-if-unavailable \
+    --strict-owner --known-duplicates scripts/view_owner_known_duplicates.txt \
+    --create-missing-tables scripts/view_create_missing_allowlist.txt \
+    --narrowed-tables scripts/view_narrowed_allowlist.txt \
+    --ignore-missing-tables scripts/view_ignore_missing_tables.txt || exit 1
 # 四进程路由漂移：nginx 分流 vs 各进程实际路由（无 nginx/无进程时自动跳过）
 if [ -f "${GRAPE_NGINX_CONF:-/etc/nginx/conf.d/grape.conf}" ]; then
-  "$PY" scripts/probe/route_contract_probe.py || exit 1
+  # --warmup：先预热 worker 包/安装包等重接口，避免部署刚重启时的冷启动超时被误判为 unreachable
+  "$PY" scripts/probe/route_contract_probe.py --warmup || exit 1
 else
   echo "[skip] route_contract_probe: nginx conf 不存在"
 fi
@@ -47,6 +56,21 @@ if [ -n "${GRAPE_PR_FILES:-}" ]; then
   echo "--- doc-redaction (changed files) ---"
   # shellcheck disable=SC2086
   python3 scripts/check-doc-redaction.py --files $GRAPE_PR_FILES || exit 1
+fi
+# PR #1377 复审 I-5：check-all 全绿 ≠ 守卫绿。两条前端缓存棘轮（页面模块 ?v= 冻结表、
+# 语言包内容指纹/cacheVer 单调）与 node 前端用例此前不在本门禁内，导致「check-all exit 0」
+# 掩盖了 head 上真实失败的守卫。此处纳入统一门禁。
+"$PY" -m pytest -q tests/api/test_frontend_cache_version_ratchet.py \
+                      tests/api/test_i18n_locale_cache_ratchet.py || exit 1
+if command -v node >/dev/null 2>&1; then
+  _rc=0
+  for _f in tests/js/test_*.js; do
+    node "$_f" >/dev/null || { echo "[FAIL] $_f" >&2; _rc=1; }
+  done
+  [ "$_rc" = 0 ] || exit 1
+  echo "[ok] tests/js (node)"
+else
+  echo "[skip] tests/js: node 不可用"
 fi
 # smoke-admin.sh needs a running server (localhost:3000); run manually after deploy
 # ./scripts/smoke-admin.sh
