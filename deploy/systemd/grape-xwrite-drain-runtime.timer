@@ -2,8 +2,9 @@
 Description=Run the Grape runtime-domain cross-domain write compensation drain every 5 minutes
 
 [Timer]
-OnBootSec=4min
-OnUnitActiveSec=5min
+# 与 mgmt 排水单元错开 2 分钟（:02/07/12… vs :00/05/10…），避免两个进程并发回填 1213 死锁。
+OnBootSec=6min
+OnCalendar=*:2/5:00
 AccuracySec=30s
 Unit=grape-xwrite-drain-runtime.service
 
