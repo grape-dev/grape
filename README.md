@@ -120,19 +120,23 @@ Install and start the Grape platform for me by following https://gitcode.com/gra
 
 Execution engine and model configuration, hosting your first repository, the preflight check and deployment are covered in **[SETUP.AGENT.md](SETUP.AGENT.md)**.
 
+Prerequisites: Python ≥ 3.10 (the script creates its own `venv`); on mainland networks the install uses the Aliyun PyPI mirror (`mirrors.aliyun.com`). Full steps: [SETUP.HUMAN.md](SETUP.HUMAN.md).
+
+First-time deployment? Follow the self-check list: [docs/0-to-1-checklist.md](docs/0-to-1-checklist.md).
+
 <details>
 <summary><strong>② Manual installation (one command)</strong></summary>
 
 **GitHub**
 
 ```bash
-git clone https://github.com/grape-dev/grape.git && python grape/quickstart.py
+git clone https://github.com/grape-dev/grape.git && python3 grape/quickstart.py
 ```
 
 **GitCode**
 
 ```bash
-git clone https://gitcode.com/grape-dev/grape.git && python grape/quickstart.py
+git clone https://gitcode.com/grape-dev/grape.git && python3 grape/quickstart.py
 ```
 
 **Windows PowerShell** (5.1 does not support `&&` — use `;` instead; the GitHub URL works the same way):

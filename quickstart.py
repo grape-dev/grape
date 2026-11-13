@@ -271,6 +271,27 @@ def start_native(vp: Path, production: bool, foreground: bool) -> None:
     print(f"\n访问 http://localhost:3000   ·   停止：{'taskkill /PID ' + str(proc.pid) + ' /F' if IS_WIN else 'kill ' + str(proc.pid)}")
 
 
+def ensure_jwt(env: Path) -> str:
+    """确保 .env 里有可用的 JWT_SECRET：占位值/空值/过短视为缺失并就地替换。
+
+    返回 "generated" 或 "existing"。
+    """
+    PLACEHOLDERS = {"your-jwt-secret-change-in-production", "your-jwt-secret", "change-me", "changeme"}
+    text = env.read_text(encoding="utf-8") if env.exists() else ""
+    cur = ""
+    for ln in text.splitlines():
+        if ln.strip().startswith("JWT_SECRET="):
+            cur = ln.split("=", 1)[1].strip()
+            break
+    if len(cur) >= 8 and cur.lower() not in PLACEHOLDERS:
+        return "existing"
+    lines = [ln for ln in text.splitlines() if not ln.strip().startswith("JWT_SECRET=")]
+    lines.append(f"JWT_SECRET={secrets.token_hex(32)}")
+    env.parent.mkdir(parents=True, exist_ok=True)
+    env.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return "generated"
+
+
 def start_docker(dc: list[str]) -> None:
     cf = compose_file()
     if cf and cf.parent != HERE:
@@ -280,16 +301,15 @@ def start_docker(dc: list[str]) -> None:
     if not env.exists() and (HERE / ".env.example").exists():
         shutil.copyfile(HERE / ".env.example", env)
         ok("已从 .env.example 复制 .env")
-    text = env.read_text(encoding="utf-8") if env.exists() else ""
-    if "JWT_SECRET=" not in text or len(text.split("JWT_SECRET=", 1)[1].splitlines()[0].strip()) < 8:
-        with env.open("a", encoding="utf-8") as fh:
-            fh.write(f"\nJWT_SECRET={secrets.token_hex(32)}\n")
-        ok("已生成并写入 JWT_SECRET（compose 文件缺它会立刻退出）")
+    if ensure_jwt(env) == "generated":
+        ok("已生成并写入 JWT_SECRET（compose 文件缺它会立刻退出；.env.example 的占位值视为缺失）")
     else:
         ok("JWT_SECRET 已存在")
 
     step("Docker：构建并启动")
-    r = subprocess.run(dc + ["up", "-d", "--build"], cwd=str(HERE))
+    # compose 的 .env 插值按 compose 文件所在目录解析，必须显式指向仓库根的 .env
+    up = dc + ["--env-file", str(env), "up", "-d", "--build"]
+    r = subprocess.run(up, cwd=str(HERE))
     if r.returncode != 0:
         die(f"compose 启动失败。排障：{' '.join(dc)} logs --tail=50")
     ok(f"容器已启动（{' '.join(dc)}）")

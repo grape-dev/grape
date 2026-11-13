@@ -7,13 +7,13 @@
 **GitHub**
 
 ```bash
-git clone https://github.com/grape-dev/grape.git && python grape/quickstart.py
+git clone https://github.com/grape-dev/grape.git && python3 grape/quickstart.py
 ```
 
 **GitCode**
 
 ```bash
-git clone https://gitcode.com/grape-dev/grape.git && python grape/quickstart.py
+git clone https://gitcode.com/grape-dev/grape.git && python3 grape/quickstart.py
 ```
 
 > 下文手工步骤里的仓库地址以 GitHub 为准；换 GitCode 镜像只需把 `https://github.com/grape-dev/grape.git` 换成 `https://gitcode.com/grape-dev/grape.git`。

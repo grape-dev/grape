@@ -55,7 +55,7 @@ Grape 把任意 Git 项目变成一支 AI 自主开发团队：需求、实现�
 | **五段 Agent 流水线** | VOD 收集声音建单 → Issue 分类指派 → Coding 编码提 PR → QA 审查与安全扫描 → SRE 构建部署运维；Chat Agent 随时问答。事件进来即自动贯穿全流程。 |
 | **一键托管任意 Git 项目** | 选模板或喂现有仓库 → 自动套用「Agent × Skill」场景 → 异步首次引导（分析项目、建体验部署与探索 Issue）→ 此后每个 Issue / PR 自动处理。 |
 | **Skills 技能库** | 15+ 官方技能覆盖全流程（声音收集、Issue 管理、代码实现、PR 审查、构建部署运维、通知、托管引导），支持官方 / 仓库级 / 个人级三态自定义。 |
-| **多租户与可审计** | GitCode OAuth 动态建号、登录白名单、凭据按用户隔离；每次 Agent 执行留痕（日志 / 耗时 / 结论），Pipeline 可追踪。 |
+| **多租户与可审计** | GitHub / GitCode OAuth 动态建号、登录白名单、凭据按用户隔离；每次 Agent 执行留痕（日志 / 耗时 / 结论），Pipeline 可追踪。 |
 | **引擎可插拔** | opencode / codearts 等多后端切换，按 online-healthy-installed 选型。 |
 
 ## 三、解决的问题
@@ -120,19 +120,23 @@ Agent 任务的 59% 集中于流水线两端：VOD 将模糊需求收敛为可�
 
 执行引擎与模型配置、托管首个仓库、环境自检、上线部署等其余事项，见 **[SETUP.AGENT.md](SETUP.AGENT.md)**。
 
+前置依赖：Python ≥ 3.10（脚本会自动创建 `venv`）；国内网络默认走阿里云 PyPI 镜像（`mirrors.aliyun.com`）。完整步骤见 [SETUP.HUMAN.zh.md](SETUP.HUMAN.zh.md)。
+
+首次上线？按自检清单逐项过一遍：[docs/0-to-1-checklist.md](docs/0-to-1-checklist.md)。
+
 <details>
 <summary><strong>② 人工安装（一条命令）</strong></summary>
 
 **GitHub**
 
 ```bash
-git clone https://github.com/grape-dev/grape.git && python grape/quickstart.py
+git clone https://github.com/grape-dev/grape.git && python3 grape/quickstart.py
 ```
 
 **GitCode**
 
 ```bash
-git clone https://gitcode.com/grape-dev/grape.git && python grape/quickstart.py
+git clone https://gitcode.com/grape-dev/grape.git && python3 grape/quickstart.py
 ```
 
 **Windows PowerShell**（5.1 不支持 `&&`，用 `;` 代替，仓库地址换成 GitHub 的亦可）：
