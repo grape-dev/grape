@@ -193,7 +193,9 @@
     "guide_manifest_btn": "Copy app manifest",
     "guide_manifest_show": "Show app manifest JSON",
     "hint_dingtalk_app_id": "AppKey",
-    "hint_dingtalk_secret": "AppSecret"
+    "hint_dingtalk_secret": "AppSecret",
+    "wechat_pin_label": "Verification code shown on your phone",
+    "wechat_qr_close": "Close"
   },
   "current_engine": "Current",
   "recall": {

@@ -81,13 +81,12 @@
                 <div class="imc__pcard-en">{{ p.name }}</div>
               </div>
             </div>
-            <div class="imc__pcard-desc">{{ p.desc }}</div>
+            <div class="imc__pcard-desc">{{ descOf(key) }}</div>
             <div class="imc__pcard-status">
-              <span v-if="p.disabled">—</span>
-              <span v-else-if="platformConfig(key).app_id" class="imc__st-ok">
-                <span class="dot"></span>{{ imt('connected') }}
+              <span v-if="badgeOf(key).tone === 'ok'" class="imc__st-ok">
+                <span class="dot"></span>{{ badgeOf(key).text }}
               </span>
-              <span v-else class="imc__st-no">{{ imt('not_connected') }}</span>
+              <span v-else class="imc__st-no">{{ badgeOf(key).text }}</span>
             </div>
           </div>
         </div>
@@ -110,7 +109,7 @@
               </div>
               <div class="imc__cfg-name">
                 <div class="imc__cfg-title">{{ dispName(cur) }} {{ imt('config') }}</div>
-                <div class="imc__cfg-desc">{{ cur.desc }}</div>
+                <div class="imc__cfg-desc">{{ descOf(current) }}</div>
               </div>
               <div v-if="isConfigured" class="imc__cfg-ok">
                 <span class="dot"></span>{{ imt('connected') }}
@@ -118,39 +117,47 @@
             </div>
 
             <div class="imc__cfg-row">
-              <div class="imc__field">
-                <label>{{ ct('chat.app_id') }}</label>
-                <input v-model="form.app_id" :placeholder="cur.name + ' App ID'" />
-              </div>
-              <div class="imc__field">
-                <label>{{ ct('chat.app_secret') }}</label>
+              <div
+                v-for="f in curFields"
+                :key="f.key"
+                class="imc__field"
+                :class="{ 'imc__field--wide': curFields.length === 1 }"
+              >
+                <label>{{ fieldLabel(f) }}</label>
                 <input
-                  v-model="form.app_secret"
-                  type="password"
-                  :placeholder="cur.name + ' App Secret'"
+                  v-model="form[f.key]"
+                  :type="f.type"
+                  :readonly="f.readonly"
+                  :placeholder="fieldPlaceholder(f)"
                 />
+              </div>
+            </div>
+            <div v-if="current === 'wechat'" class="imc__cfg-tip">{{ imt('guide_wechat_s1') }}</div>
+
+            <div v-if="qr.open" class="imc__qr">
+              <img v-if="qr.img" :src="qr.img" alt="wechat qr" class="imc__qr-img" />
+              <div class="imc__qr-side">
+                <div class="imc__qr-status">{{ qr.text }}</div>
+                <div v-if="qr.needPin" class="imc__field">
+                  <label>{{ imt('wechat_pin_label') }}</label>
+                  <input v-model="qr.pin" type="text" placeholder="1234" />
+                </div>
+                <div class="imc__qr-actions">
+                  <AGButton v-if="qr.needPin" size="sm" @click="submitWechatPin">{{ imt('wechat_pin_submit') }}</AGButton>
+                  <AGButton variant="plain" size="sm" @click="closeQr">{{ imt('wechat_qr_close') }}</AGButton>
+                </div>
               </div>
             </div>
 
             <div class="imc__cfg-actions">
-              <AGButton variant="plain" @click="scanOnboard">
-                <svg
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <rect x="3" y="3" width="18" height="18" rx="2" />
-                  <path d="M7 7h10M7 12h6M7 17h4" />
-                </svg>
+              <AGButton v-if="current === 'wechat'" variant="plain" @click="startWechatBind">
+                {{ imt('btn_scan_wechat') }}
+              </AGButton>
+              <AGButton v-else-if="current === 'feishu'" variant="plain" @click="scanOnboard">
                 {{ ct('chat.scan_config') }}
               </AGButton>
               <AGButton @click="save">{{ ct('common.save') }}</AGButton>
-              <AGButton v-if="isConfigured" variant="danger" @click="unbind">{{
-                imt('unbind')
-              }}</AGButton>
+              <AGButton v-if="isConfigured" variant="danger" @click="unbind">{{ imt('unbind') }}</AGButton>
             </div>
           </AGCard>
 
@@ -170,9 +177,26 @@
               <circle cx="12" cy="12" r="10" />
               <path d="M12 16v-4M12 8h.01" />
             </svg>
-            <div>
-              <div class="imc__help-title">{{ imt('help_title') }}</div>
-              <div>{{ imt('help_desc') }}</div>
+            <div class="imc__help-body">
+              <div class="imc__help-title">{{ guideTitle }}</div>
+              <ol class="imc__guide-list">
+                <li v-for="(st, i) in curGuide.steps" :key="i" v-html="st"></li>
+              </ol>
+              <div v-if="curGuide.tip" class="imc__guide-tip">{{ curGuide.tip }}</div>
+              <div class="imc__guide-actions">
+                <a
+                  v-if="curGuide.url"
+                  :href="curGuide.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="imc__guide-link"
+                  :style="{ color: cur.color, borderColor: cur.color + '55' }"
+                  >{{ imt('guide_url_' + current) }} ↗</a
+                >
+                <button v-if="current === 'slack'" class="imc__guide-link" type="button" @click="copyManifest">
+                  {{ imt('guide_manifest_btn') }}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -182,7 +206,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch, onBeforeUnmount } from 'vue'
 import AGCard from '@/components/ui/AGCard.vue'
 import AGButton from '@/components/ui/AGButton.vue'
 
@@ -192,116 +216,205 @@ const loading = ref(true)
 const error = ref(false)
 const config = ref(null)
 const current = ref('feishu')
+const live = ref({}) // channel_type -> {connected, status}（来自 /im/installations）
 const form = reactive({ app_id: '', app_secret: '' })
 
+// 2026-11-13：与后端 Type 枚举对齐的 6 个渠道（feishu/wecom/dingtalk/slack/telegram/wechat）。
+// 品牌色只用于卡片强调色与图标底，不写死凭据字段——字段由 FIELDS 表驱动。
 const platforms = {
-  feishu: {
-    name: 'Feishu',
-    nameZh: '飞书',
-    color: '#3370FF',
-    bg: 'color-mix(in srgb, #3370FF 14%, transparent)',
-    bgLight: 'color-mix(in srgb, #3370FF 8%, transparent)',
-    gradient: 'linear-gradient(135deg,#3370FF,#5B8EFF)',
-    desc: 'Lark / Feishu Open Platform',
+  feishu: { name: 'Feishu', color: '#3370FF' },
+  wecom: { name: 'WeCom', color: '#07C160' },
+  dingtalk: { name: 'DingTalk', color: '#1677FF' },
+  slack: { name: 'Slack', color: '#611F69' },
+  telegram: { name: 'Telegram', color: '#2AABEE' },
+  wechat: { name: 'WeChat', color: '#1AAD19' },
+}
+for (const k of Object.keys(platforms)) {
+  platforms[k].bg = 'color-mix(in srgb, ' + platforms[k].color + ' 14%, transparent)'
+  platforms[k].bgLight = 'color-mix(in srgb, ' + platforms[k].color + ' 8%, transparent)'
+  platforms[k].gradient = 'linear-gradient(135deg,' + platforms[k].color + ',' + platforms[k].color + 'bb)'
+}
+
+// 每个渠道的凭据字段：label 为完整 i18n key；placeholder 可选；readonly 用于扫码写入的渠道。
+const FIELDS = {
+  feishu: [
+    { key: 'app_id', type: 'text', label: 'chat.app_id' },
+    { key: 'app_secret', type: 'password', label: 'chat.app_secret' },
+  ],
+  wecom: [
+    { key: 'app_id', type: 'text', label: 'chat.im_channel.label_wecom_app_id', ph: 'hint_wecom_app_id' },
+    { key: 'app_secret', type: 'password', label: 'chat.im_channel.label_wecom_secret', ph: 'hint_wecom_secret' },
+  ],
+  dingtalk: [
+    { key: 'app_id', type: 'text', label: 'chat.im_channel.label_dingtalk_app_id', ph: 'hint_dingtalk_app_id' },
+    { key: 'app_secret', type: 'password', label: 'chat.im_channel.label_dingtalk_secret', ph: 'hint_dingtalk_secret' },
+  ],
+  slack: [
+    { key: 'app_id', type: 'password', label: 'chat.im_channel.label_slack_app_id' },
+    { key: 'app_secret', type: 'password', label: 'chat.im_channel.label_slack_secret' },
+  ],
+  telegram: [
+    { key: 'app_id', type: 'password', label: 'chat.im_channel.label_telegram_app_id', ph: 'hint_telegram_app_id' },
+  ],
+  wechat: [
+    { key: 'app_id', type: 'text', label: 'chat.im_channel.label_wechat_app_id', ph: 'hint_wechat_app_id', readonly: true },
+  ],
+}
+
+// 各平台接入后台地址（按钮文案走 guide_url_<p>，地址集中在 JS，避免 i18n 里出现 URL）
+const GUIDE_URLS = {
+  feishu: 'https://open.feishu.cn/app',
+  wecom: 'https://work.weixin.qq.com/wework_admin/frame#apps',
+  dingtalk: 'https://open-dev.dingtalk.com/fe/app#/corp/app',
+  slack: 'https://api.slack.com/apps',
+  telegram: 'https://t.me/BotFather',
+}
+
+// Slack App Manifest（Issue #1309）：Socket Mode + 最小 scope，直接粘贴到 api.slack.com/apps 建应用
+const SLACK_MANIFEST = {
+  display_information: { name: 'grape-devops', description: 'Grape DevOps assistant', background_color: '#611f69' },
+  features: { bot_user: { display_name: 'grape', always_online: true } },
+  oauth_config: {
+    scopes: {
+      bot: ['app_mentions:read', 'channels:history', 'chat:write', 'files:write', 'groups:history', 'im:history', 'im:read', 'im:write', 'reactions:write'],
+    },
   },
-  wecom: {
-    name: 'WeCom',
-    nameZh: '企业微信',
-    color: '#07C160',
-    bg: 'color-mix(in srgb, #07C160 14%, transparent)',
-    bgLight: 'color-mix(in srgb, #07C160 8%, transparent)',
-    gradient: 'linear-gradient(135deg,#07C160,#2DD879)',
-    desc: 'WeCom / Enterprise WeChat',
-    disabled: true,
-  },
-  dingtalk: {
-    name: 'DingTalk',
-    nameZh: '钉钉',
-    color: '#1677FF',
-    bg: 'color-mix(in srgb, #1677FF 14%, transparent)',
-    bgLight: 'color-mix(in srgb, #1677FF 8%, transparent)',
-    gradient: 'linear-gradient(135deg,#1677FF,#3D8BFF)',
-    desc: 'DingTalk / DingTalk Open Platform',
-    disabled: true,
+  settings: {
+    event_subscriptions: {
+      bot_events: ['app_mention', 'message.channels', 'message.groups', 'message.im'],
+    },
+    interactivity: { is_enabled: true },
+    org_deploy_enabled: false,
+    socket_mode_enabled: true,
+    token_rotation_enabled: false,
   },
 }
 
 const cur = computed(() => platforms[current.value])
+const curFields = computed(() => FIELDS[current.value] || FIELDS.feishu)
 const curConfig = computed(() => platformConfig(current.value))
 const isConfigured = computed(() => !!curConfig.value.app_id)
+const curGuide = computed(() => guideOf(current.value))
+const guideTitle = computed(() => imt('guide_title', { n: String(curGuide.value.steps.length) }))
 
 function ct(key) {
   return G.I18N.t(key)
 }
-function imt(key) {
-  return G.I18N.t('chat.im_channel.' + key)
+function imt(key, vars) {
+  const full = 'chat.im_channel.' + key
+  const v = G.I18N.t(full, vars)
+  return v && v !== full ? v : ''
 }
 function dispName(p) {
-  return G.I18N.getLang() === 'zh' ? p.nameZh : p.name
+  const key = Object.keys(platforms).find(function (k) { return platforms[k] === p })
+  return imt('platform_' + key) || p.name
+}
+function descOf(key) {
+  return imt('desc_' + key)
+}
+function fieldLabel(f) {
+  return f.label.indexOf('chat.im_channel.') === 0 ? imt(f.label.slice(16)) : G.I18N.t(f.label)
+}
+function fieldPlaceholder(f) {
+  if (f.ph) return imt(f.ph)
+  return (dispName(cur.value) || '') + ' ' + fieldLabel(f)
 }
 function platformConfig(key) {
   return (config.value && config.value.im && config.value.im[key]) || {}
+}
+function badgeOf(key) {
+  const inst = live.value[key]
+  const cfg = platformConfig(key)
+  if (inst && inst.connected) return { tone: 'ok', text: imt('badge_connected') }
+  if (cfg && cfg.app_id) return { tone: 'no', text: inst ? imt('badge_configured_offline') : imt('badge_configured') }
+  return { tone: 'no', text: imt('badge_none') }
+}
+function guideOf(key) {
+  const steps = []
+  for (let i = 1; i <= 4; i++) {
+    const v = imt('guide_' + key + '_s' + i)
+    if (v) steps.push(v)
+  }
+  return { steps: steps, tip: imt('guide_' + key + '_tip'), url: GUIDE_URLS[key] || '' }
+}
+
+function qs() {
+  const repo = G.app.currentRepo()
+  return repo ? '?repo=' + encodeURIComponent(repo.fullName) : ''
 }
 
 function load() {
   loading.value = true
   error.value = false
-  const repo = G.app.currentRepo()
-  const qs = repo ? '?repo=' + encodeURIComponent(repo.fullName) : ''
-  G.API.get('/chat/config' + qs)
-    .then((d) => {
+  G.API.get('/chat/config' + qs())
+    .then(function (d) {
       config.value = d
-      const p = d.im || {}
-      if (p.dingtalk && p.dingtalk.app_id) current.value = 'dingtalk'
-      else if (p.wecom && p.wecom.app_id) current.value = 'wecom'
-      else current.value = 'feishu'
+      const im = d.im || {}
+      const bound = Object.keys(platforms).find(function (k) {
+        return im[k] && im[k].app_id
+      })
+      current.value = (im.provider && platforms[im.provider]) ? im.provider : bound || 'feishu'
       syncForm()
       loading.value = false
+      loadLive()
     })
-    .catch(() => {
+    .catch(function () {
       error.value = true
       loading.value = false
     })
 }
 
-function syncForm() {
-  form.app_id = curConfig.value.app_id || ''
-  form.app_secret = curConfig.value.app_secret_exists ? '********' : ''
+function loadLive() {
+  // 只取连接状态给徽标用（正式界面不展示运维面板）
+  G.API.get('/im/installations' + qs())
+    .then(function (list) {
+      const map = {}
+      ;(list && list.installations ? list.installations : []).forEach(function (it) {
+        if (!it || it.status === 'revoked' || !it.channel_type) return
+        map[it.channel_type] = { connected: !!it.connected, status: it.status }
+      })
+      live.value = map
+    })
+    .catch(function () {
+      live.value = {}
+    })
 }
 
-// keep form in sync when switching provider
-import { watch } from 'vue'
-watch(current, () => syncForm())
+function syncForm() {
+  const cfg = curConfig.value || {}
+  form.app_id = cfg.app_id || ''
+  form.app_secret = cfg.app_secret_exists || cfg.app_secret ? '********' : ''
+}
+watch(current, function () {
+  syncForm()
+  closeQr()
+})
 
 function save() {
   const secret = form.app_secret === '********' ? '' : form.app_secret
-  const im = {}
-  im[current.value] = { app_id: form.app_id, app_secret: secret }
-  const repo = G.app.currentRepo()
-  const qs = repo ? '?repo=' + encodeURIComponent(repo.fullName) : ''
-  G.API.put('/chat/config' + qs, { im })
-    .then(() => {
+  const payload = { im: { provider: current.value, app_id: form.app_id, app_secret: secret } }
+  G.API.put('/chat/config' + qs(), payload)
+    .then(function () {
       G.app.showToast(G.I18N.t('chat.config.saved'))
       load()
     })
-    .catch((e) => G.app.showToast(G.I18N.t('chat.config.save_failed', { msg: e.message })))
+    .catch(function (e) {
+      G.app.showToast(G.I18N.t('chat.config.save_failed', { msg: e.message }))
+    })
 }
 
-/** 解绑当前渠道（Issue #294）：置空 app_id 走既有 PUT 语义，后端同步清理注册表/会话/映射。 */
 function unbind() {
   G.app.showConfirm(
     imt('unbind_confirm'),
     function () {
-      const im = {}
-      im[current.value] = { app_id: '', app_secret: '' }
-      const repo = G.app.currentRepo()
-      const qs = repo ? '?repo=' + encodeURIComponent(repo.fullName) : ''
-      G.API.put('/chat/config' + qs, { im })
-        .then(() => {
+      G.API.put('/chat/config' + qs(), { im: { provider: current.value, app_id: '', app_secret: '' } })
+        .then(function () {
           G.app.showToast(imt('unbind_success'))
           load()
         })
-        .catch((e) => G.app.showToast(imt('unbind_failed', { msg: e.message })))
+        .catch(function (e) {
+          G.app.showToast(imt('unbind_failed', { msg: e.message }))
+        })
     },
     { danger: true }
   )
@@ -310,6 +423,78 @@ function unbind() {
 function scanOnboard() {
   G.startFeishuOnboard('chat_bot')
 }
+
+function copyManifest() {
+  const text = JSON.stringify(SLACK_MANIFEST, null, 2)
+  const ok = function () { G.app.showToast(imt('copy_ok')) }
+  const fail = function () { G.app.showToast(imt('copy_fail')) }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(ok).catch(fail)
+      return
+    }
+  } catch (e) { /* fallthrough */ }
+  fail()
+}
+
+// ── 微信 ilink 扫码绑定（Issue #1728）──
+const qr = reactive({ open: false, id: '', img: '', text: '', needPin: false, pin: '' })
+let qrTimer = null
+
+function startWechatBind() {
+  qr.open = true
+  qr.img = ''
+  qr.needPin = false
+  qr.pin = ''
+  qr.text = G.I18N.t('chat.im_channel.loading') || '…'
+  G.API.post('/chat/im/wechat/login/start', {})
+    .then(function (res) {
+      qr.id = (res && res.id) || ''
+      qr.img = (res && (res.qrcode_img_content || res.qrcode_url)) || ''
+      pollWechat()
+    })
+    .catch(function (e) {
+      qr.text = imt('err_qr_failed') + (e && e.message ? e.message : '')
+    })
+}
+
+function pollWechat() {
+  if (qrTimer) clearTimeout(qrTimer)
+  qrTimer = setTimeout(function () {
+    if (!qr.id) return
+    G.API.get('/chat/im/wechat/login/status?id=' + encodeURIComponent(qr.id) + (qr.needPin && qr.pin ? '&verify_code=' + encodeURIComponent(qr.pin) : ''))
+      .then(function (res) {
+        const st = (res && res.status) || ''
+        qr.needPin = st === 'need_verifycode'
+        qr.text = st + (res && res.message ? ' · ' + res.message : '')
+        if (st === 'confirmed') {
+          qr.text = imt('connected')
+          load()
+          setTimeout(closeQr, 1200)
+          return
+        }
+        if (st === 'expired') return
+        pollWechat()
+      })
+      .catch(function () { pollWechat() })
+  }, 2500)
+}
+
+function submitWechatPin() {
+  pollWechat()
+}
+
+function closeQr() {
+  if (qrTimer) clearTimeout(qrTimer)
+  qrTimer = null
+  qr.open = false
+  qr.id = ''
+  qr.img = ''
+  qr.needPin = false
+  qr.pin = ''
+}
+
+onBeforeUnmount(closeQr)
 
 load()
 </script>
@@ -587,3 +772,79 @@ load()
   color: var(--c-text-2);
 }
 </style>
+/* 2026-11-13：六渠道版新增样式（字段/引导/二维码） */
+.imc__field--wide {
+  grid-column: 1 / -1;
+}
+.imc__cfg-tip {
+  font-size: 12px;
+  color: var(--c-text-3);
+  margin: 8px 0 4px;
+}
+.imc__help-body {
+  flex: 1;
+  min-width: 0;
+}
+.imc__guide-list {
+  margin: 6px 0 0 16px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--c-text-2);
+}
+.imc__guide-tip {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--c-text-3);
+  line-height: 1.6;
+}
+.imc__guide-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.imc__guide-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.imc__qr {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin: 12px 0 4px;
+  padding: 14px;
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  background: var(--c-bg);
+}
+.imc__qr-img {
+  width: 148px;
+  height: 148px;
+  object-fit: contain;
+  border-radius: 10px;
+  background: #fff;
+}
+.imc__qr-side {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.imc__qr-status {
+  font-size: 12px;
+  color: var(--c-text-2);
+}
+.imc__qr-actions {
+  display: flex;
+  gap: 8px;
+}

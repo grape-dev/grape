@@ -193,7 +193,9 @@
     "guide_manifest_btn": "复制 App 清单",
     "guide_manifest_show": "查看 App 清单 JSON",
     "hint_dingtalk_app_id": "AppKey",
-    "hint_dingtalk_secret": "AppSecret"
+    "hint_dingtalk_secret": "AppSecret",
+    "wechat_pin_label": "验证码（手机显示的数字）",
+    "wechat_qr_close": "关闭"
   },
   "current_engine": "当前使用",
   "recall": {
