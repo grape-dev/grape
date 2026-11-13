@@ -362,6 +362,15 @@ def upsert_engine_capability(runtime_id: int, tag: str, priority: int = 50,
         )
 
 
+def update_engine_capability(runtime_id: int, tag: str, priority: int, enabled: int) -> int:
+    """更新引擎能力优先级/启用态，返回受影响行数（0 = 不存在，供 404 判定）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE engine_capabilities SET priority=%s, enabled=%s, updated_at=NOW() "
+                  "WHERE runtime_id=%s AND tag=%s",
+                  (int(priority), int(enabled), int(runtime_id), tag))
+        return int(c.rowcount or 0)
+
+
 def delete_engine_capability(runtime_id: int, tag: str | None = None) -> int:
     """删除引擎能力（tag 为空则删该引擎全部），返回受影响行数；天然幂等。"""
     with db_registry.cursor("runtime") as c:
@@ -388,4 +397,4 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
-           "delete_engine_capability", "health"]
+           "delete_engine_capability", "update_engine_capability", "health"]

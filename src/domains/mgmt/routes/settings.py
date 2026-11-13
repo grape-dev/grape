@@ -2093,12 +2093,20 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_n
             c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (rid,))
             if not c.fetchone():
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在"})
-            c.execute(
-                "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                "VALUES (?,?,1,?,1,?,?) "
-                "ON DUPLICATE KEY UPDATE priority=VALUES(priority), updated_at=VALUES(updated_at)",
-                (rid, tag, body.priority, now, now)
-            )
+            from src.kernel.domain_read import runtime_lib as _rt_ins
+            _rti = _rt_ins()
+            if _rti is not None:
+                from src.kernel import cross_write as _xw_ins
+                _xw_ins.submit("runtime", "engine_cap_upsert", f"cap-upsert:{rid}:{tag}",
+                               {"rid": rid, "tag": tag, "priority": body.priority},
+                               lambda: _rti.upsert_engine_capability(rid, tag, priority=body.priority))
+            else:
+                c.execute(
+                    "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                    "VALUES (?,?,1,?,1,?,?) "
+                    "ON DUPLICATE KEY UPDATE priority=VALUES(priority), updated_at=VALUES(updated_at)",
+                    (rid, tag, body.priority, now, now)
+                )
             _sync_agent_tags(rid, c)
             db.commit()
         except HTTPException:
@@ -2131,12 +2139,27 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(
-                "UPDATE engine_capabilities SET priority=?, enabled=?, updated_at=? "
-                "WHERE runtime_id=? AND tag=?",
-                (body.priority, body.enabled, now, rid, tag)
-            )
-            if c.rowcount == 0:
+            from src.kernel.domain_read import runtime_lib as _rt_upd
+            _rtu = _rt_upd()
+            if _rtu is not None:
+                from src.kernel import cross_write as _xw_upd
+                _updated = {"n": 0}
+
+                def _apply_upd():
+                    _updated["n"] = _rtu.update_engine_capability(rid, tag, body.priority, body.enabled)
+
+                _xw_upd.submit("runtime", "engine_cap_update", f"cap-upd:{rid}:{tag}",
+                               {"rid": rid, "tag": tag, "priority": body.priority,
+                                "enabled": body.enabled}, _apply_upd)
+                _rowcount_upd = _updated["n"]
+            else:
+                c.execute(
+                    "UPDATE engine_capabilities SET priority=?, enabled=?, updated_at=? "
+                    "WHERE runtime_id=? AND tag=?",
+                    (body.priority, body.enabled, now, rid, tag)
+                )
+                _rowcount_upd = c.rowcount
+            if _rowcount_upd == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
             _sync_agent_tags(rid, c)
             db.commit()
