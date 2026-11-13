@@ -18,7 +18,12 @@ from src.kernel.config import log
 # ---- 常量 ----
 SESSION_TOKEN_PREFIX = "tk_"
 API_KEY_PREFIX = "grape_"
-SESSION_TOKEN_TTL = 6 * 3600  # 会话级临时 token 默认 TTL（秒）——执行超时兜底
+TAKEOVER_TOKEN_PREFIX = "tko_"
+TAKEOVER_SESSION_KEY_PREFIX = "takeover:"
+SESSION_TOKEN_TTL = 6 * 3600       # 会话级临时 token 默认 TTL（秒）——执行超时兜底
+TAKEOVER_TOKEN_TTL = 12 * 3600      # 接管 token 默认 TTL（12h）
+TAKEOVER_TOKEN_MAX_TTL = 24 * 3600  # 续期上限（从首次签发起算）
+TAKEOVER_RENEW_WINDOW = 2 * 3600    # 剩余不足该值时允许续期
 
 # 预留 scopes（方式 B，未来 RBAC 扩展）
 _API_KEY_SCOPES = '["public"]'
@@ -135,98 +140,6 @@ def purge_expired_session_tokens() -> int:
     except Exception as e:
         log.warning(f"Purge expired session tokens failed: {e}")
         return 0
-
-
-# ===================== 方式 B：用户级长期 API Key =====================
-
-def generate_api_token(user_id: str, name: str = "") -> dict | None:
-    """生成用户级 API Key，返回 {token(明文一次), id}；None 表示失败。
-
-    明文仅创建返回一次；落库 sha256；同名（user_id, name）冲突时返回 None。
-    """
-    token = API_KEY_PREFIX + secrets.token_urlsafe(40)
-    name = (name or "").strip()
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "INSERT INTO api_tokens (user_id, token_sha256, name) VALUES (?,?,?)",
-                (user_id, _sha256(token), name),
-            )
-            db.commit()
-            return {"token": token, "id": c.lastrowid}
-    except Exception as e:
-        log.warning(f"Generate api token failed: {e}")
-        return None
-
-
-def verify_api_token(token: str) -> dict | None:
-    """校验用户级 API Key：sha256 查表 → 未吊销即有效。更新 last_used_at。"""
-    if not token.startswith(API_KEY_PREFIX):
-        return None
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT id, user_id, name, scopes, revoked FROM api_tokens WHERE token_sha256=?",
-                (_sha256(token),),
-            )
-            row = c.fetchone()
-        if not row or row[4] != 0:
-            return None
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "UPDATE api_tokens SET last_used_at=? WHERE id=?",
-                    (str(_now()), row[0]),
-                )
-                db.commit()
-        except Exception:
-            pass
-        return {"api_token_id": row[0], "user_id": row[1], "name": row[2], "scopes": row[3]}
-    except Exception as e:
-        log.warning(f"Verify api token failed: {e}")
-        return None
-
-
-def revoke_api_token(user_id: str, token_id: int) -> bool:
-    """吊销用户级 API Key（软删：revoked=1，保审计）。"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE api_tokens SET revoked=1 WHERE id=? AND user_id=?", (token_id, user_id))
-            db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"Revoke api token failed: {e}")
-        return False
-
-
-def list_api_tokens(user_id: str) -> list[dict]:
-    """列出用户全部未吊销 API Key（不含明文/sha256）。"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT id, name, scopes, created_at, last_used_at FROM api_tokens "
-                "WHERE user_id=? AND revoked=0 ORDER BY id DESC",
-                (user_id,),
-            )
-            rows = c.fetchall()
-        return [
-            {
-                "id": r[0],
-                "name": r[1],
-                "scopes": r[2],
-                "created_at": r[3],
-                "last_used_at": r[4],
-            }
-            for r in rows
-        ]
-    except Exception as e:
-        log.warning(f"List api tokens failed: {e}")
-        return []
 
 
 SESSION_TOKEN_RECOVERY_HINT = (
@@ -382,6 +295,9 @@ def renew_takeover_token(task_id_or_key: str, new_expires_at: int) -> bool:
     except Exception as e:
         log.warning(f"Renew takeover token failed (key={key}): {e}")
         return False
+
+
+# ===================== 方式 B：用户级长期 API Key =====================
 
 def generate_api_token(user_id: int, name: str = "") -> dict | None:
     """生成用户级 API Key，返回 {token(明文一次), id}；None 表示失败。

@@ -368,8 +368,6 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
         raise ValueError(f"Git provider 未支持: {provider}")
     rk = to_repo_key(f"{provider}:{owner}/{repo}")
     auth_type = str(user.get("auth_type") or "")
-    if auth_type not in ("session_token", "takeover"):
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
     if auth_type == "takeover":
         # 接管 token（tko_）= 人以 agent 身份在"自己那条任务仓库"里干活：
         # 只放行同仓库，且接管会话必须仍是 active（finish/abort 会立即吊销 token，这里是二次校验）。
