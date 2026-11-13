@@ -212,6 +212,36 @@ def list_repo_credentials(repo_key: str = "") -> list[tuple]:
         return [tuple(r) for r in c.fetchall()]
 
 
+_EC_COLS = ("id", "runtime_id", "tag", "max_concurrent", "priority", "enabled",
+            "created_at", "updated_at")
+_ASK_COLS = ("id", "scope", "repo_key", "agent_type", "issue_num", "file_path", "status",
+             "source_seq", "created_by", "created_at", "obs_key", "content_hash", "updated_at",
+             "source", "archived", "description", "name", "org_id")
+
+
+def has_engine_capability(runtime_id: int) -> bool:
+    """该引擎是否有能力记录（mgmt 侧用 SELECT 1 判定）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=%s LIMIT 1", (int(runtime_id),))
+        return c.fetchone() is not None
+
+
+def list_engine_capabilities(runtime_id: int, enabled_only: bool = False) -> list[tuple]:
+    """引擎能力行（id, tag, priority, enabled），按 tag 排序。"""
+    sql = "SELECT id, tag, priority, enabled FROM engine_capabilities WHERE runtime_id=%s"
+    if enabled_only:
+        sql += " AND enabled=1"
+    sql += " ORDER BY tag"
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, (int(runtime_id),))
+        return [tuple(r) for r in c.fetchall()]
+
+
+def list_engine_tags(runtime_id: int, enabled_only: bool = True) -> list[str]:
+    """引擎能力标签列表（mgmt 展示/校验用）。"""
+    return [r[1] for r in list_engine_capabilities(runtime_id, enabled_only)]
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -225,4 +255,5 @@ def health() -> dict[str, Any]:
 __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
-           "task_brief", "list_credential_rows", "list_repo_credentials", "health"]
+           "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
+           "list_engine_tags", "health"]

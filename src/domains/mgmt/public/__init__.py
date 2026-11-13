@@ -22,6 +22,11 @@ _TABLES: dict[str, set[str]] = {
         "bot_token_status", "host_vcs_username", "host_step", "host_error", "host_updated_at",
         "bot_gitcode_token", "gitcode_webhook_token", "bot_github_token", "github_webhook_token",
     },
+    "agent_shared_knowledge": {
+        "id", "scope", "repo_key", "agent_type", "issue_num", "file_path", "status",
+        "source_seq", "created_by", "created_at", "obs_key", "content_hash", "updated_at",
+        "source", "archived", "description", "name", "org_id",
+    },
     "scene_market": {
         "id", "name", "display_name", "version", "description", "market_description", "icon",
         "category_id", "is_featured", "like_count", "source", "source_user_id",

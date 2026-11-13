@@ -1389,7 +1389,12 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                  "worker_version": x[9] or "" if len(x) > 9 else ""}
                 for x in c.fetchall()
             ]
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_tags
+            _rtl = _runtime_lib_tags()
             for rt in runtimes:
+                if _rtl is not None:
+                    rt["agent_tags"] = _rtl.list_engine_tags(rt["id"], enabled_only=True)
+                    continue
                 _tc = db.cursor()
                 _tc.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
                 rt["agent_tags"] = [r[0] for r in _tc.fetchall()]
@@ -2037,8 +2042,13 @@ def _sync_agent_tags(rid: int, cursor):
     agent_tags 是 engine_capabilities 中 enabled=1 的 tag 列表的 JSON 表示，
     供前端展示用。此函数确保两表一致。
     """
-    cursor.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rid,))
-    tags = [r[0] for r in cursor.fetchall()]
+    from src.kernel.domain_read import runtime_lib as _runtime_lib_sync
+    _rtl_sync = _runtime_lib_sync()
+    if _rtl_sync is not None:
+        tags = _rtl_sync.list_engine_tags(rid, enabled_only=True)
+    else:
+        cursor.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rid,))
+        tags = [r[0] for r in cursor.fetchall()]
     cursor.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (json.dumps(tags, ensure_ascii=False), rid))
 
 @router.get("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tags", summary="List engine tags", description="Lists an engine's tags.")
@@ -2048,12 +2058,18 @@ def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(
-                "SELECT id, tag, priority, enabled, created_at, updated_at "
-                "FROM engine_capabilities WHERE runtime_id=? ORDER BY tag",
-                (rid,)
-            )
-            rows = c.fetchall()
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_et
+            _rtl_et = _runtime_lib_et()
+            if _rtl_et is not None:
+                rows = [(r[0], r[1], r[2], r[3], None, None)
+                        for r in _rtl_et.list_engine_capabilities(rid)]
+            else:
+                c.execute(
+                    "SELECT id, tag, priority, enabled, created_at, updated_at "
+                    "FROM engine_capabilities WHERE runtime_id=? ORDER BY tag",
+                    (rid,)
+                )
+                rows = c.fetchall()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"tags": [
