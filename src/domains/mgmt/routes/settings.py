@@ -2397,6 +2397,7 @@ def list_event_action_filters(user: dict = Depends(require_no_session_token)):
             if "block_changes" in cols:
                 c.execute("SELECT id, event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, "
                           "priority, enabled FROM event_action_filter ORDER BY event_type, action")
+                rows = c.fetchall()
             else:
                 from src.kernel.domain_read import runtime_lib as _ru_lib_3d22a6_f
                 _ru_lib_3d22a6 = _ru_lib_3d22a6_f(foreign_only=True)
@@ -2405,7 +2406,7 @@ def list_event_action_filters(user: dict = Depends(require_no_session_token)):
                 else:
                     c.execute("SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, "
                               "priority, enabled FROM event_action_filter ORDER BY event_type, action")
-                rows = c.fetchall()
+                    rows = c.fetchall()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"rules": [

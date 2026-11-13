@@ -1465,6 +1465,7 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                 c.execute(
                     "SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
                     (skill_name, owner))
+                row = c.fetchone()
             else:
                 from src.kernel.domain_read import runtime_lib as _ru_lib_652318_f
                 _ru_lib_652318 = _ru_lib_652318_f(foreign_only=True)
@@ -1474,7 +1475,7 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                     c.execute(
                         "SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?",
                         (skill_name, owner))
-                row = c.fetchone()
+                    row = c.fetchone()
             if row:
                 # P3-5f：skill 在 runtime 域
                 from src.kernel.domain_read import runtime_lib as _rt_lib_uso
