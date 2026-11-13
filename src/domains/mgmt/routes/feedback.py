@@ -195,13 +195,18 @@ def _collect_feedback_context(event_seq: int, user: dict):
             try:
                 with db_lock:
                     c5 = db.cursor()
-                    c5.execute(
-                        "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), "
-                        "COALESCE(rc.last_ip,''), COALESCE(ar.provider,'') "
-                        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc "
-                        "ON rc.id=ar.credential_id WHERE ar.id=?",
-                        (runtime_id,))
-                    ar = c5.fetchone()
+                    from src.kernel.domain_read import runtime_lib as _ru_lib_a4f724_f
+                    _ru_lib_a4f724 = _ru_lib_a4f724_f(foreign_only=True)
+                    if _ru_lib_a4f724 is not None:
+                        ar = _ru_lib_a4f724.read_one("agent_runtimes_a4f724", (runtime_id,))
+                    else:
+                        c5.execute(
+                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), "
+                            "COALESCE(rc.last_ip,''), COALESCE(ar.provider,'') "
+                            "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc "
+                            "ON rc.id=ar.credential_id WHERE ar.id=?",
+                            (runtime_id,))
+                        ar = c5.fetchone()
                 if ar:
                     from src.domains.runtime.engine.instances import instance_name
                     engine = {

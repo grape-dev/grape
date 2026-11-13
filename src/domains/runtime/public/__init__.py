@@ -1115,6 +1115,17 @@ _READ_QUERIES: dict[str, str] = {
     "skill_da7be4": "SELECT id, content_hash, file_path, is_active FROM skill WHERE id=%s",
     "skill_1b908c": "SELECT id, content_hash, file_path FROM skill WHERE skill_name=%s AND scope=%s LIMIT 1",
     "skill_4b5014": "SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, scope, owner_id, content_hash FROM skill WHERE id=%s AND is_active=1",
+    "agent_runtimes_1c267b": "SELECT model_name FROM agent_runtimes WHERE id=%s",
+    "agent_runtimes_7776a6": "SELECT COALESCE(NULLIF(r.name,''), NULLIF(r.provider,''), ''), COALESCE(rc.device_name, rc.name, '') FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id = r.credential_id WHERE r.id=%s",
+    "agent_runtimes_34b97d": "SELECT name, status, healthy FROM agent_runtimes WHERE status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1",
+    "agent_runtimes_a4f724": "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,''), COALESCE(ar.provider,'') FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id WHERE ar.id=%s",
+    "agent_runtimes_5fd717": "SELECT status, healthy FROM agent_runtimes WHERE id=%s",
+    "agent_runtimes_62d4e0": "SELECT r.credential_id, rc.scope, rc.owner_id FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id WHERE r.id=%s",
+    "agent_runtimes_e6e235": "SELECT MIN(updated_at) FROM agent_runtimes",
+    "agent_runtimes_808985": "SELECT ar.id FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id WHERE lower(ar.name)=%s AND ar.scope=%s AND ar.owner_id='' AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active') ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC LIMIT 1",
+    "agent_runtimes_145cfe": "SELECT ar.id FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id WHERE lower(ar.name)=%s AND ar.scope=%s AND ar.owner_id=%s AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active') ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC LIMIT 1",
+    "agent_runtimes_b84e88": "SELECT id FROM agent_runtimes WHERE lower(name)=%s AND credential_id=0 AND installed=1 ORDER BY id LIMIT 1",
+    "agent_runtimes_874081": "SELECT id FROM agent_runtimes WHERE name=%s AND scope=%s AND owner_id=%s AND credential_id=0 AND (host_name=%s OR host_name='' OR host_name IS NULL) ORDER BY CASE WHEN host_name=%s THEN 0 ELSE 1 END, id LIMIT 1",
     # issue 查 id（mgmt feedback 上下文）
     "issue_id_by_repo_number": "SELECT id FROM issue WHERE repo_key=%s AND issue_number=%s LIMIT 1",
     # 仓库 bot 凭据（mgmt 读；config_store 的 JOIN 拆分后也需要全量 rc 行）

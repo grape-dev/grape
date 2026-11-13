@@ -53,12 +53,17 @@ def health():
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            row = c.execute(
-                "SELECT name, status, healthy FROM agent_runtimes "
-                "WHERE status='online' AND healthy=1 "
-                "ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END "
-                "LIMIT 1"
-            ).fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_34b97d_f
+            _ru_lib_34b97d = _ru_lib_34b97d_f(foreign_only=True)
+            if _ru_lib_34b97d is not None:
+                c = _ru_lib_34b97d.read_one("agent_runtimes_34b97d", ).fetchone()
+            else:
+                row = c.execute(
+                    "SELECT name, status, healthy FROM agent_runtimes "
+                    "WHERE status='online' AND healthy=1 "
+                    "ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END "
+                    "LIMIT 1"
+                ).fetchone()
             if row:
                 agent_runtime_status = "online"
             else:

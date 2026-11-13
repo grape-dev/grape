@@ -1904,11 +1904,16 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
             with db_lock:
                 c = db.cursor()
                 # 查引擎 + credential scope/owner_id
-                c.execute(
-                    "SELECT r.credential_id, rc.scope, rc.owner_id "
-                    "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                    "WHERE r.id=?", (_eid,))
-                row = c.fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_62d4e0_f
+                _ru_lib_62d4e0 = _ru_lib_62d4e0_f(foreign_only=True)
+                if _ru_lib_62d4e0 is not None:
+                    row = _ru_lib_62d4e0.read_one("agent_runtimes_62d4e0", (_eid,))
+                else:
+                    c.execute(
+                        "SELECT r.credential_id, rc.scope, rc.owner_id "
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.id=?", (_eid,))
+                    row = c.fetchone()
             if not row:
                 # Issue #250: 失效 runtime_id 优雅降级——跳过而非 400
                 log.warning(f"_validate_scene_engine_ids: 节点 {tag} 的引擎 ID {_eid} 不存在（已跳过）")
@@ -2560,9 +2565,14 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                     _declared_state = ""
                     for eid in declared_ids:
                         try:
-                            _row = c.execute(
-                                "SELECT status, healthy FROM agent_runtimes WHERE id=?",
-                                (eid,)).fetchone()
+                            from src.kernel.domain_read import runtime_lib as _ru_lib_5fd717_f
+                            _ru_lib_5fd717 = _ru_lib_5fd717_f(foreign_only=True)
+                            if _ru_lib_5fd717 is not None:
+                                c = _ru_lib_5fd717.read_one("agent_runtimes_5fd717", (eid,)).fetchone()
+                            else:
+                                _row = c.execute(
+                                    "SELECT status, healthy FROM agent_runtimes WHERE id=?",
+                                    (eid,)).fetchone()
                             if _row and _row[0] == "online" and _row[1] == 1:
                                 runtime_id = eid
                                 break

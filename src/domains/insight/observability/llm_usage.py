@@ -386,8 +386,13 @@ def task_model_summary(task_id: str, runtime_id: int = 0) -> Dict[str, Any]:
             with db_lock:
                 c = db.cursor()
                 if _agent_runtimes_has_model_name(c):
-                    c.execute("SELECT model_name FROM agent_runtimes WHERE id=?", (int(runtime_id),))
-                    row = c.fetchone()
+                    from src.kernel.domain_read import runtime_lib as _ru_lib_1c267b_f
+                    _ru_lib_1c267b = _ru_lib_1c267b_f(foreign_only=True)
+                    if _ru_lib_1c267b is not None:
+                        row = _ru_lib_1c267b.read_one("agent_runtimes_1c267b", (int(runtime_id),))
+                    else:
+                        c.execute("SELECT model_name FROM agent_runtimes WHERE id=?", (int(runtime_id),))
+                        row = c.fetchone()
                     name = (row[0] if row else "") or ""
                     name = name.strip()
                     if name:

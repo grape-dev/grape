@@ -4158,12 +4158,17 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                 _detail_json = json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
                 # 匹配已有本机直连行：优先 host_name 精确匹配，其次 host_name 为空/NULL 的遗留孤儿行（claim 它）
                 # 防止 host_name 字段引入后旧行（host_name=''）匹配不上 → 新建重复行 → 前端显示两个 opencode-cred0
-                c.execute(
-                    "SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 "
-                    "AND (host_name=? OR host_name='' OR host_name IS NULL) "
-                    "ORDER BY CASE WHEN host_name=? THEN 0 ELSE 1 END, id LIMIT 1",
-                    (name, scope, owner_id, host_name, host_name))
-                row = c.fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_874081_f
+                _ru_lib_874081 = _ru_lib_874081_f(foreign_only=True)
+                if _ru_lib_874081 is not None:
+                    row = _ru_lib_874081.read_one("agent_runtimes_874081", (name, scope, owner_id, host_name, host_name))
+                else:
+                    c.execute(
+                        "SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 "
+                        "AND (host_name=? OR host_name='' OR host_name IS NULL) "
+                        "ORDER BY CASE WHEN host_name=? THEN 0 ELSE 1 END, id LIMIT 1",
+                        (name, scope, owner_id, host_name, host_name))
+                    row = c.fetchone()
                 if row:
                     # Issue #1496：status+last_seen_at 走统一写入口（同事务含遗留
                     # health 列派生同步），其余展示/配置字段仍随本 upsert 原地更新。
@@ -4310,10 +4315,15 @@ def get_local_direct_runtime_id(name: str) -> int | None:
         return None
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "SELECT id FROM agent_runtimes WHERE lower(name)=? AND credential_id=0 AND installed=1 ORDER BY id LIMIT 1",
-            (name.strip().lower(),))
-        row = c.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_b84e88_f
+        _ru_lib_b84e88 = _ru_lib_b84e88_f(foreign_only=True)
+        if _ru_lib_b84e88 is not None:
+            row = _ru_lib_b84e88.read_one("agent_runtimes_b84e88", (name.strip().lower(),))
+        else:
+            c.execute(
+                "SELECT id FROM agent_runtimes WHERE lower(name)=? AND credential_id=0 AND installed=1 ORDER BY id LIMIT 1",
+                (name.strip().lower(),))
+            row = c.fetchone()
         return row[0] if row else None
 
 def get_runtime_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
@@ -4327,15 +4337,20 @@ def get_runtime_id_by_name(name: str, scope: str = "global", owner_id: str = "")
     name = name.strip().lower()
     with db_lock:
         c = db.cursor()
-        c.execute("""
-            SELECT ar.id FROM agent_runtimes ar
-            LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
-            WHERE lower(ar.name)=? AND ar.scope=? AND ar.owner_id=?
-              AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active')
-            ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC
-            LIMIT 1
-        """, (name, scope, owner_id))
-        row = c.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_145cfe_f
+        _ru_lib_145cfe = _ru_lib_145cfe_f(foreign_only=True)
+        if _ru_lib_145cfe is not None:
+            row = _ru_lib_145cfe.read_one("agent_runtimes_145cfe", (name, scope, owner_id))
+        else:
+            c.execute("""
+                SELECT ar.id FROM agent_runtimes ar
+                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
+                WHERE lower(ar.name)=? AND ar.scope=? AND ar.owner_id=?
+                  AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active')
+                ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC
+                LIMIT 1
+            """, (name, scope, owner_id))
+            row = c.fetchone()
         return row[0] if row else None
 
 def ensure_default_backend(name: str = "opencode", scope: str = "global"):
@@ -4392,15 +4407,20 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
     name = (name or "opencode").strip().lower() or "opencode"
     with db_lock:
         c = db.cursor()
-        c.execute("""
-            SELECT ar.id FROM agent_runtimes ar
-            LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
-            WHERE lower(ar.name)=? AND ar.scope=? AND ar.owner_id=''
-              AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active')
-            ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC
-            LIMIT 1
-        """, (name, scope))
-        row = c.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_808985_f
+        _ru_lib_808985 = _ru_lib_808985_f(foreign_only=True)
+        if _ru_lib_808985 is not None:
+            row = _ru_lib_808985.read_one("agent_runtimes_808985", (name, scope))
+        else:
+            c.execute("""
+                SELECT ar.id FROM agent_runtimes ar
+                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
+                WHERE lower(ar.name)=? AND ar.scope=? AND ar.owner_id=''
+                  AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active')
+                ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC
+                LIMIT 1
+            """, (name, scope))
+            row = c.fetchone()
         if row:
             return row[0]
         if not is_known_engine_name(name):
@@ -4451,8 +4471,13 @@ def get_agent_runtimes_age() -> float | None:
     """返回缓存数据的 age（秒），无缓存返回 None"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT MIN(updated_at) FROM agent_runtimes")
-        row = c.fetchone()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_e6e235_f
+        _ru_lib_e6e235 = _ru_lib_e6e235_f(foreign_only=True)
+        if _ru_lib_e6e235 is not None:
+            row = _ru_lib_e6e235.read_one("agent_runtimes_e6e235", ())
+        else:
+            c.execute("SELECT MIN(updated_at) FROM agent_runtimes")
+            row = c.fetchone()
         if not row or not row[0]:
             return None
     import datetime

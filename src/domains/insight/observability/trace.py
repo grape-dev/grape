@@ -169,11 +169,16 @@ def _engine_label(runtime_id: int) -> str:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT COALESCE(NULLIF(r.name,''), NULLIF(r.provider,''), ''),"
-                      " COALESCE(rc.device_name, rc.name, '')"
-                      " FROM agent_runtimes r LEFT JOIN runtime_credentials rc"
-                      " ON rc.id = r.credential_id WHERE r.id=?", (int(runtime_id),))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_7776a6_f
+            _ru_lib_7776a6 = _ru_lib_7776a6_f(foreign_only=True)
+            if _ru_lib_7776a6 is not None:
+                row = _ru_lib_7776a6.read_one("agent_runtimes_7776a6", (int(runtime_id),))
+            else:
+                c.execute("SELECT COALESCE(NULLIF(r.name,''), NULLIF(r.provider,''), ''),"
+                          " COALESCE(rc.device_name, rc.name, '')"
+                          " FROM agent_runtimes r LEFT JOIN runtime_credentials rc"
+                          " ON rc.id = r.credential_id WHERE r.id=?", (int(runtime_id),))
+                row = c.fetchone()
             if not row:
                 return f"#{runtime_id}"
             eng = row[0] or ""
