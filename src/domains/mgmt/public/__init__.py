@@ -156,6 +156,52 @@ def mark_default_featured(names: list[str]) -> int:
         return int(c.rowcount or 0)
 
 
+_SCENE_CONTENT_COLS = (
+    "display_name", "version", "description", "market_description", "icon", "category_id",
+    "recommended_template", "nodes_json", "onboarding", "tags", "author", "content_hash",
+    "obs_icon_key", "preset_custom_fields",
+)
+_SCENE_REQUIRED = ("name", "source", "scope")
+
+
+def upsert_scene_content(name: str, payload: dict[str, Any], source: str = "official",
+                         scope: str = "official", repo_key: str = "", source_user_id: str = "") -> dict[str, Any]:
+    """写入场景内容（只写内容列，**绝不触碰 is_active / is_featured**）。
+
+    返回 {"action": inserted|updated|skipped, "id": ..., "changed": n}。
+    幂等：payload 的 content_hash 与库内一致时直接 skipped。
+    """
+    cols = [c for c in _SCENE_CONTENT_COLS if c in payload]
+    with db_registry.cursor("mgmt") as cur:
+        cur.execute("SELECT id, content_hash FROM scene_market "
+                    "WHERE name=%s AND source=%s LIMIT 1", (name, source))
+        row = cur.fetchone()
+        if row:
+            sid, old_hash = row[0], (row[1] or "")
+            if payload.get("content_hash") and payload.get("content_hash") == old_hash:
+                return {"action": "skipped", "id": sid, "changed": 0}
+            if not cols:
+                return {"action": "skipped", "id": sid, "changed": 0}
+            sets = ", ".join(f"{c}=%s" for c in cols)
+            cur.execute(f"UPDATE scene_market SET {sets}, updated_at=NOW() WHERE id=%s",
+                        tuple(payload[c] for c in cols) + (sid,))
+            return {"action": "updated", "id": sid, "changed": int(cur.rowcount or 0)}
+        # 插入：只带白名单里出现的列 + 定位列
+        insert_cols = ["name", "source", "scope"] + cols + ["repo_key", "source_user_id"]
+        values = [name, source, scope] + [payload[c] for c in cols] + [repo_key or None, source_user_id or None]
+        ph = ", ".join(["%s"] * len(insert_cols))
+        cur.execute(f"INSERT INTO scene_market ({', '.join(insert_cols)}) VALUES ({ph})", tuple(values))
+        return {"action": "inserted", "id": int(cur.lastrowid or 0), "changed": 1}
+
+
+def set_scene_icon(name: str, obs_icon_key: str, source: str = "official") -> int:
+    """单独设置场景图标（OBS 上传成功后调用），幂等。"""
+    with db_registry.cursor("mgmt") as cur:
+        cur.execute("UPDATE scene_market SET obs_icon_key=%s, updated_at=NOW() "
+                    "WHERE name=%s AND source=%s", (obs_icon_key, name, source))
+        return int(cur.rowcount or 0)
+
+
 def get_official_scene_id(scene_name: str) -> Any:
     """按场景名取 official 模板的 id（无则 None）。"""
     row = fetch_one("scene_market", ["id"], "name=%s AND source='official'", (scene_name,))
@@ -261,6 +307,6 @@ __all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_o
            "list_user_ids_by_open_id", "get_feishu_open_id", "list_all_user_ids",
            "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
            "get_account_id_by_username", "get_account_username_by_id",
-           "mark_default_featured", "list_baseline_knowledge_files", "list_knowledge_obs_keys",
+           "upsert_scene_content", "set_scene_icon", "mark_default_featured", "list_baseline_knowledge_files", "list_knowledge_obs_keys",
            "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks", "get_autopilot_task_brief",
            "health"]
