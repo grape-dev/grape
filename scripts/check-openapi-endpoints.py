@@ -45,6 +45,9 @@ CORE_WORKFLOW_PREFIXES = (
     "/api/a2a",
     "/api/tasks",
     "/api/runtime/tasks",
+    # I-1（架构守护）：IM 通道端点（installations / outbound / retry / status）此前不在
+    # 守护面内，四进程分流把它挂错版本时基线比对拦不住（#1363 C-3 正是这样漏掉的）。
+    "/api/im",
 )
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.|$)")

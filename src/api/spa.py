@@ -35,16 +35,23 @@ def install_spa_routes(app: FastAPI) -> None:
     """
     from src.kernel.config import WORKSPACE_DIR as _WS_DIR
 
+    # M-1（架构守护）：server_common.attach_frontend 与这里的挂载点是同一批路径，
+    # 两个调用方（main.py / grape_server.py）都会依次调用 → 同一路径被 mount 两次，
+    # 先注册者生效。这里统一「已挂过就跳过」，保证只有一份实现真正生效。
+    _mounted = {getattr(r, "name", None) for r in app.routes}
+
     # Issue 附件静态服务（必须在 /static 之前 mount）
     _ISSUE_ATTACH_DIR = os.path.join(_WS_DIR, "..", "data", "issue_attachments")
     os.makedirs(_ISSUE_ATTACH_DIR, exist_ok=True)
-    app.mount("/static/issue_attachments", StaticFiles(directory=_ISSUE_ATTACH_DIR), name="issue_attachments")
+    if "issue_attachments" not in _mounted:
+        app.mount("/static/issue_attachments", StaticFiles(directory=_ISSUE_ATTACH_DIR), name="issue_attachments")
 
     # Community uploads
     _api_dir = os.path.dirname(os.path.abspath(__file__))
     _COMMUNITY_UPLOAD_DIR = os.path.join(_api_dir, "data", "community_uploads")
     os.makedirs(_COMMUNITY_UPLOAD_DIR, exist_ok=True)
-    app.mount("/static/community_uploads", StaticFiles(directory=_COMMUNITY_UPLOAD_DIR), name="community_uploads")
+    if "community_uploads" not in _mounted:
+        app.mount("/static/community_uploads", StaticFiles(directory=_COMMUNITY_UPLOAD_DIR), name="community_uploads")
 
     # Vue refactor: static root moved to frontend/shell (phase 1); keep serving under /static
     _legacy_dir = os.path.join(_api_dir, "frontend", "shell")
@@ -52,24 +59,30 @@ def install_spa_routes(app: FastAPI) -> None:
     if not os.path.isdir(STATIC_DIR):
         return
 
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    if "static" not in _mounted:
+        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     # Vue refactor (phase 1): serve new Vue app build output under /static-vue/
     # (approved Gate 0 option A). Temporary mount — removed when migration completes.
     _VUE_DIST_DIR = os.path.join(_api_dir, "frontend", "static-dist")
-    if os.path.isdir(_VUE_DIST_DIR):
+    if os.path.isdir(_VUE_DIST_DIR) and "static_vue" not in _mounted:
         class _VueSPAStaticFiles(StaticFiles):
-            """StaticFiles with history-mode fallback: unknown paths -> index.html."""
+            """StaticFiles with history-mode fallback: 只吞 404，其余异常必须上抛。
+
+            M-1（架构守护）：与 server_common._VueSPAStaticFiles 语义对齐 —— 真实 5xx
+            被伪装成 200 HTML 会毁掉故障定位（INFO-3 原形态）。
+            """
             async def get_response(self, path, scope):
+                from starlette.exceptions import HTTPException as _HTTPExc
                 from starlette.responses import FileResponse as _FR
                 try:
-                    resp = await super().get_response(path, scope)
-                except Exception:
-                    resp = None
-                if resp is None or resp.status_code == 404:
+                    return await super().get_response(path, scope)
+                except _HTTPExc as exc:
+                    if exc.status_code != 404:
+                        raise
                     resp = _FR(os.path.join(_VUE_DIST_DIR, "index.html"))
                     resp.headers["Cache-Control"] = "no-cache, must-revalidate"
-                return resp
+                    return resp
         app.mount("/static-vue", _VueSPAStaticFiles(directory=_VUE_DIST_DIR, html=True), name="static_vue")
 
     # Static assets: allow browser caching with ETag revalidation.

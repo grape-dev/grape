@@ -85,7 +85,7 @@ class TestDashboardNoSlice:
         """验证 dashboard.js 中 _buildRelatedPipelineHTML 不再使用 slice(0, 20)"""
         import os
         js_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "..", "src", "api", "static", "js", "pages", "dashboard.js"
+            os.path.dirname(__file__), "..", "..", "..", "src", "api", "frontend", "app", "src", "views", "DashboardView.vue"
         )
         with open(js_path, "r", encoding="utf-8") as f:
             content = f.read()

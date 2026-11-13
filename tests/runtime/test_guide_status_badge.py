@@ -6,8 +6,8 @@ OAuth 已配置 → 双页签；未配置 → 仅 PAT 表单）。角标方案�
 """
 from pathlib import Path
 
-APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "static" / "js" / "app.js"
-ACCT = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "static" / "js" / "pages" / "account.js"
+APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell" / "js" / "app.js"
+ACCT = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "app" / "src" / "views" / "AccountView.vue"
 
 
 def _shell_src():

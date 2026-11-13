@@ -7,7 +7,11 @@ helper 直接拼进 innerHTML。
 （含 ' →&#39;），各页本地 _esc/_escHtml/_escapeHtml/esc 一律内部代理；
 高危插值点逐个包 helper（清单见 commit fix(xss) S2）。
 
-扫描模式：src/api/static/js/**/*.js（vendor 除外）非注释行，逐个提取
+扫描模式：src/api/frontend/shell/js/**/*.js（vendor 除外）非注释行，逐个提取。
+
+覆盖口径（静态根迁移后）：手写 HTML 拼接只剩 shell/js（Vue 模板默认转义，不在扫描面）；
+旧 pages/*.js 已随迁移删除，其 BASELINE 条目保留但不再生效。目录为空时直接 FAIL ——
+守卫「扫到 0 个文件也通过」比红更危险（架构守护 C-2 原形态）。
 模板插值 `${...}` 表达式；表达式引用用户可控字段（title/summary/
 display_name/description/message，含 `||` 兜底链）且未包任何转义 helper
 （escHtml/_esc/_escHtml/_escapeHtml/_evEsc494/_escChatAttr）→ 记为高危
@@ -25,7 +29,7 @@ from collections import Counter
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-JS_ROOT = REPO_ROOT / "src" / "api" / "static" / "js"
+JS_ROOT = REPO_ROOT / "src" / "api" / "frontend" / "shell" / "js"
 
 # 用户可控字段（返回值可被攻击者控制的字段名）
 FIELD_RE = re.compile(r"(?:^|[^.\w])([A-Za-z_$][\w.$]*\.)?(title|summary|display_name|description|message)\b")
@@ -59,6 +63,7 @@ _BASELINE_COUNTS = Counter(BASELINE)
 
 
 def _iter_js_files():
+    assert JS_ROOT.is_dir(), f"扫描目录不存在: {JS_ROOT}（迁移后路径失效 → 守卫会静默失效）"
     for p in sorted(JS_ROOT.rglob("*.js")):
         if "vendor" in p.parts or "node_modules" in p.parts:
             continue
@@ -85,6 +90,8 @@ def _collect():
 
 
 def test_xss_escape_guard():
+    files = list(_iter_js_files())
+    assert files, f"扫描到 0 个 JS 文件（{JS_ROOT}），守卫不得空转通过"
     hits = _collect()
     counts = Counter((rel, s) for rel, _, s in hits)
     new = []

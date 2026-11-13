@@ -19,7 +19,7 @@ import os
 
 import pytest
 
-_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "static")
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "shell")
 
 def _read_file(rel_path):
     """读取静态文件内容。"""

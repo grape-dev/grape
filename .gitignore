@@ -129,7 +129,7 @@ help/api/openapi.json
 
 # grape-cli 已拆为独立仓库管理（本地 clone 目录不入仓）
 cli/
-src/api/static/uploads/
+src/api/frontend/shell/uploads/
 *.log
 
 # git askpass credential script (outputs token env vars, must not be committed)

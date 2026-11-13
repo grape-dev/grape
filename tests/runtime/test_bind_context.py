@@ -10,8 +10,8 @@
 import re
 from pathlib import Path
 
-ACCT = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "static" / "js" / "pages" / "account.js"
-APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "static" / "js" / "app.js"
+ACCT = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "app" / "src" / "views" / "AccountView.vue"
+APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell" / "js" / "app.js"
 
 
 def test_context_split_signature():

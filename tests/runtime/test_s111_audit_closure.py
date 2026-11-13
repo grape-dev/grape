@@ -28,8 +28,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 _SRC = Path(__file__).resolve().parent.parent.parent / "src"
 _TESTS = Path(__file__).resolve().parent
-_APP_JS = _SRC / "api" / "static" / "js" / "app.js"
-_INDEX_HTML = _SRC / "api" / "static" / "index.html"
+_APP_JS = _SRC / "api" / "frontend" / "shell" / "js" / "app.js"
+_INDEX_HTML = _SRC / "api" / "frontend" / "shell" / "index.html"
 
 
 def _js_brace_depth_at(line_no: int, lines: list) -> int:

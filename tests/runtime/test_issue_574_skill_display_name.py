@@ -212,7 +212,7 @@ class TestAutopilotTaskDisplayName:
 
 # ── 前端源码断言 ──
 
-BASE_SRC = os.path.join(ROOT, "src", "api", "static", "js", "pages")
+BASE_SRC = os.path.join(ROOT, "src", "api", "frontend", "shell", "js", "pages")
 
 
 @pytest.fixture(scope="module")

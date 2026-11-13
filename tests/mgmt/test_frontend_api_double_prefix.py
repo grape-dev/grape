@@ -7,7 +7,7 @@
 import re
 from pathlib import Path
 
-STATIC = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "static" / "js"
+STATIC = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell" / "js"
 
 # API.get('/api/... / API.post('/api/... 等调用形态
 _BANNED = re.compile(r"API\.(get|post|put|del|delete|patch)\(\s*['\"]/api/")

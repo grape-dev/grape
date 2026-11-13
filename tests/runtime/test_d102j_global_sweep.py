@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_OBS = _REPO_ROOT / "src" / "api" / "static" / "js" / "pages" / "observability.js"
+_OBS = _REPO_ROOT / "src" / "api" / "frontend" / "app" / "src" / "views" / "ObservabilityView.vue"
 
 
 def test_d102j_observability_urls_derived():
@@ -32,6 +32,6 @@ def test_d102j_grape_auth_pname_lookup():
 
 def test_d102j_cache_version_ge_219():
     """JS 改动配套 bump（本轮 observability 改动 → v219）。"""
-    html = (_REPO_ROOT / "src" / "api" / "static" / "index.html").read_text(encoding="utf-8")
+    html = (_REPO_ROOT / "src" / "api" / "frontend" / "shell" / "index.html").read_text(encoding="utf-8")
     m = re.search(r"app\.js\?v=(\d+)", html)
     assert m and int(m.group(1)) >= 219, "app.js 版本未随 observability 改动 bump"

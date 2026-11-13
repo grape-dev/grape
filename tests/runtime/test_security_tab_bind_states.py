@@ -13,7 +13,7 @@ uid=24 gitcode 行实锤——存量 PAT 写在 ei.access_token 使 bool(access_
 import re
 from pathlib import Path
 
-ACCT = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "static" / "js" / "pages" / "account.js"
+ACCT = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "app" / "src" / "views" / "AccountView.vue"
 
 
 def _sec_src() -> str:
