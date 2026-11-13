@@ -1,0 +1,25 @@
+[Unit]
+Description=Grape cross-domain write compensation drain (insight domain log)
+Documentation=file:/opt/grape/deploy/README.md
+After=network-online.target
+
+# 为什么需要第三个排水单元：
+#   `grape_t_xwrite_log` 在每个域库各一份。insight 进程（DEVOPS_DB_NAME=grape_dev_insight）
+#   发起的意图（agent_tasks_stamp_traces = 给 agent_tasks 补 trace_id）落在 **insight 库**，
+#   mgmt / runtime 两个排水单元都看不到 → 失败意图永远不会重试。
+# 目标域是 runtime：处理器由 GRAPE_DSN_RUNTIME + GRAPE_DOMAIN_LIB=1 提供。
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/grape
+EnvironmentFile=-/etc/grape/grape.env
+# insight 库配置 + 各目标域 DSN（含口令，0600）
+EnvironmentFile=-/etc/grape/xwrite-insight.env
+# 库主机/账号/口令一律由 EnvironmentFile 提供，单元内不得写死任何地址
+Environment=DEVOPS_DB_NAME=grape_dev_insight
+Environment=DEVOPS_DB_BACKEND=mysql
+Environment=PYTHONPATH=/opt/grape
+ExecStart=/opt/grape/.venv/bin/python /opt/grape/scripts/xwrite_drain.py drain
+StandardOutput=journal
+StandardError=journal

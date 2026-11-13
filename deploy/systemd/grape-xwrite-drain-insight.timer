@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the Grape insight-domain cross-domain write compensation drain every 5 minutes
+
+[Timer]
+# 与另外两个排水单元错开：mgmt :00/05…、runtime :02/07…、insight :04/09…
+# （每个单元的启动都会跑 session_manager 回填，同刻并发会 1213 死锁）
+OnBootSec=8min
+OnCalendar=*:4/5:00
+AccuracySec=30s
+Unit=grape-xwrite-drain-insight.service
+
+[Install]
+WantedBy=timers.target
