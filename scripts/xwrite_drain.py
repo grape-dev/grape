@@ -152,6 +152,16 @@ def _handlers() -> dict:
                 p["repo_key"], p["cred_type"], p.get("value", ""), p.get("updated_at", ""))
             out["repo_credential_clear"] = lambda p: rt.clear_repo_credential(
                 p["repo_key"], p.get("cred_type", "bot"), p.get("updated_at", ""))
+            # P3-5f-2：引擎行（组合原语）
+            out["agent_runtimes_upsert_local"] = lambda p: rt.upsert_local_runtimes(
+                list(p.get("agents") or []), p.get("scope", "global"), p.get("owner_id", ""),
+                p.get("host_name", ""), p.get("now_iso", ""))
+            out["agent_runtime_ensure_default"] = lambda p: rt.ensure_default_runtime(
+                p["name"], p.get("display_name") or p["name"], int(p.get("installed", 0)),
+                p.get("cli_path", ""), p.get("version", ""), int(p.get("healthy", 0)),
+                p.get("pip_package") or p["name"], p.get("scope", "global"))
+            out["agent_tags_set"] = lambda p: rt.set_agent_tags(
+                int(p["runtime_id"]), list(p.get("tags") or []))
     except Exception:  # noqa: BLE001
         pass
     return out

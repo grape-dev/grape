@@ -4063,6 +4063,26 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
         migrate_agent_runtimes_utc_caliber()
     except Exception as _me:
         log.warning(f"migrate_agent_runtimes_utc_caliber skipped: {_me}")
+    # P3-5f-2：agent_runtimes 在 runtime 域。整段「探测即快照」（逐引擎 upsert + prune + dedupe）
+    # 必须一次事务完成，拆成多条意图会让旧 payload 重放误删新行 → 收成一个组合原语。
+    from src.kernel.domain_read import runtime_lib as _rt_lib_sar
+    from src.kernel import cross_write as _xw_sar
+    _rt_sar = _rt_lib_sar(foreign_only=True)
+    if _rt_sar is not None:
+        _rt_sar_ok = _rt_sar
+        _sar_out: dict = {}
+
+        def _apply_sar() -> None:
+            _sar_out.update(_rt_sar_ok.upsert_local_runtimes(
+                agents, scope, owner_id, host_name, _now_iso))
+
+        if _xw_sar.submit_if_lib(
+                _rt_sar_ok, "runtime", "agent_runtimes_upsert_local",
+                f"agent-runtimes-local:{scope}:{owner_id}:{host_name}:{_now_iso}",
+                {"agents": agents, "scope": scope, "owner_id": owner_id,
+                 "host_name": host_name, "now_iso": _now_iso}, _apply_sar, log):
+            log.info(f"save_agent_runtimes via lib: {_sar_out}")
+            return
     with db_lock:
         c = db.cursor()
         # P0 修复：MySQL 下缩短 innodb_lock_wait_timeout（50s→5s），
@@ -4342,6 +4362,27 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
                     version = probed[0].get("version", "") or ""
             except Exception:
                 pass
+        # P3-5f-2：agent_runtimes 在 runtime 域（组合原语自带 online 优先 + credential JOIN）
+        from src.kernel.domain_read import runtime_lib as _rt_lib_edr
+        from src.kernel import cross_write as _xw_edr
+        _rt_edr = _rt_lib_edr(foreign_only=True)
+        if _rt_edr is not None:
+            _rt_edr_ok = _rt_edr
+            _edr_out: dict = {}
+
+            def _apply_edr() -> None:
+                _edr_out.update(_rt_edr_ok.ensure_default_runtime(
+                    name, name.capitalize(), 1 if installed else 0, cli_path, version,
+                    healthy, name, scope))
+
+            if _xw_edr.submit_if_lib(
+                    _rt_edr_ok, "runtime", "agent_runtime_ensure_default",
+                    f"agent-runtime-default:{name}:{scope}",
+                    {"name": name, "display_name": name.capitalize(),
+                     "installed": 1 if installed else 0, "cli_path": cli_path,
+                     "version": version, "healthy": healthy, "pip_package": name,
+                     "scope": scope}, _apply_edr, log):
+                return int(_edr_out.get("id") or 0) or None
         c.execute("INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')",
                   (name, name.capitalize(), 1 if installed else 0, cli_path, version, healthy, name, scope))
         db.commit()

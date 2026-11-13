@@ -848,6 +848,128 @@ def touch_credential_metrics(hostname: str, last_seen_at: str, last_ip: str = ""
         return int(c.rowcount or 0)
 
 
+# ---------- 引擎行写原语（P3-5f-2：mgmt 进程写 runtime 基表 agent_runtimes） ----------
+
+def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_name: str,
+                          now_iso: str) -> dict[str, Any]:
+    """本机直连引擎行批量 upsert：SELECT → UPDATE/INSERT → prune → dedupe，**同一事务**。
+
+    一次调用 = 一次"本机探测即快照"，所以不能拆成多条意图（旧 payload 重放会误删新行）。
+    顺带修掉两个既有缺陷：
+      · 旧实现在 mgmt 事务未提交时用**另一条连接**读 engine_capabilities → 读不到刚插的行，
+        `agent_tags` 被写成 `[]`；这里在同一事务内读，tags 正确。
+      · health 派生改用**本次探测的新值**（installed/healthy），而不是上一次的旧值。
+    """
+    import json as _json
+
+    from src.domains.runtime.engine.health import derive_local_runtime_health
+
+    out: dict[str, Any] = {"upserted": 0, "inserted": 0, "pruned": 0, "deduped": 0, "ids": {}}
+    names: list[str] = []
+    with db_registry.transaction("runtime") as c:
+        try:
+            c.execute("SET SESSION innodb_lock_wait_timeout=5")
+        except Exception:  # noqa: BLE001
+            pass
+        for a in agents or []:
+            name = (a.get("name") or "").strip().lower()
+            if not name:
+                continue
+            names.append(name)
+            _ls = _json.dumps(a.get("local_skills") or [], ensure_ascii=False)
+            _detail = a.get("local_skills_detail")
+            _detail_json = _json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
+            c.execute(
+                "SELECT id FROM agent_runtimes WHERE name=%s AND scope=%s AND owner_id=%s "
+                "AND credential_id=0 AND (host_name=%s OR host_name='' OR host_name IS NULL) "
+                "ORDER BY CASE WHEN host_name=%s THEN 0 ELSE 1 END, id LIMIT 1",
+                (name, scope, owner_id, host_name, host_name))
+            row = c.fetchone()
+            if row:
+                rid = int(row[0])
+                _derived = derive_local_runtime_health(bool(a.get("installed")), bool(a.get("healthy")))
+                try:
+                    c.execute("UPDATE agent_runtimes SET status='online', last_seen_at=%s, health=%s "
+                              "WHERE id=%s", (now_iso, _derived, rid))
+                except Exception:  # noqa: BLE001 - 无遗留 health 列的库
+                    c.execute("UPDATE agent_runtimes SET status='online', last_seen_at=%s WHERE id=%s",
+                              (now_iso, rid))
+                c.execute(
+                    "UPDATE agent_runtimes SET display_name=%s, installed=%s, cli_path=%s, version=%s, "
+                    "healthy=%s, pip_package=%s, updated_at=%s, local_skills=%s, "
+                    "skill_scan_result=%s, host_name=%s WHERE id=%s",
+                    (a.get("display_name", name), 1 if a.get("installed") else 0,
+                     a.get("cli_path", ""), a.get("version", ""),
+                     1 if a.get("healthy") else 0, a.get("pip_package", ""), now_iso,
+                     _ls, _detail_json, host_name, rid))
+                out["upserted"] += 1
+                out["ids"][name] = rid
+                continue
+            if not a.get("installed"):
+                continue
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
+                "pip_package, scope, owner_id, local_skills, skill_scan_result, host_name, "
+                "last_seen_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (name, a.get("display_name", name), 1, a.get("cli_path", ""), a.get("version", ""),
+                 1 if a.get("healthy") else 0, a.get("pip_package", ""), scope, owner_id,
+                 _ls, _detail_json, host_name, now_iso, now_iso))
+            rid = int(c.lastrowid or 0)
+            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=%s LIMIT 1", (rid,))
+            if not c.fetchone():
+                c.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, "
+                          "enabled, created_at, updated_at) VALUES (%s,'all',1,50,1,%s,%s)",
+                          (rid, now_iso, now_iso))
+            c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=%s AND enabled=1 ORDER BY tag",
+                      (rid,))
+            tags = [r[0] for r in c.fetchall()]
+            c.execute("UPDATE agent_runtimes SET agent_tags=%s WHERE id=%s",
+                      (_json.dumps(tags, ensure_ascii=False), rid))
+            out["inserted"] += 1
+            out["ids"][name] = rid
+
+        if names:
+            ph = ",".join(["%s"] * len(names))
+            c.execute(f"DELETE FROM agent_runtimes WHERE scope=%s AND owner_id=%s AND credential_id=0 "
+                      f"AND host_name=%s AND lower(name) NOT IN ({ph})",
+                      (scope, owner_id, host_name, *names))
+            out["pruned"] = int(c.rowcount or 0)
+        c.execute("DELETE FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
+                  "(SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 "
+                  "GROUP BY lower(name), scope, owner_id, COALESCE(org_id,0), COALESCE(host_name,''))")
+        out["deduped"] = int(c.rowcount or 0)
+    return out
+
+
+def ensure_default_runtime(name: str, display_name: str, installed: int, cli_path: str,
+                           version: str, healthy: int, pip_package: str,
+                           scope: str) -> dict[str, Any]:
+    """确保存在默认引擎行（本机直连 credential_id=0），返回 {id, created}。"""
+    with db_registry.transaction("runtime") as c:
+        c.execute("SELECT ar.id FROM agent_runtimes ar "
+                  "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                  "WHERE lower(ar.name)=%s AND ar.scope=%s AND ar.owner_id='' "
+                  "AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active') "
+                  "ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC "
+                  "LIMIT 1", (name, scope))
+        row = c.fetchone()
+        if row:
+            return {"id": int(row[0]), "created": False}
+        c.execute("INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
+                  "pip_package, scope, owner_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'')",
+                  (name, display_name, int(installed), cli_path, version, int(healthy), pip_package, scope))
+        return {"id": int(c.lastrowid or 0), "created": True}
+
+
+def set_agent_tags(runtime_id: int, tags: list[str]) -> int:
+    """回写 agent_runtimes.agent_tags（engine_capabilities 的 JSON 快照）。"""
+    import json as _json
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE agent_runtimes SET agent_tags=%s WHERE id=%s",
+                  (_json.dumps(list(tags or []), ensure_ascii=False), int(runtime_id)))
+        return int(c.rowcount or 0)
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -879,4 +1001,5 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "insert_runtime_credential", "rename_runtime_credential",
            "set_runtime_credential_scope", "delete_runtime_credential",
            "upsert_repo_credential", "clear_repo_credential",
-           "ensure_device_credential", "touch_credential_metrics"]
+           "ensure_device_credential", "touch_credential_metrics",
+           "upsert_local_runtimes", "ensure_default_runtime", "set_agent_tags"]

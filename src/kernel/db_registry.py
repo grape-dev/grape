@@ -136,12 +136,12 @@ class _CompatConn:
         return getattr(self._raw, item)
 
 
-def _new_conn(domain: str):
+def _new_conn(domain: str, autocommit: bool = True):
     import pymysql
 
     cfg = parse_dsn(dsn_of(domain))
     # connect_timeout=8s：pymysql 默认 10s，收紧 2s 与域读超时 10s 留余量
-    conn = pymysql.connect(autocommit=True, connect_timeout=8, **cfg)
+    conn = pymysql.connect(autocommit=autocommit, connect_timeout=8, **cfg)
     return _CompatConn(conn)
 
 
@@ -215,6 +215,65 @@ def domain_lock(domain: str) -> Any:
         if key not in _conns:
             _conns[key] = threading.RLock()
         return _conns[key]
+
+
+@contextmanager
+def transaction(domain: str):
+    """域连接上的**显式事务**，供需要多语句原子性的组合写原语使用。
+
+    为什么不用缓存的共享连接：`domain_db()` 的连接是进程级共享 + `autocommit=True`，
+    在里面 `START TRANSACTION` 会把其它线程刚写的语句卷进本次事务（回滚时连带丢写）。
+    这里为一次组合写单独开一条 `autocommit=False` 的连接，用完即关；
+    组合写都是低频操作（引擎刷新 / 吊销 / 环境删除），连接开销可接受。
+    """
+    domain = (domain or "").lower()
+    if domain not in _VALID:
+        raise ValueError(f"unknown domain: {domain}")
+
+    if lib_enabled() and dsn_of(domain):
+        conn = _new_conn(domain, autocommit=False)
+        c = conn.cursor()
+        try:
+            yield c
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        finally:
+            for _x in (c, conn):
+                try:
+                    _x.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        return
+
+    if domain == current_domain():
+        from src.kernel import session_manager
+
+        conn = session_manager.db
+        c = conn.cursor()
+        try:
+            yield c
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        finally:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return
+
+    raise RuntimeError(
+        f"domain '{domain}' 事务不可用：需要设置 GRAPE_DSN_{domain.upper()} 且 GRAPE_DOMAIN_LIB=1"
+    )
 
 
 @contextmanager

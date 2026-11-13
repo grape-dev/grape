@@ -2134,6 +2134,17 @@ def _sync_agent_tags(rid: int, cursor):
     else:
         cursor.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rid,))
         tags = [r[0] for r in cursor.fetchall()]
+    # P3-5f-2：agent_tags 写在 runtime 域（同域进程或 lib 不可用时回落调用方 cursor）
+    from src.kernel.domain_read import runtime_lib as _rt_lib_tags
+    from src.kernel import cross_write as _xw_tags
+    _rt_tags = _rt_lib_tags(foreign_only=True)
+    if _rt_tags is not None:
+        _rt_tags_ok = _rt_tags
+        if _xw_tags.submit_if_lib(
+                _rt_tags_ok, "runtime", "agent_tags_set", f"agent-tags:{rid}",
+                {"runtime_id": int(rid), "tags": list(tags)},
+                lambda: _rt_tags_ok.set_agent_tags(int(rid), list(tags)), log):
+            return
     cursor.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (json.dumps(tags, ensure_ascii=False), rid))
 
 @router.get("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tags", summary="List engine tags", description="Lists an engine's tags.")
