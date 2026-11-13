@@ -5,7 +5,8 @@
 `[Errno 111] Connection refused` → handoff_seq=0，需求停在本节点没派给下一 agent。
 
 修法：
-  ① 路由层直接传 `request.base_url`（本次请求真实到达的地址），不靠猜；
+  ① 派发目标一律取 `_internal_base_url()`（本机探活地址）；调用方 base_url 来自
+     `request.base_url`（Host 头可控），不得用于内部派发（SSRF/凭据外发）；
   ② 探活超时放宽到 2.5s；本机任务探活全失败也只回退本机地址，绝不回退公网/配置域名。
 """
 import pytest
@@ -31,7 +32,7 @@ def _reset_cache():
     svc._INTERNAL_BASE_CACHE = ""
 
 
-def test_dispatch_uses_explicit_base_url(monkeypatch):
+def test_dispatch_ignores_caller_base_url_and_uses_internal(monkeypatch):
     calls = {}
 
     def _post(url, **kw):
@@ -41,12 +42,13 @@ def test_dispatch_uses_explicit_base_url(monkeypatch):
         return _Resp(200, {"ok": True, "response": {"seq": 4242}})
 
     monkeypatch.setattr("httpx.post", _post)
+    monkeypatch.setattr(svc, "_internal_base_url", lambda *a, **kw: "http://127.0.0.1:8000")
     res = svc._dispatch_next(repo_key="gitcode:o/r", issue_number="7", next_agent="issue",
                              context="由用户完成 vod", runtime_id=0,
                              auth_headers={"private-token": "grape_x"},
-                             base_url="http://127.0.0.1:8123/")
+                             base_url="http://attacker.example/")
     assert res == {"ok": True, "seq": 4242, "status": 200}
-    assert calls["url"] == "http://127.0.0.1:8123/api/a2a"
+    assert calls["url"] == "http://127.0.0.1:8000/api/a2a", "内部派发不得使用 Host 头可控的 base_url"
     assert calls["headers"]["private-token"] == "grape_x"
     assert calls["json"]["agent"] == "issue"
     assert calls["json"]["payload"]["issue_number"] == "7"

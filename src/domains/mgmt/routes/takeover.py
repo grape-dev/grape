@@ -1,6 +1,6 @@
 """接管（takeover）HTTP 接口。
 
-设计文档：/root/dsh_grape_docs/TAKEOVER-API-DESIGN-v1.md §5
+设计说明：接口约定见仓库内 takeover 文档。
 5 个端点：
   POST /api/takeover/sessions                 开始（原子：cancel + mark + 签发 tko_ + bundle）
   GET  /api/takeover/sessions/{id}            状态 / 续期（?renew=1）
@@ -165,7 +165,7 @@ def get_takeover(session_id: str, renew: int = 0,
         sess = svc.get_session(session_id)
         if not sess:
             raise svc.TakeoverError(404, "not_found", "接管会话不存在")
-        if int(sess.get("user_id") or 0) and int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+        if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
             raise svc.TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
         out = {"ok": True, "session": {k: v for k, v in sess.items() if k != "bundle_json"},
                "bundle": json.loads(sess.get("bundle_json") or "{}") if sess.get("bundle_json") else None,
@@ -193,7 +193,7 @@ def takeover_progress(session_id: str, body: ProgressBody,
             from src.api.auth_token import takeover_session_key as _tko_key
             if str(user.get("session_key") or "") != _tko_key(sess.get("task_id") or ""):
                 raise svc.TakeoverError(403, "not_owner", "该接管 token 不属于此会话")
-        elif int(sess.get("user_id") or 0) and int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+        elif int(sess.get("user_id") or 0) != int(user.get("id") or 0):
             raise svc.TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
         if sess.get("status") != svc.ST_ACTIVE:
             raise svc.TakeoverError(409, "not_active", f"接管会话已结束（{sess.get('status')}）")

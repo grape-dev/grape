@@ -137,6 +137,32 @@ def test_start_is_atomic_and_idempotent(client):
     assert _get("SELECT COUNT(*) FROM takeover_sessions WHERE repo_key=?", (REPO,))[0] == 1
 
 
+def test_start_reuse_rejects_foreign_user(client):
+    """已有 active 接管时，其他用户再点接管必须 403（reused 不得绕过归属校验）。"""
+    _seed()
+    assert _start(client).status_code == 200
+    app.dependency_overrides[get_current_user_or_api_key] = lambda: {
+        "id": 2, "username": "other", "auth_type": "api_key", "token": "x", "token_type": "api_key"}
+    r = _start(client)
+    assert r.status_code == 403, r.text
+    assert r.json()["code"] == "not_owner"
+
+
+def test_unowned_session_is_denied_even_when_user_id_zero(client):
+    """会话 user_id=0 时归属校验也必须拒绝（不得 fail-open）。"""
+    _seed()
+    sid = _start(client).json()["takeover_id"]
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE takeover_sessions SET user_id=0 WHERE id=?", (sid,))
+        db.commit()
+    app.dependency_overrides[get_current_user_or_api_key] = lambda: {
+        "id": 2, "username": "other", "auth_type": "api_key", "token": "x", "token_type": "api_key"}
+    r = client.post(f"/api/takeover/sessions/{sid}/finish", json={"outcome": "completed"})
+    assert r.status_code == 403, r.text
+    assert r.json()["code"] == "not_owner"
+
+
 def test_start_without_running_task_404(client):
     _cleanup()
     r = _start(client, issue=999)

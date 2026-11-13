@@ -1,6 +1,6 @@
 """接管（takeover）服务层。
 
-设计文档：/root/dsh_grape_docs/TAKEOVER-API-DESIGN-v1.md
+设计说明：见仓库内 takeover 接口约定文档。
 职责：
   · start_takeover()   —— 原子地把"正在跑的任务"转交给本地交互式会话（cancel + mark + 签 tko_ + 存会话）
   · get_takeover()     —— 重连 / 续期（重新组装 bundle，secrets 一次一发不落库）
@@ -1037,6 +1037,10 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
     # ① 已有进行中的接管 → 幂等返回（重新组装 fresh bundle）
     sess = active_takeover_for(repo_key, issue_id, agent_type)
     if sess:
+        # 归属校验：_rebuild_for_session 会吊销原 token 并按调用者重签，
+        # 不校验就会让同仓库其它用户接管他人会话并踢掉对方 token。
+        if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+            raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
         return {"reused": True, "session": sess, "bundle": _rebuild_for_session(sess, user)}
 
     task = find_running_task(repo_key, issue_number)
@@ -1170,7 +1174,7 @@ def attach_client_session(*, session_id: str, user: dict, client_session: str,
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) and int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     cs = (client_session or "").strip()[:128]
     try:
@@ -1192,7 +1196,7 @@ def renew_takeover_session(*, session_id: str, user: dict) -> dict:
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) and int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     if sess.get("status") != ST_ACTIVE:
         return {"renewed": False, "status": sess.get("status"), "remaining": 0}
@@ -1326,11 +1330,12 @@ def _dispatch_next(*, repo_key: str, issue_number: str, next_agent: str, context
                    base_url: str = "") -> dict:
     """派发下一节点（内部 HTTP 调 /api/a2a，与 resume 同路径；失败可重试）。
 
-    base_url：路由层用 `request.base_url` 传进来最准（就是本次请求实际到达的地址，
-    不受 config 端口 / 探活超时影响）。
+    目标地址一律取 ``_internal_base_url()``（本机探活得出的内部基址）。
+    调用方传入的 base_url 来自 ``request.base_url``，可被 Host 头伪造，
+    用作 SSRF 跳板会把调用方凭据发给攻击者控制的主机，因此这里显式忽略。
     """
     import httpx
-    base = (base_url or "").rstrip("/") or _internal_base_url(int(runtime_id or 0))
+    base = _internal_base_url(int(runtime_id or 0)).rstrip("/")
     url = f"{base.rstrip('/')}/api/a2a"
     body = {"agent": next_agent,
             "payload": {"repository": repo_key.split(":", 1)[-1],
@@ -1377,7 +1382,7 @@ def request_finish(*, session_id: str, user: dict, summary: str = "", evidence: 
         from src.api.auth_token import takeover_session_key as _tko_key
         if str(user.get("session_key") or "") != _tko_key(sess.get("task_id") or ""):
             raise TakeoverError(403, "not_owner", "该接管 token 不属于此会话")
-    elif int(sess.get("user_id") or 0) and int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    elif int(sess.get("user_id") or 0) != int(user.get("id") or 0):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     if sess.get("status") != ST_ACTIVE:
         raise TakeoverError(409, "not_active", f"接管会话已结束（{sess.get('status')}）")
@@ -1428,7 +1433,7 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) and int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
 
     # agent 已经用 request-finish 提交过内容 → 用户点确认时直接沿用（不被空 body 覆盖）
@@ -1610,7 +1615,7 @@ def abort_takeover(*, session_id: str, user: dict, reason: str = "", redispatch:
     sess = get_session(session_id)
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
-    if int(sess.get("user_id") or 0) and int(sess.get("user_id") or 0) != int(user.get("id") or 0):
+    if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
     if sess.get("status") != ST_ACTIVE:
         return {"ok": True, "changed": False, "status": sess.get("status"), "session": sess}
