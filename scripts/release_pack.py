@@ -15,7 +15,7 @@
   - skills 已独立项目 (grape-dev/grape-skills)，打包时从独立仓库读取
   - examples/templates 已独立项目 (grape-dev/grape-template)，打包时从独立仓库读取
 """
-import hashlib, os, subprocess, sys, tarfile, io, shutil, datetime, gzip, json
+import hashlib, os, re, subprocess, sys, tarfile, io, shutil, datetime, gzip, json
 
 ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 # 输出目录可用环境变量覆盖（发布机路径部署相关，不写死在脚本里）
@@ -92,6 +92,21 @@ def pack_backend(ts):
         print("[FATAL] 缺少 Vue 前端构建产物: src/api/frontend/static-dist/index.html")
         print("        打包前请先构建：cd src/api/frontend/app && npm ci && npm run build")
         sys.exit(1)
+    # N-3：不止断言 index.html —— shell/index.html 引用的每个 /static-vue/** 都必须
+    # 在 static-dist 里存在，否则陈旧构建（缺新 chunk）会静默打出「半套 UI」的包。
+    dist_root = os.path.join(ROOT, "src", "api", "frontend", "static-dist")
+    shell_index = os.path.join(ROOT, "src", "api", "frontend", "shell", "index.html")
+    if os.path.isfile(shell_index):
+        with open(shell_index, encoding="utf-8") as fh:
+            refs = set(re.findall(r'(?:src|href)="(/static-vue/[^"?]+)', fh.read()))
+        missing = sorted(r for r in refs
+                         if not os.path.isfile(os.path.join(dist_root, r[len("/static-vue/"):])))
+        if missing:
+            print(f"[FATAL] static-dist 缺 {len(missing)} 个被 shell 引用的产物（构建过期）：")
+            for r in missing[:10]:
+                print(f"        {r}")
+            print("        请重新构建：cd src/api/frontend/app && npm ci && npm run build")
+            sys.exit(1)
     items.append((src_dir, "src"))
     # scripts/ 目录 (install-worker.sh, sync_templates.sh, sync_skills.sh 等)
     scripts_dir = os.path.join(ROOT, "scripts")

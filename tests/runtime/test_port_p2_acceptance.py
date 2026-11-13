@@ -6,6 +6,7 @@
 """
 import json
 import os
+import re
 import subprocess
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
@@ -118,16 +119,22 @@ class TestDeliveryBaseline:
 
 class TestStaticAndDocs:
     def test_frontend_versions_and_keys(self):
-        """#1961：语言包键 + 三处版本串均已 bump。"""
-        root = os.path.join(ROOT, "src", "api", "static")
+        """#1961：语言包键 + 三处版本串均已 bump。
+
+        静态根在 Vue 迁移后由 src/api/static/ 迁到 src/api/frontend/shell/；
+        具体版本号由缓存版本 ratchet 守卫（tests/api/test_frontend_cache_version_ratchet.py
+        / test_i18n_locale_cache_ratchet.py），本用例只锁「语言包键 + 版本串机制」。
+        """
+        root = os.path.join(ROOT, "src", "api", "frontend", "shell")
         for lang in ("zh", "en"):
             with open(os.path.join(root, "locales", lang, "tasks.json"), encoding="utf-8") as f:
                 assert json.load(f).get("searching"), lang
         with open(os.path.join(root, "index.html"), encoding="utf-8") as f:
             html = f.read()
-        assert "pages/events.js?v=65" in html
-        assert "pages/issues.js?v=136" in html
-        assert "__I18N_CACHE_VER__='41'" in html
+        assert "__I18N_CACHE_VER__=" in html, "index.html 缺语言包缓存版本键"
+        assert re.search(r'/static-vue/viewjs/[a-z0-9-]+\.js\?v=\d+', html), (
+            "index.html 未带 ?v= 引用 Vue 视图 chunk"
+        )
 
     def test_force_hint_and_docs(self):
         """#1942：提示三要素 + 两处文档口径。"""
