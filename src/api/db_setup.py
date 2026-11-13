@@ -414,6 +414,8 @@ CREATE TABLE IF NOT EXISTS task_messages (
     input_json MEDIUMTEXT DEFAULT '',         -- tool_use 入参 JSON(服务端已脱敏)
     output     TEXT DEFAULT '',         -- tool_result 输出(worker 截断 8192)
     created_at TEXT DEFAULT (datetime('now')),
+    -- agent|user：谁产生这条消息（202611160001 引入，同步进基表 DDL）
+    actor      VARCHAR(128) NOT NULL DEFAULT 'agent',
     UNIQUE(task_id, seq)
 )
 """
@@ -1013,7 +1015,10 @@ CREATE TABLE IF NOT EXISTS session_api_tokens (
     agent_type TEXT NOT NULL DEFAULT '',
     user_id TEXT NOT NULL DEFAULT 0,
     token_sha256 TEXT NOT NULL,
-    expires_at INTEGER NOT NULL DEFAULT 0
+    expires_at INTEGER NOT NULL DEFAULT 0,
+    -- worker=任务执行期会话凭据 / takeover=接管凭据（202611160001 引入；同步进基表
+    -- DDL，避免全新库/测试库只靠迁移补列，缺列即 1054 → 会话凭据全 401）
+    kind VARCHAR(16) NOT NULL DEFAULT 'worker'
 )"""),
     # ===== 事件活跃守卫（duplicate-issue-opened-event-fix-design.md 方案 A/C）=====
     # 同一 (repo, issue, agent) 同一时刻只允许一条活跃事件；跨进程原子（PK 唯一约束，
@@ -1958,6 +1963,37 @@ CREATE TABLE IF NOT EXISTS grape_t_system_credentials (
 )
 """
 
+class _NonOwnerObject(Exception):
+    """目标表在当前库中是视图（非 owner 域库）——跳过该条迁移且**不盖章**。
+
+    库按域拆分后，同一张表只有在 owner 库才是基表；其它域库拿到的是跨库只读视图。
+    视图既不能 ALTER、列又是快照，所以补列只能由 owner 库进程执行。抛这个异常
+    让执行器「跳过不盖章」，等 owner 库补齐后其它库自然收敛，而不是把版本号盖死。
+    """
+
+
+def _is_base_table(c, tbl: str) -> bool:
+    """当前库中 tbl 是否为基表（MySQL 查 information_schema；SQLite 恒 True）。
+
+    库按域拆分后，非 owner 角色看到的是跨库只读视图：视图不能 ALTER，且其列是
+    **建视图时**的快照。此时补列必须由 owner 库完成并重建视图，不能在本库盲试
+    ALTER（MySQL 报 1347 "'xxx' is not BASE TABLE"）。
+    """
+    if not _mysql_backend():
+        return True
+    try:
+        row = c.execute(
+            "SELECT table_type FROM information_schema.tables "
+            "WHERE table_schema=DATABASE() AND table_name=?",
+            (tbl,),
+        ).fetchone()
+        if not row:
+            return True   # 查不到（mock/临时表）→ 按基表处理，保持既有行为
+        return str(row[0]).upper() == "BASE TABLE"
+    except Exception:
+        return True   # 查询失败按基表处理，保持既有行为
+
+
 def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
                    strict: bool = False):
     """Idempotent column add: PRAGMA check if column missing then ALTER.
@@ -1986,6 +2022,12 @@ def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
     cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
     if col in cols:
         return
+    if not _is_base_table(c, tbl):
+        # 非 owner 库的视图：ALTER 必然 1347，且视图列是建视图时快照 —— 必须由
+        # owner 库补列 + 重建视图。**跳过且不盖章**（抛给迁移执行器，下次启动重试），
+        # 否则版本被盖死、列永不创建，线上表现为查询该列 1054 静默失败。
+        raise _NonOwnerObject(
+            f"{tbl}.{col}: 当前库中是视图（非 owner），需 owner 库补列并重建视图后重试")
     base_sql = f"ALTER TABLE {tbl} ADD COLUMN `{col}` {ddl}"
     if not _mysql_backend():
         c.execute(base_sql)
@@ -4683,16 +4725,21 @@ def _fn_takeover_schema_v1() -> None:
     with db_lock:
         c = db.cursor()
         c.execute(_TAKEOVER_SESSIONS_DDL)
-        _ensure_column(c, "session_api_tokens", "kind", "VARCHAR(16) NOT NULL DEFAULT 'worker'")
-        _ensure_column(c, "task_messages", "actor", "VARCHAR(128) NOT NULL DEFAULT 'agent'")
-        _ensure_column(c, "takeover_sessions", "token_issued_at", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(c, "takeover_sessions", "handoff_seq", "INTEGER NOT NULL DEFAULT 0")
-        _ensure_column(c, "takeover_sessions", "next_agent", "VARCHAR(32) NOT NULL DEFAULT ''")
+        # strict=True：补列失败必须 raise（迁移不盖章、下次启动重试）。否则版本号被
+        # 盖死而列永不创建，线上表现为「查询该列 1054 → 鉴权静默 401」
+        #（2026-11-13 事故：session_api_tokens.kind 缺失导致所有 tk_ 会话凭据 401）。
+        _ensure_column(c, "session_api_tokens", "kind", "VARCHAR(16) NOT NULL DEFAULT 'worker'", strict=True)
+        _ensure_column(c, "task_messages", "actor", "VARCHAR(128) NOT NULL DEFAULT 'agent'", strict=True)
+        _ensure_column(c, "takeover_sessions", "token_issued_at", "INTEGER NOT NULL DEFAULT 0", strict=True)
+        _ensure_column(c, "takeover_sessions", "handoff_seq", "INTEGER NOT NULL DEFAULT 0", strict=True)
+        _ensure_column(c, "takeover_sessions", "next_agent", "VARCHAR(32) NOT NULL DEFAULT ''", strict=True)
         db.commit()
 
-        # 索引：MySQL 不支持 CREATE INDEX IF NOT EXISTS → 逐个 try，重复即忽略
+        # 索引：MySQL 不支持 CREATE INDEX IF NOT EXISTS → 逐个 try，重复即忽略。
+        # session_key 是 TEXT，MySQL 索引必须给前缀长度（否则 1170）。
+        _sat_key_col = "session_key(64)" if _mysql_backend() else "session_key"
         for ddl in (
-            "CREATE INDEX IF NOT EXISTS ix_sat_kind_key ON session_api_tokens(kind, session_key)",
+            f"CREATE INDEX IF NOT EXISTS ix_sat_kind_key ON session_api_tokens(kind, {_sat_key_col})",
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_takeover_active ON takeover_sessions(active_key)",
             "CREATE INDEX IF NOT EXISTS ix_takeover_task ON takeover_sessions(task_id)",
             "CREATE INDEX IF NOT EXISTS ix_takeover_status ON takeover_sessions(status, updated_at)",
@@ -4712,6 +4759,66 @@ register_migration(
     kind="safe",
     fn=_fn_takeover_schema_v1,
 )
+
+def _fn_repair_session_token_kind_v1() -> None:
+    """补 `session_api_tokens.kind`（owner=mgmt 域库）——2026-11-13 事故修复。
+
+    事故链：`_fn_takeover_schema_v1` 的 `_ensure_column` 当时不 strict，在非 owner
+    库（该表是跨库视图）ALTER 报 1347 后只记 MANUAL REVIEW 就正常返回，迁移照样
+    盖章 → 列永不创建；而 `verify_session_token()` 的 SQL 带
+    `COALESCE(kind,'worker')`，MySQL 直接 1054 → 异常被吞返回 None → 所有 tk_ 会话
+    凭据 401 → Agent 任务「前置检查失败」，流水线自动停摆且退出码 0（无告警）。
+
+    只补列（幂等）。视图侧仍需重建（owner=mgmt → runtime/insight）：
+      `python3 scripts/sync_domain_views.py --owner grape_mgmt_db \\
+         --target grape_runtime_db,grape_insight_db --tables session_api_tokens`
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "session_api_tokens", "kind",
+                       "VARCHAR(16) NOT NULL DEFAULT 'worker'", strict=True)
+        db.commit()
+        # session_key 是 TEXT → MySQL 索引用前缀长度（否则 1170）
+        _key_col = "session_key(64)" if _mysql_backend() else "session_key"
+        try:
+            c.execute(f"CREATE INDEX IF NOT EXISTS ix_sat_kind_key "
+                      f"ON session_api_tokens(kind, {_key_col})")
+        except Exception as e:
+            _msg = str(e).lower()
+            if "already exists" not in _msg and "duplicate" not in _msg:
+                log.warning(f"repair ix_sat_kind_key skipped: {e}")
+        db.commit()
+
+
+register_migration(
+    version="202611160006",
+    name="repair-session-token-kind-v1",
+    kind="safe",
+    fn=_fn_repair_session_token_kind_v1,
+)
+
+
+def _fn_repair_task_messages_actor_v1() -> None:
+    """补 `task_messages.actor`（owner=runtime 域库）——同批次静默漏列修复。
+
+    `_fn_takeover_schema_v1` 在 mgmt/insight（该表为视图）同样 ALTER 失败后照常
+    盖章，导致非 owner 侧读 `actor` 会 1054。视图侧重建：
+      owner=runtime → targets mgmt,insight
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "task_messages", "actor",
+                       "VARCHAR(128) NOT NULL DEFAULT 'agent'", strict=True)
+        db.commit()
+
+
+register_migration(
+    version="202611160007",
+    name="repair-task-messages-actor-v1",
+    kind="safe",
+    fn=_fn_repair_task_messages_actor_v1,
+)
+
 
 def _fn_checksum(fn: Callable[[], None]) -> str:
     """fn 指纹 sha256 前 16 位（漂移检测用；取不到返回空串不阻断）。
@@ -5056,6 +5163,11 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
             log.error(
                 f"迁移 {mig.version} {mig.name} MDL 等待超时，跳过不盖章（下次续跑）: {e}"
                 + (f"；MDL 持有者摘要: {holders}" if holders else ""))
+            continue
+        except _NonOwnerObject as e:
+            # 非 owner 域库（该表在本库是视图）——不能 ALTER，也不能盖章，
+            # 等 owner 库进程补列 + 重建视图后自然收敛。
+            log.info(f"迁移 {mig.version} {mig.name} 跳过不盖章（非 owner 视图，等 owner 库收敛）: {e}")
             continue
         except Exception as e:
             # backfill/cleanup 失败跳过不阻断启动（可用性优先，幂等下次续跑）
