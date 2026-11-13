@@ -660,6 +660,30 @@ def _persist_scene_row(name: str, fields: dict, stats: dict) -> tuple[int, str]:
     只更新内容列，`is_active` 保留库内既有值（admin 设置不被覆盖）。
     """
     content_hash = fields["content_hash"]
+
+    # lib 模式（三库三机）：跨域写走 mgmt lib + 幂等键；hash 未变时 upsert 内部直接 skipped
+    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_scene
+    _mg_scene = _mgmt_lib_scene()
+    if _mg_scene is not None:
+        from src.kernel import cross_write as _xw_scene
+        _out: dict = {}
+
+        def _apply_scene() -> None:
+            _out.update(_mg_scene.upsert_scene_content(name, fields))
+
+        _res = _xw_scene.submit(
+            "mgmt", "scene_upsert", f"scene-upsert:{name}:{content_hash}",
+            {"name": name, "content_hash": content_hash}, _apply_scene)
+        if _res.get("status") == "duplicate":
+            stats["skipped"] += 1
+            return int(_out.get("id") or 0) or int(_mg_scene.get_official_scene_id(name) or 0), "skipped"
+        _action = {"inserted": "added", "updated": "updated",
+                   "skipped": "skipped"}.get(str(_out.get("action") or ""), "updated")
+        stats[_action] += 1
+        _sid = int(_out.get("id") or 0) or int(_mg_scene.get_official_scene_id(name) or 0)
+        log.info(f"Scene sync: {_action} '{name}' v{fields['version']} (lib)")
+        return _sid, _action
+
     with db_lock:
         c = db.cursor()
         c.execute(
