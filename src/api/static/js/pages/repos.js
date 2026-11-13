@@ -278,14 +278,27 @@ function _loadPlatformCatalog(cb) {
   } else finish(fallback);
 }
 function _getAvailablePlatforms() {
+  // 平台栏数据源 = 当前账号实际有仓库的平台（repo_key 前缀）∪ 身份绑定（无仓库时兜底）。
+  // 不能用 bindings 当权威：PAT 是「仓库执行凭据」、不产生身份行（A2 对象模型），
+  // 纯 PAT 平台永远不在 bindings 里 → 平台栏不渲染（platforms.length <= 1）→
+  // 该平台的仓库只能靠翻页找（2026-11-13 实测：gitee 7 条落第 7/8 页、无页签）。
   var _lu = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
   var bindings = (_lu && _lu.bindings) || [];
   var cat = _platformCatalog || {gitcode:{key:'gitcode',name:'GitCode'},
                                  github:{key:'github',name:'GitHub'},
                                  gitee:{key:'gitee',name:'Gitee'}};
+  var keys = {};
+  (_projectsRepos || []).forEach(function(r) {
+    var rk = (r && r.repo_key) || '';
+    var k = rk.indexOf(':') > 0 ? rk.split(':')[0] : 'gitcode';  // 裸键归 gitcode
+    if (k) keys[k] = true;
+  });
+  if (!Object.keys(keys).length) {
+    bindings.forEach(function(b) { keys[b] = true; });  // 尚无仓库（新账号/加载中）→ 回退身份绑定
+  }
   var platforms = [];
   Object.keys(cat).forEach(function(k) {
-    if (bindings.indexOf(k) >= 0) platforms.push({key: k, name: cat[k].name || k});
+    if (keys[k]) platforms.push({key: k, name: cat[k].name || k});
   });
   return platforms;
 }
@@ -317,6 +330,7 @@ function _filterByPlatform(repos) {
   if (!_activePlatformFilter) return repos;
   return repos.filter(function(r) {
     var rk = r.repo_key || '';
+    if (!rk) return _activePlatformFilter === 'gitcode'; // 裸键归 gitcode（与平台栏同口径，评审 I-2）
     return rk.indexOf(_activePlatformFilter + ':') === 0; // D102-F: 前缀精确匹配（原"非 github 即 gitcode"把 gitee 错归 gitcode 桶）
   });
 }

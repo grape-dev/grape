@@ -39,8 +39,12 @@ TARGET_FILES = ["src/api/db_setup.py"] + sorted(
 )
 
 # 危险 DDL 形态（大小写不敏感；行内匹配）
+# 列级 + 表级都要覆盖：表级形态（DROP/RENAME TABLE、ALTER ... RENAME TO）一旦漏掉，
+# 把重建迁移回退成裸 DDL 时 CI 仍全绿（评审 G-1）。
 _DESTRUCTIVE_RE = re.compile(
-    r"\b(DROP\s+COLUMN|RENAME\s+COLUMN|MODIFY\s+COLUMN)\b", re.IGNORECASE)
+    r"\b(DROP\s+COLUMN|RENAME\s+COLUMN|MODIFY\s+COLUMN|"
+    r"DROP\s+TABLE|RENAME\s+TABLE|TRUNCATE\s+TABLE)\b"
+    r"|\bALTER\s+TABLE\s+\S+\s+RENAME\s+TO\b", re.IGNORECASE)
 # 收口形态 a：_destructive_ddl( 调用行
 _COLLECTED_RE = re.compile(r"_destructive_ddl\s*\(", re.IGNORECASE)
 # 收口形态 b：cleanup 声明（注册表登记行）
@@ -49,7 +53,8 @@ _CLEANUP_DECL_RE = re.compile(
     re.IGNORECASE)
 # 探测逻辑行（'DROP COLUMN' in sql 之类的成员判断，非 DDL 语句本身）
 _MEMBERSHIP_RE = re.compile(
-    r"[\"'](DROP|RENAME|MODIFY)\s+COLUMN[\"']\s+in\b", re.IGNORECASE)
+    r"[\"'](DROP|RENAME|MODIFY|TRUNCATE)\s+(COLUMN|TABLE)[\"']\s+in\b",
+    re.IGNORECASE)
 
 
 def _paren_balance(line: str) -> int:

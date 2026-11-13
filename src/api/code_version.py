@@ -42,6 +42,13 @@ def current_code_version() -> str:
 
 
 def _compute_version() -> str:
+    # 镜像 / docker-compose 部署没有 .git（.dockerignore 排除），git 分支退化成 fp- 指纹，
+    # 而 fp- 与日期式 min_code_version 不可比 → cleanup 迁移永不执行（评审 C-1）。
+    # 允许部署侧显式注入可比版本（与写入 meta 的 min_code_version 同源），如 build 时
+    # ENV GRAPE_DEPLOY_VERSION=2026.11.13；不注入时仍走 git → 指纹回退链。
+    env_ver = (os.environ.get("GRAPE_DEPLOY_VERSION") or "").strip()
+    if env_ver:
+        return env_ver
     ver = _git_version()
     if ver:
         return ver

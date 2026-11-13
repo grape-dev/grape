@@ -504,7 +504,7 @@ function loadAgentTypes() {
     if (!_bs.length) return false;
     var _cat = (typeof _appVcsCatalog === 'object' && _appVcsCatalog) ? _appVcsCatalog : null;
     if (!_cat) return true;  // 目录未就绪：不误判，交给后端
-    return _bs.some(function(b) { return !!_cat[b.provider]; });
+    return _bs.some(function(b) { return !!_cat[b]; });
   }
 
   // 统一路由恢复：密码登录 / OAuth 登录 / 页面刷新共用

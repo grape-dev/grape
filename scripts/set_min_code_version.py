@@ -25,17 +25,19 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 形状校验：带数值点分前缀（2026.12.01 / 2026.12.01-rc1 / 与自身版本同形的
-# g-2026.10.30-abc123 均通过；纯哈希/空串拒绝）。
-_VERSION_SHAPE_RE = re.compile(r"^(g-)?\d{4}(\.\d{1,2}){1,2}([.-].*)?$")
+# g-2026.10.30-abc123 均通过）；另接受 fp- 形态的内容指纹（镜像/无 .git 部署，
+# 必须写入目标代码 current_code_version() 的**原值**，_version_ge 对同形态做相等判定）。
+_VERSION_SHAPE_RE = re.compile(r"^(g-)?\d{4}(\.\d{1,2}){1,2}([.-].*)?$|^fp-[0-9a-f]{6,}$")
 
 
 def _validate_version(value: str) -> str:
-    """版本号形状校验：必须带数值点分前缀（与 _version_ge 可比）。校验失败返回原因。"""
+    """版本号形状校验：数值点分前缀或 fp- 指纹（与 _version_ge 可比）。失败返回原因。"""
     if not value:
         return "版本号为空"
     if not _VERSION_SHAPE_RE.match(value):
         return (f"版本号必须带数值点分前缀（如 2026.12.01 或 2026.12.01-rc1），"
-                f"与主控自身版本（g-2026.10.30-abc123）可比；收到: {value!r}")
+                f"或是目标代码 current_code_version() 的 fp- 指纹原值；"
+                f"与主控自身版本（g-2026.10.30-abc123）可比。收到: {value!r}")
     return ""
 
 

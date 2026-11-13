@@ -38,6 +38,10 @@ def _mysql_env():
     env["DEVOPS_DB_NAME"] = _GRAPE_GATE_TEST_DB
     env.setdefault("DEVOPS_DB_USER", "root")
     env.setdefault("DEVOPS_DB_HOST", "127.0.0.1")
+    # 沙盒库是单实例、无滚动升级窗口：显式跳过 007 的严格 cleanup 门槛
+    # （该门槛要求先写 meta.min_code_version，生产由部署步骤保证）。
+    # 不开这个口子，沙盒库上 007 会按设计拒绝执行、门禁的「盖章 ⊇ 注册链」必红。
+    env["GRAPE_ALLOW_UNGUARDED_CLEANUP"] = "1"
     return env
 
 

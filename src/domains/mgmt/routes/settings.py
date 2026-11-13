@@ -495,8 +495,11 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                 _cascade_pat_clear(user, _p)
 
     # 绑定/解绑平台后清理 user_repos 缓存——下次 /repos/member 会从 VCS 重新拉取
-    # 卡驱动：任意平台凭据键（<p>_token / <p>_pat）变更都失效缓存，无平台名分支。
-    if any(k.endswith(("_token", "_pat")) for k in explicit):
+    # 卡驱动：任意平台凭据键变更都失效缓存，无平台名分支。
+    # 2026-11-13 补泛型入口：新平台 PAT 走 body.platform_tokens（复数），键名结尾
+    # 是 `_tokens` 不是 `_token` —— 只看旧键会让「配完 PAT 项目页看不到列表」复现
+    # （缓存 30min 内直接返回旧的、不含新平台的快照）。清除路径用的是同一个泛型键。
+    if any(k.endswith(("_token", "_pat")) for k in explicit) or explicit.get("platform_tokens"):
 
         try:
             from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl

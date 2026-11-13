@@ -364,7 +364,12 @@ CREATE TABLE IF NOT EXISTS user_credentials (
     -- 必须能共存——OAuth 刷新是现役写路径（refresh_oauth_token → kind='oauth'），
     -- 旧 UNIQUE(user_id, provider) 会把 PAT 归位行 upsert 成覆盖，A2 收口删旧键行后
     -- PAT 即丢失（验证库实弹复现）。id 因此退化为普通列，不再承担唯一性。
-    id TEXT NOT NULL DEFAULT '',
+    -- 默认值写成 VARCHAR + 字面量：MySQL 上 TEXT 列不能带默认（1101），
+    -- 翻译器会把 TEXT DEFAULT '' 静默剥掉 → 不写 id/created_at 的 INSERT 严格模式
+    -- 报 1364（QA !1372 P3）。VARCHAR(191) 的字面量默认两栈全版本合法，
+    -- id 是 UUID(36)、时间戳 19 字符，长度足够；reconcile 已把 VARCHAR(191) 归一为 TEXT，
+    -- 不影响 schema drift。
+    id VARCHAR(191) NOT NULL DEFAULT '',
     user_id TEXT NOT NULL,                -- D105 第二批：grape_accounts.id（UUID TEXT）
     -- provider 值域三族（动态派生，非固定枚举；平台清单由平台卡驱动）：
     --   云凭据裸名:    huawei_cloud / codearts（settings.py 固定白名单）
@@ -376,8 +381,8 @@ CREATE TABLE IF NOT EXISTS user_credentials (
     -- 写入方向：新写一律带 kind；读取双读（新形态 → 旧复合键 provider=f"{p}_{kind}" 回退）。
     kind TEXT NOT NULL DEFAULT '',
     config_json MEDIUMTEXT NOT NULL,
-    created_at TEXT DEFAULT '',
-    updated_at TEXT DEFAULT '',
+    created_at VARCHAR(191) DEFAULT '',
+    updated_at VARCHAR(191) DEFAULT '',
     PRIMARY KEY (user_id, provider, kind)   -- upsert 语义键：一用户一平台一类型一条
 )
 """
@@ -569,6 +574,10 @@ def backfill_credential_kind() -> dict:
         return stats
     except Exception as e:
         log.warning(f"backfill_credential_kind failed: {e}")
+        try:
+            db.rollback()      # 失败事务不能留在连接上（评审 M-1）
+        except Exception:
+            pass
         raise  # 迁移约定：抛错=不盖章，下次启动重试
 
 

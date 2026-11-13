@@ -302,6 +302,11 @@ class GenericVcsProvider(VCSProvider):
         一次取回）→ is_admin=True，与 permissions.admin 取或；login 拉取
         失败降级纯 permissions 判定（不炸列表拉取）。非 owner 仓库判定
         不变（permissions 缺失降级 False 不误报权限的原则保留）。
+
+        2026-11-13：补 created_at 回填。前端项目大厅按「已托管 > 已加入 > 其它」
+        排序、同级按 created_at 倒序，generic 平台不回填该字段时全部沉底
+        （gitee 实测 7 条落第 7/8 页，首屏永远看不到）。各平台字段名不同：
+        Gitee/GitHub/GitLab 用 created_at，个别实现用 created_on / created。
         """
         out, page = [], 1
         # D102-A: owner 兜底基准 login（失败降级 None=纯 permissions 判定）
@@ -330,6 +335,8 @@ class GenericVcsProvider(VCSProvider):
                     "name": r.get("name") or "",
                     "is_admin": _is_admin,
                     "html_url": r.get("html_url") or "",
+                    "created_at": (r.get("created_at") or r.get("created_on")
+                                   or r.get("created") or ""),
                 })
             if len(batch) < 100:
                 break
