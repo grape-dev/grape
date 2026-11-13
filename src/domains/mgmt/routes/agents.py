@@ -301,18 +301,31 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         _evt_where_sql = " AND ".join(_evt_where)
 
         try:
-            c.execute(f"SELECT COUNT(*) FROM events WHERE {_evt_where_sql}", _evt_params)
-            events_total = c.fetchone()[0]
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_ev
+            _rt_ev = _runtime_lib_ev()
+            if _rt_ev is not None:
+                events_total = _rt_ev.count_events(_evt_where_sql, tuple(_evt_params))
+            else:
+                c.execute(f"SELECT COUNT(*) FROM events WHERE {_evt_where_sql}", _evt_params)
+                events_total = c.fetchone()[0]
         except Exception as e:
             log.warning(f"agent events search count failed (keyword={keyword!r}): {e}")
             events_total = 0
 
         try:
             _offset = (page - 1) * page_size
-            c.execute(
-                f"SELECT seq, event_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at, issue_id, repo_key FROM events WHERE {_evt_where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
-                _evt_params + [page_size, _offset]
-            )
+            from src.kernel.domain_read import runtime_lib as _runtime_lib_ev2
+            _rt_ev2 = _runtime_lib_ev2()
+            if _rt_ev2 is not None:
+                _rows_ev = _rt_ev2.query_events(
+                    "seq, event_type, title, actor, summary, status, created_at, runtime, "
+                    "skill, exit_code, duration, started_at, completed_at, issue_id, repo_key",
+                    _evt_where_sql, tuple(_evt_params), "seq DESC", int(page_size), int(_offset))
+            else:
+                _rows_ev = c.execute(
+                    f"SELECT seq, event_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at, issue_id, repo_key FROM events WHERE {_evt_where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                    _evt_params + [page_size, _offset]
+                ).fetchall()
             recent_events = [
                 {"seq": r[0], "event_type": r[1], "title": r[2] or r[1], "actor": r[3] or "",
                  "summary": r[4] or r[2] or r[1],
@@ -321,7 +334,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                  "exit_code": r[9], "duration": r[10],
                  "started_at": normalize_event_time(r[11] or ""), "completed_at": normalize_event_time(r[12] or ""),
                  "issue_id": r[13] or "", "repo_key": r[14] or ""}
-                for r in c.fetchall()
+                for r in _rows_ev
             ]
         except Exception as e:
             log.warning(f"agent events search query failed (keyword={keyword!r}): {e}")

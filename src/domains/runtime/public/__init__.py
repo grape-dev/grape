@@ -242,6 +242,71 @@ def list_engine_tags(runtime_id: int, enabled_only: bool = True) -> list[str]:
     return [r[1] for r in list_engine_capabilities(runtime_id, enabled_only)]
 
 
+_EVENT_COLS = {
+    "seq", "repo_key", "issue_id", "event_type", "agent_type", "title", "summary", "actor",
+    "status", "created_at", "started_at", "completed_at", "runtime", "skill", "exit_code",
+    "duration", "entity_type", "org_id",
+}
+
+
+def _check_select(select: str) -> str:
+    """允许 `列, 列` 或 `COUNT(*)` / `SUM(列)` / `列, COUNT(*)` 形式，其余拒绝。"""
+    parts = [p.strip() for p in select.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("select 不能为空")
+    for part in parts:
+        upper = part.upper()
+        if upper == "COUNT(*)":
+            continue
+        if upper.startswith("SUM(") and upper.endswith(")"):
+            col = part[4:-1].strip()
+            if col not in _EVENT_COLS:
+                raise ValueError(f"SUM 列 '{col}' 不在 events 允许列表内")
+            continue
+        if " AS " in upper:
+            col = part.split(" ", 1)[0].strip()
+            if col not in _EVENT_COLS:
+                raise ValueError(f"列 '{col}' 不在 events 允许列表内")
+            continue
+        if part not in _EVENT_COLS:
+            raise ValueError(f"列 '{part}' 不在 events 允许列表内")
+    return select
+
+
+def _check_where(where: str) -> None:
+    low = where.lower()
+    for bad in (";", "--", "/*", "*/"):
+        if bad in where:
+            raise ValueError("where 片段不得包含分号或注释")
+    if " from " in low or " join " in low:
+        raise ValueError("where 片段不得包含子查询表引用")
+
+
+def query_events(select: str, where: str = "", params: tuple = (), order_by: str = "",
+                 limit: int = 0, offset: int = 0) -> list[tuple]:
+    """events 受控查询：列/表达式白名单 + where 片段校验（占位符用 `?` 亦可）。"""
+    _check_select(select)
+    if where:
+        _check_where(where)
+    sql = f"SELECT {select} FROM events"
+    if where:
+        sql += f" WHERE {where}"
+    if order_by:
+        sql += f" ORDER BY {order_by}"
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+        if offset:
+            sql += f" OFFSET {int(offset)}"
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, params)
+        return [tuple(r) for r in c.fetchall()]
+
+
+def count_events(where: str = "", params: tuple = ()) -> int:
+    rows = query_events("COUNT(*)", where, params)
+    return int(rows[0][0]) if rows else 0
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -256,4 +321,4 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
-           "list_engine_tags", "health"]
+           "list_engine_tags", "query_events", "count_events", "health"]
