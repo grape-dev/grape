@@ -334,8 +334,8 @@
 .scn-loading{display:flex;align-items:center;justify-content:center;min-height:400px;width:100%}
 .scn-spinner{width:24px;height:24px;border:2.5px solid var(--b);border-top-color:var(--a);border-radius:50%;animation:scn-spin .7s linear infinite}
 @keyframes scn-spin{to{transform:rotate(360deg)}}
-.scn-card{background:var(--c);border:1px solid var(--b);border-radius:18px;overflow:hidden;cursor:pointer;transition:all .3s cubic-bezier(.25,.1,.25,1);box-shadow:var(--sh);display:flex;flex-direction:column}
-.scn-card:hover{transform:translateY(-4px);box-shadow:0 12px 40px rgba(0,0,0,.08);border-color:rgba(0,113,227,.15)}
+.scn-card{background:color-mix(in srgb,#fff 3%,var(--c));border:1px solid var(--b);border-radius:18px;overflow:hidden;cursor:pointer;transition:background .25s,border-color .25s,box-shadow .25s,transform .25s cubic-bezier(.25,.1,.25,1);box-shadow:var(--sh);display:flex;flex-direction:column}
+.scn-card:hover{transform:translateY(-4px);background:color-mix(in srgb,var(--a) 7%,color-mix(in srgb,#fff 3%,var(--c)));box-shadow:0 12px 32px color-mix(in srgb,#000 26%,transparent);border-color:color-mix(in srgb,var(--a) 45%,transparent)}
 .scn-scroll-track .scn-card{flex-shrink:0;width:300px}
 .scn-grid-track .scn-card{width:100%;flex-shrink:unset;position:relative}
 .scn-card-bar{height:4px;width:100%;transition:height .3s cubic-bezier(.25,.1,.25,1)}

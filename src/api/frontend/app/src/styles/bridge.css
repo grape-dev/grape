@@ -164,3 +164,18 @@
     background: var(--c);
   }
 }
+
+/* ── 卡片亮面 + hover 反馈（2026-11-12 场景卡反馈）────────────────────────
+   页面底是 --c（暗色 #2c2c2e），卡片原先也用 --c/--bg → 卡片和背景分不出来；
+   hover 只给了 8% 黑阴影，暗色下等于没有。这里：卡片抬一档（+4% 白），
+   hover 换成 accent 8% 淡染 + 45% 蓝描边 + 深投影，两个主题都明显。 */
+:is(.scn-card, .sm__scard:not(.sm__scard--del), .sm__fcard:not(.sm__fcard--del)) {
+  background: color-mix(in srgb, #fff 4%, var(--c)) !important;
+  border: 1px solid var(--b) !important;
+  transition: background .2s, border-color .2s, box-shadow .2s, transform .2s !important;
+}
+:is(.scn-card, .sm__scard:not(.sm__scard--del), .sm__fcard:not(.sm__fcard--del)):hover {
+  background: color-mix(in srgb, var(--a) 8%, color-mix(in srgb, #fff 4%, var(--c))) !important;
+  border-color: color-mix(in srgb, var(--a) 45%, transparent) !important;
+  box-shadow: 0 10px 26px color-mix(in srgb, #000 36%, transparent) !important;
+}
