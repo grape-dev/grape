@@ -494,6 +494,9 @@ app.include_router(task_logs.router)     # 任务日志查看 / SSE 流（TC-4.1
 
 # runtime 只读端点（runtime_view 语义：Mgmt 查看 install / machine-health / task-status）
 server_common.include_selected(app, runtime.router, methods={"GET"})
+# 接管会话（weekly-11）：任务接管是一等资源，路由在管理域，只有 mgmt 进程提供
+from src.domains.mgmt.routes import takeover as takeover_api  # noqa: E402
+app.include_router(takeover_api.router)
 
 # 数据域用户面路由（设计 §5.1 清单；nginx 主路由到 Insight 进程，此处作直连/内部兜底）
 from src.domains.insight.routes import dashboard, search, latency, health
