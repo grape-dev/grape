@@ -776,8 +776,13 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                                 (body.skill, scope, *_owners),
                             ).fetchone()
                         else:
-                            row = _c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1",
-                                             (body.skill, scope)).fetchone()
+                            from src.kernel.domain_read import runtime_lib as _ru_lib_d40f5e_f
+                            _ru_lib_d40f5e = _ru_lib_d40f5e_f(foreign_only=True)
+                            if _ru_lib_d40f5e is not None:
+                                _c = _ru_lib_d40f5e.read_one("skill_d40f5e", (body.skill, scope)).fetchone()
+                            else:
+                                row = _c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1",
+                                                 (body.skill, scope)).fetchone()
                         return row[0] if row else 0
 
                 if getattr(body, "skill_scope", "") == "repo":

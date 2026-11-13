@@ -75,11 +75,16 @@ def _resolve_skill(skill_name: str):
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT id, skill_name, scope FROM skill WHERE skill_name=? AND is_active=1 "
-                "ORDER BY CASE scope WHEN 'official' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END LIMIT 1",
-                (skill_name,))
-            r = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_820107_f
+            _ru_lib_820107 = _ru_lib_820107_f(foreign_only=True)
+            if _ru_lib_820107 is not None:
+                r = _ru_lib_820107.read_one("skill_820107", (skill_name,))
+            else:
+                c.execute(
+                    "SELECT id, skill_name, scope FROM skill WHERE skill_name=? AND is_active=1 "
+                    "ORDER BY CASE scope WHEN 'official' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END LIMIT 1",
+                    (skill_name,))
+                r = c.fetchone()
         if r:
             return r[0], r[1] or '', r[2] or ''
         return None, skill_name, ''

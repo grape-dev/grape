@@ -951,10 +951,15 @@ def _skill_display_name(skill_name: str) -> str:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
-                (skill_name,))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_1abf56_f
+            _ru_lib_1abf56 = _ru_lib_1abf56_f(foreign_only=True)
+            if _ru_lib_1abf56 is not None:
+                row = _ru_lib_1abf56.read_one("skill_1abf56", (skill_name,))
+            else:
+                c.execute(
+                    "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
+                    (skill_name,))
+                row = c.fetchone()
         return (row[0] or "") if row else ""
     except Exception:
         return ""

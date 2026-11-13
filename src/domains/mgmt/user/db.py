@@ -1081,8 +1081,13 @@ def get_skill_by_id(skill_id, *, raise_on_error: bool = False) -> dict | None:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, scope, owner_id, content_hash FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_4b5014_f
+            _ru_lib_4b5014 = _ru_lib_4b5014_f(foreign_only=True)
+            if _ru_lib_4b5014 is not None:
+                row = _ru_lib_4b5014.read_one("skill_4b5014", (int(skill_id),))
+            else:
+                c.execute("SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, scope, owner_id, content_hash FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
+                row = c.fetchone()
             if not row:
                 return None
             return {
@@ -1113,8 +1118,13 @@ def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[in
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, content_hash, file_path FROM skill WHERE skill_name=? AND scope=? LIMIT 1", (skill_name, scope))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_1b908c_f
+            _ru_lib_1b908c = _ru_lib_1b908c_f(foreign_only=True)
+            if _ru_lib_1b908c is not None:
+                row = _ru_lib_1b908c.read_one("skill_1b908c", (skill_name, scope))
+            else:
+                c.execute("SELECT id, content_hash, file_path FROM skill WHERE skill_name=? AND scope=? LIMIT 1", (skill_name, scope))
+                row = c.fetchone()
             if not row:
                 return (0, "", "")
             return (row[0], row[1] or "", row[2] or "")
@@ -1154,10 +1164,15 @@ def get_skill_hash_by_id(skill_id: int) -> tuple[int, str, str, int]:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT id, content_hash, file_path, is_active FROM skill WHERE id=?",
-                (skill_id,))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_da7be4_f
+            _ru_lib_da7be4 = _ru_lib_da7be4_f(foreign_only=True)
+            if _ru_lib_da7be4 is not None:
+                row = _ru_lib_da7be4.read_one("skill_da7be4", (skill_id,))
+            else:
+                c.execute(
+                    "SELECT id, content_hash, file_path, is_active FROM skill WHERE id=?",
+                    (skill_id,))
+                row = c.fetchone()
             if not row:
                 return (0, "", "", 0)
             return (row[0], row[1] or "", row[2] or "", row[3] if row[3] is not None else 1)
@@ -1238,19 +1253,34 @@ def resolve_skill_id(skill_name: str, owner_id: str = "",
         with db_lock:
             c = db.cursor()
             if user_id:
-                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, user_id))
-                row = c.fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_17c0d2_f
+                _ru_lib_17c0d2 = _ru_lib_17c0d2_f(foreign_only=True)
+                if _ru_lib_17c0d2 is not None:
+                    row = _ru_lib_17c0d2.read_one("skill_17c0d2", (skill_name, user_id))
+                else:
+                    c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, user_id))
+                    row = c.fetchone()
                 if row:
                     log.info(f"resolve_skill_id: '{skill_name}' hit user scope (owner={user_id})")
                     return row[0]
             if repo_key:
-                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, repo_key))
-                row = c.fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_4a8bb9_f
+                _ru_lib_4a8bb9 = _ru_lib_4a8bb9_f(foreign_only=True)
+                if _ru_lib_4a8bb9 is not None:
+                    row = _ru_lib_4a8bb9.read_one("skill_4a8bb9", (skill_name, repo_key))
+                else:
+                    c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, repo_key))
+                    row = c.fetchone()
                 if row:
                     log.info(f"resolve_skill_id: '{skill_name}' hit repo scope (owner={repo_key})")
                     return row[0]
-            c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1", (skill_name,))
-            row = c.fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_94e35b_f
+            _ru_lib_94e35b = _ru_lib_94e35b_f(foreign_only=True)
+            if _ru_lib_94e35b is not None:
+                row = _ru_lib_94e35b.read_one("skill_94e35b", (skill_name,))
+            else:
+                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1", (skill_name,))
+                row = c.fetchone()
             if row:
                 return row[0]
     except Exception as e:
@@ -1327,24 +1357,39 @@ def get_skill_scope_info(skill_name: str, repo_key: str = "",
         with db_lock:
             c = db.cursor()
             if repo_key:
-                row = c.execute(
-                    "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='repo' "
-                    "AND owner_id=? AND is_active=1 LIMIT 1",
-                    (skill_name, repo_key)).fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_015f53_f
+                _ru_lib_015f53 = _ru_lib_015f53_f(foreign_only=True)
+                if _ru_lib_015f53 is not None:
+                    c = _ru_lib_015f53.read_one("skill_015f53", (skill_name, repo_key)).fetchone()
+                else:
+                    row = c.execute(
+                        "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='repo' "
+                        "AND owner_id=? AND is_active=1 LIMIT 1",
+                        (skill_name, repo_key)).fetchone()
                 if row:
                     info.update(found=True, matched=True, scope="repo",
                                 skill_id=row[0], owner_id=row[1] or "")
                     return info
-            row = c.execute(
-                "SELECT id FROM skill WHERE skill_name=? AND scope='official' "
-                "AND is_active=1 LIMIT 1", (skill_name,)).fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_94e35b_f
+            _ru_lib_94e35b = _ru_lib_94e35b_f(foreign_only=True)
+            if _ru_lib_94e35b is not None:
+                c = _ru_lib_94e35b.read_one("skill_94e35b", (skill_name,)).fetchone()
+            else:
+                row = c.execute(
+                    "SELECT id FROM skill WHERE skill_name=? AND scope='official' "
+                    "AND is_active=1 LIMIT 1", (skill_name,)).fetchone()
             if row:
                 info.update(found=True, matched=True, scope="official",
                             skill_id=row[0], owner_id="")
                 return info
-            row = c.execute(
-                "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='user' "
-                "AND is_active=1 LIMIT 1", (skill_name,)).fetchone()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_311fe3_f
+            _ru_lib_311fe3 = _ru_lib_311fe3_f(foreign_only=True)
+            if _ru_lib_311fe3 is not None:
+                c = _ru_lib_311fe3.read_one("skill_311fe3", (skill_name,)).fetchone()
+            else:
+                row = c.execute(
+                    "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='user' "
+                    "AND is_active=1 LIMIT 1", (skill_name,)).fetchone()
             if row:
                 info.update(found=True, matched=False, scope="user",
                             skill_id=row[0], owner_id=row[1] or "")
@@ -1421,10 +1466,15 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                     "SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
                     (skill_name, owner))
             else:
-                c.execute(
-                    "SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?",
-                    (skill_name, owner))
-            row = c.fetchone()
+                from src.kernel.domain_read import runtime_lib as _ru_lib_652318_f
+                _ru_lib_652318 = _ru_lib_652318_f(foreign_only=True)
+                if _ru_lib_652318 is not None:
+                    row = _ru_lib_652318.read_one("skill_652318", (skill_name, owner))
+                else:
+                    c.execute(
+                        "SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?",
+                        (skill_name, owner))
+                row = c.fetchone()
             if row:
                 # P3-5f：skill 在 runtime 域
                 from src.kernel.domain_read import runtime_lib as _rt_lib_uso
@@ -5213,12 +5263,17 @@ def resolve_official_checker_skill(agent_type: str) -> dict | None:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT id, skill_name, display_name, description, agent_type, skill_path, "
-                "file_path, scope, owner_id, content_hash FROM skill "
-                "WHERE agent_type=? AND is_active=1 AND scope='official' ORDER BY id",
-                (agent_type,))
-            rows = c.fetchall()
+            from src.kernel.domain_read import runtime_lib as _ru_lib_43d037_f
+            _ru_lib_43d037 = _ru_lib_43d037_f(foreign_only=True)
+            if _ru_lib_43d037 is not None:
+                rows = _ru_lib_43d037.read_all("skill_43d037", (agent_type,))
+            else:
+                c.execute(
+                    "SELECT id, skill_name, display_name, description, agent_type, skill_path, "
+                    "file_path, scope, owner_id, content_hash FROM skill "
+                    "WHERE agent_type=? AND is_active=1 AND scope='official' ORDER BY id",
+                    (agent_type,))
+                rows = c.fetchall()
         if not rows:
             return None
         pick = next((r for r in rows
