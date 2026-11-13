@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from src.api.deps import get_current_user_or_api_key
 from src.api.main import app
-from src.runtime import takeover as svc
+from src.domains.runtime.engine import takeover as svc
 
 REPO = "gitcode:o/r"
 

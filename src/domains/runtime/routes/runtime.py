@@ -1194,7 +1194,7 @@ def _cwd_or_derived(cwd: str, repo_key: str, agent_type: str, issue_id: str, tas
     if cwd or not repo_key or not agent_type:
         return cwd
     try:
-        from src.api.event_pipeline import get_agent_workdir
+        from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
         return get_agent_workdir(repo_key, agent_type, issue_id or "")
     except Exception as e:
         log.warning(f"cwd fallback failed (task={task_id}): {e}")

@@ -206,7 +206,7 @@ def _client():
 
 
 def _session_token():
-    from src.api.auth_token import issue_session_token
+    from src.kernel.auth_sdk.auth_token import issue_session_token
     return issue_session_token(session_key="sess-755", repo_key=REPO_KEY, agent_type="coding")
 
 

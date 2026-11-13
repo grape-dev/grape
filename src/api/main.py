@@ -562,6 +562,10 @@ app.include_router(issues.router)
 
 app.include_router(runtime.router)
 
+# 接管会话：任务接管是一等资源，路由在管理域
+from src.domains.mgmt.routes import takeover as takeover_api
+app.include_router(takeover_api.router)
+
 app.include_router(feishu_onboard.router)
 
 app.include_router(feishu_card.router)

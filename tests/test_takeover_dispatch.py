@@ -11,7 +11,7 @@
 """
 import pytest
 
-from src.runtime import takeover as svc
+from src.domains.runtime.engine import takeover as svc
 
 
 class _Resp:

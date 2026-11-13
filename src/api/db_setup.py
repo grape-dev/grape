@@ -4630,7 +4630,7 @@ def _fn_takeover_client_session_v1() -> None:
 
 
 register_migration(
-    version="202611120002",
+    version="202611170002",
     name="takeover-client-session-v1",
     kind="safe",
     fn=_fn_takeover_client_session_v1,
@@ -4661,7 +4661,7 @@ def _fn_takeover_result_json_v1() -> None:
 
 def _fn_takeover_host_os_v1() -> None:
     """接管会话记录宿主 OS / 架构 / shell（跨平台适配：服务端按它渲染脚本与 prompt）。"""
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     c = db.cursor()
     for col, typ in (("host_os", "TEXT DEFAULT ''"), ("host_arch", "TEXT DEFAULT ''"),
                      ("host_shell", "TEXT DEFAULT ''")):
@@ -4676,7 +4676,7 @@ def _fn_takeover_host_os_v1() -> None:
 
 
 register_migration(
-    version="202611120005",
+    version="202611170005",
     name="takeover-host-os-v1",
     kind="safe",
     fn=_fn_takeover_host_os_v1,
@@ -4684,7 +4684,7 @@ register_migration(
 
 
 register_migration(
-    version="202611120004",
+    version="202611170004",
     name="takeover-result-json-v1",
     kind="safe",
     fn=_fn_takeover_result_json_v1,
@@ -4692,7 +4692,7 @@ register_migration(
 
 
 register_migration(
-    version="202611120003",
+    version="202611170003",
     name="takeover-finish-request-v1",
     kind="safe",
     fn=_fn_takeover_finish_request_v1,
@@ -4738,7 +4738,7 @@ def _fn_takeover_schema_v1() -> None:
 
 
 register_migration(
-    version="202611120001",
+    version="202611170001",
     name="takeover-sessions-v1",
     kind="safe",
     fn=_fn_takeover_schema_v1,

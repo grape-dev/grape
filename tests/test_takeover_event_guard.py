@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.api import event_store as es
-from src.runtime import service as svc
+from src.domains.runtime.engine import service as svc
 
 REPO = "gitcode:takeoverguard/repo"
 ISSUE = "#9"
@@ -89,7 +89,7 @@ def test_takeover_service_can_finalize():
 
 def test_list_expires_stale_active_sessions():
     """token 过期的 active 会话要自动转 expired，否则面板永远显示"接管中"。"""
-    from src.runtime import takeover as tk
+    from src.domains.runtime.engine import takeover as tk
     with svc.db_lock:
         c = svc.db.cursor()
         c.execute("DELETE FROM takeover_sessions WHERE id='tkos_guard_stale'")

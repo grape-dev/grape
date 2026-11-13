@@ -12,9 +12,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.api.event_pipeline import get_agent_workdir
-from src.runtime import takeover as svc
-from src.session_manager import db, db_lock
+from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
+from src.domains.runtime.engine import takeover as svc
+from src.kernel.session_manager import db, db_lock
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +27,7 @@ def _bind_db():
     globals 可以保证种子与读取指向同一个连接。
     """
     global db, db_lock
-    from src.runtime import takeover as _svc
+    from src.domains.runtime.engine import takeover as _svc
     db, db_lock = _svc.db, _svc.db_lock
 
 REPO = "gitcode:testtakeovercwd/repo"

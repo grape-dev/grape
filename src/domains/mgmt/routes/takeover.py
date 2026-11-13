@@ -21,8 +21,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.api.deps import check_repo_access, require_no_session_token, require_user_or_takeover
-from src.config import log
-from src.runtime import takeover as svc
+from src.kernel.config import log
+from src.domains.runtime.engine import takeover as svc
 
 router = APIRouter(prefix="/api/takeover", tags=["takeover"])
 
@@ -190,7 +190,7 @@ def takeover_progress(session_id: str, body: ProgressBody,
         #  ② 本地会话自己（tko_ token）：只允许上报"自己这条接管"的进展
         #     —— 否则 agent 无法把进展写回平台（它没有 user_scope，这是设计使然）。
         if str(user.get("auth_type") or "") == "takeover":
-            from src.api.auth_token import takeover_session_key as _tko_key
+            from src.kernel.auth_sdk.auth_token import takeover_session_key as _tko_key
             if str(user.get("session_key") or "") != _tko_key(sess.get("task_id") or ""):
                 raise svc.TakeoverError(403, "not_owner", "该接管 token 不属于此会话")
         elif int(sess.get("user_id") or 0) != int(user.get("id") or 0):

@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from src.api.auth_token import (
+from src.kernel.auth_sdk.auth_token import (
     SESSION_TOKEN_PREFIX, TAKEOVER_TOKEN_PREFIX,
     issue_session_token, issue_takeover_token, revoke_takeover_token,
     takeover_session_key, verify_session_token, verify_takeover_token,
@@ -37,7 +37,7 @@ def test_issue_and_verify():
     assert info["session_key"] == "takeover:t_issue_ok"
     assert info["repo_key"] == "gitcode:o/r"
     assert info["agent_type"] == "coding"
-    assert info["user_id"] == 1
+    assert info["user_id"] == "1"
 
 
 def test_session_key_namespace():
@@ -67,7 +67,7 @@ def test_revoke_is_immediate():
 def test_expired_token_rejected():
     # 用 auth_token 模块自己的连接改过期时间：全树收集时其它模块可能 reload
     # session_manager，另取新连接会写到别的库，签发/校验却还在旧库 → 断言假失败
-    from src.api.auth_token import db, db_lock
+    from src.kernel.auth_sdk.auth_token import db, db_lock
     t = _issue("t_expired", ttl=1)["token"]
     with db_lock:
         c = db.cursor()

@@ -26,9 +26,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from src.config import log
-from src.lock import acquire_lock, release_lock
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.lock import acquire_lock, release_lock
+from src.kernel.session_manager import db, db_lock
 
 # 会话状态
 ST_ACTIVE = "active"
@@ -73,7 +73,7 @@ def _issue_num(issue_id: str) -> str:
 
 def _local_port() -> int:
     try:
-        from src.prompt_builder import _local_port as _lp
+        from src.kernel.prompt_builder import _local_port as _lp
         return int(_lp())
     except Exception:
         return 8000
@@ -243,8 +243,8 @@ def _skill_assets(task: dict, user: dict, warnings: list[str]) -> dict:
             if not assets["has_references"]:
                 warnings.append("skill_no_references")
             return assets
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"takeover.py best-effort skipped: {_e}")
     # ② 平台技能表：OBS 对象键 → zip_url（300s）+ SKILL.md
     try:
         repo_key = task.get("repo_key") or ""
@@ -261,7 +261,7 @@ def _skill_assets(task: dict, user: dict, warnings: list[str]) -> dict:
         if not row:
             warnings.append("skill_not_found")
             return assets
-        from src.storage import get_skill_storage, skill_md_content
+        from src.domains.runtime.storage import get_skill_storage, skill_md_content
         storage = get_skill_storage()
         obj_key = (row.get("file_path") or "").strip()
         if storage is not None and obj_key:
@@ -280,7 +280,7 @@ def _skill_assets(task: dict, user: dict, warnings: list[str]) -> dict:
         sp = (row.get("skill_path") or "").strip()
         md_path = ""
         try:
-            from src.config import SKILLS_DIR, resolve_official_skill_path
+            from src.kernel.config import SKILLS_DIR, resolve_official_skill_path
             md_path = resolve_official_skill_path(name) or ""
             if not md_path and sp:
                 cand = sp if os.path.isabs(sp) else os.path.join(SKILLS_DIR, sp.replace("/", os.sep))
@@ -306,7 +306,8 @@ def _skill_assets(task: dict, user: dict, warnings: list[str]) -> dict:
                             try:
                                 with open(fp, "r", encoding="utf-8", errors="replace") as rf:
                                     text = rf.read()
-                            except Exception:
+                            except Exception as _e:
+                                log.debug(f"takeover best-effort skipped: {_e}")
                                 continue
                             files[rel] = text[: budget]
                             budget -= len(files[rel])
@@ -330,7 +331,7 @@ def _knowledge_assets(task: dict, scene_id: str, warnings: list[str]) -> dict:
     out: dict[str, Any] = {"project_info": {"files": {}, "urls": {}, "meta": {}},
                            "knowledge": {"files": {}, "urls": {}}}
     try:
-        from src.runtime.service import collect_knowledge_files
+        from src.domains.runtime.engine.service import collect_knowledge_files
         collected = collect_knowledge_files(
             task.get("repo_key") or "", agent_type=task.get("agent_type") or "",
             issue_id=task.get("issue_id") or "", scene_id=scene_id or "") or {}
@@ -339,7 +340,7 @@ def _knowledge_assets(task: dict, scene_id: str, warnings: list[str]) -> dict:
         out["project_info"]["meta"] = collected.get("meta") or {}
         urls: dict = {}
         try:
-            from src.storage import get_skill_storage
+            from src.domains.runtime.storage import get_skill_storage
             storage = get_skill_storage()
             if storage is not None and (pi or kn):
                 urls = storage.generate_file_urls({**pi, **kn}) or {}
@@ -853,7 +854,7 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
 
     if not (task.get("cwd") or "").strip():
         try:
-            from src.api.event_pipeline import get_agent_workdir
+            from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
             task["cwd"] = get_agent_workdir(repo_key, agent_type, task.get("issue_id") or "")
         except Exception as e:
             log.warning(f"takeover: derive cwd failed: {e}")
@@ -888,7 +889,7 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
     except Exception:
         env = {}
     try:
-        from src.runtime.service import _collect_server_env
+        from src.domains.runtime.engine.service import _collect_server_env
         fresh = _collect_server_env(task.get("user_id") or 0, task.get("account") or "") or {}
         for k, v in fresh.items():
             env.setdefault(k, v)
@@ -921,7 +922,7 @@ def build_bundle(*, task: dict, session_id: str, token: str, token_expires_at: i
     history_meta: dict = {"total_items": 0, "included_items": 0, "omitted_items": 0,
                           "total_chars": 0, "included_chars": 0, "truncated": False}
     try:
-        from src.runtime.service import list_task_messages_recent
+        from src.domains.runtime.engine.service import list_task_messages_recent
         raw_msgs = list_task_messages_recent(task.get("id") or "", limit=1000) or []
         for m in raw_msgs:
             m.setdefault("actor", m.get("actor") or "agent")
@@ -1026,8 +1027,8 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
                    client_version: str = "", supports: dict | None = None,
                    host_os: str = "", host_arch: str = "", host_shell: str = "") -> dict:
     """开始接管（原子）。返回 {session, bundle, reused}；失败抛 TakeoverError。"""
-    from src.api.auth_token import issue_takeover_token, revoke_takeover_token
-    from src.runtime import service as rt
+    from src.kernel.auth_sdk.auth_token import issue_takeover_token, revoke_takeover_token
+    from src.domains.runtime.engine import service as rt
 
     issue_number = _issue_num(issue_number)
     if not repo_key or not issue_number:
@@ -1139,7 +1140,7 @@ def start_takeover(*, repo_key: str, issue_number: str, user: dict,
 
 def _rebuild_for_session(sess: dict, user: dict) -> dict:
     """重连：重新组装 bundle（fresh env、重签 URL；secrets 只在此刻下发）。"""
-    from src.api.auth_token import issue_takeover_token, revoke_takeover_token
+    from src.kernel.auth_sdk.auth_token import issue_takeover_token, revoke_takeover_token
     task = get_task(sess.get("task_id") or "")
     if not task:
         raise TakeoverError(404, "task_missing", "原任务已不存在")
@@ -1191,7 +1192,7 @@ def attach_client_session(*, session_id: str, user: dict, client_session: str,
 
 def renew_takeover_session(*, session_id: str, user: dict) -> dict:
     """续期（剩余 <2h 且未到 24h 上限时）。不换 token，只延长 expires_at。"""
-    from src.api.auth_token import (TAKEOVER_RENEW_WINDOW, TAKEOVER_TOKEN_MAX_TTL,
+    from src.kernel.auth_sdk.auth_token import (TAKEOVER_RENEW_WINDOW, TAKEOVER_TOKEN_MAX_TTL,
                                     TAKEOVER_TOKEN_TTL, renew_takeover_token)
     sess = get_session(session_id)
     if not sess:
@@ -1233,8 +1234,8 @@ def _advance_stage(repo_key: str, issue_number: str, current_agent: str) -> tupl
     try:
         sc = get_issue_scene(repo_key, f"#{issue_number}")
         scene_id = (sc[0] if sc and sc[0] else "") or ""
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"takeover.py best-effort skipped: {_e}")
     nodes: list[dict] = []
     try:
         from src.api.pipeline_config import get_pipeline_config
@@ -1290,8 +1291,8 @@ def _internal_base_url(runtime_id: int = 0) -> str:
                 cands.append(v if str(v).startswith("http") else f"http://127.0.0.1:{v}")
         try:
             cands.append(f"http://127.0.0.1:{_local_port()}")
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"takeover.py best-effort skipped: {_e}")
         cands += ["http://127.0.0.1:8000", "http://127.0.0.1:3000"]
         seen: set[str] = set()
         for base in cands:
@@ -1307,7 +1308,8 @@ def _internal_base_url(runtime_id: int = 0) -> str:
                     _INTERNAL_BASE_CACHE = base
                     log.info(f"takeover: internal base = {base}")
                     return base
-            except Exception:
+            except Exception as _e:
+                log.debug(f"takeover best-effort skipped: {_e}")
                 continue
         # 本机任务：探活全失败也只用本机地址，绝不回退公网/配置域名
         # （实测 config 的 worker_connect_url = http://localhost:3000，本机没人监听）
@@ -1316,7 +1318,7 @@ def _internal_base_url(runtime_id: int = 0) -> str:
         log.warning(f"takeover: health probe all failed, fallback {_INTERNAL_BASE_CACHE}")
         return _INTERNAL_BASE_CACHE
     try:
-        from src.prompt_builder import _resolve_server_url
+        from src.kernel.prompt_builder import _resolve_server_url
         base = (_resolve_server_url(int(runtime_id or 0)) or "").rstrip("/")
     except Exception:
         base = ""
@@ -1379,7 +1381,7 @@ def request_finish(*, session_id: str, user: dict, summary: str = "", evidence: 
     if not sess:
         raise TakeoverError(404, "not_found", "接管会话不存在")
     if str(user.get("auth_type") or "") == "takeover":
-        from src.api.auth_token import takeover_session_key as _tko_key
+        from src.kernel.auth_sdk.auth_token import takeover_session_key as _tko_key
         if str(user.get("session_key") or "") != _tko_key(sess.get("task_id") or ""):
             raise TakeoverError(403, "not_owner", "该接管 token 不属于此会话")
     elif int(sess.get("user_id") or 0) != int(user.get("id") or 0):
@@ -1427,7 +1429,7 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
                     issue_summary: str = "",
                     auth_headers: dict | None = None, base_url: str = "") -> dict:
     from fastapi import HTTPException
-    from src.api.auth_token import revoke_takeover_token
+    from src.kernel.auth_sdk.auth_token import revoke_takeover_token
     from src.api.event_store import update_event_complete
 
     sess = get_session(session_id)
@@ -1566,8 +1568,8 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
                     c.execute("UPDATE takeover_sessions SET handoff_seq=? WHERE id=?",
                               (int(handoff_result.get("seq") or 0), session_id))
                     db.commit()
-            except Exception:
-                pass
+            except Exception as _e:
+                log.debug(f"takeover.py best-effort skipped: {_e}")
 
     log.info(f"takeover: finished {session_id} event={outcome} next={next_agent_resolved or '-'} "
              f"handoff_ok={handoff_result.get('ok')} done={is_done}")
@@ -1609,7 +1611,7 @@ def abort_takeover(*, session_id: str, user: dict, reason: str = "", redispatch:
     需要"只停不重派"的调用方显式传 redispatch=False（例如接管期间已经手工推了分支）。
     """
     from fastapi import HTTPException
-    from src.api.auth_token import revoke_takeover_token
+    from src.kernel.auth_sdk.auth_token import revoke_takeover_token
     from src.api.event_store import update_event_complete
 
     sess = get_session(session_id)
@@ -1640,7 +1642,7 @@ def abort_takeover(*, session_id: str, user: dict, reason: str = "", redispatch:
     redispatch_info: dict = {}
     if redispatch and event_seq:
         try:
-            from src.api.routes.events import redispatch_event
+            from src.domains.runtime.routes.events import redispatch_event
             res = redispatch_event(event_seq, False, user) or {}
             redispatch_info = {"ok": True, **{k: res.get(k) for k in ("status", "task_id", "event_seq")}}
             log.info(f"takeover: aborted {session_id} → redispatch seq={event_seq} "
@@ -1669,7 +1671,7 @@ def append_takeover_messages(*, task_id: str, entries: list[dict], actor: str) -
     - seq 在 db_lock 内用 MAX+1 分配，UNIQUE(task_id,seq) 冲突时整体重试一次；
     - 截断规则与 worker 一致（单条 4KB / output 8KB / 单批 ≤50）。
     """
-    from src.runtime.service import peek_next_seq
+    from src.domains.runtime.engine.service import peek_next_seq
     if not task_id:
         raise TakeoverError(400, "bad_request", "缺少 task_id")
     items = [m for m in (entries or []) if isinstance(m, dict)][:50]
