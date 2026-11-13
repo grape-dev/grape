@@ -521,6 +521,15 @@ const API = (() => {
     },
     // R6: Export ensureTokenValid for SSE streams that need fresh token before fetch
     ensureTokenValid: ensureTokenValid,
+    // 改密/换绑后 token 被外部更新时同步 API 模块：落盘 + 重置并发刷新态 +
+    // 重排主动刷新（此前 app.js/account.js 调 API.setToken 报 TypeError——
+    // account.js 有 typeof 守卫静默跳过，app.js doChangePassword 无守卫，
+    // 改密成功弹窗卡死）。
+    setToken: (t) => {
+      if (t) localStorage.setItem('token', t); else localStorage.removeItem('token');
+      _refreshPromise = null;
+      scheduleProactiveRefresh();
+    },
     upload: (path, formData, onUploadProgress) => {
       return ensureTokenValid().then(token => {
       return new Promise((resolve, reject) => {

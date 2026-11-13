@@ -183,6 +183,27 @@ EXEMPT_FILES: dict = {
     # 理由：临时文件 unlink 的 FileNotFoundError: pass（清理幂等惯用法）；
     # atomcode.py 为 arch-weekly-11 基线自带文件，重锚时基线漏记该条目，
     # 本条为补登记（非 PR 新增吞噬点）。
+
+    # ── arch-weekly-11-zj 线合入登记（2026-11-12 rebase onto arch-weekly-11）──
+    # 均为 zj 线 #1982/#2133/#2134/#2041 已审阅的 fail-open/幂等收尾语义，
+    # docstring/注释内声明吞错意图，主错误路径另有 log.warning。
+    ('domains/runtime/agents/executor.py', 'except Exception:'): 4,
+    # 理由：#1982 fd 泄漏修复族——_close_proc_pipes 幂等关管道（关闭失败无害）/
+    # _close_exec_scope 收尾兜底 terminate+关管道 / reader 线程 join 超时后
+    # 放行（daemon 线程 EOF 自退），作用域收尾绝不反向阻断任务路径。
+    ('domains/runtime/engine/acp_bootstrap.py', 'except Exception:'): 7,
+    # 理由：#2134/#1982 bootstrap 改造——子进程终止链（kill/socket close/wait/
+    # stdin flush）收尾尽力而为 + 引擎 bin 路径探测候选循环逐个试错（探不到
+    # 换下一个候选，探测语义本体）。
+    ('domains/runtime/engine/branch_guard.py', 'except Exception:'): 2,
+    # 理由：#2028/#2041 fail-open 族——守卫自检异常一律 fail-open（stderr 告警
+    # + exit 0，真实违规由 hook_main 显式阻断）/ hook 幂等检查与租约释放尽力而为。
+    ('domains/runtime/engine/recovery.py', 'except Exception:'): 1,
+    # 理由：#2133 引擎自动恢复链——恢复步骢单项失败不阻断整体恢复循环
+    # （循环内 continue，失败已 log.warning 留痕）。
+    ('domains/runtime/engine/worktree_guard.py', 'except Exception:'): 2,
+    # 理由：#2041 归档守卫族——bundle/补丁归档的幂等收尾（归档失败走
+    # 「拒绝删除、宁可残留」主路径，吞噬点均为快照收尾尽力而为）。
 }
 
 

@@ -1578,6 +1578,12 @@ def _has_verified_executor(probe_status: str, worker_version: str,
     "has no verified executor ... skip claiming"）。改为按 installed+healthy 判定：
     既放行真实可用的本机引擎，也保留「未安装 / 探活失败(healthy=0) 不得认领」的 9491 保护。
     """
+    # Issue #2133：spawn_failed（子进程起不来：fd/内存/资源类故障）必须挡在认领闸门外——
+    # PR !1202 后该状态不摘除且 healthy 可能仍为 1（worker_version 也非空），若只追加到下面的
+    # probe_status 黑名单，`bool(worker_version)` 会短路放行。故先做显式拦截。
+    # 状态驱动：探活 ok 后 probe_status 离开 spawn_failed，自动恢复认领（无需清理持久黑名单）。
+    if (probe_status or "").strip().lower() == "spawn_failed":
+        return False
     if not (credential_id or 0):
         return bool(installed) and bool(healthy)
     return bool(worker_version) or probe_status not in ("pending", "failed")
@@ -2103,6 +2109,41 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
     except Exception as _e:
         log.warning(f"_cascade_event_terminal: failed for event {event_seq} -> {status}: {_e}")
         return False
+
+
+def mark_task_takeover(task_id: str) -> dict:
+    """接管标记：任务被本地交互式会话接手，把关联事件从 cancelled 拉回「接管中」。
+
+    为什么需要这一步：`cancel_task` 会让 worker 停下，并把关联事件收敛成
+    cancelled —— 流水线于是显示「已取消 / 中断」。但对人的视角来说，接管意味着
+    这个 Issue 仍有人在推进（本地 dsh 会话里），状态应当是「进行中」，否则一眼
+    看上去像是流水线断了。
+
+    为什么用独立状态 `takeover` 而不是直接写回 `running`：runner 已经退出，
+    服务端再声称 running 会误导 claim/串行槽/超时判断。`takeover` 只表达
+    「有人在本地接手」，pipeline_status 把它映射成 STATUS_RUNNING 供展示。
+
+    幂等：重复调用只是再写一次同状态；任务没有关联事件时返回 no_event。
+    """
+    task = get_task(task_id)
+    if not task:
+        return {"status": "not_found", "task_id": task_id}
+    seq = task.get("event_seq") or 0
+    if not seq:
+        return {"status": "no_event", "task_id": task_id}
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+        row = c.fetchone()
+        if not row:
+            return {"status": "event_missing", "task_id": task_id, "event_seq": seq}
+        before = row[0]
+        # completed_at 必须清掉：cancel 时已经写过完成时间，
+        # 留着会让「接管中」的事件看起来已经结束。
+        c.execute("UPDATE events SET status='takeover', completed_at='' WHERE seq=?", (seq,))
+        db.commit()
+    return {"status": "marked", "task_id": task_id, "event_seq": seq,
+            "before": before, "after": "takeover"}
 
 
 def converge_event_to_task(task_id: str) -> dict:
@@ -3391,6 +3432,12 @@ def fail_task(task_id, error, exit_code=-1):
     except Exception:
         pass
     task = get_task(task_id)
+    # 幂等保护 0（接管修复 2026-11-10）：task 已 cancelled（人工终止 / 被接管）时，
+    # worker 迟到的失败上报不得再动事件。实测：接管把事件标成 takeover 后 4 秒，
+    # worker 的 fail 上报把事件改写成了 failed（cancel 后 worker 必然报失败）。
+    if task and task.get("status") == "cancelled":
+        log.info(f"Task {task_id} already cancelled, skip fail_task (error={str(error)[:60]})")
+        return
     # 幂等保护：如果 task 已经 completed，不调 fail（防止 complete→fail 竞态覆盖）
     if task and task.get("status") == "completed":
         log.info(f"Task {task_id} already completed, skip fail_task (error={error[:60]})")

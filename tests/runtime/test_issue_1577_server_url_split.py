@@ -116,7 +116,7 @@ class TestResolveBusinessServerUrl:
 
 class TestBuildTaskEnv:
     def _build(self, runtime_id=0):
-        from src.api.event_pipeline import build_task_env
+        from src.domains.runtime.pipeline.event_pipeline import build_task_env
         with patch("src.kernel.prompt_builder._resolve_business_base",
                    return_value=("https://api.grape.example.com", "server_base_url")), \
              patch("src.kernel.prompt_builder._resolve_server_url",

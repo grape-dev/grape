@@ -3662,6 +3662,24 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
 
     try:
         _pool_tag = agent_type if is_plugin_mode() else ""
+        # P0 (#596) 对称补齐：execution_mode=direct 且选中的是本机直连引擎时，
+        # 本机引擎只能被 local_claimer 以 claim_by_tag 认领（只认 runtime_id=0 + pool_tag），
+        # 远端 worker 又只轮询自己的 runtime_id —— 两边都不认领会让任务永久 queued。
+        # 这里改写成广播入队，认领后交给 local_claimer 执行。
+        try:
+            from src.domains.runtime.engine.service import (
+                runtime_execution_kind as _rek,
+                get_execution_mode as _gem,
+                EXEC_MODE_DIRECT as _EMD,
+            )
+            if runtime_id and is_plugin_mode() and _gem() == _EMD and _rek(runtime_id) == _EMD:
+                log.info(f"Pipeline: direct engine {runtime_id} -> enqueue as broadcast "
+                         f"(pool_tag={agent_type}) seq={seq}，交给 local_claimer 认领")
+                _pool_agent_type = _pool_agent_type or agent_type
+                _pool_tag = _pool_tag or agent_type
+                runtime_id = 0
+        except Exception as _re:
+            log.warning(f"Pipeline: direct-engine broadcast rewrite failed seq={seq}: {_re}")
         tid = enqueue_task(
             agent_session_id=session.get("id") or "",
             runtime_id=runtime_id,

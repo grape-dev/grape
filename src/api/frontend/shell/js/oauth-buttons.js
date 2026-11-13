@@ -84,7 +84,7 @@ var i18nKey = 'app.login.' + p.provider + '_login';
         } else {
           container.innerHTML = providers.map(_mkBtn).join('');
         }
-    if (typeof I18N !== 'undefined' && I18N.apply) I18N.apply();
+    if (typeof I18N !== 'undefined' && I18N.applyI18nToDOM) I18N.applyI18nToDOM();
   }
 
   global.__renderOAuthButtonList = _renderOAuthButtonList;

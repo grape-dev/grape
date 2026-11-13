@@ -17,6 +17,7 @@ PR 已合并后继续向 head 分支 push 无任何提示，修复静默丢失�
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import shlex
@@ -44,6 +45,15 @@ log = _LazyLog()
 LEASE_PREFIX = "branch_guard:"
 DEFAULT_TTL = 1800  # 30 分钟；租约仅覆盖一次写窗口，过期自动释放
 HOOK_MARKER = "# grape-branch-guard (Issue #993)"
+# Issue #2028：钩子模板版本指纹。install_pre_push_hook 依据它识别存量旧模板并重装；
+# 模板内容（fail-open/加载路径/自检）变化时必须递增，否则现网存量 worktree 永不升级。
+# 2028-03：固化元数据改为单行 marker 注释（hook-interpreter/hook-module-path/
+# hook-repo-key），修复 _existing_hook_usable 解析多行内联代码恒 False 的缺陷。
+# 2028-04：spec 构建并入钩子 try/except（I-3），_spec is None 时不再 fail-closed。
+HOOK_TEMPLATE_VERSION = "2028-04"
+HOOK_VERSION_LINE = f"# hook-template-version: {HOOK_TEMPLATE_VERSION}"
+# 钩子运行时自检依赖：缺失时 fail-open 并输出可定位告警（避免 Agent 反复盲重试）。
+HOOK_DEP_MODULES = ("src.lock", "src.kernel.session_manager")
 
 
 def lease_key(repo_key: str, head_branch: str) -> str:
@@ -511,6 +521,92 @@ def _hooks_dir(wt_dir: str) -> str:
     return path if os.path.isabs(path) else os.path.join(wt_dir, path)
 
 
+def _hook_module_path() -> str:
+    """当前 canonical 守卫模块绝对路径（随 #699 迁移到 src/domains/runtime/engine/）。"""
+    return os.path.abspath(__file__)
+
+
+def _hook_root() -> str:
+    """仓库/安装根目录：``<root>/src/domains/runtime/engine/branch_guard.py`` 上溯 5 层。"""
+    root = _hook_module_path()
+    for _ in range(5):
+        root = os.path.dirname(root)
+    return root
+
+
+def _existing_hook_usable(existing: str, repo_key: str) -> bool:
+    """版本指纹命中后仍校验钩子内固化的运行时路径是否可用（Issue #2028）。
+
+    钩子通过单行 marker 注释（``# hook-interpreter:/hook-module-path:/hook-repo-key:``）
+    固化解释器绝对路径、守卫模块路径与 repo_key；解释器升级/目录搬迁后旧路径失效
+    会让钩子以 127 退出 → git 拒绝所有 push（fail-closed），fail-open 无从执行。
+    任一项缺失或失效即返回 False，触发重写自愈。
+
+    注意不要回退到解析内联 Python 代码（2028-02 的做法）：代码经 shlex.quote 后
+    跨物理行，``splitlines()`` 首行引号未闭合，``shlex.split`` 抛 ValueError 被吞，
+    校验恒 False，「版本命中→校验→幂等跳过」分支退化为死代码（QA 第 2 轮 M-2 复现）。
+    """
+    markers = {}
+    for line in existing.splitlines():
+        for key in ("hook-interpreter", "hook-module-path", "hook-repo-key"):
+            prefix = f"# {key}: "
+            if line.startswith(prefix):
+                markers[key] = line[len(prefix):].strip()
+    if len(markers) != 3:
+        return False
+    if not markers["hook-interpreter"] or not os.path.isfile(markers["hook-interpreter"]):
+        return False
+    if not markers["hook-module-path"] or not os.path.isfile(markers["hook-module-path"]):
+        return False
+    return markers["hook-repo-key"] == repo_key
+
+
+def _hook_entry_code(root: str, module_path: str) -> str:
+    """生成钩子内联 Python 代码：加载守卫模块并执行 hook_main。
+
+    Issue #2028：模块加载与 ``hook_main()`` 调用一并纳入 try/except，
+    守卫自身异常一律 fail-open（stderr 明确告警 + exit 0），真实违规仍由
+    ``hook_main`` 显式 return 1 阻断。
+    """
+    return (
+        "import sys, importlib.util; "
+        f"sys.path.insert(0, {json.dumps(root)}); "
+        "\ntry:\n"
+        # Issue #2028 I-3：spec 构建也纳入 try——`_spec is None`（扩展名异常等）
+        # 会在 module_from_spec 抛未捕获 AttributeError → 非零退出 fail-closed；
+        # 与 hook_main 统一 fail-open。
+        f"    _spec = importlib.util.spec_from_file_location('grape_branch_guard', {json.dumps(module_path)}); "
+        "    _m = importlib.util.module_from_spec(_spec); "
+        "    _spec.loader.exec_module(_m)\n"
+        "    _rc = _m.hook_main()\n"
+        "except Exception as _e:\n"
+        f"    sys.stderr.write('\\n[branch-guard] WARNING 守卫自身异常，已放行本次 push "
+        f"(fail-open): %r [module=%s]\\n' % (_e, {json.dumps(module_path)}))\n"
+        "    _rc = 0\n"
+        "sys.exit(_rc)"
+    )
+
+
+def _missing_hook_deps() -> list:
+    """钩子依赖自检：返回无法导入的依赖描述列表（空=齐全）。"""
+    missing = []
+    for name in HOOK_DEP_MODULES:
+        try:
+            importlib.import_module(name)
+        except Exception as e:
+            missing.append(f"{name} ({e.__class__.__name__}: {e})")
+    return missing
+
+
+def _fail_open(reason: str) -> None:
+    """守卫自身异常/依赖缺失：放行本次 push 并输出可定位告警。"""
+    sys.stderr.write(f"\n[branch-guard] WARNING {reason}；守卫已放行本次 push（fail-open）\n")
+    try:
+        log.warning(f"branch guard fail-open: {reason}")
+    except Exception:
+        pass
+
+
 def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
     """安装 pre-push 守卫（幂等）。
 
@@ -540,26 +636,31 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
                     if os.path.isfile(preserved):
                         os.remove(preserved)
                     os.replace(hook_path, preserved)
+                elif HOOK_VERSION_LINE in existing:
+                    # 存量钩子已是当前模板版本：再校验钩子内固化的解释器/模块路径/
+                    # repo_key 是否仍可用（Issue #2028：解释器升级、目录搬迁后旧路径
+                    # 失效会让钩子 127 退出 → 所有 push 被 git 拒绝，fail-closed），
+                    # 任一失效即落到下方重写逻辑自愈；全部可用才幂等跳过。
+                    if _existing_hook_usable(existing, repo_key):
+                        return True
             except Exception:
                 pass
-        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        # Issue #993 R8：钩子按文件路径直接加载本模块，绕过 src/runtime/__init__.py 的
-        # 重型依赖链（base/opencode/service/engine_select …，实测 115ms）。钩子的快路径
-        # （tag 推送、删分支、空 stdin）因此从 ~290ms 降到 ~40ms；真正要判分支时
-        # src.kernel.lock/session_manager 仍会导入 config，那是必要成本。
-        module_path = os.path.join(root, "src", "runtime", "branch_guard.py")
-        code = (
-            "import sys, importlib.util; "
-            f"sys.path.insert(0, {json.dumps(root)}); "
-            f"_spec = importlib.util.spec_from_file_location('grape_branch_guard', {json.dumps(module_path)}); "
-            "_m = importlib.util.module_from_spec(_spec); "
-            "\ntry: _spec.loader.exec_module(_m)\nexcept Exception: sys.exit(0) "
-            "\nsys.exit(_m.hook_main())"
-        )
+        root = _hook_root()
+        # Issue #993 R8：钩子按文件路径直接加载本模块，绕过运行时包 __init__ 的重型依赖链。
+        # Issue #2028：模板必须按当前 canonical 布局（src/domains/runtime/engine/）定位，
+        # 不能沿用 #699 迁移前的 src/runtime/ 路径，否则守卫模块加载必失败、静默 no-op。
+        module_path = _hook_module_path()
+        code = _hook_entry_code(root, module_path)
         interpreter = sys.executable or "python3"
         lines = [
             "#!/bin/sh",
             HOOK_MARKER,
+            HOOK_VERSION_LINE,
+            # Issue #2028：固化元数据单行 marker，供 _existing_hook_usable 解析
+            # （2028-02 解析多行内联代码恒 False 的教训，勿再回退）。
+            f"# hook-interpreter: {interpreter}",
+            f"# hook-module-path: {module_path}",
+            f"# hook-repo-key: {repo_key}",
             'STDIN_TMP="$(mktemp "${TMPDIR:-/tmp}/grape-pre-push.XXXXXX" 2>/dev/null)" || STDIN_TMP=""',
             'if [ -z "$STDIN_TMP" ]; then STDIN_TMP="${TMPDIR:-/tmp}/grape-pre-push.$$"; fi',
             "trap 'rm -f \"$STDIN_TMP\"' EXIT INT TERM HUP",
@@ -582,7 +683,20 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
 
 
 def hook_main(argv: list | None = None) -> int:
-    """pre-push 钩子入口：stdin 为 ``<local_ref> <local_sha> <remote_ref> <remote_sha>``。
+    """pre-push 钩子入口（fail-open 兜底）。
+
+    Issue #2028：守卫自身任何未预期异常（含依赖 ImportError）都不得阻断交付，
+    统一 stderr 告警 + 返回 0；真实拦截由 ``_hook_main`` 显式返回 1。
+    """
+    try:
+        return _hook_main(argv)
+    except Exception as e:
+        _fail_open(f"branch guard runtime error {e.__class__.__name__}: {e}")
+        return 0
+
+
+def _hook_main(argv: list | None = None) -> int:
+    """pre-push 钩子主逻辑：stdin 为 ``<local_ref> <local_sha> <remote_ref> <remote_sha>``。
 
     不固化分支：逐条解析 stdin 的 remote ref，对本次实际被推的每个 head 分支独立
     获取租约、查 PR/漂移并在全部通过后记录 local sha。返回 0=放行；1=阻断
@@ -613,6 +727,13 @@ def hook_main(argv: list | None = None) -> int:
             remote_sha = ""
         refs.append((pushed, local_sha, remote_sha))
     if not refs:
+        return 0
+
+    # 依赖自检放在快路径（tag 推送/删分支/空 stdin）之后：#993 R8 的快路径不触发
+    # config 链，自检的 import 开销只在确有分支要判定时才支付（Issue #2028 复审）。
+    missing = _missing_hook_deps()
+    if missing:
+        _fail_open("branch guard dependency missing: " + "; ".join(missing))
         return 0
 
     held: list[str] = []
@@ -647,7 +768,18 @@ def hook_main(argv: list | None = None) -> int:
         return 0
     finally:
         for pushed in held:
-            release_branch_lease(repo_key, pushed)
+            try:
+                release_branch_lease(repo_key, pushed)
+            except Exception as e:
+                # Issue #2028：释放租约的 DB 异常不得覆盖待返回的退出码——真实拦截
+                # （return 1）若被 finally 异常顶掉，会被 hook_main 的 fail-open 兜底
+                # 翻转成放行。这里只告警，不改变既有判定结果。
+                try:
+                    log.warning(f"branch guard release lease failed {repo_key}:{pushed}: {e}")
+                except Exception:
+                    pass
+                sys.stderr.write(f"\n[branch-guard] WARNING release lease failed "
+                                 f"{pushed}: {e}\n")
 
 
 def _block(log_message: str, user_message: str) -> None:

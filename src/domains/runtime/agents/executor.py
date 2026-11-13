@@ -48,16 +48,100 @@ _active_procs: set[subprocess.Popen] = set()
 _active_procs_lock = _threading.Lock()
 
 
+# Issue #1982：任务执行作用域。stream_agent 每轮执行创建独立 scope，记录本轮
+# spawn 的所有引擎子进程；正常路径由 _untrack_proc 逐个关闭管道，异常/提前中断
+# （cancel/requeue/stream 提前 break/GeneratorExit）由 scope finally 兜底 terminate
+# + 关闭管道，保证 fd 不随任务数累积。
+_exec_scope = _threading.local()
+
+
+def _close_proc_pipes(proc, label: str = "") -> None:
+    """显式关闭子进程 stdin/stdout/stderr 管道（幂等，异常吞掉）。
+
+    仅 terminate/kill 不关闭 PIPE 时，fd 要等 Popen 对象被 GC 才释放；读线程持有
+    引用会让释放更晚，长跑 worker 因此累积匿名 pipe 直至 EMFILE（Issue #1982）。
+    """
+    if proc is None:
+        return
+    for _name in ("stdin", "stdout", "stderr"):
+        _stream = getattr(proc, _name, None)
+        if _stream is None:
+            continue
+        try:
+            _stream.close()
+        except Exception:
+            pass
+
+
+def _scope_procs():
+    """当前 stream_agent 作用域的进程集合（不在作用域内返回 None）。"""
+    return getattr(_exec_scope, "procs", None)
+
+
+def _track_reader_threads(*threads: _threading.Thread):
+    """把本轮 spawn 的 stdout/stderr reader 线程登记进当前作用域。
+
+    Issue #1982 复审：异常/cancel/requeue 路径由 _close_exec_scope 兜底时，
+    reader 线程此前从未被 join——terminate+close 管道产生 EOF 后线程本应退出，
+    但守护线程不被等待就无法确认回收（线程对象与队列残留至调度周期结束）。
+    登记后在 scope 收尾统一 join（带超时，不阻塞任务路径）。
+    """
+    threads_set = getattr(_exec_scope, "reader_threads", None)
+    if threads_set is not None:
+        threads_set.update(t for t in threads if t is not None)
+
+
 def _track_proc(proc: subprocess.Popen, backend: str = "", cwd: str = ""):
     with _active_procs_lock:
         proc._grape_backend = backend
         proc._grape_cwd = os.path.normcase(os.path.realpath(cwd)) if cwd else ""
         _active_procs.add(proc)
+    procs = _scope_procs()
+    if procs is not None:
+        procs.add(proc)
 
 
 def _untrack_proc(proc: subprocess.Popen):
     with _active_procs_lock:
         _active_procs.discard(proc)
+    procs = _scope_procs()
+    if procs is not None:
+        procs.discard(proc)
+    _close_proc_pipes(proc)
+
+
+def _close_exec_scope(prev_scope):
+    """结束本轮执行作用域：terminate 尚未回收的进程、关闭全部管道并 join reader 线程。
+
+    Issue #1982 复审：join 顺序必须是 terminate → close（管道关闭产生 EOF 唤醒
+    readline）→ join；先 join 再 close 会因 reader 阻塞在 readline 上无法唤醒。
+    join 带 1.5s 超时，线程异常存活时仅告警不阻塞任务路径。
+    """
+    procs = _scope_procs()
+    reader_threads = getattr(_exec_scope, "reader_threads", None)
+    _exec_scope.procs = prev_scope
+    _exec_scope.reader_threads = None
+    for proc in list(procs or ()):
+        try:
+            if proc.poll() is None:
+                _terminate_proc(proc, "stream-scope", grace_seconds=3)
+        except Exception:
+            pass
+        try:
+            _close_proc_pipes(proc)
+        except Exception:
+            pass
+        with _active_procs_lock:
+            _active_procs.discard(proc)
+    for t in list(reader_threads or ()):
+        try:
+            if t.is_alive():
+                t.join(timeout=1.5)
+            if t.is_alive():
+                log.warning("stream-scope reader thread still alive after join(1.5s): "
+                            f"{t.name}; daemon thread, left to finish on EOF")
+        except Exception:
+            pass
 
 
 def active_task_processes(backend: str, cwd: str) -> list:
@@ -102,6 +186,7 @@ def terminate_active_agents(grace_seconds: int = 5):
             _terminate_proc(proc, "shutdown")
         except Exception:
             pass
+        _close_proc_pipes(proc)
     if procs:
         log.info(f"terminate_active_agents: terminated {len(procs)} running agent subprocess(es)")
     # 标记 DB 中 running/dispatched 任务（防止重启后悬空）。
@@ -847,6 +932,36 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                  agent_label: str = "",
                  repo_key: str = "",
                  max_exec_seconds: int = 600) -> Generator:
+    """流式执行 Agent（执行作用域包装）。
+
+    Issue #1982：为本轮所有引擎子进程建立 fd 收口作用域——正常结束由
+    _untrack_proc 关闭管道；异常/cancel/requeue/消费方提前中断/GeneratorExit
+    由 finally 兜底 terminate + 关闭 stdin/stdout/stderr，避免 pipe fd 泄漏。
+    """
+    prev_scope = _scope_procs()
+    _exec_scope.procs = set()
+    _exec_scope.reader_threads = set()
+    try:
+        yield from _stream_agent_impl(
+            prompt, cwd, session_id=session_id, event_type=event_type,
+            backend_name=backend_name, account=account, user_id=user_id,
+            env_extra=env_extra, bot_token=bot_token, user_token=user_token,
+            agent_name=agent_name, agent_label=agent_label,
+            repo_key=repo_key, max_exec_seconds=max_exec_seconds,
+        )
+    finally:
+        _close_exec_scope(prev_scope)
+
+
+def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
+                       event_type: str = "", backend_name: str = "",
+                       account: str = "", user_id: int = 0,
+                       env_extra: dict | None = None,
+                       bot_token: str = "", user_token: str = "",
+                       agent_name: str = "",
+                       agent_label: str = "",
+                       repo_key: str = "",
+                       max_exec_seconds: int = 600) -> Generator:
     """流式执行 Agent，yield 事件。agent_label 用于日志区分（如 [Agent:issue|repo:owner/repo]）。
 
     **会话失效自动重建**：当 opencode 会话在服务端已不存在（如被清理/误删）时，
@@ -1152,6 +1267,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 pass
         _stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
         _stderr_thread.start()
+        # Issue #1982 复审：reader 线程登记进作用域，异常/cancel/requeue 兜底路径
+        # （_close_exec_scope）在 terminate+close 产生 EOF 后统一 join 回收。
+        _track_reader_threads(_reader_thread, _stderr_thread)
 
         _raw_count = 0
         _parsed_count = 0
@@ -1324,6 +1442,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             if not _safe_terminate(proc, f"{label}{backend.name}"):
                 error_events.append(f"{backend.name} terminate failed")
             _reader_thread.join(timeout=5)
+            # Issue #1982 复审：terminate+close 已产生 EOF，stderr reader 同步 join 回收
+            _stderr_thread.join(timeout=2)
             _untrack_proc(proc)
             # codearts 方案E2: 超时也要杀 serve
             if _serve_proc and _serve_proc.poll() is None:
@@ -1340,6 +1460,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             return
 
         _reader_thread.join(timeout=5)
+        # Issue #1982 复审：正常结束路径 stdout 已 EOF，stderr reader 同步 join 回收
+        _stderr_thread.join(timeout=2)
 
         stdout_remainder = ""
         try:
