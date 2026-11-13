@@ -1390,7 +1390,14 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                 continue  # cred_map 已被组织过滤 — 不在 map 中的凭据跳过
             if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", ""), from_repo_key(cred.get("repo_key", ""))):
                 continue
-            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?", (cid,))
+            # P4：删视图后 agent_runtimes 走 lib 读
+            from src.kernel.domain_read import runtime_lib as _rt_lib_lr
+            _lr_lib = _rt_lib_lr(foreign_only=True)
+            if _lr_lib is not None:
+                _lr_rows = _lr_lib.read_all("runtimes_by_credential", (cid,))
+            else:
+                c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?", (cid,))
+                _lr_rows = c.fetchall()
             # AIShell 显示名（2026-10-13 收口补漏）：worker 设备视图的承载引擎列表
             from src.domains.runtime.engine.instances import to_display as _td2
             runtimes = [
@@ -1401,7 +1408,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                  "local_skills": _json.loads(x[7] or "[]") if x[7] else [],
                  "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else [],
                  "worker_version": x[9] or "" if len(x) > 9 else ""}
-                for x in c.fetchall()
+                for x in _lr_rows
             ]
             from src.kernel.domain_read import runtime_lib as _runtime_lib_tags
             _rtl = _runtime_lib_tags()
@@ -2212,8 +2219,13 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_n
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (rid,))
-            if not c.fetchone():
+            from src.kernel.domain_read import runtime_lib as _rt_lib_ex2
+            _ex2 = _rt_lib_ex2(foreign_only=True)
+            _ex_hit = (_ex2.read_one("runtime_exists", (rid,)) is not None) if _ex2 is not None else None
+            if _ex_hit is None:
+                c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (rid,))
+                _ex_hit = c.fetchone() is not None
+            if not _ex_hit:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在"})
             from src.kernel.domain_read import runtime_lib as _rt_ins
             _rti = _rt_ins()

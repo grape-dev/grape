@@ -249,8 +249,14 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                 backend_name = ""
                 instance_name_val = ""
                 if row[1]:
-                    c.execute("SELECT name, credential_id FROM agent_runtimes WHERE id=?", (row[1],))
-                    brow = c.fetchone()
+                    # P4：删视图后 agent_runtimes 只能走 lib 读（白名单查询，未知名会抛错）
+                    from src.kernel.domain_read import runtime_lib as _rt_lib_rn
+                    _rn_lib = _rt_lib_rn(foreign_only=True)
+                    if _rn_lib is not None:
+                        brow = _rn_lib.read_one("runtime_name_cred", (row[1],))
+                    else:
+                        c.execute("SELECT name, credential_id FROM agent_runtimes WHERE id=?", (row[1],))
+                        brow = c.fetchone()
                     if brow and brow[0]:
                         backend_name = brow[0]
                         _dev = ""
@@ -384,8 +390,13 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                         _wr = c.fetchone()
                         _wname = (_wr[0] or "") if _wr else ""
                     else:
-                        c.execute("SELECT host_name FROM agent_runtimes WHERE id=?", (_p.get("runtime_id") or 0,))
-                        _wr = c.fetchone()
+                        from src.kernel.domain_read import runtime_lib as _rt_lib_wn
+                        _wn_lib = _rt_lib_wn(foreign_only=True)
+                        if _wn_lib is not None:
+                            _wr = _wn_lib.read_one("runtime_host_name", (_p.get("runtime_id") or 0,))
+                        else:
+                            c.execute("SELECT host_name FROM agent_runtimes WHERE id=?", (_p.get("runtime_id") or 0,))
+                            _wr = c.fetchone()
                         _wname = (_wr[0] or "") if _wr else ""
             except Exception:
                 _wname = ""
@@ -407,6 +418,13 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             _cid = _p.get("credential_id") or 0
             _wname = ""
             try:
+                if not _cid:
+                    from src.kernel.domain_read import runtime_lib as _rt_lib_wn2
+                    _wn2_lib = _rt_lib_wn2(foreign_only=True)
+                    if _wn2_lib is not None:
+                        _wr = _wn2_lib.read_one("runtime_host_name", (_p.get("runtime_id") or 0,))
+                        _wname = (_wr[0] or "") if _wr else ""
+                        return _wname
                 with db_lock:
                     c.execute(
                         "SELECT name FROM runtime_credentials WHERE id=?" if _cid
@@ -636,11 +654,17 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             try:
                 _rid = int(bn)
                 # 校验 ID 存在
-                with db_lock:
-                    c2 = db.cursor()
-                    c2.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (_rid,))
-                    if not c2.fetchone():
+                from src.kernel.domain_read import runtime_lib as _rt_lib_ex
+                _ex_lib = _rt_lib_ex(foreign_only=True)
+                if _ex_lib is not None:
+                    if not _ex_lib.read_one("runtime_exists", (_rid,)):
                         _rid = None
+                else:
+                    with db_lock:
+                        c2 = db.cursor()
+                        c2.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (_rid,))
+                        if not c2.fetchone():
+                            _rid = None
             except (ValueError, TypeError):
                 pass
             if _rid is None:

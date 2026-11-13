@@ -1077,6 +1077,57 @@ def reassign_repo_org_id(repo_key: str, org_id: str) -> dict[str, int]:
     return out
 
 
+# ---------- 命名查询白名单（P4 读路径：删视图后跨域读走 lib） ----------
+# 为什么不是"任意 SQL 直通"：跨域读也要有边界。这里只登记**用到的具体查询**，
+# 调用方传查询名 + 参数，未知查询名直接 KeyError —— 不给远端开任意读口子。
+_READ_QUERIES: dict[str, str] = {
+    # 引擎行
+    "runtime_name_cred": "SELECT name, credential_id FROM agent_runtimes WHERE id=%s",
+    "runtime_host_name": "SELECT host_name FROM agent_runtimes WHERE id=%s",
+    "runtime_exists": "SELECT 1 FROM agent_runtimes WHERE id=%s LIMIT 1",
+    "runtimes_by_credential": (
+        "SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, "
+        "skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=%s"),
+    "runtime_ids_by_credential": "SELECT id FROM agent_runtimes WHERE credential_id=%s",
+    "runtime_ages": "SELECT id, last_seen_at, updated_at FROM agent_runtimes",
+    # 能力标签
+    "capability_tag_hit": (
+        "SELECT 1 FROM engine_capabilities WHERE runtime_id=%s AND enabled=1 "
+        "AND (tag=%s OR tag='all') LIMIT 1"),
+    "engine_tags_enabled": "SELECT tag FROM engine_capabilities WHERE runtime_id=%s AND enabled=1 ORDER BY tag",
+    # 账号 / 外部身份（按 engine_select._repo_user_id 的真实 SQL 登记，别自己编列名）
+    "account_id_by_platform_login": (
+        "SELECT ga.id FROM grape_accounts ga "
+        "WHERE ga.id IS NOT NULL AND ga.id NOT IN ('', '0') AND ga.status=1 "
+        "AND EXISTS (SELECT 1 FROM external_identities ei "
+        "WHERE ei.grape_user_id=ga.id AND ei.provider=%s AND ei.status=1 "
+        "AND LOWER(ei.external_login)=LOWER(%s) AND ei.external_login!='') LIMIT 1"),
+    "grape_user_id_by_external_id": (
+        "SELECT ei.grape_user_id FROM external_identities ei "
+        "WHERE ei.provider=%s AND ei.status=1 AND ei.external_id=%s LIMIT 1"),
+}
+
+
+def read_one(query: str, params: tuple = ()) -> Any | None:
+    """按白名单执行单行读；未知查询名抛 KeyError（不静默）。"""
+    sql = _READ_QUERIES.get(query)
+    if sql is None:
+        raise KeyError(f"unknown read query: {query}")
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, params)
+        return c.fetchone()
+
+
+def read_all(query: str, params: tuple = ()) -> list[Any]:
+    """按白名单执行多行读；未知查询名抛 KeyError。"""
+    sql = _READ_QUERIES.get(query)
+    if sql is None:
+        raise KeyError(f"unknown read query: {query}")
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, params)
+        return list(c.fetchall() or [])
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -1110,4 +1161,5 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "upsert_repo_credential", "clear_repo_credential",
            "ensure_device_credential", "touch_credential_metrics",
            "upsert_local_runtimes", "ensure_default_runtime", "set_agent_tags",
-           "purge_runtime_credential", "change_credential_scope", "reassign_repo_org_id"]
+           "purge_runtime_credential", "change_credential_scope", "reassign_repo_org_id",
+           "read_one", "read_all"]

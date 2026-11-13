@@ -1934,16 +1934,23 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
                         "message": f"节点 {tag} 的引擎 {_eid} 属于仓库 {_owner_norm}，不是当前仓库 {_repo_norm}"})
             # 校验角色能力（Issue #955 follow-up：按节点角色匹配，'all' 通配放行——
             # 存量引擎能力表仅 'all' 行，严格匹配误杀，恢复宽匹配待角色数据面补齐后再收紧）
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT 1 FROM engine_capabilities "
-                    "WHERE runtime_id=? AND enabled=1 AND (tag=? OR tag='all') LIMIT 1",
-                    (_eid, tag))
-                if not c.fetchone():
-                    raise HTTPException(status_code=400, detail={
-                        "code": 400,
-                        "message": f"节点 {tag} 的引擎 {_eid} 没有该角色能力标签（{tag}），请重新选择"})
+            # P4：删视图后能力校验走 lib 读（白名单查询 capability_tag_hit）
+            from src.kernel.domain_read import runtime_lib as _rt_lib_cap
+            _cap_lib = _rt_lib_cap(foreign_only=True)
+            if _cap_lib is not None:
+                _cap_hit = _cap_lib.read_one("capability_tag_hit", (_eid, tag)) is not None
+            else:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT 1 FROM engine_capabilities "
+                        "WHERE runtime_id=? AND enabled=1 AND (tag=? OR tag='all') LIMIT 1",
+                        (_eid, tag))
+                    _cap_hit = c.fetchone() is not None
+            if not _cap_hit:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"节点 {tag} 的引擎 {_eid} 没有该角色能力标签（{tag}），请重新选择"})
 
 @router.post("", operation_id="scenes_create", summary="Create scene", description="Creates a custom scene (associated only with the repo, no user-level).")
 def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
