@@ -40,7 +40,7 @@ def _cleanup_whitelist():
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM login_whitelist")
+        c.execute("DELETE FROM login_whitelist WHERE id > 0")  # F5：ratchet 禁无 WHERE 整表 DELETE
         db.commit()
     from src.domains.mgmt.user.db import set_meta_value
     set_meta_value("login_whitelist_enabled", "false")
@@ -80,7 +80,10 @@ class TestLoginWhitelist:
         assert r2.status_code == 200
         wl = r2.json()["whitelist"]
         assert len(wl) == 1
-        assert wl[0]["gitcode_username"] == "testuser_gc"
+        # 2026-11-12 行式化：条目统一行形态（provider+username，老列式 legacy 标记）
+        assert wl[0]["provider"] == "gitcode"
+        assert wl[0]["username"] == "testuser_gc"
+        assert wl[0]["legacy"] is False
         assert wl[0]["remark"] == "test"
 
     def test_add_and_list_github(self, client):
@@ -94,7 +97,8 @@ class TestLoginWhitelist:
         r2 = client.get("/api/admin/whitelist")
         wl = r2.json()["whitelist"]
         assert len(wl) == 1
-        assert wl[0]["github_username"] == "testuser_gh"
+        assert wl[0]["provider"] == "github"
+        assert wl[0]["username"] == "testuser_gh"
 
     def test_add_duplicate_returns_409(self, client):
         """POST /whitelist with duplicate entry returns 409."""

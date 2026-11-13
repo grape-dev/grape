@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, Response
 
 from pydantic import BaseModel
 
+from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.domains.mgmt.user import db as user_db
 
 from src.api.deps import require_no_session_token, require_org_member
@@ -61,15 +62,12 @@ def _resolve_repo_key(owner_repo: str) -> str:
         pass
     return rk
 
-@router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status", description="Returns the status of third-party credentials (gitcode/github/huawei-cloud/codearts) for the current user. Credential secrets (AK/SK/tokens) are never returned in plaintext; only existence flags are exposed.")
+@router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status", description="Returns the status of third-party credentials (VCS platform PATs from the platform-card catalog, plus huawei-cloud/codearts) for the current user. Credential secrets (AK/SK/tokens) are never returned in plaintext; only existence flags are exposed.")
 def get_credentials(user: dict = Depends(require_no_session_token), repo_key: str = ""):
     # D32: 从 user_credentials 表 + external_identities 读凭据，不查 user_accounts
-    from src.api.deps import get_user_token, get_user_token_for
-    from src.domains.mgmt.auth.grape_account_db import get_user_identities
+    from src.api.deps import get_user_token_for
     from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvcs
     _vcs_platform_list = list(_lvcs())  # D102-P 统一：全平台走泛型 <p>_pat 存在性键
-    gitcode_token = get_user_token(user["username"])
-    github_token = get_user_token_for(user["username"], user_id=user["id"], provider="github")
     # S63 守卫收口（LABEL_COLOR 同款契约开关派生）：存量专用字段平台（表单键
     # <p>_token，provider 模块声明 SETTINGS_TOKEN_FIELD_SUFFIX="token"）的 PAT
     # 存在性回退不按平台名比较——按开关派生在下方 _legacy_dedicated_pat 里
@@ -85,41 +83,37 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
         except Exception:
             pass
         return ""
-    identities = {ident["provider"]: ident for ident in get_user_identities(user["id"])}
     hw_cred = user_db.get_credential(user["id"], "huawei_cloud") or {}
     codearts_cred = user_db.get_credential(user["id"], "codearts") or {}
 
-    # R16.2.3: 返回 token 状态（是否过期）
-    _gitcode_identity = identities.get("gitcode", {})
-    _github_identity = identities.get("github", {})
-    _gitcode_status = _gitcode_identity.get("status", 0)
-    _github_status = _github_identity.get("status", 0)
-    # status: 1=active, 4=expired
-    _gitcode_expired = (_gitcode_status == 4)
-    _github_expired = (_github_status == 4)
-
-    # R16.2.3: 全局/仓库级 bot token 状态
+    # 存量契约键（前端凭据页 + tests/api 在用）：本批卡驱动改造不动响应契约。
+    try:
+        from src.domains.mgmt.auth.grape_account_db import get_user_identities
+        _identities = {ident["provider"]: ident for ident in (get_user_identities(user["id"]) or [])}
+    except Exception:
+        _identities = {}
     _global_token_status = {}
     try:
-        from src.domains.mgmt.user.db import get_meta_value
+        from src.domains.mgmt.user.db import get_meta_value as _gmv
         _global_token_status = {
-            "gitcode_expired": get_meta_value("global_gitcode_bot_token_status") == "expired",
-            "github_expired": get_meta_value("global_github_bot_token_status") == "expired",
+            "gitcode_expired": _gmv("global_gitcode_bot_token_status") == "expired",
+            "github_expired": _gmv("global_github_bot_token_status") == "expired",
         }
     except Exception:
         _global_token_status = {"gitcode_expired": False, "github_expired": False}
 
     return {
+        # ── legacy 兼容键（勿删：前端与既有测试消费；新代码请用 <p>_pat 泛型键）──
         "gitcode": {
-            "api_token_exists": bool(gitcode_token),
+            "api_token_exists": bool(_legacy_dedicated_pat("gitcode")),
             "account": user["username"],
             "auto_filled": True,
-            "token_expired": _gitcode_expired,
+            "token_expired": (_identities.get("gitcode", {}).get("status", 0) == 4),
         },
         "github": {
-            "token_exists": bool(github_token),
-            "login": identities.get("github", {}).get("external_login", ""),
-            "token_expired": _github_expired,
+            "token_exists": bool(get_user_token_for(user["username"], user_id=user["id"], provider="github")),
+            "login": _identities.get("github", {}).get("external_login", ""),
+            "token_expired": (_identities.get("github", {}).get("status", 0) == 4),
         },
         "global_bot_token_status": _global_token_status,
         # D102-P：泛型平台 PAT 存在性（gitee/gitlab 等平台卡驱动平台）——
@@ -630,7 +624,8 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                 _cascade_pat_clear(user, _p)
 
     # 绑定/解绑平台后清理 user_repos 缓存——下次 /repos/member 会从 VCS 重新拉取
-    if "github_token" in explicit or "gitcode_token" in explicit:
+    # 卡驱动：任意平台凭据键（<p>_token / <p>_pat）变更都失效缓存，无平台名分支。
+    if any(k.endswith(("_token", "_pat")) for k in explicit):
 
         try:
             from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
@@ -651,7 +646,8 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
         from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
         _probe_platforms = _lvp()
     except Exception:
-        _probe_platforms = ["gitcode", "github"]
+        # 卡目录不可用 → 不探测（不做平台名兜底：探测范围必须来自卡目录）
+        _probe_platforms = []
     for _provider in _probe_platforms:
         try:
             from src.domains.runtime.vcs.providers import module_for as _module_for
@@ -1514,13 +1510,13 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                             "runtimes": runtimes})
 
     # 本机直连引擎（credential_id=0）：关联到 runtime_credentials 中已有的主控机设备
-    import socket as _sock
     _local_hostname = ""
     try:
-        _local_hostname = _sock.gethostname()
+        _local_hostname = engine_host()
     except Exception:
         pass
     _device_by_name = {d.get("device_name", ""): d for d in devices}
+    from src.domains.runtime.engine.instances import engine_mounts_to_credential as _mounts_to
 
     for rt in local_runtimes:
         if (rt.get("credential_id") or 0) != 0:
@@ -1535,7 +1531,8 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
         rt["instance_name"] = instance_name(rt["name"], _hn, 0)
         from src.domains.runtime.engine.instances import to_display as _td
         rt["name"] = _td(rt["name"])
-        target_device = _device_by_name.get(_hn)
+        target_device = next((d for d in devices
+                              if _mounts_to(0, rt.get("host_name"), d.get("device_name", ""))), None)
         if target_device:
             # Issue #473 范围筛选：本机引擎挂到已有主控机凭据设备时补充归属
             if not target_device.get("local_owner_id"):
@@ -1797,8 +1794,7 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
     from src.domains.runtime.engine.agent import _scan_local_skills
     from src.domains.mgmt.user import db as user_db
     from src.kernel.config import log
-    import socket as _sock
-    _hostname = _sock.gethostname()
+    _hostname = engine_host()
     try:
         discovered = discover_runtimes()
         results = probe_local_engines(discovered)
@@ -2422,6 +2418,15 @@ def _cascade_pat_clear(user: dict, provider: str) -> dict:
                         f"provider={provider}): {_e}")
     return {"oauth_kept": has_oauth}
 
+def _pr_web_path_of(provider: str) -> str:
+    """provider 模块 PR_WEB_PATH 能力位（前端链接权威）。"""
+    try:
+        from src.domains.runtime.vcs.providers import _MODULES
+        return getattr(_MODULES.get(provider), "PR_WEB_PATH", "pull") or "pull"
+    except Exception:
+        return "pull"
+
+
 @router.get("/vcs/platforms", operation_id="settings_vcs_platforms",
             summary="List visible vcs platforms (builtin + configured)")
 def list_vcs_platforms_public():
@@ -2436,17 +2441,13 @@ def list_vcs_platforms_public():
             _hidden = set()
     except Exception:
         _hidden = set()
-    # GitCode/GitHub = 默认平台（2026-11-08 用户裁定）：恒显示；其余平台
-    # 按 OAuth 是否配置显示（oauth_<p>_client_id 存在）。
-    _DEFAULT_PLATFORMS = {"gitcode", "github"}
+    # 平台可见性唯一口径（本函数）：部署级隐藏名单 vcs_platforms_hidden。
+    # 平台卡在册即可见（纯 PAT 部署不配 OAuth 也能绑定 gitee/gitlab）；
+    # 不再按 OAuth 配置做过 ∉ 默认双平台筛选——白名单会藏掉纯 PAT 平台的卡片。
     out = []
     for provider in list_vcs_platforms():
         if provider in _hidden:
             continue
-        if provider not in _DEFAULT_PLATFORMS:
-            _cfgd = bool(get_meta_value(f"oauth_{provider}_client_id"))
-            if not _cfgd:
-                continue
         card = get_platform_card(provider)
         if card is None:
             continue
@@ -2457,6 +2458,8 @@ def list_vcs_platforms_public():
             "dialect": card.dialect,
             "pat_create_url": f"https://{card.host}/profile/personal_access_tokens",
             "brand_color": card.brand_color,  # 台阶2：品牌资产进卡（#RRGGBB，空=前端兜底）
+            # 前端 PR/MR 链接路径段（provider 模块能力位，避免前端按平台名/方言猜）
+            "pr_web_path": _pr_web_path_of(provider),
         })
     return {"platforms": out}
 

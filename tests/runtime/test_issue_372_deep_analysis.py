@@ -333,9 +333,10 @@ class TestHostingProviderConfig:
         with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value=""), \
              patch("src.domains.mgmt.user.db.get_global_github_bot_username", return_value=""):
             cfg = get_hosting_provider_config("github")
-            assert cfg["find_webhook"] == find_existing_github_webhook
-            assert cfg["setup_webhook"] == setup_github_webhook
-            assert cfg["remove_webhook"] == remove_github_webhook
+            # D105-19：github_web 方言 → github 家族三件套（partial 绑定卡 api_base）
+            assert cfg["find_webhook"].func is find_existing_github_webhook
+            assert cfg["setup_webhook"].func is setup_github_webhook
+            assert cfg["remove_webhook"].func is remove_github_webhook
 
     def test_gitcode_provider_config_uses_gitcode_webhook_functions(self):
         """GitCode config 的 find/setup/remove webhook 函数是 GitCode 版本。"""
@@ -345,9 +346,10 @@ class TestHostingProviderConfig:
         with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value=""), \
              patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=[]):
             cfg = get_hosting_provider_config("gitcode")
-            assert cfg["find_webhook"] == find_existing_webhook
-            assert cfg["setup_webhook"] == setup_webhook
-            assert cfg["remove_webhook"] == remove_webhook
+            # D105-19：gitee_v5 方言 → v5 家族三件套（partial 绑定卡 api_base）
+            assert cfg["find_webhook"].func is find_existing_webhook
+            assert cfg["setup_webhook"].func is setup_webhook
+            assert cfg["remove_webhook"].func is remove_webhook
 
 class TestR10TokenExpiryDetection:
     """验收标准 10：PAT 被撤销后 401 → task failed + error_code=TOKEN_EXPIRED。"""

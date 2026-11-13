@@ -1960,7 +1960,8 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                     from src.kernel.token_service import detect_and_mark_repo_token_expired
                     _feishu_error_code = detect_and_mark_repo_token_expired(repo_key) or ""
                     if _feishu_error_code:
-                        _pName = "GitHub" if repo_key.startswith("github:") else "GitCode"
+                        from src.domains.runtime.vcs.platform_card import display_name_for_repo_key
+                        _pName = display_name_for_repo_key(repo_key)  # 卡 name（gitee/gitlab 不再冒充 GitCode）
                         output = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
                 except Exception as _fe:
                     log.warning(f"[Chat:{ctx.name}] post-exec 401 detect failed: {_fe}")

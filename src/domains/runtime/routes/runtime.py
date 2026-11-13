@@ -1419,15 +1419,33 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(require_no_sessi
 @router.get("/credentials/{cid}/tasks", operation_id="runtime_credential_tasks", summary="Tasks aggregated by credential", description="Tasks aggregated by credential across all its engine instances.")
 def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_token),
                                 status: str = "", limit: int = 50):
-    """按凭据聚合任务（该凭据所有引擎实例的 agent_tasks，见 runtime-admin-two-view-design.md §4.3）。"""
+    """按凭据聚合任务（该凭据所有引擎实例的 agent_tasks，见 runtime-admin-two-view-design.md §4.3）。
+
+    P7：聚合范围 = 该凭据下挂载的全部引擎，与设备视图（_build_runtime_devices）
+    同一挂载口径（engine_mounts_to_credential，单一来源）：除 credential_id=cid
+    的引擎外，还含本机直连引擎（credential_id=0）中 host_name（或本机 hostname）
+    等于该凭据 device_name 的引擎——否则设备「查看任务」错误显示「暂无任务」。
+    """
     from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime.engine.instances import engine_mounts_to_credential
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
         rid_rows = c.fetchall()
-    if not rid_rows:
-        return {"tasks": []}
+        c.execute("SELECT device_name FROM runtime_credentials WHERE id=?", (cid,))
+        dev_row = c.fetchone()
     rids = [r[0] for r in rid_rows]
+    dev_name = (dev_row[0] or "") if dev_row else ""
+    if (dev_name or "").strip():
+        # 本机直连引擎按设备视图同口径挂载计入
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id, host_name FROM agent_runtimes WHERE credential_id=0")
+            local_rows = c.fetchall()
+        rids.extend(rid for rid, hn in local_rows
+                    if engine_mounts_to_credential(0, hn, dev_name))
+    if not rids:
+        return {"tasks": []}
     ph = ",".join("?" for _ in rids)
     clauses = [f"runtime_id IN ({ph})"]
     params = list(rids)

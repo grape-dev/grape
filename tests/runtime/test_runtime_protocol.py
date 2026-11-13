@@ -465,9 +465,38 @@ class TestRuntimeAdminViews:
         with db_lock:
             cid = db.cursor().execute("SELECT id FROM runtime_credentials WHERE name='w-agg'").fetchone()[0]
         app = self._admin_user("dave")
+        from src.api.deps import require_no_session_token
+        app.dependency_overrides[require_no_session_token] = lambda: {"id": 1, "username": "dave"}
         c = TestClient(app)
         data = c.get(f"/api/runtime/credentials/{cid}/tasks").json()
         assert len(data["tasks"]) == 2, f"按凭据应聚合 2 个任务: {data}"
+        app.dependency_overrides.clear()
+
+    def test_credential_tasks_includes_mounted_local_engines(self):
+        """P7 回归：设备视图把本机直连引擎（credential_id=0，host_name==凭据
+        device_name）挂到凭据设备下展示，credentials/{cid}/tasks 必须同样计入
+        这些引擎的任务，否则设备「查看任务」错误显示「暂无任务」。"""
+        t = _make_token("w-p7")
+        client_ = TestClient(__import__("src.api.main", fromlist=["app"]).app)
+        client_.post("/api/runtime/register",
+                     json={"device_name": "p7-dev", "runtimes": [{"name": "opencode"}]},
+                     headers={"Authorization": f"Bearer {t}"})
+        from src.kernel.session_manager import db, db_lock
+        with db_lock:
+            cid = db.cursor().execute("SELECT id FROM runtime_credentials WHERE name='w-p7'").fetchone()[0]
+            cur = db.cursor()
+            cur.execute("INSERT INTO agent_runtimes (name, credential_id, host_name, scope, installed, status) "
+                        "VALUES ('codex', 0, 'p7-dev', 'global', 1, 'running')")
+            local_rid = cur.lastrowid
+        from src.domains.runtime.engine import service
+        service.enqueue_task(agent_session_id="s-p7", runtime_id=local_rid, prompt="p", repo_key="t/r",
+                             agent_type="issue", skill="issue")
+        app = self._admin_user("erin")
+        from src.api.deps import require_no_session_token
+        app.dependency_overrides[require_no_session_token] = lambda: {"id": 1, "username": "erin"}
+        c = TestClient(app)
+        data = c.get(f"/api/runtime/credentials/{cid}/tasks").json()
+        assert len(data["tasks"]) == 1, f"挂载到凭据设备的本机引擎任务应计入: {data}"
         app.dependency_overrides.clear()
 
     def test_personal_not_visible_to_other_user(self):

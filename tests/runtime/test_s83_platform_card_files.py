@@ -31,9 +31,7 @@ def _restore_platform_card_cache():
 def test_s83_builtin_files_load_parity():
     """configs/platforms/ 四卡加载与代码内置默认逐字段等价（gitlab 的
     download_base 等），gitee 文件卡含能力位。"""
-    cards = builtin_cards_from_dir(os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(
-            pc.__file__))), "..", "configs", "platforms"))
+    cards = builtin_cards_from_dir(pc._CONFIGS_DIR)
     assert {"gitcode", "github", "gitlab", "gitee"} <= set(cards)
     for provider, legacy_raw in _DEFAULT_CARDS_RAW.items():
         m = cards[provider]
@@ -76,9 +74,7 @@ def test_s83_precedence_meta_over_file():
 
 def test_s83_unknown_key_rejects_card_loudly(tmp_path):
     """文件含未知键（Builder 不认识的字段）→ 整卡拒绝（响亮，非静默丢键）。"""
-    bad = dict(json.load(open(os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(pc.__file__))),
-        "..", "configs", "platforms", "gitee.json"))))
+    bad = dict(json.load(open(os.path.join(pc._CONFIGS_DIR, "gitee.json"))))
     bad["issue_write_form_typo"] = "owner_param"
     (tmp_path / "gitee.json").write_text(json.dumps(bad), encoding="utf-8")
     cards = builtin_cards_from_dir(str(tmp_path))
@@ -89,8 +85,7 @@ def test_s83_file_keys_subset_of_dataclass():
     """守卫：repo 内全部平台配置文件的键 ⊆ PlatformCard dataclass 字段。"""
     import dataclasses as _dc
     valid = {f.name for f in __import__("dataclasses").fields(PlatformCard)}
-    configs_dir = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(pc.__file__))), "..", "configs", "platforms")
+    configs_dir = pc._CONFIGS_DIR
     for fn in os.listdir(configs_dir):
         if not fn.endswith(".json"):
             continue

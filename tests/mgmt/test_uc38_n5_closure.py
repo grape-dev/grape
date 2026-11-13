@@ -125,26 +125,37 @@ def test_uc38_2_platform_tokens_write_path_dual_write():
         _cleanup_user({"id": uid})
 
 
-# ────────────────────────── UC38③ 白名单列驱动行为闭环 ──────────────────────────
+# ────────────────────────── UC38③ 白名单行式行为闭环 ──────────────────────────
 
 def test_uc38_3_whitelist_column_end_to_end():
-    """白名单列驱动：建列→add→list 全链走配置派生（真实 sqlite 落库）。"""
+    """白名单行式：建列→add→list 全链走 (provider, username)（真实 sqlite 落库）。
+
+    2026-11-12 行式化：列驱动改行式——db 层不再做渠道校验（登录域自治，
+    校验上移路由层）；未知渠道拒绝由 POST /whitelist 路由 400 承担。"""
     import uuid
 
     from src.domains.mgmt.admin.db import add_login_whitelist, list_login_whitelist
-    from src.api.db_setup import _ensure_whitelist_columns
+    from src.domains.mgmt.admin.routes import admin_add_login_whitelist, LoginWhitelistBody
+    from src.api.db_setup import _fn_login_whitelist_row_columns
+    from fastapi import HTTPException
 
-    _ensure_whitelist_columns()
+    _fn_login_whitelist_row_columns()
     uname = "uc38wl" + uuid.uuid4().hex[:6]
     try:
         assert add_login_whitelist("gitee", uname, "uc38") is True
         rows = list_login_whitelist()
-        assert any(r.get("gitee_username") == uname for r in rows)
-        # 未注册渠道拒绝（fail-closed）
-        assert add_login_whitelist("nosuchplatform", uname, "uc38") is False
+        assert any(r.get("provider") == "gitee" and r.get("username") == uname
+                   for r in rows)
+        # 未注册渠道拒绝（fail-closed，路由层）
+        try:
+            admin_add_login_whitelist(
+                LoginWhitelistBody(provider="nosuchplatform", username=uname), admin={"id": "t"})
+            raise AssertionError("未在册渠道未拒绝")
+        except HTTPException as e:
+            assert e.status_code == 400
     finally:
         with db_lock:
-            db.execute("DELETE FROM login_whitelist WHERE gitee_username=?", (uname,))
+            db.execute("DELETE FROM login_whitelist WHERE provider='gitee' AND username=?", (uname,))
             db.commit()
 
 

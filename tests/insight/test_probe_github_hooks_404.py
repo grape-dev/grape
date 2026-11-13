@@ -52,11 +52,15 @@ def _urlopen_factory(user_routes, bot_routes=None):
 
     def _fake_urlopen(req, timeout=None):
         url = req.full_url
+        # 2026-11-12 卡驱动改造：query_token 平台（gitee/gitcode）凭据在查询参数里，
+        # 路由表按去掉 access_token 的裸 URL 匹配；bot 判定兼顾 header 与查询参数。
         auth = req.headers.get("Authorization", "")
-        routes = bot_routes if BOT_TOKEN in auth else user_routes
-        if url not in routes:
-            raise AssertionError(f"unexpected url: {url}")
-        v = routes[url]
+        is_bot = (BOT_TOKEN in auth) or (f"access_token={BOT_TOKEN}" in url)
+        routes = bot_routes if is_bot else user_routes
+        bare = url.split("?access_token=", 1)[0].split("&access_token=", 1)[0]
+        if bare not in routes:
+            raise AssertionError(f"unexpected url: {bare}")
+        v = routes[bare]
         if isinstance(v, tuple):
             code, body = v
         else:
@@ -72,7 +76,7 @@ def _run_probe(user_id, repo_key, user_routes, bot_routes=None):
     """跑一轮探活，mock 掉 DB / 用户 GitHub token / 网络层，返回 user_db mock。"""
     owner, name = repo_key.split(":")[1].split("/")
     with patch("src.domains.mgmt.routes.repos.user_db") as udb, \
-         patch("src.api.deps.get_user_github_token_with_refresh", return_value=GH_USER_TOKEN), \
+         patch("src.domains.mgmt.routes.repos._probe_repo_token", return_value=GH_USER_TOKEN), \
          patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "t"}), \
          patch("urllib.request.urlopen", side_effect=_urlopen_factory(user_routes, bot_routes)):
         udb.get_managed_repos.return_value = [{
@@ -82,7 +86,7 @@ def _run_probe(user_id, repo_key, user_routes, bot_routes=None):
         udb.remove_managed_repo.return_value = None
         user_routes.setdefault("https://gitcode.com/api/v5/user", 200)
         user_routes.setdefault("https://api.github.com/user", 200)
-        _probe_stale_repos("gc-token", user_id)
+        _probe_stale_repos(user_id)
     return udb
 
 

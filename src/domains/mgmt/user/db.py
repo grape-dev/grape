@@ -1890,17 +1890,16 @@ def update_managed_repo_bot_username(repo_key: str, bot_username: str) -> bool:
         log.warning(f"Update managed repo bot username failed: {e}")
         return False
 
-def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
-    """按 owner/repo 查仓库 bot token（内部按带前缀 repo_key 命中）。
+def resolve_managed_repo_key(repo_owner: str, repo_name: str) -> str:
+    """owner/repo → 带前缀 repo_key（按 managed_repos 候选集探针解析真实前缀）。
 
-    R12.12: 路径 B 仓库（host_user_id > 0）守卫下沉到此处——
-    所有调用方（scenes/feishu_async/chat/agents/session_store/settings 等 12 处）
-    自动继承路径 B 跳过逻辑，与 get_repo_token_with_refresh / get_repo_bot_token 对齐。
+    P9 抽取自 get_bot_token_by_repo 的探针段——单仓 bot-token 端点与
+    token 读取链共用同一解析，避免两处前缀口径漂移。
     """
     from src.kernel.repo_key import to_repo_key, repo_key_candidates
     repo_key = to_repo_key(f"{repo_owner}/{repo_name}")
-    # 实弹验证 2026-11-10：裸 to_repo_key 默认 gitcode: 前缀，gitee/github 仓查错行
-    # → 恒 has_bot_token=false。候选集探针按 managed_repos 解析真实前缀（幂等）。
+    # 实弹验证 2026-11-10：裸 to_repo_key 默认 gitcode: 前缀，gitee/github 仓查错行。
+    # 候选集探针按 managed_repos 解析真实前缀（幂等）。
     try:
         _rks = tuple(repo_key_candidates(f"{repo_owner}/{repo_name}"))
         if _rks:
@@ -1912,22 +1911,94 @@ def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
                 repo_key = _row[0]
     except Exception:
         pass
-    # R12.12: 路径 B 仓库跳过仓库级 bot token（降级场景脏写入防护）
+    return repo_key
+
+
+def repo_has_bot_credential(repo_key: str) -> bool:
+    """P9：per-repo bot 凭据存在性判定（repo_key 前缀 → 卡派生，读序=卡列→rc 单表→
+    存量列回落，与 get_bot_token_by_repo 同一实现，消除双口径）。
+
+    - 卡 token_storage_field 非空（gitcode/github 存量列）→ 查 managed_repos 对应列；
+    - 卡 token_storage_field 为空（gitee/gitlab 终态，无物理列）→ 查
+      grape_t_repo_credentials（repo_key × cred_type='bot'）；
+    - 【存量列回落】rc 未命中/表不存在（老部署冷启动库无 rc 表）时，若
+      managed_repos 存在遗留列 bot_<provider>_token（gitee 老数据形态，live-w10
+      实测 gitee bot 凭据落在旧列），读该列——与白名单行式化「行式双读存量列」
+      同原则：终态口径不能让存量数据失真。
+    - 路径 B 仓库（host_user_id > 0）无仓库级 bot token——同 get_bot_token_by_repo 口径。
+    """
+    return bool(_repo_bot_token_value(repo_key))
+
+
+def _repo_bot_token_value(repo_key: str) -> str:
+    """仓库 bot token 读序实现（卡列 → rc 单表 → 存量列回落）。
+
+    repo_has_bot_credential（存在性）与 get_bot_token_by_repo（取值）共用，
+    单一读序单一来源。读不到返回 ''。
+    """
+    # R12.12 同口径：路径 B 仓库跳过仓库级 bot token（降级场景脏写入防护）
     if str(get_host_user_id(repo_key) or "") not in ("", "0"):
         return ""
+    from src.kernel.repo_key import parse_repo_key
+    provider = parse_repo_key(repo_key or "")[0] or "gitcode"
+    _col = ""
+    try:
+        from src.kernel.token_resolver import create_provider
+        _col = create_provider(provider).token_storage_field()
+    except Exception:
+        _col = ""
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _col or ""):
+        _col = ""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT bot_gitcode_token FROM managed_repos WHERE repo_key=? AND bot_gitcode_token!='' LIMIT 1", (repo_key,))
-        row = c.fetchone()
-        if row:
-            # N3：列值通道加密，读侧解密
-            return _decrypt_repo_secret(row[0])
-    # S85/D60②：S82 列冻结补漏——新托管仓凭据只在 grape_t_repo_credentials（第 5 类读者收口，
-    # 12 调用点自动继承；历史行由上方列查询回落，顺序=列→rc 等价 S82 读者）
-    _rc_bot = get_repo_credential_value(repo_key, "bot")  # D99 归一
-    if _rc_bot:
-        return _rc_bot
-    return ""
+        # ① 卡声明列（gitcode/github 终态）
+        if _col:
+            try:
+                c.execute(
+                    f"SELECT {_col} FROM managed_repos "
+                    f"WHERE repo_key=? AND {_col}!='' LIMIT 1", (repo_key,))
+                row = c.fetchone()
+                if row:
+                    return _decrypt_repo_secret(row[0] or "")
+            except Exception:
+                pass
+        # ② rc 单表（空卡列平台终态；老库无表→吞异常走③）
+        try:
+            c.execute(
+                "SELECT value FROM grape_t_repo_credentials "
+                "WHERE repo_key=? AND cred_type='bot' LIMIT 1", (repo_key,))
+            row = c.fetchone()
+            if row:
+                return _decrypt_repo_secret(row[0] or "")
+        except Exception:
+            pass
+        # ③ 存量列回落（空卡列平台的老数据形态：gitee bot 凭据落 bot_gitee_token 列）
+        _legacy = f"bot_{provider}_token"
+        if _legacy != _col:
+            try:
+                c.execute(
+                    f"SELECT {_legacy} FROM managed_repos "
+                    f"WHERE repo_key=? AND {_legacy}!='' LIMIT 1", (repo_key,))
+                row = c.fetchone()
+                if row:
+                    return _decrypt_repo_secret(row[0] or "")
+            except Exception:
+                pass
+        return ""
+
+
+def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
+    """按 owner/repo 查仓库 bot token（内部按带前缀 repo_key 命中）。
+
+    R12.12: 路径 B 仓库（host_user_id > 0）守卫下沉到此处——
+    所有调用方（scenes/feishu_async/chat/agents/session_store/settings 等 12 处）
+    自动继承路径 B 跳过逻辑，与 get_repo_token_with_refresh / get_repo_bot_token 对齐。
+    """
+    repo_key = resolve_managed_repo_key(repo_owner, repo_name)
+    # P9 收口：取值与存在性同一实现（卡列→rc 单表→存量列回落，含路径 B 守卫），
+    # 消灭本函数写死的 bot_gitcode_token 列读（gitee/gitlab 老列数据此前恒空）
+    return _repo_bot_token_value(repo_key)
 
 def get_repo_bot_token_no_global(repo_key: str) -> str:
     """仓库级 bot token（不含全局兜底）：managed_repos.bot_gitcode_token / devops_agent_session.repo_gitcode_token。
@@ -2047,26 +2118,41 @@ def get_global_github_bot_token() -> str:
                             file_fallback_fn=lambda: _read_gbt_file_field("github_bot_token"))
 
 def get_global_github_bot_username() -> str:
-    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存）。
+    """统一入口：github 卡 bot_username 优先 → meta 兜底（D15，2026-11-12）。
 
-    GitHub bot username 不在 bot_usernames 列表中（那是 GitCode 的），
-    需要单独存储。用于 GitHub 仓库托管时移除 bot 协作者身份。
+    B 层收敛：GitHub bot 身份归仓库平台卡字段（get_platform_card("github").bot_username），
+    存量 meta global_bot_github_username（+文件 fallback）保留为卡空时的兜底
+    （兼容窗口）。消费方（event_pipeline self-comment / repos 解绑协作者）零改动。
+
+    Issue #345: DB 是权威源。文件 fallback 确保迁移失败或集群竞态时系统仍可用。
     """
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+        _card = get_platform_card("github")
+        if _card is not None and _card.bot_username:
+            return _card.bot_username
+    except Exception:
+        pass
     return _cached_get_meta("global_bot_github_username",
                             file_fallback_fn=lambda: _read_gbt_file_field("github_bot_username"))
 
 def get_global_bot_usernames() -> list[str]:
-    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存）。"""
-    raw = _cached_get_meta("global_bot_usernames",
-                           file_fallback_fn=_read_gbt_file_usernames)
-    if raw:
-        try:
-            import json
-            val = json.loads(raw)
-            return val if isinstance(val, list) else []
-        except Exception:
-            pass
-    return []
+    """统一入口：各卡 bot_username 纯卡派生并集（D16→D22，2026-11-12 拍板）。
+
+    self-comment 检测的 bot 名单 = list_vcs_platforms() 各卡 bot_username
+    非空并集（新平台卡配 bot 自动进名单）。meta global_bot_usernames 兜底
+    读链按用户拍板退役；存量 meta 键成死配置，清理挂账下批。
+    """
+    out: list[str] = []
+    try:
+        from src.domains.runtime.vcs.platform_card import list_vcs_platforms, get_platform_card
+        for _p in list_vcs_platforms():
+            _card = get_platform_card(_p)
+            if _card is not None and _card.bot_username and _card.bot_username not in out:
+                out.append(_card.bot_username)
+    except Exception:
+        pass
+    return out
 
 def _get_global_bot_token() -> str:
     """读取全局 GitCode bot token——向后兼容包装。
@@ -2302,6 +2388,24 @@ def get_repo_token_with_refresh(repo_key: str) -> str:
     from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
     provider = create_provider_from_repo_key(repo_key)
     return TokenResolver(provider).get_token(repo_key)
+
+
+def get_repo_token_for(repo_key: str) -> str:
+    """仓库 token 统一读入口（2026-11-13 if/else 收口配套）：
+
+    单一入口=provider.resolve_repo_token（GenericVcsProvider 基类能力）：
+    TokenResolver 标准策略链 + 卡能力位 owner_identity_token_fallback 派生的
+    owner-identity 回落（github 卡声明，新平台卡内声明即得）。
+    消费方（qa_gate/issues 路由/issue_vcs_index/event_pipeline）不再按
+    平台名分叉选 getter——本函数自身也零平台分支。
+    """
+    from src.kernel.token_resolver import create_provider_from_repo_key
+    _prov = create_provider_from_repo_key(repo_key)
+    try:
+        return _prov.resolve_repo_token(repo_key) or ""
+    except Exception as e:
+        log.warning(f"get_repo_token_for failed (repo_key={repo_key}): {e}")
+        return ""
 
 def _is_user_token_repo(repo_key: str) -> bool:
     """Issue #372 R2.4: 判断仓库是否走路径 D（用户 token 降级）。
@@ -2733,16 +2837,23 @@ def get_webhook_token_by_repo(full_name: str, provider: str = "") -> str:
                 row = None
             if row and row[0]:
                 return row[0]
-            if provider in ("gitcode", "github"):
-                try:
+            # 2026-11-13 if/else 收口：平台 webhook token 存量列经卡能力位
+            # webhook_token_field 派生（空=无列平台，gitee/gitlab F4 终态）——
+            # 消除 `provider in (gitcode,github)` 二元枚举与列名映射硬编码；
+            # 有列平台（gitcode/github 派生列名）行为不变。
+            try:
+                from src.domains.runtime.vcs.platform_card import get_platform_card
+                _wt_col = (getattr(get_platform_card(provider), "webhook_token_field", "") or "") \
+                    if provider else ""
+                if _wt_col:
                     c.execute(
-                        f"SELECT {_webhook_token_col_for(provider)} FROM managed_repos "
+                        f"SELECT {_wt_col} FROM managed_repos "
                         "WHERE repo_key=? LIMIT 1", (_pk,))
                     row = c.fetchone()
                     if row and row[0]:
                         return _decrypt_repo_secret(row[0])
-                except Exception:
-                    pass
+            except Exception:
+                pass
             return get_repo_credential_value(_pk, "webhook")
         # 同时查 gitcode: 和 github: 前缀
         gc_key = to_repo_key(full_name)  # 默认 gitcode:
@@ -5132,12 +5243,6 @@ def get_repo_credential_value(repo_key: str, cred_type: str) -> str:
         log.warning(f"get_repo_credential_value failed: {e}")
         return ""
 
-def _webhook_token_col_for(provider: str) -> str:
-    """provider → managed_repos webhook token 存量列名（路径 A 兼容）。
-    单平台一行一判定，避免字面量二元枚举（ratchet 约束）。"""
-    if provider == "github":
-        return "github_webhook_token"
-    return "gitcode_webhook_token"
 
 """用户系统数据库：users/credentials/vms/skills 表管理
 

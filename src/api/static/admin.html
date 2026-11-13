@@ -91,6 +91,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 .f-row .st{font-size:12px;color:var(--g,#1ca44c);min-width:90px}
 .f-row .st.off{color:var(--r,#dc2828)}
 .hint{font-size:12px;color:var(--t2,#5b667b);margin:-6px 0 12px 210px}
+/* S43/S44（2026-11-13）卡详情页 Apple 式可用性：字段级配置指导 + 高级折叠 + 域说明 */
+.domain-note{margin:0 0 14px 0;padding:10px 14px;background:rgba(120,120,128,0.08);border-radius:9px;font-size:12px;color:var(--t2,#5b667b)}
+#vpCardFields .f-doc,#acCardFields .f-doc{font-size:11.5px;color:var(--t3,#8d97a8);line-height:1.5;margin-top:2px;padding-left:2px}
+.adv-fold{margin:6px 0 2px 0;border-top:1px dashed var(--b,#e3e6ee)}
+.adv-fold summary{cursor:pointer;padding:10px 2px;font-size:12px;font-weight:500;color:var(--t2,#5b667b);user-select:none;list-style:none;display:flex;align-items:center;gap:6px}
+.adv-fold summary::before{content:'⌄';font-size:13px;transition:transform .15s;color:var(--t3,#8d97a8)}
+.adv-fold[open] summary::before{transform:rotate(180deg)}
+.adv-fold summary:hover{color:var(--t,#1d1d1f)}
+.adv-body{padding-bottom:4px}
 .save-bar{display:flex;align-items:center;gap:12px;margin-top:8px}
 .btn{padding:11px 22px;border-radius:980px;border:none;font-size:14px;font-weight:500;cursor:pointer}
 .btn-p{background:var(--a,#3168e0);color:#fff}
@@ -156,6 +165,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 .toast{padding:12px 18px;border-radius:10px;color:#fff;font-size:13px;box-shadow:0 6px 20px rgba(0,0,0,.18);animation:fadeIn .25s}
 .toast.ok{background:var(--g,#1ca44c)}.toast.err{background:var(--r,#dc2828)}
 @keyframes fadeIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1}}
+
+/* D21（2026-11-12）：iOS 分段控件（详情页 Tab）+ 分组卡片行——苹果风格：
+   灰底圆角容器、白色活动段、SF 风格小字标签、组内行分隔线 */
+.seg-tabs{display:inline-flex;gap:2px;background:rgba(120,120,128,0.12);border-radius:9px;padding:2px;margin:0 0 16px 0}
+.seg-tab{padding:5px 14px;border-radius:7px;font-size:13px;font-weight:500;color:var(--t2,#5b667b);cursor:pointer;user-select:none;transition:background .15s,color .15s}
+.seg-tab.act{background:#fff;color:var(--t,#1d1d1f);box-shadow:0 1px 3px rgba(0,0,0,0.12)}
+.seg-tab:not(.act):hover{color:var(--t,#1d1d1f)}
+#vpCardFields .f-row,#acCardFields .f-row{flex-direction:column;gap:4px;align-items:stretch;padding:10px 0;border-bottom:1px solid var(--b,#e3e6ee)}
+#vpCardFields .f-row:last-child,#acCardFields .f-row:last-child{border-bottom:none}
+#vpCardFields label,#acCardFields label{min-width:0;font-size:12px;font-weight:600;color:var(--t2,#5b667b);letter-spacing:0.2px}
+#vpCardFields input.ipt,#acCardFields input.ipt{width:100% !important;box-sizing:border-box}
 </style>
 </head>
 <body>
@@ -199,7 +219,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
     </div>
     <div class="sb-nav">
       <div class="grp" data-i18n="admin.nav.config_center">配置中心</div>
-      <a class="act" onclick="showCfg()"><span class="ic">⚙</span><span data-i18n="admin.nav.credentials">平台凭据</span></a>
+      <a class="act" onclick="showCfg()"><span class="ic">⚙</span><span data-i18n="admin.nav.credentials">运行参数</span></a>
+      <a onclick="showAuthChannels(event)"><span class="ic">🔐</span><span data-i18n="admin.nav.auth_channels">OAuth 登录渠道</span></a>
+      <a onclick="showVcsPlatforms(event)"><span class="ic">🗂</span><span data-i18n="admin.nav.vcs_platforms">仓库平台</span></a>
       <div class="grp" data-i18n="admin.nav.user_management">用户管理</div>
       <a onclick="showUsers(1, event)"><span class="ic">👥</span><span data-i18n="admin.nav.user_list">用户列表</span></a>
       <a onclick="showWhitelist(event)"><span class="ic">📋</span><span data-i18n="admin.nav.whitelist">注册白名单</span></a>
@@ -223,34 +245,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
   <div class="mn">
     <div class="tb"><div class="bc"><b data-i18n="admin.config.title">平台凭据配置</b></div></div>
     <div class="ct">
-      <div class="card">
-        <div class="card-h"><h2><span data-i18n="admin.config.gitcode">GitCode 配置</span><span class="tag" data-i18n="admin.config.gitcode_desc">github.com 平台操作凭据</span></h2></div>
-        <div class="f-row"><label>gitcode_api_token</label><input id="f_gitcode_api_token" type="password" placeholder="GitCode bot token"><button class="s-btn" onclick="verifyToken('gitcode','f_gitcode_api_token')" data-i18n="admin.config.verify">校验</button><span class="st" id="s_gitcode_api_token"></span></div>
-        <div class="f-row"><label>oauth_client_id</label><input id="f_gitcode_oauth_client_id" placeholder="GitCode OAuth App Client ID"></div>
-        <div class="f-row"><label>oauth_client_secret</label><input id="f_gitcode_oauth_client_secret" type="password" placeholder="GitCode OAuth App Client Secret"></div>
-        <div class="f-row"><label>oauth_redirect_uri</label><input id="f_gitcode_oauth_redirect_uri" data-i18n-placeholder="admin.config.auto_infer" placeholder="留空自动推断"></div>
-        <div class="f-row"><label>webhook_url</label><input id="f_webhook_url" placeholder="GitCode webhook callback URL"></div>
-        <div class="f-row"><label>gitcode_webhook_token</label><input id="f_gitcode_webhook_token" type="password" placeholder="GitCode webhook secret"><span class="st" id="s_gitcode_webhook_token"></span></div>
-      </div>
-
-      <div class="card">
-        <div class="card-h"><h2><span data-i18n="admin.config.github">GitHub 配置</span><span class="tag" data-i18n="admin.config.github_desc">GitHub 平台操作凭据</span></h2></div>
-        <div class="f-row"><label>github_bot_token</label><input id="f_github_bot_token" type="password" placeholder="GitHub bot token"><button class="s-btn" onclick="verifyToken('github','f_github_bot_token')" data-i18n="admin.config.verify">校验</button><span class="st" id="s_github_bot_token"></span></div>
-        <div class="f-row"><label>github_bot_username</label><input id="f_github_bot_username" placeholder="GitHub bot username"></div>
-        <div class="f-row"><label>oauth_client_id</label><input id="f_github_oauth_client_id" placeholder="GitHub OAuth App Client ID"></div>
-        <div class="f-row"><label>oauth_client_secret</label><input id="f_github_oauth_client_secret" type="password" placeholder="GitHub OAuth App Client Secret"></div>
-        <div class="f-row"><label>oauth_redirect_uri</label><input id="f_github_oauth_redirect_uri" data-i18n-placeholder="admin.config.auto_infer" placeholder="留空自动推断"></div>
-      </div>
-
-      <div class="card">
-        <div class="card-h"><h2><span data-i18n="admin.config.bot_account">Bot 账户</span><span class="tag" data-i18n="admin.config.bot_account_desc">self-comment 检测</span></h2></div>
-        <div class="f-row"><label>bot_usernames</label><input id="f_bot_usernames" data-i18n-placeholder="admin.config.bot_usernames_hint" placeholder="逗号分隔，如 grape_bot, dev-bot"></div>
-        <div class="hint" data-i18n="admin.config.bot_usernames_fill_hint">手动填写或点击上方「校验」后用返回的用户名自动回填</div>
-      </div>
-
+<!-- D13（2026-11-12 A 层收口）：GitCode/GitHub 配置双卡整卡删除——6 个凭据字段
+           与新双菜单同 meta key（登录渠道/仓库平台），双入口=配置漂移源；
+           webhook_url 迁运行参数卡、gitcode_webhook_token 迁仓库平台详情、
+           github_bot_username 归卡 bot_username（D15）。 -->
+<!-- D18（2026-11-12）：Bot 身份兜底清单 + Bot Token 健康状态两卡迁仓库平台页
+           （bot 配置域跟平台卡走）；本页收敛为运行参数。 -->
       <!-- 运行参数 (Issue #470) -->
       <div class="card">
         <div class="card-h"><h2><span data-i18n="admin.config.runtime_params">运行参数</span><span class="tag" data-i18n="admin.config.runtime_params_desc">超时与 DevSpace 规格</span></h2></div>
+        <div class="f-row"><label>webhook_url</label><input id="f_webhook_url" data-i18n-placeholder="admin.config.webhook_url_ph" placeholder="本服务对外 webhook 回调地址（部署级，所有平台共用）"><span class="st" id="s_webhook_url"></span></div>
+        <div class="hint" data-i18n="admin.config.webhook_url_hint">部署级配置：本服务公网回调地址（所有仓库平台共用），非平台差异</div>
         <div class="f-row"><label>runtime_task_timeout</label><input id="f_runtime_task_timeout" type="number" min="1" placeholder="3600"><span class="st" id="s_runtime_task_timeout"></span></div>
         <div class="hint" data-i18n="admin.config.runtime_timeout_hint">任务超时（秒，默认 3600）；引擎全局超时/看门狗/stuck 预警/孤儿回收均随此派生，env RUNTIME_TASK_TIMEOUT 可覆盖</div>
         <div class="f-row"><label>devstage_template_id</label><input id="f_devstage_template_id" placeholder="4ef59a2b…"></div>
@@ -264,18 +269,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
           </select>
         </div>
         <div class="hint" data-i18n="admin.config.devstage_hint">AI DevSpace 默认规格（3c6g/ARM）；留空保持现值，env GRAPE_DEVSTAGE_* 可覆盖</div>
-      </div>
-
-      <!-- Bot Token Health (Issue #348) -->
-      <div class="card">
-        <div class="card-h">
-          <h2><span data-i18n="admin.token_health.title">Bot Token 健康状态</span><span class="tag" data-i18n="admin.token_health.desc">后端探活监控</span></h2>
-          <button class="s-btn" onclick="loadTokenHealth()" data-i18n="admin.token_health.refresh">刷新</button>
-        </div>
-        <div class="f-row"><label data-i18n="admin.token_health.status">健康状态</label><span id="tkh_status">…</span></div>
-        <div class="f-row"><label data-i18n="admin.token_health.checked_at">最近探活时间</label><span id="tkh_checked_at" style="font-size:13px">…</span></div>
-        <div id="tkh_platforms"></div>
-        <div class="hint" style="margin-left:0" data-i18n="admin.token_health.hint">后端定时探活 GitCode/GitHub bot token；「暂不可用」表示探活服务尚未部署</div>
       </div>
 
       <div class="save-bar">
@@ -309,6 +302,112 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <div class="empty-tx" data-i18n="admin.users.no_results">没有找到匹配的用户</div>
       </div>
       <div id="userPager" class="pager-bar"></div>
+    </div>
+  </div>
+
+  <!-- Auth Channels (OAuth login provider cards) -->
+  <div id="authChannelsView" style="display:none">
+    <div class="tb"><div class="bc"><b data-i18n="admin.channels.title">OAuth 登录渠道</b> <span style="color:var(--t2,#5b667b);font-size:12px;margin-left:8px" data-i18n="admin.channels.subtitle">登录渠道卡 · 配置即接入</span></div></div>
+    <div class="ct">
+      <table class="tbl" style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="text-align:left;border-bottom:2px solid var(--b,#e3e6ee)">
+          <th style="padding:8px">ID</th>
+          <th style="padding:8px" data-i18n="admin.channels.col_name">名称</th>
+          <th style="padding:8px" data-i18n="admin.channels.col_type">类型</th>
+          <th style="padding:8px" data-i18n="admin.channels.col_auth_url">授权端点</th>
+          <th style="padding:8px" data-i18n="admin.channels.col_status">状态</th>
+          <th style="padding:8px" data-i18n="admin.channels.col_actions">操作</th>
+        </tr></thead>
+        <tbody id="authChannelsTbody"></tbody>
+      </table>
+    </div>
+    <div class="ct" id="authChannelDetail" style="display:none">
+      <div class="tb"><div class="bc"><b id="authChannelDetailTitle"></b></div>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn btn-o" style="padding:6px 14px;font-size:13px" onclick="backAuthChannels()" data-i18n="admin.channels.back">返回列表</button>
+          <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="saveAuthChannel()" data-i18n="admin.channels.save">保存</button>
+        </div>
+      </div>
+      <!-- S44（2026-11-13）：双域说明——渠道卡=登录/绑定凭据域，与托管平台卡解耦 -->
+      <div class="hint domain-note" data-i18n="admin.domain_note_channels">登录渠道卡：OAuth 登录与账号绑定的凭据配置（不影响仓库托管行为）</div>
+      <!-- D21：与仓库平台详情同款 iOS 分段控件 -->
+      <div class="seg-tabs" id="acTabs">
+        <div class="seg-tab act" onclick="_switchCardTab('ac',0)" data-i18n="admin.tabs.creds">凭据</div>
+        <div class="seg-tab" onclick="_switchCardTab('ac',1)" data-i18n="admin.tabs.basic">基础</div>
+        <div class="seg-tab" onclick="_switchCardTab('ac',2)" data-i18n="admin.tabs.capability">能力与协议</div>
+        <div class="seg-tab" onclick="_switchCardTab('ac',3)" data-i18n="admin.tabs.storage">存储与身份</div>
+        <div class="seg-tab" onclick="_switchCardTab('ac',4)" data-i18n="admin.tabs.other">其他</div>
+      </div>
+      <div class="card" id="acTab0" style="margin-bottom:16px">
+        <div class="card-h"><h2 data-i18n="admin.channels.cred_title">应用凭据（OAuth App）</h2></div>
+        <div class="f-row">
+          <label>client_id</label><input id="ac_client_id" class="ipt" style="width:280px;background:#fff;color:#1d1d1f">
+          <label>client_secret</label><input id="ac_client_secret" class="ipt" type="password" style="width:280px;background:#fff;color:#1d1d1f" placeholder="">
+        </div>
+        <div class="hint" data-i18n="admin.channels.cred_hint">client_secret 只写不读，留空=不修改</div>
+      </div>
+      <div class="card" id="acTab1"><div class="card-h"><h2 data-i18n="admin.tabs.basic">基础</h2></div><div id="acCardF1"></div></div>
+      <div class="card" id="acTab2" style="display:none"><div class="card-h"><h2 data-i18n="admin.tabs.capability">能力与协议</h2></div><div id="acCardF2"></div></div>
+      <div class="card" id="acTab3" style="display:none"><div class="card-h"><h2 data-i18n="admin.tabs.storage">存储与身份</h2></div><div id="acCardF3"></div></div>
+      <div class="card" id="acTab4" style="display:none"><div class="card-h"><h2 data-i18n="admin.tabs.other">其他</h2></div><div id="acCardF4"></div></div>
+    </div>
+  </div>
+
+  <!-- VCS Platforms (repo hosting platform cards) -->
+  <div id="vcsPlatformsView" style="display:none">
+    <div class="tb"><div class="bc"><b data-i18n="admin.platforms.title">仓库平台</b> <span style="color:var(--t2,#5b667b);font-size:12px;margin-left:8px" data-i18n="admin.platforms.subtitle">仓库平台卡 · 方言与能力位</span></div></div>
+    <div class="ct">
+      <table class="tbl" style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="text-align:left;border-bottom:2px solid var(--b,#e3e6ee)">
+          <th style="padding:8px">ID</th>
+          <th style="padding:8px" data-i18n="admin.platforms.col_name">名称</th>
+          <th style="padding:8px">host</th>
+          <th style="padding:8px" data-i18n="admin.platforms.col_dialect">方言</th>
+          <th style="padding:8px">bot</th>
+          <th style="padding:8px" data-i18n="admin.platforms.col_bot_token">bot token</th>
+          <th style="padding:8px" data-i18n="admin.platforms.col_health">token 健康</th>
+          <th style="padding:8px" data-i18n="admin.platforms.col_actions">操作</th>
+        </tr></thead>
+        <tbody id="vcsPlatformsTbody"></tbody>
+      </table>
+    </div>
+<!-- D22（2026-11-12 拍板）：Bot 身份兜底清单卡删除——self-comment 检测名单
+     纯卡派生（各卡 bot_username 并集），meta global_bot_usernames 兜底读链退役 -->
+<!-- D19：全局 token 探活汇总卡退役——探活状态并入各平台（列表逐行展示） -->
+    <div class="ct" id="vcsPlatformDetail" style="display:none">
+      <div class="tb"><div class="bc"><b id="vcsPlatformDetailTitle"></b> <span id="vcsHealthCheckedAt" style="color:var(--t3,#8d97a8);font-size:11px;margin-left:8px"></span></div>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn btn-o" style="padding:6px 14px;font-size:13px" onclick="backVcsPlatforms()" data-i18n="admin.platforms.back">返回列表</button>
+          <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="saveVcsPlatform()" data-i18n="admin.platforms.save">保存</button>
+        </div>
+      </div>
+      <!-- S44（2026-11-13）：双域说明——托管平台卡=仓库托管/代理行为域 -->
+      <div class="hint domain-note" data-i18n="admin.domain_note_platforms">托管平台卡：仓库托管、webhook 与代理行为的配置（不影响登录渠道）</div>
+      <!-- D21（2026-11-12 拍板）：详情字段过多——iOS 分段控件分 Tab（凭据/基础/
+           能力与协议/存储与身份/其他），字段按名字清单分组，未匹配字段进"其他"
+           零丢失；_collectCardFields 扫全容器不变 -->
+      <div class="seg-tabs" id="vpTabs">
+        <div class="seg-tab act" onclick="_switchCardTab('vp',0)" data-i18n="admin.tabs.creds">凭据</div>
+        <div class="seg-tab" onclick="_switchCardTab('vp',1)" data-i18n="admin.tabs.basic">基础</div>
+        <div class="seg-tab" onclick="_switchCardTab('vp',2)" data-i18n="admin.tabs.capability">能力与协议</div>
+        <div class="seg-tab" onclick="_switchCardTab('vp',3)" data-i18n="admin.tabs.storage">存储与身份</div>
+        <div class="seg-tab" onclick="_switchCardTab('vp',4)" data-i18n="admin.tabs.other">其他</div>
+      </div>
+      <div class="card" id="vpTab0" style="margin-bottom:16px">
+        <div class="card-h"><h2 data-i18n="admin.platforms.bot_title">Bot 凭据（平台私有）</h2></div>
+        <div class="f-row">
+          <label>bot_token</label><input id="vp_bot_token" class="ipt" type="password" style="width:280px;background:#fff;color:#1d1d1f" placeholder="">
+        </div>
+        <div class="hint" data-i18n="admin.platforms.bot_hint">全局 bot token 只写不读，留空=不修改；按卡 global_bot_meta_key 落库</div>
+        <div class="f-row" id="vp_webhook_row" style="display:none">
+          <label>webhook_token</label><input id="vp_webhook_token" class="ipt" type="password" style="width:280px;background:#fff;color:#1d1d1f" placeholder="">
+        </div>
+        <div class="hint" id="vp_webhook_hint" style="display:none" data-i18n="admin.platforms.webhook_hint">webhook 验签 token 只写不读，留空=不修改；按 {provider}_webhook_token 落库</div>
+      </div>
+      <div class="card" id="vpTab1"><div class="card-h"><h2 data-i18n="admin.tabs.basic">基础</h2></div><div id="vpCardF1"></div></div>
+      <div class="card" id="vpTab2" style="display:none"><div class="card-h"><h2 data-i18n="admin.tabs.capability">能力与协议</h2></div><div id="vpCardF2"></div></div>
+      <div class="card" id="vpTab3" style="display:none"><div class="card-h"><h2 data-i18n="admin.tabs.storage">存储与身份</h2></div><div id="vpCardF3"></div></div>
+      <div class="card" id="vpTab4" style="display:none"><div class="card-h"><h2 data-i18n="admin.tabs.other">其他</h2></div><div id="vpCardF4"></div></div>
     </div>
   </div>
 
@@ -350,7 +449,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 
       <!-- OAuth Login Whitelist (Issue #332) -->
       <div class="card">
-        <div class="card-h"><h2><span data-i18n="admin.login_whitelist.title">OAuth 登录白名单</span><span class="tag" data-i18n="admin.login_whitelist.desc">GitCode/GitHub 登录白名单</span></h2></div>
+        <div class="card-h"><h2><span data-i18n="admin.login_whitelist.title">OAuth 登录白名单</span><span class="tag" data-i18n="admin.login_whitelist.desc">OAuth 渠道登录白名单</span></h2></div>
         <div class="f-row">
           <label data-i18n="admin.login_whitelist.toggle">白名单开关</label>
           <select id="loginWlToggle" class="ipt" style="width:120px">
@@ -360,6 +459,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
           <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="toggleLoginWhitelist()" data-i18n="admin.whitelist.save">保存</button>
         </div>
         <div class="hint" data-i18n="admin.login_whitelist.toggle_hint">开启时仅白名单内用户可 OAuth 登录；关闭时全部放行</div>
+        <!-- 2026-11-12 fail-closed：开关开启+表空=拒绝所有 OAuth 登录，管理面必须显式警示 -->
+        <div id="loginWlEmptyWarn" style="display:none;margin-top:8px;padding:8px 12px;border-radius:6px;background:rgba(220,40,40,.12);border:1px solid var(--r,#dc2828);color:var(--r,#dc2828);font-size:13px;font-weight:600"
+             data-i18n="admin.login_whitelist.empty_warn">开关已开启但白名单为空：当前拒绝所有 OAuth 登录，请先添加条目（管理台密码登录不受影响）</div>
       </div>
 
       <div class="card">
@@ -367,11 +469,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <div class="f-row">
           <label data-i18n="admin.login_whitelist.provider">平台</label>
           <select id="lw_provider" class="ipt" style="width:120px">
-            <option value="gitcode" data-i18n="admin.login_whitelist.provider_gitcode">GitCode</option>
-            <option value="github" data-i18n="admin.login_whitelist.provider_github">GitHub</option>
+            <!-- 2026-11-12 行式化：选项由 loadLoginWhitelist 从 GET /whitelist
+                 providers 元数据动态填充（渠道卡目录），零字面量平台 option -->
           </select>
           <label data-i18n="admin.login_whitelist.username">用户名</label>
-          <input id="lw_username" class="ipt" style="width:200px" data-i18n-placeholder="admin.login_whitelist.username_ph" placeholder="GitHub/GitCode 用户名">
+          <input id="lw_username" class="ipt" style="width:200px" data-i18n-placeholder="admin.login_whitelist.username_ph" placeholder="用户名">
           <label data-i18n="admin.login_whitelist.remark">备注</label>
           <input id="lw_remark" class="ipt" style="width:160px" data-i18n-placeholder="admin.login_whitelist.remark_ph" placeholder="可选">
           <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="addLoginWhitelist()" data-i18n="admin.login_whitelist.add_btn">添加</button>
@@ -383,8 +485,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <table class="tbl" style="width:100%;border-collapse:collapse;font-size:13px">
           <thead><tr style="text-align:left;border-bottom:2px solid var(--b,#e3e6ee)">
             <th style="padding:8px" data-i18n="admin.login_whitelist.col_id">ID</th>
-            <th style="padding:8px" data-i18n="admin.login_whitelist.col_gitcode">GitCode 用户名</th>
-            <th style="padding:8px" data-i18n="admin.login_whitelist.col_github">GitHub 用户名</th>
+            <th style="padding:8px" data-i18n="admin.login_whitelist.col_provider">平台</th>
+            <th style="padding:8px" data-i18n="admin.login_whitelist.col_username">用户名</th>
             <th style="padding:8px" data-i18n="admin.login_whitelist.col_remark">备注</th>
             <th style="padding:8px" data-i18n="admin.login_whitelist.col_created">创建时间</th>
             <th style="padding:8px" data-i18n="admin.login_whitelist.col_actions">操作</th>
@@ -401,6 +503,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 <script src="/static/js/i18n.js?v=20261112-1"></script>
 <script src="/static/js/pwd-blocklist.js?v=3"></script><!-- admin 改密长度/黑名单预检（C 家族） -->
 <script>I18N.init('20261016-8');</script>
-<script src="/static/js/admin.js?v=20261109-1"></script>
+<script src="/static/js/admin.js?v=20261113-1"></script>
 </body>
 </html>

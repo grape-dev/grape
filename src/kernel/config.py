@@ -688,15 +688,24 @@ def invalidate_login_whitelist_cache():
     _WL_CACHE_TS = 0.0
 
 
-def is_user_allowed(whitelist_column: str, login: str) -> bool:
-    """通用白名单判定——需显式启用才校验，未启用时全部放行。
+def is_user_allowed(provider: str, login: str) -> bool:
+    """通用白名单判定（行式双读）——需显式启用才校验，未启用时全部放行。
+
+    2026-11-12 行式化（weekly-11）：provider=OAuth 渠道 key（回调路由参数，
+    全链贯穿零转换），不再接收白名单列名（渠道卡 whitelist_column 字段已退役）。
 
     开关：meta 表 login_whitelist_enabled（true=启用，未设置=关闭）
-    启用时：按平台列独立校验 login_whitelist 表
-    未启用时：直接返回 True
+    判定序（逐人兜底，任一命中即放行——不按表/按渠道整体切换，避免管理员
+    加首条新条目时锁死存量列式用户）：
+    1. 新行：WHERE provider=? AND LOWER(username)=LOWER(?)
+    2. 老列兜底：列名由 provider key 派生 f"{provider}_username"（存量
+       gitcode/github/gitee_username 列全符合该规律，无需读卡）；
+       列不存在（新装/该渠道无老列）=无老数据 → 拒绝
+    未启用时：直接返回 True；启用+表空：全部拒绝（fail-closed，2026-11-12 拍板）
     降级：DB 不可用时读 login-whitelist.json 文件
-    - 文件缺失 / whitelist 为空 → 全部放行
-    - 读取异常 → 放行（避免误锁所有用户）
+    - 文件缺失 / whitelist 为空 → 拒绝
+    - 读取异常 → 拒绝（fail-closed；管理台走独立密码链 admin_accounts，
+      可登入即时补条目，不构成不可逆锁死）
     """
     if not login:
         return False
@@ -705,49 +714,71 @@ def is_user_allowed(whitelist_column: str, login: str) -> bool:
     if not _is_login_whitelist_enabled():
         return True
 
-    # 列名安全校验（防 SQL 注入——列名来自 provider 配置）
+    # provider 格式校验（防 SQL 注入——用于派生老列名）
     import re
-    if not re.match(r'^[a-z_]+$', whitelist_column):
-        log.warning(f"is_user_allowed: invalid whitelist_column='{whitelist_column}'")
+    if not re.match(r'^[a-z0-9_]+$', provider or ""):
+        log.warning(f"is_user_allowed: invalid provider='{provider}'")
         return False
-    # 查 DB——按平台列独立校验
+    # 查 DB——行式新行优先，老列兜底
     try:
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            # P2-6: 检查表非空，避免开关启用但表为空时锁死所有用户
+            # fail-closed（2026-11-12 拍板，取代原 P2-6 全放行）：
+            # 开关已启用而表空 = 未配置任何人 → 拒绝所有 OAuth 登录。
+            # 管理台走独立密码链（admin_accounts），可登入即时补条目，不构成不可逆锁死。
             count = c.execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
             if count == 0:
-                log.warning("login_whitelist_enabled=true but table is empty — allowing all logins")
-                return True
+                log.error(
+                    "login_whitelist_enabled=true but table is empty — denying all OAuth logins (fail-closed)"
+                )
+                return False
+            # 1) 新行查询（行式：provider + username）
             row = c.execute(
-                f"SELECT 1 FROM login_whitelist WHERE LOWER({whitelist_column})=LOWER(?)", (login,)
+                "SELECT 1 FROM login_whitelist WHERE provider=? AND LOWER(username)=LOWER(?)",
+                (provider, login),
             ).fetchone()
-            return row is not None
+            if row is not None:
+                return True
+            # 2) 老列兜底（列名由 provider key 派生）
+            try:
+                row = c.execute(
+                    f"SELECT 1 FROM login_whitelist WHERE LOWER({provider}_username)=LOWER(?)",
+                    (login,),
+                ).fetchone()
+                return row is not None
+            except Exception as _col_err:
+                _msg = str(_col_err).lower()
+                if "no such column" in _msg or "unknown column" in _msg:
+                    return False  # 该渠道无老列=无老数据
+                raise  # 真 DB 异常 → 外层降级文件
     except Exception:
-        pass  # DB 不可用或列不存在，降级文件
-    # 降级：读文件
+        pass  # DB 不可用，降级文件
+    # 降级：读文件（fail-closed：开关已启用时，文件缺失/空/损坏一律拒绝）
     try:
         if not os.path.exists(LOGIN_WHITELIST_PATH):
-            return True
+            log.error(
+                "login whitelist enabled but %s is missing — denying (fail-closed)", LOGIN_WHITELIST_PATH
+            )
+            return False
         with open(LOGIN_WHITELIST_PATH, encoding="utf-8") as f:
             data = json.load(f)
         wl = data.get("whitelist") if isinstance(data, dict) else None
         if not wl:
-            return True
+            log.error(
+                "login whitelist enabled but %s has no entries — denying (fail-closed)", LOGIN_WHITELIST_PATH
+            )
+            return False
         return login.lower() in [w.lower() for w in wl]
-    except Exception:
-        return True
+    except Exception as _file_err:
+        log.error("login whitelist enabled but file fallback failed (%s) — denying (fail-closed)", _file_err)
+        return False
 
 
-def is_gitcode_user_allowed(gitcode_login: str) -> bool:
-    """白名单判定（GitCode 用户名）——委托通用函数。"""
-    return is_user_allowed("gitcode_username", gitcode_login)
-
-
-def is_github_user_allowed(github_login: str) -> bool:
-    """白名单判定（GitHub 用户名）——委托通用函数。"""
-    return is_user_allowed("github_username", github_login)
+# 2026-11-12 行式化（weekly-11）：is_gitcode_user_allowed / is_github_user_allowed
+# 平台名特化包装函数退役——行式模型下调用方直接传 provider key
+# （is_user_allowed(provider, login)），列名特化无存在意义。
+# 退役锁：tests/mgmt/test_login_whitelist_row_model.py 断言符号不存在。
 
 
 # ====== 技能目录解析（按 agent_type 一层分组：skills/<agent_type>/<skill>/SKILL.md）======

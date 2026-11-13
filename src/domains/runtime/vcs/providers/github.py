@@ -14,11 +14,28 @@ API_BASE = "https://api.github.com"
 # 未声明该开关的平台走 <p>_pat 泛型凭据键。
 SETTINGS_TOKEN_FIELD_SUFFIX = "token"
 
+# PATCH /issues 的 labels 必须是数组（逗号串 422 实测）；v5 系平台接收逗号串。
+LABELS_ARRAY_FORM = True
+
 # - milestones due_on 上游只认 ISO 8601 datetime（纯日期 422 "not a valid
 #   date-time"，2026-11-11 三平台实弹；ISO 时间戳 200）。与 v5 系的
 #   MILESTONE_DUE_DATE_ONLY（gitcode）对称：代理层把纯日期补成 T00:00:00Z，
 #   调用方无需记忆平台差异（平台差异收进开关，业务侧零感知）。
 MILESTONE_DUE_TIME_ONLY = True
+
+# 同 gitcode MILESTONE_VERIFY_READBACK：github 上游亦有 milestone 静默忽略
+# 实证（B1，2026-11-13 P1-full 实弹：milestone_id 未映射上游 `milestone` 时
+# 200 假成功）。写后 GET 回读校验按此开关派生。
+MILESTONE_VERIFY_READBACK = True
+
+# ── S89/D65 同族口径的 provider 模块契约开关（git_repo_api.py 消费）──
+
+# GitHub closing keywords（fixes/closes/resolves #N）由上游自动关联关闭；
+# auto_close_issues 缺省语义=true（v5 系上游无此行为，缺省 false）。
+# b439764fd 原版经 native_field_for 派生，但 gitee 规则 auto_close_issues
+# 为 native:None + _drop（无原生承载）——native_field_for 口径会给 gitee/gitlab
+# 也注入 Closes，与已发布行为（仅 github 注入）不符；改模块开关收窄为零回归。
+CLOSING_REFS_AUTO_CLOSE_DEFAULT = True
 
 # 调用方 body 自带的自动关闭引用（auto_close=false 时必须清除，避免绕过门禁）
 _CLOSING_REF_RE = re.compile(
@@ -90,7 +107,10 @@ _RULES = {
         "labels": "labels",
         "assignee": {"native": "assignees", "transform": _assignee_list},
         "assignees": {"native": "assignees", "transform": _assignee_list},
-        "milestone_id": "milestone_id",
+        # Issue #640 家族（2026-11-13 P1-full 实弹）：GitHub PATCH /issues 契约字段名
+        # 为 `milestone`（int，里程碑 number）——同名直传 milestone_id 会被上游
+        # 静默忽略（200 假成功、milestone 恒为 null）。与 gitcode/gitee 通道同口径。
+        "milestone_id": "milestone",
         "state": {"native": "state", "values": _UPDATE_STATE},
         "body": "body",
     },
@@ -119,3 +139,16 @@ def translate(resource: str, op: str, neutral: dict, ctx: dict) -> dict:
 
 def query_state(state: str) -> str:
     return _QUERY_STATE.get(state, state)
+
+# 托管全流程（bot 合作者 + webhook 建/删/探 + 库回写）已实装：
+HOSTING_FULL_FLOW = True
+
+# PR/MR 网页路径段（前端 PR 详情链接与 QA 门禁链接共用；能力位驱动，业务侧零平台判断）。
+PR_WEB_PATH = "pull"
+
+
+def repo_segment(owner: str, repo: str) -> str:
+    """资源根片段（github 方言）：repos/{owner}/{repo}（URL 段编码）。"""
+    import urllib.parse
+    return (f"repos/{urllib.parse.quote(owner, safe='')}/"
+            f"{urllib.parse.quote(repo, safe='')}")

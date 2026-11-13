@@ -91,6 +91,41 @@ def to_display(name: str) -> str:
     return dn.upper() if dn == "aishell" else dn
 
 
+def local_engine_device_name(host_name: str | None, local_hostname: str | None = None) -> str:
+    """本机直连引擎（credential_id=0）挂载到的设备名 = host_name（无则本机 hostname）。
+
+    设备视图（_build_runtime_devices）与凭据任务聚合
+    （GET /api/runtime/credentials/{cid}/tasks）共用此口径，保持单一来源。
+    """
+    if not local_hostname:
+        # Issue #2094：设备身份统一走 engine_host()（GRAPE_HOSTNAME 优先，容器
+        # 重建不漂移）；本函数本身就是「本机直连引擎挂载设备名」的单一来源，
+        # 设备视图与凭据任务聚合共用，不得绕开 host_identity 直取系统主机名。
+        try:
+            from src.kernel.host_identity import engine_host
+            local_hostname = engine_host()
+        except Exception:
+            local_hostname = ""
+    return (host_name or local_hostname or "").strip()
+
+
+def engine_mounts_to_credential(credential_id, host_name: str | None,
+                                cred_device_name: str | None) -> bool:
+    """引擎是否挂载到某凭据的设备（与设备视图挂载逻辑同一口径）。
+
+    - credential_id == 该凭据 id：引擎直接注册在该凭据下；
+    - credential_id == 0（本机直连）：host_name（或本机 hostname）等于凭据
+      device_name 时挂载到该设备——设备视图据此把本机引擎展示在凭据设备下，
+      任务聚合必须同样计入，否则设备「查看任务」错误显示「暂无任务」。
+    """
+    if (credential_id or 0) != 0:
+        return False
+    dev = (cred_device_name or "").strip()
+    if not dev:
+        return False
+    return local_engine_device_name(host_name) == dev
+
+
 def instance_name(engine_type: str, device_name: str, credential_id) -> str:
     """派生唯一引擎实例名：`{display_name}-{device_suffix}`；无 device_name 回退 `{display_name}-cred{credential_id}`。
 

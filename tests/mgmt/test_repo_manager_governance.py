@@ -148,7 +148,11 @@ def test_github_webhook_dispatch_via_provider_config(mock_vcs_http, fake_bot_sou
         (user_db, "get_global_bot_token_for", lambda p: f"bot-{p}-tok"),
         (pc, "get_platform_card",
          lambda p: SimpleNamespace(host="github.com", webhook_path="/webhook/github",
-                                   bot_username="gh-bot")),
+                                   bot_username="gh-bot", dialect="github",
+                                   webhook_dialect="github_web",
+                                   api_base="https://api.github.com",
+                                   token_storage_field="bot_github_token",
+                                   webhook_token_field="github_webhook_token")),
     ]
     saved = [(m, n, getattr(m, n)) for m, n, _ in monkey_targets]
     try:
@@ -159,9 +163,12 @@ def test_github_webhook_dispatch_via_provider_config(mock_vcs_http, fake_bot_sou
         for m, n, v in saved:
             setattr(m, n, v)
 
-    assert cfg["setup_webhook"] is rm.setup_github_webhook
-    assert cfg["find_webhook"] is rm.find_existing_github_webhook
-    assert cfg["remove_webhook"] is rm.remove_github_webhook
+    # D105-19：三件套按卡 webhook_dialect 分派（partial 绑定卡 api_base）
+    assert cfg["setup_webhook"].func is rm.setup_github_webhook
+    assert cfg["find_webhook"].func is rm.find_existing_github_webhook
+    assert cfg["remove_webhook"].func is rm.remove_github_webhook
+    assert cfg["find_webhook"].keywords == {"api_base": "https://api.github.com"}
+    assert cfg["setup_webhook"].keywords == {"api_base": "https://api.github.com"}
     assert cfg["webhook_url_suffix"] == "/webhook/github"
     assert cfg["db_token_field"] == "github_webhook_token"
     assert cfg["bot_username"] == "gh-bot"
@@ -177,6 +184,65 @@ def test_github_webhook_dispatch_via_provider_config(mock_vcs_http, fake_bot_sou
     method, url, token, _body = mock_vcs_http.calls[0]
     assert method == "GET" and url == "https://api.github.com/repos/own/repo/hooks"
     assert token == "gh-tok"
+
+
+# ────────────────────────── 行为锁 2b：新平台复用 webhook 家族（卡声明即分派） ──────────────────────────
+
+def test_new_platform_reuses_webhook_family_via_card(mock_vcs_http, fake_bot_sources):
+    """锁 2b（D105-19）：自定义平台（如 gitea.example.com，github_web 家族）零代码接入——
+    卡声明 webhook_dialect=github_web + 自己的 api_base，三件套即绑定到该平台 API 面；
+    webhooks 请求真打到自定义 base（不再回落 gitcode/github 硬编码）。"""
+    import src.domains.mgmt.user.db as user_db
+    import src.domains.runtime.vcs.platform_card as pc
+
+    monkey_targets = [
+        (user_db, "get_global_bot_token_for", lambda p: f"bot-{p}-tok"),
+        (rm, "resolve_bot_username", lambda p: "gitea-bot"),
+        (pc, "get_platform_card",
+         lambda p: SimpleNamespace(host="gitea.example.com", webhook_path="/webhook/gitea",
+                                   bot_username="gitea-bot", dialect="github",
+                                   webhook_dialect="github_web",
+                                   api_base="https://gitea.example.com/api/v1",
+                                   token_storage_field="",
+                                   webhook_token_field="")),
+    ]
+    saved = [(m, n, getattr(m, n)) for m, n, _ in monkey_targets]
+    try:
+        for m, n, v in monkey_targets:
+            setattr(m, n, v)
+        cfg = rm.get_hosting_provider_config("gitea")
+    finally:
+        for m, n, v in saved:
+            setattr(m, n, v)
+
+    assert cfg["find_webhook"].func is rm.find_existing_github_webhook
+    assert cfg["find_webhook"].keywords == {"api_base": "https://gitea.example.com/api/v1"}
+    assert cfg["webhook_url_suffix"] == "/webhook/gitea"
+
+    monkey_src = rm._github_req
+    try:
+        rm._github_req = mock_vcs_http.req
+        assert cfg["find_webhook"]("gitea-tok", "own", "repo", "https://x/hook") is None
+    finally:
+        rm._github_req = monkey_src
+    assert mock_vcs_http.calls, "gitea webhook 查找应发出 API 请求"
+    method, url, token, _body = mock_vcs_http.calls[-1]
+    assert method == "GET" and url == "https://gitea.example.com/api/v1/repos/own/repo/hooks"
+    assert token == "gitea-tok"
+
+
+# ────────────────────────── 行为锁 2c：webhook_dialect 未声明 fail-closed ──────────────────────────
+
+def test_webhook_dialect_undeclared_fail_closed(monkeypatch):
+    """锁 2c（D105-19）：卡存在但 webhook_dialect 未声明且不可派生 → 显式 ValueError
+    （含平台名与声明指引），不再静默回落 gitcode/github 函数打错平台。"""
+    import src.domains.runtime.vcs.platform_card as pc
+    monkeypatch.setattr(pc, "get_platform_card",
+                        lambda p: SimpleNamespace(host="x.example.com", dialect="gitlab",
+                                                  webhook_dialect="", api_base="https://x/api"))
+    with pytest.raises(ValueError) as ei:
+        rm.get_hosting_provider_config("xplatform")
+    assert "xplatform" in str(ei.value) and "webhook_dialect" in str(ei.value)
 
 
 # ────────────────────────── 行为锁 3：卡驱动 target host ──────────────────────────

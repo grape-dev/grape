@@ -569,6 +569,7 @@
     "github_token_help": "1. 前往 github.com → Settings<br>2. Developer settings → Personal access tokens<br>3. 生成新令牌（需 repo 权限）",
     "gitee_token_help": "1. 前往 gitee.com → 设置<br>2. 私人令牌 → 生成新令牌<br>3. 勾选 projects 权限",
     "gitcode_token_help": "1. 前往 gitcode.com → 设置<br>2. 私人令牌 → 新建令牌<br>3. 勾选项目读写权限",
+    "pat_token_help_generic": "1. 前往 {{host}} → 设置<br>2. 私人令牌 / Personal Access Tokens → 新建令牌<br>3. 勾选项目读写权限",
     "access_token": "访问令牌",
     "paste_token": "粘贴令牌",
     "how_to_get_token": "如何获取令牌？",

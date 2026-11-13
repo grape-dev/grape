@@ -119,18 +119,46 @@ class TestT32WebhookNoSignatureRejection:
     """T32: webhook 无签名无 token 头时拒绝"""
 
     def test_t32_01_no_signature_no_token_returns_401(self):
-        """T32-01: 无签名无 token 头 → 401（weekly-08 安全加固标准，R12.5 对齐）"""
+        """T32-01: 已托管仓 + 无签名无 token 头 → 401（weekly-08 安全加固标准，R12.5 对齐）。
+
+        2026-11-13（QA B3）裁定登记与同步：#699 四进程修复后 token 读链改走
+        GSB（webhook._expected_webhook_token），且「未托管 404」先于签名校验——
+        与 gitcode 端点既有语义一致（unmanaged 404 优先：不对未托管仓泄露
+        签名校验细节）。本守卫锁「已托管仓无凭据 → 401 拒绝、绝不进流水线」，
+        mock 目标随读链更新为 _expected_webhook_token。
+        """
         import asyncio
         from src.domains.runtime.routes.webhook import _process_github_webhook
 
         body = b'{"repository": {"full_name": "test/repo"}, "action": "opened"}'
         headers = {"X-GitHub-Event": "issues"}  # 无 X-Hub-Signature-256, 无 X-GitHub-Token
 
-        with patch("src.domains.mgmt.user.db.get_webhook_token_by_repo", return_value="webhook_secret"):
+        with patch("src.domains.runtime.routes.webhook._expected_webhook_token",
+                   return_value="webhook_secret"):
             result = asyncio.run(_process_github_webhook(body, headers))
             # 应该返回 401 JSONResponse
             assert hasattr(result, 'status_code'), f"expected JSONResponse, got {type(result)}"
             assert result.status_code == 401
+
+    def test_t32_02_unmanaged_repo_404_before_signature_check(self):
+        """T32-02（裁定登记，2026-11-13）：未托管仓 → 404 先于签名校验。
+
+        裁定口径：与 gitcode 端点既有语义一致（unmanaged 404 优先）——
+        未托管仓不进入签名/token 校验分支，不泄露校验细节；404 隐藏
+        仓库存在性属有意行为（外部扫描面得到的是统一 not-managed 404）。
+        """
+        import asyncio
+        from src.domains.runtime.routes.webhook import _process_github_webhook
+
+        body = b'{"repository": {"full_name": "test/repo"}, "action": "opened"}'
+        headers = {"X-GitHub-Event": "issues"}  # 无签名无 token，且未托管（token 空）
+
+        with patch("src.domains.runtime.routes.webhook._expected_webhook_token",
+                   return_value=""):
+            result = asyncio.run(_process_github_webhook(body, headers))
+            # 未托管分支返回 JSONResponse（处理成功路径才返回 dict）——
+            # getattr 取状态码避免对联合返回类型断言属性
+            assert getattr(result, "status_code", None) == 404
 
 class TestT36IssueUpdatedMarker:
     """T36: issue_updated description 编辑标记检测"""

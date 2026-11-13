@@ -128,9 +128,11 @@ body{margin:0;display:flex;align-items:center;justify-content:center;height:100v
       // 跳主站可能在弹窗里加载完整 SPA，重现原问题。
       // 统一显示静态提示页（友好文案），用户手动关闭后由父窗口轮询兜底。
       // 双语提示——此页面不加载 i18n.js（设计决策：保持中间页零依赖）。
-      var pName = (result.provider === 'github') ? 'GitHub' : 'GitCode';
+      // 平台名不在此页二分（本页零依赖，取不到平台卡目录）——标题用中性措辞，
+      // 具体平台由主窗口展示（避免 gitee/gitlab/华为账号被标成 GitCode/GitHub）。
+
       var MESSAGES = {
-        bindSuccess:    {title: pName + ' 绑定成功 / Bind Success',    msg: '授权结果已传回主窗口，您可以关闭此窗口。Authorization complete, you can close this window.'},
+        bindSuccess:    {title: '绑定成功 / Bind Success',    msg: '授权结果已传回主窗口，您可以关闭此窗口。Authorization complete, you can close this window.'},
         needTransfer:   {title: '需要确认 / Confirmation Needed',       msg: '请在主窗口中完成绑定转移确认。您可以关闭此窗口。Please complete the transfer confirmation in the main window.'},
         loginSuccess:   {title: '登录成功 / Login Success',             msg: '正在返回主窗口，您可以关闭此窗口。Returning to main window, you can close this window.'},
         deleteSuccess:  {title: '认证完成 / Verification Complete',     msg: '请在主窗口完成注销操作。您可以关闭此窗口。Please complete account deletion in the main window.'},

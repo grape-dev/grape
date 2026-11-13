@@ -265,8 +265,10 @@ def delete_signup_whitelist(item_id: int) -> bool:
 def list_login_whitelist() -> list[dict]:
     """List OAuth login whitelist entries.
 
-    D90-N5：渠道列动态化——SELECT * + PRAGMA 列清单组装（新渠道列自动出现，
-    不再写死双列）。
+    2026-11-12 行式化（weekly-11）：统一行形态条目——新模式行直接返回
+    (provider, username)；老列式行按 f"{provider}_username" 规律展开成条目
+    （legacy=true 标记，供前端展示与删除路由按 provider 清列）。
+    新增渠道零 DDL 零卡字段，条目自动出现。
     """
     try:
         with db_lock:
@@ -274,9 +276,11 @@ def list_login_whitelist() -> list[dict]:
             cols = [r[1] for r in c.execute("PRAGMA table_info(login_whitelist)").fetchall()]
             whitelist_cols = [col for col in cols
                               if col.endswith("_username") and col != "id"]
-            select_cols = ", ".join(["id"] + whitelist_cols + ["remark", "created_at"])
+            has_row_cols = {"provider", "username"} <= set(cols)
+            select_parts = ["id"] + (["provider", "username"] if has_row_cols else []) \
+                + whitelist_cols + ["remark", "created_at"]
             c.execute(
-                f"SELECT {select_cols} FROM login_whitelist ORDER BY created_at DESC"
+                f"SELECT {', '.join(select_parts)} FROM login_whitelist ORDER BY created_at DESC"
             )
             rows = c.fetchall()
     except Exception as e:
@@ -284,51 +288,43 @@ def list_login_whitelist() -> list[dict]:
         return []
     out = []
     for r in rows:
-        item = {"id": r[0], "remark": r[-2] or "", "created_at": r[-1] or ""}
-        for i, col in enumerate(whitelist_cols, start=1):
-            item[col] = r[i] or ""
-        out.append(item)
+        item_id, remark, created_at = r[0], r[-2] or "", r[-1] or ""
+        legacy_start = 1
+        prov, uname = "", ""
+        if has_row_cols:
+            prov, uname = r[1], r[2]
+            legacy_start = 3
+            # 新模式行
+            if prov:
+                out.append({"id": item_id, "provider": prov, "username": uname or "",
+                            "remark": remark, "created_at": created_at,
+                            "legacy": False})
+        # 老列式行展开（每列非空值一条）
+        for i, col in enumerate(whitelist_cols, start=legacy_start):
+            val = r[i] or ""
+            if val:
+                out.append({"id": item_id, "provider": col[:-len("_username")],
+                            "username": val, "remark": remark,
+                            "created_at": created_at, "legacy": True})
     return out
 
 
-# D43/S63：登录白名单平台列映射（存量两渠道；新渠道列归批次 1 DDL）
-def _whitelist_column_for(provider: str) -> str | None:
-    """D90-N5（2026-11-07）：白名单列名 provider 配置驱动（原写死双渠道映射）。
-
-    来源 = providers 渠道卡的 whitelist_column（gitee 卡=N5-1 新增
-    gitee_username）；config-only 渠道无声明时按 {provider}_username 派生
-    （与 _ensure_whitelist_columns 同形）。未注册渠道返回 None（拒绝）。
-    列物理存在由 _ensure_whitelist_columns 启动动态建列保证。
-    """
-    if not provider:
-        return None
-    try:
-        from src.domains.mgmt.auth.providers import get_provider
-        cfg = get_provider(provider) or {}
-        col = cfg.get("whitelist_column") or f"{provider}_username"
-        import re as _re
-        return col if _re.match(r"^[a-z_]+$", col) else None
-    except Exception:
-        return None
-
-
+# 2026-11-12 行式化（weekly-11）：_whitelist_column_for 退役——列名派生已内联到
+# 各调用点（is_user_allowed 老列兜底 / delete 清列），渠道卡 whitelist_column 字段删除。
 def add_login_whitelist(provider: str, username: str, remark: str = "") -> bool:
     """Add OAuth login whitelist entry.
 
-    provider: 'gitcode' or 'github'
+    2026-11-12 行式化（weekly-11）：只写新模式行 (provider, username)，
+    永不写老列（老列=存量只读兜底）。provider 合法性（渠道目录在册）由
+    路由层校验；幂等性由部分唯一索引 uq_login_whitelist_row 保证
+    （INSERT OR IGNORE + rowcount）。
     """
-    # D43/S63 + D90-N5：白名单列 provider 配置驱动（新渠道加卡即接入，零代码）
-    _col = _whitelist_column_for(provider or "")
-    if not _col:
-        log.warning(f"add_login_whitelist: provider {provider!r} has no whitelist column, rejected")
-        return False
-    col = _col
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
-                f"INSERT OR IGNORE INTO login_whitelist ({col}, remark) VALUES (?, ?)",
-                (username, remark),
+                "INSERT OR IGNORE INTO login_whitelist (provider, username, remark) VALUES (?, ?, ?)",
+                (provider, username, remark),
             )
             db.commit()
             return c.rowcount > 0
@@ -337,14 +333,59 @@ def add_login_whitelist(provider: str, username: str, remark: str = "") -> bool:
         return False
 
 
-def delete_login_whitelist(item_id: int) -> bool:
-    """Delete OAuth login whitelist entry."""
+def delete_login_whitelist(item_id: int, provider: str = "") -> bool:
+    """Delete OAuth login whitelist entry.
+
+    2026-11-12 行式化（weekly-11）：provider 缺省删整行；带 provider 时保
+    删除粒度——老列式行只清对应派生列 f"{provider}_username"（一人多平台
+    老行互不误伤），新模式行按 (id AND provider) 删。
+    """
+    import re as _re
+    if provider and not _re.match(r'^[a-z0-9_]+$', provider):
+        log.warning(f"delete_login_whitelist: invalid provider='{provider}'")
+        return False
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM login_whitelist WHERE id=?", (item_id,))
+            if not provider:
+                c.execute("DELETE FROM login_whitelist WHERE id=?", (item_id,))
+                db.commit()
+                return c.rowcount > 0
+            # 新模式行：按 (id, provider) 删
+            c.execute(
+                "DELETE FROM login_whitelist WHERE id=? AND provider=?",
+                (item_id, provider),
+            )
+            deleted = c.rowcount
+            # 老列式行：清对应派生列（列不存在捕获跳过）
+            col = f"{provider}_username"
+            cleared = 0
+            try:
+                c.execute(
+                    f"UPDATE login_whitelist SET {col}='' WHERE id=? AND {col}!=''",
+                    (item_id,),
+                )
+                cleared = c.rowcount
+            except Exception:
+                cleared = 0
             db.commit()
-            return c.rowcount > 0
+            if deleted or cleared:
+                # 行全空（无 provider、无任何老列值）则整行删——remark 残留不算
+                # 白名单语义数据，留着只会成不可见的僵尸行
+                cols = [r[1] for r in c.execute("PRAGMA table_info(login_whitelist)").fetchall()]
+                wl_cols = [col for col in cols if col.endswith("_username")]
+                sel = ", ".join(["provider"] + wl_cols)
+                row = c.execute(
+                    f"SELECT {sel} FROM login_whitelist WHERE id=?", (item_id,)
+                ).fetchone()
+                if row is not None:
+                    prov_v = row[0] or ""
+                    legacy_empty = all((v or "") == "" for v in row[1:])
+                    if not prov_v and legacy_empty:
+                        c.execute("DELETE FROM login_whitelist WHERE id=?", (item_id,))
+                        db.commit()
+                return True
+            return False
     except Exception as e:
         log.warning(f"Delete login whitelist failed: {e}")
         return False

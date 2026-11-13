@@ -148,6 +148,7 @@
     // 隐藏用户管理和白名单区域
     document.getElementById('usersView').style.display = 'none';
     document.getElementById('whitelistView').style.display = 'none';
+    _hideCardMgmtViews();
     _usersViewVisible = false;
     _whitelistViewVisible = false;
     _cfgViewVisible = true;
@@ -155,7 +156,7 @@
     document.querySelector('.mn > div:first-child').style.display = '';
     var cfgCt = document.querySelector('.mn .ct');
     if (cfgCt) cfgCt.style.display = '';
-    loadTokenHealth();
+    // D18：token health 卡已迁仓库平台页（showVcsPlatforms 加载）
     api('/config').then(function (d) {
       _lastConfigData = d;
       _renderCfg(d);
@@ -165,29 +166,13 @@
   function _renderCfg(d) {
       var c = d.config || {};
       var os = c.oauth_status || {};
-      applyToField('f_gitcode_api_token', c.gitcode_api_token_present, c.gitcode_api_token_tail);
-      applyToField('f_github_bot_token', c.github_bot_token_present, c.github_bot_token_tail);
-      // github_bot_username 非敏感，回显明文
-      $2('f_github_bot_username').value = c.github_bot_username || '';
-      $2('f_github_bot_username').placeholder = c.github_bot_username_present ? I18N.t('admin.config.configured') : 'GitHub bot username';
-      // client_id / redirect_uri 非敏感，回显明文；secret 占位提示
-      $2('f_gitcode_oauth_client_id').value = c.gitcode_oauth_client_id || '';
-      $2('f_gitcode_oauth_client_id').placeholder = c.gitcode_oauth_client_id_present ? I18N.t('admin.config.configured') : 'GitCode OAuth App Client ID';
-      $2('f_github_oauth_client_id').value = c.github_oauth_client_id || '';
-      $2('f_github_oauth_client_id').placeholder = c.github_oauth_client_id_present ? I18N.t('admin.config.configured') : 'GitHub OAuth App Client ID';
-      $2('f_gitcode_oauth_client_secret').value = '';
-      $2('f_gitcode_oauth_client_secret').placeholder = os.gitcode ? I18N.t('admin.config.configured_update') : 'GitCode OAuth App Client Secret';
-      $2('f_github_oauth_client_secret').value = '';
-      $2('f_github_oauth_client_secret').placeholder = os.github ? I18N.t('admin.config.configured_update') : 'GitHub OAuth App Client Secret';
-      $2('f_gitcode_oauth_redirect_uri').value = c.gitcode_oauth_redirect_uri || '';
-      $2('f_gitcode_oauth_redirect_uri').placeholder = I18N.t('admin.config.auto_infer');
-      $2('f_github_oauth_redirect_uri').value = c.github_oauth_redirect_uri || '';
-      $2('f_github_oauth_redirect_uri').placeholder = I18N.t('admin.config.auto_infer');
-      $2('f_bot_usernames').value = (c.bot_usernames || []).join(', ');
-      // webhook_url non-sensitive, show plaintext; gitcode_webhook_token sensitive, masked
+      // D13（2026-11-12 A 层收口）：GitCode/GitHub 双卡 6 字段回显删除——凭据与
+      // oauth 配置由"仓库平台"/"OAuth 登录渠道"菜单接管（同 meta key）。
+      // webhook token 归仓库平台详情（{provider}_webhook_token）。
+      // D18：f_bot_usernames 回显迁 showVcsPlatforms（仓库平台页）
+      // webhook_url 非敏感回显明文（D13：迁运行参数卡，部署级语义）
       $2('f_webhook_url').value = c.webhook_url || '';
-      $2('f_webhook_url').placeholder = c.webhook_url_present ? I18N.t('admin.config.configured') : 'GitCode webhook callback URL';
-      applyToField('f_gitcode_webhook_token', c.gitcode_webhook_token_present, c.gitcode_webhook_token_tail);
+      $2('f_webhook_url').placeholder = c.webhook_url_present ? I18N.t('admin.config.configured') : 'https://your-host/webhook/<provider>';
       // 运行参数 (Issue #470)：回显当前值 + 生效值标注（env 覆盖时管理台值不生效）
       $2('f_runtime_task_timeout').value = c.runtime_task_timeout || '';
       var _eff_t = c.runtime_task_timeout_effective;
@@ -215,30 +200,10 @@
   function saveConfig() {
     $2('saveBtn').disabled = true;
     var body = {};
-    var gitcodeTok = $2('f_gitcode_api_token').value.trim();
-    var githubTok = $2('f_github_bot_token').value.trim();
-    if (gitcodeTok) body.gitcode_api_token = gitcodeTok;
-    if (githubTok) body.github_bot_token = githubTok;
-    var githubBotUser = $2('f_github_bot_username').value.trim();
-    if (githubBotUser) body.github_bot_username = githubBotUser;
-    var gcdClientId = $2('f_gitcode_oauth_client_id').value.trim();
-    if (gcdClientId && gcdClientId.indexOf('●') < 0) body.gitcode_oauth_client_id = gcdClientId;
-    var gcdClientSec = $2('f_gitcode_oauth_client_secret').value.trim();
-    if (gcdClientSec) body.gitcode_oauth_client_secret = gcdClientSec;
-    var gcdRedirect = $2('f_gitcode_oauth_redirect_uri').value.trim();
-    if (gcdRedirect) body.gitcode_oauth_redirect_uri = gcdRedirect;
-    var ghClientId = $2('f_github_oauth_client_id').value.trim();
-    if (ghClientId && ghClientId.indexOf('●') < 0) body.github_oauth_client_id = ghClientId;
-    var ghClientSec = $2('f_github_oauth_client_secret').value.trim();
-    if (ghClientSec) body.github_oauth_client_secret = ghClientSec;
-    var ghRedirect = $2('f_github_oauth_redirect_uri').value.trim();
-    if (ghRedirect) body.github_oauth_redirect_uri = ghRedirect;
-    var us = $2('f_bot_usernames').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-    if (us.length) body.bot_usernames = us;
+    // D18（2026-11-12）：本页收敛为运行参数——webhook_url（部署级）+ DevSpace 规格；
+    // bot_usernames 兜底清单已按 D22 拍板退役（self-comment 名单纯卡派生）
     var webhookUrl = $2('f_webhook_url').value.trim();
     if (webhookUrl) body.webhook_url = webhookUrl;
-    var webhookToken = $2('f_gitcode_webhook_token').value.trim();
-    if (webhookToken) body.gitcode_webhook_token = webhookToken;
     // 运行参数 (Issue #470)：留空不提交（保持现值）；数值字段转 int
     var rtTimeout = parseInt($2('f_runtime_task_timeout').value, 10);
     if (rtTimeout > 0) body.runtime_task_timeout = rtTimeout;
@@ -284,7 +249,15 @@
   };
   var ERROR_TYPE_CLS = { auth: 'tag-d', network: 'tag-w', config: 'tag-w' };
 
-  function esc(s) { return window.escHtml(s); } // S2: 代理全局唯一 escHtml
+  function esc(s) {
+    // 2026-11-12 修复（实弹：admin 菜单 "window.escHtml is not a function"）：
+    // admin.html 只加载 i18n/admin.js，不加载定义 window.escHtml 的 app.js/auth.js，
+    // 全局代理必炸。兜底本地实现（口径同 auth.js Auth.escHtml：& < > " ' 全转义）。
+    if (typeof window.escHtml === 'function') return window.escHtml(s);
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+    });
+  }
 
   function renderTokenHealth(d) {
     _lastHealthData = d;
@@ -485,24 +458,340 @@
   function _rerenderLoginWhitelist() {
     var sel = document.getElementById('loginWlToggle');
     if (sel) sel.value = _lastLoginWhitelistEnabled ? '1' : '0';
-    var tbody = document.getElementById('loginWhitelistTbody');
-    if (!tbody) return;
-    tbody.innerHTML = '';
-    (_lastLoginWhitelist || []).forEach(function(w) {
-      var tr = document.createElement('tr');
-      tr.style.borderBottom = '1px solid var(--b,#e3e6ee)';
-      tr.innerHTML =
-        '<td style="padding:8px">' + w.id + '</td>' +
-        '<td style="padding:8px">' + esc(w.gitcode_username || '-') + '</td>' +
-        '<td style="padding:8px">' + esc(w.github_username || '-') + '</td>' +
-        '<td style="padding:8px">' + esc(w.remark || '-') + '</td>' +
-        '<td style="padding:8px;color:var(--t2)">' + (w.created_at || '-') + '</td>' +
-        '<td style="padding:8px"><button class="btn" style="padding:4px 10px;font-size:12px;color:var(--r,#dc2828)" onclick="deleteLoginWhitelist(' + w.id + ')">' + I18N.t('admin.login_whitelist.delete') + '</button></td>';
-      tbody.appendChild(tr);
+    _fillLoginWlProviderSelect();
+    _renderLoginWhitelistRows();
+    // 2026-11-12 fail-closed：开关开启 + 表空 = 拒绝所有 OAuth 登录 → 红条警示
+    var warn = document.getElementById('loginWlEmptyWarn');
+    if (warn) {
+      var emptyLock = _lastLoginWhitelistEnabled && ((_lastLoginWhitelist || []).length === 0);
+      warn.style.display = emptyLock ? '' : 'none';
+    }
+  }
+
+
+  // ════════════ D12 卡管理视图（OAuth 登录渠道 / 仓库平台，2026-11-12） ════════════
+  // 后端积木：GET/PUT /admin/auth-channels、GET/PUT /admin/vcs-platforms。
+  // 详情表单按卡 dict 键动态渲染——新渠道/新卡字段自动出现，零平台字面量。
+
+  function _hideCardMgmtViews() {
+    var a = document.getElementById('authChannelsView');
+    var v = document.getElementById('vcsPlatformsView');
+    if (a) a.style.display = 'none';
+    if (v) v.style.display = 'none';
+  }
+
+  function _switchCardMgmtView(viewId, ev) {
+    var navItems = document.querySelectorAll('.sb-nav a');
+    navItems.forEach(function(a){a.classList.remove('act')});
+    if (ev && ev.target) {
+      var navA = ev.target.closest('a');
+      if (navA) navA.classList.add('act');
+    }
+    document.querySelector('.mn > div:first-child').style.display = 'none';
+    var cfgCt = document.querySelector('.mn .ct');
+    if (cfgCt) cfgCt.style.display = 'none';
+    document.getElementById('usersView').style.display = 'none';
+    document.getElementById('whitelistView').style.display = 'none';
+    _hideCardMgmtViews();
+    document.getElementById(viewId).style.display = '';
+  }
+
+  var _lastAuthChannels = [];
+  var _lastVcsPlatforms = {};
+  var _editingAuthChannel = '';
+  var _editingVcsPlatform = '';
+
+  function showAuthChannels(ev) {
+    _switchCardMgmtView('authChannelsView', ev);
+    loadAuthChannels();
+  }
+
+  function showVcsPlatforms(ev) {
+    _switchCardMgmtView('vcsPlatformsView', ev);
+    loadVcsPlatforms();
+    // D22（2026-11-12 拍板）：兜底清单卡退役——self-comment 名单纯卡派生；
+    // D19：全局探活卡退役（状态由 loadVcsPlatforms 逐行渲染）
+  }
+
+  function loadAuthChannels() {
+    api('/auth-channels').then(function(d) {
+      _lastAuthChannels = d.providers || [];
+      var tbody = document.getElementById('authChannelsTbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+      _lastAuthChannels.forEach(function(p, i) {
+        var tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid var(--b,#e3e6ee)';
+        var st = p.configured
+          ? '<span style="color:#1a7f37">● ' + I18N.t('admin.channels.st_configured') + '</span>'
+          : '<span style="color:var(--r,#dc2828)">○ ' + I18N.t('admin.channels.st_unconfigured') + '</span>';
+        tr.innerHTML =
+          '<td style="padding:8px">' + (i + 1) + '</td>' +
+          '<td style="padding:8px">' + esc(p.name || p.provider) + '</td>' +
+          '<td style="padding:8px">' + esc(p.type || 'oauth2') + '</td>' +
+          '<td style="padding:8px;color:var(--t2)">' + esc(p.auth_url || '-') + '</td>' +
+          '<td style="padding:8px">' + st + '</td>' +
+          '<td style="padding:8px"><button class="btn" style="padding:4px 10px;font-size:12px" onclick="viewAuthChannel(\'' + p.provider + '\')">' + I18N.t('admin.channels.detail') + '</button></td>';
+        tbody.appendChild(tr);
+      });
+      document.getElementById('authChannelDetail').style.display = 'none';
+      document.querySelector('#authChannelsView .ct').style.display = '';
+    }).catch(function(e) { toast(I18N.t('admin.channels.load_failed') + ': ' + errMsg(e), false); });
+  }
+
+  function viewAuthChannel(provider) {
+    var p = null;
+    for (var i = 0; i < _lastAuthChannels.length; i++) {
+      if (_lastAuthChannels[i].provider === provider) { p = _lastAuthChannels[i]; break; }
+    }
+    if (!p) return;
+    _editingAuthChannel = provider;
+    document.getElementById('authChannelDetailTitle').textContent = p.name + '（' + provider + '）';
+    document.getElementById('ac_client_id').value = p.client_id || '';
+    document.getElementById('ac_client_secret').value = '';
+    document.getElementById('ac_client_secret').placeholder = p.client_secret_set ? I18N.t('admin.channels.secret_set') : '';
+    // 卡字段动态渲染（布尔→checkbox；其余→text input）
+    _renderCardFields('ac', p.card || {});
+    _switchCardTab('ac', 0);
+    document.querySelector('#authChannelsView .ct').style.display = 'none';
+    document.getElementById('authChannelDetail').style.display = '';
+  }
+
+  function backAuthChannels() {
+    document.getElementById('authChannelDetail').style.display = 'none';
+    document.querySelector('#authChannelsView .ct').style.display = '';
+  }
+
+  function saveAuthChannel() {
+    var card = _collectCardFields('ac');
+    var body = { providers: {} };
+    card['name'] = card['name'] || _editingAuthChannel;
+    card['client_id'] = document.getElementById('ac_client_id').value.trim();
+    var sec = document.getElementById('ac_client_secret').value;
+    if (sec) card['client_secret'] = sec;
+    body.providers[_editingAuthChannel] = card;
+    api('/auth-channels', {method: 'PUT', body: body}).then(function() {
+      toast(I18N.t('admin.channels.saved'), true);
+      loadAuthChannels();
+    }).catch(function(e) { toast(I18N.t('admin.channels.save_failed') + ': ' + errMsg(e), false); });
+  }
+
+  function loadVcsPlatforms() {
+    api('/vcs-platforms').then(function(d) {
+      _lastVcsPlatforms = d.cards || {};
+      // D19：整体探活时间挂列表标题（每卡健康状态在行内）
+      var ca = document.getElementById('vcsHealthCheckedAt');
+      if (ca) ca.textContent = d.bot_token_health_checked_at || '';
+      var tbody = document.getElementById('vcsPlatformsTbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+      Object.keys(_lastVcsPlatforms).forEach(function(provider, i) {
+        var c = _lastVcsPlatforms[provider];
+        var tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid var(--b,#e3e6ee)';
+        var bt = c.bot_token_configured
+          ? '<span style="color:#1a7f37">●</span>'
+          : '<span style="color:var(--r,#dc2828)">○</span>';
+        // D19：探活状态逐行展示（healthy=绿● / degraded=橙● / unhealthy=红● /
+        // 无数据=灰—；title 带错误摘要，整体 checked_at 由表头小字展示）
+        var h = c.bot_token_health || {};
+        var hs, ht = '';
+        if (h.healthy) { hs = '<span style="color:#1a7f37">●</span>'; }
+        else if (h.degraded) { hs = '<span style="color:#c77c1b">●</span>'; ht = (h.error || '') ; }
+        else if (h.unhealthy) { hs = '<span style="color:var(--r,#dc2828)">●</span>'; ht = (h.error || ''); }
+        else { hs = '<span style="color:var(--t3)">—</span>'; }
+        if (ht) hs = '<span title="' + esc(ht) + '">' + hs + '</span>';
+        tr.innerHTML =
+          '<td style="padding:8px">' + (i + 1) + '</td>' +
+          '<td style="padding:8px">' + esc(c.name || provider) + '</td>' +
+          '<td style="padding:8px;color:var(--t2)">' + esc(c.host || '-') + '</td>' +
+          '<td style="padding:8px">' + esc(c.dialect || '-') + '</td>' +
+          '<td style="padding:8px">' + esc(c.bot_username || '-') + '</td>' +
+          '<td style="padding:8px">' + bt + '</td>' +
+          '<td style="padding:8px">' + hs + '</td>' +
+          '<td style="padding:8px"><button class="btn" style="padding:4px 10px;font-size:12px" onclick="viewVcsPlatform(\'' + provider + '\')">' + I18N.t('admin.platforms.detail') + '</button></td>';
+        tbody.appendChild(tr);
+      });
+      document.getElementById('vcsPlatformDetail').style.display = 'none';
+      document.querySelector('#vcsPlatformsView .ct').style.display = '';
+    }).catch(function(e) { toast(I18N.t('admin.platforms.load_failed') + ': ' + errMsg(e), false); });
+  }
+
+  function viewVcsPlatform(provider) {
+    var c = _lastVcsPlatforms[provider];
+    if (!c) return;
+    _editingVcsPlatform = provider;
+    document.getElementById('vcsPlatformDetailTitle').textContent = (c.name || provider) + '（' + provider + '）';
+    var bt = document.getElementById('vp_bot_token');
+    bt.value = '';
+    bt.placeholder = c.bot_token_configured ? I18N.t('admin.platforms.bot_set') : '';
+    // D13/S20：webhook token 行——仅卡有 webhook 存储语义（webhook_token_supported）时展示
+    var wtRow = document.getElementById('vp_webhook_row');
+    var wtHint = document.getElementById('vp_webhook_hint');
+    var wt = document.getElementById('vp_webhook_token');
+    if (wt) {
+      wt.value = '';
+      wt.placeholder = c.webhook_token_configured ? I18N.t('admin.platforms.bot_set') : '';
+    }
+    if (wtRow) wtRow.style.display = c.webhook_token_supported ? '' : 'none';
+    if (wtHint) wtHint.style.display = c.webhook_token_supported ? '' : 'none';
+    // 卡字段动态渲染（排除只读标记位——凭据态/健康态不进表单）
+    var fields = {};
+    Object.keys(c).forEach(function(k) {
+      if (['bot_token_configured', 'webhook_token_configured',
+           'webhook_token_supported', 'bot_token_health'].indexOf(k) < 0) fields[k] = c[k];
     });
+    _renderCardFields('vp', fields);
+    _switchCardTab('vp', 0);
+    document.querySelector('#vcsPlatformsView .ct').style.display = 'none';
+    document.getElementById('vcsPlatformDetail').style.display = '';
+  }
+
+  function backVcsPlatforms() {
+    document.getElementById('vcsPlatformDetail').style.display = 'none';
+    document.querySelector('#vcsPlatformsView .ct').style.display = '';
+  }
+
+  function saveVcsPlatform() {
+    var card = _collectCardFields('vp');
+    var body = { cards: {} };
+    body.cards[_editingVcsPlatform] = card;
+    var tok = document.getElementById('vp_bot_token').value;
+    if (tok) { body.bot_tokens = {}; body.bot_tokens[_editingVcsPlatform] = tok; }
+    // D13/S20：webhook token 凭据通道（{provider}_webhook_token）
+    var wtok = (document.getElementById('vp_webhook_token') || {}).value || '';
+    if (wtok.trim()) { body.webhook_tokens = {}; body.webhook_tokens[_editingVcsPlatform] = wtok.trim(); }
+    api('/vcs-platforms', {method: 'PUT', body: body}).then(function() {
+      toast(I18N.t('admin.platforms.saved'), true);
+      loadVcsPlatforms();
+    }).catch(function(e) { toast(I18N.t('admin.platforms.save_failed') + ': ' + errMsg(e), false); });
+  }
+
+  // 卡字段动态渲染/收集（D12：字段由卡驱动，布尔→checkbox，其余→input）
+  // 卡字段动态渲染/收集（D12 卡驱动；D21 iOS 分段 Tab 分组，2026-11-12 拍板）
+  var _CARD_TAB_FIELDS = {
+    basic: ['name', 'type', 'dialect', 'host', 'webhook_path', 'event_header',
+            'api_base', 'api_auth', 'auth_url', 'token_url', 'user_url',
+            'brand_color', 'pat_create_url', 'download_base', 'user_images_base',
+            'token_env', 'legacy_token_symbol', 'clone_auth', 'webhook_verify',
+            'bot_username', 'redirect_uri'],
+    capability: ['scope', 'id_field', 'login_field', 'name_field', 'email_field',
+                 'accept_header', 'pkce_enabled', 'issue_search',
+                 'issue_write_form', 'branch_create_form', 'pr_comment_endpoint',
+                 'pr_labels_via_issues', 'git_tree_family'],
+    storage: ['token_storage_field', 'webhook_token_field', 'session_token_field',
+              'global_bot_meta_key', 'global_bot_status_meta_key']
+  };
+  function _cardFieldTab(k) {
+    if (_CARD_TAB_FIELDS.basic.indexOf(k) >= 0) return 1;
+    if (_CARD_TAB_FIELDS.capability.indexOf(k) >= 0) return 2;
+    if (_CARD_TAB_FIELDS.storage.indexOf(k) >= 0) return 3;
+    return 4;
+  }
+  // 分段控件切换（prefix='vp'|'ac'，idx=0 凭据..4 其他）
+  function _switchCardTab(prefix, idx) {
+    for (var i = 0; i < 5; i++) {
+      var tab = document.getElementById(prefix + 'Tab' + i);
+      if (tab) tab.style.display = (i === idx) ? '' : 'none';
+    }
+    var seg = document.querySelectorAll('#' + prefix + 'Tabs .seg-tab');
+    seg.forEach(function(t, j) { t.classList.toggle('act', j === idx); });
+  }
+  // 常用键白名单（2026-11-13 拍板：53 个卡字段全暴露对管理员不可用——Apple 式
+  // 两级曝光）：常用=日常会改的键直接渲染；其余进"高级"折叠区默认收起
+  // （details/summary 原生折叠，零 JS 状态管理），改错能力位的面收窄。
+  var _COMMON_CARD_KEYS = {
+    // 渠道卡（ac）：管理员日常只动凭据与展示
+    name: 1, auth_url: 1, token_url: 1, user_url: 1, scope: 1,
+    redirect_uri: 1, pkce_enabled: 1, brand_color: 1,
+    // 平台卡（vp）：bot 身份与端点基址
+    host: 1, api_base: 1, bot_username: 1, webhook_path: 1,
+    pat_create_url: 1, download_base: 1
+  };
+  function _renderCardFields(prefix, card) {
+    var groups = {1: [], 2: [], 3: [], 4: []};
+    Object.keys(card).forEach(function(k) {
+      var v = card[k];
+      if (v !== null && typeof v === 'object') return;  // event_map/fields 等映射段不进表单
+      var g = _cardFieldTab(k);
+      // 高级折叠：非常用键且非"其他"桶——同 tab 内拆 common/advanced 两段
+      groups[g].push([k, v, _COMMON_CARD_KEYS[k] ? 0 : 1]);
+    });
+    [1, 2, 3, 4].forEach(function(n) {
+      var el = document.getElementById(prefix + 'CardF' + n);
+      if (!el) return;
+      el.innerHTML = '';
+      var common = document.createElement('div');
+      var adv = document.createElement('details');
+      adv.className = 'adv-fold';
+      adv.innerHTML = '<summary data-i18n="admin.adv_fields">' +
+        (I18N.t('admin.adv_fields') !== 'admin.adv_fields' ? I18N.t('admin.adv_fields') : '高级字段') + '</summary>';
+      var advBody = document.createElement('div');
+      advBody.className = 'adv-body';
+      adv.appendChild(advBody);
+      groups[n].forEach(function(kv) {
+        var k = kv[0], v = kv[1], isAdv = kv[2];
+        var row = document.createElement('div');
+        row.className = 'f-row';
+        // 字段级配置指导（2026-11-13）：每键配 i18n hint（admin.field_docs.<key>），
+        // 有词条渲染输入框下方小字——53 键的语义内置表单，不靠用户猜。
+        var _docKey = 'admin.field_docs.' + k;
+        var _doc = I18N.t(_docKey);
+        if (_doc === _docKey) _doc = '';  // 无词条不渲染
+        if (typeof v === 'boolean') {
+          row.innerHTML =
+            '<label>' + esc(k) + '</label>' +
+            '<input type="checkbox" data-cardfield="' + esc(k) + '" data-cardtype="bool"' + (v ? ' checked' : '') + '>' +
+            (_doc ? '<div class="f-doc">' + esc(_doc) + '</div>' : '');
+        } else if (typeof v === 'number') {
+          row.innerHTML =
+            '<label>' + esc(k) + '</label>' +
+            '<input type="number" class="ipt" style="background:#fff;color:#1d1d1f" data-cardfield="' + esc(k) + '" data-cardtype="num" value="' + esc(String(v)) + '">' +
+            (_doc ? '<div class="f-doc">' + esc(_doc) + '</div>' : '');
+        } else {
+          row.innerHTML =
+            '<label>' + esc(k) + '</label>' +
+            '<input type="text" class="ipt" style="background:#fff;color:#1d1d1f" data-cardfield="' + esc(k) + '" data-cardtype="text" value="' + esc(String(v == null ? '' : v)) + '">' +
+            (_doc ? '<div class="f-doc">' + esc(_doc) + '</div>' : '');
+        }
+        (isAdv ? advBody : common).appendChild(row);
+      });
+      el.appendChild(common);
+      if (advBody.childElementCount > 0) el.appendChild(adv);
+    });
+    // "其他"tab 是分组兜底桶（未匹配字段零丢失保障）——空时整 tab 隐藏
+    // （用户拍板 2026-11-12：空 tab 不展示，无"无未分组字段"占位）
+    var otherTab = document.getElementById(prefix + 'Tab4');
+    var otherSeg = document.querySelectorAll('#' + prefix + 'Tabs .seg-tab')[4];
+    var hasOther = groups[4].length > 0;
+    if (otherTab) otherTab.style.display = hasOther ? '' : 'none';
+    if (otherSeg) otherSeg.style.display = hasOther ? '' : 'none';
+  }
+
+  function _collectCardFields(prefix) {
+    var out = {};
+    var els = document.querySelectorAll(
+      '#' + prefix + 'CardF1 [data-cardfield], #' + prefix + 'CardF2 [data-cardfield], ' +
+      '#' + prefix + 'CardF3 [data-cardfield], #' + prefix + 'CardF4 [data-cardfield]');
+    els.forEach(function(inp) {
+      var t = inp.getAttribute('data-cardtype');
+      if (t === 'bool') out[inp.getAttribute('data-cardfield')] = inp.checked;
+      else if (t === 'num') out[inp.getAttribute('data-cardfield')] = Number(inp.value || 0);
+      else out[inp.getAttribute('data-cardfield')] = inp.value;
+    });
+    return out;
   }
 
   window._toggleAdminLang = _toggleAdminLang;
+  window._switchCardTab = _switchCardTab;
+  window.showAuthChannels = showAuthChannels;
+  window.showVcsPlatforms = showVcsPlatforms;
+  window.viewAuthChannel = viewAuthChannel;
+  window.backAuthChannels = backAuthChannels;
+  window.saveAuthChannel = saveAuthChannel;
+  window.viewVcsPlatform = viewVcsPlatform;
+  window.backVcsPlatforms = backVcsPlatforms;
+  window.saveVcsPlatform = saveVcsPlatform;
   window._setAdminLang = _setAdminLang;
 
   window.AdminApp = { login: login, changePwd: changePwd, closePwdModal: closePwdModal, openPwdModal: openPwdModal,
@@ -532,6 +821,7 @@
   var _lastSignupWhitelist = null;
   var _lastLoginWhitelist = null;
   var _lastLoginWhitelistEnabled = false;
+  var _lastLoginWlProviders = [];  // 渠道目录元数据（GET /whitelist providers）
   var _usersViewVisible = false;
   var _whitelistViewVisible = false;
   var _cfgViewVisible = false;    // config page visible
@@ -576,6 +866,7 @@
     if (cfgCt) cfgCt.style.display = 'none';
     document.getElementById('usersView').style.display = '';
     document.getElementById('whitelistView').style.display = 'none';
+    _hideCardMgmtViews();
     _cfgViewVisible = false;
     _whitelistViewVisible = false;
     _usersViewVisible = true;
@@ -691,6 +982,7 @@
     if (cfgCt) cfgCt.style.display = 'none';
     document.getElementById('usersView').style.display = 'none';
     document.getElementById('whitelistView').style.display = '';
+    _hideCardMgmtViews();
     _cfgViewVisible = false;
     _usersViewVisible = false;
     _whitelistViewVisible = true;
@@ -756,31 +1048,51 @@
 
   // ====== OAuth 登录白名单 (Issue #332) ======
   function loadLoginWhitelist() {
-    // Single call: GET /whitelist returns {whitelist, enabled}
+    // 2026-11-12 行式化：GET /whitelist 返回 {whitelist, enabled, providers}——
+    // whitelist=行形态条目 {id, provider, username, remark, created_at, legacy}
+    // providers=渠道目录元数据（provider/name），下拉动态填充，零字面量平台 option
     api('/whitelist').then(function(d) {
       _lastLoginWhitelist = d.whitelist || [];
       _lastLoginWhitelistEnabled = !!(d && d.enabled);
+      _lastLoginWlProviders = d.providers || [];
       _whitelistViewVisible = true;
-      var sel = document.getElementById('loginWlToggle');
-      if (sel) sel.value = _lastLoginWhitelistEnabled ? '1' : '0';
-      var tbody = document.getElementById('loginWhitelistTbody');
-      if (!tbody) return;
-      tbody.innerHTML = '';
-      (_lastLoginWhitelist).forEach(function(w) {
-        var tr = document.createElement('tr');
-        tr.style.borderBottom = '1px solid var(--b,#e3e6ee)';
-        var gitcodeUser = esc(w.gitcode_username || '-');
-        var githubUser = esc(w.github_username || '-');
-        tr.innerHTML =
-          '<td style="padding:8px">' + w.id + '</td>' +
-          '<td style="padding:8px">' + gitcodeUser + '</td>' +
-          '<td style="padding:8px">' + githubUser + '</td>' +
-          '<td style="padding:8px">' + esc(w.remark || '-') + '</td>' +
-          '<td style="padding:8px;color:var(--t2)">' + (w.created_at || '-') + '</td>' +
-          '<td style="padding:8px"><button class="btn" style="padding:4px 10px;font-size:12px;color:var(--r,#dc2828)" onclick="deleteLoginWhitelist(' + w.id + ')">' + I18N.t('admin.login_whitelist.delete') + '</button></td>';
-        tbody.appendChild(tr);
-      });
+      _rerenderLoginWhitelist();
     }).catch(function(e) { toast(I18N.t('admin.login_whitelist.load_failed') + ': ' + errMsg(e), false); });
+  }
+
+  function _fillLoginWlProviderSelect() {
+    var sel = document.getElementById('lw_provider');
+    if (!sel) return;
+    var prev = sel.value;
+    sel.innerHTML = '';
+    (_lastLoginWlProviders || []).forEach(function(p) {
+      var opt = document.createElement('option');
+      opt.value = p.provider;
+      opt.textContent = p.name || p.provider;
+      sel.appendChild(opt);
+    });
+    if (prev) sel.value = prev;
+  }
+
+  function _renderLoginWhitelistRows() {
+    var tbody = document.getElementById('loginWhitelistTbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    (_lastLoginWhitelist || []).forEach(function(w) {
+      var tr = document.createElement('tr');
+      tr.style.borderBottom = '1px solid var(--b,#e3e6ee)';
+      var legacyTag = w.legacy ? ' <span class="tag" data-i18n="admin.login_whitelist.legacy_tag" style="font-size:11px">存量列式</span>' : '';
+      // legacy 条目带 provider 定位删除（只清对应平台列，一人多平台老行互不误伤）
+      var delArg = w.legacy ? (w.id + ", '" + w.provider + "'") : ('' + w.id);
+      tr.innerHTML =
+        '<td style="padding:8px">' + w.id + '</td>' +
+        '<td style="padding:8px">' + esc(w.provider || '-') + '</td>' +
+        '<td style="padding:8px">' + esc(w.username || '-') + legacyTag + '</td>' +
+        '<td style="padding:8px">' + esc(w.remark || '-') + '</td>' +
+        '<td style="padding:8px;color:var(--t2)">' + (w.created_at || '-') + '</td>' +
+        '<td style="padding:8px"><button class="btn" style="padding:4px 10px;font-size:12px;color:var(--r,#dc2828)" onclick="deleteLoginWhitelist(' + delArg + ')">' + I18N.t('admin.login_whitelist.delete') + '</button></td>';
+      tbody.appendChild(tr);
+    });
   }
 
   function addLoginWhitelist() {
@@ -797,8 +1109,9 @@
     }).catch(function(e) { toast(I18N.t('admin.login_whitelist.add_failed') + ': ' + errMsg(e), false); });
   }
 
-  function deleteLoginWhitelist(id) {
-    api('/whitelist/' + id, {method: 'DELETE'}).then(function() {
+  function deleteLoginWhitelist(id, provider) {
+    var url = '/whitelist/' + id + (provider ? ('?provider=' + encodeURIComponent(provider)) : '');
+    api(url, {method: 'DELETE'}).then(function() {
       toast(I18N.t('admin.login_whitelist.deleted'), true);
       loadLoginWhitelist();
     }).catch(function(e) { toast(I18N.t('admin.login_whitelist.delete_failed') + ': ' + errMsg(e), false); });

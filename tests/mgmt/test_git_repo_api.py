@@ -45,6 +45,14 @@ def _token(monkeypatch):
     monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: BOT)
     monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", lambda *a, **k: BOT)
 
+# S114 真库缝复核（2026-11-13）：squash 按「基线为准」落形态后，git-credential
+# 路由的 gitcode/github 分支走 db 包装函数（get_gitcode_token/get_github_token，
+# 内部再委托 TokenResolver 统一读链）——上方 autouse _token 的 mock 恰在链上。
+# TestRepoCredentialProviderByPath 的真库缝用例须在用例内恢复真实实现（模块
+# 导入期先捕获，早于 autouse 替换）。
+from src.domains.mgmt.user.db import get_gitcode_token as _REAL_GC_TOKEN
+from src.domains.mgmt.user.db import get_github_token as _REAL_GH_TOKEN
+
 def _override_user(repo_key: str):
     """设置会话 token 用户（依赖覆盖，auth_type=session_token）。"""
     app.dependency_overrides[get_current_user_or_api_key] = lambda: {
@@ -671,13 +679,15 @@ class TestRepoCredentialProviderByPath:
     目标仓宿主解析，而非把 ghp_ token 发给 gitcode.com。
     """
 
-    def test_cross_platform_path_prefix_gitcode(self, _client):
+    def test_cross_platform_path_prefix_gitcode(self, _client, monkeypatch):
         """主仓 github: 会话 + 请求 gitcode: 前缀目标仓 → provider=gitcode、走 GitCode 解析链。
 
-        S114 迁移：旧 mock get_gitcode_token 不在 TokenResolver 链上（真库缝，
-        对齐域2 empty_repo 先例）——linked/hello 播 gc_seed_tok、github:linked/hello
-        播 gh_seed_tok（不同值），返回值即证明 repo_key 单前缀精确匹配。
+        S114 真库缝：linked/hello 播 gc_seed_tok、github:linked/hello 播 gh_seed_tok
+        （不同值），返回值即证明 repo_key 单前缀精确匹配。autouse _token 的 mock
+        在链上（包装函数形态），用例内先恢复真实实现再走真库。
         """
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", _REAL_GC_TOKEN)
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", _REAL_GH_TOKEN)
         _override_user(f"github:{OWNER}/{REPO}")
         r = _client.get("/api/repos/gitcode:linked/hello/git-credential")
         assert r.status_code == 200
@@ -690,14 +700,10 @@ class TestRepoCredentialProviderByPath:
 
     def test_cross_platform_path_prefix_github(self, _client, monkeypatch):
         """主仓 gitcode: 会话 + 请求 github: 前缀目标仓 → provider=github（反向组合）。"""
-        seen = {}
-        monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
-
-        def _gh(*a, **k):
-            seen["repo_key"] = k.get("repo_key")
-            return "gh_tok"
-
-        monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", _gh)
+        # S114 真库缝：恢复真实实现（覆盖 autouse mock 与本模块历史 mock 残留），
+        # 断言基于真库播值 gh_seed_tok。
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", _REAL_GC_TOKEN)
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", _REAL_GH_TOKEN)
         _override_user(f"gitcode:{OWNER}/{REPO}")
         r = _client.get("/api/repos/github:linked/hello/git-credential")
         assert r.status_code == 200
@@ -710,8 +716,9 @@ class TestRepoCredentialProviderByPath:
 
     def test_no_prefix_falls_back_to_session_repo(self, _client, monkeypatch):
         """路径无前缀 → 回退会话主仓 provider（向后兼容，同平台现状不回归）。"""
-        monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
-        monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", lambda *a, **k: "gh_tok")
+        # S114 真库缝：恢复真实实现，断言基于真库播值（github:o/hello → BOT）。
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", _REAL_GC_TOKEN)
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", _REAL_GH_TOKEN)
         _override_user(f"github:{OWNER}/{REPO}")
         r = _client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
         assert r.status_code == 200
@@ -878,7 +885,9 @@ def test_milestones_state_normalized(monkeypatch, _client):
     items = r.json()
     assert [i["state"] for i in items] == ["open", "closed", "open"]
 
-    r = _client.post(f"{base}/milestones", json={"title": "v9"})
+    r = _client.post(f"{base}/milestones", json={"title": "v9", "due_on": "2026-12-31"})
+    # B4 契约（2026-11-11 三平台实弹）：gitcode/gitee 上游 milestones create
+    # 强制 due_on——缺省即本地可读 400 拦截（_milestone_due_on），非回归。
     assert r.status_code == 200
     assert r.json()["state"] == "open"
 

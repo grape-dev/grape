@@ -67,7 +67,9 @@ def install_request_middleware(app: FastAPI) -> None:
         if not _repo:
             _qp = request.query_params.get("repo", "")
             if _qp:
-                _repo = f"gitcode:{_qp}" if not _qp.startswith("gitcode:") else _qp
+                # 已有 provider 前缀（github:o/r 等任意在册平台）原样保留；裸键才补默认前缀
+                from src.kernel.repo_key import to_repo_key
+                _repo = _qp if ":" in _qp else to_repo_key(_qp)
         token_repo = repo_var.set(_repo)
 
         # 从 Authorization header 提取 user_id

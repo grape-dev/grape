@@ -56,6 +56,37 @@ ZOMBIE_YOUNG_GRACE_SECONDS = int(os.environ.get("ZOMBIE_YOUNG_GRACE_SECONDS", "1
 # agent_type 固定为 'issue'，不再由用户选择
 _FIXED_AGENT_TYPE = "issue"
 
+
+def _autopilot_issue_ref(task_id) -> str:
+    """P8-consistency：autopilot 任务（agent_type='issue'）的 issue 统计回链键。
+
+    autopilot 巡检任务没有真实 issue 关联，但 agent_tasks.issue_id 是 dashboard issue
+    统计/时间线的分组键（src/domains/insight/routes/dashboard.py:565 按 issue_id IS NOT
+    NULL 回链分组）——创建入队时不落 issue_id，失败任务就整体丢出 issue 统计，导致三页面
+    数字对不上。本函数在任务创建时即产出确定性合成键（同一 autopilot 任务每次触发相同），
+    使直接模式与远端入队模式（含失败路径）的 agent_tasks 行都带回链。
+
+    为什么必须无数字：issue_id 的下游解析链
+    - engine/service.py `_issue_num`（re 搜任意数字）→ collect_knowledge_files 按真实
+      issue 号过滤成员知识；
+    - engine/agent.py / repogit.py worktree 分支派生。
+    含数字的合成 id（如 autopilot-12）会被 `_issue_num` 误挂到真实 issue #12。纯字母键使
+    `_issue_num`→0、get_issue_scene 查不到场景行（回退 default），worktree 门
+    （issue 型非 _GIT_AGENTS）天然短路——合成键只作为统计分组键生效，不驱动任何 issue
+    号解析行为。串行锁继续走 issue_session_id（合成会话 autopilot-<id>），与本键无关。
+    """
+    try:
+        n = int(task_id or 0)
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return ""
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(ord("a") + r) + s
+    return f"autopilot-{s}"
+
 _FINDINGS_PATTERN = re.compile(
     r'<!--\s*autopilot-findings\s*(.*?)\s*-->',
     re.DOTALL
@@ -434,10 +465,12 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     from src.domains.runtime.pipeline.event_pipeline import _create_direct_task
 
     # 创建 agent_tasks 记录（用 exec_id 作为 event_seq，skip_event_config=True 不写 events 表）
+    # P8-consistency：issue 回链键创建即落（无数字合成键，失败路径不丢统计），
+    # 串行锁/工作目录/知识过滤均不受影响（见 _autopilot_issue_ref）。
     task_id = _create_direct_task(
         repo_key, exec_id, agent_type, backend, skill_name,
         "", engine_id, {"repo_key": repo_key, "issue_id": "", "payload": {}},
-        issue_id="", skill_id=0, skip_event_config=True,
+        issue_id=_autopilot_issue_ref(task.get("id")), skill_id=0, skip_event_config=True,
     )
     if not task_id:
         log.warning(f"Autopilot exec {exec_id}: _create_direct_task failed")
@@ -612,8 +645,11 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             user_gitcode_token="",
             env_extra=env_extra,
             event_seq=exec_id,
-            issue_id="",  # 保持空：issue_id 会驱动场景/成员知识/工作目录按 issue 号解析，
-                          # 合成 id 含数字会被 _issue_num 误挂到真实 issue；串行锁只看 issue_session_id
+            issue_id=_autopilot_issue_ref(task.get("id")),
+            # P8-consistency：issue 回链键创建即落（无数字合成键 autopilot-<letters>）。
+            # 旧注释顾虑已由键的形态消除：纯字母键使 service._issue_num→0、
+            # get_issue_scene 查不到行（回退 default），不会按 issue 号解析场景/成员知识/
+            # 工作目录，也不会误挂真实 issue；串行锁只看 issue_session_id（不变）。
             repo_key=repo_key,
             agent_type=agent_type,
             skill=skill_name,

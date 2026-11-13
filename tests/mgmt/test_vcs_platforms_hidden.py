@@ -39,8 +39,13 @@ def test_default_platforms_always_visible(monkeypatch):
     assert "gitcode" in providers and "github" in providers, "默认平台被过滤"
 
 
-def test_non_default_platform_visible_only_when_oauth_configured(monkeypatch):
-    """非默认平台（gitee/gitlab）：OAuth 已配置才显示。"""
+def test_non_default_platform_visible_without_oauth(monkeypatch):
+    """非默认平台（gitee/gitlab）：可见性唯一权威 = vcs_platforms_hidden。
+
+    weekly-11 P1-8 口径（2026-11-12）：撤掉「非默认平台须配 OAuth 才显示」的
+    隐式白名单——纯 PAT 部署（不配 OAuth）也必须能看到平台卡、才能绑定 PAT。
+    旧口径（2026-11-08 裁定）想藏未启用平台，现由显式 vcs_platforms_hidden 承担。
+    """
     def fake_meta(k):
         if k == "vcs_platforms_hidden":
             return "[]"
@@ -50,15 +55,15 @@ def test_non_default_platform_visible_only_when_oauth_configured(monkeypatch):
     monkeypatch.setattr(user_db, "get_meta_value", fake_meta)
     out = settings_routes.list_vcs_platforms_public()
     providers = [p["provider"] for p in out["platforms"]]
-    assert "gitee" in providers, "OAuth 已配置的非默认平台应显示"
-    assert "gitlab" not in providers, "OAuth 未配置的非默认平台不应显示"
+    assert "gitee" in providers and "gitlab" in providers, "非隐藏平台应全部可见（含未配 OAuth 的）"
 
 
 def test_empty_hidden_list_keeps_all(monkeypatch):
     monkeypatch.setattr(user_db, "get_meta_value", lambda k: "" )
     out = settings_routes.list_vcs_platforms_public()
     providers = [p["provider"] for p in out["platforms"]]
-    assert providers == ["gitcode", "github"], "未配置 OAuth 的非默认平台应隐藏（可见性规则）"
+    assert set(providers) == {"gitcode", "gitee", "github", "gitlab"}, \
+        "隐藏名单为空 = 全部平台卡可见（可见性唯一权威）"
 
 
 def test_hidden_list_tolerates_bad_json(monkeypatch):

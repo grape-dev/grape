@@ -545,6 +545,14 @@ def _latest_pr_number(repo_key: str, issue_number) -> int:
     return 0
 
 
+# PR/MR 网页路径段：provider 模块能力位 PR_WEB_PATH（gitcode=merge_requests /
+# gitee=pulls / github=pull / gitlab=merge_requests），业务侧零平台判断。
+def _pr_web_path(provider: str) -> str:
+    from src.domains.runtime.vcs.providers import _MODULES
+    _m = _MODULES.get(provider or "")
+    return getattr(_m, "PR_WEB_PATH", "pull") or "pull"
+
+
 def _pr_link(repo_key: str, pr_number: int) -> str:
     if not pr_number:
         return ""
@@ -553,11 +561,17 @@ def _pr_link(repo_key: str, pr_number: int) -> str:
     _provider, _owner, _repo = parse_repo_key(repo_key)
     if not _owner or not _repo:
         return ""
-    # Issue #1739：GitHub 为 /pull/{n}，GitCode（及 GitLab 语义 provider）为
-    # /merge_requests/{n}；统一拼 /pull 会让 GitCode 关联 PR 链接 404。
-    if _provider == "github":
-        return f"https://github.com/{_owner}/{_repo}/pull/{pr_number}"
-    return f"https://gitcode.com/{_owner}/{_repo}/merge_requests/{pr_number}"
+    # Issue #1739：host 与 PR 路径均按 repo_key 平台派生（此前非 github 一律拼
+    # gitcode.com/merge_requests —— gitee/gitlab 的 host+路径双错）。
+    # 平台卡 host 优先（无卡回退 repo_key 的存量映射），PR 路径见 _PR_WEB_PATH。
+    try:
+        from src.domains.runtime.vcs.platform_card import host_for_repo_key
+        _host = host_for_repo_key(repo_key)
+    except Exception:
+        _host = ""
+    if not _host:
+        return ""
+    return f"https://{_host}/{_owner}/{_repo}/{_pr_web_path(_provider)}/{pr_number}"
 
 
 def _annotation_token(seq: int, status: str, reason: str) -> str:
@@ -628,10 +642,9 @@ def _post_issue_comment(repo_key: str, issue_number: int, body: str,
         _provider, _owner, _repo = parse_repo_key(repo_key)
         if not _owner or not _repo:
             return "skipped"
-        if _provider == "github":
-            from src.domains.mgmt.user.db import get_github_token as _get_token
-        else:
-            from src.domains.mgmt.user.db import get_repo_bot_token as _get_token
+        # 2026-11-13 if/else 收口：统一入口按 repo_key 前缀派发（github=
+        # 策略链+D32-补丁回落，其余=TokenResolver 统一链），零平台分叉。
+        from src.domains.mgmt.user.db import get_repo_token_for as _get_token
         _token = _get_token(repo_key=repo_key) or ""
         if not _token:
             log.info(f"qa gate: no bot token for {repo_key}, skip annotation")

@@ -55,6 +55,21 @@ _GUARD_FILES = [
 _GUARD_USER_DB_FUNCS = ["_path_b_prefix_clause", "_query_path_b_repos", "_rebuild_webhook_url_for_provider"]
 
 
+def _cmp_platform_operands(node, banned):
+    """Compare 节点的【直接操作数】中的平台名常量。
+
+    S63 守卫修正：原实现对整棵 Compare 子树做 walk，把比较表达式里嵌套调用的
+    平台键（如 _identities.get("gitcode", {}).get("status", 0) == 4 的 "gitcode"
+    ——settings.py legacy 兼容键，勿删）误判成平台名比较。守卫本义=比较值本身
+    是平台名（provider == "github" 形态），故只扫 left/comparators 直接操作数。
+    """
+    out = []
+    for op in [node.left] + list(node.comparators):
+        if isinstance(op, ast.Constant) and isinstance(op.value, str) and op.value in banned:
+            out.append(op)
+    return out
+
+
 def test_s63_guard_no_platform_compare_in_credential_family():
     import inspect
     banned = {"github", "gitcode", "gitee"}
@@ -63,18 +78,16 @@ def test_s63_guard_no_platform_compare_in_credential_family():
         tree = ast.parse(open(path, encoding="utf-8").read())
         for node in ast.walk(tree):
             if isinstance(node, ast.Compare):
-                for sub in ast.walk(node):
-                    if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and sub.value in banned:
-                        offenders.append(f"{path}:L{sub.lineno}:{sub.value}")
+                for sub in _cmp_platform_operands(node, banned):
+                    offenders.append(f"{path}:L{sub.lineno}:{sub.value}")
     from src.domains.mgmt.user import db as _udb
     for fn_name in _GUARD_USER_DB_FUNCS:
         fn = getattr(_udb, fn_name)
         tree = ast.parse(inspect.getsource(fn))
         for node in ast.walk(tree):
             if isinstance(node, ast.Compare):
-                for sub in ast.walk(node):
-                    if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and sub.value in banned:
-                        offenders.append(f"domains/mgmt/user/db.py:{fn_name}:L{sub.lineno}:{sub.value}")
+                for sub in _cmp_platform_operands(node, banned):
+                    offenders.append(f"domains/mgmt/user/db.py:{fn_name}:L{sub.lineno}:{sub.value}")
     assert not offenders, f"凭据族文件仍有平台名比较 {len(offenders)} 处: {offenders[:12]}"
 
 
@@ -128,7 +141,12 @@ def test_s63_swap_columns_card_driven(gitee_card):
 
 
 def test_s63_query_path_b_repos_gitee(gitee_card):
-    """_query_path_b_repos：gitee → bot_gitee_token 空列 + LIKE 'gitee:%'。"""
+    """_query_path_b_repos：gitee → rc 单表口径（F4/D106：空卡列平台无物理列）。
+
+    断言（2026-11-12 D106 终态口径）：LIKE 'gitee:%' 仓过滤 + NOT EXISTS(
+    grape_t_repo_credentials cred_type='bot' 非空行)；不再出现 bot_gitee_token
+    物理列（旧口径断言已随实现退役）。
+    """
     from src.domains.mgmt.user import db as udb
     from src.kernel.token_resolver import create_provider
     create_provider("gitee").token_storage_field()  # 预热卡缓存（防 db mock 干扰目录读）
@@ -138,7 +156,9 @@ def test_s63_query_path_b_repos_gitee(gitee_card):
         _mdb.cursor.return_value = _cursor
         udb._query_path_b_repos("gitee")
     sql = str(_cursor.execute.call_args.args[0])
-    assert "bot_gitee_token" in sql and "LIKE 'gitee:%'" in sql
+    assert "LIKE 'gitee:%'" in sql
+    assert "cred_type='bot'" in sql, "gitee 应走 rc 单表 bot 凭据判定（D106 终态）"
+    assert "bot_gitee_token" not in sql, "gitee 无物理列（旧列口径已退役）"
 
 
 def test_s63_query_path_b_repos_gitcode_parity():
@@ -194,21 +214,17 @@ def test_s63_settings_repo_config_columns(gitee_card):
     assert "token_storage_field" in src  # 列名卡派生替代字面量三元
 
 
-def test_s63_whitelist_unknown_provider_rejected():
-    """登录白名单：未知平台（无列映射）拒绝，不折叠写别人的列。"""
-    from src.domains.mgmt.admin.db import add_login_whitelist
-    with patch("src.domains.mgmt.admin.db.db") as _mdb, patch("src.domains.mgmt.admin.db.db_lock"):
-        ok = add_login_whitelist("gitee", "someone", "r")
-    assert ok is False
-
-
-def test_s63_whitelist_gitcode_parity():
+def test_s63_whitelist_row_insert_no_column_lookup():
+    """行式化（2026-11-12）：白名单 INSERT 直写 (provider, username) 行，
+    零列名映射/零卡读取（列驱动回潮守卫）。"""
     from src.domains.mgmt.admin.db import add_login_whitelist
     _cursor = MagicMock()
     _cursor.rowcount = 1
     with patch("src.domains.mgmt.admin.db.db") as _mdb, patch("src.domains.mgmt.admin.db.db_lock"):
         _mdb.cursor.return_value = _cursor
         _mdb.commit.return_value = None
-        ok = add_login_whitelist("gitcode", "someone", "r")
+        ok = add_login_whitelist("gitee", "someone", "r")
     assert ok is True
-    assert "gitcode_username" in str(_cursor.execute.call_args.args[0])
+    sql = str(_cursor.execute.call_args.args[0])
+    assert "INSERT OR IGNORE INTO login_whitelist (provider, username, remark)" in sql
+    assert "username" in sql and "gitee_username" not in sql, "列名映射回潮"

@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends
 
+from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.domains.mgmt.user import db as user_db
 
 from src.api.deps import require_no_session_token, require_org_member
@@ -759,8 +760,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         try:
             _local_hostname = ""
             try:
-                import socket as _sock
-                _local_hostname = _sock.gethostname()
+                _local_hostname = engine_host()
             except Exception:
                 pass
             c.execute(
@@ -1313,10 +1313,9 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
             "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id"
         )
         from src.domains.runtime.engine.instances import instance_name as _inst_name
-        import socket as _sock
         _local_hostname = ""
         try:
-            _local_hostname = _sock.gethostname()
+            _local_hostname = engine_host()
         except Exception:
             pass
         rt_name_map = {}

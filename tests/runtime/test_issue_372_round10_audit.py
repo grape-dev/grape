@@ -32,14 +32,18 @@ class TestT38GetBotTokenByRepoGuard:
             mock_cursor.execute.assert_not_called()
 
     def test_t38_02_path_a_returns_token(self):
-        """T38-02: 路径 A 仓库（host_user_id=0）正常返回 bot token"""
+        """T38-02: 路径 A 仓库（host_user_id=0）正常返回 bot token。
+
+        2026-11-13（QA B3）：get_bot_token_by_repo 已收敛为
+        resolve_managed_repo_key → _repo_bot_token_value（P9 三段读序：
+        卡列→rc 单表→存量列回落），旧 mock 的裸二元列读不再在链上；
+        按 QA 建议改为 mock 统一取值入口，锁「路径 A 返回 token」语义。
+        """
         from src.domains.mgmt.user.db import get_bot_token_by_repo
-        mock_cursor = MagicMock()
-        mock_cursor.fetchone.return_value = ("bot_token_value",)
-        with patch("src.domains.mgmt.user.db.db"), \
-             patch("src.domains.mgmt.user.db.db_lock"), \
-             patch("src.domains.mgmt.user.db.db.cursor", return_value=mock_cursor), \
-             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
+        with patch("src.domains.mgmt.user.db.resolve_managed_repo_key",
+                   return_value="gitcode:owner/repo"), \
+             patch("src.domains.mgmt.user.db._repo_bot_token_value",
+                   return_value="bot_token_value"):
             result = get_bot_token_by_repo("owner", "repo")
             assert result == "bot_token_value"
 

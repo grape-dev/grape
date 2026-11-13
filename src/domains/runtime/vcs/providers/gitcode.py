@@ -10,7 +10,7 @@ def request(method, url, token, body=None):
     实测实锤（2026-11-11 部署验证）：上游写接口对 JSON body 的解析不一致——
     issue 创建容忍 JSON，但 labels 创建 400 "Required request parameter 'name'
     is not present"（Spring 形态，只认 form/query 参数）。与 api_client
-    _gitcode_request 的 form=True 既有口径对齐（JSON 会 400 "body不能为空"）。
+    _request 的 form=True 既有口径对齐（JSON 会 400 "body不能为空"）。
     GET 无 body 不受影响。_req 延迟导入：测试 monkeypatch src.domains.mgmt.user.repo_manager._req
     才能拦到（from-import 旧引用会让 patch 失效、真 HTTP 出网——实测教训）。"""
     from src.domains.mgmt.user import repo_manager as _rm
@@ -104,6 +104,20 @@ MILESTONE_DUE_DATE_ONLY = True
 #   排序/逾期口径，形成不可审计的数据污染）。GitHub 方言无此约束。
 MILESTONE_DUE_ON_REQUIRED = True
 
+# Issue #640/#1005/#1076：issue PATCH 含 milestone_id 时写后 GET 回读校验
+# （上游有静默忽略先例，PATCH 200 不可信）。仅 gitcode/github 有此上游行为
+# 实证——B1（2026-11-13 P1-full 实弹）：github milestone_id 未映射上游
+# `milestone` 时同样 200 假成功，映射已修，回读守卫兜底。声明为模块契约
+# 开关（零平台字面枚举，test_no_new_binary_platform_enumerations 口径）。
+MILESTONE_VERIFY_READBACK = True
+
+# Issue #1005/#1076：issue PATCH milestone_id 取值口径 id 优先、number 兼容——
+# 先经 GET /milestones 解析到具体里程碑，再以解析出的上游 number 写 PATCH
+# （gitcode 上游 id/number 混用会静默落空）；失败原子性=写后回读不一致时回滚
+# 到请求前里程碑（before 快照 + resolved number 比对，代理层 #640 守卫配套）。
+# 未声明该开关的平台（github 等）按上游原生 id 语义直传翻译规则。
+MILESTONE_ID_RESOLVE_TO_NUMBER = True
+
 # D31/S63 凭据域口径（settings.py 读，LABEL_COLOR 同款模块契约开关）：本平台
 # settings 表单 PAT 落 <p>_token 专用字段（与专用分支/前端存量口径一致）；
 # 未声明该开关的平台走 <p>_pat 泛型凭据键。
@@ -119,3 +133,25 @@ ISSUE_UPDATE_OWNER_PATH = True
 #   全称 404 NOT_EXIST、裸名 200；下午 label/milestone 端点对两形态均收，但 issue
 #   update 端点收紧——与 gitee 同口径）。
 ISSUE_BODY_REPO_BARE = True
+
+# - PR 评论 id 为 32 位 hex（create 响应同源主键）：update/delete 上游只认数字
+#   note_id（hex 直传 400 Orchestration error）。代理层写前先 GET
+#   /pulls/comments/{hex} 解析成数字 note_id（#623 解析器复用）。
+PR_COMMENT_ID_HEX = True
+
+# 托管全流程（bot 合作者 + webhook 建/删/探 + 库回写）已实装：
+HOSTING_FULL_FLOW = True
+
+# git 传输取仓 token 走存量四级 fallback（agent session → 仓库 bot → 全局 bot → 用户），
+# 其余平台走端口 read_stored_token（bot-only）。实现绑定，非平台名判定。
+LEGACY_REPO_TOKEN_GETTER = True
+
+# PR/MR 网页路径段（前端 PR 详情链接与 QA 门禁链接共用；能力位驱动，业务侧零平台判断）。
+PR_WEB_PATH = "merge_requests"
+
+
+def repo_segment(owner: str, repo: str) -> str:
+    """资源根片段（github 方言）：repos/{owner}/{repo}（URL 段编码）。"""
+    import urllib.parse
+    return (f"repos/{urllib.parse.quote(owner, safe='')}/"
+            f"{urllib.parse.quote(repo, safe='')}")

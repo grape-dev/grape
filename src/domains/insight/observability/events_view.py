@@ -209,6 +209,18 @@ def _alert_events(user: Dict[str, Any], state: str, repo: str, limit: int,
         })
     return out
 
+def _err_text(e: Any) -> str:
+    """错误条目 → 文本：`agent_tasks.errors` 的 JSON 元素可能是 dict（错误对象，
+    含 message/localized_message/error_code），直接 `[:200]` 切片会抛
+    `KeyError: slice(None, 200, None)` → /api/obs/events 整接口 500（P8）。"""
+    if isinstance(e, dict):
+        for k in ("localized_message", "message", "error_code"):
+            if e.get(k):
+                return str(e.get(k))
+        return str(next(iter(e.values()), ""))
+    return str(e or "")
+
+
 def _task_hay(item: Dict[str, Any]) -> str:
     """任务事件的检索串（含错误摘要）。"""
     parts = [str(item.get(k) or "") for k in
@@ -264,7 +276,7 @@ def _task_events(user: Dict[str, Any], state: str, repo: str, limit: int,
                 "last_seen_at": normalize_event_time(t.get("completed_at")) or "",
                 "duration_sec": dur, "ongoing": ongoing, "state": "failed",
                 "value": None, "threshold": None, "metric": "",
-                "detail": (errs[0] if errs else (t.get("result_text") or ""))[:200],
+                "detail": (_err_text(errs[0]) if errs else str(t.get("result_text") or ""))[:200],
                 "exit_code": t.get("exit_code"),
                 "silenced": False, "escalated": False, "next_step": "timeline",
             })

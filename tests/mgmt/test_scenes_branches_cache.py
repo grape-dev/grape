@@ -79,7 +79,7 @@ class TestBranchesTTLCache:
             return [_api_branches("main"), _api_branches("dev")]
 
         with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok"), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_fake_list):
+             patch("src.domains.runtime.vcs.api_client.VcsApiClient._card_or_legacy_get", side_effect=_fake_list):
             r1 = self._get()
             assert r1.status_code == 200, r1.text
             assert r1.json()["cached"] is False
@@ -100,7 +100,7 @@ class TestBranchesTTLCache:
             return [_api_branches("main")]
 
         with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok"), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_fake_list):
+             patch("src.domains.runtime.vcs.api_client.VcsApiClient._card_or_legacy_get", side_effect=_fake_list):
             self._get()
             r2 = self._get("&refresh=1")
             assert r2.status_code == 200
@@ -116,14 +116,14 @@ class TestBranchesTTLCache:
             return [_api_branches("main")]
 
         with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok"), \
-             patch("src.domains.mgmt.user.repo_manager._req", return_value={"name": "feat/new"}):
+             patch("src.domains.runtime.vcs.api_client.VcsApiClient.create_branch", return_value={"name": "feat/new"}):
             r_create = client.post(f"/api/scenes/branches/{OWNER}/{REPO}?repo_key={REPO_KEY}",
                                    json={"branch_name": "feat/new", "refs": "main"},
                                    headers=_headers)
             assert r_create.status_code == 200, r_create.text
 
         with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok"), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_fake_get):
+             patch("src.domains.runtime.vcs.api_client.VcsApiClient._card_or_legacy_get", side_effect=_fake_get):
             r1 = self._get()
             assert r1.status_code == 200 and r1.json()["cached"] is False
             # 建分支后缓存已失效 → 再取应重新穿透（而非命中建分支前的旧缓存）
@@ -139,7 +139,7 @@ class TestBranchesTTLCache:
             return [_api_branches("main")]
 
         with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok"), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_fake_list):
+             patch("src.domains.runtime.vcs.api_client.VcsApiClient._card_or_legacy_get", side_effect=_fake_list):
             self._get()
             # 把缓存时间戳拨回过去（超过 TTL 90s）
             key = scenes_mod._branches_cache_key("gitcode", OWNER, REPO)
@@ -157,7 +157,7 @@ class TestBranchesTTLCache:
             raise RuntimeError("VCS API failed (500)")
 
         with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="tok"), \
-             patch("src.domains.mgmt.user.repo_manager._req", side_effect=_raise):
+             patch("src.domains.runtime.vcs.api_client.VcsApiClient._card_or_legacy_get", side_effect=_raise):
             r1 = self._get()
             assert r1.status_code == 502
             # 失败不入缓存：下一次仍应尝试穿透（而非命中错误）
@@ -182,8 +182,8 @@ from src.domains.mgmt.routes import scenes as scenes_mod
 4. TTL 过期后重新穿透；
 5. 失败（502）不入缓存。
 
-D44/S66 接缝：本路由当前实现仍走 repo_manager._req/_github_req（未迁统一命令层），
-mock 目标按实现落点锚定——两者不一致时以实际调用链为准，避免打到真实上游。
+D44/S66 接缝：本路由分支传输已迁统一命令层 VcsApiClient（卡驱动），
+mock 目标按实现落点锚定（VcsApiClient._card_or_legacy_get / create_branch）。
 """
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

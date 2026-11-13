@@ -696,9 +696,10 @@ function _scenePipeRowHtml(p, sceneId, dashData) {
     return map[stage] ? map[stage] : stage;
   };
   const _issueNum = String(p.issue_id || '').replace(/^#/, '');
-  const _repoParts = (dashData.repo || '').replace(/^(gitcode|github):/, '').split('/');
-  const _issueHost = (dashData.repo || '').startsWith('github:') ? 'github.com' : 'gitcode.com';
-  const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://${_issueHost}/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
+  // host/前缀统一走平台卡派生（_vcsUrl：任何在册平台前缀都剥得掉，gitee/gitlab 不落 gitcode.com）
+  const _repoParts = String(dashData.repo || '').replace(/^[a-z0-9_-]+:/, '').split('/');
+  const _issueUrl = (_issueNum && _repoParts.length === 2 && typeof window._vcsUrl === 'function')
+    ? window._vcsUrl(dashData.repo || '', '/issues/' + _issueNum) : '';
   const agentTags = ['vod', 'issue', 'coding', 'qa', 'sre'].map((at, j) => {
     const hasAgent = p.statuses && p.statuses[j] > 0;
     const cls = ['tg-v', 'tg-i', 'tg-c', 'tg-q', 'tg-s'][j];

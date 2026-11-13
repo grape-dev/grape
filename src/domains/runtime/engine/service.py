@@ -3279,30 +3279,17 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
 
 
 def _fetch_issue_comments(repo_key: str, repo: str, issue_num: str, token: str) -> list:
-    """查询 issue 已有评论列表（按 provider 分流）。
+    """查询 issue 已有评论列表（按卡驱动平台路由）。
 
     Issue #372 R10 P2-1: fail_task 发"Token 已过期"回帖前去重用。
-    GitHub: GET /repos/{owner}/{repo}/issues/{num}/comments
-    GitCode: GET /api/v5/repos/{repo}/issues/{num}/comments
+    D29/S49 follow-up：读取统一走 event_pipeline 的卡驱动 helper
+    （github/gitcode/gitee/gitlab 同一条代码路径；原 "github 否则 gitcode v5"
+    二分会让 gitee/gitlab 仓读不到评论）。
     返回评论 dict 列表（每项含 body 字段），失败返回空列表。
     """
     try:
-        if repo_key.startswith("github:"):
-            from src.kernel.repo_key import split_owner_repo
-            from src.domains.mgmt.user.repo_manager import _github_req
-            _o, _r = split_owner_repo(repo_key)
-            _result = _github_req(
-                "GET",
-                f"https://api.github.com/repos/{_o}/{_r}/issues/{issue_num}/comments",
-                token,
-            )
-            return _result if isinstance(_result, list) else []
-        else:
-            import urllib.request, json as _json
-            _url = f"https://gitcode.com/api/v5/repos/{repo}/issues/{issue_num}/comments?per_page=100"
-            _req = urllib.request.Request(_url, headers={"Authorization": f"Bearer {token}"})
-            _resp = urllib.request.urlopen(_req, timeout=15)
-            return _json.loads(_resp.read())
+        from src.domains.runtime.pipeline.event_pipeline import _list_issue_comments_card
+        return _list_issue_comments_card(repo_key, repo, issue_num, token)
     except Exception:
         return []
 
@@ -3659,7 +3646,9 @@ def fail_task(task_id, error, exit_code=-1):
                         _issue_num = _issue_num_from(_issue_id)
                         _repo = from_repo_key(_rk) or task.get("account") or ""
                         if _issue_num and _repo:
-                            _pName = "GitHub" if _expired_provider == "github" else "GitCode"
+                            # S76/D51：平台展示名按 repo_key 前缀取卡 name（gitee 仓不再显示 GitCode）
+                            from src.domains.runtime.vcs.platform_card import display_name_for_repo_key
+                            _pName = display_name_for_repo_key(_rk)
                             _msg = (
                                 f"<!-- grape-auto-comment -->\n"
                                 f"⚠️ {_pName} Token 已过期或被撤销，本次任务未能完成。"

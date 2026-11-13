@@ -36,3 +36,9 @@ SQLAlchemy>=2.0
 # compatible minor band: the otel python ecosystem ships breaking changes monthly.
 opentelemetry-sdk>=1.27,<2
 opentelemetry-exporter-otlp-proto-http>=1.27,<2
+
+# Issue #2092 / 上游 #11：MANIFEST 随包下发 src/kernel/mysql_compat.py，它模块级
+# `import pymysql`，MySQL 后端连接池懒加载 `from dbutils.pooled_db import PooledDB`。
+# 两者都必须声明，否则按文档装 worker 会 ModuleNotFoundError（服务端 requirements.txt 早已声明）。
+pymysql>=1.1
+DBUtils>=3.0

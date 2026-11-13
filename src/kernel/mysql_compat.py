@@ -135,6 +135,13 @@ _COL_TEXT_DEFAULT_RE = re.compile(
 _COL_TEXT_DEFAULT2_RE = re.compile(
     r"^(\s*)([`\"\w]+)\s+(?:MEDIUMTEXT|LONGTEXT|TEXT)\s+DEFAULT\s+'((?:[^'\\]|\\.)*)'(?=[,\s)]|$)", re.I
 )
+# D105 UUID 化：user_id 族列 INTEGER→TEXT 后保留数字哨兵 DEFAULT（0=无归属）。
+# SQLite 容忍 TEXT DEFAULT <数字>；MySQL 1101 拒绝——转表达式默认值 DEFAULT (<n>)（8.0.13+）。
+# 实弹：yaw 四进程 MySQL 8.0.43 冷启动，session_api_tokens/user_feedback/org_member 等
+# 8 表建表全败于此形态（catch 吞成 warning → 表静默缺失 → 运行时 1146）。
+_COL_TEXT_DEFAULT_NUM_RE = re.compile(
+    r"^(\s*)([`\"\w]+)\s+((?:MEDIUMTEXT|LONGTEXT|TEXT)\s+(?:NOT\s+NULL\s+)?DEFAULT\s+)(-?\d+)(?=[,\s)]|$)", re.I
+)
 _COL_INT_PK_AUTOINC_RE = re.compile(
     r"^(\s*)([`\"\w]+)\s+INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b", re.I
 )
@@ -237,18 +244,24 @@ def _translate_create_table(sql: str) -> str:
         c = _COL_INT_PK_AUTOINC_RE.sub(
             lambda mm: f"{mm.group(1)}{mm.group(2)} INT AUTO_INCREMENT PRIMARY KEY", c
         )
-        # TEXT NOT NULL DEFAULT 'x' / TEXT DEFAULT 'x' → 表达式默认值（8.0.13+）
+        # TEXT NOT NULL DEFAULT 'x' / TEXT DEFAULT 'x' → 剥除字面量 DEFAULT（G4 根修）
+        # MySQL TEXT 系列列不接受字面量 DEFAULT（1101），包成表达式 DEFAULT ('')
+        # 在部分版本下仍 1064（drill4 实锤）→ 直接剥除，默认 NULL，应用层 ``or ''`` 兜底；
+        # 带括号的表达式 DEFAULT 保留（test_text_expression_default_kept）。
         if _COL_TEXT_DEFAULT_RE.search(c) or _COL_TEXT_DEFAULT2_RE.search(c):
             if re.match(r"^[`\"\w]+\s+(?:MEDIUMTEXT|LONGTEXT|TEXT)\b", c, re.I) and "PRIMARY KEY" not in c.upper():
-                def _expr_default(mm):
-                    prefix, name, val = mm.group(1), mm.group(2), mm.group(3)
-                    # 保留原始 TEXT 变体类型（MEDIUMTEXT/LONGTEXT/TEXT）
-                    type_m = re.match(r"^[`\"\w]+\s+(MEDIUMTEXT|LONGTEXT|TEXT)\b", c, re.I)
-                    col_type = type_m.group(1).upper() if type_m else "TEXT"
-                    not_null = " NOT NULL" if "NOT NULL" in mm.string[:mm.start()].upper() or "NOT NULL" in c.upper() else ""
-                    return f"{prefix}{name} {col_type}{not_null} DEFAULT ('{val}')"
-                c = _COL_TEXT_DEFAULT_RE.sub(_expr_default, c)
-                c = _COL_TEXT_DEFAULT2_RE.sub(_expr_default, c)
+                type_m = re.match(r"^[`\"\w]+\s+(MEDIUMTEXT|LONGTEXT|TEXT)\b", c, re.I)
+                col_type = type_m.group(1).upper() if type_m else "TEXT"
+                name_m = re.match(r"^(\s*)([`\"\w]+)", c)
+                not_null = " NOT NULL" if re.search(r"\bNOT\s+NULL\b", c, re.I) else ""
+                c = f"{name_m.group(1)}{name_m.group(2)} {col_type}{not_null}"
+        # TEXT [NOT NULL] DEFAULT <数字>（D105 UUID 化哨兵）→ 同上剥除
+        # （实弹：yaw 四进程 MySQL 8.0.43 冷启动，session_api_tokens/user_feedback/
+        #  org_member 等 8 表建表全败于 TEXT DEFAULT 0 直传 → 表静默缺失 → 运行时 1146）
+        if _COL_TEXT_DEFAULT_NUM_RE.search(c) and "PRIMARY KEY" not in c.upper():
+            _m = _COL_TEXT_DEFAULT_NUM_RE.search(c)
+            # group(3)=「类型 + 可选 NOT NULL + DEFAULT 」——剥 DEFAULT 尾即保留类型与 NOT NULL
+            c = f"{_m.group(1)}{_m.group(2)} {_m.group(3).split('DEFAULT')[0].rstrip()}"
         # datetime('now') → CAST(NOW() AS CHAR)（字符串语义与 SQLite 一致，且避免 % 占位冲突）
         c = _COL_DATETIME_DEFAULT_RE.sub("CAST(NOW() AS CHAR)", c)
         out.append(c)

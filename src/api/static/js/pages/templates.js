@@ -437,14 +437,23 @@ var _TAG_HIGHLIGHTS = {
 
 
 function _buildPlatformSelect() {
-  // 用户绑定的平台列表（从 localStorage 的 user.bindings 读取）
+  // D88/S115：平台候选 = 仓库平台卡目录 ∩ 用户已绑定平台（尊重 login_provider）。
+  // 不再用 localStorage 裸绑定列 + 平台名静态表；单候选时不渲染选择器
+  // （后端按卡目录 ∩ 绑定平台自动选，gitee/gitlab 单绑定用户不再 400）。
   var user = JSON.parse(localStorage.getItem('user') || '{}');
-  var bindings = user.bindings || [];
-  if (bindings.length <= 1) return ''; // 只有一个平台不需要选择器
-  var isZh = I18N.getLang() === 'zh';
-  var options = bindings.map(function(p) {
-    var name = {gitcode: 'GitCode', github: 'GitHub', gitee: 'Gitee'}[p] || p;  // D102: gitee 入册
-    return '<option value="' + p + '">' + name + '</option>';
+  var bindings = (user.bindings || []).slice();
+  if (!bindings.length) return '';
+  var catalog = window._appVcsCatalog && Object.keys(window._appVcsCatalog).length
+    ? window._appVcsCatalog : null;
+  var catalogOrder = catalog ? Object.keys(catalog) : bindings;
+  var avail = catalogOrder.filter(function(p) { return bindings.indexOf(p) !== -1; });
+  if (!avail.length) avail = bindings;  // 目录未就绪（竞态窗口）→ 用绑定列兜底
+  if (avail.length <= 1) return '';
+  var loginProvider = user.login_provider || '';
+  var options = avail.map(function(p) {
+    var name = (typeof window._provName === 'function') ? window._provName(p) : p;
+    var sel = (p === loginProvider) ? ' selected' : '';
+    return '<option value="' + p + '"' + sel + '>' + name + '</option>';
   }).join('');
   return '<select id="ptProvider" style="padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:13px;background:var(--bg);outline:none;flex-shrink:0">' + options + '</select>';
 }

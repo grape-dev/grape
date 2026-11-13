@@ -145,15 +145,43 @@ def _get_feishu_open_id_by_user_id(user_id: str) -> str:
     return resolve_open_id_by_user(user_id)
 
 def _get_gitcode_user_by_user_id(user_id) -> str:
-    """按 user_id 反查平台用户名（gitcode_user 优先，github_login 兜底）。
+    """按 user_id 反查平台用户名（身份域优先：external_identities，按 provider 挑选）。
 
     Issue #1337: 建 issue 卡片时回填 created_by 用；查不到返回空串（归入「未归属」）。
     引擎侧 routes/tasks.py 仍调用本函数；D105 TEXT 化后哨兵为字符串口径
     （铁律⑬）：`user_id>0` 数值比较对 uuid 字符串会 TypeError/MySQL 恒假。
+
+    P1-16 收口：原实现 `COALESCE(gitcode_user, github_login)` 把身份折叠成
+    存量两列，gitee/gitlab/华为 得空串。现身份优先（external_identities.
+    external_login），provider 优先序 = grape 账号 login_provider →
+    平台卡目录顺序 → 其余绑定。um 平台列仅作无身份行时的兜底。
     """
     uid = str(user_id or "")
     if uid in ("", "0", "None"):
         return ""
+    # ① 身份域（权威）
+    try:
+        from src.domains.mgmt.auth.grape_account_db import get_user_identities, get_grape_account_by_id
+        _idents = [i for i in (get_user_identities(uid) or [])
+                   if i.get("provider") and (i.get("external_login") or "").strip()]
+        if _idents:
+            try:
+                _login_provider = (get_grape_account_by_id(uid) or {}).get("login_provider") or ""
+            except Exception:
+                _login_provider = ""
+            try:
+                from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+                _order = {p: n for n, p in enumerate(list_vcs_platforms())}
+            except Exception:
+                _order = {}
+            _idents.sort(key=lambda i: (
+                0 if i["provider"] == _login_provider else 1,
+                _order.get(i["provider"], len(_order)),
+            ))
+            return (_idents[0].get("external_login") or "").strip()
+    except Exception as e:
+        log.warning(f"_get_gitcode_user_by_user_id({uid}) identity lookup failed: {e}")
+    # ② um 平台列兜底（存量行；新平台无列）
     with db_lock:
         c = db.cursor()
         try:
@@ -3205,6 +3233,13 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             # Issue #995：VCS 存在性（默认 1=未知/存在；0=VCS 侧已删除）；未知列值按存在处理。
             "vcs_exists": bool(r[_vcs_idx]) if r[_vcs_idx] is not None else True,
             "vcs_checked_at": r[_vcs_idx + 1] or "",
+            # Issue #995 spec 验收面（2026-11-13 补齐）：存在性核验结果语义字段。
+            # - vcs_check：ok=已核验存在 / missing=已核验删除（仅审计模式可见）
+            #   / unavailable=未核验（索引失败/后台未跑，fail-open 按存在处理）
+            # - is_vcs_deleted：vcs_check=missing 的布尔投影（前端过滤/标记）
+            "is_vcs_deleted": (r[_vcs_idx] == 0 and bool(r[_vcs_idx + 1])),
+            "vcs_check": ("missing" if (r[_vcs_idx] == 0 and r[_vcs_idx + 1])
+                          else ("ok" if r[_vcs_idx + 1] else "unavailable")),
         }
         if include_user_id:
             item["user_id"] = r[15] or 0

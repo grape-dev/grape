@@ -4,6 +4,7 @@ import sys, os, asyncio
 
 # Issue #455：主服务要求 Python >= 3.10。防御直接 `uvicorn src.api.main:app` 的启动方式，
 # 在业务模块导入链触发前显式提示并退出。
+from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.api.version_check import ensure_python_version
 
 ensure_python_version()
@@ -99,7 +100,7 @@ def _start_server_metrics_task():
 
     async def _server_metrics_loop():
         import socket as _sock, hashlib as _hl
-        _hostname = _sock.gethostname() or "unknown-server"
+        _hostname = engine_host() or "unknown-server"
         _local_ip = "127.0.0.1"
         try:
             _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)

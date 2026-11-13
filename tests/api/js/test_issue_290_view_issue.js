@@ -85,7 +85,10 @@ test('_openPRDetail「查看 PR ↗」按钮保持 /pull/ 不变', () => {
   const m = src.match(/window\._openPRDetail = function\(t\) \{[\s\S]*?\n\};/);
   assert.ok(m, '应存在 _openPRDetail 函数');
   const body = m[0];
-  assert.ok(body.indexOf("var _vcsPath = '/pull/' + t.issue_number;") >= 0, '_openPRDetail 应保留 /pull/ 路径');
+  // weekly-11 P1-23：PR 路径不再写死 /pull/（gitee 是 /pulls，gitlab 是 /merge_requests）——
+  // 断言收敛为「路径段由 _prWebPath 能力位派生 + host 由 _vcsUrl 卡目录派生」。
+  assert.ok(body.indexOf('window._prWebPath') >= 0, '_openPRDetail 应经 _prWebPath 派生 PR 路径段');
+  assert.ok(body.indexOf('window._vcsUrl') >= 0, '_openPRDetail 应经 _vcsUrl 派生平台 host');
   assert.ok(body.indexOf('查看 PR ↗') >= 0, '_openPRDetail 应保留「查看 PR ↗」按钮文案');
 });
 

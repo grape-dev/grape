@@ -71,8 +71,10 @@ def test_s32_release_subissue_uses_client(gitee_card, monkeypatch):
     resp = VcsApiClient("gitee", "TK", "o", "r").create_issue("T-sub", "body-sub")
     assert resp["number"] == 21
     req = captured[-1]
-    assert req.url == "https://gitee.com/api/v5/repos/o/r/issues?access_token=TK"
+    # gitee 写形态 owner_param（D41/S61 + 官方 swagger 5.4.93）：repo 进 form body
+    assert req.url == "https://gitee.com/api/v5/repos/o/issues?access_token=TK"
     assert req.headers.get("Content-Type") == "application/x-www-form-urlencoded"
+    assert b"repo=r" in req.data and b"title=T-sub" in req.data
 
 
 def test_s32_source_code_has_no_dual_issue_create_branch():
@@ -87,16 +89,19 @@ def test_s32_source_code_has_no_dual_issue_create_branch():
 
 
 def test_s33_labels_dialect(gitee_card):
-    from src.api.git_repo_api import _labels_dialect_is_github
+    """labels 方言判定：github=数组语义（provider 模块能力位 LABELS_ARRAY_FORM），
+    Gitee 系/gitlab=逗号串（存量行为）；未知平台=无模块 → 回退逗号串。
+    （旧 helper _labels_dialect_is_github 已由 _provider_labels 的能力位机制取代。）"""
+    from src.api.git_repo_api import _provider_labels, _PROVIDER_MODULES
     # github（bearer+github 方言）= 数组语义
-    assert _labels_dialect_is_github("github") is True
+    assert getattr(_PROVIDER_MODULES["github"], "LABELS_ARRAY_FORM", False) is True
     # Gitee 系（query_token）= 逗号串（存量行为）
-    assert _labels_dialect_is_github("gitcode") is False
-    assert _labels_dialect_is_github("gitee") is False
+    assert getattr(_PROVIDER_MODULES["gitcode"], "LABELS_ARRAY_FORM", False) is False
+    assert getattr(_PROVIDER_MODULES["gitee"], "LABELS_ARRAY_FORM", False) is False
     # gitlab 方言 = 逗号串
-    assert _labels_dialect_is_github("gitlab") is False
-    # 未知平台 = 回退 github 数组语义（存量默认）
-    assert _labels_dialect_is_github("nonexist") is False or True  # 未配卡回退
+    assert getattr(_PROVIDER_MODULES["gitlab"], "LABELS_ARRAY_FORM", False) is False
+    # 未知平台 = 无模块 → 回退逗号串语义
+    assert _provider_labels("nonexist", ["a", "b"]) == "a,b"
 
 
 def test_s33_labels_normalize_passthrough_vs_array():

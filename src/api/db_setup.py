@@ -673,6 +673,8 @@ CREATE TABLE IF NOT EXISTS login_whitelist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     gitcode_username VARCHAR(64) DEFAULT NULL,
     github_username TEXT DEFAULT '',
+    provider VARCHAR(32) DEFAULT NULL,
+    username VARCHAR(128) DEFAULT '',
     remark VARCHAR(128) DEFAULT '',
     created_by VARCHAR(64) DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
@@ -680,9 +682,15 @@ CREATE TABLE IF NOT EXISTS login_whitelist (
 )
 """
 # github_username 唯一约束不在 DDL 内联定义——SQLite 内联 UNIQUE 不支持
-# WHERE 条件（需要允许空串 '' 共存）。改为在 _ensure_whitelist_columns 中
-# 用 CREATE UNIQUE INDEX ... WHERE github_username != '' 运行时创建部分索引。
+# WHERE 条件（需要允许空串 '' 共存）。改为运行时部分索引
+# （_ensure_case_insensitive_indexes + Issue #332 首跑索引）。
 # MySQL 侧在 _ensure_case_insensitive_indexes 中用生成列 LOWER(NULLIF(...)) + 唯一索引。
+#
+# 2026-11-12 行式化（weekly-11）：新增 provider/username 两列——新行=一条
+# (provider, username) 白名单条目（provider=OAuth 渠道 key），老列式列
+# （gitcode/github/gitee_username）原样保留参与读路径兜底（双读兼容：
+# 新行优先→老列兜底，逐人判定）。新行唯一性=部分表达式索引，见
+# _fn_login_whitelist_row_columns 注册式迁移。
 
 _API_LATENCY_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS api_latency_log (
@@ -2333,6 +2341,99 @@ def _seed_event_action_filter():
         db.commit()
 
 
+# ── Issue #2091（上游 #10）：存量库补种 agent_type ─────────────────────────────
+def _fn_seed_agent_types_from_config() -> None:
+    """从 configs/agent-description.json 补种 agent_type（只补缺失行，不覆盖用户改过的行）。
+
+    种子写入点在老轨 `_run_all_migrations()` 里，存量库（已盖 legacy-stamp）启动时
+    **完全不执行**该函数 → 容器化部署（镜像原先还缺 configs/）时 agent_type 永远为空，
+    `GET /api/agents/types` 返回空数组、Agent 详情 404「Agent 类型未配置」。
+
+    幂等且不覆盖：逐行 `INSERT OR IGNORE`——已有 agent_type 行（用户可能改过
+    display_name/icon）不动，只补缺失的。文件缺失只告警。
+    """
+    filepath = os.path.join(_CONFIG_DIR, "agent-description.json")
+    if not os.path.exists(filepath):
+        log.warning(f"seed-agent-types: {filepath} not found, skip "
+                    f"(container image needs .dockerignore to whitelist configs seeds)")
+        return
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        log.warning(f"seed-agent-types: failed to read {filepath}: {e}")
+        return
+    if not isinstance(data, dict) or not data:
+        log.warning(f"seed-agent-types: {filepath} empty or not a dict, skip")
+        return
+
+    inserted = 0
+    with db_lock:
+        c = db.cursor()
+        for agent_type, info in data.items():
+            info = info or {}
+            c.execute(
+                "INSERT OR IGNORE INTO agent_type "
+                "(agent_type, display_name, description, default_runtime_id, icon, order_num, "
+                " subscribe_events, enable) VALUES (?,?,?,0,?,?,?,?)",
+                (
+                    agent_type,
+                    info.get("name", agent_type),
+                    info.get("description", ""),
+                    info.get("icon", ""),
+                    info.get("order_num", 0),
+                    json.dumps(info.get("subscribe_events", []), ensure_ascii=False),
+                    1 if info.get("enable", True) else 0,
+                ),
+            )
+            inserted += c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        db.commit()
+        # Spec 要求：补种成功后同步 meta.seeded_keys（与 _seed_from_json 的老轨记账一致），
+        # 供后续诊断/去重对账；已存在该 key 时不改写（首轨种子已记）。
+        if inserted > 0:
+            c.execute("SELECT value FROM meta WHERE key='seeded_keys'")
+            row = c.fetchone()
+            seeded = set(row[0].split(",")) if row and row[0] else set()
+            if "agent_type" not in seeded:
+                seeded.add("agent_type")
+                c.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded_keys', ?)",
+                    (",".join(sorted(seeded)),),
+                )
+                db.commit()
+    log.info(f"seed-agent-types: upserted {inserted} agent type(s) from agent-description.json")
+
+
+# ── Issue #2095（上游 #14）：存量库补种 event_action_filter 默认规则 ──────────────
+def _fn_seed_event_action_filter_once() -> None:
+    """存量库补种默认事件动作过滤规则；已有数据（含用户自定义）则跳过。
+
+    老轨 `_run_all_migrations()` 在存量库（已盖 legacy-stamp）完全不执行，
+    而 `_seed_event_action_filter()` 的调用点就在那里 → 升级后默认规则永久缺失，
+    webhook 事件的放行/过滤/副作用行为与全新安装不一致且不报错（与 #2091 同源）。
+
+    幂等：表里已有任何行就直接返回，不重灌（避免与用户自定义规则叠加）；
+    真正写入由 `_seed_event_action_filter()` 的 INSERT OR IGNORE 完成。
+    """
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT COUNT(*) FROM event_action_filter")
+            existing = c.fetchone()[0]
+        except Exception as e:
+            log.warning(f"seed-event-action-filter: count query failed, skip: {e}")
+            return
+    if existing > 0:
+        log.info(f"seed-event-action-filter: table already has {existing} row(s), skip")
+        return
+    _seed_event_action_filter()
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COUNT(*) FROM event_action_filter")
+        after = c.fetchone()[0]
+    log.info(f"seed-event-action-filter: seeded {after} default rule(s)")
+
+
 def _insert_seed_data(table: str, data: dict):
     """将 JSON 数据插入对应表"""
     with db_lock:
@@ -2394,8 +2495,12 @@ def _migrate_whitelist_from_file():
         with db_lock:
             for username in wl:
                 try:
-                    c.execute("INSERT OR IGNORE INTO login_whitelist (gitcode_username, remark) VALUES (?, ?)",
-                              (username, "from file"))
+                    # 2026-11-12 行式化：文件导入写新模式行（provider='gitcode'——
+                    # login-whitelist.json 是 gitcode 时代产物）。未盖章老库兜底
+                    # 路径上列可能尚未由注册式迁移补齐，INSERT 失败静默跳过
+                    # （登录侧文件降级读仍覆盖，见 config.is_user_allowed）。
+                    c.execute("INSERT OR IGNORE INTO login_whitelist (provider, username, remark) VALUES (?, ?, ?)",
+                              ("gitcode", username, "from file"))
                     imported += c.rowcount
                 except Exception:
                     pass
@@ -2406,41 +2511,46 @@ def _migrate_whitelist_from_file():
         log.warning(f"Whitelist file migration skipped: {e}")
 
 
-def _ensure_whitelist_columns():
-    """确保 login_whitelist 表有所有 provider 配置的白名单列。
+def _fn_login_whitelist_row_columns() -> None:
+    """2026-11-12 行式化（weekly-11）：login_whitelist 补 provider/username 两列
+    + 新行大小写不敏感唯一索引（注册式迁移，存量库启动自动补列；幂等）。
 
-    遍历 oauth_providers 配置，对每个 provider 的 whitelist_column
-    检查列是否存在，不存在则 ALTER TABLE 添加。新增平台无需手动建列。
+    - 老列式列（gitcode/github/gitee_username）不动：读路径兜底（双读兼容）
+    - 新行唯一性：SQLite 部分表达式索引（provider, LOWER(username)），
+      MySQL 生成列 username_lower + UNIQUE(provider, username_lower)
+      （复用 _ensure_case_insensitive_indexes 的生成列模式，不依赖 8.0.13 函数索引）
+    - fn 失败要抛（strict=True）：列没建成不盖章，下次启动重试
     """
-    try:
-        from src.domains.mgmt.auth.providers import list_providers, get_provider
-        with db_lock:
-            c = db.cursor()
-            cols = [r[1] for r in c.execute("PRAGMA table_info(login_whitelist)").fetchall()]
-            for provider in list_providers():
-                cfg = get_provider(provider) or {}
-                col = cfg.get("whitelist_column")
-                if not col or col in cols:
-                    continue
-                # 列名安全校验
-                import re as _re
-                if not _re.match(r'^[a-z_]+$', col):
-                    log.warning(f"Invalid whitelist_column '{col}' for provider {provider}, skipping")
-                    continue
-                try:
-                    c.execute(f"ALTER TABLE login_whitelist ADD COLUMN {col} TEXT DEFAULT ''")
-                    cols.append(col)
-                    log.info(f"Added whitelist column: {col} (provider={provider})")
-                except Exception as e:
-                    log.warning(f"Failed to add whitelist column {col}: {e}")
-            db.commit()
-            # Issue #332: ensure github_username has UNIQUE index
-            try:
-                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_login_whitelist_github ON login_whitelist(github_username) WHERE github_username != ''")
-            except Exception as e:
-                log.warning(f"Create github_username unique index failed: {e}")
-    except Exception as e:
-        log.warning(f"_ensure_whitelist_columns failed: {e}")
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "login_whitelist", "provider", "VARCHAR(32) DEFAULT NULL", strict=True)
+        _ensure_column(c, "login_whitelist", "username", "VARCHAR(128) DEFAULT ''", strict=True)
+        if _mysql_backend():
+            c.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='login_whitelist' "
+                "AND COLUMN_NAME='username_lower'")
+            if c.fetchone()[0] == 0:
+                c.execute(
+                    "ALTER TABLE login_whitelist ADD COLUMN username_lower VARCHAR(128) "
+                    "AS (LOWER(NULLIF(username, ''))) STORED")
+            c.execute(
+                "SELECT COUNT(*) FROM information_schema.statistics "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='login_whitelist' "
+                "AND INDEX_NAME='uq_login_whitelist_row'")
+            if c.fetchone()[0] == 0:
+                # 老行 provider=NULL：MySQL 唯一索引 NULL 不参与约束，存量行零影响
+                c.execute(
+                    "ALTER TABLE login_whitelist ADD UNIQUE INDEX uq_login_whitelist_row "
+                    "(provider, username_lower)")
+        else:
+            # SQLite：部分表达式索引——仅约束新模式行（provider 非空且 username 非空串）
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_login_whitelist_row "
+                "ON login_whitelist(provider, LOWER(username)) "
+                "WHERE provider IS NOT NULL AND username != ''")
+        db.commit()
+
 
 def _init_scene_category_data():
     """初始化 scene_category 表的 6 条分类数据（幂等）。
@@ -2867,7 +2977,6 @@ _MIGRATIONS: List[Migration] = []
 # 先评估是否该改成注册式迁移，只有确认必须留老轨才同步改这里，并在 PR 里说明原因。
 LEGACY_TRACK_FROZEN = (
     "_ensure_case_insensitive_indexes",
-    "_ensure_whitelist_columns",
     "_migrate_a2a_idempotency_key",
     "_migrate_allow_signup_default",
     "_migrate_event_status_pending",
@@ -3382,6 +3491,221 @@ def _fn_create_grape_t_patrol_findings() -> None:
         db.execute(_PATROL_FINDINGS_DDL)
         db.commit()
 
+
+def _ensure_platform_storage_columns():
+    """D44/S64：按仓库平台卡幂等加 managed_repos 存储列（行式白名单先例同款）。
+
+    F4/D106 终态修订（2026-11-11）：卡 token_storage_field/webhook_token_field
+    显式空串 = 无物理列（gitee/gitlab 终态，凭据只落 grape_t_repo_credentials 单表），
+    本函数跳过；仅键缺席（派生列名，gitcode/github 存量语义）才自动补列。
+    identifier 白名单校验；列已存在跳过；无卡不加。
+
+    （squash 合并一度丢失，2026-11-13 按 b439764fd 原形恢复——新增仓库平台
+    "加卡即接入"的动态列供给链依赖此函数：config-only 平台声明存储列后，
+    盖章库/新库启动时列自动补齐，无需手工 DDL。）
+    """
+    try:
+        import re as _re
+        from src.domains.runtime.vcs.platform_card import list_vcs_platforms, get_platform_card
+        with db_lock:
+            c = db.cursor()
+            cols = {r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()}
+            for provider in (list_vcs_platforms() or []):
+                card = get_platform_card(provider)
+                if card is None:
+                    continue
+                for col in (card.token_storage_field, card.webhook_token_field):
+                    if not col or col in cols:
+                        continue
+                    if not _re.match(r'^[a-z_]+$', col):
+                        log.warning(f"Invalid managed_repos storage column '{col}' for {provider}, skipping")
+                        continue
+                    try:
+                        c.execute(f"ALTER TABLE managed_repos ADD COLUMN {col} TEXT DEFAULT ''")
+                        cols.add(col)
+                        log.info(f"Added managed_repos storage column: {col} (provider={provider})")
+                    except Exception as e:
+                        log.warning(f"Failed to add storage column {col} (provider={provider}): {e}")
+            db.commit()
+    except Exception as e:
+        log.warning(f"_ensure_platform_storage_columns failed: {e}")
+
+
+def _fn_github_bot_username_to_card() -> None:
+    """D15/S23（2026-11-12 B 层收敛）：存量 global_bot_github_username 迁入
+    github 仓库平台卡 bot_username 字段（写 meta vcs_providers_config）。
+
+    幂等：卡 bot_username 已非空跳过；meta 无值跳过。meta 键保留兜底不删
+    （get_global_github_bot_username 读链=卡优先→meta 兜底）。
+    """
+    import json as _json
+    from src.kernel.session_manager import db as _db, db_lock as _dl
+    from src.domains.mgmt.user.db import get_meta_value, set_meta_value
+    _old = (get_meta_value("global_bot_github_username") or "").strip()
+    if not _old:
+        return
+    with _dl:
+        c = _db.cursor()
+        row = c.execute("SELECT value FROM meta WHERE key='vcs_providers_config'").fetchone()
+        cards = _json.loads(row[0]) if row and row[0] else {}
+        gh = dict(cards.get("github") or {})
+        if str(gh.get("bot_username") or "").strip():
+            return  # 卡已有值（管理员显式配置）——不覆盖
+        gh["bot_username"] = _old
+        cards["github"] = gh
+        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('vcs_providers_config', ?)",
+                  (_json.dumps(cards, ensure_ascii=False),))
+        _db.commit()
+    try:
+        from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
+        invalidate_platform_card_cache()
+    except Exception:
+        pass
+    from src.kernel.config import log
+    log.info(f"migrate global_bot_github_username -> github card bot_username: {_old}")
+
+
+register_migration(
+    # 撞号改号（2026-11-13 同步 arch-weekly-11 基线）：原号 202611150002 与基线
+    # seed-event-action-filter-defaults 同号异名——基线已盖章库按号跳过，本链 fn
+    # 静默不执行。改号到 202611150006（> 基线 max 202611150002）。幂等保障：
+    # 卡 bot_username 已非空跳过、meta 无值跳过，旧号已盖章的库上重跑零写入。
+    version="202611150006",
+    name="github-bot-username-to-card",
+    kind="safe",
+    fn=_fn_github_bot_username_to_card,
+)
+
+register_migration(
+    # 撞号改号（2026-11-13 同步 arch-weekly-11 基线）：原号 202611150001 与基线
+    # seed-agent-types-from-config 同号异名。改号到 202611150005。幂等保障：
+    # _ensure_column + information_schema/IF NOT EXISTS 三态自检，旧号已盖章
+    # 库上重跑零写入（与 G4 改号同款）。
+    version="202611150005",
+    name="login-whitelist-row-columns",
+    kind="safe",
+    fn=_fn_login_whitelist_row_columns,
+)
+
+
+def _fn_create_repo_credentials_table() -> None:
+    """S80/D55 建 rc 单表；D99（2026-11-08）语义重设计——目标态一步建对。
+
+    Issue #2273：该迁移在本仓一线历史（c9aabca63，版本 202611120005）已存在，
+    合并 47bee3126 整体替换 db_setup.py 时被丢弃，而写路径（add_managed_repo）
+    与用例（_seed_repo_bot_tokens）仍在——冷启动库缺表即 OperationalError
+    （实测 69 errors）。本线未含 202611120005 盖章记录，且按迁移版本号守卫
+    （R3：新号必须 > 基线 max 202611140004）改号 202611150003 注册；
+    一线已按 202611120005 盖章的环境因 CREATE TABLE IF NOT EXISTS 幂等，
+    重跑零写入。feat/issue-2273（1ef1c04b3）同函数体，编号口径见其提交说明。
+
+    - id VARCHAR(256) PRIMARY KEY：UUID 主键（查询/引用以 id 为准，首写生成；
+      存量行由 backfill_repo_credentials_uuid 渐进回填）
+    - cred_type 归一值域 {'bot','webhook'}（平台语义由 repo_key 前缀承载）
+    - UNIQUE (repo_key, cred_type)：一仓库一类一条
+    """
+    with db_lock:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS grape_t_repo_credentials (
+                id VARCHAR(256) NOT NULL PRIMARY KEY,
+                repo_key TEXT NOT NULL,
+                cred_type TEXT NOT NULL,
+                value TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (repo_key, cred_type)
+            )
+        """)
+        db.commit()
+
+
+register_migration(
+    version="202611150003",
+    name="create-repo-credentials-table",
+    kind="safe",
+    fn=_fn_create_repo_credentials_table,
+)
+
+
+def backfill_gitee_gitlab_token_columns_to_rc() -> int:
+    """F4/D106（2026-11-11）存量列回填迁移：managed_repos 的 gitee/gitlab
+    四列 → grape_t_repo_credentials 行（幂等：只填空，已有 rc 行不覆盖）。
+
+    设计要点：
+    - 值归一：列值可能为 N3 密文或历史明文——_decrypt（明文直通）→ _encrypt
+      统一回填为密文形态（与写路径同构，读侧零特判）。
+    - 列存在性守卫：冷启动库（F4 后）无这四列，逐列探测，无列跳过零写入。
+    - 物理列**不 DROP**：作为历史回落面保留至渐进收敛完成（写路径轮换置空）。
+    - 退出 checklist（legacy 列回落分支退役顺序，见 token_resolver RepoBotToken）：
+      ①本回填（存量值进 rc）→ ②写路径置空（每次轮换自动清一行）→
+      ③确认日志零 legacy column fallback 命中后关闭回落分支 → ④删回落代码并
+      另立迁移评估列删除。本迁移只负责 ①。
+
+    幂等性：INSERT OR IGNORE（UNIQUE(repo_key, cred_type) 冲突即忽略），
+    重复执行零写入。返回回填行数。
+
+    （squash 合并一度丢失，2026-11-13 按 b439764fd 原形恢复并按
+    migration-parity-assessment.md 阶段二口径改号 202611150004
+    （原号 202611110004 落历史区间）；原函数体内 202611120005 撞号
+    由 202611150003 建表迁移承担。）
+    """
+    from src.kernel.id_gen import uuid7_str
+    _GL_COLS = ("bot_gitee_token", "gitee_webhook_token",
+                "bot_gitlab_token", "gitlab_webhook_token")
+    n = 0
+    per_col: dict = {}
+    try:
+        from src.domains.mgmt.user.db import _encrypt_repo_secret, _decrypt_repo_secret
+    except Exception as e:
+        log.warning(f"F4 backfill: crypto import failed, skip: {e}")
+        return 0
+    with db_lock:
+        c = db.cursor()
+        try:
+            cols = {r[1] for r in c.execute("PRAGMA table_info(managed_repos)").fetchall()}
+        except Exception as e:
+            log.warning(f"F4 backfill: managed_repos column probe failed, skip: {e}")
+            return 0
+        for col in _GL_COLS:
+            if col not in cols:
+                per_col[col] = 0  # 冷启动库无此列（F4 后新库）
+                continue
+            _ct = "bot" if col.startswith("bot_") else "webhook"
+            rows = c.execute(
+                f"SELECT repo_key, {col} FROM managed_repos "
+                f"WHERE {col} IS NOT NULL AND {col} != ''").fetchall()
+            k = 0
+            for rk, val in rows:
+                try:
+                    _norm = _encrypt_repo_secret(_decrypt_repo_secret(val or ""))
+                except Exception as _de:
+                    # 单行解密失败不阻断整档：保留列值原样回填（读侧明文兼容可读）
+                    log.warning(f"F4 backfill: decrypt failed for {rk}.{col}, raw copy: {_de}")
+                    _norm = val or ""
+                cur = c.execute(
+                    "INSERT OR IGNORE INTO grape_t_repo_credentials (id, repo_key, cred_type, value) "
+                    "VALUES (?, ?, ?, ?)",
+                    (uuid7_str(), rk, _ct, _norm))
+                k += cur.rowcount
+            per_col[col] = k
+            n += k
+        db.commit()
+    if n:
+        log.info(f"F4 backfill gitee/gitlab token columns -> grape_t_repo_credentials: "
+                 f"{per_col} (rows filled={n})")
+    return n
+
+
+def _fn_backfill_gitee_gitlab_token_columns() -> None:
+    """迁移壳：gitee/gitlab 存量列回填 rc（F4 第一批，safe）。"""
+    backfill_gitee_gitlab_token_columns_to_rc()
+
+
+register_migration(
+    version="202611150004",
+    name="backfill-gitee-gitlab-token-cols-to-rc",
+    kind="safe",
+    fn=_fn_backfill_gitee_gitlab_token_columns,
+)
 
 register_migration(
     version="202611020001",
@@ -4627,7 +4951,7 @@ def _run_all_migrations():
     _cleanup_stale_meta()
     _cleanup_chat_shared_worker_runtime()
     _migrate_whitelist_from_file()
-    _ensure_whitelist_columns()
+    _ensure_platform_storage_columns()
     _ensure_case_insensitive_indexes()   # Issue #348: 大小写不敏感唯一约束（dev 侧补充，生产未合）
     _migrate_allow_signup_default()      # allow_signup 默认值迁移（dev 侧补充，生产未合）
     _cleanup_old_latency_logs()
@@ -5184,6 +5508,13 @@ def init_database():
     else:
         # SQLite——单实例不需要锁
         run_pending_migrations()
+
+    # S70（实弹发现）：config 派生存储列（bot_<p>_token 等）必须每次启动幂等补齐——
+    # 盖章库的迁移段一次性跳过，而平台卡可任意时刻注册（新平台加卡后注册 → 列不创建
+    # → add_managed_repo 静默 False → webhook_secret 不落库 → webhook 验签必 404）。
+    # 幂等 DDL（列已存在跳过）与盖章迁移语义解耦，每次启动执行。
+    # （D44/S64 函数体在合并 squash 时一度丢失，2026-11-13 按 b439764fd 原形恢复。）
+    _ensure_platform_storage_columns()
     # MySQL with session_manager
 
 def _migrate_event_status_pending():
@@ -6682,10 +7013,11 @@ def _migrate_tables():
             # 平台凭据列（多平台解耦后冻结为只读列：写路径已收拢到
             # grape_t_repo_credentials，但读取/回填路径仍按列名探测，冷启动库缺列会
             # OperationalError）。逐列幂等补齐。
+            # F4/D106 终态（2026-11-11，S128 冷启动断言锁）：gitee/gitlab 四列不再
+            # 补建——读链（token_resolver RepoBot）对卡列空平台直接短路不查列，
+            # 写路径只落 rc 单表；存量库旧列由 backfill 迁入后写路径轮换置空。
             for _cred_col in ("bot_gitcode_token", "gitcode_webhook_token",
-                              "bot_github_token", "github_webhook_token",
-                              "bot_gitee_token", "gitee_webhook_token",
-                              "bot_gitlab_token", "gitlab_webhook_token"):
+                              "bot_github_token", "github_webhook_token"):
                 _ensure_column(c, "managed_repos", _cred_col, "TEXT DEFAULT ''")
             db.commit()
             log.info("Added managed_repos.deploy_url column")
@@ -7432,3 +7764,20 @@ def _backfill_scene_display_names():
                 log.info("Issue #344: cleared cached plaintext tokens from chat_conversations and agent_tasks")
     except Exception as e:
         log.warning(f"Issue #344 token cleanup failed: {e}")
+
+
+# ── Issue #2091（上游 #10）：存量库补种 agent_type（登记在文件末尾，确保 register_migration 已定义）
+register_migration(
+    version="202611150001",
+    name="seed-agent-types-from-config",
+    kind="safe",
+    fn=_fn_seed_agent_types_from_config,
+)
+
+# ── Issue #2095（上游 #14）：存量库补种 event_action_filter 默认规则
+register_migration(
+    version="202611150002",
+    name="seed-event-action-filter-defaults",
+    kind="safe",
+    fn=_fn_seed_event_action_filter_once,
+)

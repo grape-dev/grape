@@ -66,7 +66,9 @@ def _capture(monkeypatch):
 # ---------------------------------------------------------------- S30
 
 def test_s30_whitelist_column_from_card(gitee_card, monkeypatch):
-    """登录名变更白名单列名取登录渠道卡（gitee 联动其列，未配平台跳过）。"""
+    """登录名变更白名单联动（2026-11-12 行式化：新行按 provider+username
+    行式 UPDATE + 老列按派生列名 UPDATE 双写；此用例锁老列 gitee_username
+    联动——列由用例手动补列模拟存量部署）。"""
     from src.domains.mgmt.auth.providers import invalidate_provider_cache
     _oauth = {"gitee": {"name": "Gitee", "auth_url": "https://gitee.com/oauth/authorize",
                         "token_url": "https://gitee.com/oauth/token",
@@ -104,16 +106,21 @@ def test_s30_whitelist_column_from_card(gitee_card, monkeypatch):
 # ---------------------------------------------------------------- S31
 
 def test_s31_create_issue_gitee_form_semantics(gitee_card, monkeypatch):
-    """gitee 建 issue：query_token + form-encoded（Gitee 系 v5 实测语义）。"""
+    """gitee 建 issue：query_token + form-encoded + owner_param 写形态。
+
+    Gitee 官方 swagger 5.4.93：POST /repos/{owner}/issues（repo 进 form body），
+    /repos/{o}/{r}/issues 只有 GET；写形态由卡能力位 issue_write_form=owner_param
+    派生（D41/S61 实弹观测，见 test_s61_gitee_issue_write_dialect.py）。
+    """
     from src.domains.runtime.vcs.api_client import VcsApiClient
     captured = _capture(monkeypatch)
     c = VcsApiClient("gitee", "TK", "o", "r")
     resp = c.create_issue("T1", "body text", assignee="u1")
     assert "error" not in resp
     req = captured[-1]
-    assert req.url == "https://gitee.com/api/v5/repos/o/r/issues?access_token=TK"
+    assert req.url == "https://gitee.com/api/v5/repos/o/issues?access_token=TK"
     assert req.headers.get("Content-Type") == "application/x-www-form-urlencoded"
-    assert b"title=T1" in req.data and b"assignee=u1" in req.data
+    assert b"repo=r" in req.data and b"title=T1" in req.data and b"assignee=u1" in req.data
 
 
 def test_s31_create_issue_gitlab_dialect_json(monkeypatch, gitee_card):

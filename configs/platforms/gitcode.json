@@ -7,6 +7,8 @@
   "api_base": "https://gitcode.com/api/v5",
   "api_auth": "query_token",
   "webhook_verify": "hmac",
+  "webhook_dialect": "gitee_v5",
+  "pr_head_filter": "bare_ref",
   "clone_auth": "x_access_token",
   "bot_username": "my_grape_bot",
   "user_images_base": "https://raw.gitcode.com/user-images",

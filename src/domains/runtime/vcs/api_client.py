@@ -317,29 +317,15 @@ class VcsApiClient:
         Returns:
             list: 评论列表；失败返回已取到的部分（保持 best-effort 语义）。
         """
-        # #1739 分页终止契约（同页/空页/短页即停）原样保留；存量三平台仍经
-        # _gitcode_request/_github_request/_gitlab_request 薄垫片（#1739 门禁去重
-        # 调用方按方法名 monkeypatch 传输出入口，为兼容面），新平台走 _request 卡驱动。
+        # D22 收敛：垫片族已删，三平台与其他平台统一走 _request 卡驱动；
+        # 方言派生路径（gitlab → project 编码 + notes；其余 → github 形态）逐字节保留。
         _out: list = []
         _prev = None
         for _page in range(1, max_pages + 1):
-            if self.provider == "gitcode":
-                _resp = self._gitcode_request(
-                    "GET", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}"
-                    f"/comments?per_page={per_page}&page={_page}")
-            elif self.provider == "github":
-                _resp = self._github_request(
-                    "GET", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}"
-                    f"/comments?per_page={per_page}&page={_page}")
-            elif self._dialect_is_gitlab():
-                _resp = self._gitlab_request(
-                    "GET", f"/projects/{self.owner}%2F{self.repo}/issues/{issue_number}"
-                    f"/notes?per_page={per_page}&page={_page}")
-            else:
-                _resp = self._request("GET", self._generic_path(
-                    f"/repos/{self.owner}/{self.repo}/issues/{issue_number}"
-                    f"/comments?per_page={per_page}&page={_page}",
-                    f"/issues/{issue_number}/notes?per_page={per_page}&page={_page}"))
+            _resp = self._request("GET", self._generic_path(
+                f"/repos/{self.owner}/{self.repo}/issues/{issue_number}"
+                f"/comments?per_page={per_page}&page={_page}",
+                f"/issues/{issue_number}/notes?per_page={per_page}&page={_page}"))
             if not isinstance(_resp, list) or not _resp:
                 break
             if _resp == _prev:
@@ -578,38 +564,29 @@ class VcsApiClient:
 
         ``per_page=100`` 且全量翻页，避免 PR 超过单页时漏掉 merged PR。返回列表；
         查询失败返回 ``{"error": ...}``。#1739 分页契约（短页即停）不变。
-        存量三平台经 _gitcode_request/_github_request/_gitlab_request 薄垫片传输
-        （#1739 门禁去重调用方按方法名 monkeypatch 传输出入口）；D22 新平台
-        （无存量垫片）走 _request 卡驱动，head 过滤仅 github 方言（存量 #993 口径）。
+        D22 收敛：垫片族已删，全平台统一走 _request 卡驱动（gitlab 方言 →
+        merge_requests + project 编码路径；github 方言 → pulls 形态），head
+        过滤仅 github 方言（存量 #993 口径：gitcode/github 卡方言均为 github）。
         """
-        if self.provider == "gitcode":
+        _card = self._platform_card()
+        if _card is None:
+            return {"error": f"unsupported provider: {self.provider}"}
+        if self._dialect_is_gitlab():
             def _fetch(page):
-                path = (f"/repos/{self.owner}/{self.repo}/pulls?state={state}"
-                        f"&per_page=100&page={page}")
-                return self._gitcode_request("GET", path)
-        elif self.provider == "github":
-            def _fetch(page):
-                head_q = f"&head={self.owner}:{head}" if head else ""
-                path = (f"/repos/{self.owner}/{self.repo}/pulls?state={state}"
-                        f"{head_q}&per_page=100&page={page}")
-                return self._github_request("GET", path)
-        elif self.provider == "gitlab":
-            def _fetch(page):
-                project_id = f"{self.owner}%2F{self.repo}"
-                path = (f"/projects/{project_id}/merge_requests?state={state}"
-                        f"&per_page=100&page={page}")
-                return self._gitlab_request("GET", path)
+                path = (f"/projects/{self.owner}%2F{self.repo}/merge_requests"
+                        f"?state={state}&per_page=100&page={page}")
+                return self._request("GET", path)
         else:
-            # D22：无存量垫片的新平台走 _request 卡驱动（方言派生路径）
-            _card = self._platform_card()
-            if _card is None:
-                return {"error": f"unsupported provider: {self.provider}"}
-            _head_q = (f"&head={self.owner}:{head}"
-                       if head and getattr(_card, "dialect", "") == "github" else "")
+            # head 过滤形态按卡 pr_head_filter（owner_ref=GitHub "owner:branch" 缺省；
+            # bare_ref=v5 家族裸 ref——gitcode 实弹实测 owner:ref 返回空列表，发错
+            # 形态会把列表过滤成空导致 branch_guard fail-open）
+            _head_val = (f"{self.owner}:{head}"
+                         if getattr(_card, "pr_head_filter", "owner_ref") == "owner_ref"
+                         else head)
+            _head_q = f"&head={_head_val}" if head else ""
             def _fetch(page):
-                path = self._generic_path(
-                    f"/repos/{self.owner}/{self.repo}/pulls?state={state}{_head_q}&per_page=100&page={page}",
-                    f"/merge_requests?state={state}&per_page=100&page={page}")
+                path = (f"/repos/{self.owner}/{self.repo}/pulls?state={state}"
+                        f"{_head_q}&per_page=100&page={page}")
                 return self._request("GET", path)
         return paginate_pages(_fetch, page_size=100, max_pages=max_pages)
 
@@ -772,18 +749,6 @@ class VcsApiClient:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
             return self._do_request(url, method, _up.urlencode(data), headers=headers)
         return self._do_request(url, method, data, headers=headers)
-
-    # 基线内部传输族（_gitcode_request/_github_request/_gitlab_request）保留为薄垫片：
-    # #1739 门禁去重等调用方/测试按方法名 monkeypatch 传输出入口——统一走 _request
-    # 卡驱动（鉴权/路径按卡派生），不再有平行实现。
-    def _gitcode_request(self, method: str, path: str, data: dict | None = None) -> dict:
-        return self._request(method, path, data, form=True) if method != "GET" else self._request(method, path)
-
-    def _github_request(self, method: str, path: str, data: dict | None = None) -> dict:
-        return self._request(method, path, data)
-
-    def _gitlab_request(self, method: str, path: str, data: dict | None = None) -> dict:
-        return self._request(method, path, data)
 
     def _generic_path(self, github_style: str, gitlab_style: str = "") -> str:
         """按卡方言选择路径模板（github 系直接用；gitlab 系用 project 编码路径）。"""

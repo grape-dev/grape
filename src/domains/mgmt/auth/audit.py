@@ -85,8 +85,8 @@ def _next_seq() -> int:
 
 def log_audit(
     event_type: str,
-    user_id: int = 0,
-    operator_id: int = 0,
+    user_id: "str | int" = 0,   # uuid7 主键 TEXT（operator 侧 admin id 仍可为 int）
+    operator_id: "str | int" = 0,
     ip: str = "",
     detail: "dict | None" = None,
 ) -> None:

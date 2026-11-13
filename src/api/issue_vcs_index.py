@@ -129,11 +129,60 @@ def _fetch_github_numbers(owner: str, repo: str, token: str) -> Optional[set[int
     return numbers or None
 
 
+def _fetch_numbers_via_port(provider: str, owner: str, repo: str,
+                            token: str) -> Optional[set[int]]:
+    """卡/端口驱动的 issue 编号分页拉取（provider 无关；gitee/gitlab 等非二分平台）。
+
+    资源段与鉴权全部来自 providers 端口（``module_for``：模块或平台卡垫片）：
+    API_BASE + ``repo_segment``（gitlab=/projects/{urlencoded}，其余=/repos/{o}/{r}）
+    + ``request``（按卡 api_auth 取 query_token/private_token/Bearer）。分页到空页
+    为止（短页不代表末页，防索引截断误删）。端口不可用 → ValueError（调用方
+    fail-open + warning，绝不静默返回 unknown）。
+    """
+    from src.domains.runtime.vcs.providers import module_for
+
+    mod = module_for(provider)
+    if mod is None:
+        raise ValueError(f"provider {provider!r} 无资源 API 端口/平台卡，无法建立 issue 索引")
+    seg_fn = getattr(mod, "repo_segment", None)
+    if callable(seg_fn):
+        repo_path = seg_fn(owner, repo)
+    else:
+        repo_path = f"repos/{owner}/{repo}"
+    api_base = str(getattr(mod, "API_BASE", "") or "").rstrip("/")
+    if not api_base:
+        raise ValueError(f"provider {provider!r} 端口未声明 API_BASE，无法建立 issue 索引")
+    numbers: set[int] = set()
+    page = 1
+    while True:
+        if page > _MAX_PAGES:
+            return None
+        url = (f"{api_base}/{repo_path}/issues"
+               f"?state=all&page={page}&per_page={_PER_PAGE}")
+        data = mod.request("GET", url, token)
+        if not isinstance(data, list):
+            return None
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            # github 方言（github/gitcode/gitee）issues 接口把 PR 混入编号空间 → 排除。
+            if item.get("pull_request"):
+                continue
+            try:
+                numbers.add(int(item.get("number")))
+            except (TypeError, ValueError):
+                continue
+        if not data:
+            break
+        page += 1
+    return numbers or None
+
+
 def vcs_issue_numbers(repo_key: str) -> Optional[frozenset[int]]:
     """返回 repo_key 对应 VCS 的 issue 编号集合；无法核实时返回 ``None``。
 
-    ``None`` 表示 unknown（无 token / 网络异常 / 非支持 provider / 空集合防护），
-    调用方必须 fail-open，不得据此隐藏卡片。
+    ``None`` 表示 unknown（无 token / 网络异常 / 端口不可用 / 空集合防护），
+    调用方必须 fail-open，不得据此隐藏卡片；任何 unknown 均落 warning（不静默）。
     """
     hit, cached = _cached(repo_key)
     if hit:
@@ -142,20 +191,19 @@ def vcs_issue_numbers(repo_key: str) -> Optional[frozenset[int]]:
     provider, owner, repo = parse_repo_key(repo_key)
     result: Optional[frozenset[int]] = None
     try:
-        if provider == "github":
-            from src.domains.mgmt.user.db import get_github_token
-            token = get_github_token(repo_key=repo_key) or ""
-            if token:
-                raw = _fetch_github_numbers(owner, repo, token)
-                result = frozenset(raw) if raw else None
-        elif provider == "gitcode":
-            from src.domains.mgmt.user.db import get_repo_token_with_refresh
-            token = get_repo_token_with_refresh(repo_key) or ""
-            if token:
-                raw = _fetch_gitcode_numbers(owner, repo, token)
-                result = frozenset(raw) if raw else None
+        # 2026-11-13 if/else 收口：github/gitcode 专属 fetch 分叉退役——
+        # _fetch_numbers_via_port 已是全平台通用实现（API_BASE/repo_segment/
+        # 鉴权全走 providers 端口；PR 排除、空页终止语义与专属版一致，四平台
+        # 实测端口齐备）；token 统一走 get_repo_token_for（策略链+能力位回落）。
+        # 原专属 _fetch_github_numbers/_fetch_gitcode_numbers 保留为测试锚。
+        from src.domains.mgmt.user.db import get_repo_token_for
+        token = get_repo_token_for(repo_key) or ""
+        if token:
+            raw = _fetch_numbers_via_port(provider, owner, repo, token)
+            result = frozenset(raw) if raw else None
         else:
-            result = None
+            log.warning(
+                f"issue_vcs_index: {repo_key} 无可用 token，issue 索引 fail-open（unknown）")
     except Exception as exc:
         log.warning(f"issue_vcs_index: {repo_key} fetch failed: {exc}, fail-open")
         result = None

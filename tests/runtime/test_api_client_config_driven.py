@@ -96,6 +96,25 @@ def test_s14_create_pr_card(gitee_card, monkeypatch):
     assert json.loads(req.data)["head"] == "feat"
 
 
+def test_list_prs_head_filter_form_card_driven(monkeypatch):
+    """D105-19 补充锁：head 过滤参数形态按卡 pr_head_filter——gitcode 裸 ref
+    （实弹实测 owner:ref 形态返回空列表）、github owner:ref（存量语义）。"""
+    seen = _calls(monkeypatch)
+    invalidate_platform_card_cache()  # 防前序用例卡缓存串扰（meta fixture 遗留）
+    c = VcsApiClient("gitcode", "TK", "own", "repo")
+    c.list_prs(state="all", head="feat-x")
+    assert "head=feat-x&" in seen[-1].url, seen[-1].url
+
+    c2 = VcsApiClient("github", "TK", "own", "repo")
+    c2.list_prs(state="all", head="feat-x")
+    assert "head=own:feat-x&" in seen[-1].url, seen[-1].url
+
+    # 卡声明 bare_ref 的 gitee（github 方言）同样发裸 ref
+    c3 = VcsApiClient("gitee", "TK", "oschina", "grape")
+    c3.list_prs(state="all", head="feat-x")
+    assert "head=feat-x&" in seen[-1].url, seen[-1].url
+
+
 def test_s14_gitlab_dialect_new_platform_paths(monkeypatch, gitee_card):
     """gitlab 方言新平台（如自建 GLS）：project 编码路径 + Bearer 鉴权（卡驱动）。"""
     with db_lock:

@@ -68,13 +68,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
   <div class="field">
     <label>平台 <span class="req">*</span></label>
     <select id="fAccountType">
-      <option value="gitcode">GitCode</option>
-      <option value="github">GitHub</option>
+      <!-- 2026-11-12 多渠道：选项由 _loadChannelOptions 从 /api/auth/providers
+           渠道目录动态填充（登录渠道卡 name 做展示，零平台字面量 option） -->
     </select>
   </div>
   <div class="field">
     <label>用户名 <span class="req">*</span></label>
-    <input id="fAccountName" type="text" placeholder="GitCode 或 GitHub 用户名">
+    <input id="fAccountName" type="text" placeholder="所选平台的用户名">
   </div>
   <div class="field">
     <label>邮箱 <span class="req">*</span></label>
@@ -336,14 +336,40 @@ function clearForm() {
   try { sessionStorage.removeItem(_FORM_KEY); } catch(e) {}
 }
 
+// 2026-11-12 多渠道：平台下拉从渠道目录动态渲染（beta-apply 原只有
+// gitcode/github 两个字面量 option，gitee/华为渠道被白名单拦下进来时
+// platform 参数选不中，申请落错平台）
+function _loadChannelOptions() {
+  var sel = document.getElementById('fAccountType');
+  if (!sel) return;
+  fetch('/api/auth/providers').then(function(r) { return r.json(); }).then(function(d) {
+    var providers = (d && d.providers) || [];
+    if (!providers.length) return;
+    var prev = sel.value;
+    sel.innerHTML = '';
+    providers.forEach(function(p) {
+      var opt = document.createElement('option');
+      opt.value = p.provider;
+      opt.textContent = p.name || p.provider;
+      sel.appendChild(opt);
+    });
+    if (prev) sel.value = prev;
+    // URL 带来的 platform 参数（目录就绪后设置才生效）
+    var params = new URLSearchParams(window.location.search);
+    var platform = params.get('platform');
+    if (platform) sel.value = platform;
+  }).catch(function() { /* 目录失败保留空下拉，用户手选不了——降级为占位提示 */ });
+}
+
 // 从URL参数自动填充平台和用户名（覆盖 sessionStorage 回填值）
 (function() {
   var params = new URLSearchParams(window.location.search);
   var platform = params.get('platform');
   var username = params.get('username');
+  _loadChannelOptions();
   if (platform) {
     var sel = document.getElementById('fAccountType');
-    if (sel) sel.value = platform;
+    if (sel && sel.value) sel.value = platform;  // 字面量/已就绪时立即设；否则由 _loadChannelOptions 就绪后设
   }
   if (username) {
     var inp = document.getElementById('fAccountName');

@@ -36,7 +36,7 @@ def test_s34_agent_repo_key_candidates(gitee_card):
     import inspect
     from src.domains.mgmt.routes import agents
     src = inspect.getsource(agents)
-    assert 'repo_key_candidates(repo_key)' in src
+    assert 'repo_key_candidates(' in src  # 调用形态不强绑变量名（repo_key/_owner_repo 均可）
     # 旧 if/elif 双前缀对不再存在
     assert 'if repo_key.startswith("gitcode:")' not in src
     assert 'elif repo_key.startswith("github:")' not in src
