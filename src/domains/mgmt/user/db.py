@@ -1070,6 +1070,14 @@ def get_skill_by_id(skill_id, *, raise_on_error: bool = False) -> dict | None:
     """
     if not skill_id:
         return None
+    import os as _os
+    if _os.environ.get("GRAPE_SKILLS_VIA_LIB") == "1":
+        try:
+            from src.domains.runtime import public as _rt
+            if _rt.available():
+                return _rt.get_skill_by_id(int(skill_id))
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(f"skill via lib failed, fallback: {_exc}")
     try:
         with db_lock:
             c = db.cursor()
@@ -1094,6 +1102,14 @@ def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[in
     """读取技能的主键 id、content_hash 和 file_path（变更检测用）。
     返回 (id, content_hash, file_path)，id=0 表示不存在。
     """
+    import os as _os
+    if _os.environ.get("GRAPE_SKILLS_VIA_LIB") == "1":
+        try:
+            from src.domains.runtime import public as _rt
+            if _rt.available():
+                return _rt.get_skill_content_hash(skill_name, scope or "official")
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(f"skill hash via lib failed, fallback: {_exc}")
     try:
         with db_lock:
             c = db.cursor()

@@ -107,6 +107,46 @@ def append_task_message(task_id: str, actor: str, content: str,
             return {"ok": True, "deduped": False, "id": getattr(c, "lastrowid", None), "seq": seq}
 
 
+_SKILL_DETAIL_COLS = ("id", "skill_name", "display_name", "description", "agent_type",
+                      "skill_path", "file_path", "scope", "owner_id", "content_hash")
+
+
+def get_skill_by_id(skill_id: int) -> dict[str, Any] | None:
+    """按主键取启用中的 skill（与 mgmt.user.db.get_skill_by_id 同字段同语义）。"""
+    if not skill_id:
+        return None
+    cols = ", ".join(_SKILL_DETAIL_COLS)
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"SELECT {cols} FROM skill WHERE id=%s AND is_active=1", (int(skill_id),))
+        row = c.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0], "skill_name": row[1], "display_name": row[2] or row[1],
+            "description": row[3] or "", "agent_type": row[4] or "",
+            "skill_path": row[5] or row[1], "file_path": row[6] or "",
+            "scope": row[7] or "official", "owner_id": row[8] or "",
+            "content_hash": row[9] or "",
+        }
+
+
+def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[int, str, str]:
+    """返回 (id, content_hash, file_path)；id=0 表示不存在（与 mgmt 侧同语义）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT id, content_hash, file_path FROM skill "
+                  "WHERE skill_name=%s AND scope=%s LIMIT 1", (skill_name, scope))
+        row = c.fetchone()
+        if not row:
+            return (0, "", "")
+        return (row[0], row[1] or "", row[2] or "")
+
+
+def count_skills(active_only: bool = True) -> int:
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT COUNT(*) FROM skill" + (" WHERE is_active=1" if active_only else ""))
+        return int(c.fetchone()[0])
+
+
 def aggregate_counts() -> dict[str, dict[str, int]]:
     """events / agent_tasks / agent_runtimes 按 status 的计数（供 insight 看板）。"""
     out: dict[str, dict[str, int]] = {}
@@ -133,4 +173,5 @@ def health() -> dict[str, Any]:
 
 
 __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
-           "task_stats", "append_task_message", "aggregate_counts", "health"]
+           "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
+           "get_skill_content_hash", "count_skills", "health"]

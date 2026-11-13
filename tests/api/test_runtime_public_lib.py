@@ -21,7 +21,9 @@ class FakeCursor:
         return self._rows
 
     def fetchone(self):
-        return self._first
+        if self._first is not None:
+            return self._first
+        return self._rows[0] if self._rows else None
 
     def close(self):
         pass
@@ -99,3 +101,51 @@ def test_available_false_without_dsn(monkeypatch):
     monkeypatch.delenv("GRAPE_DSN_RUNTIME", raising=False)
     db_registry.reset(close=False)
     assert rt.available() is False
+
+def test_get_skill_by_id_maps_fields(monkeypatch):
+    cur = install(monkeypatch, FakeCursor(
+        rows=[(753, "vod-repo-x", "VOD Repo X", "desc", "hermes", "vod/x", "/p/x", "repo", "u1", "abc")],
+        desc=[("id",), ("skill_name",), ("display_name",), ("description",), ("agent_type",),
+              ("skill_path",), ("file_path",), ("scope",), ("owner_id",), ("content_hash",)],
+    ))
+    out = rt.get_skill_by_id(753)
+    assert out["id"] == 753 and out["skill_name"] == "vod-repo-x"
+    assert out["display_name"] == "VOD Repo X" and out["scope"] == "repo"
+    sql, args = cur.executed[0]
+    assert "FROM skill WHERE id=%s AND is_active=1" in sql and args == (753,)
+
+
+def test_get_skill_by_id_defaults_display_and_scope(monkeypatch):
+    install(monkeypatch, FakeCursor(
+        rows=[(1, "n1", None, None, None, None, None, None, None, None)],
+        desc=[("id",)],
+    ))
+    out = rt.get_skill_by_id(1)
+    assert out["display_name"] == "n1"      # 空 display_name 回落 skill_name
+    assert out["skill_path"] == "n1"
+    assert out["scope"] == "official"       # 空 scope 回落 official
+    assert out["content_hash"] == ""
+
+
+def test_get_skill_by_id_missing(monkeypatch):
+    install(monkeypatch, FakeCursor(rows=[], desc=[("id",)], first=None))
+    assert rt.get_skill_by_id(99) is None
+    assert rt.get_skill_by_id(0) is None     # 假值短路，不查库
+
+
+def test_get_skill_content_hash_found_and_missing(monkeypatch):
+    install(monkeypatch, FakeCursor(rows=[], desc=[("id",)], first=(7, "h1", "/p")))
+    assert rt.get_skill_content_hash("n", "repo") == (7, "h1", "/p")
+
+    install(monkeypatch, FakeCursor(rows=[], desc=[("id",)], first=None))
+    assert rt.get_skill_content_hash("n") == (0, "", "")
+
+
+def test_count_skills_sql(monkeypatch):
+    cur = install(monkeypatch, FakeCursor(rows=[], desc=[("c",)], first=(473,)))
+    assert rt.count_skills() == 473
+    assert "WHERE is_active=1" in cur.executed[0][0]
+    cur2 = install(monkeypatch, FakeCursor(rows=[], desc=[("c",)], first=(500,)))
+    assert rt.count_skills(active_only=False) == 500
+    assert "WHERE" not in cur2.executed[0][0]
+
