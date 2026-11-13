@@ -348,6 +348,31 @@ def get_autopilot_execution(exec_id: int) -> tuple | None:
         return tuple(row) if row else None
 
 
+def upsert_engine_capability(runtime_id: int, tag: str, priority: int = 50,
+                             max_concurrent: int = 1, enabled: int = 1) -> None:
+    """写入/更新引擎能力（幂等 UPSERT，供跨域写补偿重放）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute(
+            "INSERT INTO engine_capabilities "
+            "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, NOW(), NOW()) "
+            "ON DUPLICATE KEY UPDATE priority=VALUES(priority), "
+            "max_concurrent=VALUES(max_concurrent), enabled=VALUES(enabled), updated_at=NOW()",
+            (int(runtime_id), tag, int(max_concurrent), int(priority), int(enabled)),
+        )
+
+
+def delete_engine_capability(runtime_id: int, tag: str | None = None) -> int:
+    """删除引擎能力（tag 为空则删该引擎全部），返回受影响行数；天然幂等。"""
+    with db_registry.cursor("runtime") as c:
+        if tag:
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=%s AND tag=%s",
+                      (int(runtime_id), tag))
+        else:
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=%s", (int(runtime_id),))
+        return int(c.rowcount or 0)
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -362,4 +387,5 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
-           "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "health"]
+           "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
+           "delete_engine_capability", "health"]

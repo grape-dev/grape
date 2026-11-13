@@ -2155,8 +2155,22 @@ def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_sessio
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag=?", (rid, tag))
-            if c.rowcount == 0:
+            from src.kernel.domain_read import runtime_lib as _rt_del
+            _rtd = _rt_del()
+            if _rtd is not None:
+                from src.kernel import cross_write as _xw
+                _deleted = {"n": 0}
+
+                def _apply_del():
+                    _deleted["n"] = _rtd.delete_engine_capability(rid, tag)
+
+                _xw.submit("runtime", "engine_cap_delete",
+                           f"cap-del:{rid}:{tag}", {"rid": rid, "tag": tag}, _apply_del)
+                _rowcount_del = _deleted["n"]
+            else:
+                c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag=?", (rid, tag))
+                _rowcount_del = c.rowcount
+            if _rowcount_del == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
             _sync_agent_tags(rid, c)
             db.commit()
