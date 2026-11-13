@@ -76,11 +76,19 @@ def _parse_ts(value: str) -> float:
 
 
 def out_track_id(user_id: int, kind: str, repo_key: str, issue_number: int,
-                 channel_type: str, installation_id: str) -> str:
-    """跨进程幂等单号：sha1(uid|kind|repo|issue|channel|inst)[:40]。"""
+                 channel_type: str, installation_id: str, event_key: str = "") -> str:
+    """跨进程幂等单号：sha1(uid|kind|repo|issue|channel|inst[|event])[:40]。
+
+    event_key 为空 = 旧口径（同一 (user,kind,repo,issue,channel,inst) 永远同一行，用于
+    「同一事件多进程并发只发一次」）。当上一次触达已落终态（sent/failed/expired）时，
+    调用方传事件桶（`_event_bucket()`）派生**新单号**，避免同 Issue 同 kind 的后续通知
+    被历史行静默吞掉（架构守护 Critical-2）。
+    """
     import hashlib
     raw = f"{int(user_id or 0)}|{kind or ''}|{repo_key or ''}|{int(issue_number or 0)}" \
           f"|{channel_type or ''}|{installation_id or ''}"
+    if event_key:
+        raw += f"|{event_key}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:_TRACK_ID_LEN]
 
 
@@ -180,24 +188,52 @@ def claim_for_sending(out_track_id: str) -> bool:
         conn.close()
 
 
+def owned_installations(instance_id: str) -> list[tuple]:
+    """本实例当前持有租约的 (installation_id, channel_type) 列表（只读 lease 表）。
+
+    用于把归属过滤**下推到取批 SQL**：否则全局 `ORDER BY created_at LIMIT 50` 先截断、
+    再在 Python 里按 owner 过滤，别的安装积压 ≥50 行时本实例永远取不到自己的行
+    （架构守护 Critical-1：多主控投递饥饿）。
+    """
+    if not instance_id:
+        return []
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT installation_id, channel_type FROM grape_t_channel_lease "
+            "WHERE lease_owner=? AND installation_id<>'' "
+            "ORDER BY updated_at DESC LIMIT 200", (instance_id,)).fetchall()
+    except Exception as e:
+        log.warning("[outbox] list owned installations failed: %s", e)
+        return []
+    finally:
+        conn.close()
+    return [(str(r[0]), str(r[1] or "")) for r in rows or []]
+
+
 def claim_batch(instance_id: str, *, now: Optional[str] = None, limit: int = BATCH_LIMIT) -> list[dict]:
-    """取本实例可消费的一批行（status='pending' AND 到期 AND 未过期）。
+    """取本实例可消费的一批行（status='pending' AND 到期 AND 未过期 AND 本实例持租约）。
 
     归属判定：行的 (installation_id, channel_type) 对应租约 owner == instance_id。
     无租约的行**跳过**（租约可能在别的实例手里；本实例不抢——防重复发送）。
-    返回的行已逐行置 sending（认领失败者剔除），
-    投递方用完必须 mark_sent / mark_failed 收尾，否则由过期清扫置 expired。
 
-    20261113 性能整改：整批共用一条连接、一次 commit（原先逐行开连接+commit，
-    50 行实测 95ms → 现在 ~2ms）。原子性不变：仍是逐行 `UPDATE ... WHERE status='pending'`，
-    以 rowcount 判定认领成功。
+    20261113 修（架构守护 Critical-1）：归属过滤先下推到取批 SQL（`owned_installations`
+    → `(installation_id, channel_type) IN (...)`），取不到也只会是本实例自己没有待投行，
+    不会被别的安装积压饿死；仍保留逐行 owner 复核，防取批后租约转手的竞态。
+
+    20261113 性能整改：整批共用一条连接、一次 commit（原先逐行开连接+commit）。
+    原子性不变：仍是逐行 `UPDATE ... WHERE status='pending'`，以 rowcount 判定认领成功。
     """
     now = now or _now_str()
-    rows = _pending_rows(now, limit)
+    owned = owned_installations(instance_id)
+    if not owned:
+        return []                     # 本实例不持任何租约：没有可投的行（也无需扫表）
+    rows = _pending_rows(now, limit, owned)
     if not rows:
         return []
     out: list[dict] = []
     owner_cache: dict[str, str] = {}
+    owned_set = set(owned)
     conn = _conn()
     try:
         for row in rows:
@@ -207,7 +243,7 @@ def claim_batch(instance_id: str, *, now: Optional[str] = None, limit: int = BAT
             if owner is None:
                 owner = lease_owner_of(inst, ctype)
                 owner_cache[lkey] = owner
-            if owner != instance_id:
+            if owner != instance_id or (inst, ctype) not in owned_set:
                 continue
             if _parse_ts(row["expires_at"]) <= time.time():
                 conn.execute(
@@ -230,13 +266,28 @@ def claim_batch(instance_id: str, *, now: Optional[str] = None, limit: int = BAT
     return out
 
 
-def _pending_rows(now: str, limit: int) -> list[dict]:
+def _pending_rows(now: str, limit: int, owned: Optional[list] = None) -> list[dict]:
+    """取到期待投行；owned 给定时只取这些 (installation_id, channel_type) 的行。
+
+    归属过滤放在 SQL 里（而不是先全局 LIMIT 再在 Python 里丢），否则别的安装积压
+    会把本实例的批次挤掉（Critical-1 饥饿）。参数按 OR 组展开，个数受租约实例数量约束。
+    """
     conn = _conn()
     try:
+        params: list = [now]
+        own_sql = ""
+        if owned:
+            pairs = owned[:50]          # 参数上限（单实例持有的安装数远小于此）
+            own_sql = " AND (" + " OR ".join(
+                "(installation_id=? AND channel_type=?)" for _ in pairs) + ")"
+            for inst, ctype in pairs:
+                params.extend([inst, ctype])
+        params.append(int(limit))
         rows = conn.execute(
             f"SELECT {_COLS} FROM {_TABLE} "
-            "WHERE status='pending' AND (next_retry_at='' OR next_retry_at<=?) "
-            "ORDER BY created_at LIMIT ?", (now, int(limit))).fetchall()
+            "WHERE status='pending' AND (next_retry_at='' OR next_retry_at<=?)"
+            f"{own_sql} "
+            "ORDER BY created_at LIMIT ?", tuple(params)).fetchall()
     finally:
         conn.close()
     return [_row_to_dict(r) for r in rows or []]
@@ -377,7 +428,11 @@ def purge_old_rows(retention_days: Optional[int] = None,
         if not ids:
             return 0
         q = ",".join("?" * len(ids))
-        cur = conn.execute(f"DELETE FROM {_TABLE} WHERE out_track_id IN ({q})", ids)
+        # 单语句原子删除：带上终态条件，避免与 requeue_for_retry（failed/expired→pending）
+        # 并发时把刚到重排队的行删掉（架构守护 Medium-1）
+        cur = conn.execute(
+            f"DELETE FROM {_TABLE} WHERE out_track_id IN ({q}) "
+            "AND status IN ('sent','failed','expired')", ids)
         conn.commit()
         return int(getattr(cur, "rowcount", 0) or 0)
     finally:

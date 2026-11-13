@@ -1486,6 +1486,10 @@ window._openSkillDropdown = function(agentType, btn) {
       var nm = opt.getAttribute('data-name') || '';
       var key = opt.getAttribute('data-key') || '';
       btn.setAttribute('data-current', key || nm);
+      // 同步真实身份：key 形如 'id:123' / 'scope:name'；清除选择时置 0
+      var _sid = 0;
+      if (key && key.indexOf('id:') === 0) _sid = parseInt(key.slice(3), 10) || 0;
+      btn.setAttribute('data-skill-id', String(_sid));
       btn.textContent = disp || nm || I18N.t('dashboard.select_skill');
       btn.style.color = (disp || nm) ? '#1d1d1f' : '#86868b';
       window._closeSkillDropdown();

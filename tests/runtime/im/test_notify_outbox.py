@@ -466,16 +466,17 @@ def test_notify_user_enqueues_and_immediate_deliver(outbox_db, clean_notify):
     row = OB.get_row(tid)
     assert row is not None and row["status"] == "sent"
 
-    # 三进程并发语义：同单号二次触发不新增行、不重发（返回值可回填已投递状态，
-    # 但真实发送只发生一次 —— ch.calls 保持 1）
-    res2 = asyncio.run(N.notify_user(1, "awaiting", "请补充信息",
+    # 口径变更（2026-11-13，架构守护 Critical-2）：旧行已落终态后同 kind 再次触达 =
+    # 新一轮事件实例，**必须真的发出去**；用 90s 事件桶派生新单号（同桶内并发仍是 1 行）。
+    # 旧语义（同单号二次触发静默不重发）会让「任务分配/待澄清」的后续提醒永久丢失且回报 sent。
+    res2 = asyncio.run(N.notify_user(1, "awaiting", "请补充信息（再次提醒）",
                                      repo_key="gitcode:o/r", issue_number=7,
                                      engine=eng, dedupe=True))
-    assert ch.calls == 1, "同单号不得真实重发"
+    assert ch.calls == 2, "终态后的新一轮触达应真实重发"
     conn = sqlite3.connect(outbox_db)
     n = conn.execute("SELECT COUNT(*) FROM grape_t_channel_outbound_card").fetchone()[0]
     conn.close()
-    assert n == 1
+    assert n == 2, "新一轮事件用事件桶派生独立单号，不覆盖历史行"
 
 
 def test_notify_user_no_binding_writes_failed_row(outbox_db, clean_notify):
@@ -948,3 +949,114 @@ def test_bulk_mark_keeps_attempt_semantics(outbox_db, clean_notify):
         OB.mark_failed_many([(t2, "net")])
     assert OB.get_row(t2)["status"] == "failed"
     assert OB.mark_failed_many([("nope", "x")]) == {"nope": ""}
+
+# ---------------------------------------------------------------- 架构守护整改（2026-11-13）
+
+def test_claim_batch_not_starved_by_other_installation_backlog(outbox_db, clean_notify):
+    """Critical-1：别的安装积压 ≥ BATCH_LIMIT 时，本实例仍能取到自己的行。
+
+    旧实现先全局 `ORDER BY created_at LIMIT 50` 再在 Python 里按 owner 过滤，
+    因此 51 条 owner-B + 1 条 owner-A 时 owner-A 永远取不到（返回 []）。
+    """
+    from src.domains.runtime.im import outbox as OB
+
+    def mk(inst, ctype, owner, i):
+        _mk_lease(outbox_db, f"{ctype}:{inst}", owner)
+        OB.enqueue(out_track_id=OB.out_track_id(i, "task", "o/r", i, ctype, inst),
+                   installation_id=inst, channel_type=ctype, channel_chat_id="c",
+                   payload={"kind": "task", "text": "t"}, expires_at=OB.new_expiry())
+
+    for i in range(51):                      # 先写 51 条别的实例的积压（created_at 更早）
+        mk("inst-busy", "feishu", "node-B", 5000 + i)
+    mk("inst-mine", "feishu", "node-A", 9001)
+
+    got_a = OB.claim_batch("node-A")
+    assert [r["installation_id"] for r in got_a] == ["inst-mine"], (
+        f"owner-A 被其他安装积压饿死，实际 {got_a}")
+    # 反向：B 实例仍然只拿自己的（不会抢 A 的）
+    got_b = OB.claim_batch("node-B")
+    assert got_b, "B 实例应取到自己积压的行（说明它不是被饿死的那一侧）"
+    assert all(r["installation_id"] == "inst-busy" for r in got_b), "B 不应取到 A 的行"
+
+
+def test_no_lease_means_no_scan(outbox_db, clean_notify):
+    """没有租约的实例直接返回空（不扫表，也不误投别人的行）。"""
+    from src.domains.runtime.im import outbox as OB
+    _mk_lease(outbox_db, "feishu:inst-x", "node-X")
+    OB.enqueue(out_track_id=OB.out_track_id(1, "task", "o/r", 1, "feishu", "inst-x"),
+               installation_id="inst-x", channel_type="feishu", channel_chat_id="c",
+               payload={"kind": "task", "text": "t"}, expires_at=OB.new_expiry())
+    assert OB.claim_batch("node-nobody") == []
+
+
+def test_purge_does_not_delete_requeued_row(outbox_db, clean_notify):
+    """Medium-1：清理与手动重发并发时，刚重排队的行不能被删掉。"""
+    from src.domains.runtime.im import outbox as OB
+    old = OB._future_str(-10 * 86400)
+    c = sqlite3.connect(outbox_db)
+    c.execute(
+        "INSERT OR REPLACE INTO grape_t_channel_outbound_card "
+        "(out_track_id, installation_id, channel_type, channel_chat_id, status, "
+        " attempt_count, next_retry_at, expires_at, last_error, payload, "
+        " updated_at, created_at) VALUES (?,?,?,?,?,0,'','','','{}',?,?)",
+        ("race", "inst-p", "feishu", "c", "failed", old, old))
+    c.commit()
+    c.close()
+    assert OB.requeue_for_retry("race") is True        # 变 pending（updated_at 仍是被删的旧值场景）
+    c = sqlite3.connect(outbox_db)
+    c.execute("UPDATE grape_t_channel_outbound_card SET updated_at=? WHERE out_track_id='race'",
+              (old,))                                      # 强化：把 updated_at 也打回老值
+    c.commit()
+    c.close()
+    OB.purge_old_rows(retention_days=7, limit=100)
+    assert OB.get_row("race") is not None, "pending 行被清理误删"
+    assert OB.get_row("race")["status"] == "pending"
+
+def test_same_event_still_dedupes_before_terminal(outbox_db, clean_notify, monkeypatch):
+    """Critical-2 的另一半：同一事件在途时（尚未终态），三进程并发仍只 1 行、只发一次。
+
+    事件桶只在旧行**已终态**时才参与派生新单号；在途/待投阶段一律命中同一主键。
+    """
+    from src.domains.runtime.im import notify as N, outbox as OB
+    monkeypatch.setattr(N, "_event_bucket", lambda: "bucket-fixed")
+    conn = sqlite3.connect(outbox_db)
+    conn.execute(
+        "INSERT INTO grape_t_channel_installation "
+        "(id, channel_type, scope, owner_user_id, status) VALUES ('inst-dedup','feishu','user','9090','active')")
+    conn.commit()
+    conn.close()
+    _mk_binding(outbox_db, "inst-dedup", "oc_dedup")
+
+    # 三个进程都没有引擎 → 只落库不投递（行停在 pending，属「同一事件在途」）
+    for _ in range(3):
+        asyncio.run(N.notify_user(9090, "task", "同一事件", engine=None, dedupe=False))
+
+    conn = sqlite3.connect(outbox_db)
+    n = conn.execute("SELECT COUNT(*) FROM grape_t_channel_outbound_card").fetchone()[0]
+    conn.close()
+    assert n == 1, f"同一在途事件应只 1 行，实际 {n}"
+
+    # 租约持有者（A 进程）补投：只发一次
+    _mk_lease(outbox_db, "feishu:inst-dedup", "node-A")
+    ch = FakeChannel(Capability.TEXT | Capability.RICH_CARD)
+    eng = FakeEngine({"inst-dedup": ch}, instance_id="node-A")
+    rounds = 0
+    consumer = OB.OutboxConsumer(eng)
+    while asyncio.run(consumer.run_once()) and rounds < 5:
+        rounds += 1
+    assert ch.calls == 1, f"同一事件只允许发送一次，实际 {ch.calls}"
+
+
+def test_single_process_entry_has_same_im_api_surface():
+    """Medium-2：单进程入口（main）与 A 进程（grape_server）的 /api/im 端点集合一致。"""
+    def im_paths(app):
+        spec = app.openapi()
+        return {p for p in spec.get("paths", {}) if p.startswith("/api/im")}
+
+    import src.api.main as m
+    import src.api.grape_server as gs
+    a = im_paths(gs.app)
+    b = im_paths(m.app)
+    assert "/api/im/outbound" in a and "/api/im/outbound/{out_track_id}/retry" in a
+    assert a == b, f"两入口 IM 端点集合不一致：{a ^ b}"
+

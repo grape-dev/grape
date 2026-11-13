@@ -378,6 +378,14 @@ def _make_payload(kind: str, text: str, repo_key: str, issue_number: int,
             "user_id": uid, "note": note}
 
 
+def _event_bucket() -> str:
+    """事件桶（90s，与内存去重窗口同量级）：区分「同一 (user,kind,repo,issue) 的新一轮触达」。
+
+    不引入秒级精度是为了让并发多进程在同一事件上仍落到同一桶 → 仍是 1 行 1 次发送。
+    """
+    return str(int(time.time() // 90))
+
+
 async def _backfill_existing_row(track: str, ctype: str,
                                  sent: list, failed: list, skipped: dict) -> bool:
     """同单号已存在：读行状态回填本轮结果（不真实重发）。返回是否已回填。"""
@@ -390,10 +398,11 @@ async def _backfill_existing_row(track: str, ctype: str,
         return False
     status = str(row.get("status") or "")
     if status == "sent":
-        sent.append(ctype)
-        _bump("sent_ok")
+        # 终态行的回填只用于「同一事件已在途/已发」的并发去重：不冒充本轮 sent
+        # （架构守护 Critical-2：此前报 sent 会让监控显示正常、实际没发）
+        skipped[ctype] = "deduped_existing"
         _bump("deduped")
-    elif status == "pending":
+    elif status in ("pending", "sending"):
         skipped[ctype] = "queued"
     else:
         failed.append(ctype)
@@ -439,6 +448,21 @@ async def _handle_target(target: dict, *, uid: int, kind: str, text: str,
                 expires_at=OB.new_expiry(), replace=not dedupe)
         except Exception as e:
             log.warning("[im-notify] outbox enqueue failed inst=%s: %s", inst, e)
+
+        if not inserted:
+            # Critical-2：单号已存在且旧行**已落终态** → 这是新一轮触达（事件实例不同），
+            # 必须发出去；用 90s 事件桶派生新单号（同事件并发仍同桶 → 仍只 1 行）。
+            old = await asyncio.to_thread(OB.get_row, track)
+            if old and str(old.get("status") or "") in ("sent", "failed", "expired"):
+                track = OB.out_track_id(uid, kind, repo_key, issue_number, ctype, inst,
+                                        event_key=_event_bucket())
+                try:
+                    inserted = await asyncio.to_thread(
+                        OB.enqueue, out_track_id=track, installation_id=inst,
+                        channel_type=ctype, channel_chat_id=cid, payload=payload,
+                        expires_at=OB.new_expiry(), replace=not dedupe)
+                except Exception as e:
+                    log.warning("[im-notify] outbox re-enqueue failed inst=%s: %s", inst, e)
 
     if not cid:
         # OB 不可用（导入失败）的退路：维持旧语义只计数

@@ -163,6 +163,11 @@ class TestSkillIdCarriedToBackend:
             "编辑/创建两处 selectAgentSkill 都要写 node.skill_id"
         )
 
+    def test_selection_writes_back_skill_id(self, js_content):
+        assert "btn.setAttribute('data-skill-id', String(_sid))" in js_content, (
+            "选中后必须回写 data-skill-id，否则重开下拉会用旧 id 覆盖并高亮错误档位"
+        )
+
     def test_draft_keeps_skill_id(self, js_content):
         assert js_content.count("en.skill_id = dn.skill_id || 0;") == 2, "草稿恢复要带回 skill_id"
         assert js_content.count("skill_id: n.skill_id || 0, skill_display_name") == 2, (
