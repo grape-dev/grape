@@ -17,7 +17,7 @@
 | 阶段 | 状态 | 实测证据 |
 | --- | --- | --- |
 | P0-1 备份 182 个视图 DDL | ✅ 完成 | `docs/weekly-11/backup/cross-domain-views-20261114.sql`（182 视图全量 DDL） |
-| P0-1 删除 60 个零引用视图 | ⏸ 待人工放行 | dry-run 已生成 60 条 DROP：`docs/weekly-11/backup/p0-prune-dryrun.txt`；`DROP` 操作曾被拒绝，按"不破坏线上库"口径停在 dry-run |
+| P0-1 删除 60 个零引用视图 | ✅ 完成（已放行） | 实测视图 182 → **122**，与白名单 122 条完全一致；30 张无视图表登记于 `docs/weekly-11/no-view-tables.txt` |
 | P0-2 外域引用统计 + 棘轮守卫 | ✅ 完成 | `scripts/foreign_table_refs.py --check` 通过；`tests/arch/test_foreign_table_refs.py` 3 项通过；基线 138 对 / 1306 处 |
 | P0-3 `sync_domain_views.py` 只减不增 | ✅ 完成 | 视图白名单 122 条（`docs/weekly-11/view-allowlist.txt`）；不在白名单的建视图请求 `DENY` 并 exit 1；`--prune` 支持删白名单外视图 |
 | P0-3 第二条建视图路径同样受控 | ✅ 完成 | `scripts/domain_view_freshness.py --repair` 对白名单外视图 `DENY`（生产库名族生效，dev 库族不误拦） |
@@ -39,8 +39,8 @@
 | 指标 | 数值 | 采集命令 |
 | --- | --- | --- |
 | 三库基表 | 102（唯一表名 101；`grape_t_merge_gate_log` 在 insight/runtime 各有一份，按 disposition 判给 insight） | `scripts/rds_cutover_check.py --mode baseline` |
-| 三库跨域视图 | 182（mgmt 44 / runtime 57 / insight 81） | `information_schema.views` |
-| 视图覆盖的非本域表 | 91 张；其中 30 张（60 视图）代码零跨域引用 → P0 快赢删除对象 | `docs/weekly-11/backup/p0-prune-dryrun.txt` |
+| 三库跨域视图 | **122**（mgmt 30 / runtime 34 / insight 58；P0 已删 60 个零引用视图） | `information_schema.views` + `view-allowlist.txt` |
+| 视图覆盖的非本域表 | 91 张；其中 30 张（60 视图）代码零跨域引用，已于 2026-11-14 删除 | `docs/weekly-11/backup/p0-prune-dryrun.txt`、`no-view-tables.txt` |
 | 代码外域表引用 | 69 张表 / 1270 处跨域（`表×消费域` 136 对）；含归属域共 2690 处 | `scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv` |
 | 域×域分布 | api→mgmt 252 / api→runtime 388；mgmt→runtime 193；kernel→mgmt 88、→runtime 89 | `docs/weekly-11/dependency-matrix.md` |
 | kernel 写域表（R8 存量） | 77 处 / 10 文件（R8 已锁死不得新增；本次未改 kernel 模块布局） | `scripts/check-arch.py` |
@@ -78,12 +78,7 @@
 
 ## 4. 未完成项与原因
 
-1. **P0 删 60 视图**：`DROP VIEW` 被人工拒绝 → 停在 dry-run。放行命令：
-   ```bash
-   DEVOPS_DB_HOST=<host> DEVOPS_DB_USER=<user> DEVOPS_DB_PASSWORD=<pwd> \
-     python3 scripts/sync_domain_views.py --prune      # 先不加 --dry-run 即为执行
-   ```
-   备份：`docs/weekly-11/backup/cross-domain-views-20261114.sql`。
+1. **P0 删 60 视图**：✅ 已放行并执行（182 → 122，与白名单逐条一致）。备份：`docs/weekly-11/backup/cross-domain-views-20261114.sql`；回滚即执行该 DDL 重建所需视图。
 2. **P1 30 张表归属重定**：需要按 `cross-domain-disposition.csv` 逐表把实现搬进 owner 域，
    并把 api/kernel 调用点改到 `/internal/*` 或 public 函数。当前仅完成守卫（R8 + 棘轮），
    迁移量：kernel 38 个文件×表对、api 124 个文件×表对。
