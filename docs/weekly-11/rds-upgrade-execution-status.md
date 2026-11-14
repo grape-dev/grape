@@ -158,6 +158,13 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### 渠道安装表 SQL 归位（-7）
+- `runtime/im/engine_wiring.py` 里 7 条 `grape_t_channel_installation`（mgmt 归属）语句改为
+  mgmt public 的 `installation_*` 助手（调用方仍传自己的连接，事务/关闭语义不变）。
+  这也解释了上一轮那次回退：该文件同时服务 mgmt 的安装表与 runtime 的引擎表，
+  「整条连接改指某域」必然打断另一侧，正确做法就是把 SQL 按归属域分开。
+- 全局 **739 → 732**；基线收紧 732 / 117 对；门禁 158 passed；三实例彩排 LOOP_EXIT=0、运行面 0 失败。
+
 ### session_store 接口化（-31）
 - `src/api/session_store.py`：issue / devops_agent_session / issue_agent_session / agent_type /
   agent_runtimes 等直接 SQL 全部改走 runtime public 具名查询（新增 20 条查询 + 6 个薄原语），

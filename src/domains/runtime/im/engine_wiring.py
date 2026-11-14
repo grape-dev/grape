@@ -414,14 +414,7 @@ def get_active_installation(scope: str = "user", *, owner_user_id: str = "", rep
     try:
         conn = _connect(default_db_path())
         try:
-            sql = ("SELECT id, channel_type, scope, owner_user_id, repo_key, config "
-                   "FROM grape_t_channel_installation WHERE status='active' AND scope=? "
-                   "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)")
-            params: list = [scope, key, key]
-            if channel_type:
-                sql += " AND channel_type=?"
-                params.append(channel_type)
-            row = conn.execute(sql + " ORDER BY updated_at DESC LIMIT 1", tuple(params)).fetchone()
+            row = _mgmt_public.installation_active_row(conn, scope, key, channel_type)
             if not row:
                 return None
             try:
@@ -459,15 +452,11 @@ def sync_installation(scope: str, *, owner_user_id: str = "", repo_key: str = ""
     try:
         conn = _connect(default_db_path())
         try:
-            row = conn.execute(
-                "SELECT config FROM grape_t_channel_installation WHERE legacy_app_id=? AND scope=? "
-                "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)",
-                (app_id, scope, key, key),
-            ).fetchone()
+            _cfg_raw = _mgmt_public.installation_config_by_app(conn, app_id, scope, key)
             existing = {}
-            if row and row[0]:
+            if _cfg_raw:
                 try:
-                    existing = json.loads(row[0]) or {}
+                    existing = json.loads(_cfg_raw) or {}
                 except Exception:
                     existing = {}
             secret = app_secret or str(existing.get("app_secret", ""))
@@ -480,12 +469,7 @@ def sync_installation(scope: str, *, owner_user_id: str = "", repo_key: str = ""
             _load_migration_module().upsert_installation(
                 conn, channel_type, scope, str(owner_user_id or ""), repo_key or "",
                 installation_config, app_id)
-            conn.execute(
-                "UPDATE grape_t_channel_installation SET status='active', updated_at=datetime('now') "
-                "WHERE legacy_app_id=? AND scope=? "
-                "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)",
-                (app_id, scope, key, key),
-            )
+            _mgmt_public.installation_activate(conn, app_id, scope, key)
             conn.commit()
             return True
         finally:
@@ -511,14 +495,9 @@ def revoke_installation(scope: str, *, owner_user_id: str = "", repo_key: str = 
     try:
         conn = _connect(default_db_path())
         try:
-            cur = conn.execute(
-                "UPDATE grape_t_channel_installation SET status='revoked', updated_at=datetime('now') "
-                "WHERE channel_type=? AND scope=? AND legacy_app_id=? "
-                "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)",
-                (channel_type, scope, app_id, key, key),
-            )
+            _n = _mgmt_public.installation_revoke(conn, channel_type, scope, app_id, key)
             conn.commit()
-            return (getattr(cur, "rowcount", 0) or 0) > 0
+            return _n > 0
         finally:
             conn.close()
     except Exception as e:
@@ -788,9 +767,7 @@ def _update_installation_config_sync(db_path: str, app_id: str,
     conn = _connect(db_path)
     try:
         try:
-            rows = conn.execute(
-                "SELECT id, config FROM grape_t_channel_installation WHERE status='active'"
-            ).fetchall()
+            rows = _mgmt_public.installation_active_configs(conn)
         except _DB_ERRORS:
             return False
         for row in rows:
@@ -802,9 +779,8 @@ def _update_installation_config_sync(db_path: str, app_id: str,
                 continue
             mutate(config)
             try:
-                conn.execute(
-                    "UPDATE grape_t_channel_installation SET config=? WHERE id=?",
-                    (json.dumps(config, ensure_ascii=False), row[0]))
+                _mgmt_public.installation_set_config(
+                    conn, json.dumps(config, ensure_ascii=False), row[0])
                 conn.commit()
             except _DB_ERRORS:
                 return False
@@ -858,10 +834,7 @@ def _lookup_installation_by_app_sync(db_path: str, app_id: str) -> Optional[dict
     """grape_t_channel_installation 活跃行里按 config.app_id 找安装（user 轨唯一；repo 轨取首行）。"""
     conn = _connect(db_path)
     try:
-        rows = conn.execute(
-            "SELECT id, scope, owner_user_id, repo_key, config, status "
-            "FROM grape_t_channel_installation WHERE status='active'"
-        ).fetchall()
+        rows = _mgmt_public.installation_active_installs(conn)
     except _DB_ERRORS:
         return None
     finally:

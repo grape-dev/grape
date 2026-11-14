@@ -49,7 +49,7 @@ grape_accounts,mgmt,runtime,16
 grape_t_channel_chat_session_binding,mgmt,runtime,4
 grape_t_channel_inbound_dedup,mgmt,runtime,5
 grape_t_channel_inbound_message,mgmt,runtime,1
-grape_t_channel_installation,mgmt,runtime,26
+grape_t_channel_installation,mgmt,runtime,19
 grape_t_channel_lease,mgmt,runtime,15
 grape_t_channel_outbound_card,mgmt,runtime,2
 grape_t_channel_sender_identity,mgmt,runtime,3

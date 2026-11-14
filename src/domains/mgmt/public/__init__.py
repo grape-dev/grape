@@ -670,7 +670,7 @@ def health() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)[:160], "dsn_configured": bool(db_registry.dsn_of("mgmt"))}
 
 
-__all__ = ["unified_user_mapping_ddl", "available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_org_id",
+__all__ = ['installation_active_row', 'installation_config_by_app', 'installation_activate', 'installation_revoke', 'installation_active_configs', 'installation_set_config', 'installation_active_installs', "unified_user_mapping_ddl", "available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_org_id",
            "list_user_ids_by_open_id", "get_feishu_open_id", "list_all_user_ids",
            "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
            "get_account_id_by_username", "get_account_username_by_id",
@@ -1318,3 +1318,65 @@ def ensure_user_mapping_schema(conn: Any) -> None:
             log.info("Added unified_user_mapping.app_id column")
     except Exception as e:  # noqa: BLE001
         log.warning(f"Add unified_user_mapping.app_id failed: {e}")
+
+# ── 渠道安装表（grape_t_channel_installation 归 mgmt）────────────────────────
+# runtime/im 需要读写这张表；SQL 文本只放在本模块一份，调用方传自己的连接进来
+# （连接仍归调用方管事务/关闭，语义零变化）。
+
+def installation_active_row(conn, scope: str, key: str, channel_type: str = "") -> tuple | None:
+    """按轨 + 归属 key 取最新一条活跃安装。"""
+    sql = ("SELECT id, channel_type, scope, owner_user_id, repo_key, config "
+           "FROM grape_t_channel_installation WHERE status='active' AND scope=? "
+           "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)")
+    params: list = [scope, key, key]
+    if channel_type:
+        sql += " AND channel_type=?"
+        params.append(channel_type)
+    return conn.execute(sql + " ORDER BY updated_at DESC LIMIT 1", tuple(params)).fetchone()
+
+
+def installation_config_by_app(conn, app_id: str, scope: str, key: str) -> str | None:
+    """按 legacy_app_id 取该轨安装的 config 原文。"""
+    row = conn.execute(
+        "SELECT config FROM grape_t_channel_installation WHERE legacy_app_id=? AND scope=? "
+        "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)",
+        (app_id, scope, key, key)).fetchone()
+    return row[0] if row else None
+
+
+def installation_activate(conn, app_id: str, scope: str, key: str) -> None:
+    """把该 app 的安装行置 active（换 app 复用同一行）。"""
+    conn.execute(
+        "UPDATE grape_t_channel_installation SET status='active', updated_at=datetime('now') "
+        "WHERE legacy_app_id=? AND scope=? "
+        "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)",
+        (app_id, scope, key, key))
+
+
+def installation_revoke(conn, channel_type: str, scope: str, app_id: str, key: str) -> int:
+    """解绑：置 revoked（不硬删），返回受影响行数。"""
+    cur = conn.execute(
+        "UPDATE grape_t_channel_installation SET status='revoked', updated_at=datetime('now') "
+        "WHERE channel_type=? AND scope=? AND legacy_app_id=? "
+        "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)",
+        (channel_type, scope, app_id, key, key))
+    return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def installation_active_configs(conn) -> list[tuple]:
+    """所有活跃安装的 (id, config)，供运行时状态就地更新。"""
+    return conn.execute(
+        "SELECT id, config FROM grape_t_channel_installation WHERE status='active'").fetchall()
+
+
+def installation_set_config(conn, cfg_json: str, row_id) -> None:
+    """就地写回某行 config。"""
+    conn.execute("UPDATE grape_t_channel_installation SET config=? WHERE id=?", (cfg_json, row_id))
+
+
+def installation_active_installs(conn) -> list[tuple]:
+    """所有活跃安装的完整六列（按 config.app_id 反查安装用）。"""
+    return conn.execute(
+        "SELECT id, scope, owner_user_id, repo_key, config, status "
+        "FROM grape_t_channel_installation WHERE status='active'").fetchall()
+
