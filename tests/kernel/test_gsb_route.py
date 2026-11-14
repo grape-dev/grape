@@ -386,17 +386,26 @@ def test_remote_business_error_not_wrapped(monkeypatch, fake_service):
 
 
 def test_per_method_timeout_applied_from_config(monkeypatch, fake_service):
-    """配置表 timeout_ms 热应用到 remote HTTP 客户端（未配置不动默认超时）。"""
+    """配置表 timeout_ms → per-request 超时覆盖（未配置行不覆盖默认 10s）。"""
     monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
     applied: list[float] = []
 
     class _Gsb:
-        def set_timeout(self, seconds):
-            applied.append(seconds)
+        def with_timeout(self, seconds):
+            import contextlib
+
+            @contextlib.contextmanager
+            def _ctx():
+                applied.append(seconds)
+                yield
+            return _ctx()
 
     class _Client:
         def __init__(self):
-            self._client = _Gsb()
+            self._gsb = _Gsb()
+
+        def with_timeout(self, seconds):
+            return self._gsb.with_timeout(seconds)
 
     class _Remote:
         def __init__(self):
@@ -405,11 +414,59 @@ def test_per_method_timeout_applied_from_config(monkeypatch, fake_service):
         def get_skill(self, skill_id):
             return ("remote", skill_id)
 
+        def get_bot_config(self, repo_key):
+            return ("remote", repo_key)
+
     fake_service(_RecordingLocal, _Remote)
     route_config.set_route("fake.get_skill", "remote", timeout_ms=250)
     svc = get_service("fake")
     assert svc.get_skill("7") == ("remote", "7")
     assert applied == [0.25]
+    # 无配置行的方法：不产生超时覆盖（维持客户端默认，无粘滞）
+    assert svc.get_bot_config("o/r") == ("remote", "o/r")
+    assert applied == [0.25]
+
+
+def test_per_method_timeout_not_sticky_real_gsbclient(monkeypatch, fake_service):
+    """QA Required#3（真实 GsbClient 路径）：配 250ms 调 A → 调无配置 B，
+    B 仍为默认超时（per-request 下发，共享客户端 timeout 从不被改写）。
+    """
+    monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
+    monkeypatch.setenv("GRAPE_MGMT_URL", "http://only-host:38081")
+    from src.domains.contracts.remote.http_client import ServiceHttpClient
+
+    class _CapturingHttp:
+        """替身 httpx 客户端：记录每次请求的 per-request timeout。"""
+
+        def __init__(self):
+            self.seen: list = []
+
+        def request(self, method, url, headers=None, **kwargs):
+            self.seen.append(kwargs.get("timeout", None))
+            return _FakeResponse(200)
+
+    captured = _CapturingHttp()
+
+    class _Remote:
+        def __init__(self):
+            self.client = ServiceHttpClient("mgmt")   # 真实 ServiceHttpClient
+            self.client._client._http = captured      # 仅替换传输层替身
+
+        def get_skill(self, skill_id):
+            return self.client.get(f"/internal/skills/{skill_id}")
+
+        def get_bot_config(self, repo_key):
+            return self.client.get(f"/internal/repos/{repo_key}/bot-config")
+
+    fake_service(_RecordingLocal, _Remote)
+    route_config.set_route("fake.get_skill", "remote", timeout_ms=250)
+    svc = get_service("fake")
+    assert svc.get_skill("7") == {"ok": True}
+    assert svc.get_bot_config("o/r") == {"ok": True}
+    # A（配置 250ms）→ per-request 0.25；B（无配置行）→ 默认超时（未传
+    # per-request timeout），共享客户端状态零粘滞
+    assert captured.seen[0] == 0.25
+    assert captured.seen[1] is None
 
 
 # ---------------- metrics 标签：超时 / 不可达 / 业务错误 ----------------

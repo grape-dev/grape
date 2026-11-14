@@ -54,6 +54,14 @@ class ServiceHttpClient:
         """SSE 流式读取——yield dict per event。"""
         yield from self._client.stream_sse(path)
 
+    def with_timeout(self, timeout_seconds: float | None):
+        """公开透传 per-request 超时覆盖（Issue #2479 QA 审查修复 Required#3）。
+
+        provider 路由代理经本公开入口下发路由配置表 timeout_ms，不再走
+        ``remote.client._client`` 私有属性链。
+        """
+        return self._client.with_timeout(timeout_seconds)
+
     def close(self) -> None:
         """关闭 HTTP 客户端。"""
         self._client.close()

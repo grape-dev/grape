@@ -12,9 +12,10 @@ Issue #2479 按方法路由方案见 docs/issue-2479/plan.md。
 2. **全局开关**（部署级）：``GRAPE_PROVIDER_MODE`` 非 ``remote`` → 一律 Local
    （存量单机/共库行为零回归）。未配置时行为与改造前一致。
 3. **按方法路由**（``GRAPE_PROVIDER_MODE=remote``）：返回 ``_RoutedService`` 代理，
-   每次方法调用按 决策链 取值：
-   矩阵守卫 → DB 配置表（``gsb_provider_route``，version+TTL 缓存，改表 ≤30s 生效）
-   → 内置基线（热路径四项 lib / public 原语 lib / 其余默认偏好 remote）。
+    每次方法调用按 决策链 取值：
+    矩阵守卫 → DB 配置表（``gsb_provider_route``，version+TTL 缓存，改表 ≤30s 生效）
+    → 内置基线（热路径四项 + 压测超阈值 14 项 / public 原语 lib；
+    压测采样错误的 5 项默认偏好 remote，remote 由配置表显式放开）。
 
 Remote 超时/不可达 **fail-fast**：代理把传输层异常包装为
 ``GsbRemoteTimeoutError`` / ``GsbRemoteUnreachableError``（稳定错误码），
@@ -33,6 +34,7 @@ Remote 超时/不可达 **fail-fast**：代理把传输层异常包装为
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 from typing import Any, Callable
@@ -245,22 +247,27 @@ class _RoutedService:
             self._local = self._local_factory()
         return self._local
 
-    def _apply_remote_timeout(self, method: str) -> None:
-        """配置表 per-method timeout_ms 热应用到 remote HTTP 客户端（best-effort）。
+    def _remote_timeout_ctx(self, method: str):
+        """配置表 per-method timeout_ms → 逐请求超时覆盖（best-effort）。
 
-        未配置该行时不改客户端默认超时（10s）；显式配置才收紧/放宽。
+        QA 审查修复 Required#3：经 ``ServiceHttpClient.with_timeout()`` 公开
+        透传 GsbClient 线程本地 per-request 超时，不改共享客户端状态——
+        该方法无配置行时不覆盖（维持默认 10s），也不会把上一个方法的超时
+        「粘滞」到后续调用。返回可 with 的上下文管理器。
         """
         try:
             ms = route_config.get_cached_timeout_ms(f"{self._svc_name}.{method}")
             if not ms or ms <= 0:
-                return
-            client = getattr(self._remote, "client", None)
-            gsb = getattr(client, "_client", None) if client else None
-            if gsb is not None:
-                gsb.set_timeout(ms / 1000.0)
+                return contextlib.nullcontext()
+            remote_http = getattr(self._remote, "client", None)
+            with_timeout = getattr(remote_http, "with_timeout", None)
+            if callable(with_timeout):
+                return with_timeout(ms / 1000.0)
+            return contextlib.nullcontext()
         except Exception as exc:  # noqa: BLE001 - 超时热应用失败不阻断调用
             log.debug(f"per-method remote timeout not applied "
                       f"({self._svc_name}.{method}): {exc}")
+            return contextlib.nullcontext()
 
     def __getattr__(self, method: str):
         if method.startswith("_"):
@@ -275,20 +282,20 @@ class _RoutedService:
             impl = getattr(self._instance(mode), method)
             if mode != _MODE_REMOTE:
                 return impl(*args, **kwargs)
-            self._apply_remote_timeout(method)
-            try:
-                return impl(*args, **kwargs)
-            except _REMOTE_CHANNEL_ERRORS as exc:
-                # fail-fast：明确错误码、不回落 lib（本地实例未被触碰）
-                if _httpx is not None and isinstance(exc, _httpx.TimeoutException):
-                    raise GsbRemoteTimeoutError(
-                        f"GSB remote timeout: {self._svc_name}.{method} "
+            with self._remote_timeout_ctx(method):
+                try:
+                    return impl(*args, **kwargs)
+                except _REMOTE_CHANNEL_ERRORS as exc:
+                    # fail-fast：明确错误码、不回落 lib（本地实例未被触碰）
+                    if _httpx is not None and isinstance(exc, _httpx.TimeoutException):
+                        raise GsbRemoteTimeoutError(
+                            f"GSB remote timeout: {self._svc_name}.{method} "
+                            f"({type(exc).__name__})"
+                        ) from exc
+                    raise GsbRemoteUnreachableError(
+                        f"GSB remote unreachable: {self._svc_name}.{method} "
                         f"({type(exc).__name__})"
                     ) from exc
-                raise GsbRemoteUnreachableError(
-                    f"GSB remote unreachable: {self._svc_name}.{method} "
-                    f"({type(exc).__name__})"
-                ) from exc
 
         return _dispatch
 
