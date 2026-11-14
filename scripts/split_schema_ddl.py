@@ -29,14 +29,17 @@ OWNER_TSV = REPO / "docs/weekly-11/table-owner.tsv"
 TABLE_RE = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?(\w+)[`\"]?", re.I)
 
 
+SCHEMA_DOMAIN = {"grape_mgmt_db": "mgmt", "grape_runtime_db": "runtime",
+                 "grape_insight_db": "insight"}
+
+
 def load_owner() -> dict[str, str]:
+    """table → 归属域（冻结清单 docs/weekly-11/table-owner.tsv）。"""
     owner = {}
     for line in OWNER_TSV.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.startswith("#"):
-            continue
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            owner[parts[1].strip()] = parts[0].replace("grape_", "").replace("_db", "")
+        schema, _, table = line.partition("\t")
+        if table and schema in SCHEMA_DOMAIN:
+            owner[table.strip()] = SCHEMA_DOMAIN[schema]
     return owner
 
 
