@@ -11,11 +11,13 @@
 
 三库独立修正：原先 3/4 走 `runtime_lib` 读，而该表归 insight 域，且把 `read_all()`
 的返回值当连接用（`db = read_all(...)` + `db.execute`），独立拓扑下必然
-1146 / AttributeError。现改为 `domain_db.cursor(域)`：配了自有 DSN 走 owner 连接，
-单库/视图期回落进程库——两条拓扑下语义一致。
+1146 / AttributeError。现 3/4 两步全部走 **insight public**（`read_all_any` 系原语 +
+域内事务），SQL 只留归属域一份：配了自有 DSN 走 owner 连接，单库/视图期回落进程库——
+两条拓扑下语义一致。
 """
 import time
 
+from src.domains.insight import public as _insight_public
 from src.kernel.config import log
 from src.kernel.domain_db import cursor as _domain_cursor
 from src.kernel.id_gen import uuid7_str  # D105 第二批：DB 主键 UUIDv7
@@ -111,26 +113,18 @@ def backfill_repo_credentials_encrypt() -> int:
 
     明文判定 = 无冒号（decrypt 明文兼容同构判据）；密文行含冒号跳过。
     复合键 (repo_key, cred_type) 定位——双方言安全（N1 rowid 教训复用）。
-    表归 insight 域，故走 insight 连接。
+    表归 insight 域，SQL/事务都在 insight public（只写 value 列、不改 updated_at）。
     """
     try:
         from src.domains.mgmt.auth.credential_crypto import encrypt
 
-        with _domain_cursor("insight") as c:
-            c.execute(
-                "SELECT repo_key, cred_type, value FROM grape_t_repo_credentials "
-                "WHERE value != ''")
-            rows = c.fetchall()
-            plain = [(rk, ct, val) for rk, ct, val in rows
-                     if ":" not in val]  # 明文判定：密文恒为 kid:nonce:ct 三段
-            for rk, ct, val in plain:
-                c.execute(
-                    "UPDATE grape_t_repo_credentials SET value=? "
-                    "WHERE repo_key=? AND cred_type=?",
-                    (encrypt(val), rk, ct))
-            if plain:
-                _commit(c)
-                log.info(f"grape_t_repo_credentials encryption backfill: {len(plain)} rows")
+        rows = _insight_public.list_repo_credentials_with_nonempty_value()
+        plain = [(rk, ct, val) for rk, ct, val in rows
+                 if ":" not in val]  # 明文判定：密文恒为 kid:nonce:ct 三段
+        if plain:
+            _insight_public.update_repo_credential_values(
+                [(rk, ct, encrypt(val)) for rk, ct, val in plain])
+            log.info(f"grape_t_repo_credentials encryption backfill: {len(plain)} rows")
         return len(plain)
     except Exception as e:
         log.warning(f"grape_t_repo_credentials encrypt backfill failed: {e}")
@@ -143,11 +137,7 @@ def backfill_repo_credentials_uuid() -> int:
     本函数保留为壳（调用链稳定），语义=断言校验（残留空 id 行=数据异常告警）。
     """
     try:
-        with _domain_cursor("insight") as c:
-            c.execute(
-                "SELECT repo_key, cred_type FROM grape_t_repo_credentials "
-                "WHERE id IS NULL OR id=''")
-            need = c.fetchall()
+        need = _insight_public.list_repo_credentials_without_id()
         if need:
             # D99 主键化后不应出现——出现即数据异常（旧库未走新 DDL），响亮告警
             log.warning(f"grape_t_repo_credentials: {len(need)} rows with empty id "

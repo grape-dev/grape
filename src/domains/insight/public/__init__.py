@@ -46,6 +46,14 @@ _REPO_CRED_QUERIES: dict[str, str] = {
         "SELECT repo_key, value FROM grape_t_repo_credentials WHERE cred_type='bot'"),
     "repo_cred_nonempty_keys_all": (
         "SELECT repo_key FROM grape_t_repo_credentials WHERE value IS NOT NULL AND value!=''"),
+    # 存量回填面（D90-N3/N4）：列序与原回填 SQL 逐字一致；`!= ''` 在 sqlite/MySQL 同义，
+    # 且 NULL 行两边都不命中（NULL 比较结果为 NULL，非真）——与改造前分流一致。
+    "repo_cred_nonempty_rows": (
+        "SELECT repo_key, cred_type, value FROM grape_t_repo_credentials WHERE value != ''"),
+    "repo_cred_value_only_update": (
+        "UPDATE grape_t_repo_credentials SET value=? WHERE repo_key=? AND cred_type=?"),
+    "repo_cred_empty_id_rows": (
+        "SELECT repo_key, cred_type FROM grape_t_repo_credentials WHERE id IS NULL OR id=''"),
 }
 
 # 指标留存（`obs_metric_rollup` 归 insight）：管理台 `scope=all` 需要枚举已出现过的维度键。
@@ -268,6 +276,47 @@ def repo_keys_with_nonempty_credential(cred_type: str = "") -> set[str]:
     return {r[0] for r in rows if r[0]}
 
 
+# ---------- 存量回填面（D90-N3 加密回填 / D99 空 id 断言）----------
+#
+# 这两步原在 mgmt 的 `user/credentials_backfill_n1.py` 里持 insight 游标直发 SQL——
+# 表归 insight，SQL 只该留本域一份。下面三个入口把「读什么 / 改哪列」收回本域：
+# 回填只写 `value` 列（**不动 updated_at**，与原 SQL 逐字一致），批量写在同一事务内
+# 全成或全回滚；缺行不插入（回填不新增凭据行，与原 UPDATE 语义一致）。
+
+
+def list_repo_credentials_with_nonempty_value() -> list[tuple]:
+    """全部非空凭据行 `(repo_key, cred_type, value)`；value 未解密，判定归调用方。
+
+    **保序**（无 ORDER BY，行序即表序）：加密回填逐行改写，行序不影响结果，但保持
+    与改造前 `fetchall()` 同序，日志里的 `rows[:3]` 抽样可对齐。
+    """
+    return [tuple(r) for r in read_all_any("repo_cred_nonempty_rows")]
+
+
+def update_repo_credential_values(pairs: list[tuple]) -> int:
+    """批量改写凭据值：`[(repo_key, cred_type, value), ...]`，**同一事务**。
+
+    复合键 `(repo_key, cred_type)` 定位；只写 value 列。任一条失败 → 整批回滚
+    （调用方按「回填是幂等整批重放」的语义处理，不会留下半批密文半批明文）。
+    返回提交条数；空列表零写、不取连接。
+    """
+    items = [tuple(p) for p in (pairs or [])]
+    if not items:
+        return 0
+    with _any_tx() as c:
+        for repo_key, cred_type, value in items:
+            c.execute(_any_sql("repo_cred_value_only_update"), (value, repo_key, cred_type))
+    return len(items)
+
+
+def list_repo_credentials_without_id() -> list[tuple]:
+    """`id` 为 NULL/空串的凭据行 `(repo_key, cred_type)`（D99 主键化后应恒空）。
+
+    只读断言口：调用方据此告警「旧库未走新 DDL」，本域不做任何修补。
+    """
+    return [tuple(r) for r in read_all_any("repo_cred_empty_id_rows")]
+
+
 # ---------- 指标留存维度（obs_metric_rollup 归 insight）----------
 
 def rollup_dim_keys(exclude: str = "global") -> list[str]:
@@ -284,7 +333,9 @@ __all__ += ["list_repo_credential_rows", "aggregate_llm_usage", "read_one_any", 
             "rollup_dim_keys", "record_api_latency_any",
             "repo_credential_value", "repo_credential_meta", "upsert_repo_credential_value",
             "clear_repo_credential_value", "any_repo_credential", "repo_keys_sharing_value",
-            "repo_keys_with_nonempty_credential"]
+            "repo_keys_with_nonempty_credential",
+            "list_repo_credentials_with_nonempty_value", "update_repo_credential_values",
+            "list_repo_credentials_without_id"]
 
 
 # ---------- 观测表聚合（obs_llm_usage 归 insight）----------

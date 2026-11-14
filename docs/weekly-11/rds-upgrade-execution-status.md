@@ -3299,6 +3299,78 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   且本批无 schema / 迁移 / 契约面变化（不改表、不新增路由），运行面证据为 sqlite 烟测 + 单库 pytest；
   **不把彩排结果算作本批证据**。
 
+### mgmt/user/credentials_backfill_n1 回填两表归位（-3，本文件 insight 面清零）
+- 文件：`src/domains/mgmt/user/credentials_backfill_n1.py`（3 处 → **0**，仅剩 mgmt 本域
+  `user_credentials` 两步的 SQL）；全局静态 **81 → 78**（-3），对数 **37 → 37**——
+  `grape_t_repo_credentials←mgmt` 这一对仍有余量（其它文件），本文件的 3 处已清零。
+- 表分布（消费域 mgmt）：`grape_t_repo_credentials` 3 处（归 **insight**）：
+  · 行 121 `SELECT repo_key, cred_type, value ... WHERE value != ''`（加密回填基集读取）
+  · 行 128 `UPDATE ... SET value=? WHERE repo_key=? AND cred_type=?`（明文行逐行加密）
+  · 行 148 `SELECT repo_key, cred_type ... WHERE id IS NULL OR id=''`（D99 空 id 断言）
+  三处同一张表、同一域，无动态拼接（表名/列名均为字面量，无需白名单）。
+- 本轮取批：作业单头名 `src/kernel/prompt_builder.py` 与次名
+  `src/kernel/persistence/credential_usage_log.py` **复核后仍 blocked**（理由见本节末，
+  结论与 2026-11-14 一致），按作业单规则跳过，取第一个可改造文件。
+- 归属域侧改动（SQL 仍只在 owner 域一份）：
+  · insight public 新增 3 个具名查询（`_REPO_CRED_QUERIES`）：
+    `repo_cred_nonempty_rows` / `repo_cred_value_only_update` / `repo_cred_empty_id_rows`，
+    列序、谓词、`?` 占位符与原 SQL 逐字一致；
+  · insight public 新增 3 个薄函数：`list_repo_credentials_with_nonempty_value()`（保序全量行）、
+    `update_repo_credential_values(pairs)`（域内单事务批量写）、`list_repo_credentials_without_id()`；
+    均登记 `__all__`，体内无内联 SQL。
+- 关键设计取舍：
+  1. **批量写必须留在 owner 域内做事务**：原实现是「一个游标 + 循环 UPDATE + 末尾 `_commit`」，
+     整体一次性提交。若改成调用方逐条调 `exec_any`（每次一条连接/一次提交），中途失败会留下
+     半批密文半批明文——下一次回填按「含冒号即视为密文」跳过，**永远修不回来**。
+     因此把「循环 + 单事务」放进 insight `_any_tx()`：自有 DSN → 独立非 autocommit 连接；
+     单库 → 进程库 + `db_lock`，两条拓扑同一段代码。
+  2. **只写 `value` 列**：既有具名查询 `repo_cred_update` 会顺带写 `updated_at`，与回填原 SQL
+     不同（回填不刷新更新时间），所以新登记 `repo_cred_value_only_update` 而不是复用。
+     `updated_at` 保留是运维判据（凭据轮换时间），回填改写它等于污染审计面。
+  3. **不插入缺失行**：`UPDATE` 命中 0 行即结束，与原语义一致（回填只改存量、不造凭据）；
+     返回条数按入参计，与原日志 `N rows` 口径一致。
+  4. **明文判定留在调用方**：`":" not in val` 是 mgmt 侧 `credential_crypto` 的格式知识
+     （密文恒为 `kid:nonce:ct`），insight 不该知道；owner 只负责「给我非空行的原值」。
+     加密函数同理（`credential_crypto` 归 mgmt），薄函数只收成对的新值。
+  5. **mgmt 本域两步原样不动**：`user_credentials` 的补列/回填仍走 `_domain_cursor("mgmt")`
+     与 `_commit(c)`，本轮不扩大范围（该表归 mgmt，不是跨域）。
+- 修的存量 bug（结构性；单库拓扑不可见，三库独立后必然踩）：
+  1. **回填连接归错域**：原实现 `_domain_cursor("insight")` 只解决「配了自有 DSN」的分支；
+     单库/视图期回落进程库时，`grape_t_repo_credentials` 一旦只存在于 insight 库（视图 0 的终态），
+     两条 SELECT 直接 1146 被 `except` 吞成 warning → 启动回填静默空转、明文凭据永远不加密，
+     且 D99 空 id 断言永不告警。改走 insight public 的「任意拓扑」原语后，
+     自有 DSN / 单库 / 测试三条路径同一条代码，不再依赖调用方所在进程的库。
+  2. **docstring 与实现脱节**：模块头还写着「现改为 `domain_db.cursor(域)`」，与「SQL 只留
+     归属域」的口径不一致，易诱导后来者继续在调用方写 SQL；已同步改写。
+- 验证（真实退出码）：
+  · `py_compile` 两文件 → **COMPILE_OK**；
+  · `~/burndown/credentials_backfill_n1_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`）
+    **ALL ... PASSED (79 checks)**，A 注册面 / B 调用点静态 / C 行为 / D 事务 / E 断言 /
+    F 拓扑 / G 降级：三条新查询与原 SQL 逐字对齐、占位符数 0/3/0、无 `%s`/`NOW()`/
+    `ON DUPLICATE`/`LIMIT`；明文→密文可 `decrypt` 回原值且 **`updated_at` 不变**、
+    同仓不同 `cred_type` 各写各键互不覆盖、已密文行幂等跳过（二次回填 0 写 0 返回）、
+    空串/NULL 值不入选；批量写中途不可绑定参数 → **整批回滚**（前一条也不落库）、
+    空列表零写、目标仓库不存在 → 不插入新行；D99 计数只认 `id=''` 与 `id IS NULL`、
+    正常 id 不计、空表 0；自有 DSN 分支（monkeypatch `uses_own_dsn`/`transaction`/`cursor`）
+    写落到 insight 库、进程库同名副本**零改动**；`encrypt` 抛错 → 返回 0 且零写；
+    未登记查询名 → `KeyError`（fail-closed）；表缺失 → 两步各返回 0 不抛。
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → **import OK**；
+    `check_lib_query_names.py` → **PASS**（insight 8→11 funcs 已登记，mgmt 侧 171 funcs used）。
+  · 直覆盖用例 `tests/mgmt/test_n3_bot_token_encryption.py` /
+    `test_n4_audit_coverage.py` / `test_s119` / `test_s122` → 23 passed / 4 failed，
+    4 项失败均为**既有路径 bug**（`Path(__file__).parent.parent/"src"` 在 tests/ 镜像目录下
+    解到 `tests/src/...`）；已用 `git worktree` 在 HEAD 干净树复现同 4 项，与本批无关。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排——本会话无 `SRC_PWD`/`REMOTE_PWD`，
+  且本批不改 schema / 迁移 / 契约面（无新表、无新路由），运行面证据为 sqlite 烟测（含自有
+  DSN 分支模拟）+ 单库 pytest；**不把彩排结果算作本批证据**。
+- **blocked（复核，结论不变）**：`src/kernel/prompt_builder.py` 3 处是 agent 提示文案（本进程
+  不执行 + 测试按源文本断言）；`src/kernel/persistence/credential_usage_log.py` 3 处需
+  「每工作线程一条 owner 连接」池化。两条已在 `next-batches.md` 顶部「⛔ blocked」小节写明。
+- **新基线**：**78 处 / 37 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 78 处 / 44 文件，下一批可选头名 `src/domains/insight/observability/tokens.py` 3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
