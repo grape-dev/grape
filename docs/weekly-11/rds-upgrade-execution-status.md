@@ -185,6 +185,25 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
 第 1 条也解释了历史记录里「彩排 0 失败」与坑 2 并存的矛盾：上一轮 stage env 同样缺 lib 开关，
 多数端点在内部 catch 了 1146，只有写探测把 `PUT /api/chat/config` 的异常记成了失败。
 
+### patrol 巡检全链路接口化（-25，本文件清零）
+- `src/api/patrol.py` 的 25 处清零：`agent_tasks` 10、`grape_t_patrol_findings` 4、`meta` 4、
+  `events` 3、`issue` 2、`agent_runtimes` 1、`managed_repos` 1、`user_repos` 1（另 1 处注释）。
+- **主选举下沉为原语**：`claim_patrol_leader` 的四步 CAS（自续约 → 读现值 → CAS 接管 →
+  引导期 INSERT）原本是 `db_lock` 里连发四条 SQL，三库独立后 `meta` 在 runtime 库、patrol 在
+  api 层，必须整体下沉。`runtime.claim_meta_lease(key, holder, new_val, cutoff)` 在**同一事务**里
+  完成四步（拆开会留出「两次 UPDATE 之间被接管」的窗口），`_meta_lease_expired` 一并搬过去。
+- **findings 落库走 owner 域**：`patrol_findings_insert_many`（executemany 分块、单块失败吞掉、
+  返回真实插入数）与 `patrol_findings_insert_one`、`patrol_findings_known`、
+  `patrol_findings_delete_terminal`（保留期清理，status IN 动态列表）四个原语进 mgmt public。
+- **读路径全部具名化**：issue status/stage、events 按类型取 created_at（动态 IN 走薄函数
+  `event_created_ats_by_types`）、a2a 事件的 payload/status 与 created_at+agent_type、
+  agent_tasks 的 event_seq/created_at/分页候选/批量 result_text、agent_runtimes 健康位；
+  仓库归属 `managed_repo_host_user` / `repo_admin_user_id` 走 mgmt public。
+- 全局 **532 → 507**（-25）；基线 **507 / 99 对**。
+- 新增 `patrol_smoke`（6 组断言）：租约 CAS 五态（无行插入/他人新鲜让位/自续约/过期接管/
+  刚接管不让）、`claim_patrol_leader` 三态、findings 去重+批量计数+已知集+保留期清理、
+  巡检读路径、引擎健康位、仓库归属解析。
+
 ### db_setup 迁移/DDL 按归属域下沉（-33，本文件清零）
 - `src/api/db_setup.py` 的 33 处清零。内联 DDL/DML 按归属下沉：
   · **runtime**：`agent_runtimes` 补列与重建、`events` 补 `completed_at`（两个版本）、

@@ -10,7 +10,7 @@ docs/weekly-09/a2a-chain-patrol-design.md / -requirements.md 为本模块的权�
 - 停摆链（D13）：非独立扫描，由断链结果按 issue 聚合派生。
 - 判定范围跟随链路模式（D17）：PR 订阅链（issue_id `#pr_` 前缀）被 a2a 端点
   设计性拦截（events.py:1240），本无交棒语义，排除出断链候选。
-- 终态化唯一通道（D18）：本模块零 `UPDATE agent_tasks SET status` 写路径，
+- 终态化唯一通道（D18）：本模块零 `UPDATE ... SET status` 写路径，
   终态化只属 scheduler 的 PENDING_SELF_REPORT_TIMEOUT 通道。
 - 集群选主（D3）：meta 谓词 UPDATE 原子抢占（rowcount=1 才是主），
   仿 event_store.py:189 的 event_active_guard 抢占模式。
@@ -188,6 +188,10 @@ _QUEUED_ZOMBIE_HOURS = 24     # queued 引擎在线观察兜底窗（D12 判例�
 # src.domains.runtime.engine.engine_select._RUNTIME_STALE_SECONDS（平台既有 RUNTIME_STALE_SECONDS 配置）。
 _LEADER_TTL_MULTIPLIER = 2  # 心跳窗 = 2×周期（集群时钟漂移余量，设计 §八）
 
+# 巡检读的表分散在三域：SQL 归 owner 域 public，本模块只调用（三库独立后不能用进程库直查）
+from src.domains.mgmt import public as _mgmt_patrol  # noqa: E402
+from src.domains.runtime import public as _rt_patrol  # noqa: E402
+
 _LEADER_KEY = "patrol:leader"
 
 # ====== 交棒幂等键规范（决策 A，2026-11-02 负责人拍板）======
@@ -313,45 +317,13 @@ def claim_patrol_leader(holder: str, interval_seconds: int) -> bool:
         time.time() - interval_seconds * _LEADER_TTL_MULTIPLIER,
         tz=timezone.utc).isoformat()
     new_val = f"{holder}|{_now_iso()}"
-    with db_lock:
-        c = db.cursor()
-        try:
-            # 1) 自续约（holder 前缀精确匹配 = 自家持有；substr 精确前缀，
-            #    防 LIKE 单字通配符 `_` 让 host_a 续掉 host-a 的锁——评审四轮修正）
-            c.execute(
-                "UPDATE meta SET value=? WHERE key=? AND substr(value,1,?)=?",
-                (new_val, _LEADER_KEY, len(holder) + 1, holder + "|"))
-            db.commit()
-            if c.rowcount == 1:
-                return True
-            # 2) 读现值判断可否接管
-            c.execute("SELECT value FROM meta WHERE key=?", (_LEADER_KEY,))
-            row = c.fetchone()
-            cur = (row[0] or "") if row else ""
-            if cur and not _leader_expired(cur, cutoff):
-                return False   # 他主持有且新鲜
-            # 3) CAS 接管：仅当值仍是读到的那份（空值行同样精确匹配 ''）
-            c.execute(
-                "UPDATE meta SET value=? WHERE key=? AND value=?",
-                (new_val, _LEADER_KEY, cur))
-            db.commit()
-            if c.rowcount == 1:
-                return True
-            # 4) 行不存在（UPDATE 撞不到）→ 引导期 INSERT
-            if not cur:
-                c.execute(
-                    "INSERT OR IGNORE INTO meta (key, value) VALUES (?,?)",
-                    (_LEADER_KEY, new_val))
-                db.commit()
-                return c.rowcount == 1
-            return False   # CAS 失败：并发被他人改写，本轮让位
-        except Exception as e:
-            log.warning(f"[patrol] leader claim failed: {e}")
-            return False
+    # meta 归运行域：四步 CAS（自续约 → 读 → 接管 → 引导期 INSERT）下沉为同一事务里的原语
+    try:
+        return _rt_patrol.claim_meta_lease(_LEADER_KEY, holder, new_val, cutoff)
+    except Exception as e:
+        log.warning(f"[patrol] leader claim failed: {e}")
+        return False
 
-_PR_SUB_PREFIX = "#pr_"
-
-_NEXT_STEP_RE = re.compile(r"^a2a[-:]\s*([a-zA-Z0-9_\-]+)", re.IGNORECASE)
 
 def extract_next_step(result_text: str) -> str:
     """从 result_text 结构化 JSON 提取 next_step（D6：解析 JSON，不加列）。"""
@@ -431,12 +403,8 @@ def issue_terminal(repo_key: str, issue_id: str) -> str:
     # 原 isdigit 门槛把 gitee 已收敛 issue 视为未关闭 → 巡检补偿会复活它。
     if not num or num.startswith("pr_"):
         return ""
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT status FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
-            (repo_key, _native_issue_number(num)))
-        row = c.fetchone()
+    row = _rt_patrol.read_one_any("issue_status_by_repo_number",
+                                 (repo_key, _native_issue_number(num)))
     status = (row[0] or "").strip() if row else ""
     if status in TERMINAL_TASK_STATUSES or status in PAUSED_ISSUE_STATUSES:
         return status
@@ -451,11 +419,7 @@ def issue_stage_value(repo_key: str, issue_id: str) -> str:
         return ""
     stage = ""
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT stage FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
-                      (repo_key, int(num)))
-            row = c.fetchone()
+        row = _rt_patrol.read_one_any("issue_stage_by_repo_number", (repo_key, int(num)))
         if row and row[0]:
             stage = str(row[0]).strip()
     except Exception as e:
@@ -482,15 +446,8 @@ def has_newer_issue_event(repo_key: str, issue_id: str, completed_at: str) -> bo
     if done_dt is None or not repo_key or not issue_id:
         return False
     types = tuple(PIPELINE_SEGMENT_EVENT_TYPES)
-    placeholders = ",".join("?" for _ in types)
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT created_at FROM events WHERE repo_key=? AND issue_id=? "
-                f"AND event_type IN ({placeholders})",
-                (repo_key, issue_id, *types))
-            rows = c.fetchall() or []
+        rows = _rt_patrol.event_created_ats_by_types(repo_key, issue_id, types)
     except Exception as e:
         log.warning(f"[patrol] newer-segment check failed repo={repo_key} issue={issue_id}: {e}")
         return False
@@ -520,10 +477,7 @@ def structured_handoff_exists(repo_key: str, issue_id: str, task_id: str) -> boo
     if not repo_key or not issue_id or not task_id:
         return False
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT event_seq FROM agent_tasks WHERE id=? LIMIT 1", (task_id,))
-            row = c.fetchone()
+        row = _rt_patrol.read_one_any("task_event_seq", (task_id,))
         source_seq = int((row[0] if row else 0) or 0)
     except Exception as e:
         log.warning(f"[patrol] structured handoff source seq read failed task={task_id}: {e}")
@@ -531,13 +485,7 @@ def structured_handoff_exists(repo_key: str, issue_id: str, task_id: str) -> boo
     if source_seq <= 0:
         return False
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT payload, status FROM events WHERE repo_key=? AND issue_id=? "
-                "AND event_type='a2a_event'",
-                (repo_key, issue_id))
-            rows = c.fetchall() or []
+        rows = _rt_patrol.read_all_any("event_payload_status_a2a", (repo_key, issue_id))
     except Exception as e:
         log.warning(f"[patrol] structured handoff evidence query failed "
                     f"repo={repo_key} issue={issue_id}: {e}")
@@ -642,12 +590,7 @@ def l1_event_exists(repo_key: str, issue_id: str, completed_at: str,
     if done_dt is None:
         # 完成时间不可解析 → 无法关联，保守视为无证据（交给 L2/窗口）
         return False
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT created_at, agent_type FROM events WHERE repo_key=? AND issue_id=? AND event_type='a2a_event'",
-            (repo_key, issue_id))
-        rows = c.fetchall()
+    rows = _rt_patrol.read_all_any("event_a2a_created_agent", (repo_key, issue_id))
     for row in rows:
         created = row[0]
         evt_agent = str(row[1] or "").strip().lower() if len(row) > 1 else ""
@@ -670,21 +613,13 @@ def l2_downstream_exists(repo_key: str, issue_id: str, target_agent: str,
     if done_dt is None:
         return False
     if parent_issue:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT created_at FROM agent_tasks WHERE repo_key=? AND issue_id=? AND agent_type=?",
-                (repo_key, parent_issue, target_agent))
-            rows = c.fetchall()
+        rows = _rt_patrol.read_all_any("task_created_at_by_agent",
+                                       (repo_key, parent_issue, target_agent))
     else:
         if not target_agent:
             return False
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT created_at FROM agent_tasks WHERE repo_key=? AND issue_id=? AND agent_type=?",
-                (repo_key, issue_id, target_agent))
-            rows = c.fetchall()
+        rows = _rt_patrol.read_all_any("task_created_at_by_agent",
+                                      (repo_key, issue_id, target_agent))
     for (created,) in rows:
         dt = _parse_dt(created or "")
         if dt is not None and dt > done_dt:
@@ -724,23 +659,15 @@ def _resolve_owner(repo_key: str) -> "str | int":
     且后续通知路由漏派）。
     """
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT host_user_id FROM managed_repos WHERE repo_key=?", (repo_key,))
-            row = c.fetchone()
-            if row and row[0]:
-                return str(row[0])
+        _host = _mgmt_patrol.managed_repo_host_user(repo_key)
+        if _host:
+            return _host
     except Exception:
         pass
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT user_id FROM user_repos WHERE repo_key=? AND is_admin=1 "
-                "ORDER BY created_at LIMIT 1", (repo_key,))
-            row = c.fetchone()
-            if row and row[0]:
-                return str(row[0])
+        _adm = _mgmt_patrol.repo_admin_user_id(repo_key)
+        if _adm:
+            return str(_adm)
     except Exception:
         pass
     return 0
@@ -754,10 +681,7 @@ def _known_task_ids() -> set:
     O(任务数)+1 条集合查询；audit 模式忘切回 runtime 也不再是慢性病。
     """
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT kind, task_id FROM grape_t_patrol_findings WHERE task_id != ''")
-            return {(r[0], r[1]) for r in c.fetchall()}
+        return _mgmt_patrol.patrol_findings_known()
     except Exception:
         return set()
 
@@ -776,32 +700,16 @@ def insert_findings_batch(findings: list, chunk: int = 500) -> int:
         return 0
     owner_cache = {rk: _resolve_owner(rk) for rk in
                    {f.get("repo_key") or "" for f in findings}}   # 锁外逐仓去重解析
+    import uuid as _uuid
+
     now = _now_iso()
-    inserted = 0
-    with db_lock:
-        c = db.cursor()
-        for i in range(0, len(findings), chunk):
-            batch = findings[i:i + chunk]
-            rows = []
-            for f in batch:
-                import uuid as _uuid
-                rows.append((str(_uuid.uuid4()), f.get("kind") or "",
-                             f.get("task_id") or "", int(f.get("event_seq") or 0),
-                             f.get("repo_key") or "", f.get("issue_id") or "",
-                             owner_cache.get(f.get("repo_key") or "", 0),
-                             f.get("detail") or "", f.get("suggestion") or "",
-                             "open", "", now, now))
-            try:
-                c.executemany(
-                    "INSERT OR IGNORE INTO grape_t_patrol_findings "
-                    "(id, kind, task_id, event_seq, repo_key, issue_id, owner, detail, suggestion, status, action_meta, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
-                db.commit()
-                inserted += c.rowcount if (c.rowcount or 0) > 0 else 0
-            except Exception as e:
-                log.warning(f"[patrol] batch insert findings failed "
-                            f"(chunk {i // chunk}, {len(rows)} rows): {e}")
-    return inserted
+    rows = [(str(_uuid.uuid4()), f.get("kind") or "",
+             f.get("task_id") or "", int(f.get("event_seq") or 0),
+             f.get("repo_key") or "", f.get("issue_id") or "",
+             owner_cache.get(f.get("repo_key") or "", 0),
+             f.get("detail") or "", f.get("suggestion") or "",
+             "open", "", now, now) for f in findings]
+    return _mgmt_patrol.patrol_findings_insert_many(rows, chunk)
 
 def insert_finding(kind: str, task_id: str = "", event_seq: int = 0,
                    repo_key: str = "", issue_id: str = "",
@@ -813,23 +721,15 @@ def insert_finding(kind: str, task_id: str = "", event_seq: int = 0,
     owner = _resolve_owner(repo_key)
     now = _now_iso()
     fid = str(_uuid.uuid4())
-    with db_lock:
-        c = None
-        try:
-            c = db.cursor()
-            c.execute(
-                "INSERT OR IGNORE INTO grape_t_patrol_findings "
-                "(id, kind, task_id, event_seq, repo_key, issue_id, owner, detail, suggestion, status, action_meta, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (fid, kind, task_id, event_seq, repo_key, issue_id, owner, detail,
-                 suggestion, "open", "", now, now))
-            db.commit()
-            return c.rowcount == 1
-        except Exception as e:
-            # S5：落库失败吞掉返回 False（S43-3 实测抓出的缺陷修复——cursor()
-            # 原在 try 外，DB 异常外抛会把整轮扫描打进退避，单条失败不该伤循环）
-            log.warning(f"[patrol] insert finding failed ({kind}): {e}")
-            return False
+    try:
+        return _mgmt_patrol.patrol_findings_insert_one(
+            (fid, kind, task_id, event_seq, repo_key, issue_id, owner, detail,
+             suggestion, "open", "", now, now))
+    except Exception as e:
+        # S5：落库失败吞掉返回 False（S43-3 实测抓出的缺陷修复——原 cursor()
+        # 在 try 外，DB 异常外抛会把整轮扫描打进退避，单条失败不该伤循环）
+        log.warning(f"[patrol] insert finding failed ({kind}): {e}")
+        return False
 
 def _fetch_result_texts(task_ids: list, chunk: int = 500) -> dict:
     """按 id 批量回捞 result_text（P1/S45 两段式拉取的阶段 2）。
@@ -838,23 +738,7 @@ def _fetch_result_texts(task_ids: list, chunk: int = 500) -> dict:
     2KB+/行）不再随候选拉取；本函数只对幸存候选分块（500/批）回捞。
     单块失败吞掉（S5：缺文本该候选判 "" 走不报口径，不炸整轮）。
     """
-    out = {}
-    if not task_ids:
-        return out
-    with db_lock:
-        c = db.cursor()
-        for i in range(0, len(task_ids), chunk):
-            ids = list(task_ids[i:i + chunk])
-            sql = ("SELECT id, result_text FROM agent_tasks WHERE id IN "
-                   f"({','.join('?' * len(ids))})")
-            try:
-                c.execute(sql, tuple(ids))
-                for tid, rt in c.fetchall():
-                    out[tid] = rt or ""
-            except Exception as e:
-                log.warning(f"[patrol] result_text batch fetch failed "
-                            f"(chunk {i // chunk}): {e}")
-    return out
+    return _rt_patrol.tasks_result_texts(task_ids, chunk)
 
 def _iter_completed_tasks(cutoff: str, chunk: int = 500):
     """keyset 分页流式拉取候选（S49/R20-C）。
@@ -868,21 +752,8 @@ def _iter_completed_tasks(cutoff: str, chunk: int = 500):
     """
     last_id = ""
     while True:
-        with db_lock:
-            c = db.cursor()
-            if cutoff:
-                c.execute(
-                    "SELECT id, repo_key, issue_id, agent_type, completed_at "
-                    "FROM agent_tasks WHERE status='completed' AND completed_at > ? "
-                    "AND id > ? ORDER BY id LIMIT ?",
-                    (cutoff, last_id, chunk))
-            else:  # D17 存量核对模式：全历史（分页同样适用）
-                c.execute(
-                    "SELECT id, repo_key, issue_id, agent_type, completed_at "
-                    "FROM agent_tasks WHERE status='completed' AND id > ? "
-                    "ORDER BY id LIMIT ?",
-                    (last_id, chunk))
-            rows = c.fetchall()
+        # 一页一查询（连接不跨页存活）；D17 存量核对模式走无 cutoff 分支
+        rows = _rt_patrol.tasks_completed_page(cutoff, last_id, chunk)
         if not rows:
             return
         for row in rows:
@@ -991,12 +862,7 @@ def _engine_unreachable(runtime_id: int) -> bool:
     """
     if not runtime_id or runtime_id <= 0:
         return False
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT credential_id, status, last_seen_at, installed, healthy FROM agent_runtimes WHERE id=?",
-            (runtime_id,))
-        row = c.fetchone()
+    row = _rt_patrol.read_one_any("runtime_health_bits", (runtime_id,))
     if not row:
         return True  # 引擎行都没了 = 确定性不可达
     cred_id, status, last_seen, installed, healthy = row
@@ -1054,16 +920,8 @@ def detect_zombies(known: set = None) -> list[dict]:
     # （S51/R22：run_patrol_once 轮内共享引用，同一集合不再二次全表拉取）
     _rt_probe_cache = {}        # runtime_id -> unreachable
     _scene_probe_cache = {}     # (repo_key, issue_id) -> scene_missing
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT id, repo_key, issue_id, agent_type, runtime_id, started_at, created_at, stream_ended "
-            "FROM agent_tasks WHERE status='running'")
-        running_rows = c.fetchall()
-        c.execute(
-            "SELECT id, repo_key, issue_id, agent_type, runtime_id, created_at "
-            "FROM agent_tasks WHERE status='queued'")
-        queued_rows = c.fetchall()
+    running_rows = _rt_patrol.read_all_any("tasks_running_rows")
+    queued_rows = _rt_patrol.read_all_any("tasks_queued_rows")
     for (tid, repo_key, issue_id, agent_type, runtime_id, started_at, created_at, stream_ended) in running_rows:
         try:
             if ("zombie_running_signal", tid) in known and int(stream_ended or 0) == 1:
@@ -1168,19 +1026,11 @@ def cleanup_terminal_findings(retention_days: int = -1) -> int:
         return 0
     cutoff = datetime.fromtimestamp(
         time.time() - retention_days * 86400, tz=timezone.utc).isoformat()
-    sql = ("DELETE FROM grape_t_patrol_findings WHERE status IN "
-           f"({','.join('?' * len(_TERMINAL_RETENTION_STATUSES))}) "
-           "AND updated_at != '' AND updated_at < ?")
-    params = _TERMINAL_RETENTION_STATUSES + (cutoff,)
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(sql, params)
-            db.commit()
-            return c.rowcount if (c.rowcount or 0) > 0 else 0
-        except Exception as e:
-            log.warning(f"[patrol] findings retention cleanup failed: {e}")
-            return 0
+    try:
+        return _mgmt_patrol.patrol_findings_delete_terminal(_TERMINAL_RETENTION_STATUSES, cutoff)
+    except Exception as e:
+        log.warning(f"[patrol] findings retention cleanup failed: {e}")
+        return 0
 
 class PatrolScanInProgress(RuntimeError):
     """single-flight 闸（S41/R16，全入口）：一轮扫描已在执行（自动轮/手动轮任一入口）。"""

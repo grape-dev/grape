@@ -1620,3 +1620,70 @@ def backfill_org_id_by_repo(mapping: dict) -> dict[str, int]:
                 n += int(getattr(cur, "rowcount", 0) or 0)
             out[tbl] = n
     return out
+
+
+# ---------- 巡检（api/patrol.py）：仓库归属 + findings 落库（表归 mgmt） ----------
+
+def managed_repo_host_user(repo_key: str) -> str:
+    """仓库的 host_user_id（无行/空值返回空串）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT host_user_id FROM managed_repos WHERE repo_key=?", (repo_key,))
+        row = c.fetchone()
+    return str(row[0]) if row and row[0] else ""
+
+
+def repo_admin_user_id(repo_key: str):
+    """仓库的首个管理员 user_id（按 created_at 最早）；无则返回 0。"""
+    with _any_cursor() as c:
+        c.execute("SELECT user_id FROM user_repos WHERE repo_key=? AND is_admin=1 "
+                  "ORDER BY created_at LIMIT 1", (repo_key,))
+        row = c.fetchone()
+    return row[0] if row and row[0] else 0
+
+
+def patrol_findings_known() -> set:
+    """已落库的 (kind, task_id) 集合（audit 重扫的短路集）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT kind, task_id FROM grape_t_patrol_findings WHERE task_id != ''")
+        return {(r[0], r[1]) for r in (c.fetchall() or [])}
+
+
+_PATROL_FINDING_INSERT_SQL = (
+    "INSERT OR IGNORE INTO grape_t_patrol_findings "
+    "(id, kind, task_id, event_seq, repo_key, issue_id, owner, detail, suggestion, "
+    "status, action_meta, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+
+
+def patrol_findings_insert_many(rows: list, chunk: int = 500) -> int:
+    """攒批 executemany + 每块单次提交；单块失败吞掉其余块照常（返回真实插入数）。"""
+    inserted = 0
+    if not rows:
+        return 0
+    with _any_cursor(write=True) as c:
+        for i in range(0, len(rows), chunk):
+            try:
+                c.executemany(_PATROL_FINDING_INSERT_SQL, rows[i:i + chunk])
+                inserted += int(getattr(c, "rowcount", 0) or 0)
+            except Exception as exc:  # noqa: BLE001 - S5 口径：单块丢失，其余照常
+                log.warning(f"patrol findings batch insert failed (chunk {i // chunk}): {exc}")
+    return inserted
+
+
+def patrol_findings_insert_one(row: tuple) -> bool:
+    """插一条 finding（UNIQUE + OR IGNORE 幂等）；返回是否真插入。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(_PATROL_FINDING_INSERT_SQL, row)
+        return int(getattr(cur, "rowcount", 0) or 0) == 1
+
+
+def patrol_findings_delete_terminal(statuses, cutoff_iso: str) -> int:
+    """按保留期清理终态 finding（status IN 列表 + updated_at 早于 cutoff）。"""
+    _statuses = tuple(statuses or ())
+    if not _statuses:
+        return 0
+    _ph = ",".join(["?"] * len(_statuses))
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            f"DELETE FROM grape_t_patrol_findings WHERE status IN ({_ph}) "
+            "AND updated_at != '' AND updated_at < ?", (*_statuses, cutoff_iso))
+        return int(getattr(cur, "rowcount", 0) or 0)

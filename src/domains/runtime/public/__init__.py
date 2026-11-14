@@ -1832,6 +1832,35 @@ _ANY_QUERIES: dict[str, str] = {
         "THEN 0 ELSE 1 END, ar.id"),
     "runtime_credential_id": "SELECT credential_id FROM agent_runtimes WHERE id=?",
     "runtime_credential_scope": "SELECT scope FROM runtime_credentials WHERE id=?",
+    # 巡检（api/patrol.py）读路径：issue / events / agent_tasks / agent_runtimes
+    "issue_status_by_repo_number": (
+        "SELECT status FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1"),
+    "issue_stage_by_repo_number": (
+        "SELECT stage FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1"),
+    "task_event_seq": "SELECT event_seq FROM agent_tasks WHERE id=? LIMIT 1",
+    "event_payload_status_a2a": (
+        "SELECT payload, status FROM events WHERE repo_key=? AND issue_id=? "
+        "AND event_type='a2a_event'"),
+    "event_a2a_created_agent": (
+        "SELECT created_at, agent_type FROM events WHERE repo_key=? AND issue_id=? "
+        "AND event_type='a2a_event'"),
+    "task_created_at_by_agent": (
+        "SELECT created_at FROM agent_tasks WHERE repo_key=? AND issue_id=? AND agent_type=?"),
+    "tasks_running_rows": (
+        "SELECT id, repo_key, issue_id, agent_type, runtime_id, started_at, created_at, "
+        "stream_ended FROM agent_tasks WHERE status='running'"),
+    "tasks_queued_rows": (
+        "SELECT id, repo_key, issue_id, agent_type, runtime_id, created_at "
+        "FROM agent_tasks WHERE status='queued'"),
+    "runtime_health_bits": (
+        "SELECT credential_id, status, last_seen_at, installed, healthy "
+        "FROM agent_runtimes WHERE id=?"),
+    "tasks_completed_page_cutoff": (
+        "SELECT id, repo_key, issue_id, agent_type, completed_at FROM agent_tasks "
+        "WHERE status='completed' AND completed_at > ? AND id > ? ORDER BY id LIMIT ?"),
+    "tasks_completed_page_all": (
+        "SELECT id, repo_key, issue_id, agent_type, completed_at FROM agent_tasks "
+        "WHERE status='completed' AND id > ? ORDER BY id LIMIT ?"),
     "runtime_instance_row": (
         "SELECT ar.name, rc.device_name, ar.credential_id "
         "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
@@ -2766,3 +2795,84 @@ def backfill_skill_category_id(category_map: dict) -> int:
                 (int(cid), slug))
             total += int(getattr(cur, "rowcount", 0) or 0)
     return total
+
+
+# ---------- 巡检读/写原语（meta 租约、批量回捞；表归 runtime） ----------
+
+def _meta_lease_expired(value: str, cutoff_iso: str) -> bool:
+    """meta 租约值过期判定：`holder|iso` 取时间戳段；兼容历史纯 ISO 值。"""
+    if not value:
+        return True
+    ts = value.split("|", 1)[1] if "|" in value else value
+    return ts < cutoff_iso
+
+
+def claim_meta_lease(key: str, holder: str, new_val: str, cutoff_iso: str) -> bool:
+    """meta 键的租约抢占（巡检主选举）：自续约 → 读现值 → CAS → 引导期 INSERT。
+
+    四步必须在**同一事务**内完成（拆分会让两次 UPDATE 之间被他人插入/接管）：
+      1) 前缀精确等于 `holder|` 即自续约（substr 而非 LIKE —— holder 含 `_`/`%` 时不误匹配）；
+      2) 现值新鲜且非本主 → 让位；
+      3) CAS：仅当值仍是刚读到的那份才写；
+      4) 行不存在时 INSERT OR IGNORE（并发由主键裁决）。
+    """
+    with _any_tx() as c:
+        cur = c.execute(
+            "UPDATE meta SET value=? WHERE key=? AND substr(value,1,?)=?",
+            (new_val, key, len(holder) + 1, holder + "|"))
+        if int(getattr(cur, "rowcount", 0) or 0) == 1:
+            return True
+        row = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        cur_val = (row[0] or "") if row else ""
+        if cur_val and not _meta_lease_expired(cur_val, cutoff_iso):
+            return False
+        cur2 = c.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
+                         (new_val, key, cur_val))
+        if int(getattr(cur2, "rowcount", 0) or 0) == 1:
+            return True
+        if not cur_val:
+            cur3 = c.execute("INSERT INTO meta (key, value) VALUES (?,?)", (key, new_val))
+            return int(getattr(cur3, "rowcount", 0) or 0) == 1
+        return False
+
+
+def event_created_ats_by_types(repo_key: str, issue_id: str, types) -> list[tuple]:
+    """指定事件类型在该 issue 下的 created_at 列表（类型为 IN 列表，动态占位）。"""
+    _types = tuple(types or ())
+    if not _types:
+        return []
+    _ph = ",".join(["?"] * len(_types))
+    with _any_cursor() as c:
+        c.execute(f"SELECT created_at FROM events WHERE repo_key=? AND issue_id=? "
+                  f"AND event_type IN ({_ph})", (repo_key, issue_id, *_types))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def tasks_result_texts(task_ids, chunk: int = 500) -> dict:
+    """按 id 分块回捞 result_text（单块失败不伤其它块：S5 容错口径）。"""
+    out: dict = {}
+    ids = list(task_ids or [])
+    if not ids:
+        return out
+    with _any_cursor() as c:
+        for i in range(0, len(ids), chunk):
+            _ids = ids[i:i + chunk]
+            _ph = ",".join(["?"] * len(_ids))
+            try:
+                c.execute(f"SELECT id, result_text FROM agent_tasks WHERE id IN ({_ph})",
+                          tuple(_ids))
+                for tid, rt in c.fetchall() or []:
+                    out[tid] = rt or ""
+            except Exception as exc:  # noqa: BLE001 - 单块失败吞掉，其余块照常
+                log.warning(f"result_text batch fetch failed (chunk {i // chunk}): {exc}")
+    return out
+
+
+def tasks_completed_page(cutoff: str, last_id: str, chunk: int = 500) -> list[tuple]:
+    """keyset 分页取候选任务（一页一查询；锁/连接不跨页存活）。"""
+    with _any_cursor() as c:
+        if cutoff:
+            c.execute(_any_sql("tasks_completed_page_cutoff"), (cutoff, last_id, int(chunk)))
+        else:
+            c.execute(_any_sql("tasks_completed_page_all"), (last_id, int(chunk)))
+        return [tuple(r) for r in (c.fetchall() or [])]
