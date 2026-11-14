@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 
 from src.kernel.config import log
@@ -748,6 +749,9 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # 反馈状态联动（api/feedback_status.py；任意拓扑）
            "feedback_external_sync_page", "feedback_mark_status_if_live",
            "feedback_internal_sync_page", "feedback_apply_statuses",
+           # 登录白名单判定（kernel/config.py；任意拓扑）
+           "login_whitelist_count", "login_whitelist_row_match",
+           "login_whitelist_legacy_column", "login_whitelist_legacy_column_match",
            "health"]
 
 
@@ -1895,6 +1899,14 @@ _ANY_QUERIES: dict[str, str] = {
         "AND f.id > ? ORDER BY f.id LIMIT ?"),
     # 内部联动原语句没有任何 is_deleted 守卫（已转换行的回写不看软删标记），照抄。
     "feedback_internal_set_status": "UPDATE user_feedback SET status=? WHERE id=?",
+    # ── 登录白名单（kernel/config.py 的登录判定；login_whitelist 归 mgmt）────────
+    # 原实现在 kernel 里用进程主库游标直发：三库拓扑下进程库没有 login_whitelist
+    # （无视图 → 1146），被 `_is_login_whitelist_enabled` / `is_user_allowed` 的
+    # except 吞成「默认关闭」/「降级文件」，白名单开关在独立部署下整体失效。
+    # 列序（COUNT(*) / 常量 1）、谓词、LOWER() 大小写口径逐字照抄。
+    "login_whitelist_count": "SELECT COUNT(*) FROM login_whitelist",
+    "login_whitelist_row_match": (
+        "SELECT 1 FROM login_whitelist WHERE provider=? AND LOWER(username)=LOWER(?)"),
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -1929,6 +1941,13 @@ _REPO_TOKEN_COLUMN_QUERIES: dict[str, str] = {
     "bot_github_token": "repo_bot_token_legacy_github",
 }
 
+#: login_whitelist 老列兜底（存量列式部署的 `<provider>_username` 物理列）。
+#: 列名由本域从 provider 派生并过严格标识符白名单（`[a-z0-9_]`，≤32 字符，与
+#: `provider VARCHAR(32)` 同口径）——调用方的 provider 字符串**永不直接拼进 SQL**。
+#: 物理列不存在（新装 / 该渠道无老列）与「该渠道无老数据」同口径：返回 False。
+_LOGIN_WL_LEGACY_COLUMN_SQL = "SELECT 1 FROM login_whitelist WHERE LOWER({col})=LOWER(?)"
+_LOGIN_WL_PROVIDER_RE = re.compile(r"[a-z0-9_]{1,32}")
+
 
 def _any_sql(name: str) -> str:
     """取具名查询 SQL；未登记抛 KeyError（不静默退回任意 SQL）。"""
@@ -1957,6 +1976,51 @@ def exec_any(name: str, params: tuple = ()) -> int:
     with _any_cursor(write=True) as c:
         cur = c.execute(_any_sql(name), params)
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def login_whitelist_count() -> int:
+    """login_whitelist 行数（0 = 未配置任何条目，供「隐式启用 / fail-closed」判定）。
+
+    原 kernel 实现读的是同一进程主库游标；三库拓扑下该表在 mgmt 库（视图 0），
+    语句上移后两条拓扑跑同一份 SQL。
+    """
+    row = read_one_any("login_whitelist_count")
+    return int(row[0] or 0) if row else 0
+
+
+def login_whitelist_row_match(provider: str, login: str) -> bool:
+    """行式新行命中：provider 精确 + username 大小写不敏感（LOWER 双侧）。"""
+    return read_one_any("login_whitelist_row_match", (provider, login)) is not None
+
+
+def login_whitelist_legacy_column(provider: str) -> str | None:
+    """老列兜底的物理列名（`<provider>_username`）；provider 不合白名单 → None。
+
+    本函数是该列名的**唯一**产生点：调用方只能传 provider key，不得自己拼列名。
+    """
+    key = provider or ""
+    return f"{key}_username" if _LOGIN_WL_PROVIDER_RE.fullmatch(key) else None
+
+
+def login_whitelist_legacy_column_match(provider: str, login: str) -> bool:
+    """老列兜底命中（存量列式部署）。
+
+    provider 不合标识符白名单 → False（等同该渠道无老数据）；
+    物理列不存在（sqlite `no such column` / MySQL `unknown column`）→ False；
+    其它 DB 异常**照原样上抛**，由调用方按原口径降级到文件白名单。
+    """
+    col = login_whitelist_legacy_column(provider)
+    if not col:
+        return False
+    try:
+        with _any_cursor() as c:
+            c.execute(_LOGIN_WL_LEGACY_COLUMN_SQL.format(col=col), (login,))
+            return c.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001 - 列缺失是正常分支，其余上抛
+        msg = str(exc).lower()
+        if "no such column" in msg or "unknown column" in msg:
+            return False
+        raise
 
 
 def has_manual_knowledge_ref(repo_key: str, agent_type: str = "", issue_num: int = 0,

@@ -2416,6 +2416,87 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   同模式、后续批次）。基线 `foreign-refs-allowlist.csv` 收紧为 128 / 49，依赖看板与作业单
   同步刷新（下一批头名：`src/kernel/config.py` 4 处）。
 
+### 7.24 kernel 登录白名单判定下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件：`src/kernel/config.py`（kernel 域；登录白名单开关判定 + OAuth 放行判定），
+  **4 处 → 0**（单轮做完，4 处未超 25，未分轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `login_whitelist`（归 mgmt）× 4：
+    行 662 `_is_login_whitelist_enabled` 隐式启用判定 `SELECT COUNT(*) FROM login_whitelist`；
+    行 730 `is_user_allowed` fail-closed 判定 `SELECT COUNT(*) FROM login_whitelist`；
+    行 738 行式新行命中 `SELECT 1 FROM login_whitelist WHERE provider=? AND LOWER(username)=LOWER(?)`
+    （绑定 provider、login）；
+    行 746 老列兜底 `SELECT 1 FROM login_whitelist WHERE LOWER({provider}_username)=LOWER(?)`
+    （**动态列名**：由调用方 provider 经 `^[a-z0-9_]+$` 校验后 f-string 拼入，kernel 内唯一一处
+    拼 SQL 标识符的点）。
+  四处都是定表 + 定列（除 746 的列名），无跨域 JOIN、无写语句；调用点全部是
+  `with db_lock: db.cursor().execute(...)` 直发 kernel 进程主库。
+- owner 侧新增（`src/domains/mgmt/public/__init__.py`，`?` 占位符）：
+  1) `_ANY_QUERIES` 2 条具名查询：`login_whitelist_count` / `login_whitelist_row_match`
+     （列序、谓词、`LOWER()` 双侧大小写口径逐字照抄）；
+  2) 老列模板 `_LOGIN_WL_LEGACY_COLUMN_SQL`
+     （`SELECT 1 FROM login_whitelist WHERE LOWER({col})=LOWER(?)`）+ `_LOGIN_WL_PROVIDER_RE`；
+  3) 4 个薄函数并导出：`login_whitelist_count()` / `login_whitelist_row_match(provider, login)` /
+     `login_whitelist_legacy_column(provider)`（列名唯一产生点）/
+     `login_whitelist_legacy_column_match(provider, login)`。
+- 设计取舍：
+  1) **动态列名只由 owner 域产生**：kernel 只传 provider key，列名（`<provider>_username`）
+     在 mgmt public 里派生并过严格标识符白名单（`[a-z0-9_]{1,32}`，与 `provider VARCHAR(32)`
+     同口径），调用方字符串永不进 SQL。比原实现更严一格：`^[a-z0-9_]+$` 的 Python `$`
+     允许尾随换行，改为 `fullmatch` 后 `"gitcode\n"` 也判非法（影响面为零：provider 来自
+     固定渠道 key 集合，非法值本就在 kernel 前置校验里被拒）。
+  2) **「物理列不存在」的判定跟着语句一起搬**：`no such column` / `unknown column` → 返回
+     False（该渠道无老数据）；其它 DB 异常照原样上抛 —— 保持原实现「内层错=拒绝、外层错=
+     降级文件」的两级口径，不把两种分支合并成一个返回值。
+  3) **`COUNT(*)` 的不过滤口径原样保留**：不按 provider/username 是否为空筛行，只有老列
+     填充的存量行也计入 —— 它是「meta 未设置 → 表有数据则隐式启用」与「启用 + 表空 →
+     fail-closed 全拒」两个判定的共同输入，任何 `WHERE is_active=1` 式的"顺手优化"都会改变
+     登录行为，烟测对这两条各钉一条用例。
+  4) **锁与提交粒度**：三处读取都由 `*_any` 原语内部的 `_any_cursor()` 取锁（单库拓扑是
+     可重入 `db_lock` + 同一进程连接，自有 DSN 拓扑是 mgmt 连接），调用方不再自己持锁；
+     四次调用是顺序读、无写、无事务合并需求，与原实现「同一游标顺序执行、无显式事务」等价。
+  5) **业务口径全部留在 kernel**：开关优先级（meta 显式值 > 旧部署隐式启用）、
+     60s TTL 缓存与 `invalidate_login_whitelist_cache()`、空 login 直接拒绝、provider 前置
+     正则、文件白名单降级与 fail-closed 一律没下沉；owner 域只给行与列。
+- 修的存量 bug（归属前提，本批未在线上观测到故障，属结构性隐患）：
+  1) **「进程主库 == owner 库」的隐含前提**：这 4 条语句打在**执行进程的主库**上，而
+     `login_whitelist` 只在 mgmt 库存在（`db_setup._create_tables` 的 `_owned_skip` 已按
+     owner 过滤，三库独立后别的库不再建同名副本，也没有跨库视图）→ 任何非 mgmt 进程读它
+     必 1146。当前 OAuth 登录与 admin 白名单状态只在 mgmt 进程执行，所以线上还看不出来；
+     一旦有 event/worker/insight 侧的白名单判定需求，或 mgmt 进程改绑 DSN，就会以
+     「默认关闭 / 降级文件」的形式静默失效（`except` 吞异常，日志外无迹）；
+  2) **同名空副本的静默口径分裂风险**：单库/多库混跑的过渡拓扑里，若某进程库历史遗留过
+     同名表，`COUNT(*)` 与命中查询会读空副本 —— 不报错，但白名单实际不生效（本批改为
+     按 owner 域取连接后该路径消失）；
+  3) **kernel 侧的 SQL 标识符拼接点清零**：`f"...LOWER({provider}_username)"` 是 kernel
+     唯一一处把外部字符串拼进 SQL 的地方，现已挪到 owner 域并加白名单。
+- 验证：`py_compile` 2 个文件 **COMPILE_OK**；SQLite 烟测
+  `~/burndown/login_whitelist_smoke.py` **ALL 76 CHECKS PASSED**（含边界与否定用例：
+  3 条语句与改造前 SQL 逐字对拍 + `?` 方言 / 无 `%s`·`NOW()`·`ON DUPLICATE`·`datetime('now')`·
+  库名前缀；`COUNT(*)` 计入只有老列填充的空行；行式命中双侧大小写不敏感、provider 隔离、
+  空用户名不命中、provider 为 NULL 的存量老行不进行式命中；老列列名派生 8 类非法 provider
+  ——空串/大写/连字符/分号注入/反引号/超长/None/尾随换行——全部 None 且**零 SQL**；
+  物理列缺失 → False 且**不回退文件白名单**（原实现的内层 return 口径）、缺表 → 上抛供
+  调用方降级；meta 未设置 + 表空/有数据 → 隐式启用 False/True（含 60s 缓存清空后复判）、
+  meta 显式 false 优先于表数据、启用 + 表空 → 全拒、开关关闭 → 全放行；DB 不可用时文件
+  缺失/空/有条目三种降级口径；单库走进程库、自有 DSN 走 mgmt 连接且进程库零 SQL；
+  源码面 kernel 0 条 SQL 字面量 / 0 处外域表名 / 无 `cursor()`·`execute()` 直发 /
+  不再 import `session_manager` / 只取 3 个已导出原语 / 静默 except 13 = 基线 13）；
+  `tests/mgmt/test_login_whitelist.py` + `test_login_whitelist_row_model.py` +
+  `test_login_whitelist_null_literal_cleanup.py` **37 passed / 2 failed**，与 `d742f940c`
+  干净树对拍**失败集合完全相同**（`test_login_whitelist_empty_warn_banner` /
+  `test_login_whitelist_admin_ui` 读已迁移的 `src/api/static/admin.html`，属既有断链）；
+  `tests/api/test_auth_routes.py` 的 `test_redirect_uri_fallback_from_host` 在主 checkout 红、
+  基线树绿，把本地未跟踪的 `configs/` 复制进基线树后**同样复现**（`data/test_sessions.db`
+  里残留了生产入口的 `meta.server_base_url`），确认是环境漂移非本批回归；
+  `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 /
+  看板最新）；`pytest tests/arch tests/contracts tests/scripts` **158 passed**；
+  `make lint` **import OK**。
+- 新基线：全局 **128 → 124**（-4），对数 **49 → 48**（`login_whitelist←kernel` 4 → 0，
+  该表在 kernel 侧清零）。基线 `foreign-refs-allowlist.csv` 收紧为 124 / 48，依赖看板与作业单
+  同步刷新（下一批头名：`src/domains/runtime/project_info/builder.py` 4 处 ——
+  `agent_shared_knowledge` × 3 + `scene_knowledge_ref` × 1，均归 mgmt）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

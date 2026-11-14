@@ -32,7 +32,6 @@ grape_t_repo_credentials,insight,runtime,1
 issue,runtime,api,3
 issue,runtime,mgmt,1
 issue_state,runtime,api,1
-login_whitelist,mgmt,kernel,4
 managed_repos,mgmt,runtime,5
 meta,runtime,mgmt,4
 runtime_credentials,runtime,api,6

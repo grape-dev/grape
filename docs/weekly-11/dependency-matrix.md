@@ -1,14 +1,14 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-15 04:15　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **37** 张；跨域引用 **128** 处（49 个「表×消费域」对）；含归属域在内的 SQL 引用 2126 处
+> 生成时间：2026-11-15 04:24　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **36** 张；跨域引用 **124** 处（48 个「表×消费域」对）；含归属域在内的 SQL 引用 2108 处
 
 ## 1. 域 × 域 跨域引用热力
 
 | 消费方 ↓ / 归属域 → | mgmt | runtime | insight | 合计 |
 | --- | ---: | ---: | ---: | ---: |
 | api | 12 | 23 | 2 | 37 |
-| kernel | 7 | 3 | 0 | 10 |
+| kernel | 3 | 3 | 0 | 6 |
 | mgmt | 0 | 14 | 5 | 19 |
 | runtime | 30 | 0 | 1 | 31 |
 | insight | 1 | 29 | 0 | 30 |
@@ -19,7 +19,7 @@
 | --- | ---: | ---: |
 | D | 11 | 28 |
 | C1 | 7 | 49 |
-| C2 | 16 | 48 |
+| C2 | 15 | 44 |
 | B | 2 | 2 |
 | E | 1 | 1 |
 
@@ -38,7 +38,6 @@
 | `managed_repos` | mgmt | 5 | runtime 5 | D 模块归位（kernel 写/读域表） | — | 19 |
 | `grape_t_channel_installation` | mgmt | 4 | runtime 4 | C2 outbox 跨域写 | W2 | 7 |
 | `issue` | runtime | 4 | api 3 / mgmt 1 | D 模块归位（kernel 写/读域表） | — | 19 |
-| `login_whitelist` | mgmt | 4 | kernel 4 | C2 outbox 跨域写 | W2 | 4 |
 | `meta` | runtime | 4 | mgmt 4 | D 模块归位（kernel 写/读域表） | — | 4 |
 | `unified_user_mapping` | mgmt | 4 | kernel 3 / runtime 1 | D 模块归位（kernel 写/读域表） | — | 8 |
 | `event_action_filter` | mgmt | 3 | api 3 | C2 outbox 跨域写 | W2 | 4 |
