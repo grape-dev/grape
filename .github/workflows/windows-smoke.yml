@@ -128,6 +128,16 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_1982_fd_leak.py tests/runtime/test_issue_1982_probe_state.py -v
+      - name: GSB per-method route matrix gate + routing tests (issue #2479)
+        # Issue #2479 QA 审查修复（Required#4）：禁止矩阵静态扫描与新增 23 路由
+        # 用例此前只挂在 scripts/check-all.sh，CI 实际不执行（漂移/绕过只能靠
+        # 人工）。接入 linux-backend 门禁：runtime|insight 引用 mgmt remote 通道
+        # （如 GsbClient("mgmt")）可被 CI 拦红，路由/热切换/fail-fast 回归有门禁。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python3 scripts/check_gsb_route_matrix.py
+          python -m pytest tests/kernel/test_gsb_route.py -v
       - name: Engine recovery loop regression tests (issue #2133)
         # Issue #2133 QA 审查修复（W1 Required）：新增用例 test_issue_2133_recovery.py
         # 此前未接入 CI 门禁（先例 #1613：tests/im 未接入曾被 QA 要求补齐），闭环回归
