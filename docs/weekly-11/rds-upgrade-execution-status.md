@@ -158,7 +158,16 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
-### 迁移 SQL 按域拆分（本轮，-313）
+### issues_center 归位（-60）
+- `src/api/issues_center.py`（3535 行）→ `src/domains/runtime/issues_center.py`，旧路径保留 sys.modules 别名；
+  issue/event/agent_task 属运行域，逻辑回位。该文件跨域引用 **60 → 7**（余下是 mgmt 的
+  unified_user_mapping / grape_accounts / managed_repos）。
+- 棘轮出现 3 处「上升」实为归属重映射（同一批 SQL 从 api 消费改为 runtime 消费）：grape_accounts 12→14、
+  managed_repos 13→15、unified_user_mapping 14→17，已在基线按新归属落数并在本节记录。
+- 全局静态 **894 → 834**；check-arch PASS（R4 report-only 174→179，新增 5 条均为 runtime→mgmt 只读边）；
+  pytest arch/contracts/scripts 158 passed。
+
+### 迁移 SQL 按域拆分（-313）
 - `src/api/db_setup.py` 的迁移 SQL 按归属域搬到 `src/domains/{mgmt,runtime,insight}/migrations_ddl.py`
   （工具 `scripts/split_migration_sql.py`：AST 定位字面量 + 精确文本替换，只搬「命中表全属同域」的；
   `migrations = [...]` 里连续同域段落折叠成 tuple 常量并原位 `*alias.CONST` 展开，**执行顺序不变**）。

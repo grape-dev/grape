@@ -153,7 +153,7 @@ EXEMPT_FILES: dict = {
     # session idle 更新吞错已改 log.warning（本提交）
     ('api/main.py', 'except Exception:'): 2,
     # /metrics 背景采集失败留空
-    ('api/issues_center.py', 'except Exception:'): 1,
+    ('domains/runtime/issues_center.py', 'except Exception:'): 1,
     # 场景名缓存解析防御
     ('domains/mgmt/routes/settings.py', 'except Exception:'): 1,
     # 规则已删除，重载失败不阻断响应
