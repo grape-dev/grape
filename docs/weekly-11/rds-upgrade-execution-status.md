@@ -185,6 +185,24 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
 第 1 条也解释了历史记录里「彩排 0 失败」与坑 2 并存的矛盾：上一轮 stage env 同样缺 lib 开关，
 多数端点在内部 catch 了 1146，只有写探测把 `PUT /api/chat/config` 的异常记成了失败。
 
+### mgmt skills 技能页接口化（-20，本文件清零）
+- 20 处清零（19 条 SQL + 1 处 OpenAPI summary 文案命中正则，按判据口径改述）。
+- **可见范围条件是本批核心**：`skill_search` 把 scope 分支（`all` / `official` / `repo` / `user` /
+  默认「官方+个人」/ 带仓库）、组织隔离、keyword 三列 LIKE、agent_type、category、三种排序、
+  分页全部收进 owner 域，返回 `(total, rows)`；mgmt 侧只剩「repo 参数为空时早退」这一条策略判断。
+- `skill_agent_counts` 复用同一套 `_skill_scope_conditions`（连 agent_type 的展示排序 CASE 也在 owner 域）。
+- 单行读取全部具名化：official 精确/全量、详情（by id 与 by name 两种优先级）、下载行
+  （含 scope 可见性校验）、meta、path、repo 全列。
+- 删除与同名解析：`skill_delete_by_id`、`skill_repo_id_by_name`、`skill_repo_count_by_name`、
+  `skill_exists_active`。
+- 全局 **460 → 440**（-20）；基线 **440 / 96 对**。
+- 新增 `skills_smoke`（7 组断言）：五条可见范围分支 + 带仓库组合、keyword/agent_type/category
+  过滤、hot/latest 排序、分页 total 与行数一致、agent 计数、official 精确与全量、下载行四条
+  可见性（归属仓库/别的仓库/official/他人技能）、repo 同名 id 与计数、删除幂等、四个单行查询。
+- 又一处自己引入的语义缺陷被烟测抓住：第一版 `_skill_scope_conditions` 把
+  `scope in (None, "", "all")` 都当「不加 scope 条件」，而原语义只有 `"all"` 是全量、
+  空 scope 是「官方+个人」——第一组断言即红，改回后七组全绿。
+
 ### mgmt agents 会话配置页接口化（-23，本文件清零）
 - 23 处清零，全部指向 runtime 域：`agent_runtimes` 5、`runtime_credentials` 5、
   `devops_agent_session` 4、`vod_conversations` 3、`events` 3、`skill` 3、`agent_type` 2、

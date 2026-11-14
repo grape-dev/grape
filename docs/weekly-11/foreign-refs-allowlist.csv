@@ -78,7 +78,7 @@ scene_skill_ref,mgmt,runtime,2
 session_api_tokens,mgmt,kernel,10
 skill,runtime,api,8
 skill,runtime,kernel,5
-skill,runtime,mgmt,26
+skill,runtime,mgmt,6
 skill_category,mgmt,runtime,1
 takeover_sessions,runtime,api,1
 takeover_sessions,runtime,mgmt,1

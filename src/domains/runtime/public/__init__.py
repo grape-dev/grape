@@ -1836,6 +1836,34 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT scope, owner_name FROM runtime_credentials WHERE id=?"),
     "runtime_credentials_name_device": (
         "SELECT name, device_name FROM runtime_credentials WHERE id=?"),
+    # 技能页（mgmt/routes/skills.py）读路径
+    "skill_exists_active": "SELECT 1 FROM skill WHERE id=? AND is_active=1",
+    "skill_official_exact": (
+        "SELECT id, skill_name, display_name, description, agent_type, category_id FROM skill "
+        "WHERE is_active=1 AND scope='official' AND (skill_name=? OR display_name=?) "
+        "ORDER BY skill_name"),
+    "skill_official_all": (
+        "SELECT id, skill_name, display_name, description, agent_type, category_id FROM skill "
+        "WHERE is_active=1 AND scope='official' ORDER BY agent_type, skill_name"),
+    "skill_detail_by_id": (
+        "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, "
+        "is_featured, like_count, sub_scene, category_id FROM skill WHERE id=? AND is_active=1"),
+    "skill_detail_by_name": (
+        "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, "
+        "is_featured, like_count, sub_scene, category_id FROM skill WHERE skill_name=? AND is_active=1 "
+        "AND (scope='official' OR (scope='user' AND owner_id=?) OR scope='repo') "
+        "ORDER BY CASE scope WHEN 'user' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END, id DESC LIMIT 1"),
+    "skill_path_owner_scope": (
+        "SELECT skill_name, owner_id, skill_path, scope FROM skill WHERE id=? AND is_active=1"),
+    "skill_meta_row": (
+        "SELECT skill_name, scope, owner_id, agent_type, category_id FROM skill "
+        "WHERE id=? AND is_active=1"),
+    "skill_name_path": "SELECT skill_name, skill_path FROM skill WHERE id=? AND is_active=1",
+    "skill_repo_full_row": (
+        "SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id "
+        "FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1"),
+    "skill_name_path_scope": (
+        "SELECT skill_name, skill_path, scope FROM skill WHERE id=? AND is_active=1"),
     # 会话配置页（mgmt/routes/agents.py）读路径
     "devops_session_vod_id": (
         "SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'"),
@@ -3241,3 +3269,135 @@ def scene_detach_log_rebound(scene_row_id, node_tag: str, rebound_at: str) -> in
             "UPDATE scene_engine_detach_log SET rebound_at=? WHERE scene_row_id=? AND node_tag=? "
             "AND (rebound_at='' OR rebound_at IS NULL)", (rebound_at, scene_row_id, node_tag))
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+# ---------- 技能页（mgmt/routes/skills.py）查询原语 ----------
+#
+# skill 归运行域，列表/统计的可见性口径（scope 组合、owner、仓库、组织）跟随表一起放这里；
+# 调用方用结构化参数表达「看谁的范围」，不再拼 WHERE 片段。
+
+_SKILL_LIST_COLS = (
+    "id, skill_name, display_name, description, agent_type, scope, owner_id, "
+    "is_featured, like_count, sub_scene, category_id")
+
+
+def _skill_scope_conditions(scope=None, user_id="", repo_key="", org_id="") -> tuple[list, list]:
+    """可见范围条件（与原 mgmt 侧分支逐条对应）。"""
+    conds: list = ["is_active=1"]
+    params: list = []
+    if scope == "all":
+        pass  # 不加 scope 条件（官方 + 个人 + 所有仓库）
+    elif scope == "official":
+        conds.append("scope='official'")
+    elif scope == "repo":
+        conds.append("scope='repo'")
+        conds.append("owner_id=?")
+        params.append(repo_key)
+    elif scope == "user":
+        conds.append("scope='user'")
+        conds.append("owner_id=?")
+        params.append(str(user_id))
+    elif repo_key:
+        conds.append("(scope='official' OR (scope='user' AND owner_id=?) "
+                     "OR (scope='repo' AND owner_id=?))")
+        params.extend([str(user_id), repo_key])
+    else:
+        conds.append("(scope='official' OR (scope='user' AND owner_id=?))")
+        params.append(str(user_id))
+    # 组织隔离：official 对全组织可见；repo/user 的可见性靠 owner，不追加 org_id
+    if org_id and scope not in ("repo", "user"):
+        conds.append("(org_id='' OR org_id=?)")
+        params.append(org_id)
+    return conds, params
+
+
+def skill_search(scope=None, user_id="", repo_key="", org_id="", q: str = "",
+                 agent_type: str = "", category_id: int = 0, sort: str = "",
+                 page: int = 1, page_size: int = 0) -> tuple[int, list[tuple]]:
+    """技能列表查询：返回 (total, rows)。page_size<=0 表示不分页（total 为 0）。"""
+    conds, params = _skill_scope_conditions(scope, user_id, repo_key, org_id)
+    kw = (q or "").strip()
+    if kw:
+        like = f"%{kw}%"
+        conds.append("(skill_name LIKE ? OR display_name LIKE ? OR description LIKE ?)")
+        params.extend([like, like, like])
+    at = (agent_type or "").strip()
+    if at:
+        conds.append("agent_type=?")
+        params.append(at)
+    if category_id and int(category_id) > 0:
+        conds.append("category_id=?")
+        params.append(int(category_id))
+
+    where_sql = " WHERE " + " AND ".join(conds)
+    order_by = ("ORDER BY updated_at DESC" if sort == "latest"
+                else "ORDER BY like_count DESC" if sort == "hot"
+                else "ORDER BY agent_type, skill_name")
+    with _any_cursor() as c:
+        if page_size and int(page_size) > 0:
+            c.execute(f"SELECT COUNT(*) FROM skill{where_sql}", params)
+            total = int((c.fetchone() or [0])[0] or 0)
+            offset = max(0, (int(page) - 1) * int(page_size))
+            c.execute(f"SELECT {_SKILL_LIST_COLS} FROM skill{where_sql} {order_by} "
+                      f"LIMIT {int(page_size)} OFFSET {offset}", params)
+            return total, [tuple(r) for r in (c.fetchall() or [])]
+        c.execute(f"SELECT {_SKILL_LIST_COLS} FROM skill{where_sql} {order_by}", params)
+        return 0, [tuple(r) for r in (c.fetchall() or [])]
+
+
+def skill_agent_counts(scope=None, user_id="", repo_key="", org_id="") -> list[tuple]:
+    """按 agent_type 的技能计数（顺序固定 vod/issue/coding/qa/sre/chat/其它）。"""
+    conds, params = _skill_scope_conditions(scope, user_id, repo_key, org_id)
+    where_sql = " WHERE " + " AND ".join(conds)
+    with _any_cursor() as c:
+        c.execute(
+            f"SELECT agent_type, COUNT(*) FROM skill{where_sql} GROUP BY agent_type ORDER BY "
+            "CASE agent_type WHEN 'vod' THEN 1 WHEN 'issue' THEN 2 WHEN 'coding' THEN 3 "
+            "WHEN 'qa' THEN 4 WHEN 'sre' THEN 5 WHEN 'chat' THEN 6 ELSE 99 END", params)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def skill_download_row(skill_id, user_id="", repo_key: str = "") -> tuple | None:
+    """下载/详情用的技能行 (id, skill_path, scope, owner_id, skill_name)，含可见性校验。"""
+    with _any_cursor() as c:
+        if repo_key:
+            c.execute(
+                "SELECT id, skill_path, scope, owner_id, skill_name FROM skill WHERE id=? "
+                "AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) "
+                "OR (scope='repo' AND owner_id=?))",
+                (int(skill_id), str(user_id), repo_key))
+        else:
+            c.execute(
+                "SELECT id, skill_path, scope, owner_id, skill_name FROM skill WHERE id=? "
+                "AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) "
+                "OR scope='repo')", (int(skill_id), str(user_id)))
+        return c.fetchone()
+
+
+def skill_repo_id_by_name(name: str, owner_id: str) -> int:
+    """repo scope 同名技能 id（不存在返回 0）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? "
+                  "AND is_active=1 LIMIT 1", (name, owner_id))
+        row = c.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def skill_repo_count_by_name(name: str, owner_id: str) -> int:
+    """repo scope 同名技能条数（用于「已存在」判定）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? "
+                  "AND is_active=1", (name, owner_id))
+        return int((c.fetchone() or [0])[0] or 0)
+
+
+def skill_delete_by_id(skill_id) -> int:
+    """物理删除技能行（按 id；软删由 is_active 控制，此处与原实现一致）。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute("DELETE FROM skill WHERE id=?", (int(skill_id),))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def skill_exists_active(skill_id) -> bool:
+    """技能是否存在且未停用。"""
+    return read_one_any("skill_exists_active", (int(skill_id),)) is not None
