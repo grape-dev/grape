@@ -1,6 +1,6 @@
 # 下一批：跨域收口作业单
 
-总量 184 处 / 67 个文件；下表取前 10 个。
+总量 184 处 / 67 个文件；下表取前 3 个。
 
 ## src/domains/runtime/engine/scheduler.py（runtime 域，6 处）
 - `autopilot_tasks`（归 mgmt）× 5：行 909, 993, 1089, 1629, 1687
@@ -22,54 +22,6 @@
 - `events`（归 runtime）× 1：行 188
   - runtime public 已登记 177 条具名查询
 - `runtime_credentials`（归 runtime）× 1：行 230
-  - runtime public 已登记 177 条具名查询
-
-## src/api/skill_display.py（api 域，6 处）
-- `skill`（归 runtime）× 6：行 53, 61, 70, 79, 87, 114
-  - runtime public 已登记 177 条具名查询
-
-## src/api/scene_binding_repair.py（api 域，6 处）
-- `managed_repos`（归 mgmt）× 2：行 76, 85
-  - mgmt public 已登记 126 条具名查询
-- `issue`（归 runtime）× 2：行 99, 108
-  - runtime public 已登记 177 条具名查询
-- `scene_market`（归 mgmt）× 1：行 34
-  - mgmt public 已登记 126 条具名查询
-- `devops_pipeline_scene`（归 mgmt）× 1：行 48
-  - mgmt public 已登记 126 条具名查询
-
-## src/api/issue_vcs_index.py（api 域，6 处）
-- `issue`（归 runtime）× 6：行 273, 317, 321, 325, 433, 451
-  - runtime public 已登记 177 条具名查询
-
-## src/domains/insight/observability/efficiency.py（insight 域，5 处）
-- `issue`（归 runtime）× 2：行 138, 619
-  - runtime public 已登记 177 条具名查询
-- `grape_accounts`（归 mgmt）× 1：行 364
-  - mgmt public 已登记 126 条具名查询
-- `agent_tasks`（归 runtime）× 1：行 451
-  - runtime public 已登记 177 条具名查询
-- `devops_pipeline_scene`（归 mgmt）× 1：行 634
-  - mgmt public 已登记 126 条具名查询
-
-## src/api/server_common.py（api 域，5 处）
-- `agent_tasks`（归 runtime）× 3：行 439, 502, 504
-  - runtime public 已登记 177 条具名查询
-- `api_latency_log`（归 insight）× 1：行 357
-  - insight public 无具名查询，需新增
-- `agent_runtimes`（归 runtime）× 1：行 506
-  - runtime public 已登记 177 条具名查询
-
-## src/api/feedback_status.py（api 域，5 处）
-- `user_feedback`（归 mgmt）× 4：行 152, 174, 204, 217
-  - mgmt public 已登记 126 条具名查询
-- `issue`（归 runtime）× 1：行 205
-  - runtime public 已登记 177 条具名查询
-
-## src/api/a2a_dispatch_guard.py（api 域，5 处）
-- `events`（归 runtime）× 4：行 132, 241, 293, 356
-  - runtime public 已登记 177 条具名查询
-- `event_skipped`（归 runtime）× 1：行 362
   - runtime public 已登记 177 条具名查询
 
 ## 每批验收口径（不要跳）
