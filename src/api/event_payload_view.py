@@ -1,32 +1,10 @@
-"""事件 payload 对外投影（Issue #996）。
+"""Compatibility alias (P1 模块归位): canonical module src.kernel.event_payload_view.
 
-events.payload 可能包含完整 webhook 体，接口层只需 files / guard_impact
-两个视图。集中此处，避免 event_store 与 routes/issues 各写一份 JSON 解析。
+事件 payload 视图裁剪（纯函数）。旧路径以 sys.modules 别名指回 canonical 模块
+（import / monkeypatch / 属性赋值作用在同一模块对象上）。
 """
-import json
+import sys as _sys
 
-from src.kernel.config import log
+import src.kernel.event_payload_view as _impl
 
-
-def payload_view(payload) -> dict:
-    """从 payload dict 提取 files / guard_impact；其余字段不外泄。"""
-    if not isinstance(payload, dict):
-        return {}
-    view = {}
-    if payload.get("files"):
-        view["files"] = payload["files"]
-    if payload.get("guard_impact"):
-        view["guard_impact"] = payload["guard_impact"]
-    return view
-
-
-def payload_view_from_json(raw, seq=None) -> dict:
-    """解析 payload JSON 文本并投影；解析失败返回空视图并记录日志。"""
-    if not raw:
-        return {}
-    try:
-        payload = json.loads(raw)
-    except Exception as e:
-        log.warning(f"event payload view: parse failed seq={seq}: {e}")
-        return {}
-    return payload_view(payload)
+_sys.modules[__name__] = _impl

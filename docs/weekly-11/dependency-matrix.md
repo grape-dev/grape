@@ -1,13 +1,13 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-14 15:51　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **69** 张；跨域引用 **1262** 处（136 个「表×消费域」对）；含归属域在内的 SQL 引用 2721 处
+> 生成时间：2026-11-14 16:20　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **68** 张；跨域引用 **1232** 处（135 个「表×消费域」对）；含归属域在内的 SQL 引用 2711 处
 
 ## 1. 域 × 域 跨域引用热力
 
 | 消费方 ↓ / 归属域 → | mgmt | runtime | insight | 合计 |
 | --- | ---: | ---: | ---: | ---: |
-| api | 224 | 372 | 5 | 601 |
+| api | 224 | 342 | 5 | 571 |
 | kernel | 88 | 89 | 0 | 177 |
 | mgmt | 0 | 193 | 18 | 211 |
 | runtime | 160 | 0 | 11 | 171 |
@@ -18,8 +18,8 @@
 | 分类 | 表数 | 剩余跨域引用 |
 | --- | ---: | ---: |
 | D | 21 | 490 |
-| C1 | 10 | 443 |
-| C2 | 31 | 316 |
+| C1 | 10 | 419 |
+| C2 | 30 | 310 |
 | B | 6 | 12 |
 | E | 1 | 1 |
 
@@ -30,8 +30,8 @@
 | `skill` | runtime | 90 | mgmt 59 / api 26 / kernel 5 | D 模块归位（kernel 写/读域表） | — | 19 |
 | `issue` | runtime | 87 | api 79 / insight 4 / mgmt 2 / kernel 2 | D 模块归位（kernel 写/读域表） | — | 27 |
 | `agent_runtimes` | runtime | 81 | api 37 / mgmt 31 / insight 10 / kernel 3 | C1 归属重定（写路径挪进 owner 域） | — | 42 |
-| `events` | runtime | 81 | api 60 / insight 17 / mgmt 4 | C1 归属重定（写路径挪进 owner 域） | — | 30 |
-| `agent_tasks` | runtime | 71 | insight 36 / api 29 / mgmt 5 / kernel 1 | C2 outbox 跨域写 | W1 | 45 |
+| `agent_tasks` | runtime | 70 | insight 36 / api 28 / mgmt 5 / kernel 1 | C2 outbox 跨域写 | W1 | 45 |
+| `events` | runtime | 57 | api 36 / insight 17 / mgmt 4 | C1 归属重定（写路径挪进 owner 域） | — | 30 |
 | `runtime_credentials` | runtime | 57 | mgmt 22 / insight 20 / api 14 / kernel 1 | C1 归属重定（写路径挪进 owner 域） | — | 29 |
 | `meta` | runtime | 56 | api 24 / mgmt 24 / kernel 8 | D 模块归位（kernel 写/读域表） | — | 9 |
 | `devops_pipeline_scene` | mgmt | 51 | api 34 / runtime 15 / insight 2 | C1 归属重定（写路径挪进 owner 域） | — | 17 |
@@ -73,11 +73,9 @@
 | `grape_t_channel_inbound_dedup` | mgmt | 5 | runtime 5 | C2 outbox 跨域写 | W2 | 2 |
 | `grape_t_schema_migrations` | mgmt | 5 | api 5 | C2 outbox 跨域写 | X | 1 |
 | `scene_category` | runtime | 5 | api 3 / mgmt 2 | C2 outbox 跨域写 | W2 | 4 |
-| `event_active_guard` | runtime | 4 | api 4 | C2 outbox 跨域写 | W2 | 4 |
 | `grape_t_channel_chat_session_binding` | mgmt | 4 | runtime 4 | C2 outbox 跨域写 | W2 | 3 |
 | `grape_t_credential_usage_log` | runtime | 4 | kernel 3 / api 1 | D 模块归位（kernel 写/读域表） | — | 2 |
 | `api_latency_log` | insight | 3 | api 3 | C2 outbox 跨域写 | W3 | 5 |
-| `event_skipped` | runtime | 3 | api 3 | C2 outbox 跨域写 | W3 | 5 |
 | `grape_t_channel_sender_identity` | mgmt | 3 | runtime 3 | C2 outbox 跨域写 | W2 | 3 |
 | `runtime_health_scores` | runtime | 3 | api 2 / insight 1 | B API 聚合端点 | — | 5 |
 | `skill_category` | mgmt | 3 | api 2 / runtime 1 | B API 聚合端点 | — | 3 |
@@ -86,6 +84,7 @@
 | `user_credentials` | mgmt | 3 | api 3 | B API 聚合端点 | — | 5 |
 | `admin_accounts` | mgmt | 2 | api 2 | C2 outbox 跨域写 | W2 | 3 |
 | `event_route_config` | mgmt | 2 | api 2 | D 模块归位（kernel 写/读域表） | — | 1 |
+| `event_skipped` | runtime | 2 | api 2 | C2 outbox 跨域写 | W3 | 5 |
 | `grape_t_channel_outbound_card` | mgmt | 2 | runtime 2 | C2 outbox 跨域写 | W3 | 2 |
 | `audit_logs` | mgmt | 1 | insight 1 | E 洞察事件/宽表 | — | 3 |
 | `autopilot_subscriptions` | mgmt | 1 | runtime 1 | B API 聚合端点 | — | 3 |
