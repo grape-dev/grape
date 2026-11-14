@@ -141,6 +141,26 @@ python3 scripts/verify_domain_isolation.py --host <rds> --user <u> --password <p
 
 ## 7. P4/P5 彩排实测（2026-11-14）
 
+### 7.1 三独立实例 / 两节点（本轮落地）
+| 域 | 实例 | 说明 |
+|---|---|---|
+| mgmt | 本机 127.0.0.1:3311 | mysqld 8.0.46（二进制副本，绕开 Ubuntu AppArmor 的 datadir 限制）|
+| insight | 本机 127.0.0.1:3312 | 同上，独立 datadir/端口 |
+| runtime | 兄弟节点 192.168.0.116:3307 | MySQL 8.0.46（该机由 MariaDB 10.11 换装 MySQL 8，保证与生产同引擎，避免 MySQL8 生成列 DDL 在 MariaDB 上 1064）|
+
+一条命令跑通并验证（幂等，库/数据会重建）：
+```bash
+SRC_HOST=<参照库> SRC_USER=root SRC_PWD=*** \
+REMOTE_HOST=<兄弟节点> REMOTE_PORT=3307 REMOTE_USER=rds_admin REMOTE_PWD=*** \
+LOOP_MAX=1 bash scripts/p4_p5_loop.sh
+```
+实测：P4 PASS（mgmt 54 / insight 12 / runtime 36 基表；行数等于 dump 快照；视图 0；账号只授本库），
+P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
+静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
+
+### 7.2 单实例三域（早期彩排，已由 7.1 取代）
+
+
 ```bash
 # 1) 建三个独立库 + 只授本库账号，复制基表（不复制视图）
 MYSQL_PWD=*** python3 scripts/rds_stage_rehearsal.py --host <baseline-host> --user root

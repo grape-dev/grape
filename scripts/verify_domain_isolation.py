@@ -34,25 +34,39 @@ def _connect(host, port, user, password):
                            charset="utf8mb4", connect_timeout=10)
 
 
-def check_views(conn) -> list[str]:
+def _connect_dsn(url: str):
+    """mysql://user:pass@host:port/db → pymysql 连接。"""
+    from urllib.parse import unquote, urlparse
+
+    import pymysql
+
+    u = urlparse(url)
+    return pymysql.connect(host=u.hostname, port=u.port or 3306, user=u.username,
+                           password=unquote(u.password or ""), charset="utf8mb4",
+                           connect_timeout=10, read_timeout=120)
+
+
+def check_views(conns) -> list[str]:
     problems = []
-    with conn.cursor() as c:
-        for domain, db in DBS.items():
+    for domain, db in DBS.items():
+        conn = conns[domain]
+        with conn.cursor() as c:
             c.execute("SELECT COUNT(*) FROM information_schema.views WHERE table_schema=%s", (db,))
             n = int(c.fetchone()[0])
-            print(f"  views[{db}] = {n}")
-            if n:
-                problems.append(f"A1: {db} 仍有 {n} 个视图（目标 0）")
+        print(f"  views[{db}] = {n}")
+        if n:
+            problems.append(f"A1: {db} 仍有 {n} 个视图（目标 0）")
     return problems
 
 
-def check_grants(conn, accounts: dict[str, str]) -> list[str]:
+def check_grants(conns, accounts: dict[str, str]) -> list[str]:
     problems = []
     if not accounts:
         print("  grants: 跳过（未提供 --account）")
         return problems
-    with conn.cursor() as c:
-        for domain, user in accounts.items():
+    for domain, user in accounts.items():
+        conn = conns[domain]
+        with conn.cursor() as c:
             own = DBS[domain]
             c.execute(f"SHOW GRANTS FOR '{user}'@'%'")
             grants = [r[0] for r in c.fetchall()]
@@ -61,9 +75,9 @@ def check_grants(conn, accounts: dict[str, str]) -> list[str]:
                 grants = [r[0] for r in c.fetchall()]
             foreign = [g for g in grants
                        if any(db in g for db in DBS.values() if db != own)]
-            print(f"  grants[{user}] = {len(grants)} 条，跨库 {len(foreign)} 条")
-            if foreign:
-                problems.append(f"A2: {user} 仍有跨库授权：{foreign[:3]}")
+        print(f"  grants[{user}] = {len(grants)} 条，跨库 {len(foreign)} 条")
+        if foreign:
+            problems.append(f"A2: {user} 仍有跨库授权：{foreign[:3]}")
     return problems
 
 
@@ -90,10 +104,11 @@ def check_code_refs() -> list[str]:
     return problems
 
 
-def check_xwrite(conn) -> list[str]:
+def check_xwrite(conns) -> list[str]:
     problems = []
-    with conn.cursor() as c:
-        for domain, db in DBS.items():
+    for domain, db in DBS.items():
+        conn = conns[domain]
+        with conn.cursor() as c:
             c.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=%s "
                       "AND table_name='grape_t_xwrite_log'", (db,))
             if not c.fetchone()[0]:
@@ -111,7 +126,12 @@ def check_xwrite(conn) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="P5 域隔离验收")
-    ap.add_argument("--host", required=True)
+    ap.add_argument("--env-only", action="store_true",
+                    help="只验收环境面（A1/A2/A6）；A3 代码外域引用仍打印但不作为失败项")
+    ap.add_argument("--dsn-mgmt", default="", help="分布式拓扑：mgmt 实例 DSN")
+    ap.add_argument("--dsn-runtime", default="", help="分布式拓扑：runtime 实例 DSN")
+    ap.add_argument("--dsn-insight", default="", help="分布式拓扑：insight 实例 DSN")
+    ap.add_argument("--host", default="", help="单实例三库模式：主机（与 --db-prefix 配合）")
     ap.add_argument("--port", type=int, default=3306)
     ap.add_argument("--user", default="root")
     ap.add_argument("--password", default="")
@@ -137,8 +157,22 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         accounts[domain] = user
 
+    conns: dict[str, object] = {}
     try:
-        conn = _connect(args.host, args.port, args.user, args.password)
+        dsns = {"mgmt": args.dsn_mgmt, "runtime": args.dsn_runtime, "insight": args.dsn_insight}
+        if any(dsns.values()):
+            missing = [d for d, v in dsns.items() if not v]
+            if missing:
+                print(f"[FATAL] 分布式模式需要三个 --dsn-*：缺 {missing}", file=sys.stderr)
+                return 2
+            for domain, dsn in dsns.items():
+                conns[domain] = _connect_dsn(dsn)
+        else:
+            if not args.host:
+                print("[FATAL] 需要 --host 或三个 --dsn-*", file=sys.stderr)
+                return 2
+            conn = _connect(args.host, args.port, args.user, args.password)
+            conns = {d: conn for d in DBS}
     except Exception as exc:  # noqa: BLE001
         print(f"[FATAL] 连接失败：{exc}", file=sys.stderr)
         return 2
@@ -146,15 +180,23 @@ def main(argv: list[str] | None = None) -> int:
     problems: list[str] = []
     try:
         print("== A1 视图清零 ==")
-        problems += check_views(conn)
+        problems += check_views(conns)
         print("== A2 账号授权 ==")
-        problems += check_grants(conn, accounts)
+        problems += check_grants(conns, accounts)
         print("== A6 补偿队列 ==")
-        problems += check_xwrite(conn)
+        problems += check_xwrite(conns)
     finally:
-        conn.close()
+        for c in {id(v): v for v in conns.values()}.values():
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
     print("== A3 代码外域引用 ==")
-    problems += check_code_refs()
+    code_problems = check_code_refs()
+    if args.env_only:
+        print(f"  （--env-only：A3 {len(code_problems)} 项计入报告、不计入失败）")
+    else:
+        problems += code_problems
 
     print()
     if problems:

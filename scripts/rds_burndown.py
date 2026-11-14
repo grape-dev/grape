@@ -20,6 +20,7 @@ import argparse
 import csv
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -66,9 +67,13 @@ def baseline_pairs() -> int:
 
 def smoke_backlog() -> tuple[list[dict], int]:
     """跑 stage 冒烟（读+写），返回失败项。"""
-    proc = subprocess.run(
-        [sys.executable, str(REPO / "scripts/stage_api_smoke.py"), "--with-ids", "--write", "--json"],
-        capture_output=True, text=True, cwd=REPO, timeout=900)
+    cmd = [sys.executable, str(REPO / "scripts/stage_api_smoke.py"), "--with-ids", "--write", "--json"]
+    # 主库连接需要 DDL 权限：凭据由调用方通过环境变量透传（不落仓库）
+    if os.environ.get("STAGE_DB_USER"):
+        cmd += ["--db-user", os.environ["STAGE_DB_USER"]]
+    if os.environ.get("STAGE_DB_PWD"):
+        cmd += ["--db-password", os.environ["STAGE_DB_PWD"]]
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO, timeout=900)
     # smoke 的 JSON 是缩进多行输出（日志走 stderr），按整段解析；兜底从头找 '{'
     payload = None
     out = (proc.stdout or "").strip()
