@@ -1748,7 +1748,103 @@ def set_meta_value(key: str, value: str) -> None:
 # 两条连接都能执行，因此调用方不再需要在外域文件里留一份本地 SQL 兜底。
 # 约束：只登记固定 SQL 的具名查询（参数化），不接受调用方传入 SQL 文本或表名。
 
+# 会话/消息列清单（具名查询共用；列序即调用方取值的下标，改动必须同步所有消费者）
+_CONV_COLS_SQL = ", ".join(_CONV_COLS)
+_MSG_COLS = "id, conversation_id, role, content, created_at, task_id, generate_status, deleted"
+
 _ANY_QUERIES: dict[str, str] = {
+    # ── session_manager 去跨域所需具名查询（kernel 侧会话/消息/群绑定/配置行）──
+    # 列序与原 SQL 逐字一致：调用方按下标取值，错位即静默串列，因此只允许**照抄**。
+    'chat_session_by_repo': 'SELECT id, event_history, runtime_session_id, status FROM chat_agent_session WHERE repo_key=?',
+    'chat_session_insert': (
+        "INSERT INTO chat_agent_session (id, repo_key, source, repository, status, event_history, "
+        "created_at, last_active_at) VALUES (?,?,?,?,?,?,?,?)"),
+    'chat_session_history_reset': 'UPDATE chat_agent_session SET event_history=? WHERE id=?',
+    'chat_session_set_status': 'UPDATE chat_agent_session SET status=? WHERE id=?',
+    'chat_session_update_state': (
+        "UPDATE chat_agent_session SET event_history=?, status=?, runtime_session_id=?, "
+        "last_active_at=? WHERE id=?"),
+    'chat_session_update_state_noreid': (
+        "UPDATE chat_agent_session SET event_history=?, status=?, last_active_at=? WHERE id=?"),
+    'chat_config_row_canonical': (
+        "SELECT id, runtime_id, skill, skill_id FROM chat_agent_session "
+        "WHERE id=? AND user_id=? AND (repo_key='' OR repo_key IS NULL)"),
+    'chat_config_rows_by_user': (
+        "SELECT id, runtime_id, skill, skill_id FROM chat_agent_session "
+        "WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) "
+        "ORDER BY last_active_at DESC, id DESC"),
+    'chat_config_delete_others': (
+        "DELETE FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) AND id!=?"),
+    'chat_config_upsert': (
+        "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, skill, "
+        "skill_id, created_at, last_active_at) "
+        "VALUES (?,?,?,?,?,?,datetime('now'),datetime('now'))"),
+    # chat_conversations
+    'conversation_insert': (
+        "INSERT INTO chat_conversations (id, user_id, agent_session_id, runtime_session_id, "
+        "repo_key, im_channel_id, title, user_gitcode_token, conv_type, issue_number) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)"),
+    'conversations_by_user_repo': (
+        f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE user_id=? AND repo_key=? "
+        "ORDER BY updated_at DESC LIMIT ?"),
+    'conversations_by_user': (
+        f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE user_id=? "
+        "ORDER BY updated_at DESC LIMIT ?"),
+    'conversation_by_id': f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE id=?",
+    'conversation_by_im_user': (
+        f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE im_channel_id=? AND user_id=? "
+        "ORDER BY updated_at DESC LIMIT 1"),
+    'conversation_by_im': (
+        f"SELECT {_CONV_COLS_SQL} FROM chat_conversations WHERE im_channel_id=? "
+        "ORDER BY updated_at DESC LIMIT 1"),
+    'conversation_brief': (
+        "SELECT user_id, repo_key, conv_type, issue_number FROM chat_conversations WHERE id=?"),
+    'conversation_owner': 'SELECT user_id FROM chat_conversations WHERE id=?',
+    'conversation_touch': "UPDATE chat_conversations SET updated_at=datetime('now') WHERE id=?",
+    'conversation_clear_im_channel': (
+        "UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=? AND id!=?"),
+    'conversation_set_im_channel': "UPDATE chat_conversations SET im_channel_id=? WHERE id=?",
+    'conversation_delete': 'DELETE FROM chat_conversations WHERE id=?',
+    # chat_messages
+    'message_insert_with_task': (
+        "INSERT INTO chat_messages (conversation_id, role, content, task_id, generate_status) "
+        "VALUES (?,?,?,?,?)"),
+    'message_insert': (
+        "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?,?,?)"),
+    'message_by_id': f"SELECT {_MSG_COLS} FROM chat_messages WHERE id=?",
+    'message_recall': 'UPDATE chat_messages SET deleted=1 WHERE id=? AND deleted=0',
+    'message_recall_by_task': (
+        "UPDATE chat_messages SET deleted=1 WHERE task_id=? "
+        "AND role IN ('agent','assistant') AND deleted=0"),
+    'message_user_deleted': (
+        "SELECT deleted FROM chat_messages WHERE task_id=? AND role='user' "
+        "ORDER BY id DESC LIMIT 1"),
+    'messages_page_before': (
+        f"SELECT {_MSG_COLS} FROM chat_messages WHERE conversation_id=? AND id<? "
+        "ORDER BY id DESC LIMIT ?"),
+    'messages_page': (
+        f"SELECT {_MSG_COLS} FROM chat_messages WHERE conversation_id=? "
+        "ORDER BY id DESC LIMIT ?"),
+    'messages_delete_by_conversation': 'DELETE FROM chat_messages WHERE conversation_id=?',
+    # repo_im_group_binding
+    'repo_im_auto_impl': 'SELECT auto_impl_enabled FROM repo_im_group_binding WHERE repo_key=?',
+    'repo_im_set_auto_impl': (
+        'UPDATE repo_im_group_binding SET auto_impl_enabled=? WHERE repo_key=?'),
+    'repo_im_notify': 'SELECT notify_enabled FROM repo_im_group_binding WHERE repo_key=?',
+    'repo_im_set_notify': 'UPDATE repo_im_group_binding SET notify_enabled=? WHERE repo_key=?',
+    'repo_im_binding_upsert': (
+        "INSERT INTO repo_im_group_binding (im_provider, im_chat_id, repo_key, source, bind_by, "
+        "im_app_id) VALUES ('feishu',?,?,?,?,?) "
+        "ON CONFLICT(im_provider, im_chat_id, im_app_id) DO UPDATE SET "
+        "repo_key=excluded.repo_key, source=excluded.source, bind_by=excluded.bind_by, "
+        "im_app_id=excluded.im_app_id"),
+    # issue：会话收到真实用户消息 → 任务转 processing
+    'issue_processing_by_conversation': (
+        "UPDATE issue SET status='processing' WHERE conversation_id=? AND user_id=? "
+        "AND status='active'"),
+    'issue_processing_by_number': (
+        "UPDATE issue SET status='processing' WHERE repo_key=? AND issue_number=? AND user_id=? "
+        "AND status='active'"),
     # ── session_store 去跨域所需具名查询（见 src/api/session_store.py 注释）──
     'agent_type_enable': 'SELECT enable FROM agent_type WHERE agent_type=?',
     'devops_agent_session_row': 'SELECT id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
@@ -2392,3 +2488,252 @@ def update_issue_agent_session_fields(session_id: str, fields: dict,
     with _any_cursor(write=True) as c:
         cur = c.execute(f"UPDATE issue_agent_session SET {sets} WHERE id=?", params)
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+# ── session_manager 去跨域原语（kernel 侧会话/消息/群绑定/配置行） ─────────────
+#
+# kernel/session_manager 是「进程主库」入口，会话、消息、群绑定、Chat 配置行都归运行域。
+# 三库独立后（视图 0）它必须按表走 owner 域：SQL 只留本文件一份，连接按拓扑自适应。
+# 多语句组合写用 `_any_tx()`（自有 DSN → 独立非 autocommit 连接，真事务；
+# 单库/测试拓扑 → 进程库 + db_lock，与原 kernel 语义一致）。
+
+
+@contextmanager
+def _any_tx():
+    """运行域组合写的任意拓扑事务游标（多语句原子）。"""
+    if db_registry.uses_own_dsn("runtime"):
+        with db_registry.transaction("runtime") as c:
+            yield c
+        return
+    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+
+    with _plock:
+        c = _pdb.cursor()
+        try:
+            yield c
+            _pdb.commit()
+        except Exception:
+            try:
+                _pdb.rollback()
+            except Exception as exc:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                log.debug(f"runtime public rollback skipped: {exc}")
+            raise
+
+
+def upsert_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "",
+                           skill_id: int = 0) -> None:
+    """写用户全局 Chat 配置行（`sess-cfg-<uid>`）：先收敛同用户其它配置行，再 upsert。"""
+    sid = f"sess-cfg-{user_id}"
+    with _any_tx() as c:
+        c.execute(_any_sql("chat_config_delete_others"), (user_id, sid))
+        c.execute(_any_sql("chat_config_upsert"), (sid, user_id, "", runtime_id, skill, skill_id))
+
+
+def join_feishu_chat(chat_id: str, conv_id: str, user_id) -> bool:
+    """飞书接入指针原子切换：校验属主 → 清旧持有者 → 设新（同一事务）。
+
+    与原 kernel 实现等价：目标会话不存在或不属于该用户时返回 False，且不做任何写。
+    """
+    with _any_tx() as c:
+        c.execute(_any_sql("conversation_owner"), (conv_id,))
+        row = c.fetchone()
+        if not row or row[0] != user_id:
+            return False
+        c.execute(_any_sql("conversation_clear_im_channel"), (chat_id, conv_id))
+        c.execute(_any_sql("conversation_set_im_channel"), (chat_id, conv_id))
+    return True
+
+
+_CONV_WRITABLE = {"title", "status", "runtime_session_id", "agent_session_id",
+                  "user_gitcode_token", "conv_type", "issue_number", "im_channel_id"}
+
+
+def update_conversation_fields(conv_id: str, fields: dict) -> int:
+    """按 id 更新会话可写列（动态字段集；列名经白名单校验，`updated_at` 同步刷新）。"""
+    data = {k: v for k, v in (fields or {}).items() if k in _CONV_WRITABLE}
+    if not data:
+        return 0
+    sets = ", ".join(f"{k}=?" for k in data)
+    params = list(data.values()) + [conv_id]
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            f"UPDATE chat_conversations SET {sets}, updated_at=datetime('now') WHERE id=?", params)
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def append_chat_message(conversation_id: str, role: str, content: str, task_id: str = "",
+                        generate_status=None) -> int:
+    """追加一条会话消息，返回自增主键（task_id 为空走三列插入，与原实现分支一致）。"""
+    with _any_cursor(write=True) as c:
+        if task_id:
+            cur = c.execute(_any_sql("message_insert_with_task"),
+                            (conversation_id, role, content, task_id, generate_status))
+        else:
+            cur = c.execute(_any_sql("message_insert"), (conversation_id, role, content))
+        return int(getattr(cur, "lastrowid", 0) or 0)
+
+
+def mark_issue_processing(conv_id: str, user_id, repo_key: str, issue_number) -> None:
+    """会话收到真实用户消息 → 该用户任务 active→processing（按会话优先，退化按仓库+序号）。"""
+    with _any_tx() as c:
+        cur = c.execute(_any_sql("issue_processing_by_conversation"), (conv_id, user_id))
+        if not getattr(cur, "rowcount", 0):
+            c.execute(_any_sql("issue_processing_by_number"), (repo_key, issue_number, user_id))
+
+
+def upsert_repo_im_binding(chat_id: str, repo_key: str, source: str, bind_by: str,
+                           app_id: str) -> int:
+    """群 ↔ 仓库绑定 UPSERT：只更新绑定列，保留用户的通知/自动实现开关。"""
+    return exec_any("repo_im_binding_upsert",
+                    (chat_id, repo_key, source, str(bind_by), app_id))
+
+
+# ── 运行域表结构引导（表归本域；DDL 落调用方连接，与 mgmt.ensure_user_mapping_schema 同口径）──
+
+CHAT_AGENT_SESSION_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS chat_agent_session (
+        id TEXT PRIMARY KEY,
+        user_id TEXT DEFAULT '',
+        repo_key TEXT DEFAULT '',
+        source TEXT, repository TEXT, status TEXT,
+        runtime TEXT DEFAULT 'opencode',
+        skill TEXT DEFAULT '',
+        event_history MEDIUMTEXT DEFAULT '[]',
+        created_at TEXT, last_active_at TEXT
+    )
+"""
+
+REPO_IM_GROUP_BINDING_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS repo_im_group_binding (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    im_provider TEXT DEFAULT 'feishu',
+    im_chat_id TEXT NOT NULL,
+    im_channel_name TEXT DEFAULT '',
+    repo_key TEXT NOT NULL,
+    bind_by TEXT DEFAULT '',
+    im_app_id TEXT DEFAULT '',
+    source TEXT DEFAULT '',
+    auto_impl_enabled INTEGER DEFAULT 0,
+    notify_enabled INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (im_provider, im_chat_id, im_app_id)
+)
+"""
+
+#: 兼容列（老库升级补齐；幂等 ADD，列已存在时由方言层报错并吞掉）
+_CHAT_SESSION_LEGACY_COLUMNS = (
+    ("skill_id", "INTEGER DEFAULT 0"),
+    ("skill", "TEXT DEFAULT ''"),
+    ("user_id", "INTEGER DEFAULT 0"),
+    ("runtime_session_id", "TEXT DEFAULT ''"),
+)
+_REPO_IM_LEGACY_COLUMNS = (
+    ("auto_impl_enabled", "INTEGER DEFAULT 0"),
+    ("notify_enabled", "INTEGER DEFAULT 0"),
+    ("im_app_id", "TEXT DEFAULT ''"),
+    ("im_provider", "TEXT DEFAULT 'feishu'"),
+    ("im_channel_name", "TEXT DEFAULT ''"),
+    ("source", "TEXT DEFAULT ''"),
+)
+
+
+def chat_session_ddl() -> str:
+    """chat_agent_session 建表 DDL（只读快照，供文档/测试比对）。"""
+    return CHAT_AGENT_SESSION_TABLE_SQL
+
+
+def repo_im_binding_ddl() -> str:
+    """repo_im_group_binding 建表 DDL（只读快照，供文档/测试比对）。"""
+    return REPO_IM_GROUP_BINDING_TABLE_SQL
+
+
+def _add_legacy_columns(conn: Any, table: str, columns: tuple) -> None:
+    """幂等补列：逐列 ADD，失败只告警（列已存在 / 方言不支持生成列）。"""
+    for name, decl in columns:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        except Exception as exc:  # noqa: BLE001 - 列已存在是正常路径
+            log.debug(f"legacy column {table}.{name} skipped: {exc}")
+
+
+def ensure_chat_session_schema(conn: Any) -> None:
+    """在调用方连接上引导 chat_agent_session（会话主表）。
+
+    步骤与容错口径与 kernel 原启动块逐条等价：
+      1) 旧表 sessions → chat_agent_session（改名；两表并存时搬数据后 DROP 旧表），失败仅告警；
+      2) CREATE TABLE IF NOT EXISTS（失败必须抛出，与原启动块一致）；
+      3) 条件式与无条件式兼容列补齐（runtime_session_id / runtime_id / skill_id / runtime / skill / user_id）。
+    conn 必填（DDL 必须落在调用方所在库，不能走跨域连接）。
+    """
+    if conn is None:
+        raise ValueError("ensure_chat_session_schema 需要调用方连接（本地库引导）")
+    try:
+        old = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        if "sessions" in old and "chat_agent_session" not in old:
+            conn.execute("ALTER TABLE sessions RENAME TO chat_agent_session")
+            conn.commit()
+            log.info("Migrated table sessions -> chat_agent_session")
+        elif "sessions" in old and "chat_agent_session" in old:
+            conn.execute(
+                "INSERT OR IGNORE INTO chat_agent_session (id, repo_key, source, repository, "
+                "status, event_history, oc_session_id, created_at, last_active_at) "
+                "SELECT id, repo_key, source, repository, status, event_history, oc_session_id, "
+                "created_at, last_active_at FROM sessions")
+            conn.execute("DROP TABLE sessions")
+            conn.commit()
+            log.info("Migrated sessions rows into chat_agent_session and dropped legacy table")
+    except Exception as exc:  # noqa: BLE001 - 迁移失败不阻断启动（原实现同样只告警）
+        log.warning(f"Migrate sessions table failed: {exc}")
+    conn.execute(CHAT_AGENT_SESSION_TABLE_SQL)
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(chat_agent_session)").fetchall()]
+        if "runtime_session_id" not in cols:
+            conn.execute(
+                "ALTER TABLE chat_agent_session ADD COLUMN runtime_session_id TEXT DEFAULT ''")
+        if "runtime_id" not in cols:
+            conn.execute("ALTER TABLE chat_agent_session ADD COLUMN runtime_id INTEGER DEFAULT 0")
+        if "backend" not in cols and "runtime" not in cols:
+            conn.execute(
+                "ALTER TABLE chat_agent_session ADD COLUMN runtime TEXT DEFAULT 'opencode'")
+    except Exception as exc:  # noqa: BLE001 - 方言不支持 PRAGMA 时由下方幂等 ADD 兜底
+        log.warning(f"condition-check chat_agent_session columns failed: {exc}")
+    _add_legacy_columns(conn, "chat_agent_session", _CHAT_SESSION_LEGACY_COLUMNS)
+    try:
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"commit chat_agent_session schema failed: {exc}")
+
+
+def ensure_repo_im_binding_schema(conn: Any) -> None:
+    """在调用方连接上引导 repo_im_group_binding（群↔仓库绑定）。
+
+    步骤：旧表 feishu_bindings 改名（幂等）→ CREATE → 兼容列补齐；废弃表 feishu_users 直接 DROP。
+    conn 必填（DDL 必须落在调用方所在库）。
+    """
+    if conn is None:
+        raise ValueError("ensure_repo_im_binding_schema 需要调用方连接（本地库引导）")
+    try:
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        if "feishu_bindings" in tables and "repo_im_group_binding" not in tables:
+            conn.execute("ALTER TABLE feishu_bindings RENAME TO repo_im_group_binding")
+            conn.commit()
+            log.info("Migrated table feishu_bindings -> repo_im_group_binding")
+    except Exception as exc:  # noqa: BLE001 - 迁移失败不阻断启动
+        log.warning(f"Migrate feishu_bindings table failed: {exc}")
+    conn.execute(REPO_IM_GROUP_BINDING_TABLE_SQL)
+    _add_legacy_columns(conn, "repo_im_group_binding", _REPO_IM_LEGACY_COLUMNS)
+    try:
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        if "feishu_users" in tables:
+            conn.execute("DROP TABLE feishu_users")
+            conn.commit()
+            log.info("Dropped legacy table feishu_users")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"Drop feishu_users table failed: {exc}")
+    try:
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"commit repo_im_group_binding schema failed: {exc}")

@@ -504,6 +504,23 @@ def get_account_id_by_username(username: str) -> str | None:
     return str(row[0]) if row and row[0] not in (None, "") else None
 
 
+def account_auth_row(username: str, conn: Any = None) -> tuple | None:
+    """按注册名（大小写不敏感，仅 status=1）取 (id, nickname)。
+
+    conn 非空 → 在调用方连接上执行（单库 / 视图期，kernel 传入本进程库）；
+    None → 走 mgmt 自有 DSN（三库独立）。不存在返回 None。
+    """
+    if not username:
+        return None
+    sql = ("SELECT id, nickname FROM grape_accounts "
+           "WHERE LOWER(username)=LOWER(?) AND status=1 LIMIT 1")
+    if conn is not None:
+        return conn.execute(sql, (username,)).fetchone()
+    with db_registry.cursor("mgmt") as c:
+        c.execute(sql.replace("?", "%s"), (username,))
+        return c.fetchone()
+
+
 def get_account_username_by_id(account_id: str) -> str:
     """按账号 id（UUID 字符串）取用户名；不存在返回空串。"""
     if not account_id:

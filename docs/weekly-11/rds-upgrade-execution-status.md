@@ -160,6 +160,27 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### session_manager 会话/消息/群绑定接口化（-56，本文件清零）
+- `src/kernel/session_manager.py` 的 56 处外域引用**全部清零**：`chat_agent_session` /
+  `chat_conversations` / `chat_messages` / `repo_im_group_binding` / `issue` / `agent_runtimes`
+  改走 runtime public 的 33 条具名查询 + 6 个薄原语；`grape_accounts`（mgmt 归属）走 mgmt public
+  新增的 `account_auth_row(username, conn=None)`（单库传调用方连接，三库走自有 DSN）。
+- 建表/旧表迁移/兼容列补齐（14 处 DDL）改为 `ensure_chat_session_schema(conn)` /
+  `ensure_repo_im_binding_schema(conn)`：DDL 仍落**调用方连接**（与 `ensure_user_mapping_schema`
+  同口径），单库 sqlite 启动引导实测表结构与原 DDL 逐列一致（chat 14 列 / bind 11 列）。
+- 多语句组合写保持原子性：`upsert_chat_config_row`（收敛重复行 + upsert）、`join_feishu_chat`
+  （校验属主 + 清旧 + 设新）、`mark_issue_processing`（按会话优先、退化按仓库+序号）用 owner 域
+  事务：自有 DSN 新开非 autocommit 连接，单库回落进程库 + `db_lock`（与原 kernel 语义一致）。
+- `get_user_conversations` 删除本地兜底 SQL，改「任意拓扑」具名查询（handoff §5.3 第 3 条口径）。
+- 全局 **732 → 676**（-56，含 1 处日志文案误报）；基线收紧 **676 / 113 对**（4 对随文件清零消失）。
+- 验证：`rds_gate.sh --quick` → GATE 全绿（R1-R7 PASS、棘轮未上升、契约 37 条最新、看板已刷新）；
+  `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；本地 sqlite 八组功能烟测全通过
+  （会话 CRUD、群绑定开关/幂等 upsert、会话幂等创建、飞书指针原子切换、消息撤回、任务转
+  processing、配置行收敛、会话删除）。
+- **未验证项（如实）**：三实例彩排 `p4_p5_loop.sh` 本轮未执行——会话内没有 `SRC_PWD` /
+  `REMOTE_PWD` 凭据环境变量（口令只走环境变量，不入仓库），需在具备凭据的会话补跑后才能声称
+  「运行面 0 失败」。本批不把彩排当已通过。
+
 ### 渠道安装表 SQL 归位（-7）
 - `runtime/im/engine_wiring.py` 里 7 条 `grape_t_channel_installation`（mgmt 归属）语句改为
   mgmt public 的 `installation_*` 助手（调用方仍传自己的连接，事务/关闭语义不变）。
