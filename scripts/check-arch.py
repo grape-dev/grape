@@ -15,6 +15,9 @@ Rules:
       kernel/domains (hard; deferred in-function imports excluded)
   R6  kernel/domains must not import legacy top-level
       shim paths (src.config, src.api.jwt_utils, ...)             (hard)
+  R7  removed legacy top-level paths must stay unimportable      (hard)
+  R8  kernel must not WRITE domain-owned tables (三库独立化 P1)   (hard;
+      existing pairs are ratcheted in R8_WHITELIST with a target phase)
 
 Usage:
   python scripts/check-arch.py            # print report, exit 1 on hard violations
@@ -25,6 +28,7 @@ from __future__ import annotations
 import argparse
 import ast
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -64,6 +68,70 @@ REMOVED_LEGACY_PREFIXES = (
     "src.observability", "src.runtime", "src.project_info", "src.api.routes",
 )
 
+# ── R8：kernel 不得写「域归属表」（三库独立化 P1 硬约束）────────────────────
+# 归属口径：docs/weekly-11/table-owner.tsv（102 张基表，三库实况）。
+# 棘轮：白名单按 (文件, 表) 登记**当前数量**；新增文件/表或数量上升 → 红。
+# 每条存量以「目标阶段」标注，P1/P3 迁移完成后应逐条删除（只减不增）。
+R8_OWNER_TSV = os.path.join(REPO_ROOT, "docs", "weekly-11", "table-owner.tsv")
+R8_WHITELIST: dict[str, dict[str, int]] = {
+    "src/kernel/repo_migrate.py": {
+        "managed_repos": 3, "meta": 2, "skill": 2, "user_repos": 4,
+    },  # P1：整体迁 mgmt 域（仓库维护；受 #2010 kernel 布局契约约束，需随契约一起改）
+    "src/kernel/session_manager.py": {
+        "chat_agent_session": 7, "chat_conversations": 6, "chat_messages": 5,
+        "issue": 2, "repo_im_group_binding": 3, "unified_user_mapping": 6,
+    },  # P3：进程库 shim 的跨域写，按表迁到 runtime/mgmt public 写函数
+    "src/kernel/auth_sdk/auth_token.py": {"api_tokens": 3, "session_api_tokens": 8},  # P3：迁 mgmt auth
+    "src/kernel/repo_cleanup.py": {
+        "chat_messages": 1, "meta": 4, "scene_knowledge_ref": 1, "skill": 1,
+        "task_messages": 1, "vod_conversations": 1,
+    },  # P1：仓库清理按域拆到 mgmt/runtime
+    "src/kernel/lock.py": {"distributed_locks": 6},  # P3：分布式锁改 owner 端点
+    "src/kernel/gsb/registry.py": {"gsb_service_registry": 4},  # P3：注册表写走 mgmt 端点
+    "src/kernel/token_resolver.py": {"managed_repos": 2},  # P2：读改 mgmt 内部端点
+    "src/kernel/prompt_builder.py": {"unified_user_mapping": 2},  # P2：读改 N10
+    "src/kernel/persistence/credential_usage_log.py": {"grape_t_credential_usage_log": 2},  # P3
+    "src/kernel/outbound_ledger.py": {"outbound_content_ledger": 1},  # P1：迁 mgmt
+}
+
+_R8_WRITE_RE = re.compile(
+    r"\b(INSERT\s+(?:IGNORE\s+)?INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+"
+    r"`?(?:[A-Za-z_]\w*`?\s*\.\s*`?)?([A-Za-z_]\w*)`?", re.I)
+
+
+def load_r8_owner(path: str) -> dict[str, str]:
+    owner: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip() or line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 2:
+                    owner[parts[1].strip()] = parts[0].strip()
+    except OSError:
+        pass
+    return owner
+
+
+def scan_r8() -> list[tuple[str, str, str, int]]:
+    """返回 [(relpath, table, owner_schema, count)]；owner tsv 缺失时返回空并跳过。"""
+    owner = load_r8_owner(R8_OWNER_TSV)
+    if not owner:
+        return []
+    out = []
+    for path in iter_py(os.path.join(SRC, "kernel")):
+        text = open(path, encoding="utf-8", errors="replace").read()
+        found: dict[str, int] = {}
+        for _verb, table in _R8_WRITE_RE.findall(text):
+            if table in owner:
+                found[table] = found.get(table, 0) + 1
+        rel = os.path.relpath(path, REPO_ROOT)
+        for table, n in sorted(found.items()):
+            out.append((rel, table, owner[table], n))
+    return out
+
+
 # ── Whitelist: module -> {rule: reason} ────────────────────────────────────
 # Pre-existing deferred (function-level) imports kept working during Phase 1;
 # each entry carries the phase that will remove it.
@@ -86,15 +154,18 @@ WHITELIST: dict[str, dict[str, str]] = {
         "R1": "deferred token lookup via mgmt.user.db; Phase 5 -> MgmtService",
         "R2": "deferred token resolution via src.api.deps; Phase 5",
     },
+    "src/kernel/repo_migrate.py": {
+        "managed_repos": 3, "meta": 2, "skill": 2, "user_repos": 4,
+    },  # P1：整体迁 mgmt 域（仓库维护；受 #2010 kernel 布局契约约束，需随契约一起改）
     "src/kernel/session_manager.py": {
         "R1": "deferred feature flags via mgmt.user.db; Phase 5",
         "R2": "deferred timestamp helper via src.api.time_utils; Phase 5",
     },
-    "src/kernel/repo_cleanup.py": {
-        "R1": "deferred repo state lookup via mgmt.user.db; Phase 5",
-    },
     "src/kernel/repo_migrate.py": {
         "R1": "deferred org/user lookups via mgmt.user.db; Phase 5",
+    },
+    "src/kernel/repo_cleanup.py": {
+        "R1": "deferred repo state lookup via mgmt.user.db; Phase 5",
     },
     "src/kernel/help_docs_sync.py": {
         "R1": "deferred skill/user lookups via mgmt.user.db; Phase 5",
@@ -277,7 +348,7 @@ def main() -> int:
         return 2
 
     graph: dict[str, list[str]] = {}
-    r1, r2, r3, r4, r6, r7 = [], [], [], [], [], []
+    r1, r2, r3, r4, r6, r7, r8 = [], [], [], [], [], [], []
     r5_intra: list = []  # 包内 re-export 环（>=4 段公共前缀），report-only 输出
 
     # R7 全仓扫描：src/api 等非 kernel/domains 层不在主循环内，历史漏网正出自这里
@@ -424,12 +495,20 @@ def main() -> int:
             print("  " + " <-> ".join(comp))
     section("R6 legacy shim imports", r6, True)
     section("R7 removed legacy paths", r7, True)
+    # R8：kernel 写域归属表（棘轮：新文件/新表/数量上升 → HARD）
+    for rel, table, owner_schema, n in scan_r8():
+        expected = R8_WHITELIST.get(rel, {}).get(table)
+        if expected is None:
+            r8.append((rel, f"WRITE {table} ({owner_schema}-owned)", f"{n} 处（未登记）"))
+        elif n > expected:
+            r8.append((rel, f"WRITE {table} ({owner_schema}-owned)", f"{expected} -> {n}"))
+    section("R8 kernel writes domain-owned tables (ratchet)", r8, True)
 
     whitelisted = sum(len(v) for v in WHITELIST.values())
     print(f"\nwhitelist entries: {whitelisted} (see WHITELIST in this script)")
     print(f"R4 cross-domain findings: {len(r4)} (tracked for Phase 5)")
 
-    hard_fail = bool(r1 or r2 or r5 or r6 or r7) or (args.strict and r4)
+    hard_fail = bool(r1 or r2 or r5 or r6 or r7 or r8) or (args.strict and r4)
     if hard_fail:
         print("\nRESULT: FAIL (hard violations above)")
         return 1
