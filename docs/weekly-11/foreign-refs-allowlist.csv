@@ -1,12 +1,12 @@
 table,owner_domain,consumer,refs
-agent_runtimes,runtime,api,4
+agent_runtimes,runtime,api,3
 agent_runtimes,runtime,insight,5
 agent_shared_knowledge,mgmt,runtime,5
-agent_tasks,runtime,api,7
+agent_tasks,runtime,api,4
 agent_tasks,runtime,insight,8
 agent_tasks,runtime,mgmt,2
 agent_type,runtime,insight,1
-api_latency_log,insight,api,2
+api_latency_log,insight,api,1
 audit_logs,mgmt,insight,1
 chat_agent_session,runtime,mgmt,1
 chat_conversations,runtime,mgmt,2

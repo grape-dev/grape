@@ -19,7 +19,7 @@
   "src/api/pipeline_status.py": 3,
   "src/api/run.py": 1,
   "src/api/run_webhook.py": 1,
-  "src/api/server_common.py": 4,
+  "src/api/server_common.py": 3,
   "src/api/server_tasks.py": 17,
   "src/api/session_store.py": 9,
   "src/domains/insight/observability/__init__.py": 8,

@@ -351,16 +351,13 @@ def _attach_request_log(app: FastAPI) -> None:
                 from src.kernel.config import SLOW_REQUEST_THRESHOLD_MS
                 if duration >= SLOW_REQUEST_THRESHOLD_MS:
                     try:
-                        from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
-                        with _sdbl:
-                            _sdb.execute(
-                                "INSERT INTO api_latency_log (request_id, method, path, status, duration_ms, repo_key, user_id, source) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?, 'backend')",
-                                (rid, request.method, redacted_path, status, round(duration), _repo, _uid)
-                            )
-                            _sdb.commit()
-                    except Exception:
-                        pass  # 入库失败不影响请求
+                        # api_latency_log 归 insight：走 owner 域薄写口（任意拓扑）
+                        from src.domains.insight import public as _insight_metrics
+                        _insight_metrics.record_api_latency_any(
+                            rid, request.method, redacted_path, status,
+                            round(duration), _repo, _uid)
+                    except Exception as _exc:
+                        log.debug(f"api_latency_log insert skipped: {_exc}")
             request_id_var.reset(token_rid)
             repo_var.reset(token_repo)
             user_var.reset(token_uid)
@@ -434,10 +431,9 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
             http_status = 503
         else:
             try:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("SELECT COUNT(*) FROM agent_tasks")
-                    c.fetchone()
+                # agent_tasks 归 runtime：readiness 表探活走 owner 域（任意拓扑）
+                from src.domains.runtime import public as _runtime_health
+                _runtime_health.health_task_rows_total()
             except Exception:
                 checks["tables"] = "error: agent_tasks missing"
                 status = "not_ready"
@@ -472,7 +468,6 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
         """运维诊断：暴露 IM bot 状态、任务队列深度、runtime 在线数。仅允许内网访问。"""
         if not is_loopback(request):
             return JSONResponse(status_code=403, content={"error": "forbidden"})
-        from src.kernel.session_manager import db, db_lock
         from src.domains.runtime.engine.health import derive_runtime_health
         import time as _time2, os as _os2
 
@@ -497,21 +492,18 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
         except Exception:
             pass
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT status, COUNT(*) FROM agent_tasks GROUP BY status")
-                result["tasks"] = {r[0]: r[1] for r in c.fetchall()}
-                c.execute("SELECT COUNT(*) FROM agent_tasks WHERE status IN ('dispatched','running')")
-                result["in_progress"] = c.fetchone()[0]
-                c.execute("SELECT status, last_seen_at, credential_id FROM agent_runtimes")
-                online = 0
-                total = 0
-                for r in c.fetchall():
-                    total += 1
-                    h = derive_runtime_health(r[0] or "offline", r[1], now_ts)
-                    if h == "online":
-                        online += 1
-                result["runtimes"] = {"total": total, "online": online}
+            # agent_tasks / agent_runtimes 归 runtime：全量统计走 owner 域原语（任意拓扑）
+            from src.domains.runtime import public as _runtime_health
+            result["tasks"] = {r[0]: r[1] for r in _runtime_health.health_task_status_counts()}
+            result["in_progress"] = _runtime_health.health_task_inflight_count()
+            online = 0
+            total = 0
+            for r in _runtime_health.health_runtime_rows():
+                total += 1
+                h = derive_runtime_health(r[0] or "offline", r[1], now_ts)
+                if h == "online":
+                    online += 1
+            result["runtimes"] = {"total": total, "online": online}
         except Exception as e:
             result["db_error"] = str(e)
         return result

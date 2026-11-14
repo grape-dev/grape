@@ -1395,7 +1395,10 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # 指标桶取数（insight/observability/metric_rollup；任意拓扑）
            "task_status_counts_by_created_any", "task_status_counts_by_completed_any",
            "task_timeout_counts_by_repo_any", "task_timing_rows_any",
-           "event_cascade_counts_by_repo_any", "online_credential_count_any"]
+           "event_cascade_counts_by_repo_any", "online_credential_count_any",
+           # api server_common 运维诊断（/healthz 表探活 + /health/realtime 全量统计）
+           "health_task_rows_total", "health_task_status_counts",
+           "health_task_inflight_count", "health_runtime_rows"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2042,6 +2045,13 @@ _ANY_QUERIES: dict[str, str] = {
     "runtime_utc_caliber_rows": "SELECT id, last_seen_at, updated_at FROM agent_runtimes",
     "runtime_set_timestamps": (
         "UPDATE agent_runtimes SET last_seen_at=?, updated_at=? WHERE id=?"),
+    # api server_common 运维诊断（/healthz 表探活 + /health/realtime 全量统计）
+    # 原 SQL 在 api 进程主库直发，三库拓扑下 api 库无 agent_tasks/agent_runtimes → 恒失败。
+    "health_task_rows_total": "SELECT COUNT(*) FROM agent_tasks",
+    "health_task_status_counts": "SELECT status, COUNT(*) FROM agent_tasks GROUP BY status",
+    "health_task_inflight_count": (
+        "SELECT COUNT(*) FROM agent_tasks WHERE status IN ('dispatched','running')"),
+    "health_runtime_rows": "SELECT status, last_seen_at, credential_id FROM agent_runtimes",
     # skill
     "skill_row_by_id": (
         "SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, "
@@ -4609,3 +4619,33 @@ def online_credential_count_any(since_iso: str) -> int:
     """在线凭据数：未吊销、有最后心跳且不早于 `since_iso` 的凭据行数。"""
     row = read_one_any("rollup_online_credentials", (since_iso,))
     return int((row or [0])[0] or 0)
+
+
+# ---------- 进程运维诊断取数（api server_common 的 /healthz 与 /health/realtime）----------
+#
+# 四条原 SQL 都在 api 进程主库直发：`SELECT COUNT(*) FROM agent_tasks`（readiness 表探活）、
+# 状态分布、在制计数、`SELECT status, last_seen_at, credential_id FROM agent_runtimes`。
+# 三库拆分后 api 进程库没有这两张表（视图 0）→ /healthz 恒 `not_ready`（tables 报
+# agent_tasks missing）、/health/realtime 恒 `db_error`，运维面看不出真实在制/在线数。
+# 表归 runtime，SQL 只留本域；四条语句列序/谓词与原实现逐字一致，任意拓扑可用。
+
+def health_task_rows_total() -> int:
+    """agent_tasks 行数（readiness 的表存在性探活；表缺失时抛异常，由调用方判 not_ready）。"""
+    row = read_one_any("health_task_rows_total")
+    return int((row or [0])[0] or 0)
+
+
+def health_task_status_counts() -> list[tuple]:
+    """任务状态全量分布 `[(status, count), ...]`（不按 repo/org 过滤，运维诊断口径）。"""
+    return [tuple(r) for r in read_all_any("health_task_status_counts")]
+
+
+def health_task_inflight_count() -> int:
+    """在制任务数（`status IN ('dispatched','running')`）。"""
+    row = read_one_any("health_task_inflight_count")
+    return int((row or [0])[0] or 0)
+
+
+def health_runtime_rows() -> list[tuple]:
+    """全部引擎行 `(status, last_seen_at, credential_id)`；在线/离线判定归调用方。"""
+    return [tuple(r) for r in read_all_any("health_runtime_rows")]

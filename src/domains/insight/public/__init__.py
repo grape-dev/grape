@@ -269,7 +269,7 @@ def rollup_dim_keys(exclude: str = "global") -> list[str]:
 
 
 __all__ += ["list_repo_credential_rows", "aggregate_llm_usage", "read_one_any", "read_all_any", "exec_any",
-            "rollup_dim_keys",
+            "rollup_dim_keys", "record_api_latency_any",
             "repo_credential_value", "repo_credential_meta", "upsert_repo_credential_value",
             "clear_repo_credential_value", "any_repo_credential", "repo_keys_sharing_value",
             "repo_keys_with_nonempty_credential"]
@@ -292,3 +292,31 @@ def aggregate_llm_usage(engine_ids: list[int]) -> list[tuple]:
             f"FROM obs_llm_usage WHERE engine_id IN ({ph}) "
             f"GROUP BY engine_id, model_key, model_raw", tuple(ids))
         return list(c.fetchall() or [])
+
+
+# ---------- API 延迟流水（api_latency_log 归 insight）：任意拓扑薄写口 ----------
+#
+# 原实现在 api 的慢请求中间件里直发 `INSERT INTO api_latency_log ...` 到 api 进程主库，
+# 外面裹 `except: pass`。三库拆分后 api 进程库没有该表（视图 0）→ 慢请求指标整体静默丢
+# 失，且丢在 except 里看不出。表归 insight，写口只留本域。
+#
+# 列序与 source 字面量 `'backend'` 与改造前逐字一致（created_at 由列默认值
+# `datetime('now')` 给，原 SQL 也不写这一列）；`?` 占位符，sqlite / MySQL 同一文本。
+
+_LATENCY_INSERT_SQL = (
+    "INSERT INTO api_latency_log (request_id, method, path, status, duration_ms, "
+    "repo_key, user_id, source) VALUES (?,?,?,?,?,?,?,'backend')")
+
+
+def record_api_latency_any(request_id: str, method: str, path: str, status,
+                           duration_ms, repo_key: str = "", user_id: str = "") -> int:
+    """后端慢请求延迟落库（任意拓扑，返回影响行数）。
+
+    纯派生数据，不做幂等去重（与原实现一致：每次慢请求一行）；status/duration_ms
+    原样透传，调用方传什么存什么（与改造前同一口径）。
+    """
+    with _any_cursor(write=True) as c:
+        cur = c.execute(_LATENCY_INSERT_SQL,
+                        (request_id, method, path, status, duration_ms,
+                         repo_key or "", user_id or ""))
+        return int(getattr(cur, "rowcount", 0) or 0)

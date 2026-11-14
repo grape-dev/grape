@@ -2172,6 +2172,72 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `foreign-refs-allowlist.csv` 收紧为 143 / 50，依赖看板与作业单同步刷新
   （下一批头名：`src/api/server_common.py` 5 处）。
 
+### 7.21 api 进程运维探活取数下沉 owner 域（2026-11-15 本批）
+
+- 文件：`src/api/server_common.py`（api 域，共享 FastAPI 脚手架：慢请求指标中间件 +
+  `attach_health` 的 readiness / realtime 诊断），**5 处 → 0**（单轮做完，未分两轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `api_latency_log`（归 insight）× 1：原行 357 慢请求中间件
+    `INSERT INTO api_latency_log (request_id, method, path, status, duration_ms,
+    repo_key, user_id, source) VALUES (?,…,?, 'backend')`（8 列，created_at 由列默认值给）；
+  - `agent_tasks`（归 runtime）× 3：原行 439 readiness 表探活 `SELECT COUNT(*) FROM
+    agent_tasks`；行 502 `/health/realtime` 状态分布 `SELECT status, COUNT(*) … GROUP BY
+    status`；行 504 在制计数 `WHERE status IN ('dispatched','running')`；
+  - `agent_runtimes`（归 runtime）× 1：原行 506 全量引擎行 `SELECT status,
+    last_seen_at, credential_id`（在线判定由调用方 `derive_runtime_health` 做）。
+  五处都是**固定 SQL 文本**（无动态拼接、无跨域 JOIN、无 IN 列表展开），调用点全部是
+  `db.cursor()` / `db.execute()` 直发 api 进程主库。
+- owner 侧新增（`?` 占位符，列序/谓词/source 字面量与原 SQL 逐字一致）：
+  1) insight public：`_LATENCY_INSERT_SQL` + `record_api_latency_any(request_id, method,
+     path, status, duration_ms, repo_key='', user_id='')`，走 `_any_cursor(write=True)`；
+  2) runtime public：`_ANY_QUERIES` 增 4 个具名查询（`health_task_rows_total` /
+     `health_task_status_counts` / `health_task_inflight_count` / `health_runtime_rows`）
+     + 4 个薄函数同名导出（`__all__` 同步）。
+- 设计取舍：
+  1) **不复用 `dashboard_task_status_counts`**：那条语句带 `WHERE 1=1`（repo/org 过滤原语），
+     本批是**全量**运维口径且要求逐字对拍原 SQL，另立 `health_task_*` 具名查询，
+     避免为复用而改语义；也不复用 `alerts_task_rows_total`（体量告警语义，非 readiness 探活）。
+  2) **写口薄函数而非 `exec_any`**：insight public 没有 `_READ_QUERIES` 注册面（A3 门禁只
+     认那个 attr），走具名查询会在 `check_lib_query_names` 报未登记；且既有
+     `record_api_latency` 就是函数形态。故用薄函数，SQL 常量留本域。
+  3) **保留 readiness 第一段 `SELECT 1`**：那是「进程自身主库连通」探活，不涉任何表，
+     仍用 `session_manager.db` + `db_lock`；只有表存在性检查换成 runtime 原语 ——
+     两者是两个不同断言（连不上 vs 表缺失），不能合并。
+  4) **realtime 段放弃单游标快照**：原来三条语句共用一个 `with db_lock` + cursor。改为
+     三次 owner 原语调用（各自 `_any_cursor`）—— 三条是独立统计，无事务/快照要求；
+     单库拓扑下 `_any_cursor` 仍拿同一 `db_lock`（RLock 重入安全），不引入新锁序。
+  5) **慢请求失败降级保留、但不再静默**：原 `except: pass` 改成 `log.debug(f"…skipped: …")`，
+     入库失败依旧不影响请求（口径不变），但三库拓扑下的丢数可在日志看见。
+     `tests/silent_except_baseline.json` 中该文件计数 4 → 3（修掉的吞噬点同步下调）。
+- 修的存量 bug（三库拓扑，运维面全黑）：
+  1) **readiness 恒 `not_ready` / 503**：`SELECT COUNT(*) FROM agent_tasks` 在 api 进程库
+     1146（表在 runtime 库，视图 0）→ `checks["tables"]="error: agent_tasks missing"`、
+     `status="not_ready"`、HTTP 503。K8s/nginx 的 readiness 探针把**健康进程判成未就绪**，
+     四进程拆分后整个集群的就绪门形同永久失败；
+  2) **`/health/realtime` 恒 `db_error`**：同一张表的三条语句一起失败，`tasks` /
+     `in_progress` / `runtimes` 三个字段永久缺失 —— 运维看不到任务队列深度与引擎在线数；
+  3) **慢请求指标在三库拓扑整体丢失**：`INSERT INTO api_latency_log` 打 api 进程库 1146，
+     被 `except: pass` 吞掉，`/api/latency/logs` 与 Grafana 延迟面板在独立部署下**零样本**，
+     且日志里没有任何痕迹（本次降级改为带 debug 日志）。
+- 验证：`py_compile` 3 个文件 **COMPILE_OK**；SQLite 烟测
+  `~/burndown/server_common_health_smoke.py` **ALL 71 CHECKS PASSED**（含边界与否定用例：
+  5 条语句与改造前 SQL 逐字对拍 + 无 `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`；
+  写口 8 列取值、`source` 恒 `backend`、`created_at` 走列默认值、同请求两次**不去重**、
+  None → 空串；状态分布含 NULL 组且不按 repo 过滤、在制只认 dispatched/running；
+  引擎行 3 列含 status NULL 与 offline 全量，派生口径 online/recently_lost/offline 逐条对拍；
+  缺 agent_tasks → 探活抛异常、空表 → 0/[] 不抛；端到端 TestClient：`/healthz` 200/503 两态、
+  `/health/realtime` 数值、慢请求真实落到 owner 库且 api 进程库零写入；单库走进程库、
+  自有 DSN 两侧零串库；源码面 0 条表引用、只剩 `SELECT 1`、中间件无 `except: pass`）；
+  `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 /
+  看板最新）；`pytest tests/arch tests/contracts tests/scripts` **158 passed**；
+  `scripts/check_lib_query_names.py src` **PASS**（insight 12/20、mgmt 160/237、runtime 152/226）；
+  `make lint` **import OK**。
+- 新基线：全局 **143 → 138**（-5），对数 **50 不变**：`api_latency_log←api` 1 → 0、
+  `agent_tasks←api` 4 → 1、`agent_runtimes←api` 3 → 2（两个表在 api 还有 3 处，
+  集中在 `src/api/health_endpoints.py`：agent_tasks 3 + agent_runtimes 1，同模式、下一批候选）。
+  基线 `foreign-refs-allowlist.csv` 收紧为 138 / 50，依赖看板与作业单同步刷新
+  （下一批头名：`src/api/feedback_status.py` 5 处，并列 `src/api/a2a_dispatch_guard.py` 5 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
