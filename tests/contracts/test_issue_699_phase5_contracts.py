@@ -617,13 +617,17 @@ class TestProviderFactory:
         assert svc.__class__.__name__ == "MgmtServiceLocal"
 
     def test_cluster_remote_mode_returns_remote(self, monkeypatch, temp_db):
+        """Issue #2479：remote 制式改为按方法路由代理（默认偏好 remote + 热路径 lib）。"""
         monkeypatch.setenv("GRAPE_MODE", "cluster")
         monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
         import src.domains.contracts  # noqa: F401
-        from src.kernel.gsb.provider import get_mgmt_service, is_remote_mode
+        from src.kernel.gsb.provider import decide_mode, get_mgmt_service, is_remote_mode
         assert is_remote_mode() is True
         svc = get_mgmt_service()
-        assert svc.__class__.__name__ == "MgmtServiceRemote"
+        assert svc.__class__.__name__ == "_RoutedService"
+        # 内置基线：非热路径方法默认偏好 remote，热路径方法锁 lib
+        assert decide_mode("mgmt", "get_bot_config") == "remote"
+        assert decide_mode("mgmt", "verify_session_token") == "lib"
 
     def test_cluster_without_remote_mode_returns_local(self, monkeypatch, temp_db):
         monkeypatch.setenv("GRAPE_MODE", "cluster")

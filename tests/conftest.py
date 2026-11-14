@@ -181,4 +181,11 @@ def _reset_gsb_lb_state():
         reset_instance_cache()
     except Exception:  # noqa: BLE001 - 指标/注册表未初始化时不影响用例
         pass
+    # Issue #2479：路由配置表的进程级缓存同样逐用例重置
+    try:
+        from src.kernel.gsb import route_config as _route_config
+
+        _route_config.reset_cache()
+    except Exception:  # noqa: BLE001
+        pass
     yield

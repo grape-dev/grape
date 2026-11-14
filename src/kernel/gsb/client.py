@@ -19,6 +19,9 @@ GsbClient 是域间通信的统一入口：
   避免读超时后重放造成重复写。
 - 多实例负载均衡：discover_service() 只能拿一条，这里改用 list_instances()
   拿全部 ``service`` / ``service@namespace`` 行，按策略排序后依次尝试。
+- Issue #2479：metrics status 标签归一化（remote_timeout / remote_unreachable /
+  数字业务码），可区分「remote 超时」与「业务错误」；新增 fail-fast 异常
+  （GsbRemoteTimeoutError 等，由 provider 路由代理包装，client 保持原始传输异常语义）。
 
 负载均衡策略（GRAPE_GSB_LB，默认 local_first）：
     local_first     本机命名空间实例优先，同命名空间内轮询，失败再跨节点（默认，兼容旧行为）
@@ -111,6 +114,48 @@ if httpx:
 
 # 幂等方法：读超时/协议错误后重放不会产生重复副作用
 _IDEMPOTENT_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+# ---------------- fail-fast 异常（Issue #2479） ----------------
+
+
+class GsbRemoteChannelError(RuntimeError):
+    """GSB remote 通道失败（超时/不可达）——fail-fast，不回落 lib。
+
+    稳定错误码 ``code`` 供业务侧判别；由 provider 路由代理（_RoutedService）
+    在 remote 调用包装传输层异常时抛出。GsbClient 自身保持原始 httpx 异常语义。
+    """
+
+    code = "GSB_REMOTE_CHANNEL_ERROR"
+
+
+class GsbRemoteTimeoutError(GsbRemoteChannelError):
+    """remote 调用超时（读/写/连接/池超时）——不回落 lib。"""
+
+    code = "GSB_REMOTE_TIMEOUT"
+
+
+class GsbRemoteUnreachableError(GsbRemoteChannelError):
+    """remote 通道不可达（连接拒绝/协议错/网络错等非超时传输失败）——不回落 lib。"""
+
+    code = "GSB_REMOTE_UNREACHABLE"
+
+
+def _status_label(exc: Exception) -> str:
+    """异常 → metrics status 标签（可区分 remote 超时与业务错误）。
+
+    - httpx 超时族 → ``remote_timeout``；
+    - 其它传输层错误 → ``remote_unreachable``；
+    - HTTPStatusError 等带响应码的业务错误 → 数字状态码；
+    - 其余 → 异常类型名（兜底观测）。
+    """
+    if httpx and isinstance(exc, httpx.TimeoutException):
+        return "remote_timeout"
+    if httpx and isinstance(exc, httpx.TransportError):
+        return "remote_unreachable"
+    resp = getattr(exc, "response", None)
+    code = getattr(resp, "status_code", None)
+    return str(code) if code else type(exc).__name__
 
 
 def resolve_lb_strategy() -> str:
@@ -352,7 +397,7 @@ class GsbClient:
                     target=self.service_name,
                     caller=self.caller_name,
                     method=method,
-                    status=getattr(exc, "response", None) and getattr(exc.response, "status_code", "error") or type(exc).__name__,
+                    status=_status_label(exc),
                     seconds=time.time() - started,
                     instance=_instance_of(base),
                 )
@@ -379,6 +424,14 @@ class GsbClient:
             finally:
                 self._leave_inflight(base)
         raise last_exc if last_exc else RuntimeError(f"GSB request failed: {self.service_name}{path}")
+
+    def set_timeout(self, timeout_seconds: float, connect: float = 5.0) -> None:
+        """按路由配置表 timeout_ms 热应用 per-method 调用超时（Issue #2479）。
+
+        httpx 客户端超时可变；未配置的路由 key 不调用本方法（维持默认 10s）。
+        """
+        if self._http and timeout_seconds and timeout_seconds > 0:
+            self._http.timeout = httpx.Timeout(float(timeout_seconds), connect=connect)
 
     def get(self, path: str, params: dict | None = None) -> Any:
         """GET 请求。"""
