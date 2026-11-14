@@ -2084,6 +2084,94 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （其余 4 处在其它 api 文件）；基线 `foreign-refs-allowlist.csv` 收紧为 148 / 53，
   依赖看板与作业单同步刷新（下一批头名：`src/api/a2a_dispatch_guard.py` 5 处）。
 
+### 7.20 insight 能效看板取数下沉 owner 域（2026-11-15 本批）
+
+- 文件：`src/domains/insight/observability/efficiency.py`（insight 域，Flow Efficiency
+  看板 10 卡聚合），**5 处 → 0**（单轮做完，未分两轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `issue`（归 runtime）× 2：原行 138 `SELECT status, created_at, completed_at,
+    created_by, assignee, user_id ... WHERE repo_key IN (…) AND is_subtask_mode=0`
+    （看板轻量行，②③①⑥⑤⑦⑧⑨⑩ 的基础数据）；行 619 下钻详情 10 列（`issue_number,
+    title, status, COALESCE(stage,''), COALESCE(scene_id,''), created_at, completed_at,
+    COALESCE(created_by,''), COALESCE(assignee,''), COALESCE(user_id,0)`，同款谓词）；
+  - `agent_tasks`（归 runtime）× 1：原行 451 `SELECT status, started_at, completed_at,
+    agent_type ... WHERE repo_key IN (…)`（⑩ 任务交付时长）；
+  - `grape_accounts`（归 mgmt）× 1：原行 364 `SELECT id, username ... WHERE id IN (…)`
+    （⑨ 在办分布的归属人用户名）；
+  - `devops_pipeline_scene`（归 mgmt）× 1：原行 634 `SELECT scene_id,
+    COALESCE(NULLIF(display_name,''), NULLIF(name,'')) ... WHERE scene_id IN (…)`
+    （下钻列表的场景展示名）。
+  五处全是 **f-string 动态拼接 IN 列表**（占位符个数随 500/批的 chunk 变），表名/列名
+  不来自外部输入；无跨域 JOIN（聚合链全在 Python 侧）。
+- owner 侧新增（`?` 占位符，列序/谓词与原 SQL 逐字一致；IN 展开在 owner 内部）：
+  1) runtime public 3 个薄函数：`efficiency_issue_rows(repo_keys, cursor=None)`、
+     `efficiency_issue_detail_rows(repo_keys, cursor=None)`、
+     `efficiency_task_rows(repo_keys, cursor=None)`；
+  2) mgmt public 2 个薄函数：`account_name_rows_by_ids(ids, cursor=None)`、
+     `scene_display_name_rows(scene_ids, cursor=None)`；既有 `account_names_by_ids`
+     改为其上的 dict 包装（dashboard 的 `_efficiency_uid_name_loader` 调用口径不变）；
+  3) 两侧各一个 `_owner_cursor(cursor)` 私有上下文助手：模拟/单库拓扑复用调用方游标，
+     自有 DSN 时忽略。
+- 设计取舍：
+  1) **动态 IN 留在 owner 展开**：`read_all_any` 只认固定 SQL 文本；调用方拼 `?,?,…`
+     等于把 SQL 拼回 insight 文件（跨域引用照样计）。owner 侧按 500/批切分、自己展开
+     占位符，语句文本固定、调用方无法注入表名/列名。分块只服务 SQLite 变量上限
+     （原 issue/task 两条语句一次带走全部 repo_key，仓库候选通常 1~3 个），行集合不变。
+  2) **`cursor` 参数不是「把连接交回调用方」，而是「单库拓扑复用同一库」**：本模块的
+     设计契约是「喂一个 cursor + SQLite 建表即可单测」（模块头注释），既有 25 个单测
+     全部按这个契约写。单库拓扑下调用方游标与进程主库本就是同一个库，复用它省一次嵌套
+     `db_lock`（RLock，重入安全）并保住调用方事务快照；三库拓扑下本域有自有 DSN，
+     调用方游标指向 insight 进程库（无本域表），**必须忽略** —— 那正是原 1146 的来源。
+     这条规则写在两侧 `_owner_cursor` 的 docstring 里，由烟测 I 段两侧验证
+     （单库：调用方库有 SQL、进程库零 SQL；自有 DSN：两侧零 SQL、域连接全有）。
+  3) **owner 只给事实，回退/去重口径留在 insight**：场景名「display_name 空串或 NULL
+     回退 name、两者都空不回映射、同 scene_id 首行优先」与账号名「`int(uid)` 做键、
+     空 username 不进映射」都是展示策略，owner 返回原始行，调用方按原规则处理 ——
+     两处口径逐字保留（烟测 C/F/G 逐条对拍改造前 SQL 结果）。
+  4) **单批失败保留部分结果**：`load_uid_names` / `load_scene_names` 原来在每个 500
+     分块上 try/except 并在失败时 `return out`（已取到的部分保留）。现在分块留在调用方
+     （owner 内部再切一次单块），逐批失败语义与原来完全一致。
+  5) **任务行缺表降级留在调用方**：`_fetch_task_rows` 的 `except → []`（老库/最小测试
+     库无 `agent_tasks`）保持不动，owner 不吞异常 —— 谁的业务降级谁处理。
+  6) **不为 5 条语句再开 `_ANY_QUERIES`**：它们的 IN 列表是动态的，登记成固定文本
+     反而不匹配；同文件既有 `efficiency_issue_contrib` / `agent_sessions_with_runtime`
+     就是「owner 内直接构造 ph + 执行」的写法，本批沿用，避免一个文件两套风格。
+- 修的存量 bug（三库拓扑，功能面）：
+  1) **能效看板在独立部署下基本是空板**：路由层
+     `with db_lock: build_board(db.cursor(), …)` 传的是 insight 进程库游标，
+     `issue` / `agent_tasks` / `grape_accounts` / `devops_pipeline_scene` 四张表在
+     insight 库里都没有（视图 0）→ 首条 `_fetch_issue_rows` 就 1146，被路由的
+     顶层 `except` 吞成 `{"error": "aggregation_failed"}`：②总工作量/③在制/①净流入/
+     ⑥吞吐/⑤超龄/⑦⑧周期与积压/⑨在办/⑩任务交付**十张卡全空**，
+     `GET /api/dashboard/efficiency/board` 等于永久故障页；
+  2) **⑨ 在办分布恒为「未分配」**：即便 issue 行侥幸读到，`load_uid_names` 的
+     `grape_accounts` 查询同样 1146 → 用户名映射恒 `{}` → `created_by/assignee` 为空
+     的行全部落到「未分配」，看起来像「全平台没人认领」；
+  3) **下钻列表场景列显示 scene_id**：`load_scene_names` 1146 → `{}` →
+     `scene_map.get(scene_id, scene_id)` 回退成原始 id，用户看到 `scene_9f3c…`；
+  4) **`_fetch_task_rows` 的降级把真故障也一起吞**：原 `except → []` 没日志，三库拓扑
+     下「任务交付恒 0 样本」在日志里看不出（本次保持降级但口径已改走 owner 原语，
+     正常拓扑下不再触发）。
+- 验证：`py_compile` 3 个文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/efficiency_smoke.py`
+  **ALL 81 CHECKS PASSED**（含边界与否定用例：5 条语句与改造前 SQL 逐字对拍 + 无
+  `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`；`is_subtask_mode=0` 严格等值 —— `=1` 与
+  `NULL` 都不计；详情行 10 列含 COALESCE 默认值（NULL stage/scene_id/created_by/assignee
+  → ''、NULL user_id → 0）；任务行缺表 → 调用方 `[]` 不抛；账号名 TEXT id → int 键、
+  空/NULL username 与未知 id 不进映射、`0/None/'None'/''` 不查、600 id → 2 条语句
+  (500/100)、**单批失败保留已取到部分**；场景名 display_name NULL 与空串都回退 name、
+  两者都空不回映射、同 id 首行不覆盖、缺表 → `{}`；1200 仓键 → 3 条语句(500/500/200)；
+  单库拓扑调用方库有 SQL 且进程库零 SQL、无游标回落进程库、自有 DSN 两侧零 SQL 且
+  域连接全有；源码面 0 条 SQL 字面量、无 cursor()/execute() 直发、不 import
+  `kernel.session_manager`、不持 `db_lock`、只用 5 个已登记原语）；
+  `tests/insight/test_efficiency_flow_board.py` **25 passed**（既有用例无回归）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **148 → 143**（-5），对数 **53 → 50**：`issue←insight` 2 → 0、
+  `grape_accounts←insight` 1 → 0、`devops_pipeline_scene←insight` 1 → 0 三对清零，
+  `agent_tasks←insight` 9 → 8（其余 8 处在 insight 其它文件）；基线
+  `foreign-refs-allowlist.csv` 收紧为 143 / 50，依赖看板与作业单同步刷新
+  （下一批头名：`src/api/server_common.py` 5 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

@@ -1389,6 +1389,7 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "dashboard_runtimes_with_credential", "credential_brief", "credential_scope_owner",
            "task_event_map", "runtime_device_map", "agent_sessions_with_runtime",
            "efficiency_issue_contrib", "task_issue_attribution",
+           "efficiency_issue_rows", "efficiency_issue_detail_rows", "efficiency_task_rows",
            # IM 巡检执行卡（runtime/im/handler_async.py；任意拓扑）
            "autopilot_execution_detail_any",
            # 指标桶取数（insight/observability/metric_rollup；任意拓扑）
@@ -2278,6 +2279,22 @@ def _any_cursor(write: bool = False):
             _pdb.commit()
 
 
+@contextmanager
+def _owner_cursor(cursor: Any = None):
+    """能效看板取数游标：单库/测试拓扑复用调用方游标，自有 DSN 时忽略它。
+
+    能效看板模块（insight/observability/efficiency）的设计契约是「喂一个 cursor +
+    SQLite 建表即可单测」。单库拓扑下调用方游标与进程主库本就是同一个库，复用它省
+    一次嵌套加锁并保住调用方的事务快照；三库拓扑（本域有自有 DSN）下调用方游标指向
+    insight 进程库（没有本域表），必须忽略 —— 那正是原来 1146 的来源。
+    """
+    if cursor is not None and not db_registry.uses_own_dsn("runtime"):
+        yield cursor
+        return
+    with _any_cursor() as c:
+        yield c
+
+
 def _any_sql(name: str) -> str:
     """取具名查询 SQL；未登记抛 KeyError（不静默退回任意 SQL）。"""
     sql = _ANY_QUERIES.get(name)
@@ -2957,6 +2974,76 @@ def task_issue_attribution(task_ids) -> list[tuple]:
                 "ON i.repo_key = t.repo_key AND i.issue_number = "
                 f"CAST(SUBSTR(t.issue_id, 2) AS INTEGER) WHERE t.id IN ({ph})",
                 tuple(part))
+            out.extend(tuple(r) for r in (c.fetchall() or []))
+    return out
+
+
+# ── 能效看板取数原语（insight/observability/efficiency 的唯一取数口）──────
+#
+# issue / agent_tasks 归本域。原实现在 insight 的能效看板模块里用调用方游标直发
+# 这三条 SQL：三库拓扑下 insight 进程库没有这两张表（视图 0）→ 1146，看板十张卡
+# 里 issue 侧（②③①⑥⑤⑦⑧⑨⑩ 基础数据）全空、⑨⑩ 只剩「未分配」。
+# 列序与原语句逐字一致（调用方按下标解包）；分块 500/批（原 issue 语句一次带走
+# 全部 repo_key，仓库候选通常 1~3 个，分块只为 SQLite 变量上限，行集合不变）。
+
+_EFFICIENCY_CHUNK = 500
+
+
+def efficiency_issue_rows(repo_keys, cursor: Any = None) -> list[tuple]:
+    """看板 issue 轻量行 (status, created_at, completed_at, created_by, assignee, user_id)。
+
+    子任务行排除（`is_subtask_mode=0`，NULL 同样不计 —— SQL 三值逻辑原样保留）。
+    """
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return []
+    out: list[tuple] = []
+    with _owner_cursor(cursor) as c:
+        for i in range(0, len(keys), _EFFICIENCY_CHUNK):
+            part = keys[i:i + _EFFICIENCY_CHUNK]
+            ph = ",".join(["?"] * len(part))
+            c.execute(
+                "SELECT status, created_at, completed_at, created_by, assignee, user_id"
+                f" FROM issue WHERE repo_key IN ({ph}) AND is_subtask_mode=0", tuple(part))
+            out.extend(tuple(r) for r in (c.fetchall() or []))
+    return out
+
+
+def efficiency_issue_detail_rows(repo_keys, cursor: Any = None) -> list[tuple]:
+    """看板下钻 issue 详情行（10 列，列序与原查询逐字一致，含 COALESCE 默认值）。"""
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return []
+    out: list[tuple] = []
+    with _owner_cursor(cursor) as c:
+        for i in range(0, len(keys), _EFFICIENCY_CHUNK):
+            part = keys[i:i + _EFFICIENCY_CHUNK]
+            ph = ",".join(["?"] * len(part))
+            c.execute(
+                "SELECT issue_number, title, status, COALESCE(stage,''), COALESCE(scene_id,''),"
+                " created_at, completed_at, COALESCE(created_by,''), COALESCE(assignee,''),"
+                " COALESCE(user_id,0)"
+                f" FROM issue WHERE repo_key IN ({ph}) AND is_subtask_mode=0", tuple(part))
+            out.extend(tuple(r) for r in (c.fetchall() or []))
+    return out
+
+
+def efficiency_task_rows(repo_keys, cursor: Any = None) -> list[tuple]:
+    """看板任务交付行 (status, started_at, completed_at, agent_type)。
+
+    时间列原是带时区 UTC ISO，减法的时区抵消口径留在调用方；这里只负责取数。
+    """
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return []
+    out: list[tuple] = []
+    with _owner_cursor(cursor) as c:
+        for i in range(0, len(keys), _EFFICIENCY_CHUNK):
+            part = keys[i:i + _EFFICIENCY_CHUNK]
+            ph = ",".join(["?"] * len(part))
+            c.execute(
+                "SELECT status, started_at, completed_at, agent_type"
+                f" FROM agent_tasks WHERE repo_key IN ({ph})", tuple(part))
             out.extend(tuple(r) for r in (c.fetchall() or []))
     return out
 

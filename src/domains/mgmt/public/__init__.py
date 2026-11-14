@@ -739,6 +739,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # IM 身份解析 / 巡检执行卡（runtime/im/handler_async.py；任意拓扑）
            "sender_identity_user_by_app_any", "installation_owner_by_app_any",
            "autopilot_task_brief_any", "scene_names_by_repo_any",
+           # 能效看板取数（insight/observability/efficiency.py；任意拓扑）
+           "account_name_rows_by_ids", "scene_display_name_rows",
            # 巡检任务调度（runtime/engine/scheduler.py；任意拓扑）
            "autopilot_subscribers_any", "list_enabled_autopilot_tasks_any",
            "autopilot_task_row_any", "autopilot_task_last_run_any",
@@ -1455,6 +1457,22 @@ def _any_cursor(write: bool = False):
         yield c
         if write:
             _pdb.commit()
+
+
+@contextmanager
+def _owner_cursor(cursor: Any = None):
+    """能效看板取数游标：单库/测试拓扑复用调用方游标，自有 DSN 时忽略它。
+
+    能效看板模块（insight/observability/efficiency）的设计契约是「喂一个 cursor +
+    SQLite 建表即可单测」。单库拓扑下调用方游标与进程主库本就是同一个库，复用它省
+    一次嵌套加锁并保住调用方的事务快照；三库拓扑（本域有自有 DSN）下调用方游标指向
+    insight 进程库（没有本域表），必须忽略 —— 那正是原来 1146 的来源。
+    """
+    if cursor is not None and not db_registry.uses_own_dsn("mgmt"):
+        yield cursor
+        return
+    with _any_cursor() as c:
+        yield c
 
 
 @contextmanager
@@ -3066,18 +3084,49 @@ def patrol_open_finding_ids(cutoff_iso: str, limit: int = 20) -> list:
 
 # ---------- 看板/报表读（insight dashboard 用；表归 mgmt） ----------
 
-def account_names_by_ids(ids) -> dict:
-    """批量取账号显示名 {id: username}（分块，500/批）。"""
-    out: dict = {}
+def account_name_rows_by_ids(ids, cursor: Any = None) -> list[tuple]:
+    """批量取账号行 (id, username)（分块 500/批）。
+
+    只取账号域的用户名（平台无关），不含口令/状态列；`?` 占位符，无排序 ——
+    行序与原语句一致（原语句本无 ORDER BY，映射是字典语义）。
+    """
     todo = [str(u) for u in (ids or []) if u]
+    out: list[tuple] = []
     for i in range(0, len(todo), 500):
         part = todo[i:i + 500]
         ph = ",".join(["?"] * len(part))
-        with _any_cursor() as c:
-            c.execute(f"SELECT id, username FROM grape_accounts WHERE id IN ({ph})", part)
-            for uid, name in (c.fetchall() or []):
-                if name:
-                    out[uid] = name
+        with _owner_cursor(cursor) as c:
+            c.execute(f"SELECT id, username FROM grape_accounts WHERE id IN ({ph})", tuple(part))
+            out.extend(tuple(r) for r in (c.fetchall() or []))
+    return out
+
+
+def account_names_by_ids(ids) -> dict:
+    """批量取账号显示名 {id: username}（分块，500/批）。"""
+    out: dict = {}
+    for uid, name in account_name_rows_by_ids(ids):
+        if name:
+            out[uid] = name
+    return out
+
+
+def scene_display_name_rows(scene_ids, cursor: Any = None) -> list[tuple]:
+    """批量取场景展示名行 (scene_id, display_name)（分块 500/批）。
+
+    `display_name` 为 NULL **或空串**都回退 `name`；两者都空返回空串 ——
+    回退与去重口径（同一 scene_id 首行优先）留在调用方，这里只负责取数。
+    NULLIF 两条后端语义一致（不用 MySQL 专有语法）。
+    """
+    todo = sorted({str(s) for s in (scene_ids or []) if s})
+    out: list[tuple] = []
+    for i in range(0, len(todo), 500):
+        part = todo[i:i + 500]
+        ph = ",".join(["?"] * len(part))
+        with _owner_cursor(cursor) as c:
+            c.execute(
+                "SELECT scene_id, COALESCE(NULLIF(display_name,''), NULLIF(name,''))"
+                f" FROM devops_pipeline_scene WHERE scene_id IN ({ph})", tuple(part))
+            out.extend(tuple(r) for r in (c.fetchall() or []))
     return out
 
 

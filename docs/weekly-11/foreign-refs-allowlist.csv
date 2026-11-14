@@ -3,7 +3,7 @@ agent_runtimes,runtime,api,4
 agent_runtimes,runtime,insight,5
 agent_shared_knowledge,mgmt,runtime,5
 agent_tasks,runtime,api,7
-agent_tasks,runtime,insight,9
+agent_tasks,runtime,insight,8
 agent_tasks,runtime,mgmt,2
 agent_type,runtime,insight,1
 api_latency_log,insight,api,2
@@ -12,7 +12,6 @@ chat_agent_session,runtime,mgmt,1
 chat_conversations,runtime,mgmt,2
 devops_agent_session,runtime,mgmt,2
 devops_pipeline_scene,mgmt,api,3
-devops_pipeline_scene,mgmt,insight,1
 devops_pipeline_scene,mgmt,runtime,2
 distributed_locks,runtime,insight,1
 event_action_filter,mgmt,api,3
@@ -21,7 +20,6 @@ events,runtime,api,7
 events,runtime,insight,6
 external_identities,mgmt,api,4
 external_identities,mgmt,runtime,2
-grape_accounts,mgmt,insight,1
 grape_accounts,mgmt,runtime,3
 grape_t_channel_chat_session_binding,mgmt,runtime,1
 grape_t_channel_installation,mgmt,runtime,4
@@ -33,7 +31,6 @@ grape_t_repo_credentials,insight,contracts,1
 grape_t_repo_credentials,insight,mgmt,5
 grape_t_repo_credentials,insight,runtime,1
 issue,runtime,api,4
-issue,runtime,insight,2
 issue,runtime,mgmt,1
 issue_state,runtime,api,1
 login_whitelist,mgmt,kernel,4

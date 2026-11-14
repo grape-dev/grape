@@ -131,13 +131,14 @@ def _fetch_issue_rows(c, repo_keys: Sequence[str]):
     为什么不在 SQL 里分组：单测环境由 conftest 强制 SQLite，MySQL 的
     TIMESTAMPDIFF / DATE_FORMAT / JSON_EXTRACT 都不可用。仓库级 issue 行数
     在千级，Python 侧聚合成本可忽略，换来方言无关 + 口径唯一。
+
+    SQL 归 runtime 域（`issue` 归 runtime public）：`c` 只在单库/单测拓扑下被
+    复用（同一个库），三库拓扑下 owner 原语忽略它走本域连接 —— 原实现在三库
+    拓扑下拿 insight 进程库游标查 `issue`，1146 被吞成空看板。
     """
-    ph = ",".join("?" * len(repo_keys))
-    c.execute(
-        "SELECT status, created_at, completed_at, created_by, assignee, user_id"
-        f" FROM issue WHERE repo_key IN ({ph}) AND is_subtask_mode=0",
-        tuple(repo_keys))
-    return c.fetchall()
+    from src.domains.runtime import public as runtime_public
+
+    return runtime_public.efficiency_issue_rows(repo_keys, cursor=c)
 
 
 # ---------------------------------------------------------------- 各卡片
@@ -351,21 +352,23 @@ def load_uid_names(c, uids) -> Dict[int, str]:
 
     unified_user_mapping 在部分环境中可能不存在（老库/单测未建表），失败降级为空映射，
     不让归属兜底拖垮整块看板。
+
+    SQL 归 mgmt 域（`grape_accounts` 归 mgmt public）：`c` 只在单库/单测拓扑下复用。
+    分块 500/批与原实现一致，单批失败保留已取到的部分（原 `return out` 口径）。
     """
+    from src.domains.mgmt import public as mgmt_public
+
     # 合并重同步（多平台解耦口径）：账号域 grape_accounts.username 平台无关；
     # uuid id 不做 int() 强转（TEXT 化后 int(uuid) 直接崩）
     todo = sorted({str(u).strip() for u in uids if str(u or "").strip() not in ("", "0", "None")})
     out: Dict[int, str] = {}
     for i in range(0, len(todo), 500):
         part = todo[i:i + 500]
-        ph = ",".join("?" * len(part))
         try:
-            c.execute(
-                "SELECT id, username FROM grape_accounts"
-                f" WHERE id IN ({ph})", tuple(part))
+            rows = mgmt_public.account_name_rows_by_ids(part, cursor=c)
         except Exception:
             return out
-        for uid, name in c.fetchall():
+        for uid, name in rows:
             if name:
                 out[int(uid)] = name
     return out
@@ -443,16 +446,16 @@ DELIVERY_GROUP_ALL = "all"
 
 
 def _fetch_task_rows(c, repo_keys: Sequence[str]):
-    """取任务轻量列；agent_tasks 缺失（老库/最小测试库）降级为空，不拖垮整板。"""
-    ph = ",".join("?" * len(repo_keys))
+    """取任务轻量列；agent_tasks 缺失（老库/最小测试库）降级为空，不拖垮整板。
+
+    SQL 归 runtime 域（`agent_tasks` 归 runtime public）：`c` 只在单库/单测拓扑下复用。
+    """
+    from src.domains.runtime import public as runtime_public
+
     try:
-        c.execute(
-            "SELECT status, started_at, completed_at, agent_type"
-            f" FROM agent_tasks WHERE repo_key IN ({ph})",
-            tuple(repo_keys))
+        return runtime_public.efficiency_task_rows(repo_keys, cursor=c)
     except Exception:
         return []
-    return c.fetchall()
 
 
 def _task_durations_minutes(rows, statuses=None):
@@ -611,30 +614,33 @@ def _bucket_of(value: float, buckets) -> Optional[str]:
 
 
 def _fetch_issue_detail_rows(c, repo_keys: Sequence[str]):
-    ph = ",".join("?" * len(repo_keys))
-    c.execute(
-        "SELECT issue_number, title, status, COALESCE(stage,''), COALESCE(scene_id,''),"
-        " created_at, completed_at, COALESCE(created_by,''), COALESCE(assignee,''),"
-        " COALESCE(user_id,0)"
-        f" FROM issue WHERE repo_key IN ({ph}) AND is_subtask_mode=0",
-        tuple(repo_keys))
-    return c.fetchall()
+    """下钻 issue 详情行（10 列，列序与原查询逐字一致）。
+
+    SQL 归 runtime 域（`issue` 归 runtime public）：`c` 只在单库/单测拓扑下复用。
+    """
+    from src.domains.runtime import public as runtime_public
+
+    return runtime_public.efficiency_issue_detail_rows(repo_keys, cursor=c)
 
 
 def load_scene_names(c, scene_ids) -> Dict[str, str]:
-    """scene_id → 展示名（display_name 优先，空则 name）。表缺失/异常降级为空映射。"""
+    """scene_id → 展示名（display_name 优先，空则 name）。表缺失/异常降级为空映射。
+
+    SQL 归 mgmt 域（`devops_pipeline_scene` 归 mgmt public）：`c` 只在单库/单测拓扑下复用。
+    回退（display_name 空串/NULL → name）与去重（同 scene_id 首行优先）留在本侧，
+    owner 只返回 `(scene_id, COALESCE(NULLIF(display_name,''), NULLIF(name,'')))` 原始行。
+    """
+    from src.domains.mgmt import public as mgmt_public
+
     todo = sorted({s for s in scene_ids if s})
     out: Dict[str, str] = {}
     for i in range(0, len(todo), 500):
         part = todo[i:i + 500]
-        ph = ",".join("?" * len(part))
         try:
-            c.execute(
-                "SELECT scene_id, COALESCE(NULLIF(display_name,''), NULLIF(name,''))"
-                f" FROM devops_pipeline_scene WHERE scene_id IN ({ph})", tuple(part))
+            rows = mgmt_public.scene_display_name_rows(part, cursor=c)
         except Exception:
             return out
-        for sid, name in c.fetchall():
+        for sid, name in rows:
             if name and sid not in out:
                 out[sid] = name
     return out
