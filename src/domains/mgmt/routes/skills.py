@@ -1,5 +1,6 @@
 """Skills 路由：列表、上传、删除、个人技能转仓库技能"""
 
+from src.kernel.domain_db import cursor as _domain_cursor
 import io as _io
 
 import hashlib, os, tempfile, zipfile, json, shutil, stat as _stat
@@ -498,8 +499,7 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
     from src.kernel.session_manager import db, db_lock
     from src.kernel.repo_key import to_repo_key, from_repo_key
     repo_key = _resolve_repo_key(repo) if repo else ""
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         if repo_key:
             c.execute(
                 "SELECT id, skill_path, scope, owner_id, skill_name FROM skill WHERE id=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))",
@@ -561,8 +561,7 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
     from src.kernel.config import SKILLS_DIR
 
     _raw = str(skill_id or "").strip()
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         if _raw.isdigit():
             c.execute(
                 "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, is_featured, like_count, sub_scene, category_id FROM skill WHERE id=? AND is_active=1",
@@ -1186,8 +1185,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
     from src.kernel.session_manager import db, db_lock
     import re as _re
 
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute("SELECT skill_name, skill_path FROM skill WHERE id=? AND is_active=1", (skill_id,))
         row = c.fetchone()
     if not row:

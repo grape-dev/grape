@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query, 
 
 from pydantic import BaseModel
 
+from src.kernel.domain_db import cursor as _domain_cursor
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.api.oauth_token import with_oauth_token
 
@@ -491,22 +492,20 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
         nodes = json.loads(scene["nodes_json"]) if scene["nodes_json"] else []
     except Exception:
         nodes = []
+    # scene_skill_ref 归 mgmt 域（本地连接）；skill 归运行域（owner 连接）——分开取
     with db_lock:
-        c = db.cursor()
-        # 从 scene_skill_ref 表查 skill_id（同步时已写入），不依赖 nodes_json 的 skill_id
-        c.execute(
+        _c_ref = db.cursor()
+        _c_ref.execute(
             "SELECT skill_name, skill_id FROM scene_skill_ref WHERE scene_id=?",
             (scene["id"],),
         )
-        ref_map = {}
-        for r in c.fetchall():
-            ref_map[r[0]] = r[1]
+        ref_map = {r[0]: r[1] for r in _c_ref.fetchall()}
 
-        # 用 ref_map 的 skill_id 批量查 skill 表
-        ref_skill_ids = [sid for sid in ref_map.values() if sid]
-        skill_by_id = {}
-        if ref_skill_ids:
-            id_placeholders = ",".join("?" * len(ref_skill_ids))
+    skill_by_id = {}
+    ref_skill_ids = [sid for sid in ref_map.values() if sid]
+    if ref_skill_ids:
+        id_placeholders = ",".join("?" * len(ref_skill_ids))
+        with _domain_cursor("runtime") as c:
             c.execute(
                 f"SELECT id, skill_name, display_name, agent_type, description, scope FROM skill "
                 f"WHERE id IN ({id_placeholders}) AND is_active=1",
@@ -515,22 +514,22 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
             for row in c.fetchall():
                 skill_by_id[row[0]] = row
 
-        # 组装结果（基于 scene_skill_ref 的 skill_id 精确查询）
-        for node in nodes:
-            skill_name = node.get("skill", "")
-            if not skill_name:
-                continue
-            skill_id = _pick_node_skill_id(node, ref_map)
-            row = skill_by_id.get(skill_id) if skill_id else None
-            skills_detail.append({
-                "skill_id": (row[0] if row else skill_id),
-                "name": skill_name,
-                "display_name": (row[2] if row and row[2] else skill_name),
-                "agent_type": (row[3] if row else "") or node.get("tag", ""),
-                "role_desc": (row[4] if row else "") or "",
-                "scope": (row[5] if row else "official") or "official",
-                "skill_deleted": not bool(row),
-            })
+    # 组装结果（基于 scene_skill_ref 的 skill_id 精确查询）
+    for node in nodes:
+        skill_name = node.get("skill", "")
+        if not skill_name:
+            continue
+        skill_id = _pick_node_skill_id(node, ref_map)
+        row = skill_by_id.get(skill_id) if skill_id else None
+        skills_detail.append({
+            "skill_id": (row[0] if row else skill_id),
+            "name": skill_name,
+            "display_name": (row[2] if row and row[2] else skill_name),
+            "agent_type": (row[3] if row else "") or node.get("tag", ""),
+            "role_desc": (row[4] if row else "") or "",
+            "scope": (row[5] if row else "official") or "official",
+            "skill_deleted": not bool(row),
+        })
 
     # 查 recommended_template 对应的模板信息
     template_info = None
@@ -1794,8 +1793,7 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_sessi
 
     where_sql = " AND ".join(where)
 
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute(f"SELECT COUNT(*) FROM skill WHERE {where_sql}", params)
         total = c.fetchone()[0]
         offset = (page - 1) * page_size

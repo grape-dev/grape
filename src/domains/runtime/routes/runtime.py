@@ -18,6 +18,7 @@ from src.api.deps import require_no_session_token, require_org_member
 from src.domains.runtime.engine.health import apply_runtime_state
 
 from src.kernel.config import log
+from src.kernel.domain_db import cursor as _domain_cursor
 
 from src.api.time_utils import normalize_event_time
 
@@ -728,8 +729,7 @@ def machine_health_detail(runtime_id: int, user: dict = Depends(require_no_sessi
     Issue #1104（契约 AT-RNT-52）：详情语义——不存在的 runtime_id 返回 404
     （统一错误结构），不再回退 get_health_score 现算通路返回 200 全量结构。
     """
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
         if not c.fetchone():
             raise HTTPException(status_code=404, detail={
@@ -1428,8 +1428,7 @@ def list_runtime_tasks(runtime_id: int, user: dict = Depends(require_no_session_
         _rk_list = repo_key_candidates(repo_key)
         clauses.append(f"repo_key IN ({','.join('?' * len(_rk_list))})")
         params.extend(_rk_list)
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at, issue_id, event_seq FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
                   params + [limit])
         return {"tasks": [
@@ -1461,8 +1460,7 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(require_no_sessi
         repo_clause = f" AND repo_key IN ({','.join('?' * len(_rk_list))})"
         params.extend(_rk_list)
 
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         # 查所有 session（按 repo 过滤），不按 session.runtime_id 过滤
         c.execute(
             f"SELECT id, agent_type, repo_key, status, skill, created_at, last_active_at, "
@@ -1536,8 +1534,7 @@ def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_toke
     """
     from src.kernel.session_manager import db, db_lock
     from src.domains.runtime.engine.instances import engine_mounts_to_credential
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
         rid_rows = c.fetchall()
         c.execute("SELECT device_name FROM runtime_credentials WHERE id=?", (cid,))
@@ -1546,8 +1543,7 @@ def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_toke
     dev_name = (dev_row[0] or "") if dev_row else ""
     if (dev_name or "").strip():
         # 本机直连引擎按设备视图同口径挂载计入
-        with db_lock:
-            c = db.cursor()
+        with _domain_cursor("runtime") as c:
             c.execute("SELECT id, host_name FROM agent_runtimes WHERE credential_id=0")
             local_rows = c.fetchall()
         rids.extend(rid for rid, hn in local_rows
@@ -1561,8 +1557,7 @@ def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_toke
         clauses.append("status=?")
         params.append(status)
     params.append(limit)
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
                   params)
         return {"tasks": [
@@ -1999,8 +1994,7 @@ def _apply_tag_rules(tags: list[str]) -> list[str]:
 def get_runtime_tags(runtime_id: int, user: dict = Depends(require_no_session_token)):
     """返回 engine 的角色标签列表（web 管理视图；worker 取 tags 用 GET /runtimes/{id}/tags）。"""
     from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute("SELECT agent_tags FROM agent_runtimes WHERE id=?", (runtime_id,))
         row = c.fetchone()
     if not row:
@@ -2090,8 +2084,7 @@ def list_scene_tags(user: dict = Depends(require_no_session_token)):
 @router.get("/runtimes/{runtime_id}/scene-tags", operation_id="runtime_scene_tags_get", summary="Runtime scene tags", description="Scene tags of an engine.")
 def get_runtime_scene_tags(runtime_id: int, user: dict = Depends(require_no_session_token)):
     """返回引擎的场景标签列表。"""
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute("SELECT scene_tags FROM agent_runtimes WHERE id=?", (runtime_id,))
         row = c.fetchone()
     if not row:

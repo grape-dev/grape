@@ -76,24 +76,83 @@ def load_stage_env(db_user: str = "", db_password: str = "") -> dict[str, str]:
     return env
 
 
-def discover_get_paths(app) -> list[str]:
+# 路径参数取值来源（只读）：param -> (domain, SQL 取单值)
+PARAM_SOURCES: dict[str, tuple[str, str]] = {
+    "agent_type": ("runtime", "SELECT agent_type FROM agent_type ORDER BY order_num LIMIT 1"),
+    "cid": ("runtime", "SELECT id FROM runtime_credentials ORDER BY id LIMIT 1"),
+    "conv_id": ("runtime", "SELECT id FROM chat_conversations ORDER BY updated_at DESC LIMIT 1"),
+    "event_seq": ("runtime", "SELECT seq FROM events ORDER BY seq DESC LIMIT 1"),
+    "seq": ("runtime", "SELECT seq FROM events ORDER BY seq DESC LIMIT 1"),
+    "exec_id": ("runtime", "SELECT id FROM autopilot_executions ORDER BY id DESC LIMIT 1"),
+    "knowledge_id": ("mgmt", "SELECT id FROM agent_shared_knowledge ORDER BY id LIMIT 1"),
+    "market_id": ("mgmt", "SELECT id FROM scene_market ORDER BY id LIMIT 1"),
+    "number": ("runtime", "SELECT issue_number FROM issue ORDER BY issue_number LIMIT 1"),
+    "issue_id": ("runtime", "SELECT issue_id FROM events WHERE issue_id<>'' ORDER BY seq DESC LIMIT 1"),
+    "org_id": ("mgmt", "SELECT id FROM organization ORDER BY id LIMIT 1"),
+    "owner": ("mgmt", "SELECT repo_owner FROM managed_repos ORDER BY id LIMIT 1"),
+    "repo": ("mgmt", "SELECT repo_name FROM managed_repos ORDER BY id LIMIT 1"),
+    "repo_name": ("mgmt", "SELECT repo_name FROM managed_repos ORDER BY id LIMIT 1"),
+    "rid": ("runtime", "SELECT id FROM agent_runtimes ORDER BY id LIMIT 1"),
+    "runtime_id": ("runtime", "SELECT id FROM agent_runtimes ORDER BY id LIMIT 1"),
+    "scene_id": ("mgmt", "SELECT id FROM devops_pipeline_scene ORDER BY id LIMIT 1"),
+    "session_id": ("runtime", "SELECT id FROM devops_agent_session ORDER BY id LIMIT 1"),
+    "skill_id": ("runtime", "SELECT id FROM skill ORDER BY id LIMIT 1"),
+    "task_id": ("mgmt", "SELECT id FROM autopilot_tasks ORDER BY id LIMIT 1"),
+    "user_id": ("mgmt", "SELECT id FROM grape_accounts ORDER BY id LIMIT 1"),
+}
+FIXED_PARAMS = {"provider": "gitcode"}
+
+
+def resolve_params(app, with_ids: bool) -> tuple[list[str], list[str]]:
+    """把带参数路径替换为真实值；无法解析的参数返回 skip 列表。"""
     from src.api.openapi import _iter_routes
 
-    out: list[str] = []
+    if not with_ids:
+        return sorted({getattr(r, "path", "") for route in app.routes
+                       for r in _iter_routes(route)
+                       if "GET" in (getattr(r, "methods", set()) or set())
+                       and getattr(r, "path", "").startswith("/api/") and "{" not in getattr(r, "path", "")}), []
+    from src.kernel.domain_db import cursor as _domain_cursor
+
+    values: dict[str, str] = dict(FIXED_PARAMS)
+    for name, (domain, sql) in PARAM_SOURCES.items():
+        if name in values:
+            continue
+        try:
+            with _domain_cursor(domain) as c:
+                c.execute(sql)
+                row = c.fetchone()
+            if row and row[0] not in (None, ""):
+                values[name] = str(row[0])
+        except Exception:  # noqa: BLE001 - 取不到就跳过该参数
+            continue
+
+    ok, skipped = [], []
     for route in app.routes:
         for r in _iter_routes(route):
             path = getattr(r, "path", "")
-            methods = getattr(r, "methods", set()) or set()
-            if "GET" not in methods or not path.startswith("/api/") or "{" in path:
+            if "GET" not in (getattr(r, "methods", set()) or set()) or not path.startswith("/api/"):
                 continue
-            out.append(path)
-    return sorted(set(out))
+            names = re.findall(r"\{(\w+)\}", path)
+            if not names:
+                ok.append(path)
+                continue
+            if any(n not in values for n in names):
+                skipped.append(path + "  (" + ",".join(n for n in names if n not in values) + ")")
+                continue
+            filled = path
+            for n in names:
+                filled = filled.replace("{" + n + "}", values[n])
+            ok.append(filled)
+    return sorted(set(ok)), sorted(set(skipped))
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="stage API smoke（视图清零环境）")
     ap.add_argument("--all", action="store_true", help="自动发现所有无路径参数的 /api/* GET")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--with-ids", action="store_true",
+                    help="路径参数用 stage 库中的真实 id 填充（只读详情页覆盖）")
     ap.add_argument("--db-user", default=os.environ.get("MYSQL_USER", "root"),
                     help="主库连接账号（需 DDL；默认 root）")
     ap.add_argument("--db-password", default=os.environ.get("MYSQL_PWD", ""))
@@ -122,9 +181,12 @@ def main(argv: list[str] | None = None) -> int:
             app.dependency_overrides[fn] = lambda: fake_user
     app.dependency_overrides[deps.require_org_member] = lambda request=None, user=None: fake_user
 
-    paths = READONLY_ENDPOINTS
-    if args.all:
-        paths = sorted(set(READONLY_ENDPOINTS) | set(discover_get_paths(app)))
+    skipped: list[str] = []
+    if args.all or args.with_ids:
+        paths, skipped = resolve_params(app, with_ids=args.with_ids)
+        paths = sorted(set(paths) | set(READONLY_ENDPOINTS))
+    else:
+        paths = READONLY_ENDPOINTS
 
     results = []
     # 不进入 lifespan：冒烟只打请求，避免后台线程（日志/补偿循环）在 stage 上起停
@@ -169,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
             extra = f"  {r['error']}" if r["error"] else ""
             print(f"{mark} {r['status']:>3} {r['path']}{extra}")
         print(f"\n{len(results)} 个端点，失败 {len(bad)}")
+        if skipped:
+            print(f"跳过 {len(skipped)} 个（参数无法从 stage 数据解析）")
     return 1 if bad else 0
 
 

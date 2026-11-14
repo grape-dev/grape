@@ -109,8 +109,9 @@ def get_task(task_id: str) -> dict | None:
 
 
 def get_session(session_id: str) -> dict | None:
-    with db_lock:
-        c = db.cursor()
+    # takeover_sessions 归运行域：本模块可能挂在 mgmt 进程，走 owner 连接
+    from src.kernel.domain_db import cursor as _domain_cursor  # noqa: PLC0415
+    with _domain_cursor("runtime") as c:
         c.execute("SELECT * FROM takeover_sessions WHERE id=?", (session_id,))
         return _row_dict(c, c.fetchone())
 

@@ -708,8 +708,8 @@ def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) ->
 
 
 def get_conversation(conv_id: str) -> dict | None:
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.domain_db import cursor as _domain_cursor  # noqa: PLC0415
+    with _domain_cursor("runtime") as c:
         c.execute("SELECT id, user_id, agent_session_id, runtime_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at, conv_type, issue_number FROM chat_conversations WHERE id=?", (conv_id,))
         row = c.fetchone()
         if not row:
@@ -879,15 +879,15 @@ def is_task_recalled(task_id: str) -> bool:
 
 
 def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> list[dict]:
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.domain_db import cursor as _domain_cursor  # noqa: PLC0415
+    with _domain_cursor("runtime") as c:
         if before_id > 0:
             c.execute(f"SELECT {_MSG_COLS} FROM chat_messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",
                       (conversation_id, before_id, limit))
         else:
             c.execute(f"SELECT {_MSG_COLS} FROM chat_messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
                       (conversation_id, limit))
-        rows = c.fetchall()
+        rows = list(c.fetchall() or [])
         rows.reverse()
         return [_row_to_msg(r) for r in rows]
 
