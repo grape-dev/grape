@@ -19,6 +19,7 @@
 |---|---|
 | import / 引用 ``MgmtServiceRemote`` | FAIL（mgmt remote 契约实现） |
 | ``GsbClient("mgmt", ...)`` / ``ServiceHttpClient("mgmt", ...)`` | FAIL（直连 mgmt remote 传输） |
+| ``from … import GsbClient as GC`` 后 ``GC("mgmt", ...)`` | FAIL（客户端类别名导入后直连） |
 | 引用 ``_PROVIDERS``（绕过工厂的注册表裸访问） | FAIL |
 
 ``get_service("mgmt")`` / ``get_local_service("mgmt")`` 合法（矩阵守卫内）。
@@ -32,7 +33,7 @@ mgmt 原语对 runtime|insight 调用方 lib-only；runtime 原语本期无 remo
 
 **用法**
 
-    python3 scripts/check_gsb_route_matrix.py                # 扫 src/domains/{runtime,insight}
+    python3 scripts/check_gsb_route_matrix.py                # 扫同域代码树与 apps 入口
     python3 scripts/check_gsb_route_matrix.py --annotate    # 附原语归属标注
     python3 scripts/check_gsb_route_matrix.py --json         # 机器可读（CI 归档）
 
@@ -49,10 +50,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: 禁止矩阵的调用方域代码树（docs/lib-3db-3host-design.md §3.1）
+#: 禁止矩阵的调用方域代码树与同域进程入口（docs/lib-3db-3host-design.md §3.1）；
+#: 三个 apps 入口自身可能直接组装客户端，必须与 src 域代码一起扫描。
 SCAN_ROOTS = (
     "src/domains/runtime",
     "src/domains/insight",
+    "apps/runtime/worker/main.py",
+    "apps/runtime/webhook/main.py",
+    "apps/insight/main.py",
 )
 
 #: mgmt remote 通道符号（import/引用/实例化都算）
@@ -91,9 +96,21 @@ def _call_target_name(node: ast.Call) -> str:
     return ""
 
 
+def _collect_client_aliases(tree: ast.AST) -> dict[str, str]:
+    """收集客户端类的本地别名（``from … import GsbClient as GC`` → ``GC → GsbClient``）。"""
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in _REMOTE_CLIENT_NAMES and alias.asname:
+                    aliases[alias.asname] = alias.name
+    return aliases
+
+
 def scan_tree(tree: ast.AST, path: Path, root: str) -> list[Violation]:
     """AST 扫描单个文件（docstring/注释天然不参与）。"""
     found: list[Violation] = []
+    client_aliases = _collect_client_aliases(tree)
     for node in ast.walk(tree):
         # import MgmtServiceRemote / from ... import MgmtServiceRemote
         if isinstance(node, ast.Import):
@@ -120,6 +137,7 @@ def scan_tree(tree: ast.AST, path: Path, root: str) -> list[Violation]:
                                        "banned-symbol", f"reference {node.attr}"))
         elif isinstance(node, ast.Call):
             target = _call_target_name(node)
+            target = client_aliases.get(target, target)
             if target in _REMOTE_CLIENT_NAMES and node.args:
                 first = node.args[0]
                 if isinstance(first, ast.Constant) and isinstance(first.value, str) \
