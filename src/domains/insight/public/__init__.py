@@ -220,6 +220,37 @@ def upsert_repo_credential_value(repo_key: str, cred_type: str, value: str,
             return {"action": "updated_after_conflict", "id": 0}
 
 
+def upsert_repo_credentials(repo_key: str, items: list[tuple[str, str]],
+                            updated_at: str) -> list[dict]:
+    """**多行同事务**幂等 upsert：一次 `_any_tx()` 内写多条 (cred_type, value)。
+
+    与 `upsert_repo_credential_value` 共用同一套两步法语句（UPDATE → rowcount==0 →
+    INSERT → 撞唯一约束再 UPDATE），差别只在事务边界：全局 bot token 换发要同时写
+    `bot` 与 `webhook` 两行，拆成两次单条调用就会在两次提交之间留下「bot 已换、
+    webhook 仍旧」的半写状态。返回列表与 items 同序（`{"action", "id"}`）。
+    """
+    from src.kernel.id_gen import uuid7_str
+
+    out: list[dict] = []
+    with _any_tx() as c:
+        for cred_type, value in items:
+            cur = c.execute(_any_sql("repo_cred_update"), (value, updated_at, repo_key, cred_type))
+            if int(getattr(cur, "rowcount", 0) or 0) > 0:
+                out.append({"action": "updated", "id": 0})
+                continue
+            try:
+                new_id = uuid7_str()
+                c.execute(_any_sql("repo_cred_insert"),
+                          (new_id, repo_key, cred_type, value, updated_at))
+                out.append({"action": "inserted", "id": new_id})
+            except Exception:
+                # 并发插入撞唯一约束 → retry UPDATE（与单条版同语义，同一事务内）
+                c.execute(_any_sql("repo_cred_update"),
+                          (value, updated_at, repo_key, cred_type))
+                out.append({"action": "updated_after_conflict", "id": 0})
+    return out
+
+
 def list_repo_credential_rows(repo_key: str = "") -> list[tuple]:
     """仓库凭据行（id, repo_key, cred_type, value, updated_at；value 为密文，解密归调用方）。"""
     if repo_key:
@@ -332,6 +363,7 @@ def rollup_dim_keys(exclude: str = "global") -> list[str]:
 __all__ += ["list_repo_credential_rows", "aggregate_llm_usage", "read_one_any", "read_all_any", "exec_any",
             "rollup_dim_keys", "record_api_latency_any",
             "repo_credential_value", "repo_credential_meta", "upsert_repo_credential_value",
+            "upsert_repo_credentials",
             "clear_repo_credential_value", "any_repo_credential", "repo_keys_sharing_value",
             "repo_keys_with_nonempty_credential",
             "list_repo_credentials_with_nonempty_value", "update_repo_credential_values",

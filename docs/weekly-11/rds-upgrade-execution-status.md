@@ -4308,6 +4308,85 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （作业单 47 处 / 32 文件，下一批首个未 blocked 文件 `src/domains/mgmt/admin/config_store.py`
   2 处（`grape_t_repo_credentials` 行 497 / 502，归 **insight**；insight public 目前无具名查询，需先建）。
 
+### 7.x 批次：`src/domains/mgmt/admin/config_store.py` 归位（2026-11-15，47 → 45）
+
+- **文件 / 处数**：`src/domains/mgmt/admin/config_store.py`，**2 处 → 0 处**（全局 47 → 45，-2）。
+- **表分布**：`grape_t_repo_credentials`（归 **insight**）× 2 —— 同一函数
+  `global_bot_token_swap` 步骤 6 的两步法写：行 497 `UPDATE … SET value=?, updated_at=(datetime('now'))`，
+  行 502 `INSERT INTO … (id, repo_key, cred_type, value)`（rowcount==0 时才发）。均在 `db_lock` 内、
+  走本进程 `db.cursor()`（静态正则可判，无动态拼接）。
+- **口径纠正（作业单也已过期）**：作业单与文件内注释都写着「insight public 无具名查询，需先建」
+  「`grape_t_repo_credentials` 在 runtime 域」，两处都不成立 —— `table-owner.tsv` 是
+  `grape_insight_db → insight`，且 insight public **已**有 `_ANY_QUERIES`（`repo_cred_update` /
+  `repo_cred_insert` 等 14 条）+ 单条 `upsert_repo_credential_value`。所以本批**没有新建具名查询键**，
+  只补了一个多行组合原语（理由见下），避免两套同义键并存。
+- **设计取舍**：
+  1. **新增 `insight.public.upsert_repo_credentials(repo_key, items, updated_at)`**：与单条版共用
+     同一对已登记语句（`repo_cred_update` 先 UPDATE，rowcount==0 再 `repo_cred_insert`），差别只在
+     **事务边界**——换发要同时写 `bot` 与 `webhook` 两行，两次单条调用会在两次提交之间留下
+     「bot 已换、webhook 仍旧」的半写状态。多行版用一个 `_any_tx()` 覆盖两条（烟测 B9 用「第 3 次
+     execute 注入异常」锁住整事务回滚）。返回值与 items 同序。
+  2. **保留 lib/outbox 分支不动**：`runtime_lib(foreign_only=True)` + `cross_write.submit_if_lib(...)`
+     只在「runtime 配了自有 DSN」时启用，失败会留意图行等 drain 重试；直接调 insight 原语虽能写成功，
+     但会丢掉这条重试兜底（`apply_fn` 抛错时 `submit` 只记 `failed` 不抛）。本批只替换**兜底分支**的
+     两条 SQL，写路径结构、幂等键 `repo-cred:<repo_key>:<cred_type>`、payload 字段全未变。
+     （附注：`submit_if_lib` 的 `target_domain` 传的是 `"runtime"`，与本表 owner = insight 不符；
+     它只是 outbox 行的标签（drain 按 `action` 查本地注册表，表里 `repo_credential_upsert` 已登记在
+     runtime public 且转发 insight），功能无碍，属独立一轮的清理，本批不顺手改。）
+  3. **两条写收进一个调用点后仍保留外层 `db_lock` + `db.commit()`**：`managed_repos` 的
+     `UPDATE webhook_id/bot_username` 归本域，仍写在本地游标上；单库/测试拓扑下 insight 的
+     `_any_tx` 回落 `session_manager.db`（同一连接、`db_lock` 可重入），`commit()` 把
+     managed_repos + rc 一起落，与改前「同一事务、末尾一次 commit」等价；三库拓扑下 rc 走 insight
+     连接（autocommit），本域 `commit()` 对它为空操作。
+  4. **`updated_at` 由调用点传**（不再 `datetime('now')`）：与 lib 分支、`mgmt/user/db.py:5049`
+     的既有写法统一，避免同一逻辑写出现「UTC / 本地时间 / DB 默认」三种口径。
+  5. **加密留在调用点**（`_encrypt_repo_secret`），owner 原语只做参数转发 —— 烟测 B3 锁「value 原样
+     落库、不二次加密」。
+- **修的存量 bug**：
+  1. **三库/部分拆分拓扑下换发写不进去（静默）**：兜底 SQL 用本进程库的 `db.cursor()`。只要
+     `uses_own_dsn("runtime")` 为假（例如 insight 独立、runtime 与 mgmt 同实例的部署）就走到兜底，
+     而 `grape_t_repo_credentials` 只在 insight 库（视图 0）→ `1146` → 被 `except Exception` 吞成
+     一行 WARNING + `continue`：**webhook 已在远端重建、DB 里凭据仍是旧 token**，下次调用就用旧凭据。
+     改造后兜底走 owner 原语，自有 DSN 打到 insight、单库回落进程库，两条拓扑同一份语句。
+  2. **失败路径留下悬空写事务**：`managed_repos` UPDATE 与 rc 写在同连接，rc 抛异常时既没 commit 也没
+     rollback，锁释放后事务挂着，一旦同进程后续任何 `db.commit()` 就把**半写的 managed_repos**
+     （新 webhook_id + 旧凭据）盖章。现在 rc 写失败会先让 `_any_tx` 回滚，同连接的 managed_repos
+     UPDATE 一并撤销（烟测 C8 锁这条）。注：外层 `except` 本身仍不 rollback，属同一轮次的
+     「显式事务边界」改造，本批未动。
+  3. **测试债**（顺手修，非产品 bug）：`tests/mgmt/test_s63_credential_family_card_driven.py:test_s63_swap_columns_card_driven`
+     的 mock 仍是「单条跨域 JOIN 三列」形状，实现拆 JOIN 后一直 `too many values to unpack` 失败
+     （HEAD 就红）。改成拆 JOIN 后的二列形状，断言口径未放宽 —— 该用例重新覆盖「换发写的是 rc 的
+     bot/webhook 两行」。修后同一组三个文件：4 failed / 12 passed → **3 failed / 13 passed**。
+- **未做（如实，属另一轮）**：① `cross_write` 的 `target_domain="runtime"` 标签归位 insight；
+  ② 外层 `except` 显式 rollback（事务边界统一）；③ `upsert` 撞约束分支目前 `except Exception` 全兜
+  （非唯一约束类失败会被判成 `updated_after_conflict`）—— 与单条版逐字一致，且 MySQL 的
+  `rowcount` 是「变更行数」，加 `rowcount>0` 校验会把「同值重写」误判成失败，故不在本批改口径。
+- **验证（真实退出码）**：
+  · `py_compile`（`config_store.py` / insight `public/__init__.py`）→ **COMPILE_OK**；
+  · `~/burndown/config_store_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`）→
+    **ALL config_store smoke PASSED (30 checks)**：A 注册面/静态否定（新原语登记 + `__all__`、
+    两条语句可移植方言与列序逐字、原语体无内联 SQL、本文件自算跨域 0 处、未登记名 KeyError）；
+    B 单库语义（INSERT/UPDATE 分支、id 保留、value 不二次加密、updated_at 传参、value='' 行不新增、
+    items=[] 无副作用、**多行同事务回滚**、撞唯一约束 `updated_after_conflict`）；
+    C 调用点端到端（真跑 swap：rc bot+webhook 解密后都是新 token、managed_repos 同步、
+    多行原语**只调一次**且 items 顺序 bot→webhook、旧 token 不匹配/新 token 无效都不写、
+    原语失败降级 WARNING 且两处都不落库、`host_user_id` 非空仓不参与换发）。
+    烟测踩到一条既有行为：`credentials_backfill_n1` 会把「无冒号」的 rc 明文行加密回填（只改 value 列），
+    种声明文会被它改写 —— 种子一律用真实密文。
+  · `--update-baseline` → **baseline updated: 28 pairs, 45 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **24 表 / 45 跨域引用 / 28 对**；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**（mgmt 182+6 / 264+31；
+    runtime 173+28 / 252+61）。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  轮内口径同前：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面，运行面证据为 sqlite 烟测（含多行事务回滚与调用点端到端）。
+- **新基线**：**45 处 / 28 对 / 24 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵已刷新。
+  下一批作业单里的首个未 blocked 文件是 `src/kernel/persistence/credential_usage_log.py`（3 处）与
+  `src/kernel/prompt_builder.py`（3 处）—— **两个都已标 ⛔ blocked**，实际下一批取
+  `src/api/feedback_issue_converter.py`（2 处，`user_feedback` 归 mgmt）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
