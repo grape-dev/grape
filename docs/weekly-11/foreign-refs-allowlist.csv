@@ -3,7 +3,7 @@ agent_runtimes,runtime,api,4
 agent_runtimes,runtime,insight,6
 agent_runtimes,runtime,mgmt,4
 agent_shared_knowledge,mgmt,runtime,8
-agent_tasks,runtime,api,8
+agent_tasks,runtime,api,7
 agent_tasks,runtime,insight,18
 agent_tasks,runtime,mgmt,4
 agent_type,runtime,insight,1
@@ -38,7 +38,6 @@ grape_t_channel_outbound_card,mgmt,runtime,2
 grape_t_channel_sender_identity,mgmt,runtime,1
 grape_t_credential_usage_log,runtime,kernel,3
 grape_t_merge_gate_log,insight,api,1
-grape_t_patrol_findings,mgmt,api,7
 grape_t_repo_credentials,insight,contracts,1
 grape_t_repo_credentials,insight,mgmt,5
 grape_t_repo_credentials,insight,runtime,1
@@ -48,7 +47,7 @@ issue,runtime,insight,2
 issue,runtime,mgmt,2
 issue_state,runtime,api,1
 login_whitelist,mgmt,kernel,4
-managed_repos,mgmt,api,3
+managed_repos,mgmt,api,2
 managed_repos,mgmt,kernel,5
 managed_repos,mgmt,runtime,11
 meta,runtime,mgmt,11
@@ -70,5 +69,4 @@ unified_user_mapping,mgmt,kernel,3
 unified_user_mapping,mgmt,runtime,15
 user_accounts,mgmt,runtime,1
 user_feedback,mgmt,api,6
-user_repos,mgmt,api,1
 vod_conversations,runtime,mgmt,1

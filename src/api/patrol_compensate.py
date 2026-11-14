@@ -29,7 +29,6 @@ from typing import Optional
 
 from src.kernel.config import log
 
-from src.kernel.session_manager import db, db_lock
 from src.api.pipeline_constants import (
     PAUSED_ISSUE_STATUSES,
     TARGET_SOURCE_LEGACY_TEXT,
@@ -38,6 +37,12 @@ from src.api.pipeline_constants import (
     TARGET_SOURCE_TERMINAL,
     TARGET_SOURCE_TEXT,
 )
+
+# 责任链要读写的两张表都不属 api 域：findings 归 mgmt、agent_tasks 归 runtime。
+# 三库独立后进程库里没有这两张表（无跨库视图），SQL 一律留在 owner 域 public，
+# 本模块只调用「任意拓扑」原语（自有 DSN → owner 连接；单库/测试 → 进程主库）。
+from src.domains.mgmt import public as mgmt_public
+from src.domains.runtime import public as runtime_public
 
 # 评审八轮修正①：claiming 孤儿租约（分钟）。派发是秒级；10 分钟仍未回写=进程崩溃
 # 或异常路径漏写，回收为 open 下轮重试（幂等键保证回收重试不会双发）。
@@ -80,12 +85,7 @@ class CompensateContext:
     action_meta: str = ""      # 落库回执
 
 def _load_finding(fid: str) -> Optional[CompensateContext]:
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT id, kind, task_id, repo_key, issue_id, status FROM grape_t_patrol_findings WHERE id=?",
-            (fid,))
-        row = c.fetchone()
+    row = mgmt_public.patrol_finding_row(fid)
     if not row:
         return None
     return CompensateContext(finding_id=row[0], kind=row[1] or "", task_id=row[2] or "",
@@ -93,16 +93,8 @@ def _load_finding(fid: str) -> Optional[CompensateContext]:
 
 def _set_finding(fid: str, status: str, meta: str) -> None:
     # 仓库规范：UPDATE 禁 SQL CASE/条件逻辑——先读现值，Python 拼接，普通 UPDATE
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT action_meta FROM grape_t_patrol_findings WHERE id=?", (fid,))
-        row = c.fetchone()
-        merged = (row[0] or "") if row else ""
-        merged = (merged + " | " + meta) if merged else meta
-        c.execute(
-            "UPDATE grape_t_patrol_findings SET status=?, action_meta=?, updated_at=? WHERE id=?",
-            (status, merged[:2000], _now_iso(), fid))
-        db.commit()
+    # （读-改-写由 owner 域原语在一次事务内完成，等价于原 db_lock 段）
+    mgmt_public.patrol_finding_mark(fid, status, meta, _now_iso())
 
 class Handler:
     """责任链处理器基类：handle 返回 True=放行，False=已短路（verdict 已写入 ctx）。"""
@@ -128,15 +120,9 @@ class ClaimHandler(Handler):
     name = "claim"
 
     def handle(self, ctx: CompensateContext) -> bool:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "UPDATE grape_t_patrol_findings SET status='claiming', updated_at=? WHERE id=? AND status='open'",
-                (_now_iso(), ctx.finding_id))
-            db.commit()
-            if c.rowcount != 1:
-                ctx.verdict, ctx.action_meta = "not_open", f"状态={ctx.status}（已被消费/收敛）"
-                return False
+        if not mgmt_public.patrol_finding_claim(ctx.finding_id, _now_iso()):
+            ctx.verdict, ctx.action_meta = "not_open", f"状态={ctx.status}（已被消费/收敛）"
+            return False
         ctx.status = "claiming"
         return True
 
@@ -145,12 +131,7 @@ class RecheckHandler(Handler):
 
     def handle(self, ctx: CompensateContext) -> bool:
         from src.api import patrol as _p
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT completed_at, agent_type, result_text FROM agent_tasks WHERE id=?",
-                (ctx.task_id,))
-            row = c.fetchone()
+        row = runtime_public.task_recheck_row(ctx.task_id)
         if not row:
             # 评审十六轮修正①/S29：原任务行已删=不自愈，终态 needs_human（不进批处理），
             # 不再回挂 open 每 5 分钟空转重试
@@ -228,25 +209,17 @@ class IdentityStrategy:
 class HostUserStrategy(IdentityStrategy):
     """路径 B：用户 PAT 托管（str(host_user_id or "") not in ("", "0")）→ 托管用户平台身份。"""
     def resolve(self, repo_key: str):
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT host_user_id FROM managed_repos WHERE repo_key=?", (repo_key,))
-            row = c.fetchone()
-        if row and row[0]:
-            return {"id": str(row[0]), "auth_type": "jwt", "username": f"host-user-{row[0]}"}
+        uid = mgmt_public.managed_repo_host_user(repo_key)
+        if uid:
+            return {"id": str(uid), "auth_type": "jwt", "username": f"host-user-{uid}"}
         return None
 
 class ManagedUserFallbackStrategy(IdentityStrategy):
     """路径 A：bot token 托管 → 托管用户映射（user_repos 管理员）。"""
     def resolve(self, repo_key: str):
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT user_id FROM user_repos WHERE repo_key=? AND is_admin=1 "
-                "ORDER BY created_at LIMIT 1", (repo_key,))
-            row = c.fetchone()
-        if row and row[0]:
-            return {"id": str(row[0]), "auth_type": "jwt", "username": f"managed-user-{row[0]}"}
+        uid = mgmt_public.repo_admin_user_id(repo_key)
+        if uid:
+            return {"id": str(uid), "auth_type": "jwt", "username": f"managed-user-{uid}"}
         return None
 
 class IdentityHandler(Handler):
@@ -544,24 +517,12 @@ def reclaim_stale_claimings() -> int:
     租约窗（10 分钟，复用 updated_at）内未回写的 claiming 回收为 open。
     """
     _lease = datetime.now(timezone.utc) - timedelta(minutes=_CLAIMING_LEASE_MINUTES)
-    with db_lock:
-        c = db.cursor()
-        # 评审十轮修正①：禁用 SQL 内 || 拼接——MySQL 默认 sql_mode 下 || 是逻辑 OR
-        # （静默把 action_meta 写成 '0'/'1'，审计回执丢失且无告警；兼容层只翻译
-        # 'gitcode:'||col 形态）。改读-改-写两段普通 UPDATE（_set_finding 同款模式）。
-        c.execute(
-            "SELECT id, action_meta FROM grape_t_patrol_findings "
-            "WHERE kind='broken_chain' AND status='claiming' AND (updated_at='' OR updated_at < ?)",
-            (_lease.isoformat(),))
-        recycled = 0
-        for (fid, meta) in c.fetchall():
-            c.execute(
-                "UPDATE grape_t_patrol_findings SET status='open', action_meta=? WHERE id=?",
-                (((meta or "") + " | claiming 租约超时回收")[:2000], fid))
-            recycled += 1
-        db.commit()
-        if recycled:
-            log.info(f"[patrol] claiming 孤儿回收 {recycled} 条（租约 {_CLAIMING_LEASE_MINUTES}min）")
+    # 评审十轮修正①：禁用 SQL 内 || 拼接——MySQL 默认 sql_mode 下 || 是逻辑 OR
+    # （静默把 action_meta 写成 '0'/'1'，审计回执丢失且无告警；兼容层只翻译
+    # 'gitcode:'||col 形态）。改读-改-写两段普通 UPDATE（owner 域原语内一次事务）。
+    recycled = mgmt_public.patrol_reclaim_stale_claimings(_lease.isoformat())
+    if recycled:
+        log.info(f"[patrol] claiming 孤儿回收 {recycled} 条（租约 {_CLAIMING_LEASE_MINUTES}min）")
     return recycled
 
 async def compensate_open_findings(limit: int = 20) -> dict:
@@ -576,13 +537,9 @@ async def compensate_open_findings(limit: int = 20) -> dict:
     - 不再无条件 FIFO：卡死 finding 无法永久占据队头饿死后来者。
     """
     cooldown = datetime.now(timezone.utc) - timedelta(minutes=_RETRY_COOLDOWN_MINUTES)
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT id FROM grape_t_patrol_findings WHERE kind='broken_chain' AND status='open' "
-            "AND (action_meta='' OR updated_at < ?) "
-            "ORDER BY created_at LIMIT ?", (cooldown.isoformat(), limit))  # 评审六轮小项：按 created_at FIFO（id 是 UUID，按 id 排序=随机挑）
-        ids = [r[0] for r in c.fetchall()]
+    # 评审六轮小项：捞单 FIFO 按 created_at（id 是 UUID，按 id 排序=随机挑）——
+    # 排序与冷却谓词都在 owner 域具名查询里（SQL 只留一份）。
+    ids = mgmt_public.patrol_open_finding_ids(cooldown.isoformat(), limit)
     counts: dict[str, int] = {}
     for fid in ids:
         verdict = await compensate_finding(fid)

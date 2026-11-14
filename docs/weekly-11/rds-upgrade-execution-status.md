@@ -160,6 +160,44 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### patrol_compensate 补偿责任链接口化（-10，本文件清零）
+- 文件：`src/api/patrol_compensate.py`（10 处 → **0**）；全局静态 **304 → 294**（73 → 71 对，
+  `grape_t_patrol_findings` 与 `managed_repos` 各掉一对）。
+- 表分布（消费域 api）：`grape_t_patrol_findings`（归 mgmt）7 处 —— 载入 finding 1、回执读 1、
+  回执+状态回写 1、抢占 `open→claiming` 1、租约超窗扫描 1、回收回写 1、批处理捞单 1；
+  `managed_repos`（归 mgmt）1 处（host_user_id）；`user_repos`（归 mgmt）1 处（首个管理员）；
+  `agent_tasks`（归 runtime）1 处（终检读原任务终态）。
+- **设计取舍**：责任链跨三个进程（api/mgmt/runtime 各自可能跑巡检），原实现用进程库 `db` +
+  `db_lock`。三库独立后进程库里没有这两张表（无跨库视图 → 1146），而且 `db_lock` 只能序列化
+  **同进程线程**——抢占（`status='open'` 条件写）本来就是靠 DB 语句原子性，不是靠锁。因此：
+  ① 语句全部上移 owner 域 public（mgmt 6 条具名查询 + 5 个薄原语、runtime 1 条 + 1 个薄原语）；
+  ② 抢占改成 `exec_any("patrol_finding_claim")` 的 rowcount 判据，跨进程语义反而变强；
+  ③ 两处「读-改-写」合并成**一个** `_any_tx()` 组合原语（`patrol_finding_mark` 回执追加、
+  `patrol_reclaim_stale_claimings` 扫+逐行回写），不拆成多次 `exec_any`——否则一次原子写变多次提交；
+  ④ 回执合并/2000 截断/冷却窗/`ORDER BY created_at`（UUID id 排序=随机挑）这些**口径**跟着语句
+  进 owner 域，调用方只剩业务分支；⑤ `managed_repos.host_user_id`、`user_repos` 首个管理员复用
+  mgmt public 已有的 `managed_repo_host_user` / `repo_admin_user_id`（不新造重复原语）。
+- **口径保持（未擅自"修好"）**：`host_user_id='0'`（TEXT）在旧实现里是真值 → 仍算有主体，
+  本轮照抄；`action_meta=''` 的 finding 不受 30 分钟冷却限制、`updated_at=''` 视同过期回收，
+  两条边界都进了烟测。
+- **测试 seam 迁移**：`tests/mgmt/test_patrol_unit.py` 的 12 处 `patch.object(pc, "db"/"db_lock")`
+  改指 `src.kernel.session_manager.db/db_lock`（`*_any` 的回落路径在函数内 import 该句柄，
+  打模块别名会静默打空）；3 处读源码文本的 SQL 守卫（ORDER BY / `||` 方言 / 冷却谓词 /
+  `needs_human` 不在捞单 status）改为守 owner 域具名查询文本——守卫存活，没有为了绿而删断言。
+  该文件失败集合与改前基线逐条比对：**42 failed / 72 passed → 42 / 72，新增 0**。
+- **存量 bug（本轮发现，未修，超本批单文件范围）**：`src/api/patrol.py` 的
+  `_NEXT_STEP_RE` 只被使用（L342）没有定义，`parse_target_agent` 恒 `NameError` 被上层
+  `except` 吞成「next_step 不可解析」→ 补偿终检一律判 `target_unresolvable`。
+  丢失点在 `9b5bc6e05 refactor(patrol): route the detection and finding paths through owner
+  primitives (-25)`（该常量原为 `re.compile(r"^a2a[-:]\s*([a-zA-Z0-9_\-]+)", re.I)`）。
+  它是 `tests/mgmt/test_patrol_unit.py` 42 条既失败的主要成因（改前基线同样 42 条），下一批修复。
+- **新基线**：**294 处 / 71 对**（`--update-baseline` 已收紧）；依赖看板与矩阵已刷新。
+- 验证：`check-arch.py` RESULT PASS（R4 report-only 198）；`rds_gate.sh --quick` GATE 全绿
+  （棘轮未上升、内部契约 37 条、看板最新）；`pytest tests/arch tests/contracts tests/scripts`
+  **158 passed**；`make lint` import OK；sqlite 行为烟测 46 项全通过
+  （`~/burndown/patrol_compensate_smoke.py`：列序/回执合并与截断/抢占否定用例/租约窗与
+  `updated_at=''` 边界/幂等/捞单 FIFO 与冷却豁免/身份降级/批处理 limit）。
+
 ### event_pipeline 事件管道场景/仓库接口化（-10，本文件清零）
 - 文件：`src/domains/runtime/pipeline/event_pipeline.py`（10 处 → **0**）；全局静态 **314 → 304**（73 对）。
 - 表分布（消费域 runtime，两表都归 mgmt）：`devops_pipeline_scene` 6 处（QA 节点 2、PR 订阅列表 1、

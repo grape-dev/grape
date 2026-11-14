@@ -1563,6 +1563,27 @@ _ANY_QUERIES: dict[str, str] = {
     "repo_org_id": (
         "SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1"),
     "repo_deploy_url_set": "UPDATE managed_repos SET deploy_url=? WHERE repo_key=?",
+    # ── 巡检补偿责任链（api/patrol_compensate.py：载入/抢占/回写/回收/捞单）──
+    # 列序与补偿模块原查询逐字一致（调用方按下标解包）；写语句一律普通 UPDATE
+    # （禁 SQL CASE 与 `||` 拼接：MySQL 默认 sql_mode 下 || 是逻辑 OR）。
+    "patrol_finding_row": (
+        "SELECT id, kind, task_id, repo_key, issue_id, status "
+        "FROM grape_t_patrol_findings WHERE id=?"),
+    "patrol_finding_meta": "SELECT action_meta FROM grape_t_patrol_findings WHERE id=?",
+    "patrol_finding_set": (
+        "UPDATE grape_t_patrol_findings SET status=?, action_meta=?, updated_at=? WHERE id=?"),
+    "patrol_finding_claim": (
+        "UPDATE grape_t_patrol_findings SET status='claiming', updated_at=? "
+        "WHERE id=? AND status='open'"),
+    "patrol_findings_stale_claiming": (
+        "SELECT id, action_meta FROM grape_t_patrol_findings "
+        "WHERE kind='broken_chain' AND status='claiming' "
+        "AND (updated_at='' OR updated_at < ?)"),
+    "patrol_finding_reopen": (
+        "UPDATE grape_t_patrol_findings SET status='open', action_meta=? WHERE id=?"),
+    "patrol_findings_open_ids": (
+        "SELECT id FROM grape_t_patrol_findings WHERE kind='broken_chain' AND status='open' "
+        "AND (action_meta='' OR updated_at < ?) ORDER BY created_at LIMIT ?"),
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -2107,6 +2128,64 @@ def patrol_findings_delete_terminal(statuses, cutoff_iso: str) -> int:
             f"DELETE FROM grape_t_patrol_findings WHERE status IN ({_ph}) "
             "AND updated_at != '' AND updated_at < ?", (*_statuses, cutoff_iso))
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+# ---------- 巡检补偿责任链原语（api/patrol_compensate.py 的六个站点） ----------
+# 补偿器原先用进程库 `db` + `db_lock` 直读/直写本域表；三库独立后进程库里没有这张表
+# （无跨库视图 → 1146），且 `db_lock` 只能序列化同进程线程，跨进程抢占不再成立。
+# 语句上移本域后：自有 DSN → mgmt 连接（语句级原子），单库/测试 → 进程主库 + db_lock。
+# 列序与补偿模块原查询逐字一致，调用方按下标解包不用改。
+
+def patrol_finding_row(fid: str):
+    """单条 finding 的 (id, kind, task_id, repo_key, issue_id, status)；无行返回 None。"""
+    return read_one_any("patrol_finding_row", (fid,))
+
+
+def patrol_finding_mark(fid: str, status: str, note: str, now_iso: str,
+                        limit: int = 2000) -> None:
+    """回写 finding 状态，并把 note 追加进 action_meta（读-改-写在同一事务内）。
+
+    仓库规范：禁止在 SQL 里做条件拼接（MySQL 默认 sql_mode 下 `||` 是逻辑 OR，
+    会静默把回执写成 '0'/'1'）——先读现值、Python 拼接、普通 UPDATE。合并与截断
+    口径与原补偿模块 `db_lock` 段一致：空现值取 note 本身，超过 2000 字符截断。
+    """
+    with _any_tx() as c:
+        c.execute(_any_sql("patrol_finding_meta"), (fid,))
+        row = c.fetchone()
+        merged = (row[0] or "") if row else ""
+        merged = (merged + " | " + note) if merged else note
+        c.execute(_any_sql("patrol_finding_set"), (status, merged[:limit], now_iso, fid))
+
+
+def patrol_finding_claim(fid: str, now_iso: str) -> bool:
+    """原子抢占 open→claiming；返回是否抢到（= 原实现 rowcount==1 的判据）。"""
+    return exec_any("patrol_finding_claim", (now_iso, fid)) == 1
+
+
+def patrol_reclaim_stale_claimings(lease_iso: str, note: str = "claiming 租约超时回收",
+                                  limit: int = 2000) -> int:
+    """把租约超窗（或 updated_at 为空）的 claiming 回收为 open，返回回收条数。
+
+    先扫后写在同一事务内完成（自有 DSN 真事务 / 单库 db_lock），与补偿模块原
+    「持锁扫 + 逐行回写 + 末尾一次 commit」等价；重试幂等（已回收的行不再是 claiming）。
+    """
+    recycled = 0
+    with _any_tx() as c:
+        c.execute(_any_sql("patrol_findings_stale_claiming"), (lease_iso,))
+        for (fid, meta) in list(c.fetchall() or []):
+            c.execute(_any_sql("patrol_finding_reopen"),
+                      (((meta or "") + " | " + note)[:limit], fid))
+            recycled += 1
+    return recycled
+
+
+def patrol_open_finding_ids(cutoff_iso: str, limit: int = 20) -> list:
+    """按 created_at FIFO 捞本批待补偿的 finding id（冷却窗外的失败 + 从未尝试的）。
+
+    id 是 UUID，按 id 排序等于随机挑，因此 ORDER BY created_at 是口径的一部分
+    （冷却谓词 `action_meta=''` 让首轮 finding 不受冷却限制）。
+    """
+    return [r[0] for r in read_all_any("patrol_findings_open_ids", (cutoff_iso, limit))]
 
 
 # ---------- 看板/报表读（insight dashboard 用；表归 mgmt） ----------

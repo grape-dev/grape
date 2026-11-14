@@ -1892,6 +1892,9 @@ _ANY_QUERIES: dict[str, str] = {
     "issue_stage_by_repo_number": (
         "SELECT stage FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1"),
     "task_event_seq": "SELECT event_seq FROM agent_tasks WHERE id=? LIMIT 1",
+    # 补偿终检读原任务终态（api/patrol_compensate.py RecheckHandler）：列序与原查询逐字一致
+    "task_recheck_row": (
+        "SELECT completed_at, agent_type, result_text FROM agent_tasks WHERE id=?"),
     "event_payload_status_a2a": (
         "SELECT payload, status FROM events WHERE repo_key=? AND issue_id=? "
         "AND event_type='a2a_event'"),
@@ -2913,6 +2916,14 @@ def claim_meta_lease(key: str, holder: str, new_val: str, cutoff_iso: str) -> bo
             cur3 = c.execute("INSERT INTO meta (key, value) VALUES (?,?)", (key, new_val))
             return int(getattr(cur3, "rowcount", 0) or 0) == 1
         return False
+
+
+def task_recheck_row(task_id: str):
+    """补偿终检读原任务终态 (completed_at, agent_type, result_text)；无行返回 None。
+
+    列序与 api/patrol_compensate.py 原查询逐字一致（调用方按下标解包）。
+    """
+    return read_one_any("task_recheck_row", (task_id,))
 
 
 def event_created_ats_by_types(repo_key: str, issue_id: str, types) -> list[tuple]:
