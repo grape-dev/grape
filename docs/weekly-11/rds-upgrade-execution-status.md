@@ -3762,6 +3762,74 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （作业单 63 处 / 39 文件，顶部已带 ⛔ blocked 小节；下一批可选 `src/api/main.py` 3 处
   ——与 insight 进程同一循环，可直接复用 `device_*_any` 三个原语——或 `src/api/event_rule.py` 3 处）。
 
+### api/main 主控机指标上报循环归 runtime public（-3，该文件清零）
+
+- 文件：`src/api/main.py`（3 处 → **0**）；全局静态 **63 → 60**（-3），对数 **35 → 34** ——
+  `runtime_credentials←api` 由 3 降到 0。
+- 表分布（消费域 api，表全归 **runtime**），三处都在 `_start_server_metrics_task._server_metrics_loop`：
+  · 行 126 `SELECT id FROM runtime_credentials WHERE device_name=? AND scope='global'`（注册判存，1 列）
+  · 行 129 `INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, last_ip)`
+    `VALUES (?, ?, ?, 'global', 'active', ?)`（缺失登记）
+  · 行 208 `UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?,`
+    `disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?`
+    `WHERE device_name=? AND scope='global'`（15s 心跳刷新，9 列）
+  三处表名/列名全字面量、参数全占位符，**无动态拼接**。
+- 本轮取批：作业单头两名 `src/kernel/prompt_builder.py` / `src/kernel/persistence/credential_usage_log.py`
+  仍 blocked（口径见上一批与 `next-batches.md` 顶部），跳过；取第一个可改造文件 `src/api/main.py`
+  （上一批台账末尾点名的同构循环）。
+- 归属域侧改动：**零新增原语** —— 直接复用上一批（`api/server_tasks`）落地的
+  `register_device_credential_any` / `touch_device_credential_any`（三条模板
+  `runtime_credential_device_id` / `_register_device` / `_touch_device` 与本文件原 SQL **逐字一致**，
+  故不需要新建键）。这也验证了上一批把「判存 SELECT + INSERT」合成一个 `_any_tx()` 组合原语的决定：
+  本文件原实现是 `SELECT` 后判空再 `INSERT`，恰好同一个语义，调用点直接塌缩成一次调用。
+- 关键设计取舍：
+  1. **删掉「lib 优先 + 进程库兜底」双分支**，不留 `runtime_lib` 依赖。原结构在 lib 不可用时
+     把同一段 SQL 抄在 `else` 里直打**进程库**——那正是本表跨域统计的来源；`_any` 族本身
+     已经是「自有 DSN 优先、单库回落进程库」，调用方再包一层选择只会产生两套行为。
+  2. **调用方不再持 `db_lock`/`db.cursor()`**：`_any_cursor` 在回落路径自带锁与 commit，
+     调用方再嵌一层就是同线程二次加锁（与交接文档 §5.3 坑 4 同族），且把 `db.commit()`
+     的提交点从「SQL 之后」变成「原语内部」，语义收得更紧。
+  3. **注册与心跳都保持同步直连**（不入意图队列）：15s 一条意图会淹没 `xwrite` 日志，
+     循环本身就是重试机制 —— 这一口径与上一批一致，只换了 SQL 的归属。
+- **修的存量 bug（mgmt 进程三库拓扑下必然 1146，被外层 `except` 吞成静默降级）**：
+  `src/api/grape_server.py:281` 在 mgmt 进程启动时调用本函数（`main.py` 自己的 lifespan 走的是
+  已改造的 `server_tasks.start_insight_tasks`）。mgmt 进程库里没有 `runtime_credentials`（视图 0），
+  而 `runtime_lib(foreign_only=True)` 只有在 `GRAPE_RUNTIME_READ_VIA_LIB=1` + `GRAPE_DSN_RUNTIME`
+  都配好时才返回句柄；否则走 `else` 兜底 SQL → 1146 → 日志只有
+  `Server metrics: register failed / upload failed`，**本机 device 常量从未登记、指标从未刷新**，
+  能效看板的「本机」一行恒为空。改造后两种拓扑同源，缺表时才降级（烟测 E 段覆盖）。
+- 验证（真实退出码）：
+  · `py_compile src/api/main.py` → **COMPILE_OK**；
+  · `~/burndown/main_metrics_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建 18 列
+    `runtime_credentials`）→ **ALL main_metrics smoke PASSED (100 checks)**：
+    A 注册面/静态否定（三模板逐字对齐 + 无 `%s`/`NOW()`/`ON DUPLICATE`/`PRAGMA`、函数体内零
+    `runtime_credentials` SQL 字面量、不再 import `db`/`db_lock`/`runtime_lib`、`__all__` +
+    GSB 镜像双登记、未登记查询名 `KeyError` 同族；`_start_server_metrics_task` 仍在，596 用例
+    按源文本断言的函数名不变）；
+    B `register_device_credential_any`（空表 → inserted 五列取值正确 / 二次 → exists 且**不覆写**
+    token_hash 与 last_ip / 同名不同 device 撞 `name` UNIQUE → duplicate 且不新增行 / 换 device 新增行）；
+    C `touch_device_credential_any`（**9 个指标列逐列校对**抓参数错位 / 只命中 `scope='global'`
+    而同 device 的 `repo`、`user` 行不动 / **不过滤 status**，revoked 行照旧刷新且 status 不被改写 /
+    device 不匹配 → 0 行 / 同 device 多条 global 脏数据全命中，与原语句无 LIMIT 一致 /
+    0 与负值不被吞成 NULL、空串原样落库）；
+    D **自有 DSN 伪游标**（`uses_own_dsn`+`transaction`+`cursor` 注入：先 SELECT 后 INSERT 同一事务、
+    SQL 文本逐字、INSERT 参数顺序 `(token_hash,name,device_name,last_ip)`、UPDATE 10 个参数顺序
+    「9 指标 + device_name 尾参」、1062 → duplicate、非撞键异常上抛、touch 返回值取自伪游标
+    `rowcount` 而非 `exec_any` 恒 0）；
+    E **调用点驱动**（真跑 `_start_server_metrics_task()` 一个 tick：登记行 scope/status/name/
+    token_hash/last_ip 正确、`last_seen_at` 与指标列已刷新、重复启动幂等仍 1 行、进程库重指空库时
+    只记 warning 不抛且真库既有行不受影响）。
+  · `python3 scripts/foreign_table_refs.py … --update-baseline` → **baseline updated: 34 pairs, 60 refs**；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R8 / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → **import OK**。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排（轮内口径：每轮只跑
+  py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑一次）；
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新原语），运行面证据为 sqlite 烟测
+  含真实调用点 tick。mgmt 进程实机 1146 消失的现场证据留待彩排轮确认。
+- **新基线**：**60 处 / 34 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 60 处 / 38 文件，下一批首个可改造文件 `src/api/event_rule.py` 3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
