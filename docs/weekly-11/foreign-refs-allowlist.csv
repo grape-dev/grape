@@ -13,7 +13,7 @@ events,runtime,insight,2
 external_identities,mgmt,runtime,2
 grape_accounts,mgmt,runtime,1
 grape_t_channel_chat_session_binding,mgmt,runtime,1
-grape_t_channel_installation,mgmt,runtime,4
+grape_t_channel_installation,mgmt,runtime,2
 grape_t_channel_lease,mgmt,runtime,2
 grape_t_channel_outbound_card,mgmt,runtime,2
 grape_t_credential_usage_log,runtime,kernel,3

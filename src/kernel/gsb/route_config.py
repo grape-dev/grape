@@ -80,6 +80,8 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "event_action_filter_enabled_rows",
         # 流水线责任人展示（runtime/routes/pipeline.py；任意拓扑）
         "feishu_name_by_platform_column", "repo_bot_usernames_any",
+        # VOD Bot 导航：仓库轨安装反查（runtime/im/vod_handler_async.py；任意拓扑）
+        "installation_repo_app_ids_any", "installation_repo_keys_by_app_any",
         "add_user_feedback", "save_inbound_message", "upsert_outbound_card",
         "read_one", "read_all",
     ),

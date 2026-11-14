@@ -3964,6 +3964,84 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `installation_*` 原语）或 `src/domains/runtime/im/outbox.py` 2 处（`grape_t_channel_lease`，
   可复用 `acquire_/renew_/release_channel_lease`）。
 
+### runtime VOD 导航仓库轨安装反查归 mgmt public（-2，该文件清零）
+
+- 文件：`src/domains/runtime/im/vod_handler_async.py`（2 处 → **0**）；全局静态 **55 → 53**（-2），
+  对数 **32 → 32** —— `grape_t_channel_installation←runtime` 4 → 2（该对**未清零**：余下两处是
+  `runtime/im/notify.py:182`（通知受众枚举）与 `runtime/im/engine/installations.py:17`
+  （活跃安装枚举的引擎侧视图来源），分别属通知扇出与 InstallationProvider 枚举，另批处理）。
+- 表分布（消费域 runtime，表归 **mgmt**），两处互不相干、都在 VOD Bot 导航的装配阶段：
+  · 行 52 `_repo_app_ids`：`SELECT legacy_app_id FROM grape_t_channel_installation
+    WHERE scope='repo' AND repo_key=? AND status='active' AND COALESCE(legacy_app_id,'')<>''`
+    —— 常数 SQL，返回 set（`str(r[0])` + 真值过滤）。
+  · 行 110 `_list_vod_repos`：`SELECT DISTINCT repo_key FROM grape_t_channel_installation
+    WHERE scope='repo' AND status='active' AND legacy_app_id=? AND COALESCE(repo_key,'')<>''`
+    —— 常数 SQL，结果被包成卡片菜单项 `{"repo_key": ...}`。
+  两处表名/列名均字面量、无动态拼接，「动态」只在**参数方向相反**（一处按仓库查 bot，一处按
+  bot 查仓库）。
+- 本轮取批：作业单头两名 `src/kernel/prompt_builder.py` / `src/kernel/persistence/credential_usage_log.py`
+  仍 blocked（口径见作业单顶部 ⛔ 小节），跳过；取第一个未 blocked 文件（上一批台账末尾点名的本文件）。
+- 归属域侧改动（SQL 只在 mgmt 域一份）：
+  · `_ANY_QUERIES` 新增 2 条具名查询：`installation_repo_app_ids`（列序 `legacy_app_id` 单列）、
+    `installation_repo_keys_by_app`（`SELECT DISTINCT repo_key`，**不加 ORDER BY**，与原语句同口径）；
+    谓词三件（scope/status/COALESCE 非空）与原 SQL 逐字一致。
+  · 新增薄函数 `installation_repo_app_ids_any(repo_key) -> set[str]`（集合去重 + `str` 归一，
+    与原 `{str(r[0]) for r in rows if r[0]}` 同形）与
+    `installation_repo_keys_by_app_any(app_id) -> list[str]`（只回裸键、保序、Python 侧再兜一次空值）。
+    两个函数登记 `__all__` 并同步 `src/kernel/gsb/route_config.py` 的 `PUBLIC_PRIMITIVES["mgmt"]` 镜像。
+- 关键设计取舍：
+  1. **卡片点阵形留在调用方**：owner 域只回裸 `repo_key` 列表，`{"repo_key": ...}` 由 runtime 侧列表推导
+     组装 —— 该字典形状是卡片分页的 UI 契约（`_send_vod_repo_card` 按下标取 `r["repo_key"]`），
+     不该污染 mgmt public 的返回类型（同域的其它安装读口一律回裸 tuple）。
+  2. **不擅自加 `ORDER BY`**：原语句是 `SELECT DISTINCT` 无序，`/repo` 的分页顺序本来就依赖到达顺序；
+     固化排序会改变「同一页里出现哪几个仓库」，属未授权的行为变更，故按原样搬。
+  3. **不补 `legacy_app_id!=''` 谓词**：`installation_repo_keys_by_app` 只过滤 repo_key 非空（原 SQL 如此），
+     空 bot id 命中 app_id 为空串的 repo 轨安装这一历史口径保留（烟测 B 段固定）；调用方
+     `ctx.app_id` 恒真，实际不可达。
+  4. **拿掉调用方的 `db_lock` + `db.cursor()`**：`_any_cursor` 在单库回落路径自带锁，再嵌一层是同线程
+     二次加锁（交接文档 §5.3 坑 4 同族）；本文件仍留 `db`/`db_lock` —— 同域表
+     （`devops_agent_session` / `vod_conversations` / `agent_runtimes`）的 SQL 属本域，不动。
+  5. **失败语义保持「静默降级」但留痕**：`_repo_app_ids` → 空集合、`_list_vod_repos` → 空列表
+     （调用方据此判「未配置本 bot 的 VOD」/「无候选」，不抛），`except` 从裸 `return` 改成
+     `log.debug` + 同值返回（`tests/silent_except_baseline.json` 计数不变：两处原本就不是 `pass`）。
+- **修的存量 bug（三库独立后 VOD Bot 导航整体失效，且被吞成「你没配」）**：runtime 进程库没有
+  `grape_t_channel_installation`（视图 0）→ 两处查询在拆分拓扑下必 1146 →
+  ① `_repo_app_ids` 恒空 → `_get_vod_session` 的 `app_ids` 恒空 → `_handle_vod_selection` 的
+  `ctx.app_id not in app_ids` 恒真 → **任何仓库点选都回「该仓库未配置当前 bot 的 VOD Agent」**；
+  ② `_list_vod_repos` 恒空 → `/repo` 恒走「无候选」分支。库里配置明明存在，用户侧只看到
+  「未配置」而非报错。改造后单库与三库拓扑跑同一份 SQL，只有真缺表才降级。
+- 验证（真实退出码）：
+  · `py_compile` 三文件（`vod_handler_async.py` / mgmt `public` / `gsb/route_config.py`）→ **COMPILE_OK**；
+  · `~/burndown/vod_installation_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`）→
+    **ALL vod_installation smoke PASSED (69 checks)**：A 注册面/静态否定（两条查询逐字对齐、无 `%s`/
+    `NOW()`/`ON DUPLICATE`/`PRAGMA`、两薄函数体无内联 SQL、调用方无该表 SQL / 无 `db_lock`+`db.cursor`、
+    无 f-string 拼 SELECT、`__all__` + GSB 镜像双登记、未登记查询名 `KeyError`）；
+    B 单库行为（scope='repo'/status='active'/COALESCE 三重过滤逐项否定：revoked、disabled、user 轨、
+    NULL/空串 app_id、NULL/空串 repo_key；同仓库两行同 app → 集合去重；`DISTINCT` 去重；
+    跨 bot 隔离；空表/未知键 → 空集与空列表；两条**历史口径**单列固定）；
+    C **自有 DSN 伪游标**（两条语句逐字、`?` + 参数元组不翻译成 `%s`、参数方向相反各自校验、
+    Python 侧空值兜底仍在、驱动异常在 public 层**上抛**而在调用点吞成空集/空列表）；
+    D 调用点（真跑 `_get_vod_session`：`app_ids` 注入会话字典、revoked → 空集、无会话 → None；
+    真跑 `_list_vod_repos`：单键字典形状、revoked 不进候选、别的 bot → 无候选；两个原语打桩抛错 →
+    调用点仍返回空集/空列表且打桩已还原）；
+    E **拓扑回归**（自有 DSN 下进程库里放 `app404` 误导行：调用点只取伪游标结果、每处只发一条语句、
+    参数分别是 repo_key / app_id）。
+  · 直覆盖 `tests/runtime/test_vod_navigation_commands.py` + `tests/runtime/test_vod_handler_queue.py`
+    → **15 passed**（走真实 MySQL 单库回落路径，证明 `/repo` 候选、数字点选绑定、队列语义未变）。
+  · `--update-baseline` → **baseline updated: 32 pairs, 53 refs**；依赖看板 / 矩阵同步刷新
+    （作业单仍为 53 处 / 35 文件）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R8 / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → **import OK**。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell `SRC_PWD`/`REMOTE_PWD` 未注入；
+  轮内口径同样是「每轮只跑 py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑」）；
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新原语契约），运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标 + 调用点真跑）+ 真库直覆盖用例。runtime 进程 1146 消失的现场证据留待彩排轮确认。
+- **新基线**：**53 处 / 32 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 53 处 / 35 文件，下一批首个未 blocked 文件 `src/domains/runtime/im/outbox.py` 2 处
+  （`grape_t_channel_lease`，归 mgmt，可复用既有 `acquire_/renew_/release_channel_lease`）；紧接其后的
+  `src/domains/runtime/im/notify.py` 2 处正好包含本对的余量之一 —— 同一对表可在下一轮一并清零）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

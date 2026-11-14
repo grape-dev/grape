@@ -736,6 +736,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # 渠道安装表解绑/回显（runtime/routes/chat.py；任意拓扑）
            "installation_other_refs_any", "installation_holders_any",
            "installation_user_channel_rows_any", "clear_user_mapping_feishu_any",
+           "installation_repo_app_ids_any", "installation_repo_keys_by_app_any",
            "delete_feishu_onboard_task_any",
            # IM 身份解析 / 巡检执行卡（runtime/im/handler_async.py；任意拓扑）
            "sender_identity_user_by_app_any", "installation_owner_by_app_any",
@@ -1813,6 +1814,19 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT channel_type, status, config FROM grape_t_channel_installation "
         "WHERE scope='user' AND owner_user_id=? AND status IN ('active','disabled') "
         "ORDER BY updated_at DESC"),
+    # VOD Bot 导航（runtime/im/vod_handler_async.py）：仓库轨安装的两个反查口。
+    # 原实现在 runtime 进程里用进程主库直发 SQL —— 三库拓扑下 runtime 库没有本表（视图 0）
+    # → 1146 被调用方 `except: return set()/[]` 吞成「该仓库未配置本 bot 的 VOD」
+    # 与「/repo 无候选」。谓词/列序/COALESCE 空值过滤逐字照抄（不加 ORDER BY：
+    # 原语句是 DISTINCT 无序，分页顺序与原来同口径，不擅自改）。
+    "installation_repo_app_ids": (
+        "SELECT legacy_app_id FROM grape_t_channel_installation "
+        "WHERE scope='repo' AND repo_key=? AND status='active' "
+        "AND COALESCE(legacy_app_id,'')<>''"),
+    "installation_repo_keys_by_app": (
+        "SELECT DISTINCT repo_key FROM grape_t_channel_installation "
+        "WHERE scope='repo' AND status='active' AND legacy_app_id=? "
+        "AND COALESCE(repo_key,'')<>''"),
     # 扫码接入任务删除（含 app_secret/qr_url 敏感数据；飞书专属链路）
     "onboard_task_delete_by_app": "DELETE FROM feishu_onboard_task WHERE app_id=?",
     # ── IM 身份解析 / 巡检执行卡（runtime/im/handler_async.py）──
@@ -4169,6 +4183,26 @@ def installation_active_configs_by_type_any(channel_type: str) -> list[tuple]:
     """某渠道类型下全部活跃安装的 (config,)（「是否还有别的安装启用着」判定）。"""
     return [tuple(r) for r in read_all_any("installation_active_configs_by_type",
                                            (channel_type,))]
+
+
+def installation_repo_app_ids_any(repo_key: str) -> set[str]:
+    """某仓库的仓库轨安装（scope='repo'、active）所用 legacy_app_id 集合。
+
+    对应原 `vod_handler_async._repo_app_ids`：A2 收尾后 `devops_agent_session.im_app_id`
+    已 DROP，「这个 bot 是不是该仓库的 VOD」只能由本表回答。空值/空串 install 行被
+    `COALESCE(...)<>''` 过滤（与原语句一致），结果按原实现转成 str 并去重；无行 → 空集合。
+    """
+    return {str(r[0]) for r in read_all_any("installation_repo_app_ids", (repo_key,)) if r[0]}
+
+
+def installation_repo_keys_by_app_any(app_id: str) -> list[str]:
+    """某 bot（legacy_app_id）名下已配置 VOD 的仓库轨 repo_key 列表（去重，无序）。
+
+    对应原 `vod_handler_async._list_vod_repos` 的查询部分：只认 scope='repo'、active、
+    且 repo_key 非空；**不加 ORDER BY**——原语句是 `SELECT DISTINCT` 无序，调用方按
+    到达顺序分页，本轮不擅自固化顺序。返回原值（不做 str 归一），空值已由 SQL 过滤。
+    """
+    return [r[0] for r in read_all_any("installation_repo_keys_by_app", (app_id,)) if r[0]]
 
 
 # ---------- GSB 服务注册表（kernel/gsb/registry.py 的 SQL 全部收在此处） ----------

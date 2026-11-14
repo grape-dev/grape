@@ -45,15 +45,14 @@ def _repo_app_ids(repo_key: str) -> set:
 
     A2 收尾（Phase B）后 `devops_agent_session.im_app_id` 已 DROP：原来靠那一列判断
     "这个仓库是不是当前 bot 配的 VOD"，改由安装表回答（一个仓库可能有多渠道安装）。
+    表归 mgmt（docs/weekly-11/table-owner.tsv），SQL 只在 mgmt public 一份，本函数只留
+    拓扑无关的调用；查询失败 → 空集合（原口径：调用方据此判「未配置本 bot 的 VOD」）。
     """
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT legacy_app_id FROM grape_t_channel_installation "
-                      "WHERE scope='repo' AND repo_key=? AND status='active' "
-                      "AND COALESCE(legacy_app_id,'')<>''", (repo_key,))
-            return {str(r[0]) for r in c.fetchall() if r[0]}
-    except Exception:
+        from src.domains.mgmt import public as _mgmt_public
+        return _mgmt_public.installation_repo_app_ids_any(repo_key)
+    except Exception as exc:  # noqa: BLE001 - 安装表读不到不该阻断 VOD 会话解析
+        log.debug(f"VOD repo app ids unavailable (repo={repo_key}): {exc}")
         return set()
 
 
@@ -102,19 +101,18 @@ def _get_or_create_conversation(chat_id: str, agent_session_id: str) -> dict:
 
 
 def _list_vod_repos(bot_app_id: str) -> list:
-    """当前 bot 名下有 VOD 配置的仓库（读 grape_t_channel_installation 的 repo 轨安装）。"""
-    results = []
+    """当前 bot 名下有 VOD 配置的仓库（读 grape_t_channel_installation 的 repo 轨安装）。
+
+    表归 mgmt，SQL 只在 mgmt public 一份（`installation_repo_keys_by_app_any`）；
+    调用方只负责把返回的 repo_key 包成卡片菜单项的点阵形（`{"repo_key": ...}`），
+    顺序沿用 owner 域返回的到达顺序（原 `SELECT DISTINCT` 无序，分页口径不变）。
+    """
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT DISTINCT repo_key FROM grape_t_channel_installation "
-                      "WHERE scope='repo' AND status='active' AND legacy_app_id=? "
-                      "AND COALESCE(repo_key,'')<>''", (bot_app_id,))
-            for r in c.fetchall():
-                results.append({"repo_key": r[0]})
-    except Exception:
-        pass
-    return results
+        from src.domains.mgmt import public as _mgmt_public
+        return [{"repo_key": k} for k in _mgmt_public.installation_repo_keys_by_app_any(bot_app_id)]
+    except Exception as exc:  # noqa: BLE001 - 无候选不阻断 /repo，回退「无候选」卡片分支
+        log.debug(f"VOD repo list unavailable (app={bot_app_id}): {exc}")
+        return []
 
 
 def _current_vod_repo(chat_id: str) -> str:
