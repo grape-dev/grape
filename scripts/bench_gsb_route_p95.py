@@ -668,14 +668,51 @@ def bench_primitives(samples: int) -> list[dict]:
 
 
 def bench_provider_construction(samples: int) -> dict:
-    """既有 get_service() 每次调用新建 provider/HTTP 客户端的构造成本（参考项）。"""
-    costs: list[float] = []
+    """get_service() 句柄构造成本 A/B（Issue #2479 QA 审查修复 Required#2）.
+
+    - uncached：每次调用新建 ``_RoutedService`` 代理 + Local/Remote 实例
+      （修复前的 per-call 口径）；
+    - cached：``get_service()`` 进程级代理句柄复用（修复后口径）。
+    两者均含一次 remote get_bot_config 真实调用（同方法 A/B 对比）。
+    """
+    entry = {
+        "local": (lambda: get_local_service("mgmt")),
+        "remote": MgmtServiceRemote,
+    }
+    uncached: list[float] = []
+    for _ in range(samples):
+        started = time.perf_counter()
+        proxy = _RoutedServiceBench("mgmt", entry)
+        proxy.get_bot_config("bench/repo")
+        uncached.append((time.perf_counter() - started) * 1000.0)
+    cached: list[float] = []
     for _ in range(samples):
         started = time.perf_counter()
         get_service("mgmt").get_bot_config("bench/repo")
-        costs.append((time.perf_counter() - started) * 1000.0)
-    return {"key": "get_service(mgmt).get_bot_config (per-call construction)",
-            "p95": p95(costs)}
+        cached.append((time.perf_counter() - started) * 1000.0)
+    return {
+        "uncached_p95": p95(uncached),
+        "cached_p95": p95(cached),
+    }
+
+
+class _RoutedServiceBench:
+    """修复前口径替身：每次调用新建代理（等价 pre-fix get_service 行为）。"""
+
+    def __init__(self, name: str, entry: dict):
+        self._svc_name = name
+        self._local_factory = entry["local"]
+        self._remote_factory = entry["remote"]
+
+    def __getattr__(self, method: str):
+        # 修复前口径：每次派发先构造 Local（契约面校验）再构造 Remote
+        self._local_factory()
+        remote = self._remote_factory()
+
+        def _call(*args, **kwargs):
+            return getattr(remote, method)(*args, **kwargs)
+
+        return _call
 
 
 # ---------------- 报告 ----------------
@@ -722,7 +759,7 @@ def render_report(tract_rows, prim_rows, construction, samples, started_at) -> s
             verdict = f"{ok} remote 候选达标"
         else:
             candidates_fail += 1
-            verdict = "❌ 超阈值 → 锁 lib"
+            verdict = f"❌ 超阈值 → 基线锁 lib（实测裁决 = {r['baseline']}）"
         lines.append(f"| {r['key']} | {r['baseline']} | {lib:.3f} | {remote:.3f} | "
                      f"{delta:+.3f} | {rel:+.1f}% | {verdict} |")
     lines.append("")
@@ -745,18 +782,21 @@ def render_report(tract_rows, prim_rows, construction, samples, started_at) -> s
     lines.append("## 3. 结论")
     lines.append("")
     lines.append(f"- 契约 23 方法：lib-locked 热路径 {locked} 项；remote 候选达标 "
-                 f"{candidates_pass} 项；超阈值 {candidates_fail} 项；采样错误 {errors} 项。")
+                  f"{candidates_pass} 项；超阈值 {candidates_fail} 项（基线锁 lib，"
+                  f"与代码内置基线一致）；采样错误 {errors} 项（基线维持 remote）。")
     lines.append(f"- public 原语：实测 {prim_ok} 项 lib P95；N/A {prim_err} 项"
-                 f"（方言适配/表结构差异，生产 MySQL 拓扑直跑）。")
-    lines.append(f"- 既有 get_service() 逐次调用构造成本（参考）："
-                 f"{construction['p95']:.3f}ms/次——按方法路由代理通过句柄复用消除该项。")
+                  f"（方言适配/表结构差异，生产 MySQL 拓扑直跑）。")
+    lines.append(f"- get_service() 句柄构造成本 A/B（QA Required#2）：修复前逐次新建代理"
+                  f"+Local/Remote 实例 {construction['uncached_p95']:.3f}ms/次 → "
+                  f"进程级代理句柄复用后 {construction['cached_p95']:.3f}ms/次"
+                  f"（同方法 mgmt.get_bot_config，含一次 remote 真实调用）。")
     lines.append("- 热路径四项在基线/矩阵/一键回滚三口径下均恒 lib（见 tests/kernel/test_gsb_route.py）。")
     lines.append("- 阈值判读：本拓扑为 loopback HTTP + sqlite 共库——lib P95 基线多在亚毫秒级，"
-                 "remote 固定传输成本约 2.4~4.5ms（**绝对增量全部 ≤10ms 达标**，相对增幅 >20% 不达标）。"
-                 "在「不影响性能」前提下本拓扑 remote 候选=0；按报告数据建议先"
-                 "`route_config.set_all_known(\"lib\")` 一键全量 lib 落地（配置表一键回滚口径），"
-                 "生产三库三机（MySQL 跨机）拓扑对 lib P95 ≥15ms 的重查询逐接口实测达标后，"
-                 "再经配置表逐 key 放开 remote（改表 ≤30s 生效，无需重启）。")
+                 "remote 固定传输成本约 1.3~4.7ms（**绝对增量全部 ≤10ms 达标**，相对增幅 >20% 不达标）。"
+                 "在「不影响性能」前提下本拓扑 remote 候选=0；**超阈值 14 项已按实测裁决内置基线锁 lib**"
+                 "（QA 审查 Required#1 修复：空表部署与代码行为一致），需要放开的接口经配置表"
+                 "逐 key 显式配 remote（改表 ≤30s 生效，无需重启）；生产三库三机（MySQL 跨机）"
+                 "拓扑对 lib P95 ≥15ms 的重查询逐接口实测达标后，再逐 key 放开 remote。")
     lines.append("- ERROR 行均为**存量** schema 漂移（非本改动引入）：runtime.get_issue_state/"
                  "update_issue_state（issue_state 表已被 Phase C5 迁移收编进 issue 单表后 DROP）、"
                  "runtime.get_chat_conversations（chat_conversations 缺 backend_session_id 列）、"

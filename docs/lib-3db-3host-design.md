@@ -349,14 +349,22 @@ kernel 禁止 import domains），同步用例（`tests/kernel/test_gsb_route.py
 1) 禁止矩阵守卫：caller ∈ {runtime, insight} 且 target = mgmt → lib（恒优先，不查配置表）
 2) 全局开关：GRAPE_PROVIDER_MODE ≠ remote → lib（存量单机/共库零回归）
 3) DB 配置表 gsb_provider_route（version+TTL≤30s 缓存；读失败退回上次已知配置）
-4) 内置基线：热路径四项 → lib；public 原语 → lib（本期无 remote 传输通道）；其余 → remote
+4) 内置基线：热路径四项 + 压测超阈值 14 项 → lib（QA Required#1 实测裁决，
+   remote 由配置表显式放开）；public 原语 → lib（本期无 remote 传输通道）；
+   压测采样错误 5 项（无数据可裁决）→ remote
 ```
 
 - 配置表与 `gsb_service_registry` 同库；`set_all_known("lib")` 一键全量回滚
   （回滚后行为与未开启 remote 完全一致，无需改代码）。
+- `get_service()` 进程级代理句柄复用（QA Required#2）：同服务恒返回同一
+  `_RoutedService` 代理，Local/Remote 实例与 HTTP 客户端惰性构造一次后复用
+  （per-call 构造成本 A/B：11.491ms → 0.056ms，见 bench-report §3）。
 - remote 超时/不可达 **fail-fast**：`GsbRemoteTimeoutError`（`GSB_REMOTE_TIMEOUT`）/
   `GsbRemoteUnreachableError`（`GSB_REMOTE_UNREACHABLE`），不回落 lib；
   metrics status 标签区分 `remote_timeout` / `remote_unreachable` / 数字业务码。
+- per-method 超时（配置表 `timeout_ms`）经 `ServiceHttpClient.with_timeout()` →
+  `GsbClient.with_timeout()` **线程本地 per-request 下发**（QA Required#3：不改共享
+  客户端超时，无粘滞，无假 GSB_REMOTE_TIMEOUT）。
 
 ### 11.3 禁止矩阵（二维：调用方进程域 × 目标域）
 
@@ -377,8 +385,10 @@ kernel 禁止 import domains），同步用例（`tests/kernel/test_gsb_route.py
 - 判据：逐接口 lib/remote P95（同进程、同参数、同数据量，各采样 ≥200 次）；
   remote 候选须同时满足 **增量 ≤10ms 且相对增幅 ≤20%**。
 - 实测报告：`docs/issue-2479/bench-report.md`（23 契约 + 105 原语逐接口表；
-  热路径四项锁 lib）。loopback+共库拓扑下 remote 固定传输成本 2.4~4.5ms，
-  绝对增量全部达标、相对增幅不达标 → 按「不影响性能」口径先行一键全量 lib，
-  生产三库三机拓扑对 lib P95 ≥15ms 的重查询逐接口实测后再逐 key 放开 remote。
-- 既有 `get_service()` 逐次调用构造成本实测 ~17ms/次（每次新建 httpx 客户端）；
-  按方法路由代理经句柄复用消除该项。
+  热路径四项 + 超阈值 14 项基线锁 lib）。loopback+共库拓扑下 remote 固定传输成本
+  1.3~4.7ms，绝对增量全部达标、相对增幅不达标 → 按「不影响性能」口径把超阈值
+  14 项**内置基线锁 lib**（空表部署与实测结论一致，QA Required#1 裁决），
+  生产三库三机拓扑对 lib P95 ≥15ms 的重查询逐接口实测达标后再经配置表逐 key 放开 remote。
+- `get_service()` 逐次调用构造成本实测（remote 制式，每次新建代理 + Local/Remote
+  实例）~11.5ms/次；进程级代理句柄复用后 ~0.06ms/次（同方法 A/B，
+  见 bench-report §3，QA Required#2 修复）。

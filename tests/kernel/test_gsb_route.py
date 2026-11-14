@@ -1,7 +1,10 @@
 """Issue #2479：GSB provider 按方法路由（remote/lib 并存）单测.
 
 覆盖验收矩阵：
-- 内置基线（缺行取值：热路径四项 lib / 原语 lib / 其余默认 remote）
+- 内置基线（缺行取值：热路径四项 + 压测超阈值 14 项 lib / 原语 lib /
+  采样错误 5 项默认 remote；QA 审查修复 Required#1）
+- get_service() 进程级代理句柄复用（QA Required#2）
+- per-method 超时 per-request 下发，无粘滞（QA Required#3，真实 GsbClient 路径）
 - 配置表覆盖 + TTL 热切换 ≤30s（实测，无需重启）
 - 配置表读取失败退回上一次已知配置
 - 禁止矩阵守卫：runtime|insight → mgmt 恒 lib（契约 + 原语 + get_service 三口径，
@@ -11,7 +14,7 @@
 - metrics status 标签区分 remote 超时 / 不可达 / 业务错误
 - 一键全量 lib 回滚（行为与改造前一致）
 - 路由 key registry 与 contracts/public 实际面同步（防漂移门禁）
-- CI 静态扫描可红（check_gsb_route_matrix.py）
+- CI 静态扫描可红（check_gsb_route_matrix.py；CI step 接入见 windows-smoke.yml）
 """
 from __future__ import annotations
 
@@ -332,6 +335,21 @@ def test_proxy_locks_remote_when_method_configured_lib(monkeypatch, fake_service
 
 
 # ---------------- remote 超时 fail-fast ----------------
+
+
+def test_get_service_reuses_proxy_handle(monkeypatch, fake_service):
+    """QA Required#2：get_service() 进程级句柄复用——不再每次新建代理。"""
+    monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
+    fake_service(_RecordingLocal, _RecordingRemote)
+    svc1 = get_service("fake")
+    svc2 = get_service("fake")
+    assert svc1 is svc2                     # 同一代理（进程级缓存）
+    assert svc1.get_skill("7") == ("remote", "7")
+    # 注册面变化（重注册）→ 缓存失效重建
+    fake_service(_RecordingLocal, _RecordingRemote)
+    svc3 = get_service("fake")
+    assert svc3 is not svc1
+    assert svc3._local is not svc1._local    # 新代理惰性新实例
 
 
 def test_remote_timeout_fail_fast_with_error_code(monkeypatch, fake_service):

@@ -79,6 +79,8 @@ def register_provider(
         remote_cls: RemoteProvider 类（无参构造返回实例），可选
     """
     _PROVIDERS[name] = {"local": local_cls, "remote": remote_cls}
+    # 注册面变化 → 代理缓存失效（避免测试/重注册后拿到旧工厂）
+    _ROUTED_SERVICE_CACHE.drop(name)
 
 
 def _ensure_registered() -> None:
@@ -317,6 +319,45 @@ def get_local_service(name: str) -> Any:
     return entry["local"]()
 
 
+# ---------------- 进程级代理缓存（QA 审查修复 Required#2） ----------------
+
+
+class _RoutedServiceCache:
+    """按服务名缓存 ``_RoutedService`` 代理（进程级单例）。
+
+    QA 审查（PR #1398 Required#2）：``get_service()`` 每次新建代理 + Local 实例
+    的 per-call 构造成本实测 ~17ms/次（remote 制式下采样，见 bench-report），
+    「句柄复用」必须落在 get_service 层——调用方每次取句柄即拿到同一代理，
+    Local/Remote 实例在各代理内惰性构造一次后复用。注册面变化由
+    ``register_provider()`` 主动失效；注册表被直接改写（测试替身）时按
+    entry 身份不一致重建。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: dict[str, tuple[dict, Any]] = {}
+
+    def get(self, name: str, entry: dict) -> Any:
+        with self._lock:
+            cached = self._items.get(name)
+            if cached is not None and cached[0] is entry:
+                return cached[1]
+            proxy = _RoutedService(name, entry)
+            self._items[name] = (entry, proxy)
+            return proxy
+
+    def drop(self, name: str) -> None:
+        with self._lock:
+            self._items.pop(name, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+
+
+_ROUTED_SERVICE_CACHE = _RoutedServiceCache()
+
+
 def get_service(name: str) -> Any:
     """获取服务实现——矩阵守卫 / 全局开关 / 按方法路由。
 
@@ -340,7 +381,9 @@ def get_service(name: str) -> Any:
     entry = _PROVIDERS[name]
     if matrix_forces_lib(name) or not is_remote_mode() or entry["remote"] is None:
         return _require_local(name, entry)
-    return _RoutedService(name, entry)
+    # 进程级代理缓存：调用方每次 get_service() 拿同一代理（QA Required#2），
+    # Local/Remote 实例与 HTTP 客户端在代理内惰性构造一次后复用。
+    return _ROUTED_SERVICE_CACHE.get(name, entry)
 
 
 # GsbRemoteChannelError 重导出：业务侧从 provider 即可捕获 fail-fast 错误码
