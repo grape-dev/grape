@@ -40,7 +40,7 @@
   "src/domains/insight/observability/trace.py": 1,
   "src/domains/insight/observability/tracing.py": 1,
   "src/domains/insight/routes/dashboard.py": 29,
-  "src/domains/insight/routes/health.py": 1,
+  "src/domains/insight/routes/health.py": 0,
   "src/domains/insight/routes/latency.py": 1,
   "src/domains/insight/routes/observability.py": 0,
   "src/domains/insight/routes/search.py": 0,

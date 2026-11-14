@@ -4541,6 +4541,78 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   按文件序排在其后；头两名仍是 ⛔ blocked 的 `credential_usage_log.py`（3 处）与
   `prompt_builder.py`（3 处）。
 
+### 7.37 insight 免鉴权健康端点的 agent_runtime 就绪判定下沉 owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/insight/routes/health.py` **2 处 → 0**（单轮做完，2 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`agent_runtimes`（归 **runtime**）× 2
+  - L61 `health`：旗舰在线行 `SELECT name, status, healthy FROM agent_runtimes WHERE
+    status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts'
+    THEN 1 ELSE 2 END LIMIT 1`（`else` 兜底分支；同一行的 lib 分支走
+    `read_one("agent_runtimes_34b97d")`，静态正则只认兜底语句）。
+  - L71 `health`：就绪兜底计数 `SELECT COUNT(*) FROM agent_runtimes`（无 lib 分支）。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增两条**可移植**（零参数）具名查询：`agent_runtimes_34b97d`（与
+    `_READ_QUERIES` 同名，因为是同一条语句；那边是 `%s` 方言的 lib 专用版、单库拓扑经
+    `db_registry.cursor` 会 RuntimeError，不能复用）与 `agent_runtimes_total_count`；
+  - 新增薄函数 `agent_runtime_health_snapshot_any() -> (旗舰行 | None, 总数)`：在**一条**
+    `_any_cursor()` 里顺序执行两查（与原实现「同游标两查」等价，换成两次连接会看到不同快照），
+    列序 `(name, status, healthy)` 与原 SQL 逐字一致；
+  - `__all__` 登记新函数。
+- 调用点 `health.py`：`db_lock` + `db.cursor()` + `runtime_lib` 三者全部消失，改
+  `from src.domains.runtime.public import agent_runtime_health_snapshot_any`；
+  `online / missing / unhealthy` 三态命名与 `COUNT==0` 分支仍留路由（展示口径）。
+- 设计取舍：
+  1. **返回整行而非布尔**：`has_ready` 只够判 online，引擎优先级（opencode → codearts →
+     其他）无法在烟测里钉住；返回 `(name, status, healthy)` 原值使 B5 能断言「codearts id
+     更小也要让位给 opencode」，信息不丢失、调用点仍只判真值。
+  2. **不删 lib 灰度开关本身**：只删本文件的 `runtime_lib` 用法（该分支在三库拓扑下必崩）；
+     `src/kernel/domain_read.py` 的开关与其它消费者不动，属独立轮。
+  3. **COUNT 不过滤 status/healthy**：`unhealthy` 的定义是「有记录但没有在线健康行」，
+     加上 `status='online'` 会让有离线引擎的库误报 `missing`（B2/B9 钉住）。
+  4. **复用既有键名、不造同义键**：`_READ_QUERIES` 已有 `agent_runtimes_34b97d`；A/C 两族
+     字典用途不同（可移植 vs lib 专用），同名不冲突且台账对账直观。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **三库拆分后 `agent_runtime` 恒为 `unknown`**：lib 分支 `read_one(...).fetchone()` 对
+     已 materialize 的行元组再取一次游标（`src.domains.runtime.public.read_one` 返回的是
+     `c.fetchone()` 元组）→ 必 `AttributeError` → 被同函数 `except: pass` 吞掉。
+     单库拓扑走 else 分支所以平时看不出来；本批改走 `*_any` 原语后该分支消失。
+  2. **降级不可观测**：`except Exception: pass` → `log.debug(f"agent runtime health snapshot
+     failed: {_e}")`（`tests/silent_except_baseline.json` 该文件 1 → 0，只减不增）；
+     免鉴权端点仍保持「不因 DB 异常 500」，异常只降级为 `unknown`。
+- 验证（真实退出码）：
+  · `py_compile`（runtime `public/__init__.py` / insight `routes/health.py`）→ **COMPILE_OK**；
+  · `~/burndown/insight_health_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，建 `agent_runtimes` 空表起步）
+    → **ALL insight health smoke PASSED (35 checks)**：
+    A 注册面/静态否定（`__all__` 登记、两键 SQL 逐字、零占位符、无 `%s`/`NOW()`/`ON DUPLICATE`、
+    薄函数体无内联 SQL、`health.py` 无 SQL 字面量 / 无 `session_manager`+`db_lock`+`runtime_lib` /
+    无 `except: pass`、未登记名 KeyError）；
+    B 原语语义（空表、仅离线、online 但 `healthy=0`、`healthy=1` 但非 online 均「无旗舰行」；
+    COUNT 不过滤 status/healthy；opencode 优先于更小 id 的 codearts；codearts 在 opencode 离线时补位；
+    ELSE 2 族任一在线即就绪；列序逐字；混合形态 total 计全部 4 行）；
+    C 调用点端到端（missing / unhealthy / online 三态、其余响应字段不受影响、
+    原语异常 → `unknown` 且不抛、DEBUG 留痕、打桩还原）；
+    D 自有 DSN 伪游标（两次语句都 `domain=runtime`、顺序「旗舰行 → 总数」、语句逐字、零参数、
+    fetchone 全空 → `(None, 0)`、COUNT 值为 NULL → total 0）。
+  · `--update-baseline` → **baseline updated: 26 pairs, 39 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **23 表 / 39 跨域引用 / 26 对**；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （runtime 176 funcs + 26 named queries used / 256 funcs + 61 registered；mgmt 182+6 / 264+31；
+    insight 18+0 / 26+0）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 source/remote 口令；
+  轮内口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点），运行面证据为 sqlite 烟测。
+- **新基线**：**39 处 / 26 对 / 23 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 39 处 / 28 文件）。`src/domains/insight/routes/health.py` 已清零并退出榜单；下一批首个
+  未 blocked 文件是 `src/domains/insight/observability/rollup.py`（2 处：`runtime_credentials` /
+  `runtime_health_scores`，均归 runtime，见刷新后的作业单）；
+  头两名仍是 ⛔ blocked 的 `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+- 附带口径记录：`check-arch` 的 R4 跨域 import 发现数为 235（report-only，Phase 5 跟踪）。
+  `insight/routes/health.py` 原本已 import `runtime.engine.health`，本批新增的
+  `runtime.public` 是一条新 R4 边 —— 属「调用 owner 域公开面」的预期方向，不影响 R1–R7 PASS。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

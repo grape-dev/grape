@@ -1509,7 +1509,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # insight 数据缺失探测基集（observability/gap.py；本域两张表）
            "runtime_credentials_gap_rows_any", "runtime_credentials_silent_rows_any",
            "agent_task_activity_rows_any", "runtime_credentials_gap_rows",
-           "runtime_credentials_silent_rows", "agent_task_activity_rows"]
+           "runtime_credentials_silent_rows", "agent_task_activity_rows",
+           # 免鉴权健康端点就绪快照（insight/routes/health.py；任意拓扑）
+           "agent_runtime_health_snapshot_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -1848,6 +1850,16 @@ _CONV_COLS_SQL = ", ".join(_CONV_COLS)
 _MSG_COLS = "id, conversation_id, role, content, created_at, task_id, generate_status, deleted"
 
 _ANY_QUERIES: dict[str, str] = {
+    # ── 免鉴权健康端点的运行时就绪快照（insight/routes/health.py）──
+    # `_READ_QUERIES` 里同名键是 %s 方言的 lib 专用版（单库拓扑经 db_registry.cursor
+    # 会 RuntimeError）；这里登记的是**可移植**同名语句（零参数、任意拓扑）。
+    "agent_runtimes_34b97d": (
+        "SELECT name, status, healthy FROM agent_runtimes "
+        "WHERE status='online' AND healthy=1 "
+        "ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END "
+        "LIMIT 1"),
+    # 同上：取不到旗舰行时区分 missing（库内无任何 runtime 行）与 unhealthy。
+    "agent_runtimes_total_count": "SELECT COUNT(*) FROM agent_runtimes",
     # ── session_manager 去跨域所需具名查询（kernel 侧会话/消息/群绑定/配置行）──
     # 列序与原 SQL 逐字一致：调用方按下标取值，错位即静默串列，因此只允许**照抄**。
     'chat_session_by_repo': 'SELECT id, event_history, runtime_session_id, status FROM chat_agent_session WHERE repo_key=?',
@@ -2556,6 +2568,30 @@ def runtime_credentials_silent_rows_any() -> list[tuple]:
 def agent_task_activity_rows_any() -> list[tuple]:
     """有仓库归属的任务活动行 `(repo_key, created_at, started_at, completed_at)`。"""
     return [tuple(r) for r in read_all_any("agent_task_activity_rows")]
+
+
+# ── 免鉴权健康端点的运行时就绪快照（insight/routes/health.py）──
+# 原实现两条语句跑在**同一个**进程主库游标上（先取旗舰在线行、再取总数），且在 lib
+# 可用分支上把已 materialize 的行元组又 `.fetchone()` 了一次 —— 三库拓扑下必
+# AttributeError，被 `except: pass` 吞成 `agent_runtime="unknown"`。本函数用一条
+# `_any_cursor()` 保留「同游标两查」的顺序语义（两次连接会看到不同快照），
+# 并把 SQL 收在本域；`online/missing/unhealthy` 的命名是端点的展示口径，留调用方。
+
+def agent_runtime_health_snapshot_any() -> tuple[Any | None, int]:
+    """运行时健康快照：`(在线且健康的旗舰引擎行, runtime 总行数)`。
+
+    旗舰行是 `(name, status, healthy)` 三列元组（列序同原 SQL），无则 `None`；
+    按 `opencode → codearts → 其他` 的引擎优先级取第一行（同原 SQL 的 CASE 排序）。
+    第二查只在没有旗舰行时才有意义，但为保持与原实现的语句序一致仍然执行。
+    返回整行而非布尔：`online/missing/unhealthy` 的状态命名属端点展示口径，留调用方。
+    """
+    with _any_cursor() as c:
+        c.execute(_any_sql("agent_runtimes_34b97d"))
+        ready_row = c.fetchone()
+        c.execute(_any_sql("agent_runtimes_total_count"))
+        count_row = c.fetchone()
+    total = int(count_row[0] or 0) if count_row else 0
+    return (ready_row, total)
 
 
 # ── 飞书扫码 onboarding：换绑清理的三个读写原语（mgmt/routes/feishu_onboard.py）──
