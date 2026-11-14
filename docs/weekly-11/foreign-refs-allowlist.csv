@@ -25,7 +25,7 @@ grape_t_repo_credentials,insight,mgmt,2
 issue,runtime,api,2
 issue_state,runtime,api,1
 managed_repos,mgmt,runtime,3
-runtime_credentials,runtime,api,6
+runtime_credentials,runtime,api,3
 runtime_credentials,runtime,insight,4
 runtime_health_scores,runtime,insight,1
 skill,runtime,api,2

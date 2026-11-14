@@ -101,6 +101,9 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "rename_runtime_credential", "set_runtime_credential_scope",
         "delete_runtime_credential", "upsert_repo_credential", "clear_repo_credential",
         "ensure_device_credential", "touch_credential_metrics",
+        # 本机指标上报任意拓扑版（api/server_tasks.py insight 进程 15s 心跳）
+        "device_credential_id_any", "register_device_credential_any",
+        "touch_device_credential_any",
         "upsert_local_runtimes", "ensure_default_runtime", "set_agent_tags",
         "purge_runtime_credential", "change_credential_scope",
         "reassign_repo_org_id",

@@ -3590,6 +3590,89 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （作业单 69 处 / 41 文件，头名仍是被 blocked 的 `prompt_builder.py`，下一批可选
   `src/api/event_rule.py` 或 `src/api/server_tasks.py` 各 3 处）。
 
+### api/server_tasks 本机指标上报归 runtime public（-3，该文件清零）
+
+- 文件：`src/api/server_tasks.py`（3 处 → **0**）；全局静态 **69 → 66**（-3），对数 **37 → 37** ——
+  `runtime_credentials←api` 由 6 降到 3（余量在 `src/api/main.py` 的同构循环），本文件已清零。
+- 表分布（消费域 api，表全归 **runtime**），三处都在 `start_insight_tasks._server_metrics_loop`：
+  · 行 632 `SELECT id FROM runtime_credentials WHERE device_name=? AND scope='global'`（注册判存，1 列）
+  · 行 634 `INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, last_ip)`
+    `VALUES (?, ?, ?, 'global', 'active', ?)`（缺失登记）
+  · 行 704 `UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?,`
+    `disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?`
+    `WHERE device_name=? AND scope='global'`（15s 心跳刷新，9 列）
+  三处表名/列名全字面量，参数全占位符，**无动态拼接**（唯一的"动态"是 hostname 与指标值本身）。
+- 本轮取批：作业单头名 `src/kernel/prompt_builder.py` 与次名
+  `src/kernel/persistence/credential_usage_log.py` **四轮复核后仍 blocked**（理由已补回
+  `next-batches.md` 顶部「⛔ blocked」小节），按作业单规则跳过，取第一个可改造文件
+  （上一批台账末尾点名的 `server_tasks.py`）。
+- 归属域侧改动（SQL 只在 owner 域一份）：
+  · runtime public `_ANY_QUERIES` 新增 3 条具名查询：`runtime_credential_device_id`（1 列）、
+    `runtime_credential_register_device`（4 占位符 / 6 列）、`runtime_credential_touch_device`
+    （10 占位符 / 9 列），列序与谓词与原 SQL 逐字一致；
+  · runtime public 新增 3 个薄函数：`device_credential_id_any()`、`register_device_credential_any()`、
+    `touch_device_credential_any()`，体内无内联 SQL（只经 `_any_sql`/`_any_tx`/`read_one_any`）；
+    函数名登记 `__all__`，并同步 `src/kernel/gsb/route_config.py` 的
+    `PUBLIC_PRIMITIVES["runtime"]` 镜像（kernel 禁止 import domains，只能字面量镜像）。
+- 关键设计取舍：
+  1. **不用 `main.py` 的 `%s` + else 兜底写法**：`ensure_device_credential` /
+     `touch_credential_metrics` 直连 `db_registry.cursor("runtime")`，只在 runtime 自有 DSN
+     下可用（单库/测试拓扑直接 `RuntimeError`），而 `main.py` 的 `else` 分支把同一段 SQL
+     又抄了一份——那正是本表跨域统计的来源。本批改走 `_any` 族（自有 DSN 优先、单库回落
+     进程库），调用方零 SQL、单库与三库行为同源。
+  2. **检-插同事务**：注册是「按 (device_name, scope='global') 判存 → 缺失才 INSERT」，
+     用 `_any_tx()` 把两条语句放同一事务（自有 DSN 真事务，单库走 db_lock），而不是两次
+     独立 `_any` 调用。
+  3. **撞键收敛成值**：`runtime_credentials.name` 有 UNIQUE，同机换 scope 的存量行会让
+     INSERT 撞键。原实现由外层 `except` 吞成「register failed」；这里返回
+     `{"action": "duplicate"}`（带 `log.debug`），其余异常仍上抛——不静默降级。
+  4. **刷新原语返回值改读游标 `rowcount`**：pymysql 的 `execute()` 返回 **int**（不是游标），
+     `exec_any` 的 `getattr(cur, "rowcount", 0)` 在自有 DSN 下恒为 0；若沿用，本原语会
+     恒报「0 行受影响」，把「刷新成功」和「无此行」混成同一个值。缺陷属 `exec_any` 本体，
+     本轮只在本原语里绕开并如实记账（见下），不扩大语义面。
+  5. **拆掉调用点的 `with db_lock:` / `db.cursor()`**：`*_any` 原语在单库回落路径自带
+     `db_lock`，再嵌一层就是同线程二次获取——生产 `RLock` 侥幸不炸，测试 monkeypatch 的
+     裸 `Lock` 会自死锁（交接文档 §5.3 坑 4 同族）。调用方不再 import 进程库句柄。
+  6. **口径逐点保留**：判存命中即**不写**（不覆盖 last_ip / token_hash）；不按
+     `status`/`is_active` 过滤（revoked 行照旧算「已登记」且心跳照旧刷新）；判存语句不加
+     `LIMIT`（原实现就是 `fetchone()`）；空 hostname 与原 SQL 同口径（不 strip、不拦）。
+     失败降级仍在调用方：`log.warning("register failed" / "upload failed")` 后继续下一轮心跳。
+- 修的存量 bug（三库拓扑下必 1146，且被 except 吞成静默降级）：
+  1. 注册段在 **insight 进程库**里查/写 `runtime_credentials` → 1146 → 「register failed」：
+     本机从未登记为 device 凭据（`scope='global'`），凭据列表里看不到运行本进程的机器。
+  2. 心跳段同样 1146 → 「upload failed」：`last_seen_at` / `ip` / CPU / 内存 / 磁盘 / tmp /
+     带宽 / load 九项指标**从未落库**（单进程时代写的是同一库，拆分后整段静默失效）。
+  两处共用同一具名查询族，修复后三库与单库同源。
+- 已知未修（如实记账，不属本轮）：`exec_any` 在自有 DSN 下恒返 0（`mgmt` / `insight` 的同名
+  原语同病），会让 `set_meta_if_absent(...) > 0`、`issue_scene_set_cas` 这类「按影响行数
+  判定」的消费点在自有 DSN 拓扑恒定 False/0；属独立一轮（三域同改 + MySQL 实例验证）。
+- 验证（真实退出码）：
+  · `py_compile` 三文件（`server_tasks.py` / runtime `public` / `gsb/route_config.py`）→ **COMPILE_OK**；
+  · `~/burndown/server_metrics_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建含两条 UNIQUE 的
+    runtime_credentials 表）→ **ALL server_metrics smoke PASSED (66 checks)**：A 注册面/静态
+    （三条查询逐字对齐、无 `%s`/`NOW()`/`ON DUPLICATE`、薄函数体无 SQL、调用方无表名 SQL 与
+    进程库直连、`__all__` + GSB 镜像双登记、未登记查询名 `KeyError`）；B 单库行为（首次
+    inserted、二次 exists 且不覆盖、`scope='user'` 同名 device 不算命中、撞键 → duplicate
+    且不留半份写入、9 列刷新逐值核对、目标不存在 0 行、0 值照写、缺表上抛不吞、空 hostname
+    同口径）；C **自有 DSN 伪游标**（`?` 方言、SELECT→INSERT 两条语句、登记/刷新参数顺序与
+    占位符逐一比对、1062 撞键 → duplicate、其它异常上抛、`exec_any` 恒 0 的规避对照）；D 两轮
+    心跳时序（只有首轮打 registered 日志、第二轮 exists 不改 token_hash 但覆盖指标）；
+    E 边界（同 device 多行脏数据取第一行、刷新命中全部行、revoked 行不复活也不漏刷新）。
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → **import OK**。
+  · `tests/kernel/test_gsb_route.py::test_public_primitives_registry_sync` → **1 failed**，
+    但失败断言在 **mgmt**（镜像比 public 少约 190 个名字）；在 **HEAD 干净 worktree**
+    （`~/burndown/wt-gsbcheck`，`c08f0610f`）复现同一条失败，与本批无关（本批已把 3 个新名字
+    同步进 runtime 镜像；runtime 侧同样存在陈旧子集，属既有漂移）。
+- **未验证项（如实）**：未跑 `p4_p5_loop.sh` 三实例彩排——本 shell 无 `SRC_PWD`/`REMOTE_PWD`，
+  且本批不改 schema / 迁移 / 契约面（无新表、无新路由、无新端点）；自有 DSN 路径用伪游标
+  模拟 pymysql 语义，**未连真实 MySQL 实例**；不把彩排结果算作本批证据。
+- **新基线**：**66 处 / 37 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 66 处 / 40 文件，头名仍是被 blocked 的 `prompt_builder.py`，下一批可选
+  `src/api/main.py` 3 处——单进程版同一循环，可直接复用本批三个原语——或
+  `src/api/pipeline_status.py` / `src/api/event_rule.py` 各 3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

@@ -894,6 +894,70 @@ def touch_credential_metrics(hostname: str, last_seen_at: str, last_ip: str = ""
         return int(c.rowcount or 0)
 
 
+# ---------- 本机指标上报的任意拓扑原语（insight 进程 15s 心跳） ----------
+# 上面两个 `ensure_device_credential` / `touch_credential_metrics` 直连
+# `db_registry.cursor("runtime")`，只在 runtime 自有 DSN 下可用（单库拓扑抛
+# RuntimeError）。insight 进程的 server_metrics 循环原来在**进程库**里直查/直写
+# runtime_credentials：三库拓扑下进程库没有该表（视图 0）→ 1146 → 被外层 except
+# 吞成「register failed / upload failed」，本机 device 常量从未登记、指标从未刷新。
+# 下面三个走 `_any` 族（自有 DSN 优先、单库回落进程库），SQL 只留本模块一份。
+
+
+def device_credential_id_any(hostname: str) -> int | None:
+    """本机 device 凭据行 id（scope='global'，任意拓扑）。
+
+    与原语句逐字一致：`WHERE device_name=? AND scope='global'`，只取第一行
+    （原实现 `fetchone()`，不加 LIMIT —— 保持可逐字比对）。
+    """
+    row = read_one_any("runtime_credential_device_id", (hostname,))
+    return int(row[0]) if row else None
+
+
+def register_device_credential_any(hostname: str, token_hash: str, last_ip: str) -> dict[str, Any]:
+    """幂等登记本机 device 凭据行（scope='global'，任意拓扑）。
+
+    口径与原实现逐点一致：先按 (device_name, scope='global') 判存，命中即**不写**
+    （返回 exists）；缺失才 INSERT（name=device_name、status='active'、last_ip）。
+    `name` 带 UNIQUE 约束，同机换 scope 的存量行会让 INSERT 撞键——原实现由外层
+    except 吞成「register failed」，这里收敛成 duplicate 值返回；其余异常照旧上抛
+    （不静默降级）。SELECT+INSERT 同一 `_any_tx()`：自有 DSN 真事务。
+    """
+    with _any_tx() as c:
+        c.execute(_any_sql("runtime_credential_device_id"), (hostname,))
+        row = c.fetchone()
+        if row:
+            return {"action": "exists", "id": int(row[0])}
+        try:
+            c.execute(_any_sql("runtime_credential_register_device"),
+                      (token_hash, hostname, hostname, last_ip))
+        except Exception as exc:  # noqa: BLE001 - 撞键是正常值，其它必须上抛
+            _s = str(exc).upper()
+            if "UNIQUE" in _s or "1062" in _s or "DUPLICATE" in _s:
+                log.debug(f"register_device_credential_any duplicate: {hostname}")
+                return {"action": "duplicate", "id": 0}
+            raise
+        return {"action": "inserted", "id": int(getattr(c, "lastrowid", 0) or 0)}
+
+
+def touch_device_credential_any(hostname: str, last_seen_at: str, last_ip: str = "",
+                                cpu_percent: float = 0, memory_percent: float = 0,
+                                disk_percent: float = 0, tmp_percent: float = 0,
+                                bandwidth_percent: float = 0, bandwidth_mbps: float = 0,
+                                load_avg: str = "") -> int:
+    """刷新 device 凭据在线指标（scope='global'，任意拓扑；同值重放无副作用）。
+
+    参数顺序 = 原 UPDATE 的占位符顺序（列序逐字一致，调用方按位置传）。
+    返回受影响行数：**从游标读 `rowcount`**，不取 `exec_any` 的返回值——pymysql 的
+    `execute()` 返回 int（不是游标），`exec_any` 的 `getattr(cur,'rowcount',0)` 在自有
+    DSN 下恒为 0（该缺陷属 `exec_any` 本体，三域同名原语均存在，本轮不扩大语义面）。
+    """
+    with _any_cursor(write=True) as c:
+        c.execute(_any_sql("runtime_credential_touch_device"),
+                  (last_seen_at, last_ip, cpu_percent, memory_percent, disk_percent,
+                   tmp_percent, bandwidth_percent, bandwidth_mbps, load_avg, hostname))
+        return int(getattr(c, "rowcount", 0) or 0)
+
+
 # ---------- 引擎行写原语（P3-5f-2：mgmt 进程写 runtime 基表 agent_runtimes） ----------
 
 def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_name: str,
@@ -1398,6 +1462,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "set_runtime_credential_scope", "delete_runtime_credential",
            "upsert_repo_credential", "clear_repo_credential",
            "ensure_device_credential", "touch_credential_metrics",
+           # 本机指标上报的任意拓扑版（api/server_tasks.py insight 进程 15s 心跳）
+           "device_credential_id_any", "register_device_credential_any",
+           "touch_device_credential_any",
            "upsert_local_runtimes", "ensure_default_runtime", "set_agent_tags",
            "purge_runtime_credential", "change_credential_scope", "reassign_repo_org_id",
            # P2 服务接口补齐（N1/N2/N3/N4/N5/N11/N12）
@@ -1947,6 +2014,18 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, "
         "created_at, repo_key FROM runtime_credentials WHERE org_id=? ORDER BY id DESC"),
     "runtime_credential_exists": "SELECT id FROM runtime_credentials WHERE id=?",
+    # 本机指标上报（api/server_tasks.py 的 insight 进程 15s 心跳）：
+    # 原实现在 insight 进程库里直查/直写 runtime 表 → 三库拓扑 1146 被 except 吞成
+    # 「register/upload failed」，本机 device 常量从未登记也从未刷新。
+    "runtime_credential_device_id": (
+        "SELECT id FROM runtime_credentials WHERE device_name=? AND scope='global'"),
+    "runtime_credential_register_device": (
+        "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, last_ip) "
+        "VALUES (?, ?, ?, 'global', 'active', ?)"),
+    "runtime_credential_touch_device": (
+        "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, "
+        "memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, "
+        "bandwidth_mbps=?, load_avg=? WHERE device_name=? AND scope='global'"),
     "runtime_credential_owner_status": (
         "SELECT owner_name, status FROM runtime_credentials WHERE id=?"),
     "runtime_credential_owner_name": "SELECT owner_name FROM runtime_credentials WHERE id=?",

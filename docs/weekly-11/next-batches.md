@@ -1,6 +1,15 @@
 # 下一批：跨域收口作业单
 
-总量 69 处 / 41 个文件；下表取前 3 个。
+总量 66 处 / 40 个文件；下表取前 8 个。
+
+## ⛔ blocked（不要按处数硬拿）
+- `src/kernel/prompt_builder.py` 3 处（行 621/627/630）：全在 `_build_feishu_context_section`
+  的 f-string **提示文案**里（教 agent 用 sqlite3 自写 sessions.db），本进程不执行；
+  2026-11-14 口径「不为让正则掉数字改文案」，且 `tests/runtime/test_issue_372_unified_mapping_github.py`
+  按源文本断言。改写需先给 agent 合法映射写通道，属独立设计项。
+- `src/kernel/persistence/credential_usage_log.py` 3 处（行 179/185/261）：后台线程共用
+  owner 连接会打出 `Packet sequence number wrong`，正解是「每工作线程一条 owner 连接」
+  的池化，属独立一轮（交接文档 §5.3 坑 4 / §9 阻塞项 2）。
 
 ## src/kernel/prompt_builder.py（kernel 域，3 处）
 - `unified_user_mapping`（归 mgmt）× 3：行 621, 627, 630
@@ -8,11 +17,37 @@
 
 ## src/kernel/persistence/credential_usage_log.py（kernel 域，3 处）
 - `grape_t_credential_usage_log`（归 runtime）× 3：行 179, 185, 261
-  - runtime public 已登记 218 条具名查询
+  - runtime public 已登记 221 条具名查询
 
-## src/api/server_tasks.py（api 域，3 处）
-- `runtime_credentials`（归 runtime）× 3：行 632, 635, 705
-  - runtime public 已登记 218 条具名查询
+## src/api/pipeline_status.py（api 域，3 处）
+- `issue`（归 runtime）× 1：行 343
+  - runtime public 已登记 221 条具名查询
+- `issue_state`（归 runtime）× 1：行 353
+  - runtime public 已登记 221 条具名查询
+- `agent_tasks`（归 runtime）× 1：行 387
+  - runtime public 已登记 221 条具名查询
+
+## src/api/main.py（api 域，3 处）
+- `runtime_credentials`（归 runtime）× 3：行 126, 129, 208
+  - runtime public 已登记 221 条具名查询
+
+## src/api/event_rule.py（api 域，3 处）
+- `event_action_filter`（归 mgmt）× 3：行 40, 44, 48
+  - mgmt public 已登记 147 条具名查询
+
+## src/domains/runtime/routes/pipeline.py（runtime 域，2 处）
+- `unified_user_mapping`（归 mgmt）× 1：行 60
+  - mgmt public 已登记 147 条具名查询
+- `managed_repos`（归 mgmt）× 1：行 568
+  - mgmt public 已登记 147 条具名查询
+
+## src/domains/runtime/im/vod_handler_async.py（runtime 域，2 处）
+- `grape_t_channel_installation`（归 mgmt）× 2：行 52, 110
+  - mgmt public 已登记 147 条具名查询
+
+## src/domains/runtime/im/outbox.py（runtime 域，2 处）
+- `grape_t_channel_lease`（归 mgmt）× 2：行 163, 203
+  - mgmt public 已登记 147 条具名查询
 
 ## 每批验收口径（不要跳）
 1) `python3 scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv --baseline docs/weekly-11/foreign-refs-allowlist.csv --check`
