@@ -817,6 +817,53 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
 直接换 `domain_db` 连接会引入后台线程共用连接的问题（实测 "Packet sequence number wrong"），
 因此需要「每个工作线程一条 owner 连接」的池化改造，属独立一轮工作，未纳入本次彩排。
 
+### kernel/gsb/registry 注册表 SQL 下沉 mgmt（-9，本文件清零）
+- 文件：`src/kernel/gsb/registry.py`（258 行，GSB 服务注册表）。9 处跨域引用全部指向
+  `gsb_service_registry`（**归 mgmt**，`table-owner.tsv` / `table_ownership.json` 一致），
+  消费方是 kernel：`ALTER`(49) / `INSERT OR REPLACE`(87) / `UPDATE`(101, 240, 255) /
+  `SELECT`(118, 142, 182, 218)。动态拼接站点 2 处（`list_instances` 按 include_offline 拼
+  `AND status='online' AND last_heartbeat > ?`；`list_all_services` 拼 `WHERE status='online'`），
+  其余为定值语句。
+- 归位：mgmt public 新增 10 条可移植具名查询（`?` 占位符）+ 1 个 DDL 函数 + 9 个薄原语
+  （`gsb_registry_ddl` / `ensure_gsb_registry_schema` / `gsb_register` / `gsb_heartbeat` /
+  `gsb_discover_row` / `gsb_online_services` / `gsb_instances` / `gsb_all_services` /
+  `gsb_mark_offline` / `gsb_purge_stale`），SQL 只在 mgmt 一份；kernel 侧只留 GSB 语义
+  （心跳超时判定、`service`/`instance`/`age_seconds`/`alive` 派生、负载均衡排序口径）。
+- **修的存量 bug**：改前各域进程直连「进程主库」写注册表——单库拓扑正常，三库拓扑下
+  mgmt/runtime/insight 各写各的库，注册不报错、但跨域互相发现不到（静默失效，连 1146
+  都看不到）。收口后任一路径（`/internal/gsb/services`、`router` 启动注册、`client`
+  负载均衡）都读同一张 mgmt 表。
+- 设计取舍：
+  1) 走 owner public 原语**不**走 mgmt `/internal` 端点（R8 白名单备注原写「P3 走端点」）：
+     注册是 30s 心跳的进程内高频动作，不该依赖 mgmt HTTP 可用性；单库/测试拓扑也没有
+     任何 HTTP 跳。端点化留 Phase 5 contracts。
+  2) 动态谓词拆成定值变体（`gsb_instances` / `gsb_instances_online`、
+     `gsb_services_all` / `gsb_services_online_only`），调用方不能再传 where 片段；
+     `service@%` 通配符值在 owner 侧拼（是参数值，不是表名/列名，无需白名单但也不外泄）。
+  3) `INSERT OR REPLACE` 保留（`mysql_compat` 翻译成 `REPLACE INTO`），不引入
+     `ON DUPLICATE KEY` 专有语法；DDL 的 `TEXT PRIMARY KEY` 由同一层翻成 `VARCHAR(191)`，
+     `ADD COLUMN ... DEFAULT '1'` 由 ALTER 分支翻成表达式默认值。
+  4) 行→dict 的转换收在 owner（依赖 `cursor.description`，属驱动差异）；列序与派生字段
+     留在 kernel（GSB 语义），调用方按下标/键取值的写法未变。
+  5) 无多语句组合写（register/heartbeat/offline/purge 全是单语句幂等写）→ 不需要
+     `_any_tx()`，只 `_any_cursor`。
+- 棘轮：`scripts/check-arch.py` 删掉已清零的 R8 条目
+  `src/kernel/gsb/registry.py: {gsb_service_registry: 4}`（该棘轮只减不增）；R1 以精确
+  target 形态登记延迟导入（`src.domains.mgmt(.public)`，注「due Phase 5 -> contracts」）。
+  旧库补列那处 `except: pass` 改成 `log.debug`（静默 except 棘轮）。
+- 验证：`py_compile` COMPILE_OK；SQLite 烟测 `~/burndown/gsb_registry_smoke.py`
+  **ALL 71 CHECKS PASSED**（含 heartbeat 复活 offline 行、重新注册=上线、purge 不删行、
+  `LIKE 'svc@%'` 不误伤 `svc2`/`svcx`、旧表无 version 列补列后仍可注册等边界与否定用例）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch PASS / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**；
+  `check_lib_query_names` PASS（mgmt 115 funcs + 19 queries 全登记）。GSB 相关内核用例
+  67 passed，`tests/kernel/test_gsb_route.py::test_public_primitives_registry_sync` 为
+  **既有红**（HEAD 干净树即 108 项 `PUBLIC_PRIMITIVES` 漂移，本轮新增的 10 个 public 函数
+  也落在同一条断言里；该文件不在门禁三组内，未借机改它的白名单以免夹带）。
+- 新基线：全局 **285 → 276**（-9），对 **70 → 69**；基线
+  `foreign-refs-allowlist.csv` 收紧为 276 / 69；依赖看板与作业单同步刷新
+  （下一批头名：`insight/observability/trace.py` 9 处）。
+
 ### 7.2 单实例三域（早期彩排，已由 7.1 取代）
 
 

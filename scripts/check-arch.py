@@ -83,7 +83,8 @@ R8_WHITELIST: dict[str, dict[str, int]] = {
     # src/kernel/repo_cleanup.py 已清零（级联清理按域拆到 mgmt/runtime public 的 purge_repo_rows）
     # src/kernel/lock.py 已清零（分布式锁协议整体下沉 runtime.public：
     # acquire/release/renew/cleanup 四个原语，SQL 只在 runtime 域一份）
-    "src/kernel/gsb/registry.py": {"gsb_service_registry": 4},  # P3：注册表写走 mgmt 端点
+    # src/kernel/gsb/registry.py 已清零（注册表 DDL/读写全部下沉 mgmt.public 的
+    # gsb_* 具名查询与任意拓扑原语；三库拓扑下各域进程写同一张 mgmt 表）
     "src/kernel/token_resolver.py": {"managed_repos": 2},  # P2：读改 mgmt 内部端点
     "src/kernel/prompt_builder.py": {"unified_user_mapping": 2},  # P2：读改 N10
     "src/kernel/persistence/credential_usage_log.py": {"grape_t_credential_usage_log": 2},  # P3
@@ -171,6 +172,11 @@ WHITELIST: dict[str, dict[str, str]] = {
     "src/kernel/help_docs_sync.py": {
         "R1": "deferred skill/user lookups via mgmt.user.db; Phase 5",
         "R2": "deferred app/openapi imports for help page generation; Phase 5",
+    },
+    "src/kernel/gsb/registry.py": {
+        "R1": {"targets": ["src.domains.mgmt", "src.domains.mgmt.public"],
+              "reason": "deferred GSB registry SQL via mgmt.public "
+                        "(gsb_service_registry is mgmt-owned); due Phase 5 -> contracts"},
     },
     "src/kernel/auth_sdk/jwt_utils.py": {
         "R1": "deferred secret/credential keys via mgmt.auth.security_config; Phase 5",

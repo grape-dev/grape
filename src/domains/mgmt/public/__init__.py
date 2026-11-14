@@ -1584,6 +1584,37 @@ _ANY_QUERIES: dict[str, str] = {
     "patrol_findings_open_ids": (
         "SELECT id FROM grape_t_patrol_findings WHERE kind='broken_chain' AND status='open' "
         "AND (action_meta='' OR updated_at < ?) ORDER BY created_at LIMIT ?"),
+    # ── GSB 服务注册表（gsb_service_registry 归 mgmt；各域进程共同注册/发现）──
+    # 原实现在 kernel 里直连进程主库：单库拓扑正常，三库拓扑下每个域把注册写进自己那个库
+    # ——注册不报错、但跨域发现不到（静默失效，不是 1146）。列序与 kernel 原语句逐字一致。
+    "gsb_service_upsert": (
+        "INSERT OR REPLACE INTO gsb_service_registry "
+        "(service_name, base_url, health_url, version, status, last_heartbeat, metadata) "
+        "VALUES (?, ?, ?, ?, 'online', ?, ?)"),
+    "gsb_service_heartbeat": (
+        "UPDATE gsb_service_registry SET last_heartbeat=?, status='online' "
+        "WHERE service_name=?"),
+    "gsb_service_online_row": (
+        "SELECT * FROM gsb_service_registry WHERE service_name=? AND status='online'"),
+    "gsb_services_online": (
+        "SELECT * FROM gsb_service_registry "
+        "WHERE status='online' AND last_heartbeat > ? ORDER BY service_name"),
+    # 实例枚举两个变体（是否含离线行）：谓词与原动态拼接出的两条语句逐字一致
+    "gsb_instances": (
+        "SELECT * FROM gsb_service_registry "
+        "WHERE (service_name = ? OR service_name LIKE ?) ORDER BY service_name"),
+    "gsb_instances_online": (
+        "SELECT * FROM gsb_service_registry "
+        "WHERE (service_name = ? OR service_name LIKE ?) "
+        "AND status='online' AND last_heartbeat > ? ORDER BY service_name"),
+    "gsb_services_all": "SELECT * FROM gsb_service_registry ORDER BY service_name",
+    "gsb_services_online_only": (
+        "SELECT * FROM gsb_service_registry WHERE status='online' ORDER BY service_name"),
+    "gsb_service_mark_offline": (
+        "UPDATE gsb_service_registry SET status='offline' WHERE service_name=?"),
+    "gsb_service_purge_stale": (
+        "UPDATE gsb_service_registry SET status='offline' "
+        "WHERE status='online' AND last_heartbeat < ?"),
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -2817,3 +2848,115 @@ def installation_active_installs_any() -> list[tuple]:
         c.execute("SELECT id, scope, owner_user_id, repo_key, config, status "
                   "FROM grape_t_channel_installation WHERE status='active'")
         return [tuple(r) for r in (c.fetchall() or [])]
+
+
+# ---------- GSB 服务注册表（kernel/gsb/registry.py 的 SQL 全部收在此处） ----------
+#
+# 归位理由：gsb_service_registry 是唯一一张「所有域进程都写」的基础设施表，归属 mgmt
+# （docs/weekly-11/table-owner.tsv）。原实现在 kernel 里用进程主库直连——单库拓扑没问
+# 题，三库拓扑下每个域把注册写进自己那个库：注册不报错，但跨域互相发现不到（静默失效，
+# 不是能看到 1146 的那种故障）。SQL 收到本域后，任一域进程的注册/心跳/发现都落同一张
+# mgmt 表；单库 / 测试拓扑由任意拓扑原语回落进程主库，行为与改前逐字一致。
+# 方言：`?` 占位符 + INSERT OR REPLACE（mysql_compat 翻译成 REPLACE INTO）。
+
+
+def gsb_registry_ddl() -> str:
+    """注册表建表语句（DDL 走函数返回：调用方不得 import 常量属性）。"""
+    return (
+        "CREATE TABLE IF NOT EXISTS gsb_service_registry (\n"
+        "    service_name   TEXT PRIMARY KEY,\n"
+        "    base_url       TEXT NOT NULL,\n"
+        "    health_url     TEXT,\n"
+        "    version        TEXT DEFAULT '1',\n"
+        "    status         TEXT DEFAULT 'online',\n"
+        "    last_heartbeat REAL DEFAULT 0,\n"
+        "    metadata       TEXT DEFAULT '{}'\n"
+        ")"
+    )
+
+
+def ensure_gsb_registry_schema() -> None:
+    """幂等建表 + 旧库补 version 列。
+
+    ``CREATE TABLE IF NOT EXISTS`` 不会给已存在的表加列，而注册语句显式写 version：
+    旧库上注册会被异常吞成无限重试，所以补一次 best-effort 的 ADD COLUMN。列已存在时
+    忽略报错（SQLite / MySQL 文案不同），只落 debug 日志。
+    """
+    with _any_cursor(write=True) as c:
+        c.execute(gsb_registry_ddl())
+        try:
+            c.execute("ALTER TABLE gsb_service_registry "
+                      "ADD COLUMN version TEXT DEFAULT '1'")
+        except Exception as exc:  # noqa: BLE001 - 列已存在（两种后端报错文案不同）
+            log.debug(f"gsb registry version column already present: {exc}")
+
+
+def _any_dict_rows(name: str, params: tuple = ()) -> list[dict[str, Any]]:
+    """按具名查询读多行并转 dict。
+
+    列名取自游标 description（SQLite 行工厂 / MySQL DictCursor 均可），与 kernel 原
+    `_rows_to_dicts` 同口径；空结果返回空列表（不返回 None，调用方无需判空）。
+    """
+    with _any_cursor() as c:
+        c.execute(_any_sql(name), params)
+        rows = list(c.fetchall() or [])
+        cols = [d[0] for d in c.description] if c.description else []
+    if not rows:
+        return []
+    if hasattr(rows[0], "keys"):
+        return [dict(r) for r in rows]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def gsb_register(name: str, base_url: str, health_url: Any, version: str,
+                 last_heartbeat: float, metadata_json: str) -> int:
+    """注册/覆盖一条服务实例行（主键 service_name 覆盖，语义同 INSERT OR REPLACE）。
+
+    status 固定写回 'online'：与原语句一致，重新注册即视为上线。
+    """
+    return exec_any("gsb_service_upsert",
+                    (name, base_url, health_url, version, last_heartbeat, metadata_json))
+
+
+def gsb_heartbeat(name: str, last_heartbeat: float) -> int:
+    """刷新某服务的心跳时间并置 online，返回影响行数（0=该行已被删）。"""
+    return exec_any("gsb_service_heartbeat", (last_heartbeat, name))
+
+
+def gsb_discover_row(name: str) -> dict[str, Any]:
+    """按服务名取 online 行（全列）；无行返回 {}（心跳超时判定留在调用方 GSB 语义里）。"""
+    rows = _any_dict_rows("gsb_service_online_row", (name,))
+    return rows[0] if rows else {}
+
+
+def gsb_online_services(cutoff: float) -> list[dict[str, Any]]:
+    """心跳晚于 cutoff 的全部 online 行，按服务名排序。"""
+    return _any_dict_rows("gsb_services_online", (cutoff,))
+
+
+def gsb_instances(service: str, cutoff: float, include_offline: bool = False) -> list[dict[str, Any]]:
+    """某基础服务的全部实例行（裸键 ``service`` 与 ``service@ns`` 两类）。
+
+    通配符值 ``service@%`` 在本域拼（是参数值，不是表名/列名，调用方不得传 SQL 片段）；
+    不取名 ``include_offline`` 时只保留 online 且心跳晚于 cutoff 的行。
+    """
+    pattern = f"{service}@%"
+    if include_offline:
+        return _any_dict_rows("gsb_instances", (service, pattern))
+    return _any_dict_rows("gsb_instances_online", (service, pattern, cutoff))
+
+
+def gsb_all_services(include_offline: bool = True) -> list[dict[str, Any]]:
+    """注册表全部行（运维视角）；include_offline=False 只看 status='online'。"""
+    name = "gsb_services_all" if include_offline else "gsb_services_online_only"
+    return _any_dict_rows(name)
+
+
+def gsb_mark_offline(name: str) -> int:
+    """注销：把该服务行标 offline（保留行与 base_url/metadata 便于排查）。"""
+    return exec_any("gsb_service_mark_offline", (name,))
+
+
+def gsb_purge_stale(cutoff: float) -> int:
+    """把心跳早于 cutoff 的 online 行标 offline，返回受影响行数。"""
+    return exec_any("gsb_service_purge_stale", (cutoff,))

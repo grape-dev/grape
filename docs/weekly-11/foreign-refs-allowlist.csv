@@ -40,7 +40,6 @@ grape_t_merge_gate_log,insight,api,1
 grape_t_repo_credentials,insight,contracts,1
 grape_t_repo_credentials,insight,mgmt,5
 grape_t_repo_credentials,insight,runtime,1
-gsb_service_registry,mgmt,kernel,9
 issue,runtime,api,12
 issue,runtime,insight,2
 issue,runtime,mgmt,2
