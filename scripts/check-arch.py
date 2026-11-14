@@ -74,18 +74,13 @@ REMOVED_LEGACY_PREFIXES = (
 # 每条存量以「目标阶段」标注，P1/P3 迁移完成后应逐条删除（只减不增）。
 R8_OWNER_TSV = os.path.join(REPO_ROOT, "docs", "weekly-11", "table-owner.tsv")
 R8_WHITELIST: dict[str, dict[str, int]] = {
-    "src/kernel/repo_migrate.py": {
-        "managed_repos": 3, "meta": 2, "skill": 2, "user_repos": 4,
-    },  # P1：整体迁 mgmt 域（仓库维护；受 #2010 kernel 布局契约约束，需随契约一起改）
+    # src/kernel/repo_migrate.py 已清零（改名迁移按域下沉到 mgmt/runtime public）
     "src/kernel/session_manager.py": {
         "chat_agent_session": 7, "chat_conversations": 6, "chat_messages": 5,
         "issue": 2, "repo_im_group_binding": 3, "unified_user_mapping": 6,
     },  # P3：进程库 shim 的跨域写，按表迁到 runtime/mgmt public 写函数
-    "src/kernel/auth_sdk/auth_token.py": {"api_tokens": 3, "session_api_tokens": 8},  # P3：迁 mgmt auth
-    "src/kernel/repo_cleanup.py": {
-        "chat_messages": 1, "meta": 4, "scene_knowledge_ref": 1, "skill": 1,
-        "task_messages": 1, "vod_conversations": 1,
-    },  # P1：仓库清理按域拆到 mgmt/runtime
+    # src/kernel/auth_sdk/auth_token.py 已清零（令牌表 SQL 下沉 mgmt.public 的 session/api token 原语）
+    # src/kernel/repo_cleanup.py 已清零（级联清理按域拆到 mgmt/runtime public 的 purge_repo_rows）
     "src/kernel/lock.py": {"distributed_locks": 6},  # P3：分布式锁改 owner 端点
     "src/kernel/gsb/registry.py": {"gsb_service_registry": 4},  # P3：注册表写走 mgmt 端点
     "src/kernel/token_resolver.py": {"managed_repos": 2},  # P2：读改 mgmt 内部端点
@@ -173,6 +168,9 @@ WHITELIST: dict[str, dict[str, str]] = {
     },
     "src/kernel/auth_sdk/jwt_utils.py": {
         "R1": "deferred secret/credential keys via mgmt.auth.security_config; Phase 5",
+    },
+    "src/kernel/auth_sdk/auth_token.py": {
+        "R1": "deferred token-table access via mgmt.public (SQL already moved there); Phase 5 -> contracts",
     },
     # R1: multi-platform decoupling additions — all deferred (function-body) lookups;
     # Phase 5 inverts them through src/domains/contracts.

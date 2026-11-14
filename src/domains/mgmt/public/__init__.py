@@ -1731,3 +1731,322 @@ def pipeline_scene_advanced_options(scene_id, repo_keys) -> str:
             [scene_id] + keys)
         row = c.fetchone()
     return (row[0] if row and row[0] else "") or ""
+
+
+# ---------- API 令牌表（session_api_tokens / api_tokens 归 mgmt；auth_sdk 在 kernel 层调用） ----------
+#
+# 为什么在 mgmt：两张表在三库拓扑里落在 mgmt 库，而签发/校验逻辑是 kernel 的共享能力，
+# 由 api / mgmt / runtime 三个进程共同调用 —— 跨域时连接必须走本域（自有 DSN 或单库回落）。
+
+def session_token_insert(session_key: str, repo_key: str, agent_type: str, user_id,
+                         token_sha256: str, expires_at: int, kind: str | None = None) -> int:
+    """插入一条会话 token（kind=None 为 worker/tk_，'takeover' 为接管）；返回自增 id。"""
+    with _any_cursor(write=True) as c:
+        if kind:
+            cur = c.execute(
+                "INSERT INTO session_api_tokens "
+                "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at, kind) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at), kind))
+        else:
+            cur = c.execute(
+                "INSERT INTO session_api_tokens "
+                "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at)))
+        return int(getattr(cur, "lastrowid", 0) or 0)
+
+
+def session_token_by_sha(token_sha256: str, kind: str | None = None) -> tuple | None:
+    """按 sha256 取会话 token 行 (id, session_key, repo_key, agent_type, user_id, expires_at)。
+
+    kind 非空时追加 `kind=?` 过滤（worker 的 tk_ 与接管的 tko_ 互不通用）。
+    """
+    with _any_cursor() as c:
+        if kind:
+            c.execute(
+                "SELECT id, session_key, repo_key, agent_type, user_id, expires_at "
+                "FROM session_api_tokens WHERE token_sha256=? AND kind=?", (token_sha256, kind))
+        else:
+            c.execute(
+                "SELECT id, session_key, repo_key, agent_type, user_id, expires_at "
+                "FROM session_api_tokens WHERE token_sha256=?", (token_sha256,))
+        return c.fetchone()
+
+
+def session_token_set_expiry(session_key: str, expires_at: int) -> int:
+    """把某会话的全部 token 有效期改写（延迟吊销用）；返回影响行数。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute("UPDATE session_api_tokens SET expires_at=? WHERE session_key=?",
+                        (int(expires_at), session_key))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def session_token_shrink_active(session_key: str, expires_at: int, now: int) -> int:
+    """只提前作废仍有效的旧 token（已过期的保持原样，交给 purge）；返回影响行数。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "UPDATE session_api_tokens SET expires_at=? "
+            "WHERE session_key=? AND CAST(expires_at AS INTEGER) > ?",
+            (int(expires_at), session_key, int(now)))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def session_token_delete_expired(now: int) -> int:
+    """清理过期会话 token；返回删除行数。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute("DELETE FROM session_api_tokens WHERE CAST(expires_at AS INTEGER) <= ?",
+                        (int(now),))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def session_token_delete_by_session(session_key: str, kind: str | None = None) -> int:
+    """按 session_key（可选 kind）立即删除（接管 token 的 finish/abort）；返回删除行数。"""
+    with _any_cursor(write=True) as c:
+        if kind:
+            cur = c.execute("DELETE FROM session_api_tokens WHERE session_key=? AND kind=?",
+                            (session_key, kind))
+        else:
+            cur = c.execute("DELETE FROM session_api_tokens WHERE session_key=?", (session_key,))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def session_token_renew(session_key: str, kind: str, expires_at: int) -> int:
+    """续期（仅当当前有效期早于目标值）；返回影响行数。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "UPDATE session_api_tokens SET expires_at=? "
+            "WHERE session_key=? AND kind=? AND expires_at < ?",
+            (int(expires_at), session_key, kind, int(expires_at)))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def session_token_rotate(session_key: str, repo_key: str, agent_type: str, user_id,
+                         token_sha256: str, expires_at: int, now: int) -> None:
+    """轮换：作废仍有效的旧 token + 插入新 token（**同一事务**）。
+
+    注意跨域边界：调用方若还要回写别的域（如 agent_tasks.env_extra）的快照，
+    那一步已不在本事务内 —— 顺序上必须先完成本原语（新 token 已落库）再回写快照，
+    并由调用方自己的实例锁串行化，失败重试即可收敛。
+    """
+    with _any_tx() as c:
+        c.execute("UPDATE session_api_tokens SET expires_at=? "
+                  "WHERE session_key=? AND CAST(expires_at AS INTEGER) > ?",
+                  (int(now), session_key, int(now)))
+        c.execute("INSERT INTO session_api_tokens "
+                  "(session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
+                  "VALUES (?,?,?,?,?,?)",
+                  (session_key, repo_key, agent_type, user_id, token_sha256, int(expires_at)))
+
+
+def api_token_insert(user_id, token_sha256: str, name: str, created_at: str) -> int:
+    """插入用户级 API Key（只存 sha256）；返回自增 id。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "INSERT INTO api_tokens (user_id, token_sha256, name, created_at) VALUES (?,?,?,?)",
+            (user_id, token_sha256, name, created_at))
+        return int(getattr(cur, "lastrowid", 0) or 0)
+
+
+def api_token_by_sha(token_sha256: str) -> tuple | None:
+    """按 sha256 取 (id, user_id, name, scopes, revoked)。"""
+    with _any_cursor() as c:
+        c.execute("SELECT id, user_id, name, scopes, revoked FROM api_tokens "
+                  "WHERE token_sha256=?", (token_sha256,))
+        return c.fetchone()
+
+
+def api_token_touch(token_id, last_used_at: str) -> int:
+    """更新最近使用时间（失败由调用方吞掉，不影响校验结果）。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute("UPDATE api_tokens SET last_used_at=? WHERE id=?",
+                        (str(last_used_at), token_id))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def api_token_revoke(token_id, user_id) -> int:
+    """软吊销（revoked=1，保审计）；返回影响行数。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute("UPDATE api_tokens SET revoked=1 WHERE id=? AND user_id=?",
+                        (token_id, user_id))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def api_token_list(user_id) -> list[tuple]:
+    """未吊销的 API Key 列表 (id, name, scopes, created_at, last_used_at)，新的在前。"""
+    with _any_cursor() as c:
+        c.execute("SELECT id, name, scopes, created_at, last_used_at FROM api_tokens "
+                  "WHERE user_id=? AND revoked=0 ORDER BY id DESC", (user_id,))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+# ---------- 仓库改名迁移（mgmt 段：托管仓库主键重建 + 用户仓库 + 本域 repo_key 表） ----------
+
+#: 以 repo_key 为索引的 mgmt 表（固定白名单，不接受调用方传表名）
+REPO_KEY_TABLES = ("event_route_config", "agent_shared_knowledge",
+                   "devops_pipeline_scene", "pipeline_instances")
+
+
+def _mg_existing_tables(c) -> set:
+    try:
+        return {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    except Exception:
+        try:
+            return {list(r)[-1] for r in c.execute("SHOW TABLES")}
+        except Exception:
+            return set()
+
+
+def _mg_has_repo_key(c, table: str) -> bool:
+    try:
+        return "repo_key" in [r[1] for r in c.execute(f"PRAGMA table_info({table})")]
+    except Exception:
+        return False
+
+
+def _mg_unique_repo_key(c, table: str) -> bool:
+    try:
+        for ci in c.execute(f"PRAGMA table_info({table})"):
+            if ci[5] == 1 and ci[1] == "repo_key":
+                return True
+        for idx in c.execute(f"PRAGMA index_list({table})"):
+            if idx[2] == 1:
+                cols = [x[2] for x in c.execute(f"PRAGMA index_info({idx[1]})")]
+                if cols and cols[0] == "repo_key":
+                    return True
+    except Exception as exc:  # noqa: BLE001 - 探测失败按「无唯一约束」处理（两个分支都要能跑）
+        log.debug(f"unique-repo-key probe skipped for {table}: {exc}")
+    return False
+
+
+def _mg_migrate_managed_repos(c, old: str, new: str, new_owner: str, new_repo: str) -> int:
+    """managed_repos：repo_key 是主键 → DELETE 旧行 + INSERT 新行，保留全部托管字段。"""
+    c.execute(
+        "SELECT repo_owner, repo_name, full_name, webhook_id, dev_scene, host_status, "
+        "bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, "
+        "bot_github_token, org_id, host_user_id, webhook_secret, created_at "
+        "FROM managed_repos WHERE repo_key=?", (old,))
+    row = c.fetchone()
+    if not row:
+        return 0
+    (repo_owner, repo_name, full_name, webhook_id, dev_scene, host_status,
+     bot_gc, wh_gc, bot_user, wh_gh, bot_gh, org_id, host_uid, wh_secret, created_at) = row
+    new_full = f"{new_owner}/{new_repo}"
+    c.execute("DELETE FROM managed_repos WHERE repo_key=?", (old,))
+    try:
+        c.execute(
+            "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name, "
+            "webhook_id, dev_scene, host_status, bot_gitcode_token, gitcode_webhook_token, "
+            "bot_username, github_webhook_token, bot_github_token, org_id, host_user_id, "
+            "webhook_secret, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (new, new_owner, new_repo, new_full, webhook_id, dev_scene or "", host_status or "",
+             bot_gc or "", wh_gc or "", bot_user or "", wh_gh or "", bot_gh or "",
+             org_id or "", host_uid or 0, wh_secret or "", created_at))
+    except Exception:
+        # 列不全时降级（兼容未迁移的库）
+        c.execute(
+            "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name, "
+            "webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, "
+            "org_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (new, new_owner, new_repo, new_full, webhook_id, dev_scene or "",
+             bot_gc or "", wh_gc or "", bot_user or "", org_id or ""))
+    return 1
+
+
+def _mg_migrate_user_repos(c, old: str, new: str, new_owner: str, new_repo: str) -> int:
+    """user_repos：复合主键 (user_id, repo_key)，目标已存在时删旧留新。"""
+    c.execute("SELECT user_id, owner, name, description, role, is_admin, is_join, "
+              "created_at, synced_at FROM user_repos WHERE repo_key=?", (old,))
+    rows = c.fetchall() or []
+    if not rows:
+        return 0
+    cnt = 0
+    for (uid, owner, name, desc, role, is_admin, is_join, created_at, synced_at) in rows:
+        c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key=?", (uid, new))
+        try:
+            c.execute(
+                "INSERT INTO user_repos (user_id, repo_key, owner, name, description, "
+                "role, is_admin, is_join, created_at, synced_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (uid, new, new_owner, new_repo, desc or "", role or "",
+                 is_admin or 0, is_join or 0, created_at or "", synced_at or ""))
+        except Exception:
+            c.execute(
+                "INSERT INTO user_repos (user_id, repo_key, owner, name, role, is_admin) "
+                "VALUES (?,?,?,?,?,?)",
+                (uid, new, new_owner, new_repo, role or "", is_admin or 0))
+        cnt += 1
+    c.execute("DELETE FROM user_repos WHERE repo_key=?", (old,))
+    return cnt
+
+
+def migrate_repo_key_mgmt(repo_key: str, old_keys, new: str, new_owner: str,
+                          new_repo: str) -> dict[str, int]:
+    """同一事务内改写本域的仓库数据；返回 {表名: 改写行数}。"""
+    keys = [str(k) for k in (old_keys or []) if k]
+    out: dict[str, int] = {}
+    with _any_tx() as c:
+        existing = _mg_existing_tables(c)
+        n = _mg_migrate_managed_repos(c, repo_key, new, new_owner, new_repo)
+        if n:
+            out["managed_repos"] = n
+        n = _mg_migrate_user_repos(c, repo_key, new, new_owner, new_repo)
+        if n:
+            out["user_repos"] = n
+        if keys:
+            ph = ",".join(["?"] * len(keys))
+            for tbl in REPO_KEY_TABLES:
+                if tbl not in existing or not _mg_has_repo_key(c, tbl):
+                    continue
+                m = 0
+                if _mg_unique_repo_key(c, tbl):
+                    c.execute(f"SELECT repo_key FROM {tbl} WHERE repo_key IN ({ph})", keys)
+                    for (rk,) in (c.fetchall() or []):
+                        if c.execute(f"SELECT 1 FROM {tbl} WHERE repo_key=? LIMIT 1",
+                                     (new,)).fetchone():
+                            cur = c.execute(f"DELETE FROM {tbl} WHERE repo_key=?", (rk,))
+                        else:
+                            cur = c.execute(f"UPDATE {tbl} SET repo_key=? WHERE repo_key=?",
+                                            (new, rk))
+                        m += int(getattr(cur, "rowcount", 0) or 0)
+                else:
+                    cur = c.execute(f"UPDATE {tbl} SET repo_key=? WHERE repo_key IN ({ph})",
+                                    [new] + keys)
+                    m = int(getattr(cur, "rowcount", 0) or 0)
+                if m:
+                    out[tbl] = m
+    return out
+
+
+# ---------- 仓库级联清理（mgmt 段） ----------
+
+def purge_repo_rows(keys, dry_run: bool = False) -> dict[str, int]:
+    """删除/统计仓库在 mgmt 域的数据（知识库 + 引用 + 本域 repo_key 表）。"""
+    _keys = [str(k) for k in (keys or []) if k]
+    stats: dict[str, int] = {}
+    if not _keys:
+        return stats
+    ph = ",".join(["?"] * len(_keys))
+    with _any_tx() as c:
+        existing = _mg_existing_tables(c)
+        if dry_run:
+            for tbl in REPO_KEY_TABLES:
+                if tbl in existing:
+                    c.execute(f"SELECT COUNT(*) FROM {tbl} WHERE repo_key IN ({ph})", _keys)
+                    stats[tbl] = int((c.fetchone() or [0])[0] or 0)
+            return stats
+
+        # 1) 依赖子表：scene_knowledge_ref ← agent_shared_knowledge.id
+        if "agent_shared_knowledge" in existing and "scene_knowledge_ref" in existing:
+            c.execute(f"SELECT id FROM agent_shared_knowledge WHERE repo_key IN ({ph})", _keys)
+            ids = [r[0] for r in (c.fetchall() or [])]
+            if ids:
+                _p = ",".join(["?"] * len(ids))
+                cur = c.execute(f"DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ({_p})", ids)
+                stats["scene_knowledge_ref"] = int(getattr(cur, "rowcount", 0) or 0)
+        # 2) 本域 repo_key 表直删
+        for tbl in REPO_KEY_TABLES:
+            if tbl not in existing:
+                continue
+            cur = c.execute(f"DELETE FROM {tbl} WHERE repo_key IN ({ph})", _keys)
+            stats[tbl] = int(getattr(cur, "rowcount", 0) or 0)
+    return stats

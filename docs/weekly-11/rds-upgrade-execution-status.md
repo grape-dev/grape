@@ -185,6 +185,32 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
 第 1 条也解释了历史记录里「彩排 0 失败」与坑 2 并存的矛盾：上一轮 stage env 同样缺 lib 开关，
 多数端点在内部 catch 了 1146，只有写探测把 `PUT /api/chat/config` 的异常记成了失败。
 
+### kernel 三件套：令牌 / 改名迁移 / 级联清理（-45，三个文件清零）
+- **`auth_sdk/auth_token.py`（15 处）**：`session_api_tokens` / `api_tokens` 归 mgmt →
+  12 个原语进 mgmt public（insert/by_sha/set_expiry/shrink_active/delete_expired/delete_by_session/
+  renew/rotate + api_token 的 insert/by_sha/touch/revoke/list）。
+  跨域后 `rotate` 的「同一事务」保证不再成立：改为「先落新 token（本域原子）→ 调用方再回写
+  `agent_tasks.env_extra` 快照」，由调用方既有实例锁串行化、失败重试收敛；`commit` 参数保留以兼容
+  既有调用方但不再控制事务边界（docstring 写明）。
+- **`repo_migrate.py`（16 处）**：仓库改名拆成两段 —— mgmt 段（`managed_repos` 主键重建保留全部托管字段、
+  `user_repos` 复合主键冲突删旧留新、4 张 repo_key 表）与 runtime 段（11 张 repo_key 表、
+  `skill(scope='repo')` 的 owner_id 改写、`meta` 的 onboarded/cleanup_pending 前缀键）。各自本域一个事务；
+  两段都是「删旧留新」语义 → 重复执行幂等；第二段失败时第一段已提交，审计里显式标 `mgmt_committed`。
+- **`repo_cleanup.py`（14 处）**：级联清理拆成两段 `purge_repo_rows`（dry-run 只统计直删表，与原先口径一致）。
+  子表先删（`task_messages` / `vod_conversations` / `chat_messages` / `scene_knowledge_ref`）在各自域内
+  一条子查询完成；`meta` 的 5 处收敛成 set / delete_keys / keys_like 三个原语。
+- **架构约束处理（R1 硬约束）**：kernel 顶层不得依赖 domains。`auth_token` 用延迟导入
+  （`_tokens_lib()`）并在 `check-arch` 白名单登记「deferred token-table access; Phase 5 → contracts」；
+  同时把三条**已清零**的 R8 白名单条目删除（该棘轮只减不增），避免存量登记与实际漂移。
+- 全局 **440 → 395**（-45）；基线 **395 / 85 对**。
+- 新增两份烟测：`token_smoke`（会话 token 生命周期 / 轮换后旧 token 失效且不碰已过期行 /
+  接管 token 命名空间隔离与续期 / API Key 只存 sha256 且软吊销）、
+  `migrate_cleanup_smoke`（14 张表迁移 + 托管字段保留 + 幂等 / dry-run 不删 / 级联实删 + 幂等）。
+
+### 并行实施方式（本轮首次启用）
+- 三个只读调研子代理并行（互不冲突）；**owner public 的追加仍是单点串行**（同一个文件，
+  并行必冲突）；调用点替换按文件并行；验证与提交串行。回滚粒度 = 单文件 `git checkout`。
+
 ### mgmt skills 技能页接口化（-20，本文件清零）
 - 20 处清零（19 条 SQL + 1 处 OpenAPI summary 文案命中正则，按判据口径改述）。
 - **可见范围条件是本批核心**：`skill_search` 把 scope 分支（`all` / `official` / `repo` / `user` /

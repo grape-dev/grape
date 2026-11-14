@@ -3401,3 +3401,199 @@ def skill_delete_by_id(skill_id) -> int:
 def skill_exists_active(skill_id) -> bool:
     """技能是否存在且未停用。"""
     return read_one_any("skill_exists_active", (int(skill_id),)) is not None
+
+
+# ---------- 仓库改名迁移（runtime 段：repo_key 跟随表 + skill 归属 + meta 前缀键） ----------
+#
+# 原实现在 kernel/repo_migrate.py 里用一个事务改三域的表；三库独立后跨库事务不可得，
+# 按域拆成两段（mgmt 段在 mgmt public）。两段都是「删旧留新」语义，重复执行即幂等，
+# 第二段失败时第一段已提交 —— 调用方重试即可收敛。
+
+#: 以 repo_key 为索引的 runtime 表（固定白名单，不接受调用方传表名）
+REPO_KEY_TABLES = (
+    "issue", "issue_state", "issue_agent_session", "events", "event_skipped",
+    "event_thread", "agent_tasks", "chat_conversations", "chat_agent_session",
+    "devops_agent_session", "repo_im_group_binding",
+)
+
+
+def _rt_existing_tables(c) -> set:
+    try:
+        return {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    except Exception:
+        try:
+            return {list(r)[-1] for r in c.execute("SHOW TABLES")}
+        except Exception:
+            return set()
+
+
+def _rt_has_repo_key(c, table: str) -> bool:
+    try:
+        return "repo_key" in [r[1] for r in c.execute(f"PRAGMA table_info({table})")]
+    except Exception:
+        return False
+
+
+def _rt_unique_repo_key(c, table: str) -> bool:
+    try:
+        for ci in c.execute(f"PRAGMA table_info({table})"):
+            if ci[5] == 1 and ci[1] == "repo_key":
+                return True
+        for idx in c.execute(f"PRAGMA index_list({table})"):
+            if idx[2] == 1:
+                cols = [x[2] for x in c.execute(f"PRAGMA index_info({idx[1]})")]
+                if cols and cols[0] == "repo_key":
+                    return True
+    except Exception as exc:  # noqa: BLE001 - 探测失败按「无唯一约束」处理（两个分支都要能跑）
+        log.debug(f"unique-repo-key probe skipped for {table}: {exc}")
+    return False
+
+
+def migrate_repo_key_runtime(old_keys, new: str) -> dict[str, int]:
+    """同一事务内改写本域的 repo_key 关联数据；返回 {表名: 改写行数, "skill"/"meta": 行数}。"""
+    keys = [str(k) for k in (old_keys or []) if k]
+    out: dict[str, int] = {}
+    if not keys:
+        return out
+    ph = ",".join(["?"] * len(keys))
+    with _any_tx() as c:
+        existing = _rt_existing_tables(c)
+        # 1) repo_key 列跟随（UNIQUE(repo_key) 冲突时删源行，保留目标行）
+        for tbl in REPO_KEY_TABLES:
+            if tbl not in existing or not _rt_has_repo_key(c, tbl):
+                continue
+            n = 0
+            if _rt_unique_repo_key(c, tbl):
+                c.execute(f"SELECT repo_key FROM {tbl} WHERE repo_key IN ({ph})", keys)
+                for (rk,) in (c.fetchall() or []):
+                    if c.execute(f"SELECT 1 FROM {tbl} WHERE repo_key=? LIMIT 1", (new,)).fetchone():
+                        cur = c.execute(f"DELETE FROM {tbl} WHERE repo_key=?", (rk,))
+                    else:
+                        cur = c.execute(f"UPDATE {tbl} SET repo_key=? WHERE repo_key=?", (new, rk))
+                    n += int(getattr(cur, "rowcount", 0) or 0)
+            else:
+                cur = c.execute(f"UPDATE {tbl} SET repo_key=? WHERE repo_key IN ({ph})",
+                                [new] + keys)
+                n = int(getattr(cur, "rowcount", 0) or 0)
+            if n:
+                out[tbl] = n
+
+        # 2) skill(scope='repo')：owner_id 存 repo_key，UNIQUE(skill_name, scope, owner_id)
+        if "skill" in existing:
+            n = 0
+            c.execute(f"SELECT id, skill_name FROM skill WHERE scope='repo' AND owner_id IN ({ph})",
+                      keys)
+            for sid, skill_name in (c.fetchall() or []):
+                conflict = c.execute(
+                    "SELECT 1 FROM skill WHERE scope='repo' AND owner_id=? AND skill_name=? LIMIT 1",
+                    (new, skill_name)).fetchone()
+                if conflict:
+                    cur = c.execute("DELETE FROM skill WHERE id=?", (sid,))
+                else:
+                    cur = c.execute("UPDATE skill SET owner_id=? WHERE id=?", (new, sid))
+                n += int(getattr(cur, "rowcount", 0) or 0)
+            if n:
+                out["skill"] = n
+
+        # 3) meta：onboarded:* / cleanup_pending:*
+        if "meta" in existing:
+            n = 0
+            for prefix in ("onboarded:", "cleanup_pending:"):
+                for old in keys:
+                    old_k, new_k = f"{prefix}{old}", f"{prefix}{new}"
+                    if c.execute("SELECT 1 FROM meta WHERE `key`=? LIMIT 1", (new_k,)).fetchone():
+                        cur = c.execute("DELETE FROM meta WHERE `key`=?", (old_k,))
+                    else:
+                        cur = c.execute("UPDATE meta SET `key`=? WHERE `key`=?", (new_k, old_k))
+                    n += int(getattr(cur, "rowcount", 0) or 0)
+            if n:
+                out["meta"] = n
+    return out
+
+
+# ---------- 仓库级联清理（runtime 段） ----------
+#
+# 仓库删除时的级联清理：子表先删（无 repo_key 列，经父表 id 关联）、再直删本域 repo_key 表、
+# 再删 repo scope 技能与 onboarded 幂等键。全部在本域一个事务内完成（跨库无法同事务）。
+
+def purge_repo_rows(keys, dry_run: bool = False) -> dict[str, int]:
+    """删除/统计仓库在 runtime 域的数据；返回 {表名或子表标签: 行数}。"""
+    _keys = [str(k) for k in (keys or []) if k]
+    stats: dict[str, int] = {}
+    if not _keys:
+        return stats
+    ph = ",".join(["?"] * len(_keys))
+    with _any_tx() as c:
+        existing = _rt_existing_tables(c)
+        if dry_run:
+            for tbl in REPO_KEY_TABLES:
+                if tbl in existing:
+                    c.execute(f"SELECT COUNT(*) FROM {tbl} WHERE repo_key IN ({ph})", _keys)
+                    stats[tbl] = int((c.fetchone() or [0])[0] or 0)
+            return stats
+
+        # 1) 依赖子表（经父表 id 关联）
+        if "agent_tasks" in existing and "task_messages" in existing:
+            c.execute(f"SELECT id FROM agent_tasks WHERE repo_key IN ({ph})", _keys)
+            ids = [r[0] for r in (c.fetchall() or [])]
+            if ids:
+                _p = ",".join(["?"] * len(ids))
+                cur = c.execute(f"DELETE FROM task_messages WHERE task_id IN ({_p})", ids)
+                stats["task_messages"] = int(getattr(cur, "rowcount", 0) or 0)
+        if "devops_agent_session" in existing and "vod_conversations" in existing:
+            cur = c.execute(
+                "DELETE FROM vod_conversations WHERE agent_session_id IN "
+                f"(SELECT id FROM devops_agent_session WHERE repo_key IN ({ph}))", _keys)
+            stats["vod_conversations"] = int(getattr(cur, "rowcount", 0) or 0)
+        if "chat_conversations" in existing and "chat_messages" in existing:
+            c.execute(f"SELECT id FROM chat_conversations WHERE repo_key IN ({ph})", _keys)
+            ids = [r[0] for r in (c.fetchall() or [])]
+            if ids:
+                _p = ",".join(["?"] * len(ids))
+                cur = c.execute(f"DELETE FROM chat_messages WHERE conversation_id IN ({_p})", ids)
+                stats["chat_messages"] = int(getattr(cur, "rowcount", 0) or 0)
+
+        # 2) 本域 repo_key 表直删
+        for tbl in REPO_KEY_TABLES:
+            if tbl not in existing:
+                continue
+            cur = c.execute(f"DELETE FROM {tbl} WHERE repo_key IN ({ph})", _keys)
+            stats[tbl] = int(getattr(cur, "rowcount", 0) or 0)
+
+        # 3) repo scope 技能（owner_id 存 repo_key）
+        if "skill" in existing:
+            cur = c.execute(f"DELETE FROM skill WHERE scope='repo' AND owner_id IN ({ph})", _keys)
+            stats["skill"] = int(getattr(cur, "rowcount", 0) or 0)
+
+        # 4) onboarding 幂等标记（重建同名仓库应重新引导）
+        if "meta" in existing:
+            ob_keys = [f"onboarded:{k}" for k in _keys]
+            _p = ",".join(["?"] * len(ob_keys))
+            cur = c.execute(f"DELETE FROM meta WHERE `key` IN ({_p})", ob_keys)
+            stats["meta_onboarded"] = int(getattr(cur, "rowcount", 0) or 0)
+    return stats
+
+
+def meta_set(key: str, value: str) -> int:
+    """写入 meta 键（INSERT OR REPLACE 语义，幂等）。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute("INSERT OR REPLACE INTO meta (`key`, value) VALUES (?, ?)", (key, value))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def meta_delete_keys(keys) -> int:
+    """删除给定 meta 键；返回删除行数。"""
+    _keys = [str(k) for k in (keys or []) if k]
+    if not _keys:
+        return 0
+    ph = ",".join(["?"] * len(_keys))
+    with _any_cursor(write=True) as c:
+        cur = c.execute(f"DELETE FROM meta WHERE `key` IN ({ph})", _keys)
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def meta_keys_like(prefix: str) -> list[str]:
+    """按前缀取 meta 键（`LIKE 'prefix%'`）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT `key` FROM meta WHERE `key` LIKE ?", (f"{prefix}%",))
+        return [r[0] for r in (c.fetchall() or [])]
