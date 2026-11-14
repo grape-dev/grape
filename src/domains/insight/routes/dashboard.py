@@ -1284,7 +1284,6 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
     需登录：组织成员可见。运维只读数据。
     返回 {repoKey, issues: [{issueId, title, eventCount, firstAt, lastAt, events: [...]}]}
     """
-    from src.kernel.domain_db import cursor as _domain_cursor
     import json as _json
 
     repo_key = ""
@@ -1294,54 +1293,42 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
         _repo_keys = repo_key_candidates(_base)
         repo_key = _repo_keys[0]
 
-    # 该端点只读 runtime 归属表（events / agent_tasks / agent_runtimes / runtime_credentials）
-    with _domain_cursor("runtime") as c:
-        _COLS_A = ("seq, event_type, issue_id, title, actor, agent_type, skill, status, "
-                   "duration, created_at, payload, repo_key")
-        if _repo_keys:
-            _where_A = ("repo_key IN (" + ",".join("?" * len(_repo_keys)) +
-                        ") AND issue_id IS NOT NULL AND issue_id <> ''")
-            _params_A = tuple(_repo_keys)
-        else:
-            _where_A = "issue_id IS NOT NULL AND issue_id <> ''"
-            _params_A = ()
-        from src.kernel.domain_read import runtime_lib as _rt_ev_a
-        _rt_a = _rt_ev_a()
-        if _rt_a is not None:
-            rows = _rt_a.query_events(_COLS_A, _where_A, _params_A, "created_at")
-        else:
-            c.execute(f"SELECT {_COLS_A} FROM events WHERE {_where_A} ORDER BY created_at", _params_A)
-            rows = c.fetchall()
+    # 该端点只读 runtime 归属表（events / agent_tasks / agent_runtimes）：三张表都归
+    # runtime 域，取数一律走 runtime public 聚合原语（单库与三库独立拓扑同源）。
+    from src.domains.runtime import public as runtime_public
 
-        # 查 agent_tasks 建立 (issue_id, event_seq) → (task_id, runtime_id) 映射
-        c.execute(
-            "SELECT issue_id, event_seq, id, runtime_id FROM agent_tasks "
-            "WHERE issue_id IS NOT NULL AND issue_id <> ''"
-        )
-        task_map = {}
-        runtime_map = {}
-        for row in c.fetchall():
-            task_map[(row[0], row[1])] = row[2]
-            runtime_map[(row[0], row[1])] = row[3] or 0
+    _COLS_A = ("seq, event_type, issue_id, title, actor, agent_type, skill, status, "
+               "duration, created_at, payload, repo_key")
+    if _repo_keys:
+        _where_A = ("repo_key IN (" + ",".join("?" * len(_repo_keys)) +
+                    ") AND issue_id IS NOT NULL AND issue_id <> ''")
+        _params_A = tuple(_repo_keys)
+    else:
+        _where_A = "issue_id IS NOT NULL AND issue_id <> ''"
+        _params_A = ()
+    rows = runtime_public.query_events_any(_COLS_A, _where_A, _params_A, "created_at")
 
-        # 查 runtime_id → 引擎实例名映射（type-device_name 格式）
-        c.execute(
-            "SELECT ar.id, ar.name, ar.credential_id, rc.device_name, ar.host_name "
-            "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id"
-        )
-        from src.domains.runtime.engine.instances import instance_name as _inst_name
-        _local_hostname = ""
-        try:
-            _local_hostname = engine_host()
-        except Exception:
-            pass
-        rt_name_map = {}
-        for r in c.fetchall():
-            _rid, _name, _cid, _dev, _host = r
-            # 本机引擎（cid=0）：优先用 host_name，其次用本机 hostname
-            if (_cid or 0) == 0:
-                _dev = _host or _local_hostname or ""
-            rt_name_map[_rid] = _inst_name(_name, _dev, _cid)
+    # (issue_id, event_seq) → (task_id, runtime_id) 映射（原语内部承载 agent_tasks 查询）
+    task_map = {}
+    runtime_map = {}
+    for row in runtime_public.task_event_map():
+        task_map[(row[0], row[1])] = row[2]
+        runtime_map[(row[0], row[1])] = row[3] or 0
+
+    # runtime_id → 引擎实例名映射（type-device_name 格式）
+    from src.domains.runtime.engine.instances import instance_name as _inst_name
+    _local_hostname = ""
+    try:
+        _local_hostname = engine_host()
+    except Exception:
+        pass
+    rt_name_map = {}
+    for r in runtime_public.runtime_device_map():
+        _rid, _name, _cid, _dev, _host = r
+        # 本机引擎（cid=0）：优先用 host_name，其次用本机 hostname
+        if (_cid or 0) == 0:
+            _dev = _host or _local_hostname or ""
+        rt_name_map[_rid] = _inst_name(_name, _dev, _cid)
 
     # 按 issue_id 分组（同时记录每个 issue 的 repo_key）
     group = {}
@@ -1399,7 +1386,6 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
     """
     import requests as _requests
     from src.domains.mgmt.user.db import get_server_base_url
-    from src.kernel.session_manager import db, db_lock
 
     base_url = get_server_base_url()
     result = {
@@ -1424,27 +1410,19 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
 
     # 最近 A2A 调用记录（从 events 表查 agent_type=A2A 的最近记录）
     try:
-        with db_lock:
-            c = db.cursor()
-            _COLS_B = "seq, event_type, repo_key, issue_id, status, created_at, payload"
-            _where_B = "(event_type LIKE ? OR event_type LIKE ?)"
-            _params_B = ("%a2a%", "%A2A%")
-            from src.kernel.domain_read import runtime_lib as _rt_ev_b
-            _rt_b = _rt_ev_b()
-            if _rt_b is not None:
-                _rows_B = _rt_b.query_events(_COLS_B, _where_B, _params_B, "created_at DESC", 10)
-            else:
-                c.execute(
-                    f"SELECT {_COLS_B} FROM events WHERE {_where_B} ORDER BY created_at DESC LIMIT 10",
-                    _params_B
-                )
-                _rows_B = c.fetchall()
-            for row in _rows_B:
-                result["recent_a2a"].append({
-                    "seq": row[0], "event_type": row[1] or "", "repo_key": row[2] or "",
-                    "issue_id": row[3] or "", "status": row[4] or "",
-                    "created_at": normalize_event_time(row[5]),
-                })
+        from src.domains.runtime import public as runtime_public
+
+        _COLS_B = "seq, event_type, repo_key, issue_id, status, created_at, payload"
+        _where_B = "(event_type LIKE ? OR event_type LIKE ?)"
+        _params_B = ("%a2a%", "%A2A%")
+        _rows_B = runtime_public.query_events_any(
+            _COLS_B, _where_B, _params_B, "created_at DESC", 10)
+        for row in _rows_B:
+            result["recent_a2a"].append({
+                "seq": row[0], "event_type": row[1] or "", "repo_key": row[2] or "",
+                "issue_id": row[3] or "", "status": row[4] or "",
+                "created_at": normalize_event_time(row[5]),
+            })
     except Exception:
         pass
 
@@ -1520,78 +1498,53 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     _repo_keys = repo_key_candidates(_owner_repo)
     _rk_placeholders = ",".join("?" * len(_repo_keys))
 
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
+    # events / agent_tasks / agent_runtimes / devops_agent_session 都归 runtime 域，
+    # 取数统一走 runtime public 聚合原语（单库与三库独立拓扑同源，无需本地 SQL 兜底）。
+    from src.domains.runtime import public as runtime_public
 
-        recent_events = []
-        try:
-            from src.kernel.domain_read import runtime_lib as _runtime_lib_d1
-            _rt_d1 = _runtime_lib_d1()
-            if _rt_d1 is not None:
-                _rows_d1 = _rt_d1.query_events(
-                    "seq, event_type, agent_type, title, summary, status, created_at",
-                    f"repo_key IN ({_rk_placeholders})", tuple(_repo_keys), "seq DESC", 5)
-            else:
-                c.execute(
-                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") ORDER BY seq DESC LIMIT 5",
-                    (_repo_keys)
-                )
-                _rows_d1 = c.fetchall()
-            recent_events = [
+    recent_events = []
+    try:
+        _rows_d1 = runtime_public.query_events_any(
+            "seq, event_type, agent_type, title, summary, status, created_at",
+            f"repo_key IN ({_rk_placeholders})", tuple(_repo_keys), "seq DESC", 5)
+        recent_events = [
+            {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
+             "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
+            for r in _rows_d1
+        ]
+    except Exception:
+        pass
+
+    agent_sessions = []
+    try:
+        agent_sessions = []
+        for r in runtime_public.agent_sessions_with_runtime(_repo_keys):
+            _backend = r[1] or ""
+            # 凭据已吊销的引擎视为不可用（revoke 后旧行保留但实际无法执行）：
+            # 本机直连（rc.status=''，无凭据行）与 active 正常显示，revoked 置空走前端红字
+            if _backend and r[5] not in ("", "active"):
+                _backend = ""
+            agent_sessions.append({
+                "agent_type": r[0], "backend": _backend, "status": r[2], "last_active_at": normalize_event_time(r[3]),
+                "enable": bool(r[4]) if r[4] is not None else True})
+    except Exception:
+        pass
+
+    # 每个 Agent 的最近 2 个事件（供 Dashboard Agent 卡片展示，替代假数据）
+    agent_recent_events = {}
+    try:
+        for atype in ["vod", "issue", "coding", "qa", "sre"]:
+            _rows_C = runtime_public.query_events_any(
+                "seq, event_type, agent_type, title, summary, status, created_at",
+                f"repo_key IN ({_rk_placeholders}) AND agent_type=?",
+                tuple(_repo_keys) + (atype,), "seq DESC", 2)
+            agent_recent_events[atype] = [
                 {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
                  "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
-                for r in _rows_d1
+                for r in _rows_C
             ]
-        except Exception:
-            pass
-
-        agent_sessions = []
-        try:
-            c.execute(
-                "SELECT s.agent_type, r.name, s.status, s.last_active_at, s.enable, COALESCE(rc.status,'') "
-                "FROM devops_agent_session s LEFT JOIN agent_runtimes r ON s.runtime_id=r.id "
-                "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                "WHERE s.repo_key IN (" + _rk_placeholders + ") ORDER BY s.agent_type",
-                (_repo_keys)
-            )
-            agent_sessions = []
-            for r in c.fetchall():
-                _backend = r[1] or ""
-                # 凭据已吊销的引擎视为不可用（revoke 后旧行保留但实际无法执行）：
-                # 本机直连（rc.status=''，无凭据行）与 active 正常显示，revoked 置空走前端红字
-                if _backend and r[5] not in ("", "active"):
-                    _backend = ""
-                agent_sessions.append({
-                    "agent_type": r[0], "backend": _backend, "status": r[2], "last_active_at": normalize_event_time(r[3]),
-                    "enable": bool(r[4]) if r[4] is not None else True})
-        except Exception:
-            pass
-
-        # 每个 Agent 的最近 2 个事件（供 Dashboard Agent 卡片展示，替代假数据）
-        agent_recent_events = {}
-        try:
-            from src.kernel.domain_read import runtime_lib as _rt_ev_c
-            _rt_c = _rt_ev_c()
-            for atype in ["vod", "issue", "coding", "qa", "sre"]:
-                if _rt_c is not None:
-                    _rows_C = _rt_c.query_events(
-                        "seq, event_type, agent_type, title, summary, status, created_at",
-                        f"repo_key IN ({_rk_placeholders}) AND agent_type=?",
-                        tuple(_repo_keys) + (atype,), "seq DESC", 2)
-                else:
-                    c.execute(
-                        "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND agent_type=? ORDER BY seq DESC LIMIT 2",
-                        (_repo_keys + [atype])
-                    )
-                    _rows_C = c.fetchall()
-                agent_recent_events[atype] = [
-                    {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
-                     "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
-                    for r in _rows_C
-                ]
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     agent_types_present = {a["agent_type"] for a in agent_sessions}
     all_types = ["vod", "issue", "coding", "qa", "sre"]
@@ -1648,9 +1601,12 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         if _hit is not None:
             _actual_repo_key = _hit
         else:
-            with db_lock:
-                c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (" + _rk_placeholders + ") LIMIT 1", _repo_keys)
-                _row = c.fetchone()
+            # managed_repos 归 mgmt 域：优先走 mgmt lib，单库拓扑回落本地 SQL
+            from src.kernel.session_manager import db as _mdb, db_lock as _mlock
+            with _mlock:
+                _mc = _mdb.cursor()
+                _mc.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (" + _rk_placeholders + ") LIMIT 1", _repo_keys)
+                _row = _mc.fetchone()
                 if _row:
                     _actual_repo_key = _row[0]
     except Exception:
@@ -1727,16 +1683,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                 return _cred_name_cache[_cid]
             _n = ""
             try:
-                with db_lock:
-                    _cc = db.cursor()
-                    from src.kernel.domain_read import runtime_lib as _ru_lib_f8ea2f_f
-                    _ru_lib_f8ea2f = _ru_lib_f8ea2f_f(foreign_only=True)
-                    if _ru_lib_f8ea2f is not None:
-                        _cr = _ru_lib_f8ea2f.read_one("runtime_credentials_f8ea2f", (_cid,))
-                    else:
-                        _cc.execute("SELECT name FROM runtime_credentials WHERE id=?", (_cid,))
-                        _cr = _cc.fetchone()
-                    _n = (_cr[0] or "") if _cr else ""
+                _cr = runtime_public.credential_brief(_cid)
+                _n = (_cr[0] or "") if _cr else ""
             except Exception:
                 _n = ""
             _cred_name_cache[_cid] = _n
@@ -1797,44 +1745,24 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                "pending_events": event_counts["pending"], "failed_events": event_counts["failed"],
                "auto_resolution": 0.0, "events_week": 0, "avg_response": 0}
     try:
-        with db_lock:
-            # total_issues: 统计不同 issue_id 的数量（去重）
-            c.execute(
-                "SELECT COUNT(DISTINCT issue_id) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND issue_id!='' AND issue_id IS NOT NULL",
-                (_repo_keys))
-            metrics["total_issues"] = c.fetchone()[0] or 0
-            # Auto-Resolution: completed / (completed + failed)
-            c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND status='completed'",
-                (_repo_keys)
-            )
-            completed = c.fetchone()[0] or 0
-            c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND status='failed'",
-                (_repo_keys)
-            )
-            failed = c.fetchone()[0] or 0
-            total_done = completed + failed
-            metrics["auto_resolution"] = round(completed / total_done * 100, 1) if total_done > 0 else 0.0
-
-            # Events/Week: 最近 7 天事件数
-            # N1c 修复：原 datetime('now', '-7 days') 是 SQLite 私有函数变体（MySQL
-            # 1064），改应用层预计算 cutoff + 标准参数化 SQL，双方言一致。
-            import time as _time
-            _week_cutoff = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(_time.time() - 7 * 86400))
-            c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND created_at >= ?",
-                (*_repo_keys, _week_cutoff)
-            )
-            metrics["events_week"] = c.fetchone()[0] or 0
-
-            # Avg Response: 已完成事件的平均 duration（秒）
-            c.execute(
-                "SELECT AVG(duration) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND status='completed' AND duration IS NOT NULL AND duration > 0",
-                (_repo_keys)
-            )
-            avg_dur = c.fetchone()[0]
-            metrics["avg_response"] = round(avg_dur, 1) if avg_dur else 0
+        # Events/Week: 最近 7 天事件数
+        # N1c 修复：原 datetime('now', '-7 days') 是 SQLite 私有函数变体（MySQL
+        # 1064），改应用层预计算 cutoff + 标准参数化 SQL，双方言一致。
+        import time as _time
+        _week_cutoff = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(_time.time() - 7 * 86400))
+        # 5 条标量 SQL 收敛成 runtime 域一个聚合原语（events 归 runtime）
+        _ev = runtime_public.event_dashboard_metrics(_repo_keys, _week_cutoff)
+        # total_issues: 统计不同 issue_id 的数量（去重）
+        metrics["total_issues"] = _ev["total_issues"]
+        # Auto-Resolution: completed / (completed + failed)
+        completed = _ev["completed"]
+        failed = _ev["failed"]
+        total_done = completed + failed
+        metrics["auto_resolution"] = round(completed / total_done * 100, 1) if total_done > 0 else 0.0
+        metrics["events_week"] = _ev["events_week"]
+        # Avg Response: 已完成事件的平均 duration（秒）
+        avg_dur = _ev["avg_duration"]
+        metrics["avg_response"] = round(avg_dur, 1) if avg_dur else 0
     except Exception:
         pass
 
@@ -1855,12 +1783,15 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     advanced_options = {}
     try:
         if dev_scene:
-            with db_lock:
-                c.execute(
+            # devops_pipeline_scene 归 mgmt 域：单库拓扑走本地 SQL（与原先一致）
+            from src.kernel.session_manager import db as _sdb, db_lock as _slock
+            with _slock:
+                _sc = _sdb.cursor()
+                _sc.execute(
                     "SELECT advanced_options FROM devops_pipeline_scene "
                     "WHERE scene_id=? AND repo_key IN (" + _rk_placeholders + ") AND is_active=1 LIMIT 1",
                     ([dev_scene] + _repo_keys))
-                _adv_row = c.fetchone()
+                _adv_row = _sc.fetchone()
             if _adv_row and _adv_row[0]:
                 import json as _json
                 advanced_options = _json.loads(_adv_row[0])

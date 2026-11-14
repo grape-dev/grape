@@ -158,6 +158,18 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### 三批并行收口（-64）
+- `kernel/session_manager.py`：unified_user_mapping 读写改走 mgmt public 原语（resolve_feishu_open_id /
+  list_user_mappings / bind_feishu_mapping_row / ensure_unified_user_mapping_schema 等），该表引用 21 → 0；
+  文件跨域 84 → **56**（余下 chat_agent_session 19 / chat_conversations 13 / repo_im_group_binding 11）。
+- `mgmt/user/db.py`：skill 系列改走 runtime public 具名查询，skill 30 → **10**；文件 68 → **48**。
+- `insight/routes/dashboard.py`：新增 19 个 runtime 聚合原语（events 指标、task 状态/卡住/失败分布、
+  worker/credential JOIN 等），该文件 40 → **24**。
+- 全局静态 **834 → 770**；棘轮基线收紧 770 / 121 对。
+- 门禁：check_lib_query_names PASS（mgmt 16 funcs + 35 queries 全登记；为此把 DDL 常量改成
+  `unified_user_mapping_ddl()` 访问函数，kernel 不再取常量属性）；静默 except 棘轮 0 新增（两处 `except: pass`
+  已改为带日志）；pytest arch/contracts/scripts **158 passed**；三实例彩排循环 LOOP_EXIT=0、运行面 0 失败。
+
 ### owner 侧「任意拓扑」原语（-7）
 - runtime public 新增 `_ANY_QUERIES` 具名查询白名单与 7 个原语（read_one_any / read_all_any / exec_any /
   get_meta_value_any / set_meta_value_any / set_meta_if_absent / list_featured_skills_any）：SQL 只存在 owner 域一份，

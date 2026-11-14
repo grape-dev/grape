@@ -1423,7 +1423,16 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "read_one", "read_all",
            # P4 收口：任意拓扑可用原语（单库/sqlite 与独立 DSN 均可用；可移植方言）
            "read_one_any", "read_all_any", "exec_any", "get_meta_value_any",
-           "set_meta_value_any", "set_meta_if_absent", "list_featured_skills_any"]
+           "set_meta_value_any", "set_meta_if_absent", "list_featured_skills_any",
+           # P4 洞察看板聚合原语（insight 只读分析域唯一取数口；任意拓扑）
+           "query_events_any", "event_dashboard_metrics",
+           "dashboard_task_status_counts", "dashboard_issue_status_counts",
+           "dashboard_stuck_tasks", "dashboard_failed_tasks", "dashboard_task_by_source",
+           "dashboard_today_status_counts", "dashboard_running_counts",
+           "dashboard_avg_durations", "dashboard_workers", "dashboard_local_runtimes",
+           "dashboard_runtimes_with_credential", "credential_brief", "credential_scope_owner",
+           "task_event_map", "runtime_device_map", "agent_sessions_with_runtime",
+           "efficiency_issue_contrib", "task_issue_attribution"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -1781,6 +1790,23 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id "
         "FROM skill WHERE scope='user' AND owner_id=? ORDER BY id"),
     "skill_like_count": "SELECT like_count FROM skill WHERE id=?",
+    # skill 写（任意拓扑：mgmt 侧 skill 跨库引用收口的具名写查询）
+    "skill_repo_owner_prefix": (
+        "UPDATE skill SET owner_id='gitcode:'||owner_id "
+        "WHERE scope='repo' AND owner_id!='' AND owner_id NOT LIKE '%:%'"),
+    "skill_obs_update": (
+        "UPDATE skill SET file_path=?, display_name=?, agent_type=?, description=?, "
+        "category_id=?, updated_by=?, is_active=1, content_hash=?, updated_at=datetime('now') "
+        "WHERE id=?"),
+    "skill_obs_insert": (
+        "INSERT INTO skill (skill_name, display_name, description, agent_type, file_path, "
+        "scope, owner_id, created_by, updated_by, is_active, category_id, content_hash) "
+        "VALUES (?,?,?,?,?,?,?,?,?,1,?,?)"),
+    "skill_row_create_ignore": (
+        "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, "
+        "skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,?,?,?,?)"),
+    "skill_like_inc": "UPDATE skill SET like_count=like_count+1 WHERE id=?",
+    "skill_like_dec": "UPDATE skill SET like_count=like_count-1 WHERE id=?",
     # agent_runtimes
     "runtimes_all": (
         "SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, "
@@ -1932,3 +1958,345 @@ def list_featured_skills_any(ordered_ids: list[int] | None = None, limit: int = 
             c.execute(f"{sel} ORDER BY like_count DESC LIMIT ?", (lim,))
             out = [_featured_skill_row(r) for r in c.fetchall()]
     return out[:lim]
+
+
+# ---------- P4 洞察看板聚合原语（insight 只读分析域的唯一取数口） ----------
+#
+# 背景：三库独立后 insight 是纯只读分析域，看板里的 agent_tasks / runtime_credentials /
+# events / agent_runtimes / devops_agent_session / issue 都归 runtime 所有。直接把 SQL
+# 留在 insight 里会让 insight 进程在独立拓扑下命中 1146（无跨库视图）。
+#
+# 约定（与 `_ANY_QUERIES` 同族）：
+# - 一律走 `_any_cursor`：runtime 自有 DSN 优先，单库/测试拓扑回落进程主库——
+#   因此调用方**不需要** if/else 双路径，单库与三库行为同源；
+# - `?` 占位符（mysql_compat 翻译成 `%s`），不写方言私有函数（strftime 除外并带兜底）；
+# - 返回 tuple/list/dict 等 JSON 友好类型，**列序 = 原 insight 端 SQL 列序**，
+#   保证看板返回结构、分页、排序、字段名一个字都不变；
+# - 过滤条件语义与原 SQL 一致：repo_key 候选集（跨平台前缀）+ 组织隔离 org_id。
+
+def _rk_scope(repo_keys, org_id: int = 0, column: str = "repo_key") -> tuple[str, list[Any]]:
+    """repo_key 候选集 + 组织隔离的可选过滤片段（` AND ...`）与参数。"""
+    sql = ""
+    args: list[Any] = []
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if keys:
+        sql += f" AND {column} IN ({','.join(['?'] * len(keys))})"
+        args.extend(keys)
+    if org_id:
+        sql += " AND org_id=?"
+        args.append(int(org_id))
+    return sql, args
+
+
+def query_events_any(select: str, where: str = "", params: tuple = (), order_by: str = "",
+                     limit: int = 0, offset: int = 0) -> list[tuple]:
+    """events 受控查询（任意拓扑）：口径与 `query_events` 完全一致，单库也可用。"""
+    _check_select(select)
+    if where:
+        _check_where(where)
+    sql = f"SELECT {select} FROM events"
+    if where:
+        sql += f" WHERE {where}"
+    if order_by:
+        sql += f" ORDER BY {order_by}"
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+        if offset:
+            sql += f" OFFSET {int(offset)}"
+    with _any_cursor() as c:
+        c.execute(sql, params)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def event_dashboard_metrics(repo_keys, week_cutoff: str = "") -> dict[str, Any]:
+    """仓库看板四个事件指标一次取回（替代 insight 侧 5 条标量 SQL）。
+
+    返回 {total_issues, completed, failed, events_week, avg_duration}：
+    - total_issues：DISTINCT issue_id（非空）计数；
+    - completed / failed：status 命中计数（auto_resolution 分母的分子分母）；
+    - events_week：created_at >= 应用层算好的 cutoff；
+    - avg_duration：completed 且 duration>0 的 AVG(duration)，无样本返回 None。
+    """
+    where = "repo_key IN (" + ",".join(["?"] * max(1, len(repo_keys))) + ")"
+    args = tuple(str(k) for k in repo_keys)
+    out: dict[str, Any] = {"total_issues": 0, "completed": 0, "failed": 0,
+                           "events_week": 0, "avg_duration": None}
+    with _any_cursor() as c:
+        c.execute(f"SELECT COUNT(DISTINCT issue_id) FROM events WHERE {where} "
+                  "AND issue_id!='' AND issue_id IS NOT NULL", args)
+        row = c.fetchone()
+        out["total_issues"] = int((row or [0])[0] or 0)
+        c.execute(f"SELECT COUNT(*) FROM events WHERE {where} AND status='completed'", args)
+        row = c.fetchone()
+        out["completed"] = int((row or [0])[0] or 0)
+        c.execute(f"SELECT COUNT(*) FROM events WHERE {where} AND status='failed'", args)
+        row = c.fetchone()
+        out["failed"] = int((row or [0])[0] or 0)
+        c.execute(f"SELECT COUNT(*) FROM events WHERE {where} AND created_at >= ?",
+                  args + (week_cutoff,))
+        row = c.fetchone()
+        out["events_week"] = int((row or [0])[0] or 0)
+        c.execute(f"SELECT AVG(duration) FROM events WHERE {where} AND status='completed' "
+                  "AND duration IS NOT NULL AND duration > 0", args)
+        row = c.fetchone()
+        out["avg_duration"] = (row or [None])[0]
+    return out
+
+
+def dashboard_task_status_counts(repo_keys=(), org_id: int = 0) -> list[tuple]:
+    """任务队列状态分布：[(status, count)]（GROUP BY status，口径同 ops overview）。"""
+    where, args = _rk_scope(repo_keys, org_id)
+    with _any_cursor() as c:
+        c.execute("SELECT status, COUNT(*) FROM agent_tasks WHERE 1=1" + where +
+                  " GROUP BY status", tuple(args))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_issue_status_counts(repo_keys=(), org_id: int = 0) -> list[tuple]:
+    """issue 级状态分布：每个 issue 取 MAX(id) 那条 task 的状态再计数。"""
+    where, args = _rk_scope(repo_keys, org_id)
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT t.status, COUNT(*) FROM ("
+            " SELECT issue_id, MAX(id) as max_id FROM agent_tasks"
+            " WHERE issue_id IS NOT NULL AND issue_id <> ''" + where +
+            " GROUP BY issue_id) latest JOIN agent_tasks t ON t.id = latest.max_id"
+            " GROUP BY t.status", tuple(args))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_stuck_tasks(cutoff: str, repo_keys=(), org_id: int = 0,
+                          limit: int = 100) -> list[tuple]:
+    """stuck 任务（running 且 started_at < cutoff），按 started_at 升序。"""
+    where, args = _rk_scope(repo_keys, org_id)
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT id, agent_type, runtime_id, started_at, repo_key, issue_id, event_seq "
+            "FROM agent_tasks WHERE status='running' AND started_at IS NOT NULL "
+            "AND started_at < ?" + where + " ORDER BY started_at ASC LIMIT " + str(int(limit)),
+            (cutoff,) + tuple(args))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_failed_tasks(repo_keys=(), org_id: int = 0) -> list[tuple]:
+    """最近 failed 任务（按 completed_at 降序；调用方自行截断，保持原无 LIMIT 口径）。"""
+    where, args = _rk_scope(repo_keys, org_id)
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT id, agent_type, runtime_id, started_at, completed_at, repo_key, issue_id, "
+            "event_seq, result_text, exit_code, errors FROM agent_tasks WHERE status='failed'"
+            + where + " ORDER BY completed_at DESC", tuple(args))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_task_by_source(repo_keys=(), org_id: int = 0) -> list[tuple]:
+    """按 agent_type × status 的排队/运行数（只含 queued/dispatched/running）。"""
+    where, args = _rk_scope(repo_keys, org_id)
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT agent_type, status, COUNT(*) FROM agent_tasks "
+            "WHERE status IN ('queued','dispatched','running')" + where +
+            " GROUP BY agent_type, status", tuple(args))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_today_status_counts(day_prefix: str, repo_keys=(), org_id: int = 0) -> list[tuple]:
+    """今日任务状态分布（UTC 日期前缀匹配 created_at）。"""
+    where, args = _rk_scope(repo_keys, org_id)
+    with _any_cursor() as c:
+        c.execute("SELECT status, COUNT(*) FROM agent_tasks WHERE created_at LIKE ?" + where +
+                  " GROUP BY status", (f"{day_prefix}%",) + tuple(args))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_running_counts(org_id: int = 0) -> dict[int, int]:
+    """每个引擎当前 running 任务数（实时负载）：{runtime_id: n}。"""
+    where, args = _rk_scope((), org_id)
+    with _any_cursor() as c:
+        c.execute("SELECT runtime_id, COUNT(*) FROM agent_tasks WHERE status='running'" + where +
+                  " GROUP BY runtime_id", tuple(args))
+        return {r[0]: int(r[1] or 0) for r in (c.fetchall() or [])}
+
+
+def dashboard_avg_durations(org_id: int = 0) -> dict[int, float]:
+    """每个引擎已完成任务的平均耗时（秒）：{runtime_id: seconds}，双方言兜底。"""
+    where, args = _rk_scope((), org_id)
+    try:
+        with _any_cursor() as c:
+            c.execute(
+                "SELECT runtime_id, AVG(CASE WHEN completed_at IS NOT NULL "
+                "AND started_at IS NOT NULL THEN (strftime('%s', completed_at) - "
+                "strftime('%s', started_at)) ELSE NULL END) as avg_sec "
+                "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0"
+                + where + " GROUP BY runtime_id", tuple(args))
+            return {r[0]: round(r[1] or 0, 1) if r[1] else 0 for r in (c.fetchall() or [])}
+    except Exception:  # noqa: BLE001 - sqlite strftime 在 MySQL 上是 1064，走下面的口径
+        with _any_cursor() as c:
+            c.execute(
+                "SELECT runtime_id, AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) as avg_sec "
+                "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0 "
+                "AND started_at IS NOT NULL AND completed_at IS NOT NULL" + where +
+                " GROUP BY runtime_id", tuple(args))
+            return {r[0]: round(r[1] or 0, 1) if r[1] else 0 for r in (c.fetchall() or [])}
+
+
+_WORKER_COLS = ("id, name, device_name, status, last_seen_at, last_ip, "
+                "cpu_percent, memory_percent, disk_percent, tmp_percent, "
+                "bandwidth_percent, bandwidth_mbps, load_avg, owner_name")
+
+
+def dashboard_workers(stale_cutoff: str, org_id: int = 0, uname: str = "",
+                      repo_key: str = "", repo: str = "") -> list[tuple]:
+    """看板 worker（凭据）列表：14 列，列序与 insight 原 SQL 一致。
+
+    可见性口径（与原三份 SQL 逐字对齐）：
+    - 非个人组织（org_id>0）：只看 org_id 匹配的凭据；
+    - 仓库级看板（repo 非空）：global + 自己的 user + 该 repo 的凭据；
+    - 个人组织全局看板：global + 自己的 user。
+    三档共同前置：未吊销（status!='revoked'）且 7 天内有心跳。
+    """
+    base = (f"SELECT {_WORKER_COLS} FROM runtime_credentials WHERE status != 'revoked' "
+            "AND last_seen_at IS NOT NULL AND last_seen_at >= ?")
+    if org_id:
+        sql = base + " AND org_id=? ORDER BY id"
+        args: tuple = (stale_cutoff, int(org_id))
+    elif repo:
+        sql = base + (" AND (scope='global' OR (scope='user' AND owner_name=?) "
+                      "OR repo_key=? OR repo_key=?) ORDER BY id")
+        args = (stale_cutoff, uname, repo_key, repo)
+    else:
+        sql = base + " AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id"
+        args = (stale_cutoff, uname)
+    with _any_cursor() as c:
+        c.execute(sql, args)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_local_runtimes(org_id: int = 0) -> list[tuple]:
+    """本机直连引擎（credential_id=0）：7 列，供看板补一条本地 worker。"""
+    sql = ("SELECT ar.id, ar.name, ar.status, ar.last_seen_at, ar.host_name, "
+           "ar.healthy, ar.busy_slots, ar.max_concurrent FROM agent_runtimes ar "
+           "WHERE ar.credential_id = 0")
+    args: tuple = ()
+    if org_id:
+        sql += " AND ar.org_id=?"
+        args = (int(org_id),)
+    with _any_cursor() as c:
+        c.execute(sql, args)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_runtimes_with_credential(org_id: int = 0) -> list[tuple]:
+    """引擎列表 + 绑定凭据（20 列）：列序与 insight 原 LEFT JOIN 完全一致。
+
+    含 revoked/孤儿判定所需的 `rc.status AS cred_status` 与 `rc.id AS cred_pk`：
+    调用方据此跳过已吊销凭据的引擎（Issue #417），过滤语义留在调用方。
+    """
+    sql = ("SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
+           "ar.healthy, ar.busy_slots, ar.max_concurrent, ar.version, "
+           "rc.name AS rc_name, rc.device_name, rc.status AS cred_status, rc.id AS cred_pk, "
+           "ar.host_name, ar.probe_status, ar.probe_latency, ar.probe_last, ar.probe_error, "
+           "ar.org_id FROM agent_runtimes ar "
+           "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id")
+    args: tuple = ()
+    if org_id:
+        sql += " WHERE ar.org_id=?"
+        args = (int(org_id),)
+    sql += " ORDER BY ar.id"
+    with _any_cursor() as c:
+        c.execute(sql, args)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def credential_brief(cred_id) -> tuple | None:
+    """凭据摘要 (name, device_name)：仅两列，不含 token_hash；不存在返回 None。"""
+    with _any_cursor() as c:
+        c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (cred_id,))
+        row = c.fetchone()
+        return tuple(row) if row else None
+
+
+def credential_scope_owner(cred_id) -> tuple | None:
+    """凭据可见性 (scope, owner_name)：供看板做 user scope 归属过滤。"""
+    with _any_cursor() as c:
+        c.execute("SELECT scope, owner_name FROM runtime_credentials WHERE id=?", (cred_id,))
+        row = c.fetchone()
+        return tuple(row) if row else None
+
+
+def task_event_map() -> list[tuple]:
+    """(issue_id, event_seq) → (task_id, runtime_id) 映射源：timeline 一次取全。"""
+    with _any_cursor() as c:
+        c.execute("SELECT issue_id, event_seq, id, runtime_id FROM agent_tasks "
+                  "WHERE issue_id IS NOT NULL AND issue_id <> ''")
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def runtime_device_map() -> list[tuple]:
+    """引擎 → 设备名映射源 (ar.id, ar.name, ar.credential_id, rc.device_name, ar.host_name)。"""
+    with _any_cursor() as c:
+        c.execute("SELECT ar.id, ar.name, ar.credential_id, rc.device_name, ar.host_name "
+                  "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc "
+                  "ON ar.credential_id = rc.id")
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def agent_sessions_with_runtime(repo_keys) -> list[tuple]:
+    """看板 Agent 卡片会话行 (agent_type, runtime.name, status, last_active_at, enable,
+    credential.status)：6 列，列序与 insight 原三表 JOIN 一致。"""
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return []
+    ph = ",".join(["?"] * len(keys))
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT s.agent_type, r.name, s.status, s.last_active_at, s.enable, "
+            "COALESCE(rc.status,'') FROM devops_agent_session s "
+            "LEFT JOIN agent_runtimes r ON s.runtime_id=r.id "
+            "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+            f"WHERE s.repo_key IN ({ph}) ORDER BY s.agent_type", tuple(keys))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def efficiency_issue_contrib(repo_keys) -> list[tuple]:
+    """能效看板 issue 侧聚合 (creator, assignee, user_id, count, completed)。
+
+    分组口径：COALESCE(NULLIF(created_by,''),'') / COALESCE(assignee,'') /
+    COALESCE(user_id,0)，排除子任务行（is_subtask_mode=1）。
+    """
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return []
+    ph = ",".join(["?"] * len(keys))
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT COALESCE(NULLIF(created_by,''), '') AS creator,"
+            " COALESCE(assignee,'') AS assignee, COALESCE(user_id,0),"
+            " COUNT(*), SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END)"
+            f" FROM issue WHERE repo_key IN ({ph}) AND is_subtask_mode=0"
+            " GROUP BY creator, assignee, COALESCE(user_id,0)", tuple(keys))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def task_issue_attribution(task_ids) -> list[tuple]:
+    """任务 → 需求归属链 (task_id, created_by, assignee, user_id, is_subtask_mode, issue_id)。
+
+    单条 JOIN 承载不了分块（SQLite 变量上限），故分块落在 owner 域内部：
+    调用方只给 task_id 列表，500 一段，返回顺序与入参一致。
+    """
+    ids = [int(t) for t in (task_ids or [])]
+    if not ids:
+        return []
+    out: list[tuple] = []
+    with _any_cursor() as c:
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            ph = ",".join(["?"] * len(part))
+            c.execute(
+                "SELECT t.id, i.created_by, i.assignee, COALESCE(i.user_id, 0), "
+                "i.is_subtask_mode, i.id FROM agent_tasks t LEFT JOIN issue i "
+                "ON i.repo_key = t.repo_key AND i.issue_number = "
+                f"CAST(SUBSTR(t.issue_id, 2) AS INTEGER) WHERE t.id IN ({ph})",
+                tuple(part))
+            out.extend(tuple(r) for r in (c.fetchall() or []))
+    return out

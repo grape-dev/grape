@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from src.kernel.config import log
 
 from typing import Any
@@ -668,10 +670,13 @@ def health() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)[:160], "dsn_configured": bool(db_registry.dsn_of("mgmt"))}
 
 
-__all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_org_id",
+__all__ = ["unified_user_mapping_ddl", "available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_org_id",
            "list_user_ids_by_open_id", "get_feishu_open_id", "list_all_user_ids",
            "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
            "get_account_id_by_username", "get_account_username_by_id",
+           # 用户映射（unified_user_mapping）双拓扑读写薄封装（conn=None → 自有 DSN）
+           "resolve_feishu_open_id", "list_user_mappings", "list_feishu_name_open_id_pairs",
+           "bind_feishu_mapping_row", "sync_user_mapping", "ensure_user_mapping_schema",
            "upsert_scene_content", "set_scene_icon", "set_scene_deploy_url", "set_scene_nodes", "mark_default_featured", "list_baseline_knowledge_files", "list_knowledge_obs_keys",
            "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks", "get_autopilot_task_brief",
            # P2 服务接口补齐（N6/N8/N9/N10）
@@ -1026,3 +1031,290 @@ def upsert_outbound_card(out_track_id: str, installation_id: str = "", channel_t
                   (out_track_id, installation_id, channel_type, channel_chat_id, chat_type,
                    payload, status, last_error))
         return int(c.rowcount or 0)
+
+
+# ---------- 用户映射（unified_user_mapping）双拓扑薄封装：kernel/api 进程读写 ----------
+# 为什么带 conn 参数：单库/视图期该表就在调用方进程库里（session_manager.db），
+# 调用方的 db_lock / 事务语义必须原样保留 → 直接在其连接上执行；
+# 三库独立时表只在 mgmt 实例，调用方传 conn=None，本层走 db_registry 的 mgmt 自有 DSN。
+# 方言：SQL 一律以 sqlite 方言书写（? 占位 / INSERT OR IGNORE / datetime('now')）——
+# MySQLCompatDB 会翻译这三类；conn=None 的原生 pymysql 分支由 _um_sql() 就地翻译。
+
+_UM_NATIVE_SUBS = (("INSERT OR IGNORE", "INSERT IGNORE"),
+                   ("datetime('now')", "CAST(NOW() AS CHAR)"))
+
+
+def _um_sql(sql: str, native: bool) -> str:
+    """把以 sqlite 方言书写的**固定** SQL 转成 pymysql 原生方言（值仍走参数）。"""
+    if not native:
+        return sql
+    for src, dst in _UM_NATIVE_SUBS:
+        sql = sql.replace(src, dst)
+    return sql.replace("?", "%s")
+
+
+@contextmanager
+def _um_cursor(conn: Any = None):
+    """产出 (cursor, native_mysql)。给定 conn → 调用方连接（提交/回滚仍归调用方）。"""
+    if conn is None:
+        with db_registry.cursor("mgmt") as c:
+            yield c, True
+    else:
+        yield conn.cursor(), False
+
+
+def _um_one(c, native: bool, sql: str, params: tuple = ()):
+    c.execute(_um_sql(sql, native), params)
+    return c.fetchone()
+
+
+def resolve_feishu_open_id(login: str, app_id: str = "", conn: Any = None) -> str | None:
+    """按平台 login 解析飞书 open_id（回退链与原 session_manager.get_feishu_open_id 一致）。
+
+    FR-20.8：gitcode_user 未命中**或命中但 open_id 空**→ 回退 github_login（GitHub-only 用户）；
+    FR-22.5：两者都未命中 → 注册名查 grape_accounts.id → 按 user_id 查 um 行；
+    app_id 非空 → 只认该 App 的 open_id（open_id 为 app 级）。
+    """
+    if not login:
+        return None
+    with _um_cursor(conn) as (c, native):
+        if app_id:
+            row = _um_one(c, native,
+                          "SELECT feishu_open_id FROM unified_user_mapping "
+                          "WHERE gitcode_user=? AND app_id=?", (login, app_id))
+            if not row or not row[0]:
+                row = _um_one(c, native,
+                              "SELECT feishu_open_id FROM unified_user_mapping "
+                              "WHERE github_login=? AND app_id=?", (login, app_id))
+        else:
+            row = _um_one(c, native,
+                          "SELECT feishu_open_id FROM unified_user_mapping "
+                          "WHERE gitcode_user=?", (login,))
+            if not row or not row[0]:
+                row = _um_one(c, native,
+                              "SELECT feishu_open_id FROM unified_user_mapping "
+                              "WHERE github_login=?", (login,))
+        if row and row[0]:
+            return row[0]
+        try:
+            ga = _um_one(c, native,
+                         "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) "
+                         "AND status=1 LIMIT 1", (login,))
+            if ga:
+                if app_id:
+                    row = _um_one(c, native,
+                                  "SELECT feishu_open_id FROM unified_user_mapping "
+                                  "WHERE user_id=? AND app_id=?", (ga[0], app_id))
+                else:
+                    row = _um_one(c, native,
+                                  "SELECT feishu_open_id FROM unified_user_mapping "
+                                  "WHERE user_id=?", (ga[0],))
+                return row[0] if row else None
+        except Exception as exc:  # noqa: BLE001 - grape_accounts 可能不存在（原实现同样吞掉）
+            log.debug(f"resolve_feishu_open_id: grape_accounts fallback skipped: {exc}")
+        return None
+
+
+def list_user_mappings(conn: Any = None) -> list[tuple]:
+    """全部已知映射 (gitcode_user, github_login, feishu_open_id, feishu_name, gitcode_nickname)。
+
+    只取 gitcode_user / github_login 至少一个非空的行（原 get_feishu_mapping 的 where 口径）。
+    """
+    with _um_cursor(conn) as (c, native):
+        c.execute(_um_sql(
+            "SELECT gitcode_user, github_login, feishu_open_id, feishu_name, gitcode_nickname "
+            "FROM unified_user_mapping WHERE gitcode_user!='' OR github_login!=''", native))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def list_feishu_name_open_id_pairs(conn: Any = None) -> list[tuple]:
+    """群成员 (feishu_name, feishu_open_id)：仅 feishu_name 非空行。"""
+    with _um_cursor(conn) as (c, native):
+        c.execute(_um_sql(
+            "SELECT feishu_name, feishu_open_id FROM unified_user_mapping "
+            "WHERE feishu_name!=''", native))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def bind_feishu_mapping_row(user_id: Any, open_id: str, feishu_name: str, app_id: str,
+                            updated_at: str, conn: Any = None) -> dict[str, Any]:
+    """FR-18.7 注册名语境绑定飞书：建行（INSERT OR IGNORE）+ 只写飞书三列。
+
+    **不提交**：单库拓扑下提交/回滚归调用方（原 session_manager.bind_feishu_identity
+    在同一 db_lock 内两条语句后 commit）；conn=None 时走 mgmt 自有连接（autocommit）。
+    """
+    with _um_cursor(conn) as (c, native):
+        c.execute(_um_sql("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", native),
+                  (user_id,))
+        created = int(c.rowcount or 0)
+        c.execute(_um_sql(
+            "UPDATE unified_user_mapping SET feishu_open_id=?, feishu_name=?, app_id=?, "
+            "updated_at=? WHERE user_id=?", native),
+            (open_id, feishu_name, app_id, updated_at, user_id))
+        return {"created": created, "changed": int(c.rowcount or 0)}
+
+
+def sync_user_mapping(gitcode_user: str, open_id: str = "", feishu_name: str = "",
+                      gitcode_nickname: str = "", app_id: str = "", user_id: Any = 0,
+                      updated_at: str = "", conn: Any = None) -> dict[str, Any]:
+    """按判定规则写 unified_user_mapping 整行（与原 update_unified_user_info 逐句等价）。
+
+    判定（feishu-app-scoped-openid-fix.md §2.2，\"清空\"由 app_id 变化触发，而非 open_id 为空）：
+      - app_id 非空 且 != 存储 app_id → 刷新 app_id，清空 open_id/feishu_name（换 app 需重确认）；
+      - open_id 非空 → 写 open_id + feishu_name（有则写）+ app_id（有则写）；
+      - 否则（open_id 空且 app 未变，如 OAuth 登录）→ 仅刷 nickname/updated_at，保留 open_id/app_id。
+    写入：有真实 user_id → INSERT OR IGNORE 建行 + CASE 守卫更新（gitcode_user 空串不覆盖真值）；
+    无 user_id 但有既有行 → 按既有 user_id 更新（不动 gitcode_user）；两者皆无 → skipped。
+    返回 {"action": "updated"|"skipped", "user_id": ..., "created": n, "changed": n}。**不提交**。
+    """
+    with _um_cursor(conn) as (c, native):
+        stored = _um_one(c, native,
+                         "SELECT user_id, feishu_open_id, feishu_name, app_id "
+                         "FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,))
+        stored_open = (stored[1] or "") if stored else ""
+        stored_name = (stored[2] or "") if stored else ""
+        stored_app = (stored[3] or "") if stored else ""
+        app_changed = bool(app_id) and app_id != stored_app
+        if open_id:
+            final_app = app_id or stored_app
+        elif app_changed:
+            open_id = ""
+            feishu_name = ""
+            final_app = app_id
+        else:
+            open_id = stored_open
+            if not feishu_name:
+                feishu_name = stored_name
+            final_app = stored_app
+        created = 0
+        if user_id:
+            c.execute(_um_sql(
+                "INSERT OR IGNORE INTO unified_user_mapping (user_id, updated_at) "
+                "VALUES (?, datetime('now'))", native), (user_id,))
+            created = int(c.rowcount or 0)
+            c.execute(_um_sql(
+                "UPDATE unified_user_mapping SET gitcode_user=CASE WHEN ?='' THEN gitcode_user "
+                "ELSE ? END, gitcode_nickname=?, feishu_open_id=?, feishu_name=?, app_id=?, "
+                "updated_at=? WHERE user_id=?", native),
+                (gitcode_user, gitcode_user, gitcode_nickname, open_id, feishu_name,
+                 final_app, updated_at, user_id))
+        elif stored:
+            c.execute(_um_sql(
+                "UPDATE unified_user_mapping SET gitcode_nickname=?, feishu_open_id=?, "
+                "feishu_name=?, app_id=?, updated_at=? WHERE user_id=?", native),
+                (gitcode_nickname, open_id, feishu_name, final_app, updated_at, stored[0]))
+        else:
+            # 无 user_id 也无既有记录：跳过（user_id 必须为真实 grape_accounts.id）
+            return {"action": "skipped", "user_id": 0, "created": 0, "changed": 0}
+        return {"action": "updated", "user_id": user_id or stored[0], "created": created,
+                "changed": int(c.rowcount or 0)}
+
+
+# ---------- unified_user_mapping 本地库引导（DDL + 兼容列迁移 + 回填） ----------
+# 表归 mgmt 域，schema 引导语句随之归位；kernel/api 进程在**单库/视图期**启动时仍需
+# 保证本库有该表，故按「传入调用方连接」的方式复用同一份 DDL（不接受拼接 SQL）。
+UNIFIED_USER_MAPPING_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS unified_user_mapping (
+    user_id INTEGER PRIMARY KEY,
+    gitcode_user TEXT DEFAULT '',
+    gitcode_nickname TEXT DEFAULT '',
+    feishu_open_id TEXT DEFAULT '',
+    feishu_name TEXT DEFAULT '',
+    app_id TEXT DEFAULT '',               -- ★ 产生 feishu_open_id 的飞书 App（open_id 为 app 级，见 feishu-app-scoped-openid-fix.md）
+    github_login TEXT DEFAULT '',
+    dingtalk_user_id TEXT DEFAULT '',
+    updated_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
+
+
+def unified_user_mapping_ddl() -> str:
+    """unified_user_mapping 建表 DDL（kernel 初始化与单测复用；常量本身不对外暴露）。"""
+    return UNIFIED_USER_MAPPING_TABLE_SQL
+
+def ensure_user_mapping_schema(conn: Any) -> None:
+    """在调用方连接上引导 unified_user_mapping（与原 session_manager 启动块逐步骤等价）。
+
+    步骤与容错口径（每步独立 try/except，仅 CREATE 允许抛出——原实现同样在启动时直接抛）：
+      1) 结构不匹配（缺 gitcode_nickname/github_login/dingtalk_user_id）→ DROP 后重建；
+      2) CREATE TABLE IF NOT EXISTS（UNIFIED_USER_MAPPING_TABLE_SQL）；
+      3) 兼容列 gitcode_id（Issue #211）；
+      4) 回填：grape_accounts 已有账号建空行 + external_identities 回填平台列真值（只填空值）；
+      5) 兼容列 app_id（feishu-app-scoped-openid-fix.md）。
+    幂等：可每次启动执行。conn 必填（DDL 必须落在调用方所在库，不能走跨域连接）。
+    """
+    if conn is None:
+        raise ValueError("ensure_user_mapping_schema 需要调用方连接（本地库引导）")
+    # 1) 彻底重建：结构不匹配新 DDL 则 DROP 后重建（历史遗留表为空，直接 DROP 无数据丢失）
+    try:
+        _um_cols = [r[1] for r in conn.execute("PRAGMA table_info(unified_user_mapping)").fetchall()]
+        if _um_cols and not {"gitcode_nickname", "github_login", "dingtalk_user_id"}.issubset(set(_um_cols)):
+            conn.execute("DROP TABLE unified_user_mapping")
+            conn.commit()
+            log.info("Rebuilt unified_user_mapping (structure mismatch -> dropped & recreated)")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Rebuild unified_user_mapping check failed: {e}")
+    # 2) 建表（失败必须抛出：原实现在启动时同样直接抛）
+    conn.execute(UNIFIED_USER_MAPPING_TABLE_SQL)
+    # 3) 兼容列 gitcode_id（Issue #211，非 OAuth 注册用户的关联字段）
+    try:
+        _um_cols_gid = [r[1] for r in conn.execute("PRAGMA table_info(unified_user_mapping)").fetchall()]
+        if "gitcode_id" not in _um_cols_gid:
+            conn.execute("ALTER TABLE unified_user_mapping ADD COLUMN gitcode_id TEXT DEFAULT ''")
+            conn.commit()
+            log.info("Added unified_user_mapping.gitcode_id column")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Add unified_user_mapping.gitcode_id failed: {e}")
+    # 4) 回填：grape_accounts 已有但未映射的用户（INSERT OR IGNORE 不覆盖已有飞书绑定），
+    #    使 /api/tasks/notify 能解析 assignee→user_id；幂等，每次启动执行
+    try:
+        try:
+            _has_ga = conn.execute("SELECT 1 FROM grape_accounts LIMIT 1").fetchone()
+        except Exception:
+            _has_ga = None  # 表不存在
+        if _has_ga:
+            # FR-18.4: backfill 只建 (user_id) 空行，不灌注册名
+            conn.execute(
+                "INSERT OR IGNORE INTO unified_user_mapping (user_id) "
+                "SELECT id FROM grape_accounts WHERE id IS NOT NULL AND id NOT IN ('', '0')")
+            # FR-18.4: 从 external_identities 回填平台列真值（仅填空值不覆盖 PAT 已写真值）
+            try:
+                conn.execute(
+                    "UPDATE unified_user_mapping SET gitcode_user="
+                    "(SELECT ei.external_login FROM external_identities ei "
+                    "WHERE ei.grape_user_id=unified_user_mapping.user_id "
+                    "AND ei.provider='gitcode' AND ei.status=1 AND ei.external_login!='' LIMIT 1) "
+                    "WHERE (gitcode_user IS NULL OR gitcode_user='')")
+                conn.execute(
+                    "UPDATE unified_user_mapping SET github_login="
+                    "(SELECT ei.external_login FROM external_identities ei "
+                    "WHERE ei.grape_user_id=unified_user_mapping.user_id "
+                    "AND ei.provider='github' AND ei.status=1 AND ei.external_login!='' LIMIT 1) "
+                    "WHERE (github_login IS NULL OR github_login='')")
+            except Exception as exc:  # noqa: BLE001 - 列不存在时跳过，但不再静默
+                log.warning(f"backfill github_login failed: {exc}")
+            # 补充 gitcode_id 关联：从 external_identities 读
+            try:
+                conn.execute(
+                    "UPDATE unified_user_mapping SET gitcode_id = "
+                    "(SELECT ei.external_id FROM external_identities ei "
+                    "WHERE ei.grape_user_id = unified_user_mapping.user_id AND ei.provider='gitcode') "
+                    "WHERE gitcode_id='' AND user_id IN "
+                    "(SELECT grape_user_id FROM external_identities WHERE provider='gitcode')")
+            except Exception as exc:  # noqa: BLE001 - external_identities 表可能不存在
+                log.warning(f"backfill gitcode_id failed: {exc}")
+            conn.commit()
+        else:
+            log.info("grape_accounts table not yet created, skipping backfill")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Backfill unified_user_mapping failed: {e}")
+    # 5) 兼容列 app_id（feishu-app-scoped-openid-fix.md，open_id 为 app 级）
+    try:
+        _um_cols2 = [r[1] for r in conn.execute("PRAGMA table_info(unified_user_mapping)").fetchall()]
+        if "app_id" not in _um_cols2:
+            conn.execute("ALTER TABLE unified_user_mapping ADD COLUMN app_id TEXT DEFAULT ''")
+            conn.commit()
+            log.info("Added unified_user_mapping.app_id column")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Add unified_user_mapping.app_id failed: {e}")

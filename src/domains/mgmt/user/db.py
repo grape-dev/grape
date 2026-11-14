@@ -769,17 +769,10 @@ def _migrate_repo_key_tables():
         # skill 表 repo 级记录：owner_id 存 repo_key（scope='repo'）
         # skill 归运行域：独立拓扑下必须走 owner 连接，否则 1146
         try:
-            from src.kernel.domain_db import cursor as _domain_cursor  # noqa: PLC0415
-            with _domain_cursor("runtime") as _c_sk:
-                _c_sk.execute(
-                    "UPDATE skill SET owner_id='gitcode:'||owner_id "
-                    "WHERE scope='repo' AND owner_id!='' AND owner_id NOT LIKE '%:%'"
-                )
-                _conn = getattr(_c_sk, "connection", None)
-                if _conn is not None:
-                    _conn.commit()
-                else:
-                    db.commit()
+            # skill 归运行域：具名写查询经 runtime public 可移植原语（自有 DSN 优先，
+            # 单库拓扑回落进程主库），不再直连 runtime 基表。
+            from src.domains.runtime import public as _rt  # noqa: PLC0415
+            _rt.exec_any("skill_repo_owner_prefix")
         except Exception as e:
             log.warning(f"Migrate skill repo_key prefix failed: {e}")
 
@@ -1077,34 +1070,21 @@ def get_skill_by_id(skill_id, *, raise_on_error: bool = False) -> dict | None:
     """
     if not skill_id:
         return None
-    import os as _os
-    from src.kernel.domain_read import switch_on as _dr_switch  # noqa: PLC0415
-    if _dr_switch("GRAPE_SKILLS_VIA_LIB", "runtime"):
-        try:
-            from src.domains.runtime import public as _rt
-            if _rt.available():
-                return _rt.get_skill_by_id(int(skill_id))
-        except Exception as _exc:  # noqa: BLE001
-            log.warning(f"skill via lib failed, fallback: {_exc}")
     try:
+        # 三库拆独立实例：skill 归运行域，具名查询经 runtime public 可移植原语读取
+        # （自有 DSN 优先，单库拓扑回落进程主库），调用方零差异。
+        from src.domains.runtime import public as _rt  # noqa: PLC0415
         with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_4b5014_f
-            _ru_lib_4b5014 = _ru_lib_4b5014_f(foreign_only=True)
-            if _ru_lib_4b5014 is not None:
-                row = _ru_lib_4b5014.read_one("skill_4b5014", (int(skill_id),))
-            else:
-                c.execute("SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, scope, owner_id, content_hash FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
-                row = c.fetchone()
-            if not row:
-                return None
-            return {
-                "id": row[0], "skill_name": row[1], "display_name": row[2] or row[1],
-                "description": row[3] or "", "agent_type": row[4] or "",
-                "skill_path": row[5] or row[1], "file_path": row[6] or "",
-                "scope": row[7] or "official", "owner_id": row[8] or "",
-                "content_hash": row[9] or "",
-            }
+            row = _rt.read_one_any("skill_row_by_id", (int(skill_id),))
+        if not row:
+            return None
+        return {
+            "id": row[0], "skill_name": row[1], "display_name": row[2] or row[1],
+            "description": row[3] or "", "agent_type": row[4] or "",
+            "skill_path": row[5] or row[1], "file_path": row[6] or "",
+            "scope": row[7] or "official", "owner_id": row[8] or "",
+            "content_hash": row[9] or "",
+        }
     except Exception as e:
         if raise_on_error:
             raise
@@ -1116,27 +1096,13 @@ def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[in
     返回 (id, content_hash, file_path)，id=0 表示不存在。
     """
     import os as _os
-    from src.kernel.domain_read import switch_on as _dr_switch  # noqa: PLC0415
-    if _dr_switch("GRAPE_SKILLS_VIA_LIB", "runtime"):
-        try:
-            from src.domains.runtime import public as _rt
-            if _rt.available():
-                return _rt.get_skill_content_hash(skill_name, scope or "official")
-        except Exception as _exc:  # noqa: BLE001
-            log.warning(f"skill hash via lib failed, fallback: {_exc}")
     try:
+        from src.domains.runtime import public as _rt  # noqa: PLC0415
         with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_1b908c_f
-            _ru_lib_1b908c = _ru_lib_1b908c_f(foreign_only=True)
-            if _ru_lib_1b908c is not None:
-                row = _ru_lib_1b908c.read_one("skill_1b908c", (skill_name, scope))
-            else:
-                c.execute("SELECT id, content_hash, file_path FROM skill WHERE skill_name=? AND scope=? LIMIT 1", (skill_name, scope))
-                row = c.fetchone()
-            if not row:
-                return (0, "", "")
-            return (row[0], row[1] or "", row[2] or "")
+            row = _rt.read_one_any("skill_by_name_scope", (skill_name, scope or "official"))
+        if not row:
+            return (0, "", "")
+        return (row[0], row[1] or "", row[2] or "")
     except Exception as e:
         log.warning(f"get_skill_content_hash failed: {e}")
         return (0, "", "")
@@ -1150,16 +1116,14 @@ def get_skill_hash_by_key(skill_name: str, scope: str, owner_id: str = "") -> tu
     id=0 表示不存在；is_active=0 表示行已被软删除。
     """
     try:
+        from src.domains.runtime import public as _rt  # noqa: PLC0415
         with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT id, content_hash, file_path, is_active FROM skill "
-                "WHERE skill_name=? AND scope=? AND owner_id=? LIMIT 1",
+            row = _rt.read_one_any(
+                "skill_hash_by_key",
                 (skill_name, scope or "official", owner_id or ""))
-            row = c.fetchone()
-            if not row:
-                return (0, "", "", 0)
-            return (row[0], row[1] or "", row[2] or "", row[3] if row[3] is not None else 1)
+        if not row:
+            return (0, "", "", 0)
+        return (row[0], row[1] or "", row[2] or "", row[3] if row[3] is not None else 1)
     except Exception as e:
         log.warning(f"get_skill_hash_by_key failed: {e}")
         return (0, "", "", 0)
@@ -1171,20 +1135,12 @@ def get_skill_hash_by_id(skill_id: int) -> tuple[int, str, str, int]:
     删除重传换 id），调用方应强制失效缓存而非降级通过。
     """
     try:
+        from src.domains.runtime import public as _rt  # noqa: PLC0415
         with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_da7be4_f
-            _ru_lib_da7be4 = _ru_lib_da7be4_f(foreign_only=True)
-            if _ru_lib_da7be4 is not None:
-                row = _ru_lib_da7be4.read_one("skill_da7be4", (skill_id,))
-            else:
-                c.execute(
-                    "SELECT id, content_hash, file_path, is_active FROM skill WHERE id=?",
-                    (skill_id,))
-                row = c.fetchone()
-            if not row:
-                return (0, "", "", 0)
-            return (row[0], row[1] or "", row[2] or "", row[3] if row[3] is not None else 1)
+            row = _rt.read_one_any("skill_hash_by_id", (skill_id,))
+        if not row:
+            return (0, "", "", 0)
+        return (row[0], row[1] or "", row[2] or "", row[3] if row[3] is not None else 1)
     except Exception as e:
         log.warning(f"get_skill_hash_by_id failed: {e}")
         return (0, "", "", 0)
@@ -1197,13 +1153,11 @@ def get_skill_hashes_by_name_scope(skill_name: str, scope: str) -> list[tuple[st
     覆盖全部 provider 口径。返回空列表表示无行。
     """
     try:
+        from src.domains.runtime import public as _rt  # noqa: PLC0415
         with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT owner_id, content_hash FROM skill "
-                "WHERE skill_name=? AND scope=? AND is_active=1",
-                (skill_name, scope or "official"))
-            return [(r[0] or "", r[1] or "") for r in c.fetchall()]
+            rows = _rt.read_all_any("skill_hashes_by_name_scope",
+                                    (skill_name, scope or "official"))
+        return [(r[0] or "", r[1] or "") for r in rows]
     except Exception as e:
         log.warning(f"get_skill_hashes_by_name_scope failed: {e}")
         return []
@@ -1230,14 +1184,16 @@ def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str =
                 _apply_sch, log)
         if _sch_done:
             return int(_sch_n.get("n") or 0) > 0
+        from src.domains.runtime import public as _rt_sch_any  # noqa: PLC0415
         with db_lock:
-            c = db.cursor()
             if file_path:
-                c.execute("UPDATE skill SET content_hash=?, file_path=? WHERE id=?", (content_hash, file_path, skill_id))
+                _n_upd = _rt_sch_any.exec_any(
+                    "skill_update_content_hash", (content_hash, file_path, skill_id))
             else:
-                c.execute("UPDATE skill SET content_hash=? WHERE id=?", (content_hash, skill_id))
+                _n_upd = _rt_sch_any.exec_any(
+                    "skill_update_content_hash_only", (content_hash, skill_id))
             db.commit()
-            return c.rowcount > 0
+            return _n_upd > 0
     except Exception as e:
         log.warning(f"update_skill_content_hash failed: {e}")
         return False
@@ -1259,37 +1215,19 @@ def resolve_skill_id(skill_name: str, owner_id: str = "",
     if user_id:
         user_id = str(user_id)
     try:
+        from src.domains.runtime import public as _rt  # noqa: PLC0415
         with db_lock:
-            c = db.cursor()
             if user_id:
-                from src.kernel.domain_read import runtime_lib as _ru_lib_17c0d2_f
-                _ru_lib_17c0d2 = _ru_lib_17c0d2_f(foreign_only=True)
-                if _ru_lib_17c0d2 is not None:
-                    row = _ru_lib_17c0d2.read_one("skill_17c0d2", (skill_name, user_id))
-                else:
-                    c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, user_id))
-                    row = c.fetchone()
+                row = _rt.read_one_any("skill_id_user_owner", (skill_name, user_id))
                 if row:
                     log.info(f"resolve_skill_id: '{skill_name}' hit user scope (owner={user_id})")
                     return row[0]
             if repo_key:
-                from src.kernel.domain_read import runtime_lib as _ru_lib_4a8bb9_f
-                _ru_lib_4a8bb9 = _ru_lib_4a8bb9_f(foreign_only=True)
-                if _ru_lib_4a8bb9 is not None:
-                    row = _ru_lib_4a8bb9.read_one("skill_4a8bb9", (skill_name, repo_key))
-                else:
-                    c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, repo_key))
-                    row = c.fetchone()
+                row = _rt.read_one_any("skill_id_repo_owner", (skill_name, repo_key))
                 if row:
                     log.info(f"resolve_skill_id: '{skill_name}' hit repo scope (owner={repo_key})")
                     return row[0]
-            from src.kernel.domain_read import runtime_lib as _ru_lib_94e35b_f
-            _ru_lib_94e35b = _ru_lib_94e35b_f(foreign_only=True)
-            if _ru_lib_94e35b is not None:
-                row = _ru_lib_94e35b.read_one("skill_94e35b", (skill_name,))
-            else:
-                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1", (skill_name,))
-                row = c.fetchone()
+            row = _rt.read_one_any("skill_id_official", (skill_name,))
             if row:
                 return row[0]
     except Exception as e:
@@ -1363,42 +1301,20 @@ def get_skill_scope_info(skill_name: str, repo_key: str = "",
     if not skill_name:
         return info
     try:
+        from src.domains.runtime import public as _rt  # noqa: PLC0415
         with db_lock:
-            c = db.cursor()
             if repo_key:
-                from src.kernel.domain_read import runtime_lib as _ru_lib_015f53_f
-                _ru_lib_015f53 = _ru_lib_015f53_f(foreign_only=True)
-                if _ru_lib_015f53 is not None:
-                    c = _ru_lib_015f53.read_one("skill_015f53", (skill_name, repo_key)).fetchone()
-                else:
-                    row = c.execute(
-                        "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='repo' "
-                        "AND owner_id=? AND is_active=1 LIMIT 1",
-                        (skill_name, repo_key)).fetchone()
+                row = _rt.read_one_any("skill_scope_repo_owner", (skill_name, repo_key))
                 if row:
                     info.update(found=True, matched=True, scope="repo",
                                 skill_id=row[0], owner_id=row[1] or "")
                     return info
-            from src.kernel.domain_read import runtime_lib as _ru_lib_94e35b_f
-            _ru_lib_94e35b = _ru_lib_94e35b_f(foreign_only=True)
-            if _ru_lib_94e35b is not None:
-                c = _ru_lib_94e35b.read_one("skill_94e35b", (skill_name,)).fetchone()
-            else:
-                row = c.execute(
-                    "SELECT id FROM skill WHERE skill_name=? AND scope='official' "
-                    "AND is_active=1 LIMIT 1", (skill_name,)).fetchone()
+            row = _rt.read_one_any("skill_scope_official", (skill_name,))
             if row:
                 info.update(found=True, matched=True, scope="official",
                             skill_id=row[0], owner_id="")
                 return info
-            from src.kernel.domain_read import runtime_lib as _ru_lib_311fe3_f
-            _ru_lib_311fe3 = _ru_lib_311fe3_f(foreign_only=True)
-            if _ru_lib_311fe3 is not None:
-                c = _ru_lib_311fe3.read_one("skill_311fe3", (skill_name,)).fetchone()
-            else:
-                row = c.execute(
-                    "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='user' "
-                    "AND is_active=1 LIMIT 1", (skill_name,)).fetchone()
+            row = _rt.read_one_any("skill_scope_user_any", (skill_name,))
             if row:
                 info.update(found=True, matched=False, scope="user",
                             skill_id=row[0], owner_id=row[1] or "")
@@ -1468,23 +1384,11 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
     失败返回 None——0/None 均为 falsy，既有 `if not ok` 判断语义不变）。
     """
     try:
+        from src.domains.runtime import public as _rt  # noqa: PLC0415
         with db_lock:
-            c = db.cursor()
-            if scope == "repo":
-                c.execute(
-                    "SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
-                    (skill_name, owner))
-                row = c.fetchone()
-            else:
-                from src.kernel.domain_read import runtime_lib as _ru_lib_652318_f
-                _ru_lib_652318 = _ru_lib_652318_f(foreign_only=True)
-                if _ru_lib_652318 is not None:
-                    row = _ru_lib_652318.read_one("skill_652318", (skill_name, owner))
-                else:
-                    c.execute(
-                        "SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?",
-                        (skill_name, owner))
-                    row = c.fetchone()
+            row = _rt.read_one_any(
+                "skill_id_by_owner_scope",
+                (skill_name, "repo" if scope == "repo" else "user", owner))
             if row:
                 # P3-5f：skill 在 runtime 域
                 from src.kernel.domain_read import runtime_lib as _rt_lib_uso
@@ -1505,10 +1409,8 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                             description or "", category_id, created_by or "",
                             content_hash or ""), log)
                 if not _uso_done:
-                    c.execute(
-                        "UPDATE skill SET file_path=?, display_name=?, "
-                        "agent_type=?, description=?, category_id=?, updated_by=?, is_active=1, "
-                        "content_hash=?, updated_at=datetime('now') WHERE id=?",
+                    _rt.exec_any(
+                        "skill_obs_update",
                         (object_key, skill_name, agent_type or "", description or "",
                          category_id, created_by or "", content_hash or "", row[0]))
                 db.commit()
@@ -1539,15 +1441,16 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
             if _usi_done:
                 db.commit()
                 return int(_usi_out.get("id") or 0)
-            cur = c.execute(
-                "INSERT INTO skill (skill_name, display_name, description, agent_type, "
-                "file_path, scope, owner_id, created_by, updated_by, is_active, category_id, content_hash) "
-                "VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
+            _rt.exec_any(
+                "skill_obs_insert",
                 (skill_name, skill_name, description or "", agent_type or "",
                  object_key, scope, owner, created_by or "", created_by or "", category_id,
                  content_hash or ""))
             db.commit()
-            return int(cur.lastrowid or 0)
+            _new = _rt.read_one_any(
+                "skill_id_by_owner_scope",
+                (skill_name, "repo" if scope == "repo" else "user", owner))
+            return int(_new[0]) if _new else 0
     except Exception as e:
         log.warning(f"upsert_skill_obs failed: {e}")
         return None
@@ -1557,7 +1460,6 @@ def create_skill(user_id: int, skill_name: str, agent_type: str = "", descriptio
                  created_by: str = "") -> bool:
     try:
         with db_lock:
-            c = db.cursor()
             cb = created_by or str(user_id)
             # P3-5f：skill 在 runtime 域（INSERT IGNORE 幂等）
             from src.kernel.domain_read import runtime_lib as _rt_lib_csk
@@ -1576,12 +1478,11 @@ def create_skill(user_id: int, skill_name: str, agent_type: str = "", descriptio
                     lambda: _rt_csk_ok.create_skill_row(skill_name, description, agent_type,
                                                         scope, _csk_owner, cb), log)
             if not _csk_done:
-                if scope == "repo":
-                    c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,'repo',?,?,?)",
-                              (skill_name, skill_name, description, agent_type, skill_name, owner_id or str(user_id), cb, cb))
-                else:
-                    c.execute("INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,'user',?,?,?)",
-                              (skill_name, skill_name, description, agent_type, skill_name, str(user_id), cb, cb))
+                from src.domains.runtime import public as _rt_csk_any  # noqa: PLC0415
+                _rt_csk_any.exec_any(
+                    "skill_row_create_ignore",
+                    (skill_name, skill_name, description, agent_type, skill_name,
+                     scope, _csk_owner, cb, cb))
             db.commit()
             if scope == "repo":
                 ensure_repo_skill_dir(owner_id or str(user_id), skill_name)
