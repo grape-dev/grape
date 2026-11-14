@@ -3152,6 +3152,86 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   两对都仍有别处的 api 侧引用，故对数不变）。基线 `foreign-refs-allowlist.csv` 收紧为 88 / 39，
   依赖看板与作业单同步刷新（下一批头名 `src/api/deps.py` 4 处 `external_identities`）。
 
+### 7.34 api 进程 OAuth 身份取 token / 预刷新判定归位 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/api/deps.py` **4 处 → 0**（单轮做完，4 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`external_identities`（归 **mgmt**）× 4。
+  - L374 `_get_oauth_token_from_identity`：`SELECT access_token, status ... WHERE grape_user_id=?
+    AND provider=? AND status IN (1, 4)`（取 OAuth token 的主路径，GitHub 与平台卡遗留符号共用）。
+  - L451 `try_refresh_gitcode_token` 等锁分支：`SELECT access_token ... provider='gitcode' ...
+    LIMIT 1`（抢锁失败后读其他实例刚刷新的 token）。
+  - L491 `_try_refresh_github_token` 同形（provider='github'）。
+  - L608 `get_user_token_for` 预刷新闸门：`SELECT token_expires_at ... status IN (1, 4)`。
+  - 四条都是**单表、无 JOIN、无动态表名/列名**，值参数只有 (grape_user_id, provider)；
+    provider 在 L451/L491 原为字面量，上移后改参数绑定（同值，不拼 SQL）。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`）：
+  - 新增具名查询 `ei_oauth_token_status`（`SELECT access_token, status`，**无 LIMIT**）、
+    `ei_token_expires_at`（`SELECT token_expires_at`，无 LIMIT），均 `?` 方言、
+    谓词/列序与原 SQL 逐字一致；
+  - 新增薄函数 `oauth_token_status_any(grape_user_id, provider)`（返回原值二元组）、
+    `token_expires_at_any(...)`（返回原值或 None）；
+  - 复用既有 `ei_stored_access_token` / `stored_access_token_any`（7.19 为 token_resolver 登记，
+    `SELECT access_token ... LIMIT 1` 与 L451/L491 逐字同形），本批**不重复登记**同语句；
+    顺带把 `stored_access_token_any` 补进 `__all__`（此前只被 `from ... import` 直接引用，
+    注册面缺登记）。
+  - 调用点只改 `src/api/deps.py`。
+- 设计取舍：
+  1) **同语句不登记第二份**：L451/L491 与既有 `ei_stored_access_token` 逐字同形（含 LIMIT 1），
+     按 7.31/7.32 已确立的「已有原语优先」直接复用；只有 L374（两列）与 L608（过期时间列）
+     是本批真正新增的两条。
+  2) **`SELECT access_token, status` 保留两列**：`status` 在调用点并未使用（只判 `row[0]`），
+     但「列序与原 SQL 逐字一致」优先——缩成单列会让本批同时改变语句形态与后续
+     status=4 语义的回接成本；status 的业务判定（过期仍返回 token）仍留在调用方。
+  3) **无 LIMIT 照抄**：原实现靠 `fetchone()` 取首行，真实 schema 有
+     `UNIQUE(grape_user_id, provider)` 只可能一行；不擅自加 `LIMIT 1` 以免多行副本场景
+     改变行选择口径（冒烟用无约束表钉住「首行」行为）。
+  4) **`str()` 归一 grape_user_id**：与同域既有 `stored_access_token_any` 一致；TEXT 列 +
+     整型入参在 MySQL/sqlite 都能命中，None 仍不命中（NULL 比较同义）。
+  5) **`get_user_token_for` 里那把 `_sm_dl` 进程锁去掉**：原实现在一把 `db_lock` 内做
+     「账号查询 + 过期时间查询」两读（单库下是一个快照）。改后两跳各自取锁（单库 `db_lock`
+     是 RLock，不会自锁）/ 各自取 mgmt DSN。username→id 映射在会话期内不变，
+     两读之间毫秒级漂移不影响判定；换取的是拓扑无关（三库下有真值）。
+  6) **等锁分支的两处 `except: pass` 改为 `log.debug`**：语义不变（等锁路径读不到 =
+     「未被其他实例刷新」，随后返回 None 让上层走 401 兜底），只是让降级可观测；
+     `tests/silent_except_baseline.json` 的 `src/api/deps.py` 5 → 1（只减不增）。
+  7) **`mark_identity_expired` 的 `except: pass` 原样保留**：属既有尽力而为语义（标记失败不
+     影响「返回旧 token」），不在本批扩大范围。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1) **三库拓扑下 OAuth 取 token 恒空**：api 进程库没有 `external_identities`（视图 0）→
+     L374 必 1146 → 外层 except 吞成 `""`，`get_user_github_token` 与平台卡 `legacy_token_symbol`
+     派生入口一并失效（GitHub 侧永远拿不到 token，gitee/gitlab 等新平台同链）。
+  2) **双主集群并发 401 时刷新后仍拿不到 token**：L451/L491 的 1146 落到 `except: pass` →
+     返回 None，调用方以为「别人也没刷成功」继续用旧 token，401 重试链打空。
+  3) **预刷新闸门恒不触发**：L608 的 1146 被外层 except 吞成
+     `pre-refresh expiry check failed` 告警后直接 `return token`，`token_expires_at`
+     判定永远走不到 → 过期前 10 分钟不刷新，只能等真过期打 401 再靠兜底链救。
+  4) **同一批站点在单库拓扑下静默读副本**：若进程库恰好存在同名副本（视图期），
+     四条语句会读到与 mgmt 库不一致的旧 token/旧过期时间，且没有任何日志痕迹。
+- 验证：
+  - `py_compile` 2 个文件 **COMPILE_OK**（`src/api/deps.py`、`src/domains/mgmt/public/__init__.py`）。
+  - SQLite 烟测 `~/burndown/deps_oauth_smoke.py` **ALL 96 CHECKS PASSED**
+    （A 静态面 / B owner 注册面 / C 行为面 / D 边界与否定 / E 拓扑面）：
+    文件内「关键字 + 101 张基表名」命中 0（不是靠基线豁免）；四个站点不再持进程主库游标/锁、
+    无残留 SQL 文本、无 `%s`/`NOW()`/`ON DUPLICATE`；静默 except 3（HEAD）→ 1；
+    两条新查询列序/谓词/无 LIMIT 逐字对齐，未登记名抛 KeyError；
+    `status IN (1,4)` 口径钉住（status=4 仍返回 token，2/3 不命中），空 token 行返回行本身、
+    NULL 过期时间 → None、多行取首行与原 SQL 同；
+    取 token 端到端（含 `get_user_github_token`）、等锁分支读最新 token（token 空/无行 → None）、
+    预刷新四分（无 refresh 早退 / 窗口内刷新一次 / 远未来不刷 / 不可解析=0 不刷 / NULL 不刷）
+    与「刷新失败 → mark_identity_expired + 返回旧 token」全部按原口径；
+    缺表时 owner 抛 `OperationalError`（不静默）、调用方各自降级为 `''`/None；
+    自有 DSN 分支下 api 库缺表仍能取 token 与判定过期，全程只连 mgmt 域
+    （原实现在此 4 条语句全 1146，用户侧表现是 GitHub token 永久为空、预刷新永不触发）。
+  - `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK /
+    契约 37 条 / 看板最新）。
+  - `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**；
+    `check_lib_query_names.py src` **PASS**（mgmt 169 funcs + 6 named queries used）。
+- 新基线：全局 **88 → 84**（-4），对数 **39 → 38** —— `external_identities←api` 这一对
+  **清零**（该表剩余消费者均在 mgmt 本域与 runtime 侧，属另行批次）。基线
+  `foreign-refs-allowlist.csv` 收紧为 84 / 38，依赖看板与作业单同步刷新
+  （下一批头名 `src/kernel/prompt_builder.py` 3 处 `unified_user_mapping`，
+  同尺寸还有 `src/kernel/persistence/credential_usage_log.py` 3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

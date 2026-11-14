@@ -759,6 +759,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # baseline 知识文件行 / 账号 id（runtime/engine/service.py；任意拓扑）
            "baseline_knowledge_files_any",
            "account_id_by_username_valid_any", "account_id_by_username_ci_any",
+           # OAuth 身份原值（api/deps.py 取 token / 预刷新判定；任意拓扑）
+           "oauth_token_status_any", "token_expires_at_any", "stored_access_token_any",
            "health"]
 
 
@@ -1907,6 +1909,15 @@ _ANY_QUERIES: dict[str, str] = {
     "ei_stored_access_token": (
         "SELECT access_token FROM external_identities "
         "WHERE grape_user_id=? AND provider=? AND status IN (1, 4) LIMIT 1"),
+    # 同表两列原值（api/deps.py 的 OAuth 取 token / 预刷新判定；status 由调用方判定语义）。
+    # 原实现在 api 进程主库直发 SQL：三库拓扑下 api 库没有 external_identities（视图 0 → 1146），
+    # 被外层 except 吞成「无 token」/「不预刷新」。列序、谓词、无 LIMIT（fetchone 取首行）逐字照抄。
+    "ei_oauth_token_status": (
+        "SELECT access_token, status FROM external_identities "
+        "WHERE grape_user_id=? AND provider=? AND status IN (1, 4)"),
+    "ei_token_expires_at": (
+        "SELECT token_expires_at FROM external_identities "
+        "WHERE grape_user_id=? AND provider=? AND status IN (1, 4)"),
     # ── 代发内容台账（kernel/outbound_ledger；outbound_content_ledger 归 mgmt）──
     # 原实现在 kernel 里用进程主库游标直发 SQL：三库拓扑下进程库没有该表（视图 0 → 1146），
     # 写侧记账被内部 except 吞成 False（只剩进程内 TTL 集合，跨进程/重启即漏拦），
@@ -2336,6 +2347,24 @@ def stored_access_token_any(grape_user_id: Any, provider: str) -> str:
     """
     row = read_one_any("ei_stored_access_token", (str(grape_user_id), provider or ""))
     return str(row[0]) if row and row[0] else ""
+
+
+def oauth_token_status_any(grape_user_id: Any, provider: str) -> tuple | None:
+    """external_identities 的 (access_token, status) 原值（status IN (1, 4)）。
+
+    只交出密文与状态列，解密与「过期仍返回 token」的口径留在调用方（逐字照抄原语句，
+    无 LIMIT：原实现 fetchone 取首行，与 LIMIT 1 不同行序多行的取舍保持一致）。
+    """
+    return read_one_any("ei_oauth_token_status", (str(grape_user_id), provider or ""))
+
+
+def token_expires_at_any(grape_user_id: Any, provider: str) -> Any | None:
+    """external_identities.token_expires_at 原值（status IN (1, 4)）；无行返回 None。
+
+    时间字符串的解析（UTC 口径 / 解析失败=0）留在调用方，本域不做时间语义判定。
+    """
+    row = read_one_any("ei_token_expires_at", (str(grape_user_id), provider or ""))
+    return row[0] if row else None
 
 
 # ---------- 事件知识清理 / 账户名（runtime/routes/events.py 调用；任意拓扑） ----------

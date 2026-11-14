@@ -4,7 +4,7 @@
   "src/api/chat_task_manager.py": 4,
   "src/api/code_version.py": 1,
   "src/api/db_setup.py": 34,
-  "src/api/deps.py": 5,
+  "src/api/deps.py": 1,
   "src/api/diagnostics.py": 2,
   "src/api/event_archive.py": 1,
   "src/api/git_repo_api.py": 3,
