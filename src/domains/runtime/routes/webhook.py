@@ -466,6 +466,12 @@ def _a2a_skip_reason(skipped: str, *, issue_number=None, agent: str = "",
         return _template
 
 
+_A2A_SKIP_RESERVED_KEYS = (
+    "status", "seq", "agent", "ok", "skipped", "reason", "detail",
+    "handoff_result", "source_seq",
+)
+
+
 def _a2a_skip_response(skipped: str, *, reason: str = "", detail: dict | None = None,
                        agent: str = "", source_seq: int = 0,
                        status: str = "ok", status_code: int = 200,
@@ -474,7 +480,8 @@ def _a2a_skip_response(skipped: str, *, reason: str = "", detail: dict | None = 
     """Issue #2555：A2A 跳过响应单点收口（只增不删，既有键保持原值）。
 
     统一补齐 ok=false + skipped + reason + detail；status/seq/agent/
-    handoff_result/source_seq 与调用方原有键保持，extra 用于透传分支特有条目。
+    handoff_result/source_seq 与调用方原有键保持，extra 仅透传分支特有条目，
+    不得覆盖契约字段（见 `_A2A_SKIP_RESERVED_KEYS`）。
     `status` 显式声明（默认 ok，not_in_scene 等历史分支显式传 skipped），
     避免调用方靠 extra 覆盖契约字段。
     """
@@ -496,7 +503,8 @@ def _a2a_skip_response(skipped: str, *, reason: str = "", detail: dict | None = 
     if original_event:
         content["original_event"] = original_event
     if extra:
-        content.update(extra)
+        content.update(
+            {k: v for k, v in extra.items() if k not in _A2A_SKIP_RESERVED_KEYS})
     return JSONResponse(status_code=status_code, content=content)
 
 
@@ -2026,7 +2034,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 return _redirect["response"]
             if _redirect.get("error"):
                 _skip_code = _redirect["error"]
-                log.info(f"A2A #329: cross-pipeline handoff skipped: {_skip_code}")
+                log.info(
+                    f"A2A #329: cross-pipeline handoff skipped: code={_skip_code} "
+                    f"issue=#{issue_number} repository={repository} "
+                    f"target_node={target_node or 'vod'} "
+                    f"reason={_a2a_skip_reason(_skip_code)}")
                 # Issue #729：拦截响应透传 original_event（含 task_ref/result_ref）
                 # Issue #2555：统一补 ok=false + reason + detail（目标码只回传 target_node，
                 # 不回传 scene id / 节点清单）。
@@ -2074,11 +2086,16 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     _ck_c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
                                   (repo_key, int(issue_number)))
                     if _ck_c.fetchone():
-                        log.info(f"A2A: rejected — task cancelled, issue=#{issue_number}, agent={agent_name}")
+                        _cancel_reason = _a2a_skip_reason(
+                            "task_cancelled", issue_number=issue_number)
+                        log.info(
+                            f"A2A: rejected — task cancelled, code=task_cancelled "
+                            f"issue=#{issue_number} repository={repository} "
+                            f"agent={agent_name} status=cancelled "
+                            f"reason={_cancel_reason}")
                         return _a2a_skip_response(
                             "task_cancelled", agent=agent_name, source_seq=_source_seq,
-                            reason=_a2a_skip_reason(
-                                "task_cancelled", issue_number=issue_number),
+                            reason=_cancel_reason,
                             detail={
                                 "issue_number": int(issue_number),
                                 "repository": repository,
@@ -2166,7 +2183,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     _prsub_c.execute("SELECT issue_id FROM agent_tasks WHERE id=?", (_caller_task_id,))
                     _prsub_row = _prsub_c.fetchone()
                 if _prsub_row and _prsub_row[0] and _prsub_row[0].startswith("#pr_"):
-                    log.info(f"A2A: rejected — PR subscription QA (task={_caller_task_id}, issue={_prsub_row[0]}), A2A disabled")
+                    log.info(
+                        f"A2A: rejected — PR subscription QA (task={_caller_task_id}, "
+                        f"issue={_prsub_row[0]}), A2A disabled "
+                        f"code=pr_subscription_a2a_disabled issue=#{issue_number} "
+                        f"repository={repository} "
+                        f"reason={_a2a_skip_reason('pr_subscription_a2a_disabled')}")
                     return _a2a_skip_response(
                         "pr_subscription_a2a_disabled", agent=agent_name,
                         source_seq=_source_seq,
@@ -2541,7 +2563,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     if row:
                         _raw = (row[0] or "").strip()
                         if _raw and _raw != "[]" and _raw != "null":
-                            log.info(f"A2A: sre subscribed + pr_number={pr_number}, skip task creation (stage=sre, issue=#{issue_number})")
+                            log.info(
+                                f"A2A: sre subscribed + pr_number={pr_number}, skip task "
+                                f"creation (stage=sre, code=sre_subscribed "
+                                f"issue=#{issue_number} repository={repository} "
+                                f"reason={_a2a_skip_reason('sre_subscribed')})")
                             return _a2a_skip_response(
                                 "sre_subscribed", agent=agent_name,
                                 source_seq=_source_seq,

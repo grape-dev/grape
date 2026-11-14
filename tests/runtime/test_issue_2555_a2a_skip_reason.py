@@ -94,17 +94,24 @@ class TestSkipResponseHelper:
         assert data["agent"] == "qa"
         assert data["original_event"] == {"seq": 3}
 
-    def test_helper_extra_overrides_but_keeps_contract_fields(self):
+    def test_helper_extra_cannot_override_contract_fields(self):
         import json
         resp = _a2a_skip_response(
-            "not_in_scene", agent="coding", status_code=409,
-            extra={"status": "skipped", "scene": "s1", "message": "m"})
+            "not_in_scene", agent="coding", status="skipped", status_code=409,
+            extra={"status": "ok", "skipped": "other", "reason": "x",
+                   "detail": {"leak": 1}, "source_seq": 99,
+                   "scene": "s1", "message": "m"})
         data = json.loads(resp.body)
         assert resp.status_code == 409
+        # 契约字段由构造器参数决定，extra 只能透传分支特有条目
         assert data["status"] == "skipped"
-        assert data["scene"] == "s1"
-        assert data["handoff_result"] == "rejected"
+        assert data["skipped"] == "not_in_scene"
+        assert data["reason"] and data["reason"] != "x"
+        assert data["detail"] == {}
         assert data["source_seq"] == 0
+        assert data["scene"] == "s1"
+        assert data["message"] == "m"
+        assert data["handoff_result"] == "rejected"
 
     def test_reasons_are_chinese_and_do_not_leak_internal_ids(self):
         scene_reason = _a2a_skip_reason("target_scene_not_found")
