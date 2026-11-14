@@ -3898,6 +3898,72 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   下一批首个未 blocked 文件 `src/domains/runtime/routes/pipeline.py` 2 处（`unified_user_mapping` /
   `managed_repos`，均归 mgmt，可复用现有 mgmt 读口）。
 
+### runtime pipeline 责任人昵称 / 批量 bot 用户名读口归 mgmt public（-2，该文件清零）
+
+- 文件：`src/domains/runtime/routes/pipeline.py`（2 处 → **0**）；全局静态 **57 → 55**（-2），对数 **33 → 32** ——
+  `unified_user_mapping←runtime` 1 → 0（**该对整对清零**）、`managed_repos←runtime` 3 → 2。
+- 表分布（消费域 runtime，两表**全归 mgmt**），两处互不相干、都在读装配阶段：
+  · 行 60 `_resolve_feishu_name`：`SELECT feishu_name FROM unified_user_mapping WHERE {_col}=? AND feishu_name!='' LIMIT 1`
+    —— **动态列**：`_col` 由 `um_column_for_repo(repo_key)` 推出后 **f-string 直接拼进 SQL**（FR-17.1
+    为防跨平台同名误命中才分列）。
+  · 行 568 `_get_issue_pipeline` 里的一次性 bot 集合：`SELECT bot_username FROM managed_repos WHERE repo_key IN (...) AND bot_username!=''`
+    —— **动态占位符个数**（`",".join("?" * len(_repo_keys))`），候选集来自 `repo_key_candidates()`（多平台前缀）。
+  两处表名均字面量，值全走占位符；「动态」只在**列名**与**IN 列表长度**。
+- 本轮取批：作业单头两名 `src/kernel/prompt_builder.py` / `src/kernel/persistence/credential_usage_log.py`
+  仍 blocked（口径见作业单顶部 ⛔ 小节），跳过；取第一个未 blocked 文件（上一批台账末尾点名的本文件）。
+- 归属域侧改动（SQL 只在 mgmt 域一份）：
+  · `_ANY_QUERIES` 新增 3 条具名查询：`um_feishu_name_by_gitcode_user` / `um_feishu_name_by_github_login`
+    （与原 f-string 展开后的两条语句**逐字一致**，含 `feishu_name!=''` 与 `LIMIT 1`）、
+    `repo_bot_usernames_in`（`… WHERE repo_key IN ({ph}) AND bot_username!=''`，`{ph}` 只是占位符槽）。
+  · 新增列名白名单 `_UM_FEISHU_NAME_COLUMN_QUERIES = {gitcode_user, github_login}` 与薄函数
+    `feishu_name_by_platform_column(column, login)`：未登记列 → 空串 + `log.debug`（不拼 SQL、不靠报错），
+    查询异常 → 空串 + `log.debug`。列名的**唯一产生点**仍是 kernel 的 `um_column_for_repo`，调用方只传列名。
+  · 新增薄函数 `repo_bot_usernames_any(repo_keys)`：复用既有 `_REPO_KEY_QUERY_CHUNK=400` 分块、
+    `dict.fromkeys` 去重保序；空/None 候选集直接返回 `[]`（原语句会拼出 `IN ()` 语法错）。
+  · 两个函数登记 `__all__` 并同步 `src/kernel/gsb/route_config.py` 的 `PUBLIC_PRIMITIVES["mgmt"]` 镜像。
+- 关键设计取舍：
+  1. **昵称与 open_id 分列建表，不复用 `feishu_open_id_by_platform_column`**：同表同列风格，但
+     「昵称空」与「无 open_id」是两个不同的空值语义（前者回退用户名，后者回退身份链），
+     合并会让回退链在展示层与通知层错位。
+  2. **`_resolve_feishu_name` 显式把「无 um 列平台」前置返回用户名**：原实现是拼出空列名
+     `WHERE =?` → 语法错 → `except` 吞掉 → 回退用户名。行为相同，但不再用「制造一次 SQL 报错」
+     表达分支（烟测 B/E 段把这条历史口径固定住：具名查询**没有**加 `gitcode_user!=''` 谓词）。
+  3. **拿掉调用方的 `db_lock` + `db.cursor()`**：`_any_cursor` 在单库回落路径自带锁与 commit，
+     再嵌一层是同线程二次加锁（交接文档 §5.3 坑 4 同族）；调用点从此不再 import 进程库句柄。
+  4. **IN 列表的占位符由归属域补**（`format(ph=…)` 在 public 内部完成）：调用方只交候选键列表，
+     拼装面收在 owner 域，与 `repo_keys_existing_any` 同形。
+  5. **不把「一次查完」改成「逐个查」**：调用点原本就是一条 `IN (...)` 直发进程库（无 lib 分支），
+     本次只把这条语句搬到 owner 域；`if not _bots → get_all_bot_usernames()` 的兜底保留不动，
+     避免在小仓库（1 个候选键）场景下多出一次全表扫描或改变责任人推断结果。
+- **修的存量 bug（静默吞掉 bot 查询失败）**：原 `except Exception: pass` 让 `_bot_usernames` 悄悄为空，
+  下游 `if not _bots` 再退回 `get_all_bot_usernames()`（每次全表扫）；三库拓扑下 api/runtime 进程
+  缺 `managed_repos` 时会**每次都走这条 N+1 兜底**且无任何日志，展示层「责任人」会退化成裸 actor。
+  改成 `log.warning` 显式留痕，并把同文件 `tests/silent_except_baseline.json` 计数 6 → 5（棘轮只减）。
+- 验证（真实退出码）：
+  · `py_compile` 三文件（runtime `routes/pipeline.py` / mgmt `public` / kernel `gsb/route_config.py`）→ **COMPILE_OK**；
+  · `~/burndown/pipeline_feishu_bot_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`）→
+    **ALL pipeline_feishu_bot smoke PASSED (65 checks)**：A 注册面/静态否定（三条查询逐字对齐、无 `%s`/`NOW()`/
+    `ON DUPLICATE`/`PRAGMA`、两薄函数体无内联 SQL、调用方无这两张表 SQL / 不再 f-string 拼列名 /
+    不再直连进程库、`__all__` + GSB 双登记、未登记列返回空串且**不发 SQL**、未登记查询名 `KeyError`）；
+    B 单库行为（gitcode/github 分列命中、**FR-17.1 跨平台同名不互相污染**、空串/NULL 昵称被
+    `feishu_name!=''` 过滤、无行→空串、`LIMIT 1`、空登录名的历史口径）；C **自有 DSN 伪游标**
+    （语句逐字、`?` + 参数元组不翻译成 `%s`、驱动异常在本层吞成空串）；D bot 读口（非空过滤、NULL、
+    去重、空/None 候选不发 SQL、**401 键 → 2 条语句且 `?` 个数 = 参数个数** 400/1、块内保序）；
+    E 调用点（空用户名短路、gitee/gitlab → 回退用户名、命中取昵称、无映射/昵称为空回退用户名、
+    github 仓走 `github_login` 列、查询异常回退用户名）。
+  · `--update-baseline` → **baseline updated: 32 pairs, 55 refs**；依赖看板 / 矩阵 / 作业单同步刷新
+    （作业单 55 处 / 36 文件）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R8 / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → **import OK**。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell `SRC_PWD`/`REMOTE_PWD` 未注入）；
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点，只新增两个读口），运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标）。「runtime 进程 1146 消失」的现场证据留待彩排轮确认。
+- **新基线**：**55 处 / 32 对**（`--update-baseline` 已收紧）；作业单 55 处 / 36 文件，下一批首个未 blocked 文件
+  `src/domains/runtime/im/vod_handler_async.py` 2 处（`grape_t_channel_installation`，归 mgmt，可复用
+  `installation_*` 原语）或 `src/domains/runtime/im/outbox.py` 2 处（`grape_t_channel_lease`，
+  可复用 `acquire_/renew_/release_channel_lease`）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

@@ -763,6 +763,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "oauth_token_status_any", "token_expires_at_any", "stored_access_token_any",
            # 事件动作过滤器启用规则（api/event_rule.py 的 L1 准入判定；任意拓扑）
            "event_action_filter_enabled_rows",
+           # 流水线责任人展示（runtime/routes/pipeline.py；任意拓扑）
+           "feishu_name_by_platform_column", "repo_bot_usernames_any",
            "health"]
 
 
@@ -1572,6 +1574,15 @@ _ANY_QUERIES: dict[str, str] = {
         "UPDATE unified_user_mapping SET gitcode_nickname=?, updated_at=datetime('now') "
         "WHERE user_id=?"),
     # um 名字域兜底（FR-CQ-1）：平台列 → 该列上的 open_id，列名只在本域白名单挑
+    # um 名字域兜底（FR-17.1）：平台列 → 该列上的飞书昵称，列名只在本域白名单挑。
+    # 原调用点（runtime pipeline 责任人展示）用 f-string 拼列名；空列名拼出的
+    # `WHERE =?` 语法错被吞成「回退平台用户名」，故此处未登记列返回空串，由调用方回退。
+    "um_feishu_name_by_gitcode_user": (
+        "SELECT feishu_name FROM unified_user_mapping "
+        "WHERE gitcode_user=? AND feishu_name!='' LIMIT 1"),
+    "um_feishu_name_by_github_login": (
+        "SELECT feishu_name FROM unified_user_mapping "
+        "WHERE github_login=? AND feishu_name!='' LIMIT 1"),
     "um_feishu_open_id_by_gitcode_user": (
         "SELECT feishu_open_id FROM unified_user_mapping "
         "WHERE gitcode_user=? AND feishu_open_id!='' LIMIT 1"),
@@ -1690,6 +1701,11 @@ _ANY_QUERIES: dict[str, str] = {
         "WHERE scene_id=? AND repo_key=? AND is_active=1"),
     "repo_bot_username": (
         "SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1"),
+    # 多仓库批量 bot 用户名（runtime 流水线一次取候选仓库的 bot 集合，消 N+1）。
+    # 占位符个数由本域按批次补，SQL 文本仍只此一份；`{ph}` 不是表名/列名，不接受调用方拼接。
+    "repo_bot_usernames_in": (
+        "SELECT bot_username FROM managed_repos "
+        "WHERE repo_key IN ({ph}) AND bot_username!=''"),
     "repo_org_id": (
         "SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1"),
     "repo_deploy_url_set": "UPDATE managed_repos SET deploy_url=? WHERE repo_key=?",
@@ -2008,6 +2024,13 @@ _UM_COLUMN_QUERIES: dict[str, str] = {
 _UM_OPENID_COLUMN_QUERIES: dict[str, str] = {
     "gitcode_user": "um_feishu_open_id_by_gitcode_user",
     "github_login": "um_feishu_open_id_by_github_login",
+}
+
+#: 同一张表的「平台列 → feishu_name」白名单（runtime pipeline 责任人展示）。
+#: 与 open_id 那张分列：同表同列风格但取值不同，合并会丢「昵称空」与「无 open_id」的区别。
+_UM_FEISHU_NAME_COLUMN_QUERIES: dict[str, str] = {
+    "gitcode_user": "um_feishu_name_by_gitcode_user",
+    "github_login": "um_feishu_name_by_github_login",
 }
 
 
@@ -2666,6 +2689,25 @@ def feishu_open_id_by_platform_column(column: str, login: str) -> str:
     return str(row[0] or "") if row else ""
 
 
+def feishu_name_by_platform_column(column: str, login: str) -> str:
+    """um 平台列 → 飞书昵称（FR-17.1 分列查，防跨平台同名误命中）；未登记列返回空串。
+
+    未登记列（D39/S59 无 um 列平台）与原「拼出空列名 → SQL 语法错 → 整函数返回空」
+    同口径；查询异常同样返回空串（原实现吞掉）。空串的语义是「无昵称」，由调用方
+    决定回退到平台用户名——本层不替调用方兜底文案。
+    """
+    name = _UM_FEISHU_NAME_COLUMN_QUERIES.get(column or "")
+    if name is None:
+        log.debug(f"feishu_name_by_platform_column: column not registered ({column!r})")
+        return ""
+    try:
+        row = read_one_any(name, (login,))
+    except Exception as exc:  # noqa: BLE001 - 原实现同样吞掉 SQL 错误并回退用户名
+        log.debug(f"feishu_name_by_platform_column: query failed ({name}): {exc}")
+        return ""
+    return str(row[0] or "") if row else ""
+
+
 def clear_feishu_by_app(app_id: str, updated_at: str = "") -> int:
     """app 释放：清空该 app 全部用户的飞书三列（WHERE app_id=? 作用域必须保留）。"""
     if not app_id:
@@ -3045,6 +3087,26 @@ def repo_keys_existing_any(repo_keys: "list[str]") -> list[str]:
                       f"ORDER BY repo_key", tuple(chunk))
             out.extend(str(r[0]) for r in (c.fetchall() or []) if r and r[0])
     return out
+
+
+def repo_bot_usernames_any(repo_keys: "list[str]") -> list[str]:
+    """给定仓库键的**非空** bot 用户名（去重保序）。
+
+    原调用点是一条 `repo_key IN (...) AND bot_username!=''` 取回后立刻转 set；
+    这里按候选顺序分块查询、`dict.fromkeys` 去重——调用方只做成员判断，
+    行序不影响语义。空候选集返回 `[]`（原语句会拼出 `IN ()` 语法错并被吞掉）。
+    """
+    keys = list(dict.fromkeys(str(k) for k in (repo_keys or []) if k))
+    if not keys:
+        return []
+    out: list[str] = []
+    for start in range(0, len(keys), _REPO_KEY_QUERY_CHUNK):
+        chunk = keys[start:start + _REPO_KEY_QUERY_CHUNK]
+        ph = ",".join(["?"] * len(chunk))
+        with _any_cursor() as c:
+            c.execute(_any_sql("repo_bot_usernames_in").format(ph=ph), tuple(chunk))
+            out.extend(str(r[0]) for r in (c.fetchall() or []) if r and r[0])
+    return list(dict.fromkeys(out))
 
 
 def list_active_scene_nodes() -> list[Any]:

@@ -50,18 +50,19 @@ def _resolve_feishu_name(gitcode_user: str, repo_key: str = "") -> str:
     """
     if not gitcode_user:
         return ""
-    from src.kernel.session_manager import db, db_lock
     # FR-CQ-1: 提取为 um_column_for_repo 工具函数
     from src.kernel.repo_key import um_column_for_repo
     _col = um_column_for_repo(repo_key)
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(f"SELECT feishu_name FROM unified_user_mapping WHERE {_col}=? AND feishu_name!='' LIMIT 1", (gitcode_user,))
-            row = c.fetchone()
-            return row[0] if row else gitcode_user
-        except Exception:
-            return gitcode_user
+    if not _col:
+        # D39/S59：无 um 列的平台（gitee/gitlab 等）直接回退用户名——与原实现
+        # 「拼出空列名 → SQL 语法错 → 整段吞掉 → 回退用户名」同口径，只是不再靠报错。
+        return gitcode_user
+    try:
+        from src.domains.mgmt import public as _mgmt_public
+        return _mgmt_public.feishu_name_by_platform_column(_col, gitcode_user) or gitcode_user
+    except Exception as _e:
+        log.debug(f"[pipeline] feishu name resolve failed (user={gitcode_user!r}): {_e}")
+        return gitcode_user
 
 
 def _scene_label_for_event(scene_id: str, get_pipe_cfg, repo_key: str, pipe_cfg_cache: dict) -> str:
@@ -563,14 +564,12 @@ def get_pipeline(owner: str, repo: str,
     # 一次性查 bot_usernames（消除 get_all_bot_usernames N+1）
     _bot_usernames = set()
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT bot_username FROM managed_repos WHERE repo_key IN ({}) AND bot_username!=''".format(
-                ",".join("?" * len(_repo_keys))
-            ), _repo_keys)
-            _bot_usernames = {r[0] for r in c.fetchall() if r[0]}
-    except Exception:
-        pass
+        from src.domains.mgmt import public as _mgmt_public_bots
+        _bot_usernames = set(_mgmt_public_bots.repo_bot_usernames_any(_repo_keys))
+    except Exception as _e:
+        # 不静默：空集会让下方责任人推断退化为「直接显示 actor」（不区分 bot/用户），
+        # 必须留可观测信号，否则展示口径错误无从发现。
+        log.warning(f"[pipeline] bot_username batch query failed: {_e}")
 
     # 飞书用户名缓存（请求级，消除 _resolve_feishu_name N+1）
     _feishu_name_cache = {}

@@ -126,7 +126,7 @@
   "src/domains/runtime/routes/events.py": 36,
   "src/domains/runtime/routes/im.py": 2,
   "src/domains/runtime/routes/issues.py": 5,
-  "src/domains/runtime/routes/pipeline.py": 6,
+  "src/domains/runtime/routes/pipeline.py": 5,
   "src/domains/runtime/routes/runtime.py": 14,
   "src/domains/runtime/routes/tasks.py": 4,
   "src/domains/runtime/routes/webhook.py": 20,

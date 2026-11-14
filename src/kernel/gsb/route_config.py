@@ -78,6 +78,8 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "add_event_action_filter", "update_event_action_filter", "delete_event_action_filter",
         # 事件动作过滤器启用规则读口（api/event_rule.py L1 准入判定；任意拓扑）
         "event_action_filter_enabled_rows",
+        # 流水线责任人展示（runtime/routes/pipeline.py；任意拓扑）
+        "feishu_name_by_platform_column", "repo_bot_usernames_any",
         "add_user_feedback", "save_inbound_message", "upsert_outbound_card",
         "read_one", "read_all",
     ),

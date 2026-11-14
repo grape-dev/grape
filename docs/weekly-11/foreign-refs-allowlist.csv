@@ -21,7 +21,7 @@ grape_t_merge_gate_log,insight,api,1
 grape_t_repo_credentials,insight,contracts,1
 grape_t_repo_credentials,insight,mgmt,2
 issue,runtime,api,1
-managed_repos,mgmt,runtime,3
+managed_repos,mgmt,runtime,2
 runtime_credentials,runtime,insight,4
 runtime_health_scores,runtime,insight,1
 skill,runtime,api,2
@@ -29,6 +29,5 @@ skill_category,mgmt,runtime,1
 takeover_sessions,runtime,api,1
 takeover_sessions,runtime,mgmt,1
 unified_user_mapping,mgmt,kernel,3
-unified_user_mapping,mgmt,runtime,1
 user_accounts,mgmt,runtime,1
 user_feedback,mgmt,api,2
