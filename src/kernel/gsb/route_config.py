@@ -111,6 +111,7 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         # W2 写原语
         "upsert_event_active_guard", "upsert_issue_agent_session", "upsert_scene_category",
         "record_event_skipped",
+        "list_user_conversations", "get_scene_category", "list_scene_categories",
         "read_one", "read_all",
     ),
     "insight": (

@@ -4498,6 +4498,14 @@ def list_scene_categories() -> list[dict]:
 
 def get_scene_category(category_id: int) -> dict | None:
     """按 id 查场景分类"""
+    # P3.5：scene_category 归运行域；lib 可用时走 owner 域读
+    from src.kernel import domain_read
+    _rt_cat = domain_read.owner_lib("runtime", foreign_only=True)
+    if _rt_cat is not None:
+        try:
+            return _rt_cat.get_scene_category(int(category_id))
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(f"runtime lib get_scene_category failed, fallback: {_exc}")
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, name, slug, icon FROM scene_category WHERE id=?", (category_id,))

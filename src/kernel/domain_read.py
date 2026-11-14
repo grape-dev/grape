@@ -86,3 +86,31 @@ def mgmt_write_lib(foreign_only: bool = True) -> ModuleType | None:
 
         logging.getLogger(__name__).warning(f"mgmt write lib unavailable: {exc}")
         return None
+
+
+def owner_lib(domain: str, foreign_only: bool = True) -> ModuleType | None:
+    """跨域**读写通道**句柄：只要求该域自有 DSN（`GRAPE_DSN_<D>` + `GRAPE_DOMAIN_LIB=1`）。
+
+    与 `*_lib()` 读句柄的区别：**不受按域读开关影响**——读开关
+    （`GRAPE_<D>_READ_VIA_LIB`）管灰度读路径；W2 写通道与 P3.5 接口化读按方案独立启用。
+    `foreign_only=True` 时当前进程本身就是该域则返回 None（同域读写留本地事务）。
+    """
+    if domain not in ("mgmt", "runtime", "insight"):
+        raise ValueError(f"unknown domain: {domain}")
+    try:
+        from src.kernel import db_registry
+
+        if not db_registry.uses_own_dsn(domain):
+            return None
+        if foreign_only and db_registry.current_domain() == domain:
+            return None
+        mod = __import__(f"src.domains.{domain}.public", fromlist=["*"])
+        avail = getattr(mod, "available", None)
+        if callable(avail) and not avail():
+            return None
+        return mod
+    except Exception as exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning(f"{domain} owner lib unavailable: {exc}")
+        return None

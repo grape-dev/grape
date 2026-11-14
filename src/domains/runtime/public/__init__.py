@@ -1544,3 +1544,52 @@ def record_event_skipped(repo_key: str, issue_id: str, event_type: str, reason: 
                   "created_at) VALUES (%s, %s, %s, %s, %s, NOW())",
                   (repo_key, str(issue_id), event_type, reason, detail))
         return int(getattr(c, "lastrowid", 0) or 0)
+
+
+# ---------- P3.5：mgmt 进程读运行域会话/分类（读路径接口化） ----------
+
+_CONV_COLS = ("id", "user_id", "agent_session_id", "runtime_session_id", "user_gitcode_token",
+              "repo_key", "im_channel_id", "title", "status", "created_at", "updated_at",
+              "conv_type", "issue_number")
+
+
+def list_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) -> list[dict]:
+    """按用户列会话（替代 mgmt/kernel 直读 chat_conversations），列与语义同 kernel 版。"""
+    sql = f"SELECT {', '.join(_CONV_COLS)} FROM chat_conversations WHERE user_id=%s"
+    args: list[Any] = [user_id]
+    if repo_key:
+        sql += " AND repo_key=%s"
+        args.append(repo_key)
+    sql += " ORDER BY updated_at DESC LIMIT %s"
+    args.append(max(1, min(int(limit), 200)))
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, tuple(args))
+        rows = _rows(c)
+    return [{
+        "id": r["id"], "user_id": r["user_id"], "agent_session_id": r["agent_session_id"] or "",
+        "runtime_session_id": r["runtime_session_id"] or "",
+        "user_gitcode_token": r["user_gitcode_token"] or "", "repo_key": r["repo_key"] or "",
+        "im_channel_id": r["im_channel_id"], "title": r["title"], "status": r["status"],
+        "created_at": r["created_at"], "updated_at": r["updated_at"],
+        "conv_type": r["conv_type"] or "general", "issue_number": r["issue_number"] or 0,
+    } for r in rows]
+
+
+def get_scene_category(category_id: int) -> dict[str, Any] | None:
+    """场景分类单条（替代 mgmt 直读 scene_category）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT id, name, slug, icon, order_num, is_active FROM scene_category "
+                  "WHERE id=%s", (int(category_id),))
+        rows = _rows(c)
+    return rows[0] if rows else None
+
+
+def list_scene_categories(active_only: bool = True) -> list[dict[str, Any]]:
+    """场景分类列表（market/scene 列表页用）。"""
+    sql = "SELECT id, name, slug, icon, order_num, is_active FROM scene_category"
+    if active_only:
+        sql += " WHERE is_active=1"
+    sql += " ORDER BY order_num, id"
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql)
+        return _rows(c)

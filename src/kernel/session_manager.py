@@ -690,6 +690,14 @@ def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) ->
     from src.kernel.repo_key import to_repo_key
     if repo_key:
         repo_key = to_repo_key(repo_key)
+    # P3.5：chat_conversations 归运行域；lib 可用时走 owner 域读（三库独立后无视图可读）
+    from src.kernel import domain_read
+    _rt = domain_read.owner_lib("runtime", foreign_only=True)
+    if _rt is not None:
+        try:
+            return _rt.list_user_conversations(user_id, repo_key, limit)
+        except Exception as exc:  # noqa: BLE001 - owner 域异常时回落本地 SQL（单库/视图期）
+            log.warning(f"runtime lib list_user_conversations failed, fallback: {exc}")
     with db_lock:
         c = db.cursor()
         if repo_key:
