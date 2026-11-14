@@ -1392,7 +1392,7 @@ def health() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)[:160], "dsn_configured": bool(db_registry.dsn_of("runtime"))}
 
 
-__all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
+__all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_session', 'update_agent_session_fields', 'delete_agent_sessions', 'update_issue_agent_session_fields', "available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
@@ -1749,6 +1749,27 @@ def set_meta_value(key: str, value: str) -> None:
 # 约束：只登记固定 SQL 的具名查询（参数化），不接受调用方传入 SQL 文本或表名。
 
 _ANY_QUERIES: dict[str, str] = {
+    # ── session_store 去跨域所需具名查询（见 src/api/session_store.py 注释）──
+    'agent_type_enable': 'SELECT enable FROM agent_type WHERE agent_type=?',
+    'devops_agent_session_row': 'SELECT id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
+    'devops_agent_sessions_by_repo': 'SELECT id, agent_type, runtime_id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type',
+    'devops_agent_session_insert': "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+    'devops_agent_session_delete_by_repo_agent': 'DELETE FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
+    'devops_agent_session_delete_by_repo': 'DELETE FROM devops_agent_session WHERE repo_key=?',
+    'agent_runtime_name_by_id': 'SELECT name FROM agent_runtimes WHERE id=?',
+    'issue_card_row': 'SELECT stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override, carried_context, status FROM issue WHERE repo_key=? AND issue_number=?',
+    'issue_card_exists': 'SELECT id FROM issue WHERE repo_key=? AND issue_number=?',
+    'issue_card_ensure_insert_gitcode': "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_by) SELECT COALESCE((SELECT m.user_id FROM unified_user_mapping m WHERE m.gitcode_user=? AND m.user_id IS NOT NULL AND m.user_id NOT IN ('', '0') AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=m.user_id AND ga.status=1) ORDER BY m.user_id LIMIT 1), 0), ?, ?, ?, 'active', ?",
+    'issue_card_ensure_insert_github': "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_by) SELECT COALESCE((SELECT m.user_id FROM unified_user_mapping m WHERE m.github_login=? AND m.user_id IS NOT NULL AND m.user_id NOT IN ('', '0') AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=m.user_id AND ga.status=1) ORDER BY m.user_id LIMIT 1), 0), ?, ?, ?, 'active', ?",
+    'issue_state_legacy_row': 'SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override FROM issue_state WHERE repo_key=? AND issue_id=?',
+    'issue_children_by_parent': 'SELECT issue_number, stage, owner_agent FROM issue WHERE repo_key=? AND parent_issue_id=? ORDER BY issue_number',
+    'issue_release_children': "SELECT id, issue_number, title, status, stage, release_candidate_sha, release_target_env, release_evidence_ref, release_result, release_failure_reason, release_approved_by, release_approved_at, created_at, completed_at FROM issue WHERE repo_key=? AND parent_issue_number=? AND release_target_env != '' ORDER BY id DESC",
+    'issue_status_sync': "UPDATE issue SET status=? WHERE repo_key=? AND issue_number=? AND status NOT IN ('completed','cancelled','awaiting_input','pending_review')",
+    'issue_agent_session_row': 'SELECT id, runtime_session_id, status, last_active_at, session_engine FROM issue_agent_session WHERE repo_key=? AND agent_type=? AND issue_id=?',
+    'issue_agent_session_insert': 'INSERT INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, session_engine, status, last_active_at) VALUES (?,?,?,?,?,?,?,?)',
+    'issue_agent_sessions_by_repo': 'SELECT id, repo_key, agent_type, issue_id, runtime_session_id, status, last_active_at, created_at FROM issue_agent_session WHERE repo_key=? ORDER BY last_active_at DESC',
+    'issue_agent_sessions_by_repo_agent': 'SELECT id, repo_key, agent_type, issue_id, runtime_session_id, status, last_active_at, created_at FROM issue_agent_session WHERE repo_key=? AND agent_type=? ORDER BY last_active_at DESC',
+    'issue_agent_session_delete_by_repo': 'DELETE FROM issue_agent_session WHERE repo_key=?',
     # meta 配置（基表在运行域）
     "meta_value": "SELECT value FROM meta WHERE key=?",
     "meta_count": "SELECT COUNT(*) FROM meta WHERE key=?",
@@ -2300,3 +2321,74 @@ def task_issue_attribution(task_ids) -> list[tuple]:
                 tuple(part))
             out.extend(tuple(r) for r in (c.fetchall() or []))
     return out
+
+
+# ── session_store 去跨域原语 ─────────────────────────────────────────────
+
+def ensure_issue_card(repo_key: str, issue_number, assignee: str = "",
+                      um_column: str = "gitcode_user") -> bool:
+    """issue 卡片行建档（幂等）：无行则建最小行（status='active'）。返回是否新建。"""
+    if read_one_any("issue_card_exists", (repo_key, issue_number)):
+        return False
+    name = ("issue_card_ensure_insert_github" if um_column == "github_login"
+            else "issue_card_ensure_insert_gitcode")
+    try:
+        exec_any(name, (assignee, assignee, repo_key, issue_number, assignee))
+        return True
+    except Exception:
+        # 并发下唯一键冲突 → 行已由对端建好，等同"无行才建"的幂等语义
+        return False
+
+def update_issue_card_fields(repo_key: str, issue_number, fields: dict,
+                             touch_updated_at: bool = True) -> int:
+    """按 repo_key+issue_number 更新 issue 卡片行（列名白名单由调用方传固定字段名）。"""
+    if not fields:
+        return 0
+    sets = ", ".join(f"{k}=?" for k in fields)
+    if touch_updated_at:
+        sets += ", updated_at=datetime('now')"
+    params = list(fields.values()) + [repo_key, issue_number]
+    with _any_cursor(write=True) as c:
+        cur = c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+def ensure_agent_session(session_id: str, repo_key: str, agent_type: str, runtime_id: int = 0,
+                         skill: str = "", skill_id: int = 0, repo_gitcode_token: str = "",
+                         status: str = "idle", enable: int = 1,
+                         subscribe_events: str = "[]") -> None:
+    """建 repo 级 agent 会话行（id 由调用方生成，保证主键稳定）。"""
+    exec_any("devops_agent_session_insert",
+             (session_id, repo_key, agent_type, runtime_id, skill, skill_id,
+              repo_gitcode_token or "", status, enable, subscribe_events))
+
+def update_agent_session_fields(session_id: str, fields: dict,
+                                touch_last_active: bool = True) -> int:
+    """按 id 更新 devops_agent_session（动态字段集；last_active_at 默认同步刷新）。"""
+    if not fields:
+        return 0
+    sets = ", ".join(f"{k}=?" for k in fields)
+    if touch_last_active:
+        sets += ", last_active_at=datetime('now')"
+    params = list(fields.values()) + [session_id]
+    with _any_cursor(write=True) as c:
+        cur = c.execute(f"UPDATE devops_agent_session SET {sets} WHERE id=?", params)
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+def delete_agent_sessions(repo_key: str, agent_type: str = "") -> int:
+    """删 repo 级 agent 会话；agent_type 为空 → 删该仓库全部（返回删除行数）。"""
+    if agent_type:
+        return exec_any("devops_agent_session_delete_by_repo_agent", (repo_key, agent_type))
+    return exec_any("devops_agent_session_delete_by_repo", (repo_key,))
+
+def update_issue_agent_session_fields(session_id: str, fields: dict,
+                                      touch_last_active: bool = True) -> int:
+    """按 id 更新 issue_agent_session（动态字段集；last_active_at 默认同步刷新）。"""
+    if not fields:
+        return 0
+    sets = ", ".join(f"{k}=?" for k in fields)
+    if touch_last_active:
+        sets += ", last_active_at=datetime('now')"
+    params = list(fields.values()) + [session_id]
+    with _any_cursor(write=True) as c:
+        cur = c.execute(f"UPDATE issue_agent_session SET {sets} WHERE id=?", params)
+        return int(getattr(cur, "rowcount", 0) or 0)

@@ -1,7 +1,8 @@
 """Agent Session 管理 — per (repo_key, agent_type) 独立会话"""
 import uuid, json
 from datetime import datetime
-from src.kernel.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock  # noqa: F401  (db_lock 供既有调用面保留)
+from src.domains.runtime import public as rt
 from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
 
@@ -9,12 +10,9 @@ from src.api.time_utils import normalize_event_time
 def get_agent_type_enable(agent_type: str) -> int:
     """读 agent_type.enable（全局默认，sre 默认关）。无记录返回 1（默认开）。"""
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT enable FROM agent_type WHERE agent_type=?", (agent_type,))
-            row = c.fetchone()
-            if row and row[0] is not None:
-                return int(row[0])
+        row = rt.read_one_any("agent_type_enable", (agent_type,))
+        if row and row[0] is not None:
+            return int(row[0])
     except Exception:
         pass
     return 1
@@ -26,12 +24,9 @@ def is_agent_enabled(repo_key: str, agent_type: str) -> bool:
     见 agent-enable-toggle-design.md §五 拦截语义。
     """
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_type))
-            row = c.fetchone()
-            if row and row[0] is not None:
-                return bool(int(row[0]))
+        row = rt.read_one_any("devops_agent_session_row", (repo_key, agent_type))
+        if row and row[4] is not None:
+            return bool(int(row[4]))
     except Exception:
         pass
     return bool(get_agent_type_enable(agent_type))
@@ -53,14 +48,7 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
         _num = None
     if _num:
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT stage, owner_agent, a2a_seq, updated_at, assignee, "
-                    "scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override "
-                    "FROM issue WHERE repo_key=? AND issue_number=?",
-                    (repo_key, _num))
-                row = c.fetchone()
+            row = rt.read_one_any("issue_card_row", (repo_key, _num))
             if row:
                 return {"id": None, "stage": row[0], "owner_agent": row[1],
                         "a2a_seq": row[2], "updated_at": row[3], "assignee": row[4] or "",
@@ -73,19 +61,15 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
             pass
     # 2. issue_state 兜底（过渡期兼容）
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override FROM issue_state WHERE repo_key=? AND issue_id=?",
-                      (repo_key, issue_id))
-            row = c.fetchone()
-            if row:
-                return {"id": row[0], "stage": row[1], "owner_agent": row[2],
-                        "a2a_seq": row[3], "updated_at": row[4], "assignee": row[5] or "",
-                        "scene_id": row[6] or "",
-                        "scene_user_id": row[7] or 0,
-                        "parent_issue_id": row[8] or "",
-                        "is_subtask_mode": row[9] or 0,
-                        "allow_scene_override": row[10] or 0}
+        row = rt.read_one_any("issue_state_legacy_row", (repo_key, issue_id))
+        if row:
+            return {"id": row[0], "stage": row[1], "owner_agent": row[2],
+                    "a2a_seq": row[3], "updated_at": row[4], "assignee": row[5] or "",
+                    "scene_id": row[6] or "",
+                    "scene_user_id": row[7] or 0,
+                    "parent_issue_id": row[8] or "",
+                    "is_subtask_mode": row[9] or 0,
+                    "allow_scene_override": row[10] or 0}
     except Exception:
         pass
     return None
@@ -106,41 +90,19 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
         return
     if not _num:
         return
-    sets = ", ".join(f"{k}=?" for k in fields)
-    if not sets:
+    if not fields:
         return
-    if touch_updated_at:
-        sets += ", updated_at=datetime('now')"
-    params = list(fields.values()) + [repo_key, _num]
     try:
-        with db_lock:
-            c = db.cursor()
-            if ensure_row:
-                # 建档最小行（幂等：仅当无该卡片行时 INSERT；后再 UPDATE 收编字段）。
-                # FR-17.1/FR-18.2: 按 repo_key provider 分查对应列，不 OR 扫两列。
-                # assignee 为空 → 直接 user_id=0；非空 → 按 provider 查 gitcode_user / github_login。
-                _assignee = assignee or (fields.get("assignee") or "")
-                if _assignee:
-                    # FR-CQ-1: 提取为 um_column_for_repo 工具函数
-                    from src.kernel.repo_key import um_column_for_repo
-                    _col = um_column_for_repo(repo_key)
-                    _usr_expr = (f"COALESCE((SELECT m.user_id FROM unified_user_mapping m "
-                                 f"WHERE m.{_col} = ? AND m.user_id IS NOT NULL AND m.user_id NOT IN ('', '0') "
-                                 f"AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id = m.user_id AND ga.status = 1) "
-                                 f"ORDER BY m.user_id LIMIT 1), 0)")
-                    _usr_pre = (_assignee,)
-                else:
-                    _usr_expr = "0"
-                    _usr_pre = ()
-                c.execute(
-                    "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_by) "
-                    "SELECT " + _usr_expr + ", ?, ?, ?, 'active', ? WHERE NOT EXISTS "
-                    "(SELECT 1 FROM issue WHERE repo_key=? AND issue_number=?)",
-                    (*_usr_pre, _assignee, repo_key, _num, _assignee, repo_key, _num))
-                c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
-            else:
-                c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
-            db.commit()
+        if ensure_row:
+            # 建档最小行（幂等：仅当无该卡片行时 INSERT；后再 UPDATE 收编字段）。
+            # FR-17.1/FR-18.2: 按 repo_key provider 分查对应列，不 OR 扫两列。
+            # assignee 为空 → user_id=0；非空 → 按 provider 查 gitcode_user / github_login。
+            _assignee = assignee or (fields.get("assignee") or "")
+            from src.kernel.repo_key import um_column_for_repo
+            _col = um_column_for_repo(repo_key) if _assignee else "gitcode_user"
+            rt.ensure_issue_card(repo_key, _num, _assignee, _col)
+        rt.update_issue_card_fields(repo_key, _num, dict(fields),
+                                    touch_updated_at=touch_updated_at)
     except Exception as e:
         from src.kernel.config import log as _log2
         _log2.warning(f"sync issue table failed for {repo_key} #{_num}: {e}")
@@ -172,14 +134,7 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
     if _task_status:
         try:
             _issue_num = int(issue_id.lstrip("#"))
-            with db_lock:
-                _c = db.cursor()
-                _c.execute(
-                    "UPDATE issue SET status=? "
-                    "WHERE repo_key=? AND issue_number=? "
-                    "AND status NOT IN ('completed','cancelled','awaiting_input','pending_review')",
-                    (_task_status, repo_key, _issue_num))
-                db.commit()
+            rt.exec_any("issue_status_sync", (_task_status, repo_key, _issue_num))
         except Exception as _e:
             log.warning(f"set_issue_stage: sync task.status failed: {_e}")
 
@@ -225,16 +180,9 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
     # 回退：从 issue 表直接读 scene_id（Phase C3 权威源）
     try:
         _num = int(str(issue_id or "").lstrip("#"))
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT scene_id, scene_user_id FROM issue "
-                "WHERE repo_key=? AND issue_number=?",
-                (repo_key, _num)
-            )
-            r = c.fetchone()
-            if r and r[0]:
-                return r[0], r[1] or 0
+        r = rt.read_one_any("issue_card_row", (repo_key, _num))
+        if r and r[5]:
+            return r[5], r[6] or 0
     except Exception:
         pass
     # Issue #415: Issue 级场景为空 → 回退仓库默认场景（managed_repos.dev_scene），
@@ -274,16 +222,9 @@ def get_issue_bound_scene(repo_key: str, issue_id: str) -> tuple:
         return st["scene_id"], st.get("scene_user_id", 0) or 0
     try:
         _num = int(str(issue_id or "").lstrip("#"))
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT scene_id, scene_user_id FROM issue "
-                "WHERE repo_key=? AND issue_number=?",
-                (repo_key, _num)
-            )
-            r = c.fetchone()
-            if r and r[0]:
-                return r[0], r[1] or 0
+        r = rt.read_one_any("issue_card_row", (repo_key, _num))
+        if r and r[5]:
+            return r[5], r[6] or 0
     except Exception:
         pass
     return "", 0
@@ -304,14 +245,10 @@ def get_carried_context(repo_key: str, issue_number: int) -> dict:
     """
     import json as _json
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT carried_context FROM issue WHERE repo_key=? AND issue_number=?",
-                (repo_key, issue_number))
-            row = c.fetchone()
-        if row and row[0]:
-            return _json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        row = rt.read_one_any("issue_card_row", (repo_key, issue_number))
+        if row and row[10]:
+            _cc = row[10]
+            return _json.loads(_cc) if isinstance(_cc, str) else (_cc or {})
     except Exception:
         pass
     return {}
@@ -333,12 +270,8 @@ def get_scene_override_flag(repo_key: str, issue_id: str) -> bool:
         _num = None
     if _num:
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT allow_scene_override FROM issue WHERE repo_key=? AND issue_number=?",
-                          (repo_key, _num))
-                row = c.fetchone()
-                return bool(row[0]) if row and row[0] else False
+            row = rt.read_one_any("issue_card_row", (repo_key, _num))
+            return bool(row[9]) if row and row[9] else False
         except Exception:
             return False
     return False
@@ -381,14 +314,8 @@ def get_subtask_issues(repo_key: str, parent_issue_id: str) -> list[dict]:
     _pid = parent_issue_id or ""
     if _pid and not str(_pid).startswith("#"):
         _pid = "#" + str(_pid)
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT issue_number, stage, owner_agent FROM issue "
-            "WHERE repo_key=? AND parent_issue_id=? ORDER BY issue_number",
-            (repo_key, _pid),
-        )
-        return [{"issue_id": "#" + str(r[0]), "stage": r[1], "owner_agent": r[2]} for r in c.fetchall()]
+    rows = rt.read_all_any("issue_children_by_parent", (repo_key, _pid))
+    return [{"issue_id": "#" + str(r[0]), "stage": r[1], "owner_agent": r[2]} for r in rows]
 
 
 def list_release_subissues(repo_key: str, parent_issue_number: int) -> list[dict]:
@@ -396,37 +323,27 @@ def list_release_subissues(repo_key: str, parent_issue_number: int) -> list[dict
 
     返回最新在前，含绑定要素 / 生命周期状态 / 结果三分支 / 失败原因。
     """
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT id, issue_number, title, status, stage, "
-            "release_candidate_sha, release_target_env, release_evidence_ref, "
-            "release_result, release_failure_reason, release_approved_by, release_approved_at, "
-            "created_at, completed_at "
-            "FROM issue WHERE repo_key=? AND parent_issue_number=? AND release_target_env != '' "
-            "ORDER BY id DESC",
-            (repo_key, int(parent_issue_number)),
-        )
-        out = []
-        for r in c.fetchall():
-            out.append({
-                "issue_id": r[0],
-                "sub_issue_number": r[1],
-                "parent_issue_number": int(parent_issue_number),
-                "title": r[2] or "",
-                "status": r[3] or "active",
-                "stage": r[4] or "vod",
-                "candidate_sha": r[5] or "",
-                "target_env": r[6] or "",
-                "evidence_ref": r[7] or "",
-                "result": r[8] or "",
-                "failure_reason": r[9] or "",
-                "approved_by": r[10] or 0,
-                "approved_at": r[11] or "",
-                "created_at": r[12] or "",
-                "completed_at": r[13] or "",
-            })
-        return out
+    rows = rt.read_all_any("issue_release_children", (repo_key, int(parent_issue_number)))
+    out = []
+    for r in rows:
+        out.append({
+            "issue_id": r[0],
+            "sub_issue_number": r[1],
+            "parent_issue_number": int(parent_issue_number),
+            "title": r[2] or "",
+            "status": r[3] or "active",
+            "stage": r[4] or "vod",
+            "candidate_sha": r[5] or "",
+            "target_env": r[6] or "",
+            "evidence_ref": r[7] or "",
+            "result": r[8] or "",
+            "failure_reason": r[9] or "",
+            "approved_by": r[10] or 0,
+            "approved_at": r[11] or "",
+            "created_at": r[12] or "",
+            "completed_at": r[13] or "",
+        })
+    return out
 
 
 def get_or_create_agent_session(repo_key: str, agent_type: str,
@@ -437,55 +354,47 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
     不再走 pick_engine / 按名解析——保证"会话引擎指针 == 实际执行引擎"
     （与 guard_issue_session_pointer 的指针语义对齐）。未传（0）时保持既有行为。
     """
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(
-                "SELECT id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-                (repo_key, agent_type)
-            )
-            row = c.fetchone()
-        except Exception:
-            row = None
+    row = None
+    try:
+        row = rt.read_one_any("devops_agent_session_row", (repo_key, agent_type))
+    except Exception:
+        row = None
 
-        if row:
-            return {
-                "id": row[0],
-                "runtime_session_id": row[1] or "",
-                "status": row[2] or "idle",
-                "last_active_at": row[3] or "",
-                "enable": bool(row[4]) if row[4] is not None else True,
-                "new": False,
-                "repo_key": repo_key,
-                "agent_type": agent_type,
-            }
+    if row:
+        return {
+            "id": row[0],
+            "runtime_session_id": row[1] or "",
+            "status": row[2] or "idle",
+            "last_active_at": row[3] or "",
+            "enable": bool(row[4]) if row[4] is not None else True,
+            "new": False,
+            "repo_key": repo_key,
+            "agent_type": agent_type,
+        }
 
-        sid = str(uuid.uuid4())
-        now = datetime.now().isoformat()
-        runtime_id = int(runtime_id or 0)
-        if not runtime_id and backend:
-            # 引擎集合优先（engine-selection-design.md v2）；无集合回退按类型名解析（legacy）
-            from src.domains.runtime.engine.engine_select import pick_engine
-            runtime_id = pick_engine(repo_key, agent_type, fallback_runtime_id=0) or 0
-            if not runtime_id:
-                from src.domains.mgmt.user.db import get_runtime_id_by_name, ensure_default_backend
-                runtime_id = get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
-        _enable = get_agent_type_enable(agent_type)
-        try:
-            c.execute(
-                "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, status, last_active_at, enable) VALUES (?,?,?,?,?,?,?)",
-                (sid, repo_key, agent_type, runtime_id, "idle", now, _enable)
-            )
-            db.commit()
-        except Exception as e:
-            log.warning(f"Failed to create agent session: {e}")
-            return {"id": sid, "runtime_session_id": "", "status": "idle",
-                    "last_active_at": now, "enable": bool(_enable), "new": True,
-                    "repo_key": repo_key, "agent_type": agent_type}
-
+    sid = str(uuid.uuid4())
+    now = datetime.now().isoformat()
+    runtime_id = int(runtime_id or 0)
+    if not runtime_id and backend:
+        # 引擎集合优先（engine-selection-design.md v2）；无集合回退按类型名解析（legacy）
+        from src.domains.runtime.engine.engine_select import pick_engine
+        runtime_id = pick_engine(repo_key, agent_type, fallback_runtime_id=0) or 0
+        if not runtime_id:
+            from src.domains.mgmt.user.db import get_runtime_id_by_name, ensure_default_backend
+            runtime_id = get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
+    _enable = get_agent_type_enable(agent_type)
+    try:
+        rt.ensure_agent_session(sid, repo_key, agent_type, runtime_id, status="idle",
+                                enable=_enable, subscribe_events="[]")
+    except Exception as e:
+        log.warning(f"Failed to create agent session: {e}")
         return {"id": sid, "runtime_session_id": "", "status": "idle",
                 "last_active_at": now, "enable": bool(_enable), "new": True,
                 "repo_key": repo_key, "agent_type": agent_type}
+
+    return {"id": sid, "runtime_session_id": "", "status": "idle",
+            "last_active_at": now, "enable": bool(_enable), "new": True,
+            "repo_key": repo_key, "agent_type": agent_type}
 
 
 def upsert_agent_session(*, repo_key: str, agent_type: str,
@@ -506,98 +415,66 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
     agent 专属 token，低级别 token 永不回填；清空走 unbind 的专门 SQL 路径）。
     返回会话 id。
     """
-    with db_lock:
-        c = db.cursor()
-        row = c.execute(
-            "SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-            (repo_key, agent_type)).fetchone()
-        if row:
-            sid = row[0]
-            sets = ["runtime_id=?", "skill=?", "skill_id=?",
-                    "status=?", "last_active_at=datetime('now')"]
-            params = [runtime_id, skill, skill_id, status]
-            if repo_gitcode_token is not None:
-                sets.append("repo_gitcode_token=?")
-                params.append(repo_gitcode_token)
-            if enable is not None:
-                sets.append("enable=?")
-                params.append(enable)
-            if subscribe_events is not None:
-                sets.append("subscribe_events=?")
-                params.append(subscribe_events)
-            params.append(sid)
-            c.execute(f"UPDATE devops_agent_session SET {', '.join(sets)} WHERE id=?", params)
-            db.commit()
-            return sid
-        sid = str(uuid.uuid4())
-        _enable = enable if enable is not None else get_agent_type_enable(agent_type)
-        _sub = subscribe_events if subscribe_events is not None else "[]"
-        c.execute(
-            "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
-            (sid, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token or "",
-             status, _enable, _sub))
-        db.commit()
+    row = rt.read_one_any("devops_agent_session_row", (repo_key, agent_type))
+    if row:
+        sid = row[0]
+        fields: dict = {"runtime_id": runtime_id, "skill": skill, "skill_id": skill_id,
+                        "status": status}
+        if repo_gitcode_token is not None:
+            fields["repo_gitcode_token"] = repo_gitcode_token
+        if enable is not None:
+            fields["enable"] = enable
+        if subscribe_events is not None:
+            fields["subscribe_events"] = subscribe_events
+        rt.update_agent_session_fields(sid, fields)
         return sid
+    sid = str(uuid.uuid4())
+    _enable = enable if enable is not None else get_agent_type_enable(agent_type)
+    _sub = subscribe_events if subscribe_events is not None else "[]"
+    rt.ensure_agent_session(sid, repo_key, agent_type, runtime_id, skill=skill,
+                            skill_id=skill_id, repo_gitcode_token=repo_gitcode_token or "",
+                            status=status, enable=_enable, subscribe_events=_sub)
+    return sid
 
 
 def update_agent_session(session_id: str, status: str = "idle",
                          oc_session_id: str = None):
     """更新 Agent 会话状态"""
-    with db_lock:
-        c = db.cursor()
-        try:
-            if oc_session_id:
-                c.execute(
-                    "UPDATE devops_agent_session SET status=?, runtime_session_id=?, last_active_at=? WHERE id=?",
-                    (status, oc_session_id, datetime.now().isoformat(), session_id)
-                )
-            else:
-                c.execute(
-                    "UPDATE devops_agent_session SET status=?, last_active_at=? WHERE id=?",
-                    (status, datetime.now().isoformat(), session_id)
-                )
-            db.commit()
-        except Exception as e:
-            log.warning(f"Failed to update session {session_id}: {e}")
+    try:
+        fields: dict = {"status": status}
+        if oc_session_id:
+            fields["runtime_session_id"] = oc_session_id
+        rt.update_agent_session_fields(session_id, fields)
+    except Exception as e:
+        log.warning(f"Failed to update session {session_id}: {e}")
 
 
 def list_agent_sessions(repo_key: str) -> list[dict]:
     """列出仓库的所有 Agent 会话"""
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(
-                "SELECT id, agent_type, runtime_id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type",
-                (repo_key,)
-            )
-            result = []
-            for r in c.fetchall():
-                backend_name = ""
-                if r[2]:
-                    c.execute("SELECT name FROM agent_runtimes WHERE id=?", (r[2],))
-                    brow = c.fetchone()
-                    if brow and brow[0]:
-                        backend_name = brow[0]
-                result.append({"id": r[0], "agent_type": r[1], "backend": backend_name,
-                               "runtime_session_id": r[3] or "", "status": r[4],
-                               "last_active_at": normalize_event_time(r[5] or ""),
-                               "enable": bool(r[6]) if r[6] is not None else True})
-            return result
-        except Exception:
-            return []
+    try:
+        rows = rt.read_all_any("devops_agent_sessions_by_repo", (repo_key,))
+        result = []
+        for r in rows:
+            backend_name = ""
+            if r[2]:
+                _brow = rt.read_one_any("agent_runtime_name_by_id", (r[2],))
+                if _brow and _brow[0]:
+                    backend_name = _brow[0]
+            result.append({"id": r[0], "agent_type": r[1], "backend": backend_name,
+                           "runtime_session_id": r[3] or "", "status": r[4],
+                           "last_active_at": normalize_event_time(r[5] or ""),
+                           "enable": bool(r[6]) if r[6] is not None else True})
+        return result
+    except Exception:
+        return []
 
 
 def delete_agent_session(repo_key: str, agent_type: str) -> bool:
     """删除单个 Agent 会话"""
-    with db_lock:
-        try:
-            c = db.cursor()
-            c.execute("DELETE FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-                      (repo_key, agent_type))
-            db.commit()
-            return c.rowcount > 0
-        except Exception:
-            return False
+    try:
+        return rt.delete_agent_sessions(repo_key, agent_type) > 0
+    except Exception:
+        return False
 
 
 def ensure_default_agent_sessions(repo_key: str):
@@ -667,18 +544,14 @@ def ensure_default_agent_sessions(repo_key: str):
 
 def remove_agent_sessions(repo_key: str) -> int:
     """删除仓库的所有 Agent 会话"""
-    with db_lock:
-        try:
-            c = db.cursor()
-            c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (repo_key,))
-            db.commit()
-            _cnt = c.rowcount
-            if _cnt:
-                log.info(f"Removed {_cnt} agent session(s) for repo={repo_key}")
-            return _cnt
-        except Exception as e:
-            log.warning(f"Failed to remove sessions for {repo_key}: {e}")
-            return 0
+    try:
+        _cnt = rt.delete_agent_sessions(repo_key)
+        if _cnt:
+            log.info(f"Removed {_cnt} agent session(s) for repo={repo_key}")
+        return _cnt
+    except Exception as e:
+        log.warning(f"Failed to remove sessions for {repo_key}: {e}")
+        return 0
 
 
 # ===== Issue 级执行会话（多 Issue 并行，见 multi-issue-isolation-design.md §3.3）=====
@@ -693,39 +566,29 @@ def get_or_create_issue_session(repo_key: str, agent_type: str, issue_id: str) -
     见 vod-agent-hang-rootcause-fix.md 方案 A）；第一次执行由 opencode 生成全新 session 后回写本行。
     """
     issue_id = issue_id or ""
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(
-                "SELECT id, runtime_session_id, status, last_active_at, session_engine FROM issue_agent_session "
-                "WHERE repo_key=? AND agent_type=? AND issue_id=?",
-                (repo_key, agent_type, issue_id)
-            )
-            row = c.fetchone()
-        except Exception:
-            row = None
-        if row:
-            return {"id": row[0], "runtime_session_id": row[1] or "",
-                    "status": row[2] or "idle", "last_active_at": row[3] or "",
-                    "session_engine": row[4] or "", "new": False}
+    row = None
+    try:
+        row = rt.read_one_any("issue_agent_session_row", (repo_key, agent_type, issue_id))
+    except Exception:
+        row = None
+    if row:
+        return {"id": row[0], "runtime_session_id": row[1] or "",
+                "status": row[2] or "idle", "last_active_at": row[3] or "",
+                "session_engine": row[4] or "", "new": False}
 
-        # 每 Issue 独立 session：新 Issue 不继承 repo 级 session 指针，_seed 恒为空
-        _seed = ""
-        sid = str(uuid.uuid4())
-        now = datetime.now().isoformat()
-        try:
-            c.execute(
-                "INSERT INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, session_engine, status, last_active_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (sid, repo_key, agent_type, issue_id, _seed, "", "idle", now)
-            )
-            db.commit()
-        except Exception as e:
-            log.warning(f"Failed to create issue session: {e}")
-            return {"id": sid, "runtime_session_id": _seed, "status": "idle",
-                    "last_active_at": now, "session_engine": "", "new": True}
+    # 每 Issue 独立 session：新 Issue 不继承 repo 级 session 指针，_seed 恒为空
+    _seed = ""
+    sid = str(uuid.uuid4())
+    now = datetime.now().isoformat()
+    try:
+        rt.exec_any("issue_agent_session_insert",
+                    (sid, repo_key, agent_type, issue_id, _seed, "", "idle", now))
+    except Exception as e:
+        log.warning(f"Failed to create issue session: {e}")
         return {"id": sid, "runtime_session_id": _seed, "status": "idle",
                 "last_active_at": now, "session_engine": "", "new": True}
+    return {"id": sid, "runtime_session_id": _seed, "status": "idle",
+            "last_active_at": now, "session_engine": "", "new": True}
 
 
 def update_issue_session(session_id: str, runtime_session_id: str = None, status: str = None,
@@ -733,44 +596,29 @@ def update_issue_session(session_id: str, runtime_session_id: str = None, status
     """更新 Issue 级执行会话：续接指针 / 状态 / 引擎名。指针为空则不覆盖（避免丢上下文）。"""
     if not session_id:
         return
-    sets = []
-    params = []
+    fields: dict = {}
     if runtime_session_id is not None:
-        sets.append("runtime_session_id=?")
-        params.append(runtime_session_id)
+        fields["runtime_session_id"] = runtime_session_id
     if session_engine is not None:
-        sets.append("session_engine=?")
-        params.append(session_engine)
+        fields["session_engine"] = session_engine
     if status is not None:
-        sets.append("status=?")
-        params.append(status)
-    if not sets:
+        fields["status"] = status
+    if not fields:
         return
-    sets.append("last_active_at=?")
-    params.append(datetime.now().isoformat())
-    params.append(session_id)
-    with db_lock:
-        try:
-            c = db.cursor()
-            c.execute(f"UPDATE issue_agent_session SET {', '.join(sets)} WHERE id=?", params)
-            db.commit()
-        except Exception as e:
-            log.warning(f"Failed to update issue session {session_id}: {e}")
+    try:
+        rt.update_issue_agent_session_fields(session_id, fields)
+    except Exception as e:
+        log.warning(f"Failed to update issue session {session_id}: {e}")
 
 
 def get_issue_session(repo_key: str, agent_type: str, issue_id: str) -> dict | None:
     """按 (repo, agent, issue) 查 Issue 级执行会话；无记录返回 None。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, runtime_session_id, status, last_active_at, session_engine FROM issue_agent_session "
-                  "WHERE repo_key=? AND agent_type=? AND issue_id=?",
-                  (repo_key, agent_type, issue_id))
-        row = c.fetchone()
-        if not row:
-            return None
-        return {"id": row[0], "runtime_session_id": row[1] or "",
-                "status": row[2] or "idle", "last_active_at": row[3] or "",
-                "session_engine": row[4] or ""}
+    row = rt.read_one_any("issue_agent_session_row", (repo_key, agent_type, issue_id))
+    if not row:
+        return None
+    return {"id": row[0], "runtime_session_id": row[1] or "",
+            "status": row[2] or "idle", "last_active_at": row[3] or "",
+            "session_engine": row[4] or ""}
 
 
 def guard_issue_session_pointer(isess: dict, current_engine: str) -> str:
@@ -796,37 +644,28 @@ def guard_issue_session_pointer(isess: dict, current_engine: str) -> str:
 
 def list_issue_sessions(repo_key: str, agent_type: str = "") -> list[dict]:
     """列出仓库的 Issue 级执行会话（运维/前端展示并行情况）。"""
-    sql = "SELECT id, repo_key, agent_type, issue_id, runtime_session_id, status, last_active_at, created_at FROM issue_agent_session WHERE repo_key=?"
-    params = [repo_key]
-    if agent_type:
-        sql += " AND agent_type=?"
-        params.append(agent_type)
-    sql += " ORDER BY last_active_at DESC"
-    with db_lock:
-        c = db.cursor()
-        try:
-            rows = c.execute(sql, params).fetchall()
-        except Exception:
-            return []
-        return [{"id": r[0], "repo_key": r[1], "agent_type": r[2], "issue_id": r[3],
-                 "runtime_session_id": r[4] or "", "status": r[5], "last_active_at": normalize_event_time(r[6]),
-                 "created_at": normalize_event_time(r[7])} for r in rows]
+    try:
+        if agent_type:
+            rows = rt.read_all_any("issue_agent_sessions_by_repo_agent", (repo_key, agent_type))
+        else:
+            rows = rt.read_all_any("issue_agent_sessions_by_repo", (repo_key,))
+    except Exception:
+        return []
+    return [{"id": r[0], "repo_key": r[1], "agent_type": r[2], "issue_id": r[3],
+             "runtime_session_id": r[4] or "", "status": r[5],
+             "last_active_at": normalize_event_time(r[6]),
+             "created_at": normalize_event_time(r[7])} for r in rows]
 
 
 def remove_issue_sessions(repo_key: str):
     """删除仓库的所有 Issue 级执行会话（随仓库移除清理）。"""
-    with db_lock:
-        try:
-            c = db.cursor()
-            c.execute("DELETE FROM issue_agent_session WHERE repo_key=?", (repo_key,))
-            db.commit()
-            return c.rowcount
-        except Exception as e:
-            log.warning(f"Failed to remove issue sessions for {repo_key}: {e}")
-            return 0
+    try:
+        return rt.exec_any("issue_agent_session_delete_by_repo", (repo_key,))
+    except Exception as e:
+        log.warning(f"Failed to remove issue sessions for {repo_key}: {e}")
+        return 0
 
-# Issue #1753：carried_context.target_branch_source 的来源标记（webhook 写入 /
-# prompt_builder 判定共用，避免魔法字符串口径漂移）。
+
 TARGET_BRANCH_SOURCE_SCENE_WORK_BRANCH = "target_scene_work_branch"
 # 承接场景未配置 work_branch（含多跳链残留）时，历史权威标记显式失效为该值。
 TARGET_BRANCH_SOURCE_UNCONFIRMED_NO_SCENE_WORK_BRANCH = "unconfirmed_no_target_scene_work_branch"
@@ -938,16 +777,12 @@ def get_issue_status(repo_key: str, issue_id: str) -> str:
     if _num is None:
         return ""
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
-                (repo_key, _num))
-            row = c.fetchone()
-        return (row[0] if row and row[0] else "") or ""
+        row = rt.read_one_any("issue_card_row", (repo_key, _num))
+        return (row[11] if row and row[11] else "") or ""
     except Exception as _e:
         from src.kernel.config import log as _log3
         _log3.warning(f"get_issue_status failed for {repo_key} #{_num}: {_e}")
         return ""
+
 
 # ==== merged from weekly-08 (symbols referenced by decouple modules) ====

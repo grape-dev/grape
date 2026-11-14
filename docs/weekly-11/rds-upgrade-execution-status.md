@@ -158,6 +158,15 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### session_store 接口化（-31）
+- `src/api/session_store.py`：issue / devops_agent_session / issue_agent_session / agent_type /
+  agent_runtimes 等直接 SQL 全部改走 runtime public 具名查询（新增 20 条查询 + 6 个薄原语），
+  该文件跨域 **39 → 3**，全局 **770 → 739**。
+- 两处基线「上升」为归属重映射（同一批 SQL 从 api 消费改为 runtime 消费）：
+  grape_accounts 14→16、unified_user_mapping 17→19，已按新归属落数并记录。
+- 门禁：check_lib_query_names PASS；pytest arch/contracts/scripts **158 passed**；
+  三实例彩排循环 LOOP_EXIT=0（P4 PASS / P5 PASS / 运行面 0 失败，170+ 端点含写场景）。
+
 ### 三批并行收口（-64）
 - `kernel/session_manager.py`：unified_user_mapping 读写改走 mgmt public 原语（resolve_feishu_open_id /
   list_user_mappings / bind_feishu_mapping_row / ensure_unified_user_mapping_schema 等），该表引用 21 → 0；

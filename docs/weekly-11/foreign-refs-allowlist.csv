@@ -1,5 +1,5 @@
 table,owner_domain,consumer,refs
-agent_runtimes,runtime,api,10
+agent_runtimes,runtime,api,9
 agent_runtimes,runtime,insight,8
 agent_runtimes,runtime,kernel,3
 agent_runtimes,runtime,mgmt,31
@@ -10,7 +10,6 @@ agent_tasks,runtime,api,17
 agent_tasks,runtime,insight,35
 agent_tasks,runtime,kernel,1
 agent_tasks,runtime,mgmt,5
-agent_type,runtime,api,1
 agent_type,runtime,insight,1
 agent_type,runtime,mgmt,2
 api_latency_log,insight,api,3
@@ -26,7 +25,6 @@ chat_conversations,runtime,api,1
 chat_conversations,runtime,kernel,14
 chat_conversations,runtime,mgmt,2
 chat_messages,runtime,kernel,10
-devops_agent_session,runtime,api,11
 devops_agent_session,runtime,kernel,1
 devops_agent_session,runtime,mgmt,12
 devops_pipeline_scene,mgmt,api,4
@@ -45,10 +43,9 @@ external_identities,mgmt,api,5
 external_identities,mgmt,kernel,1
 external_identities,mgmt,runtime,7
 feishu_onboard_task,mgmt,runtime,1
-grape_accounts,mgmt,api,1
 grape_accounts,mgmt,insight,2
 grape_accounts,mgmt,kernel,1
-grape_accounts,mgmt,runtime,14
+grape_accounts,mgmt,runtime,16
 grape_t_channel_chat_session_binding,mgmt,runtime,4
 grape_t_channel_inbound_dedup,mgmt,runtime,5
 grape_t_channel_inbound_message,mgmt,runtime,1
@@ -64,12 +61,11 @@ grape_t_repo_credentials,insight,mgmt,16
 grape_t_repo_credentials,insight,runtime,11
 grape_t_schema_migrations,mgmt,api,2
 gsb_service_registry,mgmt,kernel,9
-issue,runtime,api,29
+issue,runtime,api,16
 issue,runtime,insight,4
 issue,runtime,kernel,2
 issue,runtime,mgmt,2
-issue_agent_session,runtime,api,6
-issue_state,runtime,api,2
+issue_state,runtime,api,1
 login_whitelist,mgmt,api,1
 login_whitelist,mgmt,kernel,4
 managed_repos,mgmt,api,8
@@ -108,10 +104,10 @@ takeover_sessions,runtime,api,2
 takeover_sessions,runtime,mgmt,1
 task_messages,runtime,insight,1
 task_messages,runtime,kernel,1
-unified_user_mapping,mgmt,api,2
+unified_user_mapping,mgmt,api,1
 unified_user_mapping,mgmt,insight,1
 unified_user_mapping,mgmt,kernel,3
-unified_user_mapping,mgmt,runtime,17
+unified_user_mapping,mgmt,runtime,19
 user_accounts,mgmt,runtime,1
 user_feedback,mgmt,api,6
 user_repos,mgmt,api,2
