@@ -52,9 +52,15 @@ def _audit_im(user: dict, request: Request | None, action: str, *,
         log.warning(f"IM audit log failed (action={action}): {e}")
 
 
-def _db_conn():
-    from src.domains.runtime.im import engine_wiring
-    return engine_wiring._connect(engine_wiring.default_db_path())
+def _mgmt_public():
+    """渠道安装表（`grape_t_channel_installation`）归 mgmt 域：语句只在该域 public 一份。
+
+    连接也由归属域按拓扑自选（自有 DSN → mgmt 库；单库/测试 → 进程主库），本路由不再
+    自己开连接：原实现借 `engine_wiring._connect()` 取句柄，而那条连接钉的是 IM 侧库，
+    三库独立后读的是 mgmt 表的副本（不是 1146，是静默分裂）。
+    """
+    from src.domains.mgmt import public as _pub
+    return _pub
 
 
 def _engine():
@@ -112,14 +118,8 @@ def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
             health = eng.health()
         except Exception:
             health = {}
-    conn = _db_conn()
-    try:
-        rows = conn.execute(
-            "SELECT status, COUNT(*) FROM grape_t_channel_installation GROUP BY status"
-        ).fetchall()
-    finally:
-        conn.close()
-    counts = {str(r[0]): int(r[1]) for r in rows or []}
+    mgmt = _mgmt_public()
+    counts = {str(r[0]): int(r[1]) for r in mgmt.installation_status_counts_any()}
     return {
         "mode": mode,                                   # on | off（data/im_engine_mode 优先）
         "active_engine": "new" if eng is not None else "idle",  # 旧 legacy 链路已下线
@@ -152,14 +152,7 @@ def im_installations(
 ):
     """安装列表：user 轨按 owner_user_id 过滤，repo 轨按仓库访问权限过滤；secret 掩码。"""
     uid = str(user.get("id") or "")
-    conn = _db_conn()
-    try:
-        rows = conn.execute(
-            "SELECT id, channel_type, scope, owner_user_id, repo_key, config, status, "
-            "updated_at FROM grape_t_channel_installation ORDER BY updated_at DESC"
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = _mgmt_public().installation_list_any()
 
     connected = _connected_ids()
     out = []
@@ -228,27 +221,18 @@ def im_set_installation_status(installation_id: str, body: InstallationStatusBod
     if new_status not in ("active", "disabled"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "status 只支持 active / disabled"})
 
-    conn = _db_conn()
-    try:
-        row = conn.execute(
-            "SELECT scope, owner_user_id, repo_key FROM grape_t_channel_installation WHERE id=?",
-            (installation_id,),
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "安装不存在"})
-        scope, owner, repo_key = str(row[0] or "user"), str(row[1] or ""), str(row[2] or "")
-        uid = str(user.get("id") or "")
-        if scope == "user" and owner and uid and owner != uid:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作其他用户的安装"})
-        if scope == "repo":
-            check_repo_access(user, repo_key)
-        conn.execute(
-            "UPDATE grape_t_channel_installation SET status=?, updated_at=datetime('now') WHERE id=?",
-            (new_status, installation_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    mgmt = _mgmt_public()
+    row = mgmt.installation_owner_by_id_any(installation_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "安装不存在"})
+    scope, owner, repo_key = str(row[0] or "user"), str(row[1] or ""), str(row[2] or "")
+    uid = str(user.get("id") or "")
+    if scope == "user" and owner and uid and owner != uid:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权操作其他用户的安装"})
+    if scope == "repo":
+        check_repo_access(user, repo_key)
+    # 单语句写由归属域原语自行提交（自有 DSN autocommit / 单库 db_lock+commit）
+    mgmt.installation_set_status_any(new_status, installation_id)
     log.info(f"IM engine: installation {installation_id} status -> {new_status} (by user={user.get('id')})")
     _audit_im(user, request, f"installation_{new_status}",
               installation_id=installation_id, channel_type="", scope="")
@@ -265,11 +249,8 @@ class DingtalkCardSetupBody(BaseModel):
     template_id: str = ""       # 空 = 关闭互动卡片（回落文字卡 + 回数字）
 
 
-def _load_dingtalk_install(conn, installation_id: str, user: dict) -> dict:
-    row = conn.execute(
-        "SELECT channel_type, scope, owner_user_id, repo_key, config "
-        "FROM grape_t_channel_installation WHERE id=?", (installation_id,),
-    ).fetchone()
+def _load_dingtalk_install(installation_id: str, user: dict) -> dict:
+    row = _mgmt_public().installation_detail_by_id_any(installation_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "安装不存在"})
     ctype, scope, owner, repo_key, raw = [str(x) for x in row[:4]] + [row[4]]
@@ -308,11 +289,7 @@ def im_dingtalk_card_setup(
     user: dict = Depends(get_current_user_or_api_key),
 ):
     """互动卡片接入状态（前端「卡片按钮」一栏读它）。"""
-    conn = _db_conn()
-    try:
-        cfg = _load_dingtalk_install(conn, installation_id, user)
-    finally:
-        conn.close()
+    cfg = _load_dingtalk_install(installation_id, user)
     return _card_setup_view(installation_id, cfg)
 
 
@@ -329,58 +306,50 @@ async def im_dingtalk_card_setup_save(
     （探活只建实例不投放，用户侧无感知）。
     A1（后续增强）：template_id 传空 + `auto=true` 时改为调「卡片平台模板复制」自动开模板。
     """
-    conn = _db_conn()
-    try:
-        cfg = _load_dingtalk_install(conn, body.installation_id, user)
-        tpl = (body.template_id or "").strip()
-        if tpl:
-            app_id = str(cfg.get("app_id") or "")
-            secret = str(cfg.get("app_secret") or "")
-            if not app_id or not secret:
-                raise HTTPException(status_code=400, detail={
-                    "code": 400, "message": "安装缺少 app_id/app_secret，先把钉钉应用凭证配好"})
-            from src.domains.runtime.im.adapters.dingtalk.cards import DingtalkCardClient, new_out_track_id
-            client = DingtalkCardClient(app_id, secret)
-            ok, data = await client.create_instance(
-                tpl, new_out_track_id("probe"), {"title": "grape", "body_md": "card probe"})
-            if not ok:
-                status = data.get("status")
-                hint = ("应用未开通「互动卡片实例写权限」，或模板未发布/ID 不属于本应用"
-                        if status in (401, 403) or not status
-                        else "模板 ID 不正确或卡片平台侧未发布")
-                raise HTTPException(status_code=400, detail={
-                    "code": 400, "message": "模板/权限校验失败", "hint": hint,
-                    "upstream": data})
-            cfg["dingtalk_cards"] = {"card": tpl}
-            cfg["cards_enabled"] = True
-        else:
-            cfg["dingtalk_cards"] = {"card": str((cfg.get("dingtalk_cards") or {}).get("card") or "")}
-            cfg["cards_enabled"] = False
+    mgmt = _mgmt_public()
+    cfg = _load_dingtalk_install(body.installation_id, user)
+    tpl = (body.template_id or "").strip()
+    if tpl:
+        app_id = str(cfg.get("app_id") or "")
+        secret = str(cfg.get("app_secret") or "")
+        if not app_id or not secret:
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": "安装缺少 app_id/app_secret，先把钉钉应用凭证配好"})
+        from src.domains.runtime.im.adapters.dingtalk.cards import DingtalkCardClient, new_out_track_id
+        client = DingtalkCardClient(app_id, secret)
+        ok, data = await client.create_instance(
+            tpl, new_out_track_id("probe"), {"title": "grape", "body_md": "card probe"})
+        if not ok:
+            status = data.get("status")
+            hint = ("应用未开通「互动卡片实例写权限」，或模板未发布/ID 不属于本应用"
+                    if status in (401, 403) or not status
+                    else "模板 ID 不正确或卡片平台侧未发布")
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": "模板/权限校验失败", "hint": hint,
+                "upstream": data})
+        cfg["dingtalk_cards"] = {"card": tpl}
+        cfg["cards_enabled"] = True
+    else:
+        cfg["dingtalk_cards"] = {"card": str((cfg.get("dingtalk_cards") or {}).get("card") or "")}
+        cfg["cards_enabled"] = False
 
-        from src.domains.runtime.im.engine.supervisor import fingerprint
-        from src.domains.runtime.im.adapters.dingtalk.cards import set_card_mode_file
-        conn.execute(
-            "UPDATE grape_t_channel_installation SET config=?, config_fingerprint=?, "
-            "updated_at=datetime('now') WHERE id=?",
-            (json.dumps(cfg, ensure_ascii=False), fingerprint(cfg), body.installation_id),
-        )
-        conn.commit()
-        # 全局开关：还有别的安装启用着就不能关（订阅 topic 是进程级/渠道级）
-        enabled_other = False
-        if not body.template_id.strip():
-            for (raw_cfg,) in conn.execute(
-                    "SELECT config FROM grape_t_channel_installation WHERE channel_type='dingtalk' "
-                    "AND status='active'"):
-                try:
-                    _c = json.loads(raw_cfg or "{}")
-                except Exception:
-                    continue
-                if isinstance(_c, dict) and _c.get("cards_enabled") and _c.get("dingtalk_cards"):
-                    enabled_other = True
-                    break
-        set_card_mode_file(bool(body.template_id.strip()) or enabled_other)
-    finally:
-        conn.close()
+    from src.domains.runtime.im.engine.supervisor import fingerprint
+    from src.domains.runtime.im.adapters.dingtalk.cards import set_card_mode_file
+    # config 与指纹同一语句写（指纹必须跟着配置变），提交由归属域原语负责
+    mgmt.installation_set_config_and_fingerprint_any(
+        json.dumps(cfg, ensure_ascii=False), fingerprint(cfg), body.installation_id)
+    # 全局开关：还有别的安装启用着就不能关（订阅 topic 是进程级/渠道级）
+    enabled_other = False
+    if not body.template_id.strip():
+        for (raw_cfg,) in mgmt.installation_active_configs_by_type_any("dingtalk"):
+            try:
+                _c = json.loads(raw_cfg or "{}")
+            except Exception:
+                continue
+            if isinstance(_c, dict) and _c.get("cards_enabled") and _c.get("dingtalk_cards"):
+                enabled_other = True
+                break
+    set_card_mode_file(bool(body.template_id.strip()) or enabled_other)
     log.info(f"IM dingtalk card setup: inst={body.installation_id} tpl={body.template_id or '-'} "
              f"enabled={bool(body.template_id)} by user={user.get('id')}")
     _audit_im(user, request, "dingtalk_card_setup", installation_id=body.installation_id,

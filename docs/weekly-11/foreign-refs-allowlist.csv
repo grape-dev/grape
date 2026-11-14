@@ -30,7 +30,7 @@ feishu_onboard_task,mgmt,runtime,1
 grape_accounts,mgmt,insight,1
 grape_accounts,mgmt,runtime,8
 grape_t_channel_chat_session_binding,mgmt,runtime,1
-grape_t_channel_installation,mgmt,runtime,16
+grape_t_channel_installation,mgmt,runtime,9
 grape_t_channel_lease,mgmt,runtime,2
 grape_t_channel_outbound_card,mgmt,runtime,2
 grape_t_channel_sender_identity,mgmt,runtime,1

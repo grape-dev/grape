@@ -1102,6 +1102,72 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 ---
 
+### 7.5 runtime IM 路由渠道安装表收口（2026-11-15 本批）
+
+- 文件：`src/domains/runtime/routes/im.py`（runtime 域消费、7 处跨域 SQL → 0）。
+  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`grape_t_channel_installation`（归 mgmt）7 处——
+  行 118 状态分组计数、159 安装列表八列、234 启停前归属判定、246 启停写 status、
+  271 钉钉安装详情五列、363 写 config + 指纹、372 钉钉活跃安装 config 枚举。
+- owner 侧新增（`?` 占位符、列序/排序逐字照抄原语句、写语句用可移植 `datetime('now')`）：
+  1) `_ANY_QUERIES` 补 7 条具名查询：`installation_status_counts`、`installation_list_all`、
+     `installation_owner_by_id`、`installation_detail_by_id`、`installation_update_status`、
+     `installation_update_config_fp`、`installation_active_configs_by_type`。
+  2) 同名薄函数 7 个（`*_any`，不接收拼接 SQL 也不接收外部连接）：列表类走 `read_all_any`、
+     单行类走 `read_one_any`、写类走 `exec_any`。
+- 设计取舍：
+  1) **为什么不沿用 `installation_*(conn)` 家族**（那是 `3921a54c6` 给 `im/engine_wiring` 铺的）：
+     SQL 搬进归属域只解决「语句在哪」，不解决「连接连哪个库」。`engine_wiring._connect()` 钉的是
+     IM 侧库（`GRAPE_IM_DB_NAME` 优先，dev/prod 为运行域），三库独立后拿它读 mgmt 表读到的是
+     **副本**——不报 1146，是静默数据分裂，比报错更难发现。故本文件 5 个站点全部改走不带 `conn`
+     的 `*_any`，路由不再自持连接（`_db_conn()` 随之删除）。
+  2) **读-判权-写仍是两次原语调用**：与原实现同形（同一连接先 SELECT 再 UPDATE，两步之间本来
+     就没有事务边界），没有引入新的窗口；写原语自带提交（自有 DSN autocommit / 单库回落
+     `db_lock` + commit），因此去掉外层 `conn.commit()`。若将来要把「判权 + 改状态」做成原子的，
+     应在 owner 侧加组合原语，而不是在调用方套事务。
+  3) **config 与 `config_fingerprint` 用同一条 UPDATE**：指纹必须跟着配置走，拆两条会出现
+     「配置变了指纹没变」的中间态（引擎按指纹判断是否重建渠道）。
+  4) **探活先于写保持不变**：模板探活失败仍是 400 且零写入，只是落库动作改由归属域提交；
+     空 `template_id` 的「只关启用、不清模板 ID」口径逐字保留。
+  5) **`WHERE channel_type='dingtalk'` 改参数化**：渠道类型由调用方传、语句在归属域，
+     口径不变（仍只统计 `status='active'`），避免下个渠道再复制一条几乎相同的语句。
+- 修的存量 bug：
+  1) **连接归属（功能面）**：三库拓扑下 `/api/im/status`、`/api/im/installations`、启停、
+     钉钉卡片读的安装表都来自 IM 侧库，而 mgmt 侧同表另有数据——两侧都不报错，前端看到的
+     「安装数/状态」与 mgmt 真相不一致。现按 owner 域读，两条拓扑同结果。
+  2) **本文件是 `mgmt/routes/im.py` 的陈旧分叉**（`arch-weekly-11-ljt` 合并 weekly-11 时
+     新路由落在 mgmt，runtime 侧这份没删）：它没有被任何进程挂载（`grape_server` / `main` 都
+     从 `mgmt.routes` 取），缺 #2261 的 outbox 段、`_engine()` 还在 `sys.modules` 里猜入口，
+     而 `tests/runtime/im/test_im_routes.py` 只 import 它——**四个用例守护的是死代码**。
+     本批只做 SQL 归位（不删文件：删它要同步重指用例与 `_engine` 取法，属独立一批），
+     已列为后续动作。
+  3) **测试夹具只重定向了 `engine_wiring` 的库路径**：归位后「写入 tmp 库、读进程主库」两边
+     看不到彼此（4 个用例红）。夹具补钉 `src.kernel.session_manager.db` 到同一临时库——
+     这本来就是 `_any_cursor` 回落路径的连接，属口径对齐而非迁就实现。
+- 验证：`py_compile` 三文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/im_routes_smoke.py`
+  **ALL 76 CHECKS PASSED**（含边界与否定用例：空表三类计数 0、列表**不过滤 status**、
+  owner 为空串对所有人可见、repo 轨「传 repo 精确匹配 / 不传逐行问权限且无权限即隐藏」、
+  secret 掩码与坏 JSON/数组配置降级、启停 404/403/400 三条否定路径零写入、
+  状态值 `' DISABLED '` 归一化、`updated_at` 由 `datetime('now')` 刷新且写已提交、
+  repo 轨无权限时权限异常原样透出、钉钉空模板只关启用不清模板、探活失败零写入、
+  探活成功落指纹、全局开关「还有别的 active 安装启用着就不能关」、坏 JSON / revoked /
+  非钉钉渠道的启用都不计入、7 条具名查询已登记且未登记名 `KeyError`、
+  **有自有 DSN 时 SQL 走 `db_registry.cursor('mgmt')` 不碰进程库**、源码 0 条跨域 SQL）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch PASS / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**；
+  `pytest tests/runtime/im` 同组 **10 passed**（HEAD worktree 基线同组 1 failed
+  `test_enable_disable_writes_audit` 为既有，与本次改动无关）。
+- 新基线：全局 **242 → 235**（-7），对 **66 → 66**（该表在 runtime 侧另 9 处由
+  `im/engine/installations.py` 1、`im/handler_async.py` 2、`im/notify.py` 1、
+  `im/vod_handler_async.py` 2、`routes/chat.py` 3 承担，故只减计数不减对）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 235 / 66；依赖看板与作业单同步刷新
+  （下一批头名：`mgmt/routes/autopilot.py` / `runtime/issues_center.py` /
+  `runtime/routes/events.py` 各 7 处）。
+- 遗留：`engine_wiring.get_active_installation` / `sync_installation` / `revoke_installation`
+  仍把自己的 `_connect()` 连接传给 `installation_*(conn)`——同一张表的写方向仍钉在 IM 侧库，
+  属 §"连接归属" 的下一批（与 `routes/chat.py`、`im/handler_async.py` 一起改）。
+
+---
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

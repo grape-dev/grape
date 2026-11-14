@@ -1649,6 +1649,28 @@ _ANY_QUERIES: dict[str, str] = {
     "gsb_service_purge_stale": (
         "UPDATE gsb_service_registry SET status='offline' "
         "WHERE status='online' AND last_heartbeat < ?"),
+    # ── 渠道安装表（grape_t_channel_installation 归 mgmt；runtime 侧 IM 路由的读写原语）──
+    # 列序与 runtime/routes/im.py 原语句逐字一致（调用方按下标解包）；写语句一律
+    # 可移植 `datetime('now')`（MySQL 方言桥翻译），不写 MySQL 专有 NOW()。
+    "installation_status_counts": (
+        "SELECT status, COUNT(*) FROM grape_t_channel_installation GROUP BY status"),
+    "installation_list_all": (
+        "SELECT id, channel_type, scope, owner_user_id, repo_key, config, status, updated_at "
+        "FROM grape_t_channel_installation ORDER BY updated_at DESC"),
+    "installation_owner_by_id": (
+        "SELECT scope, owner_user_id, repo_key FROM grape_t_channel_installation WHERE id=?"),
+    "installation_detail_by_id": (
+        "SELECT channel_type, scope, owner_user_id, repo_key, config "
+        "FROM grape_t_channel_installation WHERE id=?"),
+    "installation_update_status": (
+        "UPDATE grape_t_channel_installation SET status=?, updated_at=datetime('now') "
+        "WHERE id=?"),
+    "installation_update_config_fp": (
+        "UPDATE grape_t_channel_installation SET config=?, config_fingerprint=?, "
+        "updated_at=datetime('now') WHERE id=?"),
+    "installation_active_configs_by_type": (
+        "SELECT config FROM grape_t_channel_installation "
+        "WHERE channel_type=? AND status='active'"),
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -2968,6 +2990,43 @@ def installation_active_installs_any() -> list[tuple]:
         c.execute("SELECT id, scope, owner_user_id, repo_key, config, status "
                   "FROM grape_t_channel_installation WHERE status='active'")
         return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def installation_status_counts_any() -> list[tuple]:
+    """按状态分组的安装数 (status, count)（/api/im/status 汇总用）。"""
+    return [tuple(r) for r in read_all_any("installation_status_counts")]
+
+
+def installation_list_any() -> list[tuple]:
+    """全部安装八列 (id, channel_type, scope, owner_user_id, repo_key, config, status,
+    updated_at)，updated_at 倒序；可见性过滤与 secret 掩码留在调用方。"""
+    return [tuple(r) for r in read_all_any("installation_list_all")]
+
+
+def installation_owner_by_id_any(row_id) -> tuple | None:
+    """按 id 取 (scope, owner_user_id, repo_key)（启停前的权限判定）；不存在返回 None。"""
+    return read_one_any("installation_owner_by_id", (row_id,))
+
+
+def installation_detail_by_id_any(row_id) -> tuple | None:
+    """按 id 取 (channel_type, scope, owner_user_id, repo_key, config)。"""
+    return read_one_any("installation_detail_by_id", (row_id,))
+
+
+def installation_set_status_any(status: str, row_id) -> int:
+    """引擎侧启停：只改 status 与 updated_at（不动 legacy 表），返回影响行数。"""
+    return exec_any("installation_update_status", (status, row_id))
+
+
+def installation_set_config_and_fingerprint_any(cfg_json: str, fingerprint: str, row_id) -> int:
+    """渠道 config 与指纹同一语句落库（配置变了指纹必须跟着变），返回影响行数。"""
+    return exec_any("installation_update_config_fp", (cfg_json, fingerprint, row_id))
+
+
+def installation_active_configs_by_type_any(channel_type: str) -> list[tuple]:
+    """某渠道类型下全部活跃安装的 (config,)（「是否还有别的安装启用着」判定）。"""
+    return [tuple(r) for r in read_all_any("installation_active_configs_by_type",
+                                           (channel_type,))]
 
 
 # ---------- GSB 服务注册表（kernel/gsb/registry.py 的 SQL 全部收在此处） ----------

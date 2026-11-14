@@ -32,7 +32,17 @@ def ui_db(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     engine_wiring.run_startup_migration(path)
-    return path
+    # 路由侧读写自本次起走归属域（mgmt）的「任意拓扑」原语：单库/测试拓扑回落到
+    # 进程主库（src.kernel.session_manager.db），不再由路由自己开 IM 侧连接。
+    # 因此本用例除了指 engine_wiring 的库，还要把进程主库钉到同一个临时库，
+    # 否则「写进 tmp 库、读进程主库」两边看不到彼此。
+    import src.kernel.session_manager as sm
+    probe = sqlite3.connect(path, check_same_thread=False)
+    probe.execute("PRAGMA busy_timeout=5000")
+    monkeypatch.setattr(sm, "db", probe, raising=False)
+    yield path
+    probe.close()
+    engine_wiring._reset_backend_cache()
 
 
 def _user(uid=1234):
