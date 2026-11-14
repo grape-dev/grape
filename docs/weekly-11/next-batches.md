@@ -1,6 +1,6 @@
 # 下一批：跨域收口作业单
 
-总量 47 处 / 32 个文件；下表取前 3 个。
+总量 45 处 / 31 个文件；下表取前 3 个。
 
 ## ⛔ blocked（口径已确立，不要按处数硬拿）
 - `src/kernel/prompt_builder.py`：3 处是 agent 提示文案（f-string 里的说明文本，本进程不执行，静态正则才计到）；`tests/runtime/test_issue_372_unified_mapping_github.py` 按源文本断言该段语义；改写前必须先给 agent 一个合法的映射写通道。口径：**不为掉数字改文案**（台账 2026-11-14）
@@ -16,9 +16,11 @@
 - `grape_t_credential_usage_log`（归 runtime）× 3：行 179, 185, 261
   - runtime public 已登记 221 条具名查询
 
-## src/domains/mgmt/admin/config_store.py（mgmt 域，2 处）
-- `grape_t_repo_credentials`（归 insight）× 2：行 497, 502
-  - insight public 无具名查询，需新增
+## src/domains/insight/routes/search.py（insight 域，2 处）
+- `events`（归 runtime）× 1：行 26
+  - runtime public 已登记 221 条具名查询
+- `agent_type`（归 runtime）× 1：行 51
+  - runtime public 已登记 221 条具名查询
 
 ## 每批验收口径（不要跳）
 1) `python3 scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv --baseline docs/weekly-11/foreign-refs-allowlist.csv --check`
