@@ -4880,3 +4880,105 @@ def health_task_inflight_count() -> int:
 def health_runtime_rows() -> list[tuple]:
     """全部引擎行 `(status, last_seen_at, credential_id)`；在线/离线判定归调用方。"""
     return [tuple(r) for r in read_all_any("health_runtime_rows")]
+
+
+# ---------- 可观测性「failed 空 result 占比」取数（insight/observability/failed_gap.py）----------
+#
+# 归属：`docs/weekly-11/table-owner.tsv` → grape_runtime_db.events（本域）。
+# 原实现在 insight 侧是双路径：`runtime_lib()` 可用（本域配了自有 DSN）→ 具名查询
+# `count_events` / `query_events`；不可用 → insight 进程主库上直发 4 条 events SQL。
+# 后者是单库兜底，也正是 insight 文件里跨域引用恒计 4 处的原因；而三库拓扑下
+# insight 进程库没有 events（视图已退役 → 1146），4 条必失败并被外层 `except` 吞成
+# 「全 0 + 空样本」——页面把「查不到」显示成「没有无头失败」，比报错更有害。
+#
+# 本组把两条路径合成**一条任意拓扑通道**（`_any_cursor`：自有 DSN 走 db_registry，
+# 单库/测试拓扑回落进程主库），调用方不再需要 if/else，也不在 insight 里留 SQL。
+# 口径逐字照抄原语句：
+# - 只统计 `status='failed'`；repo_key 候选集由调用方给（可见仓库，已在 insight 侧算好）；
+# - 真空 = `result IS NULL OR TRIM(result)=''`（TRIM 在 MySQL/SQLite 同义）；
+# - legacy = `result LIKE '<prefix>%'`，前缀由调用方传，`%` 由本域拼（调用方不造 SQL）；
+# - 样本列序 `seq, repo_key, event_type, agent_type, issue_id, result, created_at`、
+#   `ORDER BY seq DESC LIMIT ?`，与原语句同序。
+# `{ph}` 按 repo_key 个数展开；语句文本固定在本模块，不接受 SQL/表名/列名入参。
+_FAILED_GAP_QUERIES: dict[str, str] = {
+    "failed_gap_total": (
+        "SELECT COUNT(*) FROM events WHERE status='failed' AND repo_key IN ({ph})"),
+    "failed_gap_empty": (
+        "SELECT COUNT(*) FROM events WHERE status='failed' AND repo_key IN ({ph}) "
+        "AND (result IS NULL OR TRIM(result)='')"),
+    "failed_gap_legacy": (
+        "SELECT COUNT(*) FROM events WHERE status='failed' AND repo_key IN ({ph}) "
+        "AND result LIKE ?"),
+    "failed_gap_samples": (
+        "SELECT seq, repo_key, event_type, agent_type, issue_id, result, created_at "
+        "FROM events WHERE status='failed' AND repo_key IN ({ph}) "
+        "AND (result IS NULL OR TRIM(result)='' OR result LIKE ?) "
+        "ORDER BY seq DESC LIMIT ?"),
+}
+
+#: repo_key 候选集单批上限（SQLite 变量上限 / 超长语句保护；行集合与一次 IN 等价）。
+_FAILED_GAP_KEY_CHUNK = 400
+
+
+def _failed_gap_sql(name: str, count: int) -> str:
+    """把 `{ph}` 展开成 count 个占位符；未登记名抛 KeyError（不静默退回任意 SQL）。"""
+    sql = _FAILED_GAP_QUERIES.get(name)
+    if sql is None:
+        raise KeyError(f"unknown failed-gap query: {name}")
+    return sql.replace("{ph}", ",".join(["?"] * max(0, int(count))))
+
+
+def _failed_gap_keys(repo_keys) -> list[str]:
+    """候选仓库集规整：丢空值、转字符串、保序（重复值由调用方保证不出现）。"""
+    return [str(k) for k in (repo_keys or []) if k]
+
+
+def failed_event_gap_counts_any(repo_keys, legacy_prefix: str = "[legacy]") -> dict[str, int]:
+    """failed 事件的三个标量计数：{total_failed, empty_result, legacy}（任意拓扑）。
+
+    空候选集返回全 0（原调用方在 `not repos` 时早退；这里兜住，避免 `IN ()` 语法错）。
+    多块时逐块累加 —— 各块 repo_key 集合互斥，和等于一次 IN。
+    """
+    out = {"total_failed": 0, "empty_result": 0, "legacy": 0}
+    keys = _failed_gap_keys(repo_keys)
+    if not keys:
+        return out
+    like = f"{legacy_prefix}%"
+    for start in range(0, len(keys), _FAILED_GAP_KEY_CHUNK):
+        part = keys[start:start + _FAILED_GAP_KEY_CHUNK]
+        n = len(part)
+        with _any_cursor() as c:
+            c.execute(_failed_gap_sql("failed_gap_total", n), tuple(part))
+            out["total_failed"] += int((c.fetchone() or [0])[0] or 0)
+            c.execute(_failed_gap_sql("failed_gap_empty", n), tuple(part))
+            out["empty_result"] += int((c.fetchone() or [0])[0] or 0)
+            c.execute(_failed_gap_sql("failed_gap_legacy", n), tuple(part) + (like,))
+            out["legacy"] += int((c.fetchone() or [0])[0] or 0)
+    return out
+
+
+def failed_event_gap_samples_any(repo_keys, legacy_prefix: str = "[legacy]",
+                                 limit: int = 20) -> list[tuple]:
+    """最近「真空 + legacy」failed 事件样本（任意拓扑），按 seq 倒序、至多 limit 条。
+
+    列序同上（调用方按下标取值）。`limit<=0` 返回空（等价原语句 `LIMIT 0`；路由层
+    已把入参夹到 [1,100]，这里不再提升，避免放大样本数）。
+    多块时每块先各取 limit 条，Python 合并后按 seq 倒序截断 —— 与一次 IN 等价。
+    """
+    lim = int(limit or 0)
+    keys = _failed_gap_keys(repo_keys)
+    if not keys or lim <= 0:
+        return []
+    like = f"{legacy_prefix}%"
+    chunks = [keys[i:i + _FAILED_GAP_KEY_CHUNK]
+              for i in range(0, len(keys), _FAILED_GAP_KEY_CHUNK)]
+    rows: list[tuple] = []
+    for part in chunks:
+        with _any_cursor() as c:
+            c.execute(_failed_gap_sql("failed_gap_samples", len(part)),
+                      tuple(part) + (like, lim))
+            rows.extend(tuple(r) for r in (c.fetchall() or []))
+    if len(chunks) > 1:
+        rows.sort(key=lambda r: int(r[0] or 0), reverse=True)
+        rows = rows[:lim]
+    return rows

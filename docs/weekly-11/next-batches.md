@@ -1,10 +1,6 @@
 # 下一批：跨域收口作业单
 
-总量 104 处 / 51 个文件；下表取前 3 个。
-
-## src/domains/insight/observability/failed_gap.py（insight 域，4 处）
-- `events`（归 runtime）× 4：行 57, 68, 80, 96
-  - runtime public 已登记 210 条具名查询
+总量 100 处 / 50 个文件；下表取前 10 个。
 
 ## src/domains/insight/observability/__init__.py（insight 域，4 处）
 - `agent_tasks`（归 runtime）× 3：行 618, 630, 642
@@ -16,6 +12,46 @@
 - `devops_pipeline_scene`（归 mgmt）× 3：行 486, 698, 745
   - mgmt public 已登记 144 条具名查询
 - `issue`（归 runtime）× 1：行 611
+  - runtime public 已登记 210 条具名查询
+
+## src/api/health_endpoints.py（api 域，4 处）
+- `agent_tasks`（归 runtime）× 3：行 91, 143, 146
+  - runtime public 已登记 210 条具名查询
+- `agent_runtimes`（归 runtime）× 1：行 149
+  - runtime public 已登记 210 条具名查询
+
+## src/api/deps.py（api 域，4 处）
+- `external_identities`（归 mgmt）× 4：行 374, 451, 491, 608
+  - mgmt public 已登记 144 条具名查询
+
+## src/kernel/prompt_builder.py（kernel 域，3 处）
+- `unified_user_mapping`（归 mgmt）× 3：行 621, 627, 630
+  - mgmt public 已登记 144 条具名查询
+
+## src/kernel/persistence/credential_usage_log.py（kernel 域，3 处）
+- `grape_t_credential_usage_log`（归 runtime）× 3：行 179, 185, 261
+  - runtime public 已登记 210 条具名查询
+
+## src/domains/runtime/engine/bot_token_health.py（runtime 域，3 处）
+- `managed_repos`（归 mgmt）× 2：行 232, 292
+  - mgmt public 已登记 144 条具名查询
+- `grape_t_repo_credentials`（归 insight）× 1：行 172
+  - insight public 无具名查询，需新增
+
+## src/domains/mgmt/user/credentials_backfill_n1.py（mgmt 域，3 处）
+- `grape_t_repo_credentials`（归 insight）× 3：行 121, 128, 148
+  - insight public 无具名查询，需新增
+
+## src/domains/insight/observability/tokens.py（insight 域，3 处）
+- `agent_tasks`（归 runtime）× 2：行 6, 154
+  - runtime public 已登记 210 条具名查询
+- `runtime_credentials`（归 runtime）× 1：行 279
+  - runtime public 已登记 210 条具名查询
+
+## src/domains/insight/observability/llm_usage.py（insight 域，3 处）
+- `agent_runtimes`（归 runtime）× 2：行 343, 399
+  - runtime public 已登记 210 条具名查询
+- `agent_tasks`（归 runtime）× 1：行 119
   - runtime public 已登记 210 条具名查询
 
 ## 每批验收口径（不要跳）

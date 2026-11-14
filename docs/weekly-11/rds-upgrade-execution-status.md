@@ -2890,6 +2890,74 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   依赖看板与作业单同步刷新（下一批头名 `src/domains/insight/observability/failed_gap.py`
   4 处 `events`，同尺寸还有 `src/api/deps.py` 4 处 `external_identities`）。
 
+### 7.30 insight failed 空 result 占比取数下沉 runtime owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/insight/observability/failed_gap.py` **4 处 → 0**（单轮做完，4 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，`grape_runtime_db.events`，归 **runtime**）：
+  L57 / L68 / L80 / L96 四条 `events` 语句（1 条 `COUNT(*)` 全量 failed、1 条 `COUNT(*)` 真空、
+  1 条 `COUNT(*)` legacy、1 条 7 列样本 `ORDER BY seq DESC LIMIT`）。四条都在
+  `_lib is None` 的**单库兜底分支**里；`IN ({placeholders})` 由 repo_key 个数拼占位符，
+  属「定谓词 + 动态 IN 长度」，**无动态表名/列名、无跨域 JOIN**。同函数上半段
+  （`runtime_lib()` 命中时）走 `count_events` / `query_events` 具名查询，本来就不计跨域。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`，`?` 占位符、`{ph}` 展开）：
+  1) `_FAILED_GAP_QUERIES` 4 条：`failed_gap_total` / `failed_gap_empty` / `failed_gap_legacy` /
+     `failed_gap_samples`（与原 SQL 逐字一致，仅把 IN 列表换成 `{ph}`、`%` 前缀改为参数）。
+  2) 薄原语两个：`failed_event_gap_counts_any(repo_keys, legacy_prefix)` 一次回三个标量；
+     `failed_event_gap_samples_any(repo_keys, legacy_prefix, limit)` 回 7 列样本。
+     二者一律走 `_any_cursor()`：自有 DSN → `db_registry.cursor("runtime")`，
+     单库/测试拓扑 → 进程主库（自带 `db_lock`）。IN 单批上限 400（`_FAILED_GAP_KEY_CHUNK`），
+     多块时计数逐块累加、样本每块取 limit 条后 Python 按 seq 倒序截断。
+- 设计取舍：
+  1) **两分支合成一条通道**，不保留 `if _lib is not None`：原「lib + 本地兜底」双路径正是
+     兜底 SQL 长期留存在 insight 侧的原因；合成后调用方零 SQL、零分支，单库与三库同源
+     （与 7.16 指标桶、7.20 能效看板同一手法）。
+  2) **不搬成「lib 优先」的新双路径**：`count_events` / `query_events` 是 MySQL 原生方言
+     （`%s`），单库/测试拓扑不可用；任意拓扑原语用 `?` + `TRIM`/`LIKE` 标准语法，
+     `mysql_compat` 统一翻译，因此**不需要**再留第二条路。
+  3) **语义一字未动**：只统计 `status='failed'`；真空 = `result IS NULL OR TRIM(result)=''`
+     （空白串仍算真空，legacy 不算真空）；legacy = `LIKE '<prefix>%'`（前缀在开头才算，
+     中段出现 `[legacy]` 归 with_diag）；`with_diag = max(0, total-empty-legacy)` 的夹底、
+     比率 `round(...,4)`、样本 `result[:200]` 截断、`legacy` 布尔字段全部照抄；
+     可见仓库边界完全由 insight 侧 `visible_repo_keys()` 决定，owner 侧不新增过滤
+     （不引入 is_active / 时间窗 / org_id 之类新口径）。
+  4) **`limit<=0` 原样返回空**，不夹到 1：原语句是 `LIMIT ?`，`limit=0` 就是零行；
+     路由层已把入参夹到 [1,100]，原语不做「善意放大」，避免样本数超出调用方预期。
+  5) 空候选集在 owner 侧直接回全 0 / `[]`：原实现靠调用方 `if not repos` 早退，
+     这里再兜一层，避免任何调用方拼出 `IN ()` 语法错。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1) **兜底 SQL 打错库**：三库拓扑下 insight 进程库没有 `events`（视图 0），
+     `runtime_lib()` 一旦返回 None（`GRAPE_DOMAIN_LIB` 未设置 / `available()` 为假 /
+     import 失败），四条语句必 1146 并被同函数 `except` 吞成「全 0 + samples=[]」——
+     `/api/obs/events/failed-result-gap` 返回 200 且显示「没有无头失败」，
+     把真实故障掩盖成健康态，比 500 更糟。
+  2) **真空口径在单库拓扑下不可用**：`count_events` 走 `db.cursor()` 且语句含 `%s`，
+     单库/sqlite 拓扑即使 lib 开关打开也无法执行（绑定参数报错），哨兵口径实际只在
+     三库三机才成立；现在两条拓扑同一份 `?` 语句，测试与线上同源。
+  3) **样本 IN 列表无上限**：`visible_repo_keys()` 返回全量可见仓库，仓库多时
+     `IN (?,?,...)` 可能撞变量上限/超长语句；本批在 owner 侧分块（400/批），
+     行集合与一次 IN 等价。
+- 验证：
+  - `py_compile` 2 个文件 **COMPILE_OK**。
+  - SQLite 烟测 `~/burndown/failed_gap_smoke.py` **ALL 64 CHECKS PASSED**
+    （A 静态面 / B owner 注册面 / C 行为面 / D 边界与否定 / D2 端到端 / E 拓扑面）：
+    4 条原语句从 insight 文件逐字消失、无 `%s`、无静默 except；计数 11 failed / 5 真空
+    （含 NULL 与纯空白）/ 3 legacy，`with_diag=3`；样本集合 = 真空∪legacy 且 seq 倒序、
+    列序 7 列；分块（每块 1 仓）与一次 IN 等值；空/None 候选集、未知仓库、`limit=0`、
+    `limit<0` 全 0 或 `[]`；completed、有诊断、中段 `[legacy]` 均不入 legacy；
+    样本 `result` 截 200 字、`legacy` 布尔按前缀；端到端 `failed_result_gap` 比率
+    `0.4545 / 0.2727 / 0.2727` 与字段结构不变；无可见仓库返回全 0 结构；
+    计数原语抛错时返回空结构并落 `log.warning`（不冒泡）；自有 DSN 分支经
+    `db_registry.cursor("runtime")` 取到**同一组数字**，确未回落进程主库。
+  - `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK /
+    契约 37 条 / 看板最新）。
+  - `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **104 → 100**（-4），对数 **40 → 40** —— `events←insight` 这一对**没有**清零：
+  本文件 4 处归位后，insight 侧仍有 2 处 `events` 引用（`observability/events_view.py`、
+  `routes/search.py` 各 1，属另外两批），故对数不变。基线 `foreign-refs-allowlist.csv`
+  收紧为 100 / 40，依赖看板与作业单同步刷新（下一批头名
+  `src/domains/insight/observability/__init__.py` 4 处 `agent_tasks`/`agent_runtimes`，
+  同尺寸还有 `src/api/session_store.py`、`src/api/health_endpoints.py` 各 4 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
