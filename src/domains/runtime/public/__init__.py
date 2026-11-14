@@ -2029,6 +2029,14 @@ _ANY_QUERIES: dict[str, str] = {
     "meta_upsert_update": "UPDATE meta SET value=? WHERE key=?",
     "meta_upsert_insert": "INSERT INTO meta (key, value) VALUES (?, ?)",
     "meta_insert_absent": "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+    # ── 引擎行 / 凭据单点读（kernel prompt_builder：本地性判定 + 引擎名注入）──
+    # 原实现是两条单点查询（agent_runtimes → runtime_credentials），两表都属本域，
+    # 合并成一次 LEFT JOIN：行不存在 → 无行（= 旧口径「查不到 runtime 即非本地」），
+    # credential_id=0 / last_ip 前缀判定仍留在调用方（业务口径不是域数据口径）。
+    "runtime_locality": (
+        "SELECT ar.credential_id, rc.last_ip FROM agent_runtimes ar "
+        "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id WHERE ar.id=?"),
+    "runtime_engine_name": "SELECT name FROM agent_runtimes WHERE id=?",
 }
 
 
@@ -2418,6 +2426,23 @@ def runtime_device_map() -> list[tuple]:
                   "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc "
                   "ON ar.credential_id = rc.id")
         return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def runtime_locality(runtime_id) -> tuple | None:
+    """引擎本地性判定源 (credential_id, last_ip)；runtime 行不存在返回 None。
+
+    改造前调用方连查两次（agent_runtimes → runtime_credentials），第二句在无凭据行时
+    返回 None 行 → 判定为「非本地」；LEFT JOIN 的行不存在语义与之等价。
+    「credential_id=0 → 本机直连」「last_ip 前缀 127. → 本机 worker」属业务口径，留在调用方。
+    """
+    row = read_one_any("runtime_locality", (runtime_id,))
+    return tuple(row) if row else None
+
+
+def runtime_engine_name(runtime_id) -> str:
+    """引擎名（agent_runtimes.name）；行不存在返回空串（兜底文案由调用方决定）。"""
+    row = read_one_any("runtime_engine_name", (runtime_id,))
+    return str(row[0] or "") if row else ""
 
 
 def agent_sessions_with_runtime(repo_keys) -> list[tuple]:

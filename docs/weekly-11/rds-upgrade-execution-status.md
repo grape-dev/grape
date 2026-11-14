@@ -160,6 +160,49 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### kernel/prompt_builder 跨域读归 owner public（-8，可执行 SQL 清零）
+- 文件：`src/kernel/prompt_builder.py`（11 处 → **3**，余下 3 处是 prompt 文案，见下）；全局静态 **332 → 324**（75 对）。
+- 表分布（消费域 kernel）：`agent_runtimes` 2 + `runtime_credentials` 1（归 runtime）；
+  `scene_knowledge_ref` 2 + `agent_shared_knowledge` 2（归 mgmt，同域 JOIN）；`managed_repos` 1（归 mgmt）；
+  `unified_user_mapping` 3（**非本进程 SQL**）。
+- owner 侧新增（一律「任意拓扑」`?` 方言，SQL 只在 owner 留一份，单库/多库同一份）：
+  · runtime public：具名查询 `runtime_locality`（`agent_runtimes LEFT JOIN runtime_credentials`
+    一次取 `(credential_id, last_ip)`）、`runtime_engine_name`；薄函数同名两个。
+  · mgmt public：具名查询 `knowledge_ref_manual_exists`、`knowledge_ref_agent_rows`、
+    `repo_dev_scene`；薄函数 `has_manual_knowledge_ref()` / `list_agent_knowledge_refs()` / `repo_dev_scene()`。
+- 关键设计取舍：
+  1. **本地性判定的两条单点查合成一次同域 JOIN**：原实现先取 `credential_id`、再按 cid 取 `last_ip`，
+     第二句在凭据行缺失时返回 None 行 → 判「非本地」。LEFT JOIN 的「无行」语义与之等价，顺带消掉
+     两查之间被并发改写的窗口。`cid==0 → 本机直连`、`last_ip 前缀 127.` 两条**业务口径留在调用方**——
+     那不是域数据口径，放进 owner 会让 public 长出业务分支。
+  2. **跨域 JOIN 的处理是「搬进 owner」而不是「拆成两次往返 + Python 内连接」**：
+     `scene_knowledge_ref × agent_shared_knowledge` 两张都属 mgmt，JOIN 本身不跨域，搬进 mgmt public
+     后原 SQL 的通配口径（`col = ? OR col = ''` / `= 0`）、`enabled=1`、`accepted`、`archived=0`、
+     `DISTINCT` 一次性照抄，零语义漂移；拆成两次往返反而要在 kernel 里复刻过滤逻辑（更容易漂）。
+  3. **列序逐字照抄**：`list_agent_knowledge_refs` 返回 6 列 `(id, scope, source, obs_key, file_path,
+     content_hash)`，调用方仍按下标解包，既有 `read_entry_content` 调用链一行未改。
+  4. **失败口径照旧**：owner 原语抛错时 kernel 仍走原 except 分支（本地性 → `None`「未知」并触发
+     localhost 回退、manual 判定 → `False`、知识段落 → 回退 scope 三级注入且 `injected_ids=[]`）。
+- 修的存量问题（无功能 bug，但都是**三库独立后必然 1146 的隐性跨库依赖**）：
+  本地性判定与「引擎名注入」原先直接读进程主库，分库后被 `except` 吞掉 → 静默退化成「非本地 / unknown」
+  （任务回连地址会错指公网）。现在同一条 owner 原语路径覆盖单库与多库。另把「引擎名注入」的
+  `except: pass` 改成 `_log_safe("debug", ...)`，静默 except 棘轮本文件 19 → **18**（只减不增）。
+- **未纳入本轮（如实，不假收口）**：`unified_user_mapping` 3 处（行 621/627/630）全部位于
+  `_build_feishu_context_section` 的 f-string 里，是**教 agent 用 sqlite3 自写 sessions.db 的说明文本**，
+  本进程不执行。改它得先给 agent 一个合法写入通道（现只有 mgmt `/internal` 服务端点，agent 持的是会话
+  token，公开面没有 mapping 写接口），属独立设计项；本轮保留文案并在此记明——不为了让正则掉数字而改文案。
+  同时该文案在分库拓扑下本就不可执行（`unified_user_mapping` 不在 runtime 库），建议单列为「给 agent 的
+  用户映射写接口」设计项；R8 白名单该文件 `unified_user_mapping: 2` 因此保持不变（真写语句仍是 2 条文案）。
+- 基线收紧 **324 / 75 对**（3 张表的 3 个消费对随文件清零消失）。
+- 验证：`rds_gate.sh --quick` → **GATE 全绿**（R1-R7 PASS、棘轮未上升、契约 37 条最新、看板已刷新）；
+  `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → import OK；
+  sqlite 烟测 `/tmp/prompt_builder_smoke.py` → **ALL PASSED**（本地性五种判定 + 凭据行缺失/NULL、
+  引擎名兜底、manual 通配与非对称匹配、agent 知识 DISTINCT 去重/六列列序/正文注入/8000 字截断、
+  dev_scene 有值·空值·无行、三条失败回退口径、静态否定「这五张表的可执行 SQL 已为 0」）。
+- 彩排（三实例/两节点，正确账号口径 `REMOTE_USER=rds_admin`）：P4 **PASS**（mgmt 54 / insight 12 / runtime 36
+  基表，视图 0，行数等于快照，账号仅本库）；P5 `--env-only` **PASS**（G2/G3/G4/A6 全绿，跨库授权 0）；
+  全 API 冒烟 **172 端点 0 失败**（含 3 个写场景）。
+
 ### engine_select 引擎选型/绑定维护接口化（-18，本文件清零）
 - 文件：`src/domains/runtime/engine/engine_select.py`（18 处 → **0**）；全局静态 **350 → 332**（79 对）。
 - 表分布（消费域 runtime）：`grape_accounts` 5、`autopilot_tasks` 4、`user_repos` 3、`devops_pipeline_scene` 3、

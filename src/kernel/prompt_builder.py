@@ -82,20 +82,15 @@ def _runtime_is_local(runtime_id: int = 0) -> bool | None:
     if not runtime_id or runtime_id <= 0:
         return False
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
-            row = c.fetchone()
-            if not row:
-                return False
-            cid = row[0] or 0
-            if cid == 0:
-                return True
-            # 检查是否本机 worker（last_ip == 127.0.0.1）
-            c.execute("SELECT last_ip FROM runtime_credentials WHERE id=?", (cid,))
-            cred_row = c.fetchone()
-            return bool(cred_row and (cred_row[0] or "").startswith("127."))
+        from src.domains.runtime.public import runtime_locality
+        row = runtime_locality(runtime_id)
+        if not row:
+            return False
+        cid = row[0] or 0
+        if cid == 0:
+            return True
+        # 检查是否本机 worker（last_ip == 127.0.0.1）
+        return bool((row[1] or "").startswith("127."))
     except Exception:
         return None
 
@@ -359,22 +354,9 @@ def _build_project_info_section(repo_key: str, agent_type: str = "",
 def _has_manual_ref(repo_key: str, agent_type: str = "", issue_num: int = 0, scene_id: str = "") -> bool:
     """查 ref 表是否有 source='manual' 的关联记录（Issue #95 条件引导用）。"""
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT COUNT(*) FROM scene_knowledge_ref r "
-                "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
-                "WHERE r.enabled = 1 "
-                "AND (r.scene_id = ? OR r.scene_id = '') "
-                "AND (r.agent_type = ? OR r.agent_type = '') "
-                "AND (r.issue_num = ? OR r.issue_num = 0) "
-                "AND k.repo_key = ? "
-                "AND k.source = 'manual' "
-                "AND k.status = 'accepted' "
-                "AND k.archived = 0",
-                (scene_id, agent_type, issue_num, repo_key)
-            ).fetchone()
-        return bool(row and row[0] > 0)
+        from src.domains.mgmt.public import has_manual_knowledge_ref
+        return has_manual_knowledge_ref(repo_key, agent_type=agent_type,
+                                        issue_num=issue_num, scene_id=scene_id)
     except Exception:
         return False
 
@@ -396,7 +378,6 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
     if cached and now - cached[1] < 60:
         return cached[0]
     try:
-        from src.kernel.session_manager import db, db_lock
         # 1. 优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene
         scene_id = ""
         if issue_id:
@@ -406,11 +387,8 @@ def _build_scene_advanced_options(repo_key: str, issue_id: str = "") -> str:
             except Exception:
                 scene_id = ""
         if not scene_id:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
-                row = c.fetchone()
-            scene_id = (row[0] if row else "") or ""
+            from src.domains.mgmt.public import repo_dev_scene
+            scene_id = repo_dev_scene(repo_key)
         if not scene_id:
             return ""
         # 2. 读 devops_pipeline_scene.advanced_options
@@ -1181,17 +1159,13 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     # 引擎绑定信息（避免 agent 查 /openapi.json 核验引擎）
     if runtime_id:
         try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT name FROM agent_runtimes WHERE id=?", (runtime_id,))
-                _rt_row = c.fetchone()
-            _engine_name = (_rt_row[0] if _rt_row else "") or "unknown"
+            from src.domains.runtime.public import runtime_engine_name
+            _engine_name = runtime_engine_name(runtime_id) or "unknown"
             parts.append(f"\n## Runtime Engine\nbound engine: {_engine_name} (runtime_id={runtime_id})\n"
                          "Engine binding info is provided in the prompt; no need to check /openapi.json. "
                          "A 403 from an interface is a normal security restriction and should not block subsequent scheduling.\n")
-        except Exception:
-            pass
+        except Exception as _e:
+            _log_safe("debug", f"prompt_builder: inject runtime engine name failed: {_e}")
 
     parts.append(_build_output_contract(_rk))
     # 替换服务基址占位符：{{SERVER_URL}} = 业务 API、{{RUNTIME_SERVER_URL}} = 回连基址
@@ -1384,22 +1358,9 @@ def _build_agent_knowledge_section(repo_key: str, agent_type: str = "", issue_nu
 
     # 1. 查 scene_knowledge_ref 表注入关联知识（source='agent'）
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            rows = db.cursor().execute(
-                "SELECT DISTINCT k.id, k.scope, k.source, k.obs_key, k.file_path, k.content_hash "
-                "FROM scene_knowledge_ref r "
-                "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
-                "WHERE r.enabled = 1 "
-                "AND (r.scene_id = ? OR r.scene_id = '') "
-                "AND (r.agent_type = ? OR r.agent_type = '') "
-                "AND (r.issue_num = ? OR r.issue_num = 0) "
-                "AND k.repo_key = ? "
-                "AND k.source = 'agent' "
-                "AND k.status = 'accepted' "
-                "AND k.archived = 0",
-                (scene_id, agent_type, issue_num, repo_key)
-            ).fetchall()
+        from src.domains.mgmt.public import list_agent_knowledge_refs
+        rows = list_agent_knowledge_refs(repo_key, agent_type=agent_type,
+                                         issue_num=issue_num, scene_id=scene_id)
 
         from src.api.knowledge import read_entry_content
         for kid, scope, source, obs_key, file_path, content_hash in rows:

@@ -1498,6 +1498,28 @@ _ANY_QUERIES: dict[str, str] = {
     "autopilot_engine_ids_nonempty": (
         "SELECT id, engine_runtime_ids FROM autopilot_tasks WHERE engine_runtime_ids != ''"),
     "autopilot_engine_ids_set": "UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
+    # ── 知识关联读（scene_knowledge_ref × agent_shared_knowledge，两张都属 mgmt）──
+    # 同域 JOIN 只能留在 owner 侧：调用方原先在 kernel 里 JOIN 两张 mgmt 表，
+    # 三库拆分后既读不到也不该读。列序与 kernel 原查询逐字一致（调用方按下标取值）。
+    "knowledge_ref_manual_exists": (
+        "SELECT COUNT(*) FROM scene_knowledge_ref r "
+        "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
+        "WHERE r.enabled = 1 AND (r.scene_id = ? OR r.scene_id = '') "
+        "AND (r.agent_type = ? OR r.agent_type = '') "
+        "AND (r.issue_num = ? OR r.issue_num = 0) "
+        "AND k.repo_key = ? AND k.source = 'manual' "
+        "AND k.status = 'accepted' AND k.archived = 0"),
+    "knowledge_ref_agent_rows": (
+        "SELECT DISTINCT k.id, k.scope, k.source, k.obs_key, k.file_path, k.content_hash "
+        "FROM scene_knowledge_ref r "
+        "JOIN agent_shared_knowledge k ON r.knowledge_id = k.id "
+        "WHERE r.enabled = 1 AND (r.scene_id = ? OR r.scene_id = '') "
+        "AND (r.agent_type = ? OR r.agent_type = '') "
+        "AND (r.issue_num = ? OR r.issue_num = 0) "
+        "AND k.repo_key = ? AND k.source = 'agent' "
+        "AND k.status = 'accepted' AND k.archived = 0"),
+    # 仓库默认场景（issue_state 无 Issue 级快照时的回退源）
+    "repo_dev_scene": "SELECT dev_scene FROM managed_repos WHERE repo_key=?",
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -1535,6 +1557,34 @@ def exec_any(name: str, params: tuple = ()) -> int:
     with _any_cursor(write=True) as c:
         cur = c.execute(_any_sql(name), params)
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def has_manual_knowledge_ref(repo_key: str, agent_type: str = "", issue_num: int = 0,
+                             scene_id: str = "") -> bool:
+    """是否有关联到该（仓库/场景/agent/issue）的手工沉淀知识（source='manual'）。
+
+    报 row 存在：scoped 列为空串或 0 视为通配（与 kernel 原 SQL 的
+    `col = ? OR col = ''` 口径一致），只认 enabled=1 + accepted + 未归档。
+    """
+    row = read_one_any("knowledge_ref_manual_exists",
+                       (scene_id, agent_type, issue_num, repo_key))
+    return bool(row and row[0])
+
+
+def list_agent_knowledge_refs(repo_key: str, agent_type: str = "", issue_num: int = 0,
+                              scene_id: str = "") -> list[tuple]:
+    """agent 沉淀知识关联行 (id, scope, source, obs_key, file_path, content_hash)。
+
+    列序与 kernel 原查询逐字一致（调用方按下标解包）；去重口径 DISTINCT 保留。
+    """
+    return [tuple(r) for r in read_all_any(
+        "knowledge_ref_agent_rows", (scene_id, agent_type, issue_num, repo_key))]
+
+
+def repo_dev_scene(repo_key: str) -> str:
+    """仓库默认场景 id（managed_repos.dev_scene）；无行/空值返回空串。"""
+    row = read_one_any("repo_dev_scene", (repo_key,))
+    return str(row[0] or "") if row else ""
 
 
 def mapping_user_id_by_column(column: str, value: str) -> Any:
