@@ -22,6 +22,14 @@ echo "=== Running all contract checks ==="
 "$PY" scripts/check-secrets.py || exit 1
 # Issue #536：危险 DDL 卡点——db_setup.py 新增 DROP/RENAME/MODIFY COLUMN 必须收口
 "$PY" scripts/check-destructive-ddl.py || exit 1
+# Issue #2462 A3：跨域读查询名闭包——代码引用的 lib 函数与命名查询必须都在
+# 目标域 public 模块的注册面内（lib 开关关闭时这类漂移在测试里不可见，
+# 只会在三库三机切换时以 AttributeError/KeyError 暴露，因此做成静态门禁）。
+"$PY" scripts/check_lib_query_names.py src || exit 1
+# Issue #2479：禁止矩阵静态守卫——runtime/insight 域代码不得引用 mgmt remote
+# 通道（MgmtServiceRemote / GsbClient("mgmt") / ServiceHttpClient("mgmt") /
+# _PROVIDERS 裸访问）；运行时守卫见 src/kernel/gsb/provider.py::matrix_forces_lib。
+"$PY" scripts/check_gsb_route_matrix.py || exit 1
 # Issue #897：契约端点完整性卡点——核心工作流端点（/api/a2a、/api/tasks/* 等）
 # 不得从 OpenAPI 契约丢失（v2.2.0 曾被子集落盘覆盖，CLI 命令组不渲染）。
 # --require-baseline：基线快照（help/api/openapi-baseline.json）缺失时 FAIL，

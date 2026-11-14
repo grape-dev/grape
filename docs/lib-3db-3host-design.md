@@ -21,7 +21,7 @@
 ### 1.2 硬不变量（任何阶段不得破坏）
 
 1. **同域写必须同事务**：`foreign_only=True` 守卫保证本域写不走 lib 连接（否则丢原子性）。
-2. **双主同 HEAD**：0007 / 0001 的 `/root/wt-arch` 任一时刻同 commit；nginx `ip_hash` 按 IP 钉机，两台行为必须一致。
+2. **双主同 HEAD**：0007 / 0001 的 `<deploy-root>` 任一时刻同 commit；nginx `ip_hash` 按 IP 钉机，两台行为必须一致。
 3. **只展示一次的副作用禁止入意图队列**：建凭据 token、吊销凭据必须**同步直连**（重放会造孤儿/留窗口）。
 4. **组合写收成一个原语**：探测即快照（`save_agent_runtimes`）、账号级联（`purge_user_rows`）、吊销级联（`purge_runtime_credential`）不得拆成多条意图。
 5. **意图表有上限**：`applied` 行按 7 天归档，`dead` 行必须人工处理，不得静默堆积。
@@ -34,11 +34,11 @@
 
 | 项 | 实测 |
 |---|---|
-| 三库位置 | **全部在 `192.168.0.59` 同一实例**（`grape_dev_mgmt` / `grape_dev_runtime` / `grape_dev_insight`） |
+| 三库位置 | **全部在 `<dev-db-host>` 同一实例**（`grape_dev_mgmt` / `grape_dev_runtime` / `grape_dev_insight`） |
 | 跨域视图 | **137 个**：mgmt 46（→runtime 36、→insight 10）；runtime 91（→mgmt 81、→insight 10） |
 | 视图可更新性 | mgmt 侧 runtime 表均为 `IS_UPDATABLE=YES` → 今天跨域写"能用"全靠视图 |
-| insight 副本 | `.59` = **126 表 / api_latency_log 5849 行**（实库）；`.164` = 14 表 / 5125 行（旧副本） |
-| runtime 副本 | `.243` 存在一份 `grape_dev_runtime`（45 表、无 `xwrite_log`），与 `.59` 是否同步**未验证** |
+| insight 副本 | `<dev-db-host>` = **126 表 / api_latency_log 5849 行**（实库）；`<insight-copy-host>` = 14 表 / 5125 行（旧副本） |
+| runtime 副本 | `<runtime-copy-host>` 存在一份 `grape_dev_runtime`（45 表、无 `xwrite_log`），与 `<dev-db-host>` 是否同步**未验证** |
 | 多份基表 | `takeover_sessions`（mgmt 基表 + runtime 空表）、`grape_t_channel_installation`（runtime 11 行 + mgmt 0 行）、`grape_t_channel_lease`（两库都有数据） |
 
 ### 2.2 代码改造进度
@@ -138,8 +138,8 @@
 
 | 表/副本 | 现状 | 裁定（待确认） | 动作 |
 |---|---|---|---|
-| `grape_dev_insight@.164` | 14 表 / 5125 行，代码零引用 | **退役** | 备份后 DROP DATABASE；保留 `.59` 为唯一实库 |
-| `grape_dev_runtime@.243` | 45 表 / 无 `xwrite_log`，同步性未验证 | **先比对后退役** | 逐表 `CHECKSUM TABLE` + 行数比对；差异为空 → 退役，否则以 `.59` 为准回灌 |
+| `grape_dev_insight@<insight-copy-host>` | 14 表 / 5125 行，代码零引用 | **退役** | 备份后 DROP DATABASE；保留 `<dev-db-host>` 为唯一实库 |
+| `grape_dev_runtime@<runtime-copy-host>` | 45 表 / 无 `xwrite_log`，同步性未验证 | **先比对后退役** | 逐表 `CHECKSUM TABLE` + 行数比对；差异为空 → 退役，否则以 `<dev-db-host>` 为准回灌 |
 | `takeover_sessions` | mgmt 有数据可能、runtime 空表 | **owner=mgmt**（已裁定） | P4 时 DROP runtime 空表 |
 | `grape_t_channel_installation` | runtime 11 行、mgmt 0 行 | **owner=runtime**（已裁定） | P4 时 DROP mgmt 空表 |
 | `grape_t_channel_lease` | mgmt 12 行 / runtime 11 行，**同 10 个 key 的 owner 与时间戳全部不同**；runtime `updated_at` 更新（01:12 vs 17:22），mgmt 含 `__sim_*` 测试行 | **owner=runtime（已裁定）** | P4 删 mgmt 副本；⚠️ mgmt 进程若读 lease 会读到陈旧数据（潜在 bug，见 §7） |
@@ -166,7 +166,7 @@
 
 | 步骤 | 动作 | 回滚 |
 |---|---|---|
-| 1 | **insight → 独立主机**：`mysqldump` 导出 → 目标机导入 → 校验（行数 + CHECKSUM）→ 改 `DEVOPS_DB_HOST` + `GRAPE_DSN_INSIGHT` | 改回 `.59` 地址（配置项，非代码） |
+| 1 | **insight → 独立主机**：`mysqldump` 导出 → 目标机导入 → 校验（行数 + CHECKSUM）→ 改 `DEVOPS_DB_HOST` + `GRAPE_DSN_INSIGHT` | 改回 `<dev-db-host>` 地址（配置项，非代码） |
 | 2 | **runtime → 独立主机**：同上；额外验证三个排水单元与 IM 表（`GRAPE_IM_DB_NAME` 需同步改） | 同上 |
 | 3 | mgmt 留在原机（或反向迁出） | 同上 |
 
@@ -252,8 +252,8 @@
 |---|---|---|
 | D1 | 动态列名口径 | (a) 按列枚举登记（推荐） (b) 通用 `read_column(col, ...)` 白名单校验 |
 | D2 | 动态 IN 列表口径 | (a) 逐 key 扇出 + Python 合并（推荐） (b) 支持"占位符个数模板" `..._in1..inN` |
-| D3 | `.164` insight 副本 | (a) 备份后退役（推荐） (b) 保留观察 |
-| D4 | `.243` runtime 副本 | (a) 先 CHECKSUM 比对再退役（推荐） (b) 直接退役 |
+| D3 | `<insight-copy-host>` insight 副本 | (a) 备份后退役（推荐） (b) 保留观察 |
+| D4 | `<runtime-copy-host>` runtime 副本 | (a) 先 CHECKSUM 比对再退役（推荐） (b) 直接退役 |
 | D5 | ~~`grape_t_channel_lease` 双份数据~~ | **已裁定：runtime 权威**（证据见 §2.1）；待补：mgmt 侧陈旧读点的行为影响 |
 | D6 | 迁机顺序 | (a) insight → runtime → mgmt（推荐，依赖最少） (b) 其它 |
 | D7 | 跨主机延迟预算 | 需给 P99 目标（建议 < 20ms），决定是否改心跳聚合 |
@@ -286,12 +286,109 @@
 
 ## 附录 B：关键脚本
 
+### B.1 已入库（可复现、可门禁）
+
 | 脚本 | 用途 |
 |---|---|
-| `/root/p4_view_inventory.py` | 视图清单 × 目标域 × 代码引用归属 |
-| `/root/p4_read_converter.py` | 读点候选清单（只读） |
-| `/root/p4_read_rewriter.py` | 生成可审阅补丁（AST 自检） |
-| `/root/p4_verify_all.py` | 双通道验证（三环境，FAIL/UNCOVERED 分离） |
-| `/root/p4pilot_verify.py` | 手工参数的双通道样本 |
 | `scripts/xwrite_drain.py` | 三分区排水（50 个 handler） |
 | `scripts/xwrite_reconcile.py` | 对账 / 归档 / 死信重投 |
+| `scripts/check_lib_query_names.py` | **A3 门禁**：代码引用的跨域读查询名 ⊆ 目标域 lib 注册表（AST 静态比对，退出码 0/1/2） |
+| `scripts/domain_view_freshness.py` / `scripts/sync_domain_views.py` | 跨库视图列新鲜度检查与重建（视图退役期使用） |
+
+### B.2 未入库（运行机本地脚本，需先还纳入库才能作为出口条件）
+
+下列脚本是改造期在运维机上直接运行的（运维机本地目录下的单文件，不在仓库内）。
+它们**不在本分支**，因此 W1/W2 的 `p4_verify_all.py` 出口条件在仓库内**不可复现**；
+进入 B2 前必须先还纳（登记路径 + 依赖 + 调用口径），否则每轮验收只能由掌握该脚本的人手工完成。
+
+| 运行机本地脚本 | 用途 | 还纳状态 |
+|---|---|---|
+| `p4_view_inventory.py` | 视图清单 × 目标域 × 代码引用归属 | 待还纳 |
+| `p4_read_converter.py` | 读点候选清单（只读） | 待还纳 |
+| `p4_read_rewriter.py` | 生成可审阅补丁（AST 自检） | 待还纳 |
+| `p4_verify_all.py` | 双通道验证（三环境，FAIL/UNCOVERED 分离） | 待还纳（**B2 入口阻塞**） |
+| `p4pilot_verify.py` | 手工参数的双通道样本 | 待还纳 |
+
+## 附录 C：B1 基线同步与 QA 复核结论（Issue #2462）
+
+基线同步：`arch-weekly-11`（`798fd75`）合入 `arch-weekly-11-ljt`，本分支据此继续开发；
+同步后 `docs/lib-3db-3host-design.md` 与 `src/kernel/{domain_read,cross_write,db_registry}.py` 均在位。
+
+对合入代码的逐项复核（证据为文件行号，非转述）：
+
+| 编号 | 复核项 | 结论 | 证据 |
+|---|---|---|---|
+| F1 | 意图表命名 `grape_t_` 规范 | ✅ 已整改 | `src/kernel/cross_write.py:22` = `grape_t_xwrite_log`；`scripts/view_owner_known_duplicates.txt:14` 同步登记 |
+| F2 | lib 写原语的 MySQL 方言（`%s` / `ON DUPLICATE KEY` / `NOW()`）在 sqlite 复用路径下不可用 | ✅ 已整改（按收紧可用性） | `src/domains/{mgmt,runtime}/public/__init__.py` 的 `available()` 改为 `db_registry.uses_own_dsn(<domain>)`；`src/domains/contracts/local/*.py` 同口径 |
+| F3 | 提交物携带内网地址 / 本机绝对路径 | ⚠️ 本轮补整改 | `deploy/systemd/*.service` 已脱敏（`<deploy-root>` + `EnvironmentFile`），但 `docs/lib-3db-3host-design.md` 仍含真实内网 IP 与本机绝对路径 → 本批改为 `<dev-db-host>` / `<insight-copy-host>` / `<runtime-copy-host>` 占位 |
+| F4 | 新增常量无来源登记 | ✅ 已整改 | `src/kernel/cross_write.py:23-24` 的 `MAX_ATTEMPTS` / `RETRY_BACKOFF_S` 已带 rationale 注释 |
+| I3 | mgmt lib 白名单含凭据列（`webhook_secret` / `bot_gitcode_token` / `gitcode_webhook_token` / `bot_github_token` / `github_webhook_token` / `password_hash`） | ⏳ 待人工裁决，当前无调用方 | `src/domains/mgmt/public/__init__.py:17-30` 登记；`src/` 全量检索无 `fetch_rows/fetch_one/read_one/read_all` 取这些列的调用点 |
+| I4 | `insight_lib()` 无对应 `src.domains.insight.public` 模块 | ⏳ 记录备查 | `src/kernel/domain_read.py:62` 定义但无调用方；该域读仍走 `src/domains/contracts/local/insight_local.py` |
+
+---
+
+## 11. GSB 按方法路由与禁止矩阵（Issue #2479）
+
+> 在 §1.2 硬不变量与 §3 访问策略之上，把 GSB 跨域调用从
+> `GRAPE_PROVIDER_MODE` 全局一刀切改为「按接口方法 + 默认偏好 remote +
+> 禁止矩阵兜底」的并存路由。方案细节：`docs/issue-2479/{spec,plan}.md`。
+
+### 11.1 路由 key（两级并存）
+
+| key 空间 | 形态 | 数量（实测） | 示例 |
+|---|---|---|---|
+| 契约方法 | `service.method` | 23（mgmt 7 / runtime 9 / insight 7） | `mgmt.get_bot_config` |
+| public 数据原语 | `domain.primitive` | 105（mgmt 39 / runtime 66；`available`/`health` 探活口不参与） | `mgmt.get_repo_field` |
+
+key 清单以 kernel 字面量镜像（`src/kernel/gsb/route_config.py::CONTRACT_METHODS/PUBLIC_PRIMITIVES`，
+kernel 禁止 import domains），同步用例（`tests/kernel/test_gsb_route.py`）把漂移挡在 CI。
+
+### 11.2 决策链（每次方法调用）
+
+```
+1) 禁止矩阵守卫：caller ∈ {runtime, insight} 且 target = mgmt → lib（恒优先，不查配置表）
+2) 全局开关：GRAPE_PROVIDER_MODE ≠ remote → lib（存量单机/共库零回归）
+3) DB 配置表 gsb_provider_route（version+TTL≤30s 缓存；读失败退回上次已知配置）
+4) 内置基线：热路径四项 + 压测超阈值 14 项 → lib（QA Required#1 实测裁决，
+   remote 由配置表显式放开）；public 原语 → lib（本期无 remote 传输通道）；
+   压测采样错误 5 项（无数据可裁决）→ remote
+```
+
+- 配置表与 `gsb_service_registry` 同库；`set_all_known("lib")` 一键全量回滚
+  （回滚后行为与未开启 remote 完全一致，无需改代码）。
+- `get_service()` 进程级代理句柄复用（QA Required#2）：同服务恒返回同一
+  `_RoutedService` 代理，Local/Remote 实例与 HTTP 客户端惰性构造一次后复用
+  （per-call 构造成本 A/B：11.491ms → 0.056ms，见 bench-report §3）。
+- remote 超时/不可达 **fail-fast**：`GsbRemoteTimeoutError`（`GSB_REMOTE_TIMEOUT`）/
+  `GsbRemoteUnreachableError`（`GSB_REMOTE_UNREACHABLE`），不回落 lib；
+  metrics status 标签区分 `remote_timeout` / `remote_unreachable` / 数字业务码。
+- per-method 超时（配置表 `timeout_ms`）经 `ServiceHttpClient.with_timeout()` →
+  `GsbClient.with_timeout()` **线程本地 per-request 下发**（QA Required#3：不改共享
+  客户端超时，无粘滞，无假 GSB_REMOTE_TIMEOUT）。
+
+### 11.3 禁止矩阵（二维：调用方进程域 × 目标域）
+
+| 调用方 ↓ \ 目标 → | mgmt | runtime | insight |
+|---|---|---|---|
+| mgmt（grape-server） | 本域直连 | 允许 remote（按配置表） | 允许 remote（按配置表） |
+| runtime（event/worker） | **全部 lib**（契约 7 方法 + public 39 原语） | 本域直连 | 按配置表 |
+| insight | **全部 lib**（同上） | 按配置表 | 本域直连 |
+
+- 该矩阵在三库三机目标态（各域独立主机）下保持同一形态，不因网络变远而放宽。
+- 双守卫：运行时 `matrix_forces_lib()`（`get_service("mgmt")` 在 runtime/insight 进程恒
+  Local 实例，不依赖配置表）+ CI 静态扫描 `scripts/check_gsb_route_matrix.py`
+  （命中 runtime/insight 引用 `MgmtServiceRemote` / `GsbClient("mgmt")` /
+  `ServiceHttpClient("mgmt")` / `_PROVIDERS` 裸访问即红，接入 `scripts/check-all.sh`）。
+
+### 11.4 性能判据与实测（M2 交付）
+
+- 判据：逐接口 lib/remote P95（同进程、同参数、同数据量，各采样 ≥200 次）；
+  remote 候选须同时满足 **增量 ≤10ms 且相对增幅 ≤20%**。
+- 实测报告：`docs/issue-2479/bench-report.md`（23 契约 + 105 原语逐接口表；
+  热路径四项 + 超阈值 14 项基线锁 lib）。loopback+共库拓扑下 remote 固定传输成本
+  1.3~4.7ms，绝对增量全部达标、相对增幅不达标 → 按「不影响性能」口径把超阈值
+  14 项**内置基线锁 lib**（空表部署与实测结论一致，QA Required#1 裁决），
+  生产三库三机拓扑对 lib P95 ≥15ms 的重查询逐接口实测达标后再经配置表逐 key 放开 remote。
+- `get_service()` 逐次调用构造成本实测（remote 制式，每次新建代理 + Local/Remote
+  实例）~11.5ms/次；进程级代理句柄复用后 ~0.06ms/次（同方法 A/B，
+  见 bench-report §3，QA Required#2 修复）。

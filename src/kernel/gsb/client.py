@@ -19,6 +19,11 @@ GsbClient 是域间通信的统一入口：
   避免读超时后重放造成重复写。
 - 多实例负载均衡：discover_service() 只能拿一条，这里改用 list_instances()
   拿全部 ``service`` / ``service@namespace`` 行，按策略排序后依次尝试。
+- Issue #2479：metrics status 标签归一化（remote_timeout / remote_unreachable /
+  数字业务码），可区分「remote 超时」与「业务错误」；新增 fail-fast 异常
+  （GsbRemoteTimeoutError 等，由 provider 路由代理包装，client 保持原始传输异常语义）；
+  per-method 超时经 with_timeout() 线程本地覆盖逐请求下发（不改共享客户端超时，
+  无 per-method 粘滞）。
 
 负载均衡策略（GRAPE_GSB_LB，默认 local_first）：
     local_first     本机命名空间实例优先，同命名空间内轮询，失败再跨节点（默认，兼容旧行为）
@@ -38,6 +43,7 @@ import os
 import random
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -113,6 +119,48 @@ if httpx:
 _IDEMPOTENT_METHODS = ("GET", "HEAD", "OPTIONS")
 
 
+# ---------------- fail-fast 异常（Issue #2479） ----------------
+
+
+class GsbRemoteChannelError(RuntimeError):
+    """GSB remote 通道失败（超时/不可达）——fail-fast，不回落 lib。
+
+    稳定错误码 ``code`` 供业务侧判别；由 provider 路由代理（_RoutedService）
+    在 remote 调用包装传输层异常时抛出。GsbClient 自身保持原始 httpx 异常语义。
+    """
+
+    code = "GSB_REMOTE_CHANNEL_ERROR"
+
+
+class GsbRemoteTimeoutError(GsbRemoteChannelError):
+    """remote 调用超时（读/写/连接/池超时）——不回落 lib。"""
+
+    code = "GSB_REMOTE_TIMEOUT"
+
+
+class GsbRemoteUnreachableError(GsbRemoteChannelError):
+    """remote 通道不可达（连接拒绝/协议错/网络错等非超时传输失败）——不回落 lib。"""
+
+    code = "GSB_REMOTE_UNREACHABLE"
+
+
+def _status_label(exc: Exception) -> str:
+    """异常 → metrics status 标签（可区分 remote 超时与业务错误）。
+
+    - httpx 超时族 → ``remote_timeout``；
+    - 其它传输层错误 → ``remote_unreachable``；
+    - HTTPStatusError 等带响应码的业务错误 → 数字状态码；
+    - 其余 → 异常类型名（兜底观测）。
+    """
+    if httpx and isinstance(exc, httpx.TimeoutException):
+        return "remote_timeout"
+    if httpx and isinstance(exc, httpx.TransportError):
+        return "remote_unreachable"
+    resp = getattr(exc, "response", None)
+    code = getattr(resp, "status_code", None)
+    return str(code) if code else type(exc).__name__
+
+
 def resolve_lb_strategy() -> str:
     """读取并归一化 GRAPE_GSB_LB（非法值回退默认策略并告警一次）。"""
     raw = os.environ.get(_LB_ENV, "").strip().lower()
@@ -157,6 +205,10 @@ class GsbClient:
         self._cooldown_until: dict[str, float] = {}
         self._instances: list[dict] = []
         self._instances_at = 0.0
+        # per-request 超时线程本地覆盖（Issue #2479 QA 审查修复 Required#3：
+        # 不再改共享 httpx.Client.timeout——那会让 per-method 超时「粘滞」到
+        # 后续无配置方法的调用上，产生假 GSB_REMOTE_TIMEOUT）
+        self._tls = threading.local()
 
     # ---------- 地址解析 ----------
 
@@ -322,10 +374,18 @@ class GsbClient:
     # ---------- 请求 ----------
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        """按候选地址依次尝试；仅传输层错误切换，HTTP 错误原样抛出。"""
+        """按候选地址依次尝试；仅传输层错误切换，HTTP 错误原样抛出。
+
+        per-request 超时（Issue #2479）：路由配置表 timeout_ms 经
+        ``with_timeout()`` 线程本地覆盖逐请求下发，未覆盖时用客户端默认 10s；
+        共享 httpx.Client.timeout 从不被改写（无粘滞）。
+        """
         if not self._http:
             raise RuntimeError("httpx not available")
 
+        req_timeout = getattr(self._tls, "timeout", None)
+        if req_timeout is not None:
+            kwargs.setdefault("timeout", req_timeout)
         candidates = self._candidates()
         last_exc: Exception | None = None
         for idx, base in enumerate(candidates):
@@ -352,7 +412,7 @@ class GsbClient:
                     target=self.service_name,
                     caller=self.caller_name,
                     method=method,
-                    status=getattr(exc, "response", None) and getattr(exc.response, "status_code", "error") or type(exc).__name__,
+                    status=_status_label(exc),
                     seconds=time.time() - started,
                     instance=_instance_of(base),
                 )
@@ -379,6 +439,25 @@ class GsbClient:
             finally:
                 self._leave_inflight(base)
         raise last_exc if last_exc else RuntimeError(f"GSB request failed: {self.service_name}{path}")
+
+    @contextmanager
+    def with_timeout(self, timeout_seconds: float | None):
+        """线程本地 per-request 超时覆盖（Issue #2479 QA 审查修复 Required#3）。
+
+        路由代理在派发 remote 调用时包一层：本次调用（本线程内、含其嵌套
+        HTTP 请求）按 ``timeout_seconds`` 下发；离开上下文即恢复——不污染
+        客户端默认超时，也不影响其它线程/后续方法的调用。
+        ``None`` 等价不覆盖（维持默认 10s）。
+        """
+        prev = getattr(self._tls, "timeout", None)
+        if timeout_seconds and timeout_seconds > 0:
+            self._tls.timeout = float(timeout_seconds)
+        else:
+            self._tls.timeout = None
+        try:
+            yield
+        finally:
+            self._tls.timeout = prev
 
     def get(self, path: str, params: dict | None = None) -> Any:
         """GET 请求。"""
