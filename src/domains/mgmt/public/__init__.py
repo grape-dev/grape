@@ -739,6 +739,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "installation_other_refs_any", "installation_holders_any",
            "installation_user_channel_rows_any", "clear_user_mapping_feishu_any",
            "installation_repo_app_ids_any", "installation_repo_keys_by_app_any",
+           # IM 通知扇出目标解析（runtime/im/notify.py；任意拓扑）
+           "installation_user_active_rows_any", "installation_p2p_chat_ids_any",
            "delete_feishu_onboard_task_any",
            # IM 身份解析 / 巡检执行卡（runtime/im/handler_async.py；任意拓扑）
            "sender_identity_user_by_app_any", "installation_owner_by_app_any",
@@ -1829,6 +1831,19 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT DISTINCT repo_key FROM grape_t_channel_installation "
         "WHERE scope='repo' AND status='active' AND legacy_app_id=? "
         "AND COALESCE(repo_key,'')<>''"),
+    # ── IM 通知扇出目标解析（runtime/im/notify.py；任意拓扑）──
+    # 原实现两处只读都走 engine_wiring._connect()（钉 runtime 库的 IM 句柄）读本域两张表：
+    # 三库拓扑下该库没有这两张表（视图 0）→ 1146，被调用点 `except → log.warning → 返回
+    # 空列表/空串` 吞成「该用户没有可通知渠道」，通知扇出整体静默失效。列序/谓词/排序逐字照抄，
+    # 不新增 is_active/status 之外的过滤（原语句也没有），id 原值不在这里转 str（调用方同前）。
+    "installation_user_active_rows": (
+        "SELECT id, channel_type, config FROM grape_t_channel_installation "
+        "WHERE scope='user' AND owner_user_id=? AND status='active' "
+        "ORDER BY updated_at DESC"),
+    "chat_binding_p2p_channels": (
+        "SELECT channel_chat_id FROM grape_t_channel_chat_session_binding "
+        "WHERE installation_id=? AND chat_type='p2p' AND channel_chat_id<>'' "
+        "ORDER BY updated_at DESC"),
     # 扫码接入任务删除（含 app_secret/qr_url 敏感数据；飞书专属链路）
     "onboard_task_delete_by_app": "DELETE FROM feishu_onboard_task WHERE app_id=?",
     # ── IM 身份解析 / 巡检执行卡（runtime/im/handler_async.py）──
@@ -4240,6 +4255,36 @@ def installation_repo_keys_by_app_any(app_id: str) -> list[str]:
     到达顺序分页，本轮不擅自固化顺序。返回原值（不做 str 归一），空值已由 SQL 过滤。
     """
     return [r[0] for r in read_all_any("installation_repo_keys_by_app", (app_id,)) if r[0]]
+
+
+def installation_user_active_rows_any(owner_user_id: Any, cursor: Any = None) -> list[tuple]:
+    """某用户名下 active 安装的三列 (id, channel_type, config)，updated_at 倒序。
+
+    对应原 `notify.active_targets` 的查询：只认 scope='user' 且 status='active'（revoked /
+    disabled 都不参与扇出——这是通知口径，不是回显口径，别与
+    `installation_user_channel_rows_any` 混用）。**不做去重**：同渠道多条并存时原实现
+    按首见保留（`seen` 集合在调用方），这里原样给出全部行。
+
+    `cursor` 语义同 `account_id_by_username_ci_any`：单库 / 测试拓扑复用调用方游标
+    （调用方的库就是本域库），自有 DSN 拓扑忽略它、走 mgmt 连接。调用方（im/notify）
+    的连接是**调用期**按 `DEVOPS_DB_PATH` 现取的，而 `*_any` 回落的是 import 期绑定的
+    进程主库 —— 不带游标，测试里那种「每用例换库」的 fixture 会读到另一个库。
+    """
+    with _owner_cursor(cursor) as c:
+        c.execute(_any_sql("installation_user_active_rows"), (str(owner_user_id),))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def installation_p2p_chat_ids_any(installation_id: Any, cursor: Any = None) -> list[tuple]:
+    """该安装下的 p2p 会话 id 单列 `(channel_chat_id,)`，updated_at 倒序。
+
+    对应原 `notify.p2p_chat_id` 的查询：chat_type='p2p' 且 channel_chat_id 非空；
+    **不加 LIMIT**（原语句没有），「优先非话题会话（不含 '#'）」的挑选规则留在调用方
+    —— 那是渠道方言（Slack `Dxxx#ts`）的业务口径，不属于本域。`cursor` 语义同上。
+    """
+    with _owner_cursor(cursor) as c:
+        c.execute(_any_sql("chat_binding_p2p_channels"), (str(installation_id),))
+        return [tuple(r) for r in (c.fetchall() or [])]
 
 
 # ---------- GSB 服务注册表（kernel/gsb/registry.py 的 SQL 全部收在此处） ----------

@@ -4121,6 +4121,98 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （作业单 51 处 / 34 文件，下一批首个未 blocked 文件 `src/domains/runtime/im/notify.py` 2 处
   （`grape_t_channel_installation` 行 182 / `grape_t_channel_chat_session_binding` 行 205，均归 mgmt）。
 
+### runtime im/notify 扇出目标解析归 mgmt public（-2，该文件清零）
+
+- 文件：`src/domains/runtime/im/notify.py`（2 处 → **0**）；全局静态 **51 → 49**（-2），
+  对数 **31 → 30** —— `grape_t_channel_installation←runtime` 1 → 0、
+  `grape_t_channel_chat_session_binding←runtime` 1 → 0（该表**整对清零**，已无任何非归属域消费方）。
+- 本轮取批：作业单头两名 `src/kernel/prompt_builder.py` / `src/kernel/persistence/credential_usage_log.py`
+  仍 blocked（口径见作业单顶部 ⛔ 小节），取第一个未 blocked 文件（上一批台账末尾点名的本文件）。
+- 表分布（消费域 runtime，两表都归 **mgmt**），两处都是**只读通知目标解析**、都不写渠道表：
+  · 行 182 `active_targets`：`SELECT id, channel_type, config FROM grape_t_channel_installation
+    WHERE scope='user' AND owner_user_id=? AND status='active' ORDER BY updated_at DESC`
+    —— 常数 SQL，参数 `str(user_id)`；三列列序即 `(安装 id, 渠道类型, config)`。
+  · 行 205 `p2p_chat_id`：`SELECT channel_chat_id FROM grape_t_channel_chat_session_binding
+    WHERE installation_id=? AND chat_type='p2p' AND channel_chat_id<>'' ORDER BY updated_at DESC`
+    —— 常数 SQL，参数 `str(installation_id)`；单列。
+  两处表名/列名均字面量、全参数化，无动态拼接；`ORDER BY updated_at DESC` 是原语句口径（谁是最新绑定）。
+- 归属域侧改动（SQL 只在 mgmt 域一份）：
+  · `_ANY_QUERIES` 新增 2 条具名查询：`installation_user_active_rows`（三列 + scope/status/owner
+    谓词 + ORDER BY 逐字照抄）、`chat_binding_p2p_channels`（单列 + `chat_type='p2p'` + 非空 + ORDER BY）；
+    与「回显口径」的 `installation_user_channels`（含 disabled）**分开登记**——通知只认 active，
+    回显还要看 disabled，混用会把停用渠道拉进扇出。
+  · 新增薄函数 `installation_user_active_rows_any(owner_user_id, cursor=None) -> list[tuple]`
+    （裸 tuple、保序、不做去重）与 `installation_p2p_chat_ids_any(installation_id, cursor=None)
+    -> list[tuple]`（单列、保序、不加 LIMIT），都走 `_owner_cursor`；两函数登记 `__all__`
+    并同步 `src/kernel/gsb/route_config.py` 的 `PUBLIC_PRIMITIVES["mgmt"]` 镜像。
+- 关键设计取舍：
+  1. **为什么不是复用 `installation_user_channel_rows_any`**：那条是 `/api/im/*` 回显口径
+     （`status IN ('active','disabled')`、两列不含 id）。通知扇出只要 active 且需要 `id` 作
+     outbox 主键前缀，谓词与列都不同，合流会改掉其中一侧的语义。
+  2. **去重与「优先非话题会话」留在调用方**：原实现按 `channel_type` 首见去重、p2p 优先挑不含
+     `#` 的会话（Slack `Dxxx#ts` 不主动推）。那是扇出策略（渠道方言 + 通知口径），不是表归属，
+     搬进 public 会让 owner 域长出跨渠道业务规则；public 只给「原样按序的行」。
+  3. **`id` 不在此转 str**：MySQL 侧 `id` 是 `VARCHAR`、SQLite 侧是 `TEXT`，但调用点原本就写
+     `str(inst_id)`（outbox 主键拼装依赖它），转换留在调用点，public 不替调用方决定类型。
+  4. **不加 `is_active` / 额外过滤**：原语句没有，本表也没有该列；只照抄 `scope/status/owner`
+     三个谓词，避免「顺手加个过滤」把存量行为改掉。
+  5. **空 `installation_id` 不短路**：原实现同样会发一次查询（结果必然空），本批不引入新短路，
+     保持「一条 SQL 都不少发」的等价性；空值语义靠 `channel_chat_id<>''` 与无行返回保证。
+  6. **调用点保留一条 IM 连接，但只当「当前库游标」用**：`DEVOPS_DB_PATH` 是**调用期**才定的
+     （测试按用例换库），而 `*_any` 回落的是 **import 期**绑定的进程主库 —— 实测直接改具名查询
+     后 `tests/runtime/im/test_notify_outbox.py` 有 4 个用例从 pass 变 fail（`engine_down` 被判成
+     `no_binding`，即读到了另一个库）。因此 `notify` 用一个 `_db_cursor()` 取「调用期这条库」的
+     游标交给 owner 域（`cursor=` 口径，`_owner_cursor`：单库/测试拓扑复用、自有 DSN 拓扑**忽略**
+     并改走 mgmt 连接）。**忽略那一跳正是三库修复**；带不带这个游标都不影响 1146 的消失。
+     同批删除原来的 `_conn()` 工厂（它按表名读 mgmt 表，是本轮缺陷的来源），换成只管游标的
+     `_db_cursor()`，并在注释里写明它不承载任何 SQL。
+- **修的存量缺陷（三库独立后通知扇出整体静默停摆）**：两处读口此前走
+  `engine_wiring._connect(default_db_path())` —— 那是**钉在 runtime 库的 IM 句柄**
+  （`GRAPE_IM_DB_NAME` 语义，见 `_connect` 注释）。渠道安装/绑定两表归 mgmt，三库拓扑下
+  runtime 库没有它们（视图 0）→ 1146 → 被本模块 `except → log.warning → return []/""` 吞成
+  「该用户没有可通知渠道」：任务分配 / 待澄清 / 待审核 / 完成四类主动触达在独立部署下**全部静默
+  不发**，用户侧表现为「没收到通知」，日志只有一行 WARNING。改造后读口走任意拓扑原语
+  （自有 DSN → mgmt 连接；单库 / 测试拓扑 → 进程主库），两条拓扑跑同一份 SQL，只有真缺表才降级。
+  同批删掉原来的 `_conn()` 工厂（原本只服务这两个读口），杜绝后人再拿它当「跨域读口」。
+- **未做（如实，属另一轮）**：同目录 `im/engine/outbound_cards.py` 的
+  `grape_t_channel_outbound_card` 2 处（行 75/92）仍是下一批（作业单已列首位）；本批不动它，
+  是为了把「2 处只读」的批保持在同一机制内，不把写台账表的热路径混进来。
+- 验证（真实退出码）：
+  · `py_compile` 三文件（`notify.py` / mgmt `public` / `gsb/route_config.py`）→ **COMPILE_OK**；
+  · `~/burndown/notify_fanout_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，表结构复用
+    `scripts/migrations/001_channel_tables.py`）→ **ALL notify_fanout smoke PASSED (61 checks)**：
+    A 注册面/静态否定（两条查询逐字对齐、可移植方言、单 `?`、薄函数体无内联 SQL、notify.py 无
+    两表任何 DQL/DML、`_conn`/`_connect` 残留为 0、`__all__` + GSB 镜像双登记、未登记名 `KeyError`）；
+    B 单库（scope/status/owner 过滤 + `ORDER BY updated_at DESC` + 三列列序 + 裸 tuple；
+    revoked/disabled/`scope='repo'` 否定用例；未命中/空 owner → 空列表；owner 隔离；
+    p2p 只认 `chat_type='p2p'` 且非空、保序）；
+    C 调用点（同渠道按首见去重、空/纯空白 channel_type 跳过、id 转 str、owner 隔离、
+    p2p 优先非话题 `oc_plain` 胜过更新的 `oc_topic#ts`、仅话题会话时兜底、无绑定/空 id → 空串、
+    连接用完即关（closed=1）、**换 `DEVOPS_DB_PATH` 到空库即读到空** → 证明确实按调用期路径取库、
+    驱动异常吞成 `[]`/`""` 且**两条路径各留一行 WARNING**）；
+    D 自有 DSN 伪游标（domain=`mgmt`、语句逐字、`('7',)` / `('inst-fs-1',)` 参数元组、无 `%s`）；
+    E **端到端**（真跑 `notify_user`：目标解析 → outbox 入队两行 → 本进程无引擎 → 两渠道
+    `engine_down`、行保持 `pending`、outbox 行的安装/p2p 会话与解析结果一致）。
+  · 直覆盖 `tests/runtime/im/test_notify_outbox.py` + `tests/runtime/test_d34_attribution_write_and_notify.py`
+    + `tests/runtime/test_task_notify_bot_resolve.py` → **50 passed, 5 failed**；5 个失败在 **HEAD
+    干净 worktree**（`afa1d9b3e`）逐个复现（lifespan 2 个 / d34 1 个 / bot_resolve 2 个），与本批无关。
+    第一版具名查询**直接替换**时这里多红了 4 个（`engine_down` → `no_binding`），即第 6 条取舍的
+    由来；改成 `cursor=` 口径后回到基线；
+  · `--update-baseline` → **baseline updated: 30 pairs, 49 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **25 表 / 49 跨域引用 / 30 对**（看板/矩阵同步）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 `RESULT: PASS` / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS: 全部查询名已登记**
+    （mgmt 180 funcs + 6 queries used / 262 funcs + 31 queries registered）。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  轮内口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新原语契约），运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标 + `notify_user` 端到端）。runtime 进程 1146 消失的现场证据留待彩排轮确认。
+- **新基线**：**49 处 / 30 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 49 处 / 33 文件，下一批首个未 blocked 文件 `src/domains/runtime/im/engine/outbound_cards.py`
+  2 处（`grape_t_channel_outbound_card` 行 75 / 92，归 mgmt）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

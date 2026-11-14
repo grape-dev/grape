@@ -84,6 +84,8 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "feishu_name_by_platform_column", "repo_bot_usernames_any",
         # VOD Bot 导航：仓库轨安装反查（runtime/im/vod_handler_async.py；任意拓扑）
         "installation_repo_app_ids_any", "installation_repo_keys_by_app_any",
+        # IM 通知扇出目标解析（runtime/im/notify.py；任意拓扑）
+        "installation_user_active_rows_any", "installation_p2p_chat_ids_any",
         "add_user_feedback", "save_inbound_message", "upsert_outbound_card",
         "read_one", "read_all",
     ),

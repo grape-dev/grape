@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import time
+from contextlib import contextmanager
 from typing import Any, Iterable, Optional
 
 log = logging.getLogger(__name__)
@@ -165,25 +166,40 @@ def build_cards_from_payload(payload: dict) -> tuple:
 
 
 # ---------------------------------------------------------------- 目标解析
+#
+# 两张表（渠道安装 / 会话绑定）归 mgmt：SQL 只在 mgmt public 留一份，读口走任意拓扑原语
+# （自有 DSN → mgmt 连接；单库 / 测试拓扑 → 调用方游标）。此前直接在这条 IM 句柄上发 SQL
+# ——它是**钉在 runtime 库**的连接，三库拓扑下 1146 被本模块的 except 吞成「该用户没有
+# 可通知渠道」，扇出静默停摆（不是能看见的报错）。
+#
+# 为什么仍要拿一条 IM 连接：单库 / 测试拓扑下「进程库」就是 mgmt 库，而 DEVOPS_DB_PATH
+# 是**调用期**才定的（测试按用例换库、进程启动后才改 env）；`*_any` 回落的是 import 期
+# 绑定的进程主库，只能用调用方游标把「当前这条库」交给 owner 域。自有 DSN 拓扑下
+# `_owner_cursor` 会忽略这个游标、改走 mgmt 连接 —— 三库修复正是那一跳。
 
-def _conn():
+
+@contextmanager
+def _db_cursor():
+    """当前进程库的游标（调用期解析 DEVOPS_DB_PATH；自有 DSN 拓扑由 owner 域忽略）。"""
     from src.domains.runtime.im.engine_wiring import _connect, default_db_path
-    return _connect(default_db_path())
+    conn = _connect(default_db_path())
+    try:
+        yield conn.cursor()
+    finally:
+        try:
+            conn.close()
+        except Exception as _e:      # 共享连接 close() 是空操作；自建连接关失败不影响读口
+            log.debug(f"src/domains/runtime/im/notify.py cursor close skipped: {_e}")
 
 
 def active_targets(user_id: int) -> list[dict]:
     """该用户可通知的安装：每渠道取最新一条 active（多渠并存全都要）。"""
+    from src.domains.mgmt import public as mgmt_public
     out: list[dict] = []
     seen: set[str] = set()
     try:
-        conn = _conn()
-        try:
-            rows = conn.execute(
-                "SELECT id, channel_type, config FROM grape_t_channel_installation "
-                "WHERE scope='user' AND owner_user_id=? AND status='active' "
-                "ORDER BY updated_at DESC", (str(user_id),)).fetchall()
-        finally:
-            conn.close()
+        with _db_cursor() as _cur:
+            rows = mgmt_public.installation_user_active_rows_any(user_id, cursor=_cur)
     except Exception as e:
         log.warning("[im-notify] list installations failed user=%s: %s", user_id, e)
         return out
@@ -198,15 +214,10 @@ def active_targets(user_id: int) -> list[dict]:
 
 def p2p_chat_id(installation_id: str) -> str:
     """该安装下与用户的 p2p 会话 id（优先非话题会话；无则空）。"""
+    from src.domains.mgmt import public as mgmt_public
     try:
-        conn = _conn()
-        try:
-            rows = conn.execute(
-                "SELECT channel_chat_id FROM grape_t_channel_chat_session_binding "
-                "WHERE installation_id=? AND chat_type='p2p' AND channel_chat_id<>'' "
-                "ORDER BY updated_at DESC", (str(installation_id),)).fetchall()
-        finally:
-            conn.close()
+        with _db_cursor() as _cur:
+            rows = mgmt_public.installation_p2p_chat_ids_any(installation_id, cursor=_cur)
     except Exception as e:
         log.warning("[im-notify] read binding failed inst=%s: %s", installation_id, e)
         return ""
