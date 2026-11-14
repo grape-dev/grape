@@ -185,6 +185,25 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
 第 1 条也解释了历史记录里「彩排 0 失败」与坑 2 并存的矛盾：上一轮 stage env 同样缺 lib 开关，
 多数端点在内部 catch 了 1146，只有写探测把 `PUT /api/chat/config` 的异常记成了失败。
 
+### mgmt agents 会话配置页接口化（-23，本文件清零）
+- 23 处清零，全部指向 runtime 域：`agent_runtimes` 5、`runtime_credentials` 5、
+  `devops_agent_session` 4、`vod_conversations` 3、`events` 3、`skill` 3、`agent_type` 2、
+  `scene_engine_detach_log` 1。
+- **动态 token 列**（provider 能力位给出列名）走组合原语 `agent_session_row(repo_keys,
+  agent_type, token_field)`：列名在 owner 域按 `^[a-z_]+$` 校验后才拼进 SQL（与
+  `managed_repos` 补列同一道护栏），非法列名直接 `ValueError`，列序与原 SQL 逐字一致。
+- **事件检索合并成一次调用**：`events_search` 返回 `(total, rows)`，keyword 的 6 个 LIKE 条件
+  与 `LIMIT/OFFSET` 都在 owner 域构造，调用方只给关键词与页码。
+- **VOD 会话清理两条路径**都成原语：按会话 id 批量、按仓库子查询（`DELETE ... WHERE
+  agent_session_id IN (SELECT ...)`，两表同域可一条 SQL 走完）。
+- 同名技能解析收敛成 `skill_id_by_name_scope(name, scope, owners)`，owner 集合可选
+  （原先「有 owner / 无 owner」两个分支各自一条 SQL）。
+- 全局 **483 → 460**（-23）；基线 **460 / 96 对**。
+- 新增 `agents_smoke`（7 组断言）：动态 token 列读取与非法列名拒绝、事件状态分布按
+  agent_type 隔离、事件检索（seq 倒序/分页/关键词/无命中）、VOD 清理两条路径、
+  同名技能（owner 集合命中/不在集合/不限 owner/`is_active=0` 排除）、解绑提示回绑幂等、
+  `agent_type` 单行与全量。
+
 ### insight dashboard 看板聚合接口化（-24，本文件清零）
 - 24 处清零，全部是「跨域只读聚合」，所以给的不是单表查询而是**聚合原语**：
   · runtime public `dashboard_*` 12 个：任务状态分布、issue 最新任务口径、stuck 窗口、

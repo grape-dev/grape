@@ -1836,6 +1836,28 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT scope, owner_name FROM runtime_credentials WHERE id=?"),
     "runtime_credentials_name_device": (
         "SELECT name, device_name FROM runtime_credentials WHERE id=?"),
+    # 会话配置页（mgmt/routes/agents.py）读路径
+    "devops_session_vod_id": (
+        "SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'"),
+    "agent_type_all": (
+        "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, "
+        "enable FROM agent_type ORDER BY order_num, agent_type"),
+    "agent_type_row": (
+        "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, "
+        "enable FROM agent_type WHERE agent_type=?"),
+    "runtime_name_cred": "SELECT name, credential_id FROM agent_runtimes WHERE id=?",
+    "credential_device_name": "SELECT device_name FROM runtime_credentials WHERE id=?",
+    "credential_name": "SELECT name FROM runtime_credentials WHERE id=?",
+    "runtime_host_name": "SELECT host_name FROM agent_runtimes WHERE id=?",
+    "skill_scope_by_id": "SELECT scope FROM skill WHERE id=? AND is_active=1",
+    "skill_id_by_name_scope": (
+        "SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1"),
+    "vod_conv_rows_by_session": (
+        "SELECT vc.im_chat_id, vc.im_channel_name, vc.runtime_session_id, vc.status, "
+        "vc.last_active_at FROM vod_conversations vc WHERE vc.agent_session_id=? "
+        "ORDER BY vc.last_active_at DESC"),
+    "devops_session_reset_runtime_session": (
+        "UPDATE devops_agent_session SET runtime_session_id='' WHERE repo_key=? AND agent_type=?"),
     # 巡检（api/patrol.py）读路径：issue / events / agent_tasks / agent_runtimes
     "issue_status_by_repo_number": (
         "SELECT status FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1"),
@@ -3102,3 +3124,120 @@ def dashboard_task_issue_rows(task_ids, chunk: int = 500) -> list[tuple]:
                 f"CAST(SUBSTR(t.issue_id, 2) AS INTEGER) WHERE t.id IN ({ph})", part)
             out.extend(tuple(r) for r in (c.fetchall() or []))
     return out
+
+
+# ---------- 会话配置页（mgmt/routes/agents.py）组合原语 ----------
+
+def agent_session_row(repo_keys, agent_type: str, token_field: str) -> tuple | None:
+    """按仓库集合取某类 Agent 的会话行（token 列按 provider 能力位动态选）。
+
+    动态列名只接受 `^[a-z_]+$`（与 managed_repos 补列同一道校验），列序固定：
+    id, runtime_id, skill, skill_id, <token>, runtime_session_id, status,
+    last_active_at, enable, subscribe_events。
+    """
+    import re as _re
+
+    if not _re.match(r"^[a-z_]+$", token_field or ""):
+        raise ValueError(f"invalid session token field: {token_field!r}")
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return None
+    ph = ",".join(["?"] * len(keys))
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT id, runtime_id, skill, skill_id, " + token_field + ", runtime_session_id, "
+            "status, last_active_at, enable, subscribe_events FROM devops_agent_session "
+            f"WHERE repo_key IN ({ph}) AND agent_type=?", (*keys, agent_type))
+        return c.fetchone()
+
+
+def event_status_counts(repo_keys, agent_type: str) -> list[tuple]:
+    """某类 Agent 在仓库集合内的事件状态分布 [(status, count)]。"""
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return []
+    ph = ",".join(["?"] * len(keys))
+    with _any_cursor() as c:
+        c.execute(f"SELECT status, COUNT(*) FROM events WHERE repo_key IN ({ph}) "
+                  "AND agent_type=? GROUP BY status", (*keys, agent_type))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+_EVENT_SEARCH_COLS = (
+    "seq, event_type, title, actor, summary, status, created_at, runtime, "
+    "skill, exit_code, duration, started_at, completed_at, issue_id, repo_key")
+
+
+def events_search(repo_keys, agent_type: str, keyword: str = "", page: int = 1,
+                  page_size: int = 10) -> tuple[int, list[tuple]]:
+    """事件历史搜索（keyword 命中 seq/issue_id/event_type/title/summary/actor）。
+
+    返回 (total, rows)。LIKE 条件在 owner 域构造，调用方只给关键词。
+    """
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return 0, []
+    ph = ",".join(["?"] * len(keys))
+    where = [f"repo_key IN ({ph})", "agent_type=?"]
+    params: list = list(keys) + [agent_type]
+    if keyword:
+        kw = f"%{keyword}%"
+        where.append("(CAST(seq AS CHAR) LIKE ? OR issue_id LIKE ? OR event_type LIKE ? "
+                     "OR title LIKE ? OR summary LIKE ? OR actor LIKE ?)")
+        params += [kw] * 6
+    where_sql = " AND ".join(where)
+    offset = max(0, (int(page) - 1) * int(page_size))
+    with _any_cursor() as c:
+        c.execute(f"SELECT COUNT(*) FROM events WHERE {where_sql}", params)
+        total = int((c.fetchone() or [0])[0] or 0)
+        c.execute(f"SELECT {_EVENT_SEARCH_COLS} FROM events WHERE {where_sql} "
+                  "ORDER BY seq DESC LIMIT ? OFFSET ?", params + [int(page_size), offset])
+        return total, [tuple(r) for r in (c.fetchall() or [])]
+
+
+def vod_conversations_delete(agent_session_ids=None) -> int:
+    """按会话 id 清 VOD 会话行（可批量）。"""
+    ids = [str(i) for i in (agent_session_ids or []) if i]
+    if not ids:
+        return 0
+    ph = ",".join(["?"] * len(ids))
+    with _any_cursor(write=True) as c:
+        cur = c.execute(f"DELETE FROM vod_conversations WHERE agent_session_id IN ({ph})", ids)
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def vod_conversations_delete_by_repo(repo_key: str) -> int:
+    """清某仓库所有 VOD 会话行（按该仓库的 vod 会话子查询，两表都在本域）。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "DELETE FROM vod_conversations WHERE agent_session_id IN "
+            "(SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod')",
+            (repo_key,))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def skill_id_by_name_scope(name: str, scope: str, owners=None) -> int:
+    """同名技能的 id（scope 精确；owners 非空时限定 owner 集合，回退 0）。"""
+    if not name or not scope:
+        return 0
+    _owners = [str(o) for o in (owners or []) if o]
+    with _any_cursor() as c:
+        if _owners:
+            ph = ",".join(["?"] * len(_owners))
+            c.execute(f"SELECT id FROM skill WHERE skill_name=? AND scope=? "
+                      f"AND owner_id IN ({ph}) AND is_active=1 LIMIT 1",
+                      (name, scope, *_owners))
+        else:
+            c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1",
+                      (name, scope))
+        row = c.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def scene_detach_log_rebound(scene_row_id, node_tag: str, rebound_at: str) -> int:
+    """把场景解绑提示标记为已回绑（仅未标记的行）。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "UPDATE scene_engine_detach_log SET rebound_at=? WHERE scene_row_id=? AND node_tag=? "
+            "AND (rebound_at='' OR rebound_at IS NULL)", (rebound_at, scene_row_id, node_tag))
+        return int(getattr(cur, "rowcount", 0) or 0)
