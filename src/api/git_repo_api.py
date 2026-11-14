@@ -1477,9 +1477,77 @@ def _pre_merge_qa_gate(owner: str, repo: str, number: int, p: str, token: str,
                  "status": _first["info"].get("status")}})
 
 
+# ===================== Issue #2492：rebase 合入失败的中文结构化提示 =====================
+# 上游变基失败原文形如 `Something went wrong during merge: rebase failed: conflict ... commit "abc1234"`
+# ——Issue #549/#558 的透传设计让调用方只能看到英文裸串。此处仅对 rebase 合入做归类：
+# 命中冲突特征 → 中文结构化提示（原因/冲突提交 sha/建议），原文降级到 detail 子字段与日志；
+# 未命中 → 兜底中文提示并保留原文；merge/squash 路径完全不进入本逻辑（回归安全）。
+_REBASE_CONFLICT_SHA_RE = _re.compile(r'commit\s+"([0-9a-f]{7,40})"')
+_REBASE_MERGE_SUGGESTION = ("同步目标分支并解决冲突后重试，或改用常规合并（merge_method=merge）")
+
+
+def _merge_upstream_message(exc: HTTPException) -> str:
+    """取合入失败的上游原始 message（detail 为 dict 取 message，否则整体转文本）。"""
+    _d = getattr(exc, "detail", None)
+    if isinstance(_d, dict):
+        return str(_d.get("message") or "")
+    return "" if _d is None else str(_d)
+
+
+def _classify_rebase_merge_failure(message: str) -> tuple[bool, list[str]]:
+    """rebase 合入失败归类：返回 (是否变基冲突, 冲突提交 sha 列表)。
+
+    冲突特征 = 同时含 ``rebase`` 与 ``conflict``/``conflicting``（上游存在两种文案形态）；
+    冲突提交 sha 取自 ``commit "<sha>"``，去重保序。
+    """
+    _low = (message or "").lower()
+    if "rebase" not in _low:
+        return False, []
+    if "conflict" not in _low and "conflicting" not in _low:
+        return False, []
+    _commits: list[str] = []
+    for _sha in _REBASE_CONFLICT_SHA_RE.findall(message or ""):
+        if _sha not in _commits:
+            _commits.append(_sha)
+    return True, _commits
+
+
+def _rebase_merge_failure(exc: HTTPException, owner: str, repo: str,
+                          number: int) -> HTTPException:
+    """把上游 rebase 合入失败改写为中文结构化 HTTPException（状态码沿用上游语义）。
+
+    原文不丢弃：进 ``detail.upstream_message`` 与日志（维护者溯源需要）。
+    """
+    _upstream = _merge_upstream_message(exc)
+    _status = int(getattr(exc, "status_code", 0) or 0) or 502
+    _is_conflict, _commits = _classify_rebase_merge_failure(_upstream)
+    if _is_conflict:
+        _reason = "rebase_conflict"
+        _sha_text = "、".join(_commits) if _commits else "上游未给出"
+        _message = (f"变基冲突：rebase 合入失败，PR 与目标分支存在无法自动解决的冲突"
+                    f"（冲突提交: {_sha_text}）。建议：{_REBASE_MERGE_SUGGESTION}。")
+    else:
+        _reason = "rebase_failed"
+        _message = ("变基失败：rebase 合入未成功（未识别为冲突类原因）。"
+                    "建议：确认 PR 可合入状态与分支保护设置后重试，"
+                    "或改用常规合并（merge_method=merge）；"
+                    "上游原始信息见 upstream_message。")
+    log.warning(f"merge_pull rebase failure classified as {_reason} "
+                f"{owner}/{repo}#{number} (status={_status}, "
+                f"conflict_commits={_commits}): {_upstream}")
+    return HTTPException(status_code=_status, detail={
+        "code": _status,
+        "message": _message,
+        "reason": _reason,
+        "conflict_commits": _commits,
+        "suggestion": _REBASE_MERGE_SUGGESTION,
+        "upstream_message": _upstream,
+    })
+
+
 @router.put("/{owner}/{repo}/pulls/{number}/merge", operation_id="gitrepo_pulls_merge",
             summary="Merge pull request",
-            description="Merges a pull request; returns {merged, sha}. Optional body: merge_method (merge/squash/rebase, default merge) and title (custom merge commit title), passed through to the provider merge endpoint. Upstream failures (e.g. 405 not mergeable) return the upstream status code with the full error message. WARNING (live-fire evidence 2026-11-13): an empty body is a REAL merge — GitCode PUT /pulls/{n}/merge with no fields merged the PR with upstream defaults ({merged: true}); there is no dry-run on this endpoint.")
+            description="Merges a pull request; returns {merged, sha}. Optional body: merge_method (merge/squash/rebase, default merge) and title (custom merge commit title), passed through to the provider merge endpoint. Upstream failures (e.g. 405 not mergeable) return the upstream status code with the full error message. Issue #2492: merge_method=rebase failures are classified — a rebase conflict returns a Chinese structured detail (reason=rebase_conflict, conflict_commits, suggestion, upstream_message) and any other rebase failure returns a Chinese fallback hint (reason=rebase_failed), both keeping the upstream status code and the raw message in detail.upstream_message; merge/squash failures keep the upstream message untouched. WARNING (live-fire evidence 2026-11-13): an empty body is a REAL merge — GitCode PUT /pulls/{n}/merge with no fields merged the PR with upstream defaults ({merged: true}); there is no dry-run on this endpoint.")
 def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = None,
                user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #558：merge_method/title 透传（空值过滤，缺省保持 body=None 存量行为）
@@ -1540,8 +1608,14 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
                     f"{_gate.get('soft_hits')}")
     else:
         record_gate_log(_repo_key, number, "pre_merge", _gate.get("decision", "passed"), _gate)
-    resp = _vcs_req(p, "PUT", _vcs_url(owner, repo, f"/pulls/{number}/merge", None, p),
-                    _token, _payload)
+    try:
+        resp = _vcs_req(p, "PUT", _vcs_url(owner, repo, f"/pulls/{number}/merge", None, p),
+                        _token, _payload)
+    except HTTPException as _merge_exc:
+        # Issue #2492：仅 rebase 合入失败做中文归类改写；merge/squash/缺省保持原文透传。
+        if (_payload or {}).get("merge_method") == "rebase":
+            raise _rebase_merge_failure(_merge_exc, owner, repo, number)
+        raise
     # Issue #752（M1，PR #874 审查修正）：合入后扫描 base 分支合入结果（pre-merge base sha
     # → 合入后 tip 的 compare diff）——覆盖自动复测等旁路写入 base 分支的残留（PR files
     # 复扫永远与 pre_merge 同结果，检不出旁路）；命中告警+日志（合入已完成无法回滚，
