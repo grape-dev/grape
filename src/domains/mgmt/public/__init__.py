@@ -702,6 +702,10 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # 用户映射（unified_user_mapping）双拓扑读写薄封装（conn=None → 自有 DSN）
            "resolve_feishu_open_id", "list_user_mappings", "list_feishu_name_open_id_pairs",
            "bind_feishu_mapping_row", "sync_user_mapping", "ensure_user_mapping_schema",
+           # 飞书通道列（runtime/im/channel_directory 调用；任意拓扑）
+           "write_back_feishu_identity", "feishu_open_id_by_user",
+           "user_mapping_row_by_open_id", "feishu_open_id_by_platform_column",
+           "clear_feishu_by_app", "clear_feishu_by_user", "set_gitcode_nickname_any",
            "upsert_scene_content", "set_scene_icon", "set_scene_deploy_url", "set_scene_nodes", "mark_default_featured", "list_baseline_knowledge_files", "list_knowledge_obs_keys",
            "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks", "get_autopilot_task_brief",
            # P2 服务接口补齐（N6/N8/N9/N10）
@@ -1475,6 +1479,36 @@ _ANY_QUERIES: dict[str, str] = {
     "um_user_id_by_github_login": (
         "SELECT user_id FROM unified_user_mapping "
         "WHERE github_login=? AND github_login!='' AND user_id!='' AND user_id!='0' LIMIT 1"),
+    # ── 飞书通道列（channel_directory 原「mgmt_lib 优先 + 本地兜底 SQL」的兜底侧上移）──
+    # 兜底 SQL 只在单库/视图期执行，却正是跨域表引用的来源；上移到 owner 域后
+    # 自有 DSN 与单库拓扑跑同一份语句，调用方不再保留任何 um SQL。
+    "um_insert_ignore_user": "INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)",
+    "um_set_feishu_by_user": (
+        "UPDATE unified_user_mapping SET feishu_open_id=?, feishu_name=?, app_id=?, "
+        "updated_at=datetime('now') WHERE user_id=? "
+        "AND (user_id IS NOT NULL AND user_id != '' AND user_id != '0')"),
+    "um_feishu_open_id_by_user": (
+        "SELECT feishu_open_id FROM unified_user_mapping "
+        "WHERE user_id=? AND feishu_open_id!='' LIMIT 1"),
+    "um_row_by_feishu_open_id": (
+        "SELECT user_id, gitcode_user, feishu_name, gitcode_nickname "
+        "FROM unified_user_mapping WHERE feishu_open_id=? LIMIT 1"),
+    "um_clear_feishu_by_app": (
+        "UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', "
+        "updated_at=? WHERE app_id=?"),
+    "um_clear_feishu_by_user": (
+        "UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', "
+        "updated_at=? WHERE user_id=?"),
+    "um_set_nickname_by_user": (
+        "UPDATE unified_user_mapping SET gitcode_nickname=?, updated_at=datetime('now') "
+        "WHERE user_id=?"),
+    # um 名字域兜底（FR-CQ-1）：平台列 → 该列上的 open_id，列名只在本域白名单挑
+    "um_feishu_open_id_by_gitcode_user": (
+        "SELECT feishu_open_id FROM unified_user_mapping "
+        "WHERE gitcode_user=? AND feishu_open_id!='' LIMIT 1"),
+    "um_feishu_open_id_by_github_login": (
+        "SELECT feishu_open_id FROM unified_user_mapping "
+        "WHERE github_login=? AND feishu_open_id!='' LIMIT 1"),
     # 平台 login → 账号 id（账号名≠平台 login 时以 external_identities 为准）
     "account_id_by_platform_login": (
         "SELECT ga.id FROM grape_accounts ga "
@@ -1624,6 +1658,13 @@ _UM_COLUMN_QUERIES: dict[str, str] = {
     "github_login": "um_user_id_by_github_login",
 }
 
+#: 同一张表的「平台列 → open_id」白名单（channel_directory 的 um 名字域兜底）。
+#: 列名由本域挑选，调用方只传 repo_key 推出的列名，不得拼 SQL。
+_UM_OPENID_COLUMN_QUERIES: dict[str, str] = {
+    "gitcode_user": "um_feishu_open_id_by_gitcode_user",
+    "github_login": "um_feishu_open_id_by_github_login",
+}
+
 
 def _any_sql(name: str) -> str:
     """取具名查询 SQL；未登记抛 KeyError（不静默退回任意 SQL）。"""
@@ -1680,6 +1721,85 @@ def repo_dev_scene(repo_key: str) -> str:
     """仓库默认场景 id（managed_repos.dev_scene）；无行/空值返回空串。"""
     row = read_one_any("repo_dev_scene", (repo_key,))
     return str(row[0] or "") if row else ""
+
+
+# ---------- 飞书通道列（runtime/im/channel_directory 调用） ----------
+#
+# channel_directory 原先每个站点都是「mgmt_lib 优先 + 本地兜底 SQL」：兜底侧只在
+# 单库/视图期执行，却是跨域表引用的来源，且三库拓扑下进程库没有该表（无视图 → 1146）。
+# 这里把兜底侧上移成 owner 域原语：SQL 只留 mgmt 一份，两条拓扑同一份语句。
+# 写语义逐条照抄 channel_directory 原语句（datetime('now') / USER_ID>0 守卫 /
+# app 级与 user 级清空的作用域 WHERE 都不改）。
+
+
+def write_back_feishu_identity(user_id: Any, open_id: str, feishu_name: str = "",
+                               app_id: str = "") -> None:
+    """agent 引导回写飞书三列（FR-18.4：USER_ID 必须 >0，禁 0 占位行）。
+
+    建行（INSERT OR IGNORE）+ 带 USER_ID>0 守卫的 UPDATE，同一事务；
+    app_id 可为空串但由调用方显式传（app 级成对语义留在调用方）。
+    """
+    with _any_tx() as c:
+        c.execute(_any_sql("um_insert_ignore_user"), (user_id,))
+        c.execute(_any_sql("um_set_feishu_by_user"),
+                  (open_id, feishu_name, app_id, user_id))
+
+
+def feishu_open_id_by_user(user_id: Any) -> str:
+    """按 user_id 取 open_id（空值/无行返回空串，与原 `row[0] if row else ''` 同口径）。"""
+    row = read_one_any("um_feishu_open_id_by_user", (user_id,))
+    return str(row[0] or "") if row else ""
+
+
+def user_mapping_row_by_open_id(open_id: str) -> tuple | None:
+    """open_id → (user_id, gitcode_user, feishu_name, gitcode_nickname)；无行返回 None。"""
+    row = read_one_any("um_row_by_feishu_open_id", (open_id,))
+    return tuple(row) if row else None
+
+
+def feishu_open_id_by_platform_column(column: str, login: str) -> str:
+    """um 名字域兜底（FR-CQ-1）：按平台列取 open_id；未登记列返回空串。
+
+    未登记列（D39/S59 无 um 列平台）与「拼出空列名 → SQL 报错 → 整函数返回空」
+    原口径一致，只补一条 debug 日志；查询异常同样返回空串（原实现吞掉）。
+    """
+    name = _UM_OPENID_COLUMN_QUERIES.get(column or "")
+    if name is None:
+        log.debug(f"feishu_open_id_by_platform_column: column not registered ({column!r})")
+        return ""
+    try:
+        row = read_one_any(name, (login,))
+    except Exception as exc:  # noqa: BLE001 - 原实现同样吞掉 SQL 错误并返回空串
+        log.debug(f"feishu_open_id_by_platform_column: query failed ({name}): {exc}")
+        return ""
+    return str(row[0] or "") if row else ""
+
+
+def clear_feishu_by_app(app_id: str, updated_at: str = "") -> int:
+    """app 释放：清空该 app 全部用户的飞书三列（WHERE app_id=? 作用域必须保留）。"""
+    if not app_id:
+        return 0
+    from datetime import datetime
+
+    return exec_any("um_clear_feishu_by_app",
+                    (updated_at or datetime.now().isoformat(), app_id))
+
+
+def clear_feishu_by_user(user_id: Any, updated_at: str = "") -> int:
+    """user 级精确清空（FR-21.10：按 user_id，不按用户名扫列，防误清同名用户）。"""
+    if not user_id:
+        return 0
+    from datetime import datetime
+
+    return exec_any("um_clear_feishu_by_user",
+                    (updated_at or datetime.now().isoformat(), user_id))
+
+
+def set_gitcode_nickname_any(user_id: Any, nickname: str = "") -> None:
+    """昵称更新：无行先建行（INSERT OR IGNORE）再写昵称，同一事务（原两语句同批口径）。"""
+    with _any_tx() as c:
+        c.execute(_any_sql("um_insert_ignore_user"), (user_id,))
+        c.execute(_any_sql("um_set_nickname_by_user"), (nickname or "", user_id))
 
 
 # ---------- 流水线场景 / 托管仓库（runtime 事件管道） ----------

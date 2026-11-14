@@ -1,7 +1,7 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-15 00:50　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **47** 张；跨域引用 **276** 处（69 个「表×消费域」对）；含归属域在内的 SQL 引用 2315 处
+> 生成时间：2026-11-15 00:55　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **47** 张；跨域引用 **267** 处（69 个「表×消费域」对）；含归属域在内的 SQL 引用 2315 处
 
 ## 1. 域 × 域 跨域引用热力
 
@@ -10,14 +10,14 @@
 | api | 20 | 47 | 3 | 70 |
 | kernel | 19 | 3 | 0 | 22 |
 | mgmt | 0 | 42 | 6 | 48 |
-| runtime | 84 | 0 | 1 | 85 |
+| runtime | 75 | 0 | 1 | 76 |
 | insight | 3 | 47 | 0 | 50 |
 
 ## 2. 处置分类进度
 
 | 分类 | 表数 | 剩余跨域引用 |
 | --- | ---: | ---: |
-| D | 13 | 90 |
+| D | 13 | 81 |
 | C1 | 8 | 80 |
 | C2 | 21 | 101 |
 | B | 4 | 4 |
@@ -30,7 +30,6 @@
 | `agent_tasks` | runtime | 29 | insight 18 / api 7 / mgmt 4 | C2 outbox 跨域写 | W1 | 39 |
 | `runtime_credentials` | runtime | 19 | insight 9 / api 6 / mgmt 4 | C1 归属重定（写路径挪进 owner 域） | — | 21 |
 | `managed_repos` | mgmt | 18 | runtime 11 / kernel 5 / api 2 | D 模块归位（kernel 写/读域表） | — | 23 |
-| `unified_user_mapping` | mgmt | 18 | runtime 15 / kernel 3 | D 模块归位（kernel 写/读域表） | — | 11 |
 | `events` | runtime | 16 | insight 8 / api 7 / mgmt 1 | C1 归属重定（写路径挪进 owner 域） | — | 27 |
 | `grape_t_channel_installation` | mgmt | 16 | runtime 16 | C2 outbox 跨域写 | W2 | 10 |
 | `issue` | runtime | 16 | api 12 / insight 2 / mgmt 2 | D 模块归位（kernel 写/读域表） | — | 24 |
@@ -39,6 +38,7 @@
 | `meta` | runtime | 11 | mgmt 11 | D 模块归位（kernel 写/读域表） | — | 5 |
 | `skill` | runtime | 10 | api 8 / mgmt 2 | D 模块归位（kernel 写/读域表） | — | 13 |
 | `grape_accounts` | mgmt | 9 | runtime 8 / insight 1 | C2 outbox 跨域写 | W2 | 16 |
+| `unified_user_mapping` | mgmt | 9 | runtime 6 / kernel 3 | D 模块归位（kernel 写/读域表） | — | 10 |
 | `agent_shared_knowledge` | mgmt | 8 | runtime 8 | C1 归属重定（写路径挪进 owner 域） | — | 7 |
 | `external_identities` | mgmt | 7 | api 4 / runtime 2 / kernel 1 | C2 outbox 跨域写 | W2 | 8 |
 | `grape_t_repo_credentials` | insight | 7 | mgmt 5 / contracts 1 / runtime 1 | C1 归属重定（写路径挪进 owner 域） | — | 6 |

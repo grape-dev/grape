@@ -864,6 +864,56 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
   `foreign-refs-allowlist.csv` 收紧为 276 / 69；依赖看板与作业单同步刷新
   （下一批头名：`insight/observability/trace.py` 9 处）。
 
+### runtime/im/channel_directory 飞书通道列 SQL 上移 mgmt（-9，本文件清零）
+- 文件：`src/domains/runtime/im/channel_directory.py`（210 行，IM 通道目录、um 通道数据唯一访问层）。
+  9 处跨域引用全部指向 `unified_user_mapping`（**归 mgmt**），消费方 runtime：`INSERT OR IGNORE`(73,273)、
+  `UPDATE`(75,209,237,274)、`SELECT`(106,144,176)。表分布：`unified_user_mapping` × 9（单表）；
+  动态拼接 1 处（`resolve_open_id_for_login` 用 `repo_key` 推平台列名拼 `WHERE {col}=?`，列名集合
+  实际只有 `gitcode_user`/`github_login` 两值）。
+- 归因：这批不是「老代码忘了走接口」，而是 **owner_lib 兜底的残留**——每个站点先走
+  `mgmt_lib(foreign_only=True)` + cross_write 幂等意图，之后为单库拓扑保留了一段本地 SQL。
+  lib 句柄只在「配了 mgmt 自有 DSN」时可用，兜底 SQL 却正是静态统计的来源；三库拓扑下进程库
+  没有该表（无视图 → 1146），所以兜底侧既不该留、也不该跑。
+- 归位：mgmt public 新增 9 条可移植具名查询（`um_insert_ignore_user` / `um_set_feishu_by_user` /
+  `um_feishu_open_id_by_user` / `um_row_by_feishu_open_id` / `um_clear_feishu_by_app` /
+  `um_clear_feishu_by_user` / `um_set_nickname_by_user` / `um_feishu_open_id_by_gitcode_user` /
+  `um_feishu_open_id_by_github_login`）+ 7 个薄原语（`write_back_feishu_identity` /
+  `feishu_open_id_by_user` / `user_mapping_row_by_open_id` / `feishu_open_id_by_platform_column` /
+  `clear_feishu_by_app` / `clear_feishu_by_user` / `set_gitcode_nickname_any`）。
+  列名白名单 `_UM_OPENID_COLUMN_QUERIES` 收在 owner（沿用 `_UM_COLUMN_QUERIES` 口径：未登记列返回空串）。
+- 设计取舍：
+  1) 写路径保持**双通道**：自有 DSN 下仍走 `mgmt_lib(foreign_only=True)` + `cross_write` 幂等意图
+     （重试/死信语义不变），只有兜底侧换成 mgmt public 原语；单库/视图期 SQL 与三库期是同一份。
+  2) 多语句写（建行 + 写列）用 `_any_tx()`：自有 DSN → `db_registry.transaction("mgmt")` 真事务；
+     单库 → 进程库 + `db_lock` 且回滚，与原「同一 db_lock 内两条语句后 commit」等价。
+  3) 方言：具名查询按 sqlite 方言书写（`?` / `INSERT OR IGNORE` / `datetime('now')`），
+     由 `mysql_compat` 翻译；不引入 `NOW()`/`ON DUPLICATE KEY` 专有语法。
+  4) `write_back` 的 `USER_ID>0` 是**双层**：调用方前置守卫 + owner 侧 UPDATE 的
+     `user_id IS NOT NULL AND user_id != '' AND user_id != '0'`。后者照抄原 SQL，绕过调用方也写不进 0 行。
+  5) `clear_for_app`/`clear_for_user` 的 `updated_at` 仍是 `datetime.now().isoformat()`
+     （本地时间、非 UTC）——原口径，不在本批改成 UTC，避免与 W2 原语的时间基线混用。
+  6) 反查/解析两个站点原来各有「lib 优先」与「db_lock 内再取 foreign lib」两层，属重复判定，
+     合并成一次 `*_any` 调用（`_any_cursor` 已按拓扑自适应）。
+- 修的存量 bug：`resolve_open_id_for_login` 的兜底分支在单库拓扑下走 `except Exception: return ""`
+  吞掉一切 SQL 错误（含列名拼错、表缺失），排障时看不到原因；上移后 owner 侧 `log.debug` 记录
+  失败查询名与异常，行为仍是返回空串（不改变对调用方的语义）。
+- 棘轮：本文件跨域引用 **9 → 0**；`check-arch` R1 无需新白名单（runtime → `src.domains.mgmt.public`
+  的函数内延迟导入是既有形态，且不新增顶层 import）。无静默 `except: pass` 新增。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/channel_directory_smoke.py`
+  **ALL 51 CHECKS PASSED**（覆盖 write_back 的 0 占位行双层守卫、只写三列不碰平台列/昵称、
+  open_id 空串与未命中返回空、平台列白名单命中/未登记列返回空串/表缺失仍返回空串不抛、
+  app 级只清该 app、user 级同名 `gitcode_user` 不误清（FR-21.10）、昵称建行+二次只更一行且不动
+  open_id/app_id、S54 身份优先与 github 无 um 列跳过、调用方零 um SQL 动词等边界与否定用例）；
+  `tests/runtime/im/test_s99_channel_directory.py` **8 passed**（S99 六类行为回归全绿）；
+  `rds_gate.sh --quick` **GATE: 全绿**；`pytest tests/arch tests/contracts tests/scripts`
+  **158 passed**；`make lint` **import OK**。
+  `tests/mgmt/test_s110_um_boundary_guard.py::test_s110_um_channel_columns_boundary` 为**既有红**
+  （HEAD 干净树即报 `issues_center.py` / `migrations_ddl.py` / `mgmt/public/__init__.py` 三个快照外
+  触点；本轮未新增文件，`channel_directory` 本就在白名单内；该文件不在门禁三组内，未借机改其快照）。
+- 新基线：全局 **276 → 267**（-9），对 **69 → 69**（同一对 mgmt→runtime 内消化，未跨对）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 267 / 69；依赖看板与作业单同步刷新
+  （下一批头名：`insight/observability/trace.py` 9 处）。
+
 ### 7.2 单实例三域（早期彩排，已由 7.1 取代）
 
 

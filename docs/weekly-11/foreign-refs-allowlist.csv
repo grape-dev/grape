@@ -64,7 +64,7 @@ takeover_sessions,runtime,api,1
 takeover_sessions,runtime,mgmt,1
 task_messages,runtime,insight,1
 unified_user_mapping,mgmt,kernel,3
-unified_user_mapping,mgmt,runtime,15
+unified_user_mapping,mgmt,runtime,6
 user_accounts,mgmt,runtime,1
 user_feedback,mgmt,api,6
 vod_conversations,runtime,mgmt,1

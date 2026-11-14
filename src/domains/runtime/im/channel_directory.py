@@ -3,8 +3,8 @@
 背景：unified_user_mapping 中"身份域无对应物"的列（feishu_open_id/
 feishu_name/app_id/gitcode_nickname）此前散落 6 处裸 SQL 读写
 （prompt_builder / routes.settings / routes.chat / im.handler_async ×2 /
-api.issues_center）。本模块把读写收敛为单一 API，um 列降级为本模块的
-私有存储实现——um 表退役（存储切换批）时只改本模块后端。
+api.issues_center）。本模块把读写收敛为单一 API；表归属 mgmt，SQL 与具名查询
+只在 mgmt public 留一份（任意拓扑原语），本模块只保留编排、回退链与幂等意图。
 
 护栏（设计评审钉死，实现逐条落实）：
 1. S54 解析顺序内置：身份域优先（external_identities→user_id）→
@@ -18,6 +18,8 @@ api.issues_center）。本模块把读写收敛为单一 API，um 列降级为�
    禁止反向 import 本模块。
 4. 零行为变化：全部函数为存量裸 SQL/既有 helper 的原样搬运（含
    FR-18.4 USER_ID>0 约束、FR-21.10 user_id 精确清空、app 变更清空语义）。
+5. 跨域边界：um 表的 SQL 不在本文件出现（原「mgmt_lib 优先 + 本地兜底 SQL」
+   的兜底侧已上移到 mgmt public 具名查询）；列名白名单也由 owner 域挑选。
 
 登记（存储切换批出口条件，见 D74 台账）：feishu_directory 回归全绿 +
 存储后端切换方案评审通过 → 换后端 + IM 链路实弹验证。届时若
@@ -25,8 +27,6 @@ external_identities 已自然演进 app_id/provider 扩展位则并入身份域
 （原方案 A），否则维持模块私有存储，不强行统一。
 """
 from __future__ import annotations
-
-from datetime import datetime
 
 from src.kernel.config import log
 
@@ -66,16 +66,10 @@ def write_back(user_id: str, open_id: str, feishu_name: str, *, app_id: str) -> 
                 log.warning(f"channel_directory.write_back queued for retry: {_res_wb.get('error')}")
             return
         except Exception as _e_wb:
-            log.warning(f"channel_directory.write_back lib path failed, fallback to local SQL: {_e_wb}")
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        c.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (user_id,))
-        c.execute(
-            "UPDATE unified_user_mapping SET feishu_open_id=?, feishu_name=?, app_id=?, "
-            "updated_at=datetime('now') WHERE user_id=? AND (user_id IS NOT NULL AND user_id != '' AND user_id != '0')",
-            (open_id, feishu_name, app_id, user_id))
-        db.commit()
+            log.warning(f"channel_directory.write_back lib path failed, fallback to mgmt public: {_e_wb}")
+    # 单库/视图期：同一份 SQL 在 owner 域（mgmt public），本模块不留任何 um SQL
+    from src.domains.mgmt import public as _mgmt_public_wb
+    _mgmt_public_wb.write_back_feishu_identity(str(user_id), open_id, feishu_name, app_id)
 
 
 def resolve_open_id_by_login(gitcode_user: str, app_id: str = "") -> "str | None":
@@ -90,23 +84,8 @@ def resolve_open_id_by_user(user_id: str) -> str:
     """按 grape_accounts user_id 解析 open_id（assignee 为空场景，feishu-openid-by-user-id）。"""
     if not user_id:
         return ""
-    from src.kernel.session_manager import db, db_lock
-    from src.kernel.domain_read import mgmt_lib
-    _mg = mgmt_lib()
-    if _mg is not None:
-        return _mg.get_feishu_open_id(user_id) or ""
-    with db_lock:
-        c = db.cursor()
-        from src.kernel.domain_read import mgmt_lib as _mg_oid
-        _oid = _mg_oid(foreign_only=True)
-        if _oid is not None:
-            row = _oid.read_one("um_feishu_open_id_by_user", (user_id,))
-        else:
-            c.execute(
-                "SELECT feishu_open_id FROM unified_user_mapping WHERE user_id=? AND feishu_open_id!='' LIMIT 1",
-                (user_id,))
-            row = c.fetchone()
-        return row[0] if row and row[0] else ""
+    from src.domains.mgmt import public as _mgmt_public_oid
+    return _mgmt_public_oid.feishu_open_id_by_user(user_id)
 
 
 def resolve_open_id_for_login(gitcode_user: str, repo_key: str = "") -> str:
@@ -127,26 +106,13 @@ def resolve_open_id_for_login(gitcode_user: str, repo_key: str = "") -> str:
     except Exception as _e:
         log.warning(f"channel_directory.resolve_open_id_for_login: identity-first failed "
                     f"(user={gitcode_user!r}, repo={repo_key!r}): {_e}")
-    # FR-CQ-1: um 名字域兜底
+    # FR-CQ-1: um 名字域兜底（列名由 owner 域白名单挑，本模块不拼 SQL）
     from src.kernel.repo_key import um_column_for_repo
     _col = um_column_for_repo(repo_key)
     if not _col:
         return ""
-    from src.kernel.session_manager import db, db_lock
-    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_cd
-    _mg2 = _mgmt_lib_cd()
-    if _mg2 is not None:
-        _hit = _mg2.fetch_one("unified_user_mapping", ["feishu_open_id"], f"{_col}=%s AND feishu_open_id<>''", (gitcode_user,), "")
-        return _hit[0] if _hit and _hit[0] else ""
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(f"SELECT feishu_open_id FROM unified_user_mapping WHERE {_col}=? "
-                      "AND feishu_open_id!='' LIMIT 1", (gitcode_user,))
-            row = c.fetchone()
-            return row[0] if row else ""
-        except Exception:
-            return ""
+    from src.domains.mgmt import public as _mgmt_public_col
+    return _mgmt_public_col.feishu_open_id_by_platform_column(_col, gitcode_user)
 
 
 def reverse_lookup_by_open_id(open_id: str) -> dict:
@@ -154,27 +120,8 @@ def reverse_lookup_by_open_id(open_id: str) -> dict:
     out = {"user_id": None, "gitcode_user": None, "feishu_name": "", "gitcode_nickname": ""}
     if not open_id:
         return out
-    from src.kernel.session_manager import db, db_lock
-    from src.kernel.domain_read import mgmt_lib as _mgmt_lib_rev
-    _mg3 = _mgmt_lib_rev()
-    if _mg3 is not None:
-        _row = _mg3.fetch_one("unified_user_mapping", ["user_id", "gitcode_user", "feishu_name", "gitcode_nickname"], "feishu_open_id=%s", (open_id,))
-        if _row:
-            out["user_id"], out["gitcode_user"] = _row[0], _row[1]
-            out["feishu_name"] = _row[2] or ""
-            out["gitcode_nickname"] = _row[3] or ""
-        return out
-    with db_lock:
-        c = db.cursor()
-        from src.kernel.domain_read import mgmt_lib as _mg_umrow
-        _umrow = _mg_umrow(foreign_only=True)
-        if _umrow is not None:
-            row = _umrow.read_one("um_row_by_feishu_open_id", (open_id,))
-        else:
-            c.execute(
-                "SELECT user_id, gitcode_user, feishu_name, gitcode_nickname "
-                "FROM unified_user_mapping WHERE feishu_open_id=? LIMIT 1", (open_id,))
-            row = c.fetchone()
+    from src.domains.mgmt import public as _mgmt_public_rev
+    row = _mgmt_public_rev.user_mapping_row_by_open_id(open_id)
     if row:
         out["user_id"] = row[0]
         out["gitcode_user"] = row[1]
@@ -203,12 +150,8 @@ def clear_for_app(old_app_id: str) -> None:
             return
         except Exception as _e_ca:
             log.warning(f"channel_directory.clear_for_app lib path failed, fallback: {_e_ca}")
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', "
-                  "updated_at=? WHERE app_id=?", (datetime.now().isoformat(), old_app_id))
-        db.commit()
+    from src.domains.mgmt import public as _mgmt_public_ca
+    _mgmt_public_ca.clear_feishu_by_app(old_app_id)
 
 
 def clear_for_user(user_id: str) -> None:
@@ -231,12 +174,8 @@ def clear_for_user(user_id: str) -> None:
             return
         except Exception as _e_cu:
             log.warning(f"channel_directory.clear_for_user lib path failed, fallback: {_e_cu}")
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', "
-                  "updated_at=? WHERE user_id=?", (datetime.now().isoformat(), user_id))
-        db.commit()
+    from src.domains.mgmt import public as _mgmt_public_cu
+    _mgmt_public_cu.clear_feishu_by_user(str(user_id))
 
 
 # ============================ gitcode_nickname 子域 ============================
@@ -267,10 +206,5 @@ def set_gitcode_nickname(user_id: str, nickname: str) -> None:
             return
         except Exception as _e_nk:
             log.warning(f"channel_directory.set_gitcode_nickname lib path failed, fallback: {_e_nk}")
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        c.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (user_id,))
-        c.execute("UPDATE unified_user_mapping SET gitcode_nickname=?, updated_at=datetime('now') "
-                  "WHERE user_id=?", (nickname or "", user_id))
-        db.commit()
+    from src.domains.mgmt import public as _mgmt_public_nk
+    _mgmt_public_nk.set_gitcode_nickname_any(str(user_id), nickname or "")
