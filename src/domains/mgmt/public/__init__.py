@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+from src.kernel.config import log
+
 from typing import Any
 
 from src.kernel import db_registry
@@ -529,7 +531,8 @@ def list_alert_user_ids(limit: int = 200) -> list[int]:
     for r in rows:
         try:
             out.append(int(r[0]))
-        except (TypeError, ValueError):
+        except Exception as _e:
+            log.debug(f"src/domains/mgmt/public/__init__.py best-effort skipped: {_e}")
             continue
     return sorted(set(out))
 

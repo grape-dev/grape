@@ -4189,13 +4189,11 @@ def _fn_add_agent_runtimes_role_tags() -> None:
 
 
 register_migration(
-    # 2026-11-13 撞号修复：库内 202611030001 早已被历史遗留的
-    # create-merge-gate-log-table（当年用 0001、后改号 202611100002 的正身）盖章，
-    # 与本次注册同号异名 → 启动打 ERROR 且该迁移被永久跳过。
-    # 存量库 role_tags 列已由 legacy 建表（db_setup.py 的 agent_runtimes DDL）带上，
-    # 但新库/生产库若无该列就会静默缺列，故 renumber 到独立号段重跑一次；
-    # fn 幂等（先查列存在才 ALTER），重跑无损。
-    version="202611160001",
+    # 2026-11-13 回滚一次性误改号：账本实测 202611030001 = issue658_role_tags、
+    # 202611100002 = create-merge-gate-log，并不存在"同号异名"；改号到 202611160001
+    # 反而与已盖章的 takeover-sessions-v1 相撞，且违反"已发布版本不得改名改号"。
+    # 恢复原号；fn 幂等（先查列存在才 ALTER），各环境重放无损。
+    version="202611030001",
     name="issue658_agent_runtimes_role_tags",
     kind="safe",
     fn=_fn_add_agent_runtimes_role_tags,

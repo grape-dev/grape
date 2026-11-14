@@ -6,6 +6,7 @@
 - 写函数接受 idempotency_key（最终一致 + 补偿，非强事务）
 """
 from __future__ import annotations
+from src.kernel.config import log
 
 import json
 from typing import Any
@@ -586,7 +587,8 @@ def stamp_task_traces(pairs: list[tuple]) -> int:
                 c.execute("UPDATE agent_tasks SET trace_id=%s, pipeline_trace_id=%s WHERE id=%s",
                           (tid_trace, ptrace, str(tid)))
                 done += int(c.rowcount or 0)
-            except Exception:  # noqa: BLE001
+            except Exception as _e:
+                log.debug(f"src/domains/runtime/public/__init__.py best-effort skipped: {_e}")
                 continue
     return done
 
@@ -869,8 +871,8 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
     with db_registry.transaction("runtime") as c:
         try:
             c.execute("SET SESSION innodb_lock_wait_timeout=5")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as _e:
+            log.debug(f"src/domains/runtime/public/__init__.py best-effort skipped: {_e}")
         for a in agents or []:
             name = (a.get("name") or "").strip().lower()
             if not name:
@@ -1072,8 +1074,8 @@ def reassign_repo_org_id(repo_key: str, org_id: str) -> dict[str, int]:
                 try:
                     import logging
                     logging.getLogger(__name__).warning(log_msg)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as _e:
+                    log.debug(f"src/domains/runtime/public/__init__.py best-effort skipped: {_e}")
     return out
 
 

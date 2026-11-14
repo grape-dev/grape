@@ -7,6 +7,8 @@ Issue #699 Phase 4 四进程拆分：本进程把 main.py 的「用户面」职�
 
 import sys, os
 
+from src.kernel.config import log
+
 # Issue #455：主服务要求 Python >= 3.10。防御直接 `uvicorn src.api.grape_server:app` 的启动方式。
 from src.api.version_check import ensure_python_version
 
@@ -61,8 +63,8 @@ def _startup_security_check():
             with open(email_json_path, encoding="utf-8") as _f:
                 _email_cfg = _json.load(_f)
             _has_email_json = bool(_email_cfg.get("smtp", {}).get("host") or _email_cfg.get("resend", {}).get("api_key"))
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     if not _has_email_env and not _has_email_json:
         errors.append("生产环境必须配置邮件服务（环境变量 SMTP_HOST/RESEND_API_KEY 或 configs/email.json）")
 
@@ -143,8 +145,8 @@ async def lifespan(app: FastAPI):
         try:
             import psutil as _ps_init
             _ps_init.cpu_percent(interval=None)
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
 
         # 启动引擎健康探测线程（每 10 分钟，observability——A 职责）
         try:
@@ -387,13 +389,13 @@ async def lifespan(app: FastAPI):
             log.warning(f"IM outbox consumer stop failed: {_e}")
         try:
             app.state.outbox_consumer = None
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     try:
         from src.domains.runtime.im.notify import set_running_app
         set_running_app(None)
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     if im_engine is not None:
         try:
             await im_engine.stop()
@@ -401,21 +403,21 @@ async def lifespan(app: FastAPI):
             log.warning(f"IM engine stop failed: {_e}")
         try:
             app.state.im_engine = None
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     if _knowledge_write_task:
         _knowledge_write_task.cancel()
         try:
             await asyncio.wait_for(_knowledge_write_task, timeout=5)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+        except Exception as _e:
+            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     for _t in (_obs_alert_loop_task, _obs_rollup_task, _obs_sample_task):
         if _t:
             _t.cancel()
             try:
                 await asyncio.wait_for(_t, timeout=5)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
+            except Exception as _e:
+                log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     # knowledge_migrate：shutdown 时等待完成（不 cancel，迁移中断不如跑完）
     _migrate_task = getattr(app.state, "knowledge_migrate_task", None)
     if _migrate_task and not _migrate_task.done():
@@ -423,19 +425,19 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(_migrate_task, timeout=10)
         except asyncio.TimeoutError:
             log.warning("knowledge_migrate shutdown wait timeout, task continues in background")
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     # 官方技能 OBS 同步 / 反馈 reconcile：优雅关闭
     try:
         from src.domains.runtime.storage.skill_sync import stop_skill_sync_scheduler
         await stop_skill_sync_scheduler()
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     try:
         from src.api.feedback_issue_converter import stop_feedback_reconcile_scheduler
         await stop_feedback_reconcile_scheduler()
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     # GSB 注销 + 定时任务收口（原先被误放在第一次 yield 之后，现归还 shutdown 段）
     if _gsb is not None:
         try:
@@ -678,8 +680,8 @@ if metrics_enabled():
 try:
     from src.domains.insight.observability.otel import instrument_fastapi
     instrument_fastapi(app, "grape-server-a")
-except Exception:
-    pass
+except Exception as _e:
+    log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
 
 install_request_middleware(app)
 

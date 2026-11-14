@@ -253,16 +253,16 @@ def resolve_engine():
         eng = getattr(_gs, "im_engine", None)
         if eng is not None:
             return eng
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"src/domains/runtime/im/notify.py best-effort skipped: {_e}")
     try:
         app = _running_asgi_app
         if app is not None:
             eng = getattr(getattr(app, "state", None), "im_engine", None)
             if eng is not None:
                 return eng
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"src/domains/runtime/im/notify.py best-effort skipped: {_e}")
     global _ENGINE_WARNED
     if not _ENGINE_WARNED:
         _ENGINE_WARNED = True
@@ -330,8 +330,8 @@ def _render(channel, channel_type: str, card, text_card=None) -> tuple[Any, bool
     caps = Capability.TEXT
     try:
         caps = channel.capabilities()
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"src/domains/runtime/im/notify.py best-effort skipped: {_e}")
     if (caps & Capability.RICH_CARD):
         try:
             from src.domains.runtime.im.engine_wiring import _card_renderer_for
@@ -505,8 +505,8 @@ async def _handle_target(target: dict, *, uid: int, kind: str, text: str,
         if OB is not None and track:
             try:
                 await asyncio.to_thread(OB.release_sending, track)
-            except Exception:
-                pass
+            except Exception as _e:
+                log.debug(f"src/domains/runtime/im/notify.py best-effort skipped: {_e}")
         return
     if degraded:
         _bump("degraded_text")

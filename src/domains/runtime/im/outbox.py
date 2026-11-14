@@ -657,8 +657,8 @@ class OutboxConsumer:
                 log.warning("[outbox] consumer round failed: %s", e)
             try:
                 await asyncio.wait_for(self._stopped.wait(), timeout=self._poll_interval)
-            except asyncio.TimeoutError:
-                pass
+            except Exception as _e:
+                log.debug(f"src/domains/runtime/im/outbox.py best-effort skipped: {_e}")
         log.info("[outbox] consumer stopped")
 
     async def run_once(self) -> int:
@@ -732,8 +732,8 @@ class OutboxConsumer:
                     await asyncio.to_thread(
                         _register_numbered_reply, m["chat_id"], m["conv"],
                         m["repo_key"], m["issue_number"])
-            except Exception:
-                pass
+            except Exception as _e:
+                log.debug(f"src/domains/runtime/im/outbox.py best-effort skipped: {_e}")
         return len(rows)
 
     async def stop(self) -> None:
@@ -742,8 +742,8 @@ class OutboxConsumer:
             self._task.cancel()
             try:
                 await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
+            except Exception as _e:
+                log.debug(f"src/domains/runtime/im/outbox.py best-effort skipped: {_e}")
         self._task = None
 
     def spawn(self) -> asyncio.Task:

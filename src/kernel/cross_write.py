@@ -258,26 +258,3 @@ def stats() -> dict[str, int]:
         return {r[0]: r[1] for r in c.fetchall()}
     finally:
         c.close()
-
-
-if __name__ == "__main__":  # pragma: no cover - 运维入口
-    import sys
-
-    from src.domains.runtime import public as _rt
-
-    _handlers = {
-        "engine_cap_upsert": lambda p: _rt.upsert_engine_capability(
-            p["rid"], p["tag"], priority=p.get("priority", 50)),
-        "engine_cap_update": lambda p: _rt.update_engine_capability(
-            p["rid"], p["tag"], p.get("priority", 50), p.get("enabled", 1)),
-        "engine_cap_delete": lambda p: _rt.delete_engine_capability(p["rid"], p.get("tag")),
-        "engine_cap_delete_all": lambda p: _rt.delete_engine_capability(p["rid"]),
-    }
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "drain"
-    if cmd == "stats":
-        print(stats())
-    elif cmd == "drain":
-        print(drain(_handlers))
-    else:
-        print("usage: python -m src.kernel.cross_write [drain|stats]")
-

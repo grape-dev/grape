@@ -15,6 +15,7 @@
     GRAPE_DOMAIN_LIB=1 启用 lib 模式的跨域连接（默认 0，保持"仅本域"行为）
 """
 from __future__ import annotations
+from src.kernel.config import log
 
 import os
 import threading
@@ -239,15 +240,15 @@ def transaction(domain: str):
         except Exception:
             try:
                 conn.rollback()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as _e:
+                log.debug(f"src/kernel/db_registry.py best-effort skipped: {_e}")
             raise
         finally:
             for _x in (c, conn):
                 try:
                     _x.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as _e:
+                    log.debug(f"src/kernel/db_registry.py best-effort skipped: {_e}")
         return
 
     if domain == current_domain():
@@ -261,14 +262,14 @@ def transaction(domain: str):
         except Exception:
             try:
                 conn.rollback()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as _e:
+                log.debug(f"src/kernel/db_registry.py best-effort skipped: {_e}")
             raise
         finally:
             try:
                 c.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as _e:
+                log.debug(f"src/kernel/db_registry.py best-effort skipped: {_e}")
         return
 
     raise RuntimeError(
@@ -289,8 +290,8 @@ def cursor(domain: str):
     finally:
         try:
             c.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as _e:
+            log.debug(f"src/kernel/db_registry.py best-effort skipped: {_e}")
 
 
 def health() -> dict:
@@ -319,7 +320,7 @@ def reset(close: bool = True) -> None:
             if not k.startswith("lock:") and close:
                 try:
                     v.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as _e:
+                    log.debug(f"src/kernel/db_registry.py best-effort skipped: {_e}")
         _conns.clear()
         _forbidden.clear()
