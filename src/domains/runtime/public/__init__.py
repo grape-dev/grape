@@ -2306,6 +2306,32 @@ _ANY_QUERIES: dict[str, str] = {
     "issue_stage_by_repo_number": (
         "SELECT stage FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1"),
     "task_event_seq": "SELECT event_seq FROM agent_tasks WHERE id=? LIMIT 1",
+    # Issue #2327：dispatch_stalled 巡检候选（谓词/列序照抄原 api 侧 SQL，
+    # 三库拓扑下由 _any_cursor 路由到 runtime 域；查询已按状态/语义收窄、
+    # 不再用 LIMIT 截断，避免 7 天窗内早于上限的卡死事件被漏扫）。
+    # 形态一：running + runtime 空 + 无任何 agent_tasks 行（真「没派出去」；
+    # 有任务行的广播池排队属正常容量等待，不报）。
+    "patrol_a2a_unclaimed_rows": (
+        "SELECT e.seq, e.repo_key, e.issue_id, e.agent_type, e.status, e.runtime, "
+        "e.result, e.payload, e.created_at, e.started_at, e.completed_at "
+        "FROM events e LEFT JOIN agent_tasks t ON t.event_seq = e.seq "
+        "WHERE e.event_type='a2a_event' AND e.status='running' "
+        "AND (e.runtime IS NULL OR e.runtime='') AND t.id IS NULL "
+        "ORDER BY e.seq DESC"),
+    # 形态二/三：failed 且失败语义=派发失败/排队超时（结果文本已含
+    # _fail_event 写入的 [code]；LIKE 预筛只用于减少跨库取数，最终归类仍在 patrol）。
+    "patrol_a2a_failed_dispatch_rows": (
+        "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result, "
+        "payload, created_at, started_at, completed_at FROM events "
+        "WHERE event_type='a2a_event' AND status='failed' AND ("
+        "result LIKE '%[dispatch_failed]%' OR result LIKE '%[a2a_dispatch_failed]%' "
+        "OR result LIKE '%[a2a_dispatch_exception]%' "
+        "OR result LIKE '%[a2a_queue_dispatch_failed]%' "
+        "OR result LIKE '%[a2a_queue_dispatch_exception]%' "
+        "OR result LIKE '%排队超时%' OR result LIKE '%队列超时%' "
+        "OR result LIKE '%未被认领%' OR result LIKE '%queue_timeout%' "
+        "OR result LIKE '%unclaimed%') "
+        "ORDER BY seq DESC"),
     # 补偿终检读原任务终态（api/patrol_compensate.py RecheckHandler）：列序与原查询逐字一致
     "task_recheck_row": (
         "SELECT completed_at, agent_type, result_text FROM agent_tasks WHERE id=?"),
@@ -2727,6 +2753,18 @@ def read_all_any(name: str, params: tuple = ()) -> list[Any]:
     with _any_cursor() as c:
         c.execute(_any_sql(name), params)
         return list(c.fetchall() or [])
+
+
+def patrol_dispatch_stall_threshold_seconds() -> int:
+    """派发静默窗默认值的单一来源（Issue #2327）。
+
+    复用平台既有 queued 老化窗 `engine/service._STALE_QUEUED_THRESHOLD`
+    （env `HEALTH_STALE_QUEUED_THRESHOLD`，默认 120s，Issue #134）——
+    该常量已定义「queued 任务超龄即视为卡住」的项目口径，巡检的
+    dispatch_stalled 静默窗与它同语义，故不再另立魔数。
+    """
+    from src.domains.runtime.engine.service import _STALE_QUEUED_THRESHOLD
+    return int(_STALE_QUEUED_THRESHOLD)
 
 
 def exec_any(name: str, params: tuple = ()) -> int:

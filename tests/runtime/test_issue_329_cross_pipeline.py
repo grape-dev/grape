@@ -301,3 +301,86 @@ def test_i18n_cross_pipeline_entries():
     en_pipe = json.load(open(os.path.join(ROOT, "src/api/frontend/shell/locales/en/pipeline.json"), encoding="utf-8"))
     assert "cross_scene_handoff" in zh_pipe
     assert "cross_scene_handoff" in en_pipe
+
+
+# === Issue #2327: handoff 建事件复用 run_a2a_dispatch（引擎选择/入队）===
+def _latest_a2a_event(repo_key, issue_number):
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT seq, status, runtime, result, payload FROM events "
+            "WHERE repo_key=? AND issue_id=? AND event_type='a2a_event' "
+            "ORDER BY seq DESC LIMIT 1",
+            (repo_key, f"#{issue_number}"))
+        return c.fetchone()
+
+
+def test_issue_2327_handoff_dispatches_through_run_a2a_dispatch(monkeypatch):
+    """handoff 必须走统一派发入口，事件由认领方回写 runtime（不再直置 running 且 runtime 空）。"""
+    import src.domains.runtime.routes.webhook as webhook_mod
+
+    _set_issue(REPO, 108, "source")
+    _set_scene(REPO, "target-scene", [{"id": "vod", "skill": "vod-skill"}])
+    calls = []
+
+    def _fake_dispatch(repo_key, seq, agent_name, evt, **kwargs):
+        calls.append({"seq": seq, "agent": agent_name, "evt": evt, **kwargs})
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE events SET runtime=? WHERE seq=?", ("engine-108", seq))
+            db.commit()
+        return {"status": "ok", "seq": seq, "agent": agent_name}
+
+    monkeypatch.setattr(webhook_mod, "run_a2a_dispatch", _fake_dispatch)
+    result = _cross_pipeline_handoff(
+        REPO, "108", "target-scene", "vod",
+        {"source_issue_number": 108}, "", None, "issue-2327 context",
+        "org/test-329", "org/test-329", source_seq=99,
+    )
+    assert result["ok"] is True
+    assert result["response"]["status"] == "ok"
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["seq"] == result["response"]["seq"]
+    assert call["agent"] == "vod"
+    assert call["skill_name"] == "vod-skill"
+    assert call["issue_number"] == "108"
+    assert call["repository"] == "org/test-329"
+    assert call["ref_seq"] == 99
+
+    row = _latest_a2a_event(REPO, 108)
+    assert row is not None
+    assert row[1] == "running"
+    assert row[2] == "engine-108", "认领方回写 runtime 后事件不得为空"
+
+
+def test_issue_2327_handoff_dispatch_failure_is_bounded_and_visible(monkeypatch):
+    """派发始终失败 → 有界重派后标 dispatch_failed 并落 failed 终态（不留 running 僵尸）。"""
+    import src.domains.runtime.routes.webhook as webhook_mod
+
+    _set_issue(REPO, 109, "source")
+    _set_scene(REPO, "target-scene", [{"id": "vod", "skill": "vod-skill"}])
+    monkeypatch.setenv("GRAPE_A2A_HANDOFF_RETRY_LIMIT", "1")
+    calls = []
+
+    def _fail_dispatch(repo_key, seq, agent_name, evt, **kwargs):
+        calls.append(seq)
+        return {"status": "failed", "seq": 0, "error": "no available engine"}
+
+    monkeypatch.setattr(webhook_mod, "run_a2a_dispatch", _fail_dispatch)
+    result = _cross_pipeline_handoff(
+        REPO, "109", "target-scene", "vod",
+        {}, "", None, "fail context", "org/test-329", "org/test-329",
+    )
+    assert result["ok"] is True
+    assert result["response"]["status"] == "failed"
+    assert result["response"]["error"] == "dispatch_failed"
+    assert result["response"]["dispatch_attempts"] == 2
+    assert len(calls) == 2, "有界重派：默认 1 次重试 + 首次派发"
+
+    row = _latest_a2a_event(REPO, 109)
+    assert row is not None
+    assert row[1] == "failed", "派发失败不得留下 running 僵尸事件"
+    assert "[dispatch_failed]" in (row[3] or "")
+    payload = json.loads(row[4] or "{}")
+    assert payload.get("_fail_diag", {}).get("code") == "dispatch_failed"

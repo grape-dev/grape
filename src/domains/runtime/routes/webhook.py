@@ -1017,6 +1017,73 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
     return effective_scene_id
 
 
+def _handoff_dispatch_retry_limit() -> int:
+    """Issue #2327：跨流水线派发失败的重派次数（env 可调，默认 2）。
+
+    默认 2 = 总尝试 3 次，与任务级自愈上限对齐：agent_tasks.attempts 的重跑
+    上限为 3（docs/weekly-08/model-stream-retry-design.md；transient_retry.py
+    「复用 agent_tasks.attempts 列计数，上限默认 3」）。派发层不另立更大的
+    次数，避免「派发 3 次 × 任务重试 3 次」叠成 9 次执行风暴。
+    """
+    try:
+        return max(0, int(os.environ.get("GRAPE_A2A_HANDOFF_RETRY_LIMIT", "2")))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _dispatch_handoff_a2a(repo_key: str, seq: int, target_node: str, evt: dict,
+                          issue_number, repository: str, ref_seq: int = 0,
+                          skill_name: str = "", skill_id: int = 0,
+                          skill_path: str = "", backend: str = "") -> dict:
+    """Issue #2327：handoff 建事件后统一走正常 A2A 派发实现（引擎选择 + 入队）。
+
+    不再自行构造 `agent/handoff` 事件手搓 payload（原实现绕过 `run_a2a_dispatch`，
+    `get_running_loop()` 缺席时事件写库却无人调度）。这里传的 runtime_id=0 是
+    auto-select 语义，与正常 /api/a2a 派发同款——由引擎选择决定定向/广播，不是
+    自行广播。
+
+    重派覆盖面（评审 O6）：plugin/event-driven 分支 `run_a2a_dispatch` 立即返回
+    ok（异步 listener 尚未执行），失败由 listener 自行 `_fail_event`
+    （code=a2a_dispatch_failed），不进入本循环；本循环只兜底 legacy/direct 的
+    同步失败路径。两类失败最终都由 patrol dispatch_stalled 巡检可见。
+    """
+    from src.domains.runtime.pipeline.event_pipeline import _fail_event
+
+    attempts = 1 + _handoff_dispatch_retry_limit()
+    last_err = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            result = run_a2a_dispatch(
+                repo_key, seq, target_node, evt,
+                skill_name=skill_name, skill_id=skill_id, skill_path=skill_path,
+                runtime_id=0, backend=backend,
+                issue_number=str(issue_number or ""),
+                repository=repository, ref_seq=int(ref_seq or 0),
+            )
+        except Exception as _de:
+            result = {"status": "failed", "seq": 0, "error": str(_de)}
+        if isinstance(result, dict) and result.get("status") != "failed" and result.get("seq"):
+            if attempt > 1:
+                log.info(f"A2A #2327: handoff dispatch succeeded on attempt {attempt} seq={seq}")
+            return {"status": "ok", "attempts": attempt, "dispatch": result}
+        last_err = (result or {}).get("error") if isinstance(result, dict) else ""
+        last_err = last_err or "dispatch returned no task"
+        log.warning(f"A2A #2327: handoff dispatch failed attempt {attempt}/{attempts} seq={seq}: {str(last_err)[:200]}")
+    _fail_event(
+        seq,
+        f"跨流水线 A2A 派发失败（target={target_node}，已重试 {attempts - 1} 次）: {str(last_err)[:200]}",
+        diag={
+            "code": "dispatch_failed",
+            "target_node": target_node,
+            "phase": "cross_pipeline_handoff",
+            "attempts": attempts,
+            "ref_seq": int(ref_seq or 0),
+        },
+    )
+    return {"status": "failed", "attempts": attempts, "error": "dispatch_failed",
+            "reason": str(last_err)[:200]}
+
+
 def _cross_pipeline_handoff(
     repo_key: str, issue_number: str, target_scene_id: str, target_node: str,
     carried_context: dict, target_assignee: str, engine_config, context: str,
@@ -1309,63 +1376,54 @@ def _cross_pipeline_handoff(
             scene_id=target_scene_id,
         )
         log.info(f"A2A #329: cross-pipeline a2a_event created seq={seq}")
-        # Trigger pipeline execution for the new event (same as normal A2A path)
-        try:
-            from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
-            import asyncio as _aio
-            handoff_event = GrapeEvent(
-                domain=EventDomain.AGENT,
-                type="agent/handoff",
-                repo_key=repo_key,
-                issue_id=f"#{issue_number}",
-                agent_type=target_node,
-                seq=seq,
-                payload={
-                    "target_agent": target_node,
-                    "node_id": target_node,
-                    "scene_id": target_scene_id,
-                    "runtime_id": 0,
-                    "evt": {
-                        "type": "a2a_event",
-                        "repository": repository,
-                        "source": "a2a",
-                        "actor": account,
-                        "account": account,
-                        "issue_id": str(issue_number) if issue_number else "",
-                        "_a2a_context": _handoff_context,
-                        "payload": {
-                            "repository": repository,
-                            "account": account,
-                            "issue_number": issue_number,
-                            "pr_number": None,
-                            "context": _handoff_context,
-                            "handoff_baseline_note": _baseline_note_1753,
-                            "carried_context": carried_context or {},
-                            "engine_config": engine_config,
-                            "target_scene_id": target_scene_id,
-                        },
-                    },
-                },
-            )
-            _bus = get_event_bus()
-            if not _bus.has_listeners("agent/handoff"):
-                _bus.on_sync("agent/handoff", _on_handoff_dispatch)
-            # 必须用 get_running_loop：get_event_loop() 在没有运行中 loop 的上下文里会返回
-            # （或新建）一个未被 run 的 loop，create_task 出来的 task 永远不会被调度 ——
-            # 于是事件写进了库（status=running）却没有任何 agent_tasks，前端显示
-            # 「未派发/无执行引擎」、日志空白。实测 2026-11-15 seq=9755 即此症状。
-            _loop = _aio.get_running_loop()
-            _loop.create_task(_bus.emit(handoff_event))
-            log.info(f"A2A #329: cross-pipeline event bus dispatch seq={seq}")
-        except Exception as _de2:
-            log.warning(f"A2A #329: event bus dispatch failed, falling back to direct: {_de2}")
-            try:
-                import json as _pj
-                _raw = _pj.dumps({"action": "a2a_event", "seq": seq, "repository": repository, "issue_number": issue_number}).encode()
-                run_pipeline(_raw, {"x-grape-token": "internal"})
-                log.info(f"A2A #329: cross-pipeline direct run_pipeline seq={seq}")
-            except Exception as _de3:
-                log.warning(f"A2A #329: direct run_pipeline also failed: {_de3}")
+        if not seq:
+            log.error(f"A2A #2327: cross-pipeline event store failed for issue=#{issue_number}")
+            return {"ok": False, "error": "event_store_failed"}
+        # Issue #2327：与普通 A2A 派发收敛到同一实现（run_a2a_dispatch 内做引擎
+        # 选择 + 入队/认领回写 runtime），不再自建 agent/handoff 且硬编码 runtime_id=0。
+        _handoff_skill = ""
+        for _n in target_nodes:
+            if (_n.get("id") or _n.get("tag")) == target_node:
+                _handoff_skill = _n.get("skill") or ""
+                break
+        _handoff_evt = {
+            "type": "a2a_event",
+            "repository": repository,
+            "source": "a2a",
+            "actor": account,
+            "account": account,
+            "issue_id": str(issue_number) if issue_number else "",
+            "_a2a_context": _handoff_context,
+            "payload": {
+                "repository": repository,
+                "account": account,
+                "issue_number": issue_number,
+                "pr_number": None,
+                "context": _handoff_context,
+                "handoff_baseline_note": _baseline_note_1753,
+                "carried_context": _cc,
+                "engine_config": engine_config,
+                "target_scene_id": target_scene_id,
+                "source_seq": int(source_seq or 0),
+                "ref_seq": int(source_seq or 0),
+            },
+        }
+        _dispatch_res = _dispatch_handoff_a2a(
+            repo_key, seq, target_node, _handoff_evt,
+            issue_number=issue_number, repository=repository,
+            ref_seq=int(source_seq or 0), skill_name=_handoff_skill,
+        )
+        if _dispatch_res.get("status") != "ok":
+            # 失败已由 _dispatch_handoff_a2a 落 dispatch_failed 终态（可见、非僵尸），
+            # 仍按 A2A 契约回显 seq 供调用方定位。
+            return {"ok": True, "response": {
+                "status": "failed", "seq": seq, "agent": target_node,
+                "scene": target_scene_id, "cross_pipeline": True,
+                "handoff_result": HANDOFF_RESULT_FAILED,
+                "source_seq": int(source_seq or 0),
+                "error": _dispatch_res.get("error") or "dispatch_failed",
+                "dispatch_attempts": _dispatch_res.get("attempts", 1),
+            }}
         # Issue #2050：成功路径也是 A2A 响应，按契约回显 handoff_result / source_seq。
         return {"ok": True, "response": {
             "status": "ok", "seq": seq, "agent": target_node, "scene": target_scene_id,
@@ -1836,6 +1894,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 source_seq=_source_seq,
             )
             if _redirect.get("ok"):
+                # Issue #2327 评审 O7：ok=True 只表示「redirect 分支已处理」，不代表派发成功——
+                # 成功与否看 response.status / handoff_result（失败时仍是 ok=True + 真实 seq 回显）。
                 log.info(f"A2A #329: cross-pipeline handoff redirected to scene={target_scene_id} node={target_node or 'vod'}")
                 return _redirect["response"]
             if _redirect.get("error"):

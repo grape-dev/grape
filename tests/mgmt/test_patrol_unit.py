@@ -2533,3 +2533,96 @@ def test_s53_4_missing_finding_returns_early():
     import asyncio
     with patch.object(pc, "_load_finding", lambda fid: None):
         assert asyncio.run(pc.compensate_finding("f-404")) == "missing"
+
+
+# ====== Issue #2327：A2A 派发卡死巡检（两形态 + reason 可区分） ======
+
+def _stalled_event_row(seq, status, runtime="", result="", payload="{}", age_min=30,
+                       agent="coding", issue="#2327"):
+    return (seq, SENTINEL_REPO, issue, agent, status, runtime, result, payload,
+            _old(age_min), _old(age_min), _old(age_min))
+
+
+def _detect_dispatch_stalled(rows, cutoff=""):
+    """用假 read_all_any 驱动检测：形态一(无任务)/形态二(失败) 各取一路候选。
+
+    取数语义由 runtime 域具名查询承担（本用例只验 patrol 侧判定与时间窗），
+    所以这里按行状态分流，等价于两条 SQL 的谓词。
+    """
+    def _fake_read_all_any(name, params=()):
+        if name == "patrol_a2a_unclaimed_rows":
+            return [r for r in rows if r[4] == "running" and not str(r[5] or "").strip()]
+        if name == "patrol_a2a_failed_dispatch_rows":
+            return [r for r in rows if r[4] == "failed"]
+        return []
+
+    with patch.object(patrol_mod._rt_patrol, "read_all_any", _fake_read_all_any):
+        return patrol_mod.detect_dispatch_stalled(cutoff, set())
+
+
+def test_issue_2327_dispatch_stalled_silent_running_without_runtime():
+    findings = _detect_dispatch_stalled([
+        _stalled_event_row(101, "running", runtime="", age_min=30),
+        _stalled_event_row(102, "running", runtime="engine-ok", age_min=30),
+    ])
+    hits = [f for f in findings if f["event_seq"] == 101]
+    assert hits, "running + runtime 空超阈值 → 应报 dispatch_stalled"
+    detail = json.loads(hits[0]["detail"])
+    assert detail["reason"] == "no_runtime_unclaimed"
+    assert not [f for f in findings if f["event_seq"] == 102], "runtime 非空不报"
+
+
+def test_issue_2327_dispatch_stalled_queue_timeout_failed_distinguishable():
+    timeout_text = ("绑定的 1 台引擎（opencode）在 900s 内未被认领，任务停止派发，"
+                    "标签=coding（Issue #1487 排队超时）")
+    findings = _detect_dispatch_stalled([
+        _stalled_event_row(201, "failed", result=timeout_text, age_min=20),
+        _stalled_event_row(202, "failed", result="普通执行失败", age_min=20),
+        _stalled_event_row(203, "running", runtime="", age_min=30),
+    ])
+    by_seq = {f["event_seq"]: json.loads(f["detail"]) for f in findings}
+    assert by_seq[201]["reason"] == "queue_timeout_unclaimed"
+    assert by_seq[203]["reason"] == "no_runtime_unclaimed"
+    assert 201 in by_seq and 203 in by_seq
+    assert by_seq[201]["reason"] != by_seq[203]["reason"], "两形态 reason 必须可区分"
+    assert 202 not in by_seq, "普通失败不应被误报为排队超时"
+
+
+def test_issue_2327_dispatch_stalled_dispatch_failed_marker():
+    findings = _detect_dispatch_stalled([
+        _stalled_event_row(301, "failed", result="[dispatch_failed] 跨流水线派发失败",
+                           payload=json.dumps({"_fail_diag": {"code": "dispatch_failed"}})),
+    ])
+    assert findings
+    assert json.loads(findings[0]["detail"])["reason"] == "dispatch_failed"
+
+
+def test_issue_2327_dispatch_stalled_reads_through_runtime_domain_public():
+    """评审 F1：候选必须走 runtime 域具名查询（三库拓扑下 api 进程看不到 events 表）。"""
+    calls = []
+
+    def _fake_read_all_any(name, params=()):
+        calls.append(name)
+        return []
+
+    with patch.object(patrol_mod._rt_patrol, "read_all_any", _fake_read_all_any):
+        assert patrol_mod.detect_dispatch_stalled("", set()) == []
+    assert calls == ["patrol_a2a_unclaimed_rows", "patrol_a2a_failed_dispatch_rows"]
+
+
+def test_issue_2327_dispatch_stalled_lookback_and_audit_window():
+    """评审 O1/O3：时间窗在 Python 侧解析比较；audit 模式（cutoff 空）扫全历史。"""
+    row = _stalled_event_row(401, "running", runtime="", age_min=30 * 24 * 60)  # 30 天前
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    assert not _detect_dispatch_stalled([row], cutoff)         # 7 天窗外 → 跳过
+    assert _detect_dispatch_stalled([row], "")                 # audit 全历史 → 命中
+    # 阈值默认取平台 queued 老化窗（HEALTH_STALE_QUEUED_THRESHOLD，120s），不再自带 180s
+    assert patrol_mod.dispatch_stall_seconds() >= 30
+
+
+def test_issue_2327_dispatch_stalled_threshold_source():
+    """评审 F2：静默窗默认值有单一来源，且不低于 2×心跳下限。"""
+    import src.domains.runtime.public as rt_public
+    from src.domains.runtime.engine.service import _STALE_QUEUED_THRESHOLD
+    assert rt_public.patrol_dispatch_stall_threshold_seconds() == int(_STALE_QUEUED_THRESHOLD)
+    assert patrol_mod._DISPATCH_STALL_MIN_SECONDS == 2 * patrol_mod._ENGINE_HEARTBEAT_SECONDS
