@@ -4387,6 +4387,79 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/kernel/prompt_builder.py`（3 处）—— **两个都已标 ⛔ blocked**，实际下一批取
   `src/api/feedback_issue_converter.py`（2 处，`user_feedback` 归 mgmt）。
 
+### 7.35 insight 全局搜索的两张 runtime 表下沉 owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/insight/routes/search.py` **2 处 → 0**（单轮做完，2 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `events`（归 **runtime**）× 1：L26 `global_search` 的 event 分档
+    `SELECT seq, repo_key, event_type, title, status FROM events WHERE LOWER(title) LIKE ?
+     OR LOWER(event_type) LIKE ? OR LOWER(repo_key) LIKE ? ORDER BY seq DESC LIMIT 10`，
+    **无 JOIN、无动态表名/列名**，三参数同值（`%q%`）。
+  - `agent_type`（归 **runtime**）× 1：L51 `SELECT agent_type, display_name, icon FROM agent_type
+    WHERE LOWER(agent_type) LIKE ? OR LOWER(display_name) LIKE ?`（无 ORDER、无 LIMIT、不过滤 `enable`）。
+  - 两处都用 `src.kernel.session_manager` 的进程主库游标（`db.cursor()` + `db_lock`）直发。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增 `events_search_global` / `agent_type_search_global`（列序/谓词/ORDER/LIMIT
+    逐字照抄，`?` 方言）；
+  - 新增薄函数 `events_search_global(keyword)`（5 列原值）、`agent_types_search_global(keyword)`
+    （3 列原值）：`%…%` 由本域构造、关键词在本域 `lower()`，调用方只给关键词。
+  - 调用点只改 `src/domains/insight/routes/search.py`：SQL 与 `session_manager` 游标全部消失，
+    改为 `runtime_public.<薄函数>`；可见仓库过滤、字段映射、`title`/`display_name`/`icon` 兜底留在原处。
+- 设计取舍：
+  1) **不把仓库条件下推到 SQL**：原实现的顺序是「SQL `LIMIT 10` → Python 侧再按
+     `user_repo_keys` 过滤」。改写成 `WHERE repo_key IN (…)` 会让结果集变大（被过滤掉的行腾出名额），
+     属于权限口径变更；本批只在 owner 域换连接，**LIMIT 先于过滤**的顺序原样保留（烟测 C4 钉住：
+     12 条不可见的新行占满 10 个名额时，可见仓库的旧行不出现）。
+  2) **薄的只做取数**：`title or event_type`、`display_name or agent_type`、`icon or ""` 三处兜底
+     是展示口径，仍留在路由；原语只回元组原值（含 NULL），不做空值替换。
+  3) **`agent_type` 照抄「不过滤 `enable` / 不排序 / 不限行」**：搜索是「找得到」而非「可用清单」，
+     加 `enable=1` 或 `ORDER BY order_num` 都会改变结果集；烟测 B12/B13 用 `enable=0` 且
+     `order_num` 倒序的种子钉住。
+  4) **关键词不做 LIKE 转义**：原实现直接把 `q.lower()` 拼进 `%…%`，`_`/`%` 一直是通配符
+     （用户搜 `%` 等于通配）。本批不改这个口径（烟测 B9/B10），避免「顺手加 ESCAPE」把
+     既有搜索行为改窄。
+  5) **两处 `except Exception: pass` 改 `log.debug`**：语义不变（任一侧读失败仍降级为空列表、
+     不向路由上层抛），只是让降级可观测；`tests/silent_except_baseline.json` 该文件 2 → 0（只减不增）。
+  6) **`db_lock` 随游标一起撤掉**：`_any_cursor` 在单库回落路径内部已取 `db_lock`（RLock），
+     外层再套一层只是重复加锁；三库路径由 owner DSN 连接自身保证读写串行。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1) **三库拆分后「事件/智能体」搜索恒空且静默**：insight 进程库没有 `events` / `agent_type`
+     （视图 0）→ `1146` → 两条 `except Exception: pass` 吞成空列表：`/api/search?type=all`
+     只回仓库结果，且**没有任何日志**指向根因。改造后走 owner 原语（自有 DSN 打到 runtime、
+     单库回落进程库），两条拓扑同一份语句。
+  2) **降级不可观测**：把吞异常改成 `log.debug` 后，真出错时至少能按 `trace_id` 查到
+     「search: events lookup failed」而不是「搜索就是没结果」。
+- 验证（真实退出码）：
+  · `py_compile`（runtime `public/__init__.py` / insight `routes/search.py`）→ **COMPILE_OK**；
+  · `~/burndown/search_global_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，种子 35 事件 + 4 智能体）
+    → **ALL search_global smoke PASSED (45 checks)**：
+    A 注册面/静态否定（两条语句逐字、`?` 计数 3/2、无 `%s`/`NOW()`/`ON DUPLICATE`、薄函数体无内联 SQL、
+    `search.py` 已无 SQL 与 `session_manager`/`db_lock`、未登记名 `KeyError`）；
+    B 原语语义（大小写不敏感、title/event_type/repo_key 三字段各自命中、**seq 倒序 + LIMIT 10 硬边界**
+    （15 命中取 10、seq 114…105）、title NULL 行只经非 title 字段命中、空关键词 = `LIKE '%%'`、
+    `_`/`%` 仍是通配、agent_type 不过滤 `enable`/不排序/display_name+icon 原样回 None）；
+    C 调用点端到端（可见仓库过滤 + seq 倒序 + title 回落、不可见仓库被过滤、
+    **LIMIT 先于过滤**、display_name/icon 兜底、`type` 分档互不填充、仓库搜索大小写不敏感 + 角色、
+    任一侧抛异常被吞成空列表且另一侧不受影响）；
+    D 自有 DSN 伪游标（两处都 `domain=runtime`、语句逐字、参数 `(%push%)×3` / `(%beta agent%)×2`、无 `%s`）。
+    烟测首轮 5 条红均为**测试期望写错**（漏掉 `keyword=push` 也命中 seq1 的 `event_type='push'`、
+    不可见仓库种子的 seq 低于可见行），实现未改，仅修种子与断言。
+  · `--update-baseline` → **baseline updated: 27 pairs, 43 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **23 表 / 43 跨域引用 / 27 对**；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （runtime 175 funcs + 28 named queries used / 254 funcs + 61 registered；mgmt 182+6 / 264+31）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  轮内口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新原语契约），运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标与 LIMIT-before-filter 边界）。
+- **新基线**：**43 处 / 27 对 / 23 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 43 处 / 30 文件）。作业单头两名仍是 ⛔ blocked 的
+  `src/kernel/persistence/credential_usage_log.py`（3 处）与 `src/kernel/prompt_builder.py`（3 处），
+  实际下一批取 `src/api/feedback_issue_converter.py`（2 处，`user_feedback` 归 **mgmt**）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

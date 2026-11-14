@@ -1,7 +1,17 @@
-"""Search 路由：全局搜索"""
+"""Search 路由：全局搜索
+
+事件 / 智能体两类结果分别来自 runtime 域的 `events` / `agent_type` 表，
+统一走 runtime public 的原语（`events_search_global` / `agent_types_search_global`），
+本文件不再持有任何 SQL —— 三库拆分后进程主库没有这两张表，直发必 1146。
+"""
+import logging
+
 from fastapi import APIRouter, Depends, Query
 from src.api.deps import require_no_session_token
 from src.domains.mgmt.user import db as user_db
+from src.domains.runtime import public as runtime_public
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/search", tags=["search"])
 
@@ -18,21 +28,16 @@ def global_search(q: str = Query("", min_length=1),
     user_repo_keys = {r["repo_key"] for r in managed}
 
     if type in ("all", "event"):
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            try:
-                c.execute(
-                    "SELECT seq, repo_key, event_type, title, status FROM events WHERE LOWER(title) LIKE ? OR LOWER(event_type) LIKE ? OR LOWER(repo_key) LIKE ? ORDER BY seq DESC LIMIT 10",
-                    (f"%{q_lower}%", f"%{q_lower}%", f"%{q_lower}%")
-                )
-                results["events"] = [
-                    {"seq": r[0], "repo_key": r[1], "event_type": r[2], "title": r[3] or r[2], "status": r[4]}
-                    for r in c.fetchall()
-                    if r[1] in user_repo_keys  # 仅返回当前用户有权访问的仓库事件
-                ]
-            except Exception:
-                pass
+        try:
+            # 原语返回 seq 倒序前 10 行候选；可见仓库过滤仍留在本处：
+            # 原 SQL 的 LIMIT 10 先于过滤生效，下推到 SQL 会改变结果集。
+            results["events"] = [
+                {"seq": r[0], "repo_key": r[1], "event_type": r[2], "title": r[3] or r[2], "status": r[4]}
+                for r in runtime_public.events_search_global(q)
+                if r[1] in user_repo_keys  # 仅返回当前用户有权访问的仓库事件
+            ]
+        except Exception as e:
+            log.debug("search: events lookup failed: %s", e)
 
     if type in ("all", "repo"):
         for r in managed:
@@ -43,19 +48,12 @@ def global_search(q: str = Query("", min_length=1),
                 })
 
     if type in ("all", "agent"):
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            try:
-                c.execute(
-                    "SELECT agent_type, display_name, icon FROM agent_type WHERE LOWER(agent_type) LIKE ? OR LOWER(display_name) LIKE ?",
-                    (f"%{q_lower}%", f"%{q_lower}%")
-                )
-                for r in c.fetchall():
-                    results["agents"].append({
-                        "name": r[0], "display_name": r[1] or r[0], "icon": r[2] or "",
-                    })
-            except Exception:
-                pass
+        try:
+            for r in runtime_public.agent_types_search_global(q):
+                results["agents"].append({
+                    "name": r[0], "display_name": r[1] or r[0], "icon": r[2] or "",
+                })
+        except Exception as e:
+            log.debug("search: agent types lookup failed: %s", e)
 
     return results

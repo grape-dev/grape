@@ -2457,6 +2457,19 @@ _ANY_QUERIES: dict[str, str] = {
     "agent_task_activity_rows": (
         "SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks"
         " WHERE repo_key IS NOT NULL AND repo_key != ''"),
+    # ── 全局搜索（insight/routes/search.py 跨域收口）────────────────────────
+    # events / agent_type 归本域；原实现取 insight 路由文件里的进程主库游标直发 →
+    # 三库拆分后 1146，被两条 `except` 吞成空列表，搜索结果「事件/智能体」静默恒空。
+    # 列序/谓词逐字照抄；两条都**不按仓库过滤**、也不过滤 `enable`：
+    # 原 SQL 的 LIMIT 10 先于调用方 Python 侧的「可见仓库」过滤生效，把仓库条件
+    # 下推到 SQL 会改变结果集（多取被过滤掉的行），故过滤与权限判定仍留调用方。
+    "events_search_global": (
+        "SELECT seq, repo_key, event_type, title, status FROM events"
+        " WHERE LOWER(title) LIKE ? OR LOWER(event_type) LIKE ? OR LOWER(repo_key) LIKE ?"
+        " ORDER BY seq DESC LIMIT 10"),
+    "agent_type_search_global": (
+        "SELECT agent_type, display_name, icon FROM agent_type"
+        " WHERE LOWER(agent_type) LIKE ? OR LOWER(display_name) LIKE ?"),
 }
 
 
@@ -4494,6 +4507,28 @@ def events_search(repo_keys, agent_type: str, keyword: str = "", page: int = 1,
         c.execute(f"SELECT {_EVENT_SEARCH_COLS} FROM events WHERE {where_sql} "
                   "ORDER BY seq DESC LIMIT ? OFFSET ?", params + [int(page_size), offset])
         return total, [tuple(r) for r in (c.fetchall() or [])]
+
+
+def events_search_global(keyword: str) -> list[tuple]:
+    """全局事件搜索候选行（5 列：seq, repo_key, event_type, title, status）。
+
+    `keyword` 命中 title / event_type / repo_key（两侧 LOWER，`%…%` 在本域拼，
+    调用方不构造 SQL 片段）；seq 倒序取**前 10 行**。不按仓库过滤 —— 原调用点
+    在 Python 里再筛「用户可见仓库」，且 LIMIT 先于筛选生效，所以权限判定留在
+    调用方（口径与原实现一致，不把 LIMIT 语义改宽）。
+    """
+    kw = f"%{str(keyword or '').lower()}%"
+    return [tuple(r) for r in read_all_any("events_search_global", (kw, kw, kw))]
+
+
+def agent_types_search_global(keyword: str) -> list[tuple]:
+    """全局智能体类型搜索（3 列：agent_type, display_name, icon）。
+
+    `keyword` 命中 agent_type / display_name（两侧 LOWER，`%…%` 在本域拼）。
+    与原 SQL 同口径：不过滤 `enable`、不排序、不限行。
+    """
+    kw = f"%{str(keyword or '').lower()}%"
+    return [tuple(r) for r in read_all_any("agent_type_search_global", (kw, kw))]
 
 
 def vod_conversations_delete(agent_session_ids=None) -> int:
