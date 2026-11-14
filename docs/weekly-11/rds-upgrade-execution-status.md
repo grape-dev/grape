@@ -3830,6 +3830,74 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 - **新基线**：**60 处 / 34 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
   （作业单 60 处 / 38 文件，下一批首个可改造文件 `src/api/event_rule.py` 3 处）。
 
+### api/event_rule 事件动作过滤器读口归 mgmt public（-3，该文件清零）
+
+- 文件：`src/api/event_rule.py`（3 处 → **0**）；全局静态 **60 → 57**（-3），对数 **34 → 33** ——
+  `event_action_filter←api` 由 3 降到 0，**该对整对清零**。
+- 表分布（消费域 api，表归 **mgmt**），三处全在 `_load_from_db`，同表同函数，只有列集不同：
+  · 行 39 `SELECT event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, vcs_source FROM event_action_filter WHERE enabled=1 ORDER BY priority, id`（block_changes + vcs_source 都在）
+  · 行 43 同上，第 8 列换成常量 `''`（只有 block_changes）
+  · 行 47 同上，第 6/8 列换成常量 `''`（迁移期老库，两列都缺）
+  三处表名/列名全字面量、**无参数**（谓词只有 `enabled=1`）；「动态」只在**有没有这两列**，
+  原来靠 `PRAGMA table_info(event_action_filter)` 探列。
+- 本轮取批：作业单头两名 `src/kernel/prompt_builder.py` / `src/kernel/persistence/credential_usage_log.py`
+  仍 blocked（口径见作业单顶部 ⛔ 小节），跳过；取第一个未 blocked 文件 `src/api/event_rule.py`
+  （上一批台账末尾已点名）。
+- 归属域侧改动（SQL 只在 mgmt 域一份）：
+  · `_ANY_QUERIES` 新增 4 条具名查询：`event_action_filter_columns`（`SELECT * … LIMIT 0`，只取元数据）、
+    `event_action_filter_enabled`（全列）、`…_no_vcs`（第 8 列常量空串）、`…_legacy`（第 6/8 列常量空串）；
+    列序 / 谓词 / `ORDER BY priority, id` 与原三条 SELECT **逐字一致**（恒 8 列）。
+  · 新增薄函数 `event_action_filter_enabled_rows()`：`_any_cursor()` 内先发探列语句读 `c.description`，
+    再由列名白名单 `_EVENT_ACTION_FILTER_OPTIONAL_COLUMNS = ("block_changes", "vcs_source")`
+    选一条已登记语句（`_event_action_filter_query_name()`）；函数体内无内联 SQL。
+    函数名登记 `__all__` 并同步 `src/kernel/gsb/route_config.py` 的 `PUBLIC_PRIMITIVES["mgmt"]` 镜像。
+- 关键设计取舍：
+  1. **探列从 PRAGMA 改成 `LIMIT 0` + `description`**：`db_registry` 的薄兼容游标不翻译 PRAGMA
+     （只有 `mysql_compat.Cursor` 对进程主库特判），在 `_any_cursor` 上直发 PRAGMA 在 MySQL 必 1064
+     —— 这正是原实现三库拓扑下失效的第一跳。`description` 两条后端一致，且零行不读数据。
+  2. **列名只用来挑变体，绝不拼进 SQL**：三份语句文本固定在 `_ANY_QUERIES`，探测结果经白名单
+     比对后只决定「用哪一条」，调用方无从传表名/列名（与原 `check_lib_query_names` 口径一致）。
+  3. **三分支条件逐字照搬**：`has_block and has_vcs` → 全列；`has_block` → 忽略 vcs；否则两者都用常量。
+     其中「有 `vcs_source` 但缺 `block_changes` → 连 vcs 一起忽略」看着像缺陷，但它是原实现的真实口径，
+     改了会静默改变规则匹配维度，故保留并在烟测 B2 固定。
+  4. **`enabled=1` 保持严格等值**：不写成 `enabled!=0`（`2` 与 NULL 都不算启用），与原语句一致。
+  5. **拿掉调用方的 `db_lock` + `db.cursor()`**：`_any_cursor` 在单库回落路径自带锁（写路径自带 commit），
+     再嵌一层就是同线程二次加锁（生产 `RLock` 侥幸不炸，测试 monkeypatch 的裸 `Lock` 会自死锁；
+     交接文档 §5.3 坑 4 同族）。本模块现在不再 import 进程库句柄。
+  6. **解析循环原样保留**：JSON 容错（非 list → 单元素原文、坏 JSON → `[s]`）、`actor or "any"`、
+     `(vcs_source, event_type)` 键结构、TTL 缓存与 `force` 语义全部不动，只换数据来源。
+- **修的存量 bug（三库独立后 L1 准入过滤整体失效，且被外层 `except` 吞成静默降级）**：
+  api 进程库没有 `event_action_filter`（视图 0）→ `PRAGMA table_info` 先抛（无表 / MySQL 1064）→
+  `cols=[]` → 走「老库变体」SELECT → 1146 → 外层 `except` 记一条 `load failed` →
+  **返回空规则集**。`evaluate_event_action` 对任何 (event_type, action) 都得到 `no_rule`，
+  于是 `skip`（assignees/labels 变更过滤）与 `side_effect`（close_issue_tasks）**永不触发**：
+  webhook 事件全量进入 agent，L1 可配准入形同不存在。改造后单库与三库拓扑跑同一份 SQL，
+  只有真缺表（迁移未建）才降级。
+- 验证（真实退出码）：
+  · `py_compile` 三文件（`event_rule.py` / mgmt `public` / `gsb/route_config.py`）→ **COMPILE_OK**；
+  · `~/burndown/event_rule_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`）→
+    **ALL event_rule smoke PASSED (70 checks)**：A 注册面/静态否定（四条查询逐字对齐、无 `%s`/`NOW()`/
+    `ON DUPLICATE`/`PRAGMA`、薄函数体无内联 SQL、调用方无表名 SQL 与进程库直连、`__all__` + GSB 镜像
+    双登记、列集挑选 6 种（含大小写与空列集）、未登记查询名 `KeyError`）；B 单库行为（空表、
+    8 列定序、`ORDER BY priority,id`、`enabled=1` 严格等值、NULL 原样返回）；B2 三种列集变体
+    （缺 vcs / 两列都缺 / 有 vcs 缺 block）；C **自有 DSN 伪游标**（两条语句逐字、description 驱动
+    变体选择、无参数、8 列原样、驱动异常上抛）；D 判定链（allow / block / no_meaningful_change /
+    side_effect / action_disallowed / no_rule / no_action / 裸字符串与非 list JSON 容错 /
+    actor_mismatch / 平台专属规则集整体遮蔽通用集 / 通用回退 / PR 无 commit 短路）+ TTL 缓存内
+    改表名不查库 + 缺表 → 空规则集降级 + 恢复后强制刷新不粘空集。
+  · `--update-baseline` → **baseline updated: 33 pairs, 57 refs**；依赖看板 / 矩阵 / 作业单同步刷新；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R8 / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → **import OK**；
+  · 直覆盖 `tests/runtime/test_event_action_filter.py` + `tests/api/test_multi_vcs.py` → **53 passed**
+    （走真实 MySQL 单库回落路径，证明 TTL/缓存与判定链未变）。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排 —— 本 shell `SRC_PWD`/`REMOTE_PWD` 未注入，
+  且本批不改 schema / 迁移 / 契约面（无新表、无新端点，只新增一个读口）；运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标）+ 真库直覆盖用例。api 进程 1146 消失的现场证据留待彩排轮确认。
+- **新基线**：**57 处 / 33 对**（`--update-baseline` 已收紧）；作业单 57 处 / 37 文件，
+  下一批首个未 blocked 文件 `src/domains/runtime/routes/pipeline.py` 2 处（`unified_user_mapping` /
+  `managed_repos`，均归 mgmt，可复用现有 mgmt 读口）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

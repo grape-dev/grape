@@ -8,7 +8,6 @@ api_latency_log,insight,api,1
 audit_logs,mgmt,insight,1
 devops_pipeline_scene,mgmt,runtime,2
 distributed_locks,runtime,insight,1
-event_action_filter,mgmt,api,3
 events,runtime,api,3
 events,runtime,insight,2
 external_identities,mgmt,runtime,2

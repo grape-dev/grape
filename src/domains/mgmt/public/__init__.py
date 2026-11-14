@@ -761,6 +761,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "account_id_by_username_valid_any", "account_id_by_username_ci_any",
            # OAuth 身份原值（api/deps.py 取 token / 预刷新判定；任意拓扑）
            "oauth_token_status_any", "token_expires_at_any", "stored_access_token_any",
+           # 事件动作过滤器启用规则（api/event_rule.py 的 L1 准入判定；任意拓扑）
+           "event_action_filter_enabled_rows",
            "health"]
 
 
@@ -1975,6 +1977,23 @@ _ANY_QUERIES: dict[str, str] = {
     "login_whitelist_count": "SELECT COUNT(*) FROM login_whitelist",
     "login_whitelist_row_match": (
         "SELECT 1 FROM login_whitelist WHERE provider=? AND LOWER(username)=LOWER(?)"),
+    # ── 事件动作过滤器（api/event_rule 的 L1 准入判定）：列集三条变体 ──
+    # 列序与原 api 侧三条 SELECT 逐字一致（恒 8 列）；`block_changes` / `vcs_source` 是
+    # 迁移期补列（`_ensure_column`），缺列时用字面量 '' 占位 —— 与原来「列不存在就查常量
+    # 空串」同义，只是把三份 SQL 收在本域。探测列名只用 `LIMIT 0` 的元数据，不读数据。
+    "event_action_filter_columns": "SELECT * FROM event_action_filter LIMIT 0",
+    "event_action_filter_enabled": (
+        "SELECT event_type, action, allow, actor, require_changes, block_changes, "
+        "handle_side_effect, vcs_source FROM event_action_filter "
+        "WHERE enabled=1 ORDER BY priority, id"),
+    "event_action_filter_enabled_no_vcs": (
+        "SELECT event_type, action, allow, actor, require_changes, block_changes, "
+        "handle_side_effect, '' FROM event_action_filter "
+        "WHERE enabled=1 ORDER BY priority, id"),
+    "event_action_filter_enabled_legacy": (
+        "SELECT event_type, action, allow, actor, require_changes, '', "
+        "handle_side_effect, '' FROM event_action_filter "
+        "WHERE enabled=1 ORDER BY priority, id"),
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -3156,6 +3175,41 @@ def delete_event_action_filter_row(rule_id: int) -> int:
     with _any_cursor(write=True) as c:
         cur = c.execute("DELETE FROM event_action_filter WHERE id=?", (int(rule_id),))
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+#: 迁移期补列的列名白名单（探测到的列只用于在下面三条已登记语句里挑一条，绝不拼列名）。
+_EVENT_ACTION_FILTER_OPTIONAL_COLUMNS: tuple[str, str] = ("block_changes", "vcs_source")
+
+
+def _event_action_filter_query_name(columns) -> str:
+    """按探测到的列集挑已登记语句：与原 api 侧 if/elif/else 三分支同口径。
+
+    原实现的条件是 `has_block and has_vcs` → 全列；`has_block`（vcs 缺）→ 忽略 vcs；
+    else（block 缺，无论 vcs 在不在）→ 两者都用常量空串。这里逐条照搬，不「改良」。
+    """
+    present = {str(name).lower() for name in (columns or ())}
+    has_block = _EVENT_ACTION_FILTER_OPTIONAL_COLUMNS[0] in present
+    has_vcs = _EVENT_ACTION_FILTER_OPTIONAL_COLUMNS[1] in present
+    if has_block and has_vcs:
+        return "event_action_filter_enabled"
+    if has_block:
+        return "event_action_filter_enabled_no_vcs"
+    return "event_action_filter_enabled_legacy"
+
+
+def event_action_filter_enabled_rows() -> list[Any]:
+    """启用中的动作过滤器规则（8 列定序，按 priority, id 升序）。
+
+    返回列序 = (event_type, action, allow, actor, require_changes, block_changes,
+    handle_side_effect, vcs_source)，与改造前 api 侧三条 SELECT 逐字一致；缺列以空串
+    占位（迁移期老库）。**不过滤 status / 任意软删列**：原 SQL 只有 `enabled=1`，
+    `enabled=0` 的行照旧不出现、其余行照旧出现。查询失败直接上抛，由调用方降级。
+    """
+    with _any_cursor() as c:
+        c.execute(_ANY_QUERIES["event_action_filter_columns"])
+        columns = [d[0] for d in (c.description or [])]
+        c.execute(_ANY_QUERIES[_event_action_filter_query_name(columns)])
+        return list(c.fetchall() or [])
 
 
 # ---------- 平台身份 → 账号（runtime 侧读 mgmt 身份的替身；单库回落进程库） ----------

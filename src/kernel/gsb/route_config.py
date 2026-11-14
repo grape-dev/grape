@@ -76,6 +76,8 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "release_all_leases", "claim_inbound_dedup", "upsert_channel_installation",
         "upsert_chat_session_binding", "upsert_sender_identity",
         "add_event_action_filter", "update_event_action_filter", "delete_event_action_filter",
+        # 事件动作过滤器启用规则读口（api/event_rule.py L1 准入判定；任意拓扑）
+        "event_action_filter_enabled_rows",
         "add_user_feedback", "save_inbound_message", "upsert_outbound_card",
         "read_one", "read_all",
     ),
