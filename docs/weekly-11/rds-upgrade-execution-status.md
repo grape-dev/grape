@@ -2313,9 +2313,19 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   execute() 直发、不 import session_manager、无静默 except、只用 5 个已登记原语且
   均已导出）；
   `tests/mgmt/test_feedback_status_sync.py` **13 passed**（既有用例无回归）；
+  `pytest tests/arch tests/contracts tests/scripts tests/mgmt/test_feedback_status_sync.py`
+  **171 passed**（同会话混跑，见下条）；
   `rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 /
   看板最新）；`pytest tests/arch tests/contracts tests/scripts` **158 passed**；
   `make lint` **import OK**。
+- 配套修的测试隔离 bug（本批暴露）：`tests/contracts/test_issue_699_phase5_contracts.py`
+  的 `temp_db` fixture 在临时库上 `reload(session_manager)`，teardown 的第二次 reload
+  却仍在本 fixture 设的 `DEVOPS_DB_PATH` 下执行 → 该模块被永久绑在只有 5 张表的临时库。
+  旧代码因 `feedback_status` 导入期就抓住 `db` 而侥幸不炸；本批改走 owner 域原语后，
+  `_any_cursor` 懒解析当前 `session_manager` 才暴露：同会话跑
+  `tests/contracts + tests/mgmt` 时 5 条联动用例报 0 条更新（在 `69f0242ce` 干净
+  worktree 上对拍为 52 passed，确认是本批新增的顺序敏感性）。修法：teardown 先
+  `monkeypatch.undo()` 再 reload，恢复真实配置，不碰生产语义。
 - 新基线：全局 **138 → 133**（-5），对数 **50 不变**：`user_feedback←api` 6 → 2、
   `issue←api` 4 → 3（两表在 api 还有 5 处集中在其它的 api 文件，同模式、后续批次）。
   基线 `foreign-refs-allowlist.csv` 收紧为 133 / 50，依赖看板与作业单同步刷新

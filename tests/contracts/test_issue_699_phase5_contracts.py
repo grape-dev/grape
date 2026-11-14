@@ -309,7 +309,10 @@ def temp_db(tmp_path, monkeypatch):
 
     yield sm
 
-    # Cleanup
+    # Cleanup：先撤掉本 fixture 设的 env 再 reload —— 否则第二次 reload 仍读临时库路径，
+    # session_manager 会被永久绑在那个只有 5 张表的临时库上；同会话后续用例里凡是
+    # 懒解析 db 的 owner 域原语（_any_cursor 回落进程库）都会看到「no such table」。
+    monkeypatch.undo()
     importlib.reload(sm)
 
 
