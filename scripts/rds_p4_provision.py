@@ -86,7 +86,7 @@ def counts(conn, db: str, tables: list[str]) -> dict[str, int]:
 
 
 def dump_load(src_host: str, src_user: str, src_pwd: str, src_db: str, tgt: Target,
-              tgt_db: str, app_user: str, pwd: str, exclude: list[str]) -> None:
+              tgt_db: str, exclude: list[str]) -> None:
     env = dict(os.environ, MYSQL_PWD=src_pwd)
     args = ["mysqldump", f"-h{src_host}", f"-u{src_user}", "--single-transaction",
             "--no-create-db", "--set-gtid-purged=OFF", "--skip-add-locks",
@@ -161,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
               f"（排除 {len(v)} 视图，账号 {app_user}@% 仅本库）")
         if not args.skip_load:
             dump_load(args.source_host, args.source_user, args.source_password, src_db,
-                      target, stage_db, app_user, app_pwd, v)
+                      target, stage_db, v)
         dst_tables = base_tables(admin, stage_db)
         if dst_tables != src_tables:
             missing = sorted(set(src_tables) - set(dst_tables))[:5]
