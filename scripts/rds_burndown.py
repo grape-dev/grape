@@ -65,6 +65,33 @@ def baseline_pairs() -> int:
         return sum(1 for _ in csv.DictReader(f))
 
 
+def rank_files(top: int = 12) -> None:
+    """按「文件 → 跨域引用数」排序：归位/接口化的下一批候选（收益最大优先）。"""
+    import collections
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("ftr", REPO / "scripts/foreign_table_refs.py")
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    mod_sys = __import__("sys")
+    mod_sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    owner = mod.load_owner(REPO / "docs" / "weekly-11" / "table-owner.tsv")
+    per: collections.Counter = collections.Counter()
+    tabs: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    for path in sorted((REPO / "src").rglob("*.py")):
+        dom = mod.domain_of(path.relative_to(REPO / "src"))
+        for name in mod._REF_RE.findall(path.read_text("utf-8", errors="replace")):
+            if name in owner and owner[name] != dom:
+                key = str(path.relative_to(REPO))
+                per[key] += 1
+                tabs[key][name] += 1
+    print(f"[归位候选] 有跨域引用的文件 {len(per)} 个，合计 {sum(per.values())} 处")
+    for f, n in per.most_common(top):
+        top_tables = ", ".join(f"{t}:{c}" for t, c in tabs[f].most_common(3))
+        print(f"  {n:>4}  {f}  ← {top_tables}")
+
+
 def smoke_backlog() -> tuple[list[dict], int]:
     """跑 stage 冒烟（读+写），返回失败项。"""
     cmd = [sys.executable, str(REPO / "scripts/stage_api_smoke.py"), "--with-ids", "--write", "--json"]
@@ -120,8 +147,11 @@ def report(it: int, smoke: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="三库独立化剩余工作清单")
     ap.add_argument("--loop", type=int, default=1, help="连续跑几轮（默认 1）")
+    ap.add_argument("--rank", action="store_true", help="列出跨域引用最多的文件（归位候选）")
     ap.add_argument("--smoke", action="store_true", help="叠加 stage 冒烟（需要 stage DSN）")
     args = ap.parse_args(argv)
+    if args.rank:
+        rank_files()
     rc = 1
     for it in range(1, max(1, args.loop) + 1):
         rc = report(it, args.smoke)

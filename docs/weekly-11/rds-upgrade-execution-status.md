@@ -158,6 +158,13 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### 归位批次（本轮，-25）
+- `src/api/pipeline_config.py` → `src/domains/mgmt/pipeline_config.py`（+ `src/api/` 同名 sys.modules 别名）：
+  流水线配置读写的是 devops_pipeline_scene / scene_market（管理域表），放 api 层属错位。
+- 静态跨域引用 **1232 → 1207**（-25），棘轮基线同步收紧到 1207；`tests/arch` 全绿。
+- 新增 `scripts/rds_burndown.py --rank`：按「文件→跨域引用数」排序，直接给出下一批归位候选
+  （当前 Top：db_setup 346 / kernel session_manager 84 / mgmt user/db 75 / issues_center 60 / insight dashboard 40）。
+
 ### DDL 归属下沉（本轮）
 - `src/api/db_setup.py` 里 77 个建表 DDL 常量按归属域搬到 `src/domains/{runtime,mgmt,insight}/schema_ddl.py`
   （`scripts/split_schema_ddl.py`，可重复执行/`--dry-run` 预览）。db_setup 改为显式 import，执行顺序不变。

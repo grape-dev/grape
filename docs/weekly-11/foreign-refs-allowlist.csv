@@ -31,7 +31,7 @@ devops_agent_session,runtime,api,25
 devops_agent_session,runtime,insight,1
 devops_agent_session,runtime,kernel,1
 devops_agent_session,runtime,mgmt,12
-devops_pipeline_scene,mgmt,api,34
+devops_pipeline_scene,mgmt,api,14
 devops_pipeline_scene,mgmt,insight,2
 devops_pipeline_scene,mgmt,runtime,15
 distributed_locks,runtime,insight,1
@@ -104,7 +104,7 @@ scene_engine_detach_log,runtime,mgmt,1
 scene_knowledge_ref,mgmt,api,11
 scene_knowledge_ref,mgmt,kernel,3
 scene_knowledge_ref,mgmt,runtime,2
-scene_market,mgmt,api,24
+scene_market,mgmt,api,19
 scene_market,mgmt,runtime,8
 scene_skill_ref,mgmt,api,4
 scene_skill_ref,mgmt,runtime,2
