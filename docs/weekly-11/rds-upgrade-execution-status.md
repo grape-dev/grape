@@ -914,6 +914,65 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
   基线 `foreign-refs-allowlist.csv` 收紧为 267 / 69；依赖看板与作业单同步刷新
   （下一批头名：`insight/observability/trace.py` 9 处）。
 
+### insight/observability/trace 任务轨迹取数下沉 runtime（-9，本文件清零）
+
+- 文件：`src/domains/insight/observability/trace.py`（349 → 286 行，任务轨迹重建：任务 → 消息步骤 →
+  引擎标注 → 流水线事件）。9 处跨域引用指向 **runtime** 的五张表：`agent_tasks` × 5
+  （回填候选 80 / 逐行补写 107 / 任务号定位 245 / 候选集取行 255 / trace 直取 262）、
+  `task_messages` × 1（129）、`agent_runtimes` × 1 与 `runtime_credentials` × 1（同一条 LEFT JOIN，184）、
+  `events` × 1（322）。动态拼接 2 处（任务号入口的 `trace_id IN (…) OR pipeline_trace_id IN (…)`、
+  事件按 `seq IN (…)`），其余为定值语句。`obs_log` / `obs_llm_usage` 属 insight 本域，继续留在原处。
+- 归位：runtime public 新增 5 条可移植具名查询（`trace_tasks_unstamped` / `trace_task_stamp` /
+  `trace_task_trace_ids` / `trace_task_messages` / `trace_runtime_label`，全部 `?` 占位符）+ 7 个薄原语
+  （`trace_unstamped_tasks` / `stamp_task_traces_any` / `trace_tasks_for_trace` / `trace_tasks_for_task` /
+  `trace_task_steps` / `trace_runtime_label` / `trace_events_by_seq`）。SQL 只在 runtime 一份；
+  insight 侧只留确定性 trace id 生成、时间换算与可见性过滤（业务语义）。
+- **修的存量 bug**：
+  1) `resolve_tasks` 是**半截改造**：任务号入口先用 lib 具名查询定位 trace/pipeline id，紧接着的主查询
+     却仍走进程主库游标裸 SQL。三库拓扑下定位走的是 runtime 自有连接、取行走的是 insight 进程库
+     （无视图 → 1146），lib 只覆盖了一半，等于「点进来能看到 trace 存在、但取不回任务行」。
+     改为整段走 owner 原语后两条路径同源。
+  2) 事件段取 lib 句柄时漏了 `foreign_only=True`（本文件其余四处都带），单库拓扑下会拿到非空句柄、
+     再往 owner 传 `select`/`where` 片段；与其它站点口径不一致且把 SQL 片段留在调用方。
+     现在事件列序与谓词都在 owner，调用方只传 seq 列表。
+  3) 回填兜底分支是 `except Exception: pass` + 末尾 `if done: db.commit()`：中途异常时已执行的语句
+     可能不提交却被计进返回值（静默漏回填）。改为 owner 侧单事务 + `log.debug` 记录被跳过的任务号。
+  4) `_engine_label` 的异常分支是裸 `except Exception: return f"#{id}"`，排障看不到原因；
+     改为带 `log.debug`。
+- 设计取舍：
+  1) 拆掉「lib 优先 + 本地兜底 SQL」双路径：`_any_cursor` 已按拓扑自适应（自有 DSN → `db_registry`，
+     未配 → 进程主库 + `db_lock`），单库与三库跑同一份语句，调用方不再有第二条读法。
+  2) `agent_runtimes × runtime_credentials` 的 LEFT JOIN **不拆**：两张表都归 runtime，属域内 JOIN；
+     拆成两跳只会把「无 runtime 行 → 无行」的语义在 Python 里重做一遍。
+  3) 跨域 IN 列表在 owner 侧拼占位符并分块（500/段）；`trace_events_by_seq` 跨块后再整体按 seq 排序，
+     保证与单条 `ORDER BY seq` 的输出顺序一致（分块不能改变语义）。
+  4) 行 → dict 的转换收在 owner（列名元组即契约，列序照抄原 SQL）；原来靠 `cursor.description` 取名，
+     属驱动差异，不该留在消费方。
+  5) 回填写入口径由「每执行一行 +1」改为 `rowcount`：写一个不存在的任务号不再虚增计数，
+     与既有的 `stamp_task_traces`（自有 DSN 版）口径统一。
+  6) 回填写仍保留 `cross_write` 意图路径（P3-5g 的「整批一条意图」语义不变），只有单库兜底侧
+     换成 owner 原语；两条路径的 SQL 与列序完全一致。
+  7) 方言：`?` 占位符、`datetime('now')` 由 `mysql_compat` 翻译，未引入 `NOW()` / `ON DUPLICATE KEY`。
+  8) 无多语句组合写需要「先读后写的原子性」——回填是「取候选集 → 逐条幂等 UPDATE」，
+     单事务即可，不需要在调用方持锁跨语句。
+- 棘轮：本文件跨域引用 **9 → 0**；`check-arch` R1 无需新白名单（insight → `src.domains.runtime.public`
+  的延迟导入与 `dashboard.py` / `alerts.py` 既有形态一致），R8 条目不涉及（该棘轮只管 kernel 写域表）；
+  静默 `except` 基线 `trace.py` 1 → 0（棘轮只减不增，属正常下调）。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/trace_smoke.py`
+  **ALL 81 CHECKS PASSED**（含：候选集只认 `trace_id IS NULL OR ''`、无 issue 行的 pipeline id 退回任务级、
+  二次回填幂等、`limit` 生效、写不存在的任务号计 0、任务号入口在 trace 两列为空时仍按 id 命中、
+  未知 trace/任务号返回空且不回落全表、引擎标注三级回退与 runtime 行缺失、设备名空串**不**回退
+  （COALESCE 只吃 NULL）、事件跨 500 分块后仍整体有序、他人仓库 trace 不可见等边界与否定用例）；
+  `tests/insight/test_obs_trace.py` **8 passed / 1 既有红**
+  （`test_routes_trace_and_404_for_out_of_scope` 在 HEAD 干净树即因 TestClient 异步取消报
+  `CancelledError`，与本次改动无关；该文件不在门禁三组内）；`rds_gate.sh --quick` **GATE: 全绿**
+  （check-arch PASS / 棘轮 OK / 契约 37 条 / 看板最新）；`pytest tests/arch tests/contracts tests/scripts`
+  **158 passed**；`make lint` **import OK**；`check_lib_query_names` **PASS**
+  （runtime 122 funcs + 39 queries 全登记）。测试产物 `src/api/frontend/shell/openapi.json` 已还原。
+- 新基线：全局 **267 → 258**（-9），对 **69 → 68**（insight → runtime 这一对归零）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 258 / 68；依赖看板与作业单同步刷新
+  （下一批头名：`mgmt/routes/feedback.py` 8 处）。
+
 ### 7.2 单实例三域（早期彩排，已由 7.1 取代）
 
 

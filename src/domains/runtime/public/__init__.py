@@ -2040,6 +2040,24 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT ar.credential_id, rc.last_ip FROM agent_runtimes ar "
         "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id WHERE ar.id=?"),
     "runtime_engine_name": "SELECT name FROM agent_runtimes WHERE id=?",
+    # ── 任务轨迹重建（insight/observability/trace）：agent_tasks / task_messages ──
+    # insight 是只读分析域，轨迹取数全归本域；列序与原 insight SQL 逐字一致
+    # （调用方按下标/键取值）。动态 IN 列表由下方 owner 函数分块拼占位符，
+    # 调用方只传 id 列表，不接触 SQL 片段。
+    "trace_tasks_unstamped": (
+        "SELECT id, repo_key, issue_id FROM agent_tasks "
+        "WHERE trace_id IS NULL OR trace_id='' LIMIT ?"),
+    "trace_task_stamp": "UPDATE agent_tasks SET trace_id=?, pipeline_trace_id=? WHERE id=?",
+    "trace_task_trace_ids": "SELECT trace_id, pipeline_trace_id FROM agent_tasks WHERE id=?",
+    "trace_task_messages": (
+        "SELECT seq, type, tool, content, input_json, output, created_at "
+        "FROM task_messages WHERE task_id=? ORDER BY seq LIMIT ?"),
+    # agent_runtimes × runtime_credentials 两表同属本域，JOIN 留在 owner 侧一条查询；
+    # 行不存在 → 无行（调用方回退 `#<id>`，属展示口径不是域数据口径）。
+    "trace_runtime_label": (
+        "SELECT COALESCE(NULLIF(r.name,''), NULLIF(r.provider,''), ''), "
+        "COALESCE(rc.device_name, rc.name, '') FROM agent_runtimes r "
+        "LEFT JOIN runtime_credentials rc ON rc.id = r.credential_id WHERE r.id=?"),
     # ── 分布式锁（distributed_locks，本域基表；原 SQL 在 src/kernel/lock.py）──
     # 列序/谓词与原语句逐字一致：抢锁是「INSERT 冲突 → 查过期 → 条件 UPDATE」三步，
     # 由下方 acquire_distributed_lock 在同一事务内完成，调用方不再持有任何 SQL。
@@ -2522,6 +2540,119 @@ def task_issue_attribution(task_ids) -> list[tuple]:
                 f"CAST(SUBSTR(t.issue_id, 2) AS INTEGER) WHERE t.id IN ({ph})",
                 tuple(part))
             out.extend(tuple(r) for r in (c.fetchall() or []))
+    return out
+
+
+# ── 任务轨迹重建原语（insight/observability/trace 的唯一取数口）──────────────
+#
+# 轨迹把「任务 → 消息步骤 → 引擎标注 → 流水线事件」拼成一条时间线，四张表
+# （agent_tasks / task_messages / events / agent_runtimes×runtime_credentials）
+# 全归本域。insight 侧只保留确定性 trace id 生成、时间换算与可见性过滤（业务语义），
+# SQL 一律在此：三库拓扑下 insight 进程没有这些表（无视图 → 1146），单库测试拓扑
+# 也必须跑同一份语句，因此全部走 `_any_cursor`（自有 DSN 优先，未配回落进程主库）。
+
+_TRACE_TASK_COLS = ("id", "agent_type", "status", "issue_id", "repo_key", "runtime_id",
+                    "event_seq", "created_at", "started_at", "completed_at", "errors",
+                    "stderr", "result_text", "trace_id", "pipeline_trace_id")
+_TRACE_TASK_SELECT = ", ".join(_TRACE_TASK_COLS)
+_TRACE_STEP_COLS = ("seq", "type", "tool", "content", "input_json", "output", "created_at")
+_TRACE_EVENT_COLS = ("seq", "event_type", "actor", "issue_id", "title", "status", "created_at")
+_TRACE_IN_CHUNK = 500
+
+
+def _trace_dicts(cols: tuple, rows) -> list[dict[str, Any]]:
+    """行 → dict（列名由本文件定义，列序即契约）。"""
+    return [dict(zip(cols, r)) for r in (rows or [])]
+
+
+def trace_unstamped_tasks(limit: int = 5000) -> list[tuple]:
+    """待回填 trace id 的任务 [(id, repo_key, issue_id)]（原 `trace_id IS NULL OR ''` 口径）。"""
+    return [tuple(r) for r in read_all_any("trace_tasks_unstamped", (int(limit),))]
+
+
+def stamp_task_traces_any(pairs: list[tuple]) -> int:
+    """批量补写 agent_tasks 的 trace_id / pipeline_trace_id（任意拓扑，单事务，幂等）。
+
+    与 `stamp_task_traces`（自有 DSN 版、`%s` 方言）差别只有连接与方言：同一批在一个
+    事务里提交（原来靠调用方 db_lock + 末尾 commit），单条脏 id 只跳过该条不阻断整批。
+    返回真正改到的行数（rowcount；写不存在的任务不计，比旧口径「每执行一行 +1」更准）。
+    """
+    if not pairs:
+        return 0
+    done = 0
+    with _any_tx() as c:
+        for tid, tid_trace, ptrace in pairs:
+            try:
+                cur = c.execute(_any_sql("trace_task_stamp"), (tid_trace, ptrace, str(tid)))
+                done += int(getattr(cur, "rowcount", 0) or 0)
+            except Exception as exc:  # noqa: BLE001 - 单条脏数据不阻断整批回填
+                log.debug(f"trace stamp skipped task={tid}: {exc}")
+    return done
+
+
+def trace_tasks_for_trace(trace: str) -> list[dict[str, Any]]:
+    """按 trace 值取任务行（trace_id 或 pipeline_trace_id 命中），列序 = 原 insight SQL。"""
+    t = str(trace or "")
+    with _any_cursor() as c:
+        c.execute(f"SELECT {_TRACE_TASK_SELECT} FROM agent_tasks "
+                  "WHERE trace_id=? OR pipeline_trace_id=? ORDER BY created_at", (t, t))
+        return _trace_dicts(_TRACE_TASK_COLS, c.fetchall())
+
+
+def trace_tasks_for_task(task_id: str) -> list[dict[str, Any]]:
+    """任务号 → 该任务整条流水线（同 trace / pipeline 的其他任务一并返回）。
+
+    先按 id 定位它的 trace_id / pipeline_trace_id，再按候选集取行；定位不到 → 空列表
+    （原口径：不回落全表扫描，未知任务号与「不存在」等价）。
+    """
+    tid = str(task_id or "")
+    if not tid:
+        return []
+    got = read_one_any("trace_task_trace_ids", (tid,))
+    if not got:
+        return []
+    keys = [k for k in (tid, got[0] or "", got[1] or "") if k]
+    ph = ",".join(["?"] * len(keys))
+    with _any_cursor() as c:
+        c.execute(f"SELECT {_TRACE_TASK_SELECT} FROM agent_tasks "
+                  f"WHERE trace_id IN ({ph}) OR pipeline_trace_id IN ({ph}) OR id=? "
+                  "ORDER BY created_at", tuple(keys + keys + [tid]))
+        return _trace_dicts(_TRACE_TASK_COLS, c.fetchall())
+
+
+def trace_task_steps(task_id: str, limit: int) -> list[dict[str, Any]]:
+    """任务消息步骤（按 seq 升序；LIMIT 由调用方给，原 STEP_LIMIT 口径）。"""
+    return _trace_dicts(_TRACE_STEP_COLS,
+                        read_all_any("trace_task_messages", (str(task_id), int(limit))))
+
+
+def trace_runtime_label(runtime_id: int) -> dict[str, str]:
+    """引擎标注 {engine, device}：name 优先退 provider，设备名退凭据 name；无行 → 空 dict。"""
+    row = read_one_any("trace_runtime_label", (int(runtime_id),))
+    if not row:
+        return {}
+    return {"engine": str(row[0] or ""), "device": str(row[1] or "")}
+
+
+def trace_events_by_seq(seqs) -> list[dict[str, Any]]:
+    """同一流水线的事件上下文（seq 候选集，按 seq 升序）。
+
+    seq 列表可能上千（单任务步骤上限 200，流水线再乘任务数），按 500 分块；
+    跨块结果最后再整体按 seq 排序，保证与单条 `ORDER BY seq` 的输出顺序一致。
+    """
+    ids = [int(s) for s in (seqs or []) if s]
+    if not ids:
+        return []
+    out: list[dict[str, Any]] = []
+    with _any_cursor() as c:
+        for i in range(0, len(ids), _TRACE_IN_CHUNK):
+            part = ids[i:i + _TRACE_IN_CHUNK]
+            ph = ",".join(["?"] * len(part))
+            c.execute(f"SELECT {', '.join(_TRACE_EVENT_COLS)} FROM events "
+                      f"WHERE seq IN ({ph}) ORDER BY seq", tuple(part))
+            out.extend(_trace_dicts(_TRACE_EVENT_COLS, c.fetchall()))
+    if len(ids) > _TRACE_IN_CHUNK:
+        out.sort(key=lambda r: r["seq"])
     return out
 
 
