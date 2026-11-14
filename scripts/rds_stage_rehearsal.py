@@ -99,7 +99,9 @@ def main(argv: list[str] | None = None) -> int:
         stage_db = f"{args.prefix}_{domain}"
         stage_dbs[domain] = stage_db
         user = f"{args.prefix}_{domain}_app"
-        pwd = secrets.token_urlsafe(18)
+        # 满足 MySQL validate_password 常见策略（大小写+数字+符号）：
+        # 固定前缀保证复杂度，后缀取足熵；避免纯 base64url 触发 1819 策略拒绝。
+        pwd = "Aa1!" + secrets.token_urlsafe(18)
         env_lines.append(f"GRAPE_DSN_{domain.upper()}="
                          f"mysql://{user}:{pwd}@{args.host}:{args.port}/{stage_db}")
         with src.cursor() as c:
