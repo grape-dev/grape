@@ -1728,6 +1728,31 @@ _ANY_QUERIES: dict[str, str] = {
     "ei_stored_access_token": (
         "SELECT access_token FROM external_identities "
         "WHERE grape_user_id=? AND provider=? AND status IN (1, 4) LIMIT 1"),
+    # ── 代发内容台账（kernel/outbound_ledger；outbound_content_ledger 归 mgmt）──
+    # 原实现在 kernel 里用进程主库游标直发 SQL：三库拓扑下进程库没有该表（视图 0 → 1146），
+    # 写侧记账被内部 except 吞成 False（只剩进程内 TTL 集合，跨进程/重启即漏拦），
+    # 读侧异常同样被吞成「放行」——台账这道防线整体失效且只在日志里可见。
+    # 列序与谓词逐字照抄原语句；时间比较的截止值由调用方在 Python 侧算好传参
+    # （不写 NOW() / datetime('now','-N days') 之类专有/修饰符方言）。
+    "outbound_ledger_insert": (
+        "INSERT OR IGNORE INTO outbound_content_ledger "
+        "(provider, repo_key, content_type, content_id, issue_number, actor_identity, "
+        " origin_channel, origin_task, content_hash, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)"),
+    "outbound_ledger_purge_before": (
+        "DELETE FROM outbound_content_ledger WHERE created_at < ?"),
+    "outbound_ledger_exists_edit": (
+        "SELECT 1 FROM outbound_content_ledger WHERE provider=? AND repo_key=? "
+        "AND content_type=? AND content_id=? AND content_hash=? LIMIT 1"),
+    "outbound_ledger_exists_within": (
+        "SELECT 1 FROM outbound_content_ledger WHERE provider=? AND repo_key=? "
+        "AND content_type=? AND content_id=? AND created_at>=? LIMIT 1"),
+    "outbound_ledger_exists_id": (
+        "SELECT 1 FROM outbound_content_ledger WHERE provider=? AND repo_key=? "
+        "AND content_type=? AND content_id=? LIMIT 1"),
+    "outbound_ledger_row_by_hash": (
+        "SELECT content_id FROM outbound_content_ledger WHERE provider=? "
+        "AND content_hash=? AND repo_key=? LIMIT 1"),
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -1936,6 +1961,135 @@ def account_username_by_id_any(account_id: Any) -> str:
         return ""
     row = read_one_any("account_username_by_id", (str(account_id),))
     return str(row[0] or "") if row else ""
+
+
+# ---------- 代发内容台账（kernel/outbound_ledger 调用；任意拓扑） ----------
+#
+# outbound_content_ledger 归 mgmt。kernel 原实现「建表 + 6 条读写语句」全打在进程主库上：
+# 单库拓扑能跑；三库拓扑下进程库里没有该表（视图 0）→ 1146，写侧被 except 吞成 False
+# （记账只剩进程内 TTL 集合，多进程/重启/超过 300s 的回声全部漏拦），读侧被吞成「放行」
+# （用户消息被误当自己的回声拦掉的概率反而没了，但防线也等于不存在），
+# 且同表副本存在时静默读写副本。现按「表归谁、SQL 归谁」把结构与读写全部下沉本域：
+# kernel 只留行为（TTL 集合、指纹、时效窗口、放行策略），一条 SQL 都不剩。
+#
+# 方言：`?` 占位符、`INSERT OR IGNORE`（MySQL 桥翻译为 INSERT IGNORE）、
+# `datetime('now')` 一律不用——截止时间由调用方在 Python 侧算成 '%Y-%m-%d %H:%M:%S' 传参。
+
+OUTBOUND_LEDGER_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS outbound_content_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT DEFAULT '',
+        repo_key TEXT DEFAULT '',
+        content_type TEXT DEFAULT '',
+        content_id TEXT DEFAULT '',
+        issue_number TEXT DEFAULT '',
+        actor_identity TEXT DEFAULT '',
+        origin_channel TEXT DEFAULT 'webhook',
+        origin_task TEXT DEFAULT '',
+        content_hash TEXT DEFAULT '',
+        created_at TEXT DEFAULT ''
+    )
+"""
+
+
+def outbound_ledger_ddl() -> str:
+    """outbound_content_ledger 建表 DDL（只读快照，供文档/测试比对）。"""
+    return OUTBOUND_LEDGER_TABLE_SQL
+
+
+def ensure_outbound_ledger_table() -> None:
+    """幂等引导 outbound_content_ledger（建表 + 两个索引 + 旧索引列数迁移）。
+
+    步骤与容错口径与 kernel 原 `_ensure_table` 逐条等价：
+      1) CREATE TABLE IF NOT EXISTS（失败抛出——建表失败说明连接/权限有问题，与原实现一致）；
+      2) 唯一索引 (provider, repo_key, content_type, content_id)：漏建会让
+         INSERT OR IGNORE 失去去重语义（重复记账 → 幻觉命中），故失败只告警不阻断；
+      3) 旧 3 列唯一索引迁移：该索引不含 repo_key，同 ID 跨仓会被误判重复。
+         列数探测用 information_schema（MySQL 专有）：sqlite / 无该目录时探测失败即跳过，
+         `CREATE ... IF NOT EXISTS` 已覆盖新库，行为与原实现一致；
+      4) 指纹索引 (provider, content_hash)：读侧旁路核对用。
+
+    连接按拓扑自适应（自有 DSN → mgmt；单库 → 进程主库并持 db_lock、末尾提交）。
+    本函数自身不做「一次性」缓存：调用方（kernel）按连接对象缓存，避免热路径重复往返。
+    """
+    with _any_cursor(write=True) as c:
+        c.execute(OUTBOUND_LEDGER_TABLE_SQL)
+        try:
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_ledger_cid "
+                      "ON outbound_content_ledger (provider, repo_key, content_type, content_id)")
+        except Exception as exc:  # noqa: BLE001 - 索引已存在/方言差异不阻断记账
+            log.debug(f"outbound ledger unique index skipped: {exc}")
+        try:
+            c.execute("SELECT COUNT(DISTINCT COLUMN_NAME) FROM information_schema.statistics "
+                      "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='outbound_content_ledger' "
+                      "AND INDEX_NAME='idx_outbound_ledger_cid'")
+            _row = c.fetchone()
+            _ncols = int(_row[0]) if _row and _row[0] is not None else 0
+            if _ncols and _ncols < 4:
+                c.execute("DROP INDEX idx_outbound_ledger_cid ON outbound_content_ledger")
+                c.execute("CREATE UNIQUE INDEX idx_outbound_ledger_cid "
+                          "ON outbound_content_ledger "
+                          "(provider, repo_key, content_type, content_id)")
+        except Exception as exc:  # noqa: BLE001 - sqlite/无 information_schema：跳过迁移
+            log.debug(f"outbound ledger index migration skipped: {exc}")
+        try:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_outbound_ledger_hash "
+                      "ON outbound_content_ledger (provider, content_hash)")
+        except Exception as exc:  # noqa: BLE001 - 索引已存在不阻断记账
+            log.debug(f"outbound ledger hash index skipped: {exc}")
+
+
+def record_outbound_ledger(provider: str, repo_key: str, content_type: str, content_id: str,
+                           issue_number: str = "", actor_identity: str = "",
+                           origin_channel: str = "webhook", origin_task: str = "",
+                           content_hash: str = "", created_at: str = "") -> None:
+    """记一条代发台账（INSERT OR IGNORE：同键重复记账静默丢弃，幂等）。
+
+    只落库，不判断入账前提（provider/repo/type/content_id 非空与 TTL 集合都在调用方，
+    口径不变）。created_at 由调用方给（调用方原语义就是 Python 侧 time.strftime）。
+    失败向上抛——调用方的 best-effort 包装负责降级，避免本层静默吞异常。
+    """
+    exec_any("outbound_ledger_insert",
+             (provider, repo_key, content_type, content_id, issue_number, actor_identity,
+              origin_channel, origin_task, content_hash, created_at))
+
+
+def purge_outbound_ledger_before(cutoff: str) -> int:
+    """删除 created_at 早于 cutoff 的记录（保留期清理），返回删除行数。"""
+    return exec_any("outbound_ledger_purge_before", (cutoff,))
+
+
+def outbound_ledger_has_edit(provider: str, repo_key: str, content_type: str,
+                             content_id: str, content_hash: str) -> bool:
+    """issue_edit 回声判定：ID（issue 编号，共享键）+ 指纹双命中才算命中。"""
+    row = read_one_any("outbound_ledger_exists_edit",
+                       (provider, repo_key, content_type, content_id, content_hash))
+    return bool(row)
+
+
+def outbound_ledger_has_within(provider: str, repo_key: str, content_type: str,
+                               content_id: str, cutoff: str) -> bool:
+    """issue_close / issue_meta 回声判定：编号命中 + 记录在时效窗口内（created_at>=cutoff）。"""
+    row = read_one_any("outbound_ledger_exists_within",
+                       (provider, repo_key, content_type, content_id, cutoff))
+    return bool(row)
+
+
+def outbound_ledger_has_id(provider: str, repo_key: str, content_type: str,
+                           content_id: str) -> bool:
+    """精确 ID 命中（评论/issue/PR 族的主判定）。"""
+    row = read_one_any("outbound_ledger_exists_id",
+                       (provider, repo_key, content_type, content_id))
+    return bool(row)
+
+
+def outbound_ledger_row_by_hash(provider: str, content_hash: str, repo_key: str):
+    """按内容指纹反查台账行 (content_id,)——仅供调用方做旁路核对告警，不参与拦截判定。
+
+    返回原始行（无行 → None）：调用方原口径是 `if _row:` 再取值打日志，
+    空 content_id 的行也会触发告警，这里保持同一形态。
+    """
+    return read_one_any("outbound_ledger_row_by_hash", (provider, content_hash, repo_key))
 
 
 # ---------- 飞书通道列（runtime/im/channel_directory 调用） ----------

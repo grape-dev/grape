@@ -60,69 +60,30 @@ def _ttl_key(provider: str, repo_key: str, content_type: str, content_id: str) -
 
 
 def _ensure_table():
-    """幂等建表（跟随 session_manager 现有 db/db_lock 连接）。
+    """幂等建表的调用方缓存（表结构与索引引导归 mgmt 域）。
 
-    进程内一次性（性能优化，审查 D6）：首次调用后记录已就绪的 db 连接对象，
+    本函数只做「同一连接上只引导一次」的缓存：进程内首次调用后记录已就绪的 db 连接对象，
     同一连接不再重跑 DDL——消除热路径上每条 webhook 事件 3-5 条带 db_lock 的
     CREATE/information_schema 往返（高并发时的全局锁串行化点）。
     绑定连接对象而非布尔标记：测试隔离层会 reload(session_manager) 换新连接，
     新库（新连接）上须重新建表，标记随连接失效自动重跑，语义不变。
+    DDL 本体在 `domains.mgmt.public.ensure_outbound_ledger_table`（表归 mgmt；
+    连接按拓扑自适应，三库下不再往进程库建表）。
     """
     global _TABLE_READY_CONN
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db
     if _TABLE_READY_CONN is db:
         return
-    with db_lock:
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS outbound_content_ledger (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                provider TEXT DEFAULT '',
-                repo_key TEXT DEFAULT '',
-                content_type TEXT DEFAULT '',
-                content_id TEXT DEFAULT '',
-                issue_number TEXT DEFAULT '',
-                actor_identity TEXT DEFAULT '',
-                origin_channel TEXT DEFAULT 'webhook',
-                origin_task TEXT DEFAULT '',
-                content_hash TEXT DEFAULT '',
-                created_at TEXT DEFAULT ''
-            )
-        """)
-        try:
-            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_ledger_cid "
-                       "ON outbound_content_ledger (provider, repo_key, content_type, content_id)")
-            db.commit()
-        except Exception:
-            pass
-        # 索引迁移（幂等）：旧版索引不含 repo_key（3 列），同 ID 跨仓会被
-        # INSERT OR IGNORE 误判重复——检测列数不对则重建
-        try:
-            c = db.cursor()
-            c.execute("SELECT COUNT(DISTINCT COLUMN_NAME) FROM information_schema.statistics "
-                      "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='outbound_content_ledger' "
-                      "AND INDEX_NAME='idx_outbound_ledger_cid'")
-            _row = c.fetchone()
-            _ncols = int(_row[0]) if _row else 0
-            if _ncols and _ncols < 4:
-                db.execute("DROP INDEX idx_outbound_ledger_cid ON outbound_content_ledger")
-                db.execute("CREATE UNIQUE INDEX idx_outbound_ledger_cid "
-                           "ON outbound_content_ledger (provider, repo_key, content_type, content_id)")
-                db.commit()
-        except Exception:
-            pass  # SQLite 或无旧索引——CREATE IF NOT EXISTS 已覆盖
-        try:
-            db.execute("CREATE INDEX IF NOT EXISTS idx_outbound_ledger_hash "
-                       "ON outbound_content_ledger (provider, content_hash)")
-        except Exception:
-            pass
-        db.commit()
-        _TABLE_READY_CONN = db
+    from src.domains.mgmt.public import ensure_outbound_ledger_table
+    ensure_outbound_ledger_table()
+    _TABLE_READY_CONN = db
 
 
 def _cleanup_expired():
     """保留 30 天（S11-6）；每天最多清一次，失败不影响主流程。
 
-    截止时间在 Python 侧计算（MySQL 兼容层禁止 datetime('now', '-N days') 带修饰符方言）。
+    截止时间在 Python 侧计算（可移植方言：不带 datetime('now','-N days') 修饰符），
+    删除语句本体在 mgmt 域（表归 mgmt）。
     """
     global _last_cleanup_day
     _today = time.strftime("%Y-%m-%d")
@@ -132,11 +93,8 @@ def _cleanup_expired():
     try:
         from datetime import datetime, timedelta
         _cutoff = (datetime.now() - timedelta(days=_RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            db.execute("DELETE FROM outbound_content_ledger WHERE created_at < ?",
-                       (_cutoff,))
-            db.commit()
+        from src.domains.mgmt.public import purge_outbound_ledger_before
+        purge_outbound_ledger_before(_cutoff)
     except Exception as e:
         log.warning(f"outbound_ledger cleanup failed: {e}")
 
@@ -160,17 +118,15 @@ def record_outbound(provider: str, repo_key: str, content_type: str, content_id:
         _TTL_SET[_ttl_key(provider, repo_key, content_type, _cid)] = time.time() + _TTL_SECONDS
     try:
         _ensure_table()
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            db.execute(
-                "INSERT OR IGNORE INTO outbound_content_ledger "
-                "(provider, repo_key, content_type, content_id, issue_number, actor_identity, "
-                " origin_channel, origin_task, content_hash, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (provider, repo_key, content_type, _cid, str(issue_number or ""),
-                 actor_identity or "", origin_channel or "webhook", origin_task or "",
-                 content_hash or "", time.strftime("%Y-%m-%d %H:%M:%S")))
-            db.commit()
+        from src.domains.mgmt.public import record_outbound_ledger
+        record_outbound_ledger(
+            provider, repo_key, content_type, _cid,
+            issue_number=str(issue_number or ""),
+            actor_identity=actor_identity or "",
+            origin_channel=origin_channel or "webhook",
+            origin_task=origin_task or "",
+            content_hash=content_hash or "",
+            created_at=time.strftime("%Y-%m-%d %H:%M:%S"))
         _cleanup_expired()
         return True
     except Exception as e:
@@ -211,44 +167,27 @@ def is_our_outbound(provider: str, repo_key: str, content_type: str, content_id:
                 _TTL_SET.pop(k, None)
             if _TTL_SET.get(_ttl_key(provider, repo_key, content_type, _cid), 0) > now:
                 return True
-    # 2) 持久表
+    # 2) 持久表（SQL 在 mgmt 域：outbound_content_ledger 归 mgmt）
     try:
         _ensure_table()
-        from src.kernel.session_manager import db, db_lock
+        from src.domains.mgmt import public as _mgmt_public
         if _is_edit:
             # 编辑回声：ID（issue 编号）+ 指纹双命中才拦
             if not content_hash:
                 return False
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT 1 FROM outbound_content_ledger WHERE provider=? AND repo_key=? "
-                          "AND content_type=? AND content_id=? AND content_hash=? LIMIT 1",
-                          (provider, repo_key, content_type, _cid, content_hash))
-                return bool(c.fetchone())
+            return _mgmt_public.outbound_ledger_has_edit(
+                provider, repo_key, content_type, _cid, content_hash)
         if _is_meta_like:
             # close/meta 回声（S30-G5）：编号命中 + 时效窗口双确认——
             # created_at 解析失败/为空按"不在窗口"处理（放行，零误杀）
             _cutoff = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - _META_WINDOW_SECONDS))
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT 1 FROM outbound_content_ledger WHERE provider=? AND repo_key=? "
-                          "AND content_type=? AND content_id=? AND created_at>=? LIMIT 1",
-                          (provider, repo_key, content_type, _cid, _cutoff))
-                return bool(c.fetchone())
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT 1 FROM outbound_content_ledger WHERE provider=? AND repo_key=? "
-                      "AND content_type=? AND content_id=? LIMIT 1",
-                      (provider, repo_key, content_type, _cid))
-            if c.fetchone():
-                return True
+            return _mgmt_public.outbound_ledger_has_within(
+                provider, repo_key, content_type, _cid, _cutoff)
+        if _mgmt_public.outbound_ledger_has_id(provider, repo_key, content_type, _cid):
+            return True
         # ID 未命中时指纹仅作旁路核对信号（不参与拦截判定）
         if content_hash:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT content_id FROM outbound_content_ledger WHERE provider=? "
-                          "AND content_hash=? AND repo_key=? LIMIT 1", (provider, content_hash, repo_key))
-                _row = c.fetchone()
+            _row = _mgmt_public.outbound_ledger_row_by_hash(provider, content_hash, repo_key)
             if _row:
                 log.warning(f"outbound_ledger: content hash matches (provider={provider}, "
                             f"repo={repo_key}, ledger_id={_row[0]}) but event ID {_cid} not in ledger "

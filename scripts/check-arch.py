@@ -89,7 +89,8 @@ R8_WHITELIST: dict[str, dict[str, int]] = {
     # mgmt.public 的 set_repo_bot_token_status_any；读侧三处同步归位）
     "src/kernel/prompt_builder.py": {"unified_user_mapping": 2},  # P2：读改 N10
     "src/kernel/persistence/credential_usage_log.py": {"grape_t_credential_usage_log": 2},  # P3
-    "src/kernel/outbound_ledger.py": {"outbound_content_ledger": 1},  # P1：迁 mgmt
+    # src/kernel/outbound_ledger.py 已清零（代发台账的建表/索引引导与 6 条读写语句下沉
+    # mgmt.public 的 ensure_outbound_ledger_table + outbound_ledger_* 原语）
 }
 
 _R8_WRITE_RE = re.compile(
@@ -178,6 +179,11 @@ WHITELIST: dict[str, dict[str, str]] = {
         "R1": {"targets": ["src.domains.mgmt", "src.domains.mgmt.public"],
               "reason": "deferred GSB registry SQL via mgmt.public "
                         "(gsb_service_registry is mgmt-owned); due Phase 5 -> contracts"},
+    },
+    "src/kernel/outbound_ledger.py": {
+        "R1": {"targets": ["src.domains.mgmt", "src.domains.mgmt.public"],
+              "reason": "deferred outbound-ledger DDL/read-write primitives via mgmt.public "
+                        "(outbound_content_ledger is mgmt-owned); due Phase 5 -> contracts"},
     },
     "src/kernel/auth_sdk/jwt_utils.py": {
         "R1": "deferred secret/credential keys via mgmt.auth.security_config; Phase 5",

@@ -45,7 +45,6 @@ login_whitelist,mgmt,kernel,4
 managed_repos,mgmt,api,2
 managed_repos,mgmt,runtime,9
 meta,runtime,mgmt,4
-outbound_content_ledger,mgmt,kernel,6
 runtime_credentials,runtime,api,6
 runtime_credentials,runtime,insight,8
 runtime_credentials,runtime,mgmt,3

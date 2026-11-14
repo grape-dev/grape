@@ -1458,6 +1458,76 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 ---
 
+### 7.10 代发台账外域读写收口（2026-11-15 本批）
+
+- 文件：`src/kernel/outbound_ledger.py`（kernel 域消费、6 处跨域 SQL → 0）。
+  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `outbound_content_ledger`（归 mgmt）6 处，行 137 / 166 / 224 / 234 / 240 / 249：
+    `_cleanup_expired` 的保留期 DELETE、`record_outbound` 的 INSERT OR IGNORE、
+    `is_our_outbound` 的 4 条读（issue_edit 指纹双命中 / issue_close·issue_meta 时效窗口 /
+    精确 ID / 指纹旁路核对）。全部为静态 SQL + `?` 占位符，无动态拼表名。
+  同批还下沉了原 `_ensure_table` 里的 **DDL 与索引引导**（`CREATE TABLE IF NOT EXISTS`
+  不计入静态统计，但同样只该打在归属库上）。
+- owner 侧新增（`?` 占位符，列序/谓词逐字照抄）：
+  1) `_ANY_QUERIES` 补 6 条具名查询：`outbound_ledger_insert`、`outbound_ledger_purge_before`、
+     `outbound_ledger_exists_edit`、`outbound_ledger_exists_within`、`outbound_ledger_exists_id`、
+     `outbound_ledger_row_by_hash`；
+  2) `ensure_outbound_ledger_table()` 承载建表 + 唯一索引/指纹索引 + 旧 3 列索引迁移，
+     另留 `outbound_ledger_ddl()` 只读快照（DDL 走函数，不 import 常量属性）；
+  3) 7 个薄函数：`record_outbound_ledger`、`purge_outbound_ledger_before`、
+     `outbound_ledger_has_edit` / `_has_within` / `_has_id`、`outbound_ledger_row_by_hash`。
+- 设计取舍：
+  1) **DDL 与 6 条 DML 一起下沉，而不是只搬 DML**：原 `_ensure_table` 把建表、唯一索引、
+     `information_schema` 3 列索引迁移、指纹索引全打在进程库上；只搬读写会留下
+     「在 A 库建表、在 B 库读写」的错位，三库拓扑下第一次记账就 1146。
+  2) **「一次性建表」缓存留在 kernel，不搬进 owner**：原审查 D6 优化针对的是热路径上
+     每条 webhook 事件 3-5 次带 `db_lock` 的 DDL 往返，而「同一连接」这个身份只有调用方
+     （进程主库句柄）知道——owner 端每次幂等执行、调用方按连接对象缓存，语义与性能意图都保留。
+  3) **指纹旁路核对返回原始行而不是 content_id 字符串**：原实现是 `if _row:` 命中后取
+     `_row[0]` 打告警，空 content_id 的行也会触发；返回字符串会把空串当「无行」，
+     静默吞掉一条漂移告警。
+  4) **截止值仍由调用方在 Python 侧算出传参**：保留期 30 天、`issue_close`/`issue_meta`
+     1800s 时效窗口两个口径原样；SQL 里不出现 `NOW()` / `datetime('now','-N days')` 修饰符方言。
+  5) **重复记账靠 `INSERT OR IGNORE`，不换 `ON DUPLICATE KEY UPDATE`**：后者会覆盖首次
+     记账的指纹/actor，破坏「第一次是谁发的」这一语义；`INSERT OR IGNORE` 由方言桥翻译成
+     `INSERT IGNORE`，幂等且不改原行。
+- 修的存量 bug：
+  1) **三库拓扑下整条台账防线失效（功能面/安全面）**：6 条语句与 DDL 全部打在进程主库，
+     而 `outbound_content_ledger` 只有 mgmt 库有表（视图 0）→ 1146 被内部 `except` 吞掉：
+     写侧恒 `False`（记账只剩进程内 TTL 集合，多进程 / 重启 / 超过 300s 的回声全部漏拦），
+     读侧恒「放行」（我们自己的代发回声被当用户消息重新开工，S11 的核心价值归零），
+     运维只能看到一条 warning。现读写都走 mgmt 归属域原语，两条拓扑同一份语句。
+  2) **同表副本存在时静默读写副本（数据面）**：单库回落路径建表/记账/清理都落在副本上，
+     读也读副本——过期标记与命中判定与实际库不一致。现统一按归属域连接。
+  3) **静默 except（卫生面）**：原 `_ensure_table` 的 3 处 `except Exception: pass` 随 DDL
+     下沉改为带 `log.debug` 的显式处理；kernel 侧吞噬点清零（`silent_except_baseline.json`
+     中该文件 3 处的计数已不触顶，基线未上调）。
+  4) **R8 棘轮只减不增**：`scripts/check-arch.py` 的
+     `"src/kernel/outbound_ledger.py": {"outbound_content_ledger": 1}` 条目删除，改为「已清零」注释；
+     kernel 延迟导入 `mgmt.public` 按 R1 精确登记（targets 只列 `src.domains.mgmt[.public]`）。
+- 验证：`py_compile` 三文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/outbound_ledger_smoke.py`
+  **ALL 125 CHECKS PASSED**（含边界与否定用例：4 列唯一索引列序、DDL 二次幂等、
+  sqlite 下 `information_schema` 探测降级不抛、同键重复记账 1 行且不改原行、同 ID 跨仓
+  记 2 行、`purge` 只删 `< cutoff` 且返回行数、edit 需 ID+指纹双命中（指纹/编号/仓库/类型
+  四种不匹配全 False）、`created_at` 恰等于 cutoff 算窗口内 / 早 1 秒不算 / 空串不算、
+  精确 ID 命中与类型/仓库隔离、指纹旁路 `None` 三态、kernel 写侧四条前置校验全不查库、
+  无独立 ID 时 issue_number 兼值入账、落库失败仍靠 TTL 拦住竞态回声、issue_edit 不吃 TTL、
+  meta 记录 1 小时前放行、查询异常一律放行、同一连接只引导一次而换连接后重跑、
+  清理每日一次节流且只删 30 天前、6 条新语句无 `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`、
+  未登记查询名 KeyError、**有自有 DSN 时 SQL 走 `db_registry.cursor('mgmt')` 不碰进程库**、
+  源码 0 条台账表 SQL 且 7 个原语全部接上、R8 条目已删）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 PASS / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；
+  该模块自带回归 `tests/runtime/test_issue_453_outbound_ledger.py` **69 passed**
+  （含 S11/S12-3/S13/S14/S16/S17/S19 全族，仍全部走 mock 内存库，说明单库拓扑零回归）；
+  `make lint` **import OK**；`check_lib_query_names` **PASS**（mgmt 137 函数 + 16 具名查询在用，
+  全部登记）。
+- 新基线：全局 **208 → 202**（-6），对 **62 → 61**（`outbound_content_ledger←kernel` 6 → 0）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 202 / 61；依赖看板与作业单同步刷新
+  （下一批头名：`runtime/routes/webhook.py` 6 处 / `runtime/routes/chat.py` 6 处）。
+
+---
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
