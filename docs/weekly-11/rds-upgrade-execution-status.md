@@ -1909,6 +1909,65 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `events←insight` 7 → 6、`runtime_credentials←insight` 8 → 7（该文件三对全部清零并有下降）；
   基线 `foreign-refs-allowlist.csv` 收紧为 166 / 55，依赖看板同步刷新。
 
+---
+
+### 7.17 api 技能显示名解析下沉 runtime（2026-11-15 本批）
+
+- 文件：`src/api/skill_display.py`（api 域），**6 处 → 0**（单轮做完，未分两轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，六处全为 `skill`，归 runtime）：
+  - 原行 52（`skill_id` 精确档）、60（显式 `(scope, owner_id)` 档）、69（`scope='user'` +
+    `owner_id=user_id`）、78（`scope='repo'` + `owner_id=repo_key`）、86（`scope='official'` 兜底）、
+    113（批量版一次取全部 active 行）。
+  六处都在两个函数里（`resolve_skill_display_name` 回退链 / `build_skill_display_map` 批量映射），
+  全是静态 SQL，无动态拼接、无跨域 JOIN。
+- owner 侧新增（`?` 占位符，列序/谓词与原 SQL 逐字一致）：
+  1) runtime `_ANY_QUERIES` 补 3 条：`skill_display_name_by_id`、`skill_display_name_by_scope`
+     （`skill_name=? AND scope=? AND owner_id=? AND is_active=1 LIMIT 1`）、
+     `skill_active_display_rows`（`skill_name, display_name, scope, owner_id ... WHERE is_active=1`）；
+  2) runtime 侧 3 个薄函数：`skill_display_name_by_id_any(skill_id)`、
+     `skill_display_name_by_scope_any(skill_name, scope, owner_id)`、`skill_active_display_rows_any()`；
+  3) official 档**复用既有** `skill_display_name_official_any`（上批 autopilot 收口时已建），不复制第二条 SQL。
+- 设计取舍：
+  1) **user / repo 两档合成一条参数化语句**：原实现是两条只差字面量的 SQL（`scope='user'` /
+     `scope='repo'`），档位本就是谓词值，`scope` 交给调用方传。省一条具名查询，语义不变
+     （owner_id 仍按身份原样进谓词，不做归一化）。
+  2) **`None` 与 `""` 必须分开返回**：`None` = 无 active 行（回退链继续往下），`""` = 有行但
+     `display_name` 为空（调用方回退 skill_name **并终止**回退链）。原实现在「本人 user 档的
+     display_name 为空」时返回 skill_name、不再看 official 档；若把两者都压成空串，会滑到官方名，
+     破坏「展示名与实际绑定档位一致」这条 Issue #980 的口径。烟测 C17/C18 明确覆盖两侧。
+  3) **official 档复用而非新建**：既有查询谓词集与原语句相同（`is_active=1` + `scope='official'` +
+     `skill_name=?`），原语句多写的 `LIMIT 1` 由 `read_one_any` 的单行读吸收（两者都无 `ORDER BY`，
+     行选择同口径）。重复一条几乎相同的静态 SQL 只会让两处将来改过滤条件时漏改。
+  4) **回退链不再持有 `db_lock`**：原实现整段持锁一次游标查五层，三库拓扑下 `skill` 不在 api
+     所在进程的库里，锁内也拿不到；现在每层一次任意拓扑读，锁由 owner 侧原语自己管。
+     展示名解析是逐层「命中即返回」，本来也不需要跨语句的一致快照。
+  5) **批量版仍然一次查询**：`skill_active_display_rows_any()` 一次取全部 active 行，优先级
+     （3=user 本人 / 2=repo 本仓 / 1=official，prio=0 不写映射）留在调用方 Python 侧 —— 档位判定
+     是展示策略，不该搬进 owner public 面。
+- 修的存量 bug（三库拓扑，功能面）：
+  1) **节点显示名降级为原始 skill_name（Issue #980 的修复整体失效）**：该模块由 mgmt 服务
+     （`routes/scenes.py`）与 insight 服务（`routes/dashboard.py`）共同导入，两个进程的主库分别是
+     mgmt / insight 库，都不含 `skill`（归 runtime）→ 每次查询 1146。`build_skill_display_map` 把异常
+     吞成空 map、`resolve_skill_display_name` 吞成 skill_name，于是 scenes（with-pipeline）与
+     dashboard 的节点名全部回退成技能名，三档同名技能依旧无法区分 —— 拆分后这两条路由的
+     显示名修复等于停摆。
+  2) **批量路径静默无日志**：`except Exception: return {}` 不带任何记录，三库部署下「映射恒空」
+     无法从日志看出来。现改为 `logger.debug` 留痕（仍不上抛，保持调用方零回归）。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/skill_display_smoke.py`
+  **ALL 81 CHECKS PASSED**（含边界与否定用例：3 条具名查询与原 SQL 逐字对拍 + official 谓词集对拍 +
+  占位符个数 + 无 `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`、未登记查询名 KeyError；
+  回退链逐档命中/压过关系、失活行不命中、同名失活+active 取 active、**本人档 display 为空即终止
+  链**、official display 为 NULL 回退名、逐字匹配不 strip、user_id 转 str 比较、user_id=0 跳过、
+  非数字 skill_id 与 DB 异常均回退 skill_name 不上抛；批量映射 prio 判定、他人 user 档/他仓 repo 档
+  不写映射、同档先到者胜、空上下文只有 1 次查询、DB 异常回 {}；节点级分支 skill_id 真值/0/None
+  三条路径；自有 DSN 时三原语全走 `db_registry` 且进程库零改动；源码面 0 条 skill SQL、0 个 SELECT、
+  不再 import `kernel.session_manager`、只用 4 个已登记原语）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **166 → 160**（-6），对数 **55 不变**：`skill←api` 8 → 2（该文件 6 处清零，
+  余 2 处在其它 api 文件）；基线 `foreign-refs-allowlist.csv` 收紧为 160 / 55，依赖看板与作业单
+  同步刷新（下一批头名：`src/api/scene_binding_repair.py` 6 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

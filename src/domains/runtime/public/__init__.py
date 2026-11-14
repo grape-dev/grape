@@ -1933,6 +1933,16 @@ _ANY_QUERIES: dict[str, str] = {
         "FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1"),
     "skill_name_path_scope": (
         "SELECT skill_name, skill_path, scope FROM skill WHERE id=? AND is_active=1"),
+    # ── 技能显示名解析（src/api/skill_display.py 收口，Issue #980）──
+    # 调用方按回退链逐层查；列只有 display_name，列序与原 SQL 逐字一致。
+    # user/repo 两档在原实现里是两条字面量 SQL，档位只是谓词值，合成一条参数化语句。
+    "skill_display_name_by_id": (
+        "SELECT display_name FROM skill WHERE id=? AND is_active=1"),
+    "skill_display_name_by_scope": (
+        "SELECT display_name FROM skill WHERE skill_name=? AND scope=? AND owner_id=? "
+        "AND is_active=1 LIMIT 1"),
+    "skill_active_display_rows": (
+        "SELECT skill_name, display_name, scope, owner_id FROM skill WHERE is_active=1"),
     # 会话配置页（mgmt/routes/agents.py）读路径
     "devops_session_vod_id": (
         "SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'"),
@@ -2337,6 +2347,38 @@ def skill_display_name_official_any(skill_name: str) -> str:
         return ""
     row = read_one_any("skill_display_name_official", (skill_name,))
     return str(row[0] or "") if row else ""
+
+
+def skill_display_name_by_id_any(skill_id) -> str | None:
+    """按技能 id 取 active 技能的 display_name（任意拓扑）。
+
+    返回 None 表示**无 active 行**（回退链继续往下走）；返回 "" 表示有行但
+    display_name 为空（调用方回退 skill_name）。两者语义不同，不能都压成空串，
+    否则失活/不存在的 id 会让回退链提前终止在 skill_name 上。
+    """
+    row = read_one_any("skill_display_name_by_id", (int(skill_id),))
+    return None if row is None else str(row[0] or "")
+
+
+def skill_display_name_by_scope_any(skill_name: str, scope: str, owner_id: str) -> str | None:
+    """按 (skill_name, scope, owner_id) 取 active 技能的 display_name（任意拓扑）。
+
+    None/"" 的区分同 `skill_display_name_by_id_any`。原实现把 user / repo 两档写成
+    两条字面量 SQL（`scope='user'` / `scope='repo'`），档位只是谓词值，合并成一条
+    参数化语句后由调用方传 `scope`。
+    """
+    row = read_one_any("skill_display_name_by_scope", (skill_name, scope, owner_id))
+    return None if row is None else str(row[0] or "")
+
+
+def skill_active_display_rows_any() -> list:
+    """全部 active 技能的 (skill_name, display_name, scope, owner_id) 行（任意拓扑）。
+
+    批量显示名映射用；过滤只有 `is_active=1`，不带 scope 条件 —— 档位优先级由
+    调用方在 Python 侧判定（他人 user 档 / 他仓 repo 档不写映射），与原批量 SQL
+    逐字一致。
+    """
+    return read_all_any("skill_active_display_rows")
 
 
 def get_meta_value_any(key: str) -> str:
