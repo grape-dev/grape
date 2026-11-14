@@ -3232,6 +3232,73 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （下一批头名 `src/kernel/prompt_builder.py` 3 处 `unified_user_mapping`，
   同尺寸还有 `src/kernel/persistence/credential_usage_log.py` 3 处）。
 
+### runtime/engine/bot_token_health 巡检两表归位（-3，本文件清零）
+- 文件：`src/domains/runtime/engine/bot_token_health.py`（3 处 → **0**）；全局静态 **84 → 81**（-3），
+  对数 **38 → 37** —— `grape_t_repo_credentials←runtime` **整对清零**，`managed_repos←runtime` **5 → 3**
+  （余 3 处属其它文件）。
+- 表分布（消费域 runtime）：`grape_t_repo_credentials` 1 处（归 **insight**，行 172 巡检基集）；
+  `managed_repos` 2 处（归 **mgmt**：行 232 legacy bot token 列读、行 292 `bot_token_status` 写）。
+- 本轮取批：作业单头名 `src/kernel/prompt_builder.py`（3 处）与次名
+  `src/kernel/persistence/credential_usage_log.py`（3 处）**都是 blocked**（理由见本节末），
+  按作业单规则跳过并在 `next-batches.md` 顶部标 blocked，取第一个可改造文件。
+- 归属域侧改动（SQL 仍只在 owner 域一份，无新造查询文本）：
+  · insight public 新增**薄函数** `list_repo_keys_with_nonempty_credential(cred_type)`，
+    复用已登记具名查询 `repo_cred_nonempty_keys`（`cred_type=? AND value IS NOT NULL AND value!=''`）；
+  · mgmt public 复用既有 `repo_bot_token_from_legacy_column_any(repo_key, column)`（列名走
+    `_REPO_TOKEN_COLUMN_QUERIES` 白名单）与 `set_repo_bot_token_status_any(repo_key, status)`。
+- 关键设计取舍：
+  1. **这 3 处都是「owner lib/原语 + 本地兜底 SQL」双份**，兜底 SQL 正是跨域统计来源。本轮把兜底换成
+     任意拓扑原语（`*_any`：自有 DSN → db_registry；单库/测试 → 进程库 + db_lock），单库与三库
+     同一条路径，调用方不再需要「有 DSN 才走 owner」的条件分支——原 `_rt_health.available()` 判断整体消失。
+  2. **基集必须保序，所以不直接复用集合版**：原语句无 `ORDER BY`，`fetchall()` 行序即表序，巡检按
+     「每 10 仓一批 + 批间隔 1s」分组，依赖该顺序；既有 `repo_keys_with_nonempty_credential` 返回 set，
+     是给「本域 NOT EXISTS 等价过滤」用的（顺序无关）。两者同一份具名查询，只差返回形态，因此加一个
+     保序列表版薄函数，而不是让调用方自己排序（排序会改变分批归属）。
+  3. **少一次跨域转发**：原实现走 `runtime.public.list_repo_credentials()`，而该函数本身只是转发到
+     insight public（表归 insight）；直接调 insight public 后链路短一跳，`cred_type` 过滤也回到 SQL 内。
+  4. **动态列名收回 owner 域**：legacy 列名原由调用方把 `token_storage_field()` 拼进 f-string。
+     改为 mgmt 侧白名单挑选；未登记列（gitee/gitlab 终态无物理列）抛 `KeyError`，被调用方原有
+     `except` 兜住 → 「无 token，不发起验证」，与原「拼出不存在列 → SQL 报错 → 空 token」逐字同口径。
+  5. **写路径保留幂等意图**：仍优先 `cross_write.submit`（失败排队重试），只在 lib 不可用/失败时回落
+     `set_repo_bot_token_status_any`（owner 域自提交）；`rowcount==0`（仓库不存在）与 `0 行` 原语义一致。
+  6. 顺带删掉该文件两处 `from src.kernel.session_manager import db, db_lock` 与全部游标直连：现在
+     **整个文件没有任何直接 DB 访问**（静态否定已覆盖），也不再依赖进程库拓扑。
+- **修的存量 bug（3 条，都是三库独立后必然 1146、且都被 except 吞成静默降级）**：
+  1. 巡检基集旧兜底 `SELECT ... FROM grape_t_repo_credentials` 走进程主库：runtime 库没有该表（视图 0）
+     → 1146 → `except → warning + return`，**仓库级 bot token 巡检整体停摆**（用户侧：仓库级 bot token
+     失效不告警、`bot_token_status` 不更新）。
+  2. legacy 列回落 `SELECT {field} FROM managed_repos` 同理 1146 → 吞成「无 token」：rc 缺失时不再回落
+     legacy 存量列，等于静默放弃 gitcode/github 存量凭据。
+  3. 状态写兜底 `UPDATE managed_repos` 同样 1146 → 只剩日志，R17.2.5（401 标记 expired）/
+     R17.2.6（200 清标记）在生产三库拓扑下从未真正落库。
+- **blocked（本轮复核，结论不变）**：
+  1. `src/kernel/prompt_builder.py` 3 处（行 621/627/630）全在 `_build_feishu_context_section` 的
+     f-string 文案里——是**教 agent 用 sqlite3 自写 sessions.db 的说明文本**，本进程不执行。2026-11-14
+     已确立口径「不为了让正则掉数字而改文案」；改写还需先给 agent 一个合法映射写通道（现仅
+     mgmt `/internal` 服务端点，agent 持会话 token），且
+     `tests/runtime/test_issue_372_unified_mapping_github.py::test_prompt_builder_uses_insert_ignore_not_replace`
+     按源文本断言该段语义，属独立设计项。
+  2. `src/kernel/persistence/credential_usage_log.py` 3 处：后台线程共用 owner 连接会打出
+     `Packet sequence number wrong`，正解是「每工作线程一条 owner 连接」的池化，属独立一轮
+     （交接文档 §5.3 坑 4 / §9 阻塞项 2）。
+  两条都已在 `docs/weekly-11/next-batches.md` 顶部「⛔ blocked」小节写明，避免下一轮按处数硬拿。
+- **新基线**：**81 处 / 37 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+- 验证（真实退出码）：
+  · `py_compile` 两文件 → **COMPILE_OK**；
+  · `~/burndown/bot_token_health_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`）**40 项全通过**
+    （`ALL bot_token_health smoke PASSED (40 checks)`）：insight 列表原语保序 / 排除空串·NULL·非 bot 类型 /
+    同仓重复行不去重 / 空表；集合版与列表版行集合一致；mgmt 白名单读（密文不解密、空串·NULL·无行、
+    未登记列与注入串均抛 KeyError）、状态写（置 expired / 清空 / 缺行 0 行 / 不波及他仓）；
+    巡检调用点（基集=bot 且非空、序=表序、provider 由前缀派生、空集不发请求、原语抛错整批跳过不上抛）；
+    单仓验证调用点（rc 优先不触 legacy、rc 缺失回落 legacy、rc 空串仍回落、401 写 expired、
+    500 不标记、200 清标记、无凭据早退零写、未登记列不崩）；静态否定「本文件已无两表 SQL 字面量、
+    不再直连进程库，新薄函数体内无内联 SQL」；
+  · `rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 / 棘轮未上升 / 内部契约 37 条最新 / 看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → **import OK**。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排——本会话无 `SRC_PWD`/`REMOTE_PWD` 环境变量，
+  且本批无 schema / 迁移 / 契约面变化（不改表、不新增路由），运行面证据为 sqlite 烟测 + 单库 pytest；
+  **不把彩排结果算作本批证据**。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

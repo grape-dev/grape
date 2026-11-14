@@ -1,7 +1,7 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-15 05:33　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **29** 张；跨域引用 **84** 处（38 个「表×消费域」对）；含归属域在内的 SQL 引用 1782 处
+> 生成时间：2026-11-15 05:40　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **29** 张；跨域引用 **81** 处（37 个「表×消费域」对）；含归属域在内的 SQL 引用 1779 处
 
 ## 1. 域 × 域 跨域引用热力
 
@@ -10,15 +10,15 @@
 | api | 5 | 18 | 2 | 25 |
 | kernel | 3 | 3 | 0 | 6 |
 | mgmt | 0 | 2 | 5 | 7 |
-| runtime | 22 | 0 | 1 | 23 |
+| runtime | 20 | 0 | 0 | 20 |
 | insight | 1 | 21 | 0 | 22 |
 
 ## 2. 处置分类进度
 
 | 分类 | 表数 | 剩余跨域引用 |
 | --- | ---: | ---: |
-| D | 6 | 17 |
-| C1 | 5 | 33 |
+| D | 6 | 15 |
+| C1 | 5 | 32 |
 | C2 | 15 | 31 |
 | B | 2 | 2 |
 | E | 1 | 1 |
@@ -29,14 +29,14 @@
 | --- | --- | ---: | --- | --- | --- | ---: |
 | `runtime_credentials` | runtime | 13 | insight 7 / api 6 | C1 归属重定（写路径挪进 owner 域） | — | 17 |
 | `agent_tasks` | runtime | 7 | insight 5 / api 1 / mgmt 1 | C2 outbox 跨域写 | W1 | 31 |
-| `grape_t_repo_credentials` | insight | 7 | mgmt 5 / contracts 1 / runtime 1 | C1 归属重定（写路径挪进 owner 域） | — | 6 |
 | `agent_runtimes` | runtime | 6 | insight 4 / api 2 | C1 归属重定（写路径挪进 owner 域） | — | 25 |
+| `grape_t_repo_credentials` | insight | 6 | mgmt 5 / contracts 1 | C1 归属重定（写路径挪进 owner 域） | — | 5 |
 | `events` | runtime | 5 | api 3 / insight 2 | C1 归属重定（写路径挪进 owner 域） | — | 22 |
-| `managed_repos` | mgmt | 5 | runtime 5 | D 模块归位（kernel 写/读域表） | — | 19 |
 | `grape_t_channel_installation` | mgmt | 4 | runtime 4 | C2 outbox 跨域写 | W2 | 7 |
 | `unified_user_mapping` | mgmt | 4 | kernel 3 / runtime 1 | D 模块归位（kernel 写/读域表） | — | 8 |
 | `event_action_filter` | mgmt | 3 | api 3 | C2 outbox 跨域写 | W2 | 4 |
 | `grape_t_credential_usage_log` | runtime | 3 | kernel 3 | D 模块归位（kernel 写/读域表） | — | 2 |
+| `managed_repos` | mgmt | 3 | runtime 3 | D 模块归位（kernel 写/读域表） | — | 18 |
 | `devops_pipeline_scene` | mgmt | 2 | runtime 2 | C1 归属重定（写路径挪进 owner 域） | — | 9 |
 | `external_identities` | mgmt | 2 | runtime 2 | C2 outbox 跨域写 | W2 | 6 |
 | `grape_t_channel_lease` | mgmt | 2 | runtime 2 | C2 outbox 跨域写 | W2 | 2 |

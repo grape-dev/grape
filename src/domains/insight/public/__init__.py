@@ -247,6 +247,18 @@ def repo_bot_credential_pairs() -> list[tuple]:
     return [tuple(r) for r in read_all_any("repo_bot_credential_pairs")]
 
 
+def list_repo_keys_with_nonempty_credential(cred_type: str) -> list[str]:
+    """有非空凭据的仓库 repo_key 列表（**保序**，不去重）。
+
+    与 `repo_keys_with_nonempty_credential` 同一份具名查询，差别只在返回形态：
+    该集合版给「本域侧 NOT EXISTS 等价过滤」用（顺序无关），此列表版给
+    「逐个仓库巡检」的调用方用——原语句没有 ORDER BY，`fetchall()` 的行序即表序，
+    换成 set 会打散巡检分批顺序，因此单独留一个保序入口，而不是让调用方自己排序。
+    """
+    rows = read_all_any("repo_cred_nonempty_keys", (cred_type,))
+    return [r[0] for r in rows if r[0]]
+
+
 def repo_keys_with_nonempty_credential(cred_type: str = "") -> set[str]:
     """有非空凭据的仓库集合（cred_type 为空 → 不限类型；供本域侧 NOT EXISTS 等价过滤）。"""
     if cred_type:
