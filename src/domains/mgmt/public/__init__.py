@@ -2163,3 +2163,158 @@ def mapped_feishu_user_ids() -> list[int]:
                   " WHERE feishu_open_id!='' AND user_id IS NOT NULL "
                   "AND user_id NOT IN ('', '0')")
         return [int(r[0]) for r in (c.fetchall() or []) if r and r[0]]
+
+
+# ---------- 渠道入站去重 / 会话绑定（engine_wiring 的 IM 侧；表归 mgmt） ----------
+#
+# 与 W2 那批 `db_registry.cursor("mgmt") + %s/NOW()` 原语的区别：这批走 `_any_cursor/_any_tx`，
+# 单库/测试拓扑回落进程主库、三库拓扑走 mgmt 自有 DSN，方言一律可移植（`?` + 调用方传时间）。
+
+def inbound_dedup_seen(installation_id: str, message_id: str) -> bool:
+    """该入站消息是否已处理过（占位行存在即视为已处理）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT 1 FROM grape_t_channel_inbound_dedup "
+                  "WHERE installation_id=? AND message_id=?", (installation_id, message_id))
+        return c.fetchone() is not None
+
+
+def inbound_dedup_claim(installation_id: str, message_id: str, token: str,
+                        now: str = "") -> bool:
+    """抢占去重位（首占返回 True）；依赖 (installation_id, message_id) 唯一键幂等。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "INSERT OR IGNORE INTO grape_t_channel_inbound_dedup "
+            "(installation_id, message_id, state, claim_token) VALUES (?,?, 'claimed', ?)",
+            (installation_id, message_id, token))
+        return int(getattr(cur, "rowcount", 0) or 0) > 0
+
+
+def inbound_dedup_set_state(installation_id: str, message_id: str, state: str, now: str = "") -> bool:
+    """把去重位状态推进（claimed → marked 等）；返回是否命中行。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute("UPDATE grape_t_channel_inbound_dedup SET state=? "
+                        "WHERE installation_id=? AND message_id=?",
+                        (state, installation_id, message_id))
+        return int(getattr(cur, "rowcount", 0) or 0) > 0
+
+
+def inbound_dedup_release(installation_id: str, message_id: str) -> None:
+    """放弃去重位（处理失败允许重投）。"""
+    with _any_cursor(write=True) as c:
+        c.execute("DELETE FROM grape_t_channel_inbound_dedup "
+                  "WHERE installation_id=? AND message_id=?", (installation_id, message_id))
+
+
+def inbound_message_save_and_mark(installation_id: str, message_id: str, chat_id: str,
+                                  sender_id: str, text: str) -> None:
+    """落库入站消息 + 去重位推进到 marked（同一事务：崩溃重投不丢不重）。"""
+    with _any_tx() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO grape_t_channel_inbound_message "
+            "(installation_id, message_id, chat_id, sender_id, text) VALUES (?,?,?,?,?)",
+            (installation_id, message_id, chat_id, sender_id, (text or "")[:8000]))
+        # marked 用「存在则更新、不存在则插入」的两段式，避开 MySQL 的 ON CONFLICT 语法
+        cur = c.execute("UPDATE grape_t_channel_inbound_dedup SET state='marked' "
+                        "WHERE installation_id=? AND message_id=?", (installation_id, message_id))
+        if int(getattr(cur, "rowcount", 0) or 0) <= 0:
+            c.execute("INSERT OR IGNORE INTO grape_t_channel_inbound_dedup "
+                      "(installation_id, message_id, state, claim_token) "
+                      "VALUES (?,?, 'marked', '')", (installation_id, message_id))
+
+
+def chat_binding_get(installation_id: str, channel_chat_id: str) -> tuple | None:
+    """取会话绑定 8 列（installation_id, channel_chat_id, chat_type, scope, repo_key,
+    agent_type, runtime_session_id, config）。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT installation_id, channel_chat_id, chat_type, scope, repo_key, "
+            "agent_type, runtime_session_id, config "
+            "FROM grape_t_channel_chat_session_binding "
+            "WHERE installation_id=? AND channel_chat_id=?", (installation_id, channel_chat_id))
+        return c.fetchone()
+
+
+def chat_binding_upsert(installation_id: str, channel_chat_id: str, binding_id: str,
+                        channel_type: str, chat_type: str, scope: str, repo_key: str,
+                        agent_type: str, runtime_session_id: str, config_json: str,
+                        now: str) -> str:
+    """绑定 upsert（按 installation+chat 定位，主键 id 由调用方给）；返回生效的 id。"""
+    with _any_tx() as c:
+        c.execute("SELECT id FROM grape_t_channel_chat_session_binding "
+                  "WHERE installation_id=? AND channel_chat_id=?",
+                  (installation_id, channel_chat_id))
+        row = c.fetchone()
+        row_id = (row[0] if row else binding_id)
+        cur = c.execute(
+            "UPDATE grape_t_channel_chat_session_binding SET channel_type=?, chat_type=?, "
+            "scope=?, repo_key=?, agent_type=?, runtime_session_id=?, config=?, "
+            "last_active_at=?, updated_at=? WHERE id=?",
+            (channel_type, chat_type, scope, repo_key, agent_type, runtime_session_id,
+             config_json, now, now, row_id))
+        if int(getattr(cur, "rowcount", 0) or 0) <= 0:
+            c.execute(
+                "INSERT INTO grape_t_channel_chat_session_binding "
+                "(id, installation_id, channel_type, channel_chat_id, chat_type, scope, "
+                "repo_key, agent_type, runtime_session_id, config, last_active_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (row_id, installation_id, channel_type, channel_chat_id, chat_type, scope,
+                 repo_key, agent_type, runtime_session_id, config_json, now))
+        return row_id
+
+
+def sender_identity_user(installation_id: str, platform_user_id: str) -> str:
+    """发送者身份映射查 grape 用户 id（无映射返回空串）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT user_id FROM grape_t_channel_sender_identity "
+                  "WHERE installation_id=? AND platform_user_id=?",
+                  (installation_id, platform_user_id))
+        row = c.fetchone()
+    return str(row[0]) if row and row[0] else ""
+
+
+def sender_identity_bind(installation_id: str, platform_user_id: str,
+                         stable_id: str, user_id: str) -> None:
+    """身份绑定 upsert（(installation_id, platform_user_id) 唯一）；两段式避开 ON CONFLICT。"""
+    with _any_tx() as c:
+        cur = c.execute("UPDATE grape_t_channel_sender_identity SET user_id=?, "
+                        "platform_stable_user_id=? WHERE installation_id=? AND platform_user_id=?",
+                        (user_id, stable_id or "", installation_id, platform_user_id))
+        if int(getattr(cur, "rowcount", 0) or 0) <= 0:
+            c.execute("INSERT OR IGNORE INTO grape_t_channel_sender_identity "
+                      "(installation_id, platform_user_id, platform_stable_user_id, user_id) "
+                      "VALUES (?,?,?,?)",
+                      (installation_id, platform_user_id, stable_id or "", user_id))
+
+
+def mapped_user_by_channel(open_id: str, channel_type: str = "") -> str:
+    """按渠道外部 id 取 grape 用户 id（列名白名单：钉钉 dingtalk_user_id，其余 feishu_open_id）。"""
+    if not open_id:
+        return ""
+    col = "dingtalk_user_id" if (channel_type or "") == "dingtalk" else "feishu_open_id"
+    with _any_cursor() as c:
+        c.execute(f"SELECT user_id FROM unified_user_mapping WHERE {col}=? LIMIT 1", (open_id,))
+        row = c.fetchone()
+    return str(row[0]) if row and row[0] else ""
+
+
+def installation_active_configs_any() -> list[tuple]:
+    """活跃安装的 (id, config)，按拓扑自适应连接（替代需要外部 conn 的旧签名）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT id, config FROM grape_t_channel_installation WHERE status='active'")
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def installation_set_config_any(cfg_json: str, row_id) -> int:
+    """就地写回某安装行的 config；返回影响行数。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute("UPDATE grape_t_channel_installation SET config=? WHERE id=?",
+                        (cfg_json, row_id))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def installation_active_installs_any() -> list[tuple]:
+    """活跃安装六列 (id, scope, owner_user_id, repo_key, config, status)。"""
+    with _any_cursor() as c:
+        c.execute("SELECT id, scope, owner_user_id, repo_key, config, status "
+                  "FROM grape_t_channel_installation WHERE status='active'")
+        return [tuple(r) for r in (c.fetchall() or [])]

@@ -185,6 +185,26 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
 第 1 条也解释了历史记录里「彩排 0 失败」与坑 2 并存的矛盾：上一轮 stage env 同样缺 lib 开关，
 多数端点在内部 catch 了 1146，只有写探测把 `PUT /api/chat/config` 的异常记成了失败。
 
+### IM 引擎装配的渠道表接口化（-12，本文件清零）
+- 12 处跨域（5 张 mgmt 表：入站去重 4、入站消息 1、会话绑定 3、发送者身份 2、统一映射 1）下沉成
+  mgmt public 的 9 个任意拓扑原语（`inbound_dedup_seen/claim/set_state/release`、
+  `inbound_message_save_and_mark`、`chat_binding_get/upsert`、`sender_identity_user/bind`、
+  `mapped_user_by_channel`）。
+- **不复用 W2 那批渠道原语**：它们是 `db_registry.cursor("mgmt") + %s + NOW()`，实测在单库/sqlite
+  拓扑下直接抛 `RuntimeError: 需要设置 GRAPE_DSN_MGMT`（只服务三库拓扑）。新一批走
+  `_any_cursor/_any_tx`，单库回落进程库、三库走 mgmt DSN，方言可移植。
+- 两处 sqlite 专有写法改成可移植两段式：绑定的 `ON CONFLICT(id) DO UPDATE`、消息落库后的
+  `ON CONFLICT(...) DO UPDATE`（先 UPDATE 判 rowcount，未命中再 INSERT OR IGNORE）。
+- **顺带修掉「连接归属」隐患**（调研报告点出、非计数项）：`_update_installation_config_sync` /
+  `_lookup_installation_by_app_sync` 原先拿 IM 库的 `_connect()` 连接去查 mgmt 的安装表，
+  三库独立后必然 1146。改为 `installation_*_any` 三个任意拓扑原语，连接由 owner 域选。
+- 修一个改造中暴露的 NameError：`_bind_identity_sync` 的 except 分支还留着 `conn.rollback()`，
+  而 conn 已随原语下沉消失。
+- 全局 **373 → 361**（-12）；基线 **361 / 81 对**。
+- 新增 `im_wiring_smoke`（5 组）：去重位 seen/首占/mark/释放后可重投、绑定首次插入与二次更新
+  不增行、消息落库 + marked 同事务（重投不产生第二行）、身份解析优先级与渠道列白名单、
+  绑定的 user 轨限制与幂等。
+
 ### 租约存储 + 告警求值接口化（-22，两个文件清零）
 - **`runtime/im/bot_lease.py`（11 处）**：渠道租约/安装表归 mgmt，SQL 下沉成 8 个原语
   （`lease_acquire_row` 的「惰性建行 + CAS 抢占」两句同事务、`lease_renew_expiry` 只推到期时间、
