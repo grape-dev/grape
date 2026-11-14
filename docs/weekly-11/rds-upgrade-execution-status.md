@@ -23,7 +23,7 @@
 | P0-3 第二条建视图路径同样受控 | ✅ 完成 | `scripts/domain_view_freshness.py --repair` 对白名单外视图 `DENY`（生产库名族生效，dev 库族不误拦） |
 | P0-4 依赖矩阵看板 | ✅ 完成 | `docs/weekly-11/dependency-matrix.md`（70 表 / 138 对 / 1306 处）；`docs/weekly-11/dependency-board.html`；`--check` 防过期 |
 | P1 R8 守卫（kernel 不得写域表） | ✅ 完成 | `scripts/check-arch.py` R8 硬规则 + 棘轮白名单（77 处存量，10 文件）；`check-arch` RESULT: PASS |
-| P1 归属重定 / 模块归位 | 🟡 部分 | `src/api/knowledge.py` → `src/domains/mgmt/knowledge.py`、`src/api/onboarding.py` → `src/domains/runtime/onboarding.py`（旧路径 sys.modules 别名）；跨域引用 1306→1270、138→136 对。30 张表逐表归属重定未完成（kernel 写 77 处、api 跨域读仍大量存在） |
+| P1 归属重定 / 模块归位 | 🟡 部分（5 个模块） | 已归位：`knowledge`→mgmt、`onboarding`→runtime、`pr_merged_sre_retry`→runtime、`scene_precheck`→runtime（旧路径 sys.modules 别名）；跨域引用 **1306→1262**、138→136 对。30 张表逐表归属重定未完成（kernel 写 77 处、api 仍有 600+ 跨域引用） |
 | P2 N1–N10 服务接口 | ✅ 完成 | runtime 7 个（skills 列表/详情、engine-capabilities、runtime-credentials、meta、tasks/batch、stats/tasks）+ mgmt 4 个（repo bundle、account、knowledge、user-mapping）；mgmt 只读白名单 11 条 |
 | P2 N13 补偿应用端点 | ✅ 完成 | `POST /internal/xwrite/apply`（runtime 9 个 action、mgmt 5 个 action）；幂等键登记表 `grape_t_xwrite_applied`（`cross_write.claim_applied`） |
 | P2 内部契约快照 | ✅ 完成 | `docs/weekly-11/internal-contract.json`（36 条：runtime 17 / mgmt 12 / insight 7），全部 `<domain>_<resource>_<action>` |
@@ -41,7 +41,7 @@
 | 三库基表 | 102（唯一表名 101；`grape_t_merge_gate_log` 在 insight/runtime 各有一份，按 disposition 判给 insight） | `scripts/rds_cutover_check.py --mode baseline` |
 | 三库跨域视图 | **122**（mgmt 30 / runtime 34 / insight 58；P0 已删 60 个零引用视图） | `information_schema.views` + `view-allowlist.txt` |
 | 视图覆盖的非本域表 | 91 张；其中 30 张（60 视图）代码零跨域引用，已于 2026-11-14 删除 | `docs/weekly-11/backup/p0-prune-dryrun.txt`、`no-view-tables.txt` |
-| 代码外域表引用 | 69 张表 / 1270 处跨域（`表×消费域` 136 对）；含归属域共 2690 处 | `scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv` |
+| 代码外域表引用 | 69 张表 / 1262 处跨域（`表×消费域` 136 对）；含归属域共 2721 处 | `scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv` |
 | 域×域分布 | api→mgmt 252 / api→runtime 388；mgmt→runtime 193；kernel→mgmt 88、→runtime 89 | `docs/weekly-11/dependency-matrix.md` |
 | kernel 写域表（R8 存量） | 77 处 / 10 文件（R8 已锁死不得新增；本次未改 kernel 模块布局） | `scripts/check-arch.py` |
 | 内部端点 | 36 条（P2 新增 12 条 + 既有补齐 operationId 16 条） | `docs/weekly-11/internal-contract.json` |
@@ -147,7 +147,7 @@ python3 scripts/verify_domain_isolation.py --host <rds> --user <u> --password <p
 | `6b824e3f3` | refactor(domains): move knowledge and onboarding into owner domains | 已推送 |
 
 验证（提交后复跑）：
-- `pytest tests/contracts tests/arch tests/scripts tests/api/test_mgmt_no_internal_routes.py tests/kernel/test_gsb_route.py` → **189 passed**
+- `pytest tests/contracts tests/arch tests/scripts tests/mgmt/test_channel_w2_writes.py tests/api/test_mgmt_no_internal_routes.py tests/api/test_s103_knowledge_frontend_closure.py tests/kernel/test_gsb_route.py tests/runtime/test_onboarding_standard_task.py` → **212 passed, 2 skipped**
 - `scripts/check-arch.py` → RESULT: PASS（R1–R8）
-- `scripts/foreign_table_refs.py --check` → OK（棘轮未上升，136 对 / 1270 处）
+- `scripts/foreign_table_refs.py --check` → OK（棘轮未上升，136 对 / 1262 处）
 - `tests/kernel` 其余 44 项失败为分支既有（已在 HEAD 干净树 `git worktree` 复现，与本次改动无关）
