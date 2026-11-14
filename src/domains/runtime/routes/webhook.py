@@ -349,15 +349,16 @@ def _duplicate_a2a_skip_response(agent_name: str, repo_key: str, existing_seq: i
     existing_seq 恒指向被去重/排队的那个前序活跃事件 seq。
     Issue #1942：追加共用恢复提示句（force 位置 + 换 key 无效）。
     """
-    return JSONResponse(status_code=200, content={
-        "status": "ok", "seq": 0, "agent": agent_name,
-        "skipped": "duplicate_a2a", "queued": False, "handoff_result": HANDOFF_RESULT_REJECTED,
-        "source_seq": int(source_seq or 0),
-        "reason": reason, "existing_seq": existing_seq,
-        "message": "same issue+agent already has an active a2a event (existing_seq); "
-                   "retry with queue=true to queue it. " + _a2a_force_resend_hint(),
-        "original_event": _duplicate_a2a_original_refs(repo_key, existing_seq),
-    })
+    return _a2a_skip_response(
+        "duplicate_a2a", agent=agent_name, source_seq=source_seq,
+        reason=reason,
+        detail={"existing_seq": int(existing_seq or 0)},
+        extra={
+            "queued": False, "existing_seq": existing_seq,
+            "message": "same issue+agent already has an active a2a event (existing_seq); "
+                       "retry with queue=true to queue it. " + _a2a_force_resend_hint(),
+            "original_event": _duplicate_a2a_original_refs(repo_key, existing_seq),
+        })
 
 
 def _a2a_guard_skip_response(repo_key: str, issue_number, agent_name: str,
@@ -371,52 +372,65 @@ def _a2a_guard_skip_response(repo_key: str, issue_number, agent_name: str,
         record_skip, detect_dispatch_storm, window_key as _guard_window_key)
     _seq = int((info or {}).get("seq") or 0)
     _wkey = _guard_window_key(issue_number, scene_id, agent_name)
-    _base = {"status": "ok", "seq": 0, "agent": agent_name,
-             "skipped": kind, "queued": False, "scene": scene_id,
-             "window_key": _wkey, "handoff_result": HANDOFF_RESULT_REJECTED}
+    _extra = {"queued": False, "scene": scene_id, "window_key": _wkey}
+    _resp_detail = {"existing_seq": _seq}
+    _status = "ok"
     if kind == "downstream_running":
         _reason = f"downstream_running:{_seq}"
         _detail = (f"target={agent_name} downstream={info.get('agent', '')} "
                    f"seq={_seq} status={info.get('status', '')}")
+        _resp_detail.update({"downstream_agent": info.get("agent", ""),
+                             "status": info.get("status", "")})
         # Issue #1973：该分支只在「真实下游 running 且未声明 queue」时到达，
         # 必须显式返回「未入队」语义，不能以 status=ok + skipped + queued=false
         # 让调用方误以为已排队。queueable=true 提示唯一恢复路径 queue=true。
-        _content = dict(_base, status="not_queued",
-                        reason=_reason, downstream_event=info,
-                        queueable=True, retry_with_queue=True,
-                        action="retry_with_queue_true",
-                        message=f"same issue already has a running downstream event "
-                                f"('{info.get('agent', '')}' seq={_seq}); this handoff was "
-                                f"NOT queued and NOT dispatched. Retry with queue=true to "
-                                f"queue it behind the blocking event. "
-                                + _a2a_force_resend_hint())
+        _status = "not_queued"
+        _extra.update(
+            downstream_event=info, queueable=True, retry_with_queue=True,
+            action="retry_with_queue_true",
+            message=f"same issue already has a running downstream event "
+                    f"('{info.get('agent', '')}' seq={_seq}); this handoff was "
+                    f"NOT queued and NOT dispatched. Retry with queue=true to "
+                    f"queue it behind the blocking event. "
+                    + _a2a_force_resend_hint())
     elif kind == "active_dispatch":
         _reason = f"active_dispatch:{_seq}"
         _detail = (f"target={agent_name} scene={scene_id} active_seq={_seq} "
                    f"status={info.get('status', '')}")
-        _content = dict(_base, reason=_reason, existing_seq=_seq,
-                        active_event=info,
-                        message="same issue+scene+agent already has an active a2a event "
-                                "(existing_seq); dispatch skipped to avoid a duplicate idle run. "
-                                + _a2a_force_resend_hint())
+        _resp_detail["status"] = info.get("status", "")
+        _extra.update(
+            existing_seq=_seq, active_event=info,
+            message="same issue+scene+agent already has an active a2a event "
+                    "(existing_seq); dispatch skipped to avoid a duplicate idle run. "
+                    + _a2a_force_resend_hint())
     else:
         _reason = f"duplicate_key:{_seq}"
         _detail = (f"target={agent_name} scene={scene_id} existing_seq={_seq} "
                    f"existing_status={info.get('status', '')} "
                    f"created_at={info.get('created_at', '')}")
-        _content = dict(_base, reason=_reason, existing_seq=_seq,
-                        message="same issue+scene+agent already dispatched within the "
-                                "idempotency time window; duplicate dispatch dropped. "
-                                + _a2a_force_resend_hint(),
-                        original_event=_duplicate_a2a_original_refs(repo_key, _seq))
+        _resp_detail["status"] = info.get("status", "")
+        _extra.update(
+            existing_seq=_seq,
+            message="same issue+scene+agent already dispatched within the "
+                    "idempotency time window; duplicate dispatch dropped. "
+                    + _a2a_force_resend_hint(),
+            original_event=_duplicate_a2a_original_refs(repo_key, _seq))
     record_skip(repo_key, issue_number, agent_name, _reason, detail=_detail)
     detect_dispatch_storm(repo_key, issue_number, agent_name, upcoming=0)
     log.info(f"A2A #1770: dispatch skipped — issue=#{issue_number} agent={agent_name} "
              f"reason={_reason}")
-    return JSONResponse(status_code=200, content=_content)
+    return _a2a_skip_response(
+        kind, agent=agent_name, reason=_reason, status=_status,
+        detail=_resp_detail, extra=_extra)
 
 
 _A2A_SKIP_REASON_STATIC = {
+    "task_cancelled": "Issue #{issue_number} 处于 cancelled 状态，A2A 已拒绝；如需继续请先恢复该 Issue。",
+    "repo_mismatch": ("payload.repository 与 Issue 归属不一致："
+                      "该 Issue 属于 {expected_repository}，本次收到 {actual_repository}；"
+                      "请改用实际归属仓库重试。"),
+    "not_in_scene": ("目标 Agent 不在当前场景流水线节点中，A2A 被拦截；"
+                     "请确认场景已配置 {agent} 节点后重试。"),
     "target_scene_not_found": "目标场景不存在，跨流水线交办被拦截；请确认目标场景配置后重试。",
     "target_scene_missing_node": "目标场景未配置对应节点，跨流水线交办被拦截；请确认目标场景配置后重试。",
     "duplicate_handoff": "目标场景已有进行中的同类交接事件，本次交办被判定为重复；请等待前序交接完成后再试。",
@@ -440,28 +454,29 @@ def _a2a_skip_reason(skipped: str, *, issue_number=None, agent: str = "",
     只暴露调用方可理解的信息（单号/仓库/目标 Agent），不含 token、内部路径、
     scene id 或节点清单。
     """
-    if skipped == "task_cancelled":
-        return f"Issue #{issue_number} 处于 cancelled 状态，A2A 已拒绝；如需继续请先恢复该 Issue。"
-    if skipped == "repo_mismatch":
-        return ("payload.repository 与 Issue 归属不一致："
-                f"该 Issue 属于 {expected_repository}，本次收到 {actual_repository}；"
-                "请改用实际归属仓库重试。")
-    if skipped == "not_in_scene":
-        return (f"目标 Agent 不在当前场景流水线节点中，A2A 被拦截；"
-                f"请确认场景已配置 {agent} 节点后重试。")
-    return _A2A_SKIP_REASON_STATIC.get(
-        skipped, f"A2A 交办被跳过（{skipped}）；请根据 detail 定位原因后重试。")
+    _template = _A2A_SKIP_REASON_STATIC.get(skipped)
+    if not _template:
+        return f"A2A 交办被跳过（{skipped}）；请根据 detail 定位原因后重试。"
+    try:
+        return _template.format(
+            issue_number="" if issue_number is None else issue_number,
+            agent=agent, expected_repository=expected_repository or "-",
+            actual_repository=actual_repository or "-")
+    except (KeyError, IndexError, ValueError):
+        return _template
 
 
 def _a2a_skip_response(skipped: str, *, reason: str = "", detail: dict | None = None,
                        agent: str = "", source_seq: int = 0,
-                       status_code: int = 200,
+                       status: str = "ok", status_code: int = 200,
                        original_event: dict | None = None,
                        extra: dict | None = None) -> JSONResponse:
     """Issue #2555：A2A 跳过响应单点收口（只增不删，既有键保持原值）。
 
     统一补齐 ok=false + skipped + reason + detail；status/seq/agent/
     handoff_result/source_seq 与调用方原有键保持，extra 用于透传分支特有条目。
+    `status` 显式声明（默认 ok，not_in_scene 等历史分支显式传 skipped），
+    避免调用方靠 extra 覆盖契约字段。
     """
     _detail = dict(detail or {})
     if not reason:
@@ -472,7 +487,7 @@ def _a2a_skip_response(skipped: str, *, reason: str = "", detail: dict | None = 
             expected_repository=_detail.get("expected_repository", ""),
             actual_repository=_detail.get("actual_repository", ""))
     content = {
-        "status": "ok", "seq": 0, "agent": agent,
+        "status": status, "seq": 0, "agent": agent,
         "ok": False, "skipped": skipped,
         "reason": reason, "detail": _detail,
         "handoff_result": HANDOFF_RESULT_REJECTED,
@@ -2176,11 +2191,10 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped (nodes={_scene_node_ids})")
                 return _a2a_skip_response(
                     "not_in_scene", agent=agent_name, source_seq=_source_seq,
-                    status_code=409,
+                    status="skipped", status_code=409,
                     reason=_a2a_skip_reason("not_in_scene", agent=agent_name),
                     detail={"agent": agent_name},
                     extra={
-                        "status": "skipped",
                         "scene": _scene_ck.get("scene_id"),
                         "message": f"agent '{agent_name}' is not in the current scene pipeline (scene={_scene_ck.get('scene_id')} nodes={_scene_node_ids})",
                     })

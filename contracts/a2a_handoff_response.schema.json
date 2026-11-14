@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grape.dev/contracts/a2a_handoff_response.schema.json",
   "title": "A2A structured handoff response",
-  "description": "Issue #2050: structured handoff response contract for POST /api/a2a. handoff_result is the machine-checkable outcome callers must inspect: ok = event created and dispatched; rejected = gate/policy/scene check intentionally blocked; failed = dispatch chain failed (no engine / event store failure / exception). source_seq echoes the effective source pipeline segment seq. Issue #2555: every skipped response also carries ok=false plus reason (human-readable Chinese why-skipped + next step) and detail (code-specific locator fields). skipped codes: task_cancelled (detail: issue_number/repository/status) | repo_mismatch (detail: issue_number/expected_repository/actual_repository) | target_scene_not_found / target_scene_missing_node (detail: target_node) | not_in_scene (detail: agent) | pr_subscription_a2a_disabled / sre_subscribed (detail: issue_number) | duplicate_a2a / duplicate_handoff (detail may be {}). Existing codes keep their meaning; new codes may be added, so skipped is intentionally not narrowed to an enum.",
+  "description": "Issue #2050: structured handoff response contract for POST /api/a2a. handoff_result is the machine-checkable outcome callers must inspect: ok = event created and dispatched; rejected = gate/policy/scene check intentionally blocked; failed = dispatch chain failed (no engine / event store failure / exception). source_seq echoes the effective source pipeline segment seq. Issue #2555: every skipped response also carries ok=false, reason (why-skipped + next step) and detail (code-specific locator fields, possibly {}). Issue #2555 codes use human-readable Chinese reasons: task_cancelled (detail: issue_number/repository/status) | repo_mismatch (detail: issue_number/expected_repository/actual_repository) | target_scene_not_found / target_scene_missing_node (detail: target_node) | not_in_scene (detail: agent) | pr_subscription_a2a_disabled / sre_subscribed (detail: issue_number). Pre-existing dedup/dispatch-guard codes keep their machine-readable reason format '<kind>[:<seq>]' for backward compatibility, and now also carry ok=false + detail: duplicate_a2a / duplicate_handoff | downstream_running / duplicate_key / active_dispatch (detail: existing_seq, plus locator fields). Existing codes keep their meaning; new codes may be added, so skipped is intentionally not narrowed to an enum.",
   "type": "object",
   "properties": {
     "status": {
@@ -52,7 +52,7 @@
     },
     "reason": {
       "type": "string",
-      "description": "Issue #2555: human-readable Chinese explanation of why the handoff was skipped and what to do next. Never contains tokens, internal paths, scene ids or node lists."
+      "description": "Issue #2555: why the handoff was skipped + next step. Human-readable Chinese for the Issue #2555 skip codes; pre-existing dedup/dispatch-guard codes keep '<kind>[:<seq>]'. Never contains tokens, internal paths, scene ids or node lists for the Issue #2555 codes."
     },
     "detail": {
       "type": "object",

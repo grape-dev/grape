@@ -168,3 +168,129 @@ class TestRepoMismatchEndpoint:
         resp = _client().post("/api/a2a", json=_body(issue_number="987654"))
         assert resp.json().get("skipped") != "repo_mismatch"
         assert resp.json().get("skipped") != "task_cancelled"
+
+
+class TestDedupAndGuardSkipResponses:
+    """Issue #2555：既有去重/门禁跳过分支也必须统一带 ok=false / reason / detail。"""
+
+    def test_duplicate_a2a_has_ok_reason_detail(self):
+        import json
+
+        from src.domains.runtime.routes.webhook import _duplicate_a2a_skip_response
+        _set_issue(REPO, 2555)
+        resp = _duplicate_a2a_skip_response("qa", REPO, 42)
+        data = json.loads(resp.body)
+        assert data["ok"] is False
+        assert data["skipped"] == "duplicate_a2a"
+        assert data["reason"] == "active_a2a_event"
+        assert data["detail"]["existing_seq"] == 42
+        assert data["handoff_result"] == "rejected"
+
+    def test_guard_skip_has_ok_reason_detail(self):
+        import json
+        from unittest.mock import patch
+
+        from src.domains.runtime.routes.webhook import _a2a_guard_skip_response
+        with patch("src.api.a2a_dispatch_guard.record_skip"), \
+                patch("src.api.a2a_dispatch_guard.detect_dispatch_storm"):
+            resp = _a2a_guard_skip_response(
+                REPO, 2555, "coding", "scene-1", "duplicate_key",
+                {"seq": 42, "status": "completed"})
+        data = json.loads(resp.body)
+        assert data["ok"] is False
+        assert data["skipped"] == "duplicate_key"
+        assert data["reason"] == "duplicate_key:42"
+        assert data["detail"]["existing_seq"] == 42
+        assert data["detail"]["status"] == "completed"
+
+
+class TestCrossPipelineEndpoint:
+    """Issue #2555：跨场景拦截端点级断言 target_node / reason / detail。"""
+
+    def setup_method(self):
+        _clean()
+
+    def _scene_body(self, target_node="vod"):
+        body = _body()
+        body["payload"]["target_scene_id"] = "missing-scene"
+        body["payload"]["target_node"] = target_node
+        return body
+
+    def test_target_scene_not_found_has_ok_reason_detail(self):
+        from unittest.mock import patch
+        with patch("src.api.pipeline_config.get_pipeline_config", return_value=None):
+            resp = _client().post("/api/a2a", json=self._scene_body())
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["skipped"] == "target_scene_not_found"
+        assert data["reason"] and "目标场景" in data["reason"]
+        assert data["detail"]["target_node"] == "vod"
+
+    def test_target_scene_missing_node_has_ok_reason_detail(self):
+        from unittest.mock import patch
+        _cfg = {"display_name": "target", "nodes": [{"id": "issue"}]}
+        with patch("src.api.pipeline_config.get_pipeline_config", return_value=_cfg):
+            resp = _client().post("/api/a2a", json=self._scene_body(target_node="vod"))
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["skipped"] == "target_scene_missing_node"
+        assert data["reason"] and "目标场景" in data["reason"]
+        assert data["detail"]["target_node"] == "vod"
+
+
+class TestSubscriptionEndpoint:
+    """Issue #2555：PR 订阅 / SRE 订阅跳过端点级 reason。"""
+
+    def setup_method(self):
+        _clean()
+
+    def test_pr_subscription_a2a_disabled_has_reason(self):
+        from unittest.mock import patch
+        _set_issue(REPO, 2555)
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_tasks WHERE id=?", ("sess-prsub-2555",))
+            c.execute(
+                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, prompt, issue_id, repo_key) "
+                "VALUES (?, 'sess-row', 0, 'x', '#pr_77', ?)",
+                ("sess-prsub-2555", REPO))
+            db.commit()
+        _session = {"session_key": "sess-prsub-2555", "user_id": 0, "username": ""}
+        with patch("src.domains.runtime.routes.webhook._authorize_a2a", return_value=_session), \
+                patch("src.domains.runtime.routes.webhook._a2a_repo_fallback_check", return_value="ok"), \
+                patch("src.domains.runtime.routes.webhook._a2a_register_repo"):
+            resp = _client().post("/api/a2a", json=_body())
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["skipped"] == "pr_subscription_a2a_disabled"
+        assert data["reason"] and "PR 订阅" in data["reason"]
+        assert data["detail"]["issue_number"] == 2555
+
+    def test_sre_subscribed_has_reason(self):
+        from unittest.mock import patch
+        _set_issue(REPO, 2555)
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM devops_agent_session WHERE repo_key=? AND agent_type='sre'", (REPO,))
+            c.execute(
+                "INSERT OR REPLACE INTO devops_agent_session "
+                "(id, repo_key, agent_type, runtime_id, skill, status, last_active_at, enable, subscribe_events) "
+                "VALUES (?,?,?,?,?,?,datetime('now'),1,?)",
+                ("sre-2555", REPO, "sre", 0, "sre-cli", "running", '["pr_merged"]'))
+            db.commit()
+        _session = {"session_key": "sess-sre-2555", "user_id": 0, "username": ""}
+        body = _body(agent="sre")
+        body["payload"]["pr_number"] = "1433"
+        with patch("src.domains.runtime.routes.webhook._authorize_a2a", return_value=_session), \
+                patch("src.domains.runtime.routes.webhook._a2a_repo_fallback_check", return_value="ok"), \
+                patch("src.domains.runtime.routes.webhook._a2a_register_repo"):
+            resp = _client().post("/api/a2a", json=body)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["skipped"] == "sre_subscribed"
+        assert data["reason"] and "SRE 已订阅" in data["reason"]
+        assert data["detail"]["issue_number"] == 2555
