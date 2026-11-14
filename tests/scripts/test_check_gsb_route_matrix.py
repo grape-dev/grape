@@ -2,7 +2,7 @@
 
 覆盖 QA 复审指出的 fail-open 缺口（负例先红后绿）：
 客户端类别名导入后的直连调用、apps 三个同域进程入口纳入扫描根、
-单文件根目录扫描与原有短名判定不回退。
+单文件根目录扫描、扫描根缺失 fail-closed、原有短名判定不回退。
 """
 import ast
 import importlib.util
@@ -80,3 +80,18 @@ class TestScanRoots:
         violations, files = gate.scan_roots([entry])
         assert files == 1
         assert [v.kind for v in violations] == ["mgmt-remote-client"]
+
+    def test_missing_root_fails_closed(self, tmp_path):
+        missing = tmp_path / "does-not-exist"
+        violations, files = gate.scan_roots([missing])
+        assert files == 0
+        assert [v.kind for v in violations] == ["missing-root"]
+        assert str(missing) in violations[0].render()
+
+    def test_missing_root_is_not_silently_skipped_with_valid_roots(self, tmp_path):
+        entry = tmp_path / "main.py"
+        entry.write_text(_DIRECT_SNIPPET, encoding="utf-8")
+        missing = tmp_path / "does-not-exist"
+        violations, files = gate.scan_roots([entry, missing])
+        assert files == 1
+        assert sorted(v.kind for v in violations) == ["mgmt-remote-client", "missing-root"]

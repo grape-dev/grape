@@ -38,6 +38,7 @@ mgmt 原语对 runtime|insight 调用方 lib-only；runtime 原语本期无 remo
     python3 scripts/check_gsb_route_matrix.py --json         # 机器可读（CI 归档）
 
 退出码：0 = 通过；1 = 命中违规（CI 可红）；2 = fail-closed（没扫到任何文件）。
+扫描根缺失按违规处理（fail-closed），避免配置漂移/路径写错时静默跳过。
 """
 from __future__ import annotations
 
@@ -82,7 +83,10 @@ class Violation:
     detail: str
 
     def render(self) -> str:
-        rel = self.path.relative_to(REPO_ROOT)
+        try:
+            rel = self.path.relative_to(REPO_ROOT)
+        except ValueError:
+            rel = self.path
         return f"[{self.root}] {rel}:{self.line} {self.kind}: {self.detail}"
 
 
@@ -153,6 +157,10 @@ def scan_roots(roots: list[Path]) -> tuple[list[Violation], int]:
     violations: list[Violation] = []
     files = 0
     for root in roots:
+        if not root.exists():
+            violations.append(Violation(str(root), root, 0,
+                                        "missing-root", f"scan root not found: {root}"))
+            continue
         if root.is_file():
             candidates = [root]
         else:
