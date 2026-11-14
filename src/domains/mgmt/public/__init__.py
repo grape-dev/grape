@@ -736,6 +736,9 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "installation_other_refs_any", "installation_holders_any",
            "installation_user_channel_rows_any", "clear_user_mapping_feishu_any",
            "delete_feishu_onboard_task_any",
+           # IM 身份解析 / 巡检执行卡（runtime/im/handler_async.py；任意拓扑）
+           "sender_identity_user_by_app_any", "installation_owner_by_app_any",
+           "autopilot_task_brief_any", "scene_names_by_repo_any",
            "health"]
 
 
@@ -1737,6 +1740,26 @@ _ANY_QUERIES: dict[str, str] = {
         "ORDER BY updated_at DESC"),
     # 扫码接入任务删除（含 app_secret/qr_url 敏感数据；飞书专属链路）
     "onboard_task_delete_by_app": "DELETE FROM feishu_onboard_task WHERE app_id=?",
+    # ── IM 身份解析 / 巡检执行卡（runtime/im/handler_async.py）──
+    # 四张表（渠道身份、渠道安装、巡检任务、流水线场景）都归本域：原实现在 runtime 进程里
+    # 用进程主库游标直发 SQL，三库拓扑下本域表不在该库（视图 0）→ 1146 被内部 except 吞成
+    # 「查不到用户 / 无场景」。身份反查的两表 JOIN 不跨域，仍留一条；巡检执行行与任务表
+    # 的跨域 JOIN 已由调用方拆成「runtime 取执行行 + 本域取简报」。谓词/列序逐字照抄
+    # （含 D105 的字符串哨兵 '0'：TEXT 列 `>0` 在 MySQL 恒假）。
+    "sender_identity_user_by_app": (
+        "SELECT i.user_id FROM grape_t_channel_sender_identity i "
+        "JOIN grape_t_channel_installation ci ON ci.id=i.installation_id "
+        "WHERE ci.legacy_app_id=? AND i.platform_user_id=? "
+        "AND i.user_id IS NOT NULL AND i.user_id != '' AND i.user_id != '0' LIMIT 1"),
+    "installation_owner_by_app_user_scope": (
+        "SELECT owner_user_id FROM grape_t_channel_installation "
+        "WHERE legacy_app_id=? AND scope='user' "
+        "AND owner_user_id IS NOT NULL AND owner_user_id<>'' LIMIT 1"),
+    "autopilot_task_brief_row": (
+        "SELECT repo_key, name FROM autopilot_tasks WHERE id=? LIMIT 1"),
+    "scene_names_by_repo": (
+        "SELECT scene_id, name FROM devops_pipeline_scene "
+        "WHERE repo_key=? AND is_active=1 ORDER BY name"),
     # ── 事件知识清理 + 账户名解析（runtime/routes/events.py：原「mgmt_lib 优先 + 本地兜底 SQL」
     # 的兜底侧与引擎 scope 子查询上移；列序/谓词与原语句逐字一致，写语句不含 SQL 专有语法）──
     "knowledge_obs_keys_scoped": (
@@ -1935,6 +1958,41 @@ def delete_feishu_onboard_task_any(app_id: str) -> int:
     if not app_id:
         return 0
     return exec_any("onboard_task_delete_by_app", (app_id,))
+
+
+# ---------- IM 身份解析 / 巡检执行卡（runtime/im/handler_async；任意拓扑） ----------
+#
+# 原实现在 runtime 进程里用进程主库游标直发这四条 SQL：单库拓扑能跑，三库拆分后
+# 渠道安装 / 渠道身份 / 巡检任务 / 流水线场景四表只在 mgmt 库（视图 0）→ 1146 被内部
+# except 吞成「查不到用户 / 无场景」，表现为钉钉等新引擎渠道消息 uid=0（名下没有仓库）、
+# 巡检卡片的场景下拉恒空。身份反查的两表 JOIN 不跨域（同属本域），仍留一条具名查询。
+
+
+def sender_identity_user_by_app_any(app_id: str, sender_id: str) -> str:
+    """按 (app, 平台用户) 取发送者绑定用户 id（任意拓扑）；无行/参数空返回空串。"""
+    if not app_id or not sender_id:
+        return ""
+    row = read_one_any("sender_identity_user_by_app", (app_id, str(sender_id)))
+    return str(row[0]) if row else ""
+
+
+def installation_owner_by_app_any(app_id: str) -> str:
+    """按 app 取 user 轨安装的 owner_user_id（单用户 bot 兜底）；无行返回空串。"""
+    if not app_id:
+        return ""
+    row = read_one_any("installation_owner_by_app_user_scope", (app_id,))
+    return str(row[0]) if row else ""
+
+
+def autopilot_task_brief_any(task_id) -> tuple | None:
+    """取巡检任务的 (repo_key, name)（任意拓扑）；不存在返回 None。"""
+    row = read_one_any("autopilot_task_brief_row", (int(task_id),))
+    return tuple(row) if row else None
+
+
+def scene_names_by_repo_any(repo_key: str) -> list[tuple]:
+    """仓库下在用场景的 (scene_id, name) 列表，按 name 排序；无行返回空列表。"""
+    return [tuple(r) for r in read_all_any("scene_names_by_repo", (repo_key or "",))]
 
 
 # ---------- 仓库级 bot token / 登录名（kernel/token_resolver；任意拓扑） ----------

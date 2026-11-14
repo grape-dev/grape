@@ -1651,6 +1651,75 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 ---
 
+### 7.13 runtime IM 异步处理器身份解析 / 巡检执行卡收口（2026-11-15 本批）
+
+- 文件：`src/domains/runtime/im/handler_async.py`（runtime 域），**6 处 → 0**（单轮做完，未分两轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，全部归 mgmt）：
+  - `grape_t_channel_installation` × 2：原行 347（身份反查与身份表 JOIN）、359（user 轨安装的
+    owner_user_id 兜底）；
+  - `grape_t_channel_sender_identity` × 1：原行 346（身份反查的 FROM 侧，与上行是同一条语句）；
+  - `autopilot_tasks` × 1：原行 391（`autopilot_executions JOIN autopilot_tasks`，
+    执行表归 runtime、任务表归 mgmt，是真正的跨域 JOIN）；
+  - `devops_pipeline_scene` × 2：原行 397（巡检执行卡里的场景列表）、431（派发时的场景选择），
+    431 是「lib 命中走 lib，否则进程库兜底 SQL」的兜底侧。
+- owner 侧新增（`?` 占位符，列序/谓词逐字照抄）：
+  1) mgmt `_ANY_QUERIES` 补 4 条：`sender_identity_user_by_app`、
+     `installation_owner_by_app_user_scope`、`autopilot_task_brief_row`、`scene_names_by_repo`；
+  2) mgmt 侧 4 个薄函数：`sender_identity_user_by_app_any`、`installation_owner_by_app_any`、
+     `autopilot_task_brief_any`、`scene_names_by_repo_any`；
+  3) runtime `_ANY_QUERIES` 补 1 条 `autopilot_execution_detail`（`task_id, findings_json,
+     result, status`）与薄函数 `autopilot_execution_detail_any`（执行表归本域，不产生跨域引用，
+     但同样是「原 JOIN 里属于本域的那半条语句」）。
+- 设计取舍：
+  1) **跨域 JOIN 拆成两段 + Python 内连接**：`autopilot_executions ⋈ autopilot_tasks` 原先在
+     runtime 进程库里一次查全；现改为 runtime 取执行行 → 把 `task_id` 交给 mgmt 取
+     `(repo_key, name)`，在 Python 里按原列序（`t.repo_key, t.name, e.findings_json,
+     e.result, e.status`）拼回。任务行缺失时与原 INNER JOIN 一样返回 `None`（烟测有显式用例）。
+  2) **身份反查的两表 JOIN 不下放拆解**：身份表与安装表同属 mgmt，JOIN 不是跨域；拆成两次
+     往返反而把「一次命中」变成「两次可能不一致的读」。所以整条语句进 mgmt 具名查询。
+  3) **删掉 lib 优先 / 本地兜底双分支**：397 原走 `domain_read` 双 lib（`runtime_lib` +
+     `mgmt_lib`），431 原走 `mgmt_lib(foreign_only=True)`；兜底 SQL 正是跨域统计来源，且在
+     单库彩排里一直“绿”，掩盖了三库拓扑下 runtime 进程库根本没有这四张表（无视图 → 1146）。
+     统一到任意拓扑原语（自有 DSN → 归属域连接；单库 → 进程主库 + `db_lock`），SQL 只在
+     归属域留一份。
+  4) **「一次查全」的性能意图显式放弃**：原实现靠同一把 `db_lock` + 同一游标省往返；现在三段
+     各自持锁。执行卡是低频路径（点开一条巡检记录），换来的是两条拓扑同源与可移植，代价是
+     2 次额外往返——在台账里写明，避免被误读为性能回归。
+  5) **`get_user_id_by_app_id` 的返回类型不动**：两跳都仍返回 `str`（D105 uuid 保形），
+     函数注解里的 `int | None` 是既有口径，不在本批改签名（调用方统一 `or 0`）。
+- 修的存量 bug：
+  1) **三库拓扑下钉钉等新引擎渠道消息 uid=0（功能面）**：身份反查与安装兜底都打在 runtime
+     进程主库，三库拆分后这两张表只在 mgmt 库 → 1146 被 `except: pass` 吞成「查不到用户」，
+     消息走「uid=0 → 名下没有仓库」的降级分支。现走 mgmt 原语，两条拓扑都命中。
+  2) **巡检执行卡场景下拉恒空（功能面）**：`_autopilot_get_scenes` 的 lib 命中分支把
+     `c` 重新赋值成结果列表，随后 `return [... for r in rows]` 读的 `rows` **在该分支从未绑定**
+     → `NameError` 被外层 `except` 吞掉，函数恒返回 `[]`。也就是说凡有 mgmt lib 的拓扑
+     （含生产），派发时的场景选择根本没数据。改为单一原语路径后该分支消失。
+     397 的同一查询在 `_autopilot_exec_row` 里则会走 `c.execute` 兜底——同一份 SQL 两个函数
+     两种结果，本批一并统一。
+  3) **静默 except（卫生面）**：`get_user_id_by_app_id` 的两处 `except Exception: pass` 改为
+     带 `log.debug` 的显式降级（行为不变：第一跳失败仍进第二跳，第二跳失败返回 `None`），
+     该文件静默 except 计数下降，基线未上调。
+- 验证：`py_compile` 三文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/im_handler_async_smoke.py`
+  **ALL 68 CHECKS PASSED**（含边界与否定用例：5 条新语句与调用点原 SQL 逐字对拍、无
+  `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`、未登记查询名 KeyError；身份命中优先于安装
+  owner、不给 sender_id 跳过身份跳、身份 `user_id` 为 `'0'`/空串/NULL 三态都不算命中、
+  `scope='repo'` 不返回 owner、owner 空串/NULL/无行/空 app → None、两个原语都异常时返回
+  None 不抛；执行行列序拼装、findings 坏 JSON 与空串降级 `{}`、执行行缺失与**任务行缺失**
+  都返回 None、场景只取 `is_active=1` 且按 name 排序、`name` 为 NULL 回退 `scene_id`；
+  场景函数无场景/空键/缺表三种降级、lib 分支变量错位 bug 不再存在；空参数路径 0 次查询、
+  场景查询按原语句照查空键；**有自有 DSN 时 5 个原语全部走 `db_registry` 不碰进程库**；
+  源码面 0 条四表 SQL、5 个原语全部接上、不再借 `engine_wiring`/lib 句柄查场景）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **190 → 184**（-6），对 **60 → 59**（`autopilot_tasks←runtime` 6 → 5、
+  `grape_t_channel_sender_identity←runtime` 1 → 0（该对清零，故对数减 1）；
+  `grape_t_channel_installation←runtime` 6 → 4、`devops_pipeline_scene←runtime` 4 → 2，
+  这两张表仍有其它消费者）；基线 `foreign-refs-allowlist.csv` 收紧为 184 / 59；
+  依赖看板与作业单同步刷新（下一批头名：`runtime/engine/scheduler.py` 6 处）。
+
+---
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

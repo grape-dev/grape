@@ -335,67 +335,50 @@ def get_user_id_by_app_id(app_id: str, sender_id: str = "") -> int | None:
       2. 新引擎 `grape_t_channel_installation`（user 轨安装的 owner，兜底：单用户 bot）。
     A2 收尾（Phase B）删掉了 legacy `chat_agent_session.im_app_id` 那一跳——
     该列已 DROP，安装表是唯一真相。
+
+    SQL 归属：两跳都读 mgmt 域的表（渠道身份 + 渠道安装），语句已在 mgmt public 里
+    登记为任意拓扑原语；本函数只负责「先精确、后兜底」的顺序与异常降级。
     """
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        # 新引擎：发送者身份绑定（需要 sender_id）
-        if sender_id:
-            try:
-                c.execute(
-                    "SELECT i.user_id FROM grape_t_channel_sender_identity i "
-                    "JOIN grape_t_channel_installation ci ON ci.id=i.installation_id "
-                    "WHERE ci.legacy_app_id=? AND i.platform_user_id=? "
-                    "AND i.user_id IS NOT NULL AND i.user_id != '' AND i.user_id != '0' LIMIT 1",  # D105：字符串哨兵（TEXT 列 >0 在 MySQL 恒假）
-                    (app_id, str(sender_id)))
-                row = c.fetchone()
-                if row:
-                    return str(row[0])  # D105：uuid 字符串保形
-            except Exception:
-                pass
-        # 新引擎：user 轨安装的归属者（单用户 bot 兜底）
+    from src.domains.mgmt import public as _mgmt_public
+
+    # 新引擎：发送者身份绑定（需要 sender_id）
+    if sender_id:
         try:
-            c.execute(
-                "SELECT owner_user_id FROM grape_t_channel_installation "
-                "WHERE legacy_app_id=? AND scope='user' "
-                "AND owner_user_id IS NOT NULL AND owner_user_id<>'' LIMIT 1",
-                (app_id,))
-            row = c.fetchone()
-            if row:
-                return str(row[0])  # D105：uuid 字符串保形
-        except Exception:
-            pass
+            _uid = _mgmt_public.sender_identity_user_by_app_any(app_id, str(sender_id))
+            if _uid:
+                return _uid
+        except Exception as exc:  # noqa: BLE001 - 身份反查失败走下一跳
+            log.debug(f"[im] sender identity lookup failed app={app_id}: {exc}")
+    # 新引擎：user 轨安装的归属者（单用户 bot 兜底）
+    try:
+        _owner = _mgmt_public.installation_owner_by_app_any(app_id)
+        if _owner:
+            return _owner  # D105：uuid 字符串保形
+    except Exception as exc:  # noqa: BLE001 - 解析不到就是 uid 未知
+        log.debug(f"[im] installation owner lookup failed app={app_id}: {exc}")
     return None
 
 _SEV_MARK = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 
 def _autopilot_exec_row(exec_id: int):
-    """查 exec + 所属任务 + 仓库 + 场景列表（一次查全，减少 DB 往返延迟）。"""
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        from src.kernel.domain_read import mgmt_lib as _mgmt_lib_ap
-        from src.kernel.domain_read import runtime_lib as _runtime_lib_ap
-        _rt_ap = _runtime_lib_ap()
-        _mg_ap = _mgmt_lib_ap()
-        row = None
-        if _rt_ap is not None and _mg_ap is not None:
-            _exec = _rt_ap.get_autopilot_execution(exec_id)
-            if _exec:
-                _task = _mg_ap.get_autopilot_task_brief(_exec[0])
-                if _task:
-                    row = (_task[0], _task[1], _exec[1], _exec[2], _exec[3])
-        if row is None:
-            row = c.execute(
-                "SELECT t.repo_key, t.name, e.findings_json, e.result, e.status "
-                "FROM autopilot_executions e JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
-                (exec_id,)).fetchone()
-        if not row:
-            return None
-        # 同一事务查场景列表（省一次 db_lock + 往返）
-        scene_rows = c.execute(
-            "SELECT scene_id, name FROM devops_pipeline_scene "
-            "WHERE repo_key=? AND is_active=1 ORDER BY name", (row[0] or "",)).fetchall()
+    """查 exec + 所属任务 + 仓库 + 场景列表（跨域 JOIN 拆成本域查询 + Python 内连接）。
+
+    执行记录归 runtime、任务与场景归 mgmt：原实现把执行记录与任务表写成一条跨域
+    JOIN（外加一条场景查询）。现在两段各走归属域原语，在 Python 里拼回同一行——
+    列序与原 SELECT 一致，任务行缺失时与原 JOIN 一样返回 None。
+    """
+    from src.domains.runtime import public as _rt_public
+    from src.domains.mgmt import public as _mgmt_public
+
+    _exec = _rt_public.autopilot_execution_detail_any(exec_id)
+    if not _exec:
+        return None
+    _task = _mgmt_public.autopilot_task_brief_any(_exec[0])
+    if not _task:
+        return None
+    row = (_task[0], _task[1], _exec[1], _exec[2], _exec[3])
+    # 场景列表按归属域原语查（repo_key 取自已拼好的行，与改前同源）
+    scene_rows = _mgmt_public.scene_names_by_repo_any(row[0] or "")
     try:
         findings_data = json.loads(row[2]) if row[2] else {}
     except json.JSONDecodeError:
@@ -419,17 +402,8 @@ def _autopilot_user_allowed(uid: int, repo_key: str) -> bool:
 def _autopilot_get_scenes(repo_key: str) -> list:
     """查仓库的场景列表（供派发时选择目标场景）。返回 [{scene_id, name}]。"""
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import mgmt_lib as _mg_lib_b5f6ee_f
-            _mg_lib_b5f6ee = _mg_lib_b5f6ee_f(foreign_only=True)
-            if _mg_lib_b5f6ee is not None:
-                c = _mg_lib_b5f6ee.read_all("devops_pipeline_scene_b5f6ee", (repo_key,)).fetchall()
-            else:
-                rows = c.execute(
-                    "SELECT scene_id, name FROM devops_pipeline_scene "
-                    "WHERE repo_key=? AND is_active=1 ORDER BY name", (repo_key,)).fetchall()
+        from src.domains.mgmt import public as _mgmt_public
+        rows = _mgmt_public.scene_names_by_repo_any(repo_key)
         return [{"scene_id": r[0], "name": r[1] or r[0]} for r in rows]
     except Exception as e:
         log.warning(f"[finding-card] get scenes failed: {e}")

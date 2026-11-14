@@ -1344,7 +1344,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "dashboard_avg_durations", "dashboard_workers", "dashboard_local_runtimes",
            "dashboard_runtimes_with_credential", "credential_brief", "credential_scope_owner",
            "task_event_map", "runtime_device_map", "agent_sessions_with_runtime",
-           "efficiency_issue_contrib", "task_issue_attribution"]
+           "efficiency_issue_contrib", "task_issue_attribution",
+           # IM 巡检执行卡（runtime/im/handler_async.py；任意拓扑）
+           "autopilot_execution_detail_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2128,6 +2130,11 @@ _ANY_QUERIES: dict[str, str] = {
     "autopilot_findings_set": "UPDATE autopilot_executions SET findings_json=? WHERE id=?",
     "autopilot_execution_findings_result": (
         "SELECT findings_json, result FROM autopilot_executions WHERE id=?"),
+    # IM 巡检执行卡（runtime/im/handler_async.py）：与 mgmt 的 autopilot_tasks 原为一条
+    # 跨域 JOIN，拆成「本域取执行行 + 归属域取任务简报」后在 Python 内连接。列序照抄原
+    # SELECT 中属于本域的三列（task_id 用于去归属域取 repo_key/name）。
+    "autopilot_execution_detail": (
+        "SELECT task_id, findings_json, result, status FROM autopilot_executions WHERE id=?"),
     "skill_display_name_official": (
         "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'"),
 }
@@ -2222,6 +2229,11 @@ def set_autopilot_findings_any(exec_id, findings_json: str) -> int:
 def autopilot_execution_findings_result_any(exec_id) -> tuple | None:
     """取执行记录的 (findings_json, result)（任意拓扑）；不存在返回 None。"""
     return read_one_any("autopilot_execution_findings_result", (int(exec_id),))
+
+
+def autopilot_execution_detail_any(exec_id) -> tuple | None:
+    """取执行记录的 (task_id, findings_json, result, status)（任意拓扑）；无行返回 None。"""
+    return read_one_any("autopilot_execution_detail", (int(exec_id),))
 
 
 def skill_display_name_official_any(skill_name: str) -> str:
