@@ -3,7 +3,9 @@
 需求（用户 2026-10-19）：① 每个引擎的 token ② 每个任务的 token ③ **每个任务(issue)每个阶段事件**的 token
 （例：issue #1 走了 vod → issue 两个阶段 → 两个事件）。引擎内部 ACP 步骤那层暂不做。
 
-数据源全是现成明细 `obs_llm_usage`（join `agent_tasks` 取 issue_id）——**不需要新增采集**；
+数据源全是现成明细 `obs_llm_usage`（本域），任务行的 issue_id 由 runtime 侧 `agent_tasks`
+经 `runtime_public.task_issue_id_rows()` 批量取回后在 Python 内连接补上（原为跨库 JOIN，
+三库独立后该 JOIN 必 1146）——**不需要新增采集**；
 `agent_type` 就是阶段（vod/issue/coding/qa/sre…），任务行上带 issue_id。
 
 口径与坑：
@@ -32,6 +34,11 @@ TOKEN_COLS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write
 RANGES = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720}
 
 DEFAULT_RANGE = "24h"
+
+#: 明细列序（与 insight public `list_usage_detail_window` 的 SELECT 逐列一致；
+#: 行→dict 映射留在本模块，owner 只返回元组）
+_DETAIL_COLS: Tuple[str, ...] = ("task_id", "agent_type", "engine_id", "repo_key", "run_kind",
+                                 "run_id", "created_at") + TOKEN_COLS + ("cost_usd",)
 
 #: 每类返回的最大行数
 MAX_ROWS = 200
@@ -109,23 +116,26 @@ def _by(rows: List[Dict[str, Any]], key: Callable[[Dict[str, Any]], Tuple],
 
 def _scope(user: Optional[Dict[str, Any]], repo: str = "", global_scope: bool = False,
            engine_ids: Optional[List[int]] = None
-           ) -> Tuple[str, List[Any], bool]:
-    """可见性过滤：返回 (where 片段, 参数, 是否可用)。**空集合 → (_, _, False)**（不降级）。
+           ) -> Tuple[List[str], List[int], bool]:
+    """可见性过滤：返回 (repo_key 候选集, engine_id 集合, 是否可用)。**空集合 → False**（不降级）。
 
     - `global_scope=True`（L2）→ 不过滤；
     - `repo` 给了 → 只该仓（L1 越权 → 空集合，由调用方转 404）；
     - 否则 → 调用者可见仓库 ∪ 可见引擎（`engine_ids` 由路由传入，已在别处校验）。
+
+    只返回**结构化过滤值**、不再拼 SQL 片段：谓词由表归属域（insight public
+    `list_usage_detail_window`）按列名白名单拼装，值一律 `?` 参数化。
     """
     if global_scope:
-        return "", [], True
+        return [], [], True
     if repo:
         from src.kernel.repo_key import to_repo_key
         from src.domains.insight.observability.overview import visible_repo_keys
         want = set(repo_key_candidates(to_repo_key(repo)))  # S94/D69：候选集统一（S25 helper）
         hit = sorted(want & set(visible_repo_keys(user or {})))
         if not hit:
-            return "", [], False
-        return "u.repo_key IN (%s)" % ",".join("?" * len(hit)), hit, True
+            return [], [], False
+        return hit, [], True
     keys: List[str] = []
     try:
         from src.domains.insight.observability.overview import visible_repo_keys
@@ -133,44 +143,49 @@ def _scope(user: Optional[Dict[str, Any]], repo: str = "", global_scope: bool = 
     except Exception as e:
         log.warning(f"obs tokens scope repos failed: {e}")
     ids = [int(x) for x in (engine_ids or []) if x]
-    conds, params = [], []
-    if keys:
-        conds.append("u.repo_key IN (%s)" % ",".join("?" * len(keys)))
-        params.extend(keys)
-    if ids:
-        conds.append("u.engine_id IN (%s)" % ",".join("?" * len(ids)))
-        params.extend(ids)
-    if not conds:
-        return "", [], False
-    return "(" + " OR ".join(conds) + ")", params, True
+    if not keys and not ids:
+        return [], [], False
+    return keys, ids, True
 
-def _fetch(start: datetime, end: datetime, where: str, params: List[Any],
+def _fetch(start: datetime, end: datetime, repo_keys: Optional[List[str]] = None,
+           engine_ids: Optional[List[int]] = None,
            task_id: str = "", issue_id: str = "", limit: int = 20000) -> List[Dict[str, Any]]:
-    """取窗口内明细（SQL 宽松窗口 ±1 天粗筛 + Python 精确窗口，见模块注释）。"""
-    from src.kernel.session_manager import db, db_lock
-    sql = ("SELECT u.task_id, u.agent_type, u.engine_id, u.repo_key, u.run_kind, u.run_id,"
-           " u.created_at, u.input_tokens, u.output_tokens, u.cache_read_tokens,"
-           " u.cache_write_tokens, u.reasoning_tokens, u.cost_usd, t.issue_id"
-           " FROM obs_llm_usage u LEFT JOIN agent_tasks t ON t.id = u.task_id"
-           " WHERE u.created_at >= ? AND u.created_at <= ?")
-    p: List[Any] = [_iso(start - timedelta(days=1)), _iso(end + timedelta(days=1))]
-    if where:
-        sql += " AND " + where
-        p.extend(params)
-    if task_id:
-        sql += " AND u.task_id = ?"
-        p.append(str(task_id))
-    sql += " LIMIT ?"
-    p.append(int(limit))
+    """取窗口内明细（SQL 宽松窗口 ±1 天粗筛 + Python 精确窗口，见模块注释）。
+
+    跨库 JOIN 已拆成两步（表各归其域，本进程不写外域 SQL）：
+    ① 明细窗口读 → 本域 `insight_public.list_usage_detail_window()`；
+    ② `task_id → issue_id` → `runtime_public.task_issue_id_rows()` 批量取（分块 500），
+       在 Python 内连接补 `issue_id`（任务行不存在 → None，即原 LEFT JOIN 的 NULL 侧）。
+    任一环节失败 → 空窗口 + warning（与原「单条宽 SQL 失败即空」同口径）。
+    """
+    from src.domains.insight import public as insight_public
+    from src.domains.runtime import public as runtime_public
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(sql, tuple(p))
-            cols = [d[0] for d in c.description]
-            raw = [dict(zip(cols, r)) for r in c.fetchall()]
+        raw_rows = insight_public.list_usage_detail_window(
+            _iso(start - timedelta(days=1)), _iso(end + timedelta(days=1)),
+            repo_keys=repo_keys or (), engine_ids=engine_ids or (),
+            task_id=str(task_id) if task_id else "", limit=limit)
     except Exception as e:
         log.warning(f"obs tokens fetch failed: {e}")
         return []
+    raw = [dict(zip(_DETAIL_COLS, r)) for r in raw_rows]
+    if not raw:
+        return []
+    ids: List[str] = []
+    seen: set = set()
+    for r in raw:
+        t = str(r.get("task_id") or "")
+        if t and t not in seen:
+            seen.add(t)
+            ids.append(t)
+    try:
+        pairs = runtime_public.task_issue_id_rows(ids)
+    except Exception as e:
+        log.warning(f"obs tokens issue map failed: {e}")
+        return []
+    issue_of = {str(rid): iid for rid, iid in pairs}   # 关联口径：id 与 task_id 字符串形式相等
+    for r in raw:
+        r["issue_id"] = issue_of.get(str(r.get("task_id") or ""))
     out: List[Dict[str, Any]] = []
     for r in raw:
         d = _dt(r.get("created_at"))
@@ -186,12 +201,12 @@ def engine_totals(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
                   now: Optional[datetime] = None) -> Dict[str, Any]:
     """① 每个引擎的 token 汇总（含它跑过的任务数）。"""
     start, end = window_of(range_str, now)
-    where, params, ok = _scope(user, repo, global_scope, engine_ids)
+    scope_keys, scope_ids, ok = _scope(user, repo, global_scope, engine_ids)
     out: Dict[str, Any] = {"window": {"start": _iso(start), "end": _iso(end), "range": range_str}}
     if not ok:
         out.update({"engines": [], "total": _sum_rows([])})
         return out
-    rows = _fetch(start, end, where, params)
+    rows = _fetch(start, end, scope_keys, scope_ids)
     engines = _by(rows, lambda r: (int(r.get("engine_id") or 0),), ("engine_id",))
     for e in engines:
         e["tasks"] = len({r.get("task_id") for r in rows
@@ -208,12 +223,12 @@ def task_totals(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
                 limit: int = MAX_ROWS, now: Optional[datetime] = None) -> Dict[str, Any]:
     """② 每个任务/运行的 token 汇总（含 issue/阶段/引擎）。"""
     start, end = window_of(range_str, now)
-    where, params, ok = _scope(user, repo, global_scope)
+    scope_keys, scope_ids, ok = _scope(user, repo, global_scope)
     out: Dict[str, Any] = {"window": {"start": _iso(start), "end": _iso(end), "range": range_str}}
     if not ok:
         out.update({"tasks": [], "total": _sum_rows([])})
         return out
-    rows = _fetch(start, end, where, params)
+    rows = _fetch(start, end, scope_keys, scope_ids)
     if run_kind:
         rows = [r for r in rows if str(r.get("run_kind") or "task") == run_kind]
     tasks = _by(rows, lambda r: (str(r.get("task_id") or ""), str(r.get("run_kind") or "task"),
@@ -229,12 +244,12 @@ def stage_totals(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
                  now: Optional[datetime] = None) -> Dict[str, Any]:
     """③ 阶段事件级：按 (issue, 阶段) 聚合 —— 一个 issue 走 vod→issue 就是两行。"""
     start, end = window_of(range_str, now)
-    where, params, ok = _scope(user, repo, global_scope)
+    scope_keys, scope_ids, ok = _scope(user, repo, global_scope)
     out: Dict[str, Any] = {"window": {"start": _iso(start), "end": _iso(end), "range": range_str}}
     if not ok:
         out.update({"stages": [], "total": _sum_rows([])})
         return out
-    rows = _fetch(start, end, where, params, issue_id=issue_id)
+    rows = _fetch(start, end, scope_keys, scope_ids, issue_id=issue_id)
     stages = _by(rows, lambda r: (str(r.get("issue_id") or ""), str(r.get("agent_type") or "")),
                  ("issue_id", "stage"))
     for s in stages:
@@ -267,19 +282,20 @@ def summary(user=None, repo: str = "", range_str: str = DEFAULT_RANGE,
             "equal": e["total"]["total"] == t["total"]["total"] == s["total"]["total"]}
 
 def _engine_names(ids: List[int]) -> Dict[int, str]:
-    """engine_id → 显示名（优先 device_name，退回 name）。"""
+    """engine_id → 显示名（优先 device_name，退回 name）。
+
+    表 `runtime_credentials` 归 runtime：三库独立后本进程库没有它（视图 0），
+    原直连 SQL 必 1146 被吞成「无显示名」。改调 runtime public 批量读口
+    （`COALESCE(NULLIF(device_name,''), name, '')` 表达式与列序原样保留）。
+    """
     ids = sorted({int(i) for i in ids if i})
     if not ids:
         return {}
-    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime import public as runtime_public
     out: Dict[int, str] = {}
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id, COALESCE(NULLIF(device_name,''), name, '') FROM runtime_credentials"
-                      " WHERE id IN (%s)" % ",".join("?" * len(ids)), tuple(ids))
-            for rid, nm in c.fetchall():
-                out[int(rid)] = str(nm or "")
+        for rid, nm in runtime_public.runtime_credential_display_names(ids):
+            out[int(rid)] = str(nm or "")
     except Exception as e:
         log.warning(f"obs tokens engine names failed: {e}")
     return out

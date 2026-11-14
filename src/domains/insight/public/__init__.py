@@ -335,7 +335,7 @@ __all__ += ["list_repo_credential_rows", "aggregate_llm_usage", "read_one_any", 
             "clear_repo_credential_value", "any_repo_credential", "repo_keys_sharing_value",
             "repo_keys_with_nonempty_credential",
             "list_repo_credentials_with_nonempty_value", "update_repo_credential_values",
-            "list_repo_credentials_without_id"]
+            "list_repo_credentials_without_id", "list_usage_detail_window"]
 
 
 # ---------- 观测表聚合（obs_llm_usage 归 insight）----------
@@ -354,6 +354,57 @@ def aggregate_llm_usage(engine_ids: list[int]) -> list[tuple]:
             f"SELECT engine_id, model_key, model_raw, COUNT(*) AS cnt, MAX(created_at) AS last_used "
             f"FROM obs_llm_usage WHERE engine_id IN ({ph}) "
             f"GROUP BY engine_id, model_key, model_raw", tuple(ids))
+        return list(c.fetchall() or [])
+
+
+# ---------- LLM 用量明细窗口读（obs_llm_usage 归 insight）：token 三级归因 ----------
+#
+# 原实现在 insight 侧 tokens.py 里发一条跨库宽 SQL（obs_llm_usage 左连接 agent_tasks）。
+# `agent_tasks` 归 runtime，三库独立后本进程库里没有该表（视图 0）→ 整条语句 1146，
+# 被调用方 except 吞成「空窗口」。跨域 JOIN 的正解是拆开：
+#   ① 本域明细窗口读（本函数）；② runtime public `task_issue_ids()` 批量取映射；
+#   ③ 调用方在 Python 内连接补 issue_id（缺失即 LEFT JOIN 的 NULL 侧）。
+#
+# 列序与原宽 SQL 的 `u.*` 侧逐字一致（task_id..cost_usd）；`?` 占位符，双方言同一文本。
+
+_USAGE_DETAIL_SQL = (
+    "SELECT task_id, agent_type, engine_id, repo_key, run_kind, run_id, created_at, "
+    "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, "
+    "cost_usd FROM obs_llm_usage WHERE created_at >= ? AND created_at <= ?")
+
+
+def list_usage_detail_window(start_lo: str, start_hi: str, repo_keys=None, engine_ids=None,
+                             task_id: str = "", limit: int = 20000) -> list[tuple]:
+    """窗口内 LLM 用量明细（不含 issue_id，见本节头注释）。
+
+    过滤口径与原 `tokens._scope` 逐字一致：
+    - `repo_keys` / `engine_ids` 两组谓词**OR** 连接并整体加括号；两组皆空 → 不过滤（L2）；
+    - `engine_ids` 里的假值（0/空串）丢弃（原实现 `[int(x) for x in ids if x]` 同口径），
+      `repo_keys` 保留调用方给出的全部候选（原实现只判 `if keys`，不逐项过滤）；
+    - `task_id` 非空 → 追加等值过滤；`limit` 恒附加（原 SQL 末尾 `LIMIT ?`）。
+    """
+    conds: list[str] = []
+    args: list = [start_lo, start_hi]
+    for col, values, drop_falsy in (("repo_key", repo_keys, False),
+                                    ("engine_id", engine_ids, True)):
+        vals = [v for v in (values or []) if v is not None]
+        if drop_falsy:
+            vals = [v for v in vals if v]
+        if not vals:
+            continue
+        marks = ",".join(["?"] * len(vals))
+        conds.append(f"{col} IN ({marks})")
+        args.extend(vals)
+    sql = _USAGE_DETAIL_SQL
+    if conds:
+        sql += " AND (" + " OR ".join(conds) + ")"
+    if task_id:
+        sql += " AND task_id = ?"
+        args.append(str(task_id))
+    sql += " LIMIT ?"
+    args.append(max(1, int(limit)))
+    with _any_cursor() as c:
+        c.execute(sql, tuple(args))
         return list(c.fetchall() or [])
 
 

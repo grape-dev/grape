@@ -1431,6 +1431,8 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "task_sampler_snapshot_any",
            # issue 按 id 批量取列（api/feedback_status.py；跨域 JOIN 拆分，任意拓扑）
            "issue_stage_status_rows",
+           # 跨域 JOIN 拆分右表读口（insight token 归因：agent_tasks / runtime_credentials）
+           "task_issue_id_rows", "runtime_credential_display_names",
            # A2A 派发门禁读路径（api/a2a_dispatch_guard.py；events / event_skipped 本域）
            "a2a_active_event_rows", "a2a_active_dup_rows", "a2a_window_dedup_rows",
            "a2a_storm_event_times", "a2a_storm_skip_rows"]
@@ -2543,6 +2545,73 @@ def issue_stage_status_rows(ids, chunk: int = _ISSUE_ID_CHUNK) -> list[tuple]:
                       tuple(part))
             out.extend(tuple(r) for r in (c.fetchall() or []))
     return out
+
+
+# ── 跨域 JOIN 拆分的右表读口（agent_tasks / runtime_credentials 归本域）──────
+# 调用方是 insight 的 token 三级归因（observability/tokens.py）：原实现一条
+# `obs_llm_usage LEFT JOIN agent_tasks t ON t.id = u.task_id`，外加一条
+# `SELECT id, COALESCE(NULLIF(device_name,''), name, '') FROM runtime_credentials WHERE id IN (...)`。
+# 两张表都归本域，三库独立后 insight 进程库里没有它们（视图 0）→ 1146 被调用方
+# except 吞成「空窗口 / 无显示名」。语句文本固定在本模块（`{ph}` 只按 id 个数展开），
+# 调用方只能传 id 值列表，不接受拼接 SQL / 表名 / 列名。
+
+_TASK_SIDE_QUERIES: dict[str, str] = {
+    "task_issue_ids": "SELECT id, issue_id FROM agent_tasks WHERE id IN ({ph})",
+    "runtime_credential_display_names": (
+        "SELECT id, COALESCE(NULLIF(device_name,''), name, '') FROM runtime_credentials "
+        "WHERE id IN ({ph})"),
+}
+
+
+def _task_side_in_stmt(name: str, ids: list) -> tuple[str, tuple]:
+    """把 `{ph}` 展开成 len(ids) 个占位符，返回 (SQL, 参数元组)。"""
+    sql = _TASK_SIDE_QUERIES.get(name)
+    if sql is None:
+        raise KeyError(f"unknown task side query: {name}")
+    return sql.replace("{ph}", ",".join("?" * len(ids))), tuple(ids)
+
+
+def _task_side_in_rows(name: str, ids, chunk: int) -> list[tuple]:
+    """按 `{ph}` 模板分块读，返回行元组列表（顺序 = 表序，不排序）。"""
+    want: list = []
+    seen: set = set()
+    for i in (ids or []):
+        if i is None or str(i) == "":
+            continue
+        key = str(i)
+        if key in seen:
+            continue
+        seen.add(key)
+        want.append(i)
+    if not want:
+        return []
+    size = max(1, int(chunk or _ISSUE_ID_CHUNK))
+    out: list[tuple] = []
+    for i in range(0, len(want), size):
+        sql, args = _task_side_in_stmt(name, want[i:i + size])
+        with _any_cursor() as c:
+            c.execute(sql, args)
+            out.extend(tuple(r) for r in (c.fetchall() or []))
+    return out
+
+
+def task_issue_id_rows(ids, chunk: int = _ISSUE_ID_CHUNK) -> list[tuple]:
+    """按任务 id 批量取 `(task_id, issue_id)`（供跨域 JOIN 拆分，右表 = agent_tasks）。
+
+    列序与改造前宽 SQL 的 `t.issue_id` 侧一致；无谓词、无排序。任务行不存在 → 该 id
+    无行（即 LEFT JOIN 的 NULL 侧，由调用方补 None）。id 为 None/空串的元素丢弃并去重，
+    空列表返回 []。分块只为占位符数量上限，行集合与一次 IN 等价。
+    """
+    return _task_side_in_rows("task_issue_ids", ids, chunk)
+
+
+def runtime_credential_display_names(ids, chunk: int = _ISSUE_ID_CHUNK) -> list[tuple]:
+    """按凭据 id 批量取 `(id, 显示名)`；显示名 = `COALESCE(NULLIF(device_name,''), name, '')`。
+
+    表达式与改造前逐字一致：device_name 为空/NULL 时退回 name，两者都空 → 空串。
+    无排序（调用方按键取值，不依赖顺序）。分块与去重口径同 `task_issue_id_rows`。
+    """
+    return _task_side_in_rows("runtime_credential_display_names", ids, chunk)
 
 
 def apply_issue_vcs_existence_any(deleted_ids: list, restored_ids: list,

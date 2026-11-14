@@ -3371,6 +3371,69 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 - **新基线**：**78 处 / 37 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
   （作业单 78 处 / 44 文件，下一批可选头名 `src/domains/insight/observability/tokens.py` 3 处）。
 
+### insight/observability/tokens 跨库 JOIN 拆分（-3，本文件清零）
+- 文件：`src/domains/insight/observability/tokens.py`（3 处 → **0**）；全局静态 **78 → 75**（-3），
+  对数 **37 → 37**（`agent_tasks←insight`、`runtime_credentials←insight` 两对仍有余量，其它文件）。
+- 表分布（消费域 insight，全归 **runtime**）：
+  · 行 154 `FROM obs_llm_usage u LEFT JOIN agent_tasks t ON t.id = u.task_id`（`_fetch`，跨库 JOIN）
+  · 行 279 `SELECT id, COALESCE(NULLIF(device_name,''), name, '') FROM runtime_credentials WHERE id IN (...)`
+    （`_engine_names`，动态 IN）
+  · 行 6 `join agent_tasks 取 issue_id` —— docstring 命中正则；改造后 join 已不存在，文档失真 → 同步改写
+    （本批唯一非 SQL 的一处，属**文档与实现脱节**的修正，不是为掉数字改文案；prompt_builder 那条口径不同）。
+- 本轮取批：作业单头名 `src/kernel/prompt_builder.py` 与次名 `src/kernel/persistence/credential_usage_log.py`
+  **复核后仍 blocked**（理由见 `next-batches.md` 顶部「⛔ blocked」，与前两轮结论一致），按作业单规则跳过，
+  取第一个可改造文件（`tokens.py`，上一批台账末尾已点名）。
+- 归属域侧改动（SQL 只在 owner 域各一份）：
+  · insight public 新增薄函数 `list_usage_detail_window(start_lo, start_hi, repo_keys, engine_ids, task_id, limit)`
+    + 模块常量 `_USAGE_DETAIL_SQL`：列序与原宽 SQL 的 `u.*` 侧**逐列一致**
+    （task_id, agent_type, engine_id, repo_key, run_kind, run_id, created_at, 五项 token, cost_usd）；
+  · runtime public 新增 `_TASK_SIDE_QUERIES`（两条固定模板：`task_issue_ids` /
+    `runtime_credential_display_names`）+ `task_issue_id_rows(ids, chunk=500)`、
+    `runtime_credential_display_names(ids, chunk=500)`。`{ph}` 由 owner 按 id 个数展开，
+    调用方只能传 id 值列表（不接受拼接 SQL / 表名 / 列名），未登记 name 抛 `KeyError`（fail-closed）。
+- 关键设计取舍：
+  1. **跨域 JOIN 拆成三步**：① 本域明细窗口读 → ② runtime 右表批量读（去重后分块 500，原实现单条 IN
+     最多 2 万个 id）→ ③ Python 内连接补 `issue_id`。缺失任务 = LEFT JOIN 的 NULL 侧（补 `None`，
+     行**不丢**、仍计入汇总），与改造前 `LEFT JOIN` 语义逐点对齐。
+  2. **可见性谓词下沉到归属域**：`_scope` 不再返回 SQL 片段，改返回 `(repo_key 候选集, engine_id 集合, ok)`；
+     `repo_key IN` / `engine_id IN` 的列名走 owner 白名单，值一律 `?` 参数化，两组谓词仍 **OR** 连接并整体
+     加括号（原拼法），`engine_ids` 里的假值 0 照旧丢弃（原 `[int(x) for x in ids if x]` 同口径）。
+     调用方从此**一行 SQL 都不留**（本文件已无任何表名 + SQL 关键字）。
+  3. **失败降级保持原语义**：明细读或右表读任一失败 → 空窗口 + `log.warning`（与原「单条宽 SQL 失败即
+     空」同口径），不返回半份结果；`_engine_names` 失败 → 无显示名但引擎行照常（原语义）。
+  4. **关联口径收紧为字符串相等**：原 `t.id = u.task_id` 在 MySQL 隐式把 `task_id` 转数字（`'abc'` → 0，
+     会误命中 id=0），在 sqlite/整数与文本混存时则**永不命中**。现统一按 `str(id) == str(task_id)`，
+     两个后端同口径；非数字 task_id 不再假命中。
+  5. **行→dict 映射留在调用方**（`_DETAIL_COLS` 固定列序）：owner 只返回元组，避免把展示层列名
+     下沉到 public。
+- **修的存量 bug（3 条，都是三库独立后必然 1146、且都被 except 吞成静默降级）**：
+  1. `_fetch` 的宽 SQL 走 insight 进程库：`agent_tasks` 归 runtime、视图 0 → 1146 →
+     `except → warning + []`，**token 三级归因（引擎/任务/阶段）在生产三库拓扑下恒为空**。
+  2. `_engine_names` 直查 `runtime_credentials` 同理 1146 → 引擎列表永远只有 id、没有显示名。
+  3. **既有口径 bug（与三库无关）**：`t.id = u.task_id` 是 INTEGER 与 TEXT 比较，sqlite 拓扑下恒不命中
+     → `issue_id` 全 NULL、阶段视图塌成一个空 issue 分组（本次烟测第 16~19 项锁死新口径）。
+- **新基线**：**75 处 / 37 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 75 处 / 43 文件，下一批可选头名 `src/domains/insight/observability/llm_usage.py` 3 处）。
+- 验证（真实退出码）：
+  · `py_compile` 三文件 → **COMPILE_OK**；
+  · `~/burndown/tokens_obs_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建
+    obs/agent_tasks/runtime_credentials 三表）→ **ALL tokens_obs smoke PASSED (36 checks)**：
+    A 注册面/静态（调用方无 SQL 字样、不直连进程库、owner 方言无 `%s`/`NOW()`/`ON DUPLICATE`、
+    动态 IN 只展开 `?`、两个 `__all__` 已登记、未登记 name → KeyError）；
+    B 窗口（±1 天粗筛 + Python 精确窗口排除 CST 未来行、total 不含 reasoning、task_id/limit 过滤）；
+    C LEFT JOIN NULL 侧（缺任务 → `issue_id=None`、行仍计入、阶段视图归空 issue 分组）；
+    D 关联口径（`'007'` 不命中 id=7、`'7'` 命中）；E 可见性（global / repo 越权空集合不降级 /
+    engine 过滤、0 被丢弃）；F 分块（1201 行跨 500/500/201 三块全关联、重复·None·空串去重、
+    空列表零外呼）；G 显示名（device_name → name → 空串、缺行不出现，engine_totals.name 走原语）；
+    H 降级（runtime/insight 读抛错 → 空窗口不上抛、空窗口不触发外呼、三层合计一致）。
+  · `tests/insight/test_obs_tokens.py`（真实 MySQL 单库 `grape_ljt_db`）→ **4 passed**（改造前基线同为 4）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 / 棘轮未上升 / 内部契约 37 条最新 / 看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → **import OK**；
+    `check_lib_query_names.py` → **PASS**（runtime 165 funcs + 30 queries used / 241 + 61 registered）。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排——本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`
+  （`p4_p5_loop.sh` 建库搬数据与远端实例都要它们），且本批不改 schema / 迁移 / 契约面（无新表、无新路由），
+  运行面证据为 sqlite 烟测 + 单库（MySQL 单库 4 passed、sqlite 36 项）；**不把彩排结果算作本批证据**。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
