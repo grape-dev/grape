@@ -1393,62 +1393,70 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
     import json as _json
 
     devices = []
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
-        for (cid,) in c.fetchall():
-            cred = cred_map.get(cid)
-            if not cred:
-                continue  # cred_map 已被组织过滤 — 不在 map 中的凭据跳过
-            if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", ""), from_repo_key(cred.get("repo_key", ""))):
+    # 凭据 id 源：lib 优先（三库独立后无视图可读）；同时准备本地 cursor 供兜底 SQL 使用
+    _ids_lib = _creds_via_lib()
+    if _ids_lib is not None:
+        _cred_ids = [(cid,) for cid in _ids_lib.list_active_credential_ids()]
+        with db_lock:
+            c = db.cursor()
+    else:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
+            _cred_ids = c.fetchall()
+    for (cid,) in _cred_ids:
+        cred = cred_map.get(cid)
+        if not cred:
+            continue  # cred_map 已被组织过滤 — 不在 map 中的凭据跳过
+        if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", ""), from_repo_key(cred.get("repo_key", ""))):
+            continue
+        # P4：删视图后 agent_runtimes 走 lib 读
+        from src.kernel.domain_read import runtime_lib as _rt_lib_lr
+        _lr_lib = _rt_lib_lr(foreign_only=True)
+        if _lr_lib is not None:
+            _lr_rows = _lr_lib.read_all("runtimes_by_credential", (cid,))
+        else:
+            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?", (cid,))
+            _lr_rows = c.fetchall()
+        # AIShell 显示名（2026-10-13 收口补漏）：worker 设备视图的承载引擎列表
+        from src.domains.runtime.engine.instances import to_display as _td2
+        runtimes = [
+            {"id": x[0], "name": _td2(x[1]), "version": x[2], "healthy": bool(x[3]),
+             "installed": bool(x[4]),
+             "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
+             "health": derive_runtime_health(x[5], x[6], now),
+             "local_skills": _json.loads(x[7] or "[]") if x[7] else [],
+             "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else [],
+             "worker_version": x[9] or "" if len(x) > 9 else ""}
+            for x in _lr_rows
+        ]
+        from src.kernel.domain_read import runtime_lib as _runtime_lib_tags
+        _rtl = _runtime_lib_tags()
+        for rt in runtimes:
+            if _rtl is not None:
+                rt["agent_tags"] = _rtl.list_engine_tags(rt["id"], enabled_only=True)
                 continue
-            # P4：删视图后 agent_runtimes 走 lib 读
-            from src.kernel.domain_read import runtime_lib as _rt_lib_lr
-            _lr_lib = _rt_lib_lr(foreign_only=True)
-            if _lr_lib is not None:
-                _lr_rows = _lr_lib.read_all("runtimes_by_credential", (cid,))
-            else:
-                c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?", (cid,))
-                _lr_rows = c.fetchall()
-            # AIShell 显示名（2026-10-13 收口补漏）：worker 设备视图的承载引擎列表
-            from src.domains.runtime.engine.instances import to_display as _td2
-            runtimes = [
-                {"id": x[0], "name": _td2(x[1]), "version": x[2], "healthy": bool(x[3]),
-                 "installed": bool(x[4]),
-                 "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
-                 "health": derive_runtime_health(x[5], x[6], now),
-                 "local_skills": _json.loads(x[7] or "[]") if x[7] else [],
-                 "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else [],
-                 "worker_version": x[9] or "" if len(x) > 9 else ""}
-                for x in _lr_rows
-            ]
-            from src.kernel.domain_read import runtime_lib as _runtime_lib_tags
-            _rtl = _runtime_lib_tags()
-            for rt in runtimes:
-                if _rtl is not None:
-                    rt["agent_tags"] = _rtl.list_engine_tags(rt["id"], enabled_only=True)
-                    continue
-                _tc = db.cursor()
-                _tc.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
-                rt["agent_tags"] = [r[0] for r in _tc.fetchall()]
-            # B5: worker 版本落后标记（设备级，取首个引擎的 worker_version）
-            _dev_wv = runtimes[0].get("worker_version", "") if runtimes else ""
-            _dev_wv_stale = False
-            if _dev_wv:
-                try:
-                    from src.kernel.worker_package import worker_code_version, normalize_worker_version
-                    _dev_wv_stale = normalize_worker_version(worker_code_version()) != normalize_worker_version(_dev_wv)
-                except Exception:
-                    pass
-            devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
-                            "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
-                            "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
-                            "owner": cred.get("owner_name", ""),
-                            "repo_key": from_repo_key(cred.get("repo_key", "")),
-                            "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
-                            "worker_version": _dev_wv,
-                            "worker_version_stale": _dev_wv_stale,
-                            "runtimes": runtimes})
+            _tc = db.cursor()
+            _tc.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
+            rt["agent_tags"] = [r[0] for r in _tc.fetchall()]
+        # B5: worker 版本落后标记（设备级，取首个引擎的 worker_version）
+        _dev_wv = runtimes[0].get("worker_version", "") if runtimes else ""
+        _dev_wv_stale = False
+        if _dev_wv:
+            try:
+                from src.kernel.worker_package import worker_code_version, normalize_worker_version
+                _dev_wv_stale = normalize_worker_version(worker_code_version()) != normalize_worker_version(_dev_wv)
+            except Exception:
+                pass
+        devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
+                        "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
+                        "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
+                        "owner": cred.get("owner_name", ""),
+                        "repo_key": from_repo_key(cred.get("repo_key", "")),
+                        "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
+                        "worker_version": _dev_wv,
+                        "worker_version_stale": _dev_wv_stale,
+                        "runtimes": runtimes})
 
     # 本机直连引擎（credential_id=0）：关联到 runtime_credentials 中已有的主控机设备
     _local_hostname = ""
@@ -2022,6 +2030,14 @@ def list_runtime_credentials(user: dict = Depends(require_org_member)):
     from src.domains.mgmt.user.org_db import is_org_personal
     org_id = user.get("org_id", "")
     _is_personal = is_org_personal(org_id) if org_id else True
+    _rc_lib = _creds_via_lib()
+    if _rc_lib is not None:
+        return {"credentials": [
+            {**row, "last_seen_at": normalize_event_time(row["last_seen_at"]),
+             "created_at": normalize_event_time(row["created_at"]),
+             "repo_key": from_repo_key(row["repo_key"] or "")}
+            for row in _rc_lib.list_runtime_credentials(org_id or "", _is_personal)
+        ]}
     with db_lock:
         c = db.cursor()
         if org_id and not _is_personal:

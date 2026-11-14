@@ -1593,3 +1593,68 @@ def list_scene_categories(active_only: bool = True) -> list[dict[str, Any]]:
     with db_registry.cursor("runtime") as c:
         c.execute(sql)
         return _rows(c)
+
+
+def list_featured_skills(ordered_ids: list[int] | None = None, limit: int = 5) -> list[dict[str, Any]]:
+    """精选技能（is_featured=1 的 official 技能），排序与 mgmt 版一致。
+
+    ordered_ids 非空时按其顺序（管理台排序），缺失的按 like_count 降序追加；
+    为空时直接 like_count 降序。列与 mgmt `get_featured_skills` 完全一致。
+    """
+    cols = ("id", "skill_name", "display_name", "description", "agent_type",
+            "is_featured", "like_count", "category_id")
+    sel = f"SELECT {', '.join(cols)} FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official'"
+    out: list[dict[str, Any]] = []
+    with db_registry.cursor("runtime") as c:
+        if ordered_ids:
+            ph = ",".join(["%s"] * len(ordered_ids))
+            c.execute(f"{sel} AND id IN ({ph})", tuple(ordered_ids))
+            rows = {r["id"]: r for r in _rows(c)}
+            for item_id in ordered_ids:
+                r = rows.get(int(item_id))
+                if r:
+                    out.append(_skill_row(r))
+            if len(out) < limit:
+                c.execute(f"{sel} AND id NOT IN ({ph}) ORDER BY like_count DESC", tuple(ordered_ids))
+                out.extend(_skill_row(r) for r in _rows(c))
+        else:
+            c.execute(f"{sel} ORDER BY like_count DESC LIMIT %s", (max(1, int(limit)),))
+            out = [_skill_row(r) for r in _rows(c)]
+    return out[:max(1, int(limit))]
+
+
+def _skill_row(r: dict[str, Any]) -> dict[str, Any]:
+    return {"id": r["id"], "skill_name": r["skill_name"],
+            "display_name": r["display_name"] or r["skill_name"],
+            "description": r["description"] or "", "agent_type": r["agent_type"] or "",
+            "is_featured": r["is_featured"], "like_count": r["like_count"],
+            "category_id": r["category_id"] or 0}
+
+
+def list_active_credential_ids() -> list[int]:
+    """active 凭据 id 列表（settings 设备/引擎列表的循环源，替代跨域裸 SQL）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
+        return [r["id"] for r in _rows(c)]
+
+
+def list_runtime_credentials(org_id: str = "", personal_org: bool = True) -> list[dict[str, Any]]:
+    """凭据列表（不含 token_hash/明文）。非个人组织严格按 org_id 过滤，个人组织返回全部。
+
+    返回列与 settings `list_runtime_credentials` 一致；repo_key 由调用方按需转显示值。
+    """
+    sql = ("SELECT id, name, device_name, scope, owner_id, owner_name, status, "
+           "last_seen_at, created_at, repo_key FROM runtime_credentials")
+    args: list[Any] = []
+    if org_id and not personal_org:
+        sql += " WHERE org_id=%s"
+        args.append(org_id)
+    sql += " ORDER BY id DESC"
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, tuple(args))
+        rows = _rows(c)
+    return [{"id": r["id"], "name": r["name"], "device_name": r["device_name"] or "",
+             "scope": r["scope"], "owner_id": r["owner_id"], "owner": r["owner_name"] or "",
+             "status": r["status"], "last_seen_at": r["last_seen_at"],
+             "created_at": r["created_at"], "repo_key": r["repo_key"] or ""}
+            for r in rows]

@@ -4490,6 +4490,15 @@ def get_agent_runtimes_age() -> float | None:
 
 def list_scene_categories() -> list[dict]:
     """返回启用的场景分类列表，按 order_num 排序"""
+    # P3.5：scene_category 归运行域；lib 可用时走 owner 域读
+    from src.kernel.domain_read import owner_lib as _owner_lib  # noqa: PLC0415
+    _rt = _owner_lib("runtime", foreign_only=True)
+    if _rt is not None:
+        try:
+            return [{k: v for k, v in c.items() if k != "is_active"}
+                    for c in _rt.list_scene_categories(True)]
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(f"runtime lib list_scene_categories failed, fallback: {_exc}")
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -5154,6 +5163,14 @@ def get_featured_skills(limit: int = 5) -> list[dict]:
     from src.kernel.featured_order import get_featured_order
 
     ordered_ids = get_featured_order("skill")
+    # P3.5：skill 归运行域；lib 可用时走 owner 域读（排序仍在 mgmt 侧决定）
+    from src.kernel.domain_read import owner_lib as _owner_lib  # noqa: PLC0415
+    _rt_fs = _owner_lib("runtime", foreign_only=True)
+    if _rt_fs is not None:
+        try:
+            return _rt_fs.list_featured_skills(list(ordered_ids or []), limit)
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(f"runtime lib list_featured_skills failed, fallback: {_exc}")
 
     with db_lock:
         c = db.cursor()
