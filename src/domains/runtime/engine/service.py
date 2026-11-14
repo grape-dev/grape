@@ -98,20 +98,9 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
                 elif _scope == "user" and has_user_id(task_user_id) and _owner_name:
                     # user scope：引擎 owner_name 对应的 user_id 必须匹配 task.user_id
                     try:
-                        from src.kernel.domain_read import mgmt_lib as _mgmt_lib_acc
-                        _mg_acc = _mgmt_lib_acc()
-                        if _mg_acc is not None:
-                            _engine_uid = _mg_acc.get_account_id_by_username(_owner_name) or 0
-                        else:
-                            from src.kernel.domain_read import mgmt_lib as _mg_lib_0b3fdc_f
-                            _mg_lib_0b3fdc = _mg_lib_0b3fdc_f(foreign_only=True)
-                            if _mg_lib_0b3fdc is not None:
-                                _ur = _mg_lib_0b3fdc.read_one("grape_accounts_0b3fdc", (_owner_name,))
-                            else:
-                                c.execute("SELECT id FROM grape_accounts WHERE username=? "
-                                          "AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1", (_owner_name,))
-                                _ur = c.fetchone()
-                            _engine_uid = _ur[0] if _ur else 0
+                        from src.domains.mgmt import public as _mgmt_public_acc
+                        _engine_uid = _mgmt_public_acc.account_id_by_username_valid_any(
+                            _owner_name, cursor=c) or 0
                         if _engine_uid != task_user_id:
                             continue  # user scope 但用户不匹配
                     except Exception:
@@ -593,20 +582,8 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
             _storage = None
         if _storage is not None:
             files = {}
-            from src.kernel.session_manager import db, db_lock
-            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_kb
-            _mg_kb = _mgmt_lib_kb()
-            if _mg_kb is not None:
-                rows = _mg_kb.list_baseline_knowledge_files(repo_key)
-            else:
-                with db_lock:
-                    rows = db.cursor().execute(
-                        "SELECT file_path, obs_key FROM agent_shared_knowledge "
-                        "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
-                        "AND archived=0 "
-                        "ORDER BY id DESC",
-                        (repo_key,)
-                    ).fetchall()
+            from src.domains.mgmt import public as _mgmt_public_kb
+            rows = _mgmt_public_kb.baseline_knowledge_files_any(repo_key)
             for fp, ok in rows:
                 if fp and ok:
                     fname = os.path.basename(fp)
@@ -680,20 +657,8 @@ def load_project_info_with_obs(repo_key: str) -> tuple[dict, dict]:
             _storage = None
         if _storage is not None:
             files = {}
-            from src.kernel.session_manager import db, db_lock
-            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_kb
-            _mg_kb = _mgmt_lib_kb()
-            if _mg_kb is not None:
-                rows = _mg_kb.list_baseline_knowledge_files(repo_key)
-            else:
-                with db_lock:
-                    rows = db.cursor().execute(
-                        "SELECT file_path, obs_key FROM agent_shared_knowledge "
-                        "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
-                        "AND archived=0 "
-                        "ORDER BY id DESC",
-                        (repo_key,)
-                    ).fetchall()
+            from src.domains.mgmt import public as _mgmt_public_kb
+            rows = _mgmt_public_kb.baseline_knowledge_files_any(repo_key)
             for fp, ok in rows:
                 if fp and ok:
                     fname = os.path.basename(fp)
@@ -1702,14 +1667,8 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                     "  )) ORDER BY t.created_at ASC LIMIT 1"
                 )
             elif scope == "user":
-                from src.kernel.domain_read import mgmt_lib as _mg_lib_d0ac07_f
-                _mg_lib_d0ac07 = _mg_lib_d0ac07_f(foreign_only=True)
-                if _mg_lib_d0ac07 is not None:
-                    uid_row = _mg_lib_d0ac07.read_one("grape_accounts_d0ac07", (owner_name,))  # D32-补丁 #348: case-insensitive)
-                else:
-                    c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?)", (owner_name,))  # D32-补丁 #348: case-insensitive
-                    uid_row = c.fetchone()
-                uid = uid_row[0] if uid_row else 0
+                from src.domains.mgmt import public as _mgmt_public_uid
+                uid = _mgmt_public_uid.account_id_by_username_ci_any(owner_name, cursor=c) or 0
                 params.append(uid)
                 sql = (
                     "SELECT t.id FROM agent_tasks t "

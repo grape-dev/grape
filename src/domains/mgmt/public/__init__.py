@@ -754,6 +754,9 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "login_whitelist_legacy_column", "login_whitelist_legacy_column_match",
            # baseline 知识 upsert + 全局 ref（runtime/project_info/builder.py；任意拓扑）
            "upsert_baseline_knowledge_any", "ensure_baseline_knowledge_ref_any",
+           # baseline 知识文件行 / 账号 id（runtime/engine/service.py；任意拓扑）
+           "baseline_knowledge_files_any",
+           "account_id_by_username_valid_any", "account_id_by_username_ci_any",
            "health"]
 
 
@@ -1857,6 +1860,27 @@ _ANY_QUERIES: dict[str, str] = {
         "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
         "VALUES (?, '', '', 0, 1, 'system')"),
     "account_username_by_id": "SELECT username FROM grape_accounts WHERE id=? LIMIT 1",
+    # ── 引擎 scope / claim 过滤取账号 id（runtime/engine/service.py 两处「lib 优先 + 本地兜底」）──
+    # 原实现是双分支：lib 侧走 `grape_accounts_0b3fdc`（严格大小写）/ `grape_accounts_d0ac07`
+    # （LOWER 双侧），兜底侧是调用方进程主库上的同一段 SQL —— 三库拓扑下进程库没有
+    # grape_accounts（视图 0 → 1146，被外层 except 吞成「引擎不可达」/「uid=0」），
+    # 且同一判定在两种拓扑下答案不一致。上移后两条拓扑跑同一份语句。
+    # `valid`：保留原 0b3fdc 兜底的「id 必须有效」过滤（历史 int 主键的 ''/'0' 哨兵），
+    # 大小写取向与账号域自身口径一致（`username_lower` / `get_account_id_by_username`，
+    # D32 #348 已把同一判定定为大小写不敏感）。
+    "account_id_by_username_valid": (
+        "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) "
+        "AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1"),
+    # `ci`：逐字照抄 d0ac07（无 LIMIT、无 id 过滤，首行由 fetchone() 语义决定，
+    # 收紧会改变 claim 的 user scope 过滤结果）。
+    "account_id_by_username_ci": "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?)",
+    # baseline 知识文件行（project-info 的 OBS 分支）：原 `list_baseline_knowledge_files` 是
+    # 只对自有 DSN 可用的 `%s` 查法，单库拓扑走调用方本地兜底 SQL（跨域引用来源）；
+    # 列序 / 谓词 / ORDER BY id DESC 与原语句逐字一致。
+    "knowledge_baseline_files": (
+        "SELECT file_path, obs_key FROM agent_shared_knowledge "
+        "WHERE repo_key=? AND scope='baseline' AND obs_key!='' AND obs_key IS NOT NULL "
+        "AND archived=0 ORDER BY id DESC"),
     # ── 仓库级 bot token 与登录名（kernel/token_resolver 第 2 级策略）──
     # 原实现在 kernel 里直连进程主库：三库拓扑下进程库没有 managed_repos（无视图 → 1146，
     # 均被内部 except 吞成「无凭据」/「未过期」），或存在同表副本时静默按副本判定。
@@ -2090,6 +2114,20 @@ def ensure_baseline_knowledge_ref_any(knowledge_id: int) -> int:
     with _any_tx() as c:
         c.execute(_any_sql("knowledge_baseline_ref_ensure"), (kid,))
         return int(getattr(c, "rowcount", 0) or 0)
+
+
+def baseline_knowledge_files_any(repo_key: str) -> list[tuple]:
+    """基线知识（scope='baseline'）的 (file_path, obs_key)，按 id 倒序（任意拓扑）。
+
+    与 `list_baseline_knowledge_files` 的区别：那条是 `%s` 方言、只有自有 DSN 拓扑可用，
+    调用方必须自带本地兜底 SQL —— 兜底 SQL 正是 runtime/engine/service 的跨域表引用来源，
+    而三库拓扑下 runtime 进程库没有 agent_shared_knowledge（视图 0 → 1146，被外层
+    `except` 吞成「project-info 为空」）。这里两条拓扑同一份可移植语句。
+    空 repo_key 不发 SQL 直接返回 []（与原查询的匹配结果等价）。
+    """
+    if not repo_key:
+        return []
+    return [tuple(r) for r in read_all_any("knowledge_baseline_files", (repo_key,))]
 
 
 def has_manual_knowledge_ref(repo_key: str, agent_type: str = "", issue_num: int = 0,
@@ -2359,6 +2397,36 @@ def account_username_by_id_any(account_id: Any) -> str:
         return ""
     row = read_one_any("account_username_by_id", (str(account_id),))
     return str(row[0] or "") if row else ""
+
+
+def account_id_by_username_valid_any(username: str, cursor: Any = None) -> Any | None:
+    """用户名 → 有效账号 id（任意拓扑，大小写不敏感）；无此账号返回 None。
+
+    `valid` 口径：id 非空且不是历史 int 主键的 `'0'` 哨兵 —— 原 `grape_accounts_0b3fdc`
+    兜底 SQL 的同一过滤（供「引擎 owner_name 是否真的指向某个用户」的判定使用）。
+    `cursor` 非空且单库/测试拓扑 → 复用调用方游标（不嵌套 db_lock、保住调用方事务快照）；
+    自有 DSN → 忽略它，走 mgmt 连接（那正是原来 1146 的来源）。
+    """
+    if not username:
+        return None
+    with _owner_cursor(cursor) as c:
+        c.execute(_any_sql("account_id_by_username_valid"), (username,))
+        row = c.fetchone()
+    return row[0] if row else None
+
+
+def account_id_by_username_ci_any(username: str, cursor: Any = None) -> Any | None:
+    """用户名 → 账号 id（任意拓扑，LOWER 双侧）；无此账号返回 None。
+
+    逐字照抄原 `grape_accounts_d0ac07`：不加 LIMIT、不过滤 id 哨兵（用户名理论上唯一，
+    首行即答案；收紧会改变 claim_by_tag 的 user scope 过滤结果）。`cursor` 语义同上。
+    """
+    if not username:
+        return None
+    with _owner_cursor(cursor) as c:
+        c.execute(_any_sql("account_id_by_username_ci"), (username,))
+        row = c.fetchone()
+    return row[0] if row else None
 
 
 # ---------- 代发内容台账（kernel/outbound_ledger 调用；任意拓扑） ----------

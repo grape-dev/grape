@@ -1,7 +1,7 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-15 04:30　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **35** 张；跨域引用 **120** 处（47 个「表×消费域」对）；含归属域在内的 SQL 引用 2071 处
+> 生成时间：2026-11-15 04:39　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **34** 张；跨域引用 **116** 处（46 个「表×消费域」对）；含归属域在内的 SQL 引用 1992 处
 
 ## 1. 域 × 域 跨域引用热力
 
@@ -10,7 +10,7 @@
 | api | 12 | 23 | 2 | 37 |
 | kernel | 3 | 3 | 0 | 6 |
 | mgmt | 0 | 14 | 5 | 19 |
-| runtime | 26 | 0 | 1 | 27 |
+| runtime | 22 | 0 | 1 | 23 |
 | insight | 1 | 29 | 0 | 30 |
 
 ## 2. 处置分类进度
@@ -18,8 +18,8 @@
 | 分类 | 表数 | 剩余跨域引用 |
 | --- | ---: | ---: |
 | D | 10 | 27 |
-| C1 | 7 | 46 |
-| C2 | 15 | 44 |
+| C1 | 6 | 44 |
+| C2 | 15 | 42 |
 | B | 2 | 2 |
 | E | 1 | 1 |
 
@@ -40,9 +40,7 @@
 | `meta` | runtime | 4 | mgmt 4 | D 模块归位（kernel 写/读域表） | — | 4 |
 | `unified_user_mapping` | mgmt | 4 | kernel 3 / runtime 1 | D 模块归位（kernel 写/读域表） | — | 8 |
 | `event_action_filter` | mgmt | 3 | api 3 | C2 outbox 跨域写 | W2 | 4 |
-| `grape_accounts` | mgmt | 3 | runtime 3 | C2 outbox 跨域写 | W2 | 13 |
 | `grape_t_credential_usage_log` | runtime | 3 | kernel 3 | D 模块归位（kernel 写/读域表） | — | 2 |
-| `agent_shared_knowledge` | mgmt | 2 | runtime 2 | C1 归属重定（写路径挪进 owner 域） | — | 5 |
 | `chat_conversations` | runtime | 2 | mgmt 2 | D 模块归位（kernel 写/读域表） | — | 8 |
 | `devops_agent_session` | runtime | 2 | mgmt 2 | C1 归属重定（写路径挪进 owner 域） | — | 11 |
 | `grape_t_channel_lease` | mgmt | 2 | runtime 2 | C2 outbox 跨域写 | W2 | 2 |
@@ -55,6 +53,7 @@
 | `audit_logs` | mgmt | 1 | insight 1 | E 洞察事件/宽表 | — | 3 |
 | `chat_agent_session` | runtime | 1 | mgmt 1 | D 模块归位（kernel 写/读域表） | — | 5 |
 | `distributed_locks` | runtime | 1 | insight 1 | D 模块归位（kernel 写/读域表） | — | 3 |
+| `grape_accounts` | mgmt | 1 | runtime 1 | C2 outbox 跨域写 | W2 | 12 |
 | `grape_t_channel_chat_session_binding` | mgmt | 1 | runtime 1 | C2 outbox 跨域写 | W2 | 2 |
 | `grape_t_merge_gate_log` | insight | 1 | api 1 | C2 outbox 跨域写 | W3 | 2 |
 | `issue_state` | runtime | 1 | api 1 | C2 outbox 跨域写 | W1 | 4 |

@@ -2581,6 +2581,105 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/domains/runtime/engine/service.py` 4 处 —— `grape_accounts` × 2 + `agent_shared_knowledge`
   × 2，均归 mgmt）。
 
+### 7.26 runtime engine 的账号判定与 baseline 知识读下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件：`src/domains/runtime/engine/service.py`（runtime 域；引擎可达性判定 + claim 认领 +
+  project-info 读），**4 处 → 0**（单轮做完，4 处未超 25，未分轮）。改完该文件后 runtime 域
+  对这两张表的引用：`agent_shared_knowledge` 清零、`grape_accounts` 只剩 1 处（`routes/runtime.py`）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，两表都在 `grape_mgmt_db`）：
+  - `grape_accounts`（归 mgmt）× 2：
+    行 111 `_check_pool_engines_reachable` 的 user scope 判定
+    `SELECT id FROM grape_accounts WHERE username=? AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1`；
+    行 1710 `claim_by_tag` 的 user scope 过滤 `SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?)`
+    （无 LIMIT、无 id 过滤）。
+  - `agent_shared_knowledge`（归 mgmt）× 2：
+    行 604 `load_project_info` 与行 691 `load_project_info_with_obs` 的同一段
+    `SELECT file_path, obs_key FROM agent_shared_knowledge WHERE repo_key=? AND scope='baseline'
+    AND obs_key!='' AND obs_key IS NOT NULL AND archived=0 ORDER BY id DESC`。
+  - 四处都是定表 + 定列，**无跨域 JOIN、无动态表名/列名拼接**；结构都是「mgmt_lib 优先
+    （MySQL `%s` 具名查询）+ 调用方进程主库本地兜底 SQL」双分支 —— 兜底侧才是外域引用。
+- owner 侧新增（`src/domains/mgmt/public/__init__.py`，`?` 占位符）：
+  1) `_ANY_QUERIES` 3 条具名查询：`account_id_by_username_valid` / `account_id_by_username_ci` /
+     `knowledge_baseline_files`（列序、谓词、`ORDER BY id DESC` 与原语句逐字一致）；
+  2) 3 个薄函数并导出：`account_id_by_username_valid_any(username, cursor=None)` /
+     `account_id_by_username_ci_any(username, cursor=None)` / `baseline_knowledge_files_any(repo_key)`。
+- 设计取舍：
+  1) **两个 account 原语按消费语义分开，不合并成一个带开关的函数**：`valid` 版保留原
+     0b3fdc 兜底的「id 必须有效」过滤（`id IS NOT NULL AND id NOT IN ('', '0')`）——它的
+     消费者要把结果与 `task_user_id` 比大小，历史 int 主键的 `''`/`'0'` 哨兵必须当「无此
+     账号」；`ci` 版逐字照抄 d0ac07（无 LIMIT、不过滤哨兵）——它的消费者只把它塞进
+     `t.user_id=?`，收紧会让本来能认领的任务消失。合并就需要布尔开关，属反模式。
+  2) **大小写取向统一到「账号域自己的口径」**：`valid` 原来单库走严格大小写、三库走
+     `LOWER()`（lib 侧 `get_account_id_by_username` 先查 `username_lower` 再 `LOWER()`），
+     同一份数据在两种拓扑下答案不同。本批取向 CI（`username_lower` 列 + D32 补丁 #348 已
+     把同一判定定为大小写不敏感），且 CI 是原单库口径的**超集**：不会把原本命中的判成不命中。
+  3) **游标随参数传入，避免在已持锁路径上嵌套 `db_lock`**：行 111 与 1710 都在
+     `with db_lock` 内、且手上有调用方游标 `c`，因此两个 account 原语接受 `cursor=` 并走
+     `_owner_cursor`（单库/测试拓扑复用调用方游标 → 不嵌套锁、保住调用方事务快照；自有
+     DSN 拓扑忽略它走 mgmt 连接）。这是本文件 `_check_pool_engines_reachable` 文档里
+     「不要嵌套 `db_lock`（测试会 monkeypatch 裸 Lock）」的硬约束 —— 直接调 `*_any`
+     在 `test_issue_1503` 那类裸 Lock 用例上会自死锁。project-info 两处原本自己
+     `with db_lock:` 取锁、手上没有游标，用 `read_all_any` 即可（等价，减少一次嵌套）。
+  4) **读后写的语义没有变，因为四处全是读**：无事务合并需求，`baseline_knowledge_files_any`
+     只发一条 SELECT，行序由 SQL 的 `ORDER BY id DESC` 保证（Python 侧不重排）。
+  5) **业务口径全部留在 runtime**：`has_user_id` 守卫、repo/user scope 分支、`_engine_uid !=
+     task_user_id` 的比较、project-info 的 `.metadata.json` 特判与本地目录回退一律没下沉；
+     owner 域只给「行与标量」。空 username / 空 repo_key 在 owner 侧直接短路（不发 SQL），
+     与原查询的匹配结果等价。
+- 修的存量 bug（结构性隐患，线上未观测到故障）：
+  1) **同一判定、两种拓扑两种答案（口径分裂）**：`_check_pool_engines_reachable` 的 user
+     scope 在单库拓扑走严格大小写 SQL、在三库拓扑走 CI 的 lib 查询。账号名大小写与
+     `runtime_credentials.owner_name` 不一致时，同一个池在单库会被判「全不可达」→ 按 Issue
+     #253 直接判死任务，而在三库拓扑下能正常派发 —— 排障时看到的是「任务莫名 failed」，
+     与拓扑强相关。现已统一为 CI（烟测把「原严格 SQL 对 'alice' 不命中 / 新原语命中」两
+     条同时钉住）。
+  2) **同一文件里对同一张表的两套 SQL**：`_check_pool_engines_reachable`（严格 + id 过滤 +
+     LIMIT）与 `claim_by_tag`（CI + 无过滤 + 无 LIMIT）回答的是同一个问题「owner_name 对应
+     哪个账号 id」，却用了两条语句。两条现在都在 owner 域一处可见，语义差异显式写在函数
+     文档里（而不是散落在两段 lib/兜底分支中）。
+  3) **project-info 的 20 行兜底 SQL 复制两份**（`load_project_info` / `load_project_info_with_obs`
+     逐字重复）：任何一处口径改动都要改两遍，且兜底侧只读**执行进程的主库** —— 三库拓扑下
+     runtime 进程库没有 `agent_shared_knowledge`（视图 0），一旦 `mgmt_lib()` 因 `available()`
+     为假 / public 导入异常返回 None，兜底 SQL 必 1146，被外层 `except` 吞成「project-info
+     为空」（知识面静默不注入，日志只有一行 `load_project_info failed`）。现在两条路径同一
+     份语句、同一份代码，且不再依赖 `%s` 方言（sqlite 拓扑可执行）。
+- 验证：
+  - `py_compile` 2 个文件 **COMPILE_OK**。
+  - SQLite 烟测 `~/burndown/engine_scope_knowledge_smoke.py` **ALL 84 CHECKS PASSED**（含边界与
+    否定用例：3 条语句与改造前 SQL 逐字对拍 + `?` 方言 / 无 `%s`·`NOW()`·`ON DUPLICATE`·
+    `datetime()`·库名前缀；`valid` 的 CI 命中（小写/全大写/原样）、`id=''`/`'0'`/`NULL` 哨兵行
+    不算命中、空/None username **零 SQL**、`cursor=` 生效只发 1 条；与改造前严格 SQL 的差异
+    双条钉死；`ci` 与原 SQL 对 8 个用户名逐例一致、同名多行取首行、`'0'` 原样返回、空名零
+    SQL；`knowledge_baseline_files` 的 id DESC 排序 + `archived=1`/`scope!='baseline'`/
+    `obs_key=''`/`obs_key IS NULL`/异 repo 五类排除 + 空/None repo_key 零 SQL + 与原兜底 SQL
+    结果逐字一致；端到端 exec 真实 `_check_pool_engines_reachable`：owner 大小写不同仍匹配、
+    别的用户拒绝、id='0' 哨兵账号拒绝、离线引擎拒绝；把进程锁换成**裸 Lock** 再调用仍不死锁
+    （证明未嵌套 `db_lock`）；未提交账号行在同一事务内可见、回滚后不可见（证明复用调用方
+    游标、不切事务快照）；源码面 service.py 0 处这两张表名 / 0 个旧 lib 查询名 / 只调 3 个已
+    导出原语 / 静默 except 77 = 基线）。
+  - `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 /
+    看板最新）。
+  - `pytest tests/arch tests/contracts tests/scripts` **158 passed**；
+    `scripts/check_lib_query_names.py src` **PASS**（insight 12/20、mgmt 168/250、runtime 158/232）；
+    `make lint` **import OK**。
+  - 既有失败对拍（`git worktree` 同一棵 HEAD 树前后各跑一次）：
+    `tests/api/test_pool_personal_identity.py` 两树均 **4 failed / 8 passed**（该文件自建的假
+    `src.domains.runtime.engine.health` 只有 `parse_dt`、拿不到 `engine_health_ok`，属既有断链）；
+    `tests/runtime/test_issue_1487_local_engine_reachability.py` 两树均同一 **4 failed**（池内
+    全不可达仍判死，Issue #253 语义用例，与本批无关）；
+    `tests/runtime/test_issue_259_offline_dispatch.py::test_fresh_direct_kept` 在主树绿、HEAD
+    工作树红 —— 原因是工作树新库没有官方 `vod` skill 行，pipeline skill gate 直接 BLOCK
+    （captured log 明确），属 DB 状态差异而非本批回归；
+    `tests/kernel/test_gsb_route.py::test_public_primitives_registry_sync` 在改动前的干净树上
+    即红（`route_config.PUBLIC_PRIMITIVES` 自 7.22–7.25 各批新增原语后一直未同步），本批未
+    继续扩大差异面，留待专项同步（不在本批门禁集内）。
+- 新基线：全局 **120 → 116**（-4），对数 **47 → 46**：
+  `agent_shared_knowledge←runtime` 2 → 0（该表在 runtime 侧清零），
+  `grape_accounts←runtime` 2 → 1（余 1 处在 `src/domains/runtime/routes/runtime.py:330`，
+  同模式、后续批次）。基线 `foreign-refs-allowlist.csv` 收紧为 116 / 46，依赖看板与作业单
+  同步刷新（下一批头名：`src/domains/mgmt/user/legacy_column_migrations.py` 4 处 ——
+  `meta`（归 runtime）× 4）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
