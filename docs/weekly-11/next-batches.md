@@ -1,6 +1,6 @@
 # 下一批：跨域收口作业单
 
-总量 154 处 / 62 个文件；下表取前 10 个。
+总量 154 处 / 62 个文件；下表取前 3 个。
 
 ## src/api/issue_vcs_index.py（api 域，6 处）
 - `issue`（归 runtime）× 6：行 273, 317, 321, 325, 433, 451
@@ -22,46 +22,6 @@
 - `api_latency_log`（归 insight）× 1：行 357
   - insight public 无具名查询，需新增
 - `agent_runtimes`（归 runtime）× 1：行 506
-  - runtime public 已登记 190 条具名查询
-
-## src/api/feedback_status.py（api 域，5 处）
-- `user_feedback`（归 mgmt）× 4：行 152, 174, 204, 217
-  - mgmt public 已登记 131 条具名查询
-- `issue`（归 runtime）× 1：行 205
-  - runtime public 已登记 190 条具名查询
-
-## src/api/a2a_dispatch_guard.py（api 域，5 处）
-- `events`（归 runtime）× 4：行 132, 241, 293, 356
-  - runtime public 已登记 190 条具名查询
-- `event_skipped`（归 runtime）× 1：行 362
-  - runtime public 已登记 190 条具名查询
-
-## src/kernel/config.py（kernel 域，4 处）
-- `login_whitelist`（归 mgmt）× 4：行 662, 730, 738, 746
-  - mgmt public 已登记 131 条具名查询
-
-## src/domains/runtime/project_info/builder.py（runtime 域，4 处）
-- `agent_shared_knowledge`（归 mgmt）× 3：行 315, 324, 335
-  - mgmt public 已登记 131 条具名查询
-- `scene_knowledge_ref`（归 mgmt）× 1：行 347
-  - mgmt public 已登记 131 条具名查询
-
-## src/domains/runtime/engine/service.py（runtime 域，4 处）
-- `grape_accounts`（归 mgmt）× 2：行 111, 1710
-  - mgmt public 已登记 131 条具名查询
-- `agent_shared_knowledge`（归 mgmt）× 2：行 604, 691
-  - mgmt public 已登记 131 条具名查询
-
-## src/domains/mgmt/user/legacy_column_migrations.py（mgmt 域，4 处）
-- `meta`（归 runtime）× 4：行 166, 168, 175, 177
-  - runtime public 已登记 190 条具名查询
-
-## src/domains/mgmt/routes/feishu_onboard.py（mgmt 域，4 处）
-- `devops_agent_session`（归 runtime）× 2：行 205, 238
-  - runtime public 已登记 190 条具名查询
-- `chat_conversations`（归 runtime）× 1：行 157
-  - runtime public 已登记 190 条具名查询
-- `vod_conversations`（归 runtime）× 1：行 222
   - runtime public 已登记 190 条具名查询
 
 ## 每批验收口径（不要跳）
