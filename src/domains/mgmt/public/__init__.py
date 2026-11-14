@@ -1651,6 +1651,21 @@ _ANY_QUERIES: dict[str, str] = {
     "repo_org_id": (
         "SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1"),
     "repo_deploy_url_set": "UPDATE managed_repos SET deploy_url=? WHERE repo_key=?",
+    # ── 存量场景绑定修复（Issue #541；api/scene_binding_repair.py 一次性迁移）──
+    # 三张表都归本域，原实现在 api 进程里用进程主库游标直发：三库拆分后 api 进程库
+    # 没有这些表（视图 0）→ 整段扫描被 except 吞成「0 修复」，Issue #541 的修复
+    # 静默失效。列序/谓词/排序与原语句逐字照抄（含 is_active=1 与二级 id 排序）。
+    "scene_active_official_id_by_name": (
+        "SELECT id FROM scene_market "
+        "WHERE name=? AND source='official' AND is_active=1 LIMIT 1"),
+    "scene_copy_by_market_id": (
+        "SELECT scene_id FROM devops_pipeline_scene "
+        "WHERE market_scene_id=? AND repo_key=? AND is_active=1 "
+        "ORDER BY updated_at DESC, id DESC LIMIT 1"),
+    "repo_bound_scene_rows": (
+        "SELECT repo_key, dev_scene FROM managed_repos WHERE dev_scene != ''"),
+    "repo_dev_scene_set_cas": (
+        "UPDATE managed_repos SET dev_scene=? WHERE repo_key=? AND dev_scene=?"),
     # ── 巡检补偿责任链（api/patrol_compensate.py：载入/抢占/回写/回收/捞单）──
     # 列序与补偿模块原查询逐字一致（调用方按下标解包）；写语句一律普通 UPDATE
     # （禁 SQL CASE 与 `||` 拼接：MySQL 默认 sql_mode 下 || 是逻辑 OR）。
@@ -2453,6 +2468,35 @@ def repo_org_id_any(repo_key: str) -> Any:
 def set_repo_deploy_url_any(deploy_url: str, repo_key: str) -> int:
     """登记仓库部署地址，返回影响行数；0 行=仓库未托管（不写库）。"""
     return exec_any("repo_deploy_url_set", (deploy_url, repo_key))
+
+
+# ---------- 存量场景绑定修复（Issue #541；api 一次性迁移） ----------
+#
+# 原实现把三张本域表的 SQL 写在 api/scene_binding_repair.py 里，用 api 进程主库游标执行。
+# 三库拆分后 api 进程库没有 scene_market / devops_pipeline_scene / managed_repos（视图 0），
+# 整个扫描被 except 吞掉 → 存量错误绑定永远修不掉（Issue #541 的修复停摆）。
+# 这里只暴露「取候选行 / 取解析结果 / 条件改绑」四件事，匹配链规则留在调用方。
+
+def repo_bound_scene_rows_any() -> list[tuple]:
+    """所有已绑定默认场景的仓库 (repo_key, dev_scene) 行；空串绑定不计。"""
+    return [tuple(r) for r in read_all_any("repo_bound_scene_rows", ())]
+
+
+def scene_active_official_id_by_name_any(scene_name: str) -> str:
+    """official 且启用中的场景 id；同名无启用行返回空串。"""
+    row = read_one_any("scene_active_official_id_by_name", (scene_name,))
+    return str(row[0] or "") if row else ""
+
+
+def scene_copy_id_by_market_any(market_scene_id, repo_key: str) -> str:
+    """仓库内该 market 模板副本的 scene_id（多副本取 updated_at 最新、同刻取大 id）。"""
+    row = read_one_any("scene_copy_by_market_id", (market_scene_id, repo_key))
+    return str(row[0] or "") if row else ""
+
+
+def set_repo_dev_scene_cas_any(repo_key: str, old_scene: str, new_scene: str) -> int:
+    """仅当 dev_scene 仍是旧值时才改绑（CAS），返回影响行数；并发已改走返回 0。"""
+    return exec_any("repo_dev_scene_set_cas", (new_scene, repo_key, old_scene))
 
 
 # ---------- 场景市场（scene_market / scene_skill_ref 归 mgmt；runtime 定时同步消费） ----------

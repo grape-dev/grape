@@ -896,17 +896,14 @@ def scene_exists_in_repo(scene_id: str, repo_key: str) -> bool:
     """
     if not scene_id or not repo_key:
         return False
-    db, lock = _db()
-    with lock:
-        c = db.cursor()
-        try:
-            c.execute(
-                "SELECT 1 FROM devops_pipeline_scene WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
-                (scene_id, repo_key))
-            return c.fetchone() is not None
-        except Exception as e:
-            log.warning(f"scene_exists_in_repo: query failed: {e}")
-            return False
+    from src.domains.mgmt import public as _public
+    try:
+        # 走本域任意拓扑原语：api / runtime 进程调用时进程主库没有本表（视图 0），
+        # 原先直发 SQL 会 1146 被吞成 False，把「仓内存在」误判成「不存在」。
+        return bool(_public.scene_id_exists_any(scene_id, repo_key))
+    except Exception as e:
+        log.warning(f"scene_exists_in_repo: query failed: {e}")
+        return False
 
 
 def _query_official_scene_ids() -> set[str]:

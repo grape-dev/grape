@@ -1968,6 +1968,59 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   余 2 处在其它 api 文件）；基线 `foreign-refs-allowlist.csv` 收紧为 160 / 55，依赖看板与作业单
   同步刷新（下一批头名：`src/api/scene_binding_repair.py` 6 处）。
 
+### 7.18 api 存量场景绑定修复迁移下沉 owner 域（2026-11-15 本批）
+
+- 文件：`src/api/scene_binding_repair.py`（api 域，Issue #541 启动期迁移），**6 处 → 0**（单轮做完）。
+- 表分布（`table-owner.tsv` 冻结）：
+  - `managed_repos`（归 mgmt）× 2：原行 76 `SELECT repo_key, dev_scene ... WHERE dev_scene != ''`、
+    行 85 `UPDATE ... SET dev_scene=? WHERE repo_key=? AND dev_scene=?`；
+  - `issue`（归 runtime）× 2：原行 99 `SELECT id, repo_key, issue_number, scene_id ... WHERE scene_id != ''`、
+    行 108 `UPDATE ... SET scene_id=? WHERE id=? AND scene_id=?`；
+  - `scene_market`（归 mgmt）× 1：原行 34（同名 official + `is_active=1`）；
+  - `devops_pipeline_scene`（归 mgmt）× 1：原行 48（`market_scene_id` + repo 副本，`updated_at DESC, id DESC`）。
+  六处全是静态 SQL，无 f-string 拼接；无跨域 JOIN（解析链本就是三次独立查询）。
+- owner 侧新增（`?` 占位符，列序/谓词逐字照抄）：
+  1) mgmt `_ANY_QUERIES` 4 条：`scene_active_official_id_by_name`、`scene_copy_by_market_id`、
+     `repo_bound_scene_rows`、`repo_dev_scene_set_cas`；薄函数
+     `scene_active_official_id_by_name_any` / `scene_copy_id_by_market_any(market_scene_id, repo_key)` /
+     `repo_bound_scene_rows_any()` / `set_repo_dev_scene_cas_any(repo_key, old, new)`；
+  2) runtime `_ANY_QUERIES` 2 条：`issue_bound_scene_rows`、`issue_scene_set_cas`；薄函数
+     `issue_bound_scene_rows_any()` / `set_issue_scene_cas_any(issue_id, old, new)`。
+- 设计取舍：
+  1) **匹配链规则留在调用方，owner 只暴露四个事实**：候选仓库行、模板 id、副本 scene_id、条件改绑。
+     「仓内已存在 → 不修」「模板不存在/失活/非 official → 跳过」是迁移策略，不该固化进 public；
+  2) **不复用 `scene_official_id_by_name`**：既有查询缺 `is_active=1`，而原语句带该谓词 —— 复用它会把
+     已停用的 official 模板当成可修复目标，故新增 `scene_active_official_id_by_name`（两条并存，
+     各自谓词集不同，不做合并）；
+  3) **CAS 原语直接沿用原 WHERE 的旧值谓词**：`set_*_cas_any` 不做「先读后判」，rowcount=0 即
+     「并发已改走」，与原实现的 `if c.rowcount:` 计数口径完全一致；重复跑二轮 fixed=0；
+  4) **锁与提交交给任意拓扑原语**：原来每个仓库/issue 各持一次 `db_lock` + 手动 `db.commit()`，
+     三库拓扑下锁的是 api 进程库、表却不在那儿；现在 `exec_any` 在单库回落进程库 + `db_lock`，
+     自有 DSN 走域连接 autocommit，两条拓扑同一份 SQL；
+  5) **两次查询失败分别保留原返回口径**：模板查询失败 → `""`（跳过该行）；副本查询失败 →
+     `""`；异常仍由调用方 `log.warning` 留痕后继续，不上抛（启动期不阻断）。
+- 修的存量 bug（三库拓扑，功能面）：
+  1) **Issue #541 修复整体失效**：`scene_market` / `devops_pipeline_scene` 在 api 进程库里没有
+     （视图 0）→ 模板查询 1146，被 `except` 吞成 `return ""`；`managed_repos` / `issue` 扫描同样
+     1146 → `repos_fixed` / `issues_fixed` 恒 0 且每行刷一条 warning。存量错误绑定（模板名误写进
+     `dev_scene` / `scene_id`）在独立三库部署下永远修不掉；
+  2) **`pipeline_config.scene_exists_in_repo` 直发进程主库**：该函数由 api（本迁移）与 runtime
+     （`engine/engine_select.py` 引擎选择）跨域调用，进程库里没有 `devops_pipeline_scene`（归 mgmt）
+     → 1146 被吞成 `False`，把「仓内已存在」误判为「不存在」。现改走本域
+     `scene_id_exists_any`（任意拓扑），两条调用路径都不再误判；该函数在 mgmt 域内，SQL 仍只此一份。
+- 验证：`py_compile` 4 个文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/scene_binding_repair_smoke.py`
+  **ALL 72 CHECKS PASSED**（含边界与否定用例：6 条具名查询与原 SQL 逐字对拍 + 占位符个数 +
+  无 `%s`/`NOW()`/`ON DUPLICATE`、未登记查询名 KeyError；同名失活 official 不遮蔽 active 行、
+  custom 来源与仅失活名字不命中、多副本取 `updated_at` 最新、同刻 `id DESC`、失活新副本不参与、
+  仓内已存在短路、跨仓同名 scene 不认「已存在」、空串/NULL 绑定不计入 scanned、二轮幂等 fixed=0、
+  竞态下 CAS 不覆盖不重复计数、owner 抛错不上抛且另一段照跑、缓存仅在确实改绑时失效；
+  自有 DSN 时全走 `db_registry` 且进程库零 SQL；源码面 0 条 SQL 字面量、无 cursor/execute 直发、
+  不 import `kernel.session_manager`、只用 6 个已登记原语）；`rds_gate.sh --quick` **GATE: 全绿**；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **160 → 154**（-6），对数 **55 → 53**：`api←managed_repos`、`api←scene_market`
+  两对清零（`api←issue` 12 → 10、`api←devops_pipeline_scene` 4 → 3 仍有其它 api 文件）；
+  基线收紧为 154 / 53，看板与作业单同步刷新（下一批头名：`src/api/issue_vcs_index.py` 6 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

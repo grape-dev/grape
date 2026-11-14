@@ -2238,6 +2238,13 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT COUNT(*) FROM runtime_credentials"
         " WHERE status != 'revoked' AND last_seen_at IS NOT NULL"
         " AND last_seen_at >= ?"),
+    # ── 存量场景绑定修复（Issue #541；api/scene_binding_repair.py 一次性迁移）──
+    # issue 归本域；原实现在 api 进程主库直发 → 三库拆分后 1146，修复扫描静默归零。
+    # 列序/谓词逐字照抄；写语句走 CAS（scene_id 仍是旧值才改），与原
+    # `UPDATE ... WHERE id=? AND scene_id=?` 同一并发口径。
+    "issue_bound_scene_rows": (
+        "SELECT id, repo_key, issue_number, scene_id FROM issue WHERE scene_id != ''"),
+    "issue_scene_set_cas": "UPDATE issue SET scene_id=? WHERE id=? AND scene_id=?",
 }
 
 
@@ -2287,6 +2294,20 @@ def exec_any(name: str, params: tuple = ()) -> int:
     with _any_cursor(write=True) as c:
         cur = c.execute(_any_sql(name), params)
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+# ── 存量场景绑定修复（Issue #541；api 一次性迁移）──────────────────────
+# 原实现从 api 进程主库直发 issue 的两条 SQL；三库拆分后 api 进程库没有 issue
+# （视图 0）→ 扫描/改绑全被 except 吞成「0 修复」。issue 是本域表，SQL 只留这里。
+
+def issue_bound_scene_rows_any() -> list[tuple]:
+    """所有已绑定场景的 issue (id, repo_key, issue_number, scene_id)；空串绑定不计。"""
+    return [tuple(r) for r in read_all_any("issue_bound_scene_rows", ())]
+
+
+def set_issue_scene_cas_any(issue_id, old_scene: str, new_scene: str) -> int:
+    """仅当 scene_id 仍是旧值时才改绑（CAS），返回影响行数；并发已改走返回 0。"""
+    return exec_any("issue_scene_set_cas", (new_scene, issue_id, old_scene))
 
 
 # ── autopilot 执行记录 / 引擎实例校验 / 技能名（mgmt/routes/autopilot.py 收口）──

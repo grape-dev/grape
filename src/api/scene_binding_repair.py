@@ -22,38 +22,27 @@ def _resolve_repo_copy(scene_value: str, repo_key: str) -> str:
 
     匹配链：scene_value 仓内不存在 → scene_market 同名 official 模板 →
     devops_pipeline_scene 中该 repo 的 market_scene_id 副本（updated_at 最新）。
+
+    三张表都归 mgmt，SQL 只在 `src.domains.mgmt.public` 留一份（任意拓扑原语）；
+    本函数只保留匹配链规则，不再持有数据库句柄。
     """
     from src.api.pipeline_config import scene_exists_in_repo
     if scene_exists_in_repo(scene_value, repo_key):
         return ""  # 正常绑定，无需修复
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(
-                "SELECT id FROM scene_market WHERE name=? AND source='official' AND is_active=1 LIMIT 1",
-                (scene_value,))
-            row = c.fetchone()
-        except Exception as _e:
-            log.warning(f"repair_scene_bindings: market lookup failed: {_e}")
-            return ""
-    if not row:
+    from src.domains.mgmt import public as mgmt_public
+    try:
+        market_id = mgmt_public.scene_active_official_id_by_name_any(scene_value)
+    except Exception as _e:
+        log.warning(f"repair_scene_bindings: market lookup failed: {_e}")
         return ""
-    market_id = row[0]
-    with db_lock:
-        c = db.cursor()
-        try:
-            # 多副本（weekly-09 每次应用生成独立 custom-id）取最近应用的一条
-            c.execute(
-                "SELECT scene_id FROM devops_pipeline_scene "
-                "WHERE market_scene_id=? AND repo_key=? AND is_active=1 "
-                "ORDER BY updated_at DESC, id DESC LIMIT 1",
-                (market_id, repo_key))
-            copy_row = c.fetchone()
-        except Exception as _e:
-            log.warning(f"repair_scene_bindings: copy lookup failed: {_e}")
-            return ""
-    return (copy_row[0] or "") if copy_row else ""
+    if not market_id:
+        return ""
+    try:
+        # 多副本（weekly-09 每次应用生成独立 custom-id）由 owner 侧取最近应用的一条
+        return mgmt_public.scene_copy_id_by_market_any(market_id, repo_key)
+    except Exception as _e:
+        log.warning(f"repair_scene_bindings: copy lookup failed: {_e}")
+        return ""
 
 
 def repair_scene_bindings() -> dict:
@@ -62,7 +51,8 @@ def repair_scene_bindings() -> dict:
     返回 {"repos_fixed", "issues_fixed", "repos_scanned", "issues_scanned"}。
     幂等：已正确的绑定二轮扫描直接跳过（fixed=0）。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.domains.mgmt import public as mgmt_public
+    from src.domains.runtime import public as runtime_public
     repos_fixed = 0
     issues_fixed = 0
     repos_scanned = 0
@@ -71,47 +61,32 @@ def repair_scene_bindings() -> dict:
 
     # 1. managed_repos.dev_scene
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT repo_key, dev_scene FROM managed_repos WHERE dev_scene != ''")
-            repo_rows = c.fetchall()
+        repo_rows = mgmt_public.repo_bound_scene_rows_any()
         repos_scanned = len(repo_rows)
         for repo_key, dev_scene in repo_rows:
             copy_id = _resolve_repo_copy(dev_scene or "", repo_key)
             if not copy_id:
                 continue
-            with db_lock:
-                c = db.cursor()
-                c.execute("UPDATE managed_repos SET dev_scene=? WHERE repo_key=? AND dev_scene=?",
-                          (copy_id, repo_key, dev_scene))
-                db.commit()
-                if c.rowcount:
-                    repos_fixed += 1
-                    log.info(f"repair_scene_bindings: repo {repo_key} dev_scene "
-                             f"'{dev_scene}' -> '{copy_id}' (Issue #541)")
+            # CAS：旧值仍是本次读到的那条才改，与原 UPDATE ... AND dev_scene=? 同口径
+            if mgmt_public.set_repo_dev_scene_cas_any(repo_key, dev_scene, copy_id):
+                repos_fixed += 1
+                log.info(f"repair_scene_bindings: repo {repo_key} dev_scene "
+                         f"'{dev_scene}' -> '{copy_id}' (Issue #541)")
     except Exception as e:
         log.warning(f"repair_scene_bindings: managed_repos scan failed: {e}")
 
     # 2. issue.scene_id（issue 单表为权威，Phase C3）
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id, repo_key, issue_number, scene_id FROM issue WHERE scene_id != ''")
-            issue_rows = c.fetchall()
+        issue_rows = runtime_public.issue_bound_scene_rows_any()
         issues_scanned = len(issue_rows)
         for row_id, repo_key, issue_number, scene_id in issue_rows:
             copy_id = _resolve_repo_copy(scene_id or "", repo_key)
             if not copy_id:
                 continue
-            with db_lock:
-                c = db.cursor()
-                c.execute("UPDATE issue SET scene_id=? WHERE id=? AND scene_id=?",
-                          (copy_id, row_id, scene_id))
-                db.commit()
-                if c.rowcount:
-                    issues_fixed += 1
-                    log.info(f"repair_scene_bindings: issue {repo_key} #{issue_number} "
-                             f"scene '{scene_id}' -> '{copy_id}' (Issue #541)")
+            if runtime_public.set_issue_scene_cas_any(row_id, scene_id, copy_id):
+                issues_fixed += 1
+                log.info(f"repair_scene_bindings: issue {repo_key} #{issue_number} "
+                         f"scene '{scene_id}' -> '{copy_id}' (Issue #541)")
     except Exception as e:
         log.warning(f"repair_scene_bindings: issue scan failed: {e}")
 
