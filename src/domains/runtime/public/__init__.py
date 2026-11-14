@@ -1585,42 +1585,60 @@ def list_runtime_credentials(org_id: str = "", personal_org: bool = True) -> lis
             for r in rows]
 
 
+_AUTOPILOT_EXEC_PAGE_COLS = (
+    "e.id, e.task_id, e.status, e.retry_count, e.result, e.error, e.started_at, "
+    "e.completed_at, e.created_at, e.agent_type, e.findings_json")
+# 迁移兼容列白名单：v3.0 前的老库物理保留 / 新列未落时以空串占位（1054 → 500 的既有修复）。
+# 列表达式只允许从本表挑，调用方不得传入列名；字典序即 SELECT 列序。
+_AUTOPILOT_EXEC_COMPAT_COLS: dict[str, tuple[str, str]] = {
+    "issue_number": ("e.issue_number", "'' AS issue_number"),
+    "agent_task_id": ("e.agent_task_id", "'' AS agent_task_id"),
+}
+# 过滤谓词只允许从本表挑（值一律走 `?` 绑定，不拼值）
+_AUTOPILOT_EXEC_FILTERS: dict[str, str] = {
+    "task": "e.task_id=?",
+    "status": "e.status=?",
+}
+
+
 def list_autopilot_executions(task_id: int | None = None, status: str = "",
                               limit: int = 50, offset: int = 0) -> dict[str, Any]:
-    """autopilot 执行记录分页读（C2 表归运行域，mgmt 侧经 lib 调用）。
+    """autopilot 执行记录分页读（**任意拓扑**；C2 表归运行域，mgmt 两条拓扑共用）。
 
-    列口径与 mgmt `list_executions` 一致；issue_number/agent_task_id 在旧库可能不存在，
-    用 info_schema 探测后以空串占位（沿用 mgmt 侧同一兼容策略）。
+    列口径与原 mgmt `list_executions` 兜底 SQL 一致（13 列，同序）；issue_number /
+    agent_task_id 在旧库可能不存在，用 `SELECT * ... LIMIT 0` 的游标描述符在**本域连接**
+    上探测后以空串占位（原实现是在 mgmt 连接上探测运行域表，三库拓扑下恒探测为空）。
+    为什么不用 PRAGMA table_info：db_registry 的薄兼容游标只做方言翻译、不做 PRAGMA
+    特判（那是 mysql_compat.Cursor 才有），直发 PRAGMA 在 MySQL 上会 1064；
+    描述符探测两条后端一致。
+    可变部分只有过滤组合与兼容列，二者都由本模块白名单给出，不接收调用方 SQL/列名。
     """
     lim = max(1, min(int(limit), 200))
     off = max(0, int(offset))
     conds, args = [], []
     if task_id is not None:
-        conds.append("e.task_id=%s")
+        conds.append(_AUTOPILOT_EXEC_FILTERS["task"])
         args.append(int(task_id))
     if status:
-        conds.append("e.status=%s")
+        conds.append(_AUTOPILOT_EXEC_FILTERS["status"])
         args.append(status)
     where = (" AND " + " AND ".join(conds)) if conds else ""
-    with db_registry.cursor("runtime") as c:
-        # MySQL 8 的 information_schema 列标签为大写（COLUMN_NAME），两种都取
-        c.execute("SELECT COLUMN_NAME AS column_name FROM information_schema.columns "
-                  "WHERE table_schema=DATABASE() AND table_name='autopilot_executions'")
-        cols = {(r.get("column_name") or r.get("COLUMN_NAME") or "") for r in _rows(c)}
-        issue_expr = "e.issue_number" if "issue_number" in cols else "'' AS issue_number"
-        task_expr = "e.agent_task_id" if "agent_task_id" in cols else "'' AS agent_task_id"
-        sql = ("SELECT e.id, e.task_id, e.status, e.retry_count, e.result, e.error, "
-               "e.started_at, e.completed_at, e.created_at, e.agent_type, e.findings_json, "
-               f"{issue_expr}, {task_expr} FROM autopilot_executions e WHERE 1=1{where} "
-               "ORDER BY e.id DESC LIMIT %s OFFSET %s")
-        c.execute(sql, tuple(args + [lim, off]))
+    with _any_cursor() as c:
+        c.execute("SELECT * FROM autopilot_executions LIMIT 0")
+        cols = {str(d[0] or "") for d in (getattr(c, "description", None) or [])}
+        compat = ", ".join(present if name in cols else missing
+                           for name, (present, missing) in _AUTOPILOT_EXEC_COMPAT_COLS.items())
+        c.execute(f"SELECT {_AUTOPILOT_EXEC_PAGE_COLS}, {compat} "
+                  f"FROM autopilot_executions e WHERE 1=1{where} "
+                  f"ORDER BY e.id DESC LIMIT ? OFFSET ?", tuple(args + [lim, off]))
         rows = c.fetchall()
-        c.execute(f"SELECT COUNT(*) AS n FROM autopilot_executions e WHERE 1=1{where}", tuple(args))
-        total = int(_rows(c)[0]["n"])
+        c.execute(f"SELECT COUNT(*) FROM autopilot_executions e WHERE 1=1{where}", tuple(args))
+        total_row = c.fetchone()
     keys = ("id", "task_id", "status", "retry_count", "result", "error", "started_at",
             "completed_at", "created_at", "agent_type", "findings_json", "issue_number",
             "agent_task_id")
-    return {"executions": [dict(zip(keys, tuple(r))) for r in rows], "total": total,
+    return {"executions": [dict(zip(keys, tuple(r))) for r in rows],
+            "total": int(total_row[0]) if total_row else 0,
             "limit": lim, "offset": off}
 
 
@@ -2103,6 +2121,15 @@ _ANY_QUERIES: dict[str, str] = {
         "UPDATE distributed_locks SET expires_at=?, update_at=? "
         "WHERE lock_key=? AND holder=?"),
     "lock_cleanup": "DELETE FROM distributed_locks WHERE expires_at < ? AND holder != ?",
+    # ── autopilot 执行记录 / 技能名（mgmt/routes/autopilot.py 跨域收口）──
+    # 列序/谓词与原语句逐字一致；分页查询的可变部分（过滤组合、迁移兼容列）由本模块
+    # 白名单挑选（见 list_autopilot_executions），调用方不再持有任何 SQL 文本。
+    "autopilot_executions_delete_by_task": "DELETE FROM autopilot_executions WHERE task_id=?",
+    "autopilot_findings_set": "UPDATE autopilot_executions SET findings_json=? WHERE id=?",
+    "autopilot_execution_findings_result": (
+        "SELECT findings_json, result FROM autopilot_executions WHERE id=?"),
+    "skill_display_name_official": (
+        "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'"),
 }
 
 
@@ -2152,6 +2179,61 @@ def exec_any(name: str, params: tuple = ()) -> int:
     with _any_cursor(write=True) as c:
         cur = c.execute(_any_sql(name), params)
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+# ── autopilot 执行记录 / 引擎实例校验 / 技能名（mgmt/routes/autopilot.py 收口）──
+#
+# 这些站点原来是「lib 优先 + 本地 SQL 兜底」：兜底 SQL 留在 mgmt 文件里 → 静态面恒计
+# 跨域引用；三库拓扑下 mgmt 进程库没有这些表（视图 0 → 1146，被内部 except 吞成
+# 空结果/假 0），是「静默数据分裂」的典型来源。现按表上移成运行域原语。
+
+_RUNTIME_ID_CHUNK = 400
+
+
+def runtimes_credential_ids_any(ids) -> dict[int, int]:
+    """按引擎实例 id 批量取 (id → credential_id)（任意拓扑）。
+
+    原语句 `SELECT id, credential_id FROM agent_runtimes WHERE id IN (...)`；参数超过
+    400 个时按 400 分块（避免撞绑定参数上限），块间无顺序依赖、结果合并即可。
+    """
+    vals = [int(x) for x in (ids or [])]
+    out: dict[int, int] = {}
+    for start in range(0, len(vals), _RUNTIME_ID_CHUNK):
+        chunk = vals[start:start + _RUNTIME_ID_CHUNK]
+        ph = ", ".join(["?"] * len(chunk))
+        with _any_cursor() as c:
+            c.execute(f"SELECT id, credential_id FROM agent_runtimes WHERE id IN ({ph})",
+                      tuple(chunk))
+            for r in (c.fetchall() or []):
+                out[int(r[0])] = int(r[1] or 0)
+    return out
+
+
+def delete_autopilot_executions_by_task_any(task_id) -> int:
+    """删除某巡检任务的执行记录（任意拓扑），返回删除行数。"""
+    return exec_any("autopilot_executions_delete_by_task", (int(task_id),))
+
+
+def set_autopilot_findings_any(exec_id, findings_json: str) -> int:
+    """回写某次巡检的 findings_json（任意拓扑），返回影响行数。"""
+    return exec_any("autopilot_findings_set", (findings_json, int(exec_id)))
+
+
+def autopilot_execution_findings_result_any(exec_id) -> tuple | None:
+    """取执行记录的 (findings_json, result)（任意拓扑）；不存在返回 None。"""
+    return read_one_any("autopilot_execution_findings_result", (int(exec_id),))
+
+
+def skill_display_name_official_any(skill_name: str) -> str:
+    """按技能名取官方启用技能的 display_name（任意拓扑）；无该技能/空名返回空串。
+
+    原语句的两处过滤（`is_active=1` / `scope='official'`）照抄：下架技能与非官方技能
+    同样取不到显示名，前端回退 Skill ID 的口径不变。
+    """
+    if not skill_name:
+        return ""
+    row = read_one_any("skill_display_name_official", (skill_name,))
+    return str(row[0] or "") if row else ""
 
 
 def get_meta_value_any(key: str) -> str:

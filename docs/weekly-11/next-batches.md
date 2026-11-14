@@ -1,14 +1,6 @@
 # 下一批：跨域收口作业单
 
-总量 221 处 / 73 个文件；下表取前 3 个。
-
-## src/domains/mgmt/routes/autopilot.py（mgmt 域，7 处）
-- `autopilot_executions`（归 runtime）× 5：行 448, 505, 506, 596, 703
-  - runtime public 已登记 172 条具名查询
-- `agent_runtimes`（归 runtime）× 1：行 117
-  - runtime public 已登记 172 条具名查询
-- `skill`（归 runtime）× 1：行 983
-  - runtime public 已登记 172 条具名查询
+总量 214 处 / 72 个文件；下表取前 3 个。
 
 ## src/kernel/token_resolver.py（kernel 域，6 处）
 - `managed_repos`（归 mgmt）× 5：行 795, 831, 851, 868, 1275
@@ -18,6 +10,12 @@
 
 ## src/kernel/outbound_ledger.py（kernel 域，6 处）
 - `outbound_content_ledger`（归 mgmt）× 6：行 137, 166, 224, 234, 240, 249
+  - mgmt public 已登记 102 条具名查询
+
+## src/domains/runtime/routes/webhook.py（runtime 域，6 处）
+- `managed_repos`（归 mgmt）× 4：行 90, 841, 1687, 1803
+  - mgmt public 已登记 102 条具名查询
+- `devops_pipeline_scene`（归 mgmt）× 2：行 913, 1029
   - mgmt public 已登记 102 条具名查询
 
 ## 每批验收口径（不要跳）

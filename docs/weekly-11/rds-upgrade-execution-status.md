@@ -1311,6 +1311,80 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 ---
 
+### 7.8 巡检任务执行记录外域读收口（2026-11-15 本批）
+
+- 文件：`src/domains/mgmt/routes/autopilot.py`（mgmt 域消费、7 处跨域 SQL → 0）。
+  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `autopilot_executions`（归 runtime）5 处，行 448 / 505 / 506 / 596 / 703：
+    删除执行记录、执行列表分页（主查询 + COUNT）、单行读 `findings_json, result`、
+    回写 `findings_json`；
+  - `agent_runtimes`（归 runtime）1 处，行 117：`engine_runtime_ids` 归属校验的
+    `id IN (...)` 批量取 `credential_id`；
+  - `skill`（归 runtime）1 处，行 983：技能显示名（`is_active=1 AND scope='official'`）。
+- owner 侧新增（`?` 占位符、列序/谓词/排序逐字照抄）：
+  1) `_ANY_QUERIES` 补 4 条具名查询：`autopilot_executions_delete_by_task`、
+     `autopilot_findings_set`、`autopilot_execution_findings_result`、
+     `skill_display_name_official`；
+  2) 5 个薄函数：`runtimes_credential_ids_any(ids)`（IN 列表按 400 分块，返回
+     `{id: credential_id}`，NULL → 0）、`delete_autopilot_executions_by_task_any`、
+     `set_autopilot_findings_any`、`autopilot_execution_findings_result_any`、
+     `skill_display_name_official_any`（空名不查库）；
+  3) `list_autopilot_executions` 由 MySQL 方言（`%s` + `db_registry.cursor`）改为
+     **可移植方言**（`?` + `_any_cursor`），并新增两张白名单：`_AUTOPILOT_EXEC_FILTERS`
+     （过滤谓词）与 `_AUTOPILOT_EXEC_COMPAT_COLS`（迁移兼容列的「有列表达式/无列空串占位」
+     两态）。名与返回结构不变，mgmt 侧不再需要 else 分支。
+- 调用方改造：
+  1) `list_executions` 的「lib 优先 + 本地兜底 SQL」双分支整体收敛为一次
+     `_rt_ap.list_autopilot_executions(...)`；`_autopilot_exec_cols()`（在 mgmt 连接上
+     PRAGMA 探测运行域表）随之删除；
+  2) `delete_task` 换成「跨域删除（cross_write 优先、原语兜底）→ 本域删任务行」，
+     跨域那一步移出本域 `db_lock`；
+  3) `get_findings` / `_save_findings_json` / `_skill_display_name` / 引擎校验
+     全部只调 public，不再有 lib/兜底分支与本地游标。
+- 设计取舍：
+  1) **分页查询整体上移，而不是逐条照抄 8 条具名查询**：可变部分只有「过滤组合」和
+     「兼容列存在性」两项，二者都做成归属域白名单（谓词只拼 `?`、列表达式只从白名单里挑），
+     值一律绑定。这样 4 种过滤组合 × 2 种兼容态不必展开成 16 条静态 SQL，且列名永不来自调用方。
+  2) **兼容列探测用游标描述符（`SELECT * … LIMIT 0`）而不是 PRAGMA**：`db_registry` 的薄
+     兼容游标只做 `?`→`%s` 等方言翻译，**不做 PRAGMA 特判**（只有 `mysql_compat.Cursor`
+     有），直发 PRAGMA 在 MySQL 上 1064——本轮彩排首跑就撞了这条（见下「验证」）。
+  3) **lib 分支不再保留**：`list_autopilot_executions` 改成可移植方言后，单库与自有 DSN
+     两条拓扑跑同一份语句，mgmt 侧留着 lib 分支只会多一条永不测试的路径。
+  4) **跨域删除先于本域删除**：两者跨库本来就不在一个事务里（原实现同样是 lib else 本地），
+     顺序照原样保留；区别只是不再被 mgmt 全局锁串行化。
+- 修的存量 bug：
+  1) **`get_findings` 在 lib 可用时必 500（功能面）**：原括号错位写成
+     `c = _ru_lib.read_one(...)` 后接 `).fetchone()`，`row` 在该分支未定义 → `NameError`；
+     只有「无自有 DSN 的兜底分支」能跑，即三库拓扑下这个端点从来没成功过。现两条拓扑同一路径。
+  2) **执行列表的关单号恒为空（功能面）**：兼容列探测原在 mgmt 连接上跑 PRAGMA，三库拓扑下
+     探测结果恒为空集，于是即使运行库里有 `issue_number` 列也一律渲染空串，历史执行记录
+     的 Issue 号前端全丢；现由归属域连接探测。
+  3) **静默 except（卫生面）**：`_skill_display_name` 的 `except Exception: return ""`
+     改为带 `log.debug` 的显式处理。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/autopilot_smoke.py`
+  **ALL 108 CHECKS PASSED**（含边界与否定用例：13 列同序、`ORDER BY id DESC`、
+  task/status/双过滤与空串 status 不过滤、limit 夹 [1,200] / offset 负数归 0 / 越界空表但
+  total 不变、缺 `issue_number` 列时空串占位且 ALTER 补列后立即读真值、
+  `agent_task_id` 读真值、单行读列序与未知 id → None、回写只影响指定 id / 未知 id 0 行、
+  删除只删本 task / 二次 0 行、credential_id NULL → 0 / 未知 id 不出现 / 空列表与 None 零 SQL /
+  450 个 id 跨 400 分块、技能名下架与非官方与空 display_name 均空串、4 条新具名查询无
+  `%s`/`NOW()`/`ON DUPLICATE`、未登记名 KeyError、自有 DSN 时 SQL 全走
+  `db_registry.cursor('runtime')`、消费侧 5 个入口行为逐条对照、源码 0 条三表 SQL）；
+  `rds_gate.sh --quick` **GATE: 全绿**；`pytest tests/arch tests/contracts tests/scripts`
+  **158 passed**；`make lint` **import OK**；`check_lib_query_names` **PASS**
+  （runtime 128 函数 + 32 具名查询在用，全部登记）。
+  三实例彩排（`LOOP_MAX=1 bash scripts/p4_p5_loop.sh`，`REMOTE_USER=rds_admin`）：
+  首跑 **1 失败**——`GET /api/autopilot/executions` 报
+  `(1064 … near 'PRAGMA table_info(autopilot_executions)')`，即上条设计取舍 2）的坑；
+  改成描述符探测后复跑 P4 **RESULT: PASS**、P5 **RESULT: PASS**（A1 视图 0 / A2 授权仅本库 /
+  A6 无队列），全 API 冒烟 **0 失败**，轮末 **RESULT: 环境侧全绿**（静态 214 只反映代码面 A3）。
+- 新基线：全局 **221 → 214**（-7），对 **66 → 64**（`autopilot_executions` 在 runtime 侧还有
+  `scheduler.py` 等消费点、`agent_runtimes` 仍有 `devstage.py` 等，故只减计数不减对的部分）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 214 / 64；依赖看板与作业单同步刷新
+  （下一批头名：`kernel/token_resolver.py` 6 处 / `kernel/outbound_ledger.py` 6 处）。
+
+---
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
