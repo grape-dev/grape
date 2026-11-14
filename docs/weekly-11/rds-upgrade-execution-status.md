@@ -160,6 +160,51 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### scene_sync 场景同步接口化（-10，本文件清零）
+- 文件：`src/domains/runtime/storage/scene_sync.py`（10 处 → **0**）；全局静态 **324 → 314**（73 对）。
+- 表分布（消费域 runtime，两表都归 mgmt）：`scene_market` 8 处（读取 3 / 精选计数与标记 2 / upsert 2 / 图标回写 1）、
+  `scene_skill_ref` 2 处（DELETE + INSERT）。
+- owner 侧新增（mgmt public，全部「任意拓扑」`?` 方言，SQL 只在 owner 留一份）：
+  · 具名查询：`scene_official_id_by_name` / `scene_official_row_by_name` / `scene_official_id_names` /
+    `scene_featured_official_count` / `scene_set_icon_by_id`（列序与 scene_sync 原查询逐字一致）
+  · 薄读函数：`official_scene_id_any` / `official_scene_row_any` / `list_official_scene_ids_names_any` /
+    `count_featured_official_scenes_any`；薄写函数：`mark_default_featured_any` / `set_scene_icon_any`
+  · 组合写（`_any_tx()`，多语句原子）：`upsert_scene_content_any`（hash 幂等 upsert）、
+    `replace_scene_skill_ref_any`（DELETE + `INSERT OR IGNORE`）
+- 关键设计取舍：
+  1. 原实现每条跨域语句写了两遍：`mgmt_lib` 句柄非空走 lib/outbox，为空走「本地兜底 SQL」，
+     兜底正是本文件跨域引用的全部来源。改成「一份 SQL + 任意拓扑执行」后兜底消失；
+     **跨域写仍只走 outbox**（`scene_upsert` / `scene_skill_ref_replace` / `scene_featured_init` 三条幂等意图，
+     payload 带完整内容可重放），owner 直写只发生在单库拓扑（表就在进程库里，不构成跨域写）。
+  2. 跨库原子事务不可得，所以组合写按「先解析、后一次重建」拆：技能解析（`skill` 是 runtime 自有表）留在调用方
+     的 `db_lock` 事务里，refs 收集齐后交给 `replace_scene_skill_ref_any` 在 owner 侧一次 `_any_tx()` 删+插，
+     **不再有「先 DELETE 再远端失败留空引用」的窗口**（与既有 lib 路径同口径）。
+  3. 动态 IN 列表（精选初始化）留在 owner：`mark_default_featured_any` 只在「名字个数」上拼占位符，
+     表名/列名不来自外部；过滤口径 `source='official' AND is_active=1` 原样保留。
+  4. 历史键名 `market_desc` / `tags_str` 由 owner 侧 `_SCENE_FIELD_ALIASES` 映射为 `market_description` / `tags`，
+     调用方字段字典不用改。顺带修掉一个静默缺口：MySQL 版 `upsert_scene_content` 过去按列名过滤 payload，
+     这两个键对不上列名 → lib 路径长期丢「市场描述 / 标签」两列；映射放进 owner 后两条路径都写全。
+- 修的存量 bug（两处静默失效）：
+  1. `_detect_stale_official_scenes`：`_mg_lib_xxx.read_all(...).fetchall()` 的结果被赋给了**游标变量**，
+     `_rows_stale` 没赋值 → NameError 被外层 `except Exception` 吞掉，该分支下 stale 检测永久返回 0（名单从不产生）。
+     改成单一具名查询后该分支不复存在。
+  2. `sync_official_scenes` 解包方向反了：`_persist_scene_row` 按 docstring 返回 `(scene_id, action)`，
+     调用方写成 `action, market_id = ...` → `action` 恒为整数，`skipped` 短路失效；`_apply_scene_icon` 拿到的是
+     `"added"/"updated"` 字符串当 id → `UPDATE ... WHERE id=?` 命中 0 行，**同步进来的场景图标从来没落过库**。
+     已改为 `market_id, action = ...`。
+- 验证：`py_compile` COMPILE_OK；`/tmp/scene_sync_smoke.py`（sqlite，DEVOPS_DB_BACKEND=sqlite）覆盖
+  新建/幂等跳过（updated_at 不变）/更新保留 `is_active` 与 `is_featured`/official 与启用过滤/IN 列表过滤/
+  ref 重建去重与清空/图标两列回写/unknown query KeyError/遍历不完整跳过，**ALL SCENE_SYNC SMOKE CHECKS PASSED**；
+  `rds_gate.sh --quick` **GATE: 全绿**；pytest arch/contracts/scripts **158 passed**；`make lint` import OK；
+  `tests/mgmt/test_scene_sync.py` + `tests/mgmt/test_scene_skill_ref_authoritative.py` + `tests/runtime/test_r31_p45_p46.py`
+  **69 passed**（其中两处 mock 的 DB 句柄改为指向内核句柄：写入路径已归位，再 mock `scene_sync.db` 已无效）。
+- 已知口径：把 arch/contracts/scripts 与 tests/mgmt、tests/runtime 混在同一进程里跑，`skill.scope` / `scene_market`
+  会因前述测试的进程库污染而报 missing；HEAD 同一组合也有 7 项失败（本批 10 项里多出的 3 项是同一污染的连带），
+  属既有测试隔离问题，故按仓库惯例分域跑。
+- 基线：**314 处 / 73 对**；`next-batches.md` 已刷新（下一批 `src/api/patrol_compensate.py` 10 处）。
+- 未做（如实标注）：本轮未跑 `p4_p5_loop.sh` 三实例彩排——改动只涉及 mgmt owner 原语与 runtime 调用点，
+  无 schema / 迁移变化，独立拓扑的 outbox 写路径未改；运行面证据为 sqlite 烟测 + 单库 pytest，未把彩排结果算进来。
+
 ### kernel/prompt_builder 跨域读归 owner public（-8，可执行 SQL 清零）
 - 文件：`src/kernel/prompt_builder.py`（11 处 → **3**，余下 3 处是 prompt 文案，见下）；全局静态 **332 → 324**（75 对）。
 - 表分布（消费域 kernel）：`agent_runtimes` 2 + `runtime_credentials` 1（归 runtime）；

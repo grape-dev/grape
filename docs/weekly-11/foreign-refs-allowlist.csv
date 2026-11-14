@@ -60,8 +60,6 @@ runtime_credentials,runtime,mgmt,4
 runtime_health_scores,runtime,insight,1
 scene_knowledge_ref,mgmt,runtime,2
 scene_market,mgmt,api,1
-scene_market,mgmt,runtime,8
-scene_skill_ref,mgmt,runtime,2
 skill,runtime,api,8
 skill,runtime,mgmt,2
 skill_category,mgmt,runtime,1

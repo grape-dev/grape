@@ -1,28 +1,26 @@
 # 下一批：跨域收口作业单
 
-总量 324 处 / 85 个文件；下表取前 3 个。
-
-## src/domains/runtime/storage/scene_sync.py（runtime 域，10 处）
-- `scene_market`（归 mgmt）× 8：行 426, 461, 466, 525, 750, 769, 788, 830
-  - mgmt public 已登记 49 条具名查询
-- `scene_skill_ref`（归 mgmt）× 2：行 333, 381
-  - mgmt public 已登记 49 条具名查询
+总量 314 处 / 84 个文件；下表取前 3 个。
 
 ## src/domains/runtime/pipeline/event_pipeline.py（runtime 域，10 处）
 - `devops_pipeline_scene`（归 mgmt）× 6：行 359, 420, 1480, 3866, 4478, 5395
-  - mgmt public 已登记 49 条具名查询
+  - mgmt public 已登记 54 条具名查询
 - `managed_repos`（归 mgmt）× 4：行 885, 2938, 4413, 5418
-  - mgmt public 已登记 49 条具名查询
+  - mgmt public 已登记 54 条具名查询
 
 ## src/api/patrol_compensate.py（api 域，10 处）
 - `grape_t_patrol_findings`（归 mgmt）× 7：行 86, 98, 103, 134, 553, 559, 582
-  - mgmt public 已登记 49 条具名查询
+  - mgmt public 已登记 54 条具名查询
 - `agent_tasks`（归 runtime）× 1：行 151
   - runtime public 已登记 153 条具名查询
 - `managed_repos`（归 mgmt）× 1：行 233
-  - mgmt public 已登记 49 条具名查询
+  - mgmt public 已登记 54 条具名查询
 - `user_repos`（归 mgmt）× 1：行 245
-  - mgmt public 已登记 49 条具名查询
+  - mgmt public 已登记 54 条具名查询
+
+## src/kernel/lock.py（kernel 域，9 处）
+- `distributed_locks`（归 runtime）× 9：行 34, 44, 50, 61, 67, 84, 103, 108, 123
+  - runtime public 已登记 153 条具名查询
 
 ## 每批验收口径（不要跳）
 1) `python3 scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv --baseline docs/weekly-11/foreign-refs-allowlist.csv --check`

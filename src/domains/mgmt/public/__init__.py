@@ -209,6 +209,12 @@ _SCENE_CONTENT_COLS = (
     "recommended_template", "nodes_json", "onboarding", "tags", "author", "content_hash",
     "obs_icon_key", "preset_custom_fields",
 )
+
+#: 场景内容字段的旧键名 → 列名（runtime 场景同步沿用 market_desc / tags_str 两个历史键）
+_SCENE_FIELD_ALIASES: dict[str, str] = {
+    "market_desc": "market_description",
+    "tags_str": "tags",
+}
 _SCENE_REQUIRED = ("name", "source", "scope")
 
 
@@ -426,6 +432,8 @@ def upsert_scene_content(name: str, payload: dict[str, Any], source: str = "offi
     返回 {"action": inserted|updated|skipped, "id": ..., "changed": n}。
     幂等：payload 的 content_hash 与库内一致时直接 skipped。
     """
+    # 历史键名（market_desc / tags_str）先映射成列名，否则这两列会被静默丢掉
+    payload = {_SCENE_FIELD_ALIASES.get(k, k): v for k, v in (payload or {}).items()}
     cols = [c for c in _SCENE_CONTENT_COLS if c in payload]
     with db_registry.cursor("mgmt") as cur:
         cur.execute("SELECT id, content_hash FROM scene_market "
@@ -1520,6 +1528,16 @@ _ANY_QUERIES: dict[str, str] = {
         "AND k.status = 'accepted' AND k.archived = 0"),
     # 仓库默认场景（issue_state 无 Issue 级快照时的回退源）
     "repo_dev_scene": "SELECT dev_scene FROM managed_repos WHERE repo_key=?",
+    # 场景市场（runtime 的场景同步读/写；列序与 scene_sync 原查询逐字一致）
+    "scene_official_id_by_name": (
+        "SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1"),
+    "scene_official_row_by_name": (
+        "SELECT id, version, content_hash, is_active FROM scene_market "
+        "WHERE name=? AND source='official' LIMIT 1"),
+    "scene_official_id_names": "SELECT id, name FROM scene_market WHERE source='official'",
+    "scene_featured_official_count": (
+        "SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1"),
+    "scene_set_icon_by_id": "UPDATE scene_market SET icon=?, obs_icon_key=? WHERE id=?",
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -1585,6 +1603,121 @@ def repo_dev_scene(repo_key: str) -> str:
     """仓库默认场景 id（managed_repos.dev_scene）；无行/空值返回空串。"""
     row = read_one_any("repo_dev_scene", (repo_key,))
     return str(row[0] or "") if row else ""
+
+
+# ---------- 场景市场（scene_market / scene_skill_ref 归 mgmt；runtime 定时同步消费） ----------
+#
+# runtime 的场景同步原先为每个 mgmt 表各留一份"本地兜底 SQL"（mgmt_lib 无自有 DSN 时
+# 返回 None），兜底 SQL 正是跨域表引用的来源。SQL 上移到本域后，调用方只剩业务规则，
+# 两条拓扑跑同一份语句：自有 DSN → mgmt 连接；单库/测试 → 进程主库。
+
+
+def official_scene_id_any(scene_name: str) -> Any | None:
+    """按场景名取 official 模板的 id（无则 None）。"""
+    row = read_one_any("scene_official_id_by_name", (scene_name,))
+    return row[0] if row else None
+
+
+def official_scene_row_any(scene_name: str) -> Any | None:
+    """official 场景的 (id, version, content_hash, is_active)；列序与同步原查询一致。"""
+    return read_one_any("scene_official_row_by_name", (scene_name,))
+
+
+def list_official_scene_ids_names_any() -> list[Any]:
+    """全部 official 场景的 (id, name)，供 stale 检测比对仓库清单。"""
+    return read_all_any("scene_official_id_names", ())
+
+
+def count_featured_official_scenes_any() -> int:
+    """official 且启用中的精选场景数（精选初始化判断用）。"""
+    row = read_one_any("scene_featured_official_count", ())
+    return int(row[0] or 0) if row else 0
+
+
+def mark_default_featured_any(names: list[str]) -> int:
+    """把给定名字的 official 启用场景标记为精选（不动的行原样保留），返回影响行数。
+
+    IN 列表长度由调用方给的名字数量决定，占位符在本域拼，表名/列名不来自外部。
+    """
+    clean = [str(n) for n in (names or []) if str(n or "").strip()]
+    if not clean:
+        return 0
+    placeholders = ",".join("?" * len(clean))
+    sql = (f"UPDATE scene_market SET is_featured=1, updated_at=datetime('now') "
+           f"WHERE name IN ({placeholders}) AND source='official' AND is_active=1")
+    with _any_tx() as c:
+        c.execute(sql, tuple(clean))
+        return int(getattr(c, "rowcount", 0) or 0)
+
+
+def replace_scene_skill_ref_any(scene_id: int, refs: list[dict[str, Any]]) -> dict[str, int]:
+    """重建某场景的技能引用：同一事务里先删后插（`INSERT OR IGNORE` 幂等）。
+
+    refs: [{"skill_id": int, "skill_name": str}]，列序与 runtime 原写语句一致。
+    """
+    with _any_tx() as c:
+        c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (int(scene_id),))
+        deleted = int(getattr(c, "rowcount", 0) or 0)
+        inserted = 0
+        for r in refs or []:
+            c.execute(
+                "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) "
+                "VALUES (?,?,?)",
+                (int(scene_id), int(r.get("skill_id") or 0), str(r.get("skill_name") or "")))
+            inserted += int(getattr(c, "rowcount", 0) or 0)
+    return {"deleted": deleted, "inserted": inserted}
+
+
+def upsert_scene_content_any(name: str, fields: dict[str, Any], source: str = "official") -> dict[str, Any]:
+    """按 content_hash 幂等的场景内容写入（任意拓扑，可移植方言）。
+
+    返回 {"action": inserted|updated|skipped, "id": int|0, "old_version": str|None}。
+    只写内容列：**绝不触碰** is_featured / like_count / source_user_id；UPDATE 时
+    保留库内既有 is_active（admin 设置不被同步覆盖），INSERT 时按原实现落
+    is_featured=0 / like_count=0 / source_user_id=0 / is_active=1。
+    """
+    payload = {_SCENE_FIELD_ALIASES.get(k, k): v for k, v in (fields or {}).items()}
+    content_hash = payload.get("content_hash") or ""
+    cols = [c for c in _SCENE_CONTENT_COLS if c in payload]
+    with _any_tx() as c:
+        c.execute("SELECT id, version, content_hash, is_active FROM scene_market "
+                  "WHERE name=? AND source=? LIMIT 1", (name, source))
+        row = c.fetchone()
+        if row:
+            sid, old_version, old_hash, preserved_active = (
+                int(row[0]), row[1], (row[2] or ""), row[3])
+            if old_hash == content_hash:
+                return {"action": "skipped", "id": sid, "old_version": old_version}
+            if not cols:
+                return {"action": "skipped", "id": sid, "old_version": old_version}
+            sets = ", ".join(f"{col}=?" for col in cols)
+            # is_active 原样回写库内既有值（原 SQL 同样是 is_active=? 传 preserved_active，
+            # 语义是"不改成 1"，admin 停用状态在同步后保持）
+            active = preserved_active if preserved_active is not None else 1
+            c.execute(f"UPDATE scene_market SET {sets}, is_active=?, updated_at=datetime('now') "
+                      f"WHERE id=?", tuple(payload[col] for col in cols) + (active, sid))
+            return {"action": "updated", "id": sid, "old_version": old_version}
+
+        c.execute(
+            "INSERT INTO scene_market "
+            "(name, display_name, version, description, market_description, icon, obs_icon_key, "
+            "category_id, is_featured, like_count, source, source_user_id, "
+            "recommended_template, nodes_json, onboarding, tags, author, "
+            "content_hash, preset_custom_fields, is_active, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
+            (name, payload.get("display_name", ""), payload.get("version", ""),
+             payload.get("description", ""), payload.get("market_description", ""),
+             "", "", payload.get("category_id", 0),
+             payload.get("recommended_template", ""), payload.get("nodes_json", ""),
+             payload.get("onboarding", ""), payload.get("tags", ""), payload.get("author", ""),
+             content_hash, payload.get("preset_custom_fields", "")))
+        return {"action": "inserted", "id": int(getattr(c, "lastrowid", 0) or 0),
+                "old_version": None}
+
+
+def set_scene_icon_any(scene_id: int, icon: str, obs_icon_key: str) -> int:
+    """回写场景图标（icon 展示地址 + OBS key），按 id 定位，返回影响行数。"""
+    return exec_any("scene_set_icon_by_id", (icon or "", obs_icon_key or "", int(scene_id)))
 
 
 def mapping_user_id_by_column(column: str, value: str) -> Any:
