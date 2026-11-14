@@ -147,6 +147,43 @@ def resolve_params(app, with_ids: bool) -> tuple[list[str], list[str]]:
     return sorted(set(ok)), sorted(set(skipped))
 
 
+# 自动写扫描的安全前缀：只碰纯配置/内部域，避开会外呼平台或控制 agent 的路径
+WRITE_SCAN_PREFIXES = ("/api/settings", "/api/skills", "/api/scenes", "/api/feedback",
+                       "/api/chat", "/api/orgs", "/api/admin", "/api/autopilot")
+
+
+def scan_write_endpoints(app, client, results: list[dict]) -> int:
+    """空体探测写端点：只把 5xx / 表-列缺失当失败；4xx 视为"需要业务参数"，不算失败。
+
+    目的不是跑通业务，而是在**视图已删**的拓扑上找出还没换连接的写 SQL（1146/1142）。
+    仅扫描写白名单前缀内的无路径参数 POST/PUT，避免误触外呼或 agent 控制。
+    """
+    from src.api.openapi import _iter_routes
+
+    pat = re.compile(r"(Table '[^']+' doesn't exist|Unknown column '[^']+'|command denied)")
+    scanned = 0
+    for route in app.routes:
+        for r in _iter_routes(route):
+            path = getattr(r, "path", "")
+            methods = {m for m in (getattr(r, "methods", set()) or set()) if m in ("POST", "PUT")}
+            if not methods or "{" in path or not path.startswith(WRITE_SCAN_PREFIXES):
+                continue
+            for method in sorted(methods):
+                scanned += 1
+                try:
+                    resp = client.request(method, path, json={})
+                except Exception as exc:  # noqa: BLE001
+                    results.append({"path": f"WRITE-SCAN {method} {path}", "status": 0,
+                                    "error": str(exc)[:160]})
+                    continue
+                if resp.status_code < 500:
+                    continue
+                m = pat.search(resp.text or "")
+                results.append({"path": f"WRITE-SCAN {method} {path}", "status": resp.status_code,
+                                "error": (m.group(1) if m else (resp.text or "")[:160])})
+    return scanned
+
+
 # 写场景（每个场景自带清理；只用 p2test 前缀数据，清理带 WHERE）
 WRITE_SCENARIOS = [
     {
@@ -236,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--all", action="store_true", help="自动发现所有无路径参数的 /api/* GET")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     ap.add_argument("--write", action="store_true", help="额外跑写场景（create→cleanup）")
+    ap.add_argument("--write-all", action="store_true",
+                    help="空体扫描白名单内的 POST/PUT 写端点，只报 5xx/表列缺失")
     ap.add_argument("--with-ids", action="store_true",
                     help="路径参数用 stage 库中的真实 id 填充（只读详情页覆盖）")
     ap.add_argument("--db-user", default=os.environ.get("MYSQL_USER", "root"),
@@ -307,6 +346,10 @@ def main(argv: list[str] | None = None) -> int:
             results.append({"path": path, "status": r.status_code, "error": err})
         if args.write:
             run_write_scenarios(client, results)
+        if args.write_all:
+            _n_scan = scan_write_endpoints(app, client, results)
+            print(f"[write-scan] 空体探测 {_n_scan} 个 POST/PUT 端点（4xx=需业务参数，不计失败）",
+                  file=sys.stderr)
     client.close()
 
     bad = [r for r in results if r["status"] >= 500 or r["error"]]

@@ -678,16 +678,31 @@ def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "
     import uuid
     cid = str(uuid.uuid4())
     from src.kernel.domain_db import cursor as _domain_cursor  # noqa: PLC0415
-    with _domain_cursor("runtime") as c:
-        c.execute("INSERT INTO chat_conversations (id, user_id, agent_session_id, runtime_session_id, repo_key, im_channel_id, title, user_gitcode_token, conv_type, issue_number) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                  (cid, user_id, agent_session_id, "", repo_key, im_channel_id, title, user_gitcode_token,
-                   conv_type or "general", issue_number or 0))
-        _conn = getattr(c, "connection", None)
-        if _conn is not None:
-            _conn.commit()
-        else:
-            db.commit()
-    return cid
+    _conv_type = conv_type or "general"
+    _issue_no = issue_number or 0
+    try:
+        with _domain_cursor("runtime") as c:
+            c.execute("INSERT INTO chat_conversations (id, user_id, agent_session_id, runtime_session_id, repo_key, im_channel_id, title, user_gitcode_token, conv_type, issue_number) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                      (cid, user_id, agent_session_id, "", repo_key, im_channel_id, title, user_gitcode_token,
+                       _conv_type, _issue_no))
+            _conn = getattr(c, "connection", None)
+            if _conn is not None:
+                _conn.commit()
+            else:
+                db.commit()
+        return cid
+    except Exception as exc:
+        # MySQL 上 (user_id, repo_key, issue_number, conv_type) 是唯一键（sqlite 测试库无此约束）：
+        # 命中即「会话已存在」，返回既有 id —— 创建会话本就是 get-or-create 语义。
+        msg = str(exc)
+        if not ("1062" in msg or "Duplicate" in msg or "UNIQUE" in msg):
+            raise
+        # 复用既有读路径（不新增跨域 SQL）：命中同键会话即返回其 id
+        for conv in get_user_conversations(user_id, repo_key, limit=50):
+            if int(conv.get("issue_number") or 0) == int(_issue_no) \
+                    and (conv.get("conv_type") or "general") == _conv_type:
+                return str(conv["id"])
+        raise
 
 
 def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) -> list[dict]:
