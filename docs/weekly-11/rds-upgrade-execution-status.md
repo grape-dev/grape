@@ -1786,6 +1786,73 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   基线 `foreign-refs-allowlist.csv` 收紧为 178 / 57；依赖看板与作业单同步刷新
   （下一批头名：`src/domains/mgmt/routes/devstage.py` 6 处）。
 
+### 7.15 mgmt DevStage 环境凭据清理收口（2026-11-15 本批）
+
+- 文件：`src/domains/mgmt/routes/devstage.py`（mgmt 域），**6 处 → 0**（单轮做完，未分两轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，三张表全归 runtime）：
+  - `runtime_credentials` × 3：原行 56（`_annotate_worker_online` 取全部未吊销凭据的
+    name/status/last_seen_at）、371（删除环境时按 `env.name` 定位凭据 id）、415（删凭据行）；
+  - `agent_runtimes` × 2：原行 385（按 credential_id 取引擎实例 id）、414（删引擎行）；
+  - `devops_agent_session` × 1：原行 412（会话摘绑 `runtime_id=0`）。
+  六处全部是「`runtime_lib` 优先 / 进程主库兜底 SQL」双分支的**兜底侧**；`devops_agent_runtime_binding`
+  清理留在 mgmt（该表归 mgmt，不在棘轮统计内）。
+- owner 侧新增（`?` 占位符，列序/谓词与原 SQL 逐字一致）：
+  1) runtime `_ANY_QUERIES` 补 2 条：`credential_health_rows`（
+     `SELECT name, status, last_seen_at FROM runtime_credentials WHERE status != 'revoked'`）、
+     `credential_id_by_name`（`SELECT id FROM runtime_credentials WHERE name=?`）；
+  2) runtime 侧 3 个薄函数：`credential_health_rows_any()`、`credential_id_by_name_any(name)`、
+     `purge_env_credential_any(env_name)`；
+  3) `purge_env_credential_any` **复用既有 `purge_runtime_credential`**（后者已覆盖「按 credential_id
+     取 rids → 摘绑会话 → 删 engine_capabilities → 删 agent_runtimes → 删 runtime_credentials」，
+     域内 `_any_tx()` 一个事务），只把入口从 id 换成 name（先按名取 id 再委托），不复制第二条 SQL。
+- 设计取舍：
+  1) **五个站点合成一个原语**：371/385/412/414/415 是同一次「删环境 → 清 runtime 半区」的五步，
+     拆成五个原语会让调用方重新编排跨域顺序、也重新长出「先摘绑还是先删行」的隐式约定。
+     合成后 mgmt 侧只剩一句 `purge_env_credential_any(env_name)` + 清理自家 binding，
+     runtime 侧的五步由归属域在一个事务里定序。
+  2) **删掉 lib 优先 / 兜底双分支**：两条分支原本就是同一件事的两个写法，且 lib 分支里的
+     `submit_if_lib(...)` 只有在 lib 存在时才可能进入 —— 那时 `purge_runtime_credential` 已经摘绑过
+     会话，这段 outbox 逻辑在两种拓扑下都不产生效果（死分支）。统一到任意拓扑原语后一并移除，
+     顺带少一个 `cross_write` 依赖。
+  3) **健康注记仍由调用方派生 health**：原语只返回 `(name, status, last_seen_at)`，`derive_runtime_health`
+     的判定（心跳 100s 阈值 / recently_lost / about_to_gc）留在 devstage 现成的调用里，
+     避免把展示口径搬进 public 面。
+  4) **空名凭据不当命中**：`credential_id_by_name_any("")` 直接返回 None。原兜底 SQL 的
+     `WHERE name=?` 传空串会命中历史 `name=''` 脏行并把它的引擎行/能力行一起删掉；
+     实际调用点有 `if env_name:` 前置，此处再兜一层。取 id 不做 strip（与原语句逐字匹配同口径）。
+  5) **`rids` 交回调用方**：mgmt 侧要删的 `devops_agent_runtime_binding` 是 mgmt 表，
+     跨域边界不在原语里出现 mgmt 表名；调用方按 400 分块拼 IN 列表（原实现单条 IN 无分块）。
+  6) **`revoked` 凭据照清**：健康注记过滤 `status='revoked'`（展示上不该再挂一个已吊销的设备），
+     但删除路径两种拓扑原本都不按 status 过滤，行为保持一致（烟测 C17/C18 明确覆盖）。
+- 修的存量 bug（三库拓扑，均非统计口径问题）：
+  1) **删除环境后本地凭据/引擎行残留（数据面，最严重）**：兜底分支在 mgmt 进程库里
+     执行 `UPDATE devops_agent_session ...` → 该库没有这张表 → 1146 被内层 `except` 吞成一条
+     warning，**后面的 `DELETE FROM agent_runtimes` / `DELETE FROM runtime_credentials` 全被跳过**。
+     也就是三库拆分后，云上环境删掉了、本地凭据还在，同名 Worker 可以再次注册并拿到旧凭据。
+  2) **能力行孤儿（数据面）**：即便兜底分支走通也不删 `engine_capabilities`，
+     与 lib 分支口径不一致，引擎列表会留下指向已删引擎的能力行。现统一走
+     `purge_runtime_credential`（删能力）。
+  3) **DevStage 环境列表「未上线」恒真（功能面）**：`_annotate_worker_online` 在进程库直查
+     `runtime_credentials`，三库拓扑下 1146 被 `except` 吞成空 map → 所有环境 `worker_online=false`，
+     开机按钮/在线标识与实际 Worker 状态脱节。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/devstage_credential_smoke.py`
+  **ALL 84 CHECKS PASSED**（含边界与否定用例：2 条新语句与调用点原 SQL 逐字对拍、无
+  `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`、未登记查询名 KeyError；只排除 revoked
+  且不过滤主动态/空名、同名多行全返回、按名逐字匹配不 strip、空名短路不查库；
+  purge 摘绑只动本凭据引擎的会话、删能力/引擎/凭据行、无引擎仍删凭据、**revoked 也照清**、
+  不存在与空名零写；健康注记五态（新鲜/离线/revoked/无心跳/过期）+ 空 envs 不查库 +
+  查询异常降级不上抛；删除链路正常清理、列表缺失先 404 不发云删除、list 故障穿透、
+  上游 not_found→404 / 其它→502、env 无凭据零写、purge 异常只 warning；
+  **401 个引擎行跨 400 分块全清**；有自有 DSN 时三原语全走 `db_registry` 且进程库零改动；
+  源码面 0 条三表 SQL、不再借 `domain_read`/`runtime_lib`、两处调用点均已接上原语）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **178 → 172**（-6），对 **57 → 55**：`runtime_credentials←mgmt` 3 → 0、
+  `agent_runtimes←mgmt` 2 → 0（**两对清零**），`devops_agent_session←mgmt` 3 → 2（该表仍有其它消费者）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 172 / 55；依赖看板与作业单同步刷新
+  （下一批头名：`src/api/issue_vcs_index.py`、`scene_binding_repair.py`、`skill_display.py`、
+  `metric_rollup.py` 四个 6 处文件并列）。
+
 ---
 
 ## 8. 提交记录

@@ -775,6 +775,50 @@ def delete_runtime_credential(cid: str) -> int:
         return int(c.rowcount or 0)
 
 
+def credential_health_rows_any() -> list[tuple]:
+    """全部未吊销凭据的 (name, status, last_seen_at)（任意拓扑）。
+
+    原语句在 mgmt 进程库里直查 runtime 表：三库拓扑下该库没有 runtime_credentials
+    （视图 0 → 1146，被调用方 except 吞成「全部 offline」），DevStage 环境列表恒显示
+    未上线。口径与原实现一致：只排除 `status='revoked'`，**不**过滤 `is_active`/空名，
+    空 name 行交调用方跳过（原循环里的 `if not cname: continue`）。
+    """
+    return [tuple(r) for r in read_all_any("credential_health_rows")]
+
+
+def credential_id_by_name_any(name: str) -> str | None:
+    """按凭据名取 id（任意拓扑）。名称语义上唯一，与原实现一样只取第一行。
+
+    不做 strip/normalize：原语句就是 `WHERE name=?` 逐字匹配；空名直接返回 None
+    （避免把 `name=''` 的脏行当成命中而误删）。
+    """
+    _name = name or ""
+    if not _name:
+        return None
+    row = read_one_any("credential_id_by_name", (_name,))
+    return str(row[0]) if row else None
+
+
+def purge_env_credential_any(env_name: str) -> dict[str, Any]:
+    """按凭据名清理 DevStage 环境的 runtime 半区（任意拓扑 + 域内事务）。
+
+    与 `purge_runtime_credential` 同一口径：摘绑会话 → 删能力 → 删引擎行 → 删凭据行；
+    入口从凭据 id 换成凭据名（mgmt 侧只持有 env.name，创建环境时 name = env.name）。
+    返回 {found, cid, rids, sessions, caps, engines, deleted}；`rids` 交回调用方清
+    mgmt 侧 `devops_agent_runtime_binding`（跨域边界不把 mgmt 表名传进来）。
+    凭据不存在时 found=False 且**不做任何写**（原实现同样只在命中后才动手）。
+    """
+    out: dict[str, Any] = {"found": False, "cid": "", "rids": [], "sessions": 0,
+                           "caps": 0, "engines": 0, "deleted": 0}
+    cid = credential_id_by_name_any(env_name)
+    if not cid:
+        return out
+    out["found"] = True
+    out["cid"] = cid
+    out.update(purge_runtime_credential(cid))
+    return out
+
+
 def upsert_repo_credential(repo_key: str, cred_type: str, value: str,
                            updated_at: str) -> dict[str, Any]:
     """仓库凭据幂等 upsert（表归 insight，写原语在该域 public；返回 {action, id}）。"""
@@ -2137,6 +2181,14 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT task_id, findings_json, result, status FROM autopilot_executions WHERE id=?"),
     "skill_display_name_official": (
         "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'"),
+    # ── DevStage 环境凭据清理（mgmt/routes/devstage.py 跨域收口）──
+    # 三张表（runtime_credentials / agent_runtimes / devops_agent_session）全归本域。
+    # 列序/谓词与原语句逐字一致：健康注记取「未吊销」全量行（不过滤 active，与原口径同）；
+    # 按 env 名定位凭据（创建环境时 name = env.name）。引擎行与会话摘绑的 IN 列表
+    # 在函数内分块拼装，SQL 文本只留在本域。
+    "credential_health_rows": (
+        "SELECT name, status, last_seen_at FROM runtime_credentials WHERE status != 'revoked'"),
+    "credential_id_by_name": "SELECT id FROM runtime_credentials WHERE name=?",
 }
 
 

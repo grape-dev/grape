@@ -1,7 +1,6 @@
 table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,4
 agent_runtimes,runtime,insight,5
-agent_runtimes,runtime,mgmt,2
 agent_shared_knowledge,mgmt,runtime,5
 agent_tasks,runtime,api,7
 agent_tasks,runtime,insight,13
@@ -11,7 +10,7 @@ api_latency_log,insight,api,2
 audit_logs,mgmt,insight,1
 chat_agent_session,runtime,mgmt,1
 chat_conversations,runtime,mgmt,2
-devops_agent_session,runtime,mgmt,3
+devops_agent_session,runtime,mgmt,2
 devops_pipeline_scene,mgmt,api,4
 devops_pipeline_scene,mgmt,insight,1
 devops_pipeline_scene,mgmt,runtime,2
@@ -43,7 +42,6 @@ managed_repos,mgmt,runtime,5
 meta,runtime,mgmt,4
 runtime_credentials,runtime,api,6
 runtime_credentials,runtime,insight,8
-runtime_credentials,runtime,mgmt,3
 runtime_health_scores,runtime,insight,1
 scene_knowledge_ref,mgmt,runtime,1
 scene_market,mgmt,api,1
