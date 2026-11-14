@@ -350,16 +350,11 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                 # 按 external_id 查（issue_creator 可能是平台数字 ID）
                 # FR-18.3: 按 provider 动态查（原硬编码 gitcode）
                 # P4：external_identities 在 mgmt 域，删视图后走 mgmt lib 读
-                from src.kernel.domain_read import mgmt_lib as _mg_lib_ei
-                _ei_lib = _mg_lib_ei(foreign_only=True)
-                if _ei_lib is not None:
-                    row = _ei_lib.read_one("grape_user_id_by_external_id", (_provider, issue_creator))
-                else:
-                    c.execute(
-                        "SELECT ei.grape_user_id FROM external_identities ei "
-                        "WHERE ei.provider=? AND ei.status=1 AND ei.external_id=? LIMIT 1",
-                        (_provider, issue_creator))
-                    row = c.fetchone()
+                # external_identities 归 mgmt：身份解析走该域原语（任意拓扑，单库回落进程库）
+                from src.domains.mgmt import public as _mgmt_ident
+
+                _uid = _mgmt_ident.external_user_id(_provider, issue_creator)
+                row = (_uid,) if _uid is not None else None
                 if row:
                     return row[0]
                 # 3. user_repos 回退：按创建者过滤（JOIN grape_accounts）

@@ -1397,3 +1397,185 @@ def installation_active_installs(conn) -> list[tuple]:
         "SELECT id, scope, owner_user_id, repo_key, config, status "
         "FROM grape_t_channel_installation WHERE status='active'").fetchall()
 
+
+
+# ---------- 任意拓扑原语（自有 DSN 走 db_registry；单库/测试拓扑回落进程主库）----------
+#
+# runtime / insight 进程要读写在 mgmt 库的表（渠道租约、动作过滤器）时，SQL 只在本域留一份，
+# 连接按拓扑自适应：有自有 DSN → mgmt 连接；没有（单库 / 视图期 / 测试）→ 进程主库 + db_lock。
+# 方言一律可移植（`?` 占位符 / `datetime('now')` / `IFNULL`），两条连接都能执行。
+
+
+@contextmanager
+def _any_cursor(write: bool = False):
+    """mgmt 表游标：自有 DSN 优先（autocommit），否则回落进程主库（持有 db_lock）。"""
+    if db_registry.uses_own_dsn("mgmt"):
+        with db_registry.cursor("mgmt") as c:
+            yield c
+        return
+    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+
+    with _plock:
+        c = _pdb.cursor()
+        yield c
+        if write:
+            _pdb.commit()
+
+
+@contextmanager
+def _any_tx():
+    """多语句组合写：自有 DSN → 独立非 autocommit 连接（真事务）；单库 → 进程库 + db_lock。"""
+    if db_registry.uses_own_dsn("mgmt"):
+        with db_registry.transaction("mgmt") as c:
+            yield c
+        return
+    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+
+    with _plock:
+        c = _pdb.cursor()
+        try:
+            yield c
+            _pdb.commit()
+        except Exception:
+            try:
+                _pdb.rollback()
+            except Exception as exc:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                log.debug(f"mgmt public rollback skipped: {exc}")
+            raise
+
+
+# ---------- 渠道租约（grape_t_channel_lease 归 mgmt；runtime 的 IM 主从选举用） ----------
+
+def acquire_channel_lease(lease_key: str, token: str, owner: str = "",
+                          ttl_seconds: int = 60) -> bool:
+    """抢占渠道租约（CAS + 过期回收），可重放。
+
+    条件：租约为空、已过期，或本来就属于自己（同 token 重入）。
+    行不存在时插入（并发插入由 lease_key 主键保证只有一方成功）。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
+    stamp = now.isoformat()
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "UPDATE grape_t_channel_lease SET lease_token=?, lease_owner=?, "
+            "lease_expires_at=?, lease_acquired_at=IFNULL(lease_acquired_at, ?), updated_at=? "
+            "WHERE lease_key=? AND (lease_token IS NULL OR lease_token=? "
+            "OR lease_expires_at IS NULL OR lease_expires_at < ?)",
+            (token, owner, expires, stamp, stamp, lease_key, token, stamp))
+        if int(getattr(cur, "rowcount", 0) or 0) > 0:
+            return True
+        try:
+            c.execute(
+                "INSERT INTO grape_t_channel_lease "
+                "(lease_key, channel_type, lease_token, lease_owner, lease_expires_at, "
+                "lease_acquired_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                (lease_key, lease_key.split(":")[0] if ":" in lease_key else "", token,
+                 owner, expires, stamp, stamp))
+            return True
+        except Exception:  # noqa: BLE001 - 并发抢占时主键冲突即为失败
+            return False
+
+
+def release_channel_lease(lease_key: str, token: str) -> bool:
+    """释放租约：仅当 token 匹配时清空（幂等：已释放则返回 False）。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "UPDATE grape_t_channel_lease SET lease_token=NULL, lease_owner=NULL, "
+            "lease_expires_at=NULL, updated_at=datetime('now') "
+            "WHERE lease_key=? AND lease_token=?", (lease_key, token))
+        return int(getattr(cur, "rowcount", 0) or 0) > 0
+
+
+def renew_channel_lease(lease_key: str, token: str, owner: str = "", ttl_seconds: int = 60,
+                        expected_token: str | None = None) -> bool:
+    """IM 渠道租约续约（CAS 语义，可重放）。
+
+    仅当 `lease_token` 为空或等于 `expected_token` 时才写入，避免抢掉别人的租约。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
+    stamp = now.isoformat()
+    with _any_cursor(write=True) as c:
+        if expected_token:
+            cur = c.execute(
+                "UPDATE grape_t_channel_lease SET lease_token=?, lease_owner=?, "
+                "lease_expires_at=?, lease_acquired_at=IFNULL(lease_acquired_at, ?), updated_at=? "
+                "WHERE lease_key=? AND (lease_token IS NULL OR lease_token=?)",
+                (token, owner, expires, stamp, stamp, lease_key, expected_token))
+        else:
+            cur = c.execute(
+                "UPDATE grape_t_channel_lease SET lease_token=?, lease_owner=?, "
+                "lease_expires_at=?, lease_acquired_at=IFNULL(lease_acquired_at, ?), updated_at=? "
+                "WHERE lease_key=? AND lease_token IS NULL",
+                (token, owner, expires, stamp, stamp, lease_key))
+        return int(getattr(cur, "rowcount", 0) or 0) > 0
+
+
+# ---------- 事件动作过滤器（event_action_filter 归 mgmt） ----------
+
+def add_event_action_filter_row(fields: dict, created_at: str) -> int:
+    """新增动作过滤器行（列名 dynamic 由本域白名单收敛）；返回自增 id。"""
+    data = dict(fields or {})
+    data["created_at"] = created_at
+    cols = list(data.keys())
+    ph = ", ".join(["?"] * len(cols))
+    with _any_cursor(write=True) as c:
+        cur = c.execute(f"INSERT INTO event_action_filter ({', '.join(cols)}) VALUES ({ph})",
+                        tuple(data[k] for k in cols))
+        return int(getattr(cur, "lastrowid", 0) or 0)
+
+
+def update_event_action_filter_row(rule_id: int, fields: dict, updated_at: str) -> int:
+    """按 id 更新动作过滤器行（空 fields 直接返回 0）。"""
+    data = dict(fields or {})
+    if not data:
+        return 0
+    data["updated_at"] = updated_at
+    sets = ", ".join(f"{k}=?" for k in data)
+    params = list(data.values()) + [int(rule_id)]
+    with _any_cursor(write=True) as c:
+        cur = c.execute(f"UPDATE event_action_filter SET {sets} WHERE id=?", params)
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def delete_event_action_filter_row(rule_id: int) -> int:
+    with _any_cursor(write=True) as c:
+        cur = c.execute("DELETE FROM event_action_filter WHERE id=?", (int(rule_id),))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+# ---------- 平台身份 → 账号（runtime 侧读 mgmt 身份的替身；单库回落进程库） ----------
+
+def mapped_user_id(login: str, um_column: str = "gitcode_user") -> Any:
+    """按平台登录名解析有效账号 id（unified_user_mapping → grape_accounts.status=1 校验）。
+
+    无命中返回 0（与原 issue 建档 SQL 的 COALESCE(...,0) 口径一致）。
+    """
+    if not login:
+        return 0
+    col = "github_login" if um_column == "github_login" else "gitcode_user"
+    sql = (f"SELECT m.user_id FROM unified_user_mapping m WHERE m.{col}=? "
+           "AND m.user_id IS NOT NULL AND m.user_id NOT IN ('', '0') "
+           "AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=m.user_id AND ga.status=1) "
+           "ORDER BY m.user_id LIMIT 1")
+    with _any_cursor() as c:
+        c.execute(sql, (login,))
+        row = c.fetchone()
+    return row[0] if row else 0
+
+
+def external_user_id(provider: str, external_id: str) -> Any:
+    """按 (provider, external_id) 取账号 id（external_identities 归 mgmt）；无命中返回 None。"""
+    if not provider or external_id in (None, ""):
+        return None
+    with _any_cursor() as c:
+        c.execute("SELECT ei.grape_user_id FROM external_identities ei "
+                  "WHERE ei.provider=? AND ei.status=1 AND ei.external_id=? LIMIT 1",
+                  (provider, str(external_id)))
+        row = c.fetchone()
+    return row[0] if row else None

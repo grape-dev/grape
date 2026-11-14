@@ -27,6 +27,8 @@ from src.api.deps import get_current_user, check_repo_access
 from src.kernel.config import log
 
 from src.kernel.session_manager import db, db_lock
+# 运行域表（autopilot_executions）走 owner 域原语；autopilot_tasks 归本域
+from src.domains.runtime import public as _rt_ap
 
 from src.domains.runtime.engine.scheduler import _get_exec_agent_task
 
@@ -73,21 +75,15 @@ def _check_task_access(user: dict, task_id: int) -> dict:
 
 def _check_exec_access(user: dict, exec_id: int) -> dict:
     """校验 execution 归属并返回 dict（含 task_id, repo_key）。"""
+    # executions 归运行域、tasks 归本域：跨域 JOIN 拆成两次查询（Python 内连接）
+    _ex = _rt_ap.read_one_any("autopilot_execution_brief", (exec_id,))
+    if not _ex:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "execution not found"})
     with db_lock:
         c = db.cursor()
-        from src.kernel.domain_read import runtime_lib as _ru_lib_80b975_f
-        _ru_lib_80b975 = _ru_lib_80b975_f(foreign_only=True)
-        if _ru_lib_80b975 is not None:
-            c = _ru_lib_80b975.read_one("autopilot_executions_80b975", (exec_id,)
-        ).fetchone()
-        else:
-            row = c.execute(
-                "SELECT e.id, e.task_id, t.repo_key FROM autopilot_executions e "
-                "JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
-                (exec_id,)
-            ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "execution not found"})
+        _t = c.execute("SELECT repo_key FROM autopilot_tasks WHERE id=?",
+                       (int(_ex[1]),)).fetchone()
+    row = (int(_ex[0]), int(_ex[1]), (_t[0] if _t else ""))
     repo_key = row[2] or ""
     if repo_key:
         check_repo_access(user, repo_key)
@@ -721,19 +717,15 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
     抛 HTTPException 语义错误（404/409/400），调用方自行捕获转回复卡。
     返回 {ok, issue_number, message}。
     """
+    # 同上：executions 走运行域原语，tasks.repo_key 在本域查
+    _ex = _rt_ap.read_one_any("autopilot_execution_findings", (exec_id,))
+    if not _ex or not _ex[1]:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "无 findings 可派发"})
     with db_lock:
         c = db.cursor()
-        from src.kernel.domain_read import runtime_lib as _ru_lib_88bc87_f
-        _ru_lib_88bc87 = _ru_lib_88bc87_f(foreign_only=True)
-        if _ru_lib_88bc87 is not None:
-            c = _ru_lib_88bc87.read_one("autopilot_executions_88bc87", (exec_id,)).fetchone()
-        else:
-            row = c.execute(
-                "SELECT t.repo_key, e.findings_json FROM autopilot_executions e "
-                "JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
-                (exec_id,)).fetchone()
-    if not row or not row[1]:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "无 findings 可派发"})
+        _t = c.execute("SELECT repo_key FROM autopilot_tasks WHERE id=?",
+                       (int(_ex[0]),)).fetchone()
+    row = ((_t[0] if _t else ""), _ex[1])
     repo_key = row[0]
     try:
         findings_data = json.loads(row[1])

@@ -211,14 +211,13 @@ _REPO_CRED_COLS = ("id", "repo_key", "cred_type", "value", "updated_at")
 
 
 def list_repo_credentials(repo_key: str = "") -> list[tuple]:
-    """仓库凭据行（只返回密文 value 列，解密归调用方）。"""
-    cols = ", ".join(_REPO_CRED_COLS)
-    with db_registry.cursor("runtime") as c:
-        if repo_key:
-            c.execute(f"SELECT {cols} FROM grape_t_repo_credentials WHERE repo_key=%s", (repo_key,))
-        else:
-            c.execute(f"SELECT {cols} FROM grape_t_repo_credentials")
-        return [tuple(r) for r in c.fetchall()]
+    """仓库凭据行（只返回密文 value 列，解密归调用方）。
+
+    表归 **insight**（不是 runtime）：SQL 在该域 public 一份，本函数只做转发。
+    """
+    from src.domains.insight import public as _insight_cred
+
+    return _insight_cred.list_repo_credential_rows(repo_key)
 
 
 _EC_COLS = ("id", "runtime_id", "tag", "max_concurrent", "priority", "enabled",
@@ -417,50 +416,18 @@ def acquire_channel_lease(lease_key: str, token: str, owner: str = "",
     条件：租约为空、已过期，或本来就属于自己（同 token 重入）。
     行不存在时插入（并发插入由 lease_key 主键保证只有一方成功）。
     """
-    from datetime import datetime, timedelta, timezone
+    # 表归 mgmt：租约 CAS 原语在该域 public（任意拓扑，单库回落进程库）
+    from src.domains.mgmt import public as _mgmt_lease
 
-    lib = _mgmt_channel_lib()
-    if lib is not None:
-        try:
-            return bool(lib.acquire_channel_lease(lease_key, token, owner, ttl_seconds))
-        except Exception as exc:  # noqa: BLE001 - owner 域不可用时按原路径兜底
-            log.warning(f"mgmt lib acquire_channel_lease failed, fallback to local SQL: {exc}")
-    now = datetime.now(timezone.utc)
-    expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
-    stamp = now.isoformat()
-    with db_registry.cursor("runtime") as c:
-        c.execute("UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
-                  "lease_expires_at=%s, lease_acquired_at=?, updated_at=%s "
-                  "WHERE lease_key=%s AND (lease_token IS NULL OR lease_token=%s "
-                  "OR lease_expires_at IS NULL OR lease_expires_at < %s)"
-                  .replace("lease_acquired_at=?", "lease_acquired_at=IFNULL(lease_acquired_at, %s)"),
-                  (token, owner, expires, stamp, stamp, lease_key, token, stamp))
-        if int(c.rowcount or 0) > 0:
-            return True
-        try:
-            c.execute("INSERT INTO grape_t_channel_lease "
-                      "(lease_key, channel_type, lease_token, lease_owner, lease_expires_at, "
-                      "lease_acquired_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                      (lease_key, lease_key.split(":")[0] if ":" in lease_key else "", token,
-                       owner, expires, stamp, stamp))
-            return True
-        except Exception:  # noqa: BLE001 - 并发抢占时主键冲突即为失败
-            return False
+    return bool(_mgmt_lease.acquire_channel_lease(lease_key, token, owner, ttl_seconds))
 
 
 def release_channel_lease(lease_key: str, token: str) -> bool:
     """释放租约：仅当 token 匹配时清空（幂等：已释放则返回 False）。"""
-    lib = _mgmt_channel_lib()
-    if lib is not None:
-        try:
-            return bool(lib.release_channel_lease(lease_key, token))
-        except Exception as exc:  # noqa: BLE001
-            log.warning(f"mgmt lib release_channel_lease failed, fallback to local SQL: {exc}")
-    with db_registry.cursor("runtime") as c:
-        c.execute("UPDATE grape_t_channel_lease SET lease_token=NULL, lease_owner=NULL, "
-                  "lease_expires_at=NULL, updated_at=NOW() "
-                  "WHERE lease_key=%s AND lease_token=%s", (lease_key, token))
-        return int(c.rowcount or 0) > 0
+    # 表归 mgmt：释放原语在该域 public（任意拓扑）
+    from src.domains.mgmt import public as _mgmt_lease
+
+    return bool(_mgmt_lease.release_channel_lease(lease_key, token))
 
 
 def heartbeat_instance(instance_id: str, hostname: str = "", ip: str = "",
@@ -511,29 +478,11 @@ def renew_channel_lease(lease_key: str, token: str, owner: str = "", ttl_seconds
     """
     from datetime import datetime, timedelta, timezone
 
-    lib = _mgmt_channel_lib()
-    if lib is not None:
-        try:
-            return bool(lib.renew_channel_lease(lease_key, token, owner, ttl_seconds,
+    # 表归 mgmt：续约 CAS 在 owner 域 public（任意拓扑）
+    from src.domains.mgmt import public as _mgmt_lease
+
+    return bool(_mgmt_lease.renew_channel_lease(lease_key, token, owner, ttl_seconds,
                                                 expected_token))
-        except Exception as exc:  # noqa: BLE001
-            log.warning(f"mgmt lib renew_channel_lease failed, fallback to local SQL: {exc}")
-    now = datetime.now(timezone.utc)
-    expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
-    stamp = now.isoformat()
-    if expected_token:
-        sql = ("UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
-               "lease_expires_at=%s, lease_acquired_at=IFNULL(lease_acquired_at, %s), updated_at=%s "
-               "WHERE lease_key=%s AND (lease_token IS NULL OR lease_token=%s)")
-        args = (token, owner, expires, stamp, stamp, lease_key, expected_token)
-    else:
-        sql = ("UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
-               "lease_expires_at=%s, lease_acquired_at=IFNULL(lease_acquired_at, %s), updated_at=%s "
-               "WHERE lease_key=%s AND lease_token IS NULL")
-        args = (token, owner, expires, stamp, stamp, lease_key)
-    with db_registry.cursor("runtime") as c:
-        c.execute(sql, args)
-        return int(c.rowcount or 0) > 0
 
 
 # ---------- 会话/任务写原语（P3-5g：mgmt / insight 进程写 runtime 基表） ----------
@@ -676,20 +625,12 @@ def add_event_action_filter(fields: dict[str, Any], created_at: str) -> int:
 
     W2：表归 mgmt 域，lib 可用时委托 mgmt public 写函数。
     """
-    lib = _mgmt_channel_lib()
-    if lib is not None:
-        return int(lib.add_event_action_filter(fields, created_at))
-    cols = ["event_type", "action", "allow", "actor", "require_changes", "block_changes",
-            "handle_side_effect", "priority", "enabled", "created_at", "updated_at"]
-    vals = [fields.get("event_type", ""), fields.get("action", ""),
-            int(fields.get("allow", 0)), fields.get("actor", "any"),
-            fields.get("require_changes", ""), fields.get("block_changes", ""),
-            fields.get("handle_side_effect", ""), int(fields.get("priority", 100)),
-            int(fields.get("enabled", 1)), created_at, created_at]
-    ph = ", ".join(["%s"] * len(cols))
-    with db_registry.cursor("runtime") as c:
-        c.execute(f"INSERT INTO event_action_filter ({', '.join(cols)}) VALUES ({ph})", tuple(vals))
-        return int(c.lastrowid or 0)
+    # 表归 mgmt：写入原语在 owner 域 public（任意拓扑）
+    from src.domains.mgmt import public as _mgmt_af
+
+    payload = dict(fields or {})
+    payload["updated_at"] = created_at
+    return int(_mgmt_af.add_event_action_filter_row(payload, created_at))
 
 
 def update_event_action_filter(rule_id: int, fields: dict[str, Any], updated_at: str) -> int:
@@ -697,30 +638,22 @@ def update_event_action_filter(rule_id: int, fields: dict[str, Any], updated_at:
 
     W2：表归 mgmt 域，lib 可用时委托 mgmt public 写函数。
     """
-    lib = _mgmt_channel_lib()
-    if lib is not None:
-        return int(lib.update_event_action_filter(rule_id, fields, updated_at))
     unknown = [k for k in fields if k not in _ACTION_FILTER_WRITABLE]
     if unknown:
         raise ValueError(f"column(s) {unknown} not writable through runtime lib")
-    cols = [k for k in fields if k in _ACTION_FILTER_WRITABLE]
-    if not cols:
-        return 0
-    sets = ", ".join(f"{c}=%s" for c in cols) + ", updated_at=%s"
-    params = tuple(fields[c] for c in cols) + (updated_at, int(rule_id))
-    with db_registry.cursor("runtime") as c:
-        c.execute(f"UPDATE event_action_filter SET {sets} WHERE id=%s", params)
-        return int(c.rowcount or 0)
+    # 表归 mgmt：写入原语在 owner 域 public（任意拓扑）
+    from src.domains.mgmt import public as _mgmt_af
+
+    data = {k: v for k, v in fields.items() if k in _ACTION_FILTER_WRITABLE}
+    return int(_mgmt_af.update_event_action_filter_row(rule_id, data, updated_at))
 
 
 def delete_event_action_filter(rule_id: int) -> int:
     """删除规则（W2：表归 mgmt，lib 可用时委托 mgmt public 写函数）。"""
-    lib = _mgmt_channel_lib()
-    if lib is not None:
-        return int(lib.delete_event_action_filter(rule_id))
-    with db_registry.cursor("runtime") as c:
-        c.execute("DELETE FROM event_action_filter WHERE id=%s", (int(rule_id),))
-        return int(c.rowcount or 0)
+    # 表归 mgmt：删除原语在 owner 域 public（任意拓扑）
+    from src.domains.mgmt import public as _mgmt_af
+
+    return int(_mgmt_af.delete_event_action_filter_row(rule_id))
 
 
 # ---------- 技能写原语（P3-5f：mgmt 进程写 runtime 基表 skill） ----------
@@ -844,30 +777,17 @@ def delete_runtime_credential(cid: str) -> int:
 
 def upsert_repo_credential(repo_key: str, cred_type: str, value: str,
                            updated_at: str) -> dict[str, Any]:
-    """仓库凭据幂等 upsert（UPDATE → rowcount==0 → INSERT，并发撞唯一约束再回退 UPDATE）。"""
-    from src.kernel.id_gen import uuid7_str
-    with db_registry.cursor("runtime") as c:
-        c.execute("UPDATE grape_t_repo_credentials SET value=%s, updated_at=%s "
-                  "WHERE repo_key=%s AND cred_type=%s", (value, updated_at, repo_key, cred_type))
-        if int(c.rowcount or 0) > 0:
-            return {"action": "updated", "id": 0}
-        try:
-            _new_id = uuid7_str()
-            c.execute("INSERT INTO grape_t_repo_credentials (id, repo_key, cred_type, value, updated_at) "
-                      "VALUES (%s,%s,%s,%s,%s)", (_new_id, repo_key, cred_type, value, updated_at))
-            return {"action": "inserted", "id": _new_id}
-        except Exception:  # noqa: BLE001
-            c.execute("UPDATE grape_t_repo_credentials SET value=%s, updated_at=%s "
-                      "WHERE repo_key=%s AND cred_type=%s", (value, updated_at, repo_key, cred_type))
-            return {"action": "updated_after_conflict", "id": 0}
+    """仓库凭据幂等 upsert（表归 insight，写原语在该域 public；返回 {action, id}）。"""
+    from src.domains.insight import public as _insight_cred
+
+    return _insight_cred.upsert_repo_credential_value(repo_key, cred_type, value, updated_at)
 
 
 def clear_repo_credential(repo_key: str, cred_type: str, updated_at: str) -> int:
-    """清空仓库凭据值（value=''，保留行）。"""
-    with db_registry.cursor("runtime") as c:
-        c.execute("UPDATE grape_t_repo_credentials SET value='', updated_at=%s "
-                  "WHERE repo_key=%s AND cred_type=%s", (updated_at, repo_key, cred_type))
-        return int(c.rowcount or 0)
+    """清空仓库凭据值（value=''，保留行；表归 insight）。"""
+    from src.domains.insight import public as _insight_cred
+
+    return _insight_cred.clear_repo_credential_value(repo_key, updated_at, cred_type)
 
 
 def ensure_device_credential(hostname: str, token_hash: str, last_ip: str) -> dict[str, Any]:
@@ -1198,36 +1118,18 @@ _READ_QUERIES: dict[str, str] = {
     "agent_tasks_3e8d71": "SELECT id, repo_key, issue_id FROM agent_tasks WHERE trace_id IS NULL OR trace_id='' LIMIT %s",
     "agent_type_7eae90": "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type ORDER BY order_num, agent_type",
     "agent_type_b07f0c": "SELECT agent_type, display_name, description, default_runtime_id, icon, order_num, enable FROM agent_type WHERE agent_type=%s",
-    "autopilot_executions_88bc87": "SELECT t.repo_key, e.findings_json FROM autopilot_executions e JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=%s",
     "autopilot_executions_018f03": "SELECT findings_json, result FROM autopilot_executions WHERE id=%s",
-    "autopilot_executions_80b975": "SELECT e.id, e.task_id, t.repo_key FROM autopilot_executions e JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=%s",
     "agent_tasks_b6b789": "SELECT event_seq, agent_type, skill, runtime_id, repo_key FROM agent_tasks WHERE id=%s LIMIT 1",
     "agent_tasks_6e9804": "SELECT issue_id, repo_key FROM agent_tasks WHERE id=%s LIMIT 1",
-    "event_action_filter_3d22a6": "SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, priority, enabled FROM event_action_filter ORDER BY event_type, action",
     "engine_capabilities_440c87": "SELECT id, tag, priority, enabled, created_at, updated_at FROM engine_capabilities WHERE runtime_id=%s ORDER BY tag",
-    "grape_t_repo_credentials_8fc7c2": "SELECT repo_key, cred_type FROM grape_t_repo_credentials WHERE id IS NULL OR id=''",
-    "grape_t_repo_credentials_d590a7": "SELECT repo_key, cred_type, value FROM grape_t_repo_credentials WHERE value != ''",
     # issue 查 id（mgmt feedback 上下文）
     "issue_id_by_repo_number": "SELECT id FROM issue WHERE repo_key=%s AND issue_number=%s LIMIT 1",
-    # 仓库 bot 凭据（mgmt 读；config_store 的 JOIN 拆分后也需要全量 rc 行）
-    "repo_bot_token_value": (
-        "SELECT value FROM grape_t_repo_credentials WHERE repo_key=%s AND cred_type='bot' LIMIT 1"),
-    "repo_bot_credentials_all": (
-        "SELECT repo_key, value FROM grape_t_repo_credentials WHERE cred_type='bot'"),
     # 仓库 IM 开关（mgmt 的 _apply_ak_sk 读）
     "repo_im_flags_latest": (
         "SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding "
         "ORDER BY id DESC LIMIT 1"),
-    # 账号 / 外部身份（按 engine_select._repo_user_id 的真实 SQL 登记，别自己编列名）
-    "account_id_by_platform_login": (
-        "SELECT ga.id FROM grape_accounts ga "
-        "WHERE ga.id IS NOT NULL AND ga.id NOT IN ('', '0') AND ga.status=1 "
-        "AND EXISTS (SELECT 1 FROM external_identities ei "
-        "WHERE ei.grape_user_id=ga.id AND ei.provider=%s AND ei.status=1 "
-        "AND LOWER(ei.external_login)=LOWER(%s) AND ei.external_login!='') LIMIT 1"),
-    "grape_user_id_by_external_id": (
-        "SELECT ei.grape_user_id FROM external_identities ei "
-        "WHERE ei.provider=%s AND ei.status=1 AND ei.external_id=%s LIMIT 1"),
+    # 账号 / 外部身份：解析归 mgmt 域 public（mapped_user_id / external_user_id），
+    # 本白名单不再登记跨域读 SQL
 }
 
 
@@ -1869,8 +1771,12 @@ _ANY_QUERIES: dict[str, str] = {
     'agent_runtime_name_by_id': 'SELECT name FROM agent_runtimes WHERE id=?',
     'issue_card_row': 'SELECT stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override, carried_context, status FROM issue WHERE repo_key=? AND issue_number=?',
     'issue_card_exists': 'SELECT id FROM issue WHERE repo_key=? AND issue_number=?',
-    'issue_card_ensure_insert_gitcode': "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_by) SELECT COALESCE((SELECT m.user_id FROM unified_user_mapping m WHERE m.gitcode_user=? AND m.user_id IS NOT NULL AND m.user_id NOT IN ('', '0') AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=m.user_id AND ga.status=1) ORDER BY m.user_id LIMIT 1), 0), ?, ?, ?, 'active', ?",
-    'issue_card_ensure_insert_github': "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_by) SELECT COALESCE((SELECT m.user_id FROM unified_user_mapping m WHERE m.github_login=? AND m.user_id IS NOT NULL AND m.user_id NOT IN ('', '0') AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=m.user_id AND ga.status=1) ORDER BY m.user_id LIMIT 1), 0), ?, ?, ?, 'active', ?",
+    'autopilot_execution_brief': 'SELECT id, task_id FROM autopilot_executions WHERE id=?',
+    'autopilot_execution_findings': (
+        'SELECT task_id, findings_json FROM autopilot_executions WHERE id=?'),
+    'issue_card_ensure_insert_plain': (
+        "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, created_by) "
+        "VALUES (?,?,?,?,'active',?)"),
     'issue_state_legacy_row': 'SELECT id, stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override FROM issue_state WHERE repo_key=? AND issue_id=?',
     'issue_children_by_parent': 'SELECT issue_number, stage, owner_agent FROM issue WHERE repo_key=? AND parent_issue_id=? ORDER BY issue_number',
     'issue_release_children': "SELECT id, issue_number, title, status, stage, release_candidate_sha, release_target_env, release_evidence_ref, release_result, release_failure_reason, release_approved_by, release_approved_at, created_at, completed_at FROM issue WHERE repo_key=? AND parent_issue_number=? AND release_target_env != '' ORDER BY id DESC",
@@ -2478,13 +2384,23 @@ def task_issue_attribution(task_ids) -> list[tuple]:
 
 def ensure_issue_card(repo_key: str, issue_number, assignee: str = "",
                       um_column: str = "gitcode_user") -> bool:
-    """issue 卡片行建档（幂等）：无行则建最小行（status='active'）。返回是否新建。"""
+    """issue 卡片行建档（幂等）：无行则建最小行（status='active'）。返回是否新建。
+
+    user_id 的解析归 **mgmt**（unified_user_mapping + grape_accounts 校验）：原来的
+    `INSERT ... SELECT COALESCE((SELECT m.user_id ... EXISTS(账号表校验)))`
+    是跨域子查询，三库独立后无法执行；改为先取 user_id（mgmt 原语）再插入（本域）。
+    """
     if read_one_any("issue_card_exists", (repo_key, issue_number)):
         return False
-    name = ("issue_card_ensure_insert_github" if um_column == "github_login"
-            else "issue_card_ensure_insert_gitcode")
+    from src.domains.mgmt import public as _mgmt_uid
+
     try:
-        exec_any(name, (assignee, assignee, repo_key, issue_number, assignee))
+        _uid = _mgmt_uid.mapped_user_id(assignee, um_column=um_column)
+    except Exception as exc:  # noqa: BLE001 - 身份解析失败按 "无绑定用户" 处理（原 COALESCE 语义）
+        log.warning(f"ensure_issue_card: user_id lookup failed ({assignee}): {exc}")
+        _uid = 0
+    try:
+        exec_any("issue_card_ensure_insert_plain", (_uid, assignee, repo_key, issue_number, assignee))
         return True
     except Exception:
         # 并发下唯一键冲突 → 行已由对端建好，等同"无行才建"的幂等语义

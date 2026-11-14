@@ -160,6 +160,30 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### runtime public 自身去跨域（-32，本文件清零）
+- `src/domains/runtime/public/__init__.py` 的 28 处外域引用清零，分四类处理：
+  · **`grape_t_repo_credentials`（insight，10 处）**：本文件的 `list_repo_credentials` /
+    `upsert_repo_credential` / `clear_repo_credential` 改为**转发** insight public
+    （`list_repo_credential_rows` / `upsert_repo_credential_value`→返回 {action,id} /
+    `clear_repo_credential_value(cred_type=...)`），SQL 只在 insight 一份。
+  · **`grape_t_channel_lease`（mgmt，5 处）**：租约 CAS（抢占/续约/释放）搬到 mgmt public，
+    runtime 三个函数改为转发。原先的 `_mgmt_channel_lib()` 分支其实一直无效——mgmt public
+    里从来就没有这三个函数，`AttributeError` 被兜底吞掉后永远走本地 SQL；现在是真的走 owner 域。
+  · **`event_action_filter`（mgmt，4 处）**：add/update/delete 搬到 mgmt public，runtime 转发。
+  · **白名单里的跨域读（9 条）**：删掉无调用的 4 条（2 条 `grape_t_repo_credentials` 死条目、
+    `repo_bot_token_value`、`account_id_by_platform_login`）与随调用方改造后的 4 条
+    （两条 `autopilot_executions JOIN autopilot_tasks`、`event_action_filter_3d22a6`、
+    `grape_user_id_by_external_id`）。跨域 JOIN 一律拆成「owner 原语 + 本域查询 + Python 内连接」。
+- `ensure_issue_card` 的 `INSERT ... SELECT COALESCE((SELECT m.user_id ... EXISTS(账号表校验)))`
+  是跨域子查询，改为「mgmt.mapped_user_id 解析 → 本域插入」；新增 mgmt 原语
+  `mapped_user_id(login, um_column)` / `external_user_id(provider, external_id)`，两条都任意拓扑。
+- 全局 **597 → 565**（-32）；基线收紧 **565 / 109 对**。
+- 验证：`rds_gate --quick` GATE 全绿；`pytest arch+contracts+scripts` **158 passed**；
+  四份 sqlite 烟测全通过（新增租约 CAS 8 断言：抢占/他人持有/同 token 重入/续约/释放/过期回收；
+  过滤器 add/update/delete + 非法列拒绝；凭据转发的 inserted/updated 语义；建档 user_id 解析与禁用账号排除）。
+- 已知口径（既有事实，非本轮引入）：`unified_user_mapping.user_id` 是 INTEGER 主键，而
+  `grape_accounts.id` 是 UUID 字符串列；原 SQL 依赖 MySQL 隐式转换，`mapped_user_id` 保持同一比较方式，未改语义。
+
 ### settings 引擎管理台接口化（-31，本文件清零）
 - `src/domains/mgmt/routes/settings.py` 的 31 处外域引用清零：`runtime_credentials` 12、
   `engine_capabilities` 9、`agent_runtimes` 6、`repo_im_group_binding` 2、

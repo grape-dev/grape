@@ -391,23 +391,15 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
             # 平台专属（同一 token 不会跨平台有效），解密等值即平台定界
             # P4：这条是**跨域 JOIN**（runtime 的 rc + mgmt 的 managed_repos），删视图后不能一条 SQL 走完 →
             # 拆成「rc 走 lib 读 + managed_repos 本地读 + Python 内连接」，语义是 INNER JOIN，按 repo_key 求交。
-            from src.kernel.domain_read import runtime_lib as _rt_lib_j
-            _j_lib = _rt_lib_j(foreign_only=True)
-            if _j_lib is not None:
-                _rc_rows = _j_lib.read_all("repo_bot_credentials_all", ())
-                c.execute(
-                    "SELECT repo_key, bot_username FROM managed_repos "
-                    "WHERE (host_user_id IS NULL OR host_user_id='' OR host_user_id='0')")
-                _mr_map = {r[0]: r[1] for r in c.fetchall()}
-                _rows_join = [(rk, _mr_map[rk], val) for (rk, val) in _rc_rows if rk in _mr_map]
-            else:
-                c.execute(
-                    "SELECT rc.repo_key, mr.bot_username, rc.value FROM grape_t_repo_credentials rc "
-                    "JOIN managed_repos mr ON mr.repo_key = rc.repo_key "
-                    "WHERE rc.cred_type='bot' "
-                    "AND (mr.host_user_id IS NULL OR mr.host_user_id='' OR mr.host_user_id='0')",
-                )
-                _rows_join = c.fetchall()
+            # 凭据表归 insight、managed_repos 归本域：跨域 JOIN 拆成两查后在 Python 内连接
+            # （INNER JOIN 语义 = 按 repo_key 求交）
+            from src.domains.insight import public as _insight_cred
+            _rc_rows = _insight_cred.repo_bot_credential_pairs()
+            c.execute(
+                "SELECT repo_key, bot_username FROM managed_repos "
+                "WHERE (host_user_id IS NULL OR host_user_id='' OR host_user_id='0')")
+            _mr_map = {r[0]: r[1] for r in c.fetchall()}
+            _rows_join = [(rk, _mr_map[rk], val) for (rk, val) in _rc_rows if rk in _mr_map]
             for row in _rows_join:
                 _raw_val = row[2] or ""
                 try:

@@ -2344,14 +2344,10 @@ def list_event_action_filters(user: dict = Depends(require_no_session_token)):
                           "priority, enabled FROM event_action_filter ORDER BY event_type, action")
                 rows = c.fetchall()
             else:
-                from src.kernel.domain_read import runtime_lib as _ru_lib_3d22a6_f
-                _ru_lib_3d22a6 = _ru_lib_3d22a6_f(foreign_only=True)
-                if _ru_lib_3d22a6 is not None:
-                    rows = _ru_lib_3d22a6.read_all("event_action_filter_3d22a6", ())
-                else:
-                    c.execute("SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, "
-                              "priority, enabled FROM event_action_filter ORDER BY event_type, action")
-                    rows = c.fetchall()
+                # event_action_filter 归本域（mgmt）：直接本域查询，不再经 runtime lib
+                c.execute("SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, "
+                          "priority, enabled FROM event_action_filter ORDER BY event_type, action")
+                rows = c.fetchall()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"rules": [

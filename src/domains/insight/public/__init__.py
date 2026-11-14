@@ -19,6 +19,11 @@ from src.kernel import db_registry
 
 
 _REPO_CRED_QUERIES: dict[str, str] = {
+    "repo_cred_rows": (
+        "SELECT id, repo_key, cred_type, value, updated_at FROM grape_t_repo_credentials"),
+    "repo_cred_rows_by_key": (
+        "SELECT id, repo_key, cred_type, value, updated_at FROM grape_t_repo_credentials "
+        "WHERE repo_key=?"),
     "repo_cred_value_id": (
         "SELECT value, id FROM grape_t_repo_credentials WHERE repo_key=? AND cred_type=?"),
     "repo_cred_value": (
@@ -33,10 +38,12 @@ _REPO_CRED_QUERIES: dict[str, str] = {
         "VALUES (?,?,?,?,?)"),
     "repo_cred_clear": (
         "UPDATE grape_t_repo_credentials SET value='', updated_at=? "
-        "WHERE repo_key=? AND cred_type='bot'"),
+        "WHERE repo_key=? AND cred_type=?"),
     "repo_cred_nonempty_keys": (
         "SELECT repo_key FROM grape_t_repo_credentials WHERE cred_type=? "
         "AND value IS NOT NULL AND value!=''"),
+    "repo_bot_credential_pairs": (
+        "SELECT repo_key, value FROM grape_t_repo_credentials WHERE cred_type='bot'"),
     "repo_cred_nonempty_keys_all": (
         "SELECT repo_key FROM grape_t_repo_credentials WHERE value IS NOT NULL AND value!=''"),
 }
@@ -175,24 +182,39 @@ def repo_credential_meta(repo_key: str, cred_type: str) -> tuple | None:
 
 
 def upsert_repo_credential_value(repo_key: str, cred_type: str, value: str,
-                                 updated_at: str) -> None:
-    """幂等 upsert：UPDATE → rowcount==0 → INSERT → 并发冲突再 UPDATE（同一事务）。"""
+                                 updated_at: str) -> dict:
+    """幂等 upsert：UPDATE → rowcount==0 → INSERT → 并发冲突再 UPDATE（同一事务）。
+
+    返回 {"action": updated|inserted|updated_after_conflict, "id": 行 id 或 0}；
+    只写不关心结果的调用方可忽略返回值。
+    """
     from src.kernel.id_gen import uuid7_str
 
     with _any_tx() as c:
         cur = c.execute(_any_sql("repo_cred_update"), (value, updated_at, repo_key, cred_type))
-        if int(getattr(cur, "rowcount", 0) or 0) == 0:
-            try:
-                c.execute(_any_sql("repo_cred_insert"),
-                          (uuid7_str(), repo_key, cred_type, value, updated_at))
-            except Exception:
-                # 并发插入撞唯一约束 → retry UPDATE（与原实现同语义）
-                c.execute(_any_sql("repo_cred_update"), (value, updated_at, repo_key, cred_type))
+        if int(getattr(cur, "rowcount", 0) or 0) > 0:
+            return {"action": "updated", "id": 0}
+        try:
+            new_id = uuid7_str()
+            c.execute(_any_sql("repo_cred_insert"),
+                      (new_id, repo_key, cred_type, value, updated_at))
+            return {"action": "inserted", "id": new_id}
+        except Exception:
+            # 并发插入撞唯一约束 → retry UPDATE（与原实现同语义）
+            c.execute(_any_sql("repo_cred_update"), (value, updated_at, repo_key, cred_type))
+            return {"action": "updated_after_conflict", "id": 0}
 
 
-def clear_repo_credential_value(repo_key: str, updated_at: str) -> int:
-    """把 bot 凭据置空（返回影响行数）。"""
-    return exec_any("repo_cred_clear", (updated_at, repo_key))
+def list_repo_credential_rows(repo_key: str = "") -> list[tuple]:
+    """仓库凭据行（id, repo_key, cred_type, value, updated_at；value 为密文，解密归调用方）。"""
+    if repo_key:
+        return [tuple(r) for r in read_all_any("repo_cred_rows_by_key", (repo_key,))]
+    return [tuple(r) for r in read_all_any("repo_cred_rows")]
+
+
+def clear_repo_credential_value(repo_key: str, updated_at: str, cred_type: str = "bot") -> int:
+    """把指定类型凭据置空（默认 bot；返回影响行数）。"""
+    return exec_any("repo_cred_clear", (updated_at, repo_key, cred_type))
 
 
 def any_repo_credential(repo_keys: list[str]) -> bool:
@@ -213,6 +235,11 @@ def repo_keys_sharing_value(cred_type: str, values: tuple, prefix: str, exclude_
                                        (cred_type, values[0], values[1], prefix, exclude_repo))]
 
 
+def repo_bot_credential_pairs() -> list[tuple]:
+    """全部 bot 凭据 (repo_key, 密文 value) 对（config_store 的跨域 JOIN 拆分后需要全量行）。"""
+    return [tuple(r) for r in read_all_any("repo_bot_credential_pairs")]
+
+
 def repo_keys_with_nonempty_credential(cred_type: str = "") -> set[str]:
     """有非空凭据的仓库集合（cred_type 为空 → 不限类型；供本域侧 NOT EXISTS 等价过滤）。"""
     if cred_type:
@@ -222,7 +249,7 @@ def repo_keys_with_nonempty_credential(cred_type: str = "") -> set[str]:
     return {r[0] for r in rows if r[0]}
 
 
-__all__ += ["aggregate_llm_usage", "read_one_any", "read_all_any", "exec_any",
+__all__ += ["list_repo_credential_rows", "aggregate_llm_usage", "read_one_any", "read_all_any", "exec_any",
             "repo_credential_value", "repo_credential_meta", "upsert_repo_credential_value",
             "clear_repo_credential_value", "any_repo_credential", "repo_keys_sharing_value",
             "repo_keys_with_nonempty_credential"]
