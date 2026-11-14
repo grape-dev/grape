@@ -160,6 +160,26 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### settings 引擎管理台接口化（-31，本文件清零）
+- `src/domains/mgmt/routes/settings.py` 的 31 处外域引用清零：`runtime_credentials` 12、
+  `engine_capabilities` 9、`agent_runtimes` 6、`repo_im_group_binding` 2、
+  `devops_agent_session` 1、`obs_llm_usage` 1（insight）。
+- 前置改造：runtime public 的 17 个读写原语（凭据 CRUD / 能力 CRUD / agent_tags / 群绑定开关 /
+  吊销 / 切 scope）从「只支持自有 DSN」改为**任意拓扑**（`_any_cursor`/`_any_tx` + 可移植 `?` 方言 +
+  `datetime('now')`），单库拓扑回落进程库。这是本轮最有复用价值的一步：后续 skills/agents 批次
+  可以直接调这些原语。
+- 两个方言陷阱一并修掉：
+  · `upsert_engine_capability` 原来是 MySQL 专用 `ON DUPLICATE KEY UPDATE ... VALUES(x)`，
+    sqlite 下非法，调用点靠 `REPLACE INTO` 兜底——而 REPLACE 会把 `max_concurrent` 重置为 1。
+    改为可移植两段式（UPDATE→rowcount==0→INSERT），覆盖同样三列、语义等价、不依赖方言。
+  · `purge_runtime_credential` / `change_credential_scope` 改任意拓扑后，settings 的两处 fallback
+    （吊销的 5 步展开、切 scope 的 3 步展开）各收敛为**一次原语调用**，事务边界回到 owner 域。
+- insight public 补 `aggregate_llm_usage`（`obs_llm_usage` 聚合；按 Issue #865 只取模型名字段）。
+- 全局 **628 → 597**（-31）；基线收紧 **597 / 110 对**。
+- 验证：`rds_gate --quick` GATE 全绿；`pytest arch+contracts+scripts` **158 passed**；
+  三份 sqlite 烟测全通过（会话/消息 8 组、user-db 6 组、public 原语 6 组——含凭据插入幂等冲突、
+  能力 upsert 覆盖/删除计数、切 scope 的同名引擎合并、吊销的会话摘绑+级联删除、用量聚合）。
+
 ### mgmt/user/db 引擎/技能/凭据/场景接口化（-48，本文件清零）
 - `src/domains/mgmt/user/db.py` 的 48 处外域引用**全部清零**：`agent_runtimes` 15、`skill` 10、
   `grape_t_repo_credentials` 10、`meta` 6、`engine_capabilities` 2、`runtime_credentials` 2（JOIN）、

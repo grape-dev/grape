@@ -127,7 +127,7 @@ def list_credential_rows() -> list[tuple]:
     lib 不接触明文凭据。
     """
     cols = ", ".join(_CRED_COLS)
-    with db_registry.cursor("runtime") as c:
+    with _any_cursor() as c:
         c.execute(f"SELECT {cols} FROM runtime_credentials")
         return [tuple(r) for r in c.fetchall()]
 
@@ -230,18 +230,18 @@ _ASK_COLS = ("id", "scope", "repo_key", "agent_type", "issue_num", "file_path", 
 
 def has_engine_capability(runtime_id: int) -> bool:
     """该引擎是否有能力记录（mgmt 侧用 SELECT 1 判定）。"""
-    with db_registry.cursor("runtime") as c:
-        c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=%s LIMIT 1", (int(runtime_id),))
+    with _any_cursor() as c:
+        c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (int(runtime_id),))
         return c.fetchone() is not None
 
 
 def list_engine_capabilities(runtime_id: int, enabled_only: bool = False) -> list[tuple]:
     """引擎能力行（id, tag, priority, enabled），按 tag 排序。"""
-    sql = "SELECT id, tag, priority, enabled FROM engine_capabilities WHERE runtime_id=%s"
+    sql = "SELECT id, tag, priority, enabled FROM engine_capabilities WHERE runtime_id=?"
     if enabled_only:
         sql += " AND enabled=1"
     sql += " ORDER BY tag"
-    with db_registry.cursor("runtime") as c:
+    with _any_cursor() as c:
         c.execute(sql, (int(runtime_id),))
         return [tuple(r) for r in c.fetchall()]
 
@@ -359,35 +359,44 @@ def get_autopilot_execution(exec_id: int) -> tuple | None:
 
 def upsert_engine_capability(runtime_id: int, tag: str, priority: int = 50,
                              max_concurrent: int = 1, enabled: int = 1) -> None:
-    """写入/更新引擎能力（幂等 UPSERT，供跨域写补偿重放）。"""
-    with db_registry.cursor("runtime") as c:
-        c.execute(
-            "INSERT INTO engine_capabilities "
-            "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, %s, NOW(), NOW()) "
-            "ON DUPLICATE KEY UPDATE priority=VALUES(priority), "
-            "max_concurrent=VALUES(max_concurrent), enabled=VALUES(enabled), updated_at=NOW()",
-            (int(runtime_id), tag, int(max_concurrent), int(priority), int(enabled)),
-        )
+    """写入/更新引擎能力（幂等 UPSERT，供跨域写补偿重放）。
+
+    可移植两段式（UPDATE → rowcount==0 → INSERT）：原实现是 MySQL 专用
+    `ON DUPLICATE KEY UPDATE ... VALUES(x)`，在 sqlite 下非法；两段式覆盖同样的三列，
+    语义等价且不依赖方言，两条拓扑共用。
+    """
+    rid, tg = int(runtime_id), tag
+    mc, pri, en = int(max_concurrent), int(priority), int(enabled)
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "UPDATE engine_capabilities SET max_concurrent=?, priority=?, enabled=?, "
+            "updated_at=datetime('now') WHERE runtime_id=? AND tag=?", (mc, pri, en, rid, tg))
+        if not int(getattr(cur, "rowcount", 0) or 0):
+            c.execute(
+                "INSERT INTO engine_capabilities "
+                "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,datetime('now'),datetime('now'))",
+                (rid, tg, mc, pri, en))
+
 
 
 def update_engine_capability(runtime_id: int, tag: str, priority: int, enabled: int) -> int:
     """更新引擎能力优先级/启用态，返回受影响行数（0 = 不存在，供 404 判定）。"""
-    with db_registry.cursor("runtime") as c:
-        c.execute("UPDATE engine_capabilities SET priority=%s, enabled=%s, updated_at=NOW() "
-                  "WHERE runtime_id=%s AND tag=%s",
+    with _any_cursor(write=True) as c:
+        c.execute("UPDATE engine_capabilities SET priority=?, enabled=?, updated_at=datetime('now') "
+                  "WHERE runtime_id=? AND tag=?",
                   (int(priority), int(enabled), int(runtime_id), tag))
         return int(c.rowcount or 0)
 
 
 def delete_engine_capability(runtime_id: int, tag: str | None = None) -> int:
     """删除引擎能力（tag 为空则删该引擎全部），返回受影响行数；天然幂等。"""
-    with db_registry.cursor("runtime") as c:
+    with _any_cursor(write=True) as c:
         if tag:
-            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=%s AND tag=%s",
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag=?",
                       (int(runtime_id), tag))
         else:
-            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=%s", (int(runtime_id),))
+            c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (int(runtime_id),))
         return int(c.rowcount or 0)
 
 
@@ -652,8 +661,8 @@ def set_autopilot_findings(exec_id: int, findings_json: str) -> int:
 
 def set_repo_im_notifications(auto_impl_enabled: int, notify_enabled: int) -> int:
     """更新通知偏好（原 SQL 无 WHERE，整表更新 —— 与原实现一致）。"""
-    with db_registry.cursor("runtime") as c:
-        c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=%s, notify_enabled=%s",
+    with _any_cursor(write=True) as c:
+        c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=?, notify_enabled=?",
                   (int(auto_impl_enabled), int(notify_enabled)))
         return int(c.rowcount or 0)
 
@@ -795,11 +804,11 @@ def insert_runtime_credential(token_hash: str, name: str, scope: str, owner_id: 
                               owner_name: str, repo_key: str, org_id: str) -> dict[str, Any]:
     """新建 runtime 凭据。名称全局唯一：撞唯一约束时返回 duplicate（**不抛异常**），
     调用方据此回 400 —— 若这里抛异常，意图会被当成可重试失败而无限重放。"""
-    with db_registry.cursor("runtime") as c:
+    with _any_cursor(write=True) as c:
         try:
             c.execute("INSERT INTO runtime_credentials "
                       "(token_hash, name, scope, owner_id, owner_name, repo_key, org_id) "
-                      "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                      "VALUES (?,?,?,?,?,?,?)",
                       (token_hash, name, scope, owner_id, owner_name, repo_key, org_id))
             return {"action": "inserted", "id": int(c.lastrowid or 0)}
         except Exception as exc:  # noqa: BLE001
@@ -811,8 +820,8 @@ def insert_runtime_credential(token_hash: str, name: str, scope: str, owner_id: 
 
 def rename_runtime_credential(cid: str, name: str) -> int:
     """改名（仅 active 行），返回受影响行数。"""
-    with db_registry.cursor("runtime") as c:
-        c.execute("UPDATE runtime_credentials SET name=%s WHERE id=%s AND status='active'",
+    with _any_cursor(write=True) as c:
+        c.execute("UPDATE runtime_credentials SET name=? WHERE id=? AND status='active'",
                   (name, str(cid)))
         return int(c.rowcount or 0)
 
@@ -828,8 +837,8 @@ def set_runtime_credential_scope(cid: str, scope: str, repo_key: str, owner_id: 
 
 def delete_runtime_credential(cid: str) -> int:
     """删除凭据行。"""
-    with db_registry.cursor("runtime") as c:
-        c.execute("DELETE FROM runtime_credentials WHERE id=%s", (str(cid),))
+    with _any_cursor(write=True) as c:
+        c.execute("DELETE FROM runtime_credentials WHERE id=?", (str(cid),))
         return int(c.rowcount or 0)
 
 
@@ -1011,8 +1020,8 @@ def ensure_default_runtime(name: str, display_name: str, installed: int, cli_pat
 def set_agent_tags(runtime_id: int, tags: list[str]) -> int:
     """回写 agent_runtimes.agent_tags（engine_capabilities 的 JSON 快照）。"""
     import json as _json
-    with db_registry.cursor("runtime") as c:
-        c.execute("UPDATE agent_runtimes SET agent_tags=%s WHERE id=%s",
+    with _any_cursor(write=True) as c:
+        c.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?",
                   (_json.dumps(list(tags or []), ensure_ascii=False), int(runtime_id)))
         return int(c.rowcount or 0)
 
@@ -1026,12 +1035,12 @@ def purge_runtime_credential(cid: str, detach_sessions: bool = True,
     """
     cid_s = str(cid)
     out: dict[str, Any] = {"rids": [], "sessions": 0, "caps": 0, "engines": 0, "deleted": 0}
-    with db_registry.transaction("runtime") as c:
-        c.execute("SELECT id FROM agent_runtimes WHERE credential_id=%s", (cid_s,))
+    with _any_tx() as c:
+        c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid_s,))
         rids = [int(r[0]) for r in c.fetchall()]
         out["rids"] = rids
         if rids:
-            ph = ",".join(["%s"] * len(rids))
+            ph = ",".join(["?"] * len(rids))
             if detach_sessions:
                 c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})",
                           tuple(rids))
@@ -1041,7 +1050,7 @@ def purge_runtime_credential(cid: str, detach_sessions: bool = True,
                 out["caps"] = int(c.rowcount or 0)
             c.execute(f"DELETE FROM agent_runtimes WHERE id IN ({ph})", tuple(rids))
             out["engines"] = int(c.rowcount or 0)
-        c.execute("DELETE FROM runtime_credentials WHERE id=%s", (cid_s,))
+        c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid_s,))
         out["deleted"] = int(c.rowcount or 0)
     return out
 
@@ -1057,14 +1066,14 @@ def change_credential_scope(cid: str, scope: str, repo_key: str, owner_id: str,
 
     cid_s = str(cid)
     out: dict[str, Any] = {"credential": 0, "engines": 0, "merged": {}}
-    with db_registry.transaction("runtime") as c:
-        c.execute("UPDATE runtime_credentials SET scope=%s, repo_key=%s, owner_id=%s, org_id=%s "
-                  "WHERE id=%s", (scope, repo_key or None, owner_id, org_id, cid_s))
+    with _any_tx() as c:
+        c.execute("UPDATE runtime_credentials SET scope=?, repo_key=?, owner_id=?, org_id=? "
+                  "WHERE id=?", (scope, repo_key or None, owner_id, org_id, cid_s))
         out["credential"] = int(c.rowcount or 0)
 
         # ---- 合并同凭据下的重名引擎行（保留 MAX(id)）----
         rid_map: dict[int, int] = {}
-        c.execute("SELECT id, lower(name), tags_user_set FROM agent_runtimes WHERE credential_id=%s",
+        c.execute("SELECT id, lower(name), tags_user_set FROM agent_runtimes WHERE credential_id=?",
                   (cid_s,))
         groups: dict[str, list[tuple[int, int]]] = {}
         for rid, lname, tus in c.fetchall():
@@ -1076,27 +1085,27 @@ def change_credential_scope(cid: str, scope: str, repo_key: str, owner_id: str,
             items_sorted = sorted(items, key=lambda x: x[0])
             surviving = items_sorted[-1][0]
             replaced = [rid for rid, _ in items_sorted[:-1]]
-            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=%s LIMIT 1", (surviving,))
+            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (surviving,))
             if not c.fetchone():
                 for rid in replaced:
-                    c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=%s LIMIT 1", (rid,))
+                    c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
                     if c.fetchone():
-                        c.execute("UPDATE engine_capabilities SET runtime_id=%s, "
-                                  "updated_at=CURRENT_TIMESTAMP WHERE runtime_id=%s", (surviving, rid))
+                        c.execute("UPDATE engine_capabilities SET runtime_id=?, "
+                                  "updated_at=CURRENT_TIMESTAMP WHERE runtime_id=?", (surviving, rid))
                         break
             if items_sorted[-1][1] == 0 and any(tus for _, tus in items_sorted[:-1]):
-                c.execute("UPDATE agent_runtimes SET tags_user_set=1 WHERE id=%s", (surviving,))
+                c.execute("UPDATE agent_runtimes SET tags_user_set=1 WHERE id=?", (surviving,))
             for rid in replaced:
                 rid_map[rid] = surviving
             replaced_ids.extend(replaced)
         if replaced_ids:
-            ph = ",".join(["%s"] * len(replaced_ids))
+            ph = ",".join(["?"] * len(replaced_ids))
             c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({ph})", tuple(replaced_ids))
             c.execute(f"DELETE FROM agent_runtimes WHERE id IN ({ph})", tuple(replaced_ids))
         out["merged"] = {str(k): v for k, v in rid_map.items()}
 
-        c.execute("UPDATE agent_runtimes SET scope=%s, owner_id=%s, org_id=%s, repo_key=%s "
-                  "WHERE credential_id=%s", (scope, owner_id, org_id, repo_key or None, cid_s))
+        c.execute("UPDATE agent_runtimes SET scope=?, owner_id=?, org_id=?, repo_key=? "
+                  "WHERE credential_id=?", (scope, owner_id, org_id, repo_key or None, cid_s))
         out["engines"] = int(c.rowcount or 0)
     return out
 
@@ -1316,8 +1325,8 @@ def get_runtime_credential_meta(runtime_id: int) -> dict[str, Any] | None:
     sql = ("SELECT rc.id, rc.name, rc.device_name, rc.scope, rc.owner_id, rc.owner_name, "
            "rc.repo_key, rc.status, rc.last_seen_at, rc.last_ip, rc.spec, rc.org_id, "
            "rc.cpu_percent, rc.memory_percent, rc.disk_percent, rc.load_avg "
-           "FROM runtime_credentials rc WHERE rc.id=%s")
-    with db_registry.cursor("runtime") as c:
+           "FROM runtime_credentials rc WHERE rc.id=?")
+    with _any_cursor() as c:
         c.execute(sql, (int(runtime_id),))
         rows = _rows(c)
     return rows[0] if rows else None
@@ -1646,7 +1655,7 @@ def _skill_row(r: dict[str, Any]) -> dict[str, Any]:
 
 def list_active_credential_ids() -> list[int]:
     """active 凭据 id 列表（settings 设备/引擎列表的循环源，替代跨域裸 SQL）。"""
-    with db_registry.cursor("runtime") as c:
+    with _any_cursor() as c:
         c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
         return [r["id"] for r in _rows(c)]
 
@@ -1660,10 +1669,10 @@ def list_runtime_credentials(org_id: str = "", personal_org: bool = True) -> lis
            "last_seen_at, created_at, repo_key FROM runtime_credentials")
     args: list[Any] = []
     if org_id and not personal_org:
-        sql += " WHERE org_id=%s"
+        sql += " WHERE org_id=?"
         args.append(org_id)
     sql += " ORDER BY id DESC"
-    with db_registry.cursor("runtime") as c:
+    with _any_cursor() as c:
         c.execute(sql, tuple(args))
         rows = _rows(c)
     return [{"id": r["id"], "name": r["name"], "device_name": r["device_name"] or "",
@@ -1827,6 +1836,11 @@ _ANY_QUERIES: dict[str, str] = {
         "ORDER BY id DESC LIMIT ?"),
     'messages_delete_by_conversation': 'DELETE FROM chat_messages WHERE conversation_id=?',
     # repo_im_group_binding
+    'repo_im_flags_latest': (
+        'SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding '
+        'ORDER BY id DESC LIMIT 1'),
+    'repo_im_set_notifications': (
+        'UPDATE repo_im_group_binding SET auto_impl_enabled=?, notify_enabled=?'),
     'repo_im_auto_impl': 'SELECT auto_impl_enabled FROM repo_im_group_binding WHERE repo_key=?',
     'repo_im_set_auto_impl': (
         'UPDATE repo_im_group_binding SET auto_impl_enabled=? WHERE repo_key=?'),
@@ -1878,6 +1892,34 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT id, name, slug, icon, order_num FROM scene_category "
         "WHERE is_active=1 ORDER BY order_num"),
     "scene_category_row": "SELECT id, name, slug, icon FROM scene_category WHERE id=?",
+    # runtime_credentials / agent_runtimes / engine_capabilities（settings 引擎管理台读路径）
+    "runtime_credentials_all": (
+        "SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, "
+        "last_ip, repo_key, org_id, spec FROM runtime_credentials"),
+    "runtime_credentials_active_ids": (
+        "SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC"),
+    "runtime_credentials_list": (
+        "SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, "
+        "created_at, repo_key FROM runtime_credentials ORDER BY id DESC"),
+    "runtime_credentials_by_org": (
+        "SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, "
+        "created_at, repo_key FROM runtime_credentials WHERE org_id=? ORDER BY id DESC"),
+    "runtime_credential_exists": "SELECT id FROM runtime_credentials WHERE id=?",
+    "runtime_credential_owner_status": (
+        "SELECT owner_name, status FROM runtime_credentials WHERE id=?"),
+    "runtime_credential_owner_name": "SELECT owner_name FROM runtime_credentials WHERE id=?",
+    "runtimes_by_credential_full": (
+        "SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, "
+        "skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?"),
+    "runtime_exists_any": "SELECT 1 FROM agent_runtimes WHERE id=?",
+    "engine_cap_flags": (
+        "SELECT tag, priority, enabled FROM engine_capabilities "
+        "WHERE runtime_id=? AND enabled=1 ORDER BY tag"),
+    "engine_cap_tags_sorted": (
+        "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag"),
+    "engine_caps_by_runtime": (
+        "SELECT id, tag, priority, enabled, created_at, updated_at FROM engine_capabilities "
+        "WHERE runtime_id=? ORDER BY tag"),
     # agent_runtimes UTC 口径迁移（启动期，逐行归一存量超前行）
     "runtime_utc_caliber_rows": "SELECT id, last_seen_at, updated_at FROM agent_runtimes",
     "runtime_set_timestamps": (

@@ -222,7 +222,26 @@ def repo_keys_with_nonempty_credential(cred_type: str = "") -> set[str]:
     return {r[0] for r in rows if r[0]}
 
 
-__all__ += ["read_one_any", "read_all_any", "exec_any",
+__all__ += ["aggregate_llm_usage", "read_one_any", "read_all_any", "exec_any",
             "repo_credential_value", "repo_credential_meta", "upsert_repo_credential_value",
             "clear_repo_credential_value", "any_repo_credential", "repo_keys_sharing_value",
             "repo_keys_with_nonempty_credential"]
+
+
+# ---------- 观测表聚合（obs_llm_usage 归 insight）----------
+
+def aggregate_llm_usage(engine_ids: list[int]) -> list[tuple]:
+    """按引擎聚合模型用量：返回 [(engine_id, model_key, model_raw, cnt, last_used), ...]。
+
+    仅聚合模型名字段，不取 base_url/api_key（Issue #865 安全约束）。
+    """
+    ids = [int(x) for x in (engine_ids or []) if x]
+    if not ids:
+        return []
+    ph = ",".join(["?"] * len(ids))
+    with _any_cursor() as c:
+        c.execute(
+            f"SELECT engine_id, model_key, model_raw, COUNT(*) AS cnt, MAX(created_at) AS last_used "
+            f"FROM obs_llm_usage WHERE engine_id IN ({ph}) "
+            f"GROUP BY engine_id, model_key, model_raw", tuple(ids))
+        return list(c.fetchall() or [])
