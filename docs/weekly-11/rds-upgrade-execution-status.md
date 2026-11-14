@@ -2825,6 +2825,71 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   108 / 43，看板与作业单同步刷新（下一批头名 `src/domains/mgmt/admin/cooldown.py` 4 处：
   `agent_tasks` 1 / `chat_agent_session` 1 / `chat_conversations` 1 / `issue` 1）。
 
+### 7.29 冷静期账号匿名化的 runtime 级联删除收口到 owner 域原语（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/mgmt/admin/cooldown.py` **4 处 → 0**（单轮做完，4 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，四表都在 `grape_runtime_db`，全归 **runtime**）：
+  L135 `agent_tasks` / L136 `chat_agent_session` / L137 `chat_conversations` / L138 `issue`，
+  均在 `_anonymize_account()` 的「lib 不可用」兜底分支里，形态是定表 + 定谓词
+  `DELETE FROM <t> WHERE user_id=?`；**无动态表名/列名、无跨域 JOIN**。
+  同文件其余 SQL（`grape_accounts` / `organization` / `org_member` / `user_repos` / …）
+  都是 mgmt 自有表；`_get_expired_accounts()` 的 MySQL `%s` 分支同样是自有表，均不在统计内。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`，`?` 占位符）：
+  1) `_ANY_QUERIES` 4 条：`user_purge_agent_tasks` / `user_purge_chat_agent_session` /
+     `user_purge_chat_conversations` / `user_purge_issue`（与原兜底语句逐字一致，只换占位符）。
+  2) `purge_user_rows(user_id, cursor=None)` 升级为**任意拓扑**原语：自有 DSN → `_any_tx()`
+     真事务（四表同生共死）；单库/测试拓扑且传入游标 → 复用调用方游标与事务；单库无游标 →
+     `_any_cursor(write=True)` 自提交。表名走模块内 `_USER_PURGE_PLAN` 白名单，调用方不能传表名，
+     也传不了拼接 SQL。
+- 设计取舍：
+  1) **复用已有原语，不新增跨域出口**：mgmt 原本就有 outbox 首选通道
+     `cross_write.submit("runtime","user_rows_purge",…, purge_user_rows)`，本批不动它；
+     只把兜底从「本地 4 条 DELETE」换成「同一个原语 + 调用方游标」。owner 侧因此只多 4 条
+     具名查询，没有把引用从 A 域搬到 B 域式的假下降。
+  2) **为什么必须把游标传下去**：`_anonymize_account` 的 Step1–Step4 是**一个** mgmt 事务
+     （末尾一次 `db.commit()`），四表删除必须与 `grape_accounts` 的 status=2 标记、
+     `external_identities` 清理、字段匿名化同生共死。若兜底改走 `_any_tx()`/独立连接，
+     单库拓扑会在中途 commit，把「Step1 已标记 + Step3 只删了一半」提前落盘 —— 正是本函数
+     docstring 点名的 auto-commit 陷阱。传游标后单库拓扑下原语**完全不碰连接与提交**，
+     语义与改造前逐表 `c.execute` 一致（rollback 一并撤销）。
+  3) **自有 DSN 下反而更严**：旧实现 `db_registry.cursor("runtime")` 是共享 autocommit 连接，
+     四表逐条提交（第 3 条失败 → 前两条已删且不可回滚）；现在 `_any_tx()` 用独立非 autocommit
+     连接，四表要么全删要么全不删。
+  4) **业务口径一字未动**：不过滤 `is_active` / `status`，按 `user_id` 全删；`user_id` 为空串
+     时只删 `user_id=''` 的行（不会退化成全表删除）；重复调用返回全 0；不新增任何默认值或时间函数。
+- 修的存量 bug（结构性隐患；三库拓扑尚未上线，线上未观测到故障）：
+  1) **兜底 SQL 打在执行进程主库**：三库拓扑下 mgmt 进程库没有这四张 runtime 表（视图 0），
+     lib 路径一旦失败（outbox drain 异常 / `submit` 抛错）进入兜底，四条 DELETE 必 1146
+     并被外层 except 吞成一行 `anonymize failed` —— 而此刻账号已被标记 status=2、mgmt 侧
+     数据已清，runtime 四表的用户业务数据**永久留存**（个人数据没真正删除，且不会再重试）。
+  2) **旧原语在单库拓扑直接不可用**：`purge_user_rows` 原来直接
+     `db_registry.cursor("runtime")`，无自有 DSN 时 `domain_db()` 对非当前域返回 None →
+     必 `RuntimeError`。`scripts/xwrite_drain.py` 在单库环境重放 `user_rows_purge` 会同样抛错
+     （死信里的「匿名化残留」永远排不掉）。现在任意拓扑可用，drain 重放路径一并修好。
+  3) **四表写没有原子性**（自有 DSN 下）：见取舍 3。
+- 验证：
+  - `py_compile` 3 个文件 **COMPILE_OK**。
+  - SQLite 烟测 `~/burndown/cooldown_purge_smoke.py` **ALL 84 CHECKS PASSED**
+    （静态面 / owner 面 / 单库行为面 / 拓扑面 / 端到端五段）：4 条原语句逐字消失、跨域引用 0、
+    匿名化路径无 `%s`、静默 except 与 HEAD 等量；只删目标 `user_id`、`is_active=0` 与
+    `status='closed'` 行同样删（原口径）、调用方 rollback 能撤销四表删除、未知/空 uid 全 0、
+    二次调用全 0、无游标调用自提交（独立连接可见）；自有 DSN 下写落在运行域库、进程库哨兵行
+    一个不动、第三条语句失败时前两条 DELETE 一并回滚；真实 `_anonymize_account` 端到端
+    （四表清空 + mgmt 表清理 + `unified_user_mapping` **清列保行** + 审计落一条 + status=2）；
+    后续步骤失败时四表删除随调用方事务回滚、账号仍 status=3；status≠3 早退零删除。
+  - `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 /
+    看板最新）。
+  - `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+  - `tests/api/test_runtime_write_primitive.py`：本批改写的 purge 用例 + 新增
+    「单库复用调用方游标」用例通过；同文件 `test_ensure_agent_session_is_insert_ignore`
+    为**既有失败**（HEAD 版 `runtime/public/__init__.py` 里 `ensure_agent_session` 有 2 个定义，
+    后者 `-> None` 覆盖前者，返回值恒 None），与本批无关，留待重复定义清理专项。
+- 新基线：全局 **108 → 104**（-4），对数 **43 → 40** —— `chat_agent_session←mgmt`、
+  `chat_conversations←mgmt`、`issue←mgmt` 三对清零，`agent_tasks←mgmt` 2 → 1（余 1 处在
+  `src/api/health_endpoints.py`）。基线 `foreign-refs-allowlist.csv` 收紧为 104 / 40，
+  依赖看板与作业单同步刷新（下一批头名 `src/domains/insight/observability/failed_gap.py`
+  4 处 `events`，同尺寸还有 `src/api/deps.py` 4 处 `external_identities`）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

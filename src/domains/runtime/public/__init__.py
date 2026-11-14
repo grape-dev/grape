@@ -487,18 +487,44 @@ def renew_channel_lease(lease_key: str, token: str, owner: str = "", ttl_seconds
 
 # ---------- 会话/任务写原语（P3-5g：mgmt / insight 进程写 runtime 基表） ----------
 
-def purge_user_rows(user_id: str) -> dict[str, int]:
+# 账号删除级联的四张表（表名/语句只在本模块，调用方不可传入表名或拼接 SQL）
+_USER_PURGE_PLAN: tuple[tuple[str, str], ...] = (
+    ("agent_tasks", "user_purge_agent_tasks"),
+    ("chat_agent_session", "user_purge_chat_agent_session"),
+    ("chat_conversations", "user_purge_chat_conversations"),
+    ("issue", "user_purge_issue"),
+)
+
+
+def purge_user_rows(user_id: str, cursor: Any = None) -> dict[str, int]:
     """账号删除级联：按 user_id 一并清理 runtime 域业务数据。
 
     覆盖 agent_tasks / chat_agent_session / chat_conversations / issue 四表。原实现是
     mgmt 侧在同一事务里逐表 DELETE —— 拆成四条意图会丢"一起删"的语义，故做成一个原语。
+
+    任意拓扑：
+      - 自有 DSN → `_any_tx()` 真事务（四表同生共死，不再逐条 autocommit）；
+      - 单库/测试拓扑且调用方传入游标 → **复用调用方游标与事务**（账号匿名化在
+        mgmt 事务里"一起提交/回滚"，不提前 commit 架空调用方 rollback）；
+      - 单库/测试拓扑未传游标 → 进程库 + `db_lock`，由本原语提交。
     """
     uid = str(user_id)
     out: dict[str, int] = {}
-    with db_registry.cursor("runtime") as c:
-        for table in ("agent_tasks", "chat_agent_session", "chat_conversations", "issue"):
-            c.execute(f"DELETE FROM {table} WHERE user_id=%s", (uid,))
-            out[table] = int(c.rowcount or 0)
+
+    def _run(c: Any) -> None:
+        for table, name in _USER_PURGE_PLAN:
+            c.execute(_any_sql(name), (uid,))
+            out[table] = int(getattr(c, "rowcount", 0) or 0)
+
+    if db_registry.uses_own_dsn("runtime"):
+        with _any_tx() as c:
+            _run(c)
+        return out
+    if cursor is not None:
+        _run(cursor)
+        return out
+    with _any_cursor(write=True) as c:
+        _run(c)
     return out
 
 
@@ -1863,6 +1889,14 @@ _ANY_QUERIES: dict[str, str] = {
         "INSERT OR IGNORE INTO devops_agent_session "
         "(id, repo_key, agent_type, status, last_active_at) "
         "VALUES (?,?,'vod',?,datetime('now'))"),
+    # ── 账号删除级联（mgmt/admin/cooldown.py 匿名化；outbox user_rows_purge 重放）──
+    # 四表全归本域。原实现是 mgmt 侧在**同一个事务**里逐表 DELETE，兜底 SQL 才是
+    # 跨域统计来源；三库拓扑下兜底侧打 mgmt 进程库必 1146（视图 0）。
+    # 语句与改造前兜底 SQL 逐字一致（表名/谓词不变），只换 `?` 占位符。
+    "user_purge_agent_tasks": "DELETE FROM agent_tasks WHERE user_id=?",
+    "user_purge_chat_agent_session": "DELETE FROM chat_agent_session WHERE user_id=?",
+    "user_purge_chat_conversations": "DELETE FROM chat_conversations WHERE user_id=?",
+    "user_purge_issue": "DELETE FROM issue WHERE user_id=?",
     'agent_runtime_name_by_id': 'SELECT name FROM agent_runtimes WHERE id=?',
     'issue_card_row': 'SELECT stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override, carried_context, status FROM issue WHERE repo_key=? AND issue_number=?',
     'issue_card_exists': 'SELECT id FROM issue WHERE repo_key=? AND issue_number=?',
