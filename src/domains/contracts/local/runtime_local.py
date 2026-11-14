@@ -219,3 +219,142 @@ class RuntimeServiceLocal(RuntimeService):
                 return []
             cols = [d[0] for d in c.description] if c.description else []
             return [dict(zip(cols, r)) for r in rows] if cols else [dict(r) for r in rows]
+
+
+    # ---- P2 服务接口补齐（N1/N2/N3/N4/N5/N11/N12） ----
+
+    @staticmethod
+    def _skill_row(row, cols) -> dict:
+        d = dict(zip(cols, row)) if cols else dict(row)
+        d["name"] = d.get("skill_name") or ""
+        d["summary"] = d.get("description") or ""
+        return d
+
+    def list_skills(self, repo_key: str = "", q: str = "", limit: int = 50,
+                    offset: int = 0) -> list:
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        sql = (f"SELECT id, skill_name, display_name, description, agent_type, scope, "
+               f"owner_id, category_id, is_active, is_featured, like_count, updated_at, org_id "
+               f"FROM {self._t('skill')} WHERE is_active=1")
+        args: list = []
+        if q:
+            sql += " AND (skill_name LIKE ? OR display_name LIKE ? OR description LIKE ?)"
+            args += [f"%{q}%"] * 3
+        if repo_key:
+            sql += " AND (scope='official' OR owner_id=? OR scope=?)"
+            args += [repo_key, repo_key]
+        sql += " ORDER BY is_featured DESC, id DESC LIMIT ? OFFSET ?"
+        args += [limit, offset]
+        with self._lock:
+            c = self._db.cursor()
+            c.execute(sql, tuple(args))
+            rows = c.fetchall()
+            cols = [d[0] for d in c.description] if c.description else []
+            return [self._skill_row(r, cols) for r in rows]
+
+    def get_skill_detail(self, skill_id: int) -> dict:
+        with self._lock:
+            c = self._db.cursor()
+            c.execute(
+                f"SELECT id, skill_name, display_name, description, agent_type, scope, "
+                f"owner_id, category_id, is_featured, like_count, updated_at, org_id, file_path "
+                f"FROM {self._t('skill')} WHERE id=? AND is_active=1", (int(skill_id),))
+            row = c.fetchone()
+            if not row:
+                return {}
+            cols = [d[0] for d in c.description] if c.description else []
+        out = self._skill_row(row, cols)
+        out["content_url"] = ""
+        key = out.pop("file_path", "") or ""
+        if key:
+            try:
+                from src.domains.runtime.storage import get_storage
+
+                storage = get_storage()
+                if storage is not None:
+                    out["content_url"] = storage.temporary_url(key, 300)
+            except Exception:  # noqa: BLE001 - 存储不可用不等于接口失败
+                out["content_url"] = ""
+        return out
+
+    def list_engine_capabilities(self, limit: int = 500) -> list:
+        with self._lock:
+            c = self._db.cursor()
+            c.execute(
+                f"SELECT id, runtime_id, tag, max_concurrent, priority, enabled, updated_at "
+                f"FROM {self._t('engine_capabilities')} "
+                f"ORDER BY runtime_id, priority DESC, tag LIMIT ?",
+                (max(1, min(int(limit), 500)),))
+            rows = c.fetchall()
+            cols = [d[0] for d in c.description] if c.description else []
+            return [dict(zip(cols, r)) if cols else dict(r) for r in rows]
+
+    def get_runtime_credential_meta(self, runtime_id: int) -> dict:
+        with self._lock:
+            c = self._db.cursor()
+            c.execute(
+                f"SELECT id, name, device_name, scope, owner_id, owner_name, repo_key, status, "
+                f"last_seen_at, last_ip, spec, org_id, cpu_percent, memory_percent, disk_percent, "
+                f"load_avg FROM {self._t('runtime_credentials')} WHERE id=?", (int(runtime_id),))
+            row = c.fetchone()
+            if not row:
+                return {}
+            cols = [d[0] for d in c.description] if c.description else []
+            return dict(zip(cols, row)) if cols else dict(row)
+
+    _META_NAMESPACES = ("a2a-redo", "bot_token_health", "allow_signup", "enable_aligned",
+                        "admin_initialized", "global_bot_usernames", "global_bot_token_status",
+                        "skill_sync", "scene_sync")
+
+    def get_meta_namespace(self, namespace: str) -> dict:
+        ns = (namespace or "").strip()
+        if ns not in self._META_NAMESPACES:
+            raise ValueError(f"namespace '{ns}' 未登记（拒绝读取）")
+        with self._lock:
+            c = self._db.cursor()
+            c.execute(f"SELECT `key`, `value` FROM {self._t('meta')} "
+                      f"WHERE `key`=? OR `key` LIKE ? ORDER BY `key` LIMIT 500",
+                      (ns, ns + ":%"))
+            return {r[0]: r[1] for r in c.fetchall()}
+
+    def get_tasks_batch(self, task_ids: list) -> list:
+        raw = [t for t in (task_ids or [])
+               if isinstance(t, int) or str(t).strip().lstrip("-").isdigit()]
+        ids = [int(t) for t in raw][:200]
+        if not ids:
+            return []
+        marks = ",".join(["?"] * len(ids))
+        with self._lock:
+            c = self._db.cursor()
+            c.execute(
+                f"SELECT id, repo_key, agent_type, skill, status, exit_code, runtime_id, "
+                f"event_seq, started_at, completed_at, created_at "
+                f"FROM {self._t('agent_tasks')} WHERE id IN ({marks})", tuple(ids))
+            rows = c.fetchall()
+            cols = [d[0] for d in c.description] if c.description else []
+        out = [dict(zip(cols, r)) if cols else dict(r) for r in rows]
+        order = {tid: i for i, tid in enumerate(ids)}
+        out.sort(key=lambda r: order.get(int(r["id"]), 10 ** 9) if r.get("id") is not None else 10 ** 9)
+        return out
+
+    def get_task_stats(self, repo_key: str = "", since: str = "") -> dict:
+        sql = (f"SELECT status, COUNT(*) FROM {self._t('agent_tasks')} WHERE 1=1")
+        args: list = []
+        if repo_key:
+            sql += " AND repo_key=?"
+            args.append(repo_key)
+        if since:
+            sql += " AND created_at>=?"
+            args.append(since)
+        sql += " GROUP BY status"
+        with self._lock:
+            c = self._db.cursor()
+            c.execute(sql, tuple(args))
+            by_status = {r[0]: int(r[1]) for r in c.fetchall()}
+        total = sum(by_status.values())
+        done = sum(n for s, n in by_status.items() if s in ("completed", "success"))
+        return {"by_status": by_status,
+                "aggregate": {"total": total, "done": done,
+                              "failed": by_status.get("failed", 0),
+                              "completion_rate": round(done / total, 4) if total else 0.0}}

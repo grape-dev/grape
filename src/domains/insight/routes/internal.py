@@ -17,43 +17,43 @@ from src.kernel.gsb.provider import get_local_service as _get_local
 router = APIRouter(prefix="/internal", tags=["internal-insight"])
 
 
-@router.post("/logs")
+@router.post("/logs", operation_id="insight_logs_ingest", include_in_schema=False)
 async def log_obs(body: dict) -> dict:
     """供 InsightServiceRemote.log_obs() 调用。"""
     return _get_local("insight").log_obs(body)
 
 
-@router.post("/llm-usage")
+@router.post("/llm-usage", operation_id="insight_llm_usage_ingest", include_in_schema=False)
 async def log_llm_usage(body: dict) -> dict:
     """供 InsightServiceRemote.log_llm_usage() 调用。"""
     return _get_local("insight").log_llm_usage(body)
 
 
-@router.post("/latency")
+@router.post("/latency", operation_id="insight_latency_ingest", include_in_schema=False)
 async def log_latency(body: dict) -> dict:
     """供 InsightServiceRemote.log_api_latency() 调用。"""
     return _get_local("insight").log_api_latency(body)
 
 
-@router.get("/metrics/{repo_key}")
+@router.get("/metrics/{repo_key}", operation_id="insight_metrics_get", include_in_schema=False)
 async def get_metrics(repo_key: str, window: str = "1h") -> list:
     """供 InsightServiceRemote.query_metrics() 调用。"""
     return _get_local("insight").query_metrics(repo_key, window)
 
 
-@router.get("/slo/{repo_key}")
+@router.get("/slo/{repo_key}", operation_id="insight_slo_get", include_in_schema=False)
 async def get_slo(repo_key: str) -> list:
     """供 InsightServiceRemote.query_slo() 调用。"""
     return _get_local("insight").query_slo(repo_key)
 
 
-@router.get("/alerts/{repo_key}")
+@router.get("/alerts/{repo_key}", operation_id="insight_alerts_list", include_in_schema=False)
 async def get_alerts(repo_key: str) -> list:
     """供 InsightServiceRemote.query_alerts() 调用。"""
     return _get_local("insight").query_alerts(repo_key)
 
 
-@router.get("/dashboard/overview")
+@router.get("/dashboard/overview", operation_id="insight_dashboard_overview", include_in_schema=False)
 async def get_dashboard_overview() -> dict:
     """供 InsightServiceRemote.aggregate_runtime_stats() 调用。"""
     return _get_local("insight").aggregate_runtime_stats()

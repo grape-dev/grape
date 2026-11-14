@@ -649,9 +649,10 @@ class TestInternalEndpoints:
     """/internal/* 端点基本结构测试。"""
 
     def test_mgmt_internal_router_exists(self):
-        from src.domains.mgmt.routes.internal import router
-        assert router.prefix == "/internal"
-        routes = [r.path for r in router.routes]
+        # P2/D5 修订：mgmt 由"完全不开放"改为只读白名单 + xwrite/apply
+        from src.domains.mgmt.routes.internal import readonly_router
+        assert readonly_router.prefix == "/internal"
+        routes = [r.path for r in readonly_router.routes]
         assert any("/repos/" in r for r in routes)
         assert any("/tokens/verify" in r for r in routes)
 

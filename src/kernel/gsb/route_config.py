@@ -33,11 +33,17 @@ CONTRACT_METHODS: dict[str, tuple[str, ...]] = {
         "get_repo_webhook_config", "get_agent_session", "get_scene_config",
         "get_scene_pool_engine_ids", "verify_session_token", "get_bot_config",
         "get_skill",
+        # P2 服务接口补齐（N6/N8/N9/N10）
+        "get_repo_bundle", "get_account", "get_knowledge", "get_user_mapping_batch",
     ),
     "runtime": (
         "get_events", "get_event_detail", "get_tasks", "get_task_messages",
         "get_runtimes", "get_issue_state", "update_issue_state",
         "get_chat_conversations", "get_chat_messages",
+        # P2 服务接口补齐（N1–N5/N11/N12）
+        "list_skills", "get_skill_detail", "list_engine_capabilities",
+        "get_runtime_credential_meta", "get_meta_namespace", "get_tasks_batch",
+        "get_task_stats",
     ),
     "insight": (
         "log_obs", "log_llm_usage", "log_api_latency", "query_metrics",
@@ -63,6 +69,8 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "count_official_scenes", "list_enabled_autopilot_tasks",
         "get_account_id_by_username", "get_account_username_by_id",
         "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
+        # P2 服务接口补齐（N6/N8/N9/N10）
+        "repo_bundle", "get_account_public", "get_knowledge_entry", "user_mapping_batch",
         "read_one", "read_all",
     ),
     "runtime": (
@@ -89,7 +97,12 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "ensure_device_credential", "touch_credential_metrics",
         "upsert_local_runtimes", "ensure_default_runtime", "set_agent_tags",
         "purge_runtime_credential", "change_credential_scope",
-        "reassign_repo_org_id", "read_one", "read_all",
+        "reassign_repo_org_id",
+        # P2 服务接口补齐（N1/N2/N3/N4/N5/N11/N12）
+        "list_skills", "get_skill_detail", "list_all_engine_capabilities",
+        "get_runtime_credential_meta", "get_meta_namespace", "tasks_brief_many",
+        "task_stats_extended", "xwrite_apply",
+        "read_one", "read_all",
     ),
 }
 
@@ -287,13 +300,18 @@ def list_routes() -> list[dict]:
 
 
 def known_route_keys() -> list[str]:
-    """全部已知路由 key（23 契约方法 + public 数据原语），一键全量的目标集。"""
+    """全部已知路由 key（契约方法 + public 数据原语），一键全量的目标集。
+
+    去重：同一能力可能既是契约方法（HTTP）又是 public 原语（lib），
+    两者的路由 key 形如 `<service>.<method>` / `<domain>.<prim>`，可能同名
+    （如 runtime.list_skills）——对配置表而言是**同一个 key**，只登记一次。
+    """
     keys: list[str] = []
     for service, methods in CONTRACT_METHODS.items():
         keys.extend(f"{service}.{m}" for m in methods)
     for domain, prims in PUBLIC_PRIMITIVES.items():
         keys.extend(f"{domain}.{p}" for p in prims)
-    return keys
+    return list(dict.fromkeys(keys))
 
 
 def set_all_known(mode: str, updated_by: str = "") -> int:

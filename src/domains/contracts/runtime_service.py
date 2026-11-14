@@ -51,3 +51,34 @@ class RuntimeService(ABC):
 
         返回 chat_messages 行列表（按 id 倒序取 limit，before>0 时取 id<before）。
         """
+
+    # ---- P2 服务接口补齐（N1/N2/N3/N4/N5/N11/N12） ----
+
+    @abstractmethod
+    def list_skills(self, repo_key: str = "", q: str = "", limit: int = 50,
+                    offset: int = 0) -> list:
+        """N1 技能列表（mgmt/api 读）：不返回 OBS 原件地址。"""
+
+    @abstractmethod
+    def get_skill_detail(self, skill_id: int) -> dict:
+        """N2 技能详情：N1 字段 + `content_url`（短时效签名）。"""
+
+    @abstractmethod
+    def list_engine_capabilities(self, limit: int = 500) -> list:
+        """N3 引擎×能力矩阵一次全量（< 500 行）。"""
+
+    @abstractmethod
+    def get_runtime_credential_meta(self, runtime_id: int) -> dict:
+        """N4 运行凭据元数据（**不含 token 明文**）。"""
+
+    @abstractmethod
+    def get_meta_namespace(self, namespace: str) -> dict:
+        """N5 KV 元数据批量读（仅白名单 namespace）。"""
+
+    @abstractmethod
+    def get_tasks_batch(self, task_ids: list) -> list:
+        """N11 批量任务摘要（列表页一屏一次，替代 N+1）。"""
+
+    @abstractmethod
+    def get_task_stats(self, repo_key: str = "", since: str = "") -> dict:
+        """N12 任务聚合统计（替代洞察侧宽 SQL）。"""

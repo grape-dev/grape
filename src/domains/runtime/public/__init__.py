@@ -1197,6 +1197,146 @@ def read_all(query: str, params: tuple = ()) -> list[Any]:
         return list(c.fetchall() or [])
 
 
+# ---------- P2 服务接口补齐（N1/N2/N3/N4/N5/N11/N12） ----------
+
+# N1 列表返回列：不含 file_path（OBS 明文地址）与 owner 敏感列
+_SKILL_LIST_COLS = ("id", "skill_name", "display_name", "description", "agent_type",
+                    "scope", "owner_id", "category_id", "is_active", "is_featured",
+                    "like_count", "updated_at", "org_id")
+
+
+def list_skills(repo_key: str = "", q: str = "", limit: int = 50, offset: int = 0,
+                active_only: bool = True) -> list[dict[str, Any]]:
+    """技能列表（N1）：支持 repo_key / q / 分页；不返回 OBS 原件地址。
+
+    `repo_key` 作用域映射：`scope='official'` 全仓可见；`scope`/`owner_id` 等于 repo_key
+    的回车私有技能。上限由调用方 limit 控制（服务端 clamp 到 500）。
+    """
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    sql = f"SELECT {', '.join(_SKILL_LIST_COLS)} FROM skill WHERE 1=1"
+    args: list[Any] = []
+    if active_only:
+        sql += " AND is_active=1"
+    if q:
+        like = f"%{q}%"
+        sql += " AND (skill_name LIKE %s OR display_name LIKE %s OR description LIKE %s)"
+        args += [like, like, like]
+    if repo_key:
+        sql += " AND (scope='official' OR owner_id=%s OR scope=%s)"
+        args += [repo_key, repo_key]
+    sql += " ORDER BY is_featured DESC, id DESC LIMIT %s OFFSET %s"
+    args += [limit, offset]
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, tuple(args))
+        return _rows(c)
+
+
+def get_skill_detail(skill_id: int, url_expires: int = 300) -> dict[str, Any] | None:
+    """技能详情（N2）：字段同 N1 + `content_url`（短时效签名，无存储则空串）。"""
+    row = get_skill_by_id(int(skill_id))
+    if not row:
+        return None
+    out = {k: row.get(k) for k in _SKILL_LIST_COLS if k in row}
+    out["id"] = row.get("id")
+    out["summary"] = row.get("description") or ""
+    out["content_url"] = ""
+    key = row.get("file_path") or ""
+    if key:
+        try:
+            from src.domains.runtime.storage import get_storage
+
+            storage = get_storage()
+            if storage is not None:
+                out["content_url"] = storage.temporary_url(key, int(url_expires))
+        except Exception as exc:  # noqa: BLE001 - 存储不可用不等于接口失败
+            log.warning(f"skill content_url unavailable: {exc}")
+    return out
+
+
+def list_all_engine_capabilities(limit: int = 500, enabled_only: bool = False) -> list[dict[str, Any]]:
+    """引擎×能力矩阵一次全量（N3，< 500 行）。"""
+    sql = ("SELECT id, runtime_id, tag, max_concurrent, priority, enabled, updated_at "
+           "FROM engine_capabilities")
+    if enabled_only:
+        sql += " WHERE enabled=1"
+    sql += " ORDER BY runtime_id, priority DESC, tag LIMIT %s"
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, (max(1, min(int(limit), 500)),))
+        return _rows(c)
+
+
+def get_runtime_credential_meta(runtime_id: int) -> dict[str, Any] | None:
+    """运行凭据元数据（N4）：**绝不返回 token_hash / 明文**。"""
+    sql = ("SELECT rc.id, rc.name, rc.device_name, rc.scope, rc.owner_id, rc.owner_name, "
+           "rc.repo_key, rc.status, rc.last_seen_at, rc.last_ip, rc.spec, rc.org_id, "
+           "rc.cpu_percent, rc.memory_percent, rc.disk_percent, rc.load_avg "
+           "FROM runtime_credentials rc WHERE rc.id=%s")
+    with db_registry.cursor("runtime") as c:
+        c.execute(sql, (int(runtime_id),))
+        rows = _rows(c)
+    return rows[0] if rows else None
+
+
+# N5：只开放明确登记的 namespace（key 前缀）。meta 表里混有口令/webhook token，
+# 绝不能按前缀通配直接返回——新增 namespace 必须在此登记并经评审。
+_META_NAMESPACES = ("a2a-redo", "bot_token_health", "allow_signup", "enable_aligned",
+                    "admin_initialized", "global_bot_usernames", "global_bot_token_status",
+                    "skill_sync", "scene_sync")
+
+
+def get_meta_namespace(namespace: str, limit: int = 200) -> dict[str, str]:
+    """KV 元数据批量读（N5）：仅白名单 namespace，杜绝密钥外泄。"""
+    ns = (namespace or "").strip()
+    if ns not in _META_NAMESPACES:
+        raise ValueError(f"namespace '{ns}' 未登记（拒绝读取）")
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT `key`, `value` FROM meta WHERE `key`=%s OR `key` LIKE %s "
+                  "ORDER BY `key` LIMIT %s", (ns, ns + ":%", max(1, min(int(limit), 500))))
+        rows = c.fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def tasks_brief_many(task_ids: list[int]) -> list[dict[str, Any]]:
+    """批量取任务摘要（N11）：列表页一屏一次调用，禁止 N+1。"""
+    ids = [int(t) for t in (task_ids or []) if str(t).strip().isdigit() or isinstance(t, int)]
+    if not ids:
+        return []
+    ids = ids[:200]
+    marks = ",".join(["%s"] * len(ids))
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, "
+                  f"runtime_id, event_seq, started_at, completed_at, created_at "
+                  f"FROM agent_tasks WHERE id IN ({marks})", tuple(ids))
+        rows = _rows(c)
+    order = {tid: i for i, tid in enumerate(ids)}
+    rows.sort(key=lambda r: order.get(int(r["id"]), 10**9) if r.get("id") is not None else 10**9)
+    return rows
+
+
+def task_stats_extended(repo_key: str = "", since: str | None = None) -> dict[str, Any]:
+    """任务聚合统计（N12）：替代洞察侧宽 SQL（任务量/完成率/时长）。"""
+    base = task_stats(repo_key, since)
+    with db_registry.cursor("runtime") as c:
+        sql = ("SELECT COUNT(*) AS total, "
+               "SUM(CASE WHEN status IN ('completed','success') THEN 1 ELSE 0 END) AS done, "
+               "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed, "
+               "AVG(CASE WHEN started_at IS NOT NULL AND completed_at IS NOT NULL "
+               "     THEN TIMESTAMPDIFF(SECOND, started_at, completed_at) END) AS avg_duration_s "
+               "FROM agent_tasks WHERE 1=1")
+        args: list[Any] = []
+        if repo_key:
+            sql += " AND repo_key=%s"
+            args.append(repo_key)
+        if since:
+            sql += " AND created_at>=%s"
+            args.append(since)
+        c.execute(sql, tuple(args))
+        row = c.fetchone()
+        cols = [d[0] for d in (c.description or [])]
+    return {"by_status": base, "aggregate": dict(zip(cols, row)) if row else {}}
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -1231,4 +1371,51 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "ensure_device_credential", "touch_credential_metrics",
            "upsert_local_runtimes", "ensure_default_runtime", "set_agent_tags",
            "purge_runtime_credential", "change_credential_scope", "reassign_repo_org_id",
+           # P2 服务接口补齐（N1/N2/N3/N4/N5/N11/N12）
+           "list_skills", "get_skill_detail", "list_all_engine_capabilities",
+           "get_runtime_credential_meta", "get_meta_namespace", "tasks_brief_many",
+           "task_stats_extended",
            "read_one", "read_all"]
+
+
+# ---------- N13：跨域写补偿应用端点（幂等分发） ----------
+
+def xwrite_apply(action: str, payload: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
+    """执行一条来自其它域的跨域写意图（N13）。
+
+    约束（方案 §3.5 M1/M3/M6）：
+    - action 必须在 `_XWRITE_ACTIONS` 登记（不接受调用方传 SQL/表名）；
+    - `idempotency_key` 必填，目标域先登记（`cross_write.claim_applied`）再执行；
+    - 未登记 action → ValueError（HTTP 400），不静默。
+    """
+    from src.kernel import cross_write as xw
+
+    handlers = {
+        "engine_cap_upsert": lambda p: upsert_engine_capability(
+            int(p["rid"]), str(p["tag"]), priority=int(p.get("priority", 50))),
+        "engine_cap_update": lambda p: update_engine_capability(
+            int(p["rid"]), str(p["tag"]), int(p.get("priority", 50)), int(p.get("enabled", 1))),
+        "engine_cap_delete": lambda p: delete_engine_capability(
+            int(p["rid"]), p.get("tag")),
+        "engine_cap_delete_all": lambda p: delete_engine_capability(int(p["rid"])),
+        "task_message_append": lambda p: append_task_message(
+            str(p["task_id"]), str(p.get("actor", "system")), str(p.get("content", "")),
+            msg_type=str(p.get("type", "message"))),
+        "agent_session_ensure": lambda p: {"created": ensure_agent_session(
+            str(p["session_id"]), str(p["repo_key"]), str(p["agent_type"]),
+            str(p.get("status", "idle")))},
+        "agent_session_clear": lambda p: {"cleared": clear_agent_session_runtime(
+            str(p["repo_key"]), str(p["agent_type"]))},
+        "repo_credential_upsert": lambda p: upsert_repo_credential(
+            str(p["repo_key"]), str(p["cred_type"]), str(p["value"]),
+            str(p.get("updated_at", ""))),
+        "repo_credential_clear": lambda p: {"cleared": clear_repo_credential(
+            str(p["repo_key"]), str(p["cred_type"]), str(p.get("updated_at", "")))},
+    }
+    fn = handlers.get(action)
+    if fn is None:
+        raise ValueError(f"unregistered xwrite action: {action!r}")
+    if not xw.claim_applied(idempotency_key, action):
+        return {"status": "duplicate", "action": action, "idempotency_key": idempotency_key}
+    result = fn(payload or {})
+    return {"status": "applied", "action": action, "result": result}

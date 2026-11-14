@@ -299,3 +299,108 @@ class MgmtServiceLocal(MgmtService):
                 return None
             cols = [d[0] for d in c.description] if c.description else []
             return dict(zip(cols, row)) if cols else dict(row)
+
+
+    # ---- P2 服务接口补齐（N6/N8/N9/N10，mgmt 只读白名单） ----
+
+    _REPO_PUBLIC_COLS = ("repo_key", "repo_owner", "repo_name", "full_name", "webhook_id",
+                         "dev_scene", "host_status", "bot_username", "org_id", "deploy_url",
+                         "bot_token_status", "host_vcs_username", "created_at", "is_admin")
+    _REPO_SECRET_COLS = ("gitcode_webhook_token", "webhook_secret", "bot_gitcode_token",
+                         "bot_github_token", "github_webhook_token")
+    _MAPPING_COLUMNS = {"feishu": "feishu_open_id", "gitcode": "gitcode_user",
+                        "github": "github_login", "dingtalk": "dingtalk_user_id"}
+
+    def get_repo_bundle(self, repo_key: str) -> dict:
+        """N6：仓库配置 + 凭据「有/无」 + webhook 配置 + 场景（不含 token 明文）。"""
+        with self._lock:
+            c = self._db.cursor()
+            c.execute(
+                f"SELECT {', '.join(self._REPO_PUBLIC_COLS)} FROM {_t('managed_repos')} "
+                f"WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
+            if not row:
+                return {}
+            out = dict(zip(self._REPO_PUBLIC_COLS, row))
+            c.execute(
+                f"SELECT {', '.join(self._REPO_SECRET_COLS)} FROM {_t('managed_repos')} "
+                f"WHERE repo_key=?", (repo_key,))
+            flags = c.fetchone() or ()
+            out["credentials"] = {
+                name.replace("_token", ""): bool(flags[i]) for i, name in enumerate(self._REPO_SECRET_COLS)
+            } if flags else {}
+            c.execute(
+                f"SELECT scene_id, name, is_active FROM {_t('devops_pipeline_scene')} "
+                f"WHERE repo_key=? AND is_active=1 ORDER BY name", (repo_key,))
+            out["scenes"] = [{"scene_id": r[0], "name": r[1] or r[0], "is_active": r[2]}
+                             for r in c.fetchall()]
+            return out
+
+    def get_account(self, account_id: str) -> dict:
+        with self._lock:
+            c = self._db.cursor()
+            c.execute(
+                f"SELECT id, username, nickname, status FROM {_t('grape_accounts')} WHERE id=?",
+                (account_id,))
+            row = c.fetchone()
+            if not row:
+                return {}
+            out = {"id": row[0], "username": row[1], "display_name": row[2] or row[1],
+                   "status": row[3], "org_id": None}
+            try:
+                c.execute(f"SELECT org_id FROM {_t('org_member')} WHERE user_id=? "
+                          f"ORDER BY org_id LIMIT 1", (account_id,))
+                org = c.fetchone()
+                out["org_id"] = org[0] if org else None
+            except Exception:  # noqa: BLE001 - 旧库无 org_member 时不影响主字段
+                out["org_id"] = None
+            return out
+
+    def get_knowledge(self, knowledge_id: int) -> dict:
+        cols = ("id", "name", "description", "scope", "repo_key", "agent_type", "issue_num",
+                "status", "updated_at", "content_hash", "obs_key", "file_path")
+        with self._lock:
+            c = self._db.cursor()
+            c.execute(
+                f"SELECT {', '.join(cols)} FROM {_t('agent_shared_knowledge')} WHERE id=?",
+                (int(knowledge_id),))
+            row = c.fetchone()
+            if not row:
+                return {}
+            out = dict(zip(cols, row))
+        out["display_name"] = out.get("name") or ""
+        out["has_content"] = bool(out.pop("obs_key", "") or out.get("file_path"))
+        return out
+
+    def get_user_mapping_batch(self, keys: list) -> list:
+        keys = list(keys or [])[:200]
+        by_platform: dict[str, list] = {}
+        for k in keys:
+            platform = str((k or {}).get("platform") or "").strip().lower()
+            external = str((k or {}).get("external_id") or "").strip()
+            by_platform.setdefault(platform, []).append(external)
+        found: dict[tuple, str] = {}
+        with self._lock:
+            c = self._db.cursor()
+            for platform, values in by_platform.items():
+                column = self._MAPPING_COLUMNS.get(platform)
+                if not column:
+                    continue
+                values = [v for v in dict.fromkeys(values) if v]
+                if not values:
+                    continue
+                marks = ",".join(["?"] * len(values))
+                c.execute(
+                    f"SELECT {column}, user_id FROM {_t('unified_user_mapping')} "
+                    f"WHERE {column} IN ({marks}) AND user_id IS NOT NULL "
+                    f"AND user_id NOT IN ('', '0')", tuple(values))
+                for ext, uid in c.fetchall():
+                    found.setdefault((platform, ext), uid)
+        out = []
+        for k in keys:
+            platform = str((k or {}).get("platform") or "").strip().lower()
+            external = str((k or {}).get("external_id") or "").strip()
+            uid = found.get((platform, external))
+            out.append({"platform": platform, "external_id": external,
+                        "user_id": uid, "matched": bool(uid)})
+        return out

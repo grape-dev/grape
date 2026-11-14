@@ -925,12 +925,16 @@ def attach_internal_routes(app: FastAPI, domain: str) -> None:
     from src.kernel.auth_sdk.internal_middleware import InternalAuthMiddleware
     app.add_middleware(InternalAuthMiddleware)
 
-    # mgmt 是管理态服务（开发者工作台的后端），按架构约定不向其它域服务开放业务型
-    # /internal/* 契约：event/worker/insight 需要 mgmt 的数据时直接读共享库或走进程内契约，
-    # 不允许再通过 HTTP 反向调用 mgmt（避免管理面被业务面耦合、也避免越权面扩大）。
-    # 中间件仍然挂载：/internal/gsb/* 服务注册端点需要它做 service-secret 校验。
+    # mgmt 是管理态服务：P2 起只开放**只读白名单**内部端点 + 补偿应用端点（方案 §D5），
+    # 不再"完全不开放"（那会导致 runtime 侧 webhook-config/bot-config 42 次 404）。
+    # 白名单与写端点分别由 readonly_router / xwrite_router 承载，见 mgmt/routes/internal.py。
     if domain == "mgmt":
-        log.info("attach_internal_routes: mgmt 为管理态服务，业务型 /internal/* 不挂载（仅保留 GSB 端点）")
+        from src.domains.mgmt.routes.internal import readonly_router, xwrite_router
+
+        app.include_router(readonly_router)
+        app.include_router(xwrite_router)
+        log.info("attach_internal_routes: mgmt 挂载只读白名单 %d 条 + xwrite/apply",
+                 len(readonly_router.routes))
         return
 
     if domain == "runtime":

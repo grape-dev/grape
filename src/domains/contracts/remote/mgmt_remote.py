@@ -38,3 +38,18 @@ class MgmtServiceRemote(MgmtService):
 
     def get_skill(self, skill_id: str) -> Any:
         return self.client.get(f"/internal/skills/{skill_id}")
+
+
+    # ---- P2 服务接口补齐（N6/N8/N9/N10，mgmt 只读白名单） ----
+
+    def get_repo_bundle(self, repo_key: str) -> dict:
+        return self.client.get(f"/internal/repos/{repo_key}")
+
+    def get_account(self, account_id: str) -> dict:
+        return self.client.get(f"/internal/accounts/{account_id}")
+
+    def get_knowledge(self, knowledge_id: int) -> dict:
+        return self.client.get(f"/internal/knowledge/{int(knowledge_id)}")
+
+    def get_user_mapping_batch(self, keys: list) -> list:
+        return self.client.post("/internal/user-mapping", json_data={"keys": list(keys or [])})

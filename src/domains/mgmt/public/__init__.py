@@ -547,6 +547,117 @@ def get_user_id_by_mapping_column(column: str, value: str) -> str | None:
     return str(row[0]) if row and row[0] else None
 
 
+# ---------- P2 服务接口补齐（N6/N8/N9/N10） ----------
+
+# N6：仓库公开字段白名单（**不含任何 token/secret 明文**）
+_REPO_PUBLIC_COLS = ("repo_key", "repo_owner", "repo_name", "full_name", "webhook_id",
+                     "dev_scene", "host_status", "bot_username", "org_id", "deploy_url",
+                     "bot_token_status", "host_vcs_username", "created_at", "is_admin")
+
+
+def repo_bundle(repo_key: str) -> dict[str, Any]:
+    """仓库配置 + 凭据状态 + webhook 配置 + 场景，一次返回（N6）。
+
+    凭据只返回「有/无」，不返回明文；替代 runtime 侧 3 次单点调用。
+    """
+    row = fetch_one("managed_repos", list(_REPO_PUBLIC_COLS), "repo_key=%s", (repo_key,))
+    if not row:
+        return {}
+    out: dict[str, Any] = dict(zip(_REPO_PUBLIC_COLS, row))
+    secret_cols = ("gitcode_webhook_token", "webhook_secret", "bot_gitcode_token",
+                   "bot_github_token", "github_webhook_token")
+    flags = fetch_one("managed_repos", list(secret_cols), "repo_key=%s", (repo_key,))
+    if flags:
+        out["credentials"] = {c: bool(flags[i]) for i, c in enumerate(secret_cols)}
+        out["credentials"] = {k.replace("_token", "").replace("has_", ""): v
+                              for k, v in out["credentials"].items()}
+    else:
+        out["credentials"] = {}
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT scene_id, name, is_active FROM devops_pipeline_scene "
+                  "WHERE repo_key=%s AND is_active=1 ORDER BY name", (repo_key,))
+        out["scenes"] = [{"scene_id": r[0], "name": r[1] or r[0], "is_active": r[2]}
+                         for r in c.fetchall()]
+    return out
+
+
+_ACCOUNT_PUBLIC_COLS = ("id", "username", "nickname", "status")
+
+
+def get_account_public(account_id: str) -> dict[str, Any] | None:
+    """账号只读（N8）：仅 id/username/display_name/status/org_id，禁止口令列。"""
+    row = fetch_one("grape_accounts", list(_ACCOUNT_PUBLIC_COLS), "id=%s", (account_id,))
+    if not row:
+        return None
+    out = {"id": row[0], "username": row[1], "display_name": row[2] or row[1],
+           "status": row[3], "org_id": None}
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT org_id FROM org_member WHERE user_id=%s ORDER BY org_id LIMIT 1",
+                  (account_id,))
+        org = c.fetchone()
+        out["org_id"] = org[0] if org else None
+    return out
+
+
+_KNOWLEDGE_PUBLIC_COLS = ("id", "name", "description", "scope", "repo_key", "agent_type",
+                          "issue_num", "status", "updated_at", "content_hash", "obs_key",
+                          "file_path")
+
+
+def get_knowledge_entry(knowledge_id: int) -> dict[str, Any] | None:
+    """知识条目（N9）：返回索引元数据；正文仍由 owner 域文件/对象存储读取。"""
+    row = fetch_one("agent_shared_knowledge", list(_KNOWLEDGE_PUBLIC_COLS),
+                    "id=%s", (int(knowledge_id),))
+    if not row:
+        return None
+    out: dict[str, Any] = dict(zip(_KNOWLEDGE_PUBLIC_COLS, row))
+    out["display_name"] = out.get("name") or ""
+    out["has_content"] = bool(out.pop("obs_key", "") or out.get("file_path"))
+    return out
+
+
+# N10：平台 → unified_user_mapping 列（新增平台必须在此登记）
+_MAPPING_COLUMNS = {
+    "feishu": "feishu_open_id",
+    "gitcode": "gitcode_user",
+    "github": "github_login",
+    "dingtalk": "dingtalk_user_id",
+}
+
+
+def user_mapping_batch(keys: list[dict[str, Any]], limit: int = 200) -> list[dict[str, Any]]:
+    """批量外部身份 → grape user_id（N10）；批量 ≤ 200 键，保序返回。"""
+    keys = list(keys or [])[: max(1, min(int(limit), 200))]
+    out: list[dict[str, Any]] = []
+    by_platform: dict[str, list[str]] = {}
+    for k in keys:
+        platform = str((k or {}).get("platform") or "").strip().lower()
+        external = str((k or {}).get("external_id") or "").strip()
+        by_platform.setdefault(platform, []).append(external)
+    found: dict[tuple[str, str], str] = {}
+    for platform, values in by_platform.items():
+        column = _MAPPING_COLUMNS.get(platform)
+        if not column:
+            continue
+        values = [v for v in dict.fromkeys(values) if v]
+        if not values:
+            continue
+        marks = ",".join(["%s"] * len(values))
+        sql = (f"SELECT {column}, user_id FROM unified_user_mapping "
+               f"WHERE {column} IN ({marks}) AND user_id IS NOT NULL AND user_id NOT IN ('', '0')")
+        with db_registry.cursor("mgmt") as c:
+            c.execute(sql, tuple(values))
+            for ext, uid in c.fetchall():
+                found.setdefault((platform, ext), uid)
+    for k in keys:
+        platform = str((k or {}).get("platform") or "").strip().lower()
+        external = str((k or {}).get("external_id") or "").strip()
+        uid = found.get((platform, external))
+        out.append({"platform": platform, "external_id": external,
+                    "user_id": uid, "matched": bool(uid)})
+    return out
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("mgmt") as c:
@@ -563,6 +674,8 @@ __all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_o
            "get_account_id_by_username", "get_account_username_by_id",
            "upsert_scene_content", "set_scene_icon", "set_scene_deploy_url", "set_scene_nodes", "mark_default_featured", "list_baseline_knowledge_files", "list_knowledge_obs_keys",
            "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks", "get_autopilot_task_brief",
+           # P2 服务接口补齐（N6/N8/N9/N10）
+           "repo_bundle", "get_account_public", "get_knowledge_entry", "user_mapping_batch",
            "health"]
 
 
