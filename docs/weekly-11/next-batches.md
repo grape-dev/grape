@@ -1,24 +1,22 @@
 # 下一批：跨域收口作业单
 
-总量 100 处 / 50 个文件；下表取前 3 个。
-
-## src/domains/insight/observability/__init__.py（insight 域，4 处）
-- `agent_tasks`（归 runtime）× 3：行 618, 630, 642
-  - runtime public 已登记 210 条具名查询
-- `agent_runtimes`（归 runtime）× 1：行 656
-  - runtime public 已登记 210 条具名查询
+总量 96 处 / 49 个文件；下表取前 3 个。
 
 ## src/api/session_store.py（api 域，4 处）
 - `devops_pipeline_scene`（归 mgmt）× 3：行 486, 698, 745
   - mgmt public 已登记 144 条具名查询
 - `issue`（归 runtime）× 1：行 611
-  - runtime public 已登记 210 条具名查询
+  - runtime public 已登记 213 条具名查询
 
 ## src/api/health_endpoints.py（api 域，4 处）
 - `agent_tasks`（归 runtime）× 3：行 91, 143, 146
-  - runtime public 已登记 210 条具名查询
+  - runtime public 已登记 213 条具名查询
 - `agent_runtimes`（归 runtime）× 1：行 149
-  - runtime public 已登记 210 条具名查询
+  - runtime public 已登记 213 条具名查询
+
+## src/api/deps.py（api 域，4 处）
+- `external_identities`（归 mgmt）× 4：行 374, 451, 491, 608
+  - mgmt public 已登记 144 条具名查询
 
 ## 每批验收口径（不要跳）
 1) `python3 scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv --baseline docs/weekly-11/foreign-refs-allowlist.csv --check`
