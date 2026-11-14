@@ -9,8 +9,6 @@ agent_tasks,runtime,mgmt,2
 agent_type,runtime,insight,1
 api_latency_log,insight,api,2
 audit_logs,mgmt,insight,1
-autopilot_subscriptions,mgmt,runtime,1
-autopilot_tasks,mgmt,runtime,5
 chat_agent_session,runtime,mgmt,1
 chat_conversations,runtime,mgmt,2
 devops_agent_session,runtime,mgmt,3

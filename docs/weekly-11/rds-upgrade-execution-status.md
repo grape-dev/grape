@@ -1718,6 +1718,74 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   这两张表仍有其它消费者）；基线 `foreign-refs-allowlist.csv` 收紧为 184 / 59；
   依赖看板与作业单同步刷新（下一批头名：`runtime/engine/scheduler.py` 6 处）。
 
+### 7.14 runtime 巡检任务调度跨域读写收口（2026-11-15 本批）
+
+- 文件：`src/domains/runtime/engine/scheduler.py`（runtime 域），**6 处 → 0**（单轮做完，未分两轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，两张表都归 mgmt）：
+  - `autopilot_tasks` × 5：原行 909（`_notify_subscribers` 的 JOIN 右侧）、993（`_get_enabled_tasks`
+    取启用任务全列）、1089（`_update_task_run_info` 回写运行时间）、1629（`scheduler_loop`
+    取 last_run_at）、1687（`trigger_task_now` 取单任务全列）；
+  - `autopilot_subscriptions` × 1：原行 908（`_notify_subscribers` 订阅者列表的 FROM 侧，
+    与 909 是同一条语句的两行）。
+  六处全部是「`mgmt_lib` 优先 / 进程主库兜底 SQL」双分支的**兜底侧**（964/988 行两条是
+  `mgmt_lib()` 非空时再判 `foreign_only` 的死分支）。
+- owner 侧新增（`?` 占位符，列序/谓词与原 SQL 逐字一致）：
+  1) mgmt `_ANY_QUERIES` 补 5 条：`autopilot_subscribers_by_task`、`autopilot_tasks_enabled_full`、
+     `autopilot_task_full_row`、`autopilot_task_last_run`、`autopilot_run_info_set`；
+  2) mgmt 侧 5 个薄函数：`autopilot_subscribers_any`、`list_enabled_autopilot_tasks_any`、
+     `autopilot_task_row_any`、`autopilot_task_last_run_any`、`set_autopilot_run_info_any`
+     （写语句一行 `UPDATE ... SET last_run_at=?, next_run_at=?, updated_at=? WHERE id=?`，
+     `updated_at` 与原实现一致 = `last_run_at`）；
+  3) 同时**下线 4 条 MySQL 专用副本**（`_READ_QUERIES` 的 `autopilot_tasks_e3fa0b`、
+     `autopilot_subscriptions_13648d`、`autopilot_tasks_enabled_full`、`autopilot_task_last_run`）：
+     同一语义只留一份可移植 SQL，避免「`%s` 版能跑单库、三库拓扑却要另写」的两套真源。
+- 设计取舍：
+  1) **同域 JOIN 不拆**：订阅表与任务表都归 mgmt，`s ⋈ t` 不是跨域 JOIN，整条进具名查询；
+     拆成两次往返只会把「一次命中」变成「两次可能不一致的读」。
+  2) **写仍然走 outbox 意图 + 兜底原语**：`_update_task_run_info` 是跨域写，保留
+     「lib 可用 → `cross_write.submit(autopilot_run_info_set, 幂等键)` 落意图 + 立即尝试」的
+     既有 durability 设计；只有 lib 不可用（单库 / 未配 mgmt DSN）时才落到
+     `set_autopilot_run_info_any`（自有 DSN → mgmt 连接；单库 → 进程主库 + `db_lock`）。
+     该写自身幂等（同值 0 行变更），不需要跨域原子，因此**没有**引入 `_any_tx()`。
+  3) **读一律单原语**：四处读删掉 lib/兜底双分支，只调 `*_any`。原双分支在单库彩排里一直绿，
+     掩盖了三库拓扑下 runtime 进程库没有 `autopilot_*`（视图 0 → 1146，被调度循环的 `except`
+     吞成「没有任务 / 没有订阅者 / 没有 last_run」）。
+  4) **`autopilot_task_last_run_any` 返回整行而不是标量**：原口径是
+     `row = ...fetchone(); last_run = row[0] if row else ""`——行在但 `last_run_at IS NULL` 时
+     `last_run` 是 `None`（走 `_is_cron_due` 的「无 last_run」分支），和「无行 → 空串」不是同一分支。
+     返回 `(value,)` 保住这个区分（烟测 B9/B10 两条断言）。
+- 修的存量 bug：
+  1) **终态通知在 lib 拓扑下永不发送（功能面）**：`_notify_subscribers` 的 lib 分支写的是
+     `c = lib.read_all(...).fetchall()`（错赋给 `c`，`rows` 在该分支从未绑定）→ 紧跟的
+     `if not rows:` 抛 `UnboundLocalError`，被本函数的 `except` 吞掉只留一条 warning。
+     也就是凡配了 mgmt DSN 的拓扑（含生产），巡检执行完成后的飞书订阅通知一条也发不出去。
+  2) **手动触发恒报「任务不存在」/ 直接崩（功能面）**：`trigger_task_now` 的 lib 分支写的是
+     `c = lib.read_one(...).fetchone()`——`read_one` 已经返回行元组，再 `.fetchone()` 是
+     `AttributeError`；即便不抛，`row` 在 lib 分支也从未绑定。现在统一成单原语路径，两个分支
+     一起消失。
+  3) **`_get_enabled_tasks` 的死分支（卫生面）**：外层 `mgmt_lib()`（不带 `foreign_only`）已保证
+     lib 可用，内层再判 `mgmt_lib(foreign_only=True)` 不可能为真；且 `enabled_full` 与
+     `list_enabled_autopilot_tasks()` 是同一条 SELECT 的两份副本。合并成一条原语后
+     `%s`/`?` 两套 SQL 只剩一份。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/scheduler_autopilot_smoke.py`
+  **ALL 57 CHECKS PASSED**（含边界与否定用例：5 条新语句与调用点原 SQL 逐字对拍、无
+  `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`、未登记查询名 KeyError；enabled 过滤与 12 列列序、
+  `last_run_at` 为 NULL 时仍返回行（不等于无行）、无订阅 / 任务行缺失 → 空列表（INNER JOIN 语义）、
+  写命中 1 行 / 不存在 0 行 / `updated_at = last_run_at`；`_get_enabled_tasks` 字典键与空串列不被吞；
+  `trigger_task_now` 不存在 / 重复触发 / 正常触发三态（含原 UnboundLocalError 用例）；
+  `_notify_subscribers` 扇出两人各一次、第二次终态不重发、已通知执行不发、
+  **任务行缺失 noop**、**订阅表缺失降级不抛**；`_update_task_run_info` lib 优先时意图行 applied
+  且**不**落兜底、无 lib 时才写三列；`scheduler_loop` 单轮对每个启用任务各取一次 last_run；
+  **有自有 DSN 时 5 个原语全部走 `db_registry`、不碰进程库**）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；
+  `pytest tests/mgmt/test_autopilot_feishu_notify.py tests/api/test_autopilot_write_primitive.py`
+  **13 passed**（既有两条告警通知 / 写原语用例未受影响）；`make lint` **import OK**。
+- 新基线：全局 **184 → 178**（-6），对 **59 → 57**（`autopilot_tasks←runtime` 5 → 0、
+  `autopilot_subscriptions←runtime` 1 → 0，**两对同时清零**，故对数 -2、跨域表 41 → 39）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 178 / 57；依赖看板与作业单同步刷新
+  （下一批头名：`src/domains/mgmt/routes/devstage.py` 6 处）。
+
 ---
 
 ## 8. 提交记录

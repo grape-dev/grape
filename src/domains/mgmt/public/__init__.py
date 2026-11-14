@@ -739,6 +739,10 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # IM 身份解析 / 巡检执行卡（runtime/im/handler_async.py；任意拓扑）
            "sender_identity_user_by_app_any", "installation_owner_by_app_any",
            "autopilot_task_brief_any", "scene_names_by_repo_any",
+           # 巡检任务调度（runtime/engine/scheduler.py；任意拓扑）
+           "autopilot_subscribers_any", "list_enabled_autopilot_tasks_any",
+           "autopilot_task_row_any", "autopilot_task_last_run_any",
+           "set_autopilot_run_info_any",
            "health"]
 
 
@@ -769,8 +773,8 @@ _READ_QUERIES: dict[str, str] = {
     "grape_accounts_d0ac07": "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(%s)",
     "grape_accounts_0b3fdc": "SELECT id FROM grape_accounts WHERE username=%s AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1",
     "grape_accounts_e047af": "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(%s) LIMIT 1",
-    "autopilot_tasks_e3fa0b": "SELECT id, name, repo_key, agent_type, instruction, skill_name, cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE id=%s",
-    "autopilot_subscriptions_13648d": "SELECT s.user_id, t.name, t.repo_key FROM autopilot_subscriptions s JOIN autopilot_tasks t ON s.task_id=t.id WHERE s.task_id=%s",
+    # （`autopilot_tasks_e3fa0b` / `autopilot_subscriptions_13648d` 已下线：调度器改走
+    #   `_ANY_QUERIES` 的 `autopilot_task_full_row` / `autopilot_subscribers_by_task`）
     "user_accounts_e2eb04": "SELECT username FROM user_accounts WHERE id=%s",
     "scene_market_c969bb": "SELECT id, name FROM scene_market WHERE source='official'",
     "scene_market_0d2dd0": "SELECT id FROM scene_market WHERE name=%s AND source='official' LIMIT 1",
@@ -791,10 +795,8 @@ _READ_QUERIES: dict[str, str] = {
     # 巡检任务
     "autopilot_tasks_enabled_brief": (
         "SELECT id, name, engine_runtime_ids FROM autopilot_tasks WHERE enabled=1"),
-    "autopilot_tasks_enabled_full": (
-        "SELECT id, name, repo_key, agent_type, instruction, skill_name, cron, max_retry, "
-        "created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE enabled=1"),
-    "autopilot_task_last_run": "SELECT last_run_at FROM autopilot_tasks WHERE id=%s",
+    # （`autopilot_tasks_enabled_full` / `autopilot_task_last_run` 的 `%s` 版本已下线：
+    #   调度器改走 `_ANY_QUERIES` 同名可移植语句，两条拓扑同一份 SQL，不留 MySQL 专用副本）
     "scene_market_official_by_name": (
         "SELECT id, version, content_hash, is_active FROM scene_market "
         "WHERE name=%s AND source='official' LIMIT 1"),
@@ -1760,6 +1762,23 @@ _ANY_QUERIES: dict[str, str] = {
     "scene_names_by_repo": (
         "SELECT scene_id, name FROM devops_pipeline_scene "
         "WHERE repo_key=? AND is_active=1 ORDER BY name"),
+    # ── 巡检任务调度（runtime/engine/scheduler.py）──
+    # 任务表 + 订阅表同属本域，订阅那条 JOIN 不跨域、整条保留。列序/谓词与原语句逐字一致；
+    # 写语句只用 `?` 占位符，时间值由调用方在 Python 侧算好传入（不写 NOW()）。
+    "autopilot_subscribers_by_task": (
+        "SELECT s.user_id, t.name, t.repo_key FROM autopilot_subscriptions s "
+        "JOIN autopilot_tasks t ON s.task_id=t.id WHERE s.task_id=?"),
+    "autopilot_tasks_enabled_full": (
+        "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
+        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch "
+        "FROM autopilot_tasks WHERE enabled=1"),
+    "autopilot_task_full_row": (
+        "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
+        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch "
+        "FROM autopilot_tasks WHERE id=?"),
+    "autopilot_task_last_run": "SELECT last_run_at FROM autopilot_tasks WHERE id=?",
+    "autopilot_run_info_set": (
+        "UPDATE autopilot_tasks SET last_run_at=?, next_run_at=?, updated_at=? WHERE id=?"),
     # ── 事件知识清理 + 账户名解析（runtime/routes/events.py：原「mgmt_lib 优先 + 本地兜底 SQL」
     # 的兜底侧与引擎 scope 子查询上移；列序/谓词与原语句逐字一致，写语句不含 SQL 专有语法）──
     "knowledge_obs_keys_scoped": (
@@ -1993,6 +2012,42 @@ def autopilot_task_brief_any(task_id) -> tuple | None:
 def scene_names_by_repo_any(repo_key: str) -> list[tuple]:
     """仓库下在用场景的 (scene_id, name) 列表，按 name 排序；无行返回空列表。"""
     return [tuple(r) for r in read_all_any("scene_names_by_repo", (repo_key or "",))]
+
+
+# ---------- 巡检任务调度（runtime/engine/scheduler.py；任意拓扑） ----------
+#
+# 任务表与订阅表都归本域。原实现四处读 + 一处写全是「mgmt_lib 优先 / 进程主库兜底 SQL」
+# 双分支：兜底 SQL 正是跨域引用来源，而三库拓扑下 runtime 进程库没有 autopilot_* 表
+# （视图 0 → 1146，被调度循环的 except 吞成「无任务 / 无订阅者 / 无 last_run」）。
+# 现统一到任意拓扑原语：自有 DSN → 本域连接，单库 → 进程主库 + db_lock，SQL 只留本域一份。
+# 订阅 + 任务的 JOIN 两表同属本域（不是跨域 JOIN），整条保留；列序与原语句逐字一致。
+
+
+def autopilot_subscribers_any(task_id) -> list[tuple]:
+    """任务订阅者 (user_id, name, repo_key)；无订阅返回空列表。"""
+    return [tuple(r) for r in read_all_any("autopilot_subscribers_by_task", (int(task_id),))]
+
+
+def list_enabled_autopilot_tasks_any() -> list[tuple]:
+    """启用中的自动化任务全列（列序与调度器原查询逐字一致，调用方按下标解包）。"""
+    return [tuple(r) for r in read_all_any("autopilot_tasks_enabled_full", ())]
+
+
+def autopilot_task_row_any(task_id) -> tuple | None:
+    """单条任务全列（列序与调度器触发路径原查询逐字一致）；不存在返回 None。"""
+    row = read_one_any("autopilot_task_full_row", (int(task_id),))
+    return tuple(row) if row else None
+
+
+def autopilot_task_last_run_any(task_id) -> tuple | None:
+    """任务最近运行时间行 (last_run_at,)；无行返回 None（调用方 `row[0] if row else ''`）。"""
+    return read_one_any("autopilot_task_last_run", (int(task_id),))
+
+
+def set_autopilot_run_info_any(task_id, last_run_at: str, next_run_at: str) -> int:
+    """回写 last_run_at / next_run_at / updated_at（updated_at 与原实现一致 = last_run_at）。"""
+    return exec_any("autopilot_run_info_set",
+                    (last_run_at, next_run_at, last_run_at, int(task_id)))
 
 
 # ---------- 仓库级 bot token / 登录名（kernel/token_resolver；任意拓扑） ----------

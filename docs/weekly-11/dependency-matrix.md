@@ -1,7 +1,7 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-15 02:40　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **41** 张；跨域引用 **184** 处（59 个「表×消费域」对）；含归属域在内的 SQL 引用 2223 处
+> 生成时间：2026-11-15 02:47　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **39** 张；跨域引用 **178** 处（57 个「表×消费域」对）；含归属域在内的 SQL 引用 2193 处
 
 ## 1. 域 × 域 跨域引用热力
 
@@ -10,7 +10,7 @@
 | api | 20 | 47 | 3 | 70 |
 | kernel | 7 | 3 | 0 | 10 |
 | mgmt | 0 | 20 | 5 | 25 |
-| runtime | 36 | 0 | 1 | 37 |
+| runtime | 30 | 0 | 1 | 31 |
 | insight | 3 | 38 | 0 | 41 |
 
 ## 2. 处置分类进度
@@ -19,8 +19,8 @@
 | --- | ---: | ---: |
 | D | 11 | 47 |
 | C1 | 8 | 65 |
-| C2 | 18 | 68 |
-| B | 3 | 3 |
+| C2 | 17 | 63 |
+| B | 2 | 2 |
 | E | 1 | 1 |
 
 ## 3. 全量明细（按剩余跨域引用降序）
@@ -39,7 +39,6 @@
 | `external_identities` | mgmt | 6 | api 4 / runtime 2 | C2 outbox 跨域写 | W2 | 7 |
 | `user_feedback` | mgmt | 6 | api 6 | C2 outbox 跨域写 | W3 | 6 |
 | `agent_shared_knowledge` | mgmt | 5 | runtime 5 | C1 归属重定（写路径挪进 owner 域） | — | 6 |
-| `autopilot_tasks` | mgmt | 5 | runtime 5 | C2 outbox 跨域写 | W3 | 3 |
 | `grape_accounts` | mgmt | 4 | runtime 3 / insight 1 | C2 outbox 跨域写 | W2 | 14 |
 | `grape_t_channel_installation` | mgmt | 4 | runtime 4 | C2 outbox 跨域写 | W2 | 7 |
 | `login_whitelist` | mgmt | 4 | kernel 4 | C2 outbox 跨域写 | W2 | 4 |
@@ -55,7 +54,6 @@
 | `takeover_sessions` | runtime | 2 | api 1 / mgmt 1 | C2 outbox 跨域写 | W1 | 4 |
 | `agent_type` | runtime | 1 | insight 1 | C2 outbox 跨域写 | W1 | 3 |
 | `audit_logs` | mgmt | 1 | insight 1 | E 洞察事件/宽表 | — | 3 |
-| `autopilot_subscriptions` | mgmt | 1 | runtime 1 | B API 聚合端点 | — | 3 |
 | `chat_agent_session` | runtime | 1 | mgmt 1 | D 模块归位（kernel 写/读域表） | — | 5 |
 | `distributed_locks` | runtime | 1 | insight 1 | D 模块归位（kernel 写/读域表） | — | 3 |
 | `event_skipped` | runtime | 1 | api 1 | C2 outbox 跨域写 | W3 | 5 |

@@ -897,17 +897,10 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
         if not cur:
             return
         # 查订阅者 + 任务信息（JOIN 取 name/repo_key；订阅表缺失时抛错被外层捕获）
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import mgmt_lib as _mg_lib_13648d_f
-            _mg_lib_13648d = _mg_lib_13648d_f(foreign_only=True)
-            if _mg_lib_13648d is not None:
-                c = _mg_lib_13648d.read_all("autopilot_subscriptions_13648d", (task_id,)).fetchall()
-            else:
-                rows = c.execute(
-                    "SELECT s.user_id, t.name, t.repo_key FROM autopilot_subscriptions s "
-                    "JOIN autopilot_tasks t ON s.task_id=t.id WHERE s.task_id=?",
-                    (task_id,)).fetchall()
+        # mgmt 归属原语：订阅表与任务表同属 mgmt，JOIN 不跨域；SQL 只在归属域留一份，
+        # 任意拓扑可用（自有 DSN → mgmt 连接；单库 → 进程主库）。
+        from src.domains.mgmt import public as _mgmt_public
+        rows = _mgmt_public.autopilot_subscribers_any(task_id)
         if not rows:
             return
         _task_name = rows[0][1] or f"task-{task_id}"
@@ -975,23 +968,9 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
 
 def _get_enabled_tasks() -> list[dict]:
     """获取所有启用的 autopilot 任务。"""
-    from src.kernel.domain_read import mgmt_lib
-    _mg_tasks = mgmt_lib()
-    if _mg_tasks is not None:
-        rows = _mg_tasks.list_enabled_autopilot_tasks()
-    else:
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import mgmt_lib as _mg_apf
-            _apf = _mg_apf(foreign_only=True)
-            if _apf is not None:
-                rows = _apf.read_all("autopilot_tasks_enabled_full", ())
-            else:
-                rows = c.execute(
-                    "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-                    "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch "
-                    "FROM autopilot_tasks WHERE enabled=1"
-                ).fetchall()
+    # autopilot_tasks 归 mgmt：走归属域任意拓扑原语（列序与原查询逐字一致）
+    from src.domains.mgmt import public as _mgmt_public
+    rows = _mgmt_public.list_enabled_autopilot_tasks_any()
     tasks = []
     for r in rows:
         tasks.append({
@@ -1083,13 +1062,9 @@ def _update_task_run_info(task_id: int, next_run: str):
             return
         except Exception as _e_ri:
             log.warning(f"_update_task_run_info lib path failed, fallback to local SQL: {_e_ri}")
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "UPDATE autopilot_tasks SET last_run_at=?, next_run_at=?, updated_at=? WHERE id=?",
-            (now_str, next_run, now_str, task_id)
-        )
-        db.commit()
+    # 兜底：归属域任意拓扑原语（三库拓扑 → mgmt 连接；单库 → 进程主库 + db_lock）
+    from src.domains.mgmt import public as _mgmt_public
+    _mgmt_public.set_autopilot_run_info_any(task_id, now_str, next_run)
 
 def _parse_iso_aware(value):
     """解析 ISO 时间串为 aware datetime（无时区按 UTC 补齐），失败返回 None。"""
@@ -1619,15 +1594,10 @@ async def scheduler_loop():
                     task_id = task["id"]
                     if task_id in _RUNNING_TASKS:
                         continue
-                    with db_lock:
-                        c = db.cursor()
-                        from src.kernel.domain_read import mgmt_lib as _mg_aplr
-                        _aplr = _mg_aplr(foreign_only=True)
-                        if _aplr is not None:
-                            row = _aplr.read_one("autopilot_task_last_run", (task_id,))
-                        else:
-                            row = c.execute("SELECT last_run_at FROM autopilot_tasks WHERE id=?", (task_id,)).fetchone()
-                        last_run = row[0] if row else ""
+                    # autopilot_tasks 归 mgmt：last_run 走归属域任意拓扑原语
+                    from src.domains.mgmt import public as _mgmt_public
+                    row = _mgmt_public.autopilot_task_last_run_any(task_id)
+                    last_run = row[0] if row else ""
                     if _is_cron_due(task["cron"], last_run):
                         log.info(f"Autopilot: cron due for task {task_id} ('{task['name']}')")
                         asyncio.ensure_future(_execute_task(task))
@@ -1674,19 +1644,11 @@ async def stop_scheduler():
 
 async def trigger_task_now(task_id: int) -> dict:
     """手动触发任务执行（异步入口）。"""
-    with db_lock:
-        c = db.cursor()
-        from src.kernel.domain_read import mgmt_lib as _mg_lib_e3fa0b_f
-        _mg_lib_e3fa0b = _mg_lib_e3fa0b_f(foreign_only=True)
-        if _mg_lib_e3fa0b is not None:
-            c = _mg_lib_e3fa0b.read_one("autopilot_tasks_e3fa0b", (task_id,)
-        ).fetchone()
-        else:
-            row = c.execute(
-                "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-                "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE id=?",
-                (task_id,)
-            ).fetchone()
+    # autopilot_tasks 归 mgmt：单行全列走归属域任意拓扑原语。
+    # 原 lib 分支写的是 `c = lib.read_one(...).fetchone()`（元组再取 fetchone → AttributeError，
+    # 且错赋给 c 让 row 未绑定），lib 可用时手动触发恒抛错——本批一并修正。
+    from src.domains.mgmt import public as _mgmt_public
+    row = _mgmt_public.autopilot_task_row_any(task_id)
     if not row:
         return {"ok": False, "message": "task not found"}
     task = {
