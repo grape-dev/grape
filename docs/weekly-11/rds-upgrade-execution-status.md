@@ -4613,6 +4613,92 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `insight/routes/health.py` 原本已 import `runtime.engine.health`，本批新增的
   `runtime.public` 是一条新 R4 边 —— 属「调用 owner 域公开面」的预期方向，不影响 R1–R7 PASS。
 
+### 7.38 insight 设备资源采样的两张 runtime 表下沉 owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/insight/observability/rollup.py` **2 处 → 0**（单轮做完，2 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：**同一条语句贡献 2 处**，两张表都归 **runtime**
+  - L67–71 `snapshot_runtimes` 的采样基集
+    `SELECT rc.id, rc.device_name, rc.cpu_percent, rc.memory_percent, rc.disk_percent,
+    rc.bandwidth_percent, COALESCE(hs.health_score, 0), rc.status, rc.last_seen_at
+    FROM runtime_credentials rc LEFT JOIN runtime_health_scores hs ON hs.runtime_id = rc.id
+    WHERE rc.status != 'revoked'`
+    （`FROM runtime_credentials` 记 1 处、`JOIN runtime_health_scores` 记 1 处）；
+    同一行的 lib 分支走 `read_all("runtime_credentials_619821")`，静态正则只认兜底语句。
+  - 同函数的 `INSERT INTO obs_runtime_samples` / `DELETE FROM obs_runtime_samples` 是**本域**表
+    （`obs_runtime_samples` 归 insight），本批不动。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增**可移植**（零参数）具名查询 `runtime_credentials_619821` —— 与
+    `_READ_QUERIES` 同名，因为就是同一条语句；那边是 `%s` 方言的 lib 专用版（单库拓扑经
+    `db_registry.cursor` 会 RuntimeError），不能复用（沿用 7.37 `agent_runtimes_34b97d` 的处置）；
+  - 新增薄函数 `runtime_credential_sample_rows_any() -> list[tuple]`：9 列原值，列序与原 SQL 逐字一致；
+  - `__all__` 登记新函数。
+- 调用点 `rollup.py`：`_ru_lib_619821` 分支与兜底 SQL 一起删除，改
+  `from src.domains.runtime.public import runtime_credential_sample_rows_any`；
+  `db_lock` 仍保留，但**只管落库那一段**。
+- 设计取舍：
+  1. **JOIN 留在 owner 域，不拆 Python 内连接**：「跨域 JOIN 拆成本域查询 + Python 内连接」的前提是
+     两张表分属不同域；这里 `runtime_credentials` / `runtime_health_scores` 同归 runtime，
+     拆开只会把 `COALESCE(hs.health_score, 0)` 的缺行语义搬到调用方，多一次往返且更易写错。
+  2. **取数与落库用两条连接**：取数走 owner 原语，落库仍用本域 `db.cursor()` + 单次 `db.commit()`。
+     锁的边界随之收窄到落库段 —— 原语在单库回落路径内部自己取 `db_lock`（RLock），
+     外层再套一层会与测试里 monkeypatch 的裸 `Lock` 嵌套自死锁（台账 7.30 已踩过）。
+  3. **读失败早退，不插也不清理**：原实现是「读 → 插 → 删 → commit」一条 try，读失败即整块中止；
+     本批把读单独一个 try，失败时 `log.warning` 后直接 `return {"inserted": 0}`，
+     保持「读不到就不写、也不顺手删过期行」的等价行为（C11 钉住：过期行仍在、无新采样）。
+  4. **`status != 'revoked'` 不是 `status='active'`**：`offline` / `about_to_gc` 的引擎也要留采样点，
+     否则资源曲线在引擎重启窗口会断线；B2 / C2 用 offline 行钉住。
+  5. **`health_score` 的 `COALESCE 0` 留在 SQL 里**：这是「无健康分行」的缺省值，属本域表语义；
+     原语照抄，`device_name or ""` / `float(cpu or 0)` / `int(health or 0)` 与 online 判定
+     （900s 新鲜度 / 非法时间戳 → 0）是采样口径，仍留调用方。
+  6. **不删 lib 灰度开关本身**：只删本文件的 `domain_read.runtime_lib` 用法（该分支在三库拓扑下必崩），
+     `src/kernel/domain_read.py` 的开关与其它消费者不动，属独立轮。
+  7. **本轮未改 `obs_runtime_samples` 的写入路径**：它是本域表，三库拓扑下 insight 进程库就是它的
+     owner 库，没有跨域问题；把它也搬进原语只会让「取数/落库」变成跨两次连接的事务假象。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **三库拆分后设备资源采样恒 0 行**：insight 进程库没有 `runtime_credentials` /
+     `runtime_health_scores`（视图 0）→ 兜底语句 `1146` → 被同函数最外层
+     `except Exception` 吞成 `log.warning` + `{"inserted": 0}`：`obs_runtime_samples` 永久空表，
+     `/api/obs/runtimes/history` 曲线全空、SLO 可用率恒无分母，且日志只有一句
+     「obs snapshot_runtimes failed」不带表名。改造后走 owner 原语（自有 DSN 打到 runtime、
+     单库回落进程库），两条拓扑同一份语句。
+  2. **lib 分支的行元组二次取值风险**：`read_all(...)` 已 materialize 的实现在部分 lib 版本上
+     返回游标而非列表；改走 `read_all_any` 后统一「list[tuple]」，调用方不再靠 lib 的实现细节。
+- 验证（真实退出码）：
+  · `py_compile`（runtime `public/__init__.py` / insight `observability/rollup.py`）→ **COMPILE_OK**；
+  · `~/burndown/obs_rollup_snapshot_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建三张表）
+    → **ALL obs rollup snapshot smoke PASSED (36 checks)**：
+    A 注册面/静态否定（具名查询逐字、零占位符、无 `%s`/`NOW()`/`ON DUPLICATE`、`__all__` 登记、
+    薄函数零参数且体内无 SQL、`rollup.py` 已无两张 runtime 表的 SQL 字面量 / 无 `domain_read`、
+    未登记名 `KeyError`）；
+    B 原语语义（空表、只排除 revoked（offline 保留）、9 列列序逐字、无健康分行 → 0、
+    多行各取各的、NULL 原值不兜底、仅 revoked → 空列表）；
+    C 调用点端到端（revoked 不采样、device/cpu/mem/disk/bw/health 兜底、状态原样、
+    新鲜心跳 1 / 过期 120 分钟 0 / NULL 与非法时间戳 0、过期采样清理、读失败 inserted=0 且
+    不抛不清理并留 warning、连续两轮各插一批）；
+    D 自有 DSN 伪游标（`domain=runtime`、单语句、零参数、语句逐字、空结果不炸）。
+  · `--update-baseline` → **baseline updated: 25 pairs, 37 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **22 表 / 37 跨域引用 / 25 对**
+    （`runtime_health_scores` 已无跨域消费方，表数 23 → 22）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （runtime 176 funcs + 25 named queries used / 257 funcs + 61 registered；mgmt 182+6 / 264+31；
+    insight 18+0 / 26+0）；`tests/arch/test_silent_except_ratchet.py` → **2 passed**（未新增静默 except）。
+- 既有红项对账（如实）：`tests/insight/test_obs_rollup.py` 6 项里 `test_route_lists_only_visible_
+  runtimes_and_404s_others` 红（`TestClient` 关闭期 `CancelledError`）；已用
+  `git stash` 在**无本批改动的 HEAD 树**上复跑，同样 1 failed / 5 passed → 与本批无关，
+  不属门禁三组（`tests/arch tests/contracts tests/scripts`）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  轮内口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点），运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标与读失败降级）。
+- **新基线**：**37 处 / 25 对 / 22 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 37 处 / 27 文件）。`src/domains/insight/observability/rollup.py` 已清零并退出榜单；下一批
+  首个未 blocked 文件是 `src/domains/insight/observability/overview.py`（2 处：`agent_tasks` /
+  `runtime_credentials`，均归 runtime），其后是 `events_view.py`（2 处）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

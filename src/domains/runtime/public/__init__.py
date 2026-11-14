@@ -1511,7 +1511,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "agent_task_activity_rows_any", "runtime_credentials_gap_rows",
            "runtime_credentials_silent_rows", "agent_task_activity_rows",
            # 免鉴权健康端点就绪快照（insight/routes/health.py；任意拓扑）
-           "agent_runtime_health_snapshot_any"]
+           "agent_runtime_health_snapshot_any",
+           # 设备资源曲线采样基集（insight/observability/rollup.py；任意拓扑）
+           "runtime_credential_sample_rows_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2483,6 +2485,15 @@ _ANY_QUERIES: dict[str, str] = {
     "agent_type_search_global": (
         "SELECT agent_type, display_name, icon FROM agent_type"
         " WHERE LOWER(agent_type) LIKE ? OR LOWER(display_name) LIKE ?"),
+    # ── 设备资源曲线采样基集（insight/observability/rollup.py）──
+    # `_READ_QUERIES` 里同名键是 `%s` 方言的 lib 专用版；这里登记**可移植**同名语句
+    # （零参数、任意拓扑）。JOIN 的两张表都归本域，故 JOIN 留在本域、不需要 Python 内连接。
+    "runtime_credentials_619821": (
+        "SELECT rc.id, rc.device_name, rc.cpu_percent, rc.memory_percent, rc.disk_percent,"
+        " rc.bandwidth_percent, COALESCE(hs.health_score, 0), rc.status, rc.last_seen_at"
+        " FROM runtime_credentials rc"
+        " LEFT JOIN runtime_health_scores hs ON hs.runtime_id = rc.id"
+        " WHERE rc.status != 'revoked'"),
 }
 
 
@@ -2592,6 +2603,22 @@ def agent_runtime_health_snapshot_any() -> tuple[Any | None, int]:
         count_row = c.fetchone()
     total = int(count_row[0] or 0) if count_row else 0
     return (ready_row, total)
+
+
+# ── 设备资源曲线采样基集（insight/observability/rollup.py）──
+# 原实现「lib 可用 → lib；否则 → 进程主库兜底 SQL」；三库拓扑下 insight 进程库没有
+# 本域两张表（视图 0）→ 1146，被同一函数的外层 except 吞成 `{"inserted": 0}`，
+# 资源曲线整条为空且无日志指向根因。本原语把 SQL 收在本域，两条拓扑同一份语句。
+
+def runtime_credential_sample_rows_any() -> list[tuple]:
+    """未注销凭据的资源采样基集（9 列，列序与 insight 原 SQL 逐字一致）。
+
+    列为 `(id, device_name, cpu_percent, memory_percent, disk_percent,
+    bandwidth_percent, health_score, status, last_seen_at)`；`health_score` 由
+    LEFT JOIN 取得、缺行时 `COALESCE` 成 0（同原 SQL）。在线判定、空值兜底与
+    采样落库都是 insight 的口径，留调用方。
+    """
+    return [tuple(r) for r in read_all_any("runtime_credentials_619821")]
 
 
 # ── 飞书扫码 onboarding：换绑清理的三个读写原语（mgmt/routes/feishu_onboard.py）──
