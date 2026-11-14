@@ -1,0 +1,170 @@
+"""Issue #2555：A2A 跳过分支统一返回 ok/skipped/reason/detail。
+
+覆盖验收标准：
+- task_cancelled 带 ok=false / 中文 reason / detail.issue_number+repository；
+- 仓库不匹配且单号在他仓存在 → repo_mismatch，detail 三字段齐全且不返回 task_cancelled；
+- 本仓与他仓均不存在 → 不因归属校验新增拒绝（行为不变）；
+- 跨流水线两类拦截均带 reason，skipped 码/状态码不变；
+- 向后兼容：既有键 status/seq/agent/handoff_result/source_seq/original_event 仍在。
+"""
+import os
+
+ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+os.environ["DEVOPS_DB_PATH"] = os.path.join(ROOT, "data", "test_issue_2555_skip_reason.db")
+os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
+for _k in ("DEVOPS_DB_HOST", "DEVOPS_DB_USER", "DEVOPS_DB_PASSWORD", "DEVOPS_DB_NAME", "DEVOPS_DB_PORT"):
+    os.environ.pop(_k, None)
+
+from src.api.db_setup import init_database
+from src.domains.runtime.routes.webhook import (
+    _a2a_skip_reason,
+    _a2a_skip_response,
+    _issue_repo_mismatch,
+    _repo_key_to_repository,
+)
+from src.kernel.session_manager import db, db_lock
+
+init_database()
+
+REPO = "gitcode:owner/repo"
+OTHER_REPO = "gitcode:other/repo"
+REPOS = (REPO, OTHER_REPO)
+
+
+def _clean():
+    with db_lock:
+        c = db.cursor()
+        for _repo in REPOS:
+            c.execute("DELETE FROM issue WHERE repo_key=?", (_repo,))
+        db.commit()
+
+
+def _set_issue(repo_key, number, status="processing"):
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status, scene_id) "
+            "VALUES (0, '', ?, ?, ?, '')",
+            (repo_key, number, status))
+        db.commit()
+
+
+def _client():
+    from fastapi.testclient import TestClient
+
+    from src.api.main import app
+    return TestClient(app)
+
+
+def _body(issue_number="2555", repository="owner/repo", agent="coding"):
+    return {
+        "agent": agent,
+        "payload": {
+            "repository": repository,
+            "account": "owner/repo",
+            "issue_number": str(issue_number),
+            "pr_number": "",
+            "context": "Issue #2555 跳过原因测试",
+        },
+    }
+
+
+class TestSkipResponseHelper:
+    def setup_method(self):
+        _clean()
+
+    def test_helper_carries_all_skip_fields_and_existing_keys(self):
+        resp = _a2a_skip_response(
+            "pr_subscription_a2a_disabled", agent="qa", source_seq=7,
+            detail={"issue_number": 2555},
+            original_event={"seq": 3})
+        body = resp.body
+        import json
+        data = json.loads(body)
+        assert resp.status_code == 200
+        assert data["ok"] is False
+        assert data["skipped"] == "pr_subscription_a2a_disabled"
+        assert data.get("reason")
+        assert data["detail"] == {"issue_number": 2555}
+        # 既有键保留
+        assert data["handoff_result"] == "rejected"
+        assert data["source_seq"] == 7
+        assert data["status"] == "ok"
+        assert data["seq"] == 0
+        assert data["agent"] == "qa"
+        assert data["original_event"] == {"seq": 3}
+
+    def test_helper_extra_overrides_but_keeps_contract_fields(self):
+        import json
+        resp = _a2a_skip_response(
+            "not_in_scene", agent="coding", status_code=409,
+            extra={"status": "skipped", "scene": "s1", "message": "m"})
+        data = json.loads(resp.body)
+        assert resp.status_code == 409
+        assert data["status"] == "skipped"
+        assert data["scene"] == "s1"
+        assert data["handoff_result"] == "rejected"
+        assert data["source_seq"] == 0
+
+    def test_reasons_are_chinese_and_do_not_leak_internal_ids(self):
+        scene_reason = _a2a_skip_reason("target_scene_not_found")
+        node_reason = _a2a_skip_reason("target_scene_missing_node")
+        assert "目标场景" in scene_reason and "目标场景" in node_reason
+        assert "scene" not in scene_reason.lower()
+        assert "target_node" not in node_reason
+        assert _a2a_skip_reason("sre_subscribed")
+        assert _a2a_skip_reason("pr_subscription_a2a_disabled")
+        assert "不参与流水线流转" in _a2a_skip_reason("pr_subscription_a2a_disabled")
+
+    def test_repo_key_to_repository_strips_provider(self):
+        assert _repo_key_to_repository("gitcode:owner/repo") == "owner/repo"
+        assert _repo_key_to_repository("owner/repo") == "owner/repo"
+
+    def test_issue_repo_mismatch_requires_other_repo_evidence(self):
+        _set_issue(OTHER_REPO, 2555)
+        assert _issue_repo_mismatch(REPO, 2555) == OTHER_REPO
+        # 本仓存在时调用方不会调用本函数；他仓不存在时返回空（不误拒）
+        assert _issue_repo_mismatch("gitcode:absent/repo", 99999) == ""
+
+
+class TestCancelledEndpoint:
+    def setup_method(self):
+        _clean()
+
+    def test_task_cancelled_carries_ok_reason_detail(self):
+        _set_issue(REPO, 2555, status="cancelled")
+        resp = _client().post("/api/a2a", json=_body())
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["skipped"] == "task_cancelled"
+        assert data["reason"] and "cancelled" in data["reason"]
+        assert data["detail"]["issue_number"] == 2555
+        assert data["detail"]["repository"] == "owner/repo"
+        assert data["detail"]["status"] == "cancelled"
+        # 向后兼容：既有键仍在
+        assert data["handoff_result"] == "rejected"
+        assert data["source_seq"] == 0
+
+
+class TestRepoMismatchEndpoint:
+    def setup_method(self):
+        _clean()
+
+    def test_repo_mismatch_when_only_other_repo_has_issue(self):
+        _set_issue(OTHER_REPO, 2555, status="cancelled")
+        resp = _client().post("/api/a2a", json=_body())
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["skipped"] == "repo_mismatch"
+        assert data["skipped"] != "task_cancelled"
+        assert data["detail"]["issue_number"] == 2555
+        assert data["detail"]["expected_repository"] == "other/repo"
+        assert data["detail"]["actual_repository"] == "owner/repo"
+        assert "other/repo" in data["reason"] and "owner/repo" in data["reason"]
+
+    def test_absent_in_all_repos_does_not_repo_mismatch(self):
+        resp = _client().post("/api/a2a", json=_body(issue_number="987654"))
+        assert resp.json().get("skipped") != "repo_mismatch"
+        assert resp.json().get("skipped") != "task_cancelled"

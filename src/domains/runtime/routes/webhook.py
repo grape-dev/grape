@@ -416,6 +416,99 @@ def _a2a_guard_skip_response(repo_key: str, issue_number, agent_name: str,
     return JSONResponse(status_code=200, content=_content)
 
 
+_A2A_SKIP_REASON_STATIC = {
+    "target_scene_not_found": "目标场景不存在，跨流水线交办被拦截；请确认目标场景配置后重试。",
+    "target_scene_missing_node": "目标场景未配置对应节点，跨流水线交办被拦截；请确认目标场景配置后重试。",
+    "duplicate_handoff": "目标场景已有进行中的同类交接事件，本次交办被判定为重复；请等待前序交接完成后再试。",
+    "dispatch_failed": "跨流水线交办派发失败，事件未能启动；请稍后重试或检查运行节点状态。",
+    "pr_subscription_a2a_disabled": "PR 订阅触发的 QA 仅做审查、不参与流水线流转，本次 A2A 已禁用；如需流转请从 Issue 流水线发起。",
+    "sre_subscribed": "SRE 已订阅 PR 合并事件，该 A2A 交办视为重复；无需重复派发，已由订阅链路处理。",
+}
+
+
+def _repo_key_to_repository(repo_key: str) -> str:
+    """repo_key（provider:owner/repo）→ 面向调用方的 owner/repo 形式。"""
+    _key = str(repo_key or "")
+    return _key.split(":", 1)[1] if ":" in _key else _key
+
+
+def _a2a_skip_reason(skipped: str, *, issue_number=None, agent: str = "",
+                     expected_repository: str = "",
+                     actual_repository: str = "") -> str:
+    """Issue #2555：跳过码 → 中文可读原因（为什么被跳过 + 下一步怎么做）。
+
+    只暴露调用方可理解的信息（单号/仓库/目标 Agent），不含 token、内部路径、
+    scene id 或节点清单。
+    """
+    if skipped == "task_cancelled":
+        return f"Issue #{issue_number} 处于 cancelled 状态，A2A 已拒绝；如需继续请先恢复该 Issue。"
+    if skipped == "repo_mismatch":
+        return ("payload.repository 与 Issue 归属不一致："
+                f"该 Issue 属于 {expected_repository}，本次收到 {actual_repository}；"
+                "请改用实际归属仓库重试。")
+    if skipped == "not_in_scene":
+        return (f"目标 Agent 不在当前场景流水线节点中，A2A 被拦截；"
+                f"请确认场景已配置 {agent} 节点后重试。")
+    return _A2A_SKIP_REASON_STATIC.get(
+        skipped, f"A2A 交办被跳过（{skipped}）；请根据 detail 定位原因后重试。")
+
+
+def _a2a_skip_response(skipped: str, *, reason: str = "", detail: dict | None = None,
+                       agent: str = "", source_seq: int = 0,
+                       status_code: int = 200,
+                       original_event: dict | None = None,
+                       extra: dict | None = None) -> JSONResponse:
+    """Issue #2555：A2A 跳过响应单点收口（只增不删，既有键保持原值）。
+
+    统一补齐 ok=false + skipped + reason + detail；status/seq/agent/
+    handoff_result/source_seq 与调用方原有键保持，extra 用于透传分支特有条目。
+    """
+    _detail = dict(detail or {})
+    if not reason:
+        reason = _a2a_skip_reason(
+            skipped,
+            issue_number=_detail.get("issue_number"),
+            agent=agent,
+            expected_repository=_detail.get("expected_repository", ""),
+            actual_repository=_detail.get("actual_repository", ""))
+    content = {
+        "status": "ok", "seq": 0, "agent": agent,
+        "ok": False, "skipped": skipped,
+        "reason": reason, "detail": _detail,
+        "handoff_result": HANDOFF_RESULT_REJECTED,
+        "source_seq": int(source_seq or 0),
+    }
+    if original_event:
+        content["original_event"] = original_event
+    if extra:
+        content.update(extra)
+    return JSONResponse(status_code=status_code, content=content)
+
+
+def _issue_repo_mismatch(repo_key: str, issue_number) -> str:
+    """Issue #2555：归属正向证据反查——本仓无该单号、他仓存在 → 返回他仓 repo_key。
+
+    仅作为「仓库不匹配」的正向证据；任一侧不成立都不改行为（新单未同步/跨仓回填单
+    不误拒）。调用方须先确认本仓不存在，再调用本函数。
+    """
+    try:
+        _num = int(str(issue_number).strip().lstrip("#"))
+    except (TypeError, ValueError):
+        return ""
+    try:
+        from src.kernel.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT repo_key FROM issue WHERE issue_number=? AND repo_key<>? LIMIT 1",
+                (_num, repo_key))
+            row = c.fetchone()
+            return str(row[0]) if row and row[0] else ""
+    except Exception as _e:
+        log.warning(f"A2A #2555: cross-repo issue lookup failed for issue=#{issue_number}: {_e}")
+        return ""
+
+
 def _a2a_event_payload(seq, status, agent, issue_id, created_at=None) -> dict:
     """Issue #1691：统一 A2A 事件字段口径（seq/status/agent/issue_id[/created_at]），
     避免幂等、排队与并发回查等响应的 event 字面量再次漂移。"""
@@ -1917,21 +2010,45 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 log.info(f"A2A #329: cross-pipeline handoff redirected to scene={target_scene_id} node={target_node or 'vod'}")
                 return _redirect["response"]
             if _redirect.get("error"):
-                log.info(f"A2A #329: cross-pipeline handoff skipped: {_redirect['error']}")
+                _skip_code = _redirect["error"]
+                log.info(f"A2A #329: cross-pipeline handoff skipped: {_skip_code}")
                 # Issue #729：拦截响应透传 original_event（含 task_ref/result_ref）
-                # Issue #2050：契约字段直接落字面量，静态扫描可核（required: handoff_result/source_seq）
-                _skip_content = {
-                    "status": "ok", "seq": 0, "agent": target_node or "vod",
-                    "skipped": _redirect["error"],
-                }
-                if _redirect.get("original_event"):
-                    _skip_content["original_event"] = _redirect["original_event"]
-                return JSONResponse(status_code=200, content={
-                    "status": "ok", "seq": 0, "agent": target_node or "vod",
-                    "skipped": _redirect["error"],
-                    "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq,
-                    **({"original_event": _redirect["original_event"]} if _redirect.get("original_event") else {}),
-                })
+                # Issue #2555：统一补 ok=false + reason + detail（目标码只回传 target_node，
+                # 不回传 scene id / 节点清单）。
+                _skip_detail = {}
+                if _skip_code in ("target_scene_not_found", "target_scene_missing_node"):
+                    _skip_detail = {"target_node": target_node or "vod"}
+                return _a2a_skip_response(
+                    _skip_code, agent=target_node or "vod", source_seq=_source_seq,
+                    detail=_skip_detail,
+                    original_event=_redirect.get("original_event"),
+                )
+
+        # Issue #2555：仓库归属校验（正向证据判定，置于取消判定之前）。
+        # 仅当「本仓无该单号 + 他仓存在该单号」同时成立才返回 repo_mismatch；
+        # 命中即不再执行取消判定，避免目标仓同号取消单误报 task_cancelled。
+        if issue_number and repo_key:
+            try:
+                if not _issue_exists_in_db(repo_key, issue_number):
+                    _other_repo_key = _issue_repo_mismatch(repo_key, issue_number)
+                    if _other_repo_key:
+                        _expected_repository = _repo_key_to_repository(_other_repo_key)
+                        log.info(
+                            f"A2A #2555: repo mismatch — issue=#{issue_number} "
+                            f"expected={_expected_repository} actual={repository} agent={agent_name}")
+                        return _a2a_skip_response(
+                            "repo_mismatch", agent=agent_name, source_seq=_source_seq,
+                            reason=_a2a_skip_reason(
+                                "repo_mismatch", issue_number=issue_number,
+                                expected_repository=_expected_repository,
+                                actual_repository=repository),
+                            detail={
+                                "issue_number": int(issue_number),
+                                "expected_repository": _expected_repository,
+                                "actual_repository": repository,
+                            })
+            except Exception as _rm_e:
+                log.warning(f"A2A #2555: repo mismatch check failed: {_rm_e}")
 
         # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
         if issue_number and repo_key:
@@ -1943,8 +2060,15 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                   (repo_key, int(issue_number)))
                     if _ck_c.fetchone():
                         log.info(f"A2A: rejected — task cancelled, issue=#{issue_number}, agent={agent_name}")
-                        return {"ok": False, "skipped": "task_cancelled",
-                                "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq}
+                        return _a2a_skip_response(
+                            "task_cancelled", agent=agent_name, source_seq=_source_seq,
+                            reason=_a2a_skip_reason(
+                                "task_cancelled", issue_number=issue_number),
+                            detail={
+                                "issue_number": int(issue_number),
+                                "repository": repository,
+                                "status": "cancelled",
+                            })
             except Exception as _ck_e:
                 log.warning(f"A2A: cancelled check failed: {_ck_e}")
         seq = 0
@@ -2028,8 +2152,10 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     _prsub_row = _prsub_c.fetchone()
                 if _prsub_row and _prsub_row[0] and _prsub_row[0].startswith("#pr_"):
                     log.info(f"A2A: rejected — PR subscription QA (task={_caller_task_id}, issue={_prsub_row[0]}), A2A disabled")
-                    return {"ok": False, "skipped": "pr_subscription_a2a_disabled",
-                            "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq}
+                    return _a2a_skip_response(
+                        "pr_subscription_a2a_disabled", agent=agent_name,
+                        source_seq=_source_seq,
+                        detail={"issue_number": int(issue_number)} if issue_number else {})
             except Exception as _prsub_e:
                 log.warning(f"A2A: PR subscription check failed: {_prsub_e}")
 
@@ -2046,8 +2172,18 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         if issue_number:
             _scene_ck = _scene_node_check(repo_key, issue_number, agent_name)
             if not _scene_ck.get("in_scene"):
-                log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped (nodes={[n.get('id') for n in _scene_ck.get('nodes') or []]})")
-                return JSONResponse(status_code=409, content={"status": "skipped", "seq": 0, "agent": agent_name, "skipped": "not_in_scene", "scene": _scene_ck.get("scene_id"), "message": f"agent '{agent_name}' is not in the current scene pipeline (nodes={[n.get('id') for n in _scene_ck.get('nodes') or []]})", "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq})
+                _scene_node_ids = [_node_id(n) for n in _scene_ck.get("nodes") or []]
+                log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped (nodes={_scene_node_ids})")
+                return _a2a_skip_response(
+                    "not_in_scene", agent=agent_name, source_seq=_source_seq,
+                    status_code=409,
+                    reason=_a2a_skip_reason("not_in_scene", agent=agent_name),
+                    detail={"agent": agent_name},
+                    extra={
+                        "status": "skipped",
+                        "scene": _scene_ck.get("scene_id"),
+                        "message": f"agent '{agent_name}' is not in the current scene pipeline (scene={_scene_ck.get('scene_id')} nodes={_scene_node_ids})",
+                    })
 
         # 启动后台执行目标 Agent（由 _execute_agent 判定产出后存储事件）
     except HTTPException:
@@ -2392,7 +2528,10 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         _raw = (row[0] or "").strip()
                         if _raw and _raw != "[]" and _raw != "null":
                             log.info(f"A2A: sre subscribed + pr_number={pr_number}, skip task creation (stage=sre, issue=#{issue_number})")
-                            return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "sre_subscribed", "handoff_result": HANDOFF_RESULT_REJECTED, "source_seq": _source_seq})
+                            return _a2a_skip_response(
+                                "sre_subscribed", agent=agent_name,
+                                source_seq=_source_seq,
+                                detail={"issue_number": int(issue_number)})
             except Exception:
                 pass
 

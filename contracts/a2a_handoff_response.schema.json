@@ -2,21 +2,67 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grape.dev/contracts/a2a_handoff_response.schema.json",
   "title": "A2A structured handoff response",
-  "description": "Issue #2050: structured handoff response contract for POST /api/a2a. handoff_result is the machine-checkable outcome callers must inspect: ok = event created and dispatched; rejected = gate/policy/scene check intentionally blocked; failed = dispatch chain failed (no engine / event store failure / exception). source_seq echoes the effective source pipeline segment seq.",
+  "description": "Issue #2050: structured handoff response contract for POST /api/a2a. handoff_result is the machine-checkable outcome callers must inspect: ok = event created and dispatched; rejected = gate/policy/scene check intentionally blocked; failed = dispatch chain failed (no engine / event store failure / exception). source_seq echoes the effective source pipeline segment seq. Issue #2555: every skipped response also carries ok=false plus reason (human-readable Chinese why-skipped + next step) and detail (code-specific locator fields). skipped codes: task_cancelled (detail: issue_number/repository/status) | repo_mismatch (detail: issue_number/expected_repository/actual_repository) | target_scene_not_found / target_scene_missing_node (detail: target_node) | not_in_scene (detail: agent) | pr_subscription_a2a_disabled / sre_subscribed (detail: issue_number) | duplicate_a2a / duplicate_handoff (detail may be {}). Existing codes keep their meaning; new codes may be added, so skipped is intentionally not narrowed to an enum.",
   "type": "object",
   "properties": {
-    "status": {"type": "string"},
-    "seq": {"type": "integer"},
-    "agent": {"type": "string"},
-    "handoff_result": {"type": "string", "enum": ["ok", "failed", "rejected"]},
-    "source_seq": {"type": "integer", "minimum": 0},
-    "idempotent": {"type": "boolean"},
-    "existing_status": {"type": "string", "description": "Issue #2248: status of the existing event returned on an idempotency_key hit."},
-    "replayable": {"type": "boolean", "description": "Issue #2248: true when the idempotency hit is a terminal event and may be replayed with force=true or a new round key."},
-    "skipped": {"type": "string"},
-    "queued": {"type": "boolean"},
-    "event": {"type": "object"}
+    "status": {
+      "type": "string"
+    },
+    "seq": {
+      "type": "integer"
+    },
+    "agent": {
+      "type": "string"
+    },
+    "handoff_result": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "failed",
+        "rejected"
+      ]
+    },
+    "source_seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "idempotent": {
+      "type": "boolean"
+    },
+    "existing_status": {
+      "type": "string",
+      "description": "Issue #2248: status of the existing event returned on an idempotency_key hit."
+    },
+    "replayable": {
+      "type": "boolean",
+      "description": "Issue #2248: true when the idempotency hit is a terminal event and may be replayed with force=true or a new round key."
+    },
+    "skipped": {
+      "type": "string"
+    },
+    "queued": {
+      "type": "boolean"
+    },
+    "event": {
+      "type": "object"
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "Issue #2555: false on every skipped response; existing ok paths keep their value."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Issue #2555: human-readable Chinese explanation of why the handoff was skipped and what to do next. Never contains tokens, internal paths, scene ids or node lists."
+    },
+    "detail": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Issue #2555: code-specific locator fields; present (possibly {}) on every skipped response."
+    }
   },
-  "required": ["handoff_result", "source_seq"],
+  "required": [
+    "handoff_result",
+    "source_seq"
+  ],
   "additionalProperties": true
 }
