@@ -1400,7 +1400,10 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "health_task_rows_total", "health_task_status_counts",
            "health_task_inflight_count", "health_runtime_rows",
            # issue 按 id 批量取列（api/feedback_status.py；跨域 JOIN 拆分，任意拓扑）
-           "issue_stage_status_rows"]
+           "issue_stage_status_rows",
+           # A2A 派发门禁读路径（api/a2a_dispatch_guard.py；events / event_skipped 本域）
+           "a2a_active_event_rows", "a2a_active_dup_rows", "a2a_window_dedup_rows",
+           "a2a_storm_event_times", "a2a_storm_skip_rows"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2014,6 +2017,18 @@ _ANY_QUERIES: dict[str, str] = {
     "event_a2a_created_agent": (
         "SELECT created_at, agent_type FROM events WHERE repo_key=? AND issue_id=? "
         "AND event_type='a2a_event'"),
+    # A2A 派发门禁（api/a2a_dispatch_guard.py）读路径：events / event_skipped 归本域。
+    # 列序与原 SQL 逐字一致（调用方按下标解包）；谓词/排序/条数上限照抄原语句。
+    "a2a_window_dedup_rows": (
+        "SELECT seq, created_at, status, scene_id FROM events "
+        "WHERE repo_key=? AND issue_id=? AND event_type='a2a_event' "
+        "AND agent_type=? ORDER BY seq DESC LIMIT 20"),
+    "a2a_storm_event_times": (
+        "SELECT created_at FROM events WHERE repo_key=? AND issue_id=? "
+        "AND event_type='a2a_event' AND agent_type=? ORDER BY seq DESC LIMIT 50"),
+    "a2a_storm_skip_rows": (
+        "SELECT created_at, detail FROM event_skipped WHERE repo_key=? "
+        "AND issue_id=? AND event_type='a2a_event' ORDER BY id DESC LIMIT 100"),
     "task_created_at_by_agent": (
         "SELECT created_at FROM agent_tasks WHERE repo_key=? AND issue_id=? AND agent_type=?"),
     "tasks_running_rows": (
@@ -2447,6 +2462,102 @@ def apply_issue_vcs_existence_any(deleted_ids: list, restored_ids: list,
                 cur = c.execute(sql, params)
                 total += int(getattr(cur, "rowcount", 0) or 0)
     return total
+
+
+# ── A2A 派发门禁读路径（api/a2a_dispatch_guard.py）──────────────────────────
+#
+# events / event_skipped 归本域。原实现从 api 进程主库直发，三库拆分后 api 进程库
+# 没有这两张表（视图 0 → 1146），四条门禁查询全被内部 except 吞成空结果：
+#   1) 下游 running 判定恒「无下游」→ 上游重复派发（#1770 防抖退回原状，白烧执行槽位）；
+#   2) 时间窗去重恒「无重复」→ 未带 idempotency_key 的派发可双写（唯一索引只兜带键路径）；
+#   3) 活跃重复判定恒「无活跃」→ 同 issue+scene+agent 并发落第二个事件；
+#   4) storm 观测恒 count=1（只剩 upcoming）→ 「反复跳过」永不告警。
+#
+# 语句文本固定在本模块；`statuses` 只作为**值**绑定，并按白名单过滤（表名/列名
+# 不入参，调用方不能传 SQL）。活跃状态集合的默认值与调用方 `_ACTIVE_STATUS` 一致。
+_A2A_EVENT_STATUSES = frozenset({"queued", "dispatched", "running", "completed",
+                                 "failed", "cancelled", "timeout"})
+
+A2A_ACTIVE_STATUS = ("running", "dispatched")
+
+# `{ph}` 是 IN 列表占位符标记（按白名单过滤后的状态个数生成 `?,?,...`）。
+_A2A_EVENT_QUERIES: dict[str, str] = {
+    # 下游 running 判定 + 排队阻塞集合：同 Issue 全部活跃事件（agent 侧过滤在调用方）
+    "a2a_active_event_rows": (
+        "SELECT seq, agent_type, status, created_at, scene_id FROM events "
+        "WHERE repo_key=? AND issue_id=? AND event_type='a2a_event' "
+        "AND status IN ({ph}) ORDER BY seq DESC LIMIT ?"),
+    # 活跃重复判定：同 Issue + 同目标 agent 的活跃事件（含 payload 供上下文比对）
+    "a2a_active_dup_rows": (
+        "SELECT seq, created_at, status, scene_id, payload FROM events "
+        "WHERE repo_key=? AND issue_id=? AND event_type='a2a_event' "
+        "AND agent_type=? AND status IN ({ph}) ORDER BY seq DESC LIMIT ?"),
+}
+
+
+def _a2a_event_stmt(name: str, statuses) -> tuple[str, list[str]]:
+    """展开 `{ph}`：statuses 过白名单 + 去重保序，返回 (SQL, 状态值列表)。
+
+    白名单外的值直接丢弃（原 `IN (...)` 对未知状态本就零命中，口径不变）；
+    全被过滤时调用方不发起查询（等价空结果集）。
+    """
+    sql = _A2A_EVENT_QUERIES.get(name)
+    if sql is None:
+        raise KeyError(f"unknown a2a event query: {name}")
+    wanted: list[str] = []
+    for raw in (statuses or ()):
+        val = str(raw or "").strip()
+        if val in _A2A_EVENT_STATUSES and val not in wanted:
+            wanted.append(val)
+    return sql.replace("{ph}", ",".join(["?"] * len(wanted))), wanted
+
+
+def a2a_active_event_rows(repo_key: str, issue_id: str,
+                          statuses=A2A_ACTIVE_STATUS,
+                          limit: int = 50) -> list[tuple]:
+    """同 Issue 的 a2a_event 按状态集合取 `(seq, agent_type, status, created_at, scene_id)`。
+
+    无状态可查（statuses 全不在白名单）返回 []，不发起查询。
+    """
+    sql, wanted = _a2a_event_stmt("a2a_active_event_rows", statuses)
+    if not wanted:
+        return []
+    with _any_cursor() as c:
+        c.execute(sql, (repo_key, issue_id, *wanted, max(1, int(limit or 50))))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def a2a_active_dup_rows(repo_key: str, issue_id: str, agent_type: str,
+                        statuses=A2A_ACTIVE_STATUS,
+                        limit: int = 20) -> list[tuple]:
+    """同 Issue + 同目标 agent 的活跃 a2a_event 取
+    `(seq, created_at, status, scene_id, payload)`（最近 limit 条）。"""
+    sql, wanted = _a2a_event_stmt("a2a_active_dup_rows", statuses)
+    if not wanted:
+        return []
+    with _any_cursor() as c:
+        c.execute(sql, (repo_key, issue_id, agent_type, *wanted,
+                        max(1, int(limit or 20))))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def a2a_window_dedup_rows(repo_key: str, issue_id: str, agent_type: str) -> list[tuple]:
+    """时间窗去重候选：同 Issue + 同目标 agent 最近 20 条
+    `(seq, created_at, status, scene_id)`（状态/时间窗判定留在调用方）。"""
+    return [tuple(r) for r in read_all_any(
+        "a2a_window_dedup_rows", (repo_key, issue_id, agent_type))]
+
+
+def a2a_storm_event_times(repo_key: str, issue_id: str, agent_type: str) -> list[tuple]:
+    """storm 观测：同 Issue + 同目标 agent 最近 50 条 a2a_event 的 `(created_at,)`。"""
+    return [tuple(r) for r in read_all_any(
+        "a2a_storm_event_times", (repo_key, issue_id, agent_type))]
+
+
+def a2a_storm_skip_rows(repo_key: str, issue_id: str) -> list[tuple]:
+    """storm 观测：同 Issue 最近 100 条 event_skipped 的 `(created_at, detail)`。"""
+    return [tuple(r) for r in read_all_any(
+        "a2a_storm_skip_rows", (repo_key, issue_id))]
 
 
 # ── autopilot 执行记录 / 引擎实例校验 / 技能名（mgmt/routes/autopilot.py 收口）──

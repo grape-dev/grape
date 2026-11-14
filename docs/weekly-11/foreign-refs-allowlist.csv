@@ -15,8 +15,7 @@ devops_pipeline_scene,mgmt,api,3
 devops_pipeline_scene,mgmt,runtime,2
 distributed_locks,runtime,insight,1
 event_action_filter,mgmt,api,3
-event_skipped,runtime,api,1
-events,runtime,api,7
+events,runtime,api,3
 events,runtime,insight,6
 external_identities,mgmt,api,4
 external_identities,mgmt,runtime,2

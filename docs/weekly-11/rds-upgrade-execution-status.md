@@ -2331,6 +2331,91 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   基线 `foreign-refs-allowlist.csv` 收紧为 133 / 50，依赖看板与作业单同步刷新
   （下一批头名：`src/api/a2a_dispatch_guard.py` 5 处）。
 
+### 7.23 api A2A 派发门禁读路径归位 runtime（2026-11-15 本批）
+
+- 文件：`src/api/a2a_dispatch_guard.py`（api 域；#1770 派发去重门禁 + #1962 手动补发排除），
+  **5 处 → 0**（单轮做完，5 处未超 25，未分轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `events`（归 runtime）× 4：原行 132 下游/排队活跃事件面
+    `SELECT seq, agent_type, status, created_at, scene_id FROM events WHERE repo_key=?
+    AND issue_id=? AND event_type='a2a_event' AND status IN (…) ORDER BY seq DESC LIMIT 50`；
+    行 241 时间窗去重候选 `SELECT seq, created_at, status, scene_id … AND agent_type=?
+    ORDER BY seq DESC LIMIT 20`；行 293 活跃重复候选
+    `SELECT seq, created_at, status, scene_id, payload … AND agent_type=? AND status IN (…)
+    ORDER BY seq DESC LIMIT 20`；行 356 storm 派发计数
+    `SELECT created_at FROM events … AND agent_type=? ORDER BY seq DESC LIMIT 50`。
+  - `event_skipped`（归 runtime）× 1：行 362 storm 跳过计数
+    `SELECT created_at, detail FROM event_skipped WHERE repo_key=? AND issue_id=?
+    AND event_type='a2a_event' ORDER BY id DESC LIMIT 100`。
+  五处都是固定 SQL 文本（无跨域 JOIN、无动态表名/列名）；唯二的动态成分是状态**值**列表
+  （`_ACTIVE_STATUS` / `("queued",)`）与行数上限，调用点全部是 `db.cursor()` / `execute()`
+  直发 api 进程主库。
+- owner 侧新增（`src/domains/runtime/public/__init__.py`，`?` 占位符）：
+  1) `_ANY_QUERIES` 3 条具名查询：`a2a_window_dedup_rows` / `a2a_storm_event_times` /
+     `a2a_storm_skip_rows`（列序/谓词/排序/LIMIT 逐字照抄）；
+  2) `_A2A_EVENT_QUERIES` 2 条 `{ph}` 模板（`a2a_active_event_rows` /
+     `a2a_active_dup_rows`）+ `_a2a_event_stmt()` 展开器，状态值过 `_A2A_EVENT_STATUSES`
+     白名单后去重保序，LIMIT 作为绑定参数；
+  3) 5 个薄函数同名导出（`__all__` 同步）+ `A2A_ACTIVE_STATUS` 常量。
+- 设计取舍：
+  1) **动态 IN 用 owner 侧 `{ph}` 模板，不用调用方拼 SQL**：与 `issue_vcs_*` 同一形态 ——
+     语句文本固定在 owner，调用方只能传状态**值**，且值先过白名单（表名/列名永不入参）。
+     状态值去重保序，未知值丢弃（原 `IN` 对未知状态本就零命中，口径不变）。
+  2) **5 条语句分两形态**：三条完全固定（列序 + 谓词 + LIMIT 都是字面量）走
+     `_ANY_QUERIES` + `read_all_any`；两条带状态集合的走 `{ph}` 模板 + `_any_cursor`。
+     不为了统一形态把固定语句也塞进模板（白名单面越大越难审）。
+  3) **LIMIT 仍留在 SQL 里，不搬到 Python 截断**：20/50/100 是门禁语义的一部分
+     （「只看最近 20 行」决定更早的 completed 是否会误判重复），下沉到调用方后一次
+     `[:20]` 的疏忽就会改变去重结果，故烟测对三个上限各钉一条用例。
+  4) **storm 两条语句仍按「同一 try、失败一起归零」降级**：改成两次独立调用后，
+     第二条失败不再让第一条的计数被丢掉 —— 但那会把「表缺失」变成「半份计数」，
+     与原实现的可观测口径不一致，故异常分支里显式把 `rows, skip_rows` 一起置空。
+  5) **`append_guarded_a2a_event` 的原子段不动**：仍持 `db_lock` 包「复查 → 落库」。
+     单库拓扑下 `_any_cursor` 拿同一把 RLock（重入安全）+ 同一进程连接，锁语义与事务
+     快照都不变；自有 DSN 拓扑下复查读 runtime 库、`append_event` 写进程库的分裂是
+     **存量问题**（event_store 归位尚未做），本批不引入也不扩大。
+  6) **业务口径全部留在 api**：状态集合（running/dispatched 算活跃、queued 走 #1667）、
+     completed-only 时间窗、scene 空串通配、上下文键比对、`exclude_seq` 精确排除、
+     `upcoming` 计入与阈值告警都没下沉 —— owner 只给行与列。
+- 修的存量 bug（三库拓扑，A2A 门禁整体失效）：
+  1) **下游 running 门禁恒「无下游」**：四条门禁查询在 api 进程库 1146（events 在 runtime 库，
+     视图 0）→ 全部被 `except` 吞成空结果，`find_running_downstream` 永返 `{}` —— #1770 的
+     防抖退回原状，qa 审查期间上游仍被重复派发、白烧执行槽位；
+  2) **时间窗去重失效**：`find_window_duplicate` 永返 `{}` → 未带 `idempotency_key` 的派发
+     可落两条（唯一索引只兜带键路径），`duplicate_key` 响应分支永不触发；
+  3) **活跃重复判定失效**：`find_active_duplicate` 永返 `{}` → 同 issue+scene+agent 的
+     异上下文请求各落一条事件；
+  4) **storm 观测恒不告警**：`detect_dispatch_storm` 两条查询同时 1146 → count 只剩
+     `upcoming`（1），`count >= 2` 永不成立，「反复跳过」在日志里无痕（本批降级路径保持
+     不抛，但正常拓扑下不再触发）。
+  遗留（不在本批范围，属 event_store 归位批次）：`append_event` / `append_skipped_event`
+  仍走进程主库 `db`，三库拓扑下写入侧仍会 1146 —— 读侧就绪后，该缺口只剩「写」一半。
+- 验证：`py_compile` 2 个文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/a2a_guard_smoke.py`
+  **ALL 108 CHECKS PASSED**（含边界与否定用例：5 条语句与改造前 SQL 逐字对拍 +
+  无 `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`/库名前缀；状态白名单丢未知值、去重保序、
+  全被过滤时零查询；活跃集合只认 running/dispatched、LIMIT 50 + seq DESC；下游门禁的
+  queued/completed 不计、queued 进 `blocking_seqs`、scene 空串通配、`exclude_seq`、
+  空 nodes 零查询；时间窗只认 completed、窗口外不命中、**只看最近 20 行**、`window<=0`
+  零查询；活跃重复空上下文零查询、异上下文命中/同上下文放过/`include_same_context`
+  复查命中、payload 非 JSON 与空对象跳过、幂等键优先、**只看最近 20 行**；storm 的
+  detail 精确/前缀匹配、别的 agent 与别的 event_type 不计、LIMIT 50/100、`upcoming<0`
+  按 0；缺 events / 缺 event_skipped 双向降级不抛且口径不变；`db_lock` 内调用不死锁、
+  8 线程并发结果一致；单库走进程库、自有 DSN 两侧不串库；源码面 0 条 SQL 字面量 /
+  0 处外域表名 / 无 cursor()·execute() 直发 / 只绑 `db_lock` / 只用 5 个已导出原语）；
+  `tests/runtime/test_issue_1770_a2a_dispatch_guard.py` +
+  `test_issue_1962_a2a_time_window.py` **34 passed / 4 failed**，与改造前同一棵树上
+  对拍（`git checkout` 前后各跑一次）**失败集合与条数完全相同**，均为用例内真实外呼
+  GitCode 拿不到 `owner/repo`（HTTP 404）导致的入口 400，属既有环境依赖；
+  `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK /
+  契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；
+  `scripts/check_lib_query_names.py src` **PASS**（insight 12/20、mgmt 164/241、runtime 158/232）；
+  `make lint` **import OK**。
+- 新基线：全局 **133 → 128**（-5），对数 **50 → 49**：`event_skipped←api` 1 → 0（清零）、
+  `events←api` 7 → 3（余 3 处在 `src/api/event_archive.py` 1 + `src/api/qa_gate.py` 2，
+  同模式、后续批次）。基线 `foreign-refs-allowlist.csv` 收紧为 128 / 49，依赖看板与作业单
+  同步刷新（下一批头名：`src/kernel/config.py` 4 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

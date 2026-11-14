@@ -1,13 +1,13 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-15 03:59　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **38** 张；跨域引用 **133** 处（50 个「表×消费域」对）；含归属域在内的 SQL 引用 2131 处
+> 生成时间：2026-11-15 04:15　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **37** 张；跨域引用 **128** 处（49 个「表×消费域」对）；含归属域在内的 SQL 引用 2126 处
 
 ## 1. 域 × 域 跨域引用热力
 
 | 消费方 ↓ / 归属域 → | mgmt | runtime | insight | 合计 |
 | --- | ---: | ---: | ---: | ---: |
-| api | 12 | 28 | 2 | 42 |
+| api | 12 | 23 | 2 | 37 |
 | kernel | 7 | 3 | 0 | 10 |
 | mgmt | 0 | 14 | 5 | 19 |
 | runtime | 30 | 0 | 1 | 31 |
@@ -18,8 +18,8 @@
 | 分类 | 表数 | 剩余跨域引用 |
 | --- | ---: | ---: |
 | D | 11 | 28 |
-| C1 | 7 | 53 |
-| C2 | 17 | 49 |
+| C1 | 7 | 49 |
+| C2 | 16 | 48 |
 | B | 2 | 2 |
 | E | 1 | 1 |
 
@@ -28,8 +28,8 @@
 | 表 | 归属 | 跨域引用 | 消费方 | 处置 | 写通道 | 文件数 |
 | --- | --- | ---: | --- | --- | --- | ---: |
 | `agent_tasks` | runtime | 14 | insight 8 / api 4 / mgmt 2 | C2 outbox 跨域写 | W1 | 34 |
-| `events` | runtime | 13 | api 7 / insight 6 | C1 归属重定（写路径挪进 owner 域） | — | 24 |
 | `runtime_credentials` | runtime | 13 | insight 7 / api 6 | C1 归属重定（写路径挪进 owner 域） | — | 17 |
+| `events` | runtime | 9 | insight 6 / api 3 | C1 归属重定（写路径挪进 owner 域） | — | 23 |
 | `agent_runtimes` | runtime | 8 | insight 5 / api 3 | C1 归属重定（写路径挪进 owner 域） | — | 27 |
 | `grape_t_repo_credentials` | insight | 7 | mgmt 5 / contracts 1 / runtime 1 | C1 归属重定（写路径挪进 owner 域） | — | 6 |
 | `external_identities` | mgmt | 6 | api 4 / runtime 2 | C2 outbox 跨域写 | W2 | 7 |
@@ -56,7 +56,6 @@
 | `audit_logs` | mgmt | 1 | insight 1 | E 洞察事件/宽表 | — | 3 |
 | `chat_agent_session` | runtime | 1 | mgmt 1 | D 模块归位（kernel 写/读域表） | — | 5 |
 | `distributed_locks` | runtime | 1 | insight 1 | D 模块归位（kernel 写/读域表） | — | 3 |
-| `event_skipped` | runtime | 1 | api 1 | C2 outbox 跨域写 | W3 | 5 |
 | `grape_t_channel_chat_session_binding` | mgmt | 1 | runtime 1 | C2 outbox 跨域写 | W2 | 2 |
 | `grape_t_merge_gate_log` | insight | 1 | api 1 | C2 outbox 跨域写 | W3 | 2 |
 | `issue_state` | runtime | 1 | api 1 | C2 outbox 跨域写 | W1 | 4 |
