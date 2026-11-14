@@ -3513,6 +3513,83 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （作业单 72 处 / 42 文件，头名仍是被 blocked 的 `prompt_builder.py`，下一批可选
   `src/api/event_rule.py` 或 `src/domains/insight/observability/gap.py` 各 3 处）。
 
+### insight/observability/gap 数据缺失探测基集归位（-3，本文件清零）
+- 文件：`src/domains/insight/observability/gap.py`（3 处 → **0**，仅剩本域 `obs_alert_rules` /
+  `obs_alert_events`）；全局静态 **72 → 69**（-3），对数 **37 → 37** ——
+  `agent_tasks←insight` 由 2 降到 1、`runtime_credentials←insight` 由 6 降到 4（余量在
+  `observability/overview.py`、`routes/health.py` 等其它文件），本文件已清零。
+- 表分布（消费域 insight，全归 **runtime**）：
+  · 行 103 `SELECT id, device_name, name, last_seen_at, repo_key, org_id, scope`
+    `FROM runtime_credentials WHERE status != 'revoked'`（`_probe_runtimes` 基集，7 列）
+  · 行 167 `SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks`
+    `WHERE repo_key IS NOT NULL AND repo_key != ''`（`_probe_repos` 基集，4 列）
+  · 行 234 `SELECT id, name, device_name, scope, owner_name, org_id, last_seen_at, status,`
+    `repo_key FROM runtime_credentials WHERE status != 'revoked'`（`silent_targets`，9 列）
+  三处同一结构族、无动态拼接（表名/列名均字面量，无用户输入）。
+- 本轮取批：作业单头名 `src/kernel/prompt_builder.py` 与次名
+  `src/kernel/persistence/credential_usage_log.py` **复核后仍 blocked**（理由见
+  `next-batches.md` 顶部「⛔ blocked」，与前三轮结论一致），按作业单规则跳过，
+  取第一个可改造文件（上一批台账末尾已点名的 `gap.py`）。
+- 归属域侧改动（SQL 只在 owner 域一份）：
+  · runtime public `_ANY_QUERIES` 新增 3 条具名查询：`runtime_credentials_gap_rows`（7 列）、
+    `runtime_credentials_silent_rows`（9 列）、`agent_task_activity_rows`（4 列），
+    列序/谓词与原 SQL 逐字一致，无占位符（原语句本就无参数）；
+  · runtime public 新增 3 个薄函数：`runtime_credentials_gap_rows_any()`、
+    `runtime_credentials_silent_rows_any()`、`agent_task_activity_rows_any()`，只把
+    `read_all_any` 的行转元组返回，体内无内联 SQL；函数名与查询名都登记 `__all__`。
+- 关键设计取舍：
+  1. **两处 `runtime_credentials` 不并成一条超集查询**：列集与列序不同（7 列 vs 9 列），
+     合并就要改调用方解包顺序，等于把「列序逐字一致」这条可核对性丢掉；两条各自独立、
+     各自可逐字比对原 SQL，多一条查询只占一行注册面。
+  2. **读基集与写事件保持分段**：`*_any` 原语自带 `db_lock`（单库回落进程库），若仍嵌在
+     `with db_lock:` 里就是同线程二次获取——生产 `RLock` 侥幸不炸，测试 monkeypatch 的裸
+     `Lock` 会**自死锁**。故把基集读取提到写事务之外（原实现本来就是两段锁，顺序未变）。
+  3. **只搬跨域两表，本域事件表不动**：`obs_alert_rules` / `obs_alert_events` 归 insight，
+     在 insight 进程里走进程库就是本域库；本批不碰 `alerts._open_event/_resolve_open`
+     的游标契约（它们按「调用方游标」设计，改成别处取连接会连带影响指标求值路径）。
+  4. **口径全部留在调用方**：`silent_sec > thr` 的严格大于、`GAP_MAX_STALE_SEC` 7 天退役窗口、
+     「从未上报不算缺失」、`max(completed, started, created)` 取最后活动、L2 名单排序
+     （静默秒数降序 + 从未上报排最后）都是 insight 的判定语义，owner 只回元组原值。
+  5. **失败降级语义逐点保留**：基集读失败 → `log.warning` + 该探针返回 `(0,0,0)`
+     （`probe_all` 聚合里不计数）；`silent_targets` 的 runtime 段失败 → 空列表 + warning，
+     仍继续产出 `repos` 段——与改造前一致，不返回半份结果也不上抛。
+- 修的存量 bug（3 条，都是三库独立后必然 1146、且都被 except 吞成静默降级）：
+  1. `_probe_runtimes` 基集在 insight 库上查 `runtime_credentials` → 1146 → `except` 返回
+     `(0,0,0)`：**设备静默探测整体停摆**（心跳停了也不告警，`gap_evaluated` 恒 0，
+     监控台的「数据不再来了」这一类最危险失效恰好是自己静默）。
+  2. `silent_targets` 同样 1146 → **L2 静默名单恒为空**：运维台看不到哪些凭据已死、
+     哪些超 7 天，死凭证无人清理（也不产生事件，等于双重失明）。
+  3. `_probe_repos` 直查 `agent_tasks` 同样 1146 → 规则即便被打开，`gap_repo` 也永不触发。
+- 验证（真实退出码）：
+  · `py_compile` 两文件 → **COMPILE_OK**；
+  · `~/burndown/gap_owner_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建
+    obs_alert_rules/obs_alert_events/runtime_credentials/agent_tasks 四表 + 独立 runtime 库）
+    → **ALL gap_owner smoke PASSED (69 checks)**：A 注册面/静态（三条查询逐字对齐、
+    无 `%s`/`NOW()`/`ON DUPLICATE`、薄函数体内无 SQL、调用方无表名 SQL 与谓词片段、
+    函数名与查询名双登记）；B 设备静默（静默起点 = 最后上报 + threshold、value = 静默秒数、
+    阈值下方不报、从未上报不报且收口既有事件、超 7 天不报、恢复 → resolved、设备删除 →
+    收尾、第二轮不新建只更新）；C **原口径「只排除 revoked」**（expired/offline 照旧参与，
+    不按 is_active 过滤）；D 仓库静默（repo_key 空/NULL 不进基集、双条件、
+    取 max(completed, started, created)、规则 enabled=0 时整类不探）；E L2 名单
+    （排序、revoked 排除、never_reported / 退役标记、`include_retired=False` 只滤退役、
+    repos 段来自 firing 事件）；F **自有 DSN 拓扑**（基集/活动行/L2 全从 runtime 库取，
+    进程库同名副本不参与；缺表 → 两类探测都降级为 0 不上抛）；G **裸 `Lock` 下不嵌套**
+    （对照组证明守卫能抓嵌套获取）；H 未登记查询名 → `KeyError`（fail-closed）。
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → **import OK**；
+    `check_lib_query_names.py` → **PASS**（insight 17 funcs / runtime 170 funcs + 28 queries used）。
+  · 直覆盖用例 `tests/insight/test_obs_gap.py` → **1 failed, 9 passed**；失败项
+    `test_admin_gaps_endpoint_and_threshold_policy` 在 **HEAD 干净树 worktree
+    （`~/burndown/wt-gapbase`，`3b3bce2a6`）复现同 1 failed / 9 passed**，是同一条
+    Starlette `TestClient` 关闭期的 `CancelledError`，与本批无关。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排——本 shell `SRC_PWD`/`REMOTE_PWD`
+  均未注入，且本批不改 schema / 迁移 / 契约面（无新表、无新路由、无新端点），运行面证据为
+  sqlite 烟测（含自有 DSN 分支模拟）+ 单库 pytest；**不把彩排结果算作本批证据**。
+- **新基线**：**69 处 / 37 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 69 处 / 41 文件，头名仍是被 blocked 的 `prompt_builder.py`，下一批可选
+  `src/api/event_rule.py` 或 `src/api/server_tasks.py` 各 3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

@@ -91,6 +91,7 @@ def probe_all(open_cache=None) -> Dict[str, int]:
 def _probe_runtimes(rule: Dict[str, Any], open_cache=None) -> tuple:
     """设备/引擎静默：last_seen_at 落后超过 threshold 秒。"""
     from src.domains.insight.observability import alerts as al
+    from src.domains.runtime import public as rt_public
     from src.kernel.session_manager import db, db_lock
 
     thr = float(rule.get("threshold") or 900)
@@ -98,11 +99,9 @@ def _probe_runtimes(rule: Dict[str, Any], open_cache=None) -> tuple:
     fired = resolved = evaluated = 0
     rows: List[tuple] = []
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id, device_name, name, last_seen_at, repo_key, org_id, scope"
-                      " FROM runtime_credentials WHERE status != 'revoked'")
-            rows = list(c.fetchall())
+        # 基集归 runtime 域：任意拓扑原语（自有 DSN → runtime 库；单库 → 进程库）。
+        # 原实现在 insight 进程库直查 runtime_credentials，三库拓扑下必 1146。
+        rows = rt_public.runtime_credentials_gap_rows_any()
     except Exception as e:
         log.warning(f"obs gap runtime list failed: {e}")
         return 0, 0, 0
@@ -155,6 +154,7 @@ def _probe_runtimes(rule: Dict[str, Any], open_cache=None) -> tuple:
 def _probe_repos(rule: Dict[str, Any], open_cache=None) -> tuple:
     """仓库静默（默认关闭）：近 window_sec 有活动，最近 threshold 秒完全没有任务活动。"""
     from src.domains.insight.observability import alerts as al
+    from src.domains.runtime import public as rt_public
     from src.kernel.session_manager import db, db_lock
 
     thr = float(rule.get("threshold") or 3600)
@@ -162,11 +162,8 @@ def _probe_repos(rule: Dict[str, Any], open_cache=None) -> tuple:
     now = _now()
     rows: List[tuple] = []
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks"
-                      " WHERE repo_key IS NOT NULL AND repo_key != ''")
-            rows = list(c.fetchall())
+        # 任务活动行归 runtime 域（同 _probe_runtimes 的口径）。
+        rows = rt_public.agent_task_activity_rows_any()
     except Exception as e:
         log.warning(f"obs gap repo list failed: {e}")
         return 0, 0, 0
@@ -225,30 +222,30 @@ def silent_targets(include_retired: bool = True) -> Dict[str, Any]:
     返回 {runtimes: [...], repos: [...], generated_at}；每项带 `beyond_retire_window`
     标记（= 已超过 7 天，不会产生事件，但仍需人工处理）。
     """
+    from src.domains.runtime import public as rt_public
     from src.kernel.session_manager import db, db_lock
     now = _now()
     runtimes: List[Dict[str, Any]] = []
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id, name, device_name, scope, owner_name, org_id, last_seen_at,"
-                      " status, repo_key FROM runtime_credentials WHERE status != 'revoked'")
-            for rid, name, device, scope, owner, org_id, last_seen, status, repo_key in c.fetchall():
-                ls = _dt(last_seen)
-                if ls is None:
-                    runtimes.append({"id": int(rid), "name": name or "", "device_name": device or "",
-                                     "scope": scope or "", "owner_name": owner or "",
-                                     "org_id": str(org_id or ""), "last_seen_at": "",
-                                     "silent_sec": None, "never_reported": True,
-                                     "beyond_retire_window": False, "repo_key": repo_key or ""})
-                    continue
-                silent = (now - ls).total_seconds()
+        # 基集归 runtime 域（与探测同一口径）：原实现在 insight 进程库直查
+        # runtime_credentials，三库拓扑下 1146 → L2 静默名单恒为空。
+        for (rid, name, device, scope, owner, org_id, last_seen, status,
+             repo_key) in rt_public.runtime_credentials_silent_rows_any():
+            ls = _dt(last_seen)
+            if ls is None:
                 runtimes.append({"id": int(rid), "name": name or "", "device_name": device or "",
                                  "scope": scope or "", "owner_name": owner or "",
-                                 "org_id": str(org_id or ""), "last_seen_at": _iso(ls),
-                                 "silent_sec": round(silent, 1), "never_reported": False,
-                                 "beyond_retire_window": silent > GAP_MAX_STALE_SEC,
-                                 "repo_key": repo_key or "", "status": status or ""})
+                                 "org_id": str(org_id or ""), "last_seen_at": "",
+                                 "silent_sec": None, "never_reported": True,
+                                 "beyond_retire_window": False, "repo_key": repo_key or ""})
+                continue
+            silent = (now - ls).total_seconds()
+            runtimes.append({"id": int(rid), "name": name or "", "device_name": device or "",
+                             "scope": scope or "", "owner_name": owner or "",
+                             "org_id": str(org_id or ""), "last_seen_at": _iso(ls),
+                             "silent_sec": round(silent, 1), "never_reported": False,
+                             "beyond_retire_window": silent > GAP_MAX_STALE_SEC,
+                             "repo_key": repo_key or "", "status": status or ""})
     except Exception as e:
         log.warning(f"obs gap silent_targets runtime failed: {e}")
 

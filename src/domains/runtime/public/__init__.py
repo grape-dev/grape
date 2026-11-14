@@ -1435,7 +1435,11 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "task_issue_id_rows", "runtime_credential_display_names",
            # A2A 派发门禁读路径（api/a2a_dispatch_guard.py；events / event_skipped 本域）
            "a2a_active_event_rows", "a2a_active_dup_rows", "a2a_window_dedup_rows",
-           "a2a_storm_event_times", "a2a_storm_skip_rows"]
+           "a2a_storm_event_times", "a2a_storm_skip_rows",
+           # insight 数据缺失探测基集（observability/gap.py；本域两张表）
+           "runtime_credentials_gap_rows_any", "runtime_credentials_silent_rows_any",
+           "agent_task_activity_rows_any", "runtime_credentials_gap_rows",
+           "runtime_credentials_silent_rows", "agent_task_activity_rows"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2358,6 +2362,20 @@ _ANY_QUERIES: dict[str, str] = {
         "WHERE vcs_checked_at IS NULL OR vcs_checked_at=''"),
     "issue_vcs_checked_count": (
         "SELECT COUNT(*) FROM issue WHERE repo_key=? AND vcs_checked_at IS NOT NULL"),
+    # ── insight 数据缺失探测（observability/gap.py）跨域读口 ────────────────
+    # runtime_credentials / agent_tasks 归本域；原实现在 insight 进程库直发 → 三库
+    # 拆分后 1146，被 except 吞成「无静默 / 无缺失」——数据缺失探测整体失效。
+    # 列序/谓词逐字照抄（调用方按下标解包）；两处 runtime_credentials 列集不同，
+    # 各自保留一条（不并成超集，避免改动调用方解包顺序）。
+    "runtime_credentials_gap_rows": (
+        "SELECT id, device_name, name, last_seen_at, repo_key, org_id, scope"
+        " FROM runtime_credentials WHERE status != 'revoked'"),
+    "runtime_credentials_silent_rows": (
+        "SELECT id, name, device_name, scope, owner_name, org_id, last_seen_at,"
+        " status, repo_key FROM runtime_credentials WHERE status != 'revoked'"),
+    "agent_task_activity_rows": (
+        "SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks"
+        " WHERE repo_key IS NOT NULL AND repo_key != ''"),
 }
 
 
@@ -2423,6 +2441,26 @@ def exec_any(name: str, params: tuple = ()) -> int:
     with _any_cursor(write=True) as c:
         cur = c.execute(_any_sql(name), params)
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+# ── insight 数据缺失探测（observability/gap.py）的基集读口 ──
+# 原实现用 insight 进程库游标直查本域两张表：三库拆分后 1146 → 调用方 except 把
+# 异常吞成空列表，探测恒报「无静默」。三个函数只回元组原值，静默判定/退役窗口/
+# 事件生命周期仍留调用方（那是 insight 的口径，不属于本域）。
+
+def runtime_credentials_gap_rows_any() -> list[tuple]:
+    """未注销凭据的静默探测基集（7 列，列序与 insight 原 SQL 逐字一致）。"""
+    return [tuple(r) for r in read_all_any("runtime_credentials_gap_rows")]
+
+
+def runtime_credentials_silent_rows_any() -> list[tuple]:
+    """未注销凭据的 L2 静默名单基集（9 列，含 status / owner_name / scope）。"""
+    return [tuple(r) for r in read_all_any("runtime_credentials_silent_rows")]
+
+
+def agent_task_activity_rows_any() -> list[tuple]:
+    """有仓库归属的任务活动行 `(repo_key, created_at, started_at, completed_at)`。"""
+    return [tuple(r) for r in read_all_any("agent_task_activity_rows")]
 
 
 # ── 飞书扫码 onboarding：换绑清理的三个读写原语（mgmt/routes/feishu_onboard.py）──
