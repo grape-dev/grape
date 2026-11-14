@@ -139,8 +139,8 @@ EXEMPT_FILES: dict = {
     # 重锚 weekly-10 后由基线下调转为显式登记；旧场景表 user_repos
     # 反查吞错已改 log.warning（本提交）。
     ('domains/mgmt/user/legacy_column_migrations.py', 'except Exception:'): 5,
-    # 幂等补列/回填，失败=目标形态已达成
-    ('domains/mgmt/user/credentials_backfill_n1.py', 'except Exception:'): 2,
+    # 幂等补列/回填，失败=目标形态已达成（两条 ALTER 合并进一个循环后只剩 1 处）
+    ('domains/mgmt/user/credentials_backfill_n1.py', 'except Exception:'): 1,
     # duplicate column 幂等语义（行内注释已声明）；+1 = PR#1318 白名单改名联动
     # （渠道无老列的新装/未声明列存量跳过该渠道 UPDATE，fail-open 刻意）
     ('domains/mgmt/auth/grape_account_db.py', 'except Exception:'): 5,

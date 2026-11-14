@@ -767,12 +767,19 @@ def _migrate_repo_key_tables():
             except Exception as e:
                 log.warning(f"Migrate {_tbl} repo_key prefix failed: {e}")
         # skill 表 repo 级记录：owner_id 存 repo_key（scope='repo'）
+        # skill 归运行域：独立拓扑下必须走 owner 连接，否则 1146
         try:
-            c.execute(
-                "UPDATE skill SET owner_id='gitcode:'||owner_id "
-                "WHERE scope='repo' AND owner_id!='' AND owner_id NOT LIKE '%:%'"
-            )
-            db.commit()
+            from src.kernel.domain_db import cursor as _domain_cursor  # noqa: PLC0415
+            with _domain_cursor("runtime") as _c_sk:
+                _c_sk.execute(
+                    "UPDATE skill SET owner_id='gitcode:'||owner_id "
+                    "WHERE scope='repo' AND owner_id!='' AND owner_id NOT LIKE '%:%'"
+                )
+                _conn = getattr(_c_sk, "connection", None)
+                if _conn is not None:
+                    _conn.commit()
+                else:
+                    db.commit()
         except Exception as e:
             log.warning(f"Migrate skill repo_key prefix failed: {e}")
 

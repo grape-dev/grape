@@ -549,7 +549,7 @@ def delete_feedback(fid: int, user: dict = Depends(require_no_session_token)):
             row = c.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "反馈记录不存在"})
-            if row[0] != uid:
+            if str(row[0]) != str(uid):
                 raise HTTPException(status_code=403, detail={"code": 403, "message": "无权删除他人反馈"})
             c.execute(
                 "UPDATE user_feedback SET is_deleted=1, updated_at=? WHERE id=?",

@@ -677,12 +677,16 @@ def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "
     repo_key = to_repo_key(repo_key)
     import uuid
     cid = str(uuid.uuid4())
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.domain_db import cursor as _domain_cursor  # noqa: PLC0415
+    with _domain_cursor("runtime") as c:
         c.execute("INSERT INTO chat_conversations (id, user_id, agent_session_id, runtime_session_id, repo_key, im_channel_id, title, user_gitcode_token, conv_type, issue_number) VALUES (?,?,?,?,?,?,?,?,?,?)",
                   (cid, user_id, agent_session_id, "", repo_key, im_channel_id, title, user_gitcode_token,
                    conv_type or "general", issue_number or 0))
-        db.commit()
+        _conn = getattr(c, "connection", None)
+        if _conn is not None:
+            _conn.commit()
+        else:
+            db.commit()
     return cid
 
 
@@ -893,20 +897,28 @@ def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> l
 
 
 def delete_messages_by_conv(conversation_id: str):
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.domain_db import cursor as _domain_cursor  # noqa: PLC0415
+    with _domain_cursor("runtime") as c:
         c.execute("DELETE FROM chat_messages WHERE conversation_id=?", (conversation_id,))
-        db.commit()
+        _conn = getattr(c, "connection", None)
+        if _conn is not None:
+            _conn.commit()
+        else:
+            db.commit()
 
 
 def delete_conversation(conv_id: str):
     """删除会话 DB 记录 + 清理文件系统工作目录（防孤儿目录堆积）。"""
     # 先查 user_id（目录路径需要），删 DB 后就查不到了
     conv = get_conversation(conv_id)
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.domain_db import cursor as _domain_cursor  # noqa: PLC0415
+    with _domain_cursor("runtime") as c:
         c.execute("DELETE FROM chat_conversations WHERE id=?", (conv_id,))
-        db.commit()
+        _conn = getattr(c, "connection", None)
+        if _conn is not None:
+            _conn.commit()
+        else:
+            db.commit()
     # 清理 chat 工作目录：{CHAT_CWD_BASE}/chat/{user_id}/{conv_id}/
     if conv and conv.get("user_id"):
         try:

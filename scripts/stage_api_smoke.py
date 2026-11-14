@@ -147,10 +147,95 @@ def resolve_params(app, with_ids: bool) -> tuple[list[str], list[str]]:
     return sorted(set(ok)), sorted(set(skipped))
 
 
+# 写场景（每个场景自带清理；只用 p2test 前缀数据，清理带 WHERE）
+WRITE_SCENARIOS = [
+    {
+        "name": "feedback",
+        "create": ("post", "/api/feedback",
+                   {"category": "bug", "title": "p2test-feedback", "description": "stage write smoke"}),
+        "cleanup": ("delete", "/api/feedback/{fid}"),
+    },
+    {
+        "name": "chat_conversation",
+        "create": ("post", "/api/chat/conversations", {"repo_key": ""}),
+        "cleanup": ("delete", "/api/chat/conversations/{conversation_id}"),
+    },
+    {
+        "name": "event_action_filter",
+        "create": ("post", "/api/settings/event-action-filters",
+                   {"event_type": "p2test_event", "action": "p2test_action", "allow": 1}),
+        # create 响应不带 id：按 event_type/action 回查列表定位规则 id 再删
+        "lookup": ("get", "/api/settings/event-action-filters", "rules", "event_type", "p2test_event"),
+        "cleanup": ("delete", "/api/settings/event-action-filters/{id}"),
+    },
+]
+
+
+def _first_id(payload, keys: tuple[str, ...]) -> str:
+    if isinstance(payload, dict):
+        for k in keys:
+            if payload.get(k) not in (None, "", 0):
+                return str(payload[k])
+        for v in payload.values():
+            if isinstance(v, dict):
+                got = _first_id(v, keys)
+                if got:
+                    return got
+    return ""
+
+
+def run_write_scenarios(client, results: list[dict]) -> None:
+    """跑写场景：create → 记录响应 → 尽力 cleanup（失败也记录，不掩盖）。"""
+    for sc in WRITE_SCENARIOS:
+        method, path, body = sc["create"]
+        try:
+            r = client.request(method.upper(), path, json=body)
+        except Exception as exc:  # noqa: BLE001
+            results.append({"path": f"WRITE {sc['name']} {path}", "status": 0, "error": str(exc)[:160]})
+            continue
+        err = ""
+        if r.status_code >= 500:
+            m = re.search(r"(Table '[^']+' doesn't exist|Unknown column '[^']+')", r.text or "")
+            err = m.group(1) if m else (r.text or "")[:160]
+        elif r.status_code == 409:
+            err = ""  # 幂等冲突：规则已存在，交给 lookup+cleanup 收尾
+        elif r.status_code >= 400:
+            err = f"http {r.status_code}: {(r.text or '')[:120]}"
+        results.append({"path": f"WRITE {sc['name']} {path}", "status": r.status_code, "error": err})
+
+        ident = ""
+        try:
+            ident = _first_id(r.json(), ("id", "fid", "conversation_id", "conversationId", "rule_id"))
+        except Exception:  # noqa: BLE001
+            ident = ""
+        if not ident and sc.get("lookup"):
+            lm, lpath, lkey, lsub, lval = sc["lookup"]
+            try:
+                lr = client.request(lm.upper(), lpath)
+                items = (lr.json() or {}).get(lkey) or []
+                for it in items:
+                    if str(it.get(lsub)) == lval:
+                        ident = str(it.get("id"))
+                        break
+            except Exception:  # noqa: BLE001 - 查不到就留着，由人工清理
+                ident = ""
+        cm, cpath = sc["cleanup"]
+        if ident and "{" in cpath:
+            cpath = cpath.replace("{" + cpath.split("{")[1].split("}")[0] + "}", ident)
+        try:
+            rc = client.request(cm.upper(), cpath if ident or "{" not in sc["cleanup"][1] else cpath)
+            if rc.status_code >= 400:
+                results.append({"path": f"CLEANUP {sc['name']} {cpath}", "status": rc.status_code,
+                                "error": (rc.text or "")[:120]})
+        except Exception as exc:  # noqa: BLE001
+            results.append({"path": f"CLEANUP {sc['name']} {cpath}", "status": 0, "error": str(exc)[:120]})
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="stage API smoke（视图清零环境）")
     ap.add_argument("--all", action="store_true", help="自动发现所有无路径参数的 /api/* GET")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--write", action="store_true", help="额外跑写场景（create→cleanup）")
     ap.add_argument("--with-ids", action="store_true",
                     help="路径参数用 stage 库中的真实 id 填充（只读详情页覆盖）")
     ap.add_argument("--db-user", default=os.environ.get("MYSQL_USER", "root"),
@@ -220,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
                             err = m.group(1)
                             break
             results.append({"path": path, "status": r.status_code, "error": err})
+        if args.write:
+            run_write_scenarios(client, results)
     client.close()
 
     bad = [r for r in results if r["status"] >= 500 or r["error"]]

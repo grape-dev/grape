@@ -3,24 +3,33 @@
 生命周期设计（2026-11-07 用户拍板）：迁移是一次性代码，独立成模块——
 上线 = init_db 一行调用；下线 = 删本文件 + 删那一行调用，user/db.py 零残留。
 
-两个迁移步骤（各自幂等）：
-1. UUID 补列回填：存量库复合主键（无 id 列）→ 补 id/created_at 列 + 空行回填
-   36 字符标准 UUID（credential_usage_log 审计锚点，P-5 硬前置）。
-2. 明文加密回填：通道加密（60123cf76）上线前的历史明文 JSON 行 → encrypt
-   覆写（只处理明文行，已加密行零写入；一次性语义=回填后每次启动零命中）。
+四个迁移步骤（各自幂等）：
+1. user_credentials UUID 补列回填（mgmt 域）
+2. user_credentials 明文加密回填（mgmt 域）
+3. grape_t_repo_credentials 明文加密回填（**insight 域**：该表基表在 insight 库）
+4. grape_t_repo_credentials 空 id 断言（insight 域）
 
-破坏性说明：步骤 2 是破坏性写操作，回滚锚点 = 通道加密上线前的既有 DB
-备份链路；读侧 _load_credential_json 明文兼容保证回滚后功能不受影响。
-
-下线判据（对齐 D-2A/D90 前置 11 的量化风格）：生产日志连续观察期内零
-"backfill: N rows"（N>0）输出 → 迁移完成 → 可删本模块。
+三库独立修正：原先 3/4 走 `runtime_lib` 读，而该表归 insight 域，且把 `read_all()`
+的返回值当连接用（`db = read_all(...)` + `db.execute`），独立拓扑下必然
+1146 / AttributeError。现改为 `domain_db.cursor(域)`：配了自有 DSN 走 owner 连接，
+单库/视图期回落进程库——两条拓扑下语义一致。
 """
 import time
-import uuid
 
-from src.kernel.session_manager import db
 from src.kernel.config import log
+from src.kernel.domain_db import cursor as _domain_cursor
 from src.kernel.id_gen import uuid7_str  # D105 第二批：DB 主键 UUIDv7
+
+
+def _commit(c) -> None:
+    """提交当前游标所属连接（sqlite/pymysql 的 cursor 都有 .connection）。"""
+    conn = getattr(c, "connection", None)
+    if conn is not None:
+        conn.commit()
+        return
+    from src.kernel.session_manager import db  # 兜底：极少数包装游标无 connection
+
+    db.commit()
 
 
 def _is_plaintext_credential(config_json: str) -> bool:
@@ -43,54 +52,56 @@ def backfill_uuid() -> None:
     补列形态：直接 ALTER + 吞 duplicate column 错（幂等标准做法，零方言——
     不用 PRAGMA table_info 探测；MySQL 1060/SQLite duplicate column 双兼容）。
     """
-    try:
-        db.execute("ALTER TABLE user_credentials ADD COLUMN id TEXT DEFAULT ''")
-    except Exception:
-        pass  # duplicate column = 已补，幂等语义
-    try:
-        db.execute("ALTER TABLE user_credentials ADD COLUMN created_at TEXT DEFAULT ''")
-    except Exception:
-        pass
-    try:
-        now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-        # 双方言键：业务复合键 (user_id, provider)——不用 SQLite 方言 rowid
-        #（MySQL 无 rowid 列，此前 except 吞错导致存量 MySQL 库回填静默空转）
-        need = db.execute(
-            "SELECT user_id, provider, COALESCE(kind,'') FROM user_credentials "
-            "WHERE id IS NULL OR id=''").fetchall()
-        for user_id, provider, kind in need:
-            # A2b（2026-11-13）：唯一键扩为 (user_id, provider, kind)，同平台 PAT/OAuth
-            # 各一行 —— WHERE 不带 kind 会把两行一起改写（QA M1）。
-            db.execute(
-                "UPDATE user_credentials SET id=?, "
-                "created_at=CASE WHEN created_at IS NULL OR created_at='' THEN ? ELSE created_at END "
-                "WHERE user_id=? AND provider=? AND COALESCE(kind,'')=?",
-                (uuid7_str(), now, user_id, provider, kind))
-        if need:
-            db.commit()
-            log.info(f"user_credentials UUID backfill: {len(need)} rows")
-    except Exception as e:
-        log.warning(f"user_credentials UUID backfill failed: {e}")
+    with _domain_cursor("mgmt") as c:
+        for _ddl in ("ALTER TABLE user_credentials ADD COLUMN id TEXT DEFAULT ''",
+                     "ALTER TABLE user_credentials ADD COLUMN created_at TEXT DEFAULT ''"):
+            try:
+                c.execute(_ddl)
+            except Exception:
+                pass  # duplicate column = 已补，幂等语义
+        try:
+            now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+            # 双方言键：业务复合键 (user_id, provider)——不用 SQLite 方言 rowid
+            c.execute(
+                "SELECT user_id, provider, COALESCE(kind,'') FROM user_credentials "
+                "WHERE id IS NULL OR id=''")
+            need = c.fetchall()
+            for user_id, provider, kind in need:
+                # A2b（2026-11-13）：唯一键扩为 (user_id, provider, kind)，同平台 PAT/OAuth
+                # 各一行 —— WHERE 不带 kind 会把两行一起改写（QA M1）。
+                c.execute(
+                    "UPDATE user_credentials SET id=?, "
+                    "created_at=CASE WHEN created_at IS NULL OR created_at='' THEN ? ELSE created_at END "
+                    "WHERE user_id=? AND provider=? AND COALESCE(kind,'')=?",
+                    (uuid7_str(), now, user_id, provider, kind))
+            if need:
+                _commit(c)
+                log.info(f"user_credentials UUID backfill: {len(need)} rows")
+        except Exception as e:
+            log.warning(f"user_credentials UUID backfill failed: {e}")
 
 
 def backfill_encryption() -> None:
     """步骤 2：历史明文行加密回填（只处理明文行，已加密行零写入）。"""
     try:
         from src.domains.mgmt.auth.credential_crypto import encrypt
-        # 双方言键：业务复合键（同 backfill_uuid，MySQL 兼容）
-        rows = db.execute(
-            "SELECT user_id, provider, COALESCE(kind,''), config_json FROM user_credentials").fetchall()
-        plain = [(uid, prov, kind, cfg) for uid, prov, kind, cfg in rows
-                 if _is_plaintext_credential(cfg)]
-        for uid, prov, kind, cfg in plain:
-            # A2b：同平台多 kind 各一行，WHERE 必须带 kind（QA M1）
-            db.execute(
-                "UPDATE user_credentials SET config_json=? "
-                "WHERE user_id=? AND provider=? AND COALESCE(kind,'')=?",
-                (encrypt(cfg), uid, prov, kind))
-        if plain:
-            db.commit()
-            log.info(f"user_credentials plaintext encryption backfill: {len(plain)} rows")
+
+        with _domain_cursor("mgmt") as c:
+            # 双方言键：业务复合键（同 backfill_uuid，MySQL 兼容）
+            c.execute(
+                "SELECT user_id, provider, COALESCE(kind,''), config_json FROM user_credentials")
+            rows = c.fetchall()
+            plain = [(uid, prov, kind, cfg) for uid, prov, kind, cfg in rows
+                     if _is_plaintext_credential(cfg)]
+            for uid, prov, kind, cfg in plain:
+                # A2b：同平台多 kind 各一行，WHERE 必须带 kind（QA M1）
+                c.execute(
+                    "UPDATE user_credentials SET config_json=? "
+                    "WHERE user_id=? AND provider=? AND COALESCE(kind,'')=?",
+                    (encrypt(cfg), uid, prov, kind))
+            if plain:
+                _commit(c)
+                log.info(f"user_credentials plaintext encryption backfill: {len(plain)} rows")
     except Exception as e:
         log.warning(f"user_credentials encrypt backfill failed: {e}")
 
@@ -100,27 +111,26 @@ def backfill_repo_credentials_encrypt() -> int:
 
     明文判定 = 无冒号（decrypt 明文兼容同构判据）；密文行含冒号跳过。
     复合键 (repo_key, cred_type) 定位——双方言安全（N1 rowid 教训复用）。
-    返回加密行数。
+    表归 insight 域，故走 insight 连接。
     """
     try:
         from src.domains.mgmt.auth.credential_crypto import encrypt
-        from src.kernel.domain_read import runtime_lib as _ru_lib_d590a7_f
-        _ru_lib_d590a7 = _ru_lib_d590a7_f(foreign_only=True)
-        if _ru_lib_d590a7 is not None:
-            db = _ru_lib_d590a7.read_all("grape_t_repo_credentials_d590a7", ).fetchall()
-        else:
-            rows = db.execute(
+
+        with _domain_cursor("insight") as c:
+            c.execute(
                 "SELECT repo_key, cred_type, value FROM grape_t_repo_credentials "
-                "WHERE value != ''").fetchall()
-        plain = [(rk, ct, val) for rk, ct, val in rows
-                 if ":" not in val]  # 明文判定：密文恒为 kid:nonce:ct 三段
-        for rk, ct, val in plain:
-            db.execute(
-                "UPDATE grape_t_repo_credentials SET value=? WHERE repo_key=? AND cred_type=?",
-                (encrypt(val), rk, ct))
-        if plain:
-            db.commit()
-            log.info(f"grape_t_repo_credentials encryption backfill: {len(plain)} rows")
+                "WHERE value != ''")
+            rows = c.fetchall()
+            plain = [(rk, ct, val) for rk, ct, val in rows
+                     if ":" not in val]  # 明文判定：密文恒为 kid:nonce:ct 三段
+            for rk, ct, val in plain:
+                c.execute(
+                    "UPDATE grape_t_repo_credentials SET value=? "
+                    "WHERE repo_key=? AND cred_type=?",
+                    (encrypt(val), rk, ct))
+            if plain:
+                _commit(c)
+                log.info(f"grape_t_repo_credentials encryption backfill: {len(plain)} rows")
         return len(plain)
     except Exception as e:
         log.warning(f"grape_t_repo_credentials encrypt backfill failed: {e}")
@@ -129,16 +139,15 @@ def backfill_repo_credentials_encrypt() -> int:
 
 def backfill_repo_credentials_uuid() -> int:
     """步骤 4（D90-N4 → D99 退役）：id 已是主键（建表自带，不可空）——
-    本函数保留为壳（调用链稳定），语义=断言校验（残留空 id 行=数据异常告警）。"""
+
+    本函数保留为壳（调用链稳定），语义=断言校验（残留空 id 行=数据异常告警）。
+    """
     try:
-        from src.kernel.domain_read import runtime_lib as _ru_lib_8fc7c2_f
-        _ru_lib_8fc7c2 = _ru_lib_8fc7c2_f(foreign_only=True)
-        if _ru_lib_8fc7c2 is not None:
-            db = _ru_lib_8fc7c2.read_all("grape_t_repo_credentials_8fc7c2", ).fetchall()
-        else:
-            need = db.execute(
+        with _domain_cursor("insight") as c:
+            c.execute(
                 "SELECT repo_key, cred_type FROM grape_t_repo_credentials "
-                "WHERE id IS NULL OR id=''").fetchall()
+                "WHERE id IS NULL OR id=''")
+            need = c.fetchall()
         if need:
             # D99 主键化后不应出现——出现即数据异常（旧库未走新 DDL），响亮告警
             log.warning(f"grape_t_repo_credentials: {len(need)} rows with empty id "
@@ -147,7 +156,6 @@ def backfill_repo_credentials_uuid() -> int:
     except Exception as e:
         log.warning(f"grape_t_repo_credentials UUID backfill failed: {e}")
         return 0
-
 
 def run() -> None:
     """迁移入口（init_db 调用）。各步幂等，整体一次性。"""

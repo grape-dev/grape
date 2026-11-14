@@ -18,11 +18,11 @@ SQL 文本、只切换连接的入口：
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Any, Iterator
 
 
 @contextmanager
-def cursor(domain: str) -> Iterator[object]:
+def cursor(domain: str) -> Iterator[Any]:
     """取域连接游标（own DSN 优先，回落进程库）。"""
     if domain not in ("mgmt", "runtime", "insight"):
         raise ValueError(f"unknown domain: {domain}")
