@@ -34,6 +34,32 @@ def _redispatch_scene_override(evt: dict) -> str:
     return ""
 
 
+def _engine_scope_extra(repo_bare: str, account_id) -> tuple[str, list]:
+    """引擎候选的 scope 过滤子句（runtime 侧语句，值全部参数化）。
+
+    Issue #253：`pool_engine_ids` 为空时按 repo/user 轨过滤候选引擎。user 轨要用
+    账户 username 与 `runtime_credentials.owner_name` 比对，而账户表归 mgmt：
+    username 先由 mgmt public 解析成标量，再作为参数参与比对（等价于原来的
+    「owner_name = 账户表子查询」，比较仍在 SQL 里按列排序规则做），runtime 语句内
+    不再出现外域表——三库拓扑读的是 runtime 自己的库，单库拓扑亦同。账户不存在 /
+    id 为空 → 不生成 user 轨分支（原 SQL 的 `= NULL` 恒不成立，两端口径一致）。
+    """
+    extra = (
+        " AND (ar.credential_id = 0"
+        " OR rc.scope = 'global'"
+        " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
+    )
+    params: list = [repo_bare, f"gitcode:{repo_bare}", f"github:{repo_bare}"]
+    username = ""
+    if account_id:
+        from src.domains.mgmt import public as _mgmt_public_scope
+        username = _mgmt_public_scope.account_username_by_id_any(account_id)
+    if username:
+        extra += " OR (rc.scope = 'user' AND rc.owner_name = ?)"
+        params.append(username)
+    return extra + ")", params
+
+
 def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
                          task_id: str = ""):
     """Issue #587：管理端终止/重派等可审计操作强制留痕（actor/time/target_event/动作）。
@@ -867,14 +893,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             _scope_params = list(_pool_eids)
                         else:
                             _repo_bare = _task_repo.split(":", 1)[1] if ":" in _task_repo else _task_repo
-                            _scope_extra = (
-                                " AND (ar.credential_id = 0"
-                                " OR rc.scope = 'global'"
-                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
-                                " OR (rc.scope = 'user' AND rc.owner_name ="
-                                " (SELECT username FROM grape_accounts WHERE id=?)))"  # D32-补丁
-                            )
-                            _scope_params = [_repo_bare, f"gitcode:{_repo_bare}", f"github:{_repo_bare}", _task_uid]
+                            # D32-补丁：user 轨的 username 由 mgmt 域解析（本侧不留外域表）
+                            _scope_extra, _scope_params = _engine_scope_extra(_repo_bare, _task_uid)
                         # Query 1: prefer remote (credential_id > 0)
                         c2.execute(
                             "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
@@ -1001,14 +1021,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 _q_scope_params = list(_q_pool_eids)
             else:
                 _q_bare = _q_repo.split(":", 1)[1] if ":" in _q_repo else _q_repo
-                _q_scope_extra = (
-                    " AND (ar.credential_id = 0"
-                    " OR rc.scope = 'global'"
-                    " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
-                    " OR (rc.scope = 'user' AND rc.owner_name ="
-                    " (SELECT username FROM grape_accounts WHERE id=?)))"
-                )
-                _q_scope_params = [_q_bare, f"gitcode:{_q_bare}", f"github:{_q_bare}", _q_uid]
+                # user 轨 username 由 mgmt 域解析（runtime 侧不留外域表）
+                _q_scope_extra, _q_scope_params = _engine_scope_extra(_q_bare, _q_uid)
             try:
                 with db_lock:
                     cq = db.cursor()
@@ -1216,14 +1230,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             _scope_params2 = list(_old_pool_eids)
                         else:
                             _repo_bare2 = _old_repo.split(":", 1)[1] if ":" in _old_repo else _old_repo
-                            _scope_extra2 = (
-                                " AND (ar.credential_id = 0"
-                                " OR rc.scope = 'global'"
-                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
-                                " OR (rc.scope = 'user' AND rc.owner_name ="
-                                " (SELECT username FROM grape_accounts WHERE id=?)))"  # D32-补丁
-                            )
-                            _scope_params2 = [_repo_bare2, f"gitcode:{_repo_bare2}", f"github:{_repo_bare2}", _old_uid]
+                            # D32-补丁：user 轨 username 由 mgmt 域解析（runtime 侧不留外域表）
+                            _scope_extra2, _scope_params2 = _engine_scope_extra(_repo_bare2, _old_uid)
                         with db_lock:
                             c3 = db.cursor()
                             c3.execute(
@@ -2001,7 +2009,6 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
     _check_repo_member(user, evt["repo_key"])
 
     from src.api.knowledge import knowledge_path, _issue_num_from
-    from src.kernel.session_manager import db, db_lock
     import os
 
     issue_num = _issue_num_from(evt["issue_id"])
@@ -2023,21 +2030,10 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
         from src.kernel.storage import get_storage
         storage = get_storage()
         if storage is not None:
-            from src.kernel.session_manager import db, db_lock
-            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_obs
-            _mg_obs = _mgmt_lib_obs()
-            if _mg_obs is not None:
-                obs_rows = [(k,) for k in
-                            _mg_obs.list_knowledge_obs_keys(evt["repo_key"], scope, _ag, _in)]
-            else:
-                with db_lock:
-                    obs_rows = db.cursor().execute(
-                        "SELECT obs_key FROM agent_shared_knowledge "
-                        "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
-                        "AND obs_key!='' AND obs_key IS NOT NULL",
-                        (evt["repo_key"], scope, _ag, _in)
-                    ).fetchall()
-            for (obs_key,) in obs_rows:
+            from src.domains.mgmt import public as _mgmt_public_obs
+            # obs_key 枚举由 mgmt（表归属域）出，任意拓扑同一份语句
+            for obs_key in _mgmt_public_obs.knowledge_obs_keys_scoped(
+                    evt["repo_key"], scope, _ag, _in):
                 storage.delete_object(obs_key)
     except Exception:
         pass
@@ -2059,25 +2055,10 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
                 log.warning(f"event knowledge delete queued for retry: {_res_kdel.get('error')}")
             return {"ok": True, "scope": scope, "message": "知识已删除"}
         except Exception as _e_kdel:
-            log.warning(f"event knowledge delete via lib failed, fallback to local SQL: {_e_kdel}")
-    with db_lock:
-        c = db.cursor()
-        from src.kernel.domain_read import mgmt_lib as _mg_lib_kids
-        _kids_lib = _mg_lib_kids(foreign_only=True)
-        if _kids_lib is not None:
-            rows = _kids_lib.read_all("knowledge_ids_scoped", (evt["repo_key"], scope, _ag, _in))
-        else:
-            rows = c.execute(
-                "SELECT id FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
-                (evt["repo_key"], scope, _ag, _in)
-            ).fetchall()
-        for (kid,) in rows:
-            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,))
-        c.execute(
-            "DELETE FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
-            (evt["repo_key"], scope, _ag, _in)
-        )
-        db.commit()
+            log.warning(f"event knowledge delete via lib failed, fallback to owner primitives: {_e_kdel}")
+    # 兜底（单库 / 跨域写通道不可用）：同一份删除语句在 mgmt public，单事务先删 ref 再删主表
+    from src.domains.mgmt import public as _mgmt_public_kdel
+    _mgmt_public_kdel.delete_event_knowledge_any(evt["repo_key"], scope, _ag, _in)
 
     return {"ok": True, "scope": scope, "message": "知识已删除"}
 

@@ -1168,6 +1168,89 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 ---
 
+### 7.6 runtime 事件路由账户名与知识清理收口（2026-11-15 本批）
+
+- 文件：`src/domains/runtime/routes/events.py`（runtime 域消费、7 处跨域 SQL → 0）。
+  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `grape_accounts`（归 mgmt）3 处，行 875 / 1009 / 1224：重派/重派队列/重派重读三处
+    「引擎候选 scope 过滤」里的 `rc.owner_name = (SELECT username FROM grape_accounts WHERE id=?)`；
+  - `agent_shared_knowledge`（归 mgmt）3 处，行 2035 / 2071 / 2077：obs_key 枚举、
+    knowledge_id 枚举、按作用域删主表；
+  - `scene_knowledge_ref`（归 mgmt）1 处，行 2075：按 knowledge_id 删关联。
+- owner 侧新增（`?` 占位符、列序/谓词逐字照抄原语句、写语句不含 SQL 专有语法）：
+  1) `_ANY_QUERIES` 补 4 条具名查询：`knowledge_obs_keys_scoped`、`knowledge_ids_scoped_portable`、
+     `knowledge_delete_scoped`、`account_username_by_id`；
+  2) 4 个薄函数（`*_any` 风格，不接收拼接 SQL）：`knowledge_obs_keys_scoped`、
+     `knowledge_ids_scoped`、`delete_event_knowledge_any`、`account_username_by_id_any`。
+     前三个走 `read_all_any`/`_any_tx`；`delete_event_knowledge_any` 在 `_any_tx()` 里
+     「先删 ref 再删主表」，ref 的 IN 列表按 400 分块（超过 MySQL/sqlite 参数上限前先切开）。
+- 调用方改造：
+  1) 三处重复的 scope 子句收敛成模块内 `_engine_scope_extra(repo_bare, account_id)`：
+     先由 mgmt public 解析 username 成标量，再作为参数参与 `rc.owner_name = ?` 比对，
+     runtime 语句里不再出现外域表；`account_id` 为空/账户不存在/username 为空 → 不生成
+     user 轨分支（原 SQL 的 `= NULL` 恒不成立，两端口径一致）。
+  2) 知识删除的「mgmt_lib 优先 + 本地兜底 SQL」兜底侧整体换成
+     `delete_event_knowledge_any`；obs_key 枚举同样改走 owner 域原语（此前是
+     `mgmt_lib` 优先 + 兜底 SELECT）。
+- 设计取舍：
+  1) **只拆子查询、不拆外层语句**：外层 SQL（`agent_runtimes` × `engine_capabilities` ×
+     `runtime_credentials`）三张表全归 runtime，动的只有夹在 scope 子句里的 mgmt 标量子查询，
+     所以是「本域取标量 + 参数化比对」，不是跨域 JOIN 拆解；比较仍在 SQL 里按列排序规则做，
+     大小写口径与原语句逐字一致。
+  2) **兜底侧上移而不是删兜底**：原代码留兜底 SQL 的动机是「单库拓扑不装 lib」，而兜底 SQL
+     正是跨域统计来源。新原语走 `_any_cursor/_any_tx`（自有 DSN → mgmt 连接；单库 → 进程库
+     + `db_lock`），两条拓扑同一份语句，调用方不再需要兜底。
+  3) **删除顺序与返回口径照抄**：`delete_event_knowledge_any` 与原 `delete_event_knowledge`
+     （自有 DSN / `%s` 版）返回同样的 `knowledge / refs_deleted / rows_deleted`，且都是
+     「先 ref 后主表」；原先兜底路径的 `for kid in rows: DELETE ... WHERE knowledge_id=?`
+     逐条删改为分块 IN，语义等价、往返次数下降。
+  4) **issue_num 不强制 int**：`_issue_num_from` 返回字符串，gitee 的 issue 号可能是非数字串；
+     原兜底路径直接绑定原值，新原语同样按原值绑定（跨域写 payload 里的 `int(_in)` 是 lib 路径
+     的既有约束，不在本批改动范围）。
+- 修的存量 bug：
+  1) **连接归属（功能面）**：三库拓扑下事件删除原先只在 `mgmt_lib` 可用时走 mgmt 库；一旦
+     lib 不可用（单库/视图期/`foreign_only` 拒绝）就落回进程库——runtime 进程库里
+     `agent_shared_knowledge` 是另一份数据，删的是自己的副本，mgmt 侧真身不动（不报错、
+     静默数据分裂）。现统一由归属域原语落库，两条拓扑同一结果。
+  2) **OBS 清理一直是死分支（未修，仅记录）**：`from src.kernel.storage import
+     get_storage` 指向的模块已随模块归位消失（现为 `src/domains/runtime/storage`），
+     ImportError 被外层 `except Exception: pass` 吞掉——OBS 对象从未被删过。本批只把该分支里的
+     SQL 归位，**不**顺手改 import：改对等于打开一条从未跑过的删除链路（OBS 侧生命周期策略
+     需产品确认），已列为后续独立动作。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/runtime_events_smoke.py`
+  **ALL 60 CHECKS PASSED**（含边界与否定用例：账户名未知 id / None / 空串 / username 为
+  NULL 或空 → 空串；scope 三轨命中集合与 `credential_id>0`、online+healthy、离线行排除、
+  `ORDER BY busy_slots ASC LIMIT 1` 选中忙闲最少者；obs_key 只取非空非 NULL 且按
+  repo/scope/agent/issue 精确作用域、`issue_num` 传字符串 '42' 亦命中；删除三计数、
+  重复删全 0、850 条触发 400 分块、别的 scope/agent/仓库不动；未登记查询名 `KeyError`
+  且 `_READ_QUERIES` 的名字不走 `_ANY_QUERIES`；路由 400/403 零写入、storage 可用时只删
+  非空 obs_key 且文件与 DB 一并清、storage 缺失时 fail-open 但 DB 清理照旧、issue_agent
+  只带 agent_type、project 级 issue_num 恒 0 不受 issue_id 影响；源码 0 条三表 SQL 引用）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch PASS / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**；
+  `check_lib_query_names` **PASS**（mgmt 129 函数 + 16 具名查询在用，全部登记）。
+  `pytest tests/runtime/test_event_conversation.py` 同组 **10 failed / 20 passed**，
+  HEAD worktree 同组 **11 failed / 19 passed**（失败集合逐条比对：本树是 HEAD 的子集，
+  多出的一条 `test_queue_task_packs_event_dialogue_skill` 为顺序敏感抖动；抽查
+  `test_redispatch_resolves_runtime_and_new_cwd` 失败原因是既有断言 `cwd` 未走新结构，
+  与 SQL 归属无关）。
+- 三实例彩排（`LOOP_MAX=1 bash scripts/p4_p5_loop.sh`，`REMOTE_USER=rds_admin`）：
+  P4 **RESULT: PASS**（mgmt 54 / insight 12 / runtime 36 基表，视图 0，账号仅本库授权）；
+  P5 **RESULT: PASS**（A1 三库视图 0、A2 三账号各 2 条授权且跨库 0、A6 死信队列无表）；
+  全 API 冒烟 **0 失败**；轮末 **RESULT: 环境侧全绿**（静态余量 228 只反映代码面 A3，
+  与环境侧验收分开）。
+  环境侧前置修复（不属于代码改动）：本机 3311/3312 两实例的 socket 文件此前被外部清理
+  unlink + `~/rds-local/{mgmt,insight}/files` 目录被删，导致 P4 首轮 `(2003) Can't connect
+  ... localhost`；`mkdir` 两处 files 后按 §5.4 重启两实例（`BOTH_UP`）即恢复。远端 116:3307
+  的管理账号是 `rds_admin`（用 `root` 会 1045：来源地址被拒）。
+- 新基线：全局 **235 → 228**（-7），对 **66 → 66**（三张表在 runtime 侧余量：
+  `agent_shared_knowledge` 8 → 5、`grape_accounts` 8 → 5、`scene_knowledge_ref` 2 → 1，
+  均由 `issues_center.py`、`pipeline/*` 等文件继续承担，故只减计数不减对）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 228 / 66；依赖看板与作业单同步刷新
+  （下一批头名：`mgmt/routes/autopilot.py` / `runtime/issues_center.py` 各 7 处）。
+
+---
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

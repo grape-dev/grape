@@ -726,6 +726,9 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "list_active_scene_nodes", "list_active_scene_bindings",
            "list_enabled_autopilot_engine_ids", "list_autopilot_engine_ids_nonempty",
            "set_autopilot_engine_ids_any",
+           # 事件知识清理 / 账户名（runtime/routes/events.py；任意拓扑）
+           "knowledge_obs_keys_scoped", "knowledge_ids_scoped",
+           "delete_event_knowledge_any", "account_username_by_id_any",
            "health"]
 
 
@@ -1671,6 +1674,19 @@ _ANY_QUERIES: dict[str, str] = {
     "installation_active_configs_by_type": (
         "SELECT config FROM grape_t_channel_installation "
         "WHERE channel_type=? AND status='active'"),
+    # ── 事件知识清理 + 账户名解析（runtime/routes/events.py：原「mgmt_lib 优先 + 本地兜底 SQL」
+    # 的兜底侧与引擎 scope 子查询上移；列序/谓词与原语句逐字一致，写语句不含 SQL 专有语法）──
+    "knowledge_obs_keys_scoped": (
+        "SELECT obs_key FROM agent_shared_knowledge "
+        "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
+        "AND obs_key!='' AND obs_key IS NOT NULL"),
+    "knowledge_ids_scoped_portable": (
+        "SELECT id FROM agent_shared_knowledge "
+        "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?"),
+    "knowledge_delete_scoped": (
+        "DELETE FROM agent_shared_knowledge "
+        "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?"),
+    "account_username_by_id": "SELECT username FROM grape_accounts WHERE id=? LIMIT 1",
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -1742,6 +1758,75 @@ def list_agent_knowledge_refs(repo_key: str, agent_type: str = "", issue_num: in
 def repo_dev_scene(repo_key: str) -> str:
     """仓库默认场景 id（managed_repos.dev_scene）；无行/空值返回空串。"""
     row = read_one_any("repo_dev_scene", (repo_key,))
+    return str(row[0] or "") if row else ""
+
+
+# ---------- 事件知识清理 / 账户名（runtime/routes/events.py 调用；任意拓扑） ----------
+#
+# 原实现每个站点都是「mgmt_lib 优先 + 本地兜底 SQL」：兜底只在单库/视图期执行，
+# 却是跨域表引用的来源，且自有 DSN 拓扑下进程库没有该表（无视图 → 1146）。
+# 兜底侧上移成 owner 域原语后，两条拓扑同一份语句；调用方不再保留任何外域 SQL。
+# 删除顺序与原实现一致（先按 knowledge_id 删 ref，再删主表），并在同一事务里完成。
+
+
+#: scene_knowledge_ref 的 IN 列表分块大小（MySQL/sqlite 参数上限的保守值）。
+_KNOWLEDGE_REF_DELETE_CHUNK = 400
+
+
+def knowledge_obs_keys_scoped(repo_key: str, scope: str, agent_type: str,
+                              issue_num: Any) -> list[str]:
+    """按（仓库/scope/agent/issue）取非空 obs_key（事件清理删对象用）。
+
+    issue_num 按调用方原值绑定（原 SQL 就是这么绑的；gitee 的 issue 号可能是非数字串，
+    这里不强制 int，避免把可跑的站点点成 500）。
+    """
+    rows = read_all_any("knowledge_obs_keys_scoped", (repo_key, scope, agent_type, issue_num))
+    return [str(r[0]) for r in rows if r and r[0]]
+
+
+def knowledge_ids_scoped(repo_key: str, scope: str, agent_type: str,
+                         issue_num: Any) -> list[int]:
+    """按（仓库/scope/agent/issue）取知识主键 id 列表（任意拓扑）；issue_num 原值绑定。"""
+    rows = read_all_any("knowledge_ids_scoped_portable", (repo_key, scope, agent_type, issue_num))
+    return [int(r[0]) for r in rows if r and r[0] is not None]
+
+
+def delete_event_knowledge_any(repo_key: str, scope: str, agent_type: str,
+                               issue_num: Any) -> dict[str, int]:
+    """删除某事件的知识记录（任意拓扑，单事务）：先删 ref 再删主表。
+
+    与 `delete_event_knowledge`（自有 DSN / MySQL 方言）同语义，供单库与
+    自有 DSN 两条拓扑共用；返回口径一致（knowledge / refs_deleted / rows_deleted）。
+    issue_num 按原值绑定（不强制 int，gitee 的 issue 号可能是非数字串）。
+    """
+    params = (repo_key, scope, agent_type, issue_num)
+    refs_deleted = 0
+    with _any_tx() as c:
+        c.execute(_any_sql("knowledge_ids_scoped_portable"), params)
+        kids = [int(r[0]) for r in (c.fetchall() or []) if r and r[0] is not None]
+        for start in range(0, len(kids), _KNOWLEDGE_REF_DELETE_CHUNK):
+            chunk = kids[start:start + _KNOWLEDGE_REF_DELETE_CHUNK]
+            ph = ",".join(["?"] * len(chunk))
+            cur = c.execute(
+                f"DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ({ph})",
+                tuple(chunk))
+            refs_deleted += int(getattr(cur, "rowcount", 0) or 0)
+        cur = c.execute(_any_sql("knowledge_delete_scoped"), params)
+        rows_deleted = int(getattr(cur, "rowcount", 0) or 0)
+    return {"knowledge": len(kids), "refs_deleted": refs_deleted,
+            "rows_deleted": rows_deleted}
+
+
+def account_username_by_id_any(account_id: Any) -> str:
+    """按账户 id 取 username（任意拓扑）；id 为空/账户不存在返回空串。
+
+    供外域把 `owner_name = (SELECT username FROM grape_accounts WHERE id=?)`
+    这类跨域子查询拆成「本域取标量 + 参数化比对」（原 SQL 子查询为空时恒不匹配，
+    这里同样以空串表示「无此账户」，由调用方决定是否生成该过滤分支）。
+    """
+    if not account_id:
+        return ""
+    row = read_one_any("account_username_by_id", (str(account_id),))
     return str(row[0] or "") if row else ""
 
 

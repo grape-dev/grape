@@ -2,7 +2,7 @@ table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,4
 agent_runtimes,runtime,insight,5
 agent_runtimes,runtime,mgmt,3
-agent_shared_knowledge,mgmt,runtime,8
+agent_shared_knowledge,mgmt,runtime,5
 agent_tasks,runtime,api,7
 agent_tasks,runtime,insight,13
 agent_tasks,runtime,mgmt,2
@@ -28,7 +28,7 @@ external_identities,mgmt,kernel,1
 external_identities,mgmt,runtime,2
 feishu_onboard_task,mgmt,runtime,1
 grape_accounts,mgmt,insight,1
-grape_accounts,mgmt,runtime,8
+grape_accounts,mgmt,runtime,5
 grape_t_channel_chat_session_binding,mgmt,runtime,1
 grape_t_channel_installation,mgmt,runtime,9
 grape_t_channel_lease,mgmt,runtime,2
@@ -53,7 +53,7 @@ runtime_credentials,runtime,api,6
 runtime_credentials,runtime,insight,8
 runtime_credentials,runtime,mgmt,3
 runtime_health_scores,runtime,insight,1
-scene_knowledge_ref,mgmt,runtime,2
+scene_knowledge_ref,mgmt,runtime,1
 scene_market,mgmt,api,1
 skill,runtime,api,8
 skill,runtime,mgmt,1
