@@ -1284,7 +1284,7 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
     需登录：组织成员可见。运维只读数据。
     返回 {repoKey, issues: [{issueId, title, eventCount, firstAt, lastAt, events: [...]}]}
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.domain_db import cursor as _domain_cursor
     import json as _json
 
     repo_key = ""
@@ -1294,8 +1294,8 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
         _repo_keys = repo_key_candidates(_base)
         repo_key = _repo_keys[0]
 
-    with db_lock:
-        c = db.cursor()
+    # 该端点只读 runtime 归属表（events / agent_tasks / agent_runtimes / runtime_credentials）
+    with _domain_cursor("runtime") as c:
         _COLS_A = ("seq, event_type, issue_id, title, actor, agent_type, skill, status, "
                    "duration, created_at, payload, repo_key")
         if _repo_keys:

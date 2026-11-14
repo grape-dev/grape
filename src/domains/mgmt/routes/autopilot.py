@@ -485,38 +485,52 @@ def list_executions(
     if task_id is not None:
         _check_task_access(user, task_id)
     # v3.0: autopilot_executions 不再有 issue_number 列（旧字段物理保留则兼容读取）
-    _exec_cols = _autopilot_exec_cols()
-    _has_issue_num_col = "issue_number" in _exec_cols
-    _issue_num_expr = "e.issue_number" if _has_issue_num_col else "'' AS issue_number"
-    # Issue #1546（架构审查 M2）：agent_task_id 为新增列，迁移未落（MySQL 已盖章但列未建）
-    # 时列表查询不能直撞 1054 → 500；与 issue_number 同一列探测口径做表达式兜底。
-    _has_agent_task_id_col = "agent_task_id" in _exec_cols
-    _agent_task_id_expr = "e.agent_task_id" if _has_agent_task_id_col else "'' AS agent_task_id"
-    sql = ("SELECT e.id, e.task_id, e.status, e.retry_count, e.result, e.error, "
-           "e.started_at, e.completed_at, e.created_at, e.agent_type, e.findings_json, "
-           + _issue_num_expr + ", " + _agent_task_id_expr + " FROM autopilot_executions e WHERE 1=1")
-    count_sql = "SELECT COUNT(*) FROM autopilot_executions e WHERE 1=1"
-    conditions = []
-    params = []
-    if task_id is not None:
-        conditions.append("e.task_id=?")
-        params.append(task_id)
-    if status:
-        conditions.append("e.status=?")
-        params.append(status)
-    if conditions:
-        sql += " AND " + " AND ".join(conditions)
-        count_sql += " AND " + " AND ".join(conditions)
-    sql += " ORDER BY e.id DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
-    with db_lock:
-        c = db.cursor()
-        rows = c.execute(sql, params).fetchall()
-        total = c.execute(count_sql, params[:-2]).fetchone()[0]
-        # 批量查各 task 的 repo_key（避免 N+1）
-        task_ids = set(r[1] for r in rows)
-        repo_key_map = {}
-        if task_ids:
+    # C2 口径：autopilot_executions 归运行域，三库独立后无视图可读 → lib 优先；
+    # 单库/视图期（无自有 DSN）保持原 SQL。repo_key_map 始终来自本域 autopilot_tasks。
+    from src.kernel.domain_read import owner_lib as _owner_lib
+    _exec_lib = _owner_lib("runtime", foreign_only=True)
+    if _exec_lib is not None and hasattr(_exec_lib, "list_autopilot_executions"):
+        _page = _exec_lib.list_autopilot_executions(task_id, status or "", limit, offset)
+        _cols = ("id", "task_id", "status", "retry_count", "result", "error", "started_at",
+                 "completed_at", "created_at", "agent_type", "findings_json",
+                 "issue_number", "agent_task_id")
+        rows = [tuple(x[k] for k in _cols) for x in _page["executions"]]
+        total = int(_page["total"])
+    else:
+        _exec_cols = _autopilot_exec_cols()
+        _has_issue_num_col = "issue_number" in _exec_cols
+        _issue_num_expr = "e.issue_number" if _has_issue_num_col else "'' AS issue_number"
+        # Issue #1546（架构审查 M2）：agent_task_id 为新增列，迁移未落（MySQL 已盖章但列未建）
+        # 时列表查询不能直撞 1054 → 500；与 issue_number 同一列探测口径做表达式兜底。
+        _has_agent_task_id_col = "agent_task_id" in _exec_cols
+        _agent_task_id_expr = "e.agent_task_id" if _has_agent_task_id_col else "'' AS agent_task_id"
+        sql = ("SELECT e.id, e.task_id, e.status, e.retry_count, e.result, e.error, "
+               "e.started_at, e.completed_at, e.created_at, e.agent_type, e.findings_json, "
+               + _issue_num_expr + ", " + _agent_task_id_expr + " FROM autopilot_executions e WHERE 1=1")
+        count_sql = "SELECT COUNT(*) FROM autopilot_executions e WHERE 1=1"
+        conditions = []
+        params = []
+        if task_id is not None:
+            conditions.append("e.task_id=?")
+            params.append(task_id)
+        if status:
+            conditions.append("e.status=?")
+            params.append(status)
+        if conditions:
+            sql += " AND " + " AND ".join(conditions)
+            count_sql += " AND " + " AND ".join(conditions)
+        sql += " ORDER BY e.id DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(sql, params).fetchall()
+            total = c.execute(count_sql, params[:-2]).fetchone()[0]
+    # 批量查各 task 的 repo_key（避免 N+1）——autopilot_tasks 属本域，始终本地查
+    task_ids = set(r[1] for r in rows)
+    repo_key_map = {}
+    if task_ids:
+        with db_lock:
+            c = db.cursor()
             ph = ",".join("?" * len(task_ids))
             tk_rows = c.execute(
                 f"SELECT id, repo_key FROM autopilot_tasks WHERE id IN ({ph})",

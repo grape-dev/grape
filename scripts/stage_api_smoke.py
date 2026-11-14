@@ -138,9 +138,25 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             body = r.text or ""
             err = ""
-            if r.status_code >= 500 or "doesn't exist" in body or "Unknown column" in body:
-                m = re.search(r"(Table '[^']+' doesn't exist|Unknown column '[^']+')", body)
+            pat = r"(Table '[^']+' doesn't exist|Unknown column '[^']+')"
+            if r.status_code >= 500:
+                m = re.search(pat, body)
                 err = m.group(1) if m else body[:200]
+            else:
+                # 只认结构化错误字段（detail/message/error），避免把"日志列表里的一条历史
+                # 错误文本"误判成该端点失败（/api/dashboard/ops/error-logs 就是日志本身）。
+                try:
+                    payload = r.json()
+                except Exception:  # noqa: BLE001
+                    payload = None
+                if isinstance(payload, dict):
+                    for key in ("detail", "message", "error", "detail_message"):
+                        val = payload.get(key)
+                        text = val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
+                        m = re.search(pat, text or "")
+                        if m:
+                            err = m.group(1)
+                            break
             results.append({"path": path, "status": r.status_code, "error": err})
     client.close()
 

@@ -1658,3 +1658,42 @@ def list_runtime_credentials(org_id: str = "", personal_org: bool = True) -> lis
              "status": r["status"], "last_seen_at": r["last_seen_at"],
              "created_at": r["created_at"], "repo_key": r["repo_key"] or ""}
             for r in rows]
+
+
+def list_autopilot_executions(task_id: int | None = None, status: str = "",
+                              limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """autopilot 执行记录分页读（C2 表归运行域，mgmt 侧经 lib 调用）。
+
+    列口径与 mgmt `list_executions` 一致；issue_number/agent_task_id 在旧库可能不存在，
+    用 info_schema 探测后以空串占位（沿用 mgmt 侧同一兼容策略）。
+    """
+    lim = max(1, min(int(limit), 200))
+    off = max(0, int(offset))
+    conds, args = [], []
+    if task_id is not None:
+        conds.append("e.task_id=%s")
+        args.append(int(task_id))
+    if status:
+        conds.append("e.status=%s")
+        args.append(status)
+    where = (" AND " + " AND ".join(conds)) if conds else ""
+    with db_registry.cursor("runtime") as c:
+        # MySQL 8 的 information_schema 列标签为大写（COLUMN_NAME），两种都取
+        c.execute("SELECT COLUMN_NAME AS column_name FROM information_schema.columns "
+                  "WHERE table_schema=DATABASE() AND table_name='autopilot_executions'")
+        cols = {(r.get("column_name") or r.get("COLUMN_NAME") or "") for r in _rows(c)}
+        issue_expr = "e.issue_number" if "issue_number" in cols else "'' AS issue_number"
+        task_expr = "e.agent_task_id" if "agent_task_id" in cols else "'' AS agent_task_id"
+        sql = ("SELECT e.id, e.task_id, e.status, e.retry_count, e.result, e.error, "
+               "e.started_at, e.completed_at, e.created_at, e.agent_type, e.findings_json, "
+               f"{issue_expr}, {task_expr} FROM autopilot_executions e WHERE 1=1{where} "
+               "ORDER BY e.id DESC LIMIT %s OFFSET %s")
+        c.execute(sql, tuple(args + [lim, off]))
+        rows = c.fetchall()
+        c.execute(f"SELECT COUNT(*) AS n FROM autopilot_executions e WHERE 1=1{where}", tuple(args))
+        total = int(_rows(c)[0]["n"])
+    keys = ("id", "task_id", "status", "retry_count", "result", "error", "started_at",
+            "completed_at", "created_at", "agent_type", "findings_json", "issue_number",
+            "agent_task_id")
+    return {"executions": [dict(zip(keys, tuple(r))) for r in rows], "total": total,
+            "limit": lim, "offset": off}

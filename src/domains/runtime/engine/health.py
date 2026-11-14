@@ -201,10 +201,10 @@ def aggregate_skill_consistency(days: int = 7) -> dict:
            "window_days": int(days), "detail": ""}
     try:
         from datetime import timedelta
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.domain_db import cursor as _domain_cursor
         _since = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
-        with db_lock:
-            c = db.cursor()
+        # agent_tasks 归 runtime 域；本模块可能挂在 mgmt/insight 进程里，必须走 owner 连接
+        with _domain_cursor("runtime") as c:
             c.execute(
                 "SELECT COUNT(*) FROM agent_tasks "
                 "WHERE status='failed' AND result_text LIKE '[skill_mismatch]%' "
