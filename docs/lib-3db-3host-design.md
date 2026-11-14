@@ -324,3 +324,61 @@
 | F4 | 新增常量无来源登记 | ✅ 已整改 | `src/kernel/cross_write.py:23-24` 的 `MAX_ATTEMPTS` / `RETRY_BACKOFF_S` 已带 rationale 注释 |
 | I3 | mgmt lib 白名单含凭据列（`webhook_secret` / `bot_gitcode_token` / `gitcode_webhook_token` / `bot_github_token` / `github_webhook_token` / `password_hash`） | ⏳ 待人工裁决，当前无调用方 | `src/domains/mgmt/public/__init__.py:17-30` 登记；`src/` 全量检索无 `fetch_rows/fetch_one/read_one/read_all` 取这些列的调用点 |
 | I4 | `insight_lib()` 无对应 `src.domains.insight.public` 模块 | ⏳ 记录备查 | `src/kernel/domain_read.py:62` 定义但无调用方；该域读仍走 `src/domains/contracts/local/insight_local.py` |
+
+---
+
+## 11. GSB 按方法路由与禁止矩阵（Issue #2479）
+
+> 在 §1.2 硬不变量与 §3 访问策略之上，把 GSB 跨域调用从
+> `GRAPE_PROVIDER_MODE` 全局一刀切改为「按接口方法 + 默认偏好 remote +
+> 禁止矩阵兜底」的并存路由。方案细节：`docs/issue-2479/{spec,plan}.md`。
+
+### 11.1 路由 key（两级并存）
+
+| key 空间 | 形态 | 数量（实测） | 示例 |
+|---|---|---|---|
+| 契约方法 | `service.method` | 23（mgmt 7 / runtime 9 / insight 7） | `mgmt.get_bot_config` |
+| public 数据原语 | `domain.primitive` | 105（mgmt 39 / runtime 66；`available`/`health` 探活口不参与） | `mgmt.get_repo_field` |
+
+key 清单以 kernel 字面量镜像（`src/kernel/gsb/route_config.py::CONTRACT_METHODS/PUBLIC_PRIMITIVES`，
+kernel 禁止 import domains），同步用例（`tests/kernel/test_gsb_route.py`）把漂移挡在 CI。
+
+### 11.2 决策链（每次方法调用）
+
+```
+1) 禁止矩阵守卫：caller ∈ {runtime, insight} 且 target = mgmt → lib（恒优先，不查配置表）
+2) 全局开关：GRAPE_PROVIDER_MODE ≠ remote → lib（存量单机/共库零回归）
+3) DB 配置表 gsb_provider_route（version+TTL≤30s 缓存；读失败退回上次已知配置）
+4) 内置基线：热路径四项 → lib；public 原语 → lib（本期无 remote 传输通道）；其余 → remote
+```
+
+- 配置表与 `gsb_service_registry` 同库；`set_all_known("lib")` 一键全量回滚
+  （回滚后行为与未开启 remote 完全一致，无需改代码）。
+- remote 超时/不可达 **fail-fast**：`GsbRemoteTimeoutError`（`GSB_REMOTE_TIMEOUT`）/
+  `GsbRemoteUnreachableError`（`GSB_REMOTE_UNREACHABLE`），不回落 lib；
+  metrics status 标签区分 `remote_timeout` / `remote_unreachable` / 数字业务码。
+
+### 11.3 禁止矩阵（二维：调用方进程域 × 目标域）
+
+| 调用方 ↓ \ 目标 → | mgmt | runtime | insight |
+|---|---|---|---|
+| mgmt（grape-server） | 本域直连 | 允许 remote（按配置表） | 允许 remote（按配置表） |
+| runtime（event/worker） | **全部 lib**（契约 7 方法 + public 39 原语） | 本域直连 | 按配置表 |
+| insight | **全部 lib**（同上） | 按配置表 | 本域直连 |
+
+- 该矩阵在三库三机目标态（各域独立主机）下保持同一形态，不因网络变远而放宽。
+- 双守卫：运行时 `matrix_forces_lib()`（`get_service("mgmt")` 在 runtime/insight 进程恒
+  Local 实例，不依赖配置表）+ CI 静态扫描 `scripts/check_gsb_route_matrix.py`
+  （命中 runtime/insight 引用 `MgmtServiceRemote` / `GsbClient("mgmt")` /
+  `ServiceHttpClient("mgmt")` / `_PROVIDERS` 裸访问即红，接入 `scripts/check-all.sh`）。
+
+### 11.4 性能判据与实测（M2 交付）
+
+- 判据：逐接口 lib/remote P95（同进程、同参数、同数据量，各采样 ≥200 次）；
+  remote 候选须同时满足 **增量 ≤10ms 且相对增幅 ≤20%**。
+- 实测报告：`docs/issue-2479/bench-report.md`（23 契约 + 105 原语逐接口表；
+  热路径四项锁 lib）。loopback+共库拓扑下 remote 固定传输成本 2.4~4.5ms，
+  绝对增量全部达标、相对增幅不达标 → 按「不影响性能」口径先行一键全量 lib，
+  生产三库三机拓扑对 lib P95 ≥15ms 的重查询逐接口实测后再逐 key 放开 remote。
+- 既有 `get_service()` 逐次调用构造成本实测 ~17ms/次（每次新建 httpx 客户端）；
+  按方法路由代理经句柄复用消除该项。
