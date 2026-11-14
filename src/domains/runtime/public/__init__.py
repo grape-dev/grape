@@ -1428,6 +1428,7 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # api server_common 运维诊断（/healthz 表探活 + /health/realtime 全量统计）
            "health_task_rows_total", "health_task_status_counts",
            "health_task_inflight_count", "health_runtime_rows",
+           "task_sampler_snapshot_any",
            # issue 按 id 批量取列（api/feedback_status.py；跨域 JOIN 拆分，任意拓扑）
            "issue_stage_status_rows",
            # A2A 派发门禁读路径（api/a2a_dispatch_guard.py；events / event_skipped 本域）
@@ -2120,6 +2121,18 @@ _ANY_QUERIES: dict[str, str] = {
     "health_task_inflight_count": (
         "SELECT COUNT(*) FROM agent_tasks WHERE status IN ('dispatched','running')"),
     "health_runtime_rows": "SELECT status, last_seen_at, credential_id FROM agent_runtimes",
+    # 业务采样器按 source 分类计数（insight/observability/__init__.collect_business_sampler）
+    # 列序/谓词与原 insight 侧语句逐字一致：COALESCE(agent_type,'unknown') + COUNT(*) 分组。
+    "obs_sampler_task_queued": (
+        "SELECT COALESCE(agent_type,'unknown'), COUNT(*) FROM agent_tasks "
+        "WHERE status='queued' GROUP BY agent_type"),
+    "obs_sampler_task_running": (
+        "SELECT COALESCE(agent_type,'unknown'), COUNT(*) FROM agent_tasks "
+        "WHERE status IN ('dispatched','running') GROUP BY agent_type"),
+    "obs_sampler_task_stuck": (
+        "SELECT COALESCE(agent_type,'unknown'), COUNT(*) FROM agent_tasks "
+        "WHERE status='running' AND started_at IS NOT NULL AND started_at < ? "
+        "GROUP BY agent_type"),
     # skill
     "skill_row_by_id": (
         "SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, "
@@ -4880,6 +4893,67 @@ def health_task_inflight_count() -> int:
 def health_runtime_rows() -> list[tuple]:
     """全部引擎行 `(status, last_seen_at, credential_id)`；在线/离线判定归调用方。"""
     return [tuple(r) for r in read_all_any("health_runtime_rows")]
+
+
+# ---------- 业务采样器（insight/observability/__init__.collect_business_sampler）----------
+#
+# 归属：`docs/weekly-11/table-owner.tsv` → agent_tasks / agent_runtimes 均归本域。
+# 原实现在 insight 侧持 insight 进程库游标直发 4 条语句（`with db_lock: c = db.cursor()`，
+# 每条各自 `try/except: pass`）。三库拓扑下 insight 库没有这两张表（视图 0）→ 4 条必
+# 1146 并被吞成「队列/执行/卡住全 0、在线 0」，/metrics 上的业务 gauge 静默归零：
+# 面板显示的是「业务停摆」而不是「采不到数」。表归本域，语句只留本域一份。
+#
+# 口径逐字照抄原语句（`COALESCE(agent_type,'unknown')` + `COUNT(*)` + 同一 GROUP BY），
+# 四条在**同一个** `_any_cursor()` 上顺序执行 —— 单库/测试拓扑下就是一次 `db_lock`
+# 持有（原实现也是一把锁内跑完四条），自有 DSN 下是同一条连接，保住「一次采样 = 一个
+# 快照」的语义。单条失败只影响该条（该键返回空），与原来「每条独立吞异常」等价，
+# 但不留静默 except：降级为 log.debug，其余三条照常出数。
+
+
+def _sampler_source_counts(rows) -> dict[str, int]:
+    """行 `[(agent_type, n), ...]` → `{source: n}`；空值归 `"unknown"`（原实现同口径）。
+
+    原实现是 `queued_by_source[r[0] or "unknown"] = r[1]`：`COALESCE` 只把 NULL 变
+    `'unknown'`，空串靠 Python 的 `or` 兜住，这里保持同一条归一规则与同行覆盖语义。
+    """
+    out: dict[str, int] = {}
+    for r in rows or []:
+        out[r[0] or "unknown"] = int(r[1] or 0)
+    return out
+
+
+def task_sampler_snapshot_any(stuck_cutoff: str) -> dict[str, Any]:
+    """业务采样器一次取数（任意拓扑）：按 source 的任务计数 + 引擎行。
+
+    返回 `{"queued": {...}, "running": {...}, "stuck": {...},
+    "runtimes": [(status, last_seen_at, credential_id), ...]}`。
+
+    `stuck_cutoff` 是 ISO 时间串，谓词 `started_at < ?` 与原实现同义（严格早于才算
+    卡住，等值不算）。`runtimes` 复用已登记的 `health_runtime_rows`（同一语句、同列序），
+    不在本域把同一语句登记两份。单条查询失败 → 该键为空（`{}` / `[]`）并落 log.debug，
+    四条互不影响，调用方不必再为降级包 try/except。
+    """
+    snapshot: dict[str, Any] = {"queued": {}, "running": {}, "stuck": {}, "runtimes": []}
+    plan = (("queued", "obs_sampler_task_queued", ()),
+            ("running", "obs_sampler_task_running", ()),
+            ("stuck", "obs_sampler_task_stuck", (str(stuck_cutoff or ""),)))
+    with _any_cursor() as c:
+        for key, name, params in plan:
+            try:
+                # 分开写：pymysql 传空参数元组会把语句里的 % 当格式符（本仓既有坑）
+                if params:
+                    c.execute(_any_sql(name), params)
+                else:
+                    c.execute(_any_sql(name))
+                snapshot[key] = _sampler_source_counts(c.fetchall())
+            except Exception as e:  # noqa: BLE001 - 单条降级，不影响其余三条
+                log.debug(f"obs sampler query {name} skipped: {e}")
+        try:
+            c.execute(_any_sql("health_runtime_rows"))
+            snapshot["runtimes"] = [tuple(r) for r in (c.fetchall() or [])]
+        except Exception as e:  # noqa: BLE001 - 引擎行缺失只影响在线数
+            log.debug(f"obs sampler runtime rows skipped: {e}")
+    return snapshot
 
 
 # ---------- 可观测性「failed 空 result 占比」取数（insight/observability/failed_gap.py）----------

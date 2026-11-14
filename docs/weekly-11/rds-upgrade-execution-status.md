@@ -2958,6 +2958,68 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/domains/insight/observability/__init__.py` 4 处 `agent_tasks`/`agent_runtimes`，
   同尺寸还有 `src/api/session_store.py`、`src/api/health_endpoints.py` 各 4 处）。
 
+### 7.31 insight 业务采样器按 source 的任务计数下沉 runtime owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/insight/observability/__init__.py` **4 处 → 0**（单轮做完，4 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，均归 **runtime**）：
+  L618 / L630 / L642 三条 `agent_tasks`（`COALESCE(agent_type,'unknown')` + `COUNT(*)` 分组：
+  `status='queued'` / `status IN ('dispatched','running')` / `status='running' AND started_at < ?`），
+  L656 一条 `agent_runtimes`（`SELECT status, last_seen_at, credential_id`）。
+  四条都在 `collect_business_sampler()` 的 `with db_lock: c = db.cursor()` 里逐条 `try/except: pass`；
+  谓词与列全部定长，**无动态表名/列名、无跨域 JOIN、无动态 IN 长度**。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`，`?` 占位符）：
+  1) `_ANY_QUERIES` 3 条具名查询：`obs_sampler_task_queued` / `obs_sampler_task_running` /
+     `obs_sampler_task_stuck`（与原语句逐字一致，`started_at < ?` 由 cutoff 参数化）。
+  2) 薄原语一个：`task_sampler_snapshot_any(stuck_cutoff)` 回
+     `{"queued": {...}, "running": {...}, "stuck": {...}, "runtimes": [...]}`，
+     四条语句在**同一个** `_any_cursor()` 上顺序执行；`runtimes` 复用已登记的
+     `health_runtime_rows`（同一语句、同列序），不在本域把同一语句登记两份。
+     `_sampler_source_counts()` 负责 `[(agent_type, n)] → {source: n}` 的 `r[0] or "unknown"` 归一，
+     与原 Python loop 的**同行覆盖**语义一致（NULL 组与空串组同键时后者覆盖，不求和不炸）。
+- 设计取舍：
+  1) **一次采样 = 一个快照**：不拆成 4 个独立原语。原实现四问在同一 `db_lock` 内跑完，
+     拆开会让另一次写入插进两次取数之间，gauge 出现互相矛盾的组合；合成后单库/测试拓扑
+     是一次 `db_lock` 持有，自有 DSN 下是同一条连接（冒烟实测 e2e 一次采样只取 1 次连接）。
+  2) **引擎行复用既有原语**而不是新增同名查询：7.21 已为 api `/health/realtime` 登记
+     `health_runtime_rows`（列序同为 `status, last_seen_at, credential_id`），同一语句两份
+     登记会让 owner 侧出现两个真源。
+  3) **在线/离线判定留在 insight**：owner 只给原始列，`derive_runtime_health` 仍在调用方跑。
+     该函数是 Issue #1496 裁定的唯一派生入口，属展示口径而非数据口径，不下沉。
+  4) **分段降级搬进 owner**：原实现每条语句各自吞异常（一处表缺失不影响其余三条）。
+     现在四条在 owner 侧各自 `try/except → log.debug`，调用方零 try/except，语义不变
+     但不再静默（本文件静默 except 从 8 降到 4，基线同步收紧 8 → 4）。
+  5) **口径一字未动**：不新增 `is_active` / 时间窗 / `org_id` / `repo_key` 过滤；
+     `stuck` 仍是严格 `started_at < cutoff`（等值不算）；`started_at IS NULL` 仍不计；
+     `pending_self_report` 仍不算 running；缺失 source 的 gauge 仍由 `_apply_source_gauges` 显式归零。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1) **采样 SQL 打错库**：三库拓扑下 insight 进程库没有 `agent_tasks` / `agent_runtimes`
+     （视图 0），四条必 1146 并被就地 `except: pass` 吞成「队列/执行/卡住全 0、在线数 0」——
+     `/metrics` 上 `grape_task_*` / `grape_runtime_online` 恒定归零，面板看起来像「业务停摆」，
+     实际是「采不到数」。这是比 500 更坏的静默故障（与 7.30 同一类）。
+  2) **采样器抢 insight 主库锁**：每次 scrape 用 `db_lock` 持 insight 进程库游标查外域表，
+     在单库拓扑下与业务写入争同一把进程锁；改走 owner 连接后采样不再占用 insight 侧锁。
+- 验证：
+  - `py_compile` 2 个文件 **COMPILE_OK**（`runtime/public/__init__.py`、`insight/observability/__init__.py`）。
+  - SQLite 烟测 `~/burndown/task_sampler_smoke.py` **ALL 70 CHECKS PASSED**
+    （A 静态面 / B owner 注册面 / C 行为面 / D 边界与否定 / D2 端到端 gauge / E 拓扑面）：
+    4 条原语句从 insight 文件逐字消失、无 `%s`/`NOW()`/`ON DUPLICATE`、采样器只剩原有 1 处外层兜底；
+    三组计数 `queued{vod:2,issue:1,unknown:1}` / `running{unknown:1,vod:2,qa:2}` /
+    `stuck{vod:1,qa:1}` 与「原 SQL + 原 loop」逐字等价（对照基准在本轮内联复刻）；
+    `started_at == cutoff` 不算卡住、早 1 分钟即算；空表/缺 `agent_tasks`/缺 `agent_runtimes`
+    各自降级且互不影响；`cutoff=None` → stuck 空；NULL 组与空串组同键为覆盖语义（1+3 不出 4）；
+    端到端 `grape_task_queued/running/stuck`、`grape_runtime_online{local,remote}`、
+    `grape_task_in_progress` 数值全对，source 消失显式归零、TTL 缓存仍生效；
+    自有 DSN 分支只连 runtime 域、一次采样一次连接、读到的是 runtime 库（未回落进程主库）。
+  - `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 / 看板最新）。
+  - `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **100 → 96**（-4），对数 **40 → 40** —— `agent_tasks←insight` 剩 5 处
+  （`observability/tokens.py` 2、`llm_usage.py` 1、`gap.py` 1、`overview.py` 1），
+  `agent_runtimes←insight` 剩 4 处（`llm_usage.py` 2、`routes/health.py` 2），均属另行批次，
+  故这两对没有清零。基线 `foreign-refs-allowlist.csv` 收紧为 96 / 40，
+  依棘轮 `tests/silent_except_baseline.json` 该文件 8 → 4；依赖看板与作业单同步刷新
+  （下一批头名 `src/api/deps.py` 4 处 `external_identities`，同尺寸还有
+  `src/api/health_endpoints.py`、`src/api/session_store.py` 各 4 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

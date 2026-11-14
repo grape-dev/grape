@@ -22,7 +22,7 @@
   "src/api/server_common.py": 3,
   "src/api/server_tasks.py": 17,
   "src/api/session_store.py": 9,
-  "src/domains/insight/observability/__init__.py": 8,
+  "src/domains/insight/observability/__init__.py": 4,
   "src/domains/insight/observability/alert_policy.py": 1,
   "src/domains/insight/observability/alerts.py": 3,
   "src/domains/insight/observability/efficiency.py": 1,
