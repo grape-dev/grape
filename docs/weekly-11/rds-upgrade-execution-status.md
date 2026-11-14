@@ -2021,6 +2021,69 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   两对清零（`api←issue` 12 → 10、`api←devops_pipeline_scene` 4 → 3 仍有其它 api 文件）；
   基线收紧为 154 / 53，看板与作业单同步刷新（下一批头名：`src/api/issue_vcs_index.py` 6 处）。
 
+### 7.19 api 侧 VCS 编号索引台账读写下沉 runtime 域（2026-11-15 本批）
+
+- 文件：`src/api/issue_vcs_index.py`（api 域，Issue #995 provider 感知 VCS 编号索引），**6 处 → 0**（单轮做完）。
+- 表分布（`table-owner.tsv` 冻结）：
+  - `issue`（归 runtime）× 6：原行 273 `SELECT id, issue_number, vcs_exists, vcs_checked_at
+    FROM issue WHERE repo_key=?`（读台账）；行 317/321/325 三组 `UPDATE issue SET
+    vcs_exists=0|1|不动, vcs_checked_at=datetime('now') WHERE id IN (…)`（标删/恢复/仅盖戳）；
+    行 433 `SELECT DISTINCT repo_key FROM issue WHERE vcs_checked_at IS NULL OR
+    vcs_checked_at=''`（存量回填扫仓）；行 451 `SELECT COUNT(*) FROM issue WHERE
+    repo_key=? AND vcs_checked_at IS NOT NULL`（回填计数）。
+  - 行 317/321/325 是 **f-string 动态拼接 IN 列表**（占位符个数随 500/批的 chunk 变），表名/列名
+    不来自外部输入；其余三条静态参数化。无跨域 JOIN（三态判定与复核链都在 Python 侧）。
+- owner 侧新增（runtime 域 public）：
+  1) `_ANY_QUERIES` 3 条具名读：`issue_vcs_index_rows`、`issue_vcs_backfill_repos`、
+     `issue_vcs_checked_count`（列序/谓词逐字照抄）；
+  2) `_ISSUE_VCS_QUERIES` 3 条写模板：`issue_vcs_mark_deleted`、`issue_vcs_mark_restored`、
+     `issue_vcs_stamp_checked`，`{ph}` 是 IN 列表占位符标记；
+  3) 薄函数 4 个：`issue_vcs_index_rows_any` / `issue_vcs_backfill_repo_keys_any` /
+     `issue_vcs_checked_count_any` / `apply_issue_vcs_existence_any(deleted, restored, stamped)`。
+- 设计取舍：
+  1) **动态 IN 留在 owner 展开**：`exec_any` 只认固定 SQL 文本；若在调用方拼 `?,?,…` 等于把 SQL
+     拼回 api 文件，跨域引用照样计。owner 侧用 `{ph}` 模板 + **id 值列表**参数，语句文本固定、
+     调用方无法注入表名/列名；
+  2) **三组 UPDATE 合成一个原子原语**：原实现是一次 `db_lock` + 一次 `db.commit()`；拆成 3 次
+     `exec_any` 会变 3 个独立提交（半批可见，且失败只回滚一组）。`apply_issue_vcs_existence_any`
+     用 `_any_tx()`：自有 DSN 走真事务，单库回落进程库并提交/回滚，两条拓扑同一份 SQL；
+  3) **不在 Python 里算时间戳**：原 SQL 的 `datetime('now')` 由 `mysql_compat` 翻成
+     `CAST(NOW() AS CHAR)`，两方言同源；改传 Python 时间会把「DB 时钟」换成「应用时钟」，
+     跨机器时钟偏斜直接改变 `vcs_checked_at` 口径；
+  4) **读走标准白名单**（`read_one_any`/`read_all_any`），只有带 IN 的三条写才另起
+     `_ISSUE_VCS_QUERIES`——不为 3 条写语句再开一套通用注册面；
+  5) **分块上限 500 与原实现逐字一致**：原 `_chunks(size=500)` 随迁删除，改由 owner 内部按
+     500/批切分（烟测：1200 id → 3 条语句 500/500/200）；
+  6) **失败口径不变**：读失败/写失败 → 返回 `None`（调用方映射 `unavailable` → 列表 fail-open）；
+     唯一改动的吞噬点是「计数失败」，从 `except: pass` 改为 `log.debug`（少报 `cards` 不影响回填主流程）。
+- 修的存量 bug（三库拓扑，功能面）：
+  1) **VCS 存在性回写整批 1146**：`_apply_existence` 读 `issue` 在 api 进程库里不存在（视图 0）
+     → 异常被吞成 `return None` → `refresh_vcs_existence` 一律 `unavailable` → 列表永远 fail-open
+     不过滤，`issue.vcs_exists` 永不落列，**已删除卡片永不标删**（Issue #995 的过滤能力在独立部署
+     下整体失效）；写路径同样 1146（即使读到也会整批失败）；
+  2) **存量回填恒零**：`backfill_vcs_exists()` 默认入参先扫 `issue` 待校验仓 → 1146 被吞成
+     `{"repos":0,"ok":0,"unavailable":0,"cards":0}`，启动期回填（`main.py` 后台任务）等于空转；
+  3) 静默吞噬点上岸：回滚 `except: pass` 随 `_any_tx` 迁走、计数失败改 `log.debug`
+     （该文件裸计数 7 → 5、应用豁免后净 6 → 4，基线 6 未上调）。
+- 验证：`py_compile` 2 个文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/issue_vcs_index_smoke.py`
+  **ALL 96 CHECKS PASSED**（含边界与否定用例：6 条语句与原 SQL 逐字对拍 + IN 展开占位符个数 +
+  无 `%s`/`NOW()`/`ON DUPLICATE` + 未登记名 KeyError；读列序 `(id, issue_number, vcs_exists,
+  vcs_checked_at)`、空仓 → `[]`；待校验扫描 `NULL` **或空串** 都命中、`DISTINCT` 且空 `repo_key`
+  不混入；计数口径 `IS NOT NULL` **空串算已校验**（与扫描口径故意不对称，是原实现语义）；
+  三态回写：未校验才盖戳 / 已标删恢复为 1 / 已校验完全不动 / 复核 `exists` **不盖戳**（不让 TTL
+  内新卡变「已核验」）/ 复核 `unknown` 记 unresolved / `vcs_exists` 为 NULL 按 `!= 0` 视为「存在」
+  / 非数字编号整行跳过 / 已标删不重复写；候选 **>100** 整体 unresolved 且零写入、恰 100 正常复核；
+  1200 id → 3 条 UPDATE(500/500/200)；中段语句失败整批回滚（第一条也不落地）+ 调用方映射
+  `None`；同输入二轮零 UPDATE；时序为 读 → 复核 → 写（网络在锁外）；自有 DSN 时全走
+  `db_registry` 且进程库零 SQL；源码面 0 条 SQL 字面量、无 cursor/execute 直发、
+  不 import `kernel.session_manager`、不持 `db_lock`、只用 4 个已登记原语）；
+  `tests/mgmt/test_issue_995_vcs_exists.py` **12 passed**（既有用例无回归）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **154 → 148**（-6），对数 **53 不变**：该文件 6 处清零，`api←issue` 10 → 4
+  （其余 4 处在其它 api 文件）；基线 `foreign-refs-allowlist.csv` 收紧为 148 / 53，
+  依赖看板与作业单同步刷新（下一批头名：`src/api/a2a_dispatch_guard.py` 5 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

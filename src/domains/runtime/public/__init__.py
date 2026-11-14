@@ -2245,6 +2245,17 @@ _ANY_QUERIES: dict[str, str] = {
     "issue_bound_scene_rows": (
         "SELECT id, repo_key, issue_number, scene_id FROM issue WHERE scene_id != ''"),
     "issue_scene_set_cas": "UPDATE issue SET scene_id=? WHERE id=? AND scene_id=?",
+    # ── Issue #995 VCS 编号索引（api/issue_vcs_index.py 台账读写）─────────────
+    # issue 归本域；原实现在 api 进程主库直发 → 三库拆分后 1146：存在性回写整批
+    # 失败（映射 unavailable）、存量回扫归零，过滤与回填在独立拓扑下静默失效。
+    # 列序/谓词逐字照抄（调用方按下标取值）。
+    "issue_vcs_index_rows": (
+        "SELECT id, issue_number, vcs_exists, vcs_checked_at FROM issue WHERE repo_key=?"),
+    "issue_vcs_backfill_repos": (
+        "SELECT DISTINCT repo_key FROM issue "
+        "WHERE vcs_checked_at IS NULL OR vcs_checked_at=''"),
+    "issue_vcs_checked_count": (
+        "SELECT COUNT(*) FROM issue WHERE repo_key=? AND vcs_checked_at IS NOT NULL"),
 }
 
 
@@ -2308,6 +2319,78 @@ def issue_bound_scene_rows_any() -> list[tuple]:
 def set_issue_scene_cas_any(issue_id, old_scene: str, new_scene: str) -> int:
     """仅当 scene_id 仍是旧值时才改绑（CAS），返回影响行数；并发已改走返回 0。"""
     return exec_any("issue_scene_set_cas", (new_scene, issue_id, old_scene))
+
+
+# ── Issue #995 VCS 编号索引的存在性台账读写（api/issue_vcs_index.py）──────────
+# 原实现从 api 进程主库直发 issue 的四条 SQL；三库拆分后 api 进程库没有 issue
+# （视图 0）→ 读 1146 被吞成「回写失败 → unavailable」、回扫 1146 被吞成「0 仓」，
+# VCS 存在性过滤与存量回填在独立拓扑下整体失效（卡片永不标删、过滤永不生效）。
+# issue 是本域表，SQL 只留这里。
+#
+# `{ph}` 是 IN 列表占位符标记（按 id 个数生成 `?,?,...`）：语句文本固定在本模块，
+# 调用方只能传 id 值列表 —— 参数化，不接受拼接 SQL，也不接受表名/列名入参。
+# 读语句已登记在上方 `_ANY_QUERIES`（`read_one_any`/`read_all_any` 执行）。
+# 时间列沿用 datetime('now')（mysql_compat 翻译成 CAST(NOW() AS CHAR)），与原实现
+# 同一列同一表达式，不改「UTC 字符串」口径。
+_ISSUE_VCS_QUERIES: dict[str, str] = {
+    # 三态回写：标删 / 恢复 / 仅盖校验时间戳
+    "issue_vcs_mark_deleted": (
+        "UPDATE issue SET vcs_exists=0, vcs_checked_at=datetime('now') WHERE id IN ({ph})"),
+    "issue_vcs_mark_restored": (
+        "UPDATE issue SET vcs_exists=1, vcs_checked_at=datetime('now') WHERE id IN ({ph})"),
+    "issue_vcs_stamp_checked": (
+        "UPDATE issue SET vcs_checked_at=datetime('now') WHERE id IN ({ph})"),
+}
+
+# IN 列表单批上限：与原实现 `_chunks(size=500)` 逐字一致（超长语句/包体保护）。
+_ISSUE_VCS_ID_CHUNK = 500
+
+
+def _issue_vcs_in_stmt(name: str, ids: list) -> tuple[str, tuple]:
+    """把 `{ph}` 展开成 len(ids) 个占位符，返回 (SQL, 参数元组)。"""
+    sql = _ISSUE_VCS_QUERIES.get(name)
+    if sql is None:
+        raise KeyError(f"unknown issue vcs query: {name}")
+    return sql.replace("{ph}", ",".join("?" * len(ids))), tuple(ids)
+
+
+def issue_vcs_index_rows_any(repo_key: str) -> list[tuple]:
+    """repo_key 下台账卡片 `(id, issue_number, vcs_exists, vcs_checked_at)`（无排序，同原语句）。"""
+    return [tuple(r) for r in read_all_any("issue_vcs_index_rows", (repo_key,))]
+
+
+def issue_vcs_backfill_repo_keys_any() -> list[str]:
+    """尚待校验（vcs_checked_at 为空/NULL）的仓库集合，按 DISTINCT repo_key。"""
+    return [r[0] for r in read_all_any("issue_vcs_backfill_repos", ()) if r[0]]
+
+
+def issue_vcs_checked_count_any(repo_key: str) -> int:
+    """该仓库已写入校验时间戳的卡片数（`vcs_checked_at IS NOT NULL`，空串仍计）。"""
+    row = read_one_any("issue_vcs_checked_count", (repo_key,))
+    return int(row[0] or 0) if row else 0
+
+
+def apply_issue_vcs_existence_any(deleted_ids: list, restored_ids: list,
+                                  stamped_ids: list) -> int:
+    """原子回写 issue 台账的 VCS 存在性三态（标删/恢复/盖时间戳），返回影响行数。
+
+    原实现把三组 UPDATE 放在一次 `db_lock` + 一次 `db.commit()` 里；这里用 `_any_tx()`
+    保持同一原子性（自有 DSN 真事务 / 单库回落进程库并提交），失败整批回滚后由调用方
+    映射为 unavailable。幂等：同一批 id 重跑只会重复盖同一时间戳，行数不叠加业务语义。
+    """
+    total = 0
+    with _any_tx() as c:
+        for name, ids in (("issue_vcs_mark_deleted", deleted_ids),
+                          ("issue_vcs_mark_restored", restored_ids),
+                          ("issue_vcs_stamp_checked", stamped_ids)):
+            for start in range(0, len(ids), _ISSUE_VCS_ID_CHUNK):
+                part = list(ids[start:start + _ISSUE_VCS_ID_CHUNK])
+                if not part:
+                    continue
+                sql, params = _issue_vcs_in_stmt(name, part)
+                cur = c.execute(sql, params)
+                total += int(getattr(cur, "rowcount", 0) or 0)
+    return total
 
 
 # ── autopilot 执行记录 / 引擎实例校验 / 技能名（mgmt/routes/autopilot.py 收口）──

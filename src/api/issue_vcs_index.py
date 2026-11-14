@@ -212,11 +212,6 @@ def vcs_issue_numbers(repo_key: str) -> Optional[frozenset[int]]:
     return result
 
 
-def _chunks(items: list, size: int = 500):
-    for i in range(0, len(items), size):
-        yield items[i:i + size]
-
-
 def _confirm_missing(repo_key: str, numbers: list[int]) -> tuple[set[int], set[int]]:
     """对索引未命中的编号做单条复核，返回 ``(confirmed_missing, unresolved)``。
 
@@ -263,19 +258,14 @@ def _apply_existence(repo_key: str, numbers: frozenset[int]) -> Optional[frozens
     返回 ``None`` 表示读/写失败（调用方必须映射为 unavailable/fail-open）；
     返回编号集合表示回写成功，集合内为“无法确认存在性”的编号（卡片级 unknown）。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime import public as runtime_public
 
-    # 读台账（短暂持有 db_lock；网络复核必须在锁外，避免阻塞其它 DB 访问）。
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(
-                "SELECT id, issue_number, vcs_exists, vcs_checked_at FROM issue WHERE repo_key=?",
-                (repo_key,))
-            rows = c.fetchall()
-        except Exception as exc:
-            log.warning(f"issue_vcs_index: {repo_key} read issue rows failed: {exc}")
-            return None
+    # 读台账（任意拓扑原语内部持 db_lock；网络复核必须在锁外，避免阻塞其它 DB 访问）。
+    try:
+        rows = runtime_public.issue_vcs_index_rows_any(repo_key)
+    except Exception as exc:
+        log.warning(f"issue_vcs_index: {repo_key} read issue rows failed: {exc}")
+        return None
 
     candidates: list[int] = []
     for row in rows:
@@ -309,29 +299,13 @@ def _apply_existence(repo_key: str, numbers: frozenset[int]) -> Optional[frozens
 
     if not (to_deleted or to_restored or to_stamp):
         return frozenset(unresolved)
-    with db_lock:
-        c = db.cursor()
-        try:
-            for chunk in _chunks(to_deleted):
-                c.execute(
-                    f"UPDATE issue SET vcs_exists=0, vcs_checked_at=datetime('now') "
-                    f"WHERE id IN ({','.join('?' * len(chunk))})", chunk)
-            for chunk in _chunks(to_restored):
-                c.execute(
-                    f"UPDATE issue SET vcs_exists=1, vcs_checked_at=datetime('now') "
-                    f"WHERE id IN ({','.join('?' * len(chunk))})", chunk)
-            for chunk in _chunks(to_stamp):
-                c.execute(
-                    f"UPDATE issue SET vcs_checked_at=datetime('now') "
-                    f"WHERE id IN ({','.join('?' * len(chunk))})", chunk)
-            db.commit()
-        except Exception as exc:
-            log.warning(f"issue_vcs_index: {repo_key} write back failed: {exc}")
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            return None
+    # 三组 UPDATE 一次原子回写（owner 侧 `_any_tx`）：任一条失败整批回滚 → unavailable，
+    # 与原实现的 `db.commit()` / rollback 口径一致；分块（500/批）在 owner 侧完成。
+    try:
+        runtime_public.apply_issue_vcs_existence_any(to_deleted, to_restored, to_stamp)
+    except Exception as exc:
+        log.warning(f"issue_vcs_index: {repo_key} write back failed: {exc}")
+        return None
     return frozenset(unresolved)
 
 
@@ -423,16 +397,11 @@ def backfill_vcs_exists(repo_keys: Optional[list[str]] = None) -> dict:
     - 分批（默认 200 卡/批）限速，避免启动期/VCS 限流；
     - 仅做软标记，不删除台账行，保留审计与事件链。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime import public as runtime_public
 
     if repo_keys is None:
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT DISTINCT repo_key FROM issue "
-                    "WHERE vcs_checked_at IS NULL OR vcs_checked_at=''")
-                repo_keys = [r[0] for r in c.fetchall() if r[0]]
+            repo_keys = runtime_public.issue_vcs_backfill_repo_keys_any()
         except Exception as exc:
             log.warning(f"issue_vcs_index: backfill repo scan failed: {exc}")
             return {"repos": 0, "ok": 0, "unavailable": 0, "cards": 0}
@@ -446,13 +415,9 @@ def backfill_vcs_exists(repo_keys: Optional[list[str]] = None) -> dict:
         else:
             summary["unavailable"] += 1
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT COUNT(*) FROM issue WHERE repo_key=? AND vcs_checked_at IS NOT NULL",
-                          (repo_key,))
-                summary["cards"] += int(c.fetchone()[0] or 0)
-        except Exception:
-            pass
+            summary["cards"] += runtime_public.issue_vcs_checked_count_any(repo_key)
+        except Exception as exc:  # 计数失败不影响回填主流程（仅少报 cards 数）
+            log.debug(f"issue_vcs_index: card count skipped {repo_key}: {exc}")
         time.sleep(_BACKFILL_SLEEP_SECONDS)
     log.info(f"issue_vcs_index: backfill done {summary}")
     return summary
