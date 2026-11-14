@@ -57,3 +57,38 @@ async def get_alerts(repo_key: str) -> list:
 async def get_dashboard_overview() -> dict:
     """供 InsightServiceRemote.aggregate_runtime_stats() 调用。"""
     return _get_local("insight").aggregate_runtime_stats()
+
+
+@router.post("/xwrite/apply", operation_id="insight_xwrite_apply", include_in_schema=False)
+async def xwrite_apply(body: dict) -> dict:
+    """N13 补偿应用（insight 侧 W3 派生写；幂等键必填 + action 白名单）。"""
+    from src.kernel import cross_write as xw
+
+    from src.domains.insight.public import record_api_latency, record_merge_gate_log
+
+    body = body or {}
+    action = str(body.get("action") or "")
+    key = str(body.get("idempotency_key") or "")
+    payload = dict(body.get("payload") or {})
+    if not action or not key:
+        return {"status": "rejected", "error": "action and idempotency_key are required"}
+    handlers = {
+        "api_latency_record": lambda p: {"id": record_api_latency(
+            str(p.get("request_id", "")), str(p.get("method", "")), str(p.get("path", "")),
+            int(p.get("status", 0)), float(p.get("duration_ms", 0)),
+            str(p.get("repo_key", "")), str(p.get("user_id", "")),
+            str(p.get("source", "")), str(p.get("created_at", "")))},
+        "merge_gate_log_record": lambda p: {"id": record_merge_gate_log(
+            str(p.get("repo_key", "")), int(p.get("pr_number", 0)), str(p.get("phase", "")),
+            str(p.get("decision", "")), str(p.get("hits_json", "")),
+            str(p.get("created_at", "")))},
+    }
+    fn = handlers.get(action)
+    if fn is None:
+        return {"status": "rejected", "error": f"unregistered xwrite action: {action!r}"}
+    if not xw.claim_applied(key, action):
+        return {"status": "duplicate", "action": action, "idempotency_key": key}
+    try:
+        return {"status": "applied", "action": action, "result": fn(payload)}
+    except Exception as exc:  # noqa: BLE001 - 目标库不可用：留待补偿
+        return {"status": "failed", "error": str(exc)[:300]}

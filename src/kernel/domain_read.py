@@ -61,3 +61,28 @@ def runtime_lib(foreign_only: bool = False) -> ModuleType | None:
 
 def insight_lib() -> ModuleType | None:
     return _lib("insight", "GRAPE_INSIGHT_READ_VIA_LIB")
+
+def mgmt_write_lib(foreign_only: bool = True) -> ModuleType | None:
+    """W2 写通道句柄：只要求 mgmt 自有 DSN（`GRAPE_DSN_MGMT` + `GRAPE_DOMAIN_LIB=1`）。
+
+    与读句柄的区别：**不受按域读开关**（`GRAPE_MGMT_READ_VIA_LIB`）影响——读开关管
+    灰度读路径，写通道按方案 §3.5 独立启用；`foreign_only=True` 时 mgmt 进程内返回 None
+    （同域写必须留在本地事务，不走独立连接）。
+    """
+    try:
+        from src.kernel import db_registry
+
+        if not db_registry.uses_own_dsn("mgmt"):
+            return None
+        if foreign_only and db_registry.current_domain() == "mgmt":
+            return None
+        mod = __import__("src.domains.mgmt.public", fromlist=["*"])
+        avail = getattr(mod, "available", None)
+        if callable(avail) and not avail():
+            return None
+        return mod
+    except Exception as exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning(f"mgmt write lib unavailable: {exc}")
+        return None

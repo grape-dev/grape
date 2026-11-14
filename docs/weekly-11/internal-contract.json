@@ -50,6 +50,13 @@
       "summary": ""
     },
     {
+      "domain": "insight",
+      "method": "POST",
+      "path": "/internal/xwrite/apply",
+      "operation_id": "insight_xwrite_apply",
+      "summary": ""
+    },
+    {
       "domain": "mgmt",
       "method": "GET",
       "path": "/internal/accounts/{account_id}",
@@ -254,7 +261,7 @@
     }
   ],
   "counts": {
-    "insight": 7,
+    "insight": 8,
     "mgmt": 12,
     "runtime": 17
   }

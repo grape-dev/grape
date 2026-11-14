@@ -676,6 +676,14 @@ __all__ = ["available", "fetch_rows", "fetch_one", "get_repo_field", "get_repo_o
            "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks", "get_autopilot_task_brief",
            # P2 服务接口补齐（N6/N8/N9/N10）
            "repo_bundle", "get_account_public", "get_knowledge_entry", "user_mapping_batch",
+           # W2 渠道写原语
+           "acquire_channel_lease", "renew_channel_lease", "release_channel_lease",
+           "release_all_leases", "claim_inbound_dedup", "upsert_channel_installation",
+           "upsert_chat_session_binding", "upsert_sender_identity",
+           "add_event_action_filter", "update_event_action_filter",
+           "delete_event_action_filter",
+           # W3 派生写
+           "add_user_feedback", "save_inbound_message", "upsert_outbound_card",
            "health"]
 
 
@@ -761,3 +769,260 @@ def read_all(query: str, params: tuple = ()) -> list[Any]:
     with db_registry.cursor("mgmt") as c:
         c.execute(sql, params)
         return list(c.fetchall() or [])
+
+
+# ---------- W2 渠道写原语（runtime IM 进程写 mgmt 归属表；方案 §3.5 M1–M6） ----------
+# 统一约束：函数内 SQL 固定、参数化、幂等（UPDATE→INSERT 或 INSERT IGNORE）、
+# 目标表均为 mgmt 归属，调用方（runtime/insight）经 lib 或 N13 端点写入。
+
+def acquire_channel_lease(lease_key: str, token: str, owner: str = "",
+                          ttl_seconds: int = 60) -> bool:
+    """抢占渠道租约（W2）：条件 UPDATE（空/过期/同 token 重入），无行则 INSERT。
+
+    幂等：同 token 重入返回 True；并发插入撞主键 → False（未抢到）。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
+    stamp = now.isoformat()
+    channel_type = lease_key.split(":", 1)[0] if ":" in lease_key else ""
+    with db_registry.cursor("mgmt") as c:
+        c.execute(
+            "UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
+            "lease_expires_at=%s, lease_acquired_at=IFNULL(lease_acquired_at, %s), "
+            "updated_at=%s WHERE lease_key=%s AND (lease_token IS NULL OR "
+            "lease_token=%s OR lease_expires_at IS NULL OR lease_expires_at < %s)",
+            (token, owner, expires, stamp, stamp, lease_key, token, stamp))
+        if int(c.rowcount or 0) > 0:
+            return True
+        try:
+            c.execute(
+                "INSERT INTO grape_t_channel_lease (lease_key, channel_type, lease_token, "
+                "lease_owner, lease_expires_at, lease_acquired_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (lease_key, channel_type, token, owner, expires, stamp, stamp))
+            return True
+        except Exception as exc:  # noqa: BLE001 - 并发抢占时主键冲突即为失败
+            log.info(f"channel lease not acquired ({lease_key}): {exc}")
+            return False
+
+
+def renew_channel_lease(lease_key: str, token: str, owner: str = "", ttl_seconds: int = 60,
+                        expected_token: str | None = None) -> bool:
+    """租约续约（W2）：仅当 token 为空或等于 expected_token 时写入。"""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
+    stamp = now.isoformat()
+    if expected_token:
+        sql = ("UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
+               "lease_expires_at=%s, lease_acquired_at=IFNULL(lease_acquired_at, %s), "
+               "updated_at=%s WHERE lease_key=%s AND (lease_token IS NULL OR lease_token=%s)")
+        args = (token, owner, expires, stamp, stamp, lease_key, expected_token)
+    else:
+        sql = ("UPDATE grape_t_channel_lease SET lease_token=%s, lease_owner=%s, "
+               "lease_expires_at=%s, lease_acquired_at=IFNULL(lease_acquired_at, %s), "
+               "updated_at=%s WHERE lease_key=%s AND lease_token IS NULL")
+        args = (token, owner, expires, stamp, stamp, lease_key)
+    with db_registry.cursor("mgmt") as c:
+        c.execute(sql, args)
+        return int(c.rowcount or 0) > 0
+
+
+def release_channel_lease(lease_key: str, token: str) -> bool:
+    """释放租约（W2）：仅当 token 匹配时清空；已释放返回 False（幂等）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE grape_t_channel_lease SET lease_token=NULL, lease_owner=NULL, "
+                  "lease_expires_at=NULL, updated_at=NOW() "
+                  "WHERE lease_key=%s AND lease_token=%s", (lease_key, token))
+        return int(c.rowcount or 0) > 0
+
+
+def release_all_leases(pairs: list[tuple[str, str]]) -> int:
+    """批量释放 [(lease_key, token)]，返回实际释放条数（W2）。"""
+    released = 0
+    for lease_key, token in pairs or []:
+        if release_channel_lease(lease_key, token):
+            released += 1
+    return released
+
+
+def claim_inbound_dedup(installation_id: str, message_id: str, state: str = "claimed",
+                        claim_token: str = "") -> bool:
+    """入站消息去重占位（W2）：主键 (installation_id, message_id) 首占返回 True。
+
+    唯一键幂等：并发/重放时第二次返回 False，调用方据此丢弃重复消息。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("INSERT IGNORE INTO grape_t_channel_inbound_dedup "
+                  "(installation_id, message_id, state, claim_token, created_at) "
+                  "VALUES (%s, %s, %s, %s, NOW())",
+                  (installation_id, message_id, state, claim_token))
+        return int(c.rowcount or 0) > 0
+
+
+def upsert_channel_installation(installation_id: str, channel_type: str, scope: str,
+                                owner_user_id: str = "", repo_key: str = "",
+                                config: str = "", status: str = "active",
+                                legacy_app_id: str = "") -> dict[str, Any]:
+    """安装记录幂等 upsert（W2）：先按 id 更新，未命中再按 (legacy_app_id, scope) 更新，
+    仍未命中才插入（id 由调用方给定，重放不会产生第二行）。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE grape_t_channel_installation SET channel_type=%s, scope=%s, "
+                  "owner_user_id=%s, repo_key=%s, config=%s, status=%s, legacy_app_id=%s, "
+                  "updated_at=NOW() WHERE id=%s",
+                  (channel_type, scope, owner_user_id, repo_key, config, status,
+                   legacy_app_id, installation_id))
+        if int(c.rowcount or 0) > 0:
+            return {"action": "updated", "id": installation_id}
+        if legacy_app_id:
+            c.execute("UPDATE grape_t_channel_installation SET channel_type=%s, scope=%s, "
+                      "owner_user_id=%s, repo_key=%s, config=%s, status=%s, updated_at=NOW() "
+                      "WHERE legacy_app_id=%s AND scope=%s",
+                      (channel_type, scope, owner_user_id, repo_key, config, status,
+                       legacy_app_id, scope))
+            if int(c.rowcount or 0) > 0:
+                return {"action": "updated_by_legacy_app", "id": installation_id}
+        try:
+            c.execute("INSERT INTO grape_t_channel_installation "
+                      "(id, channel_type, scope, owner_user_id, repo_key, config, status, "
+                      "legacy_app_id, created_at, updated_at) "
+                      "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())",
+                      (installation_id, channel_type, scope, owner_user_id, repo_key, config,
+                       status, legacy_app_id))
+            return {"action": "inserted", "id": installation_id}
+        except Exception as exc:  # noqa: BLE001 - 并发插入撞主键：回退为更新
+            log.info(f"installation upsert raced ({installation_id}): {exc}")
+            c.execute("UPDATE grape_t_channel_installation SET channel_type=%s, scope=%s, "
+                      "owner_user_id=%s, repo_key=%s, config=%s, status=%s, updated_at=NOW() "
+                      "WHERE id=%s",
+                      (channel_type, scope, owner_user_id, repo_key, config, status,
+                       installation_id))
+            return {"action": "updated_after_conflict", "id": installation_id}
+
+
+def upsert_chat_session_binding(installation_id: str, channel_chat_id: str,
+                                channel_type: str = "", chat_type: str = "", scope: str = "",
+                                repo_key: str = "", agent_type: str = "",
+                                runtime_session_id: str = "", config: str = "") -> dict[str, Any]:
+    """IM 会话绑定 upsert（W2）：(installation_id, channel_chat_id, chat_type) 唯一语义。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE grape_t_channel_chat_session_binding SET channel_type=%s, scope=%s, "
+                  "repo_key=%s, agent_type=%s, runtime_session_id=%s, config=%s, "
+                  "last_active_at=NOW(), updated_at=NOW() "
+                  "WHERE installation_id=%s AND channel_chat_id=%s AND chat_type=%s",
+                  (channel_type, scope, repo_key, agent_type, runtime_session_id, config,
+                   installation_id, channel_chat_id, chat_type))
+        if int(c.rowcount or 0) > 0:
+            return {"action": "updated"}
+        c.execute("INSERT INTO grape_t_channel_chat_session_binding "
+                  "(installation_id, channel_type, channel_chat_id, chat_type, scope, repo_key, "
+                  "agent_type, runtime_session_id, config, last_active_at, created_at, updated_at) "
+                  "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), NOW())",
+                  (installation_id, channel_type, channel_chat_id, chat_type, scope, repo_key,
+                   agent_type, runtime_session_id, config))
+        return {"action": "inserted"}
+
+
+def upsert_sender_identity(installation_id: str, platform_user_id: str,
+                           user_id: str, platform_stable_user_id: str = "") -> dict[str, Any]:
+    """发送者身份映射 upsert（W2）：主键 (installation_id, platform_user_id)。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE grape_t_channel_sender_identity SET user_id=%s, "
+                  "platform_stable_user_id=%s "
+                  "WHERE installation_id=%s AND platform_user_id=%s",
+                  (user_id, platform_stable_user_id, installation_id, platform_user_id))
+        if int(c.rowcount or 0) > 0:
+            return {"action": "updated"}
+        c.execute("INSERT INTO grape_t_channel_sender_identity "
+                  "(installation_id, platform_user_id, platform_stable_user_id, user_id) "
+                  "VALUES (%s, %s, %s, %s)",
+                  (installation_id, platform_user_id, platform_stable_user_id, user_id))
+        return {"action": "inserted"}
+
+
+# ---------- W2：事件过滤规则（mgmt 归属；写方 runtime/api 经 lib） ----------
+
+_EVENT_FILTER_WRITABLE = ("event_type", "action", "allow", "actor", "require_changes",
+                          "block_changes", "handle_side_effect", "priority", "enabled",
+                          "vcs_source")
+
+
+def add_event_action_filter(fields: dict[str, Any], created_at: str) -> int:
+    """新增事件过滤规则（W2），返回新行 id；同 event_type×action 由调用方去重。"""
+    cols = [c for c in _EVENT_FILTER_WRITABLE if c in fields]
+    cols += ["created_at", "updated_at"]
+    vals = [fields[c] for c in cols[:-2]] + [created_at, created_at]
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"INSERT INTO event_action_filter ({', '.join(cols)}) "
+                  f"VALUES ({', '.join(['%s'] * len(cols))})", tuple(vals))
+        return int(getattr(c, "lastrowid", 0) or 0)
+
+
+def update_event_action_filter(rule_id: int, fields: dict[str, Any], updated_at: str) -> int:
+    """按白名单列更新规则（W2）；返回受影响行数（0 = 不存在，供 404）。"""
+    unknown = [k for k in fields if k not in _EVENT_FILTER_WRITABLE]
+    if unknown:
+        raise ValueError(f"column(s) {unknown} not writable through mgmt lib")
+    cols = [k for k in fields if k in _EVENT_FILTER_WRITABLE]
+    if not cols:
+        return 0
+    sets = ", ".join(f"{c}=%s" for c in cols) + ", updated_at=%s"
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"UPDATE event_action_filter SET {sets} WHERE id=%s",
+                  tuple(fields[c] for c in cols) + (updated_at, int(rule_id)))
+        return int(c.rowcount or 0)
+
+
+def delete_event_action_filter(rule_id: int) -> int:
+    """删除规则（W2）；返回受影响行数（0 = 不存在）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("DELETE FROM event_action_filter WHERE id=%s", (int(rule_id),))
+        return int(c.rowcount or 0)
+
+
+# ---------- W3 派生写（outbox 目标域落地；幂等靠唯一键或 action 幂等键） ----------
+
+def add_user_feedback(fields: dict[str, Any], created_at: str) -> int:
+    """落一条用户反馈（W3）；返回新行 id。幂等由调用方 action 幂等键保证。"""
+    cols = [c for c in ("user_id", "username", "category", "title", "description", "page_url",
+                        "repo_key", "user_agent", "attachment_url", "attachment_name",
+                        "event_seq", "task_id", "issue_id", "issue_number", "agent_type",
+                        "engine_info", "fail_summary", "source", "skill_id", "skill_name",
+                        "skill_scope", "issue_url", "feedback_kind") if c in fields]
+    cols += ["created_at", "updated_at"]
+    vals = [fields[c] for c in cols[:-2]] + [created_at, created_at]
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"INSERT INTO user_feedback ({', '.join(cols)}) "
+                  f"VALUES ({', '.join(['%s'] * len(cols))})", tuple(vals))
+        return int(getattr(c, "lastrowid", 0) or 0)
+
+
+def save_inbound_message(installation_id: str, message_id: str, chat_id: str = "",
+                         sender_id: str = "", text: str = "", created_at: str = "") -> bool:
+    """入站消息流水（W3）：主键 (installation_id, message_id) 首写返回 True。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("INSERT IGNORE INTO grape_t_channel_inbound_message "
+                  "(installation_id, message_id, chat_id, sender_id, text, created_at) "
+                  "VALUES (%s, %s, %s, %s, %s, COALESCE(NULLIF(%s, ''), NOW()))",
+                  (installation_id, message_id, chat_id, sender_id, text, created_at or ""))
+        return int(c.rowcount or 0) > 0
+
+
+def upsert_outbound_card(out_track_id: str, installation_id: str = "", channel_type: str = "",
+                         channel_chat_id: str = "", chat_type: str = "", payload: str = "",
+                         status: str = "pending", last_error: str = "") -> int:
+    """外发卡片流水 upsert（W3）：主键 out_track_id，重放只更新状态。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("INSERT INTO grape_t_channel_outbound_card "
+                  "(out_track_id, installation_id, channel_type, channel_chat_id, chat_type, "
+                  "payload, status, last_error, created_at, updated_at) "
+                  "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()) "
+                  "ON DUPLICATE KEY UPDATE status=VALUES(status), last_error=VALUES(last_error), "
+                  "payload=IF(VALUES(payload)='', payload, VALUES(payload)), updated_at=NOW()",
+                  (out_track_id, installation_id, channel_type, channel_chat_id, chat_type,
+                   payload, status, last_error))
+        return int(c.rowcount or 0)

@@ -390,6 +390,16 @@ def delete_engine_capability(runtime_id: int, tag: str | None = None) -> int:
         return int(c.rowcount or 0)
 
 
+def _mgmt_channel_lib():
+    """W2 渠道表（mgmt 归属）的 lib 句柄：可用则写 owner 库，否则返回 None 走原 SQL。
+
+    为什么 foreign_only：mgmt 进程内也挂载了 runtime 路由，同域写必须留在本地事务里。
+    """
+    from src.kernel import domain_read
+
+    return domain_read.mgmt_write_lib(foreign_only=True)
+
+
 def acquire_channel_lease(lease_key: str, token: str, owner: str = "",
                         ttl_seconds: int = 60) -> bool:
     """抢占渠道租约（CAS + 过期回收），可重放。
@@ -399,6 +409,12 @@ def acquire_channel_lease(lease_key: str, token: str, owner: str = "",
     """
     from datetime import datetime, timedelta, timezone
 
+    lib = _mgmt_channel_lib()
+    if lib is not None:
+        try:
+            return bool(lib.acquire_channel_lease(lease_key, token, owner, ttl_seconds))
+        except Exception as exc:  # noqa: BLE001 - owner 域不可用时按原路径兜底
+            log.warning(f"mgmt lib acquire_channel_lease failed, fallback to local SQL: {exc}")
     now = datetime.now(timezone.utc)
     expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
     stamp = now.isoformat()
@@ -424,6 +440,12 @@ def acquire_channel_lease(lease_key: str, token: str, owner: str = "",
 
 def release_channel_lease(lease_key: str, token: str) -> bool:
     """释放租约：仅当 token 匹配时清空（幂等：已释放则返回 False）。"""
+    lib = _mgmt_channel_lib()
+    if lib is not None:
+        try:
+            return bool(lib.release_channel_lease(lease_key, token))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"mgmt lib release_channel_lease failed, fallback to local SQL: {exc}")
     with db_registry.cursor("runtime") as c:
         c.execute("UPDATE grape_t_channel_lease SET lease_token=NULL, lease_owner=NULL, "
                   "lease_expires_at=NULL, updated_at=NOW() "
@@ -479,6 +501,13 @@ def renew_channel_lease(lease_key: str, token: str, owner: str = "", ttl_seconds
     """
     from datetime import datetime, timedelta, timezone
 
+    lib = _mgmt_channel_lib()
+    if lib is not None:
+        try:
+            return bool(lib.renew_channel_lease(lease_key, token, owner, ttl_seconds,
+                                                expected_token))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"mgmt lib renew_channel_lease failed, fallback to local SQL: {exc}")
     now = datetime.now(timezone.utc)
     expires = (now + timedelta(seconds=int(ttl_seconds))).isoformat()
     stamp = now.isoformat()
@@ -633,7 +662,13 @@ _ACTION_FILTER_WRITABLE = {"allow", "actor", "require_changes", "block_changes",
 
 
 def add_event_action_filter(fields: dict[str, Any], created_at: str) -> int:
-    """新增事件过滤规则，返回新行 id（调用方的 409 去重在读侧完成）。"""
+    """新增事件过滤规则，返回新行 id（调用方的 409 去重在读侧完成）。
+
+    W2：表归 mgmt 域，lib 可用时委托 mgmt public 写函数。
+    """
+    lib = _mgmt_channel_lib()
+    if lib is not None:
+        return int(lib.add_event_action_filter(fields, created_at))
     cols = ["event_type", "action", "allow", "actor", "require_changes", "block_changes",
             "handle_side_effect", "priority", "enabled", "created_at", "updated_at"]
     vals = [fields.get("event_type", ""), fields.get("action", ""),
@@ -648,7 +683,13 @@ def add_event_action_filter(fields: dict[str, Any], created_at: str) -> int:
 
 
 def update_event_action_filter(rule_id: int, fields: dict[str, Any], updated_at: str) -> int:
-    """按白名单列更新事件过滤规则；返回受影响行数（0 = 不存在，供 404 判定）。"""
+    """按白名单列更新事件过滤规则；返回受影响行数（0 = 不存在，供 404 判定）。
+
+    W2：表归 mgmt 域，lib 可用时委托 mgmt public 写函数。
+    """
+    lib = _mgmt_channel_lib()
+    if lib is not None:
+        return int(lib.update_event_action_filter(rule_id, fields, updated_at))
     unknown = [k for k in fields if k not in _ACTION_FILTER_WRITABLE]
     if unknown:
         raise ValueError(f"column(s) {unknown} not writable through runtime lib")
@@ -663,7 +704,10 @@ def update_event_action_filter(rule_id: int, fields: dict[str, Any], updated_at:
 
 
 def delete_event_action_filter(rule_id: int) -> int:
-    """删除事件过滤规则；返回受影响行数（0 = 不存在，供 404 判定）。"""
+    """删除规则（W2：表归 mgmt，lib 可用时委托 mgmt public 写函数）。"""
+    lib = _mgmt_channel_lib()
+    if lib is not None:
+        return int(lib.delete_event_action_filter(rule_id))
     with db_registry.cursor("runtime") as c:
         c.execute("DELETE FROM event_action_filter WHERE id=%s", (int(rule_id),))
         return int(c.rowcount or 0)
@@ -1419,3 +1463,84 @@ def xwrite_apply(action: str, payload: dict[str, Any], idempotency_key: str) -> 
         return {"status": "duplicate", "action": action, "idempotency_key": idempotency_key}
     result = fn(payload or {})
     return {"status": "applied", "action": action, "result": result}
+
+
+# ---------- W2 写原语（api/mgmt 进程写 runtime 归属表；方案 §3.5 M1–M6） ----------
+
+def upsert_event_active_guard(repo_key: str, issue_id: str, agent_type: str, seq: int,
+                              created_at: str = "") -> int:
+    """活动守卫状态 upsert（W2）：主键 (repo_key, issue_id, agent_type)，值取最新 seq。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("INSERT INTO event_active_guard (repo_key, issue_id, agent_type, seq, created_at) "
+                  "VALUES (%s, %s, %s, %s, COALESCE(NULLIF(%s, ''), NOW())) "
+                  "ON DUPLICATE KEY UPDATE seq=VALUES(seq)",
+                  (repo_key, str(issue_id), agent_type, int(seq), created_at or ""))
+        return int(c.rowcount or 0)
+
+
+def upsert_issue_agent_session(session_id: str, repo_key: str, agent_type: str,
+                               issue_id: str, runtime_session_id: str = "",
+                               session_engine: str = "", status: str = "active") -> dict[str, Any]:
+    """Issue↔Agent 会话绑定 upsert（W2）：唯一键 (repo_key, agent_type, issue_id)。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE issue_agent_session SET runtime_session_id=%s, session_engine=%s, "
+                  "status=%s, last_active_at=NOW() "
+                  "WHERE repo_key=%s AND agent_type=%s AND issue_id=%s",
+                  (runtime_session_id, session_engine, status, repo_key, agent_type,
+                   str(issue_id)))
+        if int(c.rowcount or 0) > 0:
+            return {"action": "updated", "id": session_id}
+        try:
+            c.execute("INSERT INTO issue_agent_session "
+                      "(id, repo_key, agent_type, issue_id, runtime_session_id, session_engine, "
+                      "status, last_active_at, created_at) "
+                      "VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())",
+                      (session_id, repo_key, agent_type, str(issue_id), runtime_session_id,
+                       session_engine, status))
+            return {"action": "inserted", "id": session_id}
+        except Exception as exc:  # noqa: BLE001 - 并发撞唯一键：回退为更新
+            log.info(f"issue agent session upsert raced ({session_id}): {exc}")
+            c.execute("UPDATE issue_agent_session SET runtime_session_id=%s, session_engine=%s, "
+                      "status=%s, last_active_at=NOW() "
+                      "WHERE repo_key=%s AND agent_type=%s AND issue_id=%s",
+                      (runtime_session_id, session_engine, status, repo_key, agent_type,
+                       str(issue_id)))
+            return {"action": "updated_after_conflict", "id": session_id}
+
+
+def upsert_scene_category(name: str, slug: str, icon: str = "", order_num: int = 0,
+                          is_active: int = 1, updated_by: str = "") -> dict[str, Any]:
+    """场景分类 upsert（W2）：唯一键 slug；重放不新增行。"""
+    from src.kernel.id_gen import uuid7_str
+
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE scene_category SET name=%s, icon=%s, order_num=%s, is_active=%s, "
+                  "updated_by=%s, updated_at=NOW() WHERE slug=%s",
+                  (name, icon, int(order_num), int(is_active), updated_by, slug))
+        if int(c.rowcount or 0) > 0:
+            return {"action": "updated", "slug": slug}
+        try:
+            new_id = uuid7_str()
+            c.execute("INSERT INTO scene_category "
+                      "(id, name, slug, icon, order_num, is_active, created_by, updated_by, "
+                      "created_at, updated_at) "
+                      "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())",
+                      (new_id, name, slug, icon, int(order_num), int(is_active), updated_by,
+                       updated_by))
+            return {"action": "inserted", "id": new_id}
+        except Exception as exc:  # noqa: BLE001
+            log.info(f"scene category upsert raced ({slug}): {exc}")
+            c.execute("UPDATE scene_category SET name=%s, icon=%s, order_num=%s, is_active=%s, "
+                      "updated_by=%s, updated_at=NOW() WHERE slug=%s",
+                      (name, icon, int(order_num), int(is_active), updated_by, slug))
+            return {"action": "updated_after_conflict", "slug": slug}
+
+
+def record_event_skipped(repo_key: str, issue_id: str, event_type: str, reason: str,
+                         detail: str = "") -> int:
+    """记录被跳过的事件（W3 派生流水），返回新行 id。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("INSERT INTO event_skipped (repo_key, issue_id, event_type, reason, detail, "
+                  "created_at) VALUES (%s, %s, %s, %s, %s, NOW())",
+                  (repo_key, str(issue_id), event_type, reason, detail))
+        return int(getattr(c, "lastrowid", 0) or 0)

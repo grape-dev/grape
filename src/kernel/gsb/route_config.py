@@ -71,6 +71,12 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
         # P2 服务接口补齐（N6/N8/N9/N10）
         "repo_bundle", "get_account_public", "get_knowledge_entry", "user_mapping_batch",
+        # W2 渠道写原语（runtime IM → mgmt 归属表）
+        "acquire_channel_lease", "renew_channel_lease", "release_channel_lease",
+        "release_all_leases", "claim_inbound_dedup", "upsert_channel_installation",
+        "upsert_chat_session_binding", "upsert_sender_identity",
+        "add_event_action_filter", "update_event_action_filter", "delete_event_action_filter",
+        "add_user_feedback", "save_inbound_message", "upsert_outbound_card",
         "read_one", "read_all",
     ),
     "runtime": (
@@ -102,7 +108,14 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "list_skills", "get_skill_detail", "list_all_engine_capabilities",
         "get_runtime_credential_meta", "get_meta_namespace", "tasks_brief_many",
         "task_stats_extended", "xwrite_apply",
+        # W2 写原语
+        "upsert_event_active_guard", "upsert_issue_agent_session", "upsert_scene_category",
+        "record_event_skipped",
         "read_one", "read_all",
+    ),
+    "insight": (
+        # W3 派生写（指标/日志落库）
+        "record_api_latency", "record_merge_gate_log",
     ),
 }
 

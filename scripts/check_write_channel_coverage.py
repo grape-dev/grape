@@ -54,7 +54,7 @@ def scan_public(domain: str) -> dict[str, list[str]]:
 def scan_actions() -> dict[str, list[str]]:
     """扫描 mgmt/runtime 路由的 xwrite action 白名单 → {动作: [域...]}。"""
     actions: dict[str, list[str]] = {}
-    for domain in ("mgmt", "runtime"):
+    for domain in ("mgmt", "runtime", "insight"):
         path = REPO / "src" / "domains" / domain / "routes" / "internal.py"
         if not path.is_file():
             continue
@@ -82,24 +82,34 @@ def main(argv: list[str] | None = None) -> int:
              "| --- | --- | --- | ---: | --- | --- | --- |"]
     missing_w2: list[str] = []
     missing_w3: list[str] = []
+    colocated: list[str] = []
     covered = 0
     for r in rows:
         table, owner, channel = r["table"], r["owner"], r["channel"]
         fns = public.get(owner, {}).get(table, [])
         ok = bool(fns)
-        if channel == "W2" and not ok:
+        writers = {w.split(":")[0] for w in (r["write_by"] or "").split(";") if w}
+        same_process = owner == "mgmt" and writers == {"api"} and not ok
+        if same_process:
+            colocated.append(table)
+        if channel == "W2" and not ok and not same_process:
             missing_w2.append(table)
         if channel == "W3" and not ok:
             missing_w3.append(table)
         if ok:
             covered += 1
+        mark = "✅" if ok else ("◻︎ 同进程" if same_process else "❌")
         lines.append(
             f"| `{table}` | {owner} | {channel} | {r['write_refs']} | {r['write_by']} | "
-            f"{', '.join('`'+f+'`' for f in fns) or '—'} | {'✅' if ok else '❌'} |")
+            f"{', '.join('`'+f+'`' for f in fns) or '—'} | {mark} |")
     lines += ["", f"合计：{len(rows)} 张表，{covered} 张已有 owner public 写函数 "
               f"（{covered * 100 // max(1, len(rows))}%）。", ""]
     if missing_w2:
         lines.append(f"W2 缺口（{len(missing_w2)}）：" + "、".join(f"`{t}`" for t in missing_w2))
+    if colocated:
+        lines.append(f"同进程免通道（{len(colocated)}）："
+                     + "、".join(f"`{t}`" for t in colocated)
+                     + "——写方 `api` 与 owner `mgmt` 同在 mgmt 进程/同库，不产生跨实例写")
     if missing_w3:
         lines.append(f"W3 缺口（{len(missing_w3)}）："
                      + "、".join(f"`{t}`" for t in missing_w3)

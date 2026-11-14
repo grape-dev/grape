@@ -2429,7 +2429,7 @@ def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(requ
             if c.fetchone():
                 raise HTTPException(status_code=409, detail={"code": 409, "message": "该事件/动作规则已存在"})
             # P3-5h：event_action_filter 在 runtime 域
-            from src.kernel.domain_read import runtime_lib as _rt_lib_ar
+            from src.kernel.domain_read import mgmt_lib as _rt_lib_ar
             from src.kernel import cross_write as _xw_ar
             _ar_done = False
             _ar_fields = {
@@ -2443,7 +2443,7 @@ def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(requ
             if _rt_ar is not None:
                 _rt_ar_ok = _rt_ar
                 _ar_done = _xw_ar.submit_if_lib(
-                    _rt_ar_ok, "runtime", "event_action_filter_add",
+                    _rt_ar_ok, "mgmt", "event_action_filter_add",
                     f"eaf-add:{body.event_type}:{body.action}",
                     {**_ar_fields, "created_at": now},
                     lambda: _rt_ar_ok.add_event_action_filter(_ar_fields, now), log)
@@ -2480,7 +2480,7 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
     params.append(now)
     params.append(rule_id)
     # P3-5h：event_action_filter 在 runtime 域（写走 lib 时仍要 rowcount 判 404）
-    from src.kernel.domain_read import runtime_lib as _rt_lib_ur
+    from src.kernel.domain_read import mgmt_lib as _rt_lib_ur
     from src.kernel import cross_write as _xw_ur
     _ur_fields = {f: getattr(body, f) for f in
                   ("allow", "actor", "require_changes", "block_changes",
@@ -2496,7 +2496,7 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
             _ur_n["n"] = _rt_ur_ok.update_event_action_filter(int(rule_id), _ur_fields, now)
 
         _ur_done = _xw_ur.submit_if_lib(
-            _rt_ur_ok, "runtime", "event_action_filter_update",
+            _rt_ur_ok, "mgmt", "event_action_filter_update",
             f"eaf-upd:{rule_id}", {"rule_id": int(rule_id), "fields": _ur_fields,
                                    "updated_at": now}, _apply_ur, log)
     if _ur_done:
@@ -2528,7 +2528,7 @@ def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_sessi
     """删除事件 action 过滤规则（删除后无规则=放行）。"""
     from src.kernel.session_manager import db, db_lock
     # P3-5h：event_action_filter 在 runtime 域（写走 lib 时仍要 rowcount 判 404）
-    from src.kernel.domain_read import runtime_lib as _rt_lib_dr
+    from src.kernel.domain_read import mgmt_lib as _rt_lib_dr
     from src.kernel import cross_write as _xw_dr
     _dr_n: dict = {}
     _dr_done = False
@@ -2540,7 +2540,7 @@ def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_sessi
             _dr_n["n"] = _rt_dr_ok.delete_event_action_filter(int(rule_id))
 
         _dr_done = _xw_dr.submit_if_lib(
-            _rt_dr_ok, "runtime", "event_action_filter_delete", f"eaf-del:{rule_id}",
+            _rt_dr_ok, "mgmt", "event_action_filter_delete", f"eaf-del:{rule_id}",
             {"rule_id": int(rule_id)}, _apply_dr, log)
     if _dr_done:
         if int(_dr_n.get("n") or 0) == 0:

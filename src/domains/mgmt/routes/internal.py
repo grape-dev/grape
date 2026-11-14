@@ -120,6 +120,17 @@ def _xwrite_apply(action: str, payload: dict, idempotency_key: str) -> dict:
         "scene_nodes_set": lambda p: _mgmt_public.set_scene_nodes(
             str(p["nodes_json"]), scene_id=p.get("scene_id"), row_id=p.get("row_id"),
             repo_key=p.get("repo_key")),
+        "user_feedback_add": lambda p: {"id": _mgmt_public.add_user_feedback(
+            dict(p.get("fields") or {}), str(p.get("created_at", "")))},
+        "inbound_message_save": lambda p: {"saved": _mgmt_public.save_inbound_message(
+            str(p["installation_id"]), str(p["message_id"]), str(p.get("chat_id", "")),
+            str(p.get("sender_id", "")), str(p.get("text", "")),
+            str(p.get("created_at", "")))},
+        "outbound_card_upsert": lambda p: {"rows": _mgmt_public.upsert_outbound_card(
+            str(p["out_track_id"]), str(p.get("installation_id", "")),
+            str(p.get("channel_type", "")), str(p.get("channel_chat_id", "")),
+            str(p.get("chat_type", "")), str(p.get("payload", "")),
+            str(p.get("status", "pending")), str(p.get("last_error", "")))},
         "scene_deploy_url_set": lambda p: {"updated": _mgmt_public.set_scene_deploy_url(
             str(p["deploy_url"]), scene_id=p.get("scene_id"), row_id=p.get("row_id"),
             repo_key=p.get("repo_key"))},

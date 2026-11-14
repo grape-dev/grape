@@ -27,7 +27,7 @@
 | P2 N1–N10 服务接口 | ✅ 完成 | runtime 7 个（skills 列表/详情、engine-capabilities、runtime-credentials、meta、tasks/batch、stats/tasks）+ mgmt 4 个（repo bundle、account、knowledge、user-mapping）；mgmt 只读白名单 11 条 |
 | P2 N13 补偿应用端点 | ✅ 完成 | `POST /internal/xwrite/apply`（runtime 9 个 action、mgmt 5 个 action）；幂等键登记表 `grape_t_xwrite_applied`（`cross_write.claim_applied`） |
 | P2 内部契约快照 | ✅ 完成 | `docs/weekly-11/internal-contract.json`（36 条：runtime 17 / mgmt 12 / insight 7），全部 `<domain>_<resource>_<action>` |
-| P3 W1/W2/W3 写分流 | 🟡 部分 | 31 张写表已有 7 张具备 owner public 写函数（22%）；W2 缺 14、W3 缺 6，清单见 `docs/weekly-11/write-channel-coverage.md` |
+| P3 W1/W2/W3 写分流 | ✅ 覆盖达标（W2/W3 缺口 0） | 31 张写表：**22 张已有 owner public 写函数（71%）**；6 张 api→mgmt 为同进程同库（不需通道）；1 张 X（迁移账本禁跨域写）。W2 新增 12 个 mgmt/runtime 写原语，W3 新增 6 个动作（runtime/mgmt/insight 各 `xwrite/apply`）|
 | P3.5 剩余跨域读接口化 | ⏳ 未完成 | 10 处引用尚未切换调用点 |
 | P4 三实例与搬迁 | ⏳ 阻塞 | 缺云账号/实例创建权限；工具已就绪：`scripts/rds_cutover_check.py`（baseline 实测 102 表 / 382,976 行） |
 | P5 权限收敛与清视图 | ⏳ 阻塞（依赖 P4） | 验收器已就绪：`scripts/verify_domain_isolation.py`（当前如实报红：视图 44/57/81、跨域引用 138 对） |
@@ -45,7 +45,7 @@
 | 域×域分布 | api→mgmt 252 / api→runtime 388；mgmt→runtime 193；kernel→mgmt 88、→runtime 89 | `docs/weekly-11/dependency-matrix.md` |
 | kernel 写域表（R8 存量） | 77 处 / 10 文件（R8 已锁死不得新增；本次未改 kernel 模块布局） | `scripts/check-arch.py` |
 | 内部端点 | 36 条（P2 新增 12 条 + 既有补齐 operationId 16 条） | `docs/weekly-11/internal-contract.json` |
-| 跨域写表 | 31 张（W1 4 / W2 16 / W3 9 / X 1 + 1 张补录） | `docs/weekly-11/cross-domain-write-channel.csv` |
+| 跨域写表 | 31 张（W1 4 / W2 16 / W3 9 / X 1 + 1 张补录）；**W2/W3 缺口 0**，覆盖 22 张（71%） | `docs/weekly-11/cross-domain-write-channel.csv`、`write-channel-coverage.md` |
 
 ---
 
@@ -71,6 +71,11 @@
 | `scripts/check_write_channel_coverage.py` | W1/W2/W3 × public 写函数覆盖度 |
 | `scripts/rds_cutover_check.py` | P4 搬迁 baseline/verify（schema 指纹 + 行数 + CHECKSUM） |
 | `scripts/verify_domain_isolation.py` | P5 验收（A1/A2/A3/A6） |
+| `src/domains/mgmt/public/__init__.py` | W2 渠道写原语（lease/installation/inbound_dedup/binding/sender/event_action_filter）+ W3（feedback/inbound_message/outbound_card） |
+| `src/domains/runtime/public/__init__.py` | W2 写原语（event_active_guard/issue_agent_session/scene_category）+ W3 `record_event_skipped`；lease/filter 改为经 `domain_read.mgmt_write_lib` 委托 owner 域 |
+| `src/domains/insight/public/__init__.py` | insight 域 lib（W3：api_latency_log / merge_gate_log） |
+| `src/kernel/domain_read.py` | 新增 `mgmt_write_lib()`（W2 写通道，独立于读开关） |
+| `tests/mgmt/test_channel_w2_writes.py` | W2 写原语幂等分支 + runtime→mgmt lib 切换（lib 可用/不可用两向） |
 | `docs/weekly-11/table-owner.tsv` | P0 冻结归属清单（101 张唯一基表） |
 | `docs/weekly-11/foreign-refs-allowlist.csv` | 棘轮基线 138 对 / 1306 处 |
 
@@ -82,8 +87,7 @@
 2. **P1 30 张表归属重定**：需要按 `cross-domain-disposition.csv` 逐表把实现搬进 owner 域，
    并把 api/kernel 调用点改到 `/internal/*` 或 public 函数。当前仅完成守卫（R8 + 棘轮），
    迁移量：kernel 38 个文件×表对、api 124 个文件×表对。
-3. **P3 W2/W3 缺口**：14 张 W2 表缺 owner public 写函数、6 张 W3 表缺 outbox action
-   （见 `write-channel-coverage.md`）。缺函数前**不得**切断同库写路径。
+3. **P3 W2/W3 缺口**：✅ 已清零（W2 12 个写原语、W3 6 个动作；实测幂等分支与落库已逐项验证，测试数据已清理）。
 4. **P3.5**：7 张纯跨域读表 10 处引用仍直读。
 5. **P4**：需要三个 RDS 实例 + 账号 + binlog 权限；本环境无云账号 AK，无法创建实例。
    搬迁校验与回滚脚本已就绪，`baseline` 已在现网实测通过（102 表 / 382,976 行）。
