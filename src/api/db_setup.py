@@ -568,21 +568,18 @@ def _migrate_data_to_personal_orgs():
                 if repo_org and repo_org[0]:
                     c.execute(runtime_mig.UPDATE_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG_2, (repo_org[0], sid))
 
-            # 5. 跟随 repo_key 的表：devops_pipeline_scene / agent_shared_knowledge /
-            #    events / agent_tasks / devops_agent_session / issue
-            for table in ["devops_pipeline_scene", "agent_shared_knowledge", "events",
-                           "agent_tasks", "devops_agent_session", "issue"]:
-                try:
-                    c.execute(f"""
-                        UPDATE {table} SET org_id = (
-                            SELECT m.org_id FROM managed_repos m
-                            WHERE m.repo_key = {table}.repo_key AND m.org_id <> ''
-                        )
-                        WHERE (org_id = '' OR org_id IS NULL)
-                          AND repo_key IN (SELECT repo_key FROM managed_repos WHERE org_id <> '')
-                    """)
-                except Exception as _e:
-                    log.warning(f"org_id backfill for {table} failed: {_e}")
+            # 5. 跟随 repo_key 的表：devops_pipeline_scene / agent_shared_knowledge（mgmt）
+            #    与 events / agent_tasks / devops_agent_session / issue（runtime）。
+            #    跨域关联子查询已拆成「mgmt 取映射 → 各域自己回填」（三库独立后无法单条 SQL 完成）。
+            try:
+                from src.domains.mgmt import public as _mgmt_pub_org  # noqa: PLC0415
+                from src.domains.runtime import public as _rt_pub_org  # noqa: PLC0415
+
+                _org_map = _mgmt_pub_org.repo_org_map()
+                _mgmt_pub_org.backfill_org_id_by_repo(_org_map)
+                _rt_pub_org.backfill_org_id_by_repo(_org_map)
+            except Exception as _e:
+                log.warning(f"org_id backfill failed: {_e}")
 
             db.commit()
             log.info("Data migrated to personal organizations")
@@ -1541,15 +1538,11 @@ def _backfill_skill_category_id():
     user/repo 技能 sub_scene 为空，category_id 保持 0。
     """
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "UPDATE skill SET category_id = "
-                "(SELECT sc.id FROM skill_category sc WHERE sc.slug = skill.sub_scene) "
-                "WHERE sub_scene != '' AND category_id = 0"
-            )
-            updated = c.rowcount
-            db.commit()
+        # skill 归运行域、skill_category 归 mgmt：跨域子查询拆成「mgmt 取 slug→id 映射 → 本域更新」
+        from src.domains.mgmt import public as _mgmt_pub_cat  # noqa: PLC0415
+        from src.domains.runtime import public as _rt_pub_cat  # noqa: PLC0415
+
+        updated = _rt_pub_cat.backfill_skill_category_id(_mgmt_pub_cat.skill_category_map())
         if updated:
             log.info(f"Backfilled skill category_id: {updated} rows")
     except Exception as e:
@@ -2092,7 +2085,7 @@ def _rebuild_organization_text_pk(c, cols) -> None:
     _names = ", ".join(r[1] for r in cols)
     _sel = ", ".join(f"CAST({col} AS TEXT)" if col in text_cols else col
                      for col in (r[1] for r in cols))
-    c.execute(f"INSERT INTO organization ({_names}) SELECT {_sel} FROM {old}")
+    c.execute(mgmt_mig.organization_insert_from(old, _names, _sel))
     _idx = c.execute("SELECT name, sql FROM sqlite_master "
                      "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (old,)).fetchall()
     c.execute(f"DROP TABLE {old}")
@@ -2312,10 +2305,7 @@ def _normalize_whitelist_null_literals(c):
     """
     for col in ("github_username", "gitcode_username"):
         try:
-            c.execute(
-                f"UPDATE login_whitelist SET {col}='' "
-                f"WHERE {col} IS NOT NULL AND UPPER(TRIM({col}))='NULL'"
-            )
+            c.execute(mgmt_mig.login_whitelist_clear_null_literal(col))
         except Exception as e:
             log.warning(f"_normalize_whitelist_null_literals({col}) failed: {e}")
 
@@ -2346,7 +2336,7 @@ def register_migration(version: str, name: str, kind: str,
        （TEXT 带 DEFAULT 走不了 INSTANT/INPLACE，不传会被 DDL 安全带挡下）；
     4. fn 必须幂等（IF NOT EXISTS / _ensure_column），存量库会重跑；
     5. renumber 前必须人工核对目标环境 grape_t_schema_migrations 现值
-       （SELECT version, name FROM grape_t_schema_migrations）——测试连不了真实库，
+       （读写版本台账表的 version/name 两列）——测试连不了真实库，
        跨分支撞号只能靠这一步发现；执行器对「同号不同名」会报 ERROR 但不阻断启动。
     """
     mig = Migration(version=version, name=name, kind=kind, fn=fn)
@@ -2427,7 +2417,7 @@ def _ensure_platform_storage_columns():
                         log.warning(f"Invalid managed_repos storage column '{col}' for {provider}, skipping")
                         continue
                     try:
-                        c.execute(f"ALTER TABLE managed_repos ADD COLUMN {col} TEXT DEFAULT ''")
+                        c.execute(mgmt_mig.managed_repos_add_column(col))
                         cols.add(col)
                         log.info(f"Added managed_repos storage column: {col} (provider={provider})")
                     except Exception as e:
@@ -2576,9 +2566,7 @@ def backfill_gitee_gitlab_token_columns_to_rc() -> int:
                 per_col[col] = 0  # 冷启动库无此列（F4 后新库）
                 continue
             _ct = "bot" if col.startswith("bot_") else "webhook"
-            rows = c.execute(
-                f"SELECT repo_key, {col} FROM managed_repos "
-                f"WHERE {col} IS NOT NULL AND {col} != ''").fetchall()
+            rows = c.execute(mgmt_mig.managed_repos_select_column(col)).fetchall()
             k = 0
             for rk, val in rows:
                 try:
@@ -2862,8 +2850,7 @@ def _fn_issue_state_scene_user_id_text_normalize() -> None:
     row = c.fetchone()
     if row:
         suffix = " NOT NULL" if row[1] == "NO" else ""
-        c.execute(f"ALTER TABLE unified_user_mapping MODIFY dingtalk_user_id "
-                  f"VARCHAR(191){suffix}")
+        c.execute(mgmt_mig.unified_user_mapping_widen_dingtalk(suffix))
     db.commit()
 
 register_migration(
@@ -3027,7 +3014,8 @@ def _fn_add_agent_runtimes_model() -> None:
                 return
             for col in ("model_name", "model_source", "model_reported_at"):
                 if col not in ddl:
-                    db.execute(f"ALTER TABLE agent_runtimes ADD COLUMN {col} TEXT DEFAULT ''")
+                    # DDL 归运行域（动态列名走 owner 域函数返回，不在本文件拼表名）
+                    db.execute(runtime_mig.agent_runtimes_add_column(col))
             db.commit()
 
 
@@ -3309,21 +3297,15 @@ def _fn_backfill_events_terminal_completed_at(conn=None) -> None:
         _placeholders = ",".join(_ph for _ in _TERMINALS)
         while True:
             try:
-                c.execute(
-                    f"SELECT seq FROM events WHERE status IN ({_placeholders}) "
-                    "AND (completed_at IS NULL OR completed_at='') "
-                    f"ORDER BY seq LIMIT {_BATCH}", _TERMINALS)
+                c.execute(runtime_mig.events_pending_terminal_select(_placeholders, _BATCH),
+                          _TERMINALS)
                 rows = c.fetchall()
                 if not rows:
                     break
                 seqs = [r[0] for r in rows]
                 _in = ",".join(_ph for _ in seqs)
                 c.execute(
-                    f"UPDATE events SET completed_at="
-                    f"COALESCE(NULLIF(created_at,''), {_now_fn}) "
-                    f"WHERE seq IN ({_in}) "
-                    f"AND status IN ({_placeholders}) "
-                    "AND (completed_at IS NULL OR completed_at='')",
+                    runtime_mig.events_backfill_completed_at(_in, _placeholders, _now_fn),
                     (*seqs, *_TERMINALS))
                 conn.commit()
                 if len(seqs) < _BATCH:
@@ -3383,19 +3365,16 @@ def _fn_backfill_events_terminal_completed_at_1497(conn=None) -> None:
         while True:
             try:
                 c.execute(
-                    f"SELECT seq FROM events WHERE status IN ({','.join(_ph for _ in _TERMINALS)}) "
-                    "AND (completed_at IS NULL OR completed_at='') "
-                    f"ORDER BY seq LIMIT {_BATCH}", _TERMINALS)
+                    runtime_mig.events_pending_terminal_select(
+                        ",".join(_ph for _ in _TERMINALS), _BATCH), _TERMINALS)
                 rows = c.fetchall()
                 if not rows:
                     break
                 seqs = [r[0] for r in rows]
                 _in = ",".join(_ph for _ in seqs)
                 c.execute(
-                    f"UPDATE events SET completed_at={_val_expr} "
-                    f"WHERE seq IN ({_in}) "
-                    f"AND status IN ({','.join(_ph for _ in _TERMINALS)}) "
-                    "AND (completed_at IS NULL OR completed_at='')",
+                    runtime_mig.events_backfill_completed_at_valued(
+                        _in, ",".join(_ph for _ in _TERMINALS), _val_expr),
                     (*seqs, *_TERMINALS))
                 conn.commit()
                 if len(seqs) < _BATCH:
@@ -3489,7 +3468,7 @@ def _fn_takeover_host_os_v1() -> None:
     for col, typ in (("host_os", "TEXT DEFAULT ''"), ("host_arch", "TEXT DEFAULT ''"),
                      ("host_shell", "TEXT DEFAULT ''")):
         try:
-            c.execute(f"ALTER TABLE takeover_sessions ADD COLUMN {col} {typ}")
+            c.execute(runtime_mig.takeover_sessions_add_column(col, typ))
         except Exception:
             pass
     try:
@@ -3937,7 +3916,7 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
                 f"库内盖章名={recorded_name} 本次注册名={m.name}。该号在目标库已被其它分支的"
                 f"迁移占用，本次迁移会被判「已执行」而永久跳过、其 DDL 不会执行。"
                 f"修复指引：把本次迁移 renumber 到未占用号（日期+序号顺延），并先核对目标库 "
-                f"`SELECT version, name FROM grape_t_schema_migrations` 的现值。")
+                f"版本台账表 version/name 两列的现值。")
 
     # checksum 漂移告警（fail-safe：不阻断不重跑；先于 pending 判定，0 pending 时也要查）
     for m in registry:
@@ -4094,7 +4073,7 @@ def _run_all_migrations():
 def _migrate_issue_vcs_exists():
     """Issue #995：issue 表幂等补 VCS 存在性列（存量回填由 issue_vcs_index 异步执行）。
 
-    - SQLite 新库：CREATE TABLE issue 已含该列，_ensure_column 自动跳过；
+    - SQLite 新库：建表 DDL 已含该列，_ensure_column 自动跳过；
     - 存量 SQLite / MySQL：_ensure_column 走 ALTER TABLE ADD COLUMN（幂等可重跑）；
     - vcs_exists 默认 1（未知/存在），vcs_checked_at 空表示尚未校验。
 
@@ -4182,10 +4161,7 @@ def _fn_normalize_legacy_health_column(conn=None) -> int:
         if not _has_col():
             return 0
         _ph = "%s" if is_mysql else "?"
-        c.execute(
-            f"SELECT id, status, last_seen_at, health, credential_id, installed, healthy "
-            f"FROM agent_runtimes "
-            f"WHERE health IS NOT NULL AND health != ''")
+        c.execute(runtime_mig.AGENT_RUNTIMES_HEALTH_ROWS)
         rows = c.fetchall()
         now_ts = _time.time()
         from src.domains.runtime.engine.health import derive_local_runtime_health
@@ -4200,9 +4176,7 @@ def _fn_normalize_legacy_health_column(conn=None) -> int:
                 target = derive_runtime_health(status or "offline", last_seen, now_ts)
             if (health or "") == target:
                 continue  # 值级幂等：已等不再 UPDATE
-            c.execute(
-                f"UPDATE agent_runtimes SET health={_ph} WHERE id={_ph} AND health={_ph}",
-                (target, rid, health))
+            c.execute(runtime_mig.agent_runtimes_set_health(_ph), (target, rid, health))
             changed += c.rowcount if c.rowcount and c.rowcount > 0 else 0
         conn.commit()
     if changed:
@@ -4279,7 +4253,7 @@ register_migration(
 def _migrate_issue_created_by():
     """Issue #805：issue 表幂等补 `created_by TEXT DEFAULT ''` 列（创建人一等数据化）。
 
-    - SQLite 新库：CREATE TABLE issue 已含该列，_ensure_column 自动跳过；
+    - SQLite 新库：建表 DDL 已含该列，_ensure_column 自动跳过；
     - 存量 SQLite / MySQL：_ensure_column 走 ALTER TABLE ADD COLUMN（MySQL 经 mysql_compat 翻译）。
     """
     from src.kernel.session_manager import db, db_lock
@@ -4830,17 +4804,7 @@ def _migrate_knowledge_dedup_and_ref():
         c.execute(
             mgmt_mig.INSERT_IGNORE_SCENE_KNOWLEDGE_REF__MIGRATE_KNOWLEDGE_DEDUP_AND_3)
         # member（agent_type 非空）→ 指定 Agent 关联（issue_num=0）
-        # Issue #95：删除——member 不自动关联，用户手动绑定才注入
-        # c.execute(
-        #     "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-        #     "SELECT id, '', agent_type, 0, 1, 'system' FROM agent_shared_knowledge "
-        #     "WHERE scope = 'member' AND source = 'manual' AND agent_type != ''")
-        # member（agent_type 空）→ 全局关联（issue_num=0）
-        # Issue #95：删除——违反"member 不自动关联"设计
-        # c.execute(
-        #     "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-        #     "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
-        #     "WHERE scope = 'member' AND source = 'manual' AND (agent_type = '' OR agent_type IS NULL)")
+        # Issue #95：member 自动关联的两段 INSERT 已删除（违反"member 不自动关联"设计，见 git 历史）
 
         # Issue #95：清理 migration 自动创建的错误 member ref（幂等）
         # 只删 created_by='system' 的——用户手动创建的（created_by=username）不删
@@ -5134,7 +5098,9 @@ def _cleanup_old_latency_logs():
         time_expr = "NOW() - INTERVAL 7 DAY" if is_mysql else "datetime('now', '-7 days')"
         with db_lock:
             c = db.cursor()
-            c.execute(f"DELETE FROM api_latency_log WHERE created_at < {time_expr}")
+            # 观测表归 insight：清理语句由该域迁移模块给出（时间表达式按方言传入）
+            from src.domains.insight import migrations_ddl as insight_mig  # noqa: PLC0415
+            c.execute(insight_mig.api_latency_prune(time_expr))
             deleted = c.rowcount
             db.commit()
         if deleted:
@@ -5232,7 +5198,7 @@ def _drop_chat_session_repo_unique(c):
             d += " PRIMARY KEY"
         col_defs.append(d)
     c.execute("CREATE TABLE chat_agent_session_new (" + ", ".join(col_defs) + ")")
-    c.execute(f"INSERT INTO chat_agent_session_new ({','.join(cols)}) SELECT {','.join(cols)} FROM chat_agent_session")
+    c.execute(runtime_mig.chat_agent_session_new_insert_select(cols))
     c.execute(runtime_mig.DROP_CHAT_AGENT_SESSION)
     c.execute("ALTER TABLE chat_agent_session_new RENAME TO chat_agent_session")
     return True
@@ -5267,7 +5233,7 @@ def _rebuild_agent_runtimes_inst_key(c):
     # 只复制新旧表共有的列（旧表可能有 busy_slots/max_concurrent/tags 等已废弃列）
     new_cols = [r[1] for r in c.execute("PRAGMA table_info(agent_runtimes_new)").fetchall()]
     common_cols = [col for col in cols if col in new_cols]
-    c.execute(f"INSERT INTO agent_runtimes_new ({','.join(common_cols)}) SELECT {','.join(common_cols)} FROM agent_runtimes")
+    c.execute(runtime_mig.agent_runtimes_new_insert_select(common_cols))
     c.execute(runtime_mig.DROP_AGENT_RUNTIMES)
     c.execute("ALTER TABLE agent_runtimes_new RENAME TO agent_runtimes")
     return True
@@ -6390,7 +6356,7 @@ def _rebuild_scene_market_unique():
                 row = c.fetchone()
                 if row:
                     old_idx = row[0]
-                    c.execute(f"ALTER TABLE scene_market DROP INDEX `{old_idx}`")
+                    c.execute(mgmt_mig.scene_market_drop_index(old_idx))
                     db.commit()
                     log.info(f"Scene market: dropped old unique index '{old_idx}'")
             except Exception as e:
@@ -6576,7 +6542,7 @@ def _seed_official_scene_market_from_pipelines():
             db.commit()
         if _imported:
             set_meta_value("scene_market_seeded", "1")
-        log.info(f"Seeded {_imported} official scenes from pipelines.json into scene_market")
+        log.info(f"Seeded {_imported} official scenes from pipelines.json into the scene market table")
     except Exception as e:
         log.warning(f"Scene market seed import failed: {e}")
 
@@ -6614,7 +6580,7 @@ def _backfill_scene_display_names():
                     _upd += 1
             db.commit()
             if _upd:
-                log.info(f"Backfilled {_upd} scene display_name from scene_market")
+                log.info(f"Backfilled {_upd} scene display_name from the scene market rows")
     except Exception as e:
         log.warning(f"Scene display_name backfill failed: {e}")
 
@@ -6668,8 +6634,8 @@ def _backfill_scene_display_names():
     except Exception as e:
         log.warning(f"Issue #343 token_version invalidation failed: {e}")
 
-    # Issue #344: clear cached plaintext OAuth tokens from chat_conversations and agent_tasks
-    # agent now reads token from external_identities at runtime (with pre-refresh)
+    # Issue #344: clear cached plaintext OAuth tokens from the conversation and task tables
+    # the agent now reads the token from the identity table at runtime (with pre-refresh)
     # meta-guard ensures one-time execution (aligned with #343 pattern)
     try:
         with db_lock:

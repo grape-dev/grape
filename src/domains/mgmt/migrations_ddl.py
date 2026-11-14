@@ -351,3 +351,41 @@ SQL_USER_CREDENTIALS = (
     "RENAME TABLE user_credentials TO user_credentials__old_backup, "
     "user_credentials__uqkind TO user_credentials"
 )
+
+
+# ── 自 db_setup 内联 DDL/DML 下沉（动态列名/表名一律「函数返回」，不 import 常量属性）──
+#
+# 这些语句原本内联在 `src/api/db_setup.py` 的迁移函数里，用 f-string 拼列名/占位符，
+# 静态扫描按路径把它们算成 api 消费 mgmt 表。搬到归属域后 SQL 与表同处一个模块；
+# 执行顺序仍由 db_setup 的迁移编排保证（本模块不含执行逻辑）。
+
+def organization_insert_from(old_table: str, names: str, sel: str) -> str:
+    """organization 文本重建后从旧表搬数据（列名/选择表达式由调用方按列清单生成）。"""
+    return f"INSERT INTO organization ({names}) SELECT {sel} FROM {old_table}"
+
+
+def login_whitelist_clear_null_literal(col: str) -> str:
+    """把历史导入留下的字面 'NULL' 字符串清成空串（避免大小写不敏感唯一索引撞 1062）。"""
+    return (f"UPDATE login_whitelist SET {col}='' "
+            f"WHERE {col} IS NOT NULL AND UPPER(TRIM({col}))='NULL'")
+
+
+def managed_repos_add_column(col: str) -> str:
+    """managed_repos 补平台存储列（列名来自平台卡，调用方已做合法性校验）。"""
+    return f"ALTER TABLE managed_repos ADD COLUMN {col} TEXT DEFAULT ''"
+
+
+def managed_repos_select_column(col: str) -> str:
+    """读 managed_repos 某存储列的非空行（F4 凭据回填用）。"""
+    return (f"SELECT repo_key, {col} FROM managed_repos "
+            f"WHERE {col} IS NOT NULL AND {col} != ''")
+
+
+def unified_user_mapping_widen_dingtalk(suffix: str) -> str:
+    """unified_user_mapping.dingtalk_user_id TEXT → VARCHAR(191)（MySQL 侧定长化）。"""
+    return f"ALTER TABLE unified_user_mapping MODIFY dingtalk_user_id VARCHAR(191){suffix}"
+
+
+def scene_market_drop_index(index_name: str) -> str:
+    """删除 scene_market 的旧唯一索引（索引名由 information_schema 探测得到）。"""
+    return f"ALTER TABLE scene_market DROP INDEX `{index_name}`"

@@ -1579,3 +1579,44 @@ def external_user_id(provider: str, external_id: str) -> Any:
                   (provider, str(external_id)))
         row = c.fetchone()
     return row[0] if row else None
+
+
+# ---------- 迁移期批量回填（跨域 JOIN 的替代：先取本域映射，再交给各域回填） ----------
+
+def repo_org_map() -> dict[str, str]:
+    """有归属组织的仓库映射 {repo_key: org_id}（org_id 为空的行不返回）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT repo_key, org_id FROM managed_repos WHERE org_id <> ''")
+        return {r[0]: r[1] for r in (c.fetchall() or []) if r[0] and r[1]}
+
+
+def skill_category_map() -> dict[str, int]:
+    """技能分类 {slug: id}（skill_category 归本域）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT slug, id FROM skill_category WHERE slug IS NOT NULL AND slug != ''")
+        return {r[0]: int(r[1]) for r in (c.fetchall() or []) if r[0]}
+
+
+#: 跟随 repo_key 的 mgmt 表（固定白名单：不接受调用方传表名）
+_ORG_BACKFILL_TABLES = ("devops_pipeline_scene", "agent_shared_knowledge")
+
+
+def backfill_org_id_by_repo(mapping: dict) -> dict[str, int]:
+    """按 repo_key→org_id 映射回填本域表的空 org_id（逐仓库 UPDATE，幂等）。
+
+    替代原来的 `UPDATE <表> SET org_id=(SELECT ... FROM managed_repos ...) WHERE repo_key IN (...)`
+    跨域关联子查询：映射由本域取，回填落在各自 owner 库。
+    """
+    out: dict[str, int] = {}
+    if not mapping:
+        return out
+    with _any_tx() as c:
+        for tbl in _ORG_BACKFILL_TABLES:
+            n = 0
+            for rk, org in mapping.items():
+                cur = c.execute(
+                    f"UPDATE {tbl} SET org_id=? WHERE repo_key=? AND (org_id='' OR org_id IS NULL)",
+                    (org, rk))
+                n += int(getattr(cur, "rowcount", 0) or 0)
+            out[tbl] = n
+    return out

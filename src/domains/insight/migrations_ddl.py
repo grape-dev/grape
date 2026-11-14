@@ -15,3 +15,8 @@ INSERT_IGNORE_GRAPE_T_REPO_CREDENTIALS = (
     "INSERT OR IGNORE INTO grape_t_repo_credentials (id, repo_key, cred_type, value) "
     "VALUES (?, ?, ?, ?)"
 )
+
+
+def api_latency_prune(time_expr: str) -> str:
+    """按保留期清理 api_latency_log（时间表达式由调用方按方言给出）。"""
+    return f"DELETE FROM api_latency_log WHERE created_at < {time_expr}"

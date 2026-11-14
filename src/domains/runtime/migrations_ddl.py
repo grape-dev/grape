@@ -336,3 +336,62 @@ UPDATE_CHAT_CONVERSATIONS__BACKFILL_SCENE_DISPLAY_NAMES = "UPDATE chat_conversat
 UPDATE_AGENT_TASKS = "UPDATE agent_tasks SET user_gitcode_token = '' WHERE user_gitcode_token != ''"
 UPSERT_META__BACKFILL_SCENE_DISPLAY_NAMES_2 = "INSERT OR REPLACE INTO meta (key, value) VALUES ('issue344_tokens_cleared', '1')"
 SQL_CHAT_CONVERSATIONS = "Issue #344: cleared cached plaintext tokens from chat_conversations and agent_tasks"
+
+
+# ── 自 db_setup 内联 DDL/DML 下沉（动态列名/表名一律「函数返回」，不 import 常量属性）──
+#
+# 这些语句原本内联在 `src/api/db_setup.py` 的迁移函数里，用 f-string 拼列名/占位符，
+# 静态扫描按文件路径把它们算成 api 消费 runtime 表。搬到归属域后 SQL 与表同处一个模块，
+# 执行顺序仍由 db_setup 的迁移编排保证（本模块不含执行逻辑）。
+
+def agent_runtimes_add_column(col: str) -> str:
+    """agent_runtimes 补列（Issue #865 模型列；幂等由调用方的列探测保证）。"""
+    return f"ALTER TABLE agent_runtimes ADD COLUMN {col} TEXT DEFAULT ''"
+
+
+def takeover_sessions_add_column(col: str, typ: str) -> str:
+    """takeover_sessions 补列（列名/类型由调用方探测后传入）。"""
+    return f"ALTER TABLE takeover_sessions ADD COLUMN {col} {typ}"
+
+
+def events_pending_terminal_select(ph: str, batch: int) -> str:
+    """待补 completed_at 的终态事件（分页拉 seq；ph 为方言占位符）。"""
+    return (f"SELECT seq FROM events WHERE status IN ({ph}) "
+            "AND (completed_at IS NULL OR completed_at='') "
+            f"ORDER BY seq LIMIT {int(batch)}")
+
+
+def events_backfill_completed_at(seq_ph: str, status_ph: str, now_fn: str) -> str:
+    """按 created_at（缺失则当前时间）回填终态事件的 completed_at（Issue #1497）。"""
+    return (f"UPDATE events SET completed_at=COALESCE(NULLIF(created_at,''), {now_fn}) "
+            f"WHERE seq IN ({seq_ph}) AND status IN ({status_ph}) "
+            "AND (completed_at IS NULL OR completed_at='')")
+
+
+def events_backfill_completed_at_valued(seq_ph: str, status_ph: str, val_expr: str) -> str:
+    """同上，但 completed_at 取调用方给定的值表达式（含 updated_at 回退链）。"""
+    return (f"UPDATE events SET completed_at={val_expr} "
+            f"WHERE seq IN ({seq_ph}) AND status IN ({status_ph}) "
+            "AND (completed_at IS NULL OR completed_at='')")
+
+
+AGENT_RUNTIMES_HEALTH_ROWS = (
+    "SELECT id, status, last_seen_at, health, credential_id, installed, healthy "
+    "FROM agent_runtimes WHERE health IS NOT NULL AND health != ''")
+
+
+def agent_runtimes_set_health(ph: str) -> str:
+    """遗留 health 列回填（值级幂等：健康值未变则 0 行）。"""
+    return f"UPDATE agent_runtimes SET health={ph} WHERE id={ph} AND health={ph}"
+
+
+def chat_agent_session_new_insert_select(cols: list[str]) -> str:
+    """chat_agent_session 重建表的行搬迁（保留新旧表共有列）。"""
+    _c = ",".join(cols)
+    return f"INSERT INTO chat_agent_session_new ({_c}) SELECT {_c} FROM chat_agent_session"
+
+
+def agent_runtimes_new_insert_select(cols: list[str]) -> str:
+    """agent_runtimes 重建表的行搬迁（只带新旧表共有列）。"""
+    _c = ",".join(cols)
+    return f"INSERT INTO agent_runtimes_new ({_c}) SELECT {_c} FROM agent_runtimes"

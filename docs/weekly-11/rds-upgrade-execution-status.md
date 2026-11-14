@@ -160,6 +160,49 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### 三实例彩排首次全绿（此前唯一未验项，含 3 个真缺陷修复）
+```bash
+SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin REMOTE_PWD=… \
+  LOOP_MAX=1 bash scripts/p4_p5_loop.sh
+```
+- **P4 PASS**：三实例 / 两节点，表集合一致、行数等于 dump 快照、视图 0、账号授权仅本库。
+- **P5 PASS**：G2 / G3 / G4 / A6 全绿（`--env-only`，A3 静态面单列）。
+- **冒烟：172 个端点，失败 0**（169 读 + 3 写场景 + 46 写端点空体探测）。
+- `RESULT: 环境侧全绿（P4 落库 + P5 A1/A2/A6 + 冒烟）`。
+
+过程中修掉三个真缺陷（都不是本批引入，但此前一直没被发现）：
+1. **`rds_p4_provision.py` 生成的 stage env 漏写 `GRAPE_DOMAIN_LIB=1`** →
+   `db_registry.uses_own_dsn()` 恒 False，所有「任意拓扑」原语回落进程库（mgmt）→ 查
+   runtime/insight 表统一 1146。补写该键后 1146 告警成片消失。
+2. **`runtime/im/engine_wiring.py` 用了 `_mgmt_public` 却没 import**（3921a54c6 归位时漏的）→
+   运行期 `NameError` 被 except 吞成「读不到安装 → None」，IM 推送静默失效。补 import，
+   7 个调用点（`installation_*`）全部恢复。
+3. **`runtime/engine/instances.py` 的 4 条 `agent_runtimes` / `runtime_credentials` SQL 走进程库** →
+   `PUT /api/chat/config` 报 `1146 ... agent_runtimes`（交接文档 §5.3 坑 2 的最后一处；之前只修了
+   `_chat_config_row_engine`）。改走 runtime 具名查询（`runtimes_for_instance_scan*` /
+   `runtime_credential_id|scope` / `runtime_instance_row`）。
+
+第 1 条也解释了历史记录里「彩排 0 失败」与坑 2 并存的矛盾：上一轮 stage env 同样缺 lib 开关，
+多数端点在内部 catch 了 1146，只有写探测把 `PUT /api/chat/config` 的异常记成了失败。
+
+### db_setup 迁移/DDL 按归属域下沉（-33，本文件清零）
+- `src/api/db_setup.py` 的 33 处清零。内联 DDL/DML 按归属下沉：
+  · **runtime**：`agent_runtimes` 补列与重建、`events` 补 `completed_at`（两个版本）、
+    `takeover_sessions` 补 host 三列、遗留 `health` 回填、`chat_agent_session` 重建；
+  · **mgmt**：`organization` 文本重建的搬数据、`login_whitelist` 字面 `'NULL'` 清洗、
+    `managed_repos` 补平台列与列读取、`unified_user_mapping.dingtalk_user_id` 加宽、
+    `scene_market` 旧唯一索引删除；
+  · **insight**：`api_latency_log` 保留期清理。
+- 动态列名/表名一律走**owner 域函数返回 SQL**（不 import 常量属性——门禁要求），
+  执行顺序仍由 db_setup 的迁移编排保证。
+- 两处跨域关联子查询拆成原语：`org_id` 回填（`mgmt.repo_org_map` → 各域
+  `backfill_org_id_by_repo`，表名固定白名单）与 `skill.category_id` 回填
+  （`mgmt.skill_category_map` → `runtime.backfill_skill_category_id`）。
+- 另有 12 处是注释/日志文案命中正则（不是 SQL），按判据口径改述。
+- 全局 **565 → 532**（-33）；基线 **532 / 100 对**。
+- 等价性硬证据：空 sqlite 跑 `init_database()` → **98 张表**（与 §5.2 记录完全一致），
+  `agent_runtimes` 模型三列、`events.completed_at`、`takeover_sessions` host 三列均在。
+
 ### runtime public 自身去跨域（-32，本文件清零）
 - `src/domains/runtime/public/__init__.py` 的 28 处外域引用清零，分四类处理：
   · **`grape_t_repo_credentials`（insight，10 处）**：本文件的 `list_repo_credentials` /
