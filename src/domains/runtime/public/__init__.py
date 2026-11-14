@@ -1832,6 +1832,10 @@ _ANY_QUERIES: dict[str, str] = {
         "THEN 0 ELSE 1 END, ar.id"),
     "runtime_credential_id": "SELECT credential_id FROM agent_runtimes WHERE id=?",
     "runtime_credential_scope": "SELECT scope FROM runtime_credentials WHERE id=?",
+    "runtime_credentials_scope_owner": (
+        "SELECT scope, owner_name FROM runtime_credentials WHERE id=?"),
+    "runtime_credentials_name_device": (
+        "SELECT name, device_name FROM runtime_credentials WHERE id=?"),
     # 巡检（api/patrol.py）读路径：issue / events / agent_tasks / agent_runtimes
     "issue_status_by_repo_number": (
         "SELECT status FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1"),
@@ -2876,3 +2880,225 @@ def tasks_completed_page(cutoff: str, last_id: str, chunk: int = 500) -> list[tu
         else:
             c.execute(_any_sql("tasks_completed_page_all"), (last_id, int(chunk)))
         return [tuple(r) for r in (c.fetchall() or [])]
+
+
+# ---------- 看板聚合（insight dashboard 只读；过滤条件由调用方给，SQL 留在本域）----------
+#
+# 这些是报表聚合而不是单表读写，所以给的是「聚合原语」：调用方传 repo_keys / org_id，
+# 本域拼 WHERE 并聚合。跨域 JOIN（如 agent_tasks ⋈ issue）也在本域内完成，
+# 避免 insight 侧持有其他域的表名。
+
+def _dash_where(repo_keys=None, org_id=None, prefix: str = "WHERE 1=1") -> tuple[str, list]:
+    """看板通用过滤：(SQL 片段, 参数)。repo_keys 走 IN，org_id 非空时加等值。"""
+    parts = [prefix]
+    params: list = []
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if keys:
+        parts.append(f"AND repo_key IN ({','.join(['?'] * len(keys))})")
+        params += keys
+    if org_id:
+        parts.append("AND org_id=?")
+        params.append(org_id)
+    return " ".join(parts), params
+
+
+def dashboard_task_status_counts(repo_keys=None, org_id=None) -> list[tuple]:
+    """任务状态分布 [(status, count)]。"""
+    where, params = _dash_where(repo_keys, org_id)
+    with _any_cursor() as c:
+        c.execute(f"SELECT status, COUNT(*) FROM agent_tasks {where} GROUP BY status", params)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_issue_latest_status_counts(repo_keys=None, org_id=None) -> list[tuple]:
+    """按 issue 最新任务状态聚合 [(status, count)]（一 issue 一任务口径）。"""
+    where, params = _dash_where(repo_keys, org_id,
+                                prefix="WHERE issue_id IS NOT NULL AND issue_id <> ''")
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT t.status, COUNT(*) FROM ("
+            "SELECT issue_id, MAX(id) AS max_id FROM agent_tasks "
+            f"{where} GROUP BY issue_id"
+            ") latest JOIN agent_tasks t ON t.id = latest.max_id GROUP BY t.status", params)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_stuck_tasks(cutoff_iso: str, repo_keys=None, org_id=None,
+                          limit: int = 100) -> list[tuple]:
+    """running 且 started_at 早于阈值的任务（按 started_at 升序取前 N）。"""
+    where, params = _dash_where(repo_keys, org_id,
+                                prefix="WHERE status='running' AND started_at IS NOT NULL "
+                                       "AND started_at < ?")
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT id, agent_type, runtime_id, started_at, repo_key, issue_id, event_seq "
+            f"FROM agent_tasks {where} ORDER BY started_at ASC LIMIT {int(limit)}",
+            [cutoff_iso] + params)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_failed_tasks(repo_keys=None, org_id=None) -> list[tuple]:
+    """failed 任务明细（按 completed_at 倒序，调用方自行截断）。"""
+    where, params = _dash_where(repo_keys, org_id, prefix="WHERE status='failed'")
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT id, agent_type, runtime_id, started_at, completed_at, repo_key, issue_id, "
+            "event_seq, result_text, exit_code, errors "
+            f"FROM agent_tasks {where} ORDER BY completed_at DESC", params)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_task_by_source(repo_keys=None, org_id=None) -> list[tuple]:
+    """未终结任务按来源分组 [(agent_type, status, count)]。"""
+    where, params = _dash_where(repo_keys, org_id,
+                                prefix="WHERE status IN ('queued','dispatched','running')")
+    with _any_cursor() as c:
+        c.execute(f"SELECT agent_type, status, COUNT(*) FROM agent_tasks {where} "
+                  "GROUP BY agent_type, status", params)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_today_status_counts(day_prefix: str, repo_keys=None, org_id=None) -> list[tuple]:
+    """今日创建任务的状态分布（created_at ISO 日期前缀匹配）。"""
+    where, params = _dash_where(repo_keys, org_id, prefix="WHERE created_at LIKE ?")
+    with _any_cursor() as c:
+        c.execute(f"SELECT status, COUNT(*) FROM agent_tasks {where} GROUP BY status",
+                  [day_prefix + "%"] + params)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+_DASH_WORKER_COLS = (
+    "SELECT id, name, device_name, status, last_seen_at, last_ip, cpu_percent, memory_percent, "
+    "disk_percent, tmp_percent, bandwidth_percent, bandwidth_mbps, load_avg, owner_name "
+    "FROM runtime_credentials WHERE status != 'revoked' "
+    "AND last_seen_at IS NOT NULL AND last_seen_at >= ?")
+
+
+def dashboard_worker_rows(stale_cutoff: str, org_id=None, uname: str = "",
+                          repo_key: str = "", repo: str = "") -> list[tuple]:
+    """看板 worker 行（三种可见性口径：组织隔离 / 仓库级 / 个人组织全局）。"""
+    with _any_cursor() as c:
+        if org_id:
+            c.execute(_DASH_WORKER_COLS + " AND org_id=? ORDER BY id", (stale_cutoff, org_id))
+        elif repo:
+            c.execute(_DASH_WORKER_COLS +
+                      " AND (scope='global' OR (scope='user' AND owner_name=?) "
+                      "OR repo_key=? OR repo_key=?) ORDER BY id",
+                      (stale_cutoff, uname, repo_key, repo))
+        else:
+            c.execute(_DASH_WORKER_COLS +
+                      " AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
+                      (stale_cutoff, uname))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_local_runtimes(org_id=None) -> list[tuple]:
+    """本机直连引擎（credential_id=0）行。"""
+    sql = ("SELECT ar.id, ar.name, ar.status, ar.last_seen_at, ar.host_name, "
+           "ar.healthy, ar.busy_slots, ar.max_concurrent FROM agent_runtimes ar "
+           "WHERE ar.credential_id = 0")
+    params: list = []
+    if org_id:
+        sql += " AND ar.org_id=?"
+        params.append(org_id)
+    with _any_cursor() as c:
+        c.execute(sql, params)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_running_counts(org_id=None) -> list[tuple]:
+    """每个引擎当前 running 任务数 [(runtime_id, count)]。"""
+    sql = "SELECT runtime_id, COUNT(*) FROM agent_tasks WHERE status='running'"
+    params: list = []
+    if org_id:
+        sql += " AND org_id=?"
+        params.append(org_id)
+    sql += " GROUP BY runtime_id"
+    with _any_cursor() as c:
+        c.execute(sql, params)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_avg_durations(org_id=None) -> list[tuple]:
+    """每个引擎已完成任务的平均耗时（秒）；sqlite 用 strftime，MySQL 回落 TIMESTAMPDIFF。"""
+    where = "WHERE status IN ('completed','failed') AND runtime_id > 0"
+    params: list = []
+    if org_id:
+        where += " AND org_id=?"
+        params.append(org_id)
+    with _any_cursor() as c:
+        try:
+            c.execute(
+                "SELECT runtime_id, AVG(CASE WHEN completed_at IS NOT NULL AND started_at IS NOT NULL "
+                "THEN (strftime('%s', completed_at) - strftime('%s', started_at)) ELSE NULL END) "
+                f"AS avg_sec FROM agent_tasks {where} GROUP BY runtime_id", params)
+            return [tuple(r) for r in (c.fetchall() or [])]
+        except Exception:  # noqa: BLE001 - MySQL 方言回落
+            c.execute(
+                "SELECT runtime_id, AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) AS avg_sec "
+                f"FROM agent_tasks {where} AND started_at IS NOT NULL AND completed_at IS NOT NULL "
+                "GROUP BY runtime_id", params)
+            return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_runtime_rows(org_id=None) -> list[tuple]:
+    """引擎行 + 绑定凭据（LEFT JOIN runtime_credentials，含探测字段与 org_id）。"""
+    sql = ("SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
+           "ar.healthy, ar.busy_slots, ar.max_concurrent, ar.version, rc.name AS rc_name, "
+           "rc.device_name, rc.status AS cred_status, rc.id AS cred_pk, ar.host_name, "
+           "ar.probe_status, ar.probe_latency, ar.probe_last, ar.probe_error, ar.org_id "
+           "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id")
+    params: list = []
+    if org_id:
+        sql += " WHERE ar.org_id=?"
+        params.append(org_id)
+    sql += " ORDER BY ar.id"
+    with _any_cursor() as c:
+        c.execute(sql, params)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_credential_scope_owner(cred_id) -> tuple | None:
+    """凭据的 (scope, owner_name)。"""
+    return read_one_any("runtime_credentials_scope_owner", (cred_id,))
+
+
+def dashboard_credential_name_device(cred_id) -> tuple | None:
+    """凭据的 (name, device_name)。"""
+    return read_one_any("runtime_credentials_name_device", (cred_id,))
+
+
+def dashboard_issue_contrib(repo_keys) -> list[tuple]:
+    """需求协作统计 [(creator, assignee, user_id, count, completed)]（issue 单表，非子任务）。"""
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return []
+    ph = ",".join(["?"] * len(keys))
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT COALESCE(NULLIF(created_by,''), '') AS creator, "
+            "COALESCE(assignee,'') AS assignee, COALESCE(user_id,0), COUNT(*), "
+            f"SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) FROM issue "
+            f"WHERE repo_key IN ({ph}) AND is_subtask_mode=0 "
+            "GROUP BY creator, assignee, COALESCE(user_id,0)", keys)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def dashboard_task_issue_rows(task_ids, chunk: int = 500) -> list[tuple]:
+    """token 归属链回链：[(task_id, created_by, assignee, user_id, is_subtask_mode, issue_id)]。
+
+    agent_tasks ⋈ issue（都在本域），分块避免 SQLite 变量上限。
+    """
+    ids = [t for t in (task_ids or []) if t]
+    out: list[tuple] = []
+    for i in range(0, len(ids), chunk):
+        part = ids[i:i + chunk]
+        ph = ",".join(["?"] * len(part))
+        with _any_cursor() as c:
+            c.execute(
+                "SELECT t.id, i.created_by, i.assignee, COALESCE(i.user_id, 0), "
+                "i.is_subtask_mode, i.id FROM agent_tasks t LEFT JOIN issue i "
+                "ON i.repo_key = t.repo_key AND i.issue_number = "
+                f"CAST(SUBSTR(t.issue_id, 2) AS INTEGER) WHERE t.id IN ({ph})", part)
+            out.extend(tuple(r) for r in (c.fetchall() or []))
+    return out

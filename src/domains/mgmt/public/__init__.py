@@ -1687,3 +1687,47 @@ def patrol_findings_delete_terminal(statuses, cutoff_iso: str) -> int:
             f"DELETE FROM grape_t_patrol_findings WHERE status IN ({_ph}) "
             "AND updated_at != '' AND updated_at < ?", (*_statuses, cutoff_iso))
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+# ---------- 看板/报表读（insight dashboard 用；表归 mgmt） ----------
+
+def account_names_by_ids(ids) -> dict:
+    """批量取账号显示名 {id: username}（分块，500/批）。"""
+    out: dict = {}
+    todo = [str(u) for u in (ids or []) if u]
+    for i in range(0, len(todo), 500):
+        part = todo[i:i + 500]
+        ph = ",".join(["?"] * len(part))
+        with _any_cursor() as c:
+            c.execute(f"SELECT id, username FROM grape_accounts WHERE id IN ({ph})", part)
+            for uid, name in (c.fetchall() or []):
+                if name:
+                    out[uid] = name
+    return out
+
+
+def repo_key_in_candidates(repo_keys) -> str:
+    """在候选里找出真实存在的 managed_repos.repo_key（无命中返回空串）。"""
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return ""
+    ph = ",".join(["?"] * len(keys))
+    with _any_cursor() as c:
+        c.execute(f"SELECT repo_key FROM managed_repos WHERE repo_key IN ({ph}) LIMIT 1", keys)
+        row = c.fetchone()
+    return (row[0] if row else "") or ""
+
+
+def pipeline_scene_advanced_options(scene_id, repo_keys) -> str:
+    """场景的 advanced_options 原文（JSON 串，解析归调用方）；无行返回空串。"""
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not scene_id or not keys:
+        return ""
+    ph = ",".join(["?"] * len(keys))
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT advanced_options FROM devops_pipeline_scene "
+            f"WHERE scene_id=? AND repo_key IN ({ph}) AND is_active=1 LIMIT 1",
+            [scene_id] + keys)
+        row = c.fetchone()
+    return (row[0] if row and row[0] else "") or ""

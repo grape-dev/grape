@@ -1,12 +1,12 @@
 table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,4
-agent_runtimes,runtime,insight,8
+agent_runtimes,runtime,insight,6
 agent_runtimes,runtime,kernel,2
 agent_runtimes,runtime,mgmt,10
 agent_shared_knowledge,mgmt,kernel,3
 agent_shared_knowledge,mgmt,runtime,8
 agent_tasks,runtime,api,8
-agent_tasks,runtime,insight,35
+agent_tasks,runtime,insight,24
 agent_tasks,runtime,kernel,1
 agent_tasks,runtime,mgmt,5
 agent_type,runtime,insight,1
@@ -24,7 +24,7 @@ chat_messages,runtime,kernel,1
 devops_agent_session,runtime,kernel,1
 devops_agent_session,runtime,mgmt,10
 devops_pipeline_scene,mgmt,api,4
-devops_pipeline_scene,mgmt,insight,2
+devops_pipeline_scene,mgmt,insight,1
 devops_pipeline_scene,mgmt,runtime,15
 distributed_locks,runtime,insight,1
 distributed_locks,runtime,kernel,9
@@ -38,7 +38,7 @@ external_identities,mgmt,api,4
 external_identities,mgmt,kernel,1
 external_identities,mgmt,runtime,4
 feishu_onboard_task,mgmt,runtime,1
-grape_accounts,mgmt,insight,2
+grape_accounts,mgmt,insight,1
 grape_accounts,mgmt,runtime,13
 grape_t_channel_chat_session_binding,mgmt,runtime,4
 grape_t_channel_inbound_dedup,mgmt,runtime,5
@@ -55,12 +55,11 @@ grape_t_repo_credentials,insight,mgmt,5
 grape_t_repo_credentials,insight,runtime,1
 gsb_service_registry,mgmt,kernel,9
 issue,runtime,api,12
-issue,runtime,insight,4
+issue,runtime,insight,2
 issue,runtime,mgmt,2
 issue_state,runtime,api,1
 login_whitelist,mgmt,kernel,4
 managed_repos,mgmt,api,3
-managed_repos,mgmt,insight,1
 managed_repos,mgmt,kernel,10
 managed_repos,mgmt,runtime,15
 meta,runtime,kernel,8
@@ -68,7 +67,7 @@ meta,runtime,mgmt,11
 obs_metric_rollup,insight,mgmt,1
 outbound_content_ledger,mgmt,kernel,6
 runtime_credentials,runtime,api,6
-runtime_credentials,runtime,insight,17
+runtime_credentials,runtime,insight,11
 runtime_credentials,runtime,kernel,1
 runtime_credentials,runtime,mgmt,8
 runtime_health_scores,runtime,insight,1

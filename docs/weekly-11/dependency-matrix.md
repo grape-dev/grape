@@ -1,7 +1,7 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-14 22:58　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **58** 张；跨域引用 **507** 处（99 个「表×消费域」对）；含归属域在内的 SQL 引用 2511 处
+> 生成时间：2026-11-14 23:04　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **58** 张；跨域引用 **483** 处（98 个「表×消费域」对）；含归属域在内的 SQL 引用 2510 处
 
 ## 1. 域 × 域 跨域引用热力
 
@@ -11,15 +11,15 @@
 | kernel | 59 | 34 | 0 | 93 |
 | mgmt | 0 | 96 | 6 | 102 |
 | runtime | 145 | 0 | 1 | 146 |
-| insight | 9 | 76 | 0 | 85 |
+| insight | 6 | 55 | 0 | 61 |
 
 ## 2. 处置分类进度
 
 | 分类 | 表数 | 剩余跨域引用 |
 | --- | ---: | ---: |
-| D | 18 | 200 |
-| C1 | 10 | 142 |
-| C2 | 25 | 160 |
+| D | 18 | 197 |
+| C1 | 10 | 133 |
+| C2 | 25 | 148 |
 | B | 4 | 4 |
 | E | 1 | 1 |
 
@@ -27,18 +27,18 @@
 
 | 表 | 归属 | 跨域引用 | 消费方 | 处置 | 写通道 | 文件数 |
 | --- | --- | ---: | --- | --- | --- | ---: |
-| `agent_tasks` | runtime | 49 | insight 35 / api 8 / mgmt 5 / kernel 1 | C2 outbox 跨域写 | W1 | 44 |
 | `skill` | runtime | 42 | mgmt 29 / api 8 / kernel 5 | D 模块归位（kernel 写/读域表） | — | 18 |
-| `runtime_credentials` | runtime | 32 | insight 17 / mgmt 8 / api 6 / kernel 1 | C1 归属重定（写路径挪进 owner 域） | — | 26 |
-| `managed_repos` | mgmt | 29 | runtime 15 / kernel 10 / api 3 / insight 1 | D 模块归位（kernel 写/读域表） | — | 28 |
-| `agent_runtimes` | runtime | 24 | mgmt 10 / insight 8 / api 4 / kernel 2 | C1 归属重定（写路径挪进 owner 域） | — | 36 |
-| `devops_pipeline_scene` | mgmt | 21 | runtime 15 / api 4 / insight 2 | C1 归属重定（写路径挪进 owner 域） | — | 17 |
+| `agent_tasks` | runtime | 38 | insight 24 / api 8 / mgmt 5 / kernel 1 | C2 outbox 跨域写 | W1 | 43 |
+| `managed_repos` | mgmt | 28 | runtime 15 / kernel 10 / api 3 | D 模块归位（kernel 写/读域表） | — | 27 |
+| `runtime_credentials` | runtime | 26 | insight 11 / mgmt 8 / api 6 / kernel 1 | C1 归属重定（写路径挪进 owner 域） | — | 25 |
+| `agent_runtimes` | runtime | 22 | mgmt 10 / insight 6 / api 4 / kernel 2 | C1 归属重定（写路径挪进 owner 域） | — | 35 |
 | `unified_user_mapping` | mgmt | 21 | runtime 17 / kernel 3 / insight 1 | D 模块归位（kernel 写/读域表） | — | 14 |
+| `devops_pipeline_scene` | mgmt | 20 | runtime 15 / api 4 / insight 1 | C1 归属重定（写路径挪进 owner 域） | — | 16 |
 | `events` | runtime | 19 | insight 8 / api 7 / mgmt 4 | C1 归属重定（写路径挪进 owner 域） | — | 28 |
 | `grape_t_channel_installation` | mgmt | 19 | runtime 19 | C2 outbox 跨域写 | W2 | 11 |
 | `meta` | runtime | 19 | mgmt 11 / kernel 8 | D 模块归位（kernel 写/读域表） | — | 7 |
-| `issue` | runtime | 18 | api 12 / insight 4 / mgmt 2 | D 模块归位（kernel 写/读域表） | — | 25 |
-| `grape_accounts` | mgmt | 15 | runtime 13 / insight 2 | C2 outbox 跨域写 | W2 | 18 |
+| `issue` | runtime | 16 | api 12 / insight 2 / mgmt 2 | D 模块归位（kernel 写/读域表） | — | 24 |
+| `grape_accounts` | mgmt | 14 | runtime 13 / insight 1 | C2 outbox 跨域写 | W2 | 17 |
 | `agent_shared_knowledge` | mgmt | 11 | runtime 8 / kernel 3 | C1 归属重定（写路径挪进 owner 域） | — | 9 |
 | `devops_agent_session` | runtime | 11 | mgmt 10 / kernel 1 | C1 归属重定（写路径挪进 owner 域） | — | 16 |
 | `user_repos` | mgmt | 11 | kernel 5 / runtime 3 / insight 2 / api 1 | D 模块归位（kernel 写/读域表） | — | 12 |

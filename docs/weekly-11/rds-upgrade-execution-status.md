@@ -185,6 +185,26 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
 第 1 条也解释了历史记录里「彩排 0 失败」与坑 2 并存的矛盾：上一轮 stage env 同样缺 lib 开关，
 多数端点在内部 catch 了 1146，只有写探测把 `PUT /api/chat/config` 的异常记成了失败。
 
+### insight dashboard 看板聚合接口化（-24，本文件清零）
+- 24 处清零，全部是「跨域只读聚合」，所以给的不是单表查询而是**聚合原语**：
+  · runtime public `dashboard_*` 12 个：任务状态分布、issue 最新任务口径、stuck 窗口、
+    failed 明细、按来源分组、今日分布、worker 三分支可见性、本机引擎、running 计数、
+    平均耗时（sqlite `strftime` / MySQL `TIMESTAMPDIFF` 双分支）、引擎行 LEFT JOIN 凭据、
+    凭据 scope/owner 与 name/device 单条；
+  · mgmt public 3 个：账号名批量（`account_names_by_ids`）、`repo_key_in_candidates`、
+    `pipeline_scene_advanced_options`。
+- **过滤语义收进 owner 域**：`_dash_where(repo_keys, org_id)` 统一「repo_keys 走 IN、org_id 等值、
+  两者可组合」，调用方只传数据不再拼 WHERE（原先 dashboard 里有 6 处 f-string 过滤片段）。
+- 两处跨域 JOIN 一并下沉：`dashboard_issue_contrib`（issue 单表 + `is_subtask_mode=0` 口径）、
+  `dashboard_task_issue_rows`（`agent_tasks ⋈ issue` 回链，分块规避 SQLite 变量上限）。
+- 全局 **507 → 483**（-24）；基线 **483 / 98 对**。
+- 新增 `dash_smoke`（8 组断言）：过滤组合（全量/按仓库/无命中）、issue 一 issue 一任务口径
+  （#2 取最新 failed）、stuck 阈值与 limit、failed 倒序、worker 三种可见性（含 revoked 排除）、
+  本机引擎、running 计数、平均耗时数值（7200s）、引擎行 LEFT JOIN、协作统计口径（子任务排除）、
+  token 回链、mgmt 三个查找。
+- 本批自己引入的一个缺陷被烟测立刻抓住：`_dash_where` 第一版追加条件漏了 `AND`，repo 过滤时
+  SQL 语法错误——补上后八组全绿，也是「每批都配烟测」的直接收益。
+
 ### patrol 巡检全链路接口化（-25，本文件清零）
 - `src/api/patrol.py` 的 25 处清零：`agent_tasks` 10、`grape_t_patrol_findings` 4、`meta` 4、
   `events` 3、`issue` 2、`agent_runtimes` 1、`managed_repos` 1、`user_repos` 1（另 1 处注释）。

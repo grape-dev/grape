@@ -15,6 +15,10 @@ from src.domains.insight.observability.engine_probe import get_probe_results
 
 from src.kernel.config import log
 
+# 看板是跨域只读聚合：SQL 在 runtime / mgmt 的 public，本模块不再持有其他域表名
+from src.domains.runtime import public as _rt_dash
+from src.domains.mgmt import public as _mgmt_dash
+
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 def _stuck_minutes() -> int:
@@ -153,13 +157,9 @@ def _efficiency_uid_name_loader(c):
         for i in range(0, len(todo), 500):
             part = todo[i:i + 500]
             _ph = ",".join("?" * len(part))
-            c.execute(
-                "SELECT id, username FROM grape_accounts"
-                f" WHERE id IN ({_ph})",
-                tuple(str(u) for u in part))
-            for uid, name in c.fetchall():
-                if name:
-                    cache[uid] = name
+            # 账号名读归 mgmt 域（分块原语）
+            for uid, name in _mgmt_dash.account_names_by_ids(part).items():
+                cache[uid] = name
         return cache
 
     return _load
@@ -229,14 +229,7 @@ def get_efficiency_board(repo: str = "", limit: int = 50,
         with db_lock:
             c = db.cursor()
             load_uid_names = _efficiency_uid_name_loader(c)
-            c.execute(
-                "SELECT COALESCE(NULLIF(created_by,''), '') AS creator,"
-                " COALESCE(assignee,'') AS assignee, COALESCE(user_id,0),"
-                " COUNT(*), SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END)"
-                f" FROM issue WHERE repo_key IN ({_rk_ph}) AND is_subtask_mode=0"
-                " GROUP BY creator, assignee, COALESCE(user_id,0)",
-                tuple(repo_keys))
-            _rows = c.fetchall()
+            _rows = _rt_dash.dashboard_issue_contrib(repo_keys)
             _uid_names = load_uid_names(r[2] for r in _rows)
             for creator, assignee, uid, cnt, done in _rows:
                 name = creator.strip() or assignee.strip() or _uid_names.get(uid, "")
@@ -271,20 +264,8 @@ def get_efficiency_board(repo: str = "", limit: int = 50,
             }
             # 回链分块查询：SQLite 变量上限 999/32766 视版本，大仓库任务数可能超限
             _task_items = list(task_tokens.items())
-            _chunk = 500
-            _task_rows = []   # (task_id, created_by, assignee, user_id, is_subtask_mode, issue_id)
-            for _i in range(0, len(_task_items), _chunk):
-                _part = _task_items[_i:_i + _chunk]
-                _t_ph = ",".join("?" * len(_part))
-                c.execute(
-                    "SELECT t.id, i.created_by, i.assignee,"
-                    " COALESCE(i.user_id, 0), i.is_subtask_mode, i.id"
-                    " FROM agent_tasks t LEFT JOIN issue i"
-                    " ON i.repo_key = t.repo_key AND i.issue_number ="
-                    " CAST(SUBSTR(t.issue_id, 2) AS INTEGER)"
-                    f" WHERE t.id IN ({_t_ph})",
-                    tuple(tid for tid, _ in _part))
-                _task_rows.extend(c.fetchall())
+            # 回链（agent_tasks ⋈ issue，两表都在运行域）：分块与 JOIN 都下沉到 owner 域
+            _task_rows = _rt_dash.dashboard_task_issue_rows([tid for tid, _ in _task_items])
             _uid_names = load_uid_names(r[3] for r in _task_rows)
             for task_id, created_by, assignee, uid, is_sub, issue_id in _task_rows:
                 name = ((created_by or "").strip() or (assignee or "").strip()
@@ -554,8 +535,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         task_status_counts = {"queued": 0, "dispatched": 0, "running": 0,
                               "completed": 0, "failed": 0, "cancelled": 0}
         try:
-            c.execute(f"SELECT status, COUNT(*) FROM agent_tasks WHERE 1=1{_repo_filter}{_task_org_filter} GROUP BY status", tuple(_repo_params + _task_org_params))
-            for status, count in c.fetchall():
+            for status, count in _rt_dash.dashboard_task_status_counts(_repo_params, _filter_org_id):
                 if status in task_status_counts:
                     task_status_counts[status] = count
         except Exception:
@@ -565,16 +545,9 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         issue_stats = {"total": 0, "completed": 0, "in_progress": 0, "failed": 0}
         try:
             # 每个 issue 取最新 task 的状态作为该 issue 的状态
-            c.execute(f"""
-                SELECT t.status, COUNT(*) FROM (
-                    SELECT issue_id, MAX(id) as max_id FROM agent_tasks
-                    WHERE issue_id IS NOT NULL AND issue_id <> '' {(_repo_filter.replace('WHERE', 'AND') if _repo_filter else '')}{_task_org_filter}
-                    GROUP BY issue_id
-                ) latest JOIN agent_tasks t ON t.id = latest.max_id
-                GROUP BY t.status
-            """, tuple(_repo_params + _task_org_params))
             _issue_status_map = {}
-            for status, count in c.fetchall():
+            for status, count in _rt_dash.dashboard_issue_latest_status_counts(
+                    _repo_params, _filter_org_id):
                 _issue_status_map[status] = count
             issue_stats["total"] = sum(_issue_status_map.values())
             issue_stats["completed"] = _issue_status_map.get("completed", 0)
@@ -591,14 +564,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         # --- stuck 检测：running 且 started_at < 30 分钟前 ---
         stuck_tasks = []
         try:
-            c.execute(
-                "SELECT id, agent_type, runtime_id, started_at, repo_key, issue_id, event_seq "
-                "FROM agent_tasks WHERE status='running' AND started_at IS NOT NULL AND started_at < ?"
-                + _repo_filter + _task_org_filter +
-                " ORDER BY started_at ASC LIMIT 100",
-                (stuck_cutoff,) + tuple(_repo_params) + tuple(_task_org_params),
-            )
-            for r in c.fetchall():
+            for r in _rt_dash.dashboard_stuck_tasks(stuck_cutoff, _repo_params, _filter_org_id):
                 stuck_tasks.append({
                     "id": r[0], "agent_type": r[1] or "", "runtime_id": r[2],
                     "started_at": normalize_event_time(r[3]), "repo_key": r[4] or "",
@@ -610,12 +576,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         # --- 最近 failed 任务（最近 20 条）---
         failed_tasks = []
         try:
-            c.execute(
-                "SELECT id, agent_type, runtime_id, started_at, completed_at, repo_key, issue_id, event_seq, result_text, exit_code, errors "
-                "FROM agent_tasks WHERE status='failed'" + _repo_filter + _task_org_filter + " ORDER BY completed_at DESC",
-                tuple(_repo_params) + tuple(_task_org_params),
-            )
-            for r in c.fetchall():
+            for r in _rt_dash.dashboard_failed_tasks(_repo_params, _filter_org_id):
                 # errors 字段是 JSON 数组字符串，解析后取前 3 条
                 import json as _json
                 _errors = []
@@ -639,12 +600,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         # --- 按来源（agent_type）分组排队/运行数 ---
         task_by_source = {}
         try:
-            c.execute(
-                "SELECT agent_type, status, COUNT(*) FROM agent_tasks "
-                "WHERE status IN ('queued','dispatched','running')" + _repo_filter + _task_org_filter + " GROUP BY agent_type, status",
-                tuple(_repo_params) + tuple(_task_org_params),
-            )
-            for atype, status, count in c.fetchall():
+            for atype, status, count in _rt_dash.dashboard_task_by_source(
+                    _repo_params, _filter_org_id):
                 key = atype or "unknown"
                 if key not in task_by_source:
                     task_by_source[key] = {"queued": 0, "running": 0}
@@ -708,37 +665,9 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         _uname = user.get("username") or ""
         try:
             _stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-            if _filter_org_id:
-                # 非个人组织：只查 org_id 匹配的凭据
-                c.execute(
-                    "SELECT id, name, device_name, status, last_seen_at, last_ip, "
-                    "cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, bandwidth_mbps, load_avg, owner_name "
-                    "FROM runtime_credentials WHERE status != 'revoked' "
-                    "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
-                    "AND org_id=? ORDER BY id",
-                    (_stale_cutoff, _filter_org_id),
-                )
-            elif repo:
-                # 仓库级看板：global + 自己的 user + 该 repo 的 worker
-                c.execute(
-                    "SELECT id, name, device_name, status, last_seen_at, last_ip, "
-                    "cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, bandwidth_mbps, load_avg, owner_name "
-                    "FROM runtime_credentials WHERE status != 'revoked' "
-                    "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
-                    "AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key=? OR repo_key=?) ORDER BY id",
-                    (_stale_cutoff, _uname, repo_key, repo),
-                )
-            else:
-                # 个人组织全局看板：global + 自己的 user scope worker
-                c.execute(
-                    "SELECT id, name, device_name, status, last_seen_at, last_ip, "
-                    "cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, bandwidth_mbps, load_avg, owner_name "
-                    "FROM runtime_credentials WHERE status != 'revoked' "
-                    "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
-                    "AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
-                    (_stale_cutoff, _uname),
-                )
-            for w in c.fetchall():
+            # 三种可见性口径（组织隔离 / 仓库级 / 个人组织全局）在 owner 域原语里分支
+            for w in _rt_dash.dashboard_worker_rows(
+                    _stale_cutoff, _filter_org_id, _uname, repo_key, repo):
                 wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wbw, wbm, wload, wowner = w
                 worker_total += 1
                 w_health = derive_runtime_health(wstatus or "offline", wlast_seen, now_ts)
@@ -766,14 +695,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                 _local_hostname = engine_host()
             except Exception:
                 pass
-            c.execute(
-                "SELECT ar.id, ar.name, ar.status, ar.last_seen_at, ar.host_name, "
-                "ar.healthy, ar.busy_slots, ar.max_concurrent "
-                "FROM agent_runtimes ar WHERE ar.credential_id = 0"
-                + (" AND ar.org_id=?" if _filter_org_id else ""),
-                ([_filter_org_id] if _filter_org_id else [])
-            )
-            _local_rts = c.fetchall()
+            _local_rts = _rt_dash.dashboard_local_runtimes(_filter_org_id)
             if _local_rts:
                 _has_local_worker = any(w.get("device_name") == (_local_hostname or "本机直连") for w in worker_list)
                 if not _has_local_worker:
@@ -813,12 +735,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         # 查每个 runtime 当前 running 任务数（实时负载）
         _running_counts = {}
         try:
-            c.execute(
-                "SELECT runtime_id, COUNT(*) FROM agent_tasks "
-                "WHERE status='running'" + _task_org_filter + " GROUP BY runtime_id",
-                tuple(_task_org_params),
-            )
-            for row in c.fetchall():
+            for row in _rt_dash.dashboard_running_counts(_filter_org_id):
                 _running_counts[row[0]] = row[1]
         except Exception:
             pass
@@ -827,45 +744,13 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         # 引擎探测结果（每 10 分钟 CLI 测试对话）
         _probe_results = get_probe_results()
         try:
-            c.execute(
-                "SELECT runtime_id, AVG(CASE "
-                "WHEN completed_at IS NOT NULL AND started_at IS NOT NULL "
-                "THEN (strftime('%s', completed_at) - strftime('%s', started_at)) "
-                "ELSE NULL END) as avg_sec "
-                "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0"
-                + _task_org_filter + " GROUP BY runtime_id",
-                tuple(_task_org_params),
-            )
-            for row in c.fetchall():
+            # sqlite strftime / MySQL TIMESTAMPDIFF 的方言回落留在 owner 域
+            for row in _rt_dash.dashboard_avg_durations(_filter_org_id):
                 _avg_durations[row[0]] = round(row[1] or 0, 1) if row[1] else 0
         except Exception:
-            try:
-                # MySQL 兼容（TIMESTAMPDIFF）
-                c.execute(
-                    "SELECT runtime_id, AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)) as avg_sec "
-                    "FROM agent_tasks WHERE status IN ('completed','failed') AND runtime_id > 0 "
-                    "AND started_at IS NOT NULL AND completed_at IS NOT NULL"
-                    + _task_org_filter + " GROUP BY runtime_id",
-                    tuple(_task_org_params),
-                )
-                for row in c.fetchall():
-                    _avg_durations[row[0]] = round(row[1] or 0, 1) if row[1] else 0
-            except Exception:
-                pass
+            pass
         try:
-            c.execute(
-                "SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
-                "ar.healthy, ar.busy_slots, ar.max_concurrent, ar.version, "
-                "rc.name AS rc_name, rc.device_name, rc.status AS cred_status, rc.id AS cred_pk, ar.host_name, "
-                "ar.probe_status, ar.probe_latency, ar.probe_last, ar.probe_error, "
-                "ar.org_id "
-                "FROM agent_runtimes ar "
-                "LEFT JOIN runtime_credentials rc ON ar.credential_id = rc.id "
-                + ("WHERE ar.org_id=?" if _filter_org_id else "") +
-                " ORDER BY ar.id",
-                ([_filter_org_id] if _filter_org_id else [])
-            )
-            for r in c.fetchall():
+            for r in _rt_dash.dashboard_runtime_rows(_filter_org_id):
                 rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rc_name, rdev, rcred_status, cred_pk, rhost, rprobe_status, rprobe_latency, rprobe_last, rprobe_error, _rt_org_id = r
                 # 跳过已注销（revoked）凭据绑定的远端引擎（与 Workers 视图一致）。
                 # Issue #417：吊销=物理删除凭据行，LEFT JOIN 得 NULL（cred_pk 为 None）
@@ -893,13 +778,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     _cred_scope = ''
                     _cred_owner = ''
                     try:
-                        from src.kernel.domain_read import runtime_lib as _ru_lib_aff203_f
-                        _ru_lib_aff203 = _ru_lib_aff203_f(foreign_only=True)
-                        if _ru_lib_aff203 is not None:
-                            _cr = _ru_lib_aff203.read_one("runtime_credentials_aff203", (cid,))
-                        else:
-                            c.execute("SELECT scope, owner_name FROM runtime_credentials WHERE id=?", (cid,))
-                            _cr = c.fetchone()
+                        _cr = _rt_dash.dashboard_credential_scope_owner(cid)
                         if _cr:
                             _cred_scope, _cred_owner = _cr[0] or '', _cr[1] or ''
                     except Exception:
@@ -985,12 +864,8 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         today_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         today_stats = {"created": 0, "completed": 0, "failed": 0}
         try:
-            c.execute(
-                "SELECT status, COUNT(*) FROM agent_tasks "
-                "WHERE created_at LIKE ?" + _repo_filter + _task_org_filter + " GROUP BY status",
-                (today_prefix + "%",) + tuple(_repo_params) + tuple(_task_org_params),
-            )
-            for status, count in c.fetchall():
+            for status, count in _rt_dash.dashboard_today_status_counts(
+                    today_prefix, _repo_params, _filter_org_id):
                 if status in today_stats:
                     today_stats[status] = count
         except Exception:
@@ -1060,13 +935,7 @@ async def get_error_log_sources(user: dict = Depends(require_org_member)):
         try:
             with db_lock:
                 c = db.cursor()
-                from src.kernel.domain_read import runtime_lib as _ru_lib_911d7f_f
-                _ru_lib_911d7f = _ru_lib_911d7f_f(foreign_only=True)
-                if _ru_lib_911d7f is not None:
-                    row = _ru_lib_911d7f.read_one("runtime_credentials_911d7f", (_cred_id,))
-                else:
-                    c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (_cred_id,))
-                    row = c.fetchone()
+                row = _rt_dash.dashboard_credential_name_device(_cred_id)
                 if row:
                     _wname = row[1] or row[0] or _wname
         except Exception:
@@ -1601,14 +1470,10 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         if _hit is not None:
             _actual_repo_key = _hit
         else:
-            # managed_repos 归 mgmt 域：优先走 mgmt lib，单库拓扑回落本地 SQL
-            from src.kernel.session_manager import db as _mdb, db_lock as _mlock
-            with _mlock:
-                _mc = _mdb.cursor()
-                _mc.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (" + _rk_placeholders + ") LIMIT 1", _repo_keys)
-                _row = _mc.fetchone()
-                if _row:
-                    _actual_repo_key = _row[0]
+            # managed_repos 归 mgmt 域：lib 不可用时走该域原语（单库回落进程库）
+            _hit_key = _mgmt_dash.repo_key_in_candidates(_repo_keys)
+            if _hit_key:
+                _actual_repo_key = _hit_key
     except Exception:
         pass
     try:
@@ -1783,18 +1648,11 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     advanced_options = {}
     try:
         if dev_scene:
-            # devops_pipeline_scene 归 mgmt 域：单库拓扑走本地 SQL（与原先一致）
-            from src.kernel.session_manager import db as _sdb, db_lock as _slock
-            with _slock:
-                _sc = _sdb.cursor()
-                _sc.execute(
-                    "SELECT advanced_options FROM devops_pipeline_scene "
-                    "WHERE scene_id=? AND repo_key IN (" + _rk_placeholders + ") AND is_active=1 LIMIT 1",
-                    ([dev_scene] + _repo_keys))
-                _adv_row = _sc.fetchone()
-            if _adv_row and _adv_row[0]:
+            # devops_pipeline_scene 归 mgmt 域：读走该域原语，JSON 解析留在这里
+            _adv_raw = _mgmt_dash.pipeline_scene_advanced_options(dev_scene, _repo_keys)
+            if _adv_raw:
                 import json as _json
-                advanced_options = _json.loads(_adv_row[0])
+                advanced_options = _json.loads(_adv_raw)
     except Exception:
         pass
 
