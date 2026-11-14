@@ -21,7 +21,7 @@
 ### 1.2 硬不变量（任何阶段不得破坏）
 
 1. **同域写必须同事务**：`foreign_only=True` 守卫保证本域写不走 lib 连接（否则丢原子性）。
-2. **双主同 HEAD**：0007 / 0001 的 `/opt/grape` 任一时刻同 commit；nginx `ip_hash` 按 IP 钉机，两台行为必须一致。
+2. **双主同 HEAD**：0007 / 0001 的 `<deploy-root>` 任一时刻同 commit；nginx `ip_hash` 按 IP 钉机，两台行为必须一致。
 3. **只展示一次的副作用禁止入意图队列**：建凭据 token、吊销凭据必须**同步直连**（重放会造孤儿/留窗口）。
 4. **组合写收成一个原语**：探测即快照（`save_agent_runtimes`）、账号级联（`purge_user_rows`）、吊销级联（`purge_runtime_credential`）不得拆成多条意图。
 5. **意图表有上限**：`applied` 行按 7 天归档，`dead` 行必须人工处理，不得静默堆积。
@@ -320,7 +320,7 @@
 |---|---|---|---|
 | F1 | 意图表命名 `grape_t_` 规范 | ✅ 已整改 | `src/kernel/cross_write.py:22` = `grape_t_xwrite_log`；`scripts/view_owner_known_duplicates.txt:14` 同步登记 |
 | F2 | lib 写原语的 MySQL 方言（`%s` / `ON DUPLICATE KEY` / `NOW()`）在 sqlite 复用路径下不可用 | ✅ 已整改（按收紧可用性） | `src/domains/{mgmt,runtime}/public/__init__.py` 的 `available()` 改为 `db_registry.uses_own_dsn(<domain>)`；`src/domains/contracts/local/*.py` 同口径 |
-| F3 | 提交物携带内网地址 / 本机绝对路径 | ⚠️ 本轮补整改 | `deploy/systemd/*.service` 已脱敏（`/opt/grape` + `EnvironmentFile`），但 `docs/lib-3db-3host-design.md` 仍含真实内网 IP 与本机绝对路径 → 本批改为 `<dev-db-host>` / `<insight-copy-host>` / `<runtime-copy-host>` 占位 |
+| F3 | 提交物携带内网地址 / 本机绝对路径 | ⚠️ 本轮补整改 | `deploy/systemd/*.service` 已脱敏（`<deploy-root>` + `EnvironmentFile`），但 `docs/lib-3db-3host-design.md` 仍含真实内网 IP 与本机绝对路径 → 本批改为 `<dev-db-host>` / `<insight-copy-host>` / `<runtime-copy-host>` 占位 |
 | F4 | 新增常量无来源登记 | ✅ 已整改 | `src/kernel/cross_write.py:23-24` 的 `MAX_ATTEMPTS` / `RETRY_BACKOFF_S` 已带 rationale 注释 |
 | I3 | mgmt lib 白名单含凭据列（`webhook_secret` / `bot_gitcode_token` / `gitcode_webhook_token` / `bot_github_token` / `github_webhook_token` / `password_hash`） | ⏳ 待人工裁决，当前无调用方 | `src/domains/mgmt/public/__init__.py:17-30` 登记；`src/` 全量检索无 `fetch_rows/fetch_one/read_one/read_all` 取这些列的调用点 |
 | I4 | `insight_lib()` 无对应 `src.domains.insight.public` 模块 | ⏳ 记录备查 | `src/kernel/domain_read.py:62` 定义但无调用方；该域读仍走 `src/domains/contracts/local/insight_local.py` |
