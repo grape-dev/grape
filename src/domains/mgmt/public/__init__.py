@@ -752,6 +752,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # 登录白名单判定（kernel/config.py；任意拓扑）
            "login_whitelist_count", "login_whitelist_row_match",
            "login_whitelist_legacy_column", "login_whitelist_legacy_column_match",
+           # baseline 知识 upsert + 全局 ref（runtime/project_info/builder.py；任意拓扑）
+           "upsert_baseline_knowledge_any", "ensure_baseline_knowledge_ref_any",
            "health"]
 
 
@@ -1831,6 +1833,29 @@ _ANY_QUERIES: dict[str, str] = {
     "knowledge_delete_scoped": (
         "DELETE FROM agent_shared_knowledge "
         "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?"),
+    # ── baseline 知识 upsert + 全局 ref（runtime/project_info/builder 的本地兜底路径）──
+    # 原实现是「进程主库游标读 id → UPDATE / INSERT → 取 lastrowid → 再补一条
+    # scene_knowledge_ref」，三库拓扑下进程库没有这两张表（视图 0 → 1146），
+    # 异常被外层 except 吞成「只写了 OBS + 本地文件」，知识行与场景关联静默缺失。
+    # 谓词与列序与 builder 原语句逐字一致（id 查询仍靠 fetchone() 取首行，不额外加 LIMIT，
+    # 与原实现同口径）；写语句无 SQL 专有语法（无 NOW() / ON DUPLICATE / 库名前缀）。
+    "knowledge_baseline_id_any": (
+        "SELECT id FROM agent_shared_knowledge "
+        "WHERE repo_key=? AND scope='baseline' AND name=? AND archived=0"),
+    "knowledge_baseline_refresh": (
+        "UPDATE agent_shared_knowledge SET status='accepted', obs_key=?, content_hash=?, "
+        "created_by='system', source='system', name=?, description=? WHERE id=?"),
+    "knowledge_baseline_insert_any": (
+        "INSERT INTO agent_shared_knowledge "
+        "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, "
+        "created_by, source, name, description) "
+        "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'system', 'system', ?, ?)"),
+    # baseline 全局关联：scene_id='' / agent_type='' / issue_num=0 / created_by='system'
+    # 全是原语句的常量；OR IGNORE 由 mysql_compat 翻译为 INSERT IGNORE（rowcount 1=新建 / 0=已存在）
+    "knowledge_baseline_ref_ensure": (
+        "INSERT OR IGNORE INTO scene_knowledge_ref "
+        "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
+        "VALUES (?, '', '', 0, 1, 'system')"),
     "account_username_by_id": "SELECT username FROM grape_accounts WHERE id=? LIMIT 1",
     # ── 仓库级 bot token 与登录名（kernel/token_resolver 第 2 级策略）──
     # 原实现在 kernel 里直连进程主库：三库拓扑下进程库没有 managed_repos（无视图 → 1146，
@@ -2021,6 +2046,50 @@ def login_whitelist_legacy_column_match(provider: str, login: str) -> bool:
         if "no such column" in msg or "unknown column" in msg:
             return False
         raise
+
+
+# ---------- baseline 知识 upsert / 全局 ref（runtime project-info 的兜底写路径）----------
+# 调用方（runtime/project_info/builder._write_to_obs）原本在自己进程主库上
+# 读 id → UPDATE / INSERT → 取 lastrowid → 补 ref：三库拓扑下进程库没有这两张 mgmt 表，
+# 整段落进外层 except（只留 OBS + 本地文件）。这里把「表 + 事务边界」一起收到 owner 域：
+# 单次 upsert 是读后写，必须原子（`_any_tx`），否则两个并发刷新会各插一行。
+
+def upsert_baseline_knowledge_any(repo_key: str, display_name: str, description: str,
+                                  file_path: str, obs_key: str, content_hash: str) -> dict[str, Any]:
+    """baseline 知识 upsert（任意拓扑），返回 {"action","id","changed"}。
+
+    定位口径与 builder 原实现逐字一致：repo_key + scope='baseline' + name + archived=0；
+    命中 → 按 id 刷新（保留原 id，已建 ref 不失效）；未命中 → 新建（id 取 lastrowid）。
+    **不写 org_id / source_seq**：原 INSERT 也不写，这里不顺手补列（否则两侧数据不一致）。
+    """
+    with _any_tx() as c:
+        c.execute(_any_sql("knowledge_baseline_id_any"), (repo_key, display_name))
+        row = c.fetchone()
+        if row:
+            kid = int(row[0])
+            c.execute(_any_sql("knowledge_baseline_refresh"),
+                      (obs_key, content_hash, display_name, description, kid))
+            return {"action": "updated", "id": kid,
+                    "changed": int(getattr(c, "rowcount", 0) or 0)}
+        c.execute(_any_sql("knowledge_baseline_insert_any"),
+                  (repo_key, file_path, obs_key, content_hash, display_name, description))
+        return {"action": "inserted", "id": int(getattr(c, "lastrowid", 0) or 0),
+                "changed": 1}
+
+
+def ensure_baseline_knowledge_ref_any(knowledge_id: int) -> int:
+    """幂等建立 baseline 的全局场景关联（OR IGNORE），返回 1=新建 / 0=已存在或 id 非法。
+
+    与原语句的常量口径一致：scene_id='' / agent_type='' / issue_num=0 / enabled=1 /
+    created_by='system'（空串=全部场景、全部 Agent，0=不限 Issue）。
+    id 非法（None / 0）时**不发 SQL**，直接返回 0 —— 原实现在 `if kid:` 处就短路了。
+    """
+    kid = int(knowledge_id or 0)
+    if kid <= 0:
+        return 0
+    with _any_tx() as c:
+        c.execute(_any_sql("knowledge_baseline_ref_ensure"), (kid,))
+        return int(getattr(c, "rowcount", 0) or 0)
 
 
 def has_manual_knowledge_ref(repo_key: str, agent_type: str = "", issue_num: int = 0,

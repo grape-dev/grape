@@ -302,56 +302,22 @@ def _write_to_obs(repo_key: str, name: str, content: str):
         if _write_baseline_db_via_lib(repo_key, display_name, name, file_path,
                                       storage_key, content_hash):
             return
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            # Issue #190：查重改用 name（不受 file_path 格式变化影响）
-            from src.kernel.domain_read import mgmt_lib as _mg_lib_kn
-            _kn_lib = _mg_lib_kn(foreign_only=True)
-            if _kn_lib is not None:
-                existing = _kn_lib.read_one("knowledge_id_baseline", (repo_key, display_name))
-            else:
-                existing = c.execute(
-                    "SELECT id FROM agent_shared_knowledge "
-                    "WHERE repo_key=? AND scope='baseline' AND name=? AND archived=0",
-                    (repo_key, display_name)
-                ).fetchone()
-            if existing:
-                # 已存在 → UPDATE（保留原 id，ref 不失效）
-                kid = existing[0]
-                _desc = BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)
-                c.execute(
-                    "UPDATE agent_shared_knowledge SET "
-                    "status='accepted', obs_key=?, content_hash=?, created_by='system', "
-                    "source='system', name=?, description=? "
-                    "WHERE id=?",
-                    (storage_key, content_hash, display_name,
-                     _desc, kid)
-                )
-            else:
-                # 不存在 → INSERT
-                _desc = BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)
-                c.execute(
-                    "INSERT INTO agent_shared_knowledge "
-                    "(scope, repo_key, agent_type, issue_num, file_path, status, obs_key, content_hash, created_by, source, name, description) "
-                    "VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'system', 'system', ?, ?)",
-                    (repo_key, file_path, storage_key, content_hash, display_name,
-                     _desc)
-                )
-                kid = c.lastrowid
-            db.commit()
-            # Issue #95：自动创建 ref（baseline → 全局关联，幂等）
-            if kid:
-                try:
-                    c.execute(
-                        "INSERT OR IGNORE INTO scene_knowledge_ref "
-                        "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-                        "VALUES (?, '', '', 0, 1, 'system')",
-                        (kid,)
-                    )
-                    db.commit()
-                except Exception:
-                    pass
+        # P4：lib 不可用（单库 / 测试拓扑，或 outbox 提交失败）时的直写路径同样走 owner 域
+        # 具名原语 —— 自有 DSN → mgmt 连接，单库 → 进程主库，一份 SQL 两条拓扑都能跑。
+        # 这里不再保留本进程库的兜底 SQL：三库拓扑下进程库没有这两张表（视图 0 已退役），
+        # 兜底语句必 1146，被外层 except 吞成「知识行静默写丢」，正是跨域引用要清的理由。
+        from src.domains.mgmt import public as _mgmt_public_kb
+        _desc = BASELINE_DESC_MAP.get(name, BASELINE_DESC_FALLBACK)
+        _ups = _mgmt_public_kb.upsert_baseline_knowledge_any(
+            repo_key, display_name, _desc, file_path, storage_key, content_hash)
+        kid = int(_ups.get("id") or 0)
+        # Issue #95：自动创建 ref（baseline → 全局关联，幂等）。
+        # 口径保留：ref 失败不回滚已落库的知识行（原实现两次 commit + 内层吞异常）。
+        if kid:
+            try:
+                _mgmt_public_kb.ensure_baseline_knowledge_ref_any(kid)
+            except Exception as e:  # noqa: BLE001 - ref 缺失只影响注入面，知识行已提交
+                log.debug(f"baseline knowledge ref ensure failed {repo_key}/{name}: {e}")
     except Exception as e:
         log.warning(f"project-info OBS write failed {repo_key}/{name}: {e}")
 

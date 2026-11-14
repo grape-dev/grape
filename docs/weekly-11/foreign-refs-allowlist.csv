@@ -1,7 +1,7 @@
 table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,3
 agent_runtimes,runtime,insight,5
-agent_shared_knowledge,mgmt,runtime,5
+agent_shared_knowledge,mgmt,runtime,2
 agent_tasks,runtime,api,4
 agent_tasks,runtime,insight,8
 agent_tasks,runtime,mgmt,2
@@ -37,7 +37,6 @@ meta,runtime,mgmt,4
 runtime_credentials,runtime,api,6
 runtime_credentials,runtime,insight,7
 runtime_health_scores,runtime,insight,1
-scene_knowledge_ref,mgmt,runtime,1
 skill,runtime,api,2
 skill_category,mgmt,runtime,1
 takeover_sessions,runtime,api,1

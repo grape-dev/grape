@@ -2497,6 +2497,90 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   同步刷新（下一批头名：`src/domains/runtime/project_info/builder.py` 4 处 ——
   `agent_shared_knowledge` × 3 + `scene_knowledge_ref` × 1，均归 mgmt）。
 
+### 7.25 runtime project-info 知识落库下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件：`src/domains/runtime/project_info/builder.py`（runtime 域；project-info 的
+  OBS + 知识表落库路径 `_write_to_obs`），**4 处 → 0**（单轮做完，4 处未超 25，未分轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，两表都在 `grape_mgmt_db`）：
+  - `agent_shared_knowledge`（归 mgmt）× 3：
+    行 315 命中读 `SELECT id FROM agent_shared_knowledge WHERE repo_key=? AND
+    scope='baseline' AND name=? AND archived=0`；
+    行 324 命中后的刷新 `UPDATE agent_shared_knowledge SET status='accepted', obs_key=?,
+    content_hash=?, created_by='system', source='system', name=?, description=? WHERE id=?`；
+    行 335 未命中时新建 `INSERT INTO agent_shared_knowledge (scope, repo_key, agent_type,
+    issue_num, file_path, status, obs_key, content_hash, created_by, source, name,
+    description) VALUES ('baseline', ?, '', 0, ?, 'accepted', ?, ?, 'system', 'system', ?, ?)`。
+  - `scene_knowledge_ref`（归 mgmt）× 1：行 347 全局关联
+    `INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type,
+    issue_num, enabled, created_by) VALUES (?, '', '', 0, 1, 'system')`。
+  - 四处都是定表 + 定列，**无跨域 JOIN、无动态表名/列名拼接**；调用点全部是
+    `with db_lock: c = db.cursor()` 直发 runtime 进程主库，写入序列是
+    「读 → UPDATE/INSERT → commit → 取 lastrowid 补 ref → 再 commit」，内层
+    `except Exception: pass` 吞掉 ref 失败。
+- owner 侧新增（`src/domains/mgmt/public/__init__.py`，`?` 占位符）：
+  1) `_ANY_QUERIES` 4 条具名查询：`knowledge_baseline_id_any` / `knowledge_baseline_refresh` /
+     `knowledge_baseline_insert_any` / `knowledge_baseline_ref_ensure`（谓词、列序、常量口径
+     与原语句逐字一致）；
+  2) 2 个薄函数并导出：`upsert_baseline_knowledge_any(repo_key, display_name, description,
+     file_path, obs_key, content_hash) -> {"action","id","changed"}`（**单事务** `_any_tx()`：
+     读 id + UPDATE/INSERT 一次提交）与 `ensure_baseline_knowledge_ref_any(knowledge_id) -> int`
+     （`_any_tx()` 单语句，`id <= 0` 直接返回 0、**不发 SQL**）。
+- 设计取舍：
+  1) **事务边界跟着语句一起搬**：原「读 → 改/插」靠进程内 `db_lock` 串行化、跨实例靠
+     `project_info_build:<md5>` 分布式锁；改 `_any_tx()` 后自有 DSN 拓扑走
+     `db_registry.transaction("mgmt")`（一次组合写一条独立非 autocommit 连接，不碰共享
+     连接池），单库/测试拓扑回落进程库 + 可重入 `db_lock`。与原「同一游标顺序执行」等价，
+     但调用方不再自己持锁，也不再有「读在 A 库、写在 B 库」的可能。
+  2) **两段提交与 ref 降级口径原样保留**：ref 仍是独立一次提交，失败不回滚已提交的知识行
+     （原实现就是这样）；只把内层 `except Exception: pass` 换成 `log.debug` —— 静默 except
+     棘轮只减不增，`tests/silent_except_baseline.json` 里本文件 7 → 6 同步下调。
+  3) **`file_path` 不被 UPDATE 改写**：原 UPDATE 的 SET 里没有 `file_path`（同一 name 即使
+     目录结构变了也不迁正文路径），新原语照抄该列集合，烟测对「命中后 file_path 保持旧值」
+     单独钉一条用例。
+  4) **`archived=0` 谓词与「不加 LIMIT」照抄**：归档行**不算命中**，会另插一行 baseline
+     （历史行为，不顺手改成「复用归档行」）；原读语句没有 `LIMIT 1`，靠 `fetchone()` 取首行，
+     这里不额外收紧。`agent_shared_knowledge` 没有 `(repo_key, scope, name)` 唯一约束，
+     去重仍靠「先读后写」，只是把这两步收进一个事务。
+  5) **outbox 优先路径不动**：`_write_baseline_db_via_lib`（`cross_write` 幂等意图 +
+     `upsert_baseline_knowledge` / `ensure_scene_knowledge_ref` 两个已登记 lib 函数）仍是第一
+     选择，只有 lib 不可用（单库 / 测试拓扑）或提交失败才落到新原语直写 —— 跨域写的首选
+     通道（outbox）口径不变，新原语只是兜底侧不再自带 SQL。
+- 修的存量 bug（结构性隐患，线上未观测到故障）：
+  1) **兜底 SQL 打在执行进程主库**：三库拓扑下 runtime 进程库没有这两张 mgmt 表
+     （`db_setup._owned_skip` 按 owner 过滤、A1 已 0 视图），四条语句必 1146 → 被
+     `except Exception as e: log.warning("project-info OBS write failed ...")` 吞成一行告警，
+     结果「OBS 与本地文件写了，知识行和场景关联没写」：project-info 知识不进注入面，
+     而日志只显示 OBS 写失败，看不出根因是跨域缺表。
+  2) **半截 lib 读造成读错库/写错库**：原代码在 `mgmt_lib(foreign_only=True)` 可用时用
+     `read_one("knowledge_id_baseline")` 从 **mgmt 库**读 id，但随后的 UPDATE/INSERT 仍打在
+     **进程主库** —— 命中判断与写入落在两个库上，同一条记录可能「读到命中、却更新了另一库
+     的 0 行」。语句整体上移后该分叉消失。
+  3) **读后写的并发窗口收窄**：原「读 → 插」两步在进程内只有 `db_lock`、跨实例只有分布式锁
+     保护；现在 upsert 是单事务，「查重 + 写入」不再可被同进程其它线程插入中间态。
+- 验证：`py_compile` 2 个文件 **COMPILE_OK**；SQLite 烟测
+  `~/burndown/project_info_knowledge_smoke.py` **ALL 118 CHECKS PASSED**（含边界与否定用例：
+  4 条语句与改造前 SQL 逐字对拍 + `?` 方言 / 无 `%s`·`NOW()`·`ON DUPLICATE`·`datetime('now')`·
+  库名前缀 / 占位符个数；新建路径逐列钉死 scope='baseline'·agent_type=''·issue_num=0·
+  status='accepted'·created_by/source='system'；ref 的 scene_id=''/agent_type=''/
+  issue_num=0/enabled=1/created_by='system'；命中路径保留原 id、不写 file_path、被覆盖的
+  status/source/created_by 一致改写；`archived=1` 不算命中且归档行不动、`scope≠baseline`
+  不命中、repo_key 隔离、name 精确匹配不走 `LOWER`；ref 同 id 连调 1→0 行数不增；
+  `id=0`/`None` **零 SQL**；INSERT/UPDATE 中途抛错整笔回滚（无半行知识、无 ref）；
+  ref 缺表抛错但知识行仍在；端到端 `_write_to_obs` 真实落库 + 二次调用幂等 + ref 原语抛错时
+  builder 不抛且知识行保留；源码面 builder.py 0 条这两张表的 SQL 字面量 / 0 处 `db_lock` /
+  无 `cursor()`·`execute()` 直发 / 不再 import `session_manager` / 只调 2 个已导出原语 /
+  静默 except 6 = 新基线）；
+  `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK /
+  契约 37 条 / 看板最新）；`pytest tests/arch tests/contracts tests/scripts` **158 passed**；
+  `scripts/check_lib_query_names.py src` **PASS**（insight 12/20、mgmt 166/247、runtime 158/232）；
+  `make lint` **import OK**。
+- 新基线：全局 **124 → 120**（-4），对数 **48 → 47**：`agent_shared_knowledge←runtime` 5 → 2
+  （余 2 处在 `src/domains/runtime/engine/service.py`，同模式、后续批次），
+  `scene_knowledge_ref←runtime` 1 → 0（该表在 runtime 侧清零）。基线
+  `foreign-refs-allowlist.csv` 收紧为 120 / 47，依赖看板与作业单同步刷新（作业单已重算：120 处 / 55 文件；下一批头名
+  `src/domains/runtime/engine/service.py` 4 处 —— `grape_accounts` × 2 + `agent_shared_knowledge`
+  × 2，均归 mgmt）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

@@ -121,7 +121,7 @@
   "src/domains/runtime/issues_center.py": 8,
   "src/domains/runtime/onboarding.py": 6,
   "src/domains/runtime/pipeline/event_pipeline.py": 56,
-  "src/domains/runtime/project_info/builder.py": 7,
+  "src/domains/runtime/project_info/builder.py": 6,
   "src/domains/runtime/routes/chat.py": 17,
   "src/domains/runtime/routes/events.py": 36,
   "src/domains/runtime/routes/im.py": 2,
