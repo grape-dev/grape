@@ -28,7 +28,7 @@ external_identities,mgmt,kernel,1
 external_identities,mgmt,runtime,2
 feishu_onboard_task,mgmt,runtime,1
 grape_accounts,mgmt,insight,1
-grape_accounts,mgmt,runtime,5
+grape_accounts,mgmt,runtime,3
 grape_t_channel_chat_session_binding,mgmt,runtime,1
 grape_t_channel_installation,mgmt,runtime,9
 grape_t_channel_lease,mgmt,runtime,2
@@ -46,7 +46,7 @@ issue_state,runtime,api,1
 login_whitelist,mgmt,kernel,4
 managed_repos,mgmt,api,2
 managed_repos,mgmt,kernel,5
-managed_repos,mgmt,runtime,11
+managed_repos,mgmt,runtime,9
 meta,runtime,mgmt,4
 outbound_content_ledger,mgmt,kernel,6
 runtime_credentials,runtime,api,6
@@ -61,7 +61,7 @@ skill_category,mgmt,runtime,1
 takeover_sessions,runtime,api,1
 takeover_sessions,runtime,mgmt,1
 unified_user_mapping,mgmt,kernel,3
-unified_user_mapping,mgmt,runtime,6
+unified_user_mapping,mgmt,runtime,3
 user_accounts,mgmt,runtime,1
 user_feedback,mgmt,api,6
 vod_conversations,runtime,mgmt,1

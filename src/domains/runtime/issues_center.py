@@ -96,10 +96,10 @@ def _get_user_id_by_gitcode(gitcode_user: str, repo_key: str = "") -> int | None
         log.warning(f"_get_user_id_by_gitcode: identity-first resolution failed "
                     f"(user={gitcode_user!r}, repo={repo_key!r}), falling back to um: {_e}")
     with db_lock:
-        c = db.cursor()
         try:
             # FR-CQ-1: 提取为 um_column_for_repo 工具函数
             from src.kernel.repo_key import um_column_for_repo
+            from src.domains.mgmt import public as _mgmt_public_um
             _col = um_column_for_repo(repo_key)
             # D39/S59：无 um 列平台（gitee 等）跳过兜底（不折叠查 gitcode_user，
             # 跨平台同名误命中消除；身份优先已在前，此处兜底 miss）
@@ -107,17 +107,13 @@ def _get_user_id_by_gitcode(gitcode_user: str, repo_key: str = "") -> int | None
                 log.warning(f"_get_user_id_by_gitcode: provider has no um column, skip um fallback "
                             f"(user={gitcode_user!r}, repo={repo_key!r})")
                 return None
-            row = c.execute(
-                f"SELECT um.user_id FROM unified_user_mapping um "
-                f"WHERE um.{_col}=? AND (um.user_id IS NOT NULL AND um.user_id != '' AND um.user_id != '0') "
-                f"AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=um.user_id AND ga.status=1) "
-                f"ORDER BY um.user_id LIMIT 1", (gitcode_user,)).fetchone()
-            if not row:
-                row = c.execute(
-                    f"SELECT user_id FROM unified_user_mapping WHERE {_col}=? AND (user_id IS NOT NULL AND user_id != '' AND user_id != '0') LIMIT 1",
-                    (gitcode_user,)).fetchone()
-            if row:
-                return row[0]
+            # 优先链两跳都由 mgmt 域执行（列名经 owner 侧白名单校验）：
+            # ① 登录账号存在且启用 ② 任意映射行；谓词/列序与原 SQL 逐字一致。
+            _uid = _mgmt_public_um.mapping_user_id_preferring_account(_col, gitcode_user)
+            if _uid is None:
+                _uid = _mgmt_public_um.mapping_user_id_by_column(_col, gitcode_user)
+            if _uid is not None:
+                return _uid
             log.warning(f"_get_user_id_by_gitcode: gitcode_user='{gitcode_user}' not found in unified_user_mapping (user_id will be 0)")
             return None
         except Exception as e:
@@ -187,17 +183,12 @@ def _get_gitcode_user_by_user_id(user_id) -> str:
     except Exception as e:
         log.warning(f"_get_gitcode_user_by_user_id({uid}) identity lookup failed: {e}")
     # ② um 平台列兜底（存量行；新平台无列）
-    with db_lock:
-        c = db.cursor()
-        try:
-            row = c.execute(
-                "SELECT COALESCE(NULLIF(gitcode_user,''), NULLIF(github_login,''))"
-                " FROM unified_user_mapping WHERE user_id=? AND user_id!='' AND user_id!='0' LIMIT 1",
-                (uid,)).fetchone()
-            return (row[0] or "") if row else ""
-        except Exception as e:
-            log.warning(f"_get_gitcode_user_by_user_id({uid}) failed: {e}")
-            return ""
+    try:
+        from src.domains.mgmt import public as _mgmt_public_login
+        return _mgmt_public_login.platform_login_by_user_id_any(uid)
+    except Exception as e:
+        log.warning(f"_get_gitcode_user_by_user_id({uid}) failed: {e}")
+        return ""
 
 def _ensure_assignee_task_card(user_id: str, assignee: str, repo_key: str, issue_number: int,
                                title: str, task_description: str) -> int | None:
@@ -222,13 +213,14 @@ def _ensure_assignee_task_card(user_id: str, assignee: str, repo_key: str, issue
         # Issue #1337-D：created_by 回填（多平台解耦口径——账号域 username，
         # 平台无关；weekly-10 版曾用 gitcode_user 反查，解耦后废弃）
         try:
+            from src.domains.mgmt import public as _mgmt_public_cb
             _uid_cb = str(user_id or "").strip()
             _cb = ""
             if _uid_cb not in ("", "0"):
-                _cb_row = c.execute(
-                    "SELECT username FROM grape_accounts WHERE id=? LIMIT 1", (_uid_cb,)).fetchone()
-                _cb = (_cb_row[0] or "") if _cb_row else ""
-        except Exception:
+                # 账号名解析由 mgmt 域提供（grape_accounts 归 mgmt；口径仍是按 id 取 username）
+                _cb = _mgmt_public_cb.account_username_by_id_any(_uid_cb)
+        except Exception as _e:
+            log.debug(f"_ensure_assignee_task_card: created_by lookup skipped: {_e}")
             _cb = ""
         c.execute(
             "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, created_by) "
@@ -782,16 +774,13 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
     """
     try:
         from src.kernel.repo_key import split_owner_repo
-        from src.kernel.session_manager import db, db_lock
+        from src.domains.mgmt import public as _mgmt_public_repo
         owner, repo = split_owner_repo(repo_key)
         if not owner or not repo:
             return ""
         gh_key = f"github:{owner}/{repo}"
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1", (gh_key,))
-            row = c.fetchone()
-        return row[0] if row else ""
+        # managed_repos 归 mgmt：命中时返回库里的 repo_key 原值（列序/谓词同原语句）
+        return _mgmt_public_repo.repo_key_exists_any(gh_key)
     except Exception as e:
         log.warning(f"find github mirror for {repo_key} failed: {e}")
         return ""
@@ -3268,7 +3257,7 @@ def _mirror_repo_keys(repo_key: str) -> "list[str]":
     """
     try:
         from src.kernel.repo_key import split_owner_repo, repo_key_candidates
-        from src.kernel.session_manager import db, db_lock
+        from src.domains.mgmt import public as _mgmt_public_mirror
         owner, repo = split_owner_repo(repo_key)
         if not owner or not repo:
             return []
@@ -3276,14 +3265,8 @@ def _mirror_repo_keys(repo_key: str) -> "list[str]":
         cands = [c for c in repo_key_candidates(full) if c != repo_key]
         if not cands:
             return []
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                f"SELECT repo_key FROM managed_repos WHERE repo_key IN "
-                f"({','.join('?' * len(cands))}) ORDER BY repo_key",
-                cands,
-            )
-            return [r[0] for r in c.fetchall()]
+        # managed_repos 归 mgmt：候选键求交集，块内 ORDER BY repo_key 与原语句一致
+        return _mgmt_public_mirror.repo_keys_existing_any(cands)
     except Exception as e:
         log.warning(f"find mirrors for {repo_key} failed: {e}")
         return []

@@ -1251,6 +1251,66 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 ---
 
+### 7.7 需求中心外域读收口（2026-11-15 本批）
+
+- 文件：`src/domains/runtime/issues_center.py`（runtime 域消费、7 处跨域 SQL → 0）。
+  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `unified_user_mapping`（归 mgmt）3 处，行 111 / 117 / 195：`_get_user_id_by_gitcode`
+    的两跳平台列查找（优先「登录账号存在且启用」→ 任意映射行）与
+    `_get_gitcode_user_by_user_id` 的平台登录名兜底（`COALESCE(NULLIF(gitcode_user,''),
+    NULLIF(github_login,''))`）；
+  - `grape_accounts`（归 mgmt）2 处，行 113（上条优先链的 `EXISTS ... ga.status=1` 子查询）、
+    行 229（`_ensure_assignee_task_card` 的 created_by 回填 `SELECT username ... WHERE id=?`）；
+  - `managed_repos`（归 mgmt）2 处，行 792（`_find_github_mirror_repo_key` 单键存在性）、
+    行 3282（`_mirror_repo_keys` 动态 IN 交集 + `ORDER BY repo_key`）。
+- owner 侧新增（`?` 占位符、列序/谓词/排序逐字照抄；写语句本批为 0 条）：
+  1) `_ANY_QUERIES` 补 4 条具名查询：`um_account_user_id_by_gitcode_user`、
+     `um_account_user_id_by_github_login`（带 EXISTS 校验的优先链两变体）、
+     `um_platform_login_by_user`（登录名兜底）、`repo_key_row`（仓库键存在性）；
+  2) 白名单映射 `_UM_ACCOUNT_COLUMN_QUERIES`（平台列 → 优先链具名查询），
+     与既有 `_UM_COLUMN_QUERIES` 并列——动态列名仍只由归属域挑选；
+  3) 4 个薄函数：`mapping_user_id_preferring_account(column, value)`、
+     `platform_login_by_user_id_any(user_id)`、`repo_key_exists_any(repo_key)`、
+     `repo_keys_existing_any(repo_keys)`（IN 列表按 400 分块，块内 `ORDER BY repo_key`）。
+- 设计取舍：
+  1) **优先链两跳留在归属域**：`EXISTS (grape_accounts ga.status=1)` 是 mgmt 本域子查询，
+     拆到调用方只会变成第二条跨域语句（`grape_accounts` 引用减不下去），所以整条
+     优先链做成两条具名查询，调用方只拿到标量 user_id；原「先优先、无行再兜底」
+     的两次往返顺序与 `LIMIT 1` 语义不变。
+  2) **动态列名不下放**：`um_column_for_repo` 推出的列名照旧由 kernel 工具给出，
+     值通过 owner 侧白名单映射取具名查询；未登记列抛 `KeyError`，被调用方原有的
+     `except` 捕获后仍返回 None/空串（与原「拼出空列名 → SQL 语法错 → 返回 0」口径一致）。
+  3) **IN 交集仍由归属域执行**：`repo_keys_existing_any` 在 owner 侧拼占位符（与控制点
+     一样只拼 `?`，不拼值），400 分块只影响 >400 候选的极端场景；候选集来自平台卡前缀，
+     实际规模远小于分块上限，单块即与原 `IN (...) ORDER BY repo_key` 逐字一致。
+  4) **`db_lock` 保留**：`_get_user_id_by_gitcode` 的原实现在 `with db_lock` 下查询，
+     本批保留该锁（自有 DSN 拓扑下是多余串行，但保持原调用语义不变；单库回落路径
+     `_any_cursor` 用的正是同一把 RLock，重入安全）。
+- 修的存量 bug：
+  1) **连接归属（功能面）**：三库拓扑下 `_get_user_id_by_gitcode` 的 um 兜底、
+     `_get_gitcode_user_by_user_id` 的登录名兜底、created_by 回填、仓库镜像链全读
+     runtime 进程库——那里面没有三张 mgmt 表（1146，均被内部 `except` 吞成
+     None/空串/空表），或存在同表副本时静默按副本判定，导致 `issue.user_id` 落 0、
+     `created_by` 退化成 assignee、多平台镜像关单漏关。现统一走 mgmt 归属域原语。
+  2) **静默 except（卫生面）**：created_by 回填原来的 `except Exception: _cb = ""`
+     改为带 `log.debug` 的显式处理，与静默 except 棘轮口径一致。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/issues_center_smoke.py`
+  **ALL 68 CHECKS PASSED**（含边界与否定用例：优先链只在 `status=1` 的账号上命中、
+  `status=0` 行被 EXISTS 过滤后由兜底取低 id、`user_id=0` 行两跳都不命中、
+  未登记列 `KeyError`、登录名 gitcode 优先 / 空则 github / 两列 NULL 为空串 /
+  空 id 与 `'0'` 不查库、仓库键命中返回库里原值 / 未登记空串 / 空候选不查库、
+  500 候选跨 400 分块不丢结果且块内有序、未登记查询名 `KeyError`、新语句不含
+  `%s`/`NOW()`/`ON DUPLICATE`、`_ensure_assignee_task_card` 未知 id/空 id/空 username
+  三种回退 assignee 且复用卡不覆盖 created_by、镜像集除自身且有序、
+  **有自有 DSN 时 SQL 走 `db_registry.cursor('mgmt')` 不碰进程库**、源码 0 条三表 SQL）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch PASS / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **228 → 221**（-7），对 **66 → 66**（三张表在 runtime 侧仍有其它消费点，
+  故只减计数不减对）；基线 `foreign-refs-allowlist.csv` 收紧为 221 / 66；依赖看板与作业单
+  同步刷新（下一批头名：`mgmt/routes/autopilot.py` 7 处）。
+
+---
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

@@ -699,6 +699,9 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "list_user_ids_by_open_id", "get_feishu_open_id", "list_all_user_ids",
            "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
            "get_account_id_by_username", "get_account_username_by_id",
+           # 需求中心（runtime/issues_center）外域读：仓库镜像 + 平台登录名（任意拓扑）
+           "mapping_user_id_preferring_account", "platform_login_by_user_id_any",
+           "repo_key_exists_any", "repo_keys_existing_any",
            # 用户映射（unified_user_mapping）双拓扑读写薄封装（conn=None → 自有 DSN）
            "resolve_feishu_open_id", "list_user_mappings", "list_feishu_name_open_id_pairs",
            "bind_feishu_mapping_row", "sync_user_mapping", "ensure_user_mapping_schema",
@@ -1482,6 +1485,24 @@ _ANY_QUERIES: dict[str, str] = {
     "um_user_id_by_github_login": (
         "SELECT user_id FROM unified_user_mapping "
         "WHERE github_login=? AND github_login!='' AND user_id!='' AND user_id!='0' LIMIT 1"),
+    # 用户映射：优先「登录账号存在且启用」的那条映射（issues_center 原语句的 EXISTS 子句）。
+    # 单列 um.user_id、谓词与 ORDER BY um.user_id LIMIT 1 逐字照抄；列名仍由本域白名单挑选。
+    "um_account_user_id_by_gitcode_user": (
+        "SELECT um.user_id FROM unified_user_mapping um "
+        "WHERE um.gitcode_user=? "
+        "AND (um.user_id IS NOT NULL AND um.user_id != '' AND um.user_id != '0') "
+        "AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=um.user_id AND ga.status=1) "
+        "ORDER BY um.user_id LIMIT 1"),
+    "um_account_user_id_by_github_login": (
+        "SELECT um.user_id FROM unified_user_mapping um "
+        "WHERE um.github_login=? "
+        "AND (um.user_id IS NOT NULL AND um.user_id != '' AND um.user_id != '0') "
+        "AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=um.user_id AND ga.status=1) "
+        "ORDER BY um.user_id LIMIT 1"),
+    # 用户 → 平台登录名（gitcode 优先、空则 github；COALESCE/NULLIF 照抄原语句）
+    "um_platform_login_by_user": (
+        "SELECT COALESCE(NULLIF(gitcode_user,''), NULLIF(github_login,'')) "
+        "FROM unified_user_mapping WHERE user_id=? AND user_id!='' AND user_id!='0' LIMIT 1"),
     # ── 飞书通道列（channel_directory 原「mgmt_lib 优先 + 本地兜底 SQL」的兜底侧上移）──
     # 兜底 SQL 只在单库/视图期执行，却正是跨域表引用的来源；上移到 owner 域后
     # 自有 DSN 与单库拓扑跑同一份语句，调用方不再保留任何 um SQL。
@@ -1565,6 +1586,8 @@ _ANY_QUERIES: dict[str, str] = {
         "AND k.status = 'accepted' AND k.archived = 0"),
     # 仓库默认场景（issue_state 无 Issue 级快照时的回退源）
     "repo_dev_scene": "SELECT dev_scene FROM managed_repos WHERE repo_key=?",
+    # 仓库键存在性（issues_center 的镜像仓查找：单键取回原值 / 多键取交集）
+    "repo_key_row": "SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1",
     # 场景市场（runtime 的场景同步读/写；列序与 scene_sync 原查询逐字一致）
     "scene_official_id_by_name": (
         "SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1"),
@@ -1701,6 +1724,15 @@ _UM_COLUMN_QUERIES: dict[str, str] = {
 _UM_OPENID_COLUMN_QUERIES: dict[str, str] = {
     "gitcode_user": "um_feishu_open_id_by_gitcode_user",
     "github_login": "um_feishu_open_id_by_github_login",
+}
+
+
+#: 同一张表的「平台列 → 带登录账号存在性校验的 user_id」白名单（issues_center 优先链：
+#: 原 SQL 的 `EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=um.user_id AND ga.status=1)`
+#: 属 mgmt 本域子查询，随 SQL 一起留在本域；调用方只传 repo_key 推出的列名）。
+_UM_ACCOUNT_COLUMN_QUERIES: dict[str, str] = {
+    "gitcode_user": "um_account_user_id_by_gitcode_user",
+    "github_login": "um_account_user_id_by_github_login",
 }
 
 
@@ -2116,6 +2148,66 @@ def first_join_user_id_by_repo(repo_key: str, prefixed_repo_key: str) -> Any:
 def user_repo_keys_by_username(username: str) -> list[str]:
     """按注册名（大小写不敏感）取该用户已加入的仓库键（is_join=1）。"""
     return [r[0] for r in read_all_any("user_repo_keys_by_username", (username,))]
+
+
+# ---------- 需求中心（runtime/issues_center）的外域读：仓库镜像 + 平台登录名 ----------
+#
+# 原实现每处都是「进程库直查 mgmt 表」：单库拓扑正常，三库拓扑下读到的是 runtime 进程库
+# 里没有的表（1146）或另一份副本（静默数据分裂）。SQL 只留本域一份，两条拓扑同一语句。
+
+
+def mapping_user_id_preferring_account(column: str, value: str) -> Any:
+    """按 um 平台列取 user_id，优先「登录账号存在且启用」的映射行；无命中 None。
+
+    与 `mapping_user_id_by_column` 的区别是那条 EXISTS 校验（issues_center 的优先链第一跳）；
+    列名必须在本域 `_UM_ACCOUNT_COLUMN_QUERIES` 白名单内，未登记列抛 KeyError。
+    """
+    row = read_one_any(_UM_ACCOUNT_COLUMN_QUERIES[column or ""], (value,))
+    return row[0] if row else None
+
+
+def platform_login_by_user_id_any(user_id: Any) -> str:
+    """按 user_id 取平台登录名（gitcode_user 优先、空则 github_login）；无行返回空串。
+
+    列序/COALESCE/NULLIF 与原语句逐字一致；user_id 为空/0 时原 SQL 恒不命中，这里直接空串。
+    """
+    uid = str(user_id or "")
+    if uid in ("", "0"):
+        return ""
+    row = read_one_any("um_platform_login_by_user", (uid,))
+    return str(row[0] or "") if row else ""
+
+
+def repo_key_exists_any(repo_key: str) -> str:
+    """仓库是否在 managed_repos 登记；返回库里的 repo_key 原值，无行返回空串。"""
+    if not repo_key:
+        return ""
+    row = read_one_any("repo_key_row", (repo_key,))
+    return str(row[0] or "") if row else ""
+
+
+#: 仓库键 IN 查询的分块大小（MySQL/sqlite 占位符上限的保守值）。
+_REPO_KEY_QUERY_CHUNK = 400
+
+
+def repo_keys_existing_any(repo_keys: "list[str]") -> list[str]:
+    """给定候选仓库键里已在 managed_repos 登记的那些（每块 `ORDER BY repo_key` 照抄）。
+
+    候选集来自平台卡前缀（实际规模远小于分块上限，单块即与原 `IN (...) ORDER BY repo_key`
+    逐字一致）；超过分块上限时按候选顺序逐块查询、块内有序拼接，避免撞参数上限。
+    """
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return []
+    out: list[str] = []
+    for start in range(0, len(keys), _REPO_KEY_QUERY_CHUNK):
+        chunk = keys[start:start + _REPO_KEY_QUERY_CHUNK]
+        ph = ",".join(["?"] * len(chunk))
+        with _any_cursor() as c:
+            c.execute(f"SELECT repo_key FROM managed_repos WHERE repo_key IN ({ph}) "
+                      f"ORDER BY repo_key", tuple(chunk))
+            out.extend(str(r[0]) for r in (c.fetchall() or []) if r and r[0])
+    return out
 
 
 def list_active_scene_nodes() -> list[Any]:
