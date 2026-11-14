@@ -4111,7 +4111,8 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `::test_main_mode_flip_rebinds_consumer`（lifespan 退出时 `OutboxConsumer.stop()` 的 `await self._task`
   抛 `CancelledError`，与本批读口无关）；
   `tests/kernel/test_gsb_route.py::test_public_primitives_registry_sync`（mgmt `PUBLIC_PRIMITIVES`
-  早已缺 189 项，非本轮新增的两个函数 —— 本轮两名字在注册面里能找到）。
+  早已漂移：public 实际面 257 个函数 / 静态镜像只登记 64 项，缺 193 项，本轮实算；
+  非本轮新增的两个函数 —— `lease_owner_by_key` / `lease_owned_installations_by_owner` 都在注册面里）。
 - **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
   轮内口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
   本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新原语契约），运行面证据为 sqlite 烟测
