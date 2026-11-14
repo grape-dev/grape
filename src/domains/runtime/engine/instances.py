@@ -153,34 +153,25 @@ def resolve_instance_id(engine_name: str, scope: str | None = None) -> int | Non
     if not engine_name:
         return None
     target = engine_name.strip().lower()
-    with _lock():
-        c = _db().cursor()
-        if scope:
-            c.execute("""
-                SELECT ar.id, ar.name, ar.credential_id, rc.device_name, rc.status
-                FROM agent_runtimes ar
-                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
-                WHERE ar.scope = ?
-                ORDER BY CASE WHEN ar.credential_id = 0 OR rc.status IS NULL OR rc.status = 'active' THEN 0 ELSE 1 END, ar.id
-            """, (scope,))
-        else:
-            c.execute("""
-                SELECT ar.id, ar.name, ar.credential_id, rc.device_name, rc.status
-                FROM agent_runtimes ar
-                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
-                ORDER BY CASE WHEN ar.credential_id = 0 OR rc.status IS NULL OR rc.status = 'active' THEN 0 ELSE 1 END, ar.id
-            """)
-        for rid, et, cid, dev, cst in c.fetchall():
-            # 双名匹配（ENGINE_DISPLAY_NAMES 引入后的兼容）：先试新派生名
-            # （aishell-worker-xxx），再试原名派生（hwcloud-worker-xxx）——历史
-            # 保存的 Agent 绑定/Chat 配置仍是旧名，改名不断链。
-            _new = instance_name(et, dev or "", cid)
-            _old = f"{(et or 'engine').strip().lower()}-{sanitize_device(dev or '') or f'cred{cid or 0}'}"
-            if _new == target or (_new != _old and _old == target):
-                # 可用：本机直连（cred 0）、凭据行不存在（LEFT JOIN 无行，测试/新环境）、凭据 active；
-                # 仅凭据存在且 revoked 的旧行排除（2026-08-17 修复）
-                if (cid or 0) == 0 or cst is None or cst == "active":
-                    return rid
+    # agent_runtimes / runtime_credentials 归运行域：三库独立后同域代码也必须走 owner 连接
+    # （进程库在非 runtime 域进程里是别域的库，直查即 1146）
+    from src.domains.runtime import public as _rt_inst
+
+    if scope:
+        _rows = _rt_inst.read_all_any("runtimes_for_instance_scan_scope", (scope,))
+    else:
+        _rows = _rt_inst.read_all_any("runtimes_for_instance_scan")
+    for rid, et, cid, dev, cst in _rows:
+        # 双名匹配（ENGINE_DISPLAY_NAMES 引入后的兼容）：先试新派生名
+        # （aishell-worker-xxx），再试原名派生（hwcloud-worker-xxx）——历史
+        # 保存的 Agent 绑定/Chat 配置仍是旧名，改名不断链。
+        _new = instance_name(et, dev or "", cid)
+        _old = f"{(et or 'engine').strip().lower()}-{sanitize_device(dev or '') or f'cred{cid or 0}'}"
+        if _new == target or (_new != _old and _old == target):
+            # 可用：本机直连（cred 0）、凭据行不存在（LEFT JOIN 无行，测试/新环境）、凭据 active；
+            # 仅凭据存在且 revoked 的旧行排除（2026-08-17 修复）
+            if (cid or 0) == 0 or cst is None or cst == "active":
+                return rid
     return None
 
 
@@ -192,17 +183,11 @@ def runtime_instance_name(runtime_id) -> str:
     if not runtime_id:
         return ""
     try:
-        with _lock():
-            c = _db().cursor()
-            c.execute(
-                "SELECT ar.name, rc.device_name, ar.credential_id "
-                "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
-                "WHERE ar.id=?",
-                (runtime_id,),
-            )
-            row = c.fetchone()
-            if row:
-                return instance_name(row[0], row[1] or "", row[2] or 0)
+        from src.domains.runtime import public as _rt_name
+
+        row = _rt_name.read_one_any("runtime_instance_row", (runtime_id,))
+        if row:
+            return instance_name(row[0], row[1] or "", row[2] or 0)
     except Exception:
         pass
     return ""
@@ -212,18 +197,16 @@ def scope_of_runtime(rid: int) -> str | None:
     """返回 runtime 行所属 scope（user/repo/global）；credential_id=0 的历史行视为 global。"""
     if not rid:
         return None
-    with _lock():
-        c = _db().cursor()
-        c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (rid,))
-        row = c.fetchone()
-        if not row:
-            return None
-        cid = row[0] or 0
-        if not cid:
-            return "global"
-        c.execute("SELECT scope FROM runtime_credentials WHERE id=?", (cid,))
-        r2 = c.fetchone()
-        return r2[0] if r2 else "global"
+    from src.domains.runtime import public as _rt_scope
+
+    row = _rt_scope.read_one_any("runtime_credential_id", (rid,))
+    if not row:
+        return None
+    cid = row[0] or 0
+    if not cid:
+        return "global"
+    r2 = _rt_scope.read_one_any("runtime_credential_scope", (cid,))
+    return r2[0] if r2 else "global"
 
 
 def engine_type_of_runtime(rid: int) -> str:
@@ -236,11 +219,10 @@ def engine_type_of_runtime(rid: int) -> str:
     if not rid:
         return ""
     try:
-        with _lock():
-            c = _db().cursor()
-            c.execute("SELECT name FROM agent_runtimes WHERE id=?", (rid,))
-            row = c.fetchone()
-            return (row[0] or "") if row else ""
+        from src.domains.runtime import public as _rt_type
+
+        row = _rt_type.read_one_any("agent_runtime_name_by_id", (rid,))
+        return (row[0] or "") if row else ""
     except Exception:
         return ""
 

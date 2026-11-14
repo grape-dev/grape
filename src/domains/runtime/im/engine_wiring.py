@@ -33,6 +33,11 @@ import sys
 import uuid
 from typing import Awaitable, Callable, Optional
 
+# 渠道安装表（grape_t_channel_installation）归 mgmt：语句在该域 public，
+# 由调用方传入自己的连接（3921a54c6 归位时漏了这行 import，运行期 NameError 被
+# except 吞成 "读不到安装 → None"，IM 推送静默失效）。
+from src.domains.mgmt import public as _mgmt_public
+
 # 数据库异常口径：SQLite 后端 sqlite3.Error；MySQL 后端 pymysql 异常。
 # 仓储层是"失败降级"语义（去重读不到就放行、绑定读不到就当未绑定），统一捕获即可。
 _DB_ERRORS: tuple = (sqlite3.Error,)

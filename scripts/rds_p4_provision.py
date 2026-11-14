@@ -186,6 +186,9 @@ def main(argv: list[str] | None = None) -> int:
         admin.close()
     src.close()
 
+    # 三库拓扑必须开 lib 开关：否则 db_registry.uses_own_dsn() 恒为 False，
+    # 所有「任意拓扑」原语会回落进程库（mgmt 库）→ 查 runtime/insight 表全 1146。
+    env_lines.append("GRAPE_DOMAIN_LIB=1")
     ENV_OUT.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
     ENV_OUT.chmod(0o600)
     print(f"\nstage DSN → {ENV_OUT}（0600）")

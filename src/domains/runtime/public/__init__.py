@@ -1818,6 +1818,24 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, "
         "skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?"),
     "runtime_exists_any": "SELECT 1 FROM agent_runtimes WHERE id=?",
+    # 引擎实例解析（engine/instances.py：三库独立后同域代码也必须走 owner 连接）
+    "runtimes_for_instance_scan": (
+        "SELECT ar.id, ar.name, ar.credential_id, rc.device_name, rc.status "
+        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+        "ORDER BY CASE WHEN ar.credential_id = 0 OR rc.status IS NULL OR rc.status = 'active' "
+        "THEN 0 ELSE 1 END, ar.id"),
+    "runtimes_for_instance_scan_scope": (
+        "SELECT ar.id, ar.name, ar.credential_id, rc.device_name, rc.status "
+        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+        "WHERE ar.scope = ? "
+        "ORDER BY CASE WHEN ar.credential_id = 0 OR rc.status IS NULL OR rc.status = 'active' "
+        "THEN 0 ELSE 1 END, ar.id"),
+    "runtime_credential_id": "SELECT credential_id FROM agent_runtimes WHERE id=?",
+    "runtime_credential_scope": "SELECT scope FROM runtime_credentials WHERE id=?",
+    "runtime_instance_row": (
+        "SELECT ar.name, rc.device_name, ar.credential_id "
+        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+        "WHERE ar.id=?"),
     "engine_cap_flags": (
         "SELECT tag, priority, enabled FROM engine_capabilities "
         "WHERE runtime_id=? AND enabled=1 ORDER BY tag"),
@@ -2708,3 +2726,43 @@ def ensure_repo_im_binding_schema(conn: Any) -> None:
         conn.commit()
     except Exception as exc:  # noqa: BLE001
         log.warning(f"commit repo_im_group_binding schema failed: {exc}")
+
+
+# ---------- 迁移期批量回填（跨域 JOIN 的替代：映射由 mgmt 取，回填落本域） ----------
+
+#: 跟随 repo_key 的 runtime 表（固定白名单：不接受调用方传表名）
+_ORG_BACKFILL_TABLES = ("events", "agent_tasks", "devops_agent_session", "issue")
+
+
+def backfill_org_id_by_repo(mapping: dict) -> dict[str, int]:
+    """按 repo_key→org_id 映射回填本域表的空 org_id（逐仓库 UPDATE，幂等）。"""
+    out: dict[str, int] = {}
+    if not mapping:
+        return out
+    with _any_tx() as c:
+        for tbl in _ORG_BACKFILL_TABLES:
+            n = 0
+            for rk, org in mapping.items():
+                cur = c.execute(
+                    f"UPDATE {tbl} SET org_id=? WHERE repo_key=? AND (org_id='' OR org_id IS NULL)",
+                    (org, rk))
+                n += int(getattr(cur, "rowcount", 0) or 0)
+            out[tbl] = n
+    return out
+
+
+def backfill_skill_category_id(category_map: dict) -> int:
+    """技能分类回填（Issue #179）：sub_scene → category_id（映射由 mgmt 取，本域更新）。
+
+    与原实现（本域 UPDATE + 分类表按 slug 关联子查询）等价：无匹配 slug 的技能保持 0。
+    """
+    total = 0
+    if not category_map:
+        return total
+    with _any_tx() as c:
+        for slug, cid in category_map.items():
+            cur = c.execute(
+                "UPDATE skill SET category_id=? WHERE sub_scene=? AND category_id=0",
+                (int(cid), slug))
+            total += int(getattr(cur, "rowcount", 0) or 0)
+    return total
