@@ -20,22 +20,7 @@ from src.api.deps import (
 )
 from src.kernel.config import log
 from src.kernel.session_manager import db, db_lock
-
-
-def _task_via_lib():
-    """GRAPE_TASKS_VIA_LIB=1 且 runtime lib 可用时走 lib（三库三机模式）。"""
-    import os as _os
-
-    from src.kernel import domain_read as _dr  # noqa: PLC0415
-    if not _dr.switch_on("GRAPE_TASKS_VIA_LIB", "runtime"):
-        return None
-    try:
-        from src.domains.runtime import public as _rt
-
-        return _rt if _rt.available() else None
-    except Exception as _exc:  # noqa: BLE001
-        log.warning(f"task read via lib unavailable: {_exc}")
-        return None
+from src.domains.runtime import public as _rt_public  # 跨域读一律走 owner 域 public
 
 # 每个 Agent 任务（tk_ / session_key）最大反馈条数（feedback-openapi-expose-design.md §四.9）
 FEEDBACK_MAX_PER_AGENT_TASK = 2
@@ -74,22 +59,12 @@ def _resolve_skill(skill_name: str):
     if not skill_name:
         return None, '', ''
     try:
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_820107_f
-            _ru_lib_820107 = _ru_lib_820107_f(foreign_only=True)
-            if _ru_lib_820107 is not None:
-                r = _ru_lib_820107.read_one("skill_820107", (skill_name,))
-            else:
-                c.execute(
-                    "SELECT id, skill_name, scope FROM skill WHERE skill_name=? AND is_active=1 "
-                    "ORDER BY CASE scope WHEN 'official' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END LIMIT 1",
-                    (skill_name,))
-                r = c.fetchone()
+        r = _rt_public.read_one_any("skill_resolve_preferred", (skill_name,))
         if r:
             return r[0], r[1] or '', r[2] or ''
         return None, skill_name, ''
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - 解析失败降级为空技能，不阻断反馈提交
+        log.debug(f"feedback skill resolve failed: {exc}")
         return None, skill_name, ''
 
 
@@ -105,18 +80,7 @@ def _collect_feedback_context(event_seq: int, user: dict):
     """
     import re as _re
     try:
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_a24eb5_f
-            _ru_lib_a24eb5 = _ru_lib_a24eb5_f(foreign_only=True)
-            if _ru_lib_a24eb5 is not None:
-                row = _ru_lib_a24eb5.read_one("events_a24eb5", (event_seq,))
-            else:
-                c.execute(
-                    "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result "
-                    "FROM events WHERE seq=?",
-                    (event_seq,))
-                row = c.fetchone()
+        row = _rt_public.read_one_any("event_feedback_row", (event_seq,))
         if not row:
             return None
         repo_key = row[1] or ''
@@ -134,20 +98,11 @@ def _collect_feedback_context(event_seq: int, user: dict):
         # 内部整型 card id（grape issue 表主键）
         issue_id_int = None
         try:
-            with db_lock:
-                c2 = db.cursor()
-                from src.kernel.domain_read import runtime_lib as _rt_lib_is
-                _is_lib = _rt_lib_is(foreign_only=True)
-                if _is_lib is not None:
-                    ir = _is_lib.read_one("issue_id_by_repo_number", (repo_key, issue_number))
-                else:
-                    c2.execute("SELECT id FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
-                               (repo_key, issue_number))
-                    ir = c2.fetchone()
-                if ir:
-                    issue_id_int = ir[0]
-        except Exception:
-            pass
+            ir = _rt_public.read_one_any("issue_id_by_repo_number", (repo_key, issue_number))
+            if ir:
+                issue_id_int = ir[0]
+        except Exception as exc:  # noqa: BLE001 - 卡片 id 仅用于详情链接，缺失不影响反馈
+            log.debug(f"feedback issue id lookup failed: {exc}")
         # 关联任务（最新一条）
         task = None
         engine = None
@@ -156,18 +111,7 @@ def _collect_feedback_context(event_seq: int, user: dict):
         skill_name = ''
         skill_scope = ''
         try:
-            _rt = _task_via_lib()
-            if _rt is not None:
-                tr = _rt.latest_task_for_event(event_seq)
-            else:
-                with db_lock:
-                    c3 = db.cursor()
-                    c3.execute(
-                        "SELECT id, status, runtime_id, exit_code, started_at, completed_at, "
-                        "result_text, skill FROM agent_tasks WHERE event_seq=? "
-                        "ORDER BY created_at DESC LIMIT 1",
-                        (event_seq,))
-                    tr = c3.fetchone()
+            tr = _rt_public.read_one_any("task_latest_by_event", (event_seq,))
             if tr:
                 task = {
                     "task_id": tr[0], "task_status": tr[1] or '', "runtime_id": tr[2] or 0,
@@ -181,33 +125,15 @@ def _collect_feedback_context(event_seq: int, user: dict):
         runtime_id = (task or {}).get("runtime_id") or 0
         if not runtime_id:
             try:
-                with db_lock:
-                    c4 = db.cursor()
-                    c4.execute(
-                        "SELECT runtime_id FROM devops_agent_session "
-                        "WHERE repo_key=? AND agent_type=? AND runtime_id>0 LIMIT 1",
-                        (repo_key, row[3] or ''))
-                    sr = c4.fetchone()
+                sr = _rt_public.read_one_any(
+                    "devops_session_runtime_id_by_repo_agent", (repo_key, row[3] or ''))
                 if sr:
                     runtime_id = sr[0]
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - 引擎归因尽力而为，取不到就不带引擎信息
+                log.debug(f"feedback engine session lookup failed: {exc}")
         if runtime_id:
             try:
-                with db_lock:
-                    c5 = db.cursor()
-                    from src.kernel.domain_read import runtime_lib as _ru_lib_a4f724_f
-                    _ru_lib_a4f724 = _ru_lib_a4f724_f(foreign_only=True)
-                    if _ru_lib_a4f724 is not None:
-                        ar = _ru_lib_a4f724.read_one("agent_runtimes_a4f724", (runtime_id,))
-                    else:
-                        c5.execute(
-                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), "
-                            "COALESCE(rc.last_ip,''), COALESCE(ar.provider,'') "
-                            "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc "
-                            "ON rc.id=ar.credential_id WHERE ar.id=?",
-                            (runtime_id,))
-                        ar = c5.fetchone()
+                ar = _rt_public.read_one_any("runtime_engine_attribution", (runtime_id,))
                 if ar:
                     from src.domains.runtime.engine.instances import instance_name
                     engine = {
@@ -262,30 +188,15 @@ def _resolve_token_task_context(user: dict) -> dict:
     runtime_id = 0
     if task_id:
         try:
-            _rt2 = _task_via_lib()
-            if _rt2 is not None:
-                r = _rt2.task_brief(task_id)
-            else:
-                with db_lock:
-                    c = db.cursor()
-                    from src.kernel.domain_read import runtime_lib as _ru_lib_b6b789_f
-                    _ru_lib_b6b789 = _ru_lib_b6b789_f(foreign_only=True)
-                    if _ru_lib_b6b789 is not None:
-                        r = _ru_lib_b6b789.read_one("agent_tasks_b6b789", (task_id,))
-                    else:
-                        c.execute(
-                            "SELECT event_seq, agent_type, skill, runtime_id, repo_key "
-                            "FROM agent_tasks WHERE id=? LIMIT 1",
-                            (task_id,))
-                        r = c.fetchone()
+            r = _rt_public.read_one_any("task_brief_row", (task_id,))
             if r:
                 event_seq = r[0]
                 agent_type = agent_type or (r[1] or '')
                 skill_name = r[2] or ''
                 runtime_id = r[3] or 0
                 repo_key = repo_key or (r[4] or '')
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - token 上下文解析尽力而为，失败退回 token 字段
+            log.debug(f"feedback token task context failed: {exc}")
     skill_id, skill_name, skill_scope = _resolve_skill(skill_name)
     return {
         "repo_key": repo_key,

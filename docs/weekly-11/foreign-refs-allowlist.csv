@@ -1,11 +1,11 @@
 table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,4
 agent_runtimes,runtime,insight,5
-agent_runtimes,runtime,mgmt,4
+agent_runtimes,runtime,mgmt,3
 agent_shared_knowledge,mgmt,runtime,8
 agent_tasks,runtime,api,7
 agent_tasks,runtime,insight,13
-agent_tasks,runtime,mgmt,4
+agent_tasks,runtime,mgmt,2
 agent_type,runtime,insight,1
 api_latency_log,insight,api,2
 audit_logs,mgmt,insight,1
@@ -14,7 +14,7 @@ autopilot_subscriptions,mgmt,runtime,1
 autopilot_tasks,mgmt,runtime,6
 chat_agent_session,runtime,mgmt,1
 chat_conversations,runtime,mgmt,2
-devops_agent_session,runtime,mgmt,4
+devops_agent_session,runtime,mgmt,3
 devops_pipeline_scene,mgmt,api,4
 devops_pipeline_scene,mgmt,insight,1
 devops_pipeline_scene,mgmt,runtime,6
@@ -23,7 +23,6 @@ event_action_filter,mgmt,api,3
 event_skipped,runtime,api,1
 events,runtime,api,7
 events,runtime,insight,7
-events,runtime,mgmt,1
 external_identities,mgmt,api,4
 external_identities,mgmt,kernel,1
 external_identities,mgmt,runtime,2
@@ -42,7 +41,7 @@ grape_t_repo_credentials,insight,mgmt,5
 grape_t_repo_credentials,insight,runtime,1
 issue,runtime,api,12
 issue,runtime,insight,2
-issue,runtime,mgmt,2
+issue,runtime,mgmt,1
 issue_state,runtime,api,1
 login_whitelist,mgmt,kernel,4
 managed_repos,mgmt,api,2
@@ -53,12 +52,12 @@ obs_metric_rollup,insight,mgmt,1
 outbound_content_ledger,mgmt,kernel,6
 runtime_credentials,runtime,api,6
 runtime_credentials,runtime,insight,8
-runtime_credentials,runtime,mgmt,4
+runtime_credentials,runtime,mgmt,3
 runtime_health_scores,runtime,insight,1
 scene_knowledge_ref,mgmt,runtime,2
 scene_market,mgmt,api,1
 skill,runtime,api,8
-skill,runtime,mgmt,2
+skill,runtime,mgmt,1
 skill_category,mgmt,runtime,1
 takeover_sessions,runtime,api,1
 takeover_sessions,runtime,mgmt,1

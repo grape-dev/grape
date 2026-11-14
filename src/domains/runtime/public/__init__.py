@@ -1886,6 +1886,34 @@ _ANY_QUERIES: dict[str, str] = {
         "ORDER BY vc.last_active_at DESC"),
     "devops_session_reset_runtime_session": (
         "UPDATE devops_agent_session SET runtime_session_id='' WHERE repo_key=? AND agent_type=?"),
+    # ── mgmt 反馈路由（routes/feedback.py）读路径收口 ──────────────────────────
+    # 这些站点此前是「lib 有 DSN 才走 lib，否则本地兜底 SQL」，而兜底 SQL 才是
+    # 跨域统计的来源。改成任意拓扑具名查询后，SQL 只在 runtime 侧留一份。
+    # 列序与原 SQL 逐字一致（调用方按下标取值）。
+    "skill_resolve_preferred": (
+        "SELECT id, skill_name, scope FROM skill WHERE skill_name=? AND is_active=1 "
+        "ORDER BY CASE scope WHEN 'official' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END LIMIT 1"),
+    "event_feedback_row": (
+        "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result "
+        "FROM events WHERE seq=?"),
+    "issue_id_by_repo_number": (
+        "SELECT id FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1"),
+    "task_latest_by_event": (
+        "SELECT id, status, runtime_id, exit_code, started_at, completed_at, "
+        "result_text, skill FROM agent_tasks WHERE event_seq=? "
+        "ORDER BY created_at DESC LIMIT 1"),
+    "task_brief_row": (
+        "SELECT event_seq, agent_type, skill, runtime_id, repo_key "
+        "FROM agent_tasks WHERE id=? LIMIT 1"),
+    "devops_session_runtime_id_by_repo_agent": (
+        "SELECT runtime_id FROM devops_agent_session "
+        "WHERE repo_key=? AND agent_type=? AND runtime_id>0 LIMIT 1"),
+    # agent_runtimes 与 runtime_credentials 同属 runtime 域，JOIN 留在本域内
+    "runtime_engine_attribution": (
+        "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), "
+        "COALESCE(rc.last_ip,''), COALESCE(ar.provider,'') "
+        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc "
+        "ON rc.id=ar.credential_id WHERE ar.id=?"),
     # 巡检（api/patrol.py）读路径：issue / events / agent_tasks / agent_runtimes
     "issue_status_by_repo_number": (
         "SELECT status FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1"),

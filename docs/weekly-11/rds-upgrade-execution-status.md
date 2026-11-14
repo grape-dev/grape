@@ -994,6 +994,49 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 #   → A1 视图 0 ✅、A2 授权仅本库 ✅、A6 队列 ✅、A3 代码引用 135 对 ❌（P1 未完成）
 ```
 
+### 7.3 mgmt 反馈路由读路径收口（2026-11-14 本批）
+
+- 文件：`src/domains/mgmt/routes/feedback.py`（mgmt 域消费、8 处跨域 SQL → 0）。
+  表分布（全部归 **runtime**，`docs/weekly-11/table-owner.tsv` 冻结）：
+  `skill` 1 / `events` 1 / `issue` 1 / `agent_tasks` 2 / `devops_agent_session` 1 /
+  `agent_runtimes` 1 / `runtime_credentials` 1（后者与 `agent_runtimes` 同属一条 LEFT JOIN）。
+- owner 侧新增 7 条具名查询（`?` 占位符、列序照抄原 SQL）到 runtime `public._ANY_QUERIES`：
+  `skill_resolve_preferred`（official→repo→其他 的排序 + `is_active=1`）、`event_feedback_row`、
+  `issue_id_by_repo_number`、`task_latest_by_event`（`created_at DESC` 取一）、`task_brief_row`、
+  `devops_session_runtime_id_by_repo_agent`（`runtime_id>0`）、`runtime_engine_attribution`。
+- 设计取舍：
+  1) 这 8 处原本是「`runtime_lib(foreign_only=True)` 有 DSN 就走 lib，否则本地兜底 SQL」的双路径，
+     **兜底 SQL 才是跨域统计的来源**（交接文档 §5.3 坑 3）。改成任意拓扑具名查询后，
+     自有 DSN 走 `db_registry`、单库/测试回落进程主库 + `db_lock`，调用方只剩一条读法。
+  2) `agent_runtimes × runtime_credentials` 的 LEFT JOIN **不拆**：两张表都归 runtime，属域内 JOIN；
+     拆两跳要把「凭据行缺失 → 空串」的 COALESCE 语义在 Python 里重做一遍，反而稀释契约。
+  3) 未新增薄函数包装：站点只有一个调用方、无参数化需求，直接 `read_one_any(name, params)`
+     比再套一层 `def` 更少维护面；`check_lib_query_names` 已在 `_ANY_QUERIES` 注册面满足。
+  4) 删掉 `_task_via_lib()`（`GRAPE_TASKS_VIA_LIB` 灰度开关的历史入口），它指向的
+     `latest_task_for_event` / `task_brief` 是 `%s` 方言函数，单库/sqlite 下不可用；
+     开关默认关闭，删除不影响任何现网路径。
+  5) `db_lock` / `db` 仍保留（`user_feedback` 写读是 mgmt 本域表），只在跨域站点上去掉多余的外层锁
+     （`_any_cursor` 回落路径自带 `db_lock`，自有 DSN 路径是 autocommit）。
+- 修的存量 bug：
+  1) 三库拓扑下未开 `GRAPE_TASKS_VIA_LIB` 时，反馈上下文查的是进程主库 → `1146`，
+     整段 `except` 后 task/engine 全空（功能静默降级）；现按 owner 域读，两条拓扑同结果。
+  2) 四处吞异常（技能解析、卡片 id、引擎绑定、token 上下文）中三处是 `except Exception: pass`，
+     排障只能靠猜；统一改为带 `log.debug` 的显式处理（静默 except 棘轮只减不增）。
+  3) `_resolve_skill` 的 lib 分支用 `%s` 方言、兜底分支用 `?`，同一语义两套写法；
+     现只有 `?` 一套，sqlite 冒烟即可覆盖。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/feedback_smoke.py`
+  **ALL 30 CHECKS PASSED**（含边界与否定用例：official 优先于 repo、停用的 official 不参与、
+  技能不存在返回原名、同事件多任务取最新、`issue_id` 无数字 → issue_number 空、卡片缺失不影响其余上下文、
+  摘要回退 `events.result` 并截断 500、任务无 `runtime_id` 时按会话绑定回退且**忽略 `runtime_id=0`**、
+  `events.runtime` 优先于 `provider`、token 仓库优先于任务仓库、任务不存在保留 token 字段、
+  源码断言调用点 0 条跨域 SQL）；`rds_gate.sh --quick` **GATE: 全绿**（check-arch PASS / 棘轮 OK /
+  契约 37 条 / 看板最新）；`pytest tests/arch tests/contracts tests/scripts` **158 passed**；
+  `make lint` **import OK**。
+- 新基线：全局 **258 → 250**（-8），对 **68 → 67**（`events → mgmt` 这一对归零；
+  其余 6 张表在 mgmt 侧仍有别的文件引用，故只减计数不减对）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 250 / 67；依赖看板与作业单同步刷新
+  （下一批头名：`mgmt/admin/routes.py` 8 处）。
+
 ---
 
 ## 8. 提交记录
