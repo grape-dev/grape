@@ -2680,6 +2680,76 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   同步刷新（下一批头名：`src/domains/mgmt/user/legacy_column_migrations.py` 4 处 ——
   `meta`（归 runtime）× 4）。
 
+### 7.27 mgmt user_accounts 死表收敛的 meta 搬迁下沉 runtime owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/mgmt/user/legacy_column_migrations.py` **4 处 → 0**
+  （`migrate_user_accounts_deprecated_fields()` 内）。
+- 表分布：全部为 `meta`（归 **runtime**）× 4 —— 两读两写：
+  L166 `SELECT COUNT(*) FROM meta WHERE key='webhook_url'`、
+  L168 `INSERT OR REPLACE INTO meta (key, value) VALUES ('webhook_url', ?)`、
+  L175 `SELECT COUNT(*) FROM meta WHERE key=?`、
+  L177 `INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)`；
+  均为参数化语句（无动态表名/列名），无跨域 JOIN。
+- 设计取舍：
+  1) **不新增 SQL 面，复用 owner 域已登记原语**：runtime public 早有
+     `set_meta_if_absent(key, value)`（语句 `meta_insert_absent` =
+     `INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)`，已在 `__all__` 与
+     `_ANY_QUERIES` 登记）。因此本批 owner 侧 0 行改动 —— 「先 COUNT 再 INSERT」的
+     **两次跨域往返收成一次**，且不再出现新的 SQL 字面量（owner 侧语句数不变，避免
+     「把引用从 A 域搬到 B 域」式的假下降）。
+  2) **等价性靠唯一键**：`meta.key` 是 `TEXT PRIMARY KEY`（`runtime/schema_ddl.py`），
+     `COUNT==0 → INSERT` 与 `INSERT IGNORE`（MySQL 由 `mysql_compat.translate_sql`
+     翻译）在「键已存在即跳过」上等价，后者还把判定与写入合成原子操作。
+  3) **业务口径一律留在 mgmt 调用点**：`PRAGMA table_info` 探列、三个
+     `if <col> in ua_cols` 守卫、OAuth 三列**逐列判空**（`client_id` 为空则整段跳过，
+     即使 secret 有值也不写）、`bot_usernames` 的 JSON/逗号双解析、取首个元素、
+     `github:` 前缀守卫、`repo_owner OR full_name` 双分支、末尾 `devops-bot` 兜底 ——
+     这些都没有下移；owner 域只提供「不存在才写」这一件事。
+  4) **延迟导入**：本模块由 `init_db()` 在**持 `db_lock`** 的上下文中早期加载
+     （`mgmt/user/db.py:863`），模块级 import 运行域 public 会把启动顺序绑死，故用
+     函数内延迟导入；导入失败仍由既有 `except` 兜成「迁移零命中」，与改造前
+     「表不存在即跳过」一致。`db_lock` 是 `RLock`，`set_meta_if_absent` 单库回落
+     再取同一把锁属重入（烟测用真 `with db_lock:` 调用钉住，不死锁）。
+  5) **事务语义**：原 4 条语句与后续 `managed_repos` 更新共用调用方游标、末尾统一
+     `commit()`；现在 meta 写经原语即时提交（与 `mgmt/user/db.py` 同款 OAuth 迁移
+     已采用的形态一致）。迁移本身幂等，部分提交无副作用；本域
+     （`user_accounts` / `managed_repos`）的 SQL 仍在调用方游标与事务内。
+- 修的存量 bug（结构性隐患，三库拓扑尚未上线，线上未观测到故障）：
+  1) **字段搬迁失败但后续 DROP COLUMN 照常执行 → 配置静默丢失**：`run()` 里
+     `migrate_user_accounts_deprecated_fields()` 与 `drop_user_accounts_deprecated_columns()`
+     是两个独立函数，前者失败只留一行 warning，后者仍会把 `webhook_url` /
+     `gitcode_oauth_*` / `bot_usernames` 列 DROP 掉。三库拓扑下 mgmt 进程库没有
+     `meta`（视图 0），本函数第一条 SQL 必 1146 被吞 —— 结果是 webhook 与 GitCode
+     OAuth 凭据**永久丢失且无报错**。现在 meta 写走 owner 域 DSN，独立拓扑下正常搬迁。
+  2) **`INSERT OR REPLACE` 是 SQLite 专有方言**：该语句靠 `db.cursor()` 直发进程库，
+     方言翻译只在 `mysql_compat.Cursor` 上生效；即便翻译成 `REPLACE INTO`，单库
+     MySQL 拓扑下「删-插」也会在 `meta` 将来增列时静默重置新列。改用 owner 域
+     `INSERT IGNORE`（只在键缺失时插入，不存在「删-插」）。
+  3) **同一张 `meta` 表两套写入口径**：`mgmt/user/db.py` 的同类搬迁用
+     `read_one_any("meta_count") + set_meta_value_any`（覆盖式 upsert 靠 COUNT 守卫，
+     有 TOCTOU 窗口），本文件用 `INSERT OR REPLACE`。本批把本文件统一到原子
+     「不存在才写」；`db.py` 那两处语义差异仍在，留给后续批次（其 SQL 已不在跨域
+     统计内，属口径统一而非引用收口）。
+- 验证：
+  - `py_compile` 目标文件 **COMPILE_OK**。
+  - SQLite 烟测 `~/burndown/legacy_meta_migration_smoke.py` **ALL 38 CHECKS PASSED**
+    （静态面 8 项 + 行为面 26 项 + 拓扑面 4 项）：4 条原语句逐字消失、只调 1 个已导出
+    原语、静默 except 与 HEAD 版同计数、`?` 方言且 MySQL 侧翻成 `INSERT IGNORE`；
+    webhook/OAuth/bot_usernames 的**全部原口径**逐条钉住（存量不覆盖、空值零写入、
+    LIMIT 1 取首、client_id 空则整段跳过、`github:` 不写、兜底只补空）；
+    缺列/缺表/幂等重跑/持 `db_lock` 重入；以及**模拟运行域自有 DSN**（第二个 sqlite
+    连接当运行域库）验证 meta 写落在运行域库、进程库 meta 保持为空 —— 正是原实现在
+    独立拓扑下静默失效的根因。
+  - `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK /
+    契约 37 条 / 看板最新）。
+  - `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **116 → 112**（-4），对数 **46 → 45** —— `meta←mgmt` 对清零
+  （`meta` 消费域只剩 runtime 44 处，均为 owner 自身）。基线
+  `foreign-refs-allowlist.csv` 收紧为 112 / 45，依赖看板与作业单同步刷新。下一批头名：
+  `src/domains/mgmt/routes/feishu_onboard.py` 4 处（`devops_agent_session` 2 /
+  `chat_conversations` 1 / `vod_conversations` 1，均归 runtime；同处还有
+  `src/api/deps.py` 4 处 `external_identities`）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

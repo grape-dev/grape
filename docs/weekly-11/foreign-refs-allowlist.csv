@@ -32,7 +32,6 @@ issue,runtime,api,3
 issue,runtime,mgmt,1
 issue_state,runtime,api,1
 managed_repos,mgmt,runtime,5
-meta,runtime,mgmt,4
 runtime_credentials,runtime,api,6
 runtime_credentials,runtime,insight,7
 runtime_health_scores,runtime,insight,1
