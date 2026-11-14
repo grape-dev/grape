@@ -732,6 +732,10 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # 事件知识清理 / 账户名（runtime/routes/events.py；任意拓扑）
            "knowledge_obs_keys_scoped", "knowledge_ids_scoped",
            "delete_event_knowledge_any", "account_username_by_id_any",
+           # 渠道安装表解绑/回显（runtime/routes/chat.py；任意拓扑）
+           "installation_other_refs_any", "installation_holders_any",
+           "installation_user_channel_rows_any", "clear_user_mapping_feishu_any",
+           "delete_feishu_onboard_task_any",
            "health"]
 
 
@@ -1716,6 +1720,23 @@ _ANY_QUERIES: dict[str, str] = {
     "installation_active_configs_by_type": (
         "SELECT config FROM grape_t_channel_installation "
         "WHERE channel_type=? AND status='active'"),
+    # chat.py 解绑清理的三条（原在 runtime/routes/chat.py 直发 SQL，或走
+    # engine_wiring._connect 的 runtime 库句柄）。列序/谓词与原语句逐字一致：
+    # 引用判定「不含本人这条」用 NOT (scope='user' AND owner_user_id=?)，与
+    # 原 `AND NOT (scope='user' AND owner_user_id=?)` 同义（可移植方言，两条后端都可执行）。
+    "installation_other_refs_count": (
+        "SELECT COUNT(*) FROM grape_t_channel_installation "
+        "WHERE legacy_app_id=? AND status='active' "
+        "AND NOT (scope='user' AND owner_user_id=?)"),
+    "installation_holders_by_app": (
+        "SELECT scope, owner_user_id FROM grape_t_channel_installation "
+        "WHERE legacy_app_id=? AND status='active'"),
+    "installation_user_channels": (
+        "SELECT channel_type, status, config FROM grape_t_channel_installation "
+        "WHERE scope='user' AND owner_user_id=? AND status IN ('active','disabled') "
+        "ORDER BY updated_at DESC"),
+    # 扫码接入任务删除（含 app_secret/qr_url 敏感数据；飞书专属链路）
+    "onboard_task_delete_by_app": "DELETE FROM feishu_onboard_task WHERE app_id=?",
     # ── 事件知识清理 + 账户名解析（runtime/routes/events.py：原「mgmt_lib 优先 + 本地兜底 SQL」
     # 的兜底侧与引擎 scope 子查询上移；列序/谓词与原语句逐字一致，写语句不含 SQL 专有语法）──
     "knowledge_obs_keys_scoped": (
@@ -1862,6 +1883,58 @@ def repo_dev_scene(repo_key: str) -> str:
     """仓库默认场景 id（managed_repos.dev_scene）；无行/空值返回空串。"""
     row = read_one_any("repo_dev_scene", (repo_key,))
     return str(row[0] or "") if row else ""
+
+
+# ---------- 渠道安装表的解绑/回显原语（runtime/routes/chat.py；任意拓扑） ----------
+#
+# 原实现在 chat.py 里用 `engine_wiring._connect(default_db_path())` 拿 runtime 库句柄直发
+# 这三条 SQL：单库拓扑能跑，三库拆分后 runtime 库没有 grape_t_channel_installation（视图 0）
+# → 1703 的持有者校验直接 1146（保存 IM 配置 500），另两条被 except 吞成「无引用 / 无安装」
+# （app 释放误清他人映射、前端多渠表单恒「未接入」）。SQL 上移到本域后两条拓扑同源。
+
+def installation_other_refs_any(app_id: str, owner_user_id: str) -> int:
+    """该 app 的 active 安装里，除 (scope=user, owner 本人) 这条外还剩几条引用。"""
+    if not app_id:
+        return 0
+    row = read_one_any("installation_other_refs_count", (app_id, str(owner_user_id)))
+    return int(row[0] or 0) if row else 0
+
+
+def installation_holders_any(app_id: str) -> list[tuple]:
+    """该 app 的全部 active 持有行 (scope, owner_user_id)；无行返回空列表。"""
+    if not app_id:
+        return []
+    return [tuple(r) for r in read_all_any("installation_holders_by_app", (app_id,))]
+
+
+def installation_user_channel_rows_any(owner_user_id: str) -> list[tuple]:
+    """某用户各渠道的安装行 (channel_type, status, config)，按 updated_at 倒序。
+
+    口径照抄原查询：只认 active/disabled 两态（revoked 不参与回显），不做去重，
+    「同渠道取最新一条」由调用方按首见保留（原实现同）。
+    """
+    return [tuple(r) for r in read_all_any("installation_user_channels", (str(owner_user_id),))]
+
+
+def clear_user_mapping_feishu_any(app_id: str = "", user_id: str = "", updated_at: str = "") -> int:
+    """清空飞书映射（app 释放按 app_id / 精确按 user_id），返回变更行数。
+
+    与 `clear_user_mapping_feishu` 的区别：那条是 `%s` 方言、只在自有 DSN 拓扑可用，
+    调用方因此保留了本地兜底 SQL（跨域统计来源）；本函数走 `?` 具名查询，两条拓扑同源。
+    updated_at 由调用方算出传参（原实现用 Python 侧 `datetime.now().isoformat()`）。
+    """
+    if app_id:
+        return exec_any("um_clear_feishu_by_app", (updated_at, app_id))
+    if not user_id:
+        raise ValueError("app_id / user_id 至少给一个")
+    return exec_any("um_clear_feishu_by_user", (updated_at, str(user_id)))
+
+
+def delete_feishu_onboard_task_any(app_id: str) -> int:
+    """删除该 app 的飞书扫码接入任务（任意拓扑；空 app_id 不落到 `WHERE app_id=''`）。"""
+    if not app_id:
+        return 0
+    return exec_any("onboard_task_delete_by_app", (app_id,))
 
 
 # ---------- 仓库级 bot token / 登录名（kernel/token_resolver；任意拓扑） ----------

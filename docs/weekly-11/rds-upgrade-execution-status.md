@@ -1583,6 +1583,74 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 ---
 
+### 7.12 runtime Chat IM 解绑/回显跨域读写收口（2026-11-15 本批）
+
+- 文件：`src/domains/runtime/routes/chat.py`（runtime 域），**6 处 → 0**（单轮做完，未分两轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，全部归 mgmt）：
+  - `grape_t_channel_installation` × 3：原行 1561（解绑前判「除本人外还有几条 active 引用」）、
+    1703（保存前查 app_id 的全部 active 持有轨）、2792（前端多渠表单回显：该用户各渠道安装行）；
+  - `unified_user_mapping` × 2：原行 1600（app 释放清飞书映射）、1606（按 user_id 精确清本人映射）；
+  - `feishu_onboard_task` × 1：原行 1631（解绑删扫码任务）。
+  均为静态 SQL + `?` 占位符，无动态拼表名/列名；1703 / 2792 走
+  `engine_wiring._connect(default_db_path())` 的 **runtime 库句柄**，1600/1606/1631 是
+  「`mgmt_lib` 命中走 lib、否则本地兜底 SQL」的兜底侧。
+- owner 侧新增（`?` 占位符，列序/谓词逐字照抄）：
+  1) `_ANY_QUERIES` 补 4 条：`installation_other_refs_count`、`installation_holders_by_app`、
+     `installation_user_channels`、`onboard_task_delete_by_app`；
+  2) 5 个薄函数：`installation_other_refs_any`、`installation_holders_any`、
+     `installation_user_channel_rows_any`、`clear_user_mapping_feishu_any`、
+     `delete_feishu_onboard_task_any`；
+  3) 用户映射两条复用**既有**具名查询 `um_clear_feishu_by_app` / `um_clear_feishu_by_user`
+     （channel_directory 批次已登记，谓词与本批原语句逐字相同），不重复登记。
+- 设计取舍：
+  1) **安装表的读也走任意拓扑原语，而不是复用 `installation_* (conn, ...)`**：那批函数的
+     `conn` 由调用方给，本文件能拿到的只有 runtime 库句柄——正是三库下读不到 mgmt 表的根因。
+     新原语自带拓扑自适应（自有 DSN → `db_registry.cursor("mgmt")`；单库 → 进程主库 + `db_lock`），
+     调用方不再需要（也拿不到）跨域连接。
+  2) **解绑清理拆成「mgmt 写 → runtime 删 → mgmt 写」三段，各自提交**：跨域原子在三库拓扑下
+     本就不可得（不同实例不同连接），硬凑只会让单库拓扑「看起来原子」而在三库下照样半途。
+     解绑是 best-effort 清理（整个函数外层就是 `try/except + log.warning`），三段各自落库、
+     失败只记一条 warning；这与改前三库拓扑的实际行为一致，单库拓扑的最终数据也一致。
+  3) **`other_refs` 的「不含本人」用 `NOT (scope='user' AND owner_user_id=?)` 原样搬**：
+     不改成 `scope='repo' OR owner_user_id!=?`（NULL owner 行会因三值逻辑漏算），
+     可移植方言两条后端同义。
+  4) **`updated_at` 仍由调用方算**：原实现是 `datetime.now().isoformat()`（本地时区 ISO 串），
+     不是库时间；薄函数收 `updated_at` 参数，SQL 里不出现 `NOW()` / `datetime('now')`。
+  5) **按 app 清映射保留「清该 app 全部行」的宽口径**：`WHERE app_id=?` 会清掉同 app 的他人行，
+     但这条只在 `other_refs == 0`（确认无人再引用该 app）时执行，宽口径才是原意——不做收紧。
+- 修的存量 bug（三库拓扑，均非统计口径问题）：
+  1) **保存 IM 配置直接 500（功能面，最严重）**：1703 的 app_id 唯一性校验在 runtime 进程里直查
+     `grape_t_channel_installation`，三库下该库没有这张表 → 1146 未被捕获 → `PUT /api/chat/config`
+     带渠道载荷必失败。现走 mgmt 原语，两条拓扑都命中。
+  2) **app 释放误清他人映射（数据面）**：1561 的引用计数被 `except` 吞成 `other_refs=0`，
+     于是「还有别人在用这个 app」被判成「没人用」→ 按 app 全清，其他用户的飞书 open_id /
+     app_id 一起被抹（他们下次推送落不到飞书）。
+  3) **前端多渠表单恒「未接入」（功能面）**：2792 读不到安装行 → `_user_im_installations()`
+     返回 `{}`，微信 / 企微 / 钉钉各渠道回显全空，用户以为没绑、重复绑定。
+  4) **兜底分支的错位写**：1600/1606/1631 的兜底 SQL 打在进程库上——单库拓扑是同一份库看不出，
+     三库拓扑下「写到 runtime 库、读在 mgmt 库」，清理实际无效且留下副本脏行。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/chat_unbind_smoke.py`
+  **ALL 100 CHECKS PASSED**（含边界与否定用例：4 条新语句与调用点 SQL 逐字对拍、无
+  `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`/`IFNULL(`、未登记查询名 KeyError；
+  引用计数只数 active 且排除本人、他人 user 行与 repo 轨行算引用、revoked/他 app 不算、
+  空 app_id 短路不把 `''` 脏行当引用；持有行列序与多行全返回；渠道回显只 active/disabled、
+  `updated_at DESC`、同渠道多行不去重、他人行不串；按 app 清命中他人行 / 按 user 清只命中本人 /
+  四列清空且 `updated_at` 取参值、平台登录名与昵称不被波及、两者都不给 ValueError；
+  扫码任务空 app_id 返回 0 且不删 `''` 行；调用点整链路四场景——other_refs>0 只清本人、
+  =0 按 app 全清、dingtalk 不碰飞书映射/扫码任务、空 old_app_id 直接返回，且
+  `chat_conversations`/`repo_im_group_binding`/`bot_seen_messages` 逐字删除；
+  自有 DSN 时 5 个原语全部走 `db_registry.cursor('mgmt')` 不碰进程库；源码面 0 条三表 SQL、
+  5 个原语全接上、不再借 engine_wiring 句柄）；`rds_gate.sh --quick` **GATE: 全绿**
+  （check-arch R1–R8 / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**；
+  `check_lib_query_names` PASS（5 个新函数均已登记）。
+- 新基线：全局 **196 → 190**（-6），对 **61 → 60**（`feishu_onboard_task←runtime` 1 → 0，
+  `grape_t_channel_installation←runtime` 9 → 6，`unified_user_mapping←runtime` 3 → 1）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 190 / 60；依赖看板与作业单同步刷新
+  （下一批头名：`runtime/im/handler_async.py` 6 处 / 多个 6 处文件并列）。
+
+---
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

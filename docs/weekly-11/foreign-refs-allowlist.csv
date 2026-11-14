@@ -24,11 +24,10 @@ events,runtime,api,7
 events,runtime,insight,7
 external_identities,mgmt,api,4
 external_identities,mgmt,runtime,2
-feishu_onboard_task,mgmt,runtime,1
 grape_accounts,mgmt,insight,1
 grape_accounts,mgmt,runtime,3
 grape_t_channel_chat_session_binding,mgmt,runtime,1
-grape_t_channel_installation,mgmt,runtime,9
+grape_t_channel_installation,mgmt,runtime,6
 grape_t_channel_lease,mgmt,runtime,2
 grape_t_channel_outbound_card,mgmt,runtime,2
 grape_t_channel_sender_identity,mgmt,runtime,1
@@ -56,7 +55,7 @@ skill_category,mgmt,runtime,1
 takeover_sessions,runtime,api,1
 takeover_sessions,runtime,mgmt,1
 unified_user_mapping,mgmt,kernel,3
-unified_user_mapping,mgmt,runtime,3
+unified_user_mapping,mgmt,runtime,1
 user_accounts,mgmt,runtime,1
 user_feedback,mgmt,api,6
 vod_conversations,runtime,mgmt,1

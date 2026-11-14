@@ -55,6 +55,10 @@ from src.api.deps import get_current_user_or_api_key, require_no_session_token
 
 from src.domains.mgmt.user import db as user_db
 
+# 渠道安装表 / 用户映射 / 扫码任务都归 mgmt：SQL 只在该域 public 留一份（任意拓扑原语），
+# 本模块不再持外域表语句，也不再借 engine_wiring 的 runtime 库句柄读 mgmt 表。
+from src.domains.mgmt import public as mgmt_public
+
 from src.kernel.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
     add_message, get_messages, touch_conversation, update_conversation,
@@ -1549,62 +1553,59 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str,
     from datetime import datetime as _dt
     from src.kernel.session_manager import db as _db, db_lock as _db_lock
     try:
+        # A2 收尾：引用判定改看 active 安装行（不含当前用户本人的这条）——mgmt 归属域原语。
+        # 原实现借 engine_wiring 的 runtime 库句柄直查安装表：三库拓扑下该库没有这张表
+        # （视图 0），异常被吞成 other_refs=0 → app 释放会把其他用户仍在用的映射一起清掉。
+        other_refs = 0
+        try:
+            other_refs = mgmt_public.installation_other_refs_any(old_app_id, str(user_id))
+        except Exception as e:
+            log.warning(f"Chat IM: installation ref check failed: {e}")
+        _now = _dt.now().isoformat()
+        is_feishu = (provider or "feishu").strip().lower() == "feishu"
+        # P3-5c：unified_user_mapping / feishu_onboard_task 是 mgmt 基表；
+        # runtime 进程（worker 或 mgmt 自身）写入走 mgmt lib + 幂等意图
+        from src.kernel.domain_read import mgmt_lib as _mgmt_lib_ct
+        _mg_ct = _mgmt_lib_ct(foreign_only=True)
+        _um_via_lib = False
+        _res_ct: dict = {}
+        if _mg_ct is not None and is_feishu:
+            try:
+                from src.kernel import cross_write as _xw_ct
+                if other_refs == 0:
+                    _res_ct = _xw_ct.submit(
+                        "mgmt", "user_mapping_feishu_clear",
+                        _xw_ct.unique_key(f"um-clear-app:{old_app_id}"), {"app_id": old_app_id},
+                        lambda: _mg_ct.clear_user_mapping_feishu(app_id=old_app_id))
+                    _um_via_lib = True
+                elif gitcode_user:
+                    _res_ct = _xw_ct.submit(
+                        "mgmt", "user_mapping_feishu_clear",
+                        _xw_ct.unique_key(f"um-clear-user:{user_id}"), {"user_id": str(user_id)},
+                        lambda: _mg_ct.clear_user_mapping_feishu(user_id=str(user_id)))
+                    _um_via_lib = True
+                if _um_via_lib and _res_ct.get("status") == "failed":
+                    log.warning(f"Chat IM: user mapping clear queued for retry: {_res_ct.get('error')}")
+            except Exception as _e_ct:
+                _um_via_lib = False
+                log.warning(f"Chat IM: user mapping clear via lib failed, fallback to owner primitive: {_e_ct}")
+        if not _um_via_lib:
+            # 兜底从「本进程库直发 UPDATE」改为 mgmt 任意拓扑原语：单库拓扑落同一份库，
+            # 三库拓扑落 mgmt 库。调用方不再保留外域表的 SQL，也不再有「在 A 库建/写、
+            # 在 B 库读」的错位。
+            if other_refs == 0:
+                if is_feishu:
+                    mgmt_public.clear_user_mapping_feishu_any(app_id=old_app_id, updated_at=_now)
+            elif gitcode_user and is_feishu:
+                # FR-21.10: 按 user_id 精确清当前用户的飞书映射——不按用户名扫列
+                # 原代码 WHERE gitcode_user=? 用注册名扫列，存量 um 行可能存注册名也可能存平台真 login
+                # 用 OR github_login=? 会误清同名 GitHub 用户；用 user_id 精确匹配无歧义
+                mgmt_public.clear_user_mapping_feishu_any(user_id=str(user_id), updated_at=_now)
+        # 以下三条是 runtime 自有表：仍用进程库游标 + 末尾一次 commit（本域事务语义不变）。
+        # 跨域写入已在上/下方按归属域各自提交——三库拓扑下跨域原子本就不可得，解绑清理是
+        # best-effort，任一步失败只记 warning，不牵连其余步骤。
         with _db_lock:
             c = _db.cursor()
-            # A2 收尾：引用判定改看 active 安装行（不含当前用户本人的这条）
-            other_refs = 0
-            try:
-                from src.domains.runtime.im.engine_wiring import _connect, default_db_path
-                _conn = _connect(default_db_path())
-                try:
-                    other_refs = int(_conn.execute(
-                        "SELECT COUNT(*) FROM grape_t_channel_installation "
-                        "WHERE legacy_app_id=? AND status='active' "
-                        "  AND NOT (scope='user' AND owner_user_id=?)",
-                        (old_app_id, str(user_id))).fetchone()[0])
-                finally:
-                    _conn.close()
-            except Exception as e:
-                log.warning(f"Chat IM: installation ref check failed: {e}")
-            _now = _dt.now().isoformat()
-            is_feishu = (provider or "feishu").strip().lower() == "feishu"
-            # P3-5c：unified_user_mapping / feishu_onboard_task 是 mgmt 基表；
-            # runtime 进程（worker 或 mgmt 自身）写入走 mgmt lib + 幂等意图
-            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_ct
-            _mg_ct = _mgmt_lib_ct(foreign_only=True)
-            _um_via_lib = False
-            _res_ct: dict = {}
-            if _mg_ct is not None and is_feishu:
-                try:
-                    from src.kernel import cross_write as _xw_ct
-                    if other_refs == 0:
-                        _res_ct = _xw_ct.submit(
-                            "mgmt", "user_mapping_feishu_clear",
-                            _xw_ct.unique_key(f"um-clear-app:{old_app_id}"), {"app_id": old_app_id},
-                            lambda: _mg_ct.clear_user_mapping_feishu(app_id=old_app_id))
-                        _um_via_lib = True
-                    elif gitcode_user:
-                        _res_ct = _xw_ct.submit(
-                            "mgmt", "user_mapping_feishu_clear",
-                            _xw_ct.unique_key(f"um-clear-user:{user_id}"), {"user_id": str(user_id)},
-                            lambda: _mg_ct.clear_user_mapping_feishu(user_id=str(user_id)))
-                        _um_via_lib = True
-                    if _um_via_lib and _res_ct.get("status") == "failed":
-                        log.warning(f"Chat IM: user mapping clear queued for retry: {_res_ct.get('error')}")
-                except Exception as _e_ct:
-                    _um_via_lib = False
-                    log.warning(f"Chat IM: user mapping clear via lib failed, fallback to local SQL: {_e_ct}")
-            if not _um_via_lib:
-                if other_refs == 0:
-                    if is_feishu:
-                        c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE app_id=?",
-                                  (_now, old_app_id))
-                elif gitcode_user and is_feishu:
-                    # FR-21.10: 按 user_id 精确清当前用户的飞书映射——不按用户名扫列
-                    # 原代码 WHERE gitcode_user=? 用注册名扫列，存量 um 行可能存注册名也可能存平台真 login
-                    # 用 OR github_login=? 会误清同名 GitHub 用户；用 user_id 精确匹配无歧义
-                    c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE user_id=?",
-                              (_now, user_id))
             c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
             # 解绑干净：该 bot 名下的群绑定（repo_im_group_binding）一并清空，避免残留脏数据
             # 导致后续 resolve_repo 仍命中旧仓库（chat-config-duplicate-row-unbind-fix-design.md）
@@ -1612,24 +1613,24 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str,
             # 解绑干净：消息去重缓存一并清，避免该 app 的历史数据残留
             #（bot_seen_messages=去重 ID；feishu_onboard_task 含 app_secret/qr_url 敏感信息，飞书专属）
             c.execute("DELETE FROM bot_seen_messages WHERE app_id=?", (old_app_id,))
-            _ot_via_lib = False
-            if is_feishu and _mg_ct is not None:
-                try:
-                    from src.kernel import cross_write as _xw_ot
-                    _res_ot = _xw_ot.submit(
-                        "mgmt", "feishu_onboard_task_delete",
-                        _xw_ot.unique_key(f"onboard-task-delete:{old_app_id}"), {"app_id": old_app_id},
-                        lambda: _mg_ct.delete_feishu_onboard_task(old_app_id))
-                    _ot_via_lib = True
-                    if _res_ot.get("status") == "failed":
-                        log.warning(f"Chat IM: feishu_onboard_task delete queued for retry: "
-                                    f"{_res_ot.get('error')}")
-                except Exception as _e_ot:
-                    _ot_via_lib = False
-                    log.warning(f"Chat IM: feishu_onboard_task delete via lib failed, fallback: {_e_ot}")
-            if is_feishu and not _ot_via_lib:
-                c.execute("DELETE FROM feishu_onboard_task WHERE app_id=?", (old_app_id,))
             _db.commit()
+        _ot_via_lib = False
+        if is_feishu and _mg_ct is not None:
+            try:
+                from src.kernel import cross_write as _xw_ot
+                _res_ot = _xw_ot.submit(
+                    "mgmt", "feishu_onboard_task_delete",
+                    _xw_ot.unique_key(f"onboard-task-delete:{old_app_id}"), {"app_id": old_app_id},
+                    lambda: _mg_ct.delete_feishu_onboard_task(old_app_id))
+                _ot_via_lib = True
+                if _res_ot.get("status") == "failed":
+                    log.warning(f"Chat IM: feishu_onboard_task delete queued for retry: "
+                                f"{_res_ot.get('error')}")
+            except Exception as _e_ot:
+                _ot_via_lib = False
+                log.warning(f"Chat IM: feishu_onboard_task delete via lib failed, fallback: {_e_ot}")
+        if is_feishu and not _ot_via_lib:
+            mgmt_public.delete_feishu_onboard_task_any(old_app_id)
         log.info(f"Chat IM: unbound old app_id={_safe_im_app_ref(old_app_id, provider)} provider={provider} user={user_id} (other_refs={other_refs})")
     except Exception as e:
         log.warning(f"Chat IM: unbind cleanup failed: {e}")
@@ -1696,14 +1697,8 @@ async def update_chat_config(body: dict, request: Request,
     if channel.get("app_id"):
         app_id = channel["app_id"]
         # 强约束：一个 app_id 全局唯一。查 active 安装行：repo 轨=被 VOD 占用，user 轨他人=被别人占用
-        from src.domains.runtime.im.engine_wiring import _connect, default_db_path
-        _conn = _connect(default_db_path())
-        try:
-            _holders = _conn.execute(
-                "SELECT scope, owner_user_id FROM grape_t_channel_installation "
-                "WHERE legacy_app_id=? AND status='active'", (app_id,)).fetchall()
-        finally:
-            _conn.close()
+        # 安装表归 mgmt：走归属域原语（三库拓扑下 runtime 库没有这张表，原直查会 1146 → 保存 500）
+        _holders = mgmt_public.installation_holders_any(app_id)
         if any(str(r[0]) == "repo" for r in _holders):
             raise HTTPException(status_code=400, detail={"code": 400, "message": "该凭证已被 VOD Agent 使用，不能同时绑定 Chat Agent 和 VOD Agent"})
         if any(str(r[0]) == "user" and str(r[1]) != str(user["id"]) for r in _holders):
@@ -2785,15 +2780,9 @@ def _user_im_installations(user_id) -> dict:
     """
     out: dict = {}
     try:
-        from src.domains.runtime.im.engine_wiring import _connect, default_db_path
-        conn = _connect(default_db_path())
-        try:
-            rows = conn.execute(
-                "SELECT channel_type, status, config FROM grape_t_channel_installation "
-                "WHERE scope='user' AND owner_user_id=? AND status IN ('active','disabled') "
-                "ORDER BY updated_at DESC", (str(user_id),)).fetchall()
-        finally:
-            conn.close()
+        # 安装表归 mgmt：归属域原语（原实现借 runtime 库句柄直查，三库拓扑下 1146 被吞成
+        # 「无安装」→ 前端多渠并存的各渠道表单恒显示「未接入」）。
+        rows = mgmt_public.installation_user_channel_rows_any(str(user_id))
         for ctype, st, raw in rows or []:
             key = str(ctype or "").strip().lower()
             if not key or key in out:
