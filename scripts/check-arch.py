@@ -85,7 +85,8 @@ R8_WHITELIST: dict[str, dict[str, int]] = {
     # acquire/release/renew/cleanup 四个原语，SQL 只在 runtime 域一份）
     # src/kernel/gsb/registry.py 已清零（注册表 DDL/读写全部下沉 mgmt.public 的
     # gsb_* 具名查询与任意拓扑原语；三库拓扑下各域进程写同一张 mgmt 表）
-    "src/kernel/token_resolver.py": {"managed_repos": 2},  # P2：读改 mgmt 内部端点
+    # src/kernel/token_resolver.py 已清零（仓库级 bot token 状态列的两条 UPDATE 下沉
+    # mgmt.public 的 set_repo_bot_token_status_any；读侧三处同步归位）
     "src/kernel/prompt_builder.py": {"unified_user_mapping": 2},  # P2：读改 N10
     "src/kernel/persistence/credential_usage_log.py": {"grape_t_credential_usage_log": 2},  # P3
     "src/kernel/outbound_ledger.py": {"outbound_content_ledger": 1},  # P1：迁 mgmt

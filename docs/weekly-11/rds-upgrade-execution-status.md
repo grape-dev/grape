@@ -1385,6 +1385,79 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 ---
 
+### 7.9 令牌解析器外域读写收口（2026-11-15 本批）
+
+- 文件：`src/kernel/token_resolver.py`（kernel 域消费、6 处跨域 SQL → 0）。
+  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `managed_repos`（归 mgmt）5 处，行 794 / 830 / 850 / 867 / 1275：
+    `RepoBotToken._fetch` 的 legacy 列回落读（动态列 `{field}` + `IS NOT NULL` + `!=''`）、
+    `_is_expired` 的状态列单行读、`mark_expired` / `clear_expired` 的两条状态列 UPDATE、
+    `RepoBotTokenHandler.is_self_loop_actor` 的 `bot_username` 单行读；
+  - `external_identities`（归 mgmt）1 处，行 977：`UserToken._fetch_stored` 的
+    `access_token` 读（`status IN (1, 4)`）。
+- owner 侧新增（`?` 占位符、列序/谓词逐字照抄）：
+  1) `_ANY_QUERIES` 补 5 条具名查询：`repo_bot_token_legacy_gitcode`、
+     `repo_bot_token_legacy_github`（两条物理列的 legacy 回落）、`repo_bot_token_status`、
+     `repo_bot_token_status_set`、`ei_stored_access_token`；
+  2) 白名单 `_REPO_TOKEN_COLUMN_QUERIES`（legacy token 列 → 具名查询），与既有
+     `_UM_COLUMN_QUERIES` 并列——动态列名仍只由归属域挑选；
+  3) 5 个薄函数：`repo_bot_token_from_legacy_column_any(repo_key, column)`、
+     `repo_bot_token_status_any(repo_key)`、`set_repo_bot_token_status_any(repo_key, status)`、
+     `stored_access_token_any(grape_user_id, provider)`，以及**复用既有**
+     `repo_bot_username_any(repo_key)`（见取舍 2）。
+- 设计取舍：
+  1) **两条状态写合并成一条参数化 UPDATE**：原 `mark_expired` / `clear_expired` 是两条
+     字面量语句，唯一可变的是状态值（`'expired'` / `''`）。合并后谓词
+     （`WHERE repo_key=?`）、rowcount 语义（未托管仓库 → 0 行）与 commit 时机都不变，
+     语义仍由两个名字清晰的薄函数承载，具名查询少一条。
+  2) **`bot_username` 不另立具名查询**：原语句是无非空过滤的 `SELECT bot_username ...
+     LIMIT 1`，但取到值后仍判真值（`if row and row[0]`）再比较，空串与 NULL 都落到
+     「不拦截」——与既有 `repo_bot_username`（带 `bot_username!=''`）在本调用点完全等价，
+     故复用 `repo_bot_username_any` 并在 docstring 写明等价性（避免近重复查询堆积）。
+  3) **动态 token 列不下放**：`{field}` 来自平台卡的 `token_storage_field`，物理列只有
+     `bot_gitcode_token` / `bot_github_token`（gitee/gitlab 平台卡显式置空，调用方在进 SQL
+     前已返回）。列名由归属域白名单挑选，未登记列抛 `KeyError`，被调用方原有
+     `except` 捕获后返回空串——与原「拼出不存在的列 → SQL 报错 → 空串」同口径，
+     没有把列名拼接能力交给调用方。
+  4) **解密留在调用方**：owner 只交出库里密文原值（`managed_repos` 列与
+     `external_identities.access_token` 同走通道加密），`_decrypt_repo_secret` / `decrypt`
+     的导入与调用仍在 kernel 函数内，读侧密钥口径与审计口径不变。
+  5) **锁语义保持**：单库回落路径 `_any_cursor` 内部持同一把 `db_lock`（RLock 可重入），
+     自有 DSN 拓扑走 autocommit 连接——与原「进程库游标 + `db_lock` + `db.commit()`」
+     在单库下等价；三库下不再打进程库。
+- 修的存量 bug：
+  1) **连接归属（功能面）**：三库拓扑下这 6 条语句全部打在进程主库上，而 `managed_repos`
+     与 `external_identities` 只有 mgmt 库有表（视图 0）→ 1146 被内部 `except` 吞成
+     「无凭据 / 未过期 / 非自环」：仓库级 bot token 恒不可用（策略链静默降级到全局 bot
+     或用户 token，运维只看到「token 解析失败」）、过期标记写不进真实库、
+     `read_stored_token` 恒空（A2A 鉴权与 session 写入拿不到原始值）、回帖链自环判定失效
+     （机器人可能回复自己）。同表副本存在时更糟：静默按副本判定，过期标记落到副本。
+     现统一走 mgmt 归属域原语（自有 DSN → mgmt 连接，单库 → 进程库，同一份语句）。
+  2) **静默 except（卫生面）**：`_is_expired`、`is_self_loop_actor` 的
+     `except Exception: pass` 改为带 `log.debug` 的显式处理（与静默 except 棘轮口径一致，
+     基线未上调）。
+  3) **R8 棘轮只减不增**：`managed_repos` 的两条 UPDATE 下沉后 kernel 侧写清零，
+     删掉 `scripts/check-arch.py` 里 `"src/kernel/token_resolver.py": {"managed_repos": 2}`
+     条目，改为「已清零」注释。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/token_resolver_smoke.py`
+  **ALL 92 CHECKS PASSED**（含边界与否定用例：legacy 列命中 gitcode/github 两列 / 空串 /
+  NULL / 无行 → 空串、未登记列 `bot_gitlab_token` → 空串不抛、平台卡无物理列 → 不查库、
+  路径 B 跳过、rc 命中优先且完全不查 `managed_repos`、命中时仍打 historical-hit 观测日志、
+  `'expired'` 才判过期而 `''`/NULL/无行/缺表 → False、get_token 过期短路、
+  `mark/clear_expired` 写后另一连接可见（已提交）、未知 repo → 0 行不抛、
+  ei `status IN (1, 4)` 命中而 0/2 不命中、空/NULL token → 空串、provider 不串号、
+  host_user_id 空/'0' → 不查库、actor 等值/他人/空串/NULL/无行/空 repo_key → 非自环、
+  缺表全部降级不抛、5 条新语句无 `%s`/`NOW()`/`ON DUPLICATE`、未登记查询名与未登记列
+  `KeyError`、语句文本逐字比对、**有自有 DSN 时 SQL 走 `db_registry.cursor('mgmt')`
+  不碰进程库**、源码 0 条两表 SQL 且 5 个原语全部接上）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch PASS / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **214 → 208**（-6），对 **64 → 62**（`managed_repos←kernel` 5 → 0、
+  `external_identities←kernel` 1 → 0）；基线 `foreign-refs-allowlist.csv` 收紧为 208 / 62；
+  依赖看板与作业单同步刷新（下一批头名：`kernel/outbound_ledger.py` 6 处）。
+
+---
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

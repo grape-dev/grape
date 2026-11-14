@@ -1,14 +1,14 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-15 02:09　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **44** 张；跨域引用 **214** 处（64 个「表×消费域」对）；含归属域在内的 SQL 引用 2247 处
+> 生成时间：2026-11-15 02:15　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **44** 张；跨域引用 **208** 处（62 个「表×消费域」对）；含归属域在内的 SQL 引用 2246 处
 
 ## 1. 域 × 域 跨域引用热力
 
 | 消费方 ↓ / 归属域 → | mgmt | runtime | insight | 合计 |
 | --- | ---: | ---: | ---: | ---: |
 | api | 20 | 47 | 3 | 70 |
-| kernel | 19 | 3 | 0 | 22 |
+| kernel | 13 | 3 | 0 | 16 |
 | mgmt | 0 | 20 | 5 | 25 |
 | runtime | 54 | 0 | 1 | 55 |
 | insight | 3 | 38 | 0 | 41 |
@@ -17,9 +17,9 @@
 
 | 分类 | 表数 | 剩余跨域引用 |
 | --- | ---: | ---: |
-| D | 12 | 64 |
+| D | 12 | 59 |
 | C1 | 8 | 69 |
-| C2 | 20 | 77 |
+| C2 | 20 | 76 |
 | B | 3 | 3 |
 | E | 1 | 1 |
 
@@ -29,16 +29,16 @@
 | --- | --- | ---: | --- | --- | --- | ---: |
 | `agent_tasks` | runtime | 22 | insight 13 / api 7 / mgmt 2 | C2 outbox 跨域写 | W1 | 37 |
 | `runtime_credentials` | runtime | 17 | insight 8 / api 6 / mgmt 3 | C1 归属重定（写路径挪进 owner 域） | — | 19 |
-| `managed_repos` | mgmt | 16 | runtime 9 / kernel 5 / api 2 | D 模块归位（kernel 写/读域表） | — | 22 |
 | `issue` | runtime | 15 | api 12 / insight 2 / mgmt 1 | D 模块归位（kernel 写/读域表） | — | 23 |
 | `events` | runtime | 14 | api 7 / insight 7 | C1 归属重定（写路径挪进 owner 域） | — | 25 |
 | `agent_runtimes` | runtime | 11 | insight 5 / api 4 / mgmt 2 | C1 归属重定（写路径挪进 owner 域） | — | 29 |
 | `devops_pipeline_scene` | mgmt | 11 | runtime 6 / api 4 / insight 1 | C1 归属重定（写路径挪进 owner 域） | — | 14 |
+| `managed_repos` | mgmt | 11 | runtime 9 / api 2 | D 模块归位（kernel 写/读域表） | — | 21 |
 | `grape_t_channel_installation` | mgmt | 9 | runtime 9 | C2 outbox 跨域写 | W2 | 9 |
 | `skill` | runtime | 8 | api 8 | D 模块归位（kernel 写/读域表） | — | 11 |
-| `external_identities` | mgmt | 7 | api 4 / runtime 2 / kernel 1 | C2 outbox 跨域写 | W2 | 8 |
 | `grape_t_repo_credentials` | insight | 7 | mgmt 5 / contracts 1 / runtime 1 | C1 归属重定（写路径挪进 owner 域） | — | 6 |
 | `autopilot_tasks` | mgmt | 6 | runtime 6 | C2 outbox 跨域写 | W3 | 4 |
+| `external_identities` | mgmt | 6 | api 4 / runtime 2 | C2 outbox 跨域写 | W2 | 7 |
 | `outbound_content_ledger` | mgmt | 6 | kernel 6 | D 模块归位（kernel 写/读域表） | — | 1 |
 | `unified_user_mapping` | mgmt | 6 | runtime 3 / kernel 3 | D 模块归位（kernel 写/读域表） | — | 9 |
 | `user_feedback` | mgmt | 6 | api 6 | C2 outbox 跨域写 | W3 | 6 |

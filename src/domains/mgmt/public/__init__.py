@@ -1710,6 +1710,24 @@ _ANY_QUERIES: dict[str, str] = {
         "DELETE FROM agent_shared_knowledge "
         "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?"),
     "account_username_by_id": "SELECT username FROM grape_accounts WHERE id=? LIMIT 1",
+    # ── 仓库级 bot token 与登录名（kernel/token_resolver 第 2 级策略）──
+    # 原实现在 kernel 里直连进程主库：三库拓扑下进程库没有 managed_repos（无视图 → 1146，
+    # 均被内部 except 吞成「无凭据」/「未过期」），或存在同表副本时静默按副本判定。
+    # legacy 列名由本域白名单挑选（bot_<provider>_token 只对 gitcode/github 存在物理列），
+    # 谓词与列序与原 SQL 逐字一致。
+    "repo_bot_token_legacy_gitcode": (
+        "SELECT bot_gitcode_token FROM managed_repos "
+        "WHERE repo_key=? AND bot_gitcode_token IS NOT NULL AND bot_gitcode_token!='' LIMIT 1"),
+    "repo_bot_token_legacy_github": (
+        "SELECT bot_github_token FROM managed_repos "
+        "WHERE repo_key=? AND bot_github_token IS NOT NULL AND bot_github_token!='' LIMIT 1"),
+    "repo_bot_token_status": "SELECT bot_token_status FROM managed_repos WHERE repo_key=? LIMIT 1",
+    "repo_bot_token_status_set": "UPDATE managed_repos SET bot_token_status=? WHERE repo_key=?",
+    # 用户 token 原始值（token_resolver 的 read_stored_token：读侧解密在调用方，
+    # 本域只交出密文；status IN (1, 4) 覆盖「正常 + 标记过期」两种存量口径）
+    "ei_stored_access_token": (
+        "SELECT access_token FROM external_identities "
+        "WHERE grape_user_id=? AND provider=? AND status IN (1, 4) LIMIT 1"),
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -1733,6 +1751,15 @@ _UM_OPENID_COLUMN_QUERIES: dict[str, str] = {
 _UM_ACCOUNT_COLUMN_QUERIES: dict[str, str] = {
     "gitcode_user": "um_account_user_id_by_gitcode_user",
     "github_login": "um_account_user_id_by_github_login",
+}
+
+#: managed_repos 的「仓库级 bot token 列 → 具名查询」白名单（token_resolver 的 legacy
+#: 列回落分支）。只有 gitcode/github 有物理列（gitee/gitlab 的平台卡显式置空
+#: token_storage_field，调用方在进 SQL 前就已返回）；未登记列抛 KeyError，
+#: 由调用方原有 except 捕获后返回空串——与原「拼出不存在的列 → SQL 报错 → 空串」同口径。
+_REPO_TOKEN_COLUMN_QUERIES: dict[str, str] = {
+    "bot_gitcode_token": "repo_bot_token_legacy_gitcode",
+    "bot_github_token": "repo_bot_token_legacy_github",
 }
 
 
@@ -1791,6 +1818,55 @@ def repo_dev_scene(repo_key: str) -> str:
     """仓库默认场景 id（managed_repos.dev_scene）；无行/空值返回空串。"""
     row = read_one_any("repo_dev_scene", (repo_key,))
     return str(row[0] or "") if row else ""
+
+
+# ---------- 仓库级 bot token / 登录名（kernel/token_resolver；任意拓扑） ----------
+#
+# 第 2 级策略（RepoBotToken）的四处读写 + 回帖链的 actor 归属判定。原实现全部在
+# kernel 里用进程主库游标直发 SQL：单库拓扑能跑，三库拓扑下 managed_repos 只在 mgmt
+# 库 → 1146（被内部 except 吞成「无凭据」，策略链静默降级到全局 bot 或用户 token），
+# 同表副本存在时则按副本判定（过期标记/登录名与实际不一致）。列序与谓词照抄原语句。
+
+
+def repo_bot_token_from_legacy_column_any(repo_key: str, column: str) -> str:
+    """读 managed_repos 的 legacy bot token 列（密文原值）；列名走本域白名单。
+
+    返回原值（未解密）——解密在调用方（credential_crypto 属 mgmt auth，由调用方函数内
+    导入，读侧密钥口径不变）。空行/空值返回空串。未登记列抛 KeyError。
+    """
+    name = _REPO_TOKEN_COLUMN_QUERIES.get(column)
+    if name is None:
+        raise KeyError(f"unsupported managed_repos token column: {column}")
+    row = read_one_any(name, (repo_key,))
+    return str(row[0]) if row and row[0] else ""
+
+
+def repo_bot_token_status_any(repo_key: str) -> str:
+    """仓库级 bot token 状态列（bot_token_status）；无行/空值返回空串。
+
+    调用方原口径是「行存在且值 == 'expired'」，空串与无行等价（都不会短路执行链）。
+    """
+    row = read_one_any("repo_bot_token_status", (repo_key,))
+    return str(row[0] or "") if row else ""
+
+
+def set_repo_bot_token_status_any(repo_key: str, status: str) -> int:
+    """置仓库级 bot token 状态（'expired' 或 ''），返回影响行数。
+
+    原实现是两条字面量语句（mark_expired / clear_expired），此处合并成一条参数化
+    UPDATE：唯一可变的是状态值，谓词与 rowcount 语义（仓库不存在 → 0）不变。
+    """
+    return exec_any("repo_bot_token_status_set", (status or "", repo_key))
+
+
+def stored_access_token_any(grape_user_id: Any, provider: str) -> str:
+    """external_identities 的 access_token 密文原值（status IN (1, 4)）。
+
+    供 token_resolver.read_stored_token 使用：不触发 OAuth 刷新、只读一列，
+    解密与过期判定都留在调用方（口径不变）。
+    """
+    row = read_one_any("ei_stored_access_token", (str(grape_user_id), provider or ""))
+    return str(row[0]) if row and row[0] else ""
 
 
 # ---------- 事件知识清理 / 账户名（runtime/routes/events.py 调用；任意拓扑） ----------
@@ -1984,7 +2060,12 @@ def set_scene_deploy_url_any(deploy_url: str, scene_id: str, repo_key: str) -> i
 
 
 def repo_bot_username_any(repo_key: str) -> str:
-    """仓库配置的非空 bot 用户名；无行/空值返回空串（回落到平台全局 bot）。"""
+    """仓库配置的非空 bot 用户名；无行/空值返回空串（回落到平台全局 bot）。
+
+    token_resolver 的 `is_self_loop_actor` 原语句是无非空过滤的 `SELECT bot_username
+    ... LIMIT 1` 且取到值后仍判真值（`if row and row[0]`）再比较——空串/NULL 两种情况
+    都落到「不拦截」，与本函数口径等价，故复用不另立具名查询。
+    """
     row = read_one_any("repo_bot_username", (repo_key,))
     return str(row[0] or "") if row else ""
 

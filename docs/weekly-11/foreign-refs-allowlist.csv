@@ -23,7 +23,6 @@ event_skipped,runtime,api,1
 events,runtime,api,7
 events,runtime,insight,7
 external_identities,mgmt,api,4
-external_identities,mgmt,kernel,1
 external_identities,mgmt,runtime,2
 feishu_onboard_task,mgmt,runtime,1
 grape_accounts,mgmt,insight,1
@@ -44,7 +43,6 @@ issue,runtime,mgmt,1
 issue_state,runtime,api,1
 login_whitelist,mgmt,kernel,4
 managed_repos,mgmt,api,2
-managed_repos,mgmt,kernel,5
 managed_repos,mgmt,runtime,9
 meta,runtime,mgmt,4
 outbound_content_ledger,mgmt,kernel,6

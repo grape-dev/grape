@@ -788,33 +788,27 @@ class RepoBotToken(TokenStrategy):
         # ④删除本分支 + 评估 DROP COLUMN。
         # ------------------------------------------------------------------
         try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    f"SELECT {field} FROM managed_repos "
-                    f"WHERE repo_key=? AND {field} IS NOT NULL "
-                    f"AND {field}!='' LIMIT 1",
-                    (repo_key,),
-                )
-                row = c.fetchone()
-                if row and row[0]:
-                    # 挂账 #12 观测：log.warning 即采集（下线判据 = grep 此日志零命中）
-                    log.warning(f"RepoBotToken: historical column fallback hit "
-                                f"(rc miss) repo={repo_key} field={field}")
-                    # N3：managed_repos 列同走通道加密，读侧解密（明文兼容覆盖存量）
-                    from src.domains.mgmt.user.db import _decrypt_repo_secret
-                    # F4/D106：legacy 列命中独立消费审计（回填期旧列消费可观测，
-                    # 与 rc 命中审计分离——旧列消费清零是回落分支下线前置）
-                    try:
-                        from src.kernel.persistence.credential_usage_log import log_usage
-                        log_usage("", 0, credential_kind="repo_credentials",
-                                  executor_context="token_resolve",
-                                  operation="repo_bot_hit_legacy_column",
-                                  repo_key=repo_key)
-                    except Exception:
-                        pass
-                    return _decrypt_repo_secret(row[0])
+            # managed_repos 归 mgmt：列名与语句都由归属域持有（本文件不再拼 SQL）。
+            # 任意拓扑原语：自有 DSN → mgmt 连接；单库回落进程库（同一份语句）。
+            from src.domains.mgmt.public import repo_bot_token_from_legacy_column_any
+            raw = repo_bot_token_from_legacy_column_any(repo_key, field)
+            if raw:
+                # 挂账 #12 观测：log.warning 即采集（下线判据 = grep 此日志零命中）
+                log.warning(f"RepoBotToken: historical column fallback hit "
+                            f"(rc miss) repo={repo_key} field={field}")
+                # N3：managed_repos 列同走通道加密，读侧解密（明文兼容覆盖存量）
+                from src.domains.mgmt.user.db import _decrypt_repo_secret
+                # F4/D106：legacy 列命中独立消费审计（回填期旧列消费可观测，
+                # 与 rc 命中审计分离——旧列消费清零是回落分支下线前置）
+                try:
+                    from src.kernel.persistence.credential_usage_log import log_usage
+                    log_usage("", 0, credential_kind="repo_credentials",
+                              executor_context="token_resolve",
+                              operation="repo_bot_hit_legacy_column",
+                              repo_key=repo_key)
+                except Exception:
+                    pass
+                return _decrypt_repo_secret(raw)
         except Exception as e:
             log.warning(f"RepoBotToken._fetch: {e}")
         return ""
@@ -824,19 +818,10 @@ class RepoBotToken(TokenStrategy):
         if not repo_key:
             return False
         try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT bot_token_status FROM managed_repos "
-                    "WHERE repo_key=? LIMIT 1",
-                    (repo_key,),
-                )
-                row = c.fetchone()
-                if row and row[0] == "expired":
-                    return True
-        except Exception:
-            pass
+            from src.domains.mgmt.public import repo_bot_token_status_any
+            return repo_bot_token_status_any(repo_key) == "expired"
+        except Exception as e:
+            log.debug(f"RepoBotToken._is_expired: {e}")
         return False
 
     def mark_expired(self, repo_key: str):
@@ -844,15 +829,8 @@ class RepoBotToken(TokenStrategy):
         if not repo_key:
             return
         try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "UPDATE managed_repos SET bot_token_status='expired' "
-                    "WHERE repo_key=?",
-                    (repo_key,),
-                )
-                db.commit()
+            from src.domains.mgmt.public import set_repo_bot_token_status_any
+            set_repo_bot_token_status_any(repo_key, "expired")
         except Exception as e:
             log.warning(f"RepoBotToken.mark_expired: {e}")
 
@@ -861,15 +839,8 @@ class RepoBotToken(TokenStrategy):
         if not repo_key:
             return
         try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "UPDATE managed_repos SET bot_token_status='' "
-                    "WHERE repo_key=?",
-                    (repo_key,),
-                )
-                db.commit()
+            from src.domains.mgmt.public import set_repo_bot_token_status_any
+            set_repo_bot_token_status_any(repo_key, "")
         except Exception as e:
             log.warning(f"RepoBotToken.clear_expired: {e}")
 
@@ -963,7 +934,6 @@ class UserToken(TokenStrategy):
         供 read_stored_token() 调用——A2A 鉴权 / session 写入只需原始值。
         """
         from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
-        from src.kernel.session_manager import db, db_lock
         from src.domains.mgmt.auth.credential_crypto import decrypt
         host_user_id = self._get_host_user_id(repo_key)
         if str(host_user_id or "") in ("", "0"):
@@ -972,16 +942,11 @@ class UserToken(TokenStrategy):
             account = get_grape_account_by_id(host_user_id)
             if not account:
                 return ""
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT access_token FROM external_identities "
-                    "WHERE grape_user_id=? AND provider=? AND status IN (1, 4) LIMIT 1",
-                    (account["id"], self.provider.provider_name),
-                )
-                row = c.fetchone()
-            if row and row[0]:
-                return decrypt(row[0])
+            # external_identities 归 mgmt：列序与 status IN (1, 4) 口径由归属域持有
+            from src.domains.mgmt.public import stored_access_token_any
+            raw = stored_access_token_any(account["id"], self.provider.provider_name)
+            if raw:
+                return decrypt(raw)
         except Exception as e:
             log.warning(f"UserToken._fetch_stored: {e}")
         return ""
@@ -1269,15 +1234,12 @@ class RepoBotTokenHandler(TokenActionHandler):
         if not actor or not result.repo_key:
             return False
         try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? LIMIT 1", (result.repo_key,))
-                row = c.fetchone()
-                if row and row[0]:
-                    return actor == row[0]
-        except Exception:
-            pass
+            # managed_repos 归 mgmt（原语句在 kernel 直连进程主库，三库拓扑下恒 1146）
+            from src.domains.mgmt.public import repo_bot_username_any
+            bot_username = repo_bot_username_any(result.repo_key)
+            return bool(bot_username) and actor == bot_username
+        except Exception as e:
+            log.debug(f"RepoBotTokenHandler.is_self_loop_actor: {e}")
         return False
 
     def get_comment_token(self, result):
