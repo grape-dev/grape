@@ -24,6 +24,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 DBS = {"mgmt": "grape_mgmt_db", "runtime": "grape_runtime_db", "insight": "grape_insight_db"}
+DBS_COPY = dict(DBS)
 
 
 def _connect(host, port, user, password):
@@ -114,9 +115,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=3306)
     ap.add_argument("--user", default="root")
     ap.add_argument("--password", default="")
+    ap.add_argument("--db-prefix", default="",
+                    help="stage 彩排用：库名改为 <prefix>_mgmt / <prefix>_runtime / <prefix>_insight")
     ap.add_argument("--account", action="append", default=[],
                     help="域=账号（可重复，如 --account mgmt=grape_mgmt）")
     args = ap.parse_args(argv)
+
+    if args.db_prefix:
+        for domain in DBS:
+            DBS[domain] = f"{args.db_prefix}_{domain}"
+            DBS_COPY[domain] = DBS[domain]
 
     accounts = {}
     for item in args.account:
