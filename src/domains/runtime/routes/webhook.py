@@ -2060,15 +2060,18 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     _other_repo_key = _issue_repo_mismatch(repo_key, issue_number)
                     if _other_repo_key:
                         _expected_repository = _repo_key_to_repository(_other_repo_key)
+                        _rm_reason = _a2a_skip_reason(
+                            "repo_mismatch", issue_number=issue_number,
+                            expected_repository=_expected_repository,
+                            actual_repository=repository)
                         log.info(
-                            f"A2A #2555: repo mismatch — issue=#{issue_number} "
-                            f"expected={_expected_repository} actual={repository} agent={agent_name}")
+                            f"A2A #2555: repo mismatch — code=repo_mismatch "
+                            f"issue=#{issue_number} "
+                            f"expected={_expected_repository} actual={repository} "
+                            f"agent={agent_name} reason={_rm_reason}")
                         return _a2a_skip_response(
                             "repo_mismatch", agent=agent_name, source_seq=_source_seq,
-                            reason=_a2a_skip_reason(
-                                "repo_mismatch", issue_number=issue_number,
-                                expected_repository=_expected_repository,
-                                actual_repository=repository),
+                            reason=_rm_reason,
                             detail={
                                 "issue_number": int(issue_number),
                                 "expected_repository": _expected_repository,
@@ -2210,11 +2213,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             _scene_ck = _scene_node_check(repo_key, issue_number, agent_name)
             if not _scene_ck.get("in_scene"):
                 _scene_node_ids = [_node_id(n) for n in _scene_ck.get("nodes") or []]
-                log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped (nodes={_scene_node_ids})")
+                _nis_reason = _a2a_skip_reason("not_in_scene", agent=agent_name)
+                log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped code=not_in_scene reason={_nis_reason} (nodes={_scene_node_ids})")
                 return _a2a_skip_response(
                     "not_in_scene", agent=agent_name, source_seq=_source_seq,
                     status="skipped", status_code=409,
-                    reason=_a2a_skip_reason("not_in_scene", agent=agent_name),
+                    reason=_nis_reason,
                     detail={"agent": agent_name},
                     extra={
                         "scene": _scene_ck.get("scene_id"),
