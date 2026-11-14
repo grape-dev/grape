@@ -6,111 +6,94 @@ import time as _time_mod
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
+from src.domains.insight.schema_ddl import (
+    _MERGE_GATE_LOG_DDL,
+    _API_LATENCY_LOG_DDL,
+    _OBS_LLM_USAGE_DDL,
+    _OBS_LLM_USAGE_ARCHIVE_DDL,
+    _OBS_ALERT_DDL,
+    _OBS_ALERT_EVENTS_DDL,
+    _OBS_RUNTIME_SAMPLES_DDL,
+    _OBS_METRIC_ROLLUP_DDL,
+    _OBS_SLO_DDL,
+    _OBS_SLO_SNAPSHOTS_DDL,
+    _OBS_LOG_DDL,
+)
+from src.domains.mgmt.schema_ddl import (
+    _EVENT_ROUTE_CONFIG_DDL,
+    _PATROL_FINDINGS_DDL,
+    _SCHEMA_MIGRATIONS_DDL,
+    _FEISHU_ONBOARD_TASK_DDL,
+    _PIPELINE_INSTANCES_DDL,
+    _AGENT_SHARED_KNOWLEDGE_DDL,
+    _SCENE_KNOWLEDGE_REF_DDL,
+    _SCENE_KNOWLEDGE_REF_MYSQL_DDL,
+    _EVENT_ACTION_FILTER_DDL,
+    _PIPELINE_SCENE_DDL,
+    _FEATURED_TEMPLATES_DDL,
+    _LOGIN_WHITELIST_DDL,
+    _SKILL_CATEGORY_DDL,
+    _SCENE_MARKET_DDL,
+    _SCENE_LIKES_DDL,
+    _SCENE_SKILL_REF_DDL,
+    _SKILL_LIKES_DDL,
+    _UPLOADED_FILES_DDL,
+    _AUTOPILOT_TASKS_DDL,
+    _AUTOPILOT_SUBSCRIPTIONS_DDL,
+    _ADMIN_ACCOUNTS_TABLE_DDL,
+    _ORGANIZATION_DDL,
+    _ORG_MEMBER_DDL,
+    _ORG_INVITATION_DDL,
+    _GRAPE_ACCOUNTS_DDL,
+    _EXTERNAL_IDENTITIES_DDL,
+    _VERIFICATION_CODES_DDL,
+    _AUDIT_LOGS_DDL,
+    _SIGNUP_WHITELIST_DDL,
+    _LOGIN_FAILURES_DDL,
+    _CREDENTIAL_REVEAL_LOG_DDL,
+    _EXCHANGE_CODES_DDL,
+    _BINDING_TICKETS_DDL,
+    _COMMUNITY_DDL,
+    _COMMUNITY_COMMENTS_DDL,
+    _COMMUNITY_LIKES_DDL,
+)
+from src.domains.runtime.schema_ddl import (
+    _EVENTS_TABLE_DDL,
+    _EVENT_SKIPPED_DDL,
+    _AGENT_SESSIONS_TABLE_DDL,
+    _AGENT_TYPE_DDL,
+    _SKILL_DDL,
+    _META_TABLE_DDL,
+    _AGENT_RUNTIMES_DDL,
+    _CHAT_CONVERSATIONS_DDL,
+    _CHAT_MESSAGES_DDL,
+    _GLOBAL_IM_BOT_CONFIG_DDL,
+    _IM_INSTANCE_DDL,
+    _VOD_CONVERSATIONS_DDL,
+    _ISSUE_DDL,
+    _AGENT_TASKS_DDL,
+    _TASK_MESSAGES_DDL,
+    _AGENT_TYPE_RUNTIME_POOL_DDL,
+    _RUNTIME_CREDENTIALS_DDL,
+    _ISSUE_STATE_DDL,
+    _ISSUE_AGENT_SESSION_DDL,
+    _EVENT_THREAD_DDL,
+    _ENGINE_CAPABILITIES_DDL,
+    _SCENE_CATEGORY_DDL,
+    _SCENE_ENGINE_DETACH_LOG_DDL,
+    _ENGINE_LIFECYCLE_AUDIT_DDL,
+    _DISTRIBUTED_LOCKS_DDL,
+    _BRANCH_GUARD_STATE_DDL,
+    _AUTOPILOT_EXECUTIONS_DDL,
+    _CUL_DDL,
+    _SC_DDL,
+    _TAKEOVER_SESSIONS_DDL,
+)
+
 from src.kernel.session_manager import db, db_lock
 from src.kernel.config import log
 
 # ====== 新表 DDL ======
-
-_EVENTS_TABLE_DDL = """
-CREATE TABLE IF NOT EXISTS events (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo_key TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    source TEXT DEFAULT 'gitcode',
-    issue_id TEXT DEFAULT '',
-    title TEXT DEFAULT '',
-    summary TEXT DEFAULT '',
-    actor TEXT DEFAULT '',
-    payload TEXT DEFAULT '{}',
-    agent_type TEXT DEFAULT '',
-    backend TEXT DEFAULT '',
-    skill TEXT DEFAULT '',
-    status TEXT DEFAULT 'pending',
-    exit_code INTEGER DEFAULT NULL,
-    duration REAL DEFAULT NULL,
-    agent_logs MEDIUMTEXT DEFAULT '[]',
-    result MEDIUMTEXT DEFAULT '',
-    entity_type TEXT DEFAULT '',
-    idempotency_key TEXT DEFAULT NULL,
-    created_at TEXT DEFAULT (datetime('now')),
-    started_at TEXT DEFAULT '',
-    completed_at TEXT DEFAULT ''
-)
-"""
-
-_EVENT_SKIPPED_DDL = """
-CREATE TABLE IF NOT EXISTS event_skipped (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo_key TEXT DEFAULT '',
-    issue_id TEXT DEFAULT '',
-    event_type TEXT DEFAULT '',
-    reason TEXT DEFAULT '',
-    detail TEXT DEFAULT '',
-    created_at TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_AGENT_SESSIONS_TABLE_DDL = """
-CREATE TABLE IF NOT EXISTS devops_agent_session (
-    id TEXT PRIMARY KEY,
-    repo_key TEXT NOT NULL,
-    agent_type TEXT NOT NULL,
-    backend_id INTEGER DEFAULT 0,
-    skill TEXT DEFAULT '',
-    backend_session_id TEXT DEFAULT '',
-    repo_gitcode_token TEXT DEFAULT '',
-    status TEXT DEFAULT 'idle',
-    created_at TEXT DEFAULT (datetime('now')),
-    last_active_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(repo_key, agent_type)
-)
-"""
-
-_EVENT_ROUTE_CONFIG_DDL = """
-CREATE TABLE IF NOT EXISTS event_route_config (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo_key TEXT DEFAULT '',
-    event_type TEXT NOT NULL,
-    skill TEXT NOT NULL,
-    priority INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_AGENT_TYPE_DDL = """
-CREATE TABLE IF NOT EXISTS agent_type (
-    agent_type TEXT PRIMARY KEY,
-    display_name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    default_backend_id INTEGER DEFAULT 0,
-    icon TEXT DEFAULT '',
-    order_num INTEGER DEFAULT 0,
-    subscribe_events MEDIUMTEXT DEFAULT '[]',
-    created_at TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_SKILL_DDL = """
-CREATE TABLE IF NOT EXISTS skill (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    skill_name TEXT NOT NULL,
-    display_name TEXT DEFAULT '',
-    description TEXT DEFAULT '',
-    agent_type TEXT DEFAULT '',
-    skill_path TEXT DEFAULT '',
-    file_path VARCHAR(512) DEFAULT '',
-    scope TEXT DEFAULT 'official',
-    owner_id TEXT DEFAULT '',
-    created_by VARCHAR(64) DEFAULT '',
-    updated_by VARCHAR(64) DEFAULT '',
-    is_active INTEGER DEFAULT 1,
-    sub_scene TEXT DEFAULT '',
-    category_id INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (skill_name, scope, owner_id)
-)
-"""
 
 _AGENT_TYPE_CONFIG_DDL = """
 CREATE TABLE IF NOT EXISTS agent_type_config (
@@ -127,68 +110,16 @@ CREATE TABLE IF NOT EXISTS agent_type_config (
 )
 """
 
-_META_TABLE_DDL = """
-CREATE TABLE IF NOT EXISTS meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-)
-"""
-
 # A2A 链路巡检器（docs/weekly-09/a2a-chain-patrol-design.md §三）：只增新表，不改既有表。
 # UNIQUE(kind, task_id, event_seq) + INSERT OR IGNORE = 集群双主同轮同发现静默去重（D3 兜底层）。
-_PATROL_FINDINGS_DDL = """
-CREATE TABLE IF NOT EXISTS grape_t_patrol_findings (
-    id            TEXT PRIMARY KEY,           -- uuid（硬性要求：新表主键一律 UUID，Python 侧生成，禁自增）
-    kind          TEXT NOT NULL,            -- broken_chain | zombie_running_signal | zombie_running_window | zombie_queued_dead | zombie_queued_window | stalled_issue
-    task_id       TEXT NOT NULL DEFAULT '',  -- agent_tasks.id（UUID 引用；合成键空串参与唯一约束）
-    event_seq     INTEGER NOT NULL DEFAULT 0, -- 关联 events.seq（可空时用 0，参与唯一约束）
-    repo_key      TEXT DEFAULT '',
-    issue_id      TEXT DEFAULT '',
-    owner         TEXT NOT NULL DEFAULT 0,  -- 归属人 user_id（D16：路径 B=host_user_id；0=unowned 置顶）
-    detail        TEXT DEFAULT '',          -- 判定输入快照
-    suggestion    TEXT DEFAULT '',          -- 建议处置（Phase 1 只写建议不执行）
-    status        TEXT NOT NULL DEFAULT 'open',  -- open | claiming | compensated | dismissed | false_positive
-    action_meta   TEXT DEFAULT '',
-    created_at    TEXT DEFAULT '',
-    updated_at    TEXT DEFAULT '',
-    UNIQUE(kind, task_id, issue_id, event_seq)
-    -- 部署验证修正（2026-11-02 实测）：issue 级 finding（stalled_issue）task_id 恒为空串，
-    -- 原三列唯一键使全部 issue 级发现共享同一键（14 条只存 1 条）——issue_id 进键。
-)
-"""
-
 # Issue #752: 合入流程冲突标记扫描门禁日志（docs/issue-752/plan.md §3）。
 # 只增新表不改既有表；主键 UUID（新表硬性要求）；每次门禁决策一行
 # （phase: pre_merge/post_merge；decision: blocked/warned/alarmed/passed/error）。
-_MERGE_GATE_LOG_DDL = """
-CREATE TABLE IF NOT EXISTS grape_t_merge_gate_log (
-    id         TEXT PRIMARY KEY,
-    repo_key   TEXT NOT NULL DEFAULT '',
-    pr_number  INTEGER NOT NULL DEFAULT 0,
-    phase      TEXT NOT NULL DEFAULT '',
-    decision   TEXT NOT NULL DEFAULT '',
-    hits_json  TEXT DEFAULT '',
-    created_at TEXT DEFAULT ''
-)
-"""
-
 # ===== Issue #536: 迁移版本表（迁移只跑一遍的地基）=====
 # 设计：docs/weekly-09/migration-versioning-and-ddl-safety-design.md §D1
 # - version 主键（'202611010001' 日期+序号）；kind: safe/backfill/cleanup/legacy-stamp；
 # - checksum = fn 源码 sha256 前 16 位，已盖章项漂移只告警不阻断（fail-safe）；
 # - 全新库与在线库统一经 _create_tables 建出，保证两条路径 schema 一致。
-_SCHEMA_MIGRATIONS_DDL = """
-CREATE TABLE IF NOT EXISTS grape_t_schema_migrations (
-    version     VARCHAR(32)  NOT NULL,
-    name        VARCHAR(128) NOT NULL,
-    kind        VARCHAR(16)  NOT NULL,
-    applied_at  DATETIME     NOT NULL,
-    duration_ms INT          DEFAULT 0,
-    checksum    VARCHAR(64)  DEFAULT NULL,
-    PRIMARY KEY (version)
-)
-"""
-
 _BACKEND_AGENTS_DDL = """
 CREATE TABLE IF NOT EXISTS backend_agents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -209,398 +140,28 @@ CREATE TABLE IF NOT EXISTS backend_agents (
 # new-version2:backend_agents -> agent_runtimes(术语重构,见 agent-runtime-design.md §5.2)
 # 多实例键(multi-runtime-instance-design §2.1):注册键 = (credential_id, name, scope, owner_id),
 # 使每台 worker(凭据)对每个引擎独占一行,同时在线.老库由迁移重建(_rebuild_agent_runtimes_inst_key).
-_AGENT_RUNTIMES_DDL = """
-CREATE TABLE IF NOT EXISTS agent_runtimes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    credential_id INTEGER DEFAULT 0,
-    name TEXT NOT NULL,
-    display_name TEXT DEFAULT '',
-    provider TEXT DEFAULT '',
-    `binary` TEXT DEFAULT '',
-    installed INTEGER DEFAULT 0,
-    cli_path TEXT DEFAULT '',
-    version TEXT DEFAULT '',
-    healthy INTEGER DEFAULT 0,
-    pip_package TEXT DEFAULT '',
-    status TEXT DEFAULT 'offline',
-    last_seen_at TEXT DEFAULT NULL,
-    scope TEXT DEFAULT 'global',
-    owner_id TEXT DEFAULT '',
-    local_skills TEXT DEFAULT '[]',
-    pending_skill_scan INTEGER DEFAULT 0,
-    skill_scan_result TEXT DEFAULT '',
-    agent_tags TEXT DEFAULT '[]',
-    repo_key TEXT DEFAULT NULL,          -- 关联项目 repo_key（注册时从凭据复制）
-    worker_version TEXT DEFAULT '',      -- worker 自报版本号（心跳/兼容性检测，见 knowledge-obs-design）
-    host_name VARCHAR(191) DEFAULT '',   -- 本机直连引擎归属主控机 hostname（credential_id=0 时区分多台主控）
-    detached_from_scenes_at TEXT DEFAULT '',  -- 引擎离线超阈值被系统从场景绑定移除的时间（空=未处理，引擎绑定真实性同步方案）
-    role_tags TEXT DEFAULT '',           -- Issue #658：引擎角色标签（JSON 数组，如 ["coding","issue"]；空=按引擎类型默认映射兜底）
-    model_name TEXT DEFAULT '',          -- Issue #865：配置模型（worker 注册上报的本机配置模型名）
-    model_source TEXT DEFAULT '',        -- Issue #865：配置模型来源（worker_report=worker 上报 / local_config=服务端本机解析）
-    model_reported_at TEXT DEFAULT '',   -- Issue #865：配置模型上报时间（UTC ISO）
-    updated_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (credential_id, name, scope, owner_id, host_name)
-)
-"""
-
-_CHAT_CONVERSATIONS_DDL = """
-CREATE TABLE IF NOT EXISTS chat_conversations (
-    id TEXT PRIMARY KEY,
-    agent_session_id TEXT DEFAULT '',
-    user_id TEXT NOT NULL,
-    backend_session_id TEXT DEFAULT '',
-    user_gitcode_token TEXT DEFAULT '',
-    repo_key TEXT DEFAULT '',
-    im_channel_id TEXT DEFAULT '',
-    title TEXT DEFAULT '',
-    status TEXT DEFAULT 'active',
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_CHAT_MESSAGES_DDL = """
-CREATE TABLE IF NOT EXISTS chat_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content MEDIUMTEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now')),
-    task_id TEXT,
-    generate_status INTEGER DEFAULT NULL,
-    deleted INTEGER DEFAULT 0
-)
-"""
-
 # ⚠️ 时间口径警告（2026-10-18 加固）：这两个 DEFAULT 在 MySQL 上经 mysql_compat 翻译后等价于
 # 服务器本地时间（CST=UTC+8），而读侧（bot_lease._heartbeat_window / list_active_instances）
 # 一律按 **UTC** 比较 last_heartbeat。因此**写入方必须显式传 last_heartbeat（UTC 值）**，
 # 不要依赖默认值——历史上就是 MySQL 分支用 CAST(NOW() AS CHAR) 写 CST，导致幽灵实例占满一致性
 # 哈希环、bot 永不连接（issue #365 / commit f7f9951005）。默认值保留仅为兼容旧插入路径。
-_GLOBAL_IM_BOT_CONFIG_DDL = """
-CREATE TABLE IF NOT EXISTS global_im_bot_config (
-    bot_app_id        VARCHAR(191) PRIMARY KEY,
-    bot_type          VARCHAR(32) NOT NULL,
-    im_provider       VARCHAR(32) DEFAULT 'feishu',
-    is_active         INTEGER DEFAULT 1,
-    bot_name          VARCHAR(128) DEFAULT '',
-    lease_token       VARCHAR(128) DEFAULT NULL,
-    lease_expires_at  DATETIME DEFAULT NULL,
-    lease_owner       VARCHAR(128) DEFAULT NULL,
-    lease_acquired_at DATETIME DEFAULT NULL,
-    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-"""
-
-_IM_INSTANCE_DDL = """
-CREATE TABLE IF NOT EXISTS grape_im_instance (
-    instance_id      VARCHAR(64) PRIMARY KEY,
-    hostname         VARCHAR(64) NOT NULL,
-    ip               VARCHAR(64) DEFAULT '',
-    joined_at        DATETIME DEFAULT (datetime('now')),
-    last_heartbeat   DATETIME DEFAULT (datetime('now')),
-    im_enabled       INTEGER DEFAULT 1
-)
-"""
-
-_VOD_CONVERSATIONS_DDL = """
-CREATE TABLE IF NOT EXISTS vod_conversations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_session_id TEXT NOT NULL,
-    im_provider TEXT DEFAULT 'feishu',
-    im_chat_id TEXT NOT NULL,
-    im_channel_name TEXT DEFAULT '',
-    backend_session_id TEXT DEFAULT '',
-    status TEXT DEFAULT 'active',
-    created_at TEXT DEFAULT (datetime('now')),
-    last_active_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(agent_session_id, im_chat_id)
-)
-"""
-
-_FEISHU_ONBOARD_TASK_DDL = """
-CREATE TABLE IF NOT EXISTS feishu_onboard_task (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id TEXT UNIQUE NOT NULL,
-    bot_type TEXT NOT NULL,
-    repo_key TEXT DEFAULT '',
-    user_id TEXT NOT NULL,
-    status TEXT DEFAULT 'pending',
-    app_id TEXT DEFAULT '',
-    app_secret TEXT DEFAULT '',
-    qr_url TEXT DEFAULT '',
-    expire_in INTEGER DEFAULT 0,
-    error TEXT DEFAULT '',
-    created_at TEXT DEFAULT (datetime('now')),
-    finished_at TEXT DEFAULT ''
-)
-"""
-
 # ===== Issue 任务卡片表（原 tasks，Phase B1 改名；结构不变，后续 B2 收编 issue_state 字段）=====
-_ISSUE_DDL = """
-CREATE TABLE IF NOT EXISTS issue (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id          TEXT NOT NULL,
-    assignee         TEXT NOT NULL,
-    repo_key         TEXT NOT NULL,
-    issue_number     INTEGER NOT NULL,
-    title            TEXT DEFAULT '',
-    task_description TEXT DEFAULT '',
-    conversation_id  TEXT DEFAULT '',
-    status           TEXT DEFAULT 'active',
-    completed_reason TEXT DEFAULT '',
-    created_by       TEXT DEFAULT '',
-    vcs_exists       INTEGER NOT NULL DEFAULT 1,
-    vcs_checked_at   TEXT DEFAULT NULL,
-    created_at       TEXT DEFAULT (datetime('now')),
-    completed_at     TEXT DEFAULT NULL
-)
-"""
-
 # ===== new-version2 M1:agent_tasks 任务队列(确定路由 + 事件档案快照)=====
 # 见 agent-runtime-event-full-design.md §4.3 / concurrency-design.md / skill-delivery-remote.md
-_AGENT_TASKS_DDL = """
-CREATE TABLE IF NOT EXISTS agent_tasks (
-    id                TEXT PRIMARY KEY,
-    agent_session_id  TEXT NOT NULL,        -- 外键 -> devops_agent_session.id
-    runtime_id        INTEGER NOT NULL,     -- 确定路由 -> agent_runtimes.id
-    event_seq         INTEGER,              -- 关联 events 表 seq
-    issue_id          TEXT DEFAULT '',      -- 关联 event.json pipeline 段
-    repo_key          TEXT DEFAULT '',
-    agent_type        TEXT DEFAULT '',
-    skill             TEXT DEFAULT '',
-    prompt            MEDIUMTEXT NOT NULL,
-    cwd               TEXT DEFAULT '',
-    runtime_session_id TEXT DEFAULT '',
-    event_type        TEXT DEFAULT '',
-    account           TEXT DEFAULT '',
-    user_id           TEXT DEFAULT 0,
-    repo_gitcode_token TEXT DEFAULT '',
-    user_gitcode_token TEXT DEFAULT '',           -- chat 专用：用户级 GitCode token（互斥注入，不放 repo_gitcode_token）
-    env_extra         MEDIUMTEXT DEFAULT '{}',    -- JSON(含服务端已注入的账号/用户凭据,见 skill-delivery-remote.md)
-    skill_files       MEDIUMTEXT,    -- JSON: {skill_name: {rel_path: content}},远端交付技能包(MySQL 不允许 MEDIUMTEXT 默认值--无默认)
-    server_url        TEXT DEFAULT '',      -- A2A 外呼地址,worker 替换 {{SERVER_URL}}
-    issue_session_id  TEXT DEFAULT '',      -- 外键 -> issue_agent_session.id(Issue 级执行会话,串行粒度,见 multi-issue-isolation-design.md §3.3)
-    project_info_files MEDIUMTEXT DEFAULT '{}',   -- JSON: {rel_path: content},repo 全局 project-info 随任务交付(§2.4)
-    project_info_meta  MEDIUMTEXT DEFAULT '{}',   -- JSON: {last_commit_sha, branches, last_updated, degraded}
-    knowledge_files    MEDIUMTEXT DEFAULT '{}',   -- JSON: {rel_path: content},共享知识快照交付(event-conversation-design.md §3.1.1)
-    project_info_file_urls TEXT DEFAULT '',       -- project-info 文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
-    knowledge_file_urls    TEXT DEFAULT '',       -- 知识文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
-    pool_engine_ids    TEXT DEFAULT '',           -- 限定广播引擎列表（JSON 数组如[76,77]，空=全量广播）
-    pool_engine_source TEXT DEFAULT '',           -- pool_engine_ids 来源：scene=用户场景绑定 / auto=自动选择（降级判别，local-claimer 设计）
-    status            TEXT DEFAULT 'queued', -- queued/dispatched/running/pending_self_report/completed/failed/timeout_failed/cancelled（Issue #537 新增 pending_self_report 中间态 + timeout_failed 终态）
-    exit_code         INTEGER DEFAULT NULL,
-    result_text       MEDIUMTEXT DEFAULT '',
-    errors            MEDIUMTEXT DEFAULT '',
-    stderr            MEDIUMTEXT DEFAULT '',
-    usage_json        MEDIUMTEXT DEFAULT '{}',
-    started_at        TEXT DEFAULT NULL,
-    completed_at      TEXT DEFAULT NULL,
-    pending_since     TEXT DEFAULT NULL,     -- 进入 pending_self_report 的时刻（Issue #537：主控停机等 worker 自报的超时基准）
-    created_at        TEXT DEFAULT (datetime('now'))
-)
-"""
-
 # ===== 运行日志:task_messages 结构化消息表(实时日志功能,对齐 multica TaskMessage 模型)=====
-_TASK_MESSAGES_DDL = """
-CREATE TABLE IF NOT EXISTS task_messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id    TEXT NOT NULL,           -- agent_tasks.id
-    seq        INTEGER NOT NULL,        -- worker 侧单调序号(顺序/去重/增量拉取三合一)
-    type       TEXT NOT NULL,           -- step_start|text|reasoning|tool_use|step_finish|error|done
-    tool       TEXT DEFAULT '',         -- tool_use 工具名
-    content    MEDIUMTEXT DEFAULT '',         -- text/reasoning/error 内容
-    input_json MEDIUMTEXT DEFAULT '',         -- tool_use 入参 JSON(服务端已脱敏)
-    output     TEXT DEFAULT '',         -- tool_result 输出(worker 截断 8192)
-    created_at TEXT DEFAULT (datetime('now')),
-    -- agent|user：谁产生这条消息（202611160001 引入，同步进基表 DDL）
-    actor      VARCHAR(128) NOT NULL DEFAULT 'agent',
-    UNIQUE(task_id, seq)
-)
-"""
-
 # ===== agent-cluster-design.md §4.1:Agent 类型 -> 引擎池绑定(1..N)=====
-_AGENT_TYPE_RUNTIME_POOL_DDL = """
-CREATE TABLE IF NOT EXISTS agent_type_runtime_pool (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_type   TEXT NOT NULL,              -- vod / issue / coding / qa / sre
-    runtime_id   INTEGER NOT NULL,           -- agent_runtimes.id(Worker 上的引擎实例)
-    weight       INTEGER NOT NULL DEFAULT 1, -- 调度权重(≥1)
-    priority     INTEGER NOT NULL DEFAULT 5, -- 池内优先级(1 高)
-    enabled      INTEGER NOT NULL DEFAULT 1, -- 软摘除(保留绑定但不参与调度)
-    remark       TEXT DEFAULT '',
-    created_at   TEXT DEFAULT (datetime('now')),
-    UNIQUE (agent_type, runtime_id)
-)
-"""
-
 # ===== new-version2 M3:runtime_credentials 独立凭据(rta_ token,见 agent-runtime-event-full-design.md §4.1)=====
-_RUNTIME_CREDENTIALS_DDL = """
-CREATE TABLE IF NOT EXISTS runtime_credentials (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_hash   TEXT NOT NULL,             -- sha256(rta_xxx),不存明文
-    name         TEXT NOT NULL UNIQUE,      -- 凭据名=worker 名,全局唯一(可改名)
-    device_name  TEXT DEFAULT '',           -- 首次注册时回填(边端自报,辅助展示)
-    scope        TEXT DEFAULT 'user',       -- user(个人)/repo(仓库)/global(全局),默认个人
-    owner_id     TEXT DEFAULT '',           -- 仓库 scope 时存 repo 全名(如 owner/repo);个人/全局为 ''
-    owner_name   TEXT DEFAULT '',           -- 归属用户 user_name(生成凭据的当前登录用户)
-    repo_key     TEXT DEFAULT NULL,         -- 关联项目 repo_key（scope=user 时存）
-    status       TEXT DEFAULT 'active',     -- active / revoked
-    last_seen_at TEXT DEFAULT NULL,
-    last_ip      TEXT DEFAULT '',           -- 最近注册/心跳来源 IP(展示用,不入唯一键)
-    created_at   TEXT DEFAULT (datetime('now')),
-    UNIQUE (token_hash)
-)
-"""
-
 # ===== new-version2 VOD:Issue 生命周期状态机(权威阶段,见 vod-skill-upgrade-plan.md §3.0.2)=====
-_ISSUE_STATE_DDL = """
-CREATE TABLE IF NOT EXISTS issue_state (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo_key     TEXT NOT NULL,
-    issue_id     TEXT NOT NULL,             -- 如 "#5"
-    stage        TEXT NOT NULL DEFAULT 'vod',   -- vod/issue/coding/qa/sre/done
-    owner_agent  TEXT NOT NULL DEFAULT 'vod',   -- 当前归属 agent(= 最新被交办者)
-    assignee     TEXT DEFAULT '',          -- Issue 责任人(GitCode assignee,可为 grape_bot 或用户)
-    a2a_seq      INTEGER,                   -- 触发当前 stage 的 A2A 事件 seq
-    scene_id     TEXT DEFAULT '',          -- Issue 级开发场景（VOD 判定，空=回退仓库默认）
-    parent_issue_id TEXT DEFAULT '',      -- 父任务 Issue ID（如 "#20"，空=普通任务）
-    is_subtask_mode INTEGER DEFAULT 0,    -- 1=多任务模式（Issue Agent 应拆分子任务）
-    scene_user_id VARCHAR(36) DEFAULT '',  -- 用户级场景的创建者 ID（''=非用户级；D105 UUID 字符串）
-    allow_scene_override INTEGER DEFAULT 0, -- 允许场景覆盖（B2 收编字段，issue_state 兼容）
-    updated_at   TEXT DEFAULT (datetime('now')),
-    created_at   TEXT DEFAULT (datetime('now')),
-    UNIQUE (repo_key, issue_id)
-)
-"""
-
 # ===== Issue #455: pipeline_instances 表（0→1 安装/清理路径被引用但此前未建表）=====
 # 清理逻辑（onboarding/repo_cleanup）按 repo_key 直删该表；新实例缺表会报 "no such table"。
-_PIPELINE_INSTANCES_DDL = """
-CREATE TABLE IF NOT EXISTS pipeline_instances (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo_key     TEXT NOT NULL,
-    pipeline_id  TEXT DEFAULT '',
-    instance_id  TEXT DEFAULT '',
-    status       TEXT DEFAULT 'pending',
-    created_at   TEXT DEFAULT (datetime('now')),
-    updated_at   TEXT DEFAULT (datetime('now'))
-)
-"""
-
 # ===== new-version2 Issue 级执行会话(多 Issue 并行,见 multi-issue-isolation-design.md §3.3)=====
 # 配置层(devops_agent_session,repo+agent)与执行层(issue_agent_session,repo+agent+issue)分离.
-_ISSUE_AGENT_SESSION_DDL = """
-CREATE TABLE IF NOT EXISTS issue_agent_session (
-    id                TEXT PRIMARY KEY,          -- uuid,agent_tasks.issue_session_id 外键
-    repo_key          TEXT NOT NULL,
-    agent_type        TEXT NOT NULL,
-    issue_id          TEXT NOT NULL,             -- 如 "#5"(对应 event.json 的 issue_num)
-    runtime_session_id TEXT DEFAULT '',          -- 引擎 --session 续接指针(Issue 级,opencode/hermes)
-    session_engine     TEXT DEFAULT '',          -- 指针产出的引擎名(opencode/hermes/codearts/codex),跨引擎守卫用
-    status            TEXT DEFAULT 'idle',       -- idle / running / failed
-    last_active_at    TEXT DEFAULT (datetime('now')),
-    created_at        TEXT DEFAULT (datetime('now')),
-    UNIQUE (repo_key, agent_type, issue_id)
-)
-"""
-
 # new-version2 Event 对话(event-conversation-design.md):以事件为锚点,与处理该事件的 agent 对话
-_EVENT_THREAD_DDL = """
-CREATE TABLE IF NOT EXISTS event_thread (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    anchor_seq  INTEGER NOT NULL,           -- 锚点事件 seq(对话对象 = 处理该事件的 agent)
-    repo_key    TEXT NOT NULL,
-    issue_id    TEXT DEFAULT '',            -- 关联 Issue(如 '#5';无关联事件为 '')
-    agent_type  TEXT NOT NULL,              -- vod/issue/coding/qa/sre
-    role        TEXT NOT NULL,              -- user / agent
-    content     MEDIUMTEXT NOT NULL,
-    created_by  TEXT DEFAULT '',
-    created_at  TEXT DEFAULT (datetime('now')),
-    task_id     TEXT DEFAULT '',            -- 对话任务 ID（持久化查询，对齐 Chat Agent）
-    generate_status INTEGER DEFAULT NULL    -- 1=生成中 2=成功 3=失败 4=中断
-)
-"""
-
 # 共享知识索引:正文=工作区文件(project-info/knowledge.md,issues/{n}/knowledge.md,
 # {agent}/issues/{n}/knowledge.md),本表仅存索引/状态/审计(见 event-conversation-design.md §3.1.1)
-_AGENT_SHARED_KNOWLEDGE_DDL = """
-CREATE TABLE IF NOT EXISTS agent_shared_knowledge (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    scope       TEXT NOT NULL,              -- baseline / project / issue / issue_agent / member
-    repo_key    TEXT NOT NULL,
-    agent_type  TEXT DEFAULT '',            -- scope=issue_agent 时必填
-    issue_num   INTEGER DEFAULT 0,          -- scope=issue / issue_agent 时必填
-    file_path   TEXT NOT NULL,              -- 知识正文文件(相对 WORKSPACE_DIR)
-    status      TEXT DEFAULT 'accepted',    -- accepted / rejected
-    source_seq  INTEGER DEFAULT 0,
-    created_by  TEXT DEFAULT '',
-    created_at  TEXT DEFAULT (datetime('now')),
-    obs_key      VARCHAR(512) DEFAULT '',    -- OBS 对象键（正文已搬入对象存储，见 knowledge-obs-design）
-    content_hash VARCHAR(64) DEFAULT '',     -- 正文内容哈希（变更检测/增量同步）
-    updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,  -- 最近内容更新时间（OBS 同步审计）
-    source       TEXT NOT NULL DEFAULT '',   -- 知识来源：system / agent / manual
-    archived     INTEGER NOT NULL DEFAULT 0,  -- 0正常 1归档（归档后不注入）
-    description  TEXT DEFAULT '',             -- 知识描述：system/agent 自动生成，manual 用户填写
-    name         VARCHAR(256) DEFAULT ''      -- 知识名称：system/agent 自动生成，manual 用户必填
-)
-"""
-
 # ===== scene_knowledge_ref：知识-场景-Agent 绑定关系表（Issue #67） =====
-_SCENE_KNOWLEDGE_REF_DDL = """
-CREATE TABLE IF NOT EXISTS scene_knowledge_ref (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    knowledge_id  INTEGER NOT NULL,                        -- agent_shared_knowledge.id
-    scene_id      TEXT NOT NULL DEFAULT '',                 -- 场景UUID，空字符串=全部场景，禁止NULL
-    agent_type    TEXT NOT NULL DEFAULT '',                 -- Agent类型，空字符串=全部Agent，禁止NULL
-    issue_num     INTEGER NOT NULL DEFAULT 0,               -- Issue编号，0=全局（不限Issue），>0=只匹配该Issue
-    enabled       INTEGER NOT NULL DEFAULT 1,               -- 1启用 0禁用
-    created_by    TEXT NOT NULL DEFAULT '',                 -- 创建人
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),  -- 创建时间
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),  -- 更新时间
-    updated_by    TEXT NOT NULL DEFAULT '',                 -- 最后修改人
-    UNIQUE (knowledge_id, scene_id, agent_type, issue_num)
-)
-"""
-
 # MySQL 原生 DDL（不走翻译层，生产环境用）
-_SCENE_KNOWLEDGE_REF_MYSQL_DDL = """
-CREATE TABLE IF NOT EXISTS scene_knowledge_ref (
-    id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
-    knowledge_id  BIGINT UNSIGNED NOT NULL COMMENT 'agent_shared_knowledge主键',
-    scene_id      VARCHAR(64) NOT NULL DEFAULT '' COMMENT '场景UUID，空字符串代表全部场景，禁止NULL',
-    agent_type    VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'Agent类型，空字符串代表全部Agent，禁止NULL',
-    issue_num     INT NOT NULL DEFAULT 0 COMMENT 'Issue编号，0=全局不限Issue，>0=只匹配该Issue',
-    enabled       TINYINT NOT NULL DEFAULT 1 COMMENT '1启用 0禁用',
-    created_by    VARCHAR(64) NOT NULL DEFAULT '' COMMENT '创建人',
-    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间，自动刷新',
-    updated_by    VARCHAR(64) NOT NULL DEFAULT '' COMMENT '最后修改人',
-    UNIQUE KEY uk_knowledge_scene_agent_issue (knowledge_id, scene_id, agent_type, issue_num),
-    KEY idx_query (enabled, scene_id, agent_type, issue_num),
-    CONSTRAINT fk_scene_knowledge_ref_knowledge_id
-        FOREIGN KEY (knowledge_id) REFERENCES agent_shared_knowledge(id)
-        ON DELETE CASCADE
-        ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库-场景-Agent绑定关系'
-"""
-
 # ===== engine tagging (event-dispatch-redesign-v2.md 2.2) =====
-_ENGINE_CAPABILITIES_DDL = """
-CREATE TABLE IF NOT EXISTS engine_capabilities (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    runtime_id  INTEGER NOT NULL,
-    tag         TEXT NOT NULL,
-    max_concurrent INTEGER DEFAULT 1,
-    priority    INTEGER DEFAULT 50,
-    enabled     INTEGER DEFAULT 1,
-    created_at  TEXT DEFAULT (datetime('now')),
-    updated_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE(runtime_id, tag)
-)
-"""
-
 # ===== Issue #49：Webhook 事件 action 过滤规则表（Q3 已确认可配置）=====
 # run_pipeline L1 准入过滤：{event_type, action} 命中规则决定是否放行/副作用短路/过滤。
 # - allow=1 且 require_changes 为空 → 放行进入阶段路由
@@ -608,81 +169,10 @@ CREATE TABLE IF NOT EXISTS engine_capabilities (
 # - allow=0 → 过滤（写 event_skipped）
 # - allow=2（副作用-only）→ 执行 handle_side_effect 后直接短路，不进入 agent（如 close）
 # - actor: user / bot / any —— bot 操作（self-comment）在前置已处理，此处主要针对 user 操作细分
-_EVENT_ACTION_FILTER_DDL = """
-CREATE TABLE IF NOT EXISTS event_action_filter (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type    TEXT NOT NULL,
-    action        TEXT NOT NULL,
-    allow         INTEGER NOT NULL DEFAULT 0,   -- 0=过滤 1=放行 2=副作用-only
-    actor         TEXT DEFAULT 'any',           -- user / bot / any
-    require_changes TEXT DEFAULT '',            -- JSON 数组，命中这些 changes 键才放行，如 ["description"]
-    block_changes   TEXT DEFAULT '',            -- JSON 数组，命中这些 changes 键即过滤，如 ["assignees","labels"]
-    handle_side_effect TEXT DEFAULT '',         -- 副作用标识（如 close_issue_tasks）；空=无副作用
-    priority      INTEGER DEFAULT 0,
-    enabled       INTEGER DEFAULT 1,
-    created_at    TEXT DEFAULT (datetime('now')),
-    updated_at    TEXT DEFAULT (datetime('now')),
-    UNIQUE(event_type, action)
-)
-"""
-
 # ===== Scene Center: 场景配置表（替代 configs/pipelines.json 运行时读取）=====
 # 场景只与仓库（repo_key）关联，无 scope/user_id 来源区分（issue-39 方案 B）
 # 官方场景不存于此表，由 scene_market(source='official') 承载（scene_sync 同步）
-_PIPELINE_SCENE_DDL = """
-CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    scene_id    TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    display_name TEXT DEFAULT '',      -- 场景展示名（如「通用开发」），空时回落 name
-    repo_key    TEXT NOT NULL DEFAULT '',
-    nodes_json  TEXT DEFAULT '[]',
-    onboarding  TEXT DEFAULT 'repo-onboarding',
-    is_active   INTEGER DEFAULT 1,
-    created_at  TEXT DEFAULT (datetime('now')),
-    updated_at  TEXT DEFAULT (datetime('now')),
-    scene_type  TEXT DEFAULT 'standard',  -- standard | pr_subscription
-    is_pinned   INTEGER NOT NULL DEFAULT 0,
-    pinned_at   VARCHAR(32) DEFAULT NULL,
-    UNIQUE (scene_id, repo_key)
-)
-"""
-
 # ===== 优选项目模板（GitCode/GitHub 云原生热门项目）=====
-_FEATURED_TEMPLATES_DDL = """
-CREATE TABLE IF NOT EXISTS featured_templates (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    platform    TEXT NOT NULL,
-    repo_full_name TEXT NOT NULL,
-    repo_name   TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    language    TEXT DEFAULT '',
-    stars       INTEGER DEFAULT 0,
-    forks       INTEGER DEFAULT 0,
-    topics      TEXT DEFAULT '[]',
-    html_url    TEXT DEFAULT '',
-    clone_url   TEXT DEFAULT '',
-    category    TEXT DEFAULT 'cloud-native',
-    recommend_reason TEXT DEFAULT '',
-    fetched_at  TEXT DEFAULT '',
-    UNIQUE(platform, repo_full_name)
-)
-"""
-
-_LOGIN_WHITELIST_DDL = """
-CREATE TABLE IF NOT EXISTS login_whitelist (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    gitcode_username VARCHAR(64) DEFAULT NULL,
-    github_username TEXT DEFAULT '',
-    provider VARCHAR(32) DEFAULT NULL,
-    username VARCHAR(128) DEFAULT '',
-    remark VARCHAR(128) DEFAULT '',
-    created_by VARCHAR(64) DEFAULT '',
-    created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (gitcode_username)
-)
-"""
 # github_username 唯一约束不在 DDL 内联定义——SQLite 内联 UNIQUE 不支持
 # WHERE 条件（需要允许空串 '' 共存）。改为运行时部分索引
 # （_ensure_case_insensitive_indexes + Issue #332 首跑索引）。
@@ -694,259 +184,13 @@ CREATE TABLE IF NOT EXISTS login_whitelist (
 # 新行优先→老列兜底，逐人判定）。新行唯一性=部分表达式索引，见
 # _fn_login_whitelist_row_columns 注册式迁移。
 
-_API_LATENCY_LOG_DDL = """
-CREATE TABLE IF NOT EXISTS api_latency_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    request_id VARCHAR(32) DEFAULT '',
-    method VARCHAR(8) DEFAULT '',
-    path VARCHAR(256) DEFAULT '',
-    status INTEGER DEFAULT 0,
-    duration_ms INTEGER DEFAULT 0,
-    repo_key VARCHAR(128) DEFAULT '',
-    user_id VARCHAR(32) DEFAULT '',
-    source VARCHAR(16) DEFAULT 'backend',
-    created_at TEXT DEFAULT (datetime('now'))
-)
-"""
-
 # ===== Issue-11: DevOps 市场（场景市场 + 技能市场）======
 # 技术方案：docs/new-version3/issue-11-scene-skill-market-tech-design.md 第二章
 
-_SCENE_CATEGORY_DDL = """
-CREATE TABLE IF NOT EXISTS scene_category (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL,
-    slug        VARCHAR(64) DEFAULT '',
-    icon        TEXT DEFAULT '',
-    order_num   INTEGER DEFAULT 0,
-    is_active   INTEGER DEFAULT 1,
-    created_by  VARCHAR(64) DEFAULT '',
-    updated_by  VARCHAR(64) DEFAULT '',
-    created_at  TEXT DEFAULT (datetime('now')),
-    updated_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE (name),
-    UNIQUE (slug)
-)
-"""
-
-_SKILL_CATEGORY_DDL = """
-CREATE TABLE IF NOT EXISTS skill_category (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL,
-    slug        VARCHAR(64) NOT NULL,
-    icon        TEXT DEFAULT '',
-    order_num   INTEGER DEFAULT 0,
-    is_active   INTEGER DEFAULT 1,
-    created_at  TEXT DEFAULT (datetime('now')),
-    updated_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE (name),
-    UNIQUE (slug)
-)
-"""
-
-_SCENE_MARKET_DDL = """
-CREATE TABLE IF NOT EXISTS scene_market (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL,
-    display_name TEXT DEFAULT '',
-    version     TEXT DEFAULT '1.0.0',
-    description TEXT DEFAULT '',
-    market_description TEXT DEFAULT '',
-    icon        TEXT DEFAULT '',
-    category_id INTEGER DEFAULT 1,
-    is_featured INTEGER DEFAULT 0,
-    like_count  INTEGER DEFAULT 0,
-    source      TEXT DEFAULT 'official',
-    source_user_id TEXT DEFAULT 0,
-    recommended_template VARCHAR(191) DEFAULT '',
-    nodes_json  TEXT DEFAULT '[]',
-    onboarding  TEXT DEFAULT 'repo-onboarding',
-    tags        VARCHAR(256) DEFAULT '',  -- 标签，逗号分隔（如 build,deploy,ci）
-    author      VARCHAR(64) DEFAULT '',
-    content_hash VARCHAR(64) DEFAULT '',  -- 内容 hash（定时同步增量检测用）
-    obs_icon_key VARCHAR(256) DEFAULT '',  -- OBS 桶 icon 对象 key（查询时动态生成签名 URL）
-    preset_custom_fields TEXT DEFAULT '[]',  -- 场景预置自定义参数声明（scene.json custom_fields 数组，Issue #246）
-    is_active   INTEGER DEFAULT 1,
-    scope       VARCHAR(32) DEFAULT 'official',  -- 可见范围：official/repo
-    repo_key    VARCHAR(191) DEFAULT '',  -- 仓库标识（official 为空，repo 为当前仓库）
-    created_by  VARCHAR(64) DEFAULT '',
-    updated_by  VARCHAR(64) DEFAULT '',
-    created_at  TEXT DEFAULT (datetime('now')),
-    updated_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE (name, scope, source_user_id, repo_key)
-)
-"""
-
-_SCENE_LIKES_DDL = """
-CREATE TABLE IF NOT EXISTS scene_likes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     TEXT NOT NULL,
-    scene_id    INTEGER NOT NULL,
-    created_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE (user_id, scene_id)
-)
-"""
-
-_SCENE_SKILL_REF_DDL = """
-CREATE TABLE IF NOT EXISTS scene_skill_ref (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    scene_id    INTEGER NOT NULL,
-    skill_id    INTEGER DEFAULT 0,
-    skill_name  TEXT NOT NULL,
-    created_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE (scene_id, skill_name)
-)
-"""
-
 # 引擎绑定真实性同步：场景引擎解绑审计表（引擎离线超 8h 系统自动移除场景绑定的留痕）
-_SCENE_ENGINE_DETACH_LOG_DDL = """
-CREATE TABLE IF NOT EXISTS scene_engine_detach_log (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    scene_row_id INTEGER NOT NULL,        -- devops_pipeline_scene.id
-    repo_key    TEXT DEFAULT '',
-    scene_id    TEXT DEFAULT '',          -- 场景 scene_id（非 market id）
-    node_tag    TEXT DEFAULT '',          -- 被移除绑定的节点标签（coding/qa/sre…）
-    runtime_id  INTEGER NOT NULL,         -- 被移除的引擎 id
-    runtime_name TEXT DEFAULT '',         -- 引擎名（快照，防 runtime 行后续变更）
-    detached_at TEXT DEFAULT (datetime('now')),
-    reason      TEXT DEFAULT '',          -- 触发原因（offline_timeout 等）
-    affected_autopilot_tasks TEXT DEFAULT '[]',  -- 仍绑定该引擎的巡检任务 [{id,name}]（两表协同提示用）
-    rebound_at  TEXT DEFAULT ''           -- 用户重绑时间（非空=不再提示）
-)
-"""
-
 # Issue #2133：引擎生命周期审计（spawn_failed 告警/降级、恢复加回、任务绑定对账留痕）
-_ENGINE_LIFECYCLE_AUDIT_DDL = """
-CREATE TABLE IF NOT EXISTS grape_t_engine_lifecycle_audit (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    runtime_id  INTEGER NOT NULL,              -- agent_runtimes.id
-    runtime_name TEXT DEFAULT '',              -- 引擎名快照
-    kind        TEXT NOT NULL,                 -- spawn_fail_alarm / spawn_fail_degraded / recovered / manual_readd
-    scene_row_id INTEGER DEFAULT 0,            -- devops_pipeline_scene.id（加回相关）
-    node_tag    TEXT DEFAULT '',               -- 场景节点标签
-    detail      TEXT DEFAULT '{}',             -- JSON：计数/时长/对账任务快照
-    created_at  TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_SKILL_LIKES_DDL = """
-CREATE TABLE IF NOT EXISTS skill_likes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     TEXT NOT NULL,
-    skill_id    INTEGER NOT NULL,
-    created_at  TEXT DEFAULT (datetime('now')),
-    UNIQUE (user_id, skill_id)
-)
-"""
-
-_UPLOADED_FILES_DDL = """
-CREATE TABLE IF NOT EXISTS uploaded_files (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_key        VARCHAR(1024) NOT NULL,      -- OBS 对象 key / 本地文件路径
-    original_name   VARCHAR(512) DEFAULT '',     -- 用户上传时的原始文件名
-    file_size       BIGINT DEFAULT 0,            -- 文件大小（字节）
-    mime_type       VARCHAR(128) DEFAULT '',     -- MIME 类型（如 image/png）
-    file_type       VARCHAR(32) DEFAULT '',      -- 文件用途类型（如 'scene_icon'，预留扩展）
-    scope           VARCHAR(16) DEFAULT 'temp',  -- 文件状态：temp（临时）/ committed（已提交）
-    ref_table       VARCHAR(64) DEFAULT '',      -- 关联业务表名（committed 时填，如 'scene_market'）
-    ref_id          INTEGER DEFAULT 0,           -- 关联业务记录 ID（committed 时填）
-    is_active       INTEGER DEFAULT 1,           -- 软删除标记（0=已删除）
-    created_by      VARCHAR(64) DEFAULT '',      -- 上传用户
-    created_at      TEXT DEFAULT (datetime('now')),
-    updated_at      TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_DISTRIBUTED_LOCKS_DDL = """
-CREATE TABLE IF NOT EXISTS distributed_locks (
-    lock_key    VARCHAR(128) NOT NULL,          -- 锁唯一 key（如 'upload_cleanup'）
-    holder      VARCHAR(128) NOT NULL,          -- 锁持有者标识（hostname-随机hex）
-    locked_at   BIGINT       NOT NULL DEFAULT 0, -- 获取锁时间戳（秒）
-    expires_at  BIGINT       NOT NULL DEFAULT 0, -- 锁过期时间戳（秒），过期可被抢占
-    update_at   BIGINT       NOT NULL DEFAULT 0, -- 最后更新时间戳（排查用）
-    created_at  BIGINT       NOT NULL DEFAULT 0, -- 锁记录首次创建时间戳（排查用）
-    PRIMARY KEY (lock_key)
-)
-"""
-
 # Issue #993：分支守卫的期望远端 sha 状态（与 distributed_locks 同源 DB，跨 worker 可见）。
-_BRANCH_GUARD_STATE_DDL = """
-CREATE TABLE IF NOT EXISTS branch_guard_state (
-    repo_key            VARCHAR(255) NOT NULL DEFAULT '',
-    head_branch         VARCHAR(255) NOT NULL DEFAULT '',
-    expected_remote_sha VARCHAR(64)  NOT NULL DEFAULT '',
-    pr_number           INTEGER      NOT NULL DEFAULT 0,
-    base_branch         VARCHAR(255) NOT NULL DEFAULT '',
-    updated_at          TEXT         NOT NULL DEFAULT '',
-    pending_expected_sha VARCHAR(64) NOT NULL DEFAULT '',
-    pending_prev_sha    VARCHAR(64)  NOT NULL DEFAULT '',
-    PRIMARY KEY (repo_key, head_branch)
-)
-"""
-
 # ===== Issue #150: Autopilot 定时自动化任务（§5.3.1 + §5.3.2 + §5.3.3）=====
-_AUTOPILOT_TASKS_DDL = """
-CREATE TABLE IF NOT EXISTS autopilot_tasks (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT NOT NULL,                       -- 任务名称
-    repo_key        TEXT NOT NULL DEFAULT '',            -- 仓库标识（gitcode:owner/repo）
-    agent_type      TEXT NOT NULL DEFAULT 'issue',       -- 执行哪个agent（issue/qa/sre）
-    instruction     TEXT NOT NULL DEFAULT '',            -- 巡检指令（注入prompt）
-    skill_name      TEXT NOT NULL DEFAULT '',            -- 可选skill（空=不用skill）
-    cron            TEXT NOT NULL DEFAULT '*/30 * * * *', -- cron 表达式（5 段制）
-    max_retry       INTEGER NOT NULL DEFAULT 3,          -- 最大重试次数
-    enabled         INTEGER NOT NULL DEFAULT 1,          -- 1=启用 0=禁用
-    last_run_at     TEXT DEFAULT '',                     -- 最近触发时间
-    next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间
-    created_at      TEXT DEFAULT (datetime('now')),
-    updated_at      TEXT DEFAULT (datetime('now')),
-    created_by      INTEGER DEFAULT 0                    -- 创建者 user_id
-)
-"""
-
-_AUTOPILOT_EXECUTIONS_DDL = """
-CREATE TABLE IF NOT EXISTS autopilot_executions (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id         INTEGER NOT NULL,                    -- 外键 -> autopilot_tasks.id
-    status          TEXT NOT NULL DEFAULT 'pending',     -- pending/running/success/failed/retrying
-    retry_count     INTEGER NOT NULL DEFAULT 0,          -- 已重试次数
-    result          MEDIUMTEXT DEFAULT '',               -- 执行结果摘要
-    error           MEDIUMTEXT DEFAULT '',               -- 错误信息
-    a2a_seq         INTEGER DEFAULT NULL,                -- 关联 agent_tasks.event_seq（=exec_id）
-    started_at      TEXT DEFAULT '',                     -- 开始时间
-    completed_at    TEXT DEFAULT '',                     -- 完成时间
-    created_at      TEXT DEFAULT (datetime('now')),
-    -- v3.0 新增字段
-    agent_type      TEXT DEFAULT '',                     -- 执行快照
-    findings_json   MEDIUMTEXT DEFAULT '',               -- findings list JSON
-    -- Issue #1546：执行记录直接持有的 agent_tasks.id（非 events.seq），反查唯一权威来源
-    agent_task_id   TEXT DEFAULT NULL,                   -- agent_tasks.id（字符串，空=历史行）
-    -- Feishu subscription notification: terminal-state notify idempotency guard
-    notified        INTEGER NOT NULL DEFAULT 0           -- 0=pending 1=notified (prevents double-send from two terminal hooks)
-)
-"""
-
-_AUTOPILOT_SUBSCRIPTIONS_DDL = """
-CREATE TABLE IF NOT EXISTS autopilot_subscriptions (
-    task_id     INTEGER NOT NULL,
-    user_id     TEXT NOT NULL,
-    created_at  TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (task_id, user_id)
-)
-"""
-
-_ADMIN_ACCOUNTS_TABLE_DDL = """
-CREATE TABLE IF NOT EXISTS admin_accounts (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    username      TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL DEFAULT '',
-    is_super      INTEGER NOT NULL DEFAULT 1,
-    token_version INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT DEFAULT (datetime('now')),
-    last_login_at TEXT DEFAULT NULL
-)
-"""
-
 _NEW_TABLES = [
     ("admin_accounts", _ADMIN_ACCOUNTS_TABLE_DDL),
     ("meta", _META_TABLE_DDL),
@@ -1110,47 +354,6 @@ CREATE TABLE IF NOT EXISTS user_feedback (
 ]
 
 # ===== Organization（组织）特性 =====
-_ORGANIZATION_DDL = """
-CREATE TABLE IF NOT EXISTS organization (
-    id              TEXT,
-    name            VARCHAR(128) NOT NULL,
-    slug            VARCHAR(64) NOT NULL UNIQUE,
-    description     TEXT DEFAULT '',
-    avatar_url      VARCHAR(512) DEFAULT '',
-    owner_id        TEXT NOT NULL,
-    is_personal     INTEGER DEFAULT 0,
-    settings        TEXT DEFAULT '{}',
-    max_members     INTEGER DEFAULT 50,
-    max_workers     INTEGER DEFAULT 10,
-    created_at      TEXT DEFAULT (datetime('now')),
-    updated_at      TEXT DEFAULT (datetime('now'))
-)"""
-
-_ORG_MEMBER_DDL = """
-CREATE TABLE IF NOT EXISTS org_member (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    org_id          TEXT NOT NULL,
-    user_id         TEXT NOT NULL,
-    role            TEXT NOT NULL DEFAULT 'member',
-    invited_by      TEXT DEFAULT 0,
-    joined_at       TEXT DEFAULT (datetime('now')),
-    UNIQUE (org_id, user_id)
-)"""
-
-_ORG_INVITATION_DDL = """
-CREATE TABLE IF NOT EXISTS org_invitation (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    org_id          TEXT NOT NULL,
-    inviter_id      TEXT NOT NULL,
-    invitee_email   TEXT DEFAULT '',
-    invitee_user_id TEXT DEFAULT 0,
-    role            TEXT NOT NULL DEFAULT 'member',
-    status          TEXT DEFAULT 'pending',
-    expires_at      TEXT,
-    created_at      TEXT DEFAULT (datetime('now')),
-    updated_at      TEXT DEFAULT (datetime('now'))
-)"""
-
 _NEW_TABLES.extend([
     ("organization", _ORGANIZATION_DDL),
     ("org_member", _ORG_MEMBER_DDL),
@@ -1158,140 +361,8 @@ _NEW_TABLES.extend([
 ])
 
 # ===== 账号体系新表 =====
-_GRAPE_ACCOUNTS_DDL = """
-CREATE TABLE IF NOT EXISTS grape_accounts (
-    id              TEXT PRIMARY KEY,      -- D105 第二批：UUIDv7（应用层生成）；存量整型值字符串化保留
-    username        VARCHAR(64) NOT NULL UNIQUE,
-    email           VARCHAR(255) DEFAULT NULL,
-    email_source    VARCHAR(16) DEFAULT NULL,
-    password_hash   TEXT NOT NULL DEFAULT '',
-    nickname        VARCHAR(128) DEFAULT '',
-    avatar_url      VARCHAR(512) DEFAULT '',
-    status          INTEGER DEFAULT 1,
-    token_version   INTEGER DEFAULT 0,
-    email_verified  INTEGER DEFAULT 0,
-    email_is_placeholder INTEGER DEFAULT 0,
-    created_by_oauth    INTEGER DEFAULT 0,
-    last_active_at  TEXT DEFAULT NULL,
-    last_login_at   TEXT DEFAULT NULL,
-    created_at      TEXT DEFAULT (datetime('now')),
-    updated_at      TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_EXTERNAL_IDENTITIES_DDL = """
-CREATE TABLE IF NOT EXISTS external_identities (
-    id                TEXT,
-    grape_user_id     TEXT NOT NULL,
-    provider          VARCHAR(32) NOT NULL,
-    external_id       VARCHAR(128) NOT NULL,
-    external_login    VARCHAR(128) DEFAULT '',
-    external_name     VARCHAR(128) DEFAULT '',
-    external_avatar   VARCHAR(512) DEFAULT '',
-    access_token      TEXT DEFAULT '',
-    refresh_token     TEXT DEFAULT '',
-    token_expires_at  TEXT DEFAULT '',
-    metadata          TEXT DEFAULT '{}',
-    status            INTEGER DEFAULT 1,
-    unbound_at        TEXT DEFAULT NULL,
-    created_at        TEXT DEFAULT (datetime('now')),
-    updated_at        TEXT DEFAULT (datetime('now')),
-    UNIQUE (provider, external_id),
-    UNIQUE (grape_user_id, provider)
-)
-"""
-
-_VERIFICATION_CODES_DDL = """
-CREATE TABLE IF NOT EXISTS verification_codes (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    email        VARCHAR(255) NOT NULL,
-    code_hash    VARCHAR(64) NOT NULL,
-    scene        VARCHAR(32) NOT NULL,
-    ip           VARCHAR(64) DEFAULT '',
-    attempts     INTEGER DEFAULT 0,
-    used         INTEGER DEFAULT 0,
-    expires_at   TEXT NOT NULL,
-    created_at   TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_AUDIT_LOGS_DDL = """
-CREATE TABLE IF NOT EXISTS audit_logs (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    seq          INTEGER NOT NULL UNIQUE,
-    event_type   VARCHAR(64) NOT NULL,
-    user_id      TEXT DEFAULT 0,
-    operator_id  INTEGER DEFAULT 0,
-    ip           VARCHAR(64) DEFAULT '',
-    detail       TEXT DEFAULT '{}',
-    prev_hash    VARCHAR(64) DEFAULT '',
-    curr_hash    VARCHAR(64) DEFAULT '',
-    created_at   TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_SIGNUP_WHITELIST_DDL = """
-CREATE TABLE IF NOT EXISTS signup_whitelist (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    type         VARCHAR(16) NOT NULL,
-    value        VARCHAR(255) NOT NULL,
-    remark       VARCHAR(128) DEFAULT '',
-    created_by   VARCHAR(64) DEFAULT '',
-    created_at   TEXT DEFAULT (datetime('now')),
-    UNIQUE (type, value)
-)
-"""
-
-_LOGIN_FAILURES_DDL = """
-CREATE TABLE IF NOT EXISTS login_failures (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    identifier   VARCHAR(255) NOT NULL,
-    ip           VARCHAR(64) DEFAULT '',
-    created_at   TEXT DEFAULT (datetime('now'))
-)
-"""
-
 # Issue #474（方案A）：凭据明文按需取回日志——审计+高频取回告警计数用（不存明文值）
-_CREDENTIAL_REVEAL_LOG_DDL = """
-CREATE TABLE IF NOT EXISTS grape_t_credential_reveal_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id      TEXT NOT NULL,
-    provider     VARCHAR(32) NOT NULL,
-    field        VARCHAR(16) NOT NULL,
-    ip           VARCHAR(64) DEFAULT '',
-    created_at   TEXT DEFAULT (datetime('now'))
-)
-"""
-
 # P0-3: OAuth 回调成功后的一次性交换码——替代 URL 直接传递 access_token
-_EXCHANGE_CODES_DDL = """
-CREATE TABLE IF NOT EXISTS exchange_codes (
-    code         TEXT PRIMARY KEY,
-    user_id      TEXT NOT NULL,
-    username     VARCHAR(64) NOT NULL,
-    provider     VARCHAR(32) NOT NULL,
-    token_version INTEGER DEFAULT 0,
-    is_new       INTEGER DEFAULT 0,
-    created_at   REAL NOT NULL,
-    expires      REAL NOT NULL
-)
-"""
-
-_BINDING_TICKETS_DDL = """
-CREATE TABLE IF NOT EXISTS binding_tickets (
-    ticket           TEXT PRIMARY KEY,
-    initiating_user_id  TEXT NOT NULL,
-    provider         VARCHAR(32) NOT NULL,
-    external_id      VARCHAR(128) NOT NULL,
-    external_login   VARCHAR(128) DEFAULT '',
-    external_name    VARCHAR(128) DEFAULT '',
-    external_avatar  VARCHAR(512) DEFAULT '',
-    original_user_id TEXT NOT NULL,
-    created_at       REAL NOT NULL,
-    expires          REAL NOT NULL
-)
-"""
-
 _NEW_TABLES.extend([
     ("grape_accounts", _GRAPE_ACCOUNTS_DDL),
     ("external_identities", _EXTERNAL_IDENTITIES_DDL),
@@ -1312,40 +383,6 @@ ON grape_accounts(email)
 """
 
 # ===== Community tables (grape-website community page) =====
-_COMMUNITY_DDL = """
-CREATE TABLE IF NOT EXISTS community_posts (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id         TEXT NOT NULL DEFAULT 0,
-    username        TEXT NOT NULL DEFAULT '',
-    title           TEXT NOT NULL,
-    content         TEXT DEFAULT '',
-    category        TEXT DEFAULT 'tech',
-    views           INTEGER DEFAULT 0,
-    likes           INTEGER DEFAULT 0,
-    comments_count  INTEGER DEFAULT 0,
-    is_deleted      INTEGER DEFAULT 0,
-    created_at      TEXT DEFAULT (datetime('now'))
-)"""
-
-_COMMUNITY_COMMENTS_DDL = """
-CREATE TABLE IF NOT EXISTS community_comments (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    post_id     INTEGER NOT NULL,
-    user_id     TEXT NOT NULL DEFAULT 0,
-    username    TEXT NOT NULL DEFAULT '',
-    content     TEXT NOT NULL,
-    is_deleted  INTEGER DEFAULT 0,
-    created_at  TEXT DEFAULT (datetime('now'))
-)"""
-
-_COMMUNITY_LIKES_DDL = """
-CREATE TABLE IF NOT EXISTS community_post_likes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    post_id     INTEGER NOT NULL,
-    user_id     TEXT NOT NULL,
-    UNIQUE(post_id, user_id)
-)"""
-
 _NEW_TABLES.extend([
     ("community_posts", _COMMUNITY_DDL),
     ("community_comments", _COMMUNITY_COMMENTS_DDL),
@@ -1356,70 +393,9 @@ _NEW_TABLES.extend([
 # 设计文档:docs/weekly-07/observability-llm-usage-design.md
 # 关键约束:绝不复用 agent_tasks.usage_json —— 该列是"会话续接指针"(session_id/work_dir/
 # engine),被 routes/events.py、im/handler_async.py 等消费,归 complete_task 独占。
-_OBS_LLM_USAGE_DDL = """
-CREATE TABLE IF NOT EXISTS obs_llm_usage (
-    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    dedup_key          TEXT NOT NULL UNIQUE,        -- '{task_id}:{seq}' 幂等键(单列,兼容方言翻译)
-    task_id            TEXT NOT NULL,               -- agent_tasks.id
-    seq                INTEGER NOT NULL DEFAULT 0,  -- 确定性序号,见 llm_usage.stable_seq
-    turn               INTEGER NOT NULL DEFAULT 0,  -- 轮次(引擎分轮上报时用)
-    source             TEXT DEFAULT '',             -- report/codex/opencode/hermes/hwcloud
-    repo_key           TEXT DEFAULT '',
-    scene_id           TEXT DEFAULT '',
-    agent_type         TEXT DEFAULT '',
-    engine_id          INTEGER DEFAULT 0,
-    user_id            TEXT DEFAULT 0,
-    provider_raw       TEXT DEFAULT '',             -- 引擎上报的原始 provider
-    model_raw          TEXT DEFAULT '',             -- 引擎上报的原始模型名
-    model_key          TEXT DEFAULT '',             -- 抽样归一化后的模型名(聚合用)
-    run_id             TEXT DEFAULT '',             -- 运行主体:task→同 task_id;其它→chat:<conv>:<msg> 等
-    run_kind           TEXT DEFAULT 'task',         -- task/chat/devops/im/wiki(主控机内跑的引擎算后者)
-    input_tokens       INTEGER NOT NULL DEFAULT 0,
-    output_tokens      INTEGER NOT NULL DEFAULT 0,
-    cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
-    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-    reasoning_tokens   INTEGER NOT NULL DEFAULT 0,
-    cost_usd           REAL DEFAULT NULL,           -- 引擎侧成本(可空,与自算成本交叉校验)
-    cost_status        TEXT DEFAULT '',             -- ok/unknown/none
-    created_at         TEXT DEFAULT (datetime('now')),
-    updated_at         TEXT DEFAULT (datetime('now'))
-)
-"""
-
 # 台账年度归档（审计决定 2026-10-17）：超过保留期的用量行搬到本表，台账只留近一年。
 # 结构镜像 obs_llm_usage，但 **dedup_key 不唯一**（归档是"搬走"，不承担幂等职责）
 # 且不带原 id（避免与台账自增 id 撞车；追溯靠 task_id/dedup_key/created_at）。
-_OBS_LLM_USAGE_ARCHIVE_DDL = """
-CREATE TABLE IF NOT EXISTS obs_llm_usage_archive (
-    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    dedup_key          TEXT NOT NULL,
-    task_id            TEXT NOT NULL,
-    seq                INTEGER NOT NULL DEFAULT 0,
-    turn               INTEGER NOT NULL DEFAULT 0,
-    source             TEXT DEFAULT '',
-    repo_key           TEXT DEFAULT '',
-    scene_id           TEXT DEFAULT '',
-    agent_type         TEXT DEFAULT '',
-    engine_id          INTEGER DEFAULT 0,
-    user_id            TEXT DEFAULT 0,
-    provider_raw       TEXT DEFAULT '',
-    model_raw          TEXT DEFAULT '',
-    model_key          TEXT DEFAULT '',
-    run_id             TEXT DEFAULT '',
-    run_kind           TEXT DEFAULT 'task',
-    input_tokens       INTEGER NOT NULL DEFAULT 0,
-    output_tokens      INTEGER NOT NULL DEFAULT 0,
-    cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
-    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-    reasoning_tokens   INTEGER NOT NULL DEFAULT 0,
-    cost_usd           REAL DEFAULT NULL,
-    cost_status        TEXT DEFAULT '',
-    created_at         TEXT DEFAULT '',
-    updated_at         TEXT DEFAULT '',
-    archived_at        TEXT DEFAULT (datetime('now'))
-)
-"""
-
 _NEW_TABLES.extend([
     ("obs_llm_usage", _OBS_LLM_USAGE_DDL),
     ("obs_llm_usage_archive", _OBS_LLM_USAGE_ARCHIVE_DDL),
@@ -1429,106 +405,15 @@ _NEW_TABLES.extend([
 # ===== 可观测性告警中心（文档 §9.1）=====
 # 规则全局共享（平台配置），事件按维度（dim_key）记录；用户面只看 level='user' 且
 # 落在自己可见仓库范围内的事件 —— 平台级规则/事件不进用户面（§5.3 三层边界）。
-_OBS_ALERT_DDL = """
-CREATE TABLE IF NOT EXISTS obs_alert_rules (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT NOT NULL UNIQUE,
-    kind            TEXT NOT NULL DEFAULT 'metric',  -- metric(阈值求值)/gap(数据缺失探测)
-    level           TEXT NOT NULL DEFAULT 'user',   -- user(用户面) / platform(仅 L2/L3)
-    metric          TEXT NOT NULL,                  -- kind=metric:指标名; kind=gap:gap_runtime/gap_repo
-    comparator      TEXT NOT NULL DEFAULT 'gt',      -- gt/lt/gte/lte
-    threshold       REAL NOT NULL DEFAULT 0,
-    window_sec      INTEGER NOT NULL DEFAULT 300,    -- 指标统计窗口
-    for_sec         INTEGER NOT NULL DEFAULT 300,    -- 持续满足多久才触发（抑制抖动）
-    severity        TEXT NOT NULL DEFAULT 'warning',  -- critical/severe/important/warning/info
-    dim_filter      TEXT DEFAULT '',                 -- 预留: repo=o/r
-    enabled         INTEGER NOT NULL DEFAULT 1,
-    notify_channels TEXT DEFAULT '',                 -- 空=只记录不推送；feishu/im/email
-    -- 策略层（P1-1）：通知节流 / 聚合 / 时段 / 升级
-    repeat_sec            INTEGER NOT NULL DEFAULT 0,  -- 0=只通知一次；>0=未恢复时每 N 秒复推
-    aggregate_mode        TEXT NOT NULL DEFAULT 'none',-- none/rule(窗口内合并)/period(周期汇总)
-    aggregate_window_sec  INTEGER NOT NULL DEFAULT 0,  -- 聚合窗口；mode!=none 且为 0 时按 300
-    notify_window_json    TEXT NOT NULL DEFAULT '',    -- 空=全天；{"days":[1..7],"start":"09:00","end":"19:00"}
-    escalate_json         TEXT NOT NULL DEFAULT '',    -- 空=不升级；{"after_sec":1800,"severity":"critical"}
-    description     TEXT DEFAULT '',
-    seed_source     TEXT DEFAULT '',                 -- 来源: deploy/alerts.yml 的 alert 名
-    created_at      TEXT DEFAULT (datetime('now')),
-    updated_at      TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_OBS_ALERT_EVENTS_DDL = """
-CREATE TABLE IF NOT EXISTS obs_alert_events (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    rule_id        INTEGER NOT NULL,
-    rule_name      TEXT NOT NULL,
-    level          TEXT NOT NULL DEFAULT 'user',
-    severity       TEXT NOT NULL DEFAULT 'warning',
-    status         TEXT NOT NULL DEFAULT 'firing',   -- firing/resolved
-    source         TEXT NOT NULL DEFAULT 'monitor',  -- monitor(指标)/gap(数据缺失)/mutation(突变)/slo
-    metric         TEXT DEFAULT '',
-    value          REAL DEFAULT 0,
-    threshold      REAL DEFAULT 0,
-    dim_key        TEXT DEFAULT '',                  -- repo:<repo_key> / global
-    repo_key       TEXT DEFAULT '',                  -- 冗余，便于按仓库过滤
-    first_fired_at TEXT DEFAULT '',
-    last_seen_at   TEXT DEFAULT '',
-    resolved_at    TEXT DEFAULT '',
-    silenced_until TEXT DEFAULT '',                  -- 非空且未过期 => 静默（不推送，仍记录）
-    link_task_id   TEXT DEFAULT '',
-    -- 策略层状态（P1-1）：通知节流 / 时段延后 / 升级
-    notify_count     INTEGER NOT NULL DEFAULT 0,     -- 已通知次数（0=只记录未推）
-    last_notified_at TEXT DEFAULT '',                -- 上次成功通知时间（重复抑制用）
-    escalated_at     TEXT DEFAULT '',                -- 升级通知时间（非空=已升级过）
-    notify_deferred  INTEGER NOT NULL DEFAULT 0,     -- 1=因通知时段只记录（窗口内恢复后补推一次）
-    created_at     TEXT DEFAULT (datetime('now')),
-    updated_at     TEXT DEFAULT (datetime('now'))
-)
-"""
-
 _NEW_TABLES.extend([
     ("obs_alert_rules", _OBS_ALERT_DDL),
     ("obs_alert_events", _OBS_ALERT_EVENTS_DDL),
 ])
 
 # ===== 设备资源采样（资源曲线用；runtime_credentials 只有当前值，没有历史）=====
-_OBS_RUNTIME_SAMPLES_DDL = """
-CREATE TABLE IF NOT EXISTS obs_runtime_samples (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    runtime_id        INTEGER NOT NULL,             -- agent_runtimes.id / runtime_credentials.id
-    device_name       TEXT DEFAULT '',
-    sampled_at        TEXT NOT NULL,
-    -- 在线信号（P2-1 SLO 用）：采样时刻该引擎心跳是否新鲜（last_seen_at 在 ONLINE_WINDOW 内）。
-    -- 注意 health_score 来自 runtime_health_scores，是"近 N 天任务健康度"**不是在线**，
-    -- 且 dev 库实测 7454 行全为 0 —— 所以可用率必须另立此列，不能拿 health_score 顶。
-    online            INTEGER NOT NULL DEFAULT 0,
-    cpu_percent       REAL DEFAULT 0,
-    memory_percent    REAL DEFAULT 0,
-    disk_percent      REAL DEFAULT 0,
-    bandwidth_percent REAL DEFAULT 0,
-    health_score      INTEGER DEFAULT 0,
-    status            TEXT DEFAULT ''
-)
-"""
-
 # ===== 业务指标分钟/小时聚合（P1-2，§6.2）=====
 # 写入方：main.py 的 rollup 循环（60s，追赶式补齐）；读取方：总览趋势 / 指标序列 API / 后续 SLO。
 # 维度：repo:<repo_key> 与 global（global 只在 L2 暴露）。设备资源仍走 obs_runtime_samples。
-_OBS_METRIC_ROLLUP_DDL = """
-CREATE TABLE IF NOT EXISTS obs_metric_rollup (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    resolution   TEXT NOT NULL DEFAULT 'minute', -- minute(7天) / hour(30天)
-    bucket_start TEXT NOT NULL,                  -- 桶起点（ISO UTC，对齐分钟/小时）
-    metric       TEXT NOT NULL,                  -- task_done / task_success_rate / token_total ...
-    dim_key      TEXT NOT NULL DEFAULT '',       -- repo:<repo_key> / global
-    repo_key     TEXT NOT NULL DEFAULT '',       -- 冗余：用户面按可见仓库过滤
-    value        REAL NOT NULL DEFAULT 0,        -- 聚合值（计数/比率/均值/p95/求和）
-    cnt          INTEGER NOT NULL DEFAULT 0,     -- 样本数（比率类=分母，供加权平均）
-    updated_at   TEXT DEFAULT (datetime('now')),
-    UNIQUE (resolution, bucket_start, metric, dim_key)
-)
-"""
-
 _NEW_TABLES.extend([
     ("obs_runtime_samples", _OBS_RUNTIME_SAMPLES_DDL),
     ("obs_metric_rollup", _OBS_METRIC_ROLLUP_DDL),
@@ -1537,41 +422,6 @@ _NEW_TABLES.extend([
 # ===== SLO / 错误预算（P2-1，§6.7）=====
 # 配置表：三类 SLI（任务成功率 / 排队时延 / 引擎可用率）；目标值由管理台统一设定（L2 写、L1 读）。
 # 快照表：按小时落一行（唯一 (slo_id, bucket_start)），供燃尽曲线与历史回溯。
-_OBS_SLO_DDL = """
-CREATE TABLE IF NOT EXISTS obs_slo (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    name           TEXT NOT NULL UNIQUE,            -- 稳定标识（前端/事件按它取文案）
-    sli_type       TEXT NOT NULL,                   -- task_success_rate / task_queue_wait_p95 / engine_availability
-    scope_type     TEXT NOT NULL DEFAULT 'global',  -- repo / global / engine
-    scope_key      TEXT NOT NULL DEFAULT '',        -- scope_type=repo 时的仓库短名；global/engine 留空
-    target         REAL NOT NULL DEFAULT 0.99,      -- 目标（比例；时延类=达标时间占比）
-    window_days    INTEGER NOT NULL DEFAULT 30,     -- 考核窗口（天）
-    threshold_json TEXT NOT NULL DEFAULT '{}',      -- 时延类的 {"max_p95_sec": 300} 等
-    enabled        INTEGER NOT NULL DEFAULT 1,
-    created_by     TEXT NOT NULL DEFAULT '',
-    created_at     TEXT DEFAULT (datetime('now')),
-    updated_at     TEXT DEFAULT (datetime('now'))
-)
-"""
-
-_OBS_SLO_SNAPSHOTS_DDL = """
-CREATE TABLE IF NOT EXISTS obs_slo_snapshots (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    slo_id           INTEGER NOT NULL,
-    bucket_start     TEXT NOT NULL,                 -- 小时桶（ISO UTC）
-    window_start     TEXT NOT NULL DEFAULT '',      -- 该次计算覆盖的窗口
-    window_end       TEXT NOT NULL DEFAULT '',
-    good             REAL NOT NULL DEFAULT 0,       -- 窗口内达标量（成功数 / 达标桶数 / 在线采样数）
-    total            REAL NOT NULL DEFAULT 0,       -- 窗口内总量（分母）
-    value            REAL NOT NULL DEFAULT 0,       -- SLI 值（比例）
-    budget_total     REAL NOT NULL DEFAULT 0,       -- 错误预算总量 =(1-target)*有数据桶数
-    budget_consumed  REAL NOT NULL DEFAULT 0,       -- 已消耗（坏桶数）
-    state            TEXT NOT NULL DEFAULT 'ok',    -- ok / warning / breached / no_data
-    computed_at      TEXT DEFAULT (datetime('now')),
-    UNIQUE (slo_id, bucket_start)
-)
-"""
-
 _NEW_TABLES.extend([
     ("obs_slo", _OBS_SLO_DDL),
     ("obs_slo_snapshots", _OBS_SLO_SNAPSHOTS_DDL),
@@ -1580,24 +430,6 @@ _NEW_TABLES.extend([
 # ===== 可观测性日志（热数据落库，§6.3）=====
 # 只落 WARNING/ERROR（INFO 走文件）；14 天留存。dedup_key 防 worker 批量重试重复落行
 # （设计 DDL 无该列，本仓实现多加一列并记入文档：批量上报天然会重试）。
-_OBS_LOG_DDL = """
-CREATE TABLE IF NOT EXISTS obs_log (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    dedup_key   TEXT NOT NULL UNIQUE,
-    ts          TEXT NOT NULL,
-    level       TEXT NOT NULL DEFAULT 'WARNING',
-    component   TEXT DEFAULT '',
-    source      TEXT DEFAULT '',
-    trace_id    TEXT DEFAULT '',
-    task_id     TEXT DEFAULT '',
-    repo_key    TEXT DEFAULT '',
-    runtime_id  INTEGER DEFAULT 0,
-    msg         TEXT DEFAULT '',
-    extra_json  TEXT DEFAULT '',
-    created_at  TEXT DEFAULT (datetime('now'))
-)
-"""
-
 _NEW_TABLES.extend([
     ("obs_log", _OBS_LOG_DDL),
 ])
@@ -1941,33 +773,6 @@ def _strip_text_default(ddl: str) -> str:
     return _re.sub(r"\s+DEFAULT\s+.*$", "", d, flags=_re.IGNORECASE)
 
 
-
-_CUL_DDL = """
-CREATE TABLE IF NOT EXISTS grape_t_credential_usage_log (
-    id TEXT PRIMARY KEY,
-    credential_id TEXT NOT NULL,
-    credential_kind TEXT NOT NULL DEFAULT 'repo_credentials',
-    user_id VARCHAR(36) NOT NULL,
-    repo_key TEXT DEFAULT '',
-    initiating_actor_id VARCHAR(36) DEFAULT '',
-    executor_context TEXT DEFAULT '',
-    operation TEXT DEFAULT '',
-    created_at TEXT DEFAULT ''
-)
-"""
-
-_SC_DDL = """
-CREATE TABLE IF NOT EXISTS grape_t_system_credentials (
-    id VARCHAR(36) NOT NULL PRIMARY KEY,
-    scope_type VARCHAR(16) NOT NULL,
-    scope_id VARCHAR(64) NOT NULL,
-    cred_type VARCHAR(64) NOT NULL,
-    value TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE (scope_type, scope_id, cred_type)
-)
-"""
 
 class _NonOwnerObject(Exception):
     """目标表在当前库中是视图（非 owner 域库）——跳过该条迁移且**不盖章**。
@@ -4650,37 +3455,6 @@ register_migration(
 # - takeover_sessions：接管会话（审计 + 幂等 + 状态机）
 # - session_api_tokens.kind：worker | takeover（区分两类会话凭据）
 # - task_messages.actor：agent | <username>（progress 复用同一份任务日志）
-_TAKEOVER_SESSIONS_DDL = """
-CREATE TABLE IF NOT EXISTS takeover_sessions (
-    id                VARCHAR(64) PRIMARY KEY,
-    active_key        VARCHAR(64) DEFAULT NULL,
-    task_id           VARCHAR(64) NOT NULL,
-    event_seq         INTEGER NOT NULL DEFAULT 0,
-    repo_key          VARCHAR(255) NOT NULL DEFAULT '',
-    issue_id          VARCHAR(32) NOT NULL DEFAULT '',
-    agent_type        VARCHAR(32) NOT NULL DEFAULT '',
-    user_id           INTEGER NOT NULL DEFAULT 0,
-    username          VARCHAR(128) NOT NULL DEFAULT '',
-    runtime_id        INTEGER NOT NULL DEFAULT 0,
-    platform          VARCHAR(32) NOT NULL DEFAULT '',
-    host              VARCHAR(128) NOT NULL DEFAULT '',
-    client_version    VARCHAR(64) NOT NULL DEFAULT '',
-    status            VARCHAR(16) NOT NULL DEFAULT 'active',
-    token_sha256      VARCHAR(64) NOT NULL DEFAULT '',
-    token_expires_at  INTEGER NOT NULL DEFAULT 0,
-    token_issued_at   INTEGER NOT NULL DEFAULT 0,
-    handoff_seq       INTEGER NOT NULL DEFAULT 0,
-    next_agent        VARCHAR(32) NOT NULL DEFAULT '',
-    bundle_json       MEDIUMTEXT,
-    warnings_json     TEXT,
-    summary           MEDIUMTEXT,
-    evidence          MEDIUMTEXT,
-    created_at        TEXT DEFAULT (datetime('now')),
-    updated_at        TEXT DEFAULT (datetime('now')),
-    finished_at       TEXT DEFAULT ''
-)
-"""
-
 
 def _fn_takeover_client_session_v1() -> None:
     """接管会话记录"本地那个 dsh session 的 id"（面板可跳回；多端时知道是哪台机器）。"""
