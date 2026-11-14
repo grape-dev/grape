@@ -1,12 +1,6 @@
 # 下一批：跨域收口作业单
 
-总量 92 处 / 48 个文件；下表取前 3 个。
-
-## src/api/health_endpoints.py（api 域，4 处）
-- `agent_tasks`（归 runtime）× 3：行 91, 143, 146
-  - runtime public 已登记 213 条具名查询
-- `agent_runtimes`（归 runtime）× 1：行 149
-  - runtime public 已登记 213 条具名查询
+总量 88 处 / 47 个文件；下表取前 3 个。
 
 ## src/api/deps.py（api 域，4 处）
 - `external_identities`（归 mgmt）× 4：行 374, 451, 491, 608
@@ -15,6 +9,10 @@
 ## src/kernel/prompt_builder.py（kernel 域，3 处）
 - `unified_user_mapping`（归 mgmt）× 3：行 621, 627, 630
   - mgmt public 已登记 145 条具名查询
+
+## src/kernel/persistence/credential_usage_log.py（kernel 域，3 处）
+- `grape_t_credential_usage_log`（归 runtime）× 3：行 179, 185, 261
+  - runtime public 已登记 213 条具名查询
 
 ## 每批验收口径（不要跳）
 1) `python3 scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv --baseline docs/weekly-11/foreign-refs-allowlist.csv --check`

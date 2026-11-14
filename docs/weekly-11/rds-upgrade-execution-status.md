@@ -3089,6 +3089,69 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （下一批头名 `src/api/health_endpoints.py` 4 处 `agent_tasks`/`agent_runtimes`，
   同尺寸还有 `src/api/deps.py` 4 处 `external_identities`）。
 
+### 7.33 api 进程三层健康检查取数归位 runtime owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/api/health_endpoints.py` **4 处 → 0**（单轮做完，4 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `agent_tasks`（归 **runtime**）× 3：L91 `/healthz` 表探活 `SELECT COUNT(*) FROM agent_tasks`；
+    L143 `/health/realtime` 的 `SELECT status, COUNT(*) ... GROUP BY status`（队列分布）；
+    L146 `SELECT COUNT(*) ... WHERE status IN ('dispatched','running')`（在制数）。
+  - `agent_runtimes`（归 **runtime**）× 1：L149 `SELECT status, last_seen_at, credential_id
+    FROM agent_runtimes`（全量引擎行，在线/离线由 `derive_runtime_health` 派生）。
+  - 四条都是**全量统计、无 WHERE 值参数、无动态表名/列名、无跨域 JOIN**，静态正则 4 处全为真引用。
+- owner 侧改动：**零新增**，全部复用既有原语（`src/domains/runtime/public/__init__.py`）：
+  `health_task_rows_total()` / `health_task_status_counts()` / `health_task_inflight_count()` /
+  `health_runtime_rows()`，对应具名查询 `health_task_rows_total` / `health_task_status_counts` /
+  `health_task_inflight_count` / `health_runtime_rows`（`?` 方言，`_ANY_QUERIES` 已登记、`__all__` 已导出）。
+  调用点只改 `src/api/health_endpoints.py`。
+- 设计取舍：
+  1) **不重复登记语句**：这四条语句在 7.21 批次已为本文件的对偶实现 `src/api/server_common.py`
+     登记过（worker 进程走 `server_common.attach_health`；server 进程与单进程入口走本文件）。
+     同语句再登记一份会让 owner 出现两个真源（7.31/7.32 已裁定「已有原语优先」），本批只切调用点。
+  2) **两套安装器口径对齐**：`/health` `/healthz` `/readyz` `/health/realtime` 长期存在两份实现
+     （`server_common.attach_health` 与 `health_endpoints.install_health_endpoints`），worker 侧已在
+     7.21 归位、server 侧未归位 → 同一集群不同进程对「任务在制数/引擎在线数」给不同答案
+     （worker 有数、server 恒 db_error）。本批把 server 侧对齐到 worker 侧同一组原语。
+  3) **`/health/realtime` 的快照语义由「一把锁内连查三表」降为「三条独立语句」**：原实现在一个
+     `db_lock` 内顺序执行三条（单库拓扑下是一个快照）；改为三个原语后各自取连接，跨语句可能有
+     毫秒级漂移。诊断端点的三个计数本就用于人读趋势、不参与任何判定，取舍是与
+     `server_common` 现有实现保持一致、且拓扑无关；若将来要求严格同快照，需 owner 提供一次
+     `_any_cursor()` 内跑多查询的原语，不在本批扩。
+  4) **readiness 的 `SELECT 1` 保留在原处、不走 owner**：它探的是「本进程到自己库的连通性」
+     （判断 `db: ok/error`），不是表引用；只有「表是否存在」这一项才归位给 agent_tasks owner。
+     静态正则不把 `SELECT 1` 计为表引用，故此处不是豁免而是口径正确。
+  5) **`fetchone()` 形态差异不影响语义**：原实现在表存在但为空时 `fetchone()` 得到 `(0,)`；
+     `health_task_rows_total()` 返回 `int`（空表 0、无行 0），探活只看「有无异常」，等价。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1) **三库拓扑下 server 进程 readiness 恒 503**：api 进程库无 `agent_tasks`（视图 0）→ L91 必
+     1146 → `tables: "error: agent_tasks missing"` + `not_ready` + 503，K8s/LB 会持续把 server
+     摘流或反复重启。修后走 runtime DSN，探的是真表。
+  2) **`/health/realtime` 在 server 进程整块失效**：三条语句同在一个 `try` 内、首条即 1146，
+     `tasks` / `in_progress` / `runtimes` 三个字段一个都不填，只剩 `db_error` —— 运维在独立
+     拓扑下拿不到任何队列/引擎诊断（worker 侧同端点正常，现场表现是「同一个集群两个端点两份答案」）。
+  3) **同一集群两套健康口径**：`server_common` 侧已归位、本文件未归位，导致 server 与 worker
+     的「在线引擎数」判定链不同源（一边 runtime DSN、一边进程主库）。本批消除该分叉。
+- 验证：
+  - `py_compile` 1 个文件 **COMPILE_OK**（`src/api/health_endpoints.py`）。
+  - SQLite 烟测 `~/burndown/health_endpoints_smoke.py` **ALL 93 CHECKS PASSED**
+    （A 静态面 / B owner 注册面 / C 行为面 / D 边界与否定 / E 拓扑面）：
+    文件内「关键字+表名」命中 0、`health_realtime` 不再持 `db_lock`/`db.cursor()`、
+    readiness 的游标只发 `SELECT 1`、无 `%s`/`NOW()`/`ON DUPLICATE`、无静默 `except pass`；
+    四条原语与原 SQL 逐字等价（列序 `status,COUNT`；引擎行 `status,last_seen_at,credential_id`
+    且不外泄）；`status` 为 NULL 的行按 `'offline'` 兜底、`active` 视同 online、心跳超 100s 不计在线；
+    近 7 天 `[skill_mismatch]` 拒绝记录 → `skill_consistency` warn 且整体 `degraded`（http 仍 200）；
+    非 loopback 四个端点全 403、`x-real-ip=127.0.0.1` 放行；
+    3s 缓存命中期内删表仍返回缓存 200、过期后 503 且文案照旧、冷缓存新 app 立即 503；
+    只缺 `agent_runtimes` 时 `tasks`/`in_progress` **仍出数**、`runtimes` 不填（与原实现逐条执行同）；
+    空表全零且不算错误；自有 DSN 分支下 api 库两张表都不存在时 `/healthz` 仍 200、
+    realtime 三组数读 runtime 库、全程只连 runtime 域（原实现恒 503 / 恒 db_error）。
+  - `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK /
+    契约 37 条 / 看板最新）。
+  - `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **92 → 88**（-4），对数 **39 → 39**（`agent_tasks←api` 4→1、`agent_runtimes←api` 3→2，
+  两对都仍有别处的 api 侧引用，故对数不变）。基线 `foreign-refs-allowlist.csv` 收紧为 88 / 39，
+  依赖看板与作业单同步刷新（下一批头名 `src/api/deps.py` 4 处 `external_identities`）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

@@ -86,10 +86,11 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
             http_status = 503
         else:
             try:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("SELECT COUNT(*) FROM agent_tasks")
-                    c.fetchone()
+                # agent_tasks 归 runtime：表探活走 owner 域原语（任意拓扑）。
+                # 原实现在 api 进程主库直发 COUNT(*)，三库拓扑下 api 库无 agent_tasks
+                # （视图 0）→ 恒 1146，readiness 永远 503，被 K8s 反复重启。
+                from src.domains.runtime import public as _runtime_health
+                _runtime_health.health_task_rows_total()
             except Exception:
                 checks["tables"] = "error: agent_tasks missing"
                 status = "not_ready"
@@ -119,7 +120,6 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
         """运维诊断：IM bot 状态、任务队列深度、runtime 在线数。"""
         if not _is_loopback(request):
             return JSONResponse(status_code=403, content={"error": "forbidden"})
-        from src.kernel.session_manager import db, db_lock
         from src.domains.runtime.engine.health import derive_runtime_health
 
         now_ts = time.time()
@@ -138,23 +138,21 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
                 result["im"] = {"error": str(e)}
 
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT status, COUNT(*) FROM agent_tasks GROUP BY status")
-                result["tasks"] = {r[0]: r[1] for r in c.fetchall()}
-
-                c.execute("SELECT COUNT(*) FROM agent_tasks WHERE status IN ('dispatched','running')")
-                result["in_progress"] = c.fetchone()[0]
-
-                c.execute("SELECT status, last_seen_at, credential_id FROM agent_runtimes")
-                online = 0
-                total = 0
-                for r in c.fetchall():
-                    total += 1
-                    h = derive_runtime_health(r[0] or "offline", r[1], now_ts)
-                    if h == "online":
-                        online += 1
-                result["runtimes"] = {"total": total, "online": online}
+            # agent_tasks / agent_runtimes 归 runtime：三条语句走 owner 域具名原语。
+            # 原实现在 api 进程主库直发（一把 db_lock 内连查三表），三库拓扑下 api 库
+            # 无这两张表（视图 0）→ 整块 1146 落到 db_error，/health/realtime 恒报错。
+            # 口径同 api/server_common.py：全量统计不过滤 repo/org，在线判定归调用方。
+            from src.domains.runtime import public as _runtime_health
+            result["tasks"] = {r[0]: r[1] for r in _runtime_health.health_task_status_counts()}
+            result["in_progress"] = _runtime_health.health_task_inflight_count()
+            online = 0
+            total = 0
+            for r in _runtime_health.health_runtime_rows():
+                total += 1
+                h = derive_runtime_health(r[0] or "offline", r[1], now_ts)
+                if h == "online":
+                    online += 1
+            result["runtimes"] = {"total": total, "online": online}
         except Exception as e:
             result["db_error"] = str(e)
 
