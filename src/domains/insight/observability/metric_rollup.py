@@ -132,8 +132,6 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
     `usage_rows` 可传入预算好的 token 行（`catch_up` 会对整段窗口只查一次库）。
     返回 `{dim_key: {metric: (value, cnt)}}`；维度含各仓库 + `global`。
     """
-    from src.kernel.session_manager import db, db_lock
-
     per_repo: Dict[str, Dict[str, List[float]]] = {}
 
     def bucket(repo_key: str) -> Dict[str, List[float]]:
@@ -141,71 +139,53 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
 
     s_iso, e_iso = _iso(start), _iso(end)
 
-    with db_lock:
-        c = db.cursor()
-        # ① 新建任务（按 created_at）
-        c.execute("SELECT repo_key, status, COUNT(*) FROM agent_tasks"
-                  " WHERE created_at >= ? AND created_at < ?"
-                  " AND repo_key IS NOT NULL AND repo_key != ''"
-                  " GROUP BY repo_key, status", (s_iso, e_iso))
-        for repo_key, _status, n in c.fetchall():
-            bucket(repo_key).setdefault("task_enqueued", []).append(float(n))
+    # 任务/事件/凭据三张表归 runtime 域，只经其 public 原语取数（本模块不留跨域 SQL）。
+    # 原实现是「整段持 db_lock 直查进程库」：单库拓扑下能给同一桶一个一致快照，三库拓扑
+    # 下则是 1146 被吞成空桶。现在每条原语各自取连接 —— 桶是**已结束**的时间片，事后不再
+    # 重算，桶间/桶内轻微漂移不影响趋势口径，换掉一致快照是这次收口的已知取舍。
+    from src.domains.runtime import public as runtime_public
 
-        # ② 终态任务（按 completed_at）：done/failed/cancelled + 成功率
-        c.execute("SELECT repo_key, status, COUNT(*) FROM agent_tasks"
-                  " WHERE completed_at >= ? AND completed_at < ?"
-                  " AND repo_key IS NOT NULL AND repo_key != ''"
-                  " GROUP BY repo_key, status", (s_iso, e_iso))
-        for repo_key, status, n in c.fetchall():
-            st = (status or "").lower()
-            m = bucket(repo_key)
-            if st == "completed":
-                m.setdefault("task_done", []).append(float(n))
-            elif st == "failed":
-                m.setdefault("task_failed", []).append(float(n))
-            elif st == "cancelled":
-                m.setdefault("task_cancelled", []).append(float(n))
+    # ① 新建任务（按 created_at）
+    for repo_key, _status, n in runtime_public.task_status_counts_by_created_any(s_iso, e_iso):
+        bucket(repo_key).setdefault("task_enqueued", []).append(float(n))
 
-        # ②b Issue #516 M3：超时失败（timed out after 签名，worker 侧超时 kill 上报，
-        #     PR #722 起常量集中在 task_timeout.py）按仓库计数——与告警指标同口径，
-        #     供趋势/仪表盘消费
-        _to_sig = f"%{_TIMEOUT_FAIL_SIGNATURE}%"
-        c.execute("SELECT repo_key, COUNT(*) FROM agent_tasks"
-                  " WHERE completed_at >= ? AND completed_at < ?"
-                  "   AND status='failed'"
-                  "   AND (result_text LIKE ? OR errors LIKE ?)"
-                  "   AND repo_key IS NOT NULL AND repo_key != ''"
-                  " GROUP BY repo_key", (s_iso, e_iso, _to_sig, _to_sig))
-        for repo_key, n in c.fetchall():
-            bucket(repo_key).setdefault("task_timeout", []).append(float(n))
+    # ② 终态任务（按 completed_at）：done/failed/cancelled + 成功率
+    for repo_key, status, n in runtime_public.task_status_counts_by_completed_any(s_iso, e_iso):
+        st = (status or "").lower()
+        m = bucket(repo_key)
+        if st == "completed":
+            m.setdefault("task_done", []).append(float(n))
+        elif st == "failed":
+            m.setdefault("task_failed", []).append(float(n))
+        elif st == "cancelled":
+            m.setdefault("task_cancelled", []).append(float(n))
 
-        # ②c Issue #1938：事件回报丢失补偿次数（events.report_missing=1）按仓库计数。
-        #     与告警指标 cascade_compensation 同口径（窗口内补偿过的关联事件数）。
-        #     独立 try/except：老库未迁出该列时跳过，不影响既有桶。
-        try:
-            _ecols = [r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()]
-            if "report_missing" in _ecols:
-                c.execute("SELECT repo_key, COUNT(*) FROM events"
-                          " WHERE completed_at >= ? AND completed_at < ?"
-                          "   AND report_missing=1"
-                          "   AND repo_key IS NOT NULL AND repo_key != ''"
-                          " GROUP BY repo_key", (s_iso, e_iso))
-                for repo_key, n in c.fetchall():
-                    bucket(repo_key).setdefault("cascade_compensation", []).append(float(n))
-        except Exception as e:
-            log.warning(f"obs rollup: cascade compensation agg failed: {e}")
+    # ②b Issue #516 M3：超时失败（timed out after 签名，worker 侧超时 kill 上报，
+    #     PR #722 起常量集中在 task_timeout.py）按仓库计数——与告警指标同口径，
+    #     供趋势/仪表盘消费。LIKE 通配符由 owner 域拼装，这里只传签名。
+    for repo_key, n in runtime_public.task_timeout_counts_by_repo_any(
+            s_iso, e_iso, _TIMEOUT_FAIL_SIGNATURE):
+        bucket(repo_key).setdefault("task_timeout", []).append(float(n))
 
-        # ③ 排队等待与执行耗时（started_at 落在桶内的任务）
-        c.execute("SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks"
-                  " WHERE started_at >= ? AND started_at < ?"
-                  " AND repo_key IS NOT NULL AND repo_key != ''", (s_iso, e_iso))
-        for repo_key, created_at, started_at, completed_at in c.fetchall():
-            m = bucket(repo_key)
-            cdt, sdt, edt = _dt(created_at), _dt(started_at), _dt(completed_at)
-            if cdt and sdt and sdt >= cdt:
-                m.setdefault("_queue_wait", []).append((sdt - cdt).total_seconds())
-            if sdt and edt and edt >= sdt:
-                m.setdefault("_duration", []).append((edt - sdt).total_seconds())
+    # ②c Issue #1938：事件回报丢失补偿次数（events.report_missing=1）按仓库计数。
+    #     与告警指标 cascade_compensation 同口径（窗口内补偿过的关联事件数）。
+    #     独立 try/except：老库未迁出该列时 owner 域返回空（列探测在 owner 侧做），
+    #     查询本身故障也不影响既有桶。
+    try:
+        for repo_key, n in runtime_public.event_cascade_counts_by_repo_any(s_iso, e_iso):
+            bucket(repo_key).setdefault("cascade_compensation", []).append(float(n))
+    except Exception as e:
+        log.warning(f"obs rollup: cascade compensation agg failed: {e}")
+
+    # ③ 排队等待与执行耗时（started_at 落在桶内的任务）
+    for repo_key, created_at, started_at, completed_at in runtime_public.task_timing_rows_any(
+            s_iso, e_iso):
+        m = bucket(repo_key)
+        cdt, sdt, edt = _dt(created_at), _dt(started_at), _dt(completed_at)
+        if cdt and sdt and sdt >= cdt:
+            m.setdefault("_queue_wait", []).append((sdt - cdt).total_seconds())
+        if sdt and edt and edt >= sdt:
+            m.setdefault("_duration", []).append((edt - sdt).total_seconds())
 
     # ④ Token（格式混用：粗筛在 fetch_usage_rows 里，精确分桶在 Python）
     for repo_key, created_at, ti, to, tcr, tcw, tr in (usage_rows if usage_rows is not None
@@ -222,22 +202,19 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
         m.setdefault("token_cache", []).append(float(i_c))
         m.setdefault("token_total", []).append(float(i_in + i_out + i_c))
 
-    # ⑤ 引擎在线数（仅 global，桶末时刻快照）
+    # ⑤ 引擎在线数（仅 global，桶末时刻快照）—— 凭据表归 runtime，走其原语
     online = 0
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM runtime_credentials"
-                      " WHERE status != 'revoked' AND last_seen_at IS NOT NULL"
-                      " AND last_seen_at >= ?", (_iso(end - timedelta(minutes=5)),))
-            online = int((c.fetchone() or [0])[0] or 0)
+        online = runtime_public.online_credential_count_any(_iso(end - timedelta(minutes=5)))
     except Exception as e:
         log.warning(f"obs rollup: online count failed: {e}")
 
     # ⑥ 引擎可用率采样（Issue #437）：SLO 的 engine_availability 从这里读小时桶，
     #    不再每轮评估全窗扫描 obs_runtime_samples（仅 global 维，桶内 SUM(online)/COUNT(*)）
+    #    obs_runtime_samples 归本域（insight），直查进程库不变。
     avail: Optional[Tuple[float, int]] = None
     try:
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT SUM(online), COUNT(*) FROM obs_runtime_samples"

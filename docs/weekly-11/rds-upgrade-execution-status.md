@@ -1855,6 +1855,60 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 ---
 
+### 7.16 insight 指标聚合桶取数下沉 runtime（2026-11-15 本批）
+
+- 文件：`src/domains/insight/observability/metric_rollup.py`（insight 域），**6 处 → 0**（单轮做完，未分两轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，三张表全归 runtime）：
+  - `agent_tasks` × 4：原行 147（按 `created_at` 的 `(repo_key, status)` 计数）、155（按 `completed_at`
+    同款）、173（`status='failed'` 且 `result_text|errors` 命中超时签名的按仓库计数）、
+    199（按 `started_at` 取 `repo_key, created_at, started_at, completed_at` 四列）；
+  - `events` × 1：原行 188（`report_missing=1` 按仓库计数，Issue #1938 补救指标）；
+  - `runtime_credentials` × 1：原行 230（在线凭据数，桶末 5min 心跳窗）。
+  六处全部落在 `compute_bucket()` 一个函数里（分钟/小时桶共用），原实现整段持 `db_lock`
+  用进程主库游标直查。
+- owner 侧新增（`?` 占位符，列序/谓词与原 SQL 逐字一致）：
+  1) runtime `_ANY_QUERIES` 补 6 条：`rollup_task_counts_by_created`、`rollup_task_counts_by_completed`、
+     `rollup_task_timeout_counts`、`rollup_task_timing_rows`、`rollup_event_cascade_counts`、
+     `rollup_online_credentials`；
+  2) runtime 侧 6 个薄函数：`task_status_counts_by_created_any(s, e)`、`task_status_counts_by_completed_any(s, e)`、
+     `task_timeout_counts_by_repo_any(s, e, signature)`、`task_timing_rows_any(s, e)`、
+     `event_cascade_counts_by_repo_any(s, e)`、`online_credential_count_any(since)`。
+- 设计取舍：
+  1) **六条查询逐条照抄成具名 SQL，不合并不参数化**：调用方按行下标解包（`for repo_key, status, n in ...`），
+     列序错位就是静默串列；具名查询是静态文本，能和原语句逐字对拍（烟测 A1）。也没有复用
+     `query_events_any` 这类「传 where 片段」的接口 —— 那等于把 SQL 拼接面搬到 insight 侧。
+  2) **超时签名的 LIKE 通配由 owner 拼**：调用方只传 `_TIMEOUT_FAIL_SIGNATURE` 常量，不再自建
+     `f"%{sig}%"`；空签名直接返回空（原写法会退化成 `LIKE '%%'` 全命中，等于把所有 failed
+     都算成超时失败）。
+  3) **`events.report_missing` 的列探测搬进 owner，并且不用 PRAGMA**：`db_registry` 的薄兼容游标
+     只对进程主库翻译 PRAGMA（MySQL 上必 1064），三库拓扑下 insight 进程库又没有 `events`；
+     改成 `SELECT * ... LIMIT 0` 读 `description`，两条后端同一写法。探测在归属域连接上做，
+     老库（#1938 前）返回空列表、不抛异常。
+  4) **放弃「桶内一致快照」**：原实现整段持 `db_lock` 用一个游标取 ①②③，三库拓扑下做不到
+     （每域一条独立连接）。桶是**已结束**的时间片、事后不重算，桶内/桶间轻微漂移不影响
+     趋势口径；`write_bucket` / `series` / `fetch_usage_rows` 仍持 `db_lock` 直查本域表不变。
+  5) **⑤ 的 status 口径照抄黑名单而不是白名单**：只排除 `revoked`，`offline` 等其它状态照数，
+     `last_seen_at` 为 NULL 或早于窗口的不算 —— 与「设备记账在线数」的原语义一致。
+- 修的存量 bug（三库拓扑，功能面）：
+  1) **分钟/小时桶在拆分后基本全空（最严重）**：insight 进程库没有 `agent_tasks` / `events` /
+     `runtime_credentials`，①②③②c 全 1146，被上层 `except` 吞成空桶；`catch_up` 于是只写出
+     `global.runtimes_online=0` + 本域 `obs_runtime_samples` 的 `engine_avail_*`。也就是
+     任务量/成功率/排队耗时/token 趋势与 SLO 小时桶底座在独立部署下**没有数据**，看板回退直查。
+  2) **`cascade_compensation` 从来没落过数**：即便单库拓扑，`PRAGMA table_info(events)` 只在
+     SQLite 有效，MySQL 上探测永远失败（1064 被吞）→ Issue #1938 的补偿计数在指标留存里恒缺。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/metric_rollup_smoke.py`
+  **ALL 56 CHECKS PASSED**（含边界与否定用例：6 条具名查询与原 SQL 逐字对拍 + 占位符个数 +
+  无 `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`、未登记查询名 KeyError；半开窗口三条时间列各按
+  自己的列过滤、`repo_key` NULL/'' 一律排除；超时只数 failed 且 `result_text`|`errors` 任一命中、
+  不命中/空签名均空；`report_missing` 列缺失 → 空且不抛、桶仍算完；`compute_bucket` 逐指标对账
+  含 global 加权/p95 取最大/未归属 token 只进 global 不造空维度；自有 DSN 时六原语全走
+  `db_registry` 且进程库零改动；源码面 0 条三表 SQL、0 处 PRAGMA、不再自拼 LIKE）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 / 看板最新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **172 → 166**（-6），对数 **55 不变**：`agent_tasks←insight` 13 → 9、
+  `events←insight` 7 → 6、`runtime_credentials←insight` 8 → 7（该文件三对全部清零并有下降）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 166 / 55，依赖看板同步刷新。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

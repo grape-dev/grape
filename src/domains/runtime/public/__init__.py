@@ -1390,7 +1390,11 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "task_event_map", "runtime_device_map", "agent_sessions_with_runtime",
            "efficiency_issue_contrib", "task_issue_attribution",
            # IM 巡检执行卡（runtime/im/handler_async.py；任意拓扑）
-           "autopilot_execution_detail_any"]
+           "autopilot_execution_detail_any",
+           # 指标桶取数（insight/observability/metric_rollup；任意拓扑）
+           "task_status_counts_by_created_any", "task_status_counts_by_completed_any",
+           "task_timeout_counts_by_repo_any", "task_timing_rows_any",
+           "event_cascade_counts_by_repo_any", "online_credential_count_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2189,6 +2193,41 @@ _ANY_QUERIES: dict[str, str] = {
     "credential_health_rows": (
         "SELECT name, status, last_seen_at FROM runtime_credentials WHERE status != 'revoked'"),
     "credential_id_by_name": "SELECT id FROM runtime_credentials WHERE name=?",
+    # ── 分钟/小时指标桶取数（insight/observability/metric_rollup 跨域收口）──
+    # agent_tasks / events / runtime_credentials 三张表全归本域（table-owner.tsv）。
+    # 列序/谓词与原 insight SQL 逐字一致（调用方按行下标取值，错位即静默串列），
+    # 只把连接换成「任意拓扑」游标；`repo_key` 空值排除谓词照抄，不改口径。
+    "rollup_task_counts_by_created": (
+        "SELECT repo_key, status, COUNT(*) FROM agent_tasks"
+        " WHERE created_at >= ? AND created_at < ?"
+        " AND repo_key IS NOT NULL AND repo_key != ''"
+        " GROUP BY repo_key, status"),
+    "rollup_task_counts_by_completed": (
+        "SELECT repo_key, status, COUNT(*) FROM agent_tasks"
+        " WHERE completed_at >= ? AND completed_at < ?"
+        " AND repo_key IS NOT NULL AND repo_key != ''"
+        " GROUP BY repo_key, status"),
+    "rollup_task_timeout_counts": (
+        "SELECT repo_key, COUNT(*) FROM agent_tasks"
+        " WHERE completed_at >= ? AND completed_at < ?"
+        "   AND status='failed'"
+        "   AND (result_text LIKE ? OR errors LIKE ?)"
+        "   AND repo_key IS NOT NULL AND repo_key != ''"
+        " GROUP BY repo_key"),
+    "rollup_task_timing_rows": (
+        "SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks"
+        " WHERE started_at >= ? AND started_at < ?"
+        " AND repo_key IS NOT NULL AND repo_key != ''"),
+    "rollup_event_cascade_counts": (
+        "SELECT repo_key, COUNT(*) FROM events"
+        " WHERE completed_at >= ? AND completed_at < ?"
+        "   AND report_missing=1"
+        "   AND repo_key IS NOT NULL AND repo_key != ''"
+        " GROUP BY repo_key"),
+    "rollup_online_credentials": (
+        "SELECT COUNT(*) FROM runtime_credentials"
+        " WHERE status != 'revoked' AND last_seen_at IS NOT NULL"
+        " AND last_seen_at >= ?"),
 }
 
 
@@ -4264,3 +4303,76 @@ def renew_distributed_lock(lock_key: str, holder: str, ttl: int, now: int) -> bo
 def cleanup_expired_distributed_locks(now: int, holder: str) -> int:
     """清理过期且非本实例持有的锁，返回删除行数（防表膨胀兜底）。"""
     return exec_any("lock_cleanup", (now, holder))
+
+
+# ── 指标桶取数（insight/observability/metric_rollup 跨域收口）─────────────────────
+# 归属：`docs/weekly-11/table-owner.tsv` → grape_runtime_db.{agent_tasks,events,
+# runtime_credentials}。原实现在 insight 侧持进程主库游标直查这三张表：单库拓扑能跑，
+# 三库拓扑下 insight 进程库没有这些表（视图已退役 → 1146），被上层 `except` 吞成
+# 「空桶 / 在线数恒 0」——聚合看板静默缺数据。取数上移本域后，SQL 只留这一份。
+#
+# 语义保持：列序、谓词、分组与原 SQL 逐字一致；参数一律由调用方传时间串/签名，
+# 不接受任何 SQL 片段。时间窗半开（>= start, < end）照抄，不改口径。
+
+
+def task_status_counts_by_created_any(start_iso: str, end_iso: str) -> list[tuple]:
+    """桶内新建任务按 (repo_key, status) 计数：`[(repo_key, status, n), ...]`。"""
+    return read_all_any("rollup_task_counts_by_created", (start_iso, end_iso))
+
+
+def task_status_counts_by_completed_any(start_iso: str, end_iso: str) -> list[tuple]:
+    """桶内终态任务按 (repo_key, status) 计数：`[(repo_key, status, n), ...]`。"""
+    return read_all_any("rollup_task_counts_by_completed", (start_iso, end_iso))
+
+
+def task_timeout_counts_by_repo_any(start_iso: str, end_iso: str, signature: str) -> list[tuple]:
+    """桶内超时失败任务按仓库计数：`[(repo_key, n), ...]`。
+
+    `signature` 是超时失败的特征串（如 `timed out after`），LIKE 通配符由本域拼装
+    （`%sig%`，两侧都要求包含），调用方不构造 SQL 片段。空签名 → 空结果（`LIKE '%%'`
+    会匹配全表，等于是把「超时失败」错算成「全部失败」，宁可不出数）。
+    """
+    sig = (signature or "").strip()
+    if not sig:
+        return []
+    like = f"%{sig}%"
+    return read_all_any("rollup_task_timeout_counts", (start_iso, end_iso, like, like))
+
+
+def task_timing_rows_any(start_iso: str, end_iso: str) -> list[tuple]:
+    """桶内已启动任务的原始时间列：`[(repo_key, created_at, started_at, completed_at), ...]`。
+
+    排队等待/耗时的差值计算与「时间戳可解析性」判定留在调用方（那是分析口径，
+    不是域数据口径）；本域只负责按 started_at 半开窗口取行。
+    """
+    return read_all_any("rollup_task_timing_rows", (start_iso, end_iso))
+
+
+def _table_has_column(c, table: str, column: str) -> bool:
+    """后端无关的列存在探测：`SELECT * ... LIMIT 0` 读 description。
+
+    不能用 PRAGMA：`db_registry` 的薄兼容游标只对进程主库翻译 PRAGMA（MySQL 上直接
+    1064），三库拓扑的产物探测必须两条后端同一写法。`table` 只接受本模块常量。
+    """
+    cur = c.execute(f"SELECT * FROM {table} LIMIT 0")
+    return column in [str(d[0]) for d in (cur.description or [])]
+
+
+def event_cascade_counts_by_repo_any(start_iso: str, end_iso: str) -> list[tuple]:
+    """桶内事件回报丢失补偿数按仓库计数：`[(repo_key, n), ...]`。
+
+    老库可能还没迁出 `events.report_missing` 列（Issue #1938 前）：列不存在时返回空
+    列表（与原实现「探测不到列就跳过」同口径），探测在**本域连接**上做，不在调用方。
+    """
+    with _any_cursor() as c:
+        if not _table_has_column(c, "events", "report_missing"):
+            log.debug("events.report_missing absent; cascade compensation metric skipped")
+            return []
+        c.execute(_any_sql("rollup_event_cascade_counts"), (start_iso, end_iso))
+        return list(c.fetchall() or [])
+
+
+def online_credential_count_any(since_iso: str) -> int:
+    """在线凭据数：未吊销、有最后心跳且不早于 `since_iso` 的凭据行数。"""
+    row = read_one_any("rollup_online_credentials", (since_iso,))
+    return int((row or [0])[0] or 0)

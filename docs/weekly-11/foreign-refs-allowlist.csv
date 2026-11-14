@@ -3,7 +3,7 @@ agent_runtimes,runtime,api,4
 agent_runtimes,runtime,insight,5
 agent_shared_knowledge,mgmt,runtime,5
 agent_tasks,runtime,api,7
-agent_tasks,runtime,insight,13
+agent_tasks,runtime,insight,9
 agent_tasks,runtime,mgmt,2
 agent_type,runtime,insight,1
 api_latency_log,insight,api,2
@@ -18,7 +18,7 @@ distributed_locks,runtime,insight,1
 event_action_filter,mgmt,api,3
 event_skipped,runtime,api,1
 events,runtime,api,7
-events,runtime,insight,7
+events,runtime,insight,6
 external_identities,mgmt,api,4
 external_identities,mgmt,runtime,2
 grape_accounts,mgmt,insight,1
@@ -41,7 +41,7 @@ managed_repos,mgmt,api,2
 managed_repos,mgmt,runtime,5
 meta,runtime,mgmt,4
 runtime_credentials,runtime,api,6
-runtime_credentials,runtime,insight,8
+runtime_credentials,runtime,insight,7
 runtime_health_scores,runtime,insight,1
 scene_knowledge_ref,mgmt,runtime,1
 scene_market,mgmt,api,1
