@@ -9,6 +9,8 @@
 | 关联文档 | `docs/weekly-09/domain-db-split.md`、`docs/weekly-11/migration-parity-assessment.md`、`docs/weekly-11/domain-view-and-ignore-pitfalls.md`、**`docs/weekly-11/cross-domain-access-channel-analysis.md`（通道优化分析 v1.1，含 lib 读/写通道）**、`cross-domain-write-channel.csv`（30 张跨域写表通道分配） |
 | 附表 | `docs/weekly-11/independent-rds-foreign-table-matrix.csv`（70 张外域表全量矩阵） |
 
+> **执行状态（2026-11-14）**：见 `docs/weekly-11/rds-upgrade-execution-status.md`——P0 守卫/看板、P2 内部接口已完成并有测试门禁；P1 归属重定、P3 写分流、P4 实例搬迁的剩余项与阻塞原因逐条记录（含实测数字）。
+
 > 文中主机、账号、口令一律用 `<mgmt-rds>` / `<runtime-rds>` / `<insight-rds>` / `<user>` / `<password>` 占位，实际值走配置中心，不落文档。
 
 ---

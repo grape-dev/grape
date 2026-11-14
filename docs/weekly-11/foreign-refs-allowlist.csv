@@ -4,7 +4,7 @@ agent_runtimes,runtime,api,38
 agent_runtimes,runtime,insight,10
 agent_runtimes,runtime,kernel,3
 agent_runtimes,runtime,mgmt,31
-agent_shared_knowledge,mgmt,api,53
+agent_shared_knowledge,mgmt,api,37
 agent_shared_knowledge,mgmt,kernel,3
 agent_shared_knowledge,mgmt,runtime,8
 agent_tasks,runtime,api,30
@@ -23,12 +23,11 @@ autopilot_tasks,mgmt,runtime,12
 chat_agent_session,runtime,api,13
 chat_agent_session,runtime,kernel,19
 chat_agent_session,runtime,mgmt,1
-chat_conversations,runtime,api,9
+chat_conversations,runtime,api,8
 chat_conversations,runtime,kernel,14
 chat_conversations,runtime,mgmt,2
-chat_messages,runtime,api,1
 chat_messages,runtime,kernel,10
-devops_agent_session,runtime,api,26
+devops_agent_session,runtime,api,25
 devops_agent_session,runtime,insight,1
 devops_agent_session,runtime,kernel,1
 devops_agent_session,runtime,mgmt,12
@@ -77,14 +76,13 @@ issue,runtime,kernel,2
 issue,runtime,mgmt,2
 issue_agent_session,runtime,api,6
 issue_state,runtime,api,18
-knowledge_write_queue,mgmt,api,8
 login_whitelist,mgmt,api,5
 login_whitelist,mgmt,kernel,4
-managed_repos,mgmt,api,17
+managed_repos,mgmt,api,16
 managed_repos,mgmt,insight,1
 managed_repos,mgmt,kernel,10
 managed_repos,mgmt,runtime,13
-meta,runtime,api,27
+meta,runtime,api,24
 meta,runtime,kernel,8
 meta,runtime,mgmt,24
 obs_llm_usage,insight,mgmt,1
@@ -104,7 +102,7 @@ runtime_health_scores,runtime,insight,1
 scene_category,runtime,api,3
 scene_category,runtime,mgmt,2
 scene_engine_detach_log,runtime,mgmt,1
-scene_knowledge_ref,mgmt,api,14
+scene_knowledge_ref,mgmt,api,11
 scene_knowledge_ref,mgmt,kernel,3
 scene_knowledge_ref,mgmt,runtime,2
 scene_market,mgmt,api,24
@@ -112,7 +110,7 @@ scene_market,mgmt,runtime,8
 scene_skill_ref,mgmt,api,4
 scene_skill_ref,mgmt,runtime,2
 session_api_tokens,mgmt,kernel,10
-skill,runtime,api,27
+skill,runtime,api,26
 skill,runtime,kernel,5
 skill,runtime,mgmt,59
 skill_category,mgmt,api,2
@@ -134,6 +132,6 @@ user_repos,mgmt,api,4
 user_repos,mgmt,insight,2
 user_repos,mgmt,kernel,5
 user_repos,mgmt,runtime,3
-vod_conversations,runtime,api,5
+vod_conversations,runtime,api,4
 vod_conversations,runtime,kernel,1
 vod_conversations,runtime,mgmt,4
