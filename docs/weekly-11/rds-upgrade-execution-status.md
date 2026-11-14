@@ -158,7 +158,17 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
-### 归位批次（本轮，-25）
+### 迁移 SQL 按域拆分（本轮，-313）
+- `src/api/db_setup.py` 的迁移 SQL 按归属域搬到 `src/domains/{mgmt,runtime,insight}/migrations_ddl.py`
+  （工具 `scripts/split_migration_sql.py`：AST 定位字面量 + 精确文本替换，只搬「命中表全属同域」的；
+  `migrations = [...]` 里连续同域段落折叠成 tuple 常量并原位 `*alias.CONST` 展开，**执行顺序不变**）。
+- 静态跨域引用 **1207 → 894**（-313，db_setup 自身 346 → 33），棘轮基线收紧到 894 / 122 对。
+- 等价性实测：空 sqlite 重建 98 张表、逐表列名与拆分前快照完全一致（0 缺失/0 多余/0 列差）；
+  pytest（arch/contracts/scripts）158 passed；三实例彩排循环 LOOP_EXIT=0、运行面 0 失败。
+- 未搬走：22 处（多域真跨域 1 处 `_backfill_skill_category_id`（skill×skill_category）+ 运行期拼名语句），
+  留在 db_setup 待接口化，属下一批工作。
+
+### 归位批次（-25）
 - `src/api/pipeline_config.py` → `src/domains/mgmt/pipeline_config.py`（+ `src/api/` 同名 sys.modules 别名）：
   流水线配置读写的是 devops_pipeline_scene / scene_market（管理域表），放 api 层属错位。
 - 静态跨域引用 **1232 → 1207**（-25），棘轮基线同步收紧到 1207；`tests/arch` 全绿。

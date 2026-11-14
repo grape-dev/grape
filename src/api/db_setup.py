@@ -90,6 +90,9 @@ from src.domains.runtime.schema_ddl import (
     _TAKEOVER_SESSIONS_DDL,
 )
 
+from src.domains.mgmt import migrations_ddl as mgmt_mig
+from src.domains.runtime import migrations_ddl as runtime_mig
+from src.domains.insight import migrations_ddl as insight_mig
 from src.kernel.session_manager import db, db_lock
 from src.kernel.config import log
 
@@ -474,21 +477,21 @@ def _migrate_create_personal_orgs():
     try:
         with db_lock:
             c = db.cursor()
-            users = c.execute("SELECT id, username FROM user_accounts").fetchall()
+            users = c.execute(mgmt_mig.SELECT_USER_ACCOUNTS__MIGRATE_CREATE_PERSONAL_ORGS).fetchall()
             for uid, username in users:
                 existing = c.execute(
-                    "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                    mgmt_mig.SELECT_ORGANIZATION, (uid,)
                 ).fetchone()
                 if existing:
                     continue
                 slug = f"personal-{uid}"
                 c.execute(
-                    "INSERT INTO organization (name, slug, owner_id, is_personal) VALUES (?, ?, ?, 1)",
+                    mgmt_mig.INSERT_ORGANIZATION,
                     ("默认工作空间", slug, uid)
                 )
                 org_id = c.lastrowid
                 c.execute(
-                    "INSERT OR IGNORE INTO org_member (org_id, user_id, role) VALUES (?, ?, 'owner')",
+                    mgmt_mig.INSERT_IGNORE_ORG_MEMBER,
                     (org_id, uid)
                 )
             db.commit()
@@ -505,43 +508,43 @@ def _migrate_data_to_personal_orgs():
 
             # 1. managed_repos：按 user_repos.is_admin 找管理员迁入
             repos = c.execute(
-                "SELECT repo_key FROM managed_repos WHERE org_id='' OR org_id IS NULL"
+                mgmt_mig.SELECT_MANAGED_REPOS
             ).fetchall()
             for (repo_key,) in repos:
                 admin = c.execute(
-                    "SELECT user_id FROM user_repos WHERE repo_key=? AND is_admin=1 LIMIT 1",
+                    mgmt_mig.SELECT_USER_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG,
                     (repo_key,)
                 ).fetchone()
                 if admin:
                     uid = admin[0]
                     org = c.execute(
-                        "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                        mgmt_mig.SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG_2, (uid,)
                     ).fetchone()
                     if org:
-                        c.execute("UPDATE managed_repos SET org_id=? WHERE repo_key=?", (org[0], repo_key))
+                        c.execute(mgmt_mig.UPDATE_MANAGED_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG, (org[0], repo_key))
 
             # 2. runtime_credentials：scope=user 的按 owner_name 迁入
             creds = c.execute(
-                "SELECT id, owner_name, scope FROM runtime_credentials WHERE org_id='' OR org_id IS NULL"
+                runtime_mig.SELECT_RUNTIME_CREDENTIALS
             ).fetchall()
             for cid, owner_name, scope in creds:
                 if not owner_name or scope == "global":
                     continue
                 user = c.execute(
-                    "SELECT id FROM user_accounts WHERE username=?", (owner_name,)
+                    mgmt_mig.SELECT_USER_ACCOUNTS__MIGRATE_DATA_TO_PERSONAL_ORG, (owner_name,)
                 ).fetchone()
                 if user:
                     uid = user[0]
                     org = c.execute(
-                        "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                        mgmt_mig.SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG_3, (uid,)
                     ).fetchone()
                     if org:
-                        c.execute("UPDATE runtime_credentials SET org_id=? WHERE id=?", (org[0], cid))
-                        c.execute("UPDATE agent_runtimes SET org_id=? WHERE credential_id=?", (org[0], cid))
+                        c.execute(runtime_mig.UPDATE_RUNTIME_CREDENTIALS, (org[0], cid))
+                        c.execute(runtime_mig.UPDATE_AGENT_RUNTIMES__MIGRATE_DATA_TO_PERSONAL_ORG, (org[0], cid))
 
             # 3. skill：scope=user 的按 owner_id 迁入
             skills = c.execute(
-                "SELECT id, owner_id, scope FROM skill WHERE scope='user' AND (org_id='' OR org_id IS NULL)"
+                runtime_mig.SELECT_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG
             ).fetchall()
             for sid, owner_id, _ in skills:
                 try:
@@ -549,21 +552,21 @@ def _migrate_data_to_personal_orgs():
                 except (ValueError, TypeError):
                     continue
                 org = c.execute(
-                    "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                    mgmt_mig.SELECT_ORGANIZATION__MIGRATE_DATA_TO_PERSONAL_ORG, (uid,)
                 ).fetchone()
                 if org:
-                    c.execute("UPDATE skill SET org_id=? WHERE id=?", (org[0], sid))
+                    c.execute(runtime_mig.UPDATE_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG, (org[0], sid))
 
             # 4. skill：scope=repo 的跟随 repo_key 迁移
             repo_skills = c.execute(
-                "SELECT id, owner_id FROM skill WHERE scope='repo' AND (org_id='' OR org_id IS NULL)"
+                runtime_mig.SELECT_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG_2
             ).fetchall()
             for sid, owner_id in repo_skills:
                 repo_org = c.execute(
-                    "SELECT org_id FROM managed_repos WHERE repo_key=?", (owner_id,)
+                    mgmt_mig.SELECT_MANAGED_REPOS__MIGRATE_DATA_TO_PERSONAL_ORG, (owner_id,)
                 ).fetchone()
                 if repo_org and repo_org[0]:
-                    c.execute("UPDATE skill SET org_id=? WHERE id=?", (repo_org[0], sid))
+                    c.execute(runtime_mig.UPDATE_SKILL__MIGRATE_DATA_TO_PERSONAL_ORG_2, (repo_org[0], sid))
 
             # 5. 跟随 repo_key 的表：devops_pipeline_scene / agent_shared_knowledge /
             #    events / agent_tasks / devops_agent_session / issue
@@ -669,7 +672,7 @@ def _create_tables():
             with db_lock:
                 c = db.cursor()
                 _ok = _destructive_ddl(
-                    c, "ALTER TABLE grape_accounts MODIFY COLUMN email VARCHAR(255) DEFAULT NULL",
+                    c, mgmt_mig.ALTER_GRAPE_ACCOUNTS,
                     kind_hint="cleanup")
                 db.commit()
                 if _ok:
@@ -987,15 +990,14 @@ def _copy_backend_to_runtime(c):
     rows = c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, updated_at FROM backend_agents").fetchall()
     for r in rows:
         rid, name, display, installed, cli, ver, healthy, pip, scope, owner, updated = r
-        existing = c.execute("SELECT id FROM agent_runtimes WHERE lower(name)=? AND scope=? AND owner_id=? LIMIT 1",
+        existing = c.execute(runtime_mig.SELECT_AGENT_RUNTIMES,
                              (name.lower() if name else name, scope or "global", owner or "")).fetchone()
         if existing:
             # 已存在(如 ensure 预置空行):补全缺失字段,保留其 id
-            c.execute("""UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, pip_package=?, updated_at=?
-                         WHERE id=? AND (display_name='' OR installed=0 OR cli_path='' OR version='' OR healthy=0 OR pip_package='')""",
+            c.execute(runtime_mig.UPDATE_AGENT_RUNTIMES,
                       (display or name, 1 if installed else 0, cli or "", ver or "", 1 if healthy else 0, pip or "", updated or "", existing[0]))
         else:
-            c.execute("INSERT OR IGNORE INTO agent_runtimes (id, name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            c.execute(runtime_mig.INSERT_IGNORE_AGENT_RUNTIMES,
                       (rid, name, display or name, 1 if installed else 0, cli or "", ver or "", 1 if healthy else 0, pip or "", scope or "global", owner or "", updated or ""))
 
 
@@ -1072,12 +1074,11 @@ def _create_indexes():
         with db_lock:
             c = db.cursor()
             _dup_groups = c.execute(
-                "SELECT repo_key, issue_number FROM issue WHERE issue_number>0 "
-                "GROUP BY repo_key, issue_number HAVING COUNT(*)>1").fetchall()
+                runtime_mig.SELECT_ISSUE).fetchall()
             _del = 0
             for _rk, _num in _dup_groups:
                 _rows = c.execute(
-                    "SELECT id, status, updated_at FROM issue WHERE repo_key=? AND issue_number=? ORDER BY id",
+                    runtime_mig.SELECT_ISSUE__CREATE_INDEXES,
                     (_rk, _num)).fetchall()
                 if len(_rows) < 2:
                     continue
@@ -1087,7 +1088,7 @@ def _create_indexes():
                 _keep = max(_rows, key=lambda r: (_pri(r[1]), r[2] or "", r[0]))
                 for _r in _rows:
                     if _r[0] != _keep[0]:
-                        c.execute("DELETE FROM issue WHERE id=?", (_r[0],))
+                        c.execute(runtime_mig.DELETE_ISSUE, (_r[0],))
                         _del += 1
             if _del:
                 db.commit()
@@ -1159,7 +1160,7 @@ def _seed_from_json():
     """首次运行时从 JSON 种子文件导入数据"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT value FROM meta WHERE key='seeded_keys'")
+        c.execute(runtime_mig.SELECT_META)
         row = c.fetchone()
         seeded_keys = set(row[0].split(",")) if row and row[0] else set()
 
@@ -1189,7 +1190,7 @@ def _seed_from_json():
         with db_lock:
             c = db.cursor()
             seeded_keys.add(seed_key)
-            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded_keys', ?)",
+            c.execute(runtime_mig.UPSERT_META__SEED_FROM_JSON,
                       (",".join(sorted(seeded_keys)),))
             db.commit()
         log.info(f"Seeded {db_table} from {json_file}")
@@ -1236,9 +1237,7 @@ def _seed_event_action_filter():
         for evt, act, allow, actor, req_changes, block_changes, side_effect in default_rules:
             try:
                 c.execute(
-                    "INSERT OR IGNORE INTO event_action_filter "
-                    "(event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, priority, enabled, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,0,1,datetime('now'),datetime('now'))",
+                    mgmt_mig.INSERT_IGNORE_EVENT_ACTION_FILTER,
                     (evt, act, allow, actor, req_changes, block_changes, side_effect))
             except Exception as e:
                 log.warning(f"event_action_filter seed failed ({evt}:{act}): {e}")
@@ -1277,9 +1276,7 @@ def _fn_seed_agent_types_from_config() -> None:
         for agent_type, info in data.items():
             info = info or {}
             c.execute(
-                "INSERT OR IGNORE INTO agent_type "
-                "(agent_type, display_name, description, default_runtime_id, icon, order_num, "
-                " subscribe_events, enable) VALUES (?,?,?,0,?,?,?,?)",
+                runtime_mig.INSERT_IGNORE_AGENT_TYPE,
                 (
                     agent_type,
                     info.get("name", agent_type),
@@ -1295,13 +1292,13 @@ def _fn_seed_agent_types_from_config() -> None:
         # Spec 要求：补种成功后同步 meta.seeded_keys（与 _seed_from_json 的老轨记账一致），
         # 供后续诊断/去重对账；已存在该 key 时不改写（首轨种子已记）。
         if inserted > 0:
-            c.execute("SELECT value FROM meta WHERE key='seeded_keys'")
+            c.execute(runtime_mig.SELECT_META__FN_SEED_AGENT_TYPES_FROM_CON)
             row = c.fetchone()
             seeded = set(row[0].split(",")) if row and row[0] else set()
             if "agent_type" not in seeded:
                 seeded.add("agent_type")
                 c.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded_keys', ?)",
+                    runtime_mig.UPSERT_META__FN_SEED_AGENT_TYPES_FROM_CON,
                     (",".join(sorted(seeded)),),
                 )
                 db.commit()
@@ -1322,7 +1319,7 @@ def _fn_seed_event_action_filter_once() -> None:
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT COUNT(*) FROM event_action_filter")
+            c.execute(mgmt_mig.SELECT_EVENT_ACTION_FILTER__FN_SEED_EVENT_ACTION_FILTER)
             existing = c.fetchone()[0]
         except Exception as e:
             log.warning(f"seed-event-action-filter: count query failed, skip: {e}")
@@ -1333,7 +1330,7 @@ def _fn_seed_event_action_filter_once() -> None:
     _seed_event_action_filter()
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT COUNT(*) FROM event_action_filter")
+        c.execute(mgmt_mig.SELECT_EVENT_ACTION_FILTER)
         after = c.fetchone()[0]
     log.info(f"seed-event-action-filter: seeded {after} default rule(s)")
 
@@ -1346,13 +1343,13 @@ def _insert_seed_data(table: str, data: dict):
             # event-routing.json: {"routing": {...}, "repo_routing": {...}}
             for event_type, skill in data.get("routing", {}).items():
                 c.execute(
-                    "INSERT OR IGNORE INTO event_route_config (repo_key, event_type, skill) VALUES (?,?,?)",
+                    mgmt_mig.INSERT_IGNORE_EVENT_ROUTE_CONFIG,
                     ("", event_type, skill)
                 )
             for repo_key, routes in data.get("repo_routing", {}).items():
                 for event_type, skill in routes.items():
                     c.execute(
-                        "INSERT OR IGNORE INTO event_route_config (repo_key, event_type, skill) VALUES (?,?,?)",
+                        mgmt_mig.INSERT_IGNORE_EVENT_ROUTE_CONFIG__INSERT_SEED_DATA,
                         (repo_key, event_type, skill)
                     )
 
@@ -1368,7 +1365,7 @@ def _insert_seed_data(table: str, data: dict):
                 subscribe_events = json.dumps(info.get("subscribe_events", []), ensure_ascii=False)
                 enable = 1 if info.get("enable", True) else 0
                 c.execute(
-                    "INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, default_runtime_id, icon, order_num, subscribe_events, enable) VALUES (?,?,?,0,?,?,?,?)",
+                    runtime_mig.UPSERT_AGENT_TYPE,
                     (agent_type, display_name, description, icon, order_num, subscribe_events, enable)
                 )
 
@@ -1387,7 +1384,7 @@ def _migrate_whitelist_from_file():
             return
         with db_lock:
             c = db.cursor()
-            count = c.execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
+            count = c.execute(mgmt_mig.SELECT_LOGIN_WHITELIST).fetchone()[0]
             if count > 0:
                 return  # 表已有数据，不重复导入
         with open(LOGIN_WHITELIST_PATH, encoding="utf-8") as f:
@@ -1403,7 +1400,7 @@ def _migrate_whitelist_from_file():
                     # login-whitelist.json 是 gitcode 时代产物）。未盖章老库兜底
                     # 路径上列可能尚未由注册式迁移补齐，INSERT 失败静默跳过
                     # （登录侧文件降级读仍覆盖，见 config.is_user_allowed）。
-                    c.execute("INSERT OR IGNORE INTO login_whitelist (provider, username, remark) VALUES (?, ?, ?)",
+                    c.execute(mgmt_mig.INSERT_IGNORE_LOGIN_WHITELIST,
                               ("gitcode", username, "from file"))
                     imported += c.rowcount
                 except Exception:
@@ -1446,8 +1443,7 @@ def _fn_login_whitelist_row_columns() -> None:
                 "AND COLUMN_NAME='username_lower'")
             if c.fetchone()[0] == 0:
                 c.execute(
-                    "ALTER TABLE login_whitelist ADD COLUMN username_lower VARCHAR(128) "
-                    "AS (LOWER(NULLIF(username, ''))) STORED")
+                    mgmt_mig.ALTER_LOGIN_WHITELIST)
             c.execute(
                 "SELECT COUNT(*) FROM information_schema.statistics "
                 "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='login_whitelist' "
@@ -1455,8 +1451,7 @@ def _fn_login_whitelist_row_columns() -> None:
             if c.fetchone()[0] == 0:
                 # 老行 provider=NULL：MySQL 唯一索引 NULL 不参与约束，存量行零影响
                 c.execute(
-                    "ALTER TABLE login_whitelist ADD UNIQUE INDEX uq_login_whitelist_row "
-                    "(provider, username_lower)")
+                    mgmt_mig.ALTER_LOGIN_WHITELIST__FN_LOGIN_WHITELIST_ROW_COLUM)
         else:
             # SQLite：部分表达式索引——仅约束新模式行（provider 非空且 username 非空串）
             c.execute(
@@ -1488,7 +1483,7 @@ def _init_scene_category_data():
             c = db.cursor()
             for name, slug, icon, order_num in categories:
                 c.execute(
-                    "INSERT OR IGNORE INTO scene_category (name, slug, icon, order_num, is_active) VALUES (?,?,?,?,1)",
+                    runtime_mig.INSERT_IGNORE_SCENE_CATEGORY,
                     (name, slug, icon, order_num),
                 )
             db.commit()
@@ -1529,7 +1524,7 @@ def _init_skill_category_data():
             c = db.cursor()
             for name, slug, icon, order_num in categories:
                 c.execute(
-                    "INSERT OR IGNORE INTO skill_category (name, slug, icon, order_num, is_active) VALUES (?,?,?,?,1)",
+                    mgmt_mig.INSERT_IGNORE_SKILL_CATEGORY,
                     (name, slug, icon, order_num),
                 )
             db.commit()
@@ -1573,21 +1568,21 @@ def _init_scene_market_data():
         with db_lock:
             c = db.cursor()
             # 检查已有数据
-            count = c.execute("SELECT COUNT(*) FROM scene_market WHERE source='official'").fetchone()[0]
+            count = c.execute(mgmt_mig.SELECT_SCENE_MARKET__INIT_SCENE_MARKET_DATA_2).fetchone()[0]
             if count > 0:
                 set_meta_value("scene_market_seeded", "1")
                 return
             # 从 scene_market(source='official') 复制 nodes_json（官方场景模板已种入 market；旧流程兼容 devops_pipeline_scene official）
             scene_map = {}
             try:
-                c.execute("SELECT DISTINCT name, display_name, description, nodes_json, onboarding FROM scene_market WHERE source='official' AND is_active=1")
+                c.execute(mgmt_mig.SELECT_SCENE_MARKET__INIT_SCENE_MARKET_DATA)
                 for r in c.fetchall():
                     scene_map[r[0]] = r
             except Exception:
                 pass
             if not scene_map:
                 try:
-                    c.execute("SELECT scene_id, name, description, nodes_json, onboarding FROM devops_pipeline_scene WHERE scope='official'")
+                    c.execute(mgmt_mig.SELECT_DEVOPS_PIPELINE_SCENE__INIT_SCENE_MARKET_DATA)
                     for r in c.fetchall():
                         scene_map[r[0]] = r
                 except Exception:
@@ -1612,10 +1607,7 @@ def _init_scene_market_data():
                     nodes_json = row[3] or "[]"
                     onboarding = row[4] or "repo-onboarding"
                 c.execute(
-                    "INSERT OR IGNORE INTO scene_market "
-                    "(name, display_name, version, description, market_description, icon, category_id, "
-                    "is_featured, like_count, source, source_user_id, recommended_template, nodes_json, onboarding, is_active) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+                    mgmt_mig.INSERT_IGNORE_SCENE_MARKET,
                     (name, display_name, "1.0.0", mkt_desc, mkt_desc, "", cat_id,
                      featured, 0, "official", 0, template, nodes_json, onboarding),
                 )
@@ -1639,17 +1631,17 @@ def _init_scene_skill_ref():
         with db_lock:
             c = db.cursor()
             # 回填：已有记录中 skill_id=0 的，从 skill 表查 id 补上
-            c.execute("SELECT id, skill_name FROM scene_skill_ref WHERE skill_id=0")
+            c.execute(mgmt_mig.SELECT_SCENE_SKILL_REF)
             stale_rows = c.fetchall()
             for ref_id, skill_name in stale_rows:
                 c.execute(
-                    "SELECT id FROM skill WHERE skill_name=? AND is_active=1 LIMIT 1",
+                    runtime_mig.SELECT_SKILL,
                     (skill_name,),
                 )
                 sk_row = c.fetchone()
                 if sk_row:
                     c.execute(
-                        "UPDATE scene_skill_ref SET skill_id=? WHERE id=?",
+                        mgmt_mig.UPDATE_SCENE_SKILL_REF,
                         (sk_row[0], ref_id),
                     )
             if stale_rows:
@@ -1659,7 +1651,7 @@ def _init_scene_skill_ref():
             # 首次初始化：未 seeded 时写入全部关联
             if get_meta_value("scene_skill_ref_seeded") == "1":
                 return
-            c.execute("SELECT id, nodes_json FROM scene_market WHERE is_active=1")
+            c.execute(mgmt_mig.SELECT_SCENE_MARKET)
             rows = c.fetchall()
             inserted = 0
             for scene_id, nodes_json in rows:
@@ -1676,14 +1668,14 @@ def _init_scene_skill_ref():
                     # 查 skill 表拿 skill_id
                     skill_id = 0
                     c.execute(
-                        "SELECT id FROM skill WHERE skill_name=? AND is_active=1 LIMIT 1",
+                        runtime_mig.SELECT_SKILL__INIT_SCENE_SKILL_REF,
                         (skill_name,),
                     )
                     sk_row = c.fetchone()
                     if sk_row:
                         skill_id = sk_row[0]
                     c.execute(
-                        "INSERT OR IGNORE INTO scene_skill_ref (scene_id, skill_id, skill_name) VALUES (?,?,?)",
+                        mgmt_mig.INSERT_IGNORE_SCENE_SKILL_REF,
                         (scene_id, skill_id, skill_name),
                     )
                     inserted += c.rowcount
@@ -1711,7 +1703,7 @@ def _init_skill_featured():
             updated = 0
             for skill_name in featured_skills:
                 c.execute(
-                    "UPDATE skill SET is_featured=1 WHERE skill_name=? AND scope='official'",
+                    runtime_mig.UPDATE_SKILL,
                     (skill_name,),
                 )
                 updated += c.rowcount
@@ -1738,10 +1730,10 @@ def _seed_admin_accounts():
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM admin_accounts")
+            c.execute(mgmt_mig.SELECT_ADMIN_ACCOUNTS)
             if c.fetchone()[0] == 0:
                 _pw_hash = hashlib.sha256(_default_pwd.encode()).hexdigest()
-                c.execute("INSERT INTO admin_accounts (username, password_hash, is_super, token_version) VALUES (?,?,1,0)",
+                c.execute(mgmt_mig.INSERT_ADMIN_ACCOUNTS,
                           ("admin", _pw_hash))
                 db.commit()
                 _src = "GRAPE_ADMIN_PASSWORD env" if os.environ.get("GRAPE_ADMIN_PASSWORD") else "default admin123"
@@ -2095,7 +2087,7 @@ def _rebuild_organization_text_pk(c, cols) -> None:
         new_create, _n = re.subn(_pat, lambda m: m.group(1) + "TEXT", new_create, count=1)
     old = "organization__text_rebuild_old"
     c.execute("DROP TABLE IF EXISTS " + old)
-    c.execute("ALTER TABLE organization RENAME TO " + old)
+    c.execute(mgmt_mig.ALTER_ORGANIZATION + old)
     c.execute(new_create)
     _names = ", ".join(r[1] for r in cols)
     _sel = ", ".join(f"CAST({col} AS TEXT)" if col in text_cols else col
@@ -2460,14 +2452,14 @@ def _fn_github_bot_username_to_card() -> None:
         return
     with _dl:
         c = _db.cursor()
-        row = c.execute("SELECT value FROM meta WHERE key='vcs_providers_config'").fetchone()
+        row = c.execute(runtime_mig.SELECT_META__FN_GITHUB_BOT_USERNAME_TO_CA).fetchone()
         cards = _json.loads(row[0]) if row and row[0] else {}
         gh = dict(cards.get("github") or {})
         if str(gh.get("bot_username") or "").strip():
             return  # 卡已有值（管理员显式配置）——不覆盖
         gh["bot_username"] = _old
         cards["github"] = gh
-        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('vcs_providers_config', ?)",
+        c.execute(runtime_mig.UPSERT_META,
                   (_json.dumps(cards, ensure_ascii=False),))
         _db.commit()
     try:
@@ -2596,8 +2588,7 @@ def backfill_gitee_gitlab_token_columns_to_rc() -> int:
                     log.warning(f"F4 backfill: decrypt failed for {rk}.{col}, raw copy: {_de}")
                     _norm = val or ""
                 cur = c.execute(
-                    "INSERT OR IGNORE INTO grape_t_repo_credentials (id, repo_key, cred_type, value) "
-                    "VALUES (?, ?, ?, ?)",
+                    insight_mig.INSERT_IGNORE_GRAPE_T_REPO_CREDENTIALS,
                     (uuid7_str(), rk, _ct, _norm))
                 k += cur.rowcount
             per_col[col] = k
@@ -2790,7 +2781,7 @@ def _fn_create_credential_usage_log_table() -> None:
         db.execute(_CUL_DDL)
         # N4：存量旧形态表幂等补列（repo_key）——ALTER + 吞 duplicate column
         try:
-            db.execute("ALTER TABLE grape_t_credential_usage_log ADD COLUMN repo_key TEXT DEFAULT ''")
+            db.execute(runtime_mig.ALTER_GRAPE_T_CREDENTIAL_USAGE_LOG)
         except Exception:
             pass  # duplicate column = 已补
         # N4-p1：审计查询索引（list_by_credential 高频路径；全量记录下防全表扫）
@@ -2860,11 +2851,10 @@ def _fn_issue_state_scene_user_id_text_normalize() -> None:
         "AND COLUMN_NAME='scene_user_id'")
     row = c.fetchone()
     if row and row[0] not in ("varchar", "char"):
-        c.execute("ALTER TABLE issue_state MODIFY scene_user_id "
-                  "VARCHAR(36) NOT NULL DEFAULT ''")
+        c.execute(runtime_mig.ALTER_ISSUE_STATE)
     if row:
         # 哨兵改写（幂等）：'0' 字符串 truthy，会破坏读侧 if not scene_uid 兜底
-        c.execute("UPDATE issue_state SET scene_user_id='' WHERE scene_user_id='0'")
+        c.execute(runtime_mig.UPDATE_ISSUE_STATE)
     c.execute(
         "SELECT DATA_TYPE, IS_NULLABLE FROM information_schema.columns "
         "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='unified_user_mapping' "
@@ -2947,9 +2937,9 @@ def _fn_rebuild_grape_t_patrol_findings_unique() -> None:
             return          # 表不存在：fresh 库走新 DDL
         if "UNIQUE(kind,task_id,issue_id,event_seq)" in create_sql.replace(" ", ""):
             return          # 已是新形态
-        db.execute("ALTER TABLE grape_t_patrol_findings RENAME TO grape_t_patrol_findings_old")
+        db.execute(mgmt_mig.ALTER_GRAPE_T_PATROL_FINDINGS)
         db.execute(_PATROL_FINDINGS_DDL)
-        db.execute("INSERT INTO grape_t_patrol_findings SELECT * FROM grape_t_patrol_findings_old")
+        db.execute(mgmt_mig.INSERT_GRAPE_T_PATROL_FINDINGS)
         db.execute("DROP TABLE grape_t_patrol_findings_old")
         db.commit()
 
@@ -2982,14 +2972,14 @@ def _fn_add_agent_runtimes_role_tags() -> None:
                 " AND COLUMN_NAME='role_tags'")
             if c.fetchone()[0]:
                 return
-            c.execute("ALTER TABLE agent_runtimes ADD COLUMN role_tags TEXT DEFAULT ''")
+            c.execute(runtime_mig.ALTER_AGENT_RUNTIMES)
             db.commit()
         else:
             c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_runtimes'")
             row = c.fetchone()
             if not row or "role_tags" in (row[0] or ""):
                 return
-            db.execute("ALTER TABLE agent_runtimes ADD COLUMN role_tags TEXT DEFAULT ''")
+            db.execute(runtime_mig.ALTER_AGENT_RUNTIMES__FN_ADD_AGENT_RUNTIMES_ROLE_T)
             db.commit()
 
 
@@ -3156,11 +3146,10 @@ def _fn_scene_nodes_skill_id_backfill() -> None:
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id, repo_key, nodes_json, created_by "
-            "FROM devops_pipeline_scene WHERE is_active=1")
+            mgmt_mig.SELECT_DEVOPS_PIPELINE_SCENE)
         scene_rows = c.fetchall() or []
         try:
-            c.execute("SELECT id, repo_key, source_user_id, nodes_json FROM scene_market")
+            c.execute(mgmt_mig.SELECT_SCENE_MARKET__FN_SCENE_NODES_SKILL_ID_BACK)
             market_rows = c.fetchall() or []
         except Exception as e:
             log.warning(f"issue979 backfill: scene_market read failed: {e}")
@@ -3173,8 +3162,7 @@ def _fn_scene_nodes_skill_id_backfill() -> None:
             try:
                 with db_lock:
                     r2 = db.cursor().execute(
-                        "SELECT user_id FROM unified_user_mapping "
-                        "WHERE gitcode_user=? AND user_id IS NOT NULL AND user_id NOT IN ('', '0') LIMIT 1",
+                        mgmt_mig.SELECT_UNIFIED_USER_MAPPING,
                         (created_by,)).fetchone()
                 if r2:
                     uid = int(r2[0] or 0)
@@ -3183,12 +3171,12 @@ def _fn_scene_nodes_skill_id_backfill() -> None:
                             f"(row={row_id}, user={created_by}): {e}")
         normalized.append((row_id, repo_key or "", uid, nodes_json))
     _backfill_scene_rows_skill_id(
-        normalized, "UPDATE devops_pipeline_scene SET nodes_json=? WHERE id=?")
+        normalized, mgmt_mig.UPDATE_DEVOPS_PIPELINE_SCENE)
     # scene_market：source_user_id 即 user 上下文，repo_key 行内（repo 档）
     _backfill_scene_rows_skill_id(
         [(row_id, repo_key or "", int(source_user_id or 0), nodes_json)
          for row_id, repo_key, source_user_id, nodes_json in market_rows],
-        "UPDATE scene_market SET nodes_json=? WHERE id=?")
+        mgmt_mig.UPDATE_SCENE_MARKET)
 
 
 register_migration(
@@ -3693,7 +3681,7 @@ def _get_meta_value_conn(conn, key: str) -> str:
     """按给定连接读 meta（执行器自用，避免与全局 db 连接耦合）。"""
     try:
         c = conn.cursor()
-        c.execute("SELECT value FROM meta WHERE key=?", (key,))
+        c.execute(runtime_mig.SELECT_META__GET_META_VALUE_CONN, (key,))
         row = c.fetchone()
         return row[0] if row else ""
     except Exception:
@@ -3704,7 +3692,7 @@ def _set_meta_value_conn(conn, key: str, value: str) -> None:
     """按给定连接写 meta。"""
     try:
         c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (key, value))
+        c.execute(runtime_mig.UPSERT_META__SET_META_VALUE_CONN, (key, value))
         conn.commit()
     except Exception as e:
         log.warning(f"_set_meta_value_conn failed: {key}: {e}")
@@ -3890,7 +3878,7 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
     def _applied_versions() -> dict:
         try:
             c = conn.cursor()
-            c.execute("SELECT version, name, checksum FROM grape_t_schema_migrations")
+            c.execute(mgmt_mig.SELECT_GRAPE_T_SCHEMA_MIGRATIONS)
             return {r[0]: ((r[1] or ""), (r[2] or "")) for r in c.fetchall()}
         except Exception as _read_err:
             # Issue #1412 QA Optional：区分「读失败」与「版本表为空」，避免线上
@@ -3924,9 +3912,7 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
         try:
             c = conn.cursor()
             c.execute(
-                "INSERT OR REPLACE INTO grape_t_schema_migrations "
-                "(version, name, kind, applied_at, duration_ms, checksum) "
-                "VALUES (?,?,?,?,?,?)",
+                mgmt_mig.UPSERT_GRAPE_T_SCHEMA_MIGRATIONS,
                 (_LEGACY_STAMP_VERSION, _LEGACY_STAMP_NAME, "legacy-stamp",
                  _now_iso(), 0, ""))
             conn.commit()
@@ -3996,9 +3982,7 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
         try:
             c = conn.cursor()
             c.execute(
-                "INSERT OR REPLACE INTO grape_t_schema_migrations "
-                "(version, name, kind, applied_at, duration_ms, checksum) "
-                "VALUES (?,?,?,?,?,?)",
+                mgmt_mig.UPSERT_GRAPE_T_SCHEMA_MIGRATIONS__RUN_MIGRATIONS_WITH_CONN,
                 (mig.version, mig.name, mig.kind, _now_iso(), duration_ms,
                  _fn_checksum(mig.fn) if mig.fn else ""))
             conn.commit()
@@ -4274,8 +4258,7 @@ def _fn_normalize_task_messages_created_at_default(conn=None) -> int:
             if "+00:00" in _cur_default:
                 return 0            # 已是 ISO+00:00，幂等
             c.execute(
-                "ALTER TABLE task_messages ALTER COLUMN created_at SET DEFAULT "
-                "(CONCAT(REPLACE(CAST(UTC_TIMESTAMP(6) AS CHAR), ' ', 'T'), '+00:00'))")
+                runtime_mig.ALTER_TASK_MESSAGES)
             conn.commit()
             log.info("Issue #1495: task_messages.created_at 默认值改为 ISO+00:00（UTC）")
             return 1
@@ -4394,8 +4377,7 @@ def _migrate_release_subissue_unique_index():
                     "AND COLUMN_NAME='release_bind_env'")
                 if (c.fetchone()[0] or 0) == 0:
                     c.execute(
-                        "ALTER TABLE issue ADD COLUMN release_bind_env VARCHAR(64) "
-                        "AS (NULLIF(release_target_env, '')) STORED")
+                        runtime_mig.ALTER_ISSUE)
                     db.commit()
                 # B4（PR #847 审查）：索引必须用 CREATE UNIQUE INDEX IF NOT EXISTS
                 # 走 mysql_compat Cursor.execute 特判——对 TEXT 列自动加 (191) 前缀
@@ -4594,7 +4576,7 @@ def _migrate_allow_signup_default():
             return  # 已设置，不覆盖
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM grape_accounts")
+            c.execute(mgmt_mig.SELECT_GRAPE_ACCOUNTS)
             user_count = c.fetchone()[0]
         if user_count > 0:
             set_meta_value("allow_signup", "1")
@@ -4696,15 +4678,11 @@ def _migrate_event_status_pending():
             c = db.cursor()
             # ① running 且关联任务 queued → pending
             c.execute(
-                "UPDATE events SET status='pending' "
-                "WHERE status='running' AND EXISTS ("
-                "  SELECT 1 FROM agent_tasks t WHERE t.event_seq = events.seq AND t.status='queued')")
+                runtime_mig.UPDATE_EVENTS)
             _n1 = c.rowcount
             # ② running 且 started_at 空且无任何关联任务 → pending（疑似入队后从未被认领/创建任务失败）
             c.execute(
-                "UPDATE events SET status='pending' "
-                "WHERE status='running' AND (started_at IS NULL OR started_at='') "
-                "AND NOT EXISTS (SELECT 1 FROM agent_tasks t WHERE t.event_seq = events.seq)")
+                runtime_mig.UPDATE_EVENTS__MIGRATE_EVENT_STATUS_PENDING)
             _n2 = c.rowcount
             db.commit()
         if _n1 or _n2:
@@ -4725,10 +4703,7 @@ def _cleanup_dup_chat_config_rows():
         with db_lock:
             c = db.cursor()
             c.execute(
-                "DELETE FROM chat_agent_session "
-                "WHERE repo_key='' AND id NOT IN ("
-                "  SELECT MIN(id) FROM chat_agent_session WHERE repo_key='' GROUP BY user_id"
-                ")")
+                runtime_mig.DELETE_CHAT_AGENT_SESSION)
             _n = c.rowcount
             db.commit()
         if _n:
@@ -4751,7 +4726,7 @@ def _migrate_knowledge_dedup_and_ref():
     with db_lock:
         try:
             row = db.cursor().execute(
-                "SELECT value FROM meta WHERE key='issue95_migrate_done'"
+                runtime_mig.SELECT_META__MIGRATE_KNOWLEDGE_DEDUP_AND
             ).fetchone()
             _issue95_done = bool(row and row[0] == '1')
         except Exception:
@@ -4762,14 +4737,11 @@ def _migrate_knowledge_dedup_and_ref():
 
         # 1. source 字段回填（幂等——只更新 source 为空的记录）
         c.execute(
-            "UPDATE agent_shared_knowledge SET source = 'system' "
-            "WHERE scope = 'baseline' AND (source IS NULL OR source = '')")
+            mgmt_mig.UPDATE_AGENT_SHARED_KNOWLEDGE)
         c.execute(
-            "UPDATE agent_shared_knowledge SET source = 'agent' "
-            "WHERE scope IN ('project', 'issue', 'issue_agent') AND (source IS NULL OR source = '')")
+            mgmt_mig.UPDATE_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE_DEDUP_AND)
         c.execute(
-            "UPDATE agent_shared_knowledge SET source = 'manual' "
-            "WHERE scope = 'member' AND (source IS NULL OR source = '')")
+            mgmt_mig.UPDATE_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE_DEDUP_AND_2)
 
         # 1.5 回填空 name + 统一 description（所有 scope，必须在去重之前）
         # 老代码部分 INSERT 路径没有 name 字段或自动生成逻辑不存在 → DEFAULT ''。
@@ -4781,10 +4753,7 @@ def _migrate_knowledge_dedup_and_ref():
                                   BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK)
         _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"  # 老的统一值，勿改
         _rows = c.execute(
-            "SELECT id, scope, source, agent_type, issue_num, name, file_path, obs_key, description "
-            "FROM agent_shared_knowledge "
-            "WHERE name IS NULL OR name = '' OR name = ? "
-            "OR description = ? OR description IS NULL OR description = ''",
+            mgmt_mig.SELECT_AGENT_SHARED_KNOWLEDGE,
             (BASELINE_NAME_FALLBACK, _UNIFIED_DESC)
         ).fetchall()
         _updates = []
@@ -4806,7 +4775,7 @@ def _migrate_knowledge_dedup_and_ref():
                 _updates.append((_new_name, _final_desc, _rid))
         if _updates:
             c.executemany(
-                "UPDATE agent_shared_knowledge SET name=?, description=? WHERE id=?",
+                mgmt_mig.UPDATE_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE_DEDUP_AND_3,
                 _updates)
             log.info(f"[issue67] backfilled name/description for {len(_updates)} rows")
 
@@ -4816,28 +4785,14 @@ def _migrate_knowledge_dedup_and_ref():
         #    用派生表子查询包装避免 DELETE 自引用（MySQL 限制），SQLite/MySQL 通用
         # baseline 去重
         c.execute(
-            "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
-            "SELECT id FROM agent_shared_knowledge WHERE scope='baseline' "
-            "AND id NOT IN (SELECT keep.keep_id FROM ("
-            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-            "WHERE scope='baseline' GROUP BY repo_key, scope, name) AS keep))")
+            mgmt_mig.DELETE_SCENE_KNOWLEDGE_REF)
         c.execute(
-            "DELETE FROM agent_shared_knowledge WHERE scope='baseline' "
-            "AND id NOT IN (SELECT keep.keep_id FROM ("
-            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-            "WHERE scope='baseline' GROUP BY repo_key, scope, name) AS keep)")
+            mgmt_mig.DELETE_AGENT_SHARED_KNOWLEDGE)
         # 其他 scope 去重
         c.execute(
-            "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ("
-            "SELECT id FROM agent_shared_knowledge WHERE scope != 'baseline' "
-            "AND id NOT IN (SELECT keep.keep_id FROM ("
-            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-            "WHERE scope != 'baseline' GROUP BY repo_key, scope, agent_type, issue_num, file_path) AS keep))")
+            mgmt_mig.DELETE_SCENE_KNOWLEDGE_REF__MIGRATE_KNOWLEDGE_DEDUP_AND)
         c.execute(
-            "DELETE FROM agent_shared_knowledge WHERE scope != 'baseline' "
-            "AND id NOT IN (SELECT keep.keep_id FROM ("
-            "SELECT MAX(id) AS keep_id FROM agent_shared_knowledge "
-            "WHERE scope != 'baseline' GROUP BY repo_key, scope, agent_type, issue_num, file_path) AS keep)")
+            mgmt_mig.DELETE_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE_DEDUP_AND)
 
         # 3. scene_knowledge_ref 加 issue_num 列（幂等）
         _ensure_column(c, "scene_knowledge_ref", "issue_num", "INTEGER NOT NULL DEFAULT 0")
@@ -4864,24 +4819,16 @@ def _migrate_knowledge_dedup_and_ref():
         # 4. scene_knowledge_ref 数据迁移——为现有知识生成关联记录
         # baseline → 全局关联（issue_num=0）
         c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-            "SELECT id, '', '', 0, 1, 'system' FROM agent_shared_knowledge "
-            "WHERE scope = 'baseline' AND source = 'system'")
+            mgmt_mig.INSERT_IGNORE_SCENE_KNOWLEDGE_REF)
         # project → 指定 Agent 关联（issue_num=0）
         c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-            "SELECT id, '', agent_type, 0, 1, 'system' FROM agent_shared_knowledge "
-            "WHERE scope = 'project' AND source = 'agent'")
+            mgmt_mig.INSERT_IGNORE_SCENE_KNOWLEDGE_REF__MIGRATE_KNOWLEDGE_DEDUP_AND)
         # issue → 全局关联（issue_num=实际值）
         c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-            "SELECT id, '', '', issue_num, 1, 'system' FROM agent_shared_knowledge "
-            "WHERE scope = 'issue' AND source = 'agent'")
+            mgmt_mig.INSERT_IGNORE_SCENE_KNOWLEDGE_REF__MIGRATE_KNOWLEDGE_DEDUP_AND_2)
         # issue_agent → 指定 Agent + Issue 关联
         c.execute(
-            "INSERT OR IGNORE INTO scene_knowledge_ref (knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
-            "SELECT id, '', agent_type, issue_num, 1, 'system' FROM agent_shared_knowledge "
-            "WHERE scope = 'issue_agent' AND source = 'agent' AND agent_type != ''")
+            mgmt_mig.INSERT_IGNORE_SCENE_KNOWLEDGE_REF__MIGRATE_KNOWLEDGE_DEDUP_AND_3)
         # member（agent_type 非空）→ 指定 Agent 关联（issue_num=0）
         # Issue #95：删除——member 不自动关联，用户手动绑定才注入
         # c.execute(
@@ -4901,9 +4848,7 @@ def _migrate_knowledge_dedup_and_ref():
         if not _issue95_done:
             try:
                 c.execute(
-                    "DELETE FROM scene_knowledge_ref WHERE knowledge_id IN "
-                    "(SELECT id FROM agent_shared_knowledge WHERE scope = 'member') "
-                    "AND created_by = 'system'")
+                    mgmt_mig.DELETE_SCENE_KNOWLEDGE_REF__MIGRATE_KNOWLEDGE_DEDUP_AND_2)
             except Exception:
                 pass
 
@@ -4912,16 +4857,14 @@ def _migrate_knowledge_dedup_and_ref():
             # 有文件内容（obs_key 非空 + content_hash 非空）说明 accepted 写过文件，应为 accepted
             try:
                 c.execute(
-                    "UPDATE agent_shared_knowledge SET status='accepted' "
-                    "WHERE status='rejected' AND obs_key != '' AND content_hash != '' "
-                    "AND obs_key IS NOT NULL AND content_hash IS NOT NULL")
+                    mgmt_mig.UPDATE_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE_DEDUP_AND_4)
             except Exception:
                 pass
 
             # Issue #95：标记已完成
             try:
                 c.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('issue95_migrate_done', '1')")
+                    runtime_mig.UPSERT_META__MIGRATE_KNOWLEDGE_DEDUP_AND)
             except Exception:
                 pass
 
@@ -4933,15 +4876,14 @@ def _migrate_knowledge_dedup_and_ref():
                 import hashlib as _hashlib
                 _prefix = os.environ.get("OBS_PREFIX", "") or ""
                 _empty_hash_rows = c.execute(
-                    "SELECT id, obs_key FROM agent_shared_knowledge "
-                    "WHERE obs_key != '' AND (content_hash = '' OR content_hash IS NULL)"
+                    mgmt_mig.SELECT_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE_DEDUP_AND
                 ).fetchall()
                 for _kid, _obs_key in _empty_hash_rows:
                     for _try_key in (_obs_key, f"{_prefix}/{_obs_key}"):
                         _data = _storage.read_bytes(_try_key)
                         if _data:
                             _h = _hashlib.sha256(_data).hexdigest()
-                            c.execute("UPDATE agent_shared_knowledge SET content_hash=? WHERE id=?", (_h, _kid))
+                            c.execute(mgmt_mig.UPDATE_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE_DEDUP_AND_5, (_h, _kid))
                             break
         except Exception as _e:
             log.warning(f"[migrate] content_hash backfill failed: {_e}")
@@ -4951,13 +4893,11 @@ def _migrate_knowledge_dedup_and_ref():
         # 先 EXISTS 快速检查，有孤儿才执行 DELETE
         try:
             _has_orphan = c.execute(
-                "SELECT EXISTS(SELECT 1 FROM scene_knowledge_ref "
-                "WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge))"
+                mgmt_mig.SELECT_SCENE_KNOWLEDGE_REF
             ).fetchone()[0]
             if _has_orphan:
                 c.execute(
-                    "DELETE FROM scene_knowledge_ref "
-                    "WHERE knowledge_id NOT IN (SELECT id FROM agent_shared_knowledge)")
+                    mgmt_mig.DELETE_SCENE_KNOWLEDGE_REF__MIGRATE_KNOWLEDGE_DEDUP_AND_3)
                 log.info("[issue67] cleaned orphan scene_knowledge_ref")
         except Exception as _e:
             log.warning(f"[issue67] orphan ref cleanup failed: {_e}")
@@ -5030,7 +4970,7 @@ def _migrate_knowledge():
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE agent_shared_knowledge SET archived=0 WHERE archived=1")
+            c.execute(mgmt_mig.UPDATE_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE)
             db.commit()
         _restore_ok = True
         log.info("[knowledge_migrate] restore archived records done")
@@ -5050,8 +4990,7 @@ def _migrate_knowledge():
         _storage = get_storage()
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT id, repo_key, scope, agent_type, issue_num, obs_key, file_path "
-                "FROM agent_shared_knowledge WHERE obs_key != '' AND obs_key IS NOT NULL"
+                mgmt_mig.SELECT_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE
             ).fetchall()
         updates = []  # [(new_obs_key, id), ...]
         for rid, repo_key, scope, agent_type, issue_num, obs_key, file_path in rows:
@@ -5109,7 +5048,7 @@ def _migrate_knowledge():
             with db_lock:
                 c = db.cursor()
                 c.executemany(
-                    "UPDATE agent_shared_knowledge SET obs_key=? WHERE id=?",
+                    mgmt_mig.UPDATE_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE_2,
                     [(u[0], u[1]) for u in updates])
                 db.commit()
             # DB 更新成功后删除旧 OBS 对象（去重防跨平台同名仓库共享同一旧 key）
@@ -5132,8 +5071,7 @@ def _migrate_knowledge():
     try:
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT id, repo_key, file_path FROM agent_shared_knowledge "
-                "WHERE file_path != '' AND file_path IS NOT NULL"
+                mgmt_mig.SELECT_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE_2
             ).fetchall()
         updates = []  # [(new_file_path, id), ...]
         for rid, repo_key, file_path in rows:
@@ -5154,7 +5092,7 @@ def _migrate_knowledge():
             with db_lock:
                 c = db.cursor()
                 c.executemany(
-                    "UPDATE agent_shared_knowledge SET file_path=? WHERE id=?",
+                    mgmt_mig.UPDATE_AGENT_SHARED_KNOWLEDGE__MIGRATE_KNOWLEDGE_3,
                     updates)
                 db.commit()
         _file_path_ok = True
@@ -5181,7 +5119,7 @@ def _cleanup_stale_meta():
     """
     try:
         c = db.cursor()
-        c.execute("DELETE FROM meta WHERE key='ws_feishu_app_id'")
+        c.execute(runtime_mig.DELETE_META)
         db.commit()
         log.info("Cleaned stale meta key: ws_feishu_app_id")
     except Exception as e:
@@ -5222,18 +5160,14 @@ def _cleanup_chat_shared_worker_runtime():
     try:
         with db_lock:
             c = db.cursor()
-            rows = c.execute("""
-                SELECT c.id, c.runtime_id, ar.name
-                FROM chat_agent_session c JOIN agent_runtimes ar ON ar.id = c.runtime_id
-                WHERE c.repo_key='' AND c.runtime_id>0 AND ar.scope='global' AND ar.credential_id>0
-            """).fetchall()
+            rows = c.execute(runtime_mig.SELECT_CHAT_AGENT_SESSION__CLEANUP_CHAT_SHARED_WORKER_R).fetchall()
             changed = 0
             for cid, _rid, name in rows:
                 local = c.execute(
-                    "SELECT id FROM agent_runtimes WHERE lower(name)=? AND credential_id=0 AND installed=1 ORDER BY id LIMIT 1",
+                    runtime_mig.SELECT_AGENT_RUNTIMES__CLEANUP_CHAT_SHARED_WORKER_R,
                     ((name or "").lower(),)).fetchone()
                 new_rid = local[0] if local else 0
-                c.execute("UPDATE chat_agent_session SET runtime_id=? WHERE id=?", (new_rid, cid))
+                c.execute(runtime_mig.UPDATE_CHAT_AGENT_SESSION, (new_rid, cid))
                 changed += 1
             if changed:
                 db.commit()
@@ -5252,18 +5186,18 @@ def _align_agent_enable():
     try:
         with db_lock:
             c = db.cursor()
-            done = c.execute("SELECT COUNT(*) FROM meta WHERE key='enable_aligned'").fetchone()[0]
+            done = c.execute(runtime_mig.SELECT_META__ALIGN_AGENT_ENABLE).fetchone()[0]
             if done:
                 return
             # 先确保 enable 列存在(新库可能无)
             _ensure_column(c, "agent_type", "enable", "INTEGER DEFAULT 1")
             _ensure_column(c, "devops_agent_session", "enable", "INTEGER DEFAULT 1")
             c.execute(
-                "UPDATE devops_agent_session SET enable = COALESCE((SELECT enable FROM agent_type WHERE agent_type = devops_agent_session.agent_type), 1)"
+                runtime_mig.UPDATE_DEVOPS_AGENT_SESSION
             )
-            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('enable_aligned', '1')")
+            c.execute(runtime_mig.UPSERT_META__ALIGN_AGENT_ENABLE)
             db.commit()
-            log.info("Aligned existing agent session enable from agent_type defaults")
+            log.info(runtime_mig.SQL_AGENT_TYPE)
     except Exception as e:
         log.warning(f"Align agent enable failed: {e}")
 
@@ -5299,7 +5233,7 @@ def _drop_chat_session_repo_unique(c):
         col_defs.append(d)
     c.execute("CREATE TABLE chat_agent_session_new (" + ", ".join(col_defs) + ")")
     c.execute(f"INSERT INTO chat_agent_session_new ({','.join(cols)}) SELECT {','.join(cols)} FROM chat_agent_session")
-    c.execute("DROP TABLE chat_agent_session")
+    c.execute(runtime_mig.DROP_CHAT_AGENT_SESSION)
     c.execute("ALTER TABLE chat_agent_session_new RENAME TO chat_agent_session")
     return True
 
@@ -5327,19 +5261,14 @@ def _rebuild_agent_runtimes_inst_key(c):
     uniq_clause = uniq_match.group(0)
     if "credential_id" in uniq_clause and "host_name" in uniq_clause:
         return False  # 已是最新 5 列唯一键
-    c.execute("""
-        DELETE FROM agent_runtimes
-        WHERE credential_id=0 AND id NOT IN (
-            SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 GROUP BY lower(name), scope, owner_id
-        )
-    """)
+    c.execute(runtime_mig.DELETE_AGENT_RUNTIMES)
     cols = [r[1] for r in c.execute("PRAGMA table_info(agent_runtimes)").fetchall()]
     c.execute(_AGENT_RUNTIMES_DDL.replace("CREATE TABLE IF NOT EXISTS agent_runtimes", "CREATE TABLE agent_runtimes_new"))
     # 只复制新旧表共有的列（旧表可能有 busy_slots/max_concurrent/tags 等已废弃列）
     new_cols = [r[1] for r in c.execute("PRAGMA table_info(agent_runtimes_new)").fetchall()]
     common_cols = [col for col in cols if col in new_cols]
     c.execute(f"INSERT INTO agent_runtimes_new ({','.join(common_cols)}) SELECT {','.join(common_cols)} FROM agent_runtimes")
-    c.execute("DROP TABLE agent_runtimes")
+    c.execute(runtime_mig.DROP_AGENT_RUNTIMES)
     c.execute("ALTER TABLE agent_runtimes_new RENAME TO agent_runtimes")
     return True
 
@@ -5360,9 +5289,9 @@ def _alter_skill_files_if_needed() -> str:
         ).fetchall()
         if rows and rows[0][0] == "mediumtext":
             return ""
-        return "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT"
+        return runtime_mig.ALTER_AGENT_TASKS
     except Exception:
-        return "ALTER TABLE agent_tasks MODIFY skill_files MEDIUMTEXT"
+        return runtime_mig.ALTER_AGENT_TASKS__ALTER_SKILL_FILES_IF_NEEDED
 
 
 def _tasks_to_issue_rename_pre_create():
@@ -5379,10 +5308,10 @@ def _tasks_to_issue_rename_pre_create():
             if "tasks" not in _tables:
                 return
             if "issue" in _tables:
-                _issue_cnt = c.execute("SELECT COUNT(*) FROM issue").fetchone()[0]
+                _issue_cnt = c.execute(runtime_mig.SELECT_ISSUE__TASKS_TO_ISSUE_RENAME_PRE_CR).fetchone()[0]
                 _tasks_cnt = c.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
                 if _issue_cnt == 0 and _tasks_cnt > 0:
-                    c.execute("DROP TABLE issue")
+                    c.execute(runtime_mig.DROP_ISSUE)
                     c.execute("ALTER TABLE tasks RENAME TO issue")
                     db.commit()
                     log.info(f"Phase B1: tasks -> issue (dropped empty issue, renamed), {_tasks_cnt} rows")
@@ -5492,7 +5421,7 @@ def _migrate_tables():
                 _backup_db(_db_path, tag="pre-m0")
                 # 记录已备份,避免多进程重复备份
                 try:
-                    c.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('m0_backup_done', '1')")
+                    c.execute(runtime_mig.INSERT_IGNORE_META)
                     db.commit()
                 except Exception:
                     pass
@@ -5515,141 +5444,18 @@ def _migrate_tables():
     migrations = [
         "ALTER TABLE agent_type_config ADD COLUMN parent_agent_type TEXT DEFAULT ''",
         "ALTER TABLE user_skills ADD COLUMN agent_type TEXT DEFAULT ''",
-        "ALTER TABLE devops_agent_session ADD COLUMN skill TEXT DEFAULT ''",
-        "ALTER TABLE chat_agent_session ADD COLUMN skill TEXT DEFAULT ''",
-        "ALTER TABLE devops_agent_session ADD COLUMN skill_id INTEGER DEFAULT 0",
-        "ALTER TABLE chat_agent_session ADD COLUMN skill_id INTEGER DEFAULT 0",
-        "ALTER TABLE chat_conversations ADD COLUMN session_id TEXT DEFAULT ''",
-        "ALTER TABLE chat_conversations ADD COLUMN user_gitcode_token TEXT DEFAULT ''",
-        "ALTER TABLE devops_agent_session ADD COLUMN repo_gitcode_token TEXT DEFAULT ''",
-        "ALTER TABLE events ADD COLUMN actor TEXT DEFAULT ''",
-        "ALTER TABLE events ADD COLUMN summary TEXT DEFAULT ''",
-        "ALTER TABLE events ADD COLUMN backend TEXT DEFAULT ''",
-        "ALTER TABLE events ADD COLUMN skill TEXT DEFAULT ''",
-        "ALTER TABLE events ADD COLUMN exit_code INTEGER DEFAULT NULL",
-        "ALTER TABLE events ADD COLUMN duration REAL DEFAULT NULL",
-        "ALTER TABLE events ADD COLUMN agent_logs TEXT DEFAULT '[]'",
-        "ALTER TABLE events ADD COLUMN started_at TEXT DEFAULT ''",
-        "ALTER TABLE events ADD COLUMN completed_at TEXT DEFAULT ''",
-        "ALTER TABLE devops_agent_session ADD COLUMN backend_session_id TEXT DEFAULT ''",
-        "ALTER TABLE chat_conversations ADD COLUMN agent_session_id TEXT DEFAULT ''",
-        "ALTER TABLE chat_conversations ADD COLUMN backend_session_id TEXT DEFAULT ''",
-        "ALTER TABLE devops_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
-        # R16.5.3: devops_agent_session 新增 token_status + repo_github_token 列
-        "ALTER TABLE devops_agent_session ADD COLUMN token_status TEXT DEFAULT ''",
-        "ALTER TABLE devops_agent_session ADD COLUMN repo_github_token TEXT DEFAULT ''",
-        "ALTER TABLE agent_type ADD COLUMN default_backend_id INTEGER DEFAULT 0",
-        "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
-        "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
-        "ALTER TABLE events ADD COLUMN scene_id TEXT DEFAULT ''",
-        "ALTER TABLE events ADD COLUMN entity_type TEXT DEFAULT ''",
-        "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
-        # ===== 发布配置(skill-publish v1.1)=====
-        # ===== OBS 技能库(obs-skill-storage-design.md §4)=====
-        # v2.4 去版本化:DROP current_version(本期新增列,无历史依赖;列不存在时 SQLite 忽略报错)
-        "ALTER TABLE skill DROP COLUMN current_version",
-        # v2.5:file_path(真实存储路径 OBS 对象键,VARCHAR(512))+ created_by/updated_by(审计/删除权限,VARCHAR(64))
-        "ALTER TABLE skill ADD COLUMN file_path VARCHAR(512) DEFAULT ''",
-        "ALTER TABLE skill ADD COLUMN created_by VARCHAR(64) DEFAULT ''",
-        "ALTER TABLE skill ADD COLUMN updated_by VARCHAR(64) DEFAULT ''",
+        *runtime_mig.ALTERS_SESSION_EVENT_COLUMNS,  # 表：devops_agent_session, chat_agent_session, chat_conversations, events, agent_type, issue_state, skill,
         # skill_zip 已移除(本次需求新增,未上线,无包袱直砍--见 obs-skill-storage-design.md §5.7 v3 决策)
         # MySQL 下 skill_files 升级(SQLite 无长度限制,MODIFY 语句报错被忽略无害)
         # 2026-08-17 修复:DEFAULT '{}' 在 MySQL 上触发 metadata lock 卡启动--改为无默认;
         # 且 ALTER 仅在列非 MEDIUMTEXT 时执行(避免每次启动 DDL 触发元数据锁--启动变慢根因)
         _alter_skill_files_if_needed(),
-        # Worker 三级分类——repo_key 字段（scope=user 时关联项目）
-        "ALTER TABLE runtime_credentials ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
-        # ===== TMP (/tmp) 使用率指标（liufei 2026-08-28）=====
-        "ALTER TABLE runtime_credentials ADD COLUMN tmp_percent DOUBLE DEFAULT 0",
-        # ===== Issue #180: 带宽占用率指标 =====
-        "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_percent DOUBLE DEFAULT 0",
-        "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_mbps DOUBLE DEFAULT 0",
-        "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
-        # JWT 撤销——token_version 字段（改密码/logout 时 +1）
-        "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
-        # Issue #281: admin 禁用用户标记——独立于 token_version，心跳/登录不可绕过
-        "ALTER TABLE user_accounts ADD COLUMN is_disabled INTEGER DEFAULT 0",
-        # GitHub OAuth 集成——user_accounts 新增 github 字段
-        "ALTER TABLE user_accounts ADD COLUMN github_id TEXT DEFAULT ''",
-        "ALTER TABLE user_accounts ADD COLUMN github_api_token TEXT DEFAULT ''",
-        "ALTER TABLE user_accounts ADD COLUMN github_login TEXT DEFAULT ''",
-        # ===== knowledge-obs-design：agent_shared_knowledge OBS 对象存储字段 =====
-        "ALTER TABLE agent_shared_knowledge ADD COLUMN obs_key VARCHAR(512) DEFAULT ''",
-        "ALTER TABLE agent_shared_knowledge ADD COLUMN content_hash VARCHAR(64) DEFAULT ''",
-        "ALTER TABLE agent_shared_knowledge ADD COLUMN updated_at TEXT DEFAULT ''",
-        # ===== Issue #67：知识来源 + 归档标记 =====
-        "ALTER TABLE agent_shared_knowledge ADD COLUMN source TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE agent_shared_knowledge ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE agent_shared_knowledge ADD COLUMN description TEXT DEFAULT ''",
-        "ALTER TABLE agent_shared_knowledge ADD COLUMN name VARCHAR(256) DEFAULT ''",
-        # ===== knowledge-obs-design：agent_tasks 知识/project-info OBS 临时 URL =====
-        "ALTER TABLE agent_tasks ADD COLUMN project_info_file_urls TEXT DEFAULT ''",
-        "ALTER TABLE agent_tasks ADD COLUMN knowledge_file_urls TEXT DEFAULT ''",
-        # ===== knowledge-obs-design：agent_runtimes worker 版本自报 =====
-        "ALTER TABLE agent_runtimes ADD COLUMN worker_version TEXT DEFAULT ''",
-        # ===== 多主控机：本机直连引擎按 host_name 区分（credential_id=0 不再全局唯一）=====
-        "ALTER TABLE agent_runtimes ADD COLUMN host_name VARCHAR(191) DEFAULT ''",
-        # ===== engine probe 探测结果列（liufei 2026-08-28）=====
-        "ALTER TABLE agent_runtimes ADD COLUMN probe_status VARCHAR(32) DEFAULT 'pending'",
-        "ALTER TABLE agent_runtimes ADD COLUMN probe_latency INT DEFAULT 0",
-        "ALTER TABLE agent_runtimes ADD COLUMN probe_last VARCHAR(64) DEFAULT ''",
-        "ALTER TABLE agent_runtimes ADD COLUMN probe_error TEXT DEFAULT ''",
-        # ===== probe 连续失败计数：连续2次fail才降级healthy，避免偶发超时误判 =====
-        "ALTER TABLE agent_runtimes ADD COLUMN probe_fail_count INT DEFAULT 0",
-        # ===== 场景标签：引擎绑定的场景列表，约束可选角色标签 =====
-        "ALTER TABLE agent_runtimes ADD COLUMN scene_tags TEXT DEFAULT '[\"default\"]'",
-        # ===== 引擎别名：用户自定义别名，不受心跳覆盖 =====
-        "ALTER TABLE agent_runtimes ADD COLUMN alias TEXT DEFAULT ''",
-        # ===== 标签用户标记：用户手动设过标签后置1，心跳注册不再自动补 'all' =====
-        "ALTER TABLE agent_runtimes ADD COLUMN tags_user_set INTEGER DEFAULT 0",
-        # ===== Issue-P2: 健康分重置时间戳（管理员赦免点，计算窗口起点=max(此值, 7天前)）=====
-        "ALTER TABLE agent_runtimes ADD COLUMN health_reset_at VARCHAR(64) DEFAULT ''",
-        # ===== Issue #658: 引擎角色标签（显式声明；空=按引擎类型默认角色映射兜底）=====
-        "ALTER TABLE agent_runtimes ADD COLUMN role_tags TEXT DEFAULT ''",
-        # ===== Issue #865: 配置模型（worker 注册上报；legacy 盖帽库需手工执行同款 ALTER）=====
-        "ALTER TABLE agent_runtimes ADD COLUMN model_name TEXT DEFAULT ''",
-        "ALTER TABLE agent_runtimes ADD COLUMN model_source TEXT DEFAULT ''",
-        "ALTER TABLE agent_runtimes ADD COLUMN model_reported_at TEXT DEFAULT ''",
-        # ===== Issue #498: 健康统计自愈留痕（失败衰减窗口有效失败数 + 最近失败时间）=====
-        "ALTER TABLE runtime_health_scores ADD COLUMN failed_tasks_effective INTEGER DEFAULT 0",
-        "ALTER TABLE runtime_health_scores ADD COLUMN last_failure_at TEXT DEFAULT ''",
-        # ===== Issue-11: skill 表加 is_featured + like_count =====
-        "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
-        "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
-        "ALTER TABLE skill ADD COLUMN sub_scene TEXT DEFAULT ''",
-        # ===== Issue-11: devops_pipeline_scene 加 market_scene_id（单向关联） =====
-        "ALTER TABLE devops_pipeline_scene ADD COLUMN market_scene_id INTEGER DEFAULT NULL",
-        # ===== Issue-11: scene_skill_ref 加 skill_id =====
-        "ALTER TABLE scene_skill_ref ADD COLUMN skill_id INTEGER DEFAULT 0",
-        # ===== Issue-11: scene_market 加 tags/author/content_hash（场景包格式 + 定时同步） =====
-        "ALTER TABLE scene_market ADD COLUMN tags VARCHAR(256) DEFAULT ''",
-        "ALTER TABLE scene_market ADD COLUMN author VARCHAR(64) DEFAULT ''",
-        "ALTER TABLE scene_market ADD COLUMN content_hash VARCHAR(64) DEFAULT ''",
-        "ALTER TABLE scene_market ADD COLUMN obs_icon_key VARCHAR(256) DEFAULT ''",
-        # ===== Issue-11: scene_category 加 slug（场景包 category 用 slug 引用） =====
-        "ALTER TABLE scene_category ADD COLUMN slug VARCHAR(64) DEFAULT ''",
-        # ===== Issue-89: event_skipped 加 issue_id 列（skipped 事件审计需关联 Issue） =====
-        "ALTER TABLE event_skipped ADD COLUMN issue_id TEXT DEFAULT ''",
-        # ===== Issue #177: user_feedback 软删除标记 =====
-        "ALTER TABLE user_feedback ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0",
-        # ===== feedback-task-context: 反馈自动携带任务上下文（weekly-08） =====
-        # event_seq/issue_id/agent_type 结构化列；issue_number 为 GitCode 展示号
-        "ALTER TABLE user_feedback ADD COLUMN event_seq INTEGER DEFAULT NULL",
-        "ALTER TABLE user_feedback ADD COLUMN task_id VARCHAR(191) DEFAULT ''",
-        "ALTER TABLE user_feedback ADD COLUMN issue_id INTEGER DEFAULT NULL",
-        "ALTER TABLE user_feedback ADD COLUMN issue_number VARCHAR(32) DEFAULT ''",
-        "ALTER TABLE user_feedback ADD COLUMN agent_type VARCHAR(32) DEFAULT ''",
-        "ALTER TABLE user_feedback ADD COLUMN engine_info TEXT DEFAULT ''",
-        "ALTER TABLE user_feedback ADD COLUMN fail_summary TEXT DEFAULT ''",
-        # ===== feedback-openapi（weekly-08）：Agent 自动反馈 + 反馈→Issue 闭环 =====
-        "ALTER TABLE user_feedback ADD COLUMN source VARCHAR(16) DEFAULT 'user'",
-        "ALTER TABLE user_feedback ADD COLUMN skill_id INTEGER DEFAULT NULL",
-        "ALTER TABLE user_feedback ADD COLUMN skill_name VARCHAR(191) DEFAULT ''",
-        "ALTER TABLE user_feedback ADD COLUMN skill_scope VARCHAR(16) DEFAULT ''",
-        "ALTER TABLE user_feedback ADD COLUMN issue_url TEXT DEFAULT ''",
-        "ALTER TABLE user_feedback ADD COLUMN issue_number VARCHAR(32) DEFAULT ''",
-        "ALTER TABLE user_feedback ADD COLUMN converted_at VARCHAR(64) DEFAULT NULL",
-        "ALTER TABLE user_feedback ADD COLUMN feedback_kind VARCHAR(32) DEFAULT ''",
+        *runtime_mig.ALTERS_ENGINE_CREDENTIAL_COLUMNS,  # 表：runtime_credentials, agent_runtimes,
+        *mgmt_mig.ALTERS_USER_AND_KNOWLEDGE_COLUMNS,  # 表：user_accounts, agent_shared_knowledge,
+        *runtime_mig.ALTERS_SKILL_ENGINE_COLUMNS,  # 表：agent_tasks, agent_runtimes, runtime_health_scores, skill,
+        *mgmt_mig.ALTERS_SCENE_COLUMNS,  # 表：devops_pipeline_scene, scene_skill_ref, scene_market,
+        *runtime_mig.ALTERS_SCENE_CATEGORY_EVENT_SKIPPED,  # 表：scene_category, event_skipped,
+        *mgmt_mig.ALTERS_USER_FEEDBACK_COLUMNS,  # 表：user_feedback,
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [
@@ -5659,7 +5465,7 @@ def _migrate_tables():
     for slug, name in _category_slugs:
         try:
             with db_lock:
-                db.execute("UPDATE scene_category SET slug=? WHERE name=? AND (slug='' OR slug IS NULL)", (slug, name))
+                db.execute(runtime_mig.UPDATE_SCENE_CATEGORY, (slug, name))
                 db.commit()
         except Exception:
             pass
@@ -5692,7 +5498,7 @@ def _migrate_tables():
                     if not r[0]:
                         continue
                     sid = f"sess-cfg-{r[0]}"
-                    c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, backend, skill, created_at, last_active_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))",
+                    c.execute(runtime_mig.UPSERT_CHAT_AGENT_SESSION,
                               (sid, r[0], "", r[1] or "opencode", r[2] or ""))
                 db.commit()
                 log.info("Migrated chat_config -> chat_agent_session")
@@ -5744,27 +5550,27 @@ def _migrate_tables():
             # devops_agent_session
             cols = [r[1] for r in c.execute("PRAGMA table_info(devops_agent_session)").fetchall()]
             if "backend" in cols and "backend_id" in cols:
-                c.execute("SELECT DISTINCT backend FROM devops_agent_session WHERE backend!='' AND backend IS NOT NULL")
+                c.execute(runtime_mig.SELECT_DEVOPS_AGENT_SESSION)
                 for r in c.fetchall():
                     bid = get_backend_id_by_name(r[0]) or ensure_default_backend(r[0]) or default_id
-                    c.execute("UPDATE devops_agent_session SET backend_id=? WHERE backend=?", (bid, r[0]))
-                c.execute("UPDATE devops_agent_session SET backend_id=? WHERE (backend='' OR backend IS NULL) AND backend_id=0", (default_id,))
+                    c.execute(runtime_mig.UPDATE_DEVOPS_AGENT_SESSION__MIGRATE_TABLES_3, (bid, r[0]))
+                c.execute(runtime_mig.UPDATE_DEVOPS_AGENT_SESSION__MIGRATE_TABLES, (default_id,))
             # agent_type
             acols = [r[1] for r in c.execute("PRAGMA table_info(agent_type)").fetchall()]
             if "default_backend" in acols and "default_backend_id" in acols:
-                c.execute("SELECT DISTINCT default_backend FROM agent_type WHERE default_backend!='' AND default_backend IS NOT NULL")
+                c.execute(runtime_mig.SELECT_AGENT_TYPE)
                 for r in c.fetchall():
                     bid = get_backend_id_by_name(r[0]) or ensure_default_backend(r[0]) or default_id
-                    c.execute("UPDATE agent_type SET default_backend_id=? WHERE default_backend=?", (bid, r[0]))
-                c.execute("UPDATE agent_type SET default_backend_id=? WHERE (default_backend='' OR default_backend IS NULL) AND default_backend_id=0", (default_id,))
+                    c.execute(runtime_mig.UPDATE_AGENT_TYPE__MIGRATE_TABLES, (bid, r[0]))
+                c.execute(runtime_mig.UPDATE_AGENT_TYPE, (default_id,))
             # chat_agent_session
             ccols = [r[1] for r in c.execute("PRAGMA table_info(chat_agent_session)").fetchall()]
             if "backend" in ccols and "backend_id" in ccols:
-                c.execute("SELECT DISTINCT backend FROM chat_agent_session WHERE backend!='' AND backend IS NOT NULL")
+                c.execute(runtime_mig.SELECT_CHAT_AGENT_SESSION)
                 for r in c.fetchall():
                     bid = get_backend_id_by_name(r[0]) or ensure_default_backend(r[0]) or default_id
-                    c.execute("UPDATE chat_agent_session SET backend_id=? WHERE backend=?", (bid, r[0]))
-                c.execute("UPDATE chat_agent_session SET backend_id=? WHERE (backend='' OR backend IS NULL) AND backend_id=0", (default_id,))
+                    c.execute(runtime_mig.UPDATE_CHAT_AGENT_SESSION__MIGRATE_TABLES_2, (bid, r[0]))
+                c.execute(runtime_mig.UPDATE_CHAT_AGENT_SESSION__MIGRATE_TABLES, (default_id,))
             db.commit()
             log.info("Migrated backend -> backend_id across agent tables")
     except Exception as e:
@@ -5813,8 +5619,8 @@ def _migrate_tables():
                 bcols = [r[1] for r in c.execute("PRAGMA table_info(repo_im_group_binding)").fetchall()]
                 # account -> im_app_id(补空)
                 if "account" in bcols and "im_app_id" in bcols:
-                    c.execute("UPDATE repo_im_group_binding SET im_app_id=account WHERE (im_app_id IS NULL OR im_app_id='') AND account IS NOT NULL AND account!=''")
-                    _ok = _destructive_ddl(c, "ALTER TABLE repo_im_group_binding DROP COLUMN account",
+                    c.execute(runtime_mig.UPDATE_REPO_IM_GROUP_BINDING)
+                    _ok = _destructive_ddl(c, runtime_mig.ALTER_REPO_IM_GROUP_BINDING,
                                            kind_hint="cleanup")
                     db.commit()
                     if _ok:
@@ -5822,7 +5628,7 @@ def _migrate_tables():
                 # chat_id -> im_chat_id
                 bcols2 = [r[1] for r in c.execute("PRAGMA table_info(repo_im_group_binding)").fetchall()]
                 if "chat_id" in bcols2 and "im_chat_id" not in bcols2:
-                    _ok = _destructive_ddl(c, "ALTER TABLE repo_im_group_binding RENAME COLUMN chat_id TO im_chat_id",
+                    _ok = _destructive_ddl(c, runtime_mig.ALTER_REPO_IM_GROUP_BINDING__MIGRATE_TABLES,
                                            kind_hint="cleanup")
                     db.commit()
                     if _ok:
@@ -5841,9 +5647,7 @@ def _migrate_tables():
             # GitCode 仓库：bot_username 为空或占位值 → 填 GitCode bot name
             if _gitcode_bot_name:
                 c.execute(
-                    "UPDATE managed_repos SET bot_username=? "
-                    "WHERE (bot_username='devops-bot' OR bot_username='' OR bot_username IS NULL) "
-                    "AND repo_key NOT LIKE 'github:%'",
+                    mgmt_mig.UPDATE_MANAGED_REPOS,
                     (_gitcode_bot_name,))
                 _gc_rows = c.rowcount
             else:
@@ -5851,9 +5655,7 @@ def _migrate_tables():
             # GitHub 仓库：bot_username 为空或占位值 → 填 GitHub bot username
             if _github_bot_name:
                 c.execute(
-                    "UPDATE managed_repos SET bot_username=? "
-                    "WHERE (bot_username='devops-bot' OR bot_username='' OR bot_username IS NULL) "
-                    "AND repo_key LIKE 'github:%'",
+                    mgmt_mig.UPDATE_MANAGED_REPOS__MIGRATE_TABLES,
                     (_github_bot_name,))
                 _gh_rows = c.rowcount
             else:
@@ -5861,8 +5663,7 @@ def _migrate_tables():
             # 纠正历史跨平台回填错误：GitHub 仓被填成 GitCode bot name → 修正为 GitHub bot username
             if _github_bot_name and _gitcode_bot_name and _github_bot_name != _gitcode_bot_name:
                 c.execute(
-                    "UPDATE managed_repos SET bot_username=? "
-                    "WHERE bot_username=? AND repo_key LIKE 'github:%'",
+                    mgmt_mig.UPDATE_MANAGED_REPOS__MIGRATE_TABLES_2,
                     (_github_bot_name, _gitcode_bot_name))
                 _fix_rows = c.rowcount
             else:
@@ -5881,7 +5682,7 @@ def _migrate_tables():
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT * FROM user_accounts WHERE username='default'")
+            c.execute(mgmt_mig.SELECT_USER_ACCOUNTS)
             row = c.fetchone()
             if row:
                 cols = [d[0] for d in c.description]
@@ -5898,13 +5699,13 @@ def _migrate_tables():
                 for src_key, meta_key in _oauth_keys:
                     val = acc.get(src_key, "") or ""
                     if val:
-                        c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
+                        c.execute(runtime_mig.SELECT_META__MIGRATE_TABLES, (meta_key,))
                         if c.fetchone()[0] == 0:
-                            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
+                            c.execute(runtime_mig.UPSERT_META__MIGRATE_TABLES,
                                       (meta_key, val))
                             migrated = True
                 # 删除 default 账户（OAuth 已收敛到 meta 表）
-                c.execute("DELETE FROM user_accounts WHERE username='default'")
+                c.execute(mgmt_mig.DELETE_USER_ACCOUNTS)
                 db.commit()
                 if migrated:
                     log.info("Migrated OAuth config from default account to meta table")
@@ -5923,10 +5724,10 @@ def _migrate_tables():
                 log.info("Migrated table agent_sessions -> devops_agent_session")
             elif "agent_sessions" in _tables and "devops_agent_session" in _tables:
                 # 新表已被创建但旧表仍存在(历史库),迁移数据后删除旧表
-                c.execute("INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at) SELECT id, repo_key, agent_type, backend, skill, oc_session_id, repo_gitcode_token, status, created_at, last_active_at FROM agent_sessions")
+                c.execute(runtime_mig.INSERT_IGNORE_DEVOPS_AGENT_SESSION)
                 c.execute("DROP TABLE agent_sessions")
                 db.commit()
-                log.info("Migrated agent_sessions data into devops_agent_session and dropped agent_sessions")
+                log.info(runtime_mig.SQL_DEVOPS_AGENT_SESSION)
     except Exception as e:
         log.warning(f"Migrate agent_sessions table failed: {e}")
     # 迁移 agent_type_config -> agent_type + skill(旧架构拆分)
@@ -5939,14 +5740,14 @@ def _migrate_tables():
                 c.execute("SELECT agent_type, display_name, description, default_backend, icon, order_num, subscribe_events FROM agent_type_config WHERE order_num>0")
                 for r in c.fetchall():
                     c.execute(
-                        "INSERT OR IGNORE INTO agent_type (agent_type, display_name, description, default_backend, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?,?)",
+                        runtime_mig.INSERT_IGNORE_AGENT_TYPE__MIGRATE_TABLES,
                         (r[0], r[1], r[2] or "", r[3] or "opencode", r[4] or "", r[5] or 0, r[6] or '[]')
                     )
                 # 2. 官方技能(parent_agent_type!='')-> skill 表(scope=official)
                 c.execute("SELECT agent_type, display_name, description, parent_agent_type, skill_path FROM agent_type_config WHERE parent_agent_type!=''")
                 for r in c.fetchall():
                     c.execute(
-                        "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'official','')",
+                        runtime_mig.INSERT_IGNORE_SKILL,
                         (r[0], r[1], r[2] or "", r[3] or "", r[4] or r[0])
                     )
                 db.commit()
@@ -5962,7 +5763,7 @@ def _migrate_tables():
                 c.execute("SELECT user_id, skill_name, agent_type, description, parent_agent_type FROM user_skills")
                 for r in c.fetchall():
                     c.execute(
-                        "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,'user',?)",
+                        runtime_mig.INSERT_IGNORE_SKILL__MIGRATE_TABLES,
                         (r[1], r[1], r[3] or "", r[2] or "", r[1], str(r[0]))
                     )
                 db.commit()
@@ -5985,7 +5786,7 @@ def _migrate_tables():
             c = db.cursor()
             cols = [r[1] for r in c.execute("PRAGMA table_info(devops_agent_session)").fetchall()]
             if "oc_session_id" in cols and "backend_session_id" in cols:
-                c.execute("UPDATE devops_agent_session SET backend_session_id=oc_session_id WHERE backend_session_id='' AND oc_session_id!=''")
+                c.execute(runtime_mig.UPDATE_DEVOPS_AGENT_SESSION__MIGRATE_TABLES_2)
                 db.commit()
                 log.info("Migrated devops_agent_session oc_session_id -> backend_session_id")
     except Exception as e:
@@ -5996,26 +5797,26 @@ def _migrate_tables():
             c = db.cursor()
             cols = [r[1] for r in c.execute("PRAGMA table_info(vod_conversations)").fetchall()]
             if "feishu_chat_id" in cols:
-                _ok = _destructive_ddl(c, "ALTER TABLE vod_conversations RENAME COLUMN feishu_chat_id TO im_chat_id",
+                _ok = _destructive_ddl(c, runtime_mig.ALTER_VOD_CONVERSATIONS,
                                        kind_hint="cleanup")
                 _skipped = [] if _ok else ["feishu_chat_id->im_chat_id"]
             else:
                 _ok, _skipped = True, []
             if "feishu_chat_name" in cols:
-                _ok2 = _destructive_ddl(c, "ALTER TABLE vod_conversations RENAME COLUMN feishu_chat_name TO im_channel_name",
+                _ok2 = _destructive_ddl(c, runtime_mig.ALTER_VOD_CONVERSATIONS__MIGRATE_TABLES,
                                         kind_hint="cleanup")
                 _ok = _ok and _ok2
                 if not _ok2:
                     _skipped.append("feishu_chat_name->im_channel_name")
             if "oc_session_id" in cols:
-                _ok3 = _destructive_ddl(c, "ALTER TABLE vod_conversations RENAME COLUMN oc_session_id TO backend_session_id",
+                _ok3 = _destructive_ddl(c, runtime_mig.ALTER_VOD_CONVERSATIONS__MIGRATE_TABLES_2,
                                         kind_hint="cleanup")
                 _ok = _ok and _ok3
                 if not _ok3:
                     _skipped.append("oc_session_id->backend_session_id")
             cols = [r[1] for r in c.execute("PRAGMA table_info(vod_conversations)").fetchall()]
             if "im_provider" not in cols:
-                c.execute("ALTER TABLE vod_conversations ADD COLUMN im_provider TEXT DEFAULT 'feishu'")
+                c.execute(runtime_mig.ALTER_VOD_CONVERSATIONS__MIGRATE_TABLES_3)
             db.commit()
             if _ok:
                 log.info("Migrated vod_conversations fields to im_* / backend_session_id")
@@ -6030,7 +5831,7 @@ def _migrate_tables():
             c = db.cursor()
             cols = [r[1] for r in c.execute("PRAGMA table_info(chat_conversations)").fetchall()]
             if "session_id" in cols and "backend_session_id" in cols:
-                c.execute("UPDATE chat_conversations SET backend_session_id=session_id WHERE backend_session_id='' AND session_id!=''")
+                c.execute(runtime_mig.UPDATE_CHAT_CONVERSATIONS)
                 db.commit()
                 log.info("Migrated chat_conversations session_id -> backend_session_id")
     except Exception as e:
@@ -6045,7 +5846,7 @@ def _migrate_tables():
                 if "skill" not in _cols or "skill_id" not in _cols:
                     continue
                 # 先构建 skill_name -> id 映射(official 优先)
-                c.execute("SELECT id, skill_name FROM skill WHERE scope='official'")
+                c.execute(runtime_mig.SELECT_SKILL__MIGRATE_TABLES)
                 _name2id = {r[1]: r[0] for r in c.fetchall()}
                 c.execute(f"SELECT id, skill FROM {_tbl} WHERE skill IS NOT NULL AND skill!='' AND (skill_id IS NULL OR skill_id=0)")
                 _rows = c.fetchall()
@@ -6227,7 +6028,7 @@ def _migrate_tables():
             _ensure_column(c, "devops_pipeline_scene", "pr_subscription_enabled", "INTEGER NOT NULL DEFAULT 0")
             db.commit()
             # 数据迁移：已有 pr_subscription 场景 → standard + pr_subscription_enabled=1
-            c.execute("UPDATE devops_pipeline_scene SET pr_subscription_enabled=1, scene_type='standard' WHERE scene_type='pr_subscription'")
+            c.execute(mgmt_mig.UPDATE_DEVOPS_PIPELINE_SCENE__MIGRATE_TABLES)
             _migrated = c.rowcount
             db.commit()
             if _migrated:
@@ -6359,11 +6160,7 @@ def _migrate_tables():
                 _ensure_column(c, "runtime_credentials", "bandwidth_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "bandwidth_mbps", "REAL DEFAULT 0")
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
-                c.execute("""
-                    DELETE FROM runtime_credentials WHERE id NOT IN (
-                        SELECT MIN(id) FROM runtime_credentials GROUP BY name
-                    )
-                """)
+                c.execute(runtime_mig.DELETE_RUNTIME_CREDENTIALS)
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_runtime_credentials_name ON runtime_credentials(name)")
                 db.commit()
             if "agent_runtimes" in _tables:
@@ -6457,36 +6254,7 @@ def _migrate_tables():
             with db_lock:
                 c = db.cursor()
                 c.execute(
-                    "UPDATE issue SET "
-                    "stage = COALESCE((SELECT s.stage FROM issue_state s "
-                    "                    WHERE s.repo_key=issue.repo_key "
-                    "                      AND s.issue_id='#'||issue.issue_number), 'vod'), "
-                    "owner_agent = COALESCE((SELECT s.owner_agent FROM issue_state s "
-                "                    WHERE s.repo_key=issue.repo_key "
-                "                      AND s.issue_id='#'||issue.issue_number), 'vod'), "
-                "scene_id = COALESCE((SELECT s.scene_id FROM issue_state s "
-                "                    WHERE s.repo_key=issue.repo_key "
-                "                      AND s.issue_id='#'||issue.issue_number), ''), "
-                "scene_user_id = COALESCE((SELECT s.scene_user_id FROM issue_state s "
-                "                    WHERE s.repo_key=issue.repo_key "
-                "                      AND s.issue_id='#'||issue.issue_number), 0), "
-                "allow_scene_override = COALESCE((SELECT s.allow_scene_override FROM issue_state s "
-                "                    WHERE s.repo_key=issue.repo_key "
-                "                      AND s.issue_id='#'||issue.issue_number), 0), "
-                "a2a_seq = COALESCE((SELECT s.a2a_seq FROM issue_state s "
-                "                    WHERE s.repo_key=issue.repo_key "
-                "                      AND s.issue_id='#'||issue.issue_number), a2a_seq), "
-                "parent_issue_id = COALESCE((SELECT s.parent_issue_id FROM issue_state s "
-                "                    WHERE s.repo_key=issue.repo_key "
-                "                      AND s.issue_id='#'||issue.issue_number), ''), "
-                "is_subtask_mode = COALESCE((SELECT s.is_subtask_mode FROM issue_state s "
-                "                    WHERE s.repo_key=issue.repo_key "
-                "                      AND s.issue_id='#'||issue.issue_number), is_subtask_mode), "
-                "updated_at = COALESCE((SELECT s.updated_at FROM issue_state s "
-                "                    WHERE s.repo_key=issue.repo_key "
-                "                      AND s.issue_id='#'||issue.issue_number), '') "
-                "WHERE EXISTS (SELECT 1 FROM issue_state s "
-                "              WHERE s.repo_key=issue.repo_key AND s.issue_id='#'||issue.issue_number)")
+                    runtime_mig.UPDATE_ISSUE)
             _backfilled = c.rowcount
             db.commit()
         else:
@@ -6573,17 +6341,13 @@ def _migrate_tables():
                         _is_dropped = True
                     else:
                         _orphan = c.execute(
-                            "SELECT COUNT(*) FROM issue_state s WHERE NOT EXISTS ("
-                            "SELECT 1 FROM issue i WHERE i.repo_key=s.repo_key "
-                            "AND i.issue_number=CAST(REPLACE(s.issue_id,'#','') AS INTEGER))"
+                            runtime_mig.SELECT_ISSUE_STATE
                         ).fetchone()[0]
                         _mismatch = c.execute(
-                            "SELECT COUNT(*) FROM issue_state s JOIN issue i "
-                            "ON i.repo_key=s.repo_key AND i.issue_number=CAST(REPLACE(s.issue_id,'#','') AS INTEGER) "
-                            "WHERE COALESCE(i.stage,'')<>COALESCE(s.stage,'')"
+                            runtime_mig.SELECT_ISSUE_STATE__MIGRATE_TABLES
                         ).fetchone()[0]
                         if _orphan == 0 and _mismatch == 0:
-                            c.execute("DROP TABLE issue_state")
+                            c.execute(runtime_mig.DROP_ISSUE_STATE)
                             db.commit()
                             _is_dropped = True
                         else:
@@ -6641,8 +6405,7 @@ def _rebuild_scene_market_unique():
                 )
                 if c.fetchone()[0] == 0:
                     c.execute(
-                        "ALTER TABLE scene_market ADD UNIQUE INDEX uk_name_scope_user_repo "
-                        "(name, scope, source_user_id, repo_key)"
+                        mgmt_mig.ALTER_SCENE_MARKET__REBUILD_SCENE_MARKET_UNIQUE
                     )
                     db.commit()
                     log.info("Scene market: added new unique index uk_name_scope_user_repo (MySQL)")
@@ -6672,18 +6435,11 @@ def _rebuild_scene_market_unique():
 
             # 表重建：创建临时新表 → 复制数据 → 删旧表 → 重命名
             log.info("Scene market: rebuilding table for new UNIQUE constraint (SQLite)")
-            c.execute("ALTER TABLE scene_market RENAME TO scene_market_old")
+            c.execute(mgmt_mig.ALTER_SCENE_MARKET)
             c.execute(_SCENE_MARKET_DDL)
             # 复制数据（official 场景补 scope='official', repo_key=***）
             c.execute(
-                "INSERT INTO scene_market SELECT "
-                "id, name, display_name, version, description, market_description, "
-                "icon, category_id, is_featured, like_count, source, source_user_id, "
-                "recommended_template, nodes_json, onboarding, tags, author, "
-                "content_hash, obs_icon_key, is_active, "
-                "COALESCE(scope, 'official'), COALESCE(repo_key, ''), "
-                "created_by, updated_by, created_at, updated_at "
-                "FROM scene_market_old"
+                mgmt_mig.INSERT_SCENE_MARKET
             )
             c.execute("DROP TABLE scene_market_old")
             db.commit()
@@ -6736,12 +6492,11 @@ def _migrate_scene_table_to_repo_model():
     with db_lock:
         c = db.cursor()
         old_rows = c.execute(
-            "SELECT scene_id, name, description, scope, repo_key, user_id, nodes_json, onboarding, is_active "
-            "FROM devops_pipeline_scene").fetchall()
+            mgmt_mig.SELECT_DEVOPS_PIPELINE_SCENE__MIGRATE_SCENE_TABLE_TO_REPO).fetchall()
         # user scope → repo_key 反查（user_repos）
         repo_of_user = {}
         try:
-            for ur in c.execute("SELECT user_id, repo_key FROM user_repos").fetchall():
+            for ur in c.execute(mgmt_mig.SELECT_USER_REPOS).fetchall():
                 repo_of_user.setdefault(ur[0], set()).add(ur[1])
         except Exception:
             pass
@@ -6782,7 +6537,7 @@ CREATE TABLE devops_pipeline_scene_new (
             else:  # official：官方模板不保留
                 _dropped += 1
         # 替换旧表
-        c.execute("DROP TABLE devops_pipeline_scene")
+        c.execute(mgmt_mig.DROP_DEVOPS_PIPELINE_SCENE)
         c.execute("ALTER TABLE devops_pipeline_scene_new RENAME TO devops_pipeline_scene")
         db.commit()
         log.info(
@@ -6812,9 +6567,7 @@ def _seed_official_scene_market_from_pipelines():
                 _nodes = _json.dumps(_scene.get("nodes", []), ensure_ascii=False)
                 try:
                     c.execute(
-                        "INSERT OR IGNORE INTO scene_market "
-                        "(name, display_name, version, description, market_description, category_id, is_featured, like_count, source, source_user_id, recommended_template, nodes_json, onboarding, is_active) "
-                        "VALUES (?,?, '1.0.0', '', ?, 1, 0, 0, 'official', 0, '', ?, ?, 1)",
+                        mgmt_mig.INSERT_IGNORE_SCENE_MARKET__SEED_OFFICIAL_SCENE_MARKET_F,
                         (_sid, _scene.get("name", _sid), _scene.get("name", _sid),
                          _nodes, _scene.get("onboarding", "repo-onboarding")))
                     _imported += 1
@@ -6836,29 +6589,28 @@ def _backfill_scene_display_names():
             # 确保列存在（老库补充）
             _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
             if _cols and "display_name" not in _cols:
-                c.execute("ALTER TABLE devops_pipeline_scene ADD COLUMN display_name TEXT DEFAULT ''")
+                c.execute(mgmt_mig.ALTER_DEVOPS_PIPELINE_SCENE)
                 db.commit()
                 log.info("Added display_name column to devops_pipeline_scene")
             # market 映射 scene_id(name) -> display_name
             _map = {}
             try:
                 for r in c.execute(
-                        "SELECT DISTINCT name, display_name FROM scene_market "
-                        "WHERE source='official' AND is_active=1 AND display_name<>''"):
+                        mgmt_mig.SELECT_SCENE_MARKET__BACKFILL_SCENE_DISPLAY_NAMES):
                     _map[r[0]] = r[1]
             except Exception as _e:
                 log.warning(f"_backfill_scene_display_names: read market failed: {_e}")
             # 回填：display_name 为空的行按 scene_id 匹配 market 的 name（官方场景标识符）
             _upd = 0
             for r in c.execute(
-                    "SELECT id, scene_id, name, display_name FROM devops_pipeline_scene"):
+                    mgmt_mig.SELECT_DEVOPS_PIPELINE_SCENE__BACKFILL_SCENE_DISPLAY_NAMES):
                 _row_id, _sid, _rname, _dn = r
                 if _dn:
                     continue
                 # scene_id 即官方场景标识符（如 default/iac），market.display_name 为其展示名
                 _target = _map.get(_sid)
                 if _target and _target != _sid:
-                    c.execute("UPDATE devops_pipeline_scene SET display_name=? WHERE id=?", (_target, _row_id))
+                    c.execute(mgmt_mig.UPDATE_DEVOPS_PIPELINE_SCENE__BACKFILL_SCENE_DISPLAY_NAMES, (_target, _row_id))
                     _upd += 1
             db.commit()
             if _upd:
@@ -6907,10 +6659,10 @@ def _backfill_scene_display_names():
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT value FROM meta WHERE key='issue343_jwt_invalidated'")
+            c.execute(runtime_mig.SELECT_META__BACKFILL_SCENE_DISPLAY_NAMES)
             if not c.fetchone():
-                c.execute("UPDATE grape_accounts SET token_version = token_version + 1")
-                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('issue343_jwt_invalidated', '1')")
+                c.execute(mgmt_mig.UPDATE_GRAPE_ACCOUNTS)
+                c.execute(runtime_mig.UPSERT_META__BACKFILL_SCENE_DISPLAY_NAMES)
                 db.commit()
                 log.info("Issue #343: token_version +1 applied (old JWTs invalidated)")
     except Exception as e:
@@ -6922,13 +6674,13 @@ def _backfill_scene_display_names():
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT value FROM meta WHERE key='issue344_tokens_cleared'")
+            c.execute(runtime_mig.SELECT_META__BACKFILL_SCENE_DISPLAY_NAMES_2)
             if not c.fetchone():
-                c.execute("UPDATE chat_conversations SET user_gitcode_token = '' WHERE user_gitcode_token != ''")
-                c.execute("UPDATE agent_tasks SET user_gitcode_token = '' WHERE user_gitcode_token != ''")
-                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('issue344_tokens_cleared', '1')")
+                c.execute(runtime_mig.UPDATE_CHAT_CONVERSATIONS__BACKFILL_SCENE_DISPLAY_NAMES)
+                c.execute(runtime_mig.UPDATE_AGENT_TASKS)
+                c.execute(runtime_mig.UPSERT_META__BACKFILL_SCENE_DISPLAY_NAMES_2)
                 db.commit()
-                log.info("Issue #344: cleared cached plaintext tokens from chat_conversations and agent_tasks")
+                log.info(runtime_mig.SQL_CHAT_CONVERSATIONS)
     except Exception as e:
         log.warning(f"Issue #344 token cleanup failed: {e}")
 
@@ -6991,7 +6743,7 @@ def _uc_unique_key_columns(c) -> set:
     """user_credentials 当前唯一键的列集合（SQLite: PRAGMA / MySQL: SHOW INDEX）。"""
     if _mysql_backend():
         try:
-            rows = c.execute("SHOW INDEX FROM user_credentials").fetchall()
+            rows = c.execute(mgmt_mig.SQL_USER_CREDENTIALS__UC_UNIQUE_KEY_COLUMNS).fetchall()
         except Exception:
             return set()
         by_key: dict = {}
@@ -7027,11 +6779,7 @@ _UC_REBUILD_DDL = """CREATE TABLE user_credentials__uqkind (
     PRIMARY KEY (user_id, provider, kind)
 )"""
 
-_UC_COPY_SQL = ("INSERT INTO user_credentials__uqkind "
-                "(id, user_id, provider, kind, config_json, created_at, updated_at) "
-                "SELECT COALESCE(id,''), user_id, provider, COALESCE(kind,''), "
-                "config_json, COALESCE(created_at,''), COALESCE(updated_at,'') "
-                "FROM user_credentials")
+_UC_COPY_SQL = (mgmt_mig.INSERT_USER_CREDENTIALS)
 
 
 _UC_TMP_TABLE = "user_credentials__uqkind"
@@ -7267,8 +7015,7 @@ def _fn_user_credentials_unique_kind() -> None:
         #    保护，每步后复查（C-1：不能信 _destructive_ddl 的返回值）
         if _mysql_backend():
             if not _destructive_ddl(
-                    c, "RENAME TABLE user_credentials TO user_credentials__old_backup, "
-                       "user_credentials__uqkind TO user_credentials", kind_hint="cleanup"):
+                    c, mgmt_mig.SQL_USER_CREDENTIALS, kind_hint="cleanup"):
                 raise RuntimeError("202611170007 被 cleanup 门槛拦截（不盖章，下版本重试）")
         else:
             for _src, _dst in (("user_credentials", _UC_BAK_TABLE),
