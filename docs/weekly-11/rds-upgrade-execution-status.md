@@ -160,6 +160,61 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### event_pipeline 事件管道场景/仓库接口化（-10，本文件清零）
+- 文件：`src/domains/runtime/pipeline/event_pipeline.py`（10 处 → **0**）；全局静态 **314 → 304**（73 对）。
+- 表分布（消费域 runtime，两表都归 mgmt）：`devops_pipeline_scene` 6 处（QA 节点 2、PR 订阅列表 1、
+  关联仓库 1、场景部署地址登记 1、启用位判定 1）、`managed_repos` 4 处（bot 用户名 1、org_id 1、
+  仓库部署地址登记 1、默认场景 1）。
+- owner 侧新增（mgmt public，全部「任意拓扑」`?` 方言，SQL 只在 owner 留一份）：
+  · 具名查询：`scene_nodes_by_repo_scene` / `pr_subscription_scenes` / `scene_active_nodes_by_repo_scene` /
+    `scene_linked_repos` / `scene_active_flags` / `scene_deploy_url_set` / `repo_bot_username` /
+    `repo_org_id` / `repo_deploy_url_set`（列序、WHERE 通配口径与原 SQL 逐字一致）
+  · 薄函数：`scene_nodes_any` / `list_pr_subscription_scenes_any` / `scene_active_nodes_any` /
+    `scene_linked_repos_any` / `scene_active_flags_any` / `set_scene_deploy_url_any` /
+    `repo_bot_username_any` / `repo_org_id_any` / `set_repo_deploy_url_any`；`repo_dev_scene` 复用上一批已建的原语。
+- 关键设计取舍：
+  1. **每个站点原本都是三段式兜底**（`mgmt_lib()` → `mgmt_lib(foreign_only=True).read_one()` → 本地兜底 SQL），
+     只有最后一段被静态统计计入。本轮统一塌缩成一次 owner 原语调用：自有 DSN 走 mgmt 连接，单库/测试走进程库，
+     同一份语句两条拓扑都能跑，调用方不再留任何 SQL（兜底段消失，双重 lib 探测也一并删掉）。
+  2. **不过滤 `is_active` 的那条照抄**：`_scene_qa_skill` 读场景节点时历史口径就是「不看启用位」
+     （停用场景的 QA 节点仍可解析），与 PR 订阅/关联仓库/部署登记三处的 `is_active=1` 口径不同。
+     九条语句各自把过滤条件写进 owner 侧，没有为了「统一」改语义——`scene_nodes_any` 的 docstring 已标注。
+  3. **写路径保留 outbox 优先**：`register_sre_deploy_url` / `register_scene_deploy_url` 仍先走
+     `cross_write.submit`（幂等键 + 失败排队重试），只在 lib 不可用/异常时回落 owner 原语自提交；
+     调用方事务语义简化为「rowcount>0 即登记成功」，与原 `db.commit()` 分支等价。
+  4. **`repo_key` 唯一键的前提下删掉 `ORDER BY org_id DESC`**：原语句带排序，但 `managed_repos.repo_key`
+     是主键，排序对结果集无影响，保留只会让人误以为存在多组织行（已在调用点注释写明）。
+  5. **`to_repo_key()` 的 provider 前缀不动**：`_resolve_bot_username` 先对 repo_key 做规范化
+     （`gitcode.com/a/b` → `gitcode:gitcode.com/a/b`）再查库，这是既有存储口径，原语签名沿用同一入参，
+     不在这里「顺手修正」。
+- 修的存量问题（无功能 bug，但都是三库独立后必然 1146 的隐性跨库依赖）：
+  1. 上述三段式兜底在独立拓扑下第二段返回 None、第三段在 runtime 库上查 mgmt 表 → 异常被外层 `except`
+     吞成空值：QA skill 解析恒空（PR 订阅不派 QA）、org_id 恒 0（引擎选型退化为「个人组织」直选本机）、
+     bot 用户名恒空（回落平台全局 bot）、部署链接永不登记。现在同一条 owner 原语路径覆盖单库与多库。
+  2. `_match_pr_subscription` / `_dispatch_pr_subscription_redispatch` 过去先 `with db_lock:` 再调
+     mgmt lib——为一条 mgmt 读把 runtime 进程库锁一起持住；现在该锁只覆盖 runtime 自己的查询。
+  3. 静默 except 未动（本文件 `except Exception: pass` 7 处是已审阅豁免，改文案会让豁免名额失配），
+     棘轮基线保持 56 不变。
+- **未做（如实标注）**：`_READ_QUERIES` 里 5 条 index 型具名查询（`devops_pipeline_scene_8b6d22/7a48a2/
+  b1eaa2/ab0110`、`managed_repos_3564e6`）本轮失去调用方，属多库拓扑既有读面，**保留在 `_READ_QUERIES`**
+  （删除需跨分支确认无其他消费方），不随本批清空。
+- 验证：`py_compile` COMPILE_OK；`~/burndown/event_pipeline_smoke.py`（sqlite，DEVOPS_DB_BACKEND=sqlite）
+  覆盖 10 个站点 + 特殊口径（停用场景 QA 节点仍可解析、订阅三条件过滤、空 bot 回落、写语句只在用行/
+  已托管仓库才落库、启用位含 `repo_key=''` 通用行、无行=有效、`repo_org_id` 无行 None/0 值原样、
+  未登记查询名 KeyError、静态否定「本文件两表可执行 SQL 为 0」），**ALL EVENT_PIPELINE SMOKE CHECKS PASSED**；
+  `rds_gate.sh --quick` **GATE: 全绿**（R1-R7 PASS / 棘轮未上升 / 内部契约 37 条 / 看板已刷新）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` import OK；
+  `check_lib_query_names.py` PASS（mgmt 101 funcs + 19 queries used / 163 funcs + 35 queries registered）；
+  定向回归 `tests/runtime/test_issue_468_sre_deploy_url_register.py` +
+  `test_issue_426_pr_sub_binding` / `test_pr_subscription_dedup` / `test_issue_528_pr_sub_env_integration` /
+  `test_issue_568_scene_visibility_unification` / `test_issue_259_offline_dispatch` **40 passed**。
+- 已知非本批（HEAD 同源）：`tests/runtime/test_issue_596_p0_direct_executor_migration.py` 4 failed
+  （re-export/无定义/RE 池断言），在 `git worktree add … HEAD` 上复现完全相同的 4 条，与本批无关。
+- 基线：**304 处 / 73 对**（`devops_pipeline_scene,mgmt,runtime` 12→6、`managed_repos,mgmt,runtime` 15→11）；
+  `next-batches.md` 已刷新（下一批 `src/api/patrol_compensate.py` 10 处）。
+- 未做（如实标注）：本轮未跑 `p4_p5_loop.sh` 三实例彩排——改动只涉及 mgmt owner 原语与 runtime 调用点，
+  无 schema / 迁移变化，跨域写仍走 outbox；运行面证据为 sqlite 烟测 + 单库 pytest，未把彩排结果算进来。
+
 ### scene_sync 场景同步接口化（-10，本文件清零）
 - 文件：`src/domains/runtime/storage/scene_sync.py`（10 处 → **0**）；全局静态 **324 → 314**（73 对）。
 - 表分布（消费域 runtime，两表都归 mgmt）：`scene_market` 8 处（读取 3 / 精选计数与标记 2 / upsert 2 / 图标回写 1）、

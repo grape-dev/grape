@@ -1538,6 +1538,31 @@ _ANY_QUERIES: dict[str, str] = {
     "scene_featured_official_count": (
         "SELECT COUNT(*) FROM scene_market WHERE source='official' AND is_featured=1 AND is_active=1"),
     "scene_set_icon_by_id": "UPDATE scene_market SET icon=?, obs_icon_key=? WHERE id=?",
+    # ── 流水线场景 / 托管仓库（runtime 事件管道消费：QA 节点、PR 订阅、部署登记）──
+    # 列序与 event_pipeline 原查询逐字一致（调用方按下标取值）；WHERE 通配口径照抄，
+    # 包括「不加 is_active」的那条（QA skill 取节点时历史口径就是不过滤启用位）。
+    "scene_nodes_by_repo_scene": (
+        "SELECT nodes_json FROM devops_pipeline_scene WHERE repo_key=? AND scene_id=?"),
+    "pr_subscription_scenes": (
+        "SELECT scene_id, nodes_json, advanced_options FROM devops_pipeline_scene "
+        "WHERE repo_key=? AND pr_subscription_enabled=1 AND is_active=1"),
+    "scene_active_nodes_by_repo_scene": (
+        "SELECT scene_id, nodes_json FROM devops_pipeline_scene "
+        "WHERE repo_key=? AND scene_id=? AND is_active=1"),
+    "scene_linked_repos": (
+        "SELECT linked_repos, advanced_options FROM devops_pipeline_scene "
+        "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1"),
+    "scene_active_flags": (
+        "SELECT is_active FROM devops_pipeline_scene "
+        "WHERE scene_id=? AND (repo_key=? OR repo_key='')"),
+    "scene_deploy_url_set": (
+        "UPDATE devops_pipeline_scene SET deploy_url=? "
+        "WHERE scene_id=? AND repo_key=? AND is_active=1"),
+    "repo_bot_username": (
+        "SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1"),
+    "repo_org_id": (
+        "SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1"),
+    "repo_deploy_url_set": "UPDATE managed_repos SET deploy_url=? WHERE repo_key=?",
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -1603,6 +1628,65 @@ def repo_dev_scene(repo_key: str) -> str:
     """仓库默认场景 id（managed_repos.dev_scene）；无行/空值返回空串。"""
     row = read_one_any("repo_dev_scene", (repo_key,))
     return str(row[0] or "") if row else ""
+
+
+# ---------- 流水线场景 / 托管仓库（runtime 事件管道） ----------
+#
+# 原实现每个站点都是「mgmt_lib 优先 + 本地兜底 SQL」双份：lib 句柄只在独立拓扑下可用，
+# 兜底 SQL 正是跨域表引用的来源，而三库拓扑下进程库根本没有这些表（无视图 → 1146）。
+# SQL 上移到本域后调用方只剩业务规则，两条拓扑跑同一份语句（自有 DSN → mgmt 连接；
+# 单库/测试 → 进程主库）。列序与调用方原查询逐字一致，按下标取值不用改。
+
+
+def scene_nodes_any(repo_key: str, scene_id: str) -> Any | None:
+    """场景节点 JSON（按仓库+场景，**不过滤 is_active**：QA skill 账面口径）。
+
+    无行返回 None；行存在但 nodes_json 为空时返回空串（调用方 `or "[]"` 后同口径）。
+    """
+    row = read_one_any("scene_nodes_by_repo_scene", (repo_key, scene_id))
+    return row[0] if row else None
+
+
+def list_pr_subscription_scenes_any(repo_key: str) -> list[tuple]:
+    """启用了 PR 订阅且在用的场景 (scene_id, nodes_json, advanced_options)。"""
+    return [tuple(r) for r in read_all_any("pr_subscription_scenes", (repo_key,))]
+
+
+def scene_active_nodes_any(repo_key: str, scene_id: str) -> Any | None:
+    """在用场景的 (scene_id, nodes_json)：无行或已停用返回 None（PR 重派判定用）。"""
+    return read_one_any("scene_active_nodes_by_repo_scene", (repo_key, scene_id))
+
+
+def scene_linked_repos_any(scene_id: str, repo_key: str) -> Any | None:
+    """在用场景的 (linked_repos, advanced_options)：无行返回 None。"""
+    return read_one_any("scene_linked_repos", (scene_id, repo_key))
+
+
+def scene_active_flags_any(scene_id: str, repo_key: str) -> list[Any]:
+    """该场景行（含 repo_key='' 的通用行）的 is_active 列表；无行返回空列表。"""
+    return list(read_all_any("scene_active_flags", (scene_id, repo_key or "")))
+
+
+def set_scene_deploy_url_any(deploy_url: str, scene_id: str, repo_key: str) -> int:
+    """登记场景部署地址（仅在用场景行），返回影响行数；0 行=场景不存在/已停用。"""
+    return exec_any("scene_deploy_url_set", (deploy_url, scene_id, repo_key))
+
+
+def repo_bot_username_any(repo_key: str) -> str:
+    """仓库配置的非空 bot 用户名；无行/空值返回空串（回落到平台全局 bot）。"""
+    row = read_one_any("repo_bot_username", (repo_key,))
+    return str(row[0] or "") if row else ""
+
+
+def repo_org_id_any(repo_key: str) -> Any:
+    """仓库所属组织 id；无行返回 None（调用方按 0/个人组织处理）。"""
+    row = read_one_any("repo_org_id", (repo_key,))
+    return row[0] if row else None
+
+
+def set_repo_deploy_url_any(deploy_url: str, repo_key: str) -> int:
+    """登记仓库部署地址，返回影响行数；0 行=仓库未托管（不写库）。"""
+    return exec_any("repo_deploy_url_set", (deploy_url, repo_key))
 
 
 # ---------- 场景市场（scene_market / scene_skill_ref 归 mgmt；runtime 定时同步消费） ----------

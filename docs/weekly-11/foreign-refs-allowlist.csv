@@ -17,7 +17,7 @@ chat_conversations,runtime,mgmt,2
 devops_agent_session,runtime,mgmt,4
 devops_pipeline_scene,mgmt,api,4
 devops_pipeline_scene,mgmt,insight,1
-devops_pipeline_scene,mgmt,runtime,12
+devops_pipeline_scene,mgmt,runtime,6
 distributed_locks,runtime,insight,1
 distributed_locks,runtime,kernel,9
 event_action_filter,mgmt,api,3
@@ -50,7 +50,7 @@ issue_state,runtime,api,1
 login_whitelist,mgmt,kernel,4
 managed_repos,mgmt,api,3
 managed_repos,mgmt,kernel,5
-managed_repos,mgmt,runtime,15
+managed_repos,mgmt,runtime,11
 meta,runtime,mgmt,11
 obs_metric_rollup,insight,mgmt,1
 outbound_content_ledger,mgmt,kernel,6

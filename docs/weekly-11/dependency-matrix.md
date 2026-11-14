@@ -1,7 +1,7 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-15 00:15　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **50** 张；跨域引用 **314** 处（73 个「表×消费域」对）；含归属域在内的 SQL 引用 2391 处
+> 生成时间：2026-11-15 00:26　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **50** 张；跨域引用 **304** 处（73 个「表×消费域」对）；含归属域在内的 SQL 引用 2390 处
 
 ## 1. 域 × 域 跨域引用热力
 
@@ -10,15 +10,15 @@
 | api | 29 | 48 | 3 | 80 |
 | kernel | 28 | 12 | 0 | 40 |
 | mgmt | 0 | 42 | 6 | 48 |
-| runtime | 94 | 0 | 1 | 95 |
+| runtime | 84 | 0 | 1 | 85 |
 | insight | 3 | 47 | 0 | 50 |
 
 ## 2. 处置分类进度
 
 | 分类 | 表数 | 剩余跨域引用 |
 | --- | ---: | ---: |
-| D | 15 | 114 |
-| C1 | 9 | 93 |
+| D | 15 | 110 |
+| C1 | 9 | 87 |
 | C2 | 21 | 102 |
 | B | 4 | 4 |
 | E | 1 | 1 |
@@ -28,14 +28,14 @@
 | 表 | 归属 | 跨域引用 | 消费方 | 处置 | 写通道 | 文件数 |
 | --- | --- | ---: | --- | --- | --- | ---: |
 | `agent_tasks` | runtime | 30 | insight 18 / api 8 / mgmt 4 | C2 outbox 跨域写 | W1 | 40 |
-| `managed_repos` | mgmt | 23 | runtime 15 / kernel 5 / api 3 | D 模块归位（kernel 写/读域表） | — | 25 |
+| `managed_repos` | mgmt | 19 | runtime 11 / kernel 5 / api 3 | D 模块归位（kernel 写/读域表） | — | 24 |
 | `runtime_credentials` | runtime | 19 | insight 9 / api 6 / mgmt 4 | C1 归属重定（写路径挪进 owner 域） | — | 21 |
 | `unified_user_mapping` | mgmt | 18 | runtime 15 / kernel 3 | D 模块归位（kernel 写/读域表） | — | 11 |
-| `devops_pipeline_scene` | mgmt | 17 | runtime 12 / api 4 / insight 1 | C1 归属重定（写路径挪进 owner 域） | — | 15 |
 | `events` | runtime | 16 | insight 8 / api 7 / mgmt 1 | C1 归属重定（写路径挪进 owner 域） | — | 27 |
 | `grape_t_channel_installation` | mgmt | 16 | runtime 16 | C2 outbox 跨域写 | W2 | 10 |
 | `issue` | runtime | 16 | api 12 / insight 2 / mgmt 2 | D 模块归位（kernel 写/读域表） | — | 24 |
 | `agent_runtimes` | runtime | 14 | insight 6 / api 4 / mgmt 4 | C1 归属重定（写路径挪进 owner 域） | — | 32 |
+| `devops_pipeline_scene` | mgmt | 11 | runtime 6 / api 4 / insight 1 | C1 归属重定（写路径挪进 owner 域） | — | 14 |
 | `meta` | runtime | 11 | mgmt 11 | D 模块归位（kernel 写/读域表） | — | 5 |
 | `distributed_locks` | runtime | 10 | kernel 9 / insight 1 | D 模块归位（kernel 写/读域表） | — | 4 |
 | `skill` | runtime | 10 | api 8 / mgmt 2 | D 模块归位（kernel 写/读域表） | — | 13 |
