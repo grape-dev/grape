@@ -3328,41 +3328,23 @@ def get_all_bot_usernames() -> list[str]:
 
 def get_meta_value(key: str) -> str:
     """从 meta 表读取配置值"""
-    # W2：meta 基表在运行域；lib 可用时走 owner 域读（三库独立后无视图）
-    from src.kernel.domain_read import owner_lib as _owner_lib  # noqa: PLC0415
-    _rt_meta = _owner_lib("runtime", foreign_only=True)
-    if _rt_meta is not None:
-        try:
-            return _rt_meta.get_meta(key) or ""
-        except Exception as _exc:  # noqa: BLE001
-            log.warning(f"runtime lib get_meta failed, fallback: {_exc}")
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("SELECT value FROM meta WHERE key=?", (key,))
-            row = c.fetchone()
-            return row[0] if row else ""
-        except Exception:
-            return ""
+    # W2：meta 基表在运行域；读原语自带「自有 DSN 优先 + 单库回落进程主库」，
+    # 因此本文件不再留一份跨域 SQL 兜底。
+    from src.domains.runtime import public as _rt  # noqa: PLC0415
+    try:
+        return _rt.get_meta_value_any(key)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"get_meta_value failed: {key}: {e}")
+        return ""
 
 def set_meta_value(key: str, value: str):
     """写入配置值到 meta 表"""
-    # W2：meta 基表在运行域；lib 可用时写 owner 域（幂等 upsert）
-    from src.kernel.domain_read import owner_lib as _owner_lib  # noqa: PLC0415
-    _rt_meta = _owner_lib("runtime", foreign_only=True)
-    if _rt_meta is not None:
-        try:
-            _rt_meta.set_meta_value(key, value)
-            return
-        except Exception as _exc:  # noqa: BLE001
-            log.warning(f"runtime lib set_meta_value failed, fallback: {_exc}")
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (key, value))
-            db.commit()
-        except Exception as e:
-            log.warning(f"set_meta_value failed: {key}: {e}")
+    # W2：meta 基表在运行域；写原语（幂等 upsert）同样自带单库回落
+    from src.domains.runtime import public as _rt  # noqa: PLC0415
+    try:
+        _rt.set_meta_value_any(key, value)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"set_meta_value failed: {key}: {e}")
 
 def get_server_base_url() -> str:
     """返回服务端 API 基址（A2A/tasks 等协议端点用，不含 /webhook/gitcode 后缀）。
@@ -3593,18 +3575,14 @@ def migrate_oauth_providers():
     ]
     loaded = []
     try:
-        with db_lock:
-            c = db.cursor()
-            for src_key, meta_key in _oauth_keys:
-                val = data.get(src_key, "") or ""
-                if not val:
-                    continue
-                c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
-                if c.fetchone()[0] == 0:
-                    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
-                              (meta_key, val))
-                    loaded.append(meta_key)
-            db.commit()
+        from src.domains.runtime import public as _rt  # noqa: PLC0415
+        for src_key, meta_key in _oauth_keys:
+            val = data.get(src_key, "") or ""
+            if not val:
+                continue
+            # meta 基表在运行域：幂等「不存在才写」，写原语自带单库回落（无需本地 SQL）
+            if _rt.set_meta_if_absent(meta_key, val):
+                loaded.append(meta_key)
         if loaded:
             log.info(f"Loaded OAuth credentials from global-bot-token.json (fallback): {loaded}")
     except Exception as e:
@@ -3619,30 +3597,24 @@ def _sync_providers_from_config(data: dict):
     """
     providers_cfg = {}
     loaded_creds = []
-    with db_lock:
-        c = db.cursor()
-        for provider, cfg in data.items():
-            # 剥离 client_id/secret，只存协议参数
-            prov_cfg = {k: v for k, v in cfg.items()
-                        if k not in ("client_id", "client_secret")}
-            providers_cfg[provider] = prov_cfg
-            # 幂等同步凭据
-            for cred_field in ("client_id", "client_secret"):
-                val = cfg.get(cred_field, "") or ""
-                if not val:
-                    continue
-                meta_key = f"oauth_{provider}_{cred_field}"
-                c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
-                if c.fetchone()[0] == 0:
-                    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
-                              (meta_key, val))
-                    loaded_creds.append(meta_key)
-        # 覆盖写入协议参数
-        if providers_cfg:
-            import json as _json
-            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
-                      ("oauth_providers_config", _json.dumps(providers_cfg, ensure_ascii=False)))
-        db.commit()
+    from src.domains.runtime import public as _rt  # noqa: PLC0415
+    for provider, cfg in data.items():
+        # 剥离 client_id/secret，只存协议参数
+        prov_cfg = {k: v for k, v in cfg.items()
+                    if k not in ("client_id", "client_secret")}
+        providers_cfg[provider] = prov_cfg
+        # 幂等同步凭据（meta 在运行域：不存在才写，原语自带单库回落）
+        for cred_field in ("client_id", "client_secret"):
+            val = cfg.get(cred_field, "") or ""
+            if not val:
+                continue
+            meta_key = f"oauth_{provider}_{cred_field}"
+            if _rt.set_meta_if_absent(meta_key, val):
+                loaded_creds.append(meta_key)
+    # 覆盖写入协议参数
+    if providers_cfg:
+        _rt.set_meta_value_any(
+            "oauth_providers_config", json.dumps(providers_cfg, ensure_ascii=False))
     log.info(f"Synced OAuth providers from oauth-providers.json: "
              f"providers={list(providers_cfg.keys())}, credentials={loaded_creds}")
 

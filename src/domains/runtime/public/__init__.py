@@ -9,6 +9,7 @@ from __future__ import annotations
 from src.kernel.config import log
 
 import json
+from contextlib import contextmanager
 from typing import Any
 
 from src.kernel import db_registry
@@ -1419,7 +1420,10 @@ __all__ = ["available", "list_runtimes", "list_runtimes_rows", "get_runtime",
            "list_skills", "get_skill_detail", "list_all_engine_capabilities",
            "get_runtime_credential_meta", "get_meta_namespace", "tasks_brief_many",
            "task_stats_extended",
-           "read_one", "read_all"]
+           "read_one", "read_all",
+           # P4 收口：任意拓扑可用原语（单库/sqlite 与独立 DSN 均可用；可移植方言）
+           "read_one_any", "read_all_any", "exec_any", "get_meta_value_any",
+           "set_meta_value_any", "set_meta_if_absent", "list_featured_skills_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -1721,3 +1725,210 @@ def set_meta_value(key: str, value: str) -> None:
             except Exception:
                 # 并发插入撞唯一键：再更新一次即可（幂等）
                 c.execute("UPDATE meta SET value=%s WHERE `key`=%s", (value, key))
+
+
+# ---------- P4 收口：任意拓扑可用的 runtime 基表原语 ----------
+#
+# 为什么需要这一组：mgmt 侧跨域读/写此前是「lib 优先 + 本地 SQL 兜底」，兜底 SQL 的
+# 表名留在外域文件里 → 静态面恒计一处跨域引用（三库独立化棘轮的剩余项）。本组把同一段
+# SQL 搬进 owner 模块，连接按拓扑自适应：
+#   - 配了自有 DSN（三库三机）→ `db_registry` 连接（MySQL 方言由 translate_sql 翻译）；
+#   - 未配（单库 / sqlite / 测试拓扑）→ `kernel.domain_db` 回落进程主库。
+# 与既有 `read_one` / `read_all` 白名单的区别：后者是 MySQL 原生方言（`%s` + `NOW()`），
+# 只在自有 DSN 下可用；本组 SQL 一律**可移植方言**（`?` 占位符 / `INSERT OR IGNORE`），
+# 两条连接都能执行，因此调用方不再需要在外域文件里留一份本地 SQL 兜底。
+# 约束：只登记固定 SQL 的具名查询（参数化），不接受调用方传入 SQL 文本或表名。
+
+_ANY_QUERIES: dict[str, str] = {
+    # meta 配置（基表在运行域）
+    "meta_value": "SELECT value FROM meta WHERE key=?",
+    "meta_count": "SELECT COUNT(*) FROM meta WHERE key=?",
+    # skill
+    "skill_row_by_id": (
+        "SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, "
+        "scope, owner_id, content_hash FROM skill WHERE id=? AND is_active=1"),
+    "skill_by_name_scope": (
+        "SELECT id, content_hash, file_path FROM skill WHERE skill_name=? AND scope=? LIMIT 1"),
+    "skill_hash_by_key": (
+        "SELECT id, content_hash, file_path, is_active FROM skill "
+        "WHERE skill_name=? AND scope=? AND owner_id=? LIMIT 1"),
+    "skill_hash_by_id": "SELECT id, content_hash, file_path, is_active FROM skill WHERE id=?",
+    "skill_hashes_by_name_scope": (
+        "SELECT owner_id, content_hash FROM skill WHERE skill_name=? AND scope=? AND is_active=1"),
+    "skill_id_user_owner": (
+        "SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=? AND is_active=1 "
+        "LIMIT 1"),
+    "skill_id_repo_owner": (
+        "SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 "
+        "LIMIT 1"),
+    "skill_id_official": (
+        "SELECT id FROM skill WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1"),
+    "skill_id_by_owner_scope": (
+        "SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? LIMIT 1"),
+    "skill_scope_repo_owner": (
+        "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? "
+        "AND is_active=1 LIMIT 1"),
+    "skill_scope_official": (
+        "SELECT id FROM skill WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1"),
+    "skill_scope_user_any": (
+        "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='user' AND is_active=1 "
+        "LIMIT 1"),
+    "skills_official_by_agent": (
+        "SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, "
+        "scope, owner_id, content_hash FROM skill "
+        "WHERE agent_type=? AND is_active=1 AND scope='official' ORDER BY id"),
+    "skills_user_by_owner": (
+        "SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id "
+        "FROM skill WHERE scope='user' AND owner_id=? ORDER BY id"),
+    "skill_like_count": "SELECT like_count FROM skill WHERE id=?",
+    # agent_runtimes
+    "runtimes_all": (
+        "SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, "
+        "updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, "
+        "skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, "
+        "worker_version, org_id, spawn_fail_degraded_at, detached_from_scenes_at, "
+        "probe_spawn_fail_count FROM agent_runtimes ORDER BY name"),
+    "runtimes_by_scope": (
+        "SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, "
+        "updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, "
+        "skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, "
+        "worker_version, org_id, spawn_fail_degraded_at, detached_from_scenes_at, "
+        "probe_spawn_fail_count FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') "
+        "ORDER BY name"),
+    "runtime_id_local_direct": (
+        "SELECT id FROM agent_runtimes WHERE lower(name)=? AND credential_id=0 AND installed=1 "
+        "ORDER BY id LIMIT 1"),
+    "runtime_id_by_name_scope_owner": (
+        "SELECT ar.id FROM agent_runtimes ar "
+        "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+        "WHERE lower(ar.name)=? AND ar.scope=? AND ar.owner_id=? "
+        "AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active') "
+        "ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC LIMIT 1"),
+    "runtime_id_by_name_scope_shared": (
+        "SELECT ar.id FROM agent_runtimes ar "
+        "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+        "WHERE lower(ar.name)=? AND ar.scope=? AND ar.owner_id='' "
+        "AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active') "
+        "ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC LIMIT 1"),
+    "runtime_age": "SELECT MIN(updated_at) FROM agent_runtimes",
+    # skill 写
+    "skill_update_content_hash": "UPDATE skill SET content_hash=?, file_path=? WHERE id=?",
+    "skill_update_content_hash_only": "UPDATE skill SET content_hash=? WHERE id=?",
+    "skill_delete_by_owner_scope": (
+        "DELETE FROM skill WHERE skill_name=? AND scope=? AND owner_id=?"),
+    # agent_runtimes 写
+    "runtime_insert_default": (
+        "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
+        "pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')"),
+    # meta 写
+    "meta_upsert_update": "UPDATE meta SET value=? WHERE key=?",
+    "meta_upsert_insert": "INSERT INTO meta (key, value) VALUES (?, ?)",
+    "meta_insert_absent": "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+}
+
+
+@contextmanager
+def _any_cursor(write: bool = False):
+    """runtime 基表游标：自有 DSN 优先（autocommit），单库/测试拓扑回落进程主库。
+
+    `write=True` 时在回落路径提交（自有 DSN 连接本身是 autocommit，无需提交）。
+    """
+    if db_registry.uses_own_dsn("runtime"):
+        with db_registry.cursor("runtime") as c:
+            yield c
+        return
+    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+
+    with _plock:
+        c = _pdb.cursor()
+        yield c
+        if write:
+            _pdb.commit()
+
+
+def _any_sql(name: str) -> str:
+    """取具名查询 SQL；未登记抛 KeyError（不静默退回任意 SQL）。"""
+    sql = _ANY_QUERIES.get(name)
+    if sql is None:
+        raise KeyError(f"unknown portable query: {name}")
+    return sql
+
+
+def read_one_any(name: str, params: tuple = ()) -> Any | None:
+    """按具名查询读单行（任意拓扑，可移植方言）。"""
+    with _any_cursor() as c:
+        c.execute(_any_sql(name), params)
+        return c.fetchone()
+
+
+def read_all_any(name: str, params: tuple = ()) -> list[Any]:
+    """按具名查询读多行（任意拓扑，可移植方言）。"""
+    with _any_cursor() as c:
+        c.execute(_any_sql(name), params)
+        return list(c.fetchall() or [])
+
+
+def exec_any(name: str, params: tuple = ()) -> int:
+    """按具名查询执行写语句（任意拓扑），返回影响行数。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(_any_sql(name), params)
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def get_meta_value_any(key: str) -> str:
+    """读 meta 配置值（任意拓扑；不存在返回空串）。"""
+    row = read_one_any("meta_value", (key,))
+    return (row[0] or "") if row else ""
+
+
+def set_meta_value_any(key: str, value: str) -> None:
+    """写 meta 配置值（任意拓扑）：UPDATE→INSERT 两段式幂等 upsert。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(_any_sql("meta_upsert_update"), (value, key))
+        if not getattr(cur, "rowcount", 0):
+            c.execute(_any_sql("meta_upsert_insert"), (key, value))
+
+
+def set_meta_if_absent(key: str, value: str) -> bool:
+    """meta 幂等插入（任意拓扑）：键已存在不动，返回是否真的写入。"""
+    return exec_any("meta_insert_absent", (key, value)) > 0
+
+
+_FEATURED_SKILL_COLS = ("id", "skill_name", "display_name", "description", "agent_type",
+                        "is_featured", "like_count", "category_id")
+
+
+def _featured_skill_row(r) -> dict[str, Any]:
+    return {"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
+            "description": r[3] or "", "agent_type": r[4] or "",
+            "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0}
+
+
+def list_featured_skills_any(ordered_ids: list[int] | None = None, limit: int = 5) -> list[dict]:
+    """精选技能（任意拓扑）：口径与 `list_featured_skills` 完全一致。
+
+    ordered_ids 非空按其顺序（管理台排序），缺失的按 like_count 降序追加；为空则纯 like_count 降序。
+    """
+    lim = max(0, int(limit))
+    if not lim:
+        return []
+    sel = (f"SELECT {', '.join(_FEATURED_SKILL_COLS)} FROM skill "
+           "WHERE is_active=1 AND is_featured=1 AND scope='official'")
+    out: list[dict] = []
+    with _any_cursor() as c:
+        if ordered_ids:
+            ids = [int(i) for i in ordered_ids]
+            ph = ",".join(["?"] * len(ids))
+            c.execute(f"{sel} AND id IN ({ph})", tuple(ids))
+            rows = {r[0]: r for r in c.fetchall()}
+            for item_id in ids:
+                r = rows.get(item_id)
+                if r:
+                    out.append(_featured_skill_row(r))
+            if len(out) < lim:
+                c.execute(f"{sel} AND id NOT IN ({ph}) ORDER BY like_count DESC", tuple(ids))
+                out.extend(_featured_skill_row(r) for r in c.fetchall())
+        else:
+            c.execute(f"{sel} ORDER BY like_count DESC LIMIT ?", (lim,))
+            out = [_featured_skill_row(r) for r in c.fetchall()]
+    return out[:lim]

@@ -158,7 +158,16 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
-### issues_center 归位（-60）
+### owner 侧「任意拓扑」原语（-7）
+- runtime public 新增 `_ANY_QUERIES` 具名查询白名单与 7 个原语（read_one_any / read_all_any / exec_any /
+  get_meta_value_any / set_meta_value_any / set_meta_if_absent / list_featured_skills_any）：SQL 只存在 owner 域一份，
+  自有 DSN 走 db_registry、单库拓扑回落进程库，调用方因此不需要再留本地兜底 SQL（兜底正是跨域统计的来源）。
+- `mgmt/user/db.py` 的 get_meta_value / set_meta_value / migrate_oauth_providers / _sync_providers_from_config
+  已改走新原语，该文件 75 → 68。
+- 验证：pytest（arch/contracts/scripts）158 passed；相关域用例与改动前基线一致（11 failed/46 passed，同为既有失败）；
+  三实例彩排循环 LOOP_EXIT=0、运行面 0 失败。
+
+### issues_center 归位（-53）
 - `src/api/issues_center.py`（3535 行）→ `src/domains/runtime/issues_center.py`，旧路径保留 sys.modules 别名；
   issue/event/agent_task 属运行域，逻辑回位。该文件跨域引用 **60 → 7**（余下是 mgmt 的
   unified_user_mapping / grape_accounts / managed_repos）。
