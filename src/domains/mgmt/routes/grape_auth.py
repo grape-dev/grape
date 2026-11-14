@@ -686,6 +686,7 @@ def delete_account_via_oauth(provider: str, popup: bool = False, prompt: str = "
     if not cfg:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的平台: {provider}"})
 
+
     # 检查用户是否已绑定该平台
     from src.domains.mgmt.auth.grape_account_db import get_user_identities
     identities = get_user_identities(user["id"])
@@ -944,9 +945,9 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
             _c.execute(
                 "SELECT m.repo_key FROM managed_repos m "
                 "INNER JOIN user_repos u ON m.repo_key = u.repo_key "
-                "WHERE u.user_id=? AND m.repo_key LIKE ? "
+                "WHERE u.user_id=? AND substr(m.repo_key, 1, ?) = ? "
                 "AND m.webhook_id != '' AND m.webhook_id IS NOT NULL",
-                (user["id"], f"{provider}:%")
+                (user["id"], len(f"{provider}:"), f"{provider}:")
             )
             rows = _c.fetchall()
             affected_warehouses = [r[0] if isinstance(r, tuple) else r["repo_key"] for r in rows]
@@ -954,8 +955,8 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
             try:
                 _c.execute(
                     "SELECT repo_key FROM managed_repos "
-                    "WHERE host_user_id=? AND repo_key LIKE ?",
-                    (user["id"], f"{provider}:%")
+                    "WHERE host_user_id=? AND substr(repo_key, 1, ?) = ?",
+                    (user["id"], len(f"{provider}:"), f"{provider}:")
                 )
                 path_b_rows = _c.fetchall()
                 path_b_warehouses = [r[0] if isinstance(r, tuple) else r["repo_key"] for r in path_b_rows]
@@ -1012,9 +1013,9 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
             _c2.execute(
                 "SELECT COUNT(*) FROM managed_repos m "
                 "INNER JOIN user_repos u ON m.repo_key = u.repo_key "
-                "WHERE u.user_id=? AND m.repo_key LIKE ? "
+                "WHERE u.user_id=? AND substr(m.repo_key, 1, ?) = ? "
                 "AND m.webhook_id != '' AND m.webhook_id IS NOT NULL",
-                (user["id"], f"{provider}:%")
+                (user["id"], len(f"{provider}:"), f"{provider}:")
             )
             row = _c2.fetchone()
             affected_count = row[0] if row else 0
@@ -1040,8 +1041,9 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     try:
         with _sm_dl:
             _c = _sm_db.cursor()
-            _c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key LIKE ?",
-                       (user["id"], f"{provider}:%"))
+            _pfx = f"{provider}:"
+            _c.execute("DELETE FROM user_repos WHERE user_id=? AND substr(repo_key, 1, ?) = ?",
+                       (user["id"], len(_pfx), _pfx))
             _sm_db.commit()
     except Exception as e:
         log.error(f"unbind user_repos cleanup failed (user={user['id']}, provider={provider}): {e}")
@@ -1054,6 +1056,11 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     remaining_identities = get_user_identities(user["id"])
     remaining_bindings = [ident["provider"] for ident in remaining_identities]
 
+    try:
+        from src.domains.platform import hooks as _pl_unbind_hooks
+        _pl_unbind_hooks.on_oauth_unbound(str(user["id"]), str(provider))
+    except Exception as _hook_err:
+        log.warning(f"platform-link hook (oauth unbound) skipped: {_hook_err}")
     return {"message": "解绑成功", "bindings": remaining_bindings, "affected_repos": affected_count,
             "partial": user_repos_cleanup_failed}
 
@@ -1324,6 +1331,15 @@ def oauth_login(provider: str, popup: bool = False, request: Request = None, lan
     if not cfg:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的平台: {provider}"})
 
+    # P2-4：enabled 必须 fail-closed —— 登录目录按 enabled_only 过滤，
+    # 但直达 /login/<provider> 不能绕过开关（原实现关掉渠道仍可用直达链接登录）。
+    from src.domains.mgmt.auth.providers import is_channel_enabled as _ch_enabled
+
+    if not _ch_enabled(provider):
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": "CHANNEL_DISABLED",
+            "message": f"{cfg.get('name') or provider} 登录渠道已停用，请联系管理员"})
+
     # D28：策略能力分派——路由不比 type 字符串（needs_oauth_client / post_callback 均为
     # 协议属性，见 LoginChannelStrategy）。构建即校验（S45：缺字段报字段名）。
     from src.kernel.auth_sdk.channel_strategy import build_channel_strategy, ChannelAuthError
@@ -1480,6 +1496,7 @@ def _handle_oauth_bind(request, provider, external_id, user_info, access_token, 
                                      ip=_get_client_ip(request),
                                      detail={"provider": provider, "external_id": external_id})
                 _clear_user_repos_cache(binding_user_id)
+                _hook_platform_link(binding_user_id, provider)  # D109：绑定（占位合并路径）也写关系
                 from fastapi.responses import RedirectResponse
                 url = _build_redirect_url(request, "/", {"bind_success": provider}, hash_frag="repos", popup=popup)
                 return RedirectResponse(url=url, status_code=302)
@@ -1571,6 +1588,7 @@ def _handle_oauth_bind(request, provider, external_id, user_info, access_token, 
                          ip=_get_client_ip(request),
                          detail={"provider": provider, "external_id": external_id})
     _clear_user_repos_cache(binding_user_id)
+    _hook_platform_link(binding_user_id, provider)  # D109：绑定路径也写关系（此前只在登录路径写）
 
     from fastapi.responses import RedirectResponse
     url = _build_redirect_url(request, "/", {"bind_success": provider}, hash_frag="repos", popup=popup)
@@ -1635,6 +1653,7 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         auth_audit.log_audit("login_success", user_id=account["id"],
                              ip=_get_client_ip(request),
                              detail={"method": "oauth", "provider": provider})
+        _hook_platform_link(account["id"], provider)
         return resp
 
     # 未绑定 → 查历史绑定（D22: 软删除记录）
@@ -1705,6 +1724,7 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         auth_audit.log_audit("login_success", user_id=original_account["id"],
                              ip=_get_client_ip(request),
                              detail={"method": "oauth", "provider": provider, "via": "rebind"})
+        _hook_platform_link(original_account["id"], provider)
         log.info(f"OAuth rebind: user {original_account['id']} ({original_account['username']}) restored via {provider}")
         return resp
 
@@ -1805,8 +1825,19 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
                          detail={"source": "oauth", "provider": provider, "username": username})
     auth_audit.log_audit("login_success", user_id=account["id"], ip=_get_client_ip(request),
                          detail={"method": "oauth", "provider": provider, "via": "auto_create"})
+    _hook_platform_link(account["id"], provider)
     log.info(f"OAuth auto-create: user {account['id']} ({account['username']}) created via {provider}")
     return resp
+
+def _hook_platform_link(user_id, provider: str) -> None:
+    """D109：登录成功 → 写 user_platform_link（fail-safe，绝不阻断登录）。"""
+    try:
+        from src.domains.platform import hooks as _pl_hooks
+
+        _pl_hooks.on_oauth_login(str(user_id), str(provider))
+    except Exception as e:  # 钩子失败只告警
+        log.warning(f"platform-link hook (oauth login) skipped: {e}")
+
 
 @router.get("/callback/{provider}")
 def oauth_callback(request: Request, provider: str, code: str = "", state: str = "", error: str = ""):
@@ -1971,6 +2002,7 @@ def exchange_token(body: ExchangeCodeBody, request: Request, response: Response)
     auth_audit.log_audit("login_success", user_id=account["id"],
                          ip=_get_client_ip(request),
                          detail={"method": "oauth", "provider": data["provider"], "via": "exchange_code"})
+    _hook_platform_link(account["id"], data["provider"])
 
     return {
         "token": jwt_access,
@@ -2130,6 +2162,7 @@ def oauth_associate(provider: str, body: OAuthAssociateBody, request: Request, r
                          detail={"provider": provider, "external_id": external_id, "via": "associate"})
     auth_audit.log_audit("login_success", user_id=account["id"], ip=_get_client_ip(request),
                          detail={"method": "oauth", "provider": provider, "via": "associate"})
+    _hook_platform_link(account["id"], provider)
 
     return {
         "token": access,

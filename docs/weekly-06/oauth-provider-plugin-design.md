@@ -129,12 +129,12 @@ configs/global-bot-token.json（回归纯 Bot 配置）
 回退后的 global-bot-token.json：
 ```json
 {
-  "gitcode_api_token": "m4kj4JfiLDKLxisQpbfjURwh",
+  "gitcode_api_token": "<REDACTED_REAL_TOKEN>",
   "gitcode_oauth_client_id": "<your_gitcode_client_id>",
   "gitcode_oauth_client_secret": "<your_gitcode_client_secret>",
   "bot_usernames": ["grape_dev_bot"],
   "webhook_url": "https://grape.example.com/webhook/gitcode",
-  "gitcode_webhook_token": "hBz31z3uAwQRzHpycsNT7W6e"
+  "gitcode_webhook_token": "<REDACTED_WEBHOOK_SECRET>"
 }
 ```
 

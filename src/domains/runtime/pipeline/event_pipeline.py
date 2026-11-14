@@ -938,13 +938,13 @@ def _resolve_bot_username(repo_key: str) -> str:
         # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
         from src.kernel.repo_key import parse_repo_key
         _prov, _o, _r = parse_repo_key(_rk)
-        if _prov == "github":
-            from src.domains.mgmt.user.db import get_global_github_bot_username
-            _bot_name = get_global_github_bot_username()
-        else:
-            from src.domains.mgmt.user.db import get_global_bot_usernames
-            _us = get_global_bot_usernames()
-            _bot_name = _us[0] if _us else ""
+        # 按 provider 取名（github 独立 meta 键、gitee 专属键、其余回落并集）——
+        # 原来 else 分支取全平台并集 [0]，gitee 仓库可能拿到别家平台的 bot 名，
+        # 导致 git 提交身份/审查人错乱（2026-11-14 深度检查）
+        from src.domains.mgmt.user.db import get_global_bot_usernames_for
+
+        _us = get_global_bot_usernames_for(_prov)
+        _bot_name = _us[0] if _us else ""
         if _bot_name:
             return _bot_name
         # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名

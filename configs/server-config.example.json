@@ -1,5 +1,6 @@
 {
   "server_base_url": "https://grape.example.com",
+  "_comment_server_base_url": "部署级公网基址（二选一，两个键当前并存且语义重叠）。区别：server_base_url 是基址真源；webhook_url 是历史键，读取时会把末尾的 /webhook/xxx 剥掉再当基址用。**平台路径不在这里配**——回调地址由平台卡 webhook_path 追加（/webhook/gitcode、/webhook/gitlab…），所以 webhook_url 里写的 /webhook/gitcode 会被忽略，填 https://x 与 https://x/webhook/gitcode 等价。未配置：托管注册/回调返回 422 并给 guidance，不会兜底 localhost。",
   "webhook_url": "https://grape.example.com/webhook/gitcode",
   "_comment_issue_471": "Issue #471 E1 拆分项（可选，未配置回退 server_base_url）：browser_callback_url=浏览器回调（OAuth/附件/前端展示）；worker_connect_url=worker 回连（devstage/任务下发/远程 worker）。双地址部署（浏览器公网域名 ≠ worker 可达地址）时必须分别配置。",
   "browser_callback_url": "https://grape.example.com",

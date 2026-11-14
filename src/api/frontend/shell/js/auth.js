@@ -38,7 +38,7 @@ var Auth = (function () {
   function initI18n() {
     // I18N.init() 同步应用 inline 包（95 个 login key，零闪烁）+ 异步加载全量包
     if (typeof I18N !== 'undefined' && I18N.init) {
-      I18N.init('34');
+      I18N.init('35');
       _updateLangSwitch();
       return;
     }

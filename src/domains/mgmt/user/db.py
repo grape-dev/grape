@@ -497,6 +497,12 @@ def set_credential(user_id: "int | str", provider: str, config: dict, kind: str 
                        SET config_json=excluded.config_json, updated_at=excluded.updated_at""",
                     row)
             _mg_db.commit()
+            if (kind or "") == "pat":
+                try:
+                    from src.domains.platform import hooks as _pl_pat_hooks
+                    _pl_pat_hooks.on_pat_saved(str(user_id), str(provider))
+                except Exception as _hook_err:
+                    log.warning(f"platform-link hook (pat saved) skipped: {_hook_err}")
             return True
     except Exception as e:
         log.warning(f"Set credential failed: {e}")
@@ -596,6 +602,12 @@ def delete_credential(user_id: "int | str", provider: str, kind: str = "") -> bo
                           (user_id, prov, k))
                 deleted = deleted or c.rowcount > 0
             _mg_db.commit()
+            if (kind or "") == "pat" and deleted:
+                try:
+                    from src.domains.platform import hooks as _pl_pat_del_hooks
+                    _pl_pat_del_hooks.on_pat_deleted(str(user_id), str(provider))
+                except Exception as _hook_err:
+                    log.warning(f"platform-link hook (pat deleted) skipped: {_hook_err}")
             return deleted
     except Exception as e:
         log.warning(f"Delete credential failed: {e}")
@@ -2168,7 +2180,7 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
             else:
                 # 凭据表归 insight：共用同一凭据值的仓库排查走该域原语
                 _related_repos = _insight_public.repo_keys_sharing_value(
-                    "bot", (_enc, bot_token), f"{provider}:%", repo_key)
+                    "bot", (_enc, bot_token), f"{provider}:", repo_key)
     except Exception:
         pass
     if _related_repos:
@@ -2379,27 +2391,37 @@ def _invalidate_global_bot_cache():
     """清除全局 bot token 缓存（admin 改配置后调用）。"""
     _global_bot_cache.clear()
 
+def _bot_seed_value(provider: str, kind: str) -> str:
+    """种子文件里某平台的值（kind = token | username）。运行期仅在库内无值时用。"""
+    try:
+        from src.kernel.config import read_bot_seed_file
+
+        return (read_bot_seed_file().get(provider) or {}).get(kind, "") or ""
+    except Exception:
+        return ""
+
+
 def _read_gbt_file_field(field: str) -> str:
-    """从 global-bot-token.json 读取指定字段（文件 fallback 用）。"""
+    """从平台 bot 种子文件读取指定字段（库内无值时的一次性 fallback；D110 改名）。"""
     import json, os
     try:
-        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
-                                  "configs", "global-bot-token.json")
+        from src.kernel.config import bot_seed_path
+
+        _gbt_path = bot_seed_path()
         if os.path.exists(_gbt_path):
             with open(_gbt_path, "r", encoding="utf-8") as f:
                 return json.load(f).get(field, "") or ""
     except Exception as e:
-        log.warning(f"Failed to read {field} from global-bot-token.json: {e}")
+        log.warning(f"Failed to read {field} from bot seed file: {e}")
     return ""
 
 def _read_gbt_file_usernames() -> str:
-    """从 global-bot-token.json 读取 bot_usernames（JSON 数组，返回原始字符串）。"""
+    """从平台 bot 种子文件读取 bot_usernames（JSON 数组，返回原始字符串）。"""
     import json, os
     try:
-        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
-                                  "configs", "global-bot-token.json")
+        from src.kernel.config import bot_seed_path
+
+        _gbt_path = bot_seed_path()
         if os.path.exists(_gbt_path):
             with open(_gbt_path, "r", encoding="utf-8") as f:
                 us = json.load(f).get("bot_usernames") or []
@@ -2408,18 +2430,73 @@ def _read_gbt_file_usernames() -> str:
         pass
     return ""
 
-def get_global_gitcode_bot_token() -> str:
-    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存）。
+def _platform_bot_row(provider: str) -> dict:
+    """D110：平台行 bot 事实（username / token 密文 / 状态），60s 缓存；读不到返回 {}。
 
-    Issue #345: DB 是权威源。文件 fallback 确保迁移失败或集群竞态时系统仍可用。
+    真源 = grape_t_repo_platforms（一平台一个 bot）；表未就绪/无行时返回 {}，
+    调用方按 meta → 文件 的顺序回落（向前兼容）。
     """
+    import time as _t
+    key = ("platform_bot", provider)
+    cached = _global_bot_cache.get(key)
+    now = _t.time()
+    if cached and now < cached[1]:
+        return cached[0]
+    data: dict = {}
+    try:
+        from sqlalchemy.orm import Session
+
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+        with Session(get_engine()) as s:
+            row = RepoPlatformRepo.get(s, provider)
+            if row is not None:
+                data = {
+                    "username": getattr(row, "bot_username", "") or "",
+                    "token_enc": getattr(row, "bot_token_enc", "") or "",
+                    "token_status": getattr(row, "bot_token_status", "") or "unknown",
+                    "checked_at": getattr(row, "bot_checked_at", "") or "",
+                }
+    except Exception:
+        data = {}
+    if data.get("token_enc") or data.get("username"):
+        _global_bot_cache[key] = (data, now + _GLOBAL_BOT_CACHE_TTL)
+    else:
+        _global_bot_cache.pop(key, None)
+    return data
+
+
+def _platform_bot_token(provider: str) -> str:
+    """D110 第 2 级来源：平台行 bot token（解密后明文；空=未配置/解密失败）。"""
+    enc = _platform_bot_row(provider).get("token_enc") or ""
+    if not enc:
+        return ""
+    try:
+        return _decrypt_repo_secret(enc) or ""
+    except Exception:
+        return ""
+
+
+def get_global_gitcode_bot_token() -> str:
+    """统一入口：平台行 → DB meta → 文件 fallback（60s 缓存）。
+
+    D110: grape_t_repo_platforms.bot_token_enc 是第 2 级来源（一平台一个 bot）；
+    meta / 文件只在平台行为空时兜底（向前兼容，迁移前后行为一致）。
+    """
+    _plat = _platform_bot_token("gitcode")
+    if _plat:
+        return _plat
     return _cached_get_meta("global_bot_gitcode_token",
-                            file_fallback_fn=lambda: _read_gbt_file_field("gitcode_api_token"))
+                            file_fallback_fn=lambda: _bot_seed_value("gitcode", "token"))
 
 def get_global_github_bot_token() -> str:
-    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存，GitHub 版）。"""
+    """统一入口：平台行 → DB meta → 文件 fallback（60s 缓存，GitHub 版）。"""
+    _plat = _platform_bot_token("github")
+    if _plat:
+        return _plat
     return _cached_get_meta("global_bot_github_token",
-                            file_fallback_fn=lambda: _read_gbt_file_field("github_bot_token"))
+                            file_fallback_fn=lambda: _bot_seed_value("github", "token"))
 
 def get_global_github_bot_username() -> str:
     """统一入口：github 卡 bot_username 优先 → meta 兜底（D15，2026-11-12）。
@@ -2430,6 +2507,9 @@ def get_global_github_bot_username() -> str:
 
     Issue #345: DB 是权威源。文件 fallback 确保迁移失败或集群竞态时系统仍可用。
     """
+    _plat = _platform_bot_row("github").get("username") or ""
+    if _plat:
+        return _plat
     try:
         from src.domains.runtime.vcs.platform_card import get_platform_card
         _card = get_platform_card("github")
@@ -2438,7 +2518,7 @@ def get_global_github_bot_username() -> str:
     except Exception:
         pass
     return _cached_get_meta("global_bot_github_username",
-                            file_fallback_fn=lambda: _read_gbt_file_field("github_bot_username"))
+                            file_fallback_fn=lambda: _bot_seed_value("github", "username"))
 
 def get_global_bot_usernames() -> list[str]:
     """统一入口：各卡 bot_username 纯卡派生并集（D16→D22，2026-11-12 拍板）。
@@ -2448,6 +2528,20 @@ def get_global_bot_usernames() -> list[str]:
     读链按用户拍板退役；存量 meta 键成死配置，清理挂账下批。
     """
     out: list[str] = []
+    # D110：平台行 bot_username 是事实来源（一平台一个 bot），卡是卡位缺失时的兜底
+    try:
+        from sqlalchemy.orm import Session
+
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+        with Session(get_engine()) as s:
+            for _row in RepoPlatformRepo.list_all(s):
+                _u = getattr(_row, "bot_username", "") or ""
+                if _u and _u not in out:
+                    out.append(_u)
+    except Exception:
+        pass
     try:
         from src.domains.runtime.vcs.platform_card import list_vcs_platforms, get_platform_card
         for _p in list_vcs_platforms():
@@ -3434,10 +3528,18 @@ def get_server_base_url_warning() -> str:
     )
 
 def get_webhook_url() -> str:
-    """返回服务端 webhook 地址（GitCode 事件回调注册用，含 /webhook/gitcode 后缀）。
+    """返回部署级**公网基址**（历史键名 webhook_url；不是某平台的回调全路径）。
 
-    优先取 configs/server-config.json 显式配置；无则 meta.webhook_url；再兜底空串
-    （不设 localhost 兜底，让 repos.py「webhook_url 未配置即拒」守卫生效）。
+    语义（2026-11-15 用户确认：只补注释，不改行为）：
+    - 这里填的是 base（如 `https://grape.example.com`）。**平台路径一律由平台卡
+      `webhook_path` 追加**（`/webhook/gitcode`、`/webhook/gitlab` …），所以值里带的
+      `/webhook/xxx` 会被 `_webhook_url_for_provider` 丢弃——填 `https://x/webhook/gitcode`
+      与填 `https://x` 等价。
+    - 读取优先级：configs/server-config.json → meta.webhook_url → 空串。
+      不设 localhost 兜底，让 repos.py「未配置即拒（422）」的守卫生效。
+    - 与 `get_server_base_url()` 同一事实的两个键：后者优先 server_base_url、并会把本键
+      剥掉 `/webhook/*` 后缀使用；两个键目前并存（合并成单一键会影响 6 个读取点与自动探测
+      落库路径，2026-11-15 裁定暂不合并，只在本注释与配置示例里写明口径）。
     """
     try:
         from src.kernel.config import read_server_config
@@ -3569,6 +3671,12 @@ def _sync_providers_from_config(data: dict):
     loaded_creds = []
     from src.domains.runtime import public as _rt  # noqa: PLC0415
     for provider, cfg in data.items():
+        provider = str(provider or "").strip()
+        # 下划线前缀 = 文档键（_readme/_fields/_note），不是渠道：这里不过滤就会把
+        # 说明块整块写进 meta.oauth_providers_config，之后被当成一个渠道渲染
+        # （实弹：登录页出现 `_fields` 按钮，未配置提示点名 _fields）。
+        if not provider or provider.startswith("_") or not isinstance(cfg, dict):
+            continue
         # 剥离 client_id/secret，只存协议参数
         prov_cfg = {k: v for k, v in cfg.items()
                     if k not in ("client_id", "client_secret")}
@@ -3900,18 +4008,32 @@ def init_user_repos_table():
         db.execute(_USER_REPOS_DDL)
         _mg_db.commit()
 
-def save_user_repos(user_id: int, repos: list[dict]):
+def save_user_repos(user_id: int, repos: list[dict], providers: list[str] | None = None):
     """批量写入用户仓库缓存（repos 元素含 full_name/owner/name/...，full_name 无前缀）
 
     is_join 从用户自己的主动托管记录（mark_user_repo_join 写入的 is_join=1 AND is_admin=1）继承，
     不再查询全局 managed_repos，防止 A 托管的仓库污染 B 的下拉框。
+
+    providers：本次**真正刷新成功**的平台集合。给定时只替换这些平台的行，其余平台的旧缓存
+    原样保留——否则某平台拉取失败（401/网络）时，先删后写会把它的整段缓存抹掉
+    （2026-11-14 实锤：gitee 7 行刷新后 gitcode 58 + github 16 行一起消失）。None = 全量覆盖。
     """
     from src.kernel.repo_key import to_repo_key
     with db_lock:
         c = _mg_db.cursor()
         c.execute("SELECT repo_key FROM user_repos WHERE user_id=? AND is_join=1 AND is_admin=1", (user_id,))
         joined_keys = {row[0] for row in c.fetchall()}
-        c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
+        if providers is None:
+            c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
+        else:
+            for _p in providers:
+                # P2-6：不能用 LIKE 拼前缀——`_` 是 LIKE 的单字符通配符，provider 名允许
+                # 下划线（如 gitee_enterprise），会误删 giteeXenterprise: 同形行。
+                # substr 前缀相等在 SQLite/MySQL 语义一致，且天然无通配符。
+                _prefix = f"{_p}:"
+                c.execute(
+                    "DELETE FROM user_repos WHERE user_id=? AND substr(repo_key, 1, ?) = ?",
+                    (user_id, len(_prefix), _prefix))
         for r in repos:
             full_name = r.get("full_name", "") or r.get("repo_key", "")
             # 优先使用 repos 中已有的 repo_key（含 provider 前缀），否则用 full_name 生成
@@ -3965,11 +4087,12 @@ def get_user_repos_synced_at(user_id: int) -> str:
         return row[0] or "" if row else ""
 
 
-def invalidate_user_repos(user_id: int):
+def invalidate_user_repos(user_id: "str | int"):
     """把用户仓库缓存标记为过期（保留缓存行与 is_join 状态）。
 
-    写操作（托管 / 模板建仓 / 解除托管）成功后调用，令下一次 /repos/member
-    直接回源 VCS 刷新，避免新增或移除的仓库被 30 分钟 TTL 挡在缓存之外。
+    写操作（托管 / 模板建仓 / 解除托管）与关系变更钩子（D109）调用，令下一次
+    /repos/member 直接回源 VCS 刷新，避免新增或移除的仓库被 30 分钟 TTL 挡在缓存之外。
+    user_id 接受 str（UUIDv7 主键）与存量 int 字符串化值——不要在这里做 int() 强转。
     synced_at 置 NULL 后 get_user_repos_synced_at 返回空串，命中 _is_expired。
     """
     with db_lock:
@@ -5166,7 +5289,11 @@ def managed_repo_exists(repo_key: str) -> bool:
         return False
 
 def _webhook_url_for_provider(base_url: str, provider: str) -> str:
-    """webhook 回调 URL 的平台段由平台卡 webhook_path 决定（数据驱动，无平台字面量）。"""
+    """webhook 回调 URL 的平台段由平台卡 webhook_path 决定（数据驱动，无平台字面量）。
+
+    注意：`base_url` 里原有的 path（哪怕写的是 `/webhook/gitlab`）**会被整体替换掉**——
+    同一份基址喂给不同平台得到不同回调地址，这是"配置只写公网基址"的实现落点。
+    """
     if not base_url:
         return base_url
     try:
@@ -5305,11 +5432,12 @@ def get_global_bot_token_for(provider: str) -> str:
     meta key 按 provider 派生（与 VCSProvider.global_bot_meta_key 同模式）；
     文件 fallback 仅存量两平台（历史迁移兼容）；config-only 平台走 meta。
     """
+    _plat = _platform_bot_token(provider)
+    if _plat:
+        return _plat
     key = f"global_bot_{provider}_token"
-    field = _GLOBAL_BOT_FILE_FIELDS.get(provider)
-    if field:
-        return _cached_get_meta(key, file_fallback_fn=lambda: _read_gbt_file_field(field))
-    return _cached_get_meta(key)
+    # D110：种子文件按 provider 取值（不再限于 gitcode/github 两平台的历史字段名）
+    return _cached_get_meta(key, file_fallback_fn=lambda: _bot_seed_value(provider, "token"))
 
 def get_global_gitee_bot_username() -> str:
     """统一入口：DB meta 表读取（60s 缓存）。
@@ -5330,6 +5458,9 @@ def get_global_bot_usernames_for(provider: str) -> list[str]:
     D15 抽象不变量（test_guard_no_new_platform_branches）：按来源链/名单数据
     派生，src/ 不得出现平台名 == 字面分支。
     """
+    _plat = _platform_bot_row(provider).get("username") or ""
+    if _plat:
+        return [_plat]
     _src = GLOBAL_BOT_USERNAME_SOURCES.get(provider)
     if _src is None:
         return get_global_bot_usernames()

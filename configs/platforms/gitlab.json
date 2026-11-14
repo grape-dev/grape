@@ -1,4 +1,20 @@
 {
+  "_readme": [
+    "仓库托管平台卡（真源）。优先级：meta.vcs_providers_config 逐键覆盖 > 本文件 > 代码兜底。",
+    "只管托管能力位；OAuth 登录配置在 configs/oauth-providers.json（两类字段互不渗透）。凭据不写在这里（见 SCHEMA.md）。",
+    "GitLab 特有：仓库路径段是 projects/{urlencoded full_path}（provider 模块 repo_segment 派生），api_auth=PRIVATE-TOKEN 头。",
+    "下划线前缀键=文档键，加载器跳过。"
+  ],
+  "_fields": {
+    "dialect": "API 方言族：gitlab=v4",
+    "api_auth": "令牌传递形态：private_token=PRIVATE-TOKEN 请求头",
+    "webhook_verify": "验签方式：token_compare=共享密钥明文比对（X-Gitlab-Token 头）",
+    "clone_auth": "clone 凭据形态：oauth2=用户名 oauth2 + token 当密码",
+    "download_base": "仓库归档/文件下载基址",
+    "token_storage_field": "显式空串=无 managed_repos 物理列，凭据走 grape_t_repo_credentials 单表",
+    "webhook_token_field": "同上（webhook 凭据）",
+    "bot_username": "该平台 bot 账号登录名（self-loop 判定 / 协作者邀请用；留空=该平台无 bot 身份）"
+  },
   "name": "GitLab",
   "dialect": "gitlab",
   "host": "gitlab.com",
@@ -11,5 +27,6 @@
   "download_base": "https://gitlab.com",
   "brand_color": "#FC6D26",
   "token_storage_field": "",
-  "webhook_token_field": ""
+  "webhook_token_field": "",
+  "bot_username": ""
 }

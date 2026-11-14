@@ -46,12 +46,21 @@
           <a :class="{ act: view === 'cfg' }" @click="showCfg"
             ><span class="ic">⚙</span><span>{{ t('nav.credentials') }}</span></a
           >
+          <a :class="{ act: view === 'channels' }" @click="view = 'channels'"
+            ><span class="ic">🔐</span><span>{{ t('nav.channels') }}</span></a
+          >
+          <a :class="{ act: view === 'platforms' }" @click="view = 'platforms'"
+            ><span class="ic">🧩</span><span>{{ t('nav.platforms') }}</span></a
+          >
           <div class="grp">{{ t('nav.user_management') }}</div>
           <a :class="{ act: view === 'users' }" @click="showUsers(1)"
             ><span class="ic">👥</span><span>{{ t('nav.user_list') }}</span></a
           >
           <a :class="{ act: view === 'wl' }" @click="showWhitelist"
             ><span class="ic">📋</span><span>{{ t('nav.whitelist') }}</span></a
+          >
+          <a :class="{ act: view === 'lwl' }" @click="showLoginWhitelist"
+            ><span class="ic">🔐</span><span>{{ t('nav.login_whitelist') }}</span></a
           >
           <div class="grp">Account</div>
           <a @click="openPwdModal('self')"
@@ -85,6 +94,9 @@
               <span class="cnt">{{ t('users.total', { count: usersTotal }) }}</span></template
             >
             <b v-else-if="view === 'wl'">{{ t('whitelist.title') }}</b>
+            <b v-else-if="view === 'lwl'">{{ t('login_whitelist.title') }}</b>
+            <b v-else-if="view === 'channels'">{{ t('nav.channels') }}</b>
+            <b v-else-if="view === 'platforms'">{{ t('nav.platforms') }}</b>
           </div>
           <div v-if="view === 'users'" class="tb-tools">
             <div class="search-wrap">
@@ -102,196 +114,24 @@
           </div>
         </div>
 
+        <AdminChannels v-if="view === 'channels'" :api="api" class="ct" />
+        <AdminPlatforms v-if="view === 'platforms'" :api="api" class="ct" />
         <div v-if="view === 'cfg'" class="ct">
           <div class="card">
             <div class="card-h">
               <h2>
-                {{ t('config.gitcode') }} <span class="tag">{{ t('config.gitcode_desc') }}</span>
+                {{ t('config.webhook_url') }}
+                <span class="tag">{{ t('config.webhook_url_hint') }}</span>
               </h2>
             </div>
             <div class="f-row">
-              <label>gitcode_api_token</label
-              ><input
-                v-model="cfg.gitcode_api_token"
-                type="password"
-                :placeholder="phToken(cfgP.gitcode_api_token_present, cfgP.gitcode_api_token_tail)"
-              /><button class="s-btn" @click="verifyToken('gitcode', 'gitcode_api_token')">
-                {{ t('config.verify') }}</button
-              ><span class="st">{{ st.gitcode_api_token }}</span>
-            </div>
-            <div class="f-row">
-              <label>oauth_client_id</label
-              ><input
-                v-model="cfg.gitcode_oauth_client_id"
-                :placeholder="
-                  cfgP.gitcode_oauth_client_id_present
-                    ? t('config.configured')
-                    : 'GitCode OAuth App Client ID'
-                "
-              />
-            </div>
-            <div class="f-row">
-              <label>oauth_client_secret</label
-              ><input
-                v-model="cfg.gitcode_oauth_client_secret"
-                type="password"
-                :placeholder="oauthPh('gitcode')"
-              />
-            </div>
-            <div class="f-row">
-              <label>oauth_redirect_uri</label
-              ><input
-                v-model="cfg.gitcode_oauth_redirect_uri"
-                :placeholder="t('config.auto_infer')"
-              />
-            </div>
-            <div class="f-row">
-              <label>webhook_url</label
-              ><input
+              <label>webhook_url</label>
+              <input
                 v-model="cfg.webhook_url"
                 :placeholder="
-                  cfgP.webhook_url_present ? t('config.configured') : 'GitCode webhook callback URL'
+                  cfgP.webhook_url_present ? t('config.configured') : t('config.webhook_url_ph')
                 "
               />
-            </div>
-            <div class="f-row">
-              <label>gitcode_webhook_token</label
-              ><input
-                v-model="cfg.gitcode_webhook_token"
-                type="password"
-                :placeholder="
-                  phToken(cfgP.gitcode_webhook_token_present, cfgP.gitcode_webhook_token_tail)
-                "
-              /><span class="st">{{ st.gitcode_webhook_token }}</span>
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-h">
-              <h2>
-                {{ t('config.github') }} <span class="tag">{{ t('config.github_desc') }}</span>
-              </h2>
-            </div>
-            <div class="f-row">
-              <label>github_bot_token</label
-              ><input
-                v-model="cfg.github_bot_token"
-                type="password"
-                :placeholder="phToken(cfgP.github_bot_token_present, cfgP.github_bot_token_tail)"
-              /><button class="s-btn" @click="verifyToken('github', 'github_bot_token')">
-                {{ t('config.verify') }}</button
-              ><span class="st">{{ st.github_bot_token }}</span>
-            </div>
-            <div class="f-row">
-              <label>github_bot_username</label
-              ><input
-                v-model="cfg.github_bot_username"
-                :placeholder="
-                  cfgP.github_bot_username_present ? t('config.configured') : 'GitHub bot username'
-                "
-              />
-            </div>
-            <div class="f-row">
-              <label>oauth_client_id</label
-              ><input
-                v-model="cfg.github_oauth_client_id"
-                :placeholder="
-                  cfgP.github_oauth_client_id_present
-                    ? t('config.configured')
-                    : 'GitHub OAuth App Client ID'
-                "
-              />
-            </div>
-            <div class="f-row">
-              <label>oauth_client_secret</label
-              ><input
-                v-model="cfg.github_oauth_client_secret"
-                type="password"
-                :placeholder="oauthPh('github')"
-              />
-            </div>
-            <div class="f-row">
-              <label>oauth_redirect_uri</label
-              ><input
-                v-model="cfg.github_oauth_redirect_uri"
-                :placeholder="t('config.auto_infer')"
-              />
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-h">
-              <h2>
-                {{ t('config.bot_account') }}
-                <span class="tag">{{ t('config.bot_account_desc') }}</span>
-              </h2>
-            </div>
-            <div class="f-row">
-              <label>bot_usernames</label
-              ><input v-model="cfg.bot_usernames" :placeholder="t('config.bot_usernames_hint')" />
-            </div>
-            <div class="hint">{{ t('config.bot_usernames_fill_hint') }}</div>
-          </div>
-          <div class="card">
-            <div class="card-h">
-              <h2>
-                {{ t('token_health.title') }} <span class="tag">{{ t('token_health.desc') }}</span>
-              </h2>
-              <button class="s-btn" @click="loadTokenHealth">
-                {{ t('token_health.refresh') }}
-              </button>
-            </div>
-            <div class="f-row">
-              <label>{{ t('token_health.status') }}</label
-              ><span v-if="healthLevel" :class="'tag-' + healthLevel.cls"
-                >● {{ t('token_health.' + healthLevel.key) }}</span
-              ><span
-                v-else-if="health.overall === 'unavailable' || health.overall === 'load_failed'"
-                class="tag-w"
-                >{{ t('token_health.' + health.overall) }}</span
-              ><span v-else>…</span>
-            </div>
-            <div class="f-row">
-              <label>{{ t('token_health.checked_at') }}</label
-              ><span style="font-size: 13px">{{
-                health.checked_at || t('token_health.not_probed')
-              }}</span>
-            </div>
-            <div v-for="(p, prov) in health.platforms" :key="prov" class="card sub">
-              <div class="card-h">
-                <h2 style="font-size: 13px">{{ provLabel(prov) }}</h2>
-              </div>
-              <div class="f-row">
-                <label>{{ t('token_health.status') }}</label
-                ><span :class="'tag-' + pMeta(p).cls"
-                  >● {{ t('token_health.' + pMeta(p).key) }}</span
-                >
-              </div>
-              <div class="f-row">
-                <label>{{ t('token_health.error_type') }}</label
-                ><span
-                  v-if="p.error_type"
-                  :class="'tag-' + (ERROR_TYPE_CLS[p.error_type.toLowerCase()] || 'tag-w')"
-                  >{{ p.error_type.toLowerCase() }}</span
-                ><span v-else>—</span>
-              </div>
-              <div class="f-row">
-                <label>{{ t('token_health.error_detail') }}</label
-                ><span style="font-size: 13px; color: var(--t2, #5b667b)">{{
-                  p.consecutive_failures > 0 ? p.error || '—' : '—'
-                }}</span>
-              </div>
-              <div class="f-row">
-                <label>{{ t('token_health.failures') }}</label
-                ><span style="font-size: 13px">{{
-                  p.consecutive_failures == null ? 0 : p.consecutive_failures
-                }}</span>
-              </div>
-            </div>
-            <div
-              v-if="!health.platforms || !Object.keys(health.platforms).length"
-              class="hint"
-              style="margin-left: 0"
-            >
-              {{ t('token_health.no_platforms') }}
             </div>
           </div>
           <!-- Issue #470：运行参数（超时 / DevSpace 规格）——改完当前实例即时生效 -->
@@ -409,8 +249,8 @@
           </div>
         </div>
 
-        <!-- Whitelist -->
-        <div v-else class="ct">
+        <!-- Whitelist（注册白名单）-->
+        <div v-else-if="view === 'wl'" class="ct">
           <div class="card">
             <div class="card-h">
               <h2>{{ t('whitelist.add') }}</h2>
@@ -485,6 +325,8 @@
               </tbody>
             </table>
           </div>
+        </div>
+        <div v-else-if="view === 'lwl'" class="ct">
           <div class="card">
             <div class="card-h">
               <h2>
@@ -504,16 +346,25 @@
             </div>
             <div class="hint">{{ t('login_whitelist.toggle_hint') }}</div>
           </div>
+          <div v-if="loginWlEnabled === '1' && !loginWl.length" class="card card-warn">
+            <div class="hint warn">{{ t('login_whitelist.empty_warn') }}</div>
+          </div>
           <div class="card">
             <div class="card-h">
               <h2>{{ t('login_whitelist.add') }}</h2>
             </div>
             <div class="f-row">
               <label>{{ t('login_whitelist.provider') }}</label>
+              <!-- 渠道目录驱动（D109：grape_t_oauth_channels 为真源）：新渠道注册即出现在下拉里，
+                   前端零平台字面量；provider key 是存储/判定键，name 只做展示。 -->
               <select v-model="lw.provider" class="ipt">
-                <option value="gitcode">GitCode</option>
-                <option value="github">GitHub</option>
+                <option v-for="p in lwProviders" :key="p.provider" :value="p.provider">
+                  {{ providerLabel(p.provider) }}
+                </option>
               </select>
+              <span v-if="!lwProviders.length" class="inline-hint">{{
+                t('login_whitelist.no_providers')
+              }}</span>
               <label>{{ t('login_whitelist.username') }}</label>
               <input
                 v-model="lw.username"
@@ -539,18 +390,21 @@
               <thead>
                 <tr>
                   <th>ID</th>
-                  <th>{{ t('login_whitelist.col_gitcode') }}</th>
-                  <th>{{ t('login_whitelist.col_github') }}</th>
+                  <th>{{ t('login_whitelist.col_provider') }}</th>
+                  <th>{{ t('login_whitelist.col_username') }}</th>
                   <th>{{ t('login_whitelist.col_remark') }}</th>
                   <th>{{ t('login_whitelist.col_created') }}</th>
                   <th>{{ t('login_whitelist.col_actions') }}</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="w in loginWl" :key="w.id" class="wlrow">
+                <tr v-for="w in loginWl" :key="w.id + ':' + w.provider" class="wlrow">
                   <td>{{ w.id }}</td>
-                  <td>{{ w.gitcode_username || '-' }}</td>
-                  <td>{{ w.github_username || '-' }}</td>
+                  <td>
+                    {{ providerLabel(w.provider) }}
+                    <span v-if="w.legacy" class="tag">{{ t('login_whitelist.legacy_tag') }}</span>
+                  </td>
+                  <td>{{ w.username || '-' }}</td>
                   <td>{{ w.remark || '-' }}</td>
                   <td class="td-sub">{{ w.created_at || '-' }}</td>
                   <td>
@@ -658,6 +512,8 @@ function isPwdTooShort(p) {
 // it is its own document (admin.html) with its own I18N namespace "admin.*".
 // Behavior-equivalent migration, no visual upgrades (visual debt tracked separately).
 import { reactive, ref, computed } from 'vue'
+import AdminChannels from './AdminChannels.vue'
+import AdminPlatforms from './AdminPlatforms.vue'
 
 const G = globalThis
 
@@ -675,18 +531,9 @@ const openMenuId = ref(null)
 
 const saving = ref(false)
 const cfg = reactive({
-  gitcode_api_token: '',
-  gitcode_oauth_client_id: '',
-  gitcode_oauth_client_secret: '',
-  gitcode_oauth_redirect_uri: '',
+  // 只放部署级配置：webhook_url + 运行参数。平台/渠道凭据归各自的菜单
+  // （登录渠道 → client_id/secret；仓库平台 → bot_username/bot 凭据）。
   webhook_url: '',
-  gitcode_webhook_token: '',
-  github_bot_token: '',
-  github_bot_username: '',
-  github_oauth_client_id: '',
-  github_oauth_client_secret: '',
-  github_oauth_redirect_uri: '',
-  bot_usernames: '',
   // Issue #470：运行参数（空 = 不改；数值字段由后端校验正整数）
   runtime_task_timeout: '',
   devstage_template_id: '',
@@ -696,16 +543,6 @@ const cfg = reactive({
   devstage_arch: '',
 })
 const cfgP = reactive({}) // presence flags from server (placeholders only, never rendered value)
-const st = reactive({ gitcode_api_token: '', github_bot_token: '', gitcode_webhook_token: '' })
-const health = ref({})
-const healthLevel = computed(() => {
-  const d = health.value || {}
-  if (d.overall === 'unhealthy') return { cls: 'd', key: 'unhealthy' }
-  if (d.overall === 'degraded') return { cls: 'w', key: 'degraded' }
-  if (d.overall) return { cls: 's', key: 'healthy' }
-  return null
-})
-
 const users = ref([])
 const usersTotal = ref(0)
 const userPage = ref(1)
@@ -722,8 +559,11 @@ const wl = reactive({ type: 'email', value: '', remark: '' })
 const allowSignup = ref('0')
 const signupWl = ref([])
 const loginWlEnabled = ref('0')
-const lw = reactive({ provider: 'gitcode', username: '', remark: '' })
+const lw = reactive({ provider: '', username: '', remark: '' })
 const loginWl = ref([])
+// 渠道目录（GET /admin/whitelist 的 providers）：D109 下真源是 grape_t_oauth_channels，
+// 新渠道注册即出现在下拉里——前端不再写死平台集合。
+const lwProviders = ref([])
 
 const pwdModal = reactive({ open: false, old: '', new_: '', confirm: '' })
 const userModal = reactive({ open: false, mode: 'create', user: null })
@@ -743,8 +583,6 @@ const userModalBtn = computed(() =>
       : t('users.edit_btn')
 )
 
-const ERROR_TYPE_CLS = { auth: 'tag-d', network: 'tag-w', config: 'tag-w' }
-
 // ---------- i18n ----------
 function initLang() {
   return (G.localStorage.getItem('grapeLang') || 'zh') === 'en' ? 'en' : 'zh'
@@ -762,14 +600,6 @@ function setLang(l) {
 }
 function toggleLang() {
   setLang(lang.value === 'zh' ? 'en' : 'zh')
-}
-function provLabel(prov) {
-  const v = G.I18N.t('admin.token_health.' + prov)
-  return v === 'admin.token_health.' + prov ? prov : v
-}
-function pMeta(p) {
-  const lvl = p.unhealthy ? 'unhealthy' : p.degraded ? 'degraded' : 'healthy'
-  return { cls: lvl === 'unhealthy' ? 'd' : lvl === 'degraded' ? 'w' : 's', key: lvl }
 }
 function dotCls(s) {
   return { 0: 's-off', 1: 's-on', 2: 's-del', 3: 's-cool' }[s] || 's-del'
@@ -848,6 +678,9 @@ async function jsonFetch(url, opts) {
     const e = new Error((data && data.detail && data.detail.message) || 'UNKNOWN')
     e.status = r.status
     e.error_code = (data && data.detail && data.detail.error_code) || 'UNKNOWN'
+    // 409 影响面预检要把统计读出来（关闭平台前弹窗展示），否则前端只能干瞪眼
+    e.detail = (data && data.detail) || null
+    e.payload = data
     throw e
   }
   return data
@@ -885,53 +718,12 @@ function doLogout() {
 }
 
 // ---------- config ----------
-function phToken(present, tail) {
-  if (present) return t('config.configured_tail', { tail: tail })
-  return t('config.not_configured')
-}
-function oauthPh(platform) {
-  const os = healthOauthStatus[platform] ? healthOauthStatus[platform] : null
-  return os
-    ? t('config.configured_update')
-    : platform === 'gitcode'
-      ? 'GitCode OAuth App Client Secret'
-      : 'GitHub OAuth App Client Secret'
-}
-// oauth_status comes with /config response; kept separate from token health
-const healthOauthStatus = reactive({})
-
 function showCfg() {
   view.value = 'cfg'
-  loadTokenHealth()
   api('/config')
     .then((d) => {
       const c = d.config || {}
-      const os = c.oauth_status || {}
-      healthOauthStatus.gitcode = os.gitcode || null
-      healthOauthStatus.github = os.github || null
-      Object.assign(cfgP, {
-        gitcode_api_token_present: c.gitcode_api_token_present,
-        gitcode_api_token_tail: c.gitcode_api_token_tail,
-        github_bot_token_present: c.github_bot_token_present,
-        github_bot_token_tail: c.github_bot_token_tail,
-        github_bot_username_present: c.github_bot_username_present,
-        gitcode_oauth_client_id_present: c.gitcode_oauth_client_id_present,
-        github_oauth_client_id_present: c.github_oauth_client_id_present,
-        webhook_url_present: c.webhook_url_present,
-        gitcode_webhook_token_present: c.gitcode_webhook_token_present,
-        gitcode_webhook_token_tail: c.gitcode_webhook_token_tail,
-      })
-      cfg.gitcode_api_token = ''
-      cfg.github_bot_token = ''
-      cfg.gitcode_webhook_token = ''
-      cfg.gitcode_oauth_client_secret = ''
-      cfg.github_oauth_client_secret = ''
-      cfg.github_bot_username = c.github_bot_username || ''
-      cfg.gitcode_oauth_client_id = c.gitcode_oauth_client_id || ''
-      cfg.github_oauth_client_id = c.github_oauth_client_id || ''
-      cfg.gitcode_oauth_redirect_uri = c.gitcode_oauth_redirect_uri || ''
-      cfg.github_oauth_redirect_uri = c.github_oauth_redirect_uri || ''
-      cfg.bot_usernames = (c.bot_usernames || []).join(', ')
+      Object.assign(cfgP, { webhook_url_present: c.webhook_url_present })
       cfg.webhook_url = c.webhook_url || ''
       // Issue #470：运行参数（GET 已回显设置值/默认值 + 当前生效值）
       cfg.runtime_task_timeout =
@@ -957,29 +749,8 @@ function showCfg() {
 function saveConfig() {
   saving.value = true
   const body = {}
-  if (cfg.gitcode_api_token.trim()) body.gitcode_api_token = cfg.gitcode_api_token.trim()
-  if (cfg.github_bot_token.trim()) body.github_bot_token = cfg.github_bot_token.trim()
-  if (cfg.github_bot_username.trim()) body.github_bot_username = cfg.github_bot_username.trim()
-  if (cfg.gitcode_oauth_client_id.trim() && cfg.gitcode_oauth_client_id.indexOf('●') < 0)
-    body.gitcode_oauth_client_id = cfg.gitcode_oauth_client_id.trim()
-  if (cfg.gitcode_oauth_client_secret.trim())
-    body.gitcode_oauth_client_secret = cfg.gitcode_oauth_client_secret.trim()
-  if (cfg.gitcode_oauth_redirect_uri.trim())
-    body.gitcode_oauth_redirect_uri = cfg.gitcode_oauth_redirect_uri.trim()
-  if (cfg.github_oauth_client_id.trim() && cfg.github_oauth_client_id.indexOf('●') < 0)
-    body.github_oauth_client_id = cfg.github_oauth_client_id.trim()
-  if (cfg.github_oauth_client_secret.trim())
-    body.github_oauth_client_secret = cfg.github_oauth_client_secret.trim()
-  if (cfg.github_oauth_redirect_uri.trim())
-    body.github_oauth_redirect_uri = cfg.github_oauth_redirect_uri.trim()
-  const us = cfg.bot_usernames
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
-  if (us.length) body.bot_usernames = us
+  // 只提交部署级配置；平台/渠道凭据一律不从这里写（各自菜单负责，避免双入口互相覆盖）
   if (cfg.webhook_url.trim()) body.webhook_url = cfg.webhook_url.trim()
-  if (cfg.gitcode_webhook_token.trim())
-    body.gitcode_webhook_token = cfg.gitcode_webhook_token.trim()
   // Issue #470：运行参数——非空才提交（空 = 保持现值）；数值字段转 int
   const _rtTimeout = String(cfg.runtime_task_timeout || '').trim()
   if (_rtTimeout) {
@@ -1004,42 +775,6 @@ function saveConfig() {
     })
     .finally(() => {
       saving.value = false
-    })
-}
-
-function verifyToken(provider, field) {
-  const tok = cfg[field].trim()
-  if (!tok) {
-    toast(t('config.enter_token_first'), false)
-    return
-  }
-  api('/config/verify-token', { method: 'POST', body: { provider, token: tok } })
-    .then((d) => {
-      if (d.ok) {
-        st[field] = '✔ ' + (d.login || d.name)
-        toast(t('config.token_valid', { login: d.login }), true)
-      } else {
-        st[field] = t('config.token_invalid_status')
-        toast(t('config.token_invalid'), false)
-      }
-    })
-    .catch((e) => {
-      toast(t('config.verify_failed') + ': ' + errMsg(e), false)
-    })
-}
-
-// ---------- token health ----------
-function loadTokenHealth() {
-  health.value = {}
-  api('/bot-token-health')
-    .then((d) => {
-      health.value = d || {}
-    })
-    .catch((e) => {
-      const unavailable = !!(e && (e.status === 404 || e.status === 405))
-      health.value = { overall: unavailable ? 'unavailable' : 'load_failed' }
-      if (!(e && e.status === 401))
-        toast(t('token_health.load_health_failed') + ': ' + errMsg(e), false)
     })
 }
 
@@ -1204,6 +939,11 @@ function showWhitelist() {
   view.value = 'wl'
   loadWhitelist()
   loadAllowSignup()
+}
+
+// 登录白名单是独立页面（渠道维度）；注册白名单是邮箱/域名维度，两者语义不同不混排
+function showLoginWhitelist() {
+  view.value = 'lwl'
   loadLoginWhitelist()
 }
 
@@ -1266,12 +1006,30 @@ function loadLoginWhitelist() {
     .then((d) => {
       loginWl.value = d.whitelist || []
       loginWlEnabled.value = d && d.enabled ? '1' : '0'
+      lwProviders.value = d.providers || []
+      // 默认选中第一个在册渠道；当前选中项已不在目录里（渠道下线）也要纠正，
+      // 否则点"添加"必然 400 OAUTH_CHANNEL_NOT_CONFIGURED。
+      const keys = lwProviders.value.map((p) => p.provider)
+      if (!keys.includes(lw.provider)) lw.provider = keys[0] || ''
     })
     .catch((e) => {
       toast(t('login_whitelist.load_failed') + ': ' + errMsg(e), false)
     })
 }
+// provider key → 展示名（卡 name）；目录里没有就用 key 本身（存量列式条目的平台可能已下线）
+// 渠道显示名：优先 i18n 专有名词（华为云 / Huawei Cloud），其次渠道目录里的 name，
+// 最后回退 provider key。中文库里存的 name 是中文，英文界面直接用它会漏出中文。
+function providerLabel(key) {
+  const loc = t('provider_name.' + key, '')
+  if (loc) return loc
+  const hit = lwProviders.value.find((p) => p.provider === key)
+  return (hit && hit.name) || key || '-'
+}
 function addLoginWhitelist() {
+  if (!lw.provider) {
+    toast(t('login_whitelist.no_providers'), false)
+    return
+  }
   if (!lw.username.trim()) {
     toast(t('login_whitelist.username_required'), false)
     return
@@ -1291,7 +1049,10 @@ function addLoginWhitelist() {
     })
 }
 function deleteLoginWhitelist(w) {
-  api('/whitelist/' + w.id, { method: 'DELETE' })
+  // 老列式行按 provider 定向清列（一人多平台老行互不误伤，与后端 S11 口径一致）；
+  // 新模式行带 provider 也无副作用（按 (id, provider) 删）。
+  const q = w.provider ? '?provider=' + encodeURIComponent(w.provider) : ''
+  api('/whitelist/' + w.id + q, { method: 'DELETE' })
     .then(() => {
       toast(t('login_whitelist.deleted'), true)
       loadLoginWhitelist()
@@ -1684,6 +1445,20 @@ if (getToken()) {
 .card.sub {
   margin-top: 8px;
   padding: 14px 18px;
+}
+/* 空表 fail-closed 警示（S6 语义）：红边浅底，视觉上必须比普通卡更"响" */
+.card.card-warn {
+  border-color: #f0b4ae;
+  background: #fff5f4;
+  padding: 12px 18px;
+}
+.hint.warn {
+  margin: 0;
+  color: #b3261e;
+}
+.inline-hint {
+  font-size: 12px;
+  color: #b3261e;
 }
 .card-h {
   display: flex;

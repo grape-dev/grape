@@ -7205,3 +7205,650 @@ register_migration(
     kind="safe",
     fn=_fn_add_events_failed_node,
 )
+
+
+# ===== D109 平台对象模型六表（设计分片 d109 §4；DDL 单一来源 src/api/platform_object_ddl.py）=====
+
+def _fn_create_platform_object_tables() -> None:
+    """建六表 + 部分唯一索引的方言等价 + grape_t_repo_credentials 补 created_at / derived_from。
+
+    幂等：IF NOT EXISTS + PRAGMA/信息模式判列；抛错不吞（执行器约定：抛错=不盖章，下次启动重试）。
+
+    方言：**逐条 cursor.execute** —— `executescript` 是 sqlite3 专有 API，不经过
+    `mysql_compat` 的翻译层，MySQL 后端下会 1064；项目既有建表迁移一律逐条 execute
+    （db_setup.py:4788/5021）。唯一真正不兼容的是 bot 默认位的**部分唯一索引**
+    （SQLite 的 `WHERE is_default = 1`）：MySQL 用 STORED 生成列 + 复合唯一键等价
+    （is_default=0 行生成列为 NULL，MySQL 唯一键不约束 NULL）。
+    """
+    from src.api.platform_object_ddl import iter_statements
+    from src.kernel.config import log
+    from src.kernel.mysql_compat import get_db_backend
+    from src.kernel.session_manager import db, db_lock
+
+    backend = get_db_backend()
+    with db_lock:
+        c = db.cursor()
+        for stmt in iter_statements():
+            # 表归属守卫：平台对象四表归 mgmt 域，非 owner 进程不建（否则三库形态下
+            # 每个进程各建一份同名基表——设计明令禁止；单库/无法判定域时守卫放行）。
+            _tbl = ""
+            _low = stmt.lower()
+            _i = _low.find("create table")
+            if _i >= 0:
+                _rest = stmt[_i + len("create table"):].strip()
+                if _rest.lower().startswith("if not exists"):
+                    _rest = _rest[len("if not exists"):].strip()
+                _tbl = _rest.split("(")[0].split()[0].replace(chr(34), "").replace(chr(39), "").replace("`", "") if _rest else ""
+            if _tbl and _owned_skip(_tbl, "D109 create table"):
+                continue
+            c.execute(stmt)
+        # D110：bot 账号目录已退役（bot 归平台行），部分唯一索引/生成列的方言适配一并删除
+
+        # grape_t_repo_credentials 归 insight 域：只有 owner 进程给该表补列
+        if not _owned_skip("grape_t_repo_credentials", "ensure column"):
+            cols = {r[1] for r in c.execute("PRAGMA table_info(grape_t_repo_credentials)").fetchall()}
+            if cols:  # 表存在才补列（rc 由 202611150003 建）
+                # MySQL 的 TEXT 不能带 DEFAULT，补列用 VARCHAR；SQLite 保持 TEXT DEFAULT ''
+                decl_text = "VARCHAR(32) NOT NULL DEFAULT ''" if backend == "mysql" else "TEXT NOT NULL DEFAULT ''"
+                for col, decl in (("created_at", decl_text), ("derived_from", decl_text)):
+                    if col not in cols:
+                        c.execute(f"ALTER TABLE grape_t_repo_credentials ADD COLUMN {col} {decl}")
+        db.commit()
+
+
+register_migration(
+    version="202611170030",
+    name="create-platform-object-tables",
+    kind="safe",
+    fn=_fn_create_platform_object_tables,
+)
+
+# ===== 凭据能力表收口（2026-11-14：删除 configs/repo-credentials.json）=====
+
+def _fn_merge_credential_caps_into_platforms() -> None:
+    """凭据能力表并入平台表：补列 → 回填存活字段 → 删表。
+
+    背景：`configs/repo-credentials.json` 已删除（drivers / oauth_requires_scope /
+    supports_bot_token / supports_webhook_secret 不再有语义）。只剩 pat_create_url /
+    token_storage_field / webhook_token_field / bot_username / owner_fallback 仍被运行时读取，
+    它们本来就在 `configs/platforms/<p>.json` 里声明 → 直接落到平台表同名列。
+
+    幂等：逐列 PRAGMA / information_schema 判存在；表已删则什么都不做。
+    破坏性 DDL（DROP TABLE）走 `_destructive_ddl` 唯一入口，受 min_code_version 门槛。
+    """
+    from src.kernel.config import log
+    from src.kernel.mysql_compat import get_db_backend
+    from src.kernel.session_manager import db, db_lock
+
+    backend = get_db_backend()
+    text_decl = "VARCHAR(64) NOT NULL DEFAULT ''" if backend == "mysql" else "TEXT NOT NULL DEFAULT ''"
+    cols = {"pat_create_url": text_decl, "token_storage_field": text_decl,
+            "webhook_token_field": text_decl, "bot_username": text_decl,
+            "owner_fallback": "INTEGER NOT NULL DEFAULT 0"}
+    with db_lock:
+        c = db.cursor()
+        if backend == "mysql":
+            have = {r[0] for r in c.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_schema = DATABASE() AND table_name = 'grape_t_repo_platforms'"
+            ).fetchall()}
+            exists = c.execute(
+                "SELECT COUNT(*) FROM information_schema.tables"
+                " WHERE table_schema = DATABASE() AND table_name = 'grape_t_repo_credential_caps'"
+            ).fetchone()
+            caps_exists = bool(exists and exists[0])
+        else:
+            have = {r[1] for r in c.execute("PRAGMA table_info(grape_t_repo_platforms)").fetchall()}
+            caps_exists = bool(c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='grape_t_repo_credential_caps'"
+            ).fetchone())
+        for col, decl in cols.items():
+            if col not in have:
+                c.execute(f"ALTER TABLE grape_t_repo_platforms ADD COLUMN {col} {decl}")
+        if caps_exists:
+            rows = c.execute(
+                "SELECT provider, pat_create_url, token_storage_field, webhook_token_field,"
+                " bot_username, owner_fallback FROM grape_t_repo_credential_caps"
+            ).fetchall()
+            for provider, pat, tok, wh, bot, owner in rows:
+                c.execute(
+                    "UPDATE grape_t_repo_platforms SET pat_create_url = ?, token_storage_field = ?,"
+                    " webhook_token_field = ?, bot_username = ?, owner_fallback = ? WHERE provider = ?",
+                    (pat or "", tok or "", wh or "", bot or "", int(owner or 0), provider),
+                )
+            if not _destructive_ddl(c, "DROP TABLE IF EXISTS grape_t_repo_credential_caps",
+                                    version="202611170031"):
+                db.commit()
+                raise RuntimeError("202611170031 删凭据能力表被 min_code_version 门槛拦截，下次启动重试")
+            log.info("202611170031 凭据能力字段已并入 grape_t_repo_platforms，并删除 grape_t_repo_credential_caps")
+        db.commit()
+        # 复检（2026-11-14 实锤：本迁移在 MySQL 上盖了章，但 5 个列一个都没建、caps 表也还在
+        # ——线上 ORM 因此每次读平台表都抛 Unknown column 走文件兜底）。DDL 的"执行成功"不等于
+        # "库真的变了"，所以这里按最终状态判定，不满足就不盖章、下次启动重试。
+        _missing, _caps_still = [], False
+        if backend == "mysql":
+            _have = {r[0] for r in c.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_schema = DATABASE() AND table_name = 'grape_t_repo_platforms'"
+            ).fetchall()}
+            _missing = [col for col in cols if col not in _have]
+            _caps_still = bool(c.execute(
+                "SELECT COUNT(*) FROM information_schema.tables"
+                " WHERE table_schema = DATABASE() AND table_name = 'grape_t_repo_credential_caps'"
+            ).fetchone()[0])
+        else:
+            _have = {r[1] for r in c.execute("PRAGMA table_info(grape_t_repo_platforms)").fetchall()}
+            _missing = [col for col in cols if col not in _have]
+            _caps_still = bool(c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='grape_t_repo_credential_caps'"
+            ).fetchone())
+        if _missing or _caps_still:
+            raise RuntimeError(
+                f"202611170031 复检未通过（缺列={_missing}，caps 表仍在={_caps_still}）——"
+                f"DDL 未真正生效，拒绝盖章，下次启动重试")
+
+
+register_migration(
+    version="202611170031",
+    name="merge-credential-caps-into-platforms",
+    kind="cleanup",  # 含 DROP TABLE，走 cleanup 语义（min_code_version 门槛）
+    fn=_fn_merge_credential_caps_into_platforms,
+)
+
+
+# ===== 配对即授权收口（2026-11-14）：删 grape_t_channel_repo_link.relation =====
+
+def _fn_drop_channel_link_relation_column() -> None:
+    """relation 列不再参与任何判定（配对即授权），随本批删除。
+
+    幂等：SQLite PRAGMA / MySQL information_schema 判列；删列属危险 DDL，
+    走 `_destructive_ddl` 唯一入口（cleanup 语义 + min_code_version 门槛）。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+    from src.kernel.session_manager import db, db_lock
+
+    backend = get_db_backend()
+    with db_lock:
+        c = db.cursor()
+        if backend == "mysql":
+            cols = {r[0] for r in c.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_schema = DATABASE() AND table_name = 'grape_t_channel_repo_link'"
+            ).fetchall()}
+        else:
+            cols = {r[1] for r in c.execute("PRAGMA table_info(grape_t_channel_repo_link)").fetchall()}
+        if "relation" not in cols:
+            db.commit()
+            return
+        if not _destructive_ddl(c, "ALTER TABLE grape_t_channel_repo_link DROP COLUMN relation",
+                                version="202611170032"):
+            db.commit()
+            raise RuntimeError("202611170032 删 relation 列被 min_code_version 门槛拦截，下次启动重试")
+        db.commit()
+        # 复检：`_destructive_ddl` 对非 MDL 异常只告警不抛（历史行为），不复检就会把
+        # "实际没删"盖成"已删"（2026-11-14 实锤：MySQL 上盖章了但列仍在）。拒绝盖章。
+        if backend == "mysql":
+            cols_after = {r[0] for r in c.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_schema = DATABASE() AND table_name = 'grape_t_channel_repo_link'"
+            ).fetchall()}
+        else:
+            cols_after = {r[1] for r in c.execute("PRAGMA table_info(grape_t_channel_repo_link)").fetchall()}
+        if "relation" in cols_after:
+            raise RuntimeError("202611170032 relation 列仍在（DROP 未实际生效，拒绝盖章）")
+        log.info("202611170032 已删除 grape_t_channel_repo_link.relation（配对即授权，档位退役）")
+
+
+register_migration(
+    version="202611170032",
+    name="drop-channel-link-relation-column",
+    kind="cleanup",  # 含 DROP COLUMN，走 cleanup 语义（min_code_version 门槛）
+    fn=_fn_drop_channel_link_relation_column,
+)
+
+
+# ===== 同域配对收口（2026-11-14 用户裁定「同域配对是错误配置」）=====
+
+def _fn_drop_same_domain_links() -> None:
+    """删除 oauth_provider == repo_provider 的关系行。
+
+    同域不是授权：渠道自己就是平台，运行时 `hooks._targets` 天然补上自己。
+    这些行是上一版"只认配置"留下的冗余数据（configs 里也配过同名对）。
+    """
+    from src.kernel.session_manager import db, db_lock
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COUNT(*) FROM grape_t_channel_repo_link"
+                  " WHERE oauth_provider = repo_provider")
+        n = (c.fetchone() or [0])[0]
+        if n:
+            c.execute("DELETE FROM grape_t_channel_repo_link WHERE oauth_provider = repo_provider")
+        db.commit()
+    log.info(f"202611170033 清理同域配对关系行 {n} 条（同域由运行时隐式提供）")
+
+
+register_migration(
+    version="202611170033",
+    name="drop-same-domain-channel-links",
+    kind="backfill",  # 纯数据清理，无 DDL：不受 min_code_version 门槛约束
+    fn=_fn_drop_same_domain_links,
+)
+
+
+
+# ===== D110：bot 归属收敛到仓库平台行（一平台一个 bot；bot_accounts 退役）=====
+
+_BOT_PLATFORM_COLUMNS = (
+    # (列名, SQLite 声明, MySQL 声明) —— MySQL 的 TEXT 不能带字面量 DEFAULT，补列用 VARCHAR
+    ("bot_token_enc", "TEXT NOT NULL DEFAULT ''", "VARCHAR(2048) NOT NULL DEFAULT ''"),
+    ("bot_token_status", "TEXT NOT NULL DEFAULT 'unknown'", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
+    ("bot_checked_at", "TEXT NOT NULL DEFAULT ''", "VARCHAR(32) NOT NULL DEFAULT ''"),
+)
+
+
+def _fn_add_platform_bot_columns() -> None:
+    """grape_t_repo_platforms 补 3 列（幂等；表不存在则跳过，建表迁移先跑）。
+
+    D110 决策：bot 的家 = 平台行（一平台一个 bot），仓库级覆盖仍在 rc('bot')。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+    from src.kernel.session_manager import db, db_lock
+
+    backend = get_db_backend()
+    with db_lock:
+        c = db.cursor()
+        cols = {row[1] for row in c.execute("PRAGMA table_info(grape_t_repo_platforms)").fetchall()}
+        if not cols:
+            log.info("202611170034 grape_t_repo_platforms 不存在，跳过补列")
+            return
+        added = []
+        for name, sqlite_decl, mysql_decl in _BOT_PLATFORM_COLUMNS:
+            if name in cols:
+                continue
+            c.execute(f"ALTER TABLE grape_t_repo_platforms ADD COLUMN {name} "
+                      f"{mysql_decl if backend == 'mysql' else sqlite_decl}")
+            added.append(name)
+        db.commit()
+    log.info(f"202611170034 平台 bot 列已就绪（本轮新增 {added or '无'}）")
+
+
+register_migration(
+    version="202611170034",
+    name="add-platform-bot-columns",
+    kind="safe",
+    fn=_fn_add_platform_bot_columns,
+)
+
+
+# 已盖章迁移的源码（含 docstring）是 checksum 冻结面：改动会让每次启动报"漂移"。
+# 因此下面的原 docstring 保持盖章时的原文；与事实不符之处在此更正：
+#   - meta 的 global_bot_*_token 是**历史明文**，本迁移会把它原样搬进 bot_token_enc
+#     （线上实锤：gitcode 24 字符 / github ghp_ 40 字符落成了明文），
+#     由 202611170039 统一就地加密；bot_accounts.token_enc 才是密文、原样搬。
+def _fn_seed_platform_bot() -> None:
+    """把 meta 的全局 bot（含历史别名）与 bot_accounts 的默认行搬进平台行（幂等）。
+
+    读序口径（D110 §4）：平台行 → meta → 文件。迁移只补空位，不覆盖任何既有值；
+    bot_accounts 的 token_enc 与平台行同一加密方案，密文直接搬（不落明文）。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+    from src.kernel.session_manager import db, db_lock
+
+    _alias = {"gitcode": ("gitcode_api_token", "global_bot_gitcode_token"),
+              "github": ("github_bot_token", "global_bot_github_token")}
+    with db_lock:
+        c = db.cursor()
+        rows = c.execute("SELECT provider, bot_username, bot_token_enc "
+                         "FROM grape_t_repo_platforms").fetchall()
+        if not rows:
+            log.info("202611170035 平台表为空，跳过 bot 播种")
+            return
+        has_bot_table = False
+        try:
+            if get_db_backend() == "mysql":
+                has_bot_table = bool(c.execute(
+                    "SELECT table_name FROM information_schema.tables"
+                    " WHERE table_schema = DATABASE() AND table_name = 'grape_t_bot_accounts'"
+                ).fetchone())
+            else:
+                has_bot_table = bool(c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='grape_t_bot_accounts'"
+                ).fetchone())
+        except Exception as _e:
+            log.warning(f"202611170035 探测 bot_accounts 失败（按不存在处理）: {_e}")
+        filled = []
+        for provider, username, token_enc in rows:
+            _new_username, _new_token = username or "", token_enc or ""
+            if not _new_token:
+                meta_keys = [f"global_bot_{provider}_token", *_alias.get(provider, ())]
+                for key in meta_keys:
+                    row = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+                    if row and row[0]:
+                        _new_token = row[0]
+                        break
+            if not _new_token and has_bot_table:
+                row = c.execute(
+                    "SELECT token_enc FROM grape_t_bot_accounts "
+                    "WHERE provider=? AND is_default=1 AND token_enc!='' LIMIT 1", (provider,)
+                ).fetchone()
+                if row and row[0]:
+                    _new_token = row[0]
+            if not _new_username:
+                for key in (f"global_bot_{provider}_username",):
+                    row = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+                    if row and row[0]:
+                        _new_username = row[0]
+                        break
+            if not _new_username and has_bot_table:
+                row = c.execute(
+                    "SELECT username FROM grape_t_bot_accounts "
+                    "WHERE provider=? ORDER BY is_default DESC, created_at ASC LIMIT 1", (provider,)
+                ).fetchone()
+                if row and row[0]:
+                    _new_username = row[0]
+            if (_new_username, _new_token) != (username or "", token_enc or ""):
+                c.execute("UPDATE grape_t_repo_platforms SET bot_username=?, bot_token_enc=?, "
+                          "updated_at=datetime('now') WHERE provider=?",
+                          (_new_username, _new_token, provider))
+                filled.append(provider)
+        # 迁移标记：兼容期 meta 仍作第 3 级来源，标记只用于"文件 fallback 是否还在服役"
+        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('bot_platform_migrated', '1')")
+        db.commit()
+    log.info(f"202611170035 平台 bot 播种完成（本轮写入 {filled or '无'}）")
+
+
+register_migration(
+    version="202611170035",
+    name="seed-platform-bot-from-meta",
+    kind="backfill",
+    fn=_fn_seed_platform_bot,
+)
+
+
+def _fn_widen_repo_credential_derived_from() -> None:
+    """MySQL：grape_t_repo_credentials.derived_from VARCHAR(32) → VARCHAR(36)。
+
+    该列存 bot 账号 id，uuid7_str() 是 36 字符；32 宽在 strict 模式下写入即 1406。
+    SQLite 侧是 TEXT，无需处理。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+    from src.kernel.session_manager import db, db_lock
+
+    if get_db_backend() != "mysql":
+        return
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns"
+            " WHERE table_schema = DATABASE() AND table_name = 'grape_t_repo_credentials'"
+            " AND column_name = 'derived_from'"
+        ).fetchone()
+        if not row:
+            return
+        width = int(row[0] or 0)
+        if width >= 36:
+            return
+        c.execute("ALTER TABLE grape_t_repo_credentials MODIFY COLUMN derived_from "
+                  "VARCHAR(36) NOT NULL DEFAULT ''")
+        db.commit()
+    log.info(f"202611170036 derived_from 列宽 {width} → 36")
+
+
+register_migration(
+    version="202611170036",
+    name="widen-repo-credential-derived-from",
+    kind="backfill",
+    fn=_fn_widen_repo_credential_derived_from,
+)
+
+
+# ===== D110 续：平台 bot 的"初始化种子"从配置文件读（任意平台，非仅 gitcode/github）=====
+
+
+# 注意：函数体内 docstring 提到的 platform-bots.example.json 是盖章时的文件名，
+# 现已改回 configs/global-bot-token.example.json（docstring 属 checksum 冻结面，不改）。
+def _fn_seed_platform_bot_from_file() -> None:
+    """把平台 bot 种子文件播进平台行（D110）。
+
+    文件格式（两种并存，见 configs/platform-bots.example.json）：
+      1) 旧扁平键：gitcode_api_token / github_bot_token / github_bot_username / <p>_bot_token …
+      2) 新数组：platform_bot: [{provider, bot_name, bot_token}]（别名 platform_type / bit_token 兼容）
+    配置文件只作**初始化种子**，运行时不读；凭据落库前加密；平台行对应列非空则不覆盖。
+    """
+    from src.kernel.config import read_bot_seed_file
+    from src.kernel.mysql_compat import get_db_backend
+    from src.kernel.session_manager import db, db_lock
+
+    seeds = read_bot_seed_file()
+    if not seeds:
+        log.info("202611170037 未发现平台 bot 种子（或文件为空），跳过")
+        return
+
+    from src.domains.mgmt.auth.credential_crypto import encrypt
+
+    backend = get_db_backend()
+    filled = []
+    with db_lock:
+        c = db.cursor()
+        if backend == "mysql":
+            exists = bool(c.execute(
+                "SELECT table_name FROM information_schema.tables"
+                " WHERE table_schema = DATABASE() AND table_name = 'grape_t_repo_platforms'"
+            ).fetchone())
+        else:
+            exists = bool(c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='grape_t_repo_platforms'"
+            ).fetchone())
+        if not exists:
+            log.info("202611170037 平台表不存在，跳过种子")
+            return
+        for provider, fields in sorted(seeds.items()):
+            row = c.execute("SELECT bot_username, bot_token_enc FROM grape_t_repo_platforms"
+                            " WHERE provider=?", (provider,)).fetchone()
+            if row is None:
+                log.info(f"202611170037 平台行 {provider} 未导入，跳过该平台种子")
+                continue
+            cur_username, cur_token = (row[0] or ""), (row[1] or "")
+            new_username = cur_username or fields.get("username", "")
+            new_token = cur_token or (encrypt(fields["token"]) if fields.get("token") else "")
+            if (new_username, new_token) != (cur_username, cur_token):
+                c.execute("UPDATE grape_t_repo_platforms SET bot_username=?, bot_token_enc=?,"
+                          " updated_at=datetime('now') WHERE provider=?",
+                          (new_username, new_token, provider))
+                filled.append(provider)
+        db.commit()
+    log.info(f"202611170037 平台 bot 种子完成（本轮写入 {filled or '无'}）")
+
+
+register_migration(
+    version="202611170037",
+    name="seed-platform-bot-from-config-file",
+    kind="backfill",
+    fn=_fn_seed_platform_bot_from_file,
+)
+
+
+# ===== D110 收尾：删除已无读者的 bot 账号目录表（先导出，导出失败拒绝 DROP）=====
+
+def _fn_drop_bot_accounts_table() -> None:
+    """删除 `grape_t_bot_accounts`（D110：一平台一个 bot，目录表零读取者）。
+
+    可恢复性优先：先把整表导出成 `data/bot_accounts-backup-<ts>.json`，
+    写盘失败就**不执行 DROP**（宁可留着死表，也不丢数据）。表不存在时幂等跳过。
+    """
+    import json as _json
+    import os as _os
+    import time as _time
+
+    from src.kernel.mysql_compat import get_db_backend
+    from src.kernel.session_manager import db, db_lock
+
+    table = "grape_t_bot_accounts"
+    data_dir = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "..", "data"))
+
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(f"SELECT * FROM {table}")
+            rows = c.fetchall()
+            cols = [d[0] for d in (c.description or [])]
+        except Exception:
+            log.info(f"202611170038 {table} 不存在，跳过")
+            return
+
+        payload = {
+            "table": table,
+            "exported_at": _time.strftime("%Y-%m-%d %H:%M:%S"),
+            "backend": get_db_backend(),
+            "columns": cols,
+            "rows": [dict(zip(cols, r)) for r in rows],
+        }
+        _os.makedirs(data_dir, exist_ok=True)
+        path = _os.path.join(data_dir, f"bot_accounts-backup-{_time.strftime('%Y%m%d-%H%M%S')}.json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log.error(f"202611170038 导出失败，拒绝 DROP {table}: {e}")
+            return
+
+        c.execute(f"DROP TABLE {table}")
+        log.info(f"202611170038 已导出 {len(rows)} 行到 {path} 并删除 {table}")
+
+
+register_migration(
+    version="202611170038",
+    name="drop-bot-accounts-table",
+    kind="cleanup",  # 含 DROP TABLE，走 cleanup 语义（min_code_version 门槛）
+    fn=_fn_drop_bot_accounts_table,
+)
+
+
+# ===== D110 修正：平台行的 bot token 必须是密文（014 从 meta 搬来的是历史明文）=====
+
+def _fn_encrypt_platform_bot_tokens() -> None:
+    """把 `bot_token_enc` 里仍是明文的 token 就地加密（幂等）。
+
+    为什么需要：202611170035 从 meta 兜底搬 token，而 meta 的
+    `global_bot_*_token` 是历史明文值（列名 bot_token_enc 是承诺，不是事实）。
+    密文形态判定见 `credential_crypto.is_ciphertext`；已加密的行原样不动。
+    """
+    from src.domains.mgmt.auth.credential_crypto import encrypt, is_ciphertext
+    from src.kernel.session_manager import db, db_lock
+
+    with db_lock:
+        c = db.cursor()
+        try:
+            rows = c.execute("SELECT provider, bot_token_enc FROM grape_t_repo_platforms "
+                             "WHERE bot_token_enc IS NOT NULL AND bot_token_enc != ''").fetchall()
+        except Exception:
+            log.info("202611170039 平台表不存在，跳过")
+            return
+        encrypted_now = []
+        for provider, token in rows:
+            if is_ciphertext(token):
+                continue
+            c.execute("UPDATE grape_t_repo_platforms SET bot_token_enc=?, "
+                      "updated_at=datetime('now') WHERE provider=?", (encrypt(token), provider))
+            encrypted_now.append(provider)
+        db.commit()
+    log.info(f"202611170039 平台 bot token 就地加密完成（本轮 {encrypted_now or '无'}）")
+
+
+register_migration(
+    version="202611170039",
+    name="encrypt-platform-bot-tokens",
+    kind="backfill",
+    fn=_fn_encrypt_platform_bot_tokens,
+)
+
+
+# ===== 甲方案：可见性真源收敛到平台行 enabled，退役部署级隐藏名单 =====
+
+def _fn_retire_vcs_platforms_hidden() -> None:
+    """把 `meta.vcs_platforms_hidden` 名单搬成平台行 `enabled=0`，然后删除该 meta 键。
+
+    背景（2026-11-15 用户拍板方案甲）：名单在 meta 里没有管理面入口、且与行级 enabled 语义重叠；
+    统一到 enabled 后，用户面可见性只剩一个开关（有 UI、有导入保护）。
+    幂等：名单缺失/为空 → 只删键；平台行不存在的 provider 跳过（纯配置平台没有行可写）。
+    """
+    import json as _json
+
+    from src.kernel.session_manager import db, db_lock
+
+    with db_lock:
+        c = db.cursor()
+        try:
+            row = c.execute("SELECT value FROM meta WHERE key='vcs_platforms_hidden'").fetchone()
+        except Exception:
+            log.info("202611170040 meta 表不可用，跳过")
+            return
+        raw = (row[0] if row else "") or ""
+        providers: list[str] = []
+        if raw:
+            try:
+                data = _json.loads(raw)
+                if isinstance(data, list):
+                    providers = [str(x).strip() for x in data if str(x).strip()]
+            except Exception:
+                log.warning(f"202611170040 vcs_platforms_hidden 解析失败，按空名单处理: {raw[:80]}")
+        moved = []
+        for prov in providers:
+            try:
+                res = c.execute("UPDATE grape_t_repo_platforms SET enabled=0, "
+                                "updated_at=datetime('now') WHERE provider=?", (prov,))
+                if getattr(res, "rowcount", 0):
+                    moved.append(prov)
+            except Exception as e:
+                log.warning(f"202611170040 写平台行失败 provider={prov}: {e}")
+        try:
+            c.execute("DELETE FROM meta WHERE key='vcs_platforms_hidden'")
+        except Exception as e:
+            log.warning(f"202611170040 删除 meta 键失败: {e}")
+        db.commit()
+    # 初始化默认：DEFAULT_HIDDEN_PLATFORMS 里的平台在**新建/既有未动过**的行上一律给
+    # enabled=0（用户裁定：这种"部署默认不展示"的规则写在初始化代码里，不进平台卡——
+    # 卡片只描述能力，可见性归 DB 行）。这里对既有行也补一次默认，运维之后可在管理面打开。
+    from src.kernel.persistence.repositories_platform_object import DEFAULT_HIDDEN_PLATFORMS
+
+    defaulted = []
+    with db_lock:
+        c = db.cursor()
+        for prov in sorted(DEFAULT_HIDDEN_PLATFORMS):
+            try:
+                res = c.execute("UPDATE grape_t_repo_platforms SET enabled=0, "
+                                "updated_at=datetime('now') WHERE provider=? AND enabled=1", (prov,))
+                if getattr(res, "rowcount", 0):
+                    defaulted.append(prov)
+            except Exception as e:
+                log.warning(f"202611170040 应用默认不展示失败 provider={prov}: {e}")
+        db.commit()
+    log.info(f"202611170040 隐藏名单已退役（写入 enabled=0 的平台：{moved or '无'}；"
+             f"初始化默认不展示：{defaulted or '无（已为默认值）'}）")
+
+
+# ===== D109 自愈迁移：盖章了但表没落地（2026-11-16 生产快照实锤）=====
+#
+# 现场：存量库首跑走 legacy-stamp 全量轨，202611170030 记账 2ms 却四表皆无（后续
+# backfill 迁移失败），台账与 DDL 不一致；PAT 保存钩子写关系表报 1146/「no such table」，
+# 表现为「配了 PAT 但平台关系不出现」。本迁移幂等重放同一份 DDL 并校验四表存在，
+# 让任何「台账说谎」的库在下次启动自动收敛（不改基线执行器语义）。
+def _fn_ensure_platform_object_tables() -> None:
+    """确保 D109 四表存在（幂等；台账已盖章但表缺失时自愈）。"""
+    _fn_create_platform_object_tables()
+
+
+register_migration(
+    version="202611170041",
+    name="ensure-platform-object-tables",
+    kind="safe",
+    fn=_fn_ensure_platform_object_tables,
+)
+
+register_migration(
+    version="202611170040",
+    name="retire-vcs-platforms-hidden",
+    kind="backfill",
+    fn=_fn_retire_vcs_platforms_hidden,
+)

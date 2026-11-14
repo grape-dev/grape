@@ -113,13 +113,20 @@ def _engine_scope_extra(repo_bare: str, account_id) -> tuple[str, list]:
     「owner_name = 账户表子查询」，比较仍在 SQL 里按列排序规则做），runtime 语句内
     不再出现外域表——三库拓扑读的是 runtime 自己的库，单库拓扑亦同。账户不存在 /
     id 为空 → 不生成 user 轨分支（原 SQL 的 `= NULL` 恒不成立，两端口径一致）。
+
+    repo 轨候选不写死三家：走 `repo_key_candidates` 平台卡派生集合，否则
+    gitee/gitlab 仓取不到 repo 级凭据，只能退到 global/user scope。
     """
+    from src.kernel.repo_key import repo_key_candidates
+
+    _cands = repo_key_candidates(repo_bare or "")
+    _ph = " OR ".join(["rc.owner_id = ?"] * len(_cands))
     extra = (
         " AND (ar.credential_id = 0"
         " OR rc.scope = 'global'"
-        " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
+        f" OR (rc.scope = 'repo' AND ({_ph}))"
     )
-    params: list = [repo_bare, f"gitcode:{repo_bare}", f"github:{repo_bare}"]
+    params: list = [*_cands]
     username = ""
     if account_id:
         from src.domains.mgmt import public as _mgmt_public_scope
@@ -2651,13 +2658,15 @@ def list_events(owner: str, repo: str,
                       page_size: int = Query(20, ge=1, le=100),
                       status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
                       user: dict = Depends(get_current_user_or_api_key)):
-    from src.kernel.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key, repo_key_candidates
     repo_key = to_repo_key(f"{owner}/{repo}")
+    # 候选键卡派生（原写死 gitcode/github 两家 → gitee/gitlab 仓的事件恒不可见）
+    _cand = set(repo_key_candidates(f"{owner}/{repo}"))
 
     # tk_ 会话 token：限定其绑定仓库（防 Agent 跨仓库读事件列表）
     if user.get("auth_type") == "session_token":
         _tok_repo = user.get("repo_key") or ""
-        if _tok_repo and _tok_repo not in (repo_key, f"github:{owner}/{repo}", f"gitcode:{owner}/{repo}"):
+        if _tok_repo and _tok_repo not in _cand:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 无权访问该仓库事件"})
 
     # 权限校验：用户必须有权访问该仓库
@@ -2669,7 +2678,7 @@ def list_events(owner: str, repo: str,
     db = _rt_db
     # 跨平台 repo_key 候选（用户可能通过 GitHub OAuth 登录）
     _owner_repo = f"{owner}/{repo}"
-    _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
+    _repo_keys = sorted(_cand)
     _rk_placeholders = ",".join("?" * len(_repo_keys))
 
     where_clauses = [f"e.repo_key IN ({_rk_placeholders})"]

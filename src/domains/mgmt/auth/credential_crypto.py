@@ -90,6 +90,26 @@ def encrypt(plaintext: str) -> str:
     return f"{kid}:{base64.b64encode(nonce).decode()}:{base64.b64encode(ciphertext).decode()}"
 
 
+def is_ciphertext(value: str) -> bool:
+    """判断一个凭据值是否已是 `{kid}:{nonce_b64}:{ct_b64}` 形态的密文。
+
+    只做形态判定（三段 + nonce 解出来正好 12 字节），不解密、不碰密钥池——
+    迁移要判断"这行到底落没落明文"，而 decrypt 对明文是**原样返回**的，
+    单看 decrypt 成功与否无法区分两者（D110 实锤：平台行被写进明文 PAT）。
+    """
+    if not value:
+        return False
+    parts = value.split(":", 2)
+    if len(parts) != 3 or not parts[0] or not parts[0].isprintable():
+        return False
+    try:
+        nonce = base64.b64decode(parts[1], validate=True)
+        base64.b64decode(parts[2], validate=True)
+    except Exception:
+        return False
+    return len(nonce) == 12
+
+
 def decrypt(encrypted: str) -> str:
     """解密 {key_id}:{nonce_b64}:{ciphertext_b64}，返回明文。
 

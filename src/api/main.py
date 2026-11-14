@@ -386,6 +386,15 @@ async def lifespan(app: FastAPI):
         from src.kernel.config import log as _log
         _log.warning(f"pat identity backfill skipped (non-fatal): {_e}")
 
+    # D109（平台对象模型）：扫描导入 → 一次性凭据迁移/关系回填 → 标记 migrated。
+    # 失败 fail-open：读路径回落文件+meta，不影响登录/托管。
+    try:
+        from src.api.d109_startup import d109_platform_object_startup
+
+        d109_platform_object_startup(log)
+    except Exception as _d109_err:
+        log.warning(f"D109 platform-object startup skipped (non-fatal, 回落旧存储): {_d109_err}")
+
     # ===== IM 引擎（2026-11-13 补齐）=====
     # weekly-11 退役 legacy BotManager 后，server_tasks 在 engine_mode=on 时直接 skip；
     # 而新引擎原先只在 grape_server.py（四进程 A 进程）里启动 → 单进程入口出现

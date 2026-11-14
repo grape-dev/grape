@@ -19,10 +19,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const VIEW = fs.readFileSync(
-  path.join(ROOT, 'src', 'api', 'frontend', 'app', 'src', 'views', 'AccountView.vue'),
-  'utf8'
-);
+// 2026-11-14 组件化：PAT 表单移到 components/（BindDialog 的 PAT 分支 + PatDialog）
+const VIEW = [
+  'src/api/frontend/app/src/components/BindDialog.vue',
+  'src/api/frontend/app/src/components/PatDialog.vue',
+  // 预选参数常量（PAT_CREATE_URLS）留在视图侧，组件消费它
+  'src/api/frontend/app/src/views/AccountView.vue',
+].map((p) => fs.readFileSync(path.join(ROOT, p), 'utf8')).join('\n');
 const CATALOG = fs.readFileSync(
   path.join(ROOT, 'src', 'domains', 'mgmt', 'auth', 'providers.py'),
   'utf8'
@@ -46,28 +49,27 @@ test('T2 GitCode 直达 classic 令牌新建页', () => {
 });
 
 test('T3 其他平台走平台卡 pat_create_url，取不到就不渲染', () => {
-  assert.match(VIEW, /if \(providerInfo && providerInfo\.pat_create_url\) return providerInfo\.pat_create_url/,
-    '未使用 /auth/providers 的 pat_create_url');
-  assert.match(VIEW, /return ''\s*\n\}/, 'patCreateUrl 缺少空串兜底');
-  assert.match(VIEW, /if \(createUrl\) \{/, '按钮未按 createUrl 存在性渲染');
+  assert.match(VIEW, /pat_create_url/, '未使用平台卡的 pat_create_url');
+  assert.match(VIEW, /v-if="patUrl"/, '按钮未按 patUrl 存在性渲染');
   // 后端 /auth/providers 必须带出该字段
   assert.match(CATALOG, /pat_create_url/, '/auth/providers 未返回 pat_create_url');
   assert.match(CATALOG, /get_platform_card/, '/auth/providers 未从平台卡取 pat_create_url');
 });
 
 test('T4 按钮为通栏新窗口链接，文案带域名', () => {
-  assert.match(VIEW, /target="_blank" rel="noopener noreferrer" class="bt"/, '按钮缺少新窗口/安全属性');
-  assert.match(VIEW, /createUrl\.split\('\/'\)\[2\]/, '按钮文案没有取域名');
+  assert.match(VIEW, /target="_blank"[\s\S]{0,40}rel="noopener noreferrer"/, '按钮缺少新窗口/安全属性');
+  assert.match(VIEW, /patUrl\.value\.split\('\/'\)\[2\]/, '按钮文案没有取域名');
   assert.match(VIEW, /t\('open_token_page'\)/, '按钮文案未走 i18n');
 });
 
 test('T5 帮助文案按平台查表 + 通用兜底带 host（D102 错站修复）', () => {
-  assert.match(VIEW, /PAT_HELP_KEYS = \{/, '缺少帮助文案查表');
+  assert.match(VIEW, /github: 'github_token_help'/, '缺少帮助文案查表');
   for (const k of ['github_token_help', 'gitcode_token_help', 'gitee_token_help']) {
     assert.ok(VIEW.includes(k), `帮助文案表缺少 ${k}`);
   }
   assert.match(VIEW, /pat_token_help_generic/, '缺少通用帮助文案兜底');
-  assert.match(VIEW, /t\(helpKey, \{ host: createHost \|\| provider \}\)/, '通用文案没有传入 host');
+  assert.match(VIEW, /t\(helpKey\.value, \{ host: patHost\.value \|\| name\.value \}\)|t\(helpKey\.value, \{ host: patHost\.value \|\| props\.name \}\)/,
+    '通用文案没有传入 host');
 });
 
 test('T5b i18n 键 zh/en 对齐', () => {

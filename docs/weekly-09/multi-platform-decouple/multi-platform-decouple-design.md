@@ -30,7 +30,9 @@
 | [d90-n4-audit-coverage-plan.md](d90-n4-audit-coverage-plan.md) | N4 审计覆盖方案 |
 | [d90-n5-platform-config-review.md](d90-n5-platform-config-review.md) | N5 平台配置评审 |
 | [d100-credential-type-schema-design.md](d100-credential-type-schema-design.md) | D100 凭据类型 Schema + sc 表 |
-| [d101-task-token-snapshot-retirement-design.md](d101-task-token-snapshot-retirement-design.md) | D101 task 行凭据快照退役 |
+| [d101-task-token-snapshot-retirement-design.md](d101-task-token-snapshot-retirement-design.md)
+| [d108-oauth-channel-config-decoupling-design.md](d108-oauth-channel-config-decoupling-design.md)
+| [d109-platform-object-model-design.md](d109-platform-object-model-design.md) | D109 平台对象模型（四类配置 / 五张表 / 派生能力视图 / 用户级平台关系（状态实时计算 + 回填迁移）/ split mode / 扩展纪律与 checklist） | | D108 登录渠道配置解耦（oauth-providers.json 文件真源 + 与仓库托管配置分层 + 协议模式说明） | | D101 task 行凭据快照退役 |
 | [rc-redesign-design.md](rc-redesign-design.md) | rc 表目标态重建（D99 前身） |
 | [deploy-checklist-design.md](deploy-checklist-design.md) | D96 生产部署 Checklist 设计 |
 | [deploy-checklist-mysql-backfill.md](deploy-checklist-mysql-backfill.md) | MySQL 首启回填观察（UC39） |

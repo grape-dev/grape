@@ -65,15 +65,19 @@
     "grape_t_channel_installation": "mgmt",
     "grape_t_channel_lease": "mgmt",
     "grape_t_channel_outbound_card": "mgmt",
+    "grape_t_channel_repo_link": "mgmt",
     "grape_t_channel_sender_identity": "mgmt",
     "grape_t_credential_reveal_log": "mgmt",
     "grape_t_credential_usage_log": "runtime",
     "grape_t_engine_lifecycle_audit": "runtime",
     "grape_t_merge_gate_log": "insight",
+    "grape_t_oauth_channels": "mgmt",
     "grape_t_patrol_findings": "mgmt",
     "grape_t_repo_credentials": "insight",
+    "grape_t_repo_platforms": "mgmt",
     "grape_t_schema_migrations": "mgmt",
     "grape_t_system_credentials": "runtime",
+    "grape_t_user_repo_platform_link": "mgmt",
     "gsb_service_registry": "mgmt",
     "issue": "runtime",
     "issue_agent_session": "runtime",
@@ -403,6 +407,9 @@
     "grape_t_repo_credentials": [
       "insight",
       "mgmt"
+    ],
+    "grape_t_repo_platforms": [
+      "runtime"
     ],
     "grape_t_schema_migrations": [
       "insight",

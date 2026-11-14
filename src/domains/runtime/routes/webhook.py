@@ -1534,7 +1534,17 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
     """
     from src.kernel.repo_key import parse_repo_key
     _provider, _owner, _name = parse_repo_key(repo_key)
-    if _provider not in ("gitcode", "github") or not _owner or not _name:
+    # 平台在册即可预检（原白名单只放 gitcode/github，gitee/gitlab 恒 "unsupported" →
+    # 这些平台的仓库永远拿不到可达性判定，2026-11-14 深度检查发现）
+    if not _owner or not _name:
+        return "unsupported"
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card as _gpc
+
+        if _provider and _gpc(_provider) is None:
+            return "unsupported"
+    except Exception:
+        # 平台卡目录不可用 → 无法判定，按"不支持"处理（与无卡等价），不改用平台白名单
         return "unsupported"
 
     token = ""
@@ -1653,7 +1663,15 @@ def _a2a_issue_vcs_check(repo_key: str, issue_number) -> str:
     """
     from src.kernel.repo_key import parse_repo_key
     _provider, _owner, _name = parse_repo_key(repo_key)
-    if _provider not in ("gitcode", "github") or not _owner or not _name:
+    # 同上：按平台卡在册判定，别用平台白名单（gitee/gitlab 的 Issue 存在性校验此前恒 unknown）
+    if not _owner or not _name:
+        return "unknown"
+    try:
+        from src.domains.runtime.vcs.platform_card import get_platform_card as _gpc2
+
+        if _provider and _gpc2(_provider) is None:
+            return "unknown"
+    except Exception:
         return "unknown"
     try:
         _num = int(str(issue_number).strip().lstrip("#"))

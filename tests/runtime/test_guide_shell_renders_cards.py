@@ -1,96 +1,55 @@
-"""引导页卡片行为测试——沙箱真实执行 _renderOnboardingShell（防"孤儿表达式"类回潮）。
+"""引导页卡片渲染守卫（2026-11-14 引导页 Vue 化后改写到组件源）。
 
-实弹事故（2026-11-08）：cherry-pick 后 forEach 内 platformCards += 拼接行丢失，
-残留孤儿 `+ '</div>';` 表达式（语法合法，node --check 与源码字符串断言全绿），
-引导页卡片区永远空白。本测试把 app.js 里的 shell 函数抽出来（花括号平衡扫描
-（node 真执行，跳过字符串/注释）断言：卡片数 == 平台数、无角标残留、无置灰按钮
-（2026-11-08 口径 v4：卡样式回归基线，角标方案已废弃；双模式在弹层内）。
-平台绑定按钮置灰。
+历史背景：沙箱真执行 `_renderOnboardingShell` 抓「孤儿表达式」导致卡片区空白
+（2026-11-08 实弹：forEach 内拼接行丢失，语法合法、字符串断言全绿、卡片永远空）。
+引导页整页迁 Vue（views/OnboardingView.vue + view chunk onboarding-view.js）后，
+壳函数不再拼 DOM，本文件把守卫改成组件源 + 挂载入口两条：
+  1. 卡片必须在 `v-for="p in providers"` 的循环体内渲染（循环外渲染 = 卡片数恒 1 的同类事故）；
+  2. 卡面结构 = logo + 平台名 + [绑定] 单按钮；无角标残留、无置灰（口径 v4 + 双模式在弹层）；
+  3. 入口必须把整份平台目录交给组件（window.renderOnboarding 收 props.providers）。
 """
-import json
-import re
-import subprocess
 from pathlib import Path
 
 APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell" / "js" / "app.js"
-
-_RUNNER = r'''
-const fnSrc = JSON.parse(require('fs').readFileSync(__FN_FILE__, 'utf8'));
-const providers = JSON.parse(require('fs').readFileSync(__PROV_FILE__, 'utf8'));
-let inner = '';
-const doc = { getElementById: (id) => (els[id] || (els[id] = { style: {}, set innerHTML(v) { inner = v; }, classList: { add() {} } })) };
-const els = {};
-const ls = { getItem: () => JSON.stringify({ bindings: ['gitee'] }) };
-const fn = new Function('providers','document','localStorage','platformIcon','I18N','_esc','_obHeroHtml','_updateTbOrgName','_updateLobbyOrgName',
-  'return (' + fnSrc + ')(providers, true, "probe", "P");');
-fn(providers, doc, ls,
-  () => '<svg/>',
-  { getLang: () => 'zh', t: (k) => k },
-  (x) => String(x),
-  (n, z, cards) => 'HERO[' + cards + ']',
-  () => {}, () => {});
-console.log(JSON.stringify({
-  cards: (inner.match(/ob-bind-card/g) || []).length,
-  badges: (inner.match(/ob-status-badge/g) || []).length,
-  grayBtn: (inner.match(/aria-disabled/g) || []).length,
-  boundOk: inner.indexOf('已绑定该平台') >= 0,
-  unconfTip: inner.indexOf('暂未开通 OAuth 授权') >= 0,
-}));
-'''
+VIEW = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "app" / "src" / "views" / "OnboardingView.vue"
+ENTRY = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "app" / "src" / "views" / "entries" / "onboarding-view.js"
 
 
-def _extract_shell_fn(src: str) -> str:
-    """截取 _renderOnboardingShell 整函数：到下一个 '\n  function ' 兄弟声明。
-
-    （不做花括号平衡扫描——JS 正则字面量里的引号会让朴素扫描器失步；
-    顶栏格式由 test_d102h 结构守卫+node --check 兜底，这里信任 2 空格
-    函数声明的仓库约定。截取完整性由本文件的执行测试自证。）
-    """
-    i = src.find("function _renderOnboardingShell")
-    assert i >= 0
-    j = src.find("\n  function ", i)
-    assert j > i, "找不到下一个兄弟函数（结构变更需同步本测试）"
+def _hero_block() -> str:
+    src = VIEW.read_text(encoding="utf-8")
+    i = src.find('class="ob-hero-bind"')
+    assert i >= 0, "缺卡片容器 ob-hero-bind"
+    j = src.find("</section>", i)
     return src[i:j]
 
 
-def _run_shell() -> dict:
-    src = APP.read_text(encoding="utf-8")
-    fn_src = _extract_shell_fn(src)
-    providers = [
-        {"provider": "gitcode", "name": "GitCode", "pat_create_url": "u", "oauth_configured": False},
-        {"provider": "gitee", "name": "Gitee", "pat_create_url": "u", "oauth_configured": True},
-    ]
-    runner = Path(__file__).parent / "_guide_shell_runner.js"
-    fn_file = Path(__file__).parent / "_guide_shell_fn.json"
-    prov_file = Path(__file__).parent / "_guide_shell_providers.json"
-    fn_file.write_text(json.dumps(fn_src), encoding="utf-8")
-    prov_file.write_text(json.dumps(providers), encoding="utf-8")
-    runner.write_text(_RUNNER
-                      .replace("__FN_FILE__", json.dumps(str(fn_file)))
-                      .replace("__PROV_FILE__", json.dumps(str(prov_file))), encoding="utf-8")
-    r = subprocess.run(
-        ["node", str(runner)],
-        capture_output=True, text=True, timeout=60)
-    fn_file.unlink()
-    prov_file.unlink()
-    out = r.stdout.strip()
-    assert out, f"node 执行失败: {r.stderr[:400]}"
-    runner.unlink()
-    return json.loads(out)
+def test_one_card_per_platform_inside_loop():
+    hero = _hero_block()
+    assert 'v-for="p in providers"' in hero, "卡片必须在 providers 循环内渲染（防循环外单卡）"
+    assert "ob-bind-card" in hero, "缺卡面 class"
+    assert hero.count(":key=\"p.provider\"") >= 1, "缺 v-for key（重复渲染风险）"
 
 
-def test_shell_renders_one_card_per_platform():
-    r = _run_shell()
-    # 场景：gitcode（未配置）/ gitee（已配置，用户已绑定 gitee）→ 2 卡
-    assert r["cards"] == 2, f"卡片数错误: {r}"
-    assert r["badges"] == 0, "基线卡无角标（口径 v4）"
+def test_card_structure_matches_baseline():
+    hero = _hero_block()
+    for marker in ("ob-bind-icon", "ob-bind-name", "ob-bind-btn", "app.login.ob_bind_btn"):
+        assert marker in hero, f"卡面缺基线结构: {marker}"
+    assert "ob-status-badge" not in hero, "角标方案已废弃（回潮）"
+    assert "disabled" not in hero, "基线卡绑定按钮恒可用（置灰方案废弃）"
 
 
-def test_unconfigured_platform_renders_plain_bind_button():
-    r = _run_shell()
-    assert r["grayBtn"] == 0, "基线卡绑定按钮恒可用（置灰方案废弃）"
+def test_cards_not_filtered_by_configured():
+    hero = _hero_block()
+    assert "filter(" not in hero, "卡片不得按 configured 过滤（未开通 OAuth 也要显示并可配 PAT）"
 
 
-def test_bound_platform_no_pat_mention_on_card():
-    r = _run_shell()
-    assert not r["boundOk"], "卡面不应有绑定态 title（绑定状态在弹层/账号页呈现）"
+def test_entry_hands_full_catalog_to_view():
+    entry = ENTRY.read_text(encoding="utf-8")
+    assert "window.renderOnboarding" in entry, "缺组件挂载入口"
+    assert "createApp(OnboardingView" in entry, "入口未挂载 OnboardingView"
+    app = APP.read_text(encoding="utf-8")
+    i = app.find("function _renderOnboardingShell")
+    assert i >= 0
+    seg = app[i:app.find("\n  function ", i + 10)]
+    assert "window.renderOnboarding(" in seg, "壳函数未把目录交给组件"
+    assert "providers: providers || []" in seg, "壳函数未传平台目录"

@@ -29,8 +29,9 @@ _REPO_CRED_QUERIES: dict[str, str] = {
     "repo_cred_value": (
         "SELECT value FROM grape_t_repo_credentials WHERE repo_key=? AND cred_type=?"),
     "repo_cred_repos_by_value": (
+        # 前缀相等而非 LIKE：repo_key 前缀里可能带下划线，_ 是 LIKE 单字符通配符
         "SELECT repo_key FROM grape_t_repo_credentials WHERE cred_type=? "
-        "AND (value=? OR value=?) AND repo_key LIKE ? AND repo_key!=?"),
+        "AND (value=? OR value=?) AND substr(repo_key, 1, ?) = ? AND repo_key!=?"),
     "repo_cred_update": (
         "UPDATE grape_t_repo_credentials SET value=?, updated_at=? WHERE repo_key=? AND cred_type=?"),
     "repo_cred_insert": (
@@ -276,9 +277,14 @@ def any_repo_credential(repo_keys: list[str]) -> bool:
 
 
 def repo_keys_sharing_value(cred_type: str, values: tuple, prefix: str, exclude_repo: str) -> list[str]:
-    """同一凭据值被哪些仓库共用（凭据泄漏排查用）。"""
-    return [r[0] for r in read_all_any("repo_cred_repos_by_value",
-                                       (cred_type, values[0], values[1], prefix, exclude_repo))]
+    """同一凭据值被哪些仓库共用（凭据泄漏排查用）。
+
+    `prefix` 是**前缀字面量**（如 `gitcode:`），由本域按 substr 前缀相等过滤——
+    不接受 `%` 通配：repo_key 前缀可带下划线，LIKE 会把其它平台静默算进来。
+    """
+    return [r[0] for r in read_all_any(
+        "repo_cred_repos_by_value",
+        (cred_type, values[0], values[1], len(prefix or ""), prefix or "", exclude_repo))]
 
 
 def repo_bot_credential_pairs() -> list[tuple]:

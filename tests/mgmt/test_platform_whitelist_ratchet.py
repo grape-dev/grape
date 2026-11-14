@@ -86,8 +86,7 @@ def _norm_path(rel: str) -> str:
 
 _COMPARE_BASELINE_RAW = {
     # ── repos.py hosting 分支（D71 冻结面，weekly-11 卡驱动改造后 17→13；
-    #    托管全流程分支仍按实现绑定保留，后续随 S62 端口收口）──
-    ('domains/mgmt/routes/repos.py', 'if provider == "github":'): 13,
+    #    托管全流程分支仍按实现绑定保留，后续随 S62 端口收口）──: 13,
     # ── repo_manager：github 专属实现分派（D105-17 审阅冻结——D105-19 平台化到位
     #    收口后该冻结解除：webhook 函数指针/平台默认三态改卡派生，对应基线点已摘除）──
     # ① push workflows 判定（D105-18 三态 None 回退路径，github 实现绑定保留：
@@ -172,9 +171,7 @@ BASELINE_RAW = {
     # 以下均为 weekly-10 原生代码（pristine weekly-10 逐一实锤在位），
     # 按“weekly-10 为准”合并策略登记豁免，非新增回潮。
     ('api/event_pipeline.py', '_ledger_record_comment("github" if _is_github_repo(repo_key) else "gitcode",'): 0,  # 摘除：weekly-10 收口后行已消失（防呆见 test_baseline_points_still_exist）
-    ('api/feedback_status.py', 'else "gitlab" if host.startswith("gitlab") else "gitcode")'): 1,  # weekly-10-native (merge adjudication dc17f2812)
     ('api/routes/issues.py', '_provider_name = "github" if is_github else "gitcode"'): 0,  # 摘除：r3 后已卡派生为 _provider_name = provider
-    ('domains/runtime/engine/direct_executor.py', 'log.info(f"Exec agent: bot_token={\'set\' if repo_gitcode_token else \'none\'} (provider={\'github\' if repo_key.startswith(\'github:\') else \'gitcode\'})")'): 1,  # weekly-10-native (merge adjudication dc17f2812)
 }
 
 

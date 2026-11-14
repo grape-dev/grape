@@ -155,7 +155,10 @@ def cleanup_stale_repo_data(repo_key: str):
                 for k in keys:
                     _ob_keys.append(f"onboarded:{k}")
                     # task 级完成标记：onboarded_task:{repo}:{type}
-                    c.execute("SELECT `key` FROM meta WHERE `key` LIKE ?", (f"onboarded_task:{k}:%",))
+                    # 前缀相等而非 LIKE：k 里可能带下划线，`_` 是 LIKE 单字符通配符
+                    _pfx = f"onboarded_task:{k}:"
+                    c.execute("SELECT `key` FROM meta WHERE substr(`key`, 1, ?) = ?",
+                              (len(_pfx), _pfx))
                     _ob_keys += [r[0] for r in c.fetchall()]
                 _ob_ph = ",".join("?" for _ in _ob_keys)
                 if _ob_keys:

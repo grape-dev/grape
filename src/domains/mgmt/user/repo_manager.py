@@ -1128,6 +1128,16 @@ def resolve_bot_username(provider: str) -> str:
     返回 ""（= 该平台无 bot 协作能力，认领流按无 bot 降级，存量语义）。
     """
     from src.domains.mgmt.user.db import GLOBAL_BOT_USERNAME_SOURCES
+    # D110：平台行是一级来源（一平台一个 bot），先于历史单值源/pool/卡；
+    # 否则 gitee 这类"来源链只认 meta 单值键"的平台会绕过管理面写的名字。
+    try:
+        from src.domains.mgmt.user.db import _platform_bot_row
+
+        _plat_name = (_platform_bot_row(provider) or {}).get("username") or ""
+        if _plat_name:
+            return _plat_name
+    except Exception:
+        pass
     _src = GLOBAL_BOT_USERNAME_SOURCES.get(provider)
     if _src is None and provider not in _KNOWN_VCS_PROVIDERS():
         raise ValueError(
@@ -1144,14 +1154,9 @@ def resolve_bot_username(provider: str) -> str:
     return _card_bot_username(provider)
 
 def _KNOWN_VCS_PROVIDERS():
-    """已知 provider 集合（存量三平台 + 平台卡）。"""
-    _known = {"gitcode", "github", "gitlab"}
-    try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
-        _known.update(list_vcs_platforms())
-    except Exception:
-        pass
-    return _known
+    """D109 判据收敛：已知平台集合 = 能力视图（存量三平台 ∪ 平台卡 ∪ 表内平台）。"""
+    from src.domains.platform.capabilities import known_providers
+    return known_providers()
 
 def _card_bot_username(provider: str) -> str:
     try:

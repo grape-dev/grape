@@ -1039,6 +1039,7 @@
 </template>
 
 <script setup>
+import { providerFromRepoKey } from '../lib/repo-provider.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 
 const G = globalThis
@@ -2942,7 +2943,8 @@ function pipeDuration(p) {
 function pipeIssueUrl(p) {
   const num = String(p.issue_id || '').replace(/^#/, '')
   const repo = (dashData.value || {}).repo || ''
-  const host = repo.startsWith('github:') ? 'github.com' : 'gitcode.com'
+  const prov = providerFromRepoKey(repo)
+  const host = (typeof window.platformHost === 'function' ? window.platformHost(prov) : '') || 'gitcode.com'
   const parts = stripRepoPrefix(repo).split('/')
   return num && parts.length === 2
     ? 'https://' + host + '/' + parts[0] + '/' + parts[1] + '/issues/' + num

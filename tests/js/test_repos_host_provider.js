@@ -20,14 +20,16 @@ function check(name, fn) {
 }
 
 check('前缀推导品牌图标与名称', function () {
-  assert.ok(/indexOf\('github:'\) === 0 \? 'github' : 'gitcode'/.test(VIEW), '应按前缀给品牌');
-  assert.ok(/indexOf\('github:'\) === 0 \? 'GitHub' : 'GitCode'/.test(VIEW), '应按前缀给名称');
+  // 2026-11-14：全量前缀解析（原实现只认 github，其余全回落 gitcode —— gitee/gitlab 品牌错）
+  assert.ok(/return i > 0 \? rk\.slice\(0, i\) : 'gitcode'/.test(VIEW), '应按前缀解析 provider');
+  assert.ok(/platformIcon\(repoProvider\(r\), 14\)/.test(VIEW), '图标应按解析出的 provider 取');
+  assert.ok(/platformLabel\(prov\)/.test(VIEW), '名称应走统一 platformLabel（含 gitee/gitlab）');
 });
 
 check('外链域名按前缀拼', function () {
-  assert.ok(/https:\/\/github\.com\/' \+ fn/.test(VIEW), 'github 前缀应拼 github.com');
-  const i = VIEW.indexOf('https://github.com/');
-  assert.ok(/gitcode\.com/.test(VIEW), 'gitcode 应有对应域名');
+  assert.ok(/const HOSTS = \{ gitcode: 'gitcode\.com', github: 'github\.com', gitee: 'gitee\.com', gitlab: 'gitlab\.com' \}/.test(VIEW),
+    '应按 provider 映射域名（github/gitcode/gitee/gitlab）');
+  assert.ok(/HOSTS\[prov\] \|\| HOSTS\.gitcode/.test(VIEW), '未知 provider 应回落 gitcode 域名');
 });
 
 check('筛选按前缀严格匹配（非 includes）', function () {

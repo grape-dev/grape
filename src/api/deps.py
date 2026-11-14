@@ -613,6 +613,9 @@ def get_user_token_for(username: str, user_id: str = "", provider: str = "gitcod
         except Exception as e:
             log.warning(f"get_user_token_for: credential-domain PAT lookup failed "
                         f"(user={user_id}, provider={provider}): {e}")
+    # OAuth 与 PAT 两种模式并存（2026-11-14 用户口径）：PAT 缺席时正常回落登录令牌。
+    # 渠道↔平台关系配置（channel-repo-links.json）**不参与这里的判定**，它只决定
+    # "登录成功之后要不要写用户↔平台仓库关系"（hooks.on_oauth_login）。
     token = _get_oauth_token_from_identity(username, provider)
     if not token and user_id == "":
         return ""

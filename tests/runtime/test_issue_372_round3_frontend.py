@@ -30,6 +30,21 @@ def _read_file(rel_path):
         return f.read()
 
 
+_VIEWS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "src", "api", "frontend", "app", "src", "views")
+
+
+def _read_login_view(name: str) -> str:
+    """读取认证页 Vue 源（2026-11-14 登录/注册/忘记密码卡片迁入 app/src/views）。"""
+    with open(os.path.join(_VIEWS_DIR, name), encoding="utf-8") as f:
+        return f.read()
+
+
+def _read_login_vue():
+    """读取 Vue 登录页源（2026-11-14 登录卡片从 shell/index.html 迁入 LoginView.vue）。"""
+    with open(os.path.join(_VIEWS_DIR, "LoginView.vue"), encoding="utf-8") as f:
+        return f.read()
+
+
 # ===========================================================================
 # P1 问题一：renderOAuthButtons 未配 OAuth 时隐藏按钮（T3-01, T3-02）
 # ===========================================================================
@@ -80,40 +95,20 @@ class TestRegisterButtonI18n:
     """T3-03, T3-04: 无邮箱配置时按钮走 i18n 而非硬编码中文。"""
 
     def test_t3_03_register_btn_sets_data_i18n_to_register_btn(self):
-        """T3-03: register.html 无邮箱配置时按钮 data-i18n 设为 app.login.register_btn。"""
-        source = _read_file("register.html")
-        # 找到无邮箱配置按钮修改逻辑
-        assert "register_btn" in source, \
-            "register.html should set data-i18n to app.login.register_btn"
-        # 不应再有硬编码 textContent='注册'
-        assert "textContent='注册'" not in source, \
-            "register.html should NOT hardcode textContent='注册'"
-        assert 'textContent=\"注册\"' not in source, \
-            "register.html should NOT hardcode textContent=\"注册\""
+        """T3-03（Vue 版）：提交按钮 data-i18n 由组件按 email_configured 动态绑定，
+        无邮箱模式落 app.login.register_btn。"""
+        vue = _read_login_view("RegisterView.vue")
+        assert "app.login.register_btn" in vue, "RegisterView should know the register_btn key"
+        assert "submitLabelKey" in vue, "label key must be computed from the email-configured state"
+        assert "textContent='注册'" not in vue, "no hardcoded Chinese label"
 
     def test_t3_04_register_btn_uses_i18n(self):
-        """T3-04: register.html 按钮文案走 i18n（data-i18n="app.login.register_btn"）。
-
-        R7.7 修复后：按钮初始就是 data-i18n="app.login.register_btn"（无邮箱模式默认），
-        不再需要在 checkEmailConfigured 中动态设置。
-        """
-        source = _read_file("register.html")
-        # 按钮初始 data-i18n 应为 register_btn（无邮箱模式默认）
-        assert 'data-i18n="app.login.register_btn"' in source, \
-            "register button should have data-i18n='app.login.register_btn' (initial no-email mode)"
-        # 不应有硬编码中文 textContent='注册'
-        assert "textContent='注册'" not in source, \
-            "register.html should NOT hardcode textContent='注册'"
-        assert 'textContent="注册"' not in source, \
-            "register.html should NOT hardcode textContent=\"注册\""
-
-
-# ===========================================================================
-# P2 问题三：startCountdown 倒计时结束文案错误（T3-05）
-# ===========================================================================
-
-class TestStartCountdownEndText:
-    """T3-05: 倒计时结束后按钮文案为 resend_code，不是 toast_code_resent。"""
+        """T3-04（Vue 版）：按钮文案走 i18n —— :data-i18n 绑定 + t() 兜底，
+        语言切换后 I18N.applyI18nToDOM 同样能刷新。"""
+        vue = _read_login_view("RegisterView.vue")
+        assert ':data-i18n="submitLabelKey"' in vue, "register button must bind data-i18n dynamically"
+        assert "t(submitLabelKey" in vue, "label text must go through the i18n helper"
+        assert "textContent='注册'" not in vue, "no hardcoded Chinese label"
 
     def test_t3_05_countdown_end_not_use_toast_code_resent(self):
         """T3-05: startCountdown 倒计时结束后不使用 toast_code_resent 作为按钮文案。"""
@@ -135,7 +130,13 @@ class TestStartCountdownEndText:
 # ===========================================================================
 
 class TestAccountBindProviderR74:
-    """T3-06, T3-07: 未配 OAuth App 时只显示手动令牌输入。"""
+    """T3-06, T3-07（口径已更新 2026-11-14）：未配 OAuth App 的渠道不做账号绑定。
+
+    职责分离裁定：三方账号绑定只允许 OAuth；未开通 OAuth 的渠道不渲染绑定入口，
+    文案指路「凭据管理」配 PAT。历史断言（未配 OAuth → 弹层只显示手动令牌输入）
+    与现口径相反，已由 tests/runtime/test_bind_context.py 与
+    tests/runtime/test_guide_status_badge.py 的 OAuth-only 守卫取代。
+    """
 
     @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_t3_06_bind_provider_checks_configured(self):
@@ -409,31 +410,27 @@ class TestRegisterPageNoFlicker:
     """测试注册页无邮箱配置时不闪动（初始隐藏，有邮箱时才显示）。"""
 
     def test_t3_14_email_field_initially_hidden(self):
-        """T3-14: register.html 邮箱字段初始 display:none（无邮箱模式默认）。"""
-        html = _read_file("register.html")
-        # emailField 应有 style="display:none"
-        assert 'id="emailField" style="display:none"' in html or \
-               'id="emailField" style="display: none"' in html, \
-            "emailField should be initially hidden (display:none)"
+        """T3-14（Vue 版）：邮箱字段按 email_configured 首帧隐藏（v-show 绑定）。"""
+        vue = _read_login_view("RegisterView.vue")
+        seg = vue.split('id="emailField"')[1][:160]
+        assert 'v-show="emailConfigured && !oauthMode"' in seg, \
+            "emailField must be driven by the injected email flag"
 
     def test_t3_15_step_indicator_initially_hidden(self):
-        """T3-15: register.html 步骤指示器初始 display:none。"""
-        html = _read_file("register.html")
-        assert 'id="stepIndicator" style="display:none"' in html or \
-               'id="stepIndicator" style="display: none"' in html, \
-            "stepIndicator should be initially hidden (display:none)"
+        """T3-15（Vue 版）：步骤指示器仅在「有邮箱且非 OAuth 关联」时出现。"""
+        vue = _read_login_view("RegisterView.vue")
+        seg = vue.split('id="stepIndicator"')[1][:120]
+        assert 'v-show="showSteps"' in seg, \
+            "stepIndicator must be gated on showSteps (email configured, no oauth mode)"
 
     def test_t3_16_check_email_shows_elements_when_configured(self):
-        """T3-16: checkEmailConfigured 返回 email_configured=true 时显示邮箱字段。"""
-        html = _read_file("register.html")
-        # 有邮箱时移除 display:none（设为空字符串）
-        assert "$('emailField').style.display=''" in html or \
-               '$(\'emailField\').style.display = \'\'' in html or \
-               "emailField').style.display=''" in html, \
-            "checkEmailConfigured should show emailField when email_configured=true"
-        # 按钮改为"发送验证码"
-        assert "app.login.send_code" in html, \
-            "button should change to send_code when email configured"
+        """T3-16（Vue 版）：email_configured=true 时邮箱字段与步骤条可见（同一 flag 驱动）。"""
+        vue = _read_login_view("RegisterView.vue")
+        assert "__EMAIL_CONFIGURED__" in vue, "component reads the server-injected flag"
+        assert "const showSteps = computed(() => !oauthMode.value && emailConfigured.value)" in vue, \
+            "showSteps must combine oauth mode and the email flag"
+        assert 'v-show="emailConfigured && !oauthMode"' in vue, \
+            "emailField must show when email_configured is true"
 
     def test_t3_17_check_email_keeps_hidden_on_failure(self):
         """T3-17: checkEmailConfigured 返回失败时保持初始隐藏状态（无闪动）。"""
@@ -448,20 +445,23 @@ class TestRegisterPageNoFlicker:
                 "catch block should not show emailField (keep hidden on API failure)"
 
     def test_t3_18_index_forgot_link_initially_hidden(self):
-        """T3-18: index.html 忘记密码链接初始 display:none（避免闪动）。"""
-        html = _read_file("index.html")
-        # forgotLink 应有 style="display:none"（可能与 data-i18n 在同一行）
-        assert 'id="forgotLink"' in html and 'display:none' in html.split('id="forgotLink"')[1][:100], \
-            "forgotLink should be initially hidden (display:none)"
-        assert 'id="forgotDot"' in html and 'display:none' in html.split('id="forgotDot"')[1][:50], \
-            "forgotDot should be initially hidden (display:none)"
+        """T3-18（Vue 登录页版）: 忘记密码链接与分隔点只在服务端邮箱已配置时渲染
+        （v-show 绑定 emailConfigured，首帧读取注入值 → 零闪动）。"""
+        vue = _read_login_vue()
+        assert 'id="forgotLink"' in vue, "forgot link must live in the Vue login card"
+        assert 'v-show="emailConfigured"' in vue, \
+            "forgot link visibility must be driven by the injected email_configured flag"
+        dot_seg = vue.split('id="forgotDot"')[1][:120]
+        assert 'v-show="emailConfigured"' in dot_seg, \
+            "forgot separator dot must follow the same flag"
 
     def test_t3_19_index_forgot_link_shown_when_email_configured(self):
-        """T3-19: index.html 有邮箱配置时显示忘记密码链接。"""
-        html = _read_file("index.html")
-        # 有邮箱时移除 display:none（设为空字符串）
-        assert "display=''" in html or "display = ''" in html, \
-            "forgotLink should be shown when email_configured=true (remove display:none)"
+        """T3-19（Vue 登录页版）: emailConfigured 取自服务端注入 window.__EMAIL_CONFIGURED__
+        → 已配置时 v-show 直接渲染链接，未配置不渲染（无 display:none 往返）。"""
+        vue = _read_login_vue()
+        assert "__EMAIL_CONFIGURED__" in vue, \
+            "the component must read the server-injected email flag synchronously"
+        assert ".filter((p) => !p.configured)" in vue or "emailConfigured" in vue
 
     @pytest.mark.skip(reason="被测对象随 Vue 迁移下线（本 PR 删除 src/api/static/js/pages/* 与 admin.js）：断言改写到 Vue 源为后续专项，不得以跳过冒充已覆盖")
     def test_t3_20_account_email_configured_initially_false(self):
@@ -473,23 +473,30 @@ class TestRegisterPageNoFlicker:
             "_emailConfigured should be initially false (no-email mode default)"
 
     def test_t3_21_forgot_page_step1_initially_hidden(self):
-        """T3-21: forgot.html Step1 初始 display:none（避免无邮箱场景闪动）。"""
-        html = _read_file("forgot.html")
-        assert 'id="forgotStep1"' in html and 'display:none' in html.split('id="forgotStep1"')[1][:100], \
-            "forgotStep1 should be initially hidden (display:none)"
+        """T3-21（Vue 版）：无邮箱时 Step1 不渲染（v-show 由 emailConfigured 驱动，
+        组件初始化即按注入值决定，无 display:none 往返闪动）。"""
+        vue = _read_login_view("ForgotView.vue")
+        seg = vue.split('id="forgotStep1"')[1][:120]
+        assert 'v-show="emailConfigured && step === 1"' in seg, \
+            "forgotStep1 must stay hidden until email is configured"
+        assert 'const step = ref(emailConfigured.value ? 1 : 0)' in vue, \
+            "initial step must follow the injected email flag"
 
     def test_t3_22_forgot_page_shows_form_when_email_configured(self):
-        """T3-22: forgot.html 有邮箱配置时显示表单。"""
-        html = _read_file("forgot.html")
-        assert "forgotStep1').style.display='block'" in html or \
-               "forgotStep1').style.display = 'block'" in html, \
-            "forgotStep1 should be shown when email_configured=true"
+        """T3-22（Vue 版）：有邮箱配置时 Step1 表单可见（v-show = emailConfigured && step=1）。"""
+        vue = _read_login_view("ForgotView.vue")
+        seg = vue.split('id="forgotStep1"')[1][:120]
+        assert 'v-show="emailConfigured && step === 1"' in seg, \
+            "forgotStep1 must show when email_configured and step=1"
 
     def test_t3_23_forgot_page_shows_message_when_no_email(self):
-        """T3-23: forgot.html 无邮箱配置时显示提示（非表单）。"""
-        html = _read_file("forgot.html")
-        assert "forgot_email_not_configured" in html, \
-            "forgot.html should show forgot_email_not_configured message when no email"
+        """T3-23（Vue 版）：无邮箱配置时显示提示块（v-show=!emailConfigured）。"""
+        vue = _read_login_view("ForgotView.vue")
+        assert "app.login.forgot_email_not_configured" in vue, \
+            "ForgotView must carry the not-configured copy"
+        seg = vue.split('id="forgotNotConfigured"')[1][:120]
+        assert 'v-show="!emailConfigured"' in seg, \
+            "not-configured notice must show only when email is absent"
 
     def test_t3_24_forgot_email_not_configured_i18n_exists(self):
         """T3-24: forgot_email_not_configured i18n key 在 zh/en locale 文件中存在。"""

@@ -184,7 +184,7 @@ def get_efficiency_board(repo: str = "", limit: int = 50,
       src/domains/insight/observability/tokens.py 同口径：total 不含 reasoning），经
       `agent_tasks.issue_id` 回链 issue 创建人；孤儿任务（无 issue 行/归属 bot）丢弃。
     - 仓库隔离：repo 支持 owner/repo 与 platform:owner/repo 两种入参，
-      双平台前缀（gitcode:/github:）同查；空 repo 返回空态（仓库维度视图）。
+      前缀按平台卡目录派生（repo_key_candidates），不再写死双平台；空 repo 返回空态。
     - 任何查询异常降级为该路径空结果（统计不拖垮页面），绝不向上抛。
     """
     from src.kernel.repo_key import to_repo_key, repo_key_candidates
@@ -196,7 +196,10 @@ def get_efficiency_board(repo: str = "", limit: int = 50,
     if repo and repo.strip():
         _base = repo.split(":", 1)[1] if ":" in repo else repo
         repo_keys = repo_key_candidates(_base)
-        repo_key_out = to_repo_key(_base)
+        # 出参前缀必须沿用入参的平台（原来一律 to_repo_key(_base) → 裸前缀默认 gitcode，
+        # gitee/gitlab 仓的仪表盘会被标成 gitcode，链接/缓存键全错；2026-11-14 深度检查）
+        _prov_in = repo.split(":", 1)[0] if ":" in repo else ""
+        repo_key_out = to_repo_key(_base, provider=_prov_in) if _prov_in else to_repo_key(_base)
 
     out = {
         "repo": repo_key_out,
@@ -367,7 +370,10 @@ def get_efficiency_flow_board(repo: str = "", weeks: int = 12,
     if repo and repo.strip():
         _base = repo.split(":", 1)[1] if ":" in repo else repo
         repo_keys = repo_key_candidates(_base)
-        repo_key_out = to_repo_key(_base)
+        # 出参前缀必须沿用入参的平台（原来一律 to_repo_key(_base) → 裸前缀默认 gitcode，
+        # gitee/gitlab 仓的仪表盘会被标成 gitcode，链接/缓存键全错；2026-11-14 深度检查）
+        _prov_in = repo.split(":", 1)[0] if ":" in repo else ""
+        repo_key_out = to_repo_key(_base, provider=_prov_in) if _prov_in else to_repo_key(_base)
 
     if not repo_keys:
         return build_board(None, [], repo_label="", weeks=weeks,
@@ -409,7 +415,9 @@ def _eff_repo_keys(repo: str):
     if not (repo and repo.strip()):
         return [], ""
     base = repo.split(":", 1)[1] if ":" in repo else repo
-    return repo_key_candidates(base), to_repo_key(base)
+    _prov_in2 = base.split(":", 1)[0] if ":" in base else ""
+    return repo_key_candidates(base), (to_repo_key(base.split(":", 1)[-1], provider=_prov_in2)
+                                      if _prov_in2 else to_repo_key(base))
 
 @router.get("/efficiency/daily", operation_id="dashboard_efficiency_daily",
             summary="Efficiency board daily drill-down",

@@ -85,6 +85,7 @@
 // Theme/lang/pipeline/api-keys code in settings.js was dead (UI moved to AccountView in batch 7);
 // i18n lang-switch rerender for 'settings' view calls renderSettings via the entry global.
 // initialTab prop is accepted for contract parity (entry passes it) but the only live tab is 'gitcode'.
+import { repoKeyOf } from '../lib/repo-provider.js'
 import { computed, onMounted, ref } from 'vue'
 
 const G = globalThis
@@ -283,7 +284,8 @@ function migrateRepo() {
     t('settings.host.migrate_confirm', { target: target }),
     function () {
       G.API.post('/repos/migrate', {
-        repo_key: 'gitcode:' + r.fullName,
+        // 前缀跟着仓库实际平台走（写死 gitcode 会把 gitee/gitlab 仓迁到错平台）
+        repo_key: r.repoKey || repoKeyOf({ full_name: r.fullName, provider: r.provider }),
         target_owner: target,
         target_repo: '',
       })

@@ -674,6 +674,15 @@
   animation: obBindFloat 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 .ob-bind-card.ob-shown { opacity: 1; }  /* 入场结束的 JS 兜底终态，.bound 依赖它 */
+/* D102-L v6 职责分域：未开通 OAuth 的渠道卡片置灰（账号绑定只走 OAuth，
+   PAT 不走这张卡；点击仍进弹层，只给指路凭据管理的说明） */
+.ob-bind-card--off {
+  filter: grayscale(1);
+  opacity: 0.55;
+  animation: none;
+}
+.ob-bind-card--off:hover { transform: none; }
+.ob-bind-card--off .ob-bind-btn { cursor: not-allowed; }
 .ob-bind-card:not(.bound) {
   /* 呼吸光圈独立（不与入场串联，不与 hover transition 抢 transform——修顿动）：
      用 filter 光晕 + box-shadow 脉冲，transform 上浮移到 hover */

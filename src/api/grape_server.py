@@ -13,6 +13,10 @@ from src.kernel.config import log
 from src.api.version_check import ensure_python_version
 
 ensure_python_version()
+# 进程角色默认值（2026-11-16 实弹）：表归属守卫按角色判定 owner，缺角色会把本域 DDL
+# 整批当「别家域」跳过（平台四表 / meta 因此不建，PAT 关系写不进）。入口写死默认值，
+# 自定义启动方式未设 env 时也不会静默丢表。
+os.environ.setdefault("GRAPE_PROCESS_ROLE", "mgmt")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -159,6 +163,16 @@ async def lifespan(app: FastAPI):
     _mgmt_h = await server_tasks.start_mgmt_tasks(app)
     bot_manager = _mgmt_h.get("bot_manager")
     log.info("Grape Mgmt Server lifespan started")
+
+    # D109（平台对象模型）：扫描导入 → 一次性凭据迁移/关系回填 → 标记 migrated。
+    # A 进程是四进程模式的唯一 mgmt 入口，启动装配必须在这里；main.py 只管单进程模式，
+    # 两处调用同一个 src/api/d109_startup.py。失败 fail-open：读路径回落文件+meta。
+    try:
+        from src.api.d109_startup import d109_platform_object_startup
+
+        d109_platform_object_startup(log)
+    except Exception as _d109_err:
+        log.warning(f"D109 platform-object startup skipped (non-fatal, 回落旧存储): {_d109_err}")
 
     # 2026-11-12 结构修复：此处原本残留了一次 yield + 关闭段（合并时把 weekly 的
     # "先 yield 再起 IM" 段落拼了进来），导致后面的启动段（IM 引擎、engine probe、

@@ -1,4 +1,21 @@
 {
+  "_readme": [
+    "仓库托管平台卡（真源）。优先级：meta.vcs_providers_config 逐键覆盖 > 本文件 > 代码兜底。",
+    "只管托管能力位；OAuth 登录配置在 configs/oauth-providers.json（两类字段互不渗透）。凭据不写在这里（见 SCHEMA.md）。",
+    "Gitee 特有坑：建/关 Issue 是 owner 级端点（owner_param）、webhook 密码是明文比对（token_compare）、PR 列表 head 要裸分支名（bare_ref）。",
+    "下划线前缀键=文档键，加载器跳过。"
+  ],
+  "_fields": {
+    "issue_write_form": "建/关 Issue 端点形态：owner_param=/repos/{owner}/issues + body.repo（Gitee 官方契约），repo_path=/repos/{o}/{r}/issues",
+    "branch_create_form": "建分支形态：form=POST /branches{branch_name,refs}",
+    "pr_head_filter": "PR 列表 head 参数形态：bare_ref=裸分支名（owner:ref 会静默返回空集）",
+    "webhook_verify": "验签方式：token_compare=Gitee 网页 WebHook 的「密码」明文比对（hmac 会验不过）",
+    "clone_auth": "clone 凭据形态：basic_password=用户名 + 私人令牌当密码",
+    "pat_create_url": "私人令牌创建页直达链接",
+    "token_storage_field": "显式空串=该平台无 managed_repos 物理列，仓库凭据唯一落点=grape_t_repo_credentials 单表",
+    "webhook_token_field": "同上，webhook 凭据也走单表；显式空串≠键缺席（缺席会回退派生列名）",
+    "bot_username": "该平台 bot 账号登录名（self-loop 判定 / 协作者邀请用；留空=该平台无 bot 身份）"
+  },
   "name": "Gitee",
   "dialect": "github",
   "host": "gitee.com",
@@ -15,5 +32,6 @@
   "pat_create_url": "https://gitee.com/profile/personal_access_tokens",
   "brand_color": "#C71D23",
   "token_storage_field": "",
-  "webhook_token_field": ""
+  "webhook_token_field": "",
+  "bot_username": ""
 }

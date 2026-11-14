@@ -2558,6 +2558,7 @@ def _cascade_pat_clear(user: dict, provider: str) -> dict:
     """
     from src.domains.mgmt.auth.grape_account_db import (
         get_user_identities, delete_external_identity, revoke_provider_credentials)
+    from src.domains.platform import hooks as _pl_hooks
     ident = next((i for i in get_user_identities(user["id"]) if i["provider"] == provider), None)
     has_oauth = bool(ident and ident.get("has_oauth_token"))
     _check_login_method_before_unbind(user["id"], provider)
@@ -2569,12 +2570,21 @@ def _cascade_pat_clear(user: dict, provider: str) -> dict:
             from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
             with _sm_dl:
                 _c = _sm_db.cursor()
-                _c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key LIKE ?",
-                           (user["id"], f"{provider}:%"))
+                _pfx = f"{provider}:"
+                _c.execute(
+                    "DELETE FROM user_repos WHERE user_id=? AND substr(repo_key, 1, ?) = ?",
+                    (user["id"], len(_pfx), _pfx))
                 _sm_db.commit()
         except Exception as _e:
             log.warning(f"_cascade_pat_clear: user_repos cleanup failed (user={user['id']}, "
                         f"provider={provider}): {_e}")
+    # D109：清 PAT 是"凭据来源消失"事件，必须让关系表同步（hook 内部现查其它来源：
+    # 有 OAuth 保有 → 关系行保留；无 OAuth → revoke）。此路径不经过 delete_credential，
+    # 漏掉这一步就会出现「PAT 清空、无 OAuth，但用户仍在项目页而进不了引导页」。
+    try:
+        _pl_hooks.on_pat_deleted(str(user["id"]), str(provider))
+    except Exception as _e:
+        log.warning(f"_cascade_pat_clear: platform-link hook skipped: {_e}")
     return {"oauth_kept": has_oauth}
 
 def _pr_web_path_of(provider: str) -> str:
@@ -2589,34 +2599,25 @@ def _pr_web_path_of(provider: str) -> str:
 @router.get("/vcs/platforms", operation_id="settings_vcs_platforms",
             summary="List visible vcs platforms (builtin + configured)")
 def list_vcs_platforms_public():
-    from src.domains.runtime.vcs.platform_card import get_platform_card, list_vcs_platforms
-    from src.domains.mgmt.user.db import get_meta_value
-    # D102-N 续（2026-11-08 用户裁定）：部署级平台隐藏名单——meta
-    # vcs_platforms_hidden（JSON 数组，provider 名单）。未启用的平台
-    # （实例：GitLab）不进目录 → 引导页/凭据页不渲染。缺省空=全可见。
-    try:
-        _hidden = set(json.loads(get_meta_value("vcs_platforms_hidden") or "[]"))
-        if not isinstance(_hidden, (set, list)):
-            _hidden = set()
-    except Exception:
-        _hidden = set()
-    # 平台可见性唯一口径（本函数）：部署级隐藏名单 vcs_platforms_hidden。
-    # 平台卡在册即可见（纯 PAT 部署不配 OAuth 也能绑定 gitee/gitlab）；
-    # 不再按 OAuth 配置做过 ∉ 默认双平台筛选——白名单会藏掉纯 PAT 平台的卡片。
+    # D109 读路径：平台目录以对象模型为权威（grape_t_repo_platforms + caps），
+    # 平台卡只是导入源（migrated 前/表未就绪时兜底）——见 kernel.platform_object.registry。
+    from src.domains.platform.registry import platform_descriptors
+    # 平台可见性唯一口径（2026-11-15 方案甲）：平台行 `enabled`。
+    # 判据单一实现见 src/domains/platform/visibility.py（/repos/member 403 也用同一份）。
+    # meta.vcs_platforms_hidden 已退役（迁移 202611170021 把名单写成 enabled=0 并删键）。
+    from src.domains.platform.visibility import is_platform_visible
     out = []
-    for provider in list_vcs_platforms():
-        if provider in _hidden:
-            continue
-        card = get_platform_card(provider)
-        if card is None:
+    for row in platform_descriptors():
+        provider = str(row.get("provider") or "")
+        if not provider or not is_platform_visible(provider):
             continue
         out.append({
             "provider": provider,
-            "name": card.name,
-            "host": card.host,
-            "dialect": card.dialect,
-            "pat_create_url": f"https://{card.host}/profile/personal_access_tokens",
-            "brand_color": card.brand_color,  # 台阶2：品牌资产进卡（#RRGGBB，空=前端兜底）
+            "name": row.get("name") or provider,
+            "host": row.get("host") or "",
+            "dialect": row.get("dialect") or "",
+            "pat_create_url": row.get("pat_create_url") or "",
+            "brand_color": row.get("brand_color") or "",  # 空=前端兜底
             # 前端 PR/MR 链接路径段（provider 模块能力位，避免前端按平台名/方言猜）
             "pr_web_path": _pr_web_path_of(provider),
         })

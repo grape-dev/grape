@@ -30,6 +30,10 @@ function pwdReqs(p, username, email) {
 }
 
 // ── 前端 blocklist 文件解析（与生成器同源产物）──
+const _VIEWS = path.resolve(__dirname, '../../src/api/frontend/app/src/views');
+const regVueSrc = fs.readFileSync(path.join(_VIEWS, 'RegisterView.vue'), 'utf8');
+const forgotVueSrc = fs.readFileSync(path.join(_VIEWS, 'ForgotView.vue'), 'utf8');
+
 const blSrc = fs.readFileSync(path.join(_STATIC, 'js', 'pwd-blocklist.js'), 'utf8');
 const m = blSrc.match(/new Set\((\[[^\]]*\])\)/);
 assert.ok(m, 'P4: pwd-blocklist.js 可解析');
@@ -49,12 +53,14 @@ for (const p of ['Xk9mzqR7', 'probe3!Secure', 'Zz99-Plow']) {
   assert.ok(r.len && r.complex && r.notmatch && r.blocklist, 'P2: ' + p + ' 全 MET');
 }
 
-// P3: RULES 前端预检存在（结构守卫：register.html 在提交前拦黑名单）
+// P3: RULES 前端预检存在（结构守卫：注册卡片在提交前拦黑名单）
+// 2026-11-14 登录/注册/忘记密码卡片迁 Vue：规则与 reqs 在 RegisterView.vue，
+// 脚本引用与 UI 行位置分属两个文件（shell 引脚本、组件出 DOM）。
 const regSrc = fs.readFileSync(path.join(_STATIC, 'register.html'), 'utf8');
-assert.ok(regSrc.includes('isWeakPassword(v)'), 'P3: RULES.regPassword 预检走统一谓词');
-assert.ok(regSrc.includes("id:'req-blocklist'"), 'P3: 第四条 req 挂钩');
+assert.ok(regVueSrc.includes('isWeakPassword'), 'P3: RULES.regPassword 预检走统一谓词');
+assert.ok(regVueSrc.includes("id: 'req-blocklist'"), 'P3: 第四条 req 挂钩');
 assert.ok(regSrc.includes('pwd-blocklist.js'), 'P3: blocklist 脚本已引入');
-assert.ok(regSrc.includes('id="req-blocklist"'), 'P3: 第四条 UI 行存在');
+assert.ok(regVueSrc.includes('id="req-blocklist"'), 'P3: 第四条 UI 行存在');
 
 // P4: 与后端同源（数量 + 抽查成员）
 const beSrc = fs.readFileSync(_BACKEND, 'utf8');
@@ -94,13 +100,13 @@ assert.ok(doChange.includes('isWeakPassword(np)'), 'P7: 改密预检走谓词');
 const doSet = appSrc.slice(appSrc.indexOf('function doSetPassword'), appSrc.indexOf('function showChangeEmail'));
 assert.ok(doSet.includes('isWeakPassword(pwd)'), 'P7b: 设密预检走谓词');
 const forgotSrc = fs.readFileSync(path.join(_STATIC, 'forgot.html'), 'utf8');
-assert.ok(forgotSrc.includes('isWeakPassword(v)'), 'P7c: 忘记密码 NEWPWD_RULE 走谓词');
+assert.ok(forgotVueSrc.includes('isWeakPassword'), 'P7c: 忘记密码 NEWPWD_RULE 走谓词');
 assert.ok(forgotSrc.includes('pwd-blocklist.js'), 'P7d: forgot.html 引入 blocklist 脚本');
 const idxHtml = fs.readFileSync(path.join(_STATIC, 'index.html'), 'utf8');
 assert.ok(idxHtml.includes('pwd-blocklist.js'), 'P7e: 主应用引入 blocklist（改密/设密消费前置）');
 
 // P8: 无散落拷贝（判断逻辑不得在调用点重复 has() 形态）
-const callSites = [regSrc, forgotSrc, appSrc,
+const callSites = [regSrc, forgotSrc, regVueSrc, forgotVueSrc, appSrc,
   fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/app/src/views/AccountView.vue'), 'utf8')];
 for (const src of callSites) {
   assert.ok(!/PWD_BLOCKLIST\.has\(/.test(src), 'P8: 消费点无 PWD_BLOCKLIST.has 散落拷贝（统一走谓词）');

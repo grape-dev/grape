@@ -35,39 +35,106 @@ from src.kernel.session_manager import db, db_lock
 
 from src.domains.mgmt.user import db as user_db
 
-# 代码内置默认——和生产环境当前行为一致，确保旧配置文件向前兼容。
-# 当 meta 表无 oauth_providers_config 时（旧文件未更新），使用此默认。
-_DEFAULT_PROVIDERS: dict[str, dict] = {
-    "gitcode": {
-        "name": "GitCode",
-        "auth_url": "https://gitcode.com/oauth/authorize",
-        "token_url": "https://gitcode.com/oauth/token",
-        "user_url": "https://gitcode.com/api/v5/user",
-        "scope": "all",
-        "id_field": "id",
-        "login_field": "login",
-        "name_field": "nickname",
-        "pkce_enabled": True,
-        "brand_color": "#e7330f",
-        "accept_header": "application/json",
-    },
-    "github": {
-        "name": "GitHub",
-        "auth_url": "https://github.com/login/oauth/authorize",
-        "token_url": "https://github.com/login/oauth/access_token",
-        "user_url": "https://api.github.com/user",
-        # D46 P1-12: 缩减 scope——仅需读取用户信息和邮箱，不需要 repo 写权限
-        "scope": "read:user user:email",
-        "id_field": "id",
-        "login_field": "login",
-        "name_field": "name",
-        "pkce_enabled": True,
-        "brand_color": "#24292f",
-        "accept_header": "application/vnd.github+json",
-    },
-}
+# 渠道卡真源 = configs/oauth-providers.json（一份聚合文件，与仓库侧的
+# configs/platforms/<provider>.json 同一纪律）。代码里不再持有任何平台卡字面量——
+# 加渠道/换端点 = 加一个文件，零代码、零发版（多平台解耦在登录渠道侧的收口）。
+# 优先级：meta.oauth_providers_config（运行时覆盖，逐键合并）> 文件卡 > 无（fail-closed）。
+# 登录渠道配置真源 = configs/oauth-providers.json（一份聚合文件，全部渠道）。
+# 与仓库托管配置（configs/platforms/*.json，每平台一文件）物理分离、字段互不渗透：
+# 这份文件只放 OAuth 渠道卡，不放托管能力位；那份只放托管卡，不放 auth/scope。
+_AUTH_CHANNELS_FILE_NAME = "oauth-providers.json"
 
-# 运行时内存缓存——从 meta 表加载，无则用代码内置默认
+# 渠道卡合法键集（与消费面一一对应：build_auth_url / exchange_token /
+# get_user_info / get_redirect_uri / 渠道策略构建校验 / OIDC claims_map）。
+# 未知键整卡拒绝——静默丢键 = 能力静默丢失（S69 反模式）。
+_CHANNEL_CARD_FIELDS = {
+    "name", "type", "channel_type",
+    "auth_url", "token_url", "user_url",
+    "scope", "id_field", "login_field", "name_field", "email_field",
+    "avatar_field", "pkce_enabled", "brand_color", "accept_header",
+    "emails_endpoint", "claims_map",
+    # 环境值但可选：留空则由 server_base_url 派生 /api/auth/callback/<provider>；
+    # 显式写必须与平台后台登记的回调地址逐字节一致（get_redirect_uri 优先读它）。
+    "redirect_uri",
+    # legacy：白名单列名声明字段已于 2026-11-12 行式化改造退役（login_whitelist 改为
+    # provider/username 行式两列，卡不再声明列名）。仍允许出现：旧卡/旧文件里带着它，
+    # 整卡拒绝会让存量配置直接失效；加载后代码不再读取该键。
+    "whitelist_column",
+    # 渠道自足字段：登录页/绑定弹窗用（PAT 创建页直达链接）。缺失时回落平台卡的
+    # pat_create_url（过渡兼容），渠道卡显式声明后登录域不再依赖托管配置。
+    "pat_create_url",
+    "idp_sso_url", "attribute_map",     # SAML 类协议预留（由渠道策略消费）
+}
+_REQUIRED_CHANNEL_CARD_FIELDS = ("auth_url", "token_url", "user_url")
+
+def _repo_root(start: str) -> str:
+    """向上找到含 configs/ 的仓库根（与 platform_card._repo_root 同构）。"""
+    cur = os.path.dirname(os.path.abspath(start))
+    while cur and cur != "/":
+        if os.path.isdir(os.path.join(cur, "configs")):
+            return cur
+        cur = os.path.dirname(cur)
+    return os.path.dirname(os.path.abspath(start))
+
+_AUTH_CHANNELS_FILE = os.path.join(_repo_root(__file__), "configs", _AUTH_CHANNELS_FILE_NAME)
+
+# P2-7 缓存：渠道展示序（键=文件 mtime+size）
+_order_cache_key = None
+_order_cache_idx: "list[str] | None" = None
+
+def _builtin_channels_from_file(path: str) -> "dict[str, dict]":
+    """configs/oauth-providers.json → 渠道卡 raw（登录渠道的配置真源）。
+
+    守卫（与 configs/platforms 同纪律，构建即校验）：
+    - 顶层必须是 {provider: card} 对象；
+    - 每张卡未知键 → 整卡拒绝并 error 级响亮（拼错键=能力静默丢失）；
+    - 缺 auth_url/token_url/user_url → 整卡拒绝；
+    - 凭据不进文件：client_id/client_secret 若出现则剥离并告警（唯一落点=DB meta/管理面）。
+    """
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception as e:
+        log.error(f"oauth-providers.json 解析失败 {path}: {e}（无渠道可用）")
+        return {}
+    if not isinstance(data, dict):
+        log.error(f"oauth-providers.json 顶层必须是 {{provider: card}} 对象（实际 {type(data).__name__}）")
+        return {}
+    raws: dict[str, dict] = {}
+    for provider, raw in data.items():
+        provider = str(provider or "").strip()
+        # 约定：下划线前缀 = 文档/注释键（JSON 无注释，用 "_readme"/"_note" 承载说明），
+        # 不是渠道名。这样 example 文件可以写满说明，复制成真文件也不会被当成渠道。
+        if not provider or provider.startswith("_"):
+            continue
+        if not isinstance(raw, dict):
+            log.error(f"oauth-providers.json: {provider!r} 卡不是 JSON 对象（整卡拒绝）")
+            continue
+        _creds = [k for k in ("client_id", "client_secret") if k in raw]
+        card = {k: v for k, v in raw.items()
+                if k not in ("client_id", "client_secret") and not str(k).startswith("_")}
+        if _creds:
+            log.warning(f"oauth-providers.json: {provider} 卡内出现 {_creds} —— 凭据不进配置文件，"
+                        f"已剥离；请在管理面「登录渠道」或 meta oauth_{provider}_client_id/secret 配置")
+        unknown = set(card) - _CHANNEL_CARD_FIELDS
+        if unknown:
+            log.error(f"oauth-providers.json: {provider} 含未知键 {sorted(unknown)}"
+                      f"（合法键={sorted(_CHANNEL_CARD_FIELDS)}），整卡拒绝")
+            continue
+        missing = [k for k in _REQUIRED_CHANNEL_CARD_FIELDS if not str(card.get(k) or "").strip()]
+        if missing:
+            log.error(f"oauth-providers.json: {provider} 缺必填端点 {missing}，整卡拒绝")
+            continue
+        raws[provider] = card
+    return raws
+
+def builtin_channels() -> "dict[str, dict]":
+    """登录渠道卡文件真源（管理面保存基线 / 测试口径的唯一入口；不含任何凭据）。"""
+    return _builtin_channels_from_file(_AUTH_CHANNELS_FILE)
+
+# 运行时内存缓存——文件卡 + meta 运行时覆盖
 _PROVIDERS_CACHE: dict[str, dict] = {}
 
 _loaded: bool = False
@@ -77,6 +144,50 @@ _cache_ts: float = 0.0          # P2-2: 上次加载时间戳
 _CACHE_TTL: float = 300.0       # P2-2: 缓存 TTL 5 分钟（兜底，admin 改配置时主动失效）
 
 _providers_lock = __import__("threading").Lock()
+
+_CHANNEL_TABLE_FIELDS = (
+    "name", "type", "auth_url", "token_url", "user_url", "emails_endpoint", "scope",
+    "id_field", "login_field", "name_field", "avatar_field", "redirect_uri",
+    "brand_color", "accept_header",
+)
+
+
+def _channels_from_table() -> dict:
+    """D109：表就绪后从 grape_t_oauth_channels 读渠道卡（运行时真源）。
+
+    未就绪 / 读失败 → 返回空 dict，调用方保持原有「文件 + meta」路径（§16 #1 回落）。
+    """
+    try:
+        from src.domains.platform.importer import is_table_backed
+
+        if not is_table_backed():
+            return {}
+        import json as _json
+        from sqlalchemy.orm import Session
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
+        out: dict[str, dict] = {}
+        with Session(get_engine()) as s:
+            for row in OAuthChannelRepo.list_all(s, enabled_only=True):
+                # 防御：导入器已跳过下划线文档键，但历史库可能留有脏行。
+                # 注意不能写 `not row.provider`——ORM 列在类型层是 Column[str]，
+                # 布尔求值会触发 Pyright reportGeneralTypeIssues。
+                _prov = str(row.provider) if row.provider is not None else ""
+                _prov = _prov.strip()
+                if not _prov or _prov.startswith("_"):
+                    continue
+                card = {f: getattr(row, f) or "" for f in _CHANNEL_TABLE_FIELDS}
+                card["pkce_enabled"] = bool(row.pkce_enabled)
+                try:
+                    card["repo_links"] = _json.loads(row.repo_links_json or "[]")
+                except Exception:
+                    card["repo_links"] = []
+                out[row.provider] = card
+        return out
+    except Exception as e:
+        log.warning(f"oauth_channels table read failed, fallback to file+meta: {e}")
+        return {}
 
 def _load_providers():
     """从 meta 表加载 provider 配置，无则用代码内置默认。
@@ -94,23 +205,47 @@ def _load_providers():
         # 双重检查：进入锁后再检查一次
         if _loaded and (time.time() - _cache_ts < _CACHE_TTL):
             return
+        # 真源：configs/oauth-providers.json（一份聚合，全部渠道）；meta 逐键覆盖
+        # （D105-19 同型——meta 只覆盖它声明的键，缺席键落文件卡）。
+        if os.path.isfile(_AUTH_CHANNELS_FILE):
+            merged = {p: dict(c) for p, c in _builtin_channels_from_file(_AUTH_CHANNELS_FILE).items()}
+        else:
+            merged = {}
+            log.error(f"oauth-providers.json 缺失 {_AUTH_CHANNELS_FILE} —— 当前无可用登录渠道"
+                      f"（该文件是运行必需配置，随仓库发布；解耦后不放回代码兜底卡）")
         raw = user_db.get_meta_value("oauth_providers_config") or ""
         if raw:
             try:
                 data = json.loads(raw)
-                _PROVIDERS_CACHE.clear()
-                _PROVIDERS_CACHE.update(data)
-                log.info(f"Loaded {len(_PROVIDERS_CACHE)} OAuth providers from DB: {list(_PROVIDERS_CACHE.keys())}")
-                _loaded = True
-                _cache_ts = time.time()
-                return
+                for provider, card in (data or {}).items():
+                    provider = str(provider or "").strip()
+                    # 约定与文件分支同口径（providers.py:_builtin_channels_from_file）：
+                    # 下划线前缀 = 文档/注释键，不是渠道名。meta 里若被历史同步写进
+                    # `_fields`/`_readme` 之类文档键，不过滤就会凭空多出一个"渠道"，
+                    # 登录页按目录渲染按钮、未配置提示点名它（实弹：hint 出现 _fields）。
+                    if not provider or provider.startswith("_"):
+                        continue
+                    if not isinstance(card, dict):
+                        continue
+                    _base = dict(merged.get(provider) or {})
+                    _base.update(card)
+                    merged[provider] = _base
+                log.info(f"Loaded {len(merged)} OAuth channels (file cards + meta overrides): {sorted(merged)}")
             except Exception as e:
-                log.warning(f"Failed to parse oauth_providers_config from DB: {e}, using defaults")
+                log.warning(f"oauth_providers_config 解析失败: {e} —— 仅用文件卡: {sorted(merged)}")
+        else:
+            log.info(f"Using auth-channel file cards: {sorted(merged)}")
 
-        # meta 表无配置 → 用代码内置默认
+        # D109：表就绪后 DB 表是运行时真源（文件与 meta 只是导入源）；
+        # 表内有的 provider 覆盖同名文件卡，文件独有的仍保留（防表缺行致渠道消失）。
+        _tbl = _channels_from_table()
+        if _tbl:
+            for _p, _card in _tbl.items():
+                merged[_p] = dict(_card)
+            log.info(f"oauth channels from table: {sorted(_tbl)}")
+
         _PROVIDERS_CACHE.clear()
-        _PROVIDERS_CACHE.update(_DEFAULT_PROVIDERS)
-        log.info(f"Using built-in default providers: {list(_PROVIDERS_CACHE.keys())}")
+        _PROVIDERS_CACHE.update(merged)
         _loaded = True
         _cache_ts = time.time()
 
@@ -132,10 +267,127 @@ def get_provider(provider: str) -> "dict | None":
     _load_providers()
     return _PROVIDERS_CACHE.get(provider)
 
+def is_channel_enabled(provider: str) -> bool:
+    """登录渠道是否启用（P2-4 fail-closed 判据）。
+
+    真源 = `grape_t_oauth_channels.enabled`（与登录目录 `_catalog_from_object` 的
+    enabled_only 过滤同源）。表未就绪 / 读失败 → 按"启用"处理：这是历史行为，
+    否则 DB 抖动会把所有登录打挂。只有明确读到 enabled=0 才拒绝。
+    """
+    try:
+        from src.domains.platform.importer import is_table_backed
+
+        if not is_table_backed():
+            return True
+        from sqlalchemy.orm import Session
+
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
+        with Session(get_engine()) as s:
+            row = OAuthChannelRepo.get(s, str(provider))
+        if row is None:
+            return False  # 渠道不在对象表里 → 不存在即不可登录
+        return bool(getattr(row, "enabled", 1))
+    except Exception as e:
+        from src.kernel.config import log
+
+        log.warning(f"is_channel_enabled 读取失败，按启用处理（fail-open）: {e}")
+        return True
+
+
 def list_providers() -> list[str]:
     """列出所有已配置的 Provider。"""
     _load_providers()
     return list(_PROVIDERS_CACHE.keys())
+
+
+def _catalog_order_index() -> "dict[str, int]":
+    """登录渠道展示顺序：`configs/oauth-providers.json` 的 `_ui_order`（可选）→ 配置键顺序。
+
+    D102-B 曾用「平台 key → 序号」的字面表固定展示序（新渠道必须改代码），与「渠道集合由
+    配置/表驱动」的口径不一致（2026-11-14 深度检查）。顺序属产品展示偏好，改为数据：
+    优先 `_ui_order` 数组，其次配置文件的键顺序（当前文件即 gitcode → github → gitee →
+    huawei），未列出的渠道排最后按名。
+    """
+    # P2-7：本函数被 HTML head 注入与 /auth/providers 每请求调用；同文件其它读配置
+    # 的都走 _load_providers 的 TTL 缓存，这里不能每次 open+parse。
+    # 缓存键 = (路径, mtime, size)：配置被带外改写时自动失效，无需重启。
+    global _order_cache_key, _order_cache_idx
+    order: list[str] = []
+    try:
+        _st = os.stat(_AUTH_CHANNELS_FILE)
+        _key = (_AUTH_CHANNELS_FILE, int(_st.st_mtime), int(_st.st_size))
+        if _order_cache_key == _key and _order_cache_idx is not None:
+            order = _order_cache_idx
+        else:
+            with open(_AUTH_CHANNELS_FILE, encoding="utf-8") as f:
+                _cfg = json.load(f)
+            order = [p for p in (_cfg.get("_ui_order") or []) if isinstance(p, str) and p]
+            _order_cache_key = _key
+            _order_cache_idx = order
+    except Exception:
+        order = []
+    idx = {p: i for i, p in enumerate(order)}
+    for k in list_providers():
+        if k not in idx:
+            idx[k] = len(idx)
+    return idx
+
+
+def _catalog_from_object() -> "list[dict]":
+    """D109 对象层读模型（表就绪时=唯一真源，不再回查 meta）。
+
+    以 grape_t_oauth_channels 行为准：provider/name/brand_color 取行内定义字段，
+    configured 取行内加密凭据列（client_id_enc）——凭据迁移后 meta 不再是真源。
+    表未就绪 / 读失败 → 返回空列表，调用方回落 file+meta（§16 影响 #1 fail-open）。
+    """
+    try:
+        from src.domains.platform.importer import is_table_backed
+
+        if not is_table_backed():
+            return []
+        from sqlalchemy.orm import Session
+
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
+        with Session(get_engine()) as s:
+            rows = list(OAuthChannelRepo.list_all(s, enabled_only=True))
+        if not rows:
+            return []
+        from src.domains.runtime.vcs.platform_card import get_platform_card
+
+        out = []
+        for row in rows:
+            # 防御：历史脏行（下划线文档键）不参与目录
+            provider = str(row.provider) if row.provider is not None else ""
+            provider = provider.strip()
+            if not provider or provider.startswith("_"):
+                continue
+            cfg = get_provider(provider) or {}
+            pat_url = str(cfg.get("pat_create_url") or "").strip()
+            try:
+                card = get_platform_card(provider)
+                if not pat_url:
+                    pat_url = (getattr(card, "pat_create_url", "") or "") if card else ""
+            except Exception:
+                pat_url = ""
+            out.append({
+                "provider": provider,
+                "name": str(row.name or cfg.get("name") or provider),
+                # configured 走与取用同一解析链：表内加密列优先，空列回落 meta
+                # （迁移窗口）。两边都没有才是真未配置。
+                "configured": bool(_get_client_id(provider)),
+                "brand_color": str(row.brand_color or cfg.get("brand_color") or ""),
+                "pat_create_url": pat_url,
+            })
+        _idx = _catalog_order_index()
+        out.sort(key=lambda c: (_idx.get(c["provider"], len(_idx)), c["provider"]))
+        return out
+    except Exception as e:
+        log.warning(f"oauth_channels table read failed, fallback to file+meta: {e}")
+        return []
 
 
 def providers_catalog() -> "list[dict]":
@@ -144,12 +396,18 @@ def providers_catalog() -> "list[dict]":
     返回固定展示序的 [{provider, name, configured, brand_color}]——
     服务端 HTML head 注入（window.__OAUTH_PROVIDERS__）与 /auth/providers
     路由共用此单一来源：登录页按钮在首帧渲染前同步生成，不等 AJAX。
+
+    D109 收口：查询真源 = 平台对象层（grape_t_oauth_channels），不再逐个回查
+    meta（凭据已迁到表内加密列，meta 只是导入源）。表未就绪才回落 file+meta。
     """
+    _from_table = _catalog_from_object()
+    if _from_table:
+        return _from_table
+
     from src.domains.mgmt.user.db import get_meta_value
-    # D102-B: 登录按钮固定展示序（用户拍板：gitcode→github→gitee→gitlab→
-    # hwcloud→其余按名）——不随 providers 配置加载序漂移
-    _ORDER = {"gitcode": 0, "github": 1, "gitee": 2, "gitlab": 3, "hwcloud": 4}
-    keys = sorted(list_providers(), key=lambda k: (_ORDER.get(k, 99), k))
+    # D102-B 的展示序改由数据驱动（_catalog_order_index：_ui_order → 配置键顺序）
+    _idx = _catalog_order_index()
+    keys = sorted(list_providers(), key=lambda k: (_idx.get(k, len(_idx)), k))
     result = []
     # 2026-11-13：手动绑定令牌弹窗需要「前往令牌创建页面」的直达链接。
     # 单一来源=平台卡 pat_create_url（gitee/gitlab 等按卡派生）；取不到就返回空串，
@@ -158,11 +416,12 @@ def providers_catalog() -> "list[dict]":
 
     for key in keys:
         cfg = get_provider(key) or {}
-        client_id = get_meta_value(f"oauth_{key}_client_id") or ""
-        pat_url = ""
+        client_id = _get_client_id(key)
+        pat_url = str(cfg.get("pat_create_url") or "").strip()
         try:
             card = get_platform_card(key)
-            pat_url = (getattr(card, "pat_create_url", "") or "") if card else ""
+            if not pat_url:
+                pat_url = (getattr(card, "pat_create_url", "") or "") if card else ""
         except Exception:
             pat_url = ""
         result.append({
@@ -403,12 +662,52 @@ def get_user_info(provider: str, access_token: str) -> "dict | None":
 
     return result
 
+def _object_credential(provider: str, column: str) -> "str | None":
+    """D109 对象层凭据读口：grape_t_oauth_channels.client_id_enc / client_secret_enc。
+
+    表就绪时表是唯一真源（凭据已迁加密列，meta 只是导入源）；表未就绪 / 无该行 /
+    解密失败 → 返回 None，调用方回落 meta（fail-open，登录不被新表拖挂）。
+    """
+    try:
+        from src.domains.platform.importer import is_table_backed
+
+        if not is_table_backed():
+            return None
+        from sqlalchemy.orm import Session
+
+        from src.domains.mgmt.auth.credential_crypto import decrypt
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
+        with Session(get_engine()) as s:
+            row = OAuthChannelRepo.get(s, provider)
+        if row is None:
+            return None
+        blob = getattr(row, column, "") or ""
+        if not blob:
+            # 行在但凭据列为空 = 迁移未落地（如历史库只配了 meta，或迁移因缺
+            # secret 跳过该条）。此时返回 None 交给 meta 兜底，避免登录被误判
+            # "未配置"（fail-open，与 §16 影响 #1 同口径）。
+            return None
+        return decrypt(blob) or ""
+    except Exception as e:
+        log.warning(f"oauth channel credential read failed ({provider}.{column}), "
+                    f"fallback to meta: {e}")
+        return None
+
+
 def _get_client_id(provider: str) -> str:
-    """获取 OAuth client_id——统一用 provider 名拼 meta key。"""
+    """获取 OAuth client_id：表就绪读对象层加密列，否则回落 meta。"""
+    _from_object = _object_credential(provider, "client_id_enc")
+    if _from_object is not None:
+        return _from_object
     return user_db.get_meta_value(f"oauth_{provider}_client_id") or ""
 
 def _get_client_secret(provider: str) -> str:
-    """获取 OAuth client_secret——统一用 provider 名拼 meta key。"""
+    """获取 OAuth client_secret：表就绪读对象层加密列，否则回落 meta。"""
+    _from_object = _object_credential(provider, "client_secret_enc")
+    if _from_object is not None:
+        return _from_object
     return user_db.get_meta_value(f"oauth_{provider}_client_secret") or ""
 
 def get_redirect_uri(request, provider: str = "") -> str:
@@ -522,50 +821,5 @@ def _channel_emails_endpoint(provider: str, cfg: "dict | None" = None) -> str:
         pass
     return ""
 
-# 代码内置默认——和生产环境当前行为一致，确保旧配置文件向前兼容。
-# 当 meta 表无 oauth_providers_config 时（旧文件未更新），使用此默认。
-_DEFAULT_PROVIDERS: dict[str, dict] = {
-    "gitcode": {
-        "name": "GitCode",
-        "auth_url": "https://gitcode.com/oauth/authorize",
-        "token_url": "https://gitcode.com/oauth/token",
-        "user_url": "https://gitcode.com/api/v5/user",
-        "scope": "all",
-        "id_field": "id",
-        "login_field": "login",
-        "name_field": "nickname",
-        "pkce_enabled": True,
-        "brand_color": "#e7330f",
-        "accept_header": "application/json",
-    },
-    "github": {
-        "name": "GitHub",
-        "auth_url": "https://github.com/login/oauth/authorize",
-        "token_url": "https://github.com/login/oauth/access_token",
-        "user_url": "https://api.github.com/user",
-        # D46 P1-12: 缩减 scope——仅需读取用户信息和邮箱，不需要 repo 写权限
-        "scope": "read:user user:email",
-        "id_field": "id",
-        "login_field": "login",
-        "name_field": "name",
-        "pkce_enabled": True,
-        "brand_color": "#24292f",
-        "accept_header": "application/vnd.github+json",
-    },
-    # D90-N5（2026-11-07）：gitee OAuth 登录渠道卡——OAuth 配置化平台化收口。
-    # endpoints 按 Gitee 官方 OAuth 文档。管理员在管理面填
-    # oauth_gitee_client_id/secret 即启用（无需改代码）。
-    "gitee": {
-        "name": "Gitee",
-        "auth_url": "https://gitee.com/oauth/authorize",
-        "token_url": "https://gitee.com/oauth/token",
-        "user_url": "https://gitee.com/api/v5/user",
-        "scope": "user_info emails",
-        "id_field": "id",
-        "login_field": "login",
-        "name_field": "name",
-        "pkce_enabled": True,
-        "brand_color": "#c71d23",
-        "accept_header": "application/json",
-    },
-}
+# 说明：登录渠道卡真源=configs/oauth-providers.json（一份聚合，全部渠道）。
+# 代码里不再有内置渠道卡字面量——加渠道/换端点 = 加文件，零代码发版。

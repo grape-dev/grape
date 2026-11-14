@@ -85,9 +85,23 @@
               {{ t('no_third_party_platforms') }}
             </div>
             <div v-for="p in providers" :key="p.provider" class="ac__prowwrap">
+              <!-- 未开通 OAuth（D105k 纯 OAuth 三态：绑定/解绑全不渲染，PAT 的一切归凭据管理） -->
+              <div v-if="!channelConfigured(p.provider)" class="ac__prow">
+                <span
+                  class="ac__avatar ac__avatar--icon"
+                  v-html="platformIcon(p.provider, 20)"
+                ></span>
+                <div class="ac__flex1">
+                  <div class="ac__pname">
+                    <span class="ac__name">{{ pName(p.provider) }}</span>
+                    <span class="tg tg-d ac__tag10">{{ t('bind_unavailable_badge') }}</span>
+                  </div>
+                  <div class="ac__linkhint">{{ t('bind_unavailable_hint') }}</div>
+                </div>
+              </div>
               <!-- token 过期 -->
               <div
-                v-if="isBound(p.provider) && isExpired(p.provider)"
+                v-else-if="isBound(p.provider) && isExpired(p.provider)"
                 class="ac__prow ac__prow--expired"
               >
                 <div class="ac__flex1">
@@ -98,7 +112,7 @@
                   </div>
                   <div class="ac__expired-hint">{{ t('token_expired_hint') }}</div>
                 </div>
-                <button class="bt bt-s bt-p" @click="bindProvider(p.provider)">
+                <button class="bt bt-s bt-p" @click="openBind(p.provider)">
                   {{ t('re_bind') }}
                 </button>
               </div>
@@ -125,7 +139,7 @@
                   </div>
                 </div>
                 <div class="ac__prow-btns">
-                  <button class="bt bt-s bt-o" @click="bindProvider(p.provider)">
+                  <button class="bt bt-s bt-o" @click="openBind(p.provider)">
                     {{ t('update') }}
                   </button>
                   <button class="bt bt-s ac__unbind-btn" @click="unbindProvider(p.provider)">
@@ -146,7 +160,7 @@
                   </div>
                   <div class="ac__linkhint">{{ t('link_to_manage_repos') }}</div>
                 </div>
-                <button class="bt bt-s bt-p" @click="bindProvider(p.provider)">
+                <button class="bt bt-s bt-p" @click="openBind(p.provider)">
                   {{ t('link_btn') }}
                 </button>
               </div>
@@ -160,6 +174,24 @@
 
         <!-- ═══ credentials ═══ -->
         <template v-else-if="tab === 'credentials'">
+          <!-- D102-L v6 职责分域：第三方仓库凭据 = PAT 域（仓库只配 PAT）——
+               行内只有 PAT 徽章（已配置/未配置）+ 令牌页直达 + 配置/重新配置/清除；
+               OAuth 三态徽章与 OAuth 过期标签一并退出本行（账号绑定域才有 OAuth）。 -->
+          <div class="cd">
+            <div class="cd-h">
+              <h2>{{ t('third_party_repo_credentials') }}</h2>
+            </div>
+            <p v-if="!repoPlatforms.length" class="tx t2 ac__mb">{{ t('loading') }}</p>
+            <CredRepoRow
+              v-for="rp in repoPlatforms"
+              :key="rp.provider"
+              :platform="rp"
+              :has-pat="hasPat(rp.provider)"
+              @configure="openPatModal"
+              @clear="clearPat"
+            />
+            <p class="tx t2 mt8 ac__small">{{ t('repo_cred_desc') }}</p>
+          </div>
           <div class="cd">
             <div class="cd-h"><h2>Huawei Cloud</h2></div>
             <div class="srow ac__crow">
@@ -328,6 +360,25 @@
     </div>
 
     <!-- ═══ 通用弹窗（accountModal 等价物） ═══ -->
+    <!-- 共享组件：账号绑定（OAuth 域，allowPat=false）与仓库 PAT 配置（凭据域，只配 PAT） -->
+    <BindDialog
+      :open="bindOpen"
+      :provider="bindTarget"
+      :allow-pat="false"
+      :already-bound="bindBound"
+      :providers="providers"
+      @close="bindOpen = false"
+      @bound="onBindOk"
+    />
+    <PatDialog
+      :open="patOpen"
+      :provider="patTarget"
+      :name="pName(patTarget)"
+      :pat-url="patDialogUrl()"
+      :oauth-configured="patDialogConfigured()"
+      @close="patOpen = false"
+      @saved="onPatSaved"
+    />
     <Teleport to="body">
       <div v-if="modal.open" class="ac__modal-mask" @click.self="onModalMask">
         <div class="ac__modal" v-html="modal.html"></div>
@@ -392,6 +443,9 @@ function fmtKeyTime(v) {
 }
 
 import { ref, reactive, onMounted } from 'vue'
+import BindDialog from '../components/BindDialog.vue'
+import PatDialog from '../components/PatDialog.vue'
+import CredRepoRow from '../components/CredRepoRow.vue'
 
 const G = globalThis
 
@@ -488,7 +542,21 @@ function platformIcon(provider, size) {
   return typeof G.window.platformIcon === 'function' ? G.window.platformIcon(provider, size) : ''
 }
 function pName(provider) {
-  return provider === 'github' ? 'GitHub' : 'GitCode'
+  // 平台名真源：shell/js/platform-icons.js 的 platformLabel（按语言出 GitCode/GitHub/
+  // Gitee/GitLab/华为云|Huawei Cloud）；未知平台才回落到服务端渠道名 → provider id。
+  if (typeof G.window.platformLabel === 'function') {
+    const label = G.window.platformLabel(provider)
+    if (label && label !== provider) return label
+  }
+  const p = providers.value.find(function (x) {
+    return x.provider === provider
+  })
+  if (p && p.name) return p.name
+  const c = repoPlatforms.value.find(function (x) {
+    return x.provider === provider
+  })
+  if (c && c.name) return c.name
+  return provider
 }
 
 // ── tab 状态（hash 路由兼容：#account#security 等）──
@@ -565,136 +633,42 @@ function identityLine(provider) {
   const name = (identity && identity.external_name) || ''
   return name && name !== login ? login + ' · ' + name : login
 }
-function bindProvider(provider) {
-  // 绑定方式弹窗（OAuth + 手动令牌）——完整 OAuth popup 流程
-  const alreadyBound = isBound(provider)
-  const providerInfo = providers.value.find(function (p) {
+function channelConfigured(provider) {
+  const info = providers.value.find(function (p) {
     return p.provider === provider
   })
-  const oauthConfigured = !!(providerInfo && providerInfo.configured)
-  let html =
-    '<h3 style="display:flex;align-items:center;gap:8px">' +
-    platformIcon(provider, 24) +
-    ' ' +
-    esc(
-      alreadyBound
-        ? t('update_platform_token', { platform: pName(provider) })
-        : t('link_platform', { platform: pName(provider) })
-    ) +
-    '</h3>'
-  if (oauthConfigured) {
-    html += '<div class="stabs" style="margin-bottom:16px">'
-    html += '<a class="ac" id="bindTabOauth">' + esc(t('oauth_auth')) + '</a>'
-    html += '<a id="bindTabToken">' + esc(t('manual_token')) + '</a></div>'
-    html +=
-      '<div id="bindPanelOauth"><p class="tx t2" style="margin-bottom:16px">' +
-      esc(
-        alreadyBound
-          ? t('oauth_rebind_hint', { platform: pName(provider) })
-          : t('oauth_redirect_hint', { platform: pName(provider) })
-      ) +
-      '</p>'
-    html +=
-      '<button class="bt bt-p" style="width:100%" id="oauthBindBtn">' +
-      esc(alreadyBound ? t('re_authorize') : t('authorize')) +
-      '</button></div>'
-    html += '<div id="bindPanelToken" style="display:none">' + manualBindForm(provider) + '</div>'
-  } else {
-    html += '<div id="bindPanelToken">' + manualBindForm(provider) + '</div>'
-  }
-  showModal(html, function (root) {
-    const oauthBtn = root.querySelector('#oauthBindBtn')
-    if (oauthBtn)
-      oauthBtn.onclick = function () {
-        doOauthBind(provider, this)
-      }
-    const tabOauth = root.querySelector('#bindTabOauth')
-    const tabToken = root.querySelector('#bindTabToken')
-    if (tabOauth && tabToken) {
-      tabOauth.onclick = function () {
-        root.querySelector('#bindPanelOauth').style.display = ''
-        root.querySelector('#bindPanelToken').style.display = 'none'
-        tabOauth.classList.add('ac')
-        tabToken.classList.remove('ac')
-      }
-      tabToken.onclick = function () {
-        root.querySelector('#bindPanelOauth').style.display = 'none'
-        root.querySelector('#bindPanelToken').style.display = ''
-        tabOauth.classList.remove('ac')
-        tabToken.classList.add('ac')
-      }
-    }
-    const manualBtn = root.querySelector('#manualBindBtn')
-    if (manualBtn)
-      manualBtn.onclick = function () {
-        doManualBind(provider, this)
-      }
-  })
+  return !!(info && info.configured)
 }
+// D102-L v6 职责分域（2026-11-08 用户裁定 / 2026-11-14 复核恢复）：
+// 第三方账号行 = OAuth 域 —— 弹层纯 OAuth，未开通 OAuth 的渠道不渲染绑定入口，
+// 文案指路「凭据管理」配 PAT；PAT 的一切（配置/清除）只归凭据 tab。
+// 账号安全 tab = OAuth 域：弹层由共享 BindDialog 组件实现（allowPat=false，纯 OAuth；
+// 未开通 OAuth 的渠道由行级灰态处理，不在这里给 PAT 表单）。PAT 的一切归凭据 tab。
+const bindOpen = ref(false)
+function onBindOk(provider) {
+  // 绑定成功：本地 bindings 快照走 /auth/me 回读，然后在屏重渲染（与壳侧同源）
+  bindOpen.value = false
+  G.API.get('/auth/me')
+    .then(function (me) {
+      if (me && me.bindings) profile.value.bindings = me.bindings
+    })
+    .catch(function () {})
+  if (provider) loadTab()
+}
+const bindTarget = ref('')
+const bindBound = ref(false)
+function openBind(provider) {
+  bindTarget.value = provider
+  bindBound.value = isBound(provider)
+  bindOpen.value = true
+}
+
 // 2026-11-13 合入 arch-weekly-11 补齐（其实现原在 static/js/pages/account.js）：令牌创建页直达链接。
 // github/gitcode 用官方实测过的预选参数链接；其余平台取 /auth/providers 的
 // pat_create_url（来自平台卡）；都没有就不渲染按钮（宁缺勿指错站）。
 const PAT_CREATE_URLS = {
   github: 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps',
   gitcode: 'https://gitcode.com/setting/token-classic/create',
-}
-function patCreateUrl(provider, providerInfo) {
-  if (PAT_CREATE_URLS[provider]) return PAT_CREATE_URLS[provider]
-  if (providerInfo && providerInfo.pat_create_url) return providerInfo.pat_create_url
-  return ''
-}
-// D102 错站修复：帮助文案按平台查表，未命中走通用文案（带 host），
-// 不再让 gitee/gitlab 落到 gitcode 文案。
-const PAT_HELP_KEYS = {
-  github: 'github_token_help',
-  gitcode: 'gitcode_token_help',
-  gitee: 'gitee_token_help',
-}
-function manualBindForm(provider) {
-  const providerInfo = providers.value.find(function (p) {
-    return p.provider === provider
-  })
-  const createUrl = patCreateUrl(provider, providerInfo)
-  const createHost = createUrl ? createUrl.split('/')[2] || '' : ''
-  const helpKey = PAT_HELP_KEYS[provider] || 'pat_token_help_generic'
-  const helpSteps =
-    helpKey === 'pat_token_help_generic'
-      ? t(helpKey, { host: createHost || provider })
-      : t(helpKey)
-  const oauthConfigured = !!(providerInfo && providerInfo.configured)
-  let html = ''
-  if (!oauthConfigured) {
-    html +=
-      '<div style="background:var(--bg);border:1px solid var(--b);border-radius:10px;padding:12px 14px;margin-bottom:12px;display:flex;gap:8px;align-items:flex-start"><span style="font-size:14px;flex-shrink:0">ℹ️</span><div style="font-size:12px;color:var(--t2);line-height:1.6">' +
-      esc(t('pat_no_refresh_hint')) +
-      '</div></div>'
-  }
-  if (createUrl) {
-    html +=
-      '<a href="' + esc(createUrl) + '" target="_blank" rel="noopener noreferrer" class="bt" ' +
-      'style="display:block;text-align:center;text-decoration:none;margin:0 0 12px;color:var(--a);border:1px solid var(--a)">' +
-      esc(t('open_token_page') + (createHost ? ' ' + createHost : '')) +
-      '</a>'
-  }
-  html +=
-    '<div class="srow"><label>' +
-    esc(t('access_token')) +
-    '</label><input type="password" id="manualTokenInput" class="kb-input" placeholder="' +
-    esc(t('paste_token')) +
-    '"></div>'
-  html +=
-    '<div id="manualBindError" style="display:none;color:var(--r);font-size:12px;padding:4px 0"></div>'
-  html +=
-    '<details style="margin:8px 0"><summary style="cursor:pointer;font-size:12px;color:var(--a)">' +
-    esc(t('how_to_get_token')) +
-    '</summary><div style="font-size:12px;color:var(--t2);padding:8px 0;line-height:1.6">' +
-    helpSteps +
-    '</div></details>'
-  html +=
-    '<button class="bt bt-p" style="width:100%" id="manualBindBtn">' +
-    esc(t('confirm_bind')) +
-    '</button>'
-  return html
 }
 function translateBindError(e, provider) {
   let code = 0
@@ -706,57 +680,6 @@ function translateBindError(e, provider) {
   if (code === 400) return t('token_format_invalid')
   return (e && e.message) || t('bind_failed')
 }
-function doManualBind(provider, btn) {
-  const root = btn.closest('.ac__modal')
-  const tokenEl = root.querySelector('#manualTokenInput')
-  const errEl = root.querySelector('#manualBindError')
-  const token = (tokenEl.value || '').trim()
-  if (!token) {
-    if (errEl) {
-      errEl.textContent = t('please_enter_token')
-      errEl.style.display = 'block'
-    }
-    return
-  }
-  btn.disabled = true
-  const origText = btn.textContent
-  btn.innerHTML = '<span class="acct-btn-spinner"></span>' + esc(t('verifying'))
-  if (errEl) errEl.style.display = 'none'
-  const field = provider === 'github' ? 'github_token' : 'gitcode_token'
-  const body = {}
-  body[field] = token
-  G.API.put('/settings/credentials', body, 15000)
-    .then(function () {
-      G.window.localStorage.removeItem('repo_member_cache')
-      try {
-        const _u = JSON.parse(G.window.localStorage.getItem('user') || '{}')
-        if (!_u.bindings) _u.bindings = []
-        if (_u.bindings.indexOf(provider) < 0) _u.bindings.push(provider)
-        G.window.localStorage.setItem('user', JSON.stringify(_u))
-      } catch (e) {
-        /* ignore：与老代码同款静默降级 */
-      }
-      closeModal()
-      showBindSuccessToast(provider)
-      navigateToRepos()
-    })
-    .catch(function (e) {
-      const detail = e && e.detail && typeof e.detail === 'object' ? e.detail : {}
-      if (detail.need_transfer && detail.binding_ticket) {
-        closeModal()
-        showTransferConfirm(provider, detail.binding_ticket, token)
-        return
-      }
-      btn.disabled = false
-      btn.textContent = origText
-      const msg = translateBindError(e, provider)
-      if (errEl) {
-        errEl.textContent = msg
-        errEl.style.display = 'block'
-      }
-    })
-}
-// OAuth popup 绑定（同步上下文开窗防拦截 + postMessage + 轮询降级）
 function oauthOpenCenteredPopup(url) {
   const w = 600,
     h = 700
@@ -779,130 +702,6 @@ function oauthOpenCenteredPopup(url) {
       top +
       ',resizable=yes,scrollbars=yes,status=yes'
   )
-}
-function doOauthBind(provider, btn) {
-  if (btn) {
-    btn.disabled = true
-    btn.dataset.origText = btn.textContent
-    btn.innerHTML = '<span class="acct-btn-spinner"></span>' + esc(t('verifying'))
-  }
-  const alreadyBound = isBound(provider)
-  const promptParam = alreadyBound ? '&prompt=login' : ''
-  // 移动端全页跳转
-  if (/Mobi|Android|iPhone|iPad|iPod/i.test(G.window.navigator.userAgent)) {
-    G.API.get('/auth/bind/' + provider + promptParam.replace('&', '?'))
-      .then(function (d) {
-        if (d.redirect_url) G.window.location.href = d.redirect_url
-      })
-      .catch(function (e) {
-        if (btn) {
-          btn.disabled = false
-          btn.textContent = btn.dataset.origText || ''
-        }
-        G.app.showToast(e.message || '操作失败')
-      })
-    return
-  }
-  const popup = oauthOpenCenteredPopup('')
-  if (!popup) {
-    G.API.get('/auth/bind/' + provider + (promptParam ? '?prompt=login' : ''))
-      .then(function (d2) {
-        if (d2.redirect_url) G.window.location.href = d2.redirect_url
-      })
-      .catch(function () {
-        if (btn) {
-          btn.disabled = false
-          btn.textContent = btn.dataset.origText || ''
-        }
-        G.app.showToast(t('popup_blocked_hint') || '操作失败')
-      })
-    return
-  }
-  if (modal.open) modal.locked = true
-  G.API.get('/auth/bind/' + provider + '?popup=true' + promptParam)
-    .then(function (d) {
-      if (!d.redirect_url) throw new Error('no_redirect_url')
-      popup.location.href = d.redirect_url
-      let timeoutId = null
-      let pollId = null
-      let handled = false
-      function cleanup() {
-        if (timeoutId) {
-          clearTimeout(timeoutId)
-          timeoutId = null
-        }
-        if (pollId) {
-          clearInterval(pollId)
-          pollId = null
-        }
-        G.window.removeEventListener('message', handler)
-      }
-      function handler(ev) {
-        if (ev.origin !== G.window.location.origin) return
-        const data = ev.data
-        if (!data || data.type !== 'oauth_result') return
-        if (handled) return
-        handled = true
-        cleanup()
-        if (data.action === 'bind' && data.success) confirmBindSuccess(provider, btn, true)
-        else if (data.action === 'bind' && data.need_transfer) fetchTransferContext(provider, btn)
-        else if (data.action === 'bind' && !data.success) {
-          if (btn) {
-            btn.disabled = false
-            btn.textContent = btn.dataset.origText || ''
-          }
-          closeModal()
-          G.app.showToast(translateOAuthError(data.error))
-        } else {
-          if (btn) {
-            btn.disabled = false
-            btn.textContent = btn.dataset.origText || ''
-          }
-          closeModal()
-          G.app.showToast('操作失败')
-        }
-      }
-      G.window.addEventListener('message', handler)
-      pollId = setInterval(function () {
-        if (handled) {
-          cleanup()
-          return
-        }
-        if (popup.closed) {
-          handled = true
-          cleanup()
-          confirmBindSuccess(provider, btn)
-        }
-      }, 500)
-      timeoutId = setTimeout(function () {
-        if (!handled) {
-          handled = true
-          cleanup()
-          if (btn) {
-            btn.disabled = false
-            btn.textContent = btn.dataset.origText || ''
-          }
-          if (popup.closed) confirmBindSuccess(provider, btn)
-          else {
-            closeModal()
-            G.app.showToast(t('oauth_timeout_hint') || '操作失败')
-          }
-        }
-      }, 60000)
-    })
-    .catch(function (e) {
-      try {
-        popup.close()
-      } catch (e2) {
-        /* ignore */
-      }
-      if (btn) {
-        btn.disabled = false
-        btn.textContent = btn.dataset.origText || ''
-      }
-      closeModal()
-      G.app.showToast(e.message || '操作失败')
-    })
 }
 function translateOAuthError(errorCode) {
   const key = 'app.login.oauth_error_' + errorCode
@@ -1747,6 +1546,92 @@ function saveCloudCreds() {
     })
 }
 
+// ── 第三方仓库凭据（平台卡驱动：OAuth 三态徽章 + PAT 两态徽章 + 配置/清除）──
+const repoPlatforms = ref([])
+const platformCreds = ref({})
+const oauthCfg = ref({})
+function hasPat(provider) {
+  const c = platformCreds.value[provider + '_pat']
+  return !!(c && Object.keys(c).length > 0)
+}
+// 令牌创建页直达链接：github/gitcode 官方预选参数常量 → 平台卡 pat_create_url；都没有不渲染
+function patCardUrl(card) {
+  if (!card) return ''
+  return PAT_CREATE_URLS[card.provider] || card.pat_create_url || ''
+}
+function refreshRepoCreds() {
+  try {
+    if (G.app._clearCachedReposData) G.app._clearCachedReposData()
+    G.window.localStorage.removeItem('repo_member_cache')
+    if (G.window.invalidateProjectsCache) G.window.invalidateProjectsCache()
+  } catch (e) {
+    /* 缓存失效失败不阻断主流程 */
+  }
+}
+const patOpen = ref(false)
+const patTarget = ref('')
+function openPatModal(provider) {
+  patTarget.value = provider
+  patOpen.value = true
+}
+function onPatSaved(provider) {
+  patOpen.value = false
+  refreshRepoCreds()
+  if (G.app && G.app.showToast) G.app.showToast(t('credentials_saved'))
+  // 关系行由服务端 hooks.on_pat_saved 写；前端快照必须重拉，否则仓库页/引导门还按旧快照判定
+  if (G.app && typeof G.app.refreshRepoLinks === 'function') G.app.refreshRepoLinks()
+  if (G.app && typeof G.app.loadProfile === 'function') G.app.loadProfile()
+  switchTab('credentials')
+}
+function patDialogCard() {
+  return (
+    repoPlatforms.value.find(function (p) {
+      return p.provider === patTarget.value
+    }) || {}
+  )
+}
+function patDialogUrl() {
+  const card = patDialogCard()
+  return PAT_CREATE_URLS[card.provider] || card.pat_create_url || ''
+}
+function patDialogConfigured() {
+  return channelConfigured(patTarget.value)
+}
+
+function clearPat(provider) {
+  // 有 OAuth 绑定 → 只清 PAT 回落 OAuth；无绑定 → 平台级解绑（后端四象限级联）
+  const note = isBound(provider) ? t('pat_clear_fallback_note') : t('pat_clear_unbound_note')
+  G.app.showConfirm(
+    esc(t('confirm_clear_pat_prefix') + pName(provider) + t('confirm_clear_pat_suffix')) + note,
+    function () {
+      const body = { platform_tokens: {} }
+      body.platform_tokens[provider] = ''
+      G.API.put('/settings/credentials', body, 15000)
+        .then(function () {
+          refreshRepoCreds()
+          G.app.showToast(t('pat_cleared'))
+          // D109：清 PAT 会让用户↔平台关系归零（后端 _cascade_pat_clear → hook 撤销）。
+          // 前端快照不刷新的话，首页判据还是旧 has_any=true，会把人送回项目页。
+          if (G.app && typeof G.app.refreshRepoLinks === 'function') {
+            G.app.refreshRepoLinks().then(function (d) {
+              if (!d || !d.has_any) {
+                try { G.window.sessionStorage.removeItem('currentRepo') } catch (e) {}
+                if (typeof G.app.goToRepos === 'function') G.app.goToRepos()
+              }
+              loadTab()
+            })
+            return
+          }
+          loadTab()
+        })
+        .catch(function (e) {
+          G.app.showToast(t('pat_clear_failed') + ': ' + (e.message || ''))
+        })
+    },
+    { danger: true }
+  )
+}
+
 // ── appearance ──
 const theme = ref('apple')
 const mode = ref('light')
@@ -1924,9 +1809,41 @@ function loadTab() {
       })
   } else if (tab.value === 'credentials') {
     tabLoading.value = true
-    G.API.get('/settings/credentials')
-      .then(function (d) {
-        const hw = d.huawei_cloud || {}
+    // 平台卡（/settings/vcs/platforms）+ 凭据存在性 + OAuth 配置态 + 绑定/过期态，四路并发
+    Promise.all([
+      G.API.get('/settings/vcs/platforms').catch(function () {
+        return { platforms: [] }
+      }),
+      G.API.get('/settings/credentials'),
+      G.API.get('/auth/providers').catch(function () {
+        return { providers: [] }
+      }),
+      G.API.get('/auth/me').catch(function () {
+        return {}
+      }),
+    ])
+      .then(function (res) {
+        repoPlatforms.value = (res[0] && res[0].platforms) || []
+        const d = res[1] || {}
+        const pd = res[2] || {}
+        const me = res[3] || {}
+        platformCreds.value = d || {}
+        const cfg = {}
+        ;(pd.providers || []).forEach(function (p) {
+          cfg[p.provider] = !!p.configured
+        })
+        oauthCfg.value = cfg
+        if (!providers.value.length) providers.value = pd.providers || []
+        if (me && (me.bindings || me.identities)) profile.value = me
+        if (me && me.token_expired_providers) {
+          const m = {}
+          me.token_expired_providers.forEach(function (ep) {
+            if (typeof ep === 'object') m[ep.provider] = ep
+            else m[ep] = { provider: ep, error_code: 'TOKEN_EXPIRED' }
+          })
+          expiredMap.value = m
+        }
+        const hw = (d && d.huawei_cloud) || {}
         // Issue #474：接口只回存在性（ak_exists/sk_exists），不回明文 → 已配置显示 ******** 占位
         hwAkExists.value = !!hw.ak_exists
         hwSkExists.value = !!hw.sk_exists
@@ -2099,6 +2016,39 @@ onMounted(function () {
 }
 .ac__crow {
   align-items: center;
+}
+/* 凭据页徽章（OAuth 三态 + PAT 两态） */
+.ac__badge {
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.ac__badge--bound {
+  background: rgba(52, 199, 89, 0.15);
+  color: #34c759;
+}
+.ac__badge--unbound {
+  background: rgba(10, 132, 255, 0.12);
+  color: #0a84ff;
+}
+.ac__badge--muted {
+  background: var(--bg);
+  color: var(--t3);
+}
+.ac__credrow {
+  padding: 12px 16px;
+  box-shadow: none;
+  border-radius: 12px;
+}
+.ac__small {
+  font-size: 12px;
+}
+.ac__linkbtn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
 }
 .ac__cred-row {
   display: flex;
