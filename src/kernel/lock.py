@@ -1,8 +1,14 @@
-"""分布式锁——基于 distributed_locks 表。
+"""分布式锁——基于 distributed_locks 表（runtime 域基表）。
 
 跨实例互斥，per-key 粒度，TTL 超时自动释放。
 应用层逻辑统一（MySQL/SQLite 不分叉）：先 INSERT，冲突后查过期，过期才条件 UPDATE。
-db_lock（threading.RLock）保证单进程内原子，distributed_locks 表 PRIMARY KEY 保证跨进程互斥。
+单进程内由 owner 域原语的 `db_lock`/事务保证原子，跨进程由 distributed_locks 表
+PRIMARY KEY 保证互斥。
+
+三库独立：`distributed_locks` 归 runtime 域（`docs/weekly-11/table-owner.tsv`），
+抢锁/续期/释放/清理四个协议全部由 `runtime.public` 承担，「任意拓扑」自适应连接
+（自有 DSN 走 runtime 库，单库/测试拓扑回落进程库）——本模块不再持有任何 SQL，
+也不再直连进程库（kernel 里查 runtime 表在三库拓扑下必然 1146）。
 
 来源设计文档：docs/new-version3/knowledge-id-and-auth-design.md §2.6
 """
@@ -10,10 +16,13 @@ import socket
 import secrets
 import time
 
-from src.kernel.config import log
-from src.kernel.session_manager import db, db_lock
-
 _holder = f"{socket.gethostname()}-{secrets.token_hex(4)}"
+
+
+def _lock_api():
+    """延迟导入 runtime owner 域（kernel 顶层 import domains 会被 check-arch R1 拦）。"""
+    from src.domains.runtime import public as runtime_public
+    return runtime_public
 
 
 def acquire_lock(lock_key: str, ttl: int = 60, holder: str = "") -> bool:
@@ -25,51 +34,7 @@ def acquire_lock(lock_key: str, ttl: int = 60, holder: str = "") -> bool:
         避免同进程内不同调用方互相误删（QA 标注链路依赖这个语义）。
     """
     _h = (holder or "").strip() or _holder
-    now = int(time.time())
-    with db_lock:
-        c = db.cursor()
-        # 1. 先尝试 INSERT（主键冲突 = 已有锁）
-        try:
-            c.execute(
-                "INSERT INTO distributed_locks (lock_key, holder, locked_at, expires_at, update_at, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (lock_key, _h, now, now + ttl, now, now))
-            db.commit()
-            return True  # INSERT 成功 = 拿到锁
-        except Exception:
-            db.rollback()  # INSERT 冲突后清理 cursor 状态（SQLite 需要）
-
-        # 2. 查现有锁
-        row = c.execute(
-            "SELECT holder, expires_at FROM distributed_locks WHERE lock_key=?",
-            (lock_key,)).fetchone()
-        if not row:
-            # 冲突后行不见了（被其他进程删了）→ 重试 INSERT
-            try:
-                c.execute(
-                    "INSERT INTO distributed_locks (lock_key, holder, locked_at, expires_at, update_at, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (lock_key, _h, now, now + ttl, now, now))
-                db.commit()
-                return True
-            except Exception:
-                return False
-
-        # 3. 已过期 → 条件 UPDATE 覆盖（WHERE expires_at < now 保证原子）
-        if int(row[1] or 0) < now:
-            c.execute(
-                "UPDATE distributed_locks SET holder=?, locked_at=?, "
-                "expires_at=?, update_at=? "
-                "WHERE lock_key=? AND expires_at < ?",
-                (_h, now, now + ttl, now, lock_key, now))
-            db.commit()
-            row2 = c.execute(
-                "SELECT holder FROM distributed_locks WHERE lock_key=?",
-                (lock_key,)).fetchone()
-            return row2 and row2[0] == _h
-
-        # 4. 未过期 → 抢锁失败
-        return False
+    return _lock_api().acquire_distributed_lock(lock_key, _h, ttl, int(time.time()))
 
 
 def release_lock(lock_key: str, holder: str = ""):
@@ -78,36 +43,20 @@ def release_lock(lock_key: str, holder: str = ""):
     holder: 与 acquire_lock 传入值一致时，只删该 holder 的锁（per-call 隔离）。
     """
     _h = (holder or "").strip() or _holder
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "DELETE FROM distributed_locks WHERE lock_key=? AND holder=?",
-            (lock_key, _h))
-        db.commit()
+    _lock_api().release_distributed_lock(lock_key, _h)
 
 
 def renew_lock(lock_key: str, ttl: int = 60, holder: str = "") -> bool:
     """续期锁（只续自己的）。返回 True=续期成功，False=锁已被别人抢走。
 
     不依赖 cursor.rowcount（MySQL/pymysql 对 UPDATE 返回 rowcount=0 不可靠），
-    改为 UPDATE + SELECT 验证 holder 是否还是自己。
+    改为 UPDATE + SELECT 验证 holder 是否还是自己（该判据在 owner 域原语内）。
 
     holder: 与 acquire_lock 传入值一致时，只续该 holder 的锁。branch_guard 的
         分支写租约按 ``task_id:进程holder`` 续期（Issue #2028），缺省仍用实例级标识。
     """
     _h = (holder or "").strip() or _holder
-    now = int(time.time())
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "UPDATE distributed_locks SET expires_at=?, update_at=? "
-            "WHERE lock_key=? AND holder=?",
-            (now + ttl, now, lock_key, _h))
-        db.commit()
-        row = c.execute(
-            "SELECT holder FROM distributed_locks WHERE lock_key=?",
-            (lock_key,)).fetchone()
-        return row and row[0] == _h
+    return _lock_api().renew_distributed_lock(lock_key, _h, ttl, int(time.time()))
 
 
 def cleanup_expired_locks():
@@ -116,10 +65,4 @@ def cleanup_expired_locks():
     只删不属于当前实例的过期锁，避免误删正在续期的锁。
     清理任务是防表膨胀兜底，业务抢锁不依赖定时清理。
     """
-    now = int(time.time())
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "DELETE FROM distributed_locks WHERE expires_at < ? AND holder != ?",
-            (now, _holder))
-        db.commit()
+    _lock_api().cleanup_expired_distributed_locks(int(time.time()), _holder)

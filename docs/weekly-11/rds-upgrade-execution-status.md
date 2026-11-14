@@ -160,6 +160,69 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### kernel/lock 分布式锁协议下沉 owner 域（-9，本文件清零）
+- 文件：`src/kernel/lock.py`（9 处 → **0**）；全局静态 **294 → 285**（-9，71 → 70 对，
+  `distributed_locks,kernel` 这一对整对消失）。
+- 表分布（消费域 kernel，唯一外域表）：`distributed_locks`（归 **runtime**）9 处 =
+  **写 6**（`INSERT` 首抢 L34 / 冲突重试 L50、条件 `UPDATE` 抢占 L61 / 续期 L103、
+  `DELETE` 释放 L84 / 清理 L123）+ **读 3**（L44 查 holder+expires_at、L67 抢占后验 holder、
+  L108 续期后验 holder）。
+- owner 侧新增（runtime public，全部「任意拓扑」`?` 方言，SQL 只在 runtime 域一份）：
+  · `_ANY_QUERIES` 7 条具名查询：`lock_insert` / `lock_row` / `lock_takeover` / `lock_holder` /
+    `lock_release` / `lock_renew` / `lock_cleanup`（列序、谓词与原语句逐字一致）；
+  · 4 个协议原语：`acquire_distributed_lock(lock_key, holder, ttl, now)` /
+    `release_distributed_lock(lock_key, holder)`（返回删除行数）/
+    `renew_distributed_lock(lock_key, holder, ttl, now)` /
+    `cleanup_expired_distributed_locks(now, holder)`（返回删除行数）。
+- **设计取舍（关键：为什么不是「kernel 调四个具名查询自己拼」）**：
+  1. 抢锁是**四步读-改-写**（INSERT 冲突 → 查过期 → `WHERE expires_at < now` 条件 UPDATE →
+     验 holder），原实现整段持 `db_lock`。只有把四步放进 owner 域**同一个** `_any_tx()`
+     才能保住单进程原子性（自有 DSN = 真事务，单库/测试拓扑回落进程库 + `db_lock`）；
+     拆成 3 次 `exec_any` 会把一次临界区变成三次，属语义降级。
+  2. `INSERT` 主键冲突**吞掉后在同一事务内继续**（SQLite/MySQL 都是语句级回滚，事务仍可用），
+     与原实现 `except Exception: db.rollback()` 后继续查行等价；两处吞异常均改 `log.debug`，
+     不触发静默 except 棘轮。
+  3. `now` 由调用方传入（`int(time.time())` 每调用取一次）：保持原口径「同一次调用内
+     locked_at / update_at / created_at 同一秒、expires_at = now+ttl」，也让时间边界可测。
+  4. kernel 只保留 holder 标识（`_holder`，`tests/runtime/test_issue_993_branch_guard.py`
+     等用例 `monkeypatch.setattr(lock, "_holder", ...)` 依赖它）与 strip 口径；不再 import
+     `db`/`db_lock`，也不再出现任何 SQL。
+  5. kernel 顶层 import domains 会被 check-arch R1 拦：改**函数内延迟导入**
+     （`from src.domains.runtime import public as runtime_public`），并在
+     `scripts/check-arch.py` WHITELIST 以**精确 targets**（`["src.domains.runtime"]`）登记，
+     不用字符串形态整条豁免（避免吞掉该文件今后其它跨域 import）；同时删掉已清零的
+     R8 条目 `src/kernel/lock.py: {"distributed_locks": 6}`（棘轮只减不增）。
+- **修的存量问题**：无功能 bug 修复。记录 3 条如实事实：
+  1. 三库独立后 kernel 进程库里没有 `distributed_locks`（视图已退役），原实现必然 1146，
+     而抢锁失败会被上层 `except` 吞成「放弃执行」——迁移任务、上传清理、技能同步、分支守卫
+     租约都会静默失效。现在走 runtime DSN，单库/三库同一条路径。
+  2. 原 `acquire_lock` 末尾 `return row2 and row2[0] == _h` 在「抢占后行被第三方删除」的极端
+     竞态下返回 `None`（非 False）；新原语统一返回 `bool`。真值语义不变，类型更严（已记录）。
+  3. `src/domains/insight/observability/sample_lease.py` 仍有自己的 `distributed_locks`
+     读点（`_READ_QUERIES.distributed_locks_4e8732` + 本地兜底 SQL，属 insight 消费域另一个
+     文件），本轮不在单文件范围内，未动；基线里 `distributed_locks,runtime,insight,1` 保留。
+- **新基线**：**285 处 / 70 对**（`--update-baseline` 已收紧）；依赖看板与
+  `next-batches.md` 已刷新（下一批 `src/kernel/gsb/registry.py` 9 处）。
+- 验证（全部真实退出码）：
+  · `py_compile` 三文件 → COMPILE_OK；
+  · `~/burndown/distributed_lock_smoke.py`（sqlite，`DEVOPS_DB_BACKEND=sqlite`）**51 项全通过**
+    （`ALL distributed_lock smoke PASSED`）：首抢六列同秒快照 / 他人持有不写行 / 同 holder 不重入 /
+    `expires_at == now` 不过期与 `now-1` 可抢占 / 0 值与 NULL(NOT NULL 拒绝) /
+    ttl=0 同秒不接管、下一秒接管 / 抢占保留 created_at / 释放只删自己且幂等 /
+    续期只续自己、`locked_at` 不动、他人续期零写入 / 清理只删「过期且非本实例 holder」且
+    `expires_at == now` 不删 / kernel 包装层默认 holder 与 per-call holder 隔离 /
+    holder strip / 未登记查询名 KeyError / 静态否定「lock.py 无 SQL 字面量、不直连进程库」；
+  · `check-arch.py` **RESULT: PASS**（R1–R8；R8 条目已删，R1 精确 targets 登记）；
+    `check_lib_query_names.py` **PASS**（runtime 115 funcs + 42 queries used / 186 + 61 registered）；
+  · `rds_gate.sh --quick` **GATE: 全绿**（棘轮未上升、内部契约 37 条最新、看板已刷新）；
+  · `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` import OK；
+  · 定向回归 `test_issue_993_branch_guard` / `test_issue_2028_branch_guard_fail_open` /
+    `test_obs_sample_lease` / `test_issue_699_phase4_servers`：**19 failed / 112 passed**，
+    在 `git worktree add … HEAD` 干净树上重跑得到**完全相同的 19 条**（diff 为空，均为既有失败）。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排——会话内无 `SRC_PWD`/`REMOTE_PWD`
+  环境变量，且本批无 schema/迁移/契约面变化（不改表、不新增路由）；运行面证据为 sqlite 烟测 +
+  单库 pytest，不把彩排结果算进来。
+
 ### patrol_compensate 补偿责任链接口化（-10，本文件清零）
 - 文件：`src/api/patrol_compensate.py`（10 处 → **0**）；全局静态 **304 → 294**（73 → 71 对，
   `grape_t_patrol_findings` 与 `managed_repos` 各掉一对）。

@@ -2040,6 +2040,22 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT ar.credential_id, rc.last_ip FROM agent_runtimes ar "
         "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id WHERE ar.id=?"),
     "runtime_engine_name": "SELECT name FROM agent_runtimes WHERE id=?",
+    # ── 分布式锁（distributed_locks，本域基表；原 SQL 在 src/kernel/lock.py）──
+    # 列序/谓词与原语句逐字一致：抢锁是「INSERT 冲突 → 查过期 → 条件 UPDATE」三步，
+    # 由下方 acquire_distributed_lock 在同一事务内完成，调用方不再持有任何 SQL。
+    "lock_insert": (
+        "INSERT INTO distributed_locks (lock_key, holder, locked_at, expires_at, "
+        "update_at, created_at) VALUES (?, ?, ?, ?, ?, ?)"),
+    "lock_row": "SELECT holder, expires_at FROM distributed_locks WHERE lock_key=?",
+    "lock_takeover": (
+        "UPDATE distributed_locks SET holder=?, locked_at=?, expires_at=?, update_at=? "
+        "WHERE lock_key=? AND expires_at < ?"),
+    "lock_holder": "SELECT holder FROM distributed_locks WHERE lock_key=?",
+    "lock_release": "DELETE FROM distributed_locks WHERE lock_key=? AND holder=?",
+    "lock_renew": (
+        "UPDATE distributed_locks SET expires_at=?, update_at=? "
+        "WHERE lock_key=? AND holder=?"),
+    "lock_cleanup": "DELETE FROM distributed_locks WHERE expires_at < ? AND holder != ?",
 }
 
 
@@ -3822,3 +3838,65 @@ def devops_session_runtime_id(repo_key: str, agent_type: str) -> str:
                   "WHERE repo_key=? AND agent_type=?", (repo_key, agent_type))
         row = c.fetchone()
         return str(row[0]) if row and row[0] else ""
+
+
+# ── 分布式锁协议（`distributed_locks`，本域基表）──────────────────────────────
+# 归属：`docs/weekly-11/table-owner.tsv` → grape_runtime_db.distributed_locks。
+# 调用方是 `src/kernel/lock.py`（任何进程都会抢锁：mgmt/insight/runtime 各自后台线程）。
+# 三库独立后 kernel 进程库里没有这张表（视图已退役 → 1146），因此协议整体上移到
+# owner 域，kernel 只保留 holder 标识与时间戳计算。
+#
+# 语义保持（与原 kernel 实现逐条对应，不"顺手修好"）：
+# - 抢锁 = INSERT 冲突 → 查过期 → `WHERE expires_at < now` 条件 UPDATE（DB 语句即原子判据）；
+# - 三步在**同一事务**内（`_any_tx`），等价于原实现整段持 `db_lock` 的单进程原子性；
+#   自有 DSN 下是真事务，单库/测试拓扑回落进程库 + db_lock；
+# - INSERT 主键冲突被吞掉后继续（语句级回滚，SQLite/MySQL 事务均可继续），
+#   与原实现的 `except: db.rollback()` 后继续查行一致；
+# - 释放只删自己的 holder；续期后 SELECT 验 holder（不依赖 rowcount，pymysql 不可靠）；
+# - 清理只删「过期且非本实例 holder」的行。
+
+
+def acquire_distributed_lock(lock_key: str, holder: str, ttl: int, now: int) -> bool:
+    """抢 per-key 分布式锁（任意拓扑）。`now` 由调用方取一次（秒），保证同一次调用内时间一致。"""
+    params = (lock_key, holder, now, now + ttl, now, now)
+    with _any_tx() as c:
+        try:
+            c.execute(_any_sql("lock_insert"), params)
+        except Exception as exc:  # noqa: BLE001 - 主键冲突=已有锁，属协议分支
+            log.debug(f"distributed lock insert conflict for {lock_key}: {exc}")
+        else:
+            return True
+
+        row = c.execute(_any_sql("lock_row"), (lock_key,)).fetchone()
+        if not row:
+            # 冲突后行不见了（被其他进程删了）→ 重试 INSERT
+            try:
+                c.execute(_any_sql("lock_insert"), params)
+            except Exception as exc:  # noqa: BLE001 - 同上，重试仍冲突即抢锁失败
+                log.debug(f"distributed lock insert retry conflict for {lock_key}: {exc}")
+                return False
+            return True
+
+        if int(row[1] or 0) < now:
+            c.execute(_any_sql("lock_takeover"), (holder, now, now + ttl, now, lock_key, now))
+            row2 = c.execute(_any_sql("lock_holder"), (lock_key,)).fetchone()
+            return bool(row2 and row2[0] == holder)
+        return False
+
+
+def release_distributed_lock(lock_key: str, holder: str) -> int:
+    """释放锁（只删自己 holder 的行），返回删除行数。"""
+    return exec_any("lock_release", (lock_key, holder))
+
+
+def renew_distributed_lock(lock_key: str, holder: str, ttl: int, now: int) -> bool:
+    """续期锁（只续自己的）：UPDATE 后 SELECT 验 holder，返回是否仍持有。"""
+    with _any_tx() as c:
+        c.execute(_any_sql("lock_renew"), (now + ttl, now, lock_key, holder))
+        row = c.execute(_any_sql("lock_holder"), (lock_key,)).fetchone()
+        return bool(row and row[0] == holder)
+
+
+def cleanup_expired_distributed_locks(now: int, holder: str) -> int:
+    """清理过期且非本实例持有的锁，返回删除行数（防表膨胀兜底）。"""
+    return exec_any("lock_cleanup", (now, holder))

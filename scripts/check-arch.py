@@ -81,7 +81,8 @@ R8_WHITELIST: dict[str, dict[str, int]] = {
     },  # P3：进程库 shim 的跨域写，按表迁到 runtime/mgmt public 写函数
     # src/kernel/auth_sdk/auth_token.py 已清零（令牌表 SQL 下沉 mgmt.public 的 session/api token 原语）
     # src/kernel/repo_cleanup.py 已清零（级联清理按域拆到 mgmt/runtime public 的 purge_repo_rows）
-    "src/kernel/lock.py": {"distributed_locks": 6},  # P3：分布式锁改 owner 端点
+    # src/kernel/lock.py 已清零（分布式锁协议整体下沉 runtime.public：
+    # acquire/release/renew/cleanup 四个原语，SQL 只在 runtime 域一份）
     "src/kernel/gsb/registry.py": {"gsb_service_registry": 4},  # P3：注册表写走 mgmt 端点
     "src/kernel/token_resolver.py": {"managed_repos": 2},  # P2：读改 mgmt 内部端点
     "src/kernel/prompt_builder.py": {"unified_user_mapping": 2},  # P2：读改 N10
@@ -161,6 +162,11 @@ WHITELIST: dict[str, dict[str, str]] = {
     },
     "src/kernel/repo_cleanup.py": {
         "R1": "deferred repo state lookup via mgmt.user.db; Phase 5",
+    },
+    "src/kernel/lock.py": {
+        "R1": {"targets": ["src.domains.runtime"],
+              "reason": "deferred distributed-lock protocol via runtime.public "
+                        "(SQL moved to owner domain); due Phase 5 -> contracts"},
     },
     "src/kernel/help_docs_sync.py": {
         "R1": "deferred skill/user lookups via mgmt.user.db; Phase 5",
