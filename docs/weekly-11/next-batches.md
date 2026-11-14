@@ -1,6 +1,6 @@
 # 下一批：跨域收口作业单
 
-总量 120 处 / 55 个文件；下表取前 10 个。
+总量 120 处 / 55 个文件；下表取前 3 个。
 
 ## src/domains/runtime/engine/service.py（runtime 域，4 处）
 - `grape_accounts`（归 mgmt）× 2：行 111, 1710
@@ -19,46 +19,6 @@
   - runtime public 已登记 203 条具名查询
 - `vod_conversations`（归 runtime）× 1：行 222
   - runtime public 已登记 203 条具名查询
-
-## src/domains/mgmt/admin/cooldown.py（mgmt 域，4 处）
-- `agent_tasks`（归 runtime）× 1：行 135
-  - runtime public 已登记 203 条具名查询
-- `chat_agent_session`（归 runtime）× 1：行 136
-  - runtime public 已登记 203 条具名查询
-- `chat_conversations`（归 runtime）× 1：行 137
-  - runtime public 已登记 203 条具名查询
-- `issue`（归 runtime）× 1：行 138
-  - runtime public 已登记 203 条具名查询
-
-## src/domains/insight/observability/failed_gap.py（insight 域，4 处）
-- `events`（归 runtime）× 4：行 57, 68, 80, 96
-  - runtime public 已登记 203 条具名查询
-
-## src/domains/insight/observability/__init__.py（insight 域，4 处）
-- `agent_tasks`（归 runtime）× 3：行 618, 630, 642
-  - runtime public 已登记 203 条具名查询
-- `agent_runtimes`（归 runtime）× 1：行 656
-  - runtime public 已登记 203 条具名查询
-
-## src/api/session_store.py（api 域，4 处）
-- `devops_pipeline_scene`（归 mgmt）× 3：行 486, 698, 745
-  - mgmt public 已登记 141 条具名查询
-- `issue`（归 runtime）× 1：行 611
-  - runtime public 已登记 203 条具名查询
-
-## src/api/health_endpoints.py（api 域，4 处）
-- `agent_tasks`（归 runtime）× 3：行 91, 143, 146
-  - runtime public 已登记 203 条具名查询
-- `agent_runtimes`（归 runtime）× 1：行 149
-  - runtime public 已登记 203 条具名查询
-
-## src/api/deps.py（api 域，4 处）
-- `external_identities`（归 mgmt）× 4：行 374, 451, 491, 608
-  - mgmt public 已登记 141 条具名查询
-
-## src/kernel/prompt_builder.py（kernel 域，3 处）
-- `unified_user_mapping`（归 mgmt）× 3：行 621, 627, 630
-  - mgmt public 已登记 141 条具名查询
 
 ## 每批验收口径（不要跳）
 1) `python3 scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv --baseline docs/weekly-11/foreign-refs-allowlist.csv --check`
