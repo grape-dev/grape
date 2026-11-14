@@ -1,7 +1,8 @@
 # Grape 三库三机 · lib 模式收口设计方案
 
-> 版本：v1（基于 2026-11-13/14 实测）
-> 现状 HEAD：`3f241628a`（分支 `feat/domain-lib-p0-20261113`，双主已同步）
+> 版本：v2（2026-11-14 复核：全页数字按实测重算，口径与复算命令见**附录 D**）
+> 数字复核基线：代码 commit `c824067b8`（2026-11-14 11:07 并入 `arch-weekly-11`，双主同 HEAD）。
+> **不要用「本文 HEAD」判断数字时效** —— 本文件自身改动不改变基线；每条数字的复算命令在附录 D。
 > 本文只做设计，不含执行。执行前需按 §9 逐条拍板。
 
 ---
@@ -37,21 +38,21 @@
 | 三库位置 | **全部在 `<dev-db-host>` 同一实例**（`grape_dev_mgmt` / `grape_dev_runtime` / `grape_dev_insight`） |
 | 跨域视图 | **252 个**：mgmt 46（→runtime 36、→insight 10）；runtime 91（→mgmt 81、→insight 10）；**insight 115（→mgmt 81、→runtime 34）**。旧口径「137」只算了 mgmt+runtime，漏掉 insight 的 115 个——insight 要迁回独立主机，这 115 个同样必须退役 |
 | 视图可更新性 | mgmt 侧 runtime 表均为 `IS_UPDATABLE=YES` → 今天跨域写"能用"全靠视图 |
-| insight 副本 | `<dev-db-host>` = **126 表 / api_latency_log 5849 行**（实库）；`<insight-copy-host>` = 14 表 / 5125 行（旧副本） |
-| runtime 副本 | `<runtime-copy-host>` 存在一份 `grape_dev_runtime`（45 表、无 `xwrite_log`），与 `<dev-db-host>` 是否同步**未验证** |
-| 多份基表 | `takeover_sessions`（mgmt 基表 + runtime 空表）、`grape_t_channel_installation`（runtime 11 行 + mgmt 0 行）、`grape_t_channel_lease`（两库都有数据） |
+| insight 库 | `<dev-db-host>` = **17 基表 + 115 视图（共 132）/ api_latency_log 6423 行**（实库，本轮实测）；`<insight-copy-host>` = 14 表 / 5125 行（旧副本，2026-11-13 实测、本轮未复核） |
+| runtime 副本 | `<runtime-copy-host>` 存在一份 `grape_dev_runtime`（**45 表**、无 `xwrite_log`；历史值、本轮未复核，且该副本无视图），与 `<dev-db-host>` 是否同步**未验证** |
+| 多份基表 | `takeover_sessions`（mgmt 基表 0 行 + runtime 空表 0 行）、`grape_t_channel_installation`（runtime 11 行 + mgmt 0 行）、`grape_t_channel_lease`（mgmt 12 行 + runtime 11 行） |
 
 ### 2.2 代码改造进度
 
 > **2026-11-14 重测口径（本节数字均以此为准）**：旧版本把 P2 记作「读路径完成」并把剩余读记作
-> 114 处、视图记作 137 个，两处都与实测不符——P2 只完成机制与约 31 处接线，
+> 114 处、视图记作（已作废的）137 个，两处都与实测不符——P2 只完成机制与约 31 处接线，
 > 视图实为 252 个（含 insight 115）。判据：`p4_read_converter.py` 重扫 +
 > 逐候选函数内 lib 句柄判定（converted / bare），历史时点用 `git worktree` 回放。
 
 | 项 | 数量 |
 |---|---|
-| 跨域写改造 | **已完成**（P3-4b/5a/5b/5c/5d/5f/5g/5h 全批次；47 个提交） |
-| 读改造已落地 | **202 处接线点**（其中「81 处」是 11-14 00:23–01:15 的 12 个提交补的，**属 P4 期，不属 P2**） |
+| 跨域写改造 | **已完成**（P3-4b/5a/5b/5c/5d/5f/5g/5h 全批次；**33 个提交**，`2f70a0d3e..a3a18f49c`） |
+| 读改造已落地 | **202 处接线点**（其中「81 处」是 11-14 00:23–01:15 的 **11 个提交**补的，`670f7709b..3f241628a`，**属 P4 期，不属 P2**） |
 | P2 实际产出 | **约 31 处接线**（`436e3299f` 收尾时实测：导入 31 / None 守卫 36）；同期重扫仍有 **208 处裸跨域读**。计划给 P2 的验收「跨域读引用降为 0」**未达成**，P2 应记作**部分完成（仅机制+原语面）** |
 | 重扫剩余跨域读 | **114 处 / 20 张表**（最大 `agent_tasks` 25）= **104 处裸读（真欠账）** + **10 处已接线但本地兜底 SQL 仍在（口径噪声，全在 `insight/routes/dashboard.py`）**；**auto 仅 16（自检绿 8）**，manual **98**（消费形态 68 + 动态 SQL 30） |
 | 剩余裸读宿主分布 | insight **52** ／ mgmt **40** ／ runtime **11** ／ `src/api` **1**；热点：`insight/routes/dashboard.py` 17、`mgmt/user/db.py` 13、`mgmt/routes/settings.py` 11、`mgmt/routes/skills.py` 8 |
@@ -68,9 +69,9 @@
 | 四进程 | `grape-{server,event,worker,insight}-server`，双主 8 端口 200 |
 | lib 开关 | 双主四进程均已开（`GRAPE_DOMAIN_LIB=1` + 三域 DSN；**本域读开关=0**、外域=1） |
 | insight 进程 | **已开 lib 开关**（`GRAPE_DOMAIN_LIB=1` + 域内读=0、外域=1）；早期版本曾记载"未开"，已过期 |
-| 排水单元 | 双主各 3 个 timer active，错峰 `:00 / :02 / :04` |
-| 对账 | `grape-xwrite-reconcile.timer` 每日 03:20，归档 7 天前 applied |
-| 意图量 | mgmt 45 / runtime 84 / insight 1（全 applied，无 dead） |
+| 排水单元 | 双主各 **3 个排水 timer** active，错峰 `:00 / :02 / :04` |
+| 对账 | `grape-xwrite-reconcile.timer` 每日 03:20，归档 7 天前 applied（**与 3 个排水合计 4 个 timer/机**） |
+| 意图量 | mgmt **5593** / runtime 84 / insight 1（全 `applied`；`pending`、`failed`、`dead` 均为 0）。mgmt 远大于早期记录的 45，原因是 `unique_key` 改造后**按调用记账**（15s 心跳等热路径），非异常，由每日归档收敛 |
 
 ---
 
@@ -89,7 +90,7 @@
 
 ### 3.2 资源（域库）
 
-`mgmt`（84 表，含 36 视图）· `runtime`（45 表，含 81 视图）· `insight`（126 表）
+`mgmt`（**91 基表 + 46 视图**）· `runtime`（**52 基表 + 91 视图**）· `insight`（**17 基表 + 115 视图，共 132**）
 
 ### 3.3 操作
 
@@ -129,18 +130,20 @@
 **验收断言**：
 - `p4_verify_all.py --domain {runtime,mgmt}` 在 `grape-server` / `grape-worker-server` 两个环境均 **FAIL=0**；
 - 代码里引用的查询名 ⊆ 注册表（脚本：`used_names - registry_names == ∅`）；
-- 双机 `py_compile` 全绿 + 8 端口 200 + 三 timer active。
+- 双机 `py_compile` 全绿 + 8 端口 200 + **4 个 timer active**（3 排水 + 1 对账）。
 
-### W2 动态 SQL 与非常规消费（98 处 = 动态 SQL 30 + 非 fetch 消费 68）
+### W2 动态 SQL 与非常规消费（98 处 = 改写器归为「动态 SQL」30 + 非 fetch 消费 68）
 
 **前置**：口径裁定（§9-D1 / D2）。
 **分类与做法**：
 
 | 形态 | 数量 | 建议做法 |
 |---|---|---|
-| 动态列名（`{mapping_col}`） | ~4 | **按列枚举**：列集合有限（feishu_open_id / gitcode_user / gitee_user…），每列登记一条查询 |
-| 动态 IN 列表（`IN ({ph})`） | ~26 | **逐 key 扇出**：`read_all(单 key 查询, (k,))` 循环 + Python 合并；语义等价，往返增加但仓库数有限 |
-| `for r in c.fetchall()` / `in c.fetchall()` 等非 fetch 赋值 | ~68 | 三分类：(a) 单行/多行 → 套用现有 `read_one/read_all`；(b) 聚合（COUNT/SUM）→ 登记聚合查询；(c) 子查询 JOIN → 拆成多次读 + Python 连接（参照 `config_store._rt_int` 已验证的做法） |
+| 动态列名（`{mapping_col}`） | **1** | **按列枚举**：列集合有限（feishu_open_id / gitcode_user / gitee_user…），每列登记一条查询 |
+| 动态 IN 列表（`IN ({ph})`） | **23** | **逐 key 扇出**：`read_all(单 key 查询, (k,))` 循环 + Python 合并；语义等价，往返增加但仓库数有限 |
+| 字符串拼接（`+ _filter +`） | **4** | 先把过滤片段解析成固定形态再登记查询，或改用 `where` 白名单校验（同 `query_events`） |
+| ⚠️ 被误判的静态多行 SQL | **2** | 实为多行字符串字面量（非动态），B1 重分类时剔除，不计入工作量 |
+| `for r in c.fetchall()` / `in c.fetchall()` 等非 fetch 赋值 | **68** | 三分类：(a) 单行/多行 → 套用现有 `read_one/read_all`；(b) 聚合（COUNT/SUM）→ 登记聚合查询；(c) 子查询 JOIN → 拆成多次读 + Python 连接（参照 `config_store._rt_int` 已验证的做法） |
 
 **验收断言**：每类各有 1 个样板的双通道等价证明（含跨域 JOIN 拆分后的**行集全等**断言，模板见 S10）。
 
@@ -149,8 +152,8 @@
 | 表/副本 | 现状 | 裁定（待确认） | 动作 |
 |---|---|---|---|
 | `grape_dev_insight@<insight-copy-host>` | 14 表 / 5125 行，代码零引用 | **退役** | 备份后 DROP DATABASE；保留 `<dev-db-host>` 为唯一实库 |
-| `grape_dev_runtime@<runtime-copy-host>` | 45 表 / 无 `xwrite_log`，同步性未验证 | **先比对后退役** | 逐表 `CHECKSUM TABLE` + 行数比对；差异为空 → 退役，否则以 `<dev-db-host>` 为准回灌 |
-| `takeover_sessions` | mgmt 有数据可能、runtime 空表 | **owner=mgmt**（已裁定） | P4 时 DROP runtime 空表 |
+| `grape_dev_runtime@<runtime-copy-host>` | 45 表（历史值，未复核）/ 无 `xwrite_log`，同步性未验证 | **先比对后退役** | 逐表 `CHECKSUM TABLE` + 行数比对；差异为空 → 退役，否则以 `<dev-db-host>` 为准回灌 |
+| `takeover_sessions` | **两库均 0 行**（mgmt 为基表、runtime 为同名空表；本轮实测） | **owner=mgmt**（已裁定） | P4 时 DROP runtime 空表 |
 | `grape_t_channel_installation` | runtime 11 行、mgmt 0 行 | **owner=runtime**（已裁定） | P4 时 DROP mgmt 空表 |
 | `grape_t_channel_lease` | mgmt 12 行 / runtime 11 行，**同 10 个 key 的 owner 与时间戳全部不同**；runtime `updated_at` 更新（01:12 vs 17:22），mgmt 含 `__sim_*` 测试行 | **owner=runtime（已裁定）** | P4 删 mgmt 副本；⚠️ mgmt 进程若读 lease 会读到陈旧数据（潜在 bug，见 §7） |
 
@@ -185,7 +188,7 @@ mgmt 46 个等 mgmt 侧 40 处裸读清零、runtime 91 个等 runtime 侧 11 �
 **验收断言**（每步）：
 - 目标机 `SELECT COUNT(*)` 与源一致；抽样 200 行 `CHECKSUM` 一致；
 - 四进程 8 端口 200；
-- 三 timer active，且各域意图 `dead=0`；
+- **4 个 timer active**（3 排水 + 1 对账），且各域意图 `dead=0`；
 - 跨主机 `p4_verify_all.py` FAIL=0（此时 lib 已跨网，延迟上升需观察 P99）。
 
 **风险**：跨主机延迟（原同实例 <1ms → 跨网 0.5-2ms）。组合写与心跳路径受影响最大，需在迁机前做一次**延迟压测**（§7）。
@@ -208,8 +211,8 @@ mgmt 46 个等 mgmt 侧 40 处裸读清零、runtime 91 个等 runtime 侧 11 �
 |---|---|---|---|
 | B1 | 重扫 + 重分类（auto/manual 真实数字） | — | 1 |
 | B2 | manual/裸读剩余（按表，每轮 ≤20；104 裸 + 10 兜底噪声） | ~104 | 6 |
-| B3 | 动态列名枚举（4） | 4 | 1 |
-| B4 | 动态 IN 扇出（26） | 26 | 2 |
+| B3 | 动态列名枚举（1）+ 拼接收敛（4）+ 2 条误判剔除 | 7 | 1 |
+| B4 | 动态 IN 扇出（23） | 23 | 2 |
 | B5 | 非 fetch 消费（68，三类） | 68 | 4-5 |
 | B6 | 多份基表裁定（5 项） | — | 2 |
 | B7 | 视图退役（252，分批） | — | 5-7 |
@@ -222,7 +225,7 @@ mgmt 46 个等 mgmt 侧 40 处裸读清零、runtime 91 个等 runtime 侧 11 �
 
 | 编号 | 断言 | 命令/位置 |
 |---|---|---|
-| A1 | 无跨域视图 | `SELECT COUNT(*) FROM information_schema.VIEWS WHERE VIEW_DEFINITION LIKE '%grape_dev_%'` → 0 |
+| A1 | 无跨域视图 | `SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA IN ('grape_dev_mgmt','grape_dev_runtime','grape_dev_insight') AND VIEW_DEFINITION LIKE '%grape_dev_%'` → 0。**必须带库过滤**：全实例不过滤会统计到其它库中指向 `grape_dev_*` 的视图（现值 544），永远到不了 0 |
 | A2 | 读路径等价 | `p4_verify_all.py` 三环境 FAIL=0 |
 | A3 | 查询名闭合 | 代码引用名 ⊆ 注册表 |
 | A4 | 写路径等价 | 各批次 `p35*_verify.py`（local/lib 双模）+ 意图 applied |
@@ -302,7 +305,7 @@ mgmt 46 个等 mgmt 侧 40 处裸读清零、runtime 91 个等 runtime 侧 11 �
 
 | 脚本 | 用途 |
 |---|---|
-| `scripts/xwrite_drain.py` | 三分区排水（50 个 handler） |
+| `scripts/xwrite_drain.py` | 三分区排水（**51 个 handler**：runtime 侧 34、mgmt 侧 17） |
 | `scripts/xwrite_reconcile.py` | 对账 / 归档 / 死信重投 |
 | `scripts/check_lib_query_names.py` | **A3 门禁**：代码引用的跨域读查询名 ⊆ 目标域 lib 注册表（AST 静态比对，退出码 0/1/2） |
 | `scripts/domain_view_freshness.py` / `scripts/sync_domain_views.py` | 跨库视图列新鲜度检查与重建（视图退役期使用） |
@@ -383,8 +386,8 @@ kernel 禁止 import domains），同步用例（`tests/kernel/test_gsb_route.py
 | 调用方 ↓ \ 目标 → | mgmt | runtime | insight |
 |---|---|---|---|
 | mgmt（grape-server） | 本域直连 | 允许 remote（按配置表） | 允许 remote（按配置表） |
-| runtime（event/worker） | **全部 lib**（契约 7 方法 + public 39 原语） | 本域直连 | 按配置表 |
-| insight | **全部 lib**（同上） | 按配置表 | 本域直连 |
+| runtime（event/worker） | **全部 lib**（mgmt 面：契约 7 方法 + public 40 原语 + 35 命名查询） | 本域直连 | 按配置表 |
+| insight | **全部 lib**（同一面：契约 7 + 40 原语 + 35 命名查询）。⚠️ 注：这是**通道能力**；insight 侧自身仍有 **52 处裸读走视图**（W1 未清零），不能理解为"insight 已完成 lib 化" | 按配置表 | 本域直连 |
 
 - 该矩阵在三库三机目标态（各域独立主机）下保持同一形态，不因网络变远而放宽。
 - 双守卫：运行时 `matrix_forces_lib()`（`get_service("mgmt")` 在 runtime/insight 进程恒
@@ -404,3 +407,33 @@ kernel 禁止 import domains），同步用例（`tests/kernel/test_gsb_route.py
 - `get_service()` 逐次调用构造成本实测（remote 制式，每次新建代理 + Local/Remote
   实例）~11.5ms/次；进程级代理句柄复用后 ~0.06ms/次（同方法 A/B，
   见 bench-report §3，QA Required#2 修复）。
+
+---
+
+## 附录 D：数字口径与复算命令（单一事实来源）
+
+规则：**本页任何数量都必须能在本附录找到复算命令**；改数字必须同时更新本表（值 + 时点）。
+标「本轮实测」= 2026-11-14 复核；标「历史批次」= 来自各批次验证记录，本轮未重算（迁移前必须重算一次）。
+
+| 数量 | 权威值 | 类别 | 复算命令（在仓库根执行，`<tree>` = 目标工作树） |
+|---|---|---|---|
+| 跨域读候选 | **114 处 / 20 表** | 本轮实测 | `sed 's#/root/wt-arch#<tree>#' /root/p4_read_converter.py > /tmp/c.py && python /tmp/c.py`（只读） |
+| 其中裸读 / 兜底噪声 | **104 / 10** | 本轮实测 | `python /root/p4_candidate_verdict.py /root/workdoc/grape/p4-read-convert.json`（AST 判据：候选所在函数内有无 lib 句柄） |
+| 已接线点 | **202** | 本轮实测 | `git grep -h 'domain_read import' -- 'src/*.py' \| wc -l` |
+| auto / 自检绿 / manual | **16 / 8 / 98** | 本轮实测 | 重跑 `p4_read_rewriter.py` → `p4-rewrite-plan.json` 里 `kind` 与 `selfcheck` 计数 |
+| 动态 SQL 细分 | **IN 23 / 列名 1 / 拼接 4 / 误判 2** | 本轮实测（正则粗分，B1 重分类） | 对 `p4-rewrite-plan.json` 中 `kind == 'manual: 动态 SQL'` 的 `sql` 字段做 `IN\\(`、`{...}`、`+` 匹配 |
+| 非 fetch 消费 | **68** | 本轮实测 | 同上，`kind == 'manual: 结果消费方式不是 fetchone/fetchall'` |
+| 跨域视图 | **252**（46 / 91 / 115） | 本轮实测 | `SELECT table_schema,COUNT(*) FROM information_schema.views WHERE table_schema IN ('grape_dev_mgmt','grape_dev_runtime','grape_dev_insight') AND view_definition LIKE '%grape_dev_%' GROUP BY table_schema` |
+| 基表数 | **91 / 52 / 17** | 本轮实测 | `SELECT table_schema,SUM(table_type='BASE TABLE') FROM information_schema.tables WHERE table_schema LIKE 'grape_dev_%' GROUP BY table_schema` |
+| api_latency_log 行数 | **6423** | 本轮实测 | `SELECT COUNT(*) FROM grape_dev_insight.api_latency_log` |
+| 意图量 | mgmt **5593** / runtime **84** / insight **1** | 本轮实测 | 各库 `SELECT status,COUNT(*) FROM grape_t_xwrite_log GROUP BY status` |
+| 排水 / 对账 timer | **3 + 1 = 4** | 本轮实测 | `systemctl list-timers --all \| grep grape-xwrite` |
+| drain handler | **51**（runtime 34 + mgmt 17） | 本轮实测 | 统计 `scripts/xwrite_drain.py` 里 `out["…"] =` 赋值键 + `out.update({…})` 字典键（去重） |
+| A2 读等价 | **FAIL=0，PASS 67+31，UNCOVERED 7** | 本轮实测 | 在两个进程环境各跑 `p4_verify_all.py`（env 取 `/proc/<pid>/environ`，PYTHONPATH 指当前树） |
+| A3 查询名闭合 | **PASS**（419 文件；mgmt 41 函数/35 查询、runtime 68 函数/70 查询） | 本轮实测 | `python scripts/check_lib_query_names.py` |
+| 写批次提交数 | **33**（`2f70a0d3e..a3a18f49c`） | 本轮实测 | `git rev-list --count 2f70a0d3e..a3a18f49c` |
+| 读批次提交数 | **11**（`670f7709b..3f241628a`） | 本轮实测 | `git rev-list --count 670f7709b..3f241628a` |
+| P2 收尾接线 / 裸读 | **31 / 208**（候选 224） | 本轮实测（历史时点回放） | `git worktree add /root/wt-p2end 436e3299f --detach` + 前两条命令 |
+| `<insight-copy-host>` 副本 | 14 表 / 5125 行 | **历史批次（未复核）** | 迁移前用 `CHECKSUM TABLE` + `COUNT(*)` 重算，该机 root 口令与 `<dev-db-host>` 不同 |
+| `<runtime-copy-host>` 副本 | 45 表 / 无 `xwrite_log` | **历史批次（未复核）** | 同上 |
+| P3 各批次处数（5a 3 / 5b 7 / 5c 10 / 5d 2 / 5g 13 / 5h 7 …） | 见附录 A | **历史批次（未复核）** | `/root/workdoc/grape/p35-crosswrite-inventory.md` + 各 `p35*_verify.py` 记录 |
