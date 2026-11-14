@@ -2750,6 +2750,81 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `chat_conversations` 1 / `vod_conversations` 1，均归 runtime；同处还有
   `src/api/deps.py` 4 处 `external_identities`）。
 
+### 7.28 飞书扫码 onboarding 的换绑清理下沉 runtime owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/mgmt/routes/feishu_onboard.py` **4 处 → 0**（单轮做完，4 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，三表都在 `grape_runtime_db`，全归 **runtime**）：
+  - `devops_agent_session` × 2：L205 `_apply_vod_credentials` 的
+    `SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'`；
+    L238 同函数的 `INSERT INTO devops_agent_session (id, repo_key, agent_type, status,
+    last_active_at) VALUES (?,?,?,?,datetime('now'))`。
+  - `chat_conversations` × 1：L157 `_apply_chat_credentials` 换绑清理
+    `DELETE FROM chat_conversations WHERE im_channel_id=?`。
+  - `vod_conversations` × 1：L222 `_apply_vod_credentials` 换绑清理
+    `DELETE FROM vod_conversations WHERE agent_session_id=?`。
+  - 四处都是定表 + 定列，**无跨域 JOIN、无动态表名/列名拼接**；结构都是「lib 可用走 lib
+    （`%s` 具名查询）+ 否则本地兜底 SQL 打进程主库」双分支 —— 兜底侧才是外域引用来源。
+- owner 侧新增（`src/domains/runtime/public/__init__.py`，`?` 占位符）：
+  1) `_ANY_QUERIES` 3 条：`conversation_delete_by_im_channel` /
+     `vod_conversation_delete_by_session` / `devops_agent_session_insert_vod`；
+     读侧**复用**既有 `devops_session_vod_id`（与改造前兜底 SELECT 逐字一致，不新增语句）。
+  2) 4 个薄函数并导出：`vod_session_id_by_repo_any(repo_key) -> str`、
+     `chat_conversations_delete_by_im_channel_any(im_channel_id) -> int`、
+     `vod_conversation_delete_by_session_any(agent_session_id) -> int`、
+     `vod_agent_session_ensure_any(session_id, repo_key, status="idle") -> int`。
+- 设计取舍：
+  1) **读只留一条语句**：原 lib 分支的 `read_one("devops_agent_session_dcd716")` 与兜底
+     SELECT 本来就是同一条 SQL，收成一个任意拓扑原语（自有 DSN 走 `db_registry`，
+     单库/测试拓扑回落进程库），不再有「两套读、两种答案」的可能。
+  2) **不做跨语句事务**：删除只在「有旧 app_id 且有旧会话行」时发生，新建只在
+     「无会话行」时发生，两条路径**互斥**；且删除按 id/渠道、新建走 `(repo_key,
+     agent_type)` 唯一键，均幂等 —— 无需 `_any_tx()`，也就没有「跨域组合写」的原子性要求。
+  3) **outbox 优先路径不动**：`cross_write.submit_if_lib`（`chat_conversations_delete` /
+     `vod_conversations_delete` / `agent_session_ensure`）仍是第一选择，新原语只在 lib
+     不可用或提交失败时兜底 —— 跨域写首选通道（outbox）口径与 P3 一致。
+  4) **调用方不再持 `db_lock`**：三处原先都是 `with db_lock: c = db.cursor()` 直发语句；
+     现在原语在 `_any_cursor` 内自取锁（单库拓扑）或走独立连接（自有 DSN）。调用点去掉
+     外层锁，既避免「测试 monkeypatch 裸 Lock」的嵌套自死锁，也让锁粒度与语句粒度一致。
+  5) **`agent_type` 钉在 owner SQL 里**（`VALUES (?,?,'vod',?,datetime('now'))`）：
+     本原语只服务 vod 轨，调用方不能传表名/列名，也不可能把 chat_bot 行误建进来。
+  6) **时间与默认值口径不变**：`last_active_at` 仍用 `datetime('now')`（`mysql_compat`
+     在 MySQL 侧翻成 `CAST(NOW() AS CHAR)`），`status` 默认 `'idle'`，与原兜底 INSERT 一致。
+- 修的存量 bug（结构性隐患，三库拓扑尚未上线，线上未观测到故障）：
+  1) **lib 分支把游标变量覆盖成结果行、`row` 从未赋值**：原代码
+     `c = _ru_lib.read_one("devops_agent_session_dcd716", (repo_key,)).fetchone()` 之后走
+     `old_session_id = row[0] if row else ""` —— `row` 在该分支从未绑定，独立 DSN 拓扑
+     （lib 非 None）下必 `UnboundLocalError`，被 `_run_registration` 外层 except 吞成
+     「扫码绑定失败」，日志只有 failed 没有根因；同一分支后续 `c.execute(...)` 还会在
+     结果行对象上 `AttributeError`。现在读路径只有原语一条，该类错误面整体消失。
+  2) **兜底 SQL 打在执行进程主库**：三库拓扑下 mgmt 进程库没有这三张 runtime 表
+     （视图 0），换绑清理必 1146 并被吞 —— 结果是「旧 bot 删了、旧会话留着」，
+     旧渠道会话与新 bot 并存，用户看到串话。
+  3) **两条写路径幂等性分裂**：lib 侧 `ensure_agent_session` 是 `INSERT IGNORE`，兜底侧是
+     plain `INSERT`，撞 `(repo_key, agent_type)` 唯一键就抛错（换绑重试即失败）。统一为
+     `INSERT OR IGNORE`（MySQL 侧翻译成 `INSERT IGNORE`），两条拓扑同一语义。
+- 验证：
+  - `py_compile` 2 个文件 **COMPILE_OK**。
+  - SQLite 烟测 `~/burndown/feishu_onboard_swap_smoke.py` **ALL 93 CHECKS PASSED**
+    （静态面 / owner 语句面 / 行为面 / 端到端 / 拓扑面五段）：4 条原语句逐字消失、
+    owner 语句 `?` 方言且 MySQL 侧翻成 `INSERT IGNORE` + `CAST(NOW() AS CHAR)`、
+    两个改造函数 0 处 `session_manager`/`db.cursor()`/`with db_lock`；chat 删除只删匹配
+    渠道并返回行数、空渠道/None **零 SQL**；vod 删除只删匹配 session、空 id 零 SQL；
+    建会话行 `agent_type='vod'`/`status='idle'`/`last_active_at` 为 UTC 字符串、二次调用 0
+    且不重复、已有行原样保留、空参数零 SQL；读会话 id 不吃同 repo 的 chat_bot 行；
+    端到端跑真实 `_apply_chat_credentials`/`_apply_vod_credentials`（换绑清理、被 VOD/他人
+    占用时拒绝且不清）；**伪造 lib 句柄**验证不再 UnboundLocalError 且写走 outbox；
+    自有 DSN 拓扑下写入/删除落在运行域库、进程库不动。
+  - `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK /
+    契约 37 条 / 看板最新）。
+  - `pytest tests/arch tests/contracts tests/scripts` **158 passed**；
+    `scripts/check_lib_query_names.py src` **PASS**（runtime 162/236）；
+    `make lint` **import OK**。
+- 新基线：全局 **112 → 108**（-4），对数 **45 → 43**：`devops_agent_session←mgmt` 与
+  `vod_conversations←mgmt` 两对清零，`chat_conversations←mgmt` 2 → 1（余 1 处在
+  `src/domains/mgmt/admin/cooldown.py:137`）。基线 `foreign-refs-allowlist.csv` 收紧为
+  108 / 43，看板与作业单同步刷新（下一批头名 `src/domains/mgmt/admin/cooldown.py` 4 处：
+  `agent_tasks` 1 / `chat_agent_session` 1 / `chat_conversations` 1 / `issue` 1）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

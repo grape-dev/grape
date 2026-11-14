@@ -1358,6 +1358,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "purge_user_rows", "delete_chat_conversations", "delete_vod_conversations",
            "detach_agent_sessions", "clear_agent_session_runtime", "ensure_agent_session",
            "stamp_task_traces",
+           # 飞书扫码 onboarding 换绑清理（任意拓扑原语；SQL 只留本模块）
+           "vod_session_id_by_repo_any", "chat_conversations_delete_by_im_channel_any",
+           "vod_conversation_delete_by_session_any", "vod_agent_session_ensure_any",
            # P3-5h 写原语
            "mark_detach_rebound", "delete_autopilot_executions", "set_autopilot_findings",
            "set_repo_im_notifications", "add_event_action_filter",
@@ -1846,6 +1849,20 @@ _ANY_QUERIES: dict[str, str] = {
     'devops_agent_session_insert': "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
     'devops_agent_session_delete_by_repo_agent': 'DELETE FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
     'devops_agent_session_delete_by_repo': 'DELETE FROM devops_agent_session WHERE repo_key=?',
+    # ── 飞书扫码 onboarding 换绑清理（mgmt/routes/feishu_onboard.py）───────────
+    # 三张表（chat_conversations / vod_conversations / devops_agent_session）全归本域。
+    # 原调用点是「lib 可用走 lib（%s 具名查询）+ 否则本地兜底 SQL 打进程主库」，
+    # 兜底 SQL 才是跨域统计来源；三库拓扑下兜底侧必 1146（视图 0）。
+    # 语句与改造前兜底 SQL 逐字一致（列序/谓词/无 ORDER·LIMIT），只换 `?` 占位符；
+    # INSERT 用 OR IGNORE 与 lib 侧 `ensure_agent_session` 的 INSERT IGNORE 对齐。
+    "conversation_delete_by_im_channel": (
+        "DELETE FROM chat_conversations WHERE im_channel_id=?"),
+    "vod_conversation_delete_by_session": (
+        "DELETE FROM vod_conversations WHERE agent_session_id=?"),
+    "devops_agent_session_insert_vod": (
+        "INSERT OR IGNORE INTO devops_agent_session "
+        "(id, repo_key, agent_type, status, last_active_at) "
+        "VALUES (?,?,'vod',?,datetime('now'))"),
     'agent_runtime_name_by_id': 'SELECT name FROM agent_runtimes WHERE id=?',
     'issue_card_row': 'SELECT stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override, carried_context, status FROM issue WHERE repo_key=? AND issue_number=?',
     'issue_card_exists': 'SELECT id FROM issue WHERE repo_key=? AND issue_number=?',
@@ -2349,6 +2366,46 @@ def exec_any(name: str, params: tuple = ()) -> int:
     with _any_cursor(write=True) as c:
         cur = c.execute(_any_sql(name), params)
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+# ── 飞书扫码 onboarding：换绑清理的三个读写原语（mgmt/routes/feishu_onboard.py）──
+# 三张表（chat_conversations / vod_conversations / devops_agent_session）全归本域。
+# 原调用点「lib 可用 → lib；否则 → 进程主库兜底 SQL」，本批把兜底侧收成任意拓扑原语：
+# 自有 DSN 走 db_registry，单库/测试拓扑回落进程库（`_any_cursor` 自带 db_lock，故调用方
+# 不再自己持锁 —— 避免与测试里 monkeypatch 的裸 Lock 嵌套自死锁）。
+
+def vod_session_id_by_repo_any(repo_key: str) -> str:
+    """某仓库的 vod agent 会话 id（无则空串）；谓词与列同 mgmt 侧原查询。"""
+    if not repo_key:
+        return ""
+    row = read_one_any("devops_session_vod_id", (str(repo_key),))
+    return str(row[0] or "") if row else ""
+
+
+def chat_conversations_delete_by_im_channel_any(im_channel_id: str) -> int:
+    """按 IM 渠道清空 chat 会话（换绑/解绑清理），返回删除行数；空渠道名零 SQL。"""
+    if not im_channel_id:
+        return 0
+    return exec_any("conversation_delete_by_im_channel", (str(im_channel_id),))
+
+
+def vod_conversation_delete_by_session_any(agent_session_id: str) -> int:
+    """按 agent_session_id 删 VOD 会话，返回删除行数；空 id 零 SQL。"""
+    if not agent_session_id:
+        return 0
+    return exec_any("vod_conversation_delete_by_session", (str(agent_session_id),))
+
+
+def vod_agent_session_ensure_any(session_id: str, repo_key: str, status: str = "idle") -> int:
+    """幂等建 vod agent 会话行（已存在则不动），返回 1=新建 / 0=已存在。
+
+    与 lib 侧 `ensure_agent_session` 同语义（INSERT IGNORE）：换绑流程可重试，
+    两拓扑不会一边幂等、一边抛 (repo_key, agent_type) 唯一键冲突。
+    """
+    if not session_id or not repo_key:
+        return 0
+    return exec_any("devops_agent_session_insert_vod",
+                    (str(session_id), str(repo_key), status))
 
 
 # ── 存量场景绑定修复（Issue #541；api 一次性迁移）──────────────────────

@@ -8,8 +8,7 @@ agent_type,runtime,insight,1
 api_latency_log,insight,api,1
 audit_logs,mgmt,insight,1
 chat_agent_session,runtime,mgmt,1
-chat_conversations,runtime,mgmt,2
-devops_agent_session,runtime,mgmt,2
+chat_conversations,runtime,mgmt,1
 devops_pipeline_scene,mgmt,api,3
 devops_pipeline_scene,mgmt,runtime,2
 distributed_locks,runtime,insight,1
@@ -43,4 +42,3 @@ unified_user_mapping,mgmt,kernel,3
 unified_user_mapping,mgmt,runtime,1
 user_accounts,mgmt,runtime,1
 user_feedback,mgmt,api,2
-vod_conversations,runtime,mgmt,1
