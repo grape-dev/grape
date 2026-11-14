@@ -6,7 +6,7 @@ agent_runtimes,runtime,mgmt,6
 agent_shared_knowledge,mgmt,kernel,2
 agent_shared_knowledge,mgmt,runtime,8
 agent_tasks,runtime,api,8
-agent_tasks,runtime,insight,24
+agent_tasks,runtime,insight,18
 agent_tasks,runtime,mgmt,5
 agent_type,runtime,insight,1
 api_latency_log,insight,api,2
@@ -37,8 +37,8 @@ grape_accounts,mgmt,runtime,13
 grape_t_channel_chat_session_binding,mgmt,runtime,4
 grape_t_channel_inbound_dedup,mgmt,runtime,5
 grape_t_channel_inbound_message,mgmt,runtime,1
-grape_t_channel_installation,mgmt,runtime,19
-grape_t_channel_lease,mgmt,runtime,10
+grape_t_channel_installation,mgmt,runtime,16
+grape_t_channel_lease,mgmt,runtime,2
 grape_t_channel_outbound_card,mgmt,runtime,2
 grape_t_channel_sender_identity,mgmt,runtime,3
 grape_t_credential_usage_log,runtime,kernel,3
@@ -60,7 +60,7 @@ meta,runtime,mgmt,11
 obs_metric_rollup,insight,mgmt,1
 outbound_content_ledger,mgmt,kernel,6
 runtime_credentials,runtime,api,6
-runtime_credentials,runtime,insight,11
+runtime_credentials,runtime,insight,9
 runtime_credentials,runtime,kernel,1
 runtime_credentials,runtime,mgmt,5
 runtime_health_scores,runtime,insight,1
@@ -75,12 +75,10 @@ skill_category,mgmt,runtime,1
 takeover_sessions,runtime,api,1
 takeover_sessions,runtime,mgmt,1
 task_messages,runtime,insight,1
-unified_user_mapping,mgmt,insight,1
 unified_user_mapping,mgmt,kernel,3
 unified_user_mapping,mgmt,runtime,17
 user_accounts,mgmt,runtime,1
 user_feedback,mgmt,api,6
 user_repos,mgmt,api,1
-user_repos,mgmt,insight,2
 user_repos,mgmt,runtime,3
 vod_conversations,runtime,mgmt,1

@@ -3597,3 +3597,100 @@ def meta_keys_like(prefix: str) -> list[str]:
     with _any_cursor() as c:
         c.execute("SELECT `key` FROM meta WHERE `key` LIKE ?", (f"{prefix}%",))
         return [r[0] for r in (c.fetchall() or [])]
+
+
+# ---------- 告警求值聚合（insight/observability/alerts 只读；SQL 留本域） ----------
+
+def alerts_task_inflight(stuck_bound: str) -> list[tuple]:
+    """按仓库的排队数 + 卡住数 [(repo_key, queued, stuck)]。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT repo_key,"
+            " SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),"
+            " SUM(CASE WHEN status IN ('dispatched','running')"
+            "          AND started_at IS NOT NULL AND started_at != '' AND started_at < ?"
+            "     THEN 1 ELSE 0 END)"
+            " FROM agent_tasks WHERE repo_key IS NOT NULL AND repo_key != ''"
+            "   AND (status='queued' OR status IN ('dispatched','running'))"
+            " GROUP BY repo_key", (stuck_bound,))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def alerts_task_terminal(fail_cutoff: str) -> list[tuple]:
+    """按仓库×状态统计窗口内终态任务 [(repo_key, status, count)]。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT repo_key, status, COUNT(*) FROM agent_tasks"
+            " WHERE repo_key IS NOT NULL AND repo_key != ''"
+            "   AND status IN ('completed','failed','cancelled')"
+            "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
+            " GROUP BY repo_key, status", (fail_cutoff,))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def alerts_task_timeout(fail_cutoff: str, signature: str) -> list[tuple]:
+    """窗口内「超时失败」按仓库计数 [(repo_key, count)]（按 result_text/errors 签名匹配）。"""
+    like = f"%{signature}%"
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT repo_key, COUNT(*) FROM agent_tasks"
+            " WHERE repo_key IS NOT NULL AND repo_key != ''"
+            "   AND status='failed'"
+            "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
+            "   AND (result_text LIKE ? OR errors LIKE ?)"
+            " GROUP BY repo_key", (fail_cutoff, like, like))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def alerts_task_mutation(mut0_cutoff: str, mut1_cutoff: str) -> list[tuple]:
+    """突变检测两窗口 [(repo_key, status, 本窗口数, 上一窗口数)]。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT repo_key, status,"
+            " SUM(CASE WHEN completed_at > ? THEN 1 ELSE 0 END),"
+            " SUM(CASE WHEN completed_at > ? AND completed_at < ? THEN 1 ELSE 0 END)"
+            " FROM agent_tasks WHERE repo_key IS NOT NULL AND repo_key != ''"
+            "   AND status IN ('completed','failed','cancelled')"
+            "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
+            " GROUP BY repo_key, status",
+            (mut0_cutoff, mut1_cutoff, mut0_cutoff, mut1_cutoff))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def alerts_task_rows_total() -> int:
+    """agent_tasks 总行数（体量类告警的求值输入）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT COUNT(*) FROM agent_tasks")
+        return int((c.fetchone() or [0])[0] or 0)
+
+
+def alerts_credential_heartbeats() -> list[tuple]:
+    """未吊销凭据的 (status, last_seen_at) 清单（在线率求值用）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT status, last_seen_at FROM runtime_credentials "
+                  "WHERE status != 'revoked'")
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def credential_ids_visible(org_id: str = "", personal_org: bool = True,
+                           uname: str = "", repo_keys=None) -> list[int]:
+    """可见凭据 id（三口径：非个人组织按 org_id / 指定仓库 / 个人全局）。
+
+    与 dashboard 的 worker 可见性同一套语义，条件在本域拼；调用方只传口径参数。
+    """
+    sql = "SELECT id FROM runtime_credentials WHERE status != 'revoked'"
+    params: list = []
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if org_id and not personal_org:
+        sql += " AND org_id=?"
+        params.append(org_id)
+    elif keys:
+        ph = ",".join(["?"] * len(keys))
+        sql += f" AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key IN ({ph}))"
+        params += [uname, *keys]
+    else:
+        sql += " AND (scope='global' OR (scope='user' AND owner_name=?))"
+        params.append(uname)
+    with _any_cursor() as c:
+        c.execute(sql, params)
+        return [int(r[0]) for r in (c.fetchall() or [])]

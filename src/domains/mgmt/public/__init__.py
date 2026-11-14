@@ -2050,3 +2050,116 @@ def purge_repo_rows(keys, dry_run: bool = False) -> dict[str, int]:
             cur = c.execute(f"DELETE FROM {tbl} WHERE repo_key IN ({ph})", _keys)
             stats[tbl] = int(getattr(cur, "rowcount", 0) or 0)
     return stats
+
+
+# ---------- 渠道租约续用（bot_lease 的 acquire/续期/批量视角；表归 mgmt） ----------
+
+def lease_acquire_row(lease_key: str, channel_type: str, installation_id: str, token: str,
+                     owner: str, expires_at: str, now: str) -> bool:
+    """惰性建行 + CAS 抢占（两句同一事务）。
+
+    与 `acquire_channel_lease` 的差别：这里先 `INSERT OR IGNORE` 铺行、再 UPDATE 抢占，
+    抢占条件只认「token 为空 / 到期为空 / 已过期」（不含同 token 重入）。
+    时钟口径：now/expires_at 都由调用方按 Python UTC 生成，不用数据库时间函数。
+    """
+    with _any_tx() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO grape_t_channel_lease "
+            "(lease_key, channel_type, installation_id, updated_at) VALUES (?,?,?,?)",
+            (lease_key, channel_type, installation_id, now))
+        cur = c.execute(
+            "UPDATE grape_t_channel_lease "
+            "SET lease_token = ?, lease_expires_at = ?, lease_owner = ?, "
+            "    lease_acquired_at = ?, updated_at = ? "
+            "WHERE lease_key = ? "
+            "  AND (lease_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at < ?)",
+            (token, expires_at, owner, now, now, lease_key, now))
+        return int(getattr(cur, "rowcount", 0) or 0) > 0
+
+
+def lease_renew_expiry(lease_key: str, token: str, expires_at: str, now: str) -> int:
+    """续期（只改到期时间，不动 token/owner）；返回影响行数。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "UPDATE grape_t_channel_lease SET lease_expires_at = ?, updated_at = ? "
+            "WHERE lease_key = ? AND lease_token = ?",
+            (expires_at, now, lease_key, token))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def lease_renew_all_by_owner(owner: str, expires_at: str, now: str) -> int:
+    """某个 owner 持有的全部租约统一续期；返回影响行数。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(
+            "UPDATE grape_t_channel_lease SET lease_expires_at = ?, updated_at = ? "
+            "WHERE lease_owner = ? AND lease_token IS NOT NULL", (expires_at, now, owner))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def lease_tokens_by_keys(keys) -> dict:
+    """批量取 {lease_key: lease_token}（对账用）。"""
+    _keys = [str(k) for k in (keys or []) if k]
+    if not _keys:
+        return {}
+    ph = ",".join(["?"] * len(_keys))
+    with _any_cursor() as c:
+        c.execute(f"SELECT lease_key, lease_token FROM grape_t_channel_lease "
+                  f"WHERE lease_key IN ({ph})", _keys)
+        return {r[0]: r[1] for r in (c.fetchall() or [])}
+
+
+def lease_keys_valid(now: str) -> set:
+    """当前仍有效的租约键集合（token 非空且未过期）。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT lease_key FROM grape_t_channel_lease "
+            "WHERE lease_token IS NOT NULL AND lease_expires_at IS NOT NULL "
+            "  AND lease_expires_at >= ?", (now,))
+        return {r[0] for r in (c.fetchall() or [])}
+
+
+def lease_owner_info(lease_key: str) -> tuple | None:
+    """租约当前 (owner, token, expires_at)。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT COALESCE(lease_owner,''), COALESCE(lease_token,''), lease_expires_at "
+            "FROM grape_t_channel_lease WHERE lease_key=?", (lease_key,))
+        return c.fetchone()
+
+
+def installation_status(installation_id: str):
+    """渠道安装状态（无行返回 None）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT status FROM grape_t_channel_installation WHERE id=?", (installation_id,))
+        row = c.fetchone()
+    return row[0] if row else None
+
+
+def installation_active_rows(cursor: str = "", limit: int = 500) -> list[tuple]:
+    """active 安装分页（id, channel_type），按 id 游标推进。"""
+    with _any_cursor() as c:
+        c.execute("SELECT id, channel_type FROM grape_t_channel_installation "
+                  "WHERE status='active' AND id > ? ORDER BY id LIMIT ?", (cursor, int(limit)))
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+# ---------- 告警收件人（repo 成员 / 映射全量；表归 mgmt） ----------
+
+def repo_member_user_ids(repo_keys) -> list[int]:
+    """仓库成员 user_id 并集（去重）；repo_keys 为空返回空列表。"""
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if not keys:
+        return []
+    ph = ",".join(["?"] * len(keys))
+    with _any_cursor() as c:
+        c.execute(f"SELECT DISTINCT user_id FROM user_repos WHERE repo_key IN ({ph})", keys)
+        return [int(r[0]) for r in (c.fetchall() or []) if r and r[0]]
+
+
+def mapped_feishu_user_ids() -> list[int]:
+    """绑定了飞书 open_id 的账号 id 全量（收件人兜底）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT DISTINCT user_id FROM unified_user_mapping"
+                  " WHERE feishu_open_id!='' AND user_id IS NOT NULL "
+                  "AND user_id NOT IN ('', '0')")
+        return [int(r[0]) for r in (c.fetchall() or []) if r and r[0]]

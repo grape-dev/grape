@@ -185,6 +185,26 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
 第 1 条也解释了历史记录里「彩排 0 失败」与坑 2 并存的矛盾：上一轮 stage env 同样缺 lib 开关，
 多数端点在内部 catch 了 1146，只有写探测把 `PUT /api/chat/config` 的异常记成了失败。
 
+### 租约存储 + 告警求值接口化（-22，两个文件清零）
+- **`runtime/im/bot_lease.py`（11 处）**：渠道租约/安装表归 mgmt，SQL 下沉成 8 个原语
+  （`lease_acquire_row` 的「惰性建行 + CAS 抢占」两句同事务、`lease_renew_expiry` 只推到期时间、
+  `lease_renew_all_by_owner`、`lease_tokens_by_keys`、`lease_keys_valid`、`lease_owner_info`、
+  `installation_status`、`installation_active_rows`）。
+  顺带删掉 `_installation_active` 的「主连接查不到再试 wiring 连接」双路探测 —— 单库拓扑由
+  owner 原语自己回落，三库拓扑直接走 mgmt DSN，两路探测没有存在意义。
+- **`insight/observability/alerts.py`（11 处）**：告警求值的聚合全部下沉
+  （`alerts_task_inflight` 排队/卡住、`alerts_task_terminal` 窗口内终态、`alerts_task_timeout`
+  超时签名、`alerts_task_mutation` 两窗口突变、`alerts_task_rows_total`、`alerts_credential_heartbeats`、
+  `credential_ids_visible` 三口径可见性），收件人两类走 mgmt public
+  （`repo_member_user_ids` / `mapped_feishu_user_ids`）。
+- 顺手修掉原代码里一个真 bug：收件人分支里 `rk` 路径只给 `_rows_ur` 赋值，末尾却统一读
+  `_rows_um` —— 单仓库告警的收件人查询一直抛 NameError 被外层 except 吞成「无收件人」。
+  改成两条原语后该分支自然消失。
+- 全局 **395 → 373**（-22）；基线 **373 / 83 对**。
+- 新增两份烟测：`lease_ops_smoke`（两实例互斥 / 续期凭 token 不凭 owner 的原语义 / 吊销安装拒锁 /
+  释放后可抢 / 批量续期判定 / 无租约清单 / 过期回收）、`alerts_smoke`（卡住阈值边界 / 窗口内外 /
+  超时签名命中与不命中 / 两窗口突变 / 心跳清单排除 revoked / 可见性三口径 / 收件人并集）。
+
 ### 并行调研的交叉核对（三份只读报告 vs 落地实现）
 三份报告与实现方向一致（都是「按域拆成 owner 内单事务 + kernel 只编排」），核对后无返工，两处细节已确认：
 - 报告提示 `session_token_set_expiry` 参数序可能反转 —— 核对：原 SQL 是 `SET expires_at=? WHERE session_key=?`，

@@ -22,6 +22,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.kernel.config import log
+
+# 告警求值读运行域（任务/凭据）与 mgmt 域（收件人）：聚合原语放各域 public
+from src.domains.runtime import public as _rt_alerts
+from src.domains.mgmt import public as _mgmt_alerts
 from src.domains.insight.observability import alert_policy as _policy
 from src.domains.runtime.engine.task_timeout import TIMEOUT_FAIL_SIGNATURE as _TIMEOUT_FAIL_SIGNATURE
 
@@ -313,7 +317,7 @@ def set_rule_policy(rule_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
 def _repo_metrics() -> Dict[str, Dict[str, float]]:
     """按仓库维度的指标：卡住数 / 失败率 / 排队数 / 成功率环比突变。
 
-    **降载（2026-10-17 审计）**：原实现 `SELECT ... FROM agent_tasks WHERE status IN (...)`
+    **降载（2026-10-17 审计）**：原实现是「按状态拉全表任务行」的查询
     把**全表**（只有 6 个状态枚举做条件，索引形同虚设，EXPLAIN rows=全表/ filtered=100%）
     捞进 Python 每 30s 算一遍，并全程持全局 `db_lock` —— 实测把其它 DB 使用者的中位延迟
     从 1.1ms 抬到 9.6ms，且随任务量线性变差。现改为**3 条 GROUP BY 聚合查询**，
@@ -343,16 +347,7 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
         with db_lock:
             c = db.cursor()
             # ① 在跑/排队：卡住数（dispatched/running 且 started_at 早于阈值）+ 排队数
-            c.execute(
-                "SELECT repo_key,"
-                " SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),"
-                " SUM(CASE WHEN status IN ('dispatched','running')"
-                "          AND started_at IS NOT NULL AND started_at != '' AND started_at < ?"
-                "     THEN 1 ELSE 0 END)"
-                " FROM agent_tasks WHERE repo_key IS NOT NULL AND repo_key != ''"
-                "   AND (status='queued' OR status IN ('dispatched','running'))"
-                " GROUP BY repo_key", (stuck_bound,))
-            for repo_key, queued, stuck in c.fetchall():
+            for repo_key, queued, stuck in _rt_alerts.alerts_task_inflight(stuck_bound):
                 m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
                                               "_done": 0.0, "_bad": 0.0,
                                               "_mut0_tot": 0.0, "_mut0_bad": 0.0,
@@ -361,13 +356,7 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
                 m["task_queued"] += float(queued or 0)
                 m["task_stuck"] += float(stuck or 0)
             # ② 终态任务按仓库×状态计数，带**时间下界**（失败率窗口）——聚合在 SQL 侧做
-            c.execute(
-                "SELECT repo_key, status, COUNT(*) FROM agent_tasks"
-                " WHERE repo_key IS NOT NULL AND repo_key != ''"
-                "   AND status IN ('completed','failed','cancelled')"
-                "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
-                " GROUP BY repo_key, status", (fail_cutoff,))
-            for repo_key, status, n in c.fetchall():
+            for repo_key, status, n in _rt_alerts.alerts_task_terminal(fail_cutoff):
                 m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
                                               "_done": 0.0, "_bad": 0.0,
                                               "_mut0_tot": 0.0, "_mut0_bad": 0.0,
@@ -379,30 +368,14 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
             # ②b Issue #516 M3：超时失败计数（worker 超时 kill 上报的
             # "timed out after" 签名，PR #722 起常量集中在 task_timeout.py），
             # 按仓库聚合供 task_timeout 告警规则消费
-            _to_sig = f"%{_TIMEOUT_FAIL_SIGNATURE}%"
-            c.execute(
-                "SELECT repo_key, COUNT(*) FROM agent_tasks"
-                " WHERE repo_key IS NOT NULL AND repo_key != ''"
-                "   AND status='failed'"
-                "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
-                "   AND (result_text LIKE ? OR errors LIKE ?)"
-                " GROUP BY repo_key", (fail_cutoff, _to_sig, _to_sig,))
-            for repo_key, n in c.fetchall():
+            for repo_key, n in _rt_alerts.alerts_task_timeout(fail_cutoff, _TIMEOUT_FAIL_SIGNATURE):
                 m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
                                               "_done": 0.0, "_bad": 0.0,
                                               "_mut0_tot": 0.0, "_mut0_bad": 0.0,
                                               "_mut1_tot": 0.0, "_mut1_bad": 0.0})
                 m["task_timeout"] = m.get("task_timeout", 0.0) + float(n or 0)
             # ③ 突变检测的两个相邻窗口（本窗口 / 上一窗口），同样 SQL 侧计数
-            c.execute(
-                "SELECT repo_key, status,"
-                " SUM(CASE WHEN completed_at > ? THEN 1 ELSE 0 END),"
-                " SUM(CASE WHEN completed_at > ? AND completed_at < ? THEN 1 ELSE 0 END)"
-                " FROM agent_tasks WHERE repo_key IS NOT NULL AND repo_key != ''"
-                "   AND status IN ('completed','failed','cancelled')"
-                "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
-                " GROUP BY repo_key, status", (mut0_cutoff, mut1_cutoff, mut0_cutoff, mut1_cutoff))
-            for repo_key, status, n0, n1 in c.fetchall():
+            for repo_key, status, n0, n1 in _rt_alerts.alerts_task_mutation(mut0_cutoff, mut1_cutoff):
                 m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
                                               "_done": 0.0, "_bad": 0.0,
                                               "_mut0_tot": 0.0, "_mut0_bad": 0.0,
@@ -459,15 +432,12 @@ def _platform_metrics() -> Dict[str, float]:
         from src.kernel.session_manager import db, db_lock
         from src.domains.runtime.engine.health import derive_runtime_health
         online = 0
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT status, last_seen_at FROM runtime_credentials WHERE status != 'revoked'")
-            for status, last_seen in c.fetchall():
-                try:
-                    if derive_runtime_health(status or "offline", last_seen, now_ts) == "online":
-                        online += 1
-                except Exception:
-                    pass
+        for status, last_seen in _rt_alerts.alerts_credential_heartbeats():
+            try:
+                if derive_runtime_health(status or "offline", last_seen, now_ts) == "online":
+                    online += 1
+            except Exception:
+                pass
         vals["runtimes_online"] = float(online)
     except Exception as e:
         log.warning(f"obs platform runtimes_online failed: {e}")
@@ -529,10 +499,7 @@ def _platform_metrics() -> Dict[str, float]:
     # SQLite 无单表统计，用 page_count×page_size 整库体积作上界参考（测试/单机部署）。
     try:
         from src.kernel.session_manager import _is_mysql_backend, db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM agent_tasks")
-            vals["agent_tasks_rows"] = float(c.fetchone()[0] or 0)
+        vals["agent_tasks_rows"] = float(_rt_alerts.alerts_task_rows_total())
         if _is_mysql_backend():
             with db_lock:
                 c = db.cursor()
@@ -860,30 +827,13 @@ def _recipients_for_event(event: Dict[str, Any]) -> List[tuple]:
         else:
             with db_lock:
                 c = db.cursor()
+                # 收件人：仓库成员取并集 / 无仓库时取已绑飞书的账号全量（表都归 mgmt）
                 if rk:
-                    from src.kernel.domain_read import mgmt_lib as _mg_ur
-                    _ur = _mg_ur(foreign_only=True)
-                    if _ur is not None:
-                        _rows_ur = _ur.read_all("user_ids_by_repo", (rk,))
-                    else:
-                        c.execute("SELECT DISTINCT user_id FROM user_repos WHERE repo_key=?", (rk,))
-                        _rows_ur = c.fetchall()
+                    uids = _mgmt_alerts.repo_member_user_ids([rk])
                 elif event.get("repo_keys"):
-                    # 聚合汇总：多个仓库的收件人取并集
-                    rks = [str(x) for x in (event.get("repo_keys") or []) if str(x).strip()]
-                    ph = ",".join("?" for _ in rks)
-                    c.execute(f"SELECT DISTINCT user_id FROM user_repos WHERE repo_key IN ({ph})",
-                              tuple(rks))
+                    uids = _mgmt_alerts.repo_member_user_ids(event.get("repo_keys"))
                 else:
-                    from src.kernel.domain_read import mgmt_lib as _mg_um_all
-                    _um_all = _mg_um_all(foreign_only=True)
-                    if _um_all is not None:
-                        _rows_um = _um_all.read_all("um_feishu_open_ids_all", ())
-                    else:
-                        c.execute("SELECT DISTINCT user_id FROM unified_user_mapping"
-                                  " WHERE feishu_open_id!='' AND user_id IS NOT NULL AND user_id NOT IN ('', '0')")
-                        _rows_um = c.fetchall()
-                uids = [int(r[0]) for r in _rows_um if r and r[0]]
+                    uids = _mgmt_alerts.mapped_feishu_user_ids()
     except Exception as e:
         log.warning(f"obs alert recipients lookup failed: {e}")
         return []
@@ -1160,15 +1110,21 @@ def visible_runtime_dim_keys(user: Dict[str, Any], repo_keys: List[str]) -> List
     与设备列表/资源曲线同一口径（`overview._cred_visibility`），避免"设备看得见、它的静默事件看不见"。
     """
     from src.domains.insight.observability.overview import _cred_visibility
-    from src.kernel.session_manager import db, db_lock
-    frag, params = _cred_visibility(user, list(repo_keys or []))
     ids: List[int] = []
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id FROM runtime_credentials WHERE status != 'revoked'"
-                      + frag, tuple(params))
-            ids = [int(r[0]) for r in c.fetchall()]
+        # 可见性口径与 _cred_visibility 一致：非个人组织按 org_id，指定仓库按 global+本人+该仓，否则 global+本人
+        _org_id = str(user.get("org_id") or "") if isinstance(user, dict) else ""
+        _is_personal = True
+        if _org_id:
+            try:
+                from src.domains.mgmt.user.org_db import is_org_personal
+                _is_personal = is_org_personal(_org_id)
+            except Exception:
+                _is_personal = False
+        ids = _rt_alerts.credential_ids_visible(
+            org_id=_org_id, personal_org=_is_personal,
+            uname=(user.get("username") or "") if isinstance(user, dict) else "",
+            repo_keys=list(repo_keys or []))
     except Exception as e:
         log.warning(f"obs visible runtimes failed: {e}")
     return [f"runtime:{i}" for i in ids]
