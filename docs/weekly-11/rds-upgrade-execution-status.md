@@ -160,6 +160,41 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### engine_select 引擎选型/绑定维护接口化（-18，本文件清零）
+- 文件：`src/domains/runtime/engine/engine_select.py`（18 处 → **0**）；全局静态 **350 → 332**（79 对）。
+- 表分布（消费域 runtime）：`grape_accounts` 5、`autopilot_tasks` 4、`user_repos` 3、`devops_pipeline_scene` 3、
+  `external_identities` 2、`unified_user_mapping` 1。
+- 新增（mgmt public）：`_ANY_QUERIES` 具名查询表（`?` 占位符）+ `read_one_any/read_all_any/exec_any`
+  （任意拓扑：自有 DSN 走 db_registry，单库/测试回落进程主库 + db_lock），共 11 条查询；
+  薄函数 10 个：`mapping_user_id_by_column` / `account_id_by_platform_login` /
+  `repo_user_id_by_platform_login` / `first_join_user_id_by_repo` / `user_repo_keys_by_username` /
+  `list_active_scene_nodes` / `list_active_scene_bindings` / `list_enabled_autopilot_engine_ids` /
+  `list_autopilot_engine_ids_nonempty` / `set_autopilot_engine_ids_any`。
+- 关键取舍：
+  1) **原实现对每个站点都是「lib 优先 + 本地兜底 SQL」双份**（`mgmt_lib(foreign_only=True)` 无自有 DSN 时返回 None，
+     兜底 SQL 就是跨域统计来源）。本轮把兜底路径换成 owner 域的**任意拓扑原语**——单库拓扑由 owner 自己路由连接，
+     同一份 SQL 两条连接都能跑，调用方不再需要兜底，语义不变而引用清零。
+  2) **动态列名收回 owner 域**：`unified_user_mapping` 的列名原由调用方用 `um_column_for_repo()` 拼进 f-string。
+     改为 mgmt 侧 `_UM_COLUMN_QUERIES` 白名单（`gitcode_user` / `github_login`）挑选具名查询；
+     未知平台（如 gitee）列名为空串 → 抛 KeyError → 调用方原有的 `except → 0` 兜住，与原「空列名拼出语法错 → 返回 0」逐字同口径。
+  3) **跨域 JOIN 不拆**：`user_repos JOIN grape_accounts ... EXISTS external_identities` 涉及的三张表全归 mgmt，
+     按「JOIN 留在 owner 域、一次具名查询」处理，比拆成两段 + Python 连接更省往返且不丢 `LIMIT 1` 语义。
+  4) **写路径保留幂等意图**：`remap_engine_references` 的任务引擎回写仍优先走 `cross_write.submit`（失败排队重试），
+     只在 lib 不可用/失败时回落 `set_autopilot_engine_ids_any`（owner 域自提交），不再有本域 SQL。
+  5) 场景读（`devops_pipeline_scene`）原本走进程库游标：三库拓扑下该游标是 runtime 库，读 mgmt 表必 1146。
+     改用 owner 原语后 **顺带修掉这个存量缺陷**（`cleanup_scene_engine_bindings` /
+     `remap_scene_engine_bindings` / `_find_scene_bindings_for_runtime` 三处）；后者与
+     `_find_autopilot_tasks_for_runtime` 已不依赖调用方游标（`c` 仅为兼容签名保留）。
+- 语义验证：sqlite 烟测 `/tmp/engine_select_smoke.py`（五级归属链 + 列白名单 + status/LOWER/is_join/id NOT IN 口径 +
+  只动活跃场景 + 停用任务不进提示面 + 写回写）**ALL PASSED**；
+  另做「改动前 vs 改动后」对拍：同一批 18 个 (repo_key, issue_creator) 输入，返回值 **逐字一致**（含 gitee 未知平台 → 0）。
+- 门禁：`rds_gate.sh --quick` **GATE 全绿**（check-arch R1–R8 / 棘轮 / 内部契约 37 条 / 看板）；
+  `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` → import OK；
+  `check_lib_query_names.py` PASS（mgmt 88 funcs + 28 named queries / 143 funcs + 35 queries registered）。
+- 已知非本批问题：`tests/api/test_named_read_queries.py::test_account_queries_match_the_real_call_sites` 因
+  `runtime public._READ_QUERIES` 缺 `account_id_by_platform_login` 键而 KeyError（该键在本分支 HEAD 就不存在，
+  与本批无关；tests/api 不在门禁集内）。
+
 ### 三实例彩排首次全绿（此前唯一未验项，含 3 个真缺陷修复）
 ```bash
 SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin REMOTE_PWD=… \

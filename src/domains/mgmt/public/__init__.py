@@ -706,6 +706,14 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "delete_event_action_filter",
            # W3 派生写
            "add_user_feedback", "save_inbound_message", "upsert_outbound_card",
+           # 任意拓扑具名查询（`?` 占位符；runtime/kernel 读 mgmt 表不再留兜底 SQL）
+           "read_one_any", "read_all_any", "exec_any",
+           "mapping_user_id_by_column", "account_id_by_platform_login",
+           "repo_user_id_by_platform_login", "first_join_user_id_by_repo",
+           "user_repo_keys_by_username",
+           "list_active_scene_nodes", "list_active_scene_bindings",
+           "list_enabled_autopilot_engine_ids", "list_autopilot_engine_ids_nonempty",
+           "set_autopilot_engine_ids_any",
            "health"]
 
 
@@ -1442,6 +1450,151 @@ def _any_tx():
             except Exception as exc:  # noqa: BLE001 - 回滚失败不掩盖原异常
                 log.debug(f"mgmt public rollback skipped: {exc}")
             raise
+
+
+# ---------- 任意拓扑具名查询（`?` 占位符：SQL 只在 owner 域留一份） ----------
+#
+# 与 `_READ_QUERIES` 的区别：那是只在「自有 DSN」拓扑可用的 MySQL 方言（`%s`），
+# 调用方必须自带本地兜底 SQL —— 兜底 SQL 正是跨域表引用的来源。这里一律可移植
+# 方言（`?`），自有 DSN → mgmt 连接；单库 / 视图期 / 测试 → 进程主库，同一份 SQL
+# 两条连接都能执行，调用方不需要（也不允许）再留兜底 SQL。
+
+_ANY_QUERIES: dict[str, str] = {
+    # 用户映射：按平台列取映射用户（列名由本域白名单挑选，调用方不得拼列名）
+    "um_user_id_by_gitcode_user": (
+        "SELECT user_id FROM unified_user_mapping "
+        "WHERE gitcode_user=? AND gitcode_user!='' AND user_id!='' AND user_id!='0' LIMIT 1"),
+    "um_user_id_by_github_login": (
+        "SELECT user_id FROM unified_user_mapping "
+        "WHERE github_login=? AND github_login!='' AND user_id!='' AND user_id!='0' LIMIT 1"),
+    # 平台 login → 账号 id（账号名≠平台 login 时以 external_identities 为准）
+    "account_id_by_platform_login": (
+        "SELECT ga.id FROM grape_accounts ga "
+        "WHERE ga.id IS NOT NULL AND ga.id NOT IN ('', '0') AND ga.status=1 "
+        "AND EXISTS (SELECT 1 FROM external_identities ei "
+        "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
+        "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') LIMIT 1"),
+    # 仓库成员：平台 login → user_id（三级回退的最后一级，未注册用户靠它命中）
+    "repo_user_id_by_platform_login": (
+        "SELECT ur.user_id FROM user_repos ur "
+        "JOIN grape_accounts ga ON ga.id = ur.user_id "
+        "WHERE ga.status=1 "
+        "AND EXISTS (SELECT 1 FROM external_identities ei "
+        "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
+        "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') "
+        "AND (ur.repo_key=? OR ur.repo_key=?) AND ur.is_join=1 LIMIT 1"),
+    "first_join_user_id_by_repo": (
+        "SELECT user_id FROM user_repos WHERE (repo_key=? OR repo_key=?) AND is_join=1 "
+        "ORDER BY user_id LIMIT 1"),
+    "user_repo_keys_by_username": (
+        "SELECT ur.repo_key FROM user_repos ur JOIN grape_accounts ua ON ua.id = ur.user_id "
+        "WHERE LOWER(ua.username)=LOWER(?) AND ur.is_join = 1"),
+    # 场景 / 自动化任务（管理域表；runtime 的引擎绑定维护读）
+    "active_scene_nodes": "SELECT id, nodes_json FROM devops_pipeline_scene WHERE is_active=1",
+    "active_scene_bindings": (
+        "SELECT id, repo_key, scene_id, nodes_json FROM devops_pipeline_scene WHERE is_active=1"),
+    "enabled_autopilot_engine_ids": (
+        "SELECT id, name, engine_runtime_ids FROM autopilot_tasks WHERE enabled=1"),
+    "autopilot_engine_ids_nonempty": (
+        "SELECT id, engine_runtime_ids FROM autopilot_tasks WHERE engine_runtime_ids != ''"),
+    "autopilot_engine_ids_set": "UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
+}
+
+#: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
+#: 与原实现「拼出空列名 → SQL 语法错 → 整函数返回 0」的口径一致，不引入新行为。
+_UM_COLUMN_QUERIES: dict[str, str] = {
+    "gitcode_user": "um_user_id_by_gitcode_user",
+    "github_login": "um_user_id_by_github_login",
+}
+
+
+def _any_sql(name: str) -> str:
+    """取具名查询 SQL；未登记抛 KeyError（不静默退回任意 SQL）。"""
+    sql = _ANY_QUERIES.get(name)
+    if sql is None:
+        raise KeyError(f"unknown portable mgmt query: {name}")
+    return sql
+
+
+def read_one_any(name: str, params: tuple = ()) -> Any | None:
+    """按具名查询读单行（任意拓扑，可移植方言）。"""
+    with _any_cursor() as c:
+        c.execute(_any_sql(name), params)
+        return c.fetchone()
+
+
+def read_all_any(name: str, params: tuple = ()) -> list[Any]:
+    """按具名查询读多行（任意拓扑，可移植方言）。"""
+    with _any_cursor() as c:
+        c.execute(_any_sql(name), params)
+        return list(c.fetchall() or [])
+
+
+def exec_any(name: str, params: tuple = ()) -> int:
+    """按具名查询执行写语句（任意拓扑，自提交），返回影响行数。"""
+    with _any_cursor(write=True) as c:
+        cur = c.execute(_any_sql(name), params)
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def mapping_user_id_by_column(column: str, value: str) -> Any:
+    """按 unified_user_mapping 平台列取映射 user_id（无命中返回 None）。
+
+    列名必须在 `_UM_COLUMN_QUERIES` 白名单内；未登记列抛 KeyError（调用方按原
+    实现的 except 口径处理），保证 SQL 不因外部传入的列名变成任意拼接。
+    """
+    row = read_one_any(_UM_COLUMN_QUERIES[column or ""], (value,))
+    return row[0] if row else None
+
+
+def account_id_by_platform_login(provider: str, login: str) -> Any:
+    """平台 login → grape 账号 id（status=1，login 大小写不敏感）；无命中 None。"""
+    row = read_one_any("account_id_by_platform_login", (provider, login))
+    return row[0] if row else None
+
+
+def repo_user_id_by_platform_login(provider: str, login: str, repo_key: str,
+                                   prefixed_repo_key: str) -> Any:
+    """平台 login → 该仓库成员 user_id（三级回退末级）；无命中 None。"""
+    row = read_one_any("repo_user_id_by_platform_login",
+                       (provider, login, repo_key, prefixed_repo_key))
+    return row[0] if row else None
+
+
+def first_join_user_id_by_repo(repo_key: str, prefixed_repo_key: str) -> Any:
+    """取仓库最早加入的成员 user_id（issue_creator 为空时的原逻辑）；无行 None。"""
+    row = read_one_any("first_join_user_id_by_repo", (repo_key, prefixed_repo_key))
+    return row[0] if row else None
+
+
+def user_repo_keys_by_username(username: str) -> list[str]:
+    """按注册名（大小写不敏感）取该用户已加入的仓库键（is_join=1）。"""
+    return [r[0] for r in read_all_any("user_repo_keys_by_username", (username,))]
+
+
+def list_active_scene_nodes() -> list[Any]:
+    """全部启用场景的 (id, nodes_json)，列序与引擎绑定维护的原查询一致。"""
+    return read_all_any("active_scene_nodes", ())
+
+
+def list_active_scene_bindings() -> list[Any]:
+    """全部启用场景的 (id, repo_key, scene_id, nodes_json)（解绑审计用）。"""
+    return read_all_any("active_scene_bindings", ())
+
+
+def list_enabled_autopilot_engine_ids() -> list[Any]:
+    """启用中的自动化任务 (id, name, engine_runtime_ids)（引擎解绑提示用）。"""
+    return read_all_any("enabled_autopilot_engine_ids", ())
+
+
+def list_autopilot_engine_ids_nonempty() -> list[Any]:
+    """已声明引擎列表的任务 (id, engine_runtime_ids)（引擎 id 重映射用）。"""
+    return read_all_any("autopilot_engine_ids_nonempty", ())
+
+
+def set_autopilot_engine_ids_any(task_id: int, engine_runtime_ids_json: str) -> int:
+    """回写任务的引擎列表 JSON（任意拓扑；与 `set_autopilot_engine_ids` 同语义）。"""
+    return exec_any("autopilot_engine_ids_set", (engine_runtime_ids_json, int(task_id)))
 
 
 # ---------- 渠道租约（grape_t_channel_lease 归 mgmt；runtime 的 IM 主从选举用） ----------
