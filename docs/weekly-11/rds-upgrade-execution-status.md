@@ -205,6 +205,23 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
   不增行、消息落库 + marked 同事务（重投不产生第二行）、身份解析优先级与渠道列白名单、
   绑定的 user 轨限制与幂等。
 
+### scenes 场景页读路径接口化（-11，本文件清零）
+- 11 处清零，全部指向运行域：`skill` 5、`agent_runtimes` 3、`devops_agent_session` 2、
+  `runtime_credentials` 1（与 agent_runtimes 同一 JOIN）、`engine_capabilities` 1、`agent_tasks` 1。
+- 技能下拉的可见范围（官方 + 本人 + 该仓）、关键词、范围过滤、分页统一进
+  `scene_skill_search(...) -> (total, rows)`；调用方不再拼 `where_sql`。
+- 引擎校验的三处读数收敛成 `runtime_with_credential`（引擎 + 凭据 scope/owner 一次取回）、
+  `runtime_capability_match`（`tag='all'` 通配）、`runtime_status_healthy`、
+  `devops_session_runtime_id`。
+- **修掉一处存量 bug**：引擎健康与旧绑定回退两处都写成 `c = lib.read_one(...).fetchone()` ——
+  对已取回的行再 `.fetchone()`（AttributeError 被吞），且把游标变量 `c` 覆盖成行，
+  后续 `c.execute(...)` 直接失败 → 「离线引擎被当成健康」与「旧绑定读不到」两个静默错。
+  改成原语后两个分支只有一条路径。
+- 全局 **361 → 350**（-11）；基线 **350 / 80 对**。
+- 新增 `scenes_smoke`（6 组）：可见范围（含停用行的原口径）、关键词/范围/分页、
+  批量取技能与启用校验、引擎+凭据 LEFT JOIN（缺凭据时后两列为空）、能力标签通配与停用标签、
+  健康位/会话绑定/任务归属。
+
 ### 租约存储 + 告警求值接口化（-22，两个文件清零）
 - **`runtime/im/bot_lease.py`（11 处）**：渠道租约/安装表归 mgmt，SQL 下沉成 8 个原语
   （`lease_acquire_row` 的「惰性建行 + CAS 抢占」两句同事务、`lease_renew_expiry` 只推到期时间、

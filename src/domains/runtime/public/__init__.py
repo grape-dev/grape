@@ -3694,3 +3694,95 @@ def credential_ids_visible(org_id: str = "", personal_org: bool = True,
     with _any_cursor() as c:
         c.execute(sql, params)
         return [int(r[0]) for r in (c.fetchall() or [])]
+
+
+# ---------- 场景页（mgmt/routes/scenes.py）读路径：技能/引擎/会话 ----------
+
+def task_issue_repo(task_id: str):
+    """任务所属 (issue_id, repo_key)；无行返回 None。"""
+    with _any_cursor() as c:
+        c.execute("SELECT issue_id, repo_key FROM agent_tasks WHERE id=? LIMIT 1", (task_id,))
+        return c.fetchone()
+
+
+def skills_by_ids(skill_ids) -> list[tuple]:
+    """按 id 批量取技能（id, name, display, agent_type, description, scope），只取启用行。"""
+    ids = [int(i) for i in (skill_ids or []) if str(i).strip()]
+    if not ids:
+        return []
+    ph = ",".join(["?"] * len(ids))
+    with _any_cursor() as c:
+        c.execute(f"SELECT id, skill_name, display_name, agent_type, description, scope "
+                  f"FROM skill WHERE id IN ({ph}) AND is_active=1", ids)
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def skill_ids_active(skill_ids) -> list[int]:
+    """批量校验技能 id 仍启用；返回命中的 id 列表。"""
+    ids = [int(i) for i in (skill_ids or []) if str(i).strip()]
+    if not ids:
+        return []
+    ph = ",".join(["?"] * len(ids))
+    with _any_cursor() as c:
+        c.execute(f"SELECT id FROM skill WHERE id IN ({ph}) AND is_active=1", ids)
+        return [int(r[0]) for r in (c.fetchall() or [])]
+
+
+def scene_skill_search(user_id: str, repo_key: str, q: str = "", scope: str = "",
+                       page: int = 1, page_size: int = 50) -> tuple:
+    """场景页技能下拉：可见范围 = 官方 + 本人 + 该仓，可按关键词/范围过滤，返回 (total, rows)。
+
+    条件在本域拼（skill 归运行域），调用方只给口径参数。
+    """
+    where = ["(scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))"]
+    params: list = [user_id, repo_key]
+    if q:
+        where.append("(skill_name LIKE ? OR display_name LIKE ?)")
+        params += [f"%{q}%", f"%{q}%"]
+    if scope:
+        where.append("scope=?")
+        params.append(scope)
+    where_sql = " AND ".join(where)
+    with _any_cursor() as c:
+        c.execute(f"SELECT COUNT(*) FROM skill WHERE {where_sql}", params)
+        total = int((c.fetchone() or [0])[0] or 0)
+        offset = max(0, (int(page) - 1) * int(page_size))
+        c.execute(
+            "SELECT id, skill_name, display_name, scope, owner_id, description, agent_type "
+            f"FROM skill WHERE {where_sql} ORDER BY scope, skill_name LIMIT ? OFFSET ?",
+            params + [int(page_size), offset])
+        return total, [tuple(r) for r in (c.fetchall() or [])]
+
+
+def runtime_with_credential(runtime_id) -> tuple | None:
+    """引擎行 + 其凭据的 (credential_id, credential_scope, credential_owner_id)。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT r.credential_id, rc.scope, rc.owner_id FROM agent_runtimes r "
+            "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id WHERE r.id=?",
+            (runtime_id,))
+        return c.fetchone()
+
+
+def runtime_capability_match(runtime_id, tag: str) -> bool:
+    """引擎是否具备某能力标签（tag='all' 视为通配）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND enabled=1 "
+                  "AND (tag=? OR tag='all') LIMIT 1", (runtime_id, tag))
+        return c.fetchone() is not None
+
+
+def runtime_status_healthy(runtime_id) -> tuple | None:
+    """引擎的 (status, healthy) 位；无行返回 None。"""
+    with _any_cursor() as c:
+        c.execute("SELECT status, healthy FROM agent_runtimes WHERE id=?", (runtime_id,))
+        return c.fetchone()
+
+
+def devops_session_runtime_id(repo_key: str, agent_type: str) -> str:
+    """仓库×代理类型绑定的引擎 id（无则空串）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT runtime_id FROM devops_agent_session "
+                  "WHERE repo_key=? AND agent_type=?", (repo_key, agent_type))
+        row = c.fetchone()
+        return str(row[0]) if row and row[0] else ""
