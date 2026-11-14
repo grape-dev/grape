@@ -160,6 +160,29 @@ LOOP_MAX=1 bash scripts/p4_p5_loop.sh
 P5 环境验收 PASS（A1/A2/A6），全 API 冒烟 0 失败；循环退出「环境侧全绿」。
 静态余量仍 1232 处（A3 代码面，`--env-only` 只报告不阻断环境验收）。
 
+### mgmt/user/db 引擎/技能/凭据/场景接口化（-48，本文件清零）
+- `src/domains/mgmt/user/db.py` 的 48 处外域引用**全部清零**：`agent_runtimes` 15、`skill` 10、
+  `grape_t_repo_credentials` 10、`meta` 6、`engine_capabilities` 2、`runtime_credentials` 2（JOIN）、
+  `scene_category` 2、`devops_agent_session` 1。
+- **归属更正**：`grape_t_repo_credentials` 归 **insight**（不是 runtime，交接文档 §6 已点名）。
+  insight public 原只有 W3 派生写，本次补上任意拓扑面（`_REPO_CRED_QUERIES` 8 条具名查询 +
+  `repo_credential_value/meta`、`upsert_repo_credential_value`、`clear_repo_credential_value`、
+  `any_repo_credential`、`repo_keys_sharing_value`、`repo_keys_with_nonempty_credential`）。
+  原实现借 `runtime_lib` 读/写这张表，三库独立后会打到 runtime 库（1146/写错库），本轮一并纠正。
+- `NOT EXISTS (SELECT 1 FROM grape_t_repo_credentials ...)` 关联子查询无法跨库执行，改为
+  「owner 域取有凭据的仓库集合 → 本域行集过滤」，语义等价（空值视同无凭据）。
+- `save_agent_runtimes` 的整段「探测即快照」（逐引擎 upsert + prune + dedupe）原先在 mgmt 侧用
+  本域连接跑 8 条 SQL；现统一走 `runtime.public.upsert_local_runtimes`，该原语改用 `_any_tx()`
+  与可移植方言（`?`），单库拓扑回落进程库 —— 事务边界不变（一次快照仍是一次事务）。
+  `ensure_default_runtime` 同样改为任意拓扑原语。
+- 全局 **676 → 628**（-48）；基线收紧 **628 / 112 对**。
+- 验证：`rds_gate --quick` GATE 全绿；`pytest tests/arch tests/contracts tests/scripts` 158 passed；
+  本地 sqlite 六组烟测全通过（引擎快照 upsert/prune/dedupe、默认引擎幂等、场景分类、技能列表、
+  仓库凭据 upsert/读/批量判存）。
+- 已知差异（如实）：`get_agent_runtimes_age` 用 `strptime("%Y-%m-%d %H:%M:%S")` 解析 `updated_at`，
+  sqlite 下该列是 TEXT（ISO 串）会抛 ValueError；MySQL DATETIME 列会自动归一，属**改造前既有**行为，
+  本轮未改语义（烟测跳过该断言）。
+
 ### session_manager 会话/消息/群绑定接口化（-56，本文件清零）
 - `src/kernel/session_manager.py` 的 56 处外域引用**全部清零**：`chat_agent_session` /
   `chat_conversations` / `chat_messages` / `repo_im_group_binding` / `issue` / `agent_runtimes`

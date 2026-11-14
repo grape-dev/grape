@@ -16,6 +16,10 @@ D32 迁移完成后 user_accounts 表为死表，不再被业务代码读取。
 import json, hashlib, re, time, os, warnings, threading
 
 from src.kernel.session_manager import db, db_lock
+# 运行域表的读写一律走该域 public 的具名查询/原语（三库独立后无视图可读，本文件不留外域 SQL）
+from src.domains.runtime import public as _rt
+# grape_t_repo_credentials 归 insight（不是 runtime）：仓库凭据唯一权威读写口在该域 public
+from src.domains.insight import public as _insight_public
 
 from src.kernel.config import log
 
@@ -979,9 +983,9 @@ def init_db():
                 c.execute("SELECT webhook_url FROM user_accounts WHERE webhook_url IS NOT NULL AND webhook_url!='' LIMIT 1")
                 row = c.fetchone()
                 if row and row[0]:
-                    c.execute("SELECT COUNT(*) FROM meta WHERE key='webhook_url'")
-                    if c.fetchone()[0] == 0:
-                        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('webhook_url', ?)", (row[0],))
+                    # meta 归运行域：计数判存 + 写入都走任意拓扑原语（单库回落进程库，三库走自有 DSN）
+                    if (_rt.read_one_any("meta_count", ("webhook_url",)) or (0,))[0] == 0:
+                        _rt.set_meta_value_any("webhook_url", row[0])
             # 2. OAuth 配置 → meta 表（default 账户清理时已完成，此处兜底）
             if "gitcode_oauth_client_id" in ua_cols:
                 c.execute("SELECT gitcode_oauth_client_id, gitcode_oauth_client_secret, gitcode_oauth_redirect_uri FROM user_accounts WHERE gitcode_oauth_client_id IS NOT NULL AND gitcode_oauth_client_id!='' LIMIT 1")
@@ -989,9 +993,8 @@ def init_db():
                 if row:
                     for meta_key, val in zip(("oauth_gitcode_client_id", "oauth_gitcode_client_secret", "oauth_gitcode_redirect_uri"), row):
                         if val:
-                            c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
-                            if c.fetchone()[0] == 0:
-                                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
+                            if (_rt.read_one_any("meta_count", (meta_key,)) or (0,))[0] == 0:
+                                _rt.set_meta_value_any(meta_key, val)
             # 3. bot_usernames → managed_repos.bot_username（对每个配置了 bot_usernames 的账户）
             if "bot_usernames" in ua_cols:
                 c.execute("SELECT username, bot_usernames FROM user_accounts WHERE bot_usernames IS NOT NULL AND bot_usernames!=''")
@@ -1518,13 +1521,11 @@ def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: s
             if _dsk_done:
                 deleted = int(_dsk_n.get("n") or 0) > 0
             else:
-                if scope == "repo":
-                    c.execute("DELETE FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=?",
-                              (skill_name, owner_id or str(user_id)))
-                else:
-                    c.execute("DELETE FROM skill WHERE skill_name=? AND scope='user' AND owner_id=?",
-                              (skill_name, str(user_id)))
-                deleted = c.rowcount > 0
+                # skill 归运行域：单调 DELETE 走任意拓扑具名查询（参数化 scope，不再各写一条 SQL）
+                _dsk_scope = "repo" if scope == "repo" else "user"
+                _dsk_target = (owner_id or str(user_id)) if scope == "repo" else str(user_id)
+                deleted = _rt.exec_any("skill_delete_by_owner_scope",
+                                       (skill_name, _dsk_scope, _dsk_target)) > 0
             db.commit()
             # 删除技能目录
             import shutil
@@ -1541,10 +1542,9 @@ def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: s
         return False
 
 def list_skills(user_id: int) -> list[dict]:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id FROM skill WHERE scope='user' AND owner_id=? ORDER BY id", (str(user_id),))
-        return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "scope": r[4], "owner_id": r[5], "file_path": r[6] or "", "category_id": r[7] or 0, "created_at": ""} for r in c.fetchall()]
+    # skill 归运行域：具名查询（任意拓扑），列序与原 SQL 一致
+    rows = _rt.read_all_any("skills_user_by_owner", (str(user_id),))
+    return [{"id": r[0], "skill_name": r[1], "agent_type": r[2] or "", "description": r[3] or "", "scope": r[4], "owner_id": r[5], "file_path": r[6] or "", "category_id": r[7] or 0, "created_at": ""} for r in rows]
 
 def save_skill_md(user_id: int, skill_name: str, content: str) -> bool:
     """保存 SKILL.md 内容"""
@@ -2082,12 +2082,11 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
                 _q = (f"SELECT repo_key FROM managed_repos "
                       f"WHERE ({_bot_token_col}=? OR {_bot_token_col}=?) AND repo_key!=?")
                 c.execute(_q, (_enc, bot_token, repo_key))
+                _related_repos = [r[0] for r in c.fetchall()]
             else:
-                _q = ("SELECT repo_key FROM grape_t_repo_credentials "
-                      "WHERE cred_type='bot' AND (value=? OR value=?) "
-                      "AND repo_key LIKE ? AND repo_key!=?")
-                c.execute(_q, (_enc, bot_token, f"{provider}:%", repo_key))
-            _related_repos = [r[0] for r in c.fetchall()]
+                # 凭据表归 insight：共用同一凭据值的仓库排查走该域原语
+                _related_repos = _insight_public.repo_keys_sharing_value(
+                    "bot", (_enc, bot_token), f"{provider}:%", repo_key)
     except Exception:
         pass
     if _related_repos:
@@ -2190,15 +2189,8 @@ def _repo_bot_token_value(repo_key: str) -> str:
                 pass
         # ② rc 单表（空卡列平台终态；老库无表→吞异常走③）
         try:
-            from src.kernel.domain_read import runtime_lib as _rt_lib_bt
-            _bt_lib = _rt_lib_bt(foreign_only=True)
-            if _bt_lib is not None:
-                row = _bt_lib.read_one("repo_bot_token_value", (repo_key,))
-            else:
-                c.execute(
-                    "SELECT value FROM grape_t_repo_credentials "
-                    "WHERE repo_key=? AND cred_type='bot' LIMIT 1", (repo_key,))
-                row = c.fetchone()
+            # 凭据表归 insight：单条读取走该域原语（行存在即返回，含空值——与原语义一致）
+            row = _insight_public.repo_credential_meta(repo_key, "bot")
             if row:
                 return _decrypt_repo_secret(row[0] or "")
         except Exception:
@@ -2660,13 +2652,8 @@ def _is_user_token_repo(repo_key: str) -> bool:
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute(
-                    "SELECT repo_gitcode_token FROM devops_agent_session "
-                    "WHERE repo_key=? AND repo_gitcode_token IS NOT NULL "
-                    "AND repo_gitcode_token!='' LIMIT 1",
-                    (repo_key,),
-                )
-                if c.fetchone():
+                # devops_agent_session 归运行域：具名查询（任意拓扑）
+                if _rt.read_one_any("devops_agent_session_repo_token", (repo_key,)):
                     return False
         except Exception:
             pass
@@ -2802,15 +2789,15 @@ def _query_path_b_repos(provider: str = "gitcode") -> list[dict]:
             # "no non-empty bot row in rc" (NOT EXISTS; decryption comparison is not usable in SQL,
             # empty-value rows are treated as absent, consistent with the read-side rc semantics).
             if not _tok_col:
+                # 凭据表归 insight：先取「已有非空 bot 凭据」的仓库集合，再在本域行集上过滤
+                # （等价于原 NOT EXISTS 关联子查询：空值行视同无凭据）
+                _has_bot = _insight_public.repo_keys_with_nonempty_credential("bot")
                 c.execute(
                     "SELECT repo_key, repo_owner, repo_name, host_user_id FROM managed_repos "
                     f"WHERE (host_user_id IS NOT NULL AND host_user_id != '' AND host_user_id != '0') "
                     f"AND {_prefix_clause} "
-                    "AND NOT EXISTS (SELECT 1 FROM grape_t_repo_credentials rc "
-                    "  WHERE rc.repo_key = managed_repos.repo_key AND rc.cred_type='bot' "
-                    "  AND rc.value IS NOT NULL AND rc.value != '')"
                 )
-                rows = c.fetchall()
+                rows = [r for r in (c.fetchall() or []) if r[0] not in _has_bot]
                 return [
                     {"repo_key": r[0], "repo_owner": r[1], "repo_name": r[2], "host_user_id": r[3]}
                     for r in (rows or [])
@@ -3548,10 +3535,8 @@ def migrate_accounts_from_json():
                 for src_key, meta_key in _oauth_keys:
                     val = acc.get(src_key, "") or ""
                     if val:
-                        c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
-                        if c.fetchone()[0] == 0:
-                            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
-                                      (meta_key, val))
+                        if (_rt.read_one_any("meta_count", (meta_key,)) or (0,))[0] == 0:
+                            _rt.set_meta_value_any(meta_key, val)
                             migrated = True
                 # 写入冻结铁律（2026-11-07）：原 DELETE default 账户语句已删除——
                 # 行留着无害（零业务读），配置已迁移即达成目的。守卫: GC1-GC3。
@@ -3964,10 +3949,9 @@ def migrate_agent_runtimes_utc_caliber(tolerance_seconds: int = 60, throttle_sec
     now_ts = _dt.now(_tz.utc).timestamp()
     changed = 0
     with db_lock:
-        c = db.cursor()
         try:
-            c.execute("SELECT id, last_seen_at, updated_at FROM agent_runtimes")
-            for rid, last_seen, updated in c.fetchall():
+            # agent_runtimes 归运行域：整表读 + 逐行归一都走任意拓扑具名查询/写查询
+            for rid, last_seen, updated in _rt.read_all_any("runtime_utc_caliber_rows"):
                 new_last, new_updated = last_seen, updated
                 for col, val in (("last_seen_at", last_seen), ("updated_at", updated)):
                     if not val or not isinstance(val, str):
@@ -3986,17 +3970,10 @@ def migrate_agent_runtimes_utc_caliber(tolerance_seconds: int = 60, throttle_sec
                         else:
                             new_updated = norm
                 if new_last != last_seen or new_updated != updated:
-                    c.execute(
-                        "UPDATE agent_runtimes SET last_seen_at=?, updated_at=? WHERE id=?",
-                        (new_last, new_updated, rid))
+                    _rt.exec_any("runtime_set_timestamps", (new_last, new_updated, rid))
                     changed += 1
-            db.commit()
         except Exception as e:
             log.warning(f"migrate_agent_runtimes_utc_caliber failed: {e}")
-            try:
-                db.rollback()
-            except Exception:
-                pass
     return changed
 
 def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
@@ -4038,117 +4015,12 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                  "host_name": host_name, "now_iso": _now_iso}, _apply_sar, log):
             log.info(f"save_agent_runtimes via lib: {_sar_out}")
             return
-    with db_lock:
-        c = db.cursor()
-        # P0 修复：MySQL 下缩短 innodb_lock_wait_timeout（50s→5s），
-        # 防止 admin 连接池泄漏占锁时 DELETE 被阻塞导致进程崩溃 (Lock wait timeout 1205)。
-        # SQLite 无此概念，执行会报错直接忽略。
-        try:
-            c.execute("SET SESSION innodb_lock_wait_timeout=5")
-        except Exception:
-            pass
-        try:
-            for a in agents:
-                name = (a.get("name", "") or "").strip().lower()
-                if not name:
-                    continue
-                # 本机直连 engine 的 local_skills + skill 详情
-                _ls_json = json.dumps(a.get("local_skills", []), ensure_ascii=False)
-                _detail = a.get("local_skills_detail")
-                _detail_json = json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
-                # 匹配已有本机直连行：优先 host_name 精确匹配，其次 host_name 为空/NULL 的遗留孤儿行（claim 它）
-                # 防止 host_name 字段引入后旧行（host_name=''）匹配不上 → 新建重复行 → 前端显示两个 opencode-cred0
-                from src.kernel.domain_read import runtime_lib as _ru_lib_874081_f
-                _ru_lib_874081 = _ru_lib_874081_f(foreign_only=True)
-                if _ru_lib_874081 is not None:
-                    row = _ru_lib_874081.read_one("agent_runtimes_874081", (name, scope, owner_id, host_name, host_name))
-                else:
-                    c.execute(
-                        "SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? AND credential_id=0 "
-                        "AND (host_name=? OR host_name='' OR host_name IS NULL) "
-                        "ORDER BY CASE WHEN host_name=? THEN 0 ELSE 1 END, id LIMIT 1",
-                        (name, scope, owner_id, host_name, host_name))
-                    row = c.fetchone()
-                if row:
-                    # Issue #1496：status+last_seen_at 走统一写入口（同事务含遗留
-                    # health 列派生同步），其余展示/配置字段仍随本 upsert 原地更新。
-                    _rid0 = row[0]
-                    _apply_runtime_state_compat(c, _rid0, "online", _now_iso)
-                    c.execute(
-                        "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, "
-                        "pip_package=?, updated_at=?, "
-                        "local_skills=?, skill_scan_result=?, host_name=? WHERE id=?",
-                        (a.get("display_name", name),
-                         1 if a.get("installed") else 0, a.get("cli_path", ""),
-                         a.get("version", ""), 1 if a.get("healthy") else 0,
-                         a.get("pip_package", ""), _now_iso,
-                         _ls_json, _detail_json, host_name, _rid0)
-                    )
-                else:
-                    # 方案1（engine-selection-design.md §4.3）：本机直连（credential_id=0）是独立受管资源。
-                    # refresh 仅持久化"真实安装"的本机 CLI（settings.py 已过滤 installed），即使同名已有
-                    # 凭据绑定行（远端 worker），也创建本机直连行；未安装则跳过（防 -cred0 幽灵占位，
-                    # 见 runtime-admin-two-view-design §6.2）。
-                    if not a.get("installed"):
-                        continue
-                    c.execute(
-                        "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result, host_name, last_seen_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (name, a.get("display_name", name),
-                         1, a.get("cli_path", ""),
-                         a.get("version", ""), 1 if a.get("healthy") else 0,
-                         a.get("pip_package", ""), scope, owner_id,
-                         _ls_json, _detail_json, host_name, _now_iso, _now_iso)
-                    )
-                    rid = c.lastrowid or 0
-                    # 新本机直连引擎默认写入 "all" 标签（与远端 worker 注册行为对齐）：
-                    # 全广播模式下无 worker 时任务由本机直连认领，缺标签会导致任务永久卡 queued。
-                    # 已有 capabilities 行（用户手动配置过）则不覆盖。
-                    from src.kernel.domain_read import runtime_lib as _rt_def
-                    _rtd2 = _rt_def()
-                    if _rtd2 is not None:
-                        # 跨域写：引擎行已在本事务内，能力行走幂等键 cap-default:{rid} 补偿
-                        if not _rtd2.has_engine_capability(rid):
-                            from src.kernel import cross_write as _xw_def
-                            _xw_def.submit("runtime", "engine_cap_upsert", f"cap-default:{rid}",
-                                           {"rid": rid, "tag": "all", "priority": 50},
-                                           lambda: _rtd2.upsert_engine_capability(rid, "all", priority=50))
-                            from src.domains.mgmt.routes.settings import _sync_agent_tags
-                            _sync_agent_tags(rid, c)
-                    else:
-                        c.execute(
-                            "SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
-                        if not c.fetchone():
-                            _now_ec = _now_iso
-                            c.execute(
-                                "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                                "VALUES (?, 'all', 1, 50, 1, ?, ?)",
-                                (rid, _now_ec, _now_ec))
-                            from src.domains.mgmt.routes.settings import _sync_agent_tags
-                            _sync_agent_tags(rid, c)
-            # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）。
-            # 仅清理未绑定凭据的本机行（credential_id=0）；凭据绑定的远端/边端注册行一律保留
-            #（见 multi-runtime-instance-design §5.1 防误删）。
-            current_names = [(a.get("name", "") or "").strip().lower() for a in agents if a.get("name")]
-            if current_names:
-                placeholders = ",".join("?" for _ in current_names)
-                c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND host_name=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, host_name, *current_names))
-            # 去重：同 name+scope+owner_id+org_id+host_name+cred=0 的重复行只保留 id 最小的一条
-            # （upsert 已 claim 旧行并写入 host_name，此处清理未被 claim 的重复行。
-            #  host_name 必须进 GROUP BY：本机直连引擎按主控机隔离（engine-selection-design.md §4.3），
-            #  002 的行与 001 同名不同机，缺 host_name 分组会把 002 的行当重复删掉——
-            #  见 chat-engine-visibility-20261027 排障）
-            c.execute(
-                "DELETE FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
-                "(SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 "
-                "GROUP BY lower(name), scope, owner_id, COALESCE(org_id, 0), COALESCE(host_name, ''))"
-            )
-            db.commit()
-        except Exception as e:
-            log.warning(f"save_agent_runtimes failed (lock timeout or error): {e}")
-            try:
-                db.rollback()
-            except Exception:
-                pass
+    # 任意拓扑：整段「探测即快照」（逐引擎 upsert + prune + dedupe）是运行域的组合原语，
+    # 必须一次事务完成（拆成多条意图会让旧 payload 重放误删新行）；单库拓扑回落进程库。
+    _sar_res = _rt.upsert_local_runtimes(agents, scope, owner_id, host_name, _now_iso)
+    log.info(f"save_agent_runtimes: {_sar_res}")
+    return _sar_res
+
 
 def get_backend_agents(scope: str = "global", owner_id: str = "") -> list[dict]:
     """[兼容别名] 见 get_agent_runtimes"""
@@ -4164,19 +4036,15 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     from src.kernel.domain_read import switch_on as _dr_switch  # noqa: PLC0415
     if _dr_switch("GRAPE_RUNTIMES_VIA_LIB", "runtime"):
         try:
-            from src.domains.runtime import public as _rt
             if _rt.available():
                 return _rows_to_runtimes(_rt.list_runtimes_rows(scope, owner_id))
         except Exception as _exc:  # noqa: BLE001
             import logging as _log
             _log.getLogger(__name__).warning(f"runtimes via lib failed, fallback: {_exc}")
-    with db_lock:
-        c = db.cursor()
-        if scope is None:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id, spawn_fail_degraded_at, detached_from_scenes_at, probe_spawn_fail_count FROM agent_runtimes ORDER BY name")
-        else:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id, spawn_fail_degraded_at, detached_from_scenes_at, probe_spawn_fail_count FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
-        return _rows_to_runtimes(c.fetchall())
+    # agent_runtimes 归运行域：两条具名查询（列序与原 SQL 完全一致），任意拓扑
+    if scope is None:
+        return _rows_to_runtimes(_rt.read_all_any("runtimes_all"))
+    return _rows_to_runtimes(_rt.read_all_any("runtimes_by_scope", (scope, owner_id)))
 
 def _rows_to_runtimes(rows) -> list[dict]:
     """将 DB 行列表转为 runtime dict 列表（供 get_agent_runtimes / paged 复用）。"""
@@ -4221,10 +4089,8 @@ def get_local_direct_runtime_id(name: str) -> int | None:
         if _ru_lib_b84e88 is not None:
             row = _ru_lib_b84e88.read_one("agent_runtimes_b84e88", (name.strip().lower(),))
         else:
-            c.execute(
-                "SELECT id FROM agent_runtimes WHERE lower(name)=? AND credential_id=0 AND installed=1 ORDER BY id LIMIT 1",
-                (name.strip().lower(),))
-            row = c.fetchone()
+            # agent_runtimes 归运行域：具名查询（任意拓扑）
+            row = _rt.read_one_any("runtime_id_local_direct", (name.strip().lower(),))
         return row[0] if row else None
 
 def get_runtime_id_by_name(name: str, scope: str = "global", owner_id: str = "") -> int | None:
@@ -4243,15 +4109,8 @@ def get_runtime_id_by_name(name: str, scope: str = "global", owner_id: str = "")
         if _ru_lib_145cfe is not None:
             row = _ru_lib_145cfe.read_one("agent_runtimes_145cfe", (name, scope, owner_id))
         else:
-            c.execute("""
-                SELECT ar.id FROM agent_runtimes ar
-                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
-                WHERE lower(ar.name)=? AND ar.scope=? AND ar.owner_id=?
-                  AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active')
-                ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC
-                LIMIT 1
-            """, (name, scope, owner_id))
-            row = c.fetchone()
+            # agent_runtimes 归运行域：具名查询（含凭据吊销过滤与 online 优先排序，任意拓扑）
+            row = _rt.read_one_any("runtime_id_by_name_scope_owner", (name, scope, owner_id))
         return row[0] if row else None
 
 def ensure_default_backend(name: str = "opencode", scope: str = "global"):
@@ -4313,15 +4172,8 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
         if _ru_lib_808985 is not None:
             row = _ru_lib_808985.read_one("agent_runtimes_808985", (name, scope))
         else:
-            c.execute("""
-                SELECT ar.id FROM agent_runtimes ar
-                LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
-                WHERE lower(ar.name)=? AND ar.scope=? AND ar.owner_id=''
-                  AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active')
-                ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC
-                LIMIT 1
-            """, (name, scope))
-            row = c.fetchone()
+            # agent_runtimes 归运行域：共享（owner_id=''）具名查询，任意拓扑
+            row = _rt.read_one_any("runtime_id_by_name_scope_shared", (name, scope))
         if row:
             return row[0]
         if not is_known_engine_name(name):
@@ -4359,10 +4211,10 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
                      "version": version, "healthy": healthy, "pip_package": name,
                      "scope": scope}, _apply_edr, log):
                 return int(_edr_out.get("id") or 0) or None
-        c.execute("INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')",
-                  (name, name.capitalize(), 1 if installed else 0, cli_path, version, healthy, name, scope))
-        db.commit()
-        return c.lastrowid
+        # 任意拓扑：组合原语（SELECT online 优先 + 无行则建行），单库回落进程库
+        _edr_res = _rt.ensure_default_runtime(name, name.capitalize(), 1 if installed else 0,
+                                              cli_path, version, healthy, name, scope)
+        return int(_edr_res.get("id") or 0) or None
 
 def get_backend_agents_age() -> float | None:
     """[兼容别名] 见 get_agent_runtimes_age"""
@@ -4377,8 +4229,8 @@ def get_agent_runtimes_age() -> float | None:
         if _ru_lib_e6e235 is not None:
             row = _ru_lib_e6e235.read_one("agent_runtimes_e6e235", ())
         else:
-            c.execute("SELECT MIN(updated_at) FROM agent_runtimes")
-            row = c.fetchone()
+            # agent_runtimes 归运行域：具名聚合查询（任意拓扑）
+            row = _rt.read_one_any("runtime_age")
         if not row or not row[0]:
             return None
     import datetime
@@ -4389,21 +4241,16 @@ def list_scene_categories() -> list[dict]:
     """返回启用的场景分类列表，按 order_num 排序"""
     # P3.5：scene_category 归运行域；lib 可用时走 owner 域读
     from src.kernel.domain_read import owner_lib as _owner_lib  # noqa: PLC0415
-    _rt = _owner_lib("runtime", foreign_only=True)
-    if _rt is not None:
+    _rt_cats = _owner_lib("runtime", foreign_only=True)
+    if _rt_cats is not None:
         try:
             return [{k: v for k, v in c.items() if k != "is_active"}
-                    for c in _rt.list_scene_categories(True)]
+                    for c in _rt_cats.list_scene_categories(True)]
         except Exception as _exc:  # noqa: BLE001
             log.warning(f"runtime lib list_scene_categories failed, fallback: {_exc}")
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT id, name, slug, icon, order_num FROM scene_category "
-            "WHERE is_active=1 ORDER BY order_num"
-        )
-        return [{"id": r[0], "name": r[1], "slug": r[2] or "", "icon": r[3] or "", "order_num": r[4]}
-                for r in c.fetchall()]
+    # 任意拓扑：具名查询在 owner 域一份（列序与原 SQL 一致）
+    return [{"id": r[0], "name": r[1], "slug": r[2] or "", "icon": r[3] or "", "order_num": r[4]}
+            for r in _rt.read_all_any("scene_categories_active")]
 
 def get_scene_category(category_id: int) -> dict | None:
     """按 id 查场景分类"""
@@ -4415,10 +4262,8 @@ def get_scene_category(category_id: int) -> dict | None:
             return _rt_cat.get_scene_category(int(category_id))
         except Exception as _exc:  # noqa: BLE001
             log.warning(f"runtime lib get_scene_category failed, fallback: {_exc}")
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, name, slug, icon FROM scene_category WHERE id=?", (category_id,))
-        row = c.fetchone()
+    # scene_category 归运行域：具名查询（任意拓扑，无需本域游标）
+    row = _rt.read_one_any("scene_category_row", (category_id,))
     if not row:
         return None
     return {"id": row[0], "name": row[1], "slug": row[2] or "", "icon": row[3] or ""}
@@ -4908,23 +4753,21 @@ def toggle_skill_like(user_id: int, skill_id: int) -> tuple[bool, int]:
                         {"skill_id": int(skill_id), "delta": int(delta)},
                         lambda: _rt_lk_ok.adjust_skill_like_count(int(skill_id), int(delta)), log):
                     return
-            c.execute("UPDATE skill SET like_count=like_count" + ("+1" if delta > 0 else "-1")
-                      + " WHERE id=?", (skill_id,))
+            # skill 归运行域：自增/自减走具名写查询（任意拓扑，仍是原子 UPDATE）
+            _rt.exec_any("skill_like_inc" if delta > 0 else "skill_like_dec", (skill_id,))
 
         c.execute("SELECT 1 FROM skill_likes WHERE user_id=? AND skill_id=?", (user_id, skill_id))
         if c.fetchone():
             c.execute("DELETE FROM skill_likes WHERE user_id=? AND skill_id=?", (user_id, skill_id))
             _bump_like(-1)
             db.commit()
-            c.execute("SELECT like_count FROM skill WHERE id=?", (skill_id,))
-            row = c.fetchone()
+            row = _rt.read_one_any("skill_like_count", (skill_id,))
             return (False, row[0] if row else 0)
         else:
             c.execute("INSERT INTO skill_likes (user_id, skill_id) VALUES (?, ?)", (user_id, skill_id))
             _bump_like(+1)
             db.commit()
-            c.execute("SELECT like_count FROM skill WHERE id=?", (skill_id,))
-            row = c.fetchone()
+            row = _rt.read_one_any("skill_like_count", (skill_id,))
             return (True, row[0] if row else 0)
 
 def batch_skill_liked(user_id: int, skill_ids: list[int]) -> dict[int, bool]:
@@ -5069,54 +4912,8 @@ def get_featured_skills(limit: int = 5) -> list[dict]:
         except Exception as _exc:  # noqa: BLE001
             log.warning(f"runtime lib list_featured_skills failed, fallback: {_exc}")
 
-    with db_lock:
-        c = db.cursor()
-        if ordered_ids:
-            # 按 admin 排序返回——查全部精选技能后在 Python 中按 ordered_ids 排序
-            placeholders = ",".join("?" * len(ordered_ids))
-            c.execute(
-                f"SELECT id, skill_name, display_name, description, agent_type, "
-                f"is_featured, like_count, category_id "
-                f"FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official' "
-                f"AND id IN ({placeholders})",
-                ordered_ids
-            )
-            rows = {r[0]: r for r in c.fetchall()}
-            result = []
-            for item_id in ordered_ids:
-                r = rows.get(item_id)
-                if r:
-                    result.append({"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
-                                   "description": r[3] or "", "agent_type": r[4] or "",
-                                   "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0})
-            # admin 排序中不存在的精选技能（如新加的），追加到末尾
-            if len(result) < limit:
-                c.execute(
-                    "SELECT id, skill_name, display_name, description, agent_type, "
-                    "is_featured, like_count, category_id "
-                    "FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official' "
-                    f"AND id NOT IN ({placeholders}) "
-                    "ORDER BY like_count DESC",
-                    ordered_ids
-                )
-                for r in c.fetchall():
-                    result.append({"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
-                                   "description": r[3] or "", "agent_type": r[4] or "",
-                                   "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0})
-            return result[:limit]
-        else:
-            # 降级：按 like_count 降序
-            c.execute(
-                "SELECT id, skill_name, display_name, description, agent_type, "
-                "is_featured, like_count, category_id "
-                "FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official' "
-                "ORDER BY like_count DESC LIMIT ?",
-                (limit,)
-            )
-            return [{"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
-                     "description": r[3] or "", "agent_type": r[4] or "",
-                     "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0}
-                    for r in c.fetchall()]
+    # 任意拓扑：精选技能取数（含「admin 排序 + like_count 降序追加」）在 owner 域一份 SQL
+    return _rt.list_featured_skills_any(list(ordered_ids or []), limit)
 
 def get_browser_callback_url() -> str:
     """浏览器回调基址（OAuth 回调 / 附件 URL / 前端展示用）。
@@ -5212,19 +5009,13 @@ def resolve_official_checker_skill(agent_type: str) -> dict | None:
     if not agent_type:
         return None
     try:
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_43d037_f
-            _ru_lib_43d037 = _ru_lib_43d037_f(foreign_only=True)
-            if _ru_lib_43d037 is not None:
-                rows = _ru_lib_43d037.read_all("skill_43d037", (agent_type,))
-            else:
-                c.execute(
-                    "SELECT id, skill_name, display_name, description, agent_type, skill_path, "
-                    "file_path, scope, owner_id, content_hash FROM skill "
-                    "WHERE agent_type=? AND is_active=1 AND scope='official' ORDER BY id",
-                    (agent_type,))
-                rows = c.fetchall()
+        from src.kernel.domain_read import runtime_lib as _ru_lib_43d037_f
+        _ru_lib_43d037 = _ru_lib_43d037_f(foreign_only=True)
+        if _ru_lib_43d037 is not None:
+            rows = _ru_lib_43d037.read_all("skill_43d037", (agent_type,))
+        else:
+            # skill 归运行域：具名查询（列序与原 SQL 一致，任意拓扑）
+            rows = _rt.read_all_any("skills_official_by_agent", (agent_type,))
         if not rows:
             return None
         pick = next((r for r in rows
@@ -5248,40 +5039,14 @@ def _upsert_repo_credential(c, repo_key: str, cred_type: str, value: str) -> Non
     id 首写 uuid7（主键，更新不碰），value 走 _encrypt_repo_secret。
     F4/D106 修订①：原裸 INSERT 撞 UNIQUE(repo_key, cred_type)（S82 基线
     3 红根因），同仓二次轮换 500——两步法即本助手函数。
+
+    归属更正：该表归 **insight**（不是 runtime）。三步（UPDATE→INSERT→冲突再 UPDATE）
+    收进 `insight.public.upsert_repo_credential_value`，由 owner 域在同一事务内执行；
+    调用方传入的 `c` 不再参与（跨库拓扑下本就不可能与本域写同事务）。
     """
-    from src.kernel.id_gen import uuid7_str
     _now = time.strftime("%Y-%m-%d %H:%M:%S")
     _enc = _encrypt_repo_secret(value or "")
-    # P3-5f-3：grape_t_repo_credentials 在 runtime 域（两步 upsert 收成一个原语）
-    from src.kernel.domain_read import runtime_lib as _rt_lib_urc
-    from src.kernel import cross_write as _xw_urc
-    _rt_urc = _rt_lib_urc(foreign_only=True)
-    if _rt_urc is not None:
-        _rt_urc_ok = _rt_urc
-        if _xw_urc.submit_if_lib(
-                _rt_urc_ok, "runtime", "repo_credential_upsert",
-                f"repo-cred:{repo_key}:{cred_type}",
-                {"repo_key": repo_key, "cred_type": cred_type, "value": _enc,
-                 "updated_at": _now},
-                lambda: _rt_urc_ok.upsert_repo_credential(repo_key, cred_type, _enc, _now), log):
-            return
-    _cur = c.execute(
-        "UPDATE grape_t_repo_credentials SET value=?, updated_at=? WHERE repo_key=? AND cred_type=?",
-        (_enc, _now, repo_key, cred_type),
-    )
-    if _cur.rowcount == 0:
-        try:
-            c.execute(
-                "INSERT INTO grape_t_repo_credentials (id, repo_key, cred_type, value, updated_at) "
-                "VALUES (?,?,?,?,?)",
-                (uuid7_str(), repo_key, cred_type, _enc, _now),
-            )
-        except Exception:
-            # 并发插入撞唯一约束 → retry UPDATE
-            c.execute(
-                "UPDATE grape_t_repo_credentials SET value=?, updated_at=? WHERE repo_key=? AND cred_type=?",
-                (_enc, _now, repo_key, cred_type),
-            )
+    _insight_public.upsert_repo_credential_value(repo_key, cred_type, _enc, _now)
 
 def repo_cred_write_keys(tok_col: str, wh_col: str) -> "tuple[str, str]":
     """F4/D106（凭据存储终态化第一批）：托管写路径的凭据 kwargs 键归一。
@@ -5355,11 +5120,9 @@ def clear_repo_bot_token(repo_key: str) -> bool:
                     f"WHERE repo_key=?", (repo_key,))
                 found = c.rowcount > 0
             else:
-                # 注：本函数当前**零调用方**（审计实测）。暂不接 lib —— 不给死代码加
-                # 跨域依赖；P4 前要么删除、要么随 5f-2 一起接 purge 原语。
-                c.execute(
-                    "UPDATE grape_t_repo_credentials SET value='', updated_at=? "
-                    "WHERE repo_key=? AND cred_type='bot'", (_now, repo_key))
+                # 注：本函数当前**零调用方**（审计实测）。凭据表归 insight，走该域原语
+                # （不再给死代码留跨域 SQL；P4 前要么删除、要么随 purge 原语一起收敛）。
+                _insight_public.clear_repo_credential_value(repo_key, _now)
                 c.execute(
                     "UPDATE managed_repos SET bot_token_status='' WHERE repo_key=?",
                     (repo_key,))
@@ -5553,12 +5316,8 @@ def any_repo_credential_for_repos(repo_keys: "list[str]") -> bool:
     if not keys:
         return False
     try:
-        with db_lock:
-            ph = ",".join(["?"] * len(keys))
-            row = db.cursor().execute(
-                f"SELECT 1 FROM grape_t_repo_credentials WHERE repo_key IN ({ph}) "
-                "AND value IS NOT NULL AND value != '' LIMIT 1", keys).fetchone()
-            return bool(row)
+        # 凭据表归 insight：批量判存走该域原语（任意拓扑）
+        return _insight_public.any_repo_credential(keys)
     except Exception as e:
         log.warning(f"any_repo_credential_for_repos failed: {e}")
         return False
@@ -5570,14 +5329,12 @@ def get_repo_credential_meta(repo_key: str, cred_type: str) -> "dict | None":
     供 RepoBotToken 命中审计用（value 与 id 同事务一致）。
     """
     try:
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT value, id FROM grape_t_repo_credentials WHERE repo_key=? AND cred_type=?",
-                (repo_key, cred_type)).fetchone()
-            if not row:
-                return None
-            return {"value": _decrypt_repo_secret(row[0] or ""),
-                    "id": row[1] or ""}
+        # 凭据表归 insight：value + 审计锚点一次查询（同事务一致）
+        row = _insight_public.repo_credential_meta(repo_key, cred_type)
+        if not row:
+            return None
+        return {"value": _decrypt_repo_secret(row[0] or ""),
+                "id": row[1] or ""}
     except Exception as e:
         log.warning(f"get_repo_credential_meta failed: {e}")
         return None
@@ -5605,11 +5362,8 @@ def get_repo_credential_value(repo_key: str, cred_type: str) -> str:
     空串=无值，调用方回落 managed_repos 列=历史回落）。
     N3：返回前统一解密（历史明文行经 decrypt 明文兼容原样返回）。"""
     try:
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT value FROM grape_t_repo_credentials WHERE repo_key=? AND cred_type=?",
-                (repo_key, cred_type)).fetchone()
-            return _decrypt_repo_secret(row[0] or "") if row else ""
+        # 凭据表归 insight：单条读取走该域原语（未解密，由本函数统一解密）
+        return _decrypt_repo_secret(_insight_public.repo_credential_value(repo_key, cred_type))
     except Exception as e:
         log.warning(f"get_repo_credential_value failed: {e}")
         return ""

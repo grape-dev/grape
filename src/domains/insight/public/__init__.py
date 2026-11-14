@@ -12,9 +12,34 @@ from __future__ import annotations
 
 from src.kernel.config import log
 
+from contextlib import contextmanager
 from typing import Any
 
 from src.kernel import db_registry
+
+
+_REPO_CRED_QUERIES: dict[str, str] = {
+    "repo_cred_value_id": (
+        "SELECT value, id FROM grape_t_repo_credentials WHERE repo_key=? AND cred_type=?"),
+    "repo_cred_value": (
+        "SELECT value FROM grape_t_repo_credentials WHERE repo_key=? AND cred_type=?"),
+    "repo_cred_repos_by_value": (
+        "SELECT repo_key FROM grape_t_repo_credentials WHERE cred_type=? "
+        "AND (value=? OR value=?) AND repo_key LIKE ? AND repo_key!=?"),
+    "repo_cred_update": (
+        "UPDATE grape_t_repo_credentials SET value=?, updated_at=? WHERE repo_key=? AND cred_type=?"),
+    "repo_cred_insert": (
+        "INSERT INTO grape_t_repo_credentials (id, repo_key, cred_type, value, updated_at) "
+        "VALUES (?,?,?,?,?)"),
+    "repo_cred_clear": (
+        "UPDATE grape_t_repo_credentials SET value='', updated_at=? "
+        "WHERE repo_key=? AND cred_type='bot'"),
+    "repo_cred_nonempty_keys": (
+        "SELECT repo_key FROM grape_t_repo_credentials WHERE cred_type=? "
+        "AND value IS NOT NULL AND value!=''"),
+    "repo_cred_nonempty_keys_all": (
+        "SELECT repo_key FROM grape_t_repo_credentials WHERE value IS NOT NULL AND value!=''"),
+}
 
 
 def available() -> bool:
@@ -66,3 +91,138 @@ def health() -> dict[str, Any]:
 
 
 __all__ = ["available", "record_api_latency", "record_merge_gate_log", "health"]
+
+# ---------- 任意拓扑原语（自有 DSN 走 db_registry；单库/测试拓扑回落进程主库）----------
+#
+# 与 mgmt/runtime public 的 `*_any` 组同口径：SQL 一律可移植方言（`?` 占位符 /
+# `datetime('now')`），两条连接都能执行，因此调用方不必在外域文件里留本地兜底 SQL。
+
+
+@contextmanager
+def _any_cursor(write: bool = False):
+    """insight 表游标：自有 DSN 优先（autocommit），否则回落进程主库（持有 db_lock）。"""
+    if db_registry.uses_own_dsn("insight"):
+        with db_registry.cursor("insight") as c:
+            yield c
+        return
+    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+
+    with _plock:
+        c = _pdb.cursor()
+        yield c
+        if write:
+            _pdb.commit()
+
+
+@contextmanager
+def _any_tx():
+    """多语句组合写：自有 DSN → 独立非 autocommit 连接（真事务）；单库 → 进程库 + db_lock。"""
+    if db_registry.uses_own_dsn("insight"):
+        with db_registry.transaction("insight") as c:
+            yield c
+        return
+    from src.kernel.session_manager import db as _pdb, db_lock as _plock
+
+    with _plock:
+        c = _pdb.cursor()
+        try:
+            yield c
+            _pdb.commit()
+        except Exception:
+            try:
+                _pdb.rollback()
+            except Exception as exc:  # noqa: BLE001 - 回滚失败不掩盖原异常
+                log.debug(f"insight public rollback skipped: {exc}")
+            raise
+
+
+def _any_sql(name: str) -> str:
+    sql = _REPO_CRED_QUERIES.get(name)
+    if sql is None:
+        raise KeyError(f"unknown portable query: {name}")
+    return sql
+
+
+def read_one_any(name: str, params: tuple = ()) -> Any | None:
+    with _any_cursor() as c:
+        c.execute(_any_sql(name), params)
+        return c.fetchone()
+
+
+def read_all_any(name: str, params: tuple = ()) -> list[Any]:
+    with _any_cursor() as c:
+        c.execute(_any_sql(name), params)
+        return list(c.fetchall() or [])
+
+
+def exec_any(name: str, params: tuple = ()) -> int:
+    with _any_cursor(write=True) as c:
+        cur = c.execute(_any_sql(name), params)
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+# ---------- 仓库凭据（grape_t_repo_credentials 归 insight：唯一权威读写口）----------
+
+def repo_credential_value(repo_key: str, cred_type: str) -> str:
+    """读单条凭据值（未解密，调用方自行 decrypt）；无行返回空串。"""
+    row = read_one_any("repo_cred_value", (repo_key, cred_type))
+    return (row[0] or "") if row else ""
+
+
+def repo_credential_meta(repo_key: str, cred_type: str) -> tuple | None:
+    """读 (value, 行 id) 一次查询（value 与审计锚点同事务一致）；无行返回 None。"""
+    return read_one_any("repo_cred_value_id", (repo_key, cred_type))
+
+
+def upsert_repo_credential_value(repo_key: str, cred_type: str, value: str,
+                                 updated_at: str) -> None:
+    """幂等 upsert：UPDATE → rowcount==0 → INSERT → 并发冲突再 UPDATE（同一事务）。"""
+    from src.kernel.id_gen import uuid7_str
+
+    with _any_tx() as c:
+        cur = c.execute(_any_sql("repo_cred_update"), (value, updated_at, repo_key, cred_type))
+        if int(getattr(cur, "rowcount", 0) or 0) == 0:
+            try:
+                c.execute(_any_sql("repo_cred_insert"),
+                          (uuid7_str(), repo_key, cred_type, value, updated_at))
+            except Exception:
+                # 并发插入撞唯一约束 → retry UPDATE（与原实现同语义）
+                c.execute(_any_sql("repo_cred_update"), (value, updated_at, repo_key, cred_type))
+
+
+def clear_repo_credential_value(repo_key: str, updated_at: str) -> int:
+    """把 bot 凭据置空（返回影响行数）。"""
+    return exec_any("repo_cred_clear", (updated_at, repo_key))
+
+
+def any_repo_credential(repo_keys: list[str]) -> bool:
+    """任一仓库有非空凭据（has_bot 闸门 rc 感知）。"""
+    keys = [k for k in (repo_keys or []) if k]
+    if not keys:
+        return False
+    ph = ",".join(["?"] * len(keys))
+    with _any_cursor() as c:
+        c.execute(f"SELECT 1 FROM grape_t_repo_credentials WHERE repo_key IN ({ph}) "
+                  "AND value IS NOT NULL AND value != '' LIMIT 1", tuple(keys))
+        return c.fetchone() is not None
+
+
+def repo_keys_sharing_value(cred_type: str, values: tuple, prefix: str, exclude_repo: str) -> list[str]:
+    """同一凭据值被哪些仓库共用（凭据泄漏排查用）。"""
+    return [r[0] for r in read_all_any("repo_cred_repos_by_value",
+                                       (cred_type, values[0], values[1], prefix, exclude_repo))]
+
+
+def repo_keys_with_nonempty_credential(cred_type: str = "") -> set[str]:
+    """有非空凭据的仓库集合（cred_type 为空 → 不限类型；供本域侧 NOT EXISTS 等价过滤）。"""
+    if cred_type:
+        rows = read_all_any("repo_cred_nonempty_keys", (cred_type,))
+    else:
+        rows = read_all_any("repo_cred_nonempty_keys_all")
+    return {r[0] for r in rows if r[0]}
+
+
+__all__ += ["read_one_any", "read_all_any", "exec_any",
+            "repo_credential_value", "repo_credential_meta", "upsert_repo_credential_value",
+            "clear_repo_credential_value", "any_repo_credential", "repo_keys_sharing_value",
+            "repo_keys_with_nonempty_credential"]

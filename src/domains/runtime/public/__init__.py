@@ -913,7 +913,7 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
 
     out: dict[str, Any] = {"upserted": 0, "inserted": 0, "pruned": 0, "deduped": 0, "ids": {}}
     names: list[str] = []
-    with db_registry.transaction("runtime") as c:
+    with _any_tx() as c:  # 任意拓扑：自有 DSN 真事务；单库回落进程库 + db_lock
         try:
             c.execute("SET SESSION innodb_lock_wait_timeout=5")
         except Exception as _e:
@@ -927,24 +927,24 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
             _detail = a.get("local_skills_detail")
             _detail_json = _json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
             c.execute(
-                "SELECT id FROM agent_runtimes WHERE name=%s AND scope=%s AND owner_id=%s "
-                "AND credential_id=0 AND (host_name=%s OR host_name='' OR host_name IS NULL) "
-                "ORDER BY CASE WHEN host_name=%s THEN 0 ELSE 1 END, id LIMIT 1",
+                "SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? "
+                "AND credential_id=0 AND (host_name=? OR host_name='' OR host_name IS NULL) "
+                "ORDER BY CASE WHEN host_name=? THEN 0 ELSE 1 END, id LIMIT 1",
                 (name, scope, owner_id, host_name, host_name))
             row = c.fetchone()
             if row:
                 rid = int(row[0])
                 _derived = derive_local_runtime_health(bool(a.get("installed")), bool(a.get("healthy")))
                 try:
-                    c.execute("UPDATE agent_runtimes SET status='online', last_seen_at=%s, health=%s "
-                              "WHERE id=%s", (now_iso, _derived, rid))
+                    c.execute("UPDATE agent_runtimes SET status='online', last_seen_at=?, health=? "
+                              "WHERE id=?", (now_iso, _derived, rid))
                 except Exception:  # noqa: BLE001 - 无遗留 health 列的库
-                    c.execute("UPDATE agent_runtimes SET status='online', last_seen_at=%s WHERE id=%s",
+                    c.execute("UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id=?",
                               (now_iso, rid))
                 c.execute(
-                    "UPDATE agent_runtimes SET display_name=%s, installed=%s, cli_path=%s, version=%s, "
-                    "healthy=%s, pip_package=%s, updated_at=%s, local_skills=%s, "
-                    "skill_scan_result=%s, host_name=%s WHERE id=%s",
+                    "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, "
+                    "healthy=?, pip_package=?, updated_at=?, local_skills=?, "
+                    "skill_scan_result=?, host_name=? WHERE id=?",
                     (a.get("display_name", name), 1 if a.get("installed") else 0,
                      a.get("cli_path", ""), a.get("version", ""),
                      1 if a.get("healthy") else 0, a.get("pip_package", ""), now_iso,
@@ -957,28 +957,28 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
             c.execute(
                 "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
                 "pip_package, scope, owner_id, local_skills, skill_scan_result, host_name, "
-                "last_seen_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "last_seen_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, a.get("display_name", name), 1, a.get("cli_path", ""), a.get("version", ""),
                  1 if a.get("healthy") else 0, a.get("pip_package", ""), scope, owner_id,
                  _ls, _detail_json, host_name, now_iso, now_iso))
             rid = int(c.lastrowid or 0)
-            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=%s LIMIT 1", (rid,))
+            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
             if not c.fetchone():
                 c.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, "
-                          "enabled, created_at, updated_at) VALUES (%s,'all',1,50,1,%s,%s)",
+                          "enabled, created_at, updated_at) VALUES (?,'all',1,50,1,?,?)",
                           (rid, now_iso, now_iso))
-            c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=%s AND enabled=1 ORDER BY tag",
+            c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
                       (rid,))
             tags = [r[0] for r in c.fetchall()]
-            c.execute("UPDATE agent_runtimes SET agent_tags=%s WHERE id=%s",
+            c.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?",
                       (_json.dumps(tags, ensure_ascii=False), rid))
             out["inserted"] += 1
             out["ids"][name] = rid
 
         if names:
-            ph = ",".join(["%s"] * len(names))
-            c.execute(f"DELETE FROM agent_runtimes WHERE scope=%s AND owner_id=%s AND credential_id=0 "
-                      f"AND host_name=%s AND lower(name) NOT IN ({ph})",
+            ph = ",".join(["?"] * len(names))
+            c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 "
+                      f"AND host_name=? AND lower(name) NOT IN ({ph})",
                       (scope, owner_id, host_name, *names))
             out["pruned"] = int(c.rowcount or 0)
         c.execute("DELETE FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
@@ -992,10 +992,10 @@ def ensure_default_runtime(name: str, display_name: str, installed: int, cli_pat
                            version: str, healthy: int, pip_package: str,
                            scope: str) -> dict[str, Any]:
     """确保存在默认引擎行（本机直连 credential_id=0），返回 {id, created}。"""
-    with db_registry.transaction("runtime") as c:
+    with _any_tx() as c:  # 任意拓扑：自有 DSN 真事务；单库回落进程库 + db_lock
         c.execute("SELECT ar.id FROM agent_runtimes ar "
                   "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
-                  "WHERE lower(ar.name)=%s AND ar.scope=%s AND ar.owner_id='' "
+                  "WHERE lower(ar.name)=? AND ar.scope=? AND ar.owner_id='' "
                   "AND (ar.credential_id=0 OR rc.status IS NULL OR rc.status='active') "
                   "ORDER BY CASE WHEN ar.status='online' THEN 0 ELSE 1 END, ar.last_seen_at DESC "
                   "LIMIT 1", (name, scope))
@@ -1003,7 +1003,7 @@ def ensure_default_runtime(name: str, display_name: str, installed: int, cli_pat
         if row:
             return {"id": int(row[0]), "created": False}
         c.execute("INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
-                  "pip_package, scope, owner_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'')",
+                  "pip_package, scope, owner_id) VALUES (?,?,?,?,?,?,?,?,'')",
                   (name, display_name, int(installed), cli_path, version, int(healthy), pip_package, scope))
         return {"id": int(c.lastrowid or 0), "created": True}
 
@@ -1869,6 +1869,19 @@ _ANY_QUERIES: dict[str, str] = {
     # meta 配置（基表在运行域）
     "meta_value": "SELECT value FROM meta WHERE key=?",
     "meta_count": "SELECT COUNT(*) FROM meta WHERE key=?",
+    # devops_agent_session：仓库 session token 判存（mgmt/user/db 路径 A 判据）
+    "devops_agent_session_repo_token": (
+        "SELECT repo_gitcode_token FROM devops_agent_session "
+        "WHERE repo_key=? AND repo_gitcode_token IS NOT NULL AND repo_gitcode_token!='' LIMIT 1"),
+    # scene_category（mgmt/user/db 的场景分类读路径）
+    "scene_categories_active": (
+        "SELECT id, name, slug, icon, order_num FROM scene_category "
+        "WHERE is_active=1 ORDER BY order_num"),
+    "scene_category_row": "SELECT id, name, slug, icon FROM scene_category WHERE id=?",
+    # agent_runtimes UTC 口径迁移（启动期，逐行归一存量超前行）
+    "runtime_utc_caliber_rows": "SELECT id, last_seen_at, updated_at FROM agent_runtimes",
+    "runtime_set_timestamps": (
+        "UPDATE agent_runtimes SET last_seen_at=?, updated_at=? WHERE id=?"),
     # skill
     "skill_row_by_id": (
         "SELECT id, skill_name, display_name, description, agent_type, skill_path, file_path, "
