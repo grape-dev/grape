@@ -73,6 +73,8 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "repo_bundle", "get_account_public", "get_knowledge_entry", "user_mapping_batch",
         # W2 渠道写原语（runtime IM → mgmt 归属表）
         "acquire_channel_lease", "renew_channel_lease", "release_channel_lease",
+        # 渠道租约只读（runtime/im/outbox 归属过滤；任意拓扑）
+        "lease_owner_by_key", "lease_owned_installations_by_owner",
         "release_all_leases", "claim_inbound_dedup", "upsert_channel_installation",
         "upsert_chat_session_binding", "upsert_sender_identity",
         "add_event_action_filter", "update_event_action_filter", "delete_event_action_filter",

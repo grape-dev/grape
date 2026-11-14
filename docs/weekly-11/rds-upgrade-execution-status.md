@@ -4042,6 +4042,84 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （`grape_t_channel_lease`，归 mgmt，可复用既有 `acquire_/renew_/release_channel_lease`）；紧接其后的
   `src/domains/runtime/im/notify.py` 2 处正好包含本对的余量之一 —— 同一对表可在下一轮一并清零）。
 
+### runtime im/outbox 租约归属读口归 mgmt public（-2，该文件清零）
+
+- 文件：`src/domains/runtime/im/outbox.py`（2 处 → **0**）；全局静态 **53 → 51**（-2），
+  对数 **32 → 31** —— `grape_t_channel_lease←runtime` 2 → 0（该对**清零**）。
+- 本轮取批：作业单头两名 `src/kernel/prompt_builder.py` / `src/kernel/persistence/credential_usage_log.py`
+  仍 blocked（口径见作业单顶部 ⛔ 小节），取第一个未 blocked 文件（上一批台账末尾点名的本文件）。
+- 表分布（消费域 runtime，表归 **mgmt**），两处都是**只读归属判定**、都不改租约：
+  · 行 163 `lease_owner_of`：`SELECT COALESCE(lease_owner,'') FROM grape_t_channel_lease WHERE lease_key=?`
+    —— 常数 SQL，按 `<channel_type>:<installation_id>`（channel_type 为空时用裸 installation_id）读 owner。
+  · 行 203 `owned_installations`：`SELECT installation_id, channel_type FROM grape_t_channel_lease
+    WHERE lease_owner=? AND installation_id<>'' ORDER BY updated_at DESC LIMIT 200`
+    —— 常数 SQL，把归属过滤下推到取批 SQL（架构守护 Critical-1 防饥饿）。
+  两处表名/列名均字面量、全参数化，无动态拼接；`LIMIT 200` 是字面量。
+- 归属域侧改动（SQL 只在 mgmt 域一份）：
+  · `_ANY_QUERIES` 新增 2 条具名查询：`lease_owner_by_key`（单列，列序/COALESCE 逐字照抄）、
+    `lease_owned_installations_by_owner`（两列 + `installation_id<>''` + `ORDER BY updated_at DESC`
+    + 字面 `LIMIT 200`）；与 W2 写原语（`acquire_/renew_/release_channel_lease`）分开登记。
+  · 新增薄函数 `lease_owner_by_key(lease_key, cursor=None) -> str`（`str(row[0]) if row and row[0] else ""`）
+    与 `lease_owned_installations_by_owner(owner, cursor=None) -> list[tuple]`（裸 tuple、保序）；
+    两函数登记 `__all__` 并同步 `src/kernel/gsb/route_config.py` 的 `PUBLIC_PRIMITIVES["mgmt"]` 镜像。
+- 关键设计取舍：
+  1. **为什么薄函数带 `cursor` 形参，而不是纯 `read_one_any`**：本文件的连接解析是「每次调用按
+     env 现取 `DEVOPS_DB_PATH`」，而 `*_any` 回落的是 **import 期绑定**的 `session_manager.db`。
+     `tests/runtime/im/test_notify_outbox.py` 的 `outbox_db` fixture 每个用例把 `DEVOPS_DB_PATH`
+     指到 `tmp_path` 的库、并在该库里铺租约行 —— 不带调用方游标就一条也读不到（12 个租约/取批
+     用例会假红）。`cursor=` 是 mgmt public 的既有口径（`_owner_cursor` + `account_id_by_username_ci_any`）：
+     **单库/测试拓扑复用调用方游标，自有 DSN 拓扑忽略它**（忽略那一跳正是原来 1146 的来源）。
+  2. **不复用 `lease_owner_info`**：它一次带出 `lease_token`（凭据），消费侧只需要 owner；新查询单列
+     `COALESCE(lease_owner,'')` 与原语句逐字一致，也不给 IM 消费路径多一个读凭据的入口。
+  3. **`LIMIT 200` 不做参数化**：它是本域对该读口的容量约束，不是调用方业务参数；**`ORDER BY
+     updated_at DESC` 必须保留** —— 去掉就退化成「随便 200 行」，多主控下会改变谁被饿死的顺序。
+  4. **调用点保留原短路与失败语义**：空 `instance_id` 直接 `[]`、一条查询都不发；驱动异常在 public
+     层上抛、调用点吞成 `""` / `[]`（`log.warning` 原文保留，不是静默 `pass`）。
+  5. 不再为这两条读在 runtime 侧持有 `db`/`db_lock` 做归属判定；同域表
+     （`grape_t_channel_outbound_card`）的连接与事务语义原样不动。
+- **确认的存量缺陷（三库独立后消费者永不投递，且被吞成「本实例没有待投行」）**：runtime 进程库没有
+  `grape_t_channel_lease`（视图 0）→ 两处查询必 1146 → ① `owned_installations` 恒空 → `claim_batch`
+  在 `if not owned: return []` 处直接返回空批（多主控投递整体停摆）；② `lease_owner_of` 恒空 →
+  逐行复核把每一行都判成「不是本实例的」→ `continue`。两条路径都只打一行 WARNING，用户侧表现为
+  「没有要发的通知」。改造后单库 / 三库跑同一份 SQL，只有真缺表才降级。
+- **未做（如实，属另一轮）**：同文件 `grape_t_channel_outbound_card` 的 15 处读写仍走 IM 连接、
+  本轮**未动**——静态正则不计它（表名是 `_TABLE` 变量，正则只认字面表名），属交接文档 §9.3
+  「P3 写通道未切完」；且 mgmt 现有 `upsert_outbound_card` 是 `%s` / `NOW()` / `ON DUPLICATE` 的
+  MySQL-only 版，直接替换会打断单库拓扑，需先补可移植具名查询（含 IN 分块、purge 的有序先取后删），
+  留独立一轮。本轮不碰它是为了不把「2 处只读」的批变成「15 处热路径重写」。
+- 验证（真实退出码）：
+  · `py_compile` 三文件（`outbox.py` / mgmt `public` / `gsb/route_config.py`）→ **COMPILE_OK**；
+  · `~/burndown/outbox_lease_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`）→
+    **ALL outbox_lease smoke PASSED (54 checks)**：A 注册面/静态否定（两条查询逐字对齐、可移植方言、
+    薄函数体无内联 SQL、调用方无该表任何 DML/DQL、`__all__` + GSB 镜像双登记、未登记名 `KeyError`）；
+    B 单库（命中 / 未命中 → 空串 / owner NULL 的 COALESCE / `installation_id=''` 被过滤 /
+    `ORDER BY updated_at DESC` / 字面 LIMIT 200 用 205 行固定 / owner 隔离 / 空 owner）；
+    C 调用点（有 channel_type 加前缀、无则裸 key、空 instance_id 零查询、驱动异常吞成 `""`/`[]`）；
+    D 游标语义（D1–D3 单库复用调用方游标：进程库放干扰行、结果只来自调用方库；D4–D9 自有 DSN
+    伪游标：忽略调用方游标、语句逐字、`?` + 参数元组、无 `%s`）；
+    E **end-to-end**（真跑 `claim_batch`：node-A/node-B 各取自己的行、不持租约 → 空批、取批行置
+    sending、过期行置 expired 且不返回、租约行 owner/token 未被改动）。
+  · 直覆盖 `tests/runtime/im/test_notify_outbox.py` + `tests/kernel/test_gsb_route.py` →
+    **68 passed**，3 failed 均为**干净树既有**（`git stash` 复现，见下）。
+  · `--update-baseline` → **baseline updated: 31 pairs, 51 refs**；依赖看板 / 矩阵 / 作业单同步刷新；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R8 / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`check_lib_query_names.py` → **PASS**（mgmt 178 funcs + 6 queries）。
+- **既有失败（与本次改动无关，已在干净树 `git stash` 后逐一复现）**：
+  `tests/runtime/im/test_notify_outbox.py::test_grape_server_lifespan_starts_consumer_and_registry`、
+  `::test_main_mode_flip_rebinds_consumer`（lifespan 退出时 `OutboxConsumer.stop()` 的 `await self._task`
+  抛 `CancelledError`，与本批读口无关）；
+  `tests/kernel/test_gsb_route.py::test_public_primitives_registry_sync`（mgmt `PUBLIC_PRIMITIVES`
+  早已缺 189 项，非本轮新增的两个函数 —— 本轮两名字在注册面里能找到）。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  轮内口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新原语契约），运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标 + claim_batch 真跑）。runtime 进程 1146 消失的现场证据留待彩排轮确认。
+- **新基线**：**51 处 / 31 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 51 处 / 34 文件，下一批首个未 blocked 文件 `src/domains/runtime/im/notify.py` 2 处
+  （`grape_t_channel_installation` 行 182 / `grape_t_channel_chat_session_binding` 行 205，均归 mgmt）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

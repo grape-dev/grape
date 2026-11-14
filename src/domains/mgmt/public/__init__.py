@@ -716,6 +716,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "repo_bundle", "get_account_public", "get_knowledge_entry", "user_mapping_batch",
            # W2 渠道写原语
            "acquire_channel_lease", "renew_channel_lease", "release_channel_lease",
+           # 渠道租约只读（runtime/im/outbox 归属过滤；任意拓扑）
+           "lease_owner_by_key", "lease_owned_installations_by_owner",
            "release_all_leases", "claim_inbound_dedup", "upsert_channel_installation",
            "upsert_chat_session_binding", "upsert_sender_identity",
            "add_event_action_filter", "update_event_action_filter",
@@ -2024,6 +2026,16 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT event_type, action, allow, actor, require_changes, '', "
         "handle_side_effect, '' FROM event_action_filter "
         "WHERE enabled=1 ORDER BY priority, id"),
+    # ── 渠道租约只读（grape_t_channel_lease 归 mgmt；runtime/im/outbox 的归属过滤）──
+    # 与上方 W2 写原语（acquire/renew/release_channel_lease）分开：消费侧只判归属，
+    # 不参与抢租约。列序、COALESCE、谓词、ORDER BY updated_at DESC 与字面 LIMIT 200
+    # 全部逐字照抄调用方原语句（LIMIT 不做参数化：它是本域对该读口的容量约束）。
+    "lease_owner_by_key": (
+        "SELECT COALESCE(lease_owner,'') FROM grape_t_channel_lease WHERE lease_key=?"),
+    "lease_owned_installations_by_owner": (
+        "SELECT installation_id, channel_type FROM grape_t_channel_lease "
+        "WHERE lease_owner=? AND installation_id<>'' "
+        "ORDER BY updated_at DESC LIMIT 200"),
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -3953,6 +3965,31 @@ def lease_owner_info(lease_key: str) -> tuple | None:
             "SELECT COALESCE(lease_owner,''), COALESCE(lease_token,''), lease_expires_at "
             "FROM grape_t_channel_lease WHERE lease_key=?", (lease_key,))
         return c.fetchone()
+
+
+def lease_owner_by_key(lease_key: str, cursor: Any = None) -> str:
+    """按 lease_key 取 owner（任意拓扑；空串 = 无行 / owner 为 NULL）。
+
+    只暴露 owner 一列（token 是凭据，消费侧无需要）：原调用方（runtime/im/outbox 的
+    `lease_owner_of`）就是这样读的 —— 列序 `COALESCE(lease_owner,'')` 单列逐字照抄。
+    `cursor` 非空且单库/测试拓扑 → 复用调用方游标（调用方的库就是本库，不必再开连接，
+    也不嵌套 db_lock）；自有 DSN → 忽略它，走 mgmt 连接（那正是原来 1146 的来源）。
+    """
+    with _owner_cursor(cursor) as c:
+        c.execute(_any_sql("lease_owner_by_key"), (str(lease_key or ""),))
+        row = c.fetchone()
+    return str(row[0]) if row and row[0] else ""
+
+
+def lease_owned_installations_by_owner(owner: str, cursor: Any = None) -> list[tuple]:
+    """某 owner 持有的 (installation_id, channel_type)（最多 200 行，最近更新优先）。
+
+    谓词 `lease_owner=? AND installation_id<>''`、`ORDER BY updated_at DESC`、字面
+    `LIMIT 200` 全部逐字照抄原语句；`cursor` 语义同 `lease_owner_by_key`。
+    """
+    with _owner_cursor(cursor) as c:
+        c.execute(_any_sql("lease_owned_installations_by_owner"), (str(owner or ""),))
+        return [tuple(r) for r in (c.fetchall() or [])]
 
 
 def installation_status(installation_id: str):
