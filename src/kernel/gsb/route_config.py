@@ -113,7 +113,7 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "record_event_skipped",
         "list_user_conversations", "get_scene_category", "list_scene_categories",
         "list_featured_skills", "list_active_credential_ids", "list_runtime_credentials",
-        "list_autopilot_executions",
+        "list_autopilot_executions", "get_meta", "set_meta_value",
         "read_one", "read_all",
     ),
     "insight": (

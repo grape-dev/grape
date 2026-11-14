@@ -192,3 +192,24 @@ def test_runtime_w2_upserts_use_fake_cursor(monkeypatch):
     out = rt_public.upsert_issue_agent_session("sess-1", "o/r", "sre", "#1")
     assert out["action"] in ("inserted", "updated")
     assert any("INSERT" in s.upper() for s, _ in fake.statements)
+
+
+def test_meta_reads_and_writes_go_through_runtime_lib(monkeypatch):
+    """meta 基表在运行域：mgmt 侧 get/set 必须走 owner 域，避免独立拓扑下 1146。"""
+    from src.domains.mgmt.user import db as mgmt_db
+    from src.kernel import domain_read
+
+    seen = {}
+
+    class _Stub:
+        def get_meta(self, key):
+            seen["get"] = key
+            return "v"
+
+        def set_meta_value(self, key, value):
+            seen["set"] = (key, value)
+
+    monkeypatch.setattr(domain_read, "owner_lib", lambda domain, foreign_only=True: _Stub())
+    assert mgmt_db.get_meta_value("k1") == "v"
+    mgmt_db.set_meta_value("k2", "v2")
+    assert seen == {"get": "k1", "set": ("k2", "v2")}

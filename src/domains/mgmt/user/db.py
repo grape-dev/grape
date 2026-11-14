@@ -3321,6 +3321,14 @@ def get_all_bot_usernames() -> list[str]:
 
 def get_meta_value(key: str) -> str:
     """从 meta 表读取配置值"""
+    # W2：meta 基表在运行域；lib 可用时走 owner 域读（三库独立后无视图）
+    from src.kernel.domain_read import owner_lib as _owner_lib  # noqa: PLC0415
+    _rt_meta = _owner_lib("runtime", foreign_only=True)
+    if _rt_meta is not None:
+        try:
+            return _rt_meta.get_meta(key) or ""
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(f"runtime lib get_meta failed, fallback: {_exc}")
     with db_lock:
         c = db.cursor()
         try:
@@ -3332,6 +3340,15 @@ def get_meta_value(key: str) -> str:
 
 def set_meta_value(key: str, value: str):
     """写入配置值到 meta 表"""
+    # W2：meta 基表在运行域；lib 可用时写 owner 域（幂等 upsert）
+    from src.kernel.domain_read import owner_lib as _owner_lib  # noqa: PLC0415
+    _rt_meta = _owner_lib("runtime", foreign_only=True)
+    if _rt_meta is not None:
+        try:
+            _rt_meta.set_meta_value(key, value)
+            return
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(f"runtime lib set_meta_value failed, fallback: {_exc}")
     with db_lock:
         c = db.cursor()
         try:

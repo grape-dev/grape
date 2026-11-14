@@ -1697,3 +1697,27 @@ def list_autopilot_executions(task_id: int | None = None, status: str = "",
             "agent_task_id")
     return {"executions": [dict(zip(keys, tuple(r))) for r in rows], "total": total,
             "limit": lim, "offset": off}
+
+
+# ---------- W2：meta 配置（基表在运行域，mgmt 经 lib 读写） ----------
+
+def get_meta(key: str) -> str:
+    """读 meta 配置值（不存在返回空串）。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT value FROM meta WHERE `key`=%s", (key,))
+        rows = _rows(c)
+    return (rows[0]["value"] or "") if rows else ""
+
+
+def set_meta_value(key: str, value: str) -> None:
+    """写 meta 配置值（upsert，幂等）。"""
+    # UPDATE→INSERT 两段式（不用 ON DUPLICATE KEY：本项目连接层会改写该子句导致 1064；
+    # 两段式也天然方言无关，sqlite 单库期同样可用）
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE meta SET value=%s WHERE `key`=%s", (value, key))
+        if not getattr(c, "rowcount", 0):
+            try:
+                c.execute("INSERT INTO meta (`key`, value) VALUES (%s, %s)", (key, value))
+            except Exception:
+                # 并发插入撞唯一键：再更新一次即可（幂等）
+                c.execute("UPDATE meta SET value=%s WHERE `key`=%s", (value, key))
