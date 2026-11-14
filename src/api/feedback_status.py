@@ -9,7 +9,6 @@
 import re
 
 from src.kernel.config import log
-from src.kernel.session_manager import db, db_lock
 
 # 反馈状态枚举（与 routes/feedback.py update_feedback_status 白名单一致）
 FEEDBACK_STATUS_OPEN = "open"
@@ -145,17 +144,10 @@ def sync_external_feedback_statuses(limit: int = 200) -> int:
     global _external_sync_cursor
     updated = 0
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT f.id, f.status, f.repo_key, f.issue_number, f.issue_url "
-                "FROM user_feedback f "
-                "WHERE f.source='user' AND f.issue_url!='' "
-                "AND (f.issue_id IS NULL OR f.issue_id=0) AND f.is_deleted=0 "
-                "AND f.status NOT IN ('closed') "
-                "AND f.id > ? ORDER BY f.id LIMIT ?",
-                (_external_sync_cursor, limit))
-            rows = c.fetchall()
+        # user_feedback 归 mgmt：读页/回写都走 owner 域原语（任意拓扑，SQL 只留一份）
+        from src.domains.mgmt import public as _mgmt_public
+
+        rows = _mgmt_public.feedback_external_sync_page(_external_sync_cursor, limit)
         if not rows:
             _external_sync_cursor = 0
             return 0
@@ -170,10 +162,8 @@ def sync_external_feedback_statuses(limit: int = 200) -> int:
             state = _fetch_external_issue_state(repo_key, number, tokens[repo_key])
             if state != "closed":
                 continue
-            with db_lock:
-                db.execute("UPDATE user_feedback SET status=? WHERE id=? AND is_deleted=0",
-                           (FEEDBACK_STATUS_CLOSED, fid))
-                db.commit()
+            # 原口径：逐行独立提交（不看 owner 是谁，只看 is_deleted=0 守卫）
+            _mgmt_public.feedback_mark_status_if_live(fid, FEEDBACK_STATUS_CLOSED)
             updated += 1
         if len(rows) < limit:
             _external_sync_cursor = 0
@@ -195,28 +185,42 @@ def sync_feedback_statuses(limit: int = 200) -> int:
 
     边界：source='user' 反馈转换生成的是外部 GitCode Issue（无内部 issue 行），
     由 `sync_external_feedback_statuses` 拉取外部状态联动，不在本 JOIN 范围内。
+
+    取数：原语句是 `user_feedback ⋈ issue` 跨域 JOIN（两表分属 mgmt / runtime），
+    三库拓扑下必 1146。现拆成「mgmt 取左表页 + runtime 按 id 取右表列 + Python
+    内连接」三段，均为 owner 域 public 原语；LIMIT 仍按**内连接后的行数**计
+    （右表无行不计入窗口），只升不降与游标外的行集合口径不变。
     """
     updated = 0
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT f.id, f.status, i.stage, i.status FROM user_feedback f "
-                "JOIN issue i ON i.id = f.issue_id "
-                "WHERE f.issue_url!='' AND f.issue_id IS NOT NULL AND f.is_deleted=0 "
-                "ORDER BY f.id LIMIT ?",
-                (limit,))
-            rows = c.fetchall()
-            for fid, cur, stage, task_status in rows:
-                derived = derive_feedback_status(stage or "", task_status or "")
+        from src.domains.mgmt import public as _mgmt_public
+        from src.domains.runtime import public as _runtime_public
+
+        pairs: list[tuple] = []
+        after_id = 0
+        joined = 0
+        while limit and joined < limit:
+            rows = _mgmt_public.feedback_internal_sync_page(after_id, limit - joined)
+            if not rows:
+                break
+            after_id = rows[-1][0]
+            issue_map = {str(r[0]): (r[1], r[2]) for r in
+                         _runtime_public.issue_stage_status_rows([r[2] for r in rows])}
+            for fid, cur, issue_id in rows:
+                issue = issue_map.get(str(issue_id))
+                if issue is None:
+                    continue            # INNER JOIN：右表无行 → 该反馈不进结果集
+                joined += 1
+                derived = derive_feedback_status(issue[0] or "", issue[1] or "")
                 cur = (cur or "").strip().lower() or FEEDBACK_STATUS_OPEN
-                if derived == cur:
-                    continue
-                if FEEDBACK_STATUS_ORDER.get(derived, 0) <= FEEDBACK_STATUS_ORDER.get(cur, 0):
-                    continue
-                c.execute("UPDATE user_feedback SET status=? WHERE id=?", (derived, fid))
-                updated += 1
-            db.commit()
+                if derived != cur and (FEEDBACK_STATUS_ORDER.get(derived, 0)
+                                       > FEEDBACK_STATUS_ORDER.get(cur, 0)):
+                    pairs.append((derived, fid))
+                if joined >= limit:
+                    break
+        if pairs:
+            # 原实现逐行 UPDATE、末尾统一 commit：保持单事务原子回写
+            updated = _mgmt_public.feedback_apply_statuses(pairs)
         if updated:
             log.info(f"feedback status sync: {updated} rows updated")
     except Exception:

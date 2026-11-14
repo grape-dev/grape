@@ -745,6 +745,9 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "autopilot_subscribers_any", "list_enabled_autopilot_tasks_any",
            "autopilot_task_row_any", "autopilot_task_last_run_any",
            "set_autopilot_run_info_any",
+           # 反馈状态联动（api/feedback_status.py；任意拓扑）
+           "feedback_external_sync_page", "feedback_mark_status_if_live",
+           "feedback_internal_sync_page", "feedback_apply_statuses",
            "health"]
 
 
@@ -1868,6 +1871,30 @@ _ANY_QUERIES: dict[str, str] = {
     "outbound_ledger_row_by_hash": (
         "SELECT content_id FROM outbound_content_ledger WHERE provider=? "
         "AND content_hash=? AND repo_key=? LIMIT 1"),
+    # ── 反馈状态联动（api/feedback_status.py；user_feedback 归 mgmt）───────────
+    # 原实现在 api 进程主库直发 SQL：三库拓扑下 user_feedback 在 mgmt 库（视图 0）→
+    # 1146 被两处顶层 except 吞成「0 条更新」，反馈状态联动（#673）整体静默失效。
+    # 谓词/列序/ORDER BY 逐字照抄；`?` 占位符，两条拓扑同一份 SQL。
+    # 内连接那条原语句是 `user_feedback ⋈ issue` 跨域 JOIN，拆分后本域只出左表页，
+    # 右表（issue，runtime 域）由调用方用 `issue_stage_status_rows` 取回后做 Python 内连接；
+    # `id > ?` 是拆分引入的键集分页锚点（ORDER BY id 不变，最终行集合与 LIMIT 口径一致）。
+    "feedback_external_sync_rows": (
+        "SELECT f.id, f.status, f.repo_key, f.issue_number, f.issue_url "
+        "FROM user_feedback f "
+        "WHERE f.source='user' AND f.issue_url!='' "
+        "AND (f.issue_id IS NULL OR f.issue_id=0) AND f.is_deleted=0 "
+        "AND f.status NOT IN ('closed') "
+        "AND f.id > ? ORDER BY f.id LIMIT ?"),
+    # 外部联动原实现对每行独立提交（`with db_lock: UPDATE; commit`），保持自提交，
+    # `is_deleted=0` 守卫同样逐字保留。
+    "feedback_external_mark_status": (
+        "UPDATE user_feedback SET status=? WHERE id=? AND is_deleted=0"),
+    "feedback_internal_sync_page": (
+        "SELECT f.id, f.status, f.issue_id FROM user_feedback f "
+        "WHERE f.issue_url!='' AND f.issue_id IS NOT NULL AND f.is_deleted=0 "
+        "AND f.id > ? ORDER BY f.id LIMIT ?"),
+    # 内部联动原语句没有任何 is_deleted 守卫（已转换行的回写不看软删标记），照抄。
+    "feedback_internal_set_status": "UPDATE user_feedback SET status=? WHERE id=?",
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -3891,3 +3918,61 @@ def gsb_mark_offline(name: str) -> int:
 def gsb_purge_stale(cutoff: float) -> int:
     """把心跳早于 cutoff 的 online 行标 offline，返回受影响行数。"""
     return exec_any("gsb_service_purge_stale", (cutoff,))
+
+
+# ---------- 反馈状态联动（api/feedback_status.py；任意拓扑） ----------
+# user_feedback 归本域。原实现从 api 进程主库直发四条 SQL（两条读、两条写），
+# 三库拆分后 api 进程库没有该表（视图 0）→ 两处顶层 except 把 1146 吞成
+# 「0 条更新」：反馈状态联动（#673）在独立部署下永久无效且日志看不出。
+# 这里只交出数据与回写动作，状态推导/只升不降/游标轮转仍留在调用方（那是业务口径）。
+
+
+def feedback_external_sync_page(after_id: Any, limit: int) -> list[tuple]:
+    """外部 Issue 联动的待同步行 [(id, status, repo_key, issue_number, issue_url)]。
+
+    列序与原查询逐字一致（调用方按下标解包）。只取 source='user'、已转换
+    （issue_url 非空）、无内部 issue 映射（issue_id 为 NULL 或 0）、未软删、
+    且状态不为 closed 的行；按 id 升序键集分页（游标语义在调用方）。
+    """
+    if limit is None or int(limit) <= 0:
+        return []
+    return [tuple(r) for r in read_all_any(
+        "feedback_external_sync_rows", (after_id, int(limit)))]
+
+
+def feedback_mark_status_if_live(fid: Any, status: str) -> int:
+    """回写单行状态（`is_deleted=0` 守卫，与原外部联动 UPDATE 逐字一致）。
+
+    原实现对每行独立提交，这里保持自提交（exec_any），不并入批量事务。
+    """
+    return exec_any("feedback_external_mark_status", (status, fid))
+
+
+def feedback_internal_sync_page(after_id: Any, limit: int) -> list[tuple]:
+    """内部映射联动的待评估行 [(id, status, issue_id)]，按 id 升序键集分页。
+
+    列序与原 JOIN 语句的左表列逐字一致；右表（issue，runtime 域）由调用方取回后
+    在 Python 侧做内连接。谓词照抄：issue_url 非空、issue_id 非 NULL、未软删。
+    """
+    if limit is None or int(limit) <= 0:
+        return []
+    return [tuple(r) for r in read_all_any(
+        "feedback_internal_sync_page", (after_id, int(limit)))]
+
+
+def feedback_apply_statuses(pairs: list[tuple]) -> int:
+    """批量回写 [(status, id)]，单事务（`_any_tx`），返回执行条数。
+
+    原内部联动在同一个 `db_lock` 里逐行 UPDATE、末尾统一 commit；这里用跨域
+    多语句事务原语保持同一原子口径（异常整体回滚，不留半批）。语句无
+    is_deleted 守卫（原语句也没有），逐字照抄。
+    """
+    todo = [(status, fid) for status, fid in (pairs or [])]
+    if not todo:
+        return 0
+    done = 0
+    with _any_tx() as c:
+        for status, fid in todo:
+            c.execute(_any_sql("feedback_internal_set_status"), (status, fid))
+            done += 1
+    return done

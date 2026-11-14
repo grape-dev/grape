@@ -2238,6 +2238,89 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   基线 `foreign-refs-allowlist.csv` 收紧为 138 / 50，依赖看板与作业单同步刷新
   （下一批头名：`src/api/feedback_status.py` 5 处，并列 `src/api/a2a_dispatch_guard.py` 5 处）。
 
+### 7.22 api 反馈状态联动拆跨域 JOIN（2026-11-15 本批）
+
+- 文件：`src/api/feedback_status.py`（api 域；#673 反馈状态口径 + #22 通知复用的联动同步），
+  **5 处 → 0**（单轮做完，5 处未超 25，未分轮）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `user_feedback`（归 mgmt）× 4：原行 152 外部联动待同步页
+    `SELECT f.id, f.status, f.repo_key, f.issue_number, f.issue_url FROM user_feedback f
+    WHERE f.source='user' AND f.issue_url!='' AND (f.issue_id IS NULL OR f.issue_id=0)
+    AND f.is_deleted=0 AND f.status NOT IN ('closed') AND f.id > ? ORDER BY f.id LIMIT ?`；
+    行 174 外部联动单行回写 `UPDATE user_feedback SET status=? WHERE id=? AND is_deleted=0`；
+    行 204 内部联动 JOIN 左表 `SELECT f.id, f.status, i.stage, i.status FROM user_feedback f
+    JOIN issue i ON i.id = f.issue_id WHERE f.issue_url!='' AND f.issue_id IS NOT NULL
+    AND f.is_deleted=0 ORDER BY f.id LIMIT ?`；行 217 内部联动单行回写
+    `UPDATE user_feedback SET status=? WHERE id=?`（**无** is_deleted 守卫）。
+  - `issue`（归 runtime）× 1：行 205 上面那条 JOIN 的右表取列
+    （`i.stage` / `i.status`，issue 侧原语句**零谓词**）。
+  五处都是固定 SQL 文本（无动态表名/列名），调用点全部是 `db.cursor()` / `db.execute()`
+  直发 api 进程主库。
+- owner 侧新增：
+  1) mgmt public `_ANY_QUERIES` 4 条（`?` 占位符，谓词/列序/ORDER BY 逐字照抄）：
+     `feedback_external_sync_rows`（读页，保留原有 `f.id > ?` 游标锚点）/
+     `feedback_external_mark_status`（带 `is_deleted=0`）/
+     `feedback_internal_sync_page`（左表页，拆分新增 `f.id > ?` 键集锚点）/
+     `feedback_internal_set_status`（原语句无守卫，照抄）；
+  2) mgmt public 4 个薄函数并导出：`feedback_external_sync_page(after_id, limit)` /
+     `feedback_mark_status_if_live(fid, status)`（`exec_any` 自提交）/
+     `feedback_internal_sync_page(after_id, limit)` / `feedback_apply_statuses(pairs)`
+     （`_any_tx()` 单事务批量回写）；
+  3) runtime public：`issue_stage_status_rows(ids, chunk=500)`——按 id 分块 `IN` 取
+     `(id, stage, status)`，导出面同步。
+- 设计取舍：
+  1) **跨域 JOIN 不下沉也不建视图**：`user_feedback ⋈ issue` 跨 mgmt / runtime 两库，
+     拆成「mgmt 取左表页 + runtime 按 id 取右表列 + 调用方 Python 内连接」，三段都是
+     已登记原语；issue 侧零谓词（原 JOIN 不过滤软删/子任务），右表查询照抄不加。
+  2) **LIMIT 仍按内连接后的行数计**：原语句的 `LIMIT` 作用在 JOIN 结果集上，所以调用方
+     按「已匹配行数」累计分页——右表缺行**不占**窗口，只升不降的相等行**占**窗口。
+     这两种相反口径在烟测里各有一条用例钉住（`右表缺行不占窗口`/`相等行占窗口`），
+     避免被后来人"顺手简化成先取 N 行左表再过滤"。
+  3) **写口提交粒度照抄原实现，不统一**：外部联动原来逐行 `with db_lock: UPDATE; commit`，
+     故用 `exec_any` 薄函数保持自提交；内部联动原来整段一次 `commit`，故用 `_any_tx()`
+     批量回写保持单事务原子（异常整体回滚，不留半批）。两者形态不同是有意为之。
+  4) **两条 UPDATE 不合并**：`is_deleted=0` 守卫只出现在外部联动那条上，内部联动原语句
+     没有。合成一条带参数开关的语句会让守卫语义藏进参数里，故分别登记。
+  5) **业务口径全部留在 api**：状态推导（stage/任务态映射）、只升不降的 rank 比较、
+     外部同步游标轮转与回绕、`limit` 默认值 200 都没下沉 —— owner 域只给数据与回写，
+     语义仍在调用方，#22 通知机制复用同一函数不受影响。
+  6) **跨后端 id 归一**：右表 id 与 `f.issue_id` 用 `str()` 对齐后匹配。MySQL 两列同为
+     整型（其比较本就等价），sqlite 下可覆盖 TEXT/INTEGER 混存的历史行。
+  7) `int(limit)` 传入前先判 `<=0` 直接返回：原 `LIMIT 0` 结果集为空，拆页后若不判
+     会陷入「零行页循环」。
+- 修的存量 bug（三库拓扑，反馈状态面）：
+  1) **外部 Issue 关闭永不回流**：`sync_external_feedback_statuses` 首条 SELECT 在 api
+     进程库 1146（`user_feedback` 在 mgmt 库，视图 0）→ 顶层 `except` 吞成「0 条更新」。
+     user 反馈转换出的外部 GitCode Issue 关闭后，反馈卡片永久停在 open/resolved，
+     只能 admin 手工关；
+  2) **内部映射反馈状态不再跟随 issue**：`sync_feedback_statuses` 的跨域 JOIN 同样
+     1146 → 0 条更新，已转换反馈的 stage/任务态推进（coding→in_progress、done→resolved、
+     closed→closed）在独立部署下整体失效，`#673` 的「一套口径」只剩读侧；
+  3) 两处降级只留 `log.exception`、返回值 0，reconcile 调度把「故障」和「本来就没
+     待同步行」混成同一个数（本次保持返回值语义不变，但正常拓扑下不再触发）。
+- 验证：`py_compile` 3 个文件 **COMPILE_OK**；SQLite 烟测
+  `~/burndown/feedback_status_smoke.py` **ALL 96 CHECKS PASSED**（含边界与否定用例：
+  4 条语句与改造前 SQL 逐字对拍 + 无 `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`；
+  外部选择面五类行——非 user 来源 / issue_url 空 / 有内部映射 / 软删 / 已 closed——
+  零调用零更新；外部 open 不回退 resolved；limit=1 多轮轮转覆盖 3 行且末轮回绕 0；
+  整页推进游标停在本页最大 id；limit=0 → 0 且不发起外部拉取；软删行回写 0 影响；
+  内部联动 stage/任务态覆盖/NULL stage/issue status=closed 参与推导/未转换与无
+  issue_id 不入选；**右表缺行不占窗口**与**相等行占窗口**两条 LIMIT 口径；
+  issue 取列 1200 id 分 3 批(500/500/200)、重复 id 只回 1 行、None 元素丢弃；
+  缺 user_feedback → 两函数均 0 不抛且零外部调用、缺 issue → 内部 0 不抛而外部照常；
+  空表 → 0/[]；单库拓扑进程库上同时出现两表 SQL、自有 DSN 时 mgmt 连接读 user_feedback
+  /runtime 连接读 issue/进程库零 SQL；源码面 0 条表引用与 SQL 字面量、无 cursor()/
+  execute() 直发、不 import session_manager、无静默 except、只用 5 个已登记原语且
+  均已导出）；
+  `tests/mgmt/test_feedback_status_sync.py` **13 passed**（既有用例无回归）；
+  `rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK / 契约 37 条 /
+  看板最新）；`pytest tests/arch tests/contracts tests/scripts` **158 passed**；
+  `make lint` **import OK**。
+- 新基线：全局 **138 → 133**（-5），对数 **50 不变**：`user_feedback←api` 6 → 2、
+  `issue←api` 4 → 3（两表在 api 还有 5 处集中在其它的 api 文件，同模式、后续批次）。
+  基线 `foreign-refs-allowlist.csv` 收紧为 133 / 50，依赖看板与作业单同步刷新
+  （下一批头名：`src/api/a2a_dispatch_guard.py` 5 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

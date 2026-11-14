@@ -1,13 +1,13 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-15 03:53　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **38** 张；跨域引用 **138** 处（50 个「表×消费域」对）；含归属域在内的 SQL 引用 2131 处
+> 生成时间：2026-11-15 03:59　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **38** 张；跨域引用 **133** 处（50 个「表×消费域」对）；含归属域在内的 SQL 引用 2131 处
 
 ## 1. 域 × 域 跨域引用热力
 
 | 消费方 ↓ / 归属域 → | mgmt | runtime | insight | 合计 |
 | --- | ---: | ---: | ---: | ---: |
-| api | 16 | 29 | 2 | 47 |
+| api | 12 | 28 | 2 | 42 |
 | kernel | 7 | 3 | 0 | 10 |
 | mgmt | 0 | 14 | 5 | 19 |
 | runtime | 30 | 0 | 1 | 31 |
@@ -17,9 +17,9 @@
 
 | 分类 | 表数 | 剩余跨域引用 |
 | --- | ---: | ---: |
-| D | 11 | 29 |
+| D | 11 | 28 |
 | C1 | 7 | 53 |
-| C2 | 17 | 53 |
+| C2 | 17 | 49 |
 | B | 2 | 2 |
 | E | 1 | 1 |
 
@@ -33,12 +33,11 @@
 | `agent_runtimes` | runtime | 8 | insight 5 / api 3 | C1 归属重定（写路径挪进 owner 域） | — | 27 |
 | `grape_t_repo_credentials` | insight | 7 | mgmt 5 / contracts 1 / runtime 1 | C1 归属重定（写路径挪进 owner 域） | — | 6 |
 | `external_identities` | mgmt | 6 | api 4 / runtime 2 | C2 outbox 跨域写 | W2 | 7 |
-| `user_feedback` | mgmt | 6 | api 6 | C2 outbox 跨域写 | W3 | 6 |
 | `agent_shared_knowledge` | mgmt | 5 | runtime 5 | C1 归属重定（写路径挪进 owner 域） | — | 6 |
 | `devops_pipeline_scene` | mgmt | 5 | api 3 / runtime 2 | C1 归属重定（写路径挪进 owner 域） | — | 10 |
-| `issue` | runtime | 5 | api 4 / mgmt 1 | D 模块归位（kernel 写/读域表） | — | 20 |
 | `managed_repos` | mgmt | 5 | runtime 5 | D 模块归位（kernel 写/读域表） | — | 19 |
 | `grape_t_channel_installation` | mgmt | 4 | runtime 4 | C2 outbox 跨域写 | W2 | 7 |
+| `issue` | runtime | 4 | api 3 / mgmt 1 | D 模块归位（kernel 写/读域表） | — | 19 |
 | `login_whitelist` | mgmt | 4 | kernel 4 | C2 outbox 跨域写 | W2 | 4 |
 | `meta` | runtime | 4 | mgmt 4 | D 模块归位（kernel 写/读域表） | — | 4 |
 | `unified_user_mapping` | mgmt | 4 | kernel 3 / runtime 1 | D 模块归位（kernel 写/读域表） | — | 8 |
@@ -51,6 +50,7 @@
 | `grape_t_channel_outbound_card` | mgmt | 2 | runtime 2 | C2 outbox 跨域写 | W3 | 2 |
 | `skill` | runtime | 2 | api 2 | D 模块归位（kernel 写/读域表） | — | 10 |
 | `takeover_sessions` | runtime | 2 | api 1 / mgmt 1 | C2 outbox 跨域写 | W1 | 4 |
+| `user_feedback` | mgmt | 2 | api 2 | C2 outbox 跨域写 | W3 | 5 |
 | `agent_type` | runtime | 1 | insight 1 | C2 outbox 跨域写 | W1 | 3 |
 | `api_latency_log` | insight | 1 | api 1 | C2 outbox 跨域写 | W3 | 4 |
 | `audit_logs` | mgmt | 1 | insight 1 | E 洞察事件/宽表 | — | 3 |

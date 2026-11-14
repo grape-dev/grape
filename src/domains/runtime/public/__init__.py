@@ -1398,7 +1398,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "event_cascade_counts_by_repo_any", "online_credential_count_any",
            # api server_common 运维诊断（/healthz 表探活 + /health/realtime 全量统计）
            "health_task_rows_total", "health_task_status_counts",
-           "health_task_inflight_count", "health_runtime_rows"]
+           "health_task_inflight_count", "health_runtime_rows",
+           # issue 按 id 批量取列（api/feedback_status.py；跨域 JOIN 拆分，任意拓扑）
+           "issue_stage_status_rows"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2395,6 +2397,33 @@ def issue_vcs_checked_count_any(repo_key: str) -> int:
     """该仓库已写入校验时间戳的卡片数（`vcs_checked_at IS NOT NULL`，空串仍计）。"""
     row = read_one_any("issue_vcs_checked_count", (repo_key,))
     return int(row[0] or 0) if row else 0
+
+
+#: issue 按 id 批量取列的 IN 单批上限（SQLite 变量上限/包体保护，与既有分块查询同值）。
+_ISSUE_ID_CHUNK = 500
+
+
+def issue_stage_status_rows(ids, chunk: int = _ISSUE_ID_CHUNK) -> list[tuple]:
+    """按 id 批量取 issue 的 `(id, stage, status)`，无过滤、无排序（同原 JOIN 右表取列）。
+
+    供跨域 JOIN 拆分用（api/feedback_status.py：user_feedback ⋈ issue，右表归本域）。
+    原语句对 issue 侧没有任何谓词，所以这里也不加（软删/子任务口径由调用方判定）；
+    id 非法/为 None 的元素直接丢弃，空列表返回 []。分块只为占位符数量上限，
+    行集合与一次 IN 等价。
+    """
+    want = [i for i in (ids or []) if i is not None]
+    if not want:
+        return []
+    size = max(1, int(chunk or _ISSUE_ID_CHUNK))
+    out: list[tuple] = []
+    for i in range(0, len(want), size):
+        part = want[i:i + size]
+        ph = ",".join(["?"] * len(part))
+        with _any_cursor() as c:
+            c.execute(f"SELECT id, stage, status FROM issue WHERE id IN ({ph})",
+                      tuple(part))
+            out.extend(tuple(r) for r in (c.fetchall() or []))
+    return out
 
 
 def apply_issue_vcs_existence_any(deleted_ids: list, restored_ids: list,
