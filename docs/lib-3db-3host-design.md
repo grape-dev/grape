@@ -35,7 +35,7 @@
 | 项 | 实测 |
 |---|---|
 | 三库位置 | **全部在 `<dev-db-host>` 同一实例**（`grape_dev_mgmt` / `grape_dev_runtime` / `grape_dev_insight`） |
-| 跨域视图 | **137 个**：mgmt 46（→runtime 36、→insight 10）；runtime 91（→mgmt 81、→insight 10） |
+| 跨域视图 | **252 个**：mgmt 46（→runtime 36、→insight 10）；runtime 91（→mgmt 81、→insight 10）；**insight 115（→mgmt 81、→runtime 34）**。旧口径「137」只算了 mgmt+runtime，漏掉 insight 的 115 个——insight 要迁回独立主机，这 115 个同样必须退役 |
 | 视图可更新性 | mgmt 侧 runtime 表均为 `IS_UPDATABLE=YES` → 今天跨域写"能用"全靠视图 |
 | insight 副本 | `<dev-db-host>` = **126 表 / api_latency_log 5849 行**（实库）；`<insight-copy-host>` = 14 表 / 5125 行（旧副本） |
 | runtime 副本 | `<runtime-copy-host>` 存在一份 `grape_dev_runtime`（45 表、无 `xwrite_log`），与 `<dev-db-host>` 是否同步**未验证** |
@@ -43,14 +43,23 @@
 
 ### 2.2 代码改造进度
 
+> **2026-11-14 重测口径（本节数字均以此为准）**：旧版本把 P2 记作「读路径完成」并把剩余读记作
+> 114 处、视图记作 137 个，两处都与实测不符——P2 只完成机制与约 31 处接线，
+> 视图实为 252 个（含 insight 115）。判据：`p4_read_converter.py` 重扫 +
+> 逐候选函数内 lib 句柄判定（converted / bare），历史时点用 `git worktree` 回放。
+
 | 项 | 数量 |
 |---|---|
 | 跨域写改造 | **已完成**（P3-4b/5a/5b/5c/5d/5f/5g/5h 全批次；47 个提交） |
-| 读改造已落地 | **81 处** |
-| 重扫剩余跨域读 | **114 处 / 20 张表**（最大 `agent_tasks` 25）；**auto 仅 16（自检绿 8）**，manual **98**（消费形态 68 + 动态 SQL 30） |
+| 读改造已落地 | **202 处接线点**（其中「81 处」是 11-14 00:23–01:15 的 12 个提交补的，**属 P4 期，不属 P2**） |
+| P2 实际产出 | **约 31 处接线**（`436e3299f` 收尾时实测：导入 31 / None 守卫 36）；同期重扫仍有 **208 处裸跨域读**。计划给 P2 的验收「跨域读引用降为 0」**未达成**，P2 应记作**部分完成（仅机制+原语面）** |
+| 重扫剩余跨域读 | **114 处 / 20 张表**（最大 `agent_tasks` 25）= **104 处裸读（真欠账）** + **10 处已接线但本地兜底 SQL 仍在（口径噪声，全在 `insight/routes/dashboard.py`）**；**auto 仅 16（自检绿 8）**，manual **98**（消费形态 68 + 动态 SQL 30） |
+| 剩余裸读宿主分布 | insight **52** ／ mgmt **40** ／ runtime **11** ／ `src/api` **1**；热点：`insight/routes/dashboard.py` 17、`mgmt/user/db.py` 13、`mgmt/routes/settings.py` 11、`mgmt/routes/skills.py` 8 |
 | 可自动改写 | **auto 16 / 自检绿 8** —— 改写器红利已耗尽，其余须手工 |
-| manual 待设计 | **99 处**：动态 SQL 30 + 非 fetch 消费 69 |
-| 验证器 | `p4_verify_all.py`（三环境跑，FAIL/UNCOVERED 分离）；当前 FAIL=0，UNCOVERED 7 |
+| manual 待设计 | **98 处**：动态 SQL 30 + 非 fetch 消费 68 |
+| 计划估算作废 | 旧计划 P2 的「runtime 190+100 处 / mgmt 97 处」是 P0 边界扫描按 **SQL 文本** 估的，与真实**调用点**（227~238）口径不同，**不要再用它算进度** |
+| 验证器 | `p4_verify_all.py`（三环境跑，FAIL/UNCOVERED 分离）；当前 FAIL=0（PASS 67+31），UNCOVERED 7（均为参数构造不出，非遗漏） |
+| A3 门禁 | `scripts/check_lib_query_names.py`：419 文件，mgmt 14 函数+35 查询 / 注册 41+35；runtime 25+65 / 注册 68+70 → **PASS** |
 
 ### 2.3 运行面
 
@@ -58,6 +67,7 @@
 |---|---|
 | 四进程 | `grape-{server,event,worker,insight}-server`，双主 8 端口 200 |
 | lib 开关 | 双主四进程均已开（`GRAPE_DOMAIN_LIB=1` + 三域 DSN；**本域读开关=0**、外域=1） |
+| insight 进程 | **已开 lib 开关**（`GRAPE_DOMAIN_LIB=1` + 域内读=0、外域=1）；早期版本曾记载"未开"，已过期 |
 | 排水单元 | 双主各 3 个 timer active，错峰 `:00 / :02 / :04` |
 | 对账 | `grape-xwrite-reconcile.timer` 每日 03:20，归档 7 天前 applied |
 | 意图量 | mgmt 45 / runtime 84 / insight 1（全 applied，无 dead） |
@@ -107,7 +117,7 @@
 
 ## 4. 剩余工作分解（六个工作流）
 
-### W1 读路径 lib 化（114 处 + 新增）
+### W1 读路径 lib 化（104 处裸读；另 10 处兜底噪声可顺带清）
 
 **前置**：无（可立即开始）。
 **步骤**：
@@ -121,7 +131,7 @@
 - 代码里引用的查询名 ⊆ 注册表（脚本：`used_names - registry_names == ∅`）；
 - 双机 `py_compile` 全绿 + 8 端口 200 + 三 timer active。
 
-### W2 动态 SQL 与非常规消费（99 处）
+### W2 动态 SQL 与非常规消费（98 处 = 动态 SQL 30 + 非 fetch 消费 68）
 
 **前置**：口径裁定（§9-D1 / D2）。
 **分类与做法**：
@@ -130,7 +140,7 @@
 |---|---|---|
 | 动态列名（`{mapping_col}`） | ~4 | **按列枚举**：列集合有限（feishu_open_id / gitcode_user / gitee_user…），每列登记一条查询 |
 | 动态 IN 列表（`IN ({ph})`） | ~26 | **逐 key 扇出**：`read_all(单 key 查询, (k,))` 循环 + Python 合并；语义等价，往返增加但仓库数有限 |
-| `for r in c.fetchall()` / `in c.fetchall()` 等非 fetch 赋值 | ~69 | 三分类：(a) 单行/多行 → 套用现有 `read_one/read_all`；(b) 聚合（COUNT/SUM）→ 登记聚合查询；(c) 子查询 JOIN → 拆成多次读 + Python 连接（参照 `config_store._rt_int` 已验证的做法） |
+| `for r in c.fetchall()` / `in c.fetchall()` 等非 fetch 赋值 | ~68 | 三分类：(a) 单行/多行 → 套用现有 `read_one/read_all`；(b) 聚合（COUNT/SUM）→ 登记聚合查询；(c) 子查询 JOIN → 拆成多次读 + Python 连接（参照 `config_store._rt_int` 已验证的做法） |
 
 **验收断言**：每类各有 1 个样板的双通道等价证明（含跨域 JOIN 拆分后的**行集全等**断言，模板见 S10）。
 
@@ -146,10 +156,12 @@
 
 **验收断言**：`SELECT COUNT(*)` 与 `CHECKSUM TABLE` 在裁定前后一致；退役库有可恢复备份（`mysqldump` + 校验和）。
 
-### W4 视图退役（137 个）
+### W4 视图退役（**252 个**：mgmt 46 / runtime 91 / insight 115）
 
 **前置**：W1/W2 完成，且对应域的读点全部 lib 化。
-**步骤**（按域分批，**先 insight 目标视图，量最小**）：
+**步骤**（按域分批；**退役顺序由该域读点清零情况决定，不是按视图数量**：
+mgmt 46 个等 mgmt 侧 40 处裸读清零、runtime 91 个等 runtime 侧 11 处清零、
+**insight 115 个等 insight 侧 52 处清零**——insight 是残留最多的一侧，必须放最后）：
 1. 每批 10-20 个：`information_schema.VIEWS` 取定义 → 归档为 `.sql`（可重建）→ `DROP VIEW`。
 2. 每批后：三环境 `p4_verify_all.py` + 8 端口 + 15 分钟日志观察（`forbidden` / `domain 不可用` / `lib failed`）。
 3. 任一断言失败 → 用归档 SQL 立即重建该批视图（回滚窗口 < 1 分钟）。
@@ -195,12 +207,12 @@
 | 批次 | 内容 | 处数 | 预估轮次 |
 |---|---|---|---|
 | B1 | 重扫 + 重分类（auto/manual 真实数字） | — | 1 |
-| B2 | auto 剩余（按表，每轮 ≤20） | ~114 | 6 |
+| B2 | manual/裸读剩余（按表，每轮 ≤20；104 裸 + 10 兜底噪声） | ~104 | 6 |
 | B3 | 动态列名枚举（4） | 4 | 1 |
 | B4 | 动态 IN 扇出（26） | 26 | 2 |
-| B5 | 非 fetch 消费（69，三类） | 69 | 4-5 |
+| B5 | 非 fetch 消费（68，三类） | 68 | 4-5 |
 | B6 | 多份基表裁定（5 项） | — | 2 |
-| B7 | 视图退役（137，分批） | — | 5-7 |
+| B7 | 视图退役（252，分批） | — | 5-7 |
 | B8 | 迁机（insight → runtime → mgmt） | — | 3 |
 | B9 | 监控/告警/演练 | — | 2 |
 
