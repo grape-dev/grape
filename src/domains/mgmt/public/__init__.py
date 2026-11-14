@@ -1588,6 +1588,16 @@ _ANY_QUERIES: dict[str, str] = {
     "repo_dev_scene": "SELECT dev_scene FROM managed_repos WHERE repo_key=?",
     # 仓库键存在性（issues_center 的镜像仓查找：单键取回原值 / 多键取交集）
     "repo_key_row": "SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1",
+    # 仓库 owner/repo 名（webhook 删仓前取原名做级联清理；列序与 runtime 原查询逐字一致）
+    "repo_owner_name": "SELECT repo_owner, repo_name FROM managed_repos WHERE repo_key=?",
+    # 仓库登记探活（A2A 真伪校验）：原语句只判「有行」，故与 repo_key_row 分开登记——
+    # 后者在空键时短路返回空串，空键行若存在语义不同，这里保留逐字 SQL。
+    "repo_registered_flag": "SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1",
+    # 幂等补录（三库拓扑下 runtime 进程无 managed_repos；INSERT OR IGNORE 由
+    # mysql_compat 翻译为 INSERT IGNORE，两条后端 rowcount 语义一致：1=新建 / 0=已存在）
+    "repo_insert_ignore": (
+        "INSERT OR IGNORE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) "
+        "VALUES (?,?,?,?)"),
     # 场景市场（runtime 的场景同步读/写；列序与 scene_sync 原查询逐字一致）
     "scene_official_id_by_name": (
         "SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1"),
@@ -1615,6 +1625,15 @@ _ANY_QUERIES: dict[str, str] = {
     "scene_active_flags": (
         "SELECT is_active FROM devops_pipeline_scene "
         "WHERE scene_id=? AND (repo_key=? OR repo_key='')"),
+    # 仓库下所有在用场景的 linked_repos（A2A 关联仓信任域）：原语句按 repo_key 全量取
+    # 多行，无 LIMIT，列序与 runtime 原查询逐字一致（与上面的单场景 scene_linked_repos 分列）
+    "scene_linked_repos_by_repo": (
+        "SELECT linked_repos, advanced_options FROM devops_pipeline_scene "
+        "WHERE repo_key=? AND is_active=1"),
+    # 场景在指定仓库下的在用性（A2A 目标场景存在性快判，列序逐字一致）
+    "scene_id_active_by_repo_scene": (
+        "SELECT scene_id FROM devops_pipeline_scene "
+        "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1"),
     "scene_deploy_url_set": (
         "UPDATE devops_pipeline_scene SET deploy_url=? "
         "WHERE scene_id=? AND repo_key=? AND is_active=1"),
@@ -2203,6 +2222,21 @@ def scene_linked_repos_any(scene_id: str, repo_key: str) -> Any | None:
     return read_one_any("scene_linked_repos", (scene_id, repo_key))
 
 
+def scene_linked_repos_rows_any(repo_key: str) -> list[Any]:
+    """仓库下**所有在用场景**的 (linked_repos, advanced_options) 列表。
+
+    与 `scene_linked_repos_any` 的差别：不限单个 scene_id、不取 LIMIT 1 —— A2A 关联仓
+    信任域要把该仓库全部场景的关联列表都扫一遍，少一行就会漏判。
+    """
+    return list(read_all_any("scene_linked_repos_by_repo", (repo_key,)))
+
+
+def scene_id_exists_any(scene_id: str, repo_key: str) -> str:
+    """场景在该仓库下是否在用；命中返回 scene_id 原值，否则空串。"""
+    row = read_one_any("scene_id_active_by_repo_scene", (scene_id, repo_key))
+    return str(row[0] or "") if row else ""
+
+
 def scene_active_flags_any(scene_id: str, repo_key: str) -> list[Any]:
     """该场景行（含 repo_key='' 的通用行）的 is_active 列表；无行返回空列表。"""
     return list(read_all_any("scene_active_flags", (scene_id, repo_key or "")))
@@ -2419,6 +2453,33 @@ def repo_key_exists_any(repo_key: str) -> str:
         return ""
     row = read_one_any("repo_key_row", (repo_key,))
     return str(row[0] or "") if row else ""
+
+
+def repo_registered_any(repo_key: str) -> bool:
+    """仓库是否在 managed_repos 有行（A2A 真伪快判）。
+
+    与 `repo_key_exists_any` 的差别：**空键也照查**——原语句是
+    `SELECT 1 ... WHERE repo_key=?`，语义只判「有行」，不能因为键为空就短路
+    （调用方据此决定是否走可达性回补录）。
+    """
+    return read_one_any("repo_registered_flag", (repo_key,)) is not None
+
+
+def repo_owner_name_any(repo_key: str) -> Any | None:
+    """仓库的 (repo_owner, repo_name)；无行返回 None（调用方自判空值再回落）。"""
+    return read_one_any("repo_owner_name", (repo_key,))
+
+
+def ensure_repo_row_any(repo_key: str, repo_owner: str, repo_name: str,
+                        full_name: str = "") -> int:
+    """任意拓扑幂等补录 managed_repos 最小行；返回 1=新建 / 0=已存在。
+
+    与 `ensure_repo_row` 同口径，但连接自适应（自有 DSN → mgmt；单库 → 进程主库），
+    供 runtime 进程在三库拓扑下补录（走独立连接而不是本地兜底 SQL）。
+    """
+    return exec_any("repo_insert_ignore",
+                    (repo_key, repo_owner, repo_name,
+                     full_name or f"{repo_owner}/{repo_name}"))
 
 
 #: 仓库键 IN 查询的分块大小（MySQL/sqlite 占位符上限的保守值）。

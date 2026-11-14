@@ -1528,6 +1528,61 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 ---
 
+### 7.11 runtime webhook/A2A 托管仓库与流水线场景收口（2026-11-15 本批）
+
+- 文件：`src/domains/runtime/routes/webhook.py`（runtime 域），**6 处 → 0**（单轮做完，未分两轮）。
+- 表分布（全部归 mgmt）：
+  - `managed_repos` × 4：原行 90（删仓前取 owner/repo 名）、841（无前缀 repository 反查托管前缀）、
+    1687（A2A 回退补录最小行）、1803（A2A 真伪快判是否存在）；
+  - `devops_pipeline_scene` × 2：原行 913（关联仓信任域扫全仓场景 linked_repos）、
+    1029（#568 目标场景在用性快判）。
+- owner 侧新增（`?` 占位符，列序/谓词逐字照抄）：
+  1) `_ANY_QUERIES` 补 5 条：`repo_owner_name`、`repo_registered_flag`、`repo_insert_ignore`、
+     `scene_linked_repos_by_repo`、`scene_id_active_by_repo_scene`；
+  2) 5 个薄函数：`repo_owner_name_any`、`repo_registered_any`、`ensure_repo_row_any`、
+     `scene_linked_repos_rows_any`、`scene_id_exists_any`；
+  3) 841 处复用既有 `repo_key_in_candidates`（github/gitcode 双候选，无 ORDER BY 的库序与
+     改前 `IN (?, ?)` + `fetchone` 逐字一致——烟测用原语句直接对拍，不假设插入序）。
+- 设计取舍：
+  1) **删掉「lib 命中 + 本地兜底 SQL」双分支**：原 90/1029 两处是
+     `mgmt_lib(foreign_only=True)` 命中走 lib、否则打本地 `SELECT` 的写法。兜底分支正是跨域
+     统计来源，且它在单库彩排里一直“绿”，掩盖了三库拓扑下 runtime 进程本地库根本没有这两张表
+     （无视图 → 1146）。统一到任意拓扑原语（自有 DSN → mgmt 连接；单库 → 进程主库 + db_lock），
+     SQL 只在 mgmt 留一份，调用方不再需要兜底。
+  2) **复制 `repo_key_row` 而不复用**：`repo_registered_any` 单独登记 `SELECT 1 … LIMIT 1`。
+     `repo_key_exists_any` 对空键短路返回空串，而原语句是「空键也照查表」的纯存在性判定；
+     两者只在空键行存在时分歧，为保证逐条等价不合并（烟测把这条写成了显式用例）。
+  3) **写原语而不是本地 `_reg_db.commit()`**：`ensure_repo_row_any` 走 `exec_any` 的
+     `_any_cursor(write=True)`，三库拓扑下写进 mgmt 库，单库拓扑仍提交进程库；`INSERT OR IGNORE`
+     由 `mysql_compat` 译为 `INSERT IGNORE`，两条后端 rowcount 同为 1=新建 / 0=已存在。
+  4) **场景两条读不合并**：913 要「该仓**全部在用场景**」（多行、无 LIMIT），与既有单场景
+     `scene_linked_repos`（scene_id + LIMIT 1）谓词不同；合并会漏扫场景，A2A 关联仓闭环会误拒。
+- 修的存量 bug：
+  1) `_authorize_a2a` 检查 2、`_resolve_a2a_repo_key`、A2A 真伪校验原来在 **runtime 进程**里直读
+     `managed_repos` / `devops_pipeline_scene`，三库拆分后是 1146 被 `except` 吞成「不信任 /
+     未登记」——表现为关联仓信任域与托管快路径**静默失效**（不是统计问题）。本批改为 owner 原语，
+     两条拓扑都命中。
+  2) `_a2a_repo_fallback` 的兜底分支在 lib 失败时用进程库游标 `commit()`：三库下会把补录写进
+     runtime 库（写入成功但没人读得到，下次仍走可达性回查）。改为 mgmt 写原语；日志措辞
+     「fallback to local SQL」同步改成「portable primitive」，避免继续误导。
+  3) 删掉 `_handle_repo_deleted` 里已无用途的 `from src.kernel.session_manager import db as _db, db_lock`
+     （游标只剩兜底那一处，搬走后就是死导入）。
+- 验证：`py_compile` 两文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/webhook_a2a_smoke.py`
+  **ALL 87 CHECKS PASSED**（含边界与否定用例：双候选命中时与原语句逐字对拍、空候选不拼空 IN、
+  停用场景不返回、他仓同名 scene_id 不命中、空 owner/空 name 仍返回并触发调用点回落、
+  补录幂等 0 行且不覆盖既有列、`full_name` 缺省拼 owner/name、写后另一连接可见、
+  **空键也照查表**（有 '' 行 → True，对照 `repo_key_exists_any` 短路返回空串）、
+  5 条新语句无 `%s`/`NOW()`/`ON DUPLICATE`/`datetime('now'`、未登记查询名 KeyError、
+  自有 DSN 时读写 SQL 全走 `db_registry.cursor('mgmt')` 不碰进程库、源码 0 条两表 SQL 且
+  6 个调用点全接上）；`rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK /
+  契约 37 条 / 看板最新）；`pytest tests/arch tests/contracts tests/scripts` **158 passed**；
+  `make lint` **import OK**；`check_lib_query_names` PASS（5 个新函数均已登记）。
+- 新基线：全局 **202 → 196**（-6），对 **61 → 61**（两条表仍有其他消费点）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 196 / 61；依赖看板与作业单同步刷新
+  （下一批头名：`runtime/routes/chat.py` 6 处 / `runtime/im/handler_async.py` 6 处）。
+
+---
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
