@@ -6,7 +6,7 @@
 | 日期 | 2026-11-13 |
 | 适用分支 | `arch-weekly-11-ljt`（HEAD 含 PR #1349 合入结果） |
 | 目标环境 | 现网（两机四进程：mgmt / event / worker / insight） |
-| 关联文档 | `docs/weekly-09/domain-db-split.md`、`docs/weekly-11/migration-parity-assessment.md`、`docs/weekly-11/domain-view-and-ignore-pitfalls.md`、**`docs/weekly-11/cross-domain-access-channel-analysis.md`（通道优化分析，v1.1 起生效）** |
+| 关联文档 | `docs/weekly-09/domain-db-split.md`、`docs/weekly-11/migration-parity-assessment.md`、`docs/weekly-11/domain-view-and-ignore-pitfalls.md`、**`docs/weekly-11/cross-domain-access-channel-analysis.md`（通道优化分析 v1.1，含 lib 读/写通道）**、`cross-domain-write-channel.csv`（30 张跨域写表通道分配） |
 | 附表 | `docs/weekly-11/independent-rds-foreign-table-matrix.csv`（70 张外域表全量矩阵） |
 
 > 文中主机、账号、口令一律用 `<mgmt-rds>` / `<runtime-rds>` / `<insight-rds>` / `<user>` / `<password>` 占位，实际值走配置中心，不落文档。
@@ -145,7 +145,7 @@
 - 任何域账号都不得对别的实例有 `GRANT`（连 `SELECT` 也不给）。
 - 数据库层禁止视图跨实例：MySQL 视图不能跨实例，天然满足；**但必须保证"表名唯一归属"**，否则迁移脚本会把视图重新建出来。
 
-### 3.3 跨域访问通道（v1.1 修订：四通道）
+### 3.3 跨域访问通道（v1.1 修订：五通道）
 
 > 修订依据：`docs/weekly-11/cross-domain-access-channel-analysis.md`。实测 70 张外域表中 **60 张存在跨域写**，说明主要矛盾不是"通道选哪个"，而是**表归属与代码归属错位**；修正归属后，剩余跨域读只有 7 张表 10 处引用。
 
@@ -154,11 +154,12 @@
 | **① 域内直连**（首选） | 归属重定 / 模块归位后，代码与表同域 | 强一致 | 无跨域动作；这是 30 张表的最终形态 |
 | **② 服务接口**（默认读通道） | 跨域只读、配置类、需审计 | 强一致（读 owner 库） | 必须聚合端点，禁止 N+1；`/internal/*` + 服务令牌 |
 | **③ lib 只读**（受控例外） | 高频（QPS ≥ 50）+ 多语句/JOIN + 小 payload + 同地域内网 | 强一致 | 见 3.4 六条硬约束；当前 7 张纯跨域读表无一张满足，故不默认启用 |
-| **④ outbox + 补偿**（唯一跨域写） | 跨域状态变更、级联、配额 | 最终一致（≤1 次退避窗口） | 幂等键 + 重试 + 死信；lib 与接口都不允许直写 |
+| **④ lib 同步写**（受控，见 3.5） | 必须同步的跨域写：读己之写 / 并发正确性（租约、绑定）/ 用户即时反馈 | 强（目标域内原子） | 调目标域 `public` 写函数；本地先写 + outbox 兜底；列级写权限、无 DELETE/DDL |
+| **⑤ outbox + 补偿**（异步兜底与派生） | 日志/流水/派生数据、可延迟的跨域通知 | 最终一致（≤1 次退避窗口） | 幂等键 + 重试 + 死信 |
 
-**明确禁止**：跨域裸 SQL 直查（绕过 ②③ 通道）、lib 直写、跨域 JOIN、跨域视图、跨域触发器、跨域外键、`SELECT *`。
+**明确禁止**：跨域裸 SQL 直查（绕过 ②③④ 通道）、lib 写任意表（只能调 public 写函数）、在调用方未提交事务内调 lib 写、跨域 JOIN、跨域视图、跨域触发器、跨域外键、`SELECT *`。
 
-### 3.4 lib 只读通道的六条硬约束
+### 3.4 lib 只读通道的六条硬约束（L1–L6）
 
 | 编号 | 约束 |
 | --- | --- |
@@ -169,6 +170,17 @@
 | L5 | 熔断：30s 窗口失败率 ≥ 20% → 熔断 30s，回退服务接口或 503 |
 | L6 | 审计：每次调用记 `(caller, target, fn, rows, elapsed_ms, trace_id, channel=lib)` |
 
+### 3.5 lib 同步写通道的六条硬约束（M1–M6）
+
+| 编号 | 约束 |
+| --- | --- |
+| M1 | 只能调 `domains/<d>/public/` 的**写函数**（函数内 SQL 固定，不接受调用方传表名/列名/SQL 片段） |
+| M2 | 写账号：`GRANT INSERT, UPDATE (col...) ON <db>.<table>`；**不给 DELETE、不给 DDL**；删除走目标域端点（可软删） |
+| M3 | 幂等：业务唯一键 + `ON DUPLICATE KEY UPDATE`，或条件更新 `WHERE status='old'`；无幂等实现不得进 W2 |
+| M4 | 编排：**本地先写 + outbox(pending) → 提交 → 同步 lib 写 → 成功置 applied / 失败留给补偿**；禁止在未提交事务内调 |
+| M5 | 限额：单次 ≤ 100 行、≤ 300 ms、每 caller ≤ 50 写/秒；目标域 `lock_wait_timeout` ≤ 3s；超时最多重试 1 次（仅幂等） |
+| M6 | 审计：目标域在**同一事务**写审计行（caller、fn、business_key、trace_id、变更摘要）；缺审计行视为未接入 |
+
 ---
 
 ## 4. 设计决策（ADR 摘要）
@@ -176,7 +188,7 @@
 | 编号 | 决策 | 备选与被否原因 |
 | --- | --- | --- |
 | D1 | 跨域视图全部删除，不做"只读视图保留" | 视图无法跨实例；且可更新视图让边界形同虚设 |
-| D2 | **允许 lib 只读通道（受控例外）**，禁止 lib 直写；`GRAPE_DOMAIN_LIB` 由全局开关改为按目标域白名单 `GRAPE_LIB_TARGETS` | 默认走服务接口（聚合端点），lib 仅在满足 3.4 六条约束时启用，避免第二套直连泛滥 |
+| D2 | **允许 lib 只读与 lib 同步写**（均受控），禁止 lib 写任意表与裸 SQL；`GRAPE_DOMAIN_LIB` 改为按目标域白名单 `GRAPE_LIB_TARGETS`，读写函数分别登记 | 读默认走服务接口（聚合端点）；写按"是否必须同步"分流到 W2/W3，避免第二套直连泛滥 |
 | D3 | 跨域写统一 outbox + 补偿（沿用 `grape_t_xwrite_log`，每域一份） | 2PC 跨实例代价高；MQ 需新增组件 |
 | D4 | 读路径优先"批量聚合端点"，不做 N+1 | 逐条调远端会把 p95 打穿；列表页必须一屏一次调用 |
 | D5 | mgmt 开放**只读白名单**内部端点 | 之前"mgmt 完全不开放"导致的 42 次 404 必须消除；只读、限定字段、限定 repo 作用域 |
@@ -392,13 +404,14 @@
 | 判据 | 目标表引用 = 0；端点成功率 ≥ 99.9%、p95 ≤ 30 ms（内网） |
 | 风险 | 中。mgmt 首次开放内部端点，字段白名单与 repo/org 作用域校验必须做足 |
 
-### P3 跨域写 outbox 化（约 2–3 周）
+### P3 跨域写分流（约 2.5 周）
 
 | 项 | 内容 |
 | --- | --- |
-| 范围 | `C2 outbox` **30 张表**（真实跨域写）+ N13 补偿应用端点 |
-| 判据 | 跨域直接 `INSERT/UPDATE/DELETE` = 0；pending < 100、dead = 0、drain 成功率 ≥ 99.9% |
-| 风险 | 中高。幂等键设计不当会重复应用，按案例逐个评审 |
+| 范围 | `C2` 30 张表按语义分三类（清单见 `cross-domain-write-channel.csv`）：**W1 回归属域 4 张**（agent_tasks / agent_type / issue_state / takeover_sessions）、**W2 lib 同步写 16 张**、**W3 outbox 9 张**；`grape_t_schema_migrations` 禁止跨域写 |
+| 动作 | ① W2：目标域实现 public 写函数（幂等 + 审计行）+ 列级写账号；调用方按「本地先写 + outbox pending → 同步写 → applied/留给补偿」编排；② W3：实现 outbox 动作与补偿端点 N13；③ W1：把写路径搬进归属域 |
+| 判据 | 跨域裸 SQL 写 = 0；W2 全部幂等（重放测试通过）；W2 失败 100% 有 outbox pending（A14）；目标域审计行覆盖 100%（A15）；lib 写 p95 ≤ 50 ms、失败率 < 0.1%（A16） |
+| 风险 | 中高。写凭据跨域扩大爆炸半径 → 列级授权 + 函数化 + 审计 + 季度权限复核；跨域死锁 → 固定加锁顺序 + 300ms 超时 |
 
 ### P3.5 剩余跨域读接口化（约 1 周）
 
@@ -436,7 +449,11 @@
 | A9 | 单实例故障演练：其余域主链路可用 | 演练记录 |
 | A10 | 备份可恢复：任取一天备份恢复到临时实例并校验 | 演练记录 |
 | A11 | 若启用 lib：100% 调用带 `channel=lib` 指标与审计；`SELECT *` 次数 = 0 | 指标 + 授权审计 |
-| A12 | 不存在 lib 直写 | 静态扫描 + `SHOW GRANTS` 双验证 |
+| A12 | 不存在 lib 写任意表：所有 lib 写都经 public 写函数 | 静态扫描 + `SHOW GRANTS` 双验证 |
+| A13 | W2 写函数 100% 幂等（唯一键或条件更新） | 评审清单 + 重放测试 |
+| A14 | W2 写失败 100% 有对应 outbox pending 兜底 | `xwrite_log` 对账 |
+| A15 | W2 写 100% 产生目标域审计行 | 审计表计数 vs 调用计数 |
+| A16 | lib 写 p95 ≤ 50 ms、失败率 < 0.1% | `channel=lib_write` 指标 |
 
 ---
 
@@ -486,7 +503,7 @@ python3 scripts/foreign_table_refs.py --src src --owner owner.tsv --out matrix.c
 
 ### 附录 B：全量矩阵
 
-见 `docs/weekly-11/independent-rds-foreign-table-matrix.csv`（70 行：表 / 归属域 / SQL 引用数 / 消费方分布 / 涉及文件数）与 `docs/weekly-11/cross-domain-disposition.csv`（70 行：跨域读/写引用数 + 写方 + 处置分类 D/C1/C2/B/E/A）。
+见 `docs/weekly-11/independent-rds-foreign-table-matrix.csv`（70 行：表 / 归属域 / SQL 引用数 / 消费方分布 / 涉及文件数）、`docs/weekly-11/cross-domain-disposition.csv`（70 行：跨域读/写引用数 + 写方 + 处置分类 D/C1/C2/B/E/A）与 `docs/weekly-11/cross-domain-write-channel.csv`（30 行：W1/W2/W3/X 通道分配 + 理由）。
 
 ### 附录 C：分阶段工期与里程碑
 
@@ -495,7 +512,7 @@ python3 scripts/foreign_table_refs.py --src src --owner owner.tsv --out matrix.c
 | P0 | 1 周 | 冻结生效 | 守卫 + allowlist + 看板 + 删 60 个无引用视图 |
 | P1 | 3 周 | 30 张表归属归位 | 路由搬迁 + kernel 模块归位 + R8 守卫 |
 | P2 | 2–3 周 | 跨域读全部走接口 | N1–N10 + 契约快照 |
-| P3 | 2–3 周 | 跨域写 100% outbox | N13 + 补偿看板 |
+| P3 | 2.5 周 | 跨域写按 W1/W2/W3 分流完成 | 16 个 public 写函数 + 9 个 outbox 动作 + 补偿看板 |
 | P3.5 | 1 周 | 剩余 7 表接口化 | 10 处引用清零 |
 | P4 | 1 周 + 2 窗口 | 三实例上线 | 搬迁记录 + 校验报告 |
 | P5 | 1 周 | 视图归零 | 权限收敛 + 回滚包 |

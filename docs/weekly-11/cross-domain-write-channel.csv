@@ -1,0 +1,31 @@
+table,owner,write_refs,write_by,channel,reason
+agent_tasks,runtime,4,api:2;insight:1;mgmt:1,W1,任务由运行域创建；api 侧只应调 runtime 建单端点
+grape_t_channel_installation,mgmt,5,runtime:5,W2,安装/卸载由用户动作触发，需即时可见
+grape_accounts,mgmt,1,api:1,W2,账号敏感表：仅限白名单列（状态/昵称），禁止口令列
+grape_t_channel_lease,mgmt,9,runtime:9,W2,并发抢占租约，需条件 UPDATE 强一致；高频但单行，幂等
+external_identities,mgmt,1,runtime:1,W2,外部身份映射，登录链路需要即时一致
+issue_state,runtime,1,api:1,W1,需求状态由运行域维护；api 应调状态端点
+autopilot_tasks,mgmt,3,runtime:3,W3,自动任务的派生登记，可延迟
+event_action_filter,mgmt,3,runtime:3,W2,配置类，改动需即时生效
+agent_type,runtime,3,api:3,W1,引擎类型是运行域字典，api 不应写
+autopilot_executions,runtime,2,mgmt:2,W3,执行流水，派生数据
+issue_agent_session,runtime,3,api:3,W2,会话绑定需即时一致（后续请求依赖）
+user_feedback,mgmt,3,api:3,W3,用户反馈落库，可异步，允许失败重试
+organization,mgmt,2,api:2,W2,组织 CRUD，用户交互需即时
+event_active_guard,runtime,3,api:3,W2,活动守卫状态，直接影响派发判断
+grape_t_channel_inbound_dedup,mgmt,3,runtime:3,W2,去重表靠唯一键幂等，失败即整体失败更安全
+user_accounts,mgmt,1,api:1,W2,用户资料，白名单列
+login_whitelist,mgmt,1,api:1,W2,登录白名单，安全相关需即时
+api_latency_log,insight,3,api:3,W3,纯指标数据，异步落洞察域
+grape_t_schema_migrations,mgmt,2,api:2,X,迁移账本禁止跨域写；账本归属各域自己的实例
+scene_skill_ref,mgmt,2,api:1;runtime:1,W2,场景↔技能引用，配置态
+grape_t_channel_chat_session_binding,mgmt,1,runtime:1,W2,会话绑定，即时一致
+scene_category,runtime,1,api:1,W2,分类字典，配置态
+grape_t_channel_sender_identity,mgmt,1,runtime:1,W2,发送者身份映射，即时一致
+takeover_sessions,runtime,1,mgmt:1,W1,接管会话是一等资源，归运行域
+admin_accounts,mgmt,1,api:1,W2,运营账号，白名单列 + 强审计
+feishu_onboard_task,mgmt,1,runtime:1,W3,引导任务，可异步
+event_skipped,runtime,1,api:1,W3,跳过记录，派生
+grape_t_channel_outbound_card,mgmt,1,runtime:1,W3,外发卡片流水，派生
+scene_engine_detach_log,runtime,1,mgmt:1,W3,日志类，派生
+grape_t_merge_gate_log,insight,1,api:1,W3,合并门禁日志，派生
