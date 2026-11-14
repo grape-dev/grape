@@ -20,7 +20,8 @@
           ├─ 矩阵守卫（恒优先）→ lib
           ├─ 配置表缓存（route_config.snapshot，TTL+version）
           │    └─ 读取失败 → 上一次已知配置（启动期兜底）
-          └─ 内置基线：热路径四项→lib；public 原语→lib；其余→remote
+          └─ 内置基线：热路径四项 + 压测超阈值 14 项→lib（QA Required#1 裁决，
+             remote 由配置表显式放开）；public 原语→lib；采样错误 5 项→remote
                ▼
         local_instance / remote_instance 调用
           └─ remote 通道传输异常 → GsbRemoteTimeoutError（fail-fast，不回落 lib）

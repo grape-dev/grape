@@ -369,10 +369,11 @@ def test_heartbeat_loop_runs_periodic_purge(monkeypatch):
 
 
 def test_get_service_returns_remote_when_mode_remote(monkeypatch):
-    """GRAPE_PROVIDER_MODE=remote 时按方法路由（Issue #2479）：默认偏好 remote。
+    """GRAPE_PROVIDER_MODE=remote 时按方法路由（Issue #2479）。
 
-    get_service 返回 _RoutedService 代理；未配置路由表时非热路径方法
-    （get_bot_config）走 Remote 实现，热路径方法（verify_session_token）走 Local。
+    get_service 返回 _RoutedService 代理；未配置路由表时按内置基线取值：
+    压测超阈值方法（get_bot_config）与热路径方法（verify_session_token）
+    均锁 lib，采样错误方法（query_metrics）默认偏好 remote。
     """
     from src.kernel.gsb.provider import get_service, decide_mode
 
@@ -381,7 +382,10 @@ def test_get_service_returns_remote_when_mode_remote(monkeypatch):
     monkeypatch.delenv("GRAPE_SERVICE_NAME", raising=False)
     svc = get_service("mgmt")
     assert type(svc).__name__ == "_RoutedService"
-    assert decide_mode("mgmt", "get_bot_config") == "remote"
+    # 内置基线（QA 审查修复 Required#1）：压测超阈值项基线锁 lib（get_bot_config
+    # 增幅 >20%），采样错误项默认偏好 remote，热路径方法锁 lib
+    assert decide_mode("mgmt", "get_bot_config") == "lib"
+    assert decide_mode("insight", "query_metrics") == "remote"
     assert decide_mode("mgmt", "verify_session_token") == "lib"
 
 

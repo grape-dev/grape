@@ -625,8 +625,10 @@ class TestProviderFactory:
         assert is_remote_mode() is True
         svc = get_mgmt_service()
         assert svc.__class__.__name__ == "_RoutedService"
-        # 内置基线：非热路径方法默认偏好 remote，热路径方法锁 lib
-        assert decide_mode("mgmt", "get_bot_config") == "remote"
+        # 内置基线（QA 审查修复 Required#1）：压测超阈值项（get_bot_config）
+        # 基线锁 lib；采样错误项默认偏好 remote；热路径方法锁 lib
+        assert decide_mode("mgmt", "get_bot_config") == "lib"
+        assert decide_mode("insight", "query_metrics") == "remote"
         assert decide_mode("mgmt", "verify_session_token") == "lib"
 
     def test_cluster_without_remote_mode_returns_local(self, monkeypatch, temp_db):

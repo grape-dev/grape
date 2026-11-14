@@ -142,7 +142,8 @@ def decide_mode(service: str, method: str) -> str:
 
     Returns:
         ``lib`` / ``remote``（矩阵守卫与全局开关恒优先，配置表缺行按内置基线：
-        热路径四项与 public 原语 → lib，其余契约方法 → remote）。
+        热路径四项 + 压测超阈值 14 项与 public 原语 → lib，
+        采样错误的契约方法 → remote）。
     """
     # 1) 禁止矩阵守卫：不查任何配置，runtime|insight → mgmt 恒 lib
     if matrix_forces_lib(service):
@@ -157,8 +158,10 @@ def decide_mode(service: str, method: str) -> str:
         value = (row.get("mode") or "").strip().lower()
         if value in (_MODE_LIB, _MODE_REMOTE):
             return value
-    # 4) 内置基线：热路径四项 → lib；public 原语（本期无 remote 传输通道）→ lib；
-    #    其余契约方法 → 默认偏好 remote
+    # 4) 内置基线：热路径四项 + 压测超阈值 14 项 → lib（「不影响性能」裁决，
+    #    数据支撑见 docs/issue-2479/bench-report.md；remote 由配置表显式放开）；
+    #    public 原语（本期无 remote 传输通道）→ lib；
+    #    其余契约方法（压测采样错误 5 项，无数据）→ 默认偏好 remote
     if key in _BUILTIN_LIB_KEYS:
         return _MODE_LIB
     if method in route_config.PUBLIC_PRIMITIVES.get(service, ()):
@@ -166,13 +169,33 @@ def decide_mode(service: str, method: str) -> str:
     return _MODE_REMOTE
 
 
-#: 热路径白名单（逐请求/逐事件调用，内置基线锁 lib；压测数据支撑见
-#: docs/issue-2479/bench-report.md）
+#: 内置基线锁 lib 的契约 key（QA 审查修复，对齐 bench-report 落地结论）：
+#: - 热路径四项：逐请求/逐事件调用；
+#: - 超阈值 14 项：loopback+共库压测 P95 相对增幅 >20%（绝对增量虽 ≤10ms，
+#:   但 lib 基线亚毫秒，「不影响性能」口径判超阈值，QA 报告 Required#1 裁决：
+#:   基线锁 lib，remote 由配置表 gsb_provider_route 显式放开（改表 ≤30s 生效）。
+#: 压测数据支撑见 docs/issue-2479/bench-report.md。
 _BUILTIN_LIB_KEYS = frozenset({
+    # 热路径四项
     "mgmt.verify_session_token",
     "insight.log_obs",
     "insight.log_api_latency",
     "insight.log_llm_usage",
+    # 压测超阈值 14 项（bench-report §1 判定列）
+    "mgmt.get_repo_webhook_config",
+    "mgmt.get_agent_session",
+    "mgmt.get_scene_config",
+    "mgmt.get_scene_pool_engine_ids",
+    "mgmt.get_bot_config",
+    "mgmt.get_skill",
+    "runtime.get_events",
+    "runtime.get_event_detail",
+    "runtime.get_tasks",
+    "runtime.get_task_messages",
+    "runtime.get_runtimes",
+    "runtime.get_chat_messages",
+    "insight.query_alerts",
+    "insight.aggregate_runtime_stats",
 })
 
 
@@ -293,8 +316,8 @@ def get_service(name: str) -> Any:
     - ``runtime|insight`` 进程请求 ``mgmt`` → 恒 Local 实例（禁止矩阵，不依赖配置表）；
     - ``GRAPE_PROVIDER_MODE`` 非 ``remote`` → Local 实例（存量零回归）；
     - ``GRAPE_PROVIDER_MODE=remote`` 且有 Remote 实现 → ``_RoutedService`` 代理，
-      每次方法调用按 决策链 路由（配置表缺行按内置基线：热路径四项/原语 → lib，
-      其余契约方法 → remote）。
+      每次方法调用按 决策链 路由（配置表缺行按内置基线：热路径四项 + 超阈值
+      14 项/原语 → lib，采样错误 5 项 → remote）。
 
     首次调用时惰性注册 contracts Provider（避免模块级 import cycle）。
 

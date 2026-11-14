@@ -88,15 +88,40 @@ def test_baseline_defaults_when_remote_mode(monkeypatch):
     assert decide_mode("insight", "log_obs") == "lib"
     assert decide_mode("insight", "log_api_latency") == "lib"
     assert decide_mode("insight", "log_llm_usage") == "lib"
-    # 其余契约方法默认偏好 remote
-    assert decide_mode("mgmt", "get_bot_config") == "remote"
-    assert decide_mode("mgmt", "get_skill") == "remote"
-    assert decide_mode("runtime", "get_events") == "remote"
+    # 压测超阈值 14 项基线锁 lib（QA Required#1：空表部署与 bench-report
+    # 落地结论一致，remote 由配置表显式放开）
+    assert decide_mode("mgmt", "get_bot_config") == "lib"
+    assert decide_mode("mgmt", "get_skill") == "lib"
+    assert decide_mode("runtime", "get_events") == "lib"
+    assert decide_mode("runtime", "get_chat_messages") == "lib"
+    assert decide_mode("insight", "query_alerts") == "lib"
+    assert decide_mode("insight", "aggregate_runtime_stats") == "lib"
+    # 采样错误 5 项（压测无数据，无法裁决）默认偏好 remote
     assert decide_mode("runtime", "update_issue_state") == "remote"
+    assert decide_mode("runtime", "get_chat_conversations") == "remote"
     assert decide_mode("insight", "query_metrics") == "remote"
+    assert decide_mode("insight", "query_slo") == "remote"
     # public 原语：本期无 remote 传输通道，基线 lib
     assert decide_mode("mgmt", "fetch_rows") == "lib"
     assert decide_mode("runtime", "list_runtimes") == "lib"
+
+
+def test_builtin_lib_keys_match_bench_report():
+    """内置基线锁 lib 的 18 项 = 热路径 4 + 压测超阈值 14（bench-report §1）。"""
+    expected = {
+        # 热路径四项
+        "mgmt.verify_session_token", "insight.log_obs",
+        "insight.log_api_latency", "insight.log_llm_usage",
+        # 超阈值 14 项
+        "mgmt.get_repo_webhook_config", "mgmt.get_agent_session",
+        "mgmt.get_scene_config", "mgmt.get_scene_pool_engine_ids",
+        "mgmt.get_bot_config", "mgmt.get_skill",
+        "runtime.get_events", "runtime.get_event_detail",
+        "runtime.get_tasks", "runtime.get_task_messages",
+        "runtime.get_runtimes", "runtime.get_chat_messages",
+        "insight.query_alerts", "insight.aggregate_runtime_stats",
+    }
+    assert set(gsb_provider._BUILTIN_LIB_KEYS) == expected
 
 
 def test_baseline_without_remote_mode_is_all_lib():
@@ -111,12 +136,16 @@ def test_baseline_without_remote_mode_is_all_lib():
 
 def test_config_row_overrides_baseline(monkeypatch):
     monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
-    assert decide_mode("mgmt", "get_bot_config") == "remote"
-    route_config.set_route("mgmt.get_bot_config", "lib", updated_by="test")
+    # runtime.update_issue_state 基线 remote（采样错误项）；配置表可覆盖为 lib
+    assert decide_mode("runtime", "update_issue_state") == "remote"
+    route_config.set_route("runtime.update_issue_state", "lib", updated_by="test")
     # 写入方本进程立即生效（set_route 内 reset_cache）
-    assert decide_mode("mgmt", "get_bot_config") == "lib"
+    assert decide_mode("runtime", "update_issue_state") == "lib"
     # 其它 key 不受影响
-    assert decide_mode("mgmt", "get_skill") == "remote"
+    assert decide_mode("runtime", "get_issue_state") == "remote"
+    # 基线 lib 的 key 也可显式放开 remote（opt-in 由配置表承载）
+    route_config.set_route("mgmt.get_bot_config", "remote", updated_by="test")
+    assert decide_mode("mgmt", "get_bot_config") == "remote"
 
 
 def test_set_route_validation_and_version_bump():
@@ -149,7 +178,7 @@ def test_hot_switch_within_ttl(monkeypatch):
     """改表 ≤30s 自动生效（实测）：TTL 到期刷新快照，无需重启。"""
     monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
     monkeypatch.setenv("GRAPE_GSB_ROUTE_TTL", "0.05")
-    assert decide_mode("mgmt", "get_skill") == "remote"
+    assert decide_mode("insight", "query_metrics") == "remote"
     # 模拟「另一进程」改表：直接落库，不走本进程 set_route 的 reset_cache
     with session_manager.db_lock:
         c = session_manager.db.cursor()
@@ -157,15 +186,15 @@ def test_hot_switch_within_ttl(monkeypatch):
             "INSERT OR REPLACE INTO gsb_provider_route "
             "(route_key, mode, timeout_ms, version, updated_at, updated_by) "
             "VALUES (?, 'lib', NULL, 1, ?, 'other-process')",
-            ("mgmt.get_skill", time.time()),
+            ("insight.query_metrics", time.time()),
         )
         session_manager.db.commit()
     started = time.time()
     while time.time() - started < 30:
-        if decide_mode("mgmt", "get_skill") == "lib":
+        if decide_mode("insight", "query_metrics") == "lib":
             break
         time.sleep(0.01)
-    assert decide_mode("mgmt", "get_skill") == "lib"
+    assert decide_mode("insight", "query_metrics") == "lib"
     assert time.time() - started <= 30   # 验收口径：改表 ≤30s 生效（实测 0.05s TTL）
     # version 已进入缓存快照（观测口）
     assert route_config.cache_state()["version"] == 1
@@ -174,8 +203,8 @@ def test_hot_switch_within_ttl(monkeypatch):
 def test_config_read_failure_keeps_last_known(monkeypatch):
     """配置表读取失败 → 退回上一次已知配置（启动期兜底，不属调用期回落）。"""
     monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
-    route_config.set_route("mgmt.get_skill", "lib")
-    assert decide_mode("mgmt.get_skill".split(".")[0], "get_skill") == "lib"
+    route_config.set_route("insight.query_metrics", "lib")
+    assert decide_mode("insight", "query_metrics") == "lib"
     monkeypatch.setenv("GRAPE_GSB_ROUTE_TTL", "0.05")
 
     def boom():
@@ -184,7 +213,7 @@ def test_config_read_failure_keeps_last_known(monkeypatch):
     monkeypatch.setattr(route_config, "_load_all", boom)
     time.sleep(0.06)  # TTL 过期，触发一次失败刷新
     assert decide_mode("mgmt", "get_skill") == "lib"      # 上次已知配置仍生效
-    assert decide_mode("mgmt", "get_bot_config") == "remote"  # 快照缺行 → 内置基线
+    assert decide_mode("insight", "query_slo") == "remote"    # 快照缺行 → 内置基线
 
 
 # ---------------- 禁止矩阵守卫 ----------------
@@ -206,7 +235,7 @@ def test_matrix_guard_forces_lib_for_runtime_and_insight(monkeypatch):
     assert matrix_forces_lib("mgmt") is False
     assert matrix_forces_lib("runtime") is False
     assert matrix_forces_lib("insight") is False
-    assert decide_mode("runtime", "get_events") == "remote"
+    assert decide_mode("runtime", "update_issue_state") == "remote"
     assert decide_mode("insight", "query_metrics") == "remote"
 
 
