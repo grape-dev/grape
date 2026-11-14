@@ -42,7 +42,7 @@
   "src/domains/insight/routes/dashboard.py": 29,
   "src/domains/insight/routes/health.py": 1,
   "src/domains/insight/routes/latency.py": 1,
-  "src/domains/insight/routes/observability.py": 1,
+  "src/domains/insight/routes/observability.py": 0,
   "src/domains/insight/routes/search.py": 0,
   "src/domains/mgmt/admin/config_store.py": 2,
   "src/domains/mgmt/admin/cooldown.py": 2,

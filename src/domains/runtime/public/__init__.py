@@ -1441,6 +1441,7 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "task_stats", "append_task_message", "aggregate_counts", "get_skill_by_id",
            "get_skill_content_hash", "count_skills", "latest_task_for_event",
            "task_brief", "list_credential_rows", "list_repo_credentials", "has_engine_capability", "list_engine_capabilities",
+           "runtime_credentials_visible_rows",
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
            "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "acquire_channel_lease", "release_channel_lease",
            "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
@@ -4980,28 +4981,69 @@ def alerts_credential_heartbeats() -> list[tuple]:
         return [tuple(r) for r in (c.fetchall() or [])]
 
 
+# 可见性查询的仓库 IN 分块上限：guest 组织可能命中上千个 repo_key，
+# 单条 IN 会在 MySQL 上撑大解析与包体；分块后按 id 去重，结果集不变。
+_CRED_VIS_CHUNK = 200
+
+
+def _cred_visibility_where(org_id: str = "", personal_org: bool = True,
+                           uname: str = "", repo_keys=None) -> tuple[str, list]:
+    """凭据可见性 WHERE 片段（三口径，`?` 占位符）。
+
+    - 非个人组织：只按 org_id 隔离；
+    - 指定仓库：global + 本人 user + 该仓 worker；
+    - 其余：global + 本人 user。
+
+    标识符（列名/表名）全部是本函数内的字面量，调用方只能传口径参数，
+    不能传 SQL 片段。
+    """
+    keys = [str(k) for k in (repo_keys or []) if k]
+    if org_id and not personal_org:
+        return " AND org_id=?", [org_id]
+    if keys:
+        ph = ",".join(["?"] * len(keys))
+        return (f" AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key IN ({ph}))",
+                [uname, *keys])
+    return " AND (scope='global' OR (scope='user' AND owner_name=?))", [uname]
+
+
 def credential_ids_visible(org_id: str = "", personal_org: bool = True,
                            uname: str = "", repo_keys=None) -> list[int]:
     """可见凭据 id（三口径：非个人组织按 org_id / 指定仓库 / 个人全局）。
 
     与 dashboard 的 worker 可见性同一套语义，条件在本域拼；调用方只传口径参数。
     """
-    sql = "SELECT id FROM runtime_credentials WHERE status != 'revoked'"
-    params: list = []
-    keys = [str(k) for k in (repo_keys or []) if k]
-    if org_id and not personal_org:
-        sql += " AND org_id=?"
-        params.append(org_id)
-    elif keys:
-        ph = ",".join(["?"] * len(keys))
-        sql += f" AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key IN ({ph}))"
-        params += [uname, *keys]
-    else:
-        sql += " AND (scope='global' OR (scope='user' AND owner_name=?))"
-        params.append(uname)
+    frag, params = _cred_visibility_where(org_id, personal_org, uname, repo_keys)
     with _any_cursor() as c:
-        c.execute(sql, params)
+        c.execute("SELECT id FROM runtime_credentials WHERE status != 'revoked'" + frag, params)
         return [int(r[0]) for r in (c.fetchall() or [])]
+
+
+def runtime_credentials_visible_rows(org_id: str = "", personal_org: bool = True,
+                                     uname: str = "", repo_keys=None) -> list[tuple]:
+    """可见凭据 `(id, device_name, name)`（未注销，按 id 升序）。
+
+    insight 的设备资源曲线原先把可见性 WHERE 片段拼进 SQL 直查本表：三库拆分后
+    进程库没有 runtime_credentials（视图 0）→ 1146 被 except 吞成空列表，曲线恒空。
+    谓词三口径与 `credential_ids_visible` 同源（同一 helper），本函数只多取两列。
+
+    仓库 IN 列表按 `_CRED_VIS_CHUNK` 分块：`scope='global'` 行会命中每个分块，
+    因此跨块按 id 去重后仍按 id 升序返回（结果集与顺序和原单条 SQL 一致）。
+    """
+    keys = [str(k) for k in (repo_keys or []) if k]
+    rows: dict[int, tuple] = {}
+    if org_id and not personal_org:
+        chunks: list[list[str]] = [keys]
+    else:
+        chunks = [keys[i:i + _CRED_VIS_CHUNK] for i in range(0, len(keys), _CRED_VIS_CHUNK)]
+    for chunk in chunks or [[]]:
+        frag, params = _cred_visibility_where(org_id, personal_org, uname, chunk)
+        with _any_cursor() as c:
+            c.execute("SELECT id, device_name, name FROM runtime_credentials"
+                      " WHERE status != 'revoked'" + frag, params)
+            for r in (c.fetchall() or []):
+                rows[int(r[0])] = tuple(r)
+    return [rows[k] for k in sorted(rows)]
 
 
 # ---------- 场景页（mgmt/routes/scenes.py）读路径：技能/引擎/会话 ----------

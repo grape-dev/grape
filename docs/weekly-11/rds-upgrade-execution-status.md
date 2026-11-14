@@ -4460,6 +4460,87 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/kernel/persistence/credential_usage_log.py`（3 处）与 `src/kernel/prompt_builder.py`（3 处），
   实际下一批取 `src/api/feedback_issue_converter.py`（2 处，`user_feedback` 归 **mgmt**）。
 
+### 7.36 insight 可观测性两处 runtime_credentials 下沉 owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/insight/routes/observability.py` **2 处 → 0**（单轮做完，2 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`runtime_credentials`（归 **runtime**）× 2
+  - L225 `obs_logs_ingest`：凭据显示名的**兜底 SQL** `SELECT name, device_name FROM runtime_credentials
+    WHERE id=?`（同一行的 legacy lib 分支 `read_one("runtime_credentials_911d7f")` 不直接计数，
+    但静态正则只认这条兜底语句）。
+  - L383 `obs_runtime_history`：设备资源曲线的可见凭据列表
+    `SELECT id, device_name, name FROM runtime_credentials WHERE status != 'revoked'` + **动态 WHERE 片段**
+    （由 `overview._cred_visibility(user, repo_keys)` 返回 `frag, params`）+ ` ORDER BY id`。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`）：
+  - 新增私有 helper `_cred_visibility_where(org_id, personal_org, uname, repo_keys)`：三口径 WHERE 片段
+    （非个人组织按 `org_id` / 指定仓库 `global ∪ 本人 ∪ 该仓` / 其余 `global ∪ 本人`），
+    标识符全是本域字面量，调用方只能传口径参数；
+  - 新增薄函数 `runtime_credentials_visible_rows(...)` → `(id, device_name, name)`，按 id 升序；
+  - `credential_ids_visible` 改为共用同一 helper（原体内联的三口径拼接删除），行为不变；
+  - L225 复用**既有**读口 `dashboard_credential_name_device` + `_ANY_QUERIES["runtime_credentials_name_device"]`
+    （列序 `name, device_name` 与原 SQL 逐字一致），未新造重复查询；
+  - `__all__` 登记 `runtime_credentials_visible_rows`。
+- 调用点只改 `src/domains/insight/routes/observability.py`：两处 `db_lock` + `db.cursor()` 与 SQL 全部消失；
+  L225 改 `runtime_public.dashboard_credential_name_device`，L383 改
+  `runtime_public.runtime_credentials_visible_rows`。`is_org_personal` 判定留在路由（与原
+  `_cred_visibility` 同一调用），异常按「非个人组织」兜底并 `log.debug`。
+- 设计取舍：
+  1. **鉴权谓词只留一份**：`_cred_visibility_where` 同时服务 `credential_ids_visible` 与新原语 ——
+     复制三口径拼接会出现「一处加了 org 隔离、另一处没加」的静默越权，因此宁可重构既有函数
+     （烟测 B11 钉住重构前后同结果）。
+  2. **非个人组织优先于仓库条件**：原实现 `if org_id and not is_personal: return org 过滤` 直接短路
+     `repo_keys`；本批原样保留（烟测 C11：org 42 用户即使带 `repo` 也只回组织内两行）。
+  3. **`status != 'revoked'` 不是 `status='active'`**：`offline` / `about_to_gc` 的引擎也要出现在
+     资源曲线里，改口径会让设备列表少行；B2 用 revoked 行钉住排除。
+  4. **`scope='global'` 行不看 `org_id`**（原口径保留）：个人视图里能看到别的组织打的 global 行，
+     这是既有语义，属「切面/全局设备」既定设计；B13 显式钉住，本批不改口径（真收窄会让
+     全局设备在个人视图消失，属产品决策）。
+  5. **仓库 IN 分块 200**：guest 组织可能命中上千 `repo_key`；分块后 `scope='global'` 行会在每块
+     重复命中，故跨块按 id 去重、最终仍按 id 升序返回（B10 用 3 键/块 2 断言 2 次查询、
+     结果集与顺序不变）。
+  6. **展示兜底留在调用点**：`device_name → name → worker-<id>` 与
+     `device_name or ""` / `name or ""` 是展示口径，原语只回 `(name, device_name)` 原值（含 NULL）。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **三库拆分后日志摄取 source 恒为 `worker-<id>`**：L225 兜底走 insight 进程库游标，该库没有
+     `runtime_credentials`（视图 0）→ `1146` → 被 `except Exception: pass` 吞成一行都没有，
+     日志按 source 过滤与 `/api/obs/logs/sources` 分面全部失真。
+  2. **三库拆分后设备资源历史列表恒空**：L383 同一根因，异常被 `log.warning` + `runtimes=[]` 兜住，
+     `/api/obs/runtimes/history` 永远没有可选设备（前端曲线空白），且 `?runtime_id=` 一律 404。
+  3. **降级不可观测**：L225 `except Exception: pass` → `log.debug`（`tests/silent_except_baseline.json`
+     该文件 1 → 0，只减不增）；L383 的 org 判定兜底同样补 `log.debug`。
+- 验证（真实退出码）：
+  · `py_compile`（runtime `public/__init__.py` / insight `routes/observability.py`）→ **COMPILE_OK**；
+  · `~/burndown/obs_visibility_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，种 10 行凭据）
+    → **ALL observability visibility smoke PASSED (46 checks)**：
+    A 注册面/静态否定（`__all__` 登记、文件无 SQL 字面量 / 无 `session_manager`+`db_lock` /
+    无 `except: pass`、原语签名只收口径参数、三口径片段逐字与占位符个数、无 `%s`/`NOW()`/`ON DUPLICATE`）；
+    B 原语语义（个人/仓库/非个人组织三口径、注销行排除、他人 user 行不可见、列序逐字含 NULL、
+    id 升序、空串与 None 仓库键忽略、IN 分块 2 次查询且 global 行不重复、`credential_ids_visible`
+    重构后同结果、global 行不看 org_id）；
+    C 调用点端到端（source 优先级 device_name → name → worker-<id>、runtime_id 透传、
+    读口异常只降级不抛、可见 id 过滤、指定 runtime_id 收窄、越权 runtime_id 404、指定仓库过滤、
+    非个人组织优先、org 判定异常兜底、越权仓库 404、rollup 异常 500）；
+    D 自有 DSN 伪游标（三处都 `domain=runtime`、语句逐字、参数 `(alice, repo-a)` / `(42,)` / `(7,)`）。
+    烟测首轮 10 条红：A7 是断言写法（把注释里的函数名当成调用），其余 9 条是**测试期望写错** ——
+    把 `scope='global'` 但带 `org_id` 的行当成「他组织不可见」，而原口径该类行在个人视图本就可见
+    （种子改为 org 内 `scope='user'`，并新增 B13 钉住原口径），实现未改。
+  · `--update-baseline` → **baseline updated: 27 pairs, 41 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **23 表 / 41 跨域引用 / 27 对**；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （runtime 176 funcs + 27 named queries used / 255 funcs + 61 registered；mgmt 182+6 / 264+31；
+    insight 18+0 / 26+0）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  轮内口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新原语契约），运行面证据为 sqlite 烟测
+  （含三口径、分块去重与自有 DSN 伪游标）。
+- **新基线**：**41 处 / 27 对 / 23 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 41 处 / 29 文件）。下一批首个未 blocked 文件是 `src/domains/insight/routes/health.py`
+  （2 处，`agent_runtimes` 归 **runtime**）——上节预测的 `feedback_issue_converter.py` 同为 2 处，
+  按文件序排在其后；头两名仍是 ⛔ blocked 的 `credential_usage_log.py`（3 处）与
+  `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
