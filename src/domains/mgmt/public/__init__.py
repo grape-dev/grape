@@ -749,6 +749,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # 反馈状态联动（api/feedback_status.py；任意拓扑）
            "feedback_external_sync_page", "feedback_mark_status_if_live",
            "feedback_internal_sync_page", "feedback_apply_statuses",
+           # 场景计数（api/session_store.py 首次托管判定；任意拓扑）
+           "count_active_scenes_any",
            # 登录白名单判定（kernel/config.py；任意拓扑）
            "login_whitelist_count", "login_whitelist_row_match",
            "login_whitelist_legacy_column", "login_whitelist_legacy_column_match",
@@ -1664,6 +1666,12 @@ _ANY_QUERIES: dict[str, str] = {
     "scene_active_flags": (
         "SELECT is_active FROM devops_pipeline_scene "
         "WHERE scene_id=? AND (repo_key=? OR repo_key='')"),
+    # 仓库在用场景计数（api 侧「首次托管是否已有默认场景」判定）。原语句在 api 进程里
+    # 用进程主库游标直发，三库拆分后 api 库没有本表（视图 0）→ 1146 被外层 except 吞成
+    # 「场景数 0」→ 每次托管都重放 apply_market_scene_by_name（幂等但白跑一遍建场景链）。
+    # 谓词/过滤位与调用方原语句逐字一致（保留 is_active=1，停用行不算已存在）。
+    "scene_active_count_by_repo": (
+        "SELECT COUNT(*) FROM devops_pipeline_scene WHERE repo_key=? AND is_active=1"),
     # 仓库下所有在用场景的 linked_repos（A2A 关联仓信任域）：原语句按 repo_key 全量取
     # 多行，无 LIMIT，列序与 runtime 原查询逐字一致（与上面的单场景 scene_linked_repos 分列）
     "scene_linked_repos_by_repo": (
@@ -2687,6 +2695,15 @@ def scene_id_exists_any(scene_id: str, repo_key: str) -> str:
 def scene_active_flags_any(scene_id: str, repo_key: str) -> list[Any]:
     """该场景行（含 repo_key='' 的通用行）的 is_active 列表；无行返回空列表。"""
     return list(read_all_any("scene_active_flags", (scene_id, repo_key or "")))
+
+
+def count_active_scenes_any(repo_key: str) -> int:
+    """该仓库下启用中的场景数（api 首次托管判定「是否已有默认场景」）。
+
+    只数 `is_active=1`（停用行不算已存在，与原语句一致）；仓库无场景返回 0。
+    """
+    row = read_one_any("scene_active_count_by_repo", (repo_key,))
+    return int(row[0] or 0) if row else 0
 
 
 def set_scene_deploy_url_any(deploy_url: str, scene_id: str, repo_key: str) -> int:

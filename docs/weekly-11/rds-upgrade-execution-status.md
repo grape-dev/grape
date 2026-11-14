@@ -3020,6 +3020,75 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （下一批头名 `src/api/deps.py` 4 处 `external_identities`，同尺寸还有
   `src/api/health_endpoints.py`、`src/api/session_store.py` 各 4 处）。
 
+### 7.32 api 会话存储的场景读取按表归位 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/api/session_store.py` **4 处 → 0**（单轮做完，4 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - `devops_pipeline_scene`（归 **mgmt**）× 3：L486 `ensure_default_agent_sessions` 的
+    `SELECT COUNT(*) ... WHERE repo_key=? AND is_active=1`（「是否已有默认场景」闸门）；
+    L698 `_scene_binding_active` 的 `SELECT is_active ... WHERE scene_id=? AND (repo_key=? OR repo_key='')`；
+    L745 `get_scene_advanced_options` 的 `SELECT advanced_options ... WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1`。
+    三条谓词与列全部定长，**无动态表名/列名、无跨域 JOIN、无动态 IN 长度**。
+  - `issue`（归 **runtime**）× 1：L611 —— **不是 SQL**，是英文日志
+    `"Failed to update issue session {session_id}: {e}"`，静态正则按「关键字 + 下一个标识符」
+    把它读成 `UPDATE issue`（假阳性）。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`，`?` 占位符）：
+  1) 新增具名查询一条 `scene_active_count_by_repo`（与 L486 原语句逐字一致，保留 `is_active=1`）。
+  2) 新增薄原语一个 `count_active_scenes_any(repo_key) -> int`（无行/空值回 0），登记 `__all__`。
+  3) 另两处**复用既有原语**，不重复登记语句：`scene_active_flags_any()`（7.x 已为
+     runtime/event_pipeline 登记 `scene_active_flags`，同语句同列序）、
+     `pipeline_scene_advanced_options(scene_id, repo_keys)`（已为 insight 看板登记，
+     单键经 `IN(?)` 传与 `repo_key=?` 等价）。
+- 设计取舍：
+  1) **按「已有原语优先」而不是「一站点一新查询」**：三条语句里两条在早前批次已登记给别的
+     消费方（runtime 事件管道 / insight 能效看板）。同语句在本域登记两份会让 owner 侧出现
+     两个真源（7.31 已裁定过同一手法），故本批只补真正缺的那一条 `COUNT(*)`。
+  2) **`COUNT` 原语不静默吞异常**（与 7.31 的四条各自 `log.debug` 不同）：调用方的降级语义是
+     「计数不确定 → 不建场景」，把异常吞成 0 会让它在「库抖动」时误建场景链（幂等但白跑）。
+     owner 抛、调用方按原有 `except → log.warning → 跳过` 处理，语义与单库拓扑逐字一致。
+  3) **`advanced_options` 复用既有原语而非新登记 `repo_key=?` 版本**：单键 `IN(?)` 与原等值谓词
+     等价；原实现里的「非 str 值直接当 dict」分支（`isinstance(row[0], str)`）在冒烟里仍钉住
+     （`_raw` 非 str 时按原样归一），JSON 解析与非 dict 归一留在调用方，口径未动。
+  4) **`_scene_binding_active` 的 `except → True` 保留**：其契约是「行不存在/查询失败都不算失效」
+     （Issue #1745：不因 DB 抖动清空场景绑定），属业务口径而非静默吞错，本批只补 `log.debug`
+     让降级可观测，不把它改成立即返回 False。
+  5) **只切「建场景闸门」**：`ensure_default_agent_sessions` 后半段（会话落库 / upsert）仍走
+     进程主库既有口径，不属本次表归位范围，避免把一批小改动扩成会话写入重构。
+  6) **日志文案消歧**：`issue` 那处是英文句子被正则误判。改文案为
+     `"Failed to persist session ..."`，并在注释里写明「关键字与表名相邻会被扫成引用」，
+     防止后续有人改回原句又把棘轮点亮。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1) **首次托管永远不建默认场景**：三库拓扑下 api 进程库没有 `devops_pipeline_scene`（视图 0），
+     `COUNT(*)` 必 1146 → 外层 `except` 吞成告警并**跳过**建场景，`apply_market_scene_by_name`
+     从不触发；端点仍 200，现场表现是「新仓库托管后没有默认场景、Agent 会话全空」。
+  2) **场景停用判定在三库拓扑下恒放行**：`_scene_binding_active` 的 1146 落到
+     `except → True`，幽灵 `scene_id` 一路传到 `scenes detail` 必然 404（Issue #1745 的修复
+     只在单库拓扑成立）。
+  3) **`work_branch` 口径漂移**：`get_scene_advanced_options` 的 1146 落到 `except → {}`，
+     场景配置的开发基线恒为空串 → 引擎用默认分支而不是场景声明的 `work_branch`，
+     且没有任何日志痕迹。
+- 验证：
+  - `py_compile` 2 个文件 **COMPILE_OK**（`src/api/session_store.py`、`src/domains/mgmt/public/__init__.py`）。
+  - SQLite 烟测 `~/burndown/session_store_scene_smoke.py` **ALL 72 CHECKS PASSED**
+    （A 静态面 / B owner 注册面 / C 行为面 / D 边界与否定 / D2 端到端 / E 拓扑面）：
+    三处 `devops_pipeline_scene` SQL 从 api 文件逐字消失、整文件「关键字+表名」命中 0、
+    无 `%s`/`NOW()`/`ON DUPLICATE`、三个站点不再持进程主库游标/锁；
+    计数/绑定/高级选项与原 SQL 逐字等价（对照基准在本轮内联复刻），`repo_key=''` 通用行
+    参与绑定匹配；停用行不计入「已存在」但绑定判定仍返回其 `is_active`；
+    空 `scene_id`、空/None `repo_key`、NULL 高级选项、`{}`、非法 JSON、`[1,2]` 非 dict、
+    跨仓同 `scene_id`、缺表（owner 抛错 / 绑定 True / 高级选项 `{}` / 闸门跳过）
+    全部按原口径；端到端建场景闸门 4 例（有在用场景 0 次、只有停用 1 次、新仓库 1 次、
+    计数=1 即拦下）；自有 DSN 分支只连 mgmt 域、读到 mgmt 库的值（`work_branch` 未被
+    api 主库覆盖）、mgmt 库无场景时**会**建场景（原实现在此恒 1146 从不建）。
+  - `bash scripts/rds_gate.sh --quick` **GATE: 全绿**（check-arch R1–R8 / 棘轮 OK /
+    契约 37 条 / 看板最新）。
+  - `pytest tests/arch tests/contracts tests/scripts` **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **96 → 92**（-4），对数 **40 → 39** —— `devops_pipeline_scene←api` 这一对
+  **清零**（api 侧 3 处全归位；该表剩余 2 处都在 runtime 侧，属另行批次）。
+  基线 `foreign-refs-allowlist.csv` 收紧为 92 / 39，依赖看板与作业单同步刷新
+  （下一批头名 `src/api/health_endpoints.py` 4 处 `agent_tasks`/`agent_runtimes`，
+  同尺寸还有 `src/api/deps.py` 4 处 `external_identities`）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
