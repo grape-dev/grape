@@ -136,3 +136,17 @@ python3 scripts/verify_domain_isolation.py --host <rds> --user <u> --password <p
    `grape_t_channel_lease` / `grape_t_channel_installation` / `grape_t_channel_inbound_dedup` /
    `grape_t_channel_chat_session_binding` / `grape_t_channel_sender_identity`）。
 5. P4 具备实例后：按 §8.4 顺序 insight → runtime → mgmt，每域 `rds_cutover_check` 全绿再切 DSN。
+---
+
+## 7. 提交记录
+
+| 提交 | 内容 | 状态 |
+| --- | --- | --- |
+| `6a275f0da` | feat(db): add domain split guards and cutover tools | 已推送 `grape-dev/arch-weekly-11-ljt` |
+| `f75acecf5` | feat(api): add P2 internal service endpoints for RDS split | 已推送 `grape-dev/arch-weekly-11-ljt` |
+
+验证（提交后复跑）：
+- `pytest tests/contracts tests/arch tests/scripts tests/api/test_mgmt_no_internal_routes.py tests/kernel/test_gsb_route.py` → **189 passed**
+- `scripts/check-arch.py` → RESULT: PASS（R1–R8）
+- `scripts/foreign_table_refs.py --check` → OK（棘轮未上升，138 对 / 1306 处）
+- `tests/kernel` 其余 44 项失败为分支既有（已在 HEAD 干净树 `git worktree` 复现，与本次改动无关）

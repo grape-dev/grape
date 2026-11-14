@@ -1,7 +1,7 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-14 14:36　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **70** 张；跨域引用 **1306** 处（138 个「表×消费域」对）；含归属域在内的 SQL 引用 2689 处
+> 生成时间：2026-11-14 15:03　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **70** 张；跨域引用 **1306** 处（138 个「表×消费域」对）；含归属域在内的 SQL 引用 2698 处
 
 ## 1. 域 × 域 跨域引用热力
 
@@ -33,7 +33,7 @@
 | `agent_runtimes` | runtime | 82 | api 38 / mgmt 31 / insight 10 / kernel 3 | C1 归属重定（写路径挪进 owner 域） | — | 42 |
 | `agent_tasks` | runtime | 72 | insight 36 / api 30 / mgmt 5 / kernel 1 | C2 outbox 跨域写 | W1 | 45 |
 | `agent_shared_knowledge` | mgmt | 64 | api 53 / runtime 8 / kernel 3 | C1 归属重定（写路径挪进 owner 域） | — | 9 |
-| `meta` | runtime | 59 | api 27 / mgmt 24 / kernel 8 | D 模块归位（kernel 写/读域表） | — | 8 |
+| `meta` | runtime | 59 | api 27 / mgmt 24 / kernel 8 | D 模块归位（kernel 写/读域表） | — | 9 |
 | `runtime_credentials` | runtime | 58 | mgmt 22 / insight 20 / api 15 / kernel 1 | C1 归属重定（写路径挪进 owner 域） | — | 29 |
 | `devops_pipeline_scene` | mgmt | 51 | api 34 / runtime 15 / insight 2 | C1 归属重定（写路径挪进 owner 域） | — | 17 |
 | `unified_user_mapping` | mgmt | 45 | kernel 24 / runtime 14 / api 6 / insight 1 | D 模块归位（kernel 写/读域表） | — | 16 |
@@ -95,7 +95,7 @@
 | `grape_t_merge_gate_log` | insight | 1 | api 1 | C2 outbox 跨域写 | W3 | 1 |
 | `obs_llm_usage` | insight | 1 | mgmt 1 | B API 聚合端点 | — | 7 |
 | `obs_metric_rollup` | insight | 1 | mgmt 1 | B API 聚合端点 | — | 5 |
-| `org_member` | mgmt | 1 | api 1 | D 模块归位（kernel 写/读域表） | — | 5 |
+| `org_member` | mgmt | 1 | api 1 | D 模块归位（kernel 写/读域表） | — | 6 |
 | `scene_engine_detach_log` | runtime | 1 | mgmt 1 | C2 outbox 跨域写 | W3 | 4 |
 
 ## 4. 用法

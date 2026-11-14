@@ -21,6 +21,7 @@ import argparse
 import csv
 import datetime
 import html
+import re
 import importlib.util
 import sys
 from collections import defaultdict
@@ -247,11 +248,18 @@ def main(argv: list[str] | None = None) -> int:
     md = render_md(data)
     page = render_html(data)
 
+    def _normalize(text: str) -> str:
+        # 生成时间戳不参与"过期"判定（否则每次刷新都会把自己判过期）
+        text = re.sub(r"生成时间：[^　]*", "生成时间：<ts>", text)
+        return re.sub(r"生成于 [^·<]*", "生成于 <ts>", text)
+
     if args.check:
         stale = []
-        if not MD_OUT.is_file() or MD_OUT.read_text(encoding="utf-8") != md:
+        if (not MD_OUT.is_file()
+                or _normalize(MD_OUT.read_text(encoding="utf-8")) != _normalize(md)):
             stale.append(str(MD_OUT.relative_to(REPO)))
-        if not HTML_OUT.is_file() or HTML_OUT.read_text(encoding="utf-8") != page:
+        if (not HTML_OUT.is_file()
+                or _normalize(HTML_OUT.read_text(encoding="utf-8")) != _normalize(page)):
             stale.append(str(HTML_OUT.relative_to(REPO)))
         if stale:
             print("看板过期，请运行 python3 scripts/gen_domain_dependency_board.py："
