@@ -17,9 +17,19 @@ from types import ModuleType
 
 
 def _lib(domain: str, env_flag: str) -> ModuleType | None:
-    if os.environ.get(env_flag) != "1":
-        return None
+    # 启用条件 = 该域配置了自有 DSN（三库独立）。历史开关（GRAPE_<D>_READ_VIA_LIB）
+    # 不再作为唯一闸门：开关打开但没 DSN 时无法独立连接，仍返回 None；反之配了 DSN
+    # 就说明已进入独立拓扑，读路径必须走 owner 域（否则命中"无视图 → 1146"）。
     try:
+        from src.kernel import db_registry
+
+        if not db_registry.uses_own_dsn(domain):
+            if os.environ.get(env_flag) == "1":
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    f"{env_flag}=1 但 {domain} 未配置自有 DSN，读路径仍走本地 SQL")
+            return None
         mod = __import__(f"src.domains.{domain}.public", fromlist=["*"])
         avail = getattr(mod, "available", None)
         if callable(avail) and not avail():
@@ -114,3 +124,19 @@ def owner_lib(domain: str, foreign_only: bool = True) -> ModuleType | None:
 
         logging.getLogger(__name__).warning(f"{domain} owner lib unavailable: {exc}")
         return None
+
+
+def switch_on(env_flag: str, domain: str) -> bool:
+    """历史灰度开关的统一判定：显式 `=1`，**或** 该域已配自有 DSN（独立拓扑）。
+
+    三库独立后不存在跨域视图，继续用"未开开关"当默认会让读路径 1146；
+    因此 DSN 存在即视为开启。单库/视图期（无 DSN）保持原行为。
+    """
+    if os.environ.get(env_flag) == "1":
+        return True
+    try:
+        from src.kernel import db_registry
+
+        return db_registry.uses_own_dsn(domain)
+    except Exception:  # noqa: BLE001
+        return False

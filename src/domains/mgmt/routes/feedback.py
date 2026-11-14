@@ -26,7 +26,8 @@ def _task_via_lib():
     """GRAPE_TASKS_VIA_LIB=1 且 runtime lib 可用时走 lib（三库三机模式）。"""
     import os as _os
 
-    if _os.environ.get("GRAPE_TASKS_VIA_LIB") != "1":
+    from src.kernel import domain_read as _dr  # noqa: PLC0415
+    if not _dr.switch_on("GRAPE_TASKS_VIA_LIB", "runtime"):
         return None
     try:
         from src.domains.runtime import public as _rt

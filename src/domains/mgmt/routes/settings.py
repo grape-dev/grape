@@ -1277,7 +1277,8 @@ def _creds_via_lib():
     """GRAPE_CREDENTIALS_VIA_LIB=1 且 runtime lib 可用时返回 lib 模块（三库三机模式）。"""
     import os as _os
 
-    if _os.environ.get("GRAPE_CREDENTIALS_VIA_LIB") != "1":
+    from src.kernel import domain_read as _dr  # noqa: PLC0415
+    if not _dr.switch_on("GRAPE_CREDENTIALS_VIA_LIB", "runtime"):
         return None
     try:
         from src.domains.runtime import public as _rt

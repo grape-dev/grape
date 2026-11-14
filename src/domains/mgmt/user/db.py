@@ -1071,7 +1071,8 @@ def get_skill_by_id(skill_id, *, raise_on_error: bool = False) -> dict | None:
     if not skill_id:
         return None
     import os as _os
-    if _os.environ.get("GRAPE_SKILLS_VIA_LIB") == "1":
+    from src.kernel.domain_read import switch_on as _dr_switch  # noqa: PLC0415
+    if _dr_switch("GRAPE_SKILLS_VIA_LIB", "runtime"):
         try:
             from src.domains.runtime import public as _rt
             if _rt.available():
@@ -1108,7 +1109,8 @@ def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[in
     返回 (id, content_hash, file_path)，id=0 表示不存在。
     """
     import os as _os
-    if _os.environ.get("GRAPE_SKILLS_VIA_LIB") == "1":
+    from src.kernel.domain_read import switch_on as _dr_switch  # noqa: PLC0415
+    if _dr_switch("GRAPE_SKILLS_VIA_LIB", "runtime"):
         try:
             from src.domains.runtime import public as _rt
             if _rt.available():
@@ -4262,7 +4264,8 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     如 settings.get_agent_runtimes 的 Engines 列表）。
     """
     import os as _os
-    if _os.environ.get("GRAPE_RUNTIMES_VIA_LIB") == "1":
+    from src.kernel.domain_read import switch_on as _dr_switch  # noqa: PLC0415
+    if _dr_switch("GRAPE_RUNTIMES_VIA_LIB", "runtime"):
         try:
             from src.domains.runtime import public as _rt
             if _rt.available():

@@ -28,7 +28,7 @@
 | P2 N13 补偿应用端点 | ✅ 完成 | `POST /internal/xwrite/apply`（runtime 9 个 action、mgmt 5 个 action）；幂等键登记表 `grape_t_xwrite_applied`（`cross_write.claim_applied`） |
 | P2 内部契约快照 | ✅ 完成 | `docs/weekly-11/internal-contract.json`（36 条：runtime 17 / mgmt 12 / insight 7），全部 `<domain>_<resource>_<action>` |
 | P3 W1/W2/W3 写分流 | ✅ 覆盖达标（W2/W3 缺口 0） | 31 张写表：**22 张已有 owner public 写函数（71%）**；6 张 api→mgmt 为同进程同库（不需通道）；1 张 X（迁移账本禁跨域写）。W2 新增 12 个 mgmt/runtime 写原语，W3 新增 6 个动作（runtime/mgmt/insight 各 `xwrite/apply`）|
-| P3.5 剩余跨域读接口化 | 🟡 进行中（按 stage 实测推进） | 已切：chat 会话列表（kernel `get_user_conversations`）、场景分类（mgmt `get_scene_category`）→ `domain_read.owner_lib`，stage 冒烟 16 端点 0 失败；其余跨域读按 `scripts/stage_api_smoke.py` 报出的 1146 逐条推进 |
+| P3.5 剩余跨域读接口化 | 🟡 进行中（按 stage `--all` 实测推进：125 端点，失败 11→9） | 已切：chat 会话列表（kernel `get_user_conversations`）、场景分类（mgmt `get_scene_category`）→ `domain_read.owner_lib`，stage 冒烟 16 端点 0 失败；读开关改为「DSN 存在即开启」（`domain_read.switch_on`），历史灰度分支自动生效。**剩余 9 个端点**（按 1146 逐条改）：`/api/autopilot/executions`（autopilot_executions）、`/api/dashboard/ops/error-logs`（agent_runtimes）、`/api/dashboard/ops/timeline`（agent_tasks）、`/api/health`（agent_tasks）、`/api/scenes/market/categories`（scene_category）、`/api/settings/{agent-runtimes,runtime-credentials,runtime-devices}`（runtime_credentials/agent_runtimes）、`/api/skills/featured`（skill） |
 | P4 三实例与搬迁 | 🟡 彩排通过（云实例仍缺） | `scripts/rds_stage_rehearsal.py` 在参照实例上建三个独立库 + 只授本库账号：表集合一致、行数与 dump 快照一致、视图 0、跨域裸读实测 1146；`rds_cutover_check.py` baseline 102 表 / 382,976 行 |
 | P5 权限收敛与清视图 | 🟡 彩排验收通过（生产待 P4） | stage 三库：A1 视图 0 ✅ / A2 授权仅本库 ✅ / A6 队列 ✅；A3 代码引用 135 对仍红（P1 未完成，如实） |
 
