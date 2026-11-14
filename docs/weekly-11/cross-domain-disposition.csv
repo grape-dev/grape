@@ -1,0 +1,68 @@
+table,owner,read_refs,write_refs,read_by,write_by,disposition
+issue,runtime,42,43,api:36;insight:4;mgmt:2,api:40;kernel:2;mgmt:1,D 模块归位（kernel 写/读域表）
+skill,runtime,68,18,mgmt:50;api:14;kernel:4,mgmt:10;api:5;kernel:3,D 模块归位（kernel 写/读域表）
+meta,runtime,29,35,api:14;mgmt:9;kernel:6,mgmt:15;api:14;kernel:6,D 模块归位（kernel 写/读域表）
+events,runtime,56,17,api:35;insight:17;mgmt:4,api:17,C1 归属重定（写路径挪进 owner 域）
+agent_shared_knowledge,mgmt,39,21,api:30;runtime:6;kernel:3,api:18;runtime:3,C1 归属重定（写路径挪进 owner 域）
+agent_runtimes,runtime,52,14,mgmt:25;api:14;insight:10;kernel:3,mgmt:10;api:4,C1 归属重定（写路径挪进 owner 域）
+agent_tasks,runtime,65,4,insight:35;api:24;mgmt:5;kernel:1,api:2;insight:1;mgmt:1,C2 outbox 跨域写
+runtime_credentials,runtime,46,11,insight:20;mgmt:19;api:6;kernel:1,api:6;mgmt:5,C1 归属重定（写路径挪进 owner 域）
+devops_pipeline_scene,mgmt,32,17,api:17;runtime:13;insight:2,api:15;runtime:2,C1 归属重定（写路径挪进 owner 域）
+managed_repos,mgmt,28,12,api:11;runtime:10;kernel:6;insight:1,api:5;kernel:5;runtime:2,D 模块归位（kernel 写/读域表）
+unified_user_mapping,mgmt,21,14,kernel:9;runtime:6;api:5;insight:1,kernel:8;runtime:6,D 模块归位（kernel 写/读域表）
+devops_agent_session,runtime,18,15,api:8;mgmt:8;insight:1;kernel:1,api:11;mgmt:4,C1 归属重定（写路径挪进 owner 域）
+grape_t_repo_credentials,insight,17,11,mgmt:9;runtime:7;contracts:1,mgmt:7;runtime:4,C1 归属重定（写路径挪进 owner 域）
+chat_agent_session,runtime,10,13,api:5;kernel:4;mgmt:1,kernel:7;api:5;mgmt:1,D 模块归位（kernel 写/读域表）
+chat_conversations,runtime,14,10,kernel:9;api:3;mgmt:2,kernel:6;api:2;mgmt:2,D 模块归位（kernel 写/读域表）
+grape_t_channel_installation,mgmt,21,5,runtime:21,runtime:5,C2 outbox 跨域写
+scene_market,mgmt,16,6,api:12;runtime:4,runtime:4;api:2,C1 归属重定（写路径挪进 owner 域）
+grape_accounts,mgmt,22,1,runtime:12;api:4;kernel:4;insight:2,api:1,C2 outbox 跨域写
+scene_knowledge_ref,mgmt,11,6,api:7;kernel:3;runtime:1,api:4;runtime:1;kernel:1,D 模块归位（kernel 写/读域表）
+grape_t_channel_lease,mgmt,5,9,runtime:5,runtime:9,C2 outbox 跨域写
+chat_messages,runtime,7,7,kernel:6;api:1,kernel:6;api:1,D 模块归位（kernel 写/读域表）
+engine_capabilities,runtime,8,6,mgmt:8,mgmt:6,C1 归属重定（写路径挪进 owner 域）
+user_repos,mgmt,12,4,api:4;runtime:3;kernel:3;insight:2,kernel:4,D 模块归位（kernel 写/读域表）
+session_api_tokens,mgmt,4,8,kernel:4,kernel:8,D 模块归位（kernel 写/读域表）
+external_identities,mgmt,16,1,runtime:6;api:5;kernel:5,runtime:1,C2 outbox 跨域写
+distributed_locks,runtime,6,6,kernel:5;insight:1,kernel:6,D 模块归位（kernel 写/读域表）
+vod_conversations,runtime,6,5,mgmt:4;api:1;kernel:1,mgmt:3;api:1;kernel:1,D 模块归位（kernel 写/读域表）
+issue_state,runtime,14,1,api:14,api:1,C2 outbox 跨域写
+grape_t_patrol_findings,mgmt,6,5,api:6,api:5,C1 归属重定（写路径挪进 owner 域）
+autopilot_tasks,mgmt,9,3,runtime:9,runtime:3,C2 outbox 跨域写
+knowledge_write_queue,mgmt,5,5,api:5,api:5,C1 归属重定（写路径挪进 owner 域）
+repo_im_group_binding,runtime,3,5,kernel:2;mgmt:1,kernel:3;api:1;mgmt:1,D 模块归位（kernel 写/读域表）
+event_action_filter,mgmt,7,3,api:5;runtime:2,runtime:3,C2 outbox 跨域写
+agent_type,runtime,7,3,api:4;mgmt:2;insight:1,api:3,C2 outbox 跨域写
+gsb_service_registry,mgmt,4,4,kernel:4,kernel:4,D 模块归位（kernel 写/读域表）
+autopilot_executions,runtime,6,2,mgmt:6,mgmt:2,C2 outbox 跨域写
+issue_agent_session,runtime,4,3,api:4,api:3,C2 outbox 跨域写
+user_feedback,mgmt,3,3,api:3,api:3,C2 outbox 跨域写
+organization,mgmt,4,2,api:4,api:2,C2 outbox 跨域写
+event_active_guard,runtime,2,3,api:2,api:3,C2 outbox 跨域写
+api_tokens,mgmt,2,3,kernel:2,kernel:3,D 模块归位（kernel 写/读域表）
+grape_t_channel_inbound_dedup,mgmt,2,3,runtime:2,runtime:3,C2 outbox 跨域写
+user_accounts,mgmt,5,1,api:4;runtime:1,api:1,C2 outbox 跨域写
+login_whitelist,mgmt,5,1,kernel:4;api:1,api:1,C2 outbox 跨域写
+api_latency_log,insight,1,3,api:1,api:3,C2 outbox 跨域写
+outbound_content_ledger,mgmt,5,1,kernel:5,kernel:1,D 模块归位（kernel 写/读域表）
+grape_t_schema_migrations,mgmt,3,2,api:3,api:2,C2 outbox 跨域写
+scene_skill_ref,mgmt,2,2,api:1;runtime:1,api:1;runtime:1,C2 outbox 跨域写
+grape_t_credential_usage_log,runtime,2,2,kernel:2,kernel:2,D 模块归位（kernel 写/读域表）
+grape_t_channel_chat_session_binding,mgmt,3,1,runtime:3,runtime:1,C2 outbox 跨域写
+task_messages,runtime,2,1,insight:1;kernel:1,kernel:1,D 模块归位（kernel 写/读域表）
+scene_category,runtime,2,1,mgmt:2,api:1,C2 outbox 跨域写
+grape_t_channel_sender_identity,mgmt,2,1,runtime:2,runtime:1,C2 outbox 跨域写
+takeover_sessions,runtime,1,1,api:1,mgmt:1,C2 outbox 跨域写
+admin_accounts,mgmt,1,1,api:1,api:1,C2 outbox 跨域写
+feishu_onboard_task,mgmt,1,1,runtime:1,runtime:1,C2 outbox 跨域写
+event_skipped,runtime,1,1,api:1,api:1,C2 outbox 跨域写
+grape_t_channel_outbound_card,mgmt,1,1,runtime:1,runtime:1,C2 outbox 跨域写
+user_credentials,mgmt,2,0,api:2,,B API 聚合端点
+scene_engine_detach_log,runtime,0,1,,mgmt:1,C2 outbox 跨域写
+runtime_health_scores,runtime,2,0,api:1;insight:1,,B API 聚合端点
+skill_category,mgmt,2,0,api:1;runtime:1,,B API 聚合端点
+grape_t_merge_gate_log,insight,0,1,,api:1,C2 outbox 跨域写
+obs_llm_usage,insight,1,0,mgmt:1,,B API 聚合端点
+obs_metric_rollup,insight,1,0,mgmt:1,,B API 聚合端点
+audit_logs,mgmt,1,0,insight:1,,E 洞察事件/宽表
+autopilot_subscriptions,mgmt,1,0,runtime:1,,B API 聚合端点
