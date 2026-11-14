@@ -4489,6 +4489,9 @@ def sync_task_session_token(task_id: str) -> str:
                     db.commit()
                     return snapshot_token
 
+                # 顺序依赖（三库独立后）：rotate 在 mgmt 库自提交（旧 token 立即作废 + 新 token 落库），
+                # 下面的 env_extra 回写属于 runtime 库，已不在同一事务内。因此必须「先 rotate 再回写」——
+                # 回写失败时新 token 已有效，下次 sync 会再轮换一次即收敛；不要调换这两步。
                 new_token = rotate_session_token(
                     session_key=task_id, repo_key=repo_key,
                     agent_type=agent_type, user_id=user_id, commit=False)

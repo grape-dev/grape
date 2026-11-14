@@ -185,6 +185,17 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
 第 1 条也解释了历史记录里「彩排 0 失败」与坑 2 并存的矛盾：上一轮 stage env 同样缺 lib 开关，
 多数端点在内部 catch 了 1146，只有写探测把 `PUT /api/chat/config` 的异常记成了失败。
 
+### 并行调研的交叉核对（三份只读报告 vs 落地实现）
+三份报告与实现方向一致（都是「按域拆成 owner 内单事务 + kernel 只编排」），核对后无返工，两处细节已确认：
+- 报告提示 `session_token_set_expiry` 参数序可能反转 —— 核对：原 SQL 是 `SET expires_at=? WHERE session_key=?`，
+  原语内部按 `(expires_at, session_key)` 绑定、对外签名是 `(session_key, expires_at)`，调用侧传 `(session_key, 值)`，
+  三层都正确；`token_smoke` 的宽限期语义断言也覆盖了这条路径。
+- 报告提示 `service.py` 的 `sync_task_session_token` 调用点未改 —— 该处依赖「先 rotate 再回写 env_extra」的顺序，
+  已在调用点加注释固定这个约定（回写失败时新 token 已有效，下次 sync 再轮换即收敛）。
+- 计数口径差异说明：报告的 21 / 15 条包含注释、docstring、以及两条**动态拼表名**的循环语句；静态判据
+  （`foreign_table_refs.py`）只认字面量文本，所以本文件的账面是 16 / 14 / 15。动态语句已在 owner 域内
+  用固定白名单循环实现（`REPO_KEY_TABLES`），不再由 kernel 拼表名。
+
 ### kernel 三件套：令牌 / 改名迁移 / 级联清理（-45，三个文件清零）
 - **`auth_sdk/auth_token.py`（15 处）**：`session_api_tokens` / `api_tokens` 归 mgmt →
   12 个原语进 mgmt public（insert/by_sha/set_expiry/shrink_active/delete_expired/delete_by_session/
