@@ -28,7 +28,7 @@
   "src/domains/insight/observability/efficiency.py": 1,
   "src/domains/insight/observability/engine_probe.py": 5,
   "src/domains/insight/observability/events_view.py": 1,
-  "src/domains/insight/observability/llm_usage.py": 4,
+  "src/domains/insight/observability/llm_usage.py": 3,
   "src/domains/insight/observability/logs.py": 5,
   "src/domains/insight/observability/loops.py": 2,
   "src/domains/insight/observability/master_usage.py": 1,

@@ -1,8 +1,8 @@
 table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,2
-agent_runtimes,runtime,insight,4
+agent_runtimes,runtime,insight,2
 agent_tasks,runtime,api,1
-agent_tasks,runtime,insight,3
+agent_tasks,runtime,insight,2
 agent_tasks,runtime,mgmt,1
 agent_type,runtime,insight,1
 api_latency_log,insight,api,1

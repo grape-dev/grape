@@ -2047,6 +2047,11 @@ _ANY_QUERIES: dict[str, str] = {
     "task_brief_row": (
         "SELECT event_seq, agent_type, skill, runtime_id, repo_key "
         "FROM agent_tasks WHERE id=? LIMIT 1"),
+    # 用量台账归属反查（insight/observability/llm_usage）：列序与调用方解包顺序逐字一致，
+    # 不复制 insight 侧的任何解析口径（scene 归因留在调用方）。
+    "task_attribution_by_id": (
+        "SELECT repo_key, agent_type, runtime_id, user_id, issue_id "
+        "FROM agent_tasks WHERE id=?"),
     "devops_session_runtime_id_by_repo_agent": (
         "SELECT runtime_id FROM devops_agent_session "
         "WHERE repo_key=? AND agent_type=? AND runtime_id>0 LIMIT 1"),
@@ -2056,6 +2061,9 @@ _ANY_QUERIES: dict[str, str] = {
         "COALESCE(rc.last_ip,''), COALESCE(ar.provider,'') "
         "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc "
         "ON rc.id=ar.credential_id WHERE ar.id=?"),
+    # 配置模型回落（#865 老库可能无 model_name 列）：存在性探测在 owner 侧连接上做，
+    # 调用方只拿「模型名或空串」，不再自己探测本域表结构。
+    "agent_runtimes_model_name": "SELECT model_name FROM agent_runtimes WHERE id=?",
     # 巡检（api/patrol.py）读路径：issue / events / agent_tasks / agent_runtimes
     "issue_status_by_repo_number": (
         "SELECT status FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1"),
@@ -3275,6 +3283,22 @@ def efficiency_issue_contrib(repo_keys) -> list[tuple]:
             f" FROM issue WHERE repo_key IN ({ph}) AND is_subtask_mode=0"
             " GROUP BY creator, assignee, COALESCE(user_id,0)", tuple(keys))
         return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def task_attribution_row_any(task_id: str):
+    """任务归属五元组 `(repo_key, agent_type, runtime_id, user_id, issue_id)`；无行 None。
+
+    任意拓扑（自有 DSN → db_registry，单库/测试 → 进程库）。列序与原调用点兜底 SQL
+    逐字一致，调用方按下标解包；`scene_id` 之类的派生口径留在调用方，不下沉到本域。
+    """
+    tid = str(task_id or "")
+    if not tid:
+        return None
+    row = read_one_any("task_attribution_by_id", (tid,))
+    if isinstance(row, dict):
+        return (row.get("repo_key"), row.get("agent_type"), row.get("runtime_id"),
+                row.get("user_id"), row.get("issue_id"))
+    return row
 
 
 def task_issue_attribution(task_ids) -> list[tuple]:
@@ -4912,6 +4936,35 @@ def _table_has_column(c, table: str, column: str) -> bool:
     """
     cur = c.execute(f"SELECT * FROM {table} LIMIT 0")
     return column in [str(d[0]) for d in (cur.description or [])]
+
+
+def runtime_model_name_any(runtime_id) -> str:
+    """引擎行上配置的模型名（`agent_runtimes.model_name`），取不到一律空串。
+
+    任意拓扑：自有 DSN 走 db_registry，单库/测试拓扑回落进程库。探测与读取都在
+    **本域连接**上做——原调用点（insight/observability/llm_usage）在 insight 连接上
+    探测/直读运行域表，三库独立后恒 1146（被 except 吞成 warning，配置模型回落永久失效）。
+    #865 老库无 `model_name` 列 → 静默跳过（与原「缺列不报错」同口径），其余错误上抛
+    由调用方决定降级。
+    """
+    rid = int(runtime_id or 0)
+    if rid <= 0:
+        return ""
+    with _any_cursor() as c:
+        try:
+            has_col = _table_has_column(c, "agent_runtimes", "model_name")
+        except Exception as e:  # 表缺失（测试库/极老库）：配置回落跳过，不报错
+            log.debug(f"agent_runtimes column probe skipped id={rid}: {e}")
+            return ""
+        if not has_col:
+            log.debug(f"agent_runtimes.model_name absent; config fallback skipped id={rid}")
+            return ""
+        c.execute(_any_sql("agent_runtimes_model_name"), (rid,))
+        row = c.fetchone()
+    if not row:
+        return ""
+    val = row.get("model_name") if isinstance(row, dict) else row[0]
+    return str(val or "").strip()
 
 
 def event_cascade_counts_by_repo_any(start_iso: str, end_iso: str) -> list[tuple]:

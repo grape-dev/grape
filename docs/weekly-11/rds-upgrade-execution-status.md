@@ -3434,6 +3434,85 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （`p4_p5_loop.sh` 建库搬数据与远端实例都要它们），且本批不改 schema / 迁移 / 契约面（无新表、无新路由），
   运行面证据为 sqlite 烟测 + 单库（MySQL 单库 4 passed、sqlite 36 项）；**不把彩排结果算作本批证据**。
 
+### insight/observability/llm_usage 运行域表读取归位（-3，本文件清零）
+- 文件：`src/domains/insight/observability/llm_usage.py`（3 处 → **0**，仅剩本域 `obs_llm_usage`）；
+  全局静态 **75 → 72**（-3），对数 **37 → 37**——`agent_tasks←insight` 仍 2 处
+  （`observability/overview.py`、`observability/gap.py`）、`agent_runtimes←insight` 仍 2 处
+  （`routes/health.py`），均为其它文件，本文件已清零。
+- 表分布（消费域 insight，全归 **runtime**）：
+  · 行 119 `SELECT repo_key, agent_type, runtime_id, user_id, issue_id FROM agent_tasks WHERE id=?`
+    （`_attribution` 的 lib 不可用分支，5 列）
+  · 行 343 `SELECT model_name FROM agent_runtimes LIMIT 0`（`_agent_runtimes_has_model_name` 的 MySQL 兜底列探测）
+  · 行 399 `SELECT model_name FROM agent_runtimes WHERE id=?`（`task_model_summary` 配置模型回落取值）
+  · 另有行 337 `PRAGMA table_info(agent_runtimes)`：静态正则不计（只认 `TABLE <表>` 等关键字），
+    但同属「在 insight 连接上探测运行域表结构」，本批一并清掉。
+  三处同一张表结构族、无用户输入拼接（表名/列名均字面量）。
+- 本轮取批：作业单头名 `src/kernel/prompt_builder.py` 与次名
+  `src/kernel/persistence/credential_usage_log.py` **三轮复核后仍 blocked**（理由见
+  `next-batches.md` 顶部「⛔ blocked」；作业单脚本每次刷新会覆盖该小节，已补回），
+  按规则跳过，取第一个可改造文件（上批台账末尾点名的 `llm_usage.py`）。
+- 归属域侧改动（SQL 只在 owner 域一份）：
+  · runtime public `_ANY_QUERIES` 新增 2 条具名查询：
+    `task_attribution_by_id`（5 列列序与调用方解包顺序逐字一致）、
+    `agent_runtimes_model_name`（`SELECT model_name FROM agent_runtimes WHERE id=?`）；
+  · runtime public 新增 2 个薄函数：`task_attribution_row_any(task_id)`（返回五元组，无行 None）、
+    `runtime_model_name_any(runtime_id)`（返回模型名或空串）；体内无内联 SQL，未登记名抛 KeyError。
+  调用方 `_attribution` 去掉 `cursor` 形参（读路径不再需要调用方游标），删掉
+  `_agent_runtimes_has_model_name`（PRAGMA + LIMIT 0 双探测共 23 行）。
+- 关键设计取舍：
+  1. **列探测下沉到归属域，且不用 PRAGMA**：复用 runtime public 既有的 `_table_has_column`
+     （`SELECT * ... LIMIT 0` 读 description，两条后端一致）。`db_registry` 的薄兼容游标只对
+     进程主库翻译 PRAGMA，跨域连接上直发 `PRAGMA table_info` 在 MySQL 上必 1064——原实现
+     之所以能跑，是因为探测走的是**本进程游标**，而这正是三库独立后失效的写法。
+  2. **归属反查移出 `db_lock`（本批最要紧的一处）**：`*_any` 原语自带 `db_lock`（单库拓扑直接
+     用进程库），若仍在 `with db_lock:` 内调用就变成同线程二次获取——生产 `RLock` 侥幸不炸，
+     但测试 monkeypatch 的裸 `Lock` 会**自死锁**。故把归属读提到写事务之前，写入段仍是
+     「一个 `db_lock` + 一个游标 + 末尾一次 commit」，事务语义逐点不变（归属是元数据，
+     读与写之间的时间差无影响）。
+  3. **取消 lib/兜底双分支**：原代码 `runtime_lib(foreign_only=True)` 为 None 时回落到本进程
+     游标直读——lib 开关只在 `GRAPE_DOMAIN_LIB=1` 时打开，单库拓扑恒走兜底分支，于是兜底 SQL
+     成了统计的全部来源。改用任意拓扑原语后（自有 DSN → db_registry，单库 → 进程库），
+     两条拓扑同一条代码，`domain_read` 依赖也从本文件消失。
+  4. **口径留在调用方**：`scene_id` 派生（`_scene_of` → `get_issue_scene`）、`engine_id` 转 int、
+     `user_id` 转 str 都是 insight 的展示/报表口径，不下沉到 owner；owner 只回「五元组原值」。
+     同理「usage > config > unknown」优先级与 top3 聚合仍在本模块。
+  5. **缺列/缺表静默跳过改成显式 `log.debug`**：原 `_agent_runtimes_has_model_name` 有 2 处
+     `except Exception: pass`（静默 except 棘轮靠基线豁免）；新实现在探针失败/缺列处
+     `log.debug` 明确记一句，其余错误照旧上抛由调用方 `log.warning` 降级（与原语义一致）。
+     该文件静默 except 基线随之 **4 → 3** 收紧（棘轮只减不增）。
+- 修的存量 bug（结构性；单库拓扑不可见，三库独立后必然踩，且都被 except 吞成静默降级）：
+  1. `_attribution` 兜底分支在 insight 库上查 `agent_tasks` → 1146 → 返回空归属：
+     **task 类用量行的 repo_key / agent_type / engine_id / user_id 全部落空**，
+     成本报表按仓库/引擎/用户的三级归因在三库拓扑下失真（不是丢行，是行内维度为空）。
+  2. `task_model_summary` 配置模型回落同理 1146 → 事件详情页/实时日志弹窗的「执行模型」
+     永远 `unknown`（明细行为空时的唯一兜底）。
+  3. **口径耦合**：列探测写在调用方，`agent_runtimes` 一加/改列就要改 insight 的代码；
+     探测与读取现在都在 owner 域，调用方只消费「模型名或空串」。
+- 验证（真实退出码）：
+  · `py_compile` 两文件 → **COMPILE_OK**；
+  · `~/burndown/llm_usage_runtime_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建
+    obs_llm_usage/agent_tasks/agent_runtimes 三表 + 独立 runtime 库）
+    → **ALL llm_usage runtime smoke PASSED (45 checks)**：A 注册面/静态（两条查询逐字对齐、
+    无 `%s`/`NOW()`/`ON DUPLICATE`、占位符各 1、薄函数体内无 SQL、死函数已删、调用方无表名 SQL）；
+    B 归属（列序解包、`_scene_of(repo_key, issue_id)` 派生留调用方、缺行/NULL/空 task_id、
+    空 task_id 零外呼、读抛错降级为空）；C 台账写（归属落库、attr 只补空、归属存在时 attr 不覆盖、
+    **非重入锁守卫下不嵌套获取**——对照组先证明守卫能抓嵌套、全 0 token 不落库）；
+    D 配置模型（取值 strip / 缺行 / NULL / 全空白 / `runtime_id<=0` 零连接）；
+    E 优先级（usage > config > unknown，`unknown` 主键回落 `model_raw`）；
+    F 自有 DSN 拓扑（monkeypatch `uses_own_dsn`/`cursor` → 归属与模型都读 runtime 库、
+    进程库同名副本不参与；缺 `model_name` 列 → 空串；缺表 → 空串不上抛）；
+    G 未登记查询名 → KeyError（fail-closed）。
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 / 棘轮未上升 /
+    内部契约 37 条最新 / 看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → **import OK**；
+    `check_lib_query_names.py` → **PASS**（insight 17 funcs used / runtime 167 funcs + 28 queries used）。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排——本 shell `SRC_PWD`/`REMOTE_PWD`
+  均未注入（实测 UNSET），且本批不改 schema / 迁移 / 契约面（无新表、无新路由），
+  运行面证据为 sqlite 烟测（含自有 DSN 分支模拟）+ 单库 pytest；**不把彩排结果算作本批证据**。
+- **新基线**：**72 处 / 37 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 72 处 / 42 文件，头名仍是被 blocked 的 `prompt_builder.py`，下一批可选
+  `src/api/event_rule.py` 或 `src/domains/insight/observability/gap.py` 各 3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
