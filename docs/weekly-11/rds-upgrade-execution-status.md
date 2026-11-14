@@ -4213,6 +4213,101 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （作业单 49 处 / 33 文件，下一批首个未 blocked 文件 `src/domains/runtime/im/engine/outbound_cards.py`
   2 处（`grape_t_channel_outbound_card` 行 75 / 92，归 mgmt）。
 
+### runtime im/engine/outbound_cards 互动卡片台账归位 mgmt public（-2，本文件清零）
+
+- 文件：`src/domains/runtime/im/engine/outbound_cards.py`（2 处 → **0**）；全局静态 **49 → 47**（-2），
+  对数 **30 → 29**，表数 **25 → 24** —— `grape_t_channel_outbound_card←runtime` 2 → 0
+  （该表**整对清零**：改造后只剩 mgmt 自己读写它）。
+- 本轮取批：作业单头两名 `src/kernel/prompt_builder.py` / `src/kernel/persistence/credential_usage_log.py`
+  仍 blocked（口径见作业单顶部 ⛔ 小节），取第一个未 blocked 文件（上一批台账末尾点名的本文件）。
+- 表分布（消费域 runtime，表归 **mgmt**），两条都在 `out_track_id → 会话` 这条反查链上：
+  · 行 75 `_save_sync`：`INSERT OR REPLACE INTO grape_t_channel_outbound_card
+    (out_track_id, installation_id, channel_type, channel_chat_id, chat_type, sender_staff_id,
+    card_template_id) VALUES (?,?,?,?,?,?,?)` —— 常数 SQL，7 参全参数化，无动态拼接；`channel_type`
+    在调用点写死 `'dingtalk'`，其余走 `entry.get(...) or "<默认>"`。
+  · 行 92 `_load_sync`：`SELECT channel_chat_id, chat_type, sender_staff_id, installation_id,
+    card_template_id FROM grape_t_channel_outbound_card WHERE out_track_id=?` —— 常数 SQL，单参；
+    五列列序即 `(会话, 会话类型, 发送人, 安装 id, 模板 id)`。
+- 归属域侧改动（SQL 只在 mgmt 域一份）：
+  · `_ANY_QUERIES` 新增 2 条具名查询 `outbound_card_put` / `outbound_card_chat_row`，语句与列序逐字照抄；
+  · 新增薄函数 `outbound_card_put_any(out_track_id, installation_id='', channel_type='dingtalk',
+    channel_chat_id='', chat_type='p2p', sender_staff_id='', card_template_id='', cursor=None) -> int`
+    与 `outbound_card_chat_row_any(out_track_id, cursor=None) -> tuple|None`；两函数登记 `__all__`
+    并同步 `src/kernel/gsb/route_config.py` 的 `PUBLIC_PRIMITIVES["mgmt"]` 镜像；
+  · 新增私有 `_owner_write_cursor(cursor=None)`（通向 `_owner_cursor` 的写侧）：单库/测试拓扑 +
+    传了游标 → 复用调用方游标（**提交责任留在调用方**）；自有 DSN → 忽略游标走 mgmt 连接
+    （共享连接 autocommit）；单库但 `cursor=None` → `_any_cursor(write=True)` 由本域提交。
+- 关键设计取舍：
+  1. **不复用已有的 `upsert_outbound_card`（W3 原语）**：那条是 outbox 投递状态机的
+     「部分更新」（`ON DUPLICATE KEY UPDATE status/last_error/payload`，10 列）；本表这条是卡片台账的
+     「整行替换」（`INSERT OR REPLACE`，7 列）。合流会把 outbox 的 `attempt_count`/`expires_at`/
+     `next_retry_at` 一起清零 —— 烟测 B6 专门锁这个差异（REPLACE 后 `status='pending'`、
+     `payload='{}'`、`attempt_count=0`），证明「两套语义并存、不互相复用」。
+  2. **默认值留在调用点**：原实现的 `entry.get("installation_id") or ""` / `"dingtalk"` /
+     `or "p2p"` 都在 `_save_sync` 里算好再传参；owner 函数只做参数转发，不替调用方补默认值
+     —— 否则「卡片台账」和「outbox 入队」两条路径对空值的兜底口径会被 owner 层强行统一。
+  3. **读口返回整行、不拆 dict**：`(channel_chat_id, chat_type, sender_staff_id, installation_id,
+     card_template_id)` 五行交给调用方映射。「行在但 `chat_type` 为空」与「无行」在原实现里是两个
+     分支（前者 `or 'p2p'`、后者返回 `None`），返回标量或提前 dict 化会把它们合并。
+  4. **提交责任按拓扑分侧**：单库/测试拓扑下语句跑在**调用方游标**上，`conn.commit()` 仍由调用点发；
+     自有 DSN 拓扑下语句跑在 mgmt 的 autocommit 连接上，调用点的 `commit()` 对它是空操作。
+     两条路径都与改前的「同一条连接执行 + 末尾 commit」等价，调用点结构几乎没动。
+  5. **`cursor=None` 分支必须自己提交**：`_any_cursor` 的回落分支只 `exec` 不 `commit`
+     （读侧语义），写原语若照抄就会在「调用方没传游标」那一路**静默丢写**。`_owner_write_cursor`
+     第三支用 `write=True` 兜住，并在烟测 B1 直调（不传游标）验证落库 + 独立连接可见。
+  6. **缓存与降级策略一行没改**：内存优先 / 清缓存回落 DB / 写失败只 WARNING / 读失败吞成空串，
+     全部保留（烟测 B10–B22 逐条锁住），因为那是「台账丢一行不影响发送」的既有产品口径。
+  7. **不顺手改同表的另一个消费方** `src/domains/runtime/im/outbox.py`：它用 `_TABLE = "..."` 变量
+     拼 SQL（`INSERT OR IGNORE`/`SELECT ... WHERE lease_owner=?`），静态正则不计入 G4，
+     且 826 行状态机属独立一批（见下方「未做」）。
+- **修的存量缺陷（三库独立后互动卡片台账整体静默失效）**：两处 SQL 此前走
+  `engine_wiring._connect(default_db_path())` —— 那是**钉在 IM/runtime 库的句柄**
+  （`GRAPE_IM_DB_NAME` 语义）。卡片台账表归 mgmt，三库拓扑下 runtime 库没有它（视图 0）：
+  写侧 1146 被 `remember` 的 `except → log.warning` 吞成「台账没落库」（发送照常成功，
+  **进程重启后点旧卡片全部反查不到会话**）；读侧 1146 被 `lookup_chat` 吞成空串 →
+  `card_callback_to_inbound` 判「没映射不猜」，按钮点击变成无响应。改造后两处走任意拓扑原语
+  （自有 DSN → mgmt 连接；单库/测试 → 进程库），两条拓扑跑同一份 SQL，只有真缺表才降级。
+  同批删掉 `_connect()` 工厂，换成**不承载任何 SQL** 的 `_db_conn()`（只提供调用期连接 +
+  `commit()` + `close()`），杜绝后人再拿它当跨域读口。
+- **未做（如实，属另一轮）**：`src/domains/runtime/im/outbox.py` 对同表的入队 / 认领 / 计数
+  （`_TABLE` 动态表名，静态正则不计）仍走自己的 IM 句柄 —— 三库拓扑下同一类 1146，
+  但它是 826 行的投递状态机（claim/退避/保留期清理），需要连"每工作线程一条连接"一起设计。
+  已记入本节，不在本批硬拿。
+- 验证（真实退出码）：
+  · `py_compile` 三文件（`outbound_cards.py` / mgmt `public` / `gsb/route_config.py`）→ **COMPILE_OK**；
+  · `~/burndown/outbound_cards_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，表结构复用
+    `scripts/migrations/001_channel_tables.py`）→ **ALL outbound_cards smoke PASSED (57 checks)**：
+    A 注册面/静态否定（两条查询逐字对齐、可移植方言、薄函数体无内联 SQL、本模块 `execute(` 为 0、
+    用棘轮同一条正则自算跨域 0 处、`_connect` 已删除、`__all__` + GSB 镜像双登记、未登记名 KeyError、
+    与 W3 upsert 分列登记）；
+    B 单库（7 列参数列序 + 表默认值、同 id 重写仍 1 行、整行替换重置 outbox 状态列、五列读序、
+    无行 → None、`remember` 真写库、内存优先、清缓存回落 DB、空 `chat_type` 两侧兜 `p2p`、
+    空会话仍落库但返回空串、空 id 两侧短路、写/读失败各留一行 WARNING 且不抛、
+    传游标时提交责任在调用方（未 commit 不可见）、**换 `DEVOPS_DB_PATH` 后读/写都落到另一个库**、
+    每次调用关连接 `closed=2`、长/含 `#` 的非 ASCII 会话 id 保真）；
+    C 回调端到端（清缓存后真跑 `card_callback_to_inbound(..., chat_resolver=lookup_chat)`：
+    outTrackId → 会话反查命中、未登记 track → None 不猜）；
+    D 自有 DSN 伪游标（domain=`mgmt`、两条语句逐字、7 参数顺序 `('track-fake','iF','dingtalk',
+    'cidF','1','sF','tplF')`、无 `%s`、行按五列解析）。
+  · 直覆盖 `tests/runtime/im/test_dingtalk_card_batch5.py`（互动卡片整包）→ **26 passed**；
+  · `--update-baseline` → **baseline updated: 29 pairs, 47 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **24 表 / 47 跨域引用 / 29 对**；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 `RESULT: PASS` / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS: 全部查询名已登记**
+    （mgmt 182 funcs + 6 queries used / 264 funcs + 31 queries registered）。
+  · `tests/kernel/test_gsb_route.py::test_public_primitives_registry_sync` 断言「镜像 == 实际面」在
+    **HEAD 就已不成立**（实际 259 vs 镜像 66，既有漂移 193 条）；本批只追加 2 个名字、两侧同步，
+    镜像仍 ⊆ 实际面（68 ⊆ 261），未新增失败。该用例属既有债，别记在本批账上。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  轮内口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新原语契约），运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标 + 按钮回调端到端）。runtime 进程 1146 消失的现场证据留待彩排轮确认。
+- **新基线**：**47 处 / 29 对 / 24 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 47 处 / 32 文件，下一批首个未 blocked 文件 `src/domains/mgmt/admin/config_store.py`
+  2 处（`grape_t_repo_credentials` 行 497 / 502，归 **insight**；insight public 目前无具名查询，需先建）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

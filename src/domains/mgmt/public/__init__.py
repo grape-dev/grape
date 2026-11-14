@@ -741,6 +741,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "installation_repo_app_ids_any", "installation_repo_keys_by_app_any",
            # IM 通知扇出目标解析（runtime/im/notify.py；任意拓扑）
            "installation_user_active_rows_any", "installation_p2p_chat_ids_any",
+           # 互动卡片台账（runtime/im/engine/outbound_cards.py；任意拓扑）
+           "outbound_card_put_any", "outbound_card_chat_row_any",
            "delete_feishu_onboard_task_any",
            # IM 身份解析 / 巡检执行卡（runtime/im/handler_async.py；任意拓扑）
            "sender_identity_user_by_app_any", "installation_owner_by_app_any",
@@ -1501,6 +1503,24 @@ def _owner_cursor(cursor: Any = None):
 
 
 @contextmanager
+def _owner_write_cursor(cursor: Any = None):
+    """写原语的取游标口径（配套 `_owner_cursor` 的读侧）。
+
+    - 单库 / 测试拓扑 + 调用方传了游标 → 复用调用方游标，**提交责任留在调用方**
+      （调用点原本就在自己连接上 `commit()`，语义逐字不变）；
+    - 自有 DSN 拓扑 → 忽略调用方游标，走 `db_registry.cursor("mgmt")`（共享连接
+      autocommit，语句即提交）—— 忽略那一跳正是 1146 的修复；
+    - 单库拓扑但调用方没传游标 → 走 `_any_cursor(write=True)` 由本域提交。
+      少了这一支，`cursor=None` 的调用方会**静默丢写**（进程库游标不提交）。
+    """
+    if cursor is not None and not db_registry.uses_own_dsn("mgmt"):
+        yield cursor
+        return
+    with _any_cursor(write=True) as c:
+        yield c
+
+
+@contextmanager
 def _any_tx():
     """多语句组合写：自有 DSN → 独立非 autocommit 连接（真事务）；单库 → 进程库 + db_lock。"""
     if db_registry.uses_own_dsn("mgmt"):
@@ -2051,6 +2071,19 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT installation_id, channel_type FROM grape_t_channel_lease "
         "WHERE lease_owner=? AND installation_id<>'' "
         "ORDER BY updated_at DESC LIMIT 200"),
+    # ── 互动卡片台账（grape_t_channel_outbound_card 归 mgmt；runtime/im/engine/
+    # outbound_cards 的钉钉 outTrackId → 会话映射）──────────────────────────────
+    # 与上方 W3 `upsert_outbound_card`（outbox 投递状态机）**分开登记**：那条是
+    # 「不改 payload 的部分更新」（ON DUPLICATE KEY UPDATE 只碰 status/last_error），
+    # 这条是卡片台账的「整行替换」（INSERT OR REPLACE），列集也不同 —— 合流会
+    # 把 outbox 的 attempt_count/expires_at 一起清掉。列序与原语句逐字一致。
+    "outbound_card_put": (
+        "INSERT OR REPLACE INTO grape_t_channel_outbound_card "
+        "(out_track_id, installation_id, channel_type, channel_chat_id, chat_type, "
+        " sender_staff_id, card_template_id) VALUES (?,?,?,?,?,?,?)"),
+    "outbound_card_chat_row": (
+        "SELECT channel_chat_id, chat_type, sender_staff_id, installation_id, "
+        "card_template_id FROM grape_t_channel_outbound_card WHERE out_track_id=?"),
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -4285,6 +4318,43 @@ def installation_p2p_chat_ids_any(installation_id: Any, cursor: Any = None) -> l
     with _owner_cursor(cursor) as c:
         c.execute(_any_sql("chat_binding_p2p_channels"), (str(installation_id),))
         return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def outbound_card_put_any(out_track_id: str, installation_id: str = "",
+                          channel_type: str = "dingtalk", channel_chat_id: str = "",
+                          chat_type: str = "p2p", sender_staff_id: str = "",
+                          card_template_id: str = "",
+                          cursor: Any = None) -> int:
+    """互动卡片台账整行登记（主键 out_track_id），返回影响行数。
+
+    对应原 `im/engine/outbound_cards._save_sync` 的 `INSERT OR REPLACE`：**整行替换**，
+    不是 outbox 那条「只更新状态」的部分 upsert（两者列集与语义都不同，别互相复用）。
+    默认值（`channel_type='dingtalk'` / `chat_type='p2p'`）与原语句逐字一致：
+    原实现把 `entry.get(...) or "<默认>"` 算好后当参数传，这里由调用点保持同一口径，
+    函数只做参数转发、不替调用方填默认值——传入什么就写什么。
+
+    `cursor` 语义见 `_owner_write_cursor`：单库/测试拓扑复用调用方游标（提交由调用方
+    负责，调用点保留原 `conn.commit()`）；自有 DSN 拓扑忽略它、走 mgmt 连接（autocommit）。
+    """
+    with _owner_write_cursor(cursor) as c:
+        cur = c.execute(_any_sql("outbound_card_put"),
+                        (out_track_id, installation_id, channel_type, channel_chat_id,
+                         chat_type, sender_staff_id, card_template_id))
+        return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def outbound_card_chat_row_any(out_track_id: str, cursor: Any = None) -> Any | None:
+    """按 outTrackId 取卡片台账的 5 列会话信息，无行返回 None。
+
+    对应原 `im/engine/outbound_cards._load_sync` 的查询：列序
+    `(channel_chat_id, chat_type, sender_staff_id, installation_id, card_template_id)`
+    逐字照抄；**返回整行**（不是拆成 dict）——「行在但某列为 NULL」与「无行」在原实现里
+    是两个分支（前者用 `or` 兜默认值、后者返回 None），返回标量会合并它们。
+    `cursor` 语义同 `installation_p2p_chat_ids_any`。
+    """
+    with _owner_cursor(cursor) as c:
+        c.execute(_any_sql("outbound_card_chat_row"), (out_track_id,))
+        return c.fetchone()
 
 
 # ---------- GSB 服务注册表（kernel/gsb/registry.py 的 SQL 全部收在此处） ----------

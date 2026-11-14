@@ -86,6 +86,8 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "installation_repo_app_ids_any", "installation_repo_keys_by_app_any",
         # IM 通知扇出目标解析（runtime/im/notify.py；任意拓扑）
         "installation_user_active_rows_any", "installation_p2p_chat_ids_any",
+        # 互动卡片台账（runtime/im/engine/outbound_cards.py；任意拓扑）
+        "outbound_card_put_any", "outbound_card_chat_row_any",
         "add_user_feedback", "save_inbound_message", "upsert_outbound_card",
         "read_one", "read_all",
     ),
