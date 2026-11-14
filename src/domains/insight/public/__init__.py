@@ -48,6 +48,11 @@ _REPO_CRED_QUERIES: dict[str, str] = {
         "SELECT repo_key FROM grape_t_repo_credentials WHERE value IS NOT NULL AND value!=''"),
 }
 
+# 指标留存（`obs_metric_rollup` 归 insight）：管理台 `scope=all` 需要枚举已出现过的维度键。
+_ROLLUP_QUERIES: dict[str, str] = {
+    "rollup_dim_keys": "SELECT DISTINCT dim_key FROM obs_metric_rollup WHERE dim_key != ?",
+}
+
 
 def available() -> bool:
     """insight lib 是否可用：必须配置 insight 自有 DSN。"""
@@ -145,6 +150,8 @@ def _any_tx():
 
 def _any_sql(name: str) -> str:
     sql = _REPO_CRED_QUERIES.get(name)
+    if sql is None:
+        sql = _ROLLUP_QUERIES.get(name)
     if sql is None:
         raise KeyError(f"unknown portable query: {name}")
     return sql
@@ -249,7 +256,20 @@ def repo_keys_with_nonempty_credential(cred_type: str = "") -> set[str]:
     return {r[0] for r in rows if r[0]}
 
 
+# ---------- 指标留存维度（obs_metric_rollup 归 insight）----------
+
+def rollup_dim_keys(exclude: str = "global") -> list[str]:
+    """指标留存里出现过的维度键（默认排除平台汇总维度 `global`）。
+
+    对应原管理台 `_all_rollup_dims()` 的平台视角：`scope=all` 逐维展开，
+    `global` 维度由调用方单独按全局口径给，不重复枚举。
+    口径照抄原 SQL：`dim_key != exclude`，空串维度（未标注维度）仍返回。
+    """
+    return [r[0] for r in read_all_any("rollup_dim_keys", (exclude,))]
+
+
 __all__ += ["list_repo_credential_rows", "aggregate_llm_usage", "read_one_any", "read_all_any", "exec_any",
+            "rollup_dim_keys",
             "repo_credential_value", "repo_credential_meta", "upsert_repo_credential_value",
             "clear_repo_credential_value", "any_repo_credential", "repo_keys_sharing_value",
             "repo_keys_with_nonempty_credential"]

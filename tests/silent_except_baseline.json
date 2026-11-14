@@ -47,7 +47,6 @@
   "src/domains/mgmt/admin/config_store.py": 2,
   "src/domains/mgmt/admin/cooldown.py": 2,
   "src/domains/mgmt/admin/db.py": 1,
-  "src/domains/mgmt/admin/routes.py": 1,
   "src/domains/mgmt/auth/grape_account_db.py": 1,
   "src/domains/mgmt/auth/providers.py": 2,
   "src/domains/mgmt/auth/repo_roles.py": 1,

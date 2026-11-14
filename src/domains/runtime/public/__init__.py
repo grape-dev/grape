@@ -1334,7 +1334,8 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "read_one", "read_all",
            # P4 收口：任意拓扑可用原语（单库/sqlite 与独立 DSN 均可用；可移植方言）
            "read_one_any", "read_all_any", "exec_any", "get_meta_value_any",
-           "set_meta_value_any", "set_meta_if_absent", "list_featured_skills_any",
+           "set_meta_value_any", "set_meta_if_absent", "set_meta_values_any",
+           "merge_meta_json_any", "list_featured_skills_any",
            # P4 洞察看板聚合原语（insight 只读分析域唯一取数口；任意拓扑）
            "query_events_any", "event_dashboard_metrics",
            "dashboard_task_status_counts", "dashboard_issue_status_counts",
@@ -2170,6 +2171,64 @@ def set_meta_value_any(key: str, value: str) -> None:
 def set_meta_if_absent(key: str, value: str) -> bool:
     """meta 幂等插入（任意拓扑）：键已存在不动，返回是否真的写入。"""
     return exec_any("meta_insert_absent", (key, value)) > 0
+
+
+def set_meta_values_any(items) -> int:
+    """批量写 meta 配置（任意拓扑，**单事务**）：返回写入的 key 数。
+
+    参数形如 `[("vcs_providers_config", json_str), ("global_bot_gitee_token", "x"), ...]`，
+    同 key 后者覆盖前者（按传入顺序）。
+
+    为什么是「INSERT OR IGNORE → UPDATE」而不是 REPLACE：REPLACE 走删-插语义，
+    以后 meta 增列会被静默重置；而「UPDATE 命中但值未变 → rowcount=0」在 MySQL
+    下会被误判成「行不存在」再 INSERT 撞主键，所以顺序固定为先补行、后改值。
+    """
+    pairs = [(str(k), "" if v is None else str(v)) for k, v in (items or []) if str(k or "")]
+    if not pairs:
+        return 0
+    with _any_tx() as c:
+        for key, value in pairs:
+            c.execute(_any_sql("meta_insert_absent"), (key, value))
+            c.execute(_any_sql("meta_upsert_update"), (value, key))
+    return len(pairs)
+
+
+def merge_meta_json_any(key: str, patch: dict, base: dict | None = None,
+                        extra: dict | None = None) -> dict:
+    """读-合并-写 meta 里的 JSON 对象（任意拓扑，**同一事务**），返回合并结果。
+
+    合并顺序：`base`（代码内默认卡）→ meta 现有 JSON → `patch`（本次提交），
+    即「默认兜底、存量为主、本次覆盖」。`extra` 里的 key/value（client_id /
+    client_secret 等凭据）在同一事务内一并 upsert，**空值跳过**——编辑面「留空=不改」
+    是原实现口径（`if cid: ...`），空白凭据从不清空存量。
+
+    读改写放在一个事务里，是为了消除原实现「先读后写、中间释放锁」的丢配置窗口
+    （并发两次保存时后写者会用陈旧快照覆盖前者的渠道）。存量 JSON 解析失败按
+    「无存量」降级并留 debug 日志，不阻断保存。
+    """
+    extra_pairs = [(str(k), str(v)) for k, v in (extra or {}).items()
+                   if str(k or "") and str(v or "")]
+    with _any_tx() as c:
+        c.execute(_any_sql("meta_value"), (key,))
+        row = c.fetchone()
+        merged = dict(base or {})
+        raw = (row[0] or "") if row else ""
+        if raw:
+            try:
+                loaded = json.loads(raw)
+            except Exception as exc:  # noqa: BLE001 - 存量脏值降级为「无存量」
+                log.debug(f"meta json parse failed: {key}: {exc}")
+                loaded = None
+            if isinstance(loaded, dict):
+                merged.update(loaded)
+        merged.update(patch or {})
+        payload = json.dumps(merged, ensure_ascii=False)
+        c.execute(_any_sql("meta_insert_absent"), (key, payload))
+        c.execute(_any_sql("meta_upsert_update"), (payload, key))
+        for extra_key, extra_value in extra_pairs:
+            c.execute(_any_sql("meta_insert_absent"), (extra_key, extra_value))
+            c.execute(_any_sql("meta_upsert_update"), (extra_value, extra_key))
+    return merged
 
 
 _FEATURED_SKILL_COLS = ("id", "skill_name", "display_name", "description", "agent_type",

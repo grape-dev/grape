@@ -160,11 +160,8 @@ EXEMPT_FILES: dict = {
     ('domains/runtime/engine/repogit.py', 'except Exception:'): 1,
     # worktree 清理尽力而为（后续 rmtree ignore_errors 同语义）
     ('domains/runtime/vcs/api_client.py', 'except Exception:'): 2,
-    # N4-p2 非阻塞队列满/空丢弃（审计旁路）
+    # N4-p2 非阻塞队列满/空丢弃（审计旁路）；事件循环未运行时跳过注册（启动竞态合法形态）
     ('domains/runtime/routes/chat.py', 'except RuntimeError:'): 1,
-    # 事件循环未运行时跳过注册（启动竞态合法形态）
-    ('domains/mgmt/admin/routes.py', 'except Exception:'): 1,
-    # 旧渠道卡存量 JSON 解析防御，失败仅少合并旧卡
 
     # ── 原有登记 ──
     ('domains/runtime/vcs/providers/__init__.py', 'except Exception:'): 1,

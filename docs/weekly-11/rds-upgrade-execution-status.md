@@ -1039,6 +1039,69 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 ---
 
+### 7.4 mgmt admin 路由跨域读写收口（2026-11-15 本批）
+
+- 文件：`src/domains/mgmt/admin/routes.py`（mgmt 域消费、8 处跨域 SQL → 0）。
+  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  `meta`（归 runtime）7 处——行 961 vcs 平台卡、975 bot token、987 webhook token、
+  1066 oauth 渠道卡读、1074 渠道卡写、1078 client_id、1081 client_secret；
+  `obs_metric_rollup`（归 insight）1 处——行 751 `scope=all` 的维度枚举。
+- owner 侧新增（列序照抄原 SQL、`?` 占位符、可移植方言）：
+  1) runtime public 两个薄函数：`set_meta_values_any(items)`（批量 upsert，`_any_tx()`
+     单事务）、`merge_meta_json_any(key, patch, base, extra)`（读-合并-写同事务）；
+     复用已登记的 `meta_value` / `meta_insert_absent` / `meta_upsert_update` 三条具名查询，
+     未新增 SQL 字符串。
+  2) insight public 新增查询表 `_ROLLUP_QUERIES`（`rollup_dim_keys`：
+     `SELECT DISTINCT dim_key FROM obs_metric_rollup WHERE dim_key != ?`）与同名薄函数；
+     `_any_sql()` 改为「repo 凭据表 → 留存表」两表联合查找，未登记名仍抛 `KeyError`。
+- 设计取舍：
+  1) **为何要薄函数而不是直接 `exec_any` × N**：这两个站点都是多键组合写——vcs 保存写
+     「平台卡 + N 个 bot token + M 个 webhook token」，渠道保存写「渠道卡 + N 个
+     client_id + M 个 client_secret」。逐个 `exec_any` 会让每个键各自提交，中途 400
+     就留半份配置；`_any_tx()` 把整批收进一个事务（自有 DSN 真事务，单库回落
+     `db_lock` + 显式 rollback）。
+  2) **为何 upsert 用「INSERT OR IGNORE → UPDATE」而非 `INSERT OR REPLACE`**：
+     REPLACE 是删-插语义（meta 以后增列会被静默重置）；而「先 UPDATE、rowcount==0
+     再 INSERT」在 MySQL 下遇到同值重写会误判行不存在而撞主键。先补行后改值两条
+     拓扑都安全，同值重写幂等。
+  3) **读-合并-写必须在一个事务里**：原实现 `with db_lock: SELECT → merge → 多写` 在
+     单进程内是原子的，但 `db_lock` 只保护进程内、且自有 DSN 拓扑下根本没走到这段；
+     把「读存量 + 合并 + 落库」搬进 owner 域的同一个事务，语义跨拓扑一致，也顺手
+     消掉「读后写之间被并发保存覆盖」的丢渠道窗口。
+  4) **`obs_metric_rollup` 只加一条具名查询**，没有把 insight 的 `metric_rollup` 模块
+     整体暴露：管理台只需要维度键，暴露面越小越好；`_all_rollup_dims()` 保留原
+     `try/except → []` 的降级口径（看板维度取不到不该 500）。
+  5) 列序/口径逐字照抄：维度枚举仍是 `dim_key != 'global'` 且**保留空串维度**；凭据
+     通道仍是「留空=不改」（空值不落库、不会清空存量密文），只是这条判断从调用点
+     挪进 owner 原语的 `extra` 过滤，避免第二个调用方漏判。
+- 修的存量 bug：
+  1) `vcs_platforms_put` 边写边校验：`bot_tokens` / `webhook_tokens` 含不在册平台时抛
+     400，但此时 `vcs_providers_config` 已经写进未提交事务，release `db_lock` 后既没
+     commit 也没 rollback，会被下一次任意 `db.commit()` 顺带落库（隐性部分写）。
+     现改为「先整批校验、再一次性事务写入」，400 时零写入。
+  2) `auth_channels_put` 的存量 JSON 解析是 `except Exception: pass`（静默）：现在解析
+     失败降级为「无存量」并留 `log.debug`，且解析结果非 dict（历史脏值可能是数组）
+     也按无存量处理，不再靠 `dict.update` 抛错兜底。
+  3) 同一函数把「同值重写」在 MySQL 下会撞主键的 upsert 形态（UPDATE 后 rowcount=0
+     再 INSERT）换成先补行后改值，重放保存不再产生 IntegrityError 噪声。
+  4) 顺手清掉本文件另一处静默 except（恢复账号的通知邮件失败 `except: pass` → 带
+     `log.debug`），`tests/silent_except_baseline.json` 里本文件的 1 条基线随之删除，
+     `EXEMPT_FILES` 里「旧渠道卡存量 JSON 解析防御」豁免名额一并撤销（棘轮只减不增）。
+- 验证：`py_compile` 三文件 **COMPILE_OK**；SQLite 烟测 `~/burndown/admin_meta_smoke.py`
+  **ALL 58 CHECKS PASSED**（含边界与否定用例：空批次 0 写、空 key 跳过、空串值/None 值
+  不撞 NOT NULL、同批同键后者胜、同值重写幂等、批量写中途失败整批回滚、非法 JSON 与
+  数组存量降级、空凭据不清空存量密文、二次保存不挤掉 gitcode/github、空表维度枚举、
+  自定义排除值、归属域抛错时 helper 回 `[]`、调用点 0 条 SQL 的源码断言、未登记查询名
+  fail-closed）；`rds_gate.sh --quick` **GATE: 全绿**（check-arch PASS / 棘轮 OK /
+  契约 37 条 / 看板最新）；`pytest tests/arch tests/contracts tests/scripts`
+  **158 passed**；`make lint` **import OK**。
+- 新基线：全局 **250 → 242**（-8），对 **67 → 66**（`obs_metric_rollup → mgmt` 归零；
+  `meta → mgmt` 11 → 4，另 4 处在 `mgmt/user/db.py` 等文件，故只减计数不减对）；
+  基线 `foreign-refs-allowlist.csv` 收紧为 242 / 66；依赖看板与作业单同步刷新
+  （下一批头名：`runtime/routes/im.py` 7 处）。
+
+---
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
