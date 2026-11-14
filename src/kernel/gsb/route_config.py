@@ -104,6 +104,9 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         # 本机指标上报任意拓扑版（api/server_tasks.py insight 进程 15s 心跳）
         "device_credential_id_any", "register_device_credential_any",
         "touch_device_credential_any",
+        # 流水线业务状态 / 阶段任务引用（api/pipeline_status.py 任意拓扑读口）
+        "issue_business_stage_status_any", "issue_state_stage_any",
+        "segment_task_rows_any",
         "upsert_local_runtimes", "ensure_default_runtime", "set_agent_tags",
         "purge_runtime_credential", "change_credential_scope",
         "reassign_repo_org_id",

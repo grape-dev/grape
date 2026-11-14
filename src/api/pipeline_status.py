@@ -9,6 +9,7 @@ Issue #539：pipeline 汇总新增「需求级业务状态」（review_status）
 """
 
 import json as _json
+import logging
 import re
 from datetime import datetime, timezone
 
@@ -19,6 +20,8 @@ from src.api.pipeline_constants import (
     TERMINAL_ISSUE_STAGES,
     TERMINAL_TASK_STATUSES,
 )
+
+log = logging.getLogger(__name__)
 
 # 状态码（与菜单流水线页现有 0/1/2/3 兼容，新增 4/5）
 STATUS_PENDING = 0
@@ -331,33 +334,17 @@ def load_issue_business_status(repo_keys, number):
 
     与 issues._issue_stage_map / _task_status_map 同口径（Issue #539 数据源）。
     """
-    from src.kernel.session_manager import db, db_lock
     stage, task_status = "", ""
     if not repo_keys:
         return stage, task_status
-    placeholders = ",".join("?" * len(repo_keys))
+    # P4：issue / issue_state 归 runtime 域 —— 读语句在该域 public，本模块不再持 SQL
+    from src.domains.runtime import public as _rt_public
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                f"SELECT stage, status FROM issue "
-                f"WHERE repo_key IN ({placeholders}) AND issue_number=?",
-                list(repo_keys) + [str(number)])
-            row = c.fetchone()
-            if row:
-                stage, task_status = row[0] or "", row[1] or ""
+        stage, task_status = _rt_public.issue_business_stage_status_any(repo_keys, str(number))
         if not stage:
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    f"SELECT stage FROM issue_state "
-                    f"WHERE repo_key IN ({placeholders}) AND issue_id=?",
-                    list(repo_keys) + [f"#{number}"])
-                row = c.fetchone()
-                if row:
-                    stage = row[0] or ""
-    except Exception:
-        pass
+            stage = _rt_public.issue_state_stage_any(repo_keys, f"#{number}") or ""
+    except Exception as exc:  # noqa: BLE001 - 流水线展示不允许因业务状态查询失败而中断
+        log.debug(f"load_issue_business_status: business status unavailable: {exc}")
     return stage, task_status
 
 
@@ -368,27 +355,15 @@ def load_segment_task_refs(repo_keys, seqs=None):
     seqs 给定时仅取这些事件的任务（避免整仓拉取 result_text 大字段）。
     查询失败 → 空映射（调用方按 unavailable 显式标注，不阻塞 pipeline）。
     """
-    from src.kernel.session_manager import db, db_lock
     out = {}
     if not repo_keys:
         return out
-    placeholders = ",".join("?" * len(repo_keys))
-    params = list(repo_keys)
-    where = f"repo_key IN ({placeholders}) AND event_seq IS NOT NULL"
-    if seqs:
-        seqs = [s for s in seqs if s]
-        if seqs:
-            where += f" AND event_seq IN ({','.join('?' * len(seqs))})"
-            params += list(seqs)
+    # P4：agent_tasks 归 runtime 域 —— 语句与排序口径都在该域 public
+    from src.domains.runtime import public as _rt_public
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                f"SELECT id, event_seq, status, result_text FROM agent_tasks "
-                f"WHERE {where} ORDER BY created_at ASC, id ASC",
-                params)
-            rows = c.fetchall()
-    except Exception:
+        rows = _rt_public.segment_task_rows_any(repo_keys, seqs)
+    except Exception as exc:  # noqa: BLE001 - 任务引用失败按 unavailable 呈现，不阻塞 pipeline
+        log.debug(f"load_segment_task_refs: task refs unavailable: {exc}")
         return out
     for tid, seq, st, rt in rows:
         try:

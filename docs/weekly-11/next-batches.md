@@ -1,22 +1,38 @@
 # 下一批：跨域收口作业单
 
-总量 66 处 / 40 个文件；下表取前 3 个。
+总量 63 处 / 39 个文件；下表取前 6 个。
 
-## src/kernel/prompt_builder.py（kernel 域，3 处）
+## ⛔ blocked（口径已确立，不要按处数硬拿）
+- `src/kernel/prompt_builder.py`：3 处是 agent 提示文案（f-string 里的说明文本，本进程不执行，静态正则才计到）；`tests/runtime/test_issue_372_unified_mapping_github.py` 按源文本断言该段语义；改写前必须先给 agent 一个合法的映射写通道。口径：**不为掉数字改文案**（台账 2026-11-14）
+- `src/kernel/persistence/credential_usage_log.py`：3 处 flush/retention 由后台线程共用 owner 连接 → `Packet sequence number wrong`；正解是「每工作线程一条 owner 连接」的池化，属独立一轮（交接文档 §5.3 坑 4 / §9 阻塞项 2）
+
+## ⛔ src/kernel/prompt_builder.py（kernel 域，3 处）
+- **blocked**：见上方 ⛔ 小节；本轮取第一个未 blocked 的文件。
 - `unified_user_mapping`（归 mgmt）× 3：行 621, 627, 630
   - mgmt public 已登记 147 条具名查询
 
-## src/kernel/persistence/credential_usage_log.py（kernel 域，3 处）
+## ⛔ src/kernel/persistence/credential_usage_log.py（kernel 域，3 处）
+- **blocked**：见上方 ⛔ 小节；本轮取第一个未 blocked 的文件。
 - `grape_t_credential_usage_log`（归 runtime）× 3：行 179, 185, 261
   - runtime public 已登记 221 条具名查询
 
-## src/api/pipeline_status.py（api 域，3 处）
-- `issue`（归 runtime）× 1：行 343
+## src/api/main.py（api 域，3 处）
+- `runtime_credentials`（归 runtime）× 3：行 126, 129, 208
   - runtime public 已登记 221 条具名查询
-- `issue_state`（归 runtime）× 1：行 353
-  - runtime public 已登记 221 条具名查询
-- `agent_tasks`（归 runtime）× 1：行 387
-  - runtime public 已登记 221 条具名查询
+
+## src/api/event_rule.py（api 域，3 处）
+- `event_action_filter`（归 mgmt）× 3：行 40, 44, 48
+  - mgmt public 已登记 147 条具名查询
+
+## src/domains/runtime/routes/pipeline.py（runtime 域，2 处）
+- `unified_user_mapping`（归 mgmt）× 1：行 60
+  - mgmt public 已登记 147 条具名查询
+- `managed_repos`（归 mgmt）× 1：行 568
+  - mgmt public 已登记 147 条具名查询
+
+## src/domains/runtime/im/vod_handler_async.py（runtime 域，2 处）
+- `grape_t_channel_installation`（归 mgmt）× 2：行 52, 110
+  - mgmt public 已登记 147 条具名查询
 
 ## 每批验收口径（不要跳）
 1) `python3 scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv --baseline docs/weekly-11/foreign-refs-allowlist.csv --check`

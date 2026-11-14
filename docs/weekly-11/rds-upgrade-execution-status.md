@@ -3673,6 +3673,95 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/api/main.py` 3 处——单进程版同一循环，可直接复用本批三个原语——或
   `src/api/pipeline_status.py` / `src/api/event_rule.py` 各 3 处）。
 
+### api/pipeline_status 流水线业务状态归 runtime public（-3，该文件清零）
+
+- 文件：`src/api/pipeline_status.py`（3 处 → **0**）；全局静态 **66 → 63**（-3），对数 **37 → 35** ——
+  `issue_state←api` 与 `agent_tasks←api` **两对整对清零**，`issue←api` 仍有 1 处余量在其它文件
+  （`src/api/git_repo_api.py`）。
+- 表分布（消费域 api，三张表全归 **runtime**），两处都在 `load_issue_business_status`、
+  一处为 `load_segment_task_refs`：
+  · 原行 343 `SELECT stage, status FROM issue WHERE repo_key IN (…) AND issue_number=?`（需求级权威）
+  · 原行 353 `SELECT stage FROM issue_state WHERE repo_key IN (…) AND issue_id=?`（stage 为空时的兜底）
+  · 原行 387 `SELECT id, event_seq, status, result_text FROM agent_tasks WHERE repo_key IN (…)`
+    `AND event_seq IS NOT NULL [AND event_seq IN (…)] ORDER BY created_at ASC, id ASC`
+  三处表名/列名全字面量，值全参数化；「动态」只有 IN 列表长度（`?` 个数按值列表展开）。
+- 本轮取批：作业单头名 `src/kernel/prompt_builder.py` 与次名
+  `src/kernel/persistence/credential_usage_log.py` **复核后仍 blocked**（理由与本文件此前四轮结论一致，
+  见下方「流程修复」），按作业单规则跳过，取第一个可改造文件（上一批台账末尾已点名的 `pipeline_status.py`）。
+- 归属域侧改动（SQL 只在 owner 域一份）：
+  · runtime public 新增 `_PIPELINE_STATUS_QUERIES` 四条具名模板：`pipeline_issue_stage_status`、
+    `pipeline_issue_state_stage`、`pipeline_segment_task_rows`、`pipeline_segment_task_rows_by_seq`，
+    列序/谓词/`ORDER BY` 与原 SQL 逐字一致；`{repo_ph}` / `{seq_ph}` 只是**占位符个数**标记，
+    语句文本固定在本模块，调用方只能传 repo_key / seq 值列表；
+  · runtime public 新增 3 个薄函数：`issue_business_stage_status_any()`、`issue_state_stage_any()`、
+    `segment_task_rows_any()`，体内无内联 SQL（只走 `_any_cursor`/模板展开）；函数名登记 `__all__`
+    并同步 `src/kernel/gsb/route_config.py` 的 `PUBLIC_PRIMITIVES["runtime"]` 镜像。
+- 关键设计取舍：
+  1. **`created_at` 只进本域、不出本域**：`agent_tasks` 读需要 `ORDER BY created_at ASC, id ASC`
+     （调用方「同一 seq 保留最后创建的一条」依赖它）。模板里多选 `created_at` 仅供本域排序，
+     薄函数按 `(created_at, id)` 重排后**只返回原 4 列**，列序与改造前逐字一致。
+  2. **分块不破坏全局序**：repo_key 的 IN 按 500 分块，但排序是「合并后再按同一键重排」，
+     而不是「每块各自有序直接拼接」 —— 后者会让跨仓同 seq 的「最后一条」变成「最后一块的最后一条」。
+     NULL `created_at` 用 `(0, "")` 键排在前面（sqlite 与 MySQL 的 ASC 都是 NULL 先），
+     id 文本/整型分别取键，避免混型比较抛错。
+  3. **`seqs` 过滤口径逐字保留**：原实现 `if seqs: seqs=[s for s in seqs if s]; if seqs: 加谓词`，
+     即「给空列表 / 全空值 = 不过滤（整仓取）」。这看着像 bug，但调用方拿到的就是「整仓任务引用」，
+     改成「空列表即空结果」会静默改变流水线卡片的内容，故按原样保留并写进 docstring。
+  4. **不加任何状态过滤**：`issue` 侧原 SQL 无 `status`/`is_active`/软删条件，终态与软删行照旧命中
+     （`review_status` 判据依赖这些行）；`repo_keys` 里的空串元素也不做「假值过滤」，
+     与原 `IN` 绑定逐字一致。
+  5. **拆掉调用方的 `db_lock` + `db.cursor()`**：`_any_cursor` 在单库回落路径自带 `db_lock`，
+     再嵌一层就是同线程二次加锁（生产 `RLock` 侥幸不炸，测试 monkeypatch 的裸 `Lock` 会自死锁；
+     交接文档 §5.3 坑 4 同族）。调用方现在不再 import 进程库句柄。
+  6. **两处裸 `except: pass` 换成 `log.debug`**：静默 except 棘轮只拦新增，改到这里属于顺带清偿；
+     降级语义不变（业务状态失败 → 空串、任务引用失败 → 空映射，都不阻塞 pipeline）。
+- **修的存量 bug（三库独立后必然 1146，且全被裸 `except` 吞成静默降级）**：
+  1. 需求级 `(stage, status)` 读在 api 进程库里没有 `issue` → 1146 → 「无业务状态」：
+     流水线页 `issue_stage` / `issue_task_status` 恒空，`review_status` 由 `derive_review_status("", "")`
+     恒推出默认值 —— 卡片永远显示「未开始/无评审」。
+  2. `issue_state` 兜底同理 1146 → 兜底分支**从未生效**（单进程时代它是 stage 为空的唯一来源）。
+  3. `agent_tasks` 读同理 1146 → `load_segment_task_refs` 恒返回 `{}`：每个段的 `task_ref`/`result_ref`
+     恒为 `unavailable`，任务详情页点不进任务、也拿不到阶段结论摘要。
+- **流程修复（本批附带，解决「每轮重复复核同一批 blocked」）**：`scripts/rds_next_batch.py` 新增
+  持久化 `BLOCKED` 清单 + 作业单顶部「⛔ blocked」小节。此前四轮都把 blocked 理由写进台账，
+  但作业单由脚本重写、标记每次被冲掉，下一轮又从头按处数硬拿同一批文件。现在标记随生成器落盘，
+  blocked 文件在作业单里带 ⛔ 与理由，取批规则明确为「取第一个未 blocked 的文件」。
+  当前 blocked 两条不变：`prompt_builder.py`（agent 提示文案，本进程不执行 + 测试按源文本断言 +
+  口径「不为掉数字改文案」）、`credential_usage_log.py`（需每工作线程一条 owner 连接的池化，独立一轮）。
+- 验证（真实退出码）：
+  · `py_compile` 四文件（`pipeline_status.py` / runtime `public` / `gsb/route_config.py` /
+    `rds_next_batch.py`）→ **COMPILE_OK**；
+  · `~/burndown/pipeline_status_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建 issue/issue_state/agent_tasks 三表）
+    → **ALL pipeline_status smoke PASSED (67 checks)**：A 注册面/静态否定（四条模板逐字对齐、无 `%s`/`NOW()`/
+    `ON DUPLICATE`、薄函数体无 SQL、调用方无三表 SQL 与进程库直连、`__all__` + GSB 镜像双登记、
+    未登记查询名 `KeyError`）；B 需求级状态（issue 命中、int/str issue_number 同口径、跨仓不误命中、
+    stage 空 → issue_state 兜底、NULL 归空串、终态/软删行照旧命中、同键脏数据取第一行、
+    空串 repo_key 不过滤、空 repo_keys 零 SQL（两表改名验证）、缺表降级不抛）；
+    C 段任务（seq 过滤 / 空 seqs 不过滤 / `event_seq IS NULL` 排除 / created_at+id 破平 /
+    NULL created_at 在前 / chunk=1 与整批结果与顺序完全一致 / 跨仓全局排序）；
+    D **自有 DSN 伪游标**（`?` 方言、`{repo_ph}`→N 个占位符、参数顺序 repo_keys→seqs→尾参、
+    驱动乱序返回仍按 created_at 重排、created_at 不进返回列）；
+    E 调用点三态（available + 摘要 / 在途 pending / 无结论 unavailable / 缺表 → 空映射 / 非数字 seq 丢弃 /
+    enrich 对无任务段显式标注 unavailable）。
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；`make lint` → **import OK**；
+  · 直覆盖用例 `tests/runtime/test_issue_539_pipeline_review_status.py` +
+    `tests/runtime/test_issue_648_attachments_display.py` + `tests/mgmt/test_issue_2050_structured_handoff_stall.py`
+    + `tests/kernel/test_gsb_route.py` → **85 passed / 24 failed**，**全部与本批无关**，已用
+    `git worktree` 在 HEAD 干净树（`~/burndown/wt-pipelinestatus`，`863308edc`）复现同样失败：
+    · `test_issue_2050` 15 项 = `src/api/patrol.py` 的 `NameError: _NEXT_STEP_RE`（分支既有 bug，DB 无关）；
+    · `test_issue_648` 8~11 项随库状态浮动（该文件只用 `get_gitcode_token` 打桩，实现已改走
+      `get_repo_token_with_refresh`，用例断言过时）；主仓 `.env` 把测试指向共享 MySQL 而 worktree 无 `.env`，
+      故两边失败项不同 —— 把本批补丁 `git apply` 到 worktree 后同一用例**仍通过**，证明确非本批引入；
+    · `test_gsb_route::test_public_primitives_registry_sync` 镜像陈旧（mgmt 侧缺约 190 个名字，既有漂移）。
+- **未验证项（如实）**：本轮未跑 `p4_p5_loop.sh` 三实例彩排 —— 本 shell `SRC_PWD`/`REMOTE_PWD` 均未注入，
+  且本批不改 schema / 迁移 / 契约面（无新表、无新路由、无新端点），运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标）+ 单库 pytest；**不把彩排结果算作本批证据**。
+- **新基线**：**63 处 / 35 对**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 63 处 / 39 文件，顶部已带 ⛔ blocked 小节；下一批可选 `src/api/main.py` 3 处
+  ——与 insight 进程同一循环，可直接复用 `device_*_any` 三个原语——或 `src/api/event_rule.py` 3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

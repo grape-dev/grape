@@ -1500,6 +1500,8 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "issue_stage_status_rows",
            # 跨域 JOIN 拆分右表读口（insight token 归因：agent_tasks / runtime_credentials）
            "task_issue_id_rows", "runtime_credential_display_names",
+           # 流水线业务状态 / 阶段任务引用（api/pipeline_status.py；issue/issue_state/agent_tasks 本域）
+           "issue_business_stage_status_any", "issue_state_stage_any", "segment_task_rows_any",
            # A2A 派发门禁读路径（api/a2a_dispatch_guard.py；events / event_skipped 本域）
            "a2a_active_event_rows", "a2a_active_dup_rows", "a2a_window_dedup_rows",
            "a2a_storm_event_times", "a2a_storm_skip_rows",
@@ -2737,6 +2739,125 @@ def runtime_credential_display_names(ids, chunk: int = _ISSUE_ID_CHUNK) -> list[
     无排序（调用方按键取值，不依赖顺序）。分块与去重口径同 `task_issue_id_rows`。
     """
     return _task_side_in_rows("runtime_credential_display_names", ids, chunk)
+
+
+# ── 流水线业务状态 / 阶段任务引用读口（api/pipeline_status.py）────────────────
+# 原实现三条 SQL 从 api 进程主库直发，表 `issue` / `issue_state` / `agent_tasks`
+# 三张全归本域。三库独立后 api 进程库里没有它们（视图 0）→ 1146 被调用方裸
+# `except` 吞成「无业务状态 / 无任务引用」：流水线页的需求级 review_status 恒空、
+# 每个段的 task_ref/result_ref 恒 unavailable（Level-1 展示整体失效）。
+# 语句文本固定在本模块（`{repo_ph}` / `{seq_ph}` 只按值个数展开成占位符），
+# 调用方只能传 repo_key / seq 值列表，不接受拼接 SQL / 表名 / 列名。
+# 列序与原 SELECT 逐字一致；`created_at` 只为本域内部排序取用，不返回调用方。
+_PIPELINE_STATUS_QUERIES: dict[str, str] = {
+    "pipeline_issue_stage_status": (
+        "SELECT stage, status FROM issue WHERE repo_key IN ({repo_ph}) AND issue_number=?"),
+    "pipeline_issue_state_stage": (
+        "SELECT stage FROM issue_state WHERE repo_key IN ({repo_ph}) AND issue_id=?"),
+    "pipeline_segment_task_rows": (
+        "SELECT id, event_seq, status, result_text, created_at FROM agent_tasks "
+        "WHERE repo_key IN ({repo_ph}) AND event_seq IS NOT NULL "
+        "ORDER BY created_at ASC, id ASC"),
+    "pipeline_segment_task_rows_by_seq": (
+        "SELECT id, event_seq, status, result_text, created_at FROM agent_tasks "
+        "WHERE repo_key IN ({repo_ph}) AND event_seq IS NOT NULL AND event_seq IN ({seq_ph}) "
+        "ORDER BY created_at ASC, id ASC"),
+}
+
+#: repo_key 的 IN 单批上限（与既有分块查询同值；正常入参 = 一个需求的候选仓库键，远小于此）。
+_PIPELINE_STATUS_CHUNK = _ISSUE_ID_CHUNK
+
+
+def _pipeline_status_stmt(name: str, repo_keys: list, extra: tuple = (),
+                          seqs: list | None = None) -> tuple[str, tuple]:
+    """展开 `{repo_ph}` / `{seq_ph}`，返回 (SQL, 参数元组)。
+
+    参数顺序与模板占位符顺序一致：repo_keys → seqs → 末尾固定谓词值（extra）。
+    """
+    sql = _PIPELINE_STATUS_QUERIES.get(name)
+    if sql is None:
+        raise KeyError(f"unknown pipeline status query: {name}")
+    sql = sql.replace("{repo_ph}", ", ".join(["?"] * len(repo_keys)))
+    params: list = list(repo_keys)
+    if seqs is not None:
+        sql = sql.replace("{seq_ph}", ", ".join(["?"] * len(seqs)))
+        params.extend(seqs)
+    params.extend(extra)
+    return sql, tuple(params)
+
+
+def _pipeline_status_rows(name: str, repo_keys: list, extra: tuple = (),
+                          seqs: list | None = None,
+                          chunk: int = _PIPELINE_STATUS_CHUNK) -> list[tuple]:
+    """按 repo_key 分块执行（seqs 仍在单条语句内），返回合并后的行元组列表。"""
+    size = max(1, int(chunk or _PIPELINE_STATUS_CHUNK))
+    out: list[tuple] = []
+    for i in range(0, len(repo_keys), size):
+        sql, args = _pipeline_status_stmt(name, repo_keys[i:i + size], extra, seqs)
+        with _any_cursor() as c:
+            c.execute(sql, args)
+            out.extend(tuple(r) for r in (c.fetchall() or []))
+    return out
+
+
+def _created_at_asc_key(value: Any) -> tuple:
+    """`ORDER BY created_at ASC` 的 Python 等价键（NULL 在前：sqlite 与 MySQL 的 ASC 都如此）。"""
+    if value is None:
+        return (0, "")
+    return (1, value)
+
+
+def _id_asc_key(value: Any) -> tuple:
+    """`ORDER BY id ASC` 的 Python 等价键（整型按数值、文本按字面，避免混型比较报错）。"""
+    if isinstance(value, (int, float)):
+        return (0, float(value), "")
+    return (1, 0.0, str(value if value is not None else ""))
+
+
+def issue_business_stage_status_any(repo_keys, issue_number) -> tuple[str, str]:
+    """需求级 `(stage, status)`：issue 单表权威（列序同原语句，无排序 → 取第一行）。
+
+    与原 `SELECT stage, status ... WHERE repo_key IN (...) AND issue_number=?` 同口径：
+    不做 status/stage 过滤（软删、终态行照旧命中），NULL → 空串。空 repo_keys 零 SQL。
+    候选键正常 ≤ 4 个（一个仓库的各平台别名），分块只为占位符数量上限。
+    """
+    keys = list(repo_keys or [])
+    if not keys:
+        return ("", "")
+    for row in _pipeline_status_rows("pipeline_issue_stage_status", keys, (str(issue_number),)):
+        return (row[0] or "", row[1] or "")
+    return ("", "")
+
+
+def issue_state_stage_any(repo_keys, issue_id) -> str:
+    """issue_state 兜底阶段（`issue_id` 形如 `#5`，与原调用方传参逐字一致）。
+
+    无行/NULL → 空串；空 repo_keys 零 SQL。
+    """
+    keys = list(repo_keys or [])
+    if not keys:
+        return ""
+    for row in _pipeline_status_rows("pipeline_issue_state_stage", keys, (str(issue_id),)):
+        return row[0] or ""
+    return ""
+
+
+def segment_task_rows_any(repo_keys, seqs=None) -> list[tuple]:
+    """按 repo_key（可限定 event_seq）取 `(id, event_seq, status, result_text)`。
+
+    顺序 = 原语句 `ORDER BY created_at ASC, id ASC`：分块后按同一键重排（单块时即语句
+    自身的顺序），保证调用方「同一 seq 保留最后创建的一条」的覆盖语义跨块一致。
+    `seqs` 的过滤口径与原实现逐字一致：给空值/全空列表 → 不加该谓词（照旧整仓取）。
+    `created_at` 只用于排序，不进入返回列。
+    """
+    keys = list(repo_keys or [])
+    if not keys:
+        return []
+    want = [s for s in (seqs or []) if s]
+    name = "pipeline_segment_task_rows_by_seq" if want else "pipeline_segment_task_rows"
+    rows = _pipeline_status_rows(name, keys, (), want or None)
+    rows.sort(key=lambda r: (_created_at_asc_key(r[4]), _id_asc_key(r[0])))
+    return [(r[0], r[1], r[2], r[3]) for r in rows]
 
 
 def apply_issue_vcs_existence_any(deleted_ids: list, restored_ids: list,

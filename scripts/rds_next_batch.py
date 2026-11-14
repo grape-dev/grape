@@ -23,6 +23,22 @@ OWNER_TSV = REPO / "docs/weekly-11/table-owner.tsv"
 PUBLIC_GLOB = "src/domains/{domain}/public/__init__.py"
 DOMAIN_KW = {"mgmt": "mgmt", "runtime": "runtime", "insight": "insight"}
 
+#: 已确立口径、短期不再尝试的文件（原因写清处，避免下一轮又按处数硬拿）。
+#: 本清单**随生成器持久化**——作业单每次重写都不会把它冲掉（历史教训：
+#: 2026-11-14 起连续四轮把同一批 blocked 理由写进台账，作业单一刷新就丢标记，
+#: 每轮都要重新复核一遍同一结论）。
+BLOCKED: dict[str, str] = {
+    "src/kernel/prompt_builder.py": (
+        "3 处是 agent 提示文案（f-string 里的说明文本，本进程不执行，静态正则才计到）；"
+        "`tests/runtime/test_issue_372_unified_mapping_github.py` 按源文本断言该段语义；"
+        "改写前必须先给 agent 一个合法的映射写通道。口径：**不为掉数字改文案**（台账 2026-11-14）"
+    ),
+    "src/kernel/persistence/credential_usage_log.py": (
+        "3 处 flush/retention 由后台线程共用 owner 连接 → `Packet sequence number wrong`；"
+        "正解是「每工作线程一条 owner 连接」的池化，属独立一轮（交接文档 §5.3 坑 4 / §9 阻塞项 2）"
+    ),
+}
+
 
 def load_scanner():
     spec = importlib.util.spec_from_file_location("ftr", REPO / "scripts/foreign_table_refs.py")
@@ -74,8 +90,18 @@ def main(argv: list[str] | None = None) -> int:
     out: list[str] = ["# 下一批：跨域收口作业单", ""]
     out.append(f"总量 {sum(r[0] for r in rows)} 处 / {len(rows)} 个文件；下表取前 {args.top} 个。")
     out.append("")
+    live_blocked = {p: why for p, why in BLOCKED.items()
+                    if any(r[1] == p for r in rows)}
+    if live_blocked:
+        out.append("## ⛔ blocked（口径已确立，不要按处数硬拿）")
+        for path, why in live_blocked.items():
+            out.append(f"- `{path}`：{why}")
+        out.append("")
     for total, path, by_table, dom in rows[: args.top]:
-        out.append(f"## {path}（{dom} 域，{total} 处）")
+        mark = "⛔ " if path in BLOCKED else ""
+        out.append(f"## {mark}{path}（{dom} 域，{total} 处）")
+        if path in BLOCKED:
+            out.append("- **blocked**：见上方 ⛔ 小节；本轮取第一个未 blocked 的文件。")
         for table, lines in sorted(by_table.items(), key=lambda kv: -len(kv[1])):
             target = owner[table]
             have = queries.get(target, set())
