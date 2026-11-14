@@ -31,7 +31,8 @@ if [ "${1:-}" != "--quick" ]; then
 fi
 
 step "归位候选（按收益排序，下一批从这里取）"
-"$PY" scripts/rds_burndown.py --rank 2>&1 | head -10 || rc=1
+# 归位候选只是报告，有剩余才正常；不能把它当成红项
+"$PY" scripts/rds_burndown.py --rank 2>&1 | head -10 || true
 
 echo
 if [ "$rc" = "0" ]; then echo "GATE: 全绿"; else echo "GATE: 有红项（见上面逐条）"; fi
