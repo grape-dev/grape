@@ -1,6 +1,5 @@
 table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,2
-agent_tasks,runtime,mgmt,1
 api_latency_log,insight,api,1
 distributed_locks,runtime,insight,1
 events,runtime,api,1

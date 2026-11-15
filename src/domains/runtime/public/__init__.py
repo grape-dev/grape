@@ -1523,7 +1523,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # 接管会话状态（src/api/git_repo_api.py；takeover_sessions 本域）
            "takeover_session_status_any",
            # 接管会话心跳（src/domains/mgmt/routes/takeover.py；takeover_sessions 本域）
-           "takeover_touch_updated_at_any"]
+           "takeover_touch_updated_at_any",
+           # 账号注销前置：在制任务数（src/domains/mgmt/routes/grape_auth.py；agent_tasks 本域）
+           "inflight_task_count_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -5801,3 +5803,65 @@ def failed_event_gap_samples_any(repo_keys, legacy_prefix: str = "[legacy]",
         rows.sort(key=lambda r: int(r[0] or 0), reverse=True)
         rows = rows[:lim]
     return rows
+
+
+# ── 账号注销前置检查：某批仓库的在制任务数（src/domains/mgmt/routes/grape_auth.py）──
+# 背景：注销端点要回答「这些仓库上还有没有跑着的 Agent 任务」，原实现拿 kernel 进程主库
+# 句柄（`session_manager.db` + `db_lock`）直发一条 COUNT。`agent_tasks` 归本域，三库
+# 独立后 mgmt 进程库里没有它（视图 0）→ 1146；原语句没有 try，异常直接冒到端点，
+# 表现为「注销 500」——只有单库拓扑一直能跑，所以测试与彩排都是绿的。
+#
+# 口径逐字保留：**不加** `is_active` / `user_id` / 时间窗谓词，也不改状态集合
+# （`queued`/`dispatched`/`running` 三态，成功/失败/取消的历史任务不算在制）。
+# `{ph}` 只按 repo_key 个数展开成占位符；语句文本固定在本模块，调用方只能传值列表，
+# 不接受拼接 SQL / 表名 / 列名。
+_INFLIGHT_TASK_QUERIES: dict[str, str] = {
+    "inflight_task_count_by_repos": (
+        "SELECT COUNT(*) FROM agent_tasks WHERE status IN ('queued','dispatched','running') "
+        "AND repo_key IN ({ph})"),
+}
+
+#: repo_key 候选集单批上限（SQLite 变量上限 / 超长语句保护；行集合与一次 IN 等价）。
+_INFLIGHT_TASK_KEY_CHUNK = 400
+
+
+def _inflight_task_sql(count: int) -> str:
+    """把 `{ph}` 展开成 count 个占位符；未登记名抛 KeyError（不静默退回任意 SQL）。"""
+    sql = _INFLIGHT_TASK_QUERIES.get("inflight_task_count_by_repos")
+    if sql is None:
+        raise KeyError("unknown inflight task query")
+    return sql.replace("{ph}", ",".join(["?"] * max(0, int(count))))
+
+
+def _inflight_repo_keys(repo_keys) -> list[str]:
+    """候选仓库集规整：丢空值、转字符串、保序去重（COUNT 口径与重复键无关）。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for k in (repo_keys or []):
+        if not k:
+            continue
+        s = str(k)
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def inflight_task_count_any(repo_keys, chunk: int = _INFLIGHT_TASK_KEY_CHUNK) -> int:
+    """这批仓库上的在制任务数（`queued`/`dispatched`/`running` 三态之和，任意拓扑）。
+
+    空候选集返回 0（原调用方在 `not repo_keys` 时早退；这里兜住，避免 `IN ()` 语法错）。
+    多块时逐块累加 —— 各块 repo_key 集合互斥，和等于一次 IN。调用方只需传值列表。
+    """
+    keys = _inflight_repo_keys(repo_keys)
+    if not keys:
+        return 0
+    size = max(1, int(chunk or _INFLIGHT_TASK_KEY_CHUNK))
+    total = 0
+    for i in range(0, len(keys), size):
+        part = keys[i:i + size]
+        with _any_cursor() as c:
+            c.execute(_inflight_task_sql(len(part)), tuple(part))
+            total += int((c.fetchone() or [0])[0] or 0)
+    return total

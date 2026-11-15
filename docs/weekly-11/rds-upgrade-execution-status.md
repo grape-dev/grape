@@ -5965,6 +5965,85 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `prompt_builder.py`（各 3 处），下一批首个未 blocked 文件是
   `src/domains/mgmt/routes/grape_auth.py`（1 处：`agent_tasks`，归 runtime）。
 
+### 7.55 mgmt 账号注销前置「在制任务数」下沉 runtime owner 域（2026-11-15 本批）
+
+- 文件：`src/domains/mgmt/routes/grape_auth.py`（`delete_account`，1 处）。
+- 处数：1 处 → 0（本文件清零并退出榜单）。
+- 表分布：`agent_tasks`（归 runtime）× 1 —— 原语句是 `SELECT COUNT(*) FROM agent_tasks
+  WHERE repo_key IN (<动态占位符>) AND status IN ('queued','dispatched','running')`，
+  `placeholders` 由 `len(repo_keys)` 现算，属**动态 IN 拼接**，因此不能机械替换成具名查询，
+  必须由 owner 域接管占位符展开。
+- 归位：runtime public 新增具名查询 `inflight_task_count_by_repos`
+  （`{ph}` 模板，语句文本固定在 owner 侧）+ 薄函数
+  `inflight_task_count_any(repo_keys, chunk=400) -> int`；调用点只剩
+  `_runtime_public.inflight_task_count_any(repo_keys)`，不再持 kernel 进程主库句柄
+  （原 `_sdb`/`_sdl` 那两行删除）。
+- 设计取舍：
+  1. **接纳值列表、不接纳拼接 SQL**：动态 IN 的正确落点是「归属域展开占位符」，调用方只传
+     repo_key 值列表；`{ph}` 之外没有任何表名/列名入参，静态面无法被绕过。
+  2. **分块（单批 400）+ 累加**：与既有 `_failed_gap_keys` / `_PIPELINE_STATUS_CHUNK` 同值同法。
+     各块 repo_key 集合互斥，和等于一次 `IN`；正常入参是「一个用户的仓库集」，远小于此，
+     分块只为 SQLite 变量上限/超长语句保护，不是常态路径。
+  3. **口径逐字照抄、不加固**：原语句**没有** `is_active`、`user_id`、时间窗谓词，状态集合就
+     是三态 `queued/dispatched/running`。本批刻意不加「只算未停用任务」这类看似更严谨的过滤 ——
+     那会把「已停用但仍在制」的历史任务从拦截面漏掉，改变 409 行为；烟测 B 段以
+     `is_active=0` 的 queued 行反证（变异法：加 `AND is_active=1` 立即红）。
+  4. **回 `int` 而非行对象**：调用方只做 `running_count > 0` 与文案插值，薄函数直接求和成
+     整数，避免调用方再解析 `[(n,)]`；保留 `int(... or 0)` 兜底（COUNT 永不 NULL，但分块累加
+     要防游标返回 `None`）。
+  5. **薄函数放 public 而不是 mgmt 侧本地 helper**：`agent_tasks` 归 runtime，SQL 只留 owner 域
+     一份才能同时满足 `check_lib_query_names` 的静态闭合与「三库视图 0」的结构约束。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  **三库拓扑下注销端点直接 500** —— 原实现用 kernel 进程主库句柄（mgmt 进程里是
+  `grape_mgmt_db`）查 `agent_tasks`，拆分后该库没有此表（视图 0 → 1146），而这段**没有**
+  `try`，异常一路冒到端点，表现为「注销失败 500」，同时把「有在制任务请先处理」这条
+  产品拦截整个绕过（用户既注销不了，也看不到 pending_tasks 提示）。单库拓扑能跑通，
+  所以既有测试与彩排一直是绿的。归位后两种拓扑同一份 SQL。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/runtime/public/__init__.py` / `src/domains/mgmt/routes/grape_auth.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/grape_auth_inflight_smoke.py`
+    （`DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=~/burndown/grape_auth_inflight.db`，连跑 2 次稳定）
+    → **ALL grape_auth inflight smoke PASSED (84 checks)**：
+    A 28 项注册面/静态否定（具名查询逐字、`{ph}` 模板且无预置字面占位符、无 `is_active`/`NOW()`/
+    反引号/`%s`、薄函数体内零字面 SQL 且登记 `__all__`、走 `_any_cursor`、调用点 `delete_account`
+    无 `FROM agent_tasks`/无 `_sdb`/`_sdl`/无 `%s`、在制检查段无 `session_manager`/无自管游标锁、
+    `running_tasks`/`need_force` 字段保留、余量 13 / 8 对、`agent_tasks` 已退出跨域榜单）；
+    B 18 项原语语义（A 仓库 3 态之和 = 3、**含 `is_active=0` 的 queued 行**、success/failed/cancelled
+    不计、跨仓库隔离、`'Running'` 大小写不折叠不计、不存在仓库 0、空集/None 0 且不发 `IN ()`、
+    空串与 None 键丢弃、重复键不翻倍、unicode 仓库键、`chunk=1` + `chunk=500` + `chunk=0` 与一次 IN
+    等价、500 键跨默认分块仍得 3、返回 `int`）；
+    C 20 项调用点端到端（真 sqlite：有在制 + 不 force → 409 `running_tasks=3`/`need_force=True`
+    且软删/token/缓存/审计全不执行、只按 user_repos 的键查一次；force=True → 放行且五项后续动作
+    全执行、`unified_user_mapping` **清列保行**（5 列清空、行仍在）、`org_member` 行被删；
+    只有历史 success → 不拦；无仓库 / 仓库键全空 → 原语根本不被调用）；
+    D 12 项拓扑判据（自有 DSN + 外域进程 → 只连 `domain=runtime`、语句与参数 `(repo_key,)` 逐字、
+    分块逐块累加 7×3、进程库未被触碰；无自有 DSN → 回落进程主库、取本域 `db_lock` 一次、
+    空集不进库也不加锁）；
+    E 6 项棘轮余量（`foreign_table_refs` 退出码 0、`cross_domain_refs=13` / `pairs=8`、
+    `agent_tasks` 不在榜单）；
+  · 变异法反证：把具名查询临时加 `AND is_active=1` → B 段立即以 `在制应为 3 … 实际 2` 失败，
+    恢复后连跑两次 ALL PASSED；
+  · `--update-baseline` → **baseline updated: 8 pairs, 13 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **8 表 / 13 跨域引用 / 8 对**
+    （`agent_tasks` 跨域 1 → 0 退出榜单，`sql_references` 777 → 506 的差值是「该表 270 处同域引用
+    不再进入跨域榜单」，非语句删除）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch / 棘轮未上升 / 内部契约 37 条
+    最新 / 依赖看板最新）；
+  · `venv/bin/python -m pytest tests/arch tests/contracts tests/scripts -q -p no:cacheprovider`
+    → **158 passed**（EXIT=0）；
+  · `make lint` → **import OK**（EXIT=0）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD` / `REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新响应字段）。
+- **新基线**：**13 处 / 8 对 / 8 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  `src/domains/mgmt/routes/grape_auth.py` 已清零并退出榜单；头两名仍是 ⛔ blocked 的
+  `prompt_builder.py` 与 `credential_usage_log.py`（各 3 处），下一批首个未 blocked 文件为
+  `src/api/a2a_dispatch.py` / `src/api/event_archive.py` 等 `src/api` 单点（各 1 处）。
+  另记一处**同域**句柄残留（不计入跨域基线、不属本批）：`delete_account` 末尾的
+  `UPDATE unified_user_mapping` / `DELETE FROM org_member` 仍走 kernel 进程主库句柄 ——
+  两张表都归 mgmt，静态面不计跨域，但三库拓扑下同为坏句柄，留给 mgmt 域自身收口一批。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
