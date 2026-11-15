@@ -6206,6 +6206,99 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `merge_gate` / `middleware` / `pipeline_executor` 各 1）——`contracts/local/mgmt_local.py`
   本轮已清零。
 
+### 7.58 api 派发前 runtime 有效性校验下沉 runtime owner 域（2026-11-15 本批）
+
+- **文件**：`src/api/pipeline_executor.py`（api 域），**1 处 → 0（本文件清零）**。
+- **表分布**：`agent_runtimes` 归 **runtime**（`table-owner.tsv` → `grape_runtime_db`）。
+  该表跨域引用 242 → 241，消费方由 `runtime:240;api:2` 收敛为 `runtime:240;api:1`；
+  全局 `cross_domain_refs` **11 → 10**、`tables` 仍 6、`pairs` 仍 6
+  （`api→runtime` 这对**未消失**：`src/api/a2a_dispatch.py` 还有 1 处同表读，属下一批）。
+- 原形态（`_enqueue_via_pipeline`，无自有 DSN 语义 = api 进程主库）：
+  ```python
+  with db_lock:
+      c = db.cursor()
+      c.execute("SELECT last_seen_at FROM agent_runtimes WHERE id=? AND status='online'", (runtime_id,))
+      _row = c.fetchone()
+      _alive = False
+      if _row and _row[0]:
+          from src.domains.runtime.engine.health import parse_dt as _parse_dt
+          from src.domains.runtime.engine.engine_select import _RUNTIME_STALE_SECONDS
+          _ts = _parse_dt(_row[0])
+          if _ts is not None and time.time() - _ts <= _RUNTIME_STALE_SECONDS:
+              _alive = True
+      if not _alive:
+          runtime_id = 0          # 降档为池任务
+  ```
+- **设计取舍**：
+  1. **判定整体归 owner 域，api 只拿布尔**：新增具名查询
+     `_ANY_QUERIES["runtime_last_seen_online"]`
+     = `SELECT last_seen_at FROM agent_runtimes WHERE id=? AND status='online'`
+     （列序/谓词/单 `?` 与原地直读**逐字一致**，`status` 谓词留在 SQL 走既有索引），
+     薄函数 `runtime_heartbeat_alive_any(runtime_id) -> bool` 负责「新鲜度」：
+     `parse_dt` 与 `RUNTIME_STALE_SECONDS` 都是运行域口径，不该留在 api。
+  2. **不看 `credential_id`**：原调用点对**本机直连行（cid=0）同样**要求 `online`+心跳，
+     与 `engine_health_ok`（cid=0 免心跳，`installed+healthy` 即可）是两把尺子，
+     故**没有**复用 `runtime_health_bits` / `engine_health_ok`——合并会悄悄让本机引擎
+     免于过期判定，把 stale `runtime_id` 重新钉死任务。
+  3. **边界与空值口径逐字保留**：`now - last_seen <= RUNTIME_STALE_SECONDS` 才算活
+     （**恰好等于阈值算活**，未来时间戳因差值为负也算活）；行缺失 / `NULL` / 空串 /
+     不可解析 → `False`（原 `if _row and _row[0]` + `_ts is not None` 三条分支）。
+  4. **异常改为「降级」而非「整条派发失败」**：原实现异常上抛到外层 `except` →
+     `{"error": ...}` → 该节点**不入队**。校验本身是防御性降档（stale id → 池任务），
+     不该因为「查不了状态」把可派发的任务丢掉，所以薄函数 catch 后 `log.warning` +
+     `False`（= 原「降级 0」路径）。若运行库真挂，紧随其后的 `_enqueue_pipeline_task`
+     照样报错，故障不会被这条降级掩盖；并且**未新增静默 except**（带原始原因）。
+  5. **锁/句柄语义**：删掉 `with db_lock:` + `db.cursor()`。任意拓扑原语在单库/测试拓扑
+     取的是同一把 `session_manager.db_lock`（`RLock`，可重入），锁语义不变但不再叠加；
+     自有 DSN 拓扑读走 runtime 独立连接（原来的直读句柄正是 api 自己的库）。
+  6. **调用点零 SQL**：api 只剩 `_runtime_public.runtime_heartbeat_alive_any(runtime_id)`
+     一行；`runtime_id=0` 时**完全不校验**（与原来 `if runtime_id:` 一致，不触库）。
+- **修的存量 bug**（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  **独立三库拓扑下「带 runtime_id 的流水线节点」整条派发失败** —— 原句发在 api 进程库，
+  而 `agent_runtimes` 在 runtime 库；api 库无此表 → `1146` → 外层 `except` 转
+  `{"error": "..."}`，节点不入队（A2A/场景定向派发全走这条分支，即定向节点在真正独立
+  拓扑下**一个都发不出去**，而广播/池任务不受影响）。单库/测试拓扑两处是同一个库，
+  所以一直是绿的。归位后两类拓扑同一份 SQL、同一条返回路径；烟测 D 段以
+  「自有 DSN 只连 `domain=runtime`、语句与参数逐字」+ C5「`DROP` 表 → 降级落池仍入队」
+  反证。
+- 验证（真实退出码）：
+  · `py_compile`（`src/api/pipeline_executor.py`、`src/domains/runtime/public/__init__.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/pipeline_rt_alive_smoke.py`
+    （`DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=~/burndown/pipeline_rt_alive.db`，
+    连跑 2 次稳定，EXIT=0）→ **ALL pipeline_executor rt-alive smoke PASSED (83 checks)**：
+    A 35 项注册面/静态否定（`runtime_last_seen_online` 逐字、恰好 1 个 `?`、列序仅
+    `last_seen_at`、无 `%s`/`NOW()`/反引号/`ON DUPLICATE`、薄函数体内零字面 SQL 且只调
+    `read_one_any`、登记 `__all__`、本域延迟导入、调用点**字符串常量**里无
+    `agent_runtimes` / 无 `session_manager db` / 无 `db_lock` / 无字面 SQL、
+    静默 except 条数不高于 HEAD、余量 10 / 6 对、榜单只剩 `api:1`）；
+    B 18 项原语语义（新鲜 → `True`、**固定时钟下恰好等于阈值 → `True`**、超 1 秒 →
+    `False`、未来时间戳 → `True`、`status=offline` 即便心跳新鲜 → `False`、行缺失 /
+    `NULL` / 空串 / 不可解析 → `False`、naive 时间戳按 UTC、id 1 与 11 不串、
+    `rid` 为 `0`/`None`/负数 → `False`、重复调用稳定、脏值不抛）；
+    C 14 项调用点端到端（新鲜 `runtime_id` 原样入队且不走 `pick_engine`；
+    `offline` / 心跳过期 → 降级 `0` + `pick_engine` 结果入队；`runtime_id=0` **不调用**校验；
+    **`DROP` 表 → 降级落池仍入队（不 error）**；入队异常 → `{"error"}` 截断 200 字符）；
+    D 16 项拓扑判据（自有 DSN → 只连 `domain=runtime` 一次、语句/参数 `(5,)` 逐字、
+    `fetchone` 结果驱动布尔、`1146` 类异常 → `False` + 带原文的 warning 不抛、
+    `rid<=0` 不触库；无自有 DSN → **不碰** `db_registry.cursor`、取 `db_lock` 恰好一次、
+    回落进程主库读真值）；
+  · `--update-baseline` → **baseline updated: 6 pairs, 10 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **6 表 / 10 跨域引用 / 6 对**
+    （`sql_references` 479 持平：本批只换消费方，未删语句；该表 241 = 240 同域 + api 1）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1-R8 PASS /
+    棘轮未上升 / 内部契约 37 条最新 / 依赖看板最新）；
+  · `venv/bin/python -m pytest tests/arch tests/contracts tests/scripts -q -p no:cacheprovider`
+    → **158 passed**（EXIT=0）；
+  · `make lint` → **import OK**（EXIT=0）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD` /
+  `REMOTE_PWD`；口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，
+  彩排压在余量归零后统一跑）。本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新响应字段）。
+- **新基线**：**10 处 / 6 对 / 6 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  余下 10 处分三族：⛔ `prompt_builder.py` ×3（文案，不改数字）、⛔ `credential_usage_log.py` ×3
+  （后台线程连接池化，独立一轮），其余 4 处全是 `src/api` 单点（`a2a_dispatch` /
+  `event_archive` / `merge_gate` / `middleware` 各 1）——`pipeline_executor.py` 本轮已清零。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

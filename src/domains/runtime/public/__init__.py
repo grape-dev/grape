@@ -9,6 +9,7 @@ from __future__ import annotations
 from src.kernel.config import log
 
 import json
+import time
 from contextlib import contextmanager
 from typing import Any
 
@@ -1525,7 +1526,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # 接管会话心跳（src/domains/mgmt/routes/takeover.py；takeover_sessions 本域）
            "takeover_touch_updated_at_any",
            # 账号注销前置：在制任务数（src/domains/mgmt/routes/grape_auth.py；agent_tasks 本域）
-           "inflight_task_count_any"]
+           "inflight_task_count_any",
+           # 派发前 runtime_id 有效性（src/api/pipeline_executor.py；agent_runtimes 本域）
+           "runtime_heartbeat_alive_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -1874,6 +1877,11 @@ _ANY_QUERIES: dict[str, str] = {
         "LIMIT 1"),
     # 同上：取不到旗舰行时区分 missing（库内无任何 runtime 行）与 unhealthy。
     "agent_runtimes_total_count": "SELECT COUNT(*) FROM agent_runtimes",
+    # 派发前 runtime_id 有效性校验（src/api/pipeline_executor.py）。
+    # 列序/谓词照抄原直发句：只取 last_seen_at 一列，status 过滤留在 SQL（走既有索引）。
+    # 心跳新鲜度的解释权在薄函数 runtime_heartbeat_alive_any（本域 parse_dt + 阈值）。
+    "runtime_last_seen_online": (
+        "SELECT last_seen_at FROM agent_runtimes WHERE id=? AND status='online'"),
     # ── session_manager 去跨域所需具名查询（kernel 侧会话/消息/群绑定/配置行）──
     # 列序与原 SQL 逐字一致：调用方按下标取值，错位即静默串列，因此只允许**照抄**。
     'chat_session_by_repo': 'SELECT id, event_history, runtime_session_id, status FROM chat_agent_session WHERE repo_key=?',
@@ -5572,6 +5580,38 @@ def _table_has_column(c, table: str, column: str) -> bool:
     """
     cur = c.execute(f"SELECT * FROM {table} LIMIT 0")
     return column in [str(d[0]) for d in (cur.description or [])]
+
+
+def runtime_heartbeat_alive_any(runtime_id) -> bool:
+    """引擎行是否「status=online 且心跳新鲜」——派发前校验 runtime_id 仍可定向。
+
+    语义与改造前逐字一致：行不存在 / ``last_seen_at`` 空 / 时间戳不可解析 → False；
+    ``now - last_seen_at <= RUNTIME_STALE_SECONDS`` 才算活（**恰好等于阈值仍算活**，
+    未来时间戳因差值为负也判活）。**不看 credential_id**：原调用点对本机直连行同样
+    要求 online+心跳，与 ``engine_health_ok`` 的分形态口径（cid=0 免心跳）不同，勿合并。
+
+    为什么归本域：``agent_runtimes`` 是运行域表，``RUNTIME_STALE_SECONDS`` 与
+    ``parse_dt`` 也都是本域口径；api 侧只该拿布尔。改造前 api 在**自己的**连接上直发
+    这条 SQL，三库独立后必 1146（表不在 api 库），校验抛错把整条派发打成 error ——
+    即「带 runtime_id 的节点在独立拓扑下整条派发失败」。任意拓扑：自有 DSN 走
+    db_registry，单库/测试拓扑回落进程库。
+    """
+    rid = int(runtime_id or 0)
+    if rid <= 0:
+        return False
+    try:
+        row = read_one_any("runtime_last_seen_online", (rid,))
+    except Exception as e:  # 表缺失/连接失败：按「不活」降级 = 原「落池任务」路径
+        log.warning(f"runtime_heartbeat_alive_any: lookup failed id={rid}: {e}")
+        return False
+    if not row or not row[0]:
+        return False
+    from src.domains.runtime.engine.health import parse_dt
+    from src.domains.runtime.engine.engine_select import _RUNTIME_STALE_SECONDS
+    ts = parse_dt(row[0])
+    if ts is None:
+        return False
+    return time.time() - ts <= _RUNTIME_STALE_SECONDS
 
 
 def runtime_model_name_any(runtime_id) -> str:

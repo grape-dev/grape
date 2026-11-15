@@ -1,13 +1,13 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-15 09:57　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **6** 张；跨域引用 **11** 处（6 个「表×消费域」对）；含归属域在内的 SQL 引用 479 处
+> 生成时间：2026-11-15 10:07　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **6** 张；跨域引用 **10** 处（6 个「表×消费域」对）；含归属域在内的 SQL 引用 479 处
 
 ## 1. 域 × 域 跨域引用热力
 
 | 消费方 ↓ / 归属域 → | mgmt | runtime | insight | 合计 |
 | --- | ---: | ---: | ---: | ---: |
-| api | 0 | 3 | 2 | 5 |
+| api | 0 | 2 | 2 | 4 |
 | kernel | 3 | 3 | 0 | 6 |
 
 ## 2. 处置分类进度
@@ -15,7 +15,7 @@
 | 分类 | 表数 | 剩余跨域引用 |
 | --- | ---: | ---: |
 | D | 2 | 6 |
-| C1 | 2 | 3 |
+| C1 | 2 | 2 |
 | C2 | 2 | 2 |
 
 ## 3. 全量明细（按剩余跨域引用降序）
@@ -24,7 +24,7 @@
 | --- | --- | ---: | --- | --- | --- | ---: |
 | `grape_t_credential_usage_log` | runtime | 3 | kernel 3 | D 模块归位（kernel 写/读域表） | — | 2 |
 | `unified_user_mapping` | mgmt | 3 | kernel 3 | D 模块归位（kernel 写/读域表） | — | 7 |
-| `agent_runtimes` | runtime | 2 | api 2 | C1 归属重定（写路径挪进 owner 域） | — | 23 |
+| `agent_runtimes` | runtime | 1 | api 1 | C1 归属重定（写路径挪进 owner 域） | — | 22 |
 | `api_latency_log` | insight | 1 | api 1 | C2 outbox 跨域写 | W3 | 4 |
 | `events` | runtime | 1 | api 1 | C1 归属重定（写路径挪进 owner 域） | — | 19 |
 | `grape_t_merge_gate_log` | insight | 1 | api 1 | C2 outbox 跨域写 | W3 | 2 |
