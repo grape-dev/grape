@@ -77,21 +77,21 @@ def release_lease() -> None:
 
 
 def lease_status() -> Optional[Dict[str, Any]]:
-    """查看租约当前状态（排查/测试用）：holder 与到期时间戳（秒）；无锁返回 None。"""
+    """查看租约当前状态（排查/测试用）：holder 与到期时间戳（秒）；无锁返回 None。
+
+    取数走 runtime owner 域：`distributed_locks` 归 runtime（`table-owner.tsv`），
+    本进程是 insight，直发 SQL 在三库拓扑下必然 1146。`lock_lease_status_any`
+    是「任意拓扑」原语——有 runtime 自有 DSN 时读 runtime 库，单库/测试拓扑回落
+    进程库（持 owner 域 db_lock），SQL 只留 runtime 一份。
+    语义不变：按 lock_key 取单行、列序 `holder, expires_at`、不按 expiry 过滤
+    （已过期未接管的行照样返回）；异常（锁表损坏/DB 闪断）→ None。
+    """
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_4e8732_f
-            _ru_lib_4e8732 = _ru_lib_4e8732_f(foreign_only=True)
-            if _ru_lib_4e8732 is not None:
-                c = _ru_lib_4e8732.read_one("distributed_locks_4e8732", (LEASE_KEY,)).fetchone()
-            else:
-                row = c.execute(
-                    "SELECT holder, expires_at FROM distributed_locks WHERE lock_key=?",
-                    (LEASE_KEY,)).fetchone()
+        from src.domains.runtime import public as runtime_public
+        row = runtime_public.lock_lease_status_any(LEASE_KEY)
         if not row:
             return None
         return {"holder": row[0], "expires_at": int(row[1] or 0)}
-    except Exception:
+    except Exception as e:
+        log.debug(f"obs sample lease status unavailable: {e}")
         return None

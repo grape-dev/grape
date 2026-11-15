@@ -5510,6 +5510,17 @@ def cleanup_expired_distributed_locks(now: int, holder: str) -> int:
     return exec_any("lock_cleanup", (now, holder))
 
 
+def lock_lease_status_any(lock_key: str) -> tuple | None:
+    """租约状态（任意拓扑）：`(holder, expires_at)`，无锁返回 None。
+
+    列序与原直发句逐字一致（`SELECT holder, expires_at FROM distributed_locks
+    WHERE lock_key=?`），**不带** expiry 过滤——调用方（insight 采样租约的排查入口）
+    需要看到「已过期但尚未被清理/接管」的行，这是同一个排查语义，不改口径。
+    负参（KeyError）不吞：未登记查询属于编码错误。
+    """
+    return read_one_any("lock_row", (lock_key,))
+
+
 # ── 指标桶取数（insight/observability/metric_rollup 跨域收口）─────────────────────
 # 归属：`docs/weekly-11/table-owner.tsv` → grape_runtime_db.{agent_tasks,events,
 # runtime_credentials}。原实现在 insight 侧持进程主库游标直查这三张表：单库拓扑能跑，

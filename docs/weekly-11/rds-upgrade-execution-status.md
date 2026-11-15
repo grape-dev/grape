@@ -6044,6 +6044,87 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `UPDATE unified_user_mapping` / `DELETE FROM org_member` 仍走 kernel 进程主库句柄 ——
   两张表都归 mgmt，静态面不计跨域，但三库拓扑下同为坏句柄，留给 mgmt 域自身收口一批。
 
+### 7.56 insight 采样租约状态读下沉 runtime owner 域（2026-11-15 本批）
+
+- **文件**：`src/domains/insight/observability/sample_lease.py`（insight 域），**1 处 → 0**。
+- **表分布**：`distributed_locks` 归 **runtime**（`table-owner.tsv` → `grape_runtime_db`）。
+  该表跨域引用 10 → 9，消费方由 `runtime:9;insight:1` 收敛为 `runtime:9`，**已退出跨域榜单**。
+- 原形态：`lease_status()` 是「双路径」读 ——
+  ```python
+  with db_lock:                                   # ← kernel 进程主库
+      c = db.cursor()
+      lib = runtime_lib(foreign_only=True)
+      if lib is not None:
+          c = lib.read_one("distributed_locks_4e8732", (LEASE_KEY,)).fetchone()
+      else:
+          row = c.execute("SELECT holder, expires_at FROM distributed_locks "
+                          "WHERE lock_key=?", (LEASE_KEY,)).fetchone()
+  ```
+  兜底分支的 SQL 正是本处跨域引用；lib 分支只走 `%s` 方言白名单。
+- **设计取舍**：
+  1. **复用既有具名查询而不是新登记**：`_ANY_QUERIES["lock_row"]`
+     = `SELECT holder, expires_at FROM distributed_locks WHERE lock_key=?`，与兜底句
+     **列序/谓词逐字一致**（同一把锁的 6 条协议语句里已有一份，再登记会形成两份同义 SQL）。
+     新加薄函数 `lock_lease_status_any(lock_key)` 只做 `read_one_any("lock_row", ...)`，
+     体内零字面 SQL。
+  2. **一条路径取代双路径**：`_any_cursor` 本身就是「自有 DSN → runtime 库；单库/测试 →
+     进程主库 + owner 域 `db_lock`」，即原两条分支的合并形态。调用方不再判断 lib 可用性，
+     也不再自持 `db_lock`/游标。
+  3. **不按 expiry 过滤**：原句只有 `lock_key` 谓词，排查入口需要看到「已过期但尚未被
+     清理/接管」的行；本批刻意不加 `AND expires_at > ?`（那会把运维最想看到的失联残留
+     抹成 `None`）。烟测以 `expires_at=now-140` 的行反证。
+  4. **降级口径不变**：异常 → `None`，但改为 `log.debug` 留痕（原为裸 `except: return None`）。
+  5. 之所以没顺手删掉旧的 `%s` 白名单项 `distributed_locks_4e8732`：它已无主树调用点，
+     但仍是 `_READ_QUERIES` 的登记面（外部 workspace 快照/测试对登记面无硬断言），
+     留待 `_READ_QUERIES` 整表退役那一批统一清，避免本批扩散面。
+- **修的存量 bug**（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  **全三库拓扑下「采样租约状态」恒返回 `None`** —— lib 分支写成
+  `lib.read_one(...).fetchone()`，而 `runtime_public.read_one()` 自身已经 `fetchone()`
+  并返回**元组**，对元组再调 `.fetchone()` 必抛 `AttributeError`（无行时是 `NoneType`），
+  被最后的 `except Exception: return None` 吞掉。后果：`/api/insight/observability` 的
+  租约排查口、以及所有依赖 `lease_status()` 判断「本轮是否由我采样」的排障路径，在
+  真正独立拓扑下永远显示「无锁」——恰好是最需要看它的环境。单库/测试拓扑走兜底分支
+  所以一直是绿的。归位后两种拓扑同一份 SQL、同一条返回路径；烟测 D 段以
+  `read_one` 返回元组、无 `fetchone` 方法反证该链必断。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/runtime/public/__init__.py` / `src/domains/insight/observability/sample_lease.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/sample_lease_smoke.py`
+    （`DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=~/burndown/sample_lease.db`，连跑 2 次稳定）
+    → **ALL sample_lease smoke PASSED (75 checks)**：
+    A 29 项注册面/静态否定（`lock_row` 逐字 `?`、列序 `holder, expires_at`、无
+    `NOW()`/反引号/`%s`/`ON DUPLICATE`/`EXPIRES_AT <`、薄函数体内零字面 SQL 且只调
+    `read_one_any`、调用点无 `FROM distributed_locks` SQL / 无 `session_manager` /
+    无自管游标锁 / 无 `%s`、返回字段与 `int` 收敛保留、降级分支带 `log.debug`、
+    `LEASE_KEY` 与 `LEASE_TTL_SEC` 常量未动）；
+    B 10 项原语语义（无锁 → `None`、别的 `lock_key` 不串、正常持有返回
+    `(holder, expires_at)`、**过期未接管照样返回**、`expires_at=0` → 0、大整数不转 float、
+    空 holder 如实返回）；
+    C 16 项调用点端到端（真 sqlite：`acquire → status → renew → release` 全链，holder 与
+    kernel 进程标识一致、`expires_at≈now+60`、续期后 expires_at 前移且 holder 不变、
+    释放只删自己那把锁（另一把 key 仍在）、**DROP 锁表 → status None + acquire/renew False
+    的 fail-safe 降级**、重建后幂等恢复）；
+    D 15 项拓扑判据（自有 DSN → 只连 `domain=runtime`、语句与参数 `(LEASE_KEY,)` 逐字、
+    调用点也不取进程库锁；无自有 DSN → 回落进程主库、取本域 `db_lock` **一次**、读真值；
+    运行时异常 → 降级 `None`；未知具名查询抛 `KeyError` 不吞；旧 `.fetchone()` 链反证）；
+    E 5 项棘轮余量（`cross_domain_refs=12` / `pairs=7` / `tables=7`、`distributed_locks`
+    已不在榜单）；
+  · `--update-baseline` → **baseline updated: 7 pairs, 12 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **7 表 / 12 跨域引用 / 7 对**
+    （`sql_references` 506 → 496 的差值是「该表 9 处同域引用不再进入跨域榜单」，非语句删除）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `venv/bin/python -m pytest tests/arch tests/contracts tests/scripts -q -p no:cacheprovider`
+    → **158 passed**（EXIT=0）；
+  · `make lint` → **import OK**（EXIT=0）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD` / `REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新响应字段）。
+- **新基线**：**12 处 / 7 对 / 7 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  余下 12 处分两族：⛔ `prompt_builder.py` ×3（文案，不改数字）、⛔ `credential_usage_log.py` ×3
+  （后台线程连接池化，独立一轮），其余 6 处是 `src/api` 单点（`a2a_dispatch` / `event_archive` /
+  `merge_gate` / `middleware` / `pipeline_executor` 各 1 + `contracts/local/mgmt_local.py` 1）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
