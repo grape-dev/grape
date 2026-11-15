@@ -4859,7 +4859,7 @@
         "tags": [
           "skills"
         ],
-        "summary": "Update skill by uploading a new ZIP (Issue #561)",
+        "summary": "Replace a skill package with a new ZIP (Issue #561)",
         "description": "Overwrites an existing skill's content by uploading a new ZIP. Keeps skill id/scope/owner/scene refs/likes, refreshes content_hash and invalidates both cache levels. official skills cannot be updated; user scope requires ownership; repo scope requires the caller to manage the repo.",
         "operationId": "skills_update",
         "parameters": [
@@ -11439,7 +11439,7 @@
           "git-repo"
         ],
         "summary": "Merge pull request",
-        "description": "Merges a pull request; returns {merged, sha}. Optional body: merge_method (merge/squash/rebase, default merge) and title (custom merge commit title), passed through to the provider merge endpoint. Upstream failures (e.g. 405 not mergeable) return the upstream status code with the full error message. WARNING (live-fire evidence 2026-11-13): an empty body is a REAL merge — GitCode PUT /pulls/{n}/merge with no fields merged the PR with upstream defaults ({merged: true}); there is no dry-run on this endpoint.",
+        "description": "Merges a pull request; returns {merged, sha}. Optional body: merge_method (merge/squash/rebase, default merge) and title (custom merge commit title), passed through to the provider merge endpoint. Upstream failures (e.g. 405 not mergeable) return the upstream status code with the full error message. Issue #2492: merge_method=rebase failures are classified — a rebase conflict returns a Chinese structured detail (reason=rebase_conflict, conflict_commits, suggestion, upstream_message) and any other rebase failure returns a Chinese fallback hint (reason=rebase_failed), both keeping the upstream status code and the raw message in detail.upstream_message; merge/squash failures keep the upstream message untouched. WARNING (live-fire evidence 2026-11-13): an empty body is a REAL merge — GitCode PUT /pulls/{n}/merge with no fields merged the PR with upstream defaults ({merged: true}); there is no dry-run on this endpoint.",
         "operationId": "gitrepo_pulls_merge",
         "parameters": [
           {

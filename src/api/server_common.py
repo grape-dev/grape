@@ -368,7 +368,22 @@ def _attach_request_log(app: FastAPI) -> None:
 
 
 def init_process_db() -> None:
-    """Idempotent DB bootstrap shared by every Grape process（从 legacy main.py 迁移）。"""
+    """Idempotent DB bootstrap shared by every Grape process（从 legacy main.py 迁移）。
+
+    三库独立模式（GRAPE_DOMAIN_LIB=1）下跳过：该模式的 schema 由 provisioning 负责
+    （rds_p4_provision 建好三库全部基表），进程启动时不该再跑全量建表/迁移——
+    每个进程主库只是本域库，跑全量迁移必然撞「别的域的表不在这里」。
+    """
+    import os as _os
+    if _os.environ.get("GRAPE_DOMAIN_LIB") == "1":
+        from src.kernel.config import log as _log
+        _log.info("three-database mode: skip full bootstrap (schema provisioned by P4)")
+        try:
+            from src.kernel.config import _load_accounts
+            _load_accounts()
+        except Exception as _e:  # 非 mgmt 进程没有账号表，属正常
+            _log.debug(f"three-database mode: account cache skipped: {_e}")
+        return
     from src.api.db_setup import init_database
     init_database()
     from src.kernel.config import _load_accounts
