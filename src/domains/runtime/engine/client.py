@@ -4,7 +4,7 @@
 终态回调（complete/fail）带指数退避（4s→8s→…→64s），仅 5xx/408/429 重试。
 runtime_gone（404）→ 清理本地 → 幂等重注册。
 """
-import asyncio, json, logging, time
+import asyncio, json, logging, os, time
 
 log = logging.getLogger("devops-bot")
 
@@ -41,7 +41,16 @@ NON_BATCH_4XX_STATUSES = (401, 404, 408, 429)
 
 
 class RuntimeClient:
-    def __init__(self, server: str, token: str, max_connections: int = 10, timeout: float = 30.0):
+    def __init__(self, server: str, token: str, max_connections: int | None = None,
+                 timeout: float = 30.0):
+        # 池子默认 10 太窄：长任务一次批量上报几百条消息就会占满，心跳、claim、tags
+        # 全部排队到 sock_read 超时 → 引擎被判失联（2026-11-15 h116-grape 实测，
+        # 同机的 orgtest 因为没有长任务所以正常）。默认放宽到 30，env 可调。
+        if max_connections is None:
+            try:
+                max_connections = int(os.environ.get("RUNTIME_CLIENT_MAX_CONNECTIONS", "30"))
+            except ValueError:
+                max_connections = 30
         self.base = server.rstrip("/")
         self.token = token
         self._timeout_secs = timeout
@@ -83,7 +92,7 @@ class RuntimeClient:
         self._session = None
 
     async def _request(self, method: str, path: str, body=None, retries: int = 4,
-                       error_sink: dict | None = None) -> dict | None:
+                       error_sink: dict | None = None, session=None) -> dict | None:
         """HTTP 请求 + 指数退避。404 且含 runtime → RuntimeGone。返回 JSON 或 None。
 
         401 鉴权失败（凭据被吊销/revoke）抛 CredentialRevokedError——调用方感知后
@@ -109,10 +118,14 @@ class RuntimeClient:
         delay = 4
         attempt = 0
         while True:
-            await self._ensure_session()
+            if session is not None:
+                _sess = session          # 心跳等专用会话，不参与共享池排队
+            else:
+                await self._ensure_session()
+                _sess = self._session
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                async with self._session.request(method, self.base + path, json=body, headers=headers) as resp:
+                async with _sess.request(method, self.base + path, json=body, headers=headers) as resp:
                     if resp.status in (408, 429) or resp.status >= 500:
                         raise RetryableError(f"http {resp.status}")
                     if resp.status == 404 and "runtime" in path:
@@ -182,6 +195,23 @@ class RuntimeClient:
         data = await self._request("GET", "/api/runtime/install/latest", retries=1)
         return (data or {}).get("version", "")
 
+    async def _heartbeat_session(self):
+        """心跳专用会话：与任务上报的连接池隔离。
+
+        心跳被 messages 上报挤掉是「引擎经常失联」的直接成因：一个跑了很久的任务
+        持续批量上报，占满共享池 → 心跳排队 → 连续失败三次 → 服务端判 offline。
+        心跳只需要一条连接，单独开会话最省事也最稳。
+        """
+        import aiohttp
+        if getattr(self, "_hb_session", None) is None or self._hb_session.closed:
+            self._hb_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=2, force_close=False,
+                                               enable_cleanup_closed=True,
+                                               keepalive_timeout=30, ssl=False),
+                timeout=aiohttp.ClientTimeout(total=self._timeout_secs, connect=10, sock_read=30),
+            )
+        return self._hb_session
+
     async def heartbeat(self, runtime_ids: list[int], log_lines: list = None, metrics: dict = None, probe_results: dict = None) -> dict | None:
         """发送心跳。返回完整响应 dict（含 cancelled_tasks）或 None（网络错误/服务端不可达）。
 
@@ -200,7 +230,9 @@ class RuntimeClient:
             payload.update(metrics)
         if probe_results:
             payload["probe_results"] = probe_results
-        result = await self._request("POST", "/api/runtime/heartbeat", payload, retries=2)
+        _hb = await self._heartbeat_session()
+        result = await self._request("POST", "/api/runtime/heartbeat", payload, retries=2,
+                                     session=_hb)
         return result
 
     async def claim(self, runtime_id: int, supports_obs_url: bool = False,
@@ -376,3 +408,6 @@ class RuntimeClient:
             await self._session.close()
         if self._connector:
             await self._connector.close()
+        _hb = getattr(self, "_hb_session", None)
+        if _hb is not None and not _hb.closed:
+            await _hb.close()

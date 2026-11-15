@@ -5,7 +5,7 @@ M3：/api/runtime/* 协议端点（register/heartbeat/claim/report），仅 rta_
 见 agent-runtime-event-full-design.md §6 / tech-impl.md §3。
 """
 
-import hashlib, json, os, threading
+import contextlib, hashlib, json, os, threading
 
 from datetime import datetime, timedelta, timezone
 
@@ -32,6 +32,33 @@ from src.domains.runtime.engine.health import apply_runtime_state, parse_dt  # I
 # 环境故障长期不恢复）后心跳降级 healthy=0 并在 probe_error 附修复指引；
 # ok/fail/model_unreachable 清零（进程能 spawn 即链断）。env 可调。
 _PROBE_SPAWN_FAIL_TRIP = max(1, int(os.environ.get("RUNTIME_PROBE_SPAWN_FAIL_TRIP", "50")))
+
+from src.kernel import db_registry as _dbreg
+
+
+@contextlib.contextmanager
+def _runtime_cursor():
+    """runtime 域独立连接（三库拓扑）；单库/测试拓扑回落进程主库 + db_lock。
+
+    agent 的高频端点（心跳、标签、认领）不能挂在进程级 db_lock 上：sweeper 持锁做
+    整表扫描时，这些请求全部排队到客户端 sock_read 超时，表现为「引擎经常失联」
+    （心跳连续失败三次即 offline），而不是“服务变慢”。实测 2026-11-15：
+    h116-grape / orgtest 两个凭据的四个引擎心跳长期停在 137s。
+    """
+    if _dbreg.uses_own_dsn("runtime"):
+        # 必须是**独立连接**：db_registry.cursor() 在同域时复用 session_manager.db
+        # 这个进程主连接，等于仍然和持锁代码抢同一个 socket，改造形同虚设。
+        conn = _dbreg.new_connection("runtime", autocommit=True)
+        try:
+            yield conn.cursor()
+        finally:
+            try:
+                conn.close()
+            except Exception as _ce:
+                log.debug(f"runtime 独立连接关闭失败: {_ce}")
+        return
+    with db_lock:
+        yield db.cursor()
 
 def _register_healthy_guard(c, rid: int, reported: bool) -> int:
     """Issue #700：register 降级守卫——已 healthy 且探活新鲜的行不被瞬时探测打回 0。
@@ -492,8 +519,7 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
     now = datetime.now(timezone.utc).isoformat()
     client_ip = _client_ip(request)
     cancelled_tasks = []
-    with db_lock:
-        c = db.cursor()
+    with _runtime_cursor() as c:
         # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
         if body.spec:
             c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?, spec=? WHERE id=?",
@@ -645,7 +671,10 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                                   (_actual, _rid))
             except Exception as _bre:
                 log.warning(f"heartbeat busy_slots reconcile failed: {_bre}")
-        db.commit()
+        try:
+            c.connection.commit()
+        except Exception:
+            db.commit()
 
     # 写入 worker 上报的日志到 data/logs/workers/{credential_id}.log
     if body.log_lines:
@@ -933,8 +962,7 @@ def runtime_claim_by_tag(runtime_id: int, tag: str,
     scan_request = False
     if not task:
         try:
-            with db_lock:
-                c = db.cursor()
+            with _runtime_cursor() as c:
                 c.execute("SELECT pending_skill_scan FROM agent_runtimes WHERE id=? AND credential_id=?",
                           (runtime_id, credential_id))
                 _row = c.fetchone()

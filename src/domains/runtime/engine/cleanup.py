@@ -73,8 +73,14 @@ def _sweep_cursor():
     连续 7 次 504，最后只能被 sweeper 判失败）。独立连接把两条路径彻底解耦。
     """
     if db_registry.uses_own_dsn("runtime"):
-        with db_registry.cursor("runtime") as c:
-            yield c
+        conn = db_registry.new_connection("runtime", autocommit=True)
+        try:
+            yield conn.cursor()
+        finally:
+            try:
+                conn.close()
+            except Exception as _ce:
+                log.debug(f"sweeper 独立连接关闭失败: {_ce}")
         return
     with db_lock:
         yield db.cursor()
