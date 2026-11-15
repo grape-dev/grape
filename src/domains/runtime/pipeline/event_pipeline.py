@@ -2706,10 +2706,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     result["skipped"] = "duplicate_active_task"
                     return result
                 # ② 近窗去重：同 (repo,issue,agent) 且同 event_type 60s 内已存在（含已终态）→ 跳过
+                # 窗口下界必须与 created_at 同源：events.created_at 由写入侧用**本地时间**
+                # strftime 落库，而 _utc_now_str 返回 UTC —— UTC+8 下两者差 8 小时，字符串比较
+                # 恒成立，60s 窗口实际变成 8 小时，同 issue 的任何重复触发/重派都被判「最近」而
+                # 静默跳过（事件 #71/#74 重放全部 duplicate_recent_window 的根因）。
+                from datetime import datetime as _dt_local, timedelta as _td_local
+                _window_floor = (_dt_local.now() + _td_local(seconds=-60)).strftime("%Y-%m-%d %H:%M:%S")
                 _dc.execute(
                     "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
                     "AND event_type=? AND created_at >= ? ORDER BY seq DESC LIMIT 1",
-                    (repo_key, issue_id or "#0", agent_type, event_type, _utc_now_str(-60)))
+                    (repo_key, issue_id or "#0", agent_type, event_type, _window_floor))
                 if _dc.fetchone():
                     log.info(f"Pipeline: dedup skip — recent {event_type} event within 60s "
                              f"for (issue,agent)=({issue_id},{agent_type})")
