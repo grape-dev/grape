@@ -112,13 +112,28 @@ def lib_enabled() -> bool:
     return any(dsn_of(d) for d in ("mgmt", "runtime", "insight"))
 
 
-# 每个角色「应该」连哪个库。启动自检用这张表，写错/漏配就在这里当场失败。
-ROLE_DB_EXPECTATION = {
-    "mgmt": "grape_stage_mgmt",
-    "event": "grape_stage_runtime",
-    "worker": "grape_stage_runtime",
-    "insight": "grape_stage_insight",
+# 每个角色归属哪个域 —— 期望库名不写死，而是从该域的 DSN 里取，
+# 这样换部署（库名不同）不用改代码，也不会把内部库名硬编码进公开仓库。
+ROLE_DOMAIN = {
+    "mgmt": "mgmt",
+    "event": "runtime",
+    "worker": "runtime",
+    "insight": "insight",
 }
+
+
+def expected_db_name(role: str) -> str:
+    """本角色应当连的库名：取自该域 DSN 的 path。没有 DSN（单库模式）时返回空串。"""
+    domain = ROLE_DOMAIN.get((role or "").strip().lower())
+    if not domain:
+        return ""
+    dsn = dsn_of(domain)
+    if not dsn:
+        return ""
+    try:
+        return (parse_dsn(dsn).get("database") or "").strip()
+    except Exception:
+        return ""
 
 
 def describe_connection() -> dict:
@@ -142,8 +157,9 @@ def assert_role_database(role: str) -> None:
     症状出现在远端机器上，现场只能靠翻 /proc/<pid>/environ 才看得出，
     2026-11-15 为此花了几个小时。
     """
-    expect = ROLE_DB_EXPECTATION.get((role or "").strip().lower())
+    expect = expected_db_name(role)
     if not expect:
+        # 单库模式（没有 DSN）：无从校验，保留原行为
         return
     actual = os.environ.get("DEVOPS_DB_NAME", "").strip()
     if not actual:

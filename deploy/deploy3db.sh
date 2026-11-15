@@ -199,7 +199,7 @@ fi
 # agent 执行进程必须来自本部署目录：旧代码目录残留的 agent 会抢到任务、却跑旧逻辑
 # （不建引擎会话、零消息），事件层随后判 failed —— 2026-11-15 在 116 上复现过。
 for pid in $(pgrep -f "python.*-m src.domains.runtime.engine.agent" 2>/dev/null); do
-  # 判据用 working directory 而不是解释器路径：venv 允许复用（orgtest 就是复用旧 venv
+  # 判据用 working directory 而不是解释器路径：venv 允许复用（非默认租户就是复用旧 venv
   # 跑新代码），真正决定跑哪份代码的是进程的 cwd。
   _cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
   _argv0=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | head -1)
