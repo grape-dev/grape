@@ -55,11 +55,9 @@ _MANAGED_REPOS_LEGACY_COLUMNS = (
 def _add_column_if_missing(table: str, col: str, ddl: str) -> None:
     """幂等补列原语（SQLite；ALTER 失败=列已存在=pass）。
 
-    启动路径不能无限期卡在 MySQL 的 metadata lock 上：本机 insight/worker 与远端实例
-    共用同一个库时，对方一条长事务就能让 `ALTER TABLE` 挂住（实测 2026-11-15：
-    insight 启动停在 `_add_column_if_missing`，进程不监听端口、日志也不再前进）。
-    这里把会话级 `lock_wait_timeout` 压到 10s，拿不到锁就当作「列已存在」跳过，
-    下次启动会重试（幂等）。
+    MySQL 下 ALTER 需要 metadata lock：远端实例上只要有一条长事务压着同表，这里就会在
+    服务端无限期等待（实测 2026-11-15：insight 启动卡在这一行，进程连监听端口都没开）。
+    会话级 `lock_wait_timeout` 压到 5s，拿不到锁就当作「列已存在」跳过，下次启动重试。
     """
     try:
         from src.kernel.session_manager import _is_mysql_backend as _is_mysql
@@ -70,7 +68,7 @@ def _add_column_if_missing(table: str, col: str, ddl: str) -> None:
                 pass
         db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
     except Exception as _e:
-        # 1205 = lock wait timeout：同表后续列一定同样被挡，交给上层 break
+        # 1205 = lock wait timeout：同表后续列也一定被挡，交给上层 break
         if "1205" in str(_e):
             raise
 
@@ -79,25 +77,28 @@ def add_legacy_columns() -> None:
     """存量库幂等补列（user_accounts / managed_repos / login_whitelist 列族）。
 
     新库由 CREATE TABLE DDL 直接带全，此处零命中；存量库补齐后同样零命中。
+
+    三库拓扑：这三张都归 mgmt，非 owner 进程（runtime/insight）跑这些 ALTER 既没意义，
+    又会在远端库上等 metadata lock 卡死启动；按归属直接跳过。
     下线判据：生产无存量库依赖本路径后整段删除。
     """
-    for col, ddl in _USER_ACCOUNTS_LEGACY_COLUMNS:
-        try:
-            _add_column_if_missing("user_accounts", col, ddl)
-        except Exception:
-            log.warning("user_accounts 补列跳过（metadata lock 等锁超时），下次启动重试")
-            break
-    for col, ddl in _MANAGED_REPOS_LEGACY_COLUMNS:
-        try:
-            _add_column_if_missing("managed_repos", col, ddl)
-        except Exception:
-            log.warning("managed_repos 补列跳过（metadata lock 等锁超时），下次启动重试")
-            break
-    # login_whitelist.github_username（幂等，与上面同族）
-    try:
-        _add_column_if_missing("login_whitelist", "github_username", "TEXT DEFAULT ''")
-    except Exception:
-        log.warning("login_whitelist 补列跳过（metadata lock 等锁超时），下次启动重试")
+    from src.kernel import table_ownership as _own_tbl
+
+    plans = (
+        ("user_accounts", _USER_ACCOUNTS_LEGACY_COLUMNS),
+        ("managed_repos", _MANAGED_REPOS_LEGACY_COLUMNS),
+        ("login_whitelist", (("github_username", "TEXT DEFAULT ''"),)),   # 与上面同族
+    )
+    for table, cols in plans:
+        if _own_tbl.should_skip(table):
+            log.info(f"[DDL_SKIP] `{table}` 补列: owner={_own_tbl.owner_of(table)}，非本域进程跳过")
+            continue
+        for col, ddl in cols:
+            try:
+                _add_column_if_missing(table, col, ddl)
+            except Exception:
+                log.warning(f"{table} 补列跳过（等 metadata lock 超时），下次启动重试")
+                break
 
 
 def remap_orphan_user_ids() -> None:
