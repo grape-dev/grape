@@ -28,9 +28,18 @@ def test_key_owners():
     assert own.owner_of("skill") == "runtime"
     assert own.owner_of("devops_pipeline_scene") == "mgmt"
     assert own.owner_of("obs_log") == "insight"
-    # 11 张多份表已裁决给 runtime
-    for t in ("branch_guard_state", "takeover_sessions", "grape_t_channel_lease",
+    # 多份表的裁决以 docs/weekly-11/table-owner.tsv（P0 冻结）为准
+    for t in ("branch_guard_state", "takeover_sessions",
               "grape_t_credential_usage_log", "grape_t_system_credentials"):
+        assert own.owner_of(t) == "runtime", f"{t} 应归 runtime"
+    # 渠道族：SQL 落在 mgmt public（runtime 仅转发），归属 mgmt（2026-11-15 对齐）
+    for t in ("grape_t_channel_lease", "grape_t_channel_installation",
+              "grape_t_channel_inbound_dedup", "event_action_filter",
+              "event_route_config", "pipeline_instances"):
+        assert own.owner_of(t) == "mgmt", f"{t} 应归 mgmt"
+    for t in ("grape_t_repo_credentials", "grape_t_merge_gate_log"):
+        assert own.owner_of(t) == "insight", f"{t} 应归 insight"
+    for t in ("meta", "scene_category"):
         assert own.owner_of(t) == "runtime", f"{t} 应归 runtime"
 
 

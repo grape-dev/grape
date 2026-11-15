@@ -39,6 +39,14 @@ _REF_RE = re.compile(
     r"`?([A-Za-z_][\w$]*)`?",
     re.I,
 )
+# DDL 是「建表/改表/删表/改名」，不是跨域数据访问：由 table_ownership 的 DDL 守卫单独治理。
+# 不剔除会把 ALTER TABLE tasks RENAME TO issue 之类的迁移语句计成业务引用
+# （2026-11-15：legacy rename 让 tasks←api 多出 4 处假引用）。
+_DDL_RE = re.compile(
+    r"\b(?:CREATE|ALTER|DROP|RENAME)\s+(?:TEMPORARY\s+)?TABLE\s+"
+    r"(?:IF\s+(?:NOT\s+)?EXISTS\s+)?`?[A-Za-z_][\w$]*`?",
+    re.I,
+)
 _SCHEMA_TO_DOMAIN = {
     "grape_mgmt_db": "mgmt",
     "grape_runtime_db": "runtime",
@@ -93,7 +101,7 @@ def scan(src: Path, owner: dict[str, str]) -> list[dict]:
         rel = path.relative_to(src)
         dom = domain_of(rel)
         found = collections.Counter()
-        for name in _REF_RE.findall(text):
+        for name in _REF_RE.findall(_DDL_RE.sub(" ", text)):
             if name in known:
                 found[name] += 1
         for table, n in found.items():
