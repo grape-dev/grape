@@ -31,6 +31,67 @@ export DEVOPS_DB_PASSWORD="${GRAPE_DOMAIN_DB_PASSWORD:-Grape@123}"
 PY="$REPO_ROOT/venv/bin/python"
 [ -x "$PY" ] || { echo "missing venv python: $PY" >&2; exit 3; }
 
+# ── 三库独立模式（deploy/deploy3db.sh 的 systemd 等价路径）────────────────────
+# GRAPE_3DB_ENV 指向三库 DSN 文件（如 /etc/grape/grape-3db.env，内含
+# GRAPE_DSN_MGMT / GRAPE_DSN_RUNTIME / GRAPE_DSN_INSIGHT 三行）。设置后：
+#   1) source 该文件（DSN 只在这里读，不写进 .env）；
+#   2) GRAPE_DOMAIN_LIB=1 打开跨域连接（owner 域 lib）；
+#   3) 把本角色 owner 域的 DSN 拆成 DEVOPS_DB_*，让进程主库 = 本域库。
+# 未设置时保持原行为（按角色连 grape_<domain>_db，单库多库但不启 lib）。
+_3db_env="${GRAPE_3DB_ENV:-}"
+if [ -n "$_3db_env" ]; then
+    [ -r "$_3db_env" ] || { echo "GRAPE_3DB_ENV 不可读: $_3db_env" >&2; exit 4; }
+    # shellcheck disable=SC1090
+    set -a; . "$_3db_env"; set +a
+    export GRAPE_DOMAIN_LIB="${GRAPE_DOMAIN_LIB:-1}"
+    case "$role" in
+        mgmt)         _dsn="${GRAPE_DSN_MGMT:-}" ;;
+        event|worker) _dsn="${GRAPE_DSN_RUNTIME:-}" ;;
+        insight)      _dsn="${GRAPE_DSN_INSIGHT:-}" ;;
+    esac
+    if [ -z "$_dsn" ]; then
+        echo "三库模式缺少本角色 DSN（role=$role，检查 $_3db_env 的 GRAPE_DSN_*）" >&2
+        exit 5
+    fi
+    # 用 urlparse 拆 DSN：密码里含 @ : / 也不会拆错（deploy3db.sh 的 bash 切分在那种
+    # 情况下会把 host 拆坏）。
+    eval "$("$PY" - "$_dsn" <<'PYEOF'
+import shlex
+import sys
+from urllib.parse import unquote, urlparse
+
+u = urlparse(sys.argv[1])
+print("export DEVOPS_DB_HOST=%s" % shlex.quote(u.hostname or "127.0.0.1"))
+print("export DEVOPS_DB_PORT=%s" % shlex.quote(str(u.port or 3306)))
+print("export DEVOPS_DB_USER=%s" % shlex.quote(unquote(u.username or "")))
+print("export DEVOPS_DB_PASSWORD=%s" % shlex.quote(unquote(u.password or "")))
+print("export DEVOPS_DB_NAME=%s" % shlex.quote((u.path or "/").lstrip("/").split("?")[0]))
+PYEOF
+)"
+else
+    # 领域库拆分（2026-11）：每个进程连自己的库。
+    # 注意：systemd 的 EnvironmentFile=.env 在 Environment= 之后加载，会覆盖 drop-in 里写的
+    # DEVOPS_DB_*，所以领域库的用户/库名必须在这里按角色 export（脚本 export 晚于 .env 注入）。
+    case "$role" in
+        mgmt)         _db_name="grape_mgmt_db";    _db_user="grape_mgmt" ;;
+        event|worker) _db_name="grape_runtime_db"; _db_user="grape_runtime" ;;
+        insight)      _db_name="grape_insight_db"; _db_user="grape_insight" ;;
+    esac
+    export DEVOPS_DB_NAME="$_db_name"
+    export DEVOPS_DB_USER="$_db_user"
+    export DEVOPS_DB_PASSWORD="${GRAPE_DOMAIN_DB_PASSWORD:-Grape@123}"
+fi
+
+# GSB 注册地址必须是其它节点可达的地址：留空时客户端回落 127.0.0.1，
+# 跨节点 round_robin 会全部打回本机（registry 里 base_url=http://127.0.0.1:3808x）。
+# 优先用 drop-in 里的显式值，否则取本机首个私网地址。
+if [ -z "${GRAPE_GSB_BASE_URL:-}" ]; then
+    _ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    if [ -n "${_ip:-}" ]; then
+        export GRAPE_GSB_BASE_URL="http://${_ip}:${port}"
+    fi
+fi
+
 # 配置由 systemd EnvironmentFile=.env 注入；这里只补 metrics/tracing 的运行期变量，
 # 不写 .env（避免影响 restart-four-process.sh 等其它启动方式）。
 export METRICS_ADDR="127.0.0.1:${mport}"
