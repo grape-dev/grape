@@ -187,6 +187,21 @@ def uses_own_dsn(domain: str) -> bool:
     return bool(lib_enabled() and dsn_of(domain) and domain_db(domain) is not None)
 
 
+def new_connection(domain: str, autocommit: bool = True):
+    """新建一条独立的域连接（不走共享缓存）。
+
+    为什么需要：`domain_db()` 返回的是进程级共享连接，pymysql 连接绑定创建它的线程，
+    在「进程域 ≠ 表所属域」的跨域路由里被工作线程复用会抛 InterfaceError(0, '')。
+    这类调用点应每次取自己的连接，用完即关。
+    """
+    domain = (domain or "").lower()
+    if domain not in _VALID:
+        raise ValueError(f"unknown domain: {domain}")
+    if not (lib_enabled() and dsn_of(domain)):
+        raise RuntimeError(f"domain '{domain}' 无自有 DSN")
+    return _new_conn(domain, autocommit=autocommit)
+
+
 def connection_for(domain: str):
     """返回 (conn, qualifier)。
 

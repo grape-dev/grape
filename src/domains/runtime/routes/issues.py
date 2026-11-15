@@ -26,6 +26,70 @@ from src.api.deps import get_current_user_or_api_key, require_no_session_token, 
 
 from src.kernel.config import log
 
+
+class _OwnedCursor:
+    """自带连接的游标：close 时把连接一并关掉（每次查询独立建连的收尾）。"""
+
+    def __init__(self, conn, cursor):
+        self._conn = conn
+        self._cur = cursor
+
+    def __getattr__(self, item):
+        return getattr(self._cur, item)
+
+    def close(self):
+        try:
+            self._cur.close()
+        finally:
+            try:
+                self._conn.close()
+            except Exception as _e:
+                log.debug(f"cursor close failed: {_e}")
+
+
+class _DomainDbProxy:
+    """把 `db.cursor()` / `db.commit()` 代理到 runtime 域连接。
+
+    需求中心的 issue / issue_state / events / agent_tasks 都在 runtime 域，但该路由由
+    mgmt 进程服务。三库模式下 mgmt 进程的主库是本域库，直连进程库会撞「表不存在」；
+    这里按域取连接（own DSN 优先，单库回落进程库），写路径仍应走 runtime public 原语。
+    """
+
+    def cursor(self, *a, **kw):
+        from src.kernel import db_registry
+        if db_registry.uses_own_dsn("runtime"):
+            # 每次取一条独立连接：共享连接绑线程，跨线程复用会 InterfaceError(0, '')
+            _conn = db_registry.new_connection("runtime")
+            return _OwnedCursor(_conn, _conn.cursor(*a, **kw))
+        from src.kernel.session_manager import db as _main
+        return _main.cursor(*a, **kw)
+
+    def commit(self):
+        from src.kernel import db_registry
+        if db_registry.uses_own_dsn("runtime"):
+            return None                      # owner 连接 autocommit，无需显式提交
+        from src.kernel.session_manager import db as _main
+        return _main.commit()
+
+    def rollback(self):
+        from src.kernel import db_registry
+        if db_registry.uses_own_dsn("runtime"):
+            try:
+                db_registry.domain_db("runtime").rollback()
+            except Exception as _e:
+                log.debug(f"cursor close failed: {_e}")
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.rollback()
+
+    def __getattr__(self, item):
+        from src.kernel.session_manager import db as _main
+        return getattr(_main, item)
+
+
+_rt_db = _DomainDbProxy()
+
+
 from src.api.time_utils import normalize_event_time
 
 from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
@@ -67,7 +131,7 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
     items = []
     placeholders = ",".join("?" * len(repo_keys))
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         try:
             c.execute(
                 f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, result, scene_id "
@@ -196,7 +260,7 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
     # 1. issue 单表（权威）
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             c.execute(
                 f"SELECT id, issue_number, stage, owner_agent, assignee, a2a_seq, scene_id, "
                 f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
@@ -224,7 +288,7 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
         _iid_params = _iids
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             c.execute(
                 f"SELECT issue_id, stage, owner_agent, assignee, a2a_seq, scene_id, "
                 f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
@@ -251,7 +315,7 @@ def _task_status_map(repo_keys: list[str]) -> dict:
     out = {}
     placeholders = ",".join("?" * len(repo_keys))
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         try:
             c.execute(f"SELECT issue_number, status FROM issue WHERE repo_key IN ({placeholders})", repo_keys)
             for r in c.fetchall():
@@ -281,7 +345,7 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
         _num_clause = f" AND issue_id IN ({','.join('?' * len(_iids))})"
         _num_params = _iids
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         try:
             # Issue #1938：补取 result 列（与事件列表/详情/PR 订阅三处调用点同口径），
             # 供 fetch_display_meta 兜底识别存量（#587 时代）补偿记录的历史固定文案。
@@ -582,7 +646,7 @@ async def start_issue(issue_id: int, user: dict = Depends(require_no_session_tok
     """
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT user_id, status FROM issue WHERE id=?", (issue_id,))
         row = c.fetchone()
         if not row:
@@ -597,7 +661,7 @@ def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api
     """返回 Issue 当前状态（含 repo/issue 上下文），供 CLI `grape issues wait` 轮询至终态。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute(
             "SELECT id, status, repo_key, issue_number, title, completed_reason, completed_at "
             "FROM issue WHERE id=?",
@@ -636,7 +700,7 @@ def _write_issue_status(c, issue_id: int, ns: str, revert_to_review: bool) -> No
         )
         if c.rowcount == 0:
             from src.kernel.session_manager import db as _db
-            _db.rollback()
+            __rt_db.rollback()
             raise HTTPException(
                 status_code=409,
                 detail={"code": 409, "message": "需求状态已变更，请刷新后重试"})
@@ -667,7 +731,7 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
     if ns not in _TASK_STATUS_FLOWS:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"非法状态: {ns}"})
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute(
             "SELECT user_id, status, repo_key, issue_number, stage, completed_at, completed_reason "
             "FROM issue WHERE id=?", (issue_id,))
@@ -687,7 +751,7 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
         # 非本人：需先做仓库角色校验（VCS 网络调用），故仅此时出锁鉴权，再带 status 守卫写回。
         if _is_owner:
             _write_issue_status(c, issue_id, ns, _revert_to_review)
-            db.commit()
+            _rt_db.commit()
     _admin_ident = None
     if not _is_owner:
         # 仓库访问 + 真实角色校验（fail-closed：未绑定/查询失败均视为非 admin），
@@ -701,8 +765,8 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
                 "code": 403,
                 "message": "无权操作该需求：仅需求本人或仓库 Owner/Admin 可撤销已完成需求"})
         with db_lock:
-            _write_issue_status(db.cursor(), issue_id, ns, _revert_to_review)
-            db.commit()
+            _write_issue_status(_rt_db.cursor(), issue_id, ns, _revert_to_review)
+            _rt_db.commit()
     if _revert_to_review:
         _actor_role = "admin" if _admin_ident else "owner"
         _actor_name = (_admin_ident or {}).get("username") or user.get("username", "")
@@ -896,7 +960,7 @@ async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict 
     from src.api.session_store import set_issue_stage
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT repo_key, issue_number, status FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
                   (issue_id, user["id"]))
         row = c.fetchone()
@@ -914,7 +978,7 @@ async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict 
             (body.confirmation, issue_id))
         if _issue_num:
             set_issue_stage(_repo_key, f"#{_issue_num}", "done", "user")
-        db.commit()
+        _rt_db.commit()
     log.info(f"Issue #{issue_id} confirmed done by {body.confirmation}")
     _issue_closed = _close_vcs_issues(_repo_key, _issue_num, user)
     return {"ok": True, "issue_id": issue_id, "status": "completed", "stage": "done",
@@ -936,7 +1000,7 @@ def _sync_issue_pipeline_terminal(repo_key: str, issue_id_num) -> int:
         return 0
     _synced = 0
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         try:
             c.execute(
                 "UPDATE agent_tasks SET status='cancelled', completed_at=COALESCE(completed_at, datetime('now')) "
@@ -952,7 +1016,7 @@ def _sync_issue_pipeline_terminal(repo_key: str, issue_id_num) -> int:
                 (repo_key, _issue_id))
         except Exception as _e:
             log.warning(f"admin-confirm: sync events failed: {_e}")
-        db.commit()
+        _rt_db.commit()
     # Issue #1667：admin 终审直接 SQL 把 events 置 completed，绕过了终态钩子；
     # 对账扫描兜底派发因此滞留的排队 A2A 事件（Spec 风险表要求）。
     try:
@@ -984,7 +1048,7 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
 
     # 1) 定位需求（admin 可跨归属确认，仅要求仓库访问权）
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT repo_key, issue_number, status FROM issue WHERE id=?", (issue_id,))
         row = c.fetchone()
     if not row:
@@ -1011,13 +1075,13 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
 
     # 5) 终态落库 + 流水线收敛（同一 db_lock 串行，防并发双写）
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute(
             "UPDATE issue SET status='completed', completed_reason='admin_confirmed', "
             "completed_at=datetime('now') WHERE id=?", (issue_id,))
         if _issue_num:
             set_issue_stage(_repo_key, f"#{_issue_num}", "done", "admin")
-        db.commit()
+        _rt_db.commit()
     _synced_tasks = _sync_issue_pipeline_terminal(_repo_key, _issue_num)
 
     # 6) 审计留痕（操作人/时间/目标需求；log_audit 自带 created_at + operator_id）
@@ -1049,7 +1113,7 @@ async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_to
     """开发者取消需求：任何阶段可取消，Agent 终止 + 流水线停止。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT status, repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
                   (issue_id, user["id"]))
         row = c.fetchone()
@@ -1063,7 +1127,7 @@ async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_to
             if repo_key and issue_number:
                 _cancel_issue_agents(c, repo_key, _issue_id)
                 cancel_issue_rows(c, repo_key, issue_number)
-                db.commit()
+                _rt_db.commit()
             return {"ok": True, "already_cancelled": True}
         if status == 'completed':
             raise HTTPException(status_code=400, detail={"code": 400, "message": "已完成需求不可取消"})
@@ -1076,7 +1140,7 @@ async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_to
             c.execute(
                 "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
                 (issue_id,))
-        db.commit()
+        _rt_db.commit()
     log.info(f"Issue #{issue_id} cancelled by user (agents={_cancelled_agents})")
     return {"ok": True, "issue_id": issue_id, "status": "cancelled", "agents_cancelled": _cancelled_agents}
 
@@ -1086,7 +1150,7 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
     from src.api.session_store import get_issue_stage
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT status, repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
                   (issue_id, user["id"]))
         row = c.fetchone()
@@ -1106,7 +1170,7 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
             c.execute(
                 "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL WHERE id=?",
                 (issue_id,))
-        db.commit()
+        _rt_db.commit()
     _issue_id = f"#{issue_number}" if issue_number else ""
     if _issue_id:
         from src.api.event_store import get_events
@@ -1174,7 +1238,7 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     from src.api.session_store import get_issue_stage, get_issue_scene
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         # 仓库全部视图下，用户可以看到其他人的 Issue
         # 按 id 查出 Issue，再校验用户是否有该仓库的访问权限
         c.execute("SELECT repo_key, issue_number, status FROM issue WHERE id=?",
@@ -1255,7 +1319,7 @@ def _load_issue_repo_scene(issue_id: int) -> tuple[str, int, str]:
     """按 issue.id 取 (repo_key, issue_number, current_scene_id)；不存在 → 404。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT repo_key, issue_number, scene_id FROM issue WHERE id=?", (issue_id,))
         row = c.fetchone()
     if not row:
@@ -1381,7 +1445,7 @@ async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_n
     if agent_task_ids:
         import json as _json
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             placeholders = ",".join("?" * len(agent_task_ids))
             c.execute(
                 f"SELECT task_id, seq, type, tool, content, input_json, created_at "
@@ -1445,7 +1509,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
         raise HTTPException(status_code=403, detail={"code": 403, "message": f"agent_type={session_agent} 不在本接口范围（仅 vod/issue 可声明待澄清）"})
 
     with _dl:
-        c = _db.cursor()
+        c = __rt_db.cursor()
         c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue WHERE id=?",
                   (issue_id,))
         irow = c.fetchone()
@@ -1457,7 +1521,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
             from src.kernel.repo_key import to_repo_key as _trk
             _fb_repo = _trk(session_repo)
             with _dl:
-                c = _db.cursor()
+                c = __rt_db.cursor()
                 c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, scene_id FROM issue "
                           "WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
                           (_fb_repo, _fb_num))
@@ -1471,7 +1535,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                                                title=str((_data or {}).get("title", "") or ""),
                                                event_type="issue_opened")
                     with _dl:
-                        c = _db.cursor()
+                        c = __rt_db.cursor()
                         c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, scene_id FROM issue "
                                   "WHERE id=?", (_fb_id,))
                         irow = c.fetchone()
@@ -1496,12 +1560,12 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
         return {"ok": True, "issue_id": issue_card_id, "status": cur_status, "changed": False}
 
     with _dl:
-        c = _db.cursor()
+        c = __rt_db.cursor()
         c.execute(
             "UPDATE issue SET status='awaiting_input' WHERE id=? AND status IN ('active','processing')",
             (issue_card_id,))
         changed = c.rowcount > 0
-        _db.commit()
+        __rt_db.commit()
     user_id = issue_user_id
 
     conv_id = ""
@@ -1511,9 +1575,9 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                                                 write_context_on_reuse=False)
             if conv_id:
                 with _dl:
-                    c = _db.cursor()
+                    c = __rt_db.cursor()
                     c.execute("UPDATE issue SET conversation_id=? WHERE id=?", (conv_id, issue_card_id))
-                    _db.commit()
+                    __rt_db.commit()
         except Exception as e:
             log.warning(f"Issue awaiting-input: conversation ensure failed: {e}")
 
@@ -1551,7 +1615,7 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
     if not _repo:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 缺少仓库作用域"})
     with _dl:
-        c = _db.cursor()
+        c = __rt_db.cursor()
         c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue WHERE id=?", (issue_id,))
         _r = c.fetchone()
     if not _r:
@@ -1591,9 +1655,9 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                         f"{review_points}" + (f"\n\n参考: {_refs}" if _refs else ""))
                 _add(conv_id, "agent", _msg)
                 with _dl:
-                    c = _db.cursor()
+                    c = __rt_db.cursor()
                     c.execute("UPDATE issue SET conversation_id=? WHERE id=?", (conv_id, it["id"]))
-                    _db.commit()
+                    __rt_db.commit()
         except Exception as e:
             log.warning(f"Issue pending-review: conversation write failed: {e}")
     # 飞书静态卡片触达（同 awaiting）：等用户双态的“待审核”必须主动通知用户
@@ -1753,7 +1817,7 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
     from src.kernel.repo_key import split_owner_repo
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?", (issue_id,))
         row = c.fetchone()
     if not row:
@@ -1781,7 +1845,7 @@ def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_
     from src.kernel.repo_key import split_owner_repo
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?", (issue_id,))
         row = c.fetchone()
     if not row:
@@ -1803,7 +1867,7 @@ def delete_issue_attachment(issue_id: int, filename: str, user: dict = Depends(r
     if not re.match(r'^[0-9a-f]{32}\.\w+$', filename):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "非法文件名"})
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?", (issue_id,))
         row = c.fetchone()
     if not row:
@@ -1991,7 +2055,7 @@ def list_repo_issues(owner: str, repo: str,
         _live = []
         for _k in repo_keys:
             with _lock:
-                _c = _db.cursor()
+                _c = __rt_db.cursor()
                 _c.execute("SELECT 1 FROM issue WHERE repo_key=? LIMIT 1", (_k,))
                 if _c.fetchone():
                     _live.append(_k)
@@ -2059,7 +2123,7 @@ def list_repo_issues(owner: str, repo: str,
         else:
             try:
                 with db_lock:
-                    c = db.cursor()
+                    c = _rt_db.cursor()
                     c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
                     _total = c.fetchone()[0]
             except Exception as e:
@@ -2355,7 +2419,7 @@ def create_production_release_endpoint(issue_id: int, body: _ProductionReleaseBo
     from src.api.issues_center import create_release_subissue, ProductionReleaseError
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT repo_key, issue_number, user_id, status FROM issue WHERE id=? "
                   "AND (user_id=? OR user_id=0)", (issue_id, user["id"]))
         row = c.fetchone()
@@ -2402,7 +2466,7 @@ async def list_production_releases(issue_id: int, user: dict = Depends(require_n
     from src.api.session_store import list_release_subissues
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT repo_key, issue_number, user_id FROM issue WHERE id=? "
                   "AND (user_id=? OR user_id=0)", (issue_id, user["id"]))
         row = c.fetchone()
@@ -2421,7 +2485,7 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     from src.api.session_store import get_issue_stage, get_issue_scene
     from src.kernel.session_manager import db, db_lock
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         # 仓库全部视图下，用户可以看到其他人的 Issue
         # 按 id 查出 Issue，再校验用户是否有该仓库的访问权限
         c.execute("SELECT repo_key, issue_number, status FROM issue WHERE id=?",
@@ -2525,7 +2589,7 @@ def _attach_event_payloads(group_map: dict) -> None:
     import json as _json
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             # SUBSTR 在 sqlite/MySQL 语义一致；多取 1 字符用于判断是否被截断
             # payload 不截断：Issue #996 复审指出先 SUBSTR 再 json.loads 会在
             # >32KB 时解析失败，导致 files/guard_impact 静默丢失；投影后仅保留
