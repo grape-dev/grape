@@ -5394,6 +5394,76 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/domains/runtime/routes/issues.py`（1 处）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
 
+### 7.48 runtime confirm-done 的 GitHub 镜像仓查找下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/runtime/routes/issues.py` **1 处 → 0**（单轮做完，1 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`managed_repos`（归 **mgmt**，`grape_mgmt_db`）× 1：
+  L889（改前）在 `_find_github_mirror_repo_key()`（def 在 L869）里 ——
+  `SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1`，按 `github:<owner>/<repo>`
+  查 GitCode 仓的 GitHub 孪生行，命中回 `repo_key` 原值、无行回空串（confirm-done 关镜像 Issue 用）。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`）：**零新增 SQL**，两侧都已存在且逐字一致 ——
+  - 具名查询 `_ANY_QUERIES["repo_key_row"]`（L1679）= `SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1`；
+    登记注释写明用途就是「issues_center 的镜像仓查找：单键取回原值」。
+  - 薄函数 `repo_key_exists_any(repo_key) -> str`（L3223）：体内零 SQL，走 `read_one_any("repo_key_row")`，
+    `str(row[0] or "")` 归一；已在 `issues_center`（L783）消费。
+- 调用点 `issues.py`：
+  - 删掉 `from src.kernel.session_manager import db, db_lock` + `with db_lock` + `db.cursor()` +
+    `from src.kernel.domain_read import mgmt_lib as ...` 的**双分支**（lib 命中 → `read_one("managed_repos_6f73d4")`，
+    lib 不可用 → 本地兜底 SQL），改成函数内 `from src.domains.mgmt import public as _mgmt_public_mirror` →
+    `_mgmt_public_mirror.repo_key_exists_any(gh_key)`。异常路径原本就是 `log.warning`，保持不变。
+  - docstring 增 3 行写明：**本函数是同名逻辑的遗留副本、全仓无调用点**，保留只为不改历史行为。
+- 设计取舍：
+  1. **复用已登记的 `repo_key_row` / `repo_key_exists_any`，不另造具名查询**：该条本就是为镜像仓查找登记的
+     （`issues_center` 已消费同一句），本批只是把 routes 侧的残留副本也接到同一条原语上——两份实现的语句逐字相同，
+     合并没有口径风险；另建名字只会让同一句 SQL 在 owner 侧出现两个别名。
+  2. **不删这个死函数（本批）**：`grep` 全仓 `src/` + `tests/` 确认 `_find_github_mirror_repo_key` 在
+     `routes/issues.py` 无任何调用点，真路径是 `_close_vcs_issues`（L764）→ `src.api.issues_center._mirror_repo_keys`，
+     `tests/runtime/test_issue_656_auto_finalize.py` 覆盖的也是 issues_center 那条。本轮是「棘轮降数」批，
+     删函数属删除面变更（会影响 `git blame` 定位历史口径），先在 docstring 标注遗留、留待独立清理批。
+  3. **口径一致性用烟测锁住而不是靠注释**：C6 逐键比对 `routes/issues.py` 与 `issues_center.py` 两个同名实现对
+     （命中/未命中/无前缀/空键）的返回值，两边一旦分叉立刻红。
+  4. **不再借 `db_lock`**：`read_one_any` 的 `_any_cursor` 在回落路径自己持有同一把 `RLock`（可重入，原实现属重复加锁）；
+     自有 DSN 拓扑下则直接走 mgmt 连接（autocommit），事务语义不变。
+  5. **空键短路口径等价**：`repo_key_exists_any` 对空键返回空串且不查库；调用点已先 `split_owner_repo` 并判
+     `owner/repo` 非空，`gh_key` 恒为 `github:x/y`，进原语时不可能为空 —— 短路分支不可达，不构成行为差异。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **三库拓扑下镜像仓查找静默退化为「无镜像」**：runtime 进程库没有 `managed_repos`（视图 0 → 1146），
+     兜底句炸掉后被 `log.warning` 记成「find github mirror failed」，上层只看到空串 —— 结论是「这仓没有 GitHub 孪生」，
+     实际是「库不对」。表现为 confirm-done 只关 GitCode、GitHub 镜像 Issue 长期 open，日志线索指向错误方向。
+  2. **同一判定按拓扑分叉两份实现**：lib 可用走 `managed_repos_6f73d4`（`%s` 方言），不可用走本地 `?` 方言 SQL；
+     两条路径的失败表现、参数形态都不同，而正确结果只有一个。接口化后两种拓扑跑同一条 owner 语句。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/runtime/routes/issues.py`）→ **COMPILE_OK**；
+  · `~/burndown/issues_mirror_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建 `managed_repos`，连跑 2 次稳定）→
+    **ALL issues_mirror smoke PASSED (50 checks)**：A 注册面/静态否定（`repo_key_row` 语句逐字、`?` 占位、
+    无 `%s`/`NOW()`/`ON DUPLICATE`/反引号、`__all__` 登记、AST 查薄函数体内无 `execute`/无 `managed_repos` 语句、
+    `read_one_any("repo_key_row")`、调用点无 `managed_repos` 语句/无 `db.cursor`/`db_lock`/`domain_read`/`mgmt_lib`、
+    不再消费 `managed_repos_6f73d4`、无静默 except、owner 侧 `%s` 注册面保留、余量 20、基线 ≥ 20）；
+    B 原语语义（无行 → 空串、空键/None 不查库、命中回原值、gitcode/github 前缀隔离、**大小写不折叠**（原句 `=` 无 LOWER）、
+    数值键 `123` → `'123'`、5 次重复调用稳定、只读不写库）；
+    C 调用点端到端（`gitcode:org/issue656` → `github:org/issue656`、无孪生 → 空串、`org/issue656` 无前缀兼容、
+    `github:` 自身命中、`gitcode:`/空键畸形态 → 空串且不查库、**与 `issues_center` 同名实现逐键同口径**、
+    原语抛异常 → fail-open 空串且 `log.warning` 留痕）；
+    D 自有 DSN 伪游标（只走 `domain=mgmt`、语句逐字、参数 `('github:org/issue656',)`、只执行一次、
+    畸形键在自有 DSN 拓扑下连库都不碰）。
+  · `--update-baseline` → **baseline updated: 14 pairs, 20 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **14 表 / 20 跨域引用 / 14 对**
+    （`managed_repos` 的 runtime 消费方 1 → 0，该表退出跨域对；`sql_references` 1011 → 1010）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （mgmt 187 funcs + 3 named queries used / 270 funcs + 31 queries registered）。
+    named queries used 4 → 3 是因为 `managed_repos_6f73d4` 不再被消费；该 `%s` 条目属 owner 侧跨进程 lib
+    注册面，删除属另一件事（同 7.46 / 7.47 的处理）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新 action 名），运行面证据为 sqlite 烟测。
+- **新基线**：**20 处 / 14 对 / 14 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  `src/domains/runtime/routes/issues.py` 已清零并退出榜单；下一批首个未 blocked 文件是
+  `src/domains/runtime/pipeline/account_env.py`（1 处：`user_accounts`，归 mgmt）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

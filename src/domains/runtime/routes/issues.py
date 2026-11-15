@@ -871,24 +871,21 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
 
     managed_repos 表中同一 owner/repo 可能同时存在 gitcode: 和 github: 两条记录，
     通过 full_name 匹配。找不到返回空串。
+
+    注：confirm-done 的实际路径已走 `_close_vcs_issues` → `issues_center._mirror_repo_keys`，
+    本函数是同名逻辑的遗留副本（无调用点）；保留是为了不改变历史行为，
+    跨域读已收口到 mgmt public 的 `repo_key_exists_any`，与 issues_center 的同名实现同口径。
     """
     try:
         from src.kernel.repo_key import split_owner_repo
-        from src.kernel.session_manager import db, db_lock
+        from src.domains.mgmt import public as _mgmt_public_mirror
         owner, repo = split_owner_repo(repo_key)
         if not owner or not repo:
             return ""
         gh_key = f"github:{owner}/{repo}"
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import mgmt_lib as _mg_lib_6f73d4_f
-            _mg_lib_6f73d4 = _mg_lib_6f73d4_f(foreign_only=True)
-            if _mg_lib_6f73d4 is not None:
-                row = _mg_lib_6f73d4.read_one("managed_repos_6f73d4", (gh_key,))
-            else:
-                c.execute("SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1", (gh_key,))
-                row = c.fetchone()
-        return row[0] if row else ""
+        # managed_repos 归 mgmt：命中时返回库里的 repo_key 原值（列序/谓词同原语句），
+        # 无行返回空串——原实现的两种拓扑（mgmt lib / 本地兜底 SQL）在这里收成一条 owner 原语。
+        return _mgmt_public_mirror.repo_key_exists_any(gh_key)
     except Exception as e:
         log.warning(f"confirm-done: find github mirror for {repo_key} failed: {e}")
         return ""
