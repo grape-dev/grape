@@ -4871,6 +4871,84 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/api/scene_skill_scope.py`（2 处：`skill`）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
 
+### 7.41 api 场景技能 scope 判定的 skill 查询下沉 runtime owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/api/scene_skill_scope.py` **2 处 → 0**（单轮做完，2 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：两处同一张表 `skill`（归 **runtime**，`grape_runtime_db`）：
+  - L105（改前）`skill_agent_type_by_name`：`SELECT agent_type FROM skill WHERE skill_name=? AND is_active=1
+    ORDER BY CASE WHEN scope='repo' AND owner_id=? THEN 0 WHEN scope='official' THEN 1
+    WHEN scope='repo' THEN 2 ELSE 3 END LIMIT 1` —— 静态语句，2 个占位符。
+  - L129（改前）`rebind_candidates`：`SELECT id, skill_name, scope, agent_type FROM skill
+    WHERE is_active=1 AND skill_name<>? AND ((scope='repo' AND owner_id=?) OR scope='official')
+    [AND agent_type=?] ORDER BY CASE scope WHEN 'repo' THEN 0 ELSE 1 END, skill_name LIMIT ?`
+    —— **动态拼接**：`agent_type` 为可选谓词、`LIMIT` 追在末尾。
+  - 同文件的 `_get_skill_cached` / `_get_scope_info_cached` 早已走 `mgmt.user.db`
+    （其内部是 `runtime.public.read_one_any`），本批不动；只收口这两处仍在 api 侧直查的站点。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增三条具名查询，列序 / 谓词 / CASE 优先级 / 顺序与原语句逐字一致，
+    只用 `?` 占位符，无 `%s` / `NOW()` / `ON DUPLICATE` / 反引号：
+    `skill_agent_type_by_priority`、`skill_rebind_candidates`（无类型谓词）、
+    `skill_rebind_candidates_typed`（`AND agent_type=?`）。
+  - 新增两个薄函数并登记 `__all__`：`skill_agent_type_by_priority_any(skill_name, repo_key="")`、
+    `skill_rebind_candidate_rows_any(skill_name, repo_key, agent_type="", limit=5)`
+    （体内零 SQL，只调 `read_one_any` / `read_all_any`；空技能名早退与原实现一致）。
+- 调用点 `scene_skill_scope.py`：两处删掉 `from src.kernel.session_manager import db, db_lock`
+  与整条 SQL/拼接逻辑，改 `from src.domains.runtime import public as _runtime_public` +
+  owner 原语；`try/except → log.warning` 的降级形状原样保留（原本就不是裸 `pass`）。
+- 设计取舍：
+  1. **可选谓词用「两条登记语句」而不是给 owner 传 where 片段**：动态性只有一个布尔分支，
+     两条具名查询即可让 SQL 100% 留在 owner 域，避免引入片段白名单这种「半个 SQL 解析器」
+     （本仓已有 `query_events_any` 那类受控查询用于列/谓词高度动态的站点，此处不需要）。
+  2. **`LIMIT` 保持绑定参数**：SQLite 与 MySQL 8 都支持 `LIMIT ?`/`LIMIT %s` 绑定，
+     改成内联整数会在两条后端出现「有拼接的 SQL」形态，反而让静态棘轮失去约束意义。
+  3. **`agent_type` 自动推导留在调用点**：`rebind_candidates` 的「未显式给类型就用技能自身
+     agent_type」是 400 响应体的编排口径，不是 `skill` 表的读取口径；下沉会把两条语义绑死。
+  4. **`_node_role(node)` 仍作 `agent_type` 实参**：原实现就是这么传的（节点 `id`/`tag`），
+     本批只换取数通道、不改口径 —— 节点 id 与 agent_type 不同名时候选为空是**改造前既有**
+     行为，台账在此标明，避免后续被当成回归。同理 `skill_name<>?` 排除的是**同名全部档位**。
+  5. **repo 档 `owner_id` 是规范 repo_key**（`gitcode:owner/repo`，启动迁移
+     `skill_repo_owner_prefix` 补齐）：原语照抄 `owner_id=?`，调用方继续传 `repo_key` 原值，
+     两侧口径不变（烟测最初用裸 `owner/repo` 被迁移改写，已按规范仓键修正用例）。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **三库拆分后「改绑建议」整块为空**：api 进程库没有 `skill`（视图 0 → 1146）→
+     `rebind_candidates` 抛错被 except 吞成 `[]`，400 响应体只剩 `请改用 repo/official 级技能`
+     这一句兜底文案，运维看不到「可改绑到哪个技能」。
+  2. **`skill_agent_type_by_name` 恒空**：同样的 1146 → 返回 `""`，改绑候选连 agent_type
+     过滤都失效（随后 `agent_type=''` 会退化成全量），判定链静默降级且无日志指向是哪张表。
+- 验证（真实退出码）：
+  · `py_compile`（`src/api/scene_skill_scope.py` / `src/domains/runtime/public/__init__.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/scene_skill_scope_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建 `skill` 表，连跑 3 次稳定）
+    → **ALL scene_skill_scope smoke PASSED (65 checks)**：
+    A 注册面/静态否定（三条语句逐字、只用 `?`、无 `%s`/`NOW()`/`ON DUPLICATE`/反引号、
+    `__all__` 登记、薄函数体内无内联 SQL、`scene_skill_scope.py` 已无 `FROM skill`、
+    不再 import `session_manager`、两处都走 owner 原语）；
+    B 原语语义（本仓 repo > official、无本仓档回落 official、他仓 repo > user、失活行不计、
+    空名/无行 → 空串；改绑排除同名各档与他仓 repo/user 档、repo 优先 + 名字升序、列序逐字、
+    typed 过滤与不命中 → `[]`、limit 参数化含 0 边界、空名 → `[]`）；
+    C 调用点端到端（透传、`agent_type` 推导后再过滤、显式类型优先、默认 limit=5 与覆盖、
+    `NULL` agent_type 回退空串、两处读失败降级 `""`/`[]` + 一条 WARNING、
+    `evaluate()` 的 user 档阻断带改绑去向、节点 id≠agent_type 时候选为空、repo 档兼容放行）；
+    D 自有 DSN 伪游标（两条原语只走 `domain=runtime`、语句逐字、参数顺序 `(name, repo[, type], limit)`、
+    空结果不炸）。
+  · `--update-baseline` → **baseline updated: 20 pairs, 31 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **19 表 / 31 跨域引用 / 20 对**
+    （`skill` 已无 api 侧消费方，表数 20 → 19）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （runtime 177 funcs + 25 named queries used / 261 funcs + 61 queries registered）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点），运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标与两侧读失败降级）。
+- **新基线**：**31 处 / 20 对 / 19 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 31 处 / 24 文件）。`src/api/scene_skill_scope.py` 已清零并退出榜单；
+  下一批首个未 blocked 文件是 `src/api/qa_gate.py`（2 处：`events`，归 runtime），
+  其后是 `src/api/git_repo_api.py`（2 处：`takeover_sessions`/`issue`）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

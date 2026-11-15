@@ -13,7 +13,6 @@ grape_t_merge_gate_log,insight,api,1
 grape_t_repo_credentials,insight,contracts,1
 issue,runtime,api,1
 managed_repos,mgmt,runtime,2
-skill,runtime,api,2
 skill_category,mgmt,runtime,1
 takeover_sessions,runtime,api,1
 takeover_sessions,runtime,mgmt,1

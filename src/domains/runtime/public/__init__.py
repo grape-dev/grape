@@ -1515,7 +1515,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # 设备资源曲线采样基集（insight/observability/rollup.py；任意拓扑）
            "runtime_credential_sample_rows_any",
            # 总览聚合基集（insight/observability/overview.py；agent_tasks / runtime_credentials 本域）
-           "obs_overview_task_rows_any", "obs_overview_credential_status_rows_any"]
+           "obs_overview_task_rows_any", "obs_overview_credential_status_rows_any",
+           # 场景节点技能 scope 判定（src/api/scene_skill_scope.py）
+           "skill_agent_type_by_priority_any", "skill_rebind_candidate_rows_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2108,6 +2110,26 @@ _ANY_QUERIES: dict[str, str] = {
         "AND is_active=1 LIMIT 1"),
     "skill_active_display_rows": (
         "SELECT skill_name, display_name, scope, owner_id FROM skill WHERE is_active=1"),
+    # ── 场景节点技能 scope 判定（src/api/scene_skill_scope.py）读路径收口 ──────
+    # 原实现在 api 侧进程主库里直查 skill（归本域）：三库拓扑下 api 进程库没有该表
+    # （视图 0 → 1146），两处调用都被 except 吞成「空 agent_type / 无改绑建议」。
+    # 列序、谓词、CASE 优先级与原 SQL 逐字一致；`LIMIT ?` 绑定参数（SQLite / MySQL 8
+    # 均支持绑定 LIMIT），不使用 MySQL 专有语法。
+    "skill_agent_type_by_priority": (
+        "SELECT agent_type FROM skill WHERE skill_name=? AND is_active=1 "
+        "ORDER BY CASE WHEN scope='repo' AND owner_id=? THEN 0 "
+        "WHEN scope='official' THEN 1 WHEN scope='repo' THEN 2 ELSE 3 END "
+        "LIMIT 1"),
+    "skill_rebind_candidates": (
+        "SELECT id, skill_name, scope, agent_type FROM skill "
+        "WHERE is_active=1 AND skill_name<>? AND "
+        "((scope='repo' AND owner_id=?) OR scope='official') "
+        "ORDER BY CASE scope WHEN 'repo' THEN 0 ELSE 1 END, skill_name LIMIT ?"),
+    "skill_rebind_candidates_typed": (
+        "SELECT id, skill_name, scope, agent_type FROM skill "
+        "WHERE is_active=1 AND skill_name<>? AND "
+        "((scope='repo' AND owner_id=?) OR scope='official') AND agent_type=? "
+        "ORDER BY CASE scope WHEN 'repo' THEN 0 ELSE 1 END, skill_name LIMIT ?"),
     # 会话配置页（mgmt/routes/agents.py）读路径
     "devops_session_vod_id": (
         "SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'"),
@@ -3148,6 +3170,37 @@ def skill_active_display_rows_any() -> list:
     逐字一致。
     """
     return read_all_any("skill_active_display_rows")
+
+
+def skill_agent_type_by_priority_any(skill_name: str, repo_key: str = "") -> str:
+    """按技能名取「本仓 repo → official → 其它仓 repo → 其它」优先级首行的 agent_type。
+
+    过滤与排序口径照抄原语句：`skill_name` + `is_active=1`，`repo_key` 作
+    `owner_id` 参与 CASE 优先级；空仓键不特判（那一支永不命中，与原实现一致）。
+    无行 / 空技能名返回空串（原实现同样回退空串，不做异常上抛）。
+    """
+    if not skill_name:
+        return ""
+    row = read_one_any("skill_agent_type_by_priority", (skill_name, repo_key or ""))
+    return str(row[0] or "") if row else ""
+
+
+def skill_rebind_candidate_rows_any(skill_name: str, repo_key: str,
+                                    agent_type: str = "", limit: int = 5) -> list[tuple]:
+    """可改绑去向行 `(id, skill_name, scope, agent_type)`：本仓 repo 优先于 official。
+
+    `agent_type` 为空走不带类型谓词的登记语句，非空走带 `agent_type=?` 的版本；
+    两条具名查询把 SQL 完整留在本域，调用方不接收也不拼接 where 片段。`limit` 参数化绑定
+    （原实现即 `LIMIT ?`）。空技能名直接返回空列表（原实现的早退分支）。
+    """
+    if not skill_name:
+        return []
+    if agent_type:
+        rows = read_all_any("skill_rebind_candidates_typed",
+                            (skill_name, repo_key, agent_type, int(limit)))
+    else:
+        rows = read_all_any("skill_rebind_candidates", (skill_name, repo_key, int(limit)))
+    return [tuple(r) for r in rows]
 
 
 def get_meta_value_any(key: str) -> str:
