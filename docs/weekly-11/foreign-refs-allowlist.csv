@@ -7,5 +7,4 @@ events,runtime,api,1
 grape_t_credential_usage_log,runtime,kernel,3
 grape_t_merge_gate_log,insight,api,1
 grape_t_repo_credentials,insight,contracts,1
-takeover_sessions,runtime,mgmt,1
 unified_user_mapping,mgmt,kernel,3

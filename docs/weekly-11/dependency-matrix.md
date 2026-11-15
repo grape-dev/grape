@@ -1,7 +1,7 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-15 09:31　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **10** 张；跨域引用 **15** 处（10 个「表×消费域」对）；含归属域在内的 SQL 引用 794 处
+> 生成时间：2026-11-15 09:38　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **9** 张；跨域引用 **14** 处（9 个「表×消费域」对）；含归属域在内的 SQL 引用 777 处
 
 ## 1. 域 × 域 跨域引用热力
 
@@ -9,7 +9,7 @@
 | --- | ---: | ---: | ---: | ---: |
 | api | 0 | 3 | 2 | 5 |
 | kernel | 3 | 3 | 0 | 6 |
-| mgmt | 0 | 2 | 0 | 2 |
+| mgmt | 0 | 1 | 0 | 1 |
 | insight | 0 | 1 | 0 | 1 |
 
 ## 2. 处置分类进度
@@ -18,7 +18,7 @@
 | --- | ---: | ---: |
 | D | 3 | 7 |
 | C1 | 3 | 4 |
-| C2 | 4 | 4 |
+| C2 | 3 | 3 |
 
 ## 3. 全量明细（按剩余跨域引用降序）
 
@@ -33,7 +33,6 @@
 | `events` | runtime | 1 | api 1 | C1 归属重定（写路径挪进 owner 域） | — | 19 |
 | `grape_t_merge_gate_log` | insight | 1 | api 1 | C2 outbox 跨域写 | W3 | 2 |
 | `grape_t_repo_credentials` | insight | 1 | contracts 1 | C1 归属重定（写路径挪进 owner 域） | — | 3 |
-| `takeover_sessions` | runtime | 1 | mgmt 1 | C2 outbox 跨域写 | W1 | 4 |
 
 ## 4. 用法
 

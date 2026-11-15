@@ -1521,7 +1521,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # QA 结论门禁读口（src/api/qa_gate.py；events 本域）
            "qa_gate_latest_event_any", "qa_gate_latest_pr_payload_any",
            # 接管会话状态（src/api/git_repo_api.py；takeover_sessions 本域）
-           "takeover_session_status_any"]
+           "takeover_session_status_any",
+           # 接管会话心跳（src/domains/mgmt/routes/takeover.py；takeover_sessions 本域）
+           "takeover_touch_updated_at_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2557,6 +2559,10 @@ _ANY_QUERIES: dict[str, str] = {
     "takeover_session_status_by_task": (
         "SELECT status FROM takeover_sessions WHERE task_id=? "
         "ORDER BY created_at DESC LIMIT 1"),
+    # 接管会话心跳（src/domains/mgmt/routes/takeover.py 的 progress 端点）：
+    # 列名与 WHERE 逐字照抄原直发句，只按主键覆写 updated_at。
+    "takeover_touch_updated_at": (
+        "UPDATE takeover_sessions SET updated_at=? WHERE id=?"),
 }
 
 
@@ -2670,6 +2676,32 @@ def takeover_session_status_any(task_id: str) -> str | None:
     _task = "" if task_id is None else str(task_id)
     _row = read_one_any("takeover_session_status_by_task", (_task,))
     return _row[0] if _row else None
+
+
+# ── 接管会话心跳（src/domains/mgmt/routes/takeover.py 的 progress 端点）──
+# 原实现在 mgmt 路由里拿接管引擎的 `svc.db_lock` + `svc.db.cursor()` 直发本域表：
+# 单库拓扑下那是进程主库（能写通），三库拆分后 mgmt 进程库没有本表（视图 0 → 1146），
+# 心跳被 `except → log.warning` 吞掉，面板「最后活动」恒停在 progress 之外的时间点。
+# 语句上移本域后两条拓扑跑同一份 SQL，路由只留「失败不阻断进展上报」的业务判断。
+
+def takeover_touch_updated_at_any(session_id: str, updated_at: str) -> int:
+    """按会话 id 覆写 ``updated_at``（心跳），返回影响行数（0 = 该行不存在）。
+
+    语义逐字照抄原直发句：
+      - ``updated_at`` 写调用方算好的时间串（**不改成 NOW()**：两条后端口径一致）；
+      - ``WHERE id=?`` 只命中一行，不改状态 / ``active_key`` / 其它列，无行时返回 0
+        （不插入、不兜底造行）；
+      - 不做 ``is_active`` 之类的业务过滤 —— 已结束会话的心跳同样落库，与原实现一致。
+    通道见 ``_any_cursor(write=True)``：自有 DSN → 本域连接（autocommit，立即生效）；
+    单库 / 测试 → 进程主库 + 本域 ``db_lock`` 并提交，等价于调用方原来的
+    ``with db_lock: ...; db.commit()``。提交责任在本函数内闭合，因为原调用点也是
+    独立于进展写回的一次提交（两段事务，不合并）。
+    """
+    _sid = "" if session_id is None else str(session_id)
+    _ts = "" if updated_at is None else str(updated_at)
+    with _any_cursor(write=True) as c:
+        cur = c.execute(_any_sql("takeover_touch_updated_at"), (_ts, _sid))
+        return int(getattr(cur, "rowcount", 0) or 0)
 
 
 # ── insight 数据缺失探测（observability/gap.py）的基集读口 ──

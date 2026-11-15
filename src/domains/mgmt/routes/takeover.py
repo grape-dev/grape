@@ -201,12 +201,11 @@ def takeover_progress(session_id: str, body: ProgressBody,
                                            entries=body.messages,
                                            actor=user.get("username") or str(user.get("id") or "user"))
         # 心跳：面板用它显示"本地最后活动 X 分钟前"（接管期间平台侧唯一的活性信号）
+        # 表归运行域：走 owner public 的具名写原语（单库拓扑回落进程主库并提交），
+        # 失败不阻断进展上报（与原实现同一姿态）。
         try:
-            with svc.db_lock:
-                _c = svc.db.cursor()
-                _c.execute("UPDATE takeover_sessions SET updated_at=? WHERE id=?",
-                           (svc._now_iso(), session_id))
-                svc.db.commit()
+            from src.domains.runtime import public as _rt_takeover  # noqa: PLC0415
+            _rt_takeover.takeover_touch_updated_at_any(session_id, svc._now_iso())
         except Exception as _e:
             log.warning(f"takeover progress: touch updated_at failed: {_e}")
         if body.summary:

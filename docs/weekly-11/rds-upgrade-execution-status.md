@@ -5886,6 +5886,85 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `takeover_sessions` 的按行读取，归 runtime）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py` 与 `prompt_builder.py`（各 3 处）。
 
+### 7.54 mgmt 接管 progress 心跳写下沉 runtime owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/mgmt/routes/takeover.py` **1 处 → 0**（该文件清零；1 处未超 25，单轮做完）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`takeover_sessions`（归 **runtime**，
+  `grape_runtime_db`）× 1：改前 L204–211，在 `takeover_progress()`（`POST
+  /api/takeover/sessions/{id}/progress`）的心跳块里用**接管引擎自己的进程库句柄**直发
+  `UPDATE takeover_sessions SET updated_at=? WHERE id=?`，并 `svc.db.commit()`。
+  同文件其余端点全部只调 `svc.*`（runtime 域服务层），无其它 SQL，未动。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增具名写 `takeover_touch_updated_at`（L2560）：
+    `UPDATE takeover_sessions SET updated_at=? WHERE id=?`，与原直发句**逐字一致**
+    （两个 `?`、SET 面只有 `updated_at`、无 `status` / `is_active` 谓词、无 `NOW()` / 反引号）。
+  - 新增薄函数 `takeover_touch_updated_at_any(session_id, updated_at) -> int`（L2686）：
+    体内零字面 SQL（走 `_any_sql`），通道 `_any_cursor(write=True)`，返回影响行数；
+    `__all__` 登记（L1525），紧邻已有的 `takeover_session_status_any`（同一张表的读口）。
+- 设计取舍：
+  1. **放进 runtime public 而不是 `runtime/engine/takeover.py` 里加个函数**：`engine.takeover`
+     是服务层（业务状态机 + bundle 组装 + 派发），心跳只是「按主键写一个时间戳」的存储事；
+     放 public 才能让 `check_lib_query_names` 的静态闭合成立（调用点只认 owner public 的
+     具名函数），也与 7.52/7.53 的「读口/写口都在 public」口径一致。
+  2. **不用 `exec_any()` 而自带 `rowcount`**：`exec_any` 在自有 DSN 下 `pymysql.execute()`
+     返回 int，`getattr(int,"rowcount",0)` 恒 0（台账已记的旧坑）。本函数直接用游标
+     `rowcount`，两条后端都回真影响行数（烟测 D 段以 3 反证）。
+  3. **提交责任放在原语内、不并入进展写回的事务**：原实现也是「`append_takeover_messages`
+     一次写 + 心跳一次独立提交」，两段事务。合并会改变语义（心跳失败会把进展写回一起回滚），
+     与「心跳失败不阻断上报」的既有姿态冲突。
+  4. **不做「同域复用调用方游标」判据（对比 mgmt 的 `_same_domain_write_cursor`）**：
+     本调用点手上没有 owner 游标（只有 `svc.db`，那正是被替换掉的跨域句柄），无可复用对象；
+     `_any_cursor(write=True)` 的两态（自有 DSN → runtime 连接 autocommit；单库/测试 →
+     进程主库 + 本域 `db_lock` 并提交）已逐字等价于原来的 `with db_lock: ...; commit()`。
+  5. **延迟 import 留在函数体内**：`from src.domains.runtime import public as _rt_takeover`，
+     与同目录其它路由（`settings.py` / `devstage.py`）口径一致，避免模块级把两个大包绑死。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  **三库拓扑下 progress 心跳恒失败**——`svc.db` 是 kernel 进程主库句柄（mgmt 进程里是
+  `grape_mgmt_db`），三库拆分后该库没有 `takeover_sessions`（视图 0 → 1146），异常被
+  `except Exception → log.warning` 吞掉；表现为面板「本地最后活动 X 分钟前」在接管期间不再
+  前移，而进展写回（`task_messages`，走 runtime 本域原语）仍成功 —— 单库拓扑下心跳能写通，
+  所以测试与彩排一直是绿的。归位后心跳只走 owner 通道，两种拓扑同一份 SQL。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/runtime/public/__init__.py` / `src/domains/mgmt/routes/takeover.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/takeover_touch_smoke.py`
+    （`DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=~/burndown/takeover_touch.db`，连跑 2 次稳定）
+    → **ALL takeover touch smoke PASSED (78 checks)**：
+    A 30 项注册面/静态否定（具名写逐字、两个 `?`、SET/WHERE 列序、无 `%s`/`NOW()`/反引号/
+    `is_active`/`status`/`LIMIT`、薄函数体内零字面 SQL 且登记 `__all__`、走
+    `_any_cursor(write=True)` 并读 `rowcount`、返回类型 `int`、调用点无本表 SQL/无 `svc.db`/
+    无 `svc.db_lock`/无 `%s`/无静默 except/仍用 `svc._now_iso()`、心跳传 `session_id`、
+    余量 14 / 9 对、`takeover_sessions` 已退出跨域榜单）；
+    B 17 项原语语义（命中回 1、`updated_at` 写调用方值而非 NOW()、`status`/`active_key`/
+    `summary`/`bundle_json`/`token_sha256` 不动、**id=1 与 id=11 不串行**、无行回 0 且不插入、
+    空串原样不兜时间、空 id 回 0 不误伤全表、unicode/引号原样、**已结束会话照写**、
+    重复写稳定）；
+    C 20 项调用点端到端（human owner → 落库 + `append` 收到 `actor=alice` 与 `task_id`；
+    非 owner → 403 且不落库；**tko_ token 凭 `session_key` 判归属**（错 key 403、对 key 落库，
+    `actor` 回落 `user`）；已结束会话 → 409 不落库；心跳抛错 → 上报仍 ok、进展写回仍执行、
+    有 `touch updated_at failed` 告警）；
+    D 11 项拓扑判据（自有 DSN + 外域进程 → 只连 `domain=runtime`、语句与参数
+    `(updated_at, id)` 逐字、进程库未被触碰、返回值取游标 `rowcount`；无自有 DSN →
+    回落进程主库、取本域 `db_lock` 一次、已提交（旁观连接可见）、不另开本域连接）；
+  · `--update-baseline` → **baseline updated: 9 pairs, 14 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **9 表 / 14 跨域引用 / 9 对**
+    （`takeover_sessions` 跨域 1 → 0 退出榜单，`sql_references` 794 → 777 的差值是
+    「该表 16 处同域引用不再进入跨域榜单」，非语句删除）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `venv/bin/python -m pytest tests/arch tests/contracts tests/scripts -q` → **158 passed**（EXIT=0）；
+  · `make lint` → **import OK**（EXIT=0）。另用变异法反证烟测有效：把具名写临时改成
+    `WHERE id=? AND is_active=1`，B 段立即以 `no such column: is_active` 失败，恢复后重跑
+    连续两次 ALL PASSED。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD` /
+  `REMOTE_PWD`；口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，
+  彩排压在余量归零后统一跑）。本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新响应字段）。
+- **新基线**：**14 处 / 9 对 / 9 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 /
+  作业单同步刷新（`next-batches.md` 14 处 / 10 文件）。`src/domains/mgmt/routes/takeover.py`
+  已清零并退出榜单；头两名仍是 ⛔ blocked 的 `credential_usage_log.py` 与
+  `prompt_builder.py`（各 3 处），下一批首个未 blocked 文件是
+  `src/domains/mgmt/routes/grape_auth.py`（1 处：`agent_tasks`，归 runtime）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
