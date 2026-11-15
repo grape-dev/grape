@@ -85,11 +85,17 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
     不再下发边端自报 device_name。
     prompt 为 agent 接收到的完整上下文（截断至 8000 字符），prompt_full_length 为原始长度。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
     from src.api.time_utils import normalize_event_time
+    # 三库模式：agent_tasks / agent_runtimes / runtime_credentials 三张表都属 runtime 域，
+    # 而 `/api/task-logs/*` 路由挂在 mgmt 进程（nginx 把其余路径都发给 38081）——用进程主库
+    # 会撞 `Table 'grape_stage_mgmt.agent_tasks' doesn't exist`（1146），事件详情页的
+    # 「查看实时日志」整块 500。改走 runtime 域游标：本进程即 runtime 时用主库，
+    # 三库跨进程时新建 runtime 连接，单库/测试拓扑回落进程库。
+    from src.domains.runtime.engine.service import _rt_db as _task_db
     _require_task_access(task_id, user)  # 扫雷⑨-H5：任务归属校验
     with db_lock:
-        c = db.cursor()
+        c = _task_db.cursor()
         c.execute(
             """SELECT ar.name, ar.version, rc.name, rc.last_ip, rc.owner_name, t.prompt,
                       t.created_at, t.started_at, t.completed_at, t.status, t.issue_id, t.event_seq, t.repo_key,

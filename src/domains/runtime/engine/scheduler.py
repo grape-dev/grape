@@ -45,6 +45,13 @@ _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id �
 # 剩余工序经常超 30 分钟被误判 timeout_failed；配合判死前活跃流豁免（见 sweep）双保险。
 PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TIMEOUT_SECONDS", "5400"))
 
+# 「认领了但从没执行」的短阈值（默认 10 分钟）：pending_self_report 且 runtime_session_id 为空，
+# 说明引擎会话根本没建起来，等 90 分钟自报窗口毫无意义。2026-11-15 实测：116 上残留的
+# 旧代码 agent 抢到任务后不建会话、不产出消息，事件层 sweeper 30 分钟就判 failed，任务却要
+# 挂满 90 分钟，需求在「处理中」多躺一小时，且覆盖 sweeper 的终态归因。
+PENDING_NO_SESSION_TIMEOUT_SECONDS = int(
+    os.environ.get("PENDING_NO_SESSION_TIMEOUT_SECONDS", "600"))
+
 ZOMBIE_OFFLINE_GRACE_SECONDS = int(os.environ.get("ZOMBIE_OFFLINE_GRACE_SECONDS", "300"))
 
 # Issue #1546：派发协程尚未 enqueue_task 落库时回收器已开跑，年轻执行（<120s）本轮跳过回收，
@@ -1393,17 +1400,25 @@ def _sweep_pending_self_report_timeouts() -> int:
     from src.domains.runtime.engine.service import update_task_status
     from src.api.event_store import update_event_complete
     _cutoff_ts = datetime.now(timezone.utc).timestamp() - PENDING_SELF_REPORT_TIMEOUT_SECONDS
+    # 「从未真正执行」的短阈值：pending_self_report + runtime_session_id 为空
+    # （引擎会话从没建起来）说明任务被认领后根本没跑，不必等 90 分钟自报窗口。
+    # 实测：116 上残留的旧代码 agent 抢到任务后既不建会话也不产出消息，事件层 sweeper
+    # 30 分钟就判 failed，而任务要挂 90 分钟 —— 需求在「处理中」白白多躺一小时。
+    _cutoff_short = datetime.now(timezone.utc).timestamp() - PENDING_NO_SESSION_TIMEOUT_SECONDS
     _now = datetime.now(timezone.utc).isoformat()
     _reason = (f"[PENDING_SELF_REPORT_TIMEOUT] worker 在 {PENDING_SELF_REPORT_TIMEOUT_SECONDS}s 内未自报完成/失败"
                f"且执行流静默超 {_PENDING_STREAM_ACTIVE_WINDOW_SECONDS}s"
                f"（pending_self_report 超时），判 timeout_failed")
+    _reason_no_session = (f"[PENDING_NO_SESSION_TIMEOUT] 任务认领后从未建立引擎会话"
+                          f"（runtime_session_id 为空、无任务消息），{PENDING_NO_SESSION_TIMEOUT_SECONDS}s 内"
+                          f"无任何执行痕迹，判 timeout_failed —— 通常意味着认领方跑的是旧代码或引擎 spawn 失败")
     marked = 0
     try:
         _pending_rows = []
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT id, event_seq, runtime_id, pending_since FROM agent_tasks "
+                "SELECT id, event_seq, runtime_id, pending_since, runtime_session_id FROM agent_tasks "
                 "WHERE status='pending_self_report' AND pending_since IS NOT NULL "
                 "AND pending_since != ''"
             )
@@ -1416,24 +1431,32 @@ def _sweep_pending_self_report_timeouts() -> int:
                     _ts = _parse_pending_since(_r[3])
                 except Exception:
                     _ts = None
-                if _ts and float(_ts) <= _cutoff_ts:
-                    # 活跃流豁免（Issue #1071）：执行流 <600s 内仍在写入 → 任务在跑，
-                    # 跳过判死等下轮（同一事务内查询，不加额外锁、每候选一条主键查询开销小）。
-                    if _pending_self_report_stream_active(c, _r[0]):
-                        continue
-                    _pending_rows.append(_r)
+                if not _ts:
+                    continue
+                _has_session = bool(str(_r[4] or "").strip())
+                _limit = _cutoff_ts if _has_session else max(_cutoff_ts, _cutoff_short)
+                if float(_ts) > _limit:
+                    continue
+                # 活跃流豁免（Issue #1071）：执行流 <600s 内仍在写入 → 任务在跑，
+                # 跳过判死等下轮（同一事务内查询，不加额外锁、每候选一条主键查询开销小）。
+                if _pending_self_report_stream_active(c, _r[0]):
+                    continue
+                # 下游按 4 元组解包；把「无会话」标记塞进第 4 位之外的 map
+                _pending_rows.append((_r[0], _r[1], _r[2], _r[3], _has_session))
             rows = _pending_rows
-        for tid, evt_seq, _rt_id, _ps in rows:
+        _reasons = {_r[0]: (_reason if _r[4] else _reason_no_session) for _r in rows}
+        for tid, evt_seq, _rt_id, _ps, _hs in rows:
+            _why = _reasons.get(tid, _reason)
             try:
                 update_task_status(tid, "timeout_failed", exit_code=-1,
-                                   errors=json.dumps([_reason], ensure_ascii=False),
+                                   errors=json.dumps([_why], ensure_ascii=False),
                                    completed_at=_now,
                                    # Issue #1938：补偿归因（sweeper 超时兜底）
                                    cascade_trigger="sweeper")
                 if evt_seq:
                     try:
                         update_event_complete(evt_seq, "failed", exit_code=-1,
-                                              completed_at=_now, result=_reason[:200])
+                                              completed_at=_now, result=_why[:200])
                     except Exception as _ee:
                         log.warning(f"pending timeout: event sync failed seq={evt_seq}: {_ee}")
                     try:
