@@ -120,6 +120,52 @@ def _scan_dropped_task(tree: ast.AST, rel: str, out: list[dict]) -> None:
                                     "detail": f"{owner}.create_task"})
 
 
+def _is_db_lock(expr: ast.AST) -> bool:
+    """识别 `with db_lock:` / `with foo.db_lock:`。"""
+    if isinstance(expr, ast.Name):
+        return expr.id == "db_lock"
+    if isinstance(expr, ast.Attribute):
+        return expr.attr == "db_lock"
+    return False
+
+
+def _with_has_bulk(node: ast.With) -> bool:
+    """with 块内是否有批量扫描（fetchall / executemany / fetchmany）。"""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            _, name = _call_name(sub)
+            if name in ("fetchall", "fetchmany", "executemany"):
+                return True
+    return False
+
+
+def _scan_db_lock(tree: ast.AST, rel: str, out: list[dict]) -> None:
+    """A6 / A7：进程级 db_lock 的使用位置。
+
+    这把锁是 SQLite 时代的单文件串行化手段。MySQL 后端上它纯属自伤：任何持锁的长扫描
+    （sweeper 整表扫 agent_tasks/events）都会让心跳、claim、/tags、tasks/complete、
+    tasks/current 一起排队 —— 实测表现为 nginx 504 与「引擎失联」，而不是“变慢”。
+
+    A6  async def 里 `with db_lock:` —— 直接卡事件循环，一定报。
+    A7  同步函数里 `with db_lock:` 且块内含 fetchall/executemany —— 长扫描持锁，报。
+    """
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.AsyncFunctionDef, ast.FunctionDef, ast.Module)):
+            continue
+        in_async = isinstance(fn, ast.AsyncFunctionDef)
+        for node in _walk_body(fn):
+            if not isinstance(node, ast.With):
+                continue
+            if not any(_is_db_lock(it.context_expr) for it in node.items):
+                continue
+            if in_async:
+                out.append({"file": rel, "line": node.lineno,
+                            "kind": "A6 db_lock in async", "detail": "with db_lock"})
+            elif _with_has_bulk(node):
+                out.append({"file": rel, "line": node.lineno,
+                            "kind": "A7 db_lock around bulk scan", "detail": "with db_lock + fetchall"})
+
+
 def collect() -> list[dict]:
     out: list[dict] = []
     for path in sorted(SRC.rglob("*.py")):
@@ -136,25 +182,36 @@ def collect() -> list[dict]:
             elif isinstance(node, ast.FunctionDef):
                 _scan_function(node, rel, out, in_async=False)
         _scan_dropped_task(tree, rel, out)
+        _scan_db_lock(tree, rel, out)
     return out
+
+
+def _key(h: dict) -> str:
+    return f"{h['file']}:{h['line']}:{h['kind']}"
 
 
 def load_baseline() -> dict:
     if not BASELINE.exists():
-        return {"total": 0, "by_kind": {}}
+        return {"total": 0, "by_kind": {}, "items": []}
     try:
         return json.loads(BASELINE.read_text(encoding="utf-8"))
     except Exception:
-        return {"total": 0, "by_kind": {}}
+        return {"total": 0, "by_kind": {}, "items": []}
 
 
 def write_baseline(hits: list[dict]) -> None:
+    """基线存条目快照（file:line:kind），这样新增项能被精确指出。
+
+    只存 total 的话，失败信息只能把全部 278 条倒出来，看不出新加的是哪一处 ——
+    棘轮就退化成“知道变红了但不知道为什么”。
+    """
     by_kind: dict[str, int] = {}
     for h in hits:
         by_kind[h["kind"]] = by_kind.get(h["kind"], 0) + 1
     BASELINE.parent.mkdir(parents=True, exist_ok=True)
     BASELINE.write_text(json.dumps(
-        {"total": len(hits), "by_kind": dict(sorted(by_kind.items()))},
+        {"total": len(hits), "by_kind": dict(sorted(by_kind.items())),
+         "items": sorted(_key(h) for h in hits)},
         ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -175,12 +232,16 @@ def main() -> int:
 
     base = load_baseline()
     base_total = int(base.get("total") or 0)
+    base_items = set(base.get("items") or [])
     print(f"async-blocking: 当前 {len(hits)} / 基线 {base_total}")
     if len(hits) > base_total:
         print(f"FAIL: 新增 {len(hits) - base_total} 处事件循环阻塞/丢弃形态"
-              f"（同步调用必须包 asyncio.to_thread；派发必须用 get_running_loop）",
-              file=sys.stderr)
-        new = [h for h in hits if args.show_all] if args.show_all else hits
+              f"（同步调用必须包 asyncio.to_thread；派发必须用 get_running_loop；"
+              f"持 db_lock 的长查询不要让请求路径排队）", file=sys.stderr)
+        if base_items:
+            new = [h for h in hits if _key(h) not in base_items]
+        else:
+            new = hits
         for h in new[:20]:
             print(f"  ✗ {h['file']}:{h['line']} [{h['kind']}] {h['detail']}", file=sys.stderr)
         return 1
