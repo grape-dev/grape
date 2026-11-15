@@ -88,6 +88,24 @@ def _startup_security_check():
             log.error(f"[SECURITY] {e}")
         raise SystemExit(f"生产环境安全门禁失败：{'; '.join(errors)}")
 
+async def _shield(awaitable, *, timeout: float | None = None, what: str = "") -> None:
+    """关闭阶段等待协程/任务：取消与超时都算正常收尾，绝不让异常冒到 lifespan。
+
+    `asyncio.CancelledError` 继承 `BaseException`，`except Exception` 接不住；只要有一处
+    漏接，uvicorn 就会打印 "Application shutdown failed" 并以退出码 3 退出，systemd 随即
+    重启 → 与尚未释放端口的旧进程抢端口，形成 crash loop（2026-11-15 实测）。
+    """
+    try:
+        if timeout is None:
+            await awaitable
+        else:
+            await asyncio.wait_for(awaitable, timeout=timeout)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    except Exception as exc:  # noqa: BLE001 - 关闭失败只记录，不阻断
+        log.debug(f"shutdown wait failed{(' for ' + what) if what else ''}: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """A 进程 lifespan：仅启动 A 归属的定时任务（设计文档 §6 分配表）。
@@ -402,10 +420,7 @@ async def lifespan(app: FastAPI):
     # 反过来会在消费者 await 途中拿到已 stop 的引擎（竞态：发给死渠道）。
     _consumer = getattr(app.state, "outbox_consumer", None)
     if _consumer is not None:
-        try:
-            await _consumer.stop()
-        except Exception as _e:
-            log.warning(f"IM outbox consumer stop failed: {_e}")
+        await _shield(_consumer.stop(), what="outbox consumer")
         try:
             app.state.outbox_consumer = None
         except Exception as _e:
@@ -416,59 +431,41 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     if im_engine is not None:
-        try:
-            await im_engine.stop()
-        except Exception as _e:
-            log.warning(f"IM engine stop failed: {_e}")
+        await _shield(im_engine.stop(), what="im engine")
         try:
             app.state.im_engine = None
         except Exception as _e:
             log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     if _knowledge_write_task:
         _knowledge_write_task.cancel()
-        try:
-            await asyncio.wait_for(_knowledge_write_task, timeout=5)
-        except Exception as _e:
-            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
+        await _shield(_knowledge_write_task, timeout=5, what="knowledge_write")
     for _t in (_obs_alert_loop_task, _obs_rollup_task, _obs_sample_task):
         if _t:
             _t.cancel()
-            try:
-                await asyncio.wait_for(_t, timeout=5)
-            except Exception as _e:
-                log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
+            await _shield(_t, timeout=5, what="obs loop")
     # knowledge_migrate：shutdown 时等待完成（不 cancel，迁移中断不如跑完）
     _migrate_task = getattr(app.state, "knowledge_migrate_task", None)
     if _migrate_task and not _migrate_task.done():
-        try:
-            await asyncio.wait_for(_migrate_task, timeout=10)
-        except asyncio.TimeoutError:
-            log.warning("knowledge_migrate shutdown wait timeout, task continues in background")
-        except Exception as _e:
-            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
+        await _shield(_migrate_task, timeout=10, what="knowledge_migrate")
     # 官方技能 OBS 同步 / 反馈 reconcile：优雅关闭
-    try:
-        from src.domains.runtime.storage.skill_sync import stop_skill_sync_scheduler
-        await stop_skill_sync_scheduler()
-    except Exception as _e:
-        log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
-    try:
-        from src.api.feedback_issue_converter import stop_feedback_reconcile_scheduler
-        await stop_feedback_reconcile_scheduler()
-    except Exception as _e:
-        log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
+    await _shield(_stop_skill_sync(), what="skill sync scheduler")
+    await _shield(_stop_feedback_reconcile(), what="feedback reconcile scheduler")
     # GSB 注销 + 定时任务收口（原先被误放在第一次 yield 之后，现归还 shutdown 段）
     if _gsb is not None:
-        try:
-            await _gsb.shutdown()
-        except Exception as _gsd:
-            log.warning(f"GSB shutdown failed: {_gsd}")
-    try:
-        await server_tasks.stop_mgmt_tasks(app, _mgmt_h)
-    except Exception as _sm:
-        log.warning(f"stop_mgmt_tasks failed: {_sm}")
+        await _shield(_gsb.shutdown(), what="gsb")
+    await _shield(server_tasks.stop_mgmt_tasks(app, _mgmt_h), what="stop_mgmt_tasks")
     log.info("Grape Mgmt Server lifespan stopped")
     log.info("A process (server) stopped")
+
+
+async def _stop_skill_sync() -> None:
+    from src.domains.runtime.storage.skill_sync import stop_skill_sync_scheduler
+    await stop_skill_sync_scheduler()
+
+
+async def _stop_feedback_reconcile() -> None:
+    from src.api.feedback_issue_converter import stop_feedback_reconcile_scheduler
+    await stop_feedback_reconcile_scheduler()
 
 
 app = server_common.build_app(
