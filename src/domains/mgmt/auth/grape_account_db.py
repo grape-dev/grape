@@ -8,6 +8,77 @@ import time
 
 from src.kernel.config import log
 
+
+class _OwnedCursor:
+    """自带连接的游标：close 时把连接一并关掉。"""
+
+    def __init__(self, conn, cursor):
+        self._conn = conn
+        self._cur = cursor
+
+    def __getattr__(self, item):
+        return getattr(self._cur, item)
+
+    def close(self):
+        try:
+            self._cur.close()
+        finally:
+            try:
+                self._conn.close()
+            except Exception as _e:
+                log.debug(f"cursor close failed: {_e}")
+
+
+class _MgmtDbProxy:
+    """把 _mg_db.cursor()/commit()/rollback() 代理到 mgmt 域连接。
+
+    grape_accounts / api token 都在 mgmt 域。三库模式下 insight / runtime / event 进程
+    也要校验会话（get_status_and_token_version → token_version 不匹配就被判 SESSION_REVOKED），
+    这些进程主库不是 mgmt 库，必须走 GRAPE_DSN_MGMT。mgmt 进程自身仍用主库（零回归）。
+    """
+
+    def cursor(self, *a, **kw):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "mgmt":
+            from src.kernel.session_manager import db as _main
+            return _main.cursor(*a, **kw)
+        if db_registry.uses_own_dsn("mgmt"):
+            _conn = db_registry.new_connection("mgmt")
+            return _OwnedCursor(_conn, _conn.cursor(*a, **kw))
+        from src.kernel.session_manager import db as _main
+        return _main.cursor(*a, **kw)
+
+    def commit(self):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "mgmt":
+            from src.kernel.session_manager import db as _main
+            return _main.commit()
+        if db_registry.uses_own_dsn("mgmt"):
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.commit()
+
+    def rollback(self):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "mgmt":
+            from src.kernel.session_manager import db as _main
+            return _main.rollback()
+        if db_registry.uses_own_dsn("mgmt"):
+            try:
+                db_registry.domain_db("mgmt").rollback()
+            except Exception as _e:
+                log.debug(f"domain rollback failed: {_e}")
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.rollback()
+
+    def __getattr__(self, item):
+        from src.kernel.session_manager import db as _main
+        return getattr(_main, item)
+
+
+_mg_db = _MgmtDbProxy()
+
 from src.kernel.session_manager import db, db_lock
 
 from src.domains.mgmt.auth.password import hash_password, verify_password, needs_upgrade
@@ -58,14 +129,14 @@ def create_grape_account(
     uid = uuid7_str()                   # D105 第二批：主键应用层 UUIDv7（插入即所得）
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "INSERT INTO grape_accounts "
                 "(id, username, email, email_source, password_hash, nickname, avatar_url, status, token_version, email_verified) "
                 "VALUES (?,?,?, 'user',?,?,?,1,0,?)",
                 (uid, username, email, pw_hash, nickname, avatar_url, 1 if email_verified else 0),
             )
-            db.commit()
+            _mg_db.commit()
             log.info(f"Grape account created: {username} (id={uid})")
             return {"id": uid, "username": username, "email": email or ""}
     except Exception as e:
@@ -94,7 +165,7 @@ def create_grape_account_oauth(
     uid = uuid7_str()                   # D105 第二批：主键应用层 UUIDv7（插入即所得）
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "INSERT INTO grape_accounts "
                 "(id, username, email, email_source, password_hash, nickname, avatar_url, "
@@ -103,7 +174,7 @@ def create_grape_account_oauth(
                 (uid, username, email, provider, nickname, avatar_url,
                  1 if email_verified else 0, is_placeholder),
             )
-            db.commit()
+            _mg_db.commit()
             log.info(f"Grape account created (OAuth): {username} (id={uid}, placeholder={is_placeholder})")
             return {"id": uid, "username": username, "email": email or ""}
     except Exception as e:
@@ -121,7 +192,7 @@ def get_grape_account_by_id(user_id: str) -> "dict | None":
     """按 ID 查询 Grape 账号。"""
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT id, username, email, password_hash, nickname, avatar_url, "
                 "status, token_version, created_at, updated_at, last_login_at, email_verified, email_source, "
@@ -141,7 +212,7 @@ def get_grape_account_by_username(username: str) -> "dict | None":
     """按用户名查询 Grape 账号。"""
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT id, username, email, password_hash, nickname, avatar_url, "
                 "status, token_version, created_at, updated_at, last_login_at, email_verified, email_source, "
@@ -166,7 +237,7 @@ def get_grape_account_by_email(email: str) -> "dict | None":
     email = email.lower().strip()
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT id, username, email, password_hash, nickname, avatar_url, "
                 "status, token_version, created_at, updated_at, last_login_at, email_verified, email_source, "
@@ -226,12 +297,12 @@ def _upgrade_password_hash(user_id: str, plain: str) -> None:
     new_hash = hash_password(plain)
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "UPDATE grape_accounts SET password_hash=? WHERE id=?",
                 (new_hash, user_id),
             )
-            db.commit()
+            _mg_db.commit()
         log.info(f"Password hash upgraded for user {user_id}")
     except Exception as e:
         log.warning(f"Upgrade password hash failed: {e}")
@@ -241,12 +312,12 @@ def update_password(user_id: str, new_password: str) -> bool:
     new_hash = hash_password(new_password)
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "UPDATE grape_accounts SET password_hash=? WHERE id=?",
                 (new_hash, user_id),
             )
-            db.commit()
+            _mg_db.commit()
             return c.rowcount > 0
     except Exception as e:
         log.warning(f"Update password failed: {e}")
@@ -265,12 +336,12 @@ def update_email(user_id: str, new_email: str) -> bool | str:
     new_email = (new_email or "").lower().strip() or None
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "UPDATE grape_accounts SET email=? WHERE id=?",
                 (new_email, user_id),
             )
-            db.commit()
+            _mg_db.commit()
             return c.rowcount > 0
     except Exception as e:
         # D46 P1-1: 检测 UNIQUE 约束冲突
@@ -288,12 +359,12 @@ def update_last_login_at(user_id: str) -> None:
     now = _time.strftime("%Y-%m-%d %H:%M:%S")
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "UPDATE grape_accounts SET last_login_at=? WHERE id=?",
                 (now, user_id),
             )
-            db.commit()
+            _mg_db.commit()
     except Exception as e:
         log.warning(f"Update last_login_at failed: {e}")
 
@@ -312,12 +383,12 @@ def update_profile(user_id: str, nickname: "str | None" = None, avatar_url: "str
     params.append(user_id)
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 f"UPDATE grape_accounts SET {', '.join(updates)} WHERE id=?",
                 params,
             )
-            db.commit()
+            _mg_db.commit()
             return c.rowcount > 0
     except Exception as e:
         log.warning(f"Update profile failed: {e}")
@@ -327,7 +398,7 @@ def get_token_version(user_id: str) -> int:
     """获取用户的 token_version。"""
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT token_version FROM grape_accounts WHERE id=?",
                 (user_id,),
@@ -343,12 +414,12 @@ def increment_token_version(user_id: str) -> None:
     """token_version + 1（改密码/登出时调用）。"""
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "UPDATE grape_accounts SET token_version=token_version+1 WHERE id=?",
                 (user_id,),
             )
-            db.commit()
+            _mg_db.commit()
     except Exception as e:
         log.warning(f"Increment token version failed: {e}")
 
@@ -362,7 +433,7 @@ def get_status_and_token_version(user_id: str) -> "tuple[int, int, str] | None":
     """
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT status, token_version, username FROM grape_accounts WHERE id=?",
                 (user_id,),
@@ -409,7 +480,7 @@ def is_email_registered(email: str) -> bool:
         return False
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             # 排除占位账号（email_is_placeholder=1），占位邮箱不参与冲突检查
             c.execute(
                 "SELECT 1 FROM grape_accounts WHERE email=? AND status IN (1, 3) "
@@ -432,7 +503,7 @@ def is_username_taken(username: str) -> bool:
     """
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 # P2-2: 大小写不敏感查询，与 _validate_username 的 .lower() 保留字检查一致
                 "SELECT 1 FROM grape_accounts WHERE LOWER(username)=LOWER(?) LIMIT 1",
@@ -449,13 +520,13 @@ def soft_delete_account(user_id: str) -> bool:
     now = _time.strftime("%Y-%m-%d %H:%M:%S")
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "UPDATE grape_accounts SET status=3, updated_at=? "
                 "WHERE id=? AND status=1",
                 (now, user_id),
             )
-            db.commit()
+            _mg_db.commit()
             return c.rowcount > 0
     except Exception as e:
         log.warning(f"Soft delete account failed: {e}")
@@ -627,7 +698,7 @@ def _has_refresh_token(user_id: str, provider: str) -> bool:
     """
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT refresh_token FROM external_identities "
                 "WHERE grape_user_id=? AND provider=? AND status IN (1, 4) LIMIT 1",
@@ -770,7 +841,7 @@ def is_placeholder_account_mergeable(grape_user_id: str) -> bool:
     """
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT email_is_placeholder, created_by_oauth, password_hash, status "
                 "FROM grape_accounts WHERE id=?",
@@ -841,7 +912,7 @@ def transfer_business_data(from_user_id: str, to_user_id: str) -> bool:
 
     返回 True 表示全部成功。
     """
-    c = db.cursor()
+    c = _mg_db.cursor()
     for table, col, _ in _BUSINESS_TABLES:
         try:
             # user_repos 有复合主键 (user_id, repo_key)，目标用户可能已有同 repo_key 记录
@@ -951,7 +1022,7 @@ def merge_placeholder_account(placeholder_user_id: str, target_user_id: str,
     now = _t.strftime("%Y-%m-%d %H:%M:%S")
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "UPDATE external_identities SET status=0, access_token='', refresh_token='', "
                 "unbound_at=? WHERE grape_user_id=? AND provider=? AND status=1",
@@ -965,7 +1036,7 @@ def merge_placeholder_account(placeholder_user_id: str, target_user_id: str,
                 "updated_at=? WHERE id=?",
                 (f"merged_{placeholder_user_id}", now, placeholder_user_id),
             )
-            db.commit()
+            _mg_db.commit()
             log.info(f"Placeholder account {placeholder_user_id} merged to {target_user_id} "
                      f"(provider={provider}, external_id={external_id})")
             return True
@@ -1084,7 +1155,7 @@ def clear_placeholder_email(user_id: str, provider: str) -> bool:
     """
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT email, email_source, email_is_placeholder FROM grape_accounts WHERE id=?",
                 (user_id,),
@@ -1101,7 +1172,7 @@ def clear_placeholder_email(user_id: str, provider: str) -> bool:
                     "email_is_placeholder=0, updated_at=? WHERE id=?",
                     (now, user_id),
                 )
-                db.commit()
+                _mg_db.commit()
                 log.info(f"Cleared placeholder email for user={user_id}, provider={provider}")
             return True
     except Exception as e:
@@ -1112,7 +1183,7 @@ def count_user_identities(grape_user_id: str) -> int:
     """统计用户的第三方活跃绑定数量。D22: 只计 status=1。"""
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT COUNT(*) FROM external_identities WHERE grape_user_id=? AND status=1",
                 (grape_user_id,),
@@ -1125,7 +1196,7 @@ def has_password(grape_user_id: str) -> bool:
     """检查用户是否已设置密码。"""
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT password_hash FROM grape_accounts WHERE id=?",
                 (grape_user_id,),
@@ -1202,13 +1273,13 @@ def sync_external_login_on_rename(
     #    核心目标失败 → 不再继续（避免四表半同步），返回 False 不阻断登录
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "UPDATE external_identities SET external_login=?, updated_at=datetime('now') "
                 "WHERE grape_user_id=? AND provider=? AND status IN (1, 4)",
                 (new_login, grape_user_id, provider),
             )
-            db.commit()
+            _mg_db.commit()
     except Exception as e:
         log.warning(f"Sync external_login failed for user {grape_user_id} provider {provider}: {e}")
         return False
@@ -1216,12 +1287,12 @@ def sync_external_login_on_rename(
     # 2) grape_accounts.username（UNIQUE 冲突 → 保留旧 username，不会因此登录失败）
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "UPDATE grape_accounts SET username=?, updated_at=datetime('now') WHERE id=?",
                 (new_login, grape_user_id),
             )
-            db.commit()
+            _mg_db.commit()
     except Exception as e:
         log.warning(f"Sync username failed for user {grape_user_id} (UNIQUE conflict? keep old username): {e}")
 
@@ -1236,7 +1307,7 @@ def sync_external_login_on_rename(
         import re as _re
         if _re.match(r'^[a-z0-9_]+$', provider or ""):
             with db_lock:
-                c = db.cursor()
+                c = _mg_db.cursor()
                 # login_whitelist 表无 updated_at 列（DDL 仅 created_at），只改用户名不碰时间戳
                 c.execute(
                     "UPDATE login_whitelist SET username=? "
@@ -1251,7 +1322,7 @@ def sync_external_login_on_rename(
                     )
                 except Exception:
                     pass  # 该渠道无老列（新装/未声明列存量）——跳过联动
-                db.commit()
+                _mg_db.commit()
     except Exception as e:
         log.warning(f"Sync login_whitelist failed for user {grape_user_id} provider {provider}: {e}")
 
@@ -1279,13 +1350,13 @@ def mark_identity_expired(grape_user_id: str, provider: str) -> bool:
     """
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "UPDATE external_identities SET status=4 "
                 "WHERE grape_user_id=? AND provider=? AND status=1",
                 (grape_user_id, provider),
             )
-            db.commit()
+            _mg_db.commit()
             if c.rowcount > 0:
                 log.info(f"mark_identity_expired: {provider} token expired for user={grape_user_id}")
                 return True
@@ -1298,7 +1369,7 @@ def is_identity_expired(grape_user_id: str, provider: str) -> bool:
     """Issue #372 R10: 检查用户 token 是否已过期（status=4）。"""
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT status FROM external_identities "
                 "WHERE grape_user_id=? AND provider=? LIMIT 1",
@@ -1317,7 +1388,7 @@ def get_unbound_identity(provider: str, external_id: str) -> "dict | None":
     """
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT grape_user_id, external_login, external_name, external_avatar, unbound_at "
                 "FROM external_identities WHERE provider=? AND external_id=? AND status=0",
@@ -1360,7 +1431,7 @@ def restore_external_identity(
                                          _time.gmtime(_time.time() + expires_in))
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             # 检查原用户是否已有同 provider 的活跃绑定（可能解绑后又绑了另一个账号）
             c.execute(
                 "SELECT id FROM external_identities "
@@ -1401,7 +1472,7 @@ def restore_external_identity(
                 f"WHERE grape_user_id=? AND provider=? AND status=0",
                 params,
             )
-            db.commit()
+            _mg_db.commit()
             return c.rowcount > 0
     except Exception as e:
         log.warning(f"Restore external identity failed: {e}")
@@ -1415,12 +1486,12 @@ def delete_unbound_identity(provider: str, external_id: str) -> bool:
     """
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "DELETE FROM external_identities WHERE provider=? AND external_id=? AND status=0",
                 (provider, external_id),
             )
-            db.commit()
+            _mg_db.commit()
             return c.rowcount > 0
     except Exception as e:
         log.warning(f"Delete unbound identity failed: {e}")
@@ -1448,7 +1519,7 @@ def save_binding_ticket(
     ticket = _secrets.token_urlsafe(32)
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             # 懒清理过期票据
             c.execute("DELETE FROM binding_tickets WHERE expires < ?", (_t.time(),))
             # FR-14.2: INSERT + 冲突重试（不覆盖未消费旧票）
@@ -1481,7 +1552,7 @@ def save_binding_ticket(
                      original_user_id,
                      _t.time(), _t.time() + _TICKET_TTL),
                 )
-            db.commit()
+            _mg_db.commit()
         return ticket
     except Exception as e:
         log.warning(f"save_binding_ticket failed: {e}")
@@ -1501,7 +1572,7 @@ def validate_binding_ticket(ticket: str, initiating_user_id: str, consume: bool 
     row = None
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT initiating_user_id, provider, external_id, "
                 "external_login, external_name, external_avatar, "
@@ -1512,7 +1583,7 @@ def validate_binding_ticket(ticket: str, initiating_user_id: str, consume: bool 
             row = c.fetchone()
             if row and consume:
                 c.execute("DELETE FROM binding_tickets WHERE ticket=?", (ticket,))
-                db.commit()
+                _mg_db.commit()
         if not row:
             return None
         if _t.time() > row[7]:
@@ -1542,9 +1613,9 @@ def consume_binding_ticket(ticket: str) -> bool:
     """
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute("DELETE FROM binding_tickets WHERE ticket=?", (ticket,))
-            db.commit()
+            _mg_db.commit()
             return c.rowcount > 0
     except Exception as e:
         log.warning(f"consume_binding_ticket failed: {e}")
@@ -1560,7 +1631,7 @@ def get_pending_transfer_context(initiating_user_id: str) -> dict | None:
     import time as _t
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             # 懒清理过期票据
             c.execute("DELETE FROM binding_tickets WHERE expires < ?", (_t.time(),))
             c.execute(
@@ -1571,7 +1642,7 @@ def get_pending_transfer_context(initiating_user_id: str) -> dict | None:
                 (initiating_user_id,),
             )
             row = c.fetchone()
-            db.commit()
+            _mg_db.commit()
         if not row:
             return None
         if _t.time() > row[6]:
@@ -1608,7 +1679,7 @@ def transfer_external_identity(
     now = _time.strftime("%Y-%m-%d %H:%M:%S")
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             # 1. 旧绑定标记为 transferred（status=0, 清 token）
             if original_user_id:
                 c.execute(
@@ -1645,12 +1716,12 @@ def transfer_external_identity(
                  encrypt(access_token) if access_token else "",
                  encrypt(refresh_token) if refresh_token else ""),
             )
-            db.commit()
+            _mg_db.commit()
         return True
     except Exception as e:
         log.warning(f"transfer_external_identity failed: {e}")
         try:
-            db.rollback()
+            _mg_db.rollback()
         except Exception:
             pass
         return False
@@ -1704,7 +1775,7 @@ def resolve_user_id_by_platform_login(provider: str, platform_login: str) -> int
         return 0
     try:
         with db_lock:
-            c = db.cursor()
+            c = _mg_db.cursor()
             c.execute(
                 "SELECT um.grape_user_id FROM external_identities um "
                 "WHERE um.provider=? AND um.external_login=? AND um.status=1 "
@@ -1853,10 +1924,10 @@ def backfill_pat_identity_tokens() -> int:
                 if str(_existing.get("token", "") or "").strip() == _tok:
                     # 凭据域已有等值副本：仅清 ei
                     with db_lock:
-                        c = db.cursor()
+                        c = _mg_db.cursor()
                         c.execute("UPDATE external_identities SET access_token='', "
                                   "metadata='' WHERE id=?", (str(m.id),))
-                        db.commit()
+                        _mg_db.commit()
                     moved_out += 1
                     continue
                 _sc(uid, prov, {"token": _tok, "login": m.external_login or ""}, kind="pat")
@@ -1868,11 +1939,11 @@ def backfill_pat_identity_tokens() -> int:
                     meta = {}
                 meta.update({"source": "pat", "pat_login": m.external_login or ""})
                 with db_lock:
-                    c = db.cursor()
+                    c = _mg_db.cursor()
                     c.execute("UPDATE external_identities SET access_token='', "
                               "metadata=? WHERE id=?",
                               (_json.dumps(meta, ensure_ascii=False), str(m.id)))
-                    db.commit()
+                    _mg_db.commit()
                 moved_out += 1
             except Exception as _e:
                 log.warning(f"backfill: move-to-credential-domain failed "

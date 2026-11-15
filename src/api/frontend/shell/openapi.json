@@ -17878,7 +17878,7 @@
           "dashboard"
         ],
         "summary": "Get A2A Health",
-        "description": "A2A 健康检查：server_base_url 可达性 + 最近 A2A 调用记录。\n\n需登录：组织成员可见。运维诊断数据。",
+        "description": "A2A 健康检查：server_base_url 可达性 + 最近 A2A 调用记录。\n\n需登录：组织成员可见。运维诊断数据。\n\n探测是「经 server_base_url 打自己」的外网 HTTP，同步 requests 放在 async 函数里会把\n事件循环阻塞到超时（实测 5s：期间该进程所有请求排队，页面表现为断断续续）。这里改为\n线程池执行 + 2s 超时 + 30s 结果缓存——驾驶舱轮询不再拖慢整进程。",
         "operationId": "dashboard_ops_a2a_health",
         "responses": {
           "200": {

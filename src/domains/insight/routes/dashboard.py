@@ -1247,16 +1247,30 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
 
     return {"repoKey": repo_key, "issues": issues}
 
+_A2A_PROBE_CACHE: dict = {"ts": 0.0, "payload": None}
+
+
 @router.get("/ops/a2a-health", operation_id="dashboard_ops_a2a_health")
 async def get_a2a_health(user: dict = Depends(require_org_member)):
     """A2A 健康检查：server_base_url 可达性 + 最近 A2A 调用记录。
 
     需登录：组织成员可见。运维诊断数据。
+
+    探测是「经 server_base_url 打自己」的外网 HTTP，同步 requests 放在 async 函数里会把
+    事件循环阻塞到超时（实测 5s：期间该进程所有请求排队，页面表现为断断续续）。这里改为
+    线程池执行 + 2s 超时 + 30s 结果缓存——驾驶舱轮询不再拖慢整进程。
     """
+    import asyncio as _asyncio
+    import time as _time
     import requests as _requests
     from src.domains.mgmt.user.db import get_server_base_url
 
     base_url = get_server_base_url()
+
+    _cached = _A2A_PROBE_CACHE.get("payload")
+    if _cached and (_time.time() - _A2A_PROBE_CACHE.get("ts", 0.0)) < 30:
+        return _cached
+
     result = {
         "server_base_url": base_url,
         "reachable": False,
@@ -1266,11 +1280,13 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
         "recent_a2a": [],
     }
 
-    # 检查可达性
+    # 检查可达性（线程池 + 短超时，别把事件循环卡住）
     try:
-        import time as _time
+        def _probe():
+            return _requests.get(base_url.rstrip("/") + "/health", timeout=2)
+
         t0 = _time.time()
-        r = _requests.get(base_url.rstrip("/") + "/health", timeout=5)
+        r = await _asyncio.to_thread(_probe)
         result["latency_ms"] = round((_time.time() - t0) * 1000)
         result["reachable"] = r.status_code == 200
         result["health_status"] = r.status_code
@@ -1295,6 +1311,8 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
     except Exception:
         pass
 
+    _A2A_PROBE_CACHE["ts"] = _time.time()
+    _A2A_PROBE_CACHE["payload"] = result
     return result
 
 def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
