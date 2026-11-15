@@ -6,17 +6,25 @@ from src.kernel import db_registry
 
 
 class FakeCursor:
-    def __init__(self, rowcounts=None):
+    def __init__(self, rowcounts=None, fetch_pages=None):
         self.executed = []
+        self.batches = []
         self.rowcounts = list(rowcounts or [])
+        self.fetch_pages = list(fetch_pages or [])
 
     def execute(self, sql, args=None):
         self.executed.append((" ".join(sql.split()), args))
         self.rowcount = self.rowcounts.pop(0) if self.rowcounts else 1
         return self.rowcount
 
+    def executemany(self, sql, rows):
+        self.batches.append((" ".join(sql.split()), [tuple(r) for r in rows]))
+        return len(self.batches[-1][1])
+
     def fetchall(self):
-        return []
+        if not self.fetch_pages:
+            return []
+        return [(v,) for v in self.fetch_pages.pop(0)]
 
     def fetchone(self):
         return None
@@ -33,6 +41,12 @@ def install(monkeypatch, cur):
 
     monkeypatch.setattr(db_registry, "cursor", _ctx)
     return cur
+
+
+def install_own(monkeypatch, cur):
+    """自有 DSN 拓扑（`_any_cursor` 走 db_registry.cursor，autocommit 不提交）。"""
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda _d: True)
+    return install(monkeypatch, cur)
 
 
 def install_tx(monkeypatch, cur):
@@ -159,3 +173,53 @@ def test_stamp_task_traces_empty_is_noop(monkeypatch):
     cur = install(monkeypatch, FakeCursor())
     assert rt.stamp_task_traces([]) == 0
     assert cur.executed == []
+
+
+# ---- 凭据使用审计原语（c53729dc0 把 SQL 从 kernel 下沉到 runtime 域）----
+
+_AUDIT_INSERT_SQL = (
+    "INSERT INTO grape_t_credential_usage_log (id, credential_id, credential_kind, "
+    "user_id, repo_key, initiating_actor_id, executor_context, operation, created_at) "
+    "VALUES (?,?,?,?,?,?,?,?,?)"
+)
+
+
+def test_credential_usage_log_insert_many_empty_is_noop(monkeypatch):
+    cur = install_own(monkeypatch, FakeCursor())
+    rt.credential_usage_log_insert_many([])
+    assert cur.batches == []
+    assert cur.executed == []
+
+
+def test_credential_usage_log_insert_many_keeps_column_order(monkeypatch):
+    """批量写入保持调用方的九列行序（kernel 侧攒批不重排列）。"""
+    cur = install_own(monkeypatch, FakeCursor())
+    rows = [("id-1", "cred-1", "user_credentials", "7", "gitcode:o/r",
+             "1", "task", "token_fetch", "2026-11-11 00:00:00"),
+            ("id-2", "cred-2", "repo_credentials", "8", "",
+             "", "chat", "", "2026-11-11 00:00:01")]
+    rt.credential_usage_log_insert_many(rows)
+    assert cur.batches == [(_AUDIT_INSERT_SQL, rows)]
+
+
+def test_credential_usage_log_prune_two_step_per_page(monkeypatch):
+    """两步查删（SELECT id LIMIT → DELETE IN 列表）：MySQL 禁 IN 子查询带 LIMIT（1235）。"""
+    # rowcount 序列对齐 execute：SELECT(忽略) / DELETE(2) / SELECT(忽略) / DELETE(1)
+    cur = install_own(monkeypatch, FakeCursor(rowcounts=[0, 2, 0, 1],
+                                              fetch_pages=[["a", "b"], ["c"]]))
+    assert rt.credential_usage_log_prune("2026-01-01 00:00:00", batch=2) == 3
+    assert [e[0] for e in cur.executed] == [
+        "SELECT id FROM grape_t_credential_usage_log WHERE created_at < ? LIMIT ?",
+        "DELETE FROM grape_t_credential_usage_log WHERE id IN (?,?)",
+        "SELECT id FROM grape_t_credential_usage_log WHERE created_at < ? LIMIT ?",
+        "DELETE FROM grape_t_credential_usage_log WHERE id IN (?)",
+    ]
+    assert cur.executed[0][1] == ("2026-01-01 00:00:00", 2)
+    assert cur.executed[1][1] == ["a", "b"]
+    assert cur.executed[3][1] == ["c"]
+
+
+def test_credential_usage_log_prune_no_rows_is_noop(monkeypatch):
+    cur = install_own(monkeypatch, FakeCursor(fetch_pages=[[]]))
+    assert rt.credential_usage_log_prune("2026-01-01 00:00:00", batch=100) == 0
+    assert len(cur.executed) == 1, cur.executed
