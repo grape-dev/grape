@@ -133,13 +133,28 @@ mgmt 在兄弟节点 `:3311`、insight 在兄弟节点 `:3312`、runtime 在本�
 | runtime MySQL 连接 | 峰值 91 / 500，`Connection_errors_max_connections=0` |
 | GSB 注册 | `mgmt@hd002 base_url=http://<本机私网 IP>:38081` |
 
-## 遗留（本轮未动，需运营侧确认）
+## 4. `grape_stage_mgmt` 缺表的处置（2026-11-15 补做）
 
-- **`grape_stage_mgmt` 缺 34 张归属表**（实测兄弟节点 `:3311`）：`admin_*`（控制台）、
-  `sandbox_*` / `user_vms` / `user_vm_repos`（沙箱与 VM）、`egress_*`、`task_proxy_tokens`、
-  `repo_platform_tokens`、`user_llm_credentials`、`template_usage`、`credential_reveal_log` 等；
-  runtime/insight 两库 0 缺失。这些表由各自功能模块懒建，功能被调用时才会暴露 1146，
-  建议按 owner 进程跑一次建表（或首次使用前预热）。
+实测兄弟节点 `:3311` 的 `grape_stage_mgmt`：59 张基表、0 视图；按清单缺 33 张。分类后发现清单
+是从旧三域库 `grape_dev_mgmt`（141 张）派生的，里面混着**本仓没有任何代码引用**的名字。
+
+处置（全部用源库 DDL，不手写建表语句）：
+
+- `SHOW CREATE TABLE grape_dev_mgmt.<t>` 取原语句（去 `AUTO_INCREMENT=` 起始值），在
+  `grape_stage_mgmt` 里 `CREATE TABLE IF NOT EXISTS`，一次补了 **27 张**：
+  `admin_*`（10 张）、`cloud_sandboxes` / `sandbox_*` / `engine_sandbox_*` / `user_vms` /
+  `user_vm_repos`、`egress_admin_*`、`task_proxy_tokens`、`repo_platform_tokens`、
+  `user_llm_credentials`、`template_usage`、`devops_agent_runtime_binding`。
+  结果：59 → **86 张**，三域缺口全部归零（mgmt 81/86、runtime 35/98、insight 12/20 归属表齐）。
+- 其余 6 张不建，并从 `configs/table_ownership.json` 移除（迁到 `_not_in_current_schema` 记录）：
+  5 张 `backup_*_20260817` 是历史快照、`flyway_schema_history` 是 Java 迁移遗留；
+  同时删掉 `credential_reveal_log` 这条旧名重复登记（真名 `grape_t_credential_reveal_log`，
+  权威 `docs/weekly-11/table-owner.tsv` 里只有真名）。
+
+清单 135 → 128 张，`tests/api/test_table_ownership.py` 18 例通过；守卫行为复核：
+`agent_tasks` 在 mgmt 进程 skip=True、`admin_users` skip=False、未登记表放行。
+
+## 遗留（本轮未动，需运营侧确认）
 - `grape_mgmt_db` / `grape_runtime_db` / `grape_insight_db` 与 `grape_ljt_db` 仍在
   共用的 RDS 实例（`<legacy-rds-host>`）上，是三库演练/迁移残留，容易误判主库；确认后归档。
 - `server_base_url` 在两节点都指向公网入口节点：这是既有设计（单入口），
