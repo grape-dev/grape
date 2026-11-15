@@ -96,19 +96,32 @@ class _CompatCursor:
         self._pycur = None
 
     def execute(self, sql: str, params=None):
+        """执行语句并返回**游标自身**（sqlite3 语义，与 MySQLCompatCursor 一致）。
+
+        不能返回 pymysql 的 rowcount(int)：调用点普遍写作
+        `c.execute(sql, params).fetchone()`（三库 lib 模式下域连接走的就是本兼容游标），
+        返回 int 会让分布式锁协议第一步就抛
+        `AttributeError: 'int' object has no attribute 'fetchone'`，
+        进而让 skill sync / feedback reconcile / table maintenance 每轮都失败。
+        需要行数的调用方读 `c.rowcount`（如 runtime public 的 exec_any）。
+        """
         from src.kernel.mysql_compat import translate_sql
 
         sql2 = translate_sql(sql) or sql
         if params is not None and not isinstance(params, (tuple, list, dict)):
             params = (params,)
         if params is None:
-            return self._raw.execute(sql2)
-        return self._raw.execute(sql2, params)
+            self._raw.execute(sql2)
+        else:
+            self._raw.execute(sql2, params)
+        return self
 
     def executemany(self, sql: str, seq):
+        """同 execute：执行后返回游标自身（sqlite3 语义）。"""
         from src.kernel.mysql_compat import translate_sql
 
-        return self._raw.executemany(translate_sql(sql) or sql, seq)
+        self._raw.executemany(translate_sql(sql) or sql, seq)
+        return self
 
     def fetchall(self):
         return self._raw.fetchall()

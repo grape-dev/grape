@@ -3,6 +3,21 @@
 # 库：stage 三库（grape_stage_mgmt / grape_stage_runtime / grape_stage_insight），
 #     由 GRAPE_DOMAIN_LIB=1 + GRAPE_DSN_* 指定，互不干扰生产（38081-38084）。
 set -u
+
+# 已被 systemd 托管时禁止执行本脚本：nohup 进程杀不干净 / Restart=always 会再拉一遍，
+# 两边抢同一端口 → address already in use，只有一个能绑上，另一个静默空转。
+# 切换/回滚方法见 scripts/install-grape-systemd.sh。
+_units_on=0
+for _r in mgmt event worker insight; do
+  systemctl is-active -q "grape@$_r.service" 2>/dev/null && _units_on=1
+  [ -L "/etc/systemd/system/multi-user.target.wants/grape@$_r.service" ] && _units_on=1
+done
+if [ "$_units_on" = "1" ]; then
+  echo "[3db] 检测到 systemd 单元 grape@*.service（已 enable 或运行中），本脚本不再适用。" >&2
+  echo "[3db] 请改用: systemctl restart grape@mgmt grape@event grape@worker grape@insight" >&2
+  echo "[3db] 需要回到 nohup 方式: systemctl disable --now grape@{mgmt,event,worker,insight}" >&2
+  exit 3
+fi
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 LOGS=/home/grape/grape-logs
 mkdir -p "$LOGS"
