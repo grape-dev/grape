@@ -2141,11 +2141,14 @@ _EVENT_CASCADE_RESULTS = {
 }
 
 
-def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int = None):
+def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int = None,
+                            result_text: str = ""):
     """Issue #587: 任务终态级联事件收敛（事务内，幂等，终态保护）。
 
     仅当事件仍处于活跃态（pending/running/dispatched）时同步为任务终态；
     已终态事件不被另一终态覆盖（与 event_store.update_event_status 同语义）。
+    `result_text`：任务已自报（self_reported=1）时传入真实结论——终态回写用它，
+    避免成功任务被盖上「回报丢失补偿」的兜底文案（事件侧真实结果还会被终态保护拒写）。
     返回 True 表示本次发生收敛。
     """
     try:
@@ -2157,6 +2160,10 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
             return False
         _now = datetime.now(timezone.utc).isoformat()
         _result = _EVENT_CASCADE_RESULTS.get(status, f"级联收敛：任务{status}")
+        _self_report = (result_text or "").strip()
+        if status == "completed" and _self_report:
+            # 自报结果优先（截断与 event_store 终态回写同口径），仅在缺失时才用兜底文案
+            _result = _self_report[:8000]
         if status == "cancelled":
             cursor.execute(
                 "UPDATE events SET status='cancelled', exit_code=-1, completed_at=?, result=? WHERE seq=?",
@@ -2309,7 +2316,18 @@ def update_task_status(task_id, status, **kw):
                 _evt_row = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?",
                                      (task_id,)).fetchone()
                 if _evt_row and _evt_row[0]:
-                    if _cascade_event_terminal(c, _evt_row[0], status):
+                    # 自报优先：agent 已通过 `tasks complete` 交过结论时，级联回写用真实结果，
+                    # 不要盖「回报丢失补偿」（8380/8381 这类成功任务曾被误标成回报丢失）。
+                    _self_txt = ""
+                    try:
+                        _srow = c.execute(
+                            "SELECT self_reported, result_text FROM agent_tasks WHERE id=?",
+                            (task_id,)).fetchone()
+                        if _srow and int(_srow[0] or 0) == 1 and (_srow[1] or "").strip():
+                            _self_txt = _srow[1]
+                    except Exception:
+                        _self_txt = ""
+                    if _cascade_event_terminal(c, _evt_row[0], status, result_text=_self_txt):
                         _cascaded_seq = _evt_row[0]
                         log.info(f"update_task_status: cascaded event {_evt_row[0]} -> "
                                  f"{status} for task {task_id} (Issue #587 convergence)")
