@@ -5800,6 +5800,92 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （1 处：`devops_pipeline_scene` 的按 id 读取兜底句，行 198，归 mgmt）；
   头两名仍是 ⛔ blocked 的 `credential_usage_log.py` 与 `prompt_builder.py`（各 3 处）。
 
+### 7.53 runtime 场景节点按 id 读取下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/runtime/engine/recovery.py` **1 处 → 0**（该文件清零；1 处未超 25，单轮做完）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`devops_pipeline_scene`（归 **mgmt**，
+  `grape_mgmt_db`）× 1：改前 L197–199，在 `_readd_scene_bindings()` 的
+  `mgmt_lib(foreign_only=True) is None` 兜底分支里，用**调用方游标**直发
+  `SELECT nodes_json FROM devops_pipeline_scene WHERE id=?`。
+  同文件其余表（`agent_runtimes` / `agent_tasks` / `task_messages` /
+  `scene_engine_detach_log` / `grape_t_engine_lifecycle_audit`）全部归 runtime，未动。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增具名读 `scene_nodes_by_id`（L1764）：`SELECT nodes_json FROM
+    devops_pipeline_scene WHERE id=?`，与原兜底句**逐字一致**（单 `?`、无 `is_active`、
+    无 `LIMIT` / `ORDER BY`；无 `%s` / `NOW()` / 反引号）。
+  - 新增读游标判据 `_same_domain_read_cursor(cursor)`（L1560），与 7.52 的写侧
+    `_same_domain_write_cursor` 共用同一条判据：单库 / 视图期 / 测试（无自有 DSN）或
+    **当前进程就是 mgmt** → 复用调用方游标；外域进程 + 自有 DSN → 走 `_any_cursor()`。
+  - 新增薄函数 `scene_nodes_row_by_id_any(row_id, cursor=None)`（L3048）：体内零字面 SQL
+    （走 `_any_sql`），**返回整行而不是首列**；`__all__` 登记（L756）。
+  - 删除已无消费者的 `%s` 面登记 `devops_pipeline_scene_b5cd89`（唯一调用点即本批改掉的
+    `recovery`），避免留下读不到任何代码路径的死面。
+- 设计取舍：
+  1. **返回 `(nodes_json,)` 整行、不返回首列**：调用方要区分三态——「无行」（直接把解绑
+     审计标 `rebound` 跳过）、「行在但 `nodes_json` 为 NULL/空串」（按原 `or "[]"` 兜成空
+     节点表，仍走标签匹配）、「行在有节点」。若薄函数返回首列，NULL 与无行会撞成同一个
+     `None`，等于悄悄改了命中集合（已删场景 vs 空场景）。
+  2. **不复用 `read_one_any()` 直接调用**：仍走一条薄函数，一是让 `cursor` 的同域判据与写侧
+     对称（`_same_domain_read_cursor`），二是调用点保持「只认 owner 的具名函数」便于
+     `check_lib_query_names` 静态闭合。
+  3. **不加 `is_active=1`**：解绑审计里的 `scene_row_id` 指向的场景可能已停用，原句只按
+     主键定位；多一个谓词会让「停用场景上的加回」静默变成「场景已删」。
+  4. **延迟 import 留在函数体内**：`from src.domains.mgmt import public as _mgmt_scene` +
+     `_mgmt_scene.<func>`，避免 runtime → mgmt 模块级 import 把两个大包在 import 期绑死
+     （同 7.50 / 7.51 / 7.52 口径）。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  **`mgmt_lib` 可用时加回引擎恒失败**——原 L195 把读结果赋给了游标变量
+  `c = _mg_lib_b5cd89.read_one("devops_pipeline_scene_b5cd89", ...).fetchone()`，于是
+  ① 循环里的 `srow` 从未赋值（下一步 `if not srow` 抛 `UnboundLocalError`），
+  ② 上层游标 `c` 被覆盖成一行数据（后续 `c.execute(UPDATE scene_engine_detach_log ...)`
+  必然 `AttributeError`）。异常被外层 `except Exception → log.warning("scene=... failed")`
+  吞掉，表现为「三库拓扑下加回引擎后节点绑定没补上、解绑日志也不标 rebound」；单库拓扑
+  走 `else` 分支所以测试一直是绿的。归位后读、写各走 owner 原语，游标只作参数传入，
+  该形态不再可能重现（烟测 A 段有静态断言、E 段有三库拓扑端到端）。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/mgmt/public/__init__.py` / `src/domains/runtime/engine/recovery.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/recovery_scene_read_smoke.py`
+    （`DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=~/burndown/recovery_scene_read.db`，连跑 2 次稳定）
+    → **ALL recovery scene read smoke PASSED (80 checks)**：
+    A 26 项注册面/静态否定（具名读逐字、单 `?`、无 `%s`/`NOW()`/反引号/`is_active`/
+    `LIMIT`、薄函数体内零字面 SQL 且登记 `__all__` 并返回整行、读游标判据同时认
+    `uses_own_dsn` 与 `current_domain`、调用点无本表 SQL/无 `mgmt_lib`/无 `read_one(`/
+    无「把 `c` 覆盖成读结果」/无静默 except、`%s` 死面已删、余量 15 / 10 对）；
+    B 15 项原语语义（返回原 JSON、**id=1 与 id=11 不串行**、无行 `None`、
+    NULL 行返回 `(None,)` 且为真值、空串原样不兜 `[]`、**`is_active=0` 照取**、
+    unicode/引号原样、`cursor=None` 走进程主库、纯读不插入不改值、重复读稳定）；
+    C 19 项调用点端到端（单库拓扑：未绑节点补 rid 且标 `rebound=True`、已绑报
+    `already_bound` 不重复追加、场景已删/标签不匹配/NULL nodes 三类都只标 `rebound`
+    不伪造绑定、**提交前旁观连接看不见**、`rollback()` 能撤销（证明没被擅自提交）、
+    提交后状态一致、重跑不重复追加、全部 `rebound` 后再跑返回空）；
+    D 10 项拓扑判据（自有 DSN + mgmt 进程内 → 复用调用方游标且不另开本域连接；
+    自有 DSN + 外域进程 → 陷阱游标全程未被触碰、只连 `domain=mgmt`、语句与参数
+    `(row_id,)` 逐字；`cursor=None` 同走本域；无自有 DSN 时 `current_domain` 不参与判定）；
+    E 10 项三库拓扑加回链路（外域进程 + 自有 DSN：场景读/写只落 mgmt 连接共 2 条语句、
+    解绑日志的读/标 `rebound` 仍落调用方游标、`nodes` 补进新 rid —— 旧实现在这条路径上
+    恒失败，本段即回归守卫）；
+  · `--update-baseline` → **baseline updated: 10 pairs, 15 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **10 表 / 15 跨域引用 / 10 对**
+    （`devops_pipeline_scene` 跨域清零后退出榜单，`sql_references` 887 → 794 的差值是
+    「该表 93 处同域引用不再进入跨域榜单」，非语句删除）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `venv/bin/python -m pytest tests/arch tests/contracts tests/scripts -q` → **158 passed**（EXIT=0）；
+    `tests/runtime/test_issue_2133_recovery.py` + `tests/api/test_scene_nodes_write.py` →
+    **13 passed, 1 failed**：失败项 `test_readd_endpoint_route_level` 在 HEAD 干净
+    worktree（`aaa6cd3aa`）同样复现，报 `'NoneType' object has no attribute 'read_all_any'`
+    （app 启动期另有一处 lib 句柄未判空），属分支既有、与本批无关；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` 在 gate 内通过。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD` /
+  `REMOTE_PWD`；口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，
+  彩排压在余量归零后统一跑）。本批不改 schema / 迁移 / 契约面（无新表、无新端点）。
+- **新基线**：**15 处 / 10 对 / 10 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 /
+  作业单同步刷新（`next-batches.md` 15 处 / 11 文件）。`recovery.py` 已清零并退出榜单；
+  下一批首个未 blocked 文件是 `src/domains/mgmt/routes/takeover.py`（1 处：
+  `takeover_sessions` 的按行读取，归 runtime）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py` 与 `prompt_builder.py`（各 3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

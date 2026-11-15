@@ -752,8 +752,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "sender_identity_user_by_app_any", "installation_owner_by_app_any",
            # 安装枚举来源（runtime/im/engine/installations.py；任意拓扑）
            "installation_provider_rows_any",
-           # 场景节点按行号覆写（runtime/engine/scene_nodes_write.py；任意拓扑，游标可选）
-           "scene_nodes_write_by_id",
+           # 场景节点按行号覆写/读取（runtime/engine/scene_nodes_write.py；任意拓扑，游标可选）
+           "scene_nodes_write_by_id", "scene_nodes_row_by_id_any",
            "autopilot_task_brief_any", "scene_names_by_repo_any",
            # 能效看板取数（insight/observability/efficiency.py；任意拓扑）
            "account_name_rows_by_ids", "scene_display_name_rows",
@@ -805,7 +805,6 @@ _READ_QUERIES: dict[str, str] = {
     "managed_repos_6f73d4": "SELECT repo_key FROM managed_repos WHERE repo_key=%s LIMIT 1",
     "managed_repos_b939bc": "SELECT repo_owner, repo_name FROM managed_repos WHERE repo_key=%s",
     "devops_pipeline_scene_9bcf48": "SELECT id, repo_key, scene_id, nodes_json FROM devops_pipeline_scene WHERE is_active=1",
-    "devops_pipeline_scene_b5cd89": "SELECT nodes_json FROM devops_pipeline_scene WHERE id=%s",
     "devops_pipeline_scene_b5f6ee": "SELECT scene_id, name FROM devops_pipeline_scene WHERE repo_key=%s AND is_active=1 ORDER BY name",
     "devops_pipeline_scene_ab0110": "SELECT linked_repos, advanced_options FROM devops_pipeline_scene WHERE scene_id=%s AND repo_key=%s AND is_active=1 LIMIT 1",
     "devops_pipeline_scene_b1eaa2": "SELECT scene_id, nodes_json FROM devops_pipeline_scene WHERE repo_key=%s AND scene_id=%s AND is_active=1",
@@ -1558,6 +1557,25 @@ def _same_domain_write_cursor(cursor: Any = None):
 
 
 @contextmanager
+def _same_domain_read_cursor(cursor: Any = None):
+    """读游标：**调用方与表同库**时复用它，真跨域才换本域连接（读侧配套 `_same_domain_write_cursor`）。
+
+    `_owner_cursor` 只在「本域没有自有 DSN」时复用调用方游标；mgmt 进程内（同域 + 自有
+    DSN）它会另开 mgmt 连接，读的是另一条事务快照 —— 调用方在同一事务里刚改过的行就看不见。
+    读侧不涉及提交责任，但快照口径同样是原 SQL 语义的一部分，故这里与写侧共用同一条判据：
+      - 单库 / 视图期 / 测试（无自有 DSN）→ 复用调用方游标（同一事务快照）；
+      - mgmt 进程内（同域）→ 复用调用方游标；
+      - 其它域的进程 + 自有 DSN → 忽略调用方游标（那是外域库句柄，看不到本域表）。
+    """
+    if cursor is not None and (not db_registry.uses_own_dsn("mgmt")
+                               or db_registry.current_domain() == "mgmt"):
+        yield cursor
+        return
+    with _any_cursor() as c:
+        yield c
+
+
+@contextmanager
 def _any_tx():
     """多语句组合写：自有 DSN → 独立非 autocommit 连接（真事务）；单库 → 进程库 + db_lock。"""
     if db_registry.uses_own_dsn("mgmt"):
@@ -1743,6 +1761,8 @@ _ANY_QUERIES: dict[str, str] = {
     # ── 流水线场景 / 托管仓库（runtime 事件管道消费：QA 节点、PR 订阅、部署登记）──
     # 列序与 event_pipeline 原查询逐字一致（调用方按下标取值）；WHERE 通配口径照抄，
     # 包括「不加 is_active」的那条（QA skill 取节点时历史口径就是不过滤启用位）。
+    "scene_nodes_by_id": (
+        "SELECT nodes_json FROM devops_pipeline_scene WHERE id=?"),
     "scene_nodes_by_repo_scene": (
         "SELECT nodes_json FROM devops_pipeline_scene WHERE repo_key=? AND scene_id=?"),
     "pr_subscription_scenes": (
@@ -3023,6 +3043,27 @@ def scene_nodes_any(repo_key: str, scene_id: str) -> Any | None:
     """
     row = read_one_any("scene_nodes_by_repo_scene", (repo_key, scene_id))
     return row[0] if row else None
+
+
+def scene_nodes_row_by_id_any(row_id: int, cursor: Any = None) -> Any | None:
+    """按行号取场景节点行 `(nodes_json,)`：无行返回 None（行存在但值为 NULL 时返回 `(None,)`）。
+
+    对应 runtime `recovery._readd_scene_bindings` 的按 id 读节点。原实现是双份：
+    `mgmt_lib(foreign_only=True).read_one("devops_pipeline_scene_b5cd89", ...)` 优先，
+    不可用时（单库拓扑 / mgmt 进程内）在**调用方游标**上直发本表 —— 那句兜底 SQL 正是
+    跨域表引用的来源，且三库拓扑下 runtime 进程库没有本表（视图 0 → 1146），加回引擎
+    重建节点绑定会静默失败。语句上移后两条拓扑跑同一份 SQL。
+
+    语义逐字照抄：
+      - 只按主键定位，**不加 `is_active=1`**：解绑审计指向的场景可能已停用，多一个谓词
+        等于改了命中集合；
+      - 返回整行而不是首列，调用方要区分「无行」（标 rebound 跳过）与「行在、nodes_json
+        为 NULL/空串」（按 `or "[]"` 兜成空节点表）；
+      - `cursor` 语义见 `_same_domain_read_cursor`：同库时复用（保住调用方事务快照）。
+    """
+    with _same_domain_read_cursor(cursor) as c:
+        c.execute(_any_sql("scene_nodes_by_id"), (row_id,))
+        return c.fetchone()
 
 
 def scene_nodes_write_by_id(nodes_json: str, now_iso: str, row_id: int,
