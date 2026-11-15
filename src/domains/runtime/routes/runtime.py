@@ -1138,19 +1138,26 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
     # 白名单是「调用方主动声明」的正向信号，优先级最高——命中即跳过往返，
     # 静默型长任务（长时间无 task_messages）不再被误判孤儿。
     _active_whitelist = set((body.active_task_ids if body else []) or [])
+    # 「认领了但从未启动引擎会话」判死阈值（事件 #9733）：worker 把任务 claim 成 running，
+    # 却始终没有写 runtime_session_id（引擎进程压根没起来），此时回炉 queued 只会被同一个
+    # worker 再 claim 一次再卡一遍 —— 用户看到的就是永久 running 且 agent 没有任何输出。
+    # 用比 300s 宽限期更短的阈值单独判死，让故障更早暴露（引擎冷启动上界 90s 足够）。
+    CLAIM_NO_SESSION_FAIL_SECONDS = int(os.environ.get("CLAIM_NO_SESSION_FAIL_SECONDS", "90"))
     recovered, skipped_active, force_failed, skipped_young = [], [], [], []
+    _fail_reason_by_tid: dict[str, str] = {}
     skipped_active_reason = {}
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id, attempts, runtime_id, event_seq, started_at, created_at "
+            "SELECT id, attempts, runtime_id, event_seq, started_at, created_at, "
+            "COALESCE(runtime_session_id,'') "
             "FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
             (runtime_id,))
         rows = c.fetchall()
         _seq_by_tid = {}
-        for tid, attempts, rid, ev_seq, _sa, _ca in rows:
+        for tid, attempts, rid, ev_seq, _sa, _ca, _rs in rows:
             _seq_by_tid[tid] = ev_seq
-        for tid, attempts, rid, _ev_seq, started_at, created_at in rows:
+        for tid, attempts, rid, _ev_seq, started_at, created_at, _rsid in rows:
             # Issue #1750 P1-A：白名单命中 → worker 自报仍在跑，直接 skipped_active。
             # 位置在年龄闸门与活跃窗口之前（白名单优先级最高）：静默型长任务即使
             # 超龄且窗口内无消息，也绝不会被回炉。
@@ -1158,11 +1165,44 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
                 skipped_active.append(tid)
                 skipped_active_reason[tid] = "active_whitelist"
                 continue
+            # 年龄基准（started_at，NULL 兜底 created_at）
+            _age_base = started_at or created_at
+            _age_seconds = None
+            if _age_base:
+                try:
+                    _age_dt0 = datetime.fromisoformat(_age_base)
+                    if _age_dt0.tzinfo is None:
+                        _age_dt0 = _age_dt0.replace(tzinfo=timezone.utc)
+                    _age_seconds = (_now - _age_dt0).total_seconds()
+                except Exception:
+                    _age_seconds = None
+            # 「认领但从未启动会话」→ 直接判死，不进无限回炉（事件 #9733 实锤：
+            # worker 认领后引擎进程没起来，runtime_session_id 恒空、task_messages 恒 0，
+            # 回炉后同一 worker 再次认领再次卡住，用户侧表现为永久 running 且无任何输出）。
+            # 只在「已经回炉过一次（attempts>=1）仍无会话」时判死：首次无会话保留原有
+            # 孤儿回收语义（回炉 + attempts+1），避免改变 Issue #1750 基线锁定的行为。
+            if (not (_rsid or "").strip()) and (attempts or 0) >= 1 \
+                    and _age_seconds is not None \
+                    and _age_seconds >= CLAIM_NO_SESSION_FAIL_SECONDS:
+                c.execute(
+                    "UPDATE agent_tasks SET status='failed', attempts=?, "
+                    "result_text=?, completed_at=? WHERE id=? AND status IN ('dispatched','running')",
+                    ((attempts or 0) + 1,
+                     "claimed but the engine session never started "
+                     "(runtime_session_id empty; the worker never spawned the engine process)",
+                     _now.isoformat(), tid))
+                if rid and rid > 0:
+                    from src.domains.runtime.engine.service import release_busy_slot
+                    release_busy_slot(rid, cursor=c)
+                force_failed.append(tid)
+                _fail_reason_by_tid[tid] = (
+                    "claimed but the engine session never started "
+                    "(runtime_session_id empty)")
+                continue
             # 年龄闸门（Issue #370）：started_at（NULL 兜底 created_at）距 now 不足
             # 宽限期 → 直接 skipped，防止刚派发的新任务被误判孤儿反复回炉。
             # 时间戳解析失败保守跳过闸门，继续后续活跃度检查（保持旧行为：回收）。
-            _age_base = started_at or created_at
-            if _age_base:
+            if _age_seconds is not None:
                 try:
                     _age_dt = datetime.fromisoformat(_age_base)
                     if _age_dt.tzinfo is None:
@@ -1227,6 +1267,8 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
                  _att, RECOVER_MAX_ATTEMPTS, _pool_fill, tid))
             if _att >= RECOVER_MAX_ATTEMPTS:
                 force_failed.append(tid)
+                _fail_reason_by_tid[tid] = (
+                    "recover-orphans attempts cap reached (possible self-restart loop)")
             else:
                 recovered.append(tid)
             # 槽位释放（与 service.py 回收/update_task_status/requeue_task 同款防负数写法）：
@@ -1245,11 +1287,12 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
             continue
         try:
             from src.api.event_store import update_event_complete
+            _reason = _fail_reason_by_tid.get(tid) or (
+                "recover-orphans attempts cap reached (possible self-restart loop)")
             update_event_complete(
                 _seq, "failed", exit_code=1,
                 completed_at=datetime.now(timezone.utc).isoformat(),
-                result="recover-orphans attempts cap reached "
-                       "(possible self-restart loop), 任务判死")
+                result=f"{_reason}, 任务判死")
         except Exception as e:
             log.warning(f"recover-orphans event writeback failed tid={tid}: {e}")
     if recovered or skipped_active or force_failed or skipped_young:
