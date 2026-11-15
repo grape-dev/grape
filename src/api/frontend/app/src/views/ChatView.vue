@@ -1550,7 +1550,6 @@ function closeOnboardModal(refresh) {
 
 // ── app.js nav 契约 ──
 // app.js nav('chat', param) 调 renderChat(param)；离开 chat 页时 app.js 直接 abort window._chatStreamAbort
-G.window.renderChat = null // 契约由入口 entries/chat-view.js 持有（fresh mount + openConvId 注入）
 G.window.resumeChatTask = function () {
   // 切回 Chat 页恢复活跃查询（app.js nav('chat') 后 setTimeout 调用）
   if (!currentConvId.value) return
