@@ -92,6 +92,20 @@ if [ -z "${GRAPE_GSB_BASE_URL:-}" ]; then
     fi
 fi
 
+# ── 连接池上限（三库拓扑下四个进程共用一个 runtime 库）──────────────────────
+# 默认 32 连接 × 4 进程 + 跨域连接会打满本地 runtime MySQL（默认 max_connections=151）。
+# 打满后 pymysql 抛 1040，跨域读全部失败 → meta/scene_category/skill 满屏 1146。
+# 这里按角色给保守上限（仍可用环境变量覆盖）：
+#   worker 是 runtime 库的 owner，给最多；mgmt/event/insight 只做跨域读。
+case "$role" in
+    worker)  _pool_conn="${DB_POOL_MAX_CONNECTIONS:-48}"; _pool_cache="${DB_POOL_MAX_CACHED:-24}" ;;
+    mgmt)    _pool_conn="${DB_POOL_MAX_CONNECTIONS:-16}"; _pool_cache="${DB_POOL_MAX_CACHED:-8}"  ;;
+    event)   _pool_conn="${DB_POOL_MAX_CONNECTIONS:-12}"; _pool_cache="${DB_POOL_MAX_CACHED:-6}"  ;;
+    insight) _pool_conn="${DB_POOL_MAX_CONNECTIONS:-12}"; _pool_cache="${DB_POOL_MAX_CACHED:-6}"  ;;
+esac
+export DB_POOL_MAX_CONNECTIONS="$_pool_conn"
+export DB_POOL_MAX_CACHED="$_pool_cache"
+
 # 配置由 systemd EnvironmentFile=.env 注入；这里只补 metrics/tracing 的运行期变量，
 # 不写 .env（避免影响 restart-four-process.sh 等其它启动方式）。
 export METRICS_ADDR="127.0.0.1:${mport}"

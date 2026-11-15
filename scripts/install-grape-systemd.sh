@@ -83,7 +83,7 @@ say "repo=$REPO node_ip=$NODE_IP 3db=$USE_3DB 源DSN=${SRC_ENV:-<none>}"
 # ── 1. 三库 DSN 环境文件 ─────────────────────────────────────────────────────
 if [ "$USE_3DB" = "1" ]; then
     if [ "$(readlink -f "$SRC_ENV")" != "$(readlink -f "$ENV_FILE" 2>/dev/null || echo "$ENV_FILE")" ]; then
-        run "install -d -m 750 $ENV_DIR"
+        run "install -d -m 755 $ENV_DIR"
         run "install -m 640 -g grape '$SRC_ENV' '$ENV_FILE'"
         say "DSN 文件 → $ENV_FILE (root:grape 640)"
     else
@@ -171,15 +171,19 @@ for _ in $(seq 1 30); do
 done
 
 printf '\n%-8s %-7s %-9s %-9s %-8s %s\n' ROLE PORT UNIT_PID HEALTH_PID STATE HTTP
+mismatch=0
 for role in $ROLES; do
     port="${PORT[$role]}"
     unit_pid="$(systemctl show -p MainPID --value "grape@$role.service" 2>/dev/null || echo 0)"
-    health_pid="$(curl -s -m 3 "http://127.0.0.1:$port$(health_path "$role")" 2>/dev/null \
+    # uvicorn 级 /health 才带 pid；/api/health 是应用级（无 pid），别拿它做托管判定
+    health_pid="$(curl -s -m 3 "http://127.0.0.1:$port/health" 2>/dev/null \
         | python3 -c 'import json,sys;print(json.load(sys.stdin).get("pid","-"))' 2>/dev/null || echo -)"
+    [ "$unit_pid" != "$health_pid" ] && mismatch=1
     state="$(systemctl is-active "grape@$role.service" 2>/dev/null || true)"
     code="$(curl -s -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port$(health_path "$role")" 2>/dev/null || echo 000)"
     printf '%-8s %-7s %-9s %-9s %-8s %s\n' "$role" "$port" "$unit_pid" "$health_pid" "$state" "$code"
 done
+[ "$mismatch" = "1" ] && say "WARN: 有角色 MainPID != /health pid（可能仍在跑旧进程或端口被占）" >&2
 
 echo
 if [ "$ok" = "1" ]; then

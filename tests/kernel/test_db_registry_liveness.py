@@ -71,16 +71,34 @@ def test_healthy_recent_conn_not_pinged_again(domain_env, monkeypatch):
     assert alive.pings == 0
 
 
-def test_forbidden_expires_and_retries(domain_env, monkeypatch):
+def test_permanent_error_disables_domain_transient_backs_off(domain_env, monkeypatch):
+    """合并后的策略（2026-11-15 远端分支）：权限类错误永久停用，临时错误 5s 退避重试。"""
     import time as _t
-    domain_env._forbidden["runtime"] = _t.time()  # 刚刚失败 → 60s 内返回 None
-    assert domain_env.domain_db("runtime") is None
+    import pymysql
 
-    domain_env._forbidden["runtime"] = _t.time() - 3600  # 过期 → 允许重试
+    def _raise(exc):
+        def _f(domain, autocommit=True):
+            raise exc
+        return _f
+
+    # ① 永久错误（1145 access denied）→ 进 _forbidden，立即返回 None
+    monkeypatch.setattr(domain_env, "_new_conn", _raise(pymysql.err.OperationalError(1045, "denied")))
+    assert domain_env.domain_db("runtime") is None
+    assert "runtime" in domain_env._forbidden
+
+    # ② 临时错误（2013 连接丢失）→ 只设退避，不进永久禁用
+    domain_env.reset(close=False)
+    monkeypatch.setattr(domain_env, "_new_conn", _raise(pymysql.err.OperationalError(2013, "lost")))
+    assert domain_env.domain_db("runtime") is None
+    assert "runtime" not in domain_env._forbidden
+    assert domain_env._retry_after.get("runtime", 0) > _t.monotonic()
+
+    # ③ 退避过期后允许重试，成功后清掉退避记录
     ok = _FakeConn()
     monkeypatch.setattr(domain_env, "_new_conn", lambda d, autocommit=True: ok)
+    domain_env._retry_after["runtime"] = _t.monotonic() - 1
     assert domain_env.domain_db("runtime") is ok
-    assert "runtime" not in domain_env._forbidden
+    assert "runtime" not in domain_env._retry_after
 
 
 def test_retry_cursor_reconnects_once_on_interface_error(domain_env, monkeypatch):
