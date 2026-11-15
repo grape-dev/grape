@@ -4,6 +4,76 @@ from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
 from src.kernel.config import log
 
+
+class _OwnedCursor:
+    """自带连接的游标：close 时把连接一并关掉。"""
+
+    def __init__(self, conn, cursor):
+        self._conn = conn
+        self._cur = cursor
+
+    def __getattr__(self, item):
+        return getattr(self._cur, item)
+
+    def close(self):
+        try:
+            self._cur.close()
+        finally:
+            try:
+                self._conn.close()
+            except Exception as _e:
+                log.debug(f"cursor close failed: {_e}")
+
+
+class _DomainDbProxy:
+    """把 db.cursor()/commit()/rollback() 代理到 runtime 域连接。
+
+    流水线看板读 events / agent_tasks（runtime 域），但路由由 mgmt 进程服务；
+    三库模式下 mgmt 主库没有这些表，直连必然查空。
+    """
+
+    def cursor(self, *a, **kw):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.cursor(*a, **kw)
+        if db_registry.uses_own_dsn("runtime"):
+            _conn = db_registry.new_connection("runtime")
+            return _OwnedCursor(_conn, _conn.cursor(*a, **kw))
+        from src.kernel.session_manager import db as _main
+        return _main.cursor(*a, **kw)
+
+    def commit(self):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.commit()
+        if db_registry.uses_own_dsn("runtime"):
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.commit()
+
+    def rollback(self):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.rollback()
+        if db_registry.uses_own_dsn("runtime"):
+            try:
+                db_registry.domain_db("runtime").rollback()
+            except Exception as _e:
+                log.debug(f"domain rollback failed: {_e}")
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.rollback()
+
+    def __getattr__(self, item):
+        from src.kernel.session_manager import db as _main
+        return getattr(_main, item)
+
+
+_rt_db = _DomainDbProxy()
+
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
 AGENT_ORDER = ["vod", "issue", "coding", "qa", "sre"]
@@ -137,7 +207,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
     # title_map 已提供有效标题时跳过 DB 查询；否则回退到 DB 查询（兼容无 title_map 的调用）
     if not title_map or _is_placeholder(title):
         try:
-            from src.kernel.session_manager import db as _db, db_lock as _dl
+            from src.kernel.session_manager import db_lock as _dl
+            _db = _rt_db
             _iss_num = int(str(issue_id).lstrip("#"))
             with _dl:
                 _c = _db.cursor()
@@ -207,7 +278,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
                 title = _api_title
                 # 回写 tasks 表（后续不再调 API）
                 try:
-                    from src.kernel.session_manager import db as _db2, db_lock as _dl2
+                    from src.kernel.session_manager import db_lock as _dl2
+                    _db2 = _rt_db
                     with _dl2:
                         _c2 = _db2.cursor()
                         _c2.execute("UPDATE issue SET title=? WHERE repo_key=? AND issue_number=? AND (title='' OR title IS NULL)",
@@ -375,7 +447,8 @@ def _running_issue_ids(repo_keys) -> set[str]:
     """按 repo 查 agent_tasks 中 queued/dispatched/running 的 issue_id 集合（前端 B 执行态派生）。"""
     if isinstance(repo_keys, str):
         repo_keys = [repo_keys]
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     try:
         with db_lock:
             c = db.cursor()
@@ -405,7 +478,8 @@ def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
     场景判定用 SQL LEFT JOIN：issue.scene_id 权威、events.scene_id 兜底，
     走 idx_tasks_repo_issue(repo_key, issue_number) 等值查找，不扫全表。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     _ph = ",".join("?" * len(repo_keys))
     need = max(1, int(need))
     # Issue #1312：审计事件与无归属事件不参与流水线聚合
@@ -473,8 +547,9 @@ def get_pipeline(owner: str, repo: str,
     from src.kernel.repo_key import repo_key_candidates
     _repo_keys = repo_key_candidates(_owner_repo)
 
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
 
+    db = _rt_db
     # Issue #1077-P：先算「要构建的 issue 窗口」（SQL 聚合 + 场景过滤），
     # 再只加载/归一化这些 issue 的事件——原先 60k 事件逐条 normalize_event_time
     # （每次还做一次后端探测）单独就占 0.8s。
