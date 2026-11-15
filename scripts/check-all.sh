@@ -30,6 +30,11 @@ echo "=== Running all contract checks ==="
 # 通道（MgmtServiceRemote / GsbClient("mgmt") / ServiceHttpClient("mgmt") /
 # _PROVIDERS 裸访问）；运行时守卫见 src/kernel/gsb/provider.py::matrix_forces_lib。
 "$PY" scripts/check_gsb_route_matrix.py || exit 1
+# Issue #2504：跨域读清单棘轮门禁——src/ 跨域读点清单必须与基线快照一致
+# （scripts/p4/read_inventory_baseline.json）。新增裸读/读点漂移即 FAIL；更新基线
+# 须 `--update-baseline` 并在 PR 中说明理由（维护流程见
+# docs/lib-3db/read-inventory-diff.md）。
+"$PY" scripts/p4/scan_cross_domain_reads.py --check || exit 1
 # Issue #897：契约端点完整性卡点——核心工作流端点（/api/a2a、/api/tasks/* 等）
 # 不得从 OpenAPI 契约丢失（v2.2.0 曾被子集落盘覆盖，CLI 命令组不渲染）。
 # --require-baseline：基线快照（help/api/openapi-baseline.json）缺失时 FAIL，

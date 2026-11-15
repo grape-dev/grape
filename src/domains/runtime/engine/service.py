@@ -56,6 +56,13 @@ class _DomainDbProxy:
 
     def commit(self):
         from src.kernel import db_registry
+        # 与 cursor() 的取连接分支保持严格一致：runtime 域进程走 session_manager.db
+        # （autocommit=False 的线程级连接），这里必须真的 commit，否则 enqueue 写进去的
+        # 任务行一直悬在事务里——UI 看到"排队中"却查不到 agent_tasks，任何 rollback
+        # 还会把它悄悄回滚掉。
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.commit()
         if db_registry.uses_own_dsn("runtime"):
             return None
         from src.kernel.session_manager import db as _main
@@ -63,6 +70,9 @@ class _DomainDbProxy:
 
     def rollback(self):
         from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.rollback()
         if db_registry.uses_own_dsn("runtime"):
             try:
                 db_registry.domain_db("runtime").rollback()
@@ -2153,11 +2163,14 @@ _EVENT_CASCADE_RESULTS = {
 }
 
 
-def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int = None):
+def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int = None,
+                            result_text: str = ""):
     """Issue #587: 任务终态级联事件收敛（事务内，幂等，终态保护）。
 
     仅当事件仍处于活跃态（pending/running/dispatched）时同步为任务终态；
     已终态事件不被另一终态覆盖（与 event_store.update_event_status 同语义）。
+    `result_text`：任务已自报（self_reported=1）时传入真实结论——终态回写用它，
+    避免成功任务被盖上「回报丢失补偿」的兜底文案（事件侧真实结果还会被终态保护拒写）。
     返回 True 表示本次发生收敛。
     """
     try:
@@ -2169,6 +2182,10 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
             return False
         _now = datetime.now(timezone.utc).isoformat()
         _result = _EVENT_CASCADE_RESULTS.get(status, f"级联收敛：任务{status}")
+        _self_report = (result_text or "").strip()
+        if status == "completed" and _self_report:
+            # 自报结果优先（截断与 event_store 终态回写同口径），仅在缺失时才用兜底文案
+            _result = _self_report[:8000]
         if status == "cancelled":
             cursor.execute(
                 "UPDATE events SET status='cancelled', exit_code=-1, completed_at=?, result=? WHERE seq=?",
@@ -2321,7 +2338,18 @@ def update_task_status(task_id, status, **kw):
                 _evt_row = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?",
                                      (task_id,)).fetchone()
                 if _evt_row and _evt_row[0]:
-                    if _cascade_event_terminal(c, _evt_row[0], status):
+                    # 自报优先：agent 已通过 `tasks complete` 交过结论时，级联回写用真实结果，
+                    # 不要盖「回报丢失补偿」（8380/8381 这类成功任务曾被误标成回报丢失）。
+                    _self_txt = ""
+                    try:
+                        _srow = c.execute(
+                            "SELECT self_reported, result_text FROM agent_tasks WHERE id=?",
+                            (task_id,)).fetchone()
+                        if _srow and int(_srow[0] or 0) == 1 and (_srow[1] or "").strip():
+                            _self_txt = _srow[1]
+                    except Exception:
+                        _self_txt = ""
+                    if _cascade_event_terminal(c, _evt_row[0], status, result_text=_self_txt):
                         _cascaded_seq = _evt_row[0]
                         log.info(f"update_task_status: cascaded event {_evt_row[0]} -> "
                                  f"{status} for task {task_id} (Issue #587 convergence)")
@@ -2478,6 +2506,13 @@ def report_messages(task_id, messages, seq_start: int | None = None) -> dict | N
                         (_json.dumps(_prev + _logs, ensure_ascii=False), task["event_seq"]))
                     _rt_db.commit()
         except Exception as e:
+            # 分库后这条连接是 autocommit=False 的线程级连接：异常时不回滚会把事务
+            # 和行锁一直挂着，后续任何写 events/task_messages 的会话都要等满
+            # innodb_lock_wait_timeout(50s) 才 1205，回报随之丢失（流水线停在上一棒）。
+            try:
+                _rt_db.rollback()
+            except Exception:
+                pass
             log.warning(f"report_messages events.agent_logs failed: {e}")
     # 结构化落库（task_messages，双后端一致；seq 服务端生成 MAX+1，UNIQUE 防重放）
     # 收集落库后的 (原始消息, seq) 对，供 fanout 透传 seq（前端按 seq 去重，跨主 DB 尾随双通道不重复渲染）
@@ -2531,6 +2566,11 @@ def report_messages(task_id, messages, seq_start: int | None = None) -> dict | N
                     log.info(f"report_messages: task={task_id} persisted count={len(_seq_messages)} "
                              f"seq_range={_seq_first}..{_seq_messages[-1].get('seq')}")
         except Exception as e:
+            # 同上：半批插入失败后必须回滚，否则线程级连接把已插入行的锁带到后续任务
+            try:
+                _rt_db.rollback()
+            except Exception:
+                pass
             log.warning(f"report_messages task_messages insert failed: {e}")
             _receipt = {}
     # 实时 fanout（订阅表推送，队列满丢弃保活；SSE 重连靠 since 回源）

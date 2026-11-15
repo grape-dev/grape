@@ -1,0 +1,38 @@
+{
+ "files": {
+  "src/domains/insight/routes/dashboard.py": 1,
+  "src/domains/insight/routes/latency.py": 4,
+  "src/domains/runtime/agents/executor.py": 3,
+  "src/domains/runtime/engine/branch_guard.py": 6,
+  "src/domains/runtime/engine/cleanup.py": 16,
+  "src/domains/runtime/engine/deploy_evidence.py": 1,
+  "src/domains/runtime/engine/direct_executor.py": 10,
+  "src/domains/runtime/engine/engine_select.py": 13,
+  "src/domains/runtime/engine/local_claimer.py": 9,
+  "src/domains/runtime/engine/recovery.py": 12,
+  "src/domains/runtime/engine/scheduler.py": 15,
+  "src/domains/runtime/engine/table_maintenance.py": 7,
+  "src/domains/runtime/engine/transient_retry.py": 9,
+  "src/domains/runtime/im/bot_lease.py": 8,
+  "src/domains/runtime/im/feishu_async.py": 11,
+  "src/domains/runtime/im/handler_async.py": 13,
+  "src/domains/runtime/im/notify.py": 1,
+  "src/domains/runtime/im/seen_store.py": 3,
+  "src/domains/runtime/im/vod_handler_async.py": 14,
+  "src/domains/runtime/onboarding.py": 7,
+  "src/domains/runtime/pr_merged_sre_retry.py": 5,
+  "src/domains/runtime/routes/chat.py": 13,
+  "src/domains/runtime/routes/runtime.py": 60,
+  "src/domains/runtime/routes/task_logs.py": 1,
+  "src/domains/runtime/routes/tasks.py": 13,
+  "src/domains/runtime/routes/webhook.py": 15,
+  "src/domains/runtime/storage/scene_sync.py": 7,
+  "src/domains/runtime/storage/skill_sync.py": 5
+ },
+ "risk_domains": {
+  "insight": 5,
+  "runtime": 277
+ },
+ "risk_sites": 282,
+ "total_sites": 543
+}
