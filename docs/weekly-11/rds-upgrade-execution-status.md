@@ -6125,6 +6125,87 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （后台线程连接池化，独立一轮），其余 6 处是 `src/api` 单点（`a2a_dispatch` / `event_archive` /
   `merge_gate` / `middleware` / `pipeline_executor` 各 1 + `contracts/local/mgmt_local.py` 1）。
 
+### 7.57 contracts mgmt_local 的仓库凭据读下沉 insight owner 域（2026-11-15 本批）
+
+- **文件**：`src/domains/contracts/local/mgmt_local.py`（contracts 域），**1 处 → 0（本文件清零）**。
+- **表分布**：`grape_t_repo_credentials` 归 **insight**（`table-owner.tsv` → `grape_insight_db`）。
+  该表跨域引用 17 → 16，消费方由 `insight:16;contracts:1` 收敛为 `insight:16`，
+  **已退出跨域榜单**（tables 7 → 6、pairs 7 → 6、cross_domain_refs 12 → 11）。
+- 原形态：`_repo_credential(c, repo_key, cred_type)` 收**调用方（mgmt）游标** `c` 直读
+  ```python
+  row = c.execute("SELECT value FROM grape_t_repo_credentials "
+                  "WHERE repo_key=? AND cred_type=?", (repo_key, cred_type)).fetchone()
+  ```
+  调用点 `get_repo_webhook_config` / `get_bot_config` 都在 `with self._lock:` 里拿
+  `self._db.cursor()`（单库 = 进程主库；自有 DSN = **mgmt 库**）。
+- **设计取舍**：
+  1. **复用已有具名查询 + 薄函数**：insight public 早有
+     `repo_credential_value(repo_key, cred_type)`（`_REPO_CRED_QUERIES["repo_cred_value"]`
+     = `SELECT value FROM grape_t_repo_credentials WHERE repo_key=? AND cred_type=?`，
+     列序/谓词/占位符与原地直读**逐字一致**），本批不再新登记同义 SQL，只把调用点接上去。
+     同一域内 `mgmt/user/db.get_repo_credential_value()` 已是这条通道（S82 起），
+     本批让 contracts 与它同口径。
+  2. **去掉游标入参**：`_repo_credential` 的 `c` 已成误导（读的根本不是那条连接），
+     签名收敛为 `(repo_key, cred_type)`，3 个调用点同步改；函数体零 SQL、零 `.execute(`、
+     零 `fetchone`，由 `read_one_any` 负责「自有 DSN → insight 库；单库/测试 → 进程主库」。
+  3. **锁语义不变但不再叠加**：单库拓扑下 insight 的 `_any_cursor` 取的是同一把
+     `session_manager.db_lock`（`threading.RLock()`，**可重入**），所以「调用方已持 mgmt 锁
+     再进 insight 原语」不会死锁；自有 DSN 拓扑下读走 insight 独立连接，与 mgmt 的
+     `managed_repos` 读本就是两条连接，原实现也没有跨库事务可保。烟测 C 段用**持锁线程 +
+     20s join** 反证重入没被破坏。
+  4. **解密仍在调用方**：`repo_credential_value` 返回未解密值（与 insight public 的
+     其它凭据口一致），`_decrypt_repo_secret` 留在 contracts，读失败/解密失败两条降级
+     路径都保留 `log.warning`（未新增静默 except）。
+  5. **回落链一个字没动**：`rc → 卡派生列 → webhook_secret → ""`（webhook），
+     `rc → 卡派生列 → ""`（bot）；`provider` 仍由 `parse_repo_key` 权威解析。
+     本批只换「rc 那一档」的来源连接，不动优先级——这是最容易顺手改错的地方。
+- **修的存量 bug**（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  **独立三库拓扑下仓库凭据恒读不到** —— 原句发在 mgmt 的 `self._db` 连接上，而该表在
+  insight 库；mgmt 库无此表 → `1146` → 被 `except` 吞成空串并留 warning。后果按平台分两类：
+  gitcode/github 仓凭据**静默回落** `managed_repos` 物理列（`bot_gitcode_token` 等，
+  与 rc 唯一权威 S82/D58 口径相悖，多实例间会读到**旧 token**）；
+  gitlab/gitee 卡已封列（`token_storage_field=""`，凭据只落 rc）→ bot/webhook token
+  **恒空**，webhook 校验与 bot 调用整条链在真正独立拓扑下失效。单库/测试拓扑两条路径
+  是同一个库所以一直是绿的。归位后两类拓扑同一份 SQL、同一条返回路径；
+  烟测 D 段以「自有 DSN 只连 `domain=insight`、语句与参数逐字」+ C5「gitlab 终态无物理列
+  → rc 空即空」反证。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/contracts/local/mgmt_local.py`）→ **COMPILE_OK**；
+  · `~/burndown/mgmt_local_cred_smoke.py`
+    （`DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=~/burndown/mgmt_local_cred.db`，连跑 2 次稳定，EXIT=0）
+    → **ALL mgmt_local_cred smoke PASSED (85 checks)**：
+    A 33 项注册面/静态否定（`repo_cred_value` 逐字、恰好 2 个 `?`、列序 `value`、无
+    `NOW()`/反引号/`%s`/`ON DUPLICATE`、薄函数体内零字面 SQL 且只调 `read_one_any`、
+    本模块无 `FROM grape_t_repo_credentials` / 无 `%s` / 无游标参数 / 无 `.execute(`、
+    insight 只在函数体内延迟导入、两处降级各留 `log.warning`、3 个调用点两参形态）；
+    B 14 项 `_repo_credential` 语义（无行 → `""`、明文原样、密文解密 round-trip、
+    bot/webhook 不串、repo_key 不串、空串行 → `""`、长值/unicode 透传、
+    **三段式明文按原 decrypt 口径降级 `""` + warning**、`DROP` 表 → `""` + warning 不抛）；
+    C 20 项调用点端到端（rc 优先于物理列、rc 空 → gitcode 派生列、webhook 链第三档
+    `webhook_secret`、全空 → `""`、`org_id=0` 如实、**gitlab 终态无物理列 → rc 空即空**、
+    未登记仓库 → `{}`、**持锁线程内调用 20s 内返回（RLock 重入未破坏）**）；
+    D 11 项拓扑判据（自有 DSN → 只连 `domain=insight` 一次、语句/参数 `(repo_key, "bot")`
+    逐字、无行 → `""`、`1146` 类异常 → 降级 `""` + warning；无自有 DSN → **不碰**
+    `db_registry.cursor`、回落进程主库读真值）；
+    E 7 项棘轮余量（`cross_domain_refs=11` / `pairs=6` / `tables=6`、
+    `grape_t_repo_credentials` 已不在榜单、基线 6 对且不含该表）；
+  · `--update-baseline` → **baseline updated: 6 pairs, 11 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **6 表 / 11 跨域引用 / 6 对**
+    （`sql_references` 496 → 479 的差值是「该表 16 处同域引用不再进入跨域榜单」，非语句删除）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `venv/bin/python -m pytest tests/arch tests/contracts tests/scripts -q -p no:cacheprovider`
+    → **158 passed**（EXIT=0）；
+  · `make lint` → **import OK**（EXIT=0）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD` / `REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新响应字段）。
+- **新基线**：**11 处 / 6 对 / 6 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  余下 11 处分两族：⛔ `prompt_builder.py` ×3（文案，不改数字）、⛔ `credential_usage_log.py` ×3
+  （后台线程连接池化，独立一轮），其余 5 处是 `src/api` 单点（`a2a_dispatch` / `event_archive` /
+  `merge_gate` / `middleware` / `pipeline_executor` 各 1）——`contracts/local/mgmt_local.py`
+  本轮已清零。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

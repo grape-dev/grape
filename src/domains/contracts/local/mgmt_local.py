@@ -59,26 +59,27 @@ def _provider_credential_columns(provider: str) -> tuple[str, str]:
     return tok_col, wh_col
 
 
-def _repo_credential(c, repo_key: str, cred_type: str) -> str:
+def _repo_credential(repo_key: str, cred_type: str) -> str:
     """读 grape_t_repo_credentials 单仓库凭据（S82/D58 起为凭据唯一权威）。
 
     cred_type ∈ {'bot','webhook'}（平台语义由 repo_key 前缀承载，D99）；
     表不存在（旧库/裁剪库）或读失败 → 空串（调用方回落历史列），并留 warning。
+
+    表归 insight（table-owner.tsv），读写只经 insight public 的
+    `repo_credential_value`（任意拓扑原语：自有 DSN 走 insight 连接，单库回落进程库），
+    本模块不再持有该表的 SQL——原先在 mgmt 连接上直读，独立三库拓扑下必然 1146。
     """
     try:
-        row = c.execute(
-            "SELECT value FROM grape_t_repo_credentials "
-            "WHERE repo_key=? AND cred_type=?",
-            (repo_key, cred_type),
-        ).fetchone()
+        from src.domains.insight import public as _insight_public
+        raw = _insight_public.repo_credential_value(repo_key, cred_type)
     except Exception as e:
         log.warning(f"mgmt_local: grape_t_repo_credentials read failed ({repo_key}, {cred_type}): {e}")
         return ""
-    if not row or not row[0]:
+    if not raw:
         return ""
     try:
         from src.domains.mgmt.user.db import _decrypt_repo_secret
-        return _decrypt_repo_secret(row[0]) or ""
+        return _decrypt_repo_secret(raw) or ""
     except Exception as e:
         log.warning(f"mgmt_local: repo credential decrypt failed ({repo_key}, {cred_type}): {e}")
         return ""
@@ -126,7 +127,7 @@ class MgmtServiceLocal(MgmtService):
             if not data:
                 return {}
             webhook_token = (
-                _repo_credential(c, repo_key, "webhook")
+                _repo_credential(repo_key, "webhook")
                 or (data.get(wh_col) if wh_col else "")
                 or data.get("webhook_secret")
                 or ""
@@ -260,12 +261,12 @@ class MgmtServiceLocal(MgmtService):
             if not data:
                 return {}
             bot_token = (
-                _repo_credential(c, repo_key, "bot")
+                _repo_credential(repo_key, "bot")
                 or (data.get(bot_col) if bot_col else "")
                 or ""
             )
             webhook_token = (
-                _repo_credential(c, repo_key, "webhook")
+                _repo_credential(repo_key, "webhook")
                 or (data.get(wh_col) if wh_col else "")
                 or ""
             )
