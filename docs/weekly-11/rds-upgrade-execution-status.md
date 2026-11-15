@@ -4784,6 +4784,93 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   其后是 `src/api/git_repo_api.py`（2 处）；头两名仍是 ⛔ blocked 的 `credential_usage_log.py`（3 处）
   与 `prompt_builder.py`（3 处）。
 
+### 7.40 insight 统一事件视图的 events / audit_logs 下沉 owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/insight/observability/events_view.py` **2 处 → 0**（单轮做完，2 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：两处、两张表，**分属两个 owner**
+  - L322（改前）`_change_events`：`SELECT seq, repo_key, event_type, issue_id, title, actor,
+    duration, started_at, completed_at, created_at, entity_type FROM events WHERE
+    event_type='pull_request_merged' [AND repo_key IN (<n 个 ?，按可见仓库键展开>)]
+    [AND (title LIKE ? OR actor LIKE ? OR issue_id LIKE ?)] ORDER BY seq DESC LIMIT ?`
+    —— `events` 1 处（归 **runtime**）；两段谓词与占位符个数都是 Python 动态拼接。
+  - L360（改前）`_audit_events`：`SELECT id, event_type, user_id, operator_id, ip, created_at,
+    detail FROM audit_logs [WHERE (event_type LIKE ? OR detail LIKE ?)] ORDER BY seq DESC LIMIT ?`
+    —— `audit_logs` 1 处（归 **mgmt**，**仅 L2** 管理台来源）；`WHERE` 与末位 `LIMIT ?` 动态拼接。
+  - 同文件的告警来源（`obs_alert_events`）与任务来源（`agent_tasks`）此前已走 owner 原语，本批不动；
+    `state` 参数在这两个函数里只做取数窗口，不参与 SQL（原实现也不参与），行为不变。
+- owner 侧改动：
+  - `src/domains/mgmt/public/__init__.py`：`_ANY_QUERIES` 新增两条具名查询
+    `audit_recent_rows`（无关键字）/ `audit_recent_rows_q`（两列 LIKE），列序、谓词、
+    `ORDER BY seq DESC LIMIT ?` 与原语句逐字一致，只用 `?` 占位符、无 `NOW()` / `ON DUPLICATE`；
+    新增薄函数 `audit_recent_rows(limit, like="")`（`like` 为空走无谓词分支，非空时**调用方**先包
+    `%kw%`，原语只收参数），`__all__` 登记。
+  - runtime 侧**零新增**：`query_events_any(select, where, params, order_by, limit)` 已存在
+    （受控查询：列白名单 `_EVENT_COLS` + `where` 片段禁分号/注释/子查询），本批直接复用 ——
+    与 `dashboard.py` 的 4 个同构调用点同一形态，不为「分清来源」另建同义键。
+- 调用点 `events_view.py`：
+  - `_change_events` 删掉「`runtime_lib()` 优先 + 进程主库兜底 SQL」整段双分支，改
+    `from src.domains.runtime import public as _runtime_public` + `query_events_any(...)`；
+    `inspect` 级的 `_COLS` 字面量保留（列序是原语句的一部分）。
+  - `_audit_events` 删掉 `from src.kernel.session_manager import db, db_lock` 与整条 SQL，
+    改 `mgmt_public.audit_recent_rows(int(limit), _like(q) if q else "")`。
+  - 新增模块常量 `_CHANGE_REPO_KEY_CHUNK = 200`（可见仓库键分块上限）。
+- 设计取舍：
+  1. **events 复用既有受控查询，不新建原语**：`query_events_any` 的校验面（列白名单 + 片段禁令）
+     本来就覆盖本调用点；另建一条「PR 合并专用查询」会把同一张表的谓词口径分裂成两份，
+     后续 dashboard 侧再改就会静默不一致（本仓已有「两套同义原语并存 → 调用方选错」的先例）。
+  2. **audit 用「两条具名查询」而不是 owner 内拼 where**：本调用点的动态性只有「一个可选谓词」，
+     两条登记语句就能把 SQL 100% 留在 owner 域；`like` 由调用方包通配符，保留原 `_like(q)`
+     的「`%`/`_` 当通配符、不转义」口径（与 `logs.search` 一致）。
+  3. **分块等价性靠 `seq`**：`events.seq` 是自增唯一主键且无并列，故「多块各取全量 → 合并按 seq
+     降序 → 取前 n」与原「单条 ORDER BY seq DESC LIMIT n」等价（原实现无 offset，不需要窗口对齐）。
+     只在 >200 键时触发；≤200 键仍走单条带 LIMIT 的路径（行为逐字不变）。
+  4. **列序不做「顺手优化」**：`audit` 仍只取 7 列（排序用 `seq` 但不外传），`events` 仍取 11 列；
+     多取列会改变行元组形状，两个消费循环的逐列解包立刻 `ValueError`。
+  5. **降级路径原样保留**：两处仍是「异常 → `[]` + 一条 `log.warning`」（原实现就不是裸 `pass`），
+     未新增静默 except；否则三库拓扑下「空得莫名其妙」的老问题会回来。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **三库拆分后变更来源（PR 合并）整块为空**：insight 进程库没有 `events`（视图 0 → 1146）→
+     兜底 SQL 抛错被 `except` 吞成 `[]`，事件中心只剩告警/任务两类，且无日志指向是哪张表。
+  2. **L2 审计来源恒空**：`audit_logs` 归 mgmt，insight 进程库同样 1146 → 管理台的登录/改配置流水
+     整块查不到（「审计」页永远 0 条），同样只留一行 warning。
+  3. **`IN` 列表无上限**：改造前把可见仓库键全量展开进一条 SQL（guest 组织可上千仓），
+     三库拓扑走 MySQL 时会顶到参数/语句长度上限；现在按 200 分块并在合并后截窗口。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/insight/observability/events_view.py` / `src/domains/mgmt/public/__init__.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/events_view_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建 `audit_logs` / `events` 两表）
+    → **ALL events_view smoke PASSED (70 checks)**：
+    A 注册面/静态否定（两条审计语句逐字、只用 `?`、无 `%s`/`NOW()`/`ON DUPLICATE`/反引号、
+    `__all__` 登记、薄函数体内无内联 SQL、`events_view.py` 已无两张表的 `FROM` 字面量、
+    不再 import `domain_read`/`runtime_lib`、分块常量 200、两条降级各留一条 warning）；
+    B 原语语义（空表/`LIMIT 0`/关键字不命中 → `[]`、七列列序逐字、seq 降序、关键字两条 LIKE
+    分别命中 event_type 与 detail）；
+    C 调用点端到端（audit 字段映射与 `operator_id → user_id` 回退、detail 截断 200、时间归一、
+    关键字过滤、读失败降级 `[]`+1 warning；change 事件类型守卫、仓库过滤、`all_repos` 全量、
+    q 三列命中与不命中、`duration` 列回退覆盖 `ongoing`、`started_at` 回退 `created_at`、
+    250 键 → 200+50 两块、跨块合并仍 seq 降序、窗口截断作用在合并结果上）；
+    D 自有 DSN 伪游标（audit 只走 `domain=mgmt`、change 只走 `domain=runtime`、语句逐字、
+    参数顺序 = 仓库键在前关键字在后、LIMIT 内联与参数化两种形态、空结果不炸）。
+  · `--update-baseline` → **baseline updated: 21 pairs, 33 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **20 表 / 33 跨域引用 / 21 对**
+    （`audit_logs` 已无跨域消费方、`events` 的 insight 消费方归零，表数 21 → 20）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （mgmt 183 funcs + 6 named queries used / 265 funcs + 31 queries registered）；
+    `tests/arch/test_silent_except_ratchet.py` → **2 passed**（未新增静默 except）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  轮内口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点），运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标与两侧读失败降级）。
+- **新基线**：**33 处 / 21 对 / 20 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 33 处 / 25 文件）。`src/domains/insight/observability/events_view.py` 已清零并退出榜单；
+  下一批首个未 blocked 文件是 `src/api/feedback_issue_converter.py`（2 处：`user_feedback`，归 mgmt），
+  其后是 `src/api/git_repo_api.py`（2 处）、`src/api/qa_gate.py`（2 处：`events`）、
+  `src/api/scene_skill_scope.py`（2 处：`skill`）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

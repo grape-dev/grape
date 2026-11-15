@@ -726,6 +726,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "add_user_feedback", "save_inbound_message", "upsert_outbound_card",
            # 任意拓扑具名查询（`?` 占位符；runtime/kernel 读 mgmt 表不再留兜底 SQL）
            "read_one_any", "read_all_any", "exec_any",
+           # 审计流水（insight/observability/events_view 的 L2 audit 来源；任意拓扑）
+           "audit_recent_rows",
            "mapping_user_id_by_column", "account_id_by_platform_login",
            "repo_user_id_by_platform_login", "first_join_user_id_by_repo",
            "user_repo_keys_by_username",
@@ -2084,6 +2086,19 @@ _ANY_QUERIES: dict[str, str] = {
     "outbound_card_chat_row": (
         "SELECT channel_chat_id, chat_type, sender_staff_id, installation_id, "
         "card_template_id FROM grape_t_channel_outbound_card WHERE out_track_id=?"),
+    # ── 审计流水（audit_logs 归 mgmt；insight/observability/events_view 的统一事件视图
+    # `audit` 来源，**仅 L2**）──────────────────────────────────────────────────
+    # 原实现在 insight 进程主库直发 SQL：三库拓扑下 insight 库没有 audit_logs（视图 0 →
+    # 1146），被 `_audit_events` 的 except 吞成「审计来源恒空」且只留一行 warning。
+    # 列序 / 谓词 / `ORDER BY seq DESC` / 参数化 LIMIT 与原语句逐字一致；关键字过滤
+    # 保留原 `if q:` 的两列 LIKE（event_type / detail），模式值由调用方包通配符后传参。
+    "audit_recent_rows": (
+        "SELECT id, event_type, user_id, operator_id, ip, created_at, detail "
+        "FROM audit_logs ORDER BY seq DESC LIMIT ?"),
+    "audit_recent_rows_q": (
+        "SELECT id, event_type, user_id, operator_id, ip, created_at, detail "
+        "FROM audit_logs WHERE (event_type LIKE ? OR detail LIKE ?) "
+        "ORDER BY seq DESC LIMIT ?"),
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -2160,6 +2175,23 @@ def exec_any(name: str, params: tuple = ()) -> int:
     with _any_cursor(write=True) as c:
         cur = c.execute(_any_sql(name), params)
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def audit_recent_rows(limit: int, like: str = "") -> list[Any]:
+    """审计流水最近 N 条，列序 `(id, event_type, user_id, operator_id, ip, created_at, detail)`。
+
+    insight 统一事件视图的 `audit` 来源（**仅 L2**）原先在 insight 进程主库直发 SQL：
+    三库拓扑下那张表在 mgmt 库（视图 0 → 1146），被调用方 except 吞成「审计来源恒空」。
+    语句上移后两条拓扑跑同一份 SQL。
+
+    `like` 为空 = 不带关键字谓词（等价原实现 `if q:` 的假分支）；非空时调用方**先包好
+    通配符**（`%kw%`）再传入，本函数不再拼值。`limit` 按原语句进 SQL 参数（不做 Python
+    侧截断，语义与 `LIMIT ?` 一致）。
+    """
+    n = int(limit)
+    if like:
+        return [tuple(r) for r in read_all_any("audit_recent_rows_q", (like, like, n))]
+    return [tuple(r) for r in read_all_any("audit_recent_rows", (n,))]
 
 
 def login_whitelist_count() -> int:
