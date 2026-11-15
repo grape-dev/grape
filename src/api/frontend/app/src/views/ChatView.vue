@@ -938,6 +938,9 @@ watch(messages, function (list) {
     if (text) recallTexts.set(id, text)
   })
 })
+// 当前 SSE 的 AbortController（必须先声明：switchConversation 在 setup 期间就会读它）
+let streamAbort = null
+
 function recallMessage(m, idx) {
   const id = parseInt(m && m.id, 10) || 0
   if (!id) return
@@ -1100,7 +1103,6 @@ function autoResize(ev) {
 
 // ── 发送 + SSE 流式（v31 submit/stream 分离）──
 const streaming = ref(null) // {elId, stepText}
-let streamAbort = null
 function sendChatStream() {
   const text = (draft.value || '').trim()
   if (!text && pendingImages.value.length === 0 && !pendingVideo.value) return
