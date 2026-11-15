@@ -4104,13 +4104,16 @@ def ensure_agent_session(session_id: str, repo_key: str, agent_type: str, runtim
                          subscribe_events: str = "[]") -> int:
     """建 repo 级 agent 会话行（id 由调用方生成，保证主键稳定）。返回 1=新建 / 0=已存在。
 
-    幂等由 SQL 侧的 INSERT IGNORE 保证。返回 rowcount 的口径与其它 *write* 原语一致；
+    幂等由 SQL 侧的 OR IGNORE 保证。返回值必须**读游标** rowcount：exec_any 在自有 DSN 路径上
+    返回的是 pymysql execute() 的 int（恒 0），拿它当「新建/已存在」判据永远得到 0。
     此前这里返回 None，而同名旧定义（本文件顶部，已删除）返回 rowcount —— 两个定义共存时
     后者覆盖前者，调用方拿到的返回值语义完全取决于定义顺序。
     """
-    return int(exec_any("devops_agent_session_insert",
-                        (session_id, repo_key, agent_type, runtime_id, skill, skill_id,
-                         repo_gitcode_token or "", status, enable, subscribe_events)) or 0)
+    with _any_cursor(write=True) as c:
+        c.execute(_ANY_QUERIES["devops_agent_session_insert"],
+                  (session_id, repo_key, agent_type, runtime_id, skill, skill_id,
+                   repo_gitcode_token or "", status, enable, subscribe_events))
+        return int(getattr(c, "rowcount", 0) or 0)
 
 def update_agent_session_fields(session_id: str, fields: dict,
                                 touch_last_active: bool = True) -> int:

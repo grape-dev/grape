@@ -152,26 +152,24 @@ def test_clear_agent_session_runtime(monkeypatch):
 
 
 def test_ensure_agent_session_is_insert_ignore(monkeypatch):
-    """ensure_agent_session 走具名写原语，且 SQL 必须保持幂等（OR IGNORE）。
+    """ensure_agent_session 必须幂等（SQL OR IGNORE）且返回值读游标 rowcount。
 
-    实现从「db_registry.cursor + 内联 SQL」收敛成 exec_any 具名查询后，原测试的
-    monkeypatch 目标（db_registry.cursor）和 4 元组参数断言都失效了；这里改为对
-    exec_any 打桩，并直接断言注册表里的 SQL 形态 —— 幂等性是这条原语的契约本身，
-    不能在重构中悄悄丢掉（丢掉后重复建会话会撞主键）。
+    两个坑都踩过：SQL 退化成普通 INSERT（重复建会话撞主键），返回值改用 exec_any
+    （自有 DSN 下恒 0，调用方拿 0 当「已存在」）。所以这里既断言 SQL 形态，
+    也断言返回值来自游标 rowcount。
     """
-    calls = []
+    cur = FakeCursor(rowcounts=[1])
 
-    def _fake_exec_any(name, args):
-        calls.append((name, args))
-        return 1
+    @contextlib.contextmanager
+    def _any_ctx(write=False):
+        yield cur
 
-    monkeypatch.setattr(rt, "exec_any", _fake_exec_any)
+    monkeypatch.setattr(rt, "_any_cursor", _any_ctx)
     assert rt.ensure_agent_session("sid-1", "gitcode:o/r", "vod") == 1
-    name, args = calls[0]
-    assert name == "devops_agent_session_insert"
+    sql, args = cur.executed[0]
+    assert sql.startswith("INSERT OR IGNORE INTO devops_agent_session")
     # 列序：id, repo_key, agent_type, runtime_id, skill, skill_id, token, status, enable, subscribe_events
     assert args[:3] == ("sid-1", "gitcode:o/r", "vod")
-    assert "INSERT OR IGNORE INTO devops_agent_session" in rt._ANY_QUERIES[name]
 
 
 def test_stamp_task_traces_batch(monkeypatch):
