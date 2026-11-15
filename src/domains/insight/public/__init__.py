@@ -466,3 +466,14 @@ def record_api_latency_any(request_id: str, method: str, path: str, status,
                         (request_id, method, path, status, duration_ms,
                          repo_key or "", user_id or ""))
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def merge_gate_log_insert(row_id: str, repo_key: str, pr_number: int, phase: str,
+                          decision: str, hits_json: str, created_at: str) -> None:
+    """合并门禁决策落库（表归本域，api 侧只调本原语）。"""
+    with _any_cursor(write=True) as c:
+        c.execute(
+            "INSERT INTO grape_t_merge_gate_log "
+            "(id, repo_key, pr_number, phase, decision, hits_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (row_id, repo_key, int(pr_number or 0), phase, decision, hits_json, created_at))

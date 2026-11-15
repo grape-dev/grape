@@ -5916,3 +5916,21 @@ def inflight_task_count_any(repo_keys, chunk: int = _INFLIGHT_TASK_KEY_CHUNK) ->
             c.execute(_inflight_task_sql(len(part)), tuple(part))
             total += int((c.fetchone() or [0])[0] or 0)
     return total
+
+
+def event_issue_id_by_seq(repo_key: str, seq):
+    """按 (仓库, 序号) 取事件关联的 issue_id；无行返回 None。"""
+    with _any_cursor() as c:
+        c.execute("SELECT issue_id FROM events WHERE repo_key=? AND seq=? LIMIT 1",
+                  (repo_key, seq))
+        return c.fetchone()
+
+
+def first_online_runtime():
+    """当前在线且健康的引擎 (id, name)，opencode/codearts 优先；无则 None。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 "
+            "ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END "
+            "LIMIT 1")
+        return c.fetchone()

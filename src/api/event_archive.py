@@ -132,13 +132,8 @@ def _locate_by_seq(repo_key: str, seq: int, issue_num_hint: str = "") -> tuple[s
         return "", ""
     # 事件表精确查：by seq（不依赖 limit=200，避免仓库事件量大时漏命中）
     try:
-        from src.kernel.session_manager import db, db_lock as _dl
-        with _dl:
-            c = db.cursor()
-            c.execute(
-                "SELECT issue_id FROM events WHERE repo_key=? AND seq=? LIMIT 1",
-                (repo_key, seq))
-            row = c.fetchone()
+        from src.domains.runtime import public as _rt_ev
+        row = _rt_ev.event_issue_id_by_seq(repo_key, seq)
         if row and row[0]:
             num = _extract_num(str(row[0]))
             if num:
