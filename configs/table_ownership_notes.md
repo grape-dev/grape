@@ -62,6 +62,40 @@
   `src/api/db_setup.py` 搬到 `domains/insight/schema_ddl.py`；`grape_t_channel_inbound_message`
   从 `domains/runtime/im/engine_wiring.py` 搬到 mgmt。
 
+## 2026-11-15 物理清理（本机 stage 三库，验证后执行）
+
+按 owner 收敛掉 36 个非 owner 副本（先 mysqldump 备份，再 DROP）：
+
+- 第一批 17 个（14 张表相关的多份基表）：
+  `grape_stage_runtime` 11 个（6 张 channel + event_action_filter/event_route_config/pipeline_instances
+  + merge_gate_log/repo_credentials）；`grape_stage_insight` 6 个（channel 族）。
+  备份：`/home/grape/table-cleanup-backup-20261115.sql`（17 张，含 CREATE + 数据）。
+- 第二批 19 个（其余跨域基表副本，全部 0 行）：
+  `grape_stage_runtime` 7 个（managed_repos/oauth_states/unified_user_mapping/user_accounts/
+  user_credentials/user_repos/grape_t_patrol_findings）、`grape_stage_insight` 9 个（含 agent_runtimes、
+  chat_agent_session、repo_im_group_binding）、`grape_stage_mgmt` 3 个（bot_seen_messages、
+  chat_agent_session、repo_im_group_binding）。
+  备份：`/home/grape/table-cleanup-backup-20261115-b.sql`（19 张）。
+
+数据风险说明：`event_action_filter` 两份内容**不同**（mgmt 为新版、含 `vcs_source`；runtime 为旧种子），
+按 P0 归属保留 mgmt 版，runtime 旧版已随备份归档。其余副本 0 行，无数据损失。
+
+清理后实测（`information_schema`）：
+```
+grape_stage_mgmt    : 基表 55 / 视图 0 / 跨域基表副本 0
+grape_stage_runtime : 基表 35 / 视图 0 / 跨域基表副本 0
+grape_stage_insight : 基表 13 / 视图 0 / 跨域基表副本 0
+```
+四个进程（nginx 38080 → mgmt 38081 / event 38082 / worker 38083 / insight 38084）健康 200，
+worker claim 仍 200 OK，清理后新日志无被删表的 1146。
+
+**未做**：生产 `192.168.0.59` 的 `grape_t_merge_gate_log` 双基表（runtime + insight）尚未删除——
+116 集群在线，需先确认写入方再动。
+
+**遗留（下一步代码批次）**：stage 仍有跨域 `schema` 缺口导致的 1146（`insight.runtime_health_scores`、
+`insight.agent_tasks`、`insight.devops_pipeline_scene`、`runtime.scene_market`、`runtime.external_identities`），
+属读数仍走本地连接的残留，需按 owner 提供具名查询或 GSB 原语。
+
 ## 维护约定
 
 1. 新增表或裁决变更：先改 `docs/weekly-11/table-owner.tsv`，再同步本文件与 manifest，最后跑
