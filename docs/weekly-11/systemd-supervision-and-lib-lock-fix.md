@@ -141,6 +141,6 @@ mgmt 在兄弟节点 `:3311`、insight 在兄弟节点 `:3312`、runtime 在本�
   runtime/insight 两库 0 缺失。这些表由各自功能模块懒建，功能被调用时才会暴露 1146，
   建议按 owner 进程跑一次建表（或首次使用前预热）。
 - `grape_mgmt_db` / `grape_runtime_db` / `grape_insight_db` 与 `grape_ljt_db` 仍在
-  `192.168.0.59` 上，是三库演练/迁移残留，容易误判主库；确认后归档。
+  共用的 RDS 实例（`<legacy-rds-host>`）上，是三库演练/迁移残留，容易误判主库；确认后归档。
 - `server_base_url` 在两节点都指向公网入口节点：这是既有设计（单入口），
   但入口节点是登录/webhook 的单点，需要 SLB/keepalived，而不是改配置。
