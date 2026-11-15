@@ -873,26 +873,30 @@ async def sweep_events_loop() -> None:
     while True:
         try:
             cleaned = 0
+            # 全部同步工作（pymysql 查询 / git 子进程 / ls-remote）必须进线程池：
+            # 直接在事件循环里跑会把整个 loop 卡住（health 无响应、Grape 心跳停发 →
+            # 引擎被判失联 → 健康分强制 0；py-spy 实证 MainThread 停在
+            # sweep_stuck_events_once 的 SSLSocket.read）。
             try:
-                cleaned += sweep_stuck_events_once()
+                cleaned += await _aio.to_thread(sweep_stuck_events_once)
             except Exception as e:
                 log.warning(f"Event sweeper stuck-event sweep failed: {e}")
             try:
                 from src.domains.runtime.im.bot_lease import purge_stale_instances
-                cleaned += purge_stale_instances(older_than_hours=24)
+                cleaned += await _aio.to_thread(purge_stale_instances, older_than_hours=24)
             except Exception as e:
                 log.debug(f"Event sweeper im-instance purge skipped: {e}")
 
-            active = _active_issue_sessions()
+            active = await _aio.to_thread(_active_issue_sessions)
             # Issue #2041：远端事实复核需 ls-remote 鉴权；单次 sweep 每仓解析一次。
             _tok_cache: dict = {}
 
-            def _tok(key: str) -> str:
+            async def _tok(key: str) -> str:
                 if key not in _tok_cache:
-                    _tok_cache[key] = _resolve_repo_git_token(key)
+                    _tok_cache[key] = await _aio.to_thread(_resolve_repo_git_token, key)
                 return _tok_cache[key]
 
-            for repo_key, issue_id in _done_issues():
+            for repo_key, issue_id in await _aio.to_thread(_done_issues):
                 num = str(issue_id or "").lstrip("#")
                 if not num or num == "0":
                     continue
@@ -904,9 +908,11 @@ async def sweep_events_loop() -> None:
                         continue
                     try:
                         # Issue #2041：同 sweep_once——守卫拒绝时不计数（目录保留）。
-                        if repogit.cleanup_issue_worktree(repo_key, agent_type, num,
-                                                          token=_tok(repo_key),
-                                                          reason="event_sweep_done_issue"):
+                        # cleanup_issue_worktree 内含 git 子进程与 ls-remote，必须入线程池。
+                        _gone = await _aio.to_thread(
+                            repogit.cleanup_issue_worktree, repo_key, agent_type, num,
+                            token=await _tok(repo_key), reason="event_sweep_done_issue")
+                        if _gone:
                             cleaned += 1
                     except Exception as e:
                         log.warning(f"Event sweeper cleanup failed {issue_dir}: {e}")
@@ -925,7 +931,9 @@ async def sweep_tasks_loop() -> None:
     import asyncio as _aio
     while True:
         try:
-            cleaned = sweep_stuck_agent_tasks_once()
+            # 同 sweep_events_loop：同步 pymysql 回收必须入线程池，否则把 worker 的
+            # 事件循环卡住 → 心跳停发 → 引擎被判失联（健康分强制 0）。
+            cleaned = await _aio.to_thread(sweep_stuck_agent_tasks_once)
             if cleaned:
                 log.info(f"Task sweeper: cleaned {cleaned} stuck tasks")
         except Exception as e:

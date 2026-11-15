@@ -103,6 +103,15 @@ async def lifespan(app: FastAPI):
     global bot_manager
     from src.kernel.config import log
 
+    # 库初始化/迁移必须在 lifespan（启动期）跑，不能留在模块级：
+    # 模块级调用会让**任何** `import src.api.grape_server` 都触发一次全量迁移，
+    # 而运行期确实存在这种 import（im/notify.resolve_engine 为了拿 im_engine 懒加载它）。
+    # 一旦那条路径在事件循环里命中，同步 pymysql 迁移会把整个 loop 卡死（py-spy 实证：
+    # MainThread 停在 _migrate_tables ← init_database ← <module>，worker 心跳停发 →
+    # 引擎被判定失联 → 健康分强制 0）。
+    init_database()
+    _load_accounts()
+
     # 生产环境启动安全门禁
     try:
         _startup_security_check()
@@ -695,9 +704,9 @@ except Exception as _e:
 
 install_request_middleware(app)
 
-init_database()
-
-_load_accounts()
+# 注意：init_database() / _load_accounts() 已移入 lifespan（见该函数开头的说明）。
+# 模块级执行会让任何 import 本模块的路径都触发全量迁移，运行期懒加载（im/notify）会把
+# 事件循环整段卡死。uvicorn 启动会跑 lifespan，所以启动期语义不变。
 
 install_exception_handlers(app)
 
