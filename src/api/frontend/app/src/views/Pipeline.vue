@@ -52,6 +52,14 @@
           :class="['pl__nd', { dim: nodeStatus(i) === 0, run: nodeStatus(i) === 1 }]"
           @click="nodeClick(node)"
         >
+          <!-- 执行中雷达扫描：与需求中心卡片（tsk-radar-sweep）同一视觉语言。
+               此前这里只有 .pl__nd-dot 的 plPulse 缩放脉冲，节点卡片本身没有任何扫描效果，
+               用户侧表现为「流水线显示执行中，但卡片没有雷达」。 -->
+          <div
+            v-if="nodeStatus(i) === 1"
+            class="pl__nd-radar"
+            :style="nodeRadarStyle(node, i)"
+          ></div>
           <div
             class="pl__nd-bar"
             :style="{ background: nodeStatus(i) === 0 ? 'var(--c-text-3)' : nodeColor(node, i) }"
@@ -379,6 +387,11 @@ function nodeActor(i) {
 function nodeColor(node, i) {
   const tag = node.tag || node.id
   return TAG_COLORS[tag] || agentColors[i % agentColors.length]
+}
+// 执行中雷达底色：取节点主题色 + 约 13% alpha 的扇形，旋转后形成扫描带
+function nodeRadarStyle(node, i) {
+  const c = nodeColor(node, i)
+  return { background: 'conic-gradient(from 0deg, transparent 0deg, ' + c + '22 40deg, transparent 90deg)' }
 }
 function nodeLabel(node) {
   const tag = node.tag || node.id
@@ -829,6 +842,29 @@ onBeforeUnmount(function () {
 }
 .pl__nd.run .pl__nd-dot {
   animation: plPulse 1.5s ease-in-out infinite;
+}
+/* 执行中雷达扫描层：绝对定位铺满卡片，conic-gradient 旋转形成扫描带。
+   放在内容之下（z-index:0），卡片内其余元素统一抬到 z-index:1 以保证文字清晰；
+   overflow:hidden 已在 .pl__nd 上，旋转不会溢出卡片。 */
+.pl__nd-radar {
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  pointer-events: none;
+  z-index: 0;
+  animation: plRadar 3s linear infinite;
+}
+.pl__nd > *:not(.pl__nd-radar) {
+  position: relative;
+  z-index: 1;
+}
+@keyframes plRadar {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 @keyframes plPulse {
   0%,
