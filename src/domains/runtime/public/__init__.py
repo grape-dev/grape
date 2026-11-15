@@ -577,17 +577,6 @@ def clear_agent_session_runtime(repo_key: str, agent_type: str) -> int:
         return int(c.rowcount or 0)
 
 
-def ensure_agent_session(session_id: str, repo_key: str, agent_type: str,
-                         status: str = "idle") -> int:
-    """幂等建 agent 会话行（已存在则不动），返回 1=新建 / 0=已存在。"""
-    with db_registry.cursor("runtime") as c:
-        c.execute("INSERT IGNORE INTO devops_agent_session "
-                  "(id, repo_key, agent_type, status, last_active_at) "
-                  "VALUES (%s, %s, %s, %s, NOW())",
-                  (str(session_id), repo_key, agent_type, status))
-        return int(c.rowcount or 0)
-
-
 def stamp_task_traces(pairs: list[tuple]) -> int:
     """批量补写 agent_tasks 的 trace_id / pipeline_trace_id（insight 回填，幂等）。
 
@@ -2042,7 +2031,11 @@ _ANY_QUERIES: dict[str, str] = {
     'agent_type_enable': 'SELECT enable FROM agent_type WHERE agent_type=?',
     'devops_agent_session_row': 'SELECT id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
     'devops_agent_sessions_by_repo': 'SELECT id, agent_type, runtime_id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type',
-    'devops_agent_session_insert': "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+    # 幂等：ensure_agent_session 语义是「已存在则不动」，SQL 必须带 OR IGNORE
+    #（与本文件 devops_agent_session_insert_vod 及历史 INSERT IGNORE 对齐）。
+    # 曾退化成普通 INSERT：重复建同一会话直接撞主键抛异常，而调用方按 0/1 语义处理，
+    # 于是「幂等建会话」在最需要幂等的抢占/重放路径上表现为失败。
+    'devops_agent_session_insert': "INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))",
     'devops_agent_session_delete_by_repo_agent': 'DELETE FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
     'devops_agent_session_delete_by_repo': 'DELETE FROM devops_agent_session WHERE repo_key=?',
     # ── 飞书扫码 onboarding 换绑清理（mgmt/routes/feishu_onboard.py）───────────
@@ -4108,11 +4101,16 @@ def update_issue_card_fields(repo_key: str, issue_number, fields: dict,
 def ensure_agent_session(session_id: str, repo_key: str, agent_type: str, runtime_id: int = 0,
                          skill: str = "", skill_id: int = 0, repo_gitcode_token: str = "",
                          status: str = "idle", enable: int = 1,
-                         subscribe_events: str = "[]") -> None:
-    """建 repo 级 agent 会话行（id 由调用方生成，保证主键稳定）。"""
-    exec_any("devops_agent_session_insert",
-             (session_id, repo_key, agent_type, runtime_id, skill, skill_id,
-              repo_gitcode_token or "", status, enable, subscribe_events))
+                         subscribe_events: str = "[]") -> int:
+    """建 repo 级 agent 会话行（id 由调用方生成，保证主键稳定）。返回 1=新建 / 0=已存在。
+
+    幂等由 SQL 侧的 INSERT IGNORE 保证。返回 rowcount 的口径与其它 *write* 原语一致；
+    此前这里返回 None，而同名旧定义（本文件顶部，已删除）返回 rowcount —— 两个定义共存时
+    后者覆盖前者，调用方拿到的返回值语义完全取决于定义顺序。
+    """
+    return int(exec_any("devops_agent_session_insert",
+                        (session_id, repo_key, agent_type, runtime_id, skill, skill_id,
+                         repo_gitcode_token or "", status, enable, subscribe_events)) or 0)
 
 def update_agent_session_fields(session_id: str, fields: dict,
                                 touch_last_active: bool = True) -> int:
