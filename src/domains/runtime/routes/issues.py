@@ -71,13 +71,22 @@ class _DomainDbProxy:
 
     def commit(self):
         from src.kernel import db_registry
+        # 必须与 cursor() 的取连接分支一致：runtime 域进程走 session_manager.db 的
+        # autocommit=False 线程级连接，这里若 return None 会让写事务一直悬着——行锁不释放、
+        # 新写入的行（如 enqueue 的任务）对其它连接不可见，随后任何 rollback 直接丢掉。
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.commit()
         if db_registry.uses_own_dsn("runtime"):
-            return None                      # owner 连接 autocommit，无需显式提交
+            return None
         from src.kernel.session_manager import db as _main
         return _main.commit()
 
     def rollback(self):
         from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.rollback()
         if db_registry.uses_own_dsn("runtime"):
             try:
                 db_registry.domain_db("runtime").rollback()

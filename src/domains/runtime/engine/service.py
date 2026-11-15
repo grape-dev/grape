@@ -56,6 +56,13 @@ class _DomainDbProxy:
 
     def commit(self):
         from src.kernel import db_registry
+        # 与 cursor() 的取连接分支保持严格一致：runtime 域进程走 session_manager.db
+        # （autocommit=False 的线程级连接），这里必须真的 commit，否则 enqueue 写进去的
+        # 任务行一直悬在事务里——UI 看到"排队中"却查不到 agent_tasks，任何 rollback
+        # 还会把它悄悄回滚掉。
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.commit()
         if db_registry.uses_own_dsn("runtime"):
             return None
         from src.kernel.session_manager import db as _main
@@ -63,6 +70,9 @@ class _DomainDbProxy:
 
     def rollback(self):
         from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.rollback()
         if db_registry.uses_own_dsn("runtime"):
             try:
                 db_registry.domain_db("runtime").rollback()
