@@ -212,6 +212,24 @@ class RuntimeClient:
             )
         return self._hb_session
 
+    async def _poll_session(self):
+        """轮询专用会话：短超时（5s）。
+
+        claim / claim_by_tag / get_tags 每轮循环都要发一次，用默认 30s 超时的话，
+        一次失败就吃掉两个心跳周期；多个 rid × 多个 tag 串行叠加，主循环会被拖到
+        分钟级，心跳协程完全饿死（实测 h116-grape / orgtest 心跳长期 149-157s，
+        而同一端点的直接压测只要 0.05s）。轮询失败要快速失败、下一轮再来。
+        """
+        import aiohttp
+        if getattr(self, "_poll_session_obj", None) is None or self._poll_session_obj.closed:
+            self._poll_session_obj = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=4, force_close=False,
+                                               enable_cleanup_closed=True,
+                                               keepalive_timeout=15, ssl=False),
+                timeout=aiohttp.ClientTimeout(total=8, connect=4, sock_read=5),
+            )
+        return self._poll_session_obj
+
     async def heartbeat(self, runtime_ids: list[int], log_lines: list = None, metrics: dict = None, probe_results: dict = None) -> dict | None:
         """发送心跳。返回完整响应 dict（含 cancelled_tasks）或 None（网络错误/服务端不可达）。
 
@@ -254,10 +272,11 @@ class RuntimeClient:
         返回完整响应 dict（含 task 和 scan_request 字段），与 claim() 一致。
         调用方通过 .get("task") 取任务、.get("scan_request") 取扫描指令。
         """
+        _poll = await self._poll_session()
         data = await self._request("POST",
                                    f"/api/runtime/runtimes/{runtime_id}/tasks/claim-by-tag/{tag}",
                                    {"supports_obs_url": supports_obs_url, "prefer_fallback": prefer_fallback},
-                                   retries=1)
+                                   retries=1, session=_poll)
         if not data:
             return None
         return data
@@ -268,7 +287,9 @@ class RuntimeClient:
         Called periodically by the claim loop to get the current tag list.
         Enables real-time tag updates via console without worker restart.
         """
-        data = await self._request("GET", f"/api/runtime/runtimes/{runtime_id}/tags", retries=1)
+        _poll = await self._poll_session()
+        data = await self._request("GET", f"/api/runtime/runtimes/{runtime_id}/tags",
+                                   retries=1, session=_poll)
         if not data:
             return []
         return data.get("tags") or []
@@ -411,3 +432,6 @@ class RuntimeClient:
         _hb = getattr(self, "_hb_session", None)
         if _hb is not None and not _hb.closed:
             await _hb.close()
+        _poll = getattr(self, "_poll_session_obj", None)
+        if _poll is not None and not _poll.closed:
+            await _poll.close()
