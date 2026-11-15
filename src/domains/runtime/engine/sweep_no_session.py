@@ -72,8 +72,8 @@ def sweep_claim_without_session_once() -> int:
                         log.debug(f"sweeper: release busy slot {rid} failed: {_re}")
             try:
                 c.connection.commit()
-            except Exception:
-                pass
+            except Exception as _ce:
+                log.debug(f"sweeper: commit after no-session reclaim failed: {_ce}")
     except Exception as e:
         log.warning(f"sweeper claim-without-session sweep failed: {e}")
         return fixed
