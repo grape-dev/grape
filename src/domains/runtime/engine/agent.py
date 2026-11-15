@@ -3404,7 +3404,15 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 _now = asyncio.get_running_loop().time()
                 _last = _requeue_cooldown.get(sid, 0)
                 if _now - _last < 60:
-                    continue  # 冷却中：不 claim 不 requeue，留给后面的任务
+                    # 冷却期也必须回滚：服务端 claim 已把任务置 running，直接 continue 会让它
+                    # 永久悬空（事件 #9733：第一次冲突 requeue → 3s 后再 claim 到 → 冷却期
+                    # continue → 任务停在 running / runtime_session_id 空 / 零输出）。
+                    # requeue 是幂等的，冷却只用于抑制日志与重置计时，不是用来跳过回滚。
+                    try:
+                        await client.requeue(tid)
+                    except Exception as _e:
+                        log.warning(f"requeue task {tid} in cooldown failed: {_e}")
+                    continue
                 _requeue_cooldown[sid] = _now
                 log.warning(f"claim conflict: session {sid} busy, requeue task {tid}")
                 try:
