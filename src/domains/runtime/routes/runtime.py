@@ -117,16 +117,52 @@ _pkg_download_count = 0
 _pkg_download_lock = threading.Lock()
 
 # ===== rta_ 凭据认证中间件（M3，D2 凭据隔离）=====
+# 校验结果缓存：每个 runtime 请求（heartbeat / claim / tags / messages / state / complete…）
+# 都要过这一关。原实现每次请求都持进程级 db_lock 跨机查一次 runtime_credentials
+# （表在 runtime 库，本机 worker 要跨机访问），长任务批量上报时几十个请求同时排队等锁
+# → anyio 线程池 40 个槽全满 → 连心跳都排不进去。实测 26 个线程卡在 _auth_credential。
+# 命中缓存则不碰 DB；holding 一条独立连接也避免与持锁代码抢同一把锁。
+_CRED_CACHE: dict = {}
+_CRED_CACHE_LOCK = threading.Lock()
+_CRED_CACHE_TTL = float(os.environ.get("RUNTIME_CRED_CACHE_TTL", "60"))
+
+
+def _lookup_credential_id(token_hash: str):
+    """查 runtime_credentials（独立连接；单库/测试拓扑回落主库 + db_lock）。"""
+    sql = "SELECT id FROM runtime_credentials WHERE token_hash=? AND status='active'"
+    try:
+        if _dbreg.uses_own_dsn("runtime"):
+            conn = _dbreg.new_connection("runtime", autocommit=True)
+            try:
+                return conn.cursor().execute(sql, (token_hash,)).fetchone()
+            finally:
+                try:
+                    conn.close()
+                except Exception as _ce:
+                    log.debug(f"credential lookup close failed: {_ce}")
+    except Exception as _de:
+        log.debug(f"credential lookup via domain connection failed: {_de}")
+    with db_lock:
+        c = db.cursor()
+        return c.execute(sql, (token_hash,)).fetchone()
+
+
 def _auth_credential(request: Request) -> int:
-    """解析 Authorization: Bearer rta_... → sha256 → 查 runtime_credentials(status=active)。返回 credential_id。"""
+    """解析 Authorization: Bearer *** → sha256 → 查 runtime_credentials(status=active)。返回 credential_id。"""
+    import time as _t
     token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
     if not token.startswith("rta_"):
         raise HTTPException(status_code=401, detail={"code": 401, "message": "invalid runtime credential"})
     h = hashlib.sha256(token.encode()).hexdigest()
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM runtime_credentials WHERE token_hash=? AND status='active'", (h,))
-        row = c.fetchone()
+    _now = _t.time()
+    with _CRED_CACHE_LOCK:
+        _hit = _CRED_CACHE.get(h)
+        if _hit and _hit[1] > _now:
+            return _hit[0]
+    row = _lookup_credential_id(h)
+    if row:
+        with _CRED_CACHE_LOCK:
+            _CRED_CACHE[h] = (row[0], _now + _CRED_CACHE_TTL)
     if not row:
         # 凭据校验失败要留痕：worker 侧只看到 401，服务端此前完全无记录，
         # 设备一直"离线"时无法判断是 token 抄错、还是根本没连上来。
@@ -514,10 +550,70 @@ async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id
     实测 116 侧连续三次 TimeoutError(40s) 之后突然 0.05s，正是池子被长请求占住的波形。
     真正的 DB 写入交给线程池，既不阻塞事件循环，也不占请求线程池的槽。
     """
-    return await asyncio.to_thread(_heartbeat_impl, body, request, credential_id)
+    # ── 心跳解耦：只入内存队列并立即回执，落库交给后台 flush ──────────────
+    # 直连 worker 的 runtime 库在兄弟机（跨机写），长任务批量上报时一次心跳要排队
+    # 几十秒，agent 侧直接 sock_read 超时 → 判失联。这里把「刷新在线态」和
+    # 「落库」拆开：端点永不等待 DB，后台每 2s 合并同一凭据的多次心跳批量写一次。
+    # 取消信号与最新版本走缓存（flush 后刷新），语义延迟 ≤ flush 周期，
+    # 而取消感知本来就有 15s 心跳间隔的量级，不受影响。
+    _client_ip = _client_ip_of(request)
+    with _HB_LOCK:
+        _HB_PENDING[credential_id] = (body, _client_ip)
+        _cached = dict(_HB_CACHE.get(credential_id) or {})
+    _ensure_flush_task()
+    return {"status": "ok",
+            "cancelled_tasks": list(_cached.get("cancelled") or []),
+            "latest_version": _cached.get("latest") or ""}
 
 
-def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
+# ── 心跳离屏缓冲 ────────────────────────────────────────────────────────
+# 直连 worker 的 runtime 库在兄弟机：一次心跳包含 last_seen / metrics / probe 的多条
+# UPDATE，跨机往返叠加在长任务批量上报的拥塞里，agent 侧 30s sock_read 就超时 →
+# 引擎被判 offline。端点因此只做「入内存队列 + 立刻回执」，落库交给后台 flush：
+# 同一凭据的多次心跳按最后一次合并，每 2s 批量写一遍。取消信号与最新版本走缓存
+# （flush 后刷新），语义延迟 ≤ flush 周期，而取消感知本来就有心跳间隔量级。
+_HB_PENDING: dict = {}
+_HB_CACHE: dict = {}
+_HB_LOCK = threading.Lock()
+_HB_FLUSH_TASK = None
+_HB_FLUSH_INTERVAL = float(os.environ.get("RUNTIME_HB_FLUSH_INTERVAL", "2"))
+
+
+def _client_ip_of(request: Request) -> str:
+    return _client_ip(request)
+
+
+async def _heartbeat_flush_loop() -> None:
+    """后台把待落库的心跳批量写一次，并刷新读缓存（取消信号 / 最新版本）。"""
+    while True:
+        await asyncio.sleep(_HB_FLUSH_INTERVAL)
+        with _HB_LOCK:
+            pending = list(_HB_PENDING.items())
+            _HB_PENDING.clear()
+        for _cid, (_body, _cip) in pending:
+            try:
+                _res = await asyncio.to_thread(_heartbeat_impl, _body, _cip, _cid)
+                with _HB_LOCK:
+                    _HB_CACHE[_cid] = {
+                        "cancelled": list((_res or {}).get("cancelled_tasks") or []),
+                        "latest": (_res or {}).get("latest_version") or "",
+                    }
+            except Exception as _fe:
+                log.debug(f"heartbeat flush failed (cid={_cid}): {_fe}")
+
+
+def _ensure_flush_task() -> None:
+    global _HB_FLUSH_TASK
+    if _HB_FLUSH_TASK is not None and not _HB_FLUSH_TASK.done():
+        return
+    try:
+        _HB_FLUSH_TASK = asyncio.get_running_loop().create_task(
+            _heartbeat_flush_loop(), name="heartbeat-flush")
+    except RuntimeError:
+        _HB_FLUSH_TASK = None
+
+
+def _heartbeat_impl(body: HeartbeatBody, client_ip: str, credential_id: int):
     """更新 runtime 在线态 / last_seen_at。
 
     归属校验：只允许更新当前凭据名下的 runtime（credential_id 匹配），
@@ -528,7 +624,7 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
     实现任务取消实时感知（延迟 15 秒，覆盖 step 很长时 report_messages 410 不触发的场景）。
     """
     now = datetime.now(timezone.utc).isoformat()
-    client_ip = _client_ip(request)
+    # client_ip 由调用方传入（flush 路径没有 Request 对象）
     cancelled_tasks = []
     with _runtime_cursor() as c:
         # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
