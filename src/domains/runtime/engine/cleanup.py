@@ -7,9 +7,9 @@
 - 对 chat / feishu / vod / history 目录做 TTL 清理（无活跃会话时删除）。
 """
 
-import asyncio, os, shutil, time
+import asyncio, contextlib, os, shutil, time
 
-from src.kernel import config
+from src.kernel import config, db_registry
 
 from src.kernel.config import log, CHAT_CWD_BASE
 
@@ -56,7 +56,28 @@ _LONG_RUNNING_TXT = "中断：running/dispatched 超长未收敛（sweeper 兜�
 
 _DUAL_SIGNAL_TXT = "中断：双信号已齐（stream_ended+self_reported）但终态未收敛（sweeper 兜底回收）"
 
+# 同一判定的「成功」方向：agent 已经自报 exit_code=0，只是主控没来得及写终态
+# （tasks/complete 504、主控重启等）。这不是中断，必须收敛成 completed。
+_DUAL_SIGNAL_OK_TXT = "已完成：agent 自报成功（stream_ended+self_reported，sweeper 补偿收敛）"
+
 _GIT_AGENTS = ("vod", "issue", "coding", "qa", "sre")
+
+
+@contextlib.contextmanager
+def _sweep_cursor():
+    """sweeper 专用游标：三库拓扑走 runtime 域独立连接，单库/测试拓扑回落主库 + db_lock。
+
+    sweeper 是批量扫描（整张 agent_tasks / events），若和请求路径共用进程级 db_lock，
+    扫描期间心跳、claim、/tags、tasks/complete、tasks/current 全部排队，nginx 直接
+    504（2026-11-15 seq=9762 实测：qa 任务跑完 742 条消息，`grape tasks complete`
+    连续 7 次 504，最后只能被 sweeper 判失败）。独立连接把两条路径彻底解耦。
+    """
+    if db_registry.uses_own_dsn("runtime"):
+        with db_registry.cursor("runtime") as c:
+            yield c
+        return
+    with db_lock:
+        yield db.cursor()
 
 def _done_issues() -> list[tuple[str, str]]:
     """返回到达终态（stage='done'）的 (repo_key, issue_id) 列表。Phase C3：读 issue 单表。"""
@@ -478,8 +499,7 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
 
     online: set = set()
     try:
-        with db_lock:
-            c = db.cursor()
+        with _sweep_cursor() as c:
             c.execute("SELECT id FROM agent_runtimes WHERE status='online'")
             online = {r[0] for r in c.fetchall()}
     except Exception as e:
@@ -488,25 +508,30 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
 
     dead: list = []  # (task_id, event_seq, result_text, runtime_id)
     try:
-        with db_lock:
-            c = db.cursor()
+        with _sweep_cursor() as c:
             c.execute("SELECT id, event_seq, runtime_id, created_at, started_at, status, "
-                      "stream_ended, self_reported "
+                      "stream_ended, self_reported, exit_code "
                       "FROM agent_tasks WHERE status IN ('queued','dispatched','running')")
-            for tid, event_seq, rid, created_at, started_at, status, stream_ended, self_reported in c.fetchall():
+            for tid, event_seq, rid, created_at, started_at, status, stream_ended, self_reported, exit_code in c.fetchall():
                 if stream_ended == 1 and self_reported == 1:
-                    dead.append((tid, event_seq, _DUAL_SIGNAL_TXT, rid))
+                    # 双信号齐 ≠ 失败：agent 已经跑完并自报终态，sweeper 只是补写主控漏掉的那一次
+                    # 收敛。按它自报的 exit_code 决定方向，否则「跑完且成功」会被打成失败
+                    # （2026-11-15 seq=9762：qa 任务 742 条消息、结论齐全，仍被判中断）。
+                    if int(exit_code or 0) == 0:
+                        dead.append((tid, event_seq, _DUAL_SIGNAL_OK_TXT, rid, True))
+                    else:
+                        dead.append((tid, event_seq, _DUAL_SIGNAL_TXT, rid, False))
                 elif status == "queued":
                     age = _dt_age_minutes(created_at, now)
                     if age is not None and age >= q_stale:
-                        dead.append((tid, event_seq, _QUEUED_STALE_TXT, rid))
+                        dead.append((tid, event_seq, _QUEUED_STALE_TXT, rid, False))
                 elif status in ("dispatched", "running"):
                     age = _dt_age_minutes(started_at, now)
                     if age is not None and age >= l_stale:
-                        dead.append((tid, event_seq, _LONG_RUNNING_TXT, rid))
+                        dead.append((tid, event_seq, _LONG_RUNNING_TXT, rid, False))
                     elif (rid and rid != 0 and rid not in online
                           and age is not None and age >= d_stale):
-                        dead.append((tid, event_seq, _DEAD_RUNTIME_TXT, rid))
+                        dead.append((tid, event_seq, _DEAD_RUNTIME_TXT, rid, False))
     except Exception as e:
         log.warning(f"sweeper agent_tasks scan failed: {e}")
         return 0
@@ -518,15 +543,18 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
     try:
         with db_lock:
             c = db.cursor()
-            for tid, event_seq, txt, rid in dead:
+            for tid, event_seq, txt, rid, _ok in dead:
                 try:
+                    _final = "completed" if _ok else "failed"
+                    _code = 0 if _ok else 1
                     if event_seq:
-                        c.execute("UPDATE events SET status='failed', exit_code=1, completed_at=?, result=? "
-                                  "WHERE seq=? AND status IN ('pending','running')", (now_iso, txt, event_seq))
-                    c.execute("UPDATE agent_tasks SET status='failed', exit_code=1, completed_at=?, "
+                        c.execute("UPDATE events SET status=?, exit_code=?, completed_at=?, result=? "
+                                  "WHERE seq=? AND status IN ('pending','running')",
+                                  (_final, _code, now_iso, txt, event_seq))
+                    c.execute("UPDATE agent_tasks SET status=?, exit_code=?, completed_at=?, "
                               "errors=?, result_text=? WHERE id=? "
                               "AND status IN ('queued','dispatched','running')",
-                              (now_iso, txt, txt, tid))
+                              (_final, _code, now_iso, txt, txt, tid))
                     # L2（2026-10-17）：回收时若任务原占用引擎槽（running/dispatched 且有 runtime_id），
                     # 同步释放 busy_slots，防僵尸计数（local-engine-busy-slots-zombie-fix-design.md §九）。
                     # queued（runtime_id=0）任务未占槽，不释放。
@@ -543,7 +571,8 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
     except Exception as e:
         log.warning(f"sweeper agent_tasks recycle commit failed: {e}")
     if fixed:
-        log.info(f"sweeper: recycled {fixed} stuck agent_task(s): {[t for t, _, _, _ in dead]}")
+        log.info(f"sweeper: recycled {fixed} stuck agent_task(s): "
+                 f"{[(t, 'completed' if ok else 'failed') for t, _, _, _, ok in dead]}")
     return fixed
 
 def sweep_once() -> int:
