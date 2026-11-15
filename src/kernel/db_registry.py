@@ -25,8 +25,22 @@ from urllib.parse import unquote, urlparse
 
 _VALID = ("mgmt", "runtime", "insight")
 _lock = threading.RLock()
-_conns: dict[str, Any] = {}
+_local = threading.local()
+_conns: dict[str, Any] = {}          # 仅放域级锁（domain_lock），连接改线程本地
 _forbidden: set[str] = set()
+
+
+def _thread_conns() -> dict[str, Any]:
+    """当前线程的域连接表。
+
+    为什么线程本地：pymysql 连接绑定创建它的线程，共享连接被请求工作线程借用会抛
+    InterfaceError(0, '')（典型症状：跨域读的端点偶发「查询失败: (0, '')」）。
+    """
+    conns = getattr(_local, "conns", None)
+    if conns is None:
+        conns = {}
+        _local.conns = conns
+    return conns
 
 
 def _domain_of(name: str) -> str | None:
@@ -160,9 +174,9 @@ def domain_db(domain: str):
     if domain in _forbidden:
         return None
 
-    with _lock:
-        if domain in _conns:
-            return _conns[domain]
+    conns = _thread_conns()
+    if domain in conns:
+        return conns[domain]
 
     if lib_enabled() and dsn_of(domain):
         try:
@@ -170,8 +184,7 @@ def domain_db(domain: str):
         except Exception:  # noqa: BLE001 - 记录禁用，避免每次调用都重试
             _forbidden.add(domain)
             return None
-        with _lock:
-            _conns[domain] = conn
+        conns[domain] = conn
         return conn
 
     if domain == current_domain():
@@ -330,12 +343,14 @@ def health() -> dict:
 
 def reset(close: bool = True) -> None:
     """测试/排障用：清缓存（可顺带关闭自建连接）。"""
+    conns = _thread_conns()
+    for _k, _v in list(conns.items()):
+        if close:
+            try:
+                _v.close()
+            except Exception as _e:
+                log.debug(f"src/kernel/db_registry.py best-effort skipped: {_e}")
+    conns.clear()
     with _lock:
-        for k, v in list(_conns.items()):
-            if not k.startswith("lock:") and close:
-                try:
-                    v.close()
-                except Exception as _e:
-                    log.debug(f"src/kernel/db_registry.py best-effort skipped: {_e}")
-        _conns.clear()
+        _conns.clear()          # 域级锁对象
         _forbidden.clear()
