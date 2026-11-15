@@ -209,6 +209,9 @@ def check(base_url: str, account: str, message: str, recall: bool,
             out["recall_status"] = f"error: {exc!r}"[:120]
 
     if conv_id:
+        # 撤回是异步生效的：agent 线程可能在撤回前一刻写下「（无返回内容）」占位消息。
+        # 等它落库后再删会话，才能连占位消息一起清掉（否则每次冒烟留一条孤儿消息）。
+        time.sleep(float(os.environ.get("GRAPE_SMOKE_CLEANUP_WAIT", "2")))
         try:
             out["conversation_delete_status"] = _delete(f"{base}/api/chat/conversations/{conv_id}",
                                                         token, timeout)

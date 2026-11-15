@@ -34,7 +34,8 @@ def mod():
 def env_ready(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "test-secret")
     monkeypatch.setenv("DEVOPS_DB_HOST", "127.0.0.1")
-    monkeypatch.setattr(_load(), "_delete", lambda url, t, to: 200, raising=False)
+    monkeypatch.setattr(_delete_target := _load(), "_delete", lambda url, t, to: 200, raising=False)
+    monkeypatch.setattr(_delete_target.time, "sleep", lambda s: None)   # 清理等待不真等
     return monkeypatch
 
 
