@@ -231,7 +231,7 @@
           <template v-if="sel">
             <div v-html="detailCardHtml"></div>
             <div v-html="reviewBannerHtml"></div>
-            <div v-html="agentStatusCardHtml"></div>
+            <div @click="onPipelineClick($event)" v-html="agentStatusCardHtml"></div>
             <!-- 附件区 -->
             <div class="isk-attach-card">
               <div class="isk-card-tt">{{ td('attachments') }}</div>
@@ -514,7 +514,7 @@
         </div>
         <div v-html="detailCardHtml"></div>
         <div v-html="reviewBannerHtml"></div>
-        <div v-html="agentStatusCardHtml"></div>
+        <div @click="onPipelineClick($event)" v-html="agentStatusCardHtml"></div>
         <div class="isk-attach-card">
           <div class="isk-card-tt">{{ td('attachments') }}</div>
           <div class="isk-attach-list">
