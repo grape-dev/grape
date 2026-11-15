@@ -14,7 +14,7 @@ PY=${PY:-venv/bin/python}
 LOOP_MAX=${LOOP_MAX:-3}
 STAGE_ENV=${STAGE_ENV:-$HOME/.grape-rds-stage.env}
 STAGE_DB_USER=${STAGE_DB_USER:-root}
-STAGE_DB_PWD=${STAGE_DB_PWD:-RdsStage#2026}
+: "${STAGE_DB_PWD:?STAGE_DB_PWD 未设置：请通过环境变量或 ~/.grape-rds-stage.env 提供 stage 口令（仓库内不得有默认口令）}"
 LOCAL_MGMT_PORT=${LOCAL_MGMT_PORT:-3311}
 LOCAL_INSIGHT_PORT=${LOCAL_INSIGHT_PORT:-3312}
 
@@ -36,15 +36,16 @@ ensure_remote() {
   nc -z -w3 "${REMOTE_HOST}" "${REMOTE_PORT}" 2>/dev/null && return 0
   echo "[ensure] 兄弟节点实例 ${REMOTE_HOST}:${REMOTE_PORT} 不在线，尝试重启（需 REMOTE_SSH_*）"
   : "${REMOTE_SSH_USER:?需要 REMOTE_SSH_USER}" "${REMOTE_SSH_PWD:?需要 REMOTE_SSH_PWD}"
-  "$PY" - "$REMOTE_HOST" "$REMOTE_SSH_USER" "$REMOTE_SSH_PWD" "$REMOTE_PORT" <<'PYEOF'
+  : "${REMOTE_RDS_HOME:?需要 REMOTE_RDS_HOME（远端 MySQL 实例目录，不含仓库内默认值）}"
+  "$PY" - "$REMOTE_HOST" "$REMOTE_SSH_USER" "$REMOTE_SSH_PWD" "$REMOTE_PORT" "$REMOTE_RDS_HOME" <<'PYEOF'
 import sys, paramiko
-host, user, pwd, port = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+host, user, pwd, port, rds_home = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 c.connect(host, username=user, password=pwd, timeout=15)
-cmd = (f"setsid /opt/rds/bin/mysqld8 --no-defaults --user=root --datadir=/opt/rds/runtime "
+cmd = (f"setsid {rds_home}/bin/mysqld8 --no-defaults --user=root --datadir={rds_home}/runtime "
        f"--port={port} --bind-address=0.0.0.0 --socket=/tmp/mysql-runtime.sock --mysqlx=0 "
-       f"--pid-file=/opt/rds/runtime/mysqld.pid --log-error=/opt/rds/runtime/error.log "
-       f"--secure-file-priv=/opt/rds/runtime/files --innodb-buffer-pool-size=512M "
+       f"--pid-file={rds_home}/runtime/mysqld.pid --log-error={rds_home}/runtime/error.log "
+       f"--secure-file-priv={rds_home}/runtime/files --innodb-buffer-pool-size=512M "
        f"--skip-name-resolve </dev/null >/dev/null 2>&1 & sleep 8; ss -ltn | grep {port} || true")
 c.exec_command(cmd, timeout=60)
 c.close()

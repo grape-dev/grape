@@ -3,7 +3,7 @@
 
 web-chat-no-response-cwd-fix.md §4 存量修正：
 旧形态（上次执行确认 119 个 chat-pattern session，仅 25 个被 conversation.runtime_session_id 引用）：
-  /home/grape/chat/{uid}/{conv}
+  <data-root>/chat/{uid}/{conv}
   /opt/grape_workspace/chat/{uid}/{conv}
   {WORKSPACE_DIR}/chat/{uid}/{conv}
 新形态：

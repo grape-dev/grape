@@ -4,9 +4,9 @@
 拓扑（默认）：
   mgmt     → 本机 mysqld 3311（socket /tmp/mysql-mgmt.sock）
   insight  → 本机 mysqld 3312（socket /tmp/mysql-insight.sock）
-  runtime  → 兄弟节点 192.168.0.116:3306（MariaDB 10.11）
+  runtime  → 兄弟节点 <remote-host>:3306（MariaDB 10.11）
 
-每个实例只建一个域库 + 一个"只授本库"的应用账号；数据来自参照库（默认 192.168.0.59）
+每个实例只建一个域库 + 一个"只授本库"的应用账号；数据来自参照库（默认 127.0.0.1，可用 --source-host 指定）
 的**基表**（视图一律不复制——独立实例后不可能存在跨域视图）。
 
 幂等：重复执行会 DROP/CREATE 域库并重新灌数据；不改参照库。
@@ -14,7 +14,7 @@
 
 用法：
   python3 scripts/rds_p4_provision.py --source-host <h> --source-user root --source-password *** \
-      --remote-host 192.168.0.116 --remote-user rds_admin --remote-password ***
+      --remote-host <remote-host> --remote-user rds_admin --remote-password ***
   --skip-load   只重建账号/库，不灌数据（快速重跑验收）
 """
 from __future__ import annotations

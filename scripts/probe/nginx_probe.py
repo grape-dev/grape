@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grape 统一探针（部署位置：116 的 /home/grape/work/nginx_probe.py，crontab 每分钟执行；仓库内保留同一份便于重建）
+"""Grape 统一探针（部署位置：<deploy-dir>/nginx_probe.py，crontab 每分钟执行；仓库内保留同一份便于重建）
 
 Grape 统一探针 —— 每分钟探测 nginx（两节点）、node_exporter 与 LGTM 组件，经 OTLP 写入观测栈。
 
@@ -13,14 +13,15 @@ Grape 统一探针 —— 每分钟探测 nginx（两节点）、node_exporter �
     nginx_probe_up / http_status / latency_ms        入口可用性（/api/health）
     nginx_conn_active / reading / writing / waiting   nginx stub_status 连接数
     host_probe_up / net_rx_bps / net_tx_bps / tcp_established / load1 / mem_available_ratio
-  label upstream=127.0.0.1:38090|192.168.0.116:38080
+  label upstream=<local-upstream>|<remote-upstream>
     lb_requests_5m / lb_share_percent               LB 近 5 分钟分发量与占比（从 Loki 反查）
   label component=grafana|prometheus|loki|tempo|alloy
     lgtm_probe_up / http_status / latency_ms          LGTM 各组件健康
 
-用法：* * * * * /usr/bin/python3 /home/grape/work/nginx_probe.py
+用法：* * * * * /usr/bin/python3 <deploy-dir>/nginx_probe.py
 """
 import json
+import os
 import os
 import time
 import urllib.request
@@ -28,12 +29,23 @@ import urllib.request
 OTLP = "http://127.0.0.1:4318/v1/metrics"
 STATE = "/tmp/nginx_probe_state.json"
 
-NODES = [
-    {"node": "hd002", "nginx": "http://127.0.0.1:38080", "exporter": "http://127.0.0.1:9100"},
-    {"node": "vod", "nginx": "http://192.168.4.245:38080", "exporter": "http://192.168.4.245:9100"},
-]
+def _load_nodes() -> list:
+    """节点清单：环境变量 PROBE_NODES（JSON 数组）优先，默认只探本机。"""
+    import json as _json
+    raw = os.environ.get("PROBE_NODES", "").strip()
+    if not raw:
+        return [{"node": "local", "nginx": "http://127.0.0.1:38080",
+                 "exporter": "http://127.0.0.1:9100"}]
+    try:
+        nodes = _json.loads(raw)
+    except Exception:
+        return []
+    return nodes if isinstance(nodes, list) else []
 
-# LGTM 观测栈（116 单容器 / 本机 systemd Alloy）
+
+NODES = _load_nodes()
+
+# LGTM 观测栈（容器或 systemd 部署，地址均由本机回环访问）
 LGTM = [
     {"component": "grafana", "url": "http://127.0.0.1:3000/api/health"},
     {"component": "prometheus", "url": "http://127.0.0.1:9090/-/ready"},
