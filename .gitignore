@@ -93,6 +93,8 @@ skills.bak.*/
 *.bak.2026082*
 *.bak2
 scripts/check_*.py
+# 例外：门禁脚本（Makefile lint / rds_gate.sh 引用），必须入库，否则别人 clone 后门禁直接红
+!scripts/check_undefined_names.py
 scripts/clean_*.py
 !scripts/clean_empty_strings_to_null.py
 scripts/batch_*.py
