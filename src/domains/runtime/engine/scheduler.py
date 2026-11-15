@@ -1612,14 +1612,19 @@ async def scheduler_loop():
     while True:
         try:
             async with run_with_distributed_lock("autopilot_scheduler", ttl=120):
-                tasks = _get_enabled_tasks()
+                # 这些调用都是同步 pymysql：直接在事件循环里跑会把整个 worker 卡住
+                # （health 不响应、心跳落不了库、引擎被判失联）。2026-11-15 实测：
+                # MainThread 停在 _reap_zombie_executions，本机 worker 38083 全部端点超时，
+                # 116 的心跳经网关落到它身上一起挂住，表现为 h116-grape 失联。
+                tasks = await asyncio.to_thread(_get_enabled_tasks)
                 for task in tasks:
                     task_id = task["id"]
                     if task_id in _RUNNING_TASKS:
                         continue
                     # autopilot_tasks 归 mgmt：last_run 走归属域任意拓扑原语
                     from src.domains.mgmt import public as _mgmt_public
-                    row = _mgmt_public.autopilot_task_last_run_any(task_id)
+                    row = await asyncio.to_thread(
+                        _mgmt_public.autopilot_task_last_run_any, task_id)
                     last_run = row[0] if row else ""
                     if _is_cron_due(task["cron"], last_run):
                         log.info(f"Autopilot: cron due for task {task_id} ('{task['name']}')")
@@ -1631,12 +1636,12 @@ async def scheduler_loop():
         # autopilot_executions 卡在 running/dispatched，但 agent_tasks 可能已完成。
         # 每轮扫描顺带检查并同步终态（幂等自愈）。
         try:
-            _reap_zombie_executions()
+            await asyncio.to_thread(_reap_zombie_executions)
         except Exception as _ze2:
             log.warning(f"Autopilot zombie recovery error: {_ze2}")
         # pending_self_report 超时兜底（Issue #537 P0-1）：worker 未在阈值内自报 → timeout_failed
         try:
-            _sweep_pending_self_report_timeouts()
+            await asyncio.to_thread(_sweep_pending_self_report_timeouts)
         except Exception as _se2:
             log.warning(f"Autopilot pending timeout sweep error: {_se2}")
 
