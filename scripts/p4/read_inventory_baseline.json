@@ -1,0 +1,34 @@
+{
+  "files_scanned": 439,
+  "stats": {
+    "total": 0,
+    "bare": 0,
+    "converted": 0,
+    "bare_by_host": {},
+    "w1_scope": {
+      "bare": 0,
+      "bare_by_host": {
+        "insight": 0,
+        "mgmt": 0,
+        "runtime": 0
+      },
+      "converted": 0,
+      "by_file_bare": {},
+      "classification": {},
+      "bare_classification": {},
+      "bare_tables": 0,
+      "bare_by_table": {},
+      "bare_classification_by_table": {}
+    },
+    "shared_scope": {
+      "total": 0,
+      "bare": 0,
+      "by_host": {}
+    },
+    "tables": 0,
+    "bare_tables": 0,
+    "table_sites": {},
+    "classification": {}
+  },
+  "sites": []
+}
