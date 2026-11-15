@@ -24,6 +24,8 @@ import json
 import sqlite3
 import uuid
 
+from src.domains.mgmt.schema_ddl import CHANNEL_TABLE_DDL
+
 
 def _config_fingerprint(config: dict) -> str:
     return hashlib.sha256(
@@ -47,86 +49,7 @@ def ensure_channel_tables(conn) -> None:
     # 注意：**不要在 SQL 字符串里写 -- 注释**。MySQLCompatDB.executescript 按 ";" 切句后
     # 逐句翻译，行首注释会让 CREATE TABLE 不再是句首 → 列级方言翻译（TEXT 主键→VARCHAR(191)）
     # 失效 → MySQL 报 1170 "BLOB/TEXT column used in key specification"。
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS grape_t_channel_installation (
-            id                  TEXT PRIMARY KEY,
-            channel_type        VARCHAR(32) NOT NULL CHECK (channel_type IN ('feishu','dingtalk','slack','wecom','telegram','wechat')),
-            scope               VARCHAR(32) NOT NULL CHECK (scope IN ('user','repo')),
-            owner_user_id       VARCHAR(191) NOT NULL DEFAULT '',
-            repo_key            VARCHAR(191) NOT NULL DEFAULT '',
-            config              TEXT NOT NULL DEFAULT '{}',
-            config_fingerprint  VARCHAR(64) NOT NULL DEFAULT '',
-            status              VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked','disabled')),
-            legacy_app_id       VARCHAR(191) NOT NULL DEFAULT '',
-            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS grape_t_channel_chat_session_binding (
-            id                 TEXT PRIMARY KEY,
-            installation_id    TEXT NOT NULL,
-            channel_type       VARCHAR(32) NOT NULL,
-            channel_chat_id    TEXT NOT NULL,
-            chat_type          TEXT NOT NULL DEFAULT 'p2p' CHECK (chat_type IN ('p2p','group')),
-            scope              VARCHAR(32) NOT NULL DEFAULT 'user',
-            repo_key           VARCHAR(191) NOT NULL DEFAULT '',
-            agent_type         VARCHAR(32) NOT NULL DEFAULT 'chat',
-            runtime_session_id TEXT NOT NULL DEFAULT '',
-            config             TEXT NOT NULL DEFAULT '{}',
-            last_active_at     TEXT,
-            created_at         TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
-            UNIQUE (installation_id, channel_chat_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS grape_t_channel_inbound_dedup (
-            installation_id TEXT NOT NULL,
-            message_id      TEXT NOT NULL,
-            state           VARCHAR(32) NOT NULL DEFAULT 'claimed' CHECK (state IN ('claimed','marked')),
-            claim_token     VARCHAR(64) NOT NULL DEFAULT '',
-            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-            PRIMARY KEY (installation_id, message_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS grape_t_channel_sender_identity (
-            installation_id        TEXT NOT NULL,
-            platform_user_id       TEXT NOT NULL,
-            platform_stable_user_id TEXT NOT NULL DEFAULT '',
-            user_id                TEXT NOT NULL,
-            PRIMARY KEY (installation_id, platform_user_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS grape_t_channel_outbound_card (
-            out_track_id     VARCHAR(191) PRIMARY KEY,
-            installation_id  TEXT NOT NULL,
-            channel_type     VARCHAR(32) NOT NULL DEFAULT 'dingtalk',
-            channel_chat_id  TEXT NOT NULL DEFAULT '',
-            chat_type        TEXT NOT NULL DEFAULT 'p2p',
-            sender_staff_id  TEXT NOT NULL DEFAULT '',
-            card_template_id VARCHAR(191) NOT NULL DEFAULT '',
-            created_at       TEXT NOT NULL DEFAULT (datetime('now')),
-            payload          TEXT NOT NULL DEFAULT '{}',
-            status           VARCHAR(32) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','sent','failed','expired')),
-            attempt_count    INTEGER NOT NULL DEFAULT 0,
-            next_retry_at    VARCHAR(32) NOT NULL DEFAULT '',
-            expires_at       VARCHAR(32) NOT NULL DEFAULT '',
-            last_error       TEXT NOT NULL DEFAULT '',
-            updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS grape_t_channel_lease (
-            lease_key          TEXT PRIMARY KEY,
-            channel_type       VARCHAR(32) NOT NULL DEFAULT '',
-            installation_id    TEXT NOT NULL DEFAULT '',
-            lease_token        VARCHAR(128) DEFAULT NULL,
-            lease_owner        VARCHAR(128) DEFAULT NULL,
-            lease_expires_at   VARCHAR(32) DEFAULT NULL,
-            lease_acquired_at  VARCHAR(32) DEFAULT NULL,
-            updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        """
-    )
+    conn.executescript(";\n".join(ddl.strip() for _name, ddl in CHANNEL_TABLE_DDL) + ";")
     _ensure_legacy_unique_index(conn)
     conn.commit()
 

@@ -553,3 +553,122 @@ CREATE TABLE IF NOT EXISTS community_post_likes (
     user_id     TEXT NOT NULL,
     UNIQUE(post_id, user_id)
 )"""
+
+
+# ===== 渠道族（Issue #742 §5.1，2026-11-15 由 scripts/migrations/001 归位）=====
+# 归属 mgmt：读写语句都在 mgmt public（runtime public 仅转发）。此前 DDL 只存在于
+# scripts/migrations/001_channel_tables.py，每个进程启动都自己建一份 → 三库模式下
+# mgmt/runtime/insight 各有一张同名基表。现在集中在本域，db_setup 只在 owner 进程建。
+# 方言约定：SQLite 方言书写，MySQL 经 mysql_compat.translate_sql 翻译；
+# 字符串内不要写 '--' 注释（executescript 按 ';' 切句会让方言翻译失效）。
+_CHANNEL_INSTALLATION_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_channel_installation (
+    id                  TEXT PRIMARY KEY,
+    channel_type        VARCHAR(32) NOT NULL CHECK (channel_type IN ('feishu','dingtalk','slack','wecom','telegram','wechat')),
+    scope               VARCHAR(32) NOT NULL CHECK (scope IN ('user','repo')),
+    owner_user_id       VARCHAR(191) NOT NULL DEFAULT '',
+    repo_key            VARCHAR(191) NOT NULL DEFAULT '',
+    config              TEXT NOT NULL DEFAULT '{}',
+    config_fingerprint  VARCHAR(64) NOT NULL DEFAULT '',
+    status              VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked','disabled')),
+    legacy_app_id       VARCHAR(191) NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+)
+"""
+
+_CHANNEL_SESSION_BINDING_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_channel_chat_session_binding (
+    id                 TEXT PRIMARY KEY,
+    installation_id    TEXT NOT NULL,
+    channel_type       VARCHAR(32) NOT NULL,
+    channel_chat_id    TEXT NOT NULL,
+    chat_type          TEXT NOT NULL DEFAULT 'p2p' CHECK (chat_type IN ('p2p','group')),
+    scope              VARCHAR(32) NOT NULL DEFAULT 'user',
+    repo_key           VARCHAR(191) NOT NULL DEFAULT '',
+    agent_type         VARCHAR(32) NOT NULL DEFAULT 'chat',
+    runtime_session_id TEXT NOT NULL DEFAULT '',
+    config             TEXT NOT NULL DEFAULT '{}',
+    last_active_at     TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (installation_id, channel_chat_id)
+)
+"""
+
+_CHANNEL_INBOUND_DEDUP_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_channel_inbound_dedup (
+    installation_id TEXT NOT NULL,
+    message_id      TEXT NOT NULL,
+    state           VARCHAR(32) NOT NULL DEFAULT 'claimed' CHECK (state IN ('claimed','marked')),
+    claim_token     VARCHAR(64) NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (installation_id, message_id)
+)
+"""
+
+_CHANNEL_SENDER_IDENTITY_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_channel_sender_identity (
+    installation_id         TEXT NOT NULL,
+    platform_user_id        TEXT NOT NULL,
+    platform_stable_user_id TEXT NOT NULL DEFAULT '',
+    user_id                 TEXT NOT NULL,
+    PRIMARY KEY (installation_id, platform_user_id)
+)
+"""
+
+_CHANNEL_OUTBOUND_CARD_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_channel_outbound_card (
+    out_track_id     VARCHAR(191) PRIMARY KEY,
+    installation_id  TEXT NOT NULL,
+    channel_type     VARCHAR(32) NOT NULL DEFAULT 'dingtalk',
+    channel_chat_id  TEXT NOT NULL DEFAULT '',
+    chat_type        TEXT NOT NULL DEFAULT 'p2p',
+    sender_staff_id  TEXT NOT NULL DEFAULT '',
+    card_template_id VARCHAR(191) NOT NULL DEFAULT '',
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    payload          TEXT NOT NULL DEFAULT '{}',
+    status           VARCHAR(32) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','sent','failed','expired')),
+    attempt_count    INTEGER NOT NULL DEFAULT 0,
+    next_retry_at    VARCHAR(32) NOT NULL DEFAULT '',
+    expires_at       VARCHAR(32) NOT NULL DEFAULT '',
+    last_error       TEXT NOT NULL DEFAULT '',
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+)
+"""
+
+_CHANNEL_LEASE_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_channel_lease (
+    lease_key          TEXT PRIMARY KEY,
+    channel_type       VARCHAR(32) NOT NULL DEFAULT '',
+    installation_id    TEXT NOT NULL DEFAULT '',
+    lease_token        VARCHAR(128) DEFAULT NULL,
+    lease_owner        VARCHAR(128) DEFAULT NULL,
+    lease_expires_at   VARCHAR(32) DEFAULT NULL,
+    lease_acquired_at  VARCHAR(32) DEFAULT NULL,
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+)
+"""
+
+_CHANNEL_INBOUND_MESSAGE_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_channel_inbound_message (
+    installation_id TEXT NOT NULL,
+    message_id      TEXT NOT NULL,
+    chat_id         TEXT NOT NULL DEFAULT '',
+    sender_id       TEXT NOT NULL DEFAULT '',
+    text            TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (installation_id, message_id)
+)
+"""
+
+# 顺序即建表顺序（inbound_message 依赖 installation/dedup 的语义，仅逻辑上相关，无外键）
+CHANNEL_TABLE_DDL = (
+    ("grape_t_channel_installation", _CHANNEL_INSTALLATION_DDL),
+    ("grape_t_channel_chat_session_binding", _CHANNEL_SESSION_BINDING_DDL),
+    ("grape_t_channel_inbound_dedup", _CHANNEL_INBOUND_DEDUP_DDL),
+    ("grape_t_channel_sender_identity", _CHANNEL_SENDER_IDENTITY_DDL),
+    ("grape_t_channel_outbound_card", _CHANNEL_OUTBOUND_CARD_DDL),
+    ("grape_t_channel_lease", _CHANNEL_LEASE_DDL),
+    ("grape_t_channel_inbound_message", _CHANNEL_INBOUND_MESSAGE_DDL),
+)

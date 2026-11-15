@@ -96,6 +96,24 @@ worker claim 仍 200 OK，清理后新日志无被删表的 1146。
 `insight.agent_tasks`、`insight.devops_pipeline_scene`、`runtime.scene_market`、`runtime.external_identities`），
 属读数仍走本地连接的残留，需按 owner 提供具名查询或 GSB 原语。
 
+## 2026-11-15 ③ DDL 归位（渠道族 + repo_credentials）
+
+| 表 | 原 DDL 位置 | 归位后 |
+|---|---|---|
+| 6 张 `grape_t_channel_*` + `grape_t_channel_inbound_message` | `scripts/migrations/001_channel_tables.py`（脚本内联）/ `runtime/im/engine_wiring.py:160` | `src/domains/mgmt/schema_ddl.py::CHANNEL_TABLE_DDL`（7 条），进入 `db_setup._NEW_TABLES` |
+| `grape_t_repo_credentials` | 迁移函数内联于 `src/api/db_setup.py` | `src/domains/insight/schema_ddl.py::_REPO_CREDENTIALS_DDL`，迁移函数只引用常量 |
+
+配套：建表收敛闸门 `table_ownership.db_name_domain()`（仅看库名）——
+`None`（单库/共享库）与 `mgmt` 才建渠道族表，`runtime`/`insight` 跳过并记
+`IM channel tables owned by mgmt, skipped in domain=…`。`001` 迁移改为
+`executescript(";\n".join(CHANNEL_TABLE_DDL))`，不再自带副本。
+
+验证：新建 SQLite 库跑 `init_database()` → 7 张渠道表 + `repo_credentials` 全部建出
+（outbound_card 15 列、repo_credentials 5 列）；`rds_gate.sh --quick` GATE 全绿；
+`tests/runtime/im + api/迁移 + arch + contracts + scripts` 与基线的失败集合**逐条一致**
+（13 failed / 879 passed / 28 errors，全部为改动前既有），新增
+`tests/api/test_channel_ddl_ownership.py` 10 条守卫用例全绿。
+
 ## 维护约定
 
 1. 新增表或裁决变更：先改 `docs/weekly-11/table-owner.tsv`，再同步本文件与 manifest，最后跑

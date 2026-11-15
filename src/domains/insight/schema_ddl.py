@@ -236,3 +236,19 @@ CREATE TABLE IF NOT EXISTS obs_log (
     created_at  TEXT DEFAULT (datetime('now'))
 )
 """
+
+
+# ===== 仓库凭据单表（S80/D55 + D99）=====
+# 归属 insight：读写语句全在 insight public（runtime public 转发）。DDL 原在
+# src/api/db_setup.py 的迁移函数里（2026-11-15 归位），建表仍由该迁移触发，
+# 但语句文本归 owner 域，避免「DDL 在 api、属主在 insight」的口径分裂。
+_REPO_CREDENTIALS_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_repo_credentials (
+    id VARCHAR(256) NOT NULL PRIMARY KEY,
+    repo_key TEXT NOT NULL,
+    cred_type TEXT NOT NULL,
+    value TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (repo_key, cred_type)
+)
+"""

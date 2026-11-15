@@ -8,6 +8,7 @@ from typing import Callable, List, Optional
 
 from src.domains.insight.schema_ddl import (
     _MERGE_GATE_LOG_DDL,
+    _REPO_CREDENTIALS_DDL,
     _API_LATENCY_LOG_DDL,
     _OBS_LLM_USAGE_DDL,
     _OBS_LLM_USAGE_ARCHIVE_DDL,
@@ -56,6 +57,7 @@ from src.domains.mgmt.schema_ddl import (
     _COMMUNITY_DDL,
     _COMMUNITY_COMMENTS_DDL,
     _COMMUNITY_LIKES_DDL,
+    CHANNEL_TABLE_DDL,
 )
 from src.domains.runtime.schema_ddl import (
     _EVENTS_TABLE_DDL,
@@ -356,6 +358,11 @@ CREATE TABLE IF NOT EXISTS user_feedback (
     ("autopilot_subscriptions", _AUTOPILOT_SUBSCRIPTIONS_DDL),
 ]
 
+# ===== 渠道族（归属 mgmt；DDL 由 scripts/migrations/001 归位到 owner 域）=====
+# 只在 owner 进程建表（与 db_setup 里 ensure_channel_schema 的域闸门同源），
+# 避免三库模式下每个进程各建一份同名基表。
+_NEW_TABLES.extend(CHANNEL_TABLE_DDL)
+
 # ===== Organization（组织）特性 =====
 _NEW_TABLES.extend([
     ("organization", _ORGANIZATION_DDL),
@@ -615,12 +622,20 @@ def _create_tables():
     # mode=off / A 未起时旧库缺列，B/C 进程入队直接异常（通知静默丢失）。
     try:
         from src.domains.runtime.im.engine_wiring import ensure_channel_schema, ensure_notify_outbox_schema
+        from src.kernel.table_ownership import db_name_domain
+        _dom = db_name_domain()
+        # 渠道族归属 mgmt：只有 owner 进程（及单库/无法判定域）建表与补列。
+        # 三库模式下 runtime/insight 跳过，避免每个进程各建一份同名基表（旧行为已造成重复基表）。
         with db_lock:
-            ensure_channel_schema(db)
-            ensure_notify_outbox_schema(db)
+            if _dom in (None, "mgmt"):
+                ensure_channel_schema(db)
+                ensure_notify_outbox_schema(db)
             db.commit()
-        log.info("IM channel tables ready "
-                 "(grape_t_channel_installation / session_binding / inbound_dedup / sender_identity)")
+        if _dom in (None, "mgmt"):
+            log.info("IM channel tables ready "
+                     "(grape_t_channel_installation / session_binding / inbound_dedup / sender_identity)")
+        else:
+            log.info(f"IM channel tables owned by mgmt, skipped in domain={_dom}")
     except Exception as e:
         log.warning(f"IM channel tables setup failed: {e}")
 
@@ -2531,16 +2546,7 @@ def _fn_create_repo_credentials_table() -> None:
     - UNIQUE (repo_key, cred_type)：一仓库一类一条
     """
     with db_lock:
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS grape_t_repo_credentials (
-                id VARCHAR(256) NOT NULL PRIMARY KEY,
-                repo_key TEXT NOT NULL,
-                cred_type TEXT NOT NULL,
-                value TEXT NOT NULL DEFAULT '',
-                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-                UNIQUE (repo_key, cred_type)
-            )
-        """)
+        db.execute(_REPO_CREDENTIALS_DDL)
         db.commit()
 
 

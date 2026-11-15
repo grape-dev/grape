@@ -38,6 +38,8 @@ from typing import Awaitable, Callable, Optional
 # 由调用方传入自己的连接（3921a54c6 归位时漏了这行 import，运行期 NameError 被
 # except 吞成 "读不到安装 → None"，IM 推送静默失效）。
 from src.domains.mgmt import public as _mgmt_public
+# 渠道族 DDL 归 mgmt 域（2026-11-15）：本模块只引用 owner 的建表语句，不再自带副本。
+from src.domains.mgmt.schema_ddl import _CHANNEL_INBOUND_MESSAGE_DDL as _MESSAGE_TABLE
 
 
 def _im_now() -> str:
@@ -154,14 +156,6 @@ def get_current_engine():
 _APP_SEEN_TABLE = (
     "CREATE TABLE IF NOT EXISTS bot_seen_messages ("
     " app_id TEXT, message_id TEXT, seen_at REAL, UNIQUE (app_id, message_id))"
-)
-
-_MESSAGE_TABLE = (
-    "CREATE TABLE IF NOT EXISTS grape_t_channel_inbound_message ("
-    " installation_id TEXT NOT NULL, message_id TEXT NOT NULL,"
-    " chat_id TEXT NOT NULL DEFAULT '', sender_id TEXT NOT NULL DEFAULT '',"
-    " text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')),"
-    " PRIMARY KEY (installation_id, message_id))"
 )
 
 
