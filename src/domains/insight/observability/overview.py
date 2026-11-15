@@ -150,7 +150,8 @@ def _fetch_usage(repo_keys: List[str]) -> List[Dict[str, Any]]:
     """范围内 LLM 用量台账行（table: obs_llm_usage）。"""
     if not repo_keys:
         return []
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     ph = ",".join("?" * len(repo_keys))
     out: List[Dict[str, Any]] = []
     try:

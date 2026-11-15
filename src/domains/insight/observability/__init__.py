@@ -474,7 +474,9 @@ def collect_mysql_metrics():
     仅 MySQL 后端时有效；SQLite 后端跳过。
     """
     try:
-        from src.kernel.session_manager import _is_mysql_backend, db, db_lock
+        from src.kernel.session_manager import _is_mysql_backend
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         if not _is_mysql_backend():
             return
         with db_lock:

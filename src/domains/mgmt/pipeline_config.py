@@ -130,7 +130,8 @@ def invalidate_scene_cache(scene_id: str = "", repo_key: str = ""):
 
 
 def _db():
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("mgmt")
     return db, db_lock
 
 

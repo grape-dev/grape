@@ -284,28 +284,38 @@ async def lifespan(app: FastAPI):
         log.warning(f"Server metrics loop start failed: {e}")
 
     # 可观测性告警中心：种子规则 + 每 30s 求值（§6：_obs_alert_loop 归 A）
+    # 三库独立（GRAPE_DOMAIN_LIB=1）时 obs_* 表在 insight 域库里，必须由 Insight 进程跑：
+    # mgmt 用本域连接跑这些循环只会得到 1146（Table 'grape_stage_mgmt.obs_*' doesn't exist）。
+    from src.kernel.table_ownership import db_name_domain as _obs_db_domain
+    _obs_owner_ok = _obs_db_domain() in (None, "insight")
+    if not _obs_owner_ok:
+        log.info(f"observability loops owned by insight, skipped in domain={_obs_db_domain()}")
+
     _obs_alert_loop_task = None
-    try:
-        from src.api.main import _start_obs_alert_task
-        _obs_alert_loop_task = _start_obs_alert_task()
-    except Exception as e:
-        log.warning(f"Observability alert evaluator start failed: {e}")
+    if _obs_owner_ok:
+        try:
+            from src.api.main import _start_obs_alert_task
+            _obs_alert_loop_task = _start_obs_alert_task()
+        except Exception as e:
+            log.warning(f"Observability alert evaluator start failed: {e}")
 
     # 业务指标聚合（60s）——A
     _obs_rollup_task = None
-    try:
-        from src.api.main import _start_obs_rollup_task
-        _obs_rollup_task = _start_obs_rollup_task()
-    except Exception as e:
-        log.warning(f"Observability metric rollup start failed: {e}")
+    if _obs_owner_ok:
+        try:
+            from src.api.main import _start_obs_rollup_task
+            _obs_rollup_task = _start_obs_rollup_task()
+        except Exception as e:
+            log.warning(f"Observability metric rollup start failed: {e}")
 
     # 设备资源采样（60s）——A
     _obs_sample_task = None
-    try:
-        from src.api.main import _start_obs_sample_task
-        _obs_sample_task = _start_obs_sample_task()
-    except Exception as e:
-        log.warning(f"Observability runtime sampler start failed: {e}")
+    if _obs_owner_ok:
+        try:
+            from src.api.main import _start_obs_sample_task
+            _obs_sample_task = _start_obs_sample_task()
+        except Exception as e:
+            log.warning(f"Observability runtime sampler start failed: {e}")
 
     # 可观测性日志落库：主控 WARNING/ERROR → obs_log（OBS_LOG_DB=1 仅 A 落库）
     try:

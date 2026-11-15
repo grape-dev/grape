@@ -23,6 +23,12 @@ import threading
 import time
 
 from src.kernel import session_manager
+
+# gsb_provider_route 归 mgmt 域：任一进程读路由配置都必须打到 owner 库，
+# 否则三库模式下非 mgmt 进程会得到 1146（表不在本域库里）。
+from src.kernel.owner_db import owner_db as _owner_db
+_owner = _owner_db("mgmt")
+_owner_lock = session_manager.db_lock
 from src.kernel.config import log
 
 # ---------------- 路由 key registry（静态镜像，同步测试防漂移） ----------------
@@ -202,16 +208,24 @@ def cache_state() -> dict:
 
 def ensure_table() -> None:
     """幂等建表（运行时惰性调用；迁移脚本同款 DDL）。"""
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
+    with _owner_lock:
+        c = _owner.cursor()
         c.execute(ROUTE_DDL)
-        session_manager.db.commit()
+        _owner.commit()
 
 
 def _load_all() -> list[dict]:
-    """全表读出为 dict 列表（SQLite Row / MySQL DictCursor 双兼容）。"""
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
+    """全表读出为 dict 列表（SQLite Row / MySQL DictCursor 双兼容）。
+
+    首次读前幂等建表：mgmt 域库由 provisioning 建，其它拓扑（单库/新环境）
+    可能缺表，缺表时 snapshot() 只会退化成内置基线（表现是路由配置不生效）。
+    """
+    try:
+        ensure_table()
+    except Exception as _e:  # noqa: BLE001 - 建表失败不阻断读（读失败仍会退回基线）
+        log.debug(f"gsb route config ensure_table skipped: {_e}")
+    with _owner_lock:
+        c = _owner.cursor()
         c.execute(
             "SELECT route_key, mode, timeout_ms, version, updated_at, updated_by "
             "FROM gsb_provider_route"
@@ -296,8 +310,8 @@ def set_route(route_key: str, mode: str, timeout_ms: int | None = None,
         if timeout_ms <= 0:
             raise ValueError(f"timeout_ms must be positive, got {timeout_ms}")
     ensure_table()
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
+    with _owner_lock:
+        c = _owner.cursor()
         c.execute("SELECT version, timeout_ms FROM gsb_provider_route WHERE route_key=?", (key,))
         row = c.fetchone()
         next_version = (int(row[0]) + 1) if row else 1
@@ -312,18 +326,18 @@ def set_route(route_key: str, mode: str, timeout_ms: int | None = None,
             "VALUES (?, ?, ?, ?, ?, ?)",
             (key, value, effective_timeout, next_version, time.time(), updated_by),
         )
-        session_manager.db.commit()
+        _owner.commit()
     reset_cache()
 
 
 def remove_route(route_key: str) -> bool:
     """删除一行配置（回落内置基线）。返回是否确实删除了行。"""
     ensure_table()
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
+    with _owner_lock:
+        c = _owner.cursor()
         c.execute("DELETE FROM gsb_provider_route WHERE route_key=?", (route_key,))
         removed = bool(c.rowcount)
-        session_manager.db.commit()
+        _owner.commit()
     reset_cache()
     return removed
 

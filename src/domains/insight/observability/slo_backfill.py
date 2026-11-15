@@ -161,7 +161,8 @@ def _worker_main() -> None:
 
 def _covered_hour_keys(start: datetime, end: datetime) -> set:
     """窗口内已有 `engine_avail_total`（global, hour）行的桶（行存在=已覆盖，total=0 也算）。"""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     out: set = set()
     try:
         with db_lock:
@@ -194,7 +195,8 @@ def _missing_hours(start: datetime, end: datetime) -> list:
 
 def _raw_hour_agg(bucket: datetime) -> Optional[Tuple[float, int]]:
     """该小时原始采样聚合（SUM(online), COUNT(*)）；无采样返回 None。"""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     s_iso, e_iso = _iso(bucket), _iso(bucket + timedelta(hours=1))
     try:
         with db_lock:
@@ -215,7 +217,8 @@ def _run_job(start: datetime, end: datetime) -> int:
     单次最多 `_MAX_HOURS_PER_JOB` 个（从新到旧）；打满时把更旧的剩余段重新入队，
     由后续限流间隔的作业继续补（最终全窗覆盖，且不产生长事务）。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     hours = _missing_hours(start, end)
     written = 0
     for b in hours:

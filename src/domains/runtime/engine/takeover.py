@@ -28,8 +28,8 @@ from typing import Any
 
 from src.kernel.config import log
 from src.kernel.lock import acquire_lock, release_lock
-from src.kernel.session_manager import db, db_lock
-
+from src.kernel.owner_db import db_pair
+db, db_lock = db_pair("runtime")
 # 会话状态
 ST_ACTIVE = "active"
 ST_FINISHED = "finished"

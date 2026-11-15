@@ -130,6 +130,40 @@ DROP: grape_runtime_db.grape_t_merge_gate_log   （59 @192.168.0.59:3306）
 说明：59 上另有一个早期彩排遗留库 `grape_stage_runtime`（不是当前在用的 stage runtime，
 后者在 116:3307）里也有一份同名表，未动，属非活跃环境残留。
 
+## 2026-11-15 ⑤ 跨域 1146 归零（owner 连接代理 + 任务归属闸门）
+
+**现象**：三库独立后，mgmt 进程 8 分钟内累计 **274 条 1146**（`Table 'grape_stage_mgmt.obs_*' doesn't exist` 等），
+全部被 `except` 吞成空结果——看板空白/健康分 null 的根因。
+
+**成因**（两条）：
+1. **任务归属错位**：`grape_server.py`（mgmt 入口）用 `src.api.main._start_obs_*` 起了 insight 域的
+   告警/聚合/采样三个循环，而 obs_* 表在 insight 库；
+2. **代码不感知 owner**：insight 可观测性模块、kernel 审计表、gsb 路由配置、takeover、health_scorer
+   都用 `session_manager.db`（进程本域连接），被非 owner 进程调用时必然打错库。
+
+**修复**：
+- 新增 `src/kernel/owner_db.py`：`db_pair(domain)` 返回 db 兼容代理 + 进程级可重入锁。
+  解析规则 = 分库有 DSN → 该域线程本地自有连接（`db_registry.domain_db`，方言翻译保留）；
+  单库/无 DSN → 回落 `session_manager.db`（零回归）。`execute()` 与 MySQLCompatDB 同语义（返回 cursor）。
+- `grape_server.py`：`db_name_domain()` 非 insight 时**不启动** obs 三循环（并打 `observability loops owned by insight, skipped in domain=…`）。
+- 12 个文件改用 owner 代理：insight/observability 全部（alerts/slo/metric_rollup/llm_usage/rollup/gap/
+  slo_backfill/overview/logs/trace/__init__）、`runtime/engine/takeover.py`(runtime)、
+  `runtime/event_store.py`(runtime)、`kernel/persistence/credential_usage_log.py`(runtime)、
+  `gsb/route_config.py`(mgmt，并首次读表前幂等建表)、`mgmt/pipeline_config.py`(mgmt)、
+  `runtime/engine/health_scorer.py`（runtime 表走 runtime、`runtime_health_scores` 走 insight）。
+- `scripts/migrate_user_accounts_to_grape.py`：用户 id 迁移扫描按 manifest **只迁本域表**
+  （非 owner 表打 `[SKIP] … 由 owner 进程迁移`），避免 mgmt 扫 runtime 表撞 1146。
+- stage mgmt 库补建 `gsb_provider_route`（provisioning 缺口）。
+
+**实测（重启后 8 分钟窗口）**：
+```
+重启前 8 分钟：mgmt 274 条 1146（obs 家族 210 + 其它 64）
+重启后 8 分钟：mgmt 0 / event 0 / worker 0 / insight 0
+业务面：/api/dashboard/ops/overview 200（带真实任务计数）、/api/issues/… 200
+测试：tests/… 与基线失败集合逐条一致（13 failed / 889 passed / 28 errors），
+      新增 tests/kernel/test_owner_db.py 7 条 + channel DDL 10 条全绿；rds_gate.sh --quick 全绿
+```
+
 ## 维护约定
 
 1. 新增表或裁决变更：先改 `docs/weekly-11/table-owner.tsv`，再同步本文件与 manifest，最后跑

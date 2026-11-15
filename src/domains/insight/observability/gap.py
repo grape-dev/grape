@@ -92,8 +92,8 @@ def _probe_runtimes(rule: Dict[str, Any], open_cache=None) -> tuple:
     """设备/引擎静默：last_seen_at 落后超过 threshold 秒。"""
     from src.domains.insight.observability import alerts as al
     from src.domains.runtime import public as rt_public
-    from src.kernel.session_manager import db, db_lock
-
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     thr = float(rule.get("threshold") or 900)
     now = _now()
     fired = resolved = evaluated = 0
@@ -155,8 +155,8 @@ def _probe_repos(rule: Dict[str, Any], open_cache=None) -> tuple:
     """仓库静默（默认关闭）：近 window_sec 有活动，最近 threshold 秒完全没有任务活动。"""
     from src.domains.insight.observability import alerts as al
     from src.domains.runtime import public as rt_public
-    from src.kernel.session_manager import db, db_lock
-
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     thr = float(rule.get("threshold") or 3600)
     active_window = float(rule.get("window_sec") or 21600)
     now = _now()
@@ -223,7 +223,8 @@ def silent_targets(include_retired: bool = True) -> Dict[str, Any]:
     标记（= 已超过 7 天，不会产生事件，但仍需人工处理）。
     """
     from src.domains.runtime import public as rt_public
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     now = _now()
     runtimes: List[Dict[str, Any]] = []
     try:

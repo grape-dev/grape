@@ -1,7 +1,9 @@
 """Event Store — 事件记录与查询（shared events table）"""
 import json, threading, asyncio
 from datetime import datetime
-from src.kernel.session_manager import db, db_lock
+from src.kernel.owner_db import db_pair
+
+db, db_lock = db_pair("runtime")
 from src.kernel.config import log
 from src.kernel.time_utils import normalize_event_time
 from src.kernel.event_payload_view import payload_view_from_json

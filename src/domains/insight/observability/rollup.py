@@ -57,7 +57,8 @@ def snapshot_runtimes() -> Dict[str, int]:
     落库与清理仍在本域（`obs_runtime_samples` 归 insight），保持原来的 `db_lock` + 单次提交语义。
     """
     from src.domains.runtime.public import runtime_credential_sample_rows_any
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     now = _now()
     now_iso = now.isoformat()
     inserted = 0
@@ -130,7 +131,8 @@ def runtime_history(runtime_ids: List[int], range_str: str = DEFAULT_RANGE) -> D
     acc: Dict[str, Dict[int, Dict[str, float]]] = {}
     ph = ",".join("?" * len(runtime_ids))
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         with db_lock:
             c = db.cursor()
             c.execute("SELECT runtime_id, sampled_at, cpu_percent, memory_percent, disk_percent,"

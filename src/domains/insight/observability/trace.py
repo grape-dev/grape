@@ -71,7 +71,8 @@ def stamp_missing(limit: int = 5000) -> int:
     取数在 runtime 域（`agent_tasks` 归 runtime）：读走任意拓扑具名查询，写走
     `stamp_task_traces_any`；有自有 DSN 时仍先进跨域写意图队列（P3-5g 的整批语义）。
     """
-    from src.kernel.session_manager import db_lock
+    from src.kernel.owner_db import owner_lock as _owner_lock
+    db_lock = _owner_lock("insight")
     from src.domains.runtime import public as runtime_public
     done = 0
     try:
@@ -127,7 +128,8 @@ def _steps(task_id: str) -> List[Dict[str, Any]]:
 
 
 def _tokens_by_task(task_ids: List[str]) -> Dict[str, Dict[str, int]]:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     out: Dict[str, Dict[str, int]] = {}
     if not task_ids:
         return out
@@ -226,8 +228,8 @@ def timeline(user: Dict[str, Any], trace: str, with_steps: bool = True) -> Dict[
     """
     from src.domains.insight.observability.overview import visible_repo_keys
     from src.domains.runtime import public as runtime_public
-    from src.kernel.session_manager import db, db_lock
-
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     stamp_missing()                                     # 保证历史任务也有 id
     rows = resolve_tasks(trace)
     visible = set(visible_repo_keys(user))

@@ -96,8 +96,9 @@ def ingest(records: List[Dict[str, Any]], default_source: str = "master") -> int
     """
     if not records:
         return 0
-    from src.kernel.session_manager import _is_mysql_backend, db, db_lock
-
+    from src.kernel.session_manager import _is_mysql_backend
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     rows: List[Tuple[Any, ...]] = []
     seen = set()
     for r in records:
@@ -292,8 +293,8 @@ def query(user: Dict[str, Any], level: str = "", source: str = "", repo: str = "
     """
     from src.domains.insight.observability.overview import RepoNotVisible
     from src.kernel.repo_key import to_repo_key
-    from src.kernel.session_manager import db, db_lock
-
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     visible = set(_visible_repo_keys(user))
     if repo:
         want = set(repo_key_candidates(to_repo_key(repo)))  # S94/D69：候选集统一（S25 helper）
@@ -370,7 +371,8 @@ _last_cleanup = 0.0
 
 def cleanup(days: int = RETENTION_DAYS) -> int:
     """清理超过留存期的日志。返回删除行数。"""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     try:
         with db_lock:

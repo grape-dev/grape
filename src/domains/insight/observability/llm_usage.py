@@ -187,7 +187,8 @@ def archive_old_usage(keep_days: int = ARCHIVE_KEEP_DAYS, batch: int = 2000) -> 
       不会因为列数不一致而失败。
     - 分批（默认 2000 行/次），单次失败不影响主循环；返回 {archived, checked}。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     out = {"archived": 0, "checked": 0}
     try:
         now = datetime.now(timezone.utc)
@@ -263,7 +264,8 @@ def record_usage(task_id: str, usages: Iterable[Dict[str, Any]], source: str = "
     if kind == "task" and not task_id:
         return 0
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
     except Exception as e:  # pragma: no cover
         log.warning(f"llm_usage: session_manager unavailable: {e}")
         return 0
@@ -394,7 +396,8 @@ def _query_usage(where: str = "", params: Sequence[Any] = (), order: str = " ORD
                  limit: int = 0) -> List[Dict[str, Any]]:
     """用量明细的共用读法（L1/L2/详情页都用同一份列投影）。"""
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         sql = f"SELECT {_USAGE_COLS} FROM obs_llm_usage" + where + order
         ps: List[Any] = list(params)
         if limit:
@@ -427,7 +430,8 @@ def usage_by_kind(since: Optional[str] = None) -> List[Dict[str, Any]]:
         params.append(since)
     sql += " GROUP BY run_kind ORDER BY (SUM(input_tokens)+SUM(output_tokens)) DESC"
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         with db_lock:
             c = db.cursor()
             c.execute(sql, tuple(params))
@@ -459,7 +463,8 @@ def summarize(repo_key: Optional[str] = None, since: Optional[str] = None,
     sql += " GROUP BY model_key ORDER BY (SUM(input_tokens)+SUM(output_tokens)) DESC LIMIT ?"
     params.append(int(limit))
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         with db_lock:
             c = db.cursor()
             c.execute(sql, tuple(params))

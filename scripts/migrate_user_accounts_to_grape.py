@@ -41,6 +41,25 @@ log = logging.getLogger("devops-bot")
 
 # ── 幂等插入原语 ──────────────────────────────────────────────────────
 
+def _skip_foreign_table(table: str) -> bool:
+    """三库模式下只迁本域的表：非 owner 表在另一个库里，本进程扫它必然 1146。
+
+    单库/无库名信息（None）时一律不跳过，保持旧行为。
+    """
+    try:
+        from src.kernel.table_ownership import db_name_domain, owner_of
+    except Exception:
+        return False
+    dom = db_name_domain()
+    if not dom:
+        return False
+    own = owner_of(table)
+    if own and own != dom:
+        log.info(f"  [SKIP] {table}: owner={own} 非本域（{dom}），由 owner 进程迁移")
+        return True
+    return False
+
+
 def _ensure_grape_account(username, password_hash, nickname,
                           token_version, created_at, last_active_at,
                           dry_run) -> int | None:
@@ -373,6 +392,8 @@ def _update_related_tables(id_map: dict[int, int], dry_run: bool) -> None:
     print(f"\n[阶段 2] 更新关联表（{len(id_map)} 个映射）")
 
     for table, column in tables:
+        if _skip_foreign_table(table):
+            continue
         updated = 0
         skipped = 0
         collisions = 0
@@ -518,6 +539,8 @@ def _scan_orphan_ids() -> list[dict]:
     ]
     orphans = []
     for table, column in orphan_tables:
+        if _skip_foreign_table(table):
+            continue
         try:
             with db_lock:
                 c = db.cursor()
@@ -665,6 +688,8 @@ def _scan_collisions() -> list[dict]:
     """
     groups = []
     for table, column in _COLLISION_COLUMNS:
+        if _skip_foreign_table(table):
+            continue
         w_col = _COLLISION_WITNESS.get(table, {}).get(column, "")
         if w_col:
             try:

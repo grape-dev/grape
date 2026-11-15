@@ -184,7 +184,8 @@ def _iso(dt: datetime) -> str:
 
 def seed_rules() -> int:
     """幂等写入种子规则（按 name 判重，已存在不动，避免覆盖用户改过的阈值）。"""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     n = 0
     with db_lock:
         c = db.cursor()
@@ -209,7 +210,8 @@ def seed_rules() -> int:
 
 def list_rules(level: str = "") -> List[Dict[str, Any]]:
     """规则列表。level='user' 过滤用户面可见规则；空=全部（平台面用）。"""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     out: List[Dict[str, Any]] = []
     sql = ("SELECT id, name, kind, level, metric, comparator, threshold, window_sec, for_sec,"
            " severity, enabled, notify_channels, description, seed_source,"
@@ -232,7 +234,8 @@ def list_rules(level: str = "") -> List[Dict[str, Any]]:
 
 
 def set_rule_enabled(rule_id: int, enabled: bool) -> bool:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     try:
         with db_lock:
             c = db.cursor()
@@ -246,7 +249,8 @@ def set_rule_enabled(rule_id: int, enabled: bool) -> bool:
 
 
 def set_rule_threshold(rule_id: int, threshold: float) -> bool:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     try:
         with db_lock:
             c = db.cursor()
@@ -260,7 +264,8 @@ def set_rule_threshold(rule_id: int, threshold: float) -> bool:
 
 
 def set_rule_notify(rule_id: int, channels: str) -> bool:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     try:
         with db_lock:
             c = db.cursor()
@@ -289,7 +294,8 @@ def set_rule_policy(rule_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     返回 {"ok":bool, "errors":[...], "applied":{...}}；**校验不通过不写库**。
     """
     from src.domains.insight.observability.alert_policy import sanitize_policy
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     rule = get_rule(rule_id)
     if not rule:
         return {"ok": False, "errors": ["rule not found"], "applied": {}}
@@ -332,7 +338,8 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
     （全 0 指标本来就不会触发），所以行为一致；**若将来加 `lt` 阈值或负阈值规则，
     需要把维度集合重新放宽**（否则"样本为空的仓库"不会参与求值）。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     now = _now()
     stuck_bound = _iso(now - timedelta(minutes=STUCK_MINUTES))
     fail_cutoff = _iso(now - timedelta(seconds=FAILURE_WINDOW_SEC))
@@ -429,7 +436,8 @@ def _platform_metrics() -> Dict[str, float]:
 
     # 全部 runtime 在线数（health 判定与 dashboard 同源）
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         from src.domains.runtime.engine.health import derive_runtime_health
         online = 0
         for status, last_seen in _rt_alerts.alerts_credential_heartbeats():
@@ -444,7 +452,9 @@ def _platform_metrics() -> Dict[str, float]:
 
     # MySQL 状态：连接使用率 + 中止连接增量
     try:
-        from src.kernel.session_manager import _is_mysql_backend, db, db_lock
+        from src.kernel.session_manager import _is_mysql_backend
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         if _is_mysql_backend():
             with db_lock:
                 c = db.cursor()
@@ -498,7 +508,9 @@ def _platform_metrics() -> Dict[str, float]:
     # agent_tasks_size_high 告警求值）。体积口径：MySQL 用 information_schema 精确值；
     # SQLite 无单表统计，用 page_count×page_size 整库体积作上界参考（测试/单机部署）。
     try:
-        from src.kernel.session_manager import _is_mysql_backend, db, db_lock
+        from src.kernel.session_manager import _is_mysql_backend
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         vals["agent_tasks_rows"] = float(_rt_alerts.alerts_task_rows_total())
         if _is_mysql_backend():
             with db_lock:
@@ -533,7 +545,8 @@ def cleanup_events(days: int = EVENT_RETENTION_DAYS) -> int:
     它是"这个维度当前还在告警"的唯一依据，删了会导致重复开一条新事件（还会重发通知）。
     时间比较用 ISO 字符串（`resolved_at` 由本模块统一写 ISO(UTC)，字典序=时间序）。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     cutoff = _iso(_now() - timedelta(days=days))
     try:
         with db_lock:
@@ -559,7 +572,8 @@ def _open_events_cache(rule_ids: Optional[List[int]] = None) -> Dict[Tuple[int, 
     同一 (规则,维度) 取 id 最大的一条，与原来 `ORDER BY id DESC LIMIT 1` 一致）。
     调用方在**同一轮内**改动了开放事件（新建/收口）时必须同步增删本缓存，否则策略扫描会看到过期状态。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     out: Dict[Tuple[int, str], Dict[str, Any]] = {}
     try:
         with db_lock:
@@ -626,7 +640,8 @@ def _resolve_open(c, rule_id: int, dim_key: str, now: datetime,
 
 def evaluate_rules() -> Dict[str, Any]:
     """求值一轮：返回 {fired, resolved, evaluated, skipped}。由进程内定时器每 30s 调用。"""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     now = _now()
     now_iso = _iso(now)
     fired = resolved = 0
@@ -811,7 +826,8 @@ def _recipients_for_event(event: Dict[str, Any]) -> List[tuple]:
     - 上限 20 人（避免一次刷屏）
     """
     from src.api.issues_center import _get_feishu_open_id_by_user_id
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     uids: List[int] = []
     try:
         rk = event.get("repo_key") or ""
@@ -852,7 +868,8 @@ def _mark_notified(event_ids: List[int], now_iso: str) -> None:
     """记录"已通知"：次数 +1、上次通知时间、清延后标记（策略层状态）。"""
     if not event_ids:
         return
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     try:
         with db_lock:
             c = db.cursor()
@@ -867,7 +884,8 @@ def _mark_notified(event_ids: List[int], now_iso: str) -> None:
 
 def _mark_deferred(event_id: int, now_iso: str) -> None:
     """通知时段外：只记录，等窗口内再补推一次。"""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     try:
         with db_lock:
             c = db.cursor()
@@ -947,7 +965,8 @@ async def notify_fired_events(events: List[Dict[str, Any]]) -> Dict[str, int]:
                 # 没渠道就别挂着"延后"标记，否则窗口内会反复进候选
                 _mark_notified([], now_iso)
                 try:
-                    from src.kernel.session_manager import db as _db, db_lock as _lock
+                    from src.kernel.owner_db import db_pair as _db_pair
+                    _db, _lock = _db_pair("insight")
                     with _lock:
                         _c = _db.cursor()
                         _c.execute("UPDATE obs_alert_events SET notify_deferred=0 WHERE id=?",
@@ -1139,8 +1158,8 @@ def list_events(user: Dict[str, Any], status: str = "", limit: int = 50,
     - 设备维度事件（数据缺失 `runtime:<id>`）：该设备在本人口径下可见
     """
     from src.domains.insight.observability.overview import RepoNotVisible, visible_repo_keys
-    from src.kernel.session_manager import db, db_lock
-
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     visible = set(visible_repo_keys(user))
     if repo:
         from src.kernel.repo_key import to_repo_key
@@ -1198,7 +1217,8 @@ def list_events_all(status: str = "", limit: int = 100, repo: str = "",
     与用户面 `list_events` 的字段投影保持一致（统一事件视图两端同口径）；`repo` 传短名时
     只出该仓库（**不做可见性校验**——调用方必须是管理台鉴权的接口）。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     sql = ("SELECT id, rule_name, level, severity, status, source, metric, value, threshold,"
            " dim_key, repo_key, first_fired_at, last_seen_at, resolved_at, silenced_until,"
            " notify_count, last_notified_at, escalated_at, notify_deferred"
@@ -1231,7 +1251,8 @@ def list_events_all(status: str = "", limit: int = 100, repo: str = "",
 def silence_event(event_id: int, minutes: int, user: Dict[str, Any]) -> bool:
     """静默一个事件：只影响通知，事件仍记录；越权（非可见仓库/设备）不动。"""
     from src.domains.insight.observability.overview import visible_repo_keys
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     visible = set(visible_repo_keys(user))
     dim_keys = set(visible_runtime_dim_keys(user, sorted(visible)))
     try:
