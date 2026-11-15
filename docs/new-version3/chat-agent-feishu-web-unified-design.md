@@ -50,7 +50,7 @@
 
 ### 3.2 Web Chat 工作目录统一（`web-chat-no-response-cwd-fix`）
 - 路径：`WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}`（owner/repo 两级，`parse_repo_key` 解析）。
-- 根因：旧 `CHAT_CWD_BASE=~/grape_workspace` 与 opencode session.directory（`/home/grape/...`）不一致 → `--session` 恢复历史失败 → tokens=0 → 无输出。
+- 根因：旧 `CHAT_CWD_BASE=~/grape_workspace` 与 opencode session.directory（`<deploy-root>/...`）不一致 → `--session` 恢复历史失败 → tokens=0 → 无输出。
 - 修复：`_get_chat_cwd` 用 `WORKSPACE_DIR` 基准 + 存量 session.directory 一次性迁移（`scripts/migrate_chat_cwd.py`）。
 
 ### 3.3 飞书复用同一会话（`feishu-chat-reuse-web-session`）

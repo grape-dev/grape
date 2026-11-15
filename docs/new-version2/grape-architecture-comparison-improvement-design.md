@@ -1,7 +1,7 @@
 # Grape 架构对比与持续改进设计文档
 
 > 状态：草案 | 日期：2026-08-28 | 分支：wise  
-> 对标项目：DeepSeek Harness (`/home/grape/deepseek-harness/`)
+> 对标项目：DeepSeek Harness (`<deploy-root>/deepseek-harness/`)
 
 ---
 

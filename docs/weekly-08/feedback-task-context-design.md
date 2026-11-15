@@ -51,7 +51,7 @@
   "task": {"task_id": "tsk_xxx", "task_status": "failed",
            "exit_code": 1, "started_at": "...", "completed_at": "..."},
   "engine": {"runtime": "hermes", "backend": "hermes", "engine_instance": "dev-mac",
-             "engine_device": "MacBook Pro", "engine_ip": "192.168.0.9",
+             "engine_device": "MacBook Pro", "engine_ip": "<lan-ip>",
              "health_score": 87},
   "fail_summary": "result_text 前 500 字（失败原因，events 详情同源）"
 }
@@ -86,7 +86,7 @@ FeedbackBody 增加可选字段：`event_seq: int = 0`。
 仓库   grape-dev/grape
 Issue  #379
 任务   tsk_xxx（failed，exit 1）
-引擎   hermes · dev-mac · 192.168.0.9 · 健康分87
+引擎   hermes · dev-mac · <lan-ip> · 健康分87
 失败摘要 result 前200字…（可折叠）
 ```
 

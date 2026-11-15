@@ -116,8 +116,8 @@ Agent Runtime
 
 【仓库】
 ┌── worker name ──────────┬─ ip address ──────┬─ scope ──┬─ owner ──────┬─ 心跳 ─────────┬─ 凭据 ──────────────┬─ 承载引擎 ─┐
-│ repo-worker-a           │ 10.0.0.5          │ 仓库     │ RepoOwner    │ ● 在线 · 20s 前 │ active · [吊销]      │ opencode v1.18.0 ✓ │
-│ repo-worker-b           │ 10.0.0.6          │ 仓库     │ MemberX      │ ● 在线 · 15s 前 │ active · [吊销]      │ opencode v1.17.9 ✓ │
+│ repo-worker-a           │ <lan-ip>          │ 仓库     │ RepoOwner    │ ● 在线 · 20s 前 │ active · [吊销]      │ opencode v1.18.0 ✓ │
+│ repo-worker-b           │ <lan-ip>          │ 仓库     │ MemberX      │ ● 在线 · 15s 前 │ active · [吊销]      │ opencode v1.17.9 ✓ │
 └─────────────────────────┴───────────────────┴──────────┴──────────────┴─────────────────┴─────────────────────┴──────────────────────────┘
 
 【个人】

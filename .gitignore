@@ -171,3 +171,7 @@ build/
 .env*
 !.env.example
 !configs/*.env.example
+
+# 运维快照：含内部库/视图真实名称，不入公开仓库
+docs/weekly-11/view-allowlist.txt
+docs/weekly-11/backup/

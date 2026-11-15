@@ -8,7 +8,7 @@
 现象：
 
 - `systemctl is-active grape@mgmt …` 四个角色全是 `inactive`，但端口 38081-38084 都在监听；
-- 四个 uvicorn 进程 `PPID=1`，由 `deploy/deploy3db.sh` 用 `nohup` 拉起（pid 落在 `/home/grape/3db-<role>.pid`）；
+- 四个 uvicorn 进程 `PPID=1`，由 `deploy/deploy3db.sh` 用 `nohup` 拉起（pid 落在 `<deploy-root>/3db-<role>.pid`）；
 - 机器重启、OOM、进程崩溃都不再自动拉起，必须有人手工再跑一次脚本。
 
 修法（`scripts/install-grape-systemd.sh`，root 执行，幂等）：
@@ -86,7 +86,7 @@ python /tmp/probe_owner.py            # skill / task_messages / agent_tasks / ev
 
 ## 3. 真实拓扑复核后追加的两处修正（三库 = 三主机）
 
-`/home/grape/.grape-rds-stage.env`（root 600）里的 DSN 并不是同一个 MySQL：
+`<deploy-root>/.grape-rds-stage.env`（root 600）里的 DSN 并不是同一个 MySQL：
 mgmt 在兄弟节点 `:3311`、insight 在兄弟节点 `:3312`、runtime 在本机 `:3307`
 （`/opt/rds/bin/mysqld8 --no-defaults` 起的裸实例）。按这个真实拓扑复核后，还有两个坑：
 
@@ -164,7 +164,7 @@ SQL 侧其实都走 owner 域：`chat_agent_session` 的语句集中在 `domains
 
 处置（可回滚）：
 
-1. `SHOW CREATE TABLE` 导出 DDL → `/home/grape/backup-leftover-tables/leftover-<ts>.sql`；
+1. `SHOW CREATE TABLE` 导出 DDL → `<deploy-root>/backup-leftover-tables/leftover-<ts>.sql`；
 2. `RENAME TABLE x TO zz_legacy_x`（秒级可回滚），观察 10 分钟；
 3. 窗口内 `(1146 ... 这三张表)` 计数为 0、四角色 `/health` 200 → `DROP TABLE zz_legacy_x`。
 
@@ -176,7 +176,7 @@ SQL 侧其实都走 owner 域：`chat_agent_session` 的语句集中在 `domains
 + **62 张 mgmt/insight 归属的空壳副本**（单库时代每个库都建了全量 schema）。空壳全部 0 行，
 但 `admin_accounts` 里被 `db_setup._seed_admin_accounts()` 在 runtime 进程种出了一行 `admin`。
 
-处置：DDL 导出（`/home/grape/backup-leftover-tables/runtime-leftover-*.sql`）→ `RENAME` 成
+处置：DDL 导出（`<deploy-root>/backup-leftover-tables/runtime-leftover-*.sql`）→ `RENAME` 成
 `zz_legacy_rt_*` 观察 12 分钟（1146 命中 0、四角色健康）→ `DROP`。runtime 库 98 → 36 张。
 
 清理过程中发现**三处会重建空壳的代码**，一并堵住（否则改名后 30 秒内又被建回来）：

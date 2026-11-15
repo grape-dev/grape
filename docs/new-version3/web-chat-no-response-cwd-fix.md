@@ -21,7 +21,7 @@
 
 | 会话 | `directory`(opencode.db) | 实际 cwd | messages/parts | 最近 tokens |
 |---|---|---|---|---|
-| web `ses_fb76...` | **`/home/grape/chat/7/518a`...** | `/opt/grape_workspace/chat/7/518a`... | 6 / 13 | **input:0, output:0（空转）** |
+| web `ses_fb76...` | **`<deploy-root>/chat/7/518a`...** | `/opt/grape_workspace/chat/7/518a`... | 6 / 13 | **input:0, output:0（空转）** |
 | 飞书 `ses_fdcb...` | `/opt/grape-workspaces/feishu/hello-html2/...` | 同名 | 17 / 48 | input:23610（正常） |
 
 - 两目录 inode 不同（非同软链），均为空目录；
@@ -39,11 +39,11 @@ CHAT_CWD_BASE  = ~/grape_workspace      // 下划线无s，web chat（dev 合并
 ```
 
 - Web 路径：`_get_chat_cwd()` 用 `CHAT_CWD_BASE` → root 下 `/opt/grape_workspace/chat/{uid}/{conv}` 作为 cwd 传 opencode；
-- 但该会话在 opencode.db 的 `directory` 是历史的 `/home/grape/chat/...`；
+- 但该会话在 opencode.db 的 `directory` 是历史的 `<deploy-root>/chat/...`；
 - cwd 与 session 归属错位 → opencode 恢复历史失败 → 模型调用空转。
 - 飞书路径用 `WORKSPACE_DIR`（`/opt/grape-workspaces`），与 session 记录一致 → 正常。
 
-`_remap_cwd`（agent.py）设计上会把 `CHAT_CWD_BASE` 映射到用户 home，但**本机 direct 执行未 remap**，root 直接用 `/opt/grape_workspace` 与历史 `/home/grape` 脱节。
+`_remap_cwd`（agent.py）设计上会把 `CHAT_CWD_BASE` 映射到用户 home，但**本机 direct 执行未 remap**，root 直接用 `/opt/grape_workspace` 与历史 `<deploy-root>` 脱节。
 
 ## 4. 修复方向（总原则：同一对话，飞书与 Web 工作目录一致）
 
@@ -65,7 +65,7 @@ WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}
   - web `_get_chat_cwd(uid, repo_key, conv_id)` → 上述路径
   - 飞书 `handler_async.py:920` `wsd` 改用 `conv_id`（非 `sess.split("-")[-1]`），去掉 `feishu` 段 → 与 web 指向完全一致
 - 取消 `CHAT_CWD_BASE` 独立基准（不再作为 web chat cwd 来源；若保留常量，默认对齐 `WORKSPACE_DIR`，绝不产生第二条路径）。
-- 对本机 direct 执行做 cwd 归一：若历史 session directory 以 `/home/grape/` 开头，统一映射为当前用户 home 下对应路径（root → `/opt/grape-workspaces/{owner}/{repo}/chat/{uid}/{conv_id}`），保证 `--session` 能加载历史消息。
+- 对本机 direct 执行做 cwd 归一：若历史 session directory 以 `<deploy-root>/` 开头，统一映射为当前用户 home 下对应路径（root → `/opt/grape-workspaces/{owner}/{repo}/chat/{uid}/{conv_id}`），保证 `--session` 能加载历史消息。
 - 一次性迁移存量数据：把 opencode.db 中 web/飞书会话的 `directory` 从旧路径改写为新结构 `WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}`，并确保目录存在。
 
 > **决定：repo 用 `{owner}/{repo}` 两级目录；飞书与 web 共用同一 `conv_id`、同一路径，去掉 `feishu/` 段。**
@@ -87,7 +87,7 @@ WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}
 | 扫描 opencode.db `session` 表 | 找 `directory` 含 `chat/{uid}` / `feishu/` 且不以新结构的 web/飞书会话 |
 | 解析 repo | 从 `chat_conversations.repo_key`（权威）取 `owner/repo` → `{owner}/{repo}` |
 | 解析 conv_id | 飞书旧目录用 `feishu/{repo}/{sess}` 尾巴 → 归档到该对话最新 `conv_id`（经 `get_conversation_by_im(chat_id)` 或 `chat_messages` 反查）；web 旧目录直接有 `conv_id` |
-| 改写 `directory` / `path` | 旧路径（`/home/grape/chat/{uid}`、`/opt/grape_workspace/chat/{uid}`、`WORKSPACE_DIR/chat/{uid}`、`WORKSPACE_DIR/feishu/{repo}/{sess}`）→ `WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}` |
+| 改写 `directory` / `path` | 旧路径（`<deploy-root>/chat/{uid}`、`/opt/grape_workspace/chat/{uid}`、`WORKSPACE_DIR/chat/{uid}`、`WORKSPACE_DIR/feishu/{repo}/{sess}`）→ `WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}` |
 | 确保目录存在 | 迁移后 cwd 为空目录可写（`os.makedirs`） |
 
 > 迁移脚本需记录"旧→新"映射，供校验与回滚；迁移后再改动路径规范需严格评估存量成本。
@@ -99,7 +99,7 @@ WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}
 | `src/config.py` | `CHAT_CWD_BASE` 不再作为 web chat cwd 基准（默认对齐/移除），保证不产生第二基准 |
 | `src/api/routes/chat.py` `_get_chat_cwd` | 改为 `WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}`（repo_key→`parse_repo_key` 解析 owner/repo） |
 | `src/im/handler_async.py` `process_chat_async` `wsd` | 改用 `conv_id` 派生 cwd（去掉 `feishu/` 段与 `sess` 尾巴），与 web 严格一致 |
-| `src/runtime/agent.py` `_remap_cwd` | 本机 direct 也应用目录归一（`/home/grape` ↔ 实际 user home） |
+| `src/runtime/agent.py` `_remap_cwd` | 本机 direct 也应用目录归一（`<deploy-root>` ↔ 实际 user home） |
 | 存量数据 | 一次性迁移 opencode.db `session.directory`（web/飞书会话）到新结构 |
 
 ## 6. 验证
@@ -121,7 +121,7 @@ WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}
 | `_get_chat_cwd(uid, repo_key, conv_id)` 返回 `WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}` | owner/repo 两级（非拍平）；repo_key 经 `parse_repo_key` 解析 |
 | 目录被 `os.makedirs(exist_ok)` 创建 | 调用后目录存在 |
 | repo_key 边界 | `gitcode:a/b` → `.../a/b/...`；缺 repo 字段时按既定约定处理（当前对话必绑仓库，不产生 fallback） |
-| `_remap_cwd` 归一 | `/home/grape/{owner}/{repo}/chat/1/x` → `/opt/grape-workspaces/{owner}/{repo}/chat/1/x`（root 下）；`/opt/grape-workspaces/...` 原样保持 |
+| `_remap_cwd` 归一 | `<deploy-root>/{owner}/{repo}/chat/1/x` → `/opt/grape-workspaces/{owner}/{repo}/chat/1/x`（root 下）；`/opt/grape-workspaces/...` 原样保持 |
 | `_remap_cwd` 幂等 | 已归一路径再归一不变 |
 
 ### 7.2 契约/集成测试（`tests/test_chat_cwd_contract.py`）
@@ -131,7 +131,7 @@ WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}
 | web `chat_submit` 与飞书 handler 对**同一 conv_id 产生的 cwd 完全相等** | 同一对话两者 cwd 字符串一致（无 `feishu/` 段差异） |
 | 飞书 `wsd` 改用 conv_id | mock handler，断言 `wsd == _get_chat_cwd(uid, repo_key, conv_id)` |
 | `stream_agent` 收到的 cwd 与 `_get_chat_cwd` 一致 | mock `stream_agent` 断言实参 |
-| 存量会话迁移函数正确改 `directory` | 对临时 sqlite 注入 `/home/grape/chat/{uid}/...` 与 `WORKSPACE_DIR/feishu/{repo}/{sess}`，迁移后均为 `WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}`，且幂等、可回滚 |
+| 存量会话迁移函数正确改 `directory` | 对临时 sqlite 注入 `<deploy-root>/chat/{uid}/...` 与 `WORKSPACE_DIR/feishu/{repo}/{sess}`，迁移后均为 `WORKSPACE_DIR/{owner}/{repo}/chat/{uid}/{conv_id}`，且幂等、可回滚 |
 | repo/conv 解析 | 从 `chat_conversations.repo_key` 取 owner/repo；飞书旧目录经 im 反查得到 conv_id |
 
 ### 7.3 运行级回归（人工/脚本，`scripts/verify_chat_cwd.sh`）

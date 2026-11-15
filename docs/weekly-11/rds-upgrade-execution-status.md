@@ -148,7 +148,7 @@ python3 scripts/verify_domain_isolation.py --host <rds> --user <u> --password <p
 |---|---|---|
 | mgmt | 本机 127.0.0.1:3311 | mysqld 8.0.46（二进制副本，绕开 Ubuntu AppArmor 的 datadir 限制）|
 | insight | 本机 127.0.0.1:3312 | 同上，独立 datadir/端口 |
-| runtime | 兄弟节点 192.168.0.116:3307 | MySQL 8.0.46（该机由 MariaDB 10.11 换装 MySQL 8，保证与生产同引擎，避免 MySQL8 生成列 DDL 在 MariaDB 上 1064）|
+| runtime | 兄弟节点 <lan-ip>:3307 | MySQL 8.0.46（该机由 MariaDB 10.11 换装 MySQL 8，保证与生产同引擎，避免 MySQL8 生成列 DDL 在 MariaDB 上 1064）|
 
 一条命令跑通并验证（幂等，库/数据会重建）：
 ```bash

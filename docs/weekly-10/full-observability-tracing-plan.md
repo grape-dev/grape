@@ -34,7 +34,7 @@ webhook (:8080)                               DB: MySQL(59) · OBS · GitCode AP
 
 - 依赖：`opentelemetry-sdk` + `opentelemetry-exporter-otlp` + `opentelemetry-instrumentation-fastapi`（进 requirements，pip 装）
 - 新增 `src/observability/otel.py`（单一初始化源，A/B/C/webhook 四入口 import）：
-  - `OTEL_EXPORTER_OTLP_ENDPOINT=http://192.168.0.39:4317`（grape.env 注入，grape-skills 生产拓扑同款 env 切换）
+  - `OTEL_EXPORTER_OTLP_ENDPOINT=http://<lan-ip>:4317`（grape.env 注入，grape-skills 生产拓扑同款 env 切换）
   - **Sampler：父头部优先（tracecontext 透传）+ 尾部采样策略**（healthy 基础上 1/10 抽样、error 全采、慢请求全采——防 Tempo 14 天盘打爆；先从固定 10% 起步）
   - Resource：`service.name=grape-server-{a|b|c|webhook}`、`service.version`、`host`
 - FastAPI instrumentation：自动 HTTP span（method/route/status/duration），**剔除 health/metrics 路径**
@@ -110,7 +110,7 @@ Step 4（worker metrics + mysqld_exporter）为运维项不进 MR。
 
 ### 7.1 入口
 - Grafana → 「Grape Dev — 任务追踪与排障」看板 → 「任务瀑布入口」→ 点 Tempo 链接（Explore）
-- 或直接: http://192.168.0.39:3000/explore → 左上数据源选 Tempo
+- 或直接: http://<lan-ip>:3000/explore → 左上数据源选 Tempo
 
 ### 7.2 查某个任务的调用链（最常用）
 1. 平台任务详情页拿到 task_id（如 t_2020735a54c3）

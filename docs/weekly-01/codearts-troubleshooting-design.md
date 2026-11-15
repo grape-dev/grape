@@ -759,7 +759,7 @@ worker claim task (HTTP long-poll)
   ▼
 _execute_task(task, engine_name)
   │
-  ├─ 1. _remap_cwd: 路径映射 (/home/grape → 本机 home)
+  ├─ 1. _remap_cwd: 路径映射 (<deploy-root> → 本机 home)
   ├─ 2. validate_task_dependencies: 依赖检查
   ├─ 3. git worktree 前置 (coding/qa/sre)
   ├─ 4. skill 物化: OBS 直连/代拉 → 解压到 cwd/.skills/

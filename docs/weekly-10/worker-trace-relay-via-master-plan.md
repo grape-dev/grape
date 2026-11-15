@@ -39,7 +39,7 @@ worker 的 OTLP/HTTP（`http://<主控入口>/otlp/v1/traces`）→ nginx `locat
 async def relay_traces(request: Request, credential_id: int = Depends(_require_credential)):
     body = await request.body()          # OTLP/protobuf 或 JSON 透传
     async with httpx.AsyncClient() as hc:
-        r = await hc.post(f"{OTLP_RELAY_TARGET}/v1/traces",   # env: http://192.168.0.39:4318
+        r = await hc.post(f"{OTLP_RELAY_TARGET}/v1/traces",   # env: http://<lan-ip>:4318
                           content=body,
                           headers={"Content-Type": request.headers.get("content-type", "application/x-protobuf")})
     return Response(status_code=r.status_code)

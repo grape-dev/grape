@@ -2,7 +2,7 @@
 
 > **版本**：v1.0  
 > **日期**：2026-10-31  
-> **基础仓**：`/home/grape/grape-new-version2`  
+> **基础仓**：`<deploy-root>/grape-new-version2`  
 > **前置文档**：`grape-three-dimension-analysis.md`（三维度分析报告）
 
 ---
@@ -1138,7 +1138,7 @@ curl -s http://127.0.0.1:38082/health    # {"status":"ok","service":"worker-serv
 #!/bin/bash
 # scripts/dev_three_process.sh — 开发模式同时启动三进程
 
-cd /home/grape/grape-new-version2
+cd <deploy-root>/grape-new-version2
 
 # 终端 1：A 进程
 uvicorn src.api.grape_server:app --host 0.0.0.0 --port 38080 --reload &
