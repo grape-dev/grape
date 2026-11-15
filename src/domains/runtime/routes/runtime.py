@@ -5,7 +5,7 @@ M3：/api/runtime/* 协议端点（register/heartbeat/claim/report），仅 rta_
 见 agent-runtime-event-full-design.md §6 / tech-impl.md §3。
 """
 
-import contextlib, hashlib, json, os, threading
+import asyncio, contextlib, hashlib, json, os, threading
 
 from datetime import datetime, timedelta, timezone
 
@@ -506,7 +506,18 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
     return {"runtimes": registered, "server_url": _server_url(), "probe_url": probe_url}
 
 @router.post("/heartbeat")
-def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int = Depends(_require_credential)):
+async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int = Depends(_require_credential)):
+    """心跳入口（async 包装）。
+
+    心跳必须走 async：uvicorn 把 sync 端点放进 anyio 线程池，而 messages 批量上报、
+    recover-orphans 这类长请求会把 40 个槽位吃满，心跳只能排队到客户端 40s 超时 ——
+    实测 116 侧连续三次 TimeoutError(40s) 之后突然 0.05s，正是池子被长请求占住的波形。
+    真正的 DB 写入交给线程池，既不阻塞事件循环，也不占请求线程池的槽。
+    """
+    return await asyncio.to_thread(_heartbeat_impl, body, request, credential_id)
+
+
+def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
     """更新 runtime 在线态 / last_seen_at。
 
     归属校验：只允许更新当前凭据名下的 runtime（credential_id 匹配），
@@ -873,7 +884,12 @@ def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
     return {"task": task, "scan_request": scan_request}
 
 @router.get("/runtimes/{runtime_id}/tags")
-def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_require_credential)):
+async def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_require_credential)):
+    """claim 前必经的标签查询：同样不能占 anyio 线程池槽（否则被长请求挤到超时）。"""
+    return await asyncio.to_thread(_get_tags_impl, runtime_id, credential_id)
+
+
+def _get_tags_impl(runtime_id: int, credential_id: int):
     """Return this engine's claimable tags from DB (worker polls this instead of ENGINE_TAGS env).
 
     Tags are managed by users via the console (settings.py CRUD endpoints).
@@ -950,9 +966,15 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
     return {"env": env}
 
 @router.post("/runtimes/{runtime_id}/tasks/claim-by-tag/{tag}")
-def runtime_claim_by_tag(runtime_id: int, tag: str,
+async def runtime_claim_by_tag(runtime_id: int, tag: str,
                                body: RuntimeClaimBody | None = None,
                                credential_id: int = Depends(_require_credential)):
+    """认领高频路径：async 包装，避免与长请求争线程池。"""
+    return await asyncio.to_thread(_claim_by_tag_impl, runtime_id, tag, body, credential_id)
+
+
+def _claim_by_tag_impl(runtime_id: int, tag: str,
+                       body: "RuntimeClaimBody | None", credential_id: int):
     """Claim task by tag + scope isolation (event-dispatch-redesign-v2.md 2.4).
 
     Workers with engine tags can claim tasks matching their tag and scope.

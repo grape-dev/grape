@@ -4596,7 +4596,16 @@ def _migrate_allow_signup_default():
 
 
 def init_database():
-    """初始化所有新表(幂等),启动时调用"""
+    """初始化所有新表(幂等),启动时调用。
+
+    `GRAPE_SKIP_DB_INIT=1` 时整体跳过：**执行侧**（runtime agent）只通过 HTTP 与主控交互，
+    不需要建表/迁移；而它在异构库（如 MariaDB）上跑这套 MySQL 8 DDL 会连续 1064，
+    既污染日志又把启动拖到几分钟，导致心跳迟迟不发、凭据被判失联。
+    建表迁移只应由主控进程（mgmt/event/worker/insight）执行。
+    """
+    if (os.environ.get("GRAPE_SKIP_DB_INIT") or "").strip().lower() in ("1", "true", "yes", "on"):
+        log.info("GRAPE_SKIP_DB_INIT=1：跳过 schema 初始化/迁移（执行侧 agent 不需要建表）")
+        return
     # 迁移前 DB 自动备份保留策略兜底（2026-10 磁盘告警：data/backups 曾堆到 63G 打满根盘）
     # 每次启动清理过量 pre-m0 备份，保留 DB_BACKUP_KEEP(默认5) 份
     try:
