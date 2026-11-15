@@ -154,6 +154,22 @@ mgmt 在兄弟节点 `:3311`、insight 在兄弟节点 `:3312`、runtime 在本�
 清单 135 → 128 张，`tests/api/test_table_ownership.py` 18 例通过；守卫行为复核：
 `agent_tasks` 在 mgmt 进程 skip=True、`admin_users` skip=False、未登记表放行。
 
+### 4.1 清掉 mgmt 库里的 3 张 runtime 域残留表
+
+`grape_stage_mgmt` 里还有 `bot_seen_messages` / `chat_agent_session` / `repo_im_group_binding`，
+是单库时期留下的（3 张都是**空表**，且 `chat_agent_session` 只有 14 列，runtime 库正本是 17 列 32 行）。
+SQL 侧其实都走 owner 域：`chat_agent_session` 的语句集中在 `domains/runtime/public/_ANY_QUERIES`，
+经 `_any_cursor()` 连 runtime DSN；`bot_seen_messages` / `repo_im_group_binding` 只在
+`_purge_chat_im_binding` 的注释里出现。
+
+处置（可回滚）：
+
+1. `SHOW CREATE TABLE` 导出 DDL → `/home/grape/backup-leftover-tables/leftover-<ts>.sql`；
+2. `RENAME TABLE x TO zz_legacy_x`（秒级可回滚），观察 10 分钟；
+3. 窗口内 `(1146 ... 这三张表)` 计数为 0、四角色 `/health` 200 → `DROP TABLE zz_legacy_x`。
+
+结果：`grape_stage_mgmt` 83 张表（27 张新建 + 3 张清理），三域缺口仍为 0。
+
 ## 遗留（本轮未动，需运营侧确认）
 - `grape_mgmt_db` / `grape_runtime_db` / `grape_insight_db` 与 `grape_ljt_db` 仍在
   共用的 RDS 实例（`<legacy-rds-host>`）上，是三库演练/迁移残留，容易误判主库；确认后归档。
