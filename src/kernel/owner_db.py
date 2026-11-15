@@ -55,15 +55,12 @@ class _OwnerDB:
 
     # ---- db 接口 ----
     def cursor(self, *args, **kwargs):
-        return self._conn().cursor(*args, **kwargs)
+        return _RetryCursor(self)
 
     def execute(self, sql: str, params=None):
         """与 MySQLCompatDB.execute 同语义：返回 cursor（调用方常用 cur.rowcount）。"""
-        c = self._conn().cursor()
-        if params is None:
-            c.execute(sql)
-        else:
-            c.execute(sql, params)
+        c = _RetryCursor(self)
+        c.execute(sql, params)
         return c
 
     def commit(self):
@@ -80,6 +77,73 @@ class _OwnerDB:
 
     def __repr__(self) -> str:
         return f"<owner_db {self.domain}>"
+
+
+def _is_disconnect(exc: BaseException) -> bool:
+    """pymysql 断线类异常：InterfaceError(0, '')、OperationalError 2006/2013、ConnectionError。"""
+    try:
+        import pymysql
+    except Exception:  # pragma: no cover - 无 pymysql 时按类型名兜底
+        pymysql = None  # type: ignore[assignment]
+    if pymysql is not None:
+        if isinstance(exc, (pymysql.err.InterfaceError, pymysql.err.OperationalError)):
+            code = exc.args[0] if exc.args else None
+            if code in (0, 2006, 2013, 2014):
+                return True
+        if isinstance(exc, pymysql.err.InterfaceError):
+            return True
+    name = type(exc).__name__
+    return name in ("InterfaceError", "ConnectionError", "ConnectionRefusedError",
+                    "ConnectionResetError", "BrokenPipeError")
+
+
+class _RetryCursor:
+    """游标包装：遇到「连接已断」类错误时重建该域连接并重试一次。
+
+    为什么需要：域连接是线程本地缓存 + 长连接，MySQL 按 wait_timeout 断开空闲连接后，
+    下一次执行必然抛 InterfaceError(0, '')（线上表现：/api/chat/submit 500，
+    日志里先出现 "get_meta_value failed: (0, '')"）。domain_db 的空闲 ping 能覆盖大多数
+    情况，但「ping 之后、执行之前」断线仍可能发生，这一层保证业务调用不会直接 500。
+    """
+
+    __slots__ = ("_proxy", "_cur")
+
+    def __init__(self, proxy: "_OwnerDB"):
+        self._proxy = proxy
+        self._cur = None
+
+    def _cursor(self):
+        if self._cur is None:
+            self._cur = self._proxy._conn().cursor()
+        return self._cur
+
+    def _reopen(self):
+        from src.kernel import db_registry
+        db_registry.reset_domain(self._proxy.domain)
+        self._cur = None
+
+    def execute(self, sql: str, params=None):
+        try:
+            c = self._cursor()
+            return c.execute(sql) if params is None else c.execute(sql, params)
+        except Exception as exc:  # noqa: BLE001 - 仅在断线类错误上重试
+            if not _is_disconnect(exc):
+                raise
+            self._reopen()
+            c = self._cursor()
+            return c.execute(sql) if params is None else c.execute(sql, params)
+
+    def executemany(self, sql: str, seq):
+        try:
+            return self._cursor().executemany(sql, seq)
+        except Exception as exc:  # noqa: BLE001
+            if not _is_disconnect(exc):
+                raise
+            self._reopen()
+            return self._cursor().executemany(sql, seq)
+
+    def __getattr__(self, item):
+        return getattr(self._cursor(), item)
 
 
 _proxies: dict[str, _OwnerDB] = {}

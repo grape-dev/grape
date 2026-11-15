@@ -19,6 +19,7 @@ from src.kernel.config import log
 
 import os
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -27,7 +28,13 @@ _VALID = ("mgmt", "runtime", "insight")
 _lock = threading.RLock()
 _local = threading.local()
 _conns: dict[str, Any] = {}          # 仅放域级锁（domain_lock），连接改线程本地
-_forbidden: set[str] = set()
+#: 连接失败后的禁用表：domain → 失败时间戳。
+#: 为什么不是永久集合：首次连接失败常是瞬时故障（启动期 DB 未就绪 / 网络抖动），
+#: 永久禁用会让该域在本进程整个生命周期内「静默不可用」，只能重启恢复。
+_forbidden: dict[str, float] = {}
+_FORBIDDEN_RETRY_SECONDS = 60.0
+#: 缓存连接的存活校验节流：空闲超过该秒数才 ping，避免每次取连接都多一次往返。
+_PING_IDLE_SECONDS = 30.0
 
 
 def _thread_conns() -> dict[str, Any]:
@@ -173,6 +180,22 @@ def _new_conn(domain: str, autocommit: bool = True):
     return _CompatConn(conn)
 
 
+def _needs_liveness_check(domain: str) -> bool:
+    """该域连接距上次确认存活是否已超过阈值（节流，避免每次多一次往返）。"""
+    seen = getattr(_local, "alive_at", None)
+    if not seen:
+        return True
+    return (time.time() - seen.get(domain, 0.0)) >= _PING_IDLE_SECONDS
+
+
+def _mark_alive(domain: str) -> None:
+    seen = getattr(_local, "alive_at", None)
+    if seen is None:
+        seen = {}
+        _local.alive_at = seen
+    seen[domain] = time.time()
+
+
 def domain_db(domain: str):
     """取该域的连接；不可用时返回 None（调用方必须显式处理）。
 
@@ -184,19 +207,39 @@ def domain_db(domain: str):
     domain = (domain or "").lower()
     if domain not in _VALID:
         raise ValueError(f"unknown domain: {domain}")
-    if domain in _forbidden:
+    _forbid_at = _forbidden.get(domain)
+    if _forbid_at is not None and (time.time() - _forbid_at) < _FORBIDDEN_RETRY_SECONDS:
         return None
 
     conns = _thread_conns()
+    if domain in conns:
+        # 存活校验：MySQL 会按 wait_timeout 断开空闲连接（或 DB 重启/网络抖动），
+        # 缓存的连接一旦失效，后续所有调用都会抛 InterfaceError(0, '')——
+        # 端点表现为 500（如 /api/chat/submit），且只能重启进程恢复。
+        # 这里按空闲节流 ping(reconnect=True)：断开时 pymysql 自动重连。
+        if _needs_liveness_check(domain):
+            try:
+                conns[domain].ping(reconnect=True)
+                _mark_alive(domain)
+            except Exception as _e:  # noqa: BLE001 - ping 失败即丢弃重建
+                log.debug(f"domain conn {domain} ping failed, reconnecting: {_e}")
+                try:
+                    conns[domain].close()
+                except Exception as _ce:
+                    log.debug(f"close dead domain conn {domain} failed: {_ce}")
+                conns.pop(domain, None)
+
     if domain in conns:
         return conns[domain]
 
     if lib_enabled() and dsn_of(domain):
         try:
             conn = _new_conn(domain)
-        except Exception:  # noqa: BLE001 - 记录禁用，避免每次调用都重试
-            _forbidden.add(domain)
+        except Exception:  # noqa: BLE001 - 记录禁用时间戳，过期后重试
+            _forbidden[domain] = time.time()
             return None
+        _forbidden.pop(domain, None)
+        _mark_alive(domain)
         conns[domain] = conn
         return conn
 
@@ -354,6 +397,22 @@ def health() -> dict:
     return out
 
 
+def reset_domain(domain: str, close: bool = True) -> None:
+    """丢弃当前线程里该域的缓存连接（断线重连用），不影响其它域。"""
+    dom = (domain or "").lower()
+    conns = _thread_conns()
+    conn = conns.pop(dom, None)
+    if conn is not None and close:
+        try:
+            conn.close()
+        except Exception as _e:
+            log.debug(f"close domain conn {dom} failed: {_e}")
+    _forbidden.pop(dom, None)
+    seen = getattr(_local, "alive_at", None)
+    if seen is not None:
+        seen.pop(dom, None)
+
+
 def reset(close: bool = True) -> None:
     """测试/排障用：清缓存（可顺带关闭自建连接）。"""
     conns = _thread_conns()
@@ -364,6 +423,9 @@ def reset(close: bool = True) -> None:
             except Exception as _e:
                 log.debug(f"src/kernel/db_registry.py best-effort skipped: {_e}")
     conns.clear()
+    seen = getattr(_local, "alive_at", None)
+    if seen is not None:
+        seen.clear()
     with _lock:
         _conns.clear()          # 域级锁对象
         _forbidden.clear()

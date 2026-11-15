@@ -43,7 +43,8 @@ def test_fallback_to_process_db_without_dsn(monkeypatch):
     monkeypatch.setattr(db_registry, "domain_db", lambda d: None)
 
     o = owner_db("insight")
-    assert o.cursor() == "PROCESS_CURSOR"
+    # cursor() 现在返回断线重试包装器：断言它最终打到进程库游标
+    assert o._conn().cursor() == "PROCESS_CURSOR"
     assert o.commit() == "COMMITTED"
 
 
@@ -60,7 +61,7 @@ def test_uses_owner_connection_when_dsn_present(monkeypatch):
 
     monkeypatch.setattr(db_registry, "domain_db", lambda d: FakeConn() if d == "insight" else None)
     o = owner_db("insight")
-    assert o.cursor() == "OWNER_CURSOR"
+    assert o._conn().cursor() == "OWNER_CURSOR"
     assert o.commit() == "OWNER_COMMIT"
 
 
@@ -85,7 +86,8 @@ def test_execute_returns_cursor_semantics(monkeypatch):
     conn = FakeConn()
     monkeypatch.setattr(db_registry, "domain_db", lambda d: conn)
     got = owner_db("runtime").execute("UPDATE t SET a=?", (1,))
-    assert got is conn.cur and got.rowcount == 3 and conn.cur.params == (1,)
+    # execute() 返回包装游标，rowcount / params 透传到底层游标
+    assert got.rowcount == 3 and conn.cur.params == (1,)
 
 
 def test_observability_modules_wired_to_insight_owner():
