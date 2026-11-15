@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# 记录部署起点：用于事后校验每个进程确实是在本次部署之后启动的。
+# 只看端口 200 会被「脚本没重启、旧进程还在应答」骗过去 —— 2026-11-15 就是这样
+# 连续多轮以为部署成功（116 上 systemd 托管后本脚本直接退出，旧代码一直在跑）。
+_DEPLOY_T0=$(date +%s)
 # 三库独立模式：一套独立实例（38081 前端+API / 38082 event / 38083 worker / 38084 insight）
 # 库：stage 三库（grape_stage_mgmt / grape_stage_runtime / grape_stage_insight），
 #     由 GRAPE_DOMAIN_LIB=1 + GRAPE_DSN_* 指定，互不干扰生产（38081-38084）。
@@ -7,13 +11,24 @@ set -u
 # 已被 systemd 托管时禁止执行本脚本：nohup 进程杀不干净 / Restart=always 会再拉一遍，
 # 两边抢同一端口 → address already in use，只有一个能绑上，另一个静默空转。
 # 切换/回滚方法见 scripts/install-grape-systemd.sh。
+# 只有「单元真的在运行」才与本脚本冲突（两边抢同一端口）。
+# 仅 enabled、但当前 inactive 的单元不该阻止本脚本 —— 那只是「开机自启已登记」，
+# 本机曾因此被误判，脚本静默退出、旧进程继续应答，看起来部署成功其实没重启。
 _units_on=0
+_units_enabled=""
 for _r in mgmt event worker insight; do
-  systemctl is-active -q "grape@$_r.service" 2>/dev/null && _units_on=1
-  [ -L "/etc/systemd/system/multi-user.target.wants/grape@$_r.service" ] && _units_on=1
+  if systemctl is-active -q "grape@$_r.service" 2>/dev/null; then
+    _units_on=1
+  elif [ -L "/etc/systemd/system/multi-user.target.wants/grape@$_r.service" ]; then
+    _units_enabled="$_units_enabled $_r"
+  fi
 done
+if [ -n "$_units_enabled" ]; then
+  echo "[3db] 提示: 这些角色已 enable 但当前未运行:$_units_enabled" >&2
+  echo "[3db]       若要用 systemd 托管: systemctl start grape@{mgmt,event,worker,insight}" >&2
+fi
 if [ "$_units_on" = "1" ]; then
-  echo "[3db] 检测到 systemd 单元 grape@*.service（已 enable 或运行中），本脚本不再适用。" >&2
+  echo "[3db] 检测到 systemd 单元 grape@*.service 正在运行，本脚本不再适用。" >&2
   echo "[3db] 请改用: systemctl restart grape@mgmt grape@event grape@worker grape@insight" >&2
   echo "[3db] 需要回到 nohup 方式: systemctl disable --now grape@{mgmt,event,worker,insight}" >&2
   exit 3
@@ -109,9 +124,31 @@ for p in 38081 38082 38083 38084; do
 done
 # 每个模块必须恰好一个进程：多实例会抢同一端口，只有一个绑得上，另一个静默空转
 for mod in $_MODS; do
-  n=$(pgrep -cf "uvicorn src.api.$mod:app" 2>/dev/null || echo 0)
-  [ "${n:-0}" -ne 1 ] && echo "[3db] WARN: $mod 进程数=$n（期望 1）"
+  # pgrep -c 在没有匹配时自己就输出 0 并以 0 退出，不能再 `|| echo 0`（会变成两行）
+  n=$(pgrep -cf "uvicorn src.api.$mod:app" 2>/dev/null); [ -z "$n" ] && n=0
+  [ "$n" -ne 1 ] && echo "[3db] WARN: $mod 进程数=$n（期望 1）"
 done
+# 启动时间校验：进程必须是本次部署之后才起来的，否则说明它根本没被重启（还在跑旧代码）。
+# 端口 200 不能证明代码是新的 —— 旧进程也 200。
+_stale_procs=0
+_btime=$(awk '/^btime/{print $2}' /proc/stat 2>/dev/null || echo 0)
+for pair in "mgmt:grape_server" "event:grape_event_server" "worker:grape_worker_server" "insight:grape_insight_server"; do
+  _role=${pair%%:*}; _mod=${pair##*:}
+  _pid=$(pgrep -f "uvicorn src.api.$_mod:app" 2>/dev/null | head -1)
+  [ -z "$_pid" ] && continue
+  _ticks=$(awk '{print $22}' "/proc/$_pid/stat" 2>/dev/null || echo "")
+  [ -z "$_ticks" ] && continue
+  _started=$(( _btime + _ticks / 100 ))
+  if [ "$_started" -lt "$((_DEPLOY_T0 - 5))" ]; then
+    echo "[3db] ERROR: $_role pid=$_pid 启动于 $(date -d @$_started '+%H:%M:%S')，早于本次部署起点 $(date -d @$_DEPLOY_T0 '+%H:%M:%S') —— 进程没被重启，仍在跑旧代码"
+    _stale_procs=1
+  fi
+done
+if [ "$_stale_procs" -ne 0 ]; then
+  echo "[3db] FAIL: 有进程未随本次部署重启（见上），代码未生效"
+  exit 1
+fi
+
 # agent 执行进程必须来自本部署目录：旧代码目录残留的 agent 会抢到任务、却跑旧逻辑
 # （不建引擎会话、零消息），事件层随后判 failed —— 2026-11-15 在 116 上复现过。
 for pid in $(pgrep -f "python.*-m src.domains.runtime.engine.agent" 2>/dev/null); do
