@@ -763,13 +763,22 @@ def adjust_skill_like_count(skill_id: int, delta: int) -> int:
 def insert_runtime_credential(token_hash: str, name: str, scope: str, owner_id: str,
                               owner_name: str, repo_key: str, org_id: str) -> dict[str, Any]:
     """新建 runtime 凭据。名称全局唯一：撞唯一约束时返回 duplicate（**不抛异常**），
-    调用方据此回 400 —— 若这里抛异常，意图会被当成可重试失败而无限重放。"""
+    调用方据此回 400 —— 若这里抛异常，意图会被当成可重试失败而无限重放。
+
+    org_id 归一：runtime_credentials.org_id 是 int 列（NULL 默认 0），而调用方在
+    「个人设备/未归属组织」时通常传空串。MySQL STRICT_TRANS_TABLES 下空串写 int 直接
+    1366，整条凭据生成失败（「添加设备生成凭据」那个报错）。这里统一转 int，空 → 0。
+    """
+    try:
+        _org_int = int(str(org_id).strip()) if str(org_id if org_id is not None else "").strip() not in ("", "None") else 0
+    except (TypeError, ValueError):
+        _org_int = 0
     with _any_cursor(write=True) as c:
         try:
             c.execute("INSERT INTO runtime_credentials "
                       "(token_hash, name, scope, owner_id, owner_name, repo_key, org_id) "
                       "VALUES (?,?,?,?,?,?,?)",
-                      (token_hash, name, scope, owner_id, owner_name, repo_key, org_id))
+                      (token_hash, name, scope, owner_id, owner_name, repo_key, _org_int))
             return {"action": "inserted", "id": int(c.lastrowid or 0)}
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)

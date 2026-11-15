@@ -311,7 +311,16 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
         cred_scope = (cred_row[0] if cred_row and cred_row[0] else "global").strip().lower()
         owner_id = (cred_row[2] or "") if cred_row else ""
         cred_repo_key = (cred_row[3] or "") if cred_row else ""
-        cred_org_id = (cred_row[4] or "") if cred_row else ""
+        # org_id 在 agent_runtimes / runtime_credentials 里是 int 列（NULL 默认为 0），
+        # 而凭据可能在未归属组织时落空串。MySQL STRICT_TRANS_TABLES 下把 '' 写进 int 列
+        # 直接 1366，引擎注册整条失败（表现为「添加设备生成凭据」报 Incorrect integer
+        # value: '' for column 'org_id'）。这里统一归一为 int，空/非数字 → 0（未归属）。
+        _raw_org = cred_row[4] if cred_row else None
+        try:
+            _org_txt = "" if _raw_org is None else str(_raw_org).strip()
+            cred_org_id = int(_org_txt) if _org_txt not in ("", "None") else 0
+        except (TypeError, ValueError):
+            cred_org_id = 0
         if cred_scope == "user" and cred_row and cred_row[1]:
             # D32-补丁：owner_id 与 grape_accounts.id 对齐（按用户名）
             # 账号表归 mgmt：走 owner 域薄原语（任意拓扑同一份语句）。原实现是
