@@ -30,6 +30,35 @@ from typing import Optional
 
 from src.kernel.config import log
 
+def get_bot_identity_token(repo_key: str) -> str:
+    """回帖/评论专用：只解析 **bot 身份** token（仓库 bot → 全局 bot），不落用户 token。
+
+    为什么需要（2026-11-15 实测）：路径 B 仓库（managed_repos.host_user_id 非空，如
+    songspace/flask-blog）下，执行链按设计跳过 repo/global bot → 落到用户 token，
+    于是 agent 处理完的回帖都挂在用户账号名下。回帖语义要求「系统/agent 发言」，
+    必须以机器人账号（如 grace_bot）出镜；执行链（clone/推送）仍保持原优先级不变。
+    """
+    from src.kernel.repo_key import to_repo_key
+    rk = to_repo_key(repo_key or "")
+    if not rk:
+        return ""
+    try:
+        provider = create_provider_from_repo_key(rk)
+    except Exception as e:  # noqa: BLE001
+        log.debug(f"get_bot_identity_token: provider 解析失败 ({repo_key}): {e}")
+        return ""
+    for strat in (RepoBotToken(provider, bypass_path_b=True),
+                  GlobalBotToken(provider, bypass_path_b=True)):
+        try:
+            tok = strat.get_token(rk)
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"get_bot_identity_token: {strat.level} 取 token 失败: {e}")
+            tok = ""
+        if tok:
+            return tok
+    return ""
+
+
 class VCSProvider(ABC):
     """VCS 平台接口。GitCode / GitHub 各自实现。
 
@@ -737,9 +766,17 @@ class TokenStrategy:
         return ""
 
 class RepoBotToken(TokenStrategy):
-    """第 2 级：managed_repos.{token_storage_field}"""
+    """第 2 级：managed_repos.{token_storage_field}
+
+    bypass_path_b=True：回帖/评论专用身份解析——路径 B（用户自己的仓库）也允许用 bot 身份。
+    默认 False 保持历史语义（路径 B 降级为用户 token），避免改到执行链。
+    """
 
     error_code = "REPO_TOKEN_EXPIRED"
+
+    def __init__(self, provider: VCSProvider, bypass_path_b: bool = False):
+        super().__init__(provider)
+        self.bypass_path_b = bypass_path_b
 
     @property
     def level(self) -> str:
@@ -749,8 +786,9 @@ class RepoBotToken(TokenStrategy):
         repo_key = self._normalize_repo_key(repo_key)
         if not repo_key:
             return ""
-        # 路径 B 仓库跳过仓库级 bot token（降级场景脏写入防护）
-        if self._is_path_b(repo_key):
+        # 路径 B 仓库跳过仓库级 bot token（降级场景脏写入防护）；
+        # 回帖身份解析传 bypass_path_b=True —— agent 的评论必须来自 bot 账号。
+        if self._is_path_b(repo_key) and not self.bypass_path_b:
             return ""
         field = self.provider.token_storage_field()  # bot_gitcode_token / bot_github_token
         # S82：grape_t_repo_credentials 唯一权威（rc 优先无条件；列=历史回落）
@@ -845,17 +883,24 @@ class RepoBotToken(TokenStrategy):
             log.warning(f"RepoBotToken.clear_expired: {e}")
 
 class GlobalBotToken(TokenStrategy):
-    """第 3 级：全局 bot token（meta 表 {global_bot_meta_key}）"""
+    """第 3 级：全局 bot token（meta 表 {global_bot_meta_key}）
+
+    bypass_path_b=True：回帖/评论专用身份解析（理由同 RepoBotToken）。
+    """
 
     error_code = "GLOBAL_TOKEN_EXPIRED"
+
+    def __init__(self, provider: VCSProvider, bypass_path_b: bool = False):
+        super().__init__(provider)
+        self.bypass_path_b = bypass_path_b
 
     @property
     def level(self) -> str:
         return "global_bot"
 
     def _fetch(self, repo_key: str) -> str:
-        # 路径 B 仓库跳过全局 bot token（§13.1）
-        if self._is_path_b(repo_key):
+        # 路径 B 仓库跳过全局 bot token（§13.1）；回帖身份解析允许 bypass。
+        if self._is_path_b(repo_key) and not self.bypass_path_b:
             return ""
         # 复用现有 _cached_get_meta 缓存逻辑
         # S87/D63：统一 get_global_bot_token_for（meta 派生键 + 存量两平台文件 fallback）

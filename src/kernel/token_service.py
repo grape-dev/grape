@@ -31,6 +31,16 @@ def is_auth_401_error(error_detail: str) -> bool:
     return any(kw in _lower for kw in AUTH_401_KEYWORDS)
 
 
+def get_bot_identity_token(repo_key: str) -> str:
+    """回帖/评论专用：只取 bot 身份 token（仓库 bot → 全局 bot），不落用户 token。
+
+    与 get_repo_bot_token 的区别：后者是**执行链**语义（路径 B 仓库会跳过 bot、
+    降级到用户 token）；本函数用于 agent/系统回帖，必须让评论挂在机器人账号名下。
+    """
+    from src.kernel.token_resolver import get_bot_identity_token as _impl
+    return _impl(repo_key)
+
+
 def get_repo_bot_token(repo_key: str) -> str:
     """获取仓库可用执行 token。供 Repo.bot_token 和其他调用方使用。
 

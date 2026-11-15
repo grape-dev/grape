@@ -401,6 +401,15 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
             raise HTTPException(status_code=503, detail={"code": 503, "message": f"接管会话校验失败：{e}"})
 
     def _bot():
+        # agent 的评论/操作必须来自机器人账号：先按「回帖身份」解析（仓库 bot → 全局 bot，
+        # 路径 B 仓库也不跳过），再退回执行链口径 mod.bot_token(rk)。
+        try:
+            from src.kernel.token_service import get_bot_identity_token
+            _t = get_bot_identity_token(rk) or ""
+            if _t:
+                return _t
+        except Exception as _e:  # noqa: BLE001
+            log.debug(f"git-repo bot identity token failed ({rk}): {_e}")
         try:
             return mod.bot_token(rk) or ""
         except Exception:
