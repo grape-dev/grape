@@ -1423,6 +1423,7 @@ def _sweep_pending_self_report_timeouts() -> int:
                           f"（runtime_session_id 为空、无任务消息），{PENDING_NO_SESSION_TIMEOUT_SECONDS}s 内"
                           f"无任何执行痕迹，判 timeout_failed —— 通常意味着认领方跑的是旧代码或引擎 spawn 失败")
     marked = 0
+    _ended = []
     try:
         _pending_rows = []
         with db_lock:
@@ -1451,9 +1452,31 @@ def _sweep_pending_self_report_timeouts() -> int:
                 # 跳过判死等下轮（同一事务内查询，不加额外锁、每候选一条主键查询开销小）。
                 if _pending_self_report_stream_active(c, _r[0]):
                     continue
+                # 执行流已正常收尾（最后一条是 end_turn）→ agent 干完了，只是那次自报
+                # 没送达。判 completed 并保留它原本写入的 result，避免把完成的工作
+                # 记成 timeout_failed（2026-11-15 #85/#84：148/27 条消息、结论齐全却判死）。
+                try:
+                    from src.domains.runtime.engine.stream_ended import stream_ended_normally
+                    _ended_ok = stream_ended_normally(c, _r[0])
+                except Exception:
+                    _ended_ok = False
+                if _ended_ok:
+                    _ended.append(_r[0])
+                    continue
                 # 下游按 4 元组解包；把「无会话」标记塞进第 4 位之外的 map
                 _pending_rows.append((_r[0], _r[1], _r[2], _r[3], _has_session))
             rows = _pending_rows
+        # 先按「执行流正常收尾」收敛：这些任务不需要等自报，直接 completed
+        for _etid in _ended:
+            try:
+                update_task_status(_etid, "completed", exit_code=0,
+                                   errors="[STREAM_ENDED_OK] 执行流已正常收尾（end_turn）但自报丢失，按完成收敛",
+                                   completed_at=_now, cascade_trigger="sweeper")
+                marked += 1
+                log.info(f"sweeper: task {_etid} stream ended normally -> completed (self-report was lost)")
+            except Exception as _ee:
+                log.warning(f"sweeper: converge ended task {_etid} failed: {_ee}")
+        rows = [r for r in rows if r[0] not in set(_ended)]
         _reasons = {_r[0]: (_reason if _r[4] else _reason_no_session) for _r in rows}
         for tid, evt_seq, _rt_id, _ps, _hs in rows:
             _why = _reasons.get(tid, _reason)
