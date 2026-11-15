@@ -1,8 +1,9 @@
 """跨域写：场景节点单行写入（P3-4b）。
 
 `devops_pipeline_scene` 是 **mgmt 基表**；runtime 进程（event/worker）改它的
-`nodes_json` 属于跨域写，统一走 `mgmt lib + cross_write 幂等意图`，lib 不可用时
-回落到调用方原有的本地游标 SQL（存量视图路径，零行为变化）。
+`nodes_json` 属于跨域写，lib 可用时走 `mgmt lib + cross_write 幂等意图`；lib 不可用
+（单库拓扑 / mgmt 进程内的同域写）时走 **mgmt public 的任意拓扑具名写**，游标与提交
+责任留在调用方 —— 本文件不再持有任何 SQL。
 
 三个调用点（P3-4b 接线）：
 - `recovery.py::_readd_scene_bindings`   加回引擎时把 rid 补进节点
@@ -38,15 +39,18 @@ def write_scene_nodes(nodes_json: str, row_id: int, expected_hash: str, c,
                       now_iso: str, log=None, action: str = "scene_nodes_update") -> str:
     """写单个场景行的 nodes_json，返回 UPDATED/SKIPPED/MISMATCH/FAILED/LOCAL。
 
-    c / now_iso：调用方持有的本地游标与时间戳，仅 lib 不可用时用于原生 SQL 回落。
+    c / now_iso：调用方持有的本地游标与时间戳，仅 lib 不可用时交给 owner 原语使用
+    （复用游标 → 提交责任仍在调用方，与原 SQL 语义一致）。
     """
     from src.kernel.domain_read import mgmt_lib
 
     _mg = mgmt_lib(foreign_only=True)
     if _mg is None:
-        c.execute(
-            "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
-            (nodes_json, now_iso, row_id))
+        # 单库 / 视图期 / mgmt 进程内：SQL 在 mgmt public（任意拓扑具名写），
+        # 只把调用方游标与时间戳递过去，本文件不留 SQL。
+        from src.domains.mgmt import public as _mgmt_scene_nodes
+
+        _mgmt_scene_nodes.scene_nodes_write_by_id(nodes_json, now_iso, row_id, c)
         return LOCAL
 
     from src.kernel import cross_write

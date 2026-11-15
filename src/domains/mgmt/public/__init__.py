@@ -752,6 +752,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "sender_identity_user_by_app_any", "installation_owner_by_app_any",
            # 安装枚举来源（runtime/im/engine/installations.py；任意拓扑）
            "installation_provider_rows_any",
+           # 场景节点按行号覆写（runtime/engine/scene_nodes_write.py；任意拓扑，游标可选）
+           "scene_nodes_write_by_id",
            "autopilot_task_brief_any", "scene_names_by_repo_any",
            # 能效看板取数（insight/observability/efficiency.py；任意拓扑）
            "account_name_rows_by_ids", "scene_display_name_rows",
@@ -1533,6 +1535,29 @@ def _owner_write_cursor(cursor: Any = None):
 
 
 @contextmanager
+def _same_domain_write_cursor(cursor: Any = None):
+    """写游标：**调用方与表同库**时复用其游标，真跨域才换本域连接。
+
+    `_owner_write_cursor` 只在「本域没有自有 DSN」时复用调用方游标；但在 **mgmt 进程内**
+    （`current_domain()=="mgmt"` + 自有 DSN）调用方的进程库就是本域库——`mgmt_lib(
+    foreign_only=True)` 正是为此返回 None，把同域写留在调用方本地事务里。若照
+    `_owner_write_cursor` 一味忽略游标，写会落到 autocommit 的独立连接，调用方随后的
+    `rollback()` 就管不到它（事务边界被悄悄改掉）。故这里多一条「同域」判据：
+      - 单库 / 视图期 / 测试（无自有 DSN）→ 复用调用方游标；
+      - mgmt 进程内（同域）→ 复用调用方游标；
+      - 其它域的进程 + 自有 DSN → 忽略调用方游标（那是外域库句柄，写不到本域表），
+        走 `_any_cursor(write=True)` 由本域提交。
+    提交责任在复用分支里仍留在调用方（与原 SQL 语义逐字一致）。
+    """
+    if cursor is not None and (not db_registry.uses_own_dsn("mgmt")
+                               or db_registry.current_domain() == "mgmt"):
+        yield cursor
+        return
+    with _any_cursor(write=True) as c:
+        yield c
+
+
+@contextmanager
 def _any_tx():
     """多语句组合写：自有 DSN → 独立非 autocommit 连接（真事务）；单库 → 进程库 + db_lock。"""
     if db_registry.uses_own_dsn("mgmt"):
@@ -1658,6 +1683,12 @@ _ANY_QUERIES: dict[str, str] = {
         "WHERE LOWER(ua.username)=LOWER(?) AND ur.is_join = 1"),
     # 场景 / 自动化任务（管理域表；runtime 的引擎绑定维护读）
     "active_scene_nodes": "SELECT id, nodes_json FROM devops_pipeline_scene WHERE is_active=1",
+    # 场景节点按行号覆写（runtime 引擎绑定维护的写：recovery / engine_select）。
+    # 原实现是调用方本地游标上的兜底句，三库拓扑下进程库没有本表（视图 0 → 1146）；
+    # 上移后两条拓扑同一份语句，参数序 `(nodes_json, updated_at 值, id)` 与原句逐字一致
+    # ——注意 `updated_at` 是**调用方算好的值**，不是 NOW()。
+    "scene_nodes_write_by_id": (
+        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?"),
     "active_scene_bindings": (
         "SELECT id, repo_key, scene_id, nodes_json FROM devops_pipeline_scene WHERE is_active=1"),
     "enabled_autopilot_engine_ids": (
@@ -2992,6 +3023,29 @@ def scene_nodes_any(repo_key: str, scene_id: str) -> Any | None:
     """
     row = read_one_any("scene_nodes_by_repo_scene", (repo_key, scene_id))
     return row[0] if row else None
+
+
+def scene_nodes_write_by_id(nodes_json: str, now_iso: str, row_id: int,
+                            cursor: Any = None) -> int:
+    """按行号覆写场景节点，返回影响行数（0 = 该行不存在）。
+
+    对应 runtime 引擎绑定维护（`recovery._readd_scene_bindings` /
+    `engine_select.cleanup|remap_scene_engine_bindings`）原有的**本地兜底句**
+    （按行号覆写节点 + 时间戳，语句见本域 `_ANY_QUERIES[...]`）：
+    三个调用点都只在 `mgmt_lib(foreign_only=True)` 不可用时才走它（单库拓扑，或
+    mgmt 进程内的同域写），而那一跳正是跨域表引用的来源，且三库拓扑下 runtime 进程库
+    没有本表（视图 0 → 1146）。
+
+    语义逐字照抄：
+      - `updated_at` 写调用方算好的 `now_iso`（**不改成 NOW()**，两条后端口径一致）；
+      - `WHERE id=?` 只命中一行，不改 `is_active` / 其它列，无行时返回 0（不插入）；
+      - `nodes_json` 原样落库（空串就写空串，不兜 `[]`）。
+    `cursor` 语义见 `_same_domain_write_cursor`：调用方与表同库时复用它、**提交责任仍在
+    调用方**（调用点后续 `db.commit()` / `rollback()` 的语义不变）；真跨域才换本域连接。
+    """
+    with _same_domain_write_cursor(cursor) as c:
+        cur = c.execute(_any_sql("scene_nodes_write_by_id"), (nodes_json, now_iso, row_id))
+        return int(getattr(cur, "rowcount", 0) or 0)
 
 
 def list_pr_subscription_scenes_any(repo_key: str) -> list[tuple]:

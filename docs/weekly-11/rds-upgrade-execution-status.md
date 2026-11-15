@@ -5705,6 +5705,101 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `devops_pipeline_scene`，归 mgmt）；头两名仍是 ⛔ blocked 的 `credential_usage_log.py` 与
   `prompt_builder.py`（各 3 处）。
 
+### 7.52 runtime 场景节点写语句下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/runtime/engine/scene_nodes_write.py` **1 处 → 0**（单轮做完，1 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`devops_pipeline_scene`（归 **mgmt**，
+  `grape_mgmt_db`）× 1：改前 L47–49，在 `write_scene_nodes()` 的
+  `if _mg is None:` 分支（`mgmt_lib(foreign_only=True)` 不可用时）用**调用方本地游标**直发
+  `UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?`。
+  该分支有三个调用点：`recovery._readd_scene_bindings`（加回引擎补 rid）、
+  `engine_select.cleanup_scene_engine_bindings`（删引擎清绑定）、
+  `engine_select.remap_scene_engine_bindings`（换引擎行后重映射 rid）。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增具名写 `scene_nodes_write_by_id`（L1690）：语句与原兜底句**逐字一致**
+    （三条 `?`、参数序 `(nodes_json, updated_at 值, id)`、`WHERE id=?` 不带 is_active）；
+    只用 `?` 方言面，无 `%s` / `NOW()` / `ON DUPLICATE` / 反引号。
+  - 新增游标判据 `_same_domain_write_cursor(cursor)`（L1538）：**复用调用方游标**的条件是
+    「本域无自有 DSN」**或**「当前进程就是 mgmt」；两者都不成立（外域进程 + 自有 DSN）才
+    忽略调用方游标、走 `_any_cursor(write=True)`。
+  - 新增薄函数 `scene_nodes_write_by_id(nodes_json, now_iso, row_id, cursor=None) -> int`（L3028）：
+    体内零字面 SQL（走 `_any_sql`），返回影响行数；`__all__` 登记（L756）。
+  - 说明：初版把原句写在薄函数 docstring 里，被静态正则当「跨域引用」又记了一次
+    （`sql_references` 一度 887 → 888），docstring 改成描述式后回到 887 —— 本批最终是纯减法。
+- 设计取舍：
+  1. **不复用现成的 `exec_any()`**：那是「自有 DSN → autocommit 共享连接；单库 → 进程库 +
+     `db_lock` + 立即 commit」的口径。本处调用点是在**自己的事务里**写（`engine_select` 末尾
+     才 `db.commit()`，`recovery` 由外层事务统一提交），换 `exec_any` 会当场提交、把
+     `rollback()` 的语义丢掉——那是行为变更，不是归位。
+  2. **不用 `_owner_write_cursor()`**：它只在「本域无自有 DSN」时复用调用方游标。可
+     `mgmt_lib(foreign_only=True)` 还有第二种返回 None 的情形——**当前进程就是 mgmt**（同域写
+     必须留在本地事务，否则失去调用方回滚能力）。此时若照 `_owner_write_cursor` 忽略游标，
+     写会落到 autocommit 独立连接上，正是它文档里警告的反面。故新增 `_same_domain_write_cursor`
+     补上「同域」这一支；`_owner_write_cursor` 保持原样（其它原语依赖它）。
+  3. **`updated_at` 继续用调用方算好的 `now_iso`**：不改 `NOW()`。三个调用点传的都是
+     `datetime.now(timezone.utc).isoformat()`，与 mgmt 侧 `set_scene_nodes` 的 `NOW()` 是
+     两条既有口径，本批不动（sqlite/MySQL 两后端也都能跑同一句）。
+  4. **不加 `is_active=1`、不改 `WHERE id=?`**：兜底句原本就按主键定位，不看启用位
+     （清理/重映射可能在停用场景上做），多一个谓词等于改了命中集合。
+  5. **返回值只用于语义、不参与判定**：原兜底分支没有返回值，调用点靠 `LOCAL` 状态码继续
+     （`engine_select` 把 `local` 与 `updated`/`skipped` 同列成功）。行不存在时返回 0 且
+     不插入——「引擎绑定指向已删场景」不因此被伪造出行。
+  6. **延迟 import 留在函数体内**：runtime → mgmt 模块级 import 会把两个大包在 import 期绑死
+     （同 7.50 / 7.51 口径）；写法用 `from src.domains.mgmt import public as _x` +
+     `_x.<func>`，是 `check_lib_query_names` 认得的隐式句柄形态。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  **三库拓扑下引擎绑定维护的写恒失败**：lib 不可用时的兜底句跑在**调用方连接**上，而
+  runtime 进程的连接钉的是 runtime 库——那里没有 `devops_pipeline_scene`（视图 0 → 1146）。
+  `recovery._readd_scene_bindings` 把它包成 `RuntimeError(f"scene nodes write ...")` 再被外层
+  `except → log.warning` 吞掉，表现为「加回引擎后节点绑定没补上」；`cleanup` 侧同理，
+  日志只有一句 `update scene N failed`，线索指向 DB 抖动而不是「库不对」。上移后两条拓扑
+  跑同一份 owner 语句，同域写仍留在调用方事务里。
+- 遗留（不在本批范围）：`mgmt lib` 的 `set_scene_nodes`（`_READ/_WRITE_QUERIES` 的 `%s` 面）
+  仍是三库拓扑下的主路径，本批只清掉兜底 SQL；`_ANY_QUERIES` 与该 `%s` 面并存属既有设计
+  （`%s` 面供跨进程 lib 调用，`?` 面供进程内任意拓扑），不属重复登记。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/mgmt/public/__init__.py` / `src/domains/runtime/engine/scene_nodes_write.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/scene_nodes_write_smoke.py`（`DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=~/burndown/scene_nodes_write.db`，
+    连跑 2 次稳定）→ **ALL scene_nodes_write smoke PASSED (58 checks)**：
+    A 28 项注册面/静态否定（具名写逐字、三个 `?` 与 SET/WHERE 顺序、无 `%s`/`NOW()`/
+    `ON DUPLICATE`/反引号/`is_active`、薄函数体内零字面 SQL 且登记 `__all__`、参数序
+    `(nodes_json, now_iso, row_id)`、游标判据同时认 `uses_own_dsn` 与 `current_domain`、
+    调用点无本表 SQL/无 `c.execute`/无 `%s`/无静默 except 且 lib 与 cross_write 分支都在、
+    余量 16、该表 runtime 消费方 2 → 1）；
+    B 11 项原语语义（命中回 1、`updated_at` 写调用方值而非 NOW()、其它列不动、
+    **id=1 的写不波及 id=11**（精确匹配）、无行回 0 且不插入、空串原样不兜 `[]`、
+    unicode/引号原样、`cursor=None` 走进程主库、重复写返回 int）；
+    C 9 项调用点端到端（单库拓扑 `LOCAL`、写落在调用方游标、**提交前旁观连接看不见**、
+    `rollback()` 能撤销（证明没被擅自提交）、提交后可见、无行仍 `LOCAL` 且不插入、
+    lib 可用时走 `UPDATED` 且不碰本地游标）；
+    D 10 项拓扑判据（自有 DSN + mgmt 进程内 → 复用调用方游标且**不另开本域连接**；
+    自有 DSN + 外域进程 → 陷阱游标全程未被触碰、只连 `domain=mgmt`、语句逐字、
+    参数 `('[]', NOW, 1)` 逐字；`cursor=None` 同走本域；无自有 DSN 时 `current_domain`
+    不参与判定）；
+  · `--update-baseline` → **baseline updated: 11 pairs, 16 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **11 表 / 16 跨域引用 / 11 对**
+    （`devops_pipeline_scene` 的 `consumer_domains` 由 `mgmt:93;runtime:2` →
+    `mgmt:93;runtime:1`，全局 `sql_references` 887 不变 = 本批只是把一处跨域引用搬成
+    同域引用，没有新增语句）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**（EXIT=0）；
+    另跑 `tests/api/test_scene_nodes_write.py` **7 passed**（既有 LOCAL/lib 分支用例未改坏）；
+    `tests/runtime/test_engine_select.py` **27 passed, 1 failed**，该失败
+    （`TestRepoUserIdIssueCreator::test_mapping_takes_priority_over_user_accounts`）在
+    HEAD 干净 worktree 里同样复现，属分支既有，与本批无关；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （mgmt 191 funcs + 1 named query used / 274 funcs + 31 queries registered）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点），运行面证据为 sqlite 烟测。
+- **新基线**：**16 处 / 11 对 / 11 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单
+  同步刷新（`next-batches.md` 16 处 / 12 文件）。`src/domains/runtime/engine/scene_nodes_write.py`
+  已清零并退出榜单；下一批首个未 blocked 文件是 `src/domains/runtime/engine/recovery.py`
+  （1 处：`devops_pipeline_scene` 的按 id 读取兜底句，行 198，归 mgmt）；
+  头两名仍是 ⛔ blocked 的 `credential_usage_log.py` 与 `prompt_builder.py`（各 3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
