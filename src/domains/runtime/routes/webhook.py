@@ -1350,7 +1350,11 @@ def _cross_pipeline_handoff(
             _bus = get_event_bus()
             if not _bus.has_listeners("agent/handoff"):
                 _bus.on_sync("agent/handoff", _on_handoff_dispatch)
-            _loop = _aio.get_event_loop()
+            # 必须用 get_running_loop：get_event_loop() 在没有运行中 loop 的上下文里会返回
+            # （或新建）一个未被 run 的 loop，create_task 出来的 task 永远不会被调度 ——
+            # 于是事件写进了库（status=running）却没有任何 agent_tasks，前端显示
+            # 「未派发/无执行引擎」、日志空白。实测 2026-11-15 seq=9755 即此症状。
+            _loop = _aio.get_running_loop()
             _loop.create_task(_bus.emit(handoff_event))
             log.info(f"A2A #329: cross-pipeline event bus dispatch seq={seq}")
         except Exception as _de2:

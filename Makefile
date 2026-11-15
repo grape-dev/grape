@@ -60,9 +60,10 @@ run: ## Start the API server (dev mode)
 sync-skills: ## Sync official skills from grape-skills repo
 	bash scripts/sync_skills.sh
 
-lint: ## Basic import/syntax check + undefined-name ratchet (F821)
+lint: ## Basic import/syntax check + undefined-name ratchet (F821) + async-blocking ratchet
 	$(PYTHON) -c "import src.api.main; print('import OK')"
 	$(PYTHON) scripts/check_undefined_names.py
+	$(PYTHON) scripts/check_async_blocking.py
 
 clean: ## Remove build artifacts and caches
 	rm -rf build/ dist/ *.egg-info src/*.egg-info

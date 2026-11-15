@@ -1955,8 +1955,12 @@ async def _materialize_files(client, tid, files_dict, file_urls, dest_dir, tag="
         # ① 优先 URL 下载
         if url:
             try:
-                with _urllib.urlopen(url, timeout=10) as resp:
-                    raw = resp.read()
+                # urlopen(timeout=10) 是同步阻塞调用：直接在事件循环里跑会在网络抖动时
+                # 把整个 agent 卡住（心跳停发 → 引擎被判失联）。下放入线程池。
+                def _download(_u=url):
+                    with _urllib.urlopen(_u, timeout=10) as _resp:
+                        return _resp.read()
+                raw = await asyncio.to_thread(_download)
                 got_content = raw.decode("utf-8") if isinstance(raw, bytes) else (raw or "")
                 if not got_content:
                     raise ValueError("empty response")
@@ -4165,8 +4169,12 @@ def main():
         global _OBS_SUPPORT
         if probe_url:
             try:
-                with _urllib.urlopen(probe_url, timeout=5) as _r:
-                    _OBS_SUPPORT = bool(_r.read())
+                # 同上下：同步 urlopen 必须入线程池，否则启动期就把 loop 占住
+                # （心跳/认领协程还没起来就先卡 5s，重试起来会叠加）。
+                def _probe_obs():
+                    with _urllib.urlopen(probe_url, timeout=5) as _r:
+                        return _r.read()
+                _OBS_SUPPORT = bool(await asyncio.to_thread(_probe_obs))
             except Exception as e:
                 log.warning(f"[skill] 启动探测失败（走 skill_files 兜底）: {type(e).__name__}")
         log.info(f"OBS 直连能力探测: supports_obs_url={_OBS_SUPPORT}")

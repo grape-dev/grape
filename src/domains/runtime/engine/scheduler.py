@@ -924,15 +924,25 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
         # 触达链：本人 bot + open_id（复用 issues_center 既有函数，不回落他人 bot）
         from src.api.issues_center import _get_feishu_open_id_by_user_id, _resolve_user_chat_bot
         from src.domains.runtime.im.engine_wiring import feishu_api
-        _loop = asyncio.get_event_loop()
+        _loop = None
+        try:
+            _loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _loop = None
         for user_id, _, _ in rows:
             try:
                 open_id = _get_feishu_open_id_by_user_id(user_id) or ""
                 ctx = _resolve_user_chat_bot(None, user_id)
                 # 旧 IM 下线 A2 M2：api 不再来自 BotManager，按本人 bot 的 app_id 取共享客户端
                 api = feishu_api(ctx.app_id) if ctx is not None else None
-                _loop.create_task(_run_autopilot_notify(ctx, api, user_id, open_id,
-                                                        card, task_id, exec_id))
+                _coro = _run_autopilot_notify(ctx, api, user_id, open_id,
+                                              card, task_id, exec_id)
+                if _loop is not None:
+                    _loop.create_task(_coro)
+                else:
+                    # 无运行中 loop 时 create_task 的 task 永不执行（通知静默丢失）；
+                    # 这条路径常在地线程/同步上下文里被调用，直接跑完再说。
+                    asyncio.run(_coro)
             except Exception as e:
                 log.warning(f"[autopilot-notify] task={task_id} exec={exec_id} user={user_id} "
                             f"resolve failed: {e}")
