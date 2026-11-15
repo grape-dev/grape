@@ -3280,6 +3280,21 @@ async def _report_replay_loop(client):
         await asyncio.sleep(_interval)
 
 
+async def _presence_heartbeat_loop(client, runtime_ids, interval: float) -> None:
+    """最小在线态心跳：只刷新 last_seen，保证服务端看到的间隔稳定在 interval。
+
+    与主循环里的完整心跳分工：完整心跳负责 log_lines / metrics / probe_results 上报和
+    cancelled_tasks 回收（发现取消就杀引擎进程），但它排在 claim 之后，节奏被主循环拖长。
+    在线态判断只看 last_seen，所以这里单独保活即可，失败也不升级为 reset（交给主循环计数）。
+    """
+    while True:
+        try:
+            await client.heartbeat(runtime_ids)
+        except Exception as _e:
+            log.debug(f"presence heartbeat failed (will retry): {_e}")
+        await asyncio.sleep(interval)
+
+
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
                     engine_by_rid: dict | None = None, installed=None, device_name="",
                     _test_execute=None, _test_active=None, _test_active_tasks=None,
@@ -3307,6 +3322,12 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         asyncio.create_task(_report_replay_loop(client), name="worker-report-replay")
     except Exception as e:
         log.warning(f"start report replay loop failed: {e}")
+    # 在线态心跳：严格按 heartbeat_interval 刷新 last_seen。
+    # 主循环里的心跳要等 claim/tags 跑完这一轮才轮到，于是 last_seen 的间隔等于主循环周期
+    # （实测 18-79s，而同一端点直接压测只要 0.05s）；服务端按心跳间隔判活，漂到分钟级就是
+    # 「凭据经常失联」。这里只发最小 payload 保活，日志/指标/probe/取消检查仍由主循环负责。
+    asyncio.create_task(_presence_heartbeat_loop(client, runtime_ids, heartbeat_interval),
+                        name="worker-presence-heartbeat")
     heartbeat_fail_streak = 0
     HEARTBEAT_FAIL_THRESHOLD = 3
     RE_REGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
