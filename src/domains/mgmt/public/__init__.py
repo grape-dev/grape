@@ -758,6 +758,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # 反馈状态联动（api/feedback_status.py；任意拓扑）
            "feedback_external_sync_page", "feedback_mark_status_if_live",
            "feedback_internal_sync_page", "feedback_apply_statuses",
+           # 反馈 → Issue 转换（api/feedback_issue_converter.py；任意拓扑）
+           "feedback_pending_conversions", "feedback_mark_converted",
            # 场景计数（api/session_store.py 首次托管判定；任意拓扑）
            "count_active_scenes_any",
            # 登录白名单判定（kernel/config.py；任意拓扑）
@@ -2038,6 +2040,23 @@ _ANY_QUERIES: dict[str, str] = {
         "AND f.id > ? ORDER BY f.id LIMIT ?"),
     # 内部联动原语句没有任何 is_deleted 守卫（已转换行的回写不看软删标记），照抄。
     "feedback_internal_set_status": "UPDATE user_feedback SET status=? WHERE id=?",
+    # ── 反馈 → Issue 转换（api/feedback_issue_converter.py；user_feedback 归 mgmt）──
+    # 原实现在 api 进程主库直发（`_fetch_pending` 读 + 组内逐行回写）：三库拓扑下
+    # api 进程库没有 user_feedback（视图 0 → 1146），待转换队列恒空、转换器整体停摆。
+    # 列序（15 列）/ 谓词 / ORDER BY / LIMIT 逐字照抄；只用 `?` 占位符。
+    # 入选口径照抄：未转换（issue_url='')、未软删，且 source='agent' 或
+    # source='user' 且带仓库上下文（repo_key 非空，Issue #673）—— 不额外加过滤。
+    "feedback_pending_rows": (
+        "SELECT id, repo_key, task_id, agent_type, skill_name, skill_scope, "
+        "title, description, fail_summary, event_seq, issue_id, issue_number, feedback_kind, "
+        "source, username "
+        "FROM user_feedback WHERE issue_url='' AND is_deleted=0 "
+        "AND (source='agent' OR (source='user' AND COALESCE(repo_key,'')!='')) "
+        "ORDER BY id LIMIT ?"),
+    # 回写守卫 `issue_url=''` 逐字保留：已转换行不被二次覆盖（重放 / 并发安全）。
+    "feedback_mark_converted": (
+        "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=? "
+        "WHERE id=? AND issue_url=''"),
     # ── 登录白名单（kernel/config.py 的登录判定；login_whitelist 归 mgmt）────────
     # 原实现在 kernel 里用进程主库游标直发：三库拓扑下进程库没有 login_whitelist
     # （无视图 → 1146），被 `_is_login_whitelist_enabled` / `is_user_allowed` 的
@@ -4556,4 +4575,51 @@ def feedback_apply_statuses(pairs: list[tuple]) -> int:
         for status, fid in todo:
             c.execute(_any_sql("feedback_internal_set_status"), (status, fid))
             done += 1
+    return done
+
+
+# ---------- 反馈 → Issue 转换（api/feedback_issue_converter.py；任意拓扑） ----------
+# user_feedback 归本域。原实现从 api 进程主库直发「读待转换队列 + 组内逐行回写」，
+# 三库拆分后 api 进程库没有该表（视图 0）→ `_fetch_pending` 抛 1146 被
+# `feedback_reconcile_loop` 的 except 吞掉：转换器每轮空转，反馈永远变不成 Issue，
+# 且日志只有一条 reconcile failed，看不出根因。
+# 这里只交出「取哪些行」与「回写哪几列」，幂等分组 / 路由 / 正文组装仍留在调用方。
+
+
+def feedback_pending_conversions(limit: int) -> list[tuple]:
+    """待转换反馈行，15 列元组，列序与原 `_fetch_pending` 逐字一致。
+
+    列序 `(id, repo_key, task_id, agent_type, skill_name, skill_scope, title,
+    description, fail_summary, event_seq, issue_id, issue_number, feedback_kind,
+    source, username)`（调用方按下标解包）。
+
+    入选口径逐字照抄原语句：`issue_url=''`（未转换）、`is_deleted=0`，且
+    `source='agent'` 或 `source='user'` 且 `COALESCE(repo_key,'')!=''`（Issue #673：
+    纯意见类用户反馈无仓库上下文，跳过不转换）。**不按 status / username 过滤**，
+    也不加 agent_type 过滤。`limit` 直接进 SQL 的 `LIMIT ?`（不在这里截断；
+    `0` 取空、负值与 SQLite 口径一致 = 不设上限，保持与原语句同义）。
+    """
+    return [tuple(r) for r in read_all_any("feedback_pending_rows", (int(limit),))]
+
+
+def feedback_mark_converted(items: list[tuple]) -> int:
+    """批量回写 `[(issue_url, issue_number, converted_at, id)]`，单事务，返回影响行数。
+
+    原实现是「同一把 db_lock 里逐行 UPDATE、末尾一次 commit」——组内多行要么全写、
+    要么全不写（同组共用同一个 Issue，半批会让同组行分属不同 Issue）。这里用
+    `_any_tx()` 保持该原子口径：自有 DSN 走独立非 autocommit 连接，单库 / 测试
+    拓扑走进程主库 + db_lock。
+
+    `WHERE id=? AND issue_url=''` 守卫逐字保留：并发 / 重放时已转换的行不会被覆盖
+    （影响行数为 0，调用方据此感知，但原实现的统计口径是「按组 +1」，交回调用方）。
+    """
+    todo = [tuple(it) for it in (items or [])]
+    if not todo:
+        return 0
+    done = 0
+    with _any_tx() as c:
+        for url, number, converted_at, fid in todo:
+            c.execute(_any_sql("feedback_mark_converted"), (url, number, converted_at, fid))
+            # rowcount 读游标（pymysql 的 execute() 返回的是 int，取不到 .rowcount）
+            done += int(getattr(c, "rowcount", 0) or 0)
     return done
