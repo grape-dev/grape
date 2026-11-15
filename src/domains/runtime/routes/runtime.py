@@ -1209,27 +1209,41 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
     # worker 再 claim 一次再卡一遍 —— 用户看到的就是永久 running 且 agent 没有任何输出。
     # 用比 300s 宽限期更短的阈值单独判死，让故障更早暴露（引擎冷启动上界 90s 足够）。
     CLAIM_NO_SESSION_FAIL_SECONDS = int(os.environ.get("CLAIM_NO_SESSION_FAIL_SECONDS", "90"))
+    # 近期仍在上报消息的任务视为活跃，不参与孤儿回收（窗口需大于回收判定的静默容忍度）
+    RECENT_MESSAGE_ACTIVE_SECONDS = int(os.environ.get("RUNTIME_RECENT_MESSAGE_ACTIVE_SECONDS", "180"))
     recovered, skipped_active, force_failed, skipped_young = [], [], [], []
     _fail_reason_by_tid: dict[str, str] = {}
     skipped_active_reason = {}
     with db_lock:
         c = db.cursor()
+        # 一并取出「最近一次上报消息的时刻」：引擎说得出话就说明它还活着。
+        # 缺这一条时，长任务在两步之间静默超过回收窗口就被判孤儿、回炉重认领，
+        # 再卡再回炉，循环里每轮都去抢同一行 events（实测 1205 lock wait timeout），
+        # 事件因此永远停在 running，前端表现为「处理中」但没有任何产出。
         c.execute(
-            "SELECT id, attempts, runtime_id, event_seq, started_at, created_at, "
-            "COALESCE(runtime_session_id,'') "
-            "FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
+            "SELECT t.id, t.attempts, t.runtime_id, t.event_seq, t.started_at, t.created_at, "
+            "COALESCE(t.runtime_session_id,''), "
+            "(SELECT MAX(m.created_at) FROM task_messages m WHERE m.task_id=t.id) "
+            "FROM agent_tasks t WHERE t.runtime_id=? AND t.status IN ('dispatched','running')",
             (runtime_id,))
         rows = c.fetchall()
         _seq_by_tid = {}
-        for tid, attempts, rid, ev_seq, _sa, _ca, _rs in rows:
+        for tid, attempts, rid, ev_seq, _sa, _ca, _rs, _lm in rows:
             _seq_by_tid[tid] = ev_seq
-        for tid, attempts, rid, _ev_seq, started_at, created_at, _rsid in rows:
+        for tid, attempts, rid, _ev_seq, started_at, created_at, _rsid, _last_msg in rows:
             # Issue #1750 P1-A：白名单命中 → worker 自报仍在跑，直接 skipped_active。
             # 位置在年龄闸门与活跃窗口之前（白名单优先级最高）：静默型长任务即使
             # 超龄且窗口内无消息，也绝不会被回炉。
             if tid in _active_whitelist:
                 skipped_active.append(tid)
                 skipped_active_reason[tid] = "active_whitelist"
+                continue
+            # 近期仍在上报消息 = 引擎确实在跑，不能当孤儿回炉。
+            # （回收 → 重认领 → 再回收的循环会让事件永远 running，见上方查询注释。）
+            _lm_ts = parse_dt(_last_msg) if _last_msg else None
+            if _lm_ts is not None and (_now.timestamp() - _lm_ts) <= RECENT_MESSAGE_ACTIVE_SECONDS:
+                skipped_active.append(tid)
+                skipped_active_reason[tid] = "recent_message"
                 continue
             # 年龄基准（started_at，NULL 兜底 created_at）
             _age_base = started_at or created_at

@@ -414,7 +414,7 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
                         if s in _terminal_by_seq:
                             # 任务已终态 → 级联到任务终态（探活收敛，幂等）
                             _st, _ec, _tid = _terminal_by_seq[s]
-                            if _cascade_event_terminal(_c2, s, _st, exit_code=_ec, task_id=_tid):
+                            if _cascade_event_terminal(_c2, s, _st, exit_code=_ec):
                                 fixed += 1
                             continue
                         _txt = _timeout_txt if s in _with_task_rows else _no_task_txt
@@ -590,8 +590,13 @@ def sweep_once() -> int:
         try:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'")
-                _has_db_tables = c.fetchone() is not None
+                # 不能用 sqlite_master：MySQL 后端下它必然抛异常，于是 _has_db_tables
+                # 被判 False，**下面所有事件/任务回收整段被跳过**，卡在 running 的事件
+                # 和 failed 的任务再没人收敛（2026-11-15 实测：5 个 issue 永久「处理中」，
+                # 其中 3 个的 agent_tasks 早已 failed）。改成后端无关的存在性探测。
+                c.execute("SELECT 1 FROM issue_state LIMIT 1")
+                c.fetchall()
+                _has_db_tables = True
         except Exception:
             _has_db_tables = False
 
@@ -603,6 +608,13 @@ def sweep_once() -> int:
                 log.warning(f"sweeper stuck-event sweep failed: {e}")
             # 兜底回收悬空 agent_tasks（queued 无 worker 认领 / runtime 已死的 running·dispatched），
             # 否则需求中心 is_running=true 雷达动画永久亮（sweep_stuck_agent_tasks_once 见 #210 佐证）
+            # 「认领了但引擎会话从未建立」的任务：原先只由 agent 主动调 recover-orphans 处理，
+            # agent 一旦卡住任务就永远 running（#87/#88 永久「处理中」的直接原因）。
+            try:
+                from src.domains.runtime.engine.sweep_no_session import sweep_claim_without_session_once
+                cleaned += sweep_claim_without_session_once()
+            except Exception as e:
+                log.warning(f"sweeper claim-without-session sweep failed: {e}")
             try:
                 cleaned += sweep_stuck_agent_tasks_once()
             except Exception as e:
@@ -1114,8 +1126,11 @@ def _has_issue_state_tables() -> bool:
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'")
-            return c.fetchone() is not None
+            # 与 sweep_once 同一个坑：MySQL 下 sqlite_master 必抛 → 恒 False →
+            # sweep_events_once 整段跳过，僵尸事件永不回收。改用后端无关探测。
+            c.execute("SELECT 1 FROM issue_state LIMIT 1")
+            c.fetchall()
+            return True
     except Exception:
         return False
 
