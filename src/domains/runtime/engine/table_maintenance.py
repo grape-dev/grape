@@ -10,7 +10,7 @@ Designed to run as a periodic background task with distributed lock
 """
 import logging
 from src.kernel.config import log
-from src.kernel.session_manager import db, db_lock
+from src.kernel.owner_db import db_pair as _db_pair
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,10 @@ def cleanup_old_agent_tasks_fields() -> int:
     Returns the number of rows updated.
     """
     try:
+        # agent_tasks / task_messages 都是 runtime 域的表：mgmt 进程的定时器也会
+        # 调本模块（§6.2 A 部分清 task_messages），三库拓扑下必须走 owner 域连接，
+        # 否则进程主库没有这些表 → 1146。（db_pair 单库拓扑回落进程库，行为不变）
+        db, db_lock = _db_pair("runtime")
         time_expr = _time_expr(_AGENT_TASKS_RETENTION_DAYS)
         dirty_cond = " OR ".join(
             f"({f} IS NOT NULL AND {f} NOT IN ('', '{{}}'))"
@@ -101,6 +105,7 @@ def delete_old_agent_tasks() -> int:
     Returns the number of rows deleted.
     """
     try:
+        db, db_lock = _db_pair("runtime")
         time_expr = _time_expr(_AGENT_TASKS_DELETE_RETENTION_DAYS)
         statuses = ",".join(f"'{s}'" for s in _AGENT_TASKS_TERMINAL_STATUSES)
         total_deleted = 0
@@ -141,6 +146,7 @@ def cleanup_old_task_messages() -> int:
     Returns the number of rows deleted.
     """
     try:
+        db, db_lock = _db_pair("runtime")
         from src.kernel.mysql_compat import get_db_backend
         is_mysql = get_db_backend() == "mysql"
         time_expr = (

@@ -69,7 +69,12 @@ def _sync_skills_to_db(data: dict) -> int:
     仅在实际数据变更时才 UPDATE + 更新 updated_at，避免 blanket UPDATE 架空 sort=latest。
     返回处理的 skill 数量。
     """
-    from src.kernel.session_manager import db as _db, db_lock as _db_lock
+    from src.kernel.owner_db import db_pair as _db_pair
+
+    # skill 表归 runtime 域：本函数既可能在 worker（runtime）进程执行，也可能被
+    # mgmt 进程的定时器调用（三库拓扑下进程主库里没有 skill 表 → 1146）。
+    # db_pair 按域解析连接，单库拓扑回落进程库，行为不变。
+    _db, _db_lock = _db_pair("runtime")
 
     count = 0
     with _db_lock:
@@ -222,7 +227,9 @@ def _detect_stale_official_skills(repo_skill_names: set, traversal_complete: boo
         logger.warning("skill sync: DB sync incomplete, skipping stale detection this cycle")
         return 0
     try:
-        from src.kernel.session_manager import db, db_lock
+        # 同 _sync_skills_to_db：skill 归 runtime 域，按 owner 域解析连接。
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("runtime")
         with db_lock:
             c = db.cursor()
             stale = [name for (_id, name) in
