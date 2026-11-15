@@ -5,6 +5,76 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
 from src.kernel.config import log
+
+
+class _OwnedCursor:
+    """自带连接的游标：close 时把连接一并关掉。"""
+
+    def __init__(self, conn, cursor):
+        self._conn = conn
+        self._cur = cursor
+
+    def __getattr__(self, item):
+        return getattr(self._cur, item)
+
+    def close(self):
+        try:
+            self._cur.close()
+        finally:
+            try:
+                self._conn.close()
+            except Exception as _e:
+                log.debug(f"cursor close failed: {_e}")
+
+
+class _DomainDbProxy:
+    """把 db.cursor()/commit()/rollback() 代理到 runtime 域连接。
+
+    事件详情/列表读 events 表（runtime 域），但路由由 mgmt 进程服务；
+    三库模式下 mgmt 主库没有这张表，直连一律「事件未找到」。
+    """
+
+    def cursor(self, *a, **kw):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.cursor(*a, **kw)
+        if db_registry.uses_own_dsn("runtime"):
+            _conn = db_registry.new_connection("runtime")
+            return _OwnedCursor(_conn, _conn.cursor(*a, **kw))
+        from src.kernel.session_manager import db as _main
+        return _main.cursor(*a, **kw)
+
+    def commit(self):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.commit()
+        if db_registry.uses_own_dsn("runtime"):
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.commit()
+
+    def rollback(self):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.rollback()
+        if db_registry.uses_own_dsn("runtime"):
+            try:
+                db_registry.domain_db("runtime").rollback()
+            except Exception as _e:
+                log.debug(f"domain rollback failed: {_e}")
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.rollback()
+
+    def __getattr__(self, item):
+        from src.kernel.session_manager import db as _main
+        return getattr(_main, item)
+
+
+_rt_db = _DomainDbProxy()
 from src.api.time_utils import normalize_event_time
 from src.kernel.token_service import is_auth_401_error
 
@@ -78,7 +148,8 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
         _target_issue = ""
         _related = False
         try:
-            from src.kernel.session_manager import db, db_lock
+            from src.kernel.session_manager import db_lock
+            db = _rt_db
             with db_lock:
                 c = db.cursor()
                 c.execute("SELECT repo_key, issue_id FROM events WHERE repo_key=? AND seq=?",
@@ -122,7 +193,8 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
 
 @router.get("/detail/{seq}", operation_id="events_detail", summary="Event detail (result/log)", description="Event detail with payload/agent_logs/result for a seq.")
 def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)):
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         try:
@@ -433,7 +505,8 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     - direct 模式（本机引擎）→ fail_task（task 状态=failed）+ cancel_direct_task 杀子进程
     - 事件状态回写 failed
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     from src.api.event_store import update_event_status
 
     # 查事件状态（含 repo_key 供归属校验）
@@ -567,7 +640,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     跳过 pick_engine，不换机器。原 runtime_id 不可用（下线/不健康）→ 返回 4xx 错误，不切换。
     """
     import json as _json
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     from src.domains.runtime.engine.service import requeue_task, get_task, enqueue_task, update_task_status
 
     # 1) 幂等：30s 内已重派过则拒绝
@@ -606,7 +680,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         _evt_type = evt.get("event_type", "") or ""
         if _evt_type in ("issue_comment", "note_hook_pr", "issue_opened", "issue_updated",
                          "issue_closed", "issue_reopened", "issue_assigned", "issue_labeled"):
-            from src.kernel.session_manager import db as _db, db_lock as _dbl
+            from src.kernel.session_manager import db_lock as _dbl
+            _db = _rt_db
             with _dbl:
                 _c = _db.cursor()
                 _c.execute("SELECT reason FROM event_skipped WHERE repo_key=? AND issue_id=? "
@@ -1531,7 +1606,8 @@ def a2a_redo_scene(seq: int, user: dict = Depends(require_no_session_token)):
         # 上游提示（2026-10-12）：该 Issue 已 completed 过的 agent 集合——
         # 补发给它们 = 重跑已完成的阶段（防手误，仅提示不拦截；合法回退仍放行）
         try:
-            from src.kernel.session_manager import db, db_lock
+            from src.kernel.session_manager import db_lock
+            db = _rt_db
             with db_lock:
                 _c = db.cursor()
                 _c.execute(
@@ -1632,7 +1708,8 @@ class FlowResetBody(BaseModel):
 
 
 def _load_event(seq: int) -> dict:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         try:
@@ -1671,7 +1748,8 @@ def _thread_gate(repo_key: str, issue_id: str) -> dict:
 def _add_thread_message(anchor_seq: int, repo_key: str, issue_id: str, agent_type: str,
                         role: str, content: str, created_by: str = "",
                         task_id: str = "", generate_status: int = 0):
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         if task_id:
@@ -1692,7 +1770,8 @@ def _add_thread_message(anchor_seq: int, repo_key: str, issue_id: str, agent_typ
 
 
 def _list_thread(anchor_seq: int, limit: int = 50) -> list:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         try:
@@ -1723,7 +1802,8 @@ def _require_event_bot_token(request: Request, repo_key: str):
 
 
 def _cancel_issue_tasks(repo_key: str, issue_id: str) -> int:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     from src.domains.runtime.engine.service import cancel_task
     with db_lock:
         c = db.cursor()
@@ -1816,7 +1896,8 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
         issue_sess_id = isess.get("id") or ""
         oc_session_id = isess.get("runtime_session_id") or ""
     if not oc_session_id:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.session_manager import db_lock
+        db = _rt_db
         with db_lock:
             c = db.cursor()
             c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
@@ -1842,7 +1923,8 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     # 引擎选择：按 issue 会话的 runtime_id 判断（credential_id=0 强制 direct）
     _conv_agent_sid = ""
     _conv_rid = 0
-    from src.kernel.session_manager import db as _conv_db, db_lock as _conv_db_lock
+    from src.kernel.session_manager import db_lock as _conv_db_lock
+    _conv_db = _rt_db
     with _conv_db_lock:
         c = _conv_db.cursor()
         c.execute("SELECT id, runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
@@ -1991,7 +2073,8 @@ def delete_event_thread(seq: int, user: dict = Depends(require_no_session_token)
     evt = _load_event(seq)
     from src.domains.mgmt.routes.knowledge import _check_repo_member
     _check_repo_member(user, evt["repo_key"])
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM event_thread WHERE anchor_seq=?", (seq,))
@@ -2182,7 +2265,8 @@ def _execute_conv_task(task_id: str, loop):
         # session 兜底查询能命中（event dialogue 不创建 agent_tasks 行，
         # 自循环检测条件4依赖 session 兜底覆盖 event dialogue 执行窗口）。
         try:
-            from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
+            from src.kernel.session_manager import db_lock as _sdbl
+            _sdb = _rt_db
             from datetime import datetime, timezone
             with _sdbl:
                 c = _sdb.cursor()
@@ -2216,7 +2300,8 @@ def _execute_conv_task(task_id: str, loop):
             issue_sess_id = isess.get("id") or ""
             oc_session_id = isess.get("runtime_session_id") or ""
         if not oc_session_id:
-            from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
+            from src.kernel.session_manager import db_lock as _sdbl
+            _sdb = _rt_db
             with _sdbl:
                 c = _sdb.cursor()
                 c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_type))
@@ -2310,7 +2395,8 @@ def _execute_conv_task(task_id: str, loop):
     # R20.15.5: event dialogue 完成后将 session 置 idle → check_running_task
     # session 兜底不再命中 → 用户后续评论可正常触发流水线（R21.7.1）。
     try:
-        from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
+        from src.kernel.session_manager import db_lock as _sdbl
+        _sdb = _rt_db
         with _sdbl:
             c = _sdb.cursor()
             c.execute(
@@ -2366,7 +2452,8 @@ def conv_task_status(task_id: str, user: dict = Depends(require_no_session_token
                     "result": task.get("result", ""), "seq": task.get("seq", 0)}
 
     # 2. DB 兜底（event_thread by task_id）
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         c.execute("SELECT role, generate_status, content FROM event_thread WHERE task_id=? ORDER BY id", (task_id,))
@@ -2410,7 +2497,8 @@ async def conv_task_stream(task_id: str, user: dict = Depends(require_no_session
                 return
             if not task:
                 # 查 DB 看是否有结果
-                from src.kernel.session_manager import db, db_lock
+                from src.kernel.session_manager import db_lock
+                db = _rt_db
                 with db_lock:
                     c = db.cursor()
                     c.execute("SELECT role, generate_status, content FROM event_thread WHERE task_id=? AND role='agent' ORDER BY id DESC LIMIT 1", (task_id,))
@@ -2510,8 +2598,9 @@ def list_events(owner: str, repo: str,
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
 
+    db = _rt_db
     # 跨平台 repo_key 候选（用户可能通过 GitHub OAuth 登录）
     _owner_repo = f"{owner}/{repo}"
     _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
