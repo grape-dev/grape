@@ -1,6 +1,5 @@
 table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,2
-agent_tasks,runtime,insight,1
 agent_tasks,runtime,mgmt,1
 api_latency_log,insight,api,1
 audit_logs,mgmt,insight,1
@@ -16,7 +15,6 @@ grape_t_merge_gate_log,insight,api,1
 grape_t_repo_credentials,insight,contracts,1
 issue,runtime,api,1
 managed_repos,mgmt,runtime,2
-runtime_credentials,runtime,insight,1
 skill,runtime,api,2
 skill_category,mgmt,runtime,1
 takeover_sessions,runtime,api,1

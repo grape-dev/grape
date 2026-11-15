@@ -1513,7 +1513,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # 免鉴权健康端点就绪快照（insight/routes/health.py；任意拓扑）
            "agent_runtime_health_snapshot_any",
            # 设备资源曲线采样基集（insight/observability/rollup.py；任意拓扑）
-           "runtime_credential_sample_rows_any"]
+           "runtime_credential_sample_rows_any",
+           # 总览聚合基集（insight/observability/overview.py；agent_tasks / runtime_credentials 本域）
+           "obs_overview_task_rows_any", "obs_overview_credential_status_rows_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -5106,6 +5108,77 @@ def runtime_credentials_visible_rows(org_id: str = "", personal_org: bool = True
                       " WHERE status != 'revoked'" + frag, params)
             for r in (c.fetchall() or []):
                 rows[int(r[0])] = tuple(r)
+    return [rows[k] for k in sorted(rows)]
+
+
+# ── 总览聚合基集（insight/observability/overview.py）──
+# 原实现两条 SQL 用 insight 进程主库游标直查本域两张表（agent_tasks / runtime_credentials）。
+# 三库独立后 insight 进程库没有这两张表（视图 0）→ 1146，被调用方同名 `except` 吞成
+# 「任务图全空 / 成功率 None / 设备 0/0」，日志不带表名，页面静默降级。
+# 本原语把两条语句收在本域：自有 DSN 打 runtime，单库/测试拓扑回落进程库，两条拓扑
+# 同一份语句。语句文本固定在本模块（`{ph}` 只按值个数展开占位符）；调用方只能传值
+# 列表与可见性口径参数，不接受拼接 SQL / 表名 / 列名。
+
+_OBS_OVERVIEW_TASK_QUERY = (
+    "SELECT id, status, repo_key, agent_type, created_at, started_at, completed_at"
+    " FROM agent_tasks WHERE repo_key IN ({ph})")
+
+# 凭据基集：`id` 仅作跨分块去重键（`scope='global'` 行会命中每个分块），
+# 返回给调用方的仍是原 SQL 的两列 `(status, last_seen_at)`，列序不变。
+_OBS_OVERVIEW_CREDENTIAL_STATUS_QUERY = (
+    "SELECT status, last_seen_at, id FROM runtime_credentials WHERE status != 'revoked'")
+
+
+def obs_overview_task_rows_any(repo_keys) -> list[tuple]:
+    """总览任务基集（7 列，列序与 insight 原 SQL 逐字一致；无排序、无窗口过滤）。
+
+    列为 `(id, status, repo_key, agent_type, created_at, started_at, completed_at)`。
+    时间窗与分桶在调用方（时间格式跨方言，见 overview 模块头注释 1）；空/None 仓库键
+    与重复键丢弃（`IN` 本身对重复值只回一行，语义等价），空列表返回 `[]` 且零 SQL。
+    仓库键按 `_CRED_VIS_CHUNK` 分块：agent_tasks 每行只有一个 repo_key，分块之间不会
+    重复，行集合与一次 `IN` 等价。
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+    for k in (repo_keys or []):
+        s = str(k or "")
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        keys.append(s)
+    out: list[tuple] = []
+    for i in range(0, len(keys), _CRED_VIS_CHUNK):
+        part = keys[i:i + _CRED_VIS_CHUNK]
+        ph = ", ".join(["?", ] * len(part))
+        with _any_cursor() as c:
+            c.execute(_OBS_OVERVIEW_TASK_QUERY.replace("{ph}", ph), tuple(part))
+            out.extend(tuple(r) for r in (c.fetchall() or []))
+    return out
+
+
+def obs_overview_credential_status_rows_any(org_id: str = "", personal_org: bool = True,
+                                            uname: str = "", repo_keys=None) -> list[tuple]:
+    """可见凭据的 `(status, last_seen_at)`（未注销；两列列序同 insight 原 SQL）。
+
+    三口径可见性与 `credential_ids_visible` / `runtime_credentials_visible_rows` 同源
+    （同一个 `_cred_visibility_where`）：非个人组织按 `org_id` 隔离；指定仓库时
+    `global + 本人 user + 该仓 worker`；否则 `global + 本人 user`。
+    只回元组原值 —— 在线判定（`derive_runtime_health`）与「非 revoked 也算总数」的
+    计数口径是 insight 展示语义，留调用方。跨分块按 id 去重后按 id 升序返回
+    （结果集与一次 `IN` 等价；顺序确定，便于断言）。
+    """
+    keys = [str(k) for k in (repo_keys or []) if k]
+    rows: dict[Any, tuple] = {}
+    if org_id and not personal_org:
+        chunks: list[list[str]] = [[]]     # org 隔离口径不看仓库键
+    else:
+        chunks = [keys[i:i + _CRED_VIS_CHUNK] for i in range(0, len(keys), _CRED_VIS_CHUNK)]
+    for chunk in chunks or [[]]:
+        frag, params = _cred_visibility_where(org_id, personal_org, uname, chunk)
+        with _any_cursor() as c:
+            c.execute(_OBS_OVERVIEW_CREDENTIAL_STATUS_QUERY + frag, params)
+            for r in (c.fetchall() or []):
+                rows[r[2]] = (r[0], r[1])
     return [rows[k] for k in sorted(rows)]
 
 

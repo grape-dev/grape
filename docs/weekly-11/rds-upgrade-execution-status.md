@@ -4699,6 +4699,91 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `runtime_credentials`，均归 runtime），其后是 `events_view.py`（2 处）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
 
+### 7.39 insight 总览聚合的任务/设备基集下沉 runtime owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/insight/observability/overview.py` **2 处 → 0**（单轮做完，2 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：两处、两张表，**都归 runtime**
+  - L140（改前）`_fetch_tasks`：
+    `SELECT id, status, repo_key, agent_type, created_at, started_at, completed_at
+    FROM agent_tasks WHERE repo_key IN (<动态占位符>)` —— `agent_tasks` 1 处，`IN` 列表由
+    Python 按可见仓库键展开（7–200+ 个键，动态拼接）。
+  - L180（改前）`_fetch_engines`：
+    `SELECT status, last_seen_at FROM runtime_credentials WHERE status != 'revoked'` +
+    `_cred_visibility()` 返回的 WHERE 片段（三口径：`org_id=?` / `global OR 本人 user OR repo_key IN (...)` /
+    `global OR 本人 user`）—— `runtime_credentials` 1 处，片段与占位符都是动态拼接。
+  - 同文件的 `_fetch_usage`（`obs_llm_usage`）与 `obs_runtime_samples` 相关语句是**本域**表，本批不动。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`，新增一节「总览聚合基集」）：
+  - 语句模板 `_OBS_OVERVIEW_TASK_QUERY` / `_OBS_OVERVIEW_CREDENTIAL_STATUS_QUERY` 均为本模块字面量，
+    `{ph}` 只按**值个数**展开成 `?`；调用方不能传 SQL / 表名 / 列名。
+  - 新增薄函数 `obs_overview_task_rows_any(repo_keys)`：7 列原值，列序与原 SQL 逐字一致；
+    仓库键去重后按 `_CRED_VIS_CHUNK`（200）分块。
+  - 新增薄函数 `obs_overview_credential_status_rows_any(org_id, personal_org, uname, repo_keys)`：
+    可见性三口径复用本域既有的 `_cred_visibility_where`（与 `credential_ids_visible` /
+    `runtime_credentials_visible_rows` 同一 helper），返回仍是原 SQL 的两列
+    `(status, last_seen_at)`；`id` 只在内部作跨分块去重键，不出模块。
+  - `__all__` 登记两个新函数（`check_lib_query_names` → runtime 176 funcs + 25 named queries used / 259 registered）。
+- 调用点 `overview.py`：两个函数里的 `from src.kernel.session_manager import db, db_lock` 与整条 SQL
+  一起删除，改 `from src.domains.runtime.public import ...`；`_TASK_COLUMNS` 字面量保留（列名映射是
+  展示口径），`_cred_visibility` 保留（`alerts.visible_runtime_dim_keys` 仍 import 它）。
+- 设计取舍：
+  1. **可见性谓词整体归位，而不是把片段继续从调用方传下去**：原实现是「insight 算片段 → 拼进 SQL」，
+     片段里带列名与 `?` 个数，正是「动态列名/拼接 SQL」的形态。三口径语义本来就与 runtime 的
+     `dashboard.ops_overview` 同源，因此收进 owner 域一个 helper，调用方只传口径参数
+     （`org_id` / `personal_org` / `uname` / `repo_keys`）。
+  2. **不拆 Python 内连接**：一条 SELECT 只碰一张表，没有跨域 JOIN 可拆；两张表的查询继续各自独立。
+  3. **`is_org_personal` 的判定仍留调用方**：它读的是 mgmt 侧组织表，runtime 不该反向依赖 mgmt；
+     调用方算好布尔再传 `personal_org`（原实现也是这么算的，口径不变）。
+  4. **`id` 作内部去重键**：`scope='global'` 的行会命中每个仓库分块，跨块直接 concatenate 会把
+     `engines_total` 数成 N 倍。SQL 里多取一列 `id`、函数内按 id 去重后再剥掉，返回列序仍是
+     `(status, last_seen_at)` —— 与 `runtime_credentials_visible_rows` 的处理同型。
+  5. **总数不过滤 status，在线才看心跳**：「`status != 'revoked'` 进分母 + `derive_runtime_health`
+     判在线」是原口径（`offline` / `about_to_gc` 的引擎要留在分母里，否则「在线率」被高估）。
+     B14/C6 钉住：`active`+新鲜心跳算在线，`active`+过期/NULL/非法心跳不算，`about_to_gc` 计入分母。
+  6. **降级路径补日志**：原实现两个 `except Exception: return []/(0,0)` 完全静默，三库拓扑下页面
+     只会「空得莫名其妙」。改为 `log.warning` 后降级，行为等价但可诊断（未新增静默 except；
+     文件内 `except ...: pass` 仍只有 `derive_runtime_health` 那一处，基线 1 未变）。
+  7. **仓库键分块只在 owner 侧做**：调用方原先自己拼 `IN`，键多时（guest 组织上千仓）没有上限；
+     分块（200）与去重口径统一收进原语，`agent_tasks` 每行只有一个 `repo_key`，分块不产生重复。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **三库拆分后总览页任务图/成功率整块为空**：insight 进程库没有 `agent_tasks`（视图 0）→
+     兜底语句 `1146` → `_fetch_tasks` 的裸 `except` 吞成 `[]`：`task_outcome` 三序列恒 0、
+     `success_rate` 恒 `None`、`p95_duration_s` 恒 `None`、`queue_depth` 恒 0。
+  2. **设备 KPI 恒 `0/0`**：`_fetch_engines` 直查 insight 进程库的 `runtime_credentials` → 同样
+     `1146` → `return 0, 0`，且无任何日志指向是哪张表。改造后走 owner 原语（自有 DSN 打 runtime、
+     单库回落进程库），两条拓扑同一份语句。
+  3. **两处失败都无痕**：`except Exception` 不带日志，运维只能靠「页面数字不对劲」猜；
+     现在两条降级各留一条 `log.warning`（带异常文本）。
+- 验证（真实退出码）：
+  · `py_compile`（runtime `public/__init__.py` / insight `observability/overview.py`）→ **COMPILE_OK**；
+  · `~/burndown/obs_overview_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建三张表）
+    → **ALL obs overview smoke PASSED (49 checks)**：
+    A 注册面/静态否定（两条语句逐字、只用 `?`、无 `%s`/`NOW()`/`ON DUPLICATE`/反引号、`__all__` 登记、
+    薄函数体内无内联 SQL、`overview.py` 已无两张 runtime 表的 SQL 字面量、两个取数函数不再开进程主库、
+    `_cred_visibility` 保留）；
+    B 原语语义（空/None → `[]` 零 SQL、7 列列序逐字、仓库过滤、重复与空键去重、250 键跨两批不漏不多、
+    只排除 revoked、三口径可见性、global 行跨分块按 id 去重、NULL 心跳原值透出、仅 revoked → `[]`）；
+    C 调用点端到端（`_fetch_tasks` 键名/列序/不做窗口、`_fetch_engines` 2/2 与 2/3、心跳新鲜度
+    5 行各态只 1 在线、org 隔离 1/1、个人组织 2/2、读失败降级 `[]` 与 `(0,0)` 且留 2 条 warning、
+    `build_overview` KPI 串通 engines 2/3·queue_depth 1·tokens 42·成功率 50.0·任务桶 completed=1/failed=1）；
+    D 自有 DSN 伪游标（`domain=runtime`、语句逐字、参数顺序、250 键 → 200+50 两批、尾部 id 被剥掉、空结果不炸）。
+  · `--update-baseline` → **baseline updated: 23 pairs, 35 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **21 表 / 35 跨域引用 / 23 对**
+    （`agent_tasks` 已无跨域消费方，表数 22 → 21）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**；
+    `tests/arch/test_silent_except_ratchet.py`（含在 arch 组）→ **2 passed**（未新增静默 except）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  轮内口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点），运行面证据为 sqlite 烟测
+  （含自有 DSN 伪游标与读失败降级）。
+- **新基线**：**35 处 / 23 对 / 21 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新
+  （作业单 35 处 / 26 文件）。`src/domains/insight/observability/overview.py` 已清零并退出榜单；下一批
+  首个未 blocked 文件是 `src/api/feedback_issue_converter.py`（2 处：`user_feedback`，归 mgmt），
+  其后是 `src/api/git_repo_api.py`（2 处）；头两名仍是 ⛔ blocked 的 `credential_usage_log.py`（3 处）
+  与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

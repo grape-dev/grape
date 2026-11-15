@@ -125,24 +125,26 @@ def _cred_visibility(user: Dict[str, Any], repo_keys: List[str]) -> Tuple[str, L
                [_uname, *repo_keys]
     return " AND (scope='global' OR (scope='user' AND owner_name=?))", [_uname]
 
+_TASK_COLUMNS = ("id", "status", "repo_key", "agent_type", "created_at", "started_at", "completed_at")
+
+
 def _fetch_tasks(repo_keys: List[str]) -> List[Dict[str, Any]]:
-    """范围内任务（不分页，窗口在 Python 侧过滤：时间格式跨方言，交给 normalize 处理）。"""
+    """范围内任务（不分页，窗口在 Python 侧过滤：时间格式跨方言，交给 normalize 处理）。
+
+    `agent_tasks` 归 runtime：走 runtime public 基集原语（自有 DSN 打 runtime、单库回落
+    进程库）。原实现用 insight 进程主库游标直查，三库独立后该库没有这张表（视图 0）→
+    1146 被本函数的 `except` 吞成空列表：任务图、成功率、p95 耗时整块静默为空。
+    列名映射是展示口径，留本域；`_TASK_COLUMNS` 与 owner 原语的列序逐字一致。
+    """
     if not repo_keys:
         return []
-    from src.kernel.session_manager import db, db_lock
-    ph = ",".join("?" * len(repo_keys))
-    out: List[Dict[str, Any]] = []
+    from src.domains.runtime.public import obs_overview_task_rows_any
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT id, status, repo_key, agent_type, created_at, started_at, completed_at"
-                f" FROM agent_tasks WHERE repo_key IN ({ph})", tuple(repo_keys))
-            cols = [d[0] for d in c.description]
-            out = [dict(zip(cols, r)) for r in c.fetchall()]
-    except Exception:
+        rows = obs_overview_task_rows_any(repo_keys)
+    except Exception as e:
+        log.warning(f"obs overview: task rows failed: {e}")
         return []
-    return out
+    return [dict(zip(_TASK_COLUMNS, r)) for r in rows]
 
 def _fetch_usage(repo_keys: List[str]) -> List[Dict[str, Any]]:
     """范围内 LLM 用量台账行（table: obs_llm_usage）。"""
@@ -165,34 +167,46 @@ def _fetch_usage(repo_keys: List[str]) -> List[Dict[str, Any]]:
     return out
 
 def _fetch_engines(user: Dict[str, Any], repo_keys: List[str]) -> Tuple[int, int]:
-    """(在线设备数, 总数) —— 按可见性口径过滤 runtime_credentials。"""
-    frag, params = _cred_visibility(user, repo_keys)
-    from src.kernel.session_manager import db, db_lock
-    total = online = 0
+    """(在线设备数, 总数) —— 按可见性口径过滤 runtime_credentials。
+
+    `runtime_credentials` 归 runtime：可见性三口径（非个人组织按 org_id / 指定仓库
+    global+本人+该仓 / 其余 global+本人）在归属域解析（`_cred_visibility_where` 同源，
+    与 dashboard.ops_overview 一套语义），本域只保留在线判定。原实现把 WHERE 片段拼进
+    SQL 直查 insight 进程库 → 三库下 1146 → 本函数 except 吞成 (0, 0)：设备 KPI 恒 0/0。
+    """
+    org_id = str(user.get("org_id") or "")
+    _is_personal = False
+    if org_id:
+        try:
+            from src.domains.mgmt.user.org_db import is_org_personal
+            _is_personal = is_org_personal(org_id)
+        except Exception:
+            _is_personal = False
+    from src.domains.runtime.public import obs_overview_credential_status_rows_any
     try:
         from src.domains.runtime.engine.health import derive_runtime_health
     except Exception:
         derive_runtime_health = None
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT status, last_seen_at FROM runtime_credentials WHERE status != 'revoked'" + frag,
-                tuple(params))
-            now = datetime.now(timezone.utc)
-            _now_ts = now.timestamp()
-            for status, last_seen in c.fetchall():
-                total += 1
-                if derive_runtime_health is not None:
-                    try:
-                        if derive_runtime_health(status or "offline", last_seen, _now_ts) == "online":
-                            online += 1
-                    except Exception:
-                        pass
-                elif (status or "") == "online":
-                    online += 1
-    except Exception:
+        rows = obs_overview_credential_status_rows_any(
+            org_id=org_id, personal_org=_is_personal,
+            uname=user.get("username") or "", repo_keys=repo_keys)
+    except Exception as e:
+        log.warning(f"obs overview: credential rows failed: {e}")
         return 0, 0
+    now = datetime.now(timezone.utc)
+    _now_ts = now.timestamp()
+    total = online = 0
+    for status, last_seen in rows:
+        total += 1
+        if derive_runtime_health is not None:
+            try:
+                if derive_runtime_health(status or "offline", last_seen, _now_ts) == "online":
+                    online += 1
+            except Exception:
+                pass
+        elif (status or "") == "online":
+            online += 1
     return online, total
 
 def build_overview(user: Dict[str, Any], repo: str = "", range_str: str = DEFAULT_RANGE) -> Dict[str, Any]:
