@@ -2127,6 +2127,13 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT id, event_type, user_id, operator_id, ip, created_at, detail "
         "FROM audit_logs WHERE (event_type LIKE ? OR detail LIKE ?) "
         "ORDER BY seq DESC LIMIT ?"),
+    # ── 技能分类（skill_category 归 mgmt；runtime/storage/skill_sync 的官方技能同步
+    # 需要「启用中的分类」slug→id 映射）────────────────────────────────────────
+    # 与 `skill_category_map()` **分开**登记：那条给迁移期回填用（不判 is_active，
+    # 只跳过空 slug），这条逐字照抄 skill_sync 原语句的 `WHERE is_active=1` ——
+    # 停用的分类不应再把新同步的技能挂上去。列序 `(slug, id)` 与原语句一致。
+    "skill_category_active_ids": (
+        "SELECT slug, id FROM skill_category WHERE is_active=1"),
 }
 
 #: unified_user_mapping 的平台列白名单（列名 → 具名查询）。未知列直接抛错，
@@ -3468,6 +3475,19 @@ def skill_category_map() -> dict[str, int]:
     with _any_cursor() as c:
         c.execute("SELECT slug, id FROM skill_category WHERE slug IS NOT NULL AND slug != ''")
         return {r[0]: int(r[1]) for r in (c.fetchall() or []) if r[0]}
+
+
+def skill_category_active_map() -> dict[str, int]:
+    """**启用中**的技能分类 {slug: id}（`skill_category` 归本域）。
+
+    唯一调用方：`runtime/storage/skill_sync` 的官方技能同步（每 30 分钟一轮）。
+    与 `skill_category_map()` 的区别只在过滤口径：保留原语句的 `is_active=1`，
+    停用分类不参与新技能的 category_id 归属（原实现的特殊口径，不能顺手并表）。
+    列序 `(slug, id)` 与原语句逐字一致；取不到行时返回空 dict。
+    """
+    with _any_cursor() as c:
+        c.execute(_ANY_QUERIES["skill_category_active_ids"])
+        return {r[0]: int(r[1]) for r in (c.fetchall() or [])}
 
 
 #: 跟随 repo_key 的 mgmt 表（固定白名单：不接受调用方传表名）

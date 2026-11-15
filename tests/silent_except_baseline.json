@@ -133,7 +133,7 @@
   "src/domains/runtime/scene_precheck.py": 2,
   "src/domains/runtime/storage/__init__.py": 1,
   "src/domains/runtime/storage/scene_sync.py": 3,
-  "src/domains/runtime/storage/skill_sync.py": 2,
+  "src/domains/runtime/storage/skill_sync.py": 1,
   "src/domains/runtime/storage/upload_cleanup.py": 3,
   "src/domains/runtime/vcs/api_client.py": 2,
   "src/kernel/a2a_context.py": 1,

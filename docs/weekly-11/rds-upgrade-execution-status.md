@@ -5183,6 +5183,79 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/domains/runtime/storage/skill_sync.py`（1 处：`skill_category`，归 mgmt）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
 
+### 7.45 runtime 技能同步的分类映射下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/runtime/storage/skill_sync.py` **1 处 → 0**（单轮做完，1 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`skill_category`（归 **mgmt**，`grape_mgmt_db`）
+  × 1：L80（改前）`_sync_skills_to_db()` 里构建分类缓存时直发
+  `SELECT slug, id FROM skill_category WHERE is_active=1`。
+  同函数里的 `skill` 表（L95 读、L109/L114 UPDATE、L119 INSERT）归 **runtime**，属本域 SQL，
+  **原样保留**——这正是本批只上移一条语句的原因：一个函数里两张表归属不同域。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增具名查询 `skill_category_active_ids`，语句与原语句**逐字一致**
+    （`WHERE is_active=1`、列序 `(slug, id)`、无占位符；只用 `?` 方言面，无 `%s` / `NOW()` /
+    `ON DUPLICATE` / 反引号——本条是常量查询，天然不带方言）。
+  - 新增薄函数 `skill_category_active_map() -> dict[str, int]`：体内零 SQL，只执行具名语句
+    并把行映射成 `{slug: id}`（`id` 归一为 `int`）。
+  - **不与既有 `skill_category_map()` 合并**：那条给迁移期回填用（`db_setup._backfill_skill_category_id`
+    → `runtime/public.backfill_skill_category_id`），过滤条件是 `slug IS NOT NULL AND slug != ''`、
+    **不判 `is_active`**；本条必须保留 `is_active=1`。两者口径不同，并表会把停用分类重新挂到
+    新同步的技能上（回填场景不受影响，因为历史行本来就已有分类）。
+- 调用点 `skill_sync.py`：删掉游标上的语句字面量与 `except Exception: pass`，改成函数内
+  `from src.domains.mgmt import public as _mgmt_public_cat` 调 `skill_category_active_map()`；
+  降级路径由「静默吞掉」改为 `logger.debug(... falls back to 0: {exc})`——
+  **失败仍不中断同步、`category_id` 仍落 0**，只是不再无声。
+- 设计取舍：
+  1. **不动事务/锁形状**：调用方仍在 `with _db_lock:` 里先取 `_db.cursor()`（`skill` 表本域写），
+     分类映射只读、走 owner 域 `_any_cursor`；单库拓扑下 `_any_cursor` 也持同一把
+     `threading.RLock`（可重入），不会自锁；自有 DSN 拓扑下读落到 mgmt 连接，与 `skill` 的
+     runtime 写不在同一连接上，避免「一个连接跨两个库」的老问题。
+  2. **不加新写原语**：本处是纯读映射，写仍在 runtime 本域；没有跨域事务需求，故不需要
+     `_any_tx()`，也不碰 outbox（无跨域写）。
+  3. **保留「空 sub_scene 按 `''` 键查」的怪口径**：原实现 `cat_map.get(sub_scene, 0)` 对空串
+     也会命中 `slug=''` 的分类行（schema 上 `slug NOT NULL UNIQUE`，生产种子数据里没有空 slug
+     行，所以线上恒为 0）。烟测 C7/C8b 把这个行为钉住：有空 slug 行时命中，没有时落 0——
+     不擅自把空串改成「跳过查询」。
+  4. **不并 `is_active` 判定到 Python 侧**：过滤留在 SQL（owner 域）里，调用方拿到的就是
+     「可直接用的映射」，避免每个调用点各写一遍 `if active`。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **三库拓扑下分类映射恒空**：runtime 进程库里没有 `skill_category`（视图 0 → 1146），
+     原 `except Exception: pass` 把错误吞成 `cat_map={}`，于是每轮官方技能同步都把
+     `category_id` 写成 0 并刷 `updated_at` —— 技能页的分类筛选全部落到「未分类」，
+     且 `sort=latest` 被每 30 分钟的刷写架空（正是函数体注释要防的那件事）。
+  2. **静默吞异常**：改为 `logger.debug` 后，映射不可用可在日志里看到原因；静默 except
+     基线随之从 2 下调到 1（`tests/silent_except_baseline.json`）。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/runtime/storage/skill_sync.py` / `src/domains/mgmt/public/__init__.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/skill_sync_cat_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，建 `skill_category` +
+    `skill` 真 DDL，连跑 2 次稳定）→ **ALL skill_sync skill_category smoke PASSED (52 checks)**：
+    A 注册面/静态否定（语句逐字、保留 `is_active=1`、无 `%s`/`NOW()`/`ON DUPLICATE`/反引号、
+    薄函数体内无内联 SQL、调用点已无 `skill_category` SQL、原 `except: pass` 已去、
+    静默 except 基线已下调、本域 `skill` SQL 仍在调用方）；
+    B 原语语义（只回启用行、`is_active=2` 不算、停用分类不进映射、列序 `(slug,id)`、
+    id 归一 int、空表 → `{}`、重复调用稳定、运行中停用即时消失）；
+    C 调用点端到端（启用分类 → `category_id=2`、停用分类 → 0 且出席 warning、空 sub_scene
+    按 `''` 键命中/无空 slug 行时落 0、未变更不刷 `updated_at`、`sub_scene` 变化触发换类、
+    `file_path` 非空不覆盖 `skill_path`、owner public 抛异常 → 降级 0 不抛出且日志带原因、
+    多条目累加计数）；
+    D 自有 DSN 伪游标（只走 `domain=mgmt`、语句逐字、无参数、行序不变）。
+  · `--update-baseline` → **baseline updated: 16 pairs, 23 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **16 表 / 23 跨域引用 / 16 对**
+    （`skill_category` 从 `mgmt:4;runtime:1` 变为 `mgmt:5`，该表退出跨域对）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （mgmt 187 funcs + 6 named queries used / 269 funcs + 31 queries registered）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新 action 名），运行面证据为 sqlite 烟测。
+- **新基线**：**23 处 / 16 对 / 16 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  `src/domains/runtime/storage/skill_sync.py` 已清零并退出榜单；下一批首个未 blocked 文件是
+  `src/domains/runtime/routes/tasks.py`（1 处：`managed_repos`，归 mgmt）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
