@@ -384,14 +384,43 @@ def _api_smoke(base_url: str) -> None:
         if status != 200:
             raise GateError(f"health 返回 {status}: {body[:200]}")
         log("api_health_ok", phase="smoke", url=base_url + "/health")
+        # 写路径冒烟：/api/chat/submit 真提交一句（默认撤回），拦住「断连 500」类故障
+        _chat_smoke(base_url)
         # 新用户闭环占位：G1/分支接口定稿后补充注册→建 issue→凭据写入断言
         log("api_user_loop_skip", phase="smoke",
-            note="新用户闭环断言待接口定稿，当前仅 health")
+            note="新用户闭环断言待接口定稿，当前 health + chat 写路径")
     except GateError:
         raise
     except Exception as exc:
         log("api_smoke_skip", phase="smoke", reason=repr(exc))
         # 网络失败允许：SKIP 不中止
+
+
+def _chat_smoke(base_url: str) -> None:
+    """写路径冒烟：真提交一句 chat 并断言 200 + task_id（默认立即撤回）。
+
+    为什么必须放在发布闸门里：2026-11-15 的 500 是「域连接被 MySQL 断开仍留缓存」，
+    health / 只读端点全绿也发现不了；只有走一次真实写路径（含跨域 meta 读）才会暴露。
+    环境不具备（缺 JWT_SECRET/账号/网络）时脚本返回 SKIP，不阻断发布。
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "smoke_chat_submit", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "smoke_chat_submit.py"))
+    if spec is None or spec.loader is None:
+        log("api_chat_smoke_skip", phase="smoke", reason="smoke_chat_submit.py 不可加载")
+        return
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    timeout = int(os.environ.get("GRAPE_GATE_HTTP_TIMEOUT", "10"))
+    code, out = mod.check(base_url, os.environ.get("GRAPE_SMOKE_ACCOUNT", "songspace"),
+                          mod.DEFAULT_MESSAGE, True, timeout)
+    if code == mod.EXIT_FAIL:
+        raise GateError(f"chat 写路径冒烟失败：status={out.get('submit_status')} "
+                        f"task_id={out.get('task_id')!r} body={out.get('body')}")
+    log("api_chat_smoke", phase="smoke", result=out.get("result"),
+        task_id=out.get("task_id"), latency_ms=out.get("latency_ms"),
+        reason=out.get("reason"))
 
 
 # ------------------------------------------------------------------- main ---

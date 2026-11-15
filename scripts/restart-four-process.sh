@@ -100,3 +100,19 @@ for mport in 39081 39082 39083 39084; do
     status=$(curl -s -m 2 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$mport/metrics")
     echo "  127.0.0.1:$mport/metrics -> $status"
 done
+
+# 发布后写路径冒烟：真提交一句 chat 并断言 200 + task_id（默认自动撤回）。
+# 断连 500（InterfaceError(0,'')）在 health / 只读端点上不可见，必须走一次写路径才拦得住。
+if [ "$ok" -eq 1 ]; then
+    echo "[restart] chat write-path smoke:"
+    if "$PY" scripts/smoke_chat_submit.py --base-url "http://127.0.0.1:38081"; then
+        echo "[restart] chat smoke OK"
+    else
+        rc=$?
+        if [ "$rc" -eq 1 ]; then
+            echo "[restart] ERROR: chat write-path smoke FAILED（发布闸门判红）"
+            exit 1
+        fi
+        echo "[restart] WARN: chat smoke SKIP（环境不具备，不阻断）"
+    fi
+fi
