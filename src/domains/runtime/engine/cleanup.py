@@ -161,6 +161,36 @@ class _ReplicaLock:
             self._conn, self._held = None, False
 
 
+_CHAT_STATUS_IDX_READY = False
+
+
+def _ensure_chat_status_index(conn) -> None:
+    """确保 chat_conversations(status) 索引存在（own 模式下用 sweeper 自己的 runtime 连接建）。
+
+    为什么不在注册式迁移里做：三库模式（GRAPE_DOMAIN_LIB=1）进程**跳过 init_database**，
+    注册迁移只在单库模式下执行；而 mgmt 进程的库是 mgmt 域，对 runtime 表只能跳过。
+    索引的唯一真实消费者就是 sweeper 的 `WHERE status='active'`，所以在首次用到时
+    用归属域连接幂等建一次最稳（MySQL 的 TEXT 列必须带前缀长度，这里给 191）。
+    """
+    global _CHAT_STATUS_IDX_READY
+    if _CHAT_STATUS_IDX_READY:
+        return
+    _CHAT_STATUS_IDX_READY = True
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM information_schema.statistics "
+            "WHERE table_schema=DATABASE() AND table_name='chat_conversations' "
+            "AND index_name='idx_chat_conv_status'")
+        row = cur.fetchone()
+        if row and row[0]:
+            return
+        cur.execute("CREATE INDEX idx_chat_conv_status ON chat_conversations(status(191))")
+        log.info("sweeper: created index idx_chat_conv_status on chat_conversations(status)")
+    except Exception as e:  # noqa: BLE001 - 建索引失败不影响清扫
+        log.debug(f"sweeper: chat_conversations(status) index ensure skipped: {e}")
+
+
 @contextlib.contextmanager
 def _sweep_mgmt_cursor():
     """IM 三张表归 mgmt 域：own 模式必须换 mgmt 域连接，用 runtime 连接会 1146。"""
@@ -190,6 +220,7 @@ def _sweep_cursor():
     if db_registry.uses_own_dsn("runtime"):
         conn = db_registry.new_connection("runtime", autocommit=True)
         try:
+            _ensure_chat_status_index(conn)
             yield conn.cursor()
         finally:
             try:

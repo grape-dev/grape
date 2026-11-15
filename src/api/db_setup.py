@@ -1068,6 +1068,12 @@ def _create_indexes():
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_conv_repo_issue "
         "ON chat_conversations (user_id, repo_key, issue_number, conv_type) "
         "WHERE issue_number > 0 AND repo_key != '' AND conv_type = 'task'",
+        # sweeper 的 chat 目录 TTL 清理每轮都跑 SELECT id FROM chat_conversations WHERE status='active'，
+        # 原先无索引=全表扫（见 docs/sweeper-lock-decoupling.md「后续可做」）。
+        # 这里只写 SQLite 通用语法：MySQL 的 TEXT 列建索引必须带前缀长度，由
+        # mysql_compat 在 CREATE INDEX 特判里自动补 (191)，调用方不要再写 (32)（会被剥掉，
+        # 且绕过兼容层直连 MySQL 会报 1170）。
+        "CREATE INDEX IF NOT EXISTS idx_chat_conv_status ON chat_conversations(status)",
     ]
     # autopilot_tasks.created_by 迁移
     try:
@@ -1898,6 +1904,9 @@ _MIGRATIONS: List[Migration] = []
 # 先评估是否该改成注册式迁移，只有确认必须留老轨才同步改这里，并在 PR 里说明原因。
 LEGACY_TRACK_FROZEN = (
     "_ensure_case_insensitive_indexes",
+    # 67ed59fb4（arch-weekly-11 platformization）加进老轨但没同步本常量 → 守卫长期红。
+    # 只做账面对齐：该调用本来就在执行，语义零变化。
+    "_ensure_platform_storage_columns",
     "_migrate_a2a_idempotency_key",
     "_migrate_allow_signup_default",
     "_migrate_event_status_pending",
@@ -7123,6 +7132,37 @@ def _fn_user_credentials_kind_backfill() -> None:
             "等 007 扩键后的下次启动重试")
     _uc_backfill_kind_rows()
 
+
+# ── sweeper 的 chat 会话状态索引（2026-11-15）─────────────────────────────
+def _fn_chat_conversations_status_index() -> None:
+    """chat_conversations(status) 索引：sweeper 每轮都跑 `WHERE status='active'`，原先全表扫。
+
+    跨域守卫：chat_conversations 归 runtime，只有 owner 库能建索引。其它域的库里它是
+    视图或不存在 → 抛 _NonOwnerObject，执行器跳过且不盖章（下次启动在该域仍跳过，
+    真正的建索引发生在 runtime 的 worker 进程）。
+    SQL 只写 SQLite 通用语法：MySQL 的 TEXT 列做键必须带前缀长度，由 mysql_compat 的
+    CREATE INDEX 特判自动补 (191)；不要在这里手写 (32)，绕过兼容层直连会报 1170。
+    """
+    with db_lock:
+        c = db.cursor()
+        present = _table_present(c, "chat_conversations")
+        is_base = _is_base_table(c, "chat_conversations") if present else True
+    if not present:
+        raise _NonOwnerObject(
+            "chat_conversations 不在本库（非 owner 域），状态索引由 runtime 库建")
+    if not is_base:
+        raise _NonOwnerObject(
+            "chat_conversations 在本库是视图（非 owner 域），状态索引由 runtime 库建")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_chat_conv_status ON chat_conversations(status)")
+    db.commit()
+
+
+register_migration(
+    version="202611170009",
+    name="chat-conversations-status-index",
+    kind="safe",
+    fn=_fn_chat_conversations_status_index,
+)
 
 register_migration(
     version="202611170008",

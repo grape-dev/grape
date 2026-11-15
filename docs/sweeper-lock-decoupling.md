@@ -61,8 +61,31 @@ systemctl daemon-reload && systemctl restart grape@event grape@worker
 rm /etc/systemd/system/grape@.service.d/20-sweeper-lock.conf && systemctl daemon-reload
 ```
 
+## 已补：chat_conversations(status) 索引
+
+三条落地路径（因为三库模式下进程**跳过 init_database**，注册迁移只在单库模式生效）：
+
+| 场景 | 谁建 | 位置 |
+| --- | --- | --- |
+| 单库 / SQLite / 新装库 | 老轨建表段 | `db_setup._create_indexes()` |
+| 单库存量库 | 注册迁移 `202611170009`（kind=safe） | `db_setup.register_migration` |
+| 三库 MySQL | sweeper 首次取连接时幂等建一次 | `cleanup._ensure_chat_status_index()`（runtime 归属域连接） |
+
+MySQL 侧 `status` 是 TEXT，建索引必须带前缀长度 —— 兼容层会自动补 `(191)`；
+三库路径直接在归属域连接上写 `status(191)`。
+
+**实测（stage 209 行，全部 status='active'）**：
+
+```
+SHOW INDEX → idx_chat_conv_status on status(191)
+EXPLAIN WHERE status='active'  → type=ALL  key=NULL      （基数=1，优化器正确地不用索引）
+EXPLAIN WHERE status='closed'  → type=ref  key=idx_chat_conv_status   （值有选择性时被选中）
+```
+
+结论：索引可用且已建；stage 因为全部会话都处于 active，优化器选全表扫是**正确行为**；
+生产历史会话累积出 closed 之后该索引才会真正生效。
+
 ## 后续可做
 
-- `chat_conversations(status)` 补索引（own 模式下 `WHERE status='active'` 仍是全表扫，208 行目前无感）；
 - 把 `sweep_events_once` 内部的各阶段再细分耗时（当前只有轮级耗时）；
 - 若将来多副本常态化，把 `GET_LOCK` 的 key 提到配置里，便于按副本角色分配。
