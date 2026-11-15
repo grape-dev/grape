@@ -26,14 +26,13 @@
   "src/domains/runtime/routes/task_logs.py": 1,
   "src/domains/runtime/routes/tasks.py": 13,
   "src/domains/runtime/routes/webhook.py": 15,
-  "src/domains/runtime/scene_precheck.py": 2,
   "src/domains/runtime/storage/scene_sync.py": 7,
   "src/domains/runtime/storage/skill_sync.py": 5
  },
  "risk_domains": {
   "insight": 5,
-  "runtime": 279
+  "runtime": 277
  },
- "risk_sites": 284,
- "total_sites": 545
+ "risk_sites": 282,
+ "total_sites": 543
 }

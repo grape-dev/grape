@@ -130,10 +130,9 @@ def _lookup_engine_rows(engine_ids: list[int]) -> dict[int, dict]:
     """单次批量查询引擎存在性、归属与在线信息（1 次 DB 查询/节点）。"""
     if not engine_ids:
         return {}
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.domain_db import cursor
     placeholders = ",".join("?" * len(engine_ids))
-    with db_lock:
-        c = db.cursor()
+    with cursor("runtime") as c:
         c.execute(
             "SELECT r.id, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
             "COALESCE(rc.scope, r.scope, ''), "
@@ -162,10 +161,9 @@ def _read_health_scores(runtime_ids: list[int]) -> dict[int, int]:
     """只读查询健康分（不触发 health_scorer 的现算落库，保持预校验零副作用）。"""
     if not runtime_ids:
         return {}
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.domain_db import cursor
     placeholders = ",".join("?" * len(runtime_ids))
-    with db_lock:
-        c = db.cursor()
+    with cursor("runtime") as c:
         c.execute(
             "SELECT runtime_id, health_score FROM runtime_health_scores "
             f"WHERE runtime_id IN ({placeholders})",

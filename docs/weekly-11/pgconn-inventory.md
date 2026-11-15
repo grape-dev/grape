@@ -41,11 +41,14 @@ runtime / insight 的路由、IM 引擎与调度），同一个游标就指向�
 ## 3. 现状（基线 commit 上的实测）
 
 ```
-进程库 SQL 执行点（src/domains/**）        545
-  其中风险域 runtime                      279
+进程库 SQL 执行点（src/domains/**）        543
+  其中风险域 runtime                      277
   其中风险域 insight                        5
-  合计风险                                  284
+  合计风险                                  282
 ```
+
+首批修复已并入：`src/domains/runtime/scene_precheck.py` 2 处（引擎在线查询 + 健康分）。
+修复前 284 → 修复后 282，基线已同步。
 
 风险文件 top（处数）：
 
