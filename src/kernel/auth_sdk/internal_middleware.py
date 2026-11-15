@@ -38,8 +38,30 @@ class InternalAuthMiddleware(BaseHTTPMiddleware):
 
         is_cluster = os.environ.get("GRAPE_MODE", "").strip().lower() == "cluster"
         if not is_cluster:
-            # 单机模式跳过认证
-            return await call_next(request)
+            # 单机模式不再无条件放行：/internal/* 里有跨域写端点（xwrite/apply），
+            # 无条件放行等于任何能连到该端口的人都能改别的域的数据。
+            # 单机部署的内部调用方都是同机进程（回环），所以按来源判定：
+            #   回环 → 放行（等价于原来的单机语义）
+            #   非回环 → 必须带正确 X-Service-Token；未配置密钥则 fail-closed 403
+            client_host = (request.client.host if request.client else "") or ""
+            if client_host in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"):
+                return await call_next(request)
+            if not _service_token.SERVICE_SECRET:
+                if not _WARNED_NO_SECRET:
+                    log.warning(
+                        "single mode: /internal/* reached from non-loopback %s without "
+                        "GRAPE_SERVICE_SECRET; rejected. Set GRAPE_SERVICE_SECRET to allow "
+                        "cross-host internal calls.", client_host or "unknown",
+                    )
+                    _WARNED_NO_SECRET = True
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "code": "INTERNAL_LOOPBACK_ONLY",
+                        "detail": "Non-loopback /internal/* requires X-Service-Token "
+                                  "(set GRAPE_SERVICE_SECRET) in single mode",
+                    },
+                )
 
         if not _service_token.SERVICE_SECRET:
             # 集群模式但密钥未设置——fail-closed，拒绝并告警（仅告警一次避免日志刷屏）

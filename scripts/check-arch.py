@@ -176,7 +176,7 @@ WHITELIST: dict[str, dict[str, str]] = {
         "R2": "deferred app/openapi imports for help page generation; Phase 5",
     },
     "src/kernel/gsb/registry.py": {
-        "R1": {"targets": ["src.domains.mgmt", "src.domains.mgmt.public"],
+        "R1": {"targets": ["src.domains.mgmt"],
               "reason": "deferred GSB registry SQL via mgmt.public "
                         "(gsb_service_registry is mgmt-owned); due Phase 5 -> contracts"},
     },
@@ -189,7 +189,9 @@ WHITELIST: dict[str, dict[str, str]] = {
         "R1": "deferred secret/credential keys via mgmt.auth.security_config; Phase 5",
     },
     "src/kernel/auth_sdk/auth_token.py": {
-        "R1": "deferred token-table access via mgmt.public (SQL already moved there); Phase 5 -> contracts",
+        "R1": {"targets": ["src.domains.mgmt"],
+              "reason": "deferred token-table access via mgmt.public primitives "
+                        "(SQL already moved there); due Phase 5 -> contracts"},
     },
     # R1: multi-platform decoupling additions — all deferred (function-body) lookups;
     # Phase 5 inverts them through src/domains/contracts.
@@ -209,11 +211,8 @@ WHITELIST: dict[str, dict[str, str]] = {
         "R1": {"targets": ["src.domains.mgmt.auth.providers", "src.domains.runtime.vcs.platform_card"],
               "reason": "deferred provider + vcs-card enumeration; due Phase 5 -> contracts"},
     },
-    # R6: legacy shim imports due Phase 5 contracts. Evidence: check-arch at
-    # base 13c6d0979 fails with these 13 R6 findings before this PR's changes
-    # (run `python scripts/check-arch.py` on the base tree to reproduce).
-    "src/domains/runtime/pipeline/account_env.py": {"R6": {"targets": ["src.config"], "reason": "legacy shim import; due Phase 5 contracts"}},
-    "src/domains/mgmt/routes/scenes.py": {"R6": {"targets": ["src.scene_custom_env"], "reason": "legacy shim imports; due Phase 5 contracts"}},
+    # R6: legacy shim imports due Phase 5 contracts. 两条旧 shim 条目（account_env / scenes）
+    # 在实际导入清零后已删除——豁免面只保留仍存在的依赖，避免白名单漂移。
     # R5: known import cycles inherited from the pre-Phase-1 layout.
     # agents <-> engine: M0 compat forwarding layer (src.domains.runtime.agents re-exported
     #   src.domains.runtime.engine backends); importing src.domains.runtime.agents before src.domains.runtime.engine fails

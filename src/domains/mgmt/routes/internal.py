@@ -12,7 +12,7 @@ token）。三库独立化方案 §D5 修订：mgmt 开放**只读白名单**内
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from src.domains.contracts.local.mgmt_local import MgmtServiceLocal
 from src.domains.mgmt import public as _mgmt_public
@@ -144,6 +144,19 @@ def _xwrite_apply(action: str, payload: dict, idempotency_key: str) -> dict:
 
 
 @xwrite_router.post("/xwrite/apply", operation_id="mgmt_xwrite_apply")
+async def xwrite_apply_http(request: Request, body: dict) -> dict:
+    """HTTP 入口：执行补偿应用并落审计（QA F2）。
+
+    路由注册在包装层，是为了让 `xwrite_apply(body)` 保持可被契约测试直接 await 的纯签名
+    （FastAPI 的 Request 参数必须无默认值，加了默认值会被当作 Pydantic 字段而注册失败）。
+    """
+    result = await xwrite_apply(body)
+    _audit_xwrite(request, str((body or {}).get("action") or ""),
+                  str((body or {}).get("idempotency_key") or ""),
+                  dict((body or {}).get("payload") or {}), result)
+    return result
+
+
 async def xwrite_apply(body: dict) -> dict:
     """N13 补偿应用（action 白名单 + 幂等键去重）。"""
     body = body or {}
@@ -155,3 +168,46 @@ async def xwrite_apply(body: dict) -> dict:
         return _xwrite_apply(action, dict(body.get("payload") or {}), key)
     except ValueError as exc:
         return {"status": "rejected", "error": str(exc)}
+
+
+def _xwrite_digest(value) -> str:
+    """payload/结果摘要：只留 sha256 前 16 位，避免把跨域写内容（可能含业务标识）落进审计正文。"""
+    import hashlib
+    import json as _json
+    try:
+        raw = _json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        raw = str(value)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _audit_xwrite(request, action: str, key: str, payload: dict, result: dict) -> None:
+    """跨域写审计（QA F2）：action / 幂等键 / 调用方 / 结果摘要 / 内容摘要。
+
+    审计失败不阻断业务（跨域写已落库，回滚反而会制造二次不一致），但必须留 warning。
+    """
+    try:
+        from src.domains.mgmt.auth.audit import log_audit
+        from src.kernel.config import log as _log
+        caller = ""
+        try:
+            caller = getattr(request.state, "service_caller", "") or ""
+        except Exception:
+            caller = ""
+        _hdrs = getattr(request, "headers", None) or {}
+        log_audit(
+            event_type="cross_write_apply",
+            ip=(request.client.host if getattr(request, "client", None) else "") or "",
+            detail={
+                "action": action,
+                "idempotency_key": key,
+                "caller_service": caller,
+                "status": str(result.get("status") or ""),
+                "payload_digest": _xwrite_digest(payload),
+                "result_digest": _xwrite_digest(result.get("result")),
+                "service_token_seen": bool(_hdrs.get("X-Service-Token")) if _hdrs else False,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - 审计失败不阻断跨域写
+        from src.kernel.config import log as _log2
+        _log2.warning(f"xwrite audit failed (action={action}, key={key}): {exc}")

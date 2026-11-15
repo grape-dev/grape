@@ -900,7 +900,7 @@ def resolve_issue_card_id(repo_key: str, issue_number) -> str:
         if not _n:
             return ""
         with _dl:
-            _r = __rt_db.cursor().execute(
+            _r = _rt_db.cursor().execute(
                 "SELECT id FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
                 (repo_key, _native_issue_number(_n))).fetchone()
         return str(_r[0]) if _r else ""
@@ -1317,7 +1317,7 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
         _ck_issue_num = str(issue_id).lstrip("#")
         if _ck_issue_num.isdigit():
             with _ck_lock:
-                _ck_c = _ck__rt_db.cursor()
+                _ck_c = _rt_db.cursor()
                 _ck_c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
                               (repo_key, int(_ck_issue_num)))
                 if _ck_c.fetchone():
@@ -2917,7 +2917,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             try:
                 from src.kernel.session_manager import db as _db, db_lock as _dbl
                 with _dbl:
-                    _c = __rt_db.cursor()
+                    _c = _rt_db.cursor()
                     _ph253 = ",".join("?" * len(_pool_ids_253))
                     _c.execute(
                         f"SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 "
@@ -2953,7 +2953,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 log.info(f"Pipeline: acquiring db_lock for engine query, seq={seq}")
                 from src.domains.mgmt import public as _mgmt_public_org
                 with _dbl:
-                    _c = __rt_db.cursor()
+                    _c = _rt_db.cursor()
                     # 仓库 org_id 归 mgmt（managed_repos）：owner 侧一条语句，自有 DSN/单库同一份。
                     # repo_key 是唯一键，原语句的 ORDER BY org_id DESC 不改变结果集。
                     _mr_org = _mgmt_public_org.repo_org_id_any(repo_key)
@@ -4867,7 +4867,7 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
     # 1) 查关联的 task conversation
     try:
         with _dl:
-            c = __rt_db.cursor()
+            c = _rt_db.cursor()
             c.execute("SELECT conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
                       (rk, issue_number))
             row = c.fetchone()
@@ -5083,6 +5083,8 @@ def _notify_scene_precheck_failure(repo_key: str, issue_id: str, problems: list,
 
 _PR_EXISTS_TTL = 60.0
 
+# PR 存在性查询缓存（60s TTL，上限 _PR_EXISTS_MAX 条）
+_PR_EXISTS_CACHE: dict = {}
 _PR_EXISTS_MAX = 128
 
 def _pr_number_exists(repo_key: str, pr_num: str) -> bool:
@@ -5759,9 +5761,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             if runtime_id and runtime_id > 0:
                 from src.kernel.session_manager import db as _sdb, db_lock as _sdl
                 with _sdl:
-                    c = _s_rt_db.cursor()
+                    c = _rt_db.cursor()
                     c.execute("UPDATE agent_tasks SET runtime_id=? WHERE id=? AND (runtime_id IS NULL OR runtime_id=0)", (runtime_id, task_id))
-                    _s_rt_db.commit()
+                    _rt_db.commit()
                 log.info(f"direct exec: task {task_id} runtime_id -> {runtime_id}")
         except Exception as e:
             log.warning(f"direct exec: failed to update task {task_id} to running: {e}")
@@ -5844,7 +5846,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             try:
                 from src.kernel.session_manager import db as _pdb, db_lock as _pdl
                 with _pdl:
-                    c = _p_rt_db.cursor()
+                    c = _rt_db.cursor()
                     c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
                     _pr = c.fetchone()
                     _reused_prompt = (_pr[0] or "").strip() if _pr else ""
@@ -5869,9 +5871,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             try:
                 from src.kernel.session_manager import db as _wdb, db_lock as _wdl
                 with _wdl:
-                    c = _w_rt_db.cursor()
+                    c = _rt_db.cursor()
                     c.execute("UPDATE agent_tasks SET prompt=? WHERE id=? AND prompt=''", (prompt, task_id))
-                    _w_rt_db.commit()
+                    _rt_db.commit()
                 log.info(f"Exec agent: prompt writeback OK for task={task_id}, rows={c.rowcount}")
             except Exception as _pe:
                 log.warning(f"Exec agent: prompt writeback failed for task={task_id}: {_pe}")
@@ -6055,7 +6057,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                     try:
                         from src.kernel.session_manager import db as _rdb, db_lock as _rdb_lock
                         with _rdb_lock:
-                            c = _r_rt_db.cursor()
+                            c = _rt_db.cursor()
                             c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
                             _trow = c.fetchone()
                             _task_prompt = _trow[0] if _trow else ""
@@ -6447,7 +6449,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 from src.kernel.session_manager import db as _db, db_lock as _dl, add_message as _am
                 _rk = to_repo_key(repo_key)
                 with _dl:
-                    _c = __rt_db.cursor()
+                    _c = _rt_db.cursor()
                     _c.execute("SELECT conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
                                (_rk, _issue_num))
                     _row = _c.fetchone()

@@ -337,6 +337,11 @@ def extract_next_step(result_text: str) -> str:
         pass
     return ""
 
+# PR 订阅链伪 ID 前缀（`#pr_`）：a2a 端点设计性拦截、本无交棒语义（D17）
+_PR_SUB_PREFIX = "#pr_"
+# next_step 交棒目标解析：`a2a-qa` / `a2a: qa` / `a2a - qa` → qa
+_NEXT_STEP_RE = re.compile(r"^a2a[-:]\s*([a-zA-Z0-9_\-]+)", re.IGNORECASE)
+
 def parse_target_agent(next_step: str) -> str:
     """`a2a-qa` / `a2a:qa` → `qa`；解析不出返回空（双源判定退化，仅 L1+窗口）。"""
     m = _NEXT_STEP_RE.match((next_step or "").strip())

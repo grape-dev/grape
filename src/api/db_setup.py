@@ -2150,6 +2150,36 @@ def _normalize_org_domain_text(conn) -> int:
     return changed or 0
 
 
+def _mysql_view_base_table(c, table: str):
+    """若 table 在 MySQL 里是视图，返回其基表 (schema, table)；否则 None。
+
+    cross-schema DEFINER 视图上直接 ALTER 会报 1347（对视图名改列不允许），
+    必须先落到真正的基表；DEFINITION 里解析 `from schema.table` 即可，
+    解析不出时保守返回 None（调用方退化到原路径，不阻断启动）。
+    """
+    import re as _re_vbt
+    try:
+        c.execute(
+            "SELECT TABLE_TYPE FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s", (table,))
+        row = c.fetchone()
+        if not row or str(row[0] or "").upper() != "VIEW":
+            return None
+        c.execute(
+            "SELECT VIEW_DEFINITION FROM information_schema.VIEWS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s", (table,))
+        vdef = (c.fetchone() or [""])[0] or ""
+        m = _re_vbt.search(r"\bfrom\s+`?(\w+)`?\.`?(\w+)`?", vdef, _re_vbt.I)
+        if m:
+            return (m.group(1), m.group(2))
+        m = _re_vbt.search(r"\bfrom\s+`?(\w+)`?", vdef, _re_vbt.I)
+        if m:
+            return (None, m.group(1))
+    except Exception:
+        return None
+    return None
+
+
 def _rebuild_issue_ident_columns_integer(c, cols, ident_cols) -> None:
     """issue 表整表重建：把 ident_cols 各列亲和 TEXT → INTEGER（基线 #995 修复）。
 

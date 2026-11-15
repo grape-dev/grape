@@ -158,9 +158,23 @@ def allowed_for(allowed: set[str], target_db: str) -> set[str]:
 
 
 def prune_unlisted(host: str, user: str, pwd: str, target_dbs, allowed, dry_run: bool) -> int:
-    """删除不在白名单里的跨域视图（P5 清零用；P0 用于删 60 个快赢视图）。"""
+    """删除不在白名单里的跨域视图（P5 清零用；P0 用于删 60 个快赢视图）。
+
+    安全闸（QA G2）：白名单整体为空时**拒绝执行**。空白名单有两种成因——文件缺失/解析失败，
+    或误用空文件——两种都不代表「所有视图都该删」。以前这种输入会把目标库视图全量 DROP，
+    属于一次误跑即清空不可回滚的操作。
+    """
+    if not allowed:
+        print("SKIP 白名单为空（view-allowlist 缺失或未解析出条目）——拒绝 prune，"
+              "避免把目标库视图全量 DROP。请先补齐白名单。")
+        return 0
     dropped = 0
     for target in target_dbs:
+        keep = allowed_for(allowed, target)
+        if not keep:
+            # 该库在整体白名单里没有任何条目：同样视为配置缺失，不删
+            print(f"SKIP {target}: 白名单里没有该库的条目 —— 不执行 prune")
+            continue
         conn = connect(host, user, pwd, target)
         try:
             with conn.cursor() as c:
@@ -168,7 +182,6 @@ def prune_unlisted(host: str, user: str, pwd: str, target_dbs, allowed, dry_run:
                     "SELECT TABLE_NAME FROM information_schema.views WHERE TABLE_SCHEMA=%s"
                     " ORDER BY TABLE_NAME", (target,))
                 names = [r[0] for r in c.fetchall()]
-            keep = allowed_for(allowed, target)
             for name in names:
                 if name in keep:
                     continue

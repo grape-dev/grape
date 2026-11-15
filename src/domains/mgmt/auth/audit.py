@@ -49,6 +49,7 @@ EVENT_TYPES = frozenset({
     "scene_secret_reveal",          # 场景自定义变量密钥明文按需取回（Issue #885：二次确认后当次返回，detail 含 scene_id/repo_key/name，不落明文）
     "scene_pin",                    # 场景置顶/取消置顶（Issue #1735：仓库共享状态变更留痕，detail 含 scene_id/repo_key/pinned）
     "im_installation_change",       # IM 渠道安装变更（凭证保存/解绑/引擎启停/卡片配置；detail 只记动作与标识，不含 secret）
+    "cross_write_apply",            # 跨域补偿写应用（/internal/xwrite/apply：action/幂等键/调用方/结果摘要，detail 不落 payload 原文）
 })
 
 

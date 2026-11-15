@@ -705,7 +705,7 @@ def _write_issue_status(c, issue_id: int, ns: str, revert_to_review: bool) -> No
         )
         if c.rowcount == 0:
             from src.kernel.session_manager import db as _db
-            __rt_db.rollback()
+            _rt_db.rollback()
             raise HTTPException(
                 status_code=409,
                 detail={"code": 409, "message": "需求状态已变更，请刷新后重试"})
@@ -1514,7 +1514,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
         raise HTTPException(status_code=403, detail={"code": 403, "message": f"agent_type={session_agent} 不在本接口范围（仅 vod/issue 可声明待澄清）"})
 
     with _dl:
-        c = __rt_db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue WHERE id=?",
                   (issue_id,))
         irow = c.fetchone()
@@ -1526,7 +1526,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
             from src.kernel.repo_key import to_repo_key as _trk
             _fb_repo = _trk(session_repo)
             with _dl:
-                c = __rt_db.cursor()
+                c = _rt_db.cursor()
                 c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, scene_id FROM issue "
                           "WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
                           (_fb_repo, _fb_num))
@@ -1540,7 +1540,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                                                title=str((_data or {}).get("title", "") or ""),
                                                event_type="issue_opened")
                     with _dl:
-                        c = __rt_db.cursor()
+                        c = _rt_db.cursor()
                         c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, scene_id FROM issue "
                                   "WHERE id=?", (_fb_id,))
                         irow = c.fetchone()
@@ -1565,12 +1565,12 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
         return {"ok": True, "issue_id": issue_card_id, "status": cur_status, "changed": False}
 
     with _dl:
-        c = __rt_db.cursor()
+        c = _rt_db.cursor()
         c.execute(
             "UPDATE issue SET status='awaiting_input' WHERE id=? AND status IN ('active','processing')",
             (issue_card_id,))
         changed = c.rowcount > 0
-        __rt_db.commit()
+        _rt_db.commit()
     user_id = issue_user_id
 
     conv_id = ""
@@ -1580,9 +1580,9 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                                                 write_context_on_reuse=False)
             if conv_id:
                 with _dl:
-                    c = __rt_db.cursor()
+                    c = _rt_db.cursor()
                     c.execute("UPDATE issue SET conversation_id=? WHERE id=?", (conv_id, issue_card_id))
-                    __rt_db.commit()
+                    _rt_db.commit()
         except Exception as e:
             log.warning(f"Issue awaiting-input: conversation ensure failed: {e}")
 
@@ -1620,7 +1620,7 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
     if not _repo:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 缺少仓库作用域"})
     with _dl:
-        c = __rt_db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue WHERE id=?", (issue_id,))
         _r = c.fetchone()
     if not _r:
@@ -1660,9 +1660,9 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                         f"{review_points}" + (f"\n\n参考: {_refs}" if _refs else ""))
                 _add(conv_id, "agent", _msg)
                 with _dl:
-                    c = __rt_db.cursor()
+                    c = _rt_db.cursor()
                     c.execute("UPDATE issue SET conversation_id=? WHERE id=?", (conv_id, it["id"]))
-                    __rt_db.commit()
+                    _rt_db.commit()
         except Exception as e:
             log.warning(f"Issue pending-review: conversation write failed: {e}")
     # 飞书静态卡片触达（同 awaiting）：等用户双态的“待审核”必须主动通知用户
@@ -2060,7 +2060,7 @@ def list_repo_issues(owner: str, repo: str,
         _live = []
         for _k in repo_keys:
             with _lock:
-                _c = __rt_db.cursor()
+                _c = _rt_db.cursor()
                 _c.execute("SELECT 1 FROM issue WHERE repo_key=? LIMIT 1", (_k,))
                 if _c.fetchone():
                     _live.append(_k)

@@ -3654,16 +3654,22 @@ def _read_refresh_token_from_identity(user_id: int, provider: str) -> str:
     - 解密成功 → 返回明文
     """
     try:
-        from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
+        from src.kernel.session_manager import db_lock as _sm_dl
         from src.domains.mgmt.auth.credential_crypto import decrypt
         with _sm_dl:
-            c = _sm__mg_db.cursor()
-            c.execute(
-                "SELECT refresh_token FROM external_identities "
-                "WHERE grape_user_id=? AND provider=? AND status=1",
-                (user_id, provider),
-            )
-            row = c.fetchone()
+            c = _mg_db.cursor()
+            try:
+                c.execute(
+                    "SELECT refresh_token FROM external_identities "
+                    "WHERE grape_user_id=? AND provider=? AND status=1",
+                    (user_id, provider),
+                )
+                row = c.fetchone()
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
         if not row or not row[0]:
             return ""
         try:
@@ -5183,21 +5189,29 @@ def clear_repo_bot_token(repo_key: str) -> bool:
     _now = time.strftime("%Y-%m-%d %H:%M:%S")
     try:
         with _sm_dl:
-            c = _sm__mg_db.cursor()
-            if _has_col:
-                c.execute(
-                    f"UPDATE managed_repos SET {_col}='', bot_token_status='' "
-                    f"WHERE repo_key=?", (repo_key,))
-                found = c.rowcount > 0
-            else:
-                # 注：本函数当前**零调用方**（审计实测）。凭据表归 insight，走该域原语
-                # （不再给死代码留跨域 SQL；P4 前要么删除、要么随 purge 原语一起收敛）。
-                _insight_public.clear_repo_credential_value(repo_key, _now)
-                c.execute(
-                    "UPDATE managed_repos SET bot_token_status='' WHERE repo_key=?",
-                    (repo_key,))
-                found = c.rowcount > 0
-            _sm__mg_db.commit()
+            # 晚绑定 _sm_db（测试按 patch("src.kernel.session_manager.db") 打桩），
+            # 不能换成域代理 —— 换掉就打桩失效、单测连真库。
+            c = _sm_db.cursor()
+            try:
+                if _has_col:
+                    c.execute(
+                        f"UPDATE managed_repos SET {_col}='', bot_token_status='' "
+                        f"WHERE repo_key=?", (repo_key,))
+                    found = c.rowcount > 0
+                else:
+                    # 注：本函数当前**零调用方**（审计实测）。凭据表归 insight，走该域原语
+                    # （不再给死代码留跨域 SQL；P4 前要么删除、要么随 purge 原语一起收敛）。
+                    _insight_public.clear_repo_credential_value(repo_key, _now)
+                    c.execute(
+                        "UPDATE managed_repos SET bot_token_status='' WHERE repo_key=?",
+                        (repo_key,))
+                    found = c.rowcount > 0
+                _sm_db.commit()
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
         return found
     except Exception as e:
         log.warning(f"clear_repo_bot_token failed: {e}")

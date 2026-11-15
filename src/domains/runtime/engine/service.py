@@ -1999,9 +1999,9 @@ def refresh_busy_snapshot(runtime_id: int, cursor=None):
         return
     from src.kernel.session_manager import db as _db, db_lock as _dl
     with _dl:
-        _n = _real_active_count(__rt_db.cursor(), runtime_id)
-        __rt_db.cursor().execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?", (_n, runtime_id))
-        __rt_db.commit()
+        _n = _real_active_count(_rt_db.cursor(), runtime_id)
+        _rt_db.cursor().execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?", (_n, runtime_id))
+        _rt_db.commit()
 
 
 def release_busy_slot(runtime_id, cursor=None):
@@ -2020,8 +2020,8 @@ def release_busy_slot(runtime_id, cursor=None):
         return
     from src.kernel.session_manager import db as _db, db_lock as _dl
     with _dl:
-        __rt_db.cursor().execute(_BUSY_SLOT_DECREMENT_SQL, (runtime_id,))
-        __rt_db.commit()
+        _rt_db.cursor().execute(_BUSY_SLOT_DECREMENT_SQL, (runtime_id,))
+        _rt_db.commit()
 
 
 # ===== Issue #1071：重启后「活着却被判死」——活性判定 · 回炉守卫 · 迟到复活 =====
@@ -3031,7 +3031,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
                 try:
                     from src.kernel.session_manager import db as _db, db_lock as _dl, add_message as _am
                     with _dl:
-                        _c = __rt_db.cursor()
+                        _c = _rt_db.cursor()
                         _c.execute("SELECT conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
                                    (_repo_key, _issue_num))
                         _row = _c.fetchone()
@@ -3311,7 +3311,7 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     try:
         from src.kernel.session_manager import db as _rdb, db_lock as _rdb_lock
         with _rdb_lock:
-            c = _r_rt_db.cursor()
+            c = _rt_db.cursor()
             c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
             _trow = c.fetchone()
             _task_prompt = _trow[0] if _trow else ""
@@ -3341,7 +3341,7 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     try:
         from src.kernel.session_manager import db as _evdb, db_lock as _evdb_lock
         with _evdb_lock:
-            _ec = _ev_rt_db.cursor()
+            _ec = _rt_db.cursor()
             _ec.execute(
                 "SELECT actor FROM events WHERE repo_key=? AND issue_id=? AND actor!='' "
                 "ORDER BY seq ASC LIMIT 1",

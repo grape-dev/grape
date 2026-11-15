@@ -154,6 +154,7 @@ def _audit(repo_key: str, trigger: str, operator_id: int, detail: dict) -> None:
 def _cleanup_files(keys: list[str], owner: str, repo: str, stats: dict) -> None:
     """skill 目录 + workspace 知识基线目录清理（带 meta pending 补偿标记）。"""
     from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime import public as _rt_clean
 
     def _mark_pending(k: str, on: bool):
         try:
