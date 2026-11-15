@@ -278,6 +278,22 @@ const app = (() => {
 
   // 深链仓库就绪后再走原有「hash → 视图」恢复逻辑（顺序不能反：先有仓库才能开详情页）
   // 只有仓库、没有 hash（/app/owner/repo/）：直接进该仓库工作台，而不是弹仓库选择大堂
+
+  // Vue 视图 chunk 是 ES module（defer 执行），hash 路由可能在模块注册 window.renderXxx
+  // 之前就跑到这里 → 直接调用会抛 "renderXxx is not a function"，容器停在「加载中」。
+  // 这里做有界重试（最多 ~4s），既修掉竞态，也不会把真正的加载失败伪装成永久 loading。
+  function _ensureViewFn(name, cb, tries) {
+    tries = tries || 0
+    if (typeof window[name] === 'function') { cb(); return; }
+    if (tries >= 40) {
+      const pc = document.getElementById('pageContent');
+      if (pc) pc.innerHTML = '<div class="error">' + (I18N.t('common.load_failed') || '加载失败') +
+        '（' + name + '）</div>';
+      return;
+    }
+    setTimeout(function () { _ensureViewFn(name, cb, tries + 1); }, 100);
+  }
+
   function _bootRestore() {
     _applyAppPathRepo().then(function (hit) {
       const h = window.location.hash || '';
@@ -2008,36 +2024,39 @@ function loadAgentTypes() {
       if (typeof resumeConvTask === 'function') setTimeout(resumeConvTask, 500);
     } else if (view === 'chat') {
       title.textContent = I18N.t('app.current_project');
-      renderChat(param || null);
+      _ensureViewFn('renderChat', function () {
+        if (window._currentView !== 'chat') return;   // 等待期间已切走 → 不覆盖新视图
+        renderChat(param || null);
+      });
       // 切换回 Chat 页面时恢复活跃查询（不中断）
       if (typeof resumeChatTask === 'function') setTimeout(resumeChatTask, 500);
     } else if (view === 'im-channel') {
       title.textContent = I18N.t('app.nav.im_channel');
-      renderImChannel();
+      _ensureViewFn('renderImChannel', function () { renderImChannel(); });
     } else if (view === 'tasks') {
       title.textContent = I18N.t('app.current_project');
       // Issue #341: #tasks/<issue号> 深链——把 hash 中的编号透传给需求中心，
       // 纯数字 param 由 renderTasks 解析为待打开详情的 issue_number
-      renderTasks(param);
+      _ensureViewFn('renderTasks', function () { renderTasks(param); });
     } else if (view === 'settings') {
       title.textContent = I18N.t('app.current_project');
-      renderSettings(param || 'gitcode');
+      _ensureViewFn('renderSettings', function () { renderSettings(param || 'gitcode'); });
     } else if (view === 'account') {
       title.textContent = I18N.t('app.account.center_title');
       // R13.2: 用户设置页不展示仓库信息——清空顶栏仓库名
       repoTitle.textContent = '';
       // 用户设置：只隐藏侧边栏，保留顶栏，mainView 保持正常布局
       var _accSb = $('sidebar'); if (_accSb) _accSb.style.display = 'none';
-      renderAccount(param || 'profile');
+      _ensureViewFn('renderAccount', function () { renderAccount(param || 'profile'); });
     } else if (view === 'organizations') {
       title.textContent = I18N.t('app.nav.organizations') || '组织管理';
       repoTitle.textContent = '';
       // 组织管理页面隐藏左侧菜单，全屏展示
       var _orgSb = $('sidebar'); if (_orgSb) _orgSb.style.display = 'none';
-      renderOrganizations();
+      _ensureViewFn('renderOrganizations', function () { renderOrganizations(); });
     } else if (view === 'my-feedback') {
       title.textContent = '我的反馈';
-      renderMyFeedback();
+      _ensureViewFn('renderMyFeedback', function () { renderMyFeedback(); });
     } else if (view === 'my-feedback-detail') {
       title.textContent = '反馈详情';
       renderMyFeedbackDetail(param);

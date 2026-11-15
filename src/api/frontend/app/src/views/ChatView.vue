@@ -1000,6 +1000,10 @@ const convMeta2 = ref(null)
 
 function switchConversation(convId) {
   if (currentConvId.value !== convId) {
+    // 切会话即中止上一个会话的 SSE：不中止会白占连接与定时器（事件已被 isOwnerConv 丢弃）；
+    // 任务态留在 storedTask，切回时由 resume 逻辑重新订阅。
+    if (streamAbort) { try { streamAbort.abort() } catch (e) {} streamAbort = null }
+    streaming.value = null
     if (currentConvId.value) saveDraft(currentConvId.value, draft.value)
     draft.value = ''
     if (currentConvId.value) saveChatImages(currentConvId.value, pendingImages.value)
@@ -1171,8 +1175,10 @@ function doSend() {
       }
     })
 }
-function finishStream(html) {
+function finishStream(html, convId) {
   // 流式气泡转正：追加为普通 agent 消息（submit 失败/立即错误路径）
+  // convId 给了且已切走 → 不写 UI（否则 A 会话的失败气泡会追加到 B 会话列表）
+  if (convId && currentConvId.value !== convId) return
   if (streaming.value) {
     messages.value.push({ role: 'agent', content: '__stream__' })
     const last = messages.value[messages.value.length - 1]
@@ -1187,6 +1193,9 @@ async function startStream(taskId, elId, convId) {
   }
   const ac = new AbortController()
   streamAbort = ac
+  // 归属会话：切走后 SSE 仍在吐事件（后端继续执行），必须丢弃，否则思考日志/正文
+  // 会写进「当前」会话的消息列表——用户在 B 会话看到 A 会话的思考滚动。
+  const isOwnerConv = () => currentConvId.value === convId
   let finalText = ''
   try {
     const token = (await G.API.ensureTokenValid()) || ''
@@ -1219,6 +1228,7 @@ async function startStream(taskId, elId, convId) {
       buf = lines.pop() || ''
       lines.forEach(function (line) {
         if (!line.startsWith('data: ')) return
+        if (!isOwnerConv()) return   // 已切到别的会话：丢弃事件，不写 UI
         try {
           const d = JSON.parse(line.substring(6))
           if (d.type === 'done') {
@@ -1240,16 +1250,17 @@ async function startStream(taskId, elId, convId) {
           /* ignore：与老代码同款静默降级 */
         }
       })
-      if (currentConvId.value === convId) nextTick(scrollBody)
+      if (!isOwnerConv()) { try { ac.abort() } catch (e) {} break }
+      nextTick(scrollBody)
     }
     // SSE 结束仍无 done（异常断流）→ 保留任务态供切回恢复
-    if (streaming.value) streaming.value = null
+    if (isOwnerConv() && streaming.value) streaming.value = null
     clearStoredTask(convId)
-    if (currentConvId.value === convId) loadConversations()
+    if (isOwnerConv()) loadConversations()
   } catch (e) {
     if (e && e.name === 'AbortError') return
     // 连接断开 → 后端继续执行，保留任务态供切回恢复
-    if (streaming.value && currentConvId.value === convId) streaming.value.stepText = ''
+    if (streaming.value && isOwnerConv()) streaming.value.stepText = ''
   }
 }
 
