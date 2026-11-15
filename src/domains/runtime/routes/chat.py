@@ -1375,14 +1375,9 @@ def _chat_selected_engine(cfg: dict, backends: list[dict]) -> dict | None:
                 return b
         try:
             from src.domains.runtime.engine.instances import instance_name
-            from src.kernel.session_manager import db as _db, db_lock as _dl
-            with _dl:
-                c = _db.cursor()
-                c.execute(
-                    "SELECT ar.name, ar.version, rc.device_name, rc.owner_name, ar.credential_id, rc.scope "
-                    "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
-                    "WHERE ar.id=?", (rid,))
-                row = c.fetchone()
+            # agent_runtimes / runtime_credentials 归 runtime：mgmt 进程直查会 1146（被外层 except 吞掉
+            # → 引擎名回显降级成裸 backend 名），走归属域具名查询。
+            row = _rt.read_one_any("chat_engine_by_id", (rid,))
             if row and row[0]:
                 ename, ver, dev, owner, cid, rscope = row
                 cid = cid or 0
@@ -1752,18 +1747,14 @@ async def update_chat_config(body: dict, request: Request,
         skill_scope = body.get("skill_scope", "")
         skill_id = 0
         if skill_name:
-            from src.kernel.session_manager import db as _db, db_lock as _db_lock
             def _find_skill(scope, owner_id=""):
-                """精确按 scope(+owner) 查 skill_id，不走 official 优先"""
-                with _db_lock:
-                    c = _db.cursor()
-                    if owner_id:
-                        row = c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? AND is_active=1 LIMIT 1",
-                                        (skill_name, scope, owner_id)).fetchone()
-                    else:
-                        row = c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1",
-                                        (skill_name, scope)).fetchone()
-                    return row[0] if row else 0
+                """精确按 scope(+owner) 查 skill_id，不走 official 优先（skill 归 runtime，走具名查询）"""
+                if owner_id:
+                    row = _rt.read_one_any("chat_skill_id_scope_owner",
+                                           (skill_name, scope, owner_id))
+                else:
+                    row = _rt.read_one_any("chat_skill_id_scope", (skill_name, scope))
+                return row[0] if row else 0
 
             if skill_scope == "repo" and repo:
                 from src.kernel.repo_key import to_repo_key

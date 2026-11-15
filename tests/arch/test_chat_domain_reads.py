@@ -23,6 +23,10 @@ FORBIDDEN = [
     r"DELETE\s+FROM\s+chat_conversations",
     r"DELETE\s+FROM\s+repo_im_group_binding",
     r"DELETE\s+FROM\s+bot_seen_messages",
+    # 引擎/技能下拉（2026-11-15：这三张表也归 runtime，直查 → 弹层永远「加载中」）
+    r"FROM\s+agent_runtimes",
+    r"FROM\s+runtime_credentials",
+    r"FROM\s+skill\b",
 ]
 
 
@@ -30,8 +34,17 @@ def _chat_src() -> str:
     return CHAT.read_text(encoding="utf-8")
 
 
+def _strip_comments(src: str) -> str:
+    """去掉 # 注释（按行），避免注释里的 'from skill table' 被当成 SQL。"""
+    out = []
+    for line in src.splitlines():
+        i = line.find("#")
+        out.append(line if i < 0 else line[:i])
+    return "\n".join(out)
+
+
 def test_no_direct_cross_domain_sql_in_chat_routes():
-    src = _chat_src()
+    src = _strip_comments(_chat_src())
     hits = []
     for pat in FORBIDDEN:
         for m in re.finditer(pat, src, flags=re.I):
@@ -43,7 +56,11 @@ def test_no_direct_cross_domain_sql_in_chat_routes():
 def test_named_queries_registered_in_runtime_public():
     src = RT_PUBLIC.read_text(encoding="utf-8")
     for name in ("messages_by_task", "conversation_delete_by_im",
-                 "repo_im_delete_by_app", "bot_seen_delete_by_app"):
+                 "repo_im_delete_by_app", "bot_seen_delete_by_app",
+                 "chat_local_engines", "chat_user_engines",
+                 "chat_skills_all", "chat_skill_scope_by_id",
+                 "chat_engine_by_id", "chat_skill_id_scope",
+                 "chat_skill_id_scope_owner"):
         assert f"'{name}'" in src, f"runtime public 缺少具名查询 {name}"
 
 
@@ -55,6 +72,16 @@ def test_messages_by_task_column_order_is_fixed():
     block = " ".join(m.group(1).split())
     assert "SELECT id, role, generate_status, content, conversation_id" in block
     assert "WHERE task_id=? ORDER BY id" in block
+
+
+def test_engine_and_skill_pickers_use_named_queries():
+    """引擎/技能下拉的取数也必须走 runtime public（否则 mgmt 进程 1146 → 空列表）。"""
+    src = _chat_src()
+    for name in ("chat_local_engines", "chat_user_engines",
+                 "chat_skills_all", "chat_skill_scope_by_id",
+                 "chat_engine_by_id", "chat_skill_id_scope",
+                 "chat_skill_id_scope_owner"):
+        assert f'"{name}"' in src, f"chat.py 未使用具名查询 {name}"
 
 
 def test_status_and_stream_use_the_named_query():

@@ -2000,6 +2000,15 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id "
         "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
         "WHERE rc.scope = 'user' AND rc.status='active' AND rc.owner_name = ?"),
+    'chat_engine_by_id': (
+        "SELECT ar.name, ar.version, rc.device_name, rc.owner_name, ar.credential_id, rc.scope "
+        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
+        "WHERE ar.id=?"),
+    'chat_skill_id_scope': (
+        "SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1"),
+    'chat_skill_id_scope_owner': (
+        "SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? "
+        "AND is_active=1 LIMIT 1"),
     'chat_skills_all': (
         "SELECT skill_name, display_name, description, skill_path, scope, COALESCE(owner_id,'') "
         "FROM skill WHERE is_active=1 AND agent_type='chat' ORDER BY scope, skill_name"),
