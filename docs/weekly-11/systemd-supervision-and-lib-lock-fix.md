@@ -170,6 +170,30 @@ SQL 侧其实都走 owner 域：`chat_agent_session` 的语句集中在 `domains
 
 结果：`grape_stage_mgmt` 83 张表（27 张新建 + 3 张清理），三域缺口仍为 0。
 
+### 4.2 清掉 runtime 库里的 62 张 mgmt/insight 空壳表（并堵住重建）
+
+`grape_stage_runtime`（`:3307`）原本 98 张基表：runtime 自己的 35 张 + 1 张 legacy `backend_agents`
++ **62 张 mgmt/insight 归属的空壳副本**（单库时代每个库都建了全量 schema）。空壳全部 0 行，
+但 `admin_accounts` 里被 `db_setup._seed_admin_accounts()` 在 runtime 进程种出了一行 `admin`。
+
+处置：DDL 导出（`/home/grape/backup-leftover-tables/runtime-leftover-*.sql`）→ `RENAME` 成
+`zz_legacy_rt_*` 观察 12 分钟（1146 命中 0、四角色健康）→ `DROP`。runtime 库 98 → 36 张。
+
+清理过程中发现**三处会重建空壳的代码**，一并堵住（否则改名后 30 秒内又被建回来）：
+
+| 位置 | 现象 | 修法 |
+|------|------|------|
+| `domains/mgmt/user/db.py::init_db()` | `user_accounts` / `user_credentials` / `managed_repos` / `oauth_states` 在非 owner 进程被重建 | 四张表走 `table_ownership.should_skip()` 守卫循环 |
+| 同文件 `db.execute(_OAUTH_STATES_DDL)`（守卫循环之后还留了一行） | 只重建 `oauth_states` 一张，`grep CREATE` 看不出（同一常量二次执行） | 删掉重复执行，注释指向守卫循环 |
+| `init_user_repos_table()` | `user_repos` 被重建 | 加 `should_skip("user_repos")` |
+| `api/db_setup.py::_seed_admin_accounts()` | 在 runtime 库种出 `admin` 行 | 加 `should_skip("admin_accounts")` |
+
+验收：四角色全量重启后 runtime 库仍是 36 张（无任何 mgmt 表回填），
+日志 5 分钟窗口内 1146 / run failed / AttributeError = 0。
+（`init_db()` 在 runtime env 下的单点复现脚本断言：调用前后 5 张表都不存在。）
+
+三域现状：mgmt 84 张（归属 81，缺 0）· runtime 36 张（归属 35，缺 0）· insight 20 张（归属 12，缺 0）。
+
 ## 遗留（本轮未动，需运营侧确认）
 - `grape_mgmt_db` / `grape_runtime_db` / `grape_insight_db` 与 `grape_ljt_db` 仍在
   共用的 RDS 实例（`<legacy-rds-host>`）上，是三库演练/迁移残留，容易误判主库；确认后归档。

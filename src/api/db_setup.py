@@ -1734,6 +1734,13 @@ def _seed_admin_accounts():
     """
     import hashlib
     from src.domains.mgmt.user.db import get_meta_value, set_meta_value
+    # 三库拓扑：admin_accounts 归 mgmt。runtime/insight 进程里这张表即便存在也是单库时代的
+    # 空壳副本，种子会写进别人的库（2026-11-15 在 grape_stage_runtime 里就长出了 admin 行），
+    # 随后被清理时又像是"丢数据"。非 owner 进程直接跳过。
+    from src.kernel import table_ownership as _table_own
+    if _table_own.should_skip("admin_accounts"):
+        log.info("[seed] admin_accounts owner=mgmt，非本域进程跳过种子")
+        return
     _default_pwd = os.environ.get("GRAPE_ADMIN_PASSWORD") or "admin123"
     try:
         with db_lock:
