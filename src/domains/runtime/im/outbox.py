@@ -741,6 +741,12 @@ class OutboxConsumer:
             self._task.cancel()
             try:
                 await self._task
+            except asyncio.CancelledError:
+                # 取消本任务就是 stop() 的正常结果。CancelledError 继承 BaseException，
+                # 原来的 `except Exception` 接不住它 → 一路冒到 lifespan，导致
+                # "Application shutdown failed"、uvicorn 退出码 3，systemd 反复重启
+                # 并和旧进程抢端口（2026-11-15 crash loop 的直接触发点）。
+                pass
             except Exception as _e:
                 log.debug(f"src/domains/runtime/im/outbox.py best-effort skipped: {_e}")
         self._task = None
