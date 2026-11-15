@@ -4949,6 +4949,84 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   其后是 `src/api/git_repo_api.py`（2 处：`takeover_sessions`/`issue`）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
 
+### 7.42 api QA 门禁的 events 查询下沉 runtime owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/api/qa_gate.py` **2 处 → 0**（单轮做完，2 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：两处同一张表 `events`（归 **runtime**，
+  `grape_runtime_db`）：
+  - L263（改前）`latest_qa_event`：`SELECT seq, status, result, summary{structured_col}
+    FROM events WHERE repo_key=? AND issue_id IN (?, ?) AND agent_type='qa' AND {scene_clause}
+    ORDER BY seq DESC LIMIT 1` —— **两个动态维度**：列集（有无 `structured_output`，旧库回退）
+    × 场景谓词（具体 `scene_id=?` / 默认场景 `(scene_id=? OR scene_id='' OR scene_id IS NULL)`）。
+  - L528（改前）`_latest_pr_number`：`SELECT payload FROM events WHERE repo_key=? AND
+    issue_id IN (?, ?) AND event_type IN ('note_hook_pr','pull_request_opened',
+    'pull_request_updated','pull_request_merged') ORDER BY seq DESC LIMIT 1` —— 静态语句。
+  - 同文件其余读路径（`get_issue_scene` / `get_pipeline_config`）早已走 api 侧 `session_store`
+    与 `pipeline_config`（其内部是 owner 原语），本批不动。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增五条具名查询，列序 / 谓词 / 排序 / `LIMIT 1` 与原语句逐字一致，
+    只用 `?` 占位符，无 `%s` / `NOW()` / `ON DUPLICATE` / 反引号：
+    `qa_gate_latest_event_by_scene`、`..._by_scene_text`（四列旧库版）、
+    `qa_gate_latest_event_default_scene`、`..._default_scene_text`、`qa_gate_latest_pr_payload`。
+  - 新增两个薄函数并登记 `__all__`：`qa_gate_latest_event_any(repo_key, issue_tags, scene_id,
+    default_scene=False)`、`qa_gate_latest_pr_payload_any(repo_key, issue_tags)`
+    （体内零 SQL，只调 `read_one_any`；`issue_tags` 是调用方已归一的 `("#N", "N")` 二元组）。
+- 调用点 `qa_gate.py`：两处删掉 `from src.kernel.session_manager import db, db_lock`、
+  游标/commit/`{structured_col}` 拼接，改 `from src.domains.runtime import public as
+  _runtime_public` + owner 原语；`except → log.warning` 的 fail-open 形状原样保留
+  （`_latest_pr_number` 原本就是裸 `return 0` 的 except，未新增 `except: pass`）。
+- 设计取舍：
+  1. **动态性拆成「登记语句 × 布尔选择」**：列集只有一个固定回退、场景只有一个默认合并，
+     4 条语句即可让 SQL 100% 留在 owner 域；不在 owner 侧接受列名/谓词片段参数。
+  2. **旧库列回退下沉到 owner**：`structured_output` 是 `db_setup._ensure_column` 后加的列，
+     老库无此列。回退判断（缺列 → 四列版）是「本域表结构演进」的知识，放 owner 域，
+     调用方只按 `len(row) > 4` 决定是否解析 structured（原实现同样是长度判断）。
+     回退分支用 `log.debug` 显式记录，不写裸 `except: pass`。
+  3. **`issue_id IN (?, ?)` 的两种历史形态留在 SQL 里**：`#N` 与 `N` 双写是历史数据形态，
+     合并成 `OR` 会改变执行计划；参数仍由调用方 `_issue_tags()` 归一后传入，口径不变。
+  4. **事件语义（seq 最大、结论文本判定、fail-open）全留调用方**：owner 只做取数，
+     门禁的「不通过/阻塞/项数汇总」判定与 `annotate_qa_failure` 评论链路不在本域。
+  5. **PR payload 返回原值不解析**：JSON 结构与 `iid → number → pull_request.*` 的优先级
+     是 VCS 平台口径（属 runtime 的 vcs 层，但主叫方已在用），本批只换取数通道。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **QA 门禁整体静默失效**：三库拆分后 api 进程库没有 `events`（视图 0 → 1146），
+     `latest_qa_event` 被 except 吞成 `None` → `qa_gate_check` 判定「无 qa 事件」直接放行，
+     qa 失败的需求仍可关闭 Issue / 合入 PR（正是 Issue #1739 要堵的路径），且只有一条 WARNING。
+  2. **Issue 标注缺 PR 关联**：`_latest_pr_number` 同样 1146 → 恒 0，失败评论里不带 PR 链接，
+     `_pr_link` 分支整体走空，运维无法从评论直达合入请求。
+- 验证（真实退出码）：
+  · `py_compile`（`src/api/qa_gate.py` / `src/domains/runtime/public/__init__.py`）→ **COMPILE_OK**；
+  · `~/burndown/qa_gate_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建 `events` 表 + 独立旧库表，
+    连跑 3 次稳定）→ **ALL qa_gate smoke PASSED (97 checks)**：
+    A 注册面/静态否定（五条语句逐字、四列版=五列版去列、只用 `?`、无 `%s`/`NOW()`/
+    `ON DUPLICATE`/反引号、`__all__` 登记、薄函数体内无内联 SQL、`qa_gate.py` 已无
+    `FROM events` 与 `session_manager`、无 `structured_col` 拼接）；
+    B 原语语义（具体场景取 seq 最大、`#N`/`N` 双形态、场景/仓库/Issue 隔离、
+    `agent_type='qa'` 过滤、五列列序、structured 原值、默认场景合并空串+NULL 并取最大、
+    旧库回退四列且默认场景同样命中、PR payload 只认四种 event_type）；
+    C 调用点端到端（dict 形状与 `status` strip、NULL result/summary 回退空串、
+    structured 仅收 dict（`[]`/坏 JSON → None）、场景未解析/非法编号不查库、
+    查询异常 → None + 一条 WARNING（fail-open）、`default_scene` 布尔透传、
+    PR 编号 `iid > number > pull_request.*` 优先级、非 PR 类/非正数/坏 JSON/空 payload → 0）；
+    D 自有 DSN 伪游标（两条原语只走 `domain=runtime`、语句逐字、参数顺序
+    `(repo_key, "#N", "N", scene)`、缺列回退到四列语句且参数不变、空结果不炸）。
+  · `--update-baseline` → **baseline updated: 20 pairs, 29 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **19 表 / 29 跨域引用 / 20 对**
+    （`events` 消费方 api:3 → api:1、文件 20 → 19）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （runtime 179 funcs + 25 named queries used / 263 funcs + 61 queries registered）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点），运行面证据为 sqlite 烟测。
+- **新基线**：**29 处 / 20 对 / 19 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  `src/api/qa_gate.py` 已清零并退出榜单；下一批首个未 blocked 文件是
+  `src/api/git_repo_api.py`（2 处：`takeover_sessions`/`issue`，均归 runtime），
+  其后是 `src/api/feedback_issue_converter.py`（2 处：`user_feedback`，归 mgmt）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

@@ -248,32 +248,13 @@ def latest_qa_event(repo_key: str, issue_number) -> dict | None:
         # 场景解析异常 → 放行，不按 default 流水线匹配历史事件
         log.info(f"qa gate: scene unresolved, skip latest event {repo_key}/#{issue_number}")
         return None
-    if _scene_id == "default":
-        # 仓库默认/未绑定场景：历史事件的 scene_id 可能为空串或 "default"
-        _scene_clause = "(scene_id=? OR scene_id='' OR scene_id IS NULL)"
-        _scene_arg = "default"
-    else:
-        _scene_clause = "scene_id=?"
-        _scene_arg = _scene_id
+    # 仓库默认/未绑定场景：历史事件的 scene_id 可能为空串或 "default"
+    _default_scene = _scene_id == "default"
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.domains.runtime import public as _runtime_public
 
-        with db_lock:
-            c = db.cursor()
-            _base_sql = ("SELECT seq, status, result, summary"
-                         "{structured_col} FROM events "
-                         "WHERE repo_key=? AND issue_id IN (?, ?) AND agent_type='qa' "
-                         f"AND {_scene_clause} "
-                         "ORDER BY seq DESC LIMIT 1")
-            try:
-                # 优先读取结构化产出（archive.output.conclusion / next_step）
-                c.execute(_base_sql.format(structured_col=", structured_output"),
-                          (repo_key, _tags[0], _tags[1], _scene_arg))
-            except Exception:
-                # 旧库无 structured_output 列时回退纯文本判定
-                c.execute(_base_sql.format(structured_col=""),
-                          (repo_key, _tags[0], _tags[1], _scene_arg))
-            _row = c.fetchone()
+        _row = _runtime_public.qa_gate_latest_event_any(
+            repo_key, _tags, _scene_id, default_scene=_default_scene)
         if not _row:
             return None
         _structured = None
@@ -520,20 +501,12 @@ def _latest_pr_number(repo_key: str, issue_number) -> int:
     if not _tags:
         return 0
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.domains.runtime import public as _runtime_public
 
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT payload FROM events WHERE repo_key=? AND issue_id IN (?, ?) "
-                "AND event_type IN ('note_hook_pr','pull_request_opened',"
-                "'pull_request_updated','pull_request_merged') "
-                "ORDER BY seq DESC LIMIT 1",
-                (repo_key, _tags[0], _tags[1]))
-            _row = c.fetchone()
-        if not _row or not _row[0]:
+        _payload = _runtime_public.qa_gate_latest_pr_payload_any(repo_key, _tags)
+        if not _payload:
             return 0
-        _p = json.loads(_row[0]) if isinstance(_row[0], str) else (_row[0] or {})
+        _p = json.loads(_payload) if isinstance(_payload, str) else (_payload or {})
         _oa = (_p.get("object_attributes") or {}) if isinstance(_p, dict) else {}
         _pr = _p.get("pull_request") or {} if isinstance(_p, dict) else {}
         for _v in (_oa.get("iid"), _oa.get("number"), _pr.get("number"), _pr.get("iid")):

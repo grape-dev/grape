@@ -1517,7 +1517,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # 总览聚合基集（insight/observability/overview.py；agent_tasks / runtime_credentials 本域）
            "obs_overview_task_rows_any", "obs_overview_credential_status_rows_any",
            # 场景节点技能 scope 判定（src/api/scene_skill_scope.py）
-           "skill_agent_type_by_priority_any", "skill_rebind_candidate_rows_any"]
+           "skill_agent_type_by_priority_any", "skill_rebind_candidate_rows_any",
+           # QA 结论门禁读口（src/api/qa_gate.py；events 本域）
+           "qa_gate_latest_event_any", "qa_gate_latest_pr_payload_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2518,6 +2520,36 @@ _ANY_QUERIES: dict[str, str] = {
         " FROM runtime_credentials rc"
         " LEFT JOIN runtime_health_scores hs ON hs.runtime_id = rc.id"
         " WHERE rc.status != 'revoked'"),
+    # ── QA 结论门禁读口（api/qa_gate.py）─────────────────────────────────────
+    # 原实现在 api 进程主库上拼 `{structured_col}` 与场景谓词后直发 events；三库拆分后
+    # api 库没有 events（视图 0 → 1146），`latest_qa_event` 恒 None → 门禁整体 fail-open
+    # 失效（qa 失败也能关闭/合入）。两个动态维度（列集 / 场景回退）各登记一条语句，
+    # 调用方不再拼 SQL；列序与原查询逐字一致（调用方按下标解包）。
+    "qa_gate_latest_event_by_scene": (
+        "SELECT seq, status, result, summary, structured_output FROM events "
+        "WHERE repo_key=? AND issue_id IN (?, ?) AND agent_type='qa' "
+        "AND scene_id=? ORDER BY seq DESC LIMIT 1"),
+    "qa_gate_latest_event_by_scene_text": (
+        "SELECT seq, status, result, summary FROM events "
+        "WHERE repo_key=? AND issue_id IN (?, ?) AND agent_type='qa' "
+        "AND scene_id=? ORDER BY seq DESC LIMIT 1"),
+    # 仓库默认/未绑定场景：历史事件的 scene_id 可能是空串或 NULL，一并命中。
+    "qa_gate_latest_event_default_scene": (
+        "SELECT seq, status, result, summary, structured_output FROM events "
+        "WHERE repo_key=? AND issue_id IN (?, ?) AND agent_type='qa' "
+        "AND (scene_id=? OR scene_id='' OR scene_id IS NULL) "
+        "ORDER BY seq DESC LIMIT 1"),
+    "qa_gate_latest_event_default_scene_text": (
+        "SELECT seq, status, result, summary FROM events "
+        "WHERE repo_key=? AND issue_id IN (?, ?) AND agent_type='qa' "
+        "AND (scene_id=? OR scene_id='' OR scene_id IS NULL) "
+        "ORDER BY seq DESC LIMIT 1"),
+    # 关联 PR 反查：payload 原值返回（JSON 解析与编号提取口径仍在调用方）。
+    "qa_gate_latest_pr_payload": (
+        "SELECT payload FROM events WHERE repo_key=? AND issue_id IN (?, ?) "
+        "AND event_type IN ('note_hook_pr','pull_request_opened',"
+        "'pull_request_updated','pull_request_merged') "
+        "ORDER BY seq DESC LIMIT 1"),
 }
 
 
@@ -2583,6 +2615,37 @@ def exec_any(name: str, params: tuple = ()) -> int:
     with _any_cursor(write=True) as c:
         cur = c.execute(_any_sql(name), params)
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+# ── QA 结论门禁（api/qa_gate.py）读口 ──────────────────────────────────────
+# 只做「取数 + 旧库列回退」，事件语义（seq 最大、结论文本判定、fail-open）仍留调用方。
+
+def qa_gate_latest_event_any(repo_key: str, issue_tags, scene_id: str,
+                            default_scene: bool = False) -> tuple[Any, ...] | None:
+    """该 Issue 同一流水线最新一条 qa 事件元组（5 列），无记录/异常回 None。
+
+    列序：``seq, status, result, summary, structured_output``（与改造前逐字一致）。
+    ``default_scene=True`` 用于仓库默认/未绑定场景：scene_id 为空串或 NULL 的历史
+    事件同样命中（判定口径属调用方的流水线解析，本函数只按布尔选择语句）。
+    旧库无 ``structured_output`` 列时回退 4 列版本，structured 位置由调用方按长度判断。
+    """
+    _name = ("qa_gate_latest_event_default_scene" if default_scene
+             else "qa_gate_latest_event_by_scene")
+    _params = (repo_key, issue_tags[0], issue_tags[1], scene_id)
+    try:
+        _row = read_one_any(_name, _params)
+    except Exception as _e:
+        # 旧库（迁移前的 events）无 structured_output 列：退回纯文本四列判定。
+        log.debug(f"qa gate: structured_output column unavailable, use text columns: {_e}")
+        _row = read_one_any(_name + "_text", _params)
+    return tuple(_row) if _row is not None else None
+
+
+def qa_gate_latest_pr_payload_any(repo_key: str, issue_tags) -> Any | None:
+    """该 Issue 最近一条 PR 类事件的 payload 原值（不解析 JSON）；无记录回 None。"""
+    _row = read_one_any("qa_gate_latest_pr_payload",
+                        (repo_key, issue_tags[0], issue_tags[1]))
+    return _row[0] if _row else None
 
 
 # ── insight 数据缺失探测（observability/gap.py）的基集读口 ──
