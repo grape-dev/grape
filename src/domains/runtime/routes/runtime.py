@@ -314,25 +314,19 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
         cred_org_id = (cred_row[4] or "") if cred_row else ""
         if cred_scope == "user" and cred_row and cred_row[1]:
             # D32-补丁：owner_id 与 grape_accounts.id 对齐（按用户名）
+            # 账号表归 mgmt：走 owner 域薄原语（任意拓扑同一份语句）。原实现是
+            # 「mgmt lib → foreign-only lib → 本进程库直发」三段兜底，后两段的 SQL
+            # 正是跨域引用来源，且三库拓扑下必 1146（被下面的 except 吞成「owner_id
+            # 保持凭据行原值」）。游标见 `account_id_by_username_first_any` 的 `cursor`
+            # 语义：单库/测试拓扑复用这里的 `c`，自有 DSN 忽略它走 mgmt 连接。
             try:
-                from src.kernel.domain_read import mgmt_lib as _mgmt_lib_acc2
-                _mg_acc2 = _mgmt_lib_acc2()
-                if _mg_acc2 is not None:
-                    _aid = _mg_acc2.get_account_id_by_username(cred_row[1])
-                    if _aid:
-                        owner_id = str(_aid)
-                else:
-                    from src.kernel.domain_read import mgmt_lib as _mg_lib_e047af_f
-                    _mg_lib_e047af = _mg_lib_e047af_f(foreign_only=True)
-                    if _mg_lib_e047af is not None:
-                        urow = _mg_lib_e047af.read_one("grape_accounts_e047af", (cred_row[1],))
-                    else:
-                        c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) LIMIT 1", (cred_row[1],))
-                        urow = c.fetchone()
-                    if urow:
-                        owner_id = str(urow[0])
-            except Exception:
-                pass
+                from src.domains.mgmt import public as _mgmt_public_acc
+                _aid = _mgmt_public_acc.account_id_by_username_first_any(cred_row[1], cursor=c)
+                if _aid:
+                    owner_id = _aid
+            except Exception as _acc_e:
+                # 账号域不可用不阻断注册主链路（owner_id 保持凭据行原值），但要留痕
+                log.debug(f"register owner_id align by username skipped ({cred_row[1]}): {_acc_e}")
         # local_skills：per-engine skill 列表，按 engine name 匹配 runtime 行
         skills_by_name = {}
         for ls in body.local_skills or []:

@@ -770,6 +770,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # baseline 知识文件行 / 账号 id（runtime/engine/service.py；任意拓扑）
            "baseline_knowledge_files_any",
            "account_id_by_username_valid_any", "account_id_by_username_ci_any",
+           "account_id_by_username_first_any",
            # OAuth 身份原值（api/deps.py 取 token / 预刷新判定；任意拓扑）
            "oauth_token_status_any", "token_expires_at_any", "stored_access_token_any",
            "mark_external_identity_expired_any",
@@ -1960,6 +1961,12 @@ _ANY_QUERIES: dict[str, str] = {
     # `ci`：逐字照抄 d0ac07（无 LIMIT、无 id 过滤，首行由 fetchone() 语义决定，
     # 收紧会改变 claim 的 user scope 过滤结果）。
     "account_id_by_username_ci": "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?)",
+    # `ci_limit1`：runtime 注册回填 owner_id 的兜底句（`SELECT id FROM grape_accounts
+    # WHERE LOWER(username)=LOWER(?) LIMIT 1`）逐字上移——那句原先是 runtime 进程主库
+    # 上的跨域 SQL。与上面的 `ci` **不合并**：`LIMIT 1` 是原语句的一部分（同表同名
+    # 多行时首行即答案），收紧/放宽都会改「注册回填拿到哪一行」的口径。
+    "account_id_by_username_ci_limit1": (
+        "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) LIMIT 1"),
     # baseline 知识文件行（project-info 的 OBS 分支）：原 `list_baseline_knowledge_files` 是
     # 只对自有 DSN 可用的 `%s` 查法，单库拓扑走调用方本地兜底 SQL（跨域引用来源）；
     # 列序 / 谓词 / ORDER BY id DESC 与原语句逐字一致。
@@ -2663,6 +2670,32 @@ def account_id_by_username_ci_any(username: str, cursor: Any = None) -> Any | No
         c.execute(_any_sql("account_id_by_username_ci"), (username,))
         row = c.fetchone()
     return row[0] if row else None
+
+
+def account_id_by_username_first_any(username: str, cursor: Any = None) -> str | None:
+    """用户名 → 账号 id（任意拓扑，LOWER 双侧 + `LIMIT 1`）；无此账号返回 ``None``。
+
+    逐字照抄 runtime 注册回填的兜底句 `SELECT id FROM grape_accounts WHERE
+    LOWER(username)=LOWER(?) LIMIT 1`（`routes/runtime.py` 的 D32 补丁：user scope
+    凭据注册时把 `owner_id` 对齐到 `grape_accounts.id`）。原实现是「mgmt lib →
+    foreign-only lib → 进程主库直发」三段兜底，后两段在三库拓扑下必 1146（进程库
+    没有该表、视图 0），整段被外层 `except` 吞成「owner_id 保持凭据行原值」——
+    个人引擎的 scope 判定因此按错 owner 落库。上移后两条拓扑跑同一份语句。
+
+    与 `account_id_by_username_ci_any` 的区别只有 `LIMIT 1`（原语句自带，别合）。
+    返回口径按 `get_account_id_by_username`（lib 侧主路径）：**id 为空/`None` 视为
+    未命中**返回 ``None``，由调用方决定回退值（不把空串当账号写进 owner_id）。
+    `cursor` 语义同 `account_id_by_username_ci_any`：单库 / 测试拓扑复用它（调用方
+    库即本域库），自有 DSN 忽略、走 mgmt 连接。
+    """
+    if not username:
+        return None
+    with _owner_cursor(cursor) as c:
+        c.execute(_any_sql("account_id_by_username_ci_limit1"), (username,))
+        row = c.fetchone()
+    if not row or row[0] in (None, ""):
+        return None
+    return str(row[0])
 
 
 # ---------- 代发内容台账（kernel/outbound_ledger 调用；任意拓扑） ----------

@@ -5322,6 +5322,78 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/domains/runtime/routes/runtime.py`（1 处：`grape_accounts`，归 mgmt）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
 
+### 7.47 runtime 注册的 owner_id 账号对齐下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/runtime/routes/runtime.py` **1 处 → 0**（单轮做完，1 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`grape_accounts`（归 **mgmt**，`grape_mgmt_db`）× 1：
+  L330（改前）在 `runtime_register()` 的 D32 回填段——
+  `SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) LIMIT 1`：user scope 凭据注册时把
+  `owner_id` 对齐到 `grape_accounts.id`（个人引擎的 scope 判定/选机靠它）。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增具名查询 `account_id_by_username_ci_limit1`（L1968），语句与原 SQL **逐字一致**
+    （`LOWER(username)=LOWER(?)`、`LIMIT 1`、列序单列 `id`；只用 `?` 方言面，无 `%s` / `NOW()` /
+    `ON DUPLICATE` / 反引号）。
+  - 新增薄函数 `account_id_by_username_first_any(username, cursor=None) -> str | None`（L2675）：
+    体内零 SQL，执行具名语句 + `str()` 归一 + 「id 空视为未命中」；`cursor` 语义同
+    `account_id_by_username_ci_any`（单库/测试拓扑复用调用方游标，自有 DSN 忽略它走 mgmt 连接）。
+  - `__all__` 登记 `account_id_by_username_first_any`（跨域消费方一眼可查）。
+- 调用点 `runtime.py`：**整段三段兜底上移**，不是只换最后一句。
+  原实现「`mgmt_lib()` → `mgmt_lib(foreign_only=True)` → 本进程库直发」，后两段是同一件事的两个副本；
+  现改成函数内 `from src.domains.mgmt import public as _mgmt_public_acc` →
+  `account_id_by_username_first_any(cred_row[1], cursor=c)`，并把 `except Exception: pass` 换成
+  `except Exception as _acc_e: log.debug(...)`。调用方仍在 `with db_lock:` 里，事务/锁形状不变。
+- 设计取舍：
+  1. **不复用 `account_id_by_username_ci`**：那条是 `d0ac07` 的逐字照抄（**无 LIMIT**），消费方
+     `claim_by_tag` 依赖「不加 LIMIT」。本处原句自带 `LIMIT 1`，合并任一边都会改另一边的口径；
+     两者在 `_ANY_QUERIES` 里并存，注释写明差异。
+  2. **`LIMIT 1` 当防御保留**：库上有 `uq_grape_accounts_username_lower`（大小写折叠唯一），
+     第二行本就插不进去；保留 LIMIT 是「唯一索引若被去掉也不会抛多行」，不改行为。
+  3. **返回口径按 lib 侧主路径**（`get_account_id_by_username`）：id 为空/`None` 视为未命中返回 `None`，
+     调用方只在真命中时覆盖 `owner_id`。原兜底句把 `str(urow[0])` 无条件写回（`id=''` 会写成 `''`），
+     两分支行为本来就不一致——三库拓扑下线上跑的是 lib 分支，故以主路径为准，并把该差异写进烟测 C4。
+  4. **不做 `0 → None` 归一、不新增写原语**：本处纯读，写仍在 runtime 本域（`agent_runtimes` upsert），
+     无跨域事务需求，不碰 `_any_tx()` / outbox。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **个人引擎 owner 对齐在三库拓扑下静默失效**：runtime 进程库没有 `grape_accounts`（视图 0 → 1146），
+     三段兜底里 lib 若不可用就落本进程库 SQL → 被 `except: pass` 吞成「`owner_id` 保持凭据行原值
+     （`''`）」。个人 scope 的引擎按空 owner 落库，`set_chat_config` / Engines 视图的
+     `scope + owner_id` 判定选不中该设备（个人引擎永远不可用），且日志里没有任何线索。
+  2. **同一判定按拓扑改答案**：lib 命中 → 账号 UUID；lib 未命中 → 本地 SQL（结论相同但走错库）。
+     接口化后两条拓扑跑同一份语句，`cursor` 参数让单库拓扑仍复用调用方事务快照。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/runtime/routes/runtime.py` / `src/domains/mgmt/public/__init__.py`）→
+    **COMPILE_OK**；
+  · `~/burndown/runtime_owner_align_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，98 张真 DDL 单库拓扑，
+    连跑 2 次稳定）→ **ALL runtime_owner_align smoke PASSED (80 checks)**：
+    A 注册面/静态否定（语句逐字、无 `%s`/`NOW()`/`ON DUPLICATE`/反引号、`ci` 与 `ci_limit1` 并存未合并、
+    `__all__` 登记、AST 查薄函数代码零 SQL、调用点无 `grape_accounts` 的 DML、不再 import
+    `domain_read`、旧 `grape_accounts_e047af` 已去、失败路径有 `log.debug`、基线 14 → 13）；
+    B 原语语义（小写/大写入参均命中、空白/空串/None → `None`、无此账号 → `None`、`str` 归一、
+    数值 id → `'12345'`、空 id → `None`、**停用账号仍命中**（原 SQL 无 `status` 谓词）、
+    `lower(username)` 唯一索引存在、重复调用稳定、读不写库）；
+    C 调用点端到端（真 `/api/runtime/register` × 7 场景：账号在 → `owner_id='acc-1'`、大小写不同仍对齐、
+    账号不在 → 保持 `''`、`id=''` → 未命中、停用账号仍对齐、owner 域抛异常 → 注册仍 200 且
+    `log.debug` 带原因、恢复后重新注册回填）；
+    D 自有 DSN 伪游标（只走 `domain=mgmt`、语句逐字、参数 `('alice',)`、调用方游标零执行、
+    空用户名连库都不碰）；单库复用调用方游标（一次执行、参数逐字）。
+  · `--update-baseline` → **baseline updated: 15 pairs, 21 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **15 表 / 21 跨域引用 / 15 对**
+    （`grape_accounts` 的 runtime 消费方 2 → 1，消费文件 17 → 16；该表退出跨域对）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （mgmt 187 funcs + 4 named queries used / 270 funcs + 31 queries registered）。
+    named queries used 5 → 4 是因为 `grape_accounts_e047af` 不再被消费；该 `%s` 条目属 owner 侧
+    跨进程 lib 注册面，删除属另一件事（同 7.46 对 `managed_repos_e9a379` 的处理）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新 action 名），运行面证据为 sqlite 烟测。
+- **新基线**：**21 处 / 15 对 / 15 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  `src/domains/runtime/routes/runtime.py` 已清零并退出榜单；下一批首个未 blocked 文件是
+  `src/domains/runtime/routes/issues.py`（1 处）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
