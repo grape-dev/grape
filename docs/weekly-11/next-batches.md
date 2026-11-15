@@ -1,6 +1,6 @@
 # 下一批：跨域收口作业单
 
-总量 13 处 / 9 个文件；下表取前 10 个。
+总量 13 处 / 9 个文件；下表取前 3 个。
 
 ## ⛔ blocked（口径已确立，不要按处数硬拿）
 - `src/kernel/prompt_builder.py`：3 处是 agent 提示文案（f-string 里的说明文本，本进程不执行，静态正则才计到）；`tests/runtime/test_issue_372_unified_mapping_github.py` 按源文本断言该段语义；改写前必须先给 agent 一个合法的映射写通道。口径：**不为掉数字改文案**（台账 2026-11-14）
@@ -18,30 +18,6 @@
 
 ## src/domains/insight/observability/sample_lease.py（insight 域，1 处）
 - `distributed_locks`（归 runtime）× 1：行 91
-  - runtime public 已登记 234 条具名查询
-
-## src/domains/contracts/local/mgmt_local.py（contracts 域，1 处）
-- `grape_t_repo_credentials`（归 insight）× 1：行 70
-  - insight public 无具名查询，需新增
-
-## src/api/pipeline_executor.py（api 域，1 处）
-- `agent_runtimes`（归 runtime）× 1：行 226
-  - runtime public 已登记 234 条具名查询
-
-## src/api/middleware.py（api 域，1 处）
-- `api_latency_log`（归 insight）× 1：行 172
-  - insight public 无具名查询，需新增
-
-## src/api/merge_gate.py（api 域，1 处）
-- `grape_t_merge_gate_log`（归 insight）× 1：行 464
-  - insight public 无具名查询，需新增
-
-## src/api/event_archive.py（api 域，1 处）
-- `events`（归 runtime）× 1：行 139
-  - runtime public 已登记 234 条具名查询
-
-## src/api/a2a_dispatch.py（api 域，1 处）
-- `agent_runtimes`（归 runtime）× 1：行 247
   - runtime public 已登记 234 条具名查询
 
 ## 每批验收口径（不要跳）
