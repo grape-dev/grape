@@ -474,8 +474,9 @@ class TestSyncOfficialScenes:
                     zf.extractall(tmp)
                 return os.path.join(tmp, "grape-skills-dev")
 
-            # mock DB：fetchone 第一次返回 None（场景不存在→INSERT 路径），
-            # 第二次返回 (0,) 给 _init_featured_scenes_if_empty 的 COUNT 查询
+            # mock DB：fetchone 第一次返回 None（场景不存在→INSERT 路径）。
+            # 写入已归位到 mgmt public 的任意拓扑原语，句柄取自进程主库（session_manager.db），
+            # 因此这里必须 mock 内核侧的句柄，而不是 scene_sync 自己的 db 别名。
             mock_cursor = MagicMock()
             mock_cursor.fetchone = MagicMock(side_effect=[None, (0,)])
             mock_cursor.fetchall = MagicMock(return_value=[])
@@ -489,11 +490,11 @@ class TestSyncOfficialScenes:
                     with patch("src.domains.runtime.storage.scene_sync._refresh_cat_cache"):
                         with patch.dict("src.domains.runtime.storage.scene_sync._cat_cache", {"general": 1}, clear=False):
                             with patch("src.domains.runtime.storage.scene_sync._check_skills_exist", return_value=[]):
-                                with patch("src.domains.runtime.storage.scene_sync.db_lock"):
-                                    with patch("src.domains.runtime.storage.scene_sync.db", mock_db):
-                                        with patch("src.domains.runtime.storage.scene_sync._rebuild_scene_skill_ref_by_name"):
-                                            with patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty"):
-                                                result = await sync_official_scenes()
+                                with patch("src.kernel.session_manager.db_lock"), \
+                                        patch("src.kernel.session_manager.db", mock_db):
+                                    with patch("src.domains.runtime.storage.scene_sync._rebuild_scene_skill_ref_by_name"):
+                                        with patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty"):
+                                            result = await sync_official_scenes()
 
             # 验证：INSERT 路径被触发（execute 调用中含 INSERT 关键字）
             execute_calls = [str(call) for call in mock_cursor.execute.call_args_list]
@@ -552,11 +553,11 @@ class TestSyncOfficialScenes:
                     with patch("src.domains.runtime.storage.scene_sync._refresh_cat_cache"):
                         with patch.dict("src.domains.runtime.storage.scene_sync._cat_cache", {"general": 1}, clear=False):
                             with patch("src.domains.runtime.storage.scene_sync._check_skills_exist", return_value=[]):
-                                with patch("src.domains.runtime.storage.scene_sync.db_lock"):
-                                    with patch("src.domains.runtime.storage.scene_sync.db", mock_db):
-                                        with patch("src.domains.runtime.storage.scene_sync._rebuild_scene_skill_ref_by_name"):
-                                            with patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty"):
-                                                await sync_official_scenes()
+                                with patch("src.kernel.session_manager.db_lock"), \
+                                        patch("src.kernel.session_manager.db", mock_db):
+                                    with patch("src.domains.runtime.storage.scene_sync._rebuild_scene_skill_ref_by_name"):
+                                        with patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty"):
+                                            await sync_official_scenes()
 
             # 找到 UPDATE 调用
             update_call = None

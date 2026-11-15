@@ -656,20 +656,20 @@ def _is_login_whitelist_enabled() -> bool:
             result = val.lower() in ("true", "1", "yes")
         else:
             # meta 未设置——兼容旧部署：表有数据则隐式启用
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                count = c.execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
-                if count > 0:
-                    log.warning(
-                        "login_whitelist has %d entries but meta 'login_whitelist_enabled' is not set. "
-                        "Falling back to legacy implicit enable. "
-                        "Set meta 'login_whitelist_enabled=true' to explicitly enable, "
-                        "or 'false' to disable.", count
-                    )
-                    result = True
-                else:
-                    result = False
+            # 表归 mgmt 域：读语句在 `src.domains.mgmt.public`（任意拓扑原语），
+            # kernel 侧不再持有该表的 SQL（三库独立后进程库没有此表）。
+            from src.domains.mgmt.public import login_whitelist_count
+            count = login_whitelist_count()
+            if count > 0:
+                log.warning(
+                    "login_whitelist has %d entries but meta 'login_whitelist_enabled' is not set. "
+                    "Falling back to legacy implicit enable. "
+                    "Set meta 'login_whitelist_enabled=true' to explicitly enable, "
+                    "or 'false' to disable.", count
+                )
+                result = True
+            else:
+                result = False
     except Exception:
         result = False  # 异常时默认关闭（不拦截）
     _WL_ENABLED_CACHE = result
@@ -720,38 +720,28 @@ def is_user_allowed(provider: str, login: str) -> bool:
         log.warning(f"is_user_allowed: invalid provider='{provider}'")
         return False
     # 查 DB——行式新行优先，老列兜底
+    # 表归 mgmt 域：三条语句都在 `src.domains.mgmt.public`（任意拓扑原语）。
+    # 老列的列名由 owner 域从 provider 派生并过白名单，kernel 不再拼列名/SQL。
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            # fail-closed（2026-11-12 拍板，取代原 P2-6 全放行）：
-            # 开关已启用而表空 = 未配置任何人 → 拒绝所有 OAuth 登录。
-            # 管理台走独立密码链（admin_accounts），可登入即时补条目，不构成不可逆锁死。
-            count = c.execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
-            if count == 0:
-                log.error(
-                    "login_whitelist_enabled=true but table is empty — denying all OAuth logins (fail-closed)"
-                )
-                return False
-            # 1) 新行查询（行式：provider + username）
-            row = c.execute(
-                "SELECT 1 FROM login_whitelist WHERE provider=? AND LOWER(username)=LOWER(?)",
-                (provider, login),
-            ).fetchone()
-            if row is not None:
-                return True
-            # 2) 老列兜底（列名由 provider key 派生）
-            try:
-                row = c.execute(
-                    f"SELECT 1 FROM login_whitelist WHERE LOWER({provider}_username)=LOWER(?)",
-                    (login,),
-                ).fetchone()
-                return row is not None
-            except Exception as _col_err:
-                _msg = str(_col_err).lower()
-                if "no such column" in _msg or "unknown column" in _msg:
-                    return False  # 该渠道无老列=无老数据
-                raise  # 真 DB 异常 → 外层降级文件
+        from src.domains.mgmt.public import (
+            login_whitelist_count,
+            login_whitelist_legacy_column_match,
+            login_whitelist_row_match,
+        )
+        # fail-closed（2026-11-12 拍板，取代原 P2-6 全放行）：
+        # 开关已启用而表空 = 未配置任何人 → 拒绝所有 OAuth 登录。
+        # 管理台走独立密码链（admin_accounts），可登入即时补条目，不构成不可逆锁死。
+        count = login_whitelist_count()
+        if count == 0:
+            log.error(
+                "login_whitelist_enabled=true but table is empty — denying all OAuth logins (fail-closed)"
+            )
+            return False
+        # 1) 新行查询（行式：provider + username）
+        if login_whitelist_row_match(provider, login):
+            return True
+        # 2) 老列兜底（列名由 provider 派生；物理列不存在 = 该渠道无老数据）
+        return login_whitelist_legacy_column_match(provider, login)
     except Exception:
         pass  # DB 不可用，降级文件
     # 降级：读文件（fail-closed：开关已启用时，文件缺失/空/损坏一律拒绝）

@@ -33,17 +33,11 @@ def task_creator_account(user_id) -> str:
     if not uid:
         return ""
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import mgmt_lib as _mg_lib_e2eb04_f
-            _mg_lib_e2eb04 = _mg_lib_e2eb04_f(foreign_only=True)
-            if _mg_lib_e2eb04 is not None:
-                row = _mg_lib_e2eb04.read_one("user_accounts_e2eb04", (uid,))
-            else:
-                c.execute("SELECT username FROM user_accounts WHERE id=?", (uid,))
-                row = c.fetchone()
-        return normalize_account(row[0] if row else "")
+        # user_accounts 归 mgmt：语句只留 mgmt public 一份（`user_accounts_*` 这个
+        # 本地兜底句已下线）。失败保留原 fail-open 口径 —— 派生不出创建者就留空并告警，
+        # 不让一次跨域读失败打断 autopilot 任务本身。
+        from src.domains.mgmt import public as _mgmt_public_account
+        return normalize_account(_mgmt_public_account.user_account_username_by_id_any(uid))
     except Exception as e:
         log.warning(f"ACCOUNT_TASK_CREATOR_LOOKUP_FAILED user_id={uid}: {e}")
         return ""

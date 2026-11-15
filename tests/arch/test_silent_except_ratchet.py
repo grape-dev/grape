@@ -139,8 +139,8 @@ EXEMPT_FILES: dict = {
     # 重锚 weekly-10 后由基线下调转为显式登记；旧场景表 user_repos
     # 反查吞错已改 log.warning（本提交）。
     ('domains/mgmt/user/legacy_column_migrations.py', 'except Exception:'): 5,
-    # 幂等补列/回填，失败=目标形态已达成
-    ('domains/mgmt/user/credentials_backfill_n1.py', 'except Exception:'): 2,
+    # 幂等补列/回填，失败=目标形态已达成（两条 ALTER 合并进一个循环后只剩 1 处）
+    ('domains/mgmt/user/credentials_backfill_n1.py', 'except Exception:'): 1,
     # duplicate column 幂等语义（行内注释已声明）；+1 = PR#1318 白名单改名联动
     # （渠道无老列的新装/未声明列存量跳过该渠道 UPDATE，fail-open 刻意）
     ('domains/mgmt/auth/grape_account_db.py', 'except Exception:'): 5,
@@ -153,18 +153,15 @@ EXEMPT_FILES: dict = {
     # session idle 更新吞错已改 log.warning（本提交）
     ('api/main.py', 'except Exception:'): 2,
     # /metrics 背景采集失败留空
-    ('api/issues_center.py', 'except Exception:'): 1,
+    ('domains/runtime/issues_center.py', 'except Exception:'): 1,
     # 场景名缓存解析防御
     ('domains/mgmt/routes/settings.py', 'except Exception:'): 1,
     # 规则已删除，重载失败不阻断响应
     ('domains/runtime/engine/repogit.py', 'except Exception:'): 1,
     # worktree 清理尽力而为（后续 rmtree ignore_errors 同语义）
     ('domains/runtime/vcs/api_client.py', 'except Exception:'): 2,
-    # N4-p2 非阻塞队列满/空丢弃（审计旁路）
+    # N4-p2 非阻塞队列满/空丢弃（审计旁路）；事件循环未运行时跳过注册（启动竞态合法形态）
     ('domains/runtime/routes/chat.py', 'except RuntimeError:'): 1,
-    # 事件循环未运行时跳过注册（启动竞态合法形态）
-    ('domains/mgmt/admin/routes.py', 'except Exception:'): 1,
-    # 旧渠道卡存量 JSON 解析防御，失败仅少合并旧卡
 
     # ── 原有登记 ──
     ('domains/runtime/vcs/providers/__init__.py', 'except Exception:'): 1,

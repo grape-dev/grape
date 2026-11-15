@@ -1,7 +1,8 @@
 """Webhook 事件 action 过滤规则（Issue #49）：可配置的 L1 准入判定。
 
-规则存 DB 表 `event_action_filter`（db_setup.py `_EVENT_ACTION_FILTER_DDL`），
-run_pipeline L1 命中时调用本模块判定事件是否有效/副作用短路/过滤。
+规则存 DB 表 `event_action_filter`（DDL 在 `src/domains/mgmt/schema_ddl.py`，表归 mgmt 域，
+读口只走 `mgmt.public.event_action_filter_enabled_rows()`），run_pipeline L1 命中时调用本模块
+判定事件是否有效/副作用短路/过滤。
 
 多 VCS 扩展（Issue #49 multi-vcs）：规则支持 vcs_source 维度，
 平台专属规则优先匹配，通用规则（vcs_source=''）作为 fallback。
@@ -21,57 +22,42 @@ _RULES_TTL = 30.0  # 30s 内复用缓存，热生效延迟 ≤30s
 
 
 def _load_from_db():
-    """从 event_action_filter 表加载启用规则为 {(vcs_source, event_type): {action: rule}}。"""
-    from src.kernel.session_manager import db, db_lock
+    """从 event_action_filter 表加载启用规则为 {(vcs_source, event_type): {action: rule}}。
+
+    表归 mgmt 域，读口只有 `mgmt.public.event_action_filter_enabled_rows()` 一份：
+    任意拓扑（自有 DSN → mgmt 连接；单库 / 测试 → 进程主库）跑同一份 SQL，
+    本模块不再持进程库句柄、不再拼 SQL、也不再靠 PRAGMA 探列。
+    """
+    from src.domains.mgmt import public as _mgmt_public  # noqa: PLC0415 - 延迟导入避免 api 顶层拉域模块
+
     rules = {}
     try:
-        with db_lock:
-            c = db.cursor()
-            try:
-                cols = [r[1] for r in c.execute("PRAGMA table_info(event_action_filter)").fetchall()]
-            except Exception:
-                cols = []
-            _has_block = "block_changes" in cols
-            _has_vcs = "vcs_source" in cols
+        rows = _mgmt_public.event_action_filter_enabled_rows()
+        for r in rows:
+            evt, act, allow = r[0], r[1], r[2]
+            actor = r[3] or "any"
+            req = r[4] or ""
+            block = r[5] or ""
+            se = r[6] or ""
+            vcs = (r[7] or "") if len(r) > 7 else ""
 
-            if _has_block and _has_vcs:
-                c.execute(
-                    "SELECT event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, vcs_source "
-                    "FROM event_action_filter WHERE enabled=1 ORDER BY priority, id")
-            elif _has_block:
-                c.execute(
-                    "SELECT event_type, action, allow, actor, require_changes, block_changes, handle_side_effect, '' "
-                    "FROM event_action_filter WHERE enabled=1 ORDER BY priority, id")
-            else:
-                c.execute(
-                    "SELECT event_type, action, allow, actor, require_changes, '', handle_side_effect, '' "
-                    "FROM event_action_filter WHERE enabled=1 ORDER BY priority, id")
+            def _parse(s):
+                if not s:
+                    return []
+                try:
+                    v = json.loads(s)
+                    return v if isinstance(v, list) else [s]
+                except Exception:
+                    return [s]
 
-            for r in c.fetchall():
-                evt, act, allow = r[0], r[1], r[2]
-                actor = r[3] or "any"
-                req = r[4] or ""
-                block = r[5] or ""
-                se = r[6] or ""
-                vcs = r[7] or "" if len(r) > 7 else ""
-
-                def _parse(s):
-                    if not s:
-                        return []
-                    try:
-                        v = json.loads(s)
-                        return v if isinstance(v, list) else [s]
-                    except Exception:
-                        return [s]
-
-                key = (vcs, evt)
-                rules.setdefault(key, {})[act] = {
-                    "allow": allow,
-                    "actor": actor,
-                    "require_changes": _parse(req),
-                    "block_changes": _parse(block),
-                    "handle_side_effect": se,
-                }
+            key = (vcs, evt)
+            rules.setdefault(key, {})[act] = {
+                "allow": allow,
+                "actor": actor,
+                "require_changes": _parse(req),
+                "block_changes": _parse(block),
+                "handle_side_effect": se,
+            }
     except Exception as e:
         log.warning(f"event_action_filter load failed: {e}")
     return rules

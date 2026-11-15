@@ -23,6 +23,12 @@ import threading
 import time
 
 from src.kernel import session_manager
+
+# gsb_provider_route 归 mgmt 域：任一进程读路由配置都必须打到 owner 库，
+# 否则三库模式下非 mgmt 进程会得到 1146（表不在本域库里）。
+from src.kernel.owner_db import owner_db as _owner_db
+_owner = _owner_db("mgmt")
+_owner_lock = session_manager.db_lock
 from src.kernel.config import log
 
 # ---------------- 路由 key registry（静态镜像，同步测试防漂移） ----------------
@@ -33,11 +39,17 @@ CONTRACT_METHODS: dict[str, tuple[str, ...]] = {
         "get_repo_webhook_config", "get_agent_session", "get_scene_config",
         "get_scene_pool_engine_ids", "verify_session_token", "get_bot_config",
         "get_skill",
+        # P2 服务接口补齐（N6/N8/N9/N10）
+        "get_repo_bundle", "get_account", "get_knowledge", "get_user_mapping_batch",
     ),
     "runtime": (
         "get_events", "get_event_detail", "get_tasks", "get_task_messages",
         "get_runtimes", "get_issue_state", "update_issue_state",
         "get_chat_conversations", "get_chat_messages",
+        # P2 服务接口补齐（N1–N5/N11/N12）
+        "list_skills", "get_skill_detail", "list_engine_capabilities",
+        "get_runtime_credential_meta", "get_meta_namespace", "get_tasks_batch",
+        "get_task_stats",
     ),
     "insight": (
         "log_obs", "log_llm_usage", "log_api_latency", "query_metrics",
@@ -63,6 +75,26 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "count_official_scenes", "list_enabled_autopilot_tasks",
         "get_account_id_by_username", "get_account_username_by_id",
         "find_repo_key_in", "list_alert_user_ids", "get_user_id_by_mapping_column",
+        # P2 服务接口补齐（N6/N8/N9/N10）
+        "repo_bundle", "get_account_public", "get_knowledge_entry", "user_mapping_batch",
+        # W2 渠道写原语（runtime IM → mgmt 归属表）
+        "acquire_channel_lease", "renew_channel_lease", "release_channel_lease",
+        # 渠道租约只读（runtime/im/outbox 归属过滤；任意拓扑）
+        "lease_owner_by_key", "lease_owned_installations_by_owner",
+        "release_all_leases", "claim_inbound_dedup", "upsert_channel_installation",
+        "upsert_chat_session_binding", "upsert_sender_identity",
+        "add_event_action_filter", "update_event_action_filter", "delete_event_action_filter",
+        # 事件动作过滤器启用规则读口（api/event_rule.py L1 准入判定；任意拓扑）
+        "event_action_filter_enabled_rows",
+        # 流水线责任人展示（runtime/routes/pipeline.py；任意拓扑）
+        "feishu_name_by_platform_column", "repo_bot_usernames_any",
+        # VOD Bot 导航：仓库轨安装反查（runtime/im/vod_handler_async.py；任意拓扑）
+        "installation_repo_app_ids_any", "installation_repo_keys_by_app_any",
+        # IM 通知扇出目标解析（runtime/im/notify.py；任意拓扑）
+        "installation_user_active_rows_any", "installation_p2p_chat_ids_any",
+        # 互动卡片台账（runtime/im/engine/outbound_cards.py；任意拓扑）
+        "outbound_card_put_any", "outbound_card_chat_row_any",
+        "add_user_feedback", "save_inbound_message", "upsert_outbound_card",
         "read_one", "read_all",
     ),
     "runtime": (
@@ -87,9 +119,30 @@ PUBLIC_PRIMITIVES: dict[str, tuple[str, ...]] = {
         "rename_runtime_credential", "set_runtime_credential_scope",
         "delete_runtime_credential", "upsert_repo_credential", "clear_repo_credential",
         "ensure_device_credential", "touch_credential_metrics",
+        # 本机指标上报任意拓扑版（api/server_tasks.py insight 进程 15s 心跳）
+        "device_credential_id_any", "register_device_credential_any",
+        "touch_device_credential_any",
+        # 流水线业务状态 / 阶段任务引用（api/pipeline_status.py 任意拓扑读口）
+        "issue_business_stage_status_any", "issue_state_stage_any",
+        "segment_task_rows_any",
         "upsert_local_runtimes", "ensure_default_runtime", "set_agent_tags",
         "purge_runtime_credential", "change_credential_scope",
-        "reassign_repo_org_id", "read_one", "read_all",
+        "reassign_repo_org_id",
+        # P2 服务接口补齐（N1/N2/N3/N4/N5/N11/N12）
+        "list_skills", "get_skill_detail", "list_all_engine_capabilities",
+        "get_runtime_credential_meta", "get_meta_namespace", "tasks_brief_many",
+        "task_stats_extended", "xwrite_apply",
+        # W2 写原语
+        "upsert_event_active_guard", "upsert_issue_agent_session", "upsert_scene_category",
+        "record_event_skipped",
+        "list_user_conversations", "get_scene_category", "list_scene_categories",
+        "list_featured_skills", "list_active_credential_ids", "list_runtime_credentials",
+        "list_autopilot_executions", "get_meta", "set_meta_value",
+        "read_one", "read_all",
+    ),
+    "insight": (
+        # W3 派生写（指标/日志落库）
+        "record_api_latency", "record_merge_gate_log",
     ),
 }
 
@@ -155,16 +208,24 @@ def cache_state() -> dict:
 
 def ensure_table() -> None:
     """幂等建表（运行时惰性调用；迁移脚本同款 DDL）。"""
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
+    with _owner_lock:
+        c = _owner.cursor()
         c.execute(ROUTE_DDL)
-        session_manager.db.commit()
+        _owner.commit()
 
 
 def _load_all() -> list[dict]:
-    """全表读出为 dict 列表（SQLite Row / MySQL DictCursor 双兼容）。"""
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
+    """全表读出为 dict 列表（SQLite Row / MySQL DictCursor 双兼容）。
+
+    首次读前幂等建表：mgmt 域库由 provisioning 建，其它拓扑（单库/新环境）
+    可能缺表，缺表时 snapshot() 只会退化成内置基线（表现是路由配置不生效）。
+    """
+    try:
+        ensure_table()
+    except Exception as _e:  # noqa: BLE001 - 建表失败不阻断读（读失败仍会退回基线）
+        log.debug(f"gsb route config ensure_table skipped: {_e}")
+    with _owner_lock:
+        c = _owner.cursor()
         c.execute(
             "SELECT route_key, mode, timeout_ms, version, updated_at, updated_by "
             "FROM gsb_provider_route"
@@ -249,8 +310,8 @@ def set_route(route_key: str, mode: str, timeout_ms: int | None = None,
         if timeout_ms <= 0:
             raise ValueError(f"timeout_ms must be positive, got {timeout_ms}")
     ensure_table()
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
+    with _owner_lock:
+        c = _owner.cursor()
         c.execute("SELECT version, timeout_ms FROM gsb_provider_route WHERE route_key=?", (key,))
         row = c.fetchone()
         next_version = (int(row[0]) + 1) if row else 1
@@ -265,18 +326,18 @@ def set_route(route_key: str, mode: str, timeout_ms: int | None = None,
             "VALUES (?, ?, ?, ?, ?, ?)",
             (key, value, effective_timeout, next_version, time.time(), updated_by),
         )
-        session_manager.db.commit()
+        _owner.commit()
     reset_cache()
 
 
 def remove_route(route_key: str) -> bool:
     """删除一行配置（回落内置基线）。返回是否确实删除了行。"""
     ensure_table()
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
+    with _owner_lock:
+        c = _owner.cursor()
         c.execute("DELETE FROM gsb_provider_route WHERE route_key=?", (route_key,))
         removed = bool(c.rowcount)
-        session_manager.db.commit()
+        _owner.commit()
     reset_cache()
     return removed
 
@@ -287,13 +348,18 @@ def list_routes() -> list[dict]:
 
 
 def known_route_keys() -> list[str]:
-    """全部已知路由 key（23 契约方法 + public 数据原语），一键全量的目标集。"""
+    """全部已知路由 key（契约方法 + public 数据原语），一键全量的目标集。
+
+    去重：同一能力可能既是契约方法（HTTP）又是 public 原语（lib），
+    两者的路由 key 形如 `<service>.<method>` / `<domain>.<prim>`，可能同名
+    （如 runtime.list_skills）——对配置表而言是**同一个 key**，只登记一次。
+    """
     keys: list[str] = []
     for service, methods in CONTRACT_METHODS.items():
         keys.extend(f"{service}.{m}" for m in methods)
     for domain, prims in PUBLIC_PRIMITIVES.items():
         keys.extend(f"{domain}.{p}" for p in prims)
-    return keys
+    return list(dict.fromkeys(keys))
 
 
 def set_all_known(mode: str, updated_by: str = "") -> int:

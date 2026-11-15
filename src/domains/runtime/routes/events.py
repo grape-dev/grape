@@ -5,6 +5,76 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
 from src.kernel.config import log
+
+
+class _OwnedCursor:
+    """自带连接的游标：close 时把连接一并关掉。"""
+
+    def __init__(self, conn, cursor):
+        self._conn = conn
+        self._cur = cursor
+
+    def __getattr__(self, item):
+        return getattr(self._cur, item)
+
+    def close(self):
+        try:
+            self._cur.close()
+        finally:
+            try:
+                self._conn.close()
+            except Exception as _e:
+                log.debug(f"cursor close failed: {_e}")
+
+
+class _DomainDbProxy:
+    """把 db.cursor()/commit()/rollback() 代理到 runtime 域连接。
+
+    事件详情/列表读 events 表（runtime 域），但路由由 mgmt 进程服务；
+    三库模式下 mgmt 主库没有这张表，直连一律「事件未找到」。
+    """
+
+    def cursor(self, *a, **kw):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.cursor(*a, **kw)
+        if db_registry.uses_own_dsn("runtime"):
+            _conn = db_registry.new_connection("runtime")
+            return _OwnedCursor(_conn, _conn.cursor(*a, **kw))
+        from src.kernel.session_manager import db as _main
+        return _main.cursor(*a, **kw)
+
+    def commit(self):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.commit()
+        if db_registry.uses_own_dsn("runtime"):
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.commit()
+
+    def rollback(self):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.rollback()
+        if db_registry.uses_own_dsn("runtime"):
+            try:
+                db_registry.domain_db("runtime").rollback()
+            except Exception as _e:
+                log.debug(f"domain rollback failed: {_e}")
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.rollback()
+
+    def __getattr__(self, item):
+        from src.kernel.session_manager import db as _main
+        return getattr(_main, item)
+
+
+_rt_db = _DomainDbProxy()
 from src.api.time_utils import normalize_event_time
 from src.kernel.token_service import is_auth_401_error
 
@@ -34,6 +104,32 @@ def _redispatch_scene_override(evt: dict) -> str:
     return ""
 
 
+def _engine_scope_extra(repo_bare: str, account_id) -> tuple[str, list]:
+    """引擎候选的 scope 过滤子句（runtime 侧语句，值全部参数化）。
+
+    Issue #253：`pool_engine_ids` 为空时按 repo/user 轨过滤候选引擎。user 轨要用
+    账户 username 与 `runtime_credentials.owner_name` 比对，而账户表归 mgmt：
+    username 先由 mgmt public 解析成标量，再作为参数参与比对（等价于原来的
+    「owner_name = 账户表子查询」，比较仍在 SQL 里按列排序规则做），runtime 语句内
+    不再出现外域表——三库拓扑读的是 runtime 自己的库，单库拓扑亦同。账户不存在 /
+    id 为空 → 不生成 user 轨分支（原 SQL 的 `= NULL` 恒不成立，两端口径一致）。
+    """
+    extra = (
+        " AND (ar.credential_id = 0"
+        " OR rc.scope = 'global'"
+        " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
+    )
+    params: list = [repo_bare, f"gitcode:{repo_bare}", f"github:{repo_bare}"]
+    username = ""
+    if account_id:
+        from src.domains.mgmt import public as _mgmt_public_scope
+        username = _mgmt_public_scope.account_username_by_id_any(account_id)
+    if username:
+        extra += " OR (rc.scope = 'user' AND rc.owner_name = ?)"
+        params.append(username)
+    return extra + ")", params
+
+
 def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
                          task_id: str = ""):
     """Issue #587：管理端终止/重派等可审计操作强制留痕（actor/time/target_event/动作）。
@@ -52,7 +148,8 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
         _target_issue = ""
         _related = False
         try:
-            from src.kernel.session_manager import db, db_lock
+            from src.kernel.session_manager import db_lock
+            db = _rt_db
             with db_lock:
                 c = db.cursor()
                 c.execute("SELECT repo_key, issue_id FROM events WHERE repo_key=? AND seq=?",
@@ -96,7 +193,8 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
 
 @router.get("/detail/{seq}", operation_id="events_detail", summary="Event detail (result/log)", description="Event detail with payload/agent_logs/result for a seq.")
 def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)):
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         try:
@@ -407,7 +505,8 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     - direct 模式（本机引擎）→ fail_task（task 状态=failed）+ cancel_direct_task 杀子进程
     - 事件状态回写 failed
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     from src.api.event_store import update_event_status
 
     # 查事件状态（含 repo_key 供归属校验）
@@ -541,7 +640,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     跳过 pick_engine，不换机器。原 runtime_id 不可用（下线/不健康）→ 返回 4xx 错误，不切换。
     """
     import json as _json
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     from src.domains.runtime.engine.service import requeue_task, get_task, enqueue_task, update_task_status
 
     # 1) 幂等：30s 内已重派过则拒绝
@@ -580,7 +680,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         _evt_type = evt.get("event_type", "") or ""
         if _evt_type in ("issue_comment", "note_hook_pr", "issue_opened", "issue_updated",
                          "issue_closed", "issue_reopened", "issue_assigned", "issue_labeled"):
-            from src.kernel.session_manager import db as _db, db_lock as _dbl
+            from src.kernel.session_manager import db_lock as _dbl
+            _db = _rt_db
             with _dbl:
                 _c = _db.cursor()
                 _c.execute("SELECT reason FROM event_skipped WHERE repo_key=? AND issue_id=? "
@@ -867,14 +968,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             _scope_params = list(_pool_eids)
                         else:
                             _repo_bare = _task_repo.split(":", 1)[1] if ":" in _task_repo else _task_repo
-                            _scope_extra = (
-                                " AND (ar.credential_id = 0"
-                                " OR rc.scope = 'global'"
-                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
-                                " OR (rc.scope = 'user' AND rc.owner_name ="
-                                " (SELECT username FROM grape_accounts WHERE id=?)))"  # D32-补丁
-                            )
-                            _scope_params = [_repo_bare, f"gitcode:{_repo_bare}", f"github:{_repo_bare}", _task_uid]
+                            # D32-补丁：user 轨的 username 由 mgmt 域解析（本侧不留外域表）
+                            _scope_extra, _scope_params = _engine_scope_extra(_repo_bare, _task_uid)
                         # Query 1: prefer remote (credential_id > 0)
                         c2.execute(
                             "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
@@ -1001,14 +1096,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 _q_scope_params = list(_q_pool_eids)
             else:
                 _q_bare = _q_repo.split(":", 1)[1] if ":" in _q_repo else _q_repo
-                _q_scope_extra = (
-                    " AND (ar.credential_id = 0"
-                    " OR rc.scope = 'global'"
-                    " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
-                    " OR (rc.scope = 'user' AND rc.owner_name ="
-                    " (SELECT username FROM grape_accounts WHERE id=?)))"
-                )
-                _q_scope_params = [_q_bare, f"gitcode:{_q_bare}", f"github:{_q_bare}", _q_uid]
+                # user 轨 username 由 mgmt 域解析（runtime 侧不留外域表）
+                _q_scope_extra, _q_scope_params = _engine_scope_extra(_q_bare, _q_uid)
             try:
                 with db_lock:
                     cq = db.cursor()
@@ -1216,14 +1305,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             _scope_params2 = list(_old_pool_eids)
                         else:
                             _repo_bare2 = _old_repo.split(":", 1)[1] if ":" in _old_repo else _old_repo
-                            _scope_extra2 = (
-                                " AND (ar.credential_id = 0"
-                                " OR rc.scope = 'global'"
-                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
-                                " OR (rc.scope = 'user' AND rc.owner_name ="
-                                " (SELECT username FROM grape_accounts WHERE id=?)))"  # D32-补丁
-                            )
-                            _scope_params2 = [_repo_bare2, f"gitcode:{_repo_bare2}", f"github:{_repo_bare2}", _old_uid]
+                            # D32-补丁：user 轨 username 由 mgmt 域解析（runtime 侧不留外域表）
+                            _scope_extra2, _scope_params2 = _engine_scope_extra(_repo_bare2, _old_uid)
                         with db_lock:
                             c3 = db.cursor()
                             c3.execute(
@@ -1523,7 +1606,8 @@ def a2a_redo_scene(seq: int, user: dict = Depends(require_no_session_token)):
         # 上游提示（2026-10-12）：该 Issue 已 completed 过的 agent 集合——
         # 补发给它们 = 重跑已完成的阶段（防手误，仅提示不拦截；合法回退仍放行）
         try:
-            from src.kernel.session_manager import db, db_lock
+            from src.kernel.session_manager import db_lock
+            db = _rt_db
             with db_lock:
                 _c = db.cursor()
                 _c.execute(
@@ -1624,7 +1708,8 @@ class FlowResetBody(BaseModel):
 
 
 def _load_event(seq: int) -> dict:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         try:
@@ -1663,7 +1748,8 @@ def _thread_gate(repo_key: str, issue_id: str) -> dict:
 def _add_thread_message(anchor_seq: int, repo_key: str, issue_id: str, agent_type: str,
                         role: str, content: str, created_by: str = "",
                         task_id: str = "", generate_status: int = 0):
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         if task_id:
@@ -1684,7 +1770,8 @@ def _add_thread_message(anchor_seq: int, repo_key: str, issue_id: str, agent_typ
 
 
 def _list_thread(anchor_seq: int, limit: int = 50) -> list:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         try:
@@ -1715,7 +1802,8 @@ def _require_event_bot_token(request: Request, repo_key: str):
 
 
 def _cancel_issue_tasks(repo_key: str, issue_id: str) -> int:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     from src.domains.runtime.engine.service import cancel_task
     with db_lock:
         c = db.cursor()
@@ -1808,7 +1896,8 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
         issue_sess_id = isess.get("id") or ""
         oc_session_id = isess.get("runtime_session_id") or ""
     if not oc_session_id:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.session_manager import db_lock
+        db = _rt_db
         with db_lock:
             c = db.cursor()
             c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
@@ -1834,7 +1923,8 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     # 引擎选择：按 issue 会话的 runtime_id 判断（credential_id=0 强制 direct）
     _conv_agent_sid = ""
     _conv_rid = 0
-    from src.kernel.session_manager import db as _conv_db, db_lock as _conv_db_lock
+    from src.kernel.session_manager import db_lock as _conv_db_lock
+    _conv_db = _rt_db
     with _conv_db_lock:
         c = _conv_db.cursor()
         c.execute("SELECT id, runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
@@ -1983,7 +2073,8 @@ def delete_event_thread(seq: int, user: dict = Depends(require_no_session_token)
     evt = _load_event(seq)
     from src.domains.mgmt.routes.knowledge import _check_repo_member
     _check_repo_member(user, evt["repo_key"])
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM event_thread WHERE anchor_seq=?", (seq,))
@@ -2001,7 +2092,6 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
     _check_repo_member(user, evt["repo_key"])
 
     from src.api.knowledge import knowledge_path, _issue_num_from
-    from src.kernel.session_manager import db, db_lock
     import os
 
     issue_num = _issue_num_from(evt["issue_id"])
@@ -2023,21 +2113,10 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
         from src.kernel.storage import get_storage
         storage = get_storage()
         if storage is not None:
-            from src.kernel.session_manager import db, db_lock
-            from src.kernel.domain_read import mgmt_lib as _mgmt_lib_obs
-            _mg_obs = _mgmt_lib_obs()
-            if _mg_obs is not None:
-                obs_rows = [(k,) for k in
-                            _mg_obs.list_knowledge_obs_keys(evt["repo_key"], scope, _ag, _in)]
-            else:
-                with db_lock:
-                    obs_rows = db.cursor().execute(
-                        "SELECT obs_key FROM agent_shared_knowledge "
-                        "WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=? "
-                        "AND obs_key!='' AND obs_key IS NOT NULL",
-                        (evt["repo_key"], scope, _ag, _in)
-                    ).fetchall()
-            for (obs_key,) in obs_rows:
+            from src.domains.mgmt import public as _mgmt_public_obs
+            # obs_key 枚举由 mgmt（表归属域）出，任意拓扑同一份语句
+            for obs_key in _mgmt_public_obs.knowledge_obs_keys_scoped(
+                    evt["repo_key"], scope, _ag, _in):
                 storage.delete_object(obs_key)
     except Exception:
         pass
@@ -2059,25 +2138,10 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
                 log.warning(f"event knowledge delete queued for retry: {_res_kdel.get('error')}")
             return {"ok": True, "scope": scope, "message": "知识已删除"}
         except Exception as _e_kdel:
-            log.warning(f"event knowledge delete via lib failed, fallback to local SQL: {_e_kdel}")
-    with db_lock:
-        c = db.cursor()
-        from src.kernel.domain_read import mgmt_lib as _mg_lib_kids
-        _kids_lib = _mg_lib_kids(foreign_only=True)
-        if _kids_lib is not None:
-            rows = _kids_lib.read_all("knowledge_ids_scoped", (evt["repo_key"], scope, _ag, _in))
-        else:
-            rows = c.execute(
-                "SELECT id FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
-                (evt["repo_key"], scope, _ag, _in)
-            ).fetchall()
-        for (kid,) in rows:
-            c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,))
-        c.execute(
-            "DELETE FROM agent_shared_knowledge WHERE repo_key=? AND scope=? AND agent_type=? AND issue_num=?",
-            (evt["repo_key"], scope, _ag, _in)
-        )
-        db.commit()
+            log.warning(f"event knowledge delete via lib failed, fallback to owner primitives: {_e_kdel}")
+    # 兜底（单库 / 跨域写通道不可用）：同一份删除语句在 mgmt public，单事务先删 ref 再删主表
+    from src.domains.mgmt import public as _mgmt_public_kdel
+    _mgmt_public_kdel.delete_event_knowledge_any(evt["repo_key"], scope, _ag, _in)
 
     return {"ok": True, "scope": scope, "message": "知识已删除"}
 
@@ -2201,7 +2265,8 @@ def _execute_conv_task(task_id: str, loop):
         # session 兜底查询能命中（event dialogue 不创建 agent_tasks 行，
         # 自循环检测条件4依赖 session 兜底覆盖 event dialogue 执行窗口）。
         try:
-            from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
+            from src.kernel.session_manager import db_lock as _sdbl
+            _sdb = _rt_db
             from datetime import datetime, timezone
             with _sdbl:
                 c = _sdb.cursor()
@@ -2235,7 +2300,8 @@ def _execute_conv_task(task_id: str, loop):
             issue_sess_id = isess.get("id") or ""
             oc_session_id = isess.get("runtime_session_id") or ""
         if not oc_session_id:
-            from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
+            from src.kernel.session_manager import db_lock as _sdbl
+            _sdb = _rt_db
             with _sdbl:
                 c = _sdb.cursor()
                 c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_type))
@@ -2329,7 +2395,8 @@ def _execute_conv_task(task_id: str, loop):
     # R20.15.5: event dialogue 完成后将 session 置 idle → check_running_task
     # session 兜底不再命中 → 用户后续评论可正常触发流水线（R21.7.1）。
     try:
-        from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
+        from src.kernel.session_manager import db_lock as _sdbl
+        _sdb = _rt_db
         with _sdbl:
             c = _sdb.cursor()
             c.execute(
@@ -2385,7 +2452,8 @@ def conv_task_status(task_id: str, user: dict = Depends(require_no_session_token
                     "result": task.get("result", ""), "seq": task.get("seq", 0)}
 
     # 2. DB 兜底（event_thread by task_id）
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
+    db = _rt_db
     with db_lock:
         c = db.cursor()
         c.execute("SELECT role, generate_status, content FROM event_thread WHERE task_id=? ORDER BY id", (task_id,))
@@ -2429,7 +2497,8 @@ async def conv_task_stream(task_id: str, user: dict = Depends(require_no_session
                 return
             if not task:
                 # 查 DB 看是否有结果
-                from src.kernel.session_manager import db, db_lock
+                from src.kernel.session_manager import db_lock
+                db = _rt_db
                 with db_lock:
                     c = db.cursor()
                     c.execute("SELECT role, generate_status, content FROM event_thread WHERE task_id=? AND role='agent' ORDER BY id DESC LIMIT 1", (task_id,))
@@ -2529,8 +2598,9 @@ def list_events(owner: str, repo: str,
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db_lock
 
+    db = _rt_db
     # 跨平台 repo_key 候选（用户可能通过 GitHub OAuth 登录）
     _owner_repo = f"{owner}/{repo}"
     _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]

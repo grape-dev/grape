@@ -122,18 +122,11 @@ def _normalize_scene(scene_id: str) -> str:
 
 def _query_active_events(repo_key: str, issue_id: str,
                          statuses=_ACTIVE_STATUS):
+    """同 Issue 的活跃 a2a_event 行（events 归 runtime 域，语句在 owner public）。"""
     _statuses = tuple(statuses or _ACTIVE_STATUS)
     try:
-        from src.kernel.session_manager import db, db_lock
-        _placeholders = ",".join("?" for _ in _statuses)
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT seq, agent_type, status, created_at, scene_id FROM events "
-                "WHERE repo_key=? AND issue_id=? AND event_type='a2a_event' "
-                f"AND status IN ({_placeholders}) ORDER BY seq DESC LIMIT 50",
-                (repo_key, issue_id, *_statuses))
-            return c.fetchall() or []
+        from src.domains.runtime import public as _runtime_public
+        return _runtime_public.a2a_active_event_rows(repo_key, issue_id, _statuses)
     except Exception as _e:
         log.warning(f"A2A guard: active event query failed: {_e}")
         return []
@@ -234,15 +227,9 @@ def find_window_duplicate(repo_key: str, issue_number, target_agent: str,
     cutoff = _utc_now() - timedelta(seconds=window)
     scene_id = _normalize_scene(scene_id)
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT seq, created_at, status, scene_id FROM events "
-                "WHERE repo_key=? AND issue_id=? AND event_type='a2a_event' "
-                "AND agent_type=? ORDER BY seq DESC LIMIT 20",
-                (repo_key, f"#{issue_number}", target_agent))
-            rows = c.fetchall() or []
+        from src.domains.runtime import public as _runtime_public
+        rows = _runtime_public.a2a_window_dedup_rows(
+            repo_key, f"#{issue_number}", target_agent)
     except Exception as _e:
         log.warning(f"A2A guard: window duplicate query failed: {_e}")
         return {}
@@ -284,18 +271,10 @@ def find_active_duplicate(repo_key: str, issue_number, target_agent: str,
         return {}
     cutoff = _utc_now() - timedelta(seconds=window)
     scene_id = _normalize_scene(scene_id)
-    _placeholders = ",".join("?" for _ in _ACTIVE_STATUS)
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT seq, created_at, status, scene_id, payload FROM events "
-                "WHERE repo_key=? AND issue_id=? AND event_type='a2a_event' "
-                f"AND agent_type=? AND status IN ({_placeholders}) "
-                "ORDER BY seq DESC LIMIT 20",
-                (repo_key, f"#{issue_number}", target_agent, *_ACTIVE_STATUS))
-            rows = c.fetchall() or []
+        from src.domains.runtime import public as _runtime_public
+        rows = _runtime_public.a2a_active_dup_rows(
+            repo_key, f"#{issue_number}", target_agent, _ACTIVE_STATUS)
     except Exception as _e:
         log.warning(f"A2A guard: active duplicate query failed: {_e}")
         return {}
@@ -349,34 +328,29 @@ def detect_dispatch_storm(repo_key: str, issue_number, target_agent: str,
     cutoff = _utc_now() - timedelta(seconds=max(window, 1))
     count = 0
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT created_at FROM events WHERE repo_key=? AND issue_id=? "
-                "AND event_type='a2a_event' AND agent_type=? ORDER BY seq DESC LIMIT 50",
-                (repo_key, f"#{issue_number}", target_agent))
-            rows = c.fetchall() or []
-            # 跳过路径不写 events：把 event_skipped 同窗口跳过次数纳入统计。
-            c.execute(
-                "SELECT created_at, detail FROM event_skipped WHERE repo_key=? "
-                "AND issue_id=? AND event_type='a2a_event' ORDER BY id DESC LIMIT 100",
-                (repo_key, f"#{issue_number}"))
-            skip_rows = c.fetchall() or []
-        for (created_at,) in rows:
-            dt = _parse_ts(created_at)
-            if dt is not None and dt >= cutoff:
-                count += 1
-        _marker = f"target={target_agent} "
-        for created_at, detail in skip_rows:
-            _detail = str(detail or "")
-            if _detail != f"target={target_agent}" and not _detail.startswith(_marker):
-                continue
-            dt = _parse_ts(created_at)
-            if dt is not None and dt >= cutoff:
-                count += 1
+        from src.domains.runtime import public as _runtime_public
+        # 两条独立统计（events 派发数 / event_skipped 跳过数）：失败一起归零，
+        # 与原「同一 try 包两条语句」的降级口径一致，不出现半份计数。
+        rows = _runtime_public.a2a_storm_event_times(
+            repo_key, f"#{issue_number}", target_agent)
+        # 跳过路径不写 events：把 event_skipped 同窗口跳过次数纳入统计。
+        skip_rows = _runtime_public.a2a_storm_skip_rows(
+            repo_key, f"#{issue_number}")
     except Exception as _e:
         log.warning(f"A2A guard: storm detection query failed: {_e}")
+        rows, skip_rows = [], []
+    for (created_at,) in rows:
+        dt = _parse_ts(created_at)
+        if dt is not None and dt >= cutoff:
+            count += 1
+    _marker = f"target={target_agent} "
+    for created_at, detail in skip_rows:
+        _detail = str(detail or "")
+        if _detail != f"target={target_agent}" and not _detail.startswith(_marker):
+            continue
+        dt = _parse_ts(created_at)
+        if dt is not None and dt >= cutoff:
+            count += 1
     count += max(int(upcoming or 0), 0)
     alerted = count >= A2A_DISPATCH_STORM_THRESHOLD
     if alerted:

@@ -147,34 +147,24 @@ async def _verify_repo_bot_tokens():
     R17.2.10: 分批执行（每 10 个一批，间隔 1 秒）
     R21.3.7: 超时/5xx 不标记
     """
-    from src.kernel.session_manager import db, db_lock
     from src.kernel.token_resolver import create_provider
     from src.domains.mgmt.user.db import set_meta_value, _invalidate_global_bot_cache
 
     # 查询有 bot token 的仓库
     repos_to_check = []
     try:
-        with db_lock:
-            c = db.cursor()
-            # S82/D58：凭据唯一权威=grape_t_repo_credentials（managed_repos 列已冻结）
-            # S86/D62：provider 由 repo_key 前缀派生（parse_repo_key 单一入口），
-            # 字面 cred_type→provider 映射表移除——第 5 平台自动纳入巡检；
-            # bot 凭据族过滤保留（webhook_token 不是 bot token，不进巡检）
-            from src.kernel.repo_key import parse_repo_key as _prk_health
-            # D99：cred_type 归一——bot 凭据族='bot' 精确匹配（LIKE 反模式消除）
-            from src.domains.runtime import public as _rt_health
-            _rows_cred = None
-            if _rt_health.available():
-                _rows_cred = [(r[1], r[2]) for r in _rt_health.list_repo_credentials()
-                              if r[3] and r[2] == "bot"]
-            if _rows_cred is None:
-                c.execute(
-                    "SELECT repo_key, cred_type FROM grape_t_repo_credentials "
-                    "WHERE value IS NOT NULL AND value != '' AND cred_type = 'bot'"
-                )
-                _rows_cred = c.fetchall()
-            for row in _rows_cred:
-                repos_to_check.append((row[0], _prk_health(row[0])[0]))
+        # S82/D58：凭据唯一权威=grape_t_repo_credentials（同理 managed_repos 列已冻结）。
+        # 表归 **insight**：SQL 只留该域 public 一份，`*_any` 原语按拓扑自行路由
+        # （自有 DSN → db_registry；单库/测试 → 进程库 + db_lock），本域不再留兜底 SQL。
+        from src.domains.insight import public as _insight_health
+        # S86/D62：provider 由 repo_key 前缀派生（parse_repo_key 单一入口），
+        # 字面 cred_type→provider 映射表移除——第 5 平台自动纳入巡检；
+        # bot 凭据族过滤保留（webhook_token 不是 bot token，不进巡检）
+        from src.kernel.repo_key import parse_repo_key as _prk_health
+        # D99：cred_type 归一——bot 凭据族='bot' 精确匹配（LIKE 反模式消除），
+        # 非空 value 的过滤在 owner 侧同一份 SQL 里（与「空值凭据不巡检」原口径一致）
+        for _repo_key_cred in _insight_health.list_repo_keys_with_nonempty_credential("bot"):
+            repos_to_check.append((_repo_key_cred, _prk_health(_repo_key_cred)[0]))
     except Exception as e:
         log.warning(f"_verify_repo_bot_tokens: query failed: {e}")
         return
@@ -211,7 +201,6 @@ def _verify_single_repo_token(repo_key: str, provider: str):
     R17.2.6: 200 → 清除过期标记
     R21.3.7: 超时/5xx 不标记
     """
-    from src.kernel.session_manager import db, db_lock
     from src.kernel.token_resolver import create_provider
 
     # 读取仓库级 token：F4/D106 改 rc 优先（grape_t_repo_credentials 唯一权威，
@@ -227,17 +216,18 @@ def _verify_single_repo_token(repo_key: str, provider: str):
         log.warning(f"_verify_single_repo_token: rc read failed for {repo_key}: {e}")
     if not token and field:
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(f"SELECT {field} FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
-                row = c.fetchone()
-                if row and row[0]:
-                    # N3：列值通道加密，verify 前解密（明文兼容覆盖存量行）
-                    # legacy 列回落命中（下线判据=零命中）
-                    from src.domains.mgmt.user.db import _decrypt_repo_secret
-                    log.warning(f"bot_token_health: legacy column fallback hit "
-                                f"repo={repo_key} field={field}")
-                    token = _decrypt_repo_secret(row[0])
+            # managed_repos 归 mgmt：legacy 列名由 owner 白名单挑选（未登记列抛
+            # KeyError），本域不再用进程库游标拼列名直发 SQL——三库拓扑下进程库
+            # 没有 managed_repos（视图 0 → 1146），旧兜底必然被 except 吞成「无 token」
+            from src.domains.mgmt import public as _mgmt_health
+            raw = _mgmt_health.repo_bot_token_from_legacy_column_any(repo_key, field)
+            if raw:
+                # N3：列值通道加密，verify 前解密（明文兼容覆盖存量行）
+                # legacy 列回落命中（下线判据=零命中）
+                from src.domains.mgmt.user.db import _decrypt_repo_secret
+                log.warning(f"bot_token_health: legacy column fallback hit "
+                            f"repo={repo_key} field={field}")
+                token = _decrypt_repo_secret(raw)
         except Exception as e:
             log.warning(f"_verify_single_repo_token: read token failed for {repo_key}: {e}")
     if not token:
@@ -283,16 +273,12 @@ def _set_repo_bot_token_status(repo_key: str, status: str):
                             f"{_res_bts.get('error')}")
             return
         except Exception as _e:
-            log.warning(f"_set_repo_bot_token_status: lib path failed, fallback to local SQL: {_e}")
-    from src.kernel.session_manager import db, db_lock
+            log.warning(f"_set_repo_bot_token_status: lib path failed, fallback to mgmt public: {_e}")
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "UPDATE managed_repos SET bot_token_status=? WHERE repo_key=?",
-                (status, repo_key),
-            )
-            db.commit()
+        from src.domains.mgmt import public as _mgmt_health
+        # managed_repos 归 mgmt：兜底写走 owner 的任意拓扑原语（单库 → 进程库 +
+        # db_lock；三库 → mgmt DSN 自提交），本域不再留 UPDATE 语句
+        _mgmt_health.set_repo_bot_token_status_any(repo_key, status)
     except Exception as e:
         log.warning(f"_set_repo_bot_token_status: update failed for {repo_key}: {e}")
 

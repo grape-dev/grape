@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from src.api.deps import get_current_user_or_api_key
 from src.kernel.config import log
 from src.domains.mgmt.user.repo_manager import UpstreamAPIError
+from src.domains.runtime import public as _runtime_public
 from src.domains.runtime.vcs.providers import (
     translate_inbound,
     translate_query_state,
@@ -32,6 +33,15 @@ _FULL_SHA_RE = _re.compile(r"^[0-9a-fA-F]{40}$")
 
 # provider = 注册表（vcs/providers）自动派生；新增 provider 只加模块
 _SUPPORTED_PROVIDERS = set(_PROVIDER_MODULES)
+
+
+def _tk_session_status(task_id: str) -> str | None:
+    """接管会话的最近状态（走 runtime owner 原语，任意拓扑）。
+
+    表 `takeover_sessions` 归运行域：单库拓扑回落进程主库，三库拓扑走 runtime 自有
+    DSN。api 侧不再持有该表 SQL，只留「active 才放行」的状态机判定（见 `_repo_token`）。
+    """
+    return _runtime_public.takeover_session_status_any(task_id)
 
 
 def _provider_module(provider: str):
@@ -381,14 +391,7 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
             raise HTTPException(status_code=403, detail={
                 "code": 403, "message": f"该接管 token 仅限其任务仓库（{tk_repo}），不能操作 {rk}"})
         try:
-            from src.domains.runtime.engine import takeover as _tk
-            _sess = None
-            with _tk.db_lock:
-                _c = _tk.db.cursor()
-                _c.execute("SELECT status FROM takeover_sessions WHERE task_id=? ORDER BY created_at DESC LIMIT 1",
-                           (str(user.get("session_key") or "").replace("takeover:", ""),))
-                _row = _c.fetchone()
-            _sess = _row[0] if _row else None
+            _sess = _tk_session_status(str(user.get("session_key") or "").replace("takeover:", ""))
             if _sess != "active":
                 raise HTTPException(status_code=403, detail={
                     "code": 403, "message": "接管会话已结束，仓库操作被拒绝"})
@@ -981,7 +984,7 @@ def get_issue(owner: str, repo: str, number: int | str, user: dict = Depends(get
     return _normalize_issue_milestone(resp)
 
 
-@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update issue", description="Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id prefers the milestone `id` and also accepts `number` (Issue #1005); the resolved milestone is sent upstream as `milestone`, PATCH auto-fills required repo/title. GitHub: milestone_id maps to the upstream `milestone` field (milestone number). The milestone is pre-validated before write and the existing value is preserved/rolled back on failure; success is read-back verified and echoed. Failure semantics are distinguishable instead of a generic 502: 400 when the milestone does not exist / is not visible, 403 when the caller lacks permission, 422 when upstream accepted the PATCH but ignored the milestone. Upstream real failures still return 5xx.")
+@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update an issue", description="Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id prefers the milestone `id` and also accepts `number` (Issue #1005); the resolved milestone is sent upstream as `milestone`, PATCH auto-fills required repo/title. GitHub: milestone_id maps to the upstream `milestone` field (milestone number). The milestone is pre-validated before write and the existing value is preserved/rolled back on failure; success is read-back verified and echoed. Failure semantics are distinguishable instead of a generic 502: 400 when the milestone does not exist / is not visible, 403 when the caller lacks permission, 422 when upstream accepted the PATCH but ignored the milestone. Upstream real failures still return 5xx.")
 def update_issue(owner: str, repo: str, number: int | str, body: IssueUpdateBody,
                  user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 §30: body 字段追加 grape-auto-comment 标记（与 create_issue_comment 一致）

@@ -3,7 +3,7 @@
   ;['bridge.css', 'ag-ui.css', 'viewcss/pipeline.css'].forEach(function (f) {
     var link = document.createElement('link')
     link.rel = 'stylesheet'
-    link.href = '/static-vue/assets/' + f + '?v=57'
+    link.href = '/static-vue/assets/' + f + '?v=58'
     document.head.appendChild(link)
   })
 })()
@@ -17,7 +17,8 @@ let _app = null
 window.renderPipeline = function (data, focusIssueNum) {
   const el = document.getElementById('pageContent')
   if (!el) return
-  if (_app) _app.unmount()
+  if (_app) { try { _app.unmount() } catch (e) {} _app = null }
+  el.innerHTML = ''
   _app = createApp(Pipeline, { data })
   const vm = _app.mount(el)
   // focus issue parity: preselect the target issue's pipeline

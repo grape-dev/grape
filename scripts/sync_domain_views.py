@@ -42,10 +42,13 @@ from view_ddl_builder import ViewDDLError, build_view_ddl, check_ident  # noqa: 
 
 DEFAULT_OWNER_DB = "grape_runtime_db"
 DEFAULT_TARGET_DBS = ("grape_mgmt_db", "grape_insight_db")
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_ALLOWLIST = os.path.join(_REPO_ROOT, "docs", "weekly-11", "view-allowlist.txt")
 DEFAULT_SYNC_TABLES = (
     "agent_tasks",
     "grape_t_credential_usage_log",
-    "grape_t_system_credentials",
+    # 2026-11-14 P0：grape_t_system_credentials 的跨域视图已删除（代码零跨域引用，
+    # 属 60 个快赢视图之一），不再作为默认同步目标；确需恢复须先评审 view-allowlist。
     # 阶段 1 扩展（2026-11-12）：mgmt 侧同样缺这张跨域表 → 启动刷
     # "Table 'grape_dev_mgmt.grape_t_repo_credentials' doesn't exist"，VCS 凭据链路受影响
     "grape_t_repo_credentials",
@@ -131,6 +134,70 @@ def table_type(conn, schema, table):
         return row[0] if row else None
 
 
+def load_allowlist(path: str) -> set[str]:
+    """读 `<库>.<视图>` 白名单（P0 冻结：只减不增）。
+
+    文件缺失 → 返回空集合 ⇒ 任何建视图请求都被拒（fail-closed）。
+    """
+    allowed: set[str] = set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                allowed.add(line)
+    except OSError:
+        return set()
+    return allowed
+
+
+def allowed_for(allowed: set[str], target_db: str) -> set[str]:
+    prefix = target_db + "."
+    return {v.split(".", 1)[1] for v in allowed if v.startswith(prefix)}
+
+
+def prune_unlisted(host: str, user: str, pwd: str, target_dbs, allowed, dry_run: bool) -> int:
+    """删除不在白名单里的跨域视图（P5 清零用；P0 用于删 60 个快赢视图）。
+
+    安全闸（QA G2）：白名单整体为空时**拒绝执行**。空白名单有两种成因——文件缺失/解析失败，
+    或误用空文件——两种都不代表「所有视图都该删」。以前这种输入会把目标库视图全量 DROP，
+    属于一次误跑即清空不可回滚的操作。
+    """
+    if not allowed:
+        print("SKIP 白名单为空（view-allowlist 缺失或未解析出条目）——拒绝 prune，"
+              "避免把目标库视图全量 DROP。请先补齐白名单。")
+        return 0
+    dropped = 0
+    for target in target_dbs:
+        keep = allowed_for(allowed, target)
+        if not keep:
+            # 该库在整体白名单里没有任何条目：同样视为配置缺失，不删
+            print(f"SKIP {target}: 白名单里没有该库的条目 —— 不执行 prune")
+            continue
+        conn = connect(host, user, pwd, target)
+        try:
+            with conn.cursor() as c:
+                c.execute(
+                    "SELECT TABLE_NAME FROM information_schema.views WHERE TABLE_SCHEMA=%s"
+                    " ORDER BY TABLE_NAME", (target,))
+                names = [r[0] for r in c.fetchall()]
+            for name in names:
+                if name in keep:
+                    continue
+                if dry_run:
+                    print(f"DRY  DROP VIEW {target}.{name}（不在白名单）")
+                    dropped += 1
+                    continue
+                with conn.cursor() as c:
+                    c.execute(f"DROP VIEW IF EXISTS `{target}`.`{name}`")
+                print(f"DROP {target}.{name}（不在白名单）")
+                dropped += 1
+        finally:
+            conn.close()
+    return dropped
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
@@ -142,6 +209,12 @@ def main():
                     help="目标库名，逗号分隔（默认 grape_mgmt_db,grape_insight_db / GRAPE_TARGET_DBS）")
     ap.add_argument("--tables", default=None,
                     help="需要同步视图的表，逗号分隔（默认见 DEFAULT_SYNC_TABLES / GRAPE_SYNC_TABLES）")
+    ap.add_argument("--allowlist", default=DEFAULT_ALLOWLIST,
+                    help="视图白名单（默认 docs/weekly-11/view-allowlist.txt；只减不增）")
+    ap.add_argument("--prune", action="store_true",
+                    help="删除目标库中不在白名单里的视图（P0 快赢 / P5 清零；配合 --dry-run 先看）")
+    ap.add_argument("--skip-allowlist", action="store_true",
+                    help="应急：跳过白名单校验（仅本地调试，CI/生产禁用）")
     args = ap.parse_args()
 
     try:
@@ -150,6 +223,9 @@ def main():
         print(f"[FATAL] {exc}", file=sys.stderr)
         return 2
     print(f"owner={owner_db} targets={target_dbs} tables={sync_tables}")
+    allowed = load_allowlist(args.allowlist)
+    if not args.skip_allowlist:
+        print(f"allowlist={args.allowlist} entries={len(allowed)}")
 
     host = os.environ["DEVOPS_DB_HOST"]
     user = os.environ.get("DEVOPS_DB_USER", "root")
@@ -157,6 +233,7 @@ def main():
 
     owner = connect(host, user, pwd, owner_db)
     changed = 0
+    denied = 0
     for table in sync_tables:
         base_type = table_type(owner, owner_db, table)
         if base_type != "BASE TABLE":
@@ -168,6 +245,11 @@ def main():
             continue
         ddl = build_view_ddl(owner_db, table, cols)
         for target in target_dbs:
+            if not args.skip_allowlist and table not in allowed_for(allowed, target):
+                print(f"DENY {target}.{table}: 不在视图白名单（只减不增；"
+                      f"如需保留请评审后改 {args.allowlist}）")
+                denied += 1
+                continue
             conn = connect(host, user, pwd, target)
             try:
                 cur_type = table_type(conn, target, table)
@@ -186,6 +268,13 @@ def main():
                 conn.close()
     owner.close()
     print(f"完成：{changed} 个视图{'（dry-run 未执行）' if args.dry_run else '已更新'}")
+    if args.prune:
+        prune_dbs = tuple(dict.fromkeys(tuple(target_dbs) + (owner_db,)))
+        dropped = prune_unlisted(host, user, pwd, prune_dbs, allowed, args.dry_run)
+        print(f"prune：{dropped} 个视图{'待删除（dry-run）' if args.dry_run else '已删除'}")
+    if denied:
+        print(f"[FAIL] {denied} 个建视图请求被白名单拒绝", file=sys.stderr)
+        return 1
     return 0
 
 

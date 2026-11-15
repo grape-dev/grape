@@ -7,11 +7,17 @@ conversationId。所以点按钮时只能拿 `outTrackId` 回来反查"这张卡
   - 进程内 dict（发送时写，命中率 100%，热路径不吃 DB）
   - DB 表 `grape_t_channel_outbound_card`（进程重启后回调仍能反查）
 读取顺序：内存 → DB。写入只增不改（同一 outTrackId 不复用，见 cards.new_out_track_id）。
+
+SQL 归属：该表归 **mgmt** 域（docs/weekly-11/table-owner.tsv），语句只在该域 public
+留一份（`outbound_card_put_any` / `outbound_card_chat_row_any`）；本模块只提供「调用期
+的进程库句柄」当执行上下文，不写 SQL、也不判断表归谁。
 """
 from __future__ import annotations
 
 import logging
 import threading
+
+from src.domains.mgmt import public as _mgmt_public
 
 log = logging.getLogger(__name__)
 
@@ -62,22 +68,31 @@ def lookup_chat(out_track_id: str) -> str:
 
 # ---------------------------------------------------------------- DB 层
 
-def _connect():
-    """复用引擎的双方言连接（sqlite3 / MySQLCompatDB）。"""
+def _db_conn():
+    """调用期进程库连接（`DEVOPS_DB_PATH` 每次调用现读），只当执行上下文用。
+
+    连接口径与 IM 引擎一致（sqlite3 / MySQLCompatDB 双方言）；**不承载任何 SQL**——
+    卡片台账归 mgmt，语句在该域 public。单库 / 测试拓扑下这条连接就是「本域库」，
+    owner 域复用它执行并沿用调用方的 `commit()`；自有 DSN 拓扑下 owner 域忽略它、
+    改走 mgmt 连接（忽略那一跳正是 1146 的修复）。
+    `close()` 对共享单例是空操作，与改前逐字一致。
+    """
     from src.domains.runtime.im.engine_wiring import default_db_path, _connect as _engine_connect
     return _engine_connect(default_db_path())
 
 
 def _save_sync(out_track_id: str, entry: dict) -> None:
-    conn = _connect()
+    conn = _db_conn()
     try:
-        conn.execute(
-            "INSERT OR REPLACE INTO grape_t_channel_outbound_card "
-            "(out_track_id, installation_id, channel_type, channel_chat_id, chat_type, "
-            " sender_staff_id, card_template_id) VALUES (?,?,?,?,?,?,?)",
-            (out_track_id, entry.get("installation_id") or "", "dingtalk",
-             entry.get("chat_id") or "", entry.get("chat_type") or "p2p",
-             entry.get("sender_id") or "", entry.get("template_id") or ""),
+        _mgmt_public.outbound_card_put_any(
+            out_track_id,
+            installation_id=entry.get("installation_id") or "",
+            channel_type="dingtalk",
+            channel_chat_id=entry.get("chat_id") or "",
+            chat_type=entry.get("chat_type") or "p2p",
+            sender_staff_id=entry.get("sender_id") or "",
+            card_template_id=entry.get("template_id") or "",
+            cursor=conn.cursor(),
         )
         conn.commit()
     finally:
@@ -85,13 +100,9 @@ def _save_sync(out_track_id: str, entry: dict) -> None:
 
 
 def _load_sync(out_track_id: str) -> dict | None:
-    conn = _connect()
+    conn = _db_conn()
     try:
-        row = conn.execute(
-            "SELECT channel_chat_id, chat_type, sender_staff_id, installation_id, "
-            "card_template_id FROM grape_t_channel_outbound_card WHERE out_track_id=?",
-            (out_track_id,),
-        ).fetchone()
+        row = _mgmt_public.outbound_card_chat_row_any(out_track_id, cursor=conn.cursor())
     finally:
         conn.close()
     if not row:

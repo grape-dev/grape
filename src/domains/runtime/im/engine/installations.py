@@ -5,6 +5,9 @@ grape_t_channel_installation 全表枚举（不按平台过滤——multica MUL-
 
 A2 收尾（Phase B）：legacy 双轨（chat_agent_session / devops_agent_session 的 im_* 列）
 已 DROP，原来与旧表对账的 reconcile_installations 一并删除——安装表是唯一真相。
+
+表归属：`grape_t_channel_installation` 归 mgmt。本模块只做「行 → 安装字典」的投影，
+SQL 在 `src.domains.mgmt.public.installation_provider_rows_any` 一处（按拓扑自选连接）。
 """
 from __future__ import annotations
 
@@ -12,10 +15,7 @@ import asyncio
 import json
 from typing import Callable, Optional
 
-_PROVIDER_SELECT = (
-    "SELECT id, channel_type, scope, owner_user_id, repo_key, config, "
-    "config_fingerprint, status FROM grape_t_channel_installation WHERE status='active'"
-)
+from src.kernel.config import log
 
 
 def _row_to_installation(row) -> dict:
@@ -33,15 +33,23 @@ def _row_to_installation(row) -> dict:
 
 
 def _list_installations_with_factory(conn_factory: Callable) -> list:
-    """在同一线程内获取并使用连接（sqlite 线程亲和约束）。"""
+    """在同一线程内获取连接（sqlite 线程亲和约束），查询走归属域 public。
+
+    conn_factory 给的是本进程的 IM 库句柄（engine_wiring 里钉 runtime 库）；单库 / 测试
+    拓扑下原语复用它——连接与游标都在本 worker 线程内创建、使用，关闭责任仍在本函数
+    （与原实现逐字一致）。三库拓扑下原语忽略它改用 mgmt 连接：本模块不再持有任何本表 SQL。
+    """
+    from src.domains.mgmt import public as _mgmt_public
+
     conn = conn_factory()
     try:
-        return [_row_to_installation(r) for r in conn.execute(_PROVIDER_SELECT).fetchall()]
+        rows = _mgmt_public.installation_provider_rows_any(conn)
+        return [_row_to_installation(r) for r in rows]
     finally:
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - 关闭失败不掩盖正常返回（共享连接 close 为空操作）
+            log.debug("im installations: close skipped: %s", exc)
 
 
 class SqliteInstallationProvider:

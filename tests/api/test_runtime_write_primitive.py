@@ -35,17 +35,49 @@ def install(monkeypatch, cur):
     return cur
 
 
+def install_tx(monkeypatch, cur):
+    """自有 DSN 拓扑：`_any_tx()` 走 db_registry.transaction。"""
+
+    @contextlib.contextmanager
+    def _tx(domain):
+        assert domain == "runtime"
+        yield cur
+
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda _d: True)
+    monkeypatch.setattr(db_registry, "transaction", _tx)
+    return cur
+
+
 def test_purge_user_rows_deletes_four_tables(monkeypatch):
-    cur = install(monkeypatch, FakeCursor(rowcounts=[3, 1, 5, 0]))
+    cur = install_tx(monkeypatch, FakeCursor(rowcounts=[3, 1, 5, 0]))
     out = rt.purge_user_rows("u1")
     assert out == {"agent_tasks": 3, "chat_agent_session": 1, "chat_conversations": 5, "issue": 0}
     assert [e[0] for e in cur.executed] == [
-        "DELETE FROM agent_tasks WHERE user_id=%s",
-        "DELETE FROM chat_agent_session WHERE user_id=%s",
-        "DELETE FROM chat_conversations WHERE user_id=%s",
-        "DELETE FROM issue WHERE user_id=%s",
+        "DELETE FROM agent_tasks WHERE user_id=?",
+        "DELETE FROM chat_agent_session WHERE user_id=?",
+        "DELETE FROM chat_conversations WHERE user_id=?",
+        "DELETE FROM issue WHERE user_id=?",
     ]
     assert all(e[1] == ("u1",) for e in cur.executed)
+
+
+def test_purge_user_rows_reuses_caller_cursor_in_single_db(monkeypatch):
+    """单库拓扑：复用调用方游标（不另开连接、不自行提交）。"""
+    cur = FakeCursor(rowcounts=[2, 0, 4, 1])
+    called = {"cursor": 0}
+
+    @contextlib.contextmanager
+    def _no_cursor(**_kw):
+        called["cursor"] += 1
+        yield FakeCursor()
+
+    monkeypatch.setattr(db_registry, "uses_own_dsn", lambda _d: False)
+    monkeypatch.setattr(db_registry, "cursor", _no_cursor)
+
+    out = rt.purge_user_rows("u9", cursor=cur)
+    assert out == {"agent_tasks": 2, "chat_agent_session": 0, "chat_conversations": 4, "issue": 1}
+    assert called["cursor"] == 0
+    assert len(cur.executed) == 4
 
 
 def test_delete_chat_conversations_by_channel(monkeypatch):

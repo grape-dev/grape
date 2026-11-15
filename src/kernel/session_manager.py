@@ -5,37 +5,15 @@ import sqlite3, json, threading, os, time, shutil
 from datetime import datetime
 from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
+# unified_user_mapping 归 mgmt 域：DDL / 启动引导 / 读写原语统一由该域 public lib 提供（P4 收口）
+from src.domains.mgmt import public as _mgmt_public
+# 会话主表 / 群绑定表 / 消息表归 runtime 域：SQL 与建表引导统一由该域 public lib 提供（P4 收口）
+from src.domains.runtime import public as _rt
 
-REPO_IM_GROUP_BINDING_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS repo_im_group_binding (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    im_provider TEXT DEFAULT 'feishu',
-    im_chat_id TEXT NOT NULL,
-    im_channel_name TEXT DEFAULT '',
-    repo_key TEXT NOT NULL,
-    bind_by TEXT DEFAULT '',
-    im_app_id TEXT DEFAULT '',
-    source TEXT DEFAULT '',
-    auto_impl_enabled INTEGER DEFAULT 0,
-    notify_enabled INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE (im_provider, im_chat_id, im_app_id)
-)
-"""
+# 兼容别名：DDL 快照只在 owner 域维护，这里保留可读入口（不要在此写建表语句）
+REPO_IM_GROUP_BINDING_TABLE_SQL = _rt.repo_im_binding_ddl()
 
-UNIFIED_USER_MAPPING_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS unified_user_mapping (
-    user_id INTEGER PRIMARY KEY,
-    gitcode_user TEXT DEFAULT '',
-    gitcode_nickname TEXT DEFAULT '',
-    feishu_open_id TEXT DEFAULT '',
-    feishu_name TEXT DEFAULT '',
-    app_id TEXT DEFAULT '',               -- ★ 产生 feishu_open_id 的飞书 App（open_id 为 app 级，见 feishu-app-scoped-openid-fix.md）
-    github_login TEXT DEFAULT '',
-    dingtalk_user_id TEXT DEFAULT '',
-    updated_at TEXT DEFAULT (datetime('now'))
-)
-"""
+UNIFIED_USER_MAPPING_TABLE_SQL = _mgmt_public.unified_user_mapping_ddl()
 
 _db_path = os.environ.get("DEVOPS_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "data/sessions.db"))
 db_lock = threading.RLock()
@@ -140,190 +118,13 @@ else:
             log.info("Schema mode enabled: SQLite table prefixes (mgmt_/rt_/ins_)")
     except Exception as e:
         log.warning(f"Schema mode wrap failed (fallback to plain sqlite): {e}")
-# 迁移旧表 sessions → chat_agent_session（幂等，须先于 CREATE 执行）
-try:
-    _old_tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-    if "sessions" in _old_tables and "chat_agent_session" not in _old_tables:
-        db.execute("ALTER TABLE sessions RENAME TO chat_agent_session")
-        db.commit()
-        log.info("Migrated table sessions -> chat_agent_session")
-    elif "sessions" in _old_tables and "chat_agent_session" in _old_tables:
-        # 新表已被创建但旧表仍存在（历史库），迁移数据后删除旧表
-        db.execute("INSERT OR IGNORE INTO chat_agent_session (id, repo_key, source, repository, status, event_history, oc_session_id, created_at, last_active_at) SELECT id, repo_key, source, repository, status, event_history, oc_session_id, created_at, last_active_at FROM sessions")
-        db.execute("DROP TABLE sessions")
-        db.commit()
-        log.info("Migrated sessions data into chat_agent_session and dropped sessions")
-except Exception as e:
-    log.warning(f"Migrate sessions table failed: {e}")
-# 迁移旧表 feishu_bindings → repo_im_group_binding
-try:
-    _tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-    if "feishu_bindings" in _tables and "repo_im_group_binding" not in _tables:
-        db.execute("ALTER TABLE feishu_bindings RENAME TO repo_im_group_binding")
-        db.commit()
-        log.info("Migrated table feishu_bindings -> repo_im_group_binding")
-except Exception as e:
-    log.warning(f"Migrate feishu_bindings table failed: {e}")
-# 迁移旧表 feishu_users → unified_user_mapping（旧表废弃，直接删除）
-try:
-    _tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-    if "feishu_users" in _tables:
-        db.execute("DROP TABLE feishu_users")
-        db.commit()
-        log.info("Dropped legacy table feishu_users")
-except Exception as e:
-    log.warning(f"Drop feishu_users table failed: {e}")
-db.execute("""
-    CREATE TABLE IF NOT EXISTS chat_agent_session (
-        id TEXT PRIMARY KEY,
-        user_id TEXT DEFAULT '',      -- D105：UUID 字符串（原 INTEGER 0 哨兵）
-        repo_key TEXT DEFAULT '',
-        source TEXT, repository TEXT, status TEXT,
-        runtime TEXT DEFAULT 'opencode',
-        skill TEXT DEFAULT '',
-        event_history MEDIUMTEXT DEFAULT '[]',
-        created_at TEXT, last_active_at TEXT
-    )
-""")
-# 兼容列迁移（幂等，M0 术语重构：runtime_* 为新列名；老库升级时补齐，新库 DDL 已含）
-try:
-    _ccols = [r[1] for r in db.execute("PRAGMA table_info(chat_agent_session)").fetchall()]
-    if "runtime_session_id" not in _ccols:
-        db.execute("ALTER TABLE chat_agent_session ADD COLUMN runtime_session_id TEXT DEFAULT ''")
-except Exception:
-    pass
-try:
-    _ccols = [r[1] for r in db.execute("PRAGMA table_info(chat_agent_session)").fetchall()]
-    if "runtime_id" not in _ccols:
-        db.execute("ALTER TABLE chat_agent_session ADD COLUMN runtime_id INTEGER DEFAULT 0")
-except Exception:
-    pass
-try:
-    db.execute("ALTER TABLE chat_agent_session ADD COLUMN skill_id INTEGER DEFAULT 0")
-except Exception:
-    pass
-db.execute(REPO_IM_GROUP_BINDING_TABLE_SQL)
-# 彻底重建 unified_user_mapping：若表结构不匹配新 DDL（缺 gitcode_nickname/github_login/dingtalk_user_id）
-# 则 DROP 后重建。当前表为空（历史遗留），直接 DROP 无数据丢失。
-try:
-    _um_cols = [r[1] for r in db.execute("PRAGMA table_info(unified_user_mapping)").fetchall()]
-    if _um_cols and not {"gitcode_nickname", "github_login", "dingtalk_user_id"}.issubset(set(_um_cols)):
-        db.execute("DROP TABLE unified_user_mapping")
-        db.commit()
-        log.info("Rebuilt unified_user_mapping (structure mismatch -> dropped & recreated)")
-except Exception as e:
-    log.warning(f"Rebuild unified_user_mapping check failed: {e}")
-db.execute(UNIFIED_USER_MAPPING_TABLE_SQL)
-# 兼容列迁移：unified_user_mapping 增加 gitcode_id（Issue #211，非 OAuth 注册用户的关联字段）
-try:
-    _um_cols_gid = [r[1] for r in db.execute("PRAGMA table_info(unified_user_mapping)").fetchall()]
-    if "gitcode_id" not in _um_cols_gid:
-        db.execute("ALTER TABLE unified_user_mapping ADD COLUMN gitcode_id TEXT DEFAULT ''")
-        db.commit()
-        log.info("Added unified_user_mapping.gitcode_id column")
-except Exception as e:
-    log.warning(f"Add unified_user_mapping.gitcode_id failed: {e}")
-# 回填 unified_user_mapping：grape_accounts 已有但未映射的用户（INSERT OR IGNORE 不覆盖已有飞书绑定）
-# 使 /api/tasks/notify 能解析 assignee→user_id（tasks.py:52）；幂等，每次启动执行
-try:
-    # D32-补丁：从 grape_accounts + external_identities 回填 unified_user_mapping
-    # D43: 用 SHOW TABLES 替代 sqlite_master（MySQL 兼容；MySQLCompatDB 会转换 INSERT OR IGNORE）
-    try:
-        _has_ga = db.execute("SELECT 1 FROM grape_accounts LIMIT 1").fetchone()
-    except Exception:
-        _has_ga = None  # 表不存在
-    if _has_ga:
-        # FR-18.4: backfill 改源——只建 (user_id) 空行，不灌注册名
-        db.execute(
-            "INSERT OR IGNORE INTO unified_user_mapping (user_id) "
-            "SELECT id FROM grape_accounts WHERE id IS NOT NULL AND id NOT IN ('', '0')"
-        )
-        # FR-18.4: 从 external_identities 回填平台列真值（仅填空值不覆盖 PAT 已写真值）
-        try:
-            db.execute(
-                "UPDATE unified_user_mapping SET gitcode_user="
-                "(SELECT ei.external_login FROM external_identities ei "
-                "WHERE ei.grape_user_id=unified_user_mapping.user_id "
-                "AND ei.provider='gitcode' AND ei.status=1 AND ei.external_login!='' LIMIT 1) "
-                "WHERE (gitcode_user IS NULL OR gitcode_user='')"
-            )
-            db.execute(
-                "UPDATE unified_user_mapping SET github_login="
-                "(SELECT ei.external_login FROM external_identities ei "
-                "WHERE ei.grape_user_id=unified_user_mapping.user_id "
-                "AND ei.provider='github' AND ei.status=1 AND ei.external_login!='' LIMIT 1) "
-                "WHERE (github_login IS NULL OR github_login='')"
-            )
-        except Exception:
-            pass
-        # 补充 gitcode_id 关联：从 external_identities 读
-        try:
-            db.execute(
-                "UPDATE unified_user_mapping SET gitcode_id = "
-                "(SELECT ei.external_id FROM external_identities ei "
-                "WHERE ei.grape_user_id = unified_user_mapping.user_id AND ei.provider='gitcode') "
-                "WHERE gitcode_id='' AND user_id IN "
-                "(SELECT grape_user_id FROM external_identities WHERE provider='gitcode')"
-            )
-        except Exception:
-            pass  # external_identities 表可能不存在
-        db.commit()
-    else:
-        log.info("grape_accounts table not yet created, skipping backfill")
-except Exception as e:
-    log.warning(f"Backfill unified_user_mapping failed: {e}")
-# 兼容列迁移：unified_user_mapping 增加 app_id（feishu-app-scoped-openid-fix.md，open_id 为 app 级）
-try:
-    _um_cols2 = [r[1] for r in db.execute("PRAGMA table_info(unified_user_mapping)").fetchall()]
-    if "app_id" not in _um_cols2:
-        db.execute("ALTER TABLE unified_user_mapping ADD COLUMN app_id TEXT DEFAULT ''")
-        db.commit()
-        log.info("Added unified_user_mapping.app_id column")
-except Exception as e:
-    log.warning(f"Add unified_user_mapping.app_id failed: {e}")
-# 兼容旧列迁移（幂等）
-try:
-    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN auto_impl_enabled INTEGER DEFAULT 0")
-except:
-    pass
-try:
-    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN notify_enabled INTEGER DEFAULT 0")
-except:
-    pass
-try:
-    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN im_app_id TEXT DEFAULT ''")
-except:
-    pass
-try:
-    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN im_provider TEXT DEFAULT 'feishu'")
-except:
-    pass
-try:
-    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN im_channel_name TEXT DEFAULT ''")
-except:
-    pass
-try:
-    db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN source TEXT DEFAULT ''")
-except:
-    pass
-try:
-    _ccols = [r[1] for r in db.execute("PRAGMA table_info(chat_agent_session)").fetchall()]
-    if "backend" not in _ccols and "runtime" not in _ccols:
-        db.execute("ALTER TABLE chat_agent_session ADD COLUMN runtime TEXT DEFAULT 'opencode'")
-except:
-    pass
-try:
-    db.execute("ALTER TABLE chat_agent_session ADD COLUMN skill TEXT DEFAULT ''")
-except:
-    pass
-try:
-    db.execute("ALTER TABLE chat_agent_session ADD COLUMN user_id INTEGER DEFAULT 0")
-except:
-    pass
-try:
-    db.execute("ALTER TABLE chat_agent_session ADD COLUMN runtime_session_id TEXT DEFAULT ''")
-except:
-    pass
+# chat_agent_session / repo_im_group_binding 归运行域：旧表迁移、建表、兼容列补齐语句只在
+# runtime public 一份，本处只交出本进程连接做本地库引导（单库/视图期建在本库；
+# 三库独立后由 runtime 进程自己引导，kernel 不再持有这两张表的 DDL）。
+_rt.ensure_chat_session_schema(db)
+# unified_user_mapping 归 mgmt 域：同上，建表/兼容列/回填由该域 public 引导。
+_mgmt_public.ensure_user_mapping_schema(db)
+_rt.ensure_repo_im_binding_schema(db)
 db.commit()
 
 MAX_HISTORY = 100
@@ -333,51 +134,38 @@ def get_or_create_session(repo_key, source, repository, backend=""):
     """获取或创建 repo 级 Chat 会话（chat_agent_session，飞书 Chat 用）"""
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, event_history, runtime_session_id, status FROM chat_agent_session WHERE repo_key=?", (repo_key,))
-        row = c.fetchone()
-        if row:
-            sid, hist_json, bsid, status = row
-            history = []
-            if hist_json:
-                try:
-                    history = json.loads(hist_json)
-                except json.JSONDecodeError:
-                    log.warning(f"session {sid} event_history corrupted (len={len(hist_json)}), resetting to []")
-                    c.execute("UPDATE chat_agent_session SET event_history=? WHERE id=?", ("[]", sid))
-                    db.commit()
-            if status == "failed":
-                c.execute("UPDATE chat_agent_session SET status=? WHERE id=?", ("idle", sid))
-                db.commit()
-            return sid, history, bsid or "", "", False
-        sid = f"sess-{repo_key}-{int(time.time()*1000000)}"
-        now = datetime.now().isoformat()
-        c.execute(
-            "INSERT INTO chat_agent_session (id, repo_key, source, repository, status, event_history, created_at, last_active_at) VALUES (?,?,?,?,?,?,?,?)",
-            (sid, repo_key, source, repository, "idle", "[]", now, now)
-        )
-        db.commit()
-        return sid, [], "", "", True
+    # chat_agent_session 归运行域：读/写走具名查询与写原语（任意拓扑）
+    row = _rt.read_one_any("chat_session_by_repo", (repo_key,))
+    if row:
+        sid, hist_json, bsid, status = row
+        history = []
+        if hist_json:
+            try:
+                history = json.loads(hist_json)
+            except json.JSONDecodeError:
+                log.warning(f"session {sid} event_history corrupted (len={len(hist_json)}), resetting to []")
+                _rt.exec_any("chat_session_history_reset", ("[]", sid))
+        if status == "failed":
+            _rt.exec_any("chat_session_set_status", ("idle", sid))
+        return sid, history, bsid or "", "", False
+    sid = f"sess-{repo_key}-{int(time.time()*1000000)}"
+    now = datetime.now().isoformat()
+    _rt.exec_any("chat_session_insert",
+                 (sid, repo_key, source, repository, "idle", "[]", now, now))
+    return sid, [], "", "", True
 
 
 def update_session(sid, history, status, oc_session_id=None, backend=""):
     """更新 Chat 会话（runtime_session_id 存当前 backend 会话）"""
-    with db_lock:
-        c = db.cursor()
-        if len(history) > MAX_HISTORY:
-            history = history[-MAX_HISTORY:]
-        if oc_session_id:
-            c.execute(
-                "UPDATE chat_agent_session SET event_history=?, status=?, runtime_session_id=?, last_active_at=? WHERE id=?",
-                (json.dumps(history), status, oc_session_id, datetime.now().isoformat(), sid)
-            )
-        else:
-            c.execute(
-                "UPDATE chat_agent_session SET event_history=?, status=?, last_active_at=? WHERE id=?",
-                (json.dumps(history), status, datetime.now().isoformat(), sid)
-            )
-        db.commit()
+    if len(history) > MAX_HISTORY:
+        history = history[-MAX_HISTORY:]
+    if oc_session_id:
+        _rt.exec_any("chat_session_update_state",
+                     (json.dumps(history), status, oc_session_id,
+                      datetime.now().isoformat(), sid))
+    else:
+        _rt.exec_any("chat_session_update_state_noreid",
+                     (json.dumps(history), status, datetime.now().isoformat(), sid))
 
 
 def dump_history_to_file(repo_key: str, history: list, account: str = ""):
@@ -433,49 +221,42 @@ def get_history_file_list(repo_key: str, account: str = "") -> list[str]:
     return files or []
 
 
+def _u2m_conn():
+    """unified_user_mapping 所在连接（该表归 mgmt 域）。
+
+    - 单库/视图期（mgmt 无自有 DSN）：返回本模块 db —— 表就在本库，锁/事务语义不变；
+    - 三库独立且本进程不是 mgmt 域：返回 None → 由 mgmt public 原语走自有 DSN；
+    - 本进程就是 mgmt 域：返回本模块 db（同域写必须留在本地事务，与 domain_read 口径一致）。
+    """
+    try:
+        from src.kernel import db_registry
+        if db_registry.uses_own_dsn("mgmt") and db_registry.current_domain() != "mgmt":
+            return None
+    except Exception:
+        pass
+    return db
+
+
+def _u2m_call(fn, *args, **kwargs):
+    """按拓扑调用 mgmt public 的 um 原语：单库复用本模块连接（持 db_lock），三库走自有 DSN。"""
+    _conn = _u2m_conn()
+    if _conn is None:
+        return fn(*args, **kwargs)
+    with db_lock:
+        return fn(*args, conn=_conn, **kwargs)
+
+
 def get_feishu_open_id(gitcode_user, app_id=""):
     """获取 GitCode 用户名对应的飞书 open_id（按 gitcode_user + app_id 过滤，见 feishu-app-scoped-openid-fix.md）。
 
     app_id 非空 → 仅返回该 App 的 open_id；为空 → 向后兼容（不按 app 过滤）。
+    回退链（FR-20.8 gitcode_user→github_login / FR-22.5 注册名→user_id）由 mgmt 域原语实现，
+    本函数只做拓扑选择（见 src/domains/mgmt/public.resolve_feishu_open_id）。
     """
     if not gitcode_user:
         return None
-    with db_lock:
-        c = db.cursor()
-        if app_id:
-            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=? AND app_id=?", (gitcode_user, app_id))
-            row = c.fetchone()
-            # FR-20.8: gitcode_user 未命中或命中但 open_id 为空时回退查 github_login（GitHub-only 用户）
-            # 回退条件不仅是"没查到行"，还包括"查到行但 feishu_open_id 为空"——
-            # 撞名型场景：gitcode_user 列撞名命中了无飞书的行，真身份在 github_login 列
-            if not row or not row[0]:
-                c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE github_login=? AND app_id=?", (gitcode_user, app_id))
-                row = c.fetchone()
-        else:
-            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,))
-            row = c.fetchone()
-            if not row or not row[0]:
-                c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE github_login=?", (gitcode_user,))
-                row = c.fetchone()
-        if row and row[0]:
-            return row[0]
-        # FR-22.5: 注册名回退——gitcode_user/github_login 都未命中时，
-        # 从 grape_accounts 按 username 查 user_id，再按 user_id 查 um 行的 feishu_open_id。
-        # 场景：注册名 != 平台 login（如注册名 "user_a"，平台 login "login_a"），
-        # FR-18.4 backfill 后 um.gitcode_user 存的是平台 login，注册名查不到。
-        try:
-            c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) AND status=1 LIMIT 1", (gitcode_user,))
-            ga_row = c.fetchone()
-            if ga_row:
-                if app_id:
-                    c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE user_id=? AND app_id=?", (ga_row[0], app_id))
-                else:
-                    c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE user_id=?", (ga_row[0],))
-                row = c.fetchone()
-                return row[0] if row else None
-        except Exception:
-            pass
-        return None
+    from src.domains.mgmt.public import resolve_feishu_open_id
+    return _u2m_call(resolve_feishu_open_id, gitcode_user, app_id)
 
 
 def bind_feishu_identity(user_id, open_id, feishu_name="", app_id=""):
@@ -486,13 +267,15 @@ def bind_feishu_identity(user_id, open_id, feishu_name="", app_id=""):
     """
     if not user_id:
         return False
+    # P4：unified_user_mapping 归 mgmt 域 —— 写语句在 mgmt public，本函数只做拓扑选择 + 提交
+    from src.domains.mgmt.public import bind_feishu_mapping_row
+    _args = (user_id, open_id, feishu_name, app_id, datetime.now().isoformat())
+    _conn = _u2m_conn()
+    if _conn is None:
+        bind_feishu_mapping_row(*_args)
+        return True
     with db_lock:
-        c = db.cursor()
-        c.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (user_id,))
-        c.execute(
-            "UPDATE unified_user_mapping SET feishu_open_id=?, feishu_name=?, app_id=?, updated_at=? "
-            "WHERE user_id=?",
-            (open_id, feishu_name, app_id, datetime.now().isoformat(), user_id))
+        bind_feishu_mapping_row(*_args, conn=_conn)
         db.commit()
         return True
 
@@ -510,73 +293,36 @@ def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_n
       - open_id 非空 → 写 open_id + feishu_name(有则写) + app_id(有则写)；
       - 否则（open_id 空且 app 未变，如 OAuth 登录）→ 仅刷 gitcode_nickname/updated_at，保留 open_id/app_id。
     """
-    # D32: 从 grape_accounts 读 user_id + nickname
-    # 直接用本模块 db 查询（避免 grape_account_db 模块缓存的 db 引用在测试中被隔离）
+    # D32: 从 grape_accounts 读 user_id + nickname（表归 mgmt 域：走该域原语，按拓扑选连接）
     user_id = 0
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id, nickname FROM grape_accounts WHERE LOWER(username)=LOWER(?) AND status=1 LIMIT 1", (gitcode_user,))
-            row = c.fetchone()
+        row = _u2m_call(_mgmt_public.account_auth_row, gitcode_user) if gitcode_user else None
         if row:
             user_id = row[0]
             if not gitcode_nickname:
                 gitcode_nickname = row[1] or ""
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - 账号表不可用时不阻断映射更新（原实现同样吞掉）
+        log.debug(f"account lookup for {gitcode_user} skipped: {exc}")
 
     # FR-11.2: 空入参早退，防止空串命中空串列行
     if not gitcode_user:
         return False
-    with db_lock:
-        c = db.cursor()
-        stored = c.execute(
-            "SELECT user_id, feishu_open_id, feishu_name, app_id FROM unified_user_mapping WHERE gitcode_user=?",
-            (gitcode_user,)).fetchone()
-        stored_open = stored[1] or "" if stored else ""
-        stored_name = stored[2] or "" if stored else ""
-        stored_app = stored[3] or "" if stored else ""
-        app_changed = bool(app_id) and app_id != stored_app
-        if open_id:
-            # 有 open_id（扫码/sync/p2p 确认）：以传入为准，直接写 open_id + feishu_name + app_id
-            final_app = app_id or stored_app
-        elif app_changed:
-            # 换 app 且无新 open_id（手动配置）：刷新 app_id，清空 open_id/feishu_name（需重确认）
-            open_id = ""
-            feishu_name = ""
-            final_app = app_id
-        else:
-            # open_id 空且 app 未变（如 OAuth 登录）：保留已有 open_id/feishu_name/app_id
-            open_id = stored_open
-            if not feishu_name:
-                feishu_name = stored_name
-            final_app = stored_app
-        if user_id:
-            # 有真实 user_id：直接以 user_id 为主键写入/覆盖
-            # Issue #372 §37: INSERT OR IGNORE + UPDATE（不用 REPLACE，避免覆盖 github_login）
-            c.execute(
-                "INSERT OR IGNORE INTO unified_user_mapping (user_id, updated_at) VALUES (?, datetime('now'))",
-                (user_id,)
-            )
-            # FR-18.4: CASE WHEN 守卫——gitcode_user 空串不覆盖真值
-            c.execute(
-                "UPDATE unified_user_mapping SET gitcode_user=CASE WHEN ?='' THEN gitcode_user ELSE ? END, "
-                "gitcode_nickname=?, feishu_open_id=?, feishu_name=?, app_id=?, updated_at=? WHERE user_id=?",
-                (gitcode_user, gitcode_user, gitcode_nickname, open_id, feishu_name, final_app, datetime.now().isoformat(), user_id)
-            )
-        else:
-            row = stored
-            if row:
-                c.execute(
-                    "UPDATE unified_user_mapping SET gitcode_nickname=?, feishu_open_id=?, feishu_name=?, app_id=?, updated_at=? WHERE user_id=?",
-                    (gitcode_nickname, open_id, feishu_name, final_app, datetime.now().isoformat(), row[0])
-                )
-            else:
-                # 无 user_id 也无已有记录：跳过（user_id 必须为真实 grape_accounts.id）
-                log.info(f"update_unified_user_info: skip mapping for {gitcode_user} (no grape_accounts record)")
-                return False
-        db.commit()
-        return True
+    # P4：判定 + 写语句都在 mgmt public（sync_user_mapping），本函数只做拓扑选择与提交
+    from src.domains.mgmt.public import sync_user_mapping
+    _args = (gitcode_user, open_id, feishu_name, gitcode_nickname, app_id, user_id,
+             datetime.now().isoformat())
+    _conn = _u2m_conn()
+    if _conn is None:
+        _res = sync_user_mapping(*_args)
+    else:
+        with db_lock:
+            _res = sync_user_mapping(*_args, conn=_conn)
+            db.commit()
+    if _res.get("action") == "skipped":
+        # 无 user_id 也无已有记录：跳过（user_id 必须为真实 grape_accounts.id）
+        log.info(f"update_unified_user_info: skip mapping for {gitcode_user} (no grape_accounts record)")
+        return False
+    return True
 
 
 def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_nickname=""):
@@ -587,79 +333,60 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_
 
 def get_feishu_mapping(repo_key):
     """获取所有已知映射 {gitcode_user: {open_id, name, gitcode_nickname}}"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT gitcode_user, github_login, feishu_open_id, feishu_name, gitcode_nickname FROM unified_user_mapping WHERE gitcode_user!='' OR github_login!=''")
-        return {row[0] or row[1]: {"open_id": row[2], "name": row[3], "gitcode_nickname": row[4] or ""} for row in c.fetchall()}
+    from src.domains.mgmt.public import list_user_mappings
+    rows = _u2m_call(list_user_mappings)
+    return {row[0] or row[1]: {"open_id": row[2], "name": row[3], "gitcode_nickname": row[4] or ""} for row in rows}
 
 
 def get_feishu_group_name_map(repo_key):
     """获取飞书群成员 {name: open_id}（从 unified_user_mapping 聚合得到）"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT feishu_name, feishu_open_id FROM unified_user_mapping WHERE feishu_name!=''")
-        return {row[0]: row[1] for row in c.fetchall()}
+    from src.domains.mgmt.public import list_feishu_name_open_id_pairs
+    return {row[0]: row[1] for row in _u2m_call(list_feishu_name_open_id_pairs)}
 
 
 def get_auto_impl_enabled(repo_key):
     """查询仓库是否开启了自动实现"""
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT auto_impl_enabled FROM repo_im_group_binding WHERE repo_key=?", (repo_key,))
-        row = c.fetchone()
-        return bool(row[0]) if row else False
+    # repo_im_group_binding 归运行域：读走具名查询（任意拓扑）
+    row = _rt.read_one_any("repo_im_auto_impl", (repo_key,))
+    return bool(row[0]) if row else False
 
 
 def set_auto_impl_enabled(repo_key, enabled):
     """设置仓库的自动实现开关"""
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
-    with db_lock:
-        c = db.cursor()
-        c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=? WHERE repo_key=?", (int(enabled), repo_key))
-        db.commit()
+    _rt.exec_any("repo_im_set_auto_impl", (int(enabled), repo_key))
 
 
 def get_notify_enabled(repo_key):
     """查询仓库是否开启了飞书通知"""
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT notify_enabled FROM repo_im_group_binding WHERE repo_key=?", (repo_key,))
-        row = c.fetchone()
-        # default to 0 (False) if column is NULL
-        return bool(row[0]) if row and row[0] is not None else False
+    row = _rt.read_one_any("repo_im_notify", (repo_key,))
+    # default to 0 (False) if column is NULL
+    return bool(row[0]) if row and row[0] is not None else False
 
 
 def set_notify_enabled(repo_key, enabled):
     """设置仓库的飞书通知开关"""
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
-    with db_lock:
-        c = db.cursor()
-        c.execute("UPDATE repo_im_group_binding SET notify_enabled=? WHERE repo_key=?", (int(enabled), repo_key))
-        db.commit()
+    _rt.exec_any("repo_im_set_notify", (int(enabled), repo_key))
 
 
 # ====== repo_im_group_binding UPSERT (FR-CQ-2) ======
 
 def upsert_repo_im_binding(chat_id: str, repo_key: str, source: str,
                            bind_by: str, app_id: str):
-    """群绑定仓库 UPSERT（调用方负责 db_lock + commit）。
+    """群绑定仓库 UPSERT（owner 域原语自提交，调用方无需再 commit）。
 
     FR-14.1: ON CONFLICT 只更新绑定列，保留 notify_enabled/auto_impl_enabled 用户配置。
-    调用方必须在 db_lock 块内调用，并在调用后执行后续 UPDATE + commit。
+    原实现要求调用方持 db_lock 且负责提交；三库独立后语句落在运行域连接上（autocommit），
+    故改为自提交。调用方仍可在外层持 db_lock（无害），但不再是本函数正确性的前提。
     """
-    c = db.cursor()
-    c.execute(
-        "INSERT INTO repo_im_group_binding (im_provider, im_chat_id, repo_key, source, bind_by, im_app_id) "
-        "VALUES ('feishu',?,?,?,?,?) "
-        "ON CONFLICT(im_provider, im_chat_id, im_app_id) DO UPDATE SET "
-        "repo_key=excluded.repo_key, source=excluded.source, bind_by=excluded.bind_by, im_app_id=excluded.im_app_id",
-        (chat_id, repo_key, source, str(bind_by), app_id))
+    _rt.upsert_repo_im_binding(chat_id, repo_key, source, bind_by, app_id)
 
 
 def _is_constraint_error(exc: Exception) -> bool:
@@ -677,79 +404,68 @@ def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "
     repo_key = to_repo_key(repo_key)
     import uuid
     cid = str(uuid.uuid4())
-    with db_lock:
-        c = db.cursor()
-        c.execute("INSERT INTO chat_conversations (id, user_id, agent_session_id, runtime_session_id, repo_key, im_channel_id, title, user_gitcode_token, conv_type, issue_number) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                  (cid, user_id, agent_session_id, "", repo_key, im_channel_id, title, user_gitcode_token,
-                   conv_type or "general", issue_number or 0))
-        db.commit()
-    return cid
+    _conv_type = conv_type or "general"
+    _issue_no = issue_number or 0
+    try:
+        _rt.exec_any("conversation_insert",
+                     (cid, user_id, agent_session_id, "", repo_key, im_channel_id, title,
+                      user_gitcode_token, _conv_type, _issue_no))
+        return cid
+    except Exception as exc:
+        # MySQL 上 (user_id, repo_key, issue_number, conv_type) 是唯一键（sqlite 测试库无此约束）：
+        # 命中即「会话已存在」，返回既有 id —— 创建会话本就是 get-or-create 语义。
+        msg = str(exc)
+        if not ("1062" in msg or "Duplicate" in msg or "UNIQUE" in msg):
+            raise
+        # 复用既有读路径（不新增跨域 SQL）：命中同键会话即返回其 id
+        for conv in get_user_conversations(user_id, repo_key, limit=50):
+            if int(conv.get("issue_number") or 0) == int(_issue_no) \
+                    and (conv.get("conv_type") or "general") == _conv_type:
+                return str(conv["id"])
+        raise
 
 
 def get_user_conversations(user_id: int, repo_key: str = "", limit: int = 20) -> list[dict]:
     from src.kernel.repo_key import to_repo_key
     if repo_key:
         repo_key = to_repo_key(repo_key)
-    with db_lock:
-        c = db.cursor()
-        if repo_key:
-            c.execute("SELECT id, user_id, agent_session_id, runtime_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at, conv_type, issue_number FROM chat_conversations WHERE user_id=? AND repo_key=? ORDER BY updated_at DESC LIMIT ?", (user_id, repo_key, limit))
-        else:
-            c.execute("SELECT id, user_id, agent_session_id, runtime_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at, conv_type, issue_number FROM chat_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
-        return [{"id": r[0], "user_id": r[1], "agent_session_id": r[2] or "", "runtime_session_id": r[3] or "", "user_gitcode_token": r[4] or "", "repo_key": r[5] or "", "im_channel_id": r[6], "title": r[7], "status": r[8], "created_at": normalize_event_time(r[9]), "updated_at": normalize_event_time(r[10]), "conv_type": r[11] or "general", "issue_number": r[12] or 0} for r in c.fetchall()]
+    # chat_conversations 归运行域：具名查询走任意拓扑（三库独立后无视图可读，也不再保留本地兜底 SQL）
+    if repo_key:
+        rows = _rt.read_all_any("conversations_by_user_repo", (user_id, repo_key, limit))
+    else:
+        rows = _rt.read_all_any("conversations_by_user", (user_id, limit))
+    return [{"id": r[0], "user_id": r[1], "agent_session_id": r[2] or "", "runtime_session_id": r[3] or "", "user_gitcode_token": r[4] or "", "repo_key": r[5] or "", "im_channel_id": r[6], "title": r[7], "status": r[8], "created_at": normalize_event_time(r[9]), "updated_at": normalize_event_time(r[10]), "conv_type": r[11] or "general", "issue_number": r[12] or 0} for r in rows]
 
 
 def get_conversation(conv_id: str) -> dict | None:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id, user_id, agent_session_id, runtime_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at, conv_type, issue_number FROM chat_conversations WHERE id=?", (conv_id,))
-        row = c.fetchone()
-        if not row:
-            return None
-        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5] or "",
-                "im_channel_id": row[6], "title": row[7], "status": row[8], "created_at": normalize_event_time(row[9]), "updated_at": normalize_event_time(row[10]),
-                "conv_type": row[11] or "general", "issue_number": row[12] or 0}
+    row = _rt.read_one_any("conversation_by_id", (conv_id,))
+    if not row:
+        return None
+    return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5] or "",
+            "im_channel_id": row[6], "title": row[7], "status": row[8], "created_at": normalize_event_time(row[9]), "updated_at": normalize_event_time(row[10]),
+            "conv_type": row[11] or "general", "issue_number": row[12] or 0}
 
 
 def get_conversation_by_im(im_channel_id: str, user_id: str = "") -> dict | None:
     """按 IM 渠道 + 用户查询会话（IM chat 场景用，幂等复用）"""
-    with db_lock:
-        c = db.cursor()
-        if str(user_id or "") not in ("", "0"):  # D105：uuid 字符串哨兵（>0 会 TypeError）
-            c.execute("SELECT id, user_id, agent_session_id, runtime_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at, conv_type, issue_number FROM chat_conversations WHERE im_channel_id=? AND user_id=? ORDER BY updated_at DESC LIMIT 1", (im_channel_id, user_id))
-        else:
-            c.execute("SELECT id, user_id, agent_session_id, runtime_session_id, user_gitcode_token, repo_key, im_channel_id, title, status, created_at, updated_at, conv_type, issue_number FROM chat_conversations WHERE im_channel_id=? ORDER BY updated_at DESC LIMIT 1", (im_channel_id,))
-        row = c.fetchone()
-        if not row:
-            return None
-        return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5] or "", "im_channel_id": row[6],
-                "title": row[7], "status": row[8], "created_at": normalize_event_time(row[9]), "updated_at": normalize_event_time(row[10]),
-                "conv_type": row[11] or "general", "issue_number": row[12] or 0}
+    if str(user_id or "") not in ("", "0"):  # D105：uuid 字符串哨兵（>0 会 TypeError）
+        row = _rt.read_one_any("conversation_by_im_user", (im_channel_id, user_id))
+    else:
+        row = _rt.read_one_any("conversation_by_im", (im_channel_id,))
+    if not row:
+        return None
+    return {"id": row[0], "user_id": row[1], "agent_session_id": row[2] or "", "runtime_session_id": row[3] or "", "user_gitcode_token": row[4] or "", "repo_key": row[5] or "", "im_channel_id": row[6],
+            "title": row[7], "status": row[8], "created_at": normalize_event_time(row[9]), "updated_at": normalize_event_time(row[10]),
+            "conv_type": row[11] or "general", "issue_number": row[12] or 0}
 
 
 def update_conversation(conv_id: str, **kwargs):
-    allowed = {"title", "status", "runtime_session_id", "agent_session_id", "user_gitcode_token",
-               "conv_type", "issue_number", "im_channel_id"}
-    sets = []
-    vals = []
-    for k, v in kwargs.items():
-        if k in allowed:
-            sets.append(f"{k}=?")
-            vals.append(v)
-    if not sets:
-        return
-    vals.append(conv_id)
-    with db_lock:
-        c = db.cursor()
-        c.execute(f"UPDATE chat_conversations SET {', '.join(sets)}, updated_at=datetime('now') WHERE id=?", vals)
-        db.commit()
+    # 可写列白名单与「updated_at 同步刷新」语义在 owner 域原语里（见 runtime public）
+    _rt.update_conversation_fields(conv_id, kwargs)
 
 
 def touch_conversation(conv_id: str):
-    with db_lock:
-        c = db.cursor()
-        c.execute("UPDATE chat_conversations SET updated_at=datetime('now') WHERE id=?", (conv_id,))
-        db.commit()
+    _rt.exec_any("conversation_touch", (conv_id,))
 
 
 def mark_task_processing_by_conversation(conv_id: str):
@@ -761,62 +477,33 @@ def mark_task_processing_by_conversation(conv_id: str):
     if not conv_id:
         return
     from src.kernel.repo_key import to_repo_key
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT user_id, repo_key, conv_type, issue_number FROM chat_conversations WHERE id=?", (conv_id,))
-        row = c.fetchone()
-        if not row or row[2] != "task" or not row[3]:
-            return
-        conv_user_id, repo_key, _ct, issue_number = row
-        repo_key = to_repo_key(repo_key)
-        c.execute("UPDATE issue SET status='processing' WHERE conversation_id=? AND user_id=? AND status='active'",
-                  (conv_id, conv_user_id))
-        if c.rowcount == 0:
-            c.execute(
-                "UPDATE issue SET status='processing' WHERE repo_key=? AND issue_number=? AND user_id=? AND status='active'",
-                (repo_key, issue_number, conv_user_id))
-        db.commit()
+    row = _rt.read_one_any("conversation_brief", (conv_id,))
+    if not row or row[2] != "task" or not row[3]:
+        return
+    conv_user_id, repo_key, _ct, issue_number = row
+    _rt.mark_issue_processing(conv_id, conv_user_id, to_repo_key(repo_key), issue_number)
 
 
 def join_feishu_chat(chat_id: str, conv_id: str, user_id: int) -> bool:
     """原子切换飞书接入指针（feishu-web-chat-unified-design.md §3.1）。
 
     im_channel_id 从"永久绑定"降级为"当前飞书接入指针"：任一时刻一个飞书接入点
-    （chat_id）只能指向一条 conversation。把 chat_id 从旧 conversation 移到 conv_id，
-    清旧设新在 db_lock 内同事务执行，防竞态。
+    （chat_id）只能指向一条 conversation。校验属主 + 清旧 + 设新在同一事务内完成，防竞态。
     """
-    with db_lock:
-        c = db.cursor()
-        # 新目标必须存在且属于该用户
-        c.execute("SELECT user_id FROM chat_conversations WHERE id=?", (conv_id,))
-        row = c.fetchone()
-        if not row or row[0] != user_id:
-            log.warning(
-                f"join_feishu_chat deny: conv={conv_id[:40] or ''} conv_user={row[0] if row else 'missing'} "
-                f"uid={user_id} chat={chat_id[:20] if chat_id else ''}"
-            )
-            return False
-        # 清旧：清空当前持有该 chat_id 的其它 conversation
-        c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=? AND id!=?", (chat_id, conv_id))
-        # 设新
-        c.execute("UPDATE chat_conversations SET im_channel_id=? WHERE id=?", (chat_id, conv_id))
-        db.commit()
-        return True
+    ok = _rt.join_feishu_chat(chat_id, conv_id, user_id)
+    if not ok:
+        log.warning(
+            f"join_feishu_chat deny: conv={conv_id[:40] if conv_id else ''} "
+            f"uid={user_id} chat={chat_id[:20] if chat_id else ''}"
+        )
+    return ok
 
 
 # ====== chat_messages CRUD ======
 
 def add_message(conversation_id: str, role: str, content: str, task_id: str = "", generate_status: int = None) -> int:
-    with db_lock:
-        c = db.cursor()
-        if task_id:
-            c.execute("INSERT INTO chat_messages (conversation_id, role, content, task_id, generate_status) VALUES (?,?,?,?,?)",
-                      (conversation_id, role, content, task_id, generate_status))
-        else:
-            c.execute("INSERT INTO chat_messages (conversation_id, role, content) VALUES (?,?,?)",
-                      (conversation_id, role, content))
-        db.commit()
-        return c.lastrowid
+    # chat_messages 归运行域：写原语返回自增主键（任意拓扑，两条插入分支保持在 owner 域）
+    return _rt.append_chat_message(conversation_id, role, content, task_id, generate_status)
 
 
 _MSG_COLS = "id, conversation_id, role, content, created_at, task_id, generate_status, deleted"
@@ -830,75 +517,49 @@ def _row_to_msg(r) -> dict:
 
 def get_message(msg_id: int) -> dict | None:
     """按主键取单条消息（Issue #442 撤回用）。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute(f"SELECT {_MSG_COLS} FROM chat_messages WHERE id=?", (msg_id,))
-        row = c.fetchone()
-        return _row_to_msg(row) if row else None
+    row = _rt.read_one_any("message_by_id", (msg_id,))
+    return _row_to_msg(row) if row else None
 
 
 def recall_message(msg_id: int) -> bool:
     """软删除一条消息（Issue #442：撤回 = deleted=1，保留原文供重新编辑）。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("UPDATE chat_messages SET deleted=1 WHERE id=? AND deleted=0", (msg_id,))
-        db.commit()
-        return c.rowcount > 0
+    return _rt.exec_any("message_recall", (msg_id,)) > 0
 
 
 def recall_agent_replies_by_task(task_id: str) -> int:
     """软删除同一轮（task_id 相同）的 agent 回复消息（Issue #442）。"""
     if not task_id:
         return 0
-    with db_lock:
-        c = db.cursor()
-        c.execute("UPDATE chat_messages SET deleted=1 WHERE task_id=? AND role IN ('agent','assistant') AND deleted=0",
-                  (task_id,))
-        db.commit()
-        return c.rowcount
+    return _rt.exec_any("message_recall_by_task", (task_id,))
 
 
 def is_task_recalled(task_id: str) -> bool:
     """该轮次用户消息是否已撤回（agent_fn 落库前校验，Issue #442）。"""
     if not task_id:
         return False
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT deleted FROM chat_messages WHERE task_id=? AND role='user' ORDER BY id DESC LIMIT 1",
-                  (task_id,))
-        row = c.fetchone()
-        return bool(row and row[0])
+    row = _rt.read_one_any("message_user_deleted", (task_id,))
+    return bool(row and row[0])
 
 
 def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> list[dict]:
-    with db_lock:
-        c = db.cursor()
-        if before_id > 0:
-            c.execute(f"SELECT {_MSG_COLS} FROM chat_messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",
-                      (conversation_id, before_id, limit))
-        else:
-            c.execute(f"SELECT {_MSG_COLS} FROM chat_messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
-                      (conversation_id, limit))
-        rows = c.fetchall()
-        rows.reverse()
-        return [_row_to_msg(r) for r in rows]
+    if before_id > 0:
+        rows = _rt.read_all_any("messages_page_before", (conversation_id, before_id, limit))
+    else:
+        rows = _rt.read_all_any("messages_page", (conversation_id, limit))
+    rows = list(rows or [])
+    rows.reverse()
+    return [_row_to_msg(r) for r in rows]
 
 
 def delete_messages_by_conv(conversation_id: str):
-    with db_lock:
-        c = db.cursor()
-        c.execute("DELETE FROM chat_messages WHERE conversation_id=?", (conversation_id,))
-        db.commit()
+    _rt.exec_any("messages_delete_by_conversation", (conversation_id,))
 
 
 def delete_conversation(conv_id: str):
     """删除会话 DB 记录 + 清理文件系统工作目录（防孤儿目录堆积）。"""
     # 先查 user_id（目录路径需要），删 DB 后就查不到了
     conv = get_conversation(conv_id)
-    with db_lock:
-        c = db.cursor()
-        c.execute("DELETE FROM chat_conversations WHERE id=?", (conv_id,))
-        db.commit()
+    _rt.exec_any("conversation_delete", (conv_id,))
     # 清理 chat 工作目录：{CHAT_CWD_BASE}/chat/{user_id}/{conv_id}/
     if conv and conv.get("user_id"):
         try:
@@ -912,7 +573,7 @@ def delete_conversation(conv_id: str):
 
 # ====== chat_config CRUD（合并进 chat_agent_session）======
 
-def _chat_config_candidate_rows(c, user_id: int):
+def _chat_config_candidate_rows(user_id: int):
     """按优先级返回该用户的全局 Chat 配置候选行。
 
     优先级：① 写路径那一行（`id='sess-cfg-{user_id}'`）② 历史遗留行（`user_id` 匹配但 id 错位，
@@ -927,34 +588,29 @@ def _chat_config_candidate_rows(c, user_id: int):
 
     A2 收尾：im_* 三列已不是凭证真相源（改读 grape_t_channel_installation），这里不再 SELECT。
     """
-    _cols = "id, runtime_id, skill, skill_id"
     seen, out = set(), []
     # 必须**同时**校验 user_id：云端存在 id 与 user_id 跨空间错位的行（如 id='sess-cfg-37' 却属于 user_id=1），
     # 只按 id 取会把**别人的配置（含飞书 app_id/secret）**当成自己的（实测 user 37 读到 user 1 的行）。
-    c.execute(f"SELECT {_cols} FROM chat_agent_session WHERE id=? AND user_id=?"
-              " AND (repo_key='' OR repo_key IS NULL)", (f"sess-cfg-{user_id}", user_id))
-    for r in c.fetchall():
-        if r[0] not in seen:
-            seen.add(r[0])
-            out.append((r[0], tuple(r[1:])))
-    c.execute(f"SELECT {_cols} FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL)"
-              " ORDER BY last_active_at DESC, id DESC", (user_id,))
-    for r in c.fetchall():
-        if r[0] not in seen:
-            seen.add(r[0])
-            out.append((r[0], tuple(r[1:])))
+    # 两条具名查询都在 owner 域（chat_agent_session 归运行域），列序与原 SQL 一致。
+    for rows in (
+        _rt.read_all_any("chat_config_row_canonical", (f"sess-cfg-{user_id}", user_id)),
+        _rt.read_all_any("chat_config_rows_by_user", (user_id,)),
+    ):
+        for r in rows:
+            if r[0] not in seen:
+                seen.add(r[0])
+                out.append((r[0], tuple(r[1:])))
     return out
 
 
-def _chat_config_row_engine(c, runtime_id: int):
+def _chat_config_row_engine(runtime_id: int):
     """解析配置行指向的引擎，返回 (backend_name, usable)。
 
     usable=False 覆盖既有的两种"按未配置处理"情形：引擎行已不存在、引擎名不是已知引擎。
     """
     if not runtime_id:
         return "", True
-    c.execute("SELECT name FROM agent_runtimes WHERE id=?", (runtime_id,))
-    brow = c.fetchone()
+    brow = _rt.read_one_any("agent_runtime_name_by_id", (runtime_id,))
     if not brow or not brow[0]:
         # runtime_id 指向的引擎行已不存在（被删除）：视为未绑定，走本机直连兜底
         log.warning(f"get_chat_config: runtime_id={runtime_id} 不存在（引擎行已删除），按未配置处理")
@@ -968,7 +624,7 @@ def _chat_config_row_engine(c, runtime_id: int):
     return brow[0], True
 
 
-def _pick_chat_config_row(c, user_id: int):
+def _pick_chat_config_row(user_id: int):
     """按"写路径优先 + 不降级可用配置"挑出该用户的生效配置行。
 
     返回 (row_id, row, backend_name)：
@@ -978,11 +634,11 @@ def _pick_chat_config_row(c, user_id: int):
 
     单独抽出来是为了让**诊断脚本/离线核查**能复用同一份逻辑（避免口径漂移）。
     """
-    cands = _chat_config_candidate_rows(c, user_id)
+    cands = _chat_config_candidate_rows(user_id)
     if not cands:
         return None, None, ""
     for rid, cand in cands:
-        name, usable = _chat_config_row_engine(c, cand[0])
+        name, usable = _chat_config_row_engine(cand[0])
         if usable:
             return rid, cand, name
     rid, cand = cands[0]
@@ -999,29 +655,27 @@ def get_chat_config(user_id: int) -> dict:
     多行并存时（见 _chat_config_candidate_rows）：**优先读写路径那一行**，保证"写进去的配置一定
     读得回来"；该行引擎不可用时**不把可用配置降级**，退回最近活跃的遗留行；全部不可用才走兜底。
     """
-    with db_lock:
-        c = db.cursor()
-        # 读侧止血（本仓 功能分支 保留的实现，见 ba7faf3e1e）：先精确取写路径那行
-        # id='sess-cfg-{user_id}'（并校验 user_id，云端存在跨 id 空间错位行），取不到才退化。
-        # 备注：weekly-08 线上另有一套等价实现（「已配置行优先 + id ASC」，见
-        # chat-config-duplicate-row-unbind-fix-design.md）——同一问题的两种解法，本分支沿用下面这套
-        # （canonical-first + 不降级；有 test_chat_config_row_selection.py 5 项钉住）。
-        picked_id, row, backend_name = _pick_chat_config_row(c, user_id)
-        if row is None:
-            # 无配置：本机直连兜底 + 幂等物化默认 runtime_id（chat-agent-backend-resolution-fix.md §3.1）
-            cfg = _chat_config_with_local_backend("", 0, "", 0, "", user_id=user_id)
-            if cfg.get("runtime_id"):
-                try:
-                    _write_chat_config_row(user_id, runtime_id=cfg["runtime_id"])
-                except Exception as e:
-                    log.warning(f"get_chat_config materialize default failed: {e}")
-            return cfg
-        if picked_id != f"sess-cfg-{user_id}" and backend_name:
-            # 命中历史遗留行（写路径碰不到它）——仍需迁移合并，见诊断报告第三步
-            log.info(f"get_chat_config: user_id={user_id} 命中历史遗留配置行 '{picked_id}'"
-                     f"（写路径行为 'sess-cfg-{user_id}'），建议迁移合并")
-        return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
-                                               "", user_id=user_id)
+    # 读侧止血（本仓 功能分支 保留的实现，见 ba7faf3e1e）：先精确取写路径那行
+    # id='sess-cfg-{user_id}'（并校验 user_id，云端存在跨 id 空间错位行），取不到才退化。
+    # 备注：weekly-08 线上另有一套等价实现（「已配置行优先 + id ASC」，见
+    # chat-config-duplicate-row-unbind-fix-design.md）——同一问题的两种解法，本分支沿用下面这套
+    # （canonical-first + 不降级；有 test_chat_config_row_selection.py 5 项钉住）。
+    picked_id, row, backend_name = _pick_chat_config_row(user_id)
+    if row is None:
+        # 无配置：本机直连兜底 + 幂等物化默认 runtime_id（chat-agent-backend-resolution-fix.md §3.1）
+        cfg = _chat_config_with_local_backend("", 0, "", 0, "", user_id=user_id)
+        if cfg.get("runtime_id"):
+            try:
+                _write_chat_config_row(user_id, runtime_id=cfg["runtime_id"])
+            except Exception as e:
+                log.warning(f"get_chat_config materialize default failed: {e}")
+        return cfg
+    if picked_id != f"sess-cfg-{user_id}" and backend_name:
+        # 命中历史遗留行（写路径碰不到它）——仍需迁移合并，见诊断报告第三步
+        log.info(f"get_chat_config: user_id={user_id} 命中历史遗留配置行 '{picked_id}'"
+                 f"（写路径行为 'sess-cfg-{user_id}'），建议迁移合并")
+    return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
+                                           "", user_id=user_id)
 
 
 def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
@@ -1075,17 +729,9 @@ def _resolve_chat_runtime_id(backend: str) -> int:
 
 
 def _write_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "", skill_id: int = 0):
-    sid = f"sess-cfg-{user_id}"
-    with db_lock:
-        c = db.cursor()
-        # 写前收敛重复：同 user 的 repo_key='' 行只保留本 sid（账号迁移残留行一并清理）
-        c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) AND id!=?",
-                  (user_id, sid))
-        c.execute(
-            "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, skill, skill_id, created_at, last_active_at) VALUES (?,?,?,?,?,?,datetime('now'),datetime('now'))",
-            (sid, user_id, "", runtime_id, skill, skill_id)
-        )
-        db.commit()
+    # 写前收敛重复 + upsert 在 owner 域同一事务内（见 runtime public.upsert_chat_config_row）：
+    # 同 user 的 repo_key='' 行只保留 'sess-cfg-{user_id}'（账号迁移残留行一并清理）。
+    _rt.upsert_chat_config_row(user_id, runtime_id=runtime_id, skill=skill, skill_id=skill_id)
 
 
 def set_chat_config(user_id: int, **kwargs):

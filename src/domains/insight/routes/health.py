@@ -3,7 +3,11 @@
 供 K8s livenessProbe / nginx 健康检查 / Docker healthcheck 使用。
 不查数据库、不暴露系统规模。
 """
+import logging
+
 from fastapi import APIRouter
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -48,30 +52,20 @@ def health():
         split_warning = ""
 
     # Issue #452: 暴露 agent_runtime 状态，缺失时显式标记 missing 而非静默通过
+    # （三库收口：两条表的读取收进 runtime 域 public；本文件不留 SQL。原 lib 分支
+    # 上的 `.fetchone()` 是对已 materialize 元组的二次调用，三库拓扑必 AttributeError
+    # 并被吞成 unknown —— 本批随原语一起修掉。）
     agent_runtime_status = "unknown"
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_34b97d_f
-            _ru_lib_34b97d = _ru_lib_34b97d_f(foreign_only=True)
-            if _ru_lib_34b97d is not None:
-                c = _ru_lib_34b97d.read_one("agent_runtimes_34b97d", ).fetchone()
-            else:
-                row = c.execute(
-                    "SELECT name, status, healthy FROM agent_runtimes "
-                    "WHERE status='online' AND healthy=1 "
-                    "ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END "
-                    "LIMIT 1"
-                ).fetchone()
-            if row:
-                agent_runtime_status = "online"
-            else:
-                # 有 runtime 记录但无 online+healthy 的
-                count = c.execute("SELECT COUNT(*) FROM agent_runtimes").fetchone()[0]
-                agent_runtime_status = "missing" if count == 0 else "unhealthy"
-    except Exception:
-        pass
+        from src.domains.runtime.public import agent_runtime_health_snapshot_any
+        ready_row, runtime_total = agent_runtime_health_snapshot_any()
+        if ready_row:
+            agent_runtime_status = "online"
+        else:
+            # 有 runtime 记录但无 online+healthy 的
+            agent_runtime_status = "missing" if runtime_total == 0 else "unhealthy"
+    except Exception as _e:  # noqa: BLE001
+        log.debug(f"agent runtime health snapshot failed: {_e}")
 
     # Issue #887：skill 一致性门禁聚合项（近 7 天 [skill_mismatch] 拒绝数，AC4）。
     # 免鉴权端点只暴露计数与状态，不含仓库/技能明细；查询失败显式 unknown。

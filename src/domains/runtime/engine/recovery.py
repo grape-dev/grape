@@ -187,16 +187,14 @@ def _readd_scene_bindings(c, runtime_id: int, now_iso: str) -> list:
     except Exception as e:
         log.warning(f"_readd_scene_bindings: query detach log failed (runtime={runtime_id}): {e}")
         return added
+
+    # SQL 在 mgmt public（本表归 mgmt）：两条拓扑同一句，调用方不再留兜底 SQL，
+    # 也不再需要「lib 优先 / 本地兜底」两支。延迟 import 保持模块级不绑死两个大包。
+    from src.domains.mgmt import public as _mgmt_scene
+
     for log_id, scene_row_id, node_tag in rows:
         try:
-            from src.kernel.domain_read import mgmt_lib as _mg_lib_b5cd89_f
-            _mg_lib_b5cd89 = _mg_lib_b5cd89_f(foreign_only=True)
-            if _mg_lib_b5cd89 is not None:
-                c = _mg_lib_b5cd89.read_one("devops_pipeline_scene_b5cd89", (scene_row_id,)).fetchone()
-            else:
-                srow = c.execute(
-                    "SELECT nodes_json FROM devops_pipeline_scene WHERE id=?",
-                    (scene_row_id,)).fetchone()
+            srow = _mgmt_scene.scene_nodes_row_by_id_any(scene_row_id, c)
             if not srow:
                 c.execute("UPDATE scene_engine_detach_log SET rebound_at=? WHERE id=?",
                           (now_iso, log_id))

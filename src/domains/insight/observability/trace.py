@@ -66,51 +66,41 @@ def _iso(d) -> str:
 # ---------------------------------------------------------------- 回填
 
 def stamp_missing(limit: int = 5000) -> int:
-    """给还没 trace 的任务补上两个 id（幂等，可反复调用）。返回补齐行数。"""
-    from src.kernel.session_manager import db, db_lock
+    """给还没 trace 的任务补上两个 id（幂等，可反复调用）。返回补齐行数。
+
+    取数在 runtime 域（`agent_tasks` 归 runtime）：读走任意拓扑具名查询，写走
+    `stamp_task_traces_any`；有自有 DSN 时仍先进跨域写意图队列（P3-5g 的整批语义）。
+    """
+    from src.kernel.owner_db import owner_lock as _owner_lock
+    db_lock = _owner_lock("insight")
+    from src.domains.runtime import public as runtime_public
     done = 0
     try:
         with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_3e8d71_f
-            _ru_lib_3e8d71 = _ru_lib_3e8d71_f(foreign_only=True)
-            if _ru_lib_3e8d71 is not None:
-                rows = _ru_lib_3e8d71.read_all("agent_tasks_3e8d71", (int(limit),))
-            else:
-                c.execute("SELECT id, repo_key, issue_id FROM agent_tasks"
-                          " WHERE trace_id IS NULL OR trace_id='' LIMIT ?", (int(limit),))
-                rows = c.fetchall()
+            rows = runtime_public.trace_unstamped_tasks(limit)
+            pairs = [(tid, task_trace_id(tid),
+                      pipeline_trace_id(rk or "", iss or "", tid)) for tid, rk, iss in rows]
             # P3-5g：agent_tasks 在 runtime 域；insight 进程整批补写收成一条意图
             # （逐行 submit 会产生上千条意图行，且丢失"一批补完"的语义）
             from src.kernel.domain_read import runtime_lib as _rt_lib_sm
             from src.kernel import cross_write as _xw_sm
             _sm_done = False
             _rt_sm = _rt_lib_sm(foreign_only=True)
-            if _rt_sm is not None and rows:
+            if _rt_sm is not None and pairs:
                 _rt_sm_ok = _rt_sm
-                _pairs = [(tid, task_trace_id(tid),
-                           pipeline_trace_id(rk or "", iss or "", tid)) for tid, rk, iss in rows]
                 _sm_n: dict = {}
 
                 def _apply_sm() -> None:
-                    _sm_n["n"] = _rt_sm_ok.stamp_task_traces(_pairs)
+                    _sm_n["n"] = _rt_sm_ok.stamp_task_traces(pairs)
 
                 _sm_done = _xw_sm.submit_if_lib(
                     _rt_sm_ok, "runtime", "agent_tasks_stamp_traces",
-                    f"agent-traces:{len(_pairs)}:{_pairs[0][0]}",
-                    {"pairs": [[str(p[0]), p[1], p[2]] for p in _pairs]}, _apply_sm, log)
+                    f"agent-traces:{len(pairs)}:{pairs[0][0]}",
+                    {"pairs": [[str(p[0]), p[1], p[2]] for p in pairs]}, _apply_sm, log)
                 if _sm_done:
                     done = int(_sm_n.get("n") or 0)
             if not _sm_done:
-                for tid, rk, iss in rows:
-                    try:
-                        c.execute("UPDATE agent_tasks SET trace_id=?, pipeline_trace_id=? WHERE id=?",
-                                  (task_trace_id(tid), pipeline_trace_id(rk or "", iss or "", tid), tid))
-                        done += 1
-                    except Exception:
-                        pass
-                if done:
-                    db.commit()
+                done = runtime_public.stamp_task_traces_any(pairs)
     except Exception as e:
         log.warning(f"obs trace stamp_missing failed: {e}")
         return 0
@@ -120,29 +110,26 @@ def stamp_missing(limit: int = 5000) -> int:
 # ---------------------------------------------------------------- 时间线
 
 def _steps(task_id: str) -> List[Dict[str, Any]]:
-    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime import public as runtime_public
     out: List[Dict[str, Any]] = []
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT seq, type, tool, content, input_json, output, created_at"
-                      " FROM task_messages WHERE task_id=? ORDER BY seq LIMIT ?",
-                      (task_id, STEP_LIMIT))
-            for seq, typ, tool, content, input_json, output, created_at in c.fetchall():
-                out.append({
-                    "seq": int(seq or 0), "type": typ or "", "tool": tool or "",
-                    "ts": created_at or "",
-                    "content": (content or "")[:400],
-                    "input": (input_json or "")[:400],
-                    "output": (output or "")[:400],
-                })
+        for r in runtime_public.trace_task_steps(task_id, STEP_LIMIT):
+            out.append({
+                "seq": int(r.get("seq") or 0), "type": r.get("type") or "",
+                "tool": r.get("tool") or "",
+                "ts": r.get("created_at") or "",
+                "content": (r.get("content") or "")[:400],
+                "input": (r.get("input_json") or "")[:400],
+                "output": (r.get("output") or "")[:400],
+            })
     except Exception as e:
         log.warning(f"obs trace steps failed task={task_id}: {e}")
     return out
 
 
 def _tokens_by_task(task_ids: List[str]) -> Dict[str, Dict[str, int]]:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     out: Dict[str, Dict[str, int]] = {}
     if not task_ids:
         return out
@@ -170,26 +157,16 @@ def _engine_label(runtime_id: int) -> str:
     """runtime_id → `引擎@设备`（给时间线标注在哪台机器的哪个引擎上跑）。"""
     if not runtime_id:
         return ""
-    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime import public as runtime_public
     try:
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_7776a6_f
-            _ru_lib_7776a6 = _ru_lib_7776a6_f(foreign_only=True)
-            if _ru_lib_7776a6 is not None:
-                row = _ru_lib_7776a6.read_one("agent_runtimes_7776a6", (int(runtime_id),))
-            else:
-                c.execute("SELECT COALESCE(NULLIF(r.name,''), NULLIF(r.provider,''), ''),"
-                          " COALESCE(rc.device_name, rc.name, '')"
-                          " FROM agent_runtimes r LEFT JOIN runtime_credentials rc"
-                          " ON rc.id = r.credential_id WHERE r.id=?", (int(runtime_id),))
-                row = c.fetchone()
-            if not row:
-                return f"#{runtime_id}"
-            eng = row[0] or ""
-            dev = row[1] or ""
-            return (f"{eng}@{dev}" if (eng and dev) else (eng or dev or f"#{runtime_id}"))
-    except Exception:
+        row = runtime_public.trace_runtime_label(int(runtime_id))
+        if not row:
+            return f"#{runtime_id}"
+        eng = row.get("engine") or ""
+        dev = row.get("device") or ""
+        return (f"{eng}@{dev}" if (eng and dev) else (eng or dev or f"#{runtime_id}"))
+    except Exception as e:
+        log.debug(f"obs trace engine label failed runtime={runtime_id}: {e}")
         return f"#{runtime_id}"
 
 
@@ -226,47 +203,21 @@ def resolve_tasks(trace: str) -> List[Dict[str, Any]]:
     """按 trace 值找出任务：支持任务级 id、流水线级 id，也支持直接传任务号（t_xxx）。
 
     传任务号时返回**该任务的整条流水线**（同 issue 的其他任务一起），前端从任务列表点进来即可看全流程。
+    取数在 runtime 域（`agent_tasks` 归 runtime）：两种入口都是 owner 侧具名原语，
+    本文件不再持有 SQL；未知 trace/任务号与「不存在」等价（空列表，不回落全表扫描）。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime import public as runtime_public
     t = str(trace or "").strip()
     if not t:
         return []
-    rows: List[Dict[str, Any]] = []
     try:
-        with db_lock:
-            c = db.cursor()
-            if t.startswith("t_"):
-                # 先按任务号定位，再用它的 pipeline_trace_id 取同流程全部任务
-                from src.kernel.domain_read import runtime_lib as _ru_lib_3b1cff_f
-                _ru_lib_3b1cff = _ru_lib_3b1cff_f(foreign_only=True)
-                if _ru_lib_3b1cff is not None:
-                    got = _ru_lib_3b1cff.read_one("agent_tasks_3b1cff", (t,))
-                else:
-                    c.execute("SELECT trace_id, pipeline_trace_id FROM agent_tasks WHERE id=?", (t,))
-                    got = c.fetchone()
-                if not got:
-                    return []
-                keys = [t, got[0] or "", got[1] or ""]
-                keys = [k for k in keys if k]
-                ph = ",".join("?" * len(keys))
-                c.execute(
-                    "SELECT id, agent_type, status, issue_id, repo_key, runtime_id, event_seq,"
-                    " created_at, started_at, completed_at, errors, stderr, result_text,"
-                    " trace_id, pipeline_trace_id FROM agent_tasks"
-                    f" WHERE trace_id IN ({ph}) OR pipeline_trace_id IN ({ph}) OR id=?"
-                    " ORDER BY created_at", tuple(keys + keys + [t]))
-            else:
-                c.execute(
-                    "SELECT id, agent_type, status, issue_id, repo_key, runtime_id, event_seq,"
-                    " created_at, started_at, completed_at, errors, stderr, result_text,"
-                    " trace_id, pipeline_trace_id FROM agent_tasks"
-                    " WHERE trace_id=? OR pipeline_trace_id=? ORDER BY created_at",
-                    (t, t))
-            cols = [d[0] for d in c.description]
-            rows = [dict(zip(cols, r)) for r in c.fetchall()]
+        if t.startswith("t_"):
+            # 先按任务号定位，再用它的 pipeline_trace_id 取同流程全部任务
+            return runtime_public.trace_tasks_for_task(t)
+        return runtime_public.trace_tasks_for_trace(t)
     except Exception as e:
         log.warning(f"obs trace resolve failed trace={t}: {e}")
-    return rows
+    return []
 
 
 def timeline(user: Dict[str, Any], trace: str, with_steps: bool = True) -> Dict[str, Any]:
@@ -276,8 +227,9 @@ def timeline(user: Dict[str, Any], trace: str, with_steps: bool = True) -> Dict[
     路由层对空结果给 404。
     """
     from src.domains.insight.observability.overview import visible_repo_keys
-    from src.kernel.session_manager import db, db_lock
-
+    from src.domains.runtime import public as runtime_public
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     stamp_missing()                                     # 保证历史任务也有 id
     rows = resolve_tasks(trace)
     visible = set(visible_repo_keys(user))
@@ -303,25 +255,12 @@ def timeline(user: Dict[str, Any], trace: str, with_steps: bool = True) -> Dict[
     except Exception as e:
         log.warning(f"obs trace logs failed: {e}")
 
-    # 事件（同一 issue 的流水线上下文）
+    # 事件（同一 issue 的流水线上下文）：事件表归 runtime，取数走 owner 侧具名原语
     events: List[Dict[str, Any]] = []
     seqs = [int(r.get("event_seq") or 0) for r in rows if r.get("event_seq")]
     if seqs:
-        ph2 = ",".join("?" * len(seqs))
         try:
-            _COLS = ["seq", "event_type", "actor", "issue_id", "title", "status", "created_at"]
-            _where = f"seq IN ({ph2})"
-            from src.kernel.domain_read import runtime_lib as _runtime_lib_tr
-            _rt_tr = _runtime_lib_tr()
-            if _rt_tr is not None:
-                _rows = _rt_tr.query_events(", ".join(_COLS), _where, tuple(seqs), "seq")
-            else:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("SELECT seq, event_type, actor, issue_id, title, status, created_at"
-                              f" FROM events WHERE seq IN ({ph2}) ORDER BY seq", tuple(seqs))
-                    _rows = list(c.fetchall())
-            events = [dict(zip(_COLS, r)) for r in _rows]
+            events = runtime_public.trace_events_by_seq(seqs)
         except Exception as e:
             log.warning(f"obs trace events failed: {e}")
 

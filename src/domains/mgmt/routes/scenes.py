@@ -6,10 +6,14 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query, 
 
 from pydantic import BaseModel
 
+from src.kernel.domain_db import cursor as _domain_cursor
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.api.oauth_token import with_oauth_token
 
 from src.kernel.config import log
+
+# 技能/引擎/任务表归运行域：查询走该域 public（三库独立后 mgmt 连接看不到这些表）
+from src.domains.runtime import public as _rt_scenes
 
 router = APIRouter(prefix="/api/scenes", tags=["scenes"])
 
@@ -217,10 +221,7 @@ def _resolve_session_bound_scene(scene_id: str, user: dict):
             if _ru_lib_6e9804 is not None:
                 _row = _ru_lib_6e9804.read_one("agent_tasks_6e9804", (_session_key,))
             else:
-                c.execute(
-                    "SELECT issue_id, repo_key FROM agent_tasks WHERE id=? LIMIT 1",
-                    (_session_key,))
-                _row = c.fetchone()
+                _row = _rt_scenes.task_issue_repo(_session_key)
         if _row:
             _issue_id = _row[0] or ""
             # agent_tasks 绑定仓库为权威（issue 归属仓库；跨流水线/关联仓库信任域
@@ -491,46 +492,37 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
         nodes = json.loads(scene["nodes_json"]) if scene["nodes_json"] else []
     except Exception:
         nodes = []
+    # scene_skill_ref 归 mgmt 域（本地连接）；skill 归运行域（owner 连接）——分开取
     with db_lock:
-        c = db.cursor()
-        # 从 scene_skill_ref 表查 skill_id（同步时已写入），不依赖 nodes_json 的 skill_id
-        c.execute(
+        _c_ref = db.cursor()
+        _c_ref.execute(
             "SELECT skill_name, skill_id FROM scene_skill_ref WHERE scene_id=?",
             (scene["id"],),
         )
-        ref_map = {}
-        for r in c.fetchall():
-            ref_map[r[0]] = r[1]
+        ref_map = {r[0]: r[1] for r in _c_ref.fetchall()}
 
-        # 用 ref_map 的 skill_id 批量查 skill 表
-        ref_skill_ids = [sid for sid in ref_map.values() if sid]
-        skill_by_id = {}
-        if ref_skill_ids:
-            id_placeholders = ",".join("?" * len(ref_skill_ids))
-            c.execute(
-                f"SELECT id, skill_name, display_name, agent_type, description, scope FROM skill "
-                f"WHERE id IN ({id_placeholders}) AND is_active=1",
-                ref_skill_ids,
-            )
-            for row in c.fetchall():
-                skill_by_id[row[0]] = row
+    skill_by_id = {}
+    ref_skill_ids = [sid for sid in ref_map.values() if sid]
+    if ref_skill_ids:
+        for row in _rt_scenes.skills_by_ids(ref_skill_ids):
+            skill_by_id[row[0]] = row
 
-        # 组装结果（基于 scene_skill_ref 的 skill_id 精确查询）
-        for node in nodes:
-            skill_name = node.get("skill", "")
-            if not skill_name:
-                continue
-            skill_id = _pick_node_skill_id(node, ref_map)
-            row = skill_by_id.get(skill_id) if skill_id else None
-            skills_detail.append({
-                "skill_id": (row[0] if row else skill_id),
-                "name": skill_name,
-                "display_name": (row[2] if row and row[2] else skill_name),
-                "agent_type": (row[3] if row else "") or node.get("tag", ""),
-                "role_desc": (row[4] if row else "") or "",
-                "scope": (row[5] if row else "official") or "official",
-                "skill_deleted": not bool(row),
-            })
+    # 组装结果（基于 scene_skill_ref 的 skill_id 精确查询）
+    for node in nodes:
+        skill_name = node.get("skill", "")
+        if not skill_name:
+            continue
+        skill_id = _pick_node_skill_id(node, ref_map)
+        row = skill_by_id.get(skill_id) if skill_id else None
+        skills_detail.append({
+            "skill_id": (row[0] if row else skill_id),
+            "name": skill_name,
+            "display_name": (row[2] if row and row[2] else skill_name),
+            "agent_type": (row[3] if row else "") or node.get("tag", ""),
+            "role_desc": (row[4] if row else "") or "",
+            "scope": (row[5] if row else "official") or "official",
+            "skill_deleted": not bool(row),
+        })
 
     # 查 recommended_template 对应的模板信息
     template_info = None
@@ -666,12 +658,7 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
         if ref_rows:
             ref_map = {r[0]: r[1] for r in ref_rows}
             ref_skill_ids = [sid for sid in ref_map.values() if sid]
-            if ref_skill_ids:
-                placeholders = ",".join("?" * len(ref_skill_ids))
-                c.execute(f"SELECT id FROM skill WHERE id IN ({placeholders}) AND is_active=1", ref_skill_ids)
-                existing_ids = set(r[0] for r in c.fetchall())
-            else:
-                existing_ids = set()
+            existing_ids = set(_rt_scenes.skill_ids_active(ref_skill_ids))
             missing = [name for name, sid in ref_map.items() if sid not in existing_ids]
             if missing:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"场景引用了已删除的技能: {', '.join(sorted(missing))}，无法应用"})
@@ -1782,34 +1769,14 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_sessi
         except Exception:
             pass
     user_id = str(user.get("id", ""))
-    where.append("(scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))")
-    params.extend([user_id, repo_key])
-
-    if q:
-        where.append("(skill_name LIKE ? OR display_name LIKE ?)")
-        params.extend([f"%{q}%", f"%{q}%"])
-    if scope:
-        where.append("scope=?")
-        params.append(scope)
-
-    where_sql = " AND ".join(where)
-
-    with db_lock:
-        c = db.cursor()
-        c.execute(f"SELECT COUNT(*) FROM skill WHERE {where_sql}", params)
-        total = c.fetchone()[0]
-        offset = (page - 1) * page_size
-        c.execute(
-            f"SELECT id, skill_name, display_name, scope, owner_id, description, agent_type FROM skill "
-            f"WHERE {where_sql} ORDER BY scope, skill_name LIMIT ? OFFSET ?",
-            params + [page_size, offset],
-        )
-        for r in c.fetchall():
-            # Issue #978 契约固化：skill 表 UNIQUE(skill_name, scope, owner_id) 允许
-            # official/repo/user 三档同名技能共存；本响应中 (skill_id, scope, skill_name)
-            # 共同构成前端选择的唯一键（skill_id 优先，缺失时回退 (scope, skill_name)）。
-            # 前端（dashboard.js 技能下拉）不得再用裸 skill_name 作选中/缓存 key。
-            skills.append({"skill_id": r[0], "skill_name": r[1], "display_name": r[2] or r[1], "scope": r[3], "owner_id": r[4] or "", "description": r[5] or "", "agent_type": r[6] or ""})
+    total, _skill_rows = _rt_scenes.scene_skill_search(
+        user_id, repo_key, q=q or "", scope=scope or "", page=page, page_size=page_size)
+    for r in _skill_rows:
+        # Issue #978 契约固化：skill 表 UNIQUE(skill_name, scope, owner_id) 允许
+        # official/repo/user 三档同名技能共存；本响应中 (skill_id, scope, skill_name)
+        # 共同构成前端选择的唯一键（skill_id 优先，缺失时回退 (scope, skill_name)）。
+        # 前端（dashboard.js 技能下拉）不得再用裸 skill_name 作选中/缓存 key。
+        skills.append({"skill_id": r[0], "skill_name": r[1], "display_name": r[2] or r[1], "scope": r[3], "owner_id": r[4] or "", "description": r[5] or "", "agent_type": r[6] or ""})
     return {"skills": skills, "total": total}
 
 class SceneNodeInput(BaseModel):
@@ -1907,18 +1874,8 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
             except (ValueError, TypeError):
                 continue
             with db_lock:
-                c = db.cursor()
-                # 查引擎 + credential scope/owner_id
-                from src.kernel.domain_read import runtime_lib as _ru_lib_62d4e0_f
-                _ru_lib_62d4e0 = _ru_lib_62d4e0_f(foreign_only=True)
-                if _ru_lib_62d4e0 is not None:
-                    row = _ru_lib_62d4e0.read_one("agent_runtimes_62d4e0", (_eid,))
-                else:
-                    c.execute(
-                        "SELECT r.credential_id, rc.scope, rc.owner_id "
-                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                        "WHERE r.id=?", (_eid,))
-                    row = c.fetchone()
+                # 引擎行 + 凭据 scope/owner_id 在运行域一次取回（两表同属 runtime）
+                row = _rt_scenes.runtime_with_credential(_eid)
             if not row:
                 # Issue #250: 失效 runtime_id 优雅降级——跳过而非 400
                 log.warning(f"_validate_scene_engine_ids: 节点 {tag} 的引擎 ID {_eid} 不存在（已跳过）")
@@ -1945,18 +1902,7 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
             # 校验角色能力（Issue #955 follow-up：按节点角色匹配，'all' 通配放行——
             # 存量引擎能力表仅 'all' 行，严格匹配误杀，恢复宽匹配待角色数据面补齐后再收紧）
             # P4：删视图后能力校验走 lib 读（白名单查询 capability_tag_hit）
-            from src.kernel.domain_read import runtime_lib as _rt_lib_cap
-            _cap_lib = _rt_lib_cap(foreign_only=True)
-            if _cap_lib is not None:
-                _cap_hit = _cap_lib.read_one("capability_tag_hit", (_eid, tag)) is not None
-            else:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute(
-                        "SELECT 1 FROM engine_capabilities "
-                        "WHERE runtime_id=? AND enabled=1 AND (tag=? OR tag='all') LIMIT 1",
-                        (_eid, tag))
-                    _cap_hit = c.fetchone() is not None
+            _cap_hit = _rt_scenes.runtime_capability_match(_eid, tag)
             if not _cap_hit:
                 raise HTTPException(status_code=400, detail={
                     "code": 400,
@@ -2570,14 +2516,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                     _declared_state = ""
                     for eid in declared_ids:
                         try:
-                            from src.kernel.domain_read import runtime_lib as _ru_lib_5fd717_f
-                            _ru_lib_5fd717 = _ru_lib_5fd717_f(foreign_only=True)
-                            if _ru_lib_5fd717 is not None:
-                                c = _ru_lib_5fd717.read_one("agent_runtimes_5fd717", (eid,)).fetchone()
-                            else:
-                                _row = c.execute(
-                                    "SELECT status, healthy FROM agent_runtimes WHERE id=?",
-                                    (eid,)).fetchone()
+                            _row = _rt_scenes.runtime_status_healthy(eid)
                             if _row and _row[0] == "online" and _row[1] == 1:
                                 runtime_id = eid
                                 break
@@ -2589,11 +2528,9 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                     if not runtime_id:
                         _cur_rid = 0
                         try:
-                            _cur = c.execute(
-                                "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-                                (repo_key, agent_type)).fetchone()
-                            if _cur and _cur[0]:
-                                _cur_rid = _cur[0]
+                            _rid = _rt_scenes.devops_session_runtime_id(repo_key, agent_type)
+                            if _rid:
+                                _cur_rid = int(_rid)
                         except Exception:
                             _cur_rid = 0
                         _reason = _declared_state or f"declared engines {declared_ids} unavailable"
@@ -2609,16 +2546,8 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                 else:
                     # 场景未声明引擎 → 旧回退链：session 旧绑定 → 默认引擎
                     try:
-                        from src.kernel.domain_read import runtime_lib as _ru_lib_a36e5f_f
-                        _ru_lib_a36e5f = _ru_lib_a36e5f_f(foreign_only=True)
-                        if _ru_lib_a36e5f is not None:
-                            c = _ru_lib_a36e5f.read_one("devops_agent_session_a36e5f", (repo_key, agent_type)).fetchone()
-                        else:
-                            _cur = c.execute(
-                                "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
-                                (repo_key, agent_type)).fetchone()
-                        if _cur and _cur[0]:
-                            runtime_id = _cur[0]
+                        _rid = _rt_scenes.devops_session_runtime_id(repo_key, agent_type)
+                        runtime_id = int(_rid) if _rid else 0
                     except Exception:
                         runtime_id = 0
                     if not runtime_id:

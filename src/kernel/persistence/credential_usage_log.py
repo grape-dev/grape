@@ -71,7 +71,8 @@ core_table = Table(
 
 def ensure_table() -> None:
     """幂等建表（init_db 启动链路调用）。"""
-    from src.kernel.session_manager import db
+    from src.kernel.owner_db import owner_db as _owner_db
+    db = _owner_db("runtime")
     db.execute(_DDL)
 
 
@@ -170,7 +171,8 @@ def cleanup_expired_retention(force: bool = False) -> int:
               - datetime.timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     total = 0
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("runtime")
         with db_lock:
             while True:
                 # 两步查删（复审修正）：MySQL 对 IN 子查询带 LIMIT 报 1235——
@@ -263,7 +265,8 @@ def _flush_batch(batch: list[dict]) -> None:
                   "VALUES (?,?,?,?,?,?,?,?,?)")
     from src.kernel.mysql_compat import get_db_backend
     if get_db_backend() == "mysql":
-        from src.kernel.session_manager import db as _sdb
+        from src.kernel.owner_db import owner_db as _owner_db
+        _sdb = _owner_db("runtime")
         _sdb.executemany(insert_sql, rows)
         _sdb.commit()
         return
@@ -290,7 +293,8 @@ def _ensure_worker() -> None:
 def list_by_credential(credential_id: str, limit: int = 100) -> list[dict]:
     """按凭据查使用历史（审计查询面）。"""
     from sqlalchemy import select
-    from src.kernel.session_manager import db
+    from src.kernel.owner_db import owner_db as _owner_db
+    db = _owner_db("runtime")
     from src.kernel.persistence.engine import get_engine
     engine = get_engine()
     with engine.connect() as conn:

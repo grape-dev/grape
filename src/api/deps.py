@@ -366,16 +366,10 @@ def _get_oauth_token_from_identity(username: str, provider: str) -> str:
         from src.domains.mgmt.auth.grape_account_db import get_external_identity
         # external_identities 按 grape_user_id + provider 查
         # get_external_identity 是按 provider + external_id 查的，不能直接用
-        from src.kernel.session_manager import db, db_lock
+        # 归位：表归 mgmt，走任意拓扑原语（api 进程库无该表，视图 0）
+        from src.domains.mgmt.public import oauth_token_status_any
         from src.domains.mgmt.auth.credential_crypto import decrypt
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT access_token, status FROM external_identities "
-                "WHERE grape_user_id=? AND provider=? AND status IN (1, 4)",
-                (acc["id"], provider),
-            )
-            row = c.fetchone()
+        row = oauth_token_status_any(acc["id"], provider)
         if row and row[0]:
             _token = decrypt(row[0])
             # F3 修复（R9.6）：status IN (1, 4) 统一——status=4（token 过期）时仍返回 token
@@ -442,21 +436,15 @@ def try_refresh_gitcode_token(user_id: str) -> str | None:
             import time as _t
             _t.sleep(1)
             # R20.27.2: 读最新 access_token（其他实例可能已刷新）
+            # 归位：external_identities 归 mgmt，走任意拓扑原语（api 进程库无该表）
             try:
-                from src.kernel.session_manager import db, db_lock
+                from src.domains.mgmt.public import stored_access_token_any
                 from src.domains.mgmt.auth.credential_crypto import decrypt
-                with db_lock:
-                    c = db.cursor()
-                    c.execute(
-                        "SELECT access_token FROM external_identities "
-                        "WHERE grape_user_id=? AND provider='gitcode' AND status IN (1,4) LIMIT 1",
-                        (user_id,)
-                    )
-                    row = c.fetchone()
-                if row and row[0]:
-                    return decrypt(row[0])
-            except Exception:
-                pass
+                _raw = stored_access_token_any(user_id, "gitcode")
+                if _raw:
+                    return decrypt(_raw)
+            except Exception as e:  # noqa: BLE001 - 等锁降级路径：读不到等价于「未被刷新」
+                log.debug(f"try_refresh_gitcode_token: token re-read failed: {e}")
             return None
     except Exception as e:
         log.warning(f"try_refresh_gitcode_token: distributed lock failed: {e}")
@@ -482,21 +470,16 @@ def _try_refresh_github_token(user_id: str) -> str | None:
             # 未抢到锁 = 其他实例在刷新，等待后读最新 token
             import time as _t
             _t.sleep(1)
+            # R20.27.2: 读最新 access_token（其他实例可能已刷新）
+            # 归位：external_identities 归 mgmt，走任意拓扑原语（api 进程库无该表）
             try:
-                from src.kernel.session_manager import db, db_lock
+                from src.domains.mgmt.public import stored_access_token_any
                 from src.domains.mgmt.auth.credential_crypto import decrypt
-                with db_lock:
-                    c = db.cursor()
-                    c.execute(
-                        "SELECT access_token FROM external_identities "
-                        "WHERE grape_user_id=? AND provider='github' AND status IN (1,4) LIMIT 1",
-                        (user_id,)
-                    )
-                    row = c.fetchone()
-                if row and row[0]:
-                    return decrypt(row[0])
-            except Exception:
-                pass
+                _raw = stored_access_token_any(user_id, "github")
+                if _raw:
+                    return decrypt(_raw)
+            except Exception as e:  # noqa: BLE001 - 等锁降级路径：读不到等价于「未被刷新」
+                log.debug(f"_try_refresh_github_token: token re-read failed: {e}")
             return None
     except Exception as e:
         log.warning(f"_try_refresh_github_token: distributed lock failed: {e}")
@@ -597,18 +580,16 @@ def get_user_token_for(username: str, user_id: str = "", provider: str = "gitcod
         # 口径），_parse_utc_timestamp 按 UTC 解释；解析失败=0 → 走 30 分钟
         # fetched_at fallback 不可用（ei 无 fetched_at），退化为不预刷新
         # （token 真实过期由 401 兜底链 oauth_401_retry 接管，语义安全）。
-        from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
+        # 归位：external_identities 归 mgmt，走任意拓扑原语（api 进程库无该表，
+        # 视图 0 → 1146，被下方 except 吞成「不预刷新」）
+        from src.domains.mgmt.public import token_expires_at_any
         try:
-            with _sm_dl:
-                from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username as _gbau
-                _acc = _gbau(username)
-                if not _acc:
-                    return token
-                _row = _sm_db.execute(
-                    "SELECT token_expires_at FROM external_identities "
-                    "WHERE grape_user_id=? AND provider=? AND status IN (1, 4)",
-                    (_acc["id"], provider)).fetchone()
-            token_expires_at = _parse_utc_timestamp(_row[0]) if _row and _row[0] else 0
+            from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username as _gbau
+            _acc = _gbau(username)
+            if not _acc:
+                return token
+            _expires_raw = token_expires_at_any(_acc["id"], provider)
+            token_expires_at = _parse_utc_timestamp(_expires_raw) if _expires_raw else 0
             now = int(_time.time())
             if token_expires_at and (token_expires_at - now) < 600:
                 new_token = _try_refresh_user_token(user_id, provider)

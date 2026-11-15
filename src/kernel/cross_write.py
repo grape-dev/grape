@@ -260,24 +260,63 @@ def stats() -> dict[str, int]:
         c.close()
 
 
-if __name__ == "__main__":  # pragma: no cover - 运维入口
-    import sys
+# ---------- N13：目标域幂等应用登记（跨实例补偿端点用） ----------
 
-    from src.domains.runtime import public as _rt
+APPLIED_TABLE = "grape_t_xwrite_applied"
 
-    _handlers = {
-        "engine_cap_upsert": lambda p: _rt.upsert_engine_capability(
-            p["rid"], p["tag"], priority=p.get("priority", 50)),
-        "engine_cap_update": lambda p: _rt.update_engine_capability(
-            p["rid"], p["tag"], p.get("priority", 50), p.get("enabled", 1)),
-        "engine_cap_delete": lambda p: _rt.delete_engine_capability(p["rid"], p.get("tag")),
-        "engine_cap_delete_all": lambda p: _rt.delete_engine_capability(p["rid"]),
-    }
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "drain"
-    if cmd == "stats":
-        print(stats())
-    elif cmd == "drain":
-        print(drain(_handlers))
-    else:
-        print("usage: python -m src.kernel.cross_write [drain|stats]")
 
+def _applied_ddl() -> str:
+    import os
+
+    backend = (os.environ.get("DEVOPS_DB_BACKEND") or "sqlite").lower()
+    if backend == "mysql":
+        return f"""
+CREATE TABLE IF NOT EXISTS {APPLIED_TABLE} (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  idempotency_key VARCHAR(191) NOT NULL,
+  action VARCHAR(64) NOT NULL,
+  applied_at BIGINT NOT NULL DEFAULT 0,
+  UNIQUE KEY uk_xwrite_applied (idempotency_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+    return f"""
+CREATE TABLE IF NOT EXISTS {APPLIED_TABLE} (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  action TEXT NOT NULL,
+  applied_at INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+
+def ensure_applied_table() -> None:
+    """在**目标域**库建应用登记表（幂等）。"""
+    c = _process_db.cursor()
+    try:
+        c.execute(_applied_ddl())
+    finally:
+        c.close()
+
+
+def claim_applied(idempotency_key: str, action: str) -> bool:
+    """登记一次跨域应用；键已存在 → False（重复应用被拒绝）。
+
+    目标域 apply_fn 仍必须自身幂等（UPSERT/条件更新），本表只是第一道闸：
+    幂等键评审不过关时，重复投递仍可能造成业务重复。
+    """
+    import os
+
+    key = (idempotency_key or "").strip()
+    if not key:
+        raise ValueError("idempotency_key 必填")
+    ensure_applied_table()
+    backend = (os.environ.get("DEVOPS_DB_BACKEND") or "sqlite").lower()
+    verb = "INSERT IGNORE" if backend == "mysql" else "INSERT OR IGNORE"
+    c = _process_db.cursor()
+    try:
+        c.execute(f"{verb} INTO {APPLIED_TABLE} (idempotency_key, action, applied_at) "
+                  f"VALUES (?, ?, ?)", (key, action, _now()))
+        _process_db.commit()
+        return int(c.rowcount or 0) > 0
+    finally:
+        c.close()

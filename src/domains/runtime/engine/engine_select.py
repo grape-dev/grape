@@ -177,6 +177,17 @@ def engine_name(runtime_id: int) -> str:
     return row[0] or "" if row else ""
 
 def _db():
+    """引擎相关的表（agent_runtimes / runtime_credentials / engine_capabilities）都在 runtime 域。
+
+    本模块同时被 mgmt 进程调用（创建需求后选引擎），三库模式下 mgmt 进程的主库是本域库，
+    直连进程库会撞「表不存在」，于是选引擎失败、需求永远不入队。这里按域取连接：
+    own DSN 优先（线程本地连接），单库/测试拓扑回落进程库。
+    """
+    from src.kernel import db_registry
+    if db_registry.uses_own_dsn("runtime"):
+        conn = db_registry.domain_db("runtime")
+        if conn is not None:
+            return conn, db_registry.domain_lock("runtime")
     from src.kernel.session_manager import db, db_lock
     return db, db_lock
 
@@ -284,113 +295,63 @@ def dedupe_engines(members: list[dict]) -> list[dict]:
     return out
 
 def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
-    """从 user_repos 表反查 repo_key 对应的 user_id。
+    """反查 repo_key 对应的 user_id（优先 Issue 创建者）。
 
-    优先按 issue_creator（GitCode 用户名）查 unified_user_mapping 获取 user_id；
-    issue_creator 为空或查不到时，改查 grape_accounts/external_identities
-    （平台 login 匹配 external_login，或平台数字 ID 匹配 external_id）作为二级回退；
-    仍查不到时，user_repos 回退按创建者过滤（JOIN grape_accounts），而非取第一个 join 用户。
+    解析链全部经 mgmt public 原语（任意拓扑），本文件不持有任何 SQL：
+      1. 平台登录名 → 账号：external_identities 是平台登录名的权威域，命中即权威（D31）；
+      2. OAuth 映射按平台列取 user_id（Issue #76 修复）；
+      3. 平台登录名 → 账号（EXISTS 校验登录名，注册名≠平台 login 也命中，D32 补丁）；
+      4. 平台数字 ID → 账号；
+      5. 仓库成员回退：按创建者过滤（而非取第一个 join 用户），未注册成员靠它命中。
+    issue_creator 为空时保留原逻辑——取最早加入的成员。
 
     Issue #76 修复：原逻辑按 user_id ASC 取第一条 is_join=1 的记录，
     对于多用户仓库会返回"最早加入的用户"而非 Issue 创建者，
     导致 scope=user 引擎无法通过 claim_by_tag 认领任务。
 
-    Issue #211 增强：二级回退 + user_repos 按创建者过滤，
+    Issue #211 增强：二级回退 + 成员回退按创建者过滤，
     确保已注册 grape 的项目组成员能正确映射而非落为 user_id=0。
     """
     if not repo_key:
         return 0
     repo = _norm_repo(repo_key)
-    db, lock = _db()
-    with lock:
-        try:
-            c = db.cursor()
-            if issue_creator:
-                if not issue_creator.strip():
-                    return 0
-                # M5/S51（D31）：身份优先——external_identities（平台登录名权威域）
-                # 命中即权威；原二级回退里已有同一身份查询，此处置前并保留原链兜底
-                from src.kernel.repo_key import parse_repo_key
-                from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login
-                _provider, _, _ = parse_repo_key(repo_key)
-                _uid = resolve_user_id_by_platform_login(_provider, issue_creator)
-                if _uid:
-                    return _uid
-                # 1. 优先查 unified_user_mapping（Issue #76 修复，OAuth 登录用户）
-                # FR-CQ-1: 提取为 um_column_for_repo，消除 if/else 分支
-                from src.kernel.repo_key import parse_repo_key, um_column_for_repo
-                _provider, _, _ = parse_repo_key(repo_key)
-                _col = um_column_for_repo(repo_key)
-                c.execute(
-                    f"SELECT user_id FROM unified_user_mapping "
-                    f"WHERE {_col}=? AND {_col}!='' AND user_id!='' AND user_id!='0' LIMIT 1",
-                    (issue_creator,))
-                row = c.fetchone()
-                if row:
-                    return row[0]
-                # 2. 二级回退：查 grape_accounts（D32-补丁）
-                # FR-18.3/FR-25.2: EXISTS 用 external_identities 验证平台 login，
-                # 不再用 ga.username 匹配注册名（注册名≠平台 login 时会误杀）
-                from src.kernel.domain_read import mgmt_lib as _mg_lib_3dd020_f
-                _mg_lib_3dd020 = _mg_lib_3dd020_f(foreign_only=True)
-                if _mg_lib_3dd020 is not None:
-                    row = _mg_lib_3dd020.read_one("grape_accounts_3dd020", (_provider, issue_creator))
-                else:
-                    c.execute(
-                        "SELECT ga.id FROM grape_accounts ga "
-                        "WHERE ga.id IS NOT NULL AND ga.id NOT IN ('', '0') AND ga.status=1 "
-                        "AND EXISTS (SELECT 1 FROM external_identities ei "
-                        "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
-                        "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') "
-                        "LIMIT 1",
-                        (_provider, issue_creator))
-                    row = c.fetchone()
-                if row:
-                    return row[0]
-                # 按 external_id 查（issue_creator 可能是平台数字 ID）
-                # FR-18.3: 按 provider 动态查（原硬编码 gitcode）
-                # P4：external_identities 在 mgmt 域，删视图后走 mgmt lib 读
-                from src.kernel.domain_read import mgmt_lib as _mg_lib_ei
-                _ei_lib = _mg_lib_ei(foreign_only=True)
-                if _ei_lib is not None:
-                    row = _ei_lib.read_one("grape_user_id_by_external_id", (_provider, issue_creator))
-                else:
-                    c.execute(
-                        "SELECT ei.grape_user_id FROM external_identities ei "
-                        "WHERE ei.provider=? AND ei.status=1 AND ei.external_id=? LIMIT 1",
-                        (_provider, issue_creator))
-                    row = c.fetchone()
-                if row:
-                    return row[0]
-                # 3. user_repos 回退：按创建者过滤（JOIN grape_accounts）
-                # FR-18.3/FR-25.2: EXISTS 用 external_identities 验证平台 login，
-                # 不再用 ga.username 匹配注册名（注册名≠平台 login 时会误杀）
-                c.execute(
-                    "SELECT ur.user_id FROM user_repos ur "
-                    "JOIN grape_accounts ga ON ga.id = ur.user_id "
-                    "WHERE ga.status=1 "
-                    "AND EXISTS (SELECT 1 FROM external_identities ei "
-                    "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
-                    "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') "
-                    "AND (ur.repo_key=? OR ur.repo_key=?) AND ur.is_join=1 "
-                    "LIMIT 1",
-                    (_provider, issue_creator, repo, f"{_provider}:{repo}"))
-                row = c.fetchone()
-                return row[0] if row else 0
-            # issue_creator 为空：保留原逻辑（取第一个 join 用户）
-            from src.kernel.domain_read import mgmt_lib as _mg_fj
-            _fj = _mg_fj(foreign_only=True)
-            if _fj is not None:
-                row = _fj.read_one("first_join_user_by_repo", (repo, f"gitcode:{repo}"))
-            else:
-                c.execute(
-                    "SELECT user_id FROM user_repos WHERE (repo_key=? OR repo_key=?) AND is_join=1 "
-                    "ORDER BY user_id LIMIT 1",
-                    (repo, f"gitcode:{repo}"))
-                row = c.fetchone()
-            return row[0] if row else 0
-        except Exception:
-            return 0
+    try:
+        from src.domains.mgmt import public as _mgmt_public
+
+        if issue_creator:
+            if not issue_creator.strip():
+                return 0
+            from src.kernel.repo_key import parse_repo_key
+            from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login
+            _provider, _, _ = parse_repo_key(repo_key)
+            # M5/S51（D31）：身份优先——平台登录名权威域命中即权威；
+            # 原二级回退里已有同一身份查询，此处置前并保留原链兜底
+            _uid = resolve_user_id_by_platform_login(_provider, issue_creator)
+            if _uid:
+                return _uid
+            # 1. OAuth 映射优先（Issue #76 修复）：列名由 mgmt 侧白名单挑选，本域不拼 SQL
+            from src.kernel.repo_key import um_column_for_repo
+            _uid = _mgmt_public.mapping_user_id_by_column(
+                um_column_for_repo(repo_key), issue_creator)
+            if _uid:
+                return _uid
+            # 2. 二级回退：按平台登录名取账号（EXISTS 校验，LOWER 比较）
+            _uid = _mgmt_public.account_id_by_platform_login(_provider, issue_creator)
+            if _uid:
+                return _uid
+            # 3. 按平台数字 ID 查（issue_creator 可能是平台数字 ID；P4 已归 mgmt 原语）
+            _uid = _mgmt_public.external_user_id(_provider, issue_creator)
+            if _uid is not None:
+                return _uid
+            # 4. 成员回退：按创建者过滤（JOIN 全在 mgmt 域内，不在本域拆表）
+            _uid = _mgmt_public.repo_user_id_by_platform_login(
+                _provider, issue_creator, repo, f"{_provider}:{repo}")
+            return _uid if _uid is not None else 0
+        # issue_creator 为空：保留原逻辑（取第一个 join 用户）
+        _uid = _mgmt_public.first_join_user_id_by_repo(repo, f"gitcode:{repo}")
+        return _uid if _uid is not None else 0
+    except Exception:
+        return 0
 
 def _engine_scope_info(runtime_id: int) -> tuple[str, str]:
     """返回引擎行档位 (scope, owner_id)：本机直连（credential_id=0）→ local；失败返回 ('global', '')。"""
@@ -716,16 +677,11 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
     user_repos = set()
     if username and scope == "repo" and not repo:
         try:
-            from src.kernel.session_manager import db as _udb, db_lock as _ulock
             from src.kernel.repo_key import from_repo_key
-            with _ulock:
-                uc = _udb.cursor()
-                uc.execute(
-                    "SELECT ur.repo_key FROM user_repos ur "
-                    "JOIN grape_accounts ua ON ua.id = ur.user_id "
-                    "WHERE LOWER(ua.username)=LOWER(?) AND ur.is_join = 1", (username,))
-                for row in uc.fetchall():
-                    user_repos.add(from_repo_key(row[0] or ""))
+            from src.domains.mgmt import public as _mgmt_public_ur
+            # 成员关系 + 账号名都在 mgmt 域内：一次具名查询，本域不拆 JOIN
+            for _repo_key in _mgmt_public_ur.user_repo_keys_by_username(username):
+                user_repos.add(from_repo_key(_repo_key or ""))
         except Exception as _e:
             log.warning(f"query_engines: get_user_repos failed: {_e}")
     with lock:
@@ -852,8 +808,9 @@ def cleanup_scene_engine_bindings(rid_list: list, commit: bool = True) -> int:
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
-            rows = c.fetchall()
+            from src.domains.mgmt import public as _mgmt_scene_cl
+            # 场景表归 mgmt：任意拓扑具名查询，列序 (id, nodes_json) 与原查询一致
+            rows = _mgmt_scene_cl.list_active_scene_nodes()
         except Exception as _e:
             log.warning(f"cleanup_scene_engine_bindings: query scenes failed: {_e}")
             return 0
@@ -901,13 +858,9 @@ def _find_scene_bindings_for_runtime(c, runtime_id: int) -> list:
     import json as _json
     hits = []
     try:
-        from src.kernel.domain_read import mgmt_lib as _mg_lib_9bcf48_f
-        _mg_lib_9bcf48 = _mg_lib_9bcf48_f(foreign_only=True)
-        if _mg_lib_9bcf48 is not None:
-            rows = _mg_lib_9bcf48.read_all("devops_pipeline_scene_9bcf48", ())
-        else:
-            c.execute("SELECT id, repo_key, scene_id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
-            rows = c.fetchall()
+        from src.domains.mgmt import public as _mgmt_scene_find
+        # 场景表归 mgmt：任意拓扑具名查询，列序 (id, repo_key, scene_id, nodes_json)
+        rows = _mgmt_scene_find.list_active_scene_bindings()
     except Exception as _e:
         log.warning(f"_find_scene_bindings_for_runtime: query failed: {_e}")
         return hits
@@ -928,13 +881,9 @@ def _find_autopilot_tasks_for_runtime(c, runtime_id: int) -> list:
     import json as _json
     out = []
     try:
-        from src.kernel.domain_read import mgmt_lib as _mg_apb
-        _apb = _mg_apb(foreign_only=True)
-        if _apb is not None:
-            rows = _apb.read_all("autopilot_tasks_enabled_brief", ())
-        else:
-            c.execute("SELECT id, name, engine_runtime_ids FROM autopilot_tasks WHERE enabled=1")
-            rows = c.fetchall()
+        from src.domains.mgmt import public as _mgmt_apb
+        # 任务表归 mgmt：任意拓扑具名查询，列序 (id, name, engine_runtime_ids)
+        rows = _mgmt_apb.list_enabled_autopilot_engine_ids()
     except Exception as _e:
         log.warning(f"_find_autopilot_tasks_for_runtime: query failed: {_e}")
         return out
@@ -1343,8 +1292,9 @@ def remap_scene_engine_bindings(rid_map: dict) -> int:
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
-            rows = c.fetchall()
+            from src.domains.mgmt import public as _mgmt_scene_rm
+            # 场景表归 mgmt：任意拓扑具名查询，列序 (id, nodes_json) 与原查询一致
+            rows = _mgmt_scene_rm.list_active_scene_nodes()
         except Exception as _e:
             log.warning(f"remap_scene_engine_bindings: query scenes failed: {_e}")
             return 0
@@ -1412,10 +1362,10 @@ def remap_engine_references(rid_map: dict, cid: int = 0, reason: str = "engine_r
             log.warning(f"remap_engine_references: remap scenes failed: {_e}")
         # 2. autopilot_tasks.engine_runtime_ids（JSON 列表字符串）
         try:
+            from src.domains.mgmt import public as _mg_at_pub
             from src.kernel.domain_read import mgmt_lib as _mgmt_lib_at
             _mg_at = _mgmt_lib_at(foreign_only=True)
-            c.execute(f"SELECT id, engine_runtime_ids FROM autopilot_tasks WHERE engine_runtime_ids != ''")
-            for tid, eids_str in c.fetchall():
+            for tid, eids_str in _mg_at_pub.list_autopilot_engine_ids_nonempty():
                 try:
                     eids = _json.loads(eids_str) if eids_str else []
                 except Exception:
@@ -1426,7 +1376,8 @@ def remap_engine_references(rid_map: dict, cid: int = 0, reason: str = "engine_r
                 if new_eids != eids:
                     _new_json = _json.dumps(new_eids)
                     if _mg_at is not None:
-                        # P3-5d：mgmt 基表，跨域写走 lib；同域（mgmt 进程）自动回落本地 SQL
+                        # P3-5d：mgmt 基表，跨域写走 lib；lib 不可用时回落 owner 域原语
+                        # （单库/测试拓扑由 owner 自己路由连接，本域不再持 SQL）
                         try:
                             import hashlib as _hl_at
                             from src.kernel import cross_write as _xw_at
@@ -1443,13 +1394,12 @@ def remap_engine_references(rid_map: dict, cid: int = 0, reason: str = "engine_r
                                 stats["autopilot_tasks"] += 1
                         except Exception as _e_at:
                             log.warning(f"remap_engine_references: autopilot task {tid} lib path "
-                                        f"failed, fallback to local SQL: {_e_at}")
-                            c.execute("UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
-                                      (_new_json, tid))
+                                        f"failed, fallback to owner primitive: {_e_at}")
+                            _mg_at_pub.set_autopilot_engine_ids_any(int(tid), _new_json)
                             stats["autopilot_tasks"] += 1
                     else:
-                        c.execute("UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
-                                  (_new_json, tid))
+                        # 单库/测试拓扑：owner 域任意拓扑写原语（同一份 SQL，自提交）
+                        _mg_at_pub.set_autopilot_engine_ids_any(int(tid), _new_json)
                         stats["autopilot_tasks"] += 1
         except Exception as _e:
             log.warning(f"remap_engine_references: remap autopilot_tasks failed: {_e}")

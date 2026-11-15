@@ -132,10 +132,10 @@ def _anonymize_account(user_id: str):
                                 f"{_e_purge}")
                     _rt_purge = None
             if _rt_purge is None:
-                c.execute("DELETE FROM agent_tasks WHERE user_id=?", (user_id,))
-                c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (user_id,))
-                c.execute("DELETE FROM chat_conversations WHERE user_id=?", (user_id,))
-                c.execute("DELETE FROM issue WHERE user_id=?", (user_id,))
+                # 兜底同样只调 owner 域原语：单库/测试拓扑复用本事务游标（与改造前
+                # 逐表 DELETE 同处一个 mgmt 事务，一起提交/回滚）；自有 DSN 走真事务。
+                from src.domains.runtime import public as _rt_public
+                _rt_public.purge_user_rows(str(user_id), cursor=c)
             c.execute("DELETE FROM user_feedback WHERE user_id=?", (user_id,))
             c.execute("DELETE FROM user_credentials WHERE user_id=?", (user_id,))
             c.execute("DELETE FROM api_tokens WHERE user_id=?", (user_id,))

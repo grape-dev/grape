@@ -52,6 +52,28 @@ from view_ddl_builder import ViewDDLError, build_view_ddl, check_ident  # noqa: 
 DB_NAME_RE = re.compile(r"^grape_(dev_)?(mgmt|runtime|insight)(_db)?$")
 VIEW_REF_RE = re.compile(r"\b(?:from|join)\s+`([^`]+)`\.`([^`]+)`", re.I)
 DEFINER_RE = re.compile(r"^[A-Za-z0-9_.%-]{1,64}@[A-Za-z0-9_.%-]{1,255}$")
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_VIEW_ALLOWLIST = os.path.join(_REPO_ROOT, "docs", "weekly-11", "view-allowlist.txt")
+_PROD_DB_RE = re.compile(r"^grape_(mgmt|runtime|insight)_db$")
+
+
+def load_view_allowlist(path: str) -> set[str]:
+    """读 `<库>.<视图>` 白名单；文件缺失 → 空集合（fail-closed）。"""
+    allowed: set[str] = set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    allowed.add(line)
+    except OSError:
+        return set()
+    return allowed
+
+
+def allowlist_applies(dbs) -> bool:
+    """白名单只约束三库现网命名；dev/测试库族（grape_dev_*）不套用，避免误拦部署。"""
+    return bool(dbs) and all(_PROD_DB_RE.match(d) for d in dbs)
 
 
 def _connect():
@@ -245,8 +267,13 @@ def _has_create_view_privilege(conn, dbs: tuple[str, ...]) -> list[str]:
 
 def repair(conn, scan_result: dict, dry_run: bool = False,
            create_missing_tables: set[str] | None = None,
-           definer: str = "", log=print) -> dict:
-    """重建视图。owner 不确定 / 孤儿视图 / 未登记的缺失视图一律跳过。"""
+           definer: str = "", log=print,
+           allowed: set[str] | None = None) -> dict:
+    """重建视图。owner 不确定 / 孤儿视图 / 未登记的缺失视图一律跳过。
+
+    `allowed` 为 `<库>.<视图>` 白名单（P0 冻结：只减不增）；不在名单内的视图
+    **不重建**，即使它已存在——这保证 sync 脚本之外的第二条建视图路径也受约束。
+    """
     create_missing_tables = create_missing_tables or set()
     ambiguous = {tbl for tbl, _dbs in scan_result["duplicates"]}
     plan: dict[tuple[str, str], set[str]] = {}
@@ -279,6 +306,9 @@ def repair(conn, scan_result: dict, dry_run: bool = False,
             log(f"SKIP {tbl}: {exc}", file=sys.stderr)
             continue
         for vdb in sorted(view_dbs):
+            if allowed is not None and f"{vdb}.{tbl}" not in allowed:
+                log(f"DENY {vdb}.{tbl}: 不在视图白名单（只减不增）", file=sys.stderr)
+                continue
             try:
                 check_ident("域库名", vdb)
             except ViewDDLError as exc:
@@ -341,6 +371,8 @@ def main(argv=None) -> int:
     ap.add_argument("--narrowed-tables", default="",
                     help="有意只暴露部分列的表清单（不自动补列）")
     ap.add_argument("--definer", default="", help="重建视图时显式指定的 DEFINER（user@host）")
+    ap.add_argument("--view-allowlist", default=DEFAULT_VIEW_ALLOWLIST,
+                    help="视图白名单（默认 docs/weekly-11/view-allowlist.txt；只减不增）")
     ap.add_argument("--fail-on-missing-view", action="store_true",
                     help="把未登记的缺视图计为失败（默认只报告，避免 owner-only 新表卡住部署）")
     ap.add_argument("--json", action="store_true", help="纯 JSON 输出")
@@ -420,7 +452,9 @@ def main(argv=None) -> int:
                 return 3
             repair_info = repair(conn, result, dry_run=args.dry_run,
                                  create_missing_tables=create_missing,
-                                 definer=args.definer, log=log)
+                                 definer=args.definer, log=log,
+                                 allowed=(load_view_allowlist(args.view_allowlist)
+                                          if allowlist_applies(dbs) else None))
             if not args.dry_run:
                 result = scan(conn, dbs, narrowed=narrowed)
                 if ignore_missing:

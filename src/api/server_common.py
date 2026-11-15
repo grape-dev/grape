@@ -351,16 +351,13 @@ def _attach_request_log(app: FastAPI) -> None:
                 from src.kernel.config import SLOW_REQUEST_THRESHOLD_MS
                 if duration >= SLOW_REQUEST_THRESHOLD_MS:
                     try:
-                        from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
-                        with _sdbl:
-                            _sdb.execute(
-                                "INSERT INTO api_latency_log (request_id, method, path, status, duration_ms, repo_key, user_id, source) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?, 'backend')",
-                                (rid, request.method, redacted_path, status, round(duration), _repo, _uid)
-                            )
-                            _sdb.commit()
-                    except Exception:
-                        pass  # 入库失败不影响请求
+                        # api_latency_log 归 insight：走 owner 域薄写口（任意拓扑）
+                        from src.domains.insight import public as _insight_metrics
+                        _insight_metrics.record_api_latency_any(
+                            rid, request.method, redacted_path, status,
+                            round(duration), _repo, _uid)
+                    except Exception as _exc:
+                        log.debug(f"api_latency_log insert skipped: {_exc}")
             request_id_var.reset(token_rid)
             repo_var.reset(token_repo)
             user_var.reset(token_uid)
@@ -371,7 +368,22 @@ def _attach_request_log(app: FastAPI) -> None:
 
 
 def init_process_db() -> None:
-    """Idempotent DB bootstrap shared by every Grape process（从 legacy main.py 迁移）。"""
+    """Idempotent DB bootstrap shared by every Grape process（从 legacy main.py 迁移）。
+
+    三库独立模式（GRAPE_DOMAIN_LIB=1）下跳过：该模式的 schema 由 provisioning 负责
+    （rds_p4_provision 建好三库全部基表），进程启动时不该再跑全量建表/迁移——
+    每个进程主库只是本域库，跑全量迁移必然撞「别的域的表不在这里」。
+    """
+    import os as _os
+    if _os.environ.get("GRAPE_DOMAIN_LIB") == "1":
+        from src.kernel.config import log as _log
+        _log.info("three-database mode: skip full bootstrap (schema provisioned by P4)")
+        try:
+            from src.kernel.config import _load_accounts
+            _load_accounts()
+        except Exception as _e:  # 非 mgmt 进程没有账号表，属正常
+            _log.debug(f"three-database mode: account cache skipped: {_e}")
+        return
     from src.api.db_setup import init_database
     init_database()
     from src.kernel.config import _load_accounts
@@ -434,10 +446,9 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
             http_status = 503
         else:
             try:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("SELECT COUNT(*) FROM agent_tasks")
-                    c.fetchone()
+                # agent_tasks 归 runtime：readiness 表探活走 owner 域（任意拓扑）
+                from src.domains.runtime import public as _runtime_health
+                _runtime_health.health_task_rows_total()
             except Exception:
                 checks["tables"] = "error: agent_tasks missing"
                 status = "not_ready"
@@ -472,7 +483,6 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
         """运维诊断：暴露 IM bot 状态、任务队列深度、runtime 在线数。仅允许内网访问。"""
         if not is_loopback(request):
             return JSONResponse(status_code=403, content={"error": "forbidden"})
-        from src.kernel.session_manager import db, db_lock
         from src.domains.runtime.engine.health import derive_runtime_health
         import time as _time2, os as _os2
 
@@ -497,21 +507,18 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
         except Exception:
             pass
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT status, COUNT(*) FROM agent_tasks GROUP BY status")
-                result["tasks"] = {r[0]: r[1] for r in c.fetchall()}
-                c.execute("SELECT COUNT(*) FROM agent_tasks WHERE status IN ('dispatched','running')")
-                result["in_progress"] = c.fetchone()[0]
-                c.execute("SELECT status, last_seen_at, credential_id FROM agent_runtimes")
-                online = 0
-                total = 0
-                for r in c.fetchall():
-                    total += 1
-                    h = derive_runtime_health(r[0] or "offline", r[1], now_ts)
-                    if h == "online":
-                        online += 1
-                result["runtimes"] = {"total": total, "online": online}
+            # agent_tasks / agent_runtimes 归 runtime：全量统计走 owner 域原语（任意拓扑）
+            from src.domains.runtime import public as _runtime_health
+            result["tasks"] = {r[0]: r[1] for r in _runtime_health.health_task_status_counts()}
+            result["in_progress"] = _runtime_health.health_task_inflight_count()
+            online = 0
+            total = 0
+            for r in _runtime_health.health_runtime_rows():
+                total += 1
+                h = derive_runtime_health(r[0] or "offline", r[1], now_ts)
+                if h == "online":
+                    online += 1
+            result["runtimes"] = {"total": total, "online": online}
         except Exception as e:
             result["db_error"] = str(e)
         return result
@@ -925,12 +932,16 @@ def attach_internal_routes(app: FastAPI, domain: str) -> None:
     from src.kernel.auth_sdk.internal_middleware import InternalAuthMiddleware
     app.add_middleware(InternalAuthMiddleware)
 
-    # mgmt 是管理态服务（开发者工作台的后端），按架构约定不向其它域服务开放业务型
-    # /internal/* 契约：event/worker/insight 需要 mgmt 的数据时直接读共享库或走进程内契约，
-    # 不允许再通过 HTTP 反向调用 mgmt（避免管理面被业务面耦合、也避免越权面扩大）。
-    # 中间件仍然挂载：/internal/gsb/* 服务注册端点需要它做 service-secret 校验。
+    # mgmt 是管理态服务：P2 起只开放**只读白名单**内部端点 + 补偿应用端点（方案 §D5），
+    # 不再"完全不开放"（那会导致 runtime 侧 webhook-config/bot-config 42 次 404）。
+    # 白名单与写端点分别由 readonly_router / xwrite_router 承载，见 mgmt/routes/internal.py。
     if domain == "mgmt":
-        log.info("attach_internal_routes: mgmt 为管理态服务，业务型 /internal/* 不挂载（仅保留 GSB 端点）")
+        from src.domains.mgmt.routes.internal import readonly_router, xwrite_router
+
+        app.include_router(readonly_router)
+        app.include_router(xwrite_router)
+        log.info("attach_internal_routes: mgmt 挂载只读白名单 %d 条 + xwrite/apply",
+                 len(readonly_router.routes))
         return
 
     if domain == "runtime":

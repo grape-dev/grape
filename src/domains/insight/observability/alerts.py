@@ -22,6 +22,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.kernel.config import log
+
+# 告警求值读运行域（任务/凭据）与 mgmt 域（收件人）：聚合原语放各域 public
+from src.domains.runtime import public as _rt_alerts
+from src.domains.mgmt import public as _mgmt_alerts
 from src.domains.insight.observability import alert_policy as _policy
 from src.domains.runtime.engine.task_timeout import TIMEOUT_FAIL_SIGNATURE as _TIMEOUT_FAIL_SIGNATURE
 
@@ -180,7 +184,8 @@ def _iso(dt: datetime) -> str:
 
 def seed_rules() -> int:
     """幂等写入种子规则（按 name 判重，已存在不动，避免覆盖用户改过的阈值）。"""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     n = 0
     with db_lock:
         c = db.cursor()
@@ -205,7 +210,8 @@ def seed_rules() -> int:
 
 def list_rules(level: str = "") -> List[Dict[str, Any]]:
     """规则列表。level='user' 过滤用户面可见规则；空=全部（平台面用）。"""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     out: List[Dict[str, Any]] = []
     sql = ("SELECT id, name, kind, level, metric, comparator, threshold, window_sec, for_sec,"
            " severity, enabled, notify_channels, description, seed_source,"
@@ -228,7 +234,8 @@ def list_rules(level: str = "") -> List[Dict[str, Any]]:
 
 
 def set_rule_enabled(rule_id: int, enabled: bool) -> bool:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     try:
         with db_lock:
             c = db.cursor()
@@ -242,7 +249,8 @@ def set_rule_enabled(rule_id: int, enabled: bool) -> bool:
 
 
 def set_rule_threshold(rule_id: int, threshold: float) -> bool:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     try:
         with db_lock:
             c = db.cursor()
@@ -256,7 +264,8 @@ def set_rule_threshold(rule_id: int, threshold: float) -> bool:
 
 
 def set_rule_notify(rule_id: int, channels: str) -> bool:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     try:
         with db_lock:
             c = db.cursor()
@@ -285,7 +294,8 @@ def set_rule_policy(rule_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     返回 {"ok":bool, "errors":[...], "applied":{...}}；**校验不通过不写库**。
     """
     from src.domains.insight.observability.alert_policy import sanitize_policy
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     rule = get_rule(rule_id)
     if not rule:
         return {"ok": False, "errors": ["rule not found"], "applied": {}}
@@ -313,7 +323,7 @@ def set_rule_policy(rule_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
 def _repo_metrics() -> Dict[str, Dict[str, float]]:
     """按仓库维度的指标：卡住数 / 失败率 / 排队数 / 成功率环比突变。
 
-    **降载（2026-10-17 审计）**：原实现 `SELECT ... FROM agent_tasks WHERE status IN (...)`
+    **降载（2026-10-17 审计）**：原实现是「按状态拉全表任务行」的查询
     把**全表**（只有 6 个状态枚举做条件，索引形同虚设，EXPLAIN rows=全表/ filtered=100%）
     捞进 Python 每 30s 算一遍，并全程持全局 `db_lock` —— 实测把其它 DB 使用者的中位延迟
     从 1.1ms 抬到 9.6ms，且随任务量线性变差。现改为**3 条 GROUP BY 聚合查询**，
@@ -328,7 +338,8 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
     （全 0 指标本来就不会触发），所以行为一致；**若将来加 `lt` 阈值或负阈值规则，
     需要把维度集合重新放宽**（否则"样本为空的仓库"不会参与求值）。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     now = _now()
     stuck_bound = _iso(now - timedelta(minutes=STUCK_MINUTES))
     fail_cutoff = _iso(now - timedelta(seconds=FAILURE_WINDOW_SEC))
@@ -343,16 +354,7 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
         with db_lock:
             c = db.cursor()
             # ① 在跑/排队：卡住数（dispatched/running 且 started_at 早于阈值）+ 排队数
-            c.execute(
-                "SELECT repo_key,"
-                " SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),"
-                " SUM(CASE WHEN status IN ('dispatched','running')"
-                "          AND started_at IS NOT NULL AND started_at != '' AND started_at < ?"
-                "     THEN 1 ELSE 0 END)"
-                " FROM agent_tasks WHERE repo_key IS NOT NULL AND repo_key != ''"
-                "   AND (status='queued' OR status IN ('dispatched','running'))"
-                " GROUP BY repo_key", (stuck_bound,))
-            for repo_key, queued, stuck in c.fetchall():
+            for repo_key, queued, stuck in _rt_alerts.alerts_task_inflight(stuck_bound):
                 m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
                                               "_done": 0.0, "_bad": 0.0,
                                               "_mut0_tot": 0.0, "_mut0_bad": 0.0,
@@ -361,13 +363,7 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
                 m["task_queued"] += float(queued or 0)
                 m["task_stuck"] += float(stuck or 0)
             # ② 终态任务按仓库×状态计数，带**时间下界**（失败率窗口）——聚合在 SQL 侧做
-            c.execute(
-                "SELECT repo_key, status, COUNT(*) FROM agent_tasks"
-                " WHERE repo_key IS NOT NULL AND repo_key != ''"
-                "   AND status IN ('completed','failed','cancelled')"
-                "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
-                " GROUP BY repo_key, status", (fail_cutoff,))
-            for repo_key, status, n in c.fetchall():
+            for repo_key, status, n in _rt_alerts.alerts_task_terminal(fail_cutoff):
                 m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
                                               "_done": 0.0, "_bad": 0.0,
                                               "_mut0_tot": 0.0, "_mut0_bad": 0.0,
@@ -379,30 +375,14 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
             # ②b Issue #516 M3：超时失败计数（worker 超时 kill 上报的
             # "timed out after" 签名，PR #722 起常量集中在 task_timeout.py），
             # 按仓库聚合供 task_timeout 告警规则消费
-            _to_sig = f"%{_TIMEOUT_FAIL_SIGNATURE}%"
-            c.execute(
-                "SELECT repo_key, COUNT(*) FROM agent_tasks"
-                " WHERE repo_key IS NOT NULL AND repo_key != ''"
-                "   AND status='failed'"
-                "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
-                "   AND (result_text LIKE ? OR errors LIKE ?)"
-                " GROUP BY repo_key", (fail_cutoff, _to_sig, _to_sig,))
-            for repo_key, n in c.fetchall():
+            for repo_key, n in _rt_alerts.alerts_task_timeout(fail_cutoff, _TIMEOUT_FAIL_SIGNATURE):
                 m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
                                               "_done": 0.0, "_bad": 0.0,
                                               "_mut0_tot": 0.0, "_mut0_bad": 0.0,
                                               "_mut1_tot": 0.0, "_mut1_bad": 0.0})
                 m["task_timeout"] = m.get("task_timeout", 0.0) + float(n or 0)
             # ③ 突变检测的两个相邻窗口（本窗口 / 上一窗口），同样 SQL 侧计数
-            c.execute(
-                "SELECT repo_key, status,"
-                " SUM(CASE WHEN completed_at > ? THEN 1 ELSE 0 END),"
-                " SUM(CASE WHEN completed_at > ? AND completed_at < ? THEN 1 ELSE 0 END)"
-                " FROM agent_tasks WHERE repo_key IS NOT NULL AND repo_key != ''"
-                "   AND status IN ('completed','failed','cancelled')"
-                "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
-                " GROUP BY repo_key, status", (mut0_cutoff, mut1_cutoff, mut0_cutoff, mut1_cutoff))
-            for repo_key, status, n0, n1 in c.fetchall():
+            for repo_key, status, n0, n1 in _rt_alerts.alerts_task_mutation(mut0_cutoff, mut1_cutoff):
                 m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
                                               "_done": 0.0, "_bad": 0.0,
                                               "_mut0_tot": 0.0, "_mut0_bad": 0.0,
@@ -456,25 +436,25 @@ def _platform_metrics() -> Dict[str, float]:
 
     # 全部 runtime 在线数（health 判定与 dashboard 同源）
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         from src.domains.runtime.engine.health import derive_runtime_health
         online = 0
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT status, last_seen_at FROM runtime_credentials WHERE status != 'revoked'")
-            for status, last_seen in c.fetchall():
-                try:
-                    if derive_runtime_health(status or "offline", last_seen, now_ts) == "online":
-                        online += 1
-                except Exception:
-                    pass
+        for status, last_seen in _rt_alerts.alerts_credential_heartbeats():
+            try:
+                if derive_runtime_health(status or "offline", last_seen, now_ts) == "online":
+                    online += 1
+            except Exception:
+                pass
         vals["runtimes_online"] = float(online)
     except Exception as e:
         log.warning(f"obs platform runtimes_online failed: {e}")
 
     # MySQL 状态：连接使用率 + 中止连接增量
     try:
-        from src.kernel.session_manager import _is_mysql_backend, db, db_lock
+        from src.kernel.session_manager import _is_mysql_backend
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         if _is_mysql_backend():
             with db_lock:
                 c = db.cursor()
@@ -528,11 +508,10 @@ def _platform_metrics() -> Dict[str, float]:
     # agent_tasks_size_high 告警求值）。体积口径：MySQL 用 information_schema 精确值；
     # SQLite 无单表统计，用 page_count×page_size 整库体积作上界参考（测试/单机部署）。
     try:
-        from src.kernel.session_manager import _is_mysql_backend, db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM agent_tasks")
-            vals["agent_tasks_rows"] = float(c.fetchone()[0] or 0)
+        from src.kernel.session_manager import _is_mysql_backend
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
+        vals["agent_tasks_rows"] = float(_rt_alerts.alerts_task_rows_total())
         if _is_mysql_backend():
             with db_lock:
                 c = db.cursor()
@@ -566,7 +545,8 @@ def cleanup_events(days: int = EVENT_RETENTION_DAYS) -> int:
     它是"这个维度当前还在告警"的唯一依据，删了会导致重复开一条新事件（还会重发通知）。
     时间比较用 ISO 字符串（`resolved_at` 由本模块统一写 ISO(UTC)，字典序=时间序）。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     cutoff = _iso(_now() - timedelta(days=days))
     try:
         with db_lock:
@@ -592,7 +572,8 @@ def _open_events_cache(rule_ids: Optional[List[int]] = None) -> Dict[Tuple[int, 
     同一 (规则,维度) 取 id 最大的一条，与原来 `ORDER BY id DESC LIMIT 1` 一致）。
     调用方在**同一轮内**改动了开放事件（新建/收口）时必须同步增删本缓存，否则策略扫描会看到过期状态。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     out: Dict[Tuple[int, str], Dict[str, Any]] = {}
     try:
         with db_lock:
@@ -659,7 +640,8 @@ def _resolve_open(c, rule_id: int, dim_key: str, now: datetime,
 
 def evaluate_rules() -> Dict[str, Any]:
     """求值一轮：返回 {fired, resolved, evaluated, skipped}。由进程内定时器每 30s 调用。"""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     now = _now()
     now_iso = _iso(now)
     fired = resolved = 0
@@ -844,7 +826,8 @@ def _recipients_for_event(event: Dict[str, Any]) -> List[tuple]:
     - 上限 20 人（避免一次刷屏）
     """
     from src.api.issues_center import _get_feishu_open_id_by_user_id
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     uids: List[int] = []
     try:
         rk = event.get("repo_key") or ""
@@ -860,30 +843,13 @@ def _recipients_for_event(event: Dict[str, Any]) -> List[tuple]:
         else:
             with db_lock:
                 c = db.cursor()
+                # 收件人：仓库成员取并集 / 无仓库时取已绑飞书的账号全量（表都归 mgmt）
                 if rk:
-                    from src.kernel.domain_read import mgmt_lib as _mg_ur
-                    _ur = _mg_ur(foreign_only=True)
-                    if _ur is not None:
-                        _rows_ur = _ur.read_all("user_ids_by_repo", (rk,))
-                    else:
-                        c.execute("SELECT DISTINCT user_id FROM user_repos WHERE repo_key=?", (rk,))
-                        _rows_ur = c.fetchall()
+                    uids = _mgmt_alerts.repo_member_user_ids([rk])
                 elif event.get("repo_keys"):
-                    # 聚合汇总：多个仓库的收件人取并集
-                    rks = [str(x) for x in (event.get("repo_keys") or []) if str(x).strip()]
-                    ph = ",".join("?" for _ in rks)
-                    c.execute(f"SELECT DISTINCT user_id FROM user_repos WHERE repo_key IN ({ph})",
-                              tuple(rks))
+                    uids = _mgmt_alerts.repo_member_user_ids(event.get("repo_keys"))
                 else:
-                    from src.kernel.domain_read import mgmt_lib as _mg_um_all
-                    _um_all = _mg_um_all(foreign_only=True)
-                    if _um_all is not None:
-                        _rows_um = _um_all.read_all("um_feishu_open_ids_all", ())
-                    else:
-                        c.execute("SELECT DISTINCT user_id FROM unified_user_mapping"
-                                  " WHERE feishu_open_id!='' AND user_id IS NOT NULL AND user_id NOT IN ('', '0')")
-                        _rows_um = c.fetchall()
-                uids = [int(r[0]) for r in _rows_um if r and r[0]]
+                    uids = _mgmt_alerts.mapped_feishu_user_ids()
     except Exception as e:
         log.warning(f"obs alert recipients lookup failed: {e}")
         return []
@@ -902,7 +868,8 @@ def _mark_notified(event_ids: List[int], now_iso: str) -> None:
     """记录"已通知"：次数 +1、上次通知时间、清延后标记（策略层状态）。"""
     if not event_ids:
         return
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     try:
         with db_lock:
             c = db.cursor()
@@ -917,7 +884,8 @@ def _mark_notified(event_ids: List[int], now_iso: str) -> None:
 
 def _mark_deferred(event_id: int, now_iso: str) -> None:
     """通知时段外：只记录，等窗口内再补推一次。"""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     try:
         with db_lock:
             c = db.cursor()
@@ -997,7 +965,8 @@ async def notify_fired_events(events: List[Dict[str, Any]]) -> Dict[str, int]:
                 # 没渠道就别挂着"延后"标记，否则窗口内会反复进候选
                 _mark_notified([], now_iso)
                 try:
-                    from src.kernel.session_manager import db as _db, db_lock as _lock
+                    from src.kernel.owner_db import db_pair as _db_pair
+                    _db, _lock = _db_pair("insight")
                     with _lock:
                         _c = _db.cursor()
                         _c.execute("UPDATE obs_alert_events SET notify_deferred=0 WHERE id=?",
@@ -1160,15 +1129,21 @@ def visible_runtime_dim_keys(user: Dict[str, Any], repo_keys: List[str]) -> List
     与设备列表/资源曲线同一口径（`overview._cred_visibility`），避免"设备看得见、它的静默事件看不见"。
     """
     from src.domains.insight.observability.overview import _cred_visibility
-    from src.kernel.session_manager import db, db_lock
-    frag, params = _cred_visibility(user, list(repo_keys or []))
     ids: List[int] = []
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id FROM runtime_credentials WHERE status != 'revoked'"
-                      + frag, tuple(params))
-            ids = [int(r[0]) for r in c.fetchall()]
+        # 可见性口径与 _cred_visibility 一致：非个人组织按 org_id，指定仓库按 global+本人+该仓，否则 global+本人
+        _org_id = str(user.get("org_id") or "") if isinstance(user, dict) else ""
+        _is_personal = True
+        if _org_id:
+            try:
+                from src.domains.mgmt.user.org_db import is_org_personal
+                _is_personal = is_org_personal(_org_id)
+            except Exception:
+                _is_personal = False
+        ids = _rt_alerts.credential_ids_visible(
+            org_id=_org_id, personal_org=_is_personal,
+            uname=(user.get("username") or "") if isinstance(user, dict) else "",
+            repo_keys=list(repo_keys or []))
     except Exception as e:
         log.warning(f"obs visible runtimes failed: {e}")
     return [f"runtime:{i}" for i in ids]
@@ -1183,8 +1158,8 @@ def list_events(user: Dict[str, Any], status: str = "", limit: int = 50,
     - 设备维度事件（数据缺失 `runtime:<id>`）：该设备在本人口径下可见
     """
     from src.domains.insight.observability.overview import RepoNotVisible, visible_repo_keys
-    from src.kernel.session_manager import db, db_lock
-
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     visible = set(visible_repo_keys(user))
     if repo:
         from src.kernel.repo_key import to_repo_key
@@ -1242,7 +1217,8 @@ def list_events_all(status: str = "", limit: int = 100, repo: str = "",
     与用户面 `list_events` 的字段投影保持一致（统一事件视图两端同口径）；`repo` 传短名时
     只出该仓库（**不做可见性校验**——调用方必须是管理台鉴权的接口）。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     sql = ("SELECT id, rule_name, level, severity, status, source, metric, value, threshold,"
            " dim_key, repo_key, first_fired_at, last_seen_at, resolved_at, silenced_until,"
            " notify_count, last_notified_at, escalated_at, notify_deferred"
@@ -1275,7 +1251,8 @@ def list_events_all(status: str = "", limit: int = 100, repo: str = "",
 def silence_event(event_id: int, minutes: int, user: Dict[str, Any]) -> bool:
     """静默一个事件：只影响通知，事件仍记录；越权（非可见仓库/设备）不动。"""
     from src.domains.insight.observability.overview import visible_repo_keys
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     visible = set(visible_repo_keys(user))
     dim_keys = set(visible_runtime_dim_keys(user, sorted(visible)))
     try:

@@ -777,16 +777,10 @@ def delete_account(body: DeleteAccountBody, user: dict = Depends(require_jwt_onl
         repo_keys = [r.get("repo_key") or r.get("full_name", "") for r in user_repos]
         repo_keys = [k for k in repo_keys if k]
         if repo_keys:
-            from src.kernel.session_manager import db as _sdb, db_lock as _sdl
-            with _sdl:
-                _c = _sdb.cursor()
-                placeholders = ",".join("?" * len(repo_keys))
-                _c.execute(
-                    f"SELECT COUNT(*) FROM agent_tasks WHERE repo_key IN ({placeholders}) "
-                    f"AND status IN ('queued','dispatched','running')",
-                    repo_keys,
-                )
-                running_count = _c.fetchone()[0]
+            # `agent_tasks` 归 runtime：在制任务数走 owner 域原语（任意拓扑），
+            # 不再拿 kernel 进程主库句柄直发（三库拆分后 mgmt 库里没有该表）。
+            from src.domains.runtime import public as _runtime_public
+            running_count = _runtime_public.inflight_task_count_any(repo_keys)
             if running_count > 0:
                 # P1-3: 用户确认强制注销时放行，否则提示先处理
                 if not body.force:

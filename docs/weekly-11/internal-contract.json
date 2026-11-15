@@ -1,0 +1,268 @@
+{
+  "routes": [
+    {
+      "domain": "insight",
+      "method": "GET",
+      "path": "/internal/alerts/{repo_key}",
+      "operation_id": "insight_alerts_list",
+      "summary": ""
+    },
+    {
+      "domain": "insight",
+      "method": "GET",
+      "path": "/internal/dashboard/overview",
+      "operation_id": "insight_dashboard_overview",
+      "summary": ""
+    },
+    {
+      "domain": "insight",
+      "method": "POST",
+      "path": "/internal/latency",
+      "operation_id": "insight_latency_ingest",
+      "summary": ""
+    },
+    {
+      "domain": "insight",
+      "method": "POST",
+      "path": "/internal/llm-usage",
+      "operation_id": "insight_llm_usage_ingest",
+      "summary": ""
+    },
+    {
+      "domain": "insight",
+      "method": "POST",
+      "path": "/internal/logs",
+      "operation_id": "insight_logs_ingest",
+      "summary": ""
+    },
+    {
+      "domain": "insight",
+      "method": "GET",
+      "path": "/internal/metrics/{repo_key}",
+      "operation_id": "insight_metrics_get",
+      "summary": ""
+    },
+    {
+      "domain": "insight",
+      "method": "GET",
+      "path": "/internal/slo/{repo_key}",
+      "operation_id": "insight_slo_get",
+      "summary": ""
+    },
+    {
+      "domain": "insight",
+      "method": "POST",
+      "path": "/internal/xwrite/apply",
+      "operation_id": "insight_xwrite_apply",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "GET",
+      "path": "/internal/accounts/{account_id}",
+      "operation_id": "mgmt_accounts_get",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "GET",
+      "path": "/internal/knowledge/{knowledge_id}",
+      "operation_id": "mgmt_knowledge_get",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "GET",
+      "path": "/internal/repos/{repo_key}",
+      "operation_id": "mgmt_repo_bundle",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "GET",
+      "path": "/internal/repos/{repo_key}/bot-config",
+      "operation_id": "mgmt_repo_bot_config",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "GET",
+      "path": "/internal/repos/{repo_key}/webhook-config",
+      "operation_id": "mgmt_repo_webhook_config",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "GET",
+      "path": "/internal/scenes/{repo_key}",
+      "operation_id": "mgmt_scenes_list",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "GET",
+      "path": "/internal/scenes/{scene_id}/engine-ids",
+      "operation_id": "mgmt_scene_engine_ids",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "GET",
+      "path": "/internal/sessions/{repo_key}/{agent_type}",
+      "operation_id": "mgmt_agent_session_get",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "GET",
+      "path": "/internal/skills/{skill_id}",
+      "operation_id": "mgmt_skill_get",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "POST",
+      "path": "/internal/tokens/verify",
+      "operation_id": "mgmt_token_verify",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "POST",
+      "path": "/internal/user-mapping",
+      "operation_id": "mgmt_user_mapping_batch",
+      "summary": ""
+    },
+    {
+      "domain": "mgmt",
+      "method": "POST",
+      "path": "/internal/xwrite/apply",
+      "operation_id": "mgmt_xwrite_apply",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/chat/conversations",
+      "operation_id": "runtime_chat_conversations_list",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/chat/conversations/{conv_id}/messages",
+      "operation_id": "runtime_chat_messages_list",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/engine-capabilities",
+      "operation_id": "runtime_engine_capabilities_list",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/events",
+      "operation_id": "runtime_events_list",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/events/{seq}",
+      "operation_id": "runtime_events_detail",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/issues/{repo_key}/{issue_number}/state",
+      "operation_id": "runtime_issue_state_get",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "POST",
+      "path": "/internal/issues/{repo_key}/{issue_number}/state",
+      "operation_id": "runtime_issue_state_update",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/meta/{namespace}",
+      "operation_id": "runtime_meta_namespace",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/runtime-credentials/{runtime_id}",
+      "operation_id": "runtime_credentials_meta",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/runtimes",
+      "operation_id": "runtime_runtimes_list",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/skills",
+      "operation_id": "runtime_skills_list",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/skills/{skill_id}",
+      "operation_id": "runtime_skills_detail",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "POST",
+      "path": "/internal/stats/tasks",
+      "operation_id": "runtime_stats_tasks",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/tasks",
+      "operation_id": "runtime_tasks_list",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "POST",
+      "path": "/internal/tasks/batch",
+      "operation_id": "runtime_tasks_batch",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
+      "path": "/internal/tasks/{task_id}/messages",
+      "operation_id": "runtime_task_messages_list",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "POST",
+      "path": "/internal/xwrite/apply",
+      "operation_id": "runtime_xwrite_apply",
+      "summary": ""
+    }
+  ],
+  "counts": {
+    "insight": 8,
+    "mgmt": 12,
+    "runtime": 17
+  }
+}

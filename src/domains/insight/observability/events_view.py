@@ -58,6 +58,11 @@ _NEXT_STEP = {
 #: —— 本轮踩过"SQL 文本含字面 `%` 又带参数"的地雷（pymysql 当格式符 → 异常被 try 吞掉 → 静默丢数据）。
 Q_MAX = 64
 
+#: 变更来源的仓库键分块上限（`events.repo_key IN (...)`）：可见仓库键可能上千（guest 组织），
+#: 单条 IN 会顶到驱动/服务器的语句长度与参数上限。分块后按 seq 还原降序（见 `_change_events`），
+#: 与「单条 ORDER BY seq DESC LIMIT n」等价。
+_CHANGE_REPO_KEY_CHUNK = 200
+
 def norm_q(q: Any) -> str:
     """规范关键字：去空白 + 截断。用户输入的 `%`/`_` 与日志检索（`logs.search`）一致，
     直接当通配符用（不做转义）——两端行为一致比"更严格"更重要。"""
@@ -293,35 +298,49 @@ def _visible_filter(items: List[Dict[str, Any]], repo_keys: Set[str]) -> List[Di
         return []
     return [x for x in items if (x.get("repo_key") or "") in repo_keys]
 
+
 def _change_events(user: Dict[str, Any], state: str, repo: str, limit: int,
                    repo_keys: Set[str], all_repos: bool = False, q: str = "") -> List[Dict[str, Any]]:
-    """变更类来源：PR 合并（`events`，P2-3 会扩展到部署等）。"""
-    from src.kernel.session_manager import db, db_lock
+    """变更类来源：PR 合并（`events`，P2-3 会扩展到部署等）。
+
+    取数走 runtime public（`events` 归 runtime）：原实现是「runtime lib 优先 + 进程主库
+    兜底 SQL」双分支，兜底侧正是跨域引用来源，且三库拓扑下 insight 进程库没有 events
+    （视图 0 → 1146）→ 变更来源恒空。列序、谓词顺序、`ORDER BY seq DESC`、LIMIT 全部
+    照抄原语句；分块只在可见仓库键过大时触发（见下）。
+    """
     if not all_repos and not repo_keys:
         return []
     _COLS = ("seq, repo_key, event_type, issue_id, title, actor, duration, started_at,"
              " completed_at, created_at, entity_type")
-    sql = "event_type='pull_request_merged'"
-    params: List[Any] = []
-    if not all_repos:
-        ph = ",".join("?" * len(repo_keys))
-        sql += f" AND repo_key IN ({ph})"
-        params.extend(sorted(repo_keys))
-    if q:
-        sql += " AND (title LIKE ? OR actor LIKE ? OR issue_id LIKE ?)"
-        params.extend([_like(q)] * 3)
+    keys: List[str] = [] if all_repos else sorted(repo_keys)
+
+    def _sql_for(part: List[str]) -> tuple[str, tuple]:
+        """按仓库键分块拼 where 片段：谓词顺序与原语句逐字一致（键块在关键字之前）。"""
+        _sql = "event_type='pull_request_merged'"
+        _p: List[Any] = []
+        if part:
+            _sql += f" AND repo_key IN ({','.join('?' * len(part))})"
+            _p.extend(part)
+        if q:
+            _sql += " AND (title LIKE ? OR actor LIKE ? OR issue_id LIKE ?)"
+            _p.extend([_like(q)] * 3)
+        return _sql, tuple(_p)
+
     rows: List[tuple] = []
     try:
-        from src.kernel.domain_read import runtime_lib as _runtime_lib_eview
-        _rt_eview = _runtime_lib_eview()
-        if _rt_eview is not None:
-            rows = _rt_eview.query_events(_COLS, sql, tuple(params), "seq DESC", int(limit))
+        from src.domains.runtime import public as _runtime_public
+        if len(keys) > _CHANGE_REPO_KEY_CHUNK:
+            # 可见仓库键可能上千（guest 组织）：分块取数后按 seq 还原全局降序再截窗口。
+            # `seq` 是 events 的自增唯一主键，故「多块各取全量 → 合并降序 → 取前 n」与
+            # 原「单条 ORDER BY seq DESC LIMIT n」等价（原实现也没有窗口偏移）。
+            for i in range(0, len(keys), _CHANGE_REPO_KEY_CHUNK):
+                _sql, _p = _sql_for(keys[i:i + _CHANGE_REPO_KEY_CHUNK])
+                rows.extend(_runtime_public.query_events_any(_COLS, _sql, _p, "seq DESC"))
+            rows.sort(key=lambda r: int(r[0]), reverse=True)
+            rows = rows[:int(limit)]
         else:
-            with db_lock:
-                c = db.cursor()
-                c.execute(f"SELECT {_COLS} FROM events WHERE {sql} ORDER BY seq DESC LIMIT ?",
-                          tuple(params) + (int(limit),))
-                rows = list(c.fetchall())
+            _sql, _p = _sql_for(keys)
+            rows = _runtime_public.query_events_any(_COLS, _sql, _p, "seq DESC", int(limit))
     except Exception as e:
         log.warning(f"obs events: change source failed: {e}")
         return []
@@ -350,22 +369,18 @@ def _change_events(user: Dict[str, Any], state: str, repo: str, limit: int,
     return out
 
 def _audit_events(state: str, limit: int, q: str = "") -> List[Dict[str, Any]]:
-    """审计类来源（**仅 L2**）：平台动作流水（登录/改配置等）。"""
-    from src.kernel.session_manager import db, db_lock
+    """审计类来源（**仅 L2**）：平台动作流水（登录/改配置等）。
+
+    取数走 mgmt public 的 `audit_recent_rows`（`audit_logs` 归 mgmt）：原实现在 insight
+    进程主库直发 SQL，三库拓扑下那张表在 mgmt 库（视图 0 → 1146）→ 审计来源恒空。
+    列序 / 谓词 / `ORDER BY seq DESC LIMIT ?` 与原语句逐字一致；关键字模式在调用方
+    包通配符（与原 `_like(q)` 同口径），原语不再拼值。降级行为不变：失败 → `[]` + 一条
+    WARNING（不静默）。
+    """
+    from src.domains.mgmt import public as _mgmt_public
     rows: List[tuple] = []
     try:
-        with db_lock:
-            c = db.cursor()
-            _sql = ("SELECT id, event_type, user_id, operator_id, ip, created_at, detail"
-                    " FROM audit_logs")
-            _p: List[Any] = []
-            if q:
-                _sql += " WHERE (event_type LIKE ? OR detail LIKE ?)"
-                _p.extend([_like(q)] * 2)
-            _sql += " ORDER BY seq DESC LIMIT ?"
-            _p.append(int(limit))
-            c.execute(_sql, tuple(_p))
-            rows = list(c.fetchall())
+        rows = _mgmt_public.audit_recent_rows(int(limit), _like(q) if q else "")
     except Exception as e:
         log.warning(f"obs events: audit source failed: {e}")
         return []

@@ -26,6 +26,11 @@ ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 from src.api import patrol as patrol_mod
 from src.api import patrol_compensate as pc
 
+# mock 的 seam 从「补偿模块自己的 db 别名」换成 session_manager 的进程库句柄：
+# 语句上移到 owner 域 public 后走 `*_any` 原语，其回落路径在**函数内** import
+# `src.kernel.session_manager.db`（这样测试重绑才生效）。打 pc.db 会打空。
+import src.kernel.session_manager as _sm
+
 SENTINEL_REPO = "gitcode:patrol-test/r1"
 
 
@@ -559,8 +564,8 @@ def test_recheck_handler_evidence_and_guards():
             recorder.append((status, meta))
 
         fake = FakeDb([("FROM agent_tasks WHERE id=?", [task_row])])
-        with patch.object(pc, "db", fake), \
-             patch.object(pc, "db_lock", __import__("threading").Lock()), \
+        with patch.object(_sm, "db", fake), \
+             patch.object(_sm, "db_lock", __import__("threading").Lock()), \
              patch.object(pc, "_set_finding", _rec), \
              patch.object(patrol_mod, "issue_terminal", lambda *a: terminal), \
              patch.object(patrol_mod, "l1_event_exists", lambda *a, **k: evidence_l1), \
@@ -580,8 +585,8 @@ def test_recheck_handler_evidence_and_guards():
     # 原任务行不存在 → 回挂
     ctx = pc.CompensateContext(finding_id="f2", task_id="t2", status="claiming")
     rec = []
-    with patch.object(pc, "db", FakeDb([("FROM agent_tasks WHERE id=?", [])])), \
-         patch.object(pc, "db_lock", __import__("threading").Lock()), \
+    with patch.object(_sm, "db", FakeDb([("FROM agent_tasks WHERE id=?", [])])), \
+         patch.object(_sm, "db_lock", __import__("threading").Lock()), \
          patch.object(pc, "_set_finding",
                       lambda fid, status, meta: rec.append(status)):
         assert pc.RecheckHandler().handle(ctx) is False
@@ -590,8 +595,8 @@ def test_recheck_handler_evidence_and_guards():
     ctx = pc.CompensateContext(finding_id="f3", task_id="t3", status="claiming")
     rec = []
     row_bad = (_old(60), "coding", json.dumps({"next_step": "a2a-"}))
-    with patch.object(pc, "db", FakeDb([("FROM agent_tasks WHERE id=?", [row_bad])])), \
-         patch.object(pc, "db_lock", __import__("threading").Lock()), \
+    with patch.object(_sm, "db", FakeDb([("FROM agent_tasks WHERE id=?", [row_bad])])), \
+         patch.object(_sm, "db_lock", __import__("threading").Lock()), \
          patch.object(pc, "_set_finding",
                       lambda fid, status, meta: rec.append((status, meta))), \
          patch.object(patrol_mod, "issue_terminal", lambda *a: ""), \
@@ -630,22 +635,22 @@ def test_identity_handler_strategy_chain():
 def test_identity_strategy_sql_seam():
     # HostUserStrategy / ManagedUserFallback 数据访问（FakeDb 行 mock）
     fake = FakeDb([("FROM managed_repos WHERE repo_key=?", [(777,)])])
-    with patch.object(pc, "db", fake), \
-         patch.object(pc, "db_lock", __import__("threading").Lock()):
+    with patch.object(_sm, "db", fake), \
+         patch.object(_sm, "db_lock", __import__("threading").Lock()):
         user = pc.HostUserStrategy().resolve("gitcode:patrol-test/b")
         assert user and user["id"] == "777" and user["auth_type"] == "jwt"  # D105: str uid
     fake = FakeDb([("FROM managed_repos WHERE repo_key=?", [(0,)])])
-    with patch.object(pc, "db", fake), \
-         patch.object(pc, "db_lock", __import__("threading").Lock()):
+    with patch.object(_sm, "db", fake), \
+         patch.object(_sm, "db_lock", __import__("threading").Lock()):
         assert pc.HostUserStrategy().resolve("gitcode:patrol-test/a") is None
     fake = FakeDb([("FROM user_repos WHERE repo_key=?", [(888,)])])
-    with patch.object(pc, "db", fake), \
-         patch.object(pc, "db_lock", __import__("threading").Lock()):
+    with patch.object(_sm, "db", fake), \
+         patch.object(_sm, "db_lock", __import__("threading").Lock()):
         fb = pc.ManagedUserFallbackStrategy().resolve("gitcode:patrol-test/a")
         assert fb and fb["id"] == "888"  # D105: str uid
     fake = FakeDb([("FROM user_repos WHERE repo_key=?", [])])
-    with patch.object(pc, "db", fake), \
-         patch.object(pc, "db_lock", __import__("threading").Lock()):
+    with patch.object(_sm, "db", fake), \
+         patch.object(_sm, "db_lock", __import__("threading").Lock()):
         assert pc.ManagedUserFallbackStrategy().resolve("gitcode:patrol-test/a") is None
 
 
@@ -766,18 +771,20 @@ def test_compensate_open_findings_order_and_batch():
     async def _fake_cf(fid):
         return "compensated"
 
-    with patch.object(pc, "db", fake), \
-         patch.object(pc, "db_lock", __import__("threading").Lock()), \
+    with patch.object(_sm, "db", fake), \
+         patch.object(_sm, "db_lock", __import__("threading").Lock()), \
          patch.object(pc, "compensate_finding", _fake_cf):
         counts = asyncio.run(pc.compensate_open_findings(limit=3))
     assert counts == {"compensated": 3}
 
 
 def test_compensate_batch_order_sql_pinned():
-    # SQL 文本守卫：批处理 SELECT 必须含 ORDER BY created_at（UUID id 排序=随机挑）
-    import inspect
-    src = inspect.getsource(pc.compensate_open_findings)
-    assert "ORDER BY created_at" in src
+    # SQL 文本守卫：捞单查询必须含 ORDER BY created_at（UUID id 排序=随机挑）
+    # 语句已归位 owner 域（mgmt public 具名查询），守卫跟着语句走，别只守调用方源码。
+    from src.domains.mgmt import public as _mp
+    sql = _mp._ANY_QUERIES["patrol_findings_open_ids"]
+    assert "ORDER BY created_at" in sql
+    assert "status='open'" in sql
 
 
 def test_reclaim_stale_claimings_lease_logic():
@@ -789,11 +796,11 @@ def test_reclaim_stale_claimings_lease_logic():
         ("status='claiming'", []),
     ])
     import threading
-    with patch.object(pc, "db", fake), \
-         patch.object(pc, "db_lock", threading.Lock()):
+    with patch.object(_sm, "db", fake), \
+         patch.object(_sm, "db_lock", threading.Lock()):
         assert pc.reclaim_stale_claimings() == 1
-    with patch.object(pc, "db", fake2), \
-         patch.object(pc, "db_lock", threading.Lock()):
+    with patch.object(_sm, "db", fake2), \
+         patch.object(_sm, "db_lock", threading.Lock()):
         assert pc.reclaim_stale_claimings() == 0
 
 
@@ -822,12 +829,16 @@ def test_s21_1_handoff_key_single_source_and_nonempty_guard():
 
 def test_s22_1_mysql_dialect_compliance():
     from src.kernel.mysql_compat import _CONCAT_RE, _SQLITE_MASTER_SQL_RE
+    from src.domains.mgmt import public as _mp
+    # 回挂 UPDATE 已归位 mgmt public（补偿模块不再持有该表 SQL）：方言守卫跟着语句走。
+    reopen_sql = _mp._ANY_QUERIES["patrol_finding_reopen"]
+    assert "action_meta=action_meta||" not in reopen_sql
+    assert "||" not in reopen_sql
+    assert "SET status='open', action_meta=? WHERE id=?" in reopen_sql
+    # 补偿模块源码零该表 SQL（否则又是一份跨域直写）
     src_comp = open(os.path.join(ROOT, "src", "api", "patrol_compensate.py"),
                     encoding="utf-8").read()
-    assert "action_meta=action_meta||" not in src_comp
-    assert "||" not in [l for l in src_comp.splitlines()
-                        if "UPDATE grape_t_patrol_findings" in l][0]
-    assert "SET status='open', action_meta=? WHERE id=?" in src_comp
+    assert "grape_t_patrol_findings" not in src_comp
     mig_sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name='grape_t_patrol_findings'"
     assert _SQLITE_MASTER_SQL_RE.match(mig_sql)
     assert not _CONCAT_RE.search("UPDATE grape_t_patrol_findings SET action_meta=action_meta||' | x'")
@@ -1174,8 +1185,8 @@ def test_s29_1_not_selfhealing_verdicts_are_terminal():
                                repo_key=SENTINEL_REPO, issue_id="#202", status="claiming")
     row_bad = (_old(60), "coding", json.dumps({"next_step": "a2a"}))
     rec = []
-    with patch.object(pc, "db", FakeDb([("FROM agent_tasks WHERE id=?", [row_bad])])), \
-         patch.object(pc, "db_lock", threading.Lock()), \
+    with patch.object(_sm, "db", FakeDb([("FROM agent_tasks WHERE id=?", [row_bad])])), \
+         patch.object(_sm, "db_lock", threading.Lock()), \
          patch.object(pc, "_set_finding", lambda fid, status, meta: rec.append((status, meta))), \
          patch.object(patrol_mod, "issue_terminal", lambda *a: ""), \
          patch.object(patrol_mod, "l1_event_exists", lambda *a, **k: False), \
@@ -1183,9 +1194,10 @@ def test_s29_1_not_selfhealing_verdicts_are_terminal():
          patch.object(patrol_mod, "_subtask_parent", lambda *a: ""):
         assert pc.RecheckHandler().handle(ctx) is False
     assert ctx.verdict == "target_unresolvable" and rec[0][0] == "needs_human"
-    # 批处理捞单谓词钉死：needs_human 不在捞单 SQL 的 status 里（SQL 文本守卫）
-    src = open(os.path.join(ROOT, "src/api/patrol_compensate.py"), encoding="utf-8").read()
-    sel = src[src.find('SELECT id FROM grape_t_patrol_findings WHERE kind'):]
+    # 批处理捞单谓词钉死：needs_human 不在捞单 SQL 的 status 里（SQL 文本守卫——
+    # 语句在 owner 域具名查询里，这里守那份文本）
+    from src.domains.mgmt import public as _mp
+    sel = _mp._ANY_QUERIES["patrol_findings_open_ids"]
     sel = sel[:sel.find("ORDER BY")]
     assert "status='open'" in sel and "needs_human" not in sel
 
@@ -1193,8 +1205,10 @@ def test_s29_1_not_selfhealing_verdicts_are_terminal():
 def test_s29_2_batch_cooldown_excludes_recent_failures():
     # UC29-2：冷却谓词——action_meta=''（从未尝试）照常捞取；失败回挂
     # （meta 非空 + updated_at 新鲜）冷却窗内不捞，卡死 finding 不再占据队头
+    from src.domains.mgmt import public as _mp
+    assert "AND (action_meta='' OR updated_at < ?)" in _mp._ANY_QUERIES["patrol_findings_open_ids"], \
+        "冷却谓词必须在捞单 SQL 里"
     src = open(os.path.join(ROOT, "src/api/patrol_compensate.py"), encoding="utf-8").read()
-    assert "AND (action_meta='' OR updated_at < ?)" in src, "冷却谓词必须在捞单 SQL 里"
     assert "_RETRY_COOLDOWN_MINUTES = 30" in src
     # 行为面：FIFO 捞取按谓词过滤（脚本行=冷却窗外的老失败 + 窗内新失败 + 新 finding）
     import threading
@@ -1202,8 +1216,8 @@ def test_s29_2_batch_cooldown_excludes_recent_failures():
     rows = [("f-old-failed",), ("f-fresh",)]
     fake = FakeDb([("FROM grape_t_patrol_findings WHERE kind='broken_chain'", rows)])
     got = []
-    with patch.object(pc, "db", fake), \
-         patch.object(pc, "db_lock", threading.Lock()), \
+    with patch.object(_sm, "db", fake), \
+         patch.object(_sm, "db_lock", threading.Lock()), \
          patch.object(pc, "_load_finding", lambda fid: pc.CompensateContext(
              finding_id=fid, kind="broken_chain", status="open")):
         async def _fake_comp(fid):

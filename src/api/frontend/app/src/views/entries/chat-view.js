@@ -19,7 +19,8 @@ let _app = null
 function mount(props) {
   const el = document.getElementById('pageContent')
   if (!el) return
-  if (_app) _app.unmount()
+  if (_app) { try { _app.unmount() } catch (e) {} _app = null }
+  el.innerHTML = ''
   _app = createApp(ChatView, props || {})
   _app.mount(el)
 }

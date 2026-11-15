@@ -241,11 +241,8 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
     # engine_id=0：auto/direct 兜底 → 自动选本机在线引擎
     if not engine_id:
         try:
-            from src.kernel.session_manager import db as _edb, db_lock as _edl
-            with _edl:
-                _ec = _edb.cursor()
-                _ec.execute("SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1")
-                _erow = _ec.fetchone()
+            from src.domains.runtime import public as _rt_eng
+            _erow = _rt_eng.first_online_runtime()
             if _erow:
                 engine_id = _erow[0]
                 _be = _erow[1] or _be

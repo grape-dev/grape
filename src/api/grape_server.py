@@ -7,6 +7,8 @@ Issue #699 Phase 4 四进程拆分：本进程把 main.py 的「用户面」职�
 
 import sys, os
 
+from src.kernel.config import log
+
 # Issue #455：主服务要求 Python >= 3.10。防御直接 `uvicorn src.api.grape_server:app` 的启动方式。
 from src.api.version_check import ensure_python_version
 
@@ -61,8 +63,8 @@ def _startup_security_check():
             with open(email_json_path, encoding="utf-8") as _f:
                 _email_cfg = _json.load(_f)
             _has_email_json = bool(_email_cfg.get("smtp", {}).get("host") or _email_cfg.get("resend", {}).get("api_key"))
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     if not _has_email_env and not _has_email_json:
         errors.append("生产环境必须配置邮件服务（环境变量 SMTP_HOST/RESEND_API_KEY 或 configs/email.json）")
 
@@ -100,6 +102,15 @@ async def lifespan(app: FastAPI):
     global im_engine
     global bot_manager
     from src.kernel.config import log
+
+    # 库初始化/迁移必须在 lifespan（启动期）跑，不能留在模块级：
+    # 模块级调用会让**任何** `import src.api.grape_server` 都触发一次全量迁移，
+    # 而运行期确实存在这种 import（im/notify.resolve_engine 为了拿 im_engine 懒加载它）。
+    # 一旦那条路径在事件循环里命中，同步 pymysql 迁移会把整个 loop 卡死（py-spy 实证：
+    # MainThread 停在 _migrate_tables ← init_database ← <module>，worker 心跳停发 →
+    # 引擎被判定失联 → 健康分强制 0）。
+    init_database()
+    _load_accounts()
 
     # 生产环境启动安全门禁
     try:
@@ -143,8 +154,8 @@ async def lifespan(app: FastAPI):
         try:
             import psutil as _ps_init
             _ps_init.cpu_percent(interval=None)
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
 
         # 启动引擎健康探测线程（每 10 分钟，observability——A 职责）
         try:
@@ -282,28 +293,38 @@ async def lifespan(app: FastAPI):
         log.warning(f"Server metrics loop start failed: {e}")
 
     # 可观测性告警中心：种子规则 + 每 30s 求值（§6：_obs_alert_loop 归 A）
+    # 三库独立（GRAPE_DOMAIN_LIB=1）时 obs_* 表在 insight 域库里，必须由 Insight 进程跑：
+    # mgmt 用本域连接跑这些循环只会得到 1146（Table 'grape_stage_mgmt.obs_*' doesn't exist）。
+    from src.kernel.table_ownership import db_name_domain as _obs_db_domain
+    _obs_owner_ok = _obs_db_domain() in (None, "insight")
+    if not _obs_owner_ok:
+        log.info(f"observability loops owned by insight, skipped in domain={_obs_db_domain()}")
+
     _obs_alert_loop_task = None
-    try:
-        from src.api.main import _start_obs_alert_task
-        _obs_alert_loop_task = _start_obs_alert_task()
-    except Exception as e:
-        log.warning(f"Observability alert evaluator start failed: {e}")
+    if _obs_owner_ok:
+        try:
+            from src.api.main import _start_obs_alert_task
+            _obs_alert_loop_task = _start_obs_alert_task()
+        except Exception as e:
+            log.warning(f"Observability alert evaluator start failed: {e}")
 
     # 业务指标聚合（60s）——A
     _obs_rollup_task = None
-    try:
-        from src.api.main import _start_obs_rollup_task
-        _obs_rollup_task = _start_obs_rollup_task()
-    except Exception as e:
-        log.warning(f"Observability metric rollup start failed: {e}")
+    if _obs_owner_ok:
+        try:
+            from src.api.main import _start_obs_rollup_task
+            _obs_rollup_task = _start_obs_rollup_task()
+        except Exception as e:
+            log.warning(f"Observability metric rollup start failed: {e}")
 
     # 设备资源采样（60s）——A
     _obs_sample_task = None
-    try:
-        from src.api.main import _start_obs_sample_task
-        _obs_sample_task = _start_obs_sample_task()
-    except Exception as e:
-        log.warning(f"Observability runtime sampler start failed: {e}")
+    if _obs_owner_ok:
+        try:
+            from src.api.main import _start_obs_sample_task
+            _obs_sample_task = _start_obs_sample_task()
+        except Exception as e:
+            log.warning(f"Observability runtime sampler start failed: {e}")
 
     # 可观测性日志落库：主控 WARNING/ERROR → obs_log（OBS_LOG_DB=1 仅 A 落库）
     try:
@@ -387,13 +408,13 @@ async def lifespan(app: FastAPI):
             log.warning(f"IM outbox consumer stop failed: {_e}")
         try:
             app.state.outbox_consumer = None
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     try:
         from src.domains.runtime.im.notify import set_running_app
         set_running_app(None)
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     if im_engine is not None:
         try:
             await im_engine.stop()
@@ -401,21 +422,21 @@ async def lifespan(app: FastAPI):
             log.warning(f"IM engine stop failed: {_e}")
         try:
             app.state.im_engine = None
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     if _knowledge_write_task:
         _knowledge_write_task.cancel()
         try:
             await asyncio.wait_for(_knowledge_write_task, timeout=5)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+        except Exception as _e:
+            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     for _t in (_obs_alert_loop_task, _obs_rollup_task, _obs_sample_task):
         if _t:
             _t.cancel()
             try:
                 await asyncio.wait_for(_t, timeout=5)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
+            except Exception as _e:
+                log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     # knowledge_migrate：shutdown 时等待完成（不 cancel，迁移中断不如跑完）
     _migrate_task = getattr(app.state, "knowledge_migrate_task", None)
     if _migrate_task and not _migrate_task.done():
@@ -423,19 +444,19 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(_migrate_task, timeout=10)
         except asyncio.TimeoutError:
             log.warning("knowledge_migrate shutdown wait timeout, task continues in background")
-        except Exception:
-            pass
+        except Exception as _e:
+            log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     # 官方技能 OBS 同步 / 反馈 reconcile：优雅关闭
     try:
         from src.domains.runtime.storage.skill_sync import stop_skill_sync_scheduler
         await stop_skill_sync_scheduler()
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     try:
         from src.api.feedback_issue_converter import stop_feedback_reconcile_scheduler
         await stop_feedback_reconcile_scheduler()
-    except Exception:
-        pass
+    except Exception as _e:
+        log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
     # GSB 注销 + 定时任务收口（原先被误放在第一次 yield 之后，现归还 shutdown 段）
     if _gsb is not None:
         try:
@@ -678,14 +699,14 @@ if metrics_enabled():
 try:
     from src.domains.insight.observability.otel import instrument_fastapi
     instrument_fastapi(app, "grape-server-a")
-except Exception:
-    pass
+except Exception as _e:
+    log.debug(f"src/api/grape_server.py best-effort skipped: {_e}")
 
 install_request_middleware(app)
 
-init_database()
-
-_load_accounts()
+# 注意：init_database() / _load_accounts() 已移入 lifespan（见该函数开头的说明）。
+# 模块级执行会让任何 import 本模块的路径都触发全量迁移，运行期懒加载（im/notify）会把
+# 事件循环整段卡死。uvicorn 启动会跑 lifespan，所以启动期语义不变。
 
 install_exception_handlers(app)
 

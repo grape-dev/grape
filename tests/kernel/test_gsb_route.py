@@ -589,8 +589,8 @@ def test_rollback_all_lib_matches_legacy_behavior(monkeypatch, fake_service):
     fake_service(_L, _R)
     gsb_provider.register_provider("mgmt", _L, _R)
     count = route_config.set_all_known("lib", updated_by="rollback")
-    # 23 契约方法 + mgmt 39 原语 + runtime 66 原语
-    assert count == 23 + 39 + 66
+    # 契约方法 + public 原语（P2 起由 registry 推导，避免硬编码随接口补齐漂移）
+    assert count == len(route_config.known_route_keys())
 
     svc = get_service("mgmt")
     assert svc.get_skill("7") == {"src": "local", "sid": "7"}
@@ -620,7 +620,8 @@ def test_contract_methods_registry_sync():
         actual = set(getattr(cls, "__abstractmethods__", ()))
         assert actual == set(route_config.CONTRACT_METHODS[service]), service
     total = sum(len(v) for v in route_config.CONTRACT_METHODS.values())
-    assert total == 23
+    # 23 基线 + P2 补齐（N1–N5/N11/N12 runtime 7 + N6/N8/N9/N10 mgmt 4）
+    assert total == 34
 
 
 def test_public_primitives_registry_sync():

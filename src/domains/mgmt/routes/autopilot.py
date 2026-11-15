@@ -27,6 +27,8 @@ from src.api.deps import get_current_user, check_repo_access
 from src.kernel.config import log
 
 from src.kernel.session_manager import db, db_lock
+# 运行域表（autopilot_executions）走 owner 域原语；autopilot_tasks 归本域
+from src.domains.runtime import public as _rt_ap
 
 from src.domains.runtime.engine.scheduler import _get_exec_agent_task
 
@@ -73,21 +75,15 @@ def _check_task_access(user: dict, task_id: int) -> dict:
 
 def _check_exec_access(user: dict, exec_id: int) -> dict:
     """校验 execution 归属并返回 dict（含 task_id, repo_key）。"""
+    # executions 归运行域、tasks 归本域：跨域 JOIN 拆成两次查询（Python 内连接）
+    _ex = _rt_ap.read_one_any("autopilot_execution_brief", (exec_id,))
+    if not _ex:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "execution not found"})
     with db_lock:
         c = db.cursor()
-        from src.kernel.domain_read import runtime_lib as _ru_lib_80b975_f
-        _ru_lib_80b975 = _ru_lib_80b975_f(foreign_only=True)
-        if _ru_lib_80b975 is not None:
-            c = _ru_lib_80b975.read_one("autopilot_executions_80b975", (exec_id,)
-        ).fetchone()
-        else:
-            row = c.execute(
-                "SELECT e.id, e.task_id, t.repo_key FROM autopilot_executions e "
-                "JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
-                (exec_id,)
-            ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "execution not found"})
+        _t = c.execute("SELECT repo_key FROM autopilot_tasks WHERE id=?",
+                       (int(_ex[1]),)).fetchone()
+    row = (int(_ex[0]), int(_ex[1]), (_t[0] if _t else ""))
     repo_key = row[2] or ""
     if repo_key:
         check_repo_access(user, repo_key)
@@ -115,11 +111,8 @@ def _validate_engine_runtime_ids(user: dict, repo_key: str, engine_ids: list) ->
         ids = [int(x) for x in engine_ids]
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid engine_runtime_ids"})
-    with db_lock:
-        c = db.cursor()
-        ph = ",".join("?" * len(ids))
-        rows = c.execute(f"SELECT id, credential_id FROM agent_runtimes WHERE id IN ({ph})", ids).fetchall()
-    rt_cred = {r[0]: (r[1] or 0) for r in rows}
+    # 引擎实例行归运行域：走归属域原语（任意拓扑；原为本地 SQL，三库下 1146）
+    rt_cred = _rt_ap.runtimes_credential_ids_any(ids)
     invalid = []
     for eid in ids:
         if eid not in rt_cred:
@@ -137,13 +130,6 @@ def _validate_engine_runtime_ids(user: dict, repo_key: str, engine_ids: list) ->
         raise HTTPException(status_code=400, detail={
             "code": 400,
             "message": f"engine runtime ids not available for this repo/user: {', '.join(invalid)}"})
-
-def _autopilot_exec_cols() -> list:
-    """返回 autopilot_executions 表的实际列名（v3.0 迁移后 issue_number 可能不存在）。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("PRAGMA table_info(autopilot_executions)")
-        return [r[1] for r in c.fetchall()]
 
 def _row_to_task(row) -> dict:
     """将 DB 行转为 API 响应 dict。"""
@@ -435,21 +421,23 @@ def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_cur
 def delete_task(task_id: int, user: dict = Depends(get_current_user)):
     """删除自动化任务（同时删除关联执行记录）。"""
     _check_task_access(user, task_id)
+    # P3-5h：autopilot_executions 在 runtime 域（task 本身是 mgmt 域，仍本地删）。
+    # 跨域删除先于本域删除，且不再压在本域 db_lock 里（跨域事务不该被 mgmt 串行锁放大）。
+    from src.kernel.domain_read import runtime_lib as _rt_lib_dt
+    from src.kernel import cross_write as _xw_dt
+    _dt_done = False
+    _rt_dt = _rt_lib_dt(foreign_only=True)
+    if _rt_dt is not None:
+        _rt_dt_ok = _rt_dt
+        _dt_done = _xw_dt.submit_if_lib(
+            _rt_dt_ok, "runtime", "autopilot_executions_delete",
+            f"autopilot-exec-del:{task_id}", {"task_id": int(task_id)},
+            lambda: _rt_dt_ok.delete_autopilot_executions(int(task_id)), log)
+    if not _dt_done:
+        # 兜底改走归属域原语（原为本地 SQL：三库拓扑下 mgmt 库无此表，删的是空集）
+        _rt_ap.delete_autopilot_executions_by_task_any(int(task_id))
     with db_lock:
         c = db.cursor()
-        # P3-5h：autopilot_executions 在 runtime 域（task 本身是 mgmt 域，仍本地删）
-        from src.kernel.domain_read import runtime_lib as _rt_lib_dt
-        from src.kernel import cross_write as _xw_dt
-        _dt_done = False
-        _rt_dt = _rt_lib_dt(foreign_only=True)
-        if _rt_dt is not None:
-            _rt_dt_ok = _rt_dt
-            _dt_done = _xw_dt.submit_if_lib(
-                _rt_dt_ok, "runtime", "autopilot_executions_delete",
-                f"autopilot-exec-del:{task_id}", {"task_id": int(task_id)},
-                lambda: _rt_dt_ok.delete_autopilot_executions(int(task_id)), log)
-        if not _dt_done:
-            c.execute("DELETE FROM autopilot_executions WHERE task_id=?", (task_id,))
         c.execute("DELETE FROM autopilot_tasks WHERE id=?", (task_id,))
         db.commit()
     log.info(f"Autopilot: task {task_id} deleted by user={user.get('username', '')}")
@@ -485,38 +473,21 @@ def list_executions(
     if task_id is not None:
         _check_task_access(user, task_id)
     # v3.0: autopilot_executions 不再有 issue_number 列（旧字段物理保留则兼容读取）
-    _exec_cols = _autopilot_exec_cols()
-    _has_issue_num_col = "issue_number" in _exec_cols
-    _issue_num_expr = "e.issue_number" if _has_issue_num_col else "'' AS issue_number"
-    # Issue #1546（架构审查 M2）：agent_task_id 为新增列，迁移未落（MySQL 已盖章但列未建）
-    # 时列表查询不能直撞 1054 → 500；与 issue_number 同一列探测口径做表达式兜底。
-    _has_agent_task_id_col = "agent_task_id" in _exec_cols
-    _agent_task_id_expr = "e.agent_task_id" if _has_agent_task_id_col else "'' AS agent_task_id"
-    sql = ("SELECT e.id, e.task_id, e.status, e.retry_count, e.result, e.error, "
-           "e.started_at, e.completed_at, e.created_at, e.agent_type, e.findings_json, "
-           + _issue_num_expr + ", " + _agent_task_id_expr + " FROM autopilot_executions e WHERE 1=1")
-    count_sql = "SELECT COUNT(*) FROM autopilot_executions e WHERE 1=1"
-    conditions = []
-    params = []
-    if task_id is not None:
-        conditions.append("e.task_id=?")
-        params.append(task_id)
-    if status:
-        conditions.append("e.status=?")
-        params.append(status)
-    if conditions:
-        sql += " AND " + " AND ".join(conditions)
-        count_sql += " AND " + " AND ".join(conditions)
-    sql += " ORDER BY e.id DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
-    with db_lock:
-        c = db.cursor()
-        rows = c.execute(sql, params).fetchall()
-        total = c.execute(count_sql, params[:-2]).fetchone()[0]
-        # 批量查各 task 的 repo_key（避免 N+1）
-        task_ids = set(r[1] for r in rows)
-        repo_key_map = {}
-        if task_ids:
+    # C2 口径：autopilot_executions 归运行域 —— 分页读整段走归属域原语（两条拓扑同一语句），
+    # 连「迁移兼容列探测」也由归属域在本域连接上完成（原实现是在 mgmt 连接上探测运行域表，
+    # 三库拓扑下恒探测为空）。repo_key_map 始终来自本域 autopilot_tasks。
+    _page = _rt_ap.list_autopilot_executions(task_id, status or "", limit, offset)
+    _cols = ("id", "task_id", "status", "retry_count", "result", "error", "started_at",
+             "completed_at", "created_at", "agent_type", "findings_json",
+             "issue_number", "agent_task_id")
+    rows = [tuple(x[k] for k in _cols) for x in _page["executions"]]
+    total = int(_page["total"])
+    # 批量查各 task 的 repo_key（避免 N+1）——autopilot_tasks 属本域，始终本地查
+    task_ids = set(r[1] for r in rows)
+    repo_key_map = {}
+    if task_ids:
+        with db_lock:
+            c = db.cursor()
             ph = ",".join("?" * len(task_ids))
             tk_rows = c.execute(
                 f"SELECT id, repo_key FROM autopilot_tasks WHERE id IN ({ph})",
@@ -574,18 +545,10 @@ def list_executions(
 def get_findings(exec_id: int, user: dict = Depends(get_current_user)):
     """获取执行结果的问题列表。"""
     _check_exec_access(user, exec_id)
-    with db_lock:
-        c = db.cursor()
-        from src.kernel.domain_read import runtime_lib as _ru_lib_018f03_f
-        _ru_lib_018f03 = _ru_lib_018f03_f(foreign_only=True)
-        if _ru_lib_018f03 is not None:
-            c = _ru_lib_018f03.read_one("autopilot_executions_018f03", (exec_id,)
-        ).fetchone()
-        else:
-            row = c.execute(
-                "SELECT findings_json, result FROM autopilot_executions WHERE id=?",
-                (exec_id,)
-            ).fetchone()
+    # 执行记录归运行域：单行读走归属域原语（任意拓扑）。
+    # 修存量 bug：原 lib 分支把 `c` 赋成 fetchone() 结果、`row` 未定义 →
+    # lib 可用时本端点直接 NameError（500），只有单库兜底分支能跑。
+    row = _rt_ap.autopilot_execution_findings_result_any(exec_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "execution not found"})
     findings_json = row[0] or ""
@@ -687,13 +650,8 @@ def _save_findings_json(exec_id: int, findings_data: dict) -> None:
             lambda: _rt_fj_ok.set_autopilot_findings(int(exec_id), _fj), log)
     if _fj_done:
         return
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "UPDATE autopilot_executions SET findings_json=? WHERE id=?",
-            (_fj, exec_id)
-        )
-        db.commit()
+    # 兜底改走归属域原语（任意拓扑，自带提交；三库拓扑下 mgmt 库无此表 → 原来写的是空集）
+    _rt_ap.set_autopilot_findings_any(int(exec_id), _fj)
 
 async def _dispatch_finding_core(exec_id: int, finding_id: str,
                                  title: str = "", description: str = "",
@@ -707,19 +665,15 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
     抛 HTTPException 语义错误（404/409/400），调用方自行捕获转回复卡。
     返回 {ok, issue_number, message}。
     """
+    # 同上：executions 走运行域原语，tasks.repo_key 在本域查
+    _ex = _rt_ap.read_one_any("autopilot_execution_findings", (exec_id,))
+    if not _ex or not _ex[1]:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "无 findings 可派发"})
     with db_lock:
         c = db.cursor()
-        from src.kernel.domain_read import runtime_lib as _ru_lib_88bc87_f
-        _ru_lib_88bc87 = _ru_lib_88bc87_f(foreign_only=True)
-        if _ru_lib_88bc87 is not None:
-            c = _ru_lib_88bc87.read_one("autopilot_executions_88bc87", (exec_id,)).fetchone()
-        else:
-            row = c.execute(
-                "SELECT t.repo_key, e.findings_json FROM autopilot_executions e "
-                "JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
-                (exec_id,)).fetchone()
-    if not row or not row[1]:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "无 findings 可派发"})
+        _t = c.execute("SELECT repo_key FROM autopilot_tasks WHERE id=?",
+                       (int(_ex[0]),)).fetchone()
+    row = ((_t[0] if _t else ""), _ex[1])
     repo_key = row[0]
     try:
         findings_data = json.loads(row[1])
@@ -966,17 +920,7 @@ def _skill_display_name(skill_name: str) -> str:
     if not skill_name:
         return ""
     try:
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_1abf56_f
-            _ru_lib_1abf56 = _ru_lib_1abf56_f(foreign_only=True)
-            if _ru_lib_1abf56 is not None:
-                row = _ru_lib_1abf56.read_one("skill_1abf56", (skill_name,))
-            else:
-                c.execute(
-                    "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
-                    (skill_name,))
-                row = c.fetchone()
-        return (row[0] or "") if row else ""
-    except Exception:
+        return _rt_ap.skill_display_name_official_any(skill_name)
+    except Exception as e:  # noqa: BLE001 - 展示名不是关键路径，失败回退 Skill ID
+        log.debug(f"Autopilot: skill display_name lookup failed for {skill_name}: {e}")
         return ""

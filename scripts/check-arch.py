@@ -15,6 +15,9 @@ Rules:
       kernel/domains (hard; deferred in-function imports excluded)
   R6  kernel/domains must not import legacy top-level
       shim paths (src.config, src.api.jwt_utils, ...)             (hard)
+  R7  removed legacy top-level paths must stay unimportable      (hard)
+  R8  kernel must not WRITE domain-owned tables (三库独立化 P1)   (hard;
+      existing pairs are ratcheted in R8_WHITELIST with a target phase)
 
 Usage:
   python scripts/check-arch.py            # print report, exit 1 on hard violations
@@ -25,6 +28,7 @@ from __future__ import annotations
 import argparse
 import ast
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -64,6 +68,73 @@ REMOVED_LEGACY_PREFIXES = (
     "src.observability", "src.runtime", "src.project_info", "src.api.routes",
 )
 
+# ── R8：kernel 不得写「域归属表」（三库独立化 P1 硬约束）────────────────────
+# 归属口径：docs/weekly-11/table-owner.tsv（102 张基表，三库实况）。
+# 棘轮：白名单按 (文件, 表) 登记**当前数量**；新增文件/表或数量上升 → 红。
+# 每条存量以「目标阶段」标注，P1/P3 迁移完成后应逐条删除（只减不增）。
+R8_OWNER_TSV = os.path.join(REPO_ROOT, "docs", "weekly-11", "table-owner.tsv")
+R8_WHITELIST: dict[str, dict[str, int]] = {
+    # src/kernel/repo_migrate.py 已清零（改名迁移按域下沉到 mgmt/runtime public）
+    "src/kernel/session_manager.py": {
+        "chat_agent_session": 7, "chat_conversations": 6, "chat_messages": 5,
+        "issue": 2, "repo_im_group_binding": 3, "unified_user_mapping": 6,
+    },  # P3：进程库 shim 的跨域写，按表迁到 runtime/mgmt public 写函数
+    # src/kernel/auth_sdk/auth_token.py 已清零（令牌表 SQL 下沉 mgmt.public 的 session/api token 原语）
+    # src/kernel/repo_cleanup.py 已清零（级联清理按域拆到 mgmt/runtime public 的 purge_repo_rows）
+    # src/kernel/lock.py 已清零（分布式锁协议整体下沉 runtime.public：
+    # acquire/release/renew/cleanup 四个原语，SQL 只在 runtime 域一份）
+    # src/kernel/gsb/registry.py 已清零（注册表 DDL/读写全部下沉 mgmt.public 的
+    # gsb_* 具名查询与任意拓扑原语；三库拓扑下各域进程写同一张 mgmt 表）
+    # src/kernel/token_resolver.py 已清零（仓库级 bot token 状态列的两条 UPDATE 下沉
+    # mgmt.public 的 set_repo_bot_token_status_any；读侧三处同步归位）
+    "src/kernel/prompt_builder.py": {"unified_user_mapping": 2},  # P2：读改 N10
+    "src/kernel/persistence/credential_usage_log.py": {"grape_t_credential_usage_log": 2},  # P3
+    # src/kernel/outbound_ledger.py 已清零（代发台账的建表/索引引导与 6 条读写语句下沉
+    # mgmt.public 的 ensure_outbound_ledger_table + outbound_ledger_* 原语）
+}
+
+_R8_WRITE_RE = re.compile(
+    r"\b(INSERT\s+(?:IGNORE\s+)?INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+"
+    r"`?(?:[A-Za-z_]\w*`?\s*\.\s*`?)?([A-Za-z_]\w*)`?", re.I)
+
+
+def load_r8_owner(path: str) -> dict[str, str]:
+    owner: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip() or line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 2:
+                    owner[parts[1].strip()] = parts[0].strip()
+    except OSError as exc:
+        # QA G4：清单缺失/不可读时此前静默 pass → scan_r8 返回空 → 报告里显示 R8 通过，
+        # 实际这条检查根本没跑。必须显式说明「跳过」，否则门禁给出的是假绿灯。
+        print(f"R8: SKIP —— 归属清单不可读（{path}: {exc}）；跨域基表直查检查本轮未执行")
+    return owner
+
+
+def scan_r8() -> list[tuple[str, str, str, int]]:
+    """返回 [(relpath, table, owner_schema, count)]；owner tsv 缺失时返回空并跳过。"""
+    owner = load_r8_owner(R8_OWNER_TSV)
+    if not owner:
+        # 与 load_r8_owner 的 SKIP 提示配套：空清单 = 检查没跑，不能当成「无违规」。
+        print(f"R8: SKIP —— 归属清单为空（{R8_OWNER_TSV}），本轮未做跨域基表直查检查")
+        return []
+    out = []
+    for path in iter_py(os.path.join(SRC, "kernel")):
+        text = open(path, encoding="utf-8", errors="replace").read()
+        found: dict[str, int] = {}
+        for _verb, table in _R8_WRITE_RE.findall(text):
+            if table in owner:
+                found[table] = found.get(table, 0) + 1
+        rel = os.path.relpath(path, REPO_ROOT)
+        for table, n in sorted(found.items()):
+            out.append((rel, table, owner[table], n))
+    return out
+
+
 # ── Whitelist: module -> {rule: reason} ────────────────────────────────────
 # Pre-existing deferred (function-level) imports kept working during Phase 1;
 # each entry carries the phase that will remove it.
@@ -86,6 +157,13 @@ WHITELIST: dict[str, dict[str, str]] = {
         "R1": "deferred token lookup via mgmt.user.db; Phase 5 -> MgmtService",
         "R2": "deferred token resolution via src.api.deps; Phase 5",
     },
+    "src/kernel/repo_migrate.py": {
+        # QA G4：这里原本是**两个**同名键（R8 表计数 + R1 豁免），Python dict 字面量后者胜，
+        # 于是 managed_repos/meta/skill/user_repos 的 R8 计数被静默丢掉，等于豁免了 4 张表的
+        # 跨域直查。合并为一个键，两类豁免同时生效。
+        "managed_repos": 3, "meta": 2, "skill": 2, "user_repos": 4,
+        "R1": "deferred org/user lookups via mgmt.user.db; Phase 5",
+    },  # P1：整体迁 mgmt 域（仓库维护；受 #2010 kernel 布局契约约束，需随契约一起改）
     "src/kernel/session_manager.py": {
         "R1": "deferred feature flags via mgmt.user.db; Phase 5",
         "R2": "deferred timestamp helper via src.api.time_utils; Phase 5",
@@ -93,15 +171,32 @@ WHITELIST: dict[str, dict[str, str]] = {
     "src/kernel/repo_cleanup.py": {
         "R1": "deferred repo state lookup via mgmt.user.db; Phase 5",
     },
-    "src/kernel/repo_migrate.py": {
-        "R1": "deferred org/user lookups via mgmt.user.db; Phase 5",
+    "src/kernel/lock.py": {
+        "R1": {"targets": ["src.domains.runtime"],
+              "reason": "deferred distributed-lock protocol via runtime.public "
+                        "(SQL moved to owner domain); due Phase 5 -> contracts"},
     },
     "src/kernel/help_docs_sync.py": {
         "R1": "deferred skill/user lookups via mgmt.user.db; Phase 5",
         "R2": "deferred app/openapi imports for help page generation; Phase 5",
     },
+    "src/kernel/gsb/registry.py": {
+        "R1": {"targets": ["src.domains.mgmt"],
+              "reason": "deferred GSB registry SQL via mgmt.public "
+                        "(gsb_service_registry is mgmt-owned); due Phase 5 -> contracts"},
+    },
+    "src/kernel/outbound_ledger.py": {
+        "R1": {"targets": ["src.domains.mgmt", "src.domains.mgmt.public"],
+              "reason": "deferred outbound-ledger DDL/read-write primitives via mgmt.public "
+                        "(outbound_content_ledger is mgmt-owned); due Phase 5 -> contracts"},
+    },
     "src/kernel/auth_sdk/jwt_utils.py": {
         "R1": "deferred secret/credential keys via mgmt.auth.security_config; Phase 5",
+    },
+    "src/kernel/auth_sdk/auth_token.py": {
+        "R1": {"targets": ["src.domains.mgmt"],
+              "reason": "deferred token-table access via mgmt.public primitives "
+                        "(SQL already moved there); due Phase 5 -> contracts"},
     },
     # R1: multi-platform decoupling additions — all deferred (function-body) lookups;
     # Phase 5 inverts them through src/domains/contracts.
@@ -121,11 +216,8 @@ WHITELIST: dict[str, dict[str, str]] = {
         "R1": {"targets": ["src.domains.mgmt.auth.providers", "src.domains.runtime.vcs.platform_card"],
               "reason": "deferred provider + vcs-card enumeration; due Phase 5 -> contracts"},
     },
-    # R6: legacy shim imports due Phase 5 contracts. Evidence: check-arch at
-    # base 13c6d0979 fails with these 13 R6 findings before this PR's changes
-    # (run `python scripts/check-arch.py` on the base tree to reproduce).
-    "src/domains/runtime/pipeline/account_env.py": {"R6": {"targets": ["src.config"], "reason": "legacy shim import; due Phase 5 contracts"}},
-    "src/domains/mgmt/routes/scenes.py": {"R6": {"targets": ["src.scene_custom_env"], "reason": "legacy shim imports; due Phase 5 contracts"}},
+    # R6: legacy shim imports due Phase 5 contracts. 两条旧 shim 条目（account_env / scenes）
+    # 在实际导入清零后已删除——豁免面只保留仍存在的依赖，避免白名单漂移。
     # R5: known import cycles inherited from the pre-Phase-1 layout.
     # agents <-> engine: M0 compat forwarding layer (src.domains.runtime.agents re-exported
     #   src.domains.runtime.engine backends); importing src.domains.runtime.agents before src.domains.runtime.engine fails
@@ -277,7 +369,7 @@ def main() -> int:
         return 2
 
     graph: dict[str, list[str]] = {}
-    r1, r2, r3, r4, r6, r7 = [], [], [], [], [], []
+    r1, r2, r3, r4, r6, r7, r8 = [], [], [], [], [], [], []
     r5_intra: list = []  # 包内 re-export 环（>=4 段公共前缀），report-only 输出
 
     # R7 全仓扫描：src/api 等非 kernel/domains 层不在主循环内，历史漏网正出自这里
@@ -424,12 +516,20 @@ def main() -> int:
             print("  " + " <-> ".join(comp))
     section("R6 legacy shim imports", r6, True)
     section("R7 removed legacy paths", r7, True)
+    # R8：kernel 写域归属表（棘轮：新文件/新表/数量上升 → HARD）
+    for rel, table, owner_schema, n in scan_r8():
+        expected = R8_WHITELIST.get(rel, {}).get(table)
+        if expected is None:
+            r8.append((rel, f"WRITE {table} ({owner_schema}-owned)", f"{n} 处（未登记）"))
+        elif n > expected:
+            r8.append((rel, f"WRITE {table} ({owner_schema}-owned)", f"{expected} -> {n}"))
+    section("R8 kernel writes domain-owned tables (ratchet)", r8, True)
 
     whitelisted = sum(len(v) for v in WHITELIST.values())
     print(f"\nwhitelist entries: {whitelisted} (see WHITELIST in this script)")
     print(f"R4 cross-domain findings: {len(r4)} (tracked for Phase 5)")
 
-    hard_fail = bool(r1 or r2 or r5 or r6 or r7) or (args.strict and r4)
+    hard_fail = bool(r1 or r2 or r5 or r6 or r7 or r8) or (args.strict and r4)
     if hard_fail:
         print("\nRESULT: FAIL (hard violations above)")
         return 1

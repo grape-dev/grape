@@ -39,3 +39,21 @@ class MgmtService(ABC):
     @abstractmethod
     def get_skill(self, skill_id: str) -> Any:
         """技能加载——返回技能定义（Phase 5 细化返回结构）。"""
+
+    # ---- P2 服务接口补齐（N6/N8/N9/N10，mgmt 只读白名单） ----
+
+    @abstractmethod
+    def get_repo_bundle(self, repo_key: str) -> dict:
+        """N6 仓库聚合：配置 + 凭据「有/无」+ webhook 配置 + 场景，一次返回。"""
+
+    @abstractmethod
+    def get_account(self, account_id: str) -> dict:
+        """N8 账号只读（id/username/display_name/status/org_id，限字段）。"""
+
+    @abstractmethod
+    def get_knowledge(self, knowledge_id: int) -> dict:
+        """N9 知识条目元数据（替代 agent_shared_knowledge 直读）。"""
+
+    @abstractmethod
+    def get_user_mapping_batch(self, keys: list) -> list:
+        """N10 批量外部身份 → user_id（platform+external_id，批量 ≤ 200）。"""

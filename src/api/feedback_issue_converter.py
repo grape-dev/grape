@@ -20,7 +20,7 @@ import os
 
 import asyncio
 
-from src.kernel.session_manager import db, db_lock
+from src.domains.mgmt import public as _mgmt_public
 
 from src.kernel.config import log
 
@@ -116,18 +116,12 @@ def _issue_url(provider: str, owner: str, repo: str, number) -> str:
 
 def _fetch_pending(limit: int):
     """取待转换行：issue_url='' AND is_deleted=0，且
-    source='agent'，或 source='user' 且带仓库上下文（repo_key 非空，Issue #673）。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "SELECT id, repo_key, task_id, agent_type, skill_name, skill_scope, "
-            "title, description, fail_summary, event_seq, issue_id, issue_number, feedback_kind, "
-            "source, username "
-            "FROM user_feedback WHERE issue_url='' AND is_deleted=0 "
-            "AND (source='agent' OR (source='user' AND COALESCE(repo_key,'')!='')) "
-            "ORDER BY id LIMIT ?",
-            (limit,))
-        rows = c.fetchall()
+    source='agent'，或 source='user' 且带仓库上下文（repo_key 非空，Issue #673）。
+
+    SQL 与入选口径都在 mgmt owner 域（`user_feedback` 归 mgmt，本文件属 api 进程）：
+    `feedback_pending_conversions` 走任意拓扑原语，单库 / 三库同一份语句。
+    """
+    rows = _mgmt_public.feedback_pending_conversions(limit)
     return [{
         "id": r[0], "repo_key": r[1] or '', "task_id": r[2] or '',
         "agent_type": r[3] or '', "skill_name": r[4] or '', "skill_scope": r[5] or '',
@@ -182,14 +176,14 @@ def convert_pending_feedback(limit: int = 20) -> dict:
             continue
         number = issue.get("number")
         url = issue.get("url") or _issue_url(provider, owner, repo, number)
-        with db_lock:
-            c = db.cursor()
-            for row in group:
-                c.execute(
-                    "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=? "
-                    "WHERE id=? AND issue_url=''",
-                    (url, number, _now, row["id"]))
-            db.commit()
+        # 组内多行同一事务回写（原实现：db_lock 内逐行 UPDATE、末尾一次 commit；
+        # 同组共用同一个 Issue，半批会让同组行分属不同 Issue）。
+        written = _mgmt_public.feedback_mark_converted(
+            [(url, number, _now, row["id"]) for row in group])
+        if written < len(group):
+            # 守卫 `issue_url=''` 未命中 = 并发进程已回写该行；统计口径仍按组 +1（原口径）
+            log.info(f"feedback→issue: group fid={fid} guarded "
+                     f"({written}/{len(group)} rows updated)")
         result["converted"] += 1
         log.info(f"feedback→issue: converted fid={fid} -> {provider}:{owner}/{repo}#{number}")
     return result

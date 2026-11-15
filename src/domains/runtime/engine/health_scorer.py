@@ -63,13 +63,20 @@ _cache_lock = threading.Lock()
 
 
 def _db():
-    from src.kernel.session_manager import db
-    return db
+    """本表域（agent_runtimes / agent_tasks 归 runtime）：分库模式走 runtime owner 连接。"""
+    from src.kernel.owner_db import owner_db
+    return owner_db("runtime")
+
+
+def _score_db():
+    """健康分表 runtime_health_scores 归 insight 域。"""
+    from src.kernel.owner_db import owner_db
+    return owner_db("insight")
 
 
 def _lock():
-    from src.kernel.session_manager import db_lock
-    return db_lock
+    from src.kernel.owner_db import owner_lock
+    return owner_lock("runtime")
 
 
 def _utcnow() -> datetime:

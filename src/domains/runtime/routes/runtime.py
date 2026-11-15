@@ -18,6 +18,7 @@ from src.api.deps import require_no_session_token, require_org_member
 from src.domains.runtime.engine.health import apply_runtime_state
 
 from src.kernel.config import log
+from src.kernel.domain_db import cursor as _domain_cursor
 
 from src.api.time_utils import normalize_event_time
 
@@ -310,28 +311,31 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
         cred_scope = (cred_row[0] if cred_row and cred_row[0] else "global").strip().lower()
         owner_id = (cred_row[2] or "") if cred_row else ""
         cred_repo_key = (cred_row[3] or "") if cred_row else ""
-        cred_org_id = (cred_row[4] or "") if cred_row else ""
+        # org_id 在 agent_runtimes / runtime_credentials 里是 int 列（NULL 默认为 0），
+        # 而凭据可能在未归属组织时落空串。MySQL STRICT_TRANS_TABLES 下把 '' 写进 int 列
+        # 直接 1366，引擎注册整条失败（表现为「添加设备生成凭据」报 Incorrect integer
+        # value: '' for column 'org_id'）。这里统一归一为 int，空/非数字 → 0（未归属）。
+        _raw_org = cred_row[4] if cred_row else None
+        try:
+            _org_txt = "" if _raw_org is None else str(_raw_org).strip()
+            cred_org_id = int(_org_txt) if _org_txt not in ("", "None") else 0
+        except (TypeError, ValueError):
+            cred_org_id = 0
         if cred_scope == "user" and cred_row and cred_row[1]:
             # D32-补丁：owner_id 与 grape_accounts.id 对齐（按用户名）
+            # 账号表归 mgmt：走 owner 域薄原语（任意拓扑同一份语句）。原实现是
+            # 「mgmt lib → foreign-only lib → 本进程库直发」三段兜底，后两段的 SQL
+            # 正是跨域引用来源，且三库拓扑下必 1146（被下面的 except 吞成「owner_id
+            # 保持凭据行原值」）。游标见 `account_id_by_username_first_any` 的 `cursor`
+            # 语义：单库/测试拓扑复用这里的 `c`，自有 DSN 忽略它走 mgmt 连接。
             try:
-                from src.kernel.domain_read import mgmt_lib as _mgmt_lib_acc2
-                _mg_acc2 = _mgmt_lib_acc2()
-                if _mg_acc2 is not None:
-                    _aid = _mg_acc2.get_account_id_by_username(cred_row[1])
-                    if _aid:
-                        owner_id = str(_aid)
-                else:
-                    from src.kernel.domain_read import mgmt_lib as _mg_lib_e047af_f
-                    _mg_lib_e047af = _mg_lib_e047af_f(foreign_only=True)
-                    if _mg_lib_e047af is not None:
-                        urow = _mg_lib_e047af.read_one("grape_accounts_e047af", (cred_row[1],))
-                    else:
-                        c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) LIMIT 1", (cred_row[1],))
-                        urow = c.fetchone()
-                    if urow:
-                        owner_id = str(urow[0])
-            except Exception:
-                pass
+                from src.domains.mgmt import public as _mgmt_public_acc
+                _aid = _mgmt_public_acc.account_id_by_username_first_any(cred_row[1], cursor=c)
+                if _aid:
+                    owner_id = _aid
+            except Exception as _acc_e:
+                # 账号域不可用不阻断注册主链路（owner_id 保持凭据行原值），但要留痕
+                log.debug(f"register owner_id align by username skipped ({cred_row[1]}): {_acc_e}")
         # local_skills：per-engine skill 列表，按 engine name 匹配 runtime 行
         skills_by_name = {}
         for ls in body.local_skills or []:
@@ -728,8 +732,7 @@ def machine_health_detail(runtime_id: int, user: dict = Depends(require_no_sessi
     Issue #1104（契约 AT-RNT-52）：详情语义——不存在的 runtime_id 返回 404
     （统一错误结构），不再回退 get_health_score 现算通路返回 200 全量结构。
     """
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
         if not c.fetchone():
             raise HTTPException(status_code=404, detail={
@@ -1135,19 +1138,26 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
     # 白名单是「调用方主动声明」的正向信号，优先级最高——命中即跳过往返，
     # 静默型长任务（长时间无 task_messages）不再被误判孤儿。
     _active_whitelist = set((body.active_task_ids if body else []) or [])
+    # 「认领了但从未启动引擎会话」判死阈值（事件 #9733）：worker 把任务 claim 成 running，
+    # 却始终没有写 runtime_session_id（引擎进程压根没起来），此时回炉 queued 只会被同一个
+    # worker 再 claim 一次再卡一遍 —— 用户看到的就是永久 running 且 agent 没有任何输出。
+    # 用比 300s 宽限期更短的阈值单独判死，让故障更早暴露（引擎冷启动上界 90s 足够）。
+    CLAIM_NO_SESSION_FAIL_SECONDS = int(os.environ.get("CLAIM_NO_SESSION_FAIL_SECONDS", "90"))
     recovered, skipped_active, force_failed, skipped_young = [], [], [], []
+    _fail_reason_by_tid: dict[str, str] = {}
     skipped_active_reason = {}
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id, attempts, runtime_id, event_seq, started_at, created_at "
+            "SELECT id, attempts, runtime_id, event_seq, started_at, created_at, "
+            "COALESCE(runtime_session_id,'') "
             "FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
             (runtime_id,))
         rows = c.fetchall()
         _seq_by_tid = {}
-        for tid, attempts, rid, ev_seq, _sa, _ca in rows:
+        for tid, attempts, rid, ev_seq, _sa, _ca, _rs in rows:
             _seq_by_tid[tid] = ev_seq
-        for tid, attempts, rid, _ev_seq, started_at, created_at in rows:
+        for tid, attempts, rid, _ev_seq, started_at, created_at, _rsid in rows:
             # Issue #1750 P1-A：白名单命中 → worker 自报仍在跑，直接 skipped_active。
             # 位置在年龄闸门与活跃窗口之前（白名单优先级最高）：静默型长任务即使
             # 超龄且窗口内无消息，也绝不会被回炉。
@@ -1155,11 +1165,44 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
                 skipped_active.append(tid)
                 skipped_active_reason[tid] = "active_whitelist"
                 continue
+            # 年龄基准（started_at，NULL 兜底 created_at）
+            _age_base = started_at or created_at
+            _age_seconds = None
+            if _age_base:
+                try:
+                    _age_dt0 = datetime.fromisoformat(_age_base)
+                    if _age_dt0.tzinfo is None:
+                        _age_dt0 = _age_dt0.replace(tzinfo=timezone.utc)
+                    _age_seconds = (_now - _age_dt0).total_seconds()
+                except Exception:
+                    _age_seconds = None
+            # 「认领但从未启动会话」→ 直接判死，不进无限回炉（事件 #9733 实锤：
+            # worker 认领后引擎进程没起来，runtime_session_id 恒空、task_messages 恒 0，
+            # 回炉后同一 worker 再次认领再次卡住，用户侧表现为永久 running 且无任何输出）。
+            # 只在「已经回炉过一次（attempts>=1）仍无会话」时判死：首次无会话保留原有
+            # 孤儿回收语义（回炉 + attempts+1），避免改变 Issue #1750 基线锁定的行为。
+            if (not (_rsid or "").strip()) and (attempts or 0) >= 1 \
+                    and _age_seconds is not None \
+                    and _age_seconds >= CLAIM_NO_SESSION_FAIL_SECONDS:
+                c.execute(
+                    "UPDATE agent_tasks SET status='failed', attempts=?, "
+                    "result_text=?, completed_at=? WHERE id=? AND status IN ('dispatched','running')",
+                    ((attempts or 0) + 1,
+                     "claimed but the engine session never started "
+                     "(runtime_session_id empty; the worker never spawned the engine process)",
+                     _now.isoformat(), tid))
+                if rid and rid > 0:
+                    from src.domains.runtime.engine.service import release_busy_slot
+                    release_busy_slot(rid, cursor=c)
+                force_failed.append(tid)
+                _fail_reason_by_tid[tid] = (
+                    "claimed but the engine session never started "
+                    "(runtime_session_id empty)")
+                continue
             # 年龄闸门（Issue #370）：started_at（NULL 兜底 created_at）距 now 不足
             # 宽限期 → 直接 skipped，防止刚派发的新任务被误判孤儿反复回炉。
             # 时间戳解析失败保守跳过闸门，继续后续活跃度检查（保持旧行为：回收）。
-            _age_base = started_at or created_at
-            if _age_base:
+            if _age_seconds is not None:
                 try:
                     _age_dt = datetime.fromisoformat(_age_base)
                     if _age_dt.tzinfo is None:
@@ -1224,6 +1267,8 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
                  _att, RECOVER_MAX_ATTEMPTS, _pool_fill, tid))
             if _att >= RECOVER_MAX_ATTEMPTS:
                 force_failed.append(tid)
+                _fail_reason_by_tid[tid] = (
+                    "recover-orphans attempts cap reached (possible self-restart loop)")
             else:
                 recovered.append(tid)
             # 槽位释放（与 service.py 回收/update_task_status/requeue_task 同款防负数写法）：
@@ -1242,11 +1287,12 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
             continue
         try:
             from src.api.event_store import update_event_complete
+            _reason = _fail_reason_by_tid.get(tid) or (
+                "recover-orphans attempts cap reached (possible self-restart loop)")
             update_event_complete(
                 _seq, "failed", exit_code=1,
                 completed_at=datetime.now(timezone.utc).isoformat(),
-                result="recover-orphans attempts cap reached "
-                       "(possible self-restart loop), 任务判死")
+                result=f"{_reason}, 任务判死")
         except Exception as e:
             log.warning(f"recover-orphans event writeback failed tid={tid}: {e}")
     if recovered or skipped_active or force_failed or skipped_young:
@@ -1428,8 +1474,7 @@ def list_runtime_tasks(runtime_id: int, user: dict = Depends(require_no_session_
         _rk_list = repo_key_candidates(repo_key)
         clauses.append(f"repo_key IN ({','.join('?' * len(_rk_list))})")
         params.extend(_rk_list)
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at, issue_id, event_seq FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
                   params + [limit])
         return {"tasks": [
@@ -1461,8 +1506,7 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(require_no_sessi
         repo_clause = f" AND repo_key IN ({','.join('?' * len(_rk_list))})"
         params.extend(_rk_list)
 
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         # 查所有 session（按 repo 过滤），不按 session.runtime_id 过滤
         c.execute(
             f"SELECT id, agent_type, repo_key, status, skill, created_at, last_active_at, "
@@ -1536,8 +1580,7 @@ def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_toke
     """
     from src.kernel.session_manager import db, db_lock
     from src.domains.runtime.engine.instances import engine_mounts_to_credential
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
         rid_rows = c.fetchall()
         c.execute("SELECT device_name FROM runtime_credentials WHERE id=?", (cid,))
@@ -1546,8 +1589,7 @@ def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_toke
     dev_name = (dev_row[0] or "") if dev_row else ""
     if (dev_name or "").strip():
         # 本机直连引擎按设备视图同口径挂载计入
-        with db_lock:
-            c = db.cursor()
+        with _domain_cursor("runtime") as c:
             c.execute("SELECT id, host_name FROM agent_runtimes WHERE credential_id=0")
             local_rows = c.fetchall()
         rids.extend(rid for rid, hn in local_rows
@@ -1561,8 +1603,7 @@ def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_toke
         clauses.append("status=?")
         params.append(status)
     params.append(limit)
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute(f"SELECT id, repo_key, agent_type, skill, status, exit_code, result_text, created_at, started_at, completed_at FROM agent_tasks WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?",
                   params)
         return {"tasks": [
@@ -1999,8 +2040,7 @@ def _apply_tag_rules(tags: list[str]) -> list[str]:
 def get_runtime_tags(runtime_id: int, user: dict = Depends(require_no_session_token)):
     """返回 engine 的角色标签列表（web 管理视图；worker 取 tags 用 GET /runtimes/{id}/tags）。"""
     from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute("SELECT agent_tags FROM agent_runtimes WHERE id=?", (runtime_id,))
         row = c.fetchone()
     if not row:
@@ -2090,8 +2130,7 @@ def list_scene_tags(user: dict = Depends(require_no_session_token)):
 @router.get("/runtimes/{runtime_id}/scene-tags", operation_id="runtime_scene_tags_get", summary="Runtime scene tags", description="Scene tags of an engine.")
 def get_runtime_scene_tags(runtime_id: int, user: dict = Depends(require_no_session_token)):
     """返回引擎的场景标签列表。"""
-    with db_lock:
-        c = db.cursor()
+    with _domain_cursor("runtime") as c:
         c.execute("SELECT scene_tags FROM agent_runtimes WHERE id=?", (runtime_id,))
         row = c.fetchone()
     if not row:

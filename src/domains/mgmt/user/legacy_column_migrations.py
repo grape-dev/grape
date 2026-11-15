@@ -157,24 +157,28 @@ def migrate_user_accounts_deprecated_fields() -> None:
     且死表 DROP 后，本函数与上一步一并消失。
     """
     try:
+        # meta 基表在运行域（runtime）；延迟导入：本模块在 init_db 早期被加载，
+        # 模块级 import 运行域 public 会把启动顺序绑死；导入失败由下面既有的
+        # except 兜成「迁移零命中」，与原「表不存在即跳过」行为一致。
+        from src.domains.runtime import public as _rt  # noqa: PLC0415
         c = db.cursor()
         ua_cols = [r[1] for r in c.execute("PRAGMA table_info(user_accounts)").fetchall()]
         if "webhook_url" in ua_cols:
             c.execute("SELECT webhook_url FROM user_accounts WHERE webhook_url IS NOT NULL AND webhook_url!='' LIMIT 1")
             row = c.fetchone()
             if row and row[0]:
-                c.execute("SELECT COUNT(*) FROM meta WHERE key='webhook_url'")
-                if c.fetchone()[0] == 0:
-                    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('webhook_url', ?)", (row[0],))
+                # meta 基表在运行域：幂等「不存在才写」原语自带单库回落（单库=进程主库，
+                # 三库=运行域自有 DSN），计数+写入在 owner 侧一次完成 —— 原「先 COUNT 再
+                # INSERT OR REPLACE」的两次跨域往返收成一条语句，也不再依赖 SQLite 专有
+                # 的元组式 INSERT OR REPLACE。
+                _rt.set_meta_if_absent("webhook_url", row[0])
         if "gitcode_oauth_client_id" in ua_cols:
             c.execute("SELECT gitcode_oauth_client_id, gitcode_oauth_client_secret, gitcode_oauth_redirect_uri FROM user_accounts WHERE gitcode_oauth_client_id IS NOT NULL AND gitcode_oauth_client_id!='' LIMIT 1")
             row = c.fetchone()
             if row:
                 for meta_key, val in zip(("oauth_gitcode_client_id", "oauth_gitcode_client_secret", "oauth_gitcode_redirect_uri"), row):
                     if val:
-                        c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
-                        if c.fetchone()[0] == 0:
-                            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
+                        _rt.set_meta_if_absent(meta_key, val)
         if "bot_usernames" in ua_cols:
             c.execute("SELECT username, bot_usernames FROM user_accounts WHERE bot_usernames IS NOT NULL AND bot_usernames!=''")
             for uname, raw in c.fetchall():

@@ -121,15 +121,13 @@ def _mark_credential_expired(user_id: str, provider: str) -> None:
                 log.info(f"credential marked expired (status=4): user={user_id} provider={provider}")
             return
         except Exception as e:  # noqa: BLE001
-            log.warning(f"mark credential expired lib path failed, fallback to local SQL: {e}")
+            log.warning(f"mark credential expired lib path failed, fallback to owner primitive: {e}")
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            db.execute(
-                "UPDATE external_identities SET status=4 "
-                "WHERE grape_user_id=? AND provider=? AND status=1",
-                (user_id, provider))
-            db.commit()
+        # 单库/测试拓扑（mgmt 不是外域，lib 分支不进）：走 owner 域任意拓扑原语。
+        # 原实现在这里直发本地 UPDATE —— 那句兜底正是本文件的跨域表引用来源，
+        # 且自有 DSN 拓扑下进程库没有 external_identities（视图 0 → 1146）。
+        from src.domains.mgmt import public as _mgmt_public_xp
+        _mgmt_public_xp.mark_external_identity_expired_any(str(user_id), provider)
         log.info(f"credential marked expired (status=4): user={user_id} provider={provider}")
     except Exception as e:
         log.warning(f"mark credential expired failed: {e}")

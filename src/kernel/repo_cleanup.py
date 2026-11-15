@@ -109,76 +109,26 @@ def cascade_cleanup_repo_data(repo_key: str, owner: str, repo: str,
         log.warning(f"Cleanup skipped: invalid owner/repo {owner}/{repo}")
         return stats
 
-    from src.kernel.session_manager import db, db_lock
+    from src.domains.mgmt import public as _mgmt_clean
+    from src.domains.runtime import public as _rt_clean
 
-    placeholders = ",".join("?" for _ in keys)
-    with db_lock:
-        c = db.cursor()
-        existing = _existing_tables(c)
-        try:
-            if dry_run:
-                for tbl in _REPO_KEY_TABLES:
-                    if tbl in existing:
-                        c.execute(f"SELECT COUNT(*) FROM {tbl} WHERE repo_key IN ({placeholders})", keys)
-                        stats["tables"] += c.fetchone()[0]
-                db.commit()
-                log.info(f"Cascade cleanup dry-run {repo_key} (trigger={trigger}): {stats}")
-                return stats
-
-            # ---- 依赖子表先删（无 repo_key 列，经父表 id 关联）----
-            # task_messages ← agent_tasks.id
-            if "agent_tasks" in existing and "task_messages" in existing:
-                c.execute(f"SELECT id FROM agent_tasks WHERE repo_key IN ({placeholders})", keys)
-                task_ids = [r[0] for r in c.fetchall()]
-                if task_ids:
-                    _ph = ",".join("?" for _ in task_ids)
-                    c.execute(f"DELETE FROM task_messages WHERE task_id IN ({_ph})", task_ids)
-                    stats["tables"] += c.rowcount
-            # scene_knowledge_ref ← agent_shared_knowledge.id
-            if "agent_shared_knowledge" in existing and "scene_knowledge_ref" in existing:
-                c.execute(f"SELECT id FROM agent_shared_knowledge WHERE repo_key IN ({placeholders})", keys)
-                kn_ids = [r[0] for r in c.fetchall()]
-                if kn_ids:
-                    _ph = ",".join("?" for _ in kn_ids)
-                    c.execute(f"DELETE FROM scene_knowledge_ref WHERE knowledge_id IN ({_ph})", kn_ids)
-                    stats["tables"] += c.rowcount
-            # vod_conversations ← devops_agent_session.id
-            if "devops_agent_session" in existing and "vod_conversations" in existing:
-                c.execute(f"DELETE FROM vod_conversations WHERE agent_session_id IN "
-                          f"(SELECT id FROM devops_agent_session WHERE repo_key IN ({placeholders}))", keys)
-                stats["tables"] += c.rowcount
-            # chat_messages ← chat_conversations.id
-            if "chat_conversations" in existing and "chat_messages" in existing:
-                c.execute(f"SELECT id FROM chat_conversations WHERE repo_key IN ({placeholders})", keys)
-                conv_ids = [r[0] for r in c.fetchall()]
-                if conv_ids:
-                    _ph = ",".join("?" for _ in conv_ids)
-                    c.execute(f"DELETE FROM chat_messages WHERE conversation_id IN ({_ph})", conv_ids)
-                    stats["tables"] += c.rowcount
-
-            # ---- 按 repo_key 直删 ----
-            for tbl in _REPO_KEY_TABLES:
-                if tbl not in existing:
-                    continue
-                c.execute(f"DELETE FROM {tbl} WHERE repo_key IN ({placeholders})", keys)
-                stats["tables"] += c.rowcount
-
-            # 仓库 skill 记录（scope='repo'，owner_id 存 repo_key）
-            if "skill" in existing:
-                c.execute(f"DELETE FROM skill WHERE scope='repo' AND owner_id IN ({placeholders})", keys)
-                stats["tables"] += c.rowcount
-            # onboarding 幂等标记（重建同名仓库应重新引导）
-            if "meta" in existing:
-                _ob_keys = [f"onboarded:{k}" for k in keys]
-                c.execute(f"DELETE FROM meta WHERE `key` IN ({','.join('?' for _ in _ob_keys)})", _ob_keys)
-                stats["tables"] += c.rowcount
-
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            log.warning(f"Cascade cleanup DB transaction failed (rolled back) {repo_key}: {e}")
-            _audit(repo_key, trigger, operator_id, {"error": str(e), "rolled_back": True})
-            raise RepoCleanupError(f"cascade cleanup failed: {e}") from e
+    # 跨库事务不可得：按域拆成两段级联（各自本域一个事务）；dry-run 只统计直删表，
+    # 与原实现口径一致。两段都在「子表先删 → 直删 → 技能/幂等键」顺序内完成。
+    try:
+        _rt_stats = _rt_clean.purge_repo_rows(keys, dry_run=bool(dry_run))
+    except Exception as e:
+        log.warning(f"Cascade cleanup runtime segment failed (rolled back) {repo_key}: {e}")
+        _audit(repo_key, trigger, operator_id, {"error": str(e), "rolled_back": True, "segment": "runtime"})
+        raise RepoCleanupError(f"cascade cleanup failed: {e}") from e
+    try:
+        _mg_stats = _mgmt_clean.purge_repo_rows(keys, dry_run=bool(dry_run))
+    except Exception as e:
+        log.warning(f"Cascade cleanup mgmt segment failed after runtime committed {repo_key}: {e}")
+        _audit(repo_key, trigger, operator_id,
+               {"error": str(e), "runtime_committed": True, "segment": "mgmt"})
+        raise RepoCleanupError(f"cascade cleanup failed at mgmt segment: {e}") from e
+    stats["tables"] = sum(_rt_stats.values()) + sum(_mg_stats.values())
+    stats["by_table"] = {**_rt_stats, **_mg_stats}
 
     # ---- 文件系统清理（DB 提交后，补偿机制）----
     if not dry_run:
@@ -204,17 +154,15 @@ def _audit(repo_key: str, trigger: str, operator_id: int, detail: dict) -> None:
 def _cleanup_files(keys: list[str], owner: str, repo: str, stats: dict) -> None:
     """skill 目录 + workspace 知识基线目录清理（带 meta pending 补偿标记）。"""
     from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime import public as _rt_clean
 
     def _mark_pending(k: str, on: bool):
         try:
-            with db_lock:
-                c = db.cursor()
-                if on:
-                    c.execute("INSERT OR REPLACE INTO meta (`key`, value) VALUES (?, ?)",
-                              (f"cleanup_pending:{k}", "1"))
-                else:
-                    c.execute("DELETE FROM meta WHERE `key`=?", (f"cleanup_pending:{k}",))
-                db.commit()
+            _key = f"cleanup_pending:{k}"
+            if on:
+                _rt_clean.meta_set(_key, "1")
+            else:
+                _rt_clean.meta_delete_keys([_key])
         except Exception as e:
             log.warning(f"Cleanup pending mark failed ({k}): {e}")
 
@@ -285,13 +233,11 @@ def retry_pending_file_cleanups() -> int:
     Returns:
         仍存在的 pending 标记数（0 = 全部清理完成）
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime import public as _rt_clean2
+
     pending = []
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT `key` FROM meta WHERE `key` LIKE 'cleanup_pending:%'")
-            pending = [r[0] for r in c.fetchall()]
+        pending = _rt_clean2.meta_keys_like("cleanup_pending:")
     except Exception as e:
         log.warning(f"Retry pending cleanups: read meta failed: {e}")
         return -1
@@ -328,10 +274,7 @@ def retry_pending_file_cleanups() -> int:
                         done = False
         if done:
             try:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("DELETE FROM meta WHERE `key`=?", (key,))
-                    db.commit()
+                _rt_clean2.meta_delete_keys([key])
             except Exception:
                 pass
         else:

@@ -14,8 +14,6 @@ import asyncio
 
 import logging
 
-import time
-
 from typing import Any
 
 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
@@ -212,29 +210,20 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
     try:
         from src.domains.runtime.pipeline.event_pipeline import _enqueue_pipeline_task, is_plugin_mode
         from src.domains.runtime.engine.engine_select import pick_engine
-        from src.kernel.session_manager import db, db_lock
 
         # Validate runtime_id: if the engine no longer exists or is offline,
         # drop it to 0 so the task becomes a pool task (claim_by_tag can pick it up).
         # This prevents stale devops_agent_session.runtime_id from pinning tasks
         # to non-existent engines.
         if runtime_id:
-            with db_lock:
-                c = db.cursor()
-                # Issue #259：status=online 且心跳新鲜（< _RUNTIME_STALE_SECONDS，默认 100s）才算在线。
-                # 原 status-only 检查会被「刚断线、reap 还没翻牌」的窗口期欺骗。
-                c.execute("SELECT last_seen_at FROM agent_runtimes WHERE id=? AND status='online'", (runtime_id,))
-                _row = c.fetchone()
-                _alive = False
-                if _row and _row[0]:
-                    from src.domains.runtime.engine.health import parse_dt as _parse_dt
-                    from src.domains.runtime.engine.engine_select import _RUNTIME_STALE_SECONDS
-                    _ts = _parse_dt(_row[0])
-                    if _ts is not None and time.time() - _ts <= _RUNTIME_STALE_SECONDS:
-                        _alive = True
-                if not _alive:
-                    log.info(f"Pipeline emit: runtime_id={runtime_id} offline or stale heartbeat, dropping to pool task (agent={agent_type})")
-                    runtime_id = 0
+            # Issue #259：status=online 且心跳新鲜（< _RUNTIME_STALE_SECONDS，默认 100s）才算在线。
+            # 原 status-only 检查会被「刚断线、reap 还没翻牌」的窗口期欺骗。
+            # 判定（含阈值与时间戳解析）归 runtime 域：agent_runtimes 是它的表，
+            # api 侧只拿布尔，不再在自己连接上直读该表（独立拓扑下那条 SQL 必 1146）。
+            from src.domains.runtime import public as _runtime_public
+            if not _runtime_public.runtime_heartbeat_alive_any(runtime_id):
+                log.info(f"Pipeline emit: runtime_id={runtime_id} offline or stale heartbeat, dropping to pool task (agent={agent_type})")
+                runtime_id = 0
 
         # Plugin 模式：始终走 pick_engine（返回 0=广播），忽略上游传入的 runtime_id。
         # 上游 runtime_id 来自发起 A2A 的 agent 自己运行的引擎（如 QA 跑在 0003 的 rt=54 上，

@@ -393,6 +393,10 @@ function loadAgentTypes() {
     document.documentElement.setAttribute('data-logged-in', '1');
     $('loginView').classList.add('hid');
     // 工作台已由 CSS 显示，立即展示加载中状态
+    // 登录/刷新是「重新绘制」入口：先清空视图标记，否则下面的 loading 占位会盖掉
+    // 深链 hash 已经渲染好的视图（如 /login#event/9717），而 _restoreNavAfterLogin
+    // 的「已有视图不覆盖」守卫又会因标记非空直接 return —— 页面永久停在「加载中」。
+    window._currentView = '';
     $('pageContent').innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
     loadAgentTypes();
     // 串行加载：loadProfile 获取 bindings → 根据绑定状态和 hash 路由决定渲染哪个页面
@@ -422,8 +426,16 @@ function loadAgentTypes() {
   // 统一路由恢复：密码登录 / OAuth 登录 / 页面刷新共用
   // 优先级：hash 路由 > 有绑定→loadRepos > 无绑定→引导页
   function _restoreNavAfterLogin() {
-    // 已有视图（如 loadRepos 同步缓存路径已渲染）→ 不覆盖
-    if (window._currentView && window._currentView !== '') return;
+    // 已有视图（如 loadRepos 同步缓存路径已渲染）→ 不覆盖。
+    // 例外：视图标记有值但主区只剩 loading 占位（登录流程 showApp 刚把它盖掉），
+    // 那是"未渲染"而非"已渲染"——放行按 hash 重绘，否则深链永久卡在加载中。
+    if (window._currentView && window._currentView !== '') {
+      var _pc0 = document.getElementById('pageContent');
+      var _onlyLoading = _pc0 && _pc0.children.length === 1 && _pc0.children[0].classList &&
+        _pc0.children[0].classList.contains('loading');
+      if (!_onlyLoading) return;
+      window._currentView = '';
+    }
 
     const hash = window.location.hash;
     const user = JSON.parse(localStorage.getItem('user') || '{}');

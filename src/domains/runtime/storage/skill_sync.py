@@ -74,13 +74,14 @@ def _sync_skills_to_db(data: dict) -> int:
     count = 0
     with _db_lock:
         c = _db.cursor()
-        # 构建 slug → category_id 缓存
+        # 构建 slug → category_id 缓存（skill_category 归 mgmt：取映射走 owner 域 public，
+        # 本域只留 skill 表的 SQL。原语句 `WHERE is_active=1` 的口径由原语保留）
         cat_map = {}
         try:
-            for row in c.execute("SELECT slug, id FROM skill_category WHERE is_active=1").fetchall():
-                cat_map[row[0]] = row[1]
-        except Exception:
-            pass
+            from src.domains.mgmt import public as _mgmt_public_cat  # noqa: PLC0415
+            cat_map = _mgmt_public_cat.skill_category_active_map()
+        except Exception as exc:  # noqa: BLE001 - 分类不可用只降级为 category_id=0（与原实现同口径）
+            logger.debug(f"skill_category map unavailable, category_id falls back to 0: {exc}")
         for skill_name, info in data.items():
             try:
                 display_name = info.get("name", skill_name)

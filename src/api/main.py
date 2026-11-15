@@ -110,27 +110,16 @@ def _start_server_metrics_task():
         except Exception:
             pass
         try:
-            from src.kernel.session_manager import db, db_lock
+            # P3-5f-3：runtime_credentials 归 runtime 域，走任意拓扑原语
+            # （自有 DSN 优先、单库回落进程库），SQL 只留 runtime public 一份。
+            # **同步直连、不入意图队列**——这是启动注册 + 15s 心跳，落成意图会每天
+            # 写几千条日志；循环本身就是重试机制。
+            from src.domains.runtime import public as _rt_public_dev
             _token_hash = _hl.sha256(_hostname.encode()).hexdigest()
-            # P3-5f-3：runtime_credentials 在 runtime 域。**同步直连、不入意图队列**——
-            # 这是启动注册 + 15s 心跳，落成意图会每天写几千条日志；循环本身就是重试机制。
-            from src.kernel.domain_read import runtime_lib as _rt_lib_dev
-            _rt_dev = _rt_lib_dev(foreign_only=True)
-            if _rt_dev is not None:
-                _dev_out = _rt_dev.ensure_device_credential(_hostname, _token_hash, _local_ip)
-                if _dev_out.get("action") == "inserted":
-                    log.info(f"Server metrics: registered {_hostname}")
-            else:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute("SELECT id FROM runtime_credentials WHERE device_name=? AND scope='global'", (_hostname,))
-                    if not c.fetchone():
-                        c.execute(
-                            "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, status, last_ip) "
-                            "VALUES (?, ?, ?, 'global', 'active', ?)",
-                            (_token_hash, _hostname, _hostname, _local_ip))
-                        db.commit()
-                        log.info(f"Server metrics: registered {_hostname}")
+            _dev = _rt_public_dev.register_device_credential_any(
+                _hostname, _token_hash, _local_ip)
+            if _dev.get("action") == "inserted":
+                log.info(f"Server metrics: registered {_hostname}")
         except Exception as e:
             log.warning(f"Server metrics: register failed: {e}")
         while True:
@@ -193,24 +182,11 @@ def _start_server_metrics_task():
                 except Exception:
                     pass
                 _now = datetime.now(timezone.utc).isoformat()
-                from src.kernel.session_manager import db, db_lock
-                from src.kernel.domain_read import runtime_lib as _rt_lib_met
-                _rt_met = _rt_lib_met(foreign_only=True)
-                if _rt_met is not None:
-                    # 同步直连：15s 心跳写意图会淹没日志，循环即重试机制
-                    _rt_met.touch_credential_metrics(
-                        _hostname, _now, _local_ip, _cpu, _mem, _disk, _tmp,
-                        _bw_pct, _bw_mbps, _load)
-                else:
-                    with db_lock:
-                        c = db.cursor()
-                        c.execute(
-                            "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
-                            "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, "
-                            "bandwidth_percent=?, bandwidth_mbps=?, load_avg=? "
-                            "WHERE device_name=? AND scope='global'",
-                            (_now, _local_ip, _cpu, _mem, _disk, _tmp, _bw_pct, _bw_mbps, _load, _hostname))
-                        db.commit()
+                from src.domains.runtime import public as _rt_public_met
+                # 同步直连：15s 心跳落成意图会淹没日志，循环即重试机制
+                _rt_public_met.touch_device_credential_any(
+                    _hostname, _now, _local_ip, _cpu, _mem, _disk, _tmp,
+                    _bw_pct, _bw_mbps, _load)
             except Exception as e:
                 log.warning(f"Server metrics: upload failed: {e}")
             await asyncio.sleep(15)

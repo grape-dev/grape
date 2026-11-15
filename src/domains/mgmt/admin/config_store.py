@@ -391,23 +391,15 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
             # 平台专属（同一 token 不会跨平台有效），解密等值即平台定界
             # P4：这条是**跨域 JOIN**（runtime 的 rc + mgmt 的 managed_repos），删视图后不能一条 SQL 走完 →
             # 拆成「rc 走 lib 读 + managed_repos 本地读 + Python 内连接」，语义是 INNER JOIN，按 repo_key 求交。
-            from src.kernel.domain_read import runtime_lib as _rt_lib_j
-            _j_lib = _rt_lib_j(foreign_only=True)
-            if _j_lib is not None:
-                _rc_rows = _j_lib.read_all("repo_bot_credentials_all", ())
-                c.execute(
-                    "SELECT repo_key, bot_username FROM managed_repos "
-                    "WHERE (host_user_id IS NULL OR host_user_id='' OR host_user_id='0')")
-                _mr_map = {r[0]: r[1] for r in c.fetchall()}
-                _rows_join = [(rk, _mr_map[rk], val) for (rk, val) in _rc_rows if rk in _mr_map]
-            else:
-                c.execute(
-                    "SELECT rc.repo_key, mr.bot_username, rc.value FROM grape_t_repo_credentials rc "
-                    "JOIN managed_repos mr ON mr.repo_key = rc.repo_key "
-                    "WHERE rc.cred_type='bot' "
-                    "AND (mr.host_user_id IS NULL OR mr.host_user_id='' OR mr.host_user_id='0')",
-                )
-                _rows_join = c.fetchall()
+            # 凭据表归 insight、managed_repos 归本域：跨域 JOIN 拆成两查后在 Python 内连接
+            # （INNER JOIN 语义 = 按 repo_key 求交）
+            from src.domains.insight import public as _insight_cred
+            _rc_rows = _insight_cred.repo_bot_credential_pairs()
+            c.execute(
+                "SELECT repo_key, bot_username FROM managed_repos "
+                "WHERE (host_user_id IS NULL OR host_user_id='' OR host_user_id='0')")
+            _mr_map = {r[0]: r[1] for r in c.fetchall()}
+            _rows_join = [(rk, _mr_map[rk], val) for (rk, val) in _rc_rows if rk in _mr_map]
             for row in _rows_join:
                 _raw_val = row[2] or ""
                 try:
@@ -481,12 +473,15 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
                 # D99：cred_type 归一 {'bot','webhook'}；两步法 UPDATE→INSERT
                 # （双方言一致，无 ON CONFLICT/REPLACE 方言分支）
                 from src.domains.mgmt.user.db import _encrypt_repo_secret as _enc_rs
-                # P3-5f-3：grape_t_repo_credentials 在 runtime 域（两步法 UPDATE→INSERT 收成一个原语）
+                # 归属更正：grape_t_repo_credentials 归 **insight**（此前注释写「runtime 域」
+                # 是错的，只影响注释、不影响写入路径——写原语在 insight public，runtime
+                # public 只是转发）。两步法 UPDATE→INSERT 收在 owner 域的 `_any_tx()` 里。
                 import time as _t_gb
                 from src.kernel.domain_read import runtime_lib as _rt_lib_gb
                 from src.kernel import cross_write as _xw_gb
                 _rt_gb = _rt_lib_gb(foreign_only=True)
                 _gb_ts = _t_gb.strftime("%Y-%m-%d %H:%M:%S")
+                _pending_creds: list[tuple[str, str]] = []
                 for _ct in ("bot", "webhook"):
                     _gb_done = False
                     if _rt_gb is not None:
@@ -501,15 +496,14 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
                                 repo_key, ct, v, _gb_ts), log)
                     if _gb_done:
                         continue
-                    _cur2 = c.execute(
-                        "UPDATE grape_t_repo_credentials SET value=?, updated_at=(datetime('now')) "
-                        "WHERE repo_key=? AND cred_type=?",
-                        (_enc_rs(new_token), repo_key, _ct))
-                    if _cur2.rowcount == 0:
-                        c.execute(
-                            "INSERT INTO grape_t_repo_credentials (id, repo_key, cred_type, value) "
-                            "VALUES (?, ?, ?, ?)",
-                            (str(__import__("uuid").uuid4()), repo_key, _ct, _enc_rs(new_token)))
+                    # 走 owner 域原语（任意拓扑）：自有 DSN → insight 连接；单库/测试 →
+                    # 进程主库。兜底 SQL 若留在本文件，三库拓扑下 mgmt 库无该表必 1146，
+                    # 静默跳过整个写块（换发后凭据仍是旧 token）。
+                    _pending_creds.append((_ct, _enc_rs(new_token)))
+                if _pending_creds:
+                    # bot/webhook 两行同一事务：避免「bot 已换、webhook 仍旧」的半写状态
+                    from src.domains.insight import public as _insight_cred_w
+                    _insight_cred_w.upsert_repo_credentials(repo_key, _pending_creds, _gb_ts)
                 db.commit()
         except Exception as e:
             log.warning(f"global_bot_token_swap: DB update failed for {repo_key}: {e}")

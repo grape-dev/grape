@@ -161,23 +161,16 @@ def install_request_middleware(app: FastAPI) -> None:
                     _log.warning(msg, extra=extra)
                 else:
                     _log.info(msg, extra=extra)
-                # 慢请求入库（方案C）
+                # 慢请求入库（方案C）：api_latency_log 归 insight，走 owner 域薄写口（任意拓扑）
                 try:
                     from src.kernel.config import SLOW_REQUEST_THRESHOLD_MS
                     if duration >= SLOW_REQUEST_THRESHOLD_MS:
-                        try:
-                            from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
-                            with _sdbl:
-                                _sdb.execute(
-                                    "INSERT INTO api_latency_log (request_id, method, path, status, duration_ms, repo_key, user_id, source) "
-                                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'backend')",
-                                    (rid, request.method, redacted_path, status, round(duration), _repo, _uid)
-                                )
-                                _sdb.commit()
-                        except Exception:
-                            pass  # 入库失败不影响请求
-                except Exception:
-                    pass
+                        from src.domains.insight import public as _insight_metrics
+                        _insight_metrics.record_api_latency_any(
+                            rid, request.method, redacted_path, status,
+                            round(duration), _repo, _uid)
+                except Exception as _exc:
+                    _log.debug(f"api_latency_log insert skipped: {_exc}")
             request_id_var.reset(token_rid)
             repo_var.reset(token_repo)
             user_var.reset(token_uid)

@@ -57,3 +57,30 @@ class RuntimeServiceRemote(RuntimeService):
             f"/internal/chat/conversations/{conv_id}/messages",
             params={"limit": limit, "before": before},
         )
+
+
+    # ---- P2 服务接口补齐（N1/N2/N3/N4/N5/N11/N12） ----
+
+    def list_skills(self, repo_key: str = "", q: str = "", limit: int = 50,
+                    offset: int = 0) -> list:
+        return self.client.get("/internal/skills", params={
+            "repo_key": repo_key, "q": q, "limit": limit, "offset": offset})
+
+    def get_skill_detail(self, skill_id: int) -> dict:
+        return self.client.get(f"/internal/skills/{int(skill_id)}")
+
+    def list_engine_capabilities(self, limit: int = 500) -> list:
+        return self.client.get("/internal/engine-capabilities", params={"limit": limit})
+
+    def get_runtime_credential_meta(self, runtime_id: int) -> dict:
+        return self.client.get(f"/internal/runtime-credentials/{int(runtime_id)}")
+
+    def get_meta_namespace(self, namespace: str) -> dict:
+        return self.client.get(f"/internal/meta/{namespace}")
+
+    def get_tasks_batch(self, task_ids: list) -> list:
+        return self.client.post("/internal/tasks/batch", json_data={"task_ids": list(task_ids or [])})
+
+    def get_task_stats(self, repo_key: str = "", since: str = "") -> dict:
+        return self.client.post("/internal/stats/tasks",
+                                json_data={"repo_key": repo_key, "since": since})

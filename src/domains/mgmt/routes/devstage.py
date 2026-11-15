@@ -43,24 +43,19 @@ def _annotate_worker_online(envs: list) -> None:
     """
     if not envs:
         return
-    from src.kernel.session_manager import db, db_lock
+    from src.domains.runtime import public as runtime_public
     from src.domains.runtime.engine.health import derive_runtime_health
     from datetime import datetime, timezone
     now_ts = datetime.now(timezone.utc).timestamp()
-    # 一次性查出所有 active 凭据的 name → health
+    # 一次性查出所有未吊销凭据的 name → health（凭据表归 runtime 域，三库拓扑下
+    # 只能经 runtime public 原语读；原实现在进程库直查 → 1146 被吞成全部 offline）
     cred_map: dict[str, str] = {}
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT name, status, last_seen_at FROM runtime_credentials "
-                "WHERE status != 'revoked'"
-            )
-            for cname, cstatus, last_seen in c.fetchall():
-                if not cname:
-                    continue
-                h = derive_runtime_health(cstatus or "offline", last_seen, now_ts)
-                cred_map[cname] = h
+        for cname, cstatus, last_seen in runtime_public.credential_health_rows_any():
+            if not cname:
+                continue
+            h = derive_runtime_health(cstatus or "offline", last_seen, now_ts)
+            cred_map[cname] = h
     except Exception as e:
         log.warning(f"_annotate_worker_online: DB query failed: {e}")
     # 注入到每个环境对象
@@ -360,63 +355,29 @@ def delete_environment(devstage_id: str, user: dict = Depends(require_no_session
     # 删除对应的 Worker 凭据和 runtime（精确匹配环境名）
     if env_name:
         try:
-            from src.kernel.session_manager import db as sm_db, db_lock as sm_lock
-            with sm_lock:
-                c = sm_db.cursor()
-                from src.kernel.domain_read import runtime_lib as _ru_lib_7431a6_f
-                _ru_lib_7431a6 = _ru_lib_7431a6_f(foreign_only=True)
-                if _ru_lib_7431a6 is not None:
-                    row = _ru_lib_7431a6.read_one("runtime_credentials_7431a6", (env_name,))
-                else:
-                    c.execute("SELECT id FROM runtime_credentials WHERE name=?", (env_name,))
-                    row = c.fetchone()
-                if row:
-                    cid = row[0]
-                    try:
-                        # P3-5f-2：runtime 半区（会话摘绑+能力+引擎行+凭据）收成一个组合原语，
-                        # 同步直连（删除环境要立刻生效）。返回 rids 供 mgmt 半区删 binding。
-                        from src.kernel.domain_read import runtime_lib as _rt_lib_pv
-                        _rt_pv = _rt_lib_pv(foreign_only=True)
-                        _purged = None
-                        if _rt_pv is not None:
-                            _purged = _rt_pv.purge_runtime_credential(str(cid))
-                            rids = [int(x) for x in (_purged.get("rids") or [])]
-                        else:
-                            c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
-                            rids = [r[0] for r in c.fetchall()]
-                        if _purged is not None:
-                            if rids:
-                                _ph_p = ",".join("?" * len(rids))
-                                c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({_ph_p})", rids)
-                            log.info(f"删除环境 {env_name} 的凭据 (id={cid}) 及关联 runtime（lib）: "
-                                     f"engines={_purged.get('engines')} caps={_purged.get('caps')}")
-                        if _purged is not None:
-                            pass
-                        elif rids:
-                            ph = ",".join("?" * len(rids))
-                            c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})", rids)
-                            # P3-5g：devops_agent_session 在 runtime 域
-                            from src.kernel.domain_read import runtime_lib as _rt_lib_ds
-                            from src.kernel import cross_write as _xw_ds
-                            _ds_done = False
-                            _rt_ds = _rt_lib_ds(foreign_only=True)
-                            if _rt_ds is not None:
-                                _rt_ds_ok = _rt_ds
-                                _ds_done = _xw_ds.submit_if_lib(
-                                    _rt_ds_ok, "runtime", "agent_sessions_detach",
-                                    f"agent-sess-detach:{sorted(int(x) for x in rids)}",
-                                    {"runtime_ids": [int(x) for x in rids]},
-                                    lambda: _rt_ds_ok.detach_agent_sessions(
-                                        [int(x) for x in rids]), log)
-                            if not _ds_done:
-                                c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rids)
-                        if _purged is None:
-                            c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
-                            c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
-                        log.info(f"删除环境 {env_name} 的凭据 (id={cid}) 及关联 runtime")
-                    except Exception as ex:
-                        log.warning(f"清理环境 {env_name} 的凭据失败: {ex}")
-                sm_db.commit()
+            from src.domains.runtime import public as runtime_public
+            # runtime 半区（会话摘绑 + 能力 + 引擎行 + 凭据行）是一个任意拓扑原语，
+            # 域内一个事务内完成、同步直连（删除环境要立刻生效）；返回 rids 供 mgmt
+            # 半区删 binding。原实现是「lib 优先 / 进程库兜底 SQL」双分支：兜底侧在三库
+            # 拓扑下打的是 mgmt 进程库（没有 runtime 表 → 1146），清理实际不生效。
+            _purged = runtime_public.purge_env_credential_any(env_name)
+            rids = [int(x) for x in (_purged.get("rids") or [])]
+            if rids:
+                from src.kernel.session_manager import db as sm_db, db_lock as sm_lock
+                with sm_lock:
+                    c = sm_db.cursor()
+                    # IN 列表按 400 分块，避免撞绑定参数上限
+                    for _start in range(0, len(rids), 400):
+                        _chunk = rids[_start:_start + 400]
+                        _ph = ",".join("?" * len(_chunk))
+                        c.execute(
+                            f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({_ph})",
+                            _chunk)
+                    sm_db.commit()
+            if _purged.get("found"):
+                log.info(f"删除环境 {env_name} 的凭据 (id={_purged.get('cid')}) 及关联 runtime: "
+                         f"engines={_purged.get('engines')} caps={_purged.get('caps')} "
+                         f"sessions={_purged.get('sessions')}")
         except Exception as ex:
             log.warning(f"删除环境 {env_name} 的 Worker 清理失败: {ex}")
     return result

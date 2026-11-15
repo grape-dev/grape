@@ -72,7 +72,6 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
     from src.kernel.repo_key import to_repo_key
     from src.kernel.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
     from src.domains.mgmt.user import db as user_db
-    from src.kernel.session_manager import db as _db, db_lock
 
     repo_key = to_repo_key(repo, provider=provider)
     owner, _, repo_name = repo.partition("/")
@@ -80,18 +79,10 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
     # 读取托管记录（清理前取 owner/repo 名，删除后即失效）
     _owner, _repo_name = owner, repo_name
     try:
-        with db_lock:
-            c = _db.cursor()
-            from src.kernel.domain_read import mgmt_lib as _mg_lib_b939bc_f
-            _mg_lib_b939bc = _mg_lib_b939bc_f(foreign_only=True)
-            if _mg_lib_b939bc is not None:
-                row = _mg_lib_b939bc.read_one("managed_repos_b939bc", (repo_key,))
-            else:
-                c.execute("SELECT repo_owner, repo_name FROM managed_repos WHERE repo_key=?",
-                          (repo_key,))
-                row = c.fetchone()
-            if row and row[0] and row[1]:
-                _owner, _repo_name = row[0], row[1]
+        from src.domains.mgmt import public as _mg_pub_b939bc
+        row = _mg_pub_b939bc.repo_owner_name_any(repo_key)
+        if row and row[0] and row[1]:
+            _owner, _repo_name = row[0], row[1]
     except Exception:
         pass
 
@@ -835,14 +826,11 @@ def _resolve_a2a_repo_key(repository: str) -> str:
     if ":" in repository:
         return to_repo_key(repository)
     try:
-        from src.kernel.session_manager import db as _pdb, db_lock as _pdb_lock
-        with _pdb_lock:
-            _pc = _pdb.cursor()
-            _pc.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?)",
-                        (f"github:{repository}", f"gitcode:{repository}"))
-            _pr = _pc.fetchone()
-        if _pr:
-            return _pr[0]
+        from src.domains.mgmt import public as _mg_pub_rk
+        _hit = _mg_pub_rk.repo_key_in_candidates(
+            [f"github:{repository}", f"gitcode:{repository}"])
+        if _hit:
+            return _hit
     except Exception:
         pass
     return to_repo_key(repository)
@@ -904,28 +892,23 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
                 pass
             # 检查 2: 目标仓库是会话仓库的关联仓库（查场景 linked_repos）
             try:
-                from src.kernel.session_manager import db, db_lock
+                from src.domains.mgmt import public as _mg_pub_lr
                 import json as _json
-                with db_lock:
-                    c = db.cursor()
-                    # 查会话仓库的所有场景的 linked_repos
-                    c.execute(
-                        "SELECT linked_repos, advanced_options FROM devops_pipeline_scene "
-                        "WHERE repo_key=? AND is_active=1", (_session_repo,))
-                    for row in c.fetchall():
-                        _lr = row[0] or ""
-                        _adv = row[1] or ""
-                        for _lr_str in (_lr, _json.loads(_adv).get("linked_repos", "[]") if _adv else "[]"):
-                            if not _lr_str:
-                                continue
-                            try:
-                                _lr_list = _json.loads(_lr_str) if isinstance(_lr_str, str) else _lr_str
-                            except Exception:
-                                continue
-                            for _lr_item in (_lr_list or []):
-                                if isinstance(_lr_item, dict) and _lr_item.get("repo_key") == repo_key:
-                                    log.info(f"A2A: trust domain (linked repo) session_repo={_session_repo} → target_repo={repo_key}")
-                                    return None
+                # 查会话仓库的所有场景的 linked_repos（SQL 只在 mgmt 域留一份）
+                for row in _mg_pub_lr.scene_linked_repos_rows_any(_session_repo):
+                    _lr = row[0] or ""
+                    _adv = row[1] or ""
+                    for _lr_str in (_lr, _json.loads(_adv).get("linked_repos", "[]") if _adv else "[]"):
+                        if not _lr_str:
+                            continue
+                        try:
+                            _lr_list = _json.loads(_lr_str) if isinstance(_lr_str, str) else _lr_str
+                        except Exception:
+                            continue
+                        for _lr_item in (_lr_list or []):
+                            if isinstance(_lr_item, dict) and _lr_item.get("repo_key") == repo_key:
+                                log.info(f"A2A: trust domain (linked repo) session_repo={_session_repo} → target_repo={repo_key}")
+                                return None
             except Exception as _le:
                 log.warning(f"A2A: linked repo trust check failed: {_le}")
     if not _expected:
@@ -1017,21 +1000,8 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
     from src.kernel.config import log
     effective_scene_id = ""
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import mgmt_lib as _mg_lib_8c7c25_f
-            _mg_lib_8c7c25 = _mg_lib_8c7c25_f(foreign_only=True)
-            if _mg_lib_8c7c25 is not None:
-                row = _mg_lib_8c7c25.read_one("devops_pipeline_scene_8c7c25", (target_scene_id, repo_key))
-            else:
-                c.execute(
-                    "SELECT scene_id FROM devops_pipeline_scene "
-                    "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
-                    (target_scene_id, repo_key))
-                row = c.fetchone()
-        if row and row[0]:
-            effective_scene_id = row[0]
+        from src.domains.mgmt import public as _mg_pub_8c7c25
+        effective_scene_id = _mg_pub_8c7c25.scene_id_exists_any(target_scene_id, repo_key)
     except Exception as _e:
         log.warning(f"A2A #568: target scene existence check failed: {_e}")
         return ""
@@ -1678,16 +1648,10 @@ def _a2a_register_repo(repo_key: str) -> bool:
             log.info(f"A2A: fallback registered managed_repos row: {repo_key}")
             return True
         except Exception as _e:
-            log.warning(f"A2A: fallback registration via lib failed, fallback to local SQL: {_e}")
+            log.warning(f"A2A: fallback registration via lib failed, fallback to portable primitive: {_e}")
     try:
-        from src.kernel.session_manager import db as _reg_db, db_lock as _reg_lock
-        with _reg_lock:
-            _reg_c = _reg_db.cursor()
-            _reg_c.execute(
-                "INSERT OR IGNORE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) "
-                "VALUES (?,?,?,?)",
-                (repo_key, _owner, _name, f"{_owner}/{_name}"))
-            _reg_db.commit()
+        from src.domains.mgmt import public as _mg_pub_reg
+        _mg_pub_reg.ensure_repo_row_any(repo_key, _owner, _name, f"{_owner}/{_name}")
         log.info(f"A2A: fallback registered managed_repos row: {repo_key}")
         return True
     except Exception as _e:
@@ -1797,13 +1761,10 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     # 避免表结构问题阻断正常 A2A。
     _repo_unregistered = False
     try:
-        from src.kernel.session_manager import db as _mr_db, db_lock as _mr_lock
-        with _mr_lock:
-            _mr_c = _mr_db.cursor()
-            _mr_c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
-            if not _mr_c.fetchone():
-                _repo_unregistered = True
-                log.info(f"A2A: repo not in managed_repos, defer to GitCode reachability fallback: {repo_key}")
+        from src.domains.mgmt import public as _mg_pub_mr
+        if not _mg_pub_mr.repo_registered_any(repo_key):
+            _repo_unregistered = True
+            log.info(f"A2A: repo not in managed_repos, defer to GitCode reachability fallback: {repo_key}")
     except Exception as _mr_e:
         log.warning(f"A2A: managed_repos existence check failed, skip: {_mr_e}")
 

@@ -33,6 +33,10 @@ from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
+# 渠道租约表（grape_t_channel_lease）归 mgmt：归属判定的两条只读语句在该域 public，
+# 本模块只传「自己这条连接」当执行上下文（单库/测试拓扑复用，自有 DSN 由该域接管）。
+from src.domains.mgmt import public as _mgmt_public
+
 _TABLE = "grape_t_channel_outbound_card"
 
 POLL_INTERVAL = 1.0          # 消费者轮询周期（秒）—— ≤30s 送达验收留足余量
@@ -154,17 +158,14 @@ _COLS = ("out_track_id, installation_id, channel_type, channel_chat_id, status, 
 
 
 def lease_owner_of(installation_id: str, channel_type: str = "") -> str:
-    """该安装当前租约的 owner（grape_t_channel_lease，只读）。空 = 无租约。"""
+    """该安装当前租约的 owner（grape_t_channel_lease 归 mgmt，只读）。空 = 无租约。"""
     key = f"{channel_type}:{installation_id}" if channel_type else installation_id
     try:
         conn = _conn()
         try:
-            row = conn.execute(
-                "SELECT COALESCE(lease_owner,'') FROM grape_t_channel_lease WHERE lease_key=?",
-                (key,)).fetchone()
+            return _mgmt_public.lease_owner_by_key(key, cursor=conn.cursor())
         finally:
             conn.close()
-        return str(row[0]) if row and row[0] else ""
     except Exception as e:
         log.warning("[outbox] lease owner read failed inst=%s: %s", installation_id, e)
         return ""
@@ -189,7 +190,7 @@ def claim_for_sending(out_track_id: str) -> bool:
 
 
 def owned_installations(instance_id: str) -> list[tuple]:
-    """本实例当前持有租约的 (installation_id, channel_type) 列表（只读 lease 表）。
+    """本实例当前持有租约的 (installation_id, channel_type) 列表（只读 lease 表，归 mgmt）。
 
     用于把归属过滤**下推到取批 SQL**：否则全局 `ORDER BY created_at LIMIT 50` 先截断、
     再在 Python 里按 owner 过滤，别的安装积压 ≥50 行时本实例永远取不到自己的行
@@ -199,10 +200,8 @@ def owned_installations(instance_id: str) -> list[tuple]:
         return []
     conn = _conn()
     try:
-        rows = conn.execute(
-            "SELECT installation_id, channel_type FROM grape_t_channel_lease "
-            "WHERE lease_owner=? AND installation_id<>'' "
-            "ORDER BY updated_at DESC LIMIT 200", (instance_id,)).fetchall()
+        rows = _mgmt_public.lease_owned_installations_by_owner(instance_id,
+                                                              cursor=conn.cursor())
     except Exception as e:
         log.warning("[outbox] list owned installations failed: %s", e)
         return []
@@ -657,8 +656,8 @@ class OutboxConsumer:
                 log.warning("[outbox] consumer round failed: %s", e)
             try:
                 await asyncio.wait_for(self._stopped.wait(), timeout=self._poll_interval)
-            except asyncio.TimeoutError:
-                pass
+            except Exception as _e:
+                log.debug(f"src/domains/runtime/im/outbox.py best-effort skipped: {_e}")
         log.info("[outbox] consumer stopped")
 
     async def run_once(self) -> int:
@@ -732,8 +731,8 @@ class OutboxConsumer:
                     await asyncio.to_thread(
                         _register_numbered_reply, m["chat_id"], m["conv"],
                         m["repo_key"], m["issue_number"])
-            except Exception:
-                pass
+            except Exception as _e:
+                log.debug(f"src/domains/runtime/im/outbox.py best-effort skipped: {_e}")
         return len(rows)
 
     async def stop(self) -> None:
@@ -742,8 +741,8 @@ class OutboxConsumer:
             self._task.cancel()
             try:
                 await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
+            except Exception as _e:
+                log.debug(f"src/domains/runtime/im/outbox.py best-effort skipped: {_e}")
         self._task = None
 
     def spawn(self) -> asyncio.Task:

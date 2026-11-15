@@ -18,7 +18,7 @@
 """
 import logging
 
-from src.kernel.session_manager import db, db_lock
+from src.domains.runtime import public as runtime_public
 
 logger = logging.getLogger(__name__)
 
@@ -46,51 +46,25 @@ def resolve_skill_display_name(skill_name: str, skill_id: int = 0,
         return ""
     uid = _norm_user_id(user_id)
     try:
-        with db_lock:
-            c = db.cursor()
-            if skill_id:
-                c.execute(
-                    "SELECT display_name FROM skill WHERE id=? AND is_active=1",
-                    (int(skill_id),),
-                )
-                row = c.fetchone()
-                if row:
-                    return _pick_display(row[0], skill_name)
-            if scope:
-                c.execute(
-                    "SELECT display_name FROM skill "
-                    "WHERE skill_name=? AND scope=? AND owner_id=? AND is_active=1 LIMIT 1",
-                    (skill_name, scope, owner_id),
-                )
-                row = c.fetchone()
-                if row:
-                    return _pick_display(row[0], skill_name)
-            if uid:
-                c.execute(
-                    "SELECT display_name FROM skill "
-                    "WHERE skill_name=? AND scope='user' AND owner_id=? AND is_active=1 LIMIT 1",
-                    (skill_name, uid),
-                )
-                row = c.fetchone()
-                if row:
-                    return _pick_display(row[0], skill_name)
-            if repo_key:
-                c.execute(
-                    "SELECT display_name FROM skill "
-                    "WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1",
-                    (skill_name, repo_key),
-                )
-                row = c.fetchone()
-                if row:
-                    return _pick_display(row[0], skill_name)
-            c.execute(
-                "SELECT display_name FROM skill "
-                "WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1",
-                (skill_name,),
-            )
-            row = c.fetchone()
-            if row:
-                return _pick_display(row[0], skill_name)
+        if skill_id:
+            name = runtime_public.skill_display_name_by_id_any(skill_id)
+            if name is not None:
+                return _pick_display(name, skill_name)
+        if scope:
+            name = runtime_public.skill_display_name_by_scope_any(skill_name, scope, owner_id)
+            if name is not None:
+                return _pick_display(name, skill_name)
+        if uid:
+            name = runtime_public.skill_display_name_by_scope_any(skill_name, "user", uid)
+            if name is not None:
+                return _pick_display(name, skill_name)
+        if repo_key:
+            name = runtime_public.skill_display_name_by_scope_any(skill_name, "repo", repo_key)
+            if name is not None:
+                return _pick_display(name, skill_name)
+        official = runtime_public.skill_display_name_official_any(skill_name)
+        if official:
+            return official
     except Exception as exc:
         logger.warning("resolve_skill_display_name failed for %r, fallback to skill_name: %s", skill_name, exc)
     return skill_name
@@ -108,13 +82,9 @@ def build_skill_display_map(repo_key: str = "", user_id=None) -> dict:
     uid = _norm_user_id(user_id)
     skill_map: dict = {}
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT skill_name, display_name, scope, owner_id FROM skill WHERE is_active=1"
-            )
-            rows = c.fetchall()
-    except Exception:
+        rows = runtime_public.skill_active_display_rows_any()
+    except Exception as exc:
+        logger.debug("build_skill_display_map query failed, fallback to empty map: %s", exc)
         return {}
     # 优先级打分：3=user(本上下文) 2=repo(本上下文) 1=official 0=不相关档
     # prio=0（他人 user 档/他仓 repo 档）不写入映射：否则无 official 档的

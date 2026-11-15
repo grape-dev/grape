@@ -10,57 +10,32 @@
 2026-11 补齐：新增 list_all_services()（运维全量视图，含离线/过期行）与
 purge_stale()（把心跳超时的 online 行标为 offline），供 /internal/gsb/services
 与巡检脚本使用；register/discover 行为保持设计稿语义不变。
+
+2026-11 跨域收口：注册表 SQL 全部下沉 mgmt 域 public（`gsb_service_registry` 归
+mgmt，见 docs/weekly-11/table-owner.tsv）。本模块只保留 GSB 语义——心跳超时判定、
+实例派生字段、负载均衡依赖的排序口径；不再直连进程库。三库拓扑下各域进程写的是
+同一张 mgmt 表（改前各写各的库：注册不报错但互相发现不到），单库 / 测试拓扑由
+owner 域的「任意拓扑」原语回落进程主库，行为与改前逐字一致。
 """
 from __future__ import annotations
 
 import json
 import time
 
-from src.kernel import session_manager
-
-_REGISTRY_DDL = """
-CREATE TABLE IF NOT EXISTS gsb_service_registry (
-    service_name   TEXT PRIMARY KEY,
-    base_url       TEXT NOT NULL,
-    health_url     TEXT,
-    version        TEXT DEFAULT '1',
-    status         TEXT DEFAULT 'online',
-    last_heartbeat REAL DEFAULT 0,
-    metadata       TEXT DEFAULT '{}'
-)
-"""
-
 # 心跳超时：90s = 3 个心跳周期（30s × 3）
 HEARTBEAT_TIMEOUT = 90
 
 
-def _ensure_table():
-    """幂等建表（每次 register 时调用，CREATE IF NOT EXISTS）。
+def _mgmt():
+    """mgmt 域 public 句柄（函数内延迟导入：kernel 顶层不得依赖 domains，check-arch R1）."""
+    from src.domains.mgmt import public as _public
 
-    旧库升级：GSB 早期版本的建表语句没有 version 列，``CREATE TABLE IF NOT
-    EXISTS`` 不会给已存在的表补列，直接 INSERT version 会失败（注册被吞成无限
-    重试）。这里补一次 best-effort 的 ADD COLUMN，列已存在时忽略报错。
-    """
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
-        c.execute(_REGISTRY_DDL)
-        try:
-            c.execute(
-                "ALTER TABLE gsb_service_registry ADD COLUMN version TEXT DEFAULT '1'"
-            )
-        except Exception:  # noqa: BLE001 - 列已存在（SQLite/MySQL 报错文案不同）
-            pass
-        session_manager.db.commit()
+    return _public
 
 
-def _rows_to_dicts(c, rows: list) -> list[dict]:
-    """统一把 cursor 结果转 dict（SQLite Row 工厂 / MySQL DictCursor 均可）。"""
-    if not rows:
-        return []
-    if hasattr(rows[0], "keys"):
-        return [dict(r) for r in rows]
-    cols = [d[0] for d in c.description] if c.description else []
-    return [dict(zip(cols, r)) for r in rows] if cols else []
+def _ensure_table() -> None:
+    """幂等建表/补列（DDL 归 mgmt 域；每次 register 前调用，时机与原实现一致）。"""
+    _mgmt().ensure_gsb_registry_schema()
 
 
 def register_service(
@@ -81,28 +56,15 @@ def register_service(
     """
     _ensure_table()
     payload = json.dumps(metadata or {}, ensure_ascii=False)
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO gsb_service_registry "
-            "(service_name, base_url, health_url, version, status, last_heartbeat, metadata) "
-            "VALUES (?, ?, ?, ?, 'online', ?, ?)",
-            (name, base_url, health_url, version or "1", time.time(), payload),
-        )
-        session_manager.db.commit()
+    _mgmt().gsb_register(
+        name, base_url, health_url, version or "1", time.time(), payload
+    )
 
 
 def heartbeat_service(name: str) -> None:
     """定时心跳更新（30s 调用一次）。"""
     _ensure_table()
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
-        c.execute(
-            "UPDATE gsb_service_registry SET last_heartbeat=?, status='online' "
-            "WHERE service_name=?",
-            (time.time(), name),
-        )
-        session_manager.db.commit()
+    _mgmt().gsb_heartbeat(name, time.time())
 
 
 def discover_service(name: str) -> dict:
@@ -112,39 +74,19 @@ def discover_service(name: str) -> dict:
         服务行 dict（service_name, base_url, health_url, ...）或空 dict。
     """
     _ensure_table()
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
-        c.execute(
-            "SELECT * FROM gsb_service_registry "
-            "WHERE service_name=? AND status='online'",
-            (name,),
-        )
-        row = c.fetchone()
-        if not row:
-            return {}
-        data = dict(row) if hasattr(row, "keys") else {}
-        if not data:
-            # SQLite Row factory may not be enabled; fall back
-            cols = [d[0] for d in c.description] if c.description else []
-            data = dict(zip(cols, row)) if row else {}
-        # 心跳超时检查
-        if time.time() - float(data.get("last_heartbeat", 0)) > HEARTBEAT_TIMEOUT:
-            return {}
-        return data
+    data = _mgmt().gsb_discover_row(name)
+    if not data:
+        return {}
+    # 心跳超时检查
+    if time.time() - float(data.get("last_heartbeat", 0)) > HEARTBEAT_TIMEOUT:
+        return {}
+    return data
 
 
 def list_services() -> list:
     """列出所有在线服务（心跳未超时）。"""
     _ensure_table()
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
-        c.execute(
-            "SELECT * FROM gsb_service_registry "
-            "WHERE status='online' AND last_heartbeat > ? "
-            "ORDER BY service_name",
-            (time.time() - HEARTBEAT_TIMEOUT,),
-        )
-        return _rows_to_dicts(c, c.fetchall())
+    return _mgmt().gsb_online_services(time.time() - HEARTBEAT_TIMEOUT)
 
 
 def split_key(key: str) -> tuple[str, str]:
@@ -178,20 +120,7 @@ def list_instances(service: str, include_offline: bool = False) -> list[dict]:
     """
     _ensure_table()
     cutoff = time.time() - HEARTBEAT_TIMEOUT
-    sql = (
-        "SELECT * FROM gsb_service_registry "
-        "WHERE (service_name = ? OR service_name LIKE ?)"
-    )
-    params: list = [service, f"{service}@%"]
-    if not include_offline:
-        sql += " AND status='online' AND last_heartbeat > ?"
-        params.append(cutoff)
-    sql += " ORDER BY service_name"
-
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
-        c.execute(sql, tuple(params))
-        rows = _rows_to_dicts(c, c.fetchall())
+    rows = _mgmt().gsb_instances(service, cutoff, include_offline=include_offline)
 
     now = time.time()
     for r in rows:
@@ -211,13 +140,7 @@ def list_all_services(include_offline: bool = True) -> list:
     两个派生字段，方便一眼看出"注册了但已经死掉"的服务。
     """
     _ensure_table()
-    where = "" if include_offline else " WHERE status='online'"
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
-        c.execute(
-            "SELECT * FROM gsb_service_registry" + where + " ORDER BY service_name"
-        )
-        rows = _rows_to_dicts(c, c.fetchall())
+    rows = _mgmt().gsb_all_services(include_offline=include_offline)
 
     now = time.time()
     for r in rows:
@@ -233,26 +156,10 @@ def purge_stale(ttl: float = HEARTBEAT_TIMEOUT) -> int:
     仅做状态收敛，不删除行——保留 base_url / metadata 便于事后排查。
     """
     _ensure_table()
-    cutoff = time.time() - ttl
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
-        c.execute(
-            "UPDATE gsb_service_registry SET status='offline' "
-            "WHERE status='online' AND last_heartbeat < ?",
-            (cutoff,),
-        )
-        affected = c.rowcount if c.rowcount and c.rowcount > 0 else 0
-        session_manager.db.commit()
-    return affected
+    return _mgmt().gsb_purge_stale(time.time() - ttl)
 
 
 def deregister_service(name: str) -> None:
     """服务关闭时注销。"""
     _ensure_table()
-    with session_manager.db_lock:
-        c = session_manager.db.cursor()
-        c.execute(
-            "UPDATE gsb_service_registry SET status='offline' WHERE service_name=?",
-            (name,),
-        )
-        session_manager.db.commit()
+    _mgmt().gsb_mark_offline(name)

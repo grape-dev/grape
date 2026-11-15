@@ -323,8 +323,8 @@ def admin_restore_user(user_id: str, admin: dict = Depends(require_admin)):
                 "Account restored",
                 "Your Grape account has been restored by an administrator. You can now log in normally."
             )
-        except Exception:
-            pass  # 通知邮件发送失败不影响恢复操作
+        except Exception as e:  # noqa: BLE001 - 通知邮件失败不影响恢复操作
+            log.debug(f"admin restore notification mail skipped: {e}")
     return {"message": "User restored"}
 
 
@@ -744,13 +744,11 @@ def admin_obs_metrics_series(metric: str = "task_success_rate,task_done,task_fai
 
 
 def _all_rollup_dims() -> List[str]:
-    from src.kernel.session_manager import db, db_lock
+    # obs_metric_rollup 归 insight：维度枚举走 insight public 原语（任意拓扑），
+    # 本文件不再持有该表的 SQL（跨域静态引用归零）。
+    from src.domains.insight import public as _insight_public
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT DISTINCT dim_key FROM obs_metric_rollup WHERE dim_key != ?",
-                      ("global",))
-            return [r[0] for r in c.fetchall()]
+        return _insight_public.rollup_dim_keys()
     except Exception as e:
         log.warning(f"admin obs metrics: all dims failed: {e}")
         return []
@@ -892,7 +890,6 @@ def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_a
     import json as _json
     from src.domains.runtime.vcs.platform_card import build_platform_card, PlatformCardError
     from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
-    from src.kernel.session_manager import db, db_lock
 
     cleaned = {}
     errors = []
@@ -956,37 +953,35 @@ def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_a
             "code": 400, "message": "platform card validation failed",
             "errors": errors})
 
-    with db_lock:
-        db.cursor().execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('vcs_providers_config', ?)",
-            (_json.dumps(cleaned, ensure_ascii=False),))
-        # D11（2026-11-12）：bot token 凭据通道——按各卡 global_bot_meta_key 写 meta
-        for provider, token in (body.bot_tokens or {}).items():
-            token = str(token or "").strip()
-            if not token:
-                continue
-            if provider not in cleaned:
-                raise HTTPException(status_code=400, detail={
-                    "code": 400,
-                    "message": f"bot_tokens 含不在册平台: {provider}"})
-            card = build_platform_card(provider, cleaned[provider])
-            bot_key = card.global_bot_meta_key or f"global_bot_{provider}_token"
-            db.cursor().execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                (bot_key, token))
-        # D13/S20：webhook token 凭据通道（{provider}_webhook_token meta key）
-        for provider, token in (body.webhook_tokens or {}).items():
-            token = str(token or "").strip()
-            if not token:
-                continue
-            if provider not in cleaned:
-                raise HTTPException(status_code=400, detail={
-                    "code": 400,
-                    "message": f"webhook_tokens 含不在册平台: {provider}"})
-            db.cursor().execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                (f"{provider}_webhook_token", token))
-        db.commit()
+    # meta 基表归运行域：写入走 runtime public 的批量 upsert（任意拓扑、单事务）。
+    # 校验放在写之前——原实现边写边校验，`bot_tokens` 含不在册平台时 400 已经
+    # 写下了 `vcs_providers_config`（未提交事务挂到下一次 commit，属隐性部分写）。
+    from src.domains.runtime import public as _rt
+    meta_pairs: list[tuple[str, str]] = [
+        ("vcs_providers_config", _json.dumps(cleaned, ensure_ascii=False))]
+    # D11（2026-11-12）：bot token 凭据通道——按各卡 global_bot_meta_key 写 meta
+    for provider, token in (body.bot_tokens or {}).items():
+        token = str(token or "").strip()
+        if not token:
+            continue
+        if provider not in cleaned:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"bot_tokens 含不在册平台: {provider}"})
+        card = build_platform_card(provider, cleaned[provider])
+        bot_key = card.global_bot_meta_key or f"global_bot_{provider}_token"
+        meta_pairs.append((bot_key, token))
+    # D13/S20：webhook token 凭据通道（{provider}_webhook_token meta key）
+    for provider, token in (body.webhook_tokens or {}).items():
+        token = str(token or "").strip()
+        if not token:
+            continue
+        if provider not in cleaned:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"webhook_tokens 含不在册平台: {provider}"})
+        meta_pairs.append((f"{provider}_webhook_token", token))
+    _rt.set_meta_values_any(meta_pairs)
     invalidate_platform_card_cache()
     from src.domains.mgmt.auth.audit import log_audit
     log_audit("admin_vcs_platforms_saved", operator_id=admin["id"],
@@ -1025,10 +1020,9 @@ def auth_channels_list(admin: dict = Depends(require_admin)):
 @router.put("/auth-channels", operation_id="admin_auth_channels_put",
             summary="Save login channel cards (merge; client creds to meta keys)")
 def auth_channels_put(body: AuthChannelsBody, admin: dict = Depends(require_admin)):
-    import json as _json
     from src.kernel.auth_sdk.channel_strategy import get_channel_strategy, ChannelAuthError
     from src.domains.mgmt.auth.providers import _DEFAULT_PROVIDERS, invalidate_provider_cache
-    from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
+    from src.domains.runtime import public as _rt
     from src.domains.mgmt.auth.audit import log_audit
 
     incoming = body.providers or {}
@@ -1060,27 +1054,15 @@ def auth_channels_put(body: AuthChannelsBody, admin: dict = Depends(require_admi
         creds[provider] = (str(raw.get("client_id") or "").strip(),
                            str(raw.get("client_secret") or "").strip())
 
-    # 合并式保存（零危害：不挤掉存量渠道——覆盖式写会杀掉 gitcode/github）
-    with _sm_dl:
-        c = _sm_db.cursor()
-        row = c.execute("SELECT value FROM meta WHERE key='oauth_providers_config'").fetchone()
-        merged = dict(_DEFAULT_PROVIDERS)
-        if row and row[0]:
-            try:
-                merged.update(_json.loads(row[0]))
-            except Exception:
-                pass
-        merged.update(protocol_cards)
-        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('oauth_providers_config', ?)",
-                  (_json.dumps(merged, ensure_ascii=False),))
-        for provider, (cid, csec) in creds.items():
-            if cid:
-                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                          (f"oauth_{provider}_client_id", cid))
-            if csec:
-                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                          (f"oauth_{provider}_client_secret", csec))
-        _sm_db.commit()
+    # 合并式保存（零危害：不挤掉存量渠道——覆盖式写会杀掉 gitcode/github）。
+    # 读→合并→写由 runtime public 在**同一事务**内完成：meta 归运行域，
+    # 本文件不再持有 meta 的 SQL；同时消掉原「先读后写、中间放锁」的丢配置窗口。
+    extra_meta = {}
+    for provider, (cid, csec) in creds.items():
+        extra_meta[f"oauth_{provider}_client_id"] = cid
+        extra_meta[f"oauth_{provider}_client_secret"] = csec
+    merged = _rt.merge_meta_json_any("oauth_providers_config", protocol_cards,
+                                     base=_DEFAULT_PROVIDERS, extra=extra_meta)
     invalidate_provider_cache()
     log_audit("admin_auth_channels_saved", operator_id=admin["id"],
               detail={"providers": sorted(protocol_cards.keys())})

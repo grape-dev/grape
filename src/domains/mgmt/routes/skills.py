@@ -1,5 +1,6 @@
 """Skills 路由：列表、上传、删除、个人技能转仓库技能"""
 
+from src.kernel.domain_db import cursor as _domain_cursor
 import io as _io
 
 import hashlib, os, tempfile, zipfile, json, shutil, stat as _stat
@@ -13,6 +14,9 @@ from src.domains.mgmt.user import db as user_db
 from src.domains.mgmt.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
+
+# skill 归运行域：列表/统计/单行读取走该域原语或具名查询
+from src.domains.runtime import public as _rt_skills
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
@@ -93,69 +97,12 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
     # repo 参数可能是 fullName（xiaowu2119/hello-skill），转成 repo_key（gitcode:xiaowu2119/hello-skill）
     repo_key = _resolve_repo_key(repo) if repo else ""
 
-    # 构建查询条件
+    # 可见范围/搜索/排序/分页都交给 owner 域（skill 归运行域）
     _org_id = user.get("org_id", "")
-    conditions = ["is_active=1"]
-    params = []
-    if scope == "all":
-        pass  # 不加 scope 条件，查全部（官方+个人+所有仓库）
-    elif scope == "official":
-        conditions.append("scope='official'")
-    elif scope == "repo":
-        if not repo:
-            return {"skills": [], "total": 0, "page": page, "page_size": page_size}
-        conditions.append("scope='repo'")
-        conditions.append("owner_id=?")
-        params.append(repo_key)
-    elif scope == "user":
-        conditions.append("scope='user'")
-        conditions.append("owner_id=?")
-        params.append(str(user["id"]))
-    elif repo:
-        # 官方 + 个人 + 指定仓库技能（兼容旧逻辑）
-        conditions.append("(scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))")
-        params.extend([str(user["id"]), repo_key])
-    else:
-        # 官方 + 个人（兼容旧逻辑）
-        conditions.append("(scope='official' OR (scope='user' AND owner_id=?))")
-        params.append(str(user["id"]))
+    if scope == "repo" and not repo:
+        return {"skills": [], "total": 0, "page": page, "page_size": page_size}
 
-    # 组织隔离（2026-10-12 修正）：official 技能（org_id=''）对所有组织可见；
-    # user/repo scope 的技能没有"组织级"概念——org_id 只是迁移时的数据归属标记，
-    # 可见性依据是 owner：repo 技能跟着仓库走（owner_id=repo_key 精确限定，
-    # 用户能访问该仓库即能看其技能，见 skills-org-visibility 修复），user 技能
-    # owner_id=user.id 已是本人限定。故组织过滤仅作用于 official 之外的兜底场景，
-    # 不再对 repo/user 分支追加 org_id 条件（否则跨组织的仓库技能会被错误滤掉）。
-    if _org_id and scope not in ("repo", "user"):
-        conditions.append("(org_id='' OR org_id=?)")
-        params.append(_org_id)
-
-    # 搜索过滤
-    q = (q or "").strip()
-    if q:
-        conditions.append("(skill_name LIKE ? OR display_name LIKE ? OR description LIKE ?)")
-        kw = f"%{q}%"
-        params.extend([kw, kw, kw])
-
-    # agent_type 过滤
-    agent_type = (agent_type or "").strip()
-    if agent_type:
-        conditions.append("agent_type=?")
-        params.append(agent_type)
-
-    # category_id 过滤
-    if category_id and category_id > 0:
-        conditions.append("category_id=?")
-        params.append(category_id)
-
-    # 排序
-    order_by = "ORDER BY updated_at DESC" if sort == "latest" else "ORDER BY like_count DESC" if sort == "hot" else "ORDER BY agent_type, skill_name"
-
-    where_sql = " WHERE " + " AND ".join(conditions)
-
-    # 分页
-    use_paging = page_size and page_size > 0
-    total = 0
+    use_paging = bool(page_size and page_size > 0)
 
     skills = []
     skill_ids: list[int] = []
@@ -166,42 +113,30 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
             cat_map[cat["id"]] = cat["name"]
     except Exception:
         pass
-    with db_lock:
-        c = db.cursor()
-        try:
-            if use_paging:
-                offset = (page - 1) * page_size
-                c.execute(f"SELECT COUNT(*) FROM skill{where_sql}", tuple(params))
-                total = c.fetchone()[0]
-                c.execute(
-                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count, sub_scene, category_id "
-                    f"FROM skill{where_sql} {order_by} LIMIT {int(page_size)} OFFSET {int(offset)}",
-                    tuple(params)
-                )
-            else:
-                c.execute(
-                    f"SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, is_featured, like_count, sub_scene, category_id "
-                    f"FROM skill{where_sql} {order_by}",
-                    tuple(params)
-                )
-            for r in c.fetchall():
-                cat_id = r[10] or 0
-                skills.append({
-                    "id": r[0],
-                    "name": r[1],
-                    "display_name": r[2] or r[1],
-                    "description": r[3] or "",
-                    "agent_type": r[4] or "",
-                    "type": "official" if r[5] == "official" else "repo" if r[5] == "repo" else "user-uploaded",
-                    "scope": r[5] or "",
-                    "is_featured": r[7] or 0,
-                    "like_count": r[8] or 0,
-                    "category_id": cat_id,
-                    "category_name": cat_map.get(cat_id, ""),
-                })
-                skill_ids.append(r[0])
-        except Exception:
-            pass
+    total = 0
+    try:
+        total, _skill_rows = _rt_skills.skill_search(
+            scope=scope, user_id=user.get("id"), repo_key=repo_key, org_id=_org_id,
+            q=q, agent_type=agent_type, category_id=category_id or 0, sort=sort,
+            page=page, page_size=page_size if use_paging else 0)
+        for r in _skill_rows:
+            cat_id = r[10] or 0
+            skills.append({
+                "id": r[0],
+                "name": r[1],
+                "display_name": r[2] or r[1],
+                "description": r[3] or "",
+                "agent_type": r[4] or "",
+                "type": "official" if r[5] == "official" else "repo" if r[5] == "repo" else "user-uploaded",
+                "scope": r[5] or "",
+                "is_featured": r[7] or 0,
+                "like_count": r[8] or 0,
+                "category_id": cat_id,
+                "category_name": cat_map.get(cat_id, ""),
+            })
+            skill_ids.append(r[0])
+    except Exception:
+        pass
 
     # 批量查 liked_by_me
     liked_map = batch_skill_liked(str(user.get("id") or ""), skill_ids) if skill_ids else {}
@@ -229,11 +164,8 @@ def toggle_skill_like(skill_id: int, user: dict = Depends(require_no_session_tok
     from src.domains.mgmt.user.db import toggle_skill_like as _toggle
 
     # 校验技能存在
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT 1 FROM skill WHERE id=? AND is_active=1", (skill_id,))
-        if not c.fetchone():
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+    if not _rt_skills.skill_exists_active(skill_id):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
     liked, like_count = _toggle(str(user.get("id") or ""), skill_id)
     return {"liked": liked, "like_count": like_count}
@@ -296,44 +228,19 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
     from src.kernel.session_manager import db, db_lock
 
     repo_key = _resolve_repo_key(repo) if repo else ""
-    conditions = ["is_active=1"]
-    params = []
-    if scope == "official":
-        conditions.append("scope='official'")
-    elif scope == "repo":
-        if not repo:
-            return {"total": 0, "agents": []}
-        conditions.append("scope='repo'")
-        conditions.append("owner_id=?")
-        params.append(repo_key)
-    elif scope == "user":
-        conditions.append("scope='user'")
-        conditions.append("owner_id=?")
-        params.append(str(user["id"]))
-    elif repo:
-        conditions.append("(scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))")
-        params.extend([str(user["id"]), repo_key])
-    else:
-        conditions.append("(scope='official' OR (scope='user' AND owner_id=?))")
-        params.append(str(user["id"]))
+    if scope == "repo" and not repo:
+        return {"total": 0, "agents": []}
 
-    where_sql = " WHERE " + " AND ".join(conditions)
     agents = []
     total = 0
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute(
-                f"SELECT agent_type, COUNT(*) as cnt FROM skill{where_sql} GROUP BY agent_type ORDER BY "
-                f"CASE agent_type WHEN 'vod' THEN 1 WHEN 'issue' THEN 2 WHEN 'coding' THEN 3 "
-                f"WHEN 'qa' THEN 4 WHEN 'sre' THEN 5 WHEN 'chat' THEN 6 ELSE 99 END",
-                tuple(params)
-            )
-            for r in c.fetchall():
-                agents.append({"agent_type": r[0] or "", "count": r[1]})
-                total += r[1]
-        except Exception:
-            pass
+    # 可见范围条件与列表接口同一套（owner 域）
+    try:
+        for r in _rt_skills.skill_agent_counts(scope=scope, user_id=user.get("id"),
+                                               repo_key=repo_key):
+            agents.append({"agent_type": r[0] or "", "count": r[1]})
+            total += r[1]
+    except Exception:
+        pass
     return {"total": total, "agents": agents}
 
 @router.get("/stats", operation_id="skills_stats", summary="Skill usage stats (scene/repo aggregation)", description="Skill usage stats aggregated from scene_skill_ref: {skill_name: {scene_count, repo_count}}.")
@@ -385,13 +292,7 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
         if _ru_lib_4e3919 is not None:
             exact_rows = _ru_lib_4e3919.read_all("skill_4e3919", (q, q),)
         else:
-            c.execute(
-                "SELECT id, skill_name, display_name, description, agent_type, category_id "
-                "FROM skill WHERE is_active=1 AND scope='official' "
-                "AND (skill_name=? OR display_name=?) ORDER BY skill_name",
-                (q, q),
-            )
-            exact_rows = c.fetchall()
+            exact_rows = _rt_skills.read_all_any("skill_official_exact", (q, q))
 
     if exact_rows:
         return {"skills": [
@@ -416,12 +317,7 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
         if _ru_lib_ded9f4 is not None:
             all_skills = _ru_lib_ded9f4.read_all("skill_ded9f4", ())
         else:
-            c.execute(
-                "SELECT id, skill_name, display_name, description, agent_type, category_id "
-                "FROM skill WHERE is_active=1 AND scope='official' "
-                "ORDER BY agent_type, skill_name",
-            )
-            all_skills = c.fetchall()
+            all_skills = _rt_skills.read_all_any("skill_official_all")
 
     results = []
     for r in all_skills:
@@ -498,19 +394,7 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
     from src.kernel.session_manager import db, db_lock
     from src.kernel.repo_key import to_repo_key, from_repo_key
     repo_key = _resolve_repo_key(repo) if repo else ""
-    with db_lock:
-        c = db.cursor()
-        if repo_key:
-            c.execute(
-                "SELECT id, skill_path, scope, owner_id, skill_name FROM skill WHERE id=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))",
-                (skill_id, str(user["id"]), repo_key)
-            )
-        else:
-            c.execute(
-                "SELECT id, skill_path, scope, owner_id, skill_name FROM skill WHERE id=? AND is_active=1 AND (scope='official' OR (scope='user' AND owner_id=?) OR scope='repo')",
-                (skill_id, str(user["id"]))
-            )
-        row = c.fetchone()
+    row = _rt_skills.skill_download_row(skill_id, user.get("id"), repo_key)
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能不存在"})
     skill_id, skill_path, scope, owner_id, name = row
@@ -561,22 +445,10 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
     from src.kernel.config import SKILLS_DIR
 
     _raw = str(skill_id or "").strip()
-    with db_lock:
-        c = db.cursor()
-        if _raw.isdigit():
-            c.execute(
-                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, is_featured, like_count, sub_scene, category_id FROM skill WHERE id=? AND is_active=1",
-                (int(_raw),)
-            )
-        else:
-            c.execute(
-                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, is_featured, like_count, sub_scene, category_id "
-                "FROM skill WHERE skill_name=? AND is_active=1 "
-                "AND (scope='official' OR (scope='user' AND owner_id=?) OR scope='repo') "
-                "ORDER BY CASE scope WHEN 'user' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END, id DESC LIMIT 1",
-                (_raw, str(user.get("id") or ""))
-            )
-        row = c.fetchone()
+    if _raw.isdigit():
+        row = _rt_skills.read_one_any("skill_detail_by_id", (int(_raw),))
+    else:
+        row = _rt_skills.read_one_any("skill_detail_by_name", (_raw, str(user.get("id") or "")))
 
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
@@ -828,11 +700,7 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
         if _ru_lib_f41425 is not None:
             row = _ru_lib_f41425.read_one("skill_f41425", (skill_id,))
         else:
-            c.execute(
-                "SELECT skill_name, owner_id, skill_path, scope FROM skill WHERE id=? AND is_active=1",
-                (skill_id,)
-            )
-            row = c.fetchone()
+            row = _rt_skills.read_one_any("skill_path_owner_scope", (skill_id,))
 
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
@@ -879,10 +747,7 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
             {"skill_id": int(skill_id)},
             lambda: _rt_dsk_ok.delete_skill_by_id(int(skill_id)), _log_dsk)
     if not _dsk_done:
-        with db_lock:
-            c = db.cursor()
-            c.execute("DELETE FROM skill WHERE id=?", (skill_id,))
-            db.commit()
+        _rt_skills.skill_delete_by_id(skill_id)
 
     if storage is None:
         from src.kernel.config import log
@@ -901,7 +766,7 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
 VALID_SKILL_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat", "auto"}
 
 @router.post("/by-id/{skill_id}/update", operation_id="skills_update",
-             summary="Update skill by uploading a new ZIP (Issue #561)",
+             summary="Replace a skill package with a new ZIP (Issue #561)",
              description="Overwrites an existing skill's content by uploading a new ZIP. Keeps skill id/scope/owner/scene refs/likes, refreshes content_hash and invalidates both cache levels. official skills cannot be updated; user scope requires ownership; repo scope requires the caller to manage the repo.")
 async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
                              user: dict = Depends(require_no_session_token),
@@ -924,11 +789,7 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
         if _ru_lib_9f2ee7 is not None:
             row = _ru_lib_9f2ee7.read_one("skill_9f2ee7", (skill_id,))
         else:
-            c.execute(
-                "SELECT skill_name, scope, owner_id, agent_type, category_id FROM skill WHERE id=? AND is_active=1",
-                (skill_id,)
-            )
-            row = c.fetchone()
+            row = _rt_skills.read_one_any("skill_meta_row", (skill_id,))
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
@@ -1095,11 +956,7 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
                 c = _ru_lib_21ba32.read_one("skill_21ba32", (skill_name, repo_key),
             ).fetchone()
             else:
-                row = c.execute(
-                    "SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id "
-                    "FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1",
-                    (skill_name, repo_key),
-                ).fetchone()
+                row = _rt_skills.read_one_any("skill_repo_full_row", (skill_name, repo_key))
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库技能未找到或不属于该仓库"})
         skill_rec = {
@@ -1113,12 +970,7 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         dst_scope, dst_owner = "repo", repo_key
         dst_skill_key_scope = "repo"
         dedup_msg = f"目标仓库已存在同名技能「{skill_name}」"
-        with db_lock:
-            c = db.cursor()
-            exists = c.execute(
-                "SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1",
-                (skill_name, repo_key),
-            ).fetchone()[0]
+        exists = _rt_skills.skill_repo_count_by_name(skill_name, repo_key)
     else:
         dst_scope, dst_owner = "user", user_id
         dst_skill_key_scope = "custom"
@@ -1186,10 +1038,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
     from src.kernel.session_manager import db, db_lock
     import re as _re
 
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT skill_name, skill_path FROM skill WHERE id=? AND is_active=1", (skill_id,))
-        row = c.fetchone()
+    row = _rt_skills.read_one_any("skill_name_path", (skill_id,))
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
@@ -1256,10 +1105,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
     """读取技能包子技能的 SKILL.md 内容"""
     from src.kernel.session_manager import db, db_lock
 
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT skill_name, skill_path FROM skill WHERE id=? AND is_active=1", (skill_id,))
-        row = c.fetchone()
+    row = _rt_skills.read_one_any("skill_name_path", (skill_id,))
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
@@ -1319,8 +1165,7 @@ def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_curre
         if _ru_lib_8d3c93 is not None:
             row = _ru_lib_8d3c93.read_one("skill_8d3c93", (pkg_id,))
         else:
-            c.execute("SELECT skill_name, skill_path, scope FROM skill WHERE id=? AND is_active=1", (pkg_id,))
-            row = c.fetchone()
+            row = _rt_skills.read_one_any("skill_name_path_scope", (pkg_id,))
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "父技能未找到"})
 

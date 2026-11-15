@@ -68,6 +68,16 @@ def current_domain() -> str | None:
     return None
 
 
+def db_name_domain() -> str | None:
+    """仅按库名判定域（不看进程角色）。
+
+    返回 None 表示「单库/共享库」——此时每个进程都是该库的 owner，应正常建表。
+    分库模式下按库名识别 owner，用于把建表收敛到 owner 进程
+    （`current_domain()` 会回落到角色，单库部署下会误判成"非 owner"）。
+    """
+    return _domain_from(os.environ.get("DEVOPS_DB_NAME", ""))
+
+
 def guard_enabled() -> bool:
     """仅在 MySQL 分库模式启用。
 

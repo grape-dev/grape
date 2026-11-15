@@ -106,29 +106,22 @@ def stable_seq(source: str, model_key: str, turn: int = 0) -> int:
     raw = f"{source}|{model_key}|{turn}".encode("utf-8")
     return int(hashlib.sha1(raw).hexdigest()[:8], 16) & 0x7FFFFFFF
 
-def _attribution(task_id: str, cursor) -> Dict[str, Any]:
-    """从 agent_tasks 反查归属维度。查不到就返回空(不阻塞落库)。"""
+def _attribution(task_id: str) -> Dict[str, Any]:
+    """从 agent_tasks 反查归属维度。查不到就返回空(不阻塞落库)。
+
+    SQL 归 runtime 域（`runtime_public.task_attribution_row_any`，任意拓扑）：
+    原实现在 lib 不可用时用**本进程游标**直读 agent_tasks，三库独立后该游标指向 insight
+    库（无此表）→ 1146 被 except 吞成 warning，归属全空。现两条拓扑同一条代码。
+    """
     try:
-        from src.kernel.domain_read import runtime_lib as _ru_lib_29ab8e_f
-        _ru_lib_29ab8e = _ru_lib_29ab8e_f(foreign_only=True)
-        if _ru_lib_29ab8e is not None:
-            row = _ru_lib_29ab8e.read_one("agent_tasks_29ab8e", (task_id,))
-        else:
-            cursor.execute(
-                "SELECT repo_key, agent_type, runtime_id, user_id, issue_id "
-                "FROM agent_tasks WHERE id=?", (task_id,))
-            row = cursor.fetchone()
+        from src.domains.runtime import public as runtime_public
+        row = runtime_public.task_attribution_row_any(task_id)
     except Exception as e:  # pragma: no cover - 表缺失/连接异常
         log.warning(f"llm_usage attribution lookup failed task={task_id}: {e}")
         return {}
     if not row:
         return {}
-    if isinstance(row, dict):
-        repo_key, agent_type, runtime_id, user_id, issue_id = (
-            row.get("repo_key"), row.get("agent_type"), row.get("runtime_id"),
-            row.get("user_id"), row.get("issue_id"))
-    else:
-        repo_key, agent_type, runtime_id, user_id, issue_id = row
+    repo_key, agent_type, runtime_id, user_id, issue_id = row
     return {
         "repo_key": repo_key or "",
         "agent_type": agent_type or "",
@@ -194,7 +187,8 @@ def archive_old_usage(keep_days: int = ARCHIVE_KEEP_DAYS, batch: int = 2000) -> 
       不会因为列数不一致而失败。
     - 分批（默认 2000 行/次），单次失败不影响主循环；返回 {archived, checked}。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     out = {"archived": 0, "checked": 0}
     try:
         now = datetime.now(timezone.utc)
@@ -270,25 +264,28 @@ def record_usage(task_id: str, usages: Iterable[Dict[str, Any]], source: str = "
     if kind == "task" and not task_id:
         return 0
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
     except Exception as e:  # pragma: no cover
         log.warning(f"llm_usage: session_manager unavailable: {e}")
         return 0
 
     written = 0
     try:
+        _given = dict(attr or {})       # 调用方（内部代码）提供的归属，仅作兜底
+        if kind == "task":
+            # 归属以 agent_tasks 反查为准；调用方给的只做**补空**——
+            # 例如 task 行的 runtime_id 为空时，用调用方知道的引擎 id 兜住。
+            # 反查走 runtime 域原语，**必须在 db_lock 之外**：原语自带 db_lock（单库拓扑
+            # 直接用进程库），嵌套获取在测试 monkeypatch 的裸 Lock 上会自死锁。
+            attr = _attribution(task_id)
+            for _k, _v in _given.items():
+                if not attr.get(_k) and _v:
+                    attr[_k] = _v
+        else:
+            attr = _given
         with db_lock:
             c = db.cursor()
-            _given = dict(attr or {})       # 调用方（内部代码）提供的归属，仅作兜底
-            if kind == "task":
-                # 归属以 agent_tasks 反查为准；调用方给的只做**补空**——
-                # 例如 task 行的 runtime_id 为空时，用调用方知道的引擎 id 兜住。
-                attr = _attribution(task_id, c)
-                for _k, _v in _given.items():
-                    if not attr.get(_k) and _v:
-                        attr[_k] = _v
-            else:
-                attr = _given
             for u in items:
                 model_raw = str(u.get("model") or u.get("model_raw") or "")
                 model_key = normalize_model(model_raw) or "unknown"
@@ -327,23 +324,6 @@ def record_usage(task_id: str, usages: Iterable[Dict[str, Any]], source: str = "
         return 0
     log.info(f"llm_usage: run_kind={kind} subject={subject} source={source} rows={written}")
     return written
-
-def _agent_runtimes_has_model_name(cursor) -> bool:
-    """agent_runtimes 是否已有 model_name 列（#865 老库可能缺列，缺列时配置回落跳过不报错）。
-
-    SQLite 走 PRAGMA table_info；MySQL/其它后端兜底 SELECT 探测（缺列抛异常 → False）。
-    """
-    try:
-        cols = [r[1] for r in cursor.execute("PRAGMA table_info(agent_runtimes)").fetchall()]
-        if cols:
-            return "model_name" in cols
-    except Exception:
-        pass
-    try:
-        cursor.execute("SELECT model_name FROM agent_runtimes LIMIT 0")
-        return True
-    except Exception:
-        return False
 
 def task_model_summary(task_id: str, runtime_id: int = 0) -> Dict[str, Any]:
     """任务执行模型的统一取值口径（事件详情页/实时日志弹窗共用，防止口径漂移）。
@@ -387,21 +367,13 @@ def task_model_summary(task_id: str, runtime_id: int = 0) -> Dict[str, Any]:
                            for m, t in ranked[:3]]}
     try:
         if runtime_id:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                if _agent_runtimes_has_model_name(c):
-                    from src.kernel.domain_read import runtime_lib as _ru_lib_1c267b_f
-                    _ru_lib_1c267b = _ru_lib_1c267b_f(foreign_only=True)
-                    if _ru_lib_1c267b is not None:
-                        row = _ru_lib_1c267b.read_one("agent_runtimes_1c267b", (int(runtime_id),))
-                    else:
-                        c.execute("SELECT model_name FROM agent_runtimes WHERE id=?", (int(runtime_id),))
-                        row = c.fetchone()
-                    name = (row[0] if row else "") or ""
-                    name = name.strip()
-                    if name:
-                        return {"model": name, "source": "config", "models": []}
+            # 配置模型回落走 runtime 域原语（探测 model_name 列 + 取值都在归属域连接上做）。
+            # 原实现在本进程游标上探测并直读 agent_runtimes：三库独立后该游标指向 insight
+            # 库 → 1146，整段被 except 吞成 warning，配置回落永久返回 unknown。
+            from src.domains.runtime import public as runtime_public
+            name = runtime_public.runtime_model_name_any(int(runtime_id))
+            if name:
+                return {"model": name, "source": "config", "models": []}
     except Exception as e:
         log.warning(f"llm_usage: task_model_summary config fallback failed task={task_id}: {e}")
     return {"model": "", "source": "unknown", "models": []}
@@ -424,7 +396,8 @@ def _query_usage(where: str = "", params: Sequence[Any] = (), order: str = " ORD
                  limit: int = 0) -> List[Dict[str, Any]]:
     """用量明细的共用读法（L1/L2/详情页都用同一份列投影）。"""
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         sql = f"SELECT {_USAGE_COLS} FROM obs_llm_usage" + where + order
         ps: List[Any] = list(params)
         if limit:
@@ -457,7 +430,8 @@ def usage_by_kind(since: Optional[str] = None) -> List[Dict[str, Any]]:
         params.append(since)
     sql += " GROUP BY run_kind ORDER BY (SUM(input_tokens)+SUM(output_tokens)) DESC"
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         with db_lock:
             c = db.cursor()
             c.execute(sql, tuple(params))
@@ -489,7 +463,8 @@ def summarize(repo_key: Optional[str] = None, since: Optional[str] = None,
     sql += " GROUP BY model_key ORDER BY (SUM(input_tokens)+SUM(output_tokens)) DESC LIMIT ?"
     params.append(int(limit))
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         with db_lock:
             c = db.cursor()
             c.execute(sql, tuple(params))

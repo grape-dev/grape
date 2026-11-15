@@ -30,8 +30,25 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 import uuid
 from typing import Awaitable, Callable, Optional
+
+# 渠道安装表（grape_t_channel_installation）归 mgmt：语句在该域 public，
+# 由调用方传入自己的连接（3921a54c6 归位时漏了这行 import，运行期 NameError 被
+# except 吞成 "读不到安装 → None"，IM 推送静默失效）。
+from src.domains.mgmt import public as _mgmt_public
+# 渠道族 DDL 归 mgmt 域（2026-11-15）：本模块只引用 owner 的建表语句，不再自带副本。
+from src.domains.mgmt.schema_ddl import _CHANNEL_INBOUND_MESSAGE_DDL as _MESSAGE_TABLE
+
+
+def _im_now() -> str:
+    """UTC 时间戳（'YYYY-MM-DD HH:MM:SS'）：绑定行的 last_active_at/updated_at。
+
+    与 bot_lease 同一口径（Python UTC，不用数据库时间函数）——MySQL NOW() 是服务器本地
+    时间（CST），与读侧 UTC 比较会差 8 小时。
+    """
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
 # 数据库异常口径：SQLite 后端 sqlite3.Error；MySQL 后端 pymysql 异常。
 # 仓储层是"失败降级"语义（去重读不到就放行、绑定读不到就当未绑定），统一捕获即可。
@@ -139,14 +156,6 @@ def get_current_engine():
 _APP_SEEN_TABLE = (
     "CREATE TABLE IF NOT EXISTS bot_seen_messages ("
     " app_id TEXT, message_id TEXT, seen_at REAL, UNIQUE (app_id, message_id))"
-)
-
-_MESSAGE_TABLE = (
-    "CREATE TABLE IF NOT EXISTS grape_t_channel_inbound_message ("
-    " installation_id TEXT NOT NULL, message_id TEXT NOT NULL,"
-    " chat_id TEXT NOT NULL DEFAULT '', sender_id TEXT NOT NULL DEFAULT '',"
-    " text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')),"
-    " PRIMARY KEY (installation_id, message_id))"
 )
 
 
@@ -414,14 +423,7 @@ def get_active_installation(scope: str = "user", *, owner_user_id: str = "", rep
     try:
         conn = _connect(default_db_path())
         try:
-            sql = ("SELECT id, channel_type, scope, owner_user_id, repo_key, config "
-                   "FROM grape_t_channel_installation WHERE status='active' AND scope=? "
-                   "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)")
-            params: list = [scope, key, key]
-            if channel_type:
-                sql += " AND channel_type=?"
-                params.append(channel_type)
-            row = conn.execute(sql + " ORDER BY updated_at DESC LIMIT 1", tuple(params)).fetchone()
+            row = _mgmt_public.installation_active_row(conn, scope, key, channel_type)
             if not row:
                 return None
             try:
@@ -459,15 +461,11 @@ def sync_installation(scope: str, *, owner_user_id: str = "", repo_key: str = ""
     try:
         conn = _connect(default_db_path())
         try:
-            row = conn.execute(
-                "SELECT config FROM grape_t_channel_installation WHERE legacy_app_id=? AND scope=? "
-                "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)",
-                (app_id, scope, key, key),
-            ).fetchone()
+            _cfg_raw = _mgmt_public.installation_config_by_app(conn, app_id, scope, key)
             existing = {}
-            if row and row[0]:
+            if _cfg_raw:
                 try:
-                    existing = json.loads(row[0]) or {}
+                    existing = json.loads(_cfg_raw) or {}
                 except Exception:
                     existing = {}
             secret = app_secret or str(existing.get("app_secret", ""))
@@ -480,12 +478,7 @@ def sync_installation(scope: str, *, owner_user_id: str = "", repo_key: str = ""
             _load_migration_module().upsert_installation(
                 conn, channel_type, scope, str(owner_user_id or ""), repo_key or "",
                 installation_config, app_id)
-            conn.execute(
-                "UPDATE grape_t_channel_installation SET status='active', updated_at=datetime('now') "
-                "WHERE legacy_app_id=? AND scope=? "
-                "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)",
-                (app_id, scope, key, key),
-            )
+            _mgmt_public.installation_activate(conn, app_id, scope, key)
             conn.commit()
             return True
         finally:
@@ -511,14 +504,9 @@ def revoke_installation(scope: str, *, owner_user_id: str = "", repo_key: str = 
     try:
         conn = _connect(default_db_path())
         try:
-            cur = conn.execute(
-                "UPDATE grape_t_channel_installation SET status='revoked', updated_at=datetime('now') "
-                "WHERE channel_type=? AND scope=? AND legacy_app_id=? "
-                "AND COALESCE(NULLIF(repo_key,''), owner_user_id)=COALESCE(?,?)",
-                (channel_type, scope, app_id, key, key),
-            )
+            _n = _mgmt_public.installation_revoke(conn, channel_type, scope, app_id, key)
             conn.commit()
-            return (getattr(cur, "rowcount", 0) or 0) > 0
+            return _n > 0
         finally:
             conn.close()
     except Exception as e:
@@ -539,60 +527,29 @@ class SqliteDedupStore:
         return _connect(self._db_path)
 
     def seen(self, installation_id: str, message_id: str) -> bool:
-        conn = self._conn()
+        """去重位查询（渠道表归 mgmt，连接由 owner 原语按拓扑选）。"""
         try:
-            row = conn.execute(
-                "SELECT 1 FROM grape_t_channel_inbound_dedup WHERE installation_id=? AND message_id=?",
-                (installation_id, message_id),
-            ).fetchone()
-            return row is not None
+            return _mgmt_public.inbound_dedup_seen(installation_id, message_id)
         except _DB_ERRORS:
             return False
-        finally:
-            conn.close()
 
     def try_claim(self, installation_id: str, message_id: str, token: str) -> bool:
-        conn = self._conn()
         try:
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO grape_t_channel_inbound_dedup "
-                "(installation_id, message_id, state, claim_token) VALUES (?,?, 'claimed', ?)",
-                (installation_id, message_id, token),
-            )
-            conn.commit()
-            return cur.rowcount > 0
+            return _mgmt_public.inbound_dedup_claim(installation_id, message_id, token)
         except _DB_ERRORS:
             return False
-        finally:
-            conn.close()
 
     def mark(self, installation_id: str, message_id: str) -> bool:
-        conn = self._conn()
         try:
-            cur = conn.execute(
-                "UPDATE grape_t_channel_inbound_dedup SET state='marked' "
-                "WHERE installation_id=? AND message_id=?",
-                (installation_id, message_id),
-            )
-            conn.commit()
-            return cur.rowcount > 0
+            return _mgmt_public.inbound_dedup_set_state(installation_id, message_id, "marked")
         except _DB_ERRORS:
             return False
-        finally:
-            conn.close()
 
     def release(self, installation_id: str, message_id: str) -> None:
-        conn = self._conn()
         try:
-            conn.execute(
-                "DELETE FROM grape_t_channel_inbound_dedup WHERE installation_id=? AND message_id=?",
-                (installation_id, message_id),
-            )
-            conn.commit()
+            _mgmt_public.inbound_dedup_release(installation_id, message_id)
         except _DB_ERRORS:
             pass
-        finally:
-            conn.close()
 
 
 class SqliteBindingStore:
@@ -605,18 +562,10 @@ class SqliteBindingStore:
         self._db_path = db_path
 
     def get(self, installation_id: str, key: str) -> Optional[SessionBinding]:
-        conn = _connect(self._db_path)
         try:
-            row = conn.execute(
-                "SELECT installation_id, channel_chat_id, chat_type, scope, repo_key, "
-                "agent_type, runtime_session_id, config "
-                "FROM grape_t_channel_chat_session_binding WHERE installation_id=? AND channel_chat_id=?",
-                (installation_id, key),
-            ).fetchone()
+            row = _mgmt_public.chat_binding_get(installation_id, key)
         except _DB_ERRORS:
             return None
-        finally:
-            conn.close()
         if not row:
             return None
         return SessionBinding(
@@ -633,31 +582,13 @@ class SqliteBindingStore:
     def upsert(self, binding: SessionBinding, channel_type: str = "feishu") -> SessionBinding:
         """channel_type：绑定行渠道列（Issue #936 P2 钉钉接入后真实化，默认 feishu 兼容旧调用）。"""
         scope_value = binding.scope.value if hasattr(binding.scope, "value") else str(binding.scope)
-        conn = _connect(self._db_path)
-        try:
-            existing = conn.execute(
-                "SELECT id FROM grape_t_channel_chat_session_binding "
-                "WHERE installation_id=? AND channel_chat_id=?",
-                (binding.installation_id, binding.binding_key),
-            ).fetchone()
-            row_id = existing[0] if existing else str(uuid.uuid4())
-            conn.execute(
-                "INSERT INTO grape_t_channel_chat_session_binding "
-                "(id, installation_id, channel_type, channel_chat_id, chat_type, scope, "
-                "repo_key, agent_type, runtime_session_id, config, last_active_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now')) "
-                "ON CONFLICT(id) DO UPDATE SET chat_type=excluded.chat_type, "
-                "scope=excluded.scope, repo_key=excluded.repo_key, "
-                "agent_type=excluded.agent_type, config=excluded.config, "
-                "last_active_at=datetime('now'), updated_at=datetime('now')",
-                (row_id, binding.installation_id, channel_type, binding.binding_key,
-                 binding.chat_type, scope_value, binding.repo_key,
-                 binding.agent_type, binding.runtime_session_id,
-                 json.dumps(binding.config, ensure_ascii=False)),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        # 绑定行归 mgmt：定位 + 更新/插入两段式在 owner 域内同一事务完成（原先是
+        # sqlite 专有的 ON CONFLICT(id) DO UPDATE，MySQL 下不可用）
+        _mgmt_public.chat_binding_upsert(
+            binding.installation_id, binding.binding_key, str(uuid.uuid4()), channel_type,
+            binding.chat_type, scope_value, binding.repo_key, binding.agent_type,
+            binding.runtime_session_id, json.dumps(binding.config, ensure_ascii=False),
+            _im_now())
         return binding
 
 
@@ -682,29 +613,13 @@ class _TypedBindingStore:
 def _append_message_sync(db_path: str, installation_id: str, msg: InboundMessage) -> None:
     """⑦ 持久化 + dedup mark 同一事务（崩溃重投不丢不重）。worker 线程内执行。"""
     mid = msg.message_id or msg.event_id
-    conn = _connect(db_path)
+    # 落库 + 去重位推进必须同事务（崩溃重投不丢不重）：两句一起下沉到 owner 域，
+    # 事务边界由原语持有（原实现在 sqlite 下手工 BEGIN、MySQL 下靠 autocommit=False）
     try:
-        # MySQL 后端 autocommit=False，事务由 commit/rollback 界定；显式 BEGIN 会额外
-        # 触发一次隐式提交（MySQL 语义），因此只在 sqlite 后端下发。
-        if not _is_mysql_backend():
-            conn.execute("BEGIN")
-        conn.execute(
-            "INSERT OR IGNORE INTO grape_t_channel_inbound_message "
-            "(installation_id, message_id, chat_id, sender_id, text) VALUES (?,?,?,?,?)",
-            (installation_id, mid, msg.source.chat_id, msg.source.sender_id,
-             (msg.text or "")[:8000]),
-        )
-        conn.execute(
-            "INSERT INTO grape_t_channel_inbound_dedup (installation_id, message_id, state, claim_token) "
-            "VALUES (?, ?, 'marked', '') ON CONFLICT(installation_id, message_id) "
-            "DO UPDATE SET state='marked'",
-            (installation_id, mid),
-        )
-        conn.commit()
+        _mgmt_public.inbound_message_save_and_mark(
+            installation_id, mid, msg.source.chat_id, msg.source.sender_id, msg.text or "")
     except _DB_ERRORS:
-        conn.rollback()
-    finally:
-        conn.close()
+        pass
 
 
 # ---------------------------------------------------------------- 身份解析
@@ -718,31 +633,19 @@ def _lookup_user_sync(db_path: str, installation_id: str, open_id: str,
     """
     if not open_id:
         return ""
-    mapping_col = {"dingtalk": "dingtalk_user_id"}.get(channel_type or "", "feishu_open_id")
-    conn = _connect(db_path)
+    # 渠道身份表与统一映射表都归 mgmt：列名白名单（钉钉/飞书）在 owner 域内决定
     try:
-        try:
-            row = conn.execute(
-                "SELECT user_id FROM grape_t_channel_sender_identity "
-                "WHERE installation_id=? AND platform_user_id=?",
-                (installation_id, open_id),
-            ).fetchone()
-            if row and str(row[0]):
-                return str(row[0])
-        except _DB_ERRORS:
-            pass
-        try:
-            row = conn.execute(
-                "SELECT user_id FROM unified_user_mapping "
-                f"WHERE {mapping_col}=? LIMIT 1",
-                (open_id,),
-            ).fetchone()
-            if row and row[0]:
-                return str(row[0])
-        except _DB_ERRORS:
-            pass
-    finally:
-        conn.close()
+        _uid = _mgmt_public.sender_identity_user(installation_id, open_id)
+        if _uid:
+            return _uid
+    except _DB_ERRORS:
+        pass
+    try:
+        _uid = _mgmt_public.mapped_user_by_channel(open_id, channel_type)
+        if _uid:
+            return _uid
+    except _DB_ERRORS:
+        pass
     return ""
 
 
@@ -759,62 +662,39 @@ def _bind_identity_sync(db_path: str, installation_id: str, scope: str,
     """
     if scope != "user" or not str(owner_user_id) or not platform_user_id:
         return ""
-    conn = _connect(db_path)
     try:
-        conn.execute(
-            "INSERT INTO grape_t_channel_sender_identity "
-            "(installation_id, platform_user_id, platform_stable_user_id, user_id) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT(installation_id, platform_user_id) "
-            "DO UPDATE SET user_id=excluded.user_id, "
-            "platform_stable_user_id=excluded.platform_stable_user_id",
-            (installation_id, platform_user_id, stable_id or "", str(owner_user_id)),
-        )
-        conn.commit()
+        _mgmt_public.sender_identity_bind(
+            installation_id, platform_user_id, stable_id, str(owner_user_id))
         return str(owner_user_id)
     except _DB_ERRORS as e:
         log.warning("im engine bind identity failed: %r", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
         return ""
-    finally:
-        conn.close()
 
 
 def _update_installation_config_sync(db_path: str, app_id: str,
                                        mutate: Callable[[dict], None]) -> bool:
     """按 config.app_id 定位活跃安装行并就地更新 config（offset 等运行时状态）。"""
-    conn = _connect(db_path)
+    # 安装表归 mgmt：连接由原语按拓扑选（原先用 IM 库的 _connect()，
+    # 三库独立后会查到 runtime 库、必然 1146）
     try:
+        rows = _mgmt_public.installation_active_configs_any()
+    except _DB_ERRORS:
+        return False
+    for row in rows:
         try:
-            rows = conn.execute(
-                "SELECT id, config FROM grape_t_channel_installation WHERE status='active'"
-            ).fetchall()
+            config = json.loads(row[1] or "{}")
+        except Exception:
+            config = {}
+        if str(config.get("app_id", "")) != app_id:
+            continue
+        mutate(config)
+        try:
+            _mgmt_public.installation_set_config_any(
+                json.dumps(config, ensure_ascii=False), row[0])
         except _DB_ERRORS:
             return False
-        for row in rows:
-            try:
-                config = json.loads(row[1] or "{}")
-            except Exception:
-                config = {}
-            if str(config.get("app_id", "")) != app_id:
-                continue
-            mutate(config)
-            try:
-                conn.execute(
-                    "UPDATE grape_t_channel_installation SET config=? WHERE id=?",
-                    (json.dumps(config, ensure_ascii=False), row[0]))
-                conn.commit()
-            except _DB_ERRORS:
-                return False
-            return True
-        return False
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        return True
+    return False
 
 
 def _telegram_offset_loader(db_path: str, app_id: str) -> Callable[[], int]:
@@ -856,16 +736,11 @@ def _wechat_cursor_persist(db_path: str, app_id: str) -> Callable[[str], None]:
 
 def _lookup_installation_by_app_sync(db_path: str, app_id: str) -> Optional[dict]:
     """grape_t_channel_installation 活跃行里按 config.app_id 找安装（user 轨唯一；repo 轨取首行）。"""
-    conn = _connect(db_path)
+    # 同上：安装表归 mgmt，连接由原语按拓扑选
     try:
-        rows = conn.execute(
-            "SELECT id, scope, owner_user_id, repo_key, config, status "
-            "FROM grape_t_channel_installation WHERE status='active'"
-        ).fetchall()
+        rows = _mgmt_public.installation_active_installs_any()
     except _DB_ERRORS:
         return None
-    finally:
-        conn.close()
     for row in rows:
         try:
             config = json.loads(row[4] or "{}")

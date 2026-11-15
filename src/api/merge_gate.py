@@ -458,15 +458,13 @@ def record_gate_log(repo_key: str, pr_number: int, phase: str, decision: str,
     try:
         import json
 
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.session_manager import db_lock
+        from src.domains.insight import public as _in_mg
+        _gid = str(uuid.uuid4())
+        _now_iso = datetime.now(timezone.utc).isoformat()
         with db_lock:
-            db.execute(
-                "INSERT INTO grape_t_merge_gate_log "
-                "(id, repo_key, pr_number, phase, decision, hits_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), repo_key or "", int(pr_number or 0), phase or "",
-                 decision or "", json.dumps(hits or {}, ensure_ascii=False),
-                 datetime.now(timezone.utc).isoformat()))
-            db.commit()
+            _in_mg.merge_gate_log_insert(
+                _gid, repo_key or "", int(pr_number or 0), phase or "", decision or "",
+                json.dumps(hits or {}, ensure_ascii=False), _now_iso)
     except Exception as e:
         log.warning(f"merge gate log write failed {repo_key}#{pr_number}: {e}")

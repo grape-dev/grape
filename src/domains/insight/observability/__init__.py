@@ -474,7 +474,9 @@ def collect_mysql_metrics():
     仅 MySQL 后端时有效；SQLite 后端跳过。
     """
     try:
-        from src.kernel.session_manager import _is_mysql_backend, db, db_lock
+        from src.kernel.session_manager import _is_mysql_backend
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         if not _is_mysql_backend():
             return
         with db_lock:
@@ -601,68 +603,30 @@ def collect_business_sampler():
 
     # 采集新快照
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.domains.runtime import public as runtime_public
         from src.domains.runtime.engine.health import derive_runtime_health
         from datetime import datetime, timezone, timedelta
 
         now_ts = _time.time()
         stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=_stuck_minutes())).isoformat()
 
-        with db_lock:
-            c = db.cursor()
+        # 四条 SQL（agent_tasks ×3 + agent_runtimes ×1）全归 runtime 域：
+        # 一次调用取回同一快照，连接/锁/方言都由 owner 原语自理，本模块不再持游标。
+        snap = runtime_public.task_sampler_snapshot_any(stuck_cutoff)
+        queued_by_source = snap["queued"]
+        running_by_source = snap["running"]
+        stuck_by_source = snap["stuck"]
 
-            # task_queued by source
-            queued_by_source = {}
-            try:
-                c.execute(
-                    "SELECT COALESCE(agent_type,'unknown'), COUNT(*) FROM agent_tasks "
-                    "WHERE status='queued' GROUP BY agent_type"
-                )
-                for r in c.fetchall():
-                    queued_by_source[r[0] or "unknown"] = r[1]
-            except Exception:
-                pass
-
-            # task_running by source
-            running_by_source = {}
-            try:
-                c.execute(
-                    "SELECT COALESCE(agent_type,'unknown'), COUNT(*) FROM agent_tasks "
-                    "WHERE status IN ('dispatched','running') GROUP BY agent_type"
-                )
-                for r in c.fetchall():
-                    running_by_source[r[0] or "unknown"] = r[1]
-            except Exception:
-                pass
-
-            # task_stuck by source
-            stuck_by_source = {}
-            try:
-                c.execute(
-                    "SELECT COALESCE(agent_type,'unknown'), COUNT(*) FROM agent_tasks "
-                    "WHERE status='running' AND started_at IS NOT NULL AND started_at < ? "
-                    "GROUP BY agent_type",
-                    (stuck_cutoff,),
-                )
-                for r in c.fetchall():
-                    stuck_by_source[r[0] or "unknown"] = r[1]
-            except Exception:
-                pass
-
-            # runtime online
-            online_local = 0
-            online_remote = 0
-            try:
-                c.execute("SELECT status, last_seen_at, credential_id FROM agent_runtimes")
-                for r in c.fetchall():
-                    h = derive_runtime_health(r[0] or "offline", r[1], now_ts)
-                    if h == "online":
-                        if (r[2] or 0) > 0:
-                            online_remote += 1
-                        else:
-                            online_local += 1
-            except Exception:
-                pass
+        # runtime online：在线/离线判定属本域分析口径，owner 只给原始列
+        online_local = 0
+        online_remote = 0
+        for r in snap["runtimes"]:
+            h = derive_runtime_health(r[0] or "offline", r[1], now_ts)
+            if h == "online":
+                if (r[2] or 0) > 0:
+                    online_remote += 1
+                else:
+                    online_local += 1
 
         # 更新 Prometheus gauges（消失的 source 会显式归零，见 _apply_source_gauges）
         _apply_source_gauges(queued_by_source, running_by_source, stuck_by_source)

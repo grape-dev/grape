@@ -10,7 +10,11 @@
 
 import secrets, socket, time
 
-from src.kernel.config import log, BOT_LEASE_TTL, BOT_LEASE_RENEW_INTERVAL, BOT_LEASE_SWEEP_INTERVAL
+from src.kernel.config import (log, BOT_LEASE_TTL, BOT_LEASE_RENEW_INTERVAL,
+                               BOT_LEASE_SWEEP_INTERVAL)
+
+# 渠道租约/安装表归 mgmt 域：语句在该域 public（三库独立后进程库 ≠ mgmt 库）
+from src.domains.mgmt import public as _mgmt_lease
 
 def generate_instance_id() -> str:
     hostname = socket.gethostname() or "unknown"
@@ -71,31 +75,14 @@ class BotLeaseStore:
                             pass
             except Exception as e:
                 log.warning(f"[lease] owner-alive precheck error {key}: {e}")
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                # 时钟口径统一（#869）：写入（_future=Python UTC）与比较（_now=Python UTC）
-                # 同钟——不用 SQL datetime('now')/MySQL NOW()（后者为服务器本地时间 CST，
-                # 与 UTC 写入差 8h → 锁出生即过期，互斥失效）。
-                now = _now()
-                c = db.cursor()
-                # 行惰性创建（不预铺全量安装行）：先补行再 CAS，两句同一事务
-                c.execute(
-                    "INSERT OR IGNORE INTO grape_t_channel_lease "
-                    "(lease_key, channel_type, installation_id, updated_at) VALUES (?,?,?,?)",
-                    (key, channel_type, installation_id, now),
-                )
-                c.execute(
-                    "UPDATE grape_t_channel_lease "
-                    "SET lease_token = ?, lease_expires_at = ?, "
-                    "    lease_owner = ?, lease_acquired_at = ?, updated_at = ? "
-                    "WHERE lease_key = ? "
-                    "  AND (lease_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at < ?)",
-                    (token, expires_at, self.instance_id, now, now, key, now),
-                )
-                db.commit()
-                if c.rowcount > 0:
-                    return token
-                return None
+            # 时钟口径统一（#869）：写入（_future=Python UTC）与比较（_now=Python UTC）
+            # 同钟 —— 不用数据库时间函数（MySQL NOW() 是服务器本地 CST，与 UTC 写入差 8h）。
+            now = _now()
+            # 行惰性创建（不预铺全量安装行）+ CAS 抢占，两句在 owner 域同一事务内
+            if _mgmt_lease.lease_acquire_row(key, channel_type, installation_id, token,
+                                             self.instance_id, expires_at, now):
+                return token
+            return None
         except Exception as e:
             self._disabled = True
             log.error(f"[lease] acquire error: {e}")
@@ -108,73 +95,28 @@ class BotLeaseStore:
         的同源连接——两者在生产指向同一个库，只有测试里可能各挂一个 sqlite 文件。
         两处都查不到（表缺失/异常）→ 放行，避免租约整体失效（与旧实现"表缺则跳过"一致）。
         """
-        from src.kernel.session_manager import db, db_lock
+        # 安装表归 mgmt：一次 owner 域查询即可（单库拓扑下该原语回落进程库，
+        # 原先「主连接查不到再试 wiring 连接」的双路探测不再需要）
         try:
-            with db_lock:
-                row = db.cursor().execute(
-                    "SELECT status FROM grape_t_channel_installation WHERE id=?", (installation_id,)
-                ).fetchone()
-            if row is not None:
-                return str(row[0]) == "active"
+            _status = _mgmt_lease.installation_status(installation_id)
+            if _status is not None:
+                return str(_status) == "active"
         except Exception as e:
-            log.warning(f"[lease] installation check (main db) error {installation_id}: {e}")
-        try:
-            from src.domains.runtime.im.engine_wiring import _connect, default_db_path
-            conn = _connect(default_db_path())
-            try:
-                row = conn.execute(
-                    "SELECT status FROM grape_t_channel_installation WHERE id=?", (installation_id,)
-                ).fetchone()
-            finally:
-                conn.close()
-            if row is not None:
-                return str(row[0]) == "active"
-        except Exception as e:
-            log.warning(f"[lease] installation check (wiring db) error {installation_id}: {e}")
+            log.warning(f"[lease] installation check error {installation_id}: {e}")
         return True
 
     def renew(self, key: str, token: str) -> bool | None:
-        from src.kernel.domain_read import runtime_lib as _rt_lib_soon
-        _rt_soon = _rt_lib_soon()
-        if _rt_soon is not None:
-            return _rt_soon.renew_channel_lease(
-                key, token, self.instance_id, self.ttl, expected_token=token)
+        """续期：只推到到期时间，不动 token/owner（与 renew_channel_lease 的 CAS 语义不同）。"""
         expires_at = _future(self.ttl)
         try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "UPDATE grape_t_channel_lease SET lease_expires_at = ?, updated_at = ? "
-                    "WHERE lease_key = ? AND lease_token = ?",
-                    (expires_at, _now(), key, token),
-                )
-                db.commit()
-                if c.rowcount > 0:
-                    return True
-                return False
+            return _mgmt_lease.lease_renew_expiry(key, token, expires_at, _now()) > 0
         except Exception as e:
             log.warning(f"[lease] renew error: {e}")
             return None
 
     def release(self, key: str, token: str) -> None:
-        from src.kernel.domain_read import runtime_lib as _rt_lib_soon
-        _rt_soon = _rt_lib_soon()
-        if _rt_soon is not None:
-            _rt_soon.release_channel_lease(key, token)
-            return
         try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "UPDATE grape_t_channel_lease "
-                    "SET lease_token = NULL, lease_expires_at = NULL, "
-                    "    lease_owner = NULL, lease_acquired_at = NULL, updated_at = ? "
-                    "WHERE lease_key = ? AND lease_token = ?",
-                    (_now(), key, token),
-                )
-                db.commit()
+            _mgmt_lease.release_channel_lease(key, token)
         except Exception as e:
             log.warning(f"[lease] release error: {e}")
 
@@ -195,23 +137,10 @@ class BotLeaseStore:
         不依赖本方法；这里只服务运维排查与测试。
         """
         try:
-            from src.kernel.session_manager import db, db_lock
             now = _now()
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT id, channel_type FROM grape_t_channel_installation "
-                    "WHERE status='active' AND id > ? ORDER BY id LIMIT ?",
-                    (cursor, limit),
-                )
-                rows = c.fetchall()
-                c.execute(
-                    "SELECT lease_key FROM grape_t_channel_lease "
-                    "WHERE lease_token IS NOT NULL AND lease_expires_at IS NOT NULL "
-                    "  AND lease_expires_at >= ?",
-                    (now,),
-                )
-                leased = {r[0] for r in c.fetchall()}
+            # 安装清单与有效租约集合都在 owner 域取（安装表 + 租约表同属 mgmt）
+            rows = _mgmt_lease.installation_active_rows(cursor, limit)
+            leased = _mgmt_lease.lease_keys_valid(now)
             return [
                 {"installation_id": r[0], "channel_type": r[1] or ""}
                 for r in rows
@@ -227,30 +156,17 @@ class BotLeaseStore:
         results = {}
         expires_at = _future(self.ttl)
         try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "UPDATE grape_t_channel_lease SET lease_expires_at = ?, updated_at = ? "
-                    "WHERE lease_owner = ? AND lease_token IS NOT NULL",
-                    (expires_at, _now(), self.instance_id),
-                )
-                db.commit()
-                keys = list(held_bots.keys())
-                ph = ",".join(["?"] * len(keys))
-                c.execute(
-                    f"SELECT lease_key, lease_token FROM grape_t_channel_lease "
-                    f"WHERE lease_key IN ({ph})", keys,
-                )
-                db_tokens = {r[0]: r[1] for r in c.fetchall()}
-                for app_id, my_token in held_bots.items():
-                    db_token = db_tokens.get(app_id)
-                    if db_token is None:
-                        results[app_id] = False
-                    elif db_token != my_token:
-                        results[app_id] = False
-                    else:
-                        results[app_id] = True
+            # 先按 owner 批量续期，再回读 token 做「是否仍由我持有」判定（同属 mgmt 域）
+            _mgmt_lease.lease_renew_all_by_owner(self.instance_id, expires_at, _now())
+            db_tokens = _mgmt_lease.lease_tokens_by_keys(list(held_bots.keys()))
+            for app_id, my_token in held_bots.items():
+                db_token = db_tokens.get(app_id)
+                if db_token is None:
+                    results[app_id] = False
+                elif db_token != my_token:
+                    results[app_id] = False
+                else:
+                    results[app_id] = True
             return results
         except Exception as e:
             log.warning(f"[lease] batch_renew error: {e}")
@@ -394,17 +310,9 @@ class BotLeaseStore:
     def lease_owner_info(self, key: str) -> dict:
         """返回某租约键当前 owner/token/到期时间（查存活与防误抢）。"""
         try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT COALESCE(lease_owner,''), COALESCE(lease_token,''), lease_expires_at "
-                    "FROM grape_t_channel_lease WHERE lease_key=?",
-                    (key,),
-                )
-                r = c.fetchone()
-                return {"owner": (r[0] or "") if r else "", "token": (r[1] or "") if r else "",
-                        "expires_at": str(r[2]) if r and r[2] else ""}
+            r = _mgmt_lease.lease_owner_info(key)
+            return {"owner": (r[0] or "") if r else "", "token": (r[1] or "") if r else "",
+                    "expires_at": str(r[2]) if r and r[2] else ""}
         except Exception as e:
             log.warning(f"[lease] owner_info error: {e}")
             return {"owner": "", "token": "", "expires_at": ""}

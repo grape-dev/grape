@@ -8,6 +8,78 @@ from src.kernel.session_manager import db, db_lock
 from src.kernel.config import log
 
 
+class _OwnedCursor:
+    """自带连接的游标：close 时把连接一并关掉。"""
+
+    def __init__(self, conn, cursor):
+        self._conn = conn
+        self._cur = cursor
+
+    def __getattr__(self, item):
+        return getattr(self._cur, item)
+
+    def close(self):
+        try:
+            self._cur.close()
+        finally:
+            try:
+                self._conn.close()
+            except Exception as _e:
+                log.debug(f"cursor close failed: {_e}")
+
+
+class _MgmtDbProxy:
+    """把 db.cursor()/commit()/rollback() 代理到 mgmt 域连接。
+
+    mgmt 进程里 current_domain()=='mgmt' → 直接用主库（零回归）；
+    其它进程（insight/runtime/event 做鉴权时）→ 用 GRAPE_DSN_MGMT 的新连接；
+    单库/测试拓扑 → 回落进程库并保留显式提交。
+    """
+
+    def cursor(self, *a, **kw):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "mgmt":
+            from src.kernel.session_manager import db as _main
+            return _main.cursor(*a, **kw)
+        if db_registry.uses_own_dsn("mgmt"):
+            _conn = db_registry.new_connection("mgmt")
+            return _OwnedCursor(_conn, _conn.cursor(*a, **kw))
+        from src.kernel.session_manager import db as _main
+        return _main.cursor(*a, **kw)
+
+    def commit(self):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "mgmt":
+            from src.kernel.session_manager import db as _main
+            return _main.commit()
+        if db_registry.uses_own_dsn("mgmt"):
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.commit()
+
+    def rollback(self):
+        from src.kernel import db_registry
+        if db_registry.current_domain() == "mgmt":
+            from src.kernel.session_manager import db as _main
+            return _main.rollback()
+        if db_registry.uses_own_dsn("mgmt"):
+            try:
+                db_registry.domain_db("mgmt").rollback()
+            except Exception as _e:
+                log.debug(f"domain rollback failed: {_e}")
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.rollback()
+
+    def __getattr__(self, item):
+        from src.kernel.session_manager import db as _main
+        return getattr(_main, item)
+
+
+_mg_db = _MgmtDbProxy()
+db = _mg_db
+
+
 def create_org(name: str, slug: str, owner_id: str, description: str = "",
                is_personal: int = 0) -> dict | None:
     """创建组织并添加创建者为 owner。D105 第三批：org.id 用 uuid7_str 显式生成
@@ -115,7 +187,8 @@ def delete_org(org_id: str) -> bool:
     with db_lock:
         c = db.cursor()
         # 检查是否个人组织
-        row = c.execute("SELECT is_personal FROM organization WHERE id=?", (org_id,)).fetchone()
+        c.execute("SELECT is_personal FROM organization WHERE id=?", (org_id,))
+        row = c.fetchone()
         if not row:
             return False
         if row[0]:
@@ -177,10 +250,11 @@ def remove_org_member(org_id: str, user_id: str) -> bool:
     with db_lock:
         c = db.cursor()
         # 检查是否 owner
-        row = c.execute(
+        c.execute(
             "SELECT role FROM org_member WHERE org_id=? AND user_id=?",
             (org_id, user_id)
-        ).fetchone()
+        )
+        row = c.fetchone()
         if not row:
             return False
         if row[0] == "owner":
@@ -197,10 +271,11 @@ def get_member_role(user_id: str, org_id: str) -> str:
     """获取用户在组织中的角色。"""
     with db_lock:
         c = db.cursor()
-        row = c.execute(
+        c.execute(
             "SELECT role FROM org_member WHERE org_id=? AND user_id=?",
             (org_id, user_id)
-        ).fetchone()
+        )
+        row = c.fetchone()
         return row[0] if row else ""
 
 
@@ -213,10 +288,11 @@ def get_personal_org_id(user_id: str) -> str:
     """获取用户的个人组织 ID（未找到返回 ''）。D105 第三批：org_id 哨兵 0 → ''。"""
     with db_lock:
         c = db.cursor()
-        row = c.execute(
+        c.execute(
             "SELECT id FROM organization WHERE owner_id=? AND is_personal=1",
             (str(user_id),)
-        ).fetchone()
+        )
+        row = c.fetchone()
         return str(row[0]) if row else ""
 
 
@@ -226,10 +302,11 @@ def is_org_personal(org_id: str) -> bool:
         return False
     with db_lock:
         c = db.cursor()
-        row = c.execute(
+        c.execute(
             "SELECT is_personal FROM organization WHERE id=?",
             (org_id,)
-        ).fetchone()
+        )
+        row = c.fetchone()
         return bool(row and row[0])
 
 
@@ -237,7 +314,8 @@ def get_org_id_by_repo_key(repo_key: str) -> str:
     """通过 repo_key 查 managed_repos.org_id（未归属返回 ''）。"""
     with db_lock:
         c = db.cursor()
-        row = c.execute(
+        c.execute(
             "SELECT org_id FROM managed_repos WHERE repo_key=?", (repo_key,)
-        ).fetchone()
+        )
+        row = c.fetchone()
         return str(row[0]) if row and row[0] else ""

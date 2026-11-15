@@ -309,7 +309,10 @@ def temp_db(tmp_path, monkeypatch):
 
     yield sm
 
-    # Cleanup
+    # Cleanup：先撤掉本 fixture 设的 env 再 reload —— 否则第二次 reload 仍读临时库路径，
+    # session_manager 会被永久绑在那个只有 5 张表的临时库上；同会话后续用例里凡是
+    # 懒解析 db 的 owner 域原语（_any_cursor 回落进程库）都会看到「no such table」。
+    monkeypatch.undo()
     importlib.reload(sm)
 
 
@@ -649,9 +652,10 @@ class TestInternalEndpoints:
     """/internal/* 端点基本结构测试。"""
 
     def test_mgmt_internal_router_exists(self):
-        from src.domains.mgmt.routes.internal import router
-        assert router.prefix == "/internal"
-        routes = [r.path for r in router.routes]
+        # P2/D5 修订：mgmt 由"完全不开放"改为只读白名单 + xwrite/apply
+        from src.domains.mgmt.routes.internal import readonly_router
+        assert readonly_router.prefix == "/internal"
+        routes = [r.path for r in readonly_router.routes]
         assert any("/repos/" in r for r in routes)
         assert any("/tokens/verify" in r for r in routes)
 

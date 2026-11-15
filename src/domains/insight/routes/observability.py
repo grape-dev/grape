@@ -214,20 +214,16 @@ def obs_logs_ingest(body: LogIngestBody, credential_id: int = Depends(_require_c
 
     src = f"worker-{credential_id}"
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_911d7f_f
-            _ru_lib_911d7f = _ru_lib_911d7f_f(foreign_only=True)
-            if _ru_lib_911d7f is not None:
-                row = _ru_lib_911d7f.read_one("runtime_credentials_911d7f", (credential_id,))
-            else:
-                c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (credential_id,))
-                row = c.fetchone()
-            if row:
-                src = row[1] or row[0] or src
-    except Exception:
-        pass
+        # 凭据显示名归 runtime：原实现「legacy lib 优先 + 本域兜底 SQL」两条路径，
+        # 三库拆分后 insight 进程库没有 runtime_credentials → 兜底 225 行必 1146。
+        # 改走 owner 任意拓扑原语（自有 DSN 打 runtime / 单库回落进程库，同一份语句）。
+        from src.domains.runtime import public as runtime_public
+        row = runtime_public.dashboard_credential_name_device(credential_id)
+        if row:
+            src = row[1] or row[0] or src
+    except Exception as e:
+        # 取不到显示名只降级成 worker-<id>，不阻断日志摄取；但要可观测。
+        log.debug(f"obs/logs/ingest credential name lookup failed cred={credential_id}: {e}")
 
     recs = []
     for r in body.records:
@@ -367,23 +363,34 @@ def obs_runtime_history(
 ):
     """设备资源历史（采样表 obs_runtime_samples）。"""
     from src.domains.insight.observability import rollup
-    from src.domains.insight.observability.overview import RepoNotVisible, _cred_visibility, _scope_keys
+    from src.domains.insight.observability.overview import RepoNotVisible, _scope_keys
 
     try:
         repo_keys = _scope_keys(user, repo)
     except RepoNotVisible:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "repo not found"})
 
-    frag, params = _cred_visibility(user, repo_keys)
     runtimes = []
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id, device_name, name FROM runtime_credentials"
-                      " WHERE status != 'revoked'" + frag + " ORDER BY id", tuple(params))
-            runtimes = [{"id": int(r[0]), "device_name": r[1] or "", "name": r[2] or ""}
-                        for r in c.fetchall()]
+        # 可见性谓词归 runtime 本域（与原 `_cred_visibility` 三口径同源，同一 helper）：
+        # insight 侧不再拼 WHERE 片段、不再直查外域表。
+        from src.domains.mgmt.user.org_db import is_org_personal
+        from src.domains.runtime import public as runtime_public
+
+        _org_id = str(user.get("org_id") or "")
+        _personal = True
+        if _org_id:
+            try:
+                _personal = bool(is_org_personal(_org_id))
+            except Exception as e:
+                # 与 `_cred_visibility` 原兜底一致：判定失败按「非个人组织」→ 走 org 过滤。
+                log.debug(f"obs/runtimes/history org personal lookup failed org={_org_id}: {e}")
+                _personal = False
+        rows = runtime_public.runtime_credentials_visible_rows(
+            org_id=_org_id, personal_org=_personal,
+            uname=user.get("username") or "", repo_keys=repo_keys)
+        runtimes = [{"id": int(r[0]), "device_name": r[1] or "", "name": r[2] or ""}
+                    for r in rows]
     except Exception as e:
         log.warning(f"obs/runtimes/history list failed: {e}")
 

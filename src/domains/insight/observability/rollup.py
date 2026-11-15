@@ -51,25 +51,25 @@ ONLINE_WINDOW_SEC = 900
 
 
 def snapshot_runtimes() -> Dict[str, int]:
-    """采样一轮：把每个未吊销引擎的当前资源值写一行历史 + 清理过期数据。"""
-    from src.kernel.session_manager import db, db_lock
+    """采样一轮：把每个未吊销引擎的当前资源值写一行历史 + 清理过期数据。
+
+    取数走 runtime 域公开原语（`runtime_credentials` / `runtime_health_scores` 归 runtime）；
+    落库与清理仍在本域（`obs_runtime_samples` 归 insight），保持原来的 `db_lock` + 单次提交语义。
+    """
+    from src.domains.runtime.public import runtime_credential_sample_rows_any
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("insight")
     now = _now()
     now_iso = now.isoformat()
     inserted = 0
     try:
+        rows = runtime_credential_sample_rows_any()
+    except Exception as e:
+        log.warning(f"obs snapshot_runtimes failed: {e}")
+        return {"inserted": inserted}
+    try:
         with db_lock:
             c = db.cursor()
-            from src.kernel.domain_read import runtime_lib as _ru_lib_619821_f
-            _ru_lib_619821 = _ru_lib_619821_f(foreign_only=True)
-            if _ru_lib_619821 is not None:
-                rows = _ru_lib_619821.read_all("runtime_credentials_619821", ())
-            else:
-                c.execute("SELECT rc.id, rc.device_name, rc.cpu_percent, rc.memory_percent, rc.disk_percent,"
-                          " rc.bandwidth_percent, COALESCE(hs.health_score, 0), rc.status, rc.last_seen_at"
-                          " FROM runtime_credentials rc"
-                          " LEFT JOIN runtime_health_scores hs ON hs.runtime_id = rc.id"
-                          " WHERE rc.status != 'revoked'")
-                rows = c.fetchall()
             for rid, device, cpu, mem, disk, bw, health, status, last_seen in rows:
                 try:
                     # 在线信号（SLO 可用率）：采样时刻心跳是否新鲜。时间口径按 UTC 解析，
@@ -131,7 +131,8 @@ def runtime_history(runtime_ids: List[int], range_str: str = DEFAULT_RANGE) -> D
     acc: Dict[str, Dict[int, Dict[str, float]]] = {}
     ph = ",".join("?" * len(runtime_ids))
     try:
-        from src.kernel.session_manager import db, db_lock
+        from src.kernel.owner_db import db_pair
+        db, db_lock = db_pair("insight")
         with db_lock:
             c = db.cursor()
             c.execute("SELECT runtime_id, sampled_at, cpu_percent, memory_percent, disk_percent,"

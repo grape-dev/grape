@@ -20,6 +20,8 @@ from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
 
 from src.kernel.repo_key import from_repo_key
+# 运行域表（引擎/凭据/能力/群绑定）的读写一律走 owner 域 public 的具名查询与原语
+from src.domains.runtime import public as _rt
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -652,8 +654,8 @@ def get_notifications(user: dict = Depends(require_no_session_token)):
             if _imf is not None:
                 row = _imf.read_one("repo_im_flags_latest", ())
             else:
-                c.execute("SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding ORDER BY id DESC LIMIT 1")
-                row = c.fetchone()
+                # repo_im_group_binding 归运行域：具名查询（任意拓扑）
+                row = _rt.read_one_any("repo_im_flags_latest")
             auto_impl = bool(row[0]) if row else True
             notify = bool(row[1]) if row else True
         except Exception:
@@ -692,14 +694,11 @@ def update_notifications(body: NotificationPrefs, user: dict = Depends(require_n
             {"auto_impl_enabled": _ai, "notify_enabled": _nt},
             lambda: _rt_np_ok.set_repo_im_notifications(_ai, _nt), log)
     if not _np_done:
-        with db_lock:
-            c = db.cursor()
-            try:
-                c.execute("UPDATE repo_im_group_binding SET auto_impl_enabled=?, notify_enabled=?",
-                          (_ai, _nt))
-                db.commit()
-            except Exception:
-                pass
+        try:
+            # repo_im_group_binding 归运行域：写走具名查询（任意拓扑，自提交）
+            _rt.exec_any("repo_im_set_notifications", (_ai, _nt))
+        except Exception as _e_np:
+            log.warning(f"update_notifications: repo_im flags write failed: {_e_np}")
     return {"message": "通知偏好已更新", "prefs": body.model_dump()}
 
 @router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo.")
@@ -1074,10 +1073,9 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             rt["health_score"] = None
         # 引擎标签（event-dispatch-redesign-v2.md §2.5）
         try:
-            with db_lock:
-                _tc = db.cursor()
-                _tc.execute("SELECT tag, priority, enabled FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rt["id"],))
-                rt["tags"] = [{"tag": r[0], "priority": r[1], "enabled": bool(r[2])} for r in _tc.fetchall()]
+            # engine_capabilities 归运行域：具名查询（任意拓扑）
+            rt["tags"] = [{"tag": r[0], "priority": r[1], "enabled": bool(r[2])} for r in
+                          _rt.read_all_any("engine_cap_flags", (rt["id"],))]
         except Exception:
             rt["tags"] = []
         visible_runtimes.append(rt)
@@ -1277,7 +1275,8 @@ def _creds_via_lib():
     """GRAPE_CREDENTIALS_VIA_LIB=1 且 runtime lib 可用时返回 lib 模块（三库三机模式）。"""
     import os as _os
 
-    if _os.environ.get("GRAPE_CREDENTIALS_VIA_LIB") != "1":
+    from src.kernel import domain_read as _dr  # noqa: PLC0415
+    if not _dr.switch_on("GRAPE_CREDENTIALS_VIA_LIB", "runtime"):
         return None
     try:
         from src.domains.runtime import public as _rt
@@ -1304,9 +1303,8 @@ def _build_cred_map(db, db_lock) -> dict:
             if _ru_lib_5b448f is not None:
                 rows = _ru_lib_5b448f.read_all("runtime_credentials_5b448f", ())
             else:
-                c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, "
-                          "last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials")
-                rows = c.fetchall()
+                # runtime_credentials 归运行域：具名查询（任意拓扑）
+                rows = _rt.read_all_any("runtime_credentials_all")
     cred_map = {}
     for r in rows:
         cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id, cspec = r
@@ -1392,62 +1390,68 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
     import json as _json
 
     devices = []
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
-        for (cid,) in c.fetchall():
-            cred = cred_map.get(cid)
-            if not cred:
-                continue  # cred_map 已被组织过滤 — 不在 map 中的凭据跳过
-            if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", ""), from_repo_key(cred.get("repo_key", ""))):
+    # 凭据 id 源：lib 优先（三库独立后无视图可读）；同时准备本地 cursor 供兜底 SQL 使用
+    _ids_lib = _creds_via_lib()
+    if _ids_lib is not None:
+        _cred_ids = [(cid,) for cid in _ids_lib.list_active_credential_ids()]
+        with db_lock:
+            c = db.cursor()
+    else:
+        # runtime_credentials 归运行域：具名查询（任意拓扑）
+        _cred_ids = _rt.read_all_any("runtime_credentials_active_ids")
+    for (cid,) in _cred_ids:
+        cred = cred_map.get(cid)
+        if not cred:
+            continue  # cred_map 已被组织过滤 — 不在 map 中的凭据跳过
+        if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", ""), from_repo_key(cred.get("repo_key", ""))):
+            continue
+        # P4：删视图后 agent_runtimes 走 lib 读
+        from src.kernel.domain_read import runtime_lib as _rt_lib_lr
+        _lr_lib = _rt_lib_lr(foreign_only=True)
+        if _lr_lib is not None:
+            _lr_rows = _lr_lib.read_all("runtimes_by_credential", (cid,))
+        else:
+            # agent_runtimes 归运行域：具名查询（任意拓扑）
+            _lr_rows = _rt.read_all_any("runtimes_by_credential_full", (cid,))
+        # AIShell 显示名（2026-10-13 收口补漏）：worker 设备视图的承载引擎列表
+        from src.domains.runtime.engine.instances import to_display as _td2
+        runtimes = [
+            {"id": x[0], "name": _td2(x[1]), "version": x[2], "healthy": bool(x[3]),
+             "installed": bool(x[4]),
+             "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
+             "health": derive_runtime_health(x[5], x[6], now),
+             "local_skills": _json.loads(x[7] or "[]") if x[7] else [],
+             "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else [],
+             "worker_version": x[9] or "" if len(x) > 9 else ""}
+            for x in _lr_rows
+        ]
+        from src.kernel.domain_read import runtime_lib as _runtime_lib_tags
+        _rtl = _runtime_lib_tags()
+        for rt in runtimes:
+            if _rtl is not None:
+                rt["agent_tags"] = _rtl.list_engine_tags(rt["id"], enabled_only=True)
                 continue
-            # P4：删视图后 agent_runtimes 走 lib 读
-            from src.kernel.domain_read import runtime_lib as _rt_lib_lr
-            _lr_lib = _rt_lib_lr(foreign_only=True)
-            if _lr_lib is not None:
-                _lr_rows = _lr_lib.read_all("runtimes_by_credential", (cid,))
-            else:
-                c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?", (cid,))
-                _lr_rows = c.fetchall()
-            # AIShell 显示名（2026-10-13 收口补漏）：worker 设备视图的承载引擎列表
-            from src.domains.runtime.engine.instances import to_display as _td2
-            runtimes = [
-                {"id": x[0], "name": _td2(x[1]), "version": x[2], "healthy": bool(x[3]),
-                 "installed": bool(x[4]),
-                 "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
-                 "health": derive_runtime_health(x[5], x[6], now),
-                 "local_skills": _json.loads(x[7] or "[]") if x[7] else [],
-                 "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else [],
-                 "worker_version": x[9] or "" if len(x) > 9 else ""}
-                for x in _lr_rows
-            ]
-            from src.kernel.domain_read import runtime_lib as _runtime_lib_tags
-            _rtl = _runtime_lib_tags()
-            for rt in runtimes:
-                if _rtl is not None:
-                    rt["agent_tags"] = _rtl.list_engine_tags(rt["id"], enabled_only=True)
-                    continue
-                _tc = db.cursor()
-                _tc.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
-                rt["agent_tags"] = [r[0] for r in _tc.fetchall()]
-            # B5: worker 版本落后标记（设备级，取首个引擎的 worker_version）
-            _dev_wv = runtimes[0].get("worker_version", "") if runtimes else ""
-            _dev_wv_stale = False
-            if _dev_wv:
-                try:
-                    from src.kernel.worker_package import worker_code_version, normalize_worker_version
-                    _dev_wv_stale = normalize_worker_version(worker_code_version()) != normalize_worker_version(_dev_wv)
-                except Exception:
-                    pass
-            devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
-                            "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
-                            "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
-                            "owner": cred.get("owner_name", ""),
-                            "repo_key": from_repo_key(cred.get("repo_key", "")),
-                            "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
-                            "worker_version": _dev_wv,
-                            "worker_version_stale": _dev_wv_stale,
-                            "runtimes": runtimes})
+            # engine_capabilities 归运行域：具名查询（任意拓扑）
+            rt["agent_tags"] = [r[0] for r in
+                                _rt.read_all_any("engine_cap_tags_sorted", (rt["id"],))]
+        # B5: worker 版本落后标记（设备级，取首个引擎的 worker_version）
+        _dev_wv = runtimes[0].get("worker_version", "") if runtimes else ""
+        _dev_wv_stale = False
+        if _dev_wv:
+            try:
+                from src.kernel.worker_package import worker_code_version, normalize_worker_version
+                _dev_wv_stale = normalize_worker_version(worker_code_version()) != normalize_worker_version(_dev_wv)
+            except Exception:
+                pass
+        devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
+                        "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
+                        "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
+                        "owner": cred.get("owner_name", ""),
+                        "repo_key": from_repo_key(cred.get("repo_key", "")),
+                        "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
+                        "worker_version": _dev_wv,
+                        "worker_version_stale": _dev_wv_stale,
+                        "runtimes": runtimes})
 
     # 本机直连引擎（credential_id=0）：关联到 runtime_credentials 中已有的主控机设备
     _local_hostname = ""
@@ -1858,20 +1862,16 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
         cred_id = int(_cc_out.get("id") or 0)
     else:
-        with db_lock:
-            c = db.cursor()
-            try:
-                c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key, org_id) VALUES (?,?,?,?,?,?,?)",
-                          (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key, _cred_org_id))
-                cred_id = c.lastrowid
-                db.commit()
-            except Exception as e:
-                msg = str(e)
-                if ("UNIQUE" in msg or "1062" in msg or "Duplicate" in msg) and "runtime_credentials.name" in msg:
-                    # sqlite: "UNIQUE constraint failed: ..."; MySQL: (1062, "Duplicate entry ... for key 'runtime_credentials.name'")
-                    # 只认 "UNIQUE" 字样在 MySQL 下匹配不到 → 误报 500（2026-08-17 实测）
-                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
-                raise HTTPException(status_code=500, detail={"code": 500, "message": f"生成失败: {e}"})
+        # runtime_credentials 归运行域：插入原语返回 {action, id}；唯一键冲突以 duplicate 返回（不抛）
+        try:
+            _cc_res = _rt.insert_runtime_credential(
+                hashlib.sha256(token.encode()).hexdigest(), name, scope,
+                repo_key if scope == "repo" else "", owner, repo_key, _cred_org_id)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"生成失败: {e}"})
+        if _cc_res.get("action") == "duplicate":
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"凭据名称已存在（全局唯一）: {name}"})
+        cred_id = int(_cc_res.get("id") or 0)
     # 预构建 worker 安装包（异步）：凭据生成后即可一键安装，避免首次下载才打包
     # （首次构建含依赖 wheels 下载，耗时数秒至数分钟，放后台不阻塞响应）
     try:
@@ -1909,14 +1909,14 @@ def rename_runtime_credential(cid: str, body: RuntimeCredBody, user: dict = Depe
             if _rn_done:
                 _rn_rc = int(_rn_n.get("n") or 0)
                 if _rn_rc == 0:
-                    row = c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,)).fetchone()
+                    row = _rt.read_one_any("runtime_credential_exists", (cid,))
                     if not row:
                         raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
                     raise HTTPException(status_code=400, detail={"code": 400, "message": "仅 active 凭据可改名"})
             else:
-                c.execute("UPDATE runtime_credentials SET name=? WHERE id=? AND status='active'", (name, cid))
-                if c.rowcount == 0:
-                    row = c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,)).fetchone()
+                # runtime_credentials 归运行域：改名写原语返回受影响行（任意拓扑）
+                if _rt.rename_runtime_credential(str(cid), name) == 0:
+                    row = _rt.read_one_any("runtime_credential_exists", (cid,))
                     if not row:
                         raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
                     raise HTTPException(status_code=400, detail={"code": 400, "message": "仅 active 凭据可改名"})
@@ -1969,8 +1969,8 @@ def change_credential_scope(cid: str, body: CredScopeBody, user: dict = Depends(
         if _ru_lib_ff9c0b is not None:
             row = _ru_lib_ff9c0b.read_one("runtime_credentials_ff9c0b", (cid,))
         else:
-            c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
-            row = c.fetchone()
+            # runtime_credentials 归运行域：具名查询（任意拓扑）
+            row = _rt.read_one_any("runtime_credential_owner_status", (cid,))
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
         _owner, _status = row[0] or "", row[1] or ""
@@ -1994,19 +1994,12 @@ def change_credential_scope(cid: str, body: CredScopeBody, user: dict = Depends(
                      f"repo_key={repo_key} org_id={_new_org_id} engines={_csc.get('engines')} "
                      f"merged={_csc.get('merged')}")
             return {"scope": scope, "repo_key": repo_key}
-        c.execute("UPDATE runtime_credentials SET scope=?, repo_key=?, owner_id=?, org_id=? WHERE id=?",
-                  (scope, repo_key or None, _new_owner_id, _new_org_id, cid))
-        # 切换 scope 后同步更新引擎行（保留引擎信息，避免 worker 需要重新注册）。
-        # Issue #654：先按 (credential_id, lower(name)) 去重合并（保留 MAX(id)）：
-        # 被替换行的 engine_capabilities / tags_user_set 迁移到存活行（priority/标签不回默认），
-        # 引用旧引擎 id 的配置（场景 engine_runtime_ids / agent backend）由 remap 改指向存活行。
-        from src.domains.runtime.engine.engine_select import merge_duplicate_engine_rows, remap_engine_references
-        _rid_map = merge_duplicate_engine_rows(cid, c)
-        c.execute(
-            "UPDATE agent_runtimes SET scope=?, owner_id=?, org_id=?, repo_key=? WHERE credential_id=?",
-            (scope, _new_owner_id, _new_org_id, repo_key or None, cid)
-        )
-        db.commit()
+        # 凭据行 + 引擎行 + 同凭据重名合并是一个运行域组合原语（一次事务）；
+        # 单库拓扑回落进程库，三库拓扑走 owner 连接 —— 与 lib 分支同一实现。
+        _csc = _rt.change_credential_scope(str(cid), scope, repo_key or "",
+                                           _new_owner_id, _new_org_id)
+        log.info(f"Credential scope changed: cid={cid} scope={scope} repo_key={repo_key} "
+                 f"engines={_csc.get('engines')} merged={_csc.get('merged')}")
     log.info(f"Credential scope changed: cid={cid} scope={scope} repo_key={repo_key} org_id={_new_org_id}")
     return {"scope": scope, "repo_key": repo_key}
 
@@ -2021,19 +2014,27 @@ def list_runtime_credentials(user: dict = Depends(require_org_member)):
     from src.domains.mgmt.user.org_db import is_org_personal
     org_id = user.get("org_id", "")
     _is_personal = is_org_personal(org_id) if org_id else True
+    _rc_lib = _creds_via_lib()
+    if _rc_lib is not None:
+        return {"credentials": [
+            {**row, "last_seen_at": normalize_event_time(row["last_seen_at"]),
+             "created_at": normalize_event_time(row["created_at"]),
+             "repo_key": from_repo_key(row["repo_key"] or "")}
+            for row in _rc_lib.list_runtime_credentials(org_id or "", _is_personal)
+        ]}
     with db_lock:
         c = db.cursor()
         if org_id and not _is_personal:
-            # 非个人组织：严格隔离，只显示 org_id 匹配的凭据
-            c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at, repo_key FROM runtime_credentials WHERE org_id=? ORDER BY id DESC", (org_id,))
+            # 非个人组织：严格隔离，只显示 org_id 匹配的凭据（具名查询，任意拓扑）
+            _rc_rows = _rt.read_all_any("runtime_credentials_by_org", (org_id,))
         else:
             # 个人组织或未指定：显示全部（兼容现有行为）
-            c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at, repo_key FROM runtime_credentials ORDER BY id DESC")
+            _rc_rows = _rt.read_all_any("runtime_credentials_list")
         return {"credentials": [
             {"id": r[0], "name": r[1], "device_name": r[2] or "", "scope": r[3],
              "owner_id": r[4], "owner": r[5] or "", "status": r[6], "last_seen_at": normalize_event_time(r[7]), "created_at": normalize_event_time(r[8]),
              "repo_key": from_repo_key(r[9] or "")}
-            for r in c.fetchall()
+            for r in _rc_rows
         ]}
 
 def _cleanup_scene_engine_runtime_ids(rid_list: list):
@@ -2069,8 +2070,8 @@ def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_
         if _ru_lib_3cd287 is not None:
             _row = _ru_lib_3cd287.read_one("runtime_credentials_3cd287", (cid,))
         else:
-            c.execute("SELECT owner_name FROM runtime_credentials WHERE id=?", (cid,))
-            _row = c.fetchone()
+            # runtime_credentials 归运行域：具名查询（任意拓扑）
+            _row = _rt.read_one_any("runtime_credential_owner_name", (cid,))
         if not _row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
         # 扫雷⑨-H2：仅凭据 owner 可吊销（对齐同文件 scope 端点的 owner 校验范式）
@@ -2093,48 +2094,15 @@ def revoke_runtime_credential(cid: str, user: dict = Depends(require_no_session_
             log.info(f"revoke {cid} via lib: engines={_purged.get('engines')} "
                      f"sessions={_purged.get('sessions')} caps={_purged.get('caps')}")
             return {"message": f"凭据 {cid} 已吊销并删除"}
-        c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
-        rid_list = [r[0] for r in c.fetchall()]
-        if rid_list:
-            ph = ",".join("?" for _ in rid_list)
-            # P3-5g：devops_agent_session 在 runtime 域；lib 可用走跨域写
-            from src.kernel.domain_read import runtime_lib as _rt_lib_rv
-            from src.kernel import cross_write as _xw_rv
-            _rv_done = False
-            _rt_rv = _rt_lib_rv(foreign_only=True)
-            if _rt_rv is not None:
-                _rt_rv_ok = _rt_rv
-                _rv_done = _xw_rv.submit_if_lib(
-                    _rt_rv_ok, "runtime", "agent_sessions_detach",
-                    f"agent-sess-detach:{sorted(int(x) for x in rid_list)}",
-                    {"runtime_ids": [int(x) for x in rid_list]},
-                    lambda: _rt_rv_ok.detach_agent_sessions([int(x) for x in rid_list]), log)
-            if not _rv_done:
-                try:
-                    c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
-                except Exception as _e:
-                    log.warning(f"revoke {cid}: 清理 session 失败: {_e}")
-        # Issue #250: 物理删除 agent_runtimes 前清理场景配置 engine_runtime_ids 悬空引用
-        _cleanup_scene_engine_runtime_ids(rid_list)
-        # Issue #417：级联清理 engine_capabilities（否则悬空能力标签残留）
-        if rid_list:
-            try:
-                from src.kernel.domain_read import runtime_lib as _rt_blk
-                _rtb = _rt_blk()
-                if _rtb is not None:
-                    from src.kernel import cross_write as _xw_blk
-                    for _rid in rid_list:
-                        _xw_blk.submit("runtime", "engine_cap_delete_all",
-                                       f"cap-del-all:{cid}:{_rid}", {"rid": _rid},
-                                       lambda r=_rid: _rtb.delete_engine_capability(r))
-                else:
-                    _ph_ec = ",".join("?" for _ in rid_list)
-                    c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({_ph_ec})", rid_list)
-            except Exception as _ece:
-                log.warning(f"revoke {cid}: 清理 engine_capabilities 失败: {_ece}")
-        c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
-        c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
-        db.commit()
+        # 运行域半区（会话摘绑 + 能力 + 引擎行 + 凭据行）是 owner 域的组合原语，一次事务：
+        # 单库拓扑回落进程库，三库拓扑走 owner 连接，与 lib 分支同一实现。
+        _purged = _rt.purge_runtime_credential(str(cid))
+        _purged_rids = [int(x) for x in (_purged.get("rids") or [])]
+        if _purged_rids:
+            # mgmt 半区：清理场景 nodes_json 里对被删 runtime 的悬空引用（Issue #250）
+            _cleanup_scene_engine_runtime_ids(_purged_rids)
+        log.info(f"revoke {cid}: engines={_purged.get('engines')} "
+                 f"sessions={_purged.get('sessions')} caps={_purged.get('caps')}")
     return {"message": f"凭据 {cid} 已吊销并删除"}
 
 class ExecModeBody(BaseModel):
@@ -2186,8 +2154,8 @@ def _sync_agent_tags(rid: int, cursor):
     if _rtl_sync is not None:
         tags = _rtl_sync.list_engine_tags(rid, enabled_only=True)
     else:
-        cursor.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag", (rid,))
-        tags = [r[0] for r in cursor.fetchall()]
+        # engine_capabilities / agent_runtimes 均归运行域：具名查询 + 写原语（任意拓扑）
+        tags = [r[0] for r in _rt.read_all_any("engine_cap_tags_sorted", (rid,))]
     # P3-5f-2：agent_tags 写在 runtime 域（同域进程或 lib 不可用时回落调用方 cursor）
     from src.kernel.domain_read import runtime_lib as _rt_lib_tags
     from src.kernel import cross_write as _xw_tags
@@ -2199,7 +2167,7 @@ def _sync_agent_tags(rid: int, cursor):
                 {"runtime_id": int(rid), "tags": list(tags)},
                 lambda: _rt_tags_ok.set_agent_tags(int(rid), list(tags)), log):
             return
-    cursor.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?", (json.dumps(tags, ensure_ascii=False), rid))
+    _rt.set_agent_tags(int(rid), list(tags))
 
 @router.get("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tags", summary="List engine tags", description="Lists an engine's tags.")
 def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
@@ -2219,12 +2187,8 @@ def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
                 if _ru_lib_440c87 is not None:
                     rows = _ru_lib_440c87.read_all("engine_capabilities_440c87", (rid,))
                 else:
-                    c.execute(
-                        "SELECT id, tag, priority, enabled, created_at, updated_at "
-                        "FROM engine_capabilities WHERE runtime_id=? ORDER BY tag",
-                        (rid,)
-                    )
-                    rows = c.fetchall()
+                    # engine_capabilities 归运行域：具名查询（任意拓扑）
+                    rows = _rt.read_all_any("engine_caps_by_runtime", (rid,))
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"tags": [
@@ -2249,8 +2213,8 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_n
             _ex2 = _rt_lib_ex2(foreign_only=True)
             _ex_hit = (_ex2.read_one("runtime_exists", (rid,)) is not None) if _ex2 is not None else None
             if _ex_hit is None:
-                c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (rid,))
-                _ex_hit = c.fetchone() is not None
+                # agent_runtimes 归运行域：具名查询（任意拓扑）
+                _ex_hit = _rt.read_one_any("runtime_exists_any", (rid,)) is not None
             if not _ex_hit:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在"})
             from src.kernel.domain_read import runtime_lib as _rt_ins
@@ -2261,30 +2225,15 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_n
                                {"rid": rid, "tag": tag, "priority": body.priority},
                                lambda: _rti.upsert_engine_capability(rid, tag, priority=body.priority))
             else:
-                c.execute(
-                    "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                    "VALUES (?,?,1,?,1,?,?) "
-                    "ON DUPLICATE KEY UPDATE priority=VALUES(priority), updated_at=VALUES(updated_at)",
-                    (rid, tag, body.priority, now, now)
-                )
+                # engine_capabilities 归运行域：可移植两段式 upsert（原 ON DUPLICATE 只在 MySQL 合法）
+                _rt.upsert_engine_capability(rid, tag, priority=body.priority)
             _sync_agent_tags(rid, c)
             db.commit()
         except HTTPException:
             raise
         except Exception as e:
             db.rollback()
-            # MySQL ON DUPLICATE KEY may not work with SQLite syntax; fallback
-            try:
-                c.execute(
-                    "REPLACE INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
-                    "VALUES (?,?,1,?,1,?,?)",
-                    (rid, tag, body.priority, now, now)
-                )
-                _sync_agent_tags(rid, c)
-                db.commit()
-            except Exception as e2:
-                db.rollback()
-                raise HTTPException(status_code=500, detail={"code": 500, "message": str(e2)})
+            raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     log.info(f"Engine tag added: runtime={rid} tag={tag} priority={body.priority}")
     return {"message": f"标签 {tag} 已添加", "tag": tag}
 
@@ -2313,12 +2262,8 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
                                 "enabled": body.enabled}, _apply_upd)
                 _rowcount_upd = _updated["n"]
             else:
-                c.execute(
-                    "UPDATE engine_capabilities SET priority=?, enabled=?, updated_at=? "
-                    "WHERE runtime_id=? AND tag=?",
-                    (body.priority, body.enabled, now, rid, tag)
-                )
-                _rowcount_upd = c.rowcount
+                # engine_capabilities 归运行域：写原语返回受影响行（任意拓扑）
+                _rowcount_upd = _rt.update_engine_capability(rid, tag, body.priority, body.enabled)
             if _rowcount_upd == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
             _sync_agent_tags(rid, c)
@@ -2351,8 +2296,8 @@ def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_sessio
                            f"cap-del:{rid}:{tag}", {"rid": rid, "tag": tag}, _apply_del)
                 _rowcount_del = _deleted["n"]
             else:
-                c.execute("DELETE FROM engine_capabilities WHERE runtime_id=? AND tag=?", (rid, tag))
-                _rowcount_del = c.rowcount
+                # engine_capabilities 归运行域：写原语返回受影响行（任意拓扑）
+                _rowcount_del = _rt.delete_engine_capability(rid, tag)
             if _rowcount_del == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": "标签不存在"})
             _sync_agent_tags(rid, c)
@@ -2399,14 +2344,10 @@ def list_event_action_filters(user: dict = Depends(require_no_session_token)):
                           "priority, enabled FROM event_action_filter ORDER BY event_type, action")
                 rows = c.fetchall()
             else:
-                from src.kernel.domain_read import runtime_lib as _ru_lib_3d22a6_f
-                _ru_lib_3d22a6 = _ru_lib_3d22a6_f(foreign_only=True)
-                if _ru_lib_3d22a6 is not None:
-                    rows = _ru_lib_3d22a6.read_all("event_action_filter_3d22a6", ())
-                else:
-                    c.execute("SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, "
-                              "priority, enabled FROM event_action_filter ORDER BY event_type, action")
-                    rows = c.fetchall()
+                # event_action_filter 归本域（mgmt）：直接本域查询，不再经 runtime lib
+                c.execute("SELECT id, event_type, action, allow, actor, require_changes, '', handle_side_effect, "
+                          "priority, enabled FROM event_action_filter ORDER BY event_type, action")
+                rows = c.fetchall()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
     return {"rules": [
@@ -2429,7 +2370,7 @@ def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(requ
             if c.fetchone():
                 raise HTTPException(status_code=409, detail={"code": 409, "message": "该事件/动作规则已存在"})
             # P3-5h：event_action_filter 在 runtime 域
-            from src.kernel.domain_read import runtime_lib as _rt_lib_ar
+            from src.kernel.domain_read import mgmt_lib as _rt_lib_ar
             from src.kernel import cross_write as _xw_ar
             _ar_done = False
             _ar_fields = {
@@ -2443,7 +2384,7 @@ def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(requ
             if _rt_ar is not None:
                 _rt_ar_ok = _rt_ar
                 _ar_done = _xw_ar.submit_if_lib(
-                    _rt_ar_ok, "runtime", "event_action_filter_add",
+                    _rt_ar_ok, "mgmt", "event_action_filter_add",
                     f"eaf-add:{body.event_type}:{body.action}",
                     {**_ar_fields, "created_at": now},
                     lambda: _rt_ar_ok.add_event_action_filter(_ar_fields, now), log)
@@ -2480,7 +2421,7 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
     params.append(now)
     params.append(rule_id)
     # P3-5h：event_action_filter 在 runtime 域（写走 lib 时仍要 rowcount 判 404）
-    from src.kernel.domain_read import runtime_lib as _rt_lib_ur
+    from src.kernel.domain_read import mgmt_lib as _rt_lib_ur
     from src.kernel import cross_write as _xw_ur
     _ur_fields = {f: getattr(body, f) for f in
                   ("allow", "actor", "require_changes", "block_changes",
@@ -2496,7 +2437,7 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
             _ur_n["n"] = _rt_ur_ok.update_event_action_filter(int(rule_id), _ur_fields, now)
 
         _ur_done = _xw_ur.submit_if_lib(
-            _rt_ur_ok, "runtime", "event_action_filter_update",
+            _rt_ur_ok, "mgmt", "event_action_filter_update",
             f"eaf-upd:{rule_id}", {"rule_id": int(rule_id), "fields": _ur_fields,
                                    "updated_at": now}, _apply_ur, log)
     if _ur_done:
@@ -2528,7 +2469,7 @@ def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_sessi
     """删除事件 action 过滤规则（删除后无规则=放行）。"""
     from src.kernel.session_manager import db, db_lock
     # P3-5h：event_action_filter 在 runtime 域（写走 lib 时仍要 rowcount 判 404）
-    from src.kernel.domain_read import runtime_lib as _rt_lib_dr
+    from src.kernel.domain_read import mgmt_lib as _rt_lib_dr
     from src.kernel import cross_write as _xw_dr
     _dr_n: dict = {}
     _dr_done = False
@@ -2540,7 +2481,7 @@ def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_sessi
             _dr_n["n"] = _rt_dr_ok.delete_event_action_filter(int(rule_id))
 
         _dr_done = _xw_dr.submit_if_lib(
-            _rt_dr_ok, "runtime", "event_action_filter_delete", f"eaf-del:{rule_id}",
+            _rt_dr_ok, "mgmt", "event_action_filter_delete", f"eaf-del:{rule_id}",
             {"rule_id": int(rule_id)}, _apply_dr, log)
     if _dr_done:
         if int(_dr_n.get("n") or 0) == 0:
@@ -2695,14 +2636,9 @@ def _recent_models_by_runtime(runtime_ids: list[int]) -> dict[int, list[dict]]:
     from src.kernel.session_manager import db, db_lock
     out: dict[int, list[dict]] = {}
     try:
-        with db_lock:
-            c = db.cursor()
-            ph = ",".join("?" * len(ids))
-            c.execute(
-                f"SELECT engine_id, model_key, model_raw, COUNT(*) AS cnt, MAX(created_at) AS last_used "
-                f"FROM obs_llm_usage WHERE engine_id IN ({ph}) GROUP BY engine_id, model_key, model_raw",
-                ids)
-            for eng_id, m_key, m_raw, cnt, last_used in c.fetchall():
+        # obs_llm_usage 归 insight：聚合走该域原语（任意拓扑；只取模型名字段）
+        from src.domains.insight import public as _insight_public  # noqa: PLC0415
+        for eng_id, m_key, m_raw, cnt, last_used in _insight_public.aggregate_llm_usage(ids):
                 model = str(m_key or m_raw or "").strip()
                 if not model:
                     continue

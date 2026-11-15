@@ -129,22 +129,17 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
     # org_id 未显式传入时，从 managed_repos 表推断仓库关联的组织
+    # （managed_repos 归 mgmt：经 owner 域 `repo_org_id_any` 取同一句——自有 DSN 走 mgmt
+    #   连接、单库拓扑回落进程主库。原实现在 runtime 进程里先试 mgmt lib、失败再落本地
+    #   兜底 SQL；三库拓扑下兜底句必 1146（视图 0），org_id 被静默丢成 0）
     if not org_id:
         try:
-            from src.kernel.session_manager import db as _org_db, db_lock as _org_db_lock
-            with _org_db_lock:
-                _oc = _org_db.cursor()
-                from src.kernel.domain_read import mgmt_lib as _mg_lib_e9a379_f
-                _mg_lib_e9a379 = _mg_lib_e9a379_f(foreign_only=True)
-                if _mg_lib_e9a379 is not None:
-                    _or = _mg_lib_e9a379.read_one("managed_repos_e9a379", (repo_key,))
-                else:
-                    _oc.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
-                    _or = _oc.fetchone()
-                if _or and _or[0]:
-                    org_id = _or[0]
-        except Exception:
-            pass
+            from src.domains.mgmt import public as _mgmt_public_org
+            _repo_org = _mgmt_public_org.repo_org_id_any(repo_key)
+            if _repo_org:
+                org_id = _repo_org
+        except Exception as _e:
+            log.debug(f"ensure_issue_task: repo org lookup failed for {repo_key}: {_e}")
     with db_lock:
         c = db.cursor()
         # 幂等：同一 issue 任何 assignee 的 active/processing 任务都复用
