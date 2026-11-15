@@ -13,7 +13,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from src.kernel.session_manager import db, db_lock
+from src.domains.runtime.engine.cleanup import _sweep_cursor
 
 log = logging.getLogger(__name__)
 
@@ -36,8 +36,8 @@ def sweep_claim_without_session_once() -> int:
     msg_cutoff = (now - timedelta(seconds=RECENT_MESSAGE_ACTIVE_SECONDS)).isoformat()
     fixed = 0
     try:
-        with db_lock:
-            c = db.cursor()
+        # 用 sweeper 专用游标（三库拓扑走独立连接），避免与请求路径抢进程级 db_lock
+        with _sweep_cursor() as c:
             c.execute(
                 "SELECT t.id, t.runtime_id, t.event_seq FROM agent_tasks t "
                 "WHERE t.status IN ('running','dispatched') "
@@ -70,7 +70,10 @@ def sweep_claim_without_session_once() -> int:
                         release_busy_slot(int(rid), cursor=c)
                     except Exception as _re:
                         log.debug(f"sweeper: release busy slot {rid} failed: {_re}")
-            db.commit()
+            try:
+                c.connection.commit()
+            except Exception:
+                pass
     except Exception as e:
         log.warning(f"sweeper claim-without-session sweep failed: {e}")
         return fixed
