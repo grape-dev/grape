@@ -27,11 +27,13 @@ if [ -n "$_units_enabled" ]; then
   echo "[3db] 提示: 这些角色已 enable 但当前未运行:$_units_enabled" >&2
   echo "[3db]       若要用 systemd 托管: systemctl start grape@{mgmt,event,worker,insight}" >&2
 fi
+# 运行中的 systemd 单元 → 本脚本作为统一部署入口，内部改用 systemctl restart。
+# 不再「检测到就退出」：那样脚本静默空跑、旧进程继续应答，看起来部署成功其实没重启。
+_SYSTEMD_MODE=0
 if [ "$_units_on" = "1" ]; then
-  echo "[3db] 检测到 systemd 单元 grape@*.service 正在运行，本脚本不再适用。" >&2
-  echo "[3db] 请改用: systemctl restart grape@mgmt grape@event grape@worker grape@insight" >&2
-  echo "[3db] 需要回到 nohup 方式: systemctl disable --now grape@{mgmt,event,worker,insight}" >&2
-  exit 3
+  _SYSTEMD_MODE=1
+  echo "[3db] systemd 模式：将通过 systemctl restart grape@{mgmt,event,worker,insight} 部署"
+  echo "[3db] （回到 nohup 方式: systemctl disable --now grape@{mgmt,event,worker,insight}）"
 fi
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 LOGS=/home/grape/grape-logs
@@ -99,12 +101,19 @@ start_one() {
   echo $! > "/home/grape/$role.pid"
 }
 
-stop_ports
-GRAPE_GSB_SELFTEST_INTERVAL=60 \
-start_one mgmt    src.api.grape_server         38081 39081 "$GRAPE_DSN_MGMT"
-start_one event   src.api.grape_event_server   38082 39082 "$GRAPE_DSN_RUNTIME"
-start_one worker  src.api.grape_worker_server  38083 39083 "$GRAPE_DSN_RUNTIME"
-start_one insight src.api.grape_insight_server 38084 39084 "$GRAPE_DSN_INSIGHT"
+if [ "$_SYSTEMD_MODE" = "1" ]; then
+  # 单元自己负责拉起进程（Restart=always / 启动顺序），这里只触发重启并等健康。
+  # 三库 DSN 已在文件头 source 过（.grape-rds-stage.env），unit 侧另有 GRAPE_3DB_ENV drop-in。
+  systemctl restart grape@mgmt grape@event grape@worker grape@insight \
+    || { echo "[3db] FAIL: systemctl restart 失败" >&2; exit 1; }
+else
+  stop_ports
+  GRAPE_GSB_SELFTEST_INTERVAL=60 \
+  start_one mgmt    src.api.grape_server         38081 39081 "$GRAPE_DSN_MGMT"
+  start_one event   src.api.grape_event_server   38082 39082 "$GRAPE_DSN_RUNTIME"
+  start_one worker  src.api.grape_worker_server  38083 39083 "$GRAPE_DSN_RUNTIME"
+  start_one insight src.api.grape_insight_server 38084 39084 "$GRAPE_DSN_INSIGHT"
+fi
 
 echo "[3db] DOMAIN_LIB=$GRAPE_DOMAIN_LIB  mgmt=$GRAPE_DSN_MGMT" | sed 's#//[^@]*@#//***@#g'
 for _ in $(seq 1 40); do
