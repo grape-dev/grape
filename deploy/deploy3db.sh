@@ -30,7 +30,7 @@ stop_ports() {
   # 1) 按 pid 文件停：覆盖「起了但没绑端口」的进程（只按端口 kill 会漏掉它们，
   #    残留进程随后抢端口 → address already in use → 新进程起不来，116 踩过两次）
   for role in mgmt event worker insight; do
-    f="/home/grape/3db-$role.pid"
+    f="/home/grape/$role.pid"
     [ -f "$f" ] && { kill "$(cat "$f")" 2>/dev/null; rm -f "$f"; }
   done
   # 2) 按监听端口兜底
@@ -66,7 +66,7 @@ start_one() {
   GRAPE_TRACE_RATIO="0.5" \
   nohup "$PY" -m uvicorn "$module:app" --host 0.0.0.0 --port "$port" --workers 1 \
     >> "$LOGS/$role.log" 2>&1 &
-  echo $! > "/home/grape/3db-$role.pid"
+  echo $! > "/home/grape/$role.pid"
 }
 
 stop_ports
