@@ -1413,40 +1413,35 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     from src.domains.mgmt.user.db import is_known_engine_name
     from src.kernel.session_manager import db, db_lock
     backends = []
-    with db_lock:
-        c = db.cursor()
-        # 本机直连引擎（credential_id=0，已知类型且已装且健康——与执行 resolve_local_engine 口径一致，
-        # local-direct-health-probe-design.md 方案 C，避免"页面有、执行无"）
-        # host_name 进列表：多主控机同名直连引擎都展示（名称标注归属机，区分显示）
-        try:
-            c.execute("SELECT id, name, version, COALESCE(host_name,'') FROM agent_runtimes WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id")
-            for r in c.fetchall():
-                _rid, ename, ver, _hn = r
-                if not is_known_engine_name(ename or ""):
-                    continue
-                _label = f"{ename} v{ver or ''}"
-                if _hn:
-                    # 主控机短名（ecs-grape-master-001 → master-001）便于前端区分双主
-                    _short = _hn.replace("ecs-grape-", "")
-                    _label += f"（{_short} 直连）"
-                else:
-                    _label += "（本机直连）"
-                backends.append({"name": ename, "display_name": _label, "scope": "local", "owner": _hn, "runtime_id": _rid})
-        except Exception:
-            pass
-        # 个人引擎（scope=user，仅当前用户 + active）
-        try:
-            c.execute("""
-                SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id
-                FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
-                WHERE rc.scope = 'user' AND rc.status='active' AND rc.owner_name = ?
-            """, (user["username"],))
-            for r in c.fetchall():
-                _rid, ename, ver, dev, owner, cid = r
-                ins = instance_name(ename, dev or "", cid or 0)
-                backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}", "scope": "user", "owner": owner or "", "runtime_id": _rid})
-        except Exception:
-            pass
+    # agent_runtimes / runtime_credentials 归 runtime：必须走归属域具名查询。
+    # 原先用进程库游标直查，在 mgmt 进程里 1146 并被 except 吞掉 —— 表现就是
+    # 「点引擎配置/技能配置没反应」（浮层里一直「执行引擎加载中...」）。
+    # 本机直连引擎（credential_id=0，已知类型且已装且健康——与 resolve_local_engine 口径一致）
+    try:
+        for r in _rt.read_all_any("chat_local_engines"):
+            _rid, ename, ver, _hn = r
+            if not is_known_engine_name(ename or ""):
+                continue
+            _label = f"{ename} v{ver or ''}"
+            if _hn:
+                # 主控机短名（ecs-grape-master-001 → master-001）便于前端区分双主
+                _short = _hn.replace("ecs-grape-", "")
+                _label += f"（{_short} 直连）"
+            else:
+                _label += "（本机直连）"
+            backends.append({"name": ename, "display_name": _label, "scope": "local",
+                             "owner": _hn, "runtime_id": _rid})
+    except Exception as _e:  # noqa: BLE001 - 取数失败不阻断配置接口，但必须留痕
+        log.warning(f"chat config: local engines unavailable: {_e}")
+    # 个人引擎（scope=user，仅当前用户 + active）
+    try:
+        for r in _rt.read_all_any("chat_user_engines", (user["username"],)):
+            _rid, ename, ver, dev, owner, cid = r
+            ins = instance_name(ename, dev or "", cid or 0)
+            backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}",
+                             "scope": "user", "owner": owner or "", "runtime_id": _rid})
+    except Exception as _e:  # noqa: BLE001
+        log.warning(f"chat config: user engines unavailable: {_e}")
     # Load chat skills from skill table（官方 + 个人 + 当前仓库，agent_type='chat'）
     chat_skills = []
     from src.kernel.repo_key import to_repo_key
@@ -1455,22 +1450,25 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     if repo:
         from src.kernel.repo_key import repo_key_candidates
         _rk_candidates = repo_key_candidates(repo)
-    with db_lock:
-        c = db.cursor()
-        try:
-            if _rk_candidates:
-                c.execute(
-                    "SELECT skill_name, display_name, description, skill_path, scope FROM skill WHERE is_active=1 AND agent_type='chat' AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id IN ({}))) ORDER BY scope, skill_name".format(",".join("?" * len(_rk_candidates))),
-                    [str(user["id"])] + _rk_candidates
-                )
+    # skill 表同样归 runtime：一次取全部 chat 技能，再按 scope 在内存里过滤
+    # （原先把 scope 过滤写进 SQL，跨库执行不了；chat 技能量级很小，内存过滤等价）。
+    try:
+        _uid = str(user["id"])
+        for r in _rt.read_all_any("chat_skills_all"):
+            _sk, _dn, _desc, _path, _scope, _owner = r
+            _scope = _scope or ""
+            if _scope == "official":
+                pass
+            elif _scope == "user" and str(_owner) == _uid:
+                pass
+            elif _scope == "repo" and _rk_candidates and str(_owner) in _rk_candidates:
+                pass
             else:
-                c.execute(
-                    "SELECT skill_name, display_name, description, skill_path, scope FROM skill WHERE is_active=1 AND agent_type='chat' AND (scope='official' OR (scope='user' AND owner_id=?)) ORDER BY scope, skill_name",
-                    (str(user["id"]),)
-                )
-            chat_skills = [{"name": r[0], "display_name": r[1] or r[0], "description": r[2], "skill_path": r[3] or r[0], "scope": r[4] or ""} for r in c.fetchall()]
-        except Exception:
-            pass
+                continue
+            chat_skills.append({"name": _sk, "display_name": _dn or _sk, "description": _desc,
+                                "skill_path": _path or _sk, "scope": _scope})
+    except Exception as _e:  # noqa: BLE001
+        log.warning(f"chat config: skills unavailable: {_e}")
 
     # A2 收尾：凭证状态改读 grape_t_channel_installation（legacy im_* 三列不再是真相源）
     # 按渠道分别回显：每个渠道取**该用户自己的**最新一条可用安装（active/disabled），
@@ -1505,11 +1503,9 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     skill_scope = cfg.get("skill_scope", "")
     if not skill_scope and cfg.get("skill_id"):
         try:
-            with db_lock:
-                c = db.cursor()
-                row = c.execute("SELECT scope FROM skill WHERE id=? AND is_active=1", (cfg["skill_id"],)).fetchone()
-                skill_scope = row[0] if row else ""
-        except Exception:
+            row = _rt.read_one_any("chat_skill_scope_by_id", (cfg["skill_id"],))
+            skill_scope = row[0] if row else ""
+        except Exception:  # noqa: BLE001 - 回显失败不影响配置返回
             pass
 
     backends = _chat_dedupe_backends(backends)

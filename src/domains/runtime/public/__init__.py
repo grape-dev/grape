@@ -1992,6 +1992,18 @@ _ANY_QUERIES: dict[str, str] = {
     'message_by_id': f"SELECT {_MSG_COLS} FROM chat_messages WHERE id=?",
     'message_recall': 'UPDATE chat_messages SET deleted=1 WHERE id=? AND deleted=0',
     # 任务维度取该轮全部消息（chat 任务状态/SSE 兜底：跨机器或进程重启后内存无常驻任务）
+    # chat 配置面（引擎/技能下拉）：三张表都归 runtime，mgmt 进程直查会 1146 → 下拉永远空
+    'chat_local_engines': (
+        "SELECT id, name, version, COALESCE(host_name,'') FROM agent_runtimes "
+        "WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id"),
+    'chat_user_engines': (
+        "SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id "
+        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+        "WHERE rc.scope = 'user' AND rc.status='active' AND rc.owner_name = ?"),
+    'chat_skills_all': (
+        "SELECT skill_name, display_name, description, skill_path, scope, COALESCE(owner_id,'') "
+        "FROM skill WHERE is_active=1 AND agent_type='chat' ORDER BY scope, skill_name"),
+    'chat_skill_scope_by_id': 'SELECT scope FROM skill WHERE id=? AND is_active=1',
     'messages_by_task': (
         "SELECT id, role, generate_status, content, conversation_id "
         "FROM chat_messages WHERE task_id=? ORDER BY id"),
