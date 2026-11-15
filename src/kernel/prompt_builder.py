@@ -618,24 +618,22 @@ curl -sL -X POST \\
   -d '{{"receive_id":"OPEN_ID","msg_type":"interactive","content":"{{\\"header\\":{{\\"title\\":{{\\"tag\\":\\"plain_text\\",\\"content\\":\\"DevOps Bot\\"}},\\"template\\":\\"blue\\"}},\\"elements\\":[{{\\"tag\\":\\"div\\",\\"text\\":{{\\"tag\\":\\"lark_md\\",\\"content\\":\\"MESSAGE\\"}}}}]}}"}}' \\
   "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
 
-### Save User Mapping (INSERT into unified_user_mapping)
-Use Python to save discovered mappings in the bot's sessions.db:
-  import sqlite3; db = sqlite3.connect('{DB_PATH}')
-  # FR-18.4: 约束——USER_ID 必须是真实 id（禁止 0/空串占位行）；GITCODE_USER 为空时不 UPDATE 该列
-  # D105：user_id 为 uuid 字符串，禁止数值比较（str > int 会 TypeError），用下面的字符串判空写法
-  if USER_ID and str(USER_ID) not in ("", "0"):
-    db.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (USER_ID,))
-    # S92/D68：um 平台归属列停写（分支合并——gitcode_user 不再写，feishu 照旧）
-    # S99/D74：agent 侧引导模板，语义与 channel_directory.write_back 同构（app 级成对语义见该模块）
-    db.execute("UPDATE unified_user_mapping SET feishu_open_id=?, feishu_name=?, updated_at=datetime('now') WHERE user_id=? AND (user_id IS NOT NULL AND user_id != '' AND user_id != '0')", (OPEN_ID, NAME, USER_ID))
-  db.commit(); db.close()
+### Save User Mapping
+Mappings are persisted by the platform, never by the agent's own scripts:
+  - Do NOT open sessions.db and do NOT issue raw INSERT/UPDATE against unified_user_mapping.
+    (The table is owned by the mgmt domain; historical snippets that connected to a local
+    sqlite file no longer work and contradict the access rule above.)
+  - Request persistence through the platform side channel (channel_directory write-back /
+    the mapping endpoint) if the current session exposes it.
+  - If no such tool is available, report the discovered mapping in your final answer
+    (vcs_login -> feishu open_id) so the platform can persist it; never write it yourself.
 
 ### Name Resolution Workflow
 1. Determine target user (vcs_login, e.g. "Jason7602")
 2. If in Known Mappings -> use open_id directly, send notification
 3. Else: find user's nick_name from Collaborators list above
 4. Match nick_name against Group Members name -> get open_id
-5. Match found -> save to unified_user_mapping -> send notification
+5. Match found -> hand the mapping to the platform for persistence -> send notification
    6. Match not found -> notify Owner: "{{login}}({{nick_name}})" in Feishu group, ask to check nickname consistency
 7. Card content rules: max 2000 chars, no ```code blocks, use [text](url) for links
 """)

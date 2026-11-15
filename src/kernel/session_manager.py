@@ -119,12 +119,24 @@ else:
     except Exception as e:
         log.warning(f"Schema mode wrap failed (fallback to plain sqlite): {e}")
 # chat_agent_session / repo_im_group_binding 归运行域：旧表迁移、建表、兼容列补齐语句只在
-# runtime public 一份，本处只交出本进程连接做本地库引导（单库/视图期建在本库；
-# 三库独立后由 runtime 进程自己引导，kernel 不再持有这两张表的 DDL）。
-_rt.ensure_chat_session_schema(db)
-# unified_user_mapping 归 mgmt 域：同上，建表/兼容列/回填由该域 public 引导。
-_mgmt_public.ensure_user_mapping_schema(db)
-_rt.ensure_repo_im_binding_schema(db)
+# runtime public 一份。
+# unified_user_mapping 归 mgmt 域：同上，由该域 public 引导。
+#
+# 三库独立（GRAPE_DOMAIN_LIB=1）时必须按**本进程所属域**分流：历史实现不分进程，把三张表
+# 全建到本进程库里，于是 mgmt 的表在 runtime / insight 库里也各留一份旧 schema
+# （user_id int）空表 —— 表归属排查会被它误导，删掉重启又会重新长回来。
+# 单库 / 测试拓扑（无当前域）保持原行为：全建，避免测试库缺表。
+try:
+    from src.kernel import db_registry as _dbreg
+    _proc_dom = _dbreg.current_domain() if _dbreg.lib_enabled() else None
+except Exception:
+    _proc_dom = None
+
+if _proc_dom in (None, "", "runtime"):
+    _rt.ensure_chat_session_schema(db)
+    _rt.ensure_repo_im_binding_schema(db)
+if _proc_dom in (None, "", "mgmt"):
+    _mgmt_public.ensure_user_mapping_schema(db)
 db.commit()
 
 MAX_HISTORY = 100

@@ -225,7 +225,8 @@ def main(argv: list[str] | None = None) -> int:
     cross_total = sum(cross_pairs(rows).values())
     print(f"tables={len(rows)} sql_references={total} cross_domain_refs={cross_total} "
           f"pairs={len(cross_pairs(rows))} baseline={baseline_path}"
-          f"{' (missing)' if not base else ''}")
+          # 只有表头的基线是清零后的合法终态，不能标 (missing) —— 那会让人以为文件丢了
+          f"{' (missing)' if not baseline_path.exists() else ''}")
 
     if args.update_baseline:
         if base:
@@ -240,7 +241,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.check:
-        if not base:
+        # 只有表头的基线是**合法**状态（跨域引用清零后的目标形态），不能当成文件缺失：
+        # 否则清零之后棘轮会静默失效，未来新增跨域引用也没人拦。
+        if not baseline_path.exists():
             print(f"基线文件不存在：{baseline_path}", file=sys.stderr)
             return 2
         violations, improvements = check(rows, base)
