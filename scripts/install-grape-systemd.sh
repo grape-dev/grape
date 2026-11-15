@@ -14,7 +14,7 @@
 #
 # 用法（需要 root）：
 #   sudo scripts/install-grape-systemd.sh --3db-env /home/grape/.grape-rds-stage.env
-#   sudo scripts/install-grape-systemd.sh --3db-env /etc/grape/grape-3db.env --node-ip 10.0.0.11
+#   sudo scripts/install-grape-systemd.sh --3db-env <3db-env-file> --node-ip <node-lan-ip>
 #   sudo scripts/install-grape-systemd.sh --dry-run
 #
 # 回滚（回到 nohup 方式）：

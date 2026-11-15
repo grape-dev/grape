@@ -95,8 +95,9 @@ def current_domain() -> str | None:
 def lib_enabled() -> bool:
     """跨域 lib 模式是否启用。
 
-    口径改为「**有 DSN 就算启用**」：三库部署先把文件放到 /etc/grape/grape-3db.env
-    并让进程看到 GRAPE_DSN_*，能力就有了，不该再额外要求一个 GRAPE_DOMAIN_LIB=1。
+    口径改为「**有 DSN 就算启用**」：三库部署先把 DSN 文件放到约定的 systemd env 路径
+    （GRAPE_3DB_ENV 指向它）并让进程看到 GRAPE_DSN_*，能力就有了，不该再额外要求一个
+    GRAPE_DOMAIN_LIB=1。
     少一个开关 = 少一个漏配点（这个开关漏配的后果尤其阴险：*_any 全部静默回落到
     进程主库，三库看起来"照常工作"，直到某个跨域查询撞上 1146）。
 

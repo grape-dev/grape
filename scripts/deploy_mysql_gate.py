@@ -413,7 +413,7 @@ def _chat_smoke(base_url: str) -> None:
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     timeout = int(os.environ.get("GRAPE_GATE_HTTP_TIMEOUT", "10"))
-    code, out = mod.check(base_url, os.environ.get("GRAPE_SMOKE_ACCOUNT", "songspace"),
+    code, out = mod.check(base_url, os.environ.get("GRAPE_SMOKE_ACCOUNT", "smoke-test-account"),
                           mod.DEFAULT_MESSAGE, True, timeout)
     if code == mod.EXIT_FAIL:
         raise GateError(f"chat 写路径冒烟失败：status={out.get('submit_status')} "

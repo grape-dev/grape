@@ -44,8 +44,8 @@ class RuntimeClient:
     def __init__(self, server: str, token: str, max_connections: int | None = None,
                  timeout: float = 30.0):
         # 池子默认 10 太窄：长任务一次批量上报几百条消息就会占满，心跳、claim、tags
-        # 全部排队到 sock_read 超时 → 引擎被判失联（2026-11-15 h116-grape 实测，
-        # 同机的 orgtest 因为没有长任务所以正常）。默认放宽到 30，env 可调。
+        # 全部排队到 sock_read 超时 → 引擎被判失联（2026-11-15 远端主机实测，
+        # 同机的另一租户因为没有长任务所以正常）。默认放宽到 30，env 可调。
         if max_connections is None:
             try:
                 max_connections = int(os.environ.get("RUNTIME_CLIENT_MAX_CONNECTIONS", "30"))
@@ -217,7 +217,7 @@ class RuntimeClient:
 
         claim / claim_by_tag / get_tags 每轮循环都要发一次，用默认 30s 超时的话，
         一次失败就吃掉两个心跳周期；多个 rid × 多个 tag 串行叠加，主循环会被拖到
-        分钟级，心跳协程完全饿死（实测 h116-grape / orgtest 心跳长期 149-157s，
+        分钟级，心跳协程完全饿死（实测远端两个凭据的心跳长期 149-157s，
         而同一端点的直接压测只要 0.05s）。轮询失败要快速失败、下一轮再来。
         """
         import aiohttp

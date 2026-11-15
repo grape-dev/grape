@@ -43,7 +43,7 @@ def _runtime_cursor():
     agent 的高频端点（心跳、标签、认领）不能挂在进程级 db_lock 上：sweeper 持锁做
     整表扫描时，这些请求全部排队到客户端 sock_read 超时，表现为「引擎经常失联」
     （心跳连续失败三次即 offline），而不是“服务变慢”。实测 2026-11-15：
-    h116-grape / orgtest 两个凭据的四个引擎心跳长期停在 137s。
+    远端两个凭据下的四个引擎心跳长期停在 137s（实测）。
     """
     if _dbreg.uses_own_dsn("runtime"):
         # 必须是**独立连接**：db_registry.cursor() 在同域时复用 session_manager.db

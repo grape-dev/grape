@@ -131,7 +131,7 @@ mgmt 在兄弟节点 `:3311`、insight 在兄弟节点 `:3312`、runtime 在本�
 | skill sync | `remote done` → `obs sync done` 正常 |
 | scene sync | `Scene sync done: added=0 updated=0 skipped=14 failed=0` |
 | runtime MySQL 连接 | 峰值 91 / 500，`Connection_errors_max_connections=0` |
-| GSB 注册 | `mgmt@hd002 base_url=http://<本机私网 IP>:38081` |
+| GSB 注册 | `mgmt@<node-a> base_url=http://<本机私网 IP>:38081` |
 
 ## 4. `grape_stage_mgmt` 缺表的处置（2026-11-15 补做）
 

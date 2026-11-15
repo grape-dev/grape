@@ -26,7 +26,9 @@ case "$role" in
 esac
 export DEVOPS_DB_NAME="$_db_name"
 export DEVOPS_DB_USER="$_db_user"
-export DEVOPS_DB_PASSWORD="${GRAPE_DOMAIN_DB_PASSWORD:-Grape@123}"
+# 库口令必须由环境显式提供：内置默认值等于把生产口令写进公开仓库。
+: "${GRAPE_DOMAIN_DB_PASSWORD:?GRAPE_DOMAIN_DB_PASSWORD 未设置：单库分支需要显式提供库口令（不允许内置默认值）}"
+export DEVOPS_DB_PASSWORD="$GRAPE_DOMAIN_DB_PASSWORD"
 
 PY="$REPO_ROOT/venv/bin/python"
 [ -x "$PY" ] || { echo "missing venv python: $PY" >&2; exit 3; }
@@ -79,7 +81,8 @@ else
     esac
     export DEVOPS_DB_NAME="$_db_name"
     export DEVOPS_DB_USER="$_db_user"
-    export DEVOPS_DB_PASSWORD="${GRAPE_DOMAIN_DB_PASSWORD:-Grape@123}"
+    : "${GRAPE_DOMAIN_DB_PASSWORD:?GRAPE_DOMAIN_DB_PASSWORD 未设置：单库分支需要显式提供库口令（不允许内置默认值）}"
+    export DEVOPS_DB_PASSWORD="$GRAPE_DOMAIN_DB_PASSWORD"
 fi
 
 # GSB 注册地址必须是其它节点可达的地址：留空时客户端回落 127.0.0.1，

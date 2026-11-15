@@ -226,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="发布后冒烟：/api/chat/submit 断言 200 + task_id")
     ap.add_argument("--base-url", default=os.environ.get("GRAPE_SMOKE_BASE_URL",
                                                         "http://127.0.0.1:38081"))
-    ap.add_argument("--account", default=os.environ.get("GRAPE_SMOKE_ACCOUNT", "songspace"))
+    ap.add_argument("--account", default=os.environ.get("GRAPE_SMOKE_ACCOUNT", "smoke-test-account"))
     ap.add_argument("--message", default=DEFAULT_MESSAGE)
     ap.add_argument("--timeout", type=float, default=float(os.environ.get("GRAPE_SMOKE_TIMEOUT", "20")))
     ap.add_argument("--no-recall", action="store_true", help="不撤回这轮消息（会真的跑 agent）")

@@ -1648,7 +1648,7 @@ async def scheduler_loop():
                 # 这些调用都是同步 pymysql：直接在事件循环里跑会把整个 worker 卡住
                 # （health 不响应、心跳落不了库、引擎被判失联）。2026-11-15 实测：
                 # MainThread 停在 _reap_zombie_executions，本机 worker 38083 全部端点超时，
-                # 116 的心跳经网关落到它身上一起挂住，表现为 h116-grape 失联。
+                # 远端心跳经网关落到它身上一起挂住，表现为该凭据失联。
                 tasks = await asyncio.to_thread(_get_enabled_tasks)
                 for task in tasks:
                     task_id = task["id"]
