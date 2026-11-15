@@ -57,6 +57,11 @@ class _DomainDbProxy:
 
     def cursor(self, *a, **kw):
         from src.kernel import db_registry
+        # 本进程主库已经是 runtime 库时直接用主库：session_manager.db 是成熟的
+        # MySQL 兼容层（方言翻译 + 连接池），换轻量连接只会引入方言差异。
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.cursor(*a, **kw)
         if db_registry.uses_own_dsn("runtime"):
             # 每次取一条独立连接：共享连接绑线程，跨线程复用会 InterfaceError(0, '')
             _conn = db_registry.new_connection("runtime")

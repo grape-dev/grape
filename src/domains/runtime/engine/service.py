@@ -13,6 +13,75 @@ from src.api.time_utils import normalize_event_time
 from src.kernel.token_service import is_auth_401_error
 
 
+class _OwnedCursor:
+    """自带连接的游标：close 时把连接一并关掉。"""
+
+    def __init__(self, conn, cursor):
+        self._conn = conn
+        self._cur = cursor
+
+    def __getattr__(self, item):
+        return getattr(self._cur, item)
+
+    def close(self):
+        try:
+            self._cur.close()
+        finally:
+            try:
+                self._conn.close()
+            except Exception as _e:
+                log.debug(f"cursor close failed: {_e}")
+
+
+class _DomainDbProxy:
+    """把 `db.cursor()` / `db.commit()` / `db.rollback()` 代理到 runtime 域连接。
+
+    agent_tasks / agent_runtimes / devops_agent_session 都在 runtime 域，但本模块也被 mgmt
+    进程调用（建单触发流水线、入队任务）。三库模式下 mgmt 主库是本域库，直连会撞「表不存在」，
+    任务入不了队、需求看起来「创建了但没跑」。单库/测试拓扑回落进程库并保留显式提交语义。
+    """
+
+    def cursor(self, *a, **kw):
+        from src.kernel import db_registry
+        # 本进程主库已经是 runtime 库时直接用主库：session_manager.db 是成熟的
+        # MySQL 兼容层（方言翻译 + 连接池），换轻量连接只会引入方言差异。
+        if db_registry.current_domain() == "runtime":
+            from src.kernel.session_manager import db as _main
+            return _main.cursor(*a, **kw)
+        if db_registry.uses_own_dsn("runtime"):
+            _conn = db_registry.new_connection("runtime")
+            return _OwnedCursor(_conn, _conn.cursor(*a, **kw))
+        from src.kernel.session_manager import db as _main
+        return _main.cursor(*a, **kw)
+
+    def commit(self):
+        from src.kernel import db_registry
+        if db_registry.uses_own_dsn("runtime"):
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.commit()
+
+    def rollback(self):
+        from src.kernel import db_registry
+        if db_registry.uses_own_dsn("runtime"):
+            try:
+                db_registry.domain_db("runtime").rollback()
+            except Exception as _e:
+                log.debug(f"domain rollback failed: {_e}")
+            return None
+        from src.kernel.session_manager import db as _main
+        return _main.rollback()
+
+    def __getattr__(self, item):
+        from src.kernel.session_manager import db as _main
+        return getattr(_main, item)
+
+
+_rt_db = _DomainDbProxy()
+
+
+
+
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用
 from src.domains.mgmt.user.db import get_task_token as _get_task_token
 
@@ -56,7 +125,7 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
     _repo_norm = (from_repo_key(repo_key) or "").strip()
     for eid in engine_ids:
         try:
-            c = db.cursor()
+            c = _rt_db.cursor()
             # 健康可达判定统一走唯一真源 engine_health_ok（Issue #592/#259/#1487，对齐 origin/weekly-10）：
             # 禁止在此复制判定——#1487 的根因就是派发侧与认领侧各拿一把尺子（派发说健康、认领说失联，
             # 任务入队即判死）。本机直连（credential_id=0）按 installed+healthy，不判心跳新鲜度：
@@ -165,7 +234,7 @@ def _fail_task_pool_unreachable(c, task_id: str, engine_ids: list, pool_tag: str
             "WHERE id=? AND status='queued'",
             (_reason, _now, task_id))
         if c.rowcount:
-            db.commit()
+            _rt_db.commit()
             log.warning(f"task {task_id} failed: pool engines {engine_ids} all unreachable (Issue #253)")
             # 同步事件终态（模式同回收逻辑：防事件永远 running）；
             # Issue #369：走 _sync_event_failed 完整回写 result/exit_code/completed_at
@@ -176,7 +245,7 @@ def _fail_task_pool_unreachable(c, task_id: str, engine_ids: list, pool_tag: str
     except Exception as _e:
         log.warning(f"_fail_task_pool_unreachable failed for task {task_id}: {_e}")
         try:
-            db.rollback()
+            _rt_db.rollback()
         except Exception:
             pass
 
@@ -210,7 +279,7 @@ def _fail_task_pool_unhealthy(c, task_id: str, engine_ids: list, waited_seconds:
             "WHERE id=? AND status='queued'",
             (_reason, _now, task_id))
         if c.rowcount:
-            db.commit()
+            _rt_db.commit()
             log.warning(f"task {task_id} failed: pool engines {engine_ids} unhealthy "
                         f"after {waited_seconds}s wait (Issue #253)")
             c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
@@ -221,7 +290,7 @@ def _fail_task_pool_unhealthy(c, task_id: str, engine_ids: list, waited_seconds:
     except Exception as _e:
         log.warning(f"_fail_task_pool_unhealthy failed for task {task_id}: {_e}")
         try:
-            db.rollback()
+            _rt_db.rollback()
         except Exception:
             pass
 
@@ -283,7 +352,7 @@ def runtime_credential_id(runtime_id: int):
         return None
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             c.execute("SELECT credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
             row = c.fetchone()
         return (row[0] or 0) if row else None
@@ -355,7 +424,7 @@ def _remote_runtime_ready(runtime_id: int) -> bool:
         from src.domains.runtime.engine.health import parse_dt
         now = time.time()
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             c.execute("SELECT status, last_seen_at, credential_id FROM agent_runtimes WHERE id=?", (runtime_id,))
             row = c.fetchone()
         if not row:
@@ -368,7 +437,7 @@ def _remote_runtime_ready(runtime_id: int) -> bool:
             return False
         if cid:
             with db_lock:
-                c = db.cursor()
+                c = _rt_db.cursor()
                 c.execute("SELECT status FROM runtime_credentials WHERE id=?", (cid,))
                 cred = c.fetchone()
             if cred and cred[0] != "active":
@@ -455,15 +524,27 @@ def _table_columns(table: str) -> set:
     以 db 对象身份（id()）为缓存键，db 变更即整体失效。
     """
     global _TABLE_COLS_CACHE_DB_ID
-    if id(db) != _TABLE_COLS_CACHE_DB_ID:
+    from src.kernel import db_registry as _dbr
+    _cache_key = (id(db), _dbr.uses_own_dsn("runtime"))
+    if _cache_key != _TABLE_COLS_CACHE_DB_ID:
         _TABLE_COLS_CACHE.clear()
-        _TABLE_COLS_CACHE_DB_ID = id(db)
+        _TABLE_COLS_CACHE_DB_ID = _cache_key
     _cached = _TABLE_COLS_CACHE.get(table)
     if _cached is not None:
         return _cached
     try:
-        _rows = db.cursor().execute(f"PRAGMA table_info({table})").fetchall()
-        _col = {r[1] for r in _rows}
+        _cur = _rt_db.cursor()
+        # MySQL 拓扑走 SHOW COLUMNS（PRAGMA 是 sqlite 语法，在 MySQL 下必然失败——
+        # 失败被吞成空集时 INSERT 会缺列，任务入队报 1364 "Field 'id' doesn't have a default value"）
+        # 注意：自有 DSN 的游标 execute() 返回 rowcount（int），不能链式 .fetchall()。
+        try:
+            _cur.execute(f"SHOW COLUMNS FROM {table}")
+            _rows = _cur.fetchall()
+            _col = {r[0] for r in _rows}
+        except Exception:
+            _cur.execute(f"PRAGMA table_info({table})")
+            _rows = _cur.fetchall()
+            _col = {r[1] for r in _rows}
     except Exception:
         _col = set()
     _TABLE_COLS_CACHE[table] = _col
@@ -1033,7 +1114,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         _task_span = None
         _task_trace_context = ""
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         _avail = _table_columns("agent_tasks")
         _insert_cols = [x for x in _TASK_COLUMNS_LIST if x not in _TASK_SIGNAL_COLUMNS and x in _avail]
         _insert_vals = {
@@ -1069,7 +1150,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             f"INSERT INTO agent_tasks ({', '.join(_insert_cols)}) VALUES ({','.join(['?'] * len(_insert_cols))})",
             [_insert_vals[x] for x in _insert_cols],
         )
-        db.commit()
+        _rt_db.commit()
     from src.domains.runtime.engine.instances import runtime_instance_name
     _inst = runtime_instance_name(runtime_id)
     log.info(f"Task enqueued: {task_id} agent={agent_type} repo={repo_key} issue={issue_id or '-'} skill={skill} runtime={runtime_id}({_inst}) session={agent_session_id}")
@@ -1106,20 +1187,20 @@ def set_agent_pool(agent_type: str, runtime_ids: list[int], weight: int = 1, pri
     if not agent_type:
         raise ValueError("agent_type is required")
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("DELETE FROM agent_type_runtime_pool WHERE agent_type=?", (agent_type,))
         for rid in (runtime_ids or []):
             c.execute(
                 "INSERT OR IGNORE INTO agent_type_runtime_pool (agent_type, runtime_id, weight, priority) VALUES (?,?,?,?)",
                 (agent_type, int(rid), int(weight), int(priority)))
-        db.commit()
+        _rt_db.commit()
     log.info(f"Agent pool set: {agent_type} -> {runtime_ids or []} (weight={weight}, priority={priority})")
 
 
 def get_agent_pool(agent_type: str) -> list[dict]:
     """返回某 Agent 类型的引擎池绑定（含引擎实时状态，供管理端/调度展示）。"""
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         try:
             c.execute(
                 "SELECT p.runtime_id, p.weight, p.priority, p.enabled, p.remark, "
@@ -1151,7 +1232,7 @@ def pool_runtime_ids(agent_type: str) -> list[int]:
     （issue #41 卡住根因：池绑定 runtime 9/12/18 全部 offline，任务挂起）。
     """
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         try:
             c.execute(
                 "SELECT p.runtime_id FROM agent_type_runtime_pool p "
@@ -1185,7 +1266,7 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
     默认 False，行为与历史完全一致。
     """
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         try:
             # ---- 兜底回收（M1：dispatched 超时自动重排，防 worker 丢弃任务死循环）----
             # worker 端 max_concurrent 满时 claim 后可能丢弃任务（不 start 不释放），
@@ -1337,7 +1418,7 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
                     """)
                     row = c.fetchone()
             if not row:
-                db.commit()
+                _rt_db.commit()
                 return None
             task_id = row[0]
 
@@ -1418,12 +1499,12 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
                         )
                         row = c.fetchone()
                     if not row:
-                        db.commit()
+                        _rt_db.commit()
                         return None
                 task_id = row[0]
                 _tried_ids.append(task_id)
                 if len(_tried_ids) >= _max_tries:
-                    db.commit()
+                    _rt_db.commit()
                     return None
             c.execute(
                 "UPDATE agent_tasks SET status='running', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
@@ -1434,7 +1515,8 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
                 refresh_busy_snapshot(runtime_id, cursor=c)
                 # 方案 E：真正被引擎认领才把事件置 running（入队时是 pending）
                 try:
-                    _evt_seq = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                    c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
+                    _evt_seq = c.fetchone()
                     if _evt_seq and _evt_seq[0]:
                         c.execute(
                             "UPDATE events SET status='running', completed_at='' "
@@ -1442,10 +1524,10 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
                             (_evt_seq[0],))
                 except Exception as _ee:
                     log.warning(f"claim: sync event running failed for task {task_id}: {_ee}")
-            db.commit()
+            _rt_db.commit()
         except Exception as e:
             log.warning(f"claim failed: {e}")
-            db.rollback()
+            _rt_db.rollback()
             return None
         if not claimed:
             return None
@@ -1481,10 +1563,10 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
                 try:
                     from src.domains.runtime.engine.instances import runtime_instance_name as _rin
                     with db_lock:
-                        c = db.cursor()
+                        c = _rt_db.cursor()
                         c.execute("UPDATE events SET runtime=? WHERE seq=?",
                                   (_rin(runtime_id), task["event_seq"]))
-                        db.commit()
+                        _rt_db.commit()
                 except Exception as e:
                     log.warning(f"claim backfill event runtime failed: {e}")
         from src.domains.runtime.engine.instances import runtime_instance_name
@@ -1542,7 +1624,7 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
 
 def get_task(task_id) -> dict | None:
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         _cols = [x for x in _TASK_COLUMNS_LIST if x in _table_columns("agent_tasks")]
         c.execute(f"SELECT {', '.join(_cols)} FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
@@ -1582,7 +1664,7 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
     scope=user   → 只认领该用户创建的 queued 任务
     """
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         try:
             # 1. 校验标签能力 + 获取引擎 scope
             # 标签匹配：精确 tag OR "all"（all 可认领任意 pool_tag 任务）
@@ -1817,7 +1899,8 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                 refresh_busy_snapshot(runtime_id, cursor=c)
                 # 方案 E：真正被引擎认领才把事件置 running（入队时是 pending）
                 try:
-                    _evt_seq = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                    c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
+                    _evt_seq = c.fetchone()
                     if _evt_seq and _evt_seq[0]:
                         c.execute(
                             "UPDATE events SET status='running', completed_at='' "
@@ -1825,10 +1908,10 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                             (_evt_seq[0],))
                 except Exception as _ee:
                     log.warning(f"claim_by_tag: sync event running failed for task {task_id}: {_ee}")
-            db.commit()
+            _rt_db.commit()
         except Exception as e:
             log.warning(f"claim_by_tag failed: {e}")
-            db.rollback()
+            _rt_db.rollback()
             return None
     if not claimed:
         return None
@@ -1862,9 +1945,9 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             try:
                 from src.domains.runtime.engine.instances import runtime_instance_name as _rin
                 with db_lock:
-                    c = db.cursor()
+                    c = _rt_db.cursor()
                     c.execute("UPDATE events SET runtime=? WHERE seq=?", (_rin(runtime_id), task["event_seq"]))
-                    db.commit()
+                    _rt_db.commit()
             except Exception:
                 pass
     from src.domains.runtime.engine.instances import runtime_instance_name
@@ -1916,9 +1999,9 @@ def refresh_busy_snapshot(runtime_id: int, cursor=None):
         return
     from src.kernel.session_manager import db as _db, db_lock as _dl
     with _dl:
-        _n = _real_active_count(_db.cursor(), runtime_id)
-        _db.cursor().execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?", (_n, runtime_id))
-        _db.commit()
+        _n = _real_active_count(__rt_db.cursor(), runtime_id)
+        __rt_db.cursor().execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?", (_n, runtime_id))
+        __rt_db.commit()
 
 
 def release_busy_slot(runtime_id, cursor=None):
@@ -1937,8 +2020,8 @@ def release_busy_slot(runtime_id, cursor=None):
         return
     from src.kernel.session_manager import db as _db, db_lock as _dl
     with _dl:
-        _db.cursor().execute(_BUSY_SLOT_DECREMENT_SQL, (runtime_id,))
-        _db.commit()
+        __rt_db.cursor().execute(_BUSY_SLOT_DECREMENT_SQL, (runtime_id,))
+        __rt_db.commit()
 
 
 # ===== Issue #1071：重启后「活着却被判死」——活性判定 · 回炉守卫 · 迟到复活 =====
@@ -1984,7 +2067,7 @@ def task_last_activity(task_id) -> float | None:
     """
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             rows = c.execute(
                 "SELECT created_at FROM task_messages WHERE task_id=? ORDER BY id DESC LIMIT 20",
                 (task_id,)
@@ -2056,7 +2139,8 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
     返回 True 表示本次发生收敛。
     """
     try:
-        row = cursor.execute("SELECT status FROM events WHERE seq=?", (event_seq,)).fetchone()
+        cursor.execute("SELECT status FROM events WHERE seq=?", (event_seq,))
+        row = cursor.fetchone()
         if not row:
             return False
         if row[0] in _TERMINAL_STATUSES:
@@ -2116,7 +2200,7 @@ def mark_task_takeover(task_id: str) -> dict:
     if not seq:
         return {"status": "no_event", "task_id": task_id}
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT status FROM events WHERE seq=?", (seq,))
         row = c.fetchone()
         if not row:
@@ -2125,7 +2209,7 @@ def mark_task_takeover(task_id: str) -> dict:
         # completed_at 必须清掉：cancel 时已经写过完成时间，
         # 留着会让「接管中」的事件看起来已经结束。
         c.execute("UPDATE events SET status='takeover', completed_at='' WHERE seq=?", (seq,))
-        db.commit()
+        _rt_db.commit()
     return {"status": "marked", "task_id": task_id, "event_seq": seq,
             "before": before, "after": "takeover"}
 
@@ -2147,13 +2231,13 @@ def converge_event_to_task(task_id: str) -> dict:
         return {"status": "task_not_terminal", "task_id": task_id,
                 "task_status": _task_status, "event_seq": _seq}
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT status FROM events WHERE seq=?", (_seq,))
         row = c.fetchone()
         before = row[0] if row else "(missing)"
         converged = _cascade_event_terminal(c, _seq, _task_status,
                                             exit_code=task.get("exit_code"))
-        db.commit()
+        _rt_db.commit()
     # Issue #1667：直接 SQL 收敛终态后补挂排队 drain（旁路兜底）
     if converged:
         try:
@@ -2170,7 +2254,7 @@ def converge_event_to_task(task_id: str) -> dict:
 def update_task_status(task_id, status, **kw):
     """终态幂等(重放安全): 已终态则不再更新(见 tech-impl 2.2)."""
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
         if not row:
@@ -2193,7 +2277,8 @@ def update_task_status(task_id, status, **kw):
         # 方案 E：任务真正开始执行（running）→ 事件 pending→running（与 claim 认领语义一致）
         if status == "running":
             try:
-                _evt_seq = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
+                _evt_seq = c.fetchone()
                 if _evt_seq and _evt_seq[0]:
                     c.execute(
                         "UPDATE events SET status='running', completed_at='' "
@@ -2220,7 +2305,7 @@ def update_task_status(task_id, status, **kw):
                                  f"{status} for task {task_id} (Issue #587 convergence)")
             except Exception as _ce:
                 log.warning(f"update_task_status: terminal cascade failed for task {task_id}: {_ce}")
-        db.commit()
+        _rt_db.commit()
     # Issue #1667：任务级联写终态是「绕过 update_event_status/complete」的直接 SQL 旁路，
     # 排队 A2A 事件不会收到终态钩子 → 在此补挂 drain，避免 queued 永久滞留。
     if _cascaded_seq:
@@ -2259,7 +2344,7 @@ def requeue_task(task_id):
     既不被执行也不重新排队 → 永久卡死。客户端冲突时应调本函数回滚。
     """
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         # 释放槽位（根因2修复）：requeue 前先查 runtime_id，requeue 后 busy_slots-1
         c.execute("SELECT runtime_id, status FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
@@ -2279,21 +2364,22 @@ def requeue_task(task_id):
         # 方案 E：任务回落 queued → 事件同步回 pending（语义：尚未被认领）
         if ret:
             try:
-                _evt_seq = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
+                _evt_seq = c.fetchone()
                 if _evt_seq and _evt_seq[0]:
                     c.execute(
                         "UPDATE events SET status='pending' WHERE seq=? AND status IN ('running','pending')",
                         (_evt_seq[0],))
             except Exception as _e:
                 log.warning(f"requeue_task: sync event pending failed for task {task_id}: {_e}")
-        db.commit()
+        _rt_db.commit()
         return ret
 
 
 def peek_next_seq(task_id) -> int:
     """预读 task 下一个可用 seq（MAX+1）。Issue #975：路由层预留下列 seq 范围作回执。"""
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
         return (c.fetchone()[0] or 0) + 1
 
@@ -2355,7 +2441,7 @@ def report_messages(task_id, messages, seq_start: int | None = None) -> dict | N
             if _logs:
                 from src.kernel.session_manager import db as _edb, db_lock as _edbl
                 with _edbl:
-                    _c2 = _edb.cursor()
+                    _c2 = _rt_db.cursor()
                     _c2.execute(
                         "SELECT agent_logs FROM events WHERE seq=?",
                         (task["event_seq"],))
@@ -2368,7 +2454,7 @@ def report_messages(task_id, messages, seq_start: int | None = None) -> dict | N
                     _c2.execute(
                         "UPDATE events SET agent_logs=? WHERE seq=?",
                         (_json.dumps(_prev + _logs, ensure_ascii=False), task["event_seq"]))
-                    _edb.commit()
+                    _rt_db.commit()
         except Exception as e:
             log.warning(f"report_messages events.agent_logs failed: {e}")
     # 结构化落库（task_messages，双后端一致；seq 服务端生成 MAX+1，UNIQUE 防重放）
@@ -2381,7 +2467,7 @@ def report_messages(task_id, messages, seq_start: int | None = None) -> dict | N
     if _persistable:
         try:
             with db_lock:
-                c = db.cursor()
+                c = _rt_db.cursor()
                 if seq_start is not None:
                     seq = int(seq_start)
                 else:
@@ -2415,7 +2501,7 @@ def report_messages(task_id, messages, seq_start: int | None = None) -> dict | N
                     # 透传 seq 给 fanout（done 终态消息 _to_payload 返回 None 不会推送，但 seq 仍记录）
                     _seq_messages.append({**m, "seq": seq})
                     seq += 1
-                db.commit()
+                _rt_db.commit()
                 _receipt = {"count": len(_seq_messages), "seq_start": _seq_first,
                             "seq_end": _seq_messages[-1].get("seq")}
                 # Issue #975：批次回执日志（seq 起止 + 条数）——master 侧对账凭证
@@ -2468,7 +2554,7 @@ def list_task_messages(task_id, since: int = 0, limit: int = 5000) -> list[dict]
     import json as _json
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             c.execute(
                 "SELECT seq, type, tool, content, input_json, output, created_at FROM task_messages "
                 "WHERE task_id=? AND seq>? ORDER BY seq LIMIT ?",
@@ -2502,7 +2588,7 @@ def list_task_messages_recent(task_id, limit: int = 200) -> list[dict]:
     import json as _json
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             c.execute(
                 "SELECT seq, type, tool, content, input_json, output, created_at FROM task_messages "
                 "WHERE task_id=? ORDER BY seq DESC LIMIT ?",
@@ -2556,7 +2642,7 @@ def list_wrote_files(task_id) -> list[dict]:
     import json as _json
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             c.execute("SELECT COALESCE(MAX(seq), 0) FROM task_messages WHERE task_id=?",
                       (task_id,))
             _max_seq = int(c.fetchone()[0] or 0)
@@ -2611,9 +2697,9 @@ def report_progress(task_id, progress):
         return
     p = progress or {}
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute("UPDATE agent_tasks SET result_text=? WHERE id=?", (str(p.get("msg", "")), task_id))
-        db.commit()
+        _rt_db.commit()
 
 
 def _detect_business_failure(agent_type, output, result_text):
@@ -2945,7 +3031,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
                 try:
                     from src.kernel.session_manager import db as _db, db_lock as _dl, add_message as _am
                     with _dl:
-                        _c = _db.cursor()
+                        _c = __rt_db.cursor()
                         _c.execute("SELECT conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
                                    (_repo_key, _issue_num))
                         _row = _c.fetchone()
@@ -3025,14 +3111,14 @@ def set_task_signal(task_id: str, signal: str, result_text: str = "") -> bool:
         return False
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             if signal == "self_reported":
                 c.execute("UPDATE agent_tasks SET self_reported=1, result_text=? "
                           "WHERE id=? AND self_reported=0", (result_text or "", task_id))
             else:
                 c.execute("UPDATE agent_tasks SET stream_ended=1 WHERE id=? AND stream_ended=0", (task_id,))
             _first = c.rowcount > 0
-            db.commit()
+            _rt_db.commit()
         return _first
     except Exception as e:
         log.warning(f"set_task_signal({signal}) failed for {task_id}: {e}")
@@ -3126,7 +3212,7 @@ def revive_timeout_task(task_id, result_text: str = "", exit_code: int = 0,
                      f"(window={TIMEOUT_REVIVE_WINDOW_SECONDS}s)")
             return False
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute(
             "UPDATE agent_tasks SET status='running', completed_at=NULL, exit_code=NULL, "
             "revived_at=? WHERE id=? AND status='timeout_failed' "
@@ -3134,7 +3220,7 @@ def revive_timeout_task(task_id, result_text: str = "", exit_code: int = 0,
             (datetime.now(timezone.utc).isoformat(), task_id)
         )
         _ok = c.rowcount > 0
-        db.commit()
+        _rt_db.commit()
     if not _ok:
         log.info(f"revive skipped: task {task_id} changed state concurrently")
         return False
@@ -3177,7 +3263,7 @@ def enrich_task_on_late_report(task_id: str, result_text: str = "") -> str:
             # 已落 event 结构化 → 幂等 already
             try:
                 with db_lock:
-                    _r = db.cursor().execute(
+                    _r = _rt_db.cursor().execute(
                         "SELECT structured_output FROM events WHERE seq=?", (_event_seq,)).fetchone()
                 if _r and (_r[0] or "").strip() not in ("", "null"):
                     return "already"
@@ -3198,7 +3284,7 @@ def _set_task_late_result(task_id: str, task: dict, result_text: str, status: st
     """补挂/提升：更新 agent_tasks 与关联 event 的结果存储（无副作用重放）。"""
     _now_iso = datetime.now(timezone.utc).isoformat()
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         c.execute(
             "UPDATE agent_tasks SET status=?, result_text=?, exit_code=CASE WHEN ?='completed' THEN 0 ELSE exit_code END, "
             "completed_at=? WHERE id=? AND status IN ('completed','failed')",
@@ -3208,7 +3294,7 @@ def _set_task_late_result(task_id: str, task: dict, result_text: str, status: st
             c.execute(
                 "UPDATE events SET status=?, structured_output=?, result=?, completed_at=? WHERE seq=?",
                 (status, result_text, result_text, _now_iso, _event_seq))
-        db.commit()
+        _rt_db.commit()
     log.info(f"task {task_id} late self-report: {status} + structured attached (enrich)")
 
 
@@ -3225,7 +3311,7 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     try:
         from src.kernel.session_manager import db as _rdb, db_lock as _rdb_lock
         with _rdb_lock:
-            c = _rdb.cursor()
+            c = _r_rt_db.cursor()
             c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
             _trow = c.fetchone()
             _task_prompt = _trow[0] if _trow else ""
@@ -3255,7 +3341,7 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     try:
         from src.kernel.session_manager import db as _evdb, db_lock as _evdb_lock
         with _evdb_lock:
-            _ec = _evdb.cursor()
+            _ec = _ev_rt_db.cursor()
             _ec.execute(
                 "SELECT actor FROM events WHERE repo_key=? AND issue_id=? AND actor!='' "
                 "ORDER BY seq ASC LIMIT 1",
@@ -3342,8 +3428,9 @@ def _task_errors_json(task_id):
     """读取 agent_tasks.errors 的 JSON 列表（异常回退空列表）。"""
     try:
         with db_lock:
-            c = db.cursor()
-            row = c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+            c = _rt_db.cursor()
+            c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+            row = c.fetchone()
         if row and row[0]:
             try:
                 v = json.loads(row[0])
@@ -3443,7 +3530,7 @@ def fail_task(task_id, error, exit_code=-1):
     if task and task.get("event_seq"):
         try:
             with db_lock:
-                c = db.cursor()
+                c = _rt_db.cursor()
                 c.execute("SELECT id, created_at FROM agent_tasks WHERE event_seq=?",
                           (task["event_seq"],))
                 _sibs = c.fetchall() or []
@@ -3557,7 +3644,7 @@ def fail_task(task_id, error, exit_code=-1):
             if _rk:
                 try:
                     with db_lock:
-                        c = db.cursor()
+                        c = _rt_db.cursor()
                         c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
                         _row = c.fetchone()
                         _existing_errors = []
@@ -3582,7 +3669,7 @@ def fail_task(task_id, error, exit_code=-1):
                             # （外审第 5 轮：旧 [-5:] 在满载时把新错误截没了）
                             _existing_errors = _existing_errors[:1] + _existing_errors[1:][-4:] if len(_existing_errors) > 5 else _existing_errors
                             c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_existing_errors), task_id))
-                            db.commit()
+                            _rt_db.commit()
                 except Exception:
                     pass
         # P2-2: 收紧 401 匹配——去掉单独 "unauthorized" 关键词（太宽泛，权限不足 403 也可能含此词）
@@ -3642,7 +3729,7 @@ def fail_task(task_id, error, exit_code=-1):
                     }
                     try:
                         with db_lock:
-                            c = db.cursor()
+                            c = _rt_db.cursor()
                             c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
                             _row = c.fetchone()
                             _existing_errors = []
@@ -3666,7 +3753,7 @@ def fail_task(task_id, error, exit_code=-1):
                                 _existing_errors = _existing_errors[:1] + _existing_errors[1:][-4:] if len(_existing_errors) > 5 else _existing_errors
                                 _err_obj = json.dumps(_existing_errors)
                                 c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (_err_obj, task_id))
-                                db.commit()
+                                _rt_db.commit()
                     except Exception:
                         pass
                     # issue 回帖提示用户重新绑定
@@ -3722,7 +3809,7 @@ def fail_task(task_id, error, exit_code=-1):
                                     # R20.2.1: 回帖失败不静默——append COMMENT_POST_FAILED
                                     try:
                                         with db_lock:
-                                            c = db.cursor()
+                                            c = _rt_db.cursor()
                                             c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
                                             _row2 = c.fetchone()
                                             _errs2 = []
@@ -3742,7 +3829,7 @@ def fail_task(task_id, error, exit_code=-1):
                                                 # 首条保护式（同 UC7-3 家族）：头部诊断不被挤掉
                                                 _errs2 = _errs2[:1] + _errs2[1:][-4:] if len(_errs2) > 5 else _errs2
                                                 c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_errs2), task_id))
-                                                db.commit()
+                                                _rt_db.commit()
                                     except Exception:
                                         pass
     except Exception as _e:
@@ -3765,7 +3852,7 @@ def fail_task(task_id, error, exit_code=-1):
                     }
                     try:
                         with db_lock:
-                            c = db.cursor()
+                            c = _rt_db.cursor()
                             c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
                             _row = c.fetchone()
                             _existing_errors = []
@@ -3786,7 +3873,7 @@ def fail_task(task_id, error, exit_code=-1):
                                 _existing_errors = _existing_errors[:1] + _existing_errors[1:][-4:] if len(_existing_errors) > 5 else _existing_errors
                                 _err_obj = json.dumps(_existing_errors)
                                 c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (_err_obj, task_id))
-                                db.commit()
+                                _rt_db.commit()
                     except Exception:
                         pass
         except Exception as _e:
@@ -3799,7 +3886,7 @@ def fail_task(task_id, error, exit_code=-1):
     if _isid and exit_code < 0:
         try:
             with db_lock:
-                c = db.cursor()
+                c = _rt_db.cursor()
                 c.execute(
                     "SELECT exit_code FROM agent_tasks WHERE issue_session_id=? ORDER BY created_at DESC LIMIT 3",
                     (_isid,))
@@ -3869,7 +3956,7 @@ def _record_report_failure(task_id: str, kind: str, reason: str):
     """回报失败落可见记录（agent_tasks.errors，追加合并 [-5:] 截断，不覆盖既有诊断）。"""
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
             row = c.fetchone()
             if not row:
@@ -3898,7 +3985,7 @@ def _record_report_failure(task_id: str, kind: str, reason: str):
             _existing = _existing[-5:]
             c.execute("UPDATE agent_tasks SET errors=? WHERE id=?",
                       (json.dumps(_existing, ensure_ascii=False), task_id))
-            db.commit()
+            _rt_db.commit()
             log.warning(f"report ingestion failed (recorded): task={task_id} kind={kind} "
                         f"retries={_n} reason={reason}")
     except Exception as _e:
@@ -3932,7 +4019,7 @@ async def _ingestion_loop():
                         # Issue #587：失败落 task 级可观测记录（含原因/重试次数），
                         # 补偿入口 /tasks/{id}/converge-event + worker 侧补报队列兜底
                         _record_report_failure(tid, kind, str(e))
-                db.commit()
+                _rt_db.commit()
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -4005,7 +4092,7 @@ def batch_recover_stale_tasks(timeout_seconds: int = 300) -> dict:
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)).isoformat()
     recovered = []
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         try:
             # Find stale dispatched tasks (dispatched but not running, older than cutoff)
             c.execute(
@@ -4029,10 +4116,10 @@ def batch_recover_stale_tasks(timeout_seconds: int = 300) -> dict:
                     if rid:
                         release_busy_slot(rid, cursor=c)
                     recovered.append({"task_id": task_id, "runtime_id": rid, "seq": seq})
-            db.commit()
+            _rt_db.commit()
         except Exception as e:
             log.warning(f"batch_recover_stale_tasks failed: {e}")
-            db.rollback()
+            _rt_db.rollback()
 
     if recovered:
         log.info(f"Batch stale recovery: {len(recovered)} tasks requeued")
@@ -4047,7 +4134,7 @@ def heartbeat_consolidated(credential_id: int, runtime_ids: list[int], client_ip
     """
     now = datetime.now(timezone.utc).isoformat()
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         # Update credential
         c.execute(
             "UPDATE runtime_credentials SET last_seen_at=?, last_ip=? WHERE id=? AND status='active'",
@@ -4060,7 +4147,7 @@ def heartbeat_consolidated(credential_id: int, runtime_ids: list[int], client_ip
                 f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
                 [now] + runtime_ids + [credential_id]
             )
-        db.commit()
+        _rt_db.commit()
 
     # Opportunistic stale recovery (every call, but batch is cheap)
     # In production, this would be rate-limited to every N seconds
@@ -4086,7 +4173,7 @@ def reap_stale_runtimes() -> dict:
     _recover_cutoff_iso = (datetime.now(timezone.utc) - timedelta(seconds=_get_recover_stale_cfg())).isoformat()
     reaped = []
     with db_lock:
-        c = db.cursor()
+        c = _rt_db.cursor()
         try:
             # 查找远端引擎（credential_id>0）status=online 但心跳过期的行
             # Issue #259：去掉 last_seen_at IS NOT NULL——NULL（从未心跳）但 status=online 的
@@ -4169,11 +4256,11 @@ def reap_stale_runtimes() -> dict:
                     )
                 reaped.append({"runtime_id": rid, "name": rname, "recovered_tasks": recovered})
             if stale:
-                db.commit()
+                _rt_db.commit()
         except Exception as e:
             log.warning(f"reap_stale_runtimes failed: {e}")
             try:
-                db.rollback()
+                _rt_db.rollback()
             except Exception:
                 pass
 
@@ -4216,7 +4303,7 @@ def _check_stale_queued_tasks():
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_STALE_QUEUED_THRESHOLD)).isoformat()
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             # 查询超时的 queued 任务（带 pool_engine_ids 限定）
             c.execute(
                 "SELECT id, pool_engine_ids, pool_tag, repo_key, user_id FROM agent_tasks "
@@ -4251,7 +4338,7 @@ def _check_stale_queued_tasks():
                         (f"[degraded] bound engines {_engine_ids} all unhealthy/unreachable at "
                          f"{datetime.now(timezone.utc).isoformat()}; released to global pool "
                          f"(source=auto, local-claimer design)", tid))
-                    db.commit()
+                    _rt_db.commit()
                     log.info(f"_check_stale_queued_tasks: engine(s) {_engine_ids} all down, "
                              f"source=auto -> degraded release task {tid} to global pool")
                     continue
@@ -4398,7 +4485,7 @@ def sync_task_session_token(task_id: str) -> str:
             return ""
     try:
         with db_lock:
-            c = db.cursor()
+            c = _rt_db.cursor()
             try:
                 if is_mysql:
                     # 已持有服务器级命名锁 → 临界区内普通 SELECT 即可（无需 FOR UPDATE）。
@@ -4419,7 +4506,7 @@ def sync_task_session_token(task_id: str) -> str:
                         (task_id,),
                     ).fetchone()
                 if not row:
-                    db.commit()
+                    _rt_db.commit()
                     return ""
                 repo_key, agent_type = (row[0] or ""), (row[1] or "")
                 try:
@@ -4433,7 +4520,7 @@ def sync_task_session_token(task_id: str) -> str:
                 if not isinstance(env, dict):
                     env = {}
                 if not repo_key or not agent_type:
-                    db.commit()
+                    _rt_db.commit()
                     return ""
 
                 snapshot_token = str(env.get("GRAPE_SESSION_TOKEN") or "")
@@ -4445,7 +4532,7 @@ def sync_task_session_token(task_id: str) -> str:
                     and info.get("agent_type") == agent_type
                 )
                 if token_ok:
-                    db.commit()
+                    _rt_db.commit()
                     return snapshot_token
 
                 # 顺序依赖（三库独立后）：rotate 在 mgmt 库自提交（旧 token 立即作废 + 新 token 落库），
@@ -4459,14 +4546,14 @@ def sync_task_session_token(task_id: str) -> str:
                     "UPDATE agent_tasks SET env_extra=? WHERE id=?",
                     (json.dumps(env, ensure_ascii=False), task_id),
                 )
-                db.commit()
+                _rt_db.commit()
                 return new_token
             except _TaskTokenLockSkipped as e:
                 log.warning(f"sync_task_session_token: sqlite write lock unavailable for {task_id}: {e}")
                 return ""
             except Exception as e:
                 try:
-                    db.rollback()
+                    _rt_db.rollback()
                 except Exception:
                     pass
                 log.warning(f"sync_task_session_token: sync failed for {task_id}: {e}")

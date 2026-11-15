@@ -177,6 +177,17 @@ def engine_name(runtime_id: int) -> str:
     return row[0] or "" if row else ""
 
 def _db():
+    """引擎相关的表（agent_runtimes / runtime_credentials / engine_capabilities）都在 runtime 域。
+
+    本模块同时被 mgmt 进程调用（创建需求后选引擎），三库模式下 mgmt 进程的主库是本域库，
+    直连进程库会撞「表不存在」，于是选引擎失败、需求永远不入队。这里按域取连接：
+    own DSN 优先（线程本地连接），单库/测试拓扑回落进程库。
+    """
+    from src.kernel import db_registry
+    if db_registry.uses_own_dsn("runtime"):
+        conn = db_registry.domain_db("runtime")
+        if conn is not None:
+            return conn, db_registry.domain_lock("runtime")
     from src.kernel.session_manager import db, db_lock
     return db, db_lock
 
