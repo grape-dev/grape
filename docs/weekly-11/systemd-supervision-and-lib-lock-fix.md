@@ -84,9 +84,63 @@ python /tmp/probe_lock.py runtime     # acquire=True / other=False / renew=True 
 python /tmp/probe_owner.py            # skill / task_messages / agent_tasks / event_thread 计数正常
 ```
 
+## 3. 真实拓扑复核后追加的两处修正（三库 = 三主机）
+
+`/home/grape/.grape-rds-stage.env`（root 600）里的 DSN 并不是同一个 MySQL：
+mgmt 在兄弟节点 `:3311`、insight 在兄弟节点 `:3312`、runtime 在本机 `:3307`
+（`/opt/rds/bin/mysqld8 --no-defaults` 起的裸实例）。按这个真实拓扑复核后，还有两个坑：
+
+### 3.1 连接打满 → 跨域读「假性缺表」
+
+本机 runtime MySQL 用 `--no-defaults` 启动，`max_connections` 是默认 **151**；
+四个进程默认连接池（32）+ 每线程跨域连接很快打到 `Max_used_connections=152`，
+出现 `1040 Too many connections`。那时 `db_registry.domain_db()` 会把**一次**连接失败
+记进 `_forbidden`，于是整个进程把 runtime 域拉黑，后续 `meta` / `scene_category` / `skill`
+的跨域读全部静默回落到进程库 → 满屏 `1146 Table 'grape_stage_mgmt.xxx' doesn't exist`。
+**1146 是症状，1040 才是病因。**
+
+修法：
+
+- `db_registry`：只有鉴权/库不存在/域名错这类「重试也不会好」的错误才永久停用，
+  其余按 5s 退避重试（`tests/kernel/test_db_registry_retry_policy.py`）；
+- `scripts/grape-systemd-run.sh`：按角色限制连接池（worker 48/24、mgmt 16/8、event 12/6、insight 12/6）；
+- `scripts/p4_p5_loop.sh`：启动本机/远端 mysqld 时带 `--max-connections=${RDS_MAX_CONNECTIONS:-500}`。
+  已存在的实例需要重启 mysqld 才生效（`SET GLOBAL` 需要 SUPER，部署账号没有）。
+
+### 3.2 `scene_sync` 也直连进程库
+
+`skill sync` 的 scene 步骤只读 runtime 域的表（`scene_category`、`skill`），却用
+`session_manager.db`；mgmt 进程跑它时必然 `1146 scene_category`。改为
+`owner_db.db_pair("runtime")`（单库拓扑回落进程库）。
+
+### 3.3 重启期 `address already in use` 导致 crash loop
+
+`KillSignal=SIGINT` + `TimeoutStopSec=25`，而关机路径（IM outbox `stop()` 等）有时要
+25s 才被 SIGKILL；`RestartSec=5` 让新实例抢在旧进程释放端口之前启动 → `[Errno 98]` → 退出码 3
+→ systemd 再重启，形成连环。切换/重启用**干净序列**：`systemctl stop` → 等端口释放 →
+`pkill -f "[u]vicorn src.api.grape_"` → `systemctl reset-failed` → `systemctl start`。
+
+## 验收（2026-11-15 19:45 CST 实测）
+
+| 检查 | 结果 |
+|------|------|
+| 四角色 `is-active` / `NRestarts` | 4×active / 0（稳定 2 分钟） |
+| `MainPID` == `/health` 里的 `pid` | 4/4 相等（真托管） |
+| 自愈（kill -9 worker） | 10s 内新 pid，`/health` 200 |
+| mgmt 日志 1146 / 1040 / AttributeError / run failed | 0 条（此前每轮各 1 条） |
+| skill sync | `remote done` → `obs sync done` 正常 |
+| scene sync | `Scene sync done: added=0 updated=0 skipped=14 failed=0` |
+| runtime MySQL 连接 | 峰值 91 / 500，`Connection_errors_max_connections=0` |
+| GSB 注册 | `mgmt@hd002 base_url=http://<本机私网 IP>:38081` |
+
 ## 遗留（本轮未动，需运营侧确认）
 
-- `grape_mgmt_db` / `grape_runtime_db` / `grape_insight_db` 与 `grape_ljt_db` 仍在同一 MySQL 上，
-  是三库演练/迁移残留，容易误判主库；确认后归档。
+- **`grape_stage_mgmt` 缺 34 张归属表**（实测兄弟节点 `:3311`）：`admin_*`（控制台）、
+  `sandbox_*` / `user_vms` / `user_vm_repos`（沙箱与 VM）、`egress_*`、`task_proxy_tokens`、
+  `repo_platform_tokens`、`user_llm_credentials`、`template_usage`、`credential_reveal_log` 等；
+  runtime/insight 两库 0 缺失。这些表由各自功能模块懒建，功能被调用时才会暴露 1146，
+  建议按 owner 进程跑一次建表（或首次使用前预热）。
+- `grape_mgmt_db` / `grape_runtime_db` / `grape_insight_db` 与 `grape_ljt_db` 仍在
+  `192.168.0.59` 上，是三库演练/迁移残留，容易误判主库；确认后归档。
 - `server_base_url` 在两节点都指向公网入口节点：这是既有设计（单入口），
   但入口节点是登录/webhook 的单点，需要 SLB/keepalived，而不是改配置。
