@@ -171,26 +171,11 @@ def cleanup_expired_retention(force: bool = False) -> int:
               - datetime.timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     total = 0
     try:
-        from src.kernel.owner_db import db_pair
-        db, db_lock = db_pair("runtime")
-        with db_lock:
-            while True:
-                # 两步查删（复审修正）：MySQL 对 IN 子查询带 LIMIT 报 1235——
-                # 先 SELECT id 分批取出，再按具体 id 列表 DELETE（双方言安全）
-                ids = [r[0] for r in db.execute(
-                    "SELECT id FROM grape_t_credential_usage_log WHERE created_at < ? LIMIT ?",
-                    (cutoff, _DELETE_BATCH)).fetchall()]
-                if not ids:
-                    break
-                placeholders = ",".join("?" for _ in ids)
-                cur = db.execute(
-                    f"DELETE FROM grape_t_credential_usage_log WHERE id IN ({placeholders})",
-                    ids)
-                batch_n = cur.rowcount or 0
-                total += batch_n
-                db.commit()
-                if batch_n < _DELETE_BATCH:
-                    break  # 本批不满 = 已清完
+        # 归属 runtime 域：SQL 由 owner public 原语持有，kernel 只调用签名
+        # （此前这里直接对 grape_t_credential_usage_log 发 SELECT/DELETE，是最后一处
+        # 真实跨域基表直查；表归属见 configs/table_ownership.json）。
+        from src.domains.runtime import public as _rt_public
+        total = _rt_public.credential_usage_log_prune(cutoff, _DELETE_BATCH)
         with _cleanup_lock:
             _cleanup_last_mono = time.monotonic()
         return total
@@ -260,24 +245,11 @@ def _flush_batch(batch: list[dict]) -> None:
              b.get("repo_key", ""), b["initiating_actor_id"],
              b["executor_context"], b["operation"], b["created_at"])
             for b in batch]
-    insert_sql = ("INSERT INTO grape_t_credential_usage_log (id, credential_id, credential_kind, "
-                  "user_id, repo_key, initiating_actor_id, executor_context, operation, created_at) "
-                  "VALUES (?,?,?,?,?,?,?,?,?)")
-    from src.kernel.mysql_compat import get_db_backend
-    if get_db_backend() == "mysql":
-        from src.kernel.owner_db import owner_db as _owner_db
-        _sdb = _owner_db("runtime")
-        _sdb.executemany(insert_sql, rows)
-        _sdb.commit()
-        return
-    import sqlite3
-    from src.kernel.session_manager import _db_path
-    conn = sqlite3.connect(_db_path, timeout=5, check_same_thread=False)
-    try:
-        conn.executemany(insert_sql, rows)
-        conn.commit()
-    finally:
-        conn.close()
+    # 归属 runtime 域：写语句与表结构由 owner 域持有，kernel 只调用具名原语。
+    # 连接语义由原语内部的线程本地连接保证（后台 flush 线程与主线程事务互不干扰），
+    # 因此不再按 backend 手写 sqlite3 独立连接分支。
+    from src.domains.runtime import public as _rt_public
+    _rt_public.credential_usage_log_insert_many(rows)
 
 
 def _ensure_worker() -> None:

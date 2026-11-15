@@ -787,6 +787,56 @@ def insert_runtime_credential(token_hash: str, name: str, scope: str, owner_id: 
             raise
 
 
+def credential_usage_log_insert_many(rows: list) -> None:
+    """批量写入凭据使用审计行（参数化，空列表直接返回）。
+
+    归属：表属 runtime 域，写语句由本域持有；kernel 的异步 flush 只负责攒批与调用本函数。
+    连接语义：`_any_cursor(write=True)` 走 db_registry 的**线程本地**连接（三库自有 DSN 为
+    autocommit，单库/测试回落进程库），因此后台线程与主线程事务互不干扰 —— 与原先 kernel
+    侧「后台线程独立连接」的诉求一致，不再需要按 backend 手写 sqlite3 分支。
+
+    rows 列序固定为：(id, credential_id, credential_kind, user_id, repo_key,
+                       initiating_actor_id, executor_context, operation, created_at)
+    """
+    if not rows:
+        return
+    with _any_cursor(write=True) as c:
+        c.executemany(
+            "INSERT INTO grape_t_credential_usage_log (id, credential_id, credential_kind, "
+            "user_id, repo_key, initiating_actor_id, executor_context, operation, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)", rows)
+
+
+def credential_usage_log_prune(cutoff: str, batch: int = 500) -> int:
+    """删除 created_at < cutoff 的凭据使用审计行，返回删除行数。
+
+    两步查删（SELECT id LIMIT → DELETE IN 具体列表）：MySQL 禁止 IN 子查询带 LIMIT（1235），
+    SQLite 也不支持同形态，两步法双方言安全。
+
+    归属：grape_t_credential_usage_log 属 runtime 域，SQL 必须由本域持有。
+    调用方（kernel 的保留期清理）此前直接对着该表发 SQL，是最后一处真实跨域基表直查；
+    这里提供具名原语后，调用方只依赖本函数签名。
+    """
+    total = 0
+    with _any_cursor(write=True) as c:
+        while True:
+            c.execute(
+                "SELECT id FROM grape_t_credential_usage_log WHERE created_at < ? LIMIT ?",
+                (cutoff, batch))
+            ids = [r[0] for r in (c.fetchall() or [])]
+            if not ids:
+                break
+            placeholders = ",".join("?" for _ in ids)
+            c.execute(
+                f"DELETE FROM grape_t_credential_usage_log WHERE id IN ({placeholders})",
+                ids)
+            n = int(getattr(c, "rowcount", 0) or 0)
+            total += n
+            if n < batch:
+                break
+    return total
+
+
 def rename_runtime_credential(cid: str, name: str) -> int:
     """改名（仅 active 行），返回受影响行数。"""
     with _any_cursor(write=True) as c:

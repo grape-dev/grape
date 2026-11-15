@@ -168,6 +168,14 @@ WHITELIST: dict[str, dict[str, str]] = {
         "R1": "deferred feature flags via mgmt.user.db; Phase 5",
         "R2": "deferred timestamp helper via src.api.time_utils; Phase 5",
     },
+    "src/kernel/persistence/credential_usage_log.py": {
+        # 跨域基表直查已清零（foreign-refs 棘轮：grape_t_credential_usage_log 3 → 0）：
+        # 写语句与保留期清理都下沉到 runtime.public 的具名原语（insert_many / prune），
+        # kernel 只保留攒批、节流与后台 flush 线程调度 —— 因此这里的跨域依赖是
+        # 「调用 owner 原语」而不是「直接读写别人的表」，属允许形态。
+        "R1": {"targets": ["src.domains.runtime"],
+               "reason": "usage-log 表归 runtime 域；kernel 仅调度，SQL 由 runtime.public 持有"},
+    },
     "src/kernel/repo_cleanup.py": {
         "R1": "deferred repo state lookup via mgmt.user.db; Phase 5",
     },
