@@ -6299,6 +6299,101 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   （后台线程连接池化，独立一轮），其余 4 处全是 `src/api` 单点（`a2a_dispatch` /
   `event_archive` / `merge_gate` / `middleware` 各 1）——`pipeline_executor.py` 本轮已清零。
 
+### 7.59 api 慢请求延迟指标落库下沉 insight owner 域（2026-11-15 本批）
+
+- **文件**：`src/api/middleware.py`（api 域），**1 处 → 0（本文件清零）**。
+- **表分布**：`api_latency_log` 归 **insight**（`table-owner.tsv` → `grape_insight_db`）。
+  该表跨域引用 11 → 0（消费方 `insight:10;api:1` → `insight:10` 同域），
+  `api→insight` 对消失 → 全局 `cross_domain_refs` **10 → 9**、`pairs` 6 → 5、`tables` 6 → 5
+  （`api_latency_log` 整表退出跨域榜单）。
+- 原形态（`request_id_and_log_middleware` 的 finally 段，慢请求入库）：
+  ```python
+  try:
+      from src.kernel.config import SLOW_REQUEST_THRESHOLD_MS
+      if duration >= SLOW_REQUEST_THRESHOLD_MS:
+          try:
+              from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
+              with _sdbl:
+                  _sdb.execute(
+                      "INSERT INTO api_latency_log (request_id, method, path, status, duration_ms, repo_key, user_id, source) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?, 'backend')",
+                      (rid, request.method, redacted_path, status, round(duration), _repo, _uid))
+                  _sdb.commit()
+          except Exception:
+              pass  # 入库失败不影响请求
+  except Exception:
+      pass
+  ```
+- **设计取舍**：
+  1. **复用上轮已落地的具名写口，本批只接线**：insight public 的
+     `_LATENCY_INSERT_SQL` 与 `record_api_latency_any(...)` 已按本句逐字登记
+     （列序、`source` 列内字面量 `'backend'`、7 个 `?`、`_any_cursor(write=True)` 负责提交），
+     与 `src/api/server_common.py` 的同一调用点（S86 起）同口径；本批不再新增同义 SQL。
+  2. **入参位置与 `round(duration)` 逐字保留**：`(rid, request.method, redacted_path,
+     status, round(duration), _repo, _uid)`——`status`/`duration_ms` 原样落库（**不按状态筛**，
+     500/0 照样入库），纯派生流水**不与去重**（与改造前一致：每次慢请求一行）。
+     入表的是 **redact 后的 path**，webhook token 段不落明文（原实现口径）。
+  3. **阈值语义一个字没动**：仍是 `duration >= SLOW_REQUEST_THRESHOLD_MS`（**恰好等于阈值算慢请求**）；
+     `/health`、`/api/ping` 等 `_LOG_SKIP_PATHS/_LOG_SKIP_PREFIXES` 未命中 `not skip_log` 分支，
+     即使慢也**不写表**（skip 判定在计时之前，未挪位）。
+  4. **两处静默 except 合并成一条带日志的降级**：原内层吞写入异常、外层吞阈值常量导入异常，
+     现统一 `except Exception as _exc: _log.debug(f"api_latency_log insert skipped: {_exc}")`。
+     请求路径行为不变（入库失败不影响响应），但失败不再不可见；本文件静默 except
+     由 4 降 **2**（`tests/silent_except_baseline.json` 同步下调，棘轮只减不增）。
+  5. **锁语义交给 owner 域原语**：单库拓扑下 `_any_cursor` 取的是同一把
+     `session_manager.db_lock`（`threading.RLock()`），中间件不再自己 `with db_lock` +
+     `commit`，不再持有第二条写句柄；自有 DSN 拓扑下写走 insight 独立连接（autocommit）。
+     中间件在 async 中间件的 `finally` 里同步等待写口——与改造前同样是同步 IO，未改变时序。
+- **修的存量 bug**（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  **独立三库拓扑下慢请求指标整体静默丢失** —— 原句发在 `session_manager.db`（api 进程主库），
+  而该表在 insight 库；api 库无此表（视图 0）→ `1146` → 被内层 `except: pass` 吞掉，
+  慢请求耗时分布、按 path 的 P95 全部归零且无任何日志线索，观测面直接瞎掉。
+  单库/测试拓扑两库同体所以一直是绿的。归位后两类拓扑同一份 SQL、同一条返回路径；
+  烟测 D 段以「自有 DSN 只连 `domain=insight`、语句与参数逐字、进程库不落行」反证。
+- 验证（真实退出码）：
+  · `py_compile`（`src/api/middleware.py`）→ **COMPILE_OK**；
+  · `~/burndown/api_middleware_latency_smoke.py`
+    （`DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=~/burndown/api_middleware_latency.db`，
+    连跑 2 次稳定，EXIT=0）→ **ALL api_middleware_latency smoke PASSED (78 checks)**：
+    A 30 项注册面/静态否定（`_LATENCY_INSERT_SQL` 逐字、恰好 7 个 `?`、列序与原句一致、
+    `source` 仍是列内字面量 `'backend'`、无 `%s`/`NOW()`/反引号/`ON DUPLICATE`、
+    薄函数体零字面 SQL 且走 `_any_cursor(write=True)`、登记 `__all__`、
+    `middleware.py` **零 SQL / 零 `.execute(` / 零 `_sdb`/`db_lock` / 零 `session_manager db`**、
+    insight 只在函数体内延迟导入、模块顶层无 insight import、阈值仍 `>=`、
+    调用参数含 `round(duration)`、失败路径是 `except ... as _exc: _log.debug(`
+    而非静默 pass、静默 except 计数 ≤ 已下调的基线 2）；
+    B 11 项原语语义（1 行/rowcount=1、列值逐字透传、`source='backend'`、
+    `created_at` 由列默认值填（原 SQL 不写该列）、status 500/0/-1 **不筛**、
+    空串与 `None` repo/user → `''`、**同参两次 → 2 行（不去重）**、unicode/长 path 与浮点
+    duration 原样透传）；
+    C 20 项调用点端到端（真中间件 + `TestClient` + 固定时钟：600ms → 1 行、
+    **恰好 500ms → 1 行**（原 `>=`）、499.9ms/0ms → 0 行、`/health` 与 `/api/ping` 慢也不写、
+    `X-Request-ID` 原样入表、`/api/agents/<任意>/<owner>/<repo>` 派生 `gitcode:o/r`、
+    `?repo=o/r` 补前缀 / `github:o/r` 原样、**webhook token 段 redact 后入表**、
+    status 500 照样入库、**`DROP` 表 → 请求仍 200 + 恰一条 `log.debug`**、
+    换独立连接读到已提交行（等价原 `commit()`））；
+    D 8 项拓扑判据（自有 DSN → 只连 `domain=insight` 两次（原语 + 中间件各一次）、
+    语句与参数逐字、**进程主库不落行**；无自有 DSN → 回落进程主库并提交可见）；
+    E 9 项棘轮余量（`cross_domain_refs=9` / `pairs=5` / `tables=5`、
+    `api_latency_log` 与 `middleware.py` 均已退出榜单、基线 5 对且不含该表、
+    `--check` 棘轮通过）；
+  · `--update-baseline` → **baseline updated: 5 pairs, 9 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **5 表 / 9 跨域引用 / 5 对**
+    （`sql_references` 479 → 468 的差值是「该表 11 处同域引用不再进入跨域榜单」中的 api 1 处
+    与表整体退出榜单，非语句删除）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `venv/bin/python -m pytest tests/arch tests/contracts tests/scripts -q -p no:cacheprovider`
+    → **158 passed**（EXIT=0）；
+  · `make lint` → **import OK**（EXIT=0）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD` /
+  `REMOTE_PWD`；口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，
+  彩排压在余量归零后统一跑）。本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新响应字段）。
+- **新基线**：**9 处 / 5 对 / 5 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  余下 9 处分三族：⛔ `prompt_builder.py` ×3（文案，不改数字）、⛔ `credential_usage_log.py` ×3
+  （后台线程连接池化，独立一轮），其余 3 处 `src/api` 单点（`a2a_dispatch` / `event_archive` /
+  `merge_gate` 各 1）——`middleware.py` 本轮已清零。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

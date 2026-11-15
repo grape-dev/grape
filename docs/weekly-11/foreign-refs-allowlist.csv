@@ -1,6 +1,5 @@
 table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,1
-api_latency_log,insight,api,1
 events,runtime,api,1
 grape_t_credential_usage_log,runtime,kernel,3
 grape_t_merge_gate_log,insight,api,1

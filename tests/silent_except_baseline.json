@@ -11,7 +11,7 @@
   "src/api/grape_server.py": 9,
   "src/api/issue_vcs_index.py": 6,
   "src/api/main.py": 2,
-  "src/api/middleware.py": 4,
+  "src/api/middleware.py": 2,
   "src/api/openapi.py": 3,
   "src/api/patrol.py": 3,
   "src/api/patrol_compensate.py": 2,
