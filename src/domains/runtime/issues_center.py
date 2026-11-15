@@ -3055,10 +3055,15 @@ def _batch_fetch_issue_state(keys: list) -> dict:
 def _batch_running_agent_tasks(keys: list) -> set:
     """批量查"正在运行"的 agent_tasks，返回 {(repo_key, issue_id)}（防 N+1，Issue #85 雷达动画依据）。
 
-    口径（local-engine-busy-slots-zombie-fix-design.md §8）：与流水线点亮一致——只认
-    `status='running'`（任务真正被认领执行；事件此刻同步 running）。`queued`（排队未认领/
-    事件 pending）与 `dispatched`（历史 pull 语义、事件未同步 running）都不算，避免
-    "任务仅排队中但需求中心雷达已在扫描、流水线未点亮" 的不一致。
+    口径（local-engine-busy-slots-zombie-fix-design.md §8）：与流水线点亮一致。
+    认 `running` 与 `pending_self_report` 两种：
+    - `running`：任务真正被认领执行；
+    - `pending_self_report`：Issue #537 的主控停机中间态，scheduler 明确「视同 running」等待
+      worker 自报（见 scheduler.py 的 poll 分支），此时事件仍是 running、流水线仍点亮。
+      此前只认 running，导致这类需求卡片**流水线亮着但需求中心没有雷达**（用户侧表现为
+      「执行中的卡片没有扫描效果」）。
+    `queued`（排队未认领/事件 pending）与 `dispatched`（历史 pull 语义、事件未同步 running）
+    仍不算，避免「任务仅排队但雷达已在扫描」的反向不一致。
     """
     out: set = set()
     if not keys:
@@ -3072,7 +3077,7 @@ def _batch_running_agent_tasks(keys: list) -> set:
                 c = _rt_db.cursor()
                 c.execute(
                     "SELECT repo_key, issue_id FROM agent_tasks "
-                    "WHERE status = 'running' AND (" + _ors + ")", _flat)
+                    "WHERE status IN ('running','pending_self_report') AND (" + _ors + ")", _flat)
                 out.update((row[0], row[1]) for row in c.fetchall())
         except Exception as e:
             log.warning(f"batch agent_tasks fetch failed: {e}")
