@@ -17,16 +17,23 @@ import EventView from '../EventView.vue'
 // window._stopEventPoll (leave-page), window.openTaskLog/closeTaskLog
 // (referenced by autopilot.js exec-log buttons).
 let _app = null
+// 入口契约：每次 nav('event', seq) 都必须「重新挂载」，不能只更新内部状态。
+// （组件内部曾占用 window.renderEventDetail 做就地更新，导致第二次进入停在占位。）
+function entryRender(data) {
+  mount({ initialData: data })
+}
+
 function mount(props) {
   const el = document.getElementById('pageContent')
   if (!el) return
-  if (_app) _app.unmount()
+  if (_app) { try { _app.unmount() } catch (e) {} _app = null }
+  el.innerHTML = ''
   _app = createApp(EventView, props || {})
   _app.mount(el)
+  // 挂载完成后再声明一次契约：组件 setup 里若覆盖同名函数，这里重新指回入口版
+  window.renderEventDetail = entryRender
 }
-window.renderEventDetail = function (data) {
-  mount({ initialData: data })
-}
+window.renderEventDetail = entryRender
 // navEvent is called from inside the view via API; expose for cross-module use
 window.navEvent = function (seq) {
   // fresh mount path: load then mount

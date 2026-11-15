@@ -1333,8 +1333,11 @@ function navEvent(seq) {
       if (maxSeq && maxSeq > 0 && maxSeq !== seq) navEvent(maxSeq)
     })
 }
-G.window.renderEventDetail = function (d) {
-  // app.js nav('event', param) 加载后注入（fresh mount 由入口处理，此路径用于轮询终态等）
+// 契约由入口 entries/event-view.js 持有（fresh mount + initialData 注入）。
+// 组件内只暴露「就地更新」内部钩子，不占用 window.renderEventDetail —— 否则
+// nav('event', seq) 第二次进来会命中本函数：它只改 data/轮询，不重建 DOM，
+// 而 nav 已把主区写成 loading 占位，页面就永久停在「加载中...」（刷新才恢复）。
+G.window.__eventViewApply = function (d) {
   data.value = d
   lastFp = fingerprint(d)
   loadConversation()
