@@ -5256,6 +5256,72 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/domains/runtime/routes/tasks.py`（1 处：`managed_repos`，归 mgmt）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
 
+### 7.46 runtime 任务建档的仓库 org 推断下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/runtime/routes/tasks.py` **1 处 → 0**（单轮做完，1 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`managed_repos`（归 **mgmt**，`grape_mgmt_db`）× 1：
+  L142（改前）在 `ensure_issue_task()` 的「未显式传 `org_id` 时从仓库推断组织」分支里，
+  `SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1` —— 它是
+  `mgmt_lib` 不可用时的**本地兜底语句**，也正是本文件唯一的跨域表引用。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`）：
+  - 具名查询与薄函数**都已存在**（`_ANY_QUERIES["repo_org_id"]` 与原语句逐字一致、只用一个 `?`；
+    `repo_org_id_any()` 体内零 SQL，`event_pipeline` 已在消费），本批**不复写 SQL**，只把
+    `repo_org_id_any` 登记进 `__all__`（注册面可见，跨域消费方一眼能找到）。
+- 调用点 `tasks.py`：
+  - 删掉 `from src.kernel.session_manager import db, db_lock` + `with db_lock` +
+    `domain_read.mgmt_lib(foreign_only=True)` 双分支与语句字面量，改成函数内
+    `from src.domains.mgmt import public as _mgmt_public_org` → `_mgmt_public_org.repo_org_id_any(repo_key)`。
+  - `except Exception: pass` → `except Exception as _e: log.debug(...)`（同批把
+    `tests/silent_except_baseline.json` 里该文件 **4 → 3** 下调）。
+- 设计取舍：
+  1. **整段上移，而不是只换兜底句**：`mgmt_lib(...)` 的放行闸门就是
+     `db_registry.uses_own_dsn("mgmt") + available()`，而 `read_one_any` 的 `_any_cursor` 用的是同一个
+     闸门（自有 DSN → mgmt 连接，否则进程主库）。保留 lib 分支只会让同一句 SQL 有两个入口：lib 命中
+     就绕过 `_any`，lib 抛异常再回落一次，两条路径的错误表现还不一样。
+  2. **不再借 `db_lock`**：原实现为「本地兜底」先拿 `session_manager.db_lock` 再取游标；`_any_cursor`
+     在回落路径自己会拿同一把锁（`RLock` 可重入，不至于死锁，但纯属重复加锁）。去掉后单库拓扑仍由
+     owner 原语内部加锁，事务语义不变。
+  3. **不做 `0 → None` 归一**：`repo_org_id_any` 返回行原值（`0` 就是 `0`），调用点仍是
+     `if _repo_org: org_id = _repo_org` —— 与原实现 `if _or and _or[0]` 完全一致：`0` 视为「无组织」
+     保持默认 0，不会被改写成 NULL/空串。
+  4. **不改 `managed_repos_e9a379`**：它是 mgmt 域 `%s` 方言的跨进程 lib 注册面（`_READ_QUERIES`），
+     属 owner 侧契约；本批改的是 runtime 侧消费，删它属另一件事（`check_lib_query_names` 的 mgmt
+     「named queries used」因此 6 → 5）。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **仓库所属组织静默丢失**：三库拆分后 runtime 进程库没有 `managed_repos`（视图 0 → 1146），兜底句
+     命中 `except Exception: pass`，`org_id` 保持 0 —— 任务卡被当成「个人组织」，非个人组织的引擎隔离
+     （按 `org_id` 选机）与看板归属跟着错，且没有任何「库不对」的线索。
+  2. **同一段代码按拓扑改语义**：lib 可用与否决定走哪条路径，而失败表现不同（lib 抛异常 → 回落跨域
+     SQL → 1146 → 吞成 0）。接口化后两种拓扑跑同一条 owner 语句。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/runtime/routes/tasks.py` / `src/domains/mgmt/public/__init__.py`）→
+    **COMPILE_OK**；
+  · `~/burndown/tasks_org_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建 `issue` / `managed_repos`）→
+    **ALL tasks_org smoke PASSED (47 checks)**：A 注册面/静态否定（语句逐字、单占位符、
+    无 `%s`/`NOW()`/`ON DUPLICATE`/反引号、`__all__` 登记、薄函数体内无 SQL、调用点无 `managed_repos`
+    的 DML、不再 import `domain_read`/`mgmt_lib`、旧 `%s` 注册面原样）；B 原语语义（同 repo 多行取
+    最大 org、无行 → `None`、`org_id=0` 原值、NULL → `None`、原值透传不做 str 归一、空 repo_key →
+    `None`、仓库隔离、空表不炸）；C 调用点端到端（未传 org → 落库 7、显式 org 优先且**不查库**、
+    未托管 → 0、仓库 org_id=0 → 落 0、复用路径回补 0/缺失、不覆盖已有非零、原语异常 → fail-open
+    且 `log.debug` 留痕、`managed_repos` 表缺失 → 同一 fail-open）；D 自有 DSN 伪游标（只走
+    `domain=mgmt`、语句逐字、参数 `(repo_key,)`、三库拓扑下任务仍拿到 7、mgmt 连接上没有第二份
+    `managed_repos` 语句）。
+  · `--update-baseline` → **baseline updated: 16 pairs, 22 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **16 表 / 22 跨域引用 / 16 对**
+    （`managed_repos` 的 runtime 消费方 2 → 1，消费文件 17 → 16）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （mgmt 187 funcs + 5 named queries used / 269 funcs + 31 queries registered）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新 action 名），运行面证据为 sqlite 烟测。
+- **新基线**：**22 处 / 16 对 / 16 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  `src/domains/runtime/routes/tasks.py` 已清零并退出榜单；下一批首个未 blocked 文件是
+  `src/domains/runtime/routes/runtime.py`（1 处：`grape_accounts`，归 mgmt）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

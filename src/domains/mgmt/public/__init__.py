@@ -777,6 +777,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "event_action_filter_enabled_rows",
            # 流水线责任人展示（runtime/routes/pipeline.py；任意拓扑）
            "feishu_name_by_platform_column", "repo_bot_usernames_any",
+           # 仓库所属 org（runtime/routes/tasks.py；任意拓扑：自有 DSN / 单库同一句）
+           "repo_org_id_any",
            "health"]
 
 
