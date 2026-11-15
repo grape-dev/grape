@@ -2456,6 +2456,13 @@ def report_messages(task_id, messages, seq_start: int | None = None) -> dict | N
                         (_json.dumps(_prev + _logs, ensure_ascii=False), task["event_seq"]))
                     _rt_db.commit()
         except Exception as e:
+            # 分库后这条连接是 autocommit=False 的线程级连接：异常时不回滚会把事务
+            # 和行锁一直挂着，后续任何写 events/task_messages 的会话都要等满
+            # innodb_lock_wait_timeout(50s) 才 1205，回报随之丢失（流水线停在上一棒）。
+            try:
+                _rt_db.rollback()
+            except Exception:
+                pass
             log.warning(f"report_messages events.agent_logs failed: {e}")
     # 结构化落库（task_messages，双后端一致；seq 服务端生成 MAX+1，UNIQUE 防重放）
     # 收集落库后的 (原始消息, seq) 对，供 fanout 透传 seq（前端按 seq 去重，跨主 DB 尾随双通道不重复渲染）
@@ -2509,6 +2516,11 @@ def report_messages(task_id, messages, seq_start: int | None = None) -> dict | N
                     log.info(f"report_messages: task={task_id} persisted count={len(_seq_messages)} "
                              f"seq_range={_seq_first}..{_seq_messages[-1].get('seq')}")
         except Exception as e:
+            # 同上：半批插入失败后必须回滚，否则线程级连接把已插入行的锁带到后续任务
+            try:
+                _rt_db.rollback()
+            except Exception:
+                pass
             log.warning(f"report_messages task_messages insert failed: {e}")
             _receipt = {}
     # 实时 fanout（订阅表推送，队列满丢弃保活；SSE 重连靠 since 回源）
