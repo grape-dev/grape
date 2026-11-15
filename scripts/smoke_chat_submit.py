@@ -123,6 +123,16 @@ def _post(url: str, payload: dict, token: str, timeout: float) -> tuple[int, dic
             return e.code, {"_raw": body}
 
 
+def _delete(url: str, token: str, timeout: float) -> int:
+    req = urllib.request.Request(url, method="DELETE",
+                                 headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
 def check(base_url: str, account: str, message: str, recall: bool,
           timeout: float) -> tuple[int, dict]:
     """返回 (退出码, 结果字典)。异常一律映射成 SKIP/FAIL，不抛给调用方。"""
@@ -141,12 +151,28 @@ def check(base_url: str, account: str, message: str, recall: bool,
     # 刚重启的进程可能在跑启动迁移/预热，401/503 属于「还没就绪」而不是「写路径坏了」：
     # 按 GRAPE_SMOKE_RETRIES 重试（默认 3 次，间隔 1s）；仍然失败才判红，避免发布误红。
     retries = max(1, int(os.environ.get("GRAPE_SMOKE_RETRIES", "3")))
+    # 冒烟必须用**独立会话**：不传 conversation_id 时后端会按 (user, repo_key) 复用
+    # 用户那条空 repo 的对话——冒烟消息就出现在用户的聊天里，撤回还可能干扰同会话的
+    # 真实任务（2026-11-15 现场：用户「反馈一下进展」与冒烟消息同会话）。
+    conv_id = ""
+    try:
+        cstatus, cbody = _post(f"{base}/api/chat/conversations",
+                               {"repo_key": "smoke:selftest"}, token, timeout)
+        if cstatus == 200 and isinstance(cbody, dict):
+            conv_id = str(cbody.get("conversation_id") or "")
+    except Exception:  # noqa: BLE001 - 建会话失败就退回默认会话（但仍会撤回消息）
+        conv_id = ""
+    out["conversation_created"] = bool(conv_id)
+
+    payload = {"message": message, "repo_key": "smoke:selftest"}
+    if conv_id:
+        payload["conversation_id"] = conv_id
+
     t0 = time.time()
     status, body = 0, {}
     for attempt in range(retries):
         try:
-            status, body = _post(f"{base}/api/chat/submit",
-                                 {"message": message, "repo_key": ""}, token, timeout)
+            status, body = _post(f"{base}/api/chat/submit", payload, token, timeout)
         except Exception as exc:  # noqa: BLE001 - 网络层不可达 → SKIP
             if attempt == retries - 1:
                 out.update(result="skip", reason=f"network: {exc!r}"[:200])
@@ -166,6 +192,12 @@ def check(base_url: str, account: str, message: str, recall: bool,
     out.update(task_id=task_id, conversation_id=conv_id, message_id=msg_id)
     if status != 200 or not task_id.startswith("chat_"):
         out.update(result="fail", body=body)
+        if conv_id:   # 失败也要清掉冒烟会话，避免下次冒烟读到脏会话
+            try:
+                out["conversation_delete_status"] = _delete(
+                    f"{base}/api/chat/conversations/{conv_id}", token, timeout)
+            except Exception as exc:  # noqa: BLE001
+                out["conversation_delete_status"] = f"error: {exc!r}"[:120]
         return EXIT_FAIL, out
 
     if recall and msg_id:
@@ -175,6 +207,13 @@ def check(base_url: str, account: str, message: str, recall: bool,
             out["recalled"] = bool(isinstance(rbody, dict) and rbody.get("recalled"))
         except Exception as exc:  # noqa: BLE001 - 撤回失败不影响「提交可用」结论，但要记录
             out["recall_status"] = f"error: {exc!r}"[:120]
+
+    if conv_id:
+        try:
+            out["conversation_delete_status"] = _delete(f"{base}/api/chat/conversations/{conv_id}",
+                                                        token, timeout)
+        except Exception as exc:  # noqa: BLE001 - 清理失败不影响结论
+            out["conversation_delete_status"] = f"error: {exc!r}"[:120]
 
     out["result"] = "ok"
     return EXIT_OK, out

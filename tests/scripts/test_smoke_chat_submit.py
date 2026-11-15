@@ -34,6 +34,7 @@ def mod():
 def env_ready(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "test-secret")
     monkeypatch.setenv("DEVOPS_DB_HOST", "127.0.0.1")
+    monkeypatch.setattr(_load(), "_delete", lambda url, t, to: 200, raising=False)
     return monkeypatch
 
 
@@ -43,20 +44,29 @@ def test_ok_when_200_and_task_id(mod, env_ready):
 
     def fake_post(url, payload, token, timeout):
         calls.append(url)
+        if url.endswith("/api/chat/conversations"):
+            return 200, {"conversation_id": "smoke-conv"}
         if url.endswith("/api/chat/submit"):
-            return 200, {"task_id": "chat_abc", "conversation_id": "c1", "message_id": 7}
+            return 200, {"task_id": "chat_abc", "conversation_id": "smoke-conv", "message_id": 7}
         return 200, {"recalled": True}
 
     env_ready.setattr(mod, "_post", fake_post)
     code, out = mod.check("http://127.0.0.1:38081", "songspace", "smoke", True, 5)
     assert code == mod.EXIT_OK and out["result"] == "ok"
     assert out["task_id"] == "chat_abc" and out["recalled"] is True
-    assert calls[0].endswith("/api/chat/submit") and "/api/chat/messages/7/recall" in calls[1]
+    assert calls[0].endswith("/api/chat/conversations")
+    assert calls[1].endswith("/api/chat/submit") and "/api/chat/messages/7/recall" in calls[2]
+    assert out["conversation_created"] is True
 
 
 def test_fail_on_500(mod, env_ready):
     env_ready.setattr(mod, "_mint_token", lambda account, timeout: "tok")
-    env_ready.setattr(mod, "_post", lambda url, p, t, to: (500, {"detail": "boom"}))
+    def fake_post(url, payload, token, timeout):
+        if url.endswith("/api/chat/conversations"):
+            return 200, {"conversation_id": "smoke-conv"}
+        return 500, {"detail": "boom"}
+
+    env_ready.setattr(mod, "_post", fake_post)
     code, out = mod.check("http://127.0.0.1:38081", "songspace", "smoke", True, 5)
     assert code == mod.EXIT_FAIL and out["result"] == "fail"
     assert out["submit_status"] == 500
@@ -64,7 +74,12 @@ def test_fail_on_500(mod, env_ready):
 
 def test_fail_when_task_id_missing(mod, env_ready):
     env_ready.setattr(mod, "_mint_token", lambda account, timeout: "tok")
-    env_ready.setattr(mod, "_post", lambda url, p, t, to: (200, {"conversation_id": "c1"}))
+    def fake_post(url, payload, token, timeout):
+        if url.endswith("/api/chat/conversations"):
+            return 200, {"conversation_id": "smoke-conv"}
+        return 200, {"conversation_id": "c1"}
+
+    env_ready.setattr(mod, "_post", fake_post)
     code, out = mod.check("http://127.0.0.1:38081", "songspace", "smoke", True, 5)
     assert code == mod.EXIT_FAIL and out["result"] == "fail"
 
@@ -93,11 +108,13 @@ def test_no_recall_flag_skips_recall(mod, env_ready):
 
     def fake_post(url, payload, token, timeout):
         seen.append(url)
-        return 200, {"task_id": "chat_x", "conversation_id": "c1", "message_id": 9}
+        if url.endswith("/api/chat/conversations"):
+            return 200, {"conversation_id": "smoke-conv"}
+        return 200, {"task_id": "chat_x", "conversation_id": "smoke-conv", "message_id": 9}
 
     env_ready.setattr(mod, "_post", fake_post)
     code, out = mod.check("http://127.0.0.1:38081", "songspace", "smoke", False, 5)
-    assert code == mod.EXIT_OK and len(seen) == 1, "关掉 recall 时不应再发撤回请求"
+    assert code == mod.EXIT_OK and len(seen) == 2, "关掉 recall 时只应有建会话 + 提交两次请求"
 
 def test_retries_warmup_401_then_ok(mod, env_ready):
     """刚重启的进程还没就绪（401）属于预热，重试后成功不应判红。"""
@@ -107,6 +124,8 @@ def test_retries_warmup_401_then_ok(mod, env_ready):
            (200, {"task_id": "chat_ok", "conversation_id": "c1", "message_id": 11})]
 
     def fake_post(url, payload, token, timeout):
+        if url.endswith("/api/chat/conversations"):
+            return 200, {"conversation_id": "smoke-conv"}
         if url.endswith("/api/chat/submit"):
             return seq.pop(0)
         return 200, {"recalled": True}
@@ -121,6 +140,11 @@ def test_persistent_401_still_fails(mod, env_ready):
     """一直 401 = 鉴权真的坏了，重试到底后仍要判红（不静默放行）。"""
     env_ready.setattr(mod, "_mint_token", lambda account, timeout: "tok")
     env_ready.setattr(mod.time, "sleep", lambda s: None)
-    env_ready.setattr(mod, "_post", lambda url, p, t, to: (401, {"detail": "expired"}))
+    def fake_post(url, payload, token, timeout):
+        if url.endswith("/api/chat/conversations"):
+            return 200, {"conversation_id": "smoke-conv"}
+        return 401, {"detail": "expired"}
+
+    env_ready.setattr(mod, "_post", fake_post)
     code, out = mod.check("http://127.0.0.1:38081", "songspace", "smoke", True, 5)
     assert code == mod.EXIT_FAIL and out["submit_status"] == 401

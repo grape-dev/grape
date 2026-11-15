@@ -58,6 +58,7 @@ from src.domains.mgmt.user import db as user_db
 # 渠道安装表 / 用户映射 / 扫码任务都归 mgmt：SQL 只在该域 public 留一份（任意拓扑原语），
 # 本模块不再持外域表语句，也不再借 engine_wiring 的 runtime 库句柄读 mgmt 表。
 from src.domains.mgmt import public as mgmt_public
+from src.domains.runtime import public as _rt
 
 from src.kernel.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
@@ -1601,19 +1602,17 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str,
                 # 原代码 WHERE gitcode_user=? 用注册名扫列，存量 um 行可能存注册名也可能存平台真 login
                 # 用 OR github_login=? 会误清同名 GitHub 用户；用 user_id 精确匹配无歧义
                 mgmt_public.clear_user_mapping_feishu_any(user_id=str(user_id), updated_at=_now)
-        # 以下三条是 runtime 自有表：仍用进程库游标 + 末尾一次 commit（本域事务语义不变）。
-        # 跨域写入已在上/下方按归属域各自提交——三库拓扑下跨域原子本就不可得，解绑清理是
-        # best-effort，任一步失败只记 warning，不牵连其余步骤。
-        with _db_lock:
-            c = _db.cursor()
-            c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
-            # 解绑干净：该 bot 名下的群绑定（repo_im_group_binding）一并清空，避免残留脏数据
-            # 导致后续 resolve_repo 仍命中旧仓库（chat-config-duplicate-row-unbind-fix-design.md）
-            c.execute("DELETE FROM repo_im_group_binding WHERE im_app_id=?", (old_app_id,))
-            # 解绑干净：消息去重缓存一并清，避免该 app 的历史数据残留
-            #（bot_seen_messages=去重 ID；feishu_onboard_task 含 app_secret/qr_url 敏感信息，飞书专属）
-            c.execute("DELETE FROM bot_seen_messages WHERE app_id=?", (old_app_id,))
-            _db.commit()
+        # 以下三张表都归 runtime：走归属域具名查询（由 lib 自己选对连接）。
+        # 原先用进程库游标，只在 runtime 进程里成立；mgmt 进程执行到此处会 1146，
+        # 解绑清理静默失败留下脏绑定。跨库无法原子，逐步 best-effort。
+
+        _rt.exec_any("conversation_delete_by_im", (old_app_id,))
+        # 解绑干净：该 bot 名下的群绑定（repo_im_group_binding）一并清空，避免残留脏数据
+        # 导致后续 resolve_repo 仍命中旧仓库（chat-config-duplicate-row-unbind-fix-design.md）
+        _rt.exec_any("repo_im_delete_by_app", (old_app_id,))
+        # 解绑干净：消息去重缓存一并清，避免该 app 的历史数据残留
+        #（bot_seen_messages=去重 ID；feishu_onboard_task 含 app_secret/qr_url 敏感信息，飞书专属）
+        _rt.exec_any("bot_seen_delete_by_app", (old_app_id,))
         _ot_via_lib = False
         if is_feishu and _mg_ct is not None:
             try:
@@ -1706,11 +1705,8 @@ async def update_chat_config(body: dict, request: Request,
 
         if old_app_id and old_app_id != app_id:
             # 更换 app_id：清旧渠道会话（安装行由下方 sync/revoke 处理，不再动 legacy 表）
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
-                db.commit()
+            # chat_conversations 归 runtime：走归属域具名查询（mgmt 进程直删会 1146）
+            _rt.exec_any("conversation_delete_by_im", (old_app_id,))
             log.info(f"Chat IM: replaced old app_id={_safe_im_app_ref(old_app_id, old_channel)} "
                      f"with new app_id={_safe_im_app_ref(app_id, provider)}")
         log.info(f"Chat IM: saved im config for user={user['id']} provider={provider} "
@@ -2108,6 +2104,11 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                         except Exception as _de:
                             log.warning(f"[Chat submit] DB save failed: {_de}")
                 elif not is_task_recalled(chat_task_id):
+                    # 空输出必须留诊断线索：否则线上只能看到「（无返回内容）」，
+                    # 分不清是引擎没吐字、session 失效还是 401（2026-11-15 Issue #81/#82 复现）。
+                    log.warning(
+                        f"[Chat submit] empty final text task_id={chat_task_id} conv={conv_id} "
+                        f"repo={repo_key} detail={(_ctm_error_detail or '(no engine detail)')[:300]}")
                     try:
                         add_message(conv_id, "agent", "（无返回内容）",
                                     task_id=chat_task_id, generate_status=3)
@@ -2225,7 +2226,6 @@ async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session
     # 内存无任务 → 可能是跨机器 submit，DB 有 user 消息但 agent 还在执行
     # 轮询 DB 等待 agent 回复（总超时 = CHAT_STREAM_TIMEOUT，可配置，Issue #399），而不是立刻报「查询已中断」
     if not q:
-        from src.kernel.session_manager import db as _msg_db, db_lock as _msg_lock
         from src.kernel.config import get_chat_stream_timeout, CHAT_STREAM_HEARTBEAT_INTERVAL as _hb_interval
 
         async def _poll_db_stream():
@@ -2237,26 +2237,31 @@ async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session
             deadline = _t.time() + timeout_s
             last_heartbeat = _t.time()
             while _t.time() < deadline:
-                with _msg_lock:
-                    c = _msg_db.cursor()
-                    c.execute("SELECT role, generate_status, content, conversation_id FROM chat_messages WHERE task_id=? ORDER BY id", (task_id,))
-                    rows = c.fetchall()
+                # chat_messages 归 runtime：mgmt 进程的 session_manager.db 里没有这张表
+                # （直查会 1146 → SSE 500 → 前端只显示「（无返回内容）」）。
+                # 走 runtime public 的具名查询，由 lib 自己选对连接（自有 DSN / 进程库）。
+                try:
+                    rows = [r for r in _rt.read_all_any("messages_by_task", (task_id,))]
+                except Exception as _e:  # noqa: BLE001 - 兜底查询失败按「暂无消息」继续轮询
+                    log.debug(f"chat stream db poll failed: {_e}")
+                    rows = []
                 if not rows:
                     # 连 user 消息都没有 → 任务不存在
                     yield f"data: {json.dumps({'type': 'error', 'text': '任务不存在', 'task_id': task_id})}\n\n"
                     return
-                has_agent = any(r[0] == "agent" for r in rows)
+                # 列序（messages_by_task）：0=id 1=role 2=generate_status 3=content 4=conversation_id
+                has_agent = any(r[1] == "agent" for r in rows)
                 if has_agent:
                     for r in rows:
-                        if r[0] == "agent":
-                            content = r[2] or ""
-                            conv_id = r[3] or ""
-                            gen_status = r[1]
+                        if r[1] == "agent":
+                            content = r[3] or ""
+                            conv_id = r[4] or ""
+                            gen_status = r[2]
                             evt_type = "done" if gen_status == 2 else "error"
                             yield f"data: {json.dumps({'type': evt_type, 'text': content, 'conversation_id': conv_id, 'task_id': task_id})}\n\n"
                             return
                 # 有 user 无 agent → agent 仍在执行（可能在另一台机器），继续等
-                conv_id = rows[0][3] if rows else ""
+                conv_id = rows[0][4] if rows else ""
                 # 等待期间周期性推送「思考中」心跳（Issue #399）
                 if _t.time() - last_heartbeat >= _hb_interval:
                     yield f"data: {json.dumps({'type': '思考中', 'text': '仍在处理，请稍候…'})}\n\n"
@@ -2668,20 +2673,23 @@ def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token
             }
 
     # 3. DB 兜底（chat_messages 表 by task_id）
-    from src.kernel.session_manager import db as _msg_db, db_lock as _msg_lock
-    with _msg_lock:
-        c = _msg_db.cursor()
-        c.execute("SELECT role, generate_status, content, conversation_id FROM chat_messages WHERE task_id=? ORDER BY id", (task_id,))
-        rows = c.fetchall()
-    has_user = any(r[0] == "user" for r in rows)
-    has_assistant = any(r[0] == "agent" for r in rows)
+    # chat_messages 归 runtime：mgmt 进程里没有这张表，直查 session_manager.db 会
+    # 1146 → /status 500 → 前端拿不到结果，只显示「（无返回内容）」。
+    # 统一走 runtime public 具名查询（列序：id, role, generate_status, content, conversation_id）。
+    try:
+        rows = [tuple(r) for r in _rt.read_all_any("messages_by_task", (task_id,))]
+    except Exception as _e:  # noqa: BLE001 - 取数失败降级为 not_found，不把 500 抛给前端
+        log.warning(f"chat task status db fallback failed ({task_id}): {_e}")
+        rows = []
+    has_user = any(r[1] == "user" for r in rows)
+    has_assistant = any(r[1] == "agent" for r in rows)
     if has_assistant:
         # assistant 消息已写入 → 任务已完成
         for r in rows:
-            if r[0] == "agent":
-                gen_status = r[1]
-                content = r[2] or ""
-                conv_id = r[3] or ""
+            if r[1] == "agent":
+                gen_status = r[2]
+                content = r[3] or ""
+                conv_id = r[4] or ""
                 status = "done" if gen_status == 2 else "error"
                 return {"task_id": task_id, "status": status, "result": content,
                         "text": content,

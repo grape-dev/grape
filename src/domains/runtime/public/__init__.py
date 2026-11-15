@@ -1978,6 +1978,7 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT user_id, repo_key, conv_type, issue_number FROM chat_conversations WHERE id=?"),
     'conversation_owner': 'SELECT user_id FROM chat_conversations WHERE id=?',
     'conversation_touch': "UPDATE chat_conversations SET updated_at=datetime('now') WHERE id=?",
+    'conversation_delete_by_im': 'DELETE FROM chat_conversations WHERE im_channel_id=?',
     'conversation_clear_im_channel': (
         "UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=? AND id!=?"),
     'conversation_set_im_channel': "UPDATE chat_conversations SET im_channel_id=? WHERE id=?",
@@ -1990,6 +1991,10 @@ _ANY_QUERIES: dict[str, str] = {
         "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?,?,?)"),
     'message_by_id': f"SELECT {_MSG_COLS} FROM chat_messages WHERE id=?",
     'message_recall': 'UPDATE chat_messages SET deleted=1 WHERE id=? AND deleted=0',
+    # 任务维度取该轮全部消息（chat 任务状态/SSE 兜底：跨机器或进程重启后内存无常驻任务）
+    'messages_by_task': (
+        "SELECT id, role, generate_status, content, conversation_id "
+        "FROM chat_messages WHERE task_id=? ORDER BY id"),
     'message_recall_by_task': (
         "UPDATE chat_messages SET deleted=1 WHERE task_id=? "
         "AND role IN ('agent','assistant') AND deleted=0"),
@@ -2004,6 +2009,8 @@ _ANY_QUERIES: dict[str, str] = {
         "ORDER BY id DESC LIMIT ?"),
     'messages_delete_by_conversation': 'DELETE FROM chat_messages WHERE conversation_id=?',
     # repo_im_group_binding
+    'repo_im_delete_by_app': 'DELETE FROM repo_im_group_binding WHERE im_app_id=?',
+    'bot_seen_delete_by_app': 'DELETE FROM bot_seen_messages WHERE app_id=?',
     'repo_im_flags_latest': (
         'SELECT auto_impl_enabled, notify_enabled FROM repo_im_group_binding '
         'ORDER BY id DESC LIMIT 1'),
