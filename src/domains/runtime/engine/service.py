@@ -1517,11 +1517,6 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
                 try:
                     c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
                     _evt_seq = c.fetchone()
-                    if _evt_seq and _evt_seq[0]:
-                        c.execute(
-                            "UPDATE events SET status='running', completed_at='' "
-                            "WHERE seq=? AND status IN ('pending','running')",
-                            (_evt_seq[0],))
                 except Exception as _ee:
                     log.warning(f"claim: sync event running failed for task {task_id}: {_ee}")
             _rt_db.commit()
@@ -1531,6 +1526,22 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
             return None
         if not claimed:
             return None
+
+        # 事件置 running：在 claim 事务之外执行（短事务，不与上报/收敛抢同一行锁）
+        _ev = locals().get("_evt_seq")
+        if _ev and _ev[0]:
+            try:
+                _rt_db.cursor().execute(
+                    "UPDATE events SET status='running', completed_at='' "
+                    "WHERE seq=? AND status IN ('pending','running')",
+                    (_ev[0],))
+                _rt_db.commit()
+            except Exception as _ee:
+                log.warning(f"claim: sync event running failed for task {task_id}: {_ee}")
+                try:
+                    _rt_db.rollback()
+                except Exception:
+                    pass
         task = get_task(task_id)
         if task:
             task["status"] = "running"
@@ -1901,11 +1912,6 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                 try:
                     c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
                     _evt_seq = c.fetchone()
-                    if _evt_seq and _evt_seq[0]:
-                        c.execute(
-                            "UPDATE events SET status='running', completed_at='' "
-                            "WHERE seq=? AND status IN ('pending','running')",
-                            (_evt_seq[0],))
                 except Exception as _ee:
                     log.warning(f"claim_by_tag: sync event running failed for task {task_id}: {_ee}")
             _rt_db.commit()
@@ -1915,6 +1921,22 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             return None
     if not claimed:
         return None
+
+    # 事件置 running：在 claim 事务之外执行（短事务，不与上报/收敛抢同一行锁）
+    _ev = locals().get("_evt_seq")
+    if _ev and _ev[0]:
+        try:
+            _rt_db.cursor().execute(
+                "UPDATE events SET status='running', completed_at='' "
+                "WHERE seq=? AND status IN ('pending','running')",
+                (_ev[0],))
+            _rt_db.commit()
+        except Exception as _ee:
+            log.warning(f"claim_by_tag: sync event running failed for task {task_id}: {_ee}")
+            try:
+                _rt_db.rollback()
+            except Exception:
+                pass
     task = get_task(task_id)
     if task:
         task["status"] = "running"

@@ -44,15 +44,25 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
 
     @app.get("/health")
     async def health(request: Request):
-        """Liveness：进程存活，不检查 DB（K8s livenessProbe 用）。"""
+        """Liveness：进程存活，不检查 DB（K8s livenessProbe 用）。
+
+        同时暴露「这个进程连的是哪个库」：连错库时进程照常 200，只有业务查不到数据，
+        表现成远端引擎失联/凭据 401。以前只能翻 /proc/<pid>/environ 才看得出来。
+        """
         if not _is_loopback(request):
             return JSONResponse(status_code=403, content={"error": "forbidden"})
+        try:
+            from src.kernel.db_registry import describe_connection
+            _db = describe_connection()
+        except Exception as _e:  # noqa: BLE001
+            _db = {"error": str(_e)}
         return {
             "status": "ok",
             "service": service_name,
             "version": "2.2.0",
             "pid": os.getpid(),
             "started_at": _PROCESS_STARTED_AT,
+            "database": _db,
         }
 
     # /healthz 3s TTL 缓存

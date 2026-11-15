@@ -121,6 +121,11 @@ async def lifespan(app: FastAPI):
     global bot_manager
     from src.kernel.config import log
 
+    # 启动自检：连错库就拒绝启动 —— 带着错库对外返回 200 时，症状是
+    # 「凭据全 401、引擎全失联」，现场只能翻 /proc 才看得出来。
+    from src.kernel.db_registry import assert_role_database
+    assert_role_database("mgmt")
+
     # 库初始化/迁移必须在 lifespan（启动期）跑，不能留在模块级：
     # 模块级调用会让**任何** `import src.api.grape_server` 都触发一次全量迁移，
     # 而运行期确实存在这种 import（im/notify.resolve_engine 为了拿 im_engine 懒加载它）。

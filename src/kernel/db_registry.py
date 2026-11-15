@@ -93,7 +93,69 @@ def current_domain() -> str | None:
 
 
 def lib_enabled() -> bool:
-    return os.environ.get("GRAPE_DOMAIN_LIB", "0").strip().lower() in ("1", "true", "yes", "on")
+    """跨域 lib 模式是否启用。
+
+    口径改为「**有 DSN 就算启用**」：三库部署先把文件放到 /etc/grape/grape-3db.env
+    并让进程看到 GRAPE_DSN_*，能力就有了，不该再额外要求一个 GRAPE_DOMAIN_LIB=1。
+    少一个开关 = 少一个漏配点（这个开关漏配的后果尤其阴险：*_any 全部静默回落到
+    进程主库，三库看起来"照常工作"，直到某个跨域查询撞上 1146）。
+
+    显式置 0 仍然尊重（单库回归/测试要关掉跨域能力时用）。
+    """
+    explicit = os.environ.get("GRAPE_DOMAIN_LIB", "").strip().lower()
+    if explicit in ("0", "false", "no", "off"):
+        return False
+    if explicit in ("1", "true", "yes", "on"):
+        return True
+    # 未显式设置 → 看能力：三个 DSN 里有任意一个就认为处于三库拓扑
+    return any(dsn_of(d) for d in ("mgmt", "runtime", "insight"))
+
+
+# 每个角色「应该」连哪个库。启动自检用这张表，写错/漏配就在这里当场失败。
+ROLE_DB_EXPECTATION = {
+    "mgmt": "grape_stage_mgmt",
+    "event": "grape_stage_runtime",
+    "worker": "grape_stage_runtime",
+    "insight": "grape_stage_insight",
+}
+
+
+def describe_connection() -> dict:
+    """当前进程实际连的库（给 /health 和启动日志用，一眼看出连错没）。"""
+    return {
+        "host": os.environ.get("DEVOPS_DB_HOST", ""),
+        "port": os.environ.get("DEVOPS_DB_PORT", ""),
+        "name": os.environ.get("DEVOPS_DB_NAME", ""),
+        "domain": current_domain() or "",
+        "domain_lib": lib_enabled(),
+        "own_dsn": sorted(d for d in ("mgmt", "runtime", "insight")
+                          if dsn_of(d) and uses_own_dsn(d)),
+    }
+
+
+def assert_role_database(role: str) -> None:
+    """启动自检：本角色连的库必须是它该连的那个，否则拒绝启动。
+
+    为什么值得 fail-fast：库连错时进程**照常启动、照常返回 200**，
+    只有业务查询查不到数据 —— 表现为「凭据全部 401、引擎全部失联」，
+    症状出现在远端机器上，现场只能靠翻 /proc/<pid>/environ 才看得出，
+    2026-11-15 为此花了几个小时。
+    """
+    expect = ROLE_DB_EXPECTATION.get((role or "").strip().lower())
+    if not expect:
+        return
+    actual = os.environ.get("DEVOPS_DB_NAME", "").strip()
+    if not actual:
+        log.error(f"[db-guard] role={role} 未设置 DEVOPS_DB_NAME，无法确认连的是哪个库 —— 拒绝启动")
+        raise SystemExit(5)
+    if actual != expect:
+        log.error(
+            f"[db-guard] role={role} 连错库：DEVOPS_DB_NAME={actual}，应为 {expect}。"
+            f" 常见原因：unit 缺少 GRAPE_3DB_ENV drop-in（于是 grape-systemd-run.sh 走了单库分支，"
+            f"连回旧的 grape_<domain>_db）。拒绝启动，避免带着错库对外服务。"
+        )
+        raise SystemExit(5)
+    log.info(f"[db-guard] role={role} database={describe_connection()}")
 
 
 def dsn_of(domain: str) -> str:
