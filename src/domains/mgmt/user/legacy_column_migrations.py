@@ -53,11 +53,26 @@ _MANAGED_REPOS_LEGACY_COLUMNS = (
 
 
 def _add_column_if_missing(table: str, col: str, ddl: str) -> None:
-    """幂等补列原语（SQLite；ALTER 失败=列已存在=pass）。"""
+    """幂等补列原语（SQLite；ALTER 失败=列已存在=pass）。
+
+    启动路径不能无限期卡在 MySQL 的 metadata lock 上：本机 insight/worker 与远端实例
+    共用同一个库时，对方一条长事务就能让 `ALTER TABLE` 挂住（实测 2026-11-15：
+    insight 启动停在 `_add_column_if_missing`，进程不监听端口、日志也不再前进）。
+    这里把会话级 `lock_wait_timeout` 压到 10s，拿不到锁就当作「列已存在」跳过，
+    下次启动会重试（幂等）。
+    """
     try:
+        from src.kernel.session_manager import _is_mysql_backend as _is_mysql
+        if _is_mysql():
+            try:
+                db.execute("SET SESSION lock_wait_timeout=5")
+            except Exception:
+                pass
         db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-    except Exception:
-        pass
+    except Exception as _e:
+        # 1205 = lock wait timeout：同表后续列一定同样被挡，交给上层 break
+        if "1205" in str(_e):
+            raise
 
 
 def add_legacy_columns() -> None:
@@ -67,11 +82,22 @@ def add_legacy_columns() -> None:
     下线判据：生产无存量库依赖本路径后整段删除。
     """
     for col, ddl in _USER_ACCOUNTS_LEGACY_COLUMNS:
-        _add_column_if_missing("user_accounts", col, ddl)
+        try:
+            _add_column_if_missing("user_accounts", col, ddl)
+        except Exception:
+            log.warning("user_accounts 补列跳过（metadata lock 等锁超时），下次启动重试")
+            break
     for col, ddl in _MANAGED_REPOS_LEGACY_COLUMNS:
-        _add_column_if_missing("managed_repos", col, ddl)
+        try:
+            _add_column_if_missing("managed_repos", col, ddl)
+        except Exception:
+            log.warning("managed_repos 补列跳过（metadata lock 等锁超时），下次启动重试")
+            break
     # login_whitelist.github_username（幂等，与上面同族）
-    _add_column_if_missing("login_whitelist", "github_username", "TEXT DEFAULT ''")
+    try:
+        _add_column_if_missing("login_whitelist", "github_username", "TEXT DEFAULT ''")
+    except Exception:
+        log.warning("login_whitelist 补列跳过（metadata lock 等锁超时），下次启动重试")
 
 
 def remap_orphan_user_ids() -> None:
