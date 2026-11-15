@@ -737,6 +737,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            # 事件知识清理 / 账户名（runtime/routes/events.py；任意拓扑）
            "knowledge_obs_keys_scoped", "knowledge_ids_scoped",
            "delete_event_knowledge_any", "account_username_by_id_any",
+           # autopilot 任务创建者解析（runtime/pipeline/account_env.py；任意拓扑）
+           "user_account_username_by_id_any",
            # 渠道安装表解绑/回显（runtime/routes/chat.py；任意拓扑）
            "installation_other_refs_any", "installation_holders_any",
            "installation_user_channel_rows_any", "clear_user_mapping_feishu_any",
@@ -1947,6 +1949,14 @@ _ANY_QUERIES: dict[str, str] = {
         "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
         "VALUES (?, '', '', 0, 1, 'system')"),
     "account_username_by_id": "SELECT username FROM grape_accounts WHERE id=? LIMIT 1",
+    # ── 个人账号（`user_accounts`，与登录账号 `grape_accounts` 是**两张表**）──
+    # 原消费点是 runtime/pipeline/account_env 的 autopilot「任务创建者」解析：lib 侧走
+    # `user_accounts_e2eb04`，lib 不可用时留了一段本地兜底 SQL —— 兜底句正是跨域引用
+    # 的来源，且三库拓扑下 runtime 进程库没有 user_accounts（视图 0 → 1146）。
+    # 语句逐字照抄原兜底句（无 LIMIT、无 is_disabled/is_active 过滤：任务创建者即便是
+    # 已停用账号也要回原名，由调用方的形态校验决定是否采用）。
+    # 不可复用 `account_username_by_id`：那张表是登录账号，同 id 空间不同表。
+    "user_account_username_by_id": "SELECT username FROM user_accounts WHERE id=?",
     # ── 引擎 scope / claim 过滤取账号 id（runtime/engine/service.py 两处「lib 优先 + 本地兜底」）──
     # 原实现是双分支：lib 侧走 `grape_accounts_0b3fdc`（严格大小写）/ `grape_accounts_d0ac07`
     # （LOWER 双侧），兜底侧是调用方进程主库上的同一段 SQL —— 三库拓扑下进程库没有
@@ -2639,6 +2649,30 @@ def account_username_by_id_any(account_id: Any) -> str:
     if not account_id:
         return ""
     row = read_one_any("account_username_by_id", (str(account_id),))
+    return str(row[0] or "") if row else ""
+
+
+def user_account_username_by_id_any(user_id: Any) -> str:
+    """按 id 取**个人账号** `user_accounts.username`（任意拓扑）；无行 / id 非法 → 空串。
+
+    与 `account_username_by_id_any` 的区别：那是登录账号 `grape_accounts`，这是个人账号
+    `user_accounts`，同 id 空间但两张表，不能互相顶替。
+
+    `id` 非法（0 / 非数字）→ 空串且**不查库**：原调用点（runtime/pipeline/account_env
+    的 autopilot 任务创建者解析）在 `created_by=0` 的历史任务上正是这么短路的 —— 一次
+    无意义查询换不来任何信息。id 按整数绑定：两边后端的该列都是 INTEGER 主键，
+    传字符串在 MySQL 侧会走隐式转换、在 SQLite 侧直接匹配不到。
+
+    没有 is_disabled / is_active 过滤：恢复的是原语句逐字口径（已停用账号也要回原名，
+    是否采用由调用方的账号形态校验决定）。
+    """
+    try:
+        uid = int(user_id or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not uid:
+        return ""
+    row = read_one_any("user_account_username_by_id", (uid,))
     return str(row[0] or "") if row else ""
 
 

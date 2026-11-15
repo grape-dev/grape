@@ -5464,6 +5464,85 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/domains/runtime/pipeline/account_env.py`（1 处：`user_accounts`，归 mgmt）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
 
+### 7.49 runtime autopilot 任务创建者解析下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/runtime/pipeline/account_env.py` **1 处 → 0**（单轮做完，1 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`user_accounts`（归 **mgmt**，`grape_mgmt_db`）× 1：
+  L44（改前）在 `task_creator_account()`——autopilot 定时任务没有事件触发人，按
+  `autopilot_tasks.created_by` 反查任务创建者账号作为 `$ACCOUNT` 来源：
+  `SELECT username FROM user_accounts WHERE id=?`（lib 不可用时的本地兜底句）。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增具名查询 `user_account_username_by_id`（L1959），语句与原兜底句**逐字一致**
+    （单列 `username`、**无 LIMIT**、无 `is_disabled`/`is_active` 过滤；只用 `?` 方言面，
+    无 `%s` / `NOW()` / `ON DUPLICATE` / 反引号）。
+  - 新增薄函数 `user_account_username_by_id_any(user_id) -> str`（L2655）：体内零 SQL，
+    id 整数归一（`0` / 非数字 → 空串且**不查库**）+ `read_one_any` + `row[0] or ""`。
+  - `__all__` 登记 `user_account_username_by_id_any`（L741）。
+- 调用点 `account_env.py`：**两段兜底合成一条 owner 原语**。原实现是
+  「`mgmt_lib(foreign_only=True).read_one("user_accounts_e2eb04")` → 本进程库
+  `db.cursor()` 直发兜底句」，`with db_lock:` 只为兜底句而存在。现改成函数内
+  `from src.domains.mgmt import public as _mgmt_public_account` →
+  `user_account_username_by_id_any(uid)`，`normalize_account()` 形态校验与
+  `except → log.warning(ACCOUNT_TASK_CREATOR_LOOKUP_FAILED) → 空串` 的 fail-open 口径逐字保留；
+  取锁/取游标整段删除（`read_one_any` 的 `_any_cursor` 在回落路径自己持有同一把可重入锁）。
+- 设计取舍：
+  1. **不复用 `account_username_by_id_any`**：那条查的是登录账号 `grape_accounts`（`id` 为 TEXT/UUID，
+     带 `LIMIT 1`）；本处查的是个人账号 `user_accounts`（`id` 为 INTEGER 主键）。同 id 空间、
+     **两张表**，顶替会把「任务创建者」换成「登录账号」甚至是另一条无关记录。两条具名查询并存，
+     注释写明差异。
+  2. **id 按整数绑定，不做 `str()` 归一**：两边后端该列都是 INTEGER 主键，字符串在 SQLite 侧
+     直接匹配不到、在 MySQL 侧走隐式转换（索引失效）。原兜底句绑的就是 `uid`（已 `int()`），
+     逐字照抄。
+  3. **不补 `is_disabled` 过滤**：原语句没有该谓词，补上会改口径（停用账号的任务创建者会从
+     「回原名」变成「空串 + 告警」）。恢复的是原语句语义，是否采用停用账号由调用方决定，
+     烟测 B5/C4 把这个旧口径钉住。
+  4. **不新增写原语**：本处纯读，写仍在 runtime 本域（autopilot 任务表），无跨域事务需求，
+     不碰 `_any_tx()` / outbox。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **三库拓扑下 autopilot 的 `$ACCOUNT` 静默退化为空**：runtime 进程库没有 `user_accounts`
+     （视图 0 → 1146），lib 分支不可用时落本地兜底句 → 抛错被 `except Exception` 吞成
+     「查不到创建者」，只留一条 `ACCOUNT_TASK_CREATOR_LOOKUP_FAILED`。表现为定时巡检任务的
+     认领/署名恒空，日志线索指向「用户已删」而不是「库不对」。
+  2. **同一判定按拓扑走两个只读副本**：lib 侧 `%s` 具名查询与兜底 `?` 语句是同一句话的两份拷贝，
+     失败表现不同而正确结果只有一个。上移后两条拓扑跑同一份 owner 语句。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/mgmt/public/__init__.py` / `src/domains/runtime/pipeline/account_env.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/account_env_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建 `user_accounts`，
+    连跑 2 次稳定）→ **ALL account_env smoke PASSED (60 checks)**：
+    A 注册面/静态否定（具名查询逐字、不指向 `grape_accounts`、`?` 占位、无
+    `%s`/`NOW()`/`ON DUPLICATE`/反引号、`__all__` 登记、AST 查薄函数体内无 `execute`/无
+    `user_accounts` 语句、**薄函数不做 `str()` 归一**、调用点无 `user_accounts` 语句/无
+    `db.cursor`/`db_lock`/`domain_read`/`mgmt_lib`、不再消费 `user_accounts_e2eb04`、无静默 except、
+    owner 侧 `%s` 注册面保留、余量 19、`user_accounts` 退出跨域表清单、基线 ≥ 19）；
+    B 原语语义（命中回原名、无行/负 id → 空串、id `0`/`None`/`''`/`'abc'`/`'0'` → 空串且不查库、
+    id 过滤真的生效（不串行取首行）、**停用账号仍回原名**（原句无过滤）、字符串 id 归一、
+    大小写不折叠、重复调用稳定、只读不写库）；
+    C 调用点端到端（合法账号 → 原名、含空格 / 含斜杠 → 形态校验拒绝、停用账号仍回原名、
+    `created_by=0`/`None`/`'abc'` → 空串且不查库、用户已删 → 空串不抛、原语异常 → fail-open 空串
+    且 `ACCOUNT_TASK_CREATOR_LOOKUP_FAILED` 带 `user_id` 留痕）；
+    D 自有 DSN 伪游标（只走 `domain=mgmt`、语句逐字、参数 `(7,)` **按整数绑定**、只执行一次、
+    非法 id 连库都不碰）。
+  · `--update-baseline` → **baseline updated: 13 pairs, 19 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **13 表 / 19 跨域引用 / 13 对**
+    （`user_accounts` 的跨域消费方 1 → 0，整表退出矩阵：`sql_references` 1010 → 979，
+    差值 31 = 该表原有 31 处引用中 30 处属 mgmt 本域内引用、只有 1 处跨域；矩阵只列有跨域
+    消费方的表，故随最后一条跨域引用一起移出）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （mgmt 188 funcs + 2 named queries used / 271 funcs + 31 queries registered）。
+    named queries used 3 → 2 是因为 `user_accounts_e2eb04` 不再被消费；该 `%s` 条目属 owner 侧
+    跨进程 lib 注册面，删除属另一件事（同 7.46 / 7.47 / 7.48 的处理）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新 action 名），运行面证据为 sqlite 烟测。
+- **新基线**：**19 处 / 13 对 / 13 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  `src/domains/runtime/pipeline/account_env.py` 已清零并退出榜单；下一批首个未 blocked 文件是
+  `src/api/a2a_dispatch.py`（1 处：`agent_runtimes`，归 runtime）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
