@@ -206,8 +206,11 @@
 
     <!-- ═══ 引擎/技能选择浮层 ═══ -->
     <Teleport to="body">
-      <div v-if="pickerOpen" class="chat-picker-overlay" @click.self="closePicker">
-        <div v-if="pickerOpen === 'model'" class="chat-picker-pop cv__pop">
+      <!-- 不用全屏遮罩：它 inset:0 会把另一个配置按钮的点击吃掉，
+           用户点「引擎配置」再点「技能配置」就变成「先关闭、没弹出」，观感是没反应。
+           改成 document 捕获阶段监听：点浮层和两个触发按钮以外的地方才关。 -->
+      <div v-if="pickerOpen" class="chat-picker-anchor">
+        <div v-if="pickerOpen === 'model'" class="chat-picker-pop cv__pop show" :style="pickerStyle">
           <div class="cv__pop-label">{{ t('engine_label') }}</div>
           <div class="cv__pop-list">
             <div v-if="!backends.length" class="cv__pop-hint">{{ tc('loading') }}</div>
@@ -235,7 +238,7 @@
             </div>
           </div>
         </div>
-        <div v-else class="chat-picker-pop cv__pop">
+        <div v-else class="chat-picker-pop cv__pop show" :style="pickerStyle">
           <div class="cv__pop-label">{{ t('skill_label') }}</div>
           <div class="cv__scope-tabs">
             <button
@@ -1280,9 +1283,40 @@ const backends = ref([])
 const skillScope = ref('official')
 const skillItems = ref([])
 const skillLoading = ref(false)
+// 浮层是 position:fixed 且基础样式 opacity:0（靠 .show 才可见），
+// 旧实现既没加 .show 也没给定位 → 点了按钮 DOM 虽在、屏幕上一片空白。
+const pickerStyle = ref({})
+function positionPicker() {
+  const btnId = pickerOpen.value === 'skill' ? 'chatSkillBtn' : 'chatModelBtn'
+  const btn = document.getElementById(btnId)
+  if (!btn) return
+  const r = btn.getBoundingClientRect()
+  const W = 280
+  const vw = G.window.innerWidth || 0
+  const vh = G.window.innerHeight || 0
+  // 贴按钮上方弹出：left 夹到视口内，bottom 以「按钮顶 - 10px」为基线
+  pickerStyle.value = {
+    left: Math.max(12, Math.min(r.left, vw - W - 12)) + 'px',
+    bottom: Math.max(12, vh - r.top + 10) + 'px',
+    maxHeight: Math.max(160, Math.min(360, r.top - 24)) + 'px',
+  }
+}
+function onPickerResize() {
+  if (pickerOpen.value) positionPicker()
+}
 function togglePicker(type) {
   pickerOpen.value = pickerOpen.value === type ? null : type
   if (pickerOpen.value === 'skill') loadSkillItems()
+  if (pickerOpen.value) nextTick(positionPicker)
+}
+// 点浮层与两个触发按钮之外的地方关闭（捕获阶段，不阻挡按钮自身事件）
+function onPickerDocClick(ev) {
+  if (!pickerOpen.value) return
+  const t = ev.target
+  if (!t || typeof t.closest !== 'function') return
+  if (t.closest('.chat-picker-pop')) return
+  if (t.closest('#chatModelBtn') || t.closest('#chatSkillBtn')) return
+  closePicker()
 }
 function switchSkillScope(s) {
   skillScope.value = s
@@ -1635,6 +1669,8 @@ function syncAbortBridge() {
 }
 
 onBeforeUnmount(function () {
+  G.window.removeEventListener('resize', onPickerResize)
+  G.document.removeEventListener('click', onPickerDocClick, true)
   stopOnboardPoll()
   if (countdownTimer) clearInterval(countdownTimer)
   if (streamAbort) streamAbort.abort()
@@ -1650,6 +1686,8 @@ onMounted(function () {
   G.window._currentView = 'chat'
   loadConversations(true)
   loadConfigData()
+  G.window.addEventListener('resize', onPickerResize)
+  G.document.addEventListener('click', onPickerDocClick, true)
 })
 </script>
 
@@ -1747,9 +1785,18 @@ onMounted(function () {
   color: var(--t3);
 }
 /* 选择浮层（复用壳里 .chat-picker-* 类） */
+.chat-picker-anchor {
+  position: static;
+  width: 0;
+  height: 0;
+}
 .cv__pop {
+  /* 定位由 positionPicker() 内联给出（贴触发按钮上方），这里只保证内容可滚动 */
   left: auto;
   right: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .cv__pop-label {
   font-size: 11px;
@@ -1760,6 +1807,8 @@ onMounted(function () {
   text-transform: uppercase;
 }
 .cv__pop-list {
+  flex: 1 1 auto;
+  min-height: 0;
   max-height: 280px;
   overflow-y: auto;
   padding: 0 6px 6px;
