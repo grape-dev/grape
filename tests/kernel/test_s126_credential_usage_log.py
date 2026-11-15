@@ -24,12 +24,23 @@ import pytest
 
 os.environ.setdefault("GRAPE_CREDENTIAL_KEYS", "dev:test")
 
-_TEST_DIR = Path(__file__).resolve().parent
-_SRC = _TEST_DIR.parent / "src"
-
+from src.kernel.persistence import credential_usage_log as _cul
 from src.kernel.persistence.credential_usage_log import (
     core_table, ensure_table, list_by_credential, log_usage)
 from src.kernel.session_manager import db, db_lock
+
+# 源码扫描锚点取被导入模块的真实文件路径：用例从 tests/ 下沉到 tests/kernel/
+# （51f77b4ff）后，原先的 `_TEST_DIR.parent / "src"` 连 src/persistence 一起指空，
+# UC30③/⑥ 读不到文件而静默红；按模块 __file__ 取路径，模块再搬家也不会失效。
+_MODULE_SRC = Path(_cul.__file__)
+
+
+def _audit_row(rid: str) -> dict:
+    """_flush_batch 的入参行（列序与 runtime.public.credential_usage_log_insert_many 一致）。"""
+    return {"id": rid, "credential_id": "cred_x", "credential_kind": "user_credentials",
+            "user_id": 7, "repo_key": "gitcode:org/repo", "initiating_actor_id": 1,
+            "executor_context": "task", "operation": "token_fetch",
+            "created_at": "2026-11-11T00:00:00Z"}
 
 
 class TestCredentialUsageLog:
@@ -63,7 +74,7 @@ class TestCredentialUsageLog:
         """
         from src.kernel.id_gen import uuid7_str
         ensure_table()
-        ddl = (_SRC / "persistence" / "credential_usage_log.py").read_text(encoding="utf-8")
+        ddl = _MODULE_SRC.read_text(encoding="utf-8")
         assert re.search(r"user_id\s+TEXT\s+NOT NULL", ddl), "user_id 列声明须 TEXT"
         assert re.search(r"initiating_actor_id\s+TEXT\s+DEFAULT", ddl), \
             "initiating_actor_id 列声明须 TEXT"
@@ -82,7 +93,7 @@ class TestCredentialUsageLog:
 
     def test_uc30_3_append_only_no_update_api(self):
         """只增不改：模块 API 面禁 update/delete（AST 扫描，防审计篡改通道）。"""
-        src = (_SRC / "persistence" / "credential_usage_log.py").read_text(encoding="utf-8")
+        src = _MODULE_SRC.read_text(encoding="utf-8")
         tree = ast.parse(src)
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
@@ -95,7 +106,9 @@ class TestCredentialUsageLog:
         from src.api.db_setup import _MIGRATIONS
         mig = [m for m in _MIGRATIONS if m.name == "create-credential-usage-log-table"]
         assert mig, "盖章迁移未注册"
-        assert mig[0].kind == "safe" and mig[0].version == "202611070002"
+        # 盖章值随立案窗口推进（202611070002 → 202611140001）；重盖章须同步改此处，
+        # 否则幂等 CREATE TABLE 的盖章语义变化无人复核。
+        assert mig[0].kind == "safe" and mig[0].version == "202611140001"
 
     def test_uc30_5_core_insert_and_query_roundtrip(self):
         """Core 参数化写入 + 查询回环（铁律 9 高频审计写入豁免通道）。"""
@@ -115,47 +128,105 @@ class TestCredentialUsageLog:
         assert len(list_by_credential(cred)) == 2
 
     def test_uc30_7_flush_batch_mysql_dispatch_no_bare_sqlite(self, monkeypatch):
-        """UC30⑦（BLK-1 / B1）：MySQL 后端下 _flush_batch 必须走统一 DB 抽象。
+        """UC30⑦（BLK-1 / B1）：三库（自有 DSN）拓扑下刷写走 runtime 域连接，禁裸连 sqlite3。
 
-        裸连 sqlite3 在 MySQL 后端下 = 审计行写进本地不存在的 sqlite 文件，
-        审计静默丢失。判据：backend=mysql 时 executemany/commit 走翻译层连接，
+        裸连 sqlite3 在 MySQL 后端下 = 审计行写进本地不存在的 sqlite 文件，审计静默丢失。
+        c53729dc0 把写语句下沉 runtime.public.credential_usage_log_insert_many 后，
+        _flush_batch 只剩「攒批 + 调 owner 原语」，后端/拓扑分派由原语内的 `_any_cursor`
+        承担，因此 mock 面落在 db_registry（自有 DSN）与 session_manager.db（单库回落）两个真实接缝。
+        判据：uses_own_dsn(runtime) 时经 db_registry.cursor("runtime") 的翻译层连接 executemany
+        批量落库；自有 DSN 连接是 autocommit，不额外 commit、也不回落进程主库；
         全程零 sqlite3.connect 调用（调用即红）。
         """
+        import contextlib
         import sqlite3 as _sq
-        import src.kernel.mysql_compat as _mc
+        import src.kernel.db_registry as _reg
         import src.kernel.session_manager as _sm
         from src.kernel.persistence.credential_usage_log import _flush_batch
 
         def _forbidden(*_a, **_kw):  # pragma: no cover - 命中即违规
             raise AssertionError(
-                "BLK-1 violation: bare sqlite3.connect under mysql backend")
+                "BLK-1 violation: bare sqlite3.connect in audit flush")
         monkeypatch.setattr(_sq, "connect", _forbidden)
 
         calls: dict = {}
 
-        class _FakeCompatDB:
+        class _FakeCursor:
             def executemany(self, sql, rows):
                 calls["sql"] = sql
                 calls["rows"] = [tuple(r) for r in rows]
                 return len(calls["rows"])
 
-            def commit(self):
-                calls["commit"] = True
+        @contextlib.contextmanager
+        def _cursor(domain):
+            assert domain == "runtime", domain
+            yield _FakeCursor()
 
-        monkeypatch.setattr(_mc, "get_db_backend", lambda: "mysql")
-        monkeypatch.setattr(_sm, "db", _FakeCompatDB())
+        class _NoFallbackDB:  # 自有 DSN 拓扑回落进程主库即违规
+            def __getattr__(self, item):
+                raise AssertionError(f"unexpected process-db access: {item}")
+
+        monkeypatch.setattr(_reg, "uses_own_dsn", lambda _d: True)
+        monkeypatch.setattr(_reg, "cursor", _cursor)
+        monkeypatch.setattr(_sm, "db", _NoFallbackDB())
 
         rid = str(uuid.uuid4())
-        row = {"id": rid, "credential_id": "cred_x", "credential_kind":
-               "user_credentials", "user_id": 7, "repo_key": "gitcode:org/repo",
-               "initiating_actor_id": 1, "executor_context": "task",
-               "operation": "token_fetch", "created_at": "2026-11-11T00:00:00Z"}
-        _flush_batch([row])
+        _flush_batch([_audit_row(rid)])
 
-        # 审计行经翻译层批量落库且提交——不静默丢行
+        # 审计行经翻译层批量落库——不静默丢行，列序不漂移
         assert calls["sql"].startswith("INSERT INTO grape_t_credential_usage_log"), \
             calls.get("sql")
+        assert calls["sql"].count("?") == 9, calls["sql"]
         assert len(calls["rows"]) == 1
         assert calls["rows"][0][0] == rid
         assert calls["rows"][0][1] == "cred_x"
-        assert calls.get("commit") is True
+        assert calls["rows"][0][4] == "gitcode:org/repo"
+
+    def test_uc30_7_flush_batch_single_db_fallback_commits(self, monkeypatch):
+        """UC30⑦续（单库/回落拓扑）：走进程库游标写批并提交一次，同样零裸连 sqlite3。
+
+        单库拓扑下自有 DSN 未启用，写路径必须落到 session_manager.db 的游标（进程共享连接）
+        并在 write=True 时提交——否则审计行停在未提交事务里，进程退出即丢。
+        """
+        import contextlib
+        import sqlite3 as _sq
+        import src.kernel.db_registry as _reg
+        import src.kernel.session_manager as _sm
+        from src.kernel.persistence.credential_usage_log import _flush_batch
+
+        def _forbidden(*_a, **_kw):  # pragma: no cover - 命中即违规
+            raise AssertionError(
+                "BLK-1 violation: bare sqlite3.connect in audit flush")
+        monkeypatch.setattr(_sq, "connect", _forbidden)
+
+        calls: dict = {}
+
+        class _FakeCursor:
+            def executemany(self, sql, rows):
+                calls["sql"] = sql
+                calls["rows"] = [tuple(r) for r in rows]
+                return len(calls["rows"])
+
+        class _FakeProcDB:
+            def cursor(self):
+                return _FakeCursor()
+
+            def commit(self):
+                calls["commit"] = True
+
+        @contextlib.contextmanager
+        def _no_domain_cursor(domain):  # pragma: no cover - 单库拓扑不该走自有 DSN
+            raise AssertionError(f"unexpected own-DSN cursor: {domain}")
+            yield  # 生成器形态：contextmanager 需要 yield 才成立
+
+        monkeypatch.setattr(_reg, "uses_own_dsn", lambda _d: False)
+        monkeypatch.setattr(_reg, "cursor", _no_domain_cursor)
+        monkeypatch.setattr(_sm, "db", _FakeProcDB())
+
+        rid = str(uuid.uuid4())
+        _flush_batch([_audit_row(rid)])
+
+        assert calls["sql"].startswith("INSERT INTO grape_t_credential_usage_log"), \
+            calls.get("sql")
+        assert len(calls["rows"]) == 1 and calls["rows"][0][0] == rid
+        assert calls.get("commit") is True, "单库回落路径未提交，审计行会丢在未提交事务里"
