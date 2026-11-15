@@ -295,9 +295,25 @@ const app = (() => {
   }
 
   function _bootRestore() {
+    var _ctx0 = _appPathCtx();
     _applyAppPathRepo().then(function (hit) {
       const h = window.location.hash || '';
       if (hit && h.length <= 1) { nav('dash'); return; }
+      // 深链指名了仓库却没命中：多半是 boot 早于 token 落地 / 接口抖动（曾表现为
+      // 「登录后第一次进 /app/owner/repo 掉回引导页，刷新一次才好」）。再试一次，
+      // 仍失败才交给 _restoreNavAfterLogin —— 那里不会再用「未绑定」去夺路径。
+      if (_ctx0 && !hit && !currentRepo()) {
+        setTimeout(function () {
+          _applyAppPathRepo().then(function (hit2) {
+            if (hit2) {
+              const h2 = window.location.hash || '';
+              if (h2.length <= 1) { nav('dash'); return; }
+            }
+            _restoreNavAfterLogin();
+          });
+        }, 400);
+        return;
+      }
       _restoreNavAfterLogin();
     });
   }
@@ -429,6 +445,10 @@ function loadAgentTypes() {
   // 注：Vue 线未搬 _appVcsCatalog 目录（旧壳的 _appLoadVcsCatalog 已随页面删除），
   // 因此目录恒为 null → 本函数当前等价于「bindings 非空」；保留它为了语义与
   // arch-weekly-11 同源，将来恢复目录即自动生效（arch 合并 d2787875）。
+  // 绑定态是否已经「确知」：/auth/profile 成功返回后才置 true。
+  // 未确知时绝不能按「未绑定」把带深链仓库的用户轰去引导页（那会把 /app/owner/repo/ 路径也改掉）。
+  var _profileLoadedOk = false;
+
   function _hasVcsBinding() {
     var _u = {};
     try { _u = JSON.parse(localStorage.getItem('user') || '{}'); } catch (e) {}
@@ -467,21 +487,24 @@ function loadAgentTypes() {
       const parts = hash.substring(1).split('/');
       const view = parts[0];
       const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
-      if (!_hasVcsBinding() && !currentRepo()) {
+      if (!_hasVcsBinding() && !currentRepo() && !_appPathCtx() && _profileLoadedOk) {
         goToRepos();
       } else if (noRepoViews.includes(view) || currentRepo()) {
         nav(view, param);
       } else {
         nav('dash');
       }
+    } else if (_appPathCtx() && !currentRepo()) {
+      // 深链仓库没解析出来（同上）：保留 URL，落在 dashboard，刷新/重登后可恢复
+      nav('dash');
     } else if (bindings.length > 0) {
       // 有仓库平台绑定无 hash → 加载仓库列表（纯登录渠道绑定 → loadRepos 内转引导页）
       loadRepos();
     } else if (currentRepo()) {
       // 无绑定但有当前仓库 → dashboard
       nav('dash');
-    } else if (!_hasVcsBinding()) {
-      // 无仓库平台绑定 → 引导页（用户裁定 2026-11-09）
+    } else if (!_hasVcsBinding() && _profileLoadedOk) {
+      // 无仓库平台绑定 → 引导页（用户裁定 2026-11-09）；绑定态未知时不跳，避免误判
       goToRepos();
     } else {
       // 有绑定且无 hash/仓库/引导需求 → 停留当前视图（显式空分支：语义=无需路由）
@@ -508,6 +531,7 @@ function loadAgentTypes() {
       var _tbAvatar = $('tbUserAvatar'); if (_tbAvatar) _tbAvatar.textContent = (displayName || 'U')[0].toUpperCase();
       var _tbName = $('tbUserName'); if (_tbName) _tbName.textContent = displayName;
       localStorage.setItem('user', JSON.stringify(d));
+      _profileLoadedOk = true;
       // 如果当前在仓库选择页，更新 Welcome 消息
       const welcomeEl = document.getElementById('welcomeUser');
       if (welcomeEl) welcomeEl.textContent = displayName;
