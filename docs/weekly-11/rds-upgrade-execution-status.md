@@ -5100,6 +5100,89 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/api/feedback_issue_converter.py`（2 处：`user_feedback`，归 mgmt）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
 
+### 7.44 runtime 401 兜底的凭据失效标记下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/runtime/vcs/oauth_401_retry.py` **1 处 → 0**（单轮做完，1 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`external_identities`（归 **mgmt**，
+  `grape_mgmt_db`）× 1：L129（改前）`_mark_credential_expired()` 的**本地兜底语句**
+  `UPDATE external_identities SET status=4 WHERE grape_user_id=? AND provider=? AND status=1`
+  —— 前面已有「mgmt lib + cross_write 幂等意图」分支，只有 lib 不可用（单库/测试拓扑、
+  或 lib 抛异常）才走到这句；而这句正是本文件唯一的跨域表引用。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增具名查询 `ei_expire_mark`，语句与原兜底句**逐字一致**（只设 `status=4`、
+    谓词 `grape_user_id=? AND provider=? AND status=1`、只用 `?`，无 `%s` / `NOW()` /
+    `ON DUPLICATE` / 反引号），紧随同表的 `ei_stored_access_token` / `ei_oauth_token_status` /
+    `ei_token_expires_at` 三条读语句，便于「同表写读一处找」。
+  - 新增薄函数 `mark_external_identity_expired_any(grape_user_id, provider) -> int`：
+    体内零 SQL，只调 `exec_any("ei_expire_mark", ...)`，返回影响行数；登记 `__all__`。
+  - **不改**既有 `mark_external_identity_expired`（`db_registry.cursor("mgmt")` + `%s`）：
+    `scripts/xwrite_drain.py` 的 outbox 落地按 action 名映射到它，是 mgmt 进程侧契约。
+- 调用点 `oauth_401_retry.py`：删掉 `from src.kernel.session_manager import db, db_lock` +
+  游标/commit + 语句字面量，改成函数内 `from src.domains.mgmt import public as _mgmt_public_xp`
+  调 `mark_external_identity_expired_any(str(user_id), provider)`；`except → log.warning`
+  的 fail-open 形状与两条日志文案原样保留（回落那条按实情改述为 `fallback to owner primitive`，
+  不再声称「fallback to local SQL」）。outbox 分支（`submit` + `unique_key` +
+  `ext-ident-expired:{user}:{provider}` 键）一字未动。
+- 设计取舍：
+  1. **保留 outbox 优先，只上移兜底**：三库拓扑下这次写仍是「幂等意图 + drain 落地」
+     （跨域写走 outbox 的唯一通道），单库/测试拓扑才同步落库——与原实现的分支顺序完全一致，
+     只是兜底那条 SQL 的**归属**搬到了 mgmt 域。
+  2. **另立 `_any` 变体而不是改原函数**：原函数绑定 `db_registry.cursor("mgmt")`，在
+     `current_domain() != "mgmt"` 且无 DSN 时直接抛 `RuntimeError`；`*_any` 走
+     `_any_cursor`（自有 DSN → mgmt 连接；否则进程主库 + `db_lock`），正是「任意拓扑
+     一份 SQL」的口径，也让 runtime 侧不必再留兜底。
+  3. **只改 status=1 的行，不顺手放宽到 `status IN (1,4)`**：原语句的语义是「首次失效
+     才计数」，重复标记 `rowcount=0`；烟测把 B3/B6/B8/B10 钉住，避免下一个人「顺手加个
+     IN」改变幂等性（outbox 重放会因此变成每次都报 1 行变更）。
+  4. **`None` 归一成空串、`provider` 归空串**：原实现把 `None` 直接绑进 `?`，在 SQL 里是
+     `NULL` 谓词（永不命中）；上移后若用 `str(None)` 会变成字面量 `'None'`，可能误伤同名行。
+     故 `uid = "" if grape_user_id is None else str(...)`，`provider or ""` 沿用原口径。
+  5. **不引入时间/方言**：没有 `NOW()`、没有 `updated_at` 联动（原语句就不改 `updated_at`），
+     保持「只置 status」的最小语义。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **三库拓扑下凭据失效标记整体失效**：`invalid_grant/400` 被判为凭据彻底失效后，
+     runtime 进程库没有 `external_identities`（视图 0 → 1146），标记被 `except` 吞成一条
+     WARNING；结果是凭据永远停在 status=1，前端不会提示重新登录，后续每次调用继续 401，
+     401 兜底链退化成「每次都强刷一次」的重试风暴入口（正是 P-6①「单次重试」要防的场景）。
+  2. **lib 抛异常时的回落方向不可控**：lib/outbox 抖动时回落本地 SQL，在单库成立、
+     三库必 1146 —— 同一段代码按拓扑改语义；接口化后两条拓扑跑同一份语句。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/runtime/vcs/oauth_401_retry.py` /
+    `src/domains/mgmt/public/__init__.py`）→ **COMPILE_OK**；
+  · `~/burndown/oauth_401_expire_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建
+    `external_identities` 表，连跑 3 次稳定）→ **ALL oauth_401_expire smoke PASSED (74 checks)**：
+    A 注册面/静态否定（语句逐字、只设 status 一列、只两个 `?`、无 `%s`/`NOW()`/
+    `ON DUPLICATE`/反引号、不内联 `status IN (1,4)`、`__all__` 登记、薄函数体内无内联 SQL、
+    调用点已无 `external_identities` 的 DML 且不再 import `session_manager`、drain 侧非 any
+    原语保持 `%s` 路径、日志文案已改述）；
+    B 原语语义（1 → 4 且 rowcount=1、重复标记 0、**只改 status=1**：2/3/4 全部不动、
+    provider/用户隔离、不存在用户 → 0、provider None 归空串、数字 id 归字符串、空表/None
+    不炸、返回 int）；
+    C 调用点端到端（单库直写 + 成功日志；lib 路径只提交意图不动本地库、action/payload/
+    `ext-ident-expired:` 键前缀不变、apply_fn 调 owner 原语；提交 failed → 只告警不写；
+    lib 抛异常 → 回落 owner 原语且写成功；原语抛异常 → 只告警不抛；invalid_grant 判定矩阵
+    `invalid_grant` / `http 400` / ` (400)` 命中、`503` / `http 401` / 空 / None 不命中；
+    `oauth_401_retry` 集成：强刷失败 + invalid_grant → status=4，暂时性错误 → 不标记）；
+    D 自有 DSN 伪游标（三次都只走 `domain=mgmt`、语句逐字、参数 `(user, provider)`、
+    provider/用户 None → 空串、rowcount 原值返回）。
+  · `tests/mgmt/test_s127_oauth_401_retry.py`（真实 e2e：UC31⑤ invalid_grant → status=4）→
+    **7 passed**；`tests/api/test_user_mapping_write_primitive.py`（非 any 原语）→ **8 passed**；
+  · `--update-baseline` → **baseline updated: 17 pairs, 24 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **17 表 / 24 跨域引用 / 17 对**
+    （`external_identities` 消费方 mgmt:47;runtime:2 → mgmt:48;runtime:1、文件 6 → 5）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （mgmt 186 funcs + 6 named queries used / 268 funcs + 31 queries registered）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点、无新 action 名），运行面证据为 sqlite 烟测。
+- **新基线**：**24 处 / 17 对 / 17 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  `src/domains/runtime/vcs/oauth_401_retry.py` 已清零并退出榜单；下一批首个未 blocked 文件是
+  `src/domains/runtime/storage/skill_sync.py`（1 处：`skill_category`，归 mgmt）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

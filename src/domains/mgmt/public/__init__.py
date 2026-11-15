@@ -772,6 +772,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "account_id_by_username_valid_any", "account_id_by_username_ci_any",
            # OAuth 身份原值（api/deps.py 取 token / 预刷新判定；任意拓扑）
            "oauth_token_status_any", "token_expires_at_any", "stored_access_token_any",
+           "mark_external_identity_expired_any",
            # 事件动作过滤器启用规则（api/event_rule.py 的 L1 准入判定；任意拓扑）
            "event_action_filter_enabled_rows",
            # 流水线责任人展示（runtime/routes/pipeline.py；任意拓扑）
@@ -1991,6 +1992,14 @@ _ANY_QUERIES: dict[str, str] = {
     "ei_token_expires_at": (
         "SELECT token_expires_at FROM external_identities "
         "WHERE grape_user_id=? AND provider=? AND status IN (1, 4)"),
+    # 凭据失效标记（runtime/vcs/oauth_401_retry 的 invalid_grant 流程写入）。
+    # 原实现是「mgmt lib + 幂等意图」优先、单库拓扑落回 runtime 侧本地 UPDATE ——
+    # 兜底句正是跨域表引用来源，且自有 DSN 拓扑下进程库没有该表（无视图 → 1146，
+    # 被 except 吞成「标记失败」）。语句上移后两条拓扑跑同一份 SQL；谓词逐字照抄
+    # （只改 status=1 的行，status=4 不重复计数，rowcount 语义不变）。
+    "ei_expire_mark": (
+        "UPDATE external_identities SET status=4 "
+        "WHERE grape_user_id=? AND provider=? AND status=1"),
     # ── 代发内容台账（kernel/outbound_ledger；outbound_content_ledger 归 mgmt）──
     # 原实现在 kernel 里用进程主库游标直发 SQL：三库拓扑下进程库没有该表（视图 0 → 1146），
     # 写侧记账被内部 except 吞成 False（只剩进程内 TTL 集合，跨进程/重启即漏拦），
@@ -2532,6 +2541,20 @@ def token_expires_at_any(grape_user_id: Any, provider: str) -> Any | None:
     """
     row = read_one_any("ei_token_expires_at", (str(grape_user_id), provider or ""))
     return row[0] if row else None
+
+
+def mark_external_identity_expired_any(grape_user_id: Any, provider: str) -> int:
+    """凭据失效标记（任意拓扑）：external_identities.status 1 → 4，返回影响行数。
+
+    与同模块 `mark_external_identity_expired`（`db_registry.cursor("mgmt")` + `%s`，
+    供 outbox drain / mgmt 进程用）语义逐字一致，区别只在拓扑：自有 DSN 走 mgmt 连接，
+    单库/测试拓扑回落进程主库，所以 runtime 侧不必再留一份本地兜底语句。
+
+    只改 status=1 的行（已是 4 的行不改，重复标记 rowcount=0）；不做「凭据是否真失效」
+    的判定，那是调用方 401/invalid_grant 口径。
+    """
+    uid = "" if grape_user_id is None else str(grape_user_id)
+    return exec_any("ei_expire_mark", (uid, provider or ""))
 
 
 # ---------- 事件知识清理 / 账户名（runtime/routes/events.py 调用；任意拓扑） ----------
