@@ -1050,13 +1050,20 @@ function switchConversation(convId) {
         G.API.get('/chat/task/' + lastMsg.task_id + '/status')
           .then(function (st) {
             if (st.status === 'running' && !hasAgentReply) {
-              const elId = 't' + Date.now()
+              if (currentConvId.value !== convId) return
+              // 复用上次的气泡 id，并**先立起 thinking 气泡**：startStream 只在首个
+              // text 事件才建气泡，agent 还在思考（无 text）时不会有任何指示，
+              // 表现就是「切走再切回来，流式气泡不见了」（走外部菜单回来时有
+              // resumeChatTask 帮忙立气泡，所以那条路径正常）。
+              const _stored = getStoredTask(convId)
+              const elId = (_stored && _stored.el_id) || 't' + Date.now()
               setStoredTask(convId, {
                 task_id: lastMsg.task_id,
                 conv_id: convId,
                 el_id: elId,
                 status: 'running',
               })
+              if (!streaming.value) streaming.value = { elId: elId, stepText: '' }
               startStream(lastMsg.task_id, elId, convId)
             } else if (st.status === 'done' || st.status === 'error' || hasAgentReply) {
               if (hasAgentReply) clearStoredTask(convId)
