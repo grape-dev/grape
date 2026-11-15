@@ -114,6 +114,22 @@ worker claim 仍 200 OK，清理后新日志无被删表的 1146。
 （13 failed / 879 passed / 28 errors，全部为改动前既有），新增
 `tests/api/test_channel_ddl_ownership.py` 10 条守卫用例全绿。
 
+## 2026-11-15 ④ 生产 merge_gate_log 双基表收口（归属 insight）
+
+`grape_t_merge_gate_log` 是 PR 合入门禁（pre_merge_qa / pre_merge / post_merge 三阶段）
+的决策流水，best-effort 只写不读、fail-open；写入方是 `insight/public.record_merge_gate_log`。
+
+实测两份都是空表（0 行），按 P0 归属保留 insight，删 runtime 副本：
+```
+备份: /home/grape/merge-gate-log-runtime-copy-backup-20261115.sql（1 张 CREATE + 0 行）
+DROP: grape_runtime_db.grape_t_merge_gate_log   （59 @192.168.0.59:3306）
+保留: grape_insight_db.grape_t_merge_gate_log   （owner，0 行）
+守卫: table_ownership.owner_of=insight；should_skip('…','runtime')=True，
+      should_skip('…','insight')=False → 其它进程不会再把它建回来
+```
+说明：59 上另有一个早期彩排遗留库 `grape_stage_runtime`（不是当前在用的 stage runtime，
+后者在 116:3307）里也有一份同名表，未动，属非活跃环境残留。
+
 ## 维护约定
 
 1. 新增表或裁决变更：先改 `docs/weekly-11/table-owner.tsv`，再同步本文件与 manifest，最后跑

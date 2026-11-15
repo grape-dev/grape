@@ -24,11 +24,18 @@ step "依赖看板（P3）"
 python3 scripts/gen_domain_dependency_board.py --check | tail -2 || rc=1
 
 if [ "${1:-}" != "--quick" ]; then
-  step "门禁测试（arch + contracts + scripts）"
-  "$PY" -m pytest tests/arch tests/contracts tests/scripts -q -p no:cacheprovider 2>&1 | tail -2 || rc=1
+  step "门禁测试（arch + contracts + scripts + 架构白名单精度）"
+  # QA G5：白名单精度守卫（tests/runtime/test_check_arch_whitelist_precision.py）此前不在门禁里，
+  # 白名单漂移只能靠人工复审发现。这里显式接线，与 check-arch 的静态校验互为补充。
+  "$PY" -m pytest tests/arch tests/contracts tests/scripts \
+      tests/runtime/test_check_arch_whitelist_precision.py -q -p no:cacheprovider 2>&1 | tail -2 || rc=1
   # 测试会改写 openapi 快照，属产物污染，必须还原
   git checkout -- src/api/frontend/shell/openapi.json 2>/dev/null || true
 fi
+
+step "未定义名棘轮（F821）"
+# QA G6：门禁此前对 undefined name 零可见性（44 处静默失败即由此漏过复审）。
+"$PY" scripts/check_undefined_names.py || rc=1
 
 step "归位候选（按收益排序，下一批从这里取）"
 # 归位候选只是报告，有剩余才正常；不能把它当成红项

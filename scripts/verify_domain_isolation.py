@@ -43,7 +43,11 @@ def _connect_dsn(url: str):
     u = urlparse(url)
     return pymysql.connect(host=u.hostname, port=u.port or 3306, user=u.username,
                            password=unquote(u.password or ""), charset="utf8mb4",
-                           connect_timeout=10, read_timeout=120)
+                           connect_timeout=10,
+                           # read_timeout=120s：最大单表 tables 概览 + 视图定义全量拉取（P4 之后
+                           # 三库合计约 130 张基表），实测最慢一次 8s；120s 是 15 倍余量，
+                           # 用于区分「慢查询」与「连接被防火墙黑洞」（后者会一直挂到超时）。
+                           read_timeout=120)
 
 
 def check_views(conns) -> list[str]:

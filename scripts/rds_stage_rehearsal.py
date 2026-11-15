@@ -33,7 +33,11 @@ def _connect(host: str, port: int, user: str, password: str):
     import pymysql
 
     return pymysql.connect(host=host, port=port, user=user, password=password,
-                           charset="utf8mb4", connect_timeout=10, read_timeout=600)
+                           charset="utf8mb4", connect_timeout=10,
+                           # read_timeout=600s：彩排会对三库做全表行数统计 + CHECKSUM，
+                           # 单次最慢的全库 CHECKSUM 在 stage 量级约 90~200s；600s 覆盖
+                           # 冷启动/磁盘抖动，同时避免连接被黑洞时无限挂起。
+                           read_timeout=600)
 
 
 def base_tables(conn, db: str) -> list[str]:

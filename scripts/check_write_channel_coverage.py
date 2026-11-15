@@ -117,13 +117,42 @@ def main(argv: list[str] | None = None) -> int:
     lines += ["", "已登记 xwrite action："
               + ("、".join(f"`{a}`（{'+'.join(d)}）" for a, d in sorted(actions.items())) or "无"),
               ""]
-    OUT_MD.write_text("\n".join(lines), encoding="utf-8")
+    # QA G3：action 必须参与判定，否则「已登记 action」只是打印。action 是**域级**登记
+    # （{动作: [域...]}），无法精确到表，因此只用于说明「该表的写方域是否已有 outbox 承接通道」。
+    _action_domains = {d for ds in actions.values() for d in ds}
+    if missing_w3:
+        _write_by = {r["table"]: {w.split(":")[0] for w in (r["write_by"] or "").split(";") if w}
+                     for r in rows}
+        _with_channel = [t for t in missing_w3
+                         if _write_by.get(t, set()) & _action_domains]
+        lines.append(f"W3 缺口中有 outbox 通道可承接（写方域已登记 action）："
+                     f"{len(_with_channel)}/{len(missing_w3)}"
+                     + (("：" + "、".join(f"`{t}`" for t in _with_channel)) if _with_channel else "")
+                     + "。outbox 未落地前这些表保持同库写，故 W3 不计入门禁硬失败。")
+
+    content = "\n".join(lines)
+    # QA G3：--check 只校验，不得写工作树。此前先 write_text 再判 W2/W3，即使门禁失败
+    # 也已经把产物改脏（复审基线与本地不一致的常见来源）。
+    if args.check:
+        stale = False
+        current = OUT_MD.read_text(encoding="utf-8") if OUT_MD.is_file() else ""
+        if current != content:
+            print(f"FAIL: {OUT_MD.relative_to(REPO)} 与当前扫描结果不一致"
+                  f"（重跑不带 --check 刷新产物）", file=sys.stderr)
+            stale = True
+        print(f"scanned {len(rows)} tables：{covered} 覆盖，W2 缺 {len(missing_w2)}，"
+              f"W3 缺 {len(missing_w3)}（不阻断），action {len(actions)} 个")
+        if missing_w2:
+            print(f"FAIL: W2 缺 public 写函数 {missing_w2[:10]}", file=sys.stderr)
+            return 1
+        if missing_w3:
+            print(f"NOTE: W3 缺 {len(missing_w3)} 张（outbox 未落地前允许同库写）："
+                  f"{missing_w3[:10]}")
+        return 1 if stale else 0
+
+    OUT_MD.write_text(content, encoding="utf-8")
     print(f"wrote {OUT_MD.relative_to(REPO)}：{covered}/{len(rows)} 覆盖，"
           f"W2 缺 {len(missing_w2)}，W3 缺 {len(missing_w3)}，action {len(actions)} 个")
-
-    if args.check and (missing_w2 or missing_w3):
-        print(f"FAIL: W2 缺 {missing_w2[:10]}；W3 缺 {missing_w3[:10]}", file=sys.stderr)
-        return 1
     return 0
 
 

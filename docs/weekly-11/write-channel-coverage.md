@@ -10,28 +10,28 @@
 | `api_latency_log` | insight | W3 | 3 | api:3 | `record_api_latency` | ✅ |
 | `autopilot_executions` | runtime | W3 | 2 | mgmt:2 | `delete_autopilot_executions`, `set_autopilot_findings` | ✅ |
 | `autopilot_tasks` | mgmt | W3 | 3 | runtime:3 | `set_autopilot_engine_ids`, `set_autopilot_run_info` | ✅ |
-| `event_action_filter` | mgmt | W2 | 3 | runtime:3 | `add_event_action_filter`, `delete_event_action_filter`, `update_event_action_filter` | ✅ |
+| `event_action_filter` | mgmt | W2 | 3 | runtime:3 | `add_event_action_filter`, `add_event_action_filter_row`, `delete_event_action_filter`, `delete_event_action_filter_row`, `update_event_action_filter`, `update_event_action_filter_row` | ✅ |
 | `event_active_guard` | runtime | W2 | 3 | api:3 | `upsert_event_active_guard` | ✅ |
 | `event_skipped` | runtime | W3 | 1 | api:1 | `record_event_skipped` | ✅ |
 | `external_identities` | mgmt | W2 | 1 | runtime:1 | `mark_external_identity_expired` | ✅ |
 | `feishu_onboard_task` | mgmt | W3 | 1 | runtime:1 | `delete_feishu_onboard_task` | ✅ |
 | `grape_accounts` | mgmt | W2 | 1 | api:1 | — | ◻︎ 同进程 |
-| `grape_t_channel_chat_session_binding` | mgmt | W2 | 1 | runtime:1 | `upsert_chat_session_binding` | ✅ |
-| `grape_t_channel_inbound_dedup` | mgmt | W2 | 3 | runtime:3 | `claim_inbound_dedup` | ✅ |
+| `grape_t_channel_chat_session_binding` | mgmt | W2 | 1 | runtime:1 | `chat_binding_upsert`, `upsert_chat_session_binding` | ✅ |
+| `grape_t_channel_inbound_dedup` | mgmt | W2 | 3 | runtime:3 | `claim_inbound_dedup`, `inbound_dedup_release`, `inbound_dedup_set_state`, `inbound_message_save_and_mark` | ✅ |
 | `grape_t_channel_inbound_message` | mgmt | W3 | 1 | runtime:1 | `save_inbound_message` | ✅ |
-| `grape_t_channel_installation` | mgmt | W2 | 5 | runtime:5 | `upsert_channel_installation` | ✅ |
-| `grape_t_channel_lease` | mgmt | W2 | 9 | runtime:9 | `acquire_channel_lease`, `release_channel_lease`, `renew_channel_lease` | ✅ |
+| `grape_t_channel_installation` | mgmt | W2 | 5 | runtime:5 | `installation_activate`, `installation_revoke`, `installation_set_config`, `installation_set_config_any`, `upsert_channel_installation` | ✅ |
+| `grape_t_channel_lease` | mgmt | W2 | 9 | runtime:9 | `acquire_channel_lease`, `lease_acquire_row`, `lease_renew_all_by_owner`, `lease_renew_expiry`, `release_channel_lease`, `renew_channel_lease` | ✅ |
 | `grape_t_channel_outbound_card` | mgmt | W3 | 1 | runtime:1 | `upsert_outbound_card` | ✅ |
-| `grape_t_channel_sender_identity` | mgmt | W2 | 1 | runtime:1 | `upsert_sender_identity` | ✅ |
-| `grape_t_merge_gate_log` | insight | W3 | 1 | api:1 | `record_merge_gate_log` | ✅ |
+| `grape_t_channel_sender_identity` | mgmt | W2 | 1 | runtime:1 | `sender_identity_bind`, `upsert_sender_identity` | ✅ |
+| `grape_t_merge_gate_log` | insight | W3 | 1 | api:1 | `merge_gate_log_insert`, `record_merge_gate_log` | ✅ |
 | `grape_t_schema_migrations` | mgmt | X | 2 | api:2 | — | ◻︎ 同进程 |
-| `issue_agent_session` | runtime | W2 | 3 | api:3 | `upsert_issue_agent_session` | ✅ |
+| `issue_agent_session` | runtime | W2 | 3 | api:3 | `update_issue_agent_session_fields`, `upsert_issue_agent_session` | ✅ |
 | `issue_state` | runtime | W1 | 1 | api:1 | — | ❌ |
 | `login_whitelist` | mgmt | W2 | 1 | api:1 | — | ◻︎ 同进程 |
 | `organization` | mgmt | W2 | 2 | api:2 | — | ◻︎ 同进程 |
 | `scene_category` | runtime | W2 | 1 | api:1 | `upsert_scene_category` | ✅ |
-| `scene_engine_detach_log` | runtime | W3 | 1 | mgmt:1 | `mark_detach_rebound` | ✅ |
-| `scene_skill_ref` | mgmt | W2 | 2 | api:1;runtime:1 | `replace_scene_skill_ref` | ✅ |
+| `scene_engine_detach_log` | runtime | W3 | 1 | mgmt:1 | `mark_detach_rebound`, `scene_detach_log_rebound` | ✅ |
+| `scene_skill_ref` | mgmt | W2 | 2 | api:1;runtime:1 | `replace_scene_skill_ref`, `replace_scene_skill_ref_any` | ✅ |
 | `takeover_sessions` | runtime | W1 | 1 | mgmt:1 | — | ❌ |
 | `user_accounts` | mgmt | W2 | 1 | api:1 | — | ◻︎ 同进程 |
 | `user_feedback` | mgmt | W3 | 3 | api:3 | `add_user_feedback` | ✅ |

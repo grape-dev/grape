@@ -32,7 +32,11 @@ def connect(host: str, port: int, user: str, password: str):
     import pymysql
 
     return pymysql.connect(host=host, port=port, user=user, password=password,
-                           charset="utf8mb4", connect_timeout=10, read_timeout=120)
+                           charset="utf8mb4", connect_timeout=10,
+                           # read_timeout=120s：切库核对只跑 information_schema 聚合与行数
+                           # 抽样（无全表扫描），实测 <3s；保留与 verify_domain_isolation 同一
+                           # 数值，便于把「慢」和「不可达」区分开。
+                           read_timeout=120)
 
 
 def collect(conn, dbs=DBS) -> dict:

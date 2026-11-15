@@ -108,8 +108,10 @@ def load_r8_owner(path: str) -> dict[str, str]:
                 parts = line.rstrip("\n").split("\t")
                 if len(parts) >= 2:
                     owner[parts[1].strip()] = parts[0].strip()
-    except OSError:
-        pass
+    except OSError as exc:
+        # QA G4：清单缺失/不可读时此前静默 pass → scan_r8 返回空 → 报告里显示 R8 通过，
+        # 实际这条检查根本没跑。必须显式说明「跳过」，否则门禁给出的是假绿灯。
+        print(f"R8: SKIP —— 归属清单不可读（{path}: {exc}）；跨域基表直查检查本轮未执行")
     return owner
 
 
@@ -117,6 +119,8 @@ def scan_r8() -> list[tuple[str, str, str, int]]:
     """返回 [(relpath, table, owner_schema, count)]；owner tsv 缺失时返回空并跳过。"""
     owner = load_r8_owner(R8_OWNER_TSV)
     if not owner:
+        # 与 load_r8_owner 的 SKIP 提示配套：空清单 = 检查没跑，不能当成「无违规」。
+        print(f"R8: SKIP —— 归属清单为空（{R8_OWNER_TSV}），本轮未做跨域基表直查检查")
         return []
     out = []
     for path in iter_py(os.path.join(SRC, "kernel")):
@@ -154,14 +158,15 @@ WHITELIST: dict[str, dict[str, str]] = {
         "R2": "deferred token resolution via src.api.deps; Phase 5",
     },
     "src/kernel/repo_migrate.py": {
+        # QA G4：这里原本是**两个**同名键（R8 表计数 + R1 豁免），Python dict 字面量后者胜，
+        # 于是 managed_repos/meta/skill/user_repos 的 R8 计数被静默丢掉，等于豁免了 4 张表的
+        # 跨域直查。合并为一个键，两类豁免同时生效。
         "managed_repos": 3, "meta": 2, "skill": 2, "user_repos": 4,
+        "R1": "deferred org/user lookups via mgmt.user.db; Phase 5",
     },  # P1：整体迁 mgmt 域（仓库维护；受 #2010 kernel 布局契约约束，需随契约一起改）
     "src/kernel/session_manager.py": {
         "R1": "deferred feature flags via mgmt.user.db; Phase 5",
         "R2": "deferred timestamp helper via src.api.time_utils; Phase 5",
-    },
-    "src/kernel/repo_migrate.py": {
-        "R1": "deferred org/user lookups via mgmt.user.db; Phase 5",
     },
     "src/kernel/repo_cleanup.py": {
         "R1": "deferred repo state lookup via mgmt.user.db; Phase 5",
