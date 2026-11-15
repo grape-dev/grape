@@ -4462,7 +4462,9 @@ def claim_meta_lease(key: str, holder: str, new_val: str, cutoff_iso: str) -> bo
             (new_val, key, len(holder) + 1, holder + "|"))
         if int(getattr(cur, "rowcount", 0) or 0) == 1:
             return True
-        row = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        # 兼容游标 execute 返回 rowcount(int)，必须先 execute 再在游标上 fetchone
+        c.execute("SELECT value FROM meta WHERE key=?", (key,))
+        row = c.fetchone()
         cur_val = (row[0] or "") if row else ""
         if cur_val and not _meta_lease_expired(cur_val, cutoff_iso):
             return False
@@ -5639,7 +5641,9 @@ def _table_has_column(c, table: str, column: str) -> bool:
     1064），三库拓扑的产物探测必须两条后端同一写法。`table` 只接受本模块常量。
     """
     cur = c.execute(f"SELECT * FROM {table} LIMIT 0")
-    return column in [str(d[0]) for d in (cur.description or [])]
+    # 兼容游标（db_registry._CompatCursor）的 execute 返回 rowcount(int)，不是游标本身：
+    # 三库拓扑下域连接走的正是它，链式取 description 会炸（'int' has no attribute）。
+    return column in [str(d[0]) for d in ((cur if hasattr(cur, "description") else c).description or [])]
 
 
 def runtime_heartbeat_alive_any(runtime_id) -> bool:
