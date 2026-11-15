@@ -97,6 +97,16 @@ SQL 会打到错误的库，得到 `ERROR 1146 (table doesn't exist)`，而这�
 全绿；`rds_gate.sh --quick` 全绿；演练环境重启后各进程 `grep -c 1146` 均为 0，
 业务接口（看板/需求列表）返回真实数据。
 
+## manifest 清单外条目（待补 provenance）
+
+`configs/table_ownership.json` 现有 135 条，其中 P0 冻结清单的 101 条逐条对齐（0 冲突），
+另有 34 条为清单外条目（`admin_*` 11 条、`backup_*` 5 条、`sandbox_*` 3 条，其余为历史批次的
+辅助表），未在 `table-owner.tsv` 登记出处。
+
+处置约定：这些条目只保留在 manifest 里供 DDL 守卫判定「不是本域表」，不得作为新建表的依据；
+后续批次应为其补 provenance（来源批次/是否废弃）或直接裁剪，禁止用 `information_schema`
+快照覆盖 manifest——那会把「历史建表位置」当归属，重演本文件开头记录的漂移。
+
 ## 维护约定
 
 1. 新增表或裁决变更：先改 `docs/weekly-11/table-owner.tsv`，再同步本文件与 manifest，最后跑
