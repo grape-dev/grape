@@ -37,6 +37,11 @@ step "未定义名棘轮（F821）"
 # QA G6：门禁此前对 undefined name 零可见性（44 处静默失败即由此漏过复审）。
 "$PY" scripts/check_undefined_names.py || rc=1
 
+step "进程库连接棘轮（PG1）"
+# 分库后「域文件用进程库连接查本域表」在别的进程里会打到错的库（静默旧值或 1146）。
+# 与 foreign_table_refs（跨域表引用）互补：这里比较的是「文件域 vs 连接来源」。
+python3 scripts/scan_pgconn.py --check | tail -2 || rc=1
+
 step "归位候选（按收益排序，下一批从这里取）"
 # 归位候选只是报告，有剩余才正常；不能把它当成红项
 "$PY" scripts/rds_burndown.py --rank 2>&1 | head -10 || true
