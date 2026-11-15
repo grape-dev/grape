@@ -19,6 +19,7 @@ from src.kernel.config import log
 
 import os
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -27,7 +28,31 @@ _VALID = ("mgmt", "runtime", "insight")
 _lock = threading.RLock()
 _local = threading.local()
 _conns: dict[str, Any] = {}          # 仅放域级锁（domain_lock），连接改线程本地
-_forbidden: set[str] = set()
+_forbidden: set[str] = set()         # 永久禁用（配置/鉴权类错误：重试也不会好）
+_retry_after: dict[str, float] = {}  # 临时失败的退避时间点（monotonic 秒）
+_RETRY_BACKOFF_S = 5.0
+# 连接一次失败就永久禁用整个域，是 2026-11-15 事故的放大器：
+# 本地 runtime MySQL 打满 max_connections（1040）后，mgmt 进程把 runtime 拉黑，
+# 之后所有跨域读（meta / scene_category / skill）静默回落到进程库 → 满屏 1146。
+# 因此只有「重试也不会成功」的错误才进 _forbidden，其余按 5s 退避重试。
+_PERMANENT_ERRNOS = {
+    1044,  # ER_DBACCESS_DENIED_ERROR
+    1045,  # ER_ACCESS_DENIED_ERROR
+    1049,  # ER_BAD_DB_ERROR
+    1142,  # ER_TABLEACCESS_DENIED_ERROR
+    1143,  # ER_COLUMNACCESS_DENIED_ERROR
+    1698,  # ER_ACCESS_DENIED_NO_PASSWORD_ERROR
+    2005,  # ER_UNKNOWN_HOST（域名解析失败属于配置错误）
+}
+
+
+def _is_permanent_connect_error(exc: BaseException) -> bool:
+    args = getattr(exc, "args", ()) or ()
+    if args and isinstance(args[0], int) and args[0] in _PERMANENT_ERRNOS:
+        return True
+    msg = str(exc).lower()
+    return any(s in msg for s in ("access denied", "unknown database",
+                                 "unknown mysql server host", "no such file or directory"))
 
 
 def _thread_conns() -> dict[str, Any]:
@@ -186,6 +211,8 @@ def domain_db(domain: str):
         raise ValueError(f"unknown domain: {domain}")
     if domain in _forbidden:
         return None
+    if _retry_after.get(domain, 0.0) > time.monotonic():
+        return None
 
     conns = _thread_conns()
     if domain in conns:
@@ -194,9 +221,16 @@ def domain_db(domain: str):
     if lib_enabled() and dsn_of(domain):
         try:
             conn = _new_conn(domain)
-        except Exception:  # noqa: BLE001 - 记录禁用，避免每次调用都重试
-            _forbidden.add(domain)
+        except Exception as exc:  # noqa: BLE001
+            if _is_permanent_connect_error(exc):
+                _forbidden.add(domain)
+                log.warning(f"domain '{domain}' 连接不可用（配置/鉴权错误，已停用）：{exc}")
+            else:
+                _retry_after[domain] = time.monotonic() + _RETRY_BACKOFF_S
+                log.warning(
+                    f"domain '{domain}' 连接暂时失败，{_RETRY_BACKOFF_S:.0f}s 后重试：{exc}")
             return None
+        _retry_after.pop(domain, None)
         conns[domain] = conn
         return conn
 
@@ -367,3 +401,4 @@ def reset(close: bool = True) -> None:
     with _lock:
         _conns.clear()          # 域级锁对象
         _forbidden.clear()
+        _retry_after.clear()

@@ -33,7 +33,7 @@ import zipfile
 
 import httpx
 from src.kernel.config import log
-from src.kernel.session_manager import db, db_lock
+from src.kernel.owner_db import db_pair as _db_pair
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,9 @@ def _compute_scene_hash(scene_dir: str) -> str:
 def _refresh_cat_cache():
     """刷新 category slug → id 缓存。"""
     _cat_cache.clear()
+    # scene_category / skill 都归 runtime 域：本模块被 mgmt 进程的定时器调用时，
+    # 直连进程库会 1146（三库拓扑），按 owner 域解析连接（单库拓扑回落进程库）。
+    db, db_lock = _db_pair("runtime")
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, slug FROM scene_category WHERE is_active=1")
@@ -221,7 +224,7 @@ def _query_active_skill_names(skill_names: set) -> set:
 
     _check_skills_exist 与 _rebuild_scene_skill_ref 共用，保证口径一致。
     """
-    from src.kernel.session_manager import db, db_lock
+    db, db_lock = _db_pair("runtime")
     if not skill_names:
         return set()
     with db_lock:
@@ -322,7 +325,7 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
       · 不再无条件按名字重解析——那会把用户选的 repo/user 档覆盖成 official 档；
       · repo 档查询带 owner_id=repo_key 过滤——避免跨仓同名技能被本仓场景认领。
     """
-    from src.kernel.session_manager import db, db_lock
+    db, db_lock = _db_pair("runtime")
     from src.kernel.domain_read import mgmt_lib as _mgmt_lib_ssr
     from src.domains.mgmt import public as _mgmt_public_ssr
     _mg_ssr = _mgmt_lib_ssr(foreign_only=True)
