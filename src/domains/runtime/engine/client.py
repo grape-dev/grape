@@ -276,8 +276,11 @@ class RuntimeClient:
             # QA 复审修复：本次调用私有 error_sink，避免并发请求互相覆盖
             # last_http_error 导致 413 被误判为网络错误（吞错语义回归）
             _sink: dict = {}
+            # 重试预算必须覆盖「主控/网关滚动重启」的窗口：原来 retries=3 约 28s，
+            # 一次部署重启就把整批消息打空（task_messages 零行 → 前端「无执行日志」，
+            # 任务停在 running 无会话）。6 次指数退避约 3 分钟，足以跨过重启。
             data = await self._request("POST", f"/api/runtime/tasks/{task_id}/messages",
-                                       {"messages": messages}, retries=3, error_sink=_sink)
+                                       {"messages": messages}, retries=6, error_sink=_sink)
             if data is None:
                 _err = _sink or getattr(self, "last_http_error", None) or {}
                 _status = _err.get("status") or 0

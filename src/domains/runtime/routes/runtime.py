@@ -851,17 +851,33 @@ def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_require_cred
     Workers call this endpoint to get their current tag list, enabling real-time
     tag updates without restart.
     """
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        try:
+    from src.kernel import db_registry as _dbreg
+    # 这条端点是 agent 每次 claim 前的必经之路，不能和进程内长查询抢同一把 db_lock：
+    # sweeper / recover-orphans 持锁做批量扫描时，/tags、心跳、/messages 会一起排队到
+    # socket 超时（实测表现为「engine probe ok 但 claim 一直超时、任务永远 queued」）。
+    # 三库拓扑走 runtime 域独立连接；单库/测试拓扑没有分域 DSN，回落进程主库 + db_lock。
+    tags = []
+    try:
+        with _dbreg.cursor("runtime") as c:
             c.execute(
                 "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
                 (runtime_id,)
             )
             tags = [r[0] for r in c.fetchall()]
-        except Exception:
-            tags = []
+    except RuntimeError:
+        from src.kernel.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute(
+                    "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
+                    (runtime_id,)
+                )
+                tags = [r[0] for r in c.fetchall()]
+            except Exception:
+                tags = []
+    except Exception:
+        tags = []
     return {"tags": tags}
 
 @router.get("/tasks/{task_id}/env")
