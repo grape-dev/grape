@@ -83,6 +83,11 @@ def count_silent_excepts(path: Path):
 # feat/weekly-10-yaw-dev 真新增 57 处（对 weekly-10 multiset diff，另 2 处已改 log），
 # 按族分类登记；豁免行数从该文件计数中扣除后再与基线比较。
 EXEMPT_FILES: dict = {
+    # outbox.stop()：await 一个已被 cancel 的 task，CancelledError 就是「取消成功」这个
+    # 正常结果；不吞会一路冒到 lifespan，触发 "Application shutdown failed" + uvicorn
+    # 退出码 3 + systemd 反复重启抢端口（d594cba3a 修的就是这个 crash loop）。
+    # scanner 只认「except ...: pass/continue」的形态，无法区分这种 await-cancelled 场景。
+    ('domains/runtime/im/outbox.py', 'except asyncio.CancelledError:'): 1,
     # ── 组Y 上游 aishell-dsh phase-2（#2045）新增：均为协议/计量链路的 fail-open ──
     # ACP JSON-RPC：会话收尾/管道写失败吞掉，避免污染上层任务状态
     ('domains/runtime/agents/aishell_acp.py', 'except Exception:'): 1,

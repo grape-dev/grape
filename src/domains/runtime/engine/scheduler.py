@@ -924,15 +924,25 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
         # 触达链：本人 bot + open_id（复用 issues_center 既有函数，不回落他人 bot）
         from src.api.issues_center import _get_feishu_open_id_by_user_id, _resolve_user_chat_bot
         from src.domains.runtime.im.engine_wiring import feishu_api
-        _loop = asyncio.get_event_loop()
+        _loop = None
+        try:
+            _loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _loop = None
         for user_id, _, _ in rows:
             try:
                 open_id = _get_feishu_open_id_by_user_id(user_id) or ""
                 ctx = _resolve_user_chat_bot(None, user_id)
                 # 旧 IM 下线 A2 M2：api 不再来自 BotManager，按本人 bot 的 app_id 取共享客户端
                 api = feishu_api(ctx.app_id) if ctx is not None else None
-                _loop.create_task(_run_autopilot_notify(ctx, api, user_id, open_id,
-                                                        card, task_id, exec_id))
+                _coro = _run_autopilot_notify(ctx, api, user_id, open_id,
+                                              card, task_id, exec_id)
+                if _loop is not None:
+                    _loop.create_task(_coro)
+                else:
+                    # 无运行中 loop 时 create_task 的 task 永不执行（通知静默丢失）；
+                    # 这条路径常在地线程/同步上下文里被调用，直接跑完再说。
+                    asyncio.run(_coro)
             except Exception as e:
                 log.warning(f"[autopilot-notify] task={task_id} exec={exec_id} user={user_id} "
                             f"resolve failed: {e}")
@@ -1413,6 +1423,7 @@ def _sweep_pending_self_report_timeouts() -> int:
                           f"（runtime_session_id 为空、无任务消息），{PENDING_NO_SESSION_TIMEOUT_SECONDS}s 内"
                           f"无任何执行痕迹，判 timeout_failed —— 通常意味着认领方跑的是旧代码或引擎 spawn 失败")
     marked = 0
+    _ended = []
     try:
         _pending_rows = []
         with db_lock:
@@ -1441,9 +1452,31 @@ def _sweep_pending_self_report_timeouts() -> int:
                 # 跳过判死等下轮（同一事务内查询，不加额外锁、每候选一条主键查询开销小）。
                 if _pending_self_report_stream_active(c, _r[0]):
                     continue
+                # 执行流已正常收尾（最后一条是 end_turn）→ agent 干完了，只是那次自报
+                # 没送达。判 completed 并保留它原本写入的 result，避免把完成的工作
+                # 记成 timeout_failed（2026-11-15 #85/#84：148/27 条消息、结论齐全却判死）。
+                try:
+                    from src.domains.runtime.engine.stream_ended import stream_ended_normally
+                    _ended_ok = stream_ended_normally(c, _r[0])
+                except Exception:
+                    _ended_ok = False
+                if _ended_ok:
+                    _ended.append(_r[0])
+                    continue
                 # 下游按 4 元组解包；把「无会话」标记塞进第 4 位之外的 map
                 _pending_rows.append((_r[0], _r[1], _r[2], _r[3], _has_session))
             rows = _pending_rows
+        # 先按「执行流正常收尾」收敛：这些任务不需要等自报，直接 completed
+        for _etid in _ended:
+            try:
+                update_task_status(_etid, "completed", exit_code=0,
+                                   errors="[STREAM_ENDED_OK] 执行流已正常收尾（end_turn）但自报丢失，按完成收敛",
+                                   completed_at=_now, cascade_trigger="sweeper")
+                marked += 1
+                log.info(f"sweeper: task {_etid} stream ended normally -> completed (self-report was lost)")
+            except Exception as _ee:
+                log.warning(f"sweeper: converge ended task {_etid} failed: {_ee}")
+        rows = [r for r in rows if r[0] not in set(_ended)]
         _reasons = {_r[0]: (_reason if _r[4] else _reason_no_session) for _r in rows}
         for tid, evt_seq, _rt_id, _ps, _hs in rows:
             _why = _reasons.get(tid, _reason)
@@ -1612,14 +1645,19 @@ async def scheduler_loop():
     while True:
         try:
             async with run_with_distributed_lock("autopilot_scheduler", ttl=120):
-                tasks = _get_enabled_tasks()
+                # 这些调用都是同步 pymysql：直接在事件循环里跑会把整个 worker 卡住
+                # （health 不响应、心跳落不了库、引擎被判失联）。2026-11-15 实测：
+                # MainThread 停在 _reap_zombie_executions，本机 worker 38083 全部端点超时，
+                # 远端心跳经网关落到它身上一起挂住，表现为该凭据失联。
+                tasks = await asyncio.to_thread(_get_enabled_tasks)
                 for task in tasks:
                     task_id = task["id"]
                     if task_id in _RUNNING_TASKS:
                         continue
                     # autopilot_tasks 归 mgmt：last_run 走归属域任意拓扑原语
                     from src.domains.mgmt import public as _mgmt_public
-                    row = _mgmt_public.autopilot_task_last_run_any(task_id)
+                    row = await asyncio.to_thread(
+                        _mgmt_public.autopilot_task_last_run_any, task_id)
                     last_run = row[0] if row else ""
                     if _is_cron_due(task["cron"], last_run):
                         log.info(f"Autopilot: cron due for task {task_id} ('{task['name']}')")
@@ -1631,12 +1669,12 @@ async def scheduler_loop():
         # autopilot_executions 卡在 running/dispatched，但 agent_tasks 可能已完成。
         # 每轮扫描顺带检查并同步终态（幂等自愈）。
         try:
-            _reap_zombie_executions()
+            await asyncio.to_thread(_reap_zombie_executions)
         except Exception as _ze2:
             log.warning(f"Autopilot zombie recovery error: {_ze2}")
         # pending_self_report 超时兜底（Issue #537 P0-1）：worker 未在阈值内自报 → timeout_failed
         try:
-            _sweep_pending_self_report_timeouts()
+            await asyncio.to_thread(_sweep_pending_self_report_timeouts)
         except Exception as _se2:
             log.warning(f"Autopilot pending timeout sweep error: {_se2}")
 

@@ -24,6 +24,11 @@ function mount(props) {
   _app = createApp(ChatView, props || {})
   _app.mount(el)
 }
-window.renderChat = function (openConvId) {
+function renderChatEntry(openConvId) {
   mount(openConvId ? { openConvId: String(openConvId) } : {})
+  window.renderChat = renderChatEntry   // 挂载后回收契约（组件 setup 可能覆盖）
 }
+// 契约要在「挂载完成后」再指回入口版：组件 setup 里若有同名赋值（曾出现
+// `window.renderChat = null`），会把入口版覆盖成不可调用值，之后每次 nav('chat')
+// 都拿到 null → "加载失败（renderChat）"。挂载后回收一次，兜住这类覆盖。
+window.renderChat = renderChatEntry

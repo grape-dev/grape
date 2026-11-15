@@ -4,9 +4,9 @@
 
 | 进程 | 数据库 | 用户 | 密码 |
 |------|--------|------|------|
-| mgmt (:38081) | `grape_mgmt_db` | `grape_mgmt` | `Grape@123` |
-| event (:38082) / worker (:38083) | `grape_runtime_db` | `grape_runtime` | `Grape@123` |
-| insight (:38084) | `grape_insight_db` | `grape_insight` | `Grape@123` |
+| mgmt (:38081) | `grape_mgmt_db` | `grape_mgmt` | `<db-password>` |
+| event (:38082) / worker (:38083) | `grape_runtime_db` | `grape_runtime` | `<db-password>` |
+| insight (:38084) | `grape_insight_db` | `grape_insight` | `<db-password>` |
 
 event 与 worker 同属 runtime 域，共用一个库。
 
@@ -30,7 +30,7 @@ event 与 worker 同属 runtime 域，共用一个库。
 
 systemd 的 `EnvironmentFile=.env` 在 `Environment=` 之后加载，**会覆盖 drop-in 里写的
 `DEVOPS_DB_*`**。所以领域库的用户/库名统一在 `scripts/grape-systemd-run.sh` 里按角色
-`export`（脚本 export 晚于 .env 注入），密码取 `GRAPE_DOMAIN_DB_PASSWORD`（默认 `Grape@123`）。
+`export`（脚本 export 晚于 .env 注入），密码取 `GRAPE_DOMAIN_DB_PASSWORD`（默认 `<db-password>`）。
 
 ## 验证（2026-11-09 实测）
 

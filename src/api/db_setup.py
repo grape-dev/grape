@@ -1068,6 +1068,12 @@ def _create_indexes():
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_conv_repo_issue "
         "ON chat_conversations (user_id, repo_key, issue_number, conv_type) "
         "WHERE issue_number > 0 AND repo_key != '' AND conv_type = 'task'",
+        # sweeper 的 chat 目录 TTL 清理每轮都跑 SELECT id FROM chat_conversations WHERE status='active'，
+        # 原先无索引=全表扫（见 docs/sweeper-lock-decoupling.md「后续可做」）。
+        # 这里只写 SQLite 通用语法：MySQL 的 TEXT 列建索引必须带前缀长度，由
+        # mysql_compat 在 CREATE INDEX 特判里自动补 (191)，调用方不要再写 (32)（会被剥掉，
+        # 且绕过兼容层直连 MySQL 会报 1170）。
+        "CREATE INDEX IF NOT EXISTS idx_chat_conv_status ON chat_conversations(status)",
     ]
     # autopilot_tasks.created_by 迁移
     try:
@@ -1734,6 +1740,13 @@ def _seed_admin_accounts():
     """
     import hashlib
     from src.domains.mgmt.user.db import get_meta_value, set_meta_value
+    # 三库拓扑：admin_accounts 归 mgmt。runtime/insight 进程里这张表即便存在也是单库时代的
+    # 空壳副本，种子会写进别人的库（2026-11-15 在 grape_stage_runtime 里就长出了 admin 行），
+    # 随后被清理时又像是"丢数据"。非 owner 进程直接跳过。
+    from src.kernel import table_ownership as _table_own
+    if _table_own.should_skip("admin_accounts"):
+        log.info("[seed] admin_accounts owner=mgmt，非本域进程跳过种子")
+        return
     _default_pwd = os.environ.get("GRAPE_ADMIN_PASSWORD") or "admin123"
     try:
         with db_lock:
@@ -1891,6 +1904,9 @@ _MIGRATIONS: List[Migration] = []
 # 先评估是否该改成注册式迁移，只有确认必须留老轨才同步改这里，并在 PR 里说明原因。
 LEGACY_TRACK_FROZEN = (
     "_ensure_case_insensitive_indexes",
+    # 67ed59fb4（arch-weekly-11 platformization）加进老轨但没同步本常量 → 守卫长期红。
+    # 只做账面对齐：该调用本来就在执行，语义零变化。
+    "_ensure_platform_storage_columns",
     "_migrate_a2a_idempotency_key",
     "_migrate_allow_signup_default",
     "_migrate_event_status_pending",
@@ -4596,7 +4612,16 @@ def _migrate_allow_signup_default():
 
 
 def init_database():
-    """初始化所有新表(幂等),启动时调用"""
+    """初始化所有新表(幂等),启动时调用。
+
+    `GRAPE_SKIP_DB_INIT=1` 时整体跳过：**执行侧**（runtime agent）只通过 HTTP 与主控交互，
+    不需要建表/迁移；而它在异构库（如 MariaDB）上跑这套 MySQL 8 DDL 会连续 1064，
+    既污染日志又把启动拖到几分钟，导致心跳迟迟不发、凭据被判失联。
+    建表迁移只应由主控进程（mgmt/event/worker/insight）执行。
+    """
+    if (os.environ.get("GRAPE_SKIP_DB_INIT") or "").strip().lower() in ("1", "true", "yes", "on"):
+        log.info("GRAPE_SKIP_DB_INIT=1：跳过 schema 初始化/迁移（执行侧 agent 不需要建表）")
+        return
     # 迁移前 DB 自动备份保留策略兜底（2026-10 磁盘告警：data/backups 曾堆到 63G 打满根盘）
     # 每次启动清理过量 pre-m0 备份，保留 DB_BACKUP_KEEP(默认5) 份
     try:
@@ -7107,6 +7132,37 @@ def _fn_user_credentials_kind_backfill() -> None:
             "等 007 扩键后的下次启动重试")
     _uc_backfill_kind_rows()
 
+
+# ── sweeper 的 chat 会话状态索引（2026-11-15）─────────────────────────────
+def _fn_chat_conversations_status_index() -> None:
+    """chat_conversations(status) 索引：sweeper 每轮都跑 `WHERE status='active'`，原先全表扫。
+
+    跨域守卫：chat_conversations 归 runtime，只有 owner 库能建索引。其它域的库里它是
+    视图或不存在 → 抛 _NonOwnerObject，执行器跳过且不盖章（下次启动在该域仍跳过，
+    真正的建索引发生在 runtime 的 worker 进程）。
+    SQL 只写 SQLite 通用语法：MySQL 的 TEXT 列做键必须带前缀长度，由 mysql_compat 的
+    CREATE INDEX 特判自动补 (191)；不要在这里手写 (32)，绕过兼容层直连会报 1170。
+    """
+    with db_lock:
+        c = db.cursor()
+        present = _table_present(c, "chat_conversations")
+        is_base = _is_base_table(c, "chat_conversations") if present else True
+    if not present:
+        raise _NonOwnerObject(
+            "chat_conversations 不在本库（非 owner 域），状态索引由 runtime 库建")
+    if not is_base:
+        raise _NonOwnerObject(
+            "chat_conversations 在本库是视图（非 owner 域），状态索引由 runtime 库建")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_chat_conv_status ON chat_conversations(status)")
+    db.commit()
+
+
+register_migration(
+    version="202611170009",
+    name="chat-conversations-status-index",
+    kind="safe",
+    fn=_fn_chat_conversations_status_index,
+)
 
 register_migration(
     version="202611170008",

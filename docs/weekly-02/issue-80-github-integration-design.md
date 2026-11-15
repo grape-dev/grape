@@ -714,7 +714,7 @@ WARNING: GitHub OAuth login: write user mapping failed:
 在 Settings → OAuth 配置页面设置：
 - `oauth_github_client_id`
 - `oauth_github_client_secret`
-- `oauth_github_redirect_uri`（如 `http://120.46.2.221/api/auth/callback/github`）
+- `oauth_github_redirect_uri`（如 `http://<eip>/api/auth/callback/github`）
 
 或在 `configs/global-bot-token.json` 中配置。
 

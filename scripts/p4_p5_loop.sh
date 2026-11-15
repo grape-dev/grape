@@ -26,7 +26,8 @@ ensure_local() {  # $1=port  $2=datadir  $3=socket
   setsid "$HOME/bin/mysqld8" --no-defaults --user="$(id -un)" --datadir="$2" --port="$1" \
     --bind-address=0.0.0.0 --socket="$3" --mysqlx=0 --pid-file="$2/mysqld.pid" \
     --log-error="$2/error.log" --secure-file-priv="$2/files" \
-    --innodb-buffer-pool-size=256M --skip-name-resolve </dev/null >/dev/null 2>&1 &
+    --innodb-buffer-pool-size=256M --skip-name-resolve \
+    --max-connections="${RDS_MAX_CONNECTIONS:-500}" </dev/null >/dev/null 2>&1 &
   for _ in $(seq 1 20); do sleep 1; ss -ltn 2>/dev/null | grep -q ":$1 " && return 0; done
   echo "[ensure] :$1 未起来（看 $2/error.log）" >&2; return 1
 }
@@ -38,7 +39,7 @@ ensure_remote() {
   : "${REMOTE_SSH_USER:?需要 REMOTE_SSH_USER}" "${REMOTE_SSH_PWD:?需要 REMOTE_SSH_PWD}"
   : "${REMOTE_RDS_HOME:?需要 REMOTE_RDS_HOME（远端 MySQL 实例目录，不含仓库内默认值）}"
   "$PY" - "$REMOTE_HOST" "$REMOTE_SSH_USER" "$REMOTE_SSH_PWD" "$REMOTE_PORT" "$REMOTE_RDS_HOME" <<'PYEOF'
-import sys, paramiko
+import os, sys, paramiko
 host, user, pwd, port, rds_home = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 c.connect(host, username=user, password=pwd, timeout=15)
@@ -46,7 +47,8 @@ cmd = (f"setsid {rds_home}/bin/mysqld8 --no-defaults --user=root --datadir={rds_
        f"--port={port} --bind-address=0.0.0.0 --socket=/tmp/mysql-runtime.sock --mysqlx=0 "
        f"--pid-file={rds_home}/runtime/mysqld.pid --log-error={rds_home}/runtime/error.log "
        f"--secure-file-priv={rds_home}/runtime/files --innodb-buffer-pool-size=512M "
-       f"--skip-name-resolve </dev/null >/dev/null 2>&1 & sleep 8; ss -ltn | grep {port} || true")
+       f"--skip-name-resolve --max-connections={os.environ.get('RDS_MAX_CONNECTIONS', '500')} "
+       f"</dev/null >/dev/null 2>&1 & sleep 8; ss -ltn | grep {port} || true")
 c.exec_command(cmd, timeout=60)
 c.close()
 PYEOF

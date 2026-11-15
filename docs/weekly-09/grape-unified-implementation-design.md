@@ -2,7 +2,7 @@
 
 > **版本**：v2.2（chat 表归运行域 + GSB 统一服务通信框架 + 跨语言接入版）
 > **日期**：2026-11-02
-> **基础仓**：`/home/grape/grape-new-version2`
+> **基础仓**：`<deploy-root>/grape-new-version2`
 > **融合来源**：grape-three-schema-split-design.md、grape-three-process-split-design.md、grape-monorepo-design.md、grape-three-dimension-analysis.md
 > **架构基线**：grape架构演进分析报告.html（Phase 0-4）
 > **核心变更**：Insight 域从"暂合入 Mgmt 进程"升级为独立进程（grape_insight_server :38083），实现真正的三域四进程独立运行。
@@ -3293,7 +3293,7 @@ services:
 #!/bin/bash
 # scripts/dev_four_process.sh — 开发模式同时启动四进程
 
-cd /home/grape/grape-new-version2
+cd <deploy-root>/grape-new-version2
 
 # 终端 1：Mgmt 进程
 uvicorn src.api.grape_server:app --host 0.0.0.0 --port 38080 --reload &

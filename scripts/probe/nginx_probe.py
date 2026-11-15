@@ -9,7 +9,7 @@ Grape 统一探针 —— 每分钟探测 nginx（两节点）、node_exporter �
 - OTLP :4318 由 otel-lgtm 内的 collector 接收并转成 Prometheus 指标。
 
 产出指标：
-  label node=hd002|vod
+  label node=<node-a>|<node-b>
     nginx_probe_up / http_status / latency_ms        入口可用性（/api/health）
     nginx_conn_active / reading / writing / waiting   nginx stub_status 连接数
     host_probe_up / net_rx_bps / net_tx_bps / tcp_established / load1 / mem_available_ratio

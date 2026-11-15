@@ -7,9 +7,9 @@
 - 对 chat / feishu / vod / history 目录做 TTL 清理（无活跃会话时删除）。
 """
 
-import asyncio, os, shutil, time
+import asyncio, contextlib, os, shutil, time
 
-from src.kernel import config
+from src.kernel import config, db_registry
 
 from src.kernel.config import log, CHAT_CWD_BASE
 
@@ -56,27 +56,197 @@ _LONG_RUNNING_TXT = "中断：running/dispatched 超长未收敛（sweeper 兜�
 
 _DUAL_SIGNAL_TXT = "中断：双信号已齐（stream_ended+self_reported）但终态未收敛（sweeper 兜底回收）"
 
+# 同一判定的「成功」方向：agent 已经自报 exit_code=0，只是主控没来得及写终态
+# （tasks/complete 504、主控重启等）。这不是中断，必须收敛成 completed。
+_DUAL_SIGNAL_OK_TXT = "已完成：agent 自报成功（stream_ended+self_reported，sweeper 补偿收敛）"
+
 _GIT_AGENTS = ("vod", "issue", "coding", "qa", "sre")
+
+
+# SWEEPER_LOCK_MODE:
+#   legacy（默认，行为与改造前一致）= 进程主连接 + 进程级 db_lock；
+#   own = 每次扫一轮用**自己的 runtime 域连接**（autocommit），完全不占 db_lock，
+#         业务侧（心跳/claim/tags）不再和批量扫描抢同一把锁。
+# 判据里要求 uses_own_dsn("runtime")：单库/SQLite/测试拓扑没有分域 DSN 时必须回落 legacy，
+# 否则 sqlite 单写者会被并发写打爆（database is locked）。
+_SWEEPER_LOCK_MODE = (os.environ.get("SWEEPER_LOCK_MODE", "legacy") or "legacy").strip().lower()
+
+
+_OWN_MODE_LOGGED = False
+
+
+def _use_own_sweeper_conn() -> bool:
+    global _OWN_MODE_LOGGED
+    if _SWEEPER_LOCK_MODE not in ("own", "1", "true", "yes"):
+        return False
+    try:
+        ok = bool(db_registry.uses_own_dsn("runtime"))
+    except Exception:
+        return False
+    if ok and not _OWN_MODE_LOGGED:
+        _OWN_MODE_LOGGED = True
+        log.info("sweeper: SWEEPER_LOCK_MODE=own —— 使用 runtime 域独立连接，不占用进程 db_lock")
+    return ok
+
+
+def _log_round(scope: str, cleaned: int, elapsed: float) -> None:
+    """每轮结束的总耗时（>=2s 记 warning：扫描慢到影响业务时能直接从日志看出来）。"""
+    if elapsed >= 2.0:
+        log.warning(f"sweeper round '{scope}' took {elapsed:.1f}s, cleaned={cleaned}")
+    else:
+        log.info(f"sweeper round '{scope}' done in {elapsed:.2f}s, cleaned={cleaned}")
+
+
+def _commit() -> None:
+    """legacy 模式下显式提交；own 模式 autocommit 已在语句结束提交（避免误提交主连接）。"""
+    if _use_own_sweeper_conn():
+        return
+    try:
+        _commit()
+    except Exception as e:  # noqa: BLE001
+        log.debug(f"sweeper commit failed: {e}")
+
+
+class _ReplicaLock:
+    """跨副本互斥句柄：acquire/release 各自在线程池里跑，持有期间连接保持打开。
+
+    MySQL GET_LOCK(name, 0) 非阻塞：抢不到说明另一个副本正在扫，本轮直接跳过。
+    非 own 模式 / 锁机制不可用时一律放行 —— 退化成改造前的行为，不把清扫停掉。
+    """
+
+    def __init__(self, key: str):
+        self.key = key
+        self._conn = None
+        self._held = False
+
+    def acquire(self) -> bool:
+        if not _use_own_sweeper_conn():
+            return True
+        conn = None
+        try:
+            conn = db_registry.new_connection("runtime", autocommit=True)
+            cur = conn.cursor()
+            cur.execute("SELECT GET_LOCK(?, 0)", (self.key,))
+            row = cur.fetchone()
+            if row and row[0] == 1:
+                self._conn, self._held = conn, True
+                return True
+            try:
+                conn.close()
+            except Exception:
+                log.debug("sweeper: 关闭独立连接失败（忽略）")
+            return False
+        except Exception as e:  # noqa: BLE001 - 锁不可用不阻断清扫
+            log.debug(f"sweeper lock unavailable ({self.key}): {e}")
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    log.debug("sweeper: 关闭独立连接失败（忽略）")
+            return True
+
+    def release(self) -> None:
+        if self._conn is None:
+            return
+        try:
+            if self._held:
+                self._conn.cursor().execute("SELECT RELEASE_LOCK(?)", (self.key,))
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"sweeper release failed ({self.key}): {e}")
+        finally:
+            try:
+                self._conn.close()
+            except Exception:
+                log.debug("sweeper: 关闭独立连接失败（忽略）")
+            self._conn, self._held = None, False
+
+
+_CHAT_STATUS_IDX_READY = False
+
+
+def _ensure_chat_status_index(conn) -> None:
+    """确保 chat_conversations(status) 索引存在（own 模式下用 sweeper 自己的 runtime 连接建）。
+
+    为什么不在注册式迁移里做：三库模式（GRAPE_DOMAIN_LIB=1）进程**跳过 init_database**，
+    注册迁移只在单库模式下执行；而 mgmt 进程的库是 mgmt 域，对 runtime 表只能跳过。
+    索引的唯一真实消费者就是 sweeper 的 `WHERE status='active'`，所以在首次用到时
+    用归属域连接幂等建一次最稳（MySQL 的 TEXT 列必须带前缀长度，这里给 191）。
+    """
+    global _CHAT_STATUS_IDX_READY
+    if _CHAT_STATUS_IDX_READY:
+        return
+    _CHAT_STATUS_IDX_READY = True
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM information_schema.statistics "
+            "WHERE table_schema=DATABASE() AND table_name='chat_conversations' "
+            "AND index_name='idx_chat_conv_status'")
+        row = cur.fetchone()
+        if row and row[0]:
+            return
+        cur.execute("CREATE INDEX idx_chat_conv_status ON chat_conversations(status(191))")
+        log.info("sweeper: created index idx_chat_conv_status on chat_conversations(status)")
+    except Exception as e:  # noqa: BLE001 - 建索引失败不影响清扫
+        log.debug(f"sweeper: chat_conversations(status) index ensure skipped: {e}")
+
+
+@contextlib.contextmanager
+def _sweep_mgmt_cursor():
+    """IM 三张表归 mgmt 域：own 模式必须换 mgmt 域连接，用 runtime 连接会 1146。"""
+    if _use_own_sweeper_conn() and db_registry.uses_own_dsn("mgmt"):
+        conn = db_registry.new_connection("mgmt", autocommit=True)
+        try:
+            yield conn.cursor()
+        finally:
+            try:
+                conn.close()
+            except Exception as _ce:
+                log.debug(f"sweeper mgmt 连接关闭失败: {_ce}")
+        return
+    with db_lock:
+        yield db.cursor()
+
+
+@contextlib.contextmanager
+def _sweep_cursor():
+    """sweeper 专用游标：三库拓扑走 runtime 域独立连接，单库/测试拓扑回落主库 + db_lock。
+
+    sweeper 是批量扫描（整张 agent_tasks / events），若和请求路径共用进程级 db_lock，
+    扫描期间心跳、claim、/tags、tasks/complete、tasks/current 全部排队，nginx 直接
+    504（2026-11-15 seq=9762 实测：qa 任务跑完 742 条消息，`grape tasks complete`
+    连续 7 次 504，最后只能被 sweeper 判失败）。独立连接把两条路径彻底解耦。
+    """
+    if db_registry.uses_own_dsn("runtime"):
+        conn = db_registry.new_connection("runtime", autocommit=True)
+        try:
+            _ensure_chat_status_index(conn)
+            yield conn.cursor()
+        finally:
+            try:
+                conn.close()
+            except Exception as _ce:
+                log.debug(f"sweeper 独立连接关闭失败: {_ce}")
+        return
+    with db_lock:
+        yield db.cursor()
 
 def _done_issues() -> list[tuple[str, str]]:
     """返回到达终态（stage='done'）的 (repo_key, issue_id) 列表。Phase C3：读 issue 单表。"""
-    with db_lock:
-        c = db.cursor()
+    with _sweep_cursor() as c:
         rows = c.execute("SELECT repo_key, issue_number FROM issue WHERE stage='done'").fetchall()
         return [(r[0], f"#{r[1]}") for r in rows]
 
 def _active_issue_sessions() -> set[tuple[str, str, str]]:
     """有 dispatched/running 任务的 (repo_key, agent_type, issue_num) 集合（不清理）。"""
-    with db_lock:
-        c = db.cursor()
+    with _sweep_cursor() as c:
         c.execute("SELECT DISTINCT issue_session_id FROM agent_tasks WHERE status IN ('dispatched','running') AND issue_session_id!=''")
         ids = [r[0] for r in c.fetchall()]
     if not ids:
         return set()
     ph = ",".join("?" for _ in ids)
     active = set()
-    with db_lock:
-        c = db.cursor()
+    with _sweep_cursor() as c:
         c.execute(f"SELECT repo_key, agent_type, issue_id FROM issue_agent_session WHERE id IN ({ph})", ids)
         for r in c.fetchall():
             active.add((r[0], r[1], str(r[2]).lstrip("#")))
@@ -172,8 +342,7 @@ def _zombie_issue_dirs(ttl: float) -> list[str]:
 def _active_chat_conv_ids() -> set[str]:
     """有活跃任务的 chat conversation ID 集合（不清理）。"""
     try:
-        with db_lock:
-            c = db.cursor()
+        with _sweep_cursor() as c:
             c.execute("SELECT id FROM chat_conversations WHERE status='active'")
             return {r[0] for r in c.fetchall()}
     except Exception:
@@ -324,8 +493,7 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
         no_start_cut = (now_local - timedelta(minutes=no_start_minutes)).strftime("%Y-%m-%d %H:%M:%S")
         now_utc = datetime.now(timezone.utc)
         stale_cut = (now_utc - timedelta(minutes=stale_minutes)).isoformat()
-        with db_lock:
-            c = db.cursor()
+        with _sweep_cursor() as c:
             # 方案 E：入队为 pending，功能上等同旧的"未开始 running"——超时无活跃任务同样回收
             c.execute(
                 "SELECT seq FROM events WHERE status IN ('pending','running') AND "
@@ -341,8 +509,7 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
         if not seqs:
             return 0
         ph = ",".join("?" * len(seqs))
-        with db_lock:
-            c = db.cursor()
+        with _sweep_cursor() as c:
             c.execute(
                 f"SELECT DISTINCT event_seq FROM agent_tasks WHERE event_seq IN ({ph}) "
                 "AND status IN ('queued','dispatched','running')",
@@ -364,8 +531,7 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
             # 而非一律标 failed。
             _terminal_by_seq = {}
             try:
-                with db_lock:
-                    _tc = db.cursor()
+                with _sweep_cursor() as _tc:
                     _tc.execute(
                         f"SELECT event_seq, status, exit_code, id FROM agent_tasks "
                         f"WHERE event_seq IN ({ph2}) AND status IN ('completed','failed','cancelled') "
@@ -378,34 +544,35 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
             try:
                 # Nit 修复：import 移出 db_lock 临界区（首次导入不应持锁执行）
                 from src.domains.runtime.engine.service import _cascade_event_terminal
-                with db_lock:
-                    _c = db.cursor()
+                with _sweep_cursor() as _c:
                     _c.execute(f"SELECT DISTINCT event_seq FROM agent_tasks WHERE event_seq IN ({ph2})", dead)
                     _with_task_rows = {r[0] for r in _c.fetchall()}
-                    _c2 = db.cursor()
+                    # 同一连接上的第二个游标（own 模式不能再用进程主连接 db.cursor()）
+                    _c2 = _c.connection.cursor()
                     for s in dead:
                         if s in _terminal_by_seq:
                             # 任务已终态 → 级联到任务终态（探活收敛，幂等）
                             _st, _ec, _tid = _terminal_by_seq[s]
-                            if _cascade_event_terminal(_c2, s, _st, exit_code=_ec, task_id=_tid):
+                            if _cascade_event_terminal(_c2, s, _st, exit_code=_ec):
                                 fixed += 1
                             continue
                         _txt = _timeout_txt if s in _with_task_rows else _no_task_txt
                         _c2.execute(
-                            "UPDATE events SET status='failed', exit_code=1, completed_at=?, result=? WHERE seq=?",
+                            "UPDATE events SET status='failed', exit_code=1, completed_at=?, result=? "
+                            "WHERE seq=? AND status IN ('pending','running')",
                             (now_iso, _txt, s))
                         fixed += _c2.rowcount
-                    db.commit()
+                    _commit()
             except Exception as e:
                 log.warning(f"sweeper: per-seq recovery failed, fallback bulk: {e}")
-                with db_lock:
-                    _c = db.cursor()
+                with _sweep_cursor() as _c:
                     _c.execute(
                         f"UPDATE events SET status='failed', exit_code=1, completed_at=?, "
-                        f"result='{_timeout_txt}' WHERE seq IN ({ph2})",
+                        f"result='{_timeout_txt}' WHERE seq IN ({ph2}) "
+                        f"AND status IN ('pending','running')",
                         (now_iso, *dead))
                     fixed = _c.rowcount
-                    db.commit()
+                    _commit()
             if fixed:
                 log.info(f"sweeper: recovered {fixed} stuck running event(s): {dead}")
             # 取消对应的线程池排队任务（防止 event 已 failed 但子进程还在跑）
@@ -478,8 +645,7 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
 
     online: set = set()
     try:
-        with db_lock:
-            c = db.cursor()
+        with _sweep_cursor() as c:
             c.execute("SELECT id FROM agent_runtimes WHERE status='online'")
             online = {r[0] for r in c.fetchall()}
     except Exception as e:
@@ -488,25 +654,30 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
 
     dead: list = []  # (task_id, event_seq, result_text, runtime_id)
     try:
-        with db_lock:
-            c = db.cursor()
+        with _sweep_cursor() as c:
             c.execute("SELECT id, event_seq, runtime_id, created_at, started_at, status, "
-                      "stream_ended, self_reported "
+                      "stream_ended, self_reported, exit_code "
                       "FROM agent_tasks WHERE status IN ('queued','dispatched','running')")
-            for tid, event_seq, rid, created_at, started_at, status, stream_ended, self_reported in c.fetchall():
+            for tid, event_seq, rid, created_at, started_at, status, stream_ended, self_reported, exit_code in c.fetchall():
                 if stream_ended == 1 and self_reported == 1:
-                    dead.append((tid, event_seq, _DUAL_SIGNAL_TXT, rid))
+                    # 双信号齐 ≠ 失败：agent 已经跑完并自报终态，sweeper 只是补写主控漏掉的那一次
+                    # 收敛。按它自报的 exit_code 决定方向，否则「跑完且成功」会被打成失败
+                    # （2026-11-15 seq=9762：qa 任务 742 条消息、结论齐全，仍被判中断）。
+                    if int(exit_code or 0) == 0:
+                        dead.append((tid, event_seq, _DUAL_SIGNAL_OK_TXT, rid, True))
+                    else:
+                        dead.append((tid, event_seq, _DUAL_SIGNAL_TXT, rid, False))
                 elif status == "queued":
                     age = _dt_age_minutes(created_at, now)
                     if age is not None and age >= q_stale:
-                        dead.append((tid, event_seq, _QUEUED_STALE_TXT, rid))
+                        dead.append((tid, event_seq, _QUEUED_STALE_TXT, rid, False))
                 elif status in ("dispatched", "running"):
                     age = _dt_age_minutes(started_at, now)
                     if age is not None and age >= l_stale:
-                        dead.append((tid, event_seq, _LONG_RUNNING_TXT, rid))
+                        dead.append((tid, event_seq, _LONG_RUNNING_TXT, rid, False))
                     elif (rid and rid != 0 and rid not in online
                           and age is not None and age >= d_stale):
-                        dead.append((tid, event_seq, _DEAD_RUNTIME_TXT, rid))
+                        dead.append((tid, event_seq, _DEAD_RUNTIME_TXT, rid, False))
     except Exception as e:
         log.warning(f"sweeper agent_tasks scan failed: {e}")
         return 0
@@ -516,17 +687,19 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
     fixed = 0
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
-        with db_lock:
-            c = db.cursor()
-            for tid, event_seq, txt, rid in dead:
+        with _sweep_cursor() as c:
+            for tid, event_seq, txt, rid, _ok in dead:
                 try:
+                    _final = "completed" if _ok else "failed"
+                    _code = 0 if _ok else 1
                     if event_seq:
-                        c.execute("UPDATE events SET status='failed', exit_code=1, completed_at=?, result=? "
-                                  "WHERE seq=? AND status IN ('pending','running')", (now_iso, txt, event_seq))
-                    c.execute("UPDATE agent_tasks SET status='failed', exit_code=1, completed_at=?, "
+                        c.execute("UPDATE events SET status=?, exit_code=?, completed_at=?, result=? "
+                                  "WHERE seq=? AND status IN ('pending','running')",
+                                  (_final, _code, now_iso, txt, event_seq))
+                    c.execute("UPDATE agent_tasks SET status=?, exit_code=?, completed_at=?, "
                               "errors=?, result_text=? WHERE id=? "
                               "AND status IN ('queued','dispatched','running')",
-                              (now_iso, txt, txt, tid))
+                              (_final, _code, now_iso, txt, txt, tid))
                     # L2（2026-10-17）：回收时若任务原占用引擎槽（running/dispatched 且有 runtime_id），
                     # 同步释放 busy_slots，防僵尸计数（local-engine-busy-slots-zombie-fix-design.md §九）。
                     # queued（runtime_id=0）任务未占槽，不释放。
@@ -539,11 +712,12 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
                     fixed += c.rowcount
                 except Exception as e:
                     log.warning(f"sweeper agent_tasks recycle {tid} failed: {e}")
-            db.commit()
+            _commit()
     except Exception as e:
         log.warning(f"sweeper agent_tasks recycle commit failed: {e}")
     if fixed:
-        log.info(f"sweeper: recycled {fixed} stuck agent_task(s): {[t for t, _, _, _ in dead]}")
+        log.info(f"sweeper: recycled {fixed} stuck agent_task(s): "
+                 f"{[(t, 'completed' if ok else 'failed') for t, _, _, _, ok in dead]}")
     return fixed
 
 def sweep_once() -> int:
@@ -553,10 +727,14 @@ def sweep_once() -> int:
         # 统一检测一次，跳过所有 DB 依赖的清理（事件回收/issue worktree 清理）
         _has_db_tables = True
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'")
-                _has_db_tables = c.fetchone() is not None
+            with _sweep_cursor() as c:
+                # 不能用 sqlite_master：MySQL 后端下它必然抛异常，于是 _has_db_tables
+                # 被判 False，**下面所有事件/任务回收整段被跳过**，卡在 running 的事件
+                # 和 failed 的任务再没人收敛（2026-11-15 实测：5 个 issue 永久「处理中」，
+                # 其中 3 个的 agent_tasks 早已 failed）。改成后端无关的存在性探测。
+                c.execute("SELECT 1 FROM issue_state LIMIT 1")
+                c.fetchall()
+                _has_db_tables = True
         except Exception:
             _has_db_tables = False
 
@@ -568,6 +746,13 @@ def sweep_once() -> int:
                 log.warning(f"sweeper stuck-event sweep failed: {e}")
             # 兜底回收悬空 agent_tasks（queued 无 worker 认领 / runtime 已死的 running·dispatched），
             # 否则需求中心 is_running=true 雷达动画永久亮（sweep_stuck_agent_tasks_once 见 #210 佐证）
+            # 「认领了但引擎会话从未建立」的任务：原先只由 agent 主动调 recover-orphans 处理，
+            # agent 一旦卡住任务就永远 running（#87/#88 永久「处理中」的直接原因）。
+            try:
+                from src.domains.runtime.engine.sweep_no_session import sweep_claim_without_session_once
+                cleaned += sweep_claim_without_session_once()
+            except Exception as e:
+                log.warning(f"sweeper claim-without-session sweep failed: {e}")
             try:
                 cleaned += sweep_stuck_agent_tasks_once()
             except Exception as e:
@@ -794,8 +979,7 @@ def _sweep_stale_workspace_repos() -> int:
     # 获取有活跃任务的 repo_key 集合
     active_repos = set()
     try:
-        with db_lock:
-            c = db.cursor()
+        with _sweep_cursor() as c:
             c.execute("SELECT DISTINCT repo_key FROM agent_tasks WHERE status IN ('dispatched','running')")
             active_repos = {r[0] for r in c.fetchall()}
     except Exception:
@@ -858,10 +1042,20 @@ async def sweep_loop():
     """服务端后台周期清理（main.py lifespan 挂载）。"""
     import asyncio as _aio
     while True:
+        _lock = _ReplicaLock("grape:sweeper:merged")
+        if not await _aio.to_thread(_lock.acquire):
+            log.debug("sweeper(merged): 另一副本正在清扫，本轮跳过")
+            await _aio.sleep(_SWEEP_INTERVAL)
+            continue
+        _t0 = time.time()
         try:
-            await _aio.to_thread(sweep_once)
+            _n = await _aio.to_thread(sweep_once)
+            _el = time.time() - _t0
+            _log_round("merged", _n, _el)
         except Exception as e:
             log.warning(f"sweeper loop error: {e}")
+        finally:
+            await _aio.to_thread(_lock.release)
         await asyncio.sleep(_SWEEP_INTERVAL)
 
 async def sweep_events_loop() -> None:
@@ -871,6 +1065,12 @@ async def sweep_events_loop() -> None:
     """
     import asyncio as _aio
     while True:
+        _lock = _ReplicaLock("grape:sweeper:events")
+        if not await _aio.to_thread(_lock.acquire):
+            log.debug("Event sweeper: 另一副本正在清扫，本轮跳过")
+            await _aio.sleep(_SWEEP_INTERVAL)
+            continue
+        _t0 = time.time()
         try:
             cleaned = 0
             # 全部同步工作（pymysql 查询 / git 子进程 / ls-remote）必须进线程池：
@@ -918,8 +1118,11 @@ async def sweep_events_loop() -> None:
                         log.warning(f"Event sweeper cleanup failed {issue_dir}: {e}")
             if cleaned:
                 log.info(f"Event sweeper: cleaned {cleaned} items")
+            _log_round("events", cleaned, time.time() - _t0)
         except Exception as e:
             log.warning(f"Event sweeper error: {e}")
+        finally:
+            await _aio.to_thread(_lock.release)
         await _aio.sleep(_SWEEP_INTERVAL)
 
 async def sweep_tasks_loop() -> None:
@@ -930,14 +1133,23 @@ async def sweep_tasks_loop() -> None:
     """
     import asyncio as _aio
     while True:
+        _lock = _ReplicaLock("grape:sweeper:tasks")
+        if not await _aio.to_thread(_lock.acquire):
+            log.debug("Task sweeper: 另一副本正在清扫，本轮跳过")
+            await _aio.sleep(_SWEEP_INTERVAL)
+            continue
+        _t0 = time.time()
         try:
             # 同 sweep_events_loop：同步 pymysql 回收必须入线程池，否则把 worker 的
             # 事件循环卡住 → 心跳停发 → 引擎被判失联（健康分强制 0）。
             cleaned = await _aio.to_thread(sweep_stuck_agent_tasks_once)
             if cleaned:
                 log.info(f"Task sweeper: cleaned {cleaned} stuck tasks")
+            _log_round("tasks", cleaned, time.time() - _t0)
         except Exception as e:
             log.warning(f"Task sweeper error: {e}")
+        finally:
+            await _aio.to_thread(_lock.release)
         await _aio.sleep(_SWEEP_INTERVAL)
 
 # ── Issue #996：Issue 产物（docs/issue-N/*）清理预检 ─────────────────────────
@@ -1041,11 +1253,10 @@ def _sweep_im_tables() -> int:
         for table, col, hours in specs:
             try:
                 cutoff = (now - timedelta(hours=int(hours))).strftime("%Y-%m-%d %H:%M:%S")
-                with db_lock:
-                    c = db.cursor()
+                with _sweep_mgmt_cursor() as c:
                     c.execute(f"DELETE FROM {table} WHERE {col} < ?", (cutoff,))
                     n = c.rowcount or 0
-                    db.commit()
+                    _commit()
                 cleaned += n
                 if n:
                     log.info(f"sweeper: purged {n} rows from {table} (older than {hours}h)")
@@ -1077,10 +1288,12 @@ def _has_issue_state_tables() -> bool:
     直接 try/except 每个清理步骤（下方两个循环已按此处理）。
     """
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'")
-            return c.fetchone() is not None
+        with _sweep_cursor() as c:
+            # 与 sweep_once 同一个坑：MySQL 下 sqlite_master 必抛 → 恒 False →
+            # sweep_events_once 整段跳过，僵尸事件永不回收。改用后端无关探测。
+            c.execute("SELECT 1 FROM issue_state LIMIT 1")
+            c.fetchall()
+            return True
     except Exception:
         return False
 

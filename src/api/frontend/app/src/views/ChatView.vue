@@ -206,8 +206,11 @@
 
     <!-- ═══ 引擎/技能选择浮层 ═══ -->
     <Teleport to="body">
-      <div v-if="pickerOpen" class="chat-picker-overlay" @click.self="closePicker">
-        <div v-if="pickerOpen === 'model'" class="chat-picker-pop cv__pop">
+      <!-- 不用全屏遮罩：它 inset:0 会把另一个配置按钮的点击吃掉，
+           用户点「引擎配置」再点「技能配置」就变成「先关闭、没弹出」，观感是没反应。
+           改成 document 捕获阶段监听：点浮层和两个触发按钮以外的地方才关。 -->
+      <div v-if="pickerOpen" class="chat-picker-anchor">
+        <div v-if="pickerOpen === 'model'" class="chat-picker-pop cv__pop show" :style="pickerStyle">
           <div class="cv__pop-label">{{ t('engine_label') }}</div>
           <div class="cv__pop-list">
             <div v-if="!backends.length" class="cv__pop-hint">{{ tc('loading') }}</div>
@@ -235,7 +238,7 @@
             </div>
           </div>
         </div>
-        <div v-else class="chat-picker-pop cv__pop">
+        <div v-else class="chat-picker-pop cv__pop show" :style="pickerStyle">
           <div class="cv__pop-label">{{ t('skill_label') }}</div>
           <div class="cv__scope-tabs">
             <button
@@ -938,6 +941,9 @@ watch(messages, function (list) {
     if (text) recallTexts.set(id, text)
   })
 })
+// 当前 SSE 的 AbortController（必须先声明：switchConversation 在 setup 期间就会读它）
+let streamAbort = null
+
 function recallMessage(m, idx) {
   const id = parseInt(m && m.id, 10) || 0
   if (!id) return
@@ -1000,6 +1006,10 @@ const convMeta2 = ref(null)
 
 function switchConversation(convId) {
   if (currentConvId.value !== convId) {
+    // 切会话即中止上一个会话的 SSE：不中止会白占连接与定时器（事件已被 isOwnerConv 丢弃）；
+    // 任务态留在 storedTask，切回时由 resume 逻辑重新订阅。
+    if (streamAbort) { try { streamAbort.abort() } catch (e) {} streamAbort = null }
+    streaming.value = null
     if (currentConvId.value) saveDraft(currentConvId.value, draft.value)
     draft.value = ''
     if (currentConvId.value) saveChatImages(currentConvId.value, pendingImages.value)
@@ -1043,13 +1053,20 @@ function switchConversation(convId) {
         G.API.get('/chat/task/' + lastMsg.task_id + '/status')
           .then(function (st) {
             if (st.status === 'running' && !hasAgentReply) {
-              const elId = 't' + Date.now()
+              if (currentConvId.value !== convId) return
+              // 复用上次的气泡 id，并**先立起 thinking 气泡**：startStream 只在首个
+              // text 事件才建气泡，agent 还在思考（无 text）时不会有任何指示，
+              // 表现就是「切走再切回来，流式气泡不见了」（走外部菜单回来时有
+              // resumeChatTask 帮忙立气泡，所以那条路径正常）。
+              const _stored = getStoredTask(convId)
+              const elId = (_stored && _stored.el_id) || 't' + Date.now()
               setStoredTask(convId, {
                 task_id: lastMsg.task_id,
                 conv_id: convId,
                 el_id: elId,
                 status: 'running',
               })
+              if (!streaming.value) streaming.value = { elId: elId, stepText: '' }
               startStream(lastMsg.task_id, elId, convId)
             } else if (st.status === 'done' || st.status === 'error' || hasAgentReply) {
               if (hasAgentReply) clearStoredTask(convId)
@@ -1096,7 +1113,6 @@ function autoResize(ev) {
 
 // ── 发送 + SSE 流式（v31 submit/stream 分离）──
 const streaming = ref(null) // {elId, stepText}
-let streamAbort = null
 function sendChatStream() {
   const text = (draft.value || '').trim()
   if (!text && pendingImages.value.length === 0 && !pendingVideo.value) return
@@ -1171,8 +1187,10 @@ function doSend() {
       }
     })
 }
-function finishStream(html) {
+function finishStream(html, convId) {
   // 流式气泡转正：追加为普通 agent 消息（submit 失败/立即错误路径）
+  // convId 给了且已切走 → 不写 UI（否则 A 会话的失败气泡会追加到 B 会话列表）
+  if (convId && currentConvId.value !== convId) return
   if (streaming.value) {
     messages.value.push({ role: 'agent', content: '__stream__' })
     const last = messages.value[messages.value.length - 1]
@@ -1187,6 +1205,9 @@ async function startStream(taskId, elId, convId) {
   }
   const ac = new AbortController()
   streamAbort = ac
+  // 归属会话：切走后 SSE 仍在吐事件（后端继续执行），必须丢弃，否则思考日志/正文
+  // 会写进「当前」会话的消息列表——用户在 B 会话看到 A 会话的思考滚动。
+  const isOwnerConv = () => currentConvId.value === convId
   let finalText = ''
   try {
     const token = (await G.API.ensureTokenValid()) || ''
@@ -1219,6 +1240,7 @@ async function startStream(taskId, elId, convId) {
       buf = lines.pop() || ''
       lines.forEach(function (line) {
         if (!line.startsWith('data: ')) return
+        if (!isOwnerConv()) return   // 已切到别的会话：丢弃事件，不写 UI
         try {
           const d = JSON.parse(line.substring(6))
           if (d.type === 'done') {
@@ -1240,16 +1262,17 @@ async function startStream(taskId, elId, convId) {
           /* ignore：与老代码同款静默降级 */
         }
       })
-      if (currentConvId.value === convId) nextTick(scrollBody)
+      if (!isOwnerConv()) { try { ac.abort() } catch (e) {} break }
+      nextTick(scrollBody)
     }
     // SSE 结束仍无 done（异常断流）→ 保留任务态供切回恢复
-    if (streaming.value) streaming.value = null
+    if (isOwnerConv() && streaming.value) streaming.value = null
     clearStoredTask(convId)
-    if (currentConvId.value === convId) loadConversations()
+    if (isOwnerConv()) loadConversations()
   } catch (e) {
     if (e && e.name === 'AbortError') return
     // 连接断开 → 后端继续执行，保留任务态供切回恢复
-    if (streaming.value && currentConvId.value === convId) streaming.value.stepText = ''
+    if (streaming.value && isOwnerConv()) streaming.value.stepText = ''
   }
 }
 
@@ -1260,9 +1283,40 @@ const backends = ref([])
 const skillScope = ref('official')
 const skillItems = ref([])
 const skillLoading = ref(false)
+// 浮层是 position:fixed 且基础样式 opacity:0（靠 .show 才可见），
+// 旧实现既没加 .show 也没给定位 → 点了按钮 DOM 虽在、屏幕上一片空白。
+const pickerStyle = ref({})
+function positionPicker() {
+  const btnId = pickerOpen.value === 'skill' ? 'chatSkillBtn' : 'chatModelBtn'
+  const btn = document.getElementById(btnId)
+  if (!btn) return
+  const r = btn.getBoundingClientRect()
+  const W = 280
+  const vw = G.window.innerWidth || 0
+  const vh = G.window.innerHeight || 0
+  // 贴按钮上方弹出：left 夹到视口内，bottom 以「按钮顶 - 10px」为基线
+  pickerStyle.value = {
+    left: Math.max(12, Math.min(r.left, vw - W - 12)) + 'px',
+    bottom: Math.max(12, vh - r.top + 10) + 'px',
+    maxHeight: Math.max(160, Math.min(360, r.top - 24)) + 'px',
+  }
+}
+function onPickerResize() {
+  if (pickerOpen.value) positionPicker()
+}
 function togglePicker(type) {
   pickerOpen.value = pickerOpen.value === type ? null : type
   if (pickerOpen.value === 'skill') loadSkillItems()
+  if (pickerOpen.value) nextTick(positionPicker)
+}
+// 点浮层与两个触发按钮之外的地方关闭（捕获阶段，不阻挡按钮自身事件）
+function onPickerDocClick(ev) {
+  if (!pickerOpen.value) return
+  const t = ev.target
+  if (!t || typeof t.closest !== 'function') return
+  if (t.closest('.chat-picker-pop')) return
+  if (t.closest('#chatModelBtn') || t.closest('#chatSkillBtn')) return
+  closePicker()
 }
 function switchSkillScope(s) {
   skillScope.value = s
@@ -1537,7 +1591,6 @@ function closeOnboardModal(refresh) {
 
 // ── app.js nav 契约 ──
 // app.js nav('chat', param) 调 renderChat(param)；离开 chat 页时 app.js 直接 abort window._chatStreamAbort
-G.window.renderChat = null // 契约由入口 entries/chat-view.js 持有（fresh mount + openConvId 注入）
 G.window.resumeChatTask = function () {
   // 切回 Chat 页恢复活跃查询（app.js nav('chat') 后 setTimeout 调用）
   if (!currentConvId.value) return
@@ -1616,6 +1669,8 @@ function syncAbortBridge() {
 }
 
 onBeforeUnmount(function () {
+  G.window.removeEventListener('resize', onPickerResize)
+  G.document.removeEventListener('click', onPickerDocClick, true)
   stopOnboardPoll()
   if (countdownTimer) clearInterval(countdownTimer)
   if (streamAbort) streamAbort.abort()
@@ -1631,6 +1686,8 @@ onMounted(function () {
   G.window._currentView = 'chat'
   loadConversations(true)
   loadConfigData()
+  G.window.addEventListener('resize', onPickerResize)
+  G.document.addEventListener('click', onPickerDocClick, true)
 })
 </script>
 
@@ -1728,9 +1785,18 @@ onMounted(function () {
   color: var(--t3);
 }
 /* 选择浮层（复用壳里 .chat-picker-* 类） */
+.chat-picker-anchor {
+  position: static;
+  width: 0;
+  height: 0;
+}
 .cv__pop {
+  /* 定位由 positionPicker() 内联给出（贴触发按钮上方），这里只保证内容可滚动 */
   left: auto;
   right: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .cv__pop-label {
   font-size: 11px;
@@ -1741,6 +1807,8 @@ onMounted(function () {
   text-transform: uppercase;
 }
 .cv__pop-list {
+  flex: 1 1 auto;
+  min-height: 0;
   max-height: 280px;
   overflow-y: auto;
   padding: 0 6px 6px;

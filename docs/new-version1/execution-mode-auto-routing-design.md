@@ -4,7 +4,7 @@
 > 日期：2026-08-11
 > 状态：待评审
 > 前置：`agent-runtime-event-design.md`（M2 执行模式）、`multi-runtime-instance-design.md`（多实例/确定路由 §3-§4）、`concurrency-design.md`（队列/串行槽）、`runtime-admin-two-view-design.md`（Engines/Workers 双视图）
-> 触发背景：测试环境（120.46.90.173）中 VOD Agent 已绑定远端引擎 `opencode@vod-worker1`，但全局执行模式为 `direct`，事件在**服务器本机**执行，vod-worker1 收不到任何任务、无执行日志；反之若全局切 `queue_remote`，绑定本机引擎（credential_id=0）的任务又无人 claim 会卡死。根因是「全局模式开关」与「per-agent 引擎绑定」两套配置脱钩。
+> 触发背景：测试环境（<eip>）中 VOD Agent 已绑定远端引擎 `opencode@vod-worker1`，但全局执行模式为 `direct`，事件在**服务器本机**执行，vod-worker1 收不到任何任务、无执行日志；反之若全局切 `queue_remote`，绑定本机引擎（credential_id=0）的任务又无人 claim 会卡死。根因是「全局模式开关」与「per-agent 引擎绑定」两套配置脱钩。
 
 ---
 
@@ -13,7 +13,7 @@
 ### 0.1 现象
 
 - `mm6667/test1` 的 VOD Agent 会话绑定 `runtime_id=11`（= opencode，宿主 worker `vod-worker1` / credential 8）；
-- 但 VOD 事件（seq 61/63/64/65）全部在 **120.46.90.173 服务器本机**执行：
+- 但 VOD 事件（seq 61/63/64/65）全部在 **<eip> 服务器本机**执行：
   - `event_pipeline.py:432` 走的是 direct 分支（`Pipeline: started agent execution`）；
   - `[Agent:vod] spawning opencode` + `cwd=/opt/grape/data/workspaces/...`（本机文件系统）；
   - `agent_tasks` 表中该仓库无任何 vod 任务行；

@@ -19,6 +19,7 @@ from src.kernel.config import log
 
 import os
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -27,7 +28,33 @@ _VALID = ("mgmt", "runtime", "insight")
 _lock = threading.RLock()
 _local = threading.local()
 _conns: dict[str, Any] = {}          # 仅放域级锁（domain_lock），连接改线程本地
-_forbidden: set[str] = set()
+_forbidden: set[str] = set()         # 永久禁用（配置/鉴权类错误：重试也不会好）
+_retry_after: dict[str, float] = {}  # 临时失败的退避时间点（monotonic 秒）
+_RETRY_BACKOFF_S = 5.0
+#: 缓存连接的存活校验节流：空闲超过该秒数才 ping，避免每次取连接都多一次往返。
+_PING_IDLE_SECONDS = 30.0
+# 连接一次失败就永久禁用整个域，是 2026-11-15 事故的放大器：
+# 本地 runtime MySQL 打满 max_connections（1040）后，mgmt 进程把 runtime 拉黑，
+# 之后所有跨域读（meta / scene_category / skill）静默回落到进程库 → 满屏 1146。
+# 因此只有「重试也不会成功」的错误才进 _forbidden，其余按 5s 退避重试。
+_PERMANENT_ERRNOS = {
+    1044,  # ER_DBACCESS_DENIED_ERROR
+    1045,  # ER_ACCESS_DENIED_ERROR
+    1049,  # ER_BAD_DB_ERROR
+    1142,  # ER_TABLEACCESS_DENIED_ERROR
+    1143,  # ER_COLUMNACCESS_DENIED_ERROR
+    1698,  # ER_ACCESS_DENIED_NO_PASSWORD_ERROR
+    2005,  # ER_UNKNOWN_HOST（域名解析失败属于配置错误）
+}
+
+
+def _is_permanent_connect_error(exc: BaseException) -> bool:
+    args = getattr(exc, "args", ()) or ()
+    if args and isinstance(args[0], int) and args[0] in _PERMANENT_ERRNOS:
+        return True
+    msg = str(exc).lower()
+    return any(s in msg for s in ("access denied", "unknown database",
+                                 "unknown mysql server host", "no such file or directory"))
 
 
 def _thread_conns() -> dict[str, Any]:
@@ -66,7 +93,86 @@ def current_domain() -> str | None:
 
 
 def lib_enabled() -> bool:
-    return os.environ.get("GRAPE_DOMAIN_LIB", "0").strip().lower() in ("1", "true", "yes", "on")
+    """跨域 lib 模式是否启用。
+
+    口径改为「**有 DSN 就算启用**」：三库部署先把 DSN 文件放到约定的 systemd env 路径
+    （GRAPE_3DB_ENV 指向它）并让进程看到 GRAPE_DSN_*，能力就有了，不该再额外要求一个
+    GRAPE_DOMAIN_LIB=1。
+    少一个开关 = 少一个漏配点（这个开关漏配的后果尤其阴险：*_any 全部静默回落到
+    进程主库，三库看起来"照常工作"，直到某个跨域查询撞上 1146）。
+
+    显式置 0 仍然尊重（单库回归/测试要关掉跨域能力时用）。
+    """
+    explicit = os.environ.get("GRAPE_DOMAIN_LIB", "").strip().lower()
+    if explicit in ("0", "false", "no", "off"):
+        return False
+    if explicit in ("1", "true", "yes", "on"):
+        return True
+    # 未显式设置 → 看能力：三个 DSN 里有任意一个就认为处于三库拓扑
+    return any(dsn_of(d) for d in ("mgmt", "runtime", "insight"))
+
+
+# 每个角色归属哪个域 —— 期望库名不写死，而是从该域的 DSN 里取，
+# 这样换部署（库名不同）不用改代码，也不会把内部库名硬编码进公开仓库。
+ROLE_DOMAIN = {
+    "mgmt": "mgmt",
+    "event": "runtime",
+    "worker": "runtime",
+    "insight": "insight",
+}
+
+
+def expected_db_name(role: str) -> str:
+    """本角色应当连的库名：取自该域 DSN 的 path。没有 DSN（单库模式）时返回空串。"""
+    domain = ROLE_DOMAIN.get((role or "").strip().lower())
+    if not domain:
+        return ""
+    dsn = dsn_of(domain)
+    if not dsn:
+        return ""
+    try:
+        return (parse_dsn(dsn).get("database") or "").strip()
+    except Exception:
+        return ""
+
+
+def describe_connection() -> dict:
+    """当前进程实际连的库（给 /health 和启动日志用，一眼看出连错没）。"""
+    return {
+        "host": os.environ.get("DEVOPS_DB_HOST", ""),
+        "port": os.environ.get("DEVOPS_DB_PORT", ""),
+        "name": os.environ.get("DEVOPS_DB_NAME", ""),
+        "domain": current_domain() or "",
+        "domain_lib": lib_enabled(),
+        "own_dsn": sorted(d for d in ("mgmt", "runtime", "insight")
+                          if dsn_of(d) and uses_own_dsn(d)),
+    }
+
+
+def assert_role_database(role: str) -> None:
+    """启动自检：本角色连的库必须是它该连的那个，否则拒绝启动。
+
+    为什么值得 fail-fast：库连错时进程**照常启动、照常返回 200**，
+    只有业务查询查不到数据 —— 表现为「凭据全部 401、引擎全部失联」，
+    症状出现在远端机器上，现场只能靠翻 /proc/<pid>/environ 才看得出，
+    2026-11-15 为此花了几个小时。
+    """
+    expect = expected_db_name(role)
+    if not expect:
+        # 单库模式（没有 DSN）：无从校验，保留原行为
+        return
+    actual = os.environ.get("DEVOPS_DB_NAME", "").strip()
+    if not actual:
+        log.error(f"[db-guard] role={role} 未设置 DEVOPS_DB_NAME，无法确认连的是哪个库 —— 拒绝启动")
+        raise SystemExit(5)
+    if actual != expect:
+        log.error(
+            f"[db-guard] role={role} 连错库：DEVOPS_DB_NAME={actual}，应为 {expect}。"
+            f" 常见原因：unit 缺少 GRAPE_3DB_ENV drop-in（于是 grape-systemd-run.sh 走了单库分支，"
+            f"连回旧的 grape_<domain>_db）。拒绝启动，避免带着错库对外服务。"
+        )
+        raise SystemExit(5)
+    log.info(f"[db-guard] role={role} database={describe_connection()}")
 
 
 def dsn_of(domain: str) -> str:
@@ -96,19 +202,32 @@ class _CompatCursor:
         self._pycur = None
 
     def execute(self, sql: str, params=None):
+        """执行语句并返回**游标自身**（sqlite3 语义，与 MySQLCompatCursor 一致）。
+
+        不能返回 pymysql 的 rowcount(int)：调用点普遍写作
+        `c.execute(sql, params).fetchone()`（三库 lib 模式下域连接走的就是本兼容游标），
+        返回 int 会让分布式锁协议第一步就抛
+        `AttributeError: 'int' object has no attribute 'fetchone'`，
+        进而让 skill sync / feedback reconcile / table maintenance 每轮都失败。
+        需要行数的调用方读 `c.rowcount`（如 runtime public 的 exec_any）。
+        """
         from src.kernel.mysql_compat import translate_sql
 
         sql2 = translate_sql(sql) or sql
         if params is not None and not isinstance(params, (tuple, list, dict)):
             params = (params,)
         if params is None:
-            return self._raw.execute(sql2)
-        return self._raw.execute(sql2, params)
+            self._raw.execute(sql2)
+        else:
+            self._raw.execute(sql2, params)
+        return self
 
     def executemany(self, sql: str, seq):
+        """同 execute：执行后返回游标自身（sqlite3 语义）。"""
         from src.kernel.mysql_compat import translate_sql
 
-        return self._raw.executemany(translate_sql(sql) or sql, seq)
+        self._raw.executemany(translate_sql(sql) or sql, seq)
+        return self
 
     def fetchall(self):
         return self._raw.fetchall()
@@ -160,6 +279,22 @@ def _new_conn(domain: str, autocommit: bool = True):
     return _CompatConn(conn)
 
 
+def _needs_liveness_check(domain: str) -> bool:
+    """该域连接距上次确认存活是否已超过阈值（节流，避免每次多一次往返）。"""
+    seen = getattr(_local, "alive_at", None)
+    if not seen:
+        return True
+    return (time.time() - seen.get(domain, 0.0)) >= _PING_IDLE_SECONDS
+
+
+def _mark_alive(domain: str) -> None:
+    seen = getattr(_local, "alive_at", None)
+    if seen is None:
+        seen = {}
+        _local.alive_at = seen
+    seen[domain] = time.time()
+
+
 def domain_db(domain: str):
     """取该域的连接；不可用时返回 None（调用方必须显式处理）。
 
@@ -171,19 +306,46 @@ def domain_db(domain: str):
     domain = (domain or "").lower()
     if domain not in _VALID:
         raise ValueError(f"unknown domain: {domain}")
-    if domain in _forbidden:
+    if domain in _forbidden:          # 配置/鉴权类错误：重试也不会好，永久停用
+        return None
+    if _retry_after.get(domain, 0.0) > time.monotonic():   # 临时失败按退避重试
         return None
 
     conns = _thread_conns()
+    if domain in conns:
+        # 存活校验：MySQL 会按 wait_timeout 断开空闲连接（或 DB 重启/网络抖动），
+        # 缓存的连接一旦失效，后续所有调用都会抛 InterfaceError(0, '')——
+        # 端点表现为 500（如 /api/chat/submit），且只能重启进程恢复。
+        # 这里按空闲节流 ping(reconnect=True)：断开时 pymysql 自动重连。
+        if _needs_liveness_check(domain):
+            try:
+                conns[domain].ping(reconnect=True)
+                _mark_alive(domain)
+            except Exception as _e:  # noqa: BLE001 - ping 失败即丢弃重建
+                log.debug(f"domain conn {domain} ping failed, reconnecting: {_e}")
+                try:
+                    conns[domain].close()
+                except Exception as _ce:
+                    log.debug(f"close dead domain conn {domain} failed: {_ce}")
+                conns.pop(domain, None)
+
     if domain in conns:
         return conns[domain]
 
     if lib_enabled() and dsn_of(domain):
         try:
             conn = _new_conn(domain)
-        except Exception:  # noqa: BLE001 - 记录禁用，避免每次调用都重试
-            _forbidden.add(domain)
+        except Exception as exc:  # noqa: BLE001
+            if _is_permanent_connect_error(exc):
+                _forbidden.add(domain)
+                log.warning(f"domain '{domain}' 连接不可用（配置/鉴权错误，已停用）：{exc}")
+            else:
+                _retry_after[domain] = time.monotonic() + _RETRY_BACKOFF_S
+                log.warning(
+                    f"domain '{domain}' 连接暂时失败，{_RETRY_BACKOFF_S:.0f}s 后重试：{exc}")
             return None
+        _retry_after.pop(domain, None)
+        _mark_alive(domain)
         conns[domain] = conn
         return conn
 
@@ -341,6 +503,23 @@ def health() -> dict:
     return out
 
 
+def reset_domain(domain: str, close: bool = True) -> None:
+    """丢弃当前线程里该域的缓存连接（断线重连用），不影响其它域。"""
+    dom = (domain or "").lower()
+    conns = _thread_conns()
+    conn = conns.pop(dom, None)
+    if conn is not None and close:
+        try:
+            conn.close()
+        except Exception as _e:
+            log.debug(f"close domain conn {dom} failed: {_e}")
+    _forbidden.discard(dom)          # set：没有 pop(default) 语义，用 discard
+    _retry_after.pop(dom, None)
+    seen = getattr(_local, "alive_at", None)
+    if seen is not None:
+        seen.pop(dom, None)
+
+
 def reset(close: bool = True) -> None:
     """测试/排障用：清缓存（可顺带关闭自建连接）。"""
     conns = _thread_conns()
@@ -351,6 +530,10 @@ def reset(close: bool = True) -> None:
             except Exception as _e:
                 log.debug(f"src/kernel/db_registry.py best-effort skipped: {_e}")
     conns.clear()
+    seen = getattr(_local, "alive_at", None)
+    if seen is not None:
+        seen.clear()
     with _lock:
         _conns.clear()          # 域级锁对象
         _forbidden.clear()
+        _retry_after.clear()

@@ -58,6 +58,7 @@ from src.domains.mgmt.user import db as user_db
 # 渠道安装表 / 用户映射 / 扫码任务都归 mgmt：SQL 只在该域 public 留一份（任意拓扑原语），
 # 本模块不再持外域表语句，也不再借 engine_wiring 的 runtime 库句柄读 mgmt 表。
 from src.domains.mgmt import public as mgmt_public
+from src.domains.runtime import public as _rt
 
 from src.kernel.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
@@ -1374,14 +1375,9 @@ def _chat_selected_engine(cfg: dict, backends: list[dict]) -> dict | None:
                 return b
         try:
             from src.domains.runtime.engine.instances import instance_name
-            from src.kernel.session_manager import db as _db, db_lock as _dl
-            with _dl:
-                c = _db.cursor()
-                c.execute(
-                    "SELECT ar.name, ar.version, rc.device_name, rc.owner_name, ar.credential_id, rc.scope "
-                    "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
-                    "WHERE ar.id=?", (rid,))
-                row = c.fetchone()
+            # agent_runtimes / runtime_credentials 归 runtime：mgmt 进程直查会 1146（被外层 except 吞掉
+            # → 引擎名回显降级成裸 backend 名），走归属域具名查询。
+            row = _rt.read_one_any("chat_engine_by_id", (rid,))
             if row and row[0]:
                 ename, ver, dev, owner, cid, rscope = row
                 cid = cid or 0
@@ -1412,40 +1408,35 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     from src.domains.mgmt.user.db import is_known_engine_name
     from src.kernel.session_manager import db, db_lock
     backends = []
-    with db_lock:
-        c = db.cursor()
-        # 本机直连引擎（credential_id=0，已知类型且已装且健康——与执行 resolve_local_engine 口径一致，
-        # local-direct-health-probe-design.md 方案 C，避免"页面有、执行无"）
-        # host_name 进列表：多主控机同名直连引擎都展示（名称标注归属机，区分显示）
-        try:
-            c.execute("SELECT id, name, version, COALESCE(host_name,'') FROM agent_runtimes WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id")
-            for r in c.fetchall():
-                _rid, ename, ver, _hn = r
-                if not is_known_engine_name(ename or ""):
-                    continue
-                _label = f"{ename} v{ver or ''}"
-                if _hn:
-                    # 主控机短名（ecs-grape-master-001 → master-001）便于前端区分双主
-                    _short = _hn.replace("ecs-grape-", "")
-                    _label += f"（{_short} 直连）"
-                else:
-                    _label += "（本机直连）"
-                backends.append({"name": ename, "display_name": _label, "scope": "local", "owner": _hn, "runtime_id": _rid})
-        except Exception:
-            pass
-        # 个人引擎（scope=user，仅当前用户 + active）
-        try:
-            c.execute("""
-                SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id
-                FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id
-                WHERE rc.scope = 'user' AND rc.status='active' AND rc.owner_name = ?
-            """, (user["username"],))
-            for r in c.fetchall():
-                _rid, ename, ver, dev, owner, cid = r
-                ins = instance_name(ename, dev or "", cid or 0)
-                backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}", "scope": "user", "owner": owner or "", "runtime_id": _rid})
-        except Exception:
-            pass
+    # agent_runtimes / runtime_credentials 归 runtime：必须走归属域具名查询。
+    # 原先用进程库游标直查，在 mgmt 进程里 1146 并被 except 吞掉 —— 表现就是
+    # 「点引擎配置/技能配置没反应」（浮层里一直「执行引擎加载中...」）。
+    # 本机直连引擎（credential_id=0，已知类型且已装且健康——与 resolve_local_engine 口径一致）
+    try:
+        for r in _rt.read_all_any("chat_local_engines"):
+            _rid, ename, ver, _hn = r
+            if not is_known_engine_name(ename or ""):
+                continue
+            _label = f"{ename} v{ver or ''}"
+            if _hn:
+                # 主控机短名（ecs-grape-master-001 → master-001）便于前端区分双主
+                _short = _hn.replace("ecs-grape-", "")
+                _label += f"（{_short} 直连）"
+            else:
+                _label += "（本机直连）"
+            backends.append({"name": ename, "display_name": _label, "scope": "local",
+                             "owner": _hn, "runtime_id": _rid})
+    except Exception as _e:  # noqa: BLE001 - 取数失败不阻断配置接口，但必须留痕
+        log.warning(f"chat config: local engines unavailable: {_e}")
+    # 个人引擎（scope=user，仅当前用户 + active）
+    try:
+        for r in _rt.read_all_any("chat_user_engines", (user["username"],)):
+            _rid, ename, ver, dev, owner, cid = r
+            ins = instance_name(ename, dev or "", cid or 0)
+            backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}",
+                             "scope": "user", "owner": owner or "", "runtime_id": _rid})
+    except Exception as _e:  # noqa: BLE001
+        log.warning(f"chat config: user engines unavailable: {_e}")
     # Load chat skills from skill table（官方 + 个人 + 当前仓库，agent_type='chat'）
     chat_skills = []
     from src.kernel.repo_key import to_repo_key
@@ -1454,22 +1445,25 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     if repo:
         from src.kernel.repo_key import repo_key_candidates
         _rk_candidates = repo_key_candidates(repo)
-    with db_lock:
-        c = db.cursor()
-        try:
-            if _rk_candidates:
-                c.execute(
-                    "SELECT skill_name, display_name, description, skill_path, scope FROM skill WHERE is_active=1 AND agent_type='chat' AND (scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id IN ({}))) ORDER BY scope, skill_name".format(",".join("?" * len(_rk_candidates))),
-                    [str(user["id"])] + _rk_candidates
-                )
+    # skill 表同样归 runtime：一次取全部 chat 技能，再按 scope 在内存里过滤
+    # （原先把 scope 过滤写进 SQL，跨库执行不了；chat 技能量级很小，内存过滤等价）。
+    try:
+        _uid = str(user["id"])
+        for r in _rt.read_all_any("chat_skills_all"):
+            _sk, _dn, _desc, _path, _scope, _owner = r
+            _scope = _scope or ""
+            if _scope == "official":
+                pass
+            elif _scope == "user" and str(_owner) == _uid:
+                pass
+            elif _scope == "repo" and _rk_candidates and str(_owner) in _rk_candidates:
+                pass
             else:
-                c.execute(
-                    "SELECT skill_name, display_name, description, skill_path, scope FROM skill WHERE is_active=1 AND agent_type='chat' AND (scope='official' OR (scope='user' AND owner_id=?)) ORDER BY scope, skill_name",
-                    (str(user["id"]),)
-                )
-            chat_skills = [{"name": r[0], "display_name": r[1] or r[0], "description": r[2], "skill_path": r[3] or r[0], "scope": r[4] or ""} for r in c.fetchall()]
-        except Exception:
-            pass
+                continue
+            chat_skills.append({"name": _sk, "display_name": _dn or _sk, "description": _desc,
+                                "skill_path": _path or _sk, "scope": _scope})
+    except Exception as _e:  # noqa: BLE001
+        log.warning(f"chat config: skills unavailable: {_e}")
 
     # A2 收尾：凭证状态改读 grape_t_channel_installation（legacy im_* 三列不再是真相源）
     # 按渠道分别回显：每个渠道取**该用户自己的**最新一条可用安装（active/disabled），
@@ -1504,11 +1498,9 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     skill_scope = cfg.get("skill_scope", "")
     if not skill_scope and cfg.get("skill_id"):
         try:
-            with db_lock:
-                c = db.cursor()
-                row = c.execute("SELECT scope FROM skill WHERE id=? AND is_active=1", (cfg["skill_id"],)).fetchone()
-                skill_scope = row[0] if row else ""
-        except Exception:
+            row = _rt.read_one_any("chat_skill_scope_by_id", (cfg["skill_id"],))
+            skill_scope = row[0] if row else ""
+        except Exception:  # noqa: BLE001 - 回显失败不影响配置返回
             pass
 
     backends = _chat_dedupe_backends(backends)
@@ -1601,19 +1593,17 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str,
                 # 原代码 WHERE gitcode_user=? 用注册名扫列，存量 um 行可能存注册名也可能存平台真 login
                 # 用 OR github_login=? 会误清同名 GitHub 用户；用 user_id 精确匹配无歧义
                 mgmt_public.clear_user_mapping_feishu_any(user_id=str(user_id), updated_at=_now)
-        # 以下三条是 runtime 自有表：仍用进程库游标 + 末尾一次 commit（本域事务语义不变）。
-        # 跨域写入已在上/下方按归属域各自提交——三库拓扑下跨域原子本就不可得，解绑清理是
-        # best-effort，任一步失败只记 warning，不牵连其余步骤。
-        with _db_lock:
-            c = _db.cursor()
-            c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
-            # 解绑干净：该 bot 名下的群绑定（repo_im_group_binding）一并清空，避免残留脏数据
-            # 导致后续 resolve_repo 仍命中旧仓库（chat-config-duplicate-row-unbind-fix-design.md）
-            c.execute("DELETE FROM repo_im_group_binding WHERE im_app_id=?", (old_app_id,))
-            # 解绑干净：消息去重缓存一并清，避免该 app 的历史数据残留
-            #（bot_seen_messages=去重 ID；feishu_onboard_task 含 app_secret/qr_url 敏感信息，飞书专属）
-            c.execute("DELETE FROM bot_seen_messages WHERE app_id=?", (old_app_id,))
-            _db.commit()
+        # 以下三张表都归 runtime：走归属域具名查询（由 lib 自己选对连接）。
+        # 原先用进程库游标，只在 runtime 进程里成立；mgmt 进程执行到此处会 1146，
+        # 解绑清理静默失败留下脏绑定。跨库无法原子，逐步 best-effort。
+
+        _rt.exec_any("conversation_delete_by_im", (old_app_id,))
+        # 解绑干净：该 bot 名下的群绑定（repo_im_group_binding）一并清空，避免残留脏数据
+        # 导致后续 resolve_repo 仍命中旧仓库（chat-config-duplicate-row-unbind-fix-design.md）
+        _rt.exec_any("repo_im_delete_by_app", (old_app_id,))
+        # 解绑干净：消息去重缓存一并清，避免该 app 的历史数据残留
+        #（bot_seen_messages=去重 ID；feishu_onboard_task 含 app_secret/qr_url 敏感信息，飞书专属）
+        _rt.exec_any("bot_seen_delete_by_app", (old_app_id,))
         _ot_via_lib = False
         if is_feishu and _mg_ct is not None:
             try:
@@ -1706,11 +1696,8 @@ async def update_chat_config(body: dict, request: Request,
 
         if old_app_id and old_app_id != app_id:
             # 更换 app_id：清旧渠道会话（安装行由下方 sync/revoke 处理，不再动 legacy 表）
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                c = db.cursor()
-                c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
-                db.commit()
+            # chat_conversations 归 runtime：走归属域具名查询（mgmt 进程直删会 1146）
+            _rt.exec_any("conversation_delete_by_im", (old_app_id,))
             log.info(f"Chat IM: replaced old app_id={_safe_im_app_ref(old_app_id, old_channel)} "
                      f"with new app_id={_safe_im_app_ref(app_id, provider)}")
         log.info(f"Chat IM: saved im config for user={user['id']} provider={provider} "
@@ -1760,18 +1747,14 @@ async def update_chat_config(body: dict, request: Request,
         skill_scope = body.get("skill_scope", "")
         skill_id = 0
         if skill_name:
-            from src.kernel.session_manager import db as _db, db_lock as _db_lock
             def _find_skill(scope, owner_id=""):
-                """精确按 scope(+owner) 查 skill_id，不走 official 优先"""
-                with _db_lock:
-                    c = _db.cursor()
-                    if owner_id:
-                        row = c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND owner_id=? AND is_active=1 LIMIT 1",
-                                        (skill_name, scope, owner_id)).fetchone()
-                    else:
-                        row = c.execute("SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1",
-                                        (skill_name, scope)).fetchone()
-                    return row[0] if row else 0
+                """精确按 scope(+owner) 查 skill_id，不走 official 优先（skill 归 runtime，走具名查询）"""
+                if owner_id:
+                    row = _rt.read_one_any("chat_skill_id_scope_owner",
+                                           (skill_name, scope, owner_id))
+                else:
+                    row = _rt.read_one_any("chat_skill_id_scope", (skill_name, scope))
+                return row[0] if row else 0
 
             if skill_scope == "repo" and repo:
                 from src.kernel.repo_key import to_repo_key
@@ -2108,6 +2091,11 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                         except Exception as _de:
                             log.warning(f"[Chat submit] DB save failed: {_de}")
                 elif not is_task_recalled(chat_task_id):
+                    # 空输出必须留诊断线索：否则线上只能看到「（无返回内容）」，
+                    # 分不清是引擎没吐字、session 失效还是 401（2026-11-15 Issue #81/#82 复现）。
+                    log.warning(
+                        f"[Chat submit] empty final text task_id={chat_task_id} conv={conv_id} "
+                        f"repo={repo_key} detail={(_ctm_error_detail or '(no engine detail)')[:300]}")
                     try:
                         add_message(conv_id, "agent", "（无返回内容）",
                                     task_id=chat_task_id, generate_status=3)
@@ -2225,7 +2213,6 @@ async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session
     # 内存无任务 → 可能是跨机器 submit，DB 有 user 消息但 agent 还在执行
     # 轮询 DB 等待 agent 回复（总超时 = CHAT_STREAM_TIMEOUT，可配置，Issue #399），而不是立刻报「查询已中断」
     if not q:
-        from src.kernel.session_manager import db as _msg_db, db_lock as _msg_lock
         from src.kernel.config import get_chat_stream_timeout, CHAT_STREAM_HEARTBEAT_INTERVAL as _hb_interval
 
         async def _poll_db_stream():
@@ -2237,26 +2224,31 @@ async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session
             deadline = _t.time() + timeout_s
             last_heartbeat = _t.time()
             while _t.time() < deadline:
-                with _msg_lock:
-                    c = _msg_db.cursor()
-                    c.execute("SELECT role, generate_status, content, conversation_id FROM chat_messages WHERE task_id=? ORDER BY id", (task_id,))
-                    rows = c.fetchall()
+                # chat_messages 归 runtime：mgmt 进程的 session_manager.db 里没有这张表
+                # （直查会 1146 → SSE 500 → 前端只显示「（无返回内容）」）。
+                # 走 runtime public 的具名查询，由 lib 自己选对连接（自有 DSN / 进程库）。
+                try:
+                    rows = [r for r in _rt.read_all_any("messages_by_task", (task_id,))]
+                except Exception as _e:  # noqa: BLE001 - 兜底查询失败按「暂无消息」继续轮询
+                    log.debug(f"chat stream db poll failed: {_e}")
+                    rows = []
                 if not rows:
                     # 连 user 消息都没有 → 任务不存在
                     yield f"data: {json.dumps({'type': 'error', 'text': '任务不存在', 'task_id': task_id})}\n\n"
                     return
-                has_agent = any(r[0] == "agent" for r in rows)
+                # 列序（messages_by_task）：0=id 1=role 2=generate_status 3=content 4=conversation_id
+                has_agent = any(r[1] == "agent" for r in rows)
                 if has_agent:
                     for r in rows:
-                        if r[0] == "agent":
-                            content = r[2] or ""
-                            conv_id = r[3] or ""
-                            gen_status = r[1]
+                        if r[1] == "agent":
+                            content = r[3] or ""
+                            conv_id = r[4] or ""
+                            gen_status = r[2]
                             evt_type = "done" if gen_status == 2 else "error"
                             yield f"data: {json.dumps({'type': evt_type, 'text': content, 'conversation_id': conv_id, 'task_id': task_id})}\n\n"
                             return
                 # 有 user 无 agent → agent 仍在执行（可能在另一台机器），继续等
-                conv_id = rows[0][3] if rows else ""
+                conv_id = rows[0][4] if rows else ""
                 # 等待期间周期性推送「思考中」心跳（Issue #399）
                 if _t.time() - last_heartbeat >= _hb_interval:
                     yield f"data: {json.dumps({'type': '思考中', 'text': '仍在处理，请稍候…'})}\n\n"
@@ -2668,20 +2660,23 @@ def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token
             }
 
     # 3. DB 兜底（chat_messages 表 by task_id）
-    from src.kernel.session_manager import db as _msg_db, db_lock as _msg_lock
-    with _msg_lock:
-        c = _msg_db.cursor()
-        c.execute("SELECT role, generate_status, content, conversation_id FROM chat_messages WHERE task_id=? ORDER BY id", (task_id,))
-        rows = c.fetchall()
-    has_user = any(r[0] == "user" for r in rows)
-    has_assistant = any(r[0] == "agent" for r in rows)
+    # chat_messages 归 runtime：mgmt 进程里没有这张表，直查 session_manager.db 会
+    # 1146 → /status 500 → 前端拿不到结果，只显示「（无返回内容）」。
+    # 统一走 runtime public 具名查询（列序：id, role, generate_status, content, conversation_id）。
+    try:
+        rows = [tuple(r) for r in _rt.read_all_any("messages_by_task", (task_id,))]
+    except Exception as _e:  # noqa: BLE001 - 取数失败降级为 not_found，不把 500 抛给前端
+        log.warning(f"chat task status db fallback failed ({task_id}): {_e}")
+        rows = []
+    has_user = any(r[1] == "user" for r in rows)
+    has_assistant = any(r[1] == "agent" for r in rows)
     if has_assistant:
         # assistant 消息已写入 → 任务已完成
         for r in rows:
-            if r[0] == "agent":
-                gen_status = r[1]
-                content = r[2] or ""
-                conv_id = r[3] or ""
+            if r[1] == "agent":
+                gen_status = r[2]
+                content = r[3] or ""
+                conv_id = r[4] or ""
                 status = "done" if gen_status == 2 else "error"
                 return {"task_id": task_id, "status": status, "result": content,
                         "text": content,

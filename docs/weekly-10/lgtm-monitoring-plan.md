@@ -6,7 +6,7 @@
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| LGTM 栈 | ✅ 已就绪 | build-004（192.168.0.39）上 Prometheus 9090 / Loki 3100 / Tempo 3200 / Grafana 3000 全部存活，从 dev 各节点可达（0007 实测 curl 全通） |
+| LGTM 栈 | ✅ 已就绪 | build-004（<lan-ip>）上 Prometheus 9090 / Loki 3100 / Tempo 3200 / Grafana 3000 全部存活，从 dev 各节点可达（0007 实测 curl 全通） |
 | Grafana 数据源 | ✅ 已预配 | lgtm.yaml 已含 Loki↔Tempo 关联（TraceID 自动跳转）；Prometheus 默认源 |
 | Prometheus 抓取 | ⚠️ 只抓自身 | 5 个 job 全是 LGTM 自身（prometheus/grafana/loki/tempo 自监控） |
 | **grape 侧埋点** | ✅ **代码已全部就绪，只差开关** | `src/observability/` 自带完整 Prometheus registry：HTTP 请求量/时延/in-flight、后台循环健康（runs/failures/consecutive）、MySQL SHOW STATUS（连接数/线程/中止连接）、业务采样（任务 queued/running/stuck、引擎 online 数）——设 `METRICS_ADDR` 即启用，scrape 时触发 DB 采样 |
@@ -52,11 +52,11 @@ METRICS_ADDR=0.0.0.0:9101
 ```yaml
   - job_name: grape-dev-masters
     static_configs:
-      - targets: ['192.168.0.242:9101', '192.168.1.229:9101']
+      - targets: ['<lan-ip>:9101', '<lan-ip>:9101']
         labels: {env: dev, role: master, host: '0007'}
-      - targets: ['192.168.1.229:9101']
+      - targets: ['<lan-ip>:9101']
         labels: {env: dev, role: master, host: '0001'}
-  - job_name: grape-dev-mysql  # 若后续加 mysqld_exporter（DB 在 192.168.0.59）
+  - job_name: grape-dev-mysql  # 若后续加 mysqld_exporter（DB 在 <lan-ip>）
     static_configs:
       - targets: ['<待定:9104>']
 ```
@@ -64,14 +64,14 @@ METRICS_ADDR=0.0.0.0:9101
 
 ### 2.3 日志接 Loki（二选一）
 
-- **选法 A（推荐，改动小）：promtail 部署到两台主控**（0007/0001），tail `data/logs/devops-bot.log`，push 到 `192.168.0.39:3100`。标签：`job=grape-dev, host=<n>, component`（JSON 已带 component 字段，用 json stage 解析提取 level/component/repo_key）
+- **选法 A（推荐，改动小）：promtail 部署到两台主控**（0007/0001），tail `data/logs/devops-bot.log`，push 到 `<lan-ip>:3100`。标签：`job=grape-dev, host=<n>, component`（JSON 已带 component 字段，用 json stage 解析提取 level/component/repo_key）
 - 选法 B：Loki 直接 `scrape_config` 拉 promtail 的 static 模式（少装两个组件但网络反向依赖，不推荐）
 
 promtail 最小配置（每台主控 `/opt/promtail/promtail-config.yaml`）：
 ```yaml
 server: {http_listen_port: 9080}
 positions: {filename: /data/promtail/positions.yaml}
-clients: [{url: http://192.168.0.39:3100/loki/api/v1/push}]
+clients: [{url: http://<lan-ip>:3100/loki/api/v1/push}]
 scrape_configs:
   - job_name: grape-dev
     static_configs:
@@ -96,7 +96,7 @@ scrape_configs:
 | 项 | 做法 | 收益 |
 |---|---|---|
 | node_exporter | 0001-0007 各装一个（二进制 0 依赖），Prometheus 加 job | 磁盘（**生产 181 磁盘 90% 的教训**）/CPU/内存告警面 |
-| mysqld_exporter | DB 侧 192.168.0.59 部署 | InnoDB/慢查询/复制等 DB 深度指标 |
+| mysqld_exporter | DB 侧 <lan-ip> 部署 | InnoDB/慢查询/复制等 DB 深度指标 |
 | worker 心跳指标 | worker 心跳数据已在 agent_runtimes 表（BusinessSampler 已出 online 数）；如需 per-engine 明细，后续加独立 exporter | 引擎健康分可视化 |
 | 告警规则 | Prometheus rule_files：stuck>0、runtime_online 骤降、obs_loop consecutive_failures>3、DB 连接>80% | 把这次测试发现的「静默故障」类问题兜住 |
 | Tempo/OTel | grape trace.py 已有确定性 trace_id（tr_<sha1>），如果日志里带 trace_id 可直接命中 Grafana 的 TraceID 跳转；全链路 OTel 属大改，暂缓 | 日志↔追踪互跳 |
@@ -113,7 +113,7 @@ scrape_configs:
 
 ## 5. 验证口径
 
-1. `curl 192.168.0.242:9101/metrics | grep grape_` → 看到 http/obs_loop/sampler/db 指标族
+1. `curl <lan-ip>:9101/metrics | grep grape_` → 看到 http/obs_loop/sampler/db 指标族
 2. Prometheus targets 页两个 master 的 `grape-dev-masters` job = UP
 3. Grafana Explore → Loki：`{job="grape-dev"} | json | level=WARNING` 实时出日志
 4. 人为触发一次告警条件（如停 A 进程 30s）→ obs_loop consecutive_failures 上升被看板捕获

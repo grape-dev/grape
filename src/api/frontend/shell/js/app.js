@@ -278,10 +278,42 @@ const app = (() => {
 
   // 深链仓库就绪后再走原有「hash → 视图」恢复逻辑（顺序不能反：先有仓库才能开详情页）
   // 只有仓库、没有 hash（/app/owner/repo/）：直接进该仓库工作台，而不是弹仓库选择大堂
+
+  // Vue 视图 chunk 是 ES module（defer 执行），hash 路由可能在模块注册 window.renderXxx
+  // 之前就跑到这里 → 直接调用会抛 "renderXxx is not a function"，容器停在「加载中」。
+  // 这里做有界重试（最多 ~4s），既修掉竞态，也不会把真正的加载失败伪装成永久 loading。
+  function _ensureViewFn(name, cb, tries) {
+    tries = tries || 0
+    if (typeof window[name] === 'function') { cb(); return; }
+    if (tries >= 40) {
+      const pc = document.getElementById('pageContent');
+      if (pc) pc.innerHTML = '<div class="error">' + (I18N.t('common.load_failed') || '加载失败') +
+        '（' + name + '）</div>';
+      return;
+    }
+    setTimeout(function () { _ensureViewFn(name, cb, tries + 1); }, 100);
+  }
+
   function _bootRestore() {
+    var _ctx0 = _appPathCtx();
     _applyAppPathRepo().then(function (hit) {
       const h = window.location.hash || '';
       if (hit && h.length <= 1) { nav('dash'); return; }
+      // 深链指名了仓库却没命中：多半是 boot 早于 token 落地 / 接口抖动（曾表现为
+      // 「登录后第一次进 /app/owner/repo 掉回引导页，刷新一次才好」）。再试一次，
+      // 仍失败才交给 _restoreNavAfterLogin —— 那里不会再用「未绑定」去夺路径。
+      if (_ctx0 && !hit && !currentRepo()) {
+        setTimeout(function () {
+          _applyAppPathRepo().then(function (hit2) {
+            if (hit2) {
+              const h2 = window.location.hash || '';
+              if (h2.length <= 1) { nav('dash'); return; }
+            }
+            _restoreNavAfterLogin();
+          });
+        }, 400);
+        return;
+      }
       _restoreNavAfterLogin();
     });
   }
@@ -413,6 +445,10 @@ function loadAgentTypes() {
   // 注：Vue 线未搬 _appVcsCatalog 目录（旧壳的 _appLoadVcsCatalog 已随页面删除），
   // 因此目录恒为 null → 本函数当前等价于「bindings 非空」；保留它为了语义与
   // arch-weekly-11 同源，将来恢复目录即自动生效（arch 合并 d2787875）。
+  // 绑定态是否已经「确知」：/auth/profile 成功返回后才置 true。
+  // 未确知时绝不能按「未绑定」把带深链仓库的用户轰去引导页（那会把 /app/owner/repo/ 路径也改掉）。
+  var _profileLoadedOk = false;
+
   function _hasVcsBinding() {
     var _u = {};
     try { _u = JSON.parse(localStorage.getItem('user') || '{}'); } catch (e) {}
@@ -451,21 +487,24 @@ function loadAgentTypes() {
       const parts = hash.substring(1).split('/');
       const view = parts[0];
       const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
-      if (!_hasVcsBinding() && !currentRepo()) {
+      if (!_hasVcsBinding() && !currentRepo() && !_appPathCtx() && _profileLoadedOk) {
         goToRepos();
       } else if (noRepoViews.includes(view) || currentRepo()) {
         nav(view, param);
       } else {
         nav('dash');
       }
+    } else if (_appPathCtx() && !currentRepo()) {
+      // 深链仓库没解析出来（同上）：保留 URL，落在 dashboard，刷新/重登后可恢复
+      nav('dash');
     } else if (bindings.length > 0) {
       // 有仓库平台绑定无 hash → 加载仓库列表（纯登录渠道绑定 → loadRepos 内转引导页）
       loadRepos();
     } else if (currentRepo()) {
       // 无绑定但有当前仓库 → dashboard
       nav('dash');
-    } else if (!_hasVcsBinding()) {
-      // 无仓库平台绑定 → 引导页（用户裁定 2026-11-09）
+    } else if (!_hasVcsBinding() && _profileLoadedOk) {
+      // 无仓库平台绑定 → 引导页（用户裁定 2026-11-09）；绑定态未知时不跳，避免误判
       goToRepos();
     } else {
       // 有绑定且无 hash/仓库/引导需求 → 停留当前视图（显式空分支：语义=无需路由）
@@ -492,6 +531,7 @@ function loadAgentTypes() {
       var _tbAvatar = $('tbUserAvatar'); if (_tbAvatar) _tbAvatar.textContent = (displayName || 'U')[0].toUpperCase();
       var _tbName = $('tbUserName'); if (_tbName) _tbName.textContent = displayName;
       localStorage.setItem('user', JSON.stringify(d));
+      _profileLoadedOk = true;
       // 如果当前在仓库选择页，更新 Welcome 消息
       const welcomeEl = document.getElementById('welcomeUser');
       if (welcomeEl) welcomeEl.textContent = displayName;
@@ -2008,36 +2048,39 @@ function loadAgentTypes() {
       if (typeof resumeConvTask === 'function') setTimeout(resumeConvTask, 500);
     } else if (view === 'chat') {
       title.textContent = I18N.t('app.current_project');
-      renderChat(param || null);
+      _ensureViewFn('renderChat', function () {
+        if (window._currentView !== 'chat') return;   // 等待期间已切走 → 不覆盖新视图
+        renderChat(param || null);
+      });
       // 切换回 Chat 页面时恢复活跃查询（不中断）
       if (typeof resumeChatTask === 'function') setTimeout(resumeChatTask, 500);
     } else if (view === 'im-channel') {
       title.textContent = I18N.t('app.nav.im_channel');
-      renderImChannel();
+      _ensureViewFn('renderImChannel', function () { renderImChannel(); });
     } else if (view === 'tasks') {
       title.textContent = I18N.t('app.current_project');
       // Issue #341: #tasks/<issue号> 深链——把 hash 中的编号透传给需求中心，
       // 纯数字 param 由 renderTasks 解析为待打开详情的 issue_number
-      renderTasks(param);
+      _ensureViewFn('renderTasks', function () { renderTasks(param); });
     } else if (view === 'settings') {
       title.textContent = I18N.t('app.current_project');
-      renderSettings(param || 'gitcode');
+      _ensureViewFn('renderSettings', function () { renderSettings(param || 'gitcode'); });
     } else if (view === 'account') {
       title.textContent = I18N.t('app.account.center_title');
       // R13.2: 用户设置页不展示仓库信息——清空顶栏仓库名
       repoTitle.textContent = '';
       // 用户设置：只隐藏侧边栏，保留顶栏，mainView 保持正常布局
       var _accSb = $('sidebar'); if (_accSb) _accSb.style.display = 'none';
-      renderAccount(param || 'profile');
+      _ensureViewFn('renderAccount', function () { renderAccount(param || 'profile'); });
     } else if (view === 'organizations') {
       title.textContent = I18N.t('app.nav.organizations') || '组织管理';
       repoTitle.textContent = '';
       // 组织管理页面隐藏左侧菜单，全屏展示
       var _orgSb = $('sidebar'); if (_orgSb) _orgSb.style.display = 'none';
-      renderOrganizations();
+      _ensureViewFn('renderOrganizations', function () { renderOrganizations(); });
     } else if (view === 'my-feedback') {
       title.textContent = '我的反馈';
-      renderMyFeedback();
+      _ensureViewFn('renderMyFeedback', function () { renderMyFeedback(); });
     } else if (view === 'my-feedback-detail') {
       title.textContent = '反馈详情';
       renderMyFeedbackDetail(param);

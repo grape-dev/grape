@@ -13,7 +13,7 @@ worker (0002-0005, 生产含外部 worker)
    │  @router.post("/runtime/traces") + _require_credential 鉴权
    │  httpx 透传 body → OTLP_RELAY_TARGET/v1/traces
    ▼
-LGTM 机器 OTLP/HTTP :4318                                   ← dev=192.168.0.39:4318；生产=额外那台，仅主控可达
+LGTM 机器 OTLP/HTTP :4318                                   ← dev=<lan-ip>:4318；生产=额外那台，仅主控可达
 ```
 
 worker 侧零新网络路径、零新增机器地址知识（从 `RUNTIME_SERVER_URL` 推导）；LGTM 机器只对主控开放。
@@ -24,7 +24,7 @@ worker 侧零新网络路径、零新增机器地址知识（从 `RUNTIME_SERVER
 
 ```python
 # ===== MR-2b（2026-11-05）：worker trace 中继（LGTM 不对 worker 开放，经主控转发）=====
-OTLP_RELAY_TARGET = os.environ.get("OTLP_RELAY_TARGET", "").strip()   # 例: http://192.168.0.39:4318
+OTLP_RELAY_TARGET = os.environ.get("OTLP_RELAY_TARGET", "").strip()   # 例: http://<lan-ip>:4318
 
 _relay_total = Counter("grape_trace_relay_requests_total", "Trace relay requests forwarded", ["status"], registry=registry)
 
@@ -65,7 +65,7 @@ async def runtime_traces_relay(request: Request, credential_id: int = Depends(_r
 
 ```ini
 # MR-2b：worker trace 中继目标（LGTM OTLP/HTTP，仅主控可达）
-OTLP_RELAY_TARGET=http://192.168.0.39:4318
+OTLP_RELAY_TARGET=http://<lan-ip>:4318
 ```
 
 （生产：指向那台额外机器的内网 IP:4318）

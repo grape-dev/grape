@@ -1498,4 +1498,4 @@ def create_user(username: str, password: str, created_by: int = 0) -> dict | Non
 
 ---
 
-> 本方案基于 Multica `server/` 目录的实际代码和 Grape `/home/grape/grape-new-version2`（分支 multitask）的实际架构编写。所有引用的表名、字段名、API 路径均来自实际代码。
+> 本方案基于 Multica `server/` 目录的实际代码和 Grape `<deploy-root>/grape-new-version2`（分支 multitask）的实际架构编写。所有引用的表名、字段名、API 路径均来自实际代码。

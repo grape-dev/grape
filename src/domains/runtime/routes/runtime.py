@@ -5,7 +5,7 @@ M3：/api/runtime/* 协议端点（register/heartbeat/claim/report），仅 rta_
 见 agent-runtime-event-full-design.md §6 / tech-impl.md §3。
 """
 
-import hashlib, json, os, threading
+import asyncio, contextlib, hashlib, json, os, threading
 
 from datetime import datetime, timedelta, timezone
 
@@ -32,6 +32,33 @@ from src.domains.runtime.engine.health import apply_runtime_state, parse_dt  # I
 # 环境故障长期不恢复）后心跳降级 healthy=0 并在 probe_error 附修复指引；
 # ok/fail/model_unreachable 清零（进程能 spawn 即链断）。env 可调。
 _PROBE_SPAWN_FAIL_TRIP = max(1, int(os.environ.get("RUNTIME_PROBE_SPAWN_FAIL_TRIP", "50")))
+
+from src.kernel import db_registry as _dbreg
+
+
+@contextlib.contextmanager
+def _runtime_cursor():
+    """runtime 域独立连接（三库拓扑）；单库/测试拓扑回落进程主库 + db_lock。
+
+    agent 的高频端点（心跳、标签、认领）不能挂在进程级 db_lock 上：sweeper 持锁做
+    整表扫描时，这些请求全部排队到客户端 sock_read 超时，表现为「引擎经常失联」
+    （心跳连续失败三次即 offline），而不是“服务变慢”。实测 2026-11-15：
+    远端两个凭据下的四个引擎心跳长期停在 137s（实测）。
+    """
+    if _dbreg.uses_own_dsn("runtime"):
+        # 必须是**独立连接**：db_registry.cursor() 在同域时复用 session_manager.db
+        # 这个进程主连接，等于仍然和持锁代码抢同一个 socket，改造形同虚设。
+        conn = _dbreg.new_connection("runtime", autocommit=True)
+        try:
+            yield conn.cursor()
+        finally:
+            try:
+                conn.close()
+            except Exception as _ce:
+                log.debug(f"runtime 独立连接关闭失败: {_ce}")
+        return
+    with db_lock:
+        yield db.cursor()
 
 def _register_healthy_guard(c, rid: int, reported: bool) -> int:
     """Issue #700：register 降级守卫——已 healthy 且探活新鲜的行不被瞬时探测打回 0。
@@ -479,7 +506,18 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
     return {"runtimes": registered, "server_url": _server_url(), "probe_url": probe_url}
 
 @router.post("/heartbeat")
-def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int = Depends(_require_credential)):
+async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int = Depends(_require_credential)):
+    """心跳入口（async 包装）。
+
+    心跳必须走 async：uvicorn 把 sync 端点放进 anyio 线程池，而 messages 批量上报、
+    recover-orphans 这类长请求会把 40 个槽位吃满，心跳只能排队到客户端 40s 超时 ——
+    实测 116 侧连续三次 TimeoutError(40s) 之后突然 0.05s，正是池子被长请求占住的波形。
+    真正的 DB 写入交给线程池，既不阻塞事件循环，也不占请求线程池的槽。
+    """
+    return await asyncio.to_thread(_heartbeat_impl, body, request, credential_id)
+
+
+def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
     """更新 runtime 在线态 / last_seen_at。
 
     归属校验：只允许更新当前凭据名下的 runtime（credential_id 匹配），
@@ -492,8 +530,7 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
     now = datetime.now(timezone.utc).isoformat()
     client_ip = _client_ip(request)
     cancelled_tasks = []
-    with db_lock:
-        c = db.cursor()
+    with _runtime_cursor() as c:
         # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
         if body.spec:
             c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?, spec=? WHERE id=?",
@@ -645,7 +682,10 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                                   (_actual, _rid))
             except Exception as _bre:
                 log.warning(f"heartbeat busy_slots reconcile failed: {_bre}")
-        db.commit()
+        try:
+            c.connection.commit()
+        except Exception:
+            db.commit()
 
     # 写入 worker 上报的日志到 data/logs/workers/{credential_id}.log
     if body.log_lines:
@@ -844,24 +884,45 @@ def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
     return {"task": task, "scan_request": scan_request}
 
 @router.get("/runtimes/{runtime_id}/tags")
-def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_require_credential)):
+async def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_require_credential)):
+    """claim 前必经的标签查询：同样不能占 anyio 线程池槽（否则被长请求挤到超时）。"""
+    return await asyncio.to_thread(_get_tags_impl, runtime_id, credential_id)
+
+
+def _get_tags_impl(runtime_id: int, credential_id: int):
     """Return this engine's claimable tags from DB (worker polls this instead of ENGINE_TAGS env).
 
     Tags are managed by users via the console (settings.py CRUD endpoints).
     Workers call this endpoint to get their current tag list, enabling real-time
     tag updates without restart.
     """
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        try:
+    from src.kernel import db_registry as _dbreg
+    # 这条端点是 agent 每次 claim 前的必经之路，不能和进程内长查询抢同一把 db_lock：
+    # sweeper / recover-orphans 持锁做批量扫描时，/tags、心跳、/messages 会一起排队到
+    # socket 超时（实测表现为「engine probe ok 但 claim 一直超时、任务永远 queued」）。
+    # 三库拓扑走 runtime 域独立连接；单库/测试拓扑没有分域 DSN，回落进程主库 + db_lock。
+    tags = []
+    try:
+        with _dbreg.cursor("runtime") as c:
             c.execute(
                 "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
                 (runtime_id,)
             )
             tags = [r[0] for r in c.fetchall()]
-        except Exception:
-            tags = []
+    except RuntimeError:
+        from src.kernel.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute(
+                    "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
+                    (runtime_id,)
+                )
+                tags = [r[0] for r in c.fetchall()]
+            except Exception:
+                tags = []
+    except Exception:
+        tags = []
     return {"tags": tags}
 
 @router.get("/tasks/{task_id}/env")
@@ -905,9 +966,15 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
     return {"env": env}
 
 @router.post("/runtimes/{runtime_id}/tasks/claim-by-tag/{tag}")
-def runtime_claim_by_tag(runtime_id: int, tag: str,
+async def runtime_claim_by_tag(runtime_id: int, tag: str,
                                body: RuntimeClaimBody | None = None,
                                credential_id: int = Depends(_require_credential)):
+    """认领高频路径：async 包装，避免与长请求争线程池。"""
+    return await asyncio.to_thread(_claim_by_tag_impl, runtime_id, tag, body, credential_id)
+
+
+def _claim_by_tag_impl(runtime_id: int, tag: str,
+                       body: "RuntimeClaimBody | None", credential_id: int):
     """Claim task by tag + scope isolation (event-dispatch-redesign-v2.md 2.4).
 
     Workers with engine tags can claim tasks matching their tag and scope.
@@ -917,8 +984,7 @@ def runtime_claim_by_tag(runtime_id: int, tag: str,
     scan_request = False
     if not task:
         try:
-            with db_lock:
-                c = db.cursor()
+            with _runtime_cursor() as c:
                 c.execute("SELECT pending_skill_scan FROM agent_runtimes WHERE id=? AND credential_id=?",
                           (runtime_id, credential_id))
                 _row = c.fetchone()
@@ -1143,27 +1209,41 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
     # worker 再 claim 一次再卡一遍 —— 用户看到的就是永久 running 且 agent 没有任何输出。
     # 用比 300s 宽限期更短的阈值单独判死，让故障更早暴露（引擎冷启动上界 90s 足够）。
     CLAIM_NO_SESSION_FAIL_SECONDS = int(os.environ.get("CLAIM_NO_SESSION_FAIL_SECONDS", "90"))
+    # 近期仍在上报消息的任务视为活跃，不参与孤儿回收（窗口需大于回收判定的静默容忍度）
+    RECENT_MESSAGE_ACTIVE_SECONDS = int(os.environ.get("RUNTIME_RECENT_MESSAGE_ACTIVE_SECONDS", "180"))
     recovered, skipped_active, force_failed, skipped_young = [], [], [], []
     _fail_reason_by_tid: dict[str, str] = {}
     skipped_active_reason = {}
     with db_lock:
         c = db.cursor()
+        # 一并取出「最近一次上报消息的时刻」：引擎说得出话就说明它还活着。
+        # 缺这一条时，长任务在两步之间静默超过回收窗口就被判孤儿、回炉重认领，
+        # 再卡再回炉，循环里每轮都去抢同一行 events（实测 1205 lock wait timeout），
+        # 事件因此永远停在 running，前端表现为「处理中」但没有任何产出。
         c.execute(
-            "SELECT id, attempts, runtime_id, event_seq, started_at, created_at, "
-            "COALESCE(runtime_session_id,'') "
-            "FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
+            "SELECT t.id, t.attempts, t.runtime_id, t.event_seq, t.started_at, t.created_at, "
+            "COALESCE(t.runtime_session_id,''), "
+            "(SELECT MAX(m.created_at) FROM task_messages m WHERE m.task_id=t.id) "
+            "FROM agent_tasks t WHERE t.runtime_id=? AND t.status IN ('dispatched','running')",
             (runtime_id,))
         rows = c.fetchall()
         _seq_by_tid = {}
-        for tid, attempts, rid, ev_seq, _sa, _ca, _rs in rows:
+        for tid, attempts, rid, ev_seq, _sa, _ca, _rs, _lm in rows:
             _seq_by_tid[tid] = ev_seq
-        for tid, attempts, rid, _ev_seq, started_at, created_at, _rsid in rows:
+        for tid, attempts, rid, _ev_seq, started_at, created_at, _rsid, _last_msg in rows:
             # Issue #1750 P1-A：白名单命中 → worker 自报仍在跑，直接 skipped_active。
             # 位置在年龄闸门与活跃窗口之前（白名单优先级最高）：静默型长任务即使
             # 超龄且窗口内无消息，也绝不会被回炉。
             if tid in _active_whitelist:
                 skipped_active.append(tid)
                 skipped_active_reason[tid] = "active_whitelist"
+                continue
+            # 近期仍在上报消息 = 引擎确实在跑，不能当孤儿回炉。
+            # （回收 → 重认领 → 再回收的循环会让事件永远 running，见上方查询注释。）
+            _lm_ts = parse_dt(_last_msg) if _last_msg else None
+            if _lm_ts is not None and (_now.timestamp() - _lm_ts) <= RECENT_MESSAGE_ACTIVE_SECONDS:
+                skipped_active.append(tid)
+                skipped_active_reason[tid] = "recent_message"
                 continue
             # 年龄基准（started_at，NULL 兜底 created_at）
             _age_base = started_at or created_at

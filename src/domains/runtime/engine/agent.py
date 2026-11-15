@@ -1955,8 +1955,12 @@ async def _materialize_files(client, tid, files_dict, file_urls, dest_dir, tag="
         # ① 优先 URL 下载
         if url:
             try:
-                with _urllib.urlopen(url, timeout=10) as resp:
-                    raw = resp.read()
+                # urlopen(timeout=10) 是同步阻塞调用：直接在事件循环里跑会在网络抖动时
+                # 把整个 agent 卡住（心跳停发 → 引擎被判失联）。下放入线程池。
+                def _download(_u=url):
+                    with _urllib.urlopen(_u, timeout=10) as _resp:
+                        return _resp.read()
+                raw = await asyncio.to_thread(_download)
                 got_content = raw.decode("utf-8") if isinstance(raw, bytes) else (raw or "")
                 if not got_content:
                     raise ValueError("empty response")
@@ -3276,6 +3280,21 @@ async def _report_replay_loop(client):
         await asyncio.sleep(_interval)
 
 
+async def _presence_heartbeat_loop(client, runtime_ids, interval: float) -> None:
+    """最小在线态心跳：只刷新 last_seen，保证服务端看到的间隔稳定在 interval。
+
+    与主循环里的完整心跳分工：完整心跳负责 log_lines / metrics / probe_results 上报和
+    cancelled_tasks 回收（发现取消就杀引擎进程），但它排在 claim 之后，节奏被主循环拖长。
+    在线态判断只看 last_seen，所以这里单独保活即可，失败也不升级为 reset（交给主循环计数）。
+    """
+    while True:
+        try:
+            await client.heartbeat(runtime_ids)
+        except Exception as _e:
+            log.debug(f"presence heartbeat failed (will retry): {_e}")
+        await asyncio.sleep(interval)
+
+
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
                     engine_by_rid: dict | None = None, installed=None, device_name="",
                     _test_execute=None, _test_active=None, _test_active_tasks=None,
@@ -3303,6 +3322,12 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         asyncio.create_task(_report_replay_loop(client), name="worker-report-replay")
     except Exception as e:
         log.warning(f"start report replay loop failed: {e}")
+    # 在线态心跳：严格按 heartbeat_interval 刷新 last_seen。
+    # 主循环里的心跳要等 claim/tags 跑完这一轮才轮到，于是 last_seen 的间隔等于主循环周期
+    # （实测 18-79s，而同一端点直接压测只要 0.05s）；服务端按心跳间隔判活，漂到分钟级就是
+    # 「凭据经常失联」。这里只发最小 payload 保活，日志/指标/probe/取消检查仍由主循环负责。
+    asyncio.create_task(_presence_heartbeat_loop(client, runtime_ids, heartbeat_interval),
+                        name="worker-presence-heartbeat")
     heartbeat_fail_streak = 0
     HEARTBEAT_FAIL_THRESHOLD = 3
     RE_REGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
@@ -4165,8 +4190,12 @@ def main():
         global _OBS_SUPPORT
         if probe_url:
             try:
-                with _urllib.urlopen(probe_url, timeout=5) as _r:
-                    _OBS_SUPPORT = bool(_r.read())
+                # 同上下：同步 urlopen 必须入线程池，否则启动期就把 loop 占住
+                # （心跳/认领协程还没起来就先卡 5s，重试起来会叠加）。
+                def _probe_obs():
+                    with _urllib.urlopen(probe_url, timeout=5) as _r:
+                        return _r.read()
+                _OBS_SUPPORT = bool(await asyncio.to_thread(_probe_obs))
             except Exception as e:
                 log.warning(f"[skill] 启动探测失败（走 skill_files 兜底）: {type(e).__name__}")
         log.info(f"OBS 直连能力探测: supports_obs_url={_OBS_SUPPORT}")

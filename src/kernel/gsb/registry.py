@@ -92,7 +92,7 @@ def list_services() -> list:
 def split_key(key: str) -> tuple[str, str]:
     """把注册键拆成 (服务名, 命名空间)。
 
-    ``mgmt@hd002`` → ``("mgmt", "hd002")``；裸 ``mgmt`` → ``("mgmt", "")``。
+    ``mgmt@node-a`` → ``("mgmt", "node-a")``；裸 ``mgmt`` → ``("mgmt", "")``。
     命名空间为空表示未启用多机隔离（旧注册/单机模式）。
     """
     raw = (key or "").strip()
@@ -110,7 +110,7 @@ def list_instances(service: str, include_offline: bool = False) -> list[dict]:
 
     返回的每行在原字段之外补充：
     - ``service``：基础服务名（mgmt / runtime / ...）
-    - ``instance``：命名空间（hd002 / vod / ...），裸键为空串
+    - ``instance``：命名空间（node-a / node-b / ...），裸键为空串
     - ``age_seconds``：距最近一次心跳的秒数
     - ``alive``：是否 online 且心跳未超时
 

@@ -42,12 +42,12 @@ devops_agent_runtime_binding:
 
 ```
 活跃引擎（credential status=active）：
-  id=31  opencode  cred=19(h206-local-02)     worker-ecs-vod-dev-design
-  id=32  hermes    cred=19(h206-local-02)     worker-ecs-vod-dev-design
-  id=33  opencode  cred=21(h116-lvjuntao3)    worker-ecs-d27a
-  id=34  hermes    cred=21(h116-lvjuntao3)    worker-ecs-d27a  (healthy=0)
-  id=35  opencode  cred=22(h116-grape3)       worker-ecs-d27a
-  id=36  hermes    cred=22(h116-grape3)       worker-ecs-d27a
+  id=31  opencode  cred=19(<credential-c>)     worker-<node-b>
+  id=32  hermes    cred=19(<credential-c>)     worker-<node-b>
+  id=33  opencode  cred=21(<credential-b>)    worker-<node-c>
+  id=34  hermes    cred=21(<credential-b>)    worker-<node-c>  (healthy=0)
+  id=35  opencode  cred=22(<credential-a>)       worker-<node-c>
+  id=36  hermes    cred=22(<credential-a>)       worker-<node-c>
   id=37  hermes    cred=0                     本机直连 (offline)
   id=38  opencode  cred=0                     本机直连 (offline)
 ```
@@ -369,7 +369,7 @@ for agent_type, engine_name in engines.items():
    - engine 查找:
      a. binding(repo, coding) 有 → 用手动绑定
      b. binding 为空 → scene.engines["coding"] = "hermes" → 找健康 hermes 引擎
-     c. 选中 id=36 (hermes, cred=22, worker-ecs-d27a, healthy)
+     c. 选中 id=36 (hermes, cred=22, worker-<node-c>, healthy)
 8. Coding Agent 用 hermes 引擎执行 iac-coding skill（terraform fmt/init/validate）
 9. ... 后续 QA/SRE 同理
 ```

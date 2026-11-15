@@ -237,7 +237,14 @@ def run_startup_migration(db_path: str) -> dict:
     migrations = _load_migration_module()
     conn = _connect(db_path)
     try:
-        conn.execute(_APP_SEEN_TABLE)     # 测试库无则补空表
+        # bot_seen_messages 归 runtime：mgmt 进程走 MySQL 时 _connect 返回的就是进程主库，
+        # 这行会在 mgmt 库里建出空壳（2026-11-15 实测：每次 mgmt 重启 3 分钟内长回来）。
+        # 渠道 4 表归 mgmt，照常建；只跳过这一张别家的表。
+        from src.kernel import table_ownership as _own_tbl
+        if _own_tbl.should_skip("bot_seen_messages"):
+            log.info("[DDL_SKIP] `bot_seen_messages`: owner=runtime，非本域进程跳过")
+        else:
+            conn.execute(_APP_SEEN_TABLE)     # 测试库无则补空表
         migrations.ensure_channel_tables(conn)
         try:
             mig004 = _load_migration_004()

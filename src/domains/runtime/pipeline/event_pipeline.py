@@ -4774,6 +4774,15 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
     """
     if not repository or not pr_number or not bot_token:
         return
+    _rk = repo_key or repository
+    # 回帖身份：PR 评论同样必须来自 bot（路径 B 仓库的执行链 token 可能是用户 token）
+    try:
+        from src.kernel.token_service import get_bot_identity_token
+        _bot_tok_pr = get_bot_identity_token(_rk) or ""
+        if _bot_tok_pr:
+            bot_token = _bot_tok_pr
+    except Exception as _e:  # noqa: BLE001
+        log.debug(f"PR 回帖 bot 身份解析失败 ({_rk}): {_e}")
     # 提取 conclusion
     _conclusion = ""
     try:
@@ -4811,7 +4820,7 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
         # gitlab 方言 → /merge_requests/{n}/notes；
         # 其余（github 系）→ PR 共用 Issue 评论 API /issues/{n}/comments
         from src.domains.runtime.vcs.api_client import create_client
-        _c = create_client(repo_key or repository, bot_token)
+        _c = create_client(_rk, bot_token)
         _card = _c._platform_card()
         if _card is not None and _card.api_auth == "query_token":
             _path = f"/repos/{_c.owner}/{_c.repo}/pulls/{pr_number}/comments"
@@ -4823,7 +4832,7 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
         # Issue #453 台账（审查 P1-1 补漏，写点9）：qa 审查结论回帖 PR → note_hook_pr 回流对账。
         # 原先响应丢弃不入账；PR 评论与 issue 评论 ID 同值域，按 issue_comment 键记。
         try:
-            _ledger_record_comment(_provider_of_repo_key(repo_key or repository),
+            _ledger_record_comment(_provider_of_repo_key(_rk),
                                    repo_key, repository, pr_number, _comment,
                                    _resp if isinstance(_resp, dict) else {})
         except Exception as _le:
@@ -5647,14 +5656,30 @@ def _post_issue_comment_ledgered(repository: str, issue_num, comment: str, bot_t
     失败抛异常（调用方原有 try/except 兜底）。
     """
     from src.domains.runtime.vcs.api_client import create_client
-    _c = create_client(repo_key or repository, bot_token or "")
+    # 回帖身份：一律优先 bot（仓库 bot → 全局 bot）。调用方传进来的可能是用户 token
+    # （执行链在路径 B 仓库会解析到用户 token），直接用会导致 agent 评论挂在用户名下。
+    _rk = repo_key or repository
+    try:
+        from src.kernel.token_service import get_bot_identity_token
+        _bot_tok = get_bot_identity_token(_rk) or ""
+    except Exception as _e:  # noqa: BLE001
+        _bot_tok = ""
+        log.debug(f"bot identity token resolve failed for {_rk}: {_e}")
+    if _bot_tok:
+        bot_token = _bot_tok
+    elif bot_token:
+        log.warning(
+            f"回帖未用 bot 身份（{_rk}）：未取到 bot token，回退调用方 token，"
+            f"该评论会以该 token 所属账号发出——请配置仓库 bot 凭据或 "
+            f"global_bot_<provider>_token")
+    _c = create_client(_rk, bot_token or "")
     _resp = _c._request("POST", _c._generic_path(
         f"/repos/{_c.owner}/{_c.repo}/issues/{issue_num}/comments",
         f"/issues/{issue_num}/notes"), {"body": comment})
     if not isinstance(_resp, dict) or "error" in _resp:
         raise RuntimeError(f"post issue comment failed: {_resp}")
     _ledger_record_comment(_provider_of_repo_key(repo_key or repository),
-                           repo_key, repository, issue_num, comment, _resp,
+                           _rk, repository, issue_num, comment, _resp,
                            origin_task=origin_task)
 
 def _list_issue_comments_card(repo_key: str, repository: str, issue_num, bot_token: str) -> list:

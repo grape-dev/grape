@@ -11,7 +11,7 @@ Task 会话与 General 会话**共用同一个入口与执行引擎**，差异�
 | 维度 | Task Chat | General Chat |
 |---|---|---|
 | runtime 调用 | 同一 `stream_agent` / `consume_stream_async` / 入队 | 相同 |
-| runtime 工作目录 | `/home/grape/chat/{user_id}/{conv_id}`（web）、`WORKSPACE_DIR/feishu/{repo}/{sess尾}`（飞书） | **相同** |
+| runtime 工作目录 | `<deploy-root>/chat/{user_id}/{conv_id}`（web）、`WORKSPACE_DIR/feishu/{repo}/{sess尾}`（飞书） | **相同** |
 | 复用 session_id | conv 级 `runtime_session_id`（web） / repo 级 `oc_sid`（飞书） | 相同机制 |
 | 返回信息 | 回复 + conversation_id | 相同 |
 | **局部差异** | 额外注入 Issue 上下文/任务描述；打开时同步 Issue 评论 | 无 |
@@ -281,10 +281,10 @@ Skill 文件：{{SKILL_DIR}}/chat/SKILL.md
 
 ### 4.1 web（`_get_chat_cwd`, chat.py:12）
 ```python
-path = /home/grape/chat/{user_id}/{conv_id}
+path = <deploy-root>/chat/{user_id}/{conv_id}
 ```
 - **web 侧统一按 conversation 隔离**：每个 conv 独立目录，task 与 general 只是同一目录树下不同 conv_id
-- 逻辑基准 `/home/grape` 由远端 worker `_remap_cwd` 映射到各自用户 home
+- 逻辑基准 `<deploy-root>` 由远端 worker `_remap_cwd` 映射到各自用户 home
 
 ### 4.2 飞书（handler:726）
 ```python
@@ -398,7 +398,7 @@ return {"reply": reply, "conversation_id": conv_id}
 
 ### 8.2 非 task/general、而是 web vs 飞书的差异
 1. session 粒度（web conv 级 / 飞书 repo 级）
-2. cwd 规则（web `/home/grape/chat/{uid}/{conv}` / 飞书 `WORKSPACE_DIR/feishu/{repo}/{sess尾}`）
+2. cwd 规则（web `<deploy-root>/chat/{uid}/{conv}` / 飞书 `WORKSPACE_DIR/feishu/{repo}/{sess尾}`）
 3. worker agent_session_id 命名（web `chat:{user}` / 飞书 repo session）
 
 ---

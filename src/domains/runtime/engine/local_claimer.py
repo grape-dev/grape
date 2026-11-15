@@ -33,6 +33,7 @@ import json
 import os
 
 import random
+from datetime import datetime, timezone
 
 from src.kernel.config import log
 
@@ -312,12 +313,66 @@ async def _claim_deterministic_locally(rid: int) -> dict | None:
             return None
     return task
 
+def _touch_direct_engines(ids: list) -> int:
+    """只刷新直连引擎的 last_seen_at（不做探测、不判活）。
+
+    直连引擎（credential_id=0）没有独立 agent 进程，last_seen 原先只随探测写入
+    （90-130s 一次），服务端按心跳间隔判活，监控里就显示成「心跳 336s」。
+    这里每 15s 轻量 touch 一次，探测节奏不变。
+    """
+    if not ids:
+        return 0
+    _ids = [int(x) for x in ids if x]
+    if not _ids:
+        return 0
+    ph = ",".join("?" for _ in _ids)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    sql = f"UPDATE agent_runtimes SET last_seen_at=? WHERE id IN ({ph})"
+    from src.kernel import db_registry as _dbr
+    try:
+        if _dbr.uses_own_dsn("runtime"):
+            conn = _dbr.new_connection("runtime", autocommit=True)
+            try:
+                cur = conn.cursor().execute(sql, [now_iso] + _ids)
+                return int(getattr(cur, "rowcount", 0) or 0)
+            finally:
+                try:
+                    conn.close()
+                except Exception as _ce:
+                    log.debug(f"presence touch close failed: {_ce}")
+    except Exception as _de:
+        log.debug(f"presence touch via domain connection failed, falling back: {_de}")
+    try:
+        from src.kernel.session_manager import db, db_lock
+        with db_lock:
+            cur = db.cursor().execute(sql, [now_iso] + _ids)
+            db.commit()
+            return int(getattr(cur, "rowcount", 0) or 0)
+    except Exception as _e:
+        log.debug(f"presence touch failed: {_e}")
+        return 0
+
+
 async def local_claimer_loop():
     """本机 direct 引擎认领主循环——语义与 worker 的 claim 循环对齐。"""
     log.info("Local claimer loop started (3s interval) — local direct engines now "
              "first-class broadcast claimers (see local-claimer-first-class-broadcast-design.md)")
     _disabled_logged = False
+    _last_presence = 0.0
+    _PRESENCE_INTERVAL = float(os.environ.get("GRAPE_LOCAL_PRESENCE_INTERVAL", "15"))
     while True:
+        # 在线态刷新：直连引擎没有 agent 进程，last_seen 原先只随「探测」写（90-130s 一次），
+        # 服务端按心跳间隔判活，于是它们在监控里显得「心跳很慢」（实测 336s/190s）。
+        # 这里每 15s 轻量 touch 一次（纯 UPDATE，不做探测），探测节奏保持不变。
+        try:
+            _now_ts = asyncio.get_running_loop().time()
+            if _now_ts - _last_presence >= _PRESENCE_INTERVAL:
+                _last_presence = _now_ts
+                _ids = await asyncio.to_thread(_local_direct_engine_ids)
+                if _ids:
+                    await asyncio.to_thread(_touch_direct_engines, _ids)
+        except Exception as _pe:
+            log.debug(f"local presence touch failed: {_pe}")
         # 热切换：循环内实时读取 GRAPE_LOCAL_CLAIMER（关闭即时停抢，重新开启即时恢复）
         if not _claimer_enabled():
             if not _disabled_logged:

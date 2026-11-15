@@ -26,11 +26,6 @@
     "autopilot_executions": "runtime",
     "autopilot_subscriptions": "mgmt",
     "autopilot_tasks": "mgmt",
-    "backup_agent_runtimes_revoked_20260817": "mgmt",
-    "backup_devops_agent_runtime_binding_20260817": "mgmt",
-    "backup_devops_agent_runtime_binding_20260827_234600": "mgmt",
-    "backup_devops_agent_session_20260817": "mgmt",
-    "backup_runtime_credentials_revoked_20260817": "mgmt",
     "binding_tickets": "mgmt",
     "bot_seen_messages": "runtime",
     "branch_guard_state": "runtime",
@@ -41,7 +36,6 @@
     "community_comments": "mgmt",
     "community_post_likes": "mgmt",
     "community_posts": "mgmt",
-    "credential_reveal_log": "mgmt",
     "devops_agent_runtime_binding": "mgmt",
     "devops_agent_session": "runtime",
     "devops_pipeline_scene": "mgmt",
@@ -62,7 +56,6 @@
     "external_identities": "mgmt",
     "featured_templates": "mgmt",
     "feishu_onboard_task": "mgmt",
-    "flyway_schema_history": "mgmt",
     "global_im_bot_config": "runtime",
     "grape_accounts": "mgmt",
     "grape_im_instance": "runtime",
@@ -646,5 +639,17 @@
       "insight",
       "mgmt"
     ]
+  },
+  "_not_in_current_schema": {
+    "_comment": "以下名字只出现在旧库 grape_dev_mgmt / 打包脚本的种子表清单里，docs/weekly-11/table-owner.tsv（权威）与当前代码均无它们：5 张是 2026-08-17 的历史备份快照，flyway_schema_history 是 Java 迁移遗留，credential_reveal_log 是 grape_t_credential_reveal_log 的旧名重复登记。2026-11-15 从 tables 里移除，避免三库缺口检查把它们报成『缺表』。",
+    "tables": {
+      "credential_reveal_log": "mgmt",
+      "backup_agent_runtimes_revoked_20260817": "mgmt",
+      "backup_devops_agent_runtime_binding_20260817": "mgmt",
+      "backup_devops_agent_runtime_binding_20260827_234600": "mgmt",
+      "backup_devops_agent_session_20260817": "mgmt",
+      "backup_runtime_credentials_revoked_20260817": "mgmt",
+      "flyway_schema_history": "mgmt"
+    }
   }
 }

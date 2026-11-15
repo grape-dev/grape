@@ -1232,7 +1232,8 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
                     data=_a2a_payload,
                     headers={"Content-Type": "application/json"},
                     method="POST")
-                urllib.request.urlopen(_req, timeout=5)
+                # 同步 HTTP POST 不能在事件循环里裸跑（5s 超时会连带卡住整个进程）
+                await asyncio.to_thread(urllib.request.urlopen, _req, timeout=5)
                 log.info(f"Issue #{issue_id} resumed → re-dispatched to stage={_resume_stage}")
             except Exception as _e:
                 from src.kernel.prompt_builder import format_base_url_candidates
