@@ -905,9 +905,19 @@ def init_db():
     重复用户清理随 D32 user_accounts 死表收敛退役。）
     """
     with db_lock:
-        db.execute(_USER_ACCOUNTS_DDL)
-        db.execute(_CREDENTIALS_DDL)
-        db.execute(_MANAGED_REPOS_DDL)
+        # 三库拓扑：这 4 张都是 mgmt 域基表。旧设计假设非 owner 侧是跨库视图，视图已退役，
+        # 现在非 owner 进程（runtime/insight）执行这些 DDL 会在自己的库里建出空壳副本
+        # （2026-11-15：runtime 库被重建过 user_accounts / user_credentials /
+        # managed_repos / oauth_states / user_repos，跨域读于是在空表上静默返回空结果）。
+        from src.kernel import table_ownership as _own_tbl
+        for _tbl, _ddl in (("user_accounts", _USER_ACCOUNTS_DDL),
+                           ("user_credentials", _CREDENTIALS_DDL),
+                           ("managed_repos", _MANAGED_REPOS_DDL),
+                           ("oauth_states", _OAUTH_STATES_DDL)):
+            if _own_tbl.should_skip(_tbl):
+                log.info(f"[DDL_SKIP] `{_tbl}`: owner={_own_tbl.owner_of(_tbl)}，非本域进程不建表")
+                continue
+            db.execute(_ddl)
         # 兼容旧列迁移（幂等）：托管诊断列（Issue #2126）——CREATE TABLE 只影响新库
         # 域拆分库（arch 四进程）：managed_repos 归属 mgmt 基表，runtime/insight 侧是
         # 跨库视图——视图上 ALTER 必然 1347（视图侧不能 ALTER）。视图进程直接跳过，
@@ -922,14 +932,16 @@ def init_db():
                 _mr_is_view = bool(_row and str(_row[0]).upper() == "VIEW")
             except Exception:
                 pass
-        if not _mr_is_view:
+        if not _mr_is_view and not _own_tbl.should_skip("managed_repos"):
             for _col in ("host_step", "host_error", "host_updated_at"):
                 try:
                     db.execute(f"ALTER TABLE managed_repos ADD COLUMN {_col} TEXT DEFAULT ''")
                 except Exception as _e:
                     # 幂等：列已存在属预期；其它失败需留痕（#2126 透明化方向，不外抛中断启动）
                     log.warning(f"managed_repos 补充诊断列失败 col={_col}: {_e}")
-        db.execute(_OAUTH_STATES_DDL)
+        # oauth_states 的建表已在上面的守卫循环里（owner=mgmt）；这里不再重复执行，
+        # 否则非 owner 进程会绕过守卫，在自己的库里建出空壳（2026-11-15 实测：
+        # worker/event 的 init_db() 只重建 oauth_states 一张，正是这一行）。
         from src.domains.mgmt.user.legacy_column_migrations import run as _legacy_migrations
         _legacy_migrations()
         from src.domains.mgmt.user.credentials_backfill_n1 import run as _n1_backfill
@@ -3879,6 +3891,11 @@ if os.path.isdir(_OLD_SKILL_DIR) and _OLD_SKILL_DIR != SKILL_DIR:
         log.warning(f"Skill dir migration failed: {e}")
 
 def init_user_repos_table():
+    # user_repos 归 mgmt：非 owner 进程（runtime/insight）不建空壳副本，读路径走 owner 域原语。
+    from src.kernel import table_ownership as _own_tbl
+    if _own_tbl.should_skip("user_repos"):
+        log.info("[DDL_SKIP] `user_repos`: owner=mgmt，非本域进程不建表")
+        return
     with db_lock:
         db.execute(_USER_REPOS_DDL)
         _mg_db.commit()
