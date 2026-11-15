@@ -245,6 +245,31 @@ def _rebuild_evt_from_task(task: dict) -> dict:
         log.warning(f"local_claimer: evt rebuild failed for seq={seq}: {e}")
     return evt
 
+def _yield_claimed_backstop(claimed: dict) -> tuple:
+    """把已认领任务回滚为无主池任务（queued + 事件 pending）。
+
+    从 local_claimer_loop 抽出来是为了整段同步 DB 写能放进线程池：loop 本身跑在事件循环里，
+    就地写库会把 loop 卡住（心跳停发 → 引擎判失联 → 健康分强制 0）。
+    """
+    from src.kernel.session_manager import db, db_lock
+    _yid = claimed.get("id") or ""
+    _yseq = claimed.get("event_seq") or 0
+    with db_lock:
+        c = db.cursor()
+        # 回滚任务为无主池任务（claim 已置 running + 占用本机 runtime_id）
+        c.execute(
+            "UPDATE agent_tasks SET status='queued', runtime_id=0, started_at=NULL "
+            "WHERE id=? AND status='running'", (_yid,))
+        # 还原 claim 的副作用：事件回 pending、runtime 清空（留给真正认领方回写）
+        if _yseq:
+            c.execute(
+                "UPDATE events SET status='pending', runtime='' "
+                "WHERE seq=? AND status='running'", (_yseq,))
+        # busy_slots 是展示快照，方案 D 有 recalc/兜底，无需精确还原
+        db.commit()
+    return _yid, _yseq
+
+
 async def _execute_claimed_locally(task: dict, rid: int):
     """认领后的本机执行：复用方案B已验证的 direct 执行通道。
 
@@ -304,15 +329,19 @@ async def local_claimer_loop():
         _disabled_logged = False
         try:
             from src.domains.runtime.engine.service import claim_by_tag
-            for rid in _local_direct_engine_ids():
-                if _engine_busy(rid):
+            # 本循环跑在事件循环里：所有同步 DB 访问（引擎发现/满载查询/打标签/让位判定
+            # 与回滚）都必须进线程池，否则一条慢查询就把 loop 卡住 —— worker 心跳随之停发，
+            # 引擎被判失联、健康分强制 0（py-spy 实证 MainThread 停在
+            # _local_direct_engine_ids 的 pymysql 调用）。
+            for rid in await asyncio.to_thread(_local_direct_engine_ids):
+                if await asyncio.to_thread(_engine_busy, rid):
                     continue
                 # Phase 3（#699）：先做确定性认领（runtime_id 绑定本机的 queued 任务，
                 # 对应原 direct 即时执行路径的入队化；不进 backstop 窗口）
                 _det_claimed = await _claim_deterministic_locally(rid)
                 claimed = _det_claimed
                 if not claimed:
-                    for tag in _engine_tags(rid):
+                    for tag in await asyncio.to_thread(_engine_tags, rid):
                         # 与远端 worker 完全相同的认领入口（含白名单/健康分/满载/守卫全套检查）
                         task = await asyncio.to_thread(claim_by_tag, tag, rid)
                         if task:
@@ -324,24 +353,9 @@ async def local_claimer_loop():
                     # 确定性认领（任务已绑定本引擎，远端不会领）不进让位窗口。
                     # 放弃方式：把任务状态回滚 queued（claim 已把它置为 running 并占用本机
                     # runtime_id），恢复为无主池任务，等下一轮再评估。
-                    if not _det_claimed and _backstop_should_yield(claimed):
+                    if not _det_claimed and await asyncio.to_thread(_backstop_should_yield, claimed):
                         try:
-                            from src.kernel.session_manager import db, db_lock
-                            _yid = claimed.get("id") or ""
-                            _yseq = claimed.get("event_seq") or 0
-                            with db_lock:
-                                c = db.cursor()
-                                # 回滚任务为无主池任务（claim 已置 running + 占用本机 runtime_id）
-                                c.execute(
-                                    "UPDATE agent_tasks SET status='queued', runtime_id=0, started_at=NULL "
-                                    "WHERE id=? AND status='running'", (_yid,))
-                                # 还原 claim 的副作用：事件回 pending、runtime 清空（留给真正认领方回写）
-                                if _yseq:
-                                    c.execute(
-                                        "UPDATE events SET status='pending', runtime='' "
-                                        "WHERE seq=? AND status='running'", (_yseq,))
-                                # busy_slots 是展示快照，方案 D 有 recalc/兜底，无需精确还原
-                                db.commit()
+                            _yid, _yseq = await asyncio.to_thread(_yield_claimed_backstop, claimed)
                             log.info(f"local_claimer: backstop yielded task={_yid} "
                                      f"(age={_task_age_seconds(claimed):.0f}s < {CLAIM_BACKSTOP_DELAY:.0f}s, "
                                      f"remote claimant reachable)")

@@ -704,7 +704,10 @@ def get_all_health_scores(force_refresh: bool = False) -> list[dict]:
 
 # ===== Issue #85: 定时刷新调度器 =====
 
-_REFRESH_INTERVAL = int(os.environ.get("HEALTH_REFRESH_INTERVAL", "300"))  # 默认 5 分钟
+_REFRESH_INTERVAL = int(os.environ.get("HEALTH_REFRESH_INTERVAL", "60"))  # 默认 1 分钟
+# 周期从 300s 收到 60s：心跳/失联是秒级事实，5 分钟的刷新间隔会让「心跳已恢复」
+# 与「分数还是 0」并存好几分钟（用户侧看到的就是「接入引擎健康分全是 0」）。
+# 7~20 个引擎的量级下每分钟一轮的查询成本可以忽略。
 _refresh_thread: threading.Thread | None = None
 _refresh_stop = threading.Event()
 
