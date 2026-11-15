@@ -110,7 +110,6 @@
   "src/domains/runtime/im/bot_lease.py": 1,
   "src/domains/runtime/im/devstage_client.py": 3,
   "src/domains/runtime/im/engine/egress.py": 1,
-  "src/domains/runtime/im/engine/installations.py": 1,
   "src/domains/runtime/im/engine/supervisor.py": 4,
   "src/domains/runtime/im/engine_wiring.py": 8,
   "src/domains/runtime/im/feishu_async.py": 14,

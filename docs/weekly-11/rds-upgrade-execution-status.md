@@ -5625,6 +5625,86 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/domains/runtime/im/engine/installations.py`（1 处：`grape_t_channel_installation`，归 mgmt）；
   头两名仍是 ⛔ blocked 的 `credential_usage_log.py` 与 `prompt_builder.py`（各 3 处）。
 
+### 7.51 runtime 安装枚举来源的渠道安装表查询下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/runtime/im/engine/installations.py` **1 处 → 0**（单轮做完，1 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`grape_t_channel_installation`（归 **mgmt**，
+  `grape_mgmt_db`）× 1：改前 L15–18 模块常量 `_PROVIDER_SELECT`，由
+  `_list_installations_with_factory()` 在 `conn.execute(_PROVIDER_SELECT)` 上直发
+  （conn 来自 `engine_wiring._connect(db_path)`，钉住 runtime 库的 IM 句柄）：
+  `SELECT id, channel_type, scope, owner_user_id, repo_key, config, config_fingerprint, status FROM grape_t_channel_installation WHERE status='active'`。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增具名查询 `installation_provider_active_rows`（L1836）：八列、列序与原语句
+    **逐字一致**，只取 `status='active'`，**无 ORDER BY / 无 DISTINCT**；只用 `?` 方言面
+    （本语句无参数），无 `%s` / `NOW()` / `ON DUPLICATE` / 反引号。
+  - 新增薄函数 `installation_provider_rows_any(conn=None)`（L4434）：体内零字面 SQL（走
+    `_any_sql`），返回八列 `tuple` 列表；`__all__` 登记（L754）。
+- 调用点 `installations.py`：`_PROVIDER_SELECT` 常量删除，`conn.execute(...)` 换成
+  「取连接 → 交给 owner 原语 → 行投影」；`conn_factory` 注入点**保留不动**（sqlite 线程亲和：
+  连接与其游标都在 `asyncio.to_thread` 的同一 worker 线程内创建/使用，关闭责任仍在调用方）。
+  `_row_to_installation` 的八个下标 `row[0..7]` 与语句列序逐位对应（烟测 AST 比对钉住）。
+- 设计取舍：
+  1. **不复用现有 `installation_active_installs_any()`**：它只回六列
+     `(id, scope, owner_user_id, repo_key, config, status)`，缺 `channel_type` 与
+     `config_fingerprint`，且列序不同；调用方按下标解包，改用它就得改投影——那是行为改动，
+     不是归位。同理不复用 `installation_list_any()`：八列但列序不同（`status`/`updated_at`
+     在前）、**不过滤 active**、还带 `ORDER BY updated_at DESC`，等于换了枚举口径。
+  2. **用 `_owner_cursor` 而不是 `_any_cursor`**：本处调用方**总是**带着一条连接（runtime 库
+     句柄）。`_owner_cursor(调用方游标)` 在单库/测试拓扑复用它（两处既有单测就是这么喂的
+     tmp sqlite 连接），在自有 DSN 拓扑**忽略**它改走 `db_registry.cursor("mgmt")`——「忽略
+     这一跳」正是 1146 的修复点；`_any_cursor` 只能表达前者，无法表达「该忽略」。
+  3. **不排序、不去重**：原语句两者都没有。枚举顺序决定 supervisor 首轮接管顺序（哈希环归属
+     只筛归属，不排序），加 `ORDER BY` 属行为变更；同 `legacy_app_id` 的多条活跃安装本来就是
+     各自的渠道连接，去重会让某些安装永远不被接管。
+  4. **纯读、不新增写原语**：本处只读活跃行，安装的建/改/删仍在 mgmt 本域，无跨域事务需求，
+     不碰 `_any_tx()` / outbox。
+  5. **顺手修掉一处静默 except**：`conn.close()` 的 `except Exception: pass` 改成
+     `log.debug`，并同步把 `tests/silent_except_baseline.json` 里本文件计数 1 → 删除该项
+     （该棘轮「修复删除吞噬点允许且鼓励，基线随后下调」）。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  **三库拓扑下安装枚举恒为空**：`_connect()` 钉的是 runtime 库，那里没有
+  `grape_t_channel_installation`（视图 0 → 1146），异常被 supervisor 的
+  `except → log.warning → 下一轮继续` 吞成「一个安装都扫不到」——引擎整体不接管任何渠道，
+  飞书/钉钉入站完全无响应，而日志只有一行 `scan round failed`（线索指向 DB 抖动而不是
+  「库不对」）。上移后两条拓扑跑同一份 owner 语句。
+- 遗留（不在本批范围）：`engine_wiring._connect()` 仍是 runtime 库句柄，本批只拆掉安装表这一半
+  （与 `3921a54c6` 同口径）；binding / dedup / inbound_message 等 IM 表仍走该句柄，各自归属
+  待下一批按表拆分。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/mgmt/public/__init__.py` / `src/domains/runtime/im/engine/installations.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/installations_smoke.py`（`DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=~/burndown/installations.db`，
+    连跑 2 次稳定）→ **ALL installations smoke PASSED (64 checks)**：
+    A 32 项注册面/静态否定（具名查询逐字、八列列序、无 ORDER BY/DISTINCT/`%s`/`NOW()`/
+    `ON DUPLICATE`/反引号/占位符、薄函数体内零字面 SQL 且登记 `__all__`、投影 `row[0..7]`
+    与列序逐位对应、调用点无本表 SQL/无 `conn.execute`/无 `db_lock`/无静默 except、余量 17、
+    安装表整表退出跨域矩阵）；
+    B 18 项原语语义（只取 active、八列逐列投影、`config` 空串/NULL → `{}`、TEXT id 原样、
+    同 `legacy_app_id` 重复行**不去重**、无行回 `[]` 而非 None、保持插入序=不排序、
+    `owner_user_id`/`repo_key` 空串保留、`conn=None` 走进程主库兜底、重复调用稳定）；
+    C 6 项调用点端到端（provider 在 worker 线程内枚举、停用后不枚举 / 恢复后重新枚举、
+    provider 关闭自己建的连接一次、坏 config 仍抛 `ValueError`（不静默丢行）、空表 → `[]`）；
+    D 8 项自有 DSN 伪游标（只走 `domain=mgmt`、调用方 conn 是「碰一下就炸」的陷阱对象且
+    全程未被触碰、语句逐字、无参数、只执行一次、`conn=None` 同走 mgmt）；
+  · `--update-baseline` → **baseline updated: 11 pairs, 17 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **11 表 / 17 跨域引用 / 11 对**
+    （`grape_t_channel_installation` 跨域消费方 1 → 0，整表退出矩阵：`sql_references`
+    930 → 887，差值 43 = 该表原有 43 处引用中 42 处属 mgmt 本域内引用、只有 1 处跨域）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**（EXIT=0）；
+    另跑 `tests/runtime/im/test_installations.py` **2 passed**、
+    `tests/runtime/im/test_im_routes.py` **5 passed**（单库拓扑的既有连接路径未被改坏）；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （mgmt 190 funcs + 1 named query used / 273 funcs + 31 queries registered）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点），运行面证据为 sqlite 烟测。
+- **新基线**：**17 处 / 11 对 / 11 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单
+  同步刷新。`src/domains/runtime/im/engine/installations.py` 已清零并退出榜单；下一批首个
+  未 blocked 文件是 `src/domains/runtime/engine/scene_nodes_write.py`（1 处：
+  `devops_pipeline_scene`，归 mgmt）；头两名仍是 ⛔ blocked 的 `credential_usage_log.py` 与
+  `prompt_builder.py`（各 3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

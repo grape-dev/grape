@@ -750,6 +750,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "delete_feishu_onboard_task_any",
            # IM 身份解析 / 巡检执行卡（runtime/im/handler_async.py；任意拓扑）
            "sender_identity_user_by_app_any", "installation_owner_by_app_any",
+           # 安装枚举来源（runtime/im/engine/installations.py；任意拓扑）
+           "installation_provider_rows_any",
            "autopilot_task_brief_any", "scene_names_by_repo_any",
            # 能效看板取数（insight/observability/efficiency.py；任意拓扑）
            "account_name_rows_by_ids", "scene_display_name_rows",
@@ -1827,6 +1829,14 @@ _ANY_QUERIES: dict[str, str] = {
     "installation_list_all": (
         "SELECT id, channel_type, scope, owner_user_id, repo_key, config, status, updated_at "
         "FROM grape_t_channel_installation ORDER BY updated_at DESC"),
+    # 安装枚举来源（runtime/im/engine/installations.py 的 Supervisor installation_provider）。
+    # 八列、列序与原语句逐字一致（调用方按下标解包；config 原文由调用方 json.loads，本层不解析）。
+    # 原语句无 ORDER BY，这里也不排序：「枚举顺序」由调用方哈希环归属决定，加排序会改变
+    # 扫描口径（首轮接管顺序），属行为变更而非归位。
+    "installation_provider_active_rows": (
+        "SELECT id, channel_type, scope, owner_user_id, repo_key, config, "
+        "config_fingerprint, status FROM grape_t_channel_installation "
+        "WHERE status='active'"),
     "installation_owner_by_id": (
         "SELECT scope, owner_user_id, repo_key FROM grape_t_channel_installation WHERE id=?"),
     "installation_detail_by_id": (
@@ -4418,6 +4428,31 @@ def installation_active_installs_any() -> list[tuple]:
     with _any_cursor() as c:
         c.execute("SELECT id, scope, owner_user_id, repo_key, config, status "
                   "FROM grape_t_channel_installation WHERE status='active'")
+        return [tuple(r) for r in (c.fetchall() or [])]
+
+
+def installation_provider_rows_any(conn: Any = None) -> list[tuple]:
+    """活跃安装八列 (id, channel_type, scope, owner_user_id, repo_key, config,
+    config_fingerprint, status)——Supervisor 的 installation_provider 枚举来源。
+
+    原实现在 runtime 进程里用 `engine_wiring._connect(db_path)`（钉住 runtime 库的 IM
+    句柄）直发 SQL：三库拓扑下该库没有本表（视图 0）→ 1146，被 supervisor 的
+    `except → log.warning → 下一轮继续` 吞成「一个安装都扫不到」——引擎整体不接管任何
+    渠道，日志只留一行 scan round failed，线索指向 DB 抖动而不是「库不对」。
+
+    拓扑取舍（两条拓扑各用各的连接，SQL 只在本域留这一份）：
+      - 单库 / 测试：**复用调用方 conn**（sqlite 线程亲和：conn 与其游标都在同一个 worker
+        线程内创建/使用；关闭仍归调用方）。`conn=None` → 进程主库 + db_lock。
+      - 自有 DSN：**忽略**调用方 conn —— 那是 runtime 库句柄，读不到本域表；改用本域连接。
+
+    `status='active'` 过滤与「不排序」都是原口径：枚举顺序由调用方的哈希环归属决定，
+    这里加 ORDER BY 会改变首轮接管顺序，属行为变更而非归位。
+    """
+    caller_cursor = None
+    if conn is not None and not db_registry.uses_own_dsn("mgmt"):
+        caller_cursor = conn.cursor()
+    with _owner_cursor(caller_cursor) as c:
+        c.execute(_any_sql("installation_provider_active_rows"))
         return [tuple(r) for r in (c.fetchall() or [])]
 
 
