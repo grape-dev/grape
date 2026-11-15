@@ -95,25 +95,45 @@ def scan_file(path: str, rel: str, domain: str, owned: set[str]) -> list[dict]:
     except SyntaxError:
         return []
 
+    # 只用模块层语句构造模块环境（不进函数体，函数内赋值不得泄入）：
+    # 模块级的 if/try/with 等控制流体内仍是模块作用域，需递归
     mod_env: dict[str, str] = {}
-    for n in ast.walk(tree):
-        if isinstance(n, ast.ImportFrom):
-            for a in n.names:
-                if n.module and n.module.endswith("session_manager") and a.name in ("db", "_db"):
-                    mod_env[a.asname or a.name] = "pg"
-        elif isinstance(n, ast.Assign):
-            o = origin_of(n.value, mod_env)
-            for t in n.targets:
-                if isinstance(t, ast.Name):
-                    mod_env[t.id] = o
 
-    out = []
-    for fn in ast.walk(tree):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
+    def _collect_mod(stmts):
+        for n in stmts:
+            if isinstance(n, ast.ImportFrom):
+                for a in n.names:
+                    if n.module and n.module.endswith("session_manager") and a.name in ("db", "_db"):
+                        mod_env[a.asname or a.name] = "pg"
+            elif isinstance(n, ast.Assign):
+                o = origin_of(n.value, mod_env)
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        mod_env[t.id] = o
+            elif isinstance(n, (ast.If, ast.Try)):
+                for body in (n.body, getattr(n, "orelse", []), getattr(n, "finalbody", [])):
+                    _collect_mod(body or [])
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                _collect_mod(n.body)
+
+    _collect_mod(tree.body)
+
+    funcs = [n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    by_name: dict[str, list] = {}
+    for fn in funcs:
+        by_name.setdefault(fn.name, []).append(fn)
+
+    def _fn_env(fn, seeds: dict[str, str]) -> dict[str, str]:
         env = dict(mod_env)
+        env.update(seeds)
         for n in ast.walk(fn):
-            if isinstance(n, ast.Assign):
+            if isinstance(n, ast.ImportFrom):
+                # 函数内延迟导入（含 db as _pdb 别名）同样构成 pg 来源
+                for a in n.names:
+                    if n.module and n.module.endswith("session_manager") and a.name in ("db", "_db"):
+                        env[a.asname or a.name] = "pg"
+            elif isinstance(n, ast.Assign):
                 o = origin_of(n.value, env)
                 for t in n.targets:
                     if isinstance(t, ast.Name):
@@ -129,7 +149,50 @@ def scan_file(path: str, rel: str, domain: str, owned: set[str]) -> list[dict]:
                 for item in n.items:
                     if item.optional_vars is not None and isinstance(item.optional_vars, ast.Name):
                         env[item.optional_vars.id] = origin_of(item.context_expr, env)
-            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
+        return env
+
+    # 参数来源传播（不动点）：调用方把 pg 游标按位传给本文件函数时，标记该形参为 pg。
+    # 取代旧实现「函数体赋值泄入模块环境」的隐式跨函数传播，消除兄弟作用域混叠。
+    pg_params: dict[tuple[str, str], set[str]] = {}
+    seeds: dict[str, dict[str, str]] = {}
+    for _ in range(5):
+        changed = False
+        for fn in funcs:
+            env = _fn_env(fn, seeds.get(fn.name, {}))
+            for n in ast.walk(fn):
+                if not (isinstance(n, ast.Call) and n.args):
+                    continue
+                callee = None
+                skip_self = 0
+                if isinstance(n.func, ast.Name) and n.func.id in by_name:
+                    callee = n.func.id
+                elif isinstance(n.func, ast.Attribute) and n.func.attr in by_name \
+                        and isinstance(n.func.value, ast.Name) and n.func.value.id == "self":
+                    callee = n.func.attr
+                    skip_self = 1
+                if callee is None:
+                    continue
+                for target in by_name[callee]:
+                    params = [a.arg for a in target.args.args]
+                    for i, arg in enumerate(n.args):
+                        if skip_self + i >= len(params):
+                            break
+                        o = origin_of(arg, env)
+                        key = (callee, params[skip_self + i])
+                        if o == "pg" and key not in pg_params:
+                            pg_params[key] = set()
+                        if o == "pg" and "pg" not in pg_params[key]:
+                            pg_params[key].add("pg")
+                            seeds.setdefault(callee, {}).setdefault(params[skip_self + i], "pg")
+                            changed = True
+        if not changed:
+            break
+
+    out = []
+    for fn in funcs:
+        env = _fn_env(fn, seeds.get(fn.name, {}))
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
                     and n.func.attr in ("execute", "executemany") and n.args:
                 sql = const_str(n.args[0])
                 if not sql:

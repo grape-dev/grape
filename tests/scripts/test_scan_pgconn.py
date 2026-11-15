@@ -75,3 +75,19 @@ def test_domain_cursor_excluded(tmp_path):
 def test_sql_on_foreign_table_ignored(tmp_path):
     # meta 不在 runtime 自有表集合 → 属跨域口径，由 foreign_table_refs 负责
     assert _scan(tmp_path, CASE_FOREIGN_TABLE) == []
+
+
+def test_function_local_assignment_does_not_leak_into_module_env(tmp_path):
+    # 函数体内的 `c = db.cursor()` 不得泄入模块环境：兄弟函数的同名参数游标来源未知，不应误报
+    case = '''
+from src.kernel.session_manager import db
+
+def f(x):
+    c = db.cursor()
+    c.execute("SELECT status FROM agent_runtimes WHERE id=%s", (x,))
+
+def h(c):
+    c.execute("SELECT status FROM agent_runtimes WHERE id=%s", (1,))
+'''
+    hits = _scan(tmp_path, case)
+    assert [h["func"] for h in hits] == ["f"]
