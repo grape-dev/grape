@@ -199,20 +199,18 @@ def _fetch_github_collaborators(owner: str, repo: str, api_token: str) -> list:
     return collabs
 
 def _resolve_uid_by_platform_login(login: str, provider: str) -> int:
-    """FR-21.2: 从 external_identities 按 platform login 查 grape_user_id。"""
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        from src.kernel.domain_read import mgmt_lib as _mg_lib_eil
-        _eil_lib = _mg_lib_eil(foreign_only=True)
-        if _eil_lib is not None:
-            row = _eil_lib.read_one("grape_user_id_by_external_login", (provider, login))
-        else:
-            row = c.execute(
-                "SELECT ei.grape_user_id FROM external_identities ei "
-                "WHERE ei.provider=? AND ei.external_login=? AND ei.status=1 LIMIT 1",
-                (provider, login)).fetchone()
-        return row[0] if row else 0
+    """FR-21.2: 按平台 login 解析 grape 账号 id（external_identities 归 mgmt 域）。
+
+    原来这里是「跨进程 lib 具名查询优先 + 进程库兜底 SQL」双分支。兜底那句只在 lib
+    不可用时执行（单库 / 视图期），而三库拓扑正是那个分支：runtime 库没有
+    external_identities（视图 0 → 1146），异常被外层吞成「解析不到」——群成员映射
+    静默失配、只绑不上飞书身份。上移后两条拓扑共用 mgmt public 的同一句可移植查询，
+    本文件不再持有任何跨域 SQL（含 `%s` 的 lib 注册名也不再被消费）。
+
+    入参与返回值不变：`(login, provider)` 顺序照旧，未命中返回 0。
+    """
+    from src.domains.mgmt import public as _mgmt_public_eil
+    return _mgmt_public_eil.external_user_id_by_login(provider, login)
 
 class FeishuAsync:
     """纯异步飞书API客户端 — 基于 aiohttp，无阻塞调用"""

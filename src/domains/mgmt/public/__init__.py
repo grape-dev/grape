@@ -1560,6 +1560,14 @@ def _any_tx():
 # 两条连接都能执行，调用方不需要（也不允许）再留兜底 SQL。
 
 _ANY_QUERIES: dict[str, str] = {
+    # 平台身份（external_identities 归本域）：按平台 login 取账号 id（FR-21.2）。
+    # 原调用方 runtime/im/feishu_async 是「mgmt_lib 优先 + 进程库兜底 SQL」双分支，
+    # 兜底那句只在 lib 不可用时执行（单库/视图期），却正是跨域表引用的来源；且三库
+    # 拓扑下 lib 不可用时 runtime 库根本没有 external_identities（视图 0 → 1146），
+    # 群成员映射会静默失配。上移后两条拓扑跑同一句，调用方不再留 SQL。
+    "external_user_id_by_external_login": (
+        "SELECT ei.grape_user_id FROM external_identities ei "
+        "WHERE ei.provider=? AND ei.external_login=? AND ei.status=1 LIMIT 1"),
     # 用户映射：按平台列取映射用户（列名由本域白名单挑选，调用方不得拼列名）
     "um_user_id_by_gitcode_user": (
         "SELECT user_id FROM unified_user_mapping "
@@ -3528,6 +3536,23 @@ def external_user_id(provider: str, external_id: str) -> Any:
                   (provider, str(external_id)))
         row = c.fetchone()
     return row[0] if row else None
+
+
+def external_user_id_by_login(provider: str, external_login: str) -> Any:
+    """按 (provider, external_login) 取账号 id（external_identities 归 mgmt）；无命中返回 0。
+
+    与 runtime/im/feishu_async 原来那句兜底 SQL 逐列逐字同口径：单列 `ei.grape_user_id`、
+    `provider=?` 在前 `external_login=?` 在后、只认 `status=1`（status=4 的失效凭据不算）、
+    `LIMIT 1` 取首行。未命中返回 **0**（不是 None）：调用点写的是 `if _uid:`，0 与空串
+    等价；而原语句的 `row[0] if row else 0` 也返回 0，保持同一返回值域。
+
+    空 provider / 空 login 直接返回 0 且不发查询（不存在 provider 为空的身份行，
+    与同族 `external_user_id` 的入参守卫一致）。
+    """
+    if not provider or external_login in (None, ""):
+        return 0
+    row = read_one_any("external_user_id_by_external_login", (provider, str(external_login)))
+    return row[0] if row else 0
 
 
 # ---------- 迁移期批量回填（跨域 JOIN 的替代：先取本域映射，再交给各域回填） ----------

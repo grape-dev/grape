@@ -5,7 +5,6 @@ api_latency_log,insight,api,1
 devops_pipeline_scene,mgmt,runtime,2
 distributed_locks,runtime,insight,1
 events,runtime,api,1
-external_identities,mgmt,runtime,1
 grape_t_channel_installation,mgmt,runtime,1
 grape_t_credential_usage_log,runtime,kernel,3
 grape_t_merge_gate_log,insight,api,1

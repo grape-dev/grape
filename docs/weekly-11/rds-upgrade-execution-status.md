@@ -5543,6 +5543,88 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   `src/api/a2a_dispatch.py`（1 处：`agent_runtimes`，归 runtime）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
 
+### 7.50 runtime 飞书群成员映射的平台身份查询下沉 mgmt owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/domains/runtime/im/feishu_async.py` **1 处 → 0**（单轮做完，1 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`external_identities`（归 **mgmt**，`grape_mgmt_db`）× 1：
+  改前 L212 在 `_resolve_uid_by_platform_login()`——FR-21.2 群成员映射里，异源平台（github 等）的
+  协作者平台 login 必须先解析成 grape 账号 id 才能 `bind_feishu_identity`：
+  `SELECT ei.grape_user_id FROM external_identities ei WHERE ei.provider=? AND ei.external_login=? AND ei.status=1 LIMIT 1`
+  （lib 不可用时的本地兜底句）。
+- owner 侧改动（`src/domains/mgmt/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增具名查询 `external_user_id_by_external_login`（L1568）：语句与原兜底句
+    **逐字一致**（单列 `ei.grape_user_id`、`provider` 在前 `external_login` 在后、只认 `status=1`、
+    `LIMIT 1`）；只用 `?` 方言面，无 `%s` / `NOW()` / `ON DUPLICATE` / 反引号。
+  - 新增薄函数 `external_user_id_by_login(provider, external_login) -> Any`（L3541）：体内零 SQL，
+    空 provider / 空 login **直接返回 0 且不查库**，命中回 `row[0]`、无行回 `0`。
+  - 未登记 `__all__`：与同族 `external_user_id` 一致（调用方走模块属性，不需要 star-export；
+    登记面判据是 `def`）。
+- 调用点 `feishu_async.py`：**双分支塌成一行委托**。原实现是
+  「`mgmt_lib(foreign_only=True).read_one("grape_user_id_by_external_login")` → 否则本进程库
+  `db.cursor()` 直发兜底句，整段包在 `with db_lock:` 里」，现改为函数内延迟 import
+  （`from src.domains.mgmt import public as _mgmt_public_eil`）→
+  `return _mgmt_public_eil.external_user_id_by_login(provider, login)`；取锁/取游标整段删除
+  （`read_one_any` 的 `_any_cursor` 在回落路径自己持有同一把可重入锁）。入参序 `(login, provider)`
+  与返回值域（`0` 表示未命中）**逐字不变**，调用点 L827 的 `if _uid:` 语义不受影响。
+  延迟 import 保留在函数体内：runtime→mgmt 走模块级 import 会把两个大包在 import 期绑死。
+- 设计取舍：
+  1. **不复用 `_READ_QUERIES["grape_user_id_by_external_login"]`**：那是 C 族（`%s` +
+     `db_registry.cursor("mgmt")`），单库拓扑下 `current_domain() != "mgmt"` 直接 `RuntimeError`，
+     不算可复用原语。A 族 `_ANY_QUERIES` 两条拓扑跑同一句，才是「SQL 只留 owner 一份」。
+  2. **返回 `0` 而不是 `None`**：调用点写的是 `if _uid:`（0/空串等价），原语句
+     `row[0] if row else 0` 也回 0；返回 None 会让类型漂移且烟测只能靠 falsy 断言。
+  3. **空参短路**：不存在 provider 为空的身份行，与同族 `external_user_id` 的守卫一致；
+     省掉一次必然落空的查询，且「空参不连库」可被烟测钉住。
+  4. **纯读、不新增写原语**：本处只读平台身份，写仍在 mgmt 本域（绑定/换发），无跨域事务需求，
+     不碰 `_any_tx()` / outbox。
+  5. **不做大小写折叠**：原句是 `external_login=?`（无 `LOWER`），改成 `LOWER(...)=LOWER(...)`
+     会把「Alice 与 alice 是两个平台账号」的既有口径改掉；烟测 B5 把这个旧口径钉住。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **三库拓扑下群成员映射恒匹配不上**：lib 分支不可用时兜底句跑在 **runtime 进程库**，那里
+     没有 `external_identities`（视图 0 → 1146），异常被 `sync_repo_feishu_mapping` 的外层
+     `except Exception` 吞成「拉不到协作者 / `matched=0`」，日志只留一句
+     `failed to fetch collaborators`，线索指向网络而不是「库不对」。表现为 github 等异源平台的
+     协作者从来不绑飞书身份。
+  2. **同一判定按拓扑走两个只读副本**：`%s` 具名查询与兜底 `?` 语句是同一句话的两份拷贝，
+     失败表现不同而正确结果只有一个；上移后两条拓扑跑同一份 owner 语句。
+- 遗留（不在本批范围）：owner 侧 `_READ_QUERIES["grape_user_id_by_external_login"]`（`%s`，
+  跨进程 lib 注册面）现已**无消费方**；删除属另一件事（同 7.46/7.47/7.48/7.49 的处理）。
+  `scripts/check_lib_query_names.py` 报 mgmt `named queries used 2 → 1` 就是它。
+- 验证（真实退出码）：
+  · `py_compile`（`src/domains/mgmt/public/__init__.py` / `src/domains/runtime/im/feishu_async.py`）
+    → **COMPILE_OK**；
+  · `~/burndown/feishu_async_smoke.py`（`DEVOPS_DB_BACKEND=sqlite DEVOPS_DB_PATH=~/burndown/feishu_async.db`，
+    自建 `external_identities`，连跑 2 次稳定）→ **ALL feishu_async smoke PASSED (56 checks)**：
+    A 24 项注册面/静态否定（具名查询逐字、`?` 两个占位、无 `%s`/`NOW()`/`ON DUPLICATE`/反引号、
+    AST 查薄函数体内无 `execute`/无 `external_identities` 语句/参数序 `(provider, str(external_login))`、
+    无静默 except、调用点无 `external_identities` SQL/无 `db.cursor`/`db_lock`/`domain_read`/`mgmt_lib`、
+    不再消费 `grape_user_id_by_external_login`、余量 18、该表退出跨域清单、基线 ≥ 18、
+    owner 侧 `%s` 注册面保留）；
+    B 16 项原语语义（`status=1` 才命中、`status=4` 失效凭据不算、provider 精确匹配、
+    **参数位置不被串**（陷阱行 `provider='alice', login='github'` 不被正确调用取到）、
+    同 `(provider, login)` 多行走 `LIMIT 1`、无行回 0 而非 None、空参不查库、大小写不折叠、
+    只读、重复调用稳定）；C 9 项调用点端到端（`(login, provider)` 传参序由「反着传命中陷阱行、
+    正着传绝不命中」双向证明、失效凭据 → 0、未登录协作者 → 0、空 login 不碰库、TEXT id 原样透传、
+    重复调用稳定）；D 7 项自有 DSN 伪游标（只走 `domain=mgmt`、语句逐字、参数
+    `('github','alice')` 逐字、只执行一次、空 login 连库都不碰）；
+  · `--update-baseline` → **baseline updated: 12 pairs, 18 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **12 表 / 18 跨域引用 / 12 对**
+    （`external_identities` 的跨域消费方 1 → 0，整表退出矩阵：`sql_references` 979 → 930，
+    差值 49 = 该表原有 49 处引用中 48 处属 mgmt 本域内引用、只有 1 处跨域；矩阵只列有跨域
+    消费方的表，故随最后一条跨域引用一起移出）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**（EXIT=0）；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （mgmt 189 funcs + 1 named query used / 272 funcs + 31 queries registered）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点），运行面证据为 sqlite 烟测。
+- **新基线**：**18 处 / 12 对 / 12 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单
+  同步刷新。`src/domains/runtime/im/feishu_async.py` 已清零并退出榜单；下一批首个未 blocked 文件是
+  `src/domains/runtime/im/engine/installations.py`（1 处：`grape_t_channel_installation`，归 mgmt）；
+  头两名仍是 ⛔ blocked 的 `credential_usage_log.py` 与 `prompt_builder.py`（各 3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |
