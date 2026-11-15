@@ -134,7 +134,7 @@ class _ReplicaLock:
             try:
                 conn.close()
             except Exception:
-                pass
+                log.debug("sweeper: 关闭独立连接失败（忽略）")
             return False
         except Exception as e:  # noqa: BLE001 - 锁不可用不阻断清扫
             log.debug(f"sweeper lock unavailable ({self.key}): {e}")
@@ -142,7 +142,7 @@ class _ReplicaLock:
                 try:
                     conn.close()
                 except Exception:
-                    pass
+                    log.debug("sweeper: 关闭独立连接失败（忽略）")
             return True
 
     def release(self) -> None:
@@ -157,7 +157,7 @@ class _ReplicaLock:
             try:
                 self._conn.close()
             except Exception:
-                pass
+                log.debug("sweeper: 关闭独立连接失败（忽略）")
             self._conn, self._held = None, False
 
 
