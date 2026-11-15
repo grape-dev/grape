@@ -10706,7 +10706,7 @@
         "tags": [
           "git-repo"
         ],
-        "summary": "Update issue",
+        "summary": "Update an issue",
         "description": "Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id prefers the milestone `id` and also accepts `number` (Issue #1005); the resolved milestone is sent upstream as `milestone`, PATCH auto-fills required repo/title. GitHub: milestone_id maps to the upstream `milestone` field (milestone number). The milestone is pre-validated before write and the existing value is preserved/rolled back on failure; success is read-back verified and echoed. Failure semantics are distinguishable instead of a generic 502: 400 when the milestone does not exist / is not visible, 403 when the caller lacks permission, 422 when upstream accepted the PATCH but ignored the milestone. Upstream real failures still return 5xx.",
         "operationId": "gitrepo_issues_update",
         "parameters": [

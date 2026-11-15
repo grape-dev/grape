@@ -5027,6 +5027,79 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   其后是 `src/api/feedback_issue_converter.py`（2 处：`user_feedback`，归 mgmt）；头两名仍是 ⛔ blocked 的
   `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
 
+### 7.43 api 仓库透传的接管会话校验下沉 runtime owner 域（2026-11-15 本批）
+
+- 文件 / 处数：`src/api/git_repo_api.py` **2 处 → 0**（单轮做完，2 处未超 25）。
+- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  - L388 真 SQL，`takeover_sessions`（归 **runtime**）：`SELECT status FROM takeover_sessions
+    WHERE task_id=? ORDER BY created_at DESC LIMIT 1` —— `_repo_token()` 里对 `tko_` 接管
+    token 的二次校验（token 有效不等于会话仍 active，finish/abort 会吊销）。
+  - L984 **不是 SQL**：`@router.patch(..., summary="Update issue", ...)` 的 OpenAPI 摘要，
+    静态正则按「UPDATE + 下一个标识符」读成 `UPDATE issue`（假阳性）。同款先例见
+    mgmt skills 批的 OpenAPI summary 与 `Failed to update issue session` 日志文案。
+- owner 侧改动（`src/domains/runtime/public/__init__.py`）：
+  - `_ANY_QUERIES` 新增一条具名查询 `takeover_session_status_by_task`，谓词 / 排序 /
+    `LIMIT 1` 与原语句逐字一致，只取 `status` 一列，只用 `?` 占位符
+    （无 `%s` / `NOW()` / `ON DUPLICATE` / 反引号）。
+  - 新增薄函数 `takeover_session_status_any(task_id)`，体内零 SQL，只调 `read_one_any`；
+    `None` 归一成空串（原实现 `str(user.get("session_key") or "")` 之后只会传字符串），
+    无行 → `None`。登记 `__all__`。
+- 调用点 `git_repo_api.py`：删掉函数内 `from src.domains.runtime.engine import takeover`、
+  `_tk.db_lock` / `_tk.db.cursor()` / `fetchone`，改走模块级
+  `_runtime_public.takeover_session_status_any`（`_tk_session_status` 薄包装）；
+  `takeover:` 前缀剥离、`!= "active"` → 403、异常 → 503 的形状原样保留。
+- 设计取舍：
+  1. **只换取数通道，状态机留调用方**：`active` 才放行、403「接管会话已结束」/ 503
+     「接管会话校验失败」的区分是鉴权语义（`_repo_token` 的契约），不下沉到 owner 域。
+  2. **不借 `runtime.engine.takeover` 的连接**：原实现借的是接管模块自己的 `db` +
+     `db_lock`，本质是「单库拓扑下进程库恰好有该表」。改用 `*_any` 原语后，单库拓扑
+     回落进程主库、三库拓扑走 runtime 自有 DSN，两种拓扑同一份 SQL。
+  3. **一次查询只登记一条语句**：本处没有动态列/动态表，也没有跨域 JOIN，不引入
+     「按布尔选语句」的多余分支（对比 7.42 的列回退场景）。
+  4. **保留原实现的宽松口径**：语句不按 `username` / token 归属过滤，也不先筛
+     `status='active'` —— 判定是「该任务最近一条会话说了算」。烟测把这两点都钉住
+     （B2 / B7），避免下一个人「顺手加个 status 过滤」改变判定。
+  5. **假阳性按判据口径改述**：`summary="Update issue"` → `"Update an issue"`，与同端
+     description 首句 `Updates an issue` 一致，语义不变、不改行为；入仓的部署即用副本
+     `src/api/frontend/shell/openapi.json` 同步改这一行（1 行 diff）。这是文案与实现
+     同源，不是「为了掉数字改 agent 提示文案」（prompt_builder 那条口径不适用）。
+- 修的存量 bug（结构性；三库拓扑尚未上线，线上未观测到故障）：
+  1. **接管态仓库操作全量 503**：三库拆分后 api 进程库没有 `takeover_sessions`（视图 0
+     → 1146），校验落到 `except Exception → 503`，所有持 `tko_` token 的 git-repo 透传
+     请求（读 Issue/PR、评论、内容……）在接管期间一律失败，人机接管的「人以 agent
+     身份干活」链路整体不可用，且没有任何「库不对」的线索。
+  2. **接管会话二次校验失效方向不可控**：同一段代码在单库拓扑成立、三库拓扑恒 503，
+     属「按拓扑改语义」的反模式；接口化后两端一致。
+- 验证（真实退出码）：
+  · `py_compile`（`src/api/git_repo_api.py` / `src/domains/runtime/public/__init__.py`）→ **COMPILE_OK**；
+  · `~/burndown/git_repo_takeover_smoke.py`（`DEVOPS_DB_BACKEND=sqlite`，自建
+    `takeover_sessions` 表 + 独立伪游标）→ **ALL git_repo_takeover smoke PASSED (52 checks)**：
+    A 注册面/静态否定（语句逐字、单占位符、无 `%s`/`NOW()`/`ON DUPLICATE`/反引号、
+    语句不内联 `status='active'`、`__all__` 登记、薄函数体内无内联 SQL、调用点已无
+    `FROM takeover_sessions` 与 `runtime.engine.takeover`、OpenAPI 副本改述且
+    description 原样保留）；B 原语语义（同任务取最近一条、**不过滤 status**、任意状态
+    原值、任务隔离、无行/空串/None → `None`、不按 username 过滤、单列字符串返回、
+    空表不炸）；C 调用点端到端（active 放行取 bot token、`takeover:` 前缀剥离、非
+    active → 403 原文案、无会话 → 403、缺 `session_key` → 空串查询后 403、跨仓库早退
+    403 且不查库、非会话身份 403 且不查库、查询异常 → 503 且文案含原因、普通会话
+    token 不查该表）；D 自有 DSN 伪游标（两次都只走 `domain=runtime`、语句逐字、
+    参数 `(task_id,)`、`None` → `("",)`、空结果 → `None`）。
+  · `--update-baseline` → **baseline updated: 18 pairs, 27 refs**；
+  · `python3 scripts/gen_domain_dependency_board.py` → **18 表 / 27 跨域引用 / 18 对**
+    （`takeover_sessions` 与 `issue` 的 api 消费方清零，文件数 19 → 18）；
+  · `bash scripts/rds_gate.sh --quick` → **GATE: 全绿**（check-arch R1–R7 PASS / 棘轮未上升 /
+    内部契约 37 条最新 / 依赖看板最新）；
+  · `pytest tests/arch tests/contracts tests/scripts` → **158 passed**；
+  · `make lint` → **import OK**；`scripts/check_lib_query_names.py` → **PASS**
+    （runtime 180 funcs + 25 named queries used / 264 funcs + 61 queries registered）。
+- 未验证项（如实）：本轮未跑 `p4_p5_loop.sh` 三实例彩排（本 shell 未注入 `SRC_PWD`/`REMOTE_PWD`；
+  口径同前几轮：py_compile + 专用烟测 + gate + 三组 pytest + lint，彩排压在余量归零后统一跑）。
+  本批不改 schema / 迁移 / 契约面（无新表、无新端点），运行面证据为 sqlite 烟测。
+- **新基线**：**27 处 / 18 对 / 18 表**（`--update-baseline` 已收紧）；依赖看板 / 矩阵 / 作业单同步刷新。
+  `src/api/git_repo_api.py` 已清零并退出榜单；下一批首个未 blocked 文件是
+  `src/api/feedback_issue_converter.py`（2 处：`user_feedback`，归 mgmt）；头两名仍是 ⛔ blocked 的
+  `credential_usage_log.py`（3 处）与 `prompt_builder.py`（3 处）。
+
 ## 8. 提交记录
 
 | 提交 | 内容 | 状态 |

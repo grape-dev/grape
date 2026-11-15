@@ -1519,7 +1519,9 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # 场景节点技能 scope 判定（src/api/scene_skill_scope.py）
            "skill_agent_type_by_priority_any", "skill_rebind_candidate_rows_any",
            # QA 结论门禁读口（src/api/qa_gate.py；events 本域）
-           "qa_gate_latest_event_any", "qa_gate_latest_pr_payload_any"]
+           "qa_gate_latest_event_any", "qa_gate_latest_pr_payload_any",
+           # 接管会话状态（src/api/git_repo_api.py；takeover_sessions 本域）
+           "takeover_session_status_any"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2550,6 +2552,11 @@ _ANY_QUERIES: dict[str, str] = {
         "AND event_type IN ('note_hook_pr','pull_request_opened',"
         "'pull_request_updated','pull_request_merged') "
         "ORDER BY seq DESC LIMIT 1"),
+    # ── 接管会话状态（api/git_repo_api.py 的 tko_ 二次校验）──
+    # 列序 / 排序 / LIMIT 与原语句逐字一致：只取 status 一列，按最近一条会话判定。
+    "takeover_session_status_by_task": (
+        "SELECT status FROM takeover_sessions WHERE task_id=? "
+        "ORDER BY created_at DESC LIMIT 1"),
 }
 
 
@@ -2645,6 +2652,23 @@ def qa_gate_latest_pr_payload_any(repo_key: str, issue_tags) -> Any | None:
     """该 Issue 最近一条 PR 类事件的 payload 原值（不解析 JSON）；无记录回 None。"""
     _row = read_one_any("qa_gate_latest_pr_payload",
                         (repo_key, issue_tags[0], issue_tags[1]))
+    return _row[0] if _row else None
+
+
+# ── 接管会话状态（api/git_repo_api.py 的 tko_ 二次校验）──
+# 原实现拿接管模块自己的 `db_lock` + `db.cursor()` 直查本域表：单库拓扑下就是进程
+# 主库，三库拆分后 api 进程库没有该表（视图 0 → 1146），校验落到 `except → 503`
+# 把**所有**接管态仓库操作打成 503。下面这条只按 task_id 取最近一条会话的 status；
+# 「active 才放行」的状态机判定与 403/503 文案仍留调用方。
+
+def takeover_session_status_any(task_id: str) -> str | None:
+    """该任务最近一条接管会话的状态（任意拓扑）；无行回 None。
+
+    列序与原语句逐字一致（只取 ``status``），按 ``created_at DESC`` 取第一条；
+    不过滤 ``status`` 也不按 token 归属过滤 —— 原实现的判定口径就这样，本函数只换通道。
+    """
+    _task = "" if task_id is None else str(task_id)
+    _row = read_one_any("takeover_session_status_by_task", (_task,))
     return _row[0] if _row else None
 
 
