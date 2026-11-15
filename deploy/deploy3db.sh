@@ -116,15 +116,49 @@ else
 fi
 
 echo "[3db] DOMAIN_LIB=$GRAPE_DOMAIN_LIB  mgmt=$GRAPE_DSN_MGMT" | sed 's#//[^@]*@#//***@#g'
-for _ in $(seq 1 40); do
-  up=0
+# 启动瞬态：进程可能仍在迁移/建连（2026-11-15 116 的 insight 卡在连接池初始化之后
+# 两分钟不监听端口，重启一次即好）。先等一轮，仍不齐就对没起来的角色单独重启一次再等一轮。
+_healthy_pids() {
+  local up=0 p
   for p in 38081 38082 38083 38084; do
     path=/api/health; case $p in 38082|38083) path=/health ;; esac
     curl -s -m 2 "http://127.0.0.1:$p$path" >/dev/null 2>&1 && up=$((up+1))
   done
-  [ "$up" -eq 4 ] && { echo "[3db] all 4 processes healthy"; break; }
-  sleep 2
-done
+  echo "$up"
+}
+_wait_healthy() {
+  local i
+  for i in $(seq 1 30); do
+    [ "$(_healthy_pids)" -eq 4 ] && return 0
+    sleep 2
+  done
+  return 1
+}
+if _wait_healthy; then
+  echo "[3db] all 4 processes healthy"
+else
+  _stuck=""
+  for pair in "38081:mgmt" "38082:event" "38083:worker" "38084:insight"; do
+    _p=${pair%%:*}; _role=${pair##*:}
+    path=/api/health; case $_p in 38082|38083) path=/health ;; esac
+    code=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$_p$path" 2>/dev/null)
+    [ "$code" != "200" ] && _stuck="$_stuck $_role"
+  done
+  if [ -n "$_stuck" ]; then
+    echo "[3db] WARN: 这些角色未就绪:$_stuck —— 判定为启动瞬态，单独重启一次再等一轮"
+    for _role in $_stuck; do
+      if [ "$_SYSTEMD_MODE" = "1" ]; then
+        systemctl restart "grape@$_role" 2>/dev/null || true
+      fi
+    done
+    if _wait_healthy; then
+      echo "[3db] all 4 processes healthy (after one restart)"
+    else
+      echo "[3db] FAIL: 重启一次后仍未全部就绪（见下方 status）" >&2
+      _unhealthy=1
+    fi
+  fi
+fi
 echo "[3db] status:"
 for p in 38081 38082 38083 38084; do
   path=/api/health; case $p in 38082|38083) path=/health ;; esac
@@ -155,6 +189,10 @@ for pair in "mgmt:grape_server" "event:grape_event_server" "worker:grape_worker_
 done
 if [ "$_stale_procs" -ne 0 ]; then
   echo "[3db] FAIL: 有进程未随本次部署重启（见上），代码未生效"
+  exit 1
+fi
+if [ "${_unhealthy:-0}" -ne 0 ]; then
+  echo "[3db] FAIL: 有角色重启一次后仍未就绪（见上方 status）" >&2
   exit 1
 fi
 
