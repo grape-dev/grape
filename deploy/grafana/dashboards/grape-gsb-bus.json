@@ -1,102 +1,26 @@
 {
-  "uid": "grape-gsb-bus",
-  "title": "GSB 服务总线调用总览",
-  "tags": [
-    "grape",
-    "gsb",
-    "bus",
-    "observability"
-  ],
-  "timezone": "browser",
-  "schemaVersion": 39,
-  "version": 1,
-  "refresh": "30s",
-  "time": {
-    "from": "now-6h",
-    "to": "now"
-  },
-  "templating": {
-    "list": [
-      {
-        "name": "target",
-        "label": "目标域",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "query": "label_values(grape_gsb_client_requests_total, target)",
-        "includeAll": true,
-        "multi": true,
-        "refresh": 2
-      },
-      {
-        "name": "caller",
-        "label": "调用方",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "query": "label_values(grape_gsb_client_requests_total, caller)",
-        "includeAll": true,
-        "multi": true,
-        "refresh": 2
-      }
-    ]
-  },
+  "id": 1032453648490496,
   "panels": [
     {
-      "id": 1,
-      "type": "row",
-      "title": "总览 · 走总线的调用有多少",
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 0
       },
-      "collapsed": false
+      "id": 1,
+      "title": "总览 · 走总线的调用有多少",
+      "type": "row"
     },
     {
-      "id": 2,
-      "type": "stat",
-      "title": "GSB 调用速率",
-      "description": "每分钟通过 GSB 服务总线发起的跨域调用数。",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 0,
-        "y": 1
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(grape_gsb_client_requests_total{target=~\"$target\", caller=~\"$caller\"}[5m])) * 60",
-          "instant": true,
-          "legendFormat": "GSB 调用速率"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto",
-        "orientation": "auto"
-      },
+      "description": "每分钟通过 GSB 服务总线发起的跨域调用数。",
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
           "decimals": 1,
           "thresholds": {
             "mode": "absolute",
@@ -106,35 +30,22 @@
                 "value": null
               }
             ]
-          }
+          },
+          "unit": "short"
         },
         "overrides": []
-      }
-    },
-    {
-      "id": 3,
-      "type": "stat",
-      "title": "通过 GSB 的调用占比",
-      "description": "GSB 调用 ÷ HTTP 接口调用总数。运维看的就是这个比例：其余都走域内 DSN 直连。",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
       },
       "gridPos": {
         "h": 5,
         "w": 6,
-        "x": 6,
+        "x": 0,
         "y": 1
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(grape_gsb_client_requests_total[5m])) / clamp_min(sum(rate(grape_http_requests_total[5m])), 0.000001) * 100",
-          "instant": true,
-          "legendFormat": "通过 GSB 的调用占比"
-        }
-      ],
+      "id": 2,
       "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "orientation": "auto",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -142,14 +53,27 @@
           "fields": "",
           "values": false
         },
-        "colorMode": "value",
-        "graphMode": "none",
-        "textMode": "auto",
-        "orientation": "auto"
+        "textMode": "auto"
       },
+      "targets": [
+        {
+          "expr": "sum(rate(grape_gsb_client_requests_total{target=~\"$target\", caller=~\"$caller\"}[5m])) * 60",
+          "instant": true,
+          "legendFormat": "GSB 调用速率",
+          "refId": "A"
+        }
+      ],
+      "title": "GSB 调用速率",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "GSB 调用 ÷ HTTP 接口调用总数。运维看的就是这个比例：其余都走域内 DSN 直连。",
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
           "decimals": 2,
           "thresholds": {
             "mode": "absolute",
@@ -167,35 +91,22 @@
                 "value": 30
               }
             ]
-          }
+          },
+          "unit": "percent"
         },
         "overrides": []
-      }
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "HTTP 接口调用速率",
-      "description": "四进程对外 HTTP 接口调用速率（对照基准）。",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
       },
       "gridPos": {
         "h": 5,
         "w": 6,
-        "x": 12,
+        "x": 6,
         "y": 1
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(grape_http_requests_total[5m])) * 60",
-          "instant": true,
-          "legendFormat": "HTTP 接口调用速率"
-        }
-      ],
+      "id": 3,
       "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "orientation": "auto",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -203,14 +114,27 @@
           "fields": "",
           "values": false
         },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto",
-        "orientation": "auto"
+        "textMode": "auto"
       },
+      "targets": [
+        {
+          "expr": "sum(rate(grape_gsb_client_requests_total[5m])) / clamp_min(sum(rate(grape_http_requests_total[5m])), 0.000001) * 100",
+          "instant": true,
+          "legendFormat": "通过 GSB 的调用占比",
+          "refId": "A"
+        }
+      ],
+      "title": "通过 GSB 的调用占比",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "四进程对外 HTTP 接口调用速率（对照基准）。",
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
           "decimals": 1,
           "thresholds": {
             "mode": "absolute",
@@ -220,35 +144,22 @@
                 "value": null
               }
             ]
-          }
+          },
+          "unit": "short"
         },
         "overrides": []
-      }
-    },
-    {
-      "id": 5,
-      "type": "stat",
-      "title": "GSB 错误率",
-      "description": "status 非 success 的 GSB 调用占比。",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
       },
       "gridPos": {
         "h": 5,
         "w": 6,
-        "x": 18,
+        "x": 12,
         "y": 1
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(grape_gsb_client_requests_total{status!=\"success\"}[5m])) / clamp_min(sum(rate(grape_gsb_client_requests_total[5m])), 0.000001) * 100",
-          "instant": true,
-          "legendFormat": "GSB 错误率"
-        }
-      ],
+      "id": 4,
       "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "orientation": "auto",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -256,14 +167,27 @@
           "fields": "",
           "values": false
         },
-        "colorMode": "value",
-        "graphMode": "none",
-        "textMode": "auto",
-        "orientation": "auto"
+        "textMode": "auto"
       },
+      "targets": [
+        {
+          "expr": "sum(rate(grape_http_requests_total[5m])) * 60",
+          "instant": true,
+          "legendFormat": "HTTP 接口调用速率",
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP 接口调用速率",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "status 非 success 的 GSB 调用占比。",
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
           "decimals": 2,
           "thresholds": {
             "mode": "absolute",
@@ -281,31 +205,70 @@
                 "value": 5
               }
             ]
-          }
+          },
+          "unit": "percent"
         },
         "overrides": []
-      }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(grape_gsb_client_requests_total{status!=\"success\"}[5m])) / clamp_min(sum(rate(grape_gsb_client_requests_total[5m])), 0.000001) * 100",
+          "instant": true,
+          "legendFormat": "GSB 错误率",
+          "refId": "A"
+        }
+      ],
+      "title": "GSB 错误率",
+      "type": "stat"
     },
     {
-      "id": 6,
-      "type": "row",
-      "title": "调用流向 · 谁在调谁",
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 6
       },
-      "collapsed": false
+      "id": 6,
+      "title": "调用流向 · 谁在调谁",
+      "type": "row"
     },
     {
-      "id": 7,
-      "type": "timeseries",
-      "title": "GSB 调用速率（按目标域）",
-      "description": "每条线是一个 target 域（runtime / insight / mgmt）。",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
+      },
+      "description": "每条线是一个 target 域（runtime / insight / mgmt）。",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -313,48 +276,48 @@
         "x": 0,
         "y": 7
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (target) (rate(grape_gsb_client_requests_total{target=~\"$target\", caller=~\"$caller\"}[5m])) * 60",
-          "legendFormat": "→ {{target}}"
-        }
-      ],
+      "id": 7,
       "options": {
         "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
           "calcs": [
             "mean",
             "max",
             "lastNotNull"
-          ]
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
         },
         "tooltip": {
           "mode": "multi",
           "sort": "desc"
         }
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      }
+      "targets": [
+        {
+          "expr": "sum by (target) (rate(grape_gsb_client_requests_total{target=~\"$target\", caller=~\"$caller\"}[5m])) * 60",
+          "legendFormat": "→ {{target}}",
+          "refId": "A"
+        }
+      ],
+      "title": "GSB 调用速率（按目标域）",
+      "type": "timeseries"
     },
     {
-      "id": 8,
-      "type": "timeseries",
-      "title": "GSB 调用速率（按调用方）",
-      "description": "每条线是一个 caller —— 哪个域在大量跨域调用。",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
+      },
+      "description": "每条线是一个 caller —— 哪个域在大量跨域调用。",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -362,60 +325,60 @@
         "x": 12,
         "y": 7
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (caller) (rate(grape_gsb_client_requests_total{target=~\"$target\", caller=~\"$caller\"}[5m])) * 60",
-          "legendFormat": "{{caller}} →"
-        }
-      ],
+      "id": 8,
       "options": {
         "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
           "calcs": [
             "mean",
             "max",
             "lastNotNull"
-          ]
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
         },
         "tooltip": {
           "mode": "multi",
           "sort": "desc"
         }
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      }
+      "targets": [
+        {
+          "expr": "sum by (caller) (rate(grape_gsb_client_requests_total{target=~\"$target\", caller=~\"$caller\"}[5m])) * 60",
+          "legendFormat": "{{caller}} →",
+          "refId": "A"
+        }
+      ],
+      "title": "GSB 调用速率（按调用方）",
+      "type": "timeseries"
     },
     {
-      "id": 9,
-      "type": "row",
-      "title": "对照 · 总线 vs 直连",
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 15
       },
-      "collapsed": false
+      "id": 9,
+      "title": "对照 · 总线 vs 直连",
+      "type": "row"
     },
     {
-      "id": 10,
-      "type": "timeseries",
-      "title": "GSB vs HTTP 调用量对比",
-      "description": "绿色是走总线的调用，蓝色是 HTTP 接口全部调用。两者比例就是面板 3。",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
+      },
+      "description": "绿色是走总线的调用，蓝色是 HTTP 接口全部调用。两者比例就是面板 3。",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -423,53 +386,53 @@
         "x": 0,
         "y": 16
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(grape_gsb_client_requests_total[5m])) * 60",
-          "legendFormat": "GSB 总线"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(rate(grape_http_requests_total[5m])) * 60",
-          "legendFormat": "HTTP 接口（全部）"
-        }
-      ],
+      "id": 10,
       "options": {
         "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
           "calcs": [
             "mean",
             "max",
             "lastNotNull"
-          ]
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
         },
         "tooltip": {
           "mode": "multi",
           "sort": "desc"
         }
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "showPoints": "never"
-          }
+      "targets": [
+        {
+          "expr": "sum(rate(grape_gsb_client_requests_total[5m])) * 60",
+          "legendFormat": "GSB 总线",
+          "refId": "A"
         },
-        "overrides": []
-      }
+        {
+          "expr": "sum(rate(grape_http_requests_total[5m])) * 60",
+          "legendFormat": "HTTP 接口（全部）",
+          "refId": "B"
+        }
+      ],
+      "title": "GSB vs HTTP 调用量对比",
+      "type": "timeseries"
     },
     {
-      "id": 11,
-      "type": "timeseries",
-      "title": "GSB 调用延迟分位",
-      "description": "p50/p95/p99。总线延迟应明显高于域内直连（网络 + 序列化代价）。",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
+      },
+      "description": "p50/p95/p99。总线延迟应明显高于域内直连（网络 + 序列化代价）。",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "s"
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -477,58 +440,58 @@
         "x": 0,
         "y": 24
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(grape_gsb_client_duration_seconds_bucket[5m])))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(grape_gsb_client_duration_seconds_bucket[5m])))",
-          "legendFormat": "p95"
-        },
-        {
-          "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(grape_gsb_client_duration_seconds_bucket[5m])))",
-          "legendFormat": "p99"
-        }
-      ],
+      "id": 11,
       "options": {
         "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
           "calcs": [
             "mean",
             "max",
             "lastNotNull"
-          ]
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
         },
         "tooltip": {
           "mode": "multi",
           "sort": "desc"
         }
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "showPoints": "never"
-          }
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(grape_gsb_client_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
         },
-        "overrides": []
-      }
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(grape_gsb_client_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(grape_gsb_client_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "title": "GSB 调用延迟分位",
+      "type": "timeseries"
     },
     {
-      "id": 12,
-      "type": "timeseries",
-      "title": "HTTP 接口延迟分位",
-      "description": "接口侧 p50/p95/p99，作 GSB 延迟的对照基线。",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
+      },
+      "description": "接口侧 p50/p95/p99，作 GSB 延迟的对照基线。",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "s"
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -536,70 +499,70 @@
         "x": 12,
         "y": 24
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(grape_http_request_duration_seconds_bucket[5m])))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(grape_http_request_duration_seconds_bucket[5m])))",
-          "legendFormat": "p95"
-        },
-        {
-          "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(grape_http_request_duration_seconds_bucket[5m])))",
-          "legendFormat": "p99"
-        }
-      ],
+      "id": 12,
       "options": {
         "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
           "calcs": [
             "mean",
             "max",
             "lastNotNull"
-          ]
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
         },
         "tooltip": {
           "mode": "multi",
           "sort": "desc"
         }
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "showPoints": "never"
-          }
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(grape_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
         },
-        "overrides": []
-      }
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(grape_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(grape_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "title": "HTTP 接口延迟分位",
+      "type": "timeseries"
     },
     {
-      "id": 13,
-      "type": "row",
-      "title": "补充 · 接口侧细节",
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 32
       },
-      "collapsed": false
+      "id": 13,
+      "title": "补充 · 接口侧细节",
+      "type": "row"
     },
     {
-      "id": 14,
-      "type": "timeseries",
-      "title": "HTTP 接口调用 Top 10 路由",
-      "description": "哪些接口被调得最多，用来对照业务流量落在域内还是跨域。",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
+      },
+      "description": "哪些接口被调得最多，用来对照业务流量落在域内还是跨域。",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -607,39 +570,427 @@
         "x": 0,
         "y": 33
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "topk(10, sum by (route) (rate(grape_http_requests_total[5m]))) * 60",
-          "legendFormat": "{{route}}"
-        }
-      ],
+      "id": 14,
       "options": {
         "legend": {
-          "displayMode": "table",
-          "placement": "right",
           "calcs": [
             "mean",
             "max",
             "lastNotNull"
-          ]
+          ],
+          "displayMode": "table",
+          "placement": "right"
         },
         "tooltip": {
           "mode": "multi",
           "sort": "desc"
         }
       },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (route) (rate(grape_http_requests_total[5m]))) * 60",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP 接口调用 Top 10 路由",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "id": 15,
+      "panels": [],
+      "title": "④ 接口明细 · 被调用的接口与调用日志",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "按 route 统计的入站总线接口调用速率（次/分）。数据源 grape_http_requests_total{route=~\"/internal.*\"}。曲线出现 = 该接口正被其他模块真实调用（例如 /internal/issues/card 由 mgmt 调 runtime）。",
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
           "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "showPoints": "never"
+            "fillOpacity": 8,
+            "lineWidth": 2
+          },
+          "unit": "reqpm"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 42
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "topk(8, sum by (route) (rate(grape_http_requests_total{route=~\"/internal.*\"}[5m]))) * 60",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "总线接口调用速率 Top 8（入站 /internal/*）",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "时间范围内每个 /internal/* 接口被调用的次数，按接口+方法+状态码拆分。排查「哪个接口被调了、调了多少次、有没有 4xx/5xx」看这张表。",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 42
+      },
+      "id": 17,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "topk(25, sum by (route, method, status) (increase(grape_http_requests_total{route=~\"/internal.*\"}[$__range])))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "总线接口调用明细（入站 · 接口/方法/状态 × 次数）",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value": "次数"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "入站 /internal/* 接口的延迟分位（秒）。跨机调用（213→116）通常 2~4ms，同机 <1ms；P95 突然抬升说明对端在排队或 DB 慢。",
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 4,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "id": 18,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (route, le) (rate(grape_http_request_duration_seconds_bucket{route=~\"/internal.*\"}[5m])))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (route, le) (rate(grape_http_request_duration_seconds_bucket{route=~\"/internal.*\"}[5m])))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "title": "总线接口延迟（入站 · P50 / P95）",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value #A": "P50",
+              "Value #B": "P95"
+            }
+          }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "调用方进程（caller）通过总线打到目标域（target）的次数，按方法+状态码拆分。数据源 grape_gsb_client_requests_total。status!=200 的行就是失败调用，常见 404=对端未挂载该 /internal 路由，remote_timeout=跨机超时。",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
           }
         },
         "overrides": []
-      }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "id": 19,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "topk(25, sum by (caller, target, method, status) (increase(grape_gsb_client_requests_total[$__range])))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "总线客户端调用明细（出站 · caller → target）",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value": "次数"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "调用方进程的 httpx 出站日志，已重排成 `状态码 方法 URL`，一眼看出打了哪个 /internal 接口、成败如何。$keyword 追加过滤（接口名 / repo_key / 目标 IP）。原始 JSON 行（含 trace_id）点开日志详情可见。",
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "id": 20,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLines": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=~\"grape-.*\"} |= \"httpx\" |= \"/internal/\" | regexp \"(?P<method>[A-Z]+) (?P<url>https?://[^ ]+/internal/[^ ]*) [^ ]+ (?P<code>[0-9]{3})\" | line_format \"{{.code}} {{.method}} {{.url}}\" ",
+          "refId": "A"
+        }
+      ],
+      "title": "GSB 调用日志 · 出站（caller 打 /internal/…）",
+      "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "被调用方进程的 uvicorn 访问日志，重排成 `状态码 方法 路径 ← 源 IP`。与左侧出站日志对照：出站有、入站无 = 请求没到对端；两边都有但状态码不同 = 对端处理失败。",
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "id": 21,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLines": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=~\"grape-.*\"} |= \"INFO:\" |= \"/internal/\" | regexp \"(?P<ip>[0-9.]+):[0-9]+ - \\\"(?P<method>[A-Z]+) (?P<path>[^ ]+) HTTP/1[.]1\\\" (?P<code>[0-9]{3})\" | line_format \"{{.code}} {{.method}} {{.path}}  ← {{.ip}}\" ",
+          "refId": "A"
+        }
+      ],
+      "title": "GSB 调用日志 · 入站（对端收到 /internal/…）",
+      "type": "logs"
+    },
+    {
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 69
+      },
+      "id": 22,
+      "options": {
+        "content": "**口径**：左边两张表是**入站**（`/internal/*` 谁被调了、多少延迟），右边是**出站**（哪个 caller 打到哪个 target、成功/失败）；下面的日志是逐条记录——出站行有 `trace_id`（可跳 Tempo），入站行是 uvicorn 的 `\"GET /internal/... 200 OK\"`。\n\n- 只看某接口：`$keyword` 填 `issues/card`（接口名）或 `repo_key=...`。\n- 判断「总线有没有在承载业务」：入站速率非 0 且出站表有对应的 caller→target 行。\n- 常见失败：`404` = 对端没挂载该 `/internal` 路由（mgmt 的内部路由就不对外挂载）；`remote_timeout` = 跨机超时（per-method timeout 太紧，建议 ≥3000ms）。\n- 数据全部来自 Prometheus（计数/延迟）+ Loki（逐条日志），不依赖 Grafana 本地存储。",
+        "mode": "markdown"
+      },
+      "title": "怎么读这一块（接口视角）",
+      "type": "text"
     }
-  ]
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "grape",
+    "gsb",
+    "bus",
+    "observability"
+  ],
+  "templating": {
+    "list": [
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "includeAll": true,
+        "label": "目标域",
+        "multi": true,
+        "name": "target",
+        "query": "label_values(grape_gsb_client_requests_total, target)",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "includeAll": true,
+        "label": "调用方",
+        "multi": true,
+        "name": "caller",
+        "query": "label_values(grape_gsb_client_requests_total, caller)",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "hide": 0,
+        "label": "日志过滤",
+        "name": "keyword",
+        "query": "",
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "GSB 服务总线调用总览",
+  "uid": "grape-gsb-bus",
+  "version": 6
 }
