@@ -57,7 +57,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(grape_gsb_client_requests_total{target=~\"$target\", caller=~\"$caller\"}[5m])) * 60",
+          "expr": "(sum(rate(grape_gsb_client_requests_total{target=~\"$target\", caller=~\"$caller\"}[5m])) or vector(0)) * 60",
           "instant": true,
           "legendFormat": "GSB 调用速率",
           "refId": "A"
@@ -118,7 +118,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(grape_gsb_client_requests_total[5m])) / clamp_min(sum(rate(grape_http_requests_total[5m])), 0.000001) * 100",
+          "expr": "(sum(rate(grape_gsb_client_requests_total[5m])) or vector(0)) / clamp_min(sum(rate(grape_http_requests_total[5m])), 0.000001) * 100",
           "instant": true,
           "legendFormat": "通过 GSB 的调用占比",
           "refId": "A"
@@ -232,7 +232,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(grape_gsb_client_requests_total{status!~\"2..\"}[5m])) / clamp_min(sum(rate(grape_gsb_client_requests_total[5m])), 0.000001) * 100",
+          "expr": "(sum(rate(grape_gsb_client_requests_total{status!~\"2..\"}[5m])) or vector(0)) / clamp_min(sum(rate(grape_gsb_client_requests_total[5m])), 0.000001) * 100",
           "instant": true,
           "legendFormat": "GSB 错误率",
           "refId": "A"
@@ -404,7 +404,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(grape_gsb_client_requests_total[5m])) * 60",
+          "expr": "(sum(rate(grape_gsb_client_requests_total[5m])) or vector(0)) * 60",
           "legendFormat": "GSB 总线",
           "refId": "A"
         },
