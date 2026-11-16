@@ -157,7 +157,12 @@ def is_our_outbound(provider: str, repo_key: str, content_type: str, content_id:
     if not provider or not repo_key or not _cid:
         return False
     _is_edit = content_type == "issue_edit"
-    _is_meta_like = content_type in ("issue_close", "issue_meta")
+    # issue / issue_opened 与 issue_close/issue_meta 同病：对账键是**issue 编号**，而编号是共享键 ——
+    # 我们在该 issue 下发过评论就会记一条同键台账，于是用户后来真正新建/重开该 issue 的
+    # issue_opened 被当成"自己创建的回流"直接跳过（2026-11-16 Issue #93 实证：用户提的 issue
+    # 被判 outbound_ledger_hit，事件失败且无法重派）。回流必然紧邻发送动作（毫秒到秒级），
+    # 所以这里也要求台账记录落在时效窗口内才命中，宁可漏拦迟到回声，不误拦用户新事件。
+    _is_meta_like = content_type in ("issue_close", "issue_meta", "issue", "issue_opened")
     now = time.time()
     # 1) TTL 集合（INSERT 未落盘的竞态窗口）——issue_edit 不走 TTL（编号非唯一键，
     #    TTL 命中无法区分"我们的编辑回声"与"用户编辑同号 issue"）
