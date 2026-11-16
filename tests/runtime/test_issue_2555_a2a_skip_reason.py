@@ -247,6 +247,35 @@ class TestCrossPipelineEndpoint:
         assert data["detail"]["target_node"] == "vod"
 
 
+class TestNotInSceneEndpoint:
+    """Issue #2555：not_in_scene 端点级 409 断言 ok/reason/detail.agent。"""
+
+    def setup_method(self):
+        _clean()
+
+    def test_not_in_scene_has_ok_reason_detail_agent(self):
+        from unittest.mock import patch
+        _set_issue(REPO, 2555)
+        _ck = {"in_scene": False, "scene_id": "scene-2427", "nodes": []}
+        _session = {"session_key": "sess-nis-2555", "user_id": 0, "username": ""}
+        with patch("src.domains.runtime.routes.webhook._authorize_a2a", return_value=_session), \
+                patch("src.domains.runtime.routes.webhook._a2a_repo_fallback_check", return_value="ok"), \
+                patch("src.domains.runtime.routes.webhook._a2a_register_repo"), \
+                patch("src.domains.runtime.routes.webhook._scene_node_check", return_value=_ck):
+            resp = _client().post("/api/a2a", json=_body(agent="coding"))
+        assert resp.status_code == 409, resp.text
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["skipped"] == "not_in_scene"
+        assert data["reason"] and "目标 Agent" in data["reason"]
+        assert data["detail"] == {"agent": "coding"}
+        assert data["status"] == "skipped"
+        assert data["handoff_result"] == "rejected"
+        # Issue #2427：scene 与 message 同源携带 scene_id
+        assert data["scene"] == "scene-2427"
+        assert "scene=scene-2427" in data["message"]
+
+
 class TestSubscriptionEndpoint:
     """Issue #2555：PR 订阅 / SRE 订阅跳过端点级 reason。"""
 
