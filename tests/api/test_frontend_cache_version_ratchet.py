@@ -18,7 +18,7 @@ SHELL = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "fronten
 FROZEN = {
     "index.html": {
         # 共享运行时模块
-        "tokens.css": "1", "app.css": "4", "auth.css": "1",
+        "tokens.css": "1", "app.css": "5", "auth.css": "1",
         "all-views.css": "3",
         "api.js": "35", "app.js": "266",
         "deeplink.js": "1",
@@ -29,7 +29,7 @@ FROZEN = {
         "dashboard-view.js": "71", "pipeline.js": "54", "agent-view.js": "50",
         "event-view.js": "57", "chat-view.js": "59", "im-channel.js": "50",
         "repos-view.js": "55", "issues-view.js": "61", "account-view.js": "54",
-        "scene-market.js": "58", "skills-view.js": "53", "knowledge-view.js": "49",
+        "scene-market.js": "58", "skills-view.js": "54", "knowledge-view.js": "49",
         "runtimes-view.js": "56", "observability-view.js": "55",
         "organizations.js": "50", "feedback-dialog.js": "50", "my-feedback.js": "50",
         "my-feedback-detail.js": "50", "autopilot-view.js": "52",
@@ -39,11 +39,11 @@ FROZEN = {
         "admin-view.css": "1",
     },
     "register.html": {
-        "app.css": "4", "auth.css": "1", "api.js": "35",
+        "app.css": "5", "auth.css": "1", "api.js": "35",
         "pwd-blocklist.js": "3", "auth.js": "7",
     },
     "forgot.html": {
-        "app.css": "4", "auth.css": "1", "api.js": "35",
+        "app.css": "5", "auth.css": "1", "api.js": "35",
         "pwd-blocklist.js": "3", "auth.js": "7",
     },
 }
