@@ -116,6 +116,25 @@ def test_zero_residue_variants_are_not_fail():
     assert _classify("0 条 Critical 未修复，结论通过") == "pass"
 
 
+def test_in_progress_without_quantity_is_not_closed():
+    """QA 第 3 轮：无数量表述的“在修复中”也不能被闭环豁免掉。
+
+    规则 4c 只对显式带数量的句子计账（"Required 2 项已在修复中"），
+    “Required 多项已在修复中 / Critical 已在修复阶段”这类无数量句曾整体豁免 → 误放。
+    """
+    assert _classify("Required 多项已在修复中") == "fail"
+    assert _classify("上轮 Required 均已在处理中") == "fail"
+    assert _classify("Critical 已在修复阶段") == "fail"
+    assert _classify("Required 若干已在修复中") == "fail"
+
+
+def test_closed_without_progress_tail_still_passes():
+    """无进行时尾缀的闭环表述仍是已处理项（不得把上轮 #2429 的修复改回去）。"""
+    assert _classify("Critical 多项已闭环") == "pass"
+    assert _classify("上轮 Required 均已在上一轮闭环") == "pass"
+    assert _classify("N 条 Required 均已闭环") == "pass"
+
+
 def test_unresolved_items_still_fail_after_reconciliation():
     """对账不得放过真实残留项。"""
     assert _classify("Critical 2 项未修复") == "fail"
