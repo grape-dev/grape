@@ -232,7 +232,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(grape_gsb_client_requests_total{status!=\"success\"}[5m])) / clamp_min(sum(rate(grape_gsb_client_requests_total[5m])), 0.000001) * 100",
+          "expr": "sum(rate(grape_gsb_client_requests_total{status!~\"2..\"}[5m])) / clamp_min(sum(rate(grape_gsb_client_requests_total[5m])), 0.000001) * 100",
           "instant": true,
           "legendFormat": "GSB 错误率",
           "refId": "A"
@@ -781,6 +781,16 @@
       "title": "总线接口延迟（入站 · P50 / P95）",
       "transformations": [
         {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
           "id": "organize",
           "options": {
             "excludeByName": {
@@ -791,10 +801,6 @@
               "Value #B": "P95"
             }
           }
-        },
-        {
-          "id": "merge",
-          "options": {}
         }
       ],
       "type": "table"
@@ -929,7 +935,7 @@
       },
       "id": 22,
       "options": {
-        "content": "**口径**：左边两张表是**入站**（`/internal/*` 谁被调了、多少延迟），右边是**出站**（哪个 caller 打到哪个 target、成功/失败）；下面的日志是逐条记录——出站行有 `trace_id`（可跳 Tempo），入站行是 uvicorn 的 `\"GET /internal/... 200 OK\"`。\n\n- 只看某接口：`$keyword` 填 `issues/card`（接口名）或 `repo_key=...`。\n- 判断「总线有没有在承载业务」：入站速率非 0 且出站表有对应的 caller→target 行。\n- 常见失败：`404` = 对端没挂载该 `/internal` 路由（mgmt 的内部路由就不对外挂载）；`remote_timeout` = 跨机超时（per-method timeout 太紧，建议 ≥3000ms）。\n- 数据全部来自 Prometheus（计数/延迟）+ Loki（逐条日志），不依赖 Grafana 本地存储。",
+        "content": "**口径**：左边两张表是**入站**（`/internal/*` 谁被调了、多少延迟），右边是**出站**（哪个 caller 打到哪个 target、成功/失败）；下面的日志是逐条记录——出站行有 `trace_id`（可跳 Tempo），入站行是 uvicorn 的 `\"GET /internal/... 200 OK\"`。\n\n- 只看某接口：`$keyword` 填 `issues/card`（接口名）或 `repo_key=...`。\n- 判断「总线有没有在承载业务」：入站速率非 0 且出站表有对应的 caller→target 行。\n- 常见失败：`404` = 对端没挂载该 `/internal` 路由（mgmt 的内部路由就不对外挂载）；`remote_timeout` = 跨机超时（per-method timeout 太紧，建议 ≥3000ms）。\n- 数据全部来自 Prometheus（计数/延迟）+ Loki（逐条日志），不依赖 Grafana 本地存储。\n\n**status 标签的取值**：`200`/`404` 等 HTTP 码，或 `ConnectError`/`remote_timeout` 等传输错误。\n错误率口径是 `status!~\"2..\"`（非 2xx 即错），不是 `status!=\"success\"` —— 指标里没有 `success` 这个字面值。",
         "mode": "markdown"
       },
       "title": "怎么读这一块（接口视角）",
@@ -992,5 +998,5 @@
   "timezone": "browser",
   "title": "GSB 服务总线调用总览",
   "uid": "grape-gsb-bus",
-  "version": 6
+  "version": 7
 }
