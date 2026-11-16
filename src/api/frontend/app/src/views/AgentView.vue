@@ -7,12 +7,11 @@
         <h2>{{ typeDisplay }}</h2>
         <div class="ag__desc">{{ typeDesc }}</div>
       </div>
-      <div class="ag__engine">
-        <template v-if="engineText">
-          <span v-if="engineDot" class="ag__engine-dot" :style="{ background: engineDot }"></span>
-          {{ t('agents.engine.label', { text: engineText }) }}
-        </template>
-        <span v-else class="ag__engine-none">{{ t('agents.engine.no_engine') }}</span>
+      <!-- 2026-11-16：没有可用引擎时不再在头卡右侧挂「无 engine，不可用」——
+           该状态在「引擎」页有完整入口，这里只保留有引擎时的绑定信息。 -->
+      <div v-if="engineText" class="ag__engine">
+        <span v-if="engineDot" class="ag__engine-dot" :style="{ background: engineDot }"></span>
+        {{ t('agents.engine.label', { text: engineText }) }}
       </div>
     </div>
 
@@ -415,10 +414,6 @@ onMounted(function () {
   height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
-}
-.ag__engine-none {
-  color: var(--c-danger);
-  font-weight: 700;
 }
 .ag__imcard {
   background: var(--c-bg-elevated);

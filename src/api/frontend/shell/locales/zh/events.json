@@ -66,6 +66,7 @@
   "redispatch_cancel": "取消",
   "redispatch_confirm": "确认派发",
   "redispatch_toast_success": "已重新派发，等待 worker 重新执行",
+  "redispatch_token_stale": "重派已发出，但任务凭据未能刷新：重跑时无法调用 grape CLI（git-repo / issues / a2a 等接口），请重建任务后再试",
   "redispatch_toast_failed": "重派失败: {{msg}}",
   "log_title_realtime": "📜 运行日志",
   "log_title_inline": "📜 执行日志",

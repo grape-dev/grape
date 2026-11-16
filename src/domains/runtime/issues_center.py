@@ -654,7 +654,8 @@ def _resume_stage(owner_agent: str) -> str:
     _owner = (owner_agent or "").strip()
     return "issue" if _owner in _RESUME_STAGE_SENTINELS else _owner
 
-def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
+def _resume_issue_waiting(repo_key: str, issue_number: int,
+                          preserve_review: bool = False) -> bool:
     """「等用户」双态恢复（幂等）：`awaiting_input / pending_review → processing`。
 
     供两条路径复用（issue-explicit-awaiting-input-api-design.md §3.6 / issue-pending-review-explicit-design.md §3.5）：
@@ -665,6 +666,9 @@ def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
     Issue #1599（审核态漂移收敛）：翻转 status 时同步把 `stage=pending_review` 回落到
     `owner_agent`，避免库内 `status=processing` 但 `stage` 仍停在 pending_review，
     导致展示态继续显示「待审核」而 review-reject 必然 noop。
+
+    Issue #2381：``preserve_review=True`` 表示本次是 redispatch 重放历史评论，不是新的
+    用户输入，`pending_review` 审核点不得再次被消费（保留审核点，只恢复 awaiting_input）。
     """
     try:
         with db_lock:
@@ -675,10 +679,12 @@ def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
             _row = c.fetchone()
             _stage = ((_row[0] if _row else "") or "").strip()
             _owner = ((_row[1] if _row else "") or "").strip()
+            _from_statuses = ("awaiting_input",) if preserve_review else ("awaiting_input", "pending_review")
+            _ph = ",".join("?" * len(_from_statuses))
             c.execute(
-                "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
-                "WHERE repo_key=? AND issue_number=? AND status IN ('awaiting_input','pending_review')",
-                (repo_key, issue_number))
+                f"UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
+                f"WHERE repo_key=? AND issue_number=? AND status IN ({_ph})",
+                (repo_key, issue_number, *_from_statuses))
             _changed = c.rowcount > 0
             if _changed and _stage == "pending_review":
                 c.execute(
@@ -686,7 +692,8 @@ def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
                     (_resume_stage(_owner), repo_key, issue_number))
             _rt_db.commit()
         if _changed:
-            log.info(f"Issue waiting resume: {repo_key}/#{issue_number} awaiting/pending_review → processing")
+            log.info(f"Issue waiting resume: {repo_key}/#{issue_number} awaiting/pending_review → processing "
+                     f"(preserve_review={preserve_review})")
         return _changed
     except Exception as _e:
         log.warning(f"resume issue from waiting failed {repo_key}/#{issue_number}: {_e}")
@@ -710,10 +717,29 @@ def _set_issue_pending_review(repo_key: str, issue_number: int) -> bool:
         log.warning(f"set issue pending_review failed {repo_key}/#{issue_number}: {_e}")
         return False
 
-def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
-    """当前 issue.stage 是否为流水线末节点（next=='done'）。
+# Issue #2381：末节点判据统一口径——`next=="done"` 与空串（无下游）均视为末节点。
+# 此前 _is_last_stage_node 仅认 "done"、_pipeline_last_node_check 同时认 ""，CLI 流水线
+# 末节点 next 为空串时 review-pass 的末节点放宽失效，target=done 恒 noop:not_pending_review。
+_LAST_NODE_NEXT_VALUES = ("done", "")
 
-    与 complete_task 末节点判定（service.py:1685-1687）同源复用 `next=='done'` 判据；
+def _next_is_last_node(next_value) -> bool:
+    """统一末节点判据：next 为 'done' 或空串（无下游节点）时为真。
+
+    Issue #2381 review: only string values may be interpreted. A missing key
+    (None) still means "no downstream node", but any other type (0, False,
+    numbers) is a configuration error and must NOT be treated as the last
+    node -- the previous `str(value or "")` turned 0 into "" and failed open.
+    """
+    if next_value is None:
+        return True
+    if not isinstance(next_value, str):
+        return False
+    return next_value.strip() in _LAST_NODE_NEXT_VALUES
+
+def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
+    """当前 issue.stage 是否为流水线末节点（next=='done' 或无下游节点）。
+
+    与 `_pipeline_last_node_check` 共用 `_next_is_last_node` 判据（Issue #2381 统一口径）；
     stage 不可推定 / 未知 / 已终态 → 保守返回 False（review-pass 归一兜底用）。
     """
     try:
@@ -729,7 +755,7 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
         _cfg = get_pipeline_config(_scene_id, repo_key=repo_key) or {}
         for _n in (_cfg.get("nodes") or []):
             if _n.get("id") == _cur:
-                return _n.get("next") == "done"
+                return _next_is_last_node(_n.get("next"))
         return False
     except Exception:
         return False
@@ -793,12 +819,45 @@ def _read_issue_status(repo_key: str, issue_number: int) -> str:
         log.warning(f"read issue status failed {repo_key}/#{issue_number}: {_e}")
         return ""
 
+def _review_checkpoint_invalidated(repo_key: str, issue_number: int) -> bool:
+    """Issue #2381：判断 processing 是否由「末节点审核点被 redispatch/回复回落」造成。
+
+    判据：末节点（next in ('done','')）的最新事件已 completed（说明审核点曾置好），
+    但 issue 当前 stage 已回落到非末节点（`_resume_issue_waiting` 把 stage 从
+    pending_review 回落到 owner_agent）→ 审核点已失效。仅用于 noop 原因码降级分类，
+    不改变任何状态。
+    """
+    try:
+        from src.api.session_store import get_issue_stage, get_issue_scene
+        from src.api.pipeline_config import get_pipeline_config
+        _issue_id = f"#{issue_number}"
+        _st = get_issue_stage(repo_key, _issue_id) or {}
+        _cur = (_st.get("stage") or "").strip()
+        if not _cur or _cur in ("done", "pending_review"):
+            return False
+        _scene = get_issue_scene(repo_key, _issue_id)
+        _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
+        _nodes = (get_pipeline_config(_scene_id, repo_key=repo_key) or {}).get("nodes") or []
+        _last_ids = set()
+        for _n in _nodes:
+            _nid = (_n.get("id") or _n.get("tag") or "").strip()
+            if _nid and _next_is_last_node(_n.get("next")):
+                _last_ids.add(_nid)
+        if not _last_ids or _cur in _last_ids:
+            return False
+        _latest = _issue_latest_event_status_by_agent(repo_key, _issue_id)
+        return any(_latest.get(_nid) == "completed" for _nid in _last_ids)
+    except Exception:
+        return False
+
 def _review_noop_reason(repo_key: str, issue_number: int, target_status: str) -> str:
     """审核动作未命中时回读真实 status 并给出机器可读原因码。
 
     - `noop:already_target`：已处于目标态（幂等，无需变更）；
     - `noop:terminal`：已完成/已取消，不可再变更；
     - `noop:not_pending_review`：前置态不符（如 awaiting_input/active）；
+    - `noop:review_checkpoint_invalidated`：Issue #2381——末节点审核点已因
+      redispatch/用户回复 resume 回落而失效（processing 且 stage 已离开末节点）；
     - `noop:error`：回读失败（无行/DB 异常）。
     """
     _cur = _read_issue_status(repo_key, issue_number)
@@ -808,6 +867,9 @@ def _review_noop_reason(repo_key: str, issue_number: int, target_status: str) ->
         return "noop:already_target"
     if _cur in _ISSUE_TERMINAL_STATUSES:
         return "noop:terminal"
+    if (target_status == "completed" and _cur == "processing"
+            and _review_checkpoint_invalidated(repo_key, issue_number)):
+        return "noop:review_checkpoint_invalidated"
     return "noop:not_pending_review"
 
 # Issue #656: 自动结单完成原因（区别于 review_passed/user_confirmed 人工确认路径）
@@ -832,7 +894,7 @@ def _pipeline_last_node_check(repo_key: str, issue_number, agent_type: str) -> b
             _nid = (_n.get("id") or _n.get("tag") or "").strip()
             if _nid == agent_type:
                 _next = (_n.get("next") or "").strip()
-                if _next == "done" or _next == "":
+                if _next_is_last_node(_next):
                     return True
                 if _next not in _ids:
                     # 配置笔误（next 指向不存在节点）不视为末节点，防误触发自动结单

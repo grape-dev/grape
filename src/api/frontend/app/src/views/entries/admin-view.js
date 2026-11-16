@@ -1,13 +1,5 @@
 // inject view css (standalone admin page — bridge/ag-ui css not needed, the page
 // keeps its own legacy tokens.css + inline styles from admin.html)
-;(function () {
-  ;['viewcss/admin-view.css'].forEach(function (f) {
-    var link = document.createElement('link')
-    link.rel = 'stylesheet'
-    link.href = '/static-vue/assets/' + f + '?v=57'
-    document.head.appendChild(link)
-  })
-})()
 import { createApp } from 'vue'
 import AdminView from '../AdminView.vue'
 

@@ -429,6 +429,290 @@ def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: st
             log.warning(f"Event skipped FAILED: {e}")
 
 
+# ====== Issue #2508：终态 a2a 事件投递去重 ======
+def _non_replayable_task_statuses() -> tuple:
+    """不可重放的任务终态：以 ``service.TASK_TERMINAL_STATUSES`` 为单源，
+    显式排除 failed/timeout_failed（保持既有失败重试语义）。"""
+    from src.domains.runtime.engine.service import TASK_TERMINAL_STATUSES
+    return tuple(s for s in TASK_TERMINAL_STATUSES if s not in ("failed", "timeout_failed"))
+
+
+# Issue #2508 review: named bounds for the content fingerprint, each with a
+# reason, instead of bare numbers inside the hash expression.
+# - context prefix: the A2A payload caps context at 500 chars; 400 keeps the
+#   leading, differentiating part while leaving room for pr_number.
+# - digest length: 16 hex chars = 64 bits, same width as the request
+#   fingerprint; collisions are negligible for the (repo, issue, node) scope.
+CONTENT_CONTEXT_MAX_CHARS = 400
+CONTENT_KEY_DIGEST_CHARS = 16
+
+
+def _content_key(payload: dict) -> str:
+    """请求内容指纹（Issue #2508 review）：context + pr_number 的摘要。
+
+    fingerprint 只按 repo|issue|agent 派生，同一节点同一天的所有交办都相同，
+    单靠它 + 时间窗会把「打回后几分钟内的正常再交办」误判成重投。content_key
+    把本轮请求的实际内容带进来：内容不同 = 新的一轮交办，不拦。
+    """
+    import hashlib as _hashlib
+    if not isinstance(payload, dict):
+        return ""
+    raw = (f"{str(payload.get('context') or '')[:CONTENT_CONTEXT_MAX_CHARS]}"
+           f"|{str(payload.get('pr_number') or '')}")
+    return _hashlib.sha1(raw.encode()).hexdigest()[:CONTENT_KEY_DIGEST_CHARS]
+
+
+def _completed_within(completed_at: str, window_s: int) -> bool:
+    """completed_at 是否落在最近 window_s 秒内（Issue #2508 review）。"""
+    if window_s <= 0:
+        return False
+    raw = str(completed_at or "").strip()
+    if not raw:
+        return False
+    from datetime import datetime, timezone
+    dt = None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds() <= window_s
+
+
+def find_terminal_event_replay(repo_key: str, event_seq: int = 0,
+                               idempotency_key: str = "",
+                               fingerprint: str = "",
+                               exclude_seq: int = 0,
+                               agent_type: str = "", issue_id: str = "",
+                               content_key: str = "",
+                               fingerprint_window_s: int | None = None) -> dict:
+    """投递前「事件终态 + 关联任务终态」双检（Issue #2508）。
+
+    以 ``(repo_key, event_seq)`` 为主键，``idempotency_key`` 作为无 seq 时的补充
+    查询维度（复用既有 ``find_event_by_idempotency_key``）；``exclude_seq`` 用于
+    排队 drain 排除排队事件自身、只匹配更早的同幂等键事件。命中 completed/
+    cancelled 的任一终态即返回结构化命中信息，调用方据此静默跳过投递并写
+    ``event_skipped(reason=terminal_event_replay)`` 审计。
+
+    failed/timeout 的重试语义约束：本函数仅把 completed/cancelled 视为「不可
+    重放终态」（任务口径由 ``service.TASK_TERMINAL_STATUSES`` 显式排除
+    failed/timeout_failed）；failed/timeout 返回空 dict，保持现有失败重试链路不变。
+    ``fingerprint`` 默认仅用于审计明细，不作为唯一命中键（它是 repo+issue+agent 维度
+    的请求指纹，跨轮次稳定，单靠它会误杀合法的下一轮交办）。
+
+    Issue #2508 review：调度层重投时可能生成**新的 seq** 且 payload 里
+    ``idempotency_key`` 为空（线上事故即此形态），(repo, seq) 主键与幂等键两个维度
+    都失配 → 闸门漏。补一条内容维度：同 repo + 同 issue + 同节点 + 同 fingerprint
+    且前一条事件在 ``fingerprint_window_s`` 秒内已 completed/cancelled，视为同一
+    次投递的重放。窗口默认 180 秒，``GRAPE_REPLAY_FP_WINDOW=0`` 可关闭；事故间隔约 176 秒，
+    窗口取 180 才能覆盖该形态，误杀面已由 content_key 收窄。
+    """
+    from src.api.pipeline_constants import REPLAY_BLOCKING_EVENT_STATUSES
+    if not repo_key:
+        return {}
+    try:
+        _seq = int(event_seq or 0)
+        _exclude = int(exclude_seq or 0)
+    except (TypeError, ValueError):
+        _seq, _exclude = 0, 0
+
+    row = None
+    _fp_hit = False
+    with db_lock:
+        try:
+            c = db.cursor()
+            if _seq > 0 and _seq != _exclude:
+                c.execute(
+                    "SELECT seq, status, payload FROM events WHERE repo_key=? AND seq=? LIMIT 1",
+                    (repo_key, _seq))
+                row = c.fetchone()
+            if not row and idempotency_key:
+                if _exclude:
+                    # 排队事件自身即最新同键行，需显式排除后匹配更早的行。
+                    c.execute(
+                        "SELECT seq, status, payload FROM events WHERE repo_key=? "
+                        "AND idempotency_key=? AND seq<>? ORDER BY seq DESC LIMIT 1",
+                        (repo_key, idempotency_key, _exclude))
+                    row = c.fetchone()
+                else:
+                    _hit = find_event_by_idempotency_key(repo_key, idempotency_key)
+                    if _hit:
+                        row = (_hit["seq"], _hit["status"], _hit.get("payload") or "")
+            if not row:
+                return {}
+            _hit_seq, _status, _payload_raw = row[0], str(row[1] or ""), row[2]
+            c.execute(
+                "SELECT status FROM agent_tasks WHERE event_seq=? "
+                "ORDER BY created_at DESC LIMIT 1", (_hit_seq,))
+            _task_row = c.fetchone()
+            # Issue #2508 review: the target event itself is usually the one being
+            # delivered (still running), so the content dimension only applies when
+            # neither the event nor its task is a non-replayable terminal.
+            _task_now = str((_task_row[0] if _task_row else "") or "")
+            _replayable_now = (
+                str(_status) not in REPLAY_BLOCKING_EVENT_STATUSES
+                and (not _task_now or _task_now not in _non_replayable_task_statuses()))
+            # content_key 为空表示调用方没有内容维度可比较：此时不按 fingerprint 拦，
+            # 宁可漏一次重投，也不能误杀正常交办（fingerprint 不含轮次）。
+            if (_replayable_now and fingerprint and agent_type and issue_id and content_key):
+                import os as _os
+                _win = fingerprint_window_s
+                if _win is None:
+                    try:
+                        _win = int(_os.environ.get("GRAPE_REPLAY_FP_WINDOW", "180"))
+                    except (TypeError, ValueError):
+                        _win = 180
+                if _win > 0:
+                    c.execute(
+                        "SELECT seq, status, payload, completed_at FROM events "
+                        "WHERE repo_key=? AND event_type='a2a_event' AND agent_type=? "
+                        "AND issue_id=? AND seq<>? AND status IN ('completed','cancelled') "
+                        "AND payload LIKE ? ORDER BY seq DESC LIMIT 1",
+                        (repo_key, agent_type, issue_id, _hit_seq, f"%{fingerprint}%"))
+                    _fp_row = c.fetchone()
+                    _fp_payload = {}
+                    if _fp_row:
+                        try:
+                            _fp_payload = json.loads(_fp_row[2] or "{}")
+                        except Exception:
+                            _fp_payload = {}
+                    if (_fp_row
+                            and _completed_within(_fp_row[3], _win)
+                            and _content_key(_fp_payload) == content_key):
+                        _fp_hit = True
+                        _hit_seq, _status, _payload_raw = (
+                            _fp_row[0], str(_fp_row[1] or ""), _fp_row[2])
+                        c.execute(
+                            "SELECT status FROM agent_tasks WHERE event_seq=? "
+                            "ORDER BY created_at DESC LIMIT 1", (_hit_seq,))
+                        _task_row = c.fetchone()
+        except Exception as e:
+            log.warning(f"find_terminal_event_replay query failed seq={event_seq}: {e}")
+            return {}
+
+    _task_status = str((_task_row[0] if _task_row else "") or "")
+    _event_terminal = _status in REPLAY_BLOCKING_EVENT_STATUSES
+    _task_terminal = bool(_task_status) and _task_status in _non_replayable_task_statuses()
+    if not (_event_terminal or _task_terminal):
+        return {}
+
+    _payload = {}
+    try:
+        _payload = json.loads(_payload_raw or "{}")
+    except Exception:
+        _payload = {}
+    if not isinstance(_payload, dict):
+        _payload = {}
+    return {
+        "seq": int(_hit_seq or 0),
+        "status": _status,
+        "reason": "fingerprint_window" if _fp_hit else "terminal_event_replay",
+        "task_status": _task_status,
+        "event_terminal": _event_terminal,
+        "task_terminal": _task_terminal,
+        "fingerprint": str(_payload.get("fingerprint") or fingerprint or ""),
+        "idempotency_key": str(_payload.get("idempotency_key") or idempotency_key or ""),
+    }
+
+
+def mark_event_reissue(seq: int, reissue: bool = True) -> bool:
+    """给事件 payload 打人工重派 reissue 标记（Issue #2508）。
+
+    仅由 redispatch 调用；用于让重派链路显式声明「本次为人工重放」，避免被
+    终态投递去重误拦。不改变 ``reset_event_terminal`` 仅限人工重派的语义。
+    """
+    try:
+        _seq = int(seq or 0)
+    except (TypeError, ValueError):
+        return False
+    if _seq <= 0:
+        return False
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute("SELECT payload FROM events WHERE seq=? LIMIT 1", (_seq,))
+            row = c.fetchone()
+            if not row:
+                return False
+            try:
+                _payload = json.loads(row[0] or "{}")
+            except Exception:
+                _payload = {}
+            if not isinstance(_payload, dict):
+                _payload = {}
+            from src.api.pipeline_constants import REISSUE_EVENT_PAYLOAD_KEY
+            _payload[REISSUE_EVENT_PAYLOAD_KEY] = bool(reissue)
+            c.execute("UPDATE events SET payload=? WHERE seq=?",
+                      (json.dumps(_payload, ensure_ascii=False), _seq))
+            db.commit()
+            return True
+        except Exception as e:
+            log.warning(f"mark_event_reissue failed seq={seq}: {e}")
+            return False
+
+
+def mark_event_redispatch_of(seq: int, original_seq: int = 0) -> bool:
+    """在事件 payload 打上人工重派痕迹（Issue #2432 review）。
+
+    与 ``_reissue`` 分开：``_reissue`` 是投递闸门的放行标记（会让该事件永久可重放），
+    ``redispatch_of`` 只表示「这一轮失败之后有人重派过」，供失败通知的周期判定使用，
+    不影响任何投递判定。
+    """
+    try:
+        _seq = int(seq or 0)
+    except (TypeError, ValueError):
+        return False
+    if _seq <= 0:
+        return False
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute("SELECT payload FROM events WHERE seq=?", (_seq,))
+            row = c.fetchone()
+            if not row:
+                return False
+            try:
+                _p = json.loads(row[0] or "{}")
+            except Exception:
+                _p = {}
+            if not isinstance(_p, dict):
+                _p = {}
+            _p["redispatch_of"] = int(original_seq or _seq)
+            c.execute("UPDATE events SET payload=? WHERE seq=?",
+                      (json.dumps(_p, ensure_ascii=False), _seq))
+            db.commit()
+            return True
+        except Exception as e:
+            log.warning(f"mark_event_redispatch_of failed seq={seq}: {e}")
+            return False
+
+
+def is_event_reissue(seq: int) -> bool:
+    """事件是否携带人工重派 reissue 标记（Issue #2508）。"""
+    try:
+        _seq = int(seq or 0)
+    except (TypeError, ValueError):
+        return False
+    if _seq <= 0:
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT payload FROM events WHERE seq=? LIMIT 1", (_seq,))
+            row = c.fetchone()
+        if not row:
+            return False
+        _payload = json.loads(row[0] or "{}")
+        from src.api.pipeline_constants import REISSUE_EVENT_PAYLOAD_KEY
+        return bool(isinstance(_payload, dict) and _payload.get(REISSUE_EVENT_PAYLOAD_KEY))
+    except Exception:
+        return False
+
+
 def parse_agent_output_json(final_text: str) -> dict | None:
     """从 final_text 提取结构化 JSON 产出块（鲁棒解析，兼容 ACP chunk 损坏）。
 
@@ -704,6 +988,20 @@ def _status_label(status: str) -> str:
     return {"completed": "已完成", "failed": "失败", "cancelled": "已终止"}.get(status, status)
 
 
+def _notify_pipeline_failure(repo_key: str, issue_id: str, agent_type: str, seq: int) -> None:
+    """Issue #2432：失败终态触发飞书群通知（异步、异常不阻断主流程）。
+
+    去重按「需求+节点」并绑定节点状态周期：同一节点上一终态仍为 failed 时
+    视为同一失败周期，不重复通知；节点恢复（completed/cancelled）后再次失败会重新通知。
+    通知失败只记日志，绝不影响终态写入与流水线主流程。
+    """
+    try:
+        from src.domains.runtime.pipeline_failure_notify import notify_node_failure
+        notify_node_failure(repo_key, issue_id, agent_type, seq)
+    except Exception as e:
+        log.warning(f"Pipeline failure notify failed seq={seq}: {e}")
+
+
 def update_event_status(seq: int, status: str, result: str = "", exit_code: int = None):
     """更新事件状态（含终态保护）。
 
@@ -724,6 +1022,7 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
     _TERMINAL = ("completed", "failed", "cancelled")
     _FALLBACK_REASON = "[E-FAIL-NODIAG] 事件置 failed 但未携带诊断信息（update_event_status 裸调用，见 #476）"
     from datetime import datetime, timezone as _tz
+    _notify_repo = _notify_issue = _notify_agent = ""
     with db_lock:
         try:
             c = db.cursor()
@@ -752,7 +1051,8 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
                                  f"(terminal state protection, bare flip)")
                     return
             if status == "failed":
-                c.execute("SELECT result, exit_code, completed_at FROM events WHERE seq=?", (seq,))
+                c.execute("SELECT result, exit_code, completed_at, agent_type, repo_key, issue_id "
+                          "FROM events WHERE seq=?", (seq,))
                 cur = c.fetchone()
                 _need_fallback = not (cur and cur[0])
                 _reason = result or (
@@ -760,11 +1060,22 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
                 _exit = exit_code if exit_code is not None else (cur[1] if cur and cur[1] is not None else 1)
                 _completed = (cur[2] if cur and cur[2] else
                               datetime.now(_tz.utc).isoformat())
-                c.execute(
-                    "UPDATE events SET status=?, result=?, exit_code=?, completed_at=? WHERE seq=?",
-                    (status, _reason, _exit, _completed, seq))
+                _agent_type = (cur[3] or "") if cur else ""
+                _repo_key = (cur[4] or "") if cur else ""
+                _issue_id = (cur[5] or "") if cur else ""
+                # Issue #2432：失败终态落库失败节点名（执行失败/超时/重试耗尽统一走此入口）
+                if _events_column_exists(c, "failed_node"):
+                    c.execute(
+                        "UPDATE events SET status=?, result=?, exit_code=?, completed_at=?, "
+                        "failed_node=CASE WHEN ?<>'' THEN ? ELSE failed_node END WHERE seq=?",
+                        (status, _reason, _exit, _completed, _agent_type, _agent_type, seq))
+                else:
+                    c.execute(
+                        "UPDATE events SET status=?, result=?, exit_code=?, completed_at=? WHERE seq=?",
+                        (status, _reason, _exit, _completed, seq))
                 if _need_fallback:
                     log.warning(f"Event {seq}: bare failed update, backfilled diagnostic result (#476)")
+                _notify_repo, _notify_issue, _notify_agent = _repo_key, _issue_id, _agent_type
             else:
                 if status in _TERMINAL:
                     # Issue #1105：completed/cancelled 终态同样强制落 completed_at
@@ -780,6 +1091,9 @@ def update_event_status(seq: int, status: str, result: str = "", exit_code: int 
             db.commit()
         except Exception as e:
             log.warning(f"Failed to update event {seq}: {e}")
+    # Issue #2432：失败终态通知（锁外执行，通知内部会再次读库，避免嵌套加锁）
+    if status == "failed" and _notify_repo:
+        _notify_pipeline_failure(_notify_repo, _notify_issue, _notify_agent, seq)
     if status in _TERMINAL:
         # 释放活跃守卫（独立 db_lock；避免在临界区内嵌套获取非可重入锁）
         _release_guard_by_seq(seq)
@@ -906,11 +1220,13 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
         from datetime import datetime, timezone as _tz
         completed_at = datetime.now(_tz.utc).isoformat()
     _is_terminal = status in ("completed", "failed", "cancelled")
+    _agent_type = _repo_key = _issue_id = ""
+    _terminal_written = False
     with db_lock:
         try:
             c = db.cursor()
             # 检查当前状态：已终态的事件不允许被其他终态覆盖
-            c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+            c.execute("SELECT status, agent_type, repo_key, issue_id FROM events WHERE seq=?", (seq,))
             row = c.fetchone()
             # 接管态保护：事件一旦被标记 takeover（接手的是人，不是 worker），
             # worker 侧的迟到 complete/fail 一律不得改写；只有接管服务自己
@@ -937,21 +1253,35 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
                          f"backfilled default summary (#1503)")
             _structured = json.dumps(structured_output, ensure_ascii=False) if structured_output is not None else None
             cols = _events_columns(c)
+            # Issue #2432: the node that failed is the event's own agent_type,
+            # read from the row selected above (arch layout keeps it in `row`).
+            if row:
+                _agent_type = str(row[1] or "")
+                _repo_key = str(row[2] or "")
+                _issue_id = str(row[3] or "")
+            # Issue #2432：失败终态落库失败节点名（执行失败/超时/重试耗尽统一在终态收口）
+            _set_failed_node = status == "failed" and "failed_node" in cols and _agent_type
+            _failed_sql = "" if not _set_failed_node else ", failed_node=?"
+            _failed_param = () if not _set_failed_node else (_agent_type,)
             if "structured_output" in cols and _structured is not None:
                 c.execute(
                     "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, "
-                    "result=?, structured_output=? WHERE seq=?",
+                    "result=?, structured_output=?" + _failed_sql + " WHERE seq=?",
                     (status, exit_code, duration, json.dumps(agent_logs or []),
-                     completed_at, result, _structured, seq))
+                     completed_at, result, _structured) + _failed_param + (seq,))
             else:
                 c.execute(
                     "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, "
-                    "result=? WHERE seq=?",
+                    "result=?" + _failed_sql + " WHERE seq=?",
                     (status, exit_code, duration, json.dumps(agent_logs or []),
-                     completed_at, result, seq))
+                     completed_at, result) + _failed_param + (seq,))
             db.commit()
+            _terminal_written = True
         except Exception as e:
             log.warning(f"Failed to update event complete {seq}: {e}")
+    # Issue #2432：失败终态（执行失败/超时/重试耗尽）→ 异步通知飞书群，异常不阻断
+    if _terminal_written and status == "failed" and _repo_key:
+        _notify_pipeline_failure(_repo_key, _issue_id, _agent_type, seq)
     # 事件进入终态 → 释放活跃守卫（允许同 (issue,agent) 开启新事件）
     if status in ("completed", "failed", "cancelled"):
         _release_guard_by_seq(seq)
@@ -990,8 +1320,11 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
         c = db.cursor()
         try:
             _payload_col = ", payload" if include_payload else ""
+            # Issue #2432：failed_node 为后加列（老库可能尚未迁移），缺失时降级为 NULL。
+            _has_failed_node = _events_column_exists(c, "failed_node")
+            _failed_col = ", failed_node" if _has_failed_node else ", NULL AS failed_node"
             c.execute(
-                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at{_payload_col} FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill, exit_code, duration, started_at, completed_at{_payload_col}{_failed_col} FROM events WHERE {where} ORDER BY seq DESC LIMIT ? OFFSET ?",
                 params + [limit, offset]
             )
             out = []
@@ -1004,6 +1337,8 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
                     "exit_code": r[11], "duration": r[12],
                     "started_at": normalize_event_time(r[13] or ""),
                     "completed_at": normalize_event_time(r[14] or ""),
+                    "failed_node": (r[16] or "") if include_payload and len(r) > 16 else (
+                        (r[15] or "") if not include_payload and len(r) > 15 else ""),
                 }
                 if include_payload:
                     item.update(payload_view_from_json(r[15], seq=r[0]))
@@ -1011,6 +1346,16 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
             return out
         except Exception:
             return []
+
+
+def _events_column_exists(c, col: str) -> bool:
+    """events 表是否已有指定列（Issue #2432 后加列兼容老库）。
+
+    Issue #2432 review: PRAGMA is sqlite-only; go through the shared two-backend
+    probe so the check also works on MySQL (three-database topology).
+    """
+    from src.domains.runtime.schema_probe import column_exists
+    return column_exists(c, "events", col)
 
 
 def get_event_count(repo_key: str, status: str = "") -> int:

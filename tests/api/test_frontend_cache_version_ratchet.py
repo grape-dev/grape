@@ -18,30 +18,32 @@ SHELL = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "fronten
 FROZEN = {
     "index.html": {
         # 共享运行时模块
-        "tokens.css": "1", "app.css": "3", "auth.css": "1",
-        "api.js": "35", "app.js": "262",
+        "tokens.css": "1", "app.css": "4", "auth.css": "1",
+        "all-views.css": "3",
+        "api.js": "35", "app.js": "266",
         "deeplink.js": "1",
         "auto-recovery.js": "2", "oauth-buttons.js": "2",
         "host-status.js": "1", "worker-name.js": "2", "pwd-blocklist.js": "3",
         "faro.js": "7",
         # Vue 视图 chunk
-        "dashboard-view.js": "65", "pipeline.js": "50", "agent-view.js": "48",
-        "event-view.js": "53", "chat-view.js": "51", "im-channel.js": "49",
-        "repos-view.js": "53", "issues-view.js": "56", "account-view.js": "52",
-        "scene-market.js": "52", "skills-view.js": "51", "knowledge-view.js": "48",
-        "runtimes-view.js": "54", "observability-view.js": "53",
-        "organizations.js": "49", "feedback-dialog.js": "49", "my-feedback.js": "49",
-        "my-feedback-detail.js": "49", "autopilot-view.js": "50",
+        "dashboard-view.js": "71", "pipeline.js": "54", "agent-view.js": "50",
+        "event-view.js": "57", "chat-view.js": "59", "im-channel.js": "50",
+        "repos-view.js": "55", "issues-view.js": "61", "account-view.js": "54",
+        "scene-market.js": "58", "skills-view.js": "53", "knowledge-view.js": "49",
+        "runtimes-view.js": "56", "observability-view.js": "55",
+        "organizations.js": "50", "feedback-dialog.js": "50", "my-feedback.js": "50",
+        "my-feedback-detail.js": "50", "autopilot-view.js": "52",
     },
     "admin.html": {
         "tokens.css": "1", "pwd-blocklist.js": "3", "admin-view.js": "11",
+        "admin-view.css": "1",
     },
     "register.html": {
-        "app.css": "3", "auth.css": "1", "api.js": "35",
+        "app.css": "4", "auth.css": "1", "api.js": "35",
         "pwd-blocklist.js": "3", "auth.js": "7",
     },
     "forgot.html": {
-        "app.css": "3", "auth.css": "1", "api.js": "35",
+        "app.css": "4", "auth.css": "1", "api.js": "35",
         "pwd-blocklist.js": "3", "auth.js": "7",
     },
 }

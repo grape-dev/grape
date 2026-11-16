@@ -602,22 +602,26 @@
           <template v-else>
             <div class="isk-fld">
               <label>
-                {{ t('create.title_label') }} <span class="isk-required">*</span>
+                <span class="isk-fld-lbl"
+                  >{{ t('create.title_label') }} <span class="isk-required">*</span></span
+                >
                 <span class="isk-fld-hint">{{ t('create.title_hint') }}</span>
                 <input v-model="modal.title" :placeholder="t('create.title_placeholder')" />
               </label>
             </div>
             <div class="isk-fld">
               <label>
-                {{ t('create.desc_label') }} <span class="isk-required">*</span>
-                <!-- Issue #460：标题一键同步进描述（幂等去重，空行分隔） -->
-                <span
-                  class="isk-sync-title"
-                  role="button"
-                  :title="t('create.sync_title_to_desc')"
-                  :aria-label="t('create.sync_title_to_desc')"
-                  @click.prevent="syncTitleToDesc"
-                  >↧</span
+                <span class="isk-fld-lbl"
+                  >{{ t('create.desc_label') }} <span class="isk-required">*</span>
+                  <!-- Issue #460：标题一键同步进描述（幂等去重，空行分隔） -->
+                  <span
+                    class="isk-sync-title"
+                    role="button"
+                    :title="t('create.sync_title_to_desc')"
+                    :aria-label="t('create.sync_title_to_desc')"
+                    @click.prevent="syncTitleToDesc"
+                    >↧</span
+                  ></span
                 >
                 <span class="isk-fld-hint">{{ t('create.desc_hint') }}</span>
                 <textarea
@@ -1620,6 +1624,16 @@ const pipelineCardHtml = computed(() => {
     let label = '⇄ 接续自 #' + sourceIssue
     if (sourceScene) label += '（' + sourceScene + '）'
     html += `<div class="isk-contin">${label}</div>`
+  }
+  // Issue #2432：失败节点提示（失败状态 + 失败节点名，不展示失败原因）
+  if (data.failed_node_name) {
+    html +=
+      '<div style="font-size:11px;color:var(--r);background:rgba(255,59,48,.08);' +
+      'border-radius:8px;padding:6px 10px;margin-bottom:10px"><b>' +
+      esc(t('pipeline.status_failed')) +
+      '</b> · ' +
+      esc(String(data.failed_node_name)) +
+      '</div>'
   }
   // 节点进度条
   if (nodes.length > 0) {
@@ -4030,11 +4044,15 @@ onBeforeUnmount(function () {
 }
 .isk-modal {
   width: min(520px, 92vw);
+  /* 2026-11-16：原来是 §23 统一玻璃（--glass-strong 85% 半透），跟输入框的实心白
+     撞在一起显得脏；按主人要求把两者对调 —— 弹窗改实心亮面（--c），输入框改浅底（--bg）。 */
   background: var(--c, #fff);
-  border: 0.5px solid #d2d2d7;
-  border-radius: 14px;
+  border: 0.5px solid var(--b, #d2d2d7);
+  border-radius: 18px;
   padding: 18px 20px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.28),
+    0 2px 6px rgba(0, 0, 0, 0.1);
 }
 .isk-modal-head {
   display: flex;
@@ -4080,6 +4098,14 @@ onBeforeUnmount(function () {
   font-size: 13px;
   color: var(--t2, #333);
 }
+/* label 是 column flex：标题文字与红色 * 必须包在同一行（.isk-fld-lbl）里，
+   否则每个子节点各占一行，* 会另起一行（老页用 <div>13px</div> 包住这一行）。 */
+.isk-fld-lbl {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 13px;
+}
 .isk-fld-hint {
   font-size: 11px;
   color: var(--t3, #888);
@@ -4090,7 +4116,8 @@ onBeforeUnmount(function () {
   padding: 7px 10px;
   border: 1px solid var(--b, #ccc);
   border-radius: 6px;
-  background: var(--c, #fff);
+  /* 与弹窗对调：弹窗实心亮面(--c)、输入框浅底(--bg)，避免两块同色糊成一片 */
+  background: var(--bg, #f5f5f7);
   color: var(--t, #111);
   font-size: 13px;
   font-family: inherit;

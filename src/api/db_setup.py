@@ -6098,6 +6098,15 @@ def _migrate_tables():
             log.info("Added events.structured_output column")
     except Exception as e:
         log.warning(f"Add events.structured_output column failed: {e}")
+    # ===== events 表补 failed_node 列（Issue #2432：失败终态落库失败节点名）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "events", "failed_node", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added events.failed_node column")
+    except Exception as e:
+        log.warning(f"Add events.failed_node column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:
@@ -7169,4 +7178,30 @@ register_migration(
     name="user-credentials-kind-backfill-after-widen",
     kind="backfill",  # 纯回填、无 DDL：不受 min_code_version 门槛约束
     fn=_fn_user_credentials_kind_backfill,
+)
+
+
+def _fn_add_events_failed_node() -> None:
+    """Issue #2432: backfill events.failed_node on existing databases.
+
+    The old-track `_migrate_tables` branch is frozen once a database carries
+    the legacy stamp, so the column has to be registered as its own idempotent
+    migration; without it a stamped database never gets the column and the
+    failure notice loses its node name.
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "events", "failed_node", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added events.failed_node column (Issue #2432)")
+    except Exception as e:
+        log.warning(f"Add events.failed_node column failed (Issue #2432): {e}")
+
+
+register_migration(
+    version="202611160020",
+    name="issue2432-events-failed-node-column",
+    kind="safe",
+    fn=_fn_add_events_failed_node,
 )

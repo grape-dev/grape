@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS events (
     idempotency_key TEXT DEFAULT NULL,
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
-    completed_at TEXT DEFAULT ''
+    completed_at TEXT DEFAULT '',
+    failed_node TEXT DEFAULT ''
 )
 """
 
