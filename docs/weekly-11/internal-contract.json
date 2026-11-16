@@ -31,6 +31,13 @@
     {
       "domain": "insight",
       "method": "POST",
+      "path": "/internal/llm-usage/aggregate",
+      "operation_id": "insight_llm_usage_aggregate",
+      "summary": ""
+    },
+    {
+      "domain": "insight",
+      "method": "POST",
       "path": "/internal/logs",
       "operation_id": "insight_logs_ingest",
       "summary": ""
@@ -157,6 +164,13 @@
     {
       "domain": "runtime",
       "method": "GET",
+      "path": "/internal/credentials/health",
+      "operation_id": "runtime_credentials_health",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
       "path": "/internal/engine-capabilities",
       "operation_id": "runtime_engine_capabilities_list",
       "summary": ""
@@ -254,6 +268,13 @@
     },
     {
       "domain": "runtime",
+      "method": "POST",
+      "path": "/internal/tasks/inflight-count",
+      "operation_id": "runtime_tasks_inflight_count",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
       "method": "GET",
       "path": "/internal/tasks/{task_id}/messages",
       "operation_id": "runtime_task_messages_list",
@@ -268,8 +289,8 @@
     }
   ],
   "counts": {
-    "insight": 8,
+    "insight": 9,
     "mgmt": 12,
-    "runtime": 18
+    "runtime": 20
   }
 }

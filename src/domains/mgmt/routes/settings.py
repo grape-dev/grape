@@ -2638,7 +2638,15 @@ def _recent_models_by_runtime(runtime_ids: list[int]) -> dict[int, list[dict]]:
     try:
         # obs_llm_usage 归 insight：聚合走该域原语（任意拓扑；只取模型名字段）
         from src.domains.insight import public as _insight_public  # noqa: PLC0415
-        for eng_id, m_key, m_raw, cnt, last_used in _insight_public.aggregate_llm_usage(ids):
+        # 走 provider（GSB，mgmt → insight）；失败回落 insight 域原语
+        try:
+            from src.kernel.gsb.provider import get_service as _gs
+            _rows = _gs("insight").aggregate_llm_usage(ids)
+        except Exception as _ge:  # noqa: BLE001
+            from src.kernel.config import log as _lg
+            _lg.debug(f"settings: provider aggregate_llm_usage failed, fallback: {_ge}")
+            _rows = _insight_public.aggregate_llm_usage(ids)
+        for eng_id, m_key, m_raw, cnt, last_used in _rows:
                 model = str(m_key or m_raw or "").strip()
                 if not model:
                     continue

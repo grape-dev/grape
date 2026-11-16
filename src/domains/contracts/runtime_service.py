@@ -35,6 +35,14 @@ class RuntimeService(ABC):
         """A Issue 阶段状态——返回 issue_state 当前行。"""
 
     @abstractmethod
+    def get_credential_health_rows(self) -> list:
+        """全部未吊销凭据的 (name, status, last_seen_at)（DevStage 环境列表用）。"""
+
+    @abstractmethod
+    def get_inflight_task_count(self, repo_keys: list) -> int:
+        """这批仓库上的在制任务数（queued/dispatched/running 三态之和）。"""
+
+    @abstractmethod
     def get_issue_card(self, repo_key: str, issue_number: int) -> dict:
         """A Issue 卡片状态（issue 单表优先，字段已归一）。
 

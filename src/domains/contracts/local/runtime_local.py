@@ -136,6 +136,15 @@ class RuntimeServiceLocal(RuntimeService):
             cols = [d[0] for d in c.description] if c.description else []
             return dict(zip(cols, row)) if cols else dict(row)
 
+    def get_credential_health_rows(self) -> list:
+        """复用 runtime public 的具名查询（不复制 SQL）。"""
+        from src.domains.runtime.public import credential_health_rows_any
+        return [list(r) for r in credential_health_rows_any()]
+
+    def get_inflight_task_count(self, repo_keys: list) -> int:
+        from src.domains.runtime.public import inflight_task_count_any
+        return int(inflight_task_count_any(repo_keys))
+
     def get_issue_card(self, repo_key: str, issue_number: int) -> dict:
         """A Issue 卡片状态——复用 runtime public 的 issue_card_row 具名查询。
 

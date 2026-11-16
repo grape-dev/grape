@@ -42,6 +42,15 @@ class RuntimeServiceRemote(RuntimeService):
     def get_issue_state(self, repo_key: str, issue_number: int) -> dict:
         return self.client.get(f"/internal/issues/{repo_key}/{issue_number}/state")
 
+    def get_credential_health_rows(self) -> list:
+        return self.client.get("/internal/credentials/health")
+
+    def get_inflight_task_count(self, repo_keys: list) -> int:
+        # repo_keys 是一批 "gitcode:owner/repo"，只能走 query/body，不进路径
+        r = self.client.post("/internal/tasks/inflight-count",
+                             json_data={"repo_keys": list(repo_keys or [])})
+        return int((r or {}).get("count") or 0)
+
     def get_issue_card(self, repo_key: str, issue_number: int) -> dict:
         # repo_key 含 ':' 和 '/'，不能进路径段（会被 URL 解析切碎 → 404）
         return self.client.get(

@@ -780,7 +780,13 @@ def delete_account(body: DeleteAccountBody, user: dict = Depends(require_jwt_onl
             # `agent_tasks` 归 runtime：在制任务数走 owner 域原语（任意拓扑），
             # 不再拿 kernel 进程主库句柄直发（三库拆分后 mgmt 库里没有该表）。
             from src.domains.runtime import public as _runtime_public
-            running_count = _runtime_public.inflight_task_count_any(repo_keys)
+            try:
+                from src.kernel.gsb.provider import get_service as _gs
+                running_count = _gs("runtime").get_inflight_task_count(repo_keys)
+            except Exception as _ge:  # noqa: BLE001
+                from src.kernel.config import log as _lg
+                _lg.debug(f"grape_auth: provider inflight count failed, fallback: {_ge}")
+                running_count = _runtime_public.inflight_task_count_any(repo_keys)
             if running_count > 0:
                 # P1-3: 用户确认强制注销时放行，否则提示先处理
                 if not body.force:

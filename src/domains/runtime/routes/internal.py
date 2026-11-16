@@ -52,6 +52,18 @@ async def get_issue_state(repo_key: str, issue_number: int) -> dict:
     """供 RuntimeServiceRemote.get_issue_state() 调用。"""
     return _get_local("runtime").get_issue_state(repo_key, issue_number)
 
+@router.get("/credentials/health", operation_id="runtime_credentials_health", include_in_schema=False)
+async def get_credential_health_rows() -> list:
+    """供 RuntimeServiceRemote.get_credential_health_rows() 调用。"""
+    return _get_local("runtime").get_credential_health_rows()
+
+
+@router.post("/tasks/inflight-count", operation_id="runtime_tasks_inflight_count", include_in_schema=False)
+async def get_inflight_task_count(body: dict) -> dict:
+    """供 RuntimeServiceRemote.get_inflight_task_count() 调用（repo_keys 走 body）。"""
+    return {"count": _get_local("runtime").get_inflight_task_count(body.get("repo_keys") or [])}
+
+
 @router.get("/issues/card", operation_id="runtime_issue_card_get", include_in_schema=False)
 async def get_issue_card(repo_key: str, issue_number: int) -> dict:
     """供 RuntimeServiceRemote.get_issue_card() 调用（issue 单表权威卡片）。
