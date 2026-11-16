@@ -2595,13 +2595,37 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
         except Exception as _rme:
             log.warning(f"task {tid}: skill source log report failed: {_rme}")
         if not _sv.get("ok"):
-            _err = skill_mismatch_error(_sv)
-            log.error(f"[skill] task {tid} refused to execute: {_err}")
-            try:
-                _res.dispose()
-            except Exception:
-                pass
-            return {"_error": _err, "_started": False}
+            # 自愈：绑定的技能没落在任务技能目录里 —— 最常见的原因不是"技能不存在"，
+            # 而是这次的物化根本没发生（换过部署目录、换过执行用户、或源解析在服务端
+            # 与引擎侧口径不一致）。此时引擎本地就能拿到官方源，直接再物化一次即可，
+            # 没有必要让整条任务失败（2026-11-16 Issue #94 实证：orgtest 侧 .grape/skills
+            # 577 个文件齐备、resolve 成功，任务仍然报 not materialized）。
+            _healed = False
+            _b = (task.get("skill") or "").strip()
+            if _b and skill_dir:
+                try:
+                    from src.kernel.config import resolve_official_skill_path as _rosp_h
+                    from src.domains.runtime.engine.skill_materialize import (
+                        materialize_skill_dir_atomic as _msda_h)
+                    _src_h = _rosp_h(_b)
+                    if _src_h and os.path.isfile(_src_h):
+                        _hok, _hr = _msda_h(skill_dir, _b, os.path.dirname(_src_h))
+                        if _hok:
+                            log.warning(f"[skill] task {tid}: bound skill '{_b}' was not materialised; "
+                                        f"self-healed from {_src_h} into {skill_dir}")
+                            _healed = True
+                        else:
+                            log.warning(f"[skill] task {tid}: self-heal failed for '{_b}': {_hr}")
+                except Exception as _he:  # noqa: BLE001
+                    log.warning(f"[skill] task {tid}: self-heal attempt raised: {_he}")
+            if not _healed:
+                _err = skill_mismatch_error(_sv)
+                log.error(f"[skill] task {tid} refused to execute: {_err}")
+                try:
+                    _res.dispose()
+                except Exception:
+                    pass
+                return {"_error": _err, "_started": False}
     except Exception as _sve:
         log.warning(f"task {tid}: skill consistency verify failed (degraded pass): {_sve}")
     return None
