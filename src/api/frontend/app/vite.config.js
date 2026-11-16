@@ -69,6 +69,28 @@ export default defineConfig({
         for (const f of ['tokens.css', 'app.css', 'auth.css']) {
           fs.copyFileSync(path.join(globalCss, f), path.join(dstGlobal, f))
         }
+
+        // 2026-11-16：view 级 CSS 合并成一份「阻塞式」产物，由 shell 的 <head> 直接引入。
+        // 背景：原来每个 entry 在模块求值时 createElement('link') 注入自己的 css，
+        // 而老壳是同步 mount 的 → 首帧渲染出无样式界面（第二次刷新因缓存命中才正常）。
+        // 现在 CSS 在 <head> 里随 HTML 阻塞加载，首帧就有样式；各 entry 不再各自注入。
+        // view 的 scoped 样式都带 data-v-* 前缀，合并成一份不会互相污染。
+        const viewCssDir = path.join(dstAssets, 'viewcss')
+        // admin-view.css 必须排除：AdminView.vue 的 <style> 是**非 scoped** 的（.ct/.tb/.card 等
+        // 都是全局选择器，最大宽度 980px 就是壳内容区的），只该在 admin.html 里加载。
+        // 一旦并进全站 bundle 会把主壳内容压到 980px（表现为“只显示半屏”）。
+        const viewFiles = fs
+          .readdirSync(viewCssDir)
+          .filter((f) => f.endsWith('.css') && f !== 'admin-view.css' && f !== 'all-views.css')
+          .sort()
+        const bundle = [
+          fs.readFileSync(path.join(dstAssets, 'bridge.css'), 'utf8'),
+          fs.readFileSync(path.join(dstAssets, 'ag-ui.css'), 'utf8'),
+          ...viewFiles.map((f) => fs.readFileSync(path.join(viewCssDir, f), 'utf8')),
+        ].join('\n')
+        fs.writeFileSync(path.join(viewCssDir, 'all-views.css'), bundle)
+        console.log(`wrote view css bundle -> ${path.join(viewCssDir, 'all-views.css')} (${viewFiles.length} views)`)
+
         console.log('wrote global css -> ' + dstGlobal)
         console.log(`wrote stable view css/assets -> ${dstAssets}`)
       },
