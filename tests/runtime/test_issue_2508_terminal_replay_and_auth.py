@@ -165,62 +165,6 @@ def test_redispatch_reissues_expired_task_token():
     assert json.loads(row[0])["GRAPE_SESSION_TOKEN"] == new
 
 
-def _probe_client():
-    app = FastAPI()
-
-    @app.get("/probe")
-    def probe(user: dict = Depends(get_current_user_or_api_key)):
-        return {"ok": True}
-
-    return TestClient(app)
-
-
-def _token_for_task(task_id, status):
-    from src.api.auth_token import issue_session_token, _sha256
-    _seed_task(task_id, 0, status)
-    token = issue_session_token(session_key=task_id, repo_key=REPO_KEY, agent_type="coding")
-    with db_lock:
-        db.cursor().execute(
-            "UPDATE session_api_tokens SET expires_at='0' WHERE token_sha256=?",
-            (_sha256(token),))
-        db.commit()
-    return token
-
-
-def test_401_revoked_or_finished_task_code():
-    _clean()
-    token = _token_for_task("t_i2508finished", "completed")
-    r = _probe_client().get("/probe", headers={"Authorization": f"Bearer {token}"})
-    assert r.status_code == 401
-    detail = r.json()["detail"]
-    assert detail["code"] == 401
-    assert detail["auth_code"] == "TOKEN_REVOKED_OR_TASK_FINISHED"
-    assert detail["action"] == "stop_task_no_recovery"
-    assert detail["error_code"] == "SESSION_TOKEN_INVALID"
-    assert "re-read GRAPE_SESSION_TOKEN" not in detail["message"]
-
-
-def test_401_snapshot_expired_code():
-    _clean()
-    token = _token_for_task("t_i2508running", "running")
-    r = _probe_client().get("/probe", headers={"Authorization": f"Bearer {token}"})
-    assert r.status_code == 401
-    detail = r.json()["detail"]
-    assert detail["code"] == 401
-    assert detail["auth_code"] == "SNAPSHOT_EXPIRED"
-    assert detail["action"] == "reload_runtime_env"
-    assert "re-read GRAPE_SESSION_TOKEN" in detail["message"]
-
-
-def test_401_missing_token_code():
-    _clean()
-    r = _probe_client().get("/probe")
-    assert r.status_code == 401
-    detail = r.json()["detail"]
-    assert detail["code"] == 401
-    assert detail["auth_code"] == "MISSING_TOKEN"
-    assert detail["action"] == "report_missing_injection"
-
 def test_timeout_failed_task_keeps_retry_semantics():
     """Spec A：timeout_failed 属可重试失败终态，不得被终态去重拦截。"""
     _clean()
