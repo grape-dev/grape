@@ -104,8 +104,16 @@ start_one() {
 if [ "$_SYSTEMD_MODE" = "1" ]; then
   # 单元自己负责拉起进程（Restart=always / 启动顺序），这里只触发重启并等健康。
   # 三库 DSN 已在文件头 source 过（.grape-rds-stage.env），unit 侧另有 GRAPE_3DB_ENV drop-in。
-  systemctl restart grape@mgmt grape@event grape@worker grape@insight \
-    || { echo "[3db] FAIL: systemctl restart 失败" >&2; exit 1; }
+  # 四个 unit 互不依赖，并行重启：串行时后一个要等前一个完全起来（mgmt 的迁移
+  # 往往十几秒），整轮部署被它拖住。并行后总耗时≈最慢的那个。
+  _rst_fail=0
+  for _r in mgmt event worker insight; do
+    ( systemctl restart "grape@$_r" || exit 9 ) &
+  done
+  for _job in $(jobs -p); do
+    wait "$_job" || _rst_fail=1
+  done
+  [ "$_rst_fail" -eq 0 ] || { echo "[3db] FAIL: systemctl restart 失败" >&2; exit 1; }
 else
   stop_ports
   GRAPE_GSB_SELFTEST_INTERVAL=60 \
@@ -118,32 +126,48 @@ fi
 echo "[3db] DOMAIN_LIB=$GRAPE_DOMAIN_LIB  mgmt=$GRAPE_DSN_MGMT" | sed 's#//[^@]*@#//***@#g'
 # 启动瞬态：进程可能仍在迁移/建连（2026-11-15 116 的 insight 卡在连接池初始化之后
 # 两分钟不监听端口，重启一次即好）。先等一轮，仍不齐就对没起来的角色单独重启一次再等一轮。
+# 探活并行：四个端口同时打，单轮耗时 ≈ 最慢的一次（原来串行 4×2s，且每轮还要 sleep 2s）
 _healthy_pids() {
-  local up=0 p
+  local up=0 p _d
+  _d=$(mktemp -d 2>/dev/null || echo /tmp/3dbprobe.$$)
+  mkdir -p "$_d"
   for p in 38081 38082 38083 38084; do
-    path=/api/health; case $p in 38082|38083) path=/health ;; esac
-    curl -s -m 2 "http://127.0.0.1:$p$path" >/dev/null 2>&1 && up=$((up+1))
+    (
+      path=/api/health; case $p in 38082|38083) path=/health ;; esac
+      curl -s -m 1 -o /dev/null "http://127.0.0.1:$p$path" 2>/dev/null && : > "$_d/$p"
+    ) &
   done
+  wait
+  up=$(ls "$_d" 2>/dev/null | wc -l)
+  rm -rf "$_d" 2>/dev/null || true
   echo "$up"
 }
 _wait_healthy() {
   local i
-  for i in $(seq 1 30); do
+  for i in $(seq 1 60); do   # 60 × 0.5s = 30s 上限（原来 30 × 2s = 60s）
     [ "$(_healthy_pids)" -eq 4 ] && return 0
-    sleep 2
+    sleep 0.5
   done
   return 1
 }
 if _wait_healthy; then
   echo "[3db] all 4 processes healthy"
 else
+  # 谁没起来：并行探一遍，只重启缺的那几个
   _stuck=""
+  _sd=$(mktemp -d 2>/dev/null || echo /tmp/3dbstuck.$$)
+  mkdir -p "$_sd"
   for pair in "38081:mgmt" "38082:event" "38083:worker" "38084:insight"; do
-    _p=${pair%%:*}; _role=${pair##*:}
-    path=/api/health; case $_p in 38082|38083) path=/health ;; esac
-    code=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$_p$path" 2>/dev/null)
-    [ "$code" != "200" ] && _stuck="$_stuck $_role"
+    (
+      _p=${pair%%:*}; _role=${pair##*:}
+      path=/api/health; case $_p in 38082|38083) path=/health ;; esac
+      code=$(curl -s -m 1 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$_p$path" 2>/dev/null)
+      [ "$code" != "200" ] && : > "$_sd/$_role"
+    ) &
   done
+  wait
+  _stuck=$(ls "$_sd" 2>/dev/null | tr '\n' ' ')
+  rm -rf "$_sd" 2>/dev/null || true
   if [ -n "$_stuck" ]; then
     echo "[3db] WARN: 这些角色未就绪:$_stuck —— 判定为启动瞬态，单独重启一次再等一轮"
     for _role in $_stuck; do
