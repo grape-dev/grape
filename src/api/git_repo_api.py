@@ -1312,7 +1312,7 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
             _mod_fb = _provider_module(p)
             if _mod_fb is not None:
                 _uname = str(user.get("username") or "")
-                _uid = int(user.get("id") or 0)
+                _uid = user.get("id") or ""
                 if not _uname and has_user_id(_uid):
                     from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                     _uname = (get_grape_account_by_id(_uid) or {}).get("username", "")
