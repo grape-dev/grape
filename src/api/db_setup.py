@@ -7908,6 +7908,65 @@ register_migration(
     fn=_fn_ensure_platform_object_tables,
 )
 
+
+def _fn_audit_logs_operator_id_widen() -> None:
+    """audit_logs.operator_id 列型归一（uuid-pk 线漏改；2026-11-16 8070 E2E 实锤）。
+
+    现象：scene_pin / issue_admin_confirmed 等「用户操作」审计全断——
+    log_audit 传账号域 uuid 字符串进 INTEGER 列，MySQL STRICT 报
+    1265 Data truncated for column 'operator_id'，被 log_audit 的 except
+    吞成 WARNING，audit_logs 一行不留（整条审计静默丢失）。
+
+    202611120003（uuid-pk-and-user-id-cols）的 widen 清单只覆盖 user_id 族列
+    （audit_logs.user_id 已 TEXT），operator_id 漏在清单外。
+
+    MySQL：INTEGER → VARCHAR(36) NOT NULL DEFAULT '0'（对齐 user_id 列型；
+    存量 int 值 0 语义保真，TEXT 列混存无碍）。SQLite：INTEGER 亲和天然容混型，
+    幂等零改动（只占盖章位）——同 202611140004 issue_state.scene_user_id 手法。
+
+    G-01 预防动作：末尾 information_schema 断言列存在且已非 int，不存在 raise
+    不盖章。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+    if get_db_backend() != "mysql":
+        return
+    from src.kernel.session_manager import db
+    c = db.cursor()
+    c.execute(
+        "SELECT DATA_TYPE FROM information_schema.columns "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='audit_logs' "
+        "AND COLUMN_NAME='operator_id'")
+    row = c.fetchone()
+    if row and row[0] in ("int", "bigint", "smallint", "tinyint", "mediumint"):
+        c.execute(
+            "ALTER TABLE audit_logs MODIFY operator_id "
+            "VARCHAR(36) NOT NULL DEFAULT '0'")
+        db.commit()
+        log.info("[migration 202611170042] audit_logs.operator_id "
+                 "INTEGER -> VARCHAR(36) widened")
+    # 幂等自检（G-01/G-05 口径）：列必须已是非整型，否则不盖章
+    c.execute(
+        "SELECT DATA_TYPE FROM information_schema.columns "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='audit_logs' "
+        "AND COLUMN_NAME='operator_id'")
+    row = c.fetchone()
+    if not row:
+        raise RuntimeError(
+            "202611170042: audit_logs.operator_id missing after widen — "
+            "refuse to stamp")
+    if row[0] in ("int", "bigint", "smallint", "tinyint", "mediumint"):
+        raise RuntimeError(
+            "202611170042: audit_logs.operator_id still integer after widen — "
+            "refuse to stamp")
+
+
+register_migration(
+    version="202611170042",
+    name="audit-logs-operator-id-text",
+    kind="safe",
+    fn=_fn_audit_logs_operator_id_widen,
+)
+
 register_migration(
     version="202611170040",
     name="retire-vcs-platforms-hidden",

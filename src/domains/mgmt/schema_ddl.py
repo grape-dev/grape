@@ -451,7 +451,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     seq          INTEGER NOT NULL UNIQUE,
     event_type   VARCHAR(64) NOT NULL,
     user_id      TEXT DEFAULT 0,
-    operator_id  INTEGER DEFAULT 0,
+    operator_id  TEXT DEFAULT '0',
     ip           VARCHAR(64) DEFAULT '',
     detail       TEXT DEFAULT '{}',
     prev_hash    VARCHAR(64) DEFAULT '',
