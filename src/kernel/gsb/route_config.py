@@ -52,6 +52,8 @@ CONTRACT_METHODS: dict[str, tuple[str, ...]] = {
         "get_task_stats",
         # 本轮新增（mgmt → runtime 跨域读迁移）
         "get_issue_card", "get_credential_health_rows", "get_inflight_task_count",
+        "get_agent_session_row", "get_event_status_counts", "search_events",
+        "list_credential_rows", "list_engine_tags",
     ),
     "insight": (
         "log_obs", "log_llm_usage", "log_api_latency", "query_metrics",

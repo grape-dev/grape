@@ -35,6 +35,27 @@ class RuntimeService(ABC):
         """A Issue 阶段状态——返回 issue_state 当前行。"""
 
     @abstractmethod
+    def list_credential_rows(self) -> list:
+        """runtime_credentials 全量行（只含密文/元数据列，解密由调用方负责）。"""
+
+    @abstractmethod
+    def list_engine_tags(self, runtime_id: int, enabled_only: bool = True) -> list:
+        """某引擎的能力标签列表。"""
+
+    @abstractmethod
+    def get_agent_session_row(self, repo_keys: list, agent_type: str, token_field: str) -> list:
+        """某类 Agent 在仓库集合内的会话行（列序由 owner 域固定）。"""
+
+    @abstractmethod
+    def get_event_status_counts(self, repo_keys: list, agent_type: str) -> list:
+        """某类 Agent 在仓库集合内的事件状态分布 [(status, count)]。"""
+
+    @abstractmethod
+    def search_events(self, repo_keys: list, agent_type: str, keyword: str = "",
+                      page: int = 1, page_size: int = 10) -> dict:
+        """事件历史搜索 → {"total": int, "rows": list}。"""
+
+    @abstractmethod
     def get_credential_health_rows(self) -> list:
         """全部未吊销凭据的 (name, status, last_seen_at)（DevStage 环境列表用）。"""
 

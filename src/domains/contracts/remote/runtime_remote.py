@@ -42,6 +42,34 @@ class RuntimeServiceRemote(RuntimeService):
     def get_issue_state(self, repo_key: str, issue_number: int) -> dict:
         return self.client.get(f"/internal/issues/{repo_key}/{issue_number}/state")
 
+    def list_credential_rows(self) -> list:
+        resp = self.client.get("/internal/credentials/rows")
+        return list((resp or {}).get("rows") or [])
+
+    def list_engine_tags(self, runtime_id: int, enabled_only: bool = True) -> list:
+        resp = self.client.get("/internal/engine-tags",
+                               params={"runtime_id": int(runtime_id),
+                                       "enabled_only": 1 if enabled_only else 0})
+        return list((resp or {}).get("tags") or [])
+
+    def get_agent_session_row(self, repo_keys: list, agent_type: str, token_field: str) -> list:
+        r = self.client.post("/internal/agent-sessions/row",
+                             json_data={"repo_keys": list(repo_keys or []),
+                                        "agent_type": agent_type, "token_field": token_field})
+        return list((r or {}).get("row") or [])
+
+    def get_event_status_counts(self, repo_keys: list, agent_type: str) -> list:
+        r = self.client.post("/internal/events/status-counts",
+                             json_data={"repo_keys": list(repo_keys or []), "agent_type": agent_type})
+        return list((r or {}).get("rows") or [])
+
+    def search_events(self, repo_keys: list, agent_type: str, keyword: str = "",
+                      page: int = 1, page_size: int = 10) -> dict:
+        r = self.client.post("/internal/events/search",
+                             json_data={"repo_keys": list(repo_keys or []), "agent_type": agent_type,
+                                        "keyword": keyword, "page": page, "page_size": page_size})
+        return r or {"total": 0, "rows": []}
+
     def get_credential_health_rows(self) -> list:
         return self.client.get("/internal/credentials/health")
 

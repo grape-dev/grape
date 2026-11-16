@@ -52,6 +52,40 @@ async def get_issue_state(repo_key: str, issue_number: int) -> dict:
     """供 RuntimeServiceRemote.get_issue_state() 调用。"""
     return _get_local("runtime").get_issue_state(repo_key, issue_number)
 
+@router.get("/credentials/rows", operation_id="runtime_credentials_rows", include_in_schema=False)
+async def list_credential_rows() -> dict:
+    """供 RuntimeServiceRemote.list_credential_rows() 调用。"""
+    return {"rows": _get_local("runtime").list_credential_rows()}
+
+
+@router.get("/engine-tags", operation_id="runtime_engine_tags", include_in_schema=False)
+async def list_engine_tags(runtime_id: int, enabled_only: int = 1) -> dict:
+    """供 RuntimeServiceRemote.list_engine_tags() 调用。"""
+    return {"tags": _get_local("runtime").list_engine_tags(int(runtime_id), bool(enabled_only))}
+
+
+@router.post("/agent-sessions/row", operation_id="runtime_agent_session_row", include_in_schema=False)
+async def get_agent_session_row(body: dict) -> dict:
+    """供 RuntimeServiceRemote.get_agent_session_row() 调用（repo_keys 走 body）。"""
+    return {"row": _get_local("runtime").get_agent_session_row(
+        body.get("repo_keys") or [], body.get("agent_type") or "", body.get("token_field") or "")}
+
+
+@router.post("/events/status-counts", operation_id="runtime_events_status_counts", include_in_schema=False)
+async def get_event_status_counts(body: dict) -> dict:
+    """供 RuntimeServiceRemote.get_event_status_counts() 调用。"""
+    return {"rows": _get_local("runtime").get_event_status_counts(
+        body.get("repo_keys") or [], body.get("agent_type") or "")}
+
+
+@router.post("/events/search", operation_id="runtime_events_search_internal", include_in_schema=False)
+async def search_events(body: dict) -> dict:
+    """供 RuntimeServiceRemote.search_events() 调用。"""
+    return _get_local("runtime").search_events(
+        body.get("repo_keys") or [], body.get("agent_type") or "",
+        body.get("keyword") or "", int(body.get("page") or 1), int(body.get("page_size") or 10))
+
+
 @router.get("/credentials/health", operation_id="runtime_credentials_health", include_in_schema=False)
 async def get_credential_health_rows() -> list:
     """供 RuntimeServiceRemote.get_credential_health_rows() 调用。"""

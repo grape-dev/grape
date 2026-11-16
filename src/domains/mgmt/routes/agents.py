@@ -244,7 +244,13 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             # 会话 token 列按 provider 从端口派生（模块/卡 session_token_field 能力位）
             from src.kernel.token_resolver import create_provider
             _token_col = create_provider(_provider).session_token_field()
-            row = _rt_agents.agent_session_row(_repo_keys, name, _token_col)
+            # 走 provider（GSB，mgmt → runtime）；失败回落 owner 域原语
+            try:
+                from src.kernel.gsb.provider import get_service as _gs
+                row = _gs("runtime").get_agent_session_row(_repo_keys, name, _token_col)
+            except Exception as _ge:  # noqa: BLE001
+                log.debug(f"agents: provider agent_session_row failed, fallback: {_ge}")
+                row = _rt_agents.agent_session_row(_repo_keys, name, _token_col)
             if row:
                 backend_name = ""
                 instance_name_val = ""
@@ -296,7 +302,13 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
             vod_bot_connected = bool(_vod_app_id)
 
         try:
-            for r in _rt_agents.event_status_counts(_repo_keys, name):
+            try:
+                from src.kernel.gsb.provider import get_service as _gs2
+                _cnts = _gs2("runtime").get_event_status_counts(_repo_keys, name)
+            except Exception as _ge2:  # noqa: BLE001
+                log.debug(f"agents: provider event_status_counts failed, fallback: {_ge2}")
+                _cnts = _rt_agents.event_status_counts(_repo_keys, name)
+            for r in _cnts:
                 event_stats[r[0]] = r[1]
         except Exception:
             pass
@@ -305,8 +317,16 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         # 事件检索（keyword LIKE 条件在 owner 域构造）：一次调用拿 (total, rows)
         _rows_ev: list = []
         try:
-            events_total, _rows_ev = _rt_agents.events_search(
-                _repo_keys, name, keyword=keyword, page=page, page_size=page_size)
+            try:
+                from src.kernel.gsb.provider import get_service as _gs3
+                _ev = _gs3("runtime").search_events(
+                    _repo_keys, name, keyword=keyword, page=page, page_size=page_size)
+                events_total = int(_ev.get("total") or 0)
+                _rows_ev = list(_ev.get("rows") or [])
+            except Exception as _ge3:  # noqa: BLE001
+                log.debug(f"agents: provider search_events failed, fallback: {_ge3}")
+                events_total, _rows_ev = _rt_agents.events_search(
+                    _repo_keys, name, keyword=keyword, page=page, page_size=page_size)
         except Exception as e:
             log.warning(f"agent events search failed (keyword={keyword!r}): {e}")
             events_total = 0

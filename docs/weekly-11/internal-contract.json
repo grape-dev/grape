@@ -149,6 +149,13 @@
     },
     {
       "domain": "runtime",
+      "method": "POST",
+      "path": "/internal/agent-sessions/row",
+      "operation_id": "runtime_agent_session_row",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
       "method": "GET",
       "path": "/internal/chat/conversations",
       "operation_id": "runtime_chat_conversations_list",
@@ -171,6 +178,13 @@
     {
       "domain": "runtime",
       "method": "GET",
+      "path": "/internal/credentials/rows",
+      "operation_id": "runtime_credentials_rows",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
       "path": "/internal/engine-capabilities",
       "operation_id": "runtime_engine_capabilities_list",
       "summary": ""
@@ -178,8 +192,29 @@
     {
       "domain": "runtime",
       "method": "GET",
+      "path": "/internal/engine-tags",
+      "operation_id": "runtime_engine_tags",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
       "path": "/internal/events",
       "operation_id": "runtime_events_list",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "POST",
+      "path": "/internal/events/search",
+      "operation_id": "runtime_events_search_internal",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "POST",
+      "path": "/internal/events/status-counts",
+      "operation_id": "runtime_events_status_counts",
       "summary": ""
     },
     {
@@ -291,6 +326,6 @@
   "counts": {
     "insight": 9,
     "mgmt": 12,
-    "runtime": 20
+    "runtime": 25
   }
 }

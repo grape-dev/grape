@@ -136,6 +136,29 @@ class RuntimeServiceLocal(RuntimeService):
             cols = [d[0] for d in c.description] if c.description else []
             return dict(zip(cols, row)) if cols else dict(row)
 
+    def list_credential_rows(self) -> list:
+        from src.domains.runtime.public import list_credential_rows as _f
+        return [list(r) for r in _f()]
+
+    def list_engine_tags(self, runtime_id: int, enabled_only: bool = True) -> list:
+        from src.domains.runtime.public import list_engine_tags as _f
+        return list(_f(int(runtime_id), bool(enabled_only)))
+
+    def get_agent_session_row(self, repo_keys: list, agent_type: str, token_field: str) -> list:
+        from src.domains.runtime.public import agent_session_row as _f
+        row = _f(repo_keys, agent_type, token_field)
+        return list(row) if row else []
+
+    def get_event_status_counts(self, repo_keys: list, agent_type: str) -> list:
+        from src.domains.runtime.public import event_status_counts as _f
+        return [list(r) for r in _f(repo_keys, agent_type)]
+
+    def search_events(self, repo_keys: list, agent_type: str, keyword: str = "",
+                      page: int = 1, page_size: int = 10) -> dict:
+        from src.domains.runtime.public import events_search as _f
+        total, rows = _f(repo_keys, agent_type, keyword, page, page_size)
+        return {"total": int(total), "rows": [list(r) for r in rows]}
+
     def get_credential_health_rows(self) -> list:
         """复用 runtime public 的具名查询（不复制 SQL）。"""
         from src.domains.runtime.public import credential_health_rows_any

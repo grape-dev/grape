@@ -1280,8 +1280,16 @@ def _creds_via_lib():
         return None
     try:
         from src.domains.runtime import public as _rt
-
-        return _rt if _rt.available() else None
+        if not _rt.available():
+            return None
+        # 优先 provider（三库下 GRAPE_PROVIDER_MODE=remote → GSB；否则 Local，行为不变）。
+        # provider 不可用时沿用 public 模块，调用方无感。
+        try:
+            from src.kernel.gsb.provider import get_service as _gs
+            return _gs("runtime")
+        except Exception as _ge:  # noqa: BLE001
+            log.debug(f"settings: provider unavailable for credentials, fallback to public: {_ge}")
+            return _rt
     except Exception as _exc:  # noqa: BLE001
         log.warning(f"credentials via lib unavailable: {_exc}")
         return None
@@ -1426,7 +1434,12 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
             for x in _lr_rows
         ]
         from src.kernel.domain_read import runtime_lib as _runtime_lib_tags
-        _rtl = _runtime_lib_tags()
+        try:
+            from src.kernel.gsb.provider import get_service as _gs_tags
+            _rtl = _gs_tags("runtime")
+        except Exception as _ge_tags:  # noqa: BLE001
+            log.debug(f"settings: provider unavailable for engine tags, fallback to lib: {_ge_tags}")
+            _rtl = _runtime_lib_tags()
         for rt in runtimes:
             if _rtl is not None:
                 rt["agent_tags"] = _rtl.list_engine_tags(rt["id"], enabled_only=True)
