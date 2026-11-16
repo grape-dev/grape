@@ -1545,12 +1545,16 @@ def runtime_claim_v2(engine_uid: str, body: RuntimeClaimBodyV2 | None = None,
 
 
 @router.post("/runtimes/uid/{engine_uid}/tasks/claim-by-tag/{tag}")
-def runtime_claim_by_tag_v2(engine_uid: str, tag: str,
+async def runtime_claim_by_tag_v2(engine_uid: str, tag: str,
                             body: RuntimeClaimBodyV2 | None = None,
                             credential_id: int = Depends(_require_credential)):
-    """Issue #1011 v2 claim-by-tag：uid 寻址 + v1 服务层（tag 匹配/scope 隔离零漂移）。"""
+    """Issue #1011 v2 claim-by-tag：uid 寻址 + v1 服务层（tag 匹配/scope 隔离零漂移）。
+
+    Bugfix（同 heartbeat-v2 家族，2026-11-16 E2E 实测线上 500）：v1
+    runtime_claim_by_tag 是 async（to_thread 高频路径），v2 必须 async + await。
+    """
     rid = _resolve_runtime_by_uid(engine_uid, body.runtime_id if body else 0, credential_id)
-    return runtime_claim_by_tag(rid, tag, _claim_body_v1(body), credential_id)
+    return await runtime_claim_by_tag(rid, tag, _claim_body_v1(body), credential_id)
 
 
 @router.post("/runtimes/uid/{engine_uid}/tasks/claim-bound")
@@ -1591,28 +1595,38 @@ def runtime_claim_capabilities_v2(engine_uid: str,
 
 
 @router.post("/heartbeat-v2")
-def runtime_heartbeat_v2(body: HeartbeatBodyV2, request: Request,
+async def runtime_heartbeat_v2(body: HeartbeatBodyV2, request: Request,
                          credential_id: int = Depends(_require_credential)):
     """Issue #1011 v2 心跳：engine_uids 优先解析、失效回退 runtime_ids、全失效不造行。
 
     解析后委托 v1 runtime_heartbeat（心跳全逻辑共用，语义零漂移）；
     uid 失效条目仅日志取证（不造行，防 -cred0 孤儿），回退语义见 v2 spec §2.3。
+
+    Bugfix（E2E 2026-11-16 实测 6884/6884 全 500）：v1 runtime_heartbeat 是 async
+    （asyncio.to_thread 包装），sync def + 裸调返回 coroutine → resp[...] 赋值
+    TypeError → 500。本函数必须 async 并 await 委托调用；uid 解析段照 v1 口径
+    交线程池，不占事件循环。
     """
-    resolved_ids: list[int] = []
-    stale_uids: list[str] = []
-    with db_lock:
-        c = db.cursor()
-        for _uid in (body.engine_uids or []):
-            uid = str(_uid or "").strip().lower()
-            if not uid:
-                continue
-            row = c.execute(
-                "SELECT id FROM agent_runtimes WHERE engine_uid=? AND credential_id=? LIMIT 1",
-                (uid, credential_id)).fetchone()
-            if row:
-                resolved_ids.append(row[0])
-            else:
-                stale_uids.append(uid)
+
+    def _resolve_uids() -> tuple[list[int], list[str]]:
+        resolved_ids: list[int] = []
+        stale_uids: list[str] = []
+        with db_lock:
+            c = db.cursor()
+            for _uid in (body.engine_uids or []):
+                uid = str(_uid or "").strip().lower()
+                if not uid:
+                    continue
+                row = c.execute(
+                    "SELECT id FROM agent_runtimes WHERE engine_uid=? AND credential_id=? LIMIT 1",
+                    (uid, credential_id)).fetchone()
+                if row:
+                    resolved_ids.append(row[0])
+                else:
+                    stale_uids.append(uid)
+        return resolved_ids, stale_uids
+
+    resolved_ids, stale_uids = await asyncio.to_thread(_resolve_uids)
     for uid in stale_uids:
         log.warning(f"heartbeat-v2: engine_uid not found (stale, no row created): "
                     f"uid={uid} credential={credential_id}")
@@ -1632,7 +1646,7 @@ def runtime_heartbeat_v2(body: HeartbeatBodyV2, request: Request,
         spec=body.spec,
         log_lines=body.log_lines,
         probe_results=body.probe_results)
-    resp = runtime_heartbeat(v1_body, request, credential_id)
+    resp = await runtime_heartbeat(v1_body, request, credential_id)
     resp["engine_uids_resolved"] = len(resolved_ids)
     resp["engine_uids_stale"] = len(stale_uids)
     return resp

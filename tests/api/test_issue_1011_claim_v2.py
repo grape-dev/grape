@@ -28,7 +28,7 @@ import src.domains.runtime.engine.service as service_mod
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
-    conn = sqlite3.connect(str(tmp_path / "v2.db"))
+    conn = sqlite3.connect(str(tmp_path / "v2.db"), check_same_thread=False)
     conn.executescript("""
     CREATE TABLE agent_runtimes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,9 +131,16 @@ class TestClaimV2:
 # ---------------------------------------------------------------------------
 
 class TestClaimVariantsV2:
-    def test_claim_by_tag_uid(self, env):
+    async def test_claim_by_tag_uid(self, env):
+        # async + await 契约（同 heartbeat-v2 家族 bugfix）：v1 claim_by_tag 是 async，
+        # v2 裸调返回 coroutine、服务层不被触达（线上 500 / 测试侧 calls 空）。
+        import inspect
+        assert inspect.iscoroutinefunction(rt.runtime_claim_by_tag), \
+            "v1 runtime_claim_by_tag must stay async (to_thread wrapper)"
+        assert inspect.iscoroutinefunction(rt.runtime_claim_by_tag_v2), \
+            "v2 runtime_claim_by_tag_v2 must be async and await the async v1"
         conn, calls = env
-        rt.runtime_claim_by_tag_v2(UID_A, "coding", rt.RuntimeClaimBodyV2(), credential_id=7)
+        await rt.runtime_claim_by_tag_v2(UID_A, "coding", rt.RuntimeClaimBodyV2(), credential_id=7)
         assert calls == [("claim_by_tag", "coding", 1)]
 
     def test_claim_bound_owned_uid(self, env):
@@ -171,6 +178,12 @@ class TestClaimVariantsV2:
 
 # ---------------------------------------------------------------------------
 # A5/A6 · heartbeat-v2
+#
+# Bugfix 回归守卫（2026-11-16 E2E 实测）：v1 runtime_heartbeat 是 async def，v2
+# 曾以 sync def 裸调 → 返回 coroutine → 500（worker.log 6884/6884 全 500）。
+# 契约：v2 必须 await v1；fake_hb 与生产同形态为 async（fake sync 会掩盖缺陷，
+# 正是本 bug 漏网原因——故 test await 契约用 inspect.iscoroutinefunction 锚死
+# 生产函数形态，而非只信 fake）。
 # ---------------------------------------------------------------------------
 
 class _FakeRequest:
@@ -181,35 +194,43 @@ class _FakeRequest:
 
 
 class TestHeartbeatV2:
-    def test_uids_priority_and_fallback(self, env, monkeypatch):
+    def test_v1_heartbeat_is_async_and_v2_awaits(self, env):
+        # 生产契约锚：v1 必须是 async def（to_thread 包装），v2 调用必须 await。
+        import inspect
+        assert inspect.iscoroutinefunction(rt.runtime_heartbeat), \
+            "v1 runtime_heartbeat must stay async (to_thread wrapper)"
+        assert inspect.iscoroutinefunction(rt.runtime_heartbeat_v2), \
+            "v2 runtime_heartbeat_v2 must be async and await the async v1"
+
+    async def test_uids_priority_and_fallback(self, env, monkeypatch):
         conn, calls = env
         seen = {}
         orig = rt.runtime_heartbeat
 
-        def fake_hb(body, request, credential_id):
+        async def fake_hb(body, request, credential_id):
             seen["ids"] = list(body.runtime_ids)
             return {"status": "ok", "cancelled_tasks": [], "latest_version": ""}
 
         monkeypatch.setattr(rt, "runtime_heartbeat", fake_hb)
         body = rt.HeartbeatBodyV2(engine_uids=[UID_A, UID_STALE], runtime_ids=[2])
-        resp = rt.runtime_heartbeat_v2(body, _FakeRequest(), credential_id=7)
+        resp = await rt.runtime_heartbeat_v2(body, _FakeRequest(), credential_id=7)
         assert seen["ids"] == [1, 2], "uid 优先解析 + 失效回退 runtime_ids"
         assert resp["engine_uids_resolved"] == 1
         assert resp["engine_uids_stale"] == 1
 
-    def test_all_stale_no_row_created(self, env, monkeypatch):
+    async def test_all_stale_no_row_created(self, env, monkeypatch):
         conn, _ = env
         before = conn.execute(
             "SELECT COUNT(*) FROM agent_runtimes WHERE engine_uid=?", (UID_STALE,)).fetchone()[0]
         seen = {}
 
-        def fake_hb(body, request, credential_id):
+        async def fake_hb(body, request, credential_id):
             seen["ids"] = list(body.runtime_ids)
             return {"status": "ok", "cancelled_tasks": [], "latest_version": ""}
 
         monkeypatch.setattr(rt, "runtime_heartbeat", fake_hb)
         body = rt.HeartbeatBodyV2(engine_uids=[UID_STALE])
-        rt.runtime_heartbeat_v2(body, _FakeRequest(), credential_id=7)
+        await rt.runtime_heartbeat_v2(body, _FakeRequest(), credential_id=7)
         assert seen["ids"] == []
         after = conn.execute(
             "SELECT COUNT(*) FROM agent_runtimes WHERE engine_uid=?", (UID_STALE,)).fetchone()[0]
