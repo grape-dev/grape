@@ -127,11 +127,11 @@ SESSION_TOKEN_FAILURE_HINTS = {
 def _finished_task_statuses() -> tuple:
     """任务终态集合（用于判定 token 被撤销/任务已结束）。
 
-    以 ``service.TASK_TERMINAL_STATUSES`` 为单源（completed/failed/cancelled/
-    timeout_failed），避免另起一套词表漂移。
+    单源在 ``src.kernel.task_states``：kernel 不能 import domains（check-arch R1），
+    所以词表放在 kernel，runtime 域反向引用，避免两套词表漂移。
     """
-    from src.domains.runtime.engine.service import TASK_TERMINAL_STATUSES
-    return tuple(TASK_TERMINAL_STATUSES)
+    from src.kernel.task_states import TERMINAL_TASK_STATUSES
+    return tuple(TERMINAL_TASK_STATUSES)
 
 # 仅对 tk_ 前缀做细分；其它前缀（grape_ API Key / JWT）沿用原有错误码。
 _NOT_SESSION_TOKEN = "not_session_token"
@@ -176,24 +176,17 @@ def inspect_session_token(token: str) -> dict:
     return {"status": "valid", "info": info, "session_key": row[1]}
 
 
-def _is_task_finished(session_key: str) -> bool:
-    """session_key 关联的任务是否已进入终态（token 可能已被撤销）。"""
-    if not session_key:
-        return False
-    try:
-        from src.kernel.owner_db import db_pair
-        _rt_db, _rt_lock = db_pair("runtime")
-        with _rt_lock:
-            c = _rt_db.cursor()
-            c.execute("SELECT status FROM agent_tasks WHERE id=? LIMIT 1", (session_key,))
-            row = c.fetchone()
-        return bool(row and str(row[0] or "").strip() in _finished_task_statuses())
-    except Exception as e:
-        log.warning(f"Inspect session token task status failed for {session_key}: {e}")
-        return False
+def _is_task_finished(task_status: str) -> bool:
+    """任务状态是否已终态（token 可能已被撤销）。
+
+    Issue #2508 review: agent_tasks is owned by the runtime domain, so kernel no
+    longer queries it. Callers (src/api/deps.py) resolve the status through the
+    runtime public primitive and pass it in.
+    """
+    return str(task_status or "").strip() in _finished_task_statuses()
 
 
-def classify_session_token_failure(token: str) -> str:
+def classify_session_token_failure(token: str, task_status: str = "") -> str:
     """把失效会话 token 细分为三类错误码（Issue #2508）。
 
     - 未提供 token → ``MISSING_TOKEN``；
@@ -207,8 +200,7 @@ def classify_session_token_failure(token: str) -> str:
         return MISSING_TOKEN
     if status == "valid":
         return ""
-    session_key = state.get("session_key") or (state.get("info") or {}).get("session_key")
-    if session_key and _is_task_finished(session_key):
+    if _is_task_finished(task_status):
         return TOKEN_REVOKED_OR_TASK_FINISHED
     return SNAPSHOT_EXPIRED
 

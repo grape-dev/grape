@@ -6042,3 +6042,27 @@ def first_online_runtime():
             "ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END "
             "LIMIT 1")
         return c.fetchone()
+
+
+def terminal_task_statuses() -> tuple[str, ...]:
+    """任务终态词表（单源在 kernel.task_states，本域反向引用，见 Issue #2508 review）。"""
+    from src.kernel.task_states import TERMINAL_TASK_STATUSES
+    return tuple(TERMINAL_TASK_STATUSES)
+
+
+def task_status_by_id(task_id: str) -> str:
+    """任务当前状态；空串表示任务不存在或查询失败。
+
+    kernel 的 token 判定需要「任务是否已终态」，但 agent_tasks 归本域，kernel
+    不能直查（check-arch A11）：由 src/api 层通过本原语取值后传进去。
+    """
+    if not task_id:
+        return ""
+    try:
+        with _any_cursor() as c:
+            c.execute("SELECT status FROM agent_tasks WHERE id=? LIMIT 1", (task_id,))
+            row = c.fetchone()
+        return str(row[0] or "") if row else ""
+    except Exception as e:
+        log.warning(f"task_status_by_id failed id={task_id}: {e}")
+        return ""

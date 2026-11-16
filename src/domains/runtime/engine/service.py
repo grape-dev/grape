@@ -505,8 +505,15 @@ _TASK_COLUMNS = (
 #   进程活在 worker 上，等待其自报终态（complete_task/fail_task 正常转换）。
 # - timeout_failed：pending_self_report 超时（默认 30min）无自报的**带说明终态**，
 #   区别于 plain failed（下游翻译时须附超时原因）。
-TASK_TERMINAL_STATUSES = ("completed", "failed", "cancelled", "timeout_failed")
-TASK_ACTIVE_STATUSES = ("queued", "dispatched", "running", "pending_self_report")
+# Issue #2508 review: the vocabulary is shared with kernel token verification,
+# which cannot import domains (check-arch R1), so it lives in kernel.task_states.
+from src.kernel.task_states import (  # noqa: E402
+    ACTIVE_TASK_STATUSES,
+    TERMINAL_TASK_STATUSES,
+)
+
+TASK_TERMINAL_STATUSES = TERMINAL_TASK_STATUSES
+TASK_ACTIVE_STATUSES = ACTIVE_TASK_STATUSES
 TASK_PENDING_SELF_REPORT = "pending_self_report"
 TASK_TIMEOUT_FAILED = "timeout_failed"
 

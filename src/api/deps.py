@@ -207,10 +207,28 @@ def get_current_user_or_api_key(request: Request) -> dict:
             "kind": "takeover",
         }
 
+    def _task_status_for_token(raw_token: str) -> str:
+        """Resolve the task status for a tk_ token through the runtime primitive.
+
+        Issue #2508 review: agent_tasks belongs to the runtime domain; kernel must
+        not query it, so the status is resolved here and passed into the classifier.
+        """
+        try:
+            from src.kernel.auth_sdk.auth_token import inspect_session_token
+            _state = inspect_session_token(raw_token) or {}
+            _key = _state.get("session_key") or (_state.get("info") or {}).get("session_key")
+            if not _key:
+                return ""
+            from src.domains.runtime import public as _rt_public
+            return _rt_public.task_status_by_id(_key)
+        except Exception:
+            return ""
+
     if token.startswith(SESSION_TOKEN_PREFIX):
         info = verify_session_token(token)
         if not info:
-            _fail_code = classify_session_token_failure(token) or SNAPSHOT_EXPIRED
+            _fail_code = (classify_session_token_failure(token, _task_status_for_token(token))
+                          or SNAPSHOT_EXPIRED)
             raise HTTPException(
                 status_code=401,
                 detail=_session_token_failure_detail(_fail_code, "SESSION_TOKEN_INVALID"))
