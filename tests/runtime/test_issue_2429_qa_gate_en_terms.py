@@ -3,7 +3,6 @@
 复现：seq=71902 的归档结论语义为通过，但裸词 Required 命中失败词规则导致
 grape-test#183 合入被 409 阻断。
 """
-import pytest
 
 SEQ_71902 = (
     "复审通过，无 Critical/Required，PR #181 已自动合入 arch-weekly-11"
@@ -25,6 +24,17 @@ def test_closed_quantifier_context_is_pass():
     assert _classify("N 条 Required 均已闭环") == "pass"
     assert _classify("上轮 2 条 Critical 已全部修复") == "pass"
     assert _classify("本轮 1 项 Required 已处理") == "pass"
+    # 量词在名词之后 / 闭环短语共享 / 闭环词在名词之前
+    assert _classify("Critical 1 项，Required 2 项，均已在上一轮闭环") == "pass"
+    assert _classify("已修复 2 条 Critical") == "pass"
+
+
+def test_negated_unresolved_is_not_fail():
+    """无/没有 + 未闭环类是双重否定，等价于已闭环，不能按未处理判 fail。"""
+    assert _classify("无未处理项，结论通过") == "pass"
+    assert _classify("无未闭环项") != "fail"
+    assert _classify("没有未修复的问题") != "fail"
+    assert _classify("均已修复，无未修复") != "fail"
 
 
 def test_unresolved_quantifier_context_is_fail():
@@ -43,6 +53,19 @@ def test_explicit_pass_does_not_hide_real_failure():
     assert _classify("Critical: 1 个未修复") == "fail"
     assert _classify("required fixes: 3") == "fail"
     assert _classify("复审通过，required fixes: 2") == "fail"
+    # 共享闭环短语不能吞掉同段真实失败项
+    assert _classify("Critical 1 项需修复，Required 2 项均已闭环") == "fail"
+    assert _classify("已修复 2 条 Critical，但 3 条 Required 未修复") == "fail"
+
+
+def test_numeric_zero_has_word_boundary():
+    """“20 failures”里的 0 不能被当作“0 failures”放行。"""
+    assert _classify("20 failures") == "fail"
+    assert _classify("10 problems") != "pass"
+    assert _classify("10 critical issues remain") == "fail"
+    # 真正的零失败仍为通过
+    assert _classify("0 failures") == "pass"
+    assert _classify("未通过 0 项") == "pass"
 
 
 def test_gate_prefers_explicit_issue_chain(monkeypatch):

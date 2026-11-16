@@ -1990,4 +1990,3 @@ def clean_issue_artifacts_endpoint(owner: str, repo: str, number: int | str, bod
 
 
 # ===================== Pull Requests =====================
-
