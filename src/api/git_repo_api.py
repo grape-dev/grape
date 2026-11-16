@@ -1295,7 +1295,35 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
         "prune_source_branch": body.prune_source_branch,
     }
     payload = translate_inbound(p, "pulls", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
-    resp = _vcs_req(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)
+    _pull_url = _vcs_url(owner, repo, "/pulls", None, p)
+    _pull_tok = _repo_token(owner, repo, user, p)
+    try:
+        resp = _vcs_req(p, "POST", _pull_url, _pull_tok, payload)
+    except HTTPException as _he:
+        # bot 身份建 PR 被 403：典型原因是机器人账号只是“能推代码”（token scope / 协作者写权限），
+        # 但没有仓库成员身份，而 GitCode 建 PR 要求成员权限。实测同一 token 读仓库 200、
+        # 列 PR 200、push 分支成功，唯独 POST /pulls 403（2026-11-16 flask-blog #93）。
+        # 这种情形不该让整条任务白跑：代码已经推上去了，缺的只是一个 PR 壳。
+        # 回退用任务发起人身份再建一次 —— PR 作者会是人而不是 bot，但链路能闭合。
+        if _he.status_code != 403:
+            raise
+        _ut = ""
+        try:
+            _mod_fb = _provider_module(p)
+            if _mod_fb is not None:
+                _uname = str(user.get("username") or "")
+                _uid = int(user.get("id") or 0)
+                if not _uname and has_user_id(_uid):
+                    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                    _uname = (get_grape_account_by_id(_uid) or {}).get("username", "")
+                _ut = _mod_fb.user_token(_uname, _uid) or ""
+        except Exception as _ue:  # noqa: BLE001
+            log.debug(f"create_pull: user-token fallback resolve failed: {_ue}")
+        if not _ut or _ut == _pull_tok:
+            log.warning(f"create_pull: bot token 403 for {owner}/{repo} and no user token to fall back to")
+            raise
+        log.warning(f"create_pull: bot token 403 for {owner}/{repo}, retrying as task initiator identity")
+        resp = _vcs_req(p, "POST", _pull_url, _ut, payload)
     # Issue #1739：QA 失败被门禁拦截时，在建 PR 成功后补充 Issue 标注（关联本次 PR）。
     # 多 Issue PR：每个 qa 失败的关联 Issue 都要标注，不能只标首个。
     if _qa_failures and _qa_rk:
