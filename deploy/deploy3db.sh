@@ -142,12 +142,29 @@ _healthy_pids() {
   rm -rf "$_d" 2>/dev/null || true
   echo "$up"
 }
+# 等待分层：event/worker/insight 冷启动约 10s，mgmt 的 lifespan 要跑迁移 + scene/skill sync +
+# 引擎探测，实测可到 60s 以上。用同一窗口要么把整轮拖到一分钟，要么把「正在启动」误判成故障。
+# 因此：先等 20s 看四个是否齐；仍缺且**只缺 mgmt** 时，再单独给它 40s，并在就绪后回报耗时。
 _wait_healthy() {
-  local i
-  for i in $(seq 1 60); do   # 60 × 0.5s = 30s 上限（原来 30 × 2s = 60s）
-    [ "$(_healthy_pids)" -eq 4 ] && return 0
+  local i up
+  for i in $(seq 1 40); do          # 40 × 0.5s = 20s
+    up=$(_healthy_pids)
+    [ "$up" -eq 4 ] && return 0
     sleep 0.5
   done
+  # 只缺 mgmt 是已知的慢启动，单独多等一轮（不等其它三个）
+  local mgmt_up=0 p
+  for p in 38082 38083 38084; do
+    path=/health
+    curl -s -m 1 -o /dev/null "http://127.0.0.1:$p$path" 2>/dev/null && mgmt_up=$((mgmt_up+1))
+  done
+  if [ "$mgmt_up" -eq 3 ]; then
+    echo "[3db] 三个快角色已就绪，mgmt 仍在启动（迁移/sync/probe，已知约 60s）"
+    for i in $(seq 1 80); do        # 再给 mgmt 40s
+      curl -s -m 1 -o /dev/null "http://127.0.0.1:38081/api/health" 2>/dev/null && return 0
+      sleep 0.5
+    done
+  fi
   return 1
 }
 if _wait_healthy; then
