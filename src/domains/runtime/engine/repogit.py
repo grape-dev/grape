@@ -1136,21 +1136,14 @@ def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, t
     旧语义 = 仅当本地 HEAD 已与远程分支一致（已 push）才删，导致失败任务/未 push 轮次的
     工作区永久残留、跨 Issue 累积。新语义 = 终态必清，但**证据先存档**：
 
-            start_head = remote_out.split()[0]
-        else:
-            # 从未 push（远程无分支）：以 mirror 基线 / merge-base 为起点补档，不直接丢证据
-            start_head = _unpushed_archive_start(issue_dir, token=token)
-            if not start_head:
-                log.warning(f"workspace terminal cleanup unpushed archive start unresolved "
-                            f"{repo_key} issue={issue_num} path={issue_dir} (skip commit archive)")
-        if start_head and local_head != start_head:
-            # 未推送提交：区间 log -p 存档（含提交信息）后再移除，不丢码
-            if not _archive_workspace_patch(
-                    issue_dir, repo_key, task_id=archive_label, token=token,
-                    suffix="-unpushed", log_range=(start_head, local_head)):
-                log.warning(f"workspace terminal cleanup deferred (unpushed archive "
-                            f"failed) {repo_key} issue={issue_num} path={issue_dir}")
-                return False
+    - 脏树 → 先落 `<repo>/artifacts/workspace-<task_id>.patch`（`git diff HEAD --binary`
+      + 白名单外 untracked 文件完整内容；task_id 缺省用 issue+agent 防同名覆盖）；
+    - 未推送提交 → 追加 `log -p --binary <remote_head>..<HEAD>` 区间存档（含提交信息）；
+      远程分支不存在（从未 push）时以 marker 基线 / `merge-base` 为起点补档；
+    - `ls-remote` 失败（网络不可核对）→ 保留现场不删（返回 False），存档已落；
+    - 清理失败只记日志，不阻断终态上报（调用方 _cleanup_task_workdir / _cleanup_direct_workdir）。
+
+    返回 True=已删除；False=保留（网络不可核对 / 存档失败 / 清理失败 / 异常）。
     """
     if not is_git_agent(agent_type):
         return False
