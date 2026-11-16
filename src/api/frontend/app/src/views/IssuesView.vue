@@ -4034,11 +4034,15 @@ onBeforeUnmount(function () {
 }
 .isk-modal {
   width: min(520px, 92vw);
+  /* 2026-11-16：原来是 §23 统一玻璃（--glass-strong 85% 半透），跟输入框的实心白
+     撞在一起显得脏；按主人要求把两者对调 —— 弹窗改实心亮面（--c），输入框改浅底（--bg）。 */
   background: var(--c, #fff);
-  border: 0.5px solid #d2d2d7;
-  border-radius: 14px;
+  border: 0.5px solid var(--b, #d2d2d7);
+  border-radius: 18px;
   padding: 18px 20px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.28),
+    0 2px 6px rgba(0, 0, 0, 0.1);
 }
 .isk-modal-head {
   display: flex;
@@ -4102,7 +4106,8 @@ onBeforeUnmount(function () {
   padding: 7px 10px;
   border: 1px solid var(--b, #ccc);
   border-radius: 6px;
-  background: var(--c, #fff);
+  /* 与弹窗对调：弹窗实心亮面(--c)、输入框浅底(--bg)，避免两块同色糊成一片 */
+  background: var(--bg, #f5f5f7);
   color: var(--t, #111);
   font-size: 13px;
   font-family: inherit;

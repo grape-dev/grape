@@ -2454,7 +2454,7 @@
 :root :is(.km-modal, .create-repo-modal, .tv-modal, .tv-fork-modal, .kb-scene-modal,
 .apv-pickmodal, .apv-dispmodal, .dbv-copymodal, .dbv-engmodal, .dbv-recmodal, .eff-modal,
 .eff-chart-modal, .obv-alertmodal, .obv-anomalymodal, .obv-logmodal, .obv-sessionmodal,
-.obv-tracemodal, .isk-modal, .ac__modal, .rtv-engdetail, .rtv-scopemodal, .ev__centerpop) {
+.obv-tracemodal, .ac__modal, .rtv-engdetail, .rtv-scopemodal, .ev__centerpop) {
   background: var(--glass-strong) !important;
   -webkit-backdrop-filter: blur(28px) !important;
   backdrop-filter: blur(28px) !important;
