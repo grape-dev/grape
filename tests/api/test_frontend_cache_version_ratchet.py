@@ -19,19 +19,19 @@ FROZEN = {
     "index.html": {
         # 共享运行时模块
         "tokens.css": "1", "app.css": "3", "auth.css": "1",
-        "api.js": "35", "app.js": "262",
+        "api.js": "35", "app.js": "266",
         "deeplink.js": "1",
         "auto-recovery.js": "2", "oauth-buttons.js": "2",
         "host-status.js": "1", "worker-name.js": "2", "pwd-blocklist.js": "3",
         "faro.js": "7",
         # Vue 视图 chunk
-        "dashboard-view.js": "65", "pipeline.js": "50", "agent-view.js": "48",
-        "event-view.js": "53", "chat-view.js": "51", "im-channel.js": "49",
-        "repos-view.js": "53", "issues-view.js": "56", "account-view.js": "52",
-        "scene-market.js": "52", "skills-view.js": "51", "knowledge-view.js": "48",
-        "runtimes-view.js": "54", "observability-view.js": "53",
+        "dashboard-view.js": "66", "pipeline.js": "52", "agent-view.js": "48",
+        "event-view.js": "55", "chat-view.js": "58", "im-channel.js": "49",
+        "repos-view.js": "54", "issues-view.js": "58", "account-view.js": "53",
+        "scene-market.js": "53", "skills-view.js": "52", "knowledge-view.js": "48",
+        "runtimes-view.js": "55", "observability-view.js": "54",
         "organizations.js": "49", "feedback-dialog.js": "49", "my-feedback.js": "49",
-        "my-feedback-detail.js": "49", "autopilot-view.js": "50",
+        "my-feedback-detail.js": "49", "autopilot-view.js": "51",
     },
     "admin.html": {
         "tokens.css": "1", "pwd-blocklist.js": "3", "admin-view.js": "11",
