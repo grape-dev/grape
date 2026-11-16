@@ -11,7 +11,7 @@
 
 与 #658 role_tags 正交：#658 管"会不会"（claim 硬拒），selector 管"是不是"（特征圈池，入队过滤）。
 
-## 2. 代码映射（实现落点，基于 arch-optimization-zhangjian 基线）
+## 2. 代码映射（实现落点，基于 arch-optimization 基线）
 
 | Spec §2 | 现状锚点 | 改动 |
 |---|---|---|

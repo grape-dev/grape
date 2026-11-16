@@ -48,7 +48,7 @@ def _stub(client, raw_results, v1_results):
             return item[0], item[1], json.dumps(item[1] or {})
         return item
 
-    async def fake_req(method, path, body=None, retries=4):
+    async def fake_req(method, path, body=None, retries=4, **kwargs):
         data = next(v1_iter, None)
         return data
 
@@ -135,7 +135,7 @@ class TestHeartbeatV2:
         async def fake_raw(method, path, body=None, retries=1):
             return 404, {"detail": "Not Found"}, '{"detail":"Not Found"}'
 
-        async def fake_req(method, path, body=None, retries=2):
+        async def fake_req(method, path, body=None, retries=2, **kwargs):
             assert path == "/api/runtime/heartbeat"
             assert "engine_uids" not in (body or {})
             return {"status": "ok", "cancelled_tasks": []}
@@ -150,7 +150,7 @@ class TestHeartbeatV2:
         async def fake_raw(method, path, body=None, retries=1):
             raise AssertionError("v2 should not be called without uid")
 
-        async def fake_req(method, path, body=None, retries=2):
+        async def fake_req(method, path, body=None, retries=2, **kwargs):
             assert path == "/api/runtime/heartbeat"
             return {"status": "ok"}
 
@@ -183,7 +183,7 @@ class TestReportV2:
         _run(client.report_progress("t1", engine_uid=UID_A))   # 不抛即过
 
     def test_progress_blank_404_fallback_v1(self, client):
-        async def fake_req(method, path, body=None, retries=1):
+        async def fake_req(method, path, body=None, retries=1, **kwargs):
             assert path.endswith("/progress") and "-v2" not in path
             return {"status": "ok"}
 
@@ -218,7 +218,7 @@ class TestCapabilitiesProbe:
 
 class TestUidPersistence:
     def test_register_persists_and_reloads(self, client, tmp_path, monkeypatch):
-        async def fake_req(method, path, body=None, retries=4):
+        async def fake_req(method, path, body=None, retries=4, **kwargs):
             return {"runtimes": [{"id": 1, "name": "a", "engine_uid": UID_A},
                                  {"id": 2, "name": "b", "engine_uid": ""}],
                     "probe_url": ""}
@@ -235,7 +235,7 @@ class TestUidPersistence:
 
     def test_old_server_register_no_uid_field(self, client):
         client._uid_by_rid = {}   # 清空 fixture 种子（模拟旧服务端无 uid 场景）
-        async def fake_req(method, path, body=None, retries=4):
+        async def fake_req(method, path, body=None, retries=4, **kwargs):
             return {"runtimes": [{"id": 1, "name": "a"}], "probe_url": ""}
         client._request = fake_req
         ids, _ = _run(client.register([{"name": "a"}]))

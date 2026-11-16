@@ -1,6 +1,6 @@
 # Spec: Issue #868 — T10 会话表双读 + claim-by-uid v2 设计 + MySQL 升级 runbook
 
-> 源自 Issue Agent Spec（评论 📋 Spec Document，评级 ready）。开发基线：arch-optimization-zhangjian。
+> 源自 Issue Agent Spec（评论 📋 Spec Document，评级 ready）。开发基线：arch-optimization。
 
 ## Objective
 - 落地 #646 排期中的 T10：`devops_agent_session` / `chat_agent_session` 增加 `engine_uid` 稳定键列，读写路径双写双读（uid 优先、runtime_id 兜底、旧库缺列降级），完成会话侧 uid 改造四阶段中的阶段 3→4 过渡。

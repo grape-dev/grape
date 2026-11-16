@@ -331,8 +331,8 @@ if _engine_sandbox not in ("1", "true", "on", "yes"):
 
 #### 验证中发现的坑：worker RUNTIME_SERVER_URL 必须走公网
 
-**问题**：worker `RUNTIME_SERVER_URL` 配成内网 `http://192.168.0.115:3000` 时，bwrap 沙箱内 grape CLI 调主控 API 被 NetworkProxy deny list 拦截（内网 IP 段 192.168.0.0/16 在 default deny list 中），返回 403。
+**问题**：worker `RUNTIME_SERVER_URL` 配成内网 `http://<intranet-host>:3000` 时，bwrap 沙箱内 grape CLI 调主控 API 被 NetworkProxy deny list 拦截（内网 IP 段在 default deny list 中），返回 403。
 
 **根因**：bwrap NetworkProxy 有 IP deny list 拦截私有网络地址。白名单虽包含 GRAPE_SERVER_URL 的 hostname，但 deny list 优先级更高。
 
-**修复**：worker 必须走公网 `http://1.92.115.229`（nginx 80 反代到 3000），不能走内网 IP。验证前确认 nginx 已启动且 229:80 可达。
+**修复**：worker 必须走公网 `http://<public-host>`（nginx 80 反代到 3000），不能走内网 IP。验证前确认 nginx 已启动且 `<public-host>:80` 可达。

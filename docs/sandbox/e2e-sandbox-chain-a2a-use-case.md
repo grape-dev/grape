@@ -1,14 +1,14 @@
 # 沙箱全链 E2E 用例：装 worker → 探测识别 → 场景绑定 → 触发 → A2A 流转
 
 > 自动化脚本：`tests/e2e/test_sandbox_chain.py`（pytest，默认跳过，`GRAPE_E2E_SANDBOX=1` + 环境变量启用）。
-> 首轮人工执行：2026-11-06，i7 分支（重建+arch 合流），8081 控制器 + .17 双 worker。
+> 首轮人工执行：2026-11-06，i7 分支（重建+arch 合流），8081 控制器 + <sandbox-host> 双 worker。
 
 ## 前置条件
 
 | 条件 | 说明 |
 |---|---|
 | 控制器运行中 | 8081，`configs/crypto.json` 就绪（chmod 600） |
-| 沙箱平台可达 | CubeMaster（如 http://192.168.0.17:3000），**平台资源充足** |
+| 沙箱平台可达 | CubeMaster（如 https://cube.example.com），**平台资源充足** |
 | worker 目标机 | SSH 可达，python3/curl 可用 |
 | 托管仓库 | managed_repos 有 webhook token |
 | LLM 凭据 | 仓库级 hermes LLM 凭据（沙箱内执行必需，缺=任务失败"缺少 LLM 凭据"） |
@@ -20,7 +20,7 @@
 | 1 | 登录拿 JWT | `POST /api/auth/login` | 200 | ✅ |
 | 2 | 建全局沙箱凭据 | `POST /api/settings/runtime-credentials` `{cred_type:sandbox, platform:cubesandbox, scope:global}` | id=67, token rta_ | ✅ |
 | 3 | 建仓库级沙箱凭据 | 同上 `scope:repo, repo_key` | id=68 | ✅ |
-| 4 | worker 一键安装 ×2 | `curl -sSL <ctrl>/api/runtime/install -o iw.sh && bash iw.sh --server <ctrl> --token <rta_>`（.17 远程执行） | 目录 `/opt/grape-cw/<cred_uid8>`，服务 `sandbox-worker-<cred_uid8>` | ✅ |
+| 4 | worker 一键安装 ×2 | `curl -sSL <ctrl>/api/runtime/install -o iw.sh && bash iw.sh --server <ctrl> --token <rta_>`（<sandbox-host> 远程执行） | 目录 `/opt/grape-cw/<cred_uid8>`，服务 `sandbox-worker-<cred_uid8>` | ✅ |
 | 5 | 等待探测批 | worker 启动→上报 provider→逐模板建箱探测→上报 detected | `sandbox provider reported: engines_detected=N` | ✅ |
 | 6 | 引擎注册 | 60s 模板刷新周期 → `template refresh: N runtimes updated` | 10 引擎 online+engine_uid | ✅ |
 | 7 | 场景绑定 | active 场景 nodes `engine_runtime_ids=[engine_uid...]` + `managed_repos.dev_scene` 指向该场景 | scene 4 四节点绑定 | ✅ |
@@ -58,10 +58,10 @@
 
 ```bash
 GRAPE_E2E_SANDBOX=1 \
-GRAPE_CONTROLLER=http://192.168.0.85:8081 \
-GRAPE_ADMIN_USER=zjj GRAPE_ADMIN_PASSWORD=*** \
-GRAPE_REPO=And-ZJ2/hello-calculator \
-GRAPE_WORKER_HOST=192.168.0.17 GRAPE_WORKER_USER=root GRAPE_WORKER_PASSWORD=*** \
+GRAPE_CONTROLLER=http://<controller-host>:8081 \
+GRAPE_ADMIN_USER=admin GRAPE_ADMIN_PASSWORD=*** \
+GRAPE_REPO=org/repo \
+GRAPE_WORKER_HOST=<worker-host> GRAPE_WORKER_USER=<worker-user> GRAPE_WORKER_PASSWORD=*** \
 pytest tests/e2e/test_sandbox_chain.py -v
 ```
 

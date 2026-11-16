@@ -1012,7 +1012,7 @@ def _require_runtime_admin(runtime_id: int, user: dict) -> None:
             from src.api.deps import check_repo_access
             # check_repo_access 契约：有权 → return None；无权 → raise HTTPException(403)。
             # 不得当布尔判定——`if check_repo_access(...)` 会把成功的 None 当 False，
-            # 仓库托管人恒落 403（aw11 E-02 实测：zjj 保不了 s2 云引擎的场景标签）。
+            # 仓库托管人恒落 403（aw11 E-02 实测：托管人账号保不了 s2 云引擎的场景标签）。
             check_repo_access(user, repo_key)
             return
         except Exception:
@@ -1165,7 +1165,8 @@ def _get_tags_impl(runtime_id: int, credential_id: int):
             c = db.cursor()
             try:
                 c.execute(
-                    "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
+                    "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 "
+                    "AND tag NOT LIKE '%:%' ORDER BY tag",
                     (runtime_id,)
                 )
                 tags = [r[0] for r in c.fetchall()]
@@ -3451,7 +3452,7 @@ def runtime_issue_proxy_token(task_id: str, cred: CredentialContext = Depends(_r
         if task:
             _rn = task.get("runtime_name") or ""
             if _rn:
-                from src.runtime.agent import _backend_for_engine
+                from src.domains.runtime.engine.agent import _backend_for_engine
                 _backend = _backend_for_engine(_rn) or "opencode"
         token = issue_proxy_token(task_id, _backend)
         return {"token": token}
@@ -3723,9 +3724,9 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
             # 凭据 scope → Provider 级别映射：repo→user+repo_key；user/global→user
             if _scope == "repo":
                 _repo_key = _row[2] or ""
-        # owner_name → 数字 user_id：owner_name 是 grape 登录账号（如 zjj），
+        # owner_name → 数字 user_id：owner_name 是 grape 登录账号，
         # 先查 grape_accounts.username（本地账号），回退 gitcode 平台映射
-        # （And-ZJ2）——与 WebUI 创建 Provider 的 user.get("id") 对齐，
+        # （平台账号）——与 WebUI 创建 Provider 的 user.get("id") 对齐，
         # UPSERT 才能命中同一条。
         if _owner_name:
             with db_lock:

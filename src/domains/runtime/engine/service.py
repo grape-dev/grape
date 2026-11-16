@@ -1301,7 +1301,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     _task_span = None
     _task_trace_context = ""
     try:
-        from src.observability.otel import start_task_span, snapshot_trace_context
+        from src.kernel.otel import start_task_span, snapshot_trace_context
         _pipeline_tid = ""
         if repo_key and issue_id:
             try:
@@ -1755,6 +1755,7 @@ def claim(runtime_id, expected_task_id=None, expected_event_seq=None, determinis
                                 # 新行为：任务置 failed + 人话原因，保留 pool_engine_ids，同步事件终态。
                                 _fail_task_pool_unreachable(c, task_id, _allowed, _task_tag)
                                 return None
+                            _log_pool_skip_once(task_id, runtime_id, _allowed)
                             _skip = True
                     except Exception:
                         pass
@@ -2209,6 +2210,7 @@ def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_even
                                 # 新行为：任务置 failed + 人话原因，保留 pool_engine_ids，同步事件终态。
                                 _fail_task_pool_unreachable(c, task_id, _allowed, _task_tag)
                                 return None
+                            _log_pool_skip_once(task_id, runtime_id, _allowed)
                             _skip = True
                     except Exception:
                         pass

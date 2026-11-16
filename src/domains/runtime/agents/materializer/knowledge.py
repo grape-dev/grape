@@ -98,7 +98,7 @@ class FileContentResolver:
     async def _read_storage_async(need_storage: dict, stats: dict, tag: str) -> dict:
         """storage 批量读取。"""
         try:
-            from src.storage import get_storage
+            from src.domains.runtime.storage import get_storage
             storage = get_storage()
         except Exception:
             storage = None

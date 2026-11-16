@@ -1081,7 +1081,7 @@ class _WhitelistCache:
                     log.info(f"WhitelistCache loaded from API: {len(self._domains)} domains")
                     return
             # API 不可用时 fallback 到本地 DB（仅本机 worker 有 DB）
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 rows = db.execute(
                     "SELECT DISTINCT domain FROM engine_sandbox_whitelist "

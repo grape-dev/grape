@@ -103,4 +103,4 @@ JOIN `sandbox_provider_config`（按 `runtime_credential_id`）输出两个新�
 - runtimes.js ~25 行（徽标+跳转+详情按钮）
 - settings.py ~10 行（runtime-devices JOIN）
 - i18n ~8 词条
-- 预估半天；页面验证 + .17 无涉（纯前端+一个读端点）
+- 预估半天；页面验证 + <sandbox-host> 无涉（纯前端+一个读端点）

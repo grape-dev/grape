@@ -72,7 +72,7 @@
 4. 可见性：global 凭据的 Provider 全员可见；user 凭据仅 owner（+admin）
 5. worker：global 凭据的引擎 claim 全局任务正常（tags=['all']）
 6. claim/模板/上报/吊销级联全链回归（凭据吊销 → Provider 级联删除按 cred_id，不受影响）
-7. 17 套件全量 + .17 热修重启验证
+7. 17 套件全量 + <sandbox-host> 热修重启验证
 
 ## 改动量
 

@@ -974,7 +974,7 @@
                   <div class="rtv-cred-fld">
                     <label>{{ t('credential.sandbox_conn_title') }}</label>
                     <label class="rtv-cred-lbl2">API URL <span class="rtv-req">{{ t('credential.sandbox_conn_required') }}</span></label>
-                    <input v-model="sbCredForm.endpoint" class="rtv-cred-input" placeholder="http://192.168.0.17:3000" />
+                    <input v-model="sbCredForm.endpoint" class="rtv-cred-input" placeholder="https://cube.example.com" />
                     <div class="rtv-cred-desc">{{ t('credential.sandbox_endpoint_desc') }}</div>
                     <label class="rtv-cred-lbl2">API Key</label>
                     <input v-model="sbCredForm.apiKey" type="password" class="rtv-cred-input" autocomplete="new-password" :placeholder="t('credential.sandbox_key_ph')" />

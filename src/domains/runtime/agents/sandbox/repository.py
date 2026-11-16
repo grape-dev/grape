@@ -23,7 +23,7 @@ class SandboxRepository:
     def __init__(self, session_factory=None):
         """Args:
             session_factory: 可选，返回 (db, db_lock) 元组的 callable。
-                默认从 src.session_manager import db, db_lock。
+                默认从 src.kernel.session_manager import db, db_lock。
         """
         self._session_factory = session_factory
 
@@ -31,7 +31,7 @@ class SandboxRepository:
         """返回 (db, db_lock)。延迟 import 避免循环。"""
         if self._session_factory:
             return self._session_factory()
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         return db, db_lock
 
     def query_task_context(self, task_id: str) -> tuple[str, str, int]:

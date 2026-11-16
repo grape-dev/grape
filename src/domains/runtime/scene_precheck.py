@@ -380,24 +380,11 @@ def _resolve_engine_refs(n: dict) -> list[int]:
     _uids = [u for u in (n.get("engine_runtime_uids") or []) if str(u or "").strip()]
     if _uids:
         from src.domains.runtime import public as _rt_pcheck
-        placeholders = ",".join("?" * len(_uids))
-        out_conn_rows = []
         try:
-            # 动态 IN 查询经任意拓扑游标（owner 域直连；单库回落进程库）
-            with _rt_pcheck._any_cursor() as _c:
-                _c.execute(f"SELECT id, engine_uid FROM agent_runtimes WHERE engine_uid IN ({placeholders})", tuple(_uids))
-                out_conn_rows = _c.fetchall()
-            found = {row[1]: row[0] for row in out_conn_rows}
+            # owner 域公开读原语（任意拓扑；lib 模式走注册面）
+            return _rt_pcheck.runtime_ids_by_engine_uids(_uids)
         except Exception:
-            found = {}
-        out = []
-        for u in _uids:
-            _rid = found.get(u)
-            if not _rid:
-                out.append(0)
-            else:
-                out.append(int(_rid))
-        return out
+            return [0 for _u in _uids]
     return _normalize_engine_ids(n.get("engine_runtime_ids"))
 
 

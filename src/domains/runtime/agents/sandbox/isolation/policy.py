@@ -505,7 +505,7 @@ class PolicyEngine:
         # DB fallback（仅本机 worker）
         result = {"content_hash": "", "admin_policy": "", "admin_exceptions": []}
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 if skill_id:
                     row = db.execute(

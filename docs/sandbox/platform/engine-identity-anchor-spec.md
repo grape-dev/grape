@@ -53,10 +53,10 @@ register 匹配（云引擎分支）:
 5. 新凭据首注册：INSERT 新行（锚未命中路径）
 6. 心跳/claim/引擎能力：rid 稳定 → 全链无感
 7. 单测 4 例：锚命中 UPDATE 不换 rid / 锚未命中 INSERT / 普通 payload 原路径 / 存量换名对合流
-8. 17 套件全量 + .17 实测一轮改名
+8. 17 套件全量 + <sandbox-host> 实测一轮改名
 
 ## 5. 改动量
 
-register 匹配段 ~30 行 + sandbox.js 提示语 2 处 + 单测 4 例 + .17 热修（cloud_worker 零改动，
+register 匹配段 ~30 行 + sandbox.js 提示语 2 处 + 单测 4 例 + <sandbox-host> 热修（cloud_worker 零改动，
 服务端文件不涉 worker——**无需热修**，只重启服务端）。
 预估半天。

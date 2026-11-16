@@ -1566,6 +1566,26 @@ def task_stats_extended(repo_key: str = "", since: str | None = None) -> dict[st
     return {"by_status": base, "aggregate": dict(zip(cols, row)) if row else {}}
 
 
+def runtime_ids_by_engine_uids(uids: list[str]) -> list[int]:
+    """engine_uid 列表 → agent_runtimes.id 列表（缺失项以 0 哨兵占位）。
+
+    scene_precheck 的 uid-first 解析经此公开读原语取数，不再跨域调用本模块的
+    私有游标；lib 模式下亦可经注册表解析。
+    """
+    _uids = [u for u in (uids or []) if str(u or "").strip()]
+    if not _uids:
+        return []
+    placeholders = ",".join("?" * len(_uids))
+    with _any_cursor() as c:
+        c.execute(
+            f"SELECT id, engine_uid FROM agent_runtimes WHERE engine_uid IN ({placeholders})",
+            tuple(_uids),
+        )
+        rows = c.fetchall()
+    found = {row[1]: row[0] for row in rows}
+    return [int(found[u]) if found.get(u) else 0 for u in _uids]
+
+
 def health() -> dict[str, Any]:
     try:
         with db_registry.cursor("runtime") as c:
@@ -1584,6 +1604,7 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "list_engine_tags", "query_events", "count_events", "group_events", "get_autopilot_execution", "upsert_engine_capability",
            "delete_engine_capability", "update_engine_capability", "renew_channel_lease", "acquire_channel_lease", "release_channel_lease",
            "release_all_leases", "heartbeat_instance", "list_active_instances", "health",
+           "runtime_ids_by_engine_uids",
            # P3-5g 写原语（mgmt / insight 进程写 runtime 基表）
            "purge_user_rows", "delete_chat_conversations", "delete_vod_conversations",
            "detach_agent_sessions", "clear_agent_session_runtime", "ensure_agent_session",

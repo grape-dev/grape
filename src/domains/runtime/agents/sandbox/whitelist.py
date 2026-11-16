@@ -172,7 +172,7 @@ class RuleCache:
         """从 DB 加载 + 编译 + 缓存。"""
         raw_rules: list[WhitelistRule] = []
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 rows = db.execute(
                     "SELECT id, backend_name, domain, method, path_prefix, scheme, port "

@@ -29,7 +29,7 @@ def ensure_sandbox_tables() -> None:
     DB 不可用时 raise TransientError（可重试）。
     调用方（bootstrap.py）决定重试/降级/fail-fast。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     _DDL = [
         """CREATE TABLE IF NOT EXISTS engine_sandbox_paths (

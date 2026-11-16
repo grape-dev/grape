@@ -8,6 +8,7 @@
 - runtime_get_tags：过滤冒号行（NOT LIKE '%:%'，worker 能力面不暴露派生维度）；
 - 注册/心跳链挂点：heartbeat 到达即刷新派生（引擎换绑/凭据 scope 切换随心跳收敛）。
 """
+import asyncio
 import sqlite3
 import threading
 from types import SimpleNamespace
@@ -166,7 +167,7 @@ class TestGetTagsFiltersColon:
         sync_derived_agent_tags(rt_db.cursor(), 1, "opencode", "repo", ["default"])
         # 路由函数内部 from src.kernel.session_manager import db, db_lock → monkeypatch 生效
         from src.domains.runtime.routes import runtime as rt
-        resp = rt.runtime_get_tags(1, credential_id=7)
+        resp = asyncio.run(rt.runtime_get_tags(1, credential_id=7))
         tags = resp["tags"]
         assert "coding" in tags and "all" in tags
         assert not [t for t in tags if ":" in t]
@@ -187,7 +188,7 @@ class TestHeartbeatHook:
         monkeypatch.setattr(rt, "_client_ip", lambda r: "127.0.0.1")
         monkeypatch.setattr("src.worker_package.worker_code_version", lambda: "abc")
         body = rt.HeartbeatBody(runtime_ids=[1])
-        resp = rt.runtime_heartbeat(body, _Req(), credential_id=7)
+        resp = asyncio.run(rt.runtime_heartbeat(body, _Req(), credential_id=7))
         assert resp["status"] == "ok"
         rows = [r[0] for r in rt_db.execute(
             "SELECT tag FROM engine_capabilities WHERE runtime_id=1")]

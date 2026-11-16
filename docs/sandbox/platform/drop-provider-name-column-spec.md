@@ -66,7 +66,7 @@ key 删除后该前提消失，上报端点收敛为：**必须携带有效 rta_
 | 1 | Part B 代码（key 删除十项） | 无 CLOUD_WORKER_TOKEN 启动 → 清晰报错退出；有 token 正常注册心跳 |
 | 2 | 本机收编 | 新凭据 worker 在线；cloud-local.key 文件不存在；cred4 已吊销 |
 | 3 | Part A（清 cube → 删列 → 读写改造） | spec v2 §5 1-7 验收全过 |
-| 4 | .17 热修（cloud_worker.py 同步） | sandbox-worker-optgrape 正常（env token 不受影响）；无 key 相关日志 |
+| 4 | <sandbox-host> 热修（cloud_worker.py 同步） | sandbox-worker-optgrape 正常（env token 不受影响）；无 key 相关日志 |
 | 5 | 回归 | 17 套件全量 + 页面验证（引擎名 provider 段=凭据名/改名跟随/编辑弹窗） |
 
 ## 5. 改动量

@@ -141,7 +141,7 @@ def _validate_engine_runtime_uids(user: dict, repo_key: str, engine_uids: list) 
     """
     if not engine_uids:
         return
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     from src.domains.mgmt.user import db as user_db
     from src.domains.mgmt.routes.settings import _build_cred_map, _make_visible_credential_fn
     from src.api.engine_uid import is_uid_str

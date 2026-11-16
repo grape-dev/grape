@@ -746,13 +746,28 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     legacy 模式：engine_runtime_ids 非空 → 按优先级选健康引擎；为空 → 回退 fallback_runtime_id。
     """
     cfg = load_engine_selection()
+
+    def _pick_decision(result: str, selected=None, reason: str = "", members=None) -> None:
+        """Issue #605：pick_engine 决策留痕（候选全集 + 每候选过滤原因 + 选中理由）。"""
+        _decision_log(
+            "pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+            result=result, selected=selected, reason=reason,
+            candidates=[
+                {"rid": m.get("runtime_id"),
+                 "reasons": _candidate_reject_reasons(m, cfg, agent_type)}
+                for m in (members or [])
+            ],
+        )
+
     if not cfg.get("enabled", True):
+        _pick_decision("disabled")
         return None
     # Plugin 模式：统一广播，engine_runtime_ids 由 get_scene_pool_engine_ids 写入 pool_engine_ids
     # （SRE 的空列表/非个人级约束在 get_scene_pool_engine_ids 内生效——那里是广播范围的唯一收口）
     try:
         from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
         if is_plugin_mode():
+            _pick_decision("plugin_broadcast")
             return 0
     except Exception:
         pass
@@ -772,6 +787,7 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     # 个人机器环境有登录态优先复用，repo 档作协作兜底）；空 = 无引擎不回退不广播
     if _sre_no_broadcast(agent_type):
         if not engine_ids:
+            _pick_decision("engine_unavailable", reason="sre_no_bound_engine")
             return None
         members = dedupe_engines(_engines_by_ids(engine_ids, repo, cfg))
         members = _filter_by_tags(members, agent_type)
@@ -784,8 +800,13 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
             if not cand:
                 continue
             if cfg.get("rule") == "order":
-                return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
-            return random.choice(cand)["runtime_id"]
+                _rid = min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
+            else:
+                _rid = random.choice(cand)["runtime_id"]
+            _pick_decision("selected", selected=_rid,
+                           reason=f"scope={_scope},rule={cfg.get('rule')}", members=members)
+            return _rid
+        _pick_decision("engine_unavailable", reason="sre_no_healthy_engine", members=members)
         return None
     if engine_ids:
         # 多引擎选择：查引擎详情，按优先级选健康引擎
@@ -802,18 +823,27 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
                 if not cand:
                     continue  # 该档位全不健康，尝试下一档位
                 if cfg.get("rule") == "order":
-                    return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
-                return random.choice(cand)["runtime_id"]
+                    _rid = min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
+                else:
+                    _rid = random.choice(cand)["runtime_id"]
+                _pick_decision("selected", selected=_rid,
+                               reason=f"scope={scope},rule={cfg.get('rule')}", members=members)
+                return _rid
             # 所有档位均无健康引擎 → 降级兜底：取所有候选中健康分最高的
             all_cand = _apply_filters(members, cfg)
             if all_cand:
                 _best = _best_health_fallback(all_cand)
                 if _best:
                     log.info(f"pick_engine: all scopes unhealthy, fallback to best={_best}")
+                    _pick_decision("selected", selected=_best,
+                                   reason="health_fallback", members=members)
                     return _best
+            _pick_decision("engine_unavailable", reason="all_scopes_unhealthy", members=members)
             return None     # 集合存在但无健康成员 → engine_unavailable
     # engine_runtime_ids 为空 → 回退会话主引擎（legacy）
     if fallback_runtime_id:
+        _pick_decision("fallback", selected=int(fallback_runtime_id),
+                       reason="fallback_runtime_id")
         return int(fallback_runtime_id)
     return None
 

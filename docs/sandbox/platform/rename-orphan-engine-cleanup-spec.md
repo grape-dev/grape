@@ -103,4 +103,4 @@ worker 的 register 请求已带全量 runtimes 列表——服务端处理 diff
 
 ## 7. 改动量
 
-后端 ~50-60 行 + 单测 4 例；预估半天（含 .17 热修 E2E：实际改一次 Provider 名观察收敛）。
+后端 ~50-60 行 + 单测 4 例；预估半天（含 <sandbox-host> 热修 E2E：实际改一次 Provider 名观察收敛）。

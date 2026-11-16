@@ -76,9 +76,9 @@
 ## 六、遗留工作（按优先级）
 
 1. **P8 E2E（最重要）**：部署 cloud worker（systemd/grape-cloud-worker.service 已就位），
-   走完验证矩阵：系统/用户/仓库级 Provider runtime 注册 → claim → 建箱（tpl-f0c43d1b）
+   走完验证矩阵：系统/用户/仓库级 Provider runtime 注册 → claim → 建箱（<template-id>）
    → 引擎安装（hermes/opencode fallback / codearts 预装约束）→ token 互斥注入 → kill。
-   本机已具备条件：CubeSandbox 平台 192.168.0.17、credential id=1(system) 已在 DB。
+   本机已具备条件：CubeSandbox 平台 `<sandbox-platform>`、credential id=1(system) 已在 DB。
 2. **悬空绑定治理**：模板删除后 binding.template_id 悬空（本会话手动清过一次）。
    建议 scan-templates 导入前顺带 DELETE 悬空行，或给 unbind 加按行删除。
 3. **TestCloneRepo 2 例基线失败**：旧分支继承的 mock 队列不匹配，修一次 mock 序列即可

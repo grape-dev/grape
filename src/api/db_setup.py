@@ -1098,7 +1098,7 @@ def _create_indexes():
     # autopilot_tasks.created_by 迁移
     # 2026-11-14 E2E 实测修正：新基线 user_accounts.id 已 UUID 化（36 字符），
     # created_by INTEGER 在 MariaDB 上写入 UUID 必炸 "Data truncated"
-    # （4p E2E：POST /api/autopilot/tasks 500，zjj UUID id 落库失败）。
+    # （4p E2E：POST /api/autopilot/tasks 500，操作者 UUID id 落库失败）。
     # DDL 同步改 TEXT；存量列走 MODIFY 收敛（幂等：已是 TEXT 时 MODIFY 无损重跑）。
     try:
         with db_lock:
@@ -1106,10 +1106,10 @@ def _create_indexes():
             _ensure_column(c, "autopilot_tasks", "created_by", "TEXT DEFAULT ''")
             from src.kernel.session_manager import _is_mysql_backend
             if _is_mysql_backend():
-                c.execute("ALTER TABLE autopilot_tasks MODIFY COLUMN created_by TEXT")
+                _destructive_ddl(c, "ALTER TABLE autopilot_tasks MODIFY COLUMN created_by TEXT", kind_hint="cleanup")
             db.commit()
     except Exception as e:
-        log.warning(f"autopilot_tasks created_by migration failed: {e}")
+        log.error(f"autopilot_tasks created_by migration failed: {e}")
     # ===== issue 表 (repo_key, issue_number) 去重（保证下方唯一索引可建，2026-10-06）=====
     # 背景：ensure_issue_task 此前仅复用 active/processing 卡，awaiting_input/completed/cancelled 时
     # 后续事件会新建一行 → 同一平台 issue 多卡（需求中心并排出现多张卡）。此处兜底删除多余行，

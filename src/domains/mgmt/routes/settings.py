@@ -979,7 +979,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         rt_org_id = rt.get("org_id") or ""
         # 注册链把无组织写成 int 0 → TEXT 列落 '0'（与本机引擎行的 '' 同语义）。
         # 不归一化时个人组织视图把 '0' 当「别的组织」跳过 → 沙箱云引擎全部不可见
-        # （aw11 E-02 实测：zjj 个人组织视图下 13-18 行全被 org 过滤吃掉）。
+        # （aw11 E-02 实测：个人组织视图下 13-18 行全被 org 过滤吃掉）。
         if rt_org_id in ("0", 0):
             rt_org_id = ""
         if _filter_org_id:
@@ -2994,8 +2994,8 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: in
     分页：page/page_size，page_size=0 时不分页（兼容 cloud_worker 旧逻辑）。
     """
     from src.api.deps import get_current_user_or_api_key, _extract_api_token
-    from src.api.auth_token import SESSION_TOKEN_PREFIX, API_KEY_PREFIX
-    from src.session_manager import db, db_lock
+    from src.kernel.auth_sdk.auth_token import SESSION_TOKEN_PREFIX, API_KEY_PREFIX
+    from src.kernel.session_manager import db, db_lock
     import hashlib
     
     token = _extract_api_token(request) if request else ""
@@ -3151,7 +3151,7 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: in
 @router.post("/sandbox-templates", operation_id="settings_sandbox_template_create", summary="Create sandbox template")
 def create_sandbox_template(body: SandboxTemplateBody, user: dict = Depends(require_no_session_token)):
     """v3：创建沙箱模板。权限按 Provider scope 校验（非 admin only）。写 provider_id + provider。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
     _now = datetime.now(timezone.utc).isoformat()
     with db_lock:
@@ -3191,7 +3191,7 @@ def create_sandbox_template(body: SandboxTemplateBody, user: dict = Depends(requ
 @router.put("/sandbox-templates/{tpl_id}", operation_id="settings_sandbox_template_update", summary="Update sandbox template")
 def update_sandbox_template(tpl_id: int, body: SandboxTemplateBody, user: dict = Depends(require_no_session_token)):
     """v3：更新沙箱模板。权限按 Provider scope 校验。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
     _now = datetime.now(timezone.utc).isoformat()
     with db_lock:
@@ -3241,7 +3241,7 @@ def update_sandbox_template(tpl_id: int, body: SandboxTemplateBody, user: dict =
 @router.delete("/sandbox-templates/{tpl_id}", operation_id="settings_sandbox_template_delete", summary="Delete sandbox template")
 def delete_sandbox_template(tpl_id: int, user: dict = Depends(require_no_session_token)):
     """v3：删除沙箱模板。权限按 Provider scope 校验。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT provider_id FROM sandbox_templates WHERE id=?", (tpl_id,))
@@ -3604,7 +3604,7 @@ def scan_sandbox_templates(provider_id: int, user: dict = Depends(require_no_ses
     本端点不感知任何具体平台 API。有效性 = status 为 ready/ok。
     已按 template_id 去重——DB 中已有的不重复导入。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT rc.name AS name, spc.platform, spc.runtime_credential_id FROM sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id WHERE spc.id=?",
@@ -3673,7 +3673,7 @@ def scan_sandbox_templates(provider_id: int, user: dict = Depends(require_no_ses
 @router.post("/sandbox-templates/{tpl_id}/check", operation_id="settings_sandbox_template_check", summary="Check template validity")
 def check_sandbox_template(tpl_id: int, user: dict = Depends(require_no_session_token)):
     """v3：手动触发模板校验。权限按 Provider scope 校验。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         # [provider 列语义修复 2026-10-30] templates.provider 列语义混用(历史存平台名,
@@ -3705,7 +3705,7 @@ def _check_template_sync(tpl_id: int, provider: str, template_id: str):
     """[provider 列语义修复 2026-10-30] 内部统一按 provider_id JOIN spc.platform
     取 registry 键——传入 provider 参数仅保留签名兼容(其值可能是凭据名/平台名
     混用, 不再使用)。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -3727,7 +3727,7 @@ def _provider_config_from_db(platform: str, provider_id: int | None = None) -> d
     health 端点同款逻辑；无记录/无 adapter 返回 None。
     优先按 provider_id 精确取（模板校验场景），无 id 时回退 system scope 行。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         # [d1e242cba 对账漏改修复] SELECT 引用 rc.name 但 FROM 无 JOIN——补关联子查询
@@ -3821,7 +3821,7 @@ def list_provider_configs(user: dict = Depends(require_no_session_token)):
 
     GET 不需要 admin 权限——登录用户即可查看（api_key 已脱敏）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         # [provider 列已删 2026-11-06 修复] 列表 SQL 仍引用已物理删除的 provider 列
@@ -3877,7 +3877,7 @@ def update_provider_config(provider: str, body: dict, user: dict = Depends(requi
     extra_json = json.dumps(extra, ensure_ascii=False)
 
     from src.utils.crypto import encrypt
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     with db_lock:
         c = db.cursor()
@@ -3989,12 +3989,12 @@ class LLMCredentialBody(BaseModel):
 def _require_repo_llm_admin(repo_key: str, user: dict):
     """[repo-llm-credential] 仓库 LLM 凭据编辑权限——口径复用仓库 Bot Token（FR-20.5）：
     托管人(host_user_id) / user_repos.is_admin / 全局 admin。"""
-    from src.session_manager import db as _sm_db, db_lock as _sm_dl
+    from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
     if user.get("role", "") == "admin":
         return
     # [U3 修复 2026-11-13] managed_repos.repo_key 带平台前缀（gitcode:owner/repo），
     # 调用方传的是 URL 形态（owner/repo）——此前直查恒 miss → 仓库托管人自己也
-    # 403（E2E 实证 zjj 是 host 仍被拒）。统一走 _resolve_repo_key 解析实际键。
+    # 403（E2E 实证账号是 host 仍被拒）。统一走 _resolve_repo_key 解析实际键。
     repo_key = _resolve_repo_key(repo_key)
     try:
         with _sm_dl:
@@ -4027,7 +4027,7 @@ class RepoLLMCredentialBody(BaseModel):
             summary="List repo LLM credentials")
 def list_repo_llm_credentials(repo_key: str = "", user: dict = Depends(require_no_session_token)):
     """列出仓库 LLM 凭据（不回明文——api_key 只报 has_key 布尔）。读权限=仓库可见即可。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     if not repo_key:
         return {"credentials": []}
     with db_lock:
@@ -4045,7 +4045,7 @@ def list_repo_llm_credentials(repo_key: str = "", user: dict = Depends(require_n
 def upsert_repo_llm_credential(body: RepoLLMCredentialBody, user: dict = Depends(require_no_session_token)):
     """新增/更新（repo_key+engine_type UPSERT）。api_key 留空=保留旧值。仅仓库管理员。"""
     from src.utils.crypto import encrypt
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
     repo_key = (body.repo_key or "").strip()
     if not repo_key:
@@ -4088,7 +4088,7 @@ def upsert_repo_llm_credential(body: RepoLLMCredentialBody, user: dict = Depends
 @router.put("/llm-credentials/repo/{cred_id}/toggle", operation_id="settings_repo_llm_credential_toggle")
 def toggle_repo_llm_credential(cred_id: int, body: dict, user: dict = Depends(require_no_session_token)):
     """启停。仅仓库管理员。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         row = c.execute("SELECT repo_key FROM repo_llm_credentials WHERE id=?", (cred_id,)).fetchone()
@@ -4104,7 +4104,7 @@ def toggle_repo_llm_credential(cred_id: int, body: dict, user: dict = Depends(re
 @router.delete("/llm-credentials/repo/{cred_id}", operation_id="settings_repo_llm_credential_delete")
 def delete_repo_llm_credential(cred_id: int, user: dict = Depends(require_no_session_token)):
     """删除。仅仓库管理员。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         row = c.execute("SELECT repo_key FROM repo_llm_credentials WHERE id=?", (cred_id,)).fetchone()
@@ -4120,7 +4120,7 @@ def delete_repo_llm_credential(cred_id: int, user: dict = Depends(require_no_ses
 def create_llm_credential(body: LLMCredentialBody, user: dict = Depends(require_no_session_token)):
     """创建/更新 LLM 凭据（加密存储到 user_llm_credentials 表）。"""
     from src.utils.crypto import encrypt
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
 
     if not body.api_key.strip():
@@ -4167,7 +4167,7 @@ def create_llm_credential(body: LLMCredentialBody, user: dict = Depends(require_
 @router.get("/llm-credentials", operation_id="settings_llm_credentials", summary="List LLM credentials", description="List user's LLM credentials without plaintext keys.")
 def list_llm_credentials(user: dict = Depends(require_no_session_token)):
     """列出用户的 LLM 凭据（不含明文 key）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -4201,7 +4201,7 @@ def list_llm_engine_types(user: dict = Depends(require_no_session_token)):
 @router.delete("/llm-credentials/{cred_id}", operation_id="settings_llm_credential_delete", summary="Delete LLM credential")
 def delete_llm_credential(cred_id: int, user: dict = Depends(require_no_session_token)):
     """删除 LLM 凭据。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM user_llm_credentials WHERE id=? AND user_id=?", (cred_id, user["id"]))

@@ -79,7 +79,7 @@ class LlmCredentialPredicate:
 
     def _get_reader(self):
         if self._reader is None:
-            from src.agent.sandbox.repository import SandboxRepository
+            from src.domains.runtime.agents.sandbox.repository import SandboxRepository
             self._reader = SandboxRepository()
         return self._reader
 

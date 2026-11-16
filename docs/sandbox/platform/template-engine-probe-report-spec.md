@@ -80,7 +80,7 @@ worker 一键安装完成 → 首次启动（_amain）即执行**模板引擎全
 **①注册先行（推翻原「探测先于 register」设计）**：
 - 原设计"探测先于（或伴随）首次 register"在实测中出事：探测（每箱 20-40s × N 模板）把
   `cloud_worker registered` 日志拖到 34s 后，**安装器 30s 注册验证窗口**判超时回滚健康新版
-  （.17 实例 27 实证：54:49 还在正常建箱探测就被回滚，用户多次重装触发）。
+  （<sandbox-host> 实例 27 实证：54:49 还在正常建箱探测就被回滚，用户多次重装触发）。
 - 修正时序：`拉模板 → register → recover_orphans → Provider 上报+探测（注册后）`。
   worker 秒级上线（与普通 worker 同语义：本地发现秒级、健康探测后置），安装窗口不再被探测吃掉。
   安装器侧 240s 沙箱窗口（489bbff8d）作双保险保留。
@@ -89,7 +89,7 @@ worker 一键安装完成 → 首次启动（_amain）即执行**模板引擎全
 
 **②失败对账 + 重试循环（修复 binding 永缺缺口）**：
 - 实测缺口：启动探测批**只跑一次**；10min 健康线程只测本机引擎（沙箱 worker 是 no-op，
-  引擎在远端沙箱）——130597 资源不足失败的模板**永远没有 binding**（.17 实例 22 实证：
+  引擎在远端沙箱）——130597 资源不足失败的模板**永远没有 binding**（<sandbox-host> 实例 22 实证：
   全天仅启动一次探测批，4 模板 130597 后永缺）。
 - 对账设计：`_report_providers_once()` 返回失败计数 = Σ(每 Provider:
   扫描到的模板数 − 探测返回有引擎的模板数 + 上报异常×1)。三类未完成形态都计入：
@@ -185,11 +185,11 @@ auto_trust_detected 开关即承认这个权衡：放开=用户信任探测自�
 3. RED：sandbox_provider_report payload 带 engines → 服务端 binding UPSERT status='detected' enabled=0
 4. GREEN：上报端点 + binding 列（status, engine_version——_ensure_column 幂等迁移）
 5. 前端：绑定弹窗建议项徽标（探测到 X vX ✓，可点击确认转 manual）+ :title 全列
-6. E2E：.17 worker 启动补报带探测 → WebUI 显示 detected 建议项 → 勾选转 manual → 引擎 60s 内注册上线
+6. E2E：<sandbox-host> worker 启动补报带探测 → WebUI 显示 detected 建议项 → 勾选转 manual → 引擎 60s 内注册上线
 
 ## 8. 验收
 
 1. pytest 全量基线不变；新增探测契约/上报 UPSERT/binding status 用例
-2. .17 实测：hermes-git-acp 模板探测上报显示 hermes（detected），勾选后 60s 注册上线，任务真实跑通
+2. <sandbox-host> 实测：hermes-git-acp 模板探测上报显示 hermes（detected），勾选后 60s 注册上线，任务真实跑通
 3. 不支持平台（无 probe_engines 能力位）前端无探测入口，行为零变化
 4. **深检验收（2026-11-04 增补）**：裸 hermes（无 ACP 依赖）模板探测**不上报** hermes；`hermes acp --check OK` 模板正常上报 detected——detected 行的实际可执行率 100%（不再有"探测通过、执行即炸"行）

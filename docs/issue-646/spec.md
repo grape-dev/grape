@@ -1,7 +1,7 @@
 # Spec: Issue #646 — 引擎/worker 表 uid 稳定键改造（开发版）
 
 > 本文件为开发侧落地摘要；完整需求与设计以 Issue #646 评论中的 **Spec v3.1**（Issue Agent 发布，评级 ready）为准。
-> 实现基线分支：**weekly-09-zhangjian**（Spec v3.1 修订：不复用/不合并旧 PR #813，其 base=weekly-09-ljt 仅作历史参考；本 PR 在新基线重新落地，代码等价重放 + 基线适配）。
+> 实现基线分支：**weekly-09**（Spec v3.1 修订：不复用/不合并旧 PR #813，其 base=weekly-09-ljt 仅作历史参考；本 PR 在新基线重新落地，代码等价重放 + 基线适配）。
 
 ## Objective
 消除引擎/worker 表自增 id 主键 + 跨表裸引用风险（悬挂引用 / id 漂移 / 无 FK / 可枚举）：

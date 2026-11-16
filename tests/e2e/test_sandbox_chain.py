@@ -3,13 +3,13 @@
 默认跳过（依赖外部环境）；设 GRAPE_E2E_SANDBOX=1 且提供以下环境变量后启用：
 
     GRAPE_CONTROLLER      控制器地址——必须是 worker 目标机可达的地址
-                          （如 http://192.168.0.85:8081，不要用 127.0.0.1）
-    GRAPE_ADMIN_USER      管理员账号（默认 zjj）
+                          （如 http://<controller-host>:8081，不要用 127.0.0.1）
+    GRAPE_ADMIN_USER      管理员账号（默认 admin）
     GRAPE_ADMIN_PASSWORD  管理员密码
-    GRAPE_REPO            目标仓库 full_name（默认 And-ZJ2/hello-calculator）
-    GRAPE_CUBE_ENDPOINT   沙箱平台地址（默认 http://192.168.0.17:3000）
-    GRAPE_WORKER_HOST     worker 安装目标机 SSH 地址（如 192.168.0.17）
-    GRAPE_WORKER_USER     SSH 用户（默认 root）
+    GRAPE_REPO            目标仓库 full_name（如 org/repo）
+    GRAPE_CUBE_ENDPOINT   沙箱平台地址（如 https://cube.example.com）
+    GRAPE_WORKER_HOST     worker 安装目标机 SSH 地址（如 <worker-host>）
+    GRAPE_WORKER_USER     SSH 用户（如 <worker-user>）
     GRAPE_WORKER_PASSWORD SSH 密码
 
 前置：目标机已装 python3/curl；控制器 configs/crypto.json 就绪；
@@ -34,10 +34,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 CTRL = os.environ.get("GRAPE_CONTROLLER", "http://127.0.0.1:8081")
-REPO = os.environ.get("GRAPE_REPO", "And-ZJ2/hello-calculator")
-ADMIN_USER = os.environ.get("GRAPE_ADMIN_USER", "zjj")
+REPO = os.environ.get("GRAPE_REPO", "org/repo")
+ADMIN_USER = os.environ.get("GRAPE_ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("GRAPE_ADMIN_PASSWORD", "")
-CUBE = os.environ.get("GRAPE_CUBE_ENDPOINT", "http://192.168.0.17:3000")
+CUBE = os.environ.get("GRAPE_CUBE_ENDPOINT", "https://cube.example.com")
 WHOST = os.environ.get("GRAPE_WORKER_HOST", "")
 WUSER = os.environ.get("GRAPE_WORKER_USER", "root")
 WPASSWORD = os.environ.get("GRAPE_WORKER_PASSWORD", "")

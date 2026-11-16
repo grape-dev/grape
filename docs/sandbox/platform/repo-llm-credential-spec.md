@@ -22,7 +22,7 @@
 ```sql
 CREATE TABLE IF NOT EXISTS repo_llm_credentials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo_key VARCHAR(512) NOT NULL,          -- 如 gitcode:And-ZJ2/hello-calculator
+    repo_key VARCHAR(512) NOT NULL,          -- 如 gitcode:org/repo
     engine_type VARCHAR(64) NOT NULL,        -- hermes/opencode/.../common(通用)
     provider VARCHAR(64) NOT NULL DEFAULT '',
     api_key_enc TEXT,

@@ -108,23 +108,23 @@ class TestRegexPatterns(unittest.TestCase):
     def test_aws_ak(self):
         from src.domains.runtime.agents.sandbox.redact import RedactEngine
         engine = RedactEngine()
-        result = engine.redact("AWS key: AKIAIOSFODNN7EXAMPLE")
-        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", result.text)
+        result = engine.redact("AWS key: AKIAIOSFODNN7EXAMPLE")  # secrets-check: allow (redactor fixture / public placeholder)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", result.text)  # secrets-check: allow (redactor fixture / public placeholder)
         types = [m["type"] for m in result.matches]
         self.assertIn("aws_ak", types)
 
     def test_huawei_ak(self):
         from src.domains.runtime.agents.sandbox.redact import RedactEngine
         engine = RedactEngine()
-        result = engine.redact("HUAWEI AK: HPUA1RGZONSTYDPQLPZR")
-        self.assertNotIn("HPUA1RGZONSTYDPQLPZR", result.text)
+        result = engine.redact("HUAWEI AK: HPUA1RGZONSTYDPQLPZR")  # secrets-check: allow (redactor fixture / public placeholder)
+        self.assertNotIn("HPUA1RGZONSTYDPQLPZR", result.text)  # secrets-check: allow (redactor fixture / public placeholder)
         types = [m["type"] for m in result.matches]
         self.assertIn("huawei_ak", types)
 
     def test_private_key(self):
         from src.domains.runtime.agents.sandbox.redact import RedactEngine
         engine = RedactEngine()
-        result = engine.redact("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...")
+        result = engine.redact("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...")  # secrets-check: allow (redactor fixture / public placeholder)
         self.assertNotIn("BEGIN RSA PRIVATE KEY", result.text)
         types = [m["type"] for m in result.matches]
         self.assertIn("private_key", types)
@@ -140,7 +140,7 @@ class TestRegexPatterns(unittest.TestCase):
     def test_db_connection(self):
         from src.domains.runtime.agents.sandbox.redact import RedactEngine
         engine = RedactEngine()
-        result = engine.redact("DB: postgres://user:passw0rd@192.168.0.59:5432/db")
+        result = engine.redact("DB: postgres://user:passw0rd@127.0.0.1:5432/db")
         self.assertNotIn("passw0rd", result.text)
         types = [m["type"] for m in result.matches]
         self.assertIn("db_connection", types)
@@ -344,9 +344,9 @@ class TestRedactBackwardCompat(unittest.TestCase):
 
     def test_redact_regex_pattern(self):
         from src.domains.runtime.agents.executor import _redact
-        result = _redact("AWS: AKIAIOSFODNN7EXAMPLE", [])
+        result = _redact("AWS: AKIAIOSFODNN7EXAMPLE", [])  # secrets-check: allow (redactor fixture / public placeholder)
         self.assertIn("[REDACTED]", result)
-        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", result)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", result)  # secrets-check: allow (redactor fixture / public placeholder)
 
 
 class TestModuleImportSmoke(unittest.TestCase):

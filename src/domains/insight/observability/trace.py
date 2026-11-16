@@ -174,7 +174,7 @@ def _engine_uid(runtime_id: int) -> str:
     """Issue #868 前端 uid 消费：runtime_id → engine_uid（旧库缺列/行不存在降级 ''）。"""
     if not runtime_id:
         return ""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             row = db.cursor().execute(

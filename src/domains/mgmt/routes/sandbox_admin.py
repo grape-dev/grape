@@ -35,7 +35,7 @@ def _require_admin(user: dict):
         return
     if not user.get("id") and not user.get("username"):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "admin only"})
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -165,7 +165,7 @@ _VALID_DEGRADE = {"strict", "compatible"}
 
 
 def _get_db():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     return db, db_lock
 
 

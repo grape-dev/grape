@@ -808,7 +808,7 @@ class CubeSandboxAdapter:
                     # 不上报（宁缺勿假，与 spec §5.6 一致）。
                     if engine == "hermes":
                         # [握手公式复刻 weekly-10 2026-11-11] 旧 echo 短管道在 v0.19.0
-                        # 原理性失效（.17 箱内实测三组对照）：
+                        # 原理性失效（<sandbox-host> 箱内实测三组对照）：
                         #   ① echo(立即 EOF) → adapter 处理完 initialize 但不写 stdout(0字节)
                         #   ② 首次 initialize 懒装 boto3 ~16s > timeout 15 → 必超时
                         #   ③ (echo...; sleep 40) stdin 握住 → 497B 完整 jsonrpc 响应

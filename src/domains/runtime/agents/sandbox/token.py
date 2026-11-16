@@ -45,7 +45,7 @@ class TokenManager:
         """延迟获取 db——构造时可能未初始化。"""
         if self._db is not None and self._lock is not None:
             return self._db, self._lock
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         return db, db_lock
 
     def issue(self, task_id: str, backend_name: str) -> str:

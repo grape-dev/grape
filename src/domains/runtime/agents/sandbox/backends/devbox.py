@@ -1,7 +1,7 @@
 """DevBox 云沙箱实现——华为云 DevBox SDK 适配。
 
 继承 CloudSandboxBase / CloudProviderBase，实现 _do_* 模板方法。
-SDK 路径：/home/yangaiwu/devspace-devbox/python-sdk/src/devbox/
+SDK 路径：<devbox-sdk-dir>/src/devbox/
 
 DevBox SDK 核心对象：
 - DevBox(client) → Sandboxes → Sandbox

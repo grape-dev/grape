@@ -285,7 +285,7 @@ def build_bwrap_argv(
     except Exception:
         # API 不可用时 fallback 到本地 DB（仅本机 worker 有 DB）
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 rows = db.execute(
                     "SELECT path, access FROM engine_sandbox_paths WHERE backend_name = ?",
