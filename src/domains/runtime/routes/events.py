@@ -1521,7 +1521,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                "pull_request_opened": "Merge Request Hook", "push": "push"}
                 _header = _header_map.get(_event_type, _event_type)
                 _rp_result = _rp(_fake_raw, {"X-GitCode-Event": _header},
-                                 account=evt.get("account", ""), repo_key_override=evt.get("repo_key", ""))
+                                 account=evt.get("account", ""), repo_key_override=evt.get("repo_key", ""),
+                                 replay=True)
                 if _rp_result.get("ok"):
                     log.info(f"[redispatch] seq={seq} re-run_pipeline ok, new seq={_rp_result.get('seq')}")
                     # Issue #600：原事件标记 cancelled（被新事件接管，非失败态）

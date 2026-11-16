@@ -1697,8 +1697,12 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
 
 
 def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
-                 repo_key_override: str = "") -> dict:
-    """事件处理管道入口：归一化 → 路由 → 存储 → 返回结果"""
+                 repo_key_override: str = "", replay: bool = False) -> dict:
+    """事件处理管道入口：归一化 → 路由 → 存储 → 返回结果
+
+    ``replay=True``：redispatch 重放历史事件（Issue #2381）——重放的是旧评论，
+    不是新的用户输入，等待态恢复不得再次消费 pending_review 审核点。
+    """
     result = {"seq": 0, "event_type": "", "skill": "", "repo_key": "", "ok": False}
 
     # 1. 归一化
@@ -1863,12 +1867,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
             # 澄清/审核回复自动恢复（§3.6/§3.5）：非 bot 用户评论且 issue 处 awaiting_input 或 pending_review →
             # 恢复 processing。bot 自评在下方 2.0 自循环检测跳过；note_hook_pr 不适用（PR 讨论非 issue 澄清）。
+            # Issue #2381：redispatch 重放旧评论（replay=True）不是新的用户输入，
+            # 保留 pending_review 审核点，避免重放把审核点再次消费掉后 review-pass 恒 noop。
             if event_type == "issue_comment" and _issue_num and _issue_num.isdigit() and int(_issue_num) > 0:
                 try:
                     from src.api.issues_center import _resume_issue_waiting
-                    if _resume_issue_waiting(repo_key, int(_issue_num)):
+                    if _resume_issue_waiting(repo_key, int(_issue_num), preserve_review=replay):
                         _resume_applied = True  # 等待态恢复已消费用户输入 → 2.0a 台账跳过不成立
-                        log.info(f"Pipeline: issue #{_issue_num} awaiting/pending_review → processing (issue_comment reply)")
+                        log.info(f"Pipeline: issue #{_issue_num} awaiting/pending_review → processing "
+                                 f"(issue_comment reply, preserve_review={replay})")
                 except Exception as _re:
                     log.warning(f"Pipeline: issue_comment resume failed: {_re}")
         except Exception as e:
