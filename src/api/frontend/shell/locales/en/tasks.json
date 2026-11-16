@@ -160,5 +160,9 @@
     "abort_confirm": "End this takeover? It only stops the current node and never re-dispatches the task.",
     "abort_done": "Takeover ended",
     "abort_failed": "Failed to end the takeover"
+  },
+  "board": {
+    "refresh_failed_keep": "Board refresh failed, showing the last data",
+    "retry": "Retry"
   }
 }

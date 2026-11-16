@@ -339,6 +339,13 @@
 
       <!-- ═══ 看板模式：六状态列 ═══ -->
       <div v-else class="isk-boardwrap">
+        <!-- Issue #2649：整刷失败保留旧帧，给可重试软横幅（不清空看板） -->
+        <div v-if="boardRefreshFailed" class="isk-board-banner">
+          <span>⚠ {{ t('board.refresh_failed_keep') }}</span>
+          <button class="tsk-btn tsk-btn-ghost" @click="retryBoardRefresh">
+            ↻ {{ t('board.retry') }}
+          </button>
+        </div>
         <div
           v-for="col in boardCols"
           :key="col.k"
@@ -682,6 +689,13 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import {
+  boardFrameKey,
+  createBoardRound,
+  settleBoardRound,
+  aggregateBoardTasks,
+  decideBoardRound,
+} from '../lib/boardRound.js'
 
 const G = globalThis
 
@@ -746,6 +760,8 @@ let listObserver = null
 // ═══════════ I18N ═══════════
 const TASK_DEFAULTS = {
   page_title: '需求中心',
+  'board.refresh_failed_keep': '看板刷新失败，已保留上次数据',
+  'board.retry': '重试',
   view_mine: '我的需求',
   view_repo_all: '仓库全部',
   view_list: '列表',
@@ -832,7 +848,6 @@ const ISSUE_DEFAULTS = {
   'cross_pipeline.scene_placeholder': '选择目标场景',
   'cross_pipeline.assignee_hint': '移交后由目标场景的 Agent 接手',
   'cross_pipeline.loading_scenes': '场景加载中...',
-
 }
 function t(key, params) {
   const full = 'tasks.' + key
@@ -1257,16 +1272,43 @@ const BOARD_CURSOR_STATUSES = {
   cancelled: 'cancelled',
 }
 const colCursor = reactive({}) // cursor -> {page, hasMore, loading, total, seq}
+// Issue #2649：整刷回合化（旧前端 issues.js 的语义等价迁移）
+const boardEpoch = ref(0) // 全局回合序号：reset 自增，旧 epoch 的在途响应一律丢弃
+const boardRound = ref(null) // 进行中的整刷回合（createBoardRound 产出）
+const boardRefreshFailed = ref(false) // 软失败态：保留旧帧 + 可重试提示
+const boardFrameId = ref('') // 帧身份：只有身份变化才允许清空旧帧
+function boardFrameIdNow() {
+  const repo = repoOf()
+  const repoKey = repo
+    ? repo.repoKey || repo.fullName || (repo.owner || '') + '/' + (repo.name || '')
+    : ''
+  return boardFrameKey([
+    repoKey,
+    viewMode.value,
+    sortOrder.value,
+    query.value || '',
+    (filterStatuses.value || []).join(','),
+    (filterAssignees.value || []).join(','),
+  ])
+}
 function resetBoardCursors() {
+  boardEpoch.value += 1 // 乱序保护：旧 epoch 的响应不得回填新回合
   Object.keys(BOARD_CURSOR_STATUSES).forEach((k) => {
     colCursor[k] = { page: 1, hasMore: true, loading: false, total: null, seq: 0 }
   })
-  tasks.value = []
-  sel.value = null
+  // 同身份（如确认完成同仓刷新）保留旧帧到回合 commit 原子替换，消除中间态空板；
+  // 身份变化（切仓/切视图/切搜索/切筛选）才清空，避免 A 仓卡片被当旧帧长期展示。
+  const fk = boardFrameIdNow()
+  if (fk !== boardFrameId.value) {
+    boardFrameId.value = fk
+    tasks.value = []
+    sel.value = null
+    G.window._tasksById = {}
+  }
   tasksHasMore.value = false
   tasksTotal.value = null
   taskServerPage = 1
-  G.window._tasksById = {}
+  boardRefreshFailed.value = false // 新回合开始即清软失败态（重试也走这条链路）
 }
 resetBoardCursors() // 先建空游标：看板分屏关闭时模板也能安全读取
 function boardCursorOf(colKey) {
@@ -1290,14 +1332,18 @@ function mergeBoardItems(items) {
     if (upd) detailView.value = upd
   }
 }
-// 取某游标的一页（merge=true 只刷新第 1 屏，用于轮询对账）
+// 取某游标的一页（merge=true 只刷新第 1 屏用于轮询对账；round=整刷回合，先缓冲后原子提交）
 function boardFetch(key, opts) {
   const repo = repoOf()
   const cur = colCursor[key]
   if (!repo || !cur) return Promise.resolve()
   const merge = !!(opts && opts.merge)
+  const round = (opts && opts.round) || null
+  const epoch = boardEpoch.value // Issue #2649：捕获回合序号，reset 后过期响应整体丢弃
   if (cur.loading) return Promise.resolve()
-  if (!merge && !cur.hasMore) return Promise.resolve()
+  // Issue #2649：回合在途时暂停列内滚动追加，防回合提交后跳页
+  if (!merge && !round && boardRound.value) return Promise.resolve()
+  if (!merge && !round && !cur.hasMore) return Promise.resolve()
   cur.loading = true
   const seq = ++cur.seq
   const page = merge ? 1 : cur.page
@@ -1320,21 +1366,41 @@ function boardFetch(key, opts) {
   return API()
     .get(url)
     .then(function (d) {
+      if (epoch !== boardEpoch.value) return // Issue #2649：过期回合（then 侧丢弃）
       if (seq !== cur.seq) return // 已被本列更新的请求取代
       cur.loading = false
       const items = d.issues || d.tasks || []
       if (!merge) cur.page = page + 1
       cur.hasMore = !!d.has_more
       cur.total = d.total === null || d.total === undefined ? null : d.total
+      if (round) {
+        // 整刷：先缓冲到回合，收敛后一次提交（无中间态空板）
+        round.items[key] = items
+        if (settleBoardRound(round)) commitBoardRound(round)
+        return
+      }
       mergeBoardItems(items)
       loaded.value = true
       loadError.value = ''
     })
     .catch(function (e) {
+      if (epoch !== boardEpoch.value) return // 过期回合（catch 侧同样丢弃）
       if (seq !== cur.seq) return
       cur.loading = false
-      if (e && e.name === 'AbortError' && e.silent) return
-      if (G.window._currentView !== 'tasks') return
+      if (e && e.name === 'AbortError' && e.silent) {
+        if (round) abandonBoardRound(round)
+        return
+      }
+      if (G.window._currentView !== 'tasks') {
+        if (round) abandonBoardRound(round)
+        return
+      }
+      if (round) {
+        round.failed = true
+        round.error = e
+        if (settleBoardRound(round)) commitBoardRound(round)
+        return
+      }
       loadError.value = t('load_failed', { msg: e.message })
       loaded.value = true
     })
@@ -1345,7 +1411,8 @@ function boardFetch(key, opts) {
 const takeovers = ref({})
 function loadTakeovers() {
   const repo = currentRepo()
-  const key = repo && (repo.repoKey || (repo.owner && repo.name ? repo.owner + '/' + repo.name : ''))
+  const key =
+    repo && (repo.repoKey || (repo.owner && repo.name ? repo.owner + '/' + repo.name : ''))
   if (!key) {
     takeovers.value = {}
     return
@@ -1387,7 +1454,60 @@ function abortTakeover(tk) {
   })
 }
 function loadBoardAll(opts) {
-  return Promise.all(Object.keys(BOARD_CURSOR_STATUSES).map((k) => boardFetch(k, opts)))
+  // Issue #2649：整刷回合——列数即 pending，全部收敛后一次性原子替换旧帧
+  const round =
+    opts && opts.round
+      ? opts.round
+      : opts && opts.merge
+        ? null
+        : createBoardRound(Object.keys(BOARD_CURSOR_STATUSES))
+  if (round) boardRound.value = round
+  return Promise.all(
+    Object.keys(BOARD_CURSOR_STATUSES).map((k) =>
+      boardFetch(k, round ? Object.assign({}, opts, { round }) : opts)
+    )
+  )
+}
+// Issue #2649：回合收敛点——成功=单次赋值原子替换；失败=保留旧帧 + 可重试软横幅
+function commitBoardRound(round) {
+  if (round !== boardRound.value) return // 已被更新的整刷取代
+  boardRound.value = null
+  const decision = decideBoardRound(round, {
+    inBoardView: boardPagedView.value && G.window._currentView === 'tasks',
+    hasOldFrame: tasks.value.length > 0,
+  })
+  if (decision.action === 'drop') return
+  if (decision.action === 'error') {
+    loadError.value = t('load_failed', {
+      msg: (round.error && round.error.message) || 'board refresh failed',
+    })
+    loaded.value = true
+    return
+  }
+  if (decision.action === 'keep') {
+    boardRefreshFailed.value = true // 保留旧帧 + 软横幅，不清空看板
+    return
+  }
+  const agg = aggregateBoardTasks(Object.keys(BOARD_CURSOR_STATUSES).map((k) => round.items[k]))
+  tasks.value = agg.list // 原子替换：渲染一帧完成新旧切换
+  if (sel.value) sel.value = agg.byId[sel.value.id] || null
+  if (detailView.value) {
+    const upd = agg.byId[detailView.value.id]
+    if (upd) detailView.value = Object.assign(detailView.value, upd)
+  }
+  loaded.value = true
+  loadError.value = ''
+  boardRefreshFailed.value = false
+}
+// Issue #2649：导航/切页导致回合作废——不视为刷新失败，收敛后由 commit 直接丢弃
+function abandonBoardRound(round) {
+  if (!round || round !== boardRound.value) return
+  round.aborted = true
+  if (settleBoardRound(round)) commitBoardRound(round)
+}
+function retryBoardRefresh() {
+  resetBoardCursors()
+  loadBoardAll()
 }
 // 列内滚到接近底部 → 只加载该列所属游标的下一页
 function onBoardScroll(colKey, ev) {
@@ -3756,6 +3876,7 @@ onBeforeUnmount(function () {
 }
 /* 看板 */
 .isk-boardwrap {
+  position: relative;
   flex: 1;
   display: flex;
   gap: 10px;
@@ -3763,6 +3884,29 @@ onBeforeUnmount(function () {
   padding-bottom: 4px;
   flex-shrink: 0;
   min-height: 0;
+}
+/* Issue #2649：整刷失败的软横幅（绝对定位于看板顶部，不挤占列宽） */
+.isk-board-banner {
+  position: absolute;
+  z-index: 5;
+  top: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: rgba(184, 133, 122, 0.14);
+  color: #b8857a;
+  font-size: 12px;
+  white-space: nowrap;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+}
+.isk-board-banner .tsk-btn {
+  padding: 1px 10px;
+  font-size: 12px;
 }
 .isk-board-col {
   min-width: 240px;

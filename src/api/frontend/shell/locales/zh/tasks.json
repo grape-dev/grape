@@ -160,5 +160,9 @@
     "abort_confirm": "结束这台接管？只会停当前节点，不会重新派发任务。",
     "abort_done": "已结束接管",
     "abort_failed": "结束接管失败"
+  },
+  "board": {
+    "refresh_failed_keep": "看板刷新失败，已保留上次数据",
+    "retry": "重试"
   }
 }
