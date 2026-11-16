@@ -3897,8 +3897,8 @@ onBeforeUnmount(function () {
   gap: 8px;
   padding: 3px 12px;
   border-radius: 999px;
-  background: rgba(184, 133, 122, 0.14);
-  color: #b8857a;
+  background: color-mix(in srgb, var(--c-issue) 14%, transparent);
+  color: var(--c-issue);
   font-size: 12px;
   white-space: nowrap;
   backdrop-filter: blur(16px);
