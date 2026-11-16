@@ -334,6 +334,39 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 **返回（200）**：单个 PR 对象（结构同上）。**错误**：404。
 
+**Issue #2324 附加字段 `merge_readiness`**：统一合并判定结果（QA hit 判定与 `pulls merge` 前置检查共用
+同一实现），不改变存量字段：
+
+```json
+"merge_readiness": {
+  "ready": false,
+  "verdict": "not_mergeable",           // ready | not_mergeable | pending_review | unknown
+  "label": "待评审/不可合入",             // 可合入 | 待评审/不可合入 | 无法判定
+  "summary": "待评审/不可合入：can_merge_check 未通过（...）；approval_reviewers 为空（待指定评审人）",
+  "missing": [{"code": "can_merge_check", "message": "..."}],
+  "warnings": ["..."],
+  "fields": {"mergeable": true, "can_merge_check": false, "...": "..."}
+}
+```
+
+**组合判定口径（GitCode v5 实测层级）**：`mergeable && can_merge_check &&
+approval_reviewers_required_passed`；仅当
+`mergeable_state.merge_request_switch.approval_required_reviewers_count >= 1` 时才纳入评审人校验。
+`None`/缺失字段显式视为不可合入并告警，禁止退化为「只看 mergeable」。
+
+| mergeable | can_merge_check | reviewers_required_passed | required_count | approval_reviewers | 判定 |
+|-----------|-----------------|---------------------------|----------------|--------------------|------|
+| true | true | true | 1 | 非空 | 可合入 |
+| true | true | true | 0 | 空 | 可合入（未开启评审人要求） |
+| true | false | false | 1 | 空 | 待评审/不可合入：can_merge_check 未通过 + 待指定评审人 |
+| true | true | false | 1 | 非空（pending） | 待评审/不可合入：必需评审人未满足 |
+| true | true | false | 1 | 空 | 待评审/不可合入：待指定评审人 |
+| false / 缺失 | * | * | * | * | 待评审/不可合入（缺失项告警） |
+
+> 字段层级：`mergeable`/`can_merge_check` 在**顶层**；`approval_reviewers_required_passed` 在
+> `mergeable_state`；`approval_required_reviewers_count` 在 `mergeable_state.merge_request_switch`。
+> 非 GitCode provider（`mergeable_state` 为字符串枚举）返回 `verdict=unknown`，合入路径按原流程继续。
+
 ### PATCH /api/git-repo/{owner}/{repo}/pulls/{number}
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 > CLI：`grape git-repo pulls update --owner {owner} --repo {repo} --number {number} --json '{...}'`（operation_id=`gitrepo_pulls_update`）。
@@ -347,6 +380,17 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 > CLI：`grape git-repo pulls merge --owner {owner} --repo {repo} --number {number}`（operation_id=`gitrepo_pulls_merge`）。
 
 **返回（200）**：`{"merged": true, "sha": "..."}`。**错误**：409（不可合并）。
+
+**Issue #2324 合入前置检查**：合入前按统一判定（与 `pulls get` 的 `merge_readiness` 同一实现）校验
+`mergeable && can_merge_check && approval_reviewers_required_passed`，不满足时 409：
+
+```json
+{"detail": {"code": 409,
+  "message": "merge blocked by merge readiness gate (Issue #2324): 待评审/不可合入：...",
+  "gate": {"phase": "pre_merge_readiness", "verdict": "pending_review",
+           "missing": [{"code": "reviewers_not_assigned", "message": "approval_reviewers 为空（待指定评审人）"}],
+           "warnings": []}}}
+```
 
 ### GET/POST /api/git-repo/{owner}/{repo}/pulls/{number}/comments
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）

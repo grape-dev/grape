@@ -1352,10 +1352,17 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     return resp
 
 
-@router.get("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_get", summary="Get pull request", description="Returns a single pull request.")
+@router.get("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_get", summary="Get pull request", description="Returns a single pull request. Issue #2324: attaches merge_readiness, the shared combined merge judgement (mergeable && can_merge_check && approval_reviewers_required_passed) also used by the pre-merge check.")
 def get_pull(owner: str, repo: str, number: int | str, user: dict = Depends(get_current_user_or_api_key),
              p: str = Depends(_provider)):
-    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), _repo_token(owner, repo, user, p))
+    _detail = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p),
+                       _repo_token(owner, repo, user, p))
+    # Issue #2324：QA 合并判定与自动合入前置检查共用同一实现（口径一致）。
+    if isinstance(_detail, dict):
+        from src.api.merge_readiness import evaluate_merge_readiness
+
+        _detail = {**_detail, "merge_readiness": evaluate_merge_readiness(_detail, p)}
+    return _detail
 
 
 @router.patch("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_update", summary="Update pull request", description="Updates a pull request (title/body/labels/state). `state` accepts open/closed and is forwarded to the provider PATCH body (empty = unchanged); providers without state semantics keep returning the unchanged pull request.")
@@ -1612,6 +1619,29 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
     # Issue #1739：合入前 QA 结论门禁（统一入口见 ``_pre_merge_qa_gate``）。
     _pre_merge_qa_gate(owner, repo, number, p, _token, _repo_key,
                        pr_detail=_pr_detail, detail_loaded=True)
+    # Issue #2324：自动合入前置检查复用统一合并判定（mergeable && can_merge_check &&
+    # approval_reviewers_required_passed），任一不满足即 409 并列出缺失项，防 mergeable 误放行。
+    from src.api.merge_readiness import (
+        NOT_MERGEABLE,
+        PENDING_REVIEW,
+        UNKNOWN,
+        evaluate_merge_readiness,
+    )
+
+    _readiness = evaluate_merge_readiness(_pr_detail, p)
+    if _readiness.get("verdict") in (PENDING_REVIEW, NOT_MERGEABLE):
+        record_gate_log(_repo_key, number, "pre_merge_readiness", "blocked", _readiness)
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "message": f"merge blocked by merge readiness gate (Issue #2324): "
+                       f"{_readiness.get('summary')}",
+            "gate": {"phase": "pre_merge_readiness",
+                     "verdict": _readiness.get("verdict"),
+                     "missing": _readiness.get("missing", []),
+                     "warnings": _readiness.get("warnings", [])}})
+    if _readiness.get("verdict") == UNKNOWN:
+        log.warning(f"merge readiness unknown {owner}/{repo}#{number}: "
+                    f"{_readiness.get('warnings')}")
     _gate = run_merge_gate(owner, repo, number, p, _token)
     if _gate.get("decision") == "blocked":
         record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)
