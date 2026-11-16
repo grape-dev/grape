@@ -175,3 +175,6 @@ build/
 # 运维快照：含内部库/视图真实名称，不入公开仓库
 docs/weekly-11/view-allowlist.txt
 docs/weekly-11/backup/
+
+# 内部运维文档（双活拓扑/事故复盘/验收记录）：只留本地，不入公开仓
+/docs/ops/
