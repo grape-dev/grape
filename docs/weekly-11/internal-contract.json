@@ -178,6 +178,13 @@
     {
       "domain": "runtime",
       "method": "GET",
+      "path": "/internal/issues/card",
+      "operation_id": "runtime_issue_card_get",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
       "path": "/internal/issues/{repo_key}/{issue_number}/state",
       "operation_id": "runtime_issue_state_get",
       "summary": ""
@@ -263,6 +270,6 @@
   "counts": {
     "insight": 8,
     "mgmt": 12,
-    "runtime": 17
+    "runtime": 18
   }
 }

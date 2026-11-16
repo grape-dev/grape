@@ -42,6 +42,13 @@ class RuntimeServiceRemote(RuntimeService):
     def get_issue_state(self, repo_key: str, issue_number: int) -> dict:
         return self.client.get(f"/internal/issues/{repo_key}/{issue_number}/state")
 
+    def get_issue_card(self, repo_key: str, issue_number: int) -> dict:
+        # repo_key 含 ':' 和 '/'，不能进路径段（会被 URL 解析切碎 → 404）
+        return self.client.get(
+            "/internal/issues/card",
+            params={"repo_key": repo_key, "issue_number": issue_number},
+        )
+
     def update_issue_state(self, repo_key: str, issue_number: int, patch: dict) -> Any:
         return self.client.post(
             f"/internal/issues/{repo_key}/{issue_number}/state", json_data=patch

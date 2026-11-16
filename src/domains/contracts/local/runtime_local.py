@@ -136,6 +136,23 @@ class RuntimeServiceLocal(RuntimeService):
             cols = [d[0] for d in c.description] if c.description else []
             return dict(zip(cols, row)) if cols else dict(row)
 
+    def get_issue_card(self, repo_key: str, issue_number: int) -> dict:
+        """A Issue 卡片状态——复用 runtime public 的 issue_card_row 具名查询。
+
+        不自己拼 SQL：字段顺序与过滤条件都在 owner 域里定义，这里只做形状归一，
+        保证 Local 与 Remote 两条路径返回同一结构。
+        """
+        from src.domains.runtime.public import read_one_any
+        _num = int(str(issue_number).lstrip("#"))
+        row = read_one_any("issue_card_row", (repo_key, _num))
+        if not row:
+            return {}
+        return {"id": None, "stage": row[0], "owner_agent": row[1],
+                "a2a_seq": row[2], "updated_at": row[3], "assignee": row[4] or "",
+                "scene_id": row[5] or "", "scene_user_id": row[6] or 0,
+                "parent_issue_id": row[7] or "", "is_subtask_mode": row[8] or 0,
+                "allow_scene_override": row[9] or 0}
+
     def update_issue_state(self, repo_key: str, issue_number: int, patch: dict) -> Any:
         """A 用户操作推进 Issue 状态。
 

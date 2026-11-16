@@ -35,6 +35,16 @@ class RuntimeService(ABC):
         """A Issue 阶段状态——返回 issue_state 当前行。"""
 
     @abstractmethod
+    def get_issue_card(self, repo_key: str, issue_number: int) -> dict:
+        """A Issue 卡片状态（issue 单表优先，字段已归一）。
+
+        与 get_issue_state 的区别：后者只读 issue_state 过渡表；本方法读**权威** issue 单表，
+        返回前端卡片需要的字段集合（stage / owner_agent / a2a_seq / assignee / scene_* /
+        parent_issue_id / is_subtask_mode / allow_scene_override）。语义与
+        api.session_store.read_issue_state 的第一段完全一致，供其迁移到 provider 通道。
+        """
+
+    @abstractmethod
     def update_issue_state(self, repo_key: str, issue_number: int, patch: dict) -> Any:
         """A 用户操作推进 Issue 状态（Phase 5 细化事务边界）。"""
 

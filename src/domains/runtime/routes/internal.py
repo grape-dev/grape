@@ -52,6 +52,15 @@ async def get_issue_state(repo_key: str, issue_number: int) -> dict:
     """供 RuntimeServiceRemote.get_issue_state() 调用。"""
     return _get_local("runtime").get_issue_state(repo_key, issue_number)
 
+@router.get("/issues/card", operation_id="runtime_issue_card_get", include_in_schema=False)
+async def get_issue_card(repo_key: str, issue_number: int) -> dict:
+    """供 RuntimeServiceRemote.get_issue_card() 调用（issue 单表权威卡片）。
+
+    repo_key 形如 ``gitcode:owner/repo``，含 ``:`` 和 ``/`` —— 放进路径参数会被
+    URL 切碎成多段导致 404（实测）。这里用 query 参数，与 get_chat_conversations 同款。
+    """
+    return _get_local("runtime").get_issue_card(repo_key, issue_number)
+
 
 @router.post("/issues/{repo_key}/{issue_number}/state", operation_id="runtime_issue_state_update", include_in_schema=False)
 async def update_issue_state(repo_key: str, issue_number: int, body: dict) -> dict:

@@ -48,6 +48,18 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
     except Exception:
         _num = None
     if _num:
+        # 走 provider 通道（GSB）：同域 → Local 实例直接查；跨域且 GRAPE_PROVIDER_MODE=remote
+        # → Remote 实例打 /internal/issues/.../card（一次 HTTP hop，同机实测 +0.3~0.8ms）。
+        # 任何异常都回落到下面的 *_any 直连，迁移不引入新的失败模式。
+        try:
+            from src.kernel.gsb.provider import get_service as _get_service
+            _card = _get_service("runtime").get_issue_card(repo_key, _num)
+            if _card:
+                return _card
+        except Exception as _ge:  # noqa: BLE001
+            # 模块顶部已 import log，直接记；不要再套一层 try/except（那会多出一个静默 except，
+            # 棘轮会按口径漂移拦下）
+            log.debug(f"session_store.get_issue_stage: provider failed, fallback to _any: {_ge}")
         try:
             row = rt.read_one_any("issue_card_row", (repo_key, _num))
             if row:
