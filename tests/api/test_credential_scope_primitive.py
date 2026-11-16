@@ -28,13 +28,40 @@ class ScriptedCursor:
         pass
 
 
+class NullLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
 def install_tx(monkeypatch, cur):
+    """把 registry 事务与进程主库游标都换成交付的脚本化游标。
+
+    `_any_tx()` 在单库/测试拓扑下**不走 registry**，直接取
+    session_manager.db —— 只补 registry 会让组合写原语打到真实库
+    （2026-11-16 修：此前 2 条用例因此拿到真实 rowcount/行）。
+    """
     @contextlib.contextmanager
     def _tx(domain):
         assert domain == "runtime"
         yield cur
 
+    class _FakeDB:
+        def cursor(self):
+            return cur
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
     monkeypatch.setattr(db_registry, "transaction", _tx)
+    import src.kernel.session_manager as _sm
+    monkeypatch.setattr(_sm, "db", _FakeDB())
+    monkeypatch.setattr(_sm, "db_lock", NullLock())
     return cur
 
 

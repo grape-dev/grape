@@ -23,13 +23,37 @@ class FakeCursor:
         pass
 
 
+class NullLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
 def install(monkeypatch, cur):
+    """把 registry 游标与进程主库游标都换成该 FakeCursor。
+
+    `_any_cursor(write=True)` 在单库/测试拓扑下不走 registry，直接取
+    session_manager.db；只补 registry 会让写原语落到真实库
+    （2026-11-16 修：此前 7 条用例因此拿到真实 id/rowcount）。
+    """
     @contextlib.contextmanager
     def _ctx(domain):
         assert domain == "runtime"
         yield cur
 
+    class _FakeDB:
+        def cursor(self):
+            return cur
+
+        def commit(self):
+            pass
+
     monkeypatch.setattr(db_registry, "cursor", _ctx)
+    import src.kernel.session_manager as _sm
+    monkeypatch.setattr(_sm, "db", _FakeDB())
+    monkeypatch.setattr(_sm, "db_lock", NullLock())
     return cur
 
 
