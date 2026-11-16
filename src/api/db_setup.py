@@ -7179,3 +7179,29 @@ register_migration(
     kind="backfill",  # 纯回填、无 DDL：不受 min_code_version 门槛约束
     fn=_fn_user_credentials_kind_backfill,
 )
+
+
+def _fn_add_events_failed_node() -> None:
+    """Issue #2432: backfill events.failed_node on existing databases.
+
+    The old-track `_migrate_tables` branch is frozen once a database carries
+    the legacy stamp, so the column has to be registered as its own idempotent
+    migration; without it a stamped database never gets the column and the
+    failure notice loses its node name.
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "events", "failed_node", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added events.failed_node column (Issue #2432)")
+    except Exception as e:
+        log.warning(f"Add events.failed_node column failed (Issue #2432): {e}")
+
+
+register_migration(
+    version="202611160020",
+    name="issue2432-events-failed-node-column",
+    kind="safe",
+    fn=_fn_add_events_failed_node,
+)
