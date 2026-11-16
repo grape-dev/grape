@@ -175,7 +175,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             repo_gitcode_token = get_repo_token_with_refresh(repo_key=repo_key) or ""
     except Exception as e:
         log.warning(f"Exec agent: get bot token failed: {e}")
-    log.info(f"Exec agent: bot_token={'set' if repo_gitcode_token else 'none'} (provider={'github' if repo_key.startswith('github:') else 'gitcode'})")
+    # provider 从 repo_key 前缀取（原实现二分 github/其余=gitcode，gitee 仓日志会打成 gitcode）
+    _prov_log = repo_key.split(":", 1)[0] if ":" in repo_key else ""
+    log.info(f"Exec agent: bot_token={'set' if repo_gitcode_token else 'none'} (provider={_prov_log or 'none'})")
 
     # R20.25.4: 获取 user_token 用于脱敏（路径 B 仓库的 host 用户 token，agent 可能复述）
     _user_token_for_redact = ""

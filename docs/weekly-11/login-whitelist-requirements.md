@@ -156,6 +156,10 @@ login_whitelist 同表加列行式化（与 signup_whitelist `(type, value)` 同
 - 作用域口径锁（S29，2026-11-12 复核拍板）：白名单=准入闸，已绑定用户登录免检
   （grape_auth.py:1590 早返回）；新增对比用例对（真实 is_user_allowed，开关开+表空）：
   已绑定放行 / 未绑定 WHITELIST 拒绝；live 依据=已绑定验收账号白名单清空后仍登录
+- 管理台 Vue 迁移后重新落地（2026-11-14）：行式白名单页在 `app/src/views/AdminView.vue` 重建——
+  渠道下拉由 `GET /admin/whitelist` 的 providers 动态渲染（grape_t_oauth_channels 真源，零平台字面量）、
+  表头改 平台/用户名 + 存量列式标记、删除按 provider 定向（S11 粒度）、空表红条 fail-closed（S6）；
+  守卫用例 S6/S7 由旧 admin.html/js 断言改写到 Vue 源码口径（`tests/mgmt/test_login_whitelist_row_model.py`）
 - 仓库列表平台集合卡驱动（S31，2026-11-12 实弹修复）：repos.py 不再二分
   ("gitcode","github")——可列仓集合=平台卡目录，拉取走 create_provider(p)
   .fetch_repos_with_role 端口，repo_key 归属走 parse_repo_key 单源；

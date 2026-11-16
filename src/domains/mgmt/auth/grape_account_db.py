@@ -609,6 +609,15 @@ def list_platform_links(grape_user_id: str) -> list[dict]:
     """
     out: list[dict] = []
     seen: set = set()
+    # token 可用性（2026-11-16 实锤）：身份行存在不等于凭据可用——历史 `derived:` 派生
+    # 密钥在当前密钥下解不出来时，行还在、token 为空，调用方若只看"有没有身份行"就会
+    # 去拉仓并必然 401（yangaiwu 现场：关系/身份都在，页面却提示授权过期）。
+    _tokens: dict = {}
+    try:
+        for _t in get_user_identities_with_tokens(grape_user_id):
+            _tokens[str(_t.get("provider") or "")] = _t
+    except Exception as e:
+        log.warning(f"list_platform_links: token scan failed: {e}")
     try:
         for ident in get_user_identities(grape_user_id):
             provider = str(ident.get("provider") or "")
@@ -617,6 +626,9 @@ def list_platform_links(grape_user_id: str) -> list[dict]:
             item = dict(ident)
             item["source"] = "identity"
             item["has_pat_token"] = False
+            _tok = _tokens.get(provider) or {}
+            item["token_usable"] = bool(str(_tok.get("access_token") or "").strip()
+                                        or str(_tok.get("refresh_token") or "").strip())
             out.append(item)
             seen.add(provider)
     except Exception as e:
@@ -644,6 +656,7 @@ def list_platform_links(grape_user_id: str) -> list[dict]:
                     for item in out:
                         if item.get("provider") == platform:
                             item["has_pat_token"] = True
+                            item["token_usable"] = True
                             if not item.get("external_login"):
                                 item["external_login"] = str(cfg.get("login") or "")
                 continue
@@ -660,6 +673,7 @@ def list_platform_links(grape_user_id: str) -> list[dict]:
                 "has_oauth_token": False,
                 "source": "pat",
                 "has_pat_token": True,
+                "token_usable": True,
             })
             seen.add(platform)
     except Exception as e:

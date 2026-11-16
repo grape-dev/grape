@@ -849,10 +849,10 @@ async def process_command_async(ctx: "BotContext", egress: "HandlerEgress",
             # 成功卡片：展示仓库 + 真实会话/Issue 标题（awaiting-notify 优化）
             # 仓库名：repo_key 去掉 provider 前缀（gitcode:/github:）
             _repo_show = str(_rk or "")
-            for _pre in ("gitcode:", "github:", "gitlab:"):
-                if _repo_show.startswith(_pre):
-                    _repo_show = _repo_show[len(_pre):]
-                    break
+            # 前缀剥离走结构化判定（原枚举 gitcode/github/gitlab，gitee 仓会带前缀显示）
+            _idx = _repo_show.find(":")
+            if _idx > 0 and "/" in _repo_show[_idx + 1:]:
+                _repo_show = _repo_show[_idx + 1:]
             # 会话标题：优先 chat_conversations.title（如「Issue #14 · xxx」）；空则回退查 issue.title
             _conv_title = ""
             if cid:

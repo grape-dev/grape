@@ -93,7 +93,7 @@ def test_s60_oauth_fill_targets_default():
     import json as _json
 
     def _builtin_channel(provider):
-        """内置渠道卡精简形态（对齐 providers._DEFAULT_PROVIDERS 关键字段）。"""
+        """内置渠道卡精简形态（对齐 configs/auth-channels/*.json 关键字段）。"""
         if provider == "gitcode":
             return {"name": "GitCode", "auth_url": "https://gitcode.com/oauth/authorize",
                     "token_url": "https://gitcode.com/oauth/token",

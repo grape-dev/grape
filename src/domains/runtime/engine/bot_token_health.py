@@ -115,6 +115,17 @@ def _verify_global_bot_token() -> dict:
         "platforms": platforms,
     }
 
+def _mark_platform_bot_status(provider: str, token_status: str) -> None:
+    """D110：巡检状态同时写平台行（真源），meta 状态键保留一段兼容期。"""
+    try:
+        # 平台对象表归 mgmt 域：拆库拓扑下写自己的库只会写进空副本，mgmt 永远看不到
+        # bot 健康态；一律走 mgmt public 写原语（幂等 UPDATE，任意拓扑）。
+        from src.domains.mgmt import public as _mgmt_public
+
+        _mgmt_public.mark_repo_platform_bot_status(provider, token_status)
+    except Exception as e:
+        log.warning(f"_mark_platform_bot_status({provider}, {token_status}) failed: {e}")
+
 def _update_global_token_status(provider: str, result: dict):
     """R17.2.2/R17.2.3: 根据 health 检查结果标记/清除 per-provider 过期状态。
 
@@ -130,10 +141,12 @@ def _update_global_token_status(provider: str, result: dict):
         # R17.2.3: 200 → 清除过期标记
         set_meta_value(status_key, "")
         _invalidate_global_bot_cache()
+        _mark_platform_bot_status(provider, "ok")
     elif result.get("error_type") == "auth":
         # R17.2.2: 401 → 标记过期
         set_meta_value(status_key, "expired")
         _invalidate_global_bot_cache()
+        _mark_platform_bot_status(provider, "expired")
 
 async def _verify_repo_bot_tokens():
     """R17.2.4/R17.2.11: 遍历有仓库级 bot token 的仓库，按 provider 验证。

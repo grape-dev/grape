@@ -546,17 +546,64 @@ def _builtin_raws_from_dir(dir_path: str) -> "dict[str, dict]":
         except Exception as e:
             log.error(f"platform_card: 配置文件解析失败 {path}: {e}（整卡拒绝）")
             continue
-        unknown = set(raw.keys()) - valid_fields
+        # 下划线前缀 = 文档键（JSON 没有注释语法，用 _readme / _fields / _note 承载说明）。
+        # 先剥离说明键再做键集校验与卡构建——说明不会变成能力位，也不会触发"未知键整卡拒绝"。
+        card_raw = {k: v for k, v in raw.items() if not str(k).startswith("_")}
+        unknown = set(card_raw.keys()) - valid_fields
         if unknown:
             log.error(f"platform_card: {provider} 配置文件含未知键 {sorted(unknown)} "
                       f"（合法键=PlatformCard 字段），整卡拒绝——修文件或扩展 Builder")
             continue
         try:
-            build_platform_card(provider, raw)  # 校验预演（非法整卡拒绝）
-            raws[provider] = raw
+            build_platform_card(provider, card_raw)  # 校验预演（非法整卡拒绝）
+            raws[provider] = card_raw
         except PlatformCardError as e:
             log.error(f"platform_card: {provider} 卡构建失败: {e}（整卡拒绝）")
     return raws
+
+
+_TABLE_SKIP = {"id", "provider", "source", "config_hash", "created_at", "updated_at", "enabled"}
+# 跨域读原语返回的列（与 mgmt.public._PLATFORM_CARD_COLUMNS 同序，凭据列不出域）
+_PLATFORM_CARD_COLUMNS = (
+    "provider", "name", "dialect", "host", "api_base", "api_auth", "webhook_path",
+    "event_header", "webhook_verify", "webhook_dialect", "pr_head_filter", "clone_auth",
+    "issue_write_form", "branch_create_form", "issue_search", "git_tree_family",
+    "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
+    "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
+    "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
+    "user_images_base", "brand_color",
+)
+# 2026-11-14：凭据能力表已删除；这些字段只在平台卡文件里声明（见 configs/platforms/*.json）
+
+
+def _raws_from_table() -> dict:
+    """D109：表就绪后从 grape_t_repo_platforms（+caps）构造平台卡 raw。
+
+    未就绪 / 读失败 → 空 dict，调用方保持「meta > 文件 > 代码兜底」原路径。
+    """
+    try:
+        from src.domains.platform.importer import is_table_backed
+
+        if not is_table_backed():
+            return {}
+        # 平台对象表归 mgmt 域：拆库拓扑下必须走 mgmt public 原语（lib 命名查询），
+        # 不能在本进程库里 ORM 直读——那是另一份空/陈旧副本（三库四进程守护）。
+        from src.domains.mgmt import public as _mgmt_public
+
+        out: dict[str, dict] = {}
+        # 这里**保留** enabled_only：disabled 平台不用表行覆盖卡，卡仍从
+        # configs/platforms/*.json 解析 → "用户面不提供"不等于"内网不可用"
+        # （方言/host/托管链路还要能工作）。与用户面目录的判据是两件事。
+        for row in _mgmt_public.repo_platform_cards(enabled_only=True):
+            out[str(row.get("provider") or "")] = {
+                col: row.get(col) or ""
+                for col in _PLATFORM_CARD_COLUMNS
+                if col not in _TABLE_SKIP
+            }
+        return {k: v for k, v in out.items() if k}
+    except Exception as e:
+        log.warning(f"repo_platforms table read failed, fallback to meta+file: {e}")
+        return {}
 
 
 def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
@@ -601,6 +648,13 @@ def _load_cards() -> None:
                     _base_raws[provider] = _merged
             except Exception as e:
                 log.warning(f"platform_card: vcs_providers_config 解析失败: {e}")
+        # D109：表就绪后 DB 表为运行时真源——表内 provider 覆盖 meta/文件合并结果；
+        # 文件独有平台仍保留（防表缺行致平台消失）。
+        _tbl_raws = _raws_from_table()
+        if _tbl_raws:
+            for _p, _raw in _tbl_raws.items():
+                _base_raws[_p] = dict(_raw)
+            log.info(f"platform cards from table: {sorted(_tbl_raws)}")
         cards = {}
         for provider, raw in _base_raws.items():
             try:

@@ -766,6 +766,38 @@
         "x-token-scope": "dual"
       }
     },
+    "/api/auth/platform-links": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Current user's repo-platform relations (object model)",
+        "description": "Returns the caller's non-revoked user↔repo-platform relations read from grape_t_user_repo_platform_link, with the identities fallback marked as source=identities. Same payload the /auth/profile field carries.",
+        "operationId": "auth_platform_links",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/auth/logout": {
       "post": {
         "tags": [
@@ -3439,7 +3471,7 @@
           "git-repo"
         ],
         "summary": "Get pull request",
-        "description": "Returns a single pull request.",
+        "description": "Returns a single pull request. Issue #2324: attaches merge_readiness, the shared combined merge judgement (mergeable && can_merge_check && approval_reviewers_required_passed) also used by the pre-merge check.",
         "operationId": "gitrepo_pulls_get",
         "parameters": [
           {
@@ -21467,6 +21499,28 @@
         ],
         "title": "Body_upload_md_api_community_upload_md_post"
       },
+      "BotBody": {
+        "properties": {
+          "username": {
+            "type": "string",
+            "title": "Username",
+            "default": ""
+          },
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "default": ""
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "BotBody",
+        "description": "平台 bot 写入体（D110）：username 空=不改；token 空=不改；token 留空无法清除，清除走 DELETE。"
+      },
       "BotTokenBody": {
         "properties": {
           "full_name": {
@@ -21544,6 +21598,22 @@
           "new_password"
         ],
         "title": "ChangePasswordBody"
+      },
+      "ChannelCredentialsBody": {
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "title": "Client Id",
+            "default": ""
+          },
+          "client_secret": {
+            "type": "string",
+            "title": "Client Secret",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "ChannelCredentialsBody"
       },
       "ChatMessage": {
         "properties": {
@@ -22373,6 +22443,19 @@
         },
         "type": "object",
         "title": "EditUserBody"
+      },
+      "EnabledBody": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "EnabledBody"
       },
       "EngineTagBody": {
         "properties": {

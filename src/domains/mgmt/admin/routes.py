@@ -1021,7 +1021,7 @@ def auth_channels_list(admin: dict = Depends(require_admin)):
             summary="Save login channel cards (merge; client creds to meta keys)")
 def auth_channels_put(body: AuthChannelsBody, admin: dict = Depends(require_admin)):
     from src.kernel.auth_sdk.channel_strategy import get_channel_strategy, ChannelAuthError
-    from src.domains.mgmt.auth.providers import _DEFAULT_PROVIDERS, invalidate_provider_cache
+    from src.domains.mgmt.auth.providers import builtin_channels, invalidate_provider_cache
     from src.domains.runtime import public as _rt
     from src.domains.mgmt.auth.audit import log_audit
 
@@ -1057,14 +1057,36 @@ def auth_channels_put(body: AuthChannelsBody, admin: dict = Depends(require_admi
     # 合并式保存（零危害：不挤掉存量渠道——覆盖式写会杀掉 gitcode/github）。
     # 读→合并→写由 runtime public 在**同一事务**内完成：meta 归运行域，
     # 本文件不再持有 meta 的 SQL；同时消掉原「先读后写、中间放锁」的丢配置窗口。
+    # 基线 = 文件卡真源（configs/oauth-providers.json），不再引用代码内置表：
+    # 保存动作不得把"代码里的平台"写回 DB，否则解耦被管理面悄悄撤销。
     extra_meta = {}
     for provider, (cid, csec) in creds.items():
         extra_meta[f"oauth_{provider}_client_id"] = cid
         extra_meta[f"oauth_{provider}_client_secret"] = csec
     merged = _rt.merge_meta_json_any("oauth_providers_config", protocol_cards,
-                                     base=_DEFAULT_PROVIDERS, extra=extra_meta)
+                                     base=builtin_channels(), extra=extra_meta)
     invalidate_provider_cache()
     log_audit("admin_auth_channels_saved", operator_id=admin["id"],
               detail={"providers": sorted(protocol_cards.keys())})
     return {"message": "Login channel cards saved (merge, cache invalidated)",
             "providers": sorted(merged.keys())}
+
+
+# D109 平台对象式管理 API（与旧扁平 PUT /config 并存）
+# D109 管理面：六个聚合各一个路由文件，平铺 include（不设「平台对象」父容器）  # noqa: E402
+from src.domains.mgmt.admin import (  # noqa: E402
+    channel_repo_link_routes as _channel_repo_link_routes,
+    oauth_channel_routes as _oauth_channel_routes,
+    repo_platform_routes as _repo_platform_routes,
+    user_repo_platform_link_routes as _user_repo_platform_link_routes,
+    views_routes as _views_routes,
+)
+
+for _obj_router in (
+    _oauth_channel_routes,
+    _repo_platform_routes,
+    _channel_repo_link_routes,
+    _user_repo_platform_link_routes,
+    _views_routes,
+):
+    router.include_router(_obj_router.router)

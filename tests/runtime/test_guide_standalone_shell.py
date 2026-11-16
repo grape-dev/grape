@@ -30,20 +30,23 @@ const doc = { getElementById: (id) => mkEl(id),
 const ss = { store: {}, getItem: (k) => (k in ss.store ? ss.store[k] : JSON.stringify({ bindings: [] })),
              removeItem: (k) => { delete ss.store[k]; }, setItem: (k, v) => { ss.store[k] = v; } };
 const ls = { getItem: () => JSON.stringify({ bindings: [] }) };
-const fn = new Function('providers','document','localStorage','sessionStorage','platformIcon','I18N','_esc','_obHeroHtml','_updateTbOrgName','_updateLobbyOrgName',
+let onboardProps = null;
+const win = { renderOnboarding: (p) => { onboardProps = p; } };
+const fn = new Function('providers','document','localStorage','sessionStorage','platformIcon','I18N','_esc','_updateTbOrgName','_updateLobbyOrgName','window',
   'return (' + fnSrc + ')(providers, true, "probe", "P");');
 fn(providers, doc, ls, ss,
   () => '<svg/>',
   { getLang: () => 'zh', t: (k) => k },
   (x) => String(x),
-  (n, z, cards) => 'HERO' + (cards || ''),
-  () => {}, () => {});
+  () => {}, () => {}, win);
 console.log(JSON.stringify({
   sidebarHidden: els['sidebar'] && els['sidebar'].style.display === 'none',
   tbHidden: els['tb'] && els['tb'].style.display === 'none',
   mvFullscreen: els['mainView'] && els['mainView'].style.position === 'fixed'
                 && els['mainView'].style.inset === '0',
-  cards: (inner.match(/ob-bind-card/g) || []).length,
+  // 2026-11-14 引导页 Vue 化：卡面由 onboarding-view.js 渲染 → 壳侧断言改为
+  // 「是否把整份平台目录交给了组件」（卡片数与渲染模板由 Vue 源守卫）
+  mountedProviders: onboardProps ? (onboardProps.providers || []).length : -1,
 }));
 '''
 
@@ -86,4 +89,6 @@ def test_guide_shell_hides_workspace_chrome():
     )
     assert out["tbHidden"], "引导壳未隐藏顶栏 tb——同上"
     assert out["mvFullscreen"], "引导壳未把 mainView 置全屏（fixed inset:0）"
-    assert out["cards"] >= 2, "回归锁：卡片区照常渲染"
+    assert out["mountedProviders"] == 2, (
+        "引导壳未把平台目录交给 Vue 组件（renderOnboarding 未调用/传参丢失）"
+    )

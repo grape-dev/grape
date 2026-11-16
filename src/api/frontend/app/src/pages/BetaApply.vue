@@ -11,8 +11,8 @@
       <div class="beta__field">
         <label>{{ t('lbl_platform') }} <span class="beta__req">*</span></label>
         <select v-model="form.fAccountType">
-          <option value="gitcode">GitCode</option>
-          <option value="github">GitHub</option>
+          <option v-if="!platformOptions.length" value="" disabled>…</option>
+          <option v-for="p in platformOptions" :key="p.provider" :value="p.provider">{{ p.name }}</option>
         </select>
       </div>
       <div class="beta__field">
@@ -328,8 +328,13 @@ const otherUseCaseOpts = [
   'opt_other',
 ]
 
+// 登录渠道目录（/auth/providers）：内测申请的「平台」不再写死 gitcode/github，
+// 选项 = 运行时登录渠道（含 gitee / 华为 等纯登录渠道），名字用目录 name。
+// 目录不可用时 = 空列表（不写死双平台兜底；与引导页 T4 同口径），submit 前要求已选
+const platformOptions = ref([])
+
 const form = reactive({
-  fAccountType: 'gitcode',
+  fAccountType: '',
   fAccountName: '',
   fEmail: '',
   fPhone: '',
@@ -433,8 +438,27 @@ function saveForm() {
 watch([form, identity, radio, other, checks], () => saveForm(), { deep: true })
 
 // Issue #205 parity: restore from sessionStorage, then URL params override platform/username
+async function loadPlatformOptions() {
+  try {
+    const r = await fetch('/api/auth/providers')
+    if (!r.ok) return
+    const d = await r.json()
+    const list = (d && d.providers) || []
+    // 只认有 provider 的条目；保持服务端返回的展示序
+    const opts = list.filter((p) => p && p.provider).map((p) => ({ provider: p.provider, name: p.name || p.provider }))
+    if (opts.length) {
+      platformOptions.value = opts
+      // 当前值不在目录里（例如目录新增/移除）→ 落到第一个渠道，避免提交一个不存在的平台
+      if (!opts.some((p) => p.provider === form.fAccountType)) form.fAccountType = opts[0].provider
+    }
+  } catch (e) {
+    /* 目录不可用：保留兜底两项，不阻断申请 */
+  }
+}
+
 onMounted(async () => {
   await loadPacks()
+  await loadPlatformOptions()
   try {
     const raw = sessionStorage.getItem(_FORM_KEY)
     if (raw) {

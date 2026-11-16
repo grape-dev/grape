@@ -132,8 +132,6 @@
                 />
               </div>
             </div>
-            <div v-if="current === 'wechat'" class="imc__cfg-tip">{{ imt('guide_wechat_s1') }}</div>
-
             <div v-if="qr.open" class="imc__qr">
               <img v-if="qr.img" :src="qr.img" alt="wechat qr" class="imc__qr-img" />
               <div class="imc__qr-side">
@@ -223,11 +221,12 @@ const form = reactive({ app_id: '', app_secret: '' })
 // 品牌色只用于卡片强调色与图标底，不写死凭据字段——字段由 FIELDS 表驱动。
 const platforms = {
   feishu: { name: 'Feishu', color: '#3370FF' },
+  // 2026-11-16：微信提到飞书后面（更常用），顺序即左栏卡片顺序。
+  wechat: { name: 'WeChat', color: '#1AAD19' },
   wecom: { name: 'WeCom', color: '#07C160' },
   dingtalk: { name: 'DingTalk', color: '#1677FF' },
   slack: { name: 'Slack', color: '#611F69' },
   telegram: { name: 'Telegram', color: '#2AABEE' },
-  wechat: { name: 'WeChat', color: '#1AAD19' },
 }
 for (const k of Object.keys(platforms)) {
   platforms[k].bg = 'color-mix(in srgb, ' + platforms[k].color + ' 14%, transparent)'

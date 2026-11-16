@@ -1605,6 +1605,28 @@ def _any_tx():
 # 两条连接都能执行，调用方不需要（也不允许）再留兜底 SQL。
 
 _ANY_QUERIES: dict[str, str] = {
+    # D109 平台对象模型（四表归 mgmt 域）：runtime 读平台卡、写 bot 巡检状态都走本域
+    # 原语，不再各自用 ORM 直连自己的库（拆库后那是另一份空/陈旧副本）。
+    # 凭据列（bot_token_enc / client_*_enc）一律不出域。
+    "repo_platform_cards": (
+        "SELECT provider, name, dialect, host, api_base, api_auth, webhook_path, event_header, "
+        "webhook_verify, webhook_dialect, pr_head_filter, clone_auth, issue_write_form, "
+        "branch_create_form, issue_search, git_tree_family, pr_comment_endpoint, "
+        "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
+        "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "FROM grape_t_repo_platforms WHERE enabled=1 ORDER BY provider"),
+    "repo_platform_cards_all": (
+        "SELECT provider, name, dialect, host, api_base, api_auth, webhook_path, event_header, "
+        "webhook_verify, webhook_dialect, pr_head_filter, clone_auth, issue_write_form, "
+        "branch_create_form, issue_search, git_tree_family, pr_comment_endpoint, "
+        "pr_labels_via_issues, workflows_write, legacy_token_symbol, pat_create_url, "
+        "token_storage_field, webhook_token_field, bot_username, bot_token_status, "
+        "bot_checked_at, owner_fallback, download_base, user_images_base, brand_color "
+        "FROM grape_t_repo_platforms ORDER BY provider"),
+    "repo_platform_bot_status_set": (
+        "UPDATE grape_t_repo_platforms SET bot_token_status=?, bot_checked_at=?, updated_at=? "
+        "WHERE provider=?"),
     # 平台身份（external_identities 归本域）：按平台 login 取账号 id（FR-21.2）。
     # 原调用方 runtime/im/feishu_async 是「mgmt_lib 优先 + 进程库兜底 SQL」双分支，
     # 兜底那句只在 lib 不可用时执行（单库/视图期），却正是跨域表引用的来源；且三库
@@ -2298,6 +2320,44 @@ def exec_any(name: str, params: tuple = ()) -> int:
     with _any_cursor(write=True) as c:
         cur = c.execute(_any_sql(name), params)
         return int(getattr(cur, "rowcount", 0) or 0)
+
+
+_PLATFORM_CARD_COLUMNS = (
+    "provider", "name", "dialect", "host", "api_base", "api_auth", "webhook_path",
+    "event_header", "webhook_verify", "webhook_dialect", "pr_head_filter", "clone_auth",
+    "issue_write_form", "branch_create_form", "issue_search", "git_tree_family",
+    "pr_comment_endpoint", "pr_labels_via_issues", "workflows_write", "legacy_token_symbol",
+    "pat_create_url", "token_storage_field", "webhook_token_field", "bot_username",
+    "bot_token_status", "bot_checked_at", "owner_fallback", "download_base",
+    "user_images_base", "brand_color",
+)
+
+
+def repo_platform_cards(enabled_only: bool = True) -> list[dict]:
+    """D109 平台卡行（grape_t_repo_platforms 归 mgmt 域；任意拓扑）。
+
+    runtime（vcs/platform_card）与 insight 需要平台方言/端点描述时走本原语：
+    - 拆库拓扑：`read_all_any` 走 mgmt 自有 DSN（lib），读到的才是平台卡真源；
+    - 单库/测试拓扑：回落进程主库，行为与拆库前一致。
+
+    返回列见 `_PLATFORM_CARD_COLUMNS`；**凭据列不出域**（bot_token_enc / client_*_enc
+    留在 mgmt，取 token 走凭据域原语）。
+    """
+    rows = read_all_any("repo_platform_cards" if enabled_only else "repo_platform_cards_all")
+    return [dict(zip(_PLATFORM_CARD_COLUMNS, tuple(r))) for r in rows]
+
+
+def mark_repo_platform_bot_status(provider: str, token_status: str,
+                                  checked_at: str = "") -> int:
+    """把 bot 巡检状态写回平台行（真源；D110 后 bot 归平台行）。
+
+    幂等：同值重复写只更新时间戳；`checked_at` 为空取当前 UTC。
+    任意拓扑走 `exec_any`（自有 DSN 直接写 mgmt 库；单库写进程主库）。
+    """
+    from datetime import datetime, timezone
+    now = (checked_at or "").strip() or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return int(exec_any("repo_platform_bot_status_set",
+                        (str(token_status or ""), now, now, str(provider or ""))) or 0)
 
 
 def audit_recent_rows(limit: int, like: str = "") -> list[Any]:

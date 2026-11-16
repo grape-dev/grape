@@ -1,4 +1,28 @@
 {
+  "_readme": [
+    "仓库托管平台卡（真源，每平台一个文件）。加载优先级：meta.vcs_providers_config 逐键覆盖 > 本文件 > 代码 _DEFAULT_CARDS_RAW 兜底（仅目录缺失时）。",
+    "本文件只管「仓库托管」能力位（host/webhook/api/clone/能力开关）；OAuth 登录配置在 configs/oauth-providers.json，两类字段互不渗透（守卫测试锁死）。",
+    "凭据不写在这里：bot token / webhook secret 落 managed_repos 分列或 grape_t_repo_credentials 单表（契约见同目录 SCHEMA.md）。",
+    "键名写错整卡拒绝（未知键=error 级响亮，防能力静默丢失）；下划线前缀键（_readme/_fields/_note）是文档键，加载器会跳过。"
+  ],
+  "_fields": {
+    "name": "平台显示名（前端按钮、文案、错误信息都从卡派生）",
+    "dialect": "API 方言族（github=GitHub 兼容 API；gitlab=v4；gitee_v5=v5）",
+    "host": "平台主域名（clone URL / 展示 / 探活基准）",
+    "webhook_path": "本平台 webhook 接收路径（全局唯一；与 meta webhook_url 基址拼接）",
+    "event_header": "事件类型请求头名（验签与事件分派用）",
+    "api_base": "REST API 根（端点= api_base + provider 模块派生的 repos/{o}/{r}）",
+    "api_auth": "令牌传递形态：query_token=URL 参数，token_header=Authorization: Bearer，private_token=PRIVATE-TOKEN 头",
+    "webhook_verify": "验签方式：hmac=HMAC-SHA256 签名头，token_compare=明文密码比对",
+    "webhook_dialect": "webhook 载荷形态族（github_web / gitee_v5）——与 API dialect 是两个维度，必须显式声明，未声明时托管消费侧 fail-closed",
+    "pr_head_filter": "PR 列表 head 参数形态：bare_ref=裸分支名，owner_ref=owner:branch（发错形态不报错而是静默空集）",
+    "clone_auth": "clone 凭据形态：x_access_token=用户名 oauth2 + token 当密码，basic_password=用户名 + 令牌当密码，oauth2=标准 OAuth",
+    "bot_username": "该平台 bot 账号登录名（self-loop 判定 / 协作者邀请用）",
+    "user_images_base": "用户图片（头像/图标）基址",
+    "download_base": "仓库归档/文件下载基址",
+    "brand_color": "品牌色（登录按钮与平台标识）",
+    "legacy_token_symbol": "历史 token 取用函数名（兼容/棘轮标记，勿删）"
+  },
   "name": "GitCode",
   "dialect": "github",
   "host": "gitcode.com",

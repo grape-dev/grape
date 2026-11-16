@@ -355,11 +355,24 @@ class GenericVcsProvider(VCSProvider):
                     continue
                 perms = r.get("permissions") or {}
                 _owner = (r.get("owner") or {}).get("login", "") if isinstance(r.get("owner"), dict) else ""
+                # Gitee v5 的仓库对象用 namespace 表示归属（owner 可能缺）；
+                # 取不到时再按 full_name 的命名空间段兜底。此前 owner 为空会让
+                # 角色判定（owner==我的 login ⇒ admin）全部落空、界面显示"我明明
+                # 是管理员"却读成 Member（2026-11-14 实锤）。
+                if not _owner:
+                    _ns = r.get("namespace")
+                    if isinstance(_ns, dict):
+                        _owner = _ns.get("path") or _ns.get("name") or ""
+                _full = r.get("full_name") or ""
+                if not _owner and "/" in _full:
+                    _owner = _full.split("/", 1)[0]
+                if not _full and _owner and r.get("name"):
+                    _full = f"{_owner}/{r.get('name')}"
                 # D102-A: owner 兜底 || permissions.admin（两者取或）
                 _is_admin = bool(perms.get("admin")) or (
                     bool(_my_login) and _owner == _my_login)
                 out.append({
-                    "full_name": r.get("full_name") or "",
+                    "full_name": _full,
                     "owner": _owner,
                     "name": r.get("name") or "",
                     "is_admin": _is_admin,

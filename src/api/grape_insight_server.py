@@ -11,6 +11,10 @@ import sys, os
 # Issue #455：主服务要求 Python >= 3.10。
 from src.api.version_check import ensure_python_version
 ensure_python_version()
+# 进程角色默认值（2026-11-16 实弹）：表归属守卫按角色判定 owner，缺角色会把本域 DDL
+# 整批当「别家域」跳过（平台四表 / meta 因此不建，PAT 关系写不进）。入口写死默认值，
+# 自定义启动方式未设 env 时也不会静默丢表。
+os.environ.setdefault("GRAPE_PROCESS_ROLE", "insight")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 

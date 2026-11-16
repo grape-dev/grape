@@ -903,6 +903,7 @@
 </template>
 
 <script setup>
+import { providerFromRepoKey, repoKeyOf } from '../lib/repo-provider.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 
 const G = globalThis
@@ -1112,7 +1113,7 @@ function loadTasks() {
     loaded.value = true
     return
   }
-  const repoKey = repo.repoKey || 'gitcode:' + (repo.fullName || '')
+  const repoKey = repo.repoKey || repoKeyOf({ full_name: repo.fullName || '', provider: repo.provider })
   API()
     .get('/autopilot/tasks?repo_key=' + repoKey)
     .then(function (d) {
@@ -1977,8 +1978,11 @@ function showCreate(templateId) {
   // 加载分支列表（当前仓库）
   const repo = currentRepo()
   if (repo) {
-    const rk = (repo.repoKey || 'gitcode:' + repo.fullName).replace(/^(gitcode|github):/, '')
-    if (rk.split('/').length === 2) loadBranches('gitcode:' + rk, dlgBranches)
+    // 前缀必须跟随仓库实际平台；原来先剥常见前缀再硬拼 'gitcode:'，gitee/gitlab 仓会去错平台拉分支
+    const rkFull = repo.repoKey || repoKeyOf({ full_name: repo.fullName || '', provider: repo.provider })
+    const prov = providerFromRepoKey(rkFull)
+    const rk = rkFull.slice(rkFull.indexOf(':') + 1)
+    if (prov && rk.split('/').length === 2) loadBranches(prov + ':' + rk, dlgBranches)
   }
 }
 function editTask(id) {
@@ -2061,7 +2065,7 @@ function submitForm() {
   const repo = currentRepo()
   const body = {
     name: name,
-    repo_key: repo && repo.repoKey ? repo.repoKey : 'gitcode:' + (repo ? repo.fullName || '' : ''),
+    repo_key: (repo && (repo.repoKey || repoKeyOf({ full_name: repo.fullName || '', provider: repo.provider }))) || '',
     instruction: instruction,
     skill_name: selectedSkill.value,
     cron: cron.value,

@@ -16,7 +16,7 @@ import os
 
 from src.kernel.config import log, CONFIG_DIR
 
-_GBT_PATH = os.path.join(CONFIG_DIR, "global-bot-token.json")
+# D110：种子文件 configs/global-bot-token.json（兼容名 platform-bots.json 也认），路径读取时解析
 
 _OAUTH_PATH = os.path.join(CONFIG_DIR, "oauth-providers.json")
 
@@ -60,7 +60,9 @@ _OAUTH_FIELD_MAP = {
 ALL_FIELDS = _BOT_FIELDS + list(_OAUTH_FIELD_MAP.keys())
 
 def get_config_path() -> str:
-    return _GBT_PATH
+    from src.kernel.config import bot_seed_path
+
+    return bot_seed_path()
 
 def load_config() -> dict:
     """Read global-bot-token.json; return empty dict if missing or corrupt.
@@ -69,8 +71,9 @@ def load_config() -> dict:
     Runtime code reads from DB meta table via unified entry functions.
     """
     try:
-        if os.path.exists(_GBT_PATH):
-            with open(_GBT_PATH, "r", encoding="utf-8") as f:
+        _seed_path = bot_seed_path()
+        if os.path.exists(_seed_path):
+            with open(_seed_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 return data if isinstance(data, dict) else {}
     except Exception as e:
@@ -227,6 +230,9 @@ def save_config(payload: dict) -> dict:
                         set_meta_value(meta_key, _json.dumps(val))
                     else:
                         set_meta_value(meta_key, str(val) if val else "")
+        # D110：同一份 payload 同步到平台行（新真源；meta 保留为兼容期第 3 级来源）。
+        # 放在 db_lock 之外：平台行走 SQLAlchemy 会话，避免与 sqlite 线程锁叠锁。
+        _sync_platform_bot_rows(bot_payload)
         # Issue #345: 清除本实例缓存（当前实例立即生效，其他实例最多 60s TTL 后生效）
         from src.domains.mgmt.user.db import _invalidate_global_bot_cache
         _invalidate_global_bot_cache()
@@ -282,7 +288,100 @@ def save_config(payload: dict) -> dict:
         from src.domains.mgmt.auth.providers import invalidate_provider_cache
         invalidate_provider_cache()
 
+    # 3. D109：同步到平台对象表（表=运行时真源；fail-safe，不阻断旧保存路径）
+    from src.domains.platform.admin_sync import sync_from_admin_payload
+    sync_from_admin_payload(payload)
+
     return read_public_config()
+
+def platform_bot_old_token(provider: str) -> str:
+    """读平台行当前 bot token 明文（解密；无值/失败返回空串）。仅供轮换比较用。"""
+    try:
+        from sqlalchemy.orm import Session
+
+        from src.domains.mgmt.user.db import _decrypt_repo_secret
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+        with Session(get_engine()) as s:
+            enc = RepoPlatformRepo.get_bot_token_enc(s, provider)
+        return _decrypt_repo_secret(enc) if enc else ""
+    except Exception as e:
+        log.warning(f"platform_bot_old_token({provider}) failed: {e}")
+        return ""
+
+
+def trigger_platform_bot_swap(provider: str, old_token: str, new_token: str) -> None:
+    """D110 R1：平台 bot token 轮换必须传播到已托管仓库。
+
+    path A 托管把全局 bot token 同时写成仓库 webhook 验签 token（routes/repos.py:976/986），
+    不同步刷这批仓库 → 所有老仓库 webhook 立刻 403。异步 + 分布式锁（同 save_config 口径）。
+    """
+    if not (old_token and new_token) or old_token == new_token:
+        return
+    try:
+        import threading
+
+        threading.Thread(target=_global_bot_token_swap_wrapper,
+                         args=(provider, old_token, new_token), daemon=True).start()
+        log.info(f"config_store: triggered platform bot swap for {provider}")
+    except Exception as e:
+        log.warning(f"trigger_platform_bot_swap({provider}) failed: {e}")
+
+
+def _sync_platform_bot_rows(payload: dict) -> None:
+    """D110：把 admin 配置里的 bot 字段写进 grape_t_repo_platforms（一平台一个 bot）。
+
+    gitcode_api_token → (gitcode, token)；github_bot_token → (github, token)；
+    github_bot_username → (github, username)。bot_usernames 池已退役（一平台一 bot），忽略。
+    平台行不存在时跳过（行由配置导入建立），不在这里凭空建行。
+    """
+    _map = {
+        "gitcode_api_token": ("gitcode", "token"),
+        "github_bot_token": ("github", "token"),
+        "github_bot_username": ("github", "username"),
+    }
+    # provider → 承载 bot token 的扁平配置字段（轮换传播时反查，不再写 provider 字面量比较）
+    _token_field_by_provider = {p: f for f, (p, k) in _map.items() if k == "token"}
+    wanted: dict[str, dict] = {}
+    old_tokens: dict[str, str] = {}
+    for field, (provider, kind) in _map.items():
+        if field not in payload:
+            continue
+        val = payload.get(field)
+        if kind == "token":
+            if not val:
+                continue
+            try:
+                from src.domains.mgmt.auth.credential_crypto import encrypt
+                old_tokens[provider] = platform_bot_old_token(provider)
+                wanted.setdefault(provider, {})["token_enc"] = encrypt(str(val))
+            except Exception as e:
+                log.warning(f"_sync_platform_bot_rows: encrypt failed for {provider}: {e}")
+                continue
+        else:
+            wanted.setdefault(provider, {})["username"] = str(val or "")
+    if not wanted:
+        return
+    try:
+        from sqlalchemy.orm import Session
+
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import RepoPlatformRepo
+
+        with Session(get_engine()) as s:
+            for provider, fields in wanted.items():
+                RepoPlatformRepo.set_bot(s, provider, **fields)
+            s.commit()
+        log.info(f"admin config_store: platform bot rows synced {sorted(wanted)}")
+        # D110 R1：token 轮换传播（path A 仓库的 webhook 验签 token 同步刷新）
+        for provider, fields in wanted.items():
+            if "token_enc" not in fields:
+                continue
+            _new_plain = str(payload.get(_token_field_by_provider.get(provider, "")) or "")
+            trigger_platform_bot_swap(provider, old_tokens.get(provider, ""), _new_plain)
+    except Exception as e:
+        log.warning(f"_sync_platform_bot_rows failed: {e}")
 
 def _save_oauth_providers(oauth_payload: dict):
     """把 ConfigBody 扁平 OAuth 字段写入 oauth-providers.json（嵌套结构）。

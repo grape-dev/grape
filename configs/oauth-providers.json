@@ -1,0 +1,132 @@
+{
+  "gitcode": {
+    "name": "GitCode",
+    "type": "oauth2",
+    "auth_url": "https://gitcode.com/oauth/authorize",
+    "token_url": "https://gitcode.com/oauth/token",
+    "user_url": "https://gitcode.com/api/v5/user",
+    "scope": "all",
+    "id_field": "id",
+    "login_field": "login",
+    "name_field": "nickname",
+    "pkce_enabled": true,
+    "brand_color": "#e7330f",
+    "accept_header": "application/json",
+    "emails_endpoint": "https://gitcode.com/user/emails"
+  },
+  "github": {
+    "name": "GitHub",
+    "type": "oauth2",
+    "auth_url": "https://github.com/login/oauth/authorize",
+    "token_url": "https://github.com/login/oauth/access_token",
+    "user_url": "https://api.github.com/user",
+    "scope": "read:user user:email",
+    "id_field": "id",
+    "login_field": "login",
+    "name_field": "name",
+    "pkce_enabled": true,
+    "brand_color": "#24292f",
+    "accept_header": "application/vnd.github+json",
+    "emails_endpoint": "https://api.github.com/user/emails",
+    "pat_create_url": "https://github.com/settings/tokens"
+  },
+  "gitee": {
+    "name": "Gitee",
+    "type": "oauth2",
+    "auth_url": "https://gitee.com/oauth/authorize",
+    "token_url": "https://gitee.com/oauth/token",
+    "user_url": "https://gitee.com/api/v5/user",
+    "scope": "user_info",
+    "id_field": "id",
+    "login_field": "login",
+    "name_field": "name",
+    "pkce_enabled": false,
+    "brand_color": "#c71d23",
+    "accept_header": "application/json",
+    "emails_endpoint": "",
+    "pat_create_url": "https://gitee.com/profile/personal_access_tokens"
+  },
+  "huawei": {
+    "name": "Huawei",
+    "type": "oauth2",
+    "auth_url": "https://oauth-login.cloud.huawei.com/oauth2/v3/authorize",
+    "token_url": "https://oauth-login.cloud.huawei.com/oauth2/v3/token",
+    "user_url": "https://oauth-api.cloud.huawei.com/rest.php?nsp_fmt=JSON&nsp_svc=com.huawei.developer.openapi.user.info.get&access_token={access_token}",
+    "scope": "openid",
+    "id_field": "openID",
+    "login_field": "openID",
+    "name_field": "nickName",
+    "avatar_field": "headPictureURL",
+    "pkce_enabled": false,
+    "brand_color": "#cf0a2c",
+    "accept_header": "application/json",
+    "emails_endpoint": ""
+  },
+  "_fields": {
+    "type": {
+      "what": "协议模式：决定登录流程与用户信息取法。",
+      "values": "oauth2 | oidc | saml",
+      "note": "⚠ 只有 oidc 支持 id_token claims 兜底；oauth2 拿不到用户字段就是登录失败。"
+    },
+    "auth_url": {
+      "what": "授权页地址（用户点击后跳转的入口）。",
+      "values": "https://…/authorize",
+      "note": "三件套之一，缺任一整卡都会被拒绝加载。"
+    },
+    "token_url": {
+      "what": "用 code 换 token 的端点。",
+      "values": "https://…/token",
+      "note": "三件套之一；端点错会表现为换 token 失败而非登录页报错。"
+    },
+    "user_url": {
+      "what": "拉取用户信息的端点。",
+      "values": "https://…/user（可含 {access_token} 占位）",
+      "note": "⚠ 华为等平台需把 token 放查询参数，用 {access_token} 占位。"
+    },
+    "emails_endpoint": {
+      "what": "单独拉邮箱的端点（可选）。",
+      "values": "https://…/emails 或空",
+      "note": "空=该渠道不提供邮箱补抓，注册时以主登录名走。"
+    },
+    "scope": {
+      "what": "登录时申请的权限范围（最小权限原则）。",
+      "values": "空格分隔，如 user_info / repo",
+      "note": "⚠ ①改这里会影响该渠道的**所有**关联；②Gitee 只能取官方合法集，且请求范围要与用户上次授权一致，否则每次弹授权页；③范围不足会导致仓库操作返回 SCOPE_INSUFFICIENT。"
+    },
+    "pkce_enabled": {
+      "what": "OAuth PKCE 校验开关。",
+      "values": "true | false",
+      "note": "⚠ Gitee 必须 false，否则每次登录都会重新弹授权页。"
+    },
+    "id_field": {
+      "what": "用户信息里唯一 id 的字段名。",
+      "values": "如 id / openID",
+      "note": "⚠ 华为只有 openID，没有 login 名。"
+    },
+    "login_field": {
+      "what": "登录名取哪个字段。",
+      "values": "如 login / preferred_username / openID",
+      "note": "取不到会回落到外部 id，展示名会变成一串编号。"
+    },
+    "name_field": {
+      "what": "显示名取哪个字段。",
+      "values": "如 name / nickname",
+      "note": "空则该渠道显示名回落登录名。"
+    },
+    "avatar_field": {
+      "what": "头像 URL 取哪个字段。",
+      "values": "如 avatar_url",
+      "note": "空=按平台默认规则派生。"
+    },
+    "redirect_uri": {
+      "what": "回调地址。",
+      "values": "https://…/api/auth/callback/<provider> 或空",
+      "note": "空=由 server_base_url 自动派生；手填错会报 redirect_uri_mismatch。"
+    },
+    "accept_header": {
+      "what": "请求用户信息时的 Accept 头。",
+      "values": "如 application/vnd.github+json",
+      "note": "GitHub 不设会拿到旧版字段结构。"
+    }
+  }
+}

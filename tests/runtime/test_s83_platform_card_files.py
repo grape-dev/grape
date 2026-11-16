@@ -41,10 +41,18 @@ def test_s83_builtin_files_load_parity():
     assert cards["gitee"].branch_create_form == "form"
 
 
-def test_s83_precedence_meta_over_file():
+def test_s83_precedence_meta_over_file(monkeypatch):
     """meta（admin 覆盖）> 文件：meta 里的 gitee 卡覆盖文件默认。
+
     语义：meta 覆盖=整卡替换（admin 面经 S70 全字段持久化，天然完整）；
-    部分覆盖（字段级 merge）语义不提供——D59 登记。"""
+    部分覆盖（字段级 merge）语义不提供——D59 登记。
+
+    固定「D109 表未就绪」态：表就绪时读路径是 table-first，meta 覆盖不再参与，
+    本用例测的是回落语义，不能依赖跑测试的环境里表里有没有行。
+    """
+    from src.domains.platform import importer
+
+    monkeypatch.setattr(importer, "is_table_backed", lambda: False, raising=False)
     with db_lock:
         db.cursor().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('vcs_providers_config', ?)",
@@ -82,7 +90,11 @@ def test_s83_unknown_key_rejects_card_loudly(tmp_path):
 
 
 def test_s83_file_keys_subset_of_dataclass():
-    """守卫：repo 内全部平台配置文件的键 ⊆ PlatformCard dataclass 字段。"""
+    """守卫：repo 内全部平台配置文件的键 ⊆ PlatformCard dataclass 字段。
+
+    例外：下划线前缀键是文档键（JSON 无注释，用 _readme/_fields/_note 承载说明），
+    加载器会剥离，故不参与"未知键"判定。
+    """
     import dataclasses as _dc
     valid = {f.name for f in __import__("dataclasses").fields(PlatformCard)}
     configs_dir = pc._CONFIGS_DIR
@@ -90,12 +102,18 @@ def test_s83_file_keys_subset_of_dataclass():
         if not fn.endswith(".json"):
             continue
         raw = json.load(open(os.path.join(configs_dir, fn), encoding="utf-8"))
-        unknown = set(raw) - valid
+        unknown = {k for k in raw if not str(k).startswith("_")} - valid
         assert not unknown, f"{fn} 未知键: {unknown}"
 
 
 def test_s83_fallback_when_dir_missing(tmp_path, monkeypatch):
-    """目录缺失 → 回退 _DEFAULT_CARDS_RAW（代码兜底语义保持）。"""
+    """目录缺失 → 回退 _DEFAULT_CARDS_RAW（代码兜底语义保持）。
+
+    同上：固定表未就绪态，否则 D109 表一旦有行，读路径 table-first 会盖掉代码兜底。
+    """
+    from src.domains.platform import importer
+
+    monkeypatch.setattr(importer, "is_table_backed", lambda: False, raising=False)
     monkeypatch.setattr(pc, "_CONFIGS_DIR", str(tmp_path / "nonexistent"))
     pc._load_cards()
     assert {"gitcode", "github", "gitlab"} <= set(pc._CACHE)

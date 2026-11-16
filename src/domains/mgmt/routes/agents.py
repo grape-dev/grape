@@ -518,7 +518,9 @@ def clean_agent_session(name: str, owner: str, repo: str,
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
     from src.kernel.repo_key import to_repo_key
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    from src.domains.mgmt.user.db import resolve_managed_repo_key
+    # 前缀按 managed_repos 解析（裸 to_repo_key 恒 gitcode:，gitee/github 托管仓会落到错行）
+    repo_key = resolve_managed_repo_key(owner, repo) or to_repo_key(f"{owner}/{repo}")
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
     from src.kernel.session_manager import db, db_lock
@@ -555,7 +557,9 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
     from src.kernel.repo_key import to_repo_key
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    from src.domains.mgmt.user.db import resolve_managed_repo_key
+    # 前缀按 managed_repos 解析（裸 to_repo_key 恒 gitcode:，gitee/github 托管仓会落到错行）
+    repo_key = resolve_managed_repo_key(owner, repo) or to_repo_key(f"{owner}/{repo}")
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 

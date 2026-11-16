@@ -108,7 +108,6 @@
               :key="at"
               :class="['skill-agent-item', { ac: activeAgent === i }]"
               href="javascript:void(0)"
-              :style="agentItemStyle(i)"
               @click="switchAgent(i)"
             >
               <span v-if="agentMetaOf(at).icon" class="sk__agent-ic">{{
@@ -842,11 +841,6 @@ function setPageSize(v) {
   loadSkills()
 }
 
-function agentItemStyle(on) {
-  return on
-    ? 'padding:10px 14px;font-size:12px;font-weight:600;color:var(--a);cursor:pointer;border-radius:8px;transition:all .15s;display:flex;align-items:center;gap:4px;white-space:nowrap;background:rgba(49,104,224,0.08)'
-    : 'padding:10px 14px;font-size:12px;font-weight:500;color:var(--t2);cursor:pointer;border-radius:8px;transition:all .15s;display:flex;align-items:center;gap:4px;white-space:nowrap;background:transparent'
-}
 function tagStyle(on) {
   return on
     ? 'padding:5px 12px;font-size:11px;color:var(--a);border:1px solid var(--a);background:rgba(49,104,224,0.06);cursor:pointer;border-radius:8px;transition:all .15s;white-space:nowrap;text-decoration:none'

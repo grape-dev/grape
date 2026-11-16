@@ -159,6 +159,95 @@ log.addFilter(_RequestIdFilter())
 # ====== 目录常量 ======
 SKILLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".grape", "skills"))
 CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "configs"))
+
+
+# D110：平台 bot 的初始化种子文件。沿用原名 global-bot-token.json（它承载的就是
+# "全局 bot 凭据"这件事，改名对运维无收益）；platform-bots.json 只是本项目某个
+# 中间版本用过的名字，保留兼容读，一个发布周期后可删。
+BOT_SEED_FILE = "global-bot-token.json"
+LEGACY_BOT_SEED_FILE = "platform-bots.json"
+
+
+def bot_seed_path() -> str:
+    """返回实际生效的种子文件路径：主名存在优先，其次兼容名，都没有则返回主名路径。"""
+    import os as _os
+
+    main_path = _os.path.join(CONFIG_DIR, BOT_SEED_FILE)
+    if _os.path.exists(main_path):
+        return main_path
+    legacy = _os.path.join(CONFIG_DIR, LEGACY_BOT_SEED_FILE)
+    if _os.path.exists(legacy):
+        return legacy
+    return main_path
+
+def read_bot_seed_file() -> dict[str, dict]:
+    """读平台 bot 种子文件并归一化成 {provider: {"username": str, "token": str}}。
+
+    兼容两种写法（后者字段优先，便于平滑升级）：
+    1) 旧扁平键：`gitcode_api_token` / `github_bot_token` / `github_bot_username` /
+       `<provider>_bot_token` / `<provider>_bot_username`；
+    2) 新数组：
+         "platform_bot": [
+             {"provider": "gitee", "bot_name": "gitee-bot", "bot_token": "..."}
+         ]
+       别名：provider ← platform_type | platform；bot_name ← username；
+       bot_token ← token | bit_token（历史笔误）。
+    文件缺失/损坏返回 {}（调用方按"无种子"处理）。
+    """
+    import json as _json
+    import os as _os
+
+    path = bot_seed_path()
+    if not _os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = _json.load(fh) or {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    out: dict[str, dict] = {}
+
+    def _put(provider: str, key: str, value) -> None:
+        # 归一化键：provider 一律小写去空白；空值视为"未配置"，不覆盖已有值
+        provider = str(provider or "").strip().lower()
+        if not provider or not value:
+            return
+        out.setdefault(provider, {})[key] = str(value)
+
+    # 1) 旧扁平键
+    for key, value in data.items():
+        if not value or str(key).startswith("_"):
+            continue
+        if key == "gitcode_api_token":
+            _put("gitcode", "token", value)
+            continue
+        if not isinstance(value, str):
+            continue
+        for suffix, field_name in (("_bot_token", "token"), ("_bot_username", "username")):
+            if key.endswith(suffix):
+                _put(key[: -len(suffix)], field_name, value)
+                break
+
+    # 2) 新数组：platform_bot（或同义 platform_bots）——同字段优先级高于上面的旧扁平键；
+    #    也接受 {provider: {...}} 的映射写法，统一转成列表处理
+    rows = data.get("platform_bot") or data.get("platform_bots") or []
+    if isinstance(rows, dict):
+        rows = [dict(v, provider=k) for k, v in rows.items()]
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            provider = (row.get("provider") or row.get("platform_type")
+                        or row.get("platform") or row.get("name") or "")
+            username = row.get("bot_name") or row.get("username") or ""
+            token = row.get("bot_token") or row.get("token") or row.get("bit_token") or ""
+            _put(provider, "username", username)
+            _put(provider, "token", token)
+    return out
+
 EXAMPLE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "examples"))
 
 

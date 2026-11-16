@@ -17,34 +17,22 @@ SHELL = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "fronten
 # 页面 → {模块: 冻结版本}（2026-11-13 缓存版本回填/统一后快照）
 FROZEN = {
     "index.html": {
-        # 共享运行时模块
-        "tokens.css": "1", "app.css": "4", "auth.css": "1",
-        "all-views.css": "3",
-        "api.js": "35", "app.js": "266",
-        "deeplink.js": "1",
-        "auto-recovery.js": "2", "oauth-buttons.js": "2",
-        "host-status.js": "1", "worker-name.js": "2", "pwd-blocklist.js": "3",
-        "faro.js": "7",
-        # Vue 视图 chunk
-        "dashboard-view.js": "71", "pipeline.js": "54", "agent-view.js": "50",
-        "event-view.js": "57", "chat-view.js": "59", "im-channel.js": "50",
-        "repos-view.js": "55", "issues-view.js": "61", "account-view.js": "54",
-        "scene-market.js": "58", "skills-view.js": "53", "knowledge-view.js": "49",
-        "runtimes-view.js": "56", "observability-view.js": "55",
-        "organizations.js": "50", "feedback-dialog.js": "50", "my-feedback.js": "50",
-        "my-feedback-detail.js": "50", "autopilot-view.js": "52",
+        "tokens.css": "1", "app.css": "6", "all-views.css": "10", "auth.css": "1", ".min.css": "1", ".min.js": "1",
+        "faro.js": "7", "api.js": "35", "pwd-blocklist.js": "3", "worker-name.js": "2", "dashboard-view.js": "73", "pipeline.js": "54",
+        "agent-view.js": "50", "event-view.js": "57", "chat-view.js": "59", "im-channel.js": "52", "repos-view.js": "56", "issues-view.js": "61",
+        "account-view.js": "55", "scene-market.js": "58", "skills-view.js": "54", "knowledge-view.js": "49", "runtimes-view.js": "56", "observability-view.js": "55",
+        "organizations.js": "50", "feedback-dialog.js": "50", "my-feedback.js": "50", "my-feedback-detail.js": "50", "autopilot-view.js": "53", "deeplink.js": "1",
+        "platform-icons.js": "2", "app.js": "269", "login-view.js": "2", "onboarding-view.js": "7", "auto-recovery.js": "2", "oauth-buttons.js": "2",
+        "host-status.js": "1",
     },
     "admin.html": {
-        "tokens.css": "1", "pwd-blocklist.js": "3", "admin-view.js": "11",
-        "admin-view.css": "1",
+        "admin-view.css": "2", "tokens.css": "1", "pwd-blocklist.js": "3", "admin-view.js": "46",
     },
     "register.html": {
-        "app.css": "4", "auth.css": "1", "api.js": "35",
-        "pwd-blocklist.js": "3", "auth.js": "7",
+        "app.css": "6", "auth.css": "1", "api.js": "35", "pwd-blocklist.js": "3", "auth.js": "8", "register-view.js": "1",
     },
     "forgot.html": {
-        "app.css": "4", "auth.css": "1", "api.js": "35",
-        "pwd-blocklist.js": "3", "auth.js": "7",
+        "app.css": "6", "auth.css": "1", "api.js": "35", "pwd-blocklist.js": "3", "auth.js": "8", "forgot-view.js": "1",
     },
 }
 
@@ -94,9 +82,21 @@ def test_page_module_cache_versions_match_frozen_map():
     )
 
 
+# 2026-11-14 两张卡片各自迁成 Vue view：两个页面各有自己的 chunk，
+# 同构性只对「共享模块」成立（vue chunk 按页面唯一，不进分叉比对）。
+PAGE_OWN_CHUNKS = {"register.html": {"register-view.js"}, "forgot.html": {"forgot-view.js"}}
+
+
 def test_register_and_forgot_agree():
-    """两封邮件页是同构复制品，版本必须一致（复审 N-1 的跨页分叉）。"""
+    """两封邮件页是同构复制品，共享模块版本必须一致（复审 N-1 的跨页分叉）。"""
     reg, fgt = _scan("register.html"), _scan("forgot.html")
+    own = PAGE_OWN_CHUNKS["register.html"] | PAGE_OWN_CHUNKS["forgot.html"]
     diff = {m: (reg.get(m), fgt.get(m)) for m in set(reg) | set(fgt)
-            if reg.get(m) != fgt.get(m) and m not in VENDOR}
+            if reg.get(m) != fgt.get(m) and m not in VENDOR and m not in own}
     assert not diff, f"register/forgot 版本分叉: {diff}"
+    # 各自的专属 chunk 必须真实注册（走 Vue 后页面不再是同构复制品）
+    for page, chunks in PAGE_OWN_CHUNKS.items():
+        other = "forgot.html" if page == "register.html" else "register.html"
+        for chunk in chunks:
+            assert chunk in _scan(page), f"{page} 缺少专属 view chunk {chunk}"
+            assert chunk not in _scan(other), f"{chunk} 不应出现在 {other} 上"

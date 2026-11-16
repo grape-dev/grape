@@ -85,7 +85,11 @@ def test_s1_u1_unbind_confirm_false_returns_409_with_warehouses(app_and_client, 
 
 
 def test_s1_u1_sql_is_standard_parameterized_like(app_and_client, monkeypatch):
-    """方言锁定：发出的 SQL 必须是纯参数化 LIKE（无 ESCAPE 反斜杠）。"""
+    """方言锁定：前缀过滤必须是纯参数化的前缀**相等**（无 ESCAPE 反斜杠、无 LIKE 通配）。
+
+    P2-6（2026-11-14）：原实现 `LIKE 'p:%'` 的 `_` 是 LIKE 单字符通配符，provider 名
+    允许下划线时会误删同形平台的行 → 统一改为 `substr(col, 1, ?) = ?`。
+    """
     app, client = app_and_client
     db, _ = _mock_unbind_db(monkeypatch, path_a_rows=[("gitcode:x/y",)])
     client.delete("/api/auth/bind/gitcode?confirm=false")
@@ -93,10 +97,12 @@ def test_s1_u1_sql_is_standard_parameterized_like(app_and_client, monkeypatch):
     assert joins, db.cursor().queries
     for sql in joins:
         assert "ESCAPE" not in sql and "\\" not in sql, sql
-        assert "LIKE ?" in sql, sql
-    # 参数是常量前缀，无转义包装
-    like_params = [p for sql, p in db.cursor().queries if "LIKE ?" in sql]
-    assert ("gitcode:%",) in like_params or any(p[-1] == "gitcode:%" for p in like_params if p)
+        assert "LIKE ?" not in sql, f"前缀过滤又回到 LIKE（通配符风险）: {sql}"
+        assert "substr(m.repo_key, 1, ?) = ?" in sql, sql
+    # 参数是「长度 + 常量前缀」两个绑定值，无转义包装
+    prefix_params = [p for sql, p in db.cursor().queries if "substr(m.repo_key" in sql]
+    assert prefix_params, "未记录前缀过滤的参数"
+    assert any(isinstance(p, tuple) and p[-1] == "gitcode:" for p in prefix_params), prefix_params
 
 
 # ---------------------------------------------------------------- S1-U2
@@ -112,9 +118,9 @@ def test_s1_u2_unbind_confirm_true_full_flow(app_and_client, monkeypatch):
     assert body["partial"] is False
     assert calls.get("deleted") == [(33, "gitcode")]  # 绑定软删
     assert calls.get("audit"), "审计缺失"           # 审计记录
-    # user_repos 清理已执行且是标准 LIKE
+    # user_repos 清理已执行且是标准前缀相等（P2-6：不用 LIKE 通配）
     dels = [sql for sql, _ in db.cursor().queries if sql.startswith("DELETE FROM user_repos")]
-    assert dels and "ESCAPE" not in dels[0] and "LIKE ?" in dels[0]
+    assert dels and "ESCAPE" not in dels[0] and "substr(repo_key, 1, ?) = ?" in dels[0], dels
     # um 列清理已执行
     assert any("UPDATE unified_user_mapping" in sql for sql, _ in db.cursor().queries)
 

@@ -24,6 +24,9 @@ export default defineConfig({
         const dstAssets = assetsDir
         fs.mkdirSync(path.join(dstAssets, 'viewcss'), { recursive: true })
         const viewCssMap = {
+          'login-view': /^[lL]ogin-[vV]iew-.*\.css$/,
+          'register-view': /^[rR]egister-[vV]iew-.*\.css$/,
+          'forgot-view': /^[fF]orgot-[vV]iew-.*\.css$/,
           'my-feedback': /^my-feedback-.*\.css$/,
           'my-feedback-detail': /^my-feedback-detail-.*\.css$/,
           'im-channel': /^im-channel-.*\.css$/,
@@ -34,6 +37,11 @@ export default defineConfig({
           'skills-view': /^skills-[vV]iew-.*\.css$/,
           'chat-view': /^chat-[vV]iew-.*\.css$/,
           'account-view': /^account-[vV]iew-.*\.css$/,
+          'onboarding-view': /^[oO]nboarding-[vV]iew-.*\.css$/,
+          // 共享组件（跨两个 entry 使用 → Vite 拆成独立 CSS chunk，必须给稳定名让 entry 引）
+          'bind-dialog': /^BindDialog-.*\.css$/,
+          'pat-dialog': /^PatDialog-.*\.css$/,
+          'cred-repo-row': /^CredRepoRow-.*\.css$/,
           'event-view': /^event-[vV]iew-.*\.css$/,
           'issues-view': /^issues-[vV]iew-.*\.css$/,
           'autopilot-view': /^autopilot-[vV]iew-.*\.css$/,
@@ -108,6 +116,9 @@ export default defineConfig({
     rollupOptions: {
       input: {
         index: fileURLToPath(new URL('./index.html', import.meta.url)),
+        'login-view': fileURLToPath(new URL('./src/views/entries/login-view.js', import.meta.url)),
+        'register-view': fileURLToPath(new URL('./src/views/entries/register-view.js', import.meta.url)),
+        'forgot-view': fileURLToPath(new URL('./src/views/entries/forgot-view.js', import.meta.url)),
         'my-feedback': fileURLToPath(new URL('./src/views/entries/my-feedback.js', import.meta.url)),
         'my-feedback-detail': fileURLToPath(
           new URL('./src/views/entries/my-feedback-detail.js', import.meta.url)
@@ -120,6 +131,7 @@ export default defineConfig({
         'skills-view': fileURLToPath(new URL('./src/views/entries/skills-view.js', import.meta.url)),
         'chat-view': fileURLToPath(new URL('./src/views/entries/chat-view.js', import.meta.url)),
         'account-view': fileURLToPath(new URL('./src/views/entries/account-view.js', import.meta.url)),
+        'onboarding-view': fileURLToPath(new URL('./src/views/entries/onboarding-view.js', import.meta.url)),
         'event-view': fileURLToPath(new URL('./src/views/entries/event-view.js', import.meta.url)),
         'issues-view': fileURLToPath(new URL('./src/views/entries/issues-view.js', import.meta.url)),
         'autopilot-view': fileURLToPath(new URL('./src/views/entries/autopilot-view.js', import.meta.url)),

@@ -97,3 +97,21 @@
 |---|------|------|------|
 | UC71 | 用户可控字段（title/summary/display_name/description/message）进 innerHTML | 必经 escHtml 系 helper；裸拼新增即红（ratchet 基线 7 条豁免有据） | test_xss_escape_guard |
 | UC71b | escape helper 单源 | 9 个本地 helper 全部代理到 window.escHtml（含 ' →&#39;）；skills/observability 漏单引号缺口补齐 | test_xss_escape_guard + node --check |
+
+## D109 域归属 / 升级自愈场景用例（2026-11-16，UC-D109-45~48）
+
+> 来源：现网反馈「配了 PAT 平台关系不出现」的复盘；设计分片 d109 §20，需求 FR-33。
+
+| # | 场景 | 触发/前置 | 预期 | 用例 |
+|---|------|-----------|------|------|
+| UC-D109-45 | runtime 进程跑 D109 建表迁移 | 三库拓扑，本进程角色 runtime | 四表全部 `[DDL_SKIP] owner=mgmt`，只由 mgmt 进程建；rbac 列补列只在 insight | test_platform_object_domain_boundary + 实弹日志 |
+| UC-D109-46 | runtime 读平台卡 / 写 bot 巡检状态 | runtime 自有库无平台表 | 读走 mgmt public 具名查询拿到真源行；写落 mgmt 库，runtime 库仍无该表；凭据列不出域 | test_platform_object_domain_boundary + 三实例实弹 |
+| UC-D109-47 | 台账盖章但四表缺失（升级坑） | 存量库副本，`202611170030` 已盖章、实表无 | 自愈迁移 `202611170041` 下次启动补建四表；补建前 PAT 关系写入失败、补建后成功 | test_platform_migration_self_heal + test_d109_pat_relation_scenario |
+| UC-D109-48 | 部署前自检拦住「会丢关系」的部署 | 缺角色 env / 台账空 / 台账与注册表撞号 / owner 表缺失 | 预检 FAIL（退出码 1）并打印处置提示，禁止启动；健康库 PASS | test_deploy_preflight |
+| UC-D109-49 | 清理全部 PAT / 平台侧吊销后回到工作区 | 账号只剩失效凭据、无缓存 | 200 + `_no_vcs_binding`，hint 指向「重新配置 PAT」（不是"重新登录授权"）；`?provider=` 定向请求仍 401 且 action=credential_invalid | test_repos_member_reauth_degrade |
+| UC-D109-50 | 清 PAT 后关系行残留 active（来源全无） | 关系表有行、身份与 PAT 凭据都没了 | 关系读口自愈撤销（revoked_at 写值），返回 providers=[]；前端不再判「已接入」 | test_dangling_relation_is_pruned_when_no_source_left |
+| UC-D109-51 | 进入工作区 / 我的项目 / 项目模板 | 关系为空、或清 PAT 后快照过期 | 入口前刷新关系 → 无关系直接渲染绑定引导页；有关系才进大厅/项目页 | test_workspace_entry_relation_gate |
+| UC-D109-52 | 身份行在、token 解不出（清理 PAT 后的老密钥账号） | external_identities 有行、access_token 空、refresh 空、无 PAT | `/auth/platform-links` providers=[]、has_any=false、needs_reauth=[p]；`/repos/member` 200+`_no_vcs_binding`（不 401）；前端引导页提示重新授权 | test_dead_identity_not_counted |
+
+**用户可见链路**：PAT 保存 → `grape_t_user_repo_platform_link` 行 → `/auth/platform-links`
+返回 provider（source=table）→ 仓库页不进引导页；删 PAT 只撤销该平台。

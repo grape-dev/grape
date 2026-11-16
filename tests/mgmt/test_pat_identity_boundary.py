@@ -182,7 +182,8 @@ def client_with_pat():
     orig = (user_db.get_user_repos, user_db.get_user_repos_synced_at, user_db.save_user_repos)
     user_db.get_user_repos = lambda uid: []
     user_db.get_user_repos_synced_at = lambda uid: None
-    user_db.save_user_repos = lambda uid, repos: (saved.update({"repos": list(repos)}) or True)
+    # save_user_repos 自 2026-11-14 起带 providers=（部分刷新，只替换指定平台的行）
+    user_db.save_user_repos = lambda uid, repos, **kw: (saved.update({"repos": list(repos)}) or True)
 
     user = {"id": a["id"], "username": "patb_t3", "auth_type": "jwt", "org_id": 0}
     app.dependency_overrides[get_current_user] = lambda: user

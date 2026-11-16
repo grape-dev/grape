@@ -27,6 +27,19 @@ FROZEN = {
     "Pipeline.vue": 5, "ReposView.vue": 18, "RuntimesView.vue": 19,
     "SceneCard.vue": 4, "SceneMarket.vue": 86, "SettingsView.vue": 0,
     "SkillsView.vue": 91, "TemplatesView.vue": 33, "BetaApply.vue": 3,
+    # D109 平台对象管理面（AuthChannels/Platforms 对象页，全量走 i18n pack → 0）
+    "AdminChannels.vue": 0, "AdminPlatforms.vue": 0,
+    # 共享 UI 组件（AG* 等）：文案全走 i18n → 0 基线
+    "AGButton.vue": 0, "AGCard.vue": 0, "AGInput.vue": 0, "AGSelect.vue": 0, "AGHelp.vue": 0,
+    # Vue 登录页（2026-11-14 登录卡片迁入 Vue）：19 处 = t() 的 zh 兜底文案，
+    # 与 index.html 迁移前同款（data-i18n 键仍在，兜底串仅首帧/缺包时可见）
+    "LoginView.vue": 19,
+    # 注册/忘记密码卡片迁 Vue（2026-11-14）：值 = t() 的 zh 兜底串，与迁移前 shell 页同款
+    "RegisterView.vue": 40, "ForgotView.vue": 23,
+    # 引导页整页 Vue 化（2026-11-14）：卡面/文案全走 i18n pack → 0
+    "OnboardingView.vue": 0,
+    # 共享弹窗/行组件（aria 组件化，2026-11-14）：文案全走 app.account.* → 0
+    "BindDialog.vue": 0, "PatDialog.vue": 0, "CredRepoRow.vue": 0,
 }
 
 
@@ -41,7 +54,10 @@ def _count(path: Path) -> int:
 
 
 def _scan() -> dict:
-    files = sorted((APP_SRC / "views").glob("*.vue")) + sorted((APP_SRC / "pages").glob("*.vue"))
+    # 扫描面：views / pages / components（组件里的用户可见文案同样不得硬编码中文）
+    files = (sorted((APP_SRC / "views").glob("*.vue"))
+             + sorted((APP_SRC / "pages").glob("*.vue"))
+             + sorted((APP_SRC / "components").glob("*.vue")))
     assert files, f"扫描面为空：{APP_SRC} 下没有 .vue 页面（目录迁移后守卫会静默失效）"
     return {f.name: _count(f) for f in files}
 

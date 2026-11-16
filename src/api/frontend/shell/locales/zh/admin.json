@@ -6,10 +6,13 @@
     "user_management": "用户管理",
     "user_list": "用户列表",
     "whitelist": "注册白名单",
+    "login_whitelist": "登录白名单",
     "change_password": "修改密码",
     "logout": "退出登录",
     "auth_channels": "OAuth 登录渠道",
-    "vcs_platforms": "仓库平台"
+    "vcs_platforms": "代码托管平台",
+    "channels": "登录渠道",
+    "platforms": "代码托管平台"
   },
   "login": {
     "subtitle": "系统管理 · 配置中心",
@@ -69,7 +72,7 @@
     "devstage_hint": "AI DevSpace 默认规格（3c6g/ARM）；留空保持现值，env GRAPE_DEVSTAGE_* 可覆盖",
     "effective_value": "生效值 {{v}}（env 覆盖）",
     "runtime_effective": "当前生效值",
-    "webhook_url_hint": "部署级配置：本服务公网回调地址（所有仓库平台共用），非平台差异",
+    "webhook_url_hint": "公网基址（不含平台路径）：回调地址由平台卡追加 /webhook/&lt;platform&gt;；此处填的 /webhook/xxx 会被忽略",
     "webhook_url_ph": "本服务对外 webhook 回调地址（部署级，所有平台共用）"
   },
   "token_health": {
@@ -176,7 +179,7 @@
   },
   "login_whitelist": {
     "title": "OAuth 登录白名单",
-    "desc": "GitCode/GitHub 登录白名单",
+    "desc": "全部 OAuth 登录渠道",
     "toggle": "白名单开关",
     "toggle_on": "已开启",
     "toggle_off": "已关闭",
@@ -209,7 +212,8 @@
     "col_provider": "平台",
     "col_username": "用户名",
     "legacy_tag": "存量列式",
-    "empty_warn": "开关已开启但白名单为空：当前拒绝所有 OAuth 登录，请先添加条目（管理台密码登录不受影响）"
+    "empty_warn": "开关已开启但白名单为空：当前拒绝所有 OAuth 登录，请先添加条目（管理台密码登录不受影响）",
+    "no_providers": "当前没有在册的 OAuth 登录渠道，请先去「登录渠道」菜单启用渠道"
   },
   "error": {
     "LOGIN_RATE_LIMITED": "登录尝试过于频繁，请稍后再试",
@@ -262,8 +266,8 @@
     "save_failed": "保存失败"
   },
   "platforms": {
-    "title": "仓库平台",
-    "subtitle": "仓库平台卡 · 方言与能力位",
+    "title": "代码托管平台",
+    "subtitle": "代码托管平台卡 · 方言与能力位",
     "col_name": "名称",
     "col_dialect": "方言",
     "col_bot_token": "bot token",
@@ -276,7 +280,7 @@
     "card_title": "平台卡字段",
     "bot_set": "已配置（留空=不修改）",
     "saved": "已保存（缓存已失效，即时生效）",
-    "load_failed": "加载仓库平台失败",
+    "load_failed": "加载代码托管平台失败",
     "save_failed": "保存失败",
     "webhook_hint": "webhook 验签 token 只写不读，留空=不修改；按 {provider}_webhook_token 落库",
     "col_health": "token 健康"
@@ -346,5 +350,271 @@
     "global_bot_meta_key": "全局 bot token 的 meta 存储键",
     "global_bot_status_meta_key": "全局 bot token 过期状态的 meta 存储键"
   },
-  "adv_fields": "高级字段"
+  "adv_fields": "高级字段",
+  "field": {
+    "type": {
+      "what": "协议模式：决定登录流程与用户信息取法。",
+      "values": "oauth2 | oidc | saml",
+      "note": "⚠ 只有 oidc 支持 id_token claims 兜底；oauth2 拿不到用户字段就是登录失败。"
+    },
+    "auth_url": {
+      "what": "授权页地址（用户点击后跳转的入口）。",
+      "values": "https://…/authorize",
+      "note": "三件套之一，缺任一整卡都会被拒绝加载。"
+    },
+    "token_url": {
+      "what": "用 code 换 token 的端点。",
+      "values": "https://…/token",
+      "note": "三件套之一；端点错会表现为换 token 失败而非登录页报错。"
+    },
+    "user_url": {
+      "what": "拉取用户信息的端点。",
+      "values": "https://…/user（可含 {access_token} 占位）",
+      "note": "⚠ 华为等平台需把 token 放查询参数，用 {access_token} 占位。"
+    },
+    "emails_endpoint": {
+      "what": "单独拉邮箱的端点（可选）。",
+      "values": "https://…/emails 或空",
+      "note": "空=该渠道不提供邮箱补抓，注册时以主登录名走。"
+    },
+    "scope": {
+      "what": "登录时申请的权限范围（最小权限原则）。",
+      "values": "空格分隔，如 user_info / repo",
+      "note": "⚠ ①改这里会影响该渠道的**所有**关联；②Gitee 只能取官方合法集，且请求范围要与用户上次授权一致，否则每次弹授权页；③范围不足会导致仓库操作返回 SCOPE_INSUFFICIENT。"
+    },
+    "pkce_enabled": {
+      "what": "OAuth PKCE 校验开关。",
+      "values": "true | false",
+      "note": "⚠ Gitee 必须 false，否则每次登录都会重新弹授权页。"
+    },
+    "id_field": {
+      "what": "用户信息里唯一 id 的字段名。",
+      "values": "如 id / openID",
+      "note": "⚠ 华为只有 openID，没有 login 名。"
+    },
+    "login_field": {
+      "what": "登录名取哪个字段。",
+      "values": "如 login / preferred_username / openID",
+      "note": "取不到会回落到外部 id，展示名会变成一串编号。"
+    },
+    "name_field": {
+      "what": "显示名取哪个字段。",
+      "values": "如 name / nickname",
+      "note": "空则该渠道显示名回落登录名。"
+    },
+    "avatar_field": {
+      "what": "头像 URL 取哪个字段。",
+      "values": "如 avatar_url",
+      "note": "空=按平台默认规则派生。"
+    },
+    "redirect_uri": {
+      "what": "回调地址。",
+      "values": "https://…/api/auth/callback/<provider> 或空",
+      "note": "空=由 server_base_url 自动派生；手填错会报 redirect_uri_mismatch。"
+    },
+    "accept_header": {
+      "what": "请求用户信息时的 Accept 头。",
+      "values": "如 application/vnd.github+json",
+      "note": "GitHub 不设会拿到旧版字段结构。"
+    },
+    "repo_links": {
+      "what": "该渠道允许驱动的代码托管平台（只读展示，由仓库侧配置）。",
+      "values": "[{\"repo_provider\":\"gitee\"}]",
+      "note": "配了这一对=该登录渠道的令牌可接入该平台（登录即建用户↔平台关系）；没有档位字段，删掉配对即不再可接入。"
+    },
+    "bot_username": {
+      "what": "配置声明字段（1:1）。",
+      "values": "平台登录名或空",
+      "note": "⚠ 该平台唯一的 bot 账号名；凭据在平台行的 bot_token_enc（加密）。"
+    },
+    "enabled": {
+      "what": "该对象是否启用（DB 权威）。",
+      "values": "true | false",
+      "note": "⚠ 配置文件不会覆盖它；导入永不改该列。"
+    },
+    "dialect": {
+      "what": "API 方言家族。",
+      "values": "github | gitlab",
+      "note": "⚠ gitcode/gitee/github 都是 github —— 看起来不同不代表需要新方言。"
+    },
+    "host": {
+      "what": "网页域名。",
+      "values": "如 gitee.com",
+      "note": "不要在这里填 API 基址。"
+    },
+    "api_base": {
+      "what": "API 基址。",
+      "values": "如 https://gitee.com/api/v5",
+      "note": "不要在这里填网页域名。"
+    },
+    "api_auth": {
+      "what": "token 承载位置。",
+      "values": "query_token | token_header | private_token",
+      "note": "选错表现为 401，且日志无线索。"
+    },
+    "webhook_path": {
+      "what": "webhook 接收路径。",
+      "values": "/webhook/<provider>",
+      "note": "必须与平台侧的 webhook 配置一致。"
+    },
+    "event_header": {
+      "what": "事件头名称。",
+      "values": "如 X-GitHub-Event",
+      "note": "用于分派 webhook 处理器。"
+    },
+    "webhook_verify": {
+      "what": "webhook 校验方式。",
+      "values": "hmac | token_compare",
+      "note": "⚠ hmac=验签头；token_compare=比对 URL token，选错会 401。"
+    },
+    "webhook_dialect": {
+      "what": "webhook 载荷形态。",
+      "values": "github_web | gitee_v5",
+      "note": "⚠ 必须显式声明，未声明时托管侧 fail-closed。"
+    },
+    "clone_auth": {
+      "what": "克隆/推送凭据形态。",
+      "values": "basic_password | x_access_token | oauth2",
+      "note": "影响 git remote URL 构造。"
+    },
+    "issue_write_form": {
+      "what": "建 Issue 端点形态。",
+      "values": "repo_path | owner_param",
+      "note": "⚠ Gitee 必须 owner_param，否则 404。"
+    },
+    "branch_create_form": {
+      "what": "建分支请求形态。",
+      "values": "form | refs_sha",
+      "note": "各平台请求体不同。"
+    },
+    "pr_head_filter": {
+      "what": "PR 列表 head 参数形态。",
+      "values": "owner_ref | bare_ref",
+      "note": "⚠ 形态发错是静默空列表，不报错。"
+    },
+    "issue_search": {
+      "what": "是否支持 issue 搜索。",
+      "values": "true | false",
+      "note": "驱动 issue 选择器。"
+    },
+    "git_tree_family": {
+      "what": "代码树 API 家族。",
+      "values": "v5 | github_api",
+      "note": "平台专属端点。"
+    },
+    "client_id": {
+      "what": "OAuth 应用 client_id（写入加密列，只回布尔）。",
+      "values": "平台应用页复制",
+      "note": "⚠ 留空＝保持现值；保存后不可再读回明文。"
+    },
+    "client_secret": {
+      "what": "OAuth 应用 client_secret（写入加密列，只回布尔）。",
+      "values": "平台应用页复制",
+      "note": "⚠ 留空＝保持现值；轮换时先填新值再保存。"
+    },
+    "enabled_channel": {
+      "what": "该登录渠道是否允许登录（DB 权威）。",
+      "values": "true | false",
+      "note": "⚠ 关闭后该渠道的登录入口返回 403 CHANNEL_DISABLED（已登录用户不受影响）；配置文件不覆盖它，导入不改该列。"
+    },
+    "enabled_platform": {
+      "what": "该平台是否在用户面显示（DB 权威）。",
+      "values": "true | false",
+      "note": "⚠ 关闭后用户面完全看不到该平台（平台目录、仓库列表、显式请求 403），内网/脚本与托管仍可用；配置文件不覆盖它，导入不改该列。"
+    }
+  },
+  "page": {
+    "channels_title": "登录渠道",
+    "platforms_title": "代码托管平台",
+    "channels_hint": "定义字段（端点/scope/字段映射）来自配置文件，这里只读；本页只写凭据与启用开关。",
+    "platforms_hint": "方言/端点/能力位来自平台卡与 repo-credentials.json（只读）；本页只写启用开关与 bot 账号。",
+    "readonly_tag": "只读 · 来自配置",
+    "enabled": "启用",
+    "save_creds": "保存凭据",
+    "save": "保存",
+    "configured_keep": "已配置（留空不改）",
+    "not_configured": "未配置",
+    "loading": "加载中…",
+    "load_failed": "加载失败",
+    "save_failed": "保存失败",
+    "toggle_failed": "开关失败",
+    "requires_scope": "所需 scope",
+    "no_scope_check": "（不校验）",
+    "bot_support": "bot",
+    "bot_supported": "支持",
+    "bot_unsupported": "不支持",
+    "bot_accounts": "bot",
+    "bot_default": "默认",
+    "bot_normal": "普通",
+    "bot_none": "（未配置 bot 账号）",
+    "empty_val": "（空）",
+    "need_one": "client_id 与 client_secret 至少填一项",
+    "client_id": "client_id",
+    "client_secret": "client_secret",
+    "page_help_title": "这一页能改什么",
+    "no_doc": "暂无说明（可在 i18n 或配置文件 _fields 补充）",
+    "bot_no": "不支持",
+    "unset": "未配置",
+    "channels_note": "⚠ 定义字段请改 configs/oauth-providers.json 后重启或重新导入。",
+    "bot_yes": "支持",
+    "scope_none": "（不校验）",
+    "switch": "启用",
+    "pill_on": "启用",
+    "platforms_note": "⚠ 定义字段改动请改配置文件并重新导入；enabled 归数据库，配置文件不会覆盖它。",
+    "bots_note": "⚠ 响应永不含 token 值；仓库级绑定优先于这里的默认账号。",
+    "help_title": "这一页能改什么",
+    "pill_off": "停用",
+    "keep": "已配置（留空不改）",
+    "scope_need": "所需 scope",
+    "empty": "（空）",
+    "bots_what": "平台上的操作身份与其 token（加密存储）。is_default 每平台至多一个。",
+    "bots": "bot 账号",
+    "bot": "bot",
+    "values_label": "取值：",
+    "health_healthy": "健康",
+    "health_degraded": "降级",
+    "health_unhealthy": "不健康",
+    "bot_username_ph": "bot 用户名",
+    "bot_token_ph": "bot token（加密入库）",
+    "bot_save_token": "用上面的 token 轮换",
+    "bot_need_username": "请填 bot 用户名",
+    "bot_add_failed": "添加 bot 失败",
+    "bot_save_failed": "保存 token 失败",
+    "bot_del_failed": "删除 bot 失败",
+    "back": "返回列表",
+    "col_name": "名称",
+    "col_provider": "标识",
+    "col_enabled": "状态",
+    "col_health": "bot token 健康",
+    "col_drive": "可接入的代码托管平台",
+    "col_bots": "bot 账号数",
+    "channels_empty": "还没有在册的登录渠道（配置导入后自动出现）",
+    "platforms_empty": "还没有在册的代码托管平台（配置导入后自动出现）",
+    "domain_note_channel": "登录渠道卡：OAuth 登录/绑定凭据，与代码托管平台卡解耦",
+    "domain_note_platform": "托管平台卡：仓库托管与代理行为，与登录渠道卡解耦",
+    "channels_list_sub": "登录渠道负责 OAuth 登录/绑定；点一行查看凭据与其可接入的代码托管平台。",
+    "platforms_list_sub": "代码托管平台负责仓库托管与代理行为；点一行查看定义字段、bot 账号与 token 健康。",
+    "sec_state": "状态",
+    "sec_credential": "凭据",
+    "sec_definition": "定义字段（只读 · 来自配置）",
+    "keep_hint": "留空 = 保持现有值不变",
+    "self_domain": "同域：该渠道本身就是这个代码托管平台，天然可接入，无需配对。",
+    "bot_username": "bot 用户名",
+    "bot_token": "bot token（加密入库）",
+    "bot_save": "保存",
+    "bot_clear": "清除 token",
+    "bots_hint": "一个平台一个 bot；token 留空=不改。无 bot 时托管动作回落用户 PAT",
+    "bots_none_short": "bot 未配置（回落用户 PAT）",
+    "bots_all_inactive": "bot 全部不可用（回落用户 PAT）",
+    "disable_confirm": "关闭 {provider} 后，它在用户面将完全不可见：{repos} 个仓库、{users} 位用户、{managed} 个托管仓库不再展示（{pats} 位用户的平台凭据仍保留）。确认关闭？",
+    "disable_confirm_title": "关闭平台确认",
+    "disable_confirm_btn": "确认关闭",
+    "cancel": "取消"
+  },
+  "provider_name": {
+    "huawei": "华为",
+    "gitcode": "GitCode",
+    "github": "GitHub",
+    "gitee": "Gitee"
+  }
 }

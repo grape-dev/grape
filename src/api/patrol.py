@@ -184,6 +184,13 @@ _RUNNING_ZOMBIE_HOURS = 2     # running 无信号僵尸窗（D12 判例定值）
 
 _QUEUED_ZOMBIE_HOURS = 24     # queued 引擎在线观察兜底窗（D12 判例定值）
 
+_DISPATCH_STALL_META = "patrol:dispatch_stall_seconds"
+
+# 引擎心跳间隔 15s（src/domains/runtime/engine/service.py:431 注释口径）。
+# 静默窗下限 = 2×心跳：短于此的「静默」还在心跳/认领正常抖动范围内，报出来纯噪声。
+_ENGINE_HEARTBEAT_SECONDS = 15
+_DISPATCH_STALL_MIN_SECONDS = 2 * _ENGINE_HEARTBEAT_SECONDS
+
 # 引擎心跳新鲜度不设 patrol 副本：_engine_unreachable 内单源引用
 # src.domains.runtime.engine.engine_select._RUNTIME_STALE_SECONDS（平台既有 RUNTIME_STALE_SECONDS 配置）。
 _LEADER_TTL_MULTIPLIER = 2  # 心跳窗 = 2×周期（集群时钟漂移余量，设计 §八）
@@ -988,6 +995,135 @@ def detect_zombies(known: set = None) -> list[dict]:
             log.warning(f"[patrol] zombie-queued judge failed task={tid}: {e}")
     return findings
 
+# Issue #2327：A2A 事件派发卡死巡检（两形态 + 可区分 reason）。
+_DISPATCH_STALL_REASON_NO_RUNTIME = "no_runtime_unclaimed"
+_DISPATCH_STALL_REASON_QUEUE_TIMEOUT = "queue_timeout_unclaimed"
+_DISPATCH_STALL_REASON_DISPATCH_FAILED = "dispatch_failed"
+
+_QUEUE_TIMEOUT_MARKERS = ("排队超时", "未被认领", "queue_timeout", "unclaimed")
+_QUEUE_TIMEOUT_CODES = ("a2a_queue_dispatch_failed", "a2a_queue_dispatch_exception")
+_DISPATCH_FAILED_CODES = ("dispatch_failed", "a2a_dispatch_failed", "a2a_dispatch_exception")
+
+
+def dispatch_stall_seconds() -> int:
+    """派发静默阈值（meta 可调；默认复用平台既有 queued 老化窗）。
+
+    默认值单一来源：runtime 域 `patrol_dispatch_stall_threshold_seconds()`
+    → `engine/service._STALE_QUEUED_THRESHOLD`（env `HEALTH_STALE_QUEUED_THRESHOLD`，
+    默认 120s，Issue #134 已定义「queued 超龄即视为卡住」的口径）。
+    下限 = 2×引擎心跳（15s），短于此仍在心跳/认领正常抖动内。
+    """
+    return _meta_int(_DISPATCH_STALL_META,
+                     _rt_patrol.patrol_dispatch_stall_threshold_seconds(),
+                     minimum=_DISPATCH_STALL_MIN_SECONDS)
+
+
+def _dispatch_stall_reason(status: str, result: str, payload_raw: str):
+    """归类失败事件 reason（返回 None = 非本规则覆盖的失败）。"""
+    payload = {}
+    try:
+        payload = json.loads(payload_raw or "{}") if payload_raw else {}
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+    diag = payload.get("_fail_diag") if isinstance(payload.get("_fail_diag"), dict) else {}
+    code = str(diag.get("code") or "")
+    text = f"{result or ''}"
+    if code in _DISPATCH_FAILED_CODES or "[dispatch_failed]" in text or "[a2a_dispatch_failed]" in text:
+        return _DISPATCH_STALL_REASON_DISPATCH_FAILED
+    if code in _QUEUE_TIMEOUT_CODES or any(m in text for m in _QUEUE_TIMEOUT_MARKERS):
+        return _DISPATCH_STALL_REASON_QUEUE_TIMEOUT
+    return None
+
+
+def detect_dispatch_stalled(lookback_cutoff_iso: str = "", known: set = None) -> list[dict]:
+    """Issue #2327：检测 A2A 事件派发卡死（三种 reason 可区分）。
+
+    - 形态一（静默）：`status=running AND runtime 空 AND 无任何 agent_tasks 行`
+      超静默窗 → reason=no_runtime_unclaimed。判据必须是「没有任务行」——
+      广播池任务的 runtime 本来就由认领方回填，排队期间恒空（含引擎满槽的
+      正常容量等待），只看 runtime 空会把正常排队判成故障。
+    - 形态二（排队超时）：`status=failed` 且失败语义=未被认领/排队超时
+      → reason=queue_timeout_unclaimed；
+    - 兜底失败：handoff 有界重派后标记 `dispatch_failed` → reason=dispatch_failed。
+
+    取数走 runtime 域具名查询（`_rt_patrol.read_all_any`，三库拓扑安全）；
+    时间窗在 Python 侧用 `_parse_dt` 比较——events.created_at 是空格格式且
+    sqlite=UTC / mysql=CST，SQL 字符串比 cutoff 会漏扫或错判。audit 模式
+    （cutoff 传空串）按全历史扫描。
+    只读检测（零终态写）：所有 finding 由 run_patrol_once 统一落库去重。
+    """
+    findings = []
+    if known is None:
+        known = _known_task_ids()
+    threshold = dispatch_stall_seconds()
+    cutoff_dt = _parse_dt(lookback_cutoff_iso) if lookback_cutoff_iso else None
+    rows = []
+    try:
+        rows += _rt_patrol.read_all_any("patrol_a2a_unclaimed_rows")
+        rows += _rt_patrol.read_all_any("patrol_a2a_failed_dispatch_rows")
+    except Exception as e:
+        # 不静默：巡检少一路数据必须留痕（三库拓扑/缺表/限流都走这里）
+        log.warning(f"[patrol] dispatch-stalled scan failed: {e}")
+        return findings
+    for (seq, repo_key, issue_id, agent_type, status, runtime, result,
+         payload_raw, created_at, started_at, completed_at) in rows:
+        try:
+            _tid = f"event:{seq}"
+            if ("dispatch_stalled", _tid) in known:
+                continue
+            if cutoff_dt is not None:
+                _created_dt = _parse_dt((created_at or started_at) or "")
+                if _created_dt is not None and _created_dt < cutoff_dt:
+                    continue
+            if status == "running":
+                if str(runtime or "").strip():
+                    continue
+                age_min = _minutes_since(_parse_dt((created_at or started_at) or ""))
+                if age_min * 60 < threshold:
+                    continue
+                reason = _DISPATCH_STALL_REASON_NO_RUNTIME
+                detail = {
+                    "reason": reason,
+                    "status": "running",
+                    "runtime": "",
+                    "has_agent_task": False,
+                    "agent_type": agent_type or "",
+                    "age_minutes": round(max(age_min, 0), 1),
+                }
+                suggestion = ("A2A 事件 running 但 runtime 为空且无 agent_tasks 行（未派发成功）："
+                              "核对派发是否经 run_a2a_dispatch 选引擎入队；必要时人工 redispatch")
+            else:
+                reason = _dispatch_stall_reason(status, result, payload_raw)
+                if not reason:
+                    continue
+                age_min = _minutes_since(_parse_dt((completed_at or created_at) or ""))
+                detail = {
+                    "reason": reason,
+                    "status": "failed",
+                    "agent_type": agent_type or "",
+                    "age_minutes": round(max(age_min, 0), 1),
+                }
+                if reason == _DISPATCH_STALL_REASON_QUEUE_TIMEOUT:
+                    suggestion = ("A2A 事件排队超时未被认领（如 900s 硬窗口）："
+                                  "检查引擎绑定/健康与认领链路，人工 redispatch 兜底")
+                else:
+                    suggestion = ("跨流水线 A2A 派发失败（dispatch_failed）："
+                                  "查看事件 result 诊断，修复引擎可用性后人工重派")
+            findings.append({
+                "kind": "dispatch_stalled",
+                "task_id": _tid,
+                "event_seq": int(seq or 0),
+                "repo_key": repo_key or "",
+                "issue_id": issue_id or "",
+                "detail": json.dumps(detail, ensure_ascii=False),
+                "suggestion": suggestion,
+            })
+        except Exception as e:
+            log.warning(f"[patrol] dispatch-stalled judge failed seq={seq}: {e}")
+    return findings
+
 def derive_stalled_issues(broken: list[dict]) -> list[dict]:
     by_issue: dict[tuple, list[dict]] = {}
     for f in broken:
@@ -1075,13 +1211,14 @@ def _run_patrol_once_inner(mode: str) -> dict:
     known = _known_task_ids()   # S51/R22：轮内一次拉取，双检测共享引用（原两检测各自全表拉同一集合）
     broken = detect_broken_chains(cutoff, known)
     zombies = detect_zombies(known)
-    stalled = derive_stalled_issues(broken)
+    dispatch_stalled = detect_dispatch_stalled(cutoff, known)   # Issue #2327
+    stalled = derive_stalled_issues(broken) + dispatch_stalled
     inserted = insert_findings_batch(broken + zombies + stalled)   # S48/R20-A：批量攒批+单块单 commit
     purged = cleanup_terminal_findings()   # R11/D21：终态行 TTL 随轮执行（0=关闭）
     duration_ms = int((time.time() - t0) * 1000)
     log.info(f"[patrol] scan done: broken={len(broken)} zombie={len(zombies)} "
-             f"stalled={len(stalled)} inserted={inserted} purged={purged} "
-             f"duration={duration_ms}ms")
+             f"stalled={len(stalled)} dispatch_stalled={len(dispatch_stalled)} "
+             f"inserted={inserted} purged={purged} duration={duration_ms}ms")
     # S40/R15：慢扫描告警（F 项落地——检测+报告零危害口径）：duration 超阈值
     # 即告警不熔断（阈值拍太紧=告警噪音，太松=无感；30s=约 60× 当前实测上界，
     # 命中即说明量级变化需复核索引/短路健康度）。

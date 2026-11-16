@@ -139,7 +139,7 @@
                   forkModal.t.name || forkModal.t.id
                 }}</span>
                 <span class="tg tg-d tmpl-platform-tag">{{
-                  forkModal.t.source_platform === 'github' ? 'GitHub' : 'GitCode'
+                  platformName(forkModal.t.source_platform)
                 }}</span>
               </div>
               <div style="font-size: 12px; color: var(--t3); margin-top: 4px">
@@ -245,7 +245,7 @@
             <input v-model="modal.repoName" class="tv-repo-input" />
             <select v-if="bindings.length > 1" v-model="modal.provider" class="tv-provider">
               <option v-for="b in bindings" :key="b" :value="b">
-                {{ b === 'gitcode' ? 'GitCode' : b === 'github' ? 'GitHub' : b }}
+                {{ platformName(b) }}
               </option>
             </select>
           </div>
@@ -286,6 +286,7 @@
 // Batch 14 (templates): legacy templates.js gallery — rendered inside the ReposView lobby shell
 // (templates is a sub-tab of the repos lobby, one component so one vite chunk keeps the contract simple).
 import { computed, onMounted, reactive, ref } from 'vue'
+import { platformChoices, repoKeyOf } from '../lib/repo-provider.js'
 
 const G = globalThis
 const emit = defineEmits(['create'])
@@ -408,10 +409,9 @@ function toggleFav(id) {
   }
 }
 function platformLabel(x) {
+  // 模板来源平台名走平台目录（含 gitee/gitlab/未来平台），不再二分
   const p = x.source_platform || ''
-  if (p === 'github') return 'GitHub'
-  if (p === 'gitcode') return 'GitCode'
-  return ''
+  return (typeof window.platformLabel === 'function' && window.platformLabel(p)) || p || ''
 }
 function fmtStars(n) {
   return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : n
@@ -517,9 +517,9 @@ function tplUrl(x) {
   let u = x.html_url || ''
   if (!u && x.source_repo) {
     u =
-      x.source_platform === 'github'
-        ? 'https://github.com/' + x.source_repo
-        : 'https://gitcode.com/' + x.source_repo
+      'https://' +
+      ((typeof window.platformHost === 'function' && window.platformHost(x.source_platform)) || 'gitcode.com') +
+      '/' + x.source_repo
   } else if (!u && x.source === 'local') {
     u = 'https://gitcode.com/grape-dev/grape-template/tree/main/' + (x.id || '')
   }
@@ -529,14 +529,19 @@ function openUrl(u) {
   window.open(u, '_blank')
 }
 
-const bindings = computed(() => {
-  try {
-    const u = JSON.parse(localStorage.getItem('user') || '{}')
-    return u.bindings || []
-  } catch (e) {
-    return []
-  }
-})
+// 可一键创建的平台：不能只看 localStorage.user.bindings（那只有 OAuth 身份行，
+// 纯 PAT 平台永不出现 → 多仓库权限的用户在创建页看不到平台选择；2026-11-14 实锤）。
+// 口径 = 服务端 /auth/platform-links（关系 ∪ PAT）∪ 已加载仓库前缀。
+const linkProviders = ref([])
+const repos = ref([])
+const bindings = computed(() =>
+  platformChoices(
+    linkProviders.value,
+    repos.value || [],
+    (k) => (typeof window.platformLabel === 'function' ? window.platformLabel(k) : k)
+  ).map((p) => p.key)
+)
+const platformName = (k) => (typeof window.platformLabel === 'function' ? window.platformLabel(k) : k)
 
 // ── create modal ──
 const modal = reactive({
@@ -671,7 +676,7 @@ function doCreate() {
             )
           }
           const parts = (r.full_name || '').split('/')
-          const rk = r.repo_key || (r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name
+          const rk = repoKeyOf(r)
           if (G.app._forceSyncRepos) G.app._forceSyncRepos()
           setTimeout(() => {
             G.window.selectRepo(r.full_name, parts[0], parts[1], rk)
@@ -740,7 +745,7 @@ function forkOne() {
         G.app.showToast(msg)
       }
       const parts = (r.full_name || '').split('/')
-      const rk = r.repo_key || (r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name
+      const rk = repoKeyOf(r)
       if (G.app._forceSyncRepos) G.app._forceSyncRepos()
       setTimeout(() => {
         G.window.selectRepo(r.full_name, parts[0], parts[1], rk)
@@ -773,6 +778,13 @@ function forkOne() {
 }
 
 onMounted(() => {
+  // 平台选择的数据源（两条都是轻量接口：platform-links 读关系表，repos/member 命中缓存）
+  G.API.get('/auth/platform-links')
+    .then((d) => { linkProviders.value = (d && d.providers) || [] })
+    .catch(() => {})
+  G.API.get('/repos/member')
+    .then((d) => { repos.value = (d && d.repos) || [] })
+    .catch(() => {})
   G.API.get('/project-templates')
     .then((data) => {
       rawCats.value = data.categories || []

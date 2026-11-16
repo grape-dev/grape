@@ -1,0 +1,16 @@
+{
+  "_readme": "渠道↔仓库平台：只配**跨名**配对（oauth 渠道 → 它可驱动的其它仓库平台）。同域不用配——渠道自己就是仓库平台时天然可驱动（登录即建本平台关系），配 (c→c) 属无意义数据，导入期告警忽略、管理面 422 拒收（2026-11-14 用户裁定）。配了跨名对 ⇒ 该渠道令牌可用于该平台仓库操作、登录即建该平台关系；没配 ⇒ 不驱动。判据只有配对，无 relation 档位 / drivers / scope。",
+  "_fields": {
+    "oauth_provider": {
+      "what": "登录渠道（oauth-providers.json 里的 provider 名）。",
+      "values": "如 gitcode / github / gitee / huawei",
+      "note": "⚠ 指向未声明的渠道 = 配置错误，导入时响亮记录且不写库。"
+    },
+    "repo_provider": {
+      "what": "被该渠道驱动的仓库平台（platforms/ 下的 provider 名）。",
+      "values": "如 gitcode / gitee / github / gitlab",
+      "note": "⚠ 指向不存在的平台 = 配置错误，该渠道整批关系拒绝（防幽灵关系）。"
+    }
+  },
+  "links": []
+}
