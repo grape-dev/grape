@@ -71,7 +71,7 @@ assertContains('debounced preview request', src, 'setTimeout(requestServerPrevie
 assertContains('local fallback retained', src, 'engSelectorPreview(vis, selTags, engineModal.agentType)');
 
 // 7. 静态资源版本号 bump（Vue chunk 走 viewjs 入口）
-assertContains('dashboard cache bumped', html, 'dashboard-view.js?v=66');
+assertContains('dashboard cache bumped', html, 'dashboard-view.js?v=73');  // 棘轮对齐 FROZEN：index.html bump 时同步（QA 复核 F2：硬编码 v=66 已过期）
 
 // 8. 未命中列表：复用「指定引擎实例」列表排布（scope 分组/无复选框/行尾不命中原因）
 assertContains('miss grouped by scope order', src, "['user', 'repo', 'global', 'local']");

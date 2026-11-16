@@ -18,7 +18,7 @@ codearts 的 proxy-fetch 模块每次 fetch 调 getProxyConfig() 读 HTTP_PROXY 
 - 审计日志路径 /var/log/grape/sandbox-audit.jsonl 可读
 
 运行方式：
-    cd /home/yangaiwu/grape
+    cd /home/<user>/grape
     PYTHONPATH=. .venv/bin/python -m pytest tests/test_codearts_bwrap_smoke.py -v --tb=short
     # 或直接跑：
     PYTHONPATH=. .venv/bin/python tests/test_codearts_bwrap_smoke.py

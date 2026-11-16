@@ -62,43 +62,43 @@ jobs:
       - name: Engine uid migration tests (issue #646)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/atomic/test_issue_646_engine_uid.py -v
+        run: python -m pytest tests/api/test_issue_646_engine_uid.py -v
       - name: Session engine uid dual-read tests (issue #868)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/atomic/test_issue_868_session_engine_uid.py -v
+        run: python -m pytest tests/api/test_issue_868_session_engine_uid.py -v
       - name: Frontend engine uid consumption tests (issue #868 scope revision)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/atomic/test_issue_868_frontend_uid.py -v
+        run: python -m pytest tests/api/test_issue_868_frontend_uid.py -v
       - name: Engine uid rename-follow anchor guard tests (issue #868 cross-warning)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/atomic/test_issue_868_engine_uid_rename_guard.py -v
+        run: python -m pytest tests/api/test_issue_868_engine_uid_rename_guard.py -v
       - name: Engine uid seed id-to-uid upgrade guard tests (issue #868 seed upgrade)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/atomic/test_issue_868_seed_uid_upgrade.py -v
+        run: python -m pytest tests/api/test_issue_868_seed_uid_upgrade.py -v
       - name: claim-by-uid v2 endpoint tests (issue #1011)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/atomic/test_issue_1011_claim_v2.py -v
+        run: python -m pytest tests/api/test_issue_1011_claim_v2.py -v
       - name: engine_uid rederive backfill + report backfill migration tests (issue #1011)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/atomic/test_issue_1011_migrations.py -v
+        run: python -m pytest tests/api/test_issue_1011_migrations.py -v
       - name: autopilot engine binding uid sibling-field tests (issue #1011)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/atomic/test_issue_1011_autopilot_uid.py -v
+        run: python -m pytest tests/api/test_issue_1011_autopilot_uid.py -v
       - name: worker v2-first/v1-fallback 404 semantics tests (issue #1011)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/atomic/test_issue_1011_worker_v2.py -v
+        run: python -m pytest tests/api/test_issue_1011_worker_v2.py -v
       - name: full dispatch-chain integration tests (issue #1011 acceptance #17)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/atomic/test_issue_1011_integration.py -v
+        run: python -m pytest tests/api/test_issue_1011_integration.py -v
       - name: Frontend source-assertion tests (issue #473)
         run: node tests/js/test_issue_473_range_filter.js
       - name: IM adapter tests (issue #1613)

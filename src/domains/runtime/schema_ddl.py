@@ -317,6 +317,7 @@ CREATE TABLE IF NOT EXISTS runtime_credentials (
     owner_id     TEXT DEFAULT '',           -- 仓库 scope 时存 repo 全名(如 owner/repo);个人/全局为 ''
     owner_name   TEXT DEFAULT '',           -- 归属用户 user_name(生成凭据的当前登录用户)
     repo_key     TEXT DEFAULT NULL,         -- 关联项目 repo_key（scope=user 时存）
+    credential_uid VARCHAR(36) DEFAULT NULL,-- Issue #646 凭据稳定键(UUIDv4,一次性终身不变;与迁移 202611080011 _ensure_column 同形,新库免迁移即带)
     status       TEXT DEFAULT 'active',     -- active / revoked
     last_seen_at TEXT DEFAULT NULL,
     last_ip      TEXT DEFAULT '',           -- 最近注册/心跳来源 IP(展示用,不入唯一键)
