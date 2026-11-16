@@ -485,6 +485,7 @@ const DEFAULTS = {
   a2a_redo_unknown: '未知返回',
   redispatch_toast_success: '已重新派发',
   redispatch_toast_failed: '派发失败：{msg}',
+  redispatch_token_stale: '重派已发出，但任务凭据未能刷新：重跑时无法调用 grape CLI（git-repo / issues / a2a 等接口），请重建任务后再试',
   local_retry_toast_success: '已开始本机重试',
   local_retry_toast_failed: '本机重试失败：{msg}',
   prompt_expand_hint: '展开查看接收上下文',
@@ -1358,9 +1359,15 @@ const redispatch = reactive({ open: false, seq: 0 })
 function doRedispatch() {
   redispatch.open = false
   G.API.post('/events/' + redispatch.seq + '/redispatch')
-    .then(function () {
-      G.app.showToast(t('redispatch_toast_success'))
-      G.app.nav('event', redispatch.seq)
+    .then(function (d) {
+      // Issue #2508: token_reissued=false means the task credential was not
+      // refreshed, so the rerun cannot call the grape CLI at all.
+      if (d && d.token_reissued === false) {
+        G.app.showToast(t('redispatch_token_stale'))
+      } else {
+        G.app.showToast(t('redispatch_toast_success'))
+      }
+      G.app.nav('event', (d && d.event_seq) ? d.event_seq : redispatch.seq)
     })
     .catch(function (e) {
       G.app.showToast(

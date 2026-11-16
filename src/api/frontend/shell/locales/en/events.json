@@ -64,6 +64,7 @@
   "redispatch_cancel": "Cancel",
   "redispatch_confirm": "Confirm Dispatch",
   "redispatch_toast_success": "Redispatched, waiting for worker to re-execute",
+  "redispatch_token_stale": "Redispatched, but the task credential was not refreshed: the rerun cannot call the grape CLI (git-repo / issues / a2a). Rebuild the task and retry.",
   "redispatch_toast_failed": "Redispatch failed: {{msg}}",
   "log_title_realtime": "📜 Runtime Logs",
   "log_title_inline": "📜 Execution Logs",

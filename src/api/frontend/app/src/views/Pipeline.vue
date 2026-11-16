@@ -418,7 +418,20 @@ function statusText(i) {
   const sc = nodeStatus(i)
   if (sc === 2) return t('pipeline.status_done')
   if (sc === 1) return t('pipeline.status_in_progress')
-  if (sc === 3) return t('pipeline.status_failed')
+  if (sc === 3) {
+    // Issue #2432: name the node that failed (no failure reason shown)
+    const st = (displayPipe.value.stages || [])[i] || {}
+    const ev = st.latest_event || {}
+    const name =
+      st.failed_node_name ||
+      ev.failed_node_name ||
+      st.name ||
+      st.tag ||
+      st.id ||
+      displayPipe.value.failed_node_name ||
+      ''
+    return name ? t('pipeline.status_failed') + ' · ' + name : t('pipeline.status_failed')
+  }
   if (sc === 4) return t('pipeline.status_cancelled') || '已取消'
   if (sc === 5) return t('pipeline.status_skipped') || '已跳过'
   return t('pipeline.status_pending')

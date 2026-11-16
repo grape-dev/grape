@@ -1625,6 +1625,16 @@ const pipelineCardHtml = computed(() => {
     if (sourceScene) label += '（' + sourceScene + '）'
     html += `<div class="isk-contin">${label}</div>`
   }
+  // Issue #2432：失败节点提示（失败状态 + 失败节点名，不展示失败原因）
+  if (data.failed_node_name) {
+    html +=
+      '<div style="font-size:11px;color:var(--r);background:rgba(255,59,48,.08);' +
+      'border-radius:8px;padding:6px 10px;margin-bottom:10px"><b>' +
+      esc(t('pipeline.status_failed')) +
+      '</b> · ' +
+      esc(String(data.failed_node_name)) +
+      '</div>'
+  }
   // 节点进度条
   if (nodes.length > 0) {
     html += '<div class="isk-flowbar">'
