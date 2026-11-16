@@ -750,7 +750,9 @@ def adjust_skill_like_count(skill_id: int, delta: int) -> int:
 # ---------- 凭据写原语（P3-5f-3：mgmt 进程写 runtime 基表） ----------
 
 def insert_runtime_credential(token_hash: str, name: str, scope: str, owner_id: str,
-                              owner_name: str, repo_key: str, org_id: str) -> dict[str, Any]:
+                              owner_name: str, repo_key: str, org_id: str,
+                              cred_type: str = "worker", platform: str = "",
+                              credential_uid: str = "") -> dict[str, Any]:
     """新建 runtime 凭据。名称全局唯一：撞唯一约束时返回 duplicate（**不抛异常**），
     调用方据此回 400 —— 若这里抛异常，意图会被当成可重试失败而无限重放。
 
@@ -764,16 +766,17 @@ def insert_runtime_credential(token_hash: str, name: str, scope: str, owner_id: 
         _org_int = 0
     with _any_cursor(write=True) as c:
         try:
-            # status 必须显式写：SQLite DDL 里的 `status TEXT DEFAULT 'active'` 在 MySQL
-            # 翻译层会被剥掉（MySQL TEXT 不接受字面量 DEFAULT，见 mysql_compat
-            # _translate_create_table），列默认值变成 NULL → _auth_credential 的
-            # `WHERE status='active'` 永远查不到新凭据 → worker 拿到 401
-            # "runtime credential revoked or not found"，在注册前退出，安装脚本
-            # 判定进程缺失而回滚，设备注册不上。
-            c.execute("INSERT INTO runtime_credentials "
-                      "(token_hash, name, status, scope, owner_id, owner_name, repo_key, org_id) "
-                      "VALUES (?,?,'active',?,?,?,?,?)",
-                      (token_hash, name, scope, owner_id, owner_name, repo_key, _org_int))
+            _rc_cols = ["token_hash", "name", "scope", "owner_id", "owner_name", "repo_key", "org_id"]
+            _rc_vals = [token_hash, name, scope, owner_id, owner_name, repo_key, _org_int]
+            # [沙箱迁移 i7] cred_type/platform 列；#646 credential_uid 稳定键——旧库缺列由迁移兜底
+            for _col, _val in (("status", "active"),
+                               ("cred_type", cred_type or "worker"), ("platform", platform or ""),
+                               ("credential_uid", credential_uid or "")):
+                _rc_cols.append(_col)
+                _rc_vals.append(_val)
+            c.execute(f"INSERT INTO runtime_credentials ({', '.join(_rc_cols)}) "
+                      f"VALUES ({','.join('?' * len(_rc_cols))})",
+                      tuple(_rc_vals))
             return {"action": "inserted", "id": int(c.lastrowid or 0)}
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
@@ -1036,20 +1039,37 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
             c.execute("SET SESSION innodb_lock_wait_timeout=5")
         except Exception as _e:
             log.debug(f"src/domains/runtime/public/__init__.py best-effort skipped: {_e}")
+        # Issue #646：engine_uid 派生轨道（UUIDv5 按自然键确定性派生，幂等防 id 漂移）；
+        # 旧库缺列时整段 uid 逻辑降级跳过（与 legacy 双读路径一致）。
+        from src.api.engine_uid import derive_engine_uid
+        _uid_ready = False
+        try:
+            c.execute("SELECT engine_uid FROM agent_runtimes LIMIT 1")
+            _uid_ready = True
+        except Exception:
+            _uid_ready = False
         for a in agents or []:
             name = (a.get("name") or "").strip().lower()
             if not name:
                 continue
             names.append(name)
+            _engine_uid = derive_engine_uid("", name, scope, owner_id, host_name)
             _ls = _json.dumps(a.get("local_skills") or [], ensure_ascii=False)
             _detail = a.get("local_skills_detail")
             _detail_json = _json.dumps(_detail, ensure_ascii=False) if _detail is not None else ""
-            c.execute(
-                "SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? "
-                "AND credential_id=0 AND (host_name=? OR host_name='' OR host_name IS NULL) "
-                "ORDER BY CASE WHEN host_name=? THEN 0 ELSE 1 END, id LIMIT 1",
-                (name, scope, owner_id, host_name, host_name))
-            row = c.fetchone()
+            row = None
+            if _uid_ready:
+                # uid 优先匹配（稳定键，幂等防漂移）；未迁移库回退 legacy 路径
+                c.execute("SELECT id FROM agent_runtimes WHERE engine_uid=? LIMIT 1",
+                          (_engine_uid,))
+                row = c.fetchone()
+            if not row:
+                c.execute(
+                    "SELECT id FROM agent_runtimes WHERE name=? AND scope=? AND owner_id=? "
+                    "AND credential_id=0 AND (host_name=? OR host_name='' OR host_name IS NULL) "
+                    "ORDER BY CASE WHEN host_name=? THEN 0 ELSE 1 END, id LIMIT 1",
+                    (name, scope, owner_id, host_name, host_name))
+                row = c.fetchone()
             if row:
                 rid = int(row[0])
                 _derived = derive_local_runtime_health(bool(a.get("installed")), bool(a.get("healthy")))
@@ -1078,12 +1098,29 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                      a.get("probe_error", ""), now_iso,
                      1 if a.get("healthy") else 0,
                      rid))
+                if _uid_ready:
+                    # Issue #646：uid 派生轨道写回（UPDATE 路径）
+                    c.execute("UPDATE agent_runtimes SET engine_uid=? WHERE id=?",
+                              (_engine_uid, rid))
                 out["upserted"] += 1
                 out["ids"][name] = rid
                 continue
             if not a.get("installed"):
                 continue
-            c.execute(
+            if _uid_ready:
+                c.execute(
+                    "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
+                    "pip_package, scope, owner_id, local_skills, skill_scan_result, host_name, "
+                    "last_seen_at, updated_at, probe_status, probe_latency, probe_last, probe_ok_streak, engine_uid) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (name, a.get("display_name", name), 1, a.get("cli_path", ""), a.get("version", ""),
+                     1 if a.get("healthy") else 0, a.get("pip_package", ""), scope, owner_id,
+                     _ls, _detail_json, host_name, now_iso, now_iso,
+                     (a.get("probe_status") or ("ok" if a.get("healthy") else "failed")),
+                     int(a.get("probe_latency") or 0), now_iso,
+                     1 if a.get("healthy") else 0, _engine_uid))
+            else:
+                c.execute(
                 "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
                 "pip_package, scope, owner_id, local_skills, skill_scan_result, host_name, "
                 "last_seen_at, updated_at, probe_status, probe_latency, probe_last, probe_ok_streak) "
@@ -1111,10 +1148,41 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
 
         if names:
             ph = ",".join(["?"] * len(names))
+            # Issue #646：过期行删除走显式清理链（池/能力/会话/绑定/场景 + 对账报告），
+            # MySQL RESTRICT FK 兜底防漏（不静默级联蒸发）——与供体 save_agent_runtimes 口径一致。
+            # 必须在 DELETE 之前执行（行删掉后 stale 集合查不到了）。
+            try:
+                _stale_ids = [r[0] for r in c.execute(
+                    f"SELECT id FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 "
+                    f"AND host_name=? AND lower(name) NOT IN ({ph})",
+                    (scope, owner_id, host_name, *names)).fetchall()]
+                if _stale_ids:
+                    from src.domains.mgmt.user.db import _rebind_runtime_references as _rb_stale
+                    _rb_stale(c, _stale_ids, 0, reason="refresh stale engines")
+            except Exception as _se:
+                log.warning(f"upsert_local_runtimes stale-cleanup rebind skipped: {_se}")
             c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 "
                       f"AND host_name=? AND lower(name) NOT IN ({ph})",
                       (scope, owner_id, host_name, *names))
             out["pruned"] = int(c.rowcount or 0)
+        # Issue #646：DELETE 前先把待删行的跨表引用改绑到保留行（孤儿引用/静默失效防护）
+        try:
+            _dup_rows = c.execute(
+                "SELECT id, lower(name), scope, owner_id, COALESCE(org_id, 0), COALESCE(host_name, '') "
+                "FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
+                "(SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 "
+                "GROUP BY lower(name), scope, owner_id, COALESCE(org_id, 0), COALESCE(host_name, ''))"
+            ).fetchall()
+            for _dup_id, _n, _sc, _ow, _org, _host in _dup_rows:
+                _keep = c.execute(
+                    "SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 AND lower(name)=? "
+                    "AND scope=? AND owner_id=? AND COALESCE(org_id, 0)=? AND COALESCE(host_name, '')=?",
+                    (_n, _sc, _ow, _org, _host)).fetchone()
+                if _keep and _keep[0] and _keep[0] != _dup_id:
+                    from src.domains.mgmt.user.db import _rebind_runtime_references as _rb_dup
+                    _rb_dup(c, [_dup_id], _keep[0])
+        except Exception as _re:
+            log.warning(f"upsert_local_runtimes rebind-before-dedup skipped: {_re}")
         c.execute("DELETE FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
                   "(SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 "
                   "GROUP BY lower(name), scope, owner_id, COALESCE(org_id,0), COALESCE(host_name,''))")
@@ -1314,7 +1382,7 @@ _READ_QUERIES: dict[str, str] = {
     "runtime_credentials_7431a6": "SELECT id FROM runtime_credentials WHERE name=%s",
     "runtime_credentials_3cd287": "SELECT owner_name FROM runtime_credentials WHERE id=%s",
     "runtime_credentials_ff9c0b": "SELECT owner_name, status FROM runtime_credentials WHERE id=%s",
-    "runtime_credentials_5b448f": "SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials",
+    "runtime_credentials_5b448f": "SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id, spec, cred_type, platform FROM runtime_credentials",
     "devops_agent_session_dcd716": "SELECT id FROM devops_agent_session WHERE repo_key=%s AND agent_type='vod'",
     "devops_agent_session_a36e5f": "SELECT runtime_id FROM devops_agent_session WHERE repo_key=%s AND agent_type=%s",
     "agent_tasks_29ab8e": "SELECT repo_key, agent_type, runtime_id, user_id, issue_id FROM agent_tasks WHERE id=%s",
@@ -1966,12 +2034,24 @@ _ANY_QUERIES: dict[str, str] = {
     'chat_session_update_state_noreid': (
         "UPDATE chat_agent_session SET event_history=?, status=?, last_active_at=? WHERE id=?"),
     'chat_config_row_canonical': (
+        "SELECT id, runtime_id, skill, skill_id, COALESCE(engine_uid,'') FROM chat_agent_session "
+        "WHERE id=? AND user_id=? AND (repo_key='' OR repo_key IS NULL)"),
+    'chat_config_row_canonical_legacy': (
         "SELECT id, runtime_id, skill, skill_id FROM chat_agent_session "
         "WHERE id=? AND user_id=? AND (repo_key='' OR repo_key IS NULL)"),
     'chat_config_rows_by_user': (
+        "SELECT id, runtime_id, skill, skill_id, COALESCE(engine_uid,'') FROM chat_agent_session "
+        "WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) "
+        "ORDER BY last_active_at DESC, id DESC"),
+    'chat_config_rows_by_user_legacy': (
         "SELECT id, runtime_id, skill, skill_id FROM chat_agent_session "
         "WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) "
         "ORDER BY last_active_at DESC, id DESC"),
+    'agent_runtime_name_by_uid': "SELECT name FROM agent_runtimes WHERE engine_uid=?",
+    'chat_config_upsert_uid': (
+        "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, engine_uid, skill, "
+        "skill_id, created_at, last_active_at) "
+        "VALUES (?,?,?,?,?,?,?,datetime('now'),datetime('now'))"),
     'chat_config_delete_others': (
         "DELETE FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) AND id!=?"),
     'chat_config_upsert': (
@@ -2015,11 +2095,13 @@ _ANY_QUERIES: dict[str, str] = {
     'message_recall': 'UPDATE chat_messages SET deleted=1 WHERE id=? AND deleted=0',
     # 任务维度取该轮全部消息（chat 任务状态/SSE 兜底：跨机器或进程重启后内存无常驻任务）
     # chat 配置面（引擎/技能下拉）：三张表都归 runtime，mgmt 进程直查会 1146 → 下拉永远空
+    'runtime_credential_type_by_id': "SELECT cred_type FROM runtime_credentials WHERE id=?",
+    'agent_runtime_online_by_cred': "SELECT 1 FROM agent_runtimes WHERE credential_id=? AND status='online' LIMIT 1",
     'chat_local_engines': (
-        "SELECT id, name, version, COALESCE(host_name,'') FROM agent_runtimes "
+        "SELECT id, name, version, COALESCE(host_name,''), COALESCE(engine_uid,'') FROM agent_runtimes "
         "WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id"),
     'chat_user_engines': (
-        "SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id "
+        "SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id, COALESCE(ar.engine_uid,'') "
         "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
         "WHERE rc.scope = 'user' AND rc.status='active' AND rc.owner_name = ?"),
     'chat_engine_by_id': (
@@ -2079,7 +2161,8 @@ _ANY_QUERIES: dict[str, str] = {
         "AND status='active'"),
     # ── session_store 去跨域所需具名查询（见 src/api/session_store.py 注释）──
     'agent_type_enable': 'SELECT enable FROM agent_type WHERE agent_type=?',
-    'devops_agent_session_row': 'SELECT id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
+    'devops_agent_session_row': 'SELECT id, runtime_session_id, status, last_active_at, enable, engine_uid FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
+    'devops_agent_session_row_legacy': 'SELECT id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? AND agent_type=?',
     'devops_agent_sessions_by_repo': 'SELECT id, agent_type, runtime_id, runtime_session_id, status, last_active_at, enable FROM devops_agent_session WHERE repo_key=? ORDER BY agent_type',
     # 幂等：ensure_agent_session 语义是「已存在则不动」，SQL 必须带 OR IGNORE
     #（与本文件 devops_agent_session_insert_vod 及历史 INSERT IGNORE 对齐）。
@@ -2110,6 +2193,8 @@ _ANY_QUERIES: dict[str, str] = {
     "user_purge_chat_agent_session": "DELETE FROM chat_agent_session WHERE user_id=?",
     "user_purge_chat_conversations": "DELETE FROM chat_conversations WHERE user_id=?",
     "user_purge_issue": "DELETE FROM issue WHERE user_id=?",
+    'agent_runtime_engine_uid_by_id': 'SELECT engine_uid FROM agent_runtimes WHERE id=?',
+    'devops_agent_session_insert_uid': "INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, engine_uid, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
     'agent_runtime_name_by_id': 'SELECT name FROM agent_runtimes WHERE id=?',
     'issue_card_row': 'SELECT stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override, carried_context, status FROM issue WHERE repo_key=? AND issue_number=?',
     'issue_card_exists': 'SELECT id FROM issue WHERE repo_key=? AND issue_number=?',
@@ -2143,7 +2228,7 @@ _ANY_QUERIES: dict[str, str] = {
     # runtime_credentials / agent_runtimes / engine_capabilities（settings 引擎管理台读路径）
     "runtime_credentials_all": (
         "SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, "
-        "last_ip, repo_key, org_id, spec FROM runtime_credentials"),
+        "last_ip, repo_key, org_id, spec, cred_type, platform FROM runtime_credentials"),
     "runtime_credentials_active_ids": (
         "SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC"),
     "runtime_credentials_list": (
@@ -4189,8 +4274,11 @@ def update_issue_card_fields(repo_key: str, issue_number, fields: dict,
 def ensure_agent_session(session_id: str, repo_key: str, agent_type: str, runtime_id: int = 0,
                          skill: str = "", skill_id: int = 0, repo_gitcode_token: str = "",
                          status: str = "idle", enable: int = 1,
-                         subscribe_events: str = "[]") -> int:
+                         subscribe_events: str = "[]", engine_uid: str = "",
+                         uid_written: list | None = None) -> int:
     """建 repo 级 agent 会话行（id 由调用方生成，保证主键稳定）。返回 1=新建 / 0=已存在。
+
+    uid_written: 可选出参——[bool] 收到 engine_uid 是否实际写入（旧库缺列降级时 False）。
 
     幂等由 SQL 侧的 OR IGNORE 保证。返回值必须**读游标** rowcount：exec_any 在自有 DSN 路径上
     返回的是 pymysql execute() 的 int（恒 0），拿它当「新建/已存在」判据永远得到 0。
@@ -4198,9 +4286,25 @@ def ensure_agent_session(session_id: str, repo_key: str, agent_type: str, runtim
     后者覆盖前者，调用方拿到的返回值语义完全取决于定义顺序。
     """
     with _any_cursor(write=True) as c:
-        c.execute(_ANY_QUERIES["devops_agent_session_insert"],
-                  (session_id, repo_key, agent_type, runtime_id, skill, skill_id,
-                   repo_gitcode_token or "", status, enable, subscribe_events))
+        # Issue #868 (T10)：engine_uid 双写轨道；旧库缺列（迁移未跑）降级 legacy INSERT
+        _uid_ready = False
+        try:
+            _uid_ready = "engine_uid" in {r[1] for r in c.execute(
+                "PRAGMA table_info(devops_agent_session)").fetchall()}
+        except Exception:
+            _uid_ready = False
+        if _uid_ready:
+            c.execute(_ANY_QUERIES["devops_agent_session_insert_uid"],
+                      (session_id, repo_key, agent_type, runtime_id, engine_uid or "",
+                       skill, skill_id, repo_gitcode_token or "", status, enable, subscribe_events))
+            if uid_written is not None:
+                uid_written.append(True)
+        else:
+            if uid_written is not None:
+                uid_written.append(False)
+            c.execute(_ANY_QUERIES["devops_agent_session_insert"],
+                      (session_id, repo_key, agent_type, runtime_id, skill, skill_id,
+                       repo_gitcode_token or "", status, enable, subscribe_events))
         return int(getattr(c, "rowcount", 0) or 0)
 
 def update_agent_session_fields(session_id: str, fields: dict,
@@ -4267,12 +4371,25 @@ def _any_tx():
 
 
 def upsert_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "",
-                           skill_id: int = 0) -> None:
-    """写用户全局 Chat 配置行（`sess-cfg-<uid>`）：先收敛同用户其它配置行，再 upsert。"""
+                           skill_id: int = 0, engine_uid: str = "") -> None:
+    """写用户全局 Chat 配置行（`sess-cfg-<uid>`）：先收敛同用户其它配置行，再 upsert。
+
+    Issue #868 (T10)：engine_uid 双写（runtime_id 的 uid 镜像）；旧库缺列降级 legacy upsert。
+    """
     sid = f"sess-cfg-{user_id}"
     with _any_tx() as c:
         c.execute(_any_sql("chat_config_delete_others"), (user_id, sid))
-        c.execute(_any_sql("chat_config_upsert"), (sid, user_id, "", runtime_id, skill, skill_id))
+        _uid_ready = False
+        try:
+            _uid_ready = "engine_uid" in {r[1] for r in c.execute(
+                "PRAGMA table_info(chat_agent_session)").fetchall()}
+        except Exception:
+            _uid_ready = False
+        if _uid_ready:
+            c.execute(_any_sql("chat_config_upsert_uid"),
+                      (sid, user_id, "", runtime_id, engine_uid or "", skill, skill_id))
+        else:
+            c.execute(_any_sql("chat_config_upsert"), (sid, user_id, "", runtime_id, skill, skill_id))
 
 
 def join_feishu_chat(chat_id: str, conv_id: str, user_id) -> bool:
@@ -4372,6 +4489,8 @@ _CHAT_SESSION_LEGACY_COLUMNS = (
     ("skill", "TEXT DEFAULT ''"),
     ("user_id", "INTEGER DEFAULT 0"),
     ("runtime_session_id", "TEXT DEFAULT ''"),
+    # Issue #868 (T10)：engine_uid 双读列（runtime_id 的 uid 引用）；新库走迁移 202611030005
+    ("engine_uid", "VARCHAR(36) DEFAULT NULL"),
 )
 _REPO_IM_LEGACY_COLUMNS = (
     ("auto_impl_enabled", "INTEGER DEFAULT 0"),

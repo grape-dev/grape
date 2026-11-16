@@ -1,6 +1,6 @@
 """Agent 执行器：流式子进程调度 (NDJSON)，不绑定具体后端。"""
 from src.kernel.user_ids import has_user_id
-import os, subprocess, json, time, signal, contextlib
+import os, subprocess, json, time, signal, contextlib, shutil
 from typing import Generator, AsyncGenerator
 from src.kernel.config import log
 from .base import AgentBackend
@@ -28,6 +28,62 @@ def _note_bwrap_fail_once(message: str) -> None:
         return
     _bwrap_fail_notified = True
     log.warning(message)
+
+
+def _find_hermes_bin(venv_py: str = "", sandbox_mode: bool = False) -> str:
+    """按优先级查找 hermes 可执行文件，返回绝对路径（最后回退为裸命令名）。
+
+    查找顺序：
+      1. 与 venv python 同目录（最可靠——venv 里 python 和 hermes 在同一个 bin/）
+      2. 当前解释器同目录（覆盖未显式传 venv_py 的情况）
+      3. sysconfig 的 scripts 目录
+      4. PATH 中的 hermes
+      5. 裸命令名 "hermes"（交给调用方 / shell 解析）
+
+    sandbox_mode=True 时跳过 isfile/access 校验——venv_py 来自沙箱内探测，
+    宿主机文件系统不存在该文件，但路径是可信的。
+    """
+    import sys, sysconfig
+    exe_name = "hermes.exe" if os.name == "nt" else "hermes"
+    candidates: list = []
+
+    # 1) 显式传入的 venv python 同目录（仅当 venv_py 是绝对路径时）
+    if venv_py and "/" in venv_py:
+        candidates.append(
+            os.path.join(os.path.dirname(os.path.abspath(venv_py)), exe_name)
+        )
+
+    # 2) 当前解释器同目录（非 sandbox_mode——宿主机路径）
+    if not sandbox_mode and sys.executable:
+        candidates.append(os.path.join(os.path.dirname(sys.executable), exe_name))
+
+    # 3) sysconfig scripts 目录（非 sandbox_mode——宿主机路径）
+    if not sandbox_mode:
+        try:
+            scripts_dir = sysconfig.get_path("scripts")
+            if scripts_dir:
+                candidates.append(os.path.join(scripts_dir, exe_name))
+        except Exception:
+            pass
+
+    # 4) PATH（非 sandbox_mode——宿主机 PATH）
+    if not sandbox_mode:
+        which = shutil.which("hermes")
+        if which:
+            candidates.append(which)
+
+    # 校验存在 + 可执行
+    for c in candidates:
+        if sandbox_mode:
+            # 沙箱模式：venv_py 来自沙箱内探测，路径可信，不做宿主机 isfile 校验
+            if c:
+                return c
+        else:
+            if c and os.path.isfile(c) and os.access(c, os.X_OK):
+                return c
+
+    # 5) 最后回退
+    return "hermes"
 
 
 _BACKENDS = {
@@ -289,6 +345,18 @@ def get_backend(name: str) -> AgentBackend:
     return _BACKENDS.get(name, _BACKENDS["opencode"])
 
 
+def get_backend_or_none(name: str | None = "") -> AgentBackend | None:
+    """[沙箱迁移] 按名取 backend，未注册返回 None（不 fallback opencode）。
+
+    bwrap.py 的沙箱 setup 链按引擎名精确取 backend；未注册的引擎名
+    返回 None 走未配置兜底。注：i7 侧 bwrap.py 一直引用本符号但从未定义
+    （云沙箱路径不经过 bwrap 故未暴露），本次移植补齐定义。
+    """
+    if not name:
+        return None
+    return _BACKENDS.get(name)
+
+
 def discover_backends() -> list[dict]:
     """动态发现本地已安装的 Agent 引擎（跨平台）。
 
@@ -329,14 +397,21 @@ def discover_backends() -> list[dict]:
 
 
 def _redact(text, tokens):
-    """将文本中的敏感 token 替换为 [REDACTED]（用于日志/事件脱敏）"""
-    if not text or not tokens:
-        return text
-    s = str(text)
-    for t in tokens:
-        if t:
-            s = s.replace(t, "[REDACTED]")
-    return s
+    """将文本中的敏感 token 替换为 [REDACTED]（用于日志/事件脱敏）
+
+    [沙箱迁移] P1-8: 内部委托 RedactEngine，支持精确值 + 正则模式两层令牌化。
+    向后兼容：签名不变，tokens 参数转为 RedactEngine.secret_values。
+    每次调用创建临时引擎——stream_agent 路径无法共享实例。
+    """
+    if not text:
+        return text if text else ""
+    from src.domains.runtime.agents.sandbox.redact import RedactEngine
+    if not tokens:
+        return RedactEngine().redact(str(text)).text
+    engine = RedactEngine(secret_values=tokens)
+    result = engine.redact(str(text)).text
+    engine.clear()  # 确定性清除，不依赖 GC
+    return result
 
 
 def _terminate_proc(proc, label: str = "", grace_seconds: float = 10.0):
@@ -1738,3 +1813,786 @@ async def consume_stream_async(prompt: str, cwd: str, session_id: str = "",
         if evt_type is None:
             break
         yield evt_type, data
+# _dispatch_execution — 统一执行分叉入口（P2-1 复活）
+#
+# cloud_worker 调 _dispatch_execution，传入自己创建的 sandbox + backend + prompt。
+# 内部按 is_cloud_sandbox(sandbox) 判断：
+#   - 云沙箱 → _run_cloud_sandbox（SDK 远程执行，yield 事件）
+#   - bwrap/null → stream_agent（本地 Popen，yield 事件）
+#
+# stream_agent 的 is_cloud_sandbox 分支已删除（云沙箱不走 stream_agent），
+# 所以 _dispatch_execution 当前只服务 cloud_worker。
+# hermes_acp.py 仍保留自己的 is_cloud_sandbox 分支（独立 ACP 协议路径），暂不动。
+# ============================================================================
+
+
+def is_cloud_sandbox(sandbox) -> bool:
+    """判断沙箱是否为云沙箱（CLOUD_SDK 模式）。
+
+    统一判断入口，避免 stream_agent / hermes_acp 各写一份 hasattr 检查。
+    """
+    return getattr(sandbox, "execution_mode", None) == _ExecutionMode.CLOUD_SDK
+
+from typing import cast as _cast, Iterator as _Iterator
+from src.domains.runtime.agents.sandbox.types import (
+    ExecutionMode as _ExecutionMode,
+    CommandResult as _CommandResult,
+    ExecHandle as _ExecHandleProtocol,
+    UnsupportedCapability as _UnsupportedCapability,
+)
+
+
+class _PtyExecHandleAdapter:
+    """适配 CubeSandbox PtyHandle 为 ExecHandle 协议。
+
+    PtyHandle 迭代 yield bytes，没有 stream_stdout()/wait(timeout)。
+    适配后让 _run_cloud_sandbox 后续代码统一处理。
+
+    PTY 分支改用 wrapper 方案后，wrapper 输出 NDJSON 事件流。
+    iter_events() 按行解析 NDJSON，yield 事件 dict。
+    非 JSON 行（stty raw 前的 shell 提示符等噪声）丢弃 + debug 日志。
+    """
+
+    def __init__(self, pty_handle):
+        self._pty = pty_handle
+        self._collected = []  # 收集所有原始输出
+        self._exit_code = None
+
+    def stream_stdout(self):
+        """迭代 PTY 输出，yield str（向后兼容，非 PTY-wrapper 路径用）。"""
+        for chunk in self._pty:
+            if isinstance(chunk, bytes):
+                text = chunk.decode("utf-8", errors="replace")
+            else:
+                text = str(chunk)
+            # PTY raw 模式可能有 \r\n，统一替换
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            self._collected.append(text)
+            yield text
+
+    def iter_events(self):
+        """迭代 PTY 输出，按行解析 NDJSON，yield 事件 dict。
+
+        wrapper stdout 是 NDJSON（每行一个 JSON 事件）。
+        stty raw -echo 之前的 shell 提示符等噪声行不是合法 JSON，丢弃。
+        """
+        import json as _json
+        buf = ""
+        for chunk in self._pty:
+            if isinstance(chunk, bytes):
+                text = chunk.decode("utf-8", errors="replace")
+            else:
+                text = str(chunk)
+            # PTY raw 模式可能有 \r\n，统一替换
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            self._collected.append(text)
+            buf += text
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = _json.loads(line)
+                    yield event
+                except _json.JSONDecodeError:
+                    log.debug(f"non-json pty line: {line!r}")
+
+    def wait(self, timeout=None):
+        """阻塞直到 PTY 退出，返回类 CommandResult。
+
+        SDK 的 PtyHandle.wait() 在 wrapper 退出码非 0 时会抛 CubeSandboxError。
+        这里捕获异常，提取退出码，不抛——让上层根据 exit_code 判断成功/失败。
+        """
+        try:
+            self._exit_code = self._pty.wait()
+        except Exception as e:
+            # SDK 在 wrapper exit_code != 0 时抛 "PTY exited with error: exit status N"
+            # 提取退出码，不中断流程
+            err_str = str(e)
+            log.warning(f"PTY wait returned error: {err_str}")
+            # 尝试从错误消息提取 exit code
+            import re
+            m = re.search(r'exit (?:status|code) (\d+)', err_str)
+            self._exit_code = int(m.group(1)) if m else -1
+        from src.domains.runtime.agents.sandbox.types import CommandResult
+        return CommandResult(
+            exit_code=self._exit_code,
+            stdout="".join(self._collected),
+            stderr="",
+        )
+
+    def kill(self):
+        self._pty.kill()
+
+    @property
+    def pid(self):
+        return self._pty.pid
+
+    @property
+    def exit_code(self):
+        return self._exit_code
+
+
+def _run_cloud_sandbox(sandbox, backend, prompt, cwd, proc_env, session_id,
+                       label, max_exec_seconds, use_session_id):
+    """云沙箱执行路径——通过 SDK run_command 在远端沙箱内执行 agent。
+
+    替代 bwrap 的 Popen 路径：
+    - 构建 agent 启动命令
+    - 调 sandbox.run_command() → ExecHandle
+    - 后台线程定期 refresh 防超时
+    - 流式读 stdout → yield 事件
+    - wait() 拿 exit_code → yield done
+    """
+    # BUG-8 修复：云沙箱路径命令预检 + 提示注入检测（与 _run_acp_session 入口一致）
+    try:
+        from src.domains.runtime.agents.policy import policy_manager
+        from src.domains.runtime.agents.policy.errors import CommandBlocked
+        from src.domains.runtime.agents.policy.types import Decision, InputDecision
+        _acp_cmd = [getattr(backend, "binary", "agent"), "acp"]
+        _guard_result = policy_manager.check_command(_acp_cmd, task_id=session_id or "")
+        if _guard_result.decision is Decision.DENY:
+            raise CommandBlocked(f"dangerous command: {_guard_result.reason}")
+        _input_result = policy_manager.check_input(prompt, task_id=session_id or "")
+        if _input_result.decision is InputDecision.DENY:
+            raise CommandBlocked(f"prompt injection detected: {_input_result.detail}")
+    except CommandBlocked as _e:
+        log.error(f"{label}cloud sandbox blocked: {_e}")
+        yield ("done", {"exit_code": -1, "text": "", "oc_session_id": session_id,
+                        "errors": [str(_e)], "stderr": ""})
+        return
+    except ImportError:
+        pass  # policy 模块不可用时跳过（Null 模式）
+
+    import time as _time
+    import threading as _threading
+    from src.domains.runtime.agents.backend_protocol import ProtocolAware, CloudBackendProvider, PTYAware, SessionStaleDetector
+
+    # 后台 refresh 线程——防止 agent 长时间执行时沙箱超时（3600s）
+    _refresh_stop = _threading.Event()
+
+    def _refresh_loop():
+        while not _refresh_stop.wait(180):  # 每 3 分钟 refresh 一次
+            try:
+                sandbox.refresh(duration=300)
+                log.debug(f"{label}cloud sandbox refreshed")
+            except Exception as e:
+                log.warning(f"{label}cloud sandbox refresh failed: {e}")
+
+    _refresh_thread = _threading.Thread(target=_refresh_loop, daemon=True)
+    _refresh_thread.start()
+
+    # 从 proc_env 补充仓库参数（manager.prepare 没传这些）
+    repo_full_name = proc_env.get("REPO_FULL_NAME", "")
+    bot_token = proc_env.get("BOT_GITCODE_TOKEN", "")
+    work_branch = proc_env.get("GRAPE_WORK_BRANCH", "")
+
+    # 通过通用接口配置仓库（不直接设私有属性，不 isinstance 分叉）
+    if repo_full_name and bot_token:
+        # 去掉 repo_key 前缀（gitcode:owner/repo → owner/repo）
+        _repo_name = repo_full_name.split(":", 1)[-1] if ":" in repo_full_name else repo_full_name
+        repo_url = f"https://gitcode.com/{_repo_name}.git"
+        try:
+            sandbox.configure_repo(
+                repo_url=repo_url,
+                bot_token=bot_token,
+                work_branch=work_branch,
+            )
+        except Exception as e:
+            log.warning(f"{label}cloud sandbox repo clone failed: {e}")
+
+    # skill 下载已由 DefaultMaterializer → SkillMaterializer 在 cloud_worker 外层完成
+    # {{SKILL_DIR}} 替换也已在 cloud_worker 外层完成
+
+    # 修正 cwd 为沙箱内路径
+    if sandbox.repo_dir:
+        cwd = sandbox.repo_dir
+    else:
+        # git clone 失败 → repo_dir 为空 → cwd 是 task 下发的本机路径（不存在于沙箱）
+        # fallback 到 /tmp 防止 PTY create 报 invalid_argument: cwd does not exist
+        log.warning(f"{label}sandbox.repo_dir empty (git clone failed?), cwd fallback to /tmp")
+        cwd = "/tmp"
+    # {{SKILL_DIR}} 替换已由 SkillMaterializer 在 cloud_worker 外层完成
+
+    # 根因修复：cwd 不存在时 EnvD 报 fork/exec /bin/bash: no such file or directory（误导性错误）
+    # 确保 cwd 目录存在，不存在则 fallback 到 /tmp
+    import shlex as _shlex
+    if cwd:
+        try:
+            _cwd_check = sandbox.run_command(f"test -d {_shlex.quote(cwd)} && echo exists", timeout=5, background=False)
+            if hasattr(_cwd_check, 'stdout') and 'exists' not in (_cwd_check.stdout or ''):
+                log.warning(f"{label}cwd {cwd} not found, falling back to /tmp")
+                cwd = "/tmp"
+        except Exception:
+            cwd = "/tmp"
+
+    # 构建 agent 命令——职责下沉到 backend（build_remote_invocation）
+    # opencode/codearts: 命令行传 prompt，无 stdin
+    # hermes ACP: 命令行只传 hermes acp，stdin 传 JSON-RPC
+    import shlex as _shlex
+    # backend 替换——isinstance 检查能力，不按名字判断
+    # HermesRuntime.cloud_backend() 返回 HermesACPBackend()（无状态，每次 new）
+    # 其他引擎默认返回 self（AgentRuntime 基类）
+    if isinstance(backend, CloudBackendProvider):
+        backend = backend.cloud_backend()
+
+    # ── 协议分叉——按 protocol 属性，不按引擎名 ──
+    # ACP（hermes）：DevBox → DevBoxTransport，CubeSandbox → CubeSandboxTransport
+    # NDJSON（opencode/codearts/codex）：走 PTY wrapper 或 run_command 路径
+    if isinstance(backend, ProtocolAware) and backend.protocol == "acp":
+        from src.domains.runtime.agents.hermes_acp import _run_acp_session
+        from src.domains.runtime.agents.hermes_acp import _detect_structured_output, _robust_join_json, _detect_findings_block, _robust_join_findings
+        # {{SKILL_DIR}} 替换已由 SkillMaterializer 在 cloud_worker 外层完成
+        # hermes_bin 查找——多级回退，不靠字符串切割猜路径
+        _sandbox_envs = getattr(sandbox, '_init_envs', None) or {}
+        _venv_py = _sandbox_envs.get("_HERMES_VENV_PYTHON", "")
+        # [沙箱迁移] _HERMES_BIN 是安装时算好的绝对路径（readlink -f which hermes）——
+        # PTY 启动脚本非 login shell 不读 ~/.bashrc，裸命令名会 not found
+        _hermes_bin = _sandbox_envs.get("_HERMES_BIN", "") or _find_hermes_bin(_venv_py, sandbox_mode=True)
+        log.info(f"{label}hermes bin: venv_py={_venv_py!r} hermes_bin={_hermes_bin!r} _init_envs_keys={list(_sandbox_envs.keys())}")
+
+        # 脱敏——和 PTY/run_command 路径一致
+        _tokens = [t for t in (proc_env.get("BOT_GITCODE_TOKEN", ""), proc_env.get("USER_GITCODE_TOKEN", "")) if t]
+        _redact_engine = None
+        if _tokens:
+            from src.domains.runtime.agents.sandbox.redact import RedactEngine
+            _redact_engine = RedactEngine(secret_values=_tokens)
+        def _redact_text(text):
+            if not text or not _redact_engine:
+                return text
+            return _redact_engine.redact(str(text)).text
+
+        # 构建 hermes acp 进程环境变量：_init_envs（含 HERMES_CUSTOM_API_KEY 等）
+        _acp_envs = dict(_sandbox_envs)
+        # 合并 proc_env 中的非敏感变量（NO_COLOR, TERM 等）
+        for _k in ("NO_COLOR", "TERM", "HERMES_YOLO_MODE", "PYTHONUNBUFFERED"):
+            if _k in proc_env:
+                _acp_envs[_k] = proc_env[_k]
+        # 合并 grape CLI / 任务上下文变量（env_extra 注入的，grape CLI 和 skill 脚本依赖）
+        for _k in ("GRAPE_SERVER_URL", "GRAPE_SESSION_TOKEN", "GRAPE_CLI_MODE",
+                   "REPO_FULL_NAME", "REPO_NAME", "ACCOUNT", "ISSUE_NUMBER",
+                   "PR_NUMBER", "DEVOPS_EVENT_TYPE", "AGENT_NAME", "GRAPE_SCENE_ID",
+                   "BOT_GITCODE_TOKEN", "BOT_GITHUB_TOKEN", "GIT_ASKPASS",
+                   "GRAPE_WORK_BRANCH"):
+            if _k in proc_env:
+                _acp_envs[_k] = proc_env[_k]
+
+        # [USP] Transport 分派收编——adapter.build_transport 注册表分派，
+        # supports_pty() if-else 分叉消失（平台自决 PTY vs 文件轮询）
+        from src.domains.runtime.agents.sandbox.backends import get_adapter as _get_adapter
+        _adapter = _get_adapter(getattr(sandbox, "platform", ""))
+        if _adapter is None:
+            raise RuntimeError(f"no platform adapter registered for {sandbox.platform!r}")
+        _transport = _adapter.build_transport(sandbox, hermes_bin=_hermes_bin, envs=_acp_envs)
+        log.info(f"{label}using {type(_transport).__name__} (via adapter.build_transport)")
+
+        _transport.start()
+        try:
+            # P1-5 修复：DevBox 路径也传 on_message 回调，支持 chat 检测
+            # 和 bwrap 路径（hermes_acp.py:746-756）逻辑一致
+            _is_chat_task = proc_env.get("DEVOPS_EVENT_TYPE", "") == "chat_message"
+            _chat_first_text_time = 0.0
+            _chat_last_text_time = 0.0
+            _CHAT_STABLE_SECONDS = 10.0
+            _CHAT_IDLE_SECONDS = 3.0
+            import threading as _chat_threading
+            _chat_prompt_done = _chat_threading.Event()
+            def _on_message(msg_type, content, prompt_done_event):
+                nonlocal _chat_first_text_time, _chat_last_text_time
+                if msg_type == "text" and _is_chat_task and not prompt_done_event.is_set():
+                    if _chat_first_text_time == 0:
+                        _chat_first_text_time = time.time()
+                    _chat_last_text_time = time.time()
+                    _stable = (time.time() - _chat_first_text_time) >= _CHAT_STABLE_SECONDS
+                    _idle = (time.time() - _chat_last_text_time) >= _CHAT_IDLE_SECONDS
+                    if _stable and _idle:
+                        log.info(f"{label}hermes ACP chat task text stable for {_CHAT_IDLE_SECONDS}s, assuming done")
+                        prompt_done_event.set()
+            # session_mode：DevBox 路径暂不 resume（沙箱内 state.db 路径不确定）
+            # [看门狗 2026-11-12] ACP 会话 tool 静默超时接通任务级 env——
+            # agent.py #378 的 HERMES_SILENT_TIMEOUT 注入(coding/qa=1200)此前在这条
+            # 调用路径断链(未传参, 恒为默认 300s). 仅放宽 tool_idle(判死);
+            # text_idle(判完成/response lost)保持 300 不动, 不影响 chat 完成检测.
+            from src.domains.runtime.agents.hermes_acp import _silent_timeout_for as _acp_silent_for
+            _acp_tool_silent = _acp_silent_for(proc_env)
+            for evt_type, evt_data in _run_acp_session(
+                transport=_transport,
+                prompt=prompt,
+                cwd=cwd,
+                session_id=use_session_id or session_id,
+                label=label,
+                max_exec_seconds=max_exec_seconds,
+                session_mode="new",
+                tool_idle_timeout=_acp_tool_silent,
+                on_message=_on_message,
+            ):
+                if evt_type == "done":
+                    # 文本后处理（JSON 鲁棒拼接）——和 bwrap 路径一致
+                    full_text = evt_data.get("text", "")
+                    if _detect_structured_output(full_text):
+                        _fixed = _robust_join_json(full_text.split("\n"))
+                        if _fixed and _detect_structured_output(_fixed):
+                            full_text = _fixed
+                    elif _detect_findings_block(full_text):
+                        _fixed = _robust_join_findings(full_text.split("\n"))
+                        if _fixed and _detect_findings_block(_fixed):
+                            full_text = _fixed
+                    evt_data["text"] = _redact_text(full_text)
+                    # 补充 sandbox_id + backend（协议层不包含）
+                    evt_data["sandbox_id"] = getattr(sandbox, "_sandbox_id", "")
+                    evt_data["backend"] = "hermes"
+                    if _redact_engine:
+                        _redact_engine.clear()
+                elif isinstance(evt_data, str):
+                    evt_data = _redact_text(evt_data)
+                yield (evt_type, evt_data)
+        finally:
+            _refresh_stop.set()  # BUG-4 修复：确保异常时也停止 refresh 线程
+        return  # ACP 路径已完成，不走后续 CLI fallback
+
+    if hasattr(backend, 'build_remote_invocation'):
+        cmd_list, stdin_payload = backend.build_remote_invocation(prompt, session_id)
+    else:
+        cmd_list = backend.build_args(prompt, session_id)
+        stdin_payload = None
+        # [E-02 exit=127 修复 2026-11-13] build_args 契约=「不含 binary 的参数列表」
+        # （本地链 executor:1116 是 _cmd = [find_cli(backend.binary)] + args——binary
+        # 由调用方前置）。云沙箱链此前直接 join build_args → opencode 的首参
+        # "run" 被当命令头 → /bin/bash: run: command not found exit=127（E3/E-02
+        # 实证 t_4b1116ff9922 / t_e4b767a016aa）。hermes 不受影响（走
+        # build_remote_invocation 返回完整 [binary, "acp"]）。
+        if isinstance(cmd_list, list) and cmd_list and str(cmd_list[0]) not in (
+                _binary := getattr(backend, 'binary', ''), getattr(backend, 'name', '')) \
+                and _binary:
+            cmd_list = [_binary] + cmd_list
+        # [E-02 prompt 丢失修复 2026-11-13] prompt_via_stdin 引擎（opencode 等）
+        # 的 prompt 不在 argv——本地链由 Popen stdin 喂；云沙箱链此前 stdin_payload
+        # 恒 None → 沙箱跑 `opencode run` 无输入 → exit=1 "You must provide a
+        # message or a command"（实证 t_8fad23936b99）。build_remote_invocation
+        # 路径（hermes ACP）不受影响——其 stdin_payload 已含协议初始化帧。
+        if stdin_payload is None and getattr(backend, 'prompt_via_stdin', False) and prompt:
+            stdin_payload = prompt
+
+    if isinstance(cmd_list, list):
+        cmd_str = " ".join(_shlex.quote(str(arg)) for arg in cmd_list)
+    else:
+        cmd_str = str(cmd_list)
+
+    # PATH 确保 /tmp/pylibs/bin 在路径中（grape wrapper 装在这里）
+    # hermes 的 PATH 由 _post_install 写入 ~/.bashrc，login shell 自动获取
+    cmd_str = f"export PATH=$PATH:/tmp/pylibs/bin && {cmd_str}"
+
+    log.info(f"{label}cloud sandbox run_command: {cmd_str[:200]}")
+
+    # prompt 已通过 build_remote_invocation 处理（命令行或 stdin）
+
+    # 执行——C-2 修复：过滤 _LLM_ 前缀的 key，不注入沙箱环境变量（防止 API Key 泄漏）
+    _safe_env = {k: v for k, v in proc_env.items() if not k.startswith("_LLM_")}
+    # git credential helper 从 GIT_BOT_TOKEN env 读 token（不落盘 ~/.git-credentials）
+    if bot_token:
+        _safe_env["GIT_BOT_TOKEN"] = bot_token
+    # 合并沙箱 bind_credential 绑定的环境变量（LLM API key 等）
+    # _apply_engine_config 里 bind_credential 存到 _init_envs/_credentials，
+    # 这些需要注入到执行环境里，否则引擎配置里的 ${ENV_VAR} 引用无法解析
+    _sandbox_creds = getattr(sandbox, '_credentials', None) or {}
+    _sandbox_envs = getattr(sandbox, '_init_envs', None) or {}
+    _safe_env.update(_sandbox_creds)
+    _safe_env.update(_sandbox_envs)
+
+    # PTY 分派——isinstance 检查能力，零引擎名 if-else
+    # PTYAware 引擎声明 wrapper 文件名 + 公共模块依赖 + stdin_payload 需求 + env 注入
+    _use_pty = (
+        sandbox.supports_pty()
+        and isinstance(backend, PTYAware)
+        and isinstance(cmd_list, list) and len(cmd_list) > 0
+    )
+    if _use_pty:
+        _wrapper_name = backend.pty_wrapper_name()
+        if _wrapper_name is None:
+            _use_pty = False
+        elif backend.pty_needs_stdin_payload():
+            # ACP 协议需要 stdin_payload + cmd == [binary, "acp"]
+            _use_pty = bool(stdin_payload) and cmd_list == [backend.binary, "acp"]
+
+    if _use_pty:
+        log.info(f"{label}using PTY with {_wrapper_name} (CubeSandbox)")
+        try:
+            # 1. 注入 wrapper 脚本到沙箱
+            from pathlib import Path as _Path
+            _wrapper_path = _Path(__file__).parent / "sandbox" / "wrappers" / _wrapper_name
+            try:
+                _wrapper_code = _wrapper_path.read_text()
+            except Exception as _e:
+                log.error(f"{label}failed to read {_wrapper_name}: {_e}")
+                raise RuntimeError(f"{_wrapper_name} not found: {_e}")
+            sandbox.write_file(f"/tmp/{_wrapper_name}", _wrapper_code)
+
+            # NDJSON 类 wrapper 需要公共模块
+            if backend.pty_use_ndjson_common():
+                _common_path = _Path(__file__).parent / "sandbox" / "wrappers" / "_ndjson_common.py"
+                try:
+                    _common_code = _common_path.read_text()
+                    sandbox.write_file("/tmp/_ndjson_common.py", _common_code)
+                except Exception as _e:
+                    log.error(f"{label}failed to read _ndjson_common.py: {_e}")
+                    raise RuntimeError(f"_ndjson_common.py not found: {_e}")
+
+            # 2. 传 prompt 和 cwd 给 wrapper（通过环境变量，避免 argv 长度限制 + shell 转义）
+            _safe_env["GRAPE_TASK_PROMPT"] = prompt
+            _safe_env["GRAPE_TASK_CWD"] = cwd or "/home/user/repo"
+            _safe_env["GRAPE_TASK_TIMEOUT"] = str(max_exec_seconds)
+            backend.pty_prepare_env(_safe_env, session_id)
+
+            # 3. PTY 创建 → stty raw -echo → 启动 wrapper; exit
+            #    ; exit 确保 wrapper 结束后 shell 退出 → PTY 关闭
+            #    timeout=None：PTY 会话永不超时，完全依赖 wrapper 自己管命令超时
+            # [USP] PTY 收编：SDK 私有对象穿透 → ExecSession 契约
+            # （PTYSize/Sdk handle 封装进 backends/cubesandbox.pty_create）
+            _pty_handle = sandbox.pty_create(
+                rows=50, cols=200,
+                cwd=cwd or None,
+                envs=_safe_env,
+                timeout=None,  # 会话永不超时，wrapper 内部管命令超时
+            )
+            # raw 模式——关回显 + 关 ONLCR
+            _pty_handle.send_stdin("stty raw -echo\n")
+            time.sleep(0.3)  # 等 stty 生效
+            # 启动 wrapper（; exit 确保 shell 退出 → PTY 关闭）
+            _pty_handle.send_stdin(f"python3 /tmp/{_wrapper_name}; exit\n")
+            # 创建适配器——iter_events() 解析 NDJSON 事件流
+            handle = _PtyExecHandleAdapter(_pty_handle)
+        except Exception as e:
+            log.error(f"{label}PTY wrapper setup failed: {e}")
+            # BUG-B 修复：不调 sandbox.__exit__——让 cloud_worker finally 统一处理 kill + exit
+            yield ("done", {
+                "exit_code": -1, "text": "", "oc_session_id": session_id,
+                "errors": [f"PTY wrapper setup failed: {e}"], "stderr": "",
+                "sandbox_id": getattr(sandbox, "_sandbox_id", ""),
+            })
+            return
+    else:
+        try:
+            handle = sandbox.run_command(
+                cmd_str,
+                envs=_safe_env,
+                cwd=cwd,
+                stdin=True,
+                background=True,
+                timeout=max_exec_seconds,
+            )
+            # 非 PTY 路径：如果有 stdin_payload 且 handle 支持 send_stdin
+            if stdin_payload and hasattr(handle, 'send_stdin'):
+                handle.send_stdin(stdin_payload)
+                if hasattr(handle, 'close_stdin'):
+                    try:
+                        handle.close_stdin()
+                    except Exception:
+                        pass  # DevBox CloseStdin 可能返回 500（file already closed），不影响功能
+        except Exception as e:
+            log.error(f"{label}cloud sandbox run_command failed: {e}")
+            # BUG-B 修复：不调 sandbox.__exit__——让 cloud_worker finally 统一处理 kill + exit
+            yield ("done", {
+                "exit_code": -1, "text": "", "oc_session_id": session_id,
+                "errors": [f"cloud sandbox execution failed: {e}"], "stderr": "",
+                "sandbox_id": getattr(sandbox, "_sandbox_id", ""),
+            })
+            return
+
+    # 脱敏——和 bwrap 路径一致（RedactEngine）
+    _tokens = [t for t in (proc_env.get("BOT_GITCODE_TOKEN", ""), proc_env.get("USER_GITCODE_TOKEN", "")) if t]
+    _redact_engine = None
+    if _tokens:
+        from src.domains.runtime.agents.sandbox.redact import RedactEngine
+        _redact_engine = RedactEngine(secret_values=_tokens)
+
+    def _redact_text(text):
+        if not text or not _redact_engine:
+            return text
+        return _redact_engine.redact(str(text)).text
+
+    # 流式读 stdout（脱敏后 yield）+ BUG-4 修复：静默超时 300s
+    # 用独立线程读 stream_stdout/iter_events，主线程轮询检查静默超时
+    # 解决 agent 完全 hang 时 for 循环不 yield 导致超时检查不触发的问题
+    import queue as _queue
+    import threading as _threading
+
+    collected_text = []
+    _last_output = time.time()
+    _SILENT_TIMEOUT = 300  # 5 分钟无输出 → kill
+    _stream_q = _queue.Queue()
+    _stream_done = _threading.Event()
+
+    # PTY wrapper 路径用 iter_events（NDJSON 事件），非 PTY 路径用 stream_stdout（裸文本）
+    _use_iter_events = hasattr(handle, 'iter_events')
+
+    def _stream_worker():
+        """后台线程：读输出，放入队列。PTY 路径放事件 dict，非 PTY 放文本 str。"""
+        try:
+            if _use_iter_events:
+                for event in handle.iter_events():
+                    _stream_q.put(event)
+            else:
+                for chunk in handle.stream_stdout():
+                    _stream_q.put(chunk)
+        except Exception as e:
+            _stream_q.put(e)
+        finally:
+            _stream_done.set()
+
+    _stream_t = _threading.Thread(target=_stream_worker, daemon=True)
+    _stream_t.start()
+
+    # PTY wrapper 路径：done 事件从 NDJSON 流中提取（不需要 wait()）
+    _pty_done_extracted = False
+
+    try:
+        while not _stream_done.is_set():
+            try:
+                item = _stream_q.get(timeout=5)  # 5s 轮询间隔
+            except _queue.Empty:
+                # 没有输出——检查静默超时
+                if time.time() - _last_output > _SILENT_TIMEOUT:
+                    log.warning(f"{label}cloud sandbox silent timeout {_SILENT_TIMEOUT}s, killing")
+                    try:
+                        handle.kill()  # 先 kill 远端进程
+                    except Exception:
+                        pass
+                    # BUG-B 修复：不调 sandbox.__exit__——让 cloud_worker finally 统一处理 kill + exit
+                    yield ("done", {
+                        "exit_code": -1, "text": "".join(collected_text),
+                        "oc_session_id": session_id,
+                        "errors": [f"silent timeout after {_SILENT_TIMEOUT}s"],
+                        "stderr": "",
+                        "sandbox_id": getattr(sandbox, "_sandbox_id", ""),
+                    })
+                    return
+                continue
+
+            if isinstance(item, Exception):
+                log.warning(f"{label}cloud sandbox stream error: {item}")
+                break
+
+            # PTY wrapper 路径：item 是 NDJSON 事件 dict
+            if _use_iter_events and isinstance(item, dict):
+                evt_type = item.get("type", "")
+                if not evt_type:
+                    continue
+                _last_output = time.time()
+
+                if evt_type == "text":
+                    content = item.get("content", "")
+                    redacted = _redact_text(content)
+                    collected_text.append(redacted)
+                    yield ("text", redacted)
+                elif evt_type == "reasoning":
+                    yield ("reasoning", _redact_text(item.get("content", "")))
+                elif evt_type == "tool_use":
+                    yield ("tool_use", {"tool": item.get("tool", ""), "input": item.get("input", {})})
+                elif evt_type == "tool_finish":
+                    yield ("tool_finish", _redact_text(item.get("content", "")))
+                elif evt_type == "tool_result":
+                    yield ("tool_result", _redact_text(item.get("content", "")))
+                elif evt_type == "error":
+                    # 引擎报错——yield 给上层，不丢弃
+                    _err_msg = _redact_text(item.get("content", ""))
+                    log.warning(f"{label}engine error event: {_err_msg[:200]}")
+                    yield ("text", f"[engine error] {_err_msg}")
+                elif evt_type == "step_start":
+                    yield ("step_start", item.get("sessionID", ""))
+                elif evt_type == "step_finish":
+                    yield ("step_finish", item.get("tokens", 0))
+                elif evt_type == "done":
+                    # wrapper 输出的最终结果——提取 exit_code/session_id
+                    _pty_done_extracted = True
+                    _done_exit = item.get("exit_code", -1)
+                    _done_stop = item.get("stop_reason", "")
+                    _done_sid = item.get("session_id", "")
+                    _done_errors = item.get("errors", [])
+                    # 如果有 collected_text，用 collected_text 作为 final_text
+                    final_text = _redact_text("".join(collected_text))
+                    _refresh_stop.set()
+                    if _redact_engine:
+                        _redact_engine.clear()
+                    _sandbox_id = getattr(sandbox, "_sandbox_id", "")
+                    log.info(f"{label}cloud sandbox done (wrapper): exit={_done_exit}, text_len={len(final_text)}")
+                    yield ("done", {
+                        "exit_code": _done_exit,
+                        "text": final_text,
+                        "oc_session_id": _done_sid or session_id,
+                        "errors": _done_errors,
+                        "stderr": "",
+                        "sandbox_id": _sandbox_id,
+                    })
+                    return
+                # 未知事件类型——记日志丢弃
+                else:
+                    # P2-15 修复：未知事件类型提升到 warning，便于发现协议变更
+                    log.warning(f"{label}unknown ndjson event type: {evt_type}")
+            else:
+                # 非 PTY 路径：item 是裸文本 str
+                if item:
+                    _last_output = time.time()
+                    redacted = _redact_text(item)
+                    collected_text.append(redacted)
+                    yield ("text", redacted)
+
+        # 线程结束——消费剩余队列
+        while not _stream_q.empty():
+            item = _stream_q.get_nowait()
+            if isinstance(item, Exception):
+                break
+            if _use_iter_events and isinstance(item, dict):
+                evt_type = item.get("type", "")
+                if evt_type == "text":
+                    redacted = _redact_text(item.get("content", ""))
+                    collected_text.append(redacted)
+                    yield ("text", redacted)
+                elif evt_type == "done":
+                    _pty_done_extracted = True
+            elif item:
+                redacted = _redact_text(item)
+                collected_text.append(redacted)
+                yield ("text", redacted)
+    except Exception as e:
+        log.warning(f"{label}cloud sandbox stream outer error: {e}")
+
+    # PTY wrapper 路径：done 事件已从 NDJSON 流提取，不需要 wait()
+    if _pty_done_extracted:
+        _refresh_stop.set()
+        if _redact_engine:
+            _redact_engine.clear()
+        return
+
+    # 非 PTY 路径：等待完成（超时 kill 远端进程）
+    try:
+        result = handle.wait(timeout=max(max_exec_seconds - 60, 60))
+        exit_code = result.exit_code
+        final_text = _redact_text(result.stdout or "".join(collected_text))
+        stderr = _redact_text(result.stderr or "")
+    except Exception as e:
+        log.error(f"{label}cloud sandbox wait failed: {e}, killing remote process")
+        try:
+            handle.kill()  # 超时杀远端进程
+        except Exception:
+            pass
+        exit_code = -1
+        final_text = _redact_text("".join(collected_text))
+        stderr = str(e)
+
+    # 停止 refresh 线程
+    _refresh_stop.set()
+
+    # 撤销 proxy token——cloud_worker finally 已统一处理，此处不重复撤销
+
+    # 清理脱敏引擎
+    if _redact_engine:
+        _redact_engine.clear()
+
+    # 每环节新建——sandbox_id 放入 done event，kill 由 cloud_worker finally 统一处理
+    _sandbox_id = getattr(sandbox, '_sandbox_id', '')
+
+    log.info(f"{label}cloud sandbox done: exit={exit_code}, text_len={len(final_text)}")
+    if exit_code != 0:
+        log.warning(f"{label}cloud sandbox exit={exit_code} text={final_text[:300]!r} stderr={stderr[:300]!r}")
+    yield ("done", {
+        "exit_code": exit_code,
+        "text": final_text,
+        "oc_session_id": session_id,
+        "errors": [] if exit_code == 0 else [stderr[:500]],
+        "stderr": stderr,
+        "sandbox_id": _sandbox_id,
+    })
+
+def dispatch_execution(sandbox, backend, prompt: str, cwd: str,
+                        proc_env: dict, session_id: str = "",
+                        label: str = "", max_exec_seconds: int = 600,
+                        use_session_id: str = "",
+                        ) -> Generator:
+    """云沙箱执行分叉入口。sandbox 必须已 __enter__。
+
+    只服务 cloud_worker 和 hermes_acp。bwrap 路径不走这里
+    （stream_agent 自己 Popen，已删 cloud 分支）。
+    非 cloud sandbox 传入时 raise（fail-fast）。
+
+    Args:
+        sandbox: 已 __enter__ 的 CloudSandbox 实例
+        backend: AgentBackend 实例（hermes/opencode/codearts）
+        prompt: agent prompt
+        cwd: 沙箱内工作目录
+        proc_env: 环境变量（含 _LLM_* / BOT_GITCODE_TOKEN 等）
+        session_id: agent 会话 ID
+        label: 日志前缀
+        max_exec_seconds: 最大执行时间
+        use_session_id: 覆盖 session_id
+
+    Yields:
+        tuple[str, dict]: ("text", chunk) / ("done", result_dict) / ("error", msg)
+    """
+    if not is_cloud_sandbox(sandbox):
+        raise RuntimeError(f"dispatch_execution only for cloud sandbox, got {type(sandbox).__name__}")
+    proc_env["GRAPE_SANDBOX_MODE"] = "cloud_sdk"
+    log.info(f"{label}{backend.name} sandboxed via cloud SDK (mode=cloud_sdk)")
+    yield from _run_cloud_sandbox(
+        sandbox, backend, prompt, cwd, proc_env, session_id,
+        label, max_exec_seconds, use_session_id or session_id,
+    )
+
+
+# deprecated alias——减少一次性破坏，新代码用 dispatch_execution
+_dispatch_execution = dispatch_execution
+
+
+async def dispatch_execution_async(sandbox, backend, prompt, cwd, proc_env,
+                                   session_id="", label="", max_exec_seconds=600,
+                                   use_session_id=""):
+    """异步桥接：在线程池中消费 dispatch_execution 同步生成器，逐事件 yield。
+
+    和 agent.py 的 _stream_runtime_async 同理——同步生成器的 readline() 阻塞
+    移到后台线程，事件循环持续调度 claim/heartbeat。
+
+    Args:
+        sandbox: 已 __enter__ 的 CloudSandbox 实例
+        backend: AgentBackend 实例
+        prompt: agent prompt
+        cwd: 沙箱内工作目录
+        proc_env: 环境变量
+        session_id: agent 会话 ID
+        label: 日志前缀
+        max_exec_seconds: 最大执行时间
+
+    Yields:
+        tuple[str, Any]: 事件类型 + 数据
+    """
+    import queue as _queue
+    import threading as _threading
+    import asyncio
+    q: _queue.Queue = _queue.Queue(maxsize=256)
+    sentinel = object()
+
+    def _produce():
+        try:
+            for evt in dispatch_execution(
+                sandbox, backend, prompt, cwd, proc_env,
+                session_id=session_id, label=label,
+                max_exec_seconds=max_exec_seconds,
+                use_session_id=use_session_id,
+            ):
+                q.put(evt, timeout=30)  # 阻塞 put，30s 超时（不 busy-wait）
+        except Exception as e:
+            log.warning(f"dispatch_execution producer error: {e}")
+            q.put(("error", str(e)))
+        finally:
+            q.put(sentinel)
+
+    _t = _threading.Thread(target=_produce, daemon=True)
+    _t.start()
+    while True:
+        try:
+            evt = q.get_nowait()
+        except _queue.Empty:
+            await asyncio.sleep(0.05)  # 50ms 轮询
+            continue
+        if evt is sentinel:
+            break
+        yield evt

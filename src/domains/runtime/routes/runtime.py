@@ -6,26 +6,18 @@ M3：/api/runtime/* 协议端点（register/heartbeat/claim/report），仅 rta_
 """
 
 import asyncio, contextlib, hashlib, json, os, threading
-
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
-
-from pydantic import BaseModel
-
+from pydantic import BaseModel, model_validator
 from src.api.deps import require_no_session_token, require_org_member
-
 from src.domains.runtime.engine.health import apply_runtime_state
-
 from src.kernel.config import log
 from src.kernel.domain_db import cursor as _domain_cursor
 
 from src.api.time_utils import normalize_event_time
-
 from src.kernel.session_manager import db, db_lock
-
 from src.domains.runtime.engine import service
-
 from src.domains.runtime.engine.health import apply_runtime_state, parse_dt  # Issue #1496 unified writer
 
 # Issue #1982 复审：spawn_failed 独立计数兜底阈值——连续 N 次 spawn_failed（资源类
@@ -107,14 +99,14 @@ def _register_healthy_guard(c, rid: int, reported: bool) -> int:
         log.warning(f"register healthy-guard failed (runtime={rid}): {_ge}")
         return 1 if reported else 0
 
+
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
 
 # Worker 包下载并发限制（防止多 worker 同时下载占满带宽）
 _PKG_DOWNLOAD_LIMIT = int(os.environ.get("PKG_DOWNLOAD_MAX_CONCURRENT", "5"))
-
 _pkg_download_count = 0
-
 _pkg_download_lock = threading.Lock()
+
 
 # ===== rta_ 凭据认证中间件（M3，D2 凭据隔离）=====
 def _auth_credential(request: Request) -> int:
@@ -137,6 +129,56 @@ def _auth_credential(request: Request) -> int:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "runtime credential revoked or not found"})
     return row[0]
 
+
+@dataclass
+class CredentialContext:
+    """[沙箱迁移] 认证层返回的凭证对象——一次查表，认证 + 授权两层消费（i7 移植）。
+
+    scope/owner 等字段来自 runtime_credentials 表（token 签发时写死），
+    不是来自注册请求体——注册请求不能篡改 scope。
+    """
+    id: int
+    scope: str            # global / repo / user
+    owner_name: str       # 用户名（user scope）或空
+    owner_id: str         # user scope 时对齐 user_accounts.id；repo scope 时为 repo_key
+    repo_key: str         # repo scope 时绑定的仓库全名
+
+
+def _require_credential_ctx(request: Request) -> CredentialContext:
+    """[沙箱迁移] 完整凭证上下文（新调用方）。
+
+    解析 Authorization: Bearer rta_*** → sha256 → 查 runtime_credentials(status=active)。
+    user scope 时 LEFT JOIN user_accounts 解析 owner_id 为数值 ID。
+    """
+    token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
+    if not token.startswith("rta_"):
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "invalid runtime credential"})
+    h = hashlib.sha256(token.encode()).hexdigest()
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT rc.id, rc.scope, rc.owner_name, rc.owner_id, rc.repo_key, ua.id "
+            "FROM runtime_credentials rc "
+            "LEFT JOIN user_accounts ua ON rc.owner_name = ua.username "
+            "WHERE rc.token_hash=? AND rc.status='active'",
+            (h,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "runtime credential revoked or not found"})
+    _scope = (row[1] or "global").strip().lower()
+    if _scope == "user" and row[5]:
+        _owner_id = str(row[5])
+    else:
+        _owner_id = row[3] or ""
+    return CredentialContext(
+        id=row[0],
+        scope=_scope,
+        owner_name=row[2] or "",
+        owner_id=_owner_id,
+        repo_key=row[4] or "",
+    )
+
+
 def _client_ip(request: Request) -> str:
     """解析来源 IP（经 nginx 反代优先 X-Forwarded-For；仅展示用，不入唯一键，见 multi-runtime-instance-design §3.2）。"""
     xff = request.headers.get("X-Forwarded-For", "")
@@ -144,21 +186,25 @@ def _client_ip(request: Request) -> str:
         return xff.split(",")[0].strip()
     return request.client.host if request.client else ""
 
+
 class RuntimeRegBody(BaseModel):
     device_name: str = ""
     cli_version: str = ""
     runtimes: list[dict] = []
     local_skills: list[dict] = []
 
+
 class RuntimeInfo(BaseModel):
     name: str
     version: str = ""
     healthy: bool = True
 
+
 class LogLineBody(BaseModel):
     ts: str = ""
     level: str = ""
     message: str = ""
+
 
 class HeartbeatBody(BaseModel):
     runtime_ids: list[int] = []
@@ -173,16 +219,20 @@ class HeartbeatBody(BaseModel):
     log_lines: list[LogLineBody] = []
     probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
 
+
 class TaskStartBody(BaseModel):
     pass
+
 
 class ProgressBody(BaseModel):
     summary: str = ""
     step: int = 0
     total: int = 0
 
+
 class MessagesBody(BaseModel):
     messages: list = []
+
 
 class RecoverOrphansBody(BaseModel):
     """Issue #1750：worker 自报活跃任务白名单（可选）。
@@ -192,6 +242,7 @@ class RecoverOrphansBody(BaseModel):
     旧版 worker 发空 body → 默认空列表，行为等同现状（字段可选、平滑兼容）。
     """
     active_task_ids: list[str] = []
+
 
 class UsageBody(BaseModel):
     """LLM 用量上报。
@@ -212,6 +263,7 @@ class UsageBody(BaseModel):
     cost_status: str = ""
     source: str = ""          # 采集来源:report/codex/opencode/hermes/hwcloud(:辅助任务)
 
+
 class CompleteBody(BaseModel):
     result_text: str = ""
     exit_code: int = 0
@@ -220,14 +272,21 @@ class CompleteBody(BaseModel):
     engine: str = ""
     run_token: str = ""  # Step 4：认领时刻 started_at，补报守卫
 
+
 class FailBody(BaseModel):
     error: str = ""
     failure_reason: str = ""
     exit_code: int = -1
     run_token: str = ""  # Step 4：认领时刻 started_at，补报守卫
 
+
+# ===== 认证中间件 =====
+
 def _require_credential(request: Request) -> int:
     return _auth_credential(request)
+
+
+# ===== 协议端点（M3）=====
 
 def _resolve_probe_fresh_window() -> int:
     """解析 register healthy-guard 探活新鲜窗口（秒）。
@@ -263,54 +322,18 @@ def _resolve_probe_fresh_window() -> int:
         return _default
     return _window
 
-def _register_healthy_guard(c, rid: int, reported: bool) -> int:
-    """Issue #700：register 降级守卫——已 healthy 且探活新鲜的行不被瞬时探测打回 0。
 
-    震荡根因：worker re-register（每 300s）用 ACP 握手探测（15s 总闸）判
-    healthy，Windows 冷启动易超时 → 上报 False；而心跳探活（每 600s）真跑
-    ACP 成功后把 healthy 升回 1。两写入源打架导致 healthy 大部分时间为 0。
 
-    守卫规则（仅作用于 UPDATE 分支的 1→0 方向）：
-    - DB 行 healthy=1 且 probe_status='ok' 且 probe_last 距今 ≤ 新鲜窗口
-      （默认 2×RUNTIME_PROBE_INTERVAL=1200s，env RUNTIME_PROBE_INTERVAL 可调）
-      → 保持 1（探活方为更权威的端到端判定，瞬时握手超时不降级）；
-    - 探活过期 / probe_status 非 ok / 已不健康 / 上报 True → 不干预
-      （真实故障仍由心跳连败路径（probe_fail_count≥2 → 0）正常摘除；
-      spawn_failed 另有独立计数 probe_spawn_fail_count 兜底，见 runtime_heartbeat）。
-
-    INSERT 分支（新引擎首注册）不经此函数——上报值原样生效。
-    """
+def _parse_ri_platform(ri_raw) -> str:
+    """[沙箱迁移] 从 runtime_info JSON 提取 platform（cloud_worker 注册的云引擎元数据，i7 移植）。"""
     try:
-        row = c.execute(
-            "SELECT healthy, probe_status, probe_last FROM agent_runtimes WHERE id=?",
-            (rid,)).fetchone()
-        if not row:
-            return 1 if reported else 0
-        cur_healthy, probe_status, probe_last = (row[0] or 0), (row[1] or ""), (row[2] or "")
-        if reported or not cur_healthy:
-            return 1 if reported else 0
-        # 仅剩「当前 healthy=1、上报 False」的降级方向需要守卫
-        if (probe_status or "").strip().lower() != "ok":
-            return 0
-        _window = _resolve_probe_fresh_window()
-        try:
-            _last = datetime.fromisoformat(probe_last)
-            if _last.tzinfo is None:
-                _last = _last.replace(tzinfo=timezone.utc)
-            fresh = (datetime.now(timezone.utc) - _last).total_seconds() <= _window
-        except Exception:
-            fresh = False
-        if fresh:
-            log.info(f"register healthy-guard: runtime={rid} probe ok within {_window}s, "
-                     f"keep healthy=1 (transient ACP check downgrade suppressed)")
-            return 1
-        return 0
-    except Exception as _ge:
-        # 守卫自身异常绝不阻塞注册主链路（保守：按上报值）
-        log.warning(f"register healthy-guard failed (runtime={rid}): {_ge}")
-        return 1 if reported else 0
+        import json as _json
+        _ri = _json.loads(ri_raw) if isinstance(ri_raw, str) and ri_raw.strip() else (ri_raw or {})
+        return (_ri.get("platform") or "").strip() if isinstance(_ri, dict) else ""
+    except Exception:
+        return ""
 
-@router.post("/register")
+@router.post("/register", operation_id="runtime_register", summary="Register worker engines", description="Worker credential auth + idempotent agent_runtimes upsert by instance key; returns authoritative runtime ids.")
 def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int = Depends(_require_credential)):
     """凭据校验 + 按实例键 upsert agent_runtimes（幂等），返回 server 权威 runtime IDs。
 
@@ -363,17 +386,20 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             except Exception as _acc_e:
                 # 账号域不可用不阻断注册主链路（owner_id 保持凭据行原值），但要留痕
                 log.debug(f"register owner_id align by username skipped ({cred_row[1]}): {_acc_e}")
+        # Issue #646：注册前确保凭据有 credential_uid（UUIDv4，一次性终身不变）；
+        # engine_uid 由服务端按自然键（credential_uid|name|scope|owner_id|host_name）
+        # 确定性派生（UUIDv5）——本机 worker 零配置，重复注册/表重建 uid 不漂移。
+        from src.domains.mgmt.user.db import ensure_credential_uid
+        from src.api.engine_uid import derive_engine_uid, cloud_anchor_from_runtime_info
+        from src.domains.mgmt.user.db import rebase_engine_uid_references
+        _cred_uid = ensure_credential_uid(credential_id, c)
         # local_skills：per-engine skill 列表，按 engine name 匹配 runtime 行
         skills_by_name = {}
         for ls in body.local_skills or []:
             eng = (ls.get("engine") or "").strip().lower()
             if eng:
                 skills_by_name[eng] = json.dumps(ls.get("skills") or [], ensure_ascii=False)
-        # Issue #654：注册前先按 (credential_id, lower(name)) 合并历史重复行
-        # （保留 MAX(id)，capabilities/tags_user_set 迁移到存活行），
-        # 避免 upsert 键收敛后与旧 (scope, owner_id) 唯一约束撞车；映射在
-        # commit 后统一 remap 引用 + 输出结构化事件。
-        from src.domains.runtime.engine.engine_select import merge_duplicate_engine_rows, remap_engine_references
+        from src.domains.runtime.engine.engine_select import merge_duplicate_engine_rows
         _rid_map = merge_duplicate_engine_rows(credential_id, c)
         for rt in body.runtimes or []:
             name = (rt.get("name") or "").strip().lower()
@@ -393,6 +419,40 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                           (credential_id, name))
                 continue
             _ls_json = skills_by_name.get(name, "[]")
+            # Issue #646：engine_uid 优先查找（UUIDv5 稳定键，表重建 uid 不漂移）；
+            # 未迁移旧库（缺 engine_uid 列）回退 #654 legacy 匹配。
+            # Issue #868 交叉预警修正：云引擎（i5 四段名，engine_type/provider_id/
+            # template_id 不可变锚透传）派生时 name 不参与——模板/Provider 改名
+            # （name 随 refresh 刷新）uid 不漂移；普通引擎无锚走 legacy 公式零回归。
+            # Issue #868 种子分量 id→uid 升格：i5 透传 provider_uid/template_uid
+            # （UUIDv4 终身不变）时种子切 uid 公式（id/name 均不参与，表重建/
+            # 库恢复零漂移）；仅 id 锚（老 worker）沿用 id 公式（过渡）。
+            _anchor = cloud_anchor_from_runtime_info(rt)
+            _engine_uid = derive_engine_uid(_cred_uid, name, cred_scope, owner_id, "",
+                                             engine_type=_anchor[0],
+                                             provider_id=_anchor[1],
+                                             template_id=_anchor[2],
+                                             provider_uid=_anchor[3],
+                                             template_uid=_anchor[4])
+            _old_uid = ""
+            try:
+                c.execute("SELECT id, scope, owner_id, repo_key, org_id FROM agent_runtimes "
+                          "WHERE engine_uid=? LIMIT 1", (_engine_uid,))
+                row = c.fetchone()
+            except Exception:
+                row = None   # 未迁移旧库（缺 engine_uid 列）回退 legacy 匹配
+            if row is None and any(_anchor):
+                # 锚定过渡（双读兼容）：锚在场 + uid-first 未命中（存量行 uid 按旧键
+                # 含四段名派生，或库缺列）时，取 legacy 行存量旧键 uid 供改绑；
+                # 缺列/无行容错为 ''
+                try:
+                    _ou = c.execute("SELECT engine_uid FROM agent_runtimes "
+                                    "WHERE credential_id=? AND lower(name)=? "
+                                    "ORDER BY id DESC LIMIT 1",
+                                    (credential_id, name)).fetchone()
+                    _old_uid = (_ou[0] or "") if _ou else ""
+                except Exception:
+                    _old_uid = ""
             # Issue #654：upsert 查找键收敛为 (credential_id, lower(name))——
             # scope/owner_id/org_id/repo_key 是凭据派生属性，命中既有行后原地同步，
             # 引擎 id 天然稳定（scope 往返切换不再 INSERT 新行 + id 全量变更）。
@@ -416,33 +476,66 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             # 不覆盖既有值——未升级 worker 重注册不会抹掉历史/兜底值，同 #658 模式）
             # 注意：UPDATE/INSERT 两个分支都要用，定义必须提到分支外
             _model_name = str(rt.get("model") or "").strip()[:120]
+            _ri_val = rt.get("runtime_info") or "{}"
+            _ri_platform = (rt.get("provider") or "").strip() or _parse_ri_platform(_ri_val)
+            _ri_type = (rt.get("runtime_type") or "").strip() or ("cloud" if _ri_platform else "local")
             if row:
                 rid = row[0]
 
                 # Issue #700：降级守卫——已 healthy 且探活新鲜的行不被 worker
                 # 瞬时 ACP 握手超时打回 0（UPDATE 的 1→0 方向过守卫）
-                # （健康值经 _register_healthy_guard，其余字段保留 #654 role_tags/凭据同步）
-                # Issue #1496：status+last_seen_at 改走统一写入口 apply_runtime_state
-                # （同事务写，含遗留 health 列派生同步），消除在线态二次写窗口。
-                apply_runtime_state(c, rid, "online", datetime.now(timezone.utc).isoformat())
-                _upd_sql = ("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, cli_path=?, local_skills=?, worker_version=?"
-                            + (", role_tags=?" if _role_tags_json else "")
-                            + (", model_name=?, model_source='worker_report', model_reported_at=?" if _model_name else "")
-                            + " WHERE id=?")
-                # 参数顺序 bug 修复（#865 基线缺陷，2026-11-10 真机实证）：rid 必须是
-                # 最后一个参数（对应 WHERE id=?）——旧实现把 rid 固定在元组第 6 位再
-                # 追加 role_tags/model 值，一旦带上 model 分支占位符与参数错位，
-                # sqlite binding 异常 → 该引擎行整个 UPDATE 失败（表现为「检测到
-                # 模型的引擎 worker_version 卡旧版且 model_name 恒空」；INSERT 新行
-                # 路径参数固定无误，故首台远程 Worker 首注册侥幸成功）。
-                _upd_args = [rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
-                             rt.get("cli_path", ""), _ls_json, body.cli_version]
-                if _role_tags_json:
-                    _upd_args.append(_role_tags_json)
-                if _model_name:
-                    _upd_args += [_model_name, datetime.now(timezone.utc).isoformat()]
-                _upd_args.append(rid)
-                c.execute(_upd_sql, _upd_args)
+                # （健康值经 _register_healthy_guard，其余字段保留 #654/#658/凭据同步）；
+                # Issue #646：注册回写 engine_uid/credential_uid 稳定键。
+                # [2026-11-15 空壳修复] 云元数据三值定义已提升至 if row 分支外（本函数
+                # 上方），INSERT 分支同用——原只在 UPDATE try 内定义，新引擎行首插
+                # 落列默认 local/'{}'/''，M1 E2E 引擎 30 空壳根因。
+                try:
+                    # [沙箱迁移 e1ab9a6bc] 注册回写 runtime_type/runtime_info/provider——
+                    # 云引擎（cloud_worker）的平台/模板元数据；本地引擎保持 local/{} 零变化
+                    # Issue #1496：status+last_seen_at 改走统一写入口 apply_runtime_state
+                    # （同事务写，含遗留 health 列派生同步），消除在线态二次写窗口。
+                    apply_runtime_state(c, rid, "online", datetime.now(timezone.utc).isoformat())
+                    # Issue #865：配置模型（worker 上报本机配置解析结果；空=未上报，
+                    # 不覆盖既有值——同 #658 模式）。参数顺序：rid 必须最后（#865 基线
+                    # 缺陷修复——占位符与参数错位会让整个 UPDATE 失败）。
+                    _model_name = str(rt.get("model") or "").strip()[:120]
+                    c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, cli_path=?, local_skills=?, worker_version=?, engine_uid=?, credential_uid=?, runtime_info=?, provider=?, runtime_type=?"
+                              + (", role_tags=?" if _role_tags_json else "")
+                              + (", model_name=?, model_source='worker_report', model_reported_at=?" if _model_name else "")
+                              + " WHERE id=?",
+                              (rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
+                               rt.get("cli_path", ""), _ls_json, body.cli_version,
+                               _engine_uid, _cred_uid,
+                               _ri_val if isinstance(_ri_val, str) and _ri_val.strip() else "{}",
+                               _ri_platform, _ri_type)
+                              + ((_role_tags_json,) if _role_tags_json else ())
+                              + (( _model_name, datetime.now(timezone.utc).isoformat()) if _model_name else ())
+                              + (rid,))
+                except Exception:
+                    # 未迁移旧库（缺 uid 列）降级 legacy 更新（保留 #654/#658/#700 语义）
+                    apply_runtime_state(c, rid, "online", datetime.now(timezone.utc).isoformat())
+                    _model_name = str(rt.get("model") or "").strip()[:120]
+                    c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, cli_path=?, local_skills=?, worker_version=?"
+                              + (", role_tags=?" if _role_tags_json else "")
+                              + (", model_name=?, model_source='worker_report', model_reported_at=?" if _model_name else "")
+                              + " WHERE id=?",
+                              (rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
+                               rt.get("cli_path", ""), _ls_json, body.cli_version)
+                              + ((_role_tags_json,) if _role_tags_json else ())
+                              + (( _model_name, datetime.now(timezone.utc).isoformat()) if _model_name else ())
+                              + (rid,))
+                else:
+                    # Issue #868 锚定过渡（双读兼容）：legacy 命中行存量旧键 uid（含
+                    # 四段名派生）与新锚 uid 不一致 → 注册即改绑（引擎行 uid + 池/
+                    # 能力/任务/会话引用轨道整体 rebase，不留孤儿，改名/合流零漂移）
+                    if _old_uid and _old_uid != _engine_uid:
+                        _rb = rebase_engine_uid_references(c, _old_uid, _engine_uid)
+                        log.info("engine_change_event: " + json.dumps(
+                            {"event": "engine_uid_anchor_rebased", "runtime_id": rid,
+                             "engine": name, "old_engine_uid": _old_uid,
+                             "new_engine_uid": _engine_uid, "report": _rb},
+                            ensure_ascii=False))
+
                 # Issue #654：凭据派生属性原地同步（纵深防御：即使 scope 切换路径
                 # 漏改，注册也会把引擎行拉回与凭据一致），变化时输出结构化事件。
                 if ((row[1] or "") != cred_scope or (row[2] or "") != owner_id
@@ -453,21 +546,53 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                     _ev = {"event": "engine_scope_synced", "credential_id": credential_id,
                            "runtime_id": rid, "engine": name,
                            "old": {"scope": row[1] or "", "owner_id": row[2] or "",
-                                   "repo_key": row[3] or "", "org_id": row[4] or ""},
+                                   "repo_key": row[3] or "", "org_id": row[4] or 0},
                            "new": {"scope": cred_scope, "owner_id": owner_id,
                                    "repo_key": cred_repo_key, "org_id": cred_org_id}}
                     log.info("engine_change_event: " + json.dumps(_ev, ensure_ascii=False))
 
             else:
-                c.execute(
-                    # Issue #865：新建行同样落模型三字段（原来只有 UPDATE 分支带，新引擎首注册会丢模型）
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id, model_name, model_source, model_reported_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
-                     1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version, cred_org_id,
-                     _model_name, "worker_report" if _model_name else "",
-                     datetime.now(timezone.utc).isoformat() if _model_name else ""))
+                try:
+                    c.execute(
+                        # 合并: HEAD #865 模型三字段 + #646 uid 稳定键 + role_tags
+                        # [2026-11-15 空壳修复] 首次 INSERT 补 runtime_info/provider/
+                        # runtime_type 三列——与 UPDATE 分支（:441-470 云元数据回写）同源
+                        # 同值。原 INSERT 不含这三列 → 新引擎行落列默认 local/'{}'/''；
+                        # 若 worker 的 hash-diff 下一轮判定「未变化」跳过注册（
+                        # _refresh_templates 的 _changed 按 runtime_info 对比，但
+                        # hash 含本地列表全量），空壳永不回填 → 认领时 build_context
+                        # 读到 provider='' 误判本地引擎 → dispatch_execution only for
+                        # cloud sandbox, got BwrapSandbox（M1 E2E 引擎 30 实证：
+                        # INSERT 空壳，靠第二轮 UPDATE 或手工修才转 cloud）。
+                        "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id, role_tags, engine_uid, credential_uid, runtime_info, provider, runtime_type, model_name, model_source, model_reported_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
+                         1 if rt.get("healthy", True) else 0, 1, "online",
+                         datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version, cred_org_id, _role_tags_json, _engine_uid, _cred_uid,
+                         _ri_val if isinstance(_ri_val, str) and _ri_val.strip() else "{}",
+                         _ri_platform, _ri_type,
+                         _model_name, "worker_report" if _model_name else "",
+                         datetime.now(timezone.utc).isoformat() if _model_name else ""))
+                except Exception:
+                    # 未迁移旧库（缺 uid 列）降级 legacy 插入（保留 #654/#658/#865 语义）
+                    c.execute(
+                        "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id, role_tags, model_name, model_source, model_reported_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
+                         1 if rt.get("healthy", True) else 0, 1, "online",
+                         datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version, cred_org_id, _role_tags_json,
+                         _model_name, "worker_report" if _model_name else "",
+                         datetime.now(timezone.utc).isoformat() if _model_name else ""))
                 rid = c.lastrowid
+            # Issue #1011：锚快照持久化（engine_type/provider_id/template_id/
+            # provider_uid/template_uid 五列，001 迁移加列）——派生源修正后
+            # 存量行可离线重算（002 重派生迁移消费）；未迁移旧库缺列时降级跳过。
+            try:
+                c.execute(
+                    "UPDATE agent_runtimes SET engine_type=?, provider_id=?, template_id=?, "
+                    "provider_uid=?, template_uid=? WHERE id=?",
+                    (_anchor[0] or "", _anchor[1] or "", _anchor[2] or "",
+                     _anchor[3] or "", _anchor[4] or "", rid))
+            except Exception:
+                pass
             # 自动写入默认 "all" 标签——新引擎默认可认领任意角色任务。
             # 若已有 capabilities 行则跳过（用户手动配置过标签的不覆盖）。
             # tags_user_set=1 时也跳过（用户已手动清空/设过标签，心跳不再自动补 'all'）
@@ -482,11 +607,34 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                     "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
                     "VALUES (?, 'all', 1, 50, 1, ?, ?)",
                     (rid, _now_ec, _now_ec))
+                # Issue #646：默认标签行同步 engine_uid（引用切换，孤儿防护）
+                try:
+                    c.execute(
+                        "UPDATE engine_capabilities SET engine_uid=? WHERE runtime_id=? AND (engine_uid IS NULL OR engine_uid='')",
+                        (_engine_uid, rid))
+                except Exception:
+                    pass
             # capabilities 写入后同步 agent_tags 派生缓存（注册路径原先漏了这一步，
             # 导致新机器 agent_tags 为空、前端按 tags 过滤时被漏掉——sre-personal-machine 修复）
             from src.domains.mgmt.routes.settings import _sync_agent_tags
             _sync_agent_tags(rid, c)
-            registered.append({"id": rid, "name": name})
+            # Issue #1208：三维度派生标签（engine:/scope:/scene:）落 capabilities 冒号行
+            # + JSON 快照刷新（selector 圈池数据底座；注册链先写，心跳链幂等收敛）
+            try:
+                from src.domains.runtime.engine.agent_tags import sync_derived_agent_tags as _sdat
+                _st_row = c.execute("SELECT scene_tags FROM agent_runtimes WHERE id=?", (rid,)).fetchone()
+                # [云引擎标签修复] engine: 维度按 engine_type 派生（云四段名不入标签）
+                _et = ""
+                try:
+                    _et = (json.loads(rt.get("runtime_info") or "{}").get("engine_type") or "")
+                except Exception:
+                    _et = ""
+                _sdat(c, rid, name, cred_scope, _st_row[0] if _st_row else "", engine_uid=_engine_uid,
+                      engine_type=_et)
+            except Exception as _at_e:
+                log.warning(f"runtime_register: agent_tags derive failed for {rid}: {_at_e}")
+            # Issue #646：返回双带 id+uid（新 worker 用 uid 落历史；旧版 worker 忽略 uid，混跑兼容）
+            registered.append({"id": rid, "name": name, "engine_uid": _engine_uid})
         db.commit()
     # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，
     # 验证完整链路：网络+签名+读取；空库返回空，worker 声明能力 false）
@@ -504,6 +652,7 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
     except Exception:
         pass
     return {"runtimes": registered, "server_url": _server_url(), "probe_url": probe_url}
+
 
 @router.post("/heartbeat")
 async def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int = Depends(_require_credential)):
@@ -682,6 +831,26 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
                                   (_actual, _rid))
             except Exception as _bre:
                 log.warning(f"heartbeat busy_slots reconcile failed: {_bre}")
+            # Issue #1208：心跳链派生标签刷新（scene_tags 维护/scope 切换随心跳幂等收敛；
+            # 只动冒号派生行，用户手设能力行不触碰）
+            try:
+                from src.domains.runtime.engine.agent_tags import sync_derived_agent_tags as _sdat_hb
+                for _rid in body.runtime_ids:
+                    _hb_row = c.execute(
+                        "SELECT r.name, r.scene_tags, r.engine_uid, COALESCE(rc.scope,'global'), r.runtime_info "
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.id=? AND r.credential_id=?", (_rid, credential_id)).fetchone()
+                    if _hb_row:
+                        _et_hb = ""
+                        try:
+                            _et_hb = (json.loads(_hb_row[4] or "{}").get("engine_type") or "")
+                        except Exception:
+                            _et_hb = ""
+                        # [云引擎标签修复] engine: 维度按 engine_type 派生（云四段名不入标签）
+                        _sdat_hb(c, _rid, _hb_row[0], _hb_row[3], _hb_row[1], engine_uid=_hb_row[2] or "",
+                                 engine_type=_et_hb)
+            except Exception as _at_e:
+                log.warning(f"heartbeat agent_tags derive failed: {_at_e}")
         try:
             c.connection.commit()
         except Exception:
@@ -738,6 +907,7 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
 
     return {"status": "ok", "cancelled_tasks": cancelled_tasks, "latest_version": _latest_ver}
 
+
 @router.get("/admin/event-bus", operation_id="runtime_event_bus", summary="Event bus debug")
 def event_bus_debug(user: dict = Depends(require_no_session_token)):
     """Debug endpoint: show event bus history and listeners."""
@@ -748,6 +918,9 @@ def event_bus_debug(user: dict = Depends(require_no_session_token)):
         "listeners": {k: len(v) for k, v in bus._listeners.items()},
         "total_events": len(bus.get_history()),
     }
+
+
+# ===== Issue #134: 机器健康度查询 API =====
 
 @router.get("/admin/machine-health", operation_id="runtime_machine_health", summary="Machine health overview", description="Machine health overview for all engines: {runtime_id, name, health_score, total_tasks, failed_tasks, consecutive_failures, failure_rate, health_abnormal, health_reason, last_failure_at, ...}. Issue #498: health_abnormal/health_reason expose the unified abnormality verdict (heartbeat_lost > consecutive_failures > low_score) with small-sample exemption and failure decay self-heal.")
 def machine_health_overview(user: dict = Depends(require_no_session_token)):
@@ -764,6 +937,7 @@ def machine_health_overview(user: dict = Depends(require_no_session_token)):
     for s in scores:
         s["engine_name"] = runtime_instance_name(s.get("runtime_id", 0))
     return {"engines": scores}
+
 
 @router.get("/admin/machine-health/{runtime_id}", operation_id="runtime_machine_health_detail", summary="Single runtime health detail", description="Health detail for a single engine. Issue #498: includes health_abnormal/health_reason (unified verdict), failed_tasks_effective (decayed-window failures) and last_failure_at for self-heal observability.")
 def machine_health_detail(runtime_id: int, user: dict = Depends(require_no_session_token)):
@@ -783,6 +957,7 @@ def machine_health_detail(runtime_id: int, user: dict = Depends(require_no_sessi
     data["engine_name"] = runtime_instance_name(runtime_id)
     return data
 
+
 @router.post("/admin/batch-recover", operation_id="runtime_batch_recover", summary="Batch recover stale tasks")
 def batch_recover_stale_tasks_api(user: dict = Depends(require_no_session_token)):
     """Manually trigger batch stale task recovery (Phase 5)."""
@@ -790,10 +965,74 @@ def batch_recover_stale_tasks_api(user: dict = Depends(require_no_session_token)
     result = batch_recover_stale_tasks()
     return result
 
+
 class RuntimeClaimBody(BaseModel):
     """v3.0：worker 能力动态声明（零落库）——claim 每次携带"""
     supports_obs_url: bool = False   # 本 worker 支持 OBS 直连（启动探测结果）
     prefer_fallback: bool = False    # 直连不稳，服务端直接给代拉模式
+    # Issue #520 bound claim：expected_task_id + expected_event_seq 成对可选字段。
+    # 二者必须成对提供（只传其一 → 422 明确拒绝）；提供时服务端在 db_lock 临界区内
+    # 原子校验目标任务身份，未命中返回无任务，绝不回退 FIFO。
+    expected_task_id: str = ""
+    expected_event_seq: int = 0
+
+    @model_validator(mode="after")
+    def _expected_pair(self):
+        if bool(self.expected_task_id) != bool(self.expected_event_seq):
+            raise ValueError(
+                "expected_task_id and expected_event_seq must be provided together")
+        return self
+
+
+def _require_runtime_admin(runtime_id: int, user: dict) -> None:
+    """扫雷⑨-H3：用户通道（JWT/API Key）写引擎配置的归属校验。
+
+    - session_token / api_key：作用域已限定，与 check_repo_access 同口径豁免；
+    - scope=user：仅 owner 本人（agent_runtimes.owner_id == 用户 id，Issue #654 口径）；
+    - scope=repo：仓库托管人（check_repo_access → managed_repos 归属）；
+    - scope=global：平台级共享引擎，维持现状放行（历史行为，不收窄）。
+    [rebase 并入 2026-11-12] 基线 post-fork 新增（62568298e）。
+    """
+    auth_type = user.get("auth_type", "jwt")
+    if auth_type in ("session_token", "api_key"):
+        return
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT scope, owner_id, repo_key FROM agent_runtimes WHERE id=?", (runtime_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+    scope, owner_id, repo_key = row[0] or "global", row[1] or "", row[2] or ""
+    if scope == "user":
+        if owner_id and owner_id == str(user.get("id") or ""):
+            return
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅引擎 owner 可修改该引擎配置"})
+    if scope == "repo":
+        try:
+            from src.api.deps import check_repo_access
+            # check_repo_access 契约：有权 → return None；无权 → raise HTTPException(403)。
+            # 不得当布尔判定——`if check_repo_access(...)` 会把成功的 None 当 False，
+            # 仓库托管人恒落 403（aw11 E-02 实测：zjj 保不了 s2 云引擎的场景标签）。
+            check_repo_access(user, repo_key)
+            return
+        except Exception:
+            pass
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库托管人可修改该引擎配置"})
+
+
+def _require_runtime_owned(runtime_id: int, credential_id: int) -> None:
+    """Issue #520：校验 runtime 归属当前 rta_ 凭据（agent_runtimes.credential_id）。
+
+    他人 runtime_id → 403（fail-closed，不泄露任务信息）。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=? AND credential_id=?",
+                  (runtime_id, credential_id))
+        if not c.fetchone():
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "message": "runtime not owned by this credential"})
+
 
 def _attach_skill_obs(task: dict) -> None:
     """v3.0：任务附 OBS 直连信息（claim 现签 URL——file_path 权威、永远最新）。
@@ -826,9 +1065,9 @@ def _attach_skill_obs(task: dict) -> None:
             _sid = resolve_skill_id(skill, repo_key=_task_repo, user_id=_task_uid)
             _okey = get_skill_object_key(_sid) if _sid else ""
         if not _okey:
-            # Issue #617：skill 按名未命中 → 按 agent_type 回退官方检查器（worker 无库，
-            # 服务端解析后以 skill_fallback 下发：名字 + id，worker 物化其 zip 并提示
-            # `grape skills detail --skill_id <id>`）
+            # [rebase 并入 2026-11-12] 基线 #617：skill 按名未命中 → 按 agent_type 回退
+            # 官方检查器（worker 无库，服务端解析后以 skill_fallback 下发：名字 + id，
+            # worker 物化其 zip 并提示 `grape skills detail --skill_id <id>`）
             try:
                 from src.domains.mgmt.user.db import resolve_official_checker_skill
                 _fb = resolve_official_checker_skill(task.get("agent_type") or "")
@@ -852,6 +1091,7 @@ def _attach_skill_obs(task: dict) -> None:
     except Exception as e:
         log.warning(f"attach skill_obs failed: {e}")
 
+
 @router.post("/runtimes/{runtime_id}/tasks/claim")
 def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
                         credential_id: int = Depends(_require_credential)):
@@ -860,8 +1100,16 @@ def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
     v3.0：能力声明（supports_obs_url/prefer_fallback）动态携带；
     任务附 skill_obs_url（claim 现签预签名 URL）——prefer_fallback
     worker 直接给 mode=server-fetch（跳过 URL 直连尝试）。
+
+    Issue #520：body 成对携带 expected_task_id/expected_event_seq 时透传服务层，
+    在 db_lock 临界区内原子校验目标身份（未命中返回无任务，不回退 FIFO）；
+    未提供 expected 保持原 FIFO 路径零改动（旧客户端零影响）。
     """
-    task = service.claim(runtime_id)
+    task = service.claim(
+        runtime_id,
+        expected_task_id=(body.expected_task_id or None) if body else None,
+        expected_event_seq=(body.expected_event_seq or None) if body else None,
+    )
     # 检查是否有 pending skill scan 指令
     scan_request = False
     if not task:
@@ -882,6 +1130,7 @@ def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
         else:
             _attach_skill_obs(task)
     return {"task": task, "scan_request": scan_request}
+
 
 @router.get("/runtimes/{runtime_id}/tags")
 async def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_require_credential)):
@@ -905,7 +1154,8 @@ def _get_tags_impl(runtime_id: int, credential_id: int):
     try:
         with _dbreg.cursor("runtime") as c:
             c.execute(
-                "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
+                "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 "
+                "AND tag NOT LIKE '%:%' ORDER BY tag",
                 (runtime_id,)
             )
             tags = [r[0] for r in c.fetchall()]
@@ -925,34 +1175,53 @@ def _get_tags_impl(runtime_id: int, credential_id: int):
         tags = []
     return {"tags": tags}
 
+
 @router.get("/tasks/{task_id}/env")
 def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credential)):
     """Return latest env (AK/SK + credentials) for a task from DB.
 
     Workers call this before executing to get fresh credentials,
     instead of relying on the env_extra snapshot from task creation time.
+
+    [沙箱迁移 i7 漏移植恢复 2026-11-11] cloud_worker: 返回 LLM 凭据（B 机器无 DB，
+    不能调 get_llm_credentials）——按 engine_type 两级查询: 引擎专属 → 通用兜底；
+    按 Provider 凭据 scope 路由来源（global/repo → 仓库 LLM 凭据，user → 用户 LLM 凭据）。
+    取不到返回 llm_cred_missing 让 worker 不建箱、任务 fail 带指引（spec A）。
     """
+    import json as _json
     from src.kernel.session_manager import db, db_lock
-    from src.domains.runtime.engine.service import _collect_server_env, sync_task_session_token
+    from src.domains.runtime.engine.service import _collect_server_env
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT user_id, account, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
+        c.execute("SELECT user_id, account, repo_key FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
     if not row:
         return {"env": {}}
-    user_id, account, runtime_id = row[0] or 0, row[1] or "", row[2] or 0
+    user_id, account, task_repo_key = row[0] or 0, row[1] or "", row[2] or ""
     env = _collect_server_env(user_id, account)
+    # [rebase 并入 2026-11-12] 基线 #1858/#990/#1745 三段（我方 SELECT 带 repo_key，
+    # runtime_id 单独补查供三面基址解析）
+    _task_runtime_id = 0
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT runtime_id FROM agent_tasks WHERE id=?", (task_id,))
+            _r = c.fetchone()
+            _task_runtime_id = (_r[0] or 0) if _r else 0
+    except Exception:
+        pass
     # Issue #1858：worker 执行前重拉任务 env 时，按任务 runtime 下发三面基址，
     # 覆盖历史任务/旧快照（此前只下发凭据，旁路路径仍可能缺 GRAPE_A2A_BASE_URL）。
     try:
         from src.kernel.prompt_builder import resolve_task_server_env
-        env.update(resolve_task_server_env(runtime_id))
+        env.update(resolve_task_server_env(_task_runtime_id))
     except Exception as _base_e:
         log.warning(f"runtime_task_env service base resolve failed for task={task_id}: {_base_e}")
     # Issue #990：会话 token 与 shell 环境快照同步——valid 时复用快照 token，
     # 失效/轮换时签发新 token 并回写 agent_tasks.env_extra，随后返回给 worker。
     # Issue #990：只同步 GRAPE_SESSION_TOKEN，不覆盖任务快照中的其它显式 env
     # （如 GRAPE_CLI_MODE），避免超出 Spec 范围改变 CLI 作用域语义。
+    from src.domains.runtime.engine.service import sync_task_session_token
     session_token = sync_task_session_token(task_id)
     if session_token:
         env["GRAPE_SESSION_TOKEN"] = session_token
@@ -963,7 +1232,66 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
         reconcile_task_scene_env(task_id, env)
     except Exception as _scene_e:
         log.warning(f"runtime_task_env scene reconcile failed for task={task_id}: {_scene_e}")
+
+    # ── LLM 凭据注入（i7 runtime.py:1060-1123 段恢复，canonical import）──
+    try:
+        engine_type = ""
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT r.runtime_info FROM agent_tasks t "
+                "LEFT JOIN agent_runtimes r ON t.runtime_id=r.id "
+                "WHERE t.id=?",
+                (task_id,),
+            )
+            _ri_row = c.fetchone()
+        if _ri_row and _ri_row[0]:
+            try:
+                _ri = _json.loads(_ri_row[0])
+                engine_type = _ri.get("engine_type", "") or ""
+            except Exception:
+                pass
+
+        # [repo-llm-credential 用户裁定 2026-10-30] 按沙箱平台凭据 scope 路由来源：
+        # 引擎所在 Provider 的关联凭据 scope=global/repo → 仓库 LLM 凭据（仓库资产；
+        # global 暂走仓库——组织界面就绪后迁移）；scope=user → 用户 LLM 凭据（原行为）。
+        # 跨级零回退；取不到返回 llm_cred_missing 让 worker 不建箱、任务 fail 带指引
+        # （spec A——消灭「静默跳过引擎死半路」盲区）。
+        _llm_mode, _llm_repo_key = "user", ""
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT rc.scope, rc.repo_key FROM agent_tasks t "
+                    "LEFT JOIN agent_runtimes r ON t.runtime_id=r.id "
+                    "LEFT JOIN sandbox_provider_config spc ON spc.id = "
+                    "  json_extract(r.runtime_info, '$.provider_id') "
+                    "LEFT JOIN runtime_credentials rc ON rc.id = spc.runtime_credential_id "
+                    "WHERE t.id=?",
+                    (task_id,),
+                )
+                _scope_row = c.fetchone()
+            if _scope_row and (_scope_row[0] in ("global", "repo")):
+                _llm_mode = "repo"
+                _llm_repo_key = task_repo_key or (_scope_row[1] or "")
+        except Exception:
+            pass
+        from src.domains.runtime.agents.sandbox.llm_cred_selector import select_llm_cred
+        with db_lock:
+            c = db.cursor()
+            _llm_row = select_llm_cred(c, user_id, engine_type, mode=_llm_mode, repo_key=_llm_repo_key)
+        if _llm_row:
+            env["_LLM_PROVIDER"], env["_LLM_API_KEY"], env["_LLM_BASE_URL"], env["_LLM_MODEL"] = _llm_row
+        else:
+            # spec A：显式失败标记 + 指引（worker 据此不建箱）
+            _src_zh = "仓库设置" if _llm_mode == "repo" else "用户设置"
+            return {"env": env, "llm_cred_missing": True, "llm_cred_source": _llm_mode,
+                    "llm_cred_hint": f"缺少 LLM 凭据：该任务使用{'仓库级' if _llm_mode == 'repo' else '个人级'}沙箱平台，"
+                                     f"请在【{_src_zh} → LLM 凭据】为引擎 {engine_type or 'common'} 配置后重试"}
+    except Exception as _e:
+        log.warning(f"task_env: attach LLM credentials failed: {_e}")
     return {"env": env}
+
 
 @router.post("/runtimes/{runtime_id}/tasks/claim-by-tag/{tag}")
 async def runtime_claim_by_tag(runtime_id: int, tag: str,
@@ -979,7 +1307,11 @@ def _claim_by_tag_impl(runtime_id: int, tag: str,
 
     Workers with engine tags can claim tasks matching their tag and scope.
     """
-    task = service.claim_by_tag(tag, runtime_id)
+    task = service.claim_by_tag(
+        tag, runtime_id,
+        expected_task_id=(body.expected_task_id or None) if body else None,
+        expected_event_seq=(body.expected_event_seq or None) if body else None,
+    )
     # 检查是否有 pending skill scan 指令（与 claim 端点一致）
     scan_request = False
     if not task:
@@ -998,6 +1330,363 @@ def _claim_by_tag_impl(runtime_id: int, tag: str,
         else:
             _attach_skill_obs(task)
     return {"task": task, "scan_request": scan_request}
+
+
+# ===== Issue #520：bound claim / 能力协商 / 许可对号 lookup（四件套，fail-closed）=====
+
+def _pending_scan_request(runtime_id: int, credential_id: int) -> bool:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT pending_skill_scan FROM agent_runtimes WHERE id=? AND credential_id=?",
+                  (runtime_id, credential_id))
+        _row = c.fetchone()
+        return bool(_row and _row[0])
+
+
+@router.post("/runtimes/{runtime_id}/tasks/claim-bound")
+def runtime_claim_bound(runtime_id: int, body: RuntimeClaimBody,
+                        credential_id: int = Depends(_require_credential)):
+    """Issue #520 bound claim：按 expected_task_id + expected_event_seq 原子领取指定任务。
+
+    - 鉴权：rta_ 凭据 + runtime 归属校验（他人 runtime → 403）。
+    - body 必须成对携带 expected 字段（缺 → 400；只传其一由模型校验 422 拒绝）。
+    - 未匹配返回 {"task": null}，不领取/不修改任何其他任务，绝不回退 FIFO。
+    - 未部署节点对本路径 404 → 客户端保持许可关闭（不回退通用 claim）。
+    """
+    _require_runtime_owned(runtime_id, credential_id)
+    if not body.expected_task_id or not body.expected_event_seq:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "claim-bound requires expected_task_id and expected_event_seq"})
+    task = service.claim(runtime_id,
+                         expected_task_id=body.expected_task_id,
+                         expected_event_seq=body.expected_event_seq)
+    scan_request = False
+    if not task:
+        scan_request = _pending_scan_request(runtime_id, credential_id)
+    else:
+        if body.prefer_fallback:
+            task["mode"] = "server-fetch"
+        else:
+            _attach_skill_obs(task)
+    return {"task": task, "scan_request": scan_request}
+
+
+@router.post("/runtimes/{runtime_id}/tasks/claim-by-tag-bound/{tag}")
+def runtime_claim_by_tag_bound(runtime_id: int, tag: str,
+                               body: RuntimeClaimBody,
+                               credential_id: int = Depends(_require_credential)):
+    """Issue #520 bound claim（tag 版）：tag + scope 条件不变，追加 expected 原子校验。
+
+    未匹配返回 {"task": null}，不回退 FIFO；归属校验同 claim-bound。
+    """
+    _require_runtime_owned(runtime_id, credential_id)
+    if not body.expected_task_id or not body.expected_event_seq:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "claim-by-tag-bound requires expected_task_id and expected_event_seq"})
+    task = service.claim_by_tag(tag, runtime_id,
+                                expected_task_id=body.expected_task_id,
+                                expected_event_seq=body.expected_event_seq)
+    scan_request = False
+    if not task:
+        scan_request = _pending_scan_request(runtime_id, credential_id)
+    else:
+        if body.prefer_fallback:
+            task["mode"] = "server-fetch"
+        else:
+            _attach_skill_obs(task)
+    return {"task": task, "scan_request": scan_request}
+
+
+@router.get("/runtimes/{runtime_id}/tasks/claim-capabilities")
+def runtime_claim_capabilities(runtime_id: int,
+                               credential_id: int = Depends(_require_credential)):
+    """Issue #520 能力协商（只读）：客户端 POST bound claim 前确认服务端能力。
+
+    能力位：bound_claim（claim-bound / claim-by-tag-bound）+ task_lookup（lookup）。
+    未部署节点 404 → 客户端保持许可关闭，不回退通用 claim。
+    """
+    _require_runtime_owned(runtime_id, credential_id)
+    return {
+        "runtime_id": runtime_id,
+        "capabilities": {
+            "bound_claim": True,
+            "task_lookup": True,
+        },
+    }
+
+
+@router.get("/runtimes/{runtime_id}/tasks/lookup")
+def runtime_task_lookup(runtime_id: int,
+                        expected_event_seq: int = 0,
+                        credential_id: int = Depends(_require_credential)):
+    """Issue #520 许可对号 lookup：按 expected_event_seq 精确查询许可目标任务。
+
+    - 鉴权：与 /runtimes/{id}/tags 同款（rta_ + 归属校验，他人 runtime → 403）。
+    - expected_event_seq 缺失或 <=0 → 400（旧任务 event_seq 空/0 不支持）。
+    - 纯验证性 SELECT：命中返回身份字段 {task_id, issue_id, event_seq, agent_type,
+      created_at}；未命中 {"task": null}（许可保留，等待目标入队）。
+    """
+    _require_runtime_owned(runtime_id, credential_id)
+    if not expected_event_seq or expected_event_seq <= 0:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "lookup requires a positive expected_event_seq"})
+    task = service.lookup_task_by_event_seq(runtime_id, expected_event_seq)
+    return {"task": task}
+
+
+# ===== Issue #1011：claim-by-uid 协议 v2 端点（双端点并存期）=====
+# 设计（docs/issue-868/claim-by-uid-v2-protocol-spec.md §2.1 勘误后口径）：
+# - v2 路由只做寻址键转换（uid → runtime_id），随后**直接调用 v1 路由函数**，
+#   服务层逻辑与 v1 完全共用（语义零漂移）；
+# - uid 命中 → 按该引擎行认领；uid 失效 + body.runtime_id 命中 → 回退 id 认领
+#   （并存期兜底）；双失效 → 404 UNKNOWN_ENGINE_UID（绝不静默 200 空任务）；
+# - v1 端点保留不变（旧 worker 唯一路径），v1 流量归零后阶段 5 统一下线。
+
+class RuntimeClaimBodyV2(RuntimeClaimBody):
+    """v2 claim body：v1 字段 + runtime_id 兜底锚（uid 失效时回退 id 认领）。"""
+    runtime_id: int = 0
+
+
+class HeartbeatBodyV2(HeartbeatBody):
+    """v2 心跳 body：v1 字段 + engine_uids 数组（uid 优先解析，失效回退 runtime_ids）。"""
+    engine_uids: list[str] = []
+
+
+class CompleteBodyV2(CompleteBody):
+    engine_uid: str = ""
+
+
+class FailBodyV2(FailBody):
+    engine_uid: str = ""
+
+
+class ProgressBodyV2(ProgressBody):
+    engine_uid: str = ""
+
+
+def _resolve_runtime_by_uid(engine_uid: str, fallback_runtime_id: int,
+                            credential_id: int) -> int:
+    """v2 寻址解析：uid → runtime_id（限本 rta_ 凭据），双失效 404 UNKNOWN_ENGINE_UID。
+
+    - uid 命中（agent_runtimes.engine_uid 且 credential_id 匹配）→ 返回该行 id；
+    - uid 未命中（失效：引擎删除/合流重派生窗口/未迁移 NULL uid）且
+      fallback_runtime_id 非 0 且命中本凭据 → 回退该行 id（并存期兜底）；
+    - 双失效 → 404（fail-fast，不静默造行；message 含 NULL uid 引擎的重注册提示）。
+    """
+    uid = (engine_uid or "").strip().lower()
+    if uid:
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT id FROM agent_runtimes WHERE engine_uid=? AND credential_id=? LIMIT 1",
+                (uid, credential_id)).fetchone()
+        if row:
+            return row[0]
+        log.warning(f"v2 resolve: engine_uid not found (stale?): uid={uid} "
+                    f"credential={credential_id} fallback_runtime_id={fallback_runtime_id}")
+    if fallback_runtime_id:
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT id FROM agent_runtimes WHERE id=? AND credential_id=? LIMIT 1",
+                (fallback_runtime_id, credential_id)).fetchone()
+        if row:
+            return row[0]
+    raise HTTPException(status_code=404, detail={
+        "code": "UNKNOWN_ENGINE_UID",
+        "message": f"engine_uid '{uid or '(empty)'}' not found"
+                   f"{' and runtime_id fallback missed' if fallback_runtime_id else ''}"
+                   " (engine deleted or uid pending backfill; re-register to obtain a fresh uid)"})
+
+
+def _require_runtime_owned_uid(engine_uid: str, credential_id: int) -> int:
+    """v2 归属校验（claim-bound 系）：上报 engine_uid 必须属于该 rta_ 凭据，否则 403。
+
+    对应 v1 的 _require_runtime_owned（runtime_id 口径）；返回解析出的 runtime_id。
+    """
+    uid = (engine_uid or "").strip().lower()
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT id FROM agent_runtimes WHERE engine_uid=? AND credential_id=? LIMIT 1",
+            (uid, credential_id)).fetchone()
+    if not row:
+        raise HTTPException(status_code=403, detail={
+            "code": 403,
+            "message": "engine_uid not owned by this credential"})
+    return row[0]
+
+
+def _claim_body_v1(body: RuntimeClaimBodyV2 | None) -> RuntimeClaimBody | None:
+    """v2 claim body → v1 body（剥离 runtime_id 兜底锚，其余字段逐字段透传）。"""
+    if body is None:
+        return None
+    return RuntimeClaimBody(
+        supports_obs_url=body.supports_obs_url,
+        prefer_fallback=body.prefer_fallback,
+        expected_task_id=body.expected_task_id,
+        expected_event_seq=body.expected_event_seq)
+
+
+@router.post("/runtimes/uid/{engine_uid}/tasks/claim")
+def runtime_claim_v2(engine_uid: str, body: RuntimeClaimBodyV2 | None = None,
+                     credential_id: int = Depends(_require_credential)):
+    """Issue #1011 v2 claim：按 engine_uid 认领（uid 失效回退 body.runtime_id）。
+
+    寻址键转换后直接调 v1 runtime_claim（服务层语义零漂移）；
+    payload 与 v1 一致双带 id+uid 三键（engine_uid/engine_name_snapshot/pool_engine_uids）。
+    """
+    rid = _resolve_runtime_by_uid(engine_uid, body.runtime_id if body else 0, credential_id)
+    return runtime_claim(rid, _claim_body_v1(body), credential_id)
+
+
+@router.post("/runtimes/uid/{engine_uid}/tasks/claim-by-tag/{tag}")
+def runtime_claim_by_tag_v2(engine_uid: str, tag: str,
+                            body: RuntimeClaimBodyV2 | None = None,
+                            credential_id: int = Depends(_require_credential)):
+    """Issue #1011 v2 claim-by-tag：uid 寻址 + v1 服务层（tag 匹配/scope 隔离零漂移）。"""
+    rid = _resolve_runtime_by_uid(engine_uid, body.runtime_id if body else 0, credential_id)
+    return runtime_claim_by_tag(rid, tag, _claim_body_v1(body), credential_id)
+
+
+@router.post("/runtimes/uid/{engine_uid}/tasks/claim-bound")
+def runtime_claim_bound_v2(engine_uid: str, body: RuntimeClaimBodyV2,
+                           credential_id: int = Depends(_require_credential)):
+    """Issue #1011 v2 claim-bound：归属校验改 uid 口径（他人 uid → 403），其余同 v1。"""
+    rid = _require_runtime_owned_uid(engine_uid, credential_id)
+    return runtime_claim_bound(rid, _claim_body_v1(body), credential_id)
+
+
+@router.post("/runtimes/uid/{engine_uid}/tasks/claim-by-tag-bound/{tag}")
+def runtime_claim_by_tag_bound_v2(engine_uid: str, tag: str,
+                                  body: RuntimeClaimBodyV2,
+                                  credential_id: int = Depends(_require_credential)):
+    """Issue #1011 v2 claim-by-tag-bound：归属校验 uid 口径，其余同 v1。"""
+    rid = _require_runtime_owned_uid(engine_uid, credential_id)
+    return runtime_claim_by_tag_bound(rid, tag, _claim_body_v1(body), credential_id)
+
+
+@router.get("/runtimes/uid/{engine_uid}/tasks/claim-capabilities")
+def runtime_claim_capabilities_v2(engine_uid: str,
+                                  credential_id: int = Depends(_require_credential)):
+    """Issue #1011 v2 能力协商（只读）：uid 形态 + uid_claim 能力位。
+
+    uid_claim=True 是 worker v2-first 的探测锚点（旧服务端该路径 404 空白 →
+    worker 判定对端不支持 v2 切换 v1 端点并记忆）；旧客户端 GET v1 路径行为不变。
+    """
+    rid = _require_runtime_owned_uid(engine_uid, credential_id)
+    return {
+        "runtime_id": rid,
+        "engine_uid": (engine_uid or "").strip().lower(),
+        "capabilities": {
+            "bound_claim": True,
+            "task_lookup": True,
+            "uid_claim": True,
+        },
+    }
+
+
+@router.post("/heartbeat-v2")
+def runtime_heartbeat_v2(body: HeartbeatBodyV2, request: Request,
+                         credential_id: int = Depends(_require_credential)):
+    """Issue #1011 v2 心跳：engine_uids 优先解析、失效回退 runtime_ids、全失效不造行。
+
+    解析后委托 v1 runtime_heartbeat（心跳全逻辑共用，语义零漂移）；
+    uid 失效条目仅日志取证（不造行，防 -cred0 孤儿），回退语义见 v2 spec §2.3。
+    """
+    resolved_ids: list[int] = []
+    stale_uids: list[str] = []
+    with db_lock:
+        c = db.cursor()
+        for _uid in (body.engine_uids or []):
+            uid = str(_uid or "").strip().lower()
+            if not uid:
+                continue
+            row = c.execute(
+                "SELECT id FROM agent_runtimes WHERE engine_uid=? AND credential_id=? LIMIT 1",
+                (uid, credential_id)).fetchone()
+            if row:
+                resolved_ids.append(row[0])
+            else:
+                stale_uids.append(uid)
+    for uid in stale_uids:
+        log.warning(f"heartbeat-v2: engine_uid not found (stale, no row created): "
+                    f"uid={uid} credential={credential_id}")
+    merged = list(resolved_ids)
+    for rid in (body.runtime_ids or []):
+        if rid not in merged:
+            merged.append(rid)
+    v1_body = HeartbeatBody(
+        runtime_ids=merged,
+        cpu_percent=body.cpu_percent,
+        memory_percent=body.memory_percent,
+        disk_percent=body.disk_percent,
+        tmp_percent=body.tmp_percent,
+        bandwidth_percent=body.bandwidth_percent,
+        bandwidth_mbps=body.bandwidth_mbps,
+        load_avg=body.load_avg,
+        spec=body.spec,
+        log_lines=body.log_lines,
+        probe_results=body.probe_results)
+    resp = runtime_heartbeat(v1_body, request, credential_id)
+    resp["engine_uids_resolved"] = len(resolved_ids)
+    resp["engine_uids_stale"] = len(stale_uids)
+    return resp
+
+
+def _validate_task_engine_uid(task_id: str, engine_uid: str) -> None:
+    """Issue #1011 上报 v2：按 uid 校验任务归属（任务行 engine_uid 快照 vs 上报引擎 uid）。
+
+    - 上报 uid 与任务行快照不一致 → 403 TASK_ENGINE_UID_MISMATCH（明确拒绝，
+      替代 v1 仅按 runtime_id 归属的口径）；
+    - 任务行 uid 为空（legacy 任务/未迁移）→ 放行走 v1 语义（兼容期）。
+    """
+    uid = (engine_uid or "").strip().lower()
+    if not uid:
+        return
+    with db_lock:
+        c = db.cursor()
+        row = c.execute("SELECT engine_uid FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+    task_uid = (row[0] or "").strip().lower() if row else ""
+    if task_uid and task_uid != uid:
+        raise HTTPException(status_code=403, detail={
+            "code": "TASK_ENGINE_UID_MISMATCH",
+            "message": f"task '{task_id}' belongs to engine_uid '{task_uid}', "
+                       f"reported by '{uid}'"})
+
+
+@router.post("/tasks/{task_id}/complete-v2")
+def runtime_task_complete_v2(task_id: str, body: CompleteBodyV2,
+                             credential_id: int = Depends(_require_credential)):
+    """Issue #1011 v2 完成（幂等）：按 uid 校验任务归属后委托 v1 逻辑。"""
+    _validate_task_engine_uid(task_id, body.engine_uid)
+    v1_body = CompleteBody(result_text=body.result_text, exit_code=body.exit_code,
+                           session_id=body.session_id, work_dir=body.work_dir,
+                           engine=body.engine, run_token=body.run_token)
+    return runtime_task_complete(task_id, v1_body, credential_id)
+
+
+@router.post("/tasks/{task_id}/fail-v2")
+def runtime_task_fail_v2(task_id: str, body: FailBodyV2,
+                         credential_id: int = Depends(_require_credential)):
+    """Issue #1011 v2 失败：按 uid 校验任务归属后委托 v1 逻辑。"""
+    _validate_task_engine_uid(task_id, body.engine_uid)
+    v1_body = FailBody(error=body.error, failure_reason=body.failure_reason,
+                       exit_code=body.exit_code, run_token=body.run_token)
+    return runtime_task_fail(task_id, v1_body, credential_id)
+
+
+@router.post("/tasks/{task_id}/progress-v2")
+def runtime_task_progress_v2(task_id: str, body: ProgressBodyV2,
+                             credential_id: int = Depends(_require_credential)):
+    """Issue #1011 v2 进度：按 uid 校验任务归属后委托 v1 逻辑。"""
+    _validate_task_engine_uid(task_id, body.engine_uid)
+    v1_body = ProgressBody(summary=body.summary, step=body.step, total=body.total)
+    return runtime_task_progress(task_id, v1_body, credential_id)
+
 
 @router.post("/tasks/{task_id}/skill-zip")
 def runtime_task_skill_zip(task_id: str, credential_id: int = Depends(_require_credential)):
@@ -1041,6 +1730,7 @@ def runtime_task_skill_zip(task_id: str, credential_id: int = Depends(_require_c
         log.warning(f"skill-zip fetch failed: {e}")
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"fetch failed: {e}"})
 
+
 @router.post("/tasks/{task_id}/start")
 def runtime_task_start(task_id: str, credential_id: int = Depends(_require_credential)):
     t = service.get_task(task_id)
@@ -1049,10 +1739,12 @@ def runtime_task_start(task_id: str, credential_id: int = Depends(_require_crede
     service.update_task_status(task_id, "running")
     return {"status": "running"}
 
+
 @router.post("/tasks/{task_id}/progress")
 def runtime_task_progress(task_id: str, body: ProgressBody, credential_id: int = Depends(_require_credential)):
     service.enqueue_async_report("progress", task_id, {"msg": body.summary, "step": body.step, "total": body.total})
     return {"status": "ok"}
+
 
 @router.post("/tasks/{task_id}/messages")
 def runtime_task_messages(task_id: str, body: MessagesBody, credential_id: int = Depends(_require_credential)):
@@ -1079,6 +1771,7 @@ def runtime_task_messages(task_id: str, body: MessagesBody, credential_id: int =
         return {"status": "ok", **_receipt}
     return {"status": "ok", "count": _count, "seq_start": _seq_start,
             "seq_end": _seq_start + _count - 1 if _count > 0 else _seq_start - 1}
+
 
 @router.post("/tasks/{task_id}/usage")
 def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int = Depends(_require_credential)):
@@ -1112,6 +1805,7 @@ def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int = Depen
         pass
     return {"status": "ok"}
 
+
 @router.post("/tasks/{task_id}/complete")
 def runtime_task_complete(task_id: str, body: CompleteBody, credential_id: int = Depends(_require_credential)):
     """完成（幂等）：解析结构化 output → finalize_event_archive → update_event_complete。
@@ -1137,6 +1831,7 @@ def runtime_task_complete(task_id: str, body: CompleteBody, credential_id: int =
     service.finalize_by_stream_end(task_id, body.result_text or "", body.exit_code, usage=_usage)
     return {"status": "completed"}
 
+
 @router.post("/tasks/{task_id}/fail")
 def runtime_task_fail(task_id: str, body: FailBody, credential_id: int = Depends(_require_credential)):
     task = service.get_task(task_id)
@@ -1153,6 +1848,7 @@ def runtime_task_fail(task_id: str, body: FailBody, credential_id: int = Depends
     service.fail_task(task_id, body.error or body.failure_reason or "unknown error", exit_code=body.exit_code)
     return {"status": "failed"}
 
+
 @router.post("/tasks/{task_id}/requeue")
 def runtime_task_requeue(task_id: str, credential_id: int = Depends(_require_credential)):
     """客户端并发冲突跳过时回滚任务为 queued（避免 dispatched 悬空卡死，见 seq#622 教训）。"""
@@ -1161,6 +1857,7 @@ def runtime_task_requeue(task_id: str, credential_id: int = Depends(_require_cre
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
     ok = service.requeue_task(task_id)
     return {"status": "requeued", "recycled": ok}
+
 
 @router.post("/runtimes/{runtime_id}/recover-orphans")
 def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = None,
@@ -1187,16 +1884,15 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
     （NULL 兜底 created_at）距 now 不足 RECOVER_GRACE_SECONDS（默认 300s，
     覆盖队列出队+引擎冷启动上界）直接 skipped，attempts 不变、不回炉。
     """
-    RECOVER_ACTIVITY_WINDOW = int(os.environ.get("RECOVER_ACTIVITY_WINDOW", "1200"))
-    RECOVER_MAX_ATTEMPTS = int(os.environ.get("RECOVER_MAX_ATTEMPTS", "3"))
-    RECOVER_GRACE_SECONDS = int(os.environ.get("RECOVER_GRACE_SECONDS", "300"))
     # Issue #1495：活跃窗口单点收敛到 task_activity 具名常量（数值沿用 1200s 不变，
     # 原 RECOVER_ACTIVITY_WINDOW 环境变量口除名——「一处定义」硬约束）；
     # 判定改走 has_recent_activity（Python 侧解析 epoch 比较），消除 TEXT 列逐字节
     # 比较对 created_at 写入格式的隐含依赖（表默认值空格格式行 / 无微秒 ISO 行）。
     from src.domains.runtime.engine.task_activity import (RECOVER_ORPHANS_ACTIVITY_WINDOW_SECONDS,
-                                           has_recent_activity)
+                                       has_recent_activity)
     RECOVER_ACTIVITY_WINDOW = RECOVER_ORPHANS_ACTIVITY_WINDOW_SECONDS
+    RECOVER_MAX_ATTEMPTS = int(os.environ.get("RECOVER_MAX_ATTEMPTS", "3"))
+    RECOVER_GRACE_SECONDS = int(os.environ.get("RECOVER_GRACE_SECONDS", "300"))
     _now = datetime.now(timezone.utc)
     _active_cutoff = (_now - timedelta(seconds=RECOVER_ACTIVITY_WINDOW)).isoformat()
     _grace_cutoff_dt = _now - timedelta(seconds=RECOVER_GRACE_SECONDS)
@@ -1383,6 +2079,9 @@ def runtime_recover_orphans(runtime_id: int, body: RecoverOrphansBody | None = N
             "skipped_active": skipped_active, "skipped_active_reason": skipped_active_reason,
             "skipped_young": skipped_young, "force_failed": force_failed}
 
+
+# ===== 用户态端点（M2，保留）=====
+
 @router.get("/tasks/{task_id}/status", operation_id="runtime_task_status", summary="Task status polling", description="Task status polling (chat front-end D5 typewriter fallback). Issue #539: also the authorized query path referenced by pipeline segment output.task_ref.query_path — returns full result_text for authorized callers; pipeline summaries only carry a redacted result_ref summary.")
 def get_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
     """任务状态轮询（chat 前端用，D5 打字机降级）。"""
@@ -1415,7 +2114,6 @@ def _cwd_or_derived(cwd: str, repo_key: str, agent_type: str, issue_id: str, tas
     except Exception as e:
         log.warning(f"cwd fallback failed (task={task_id}): {e}")
         return cwd
-
 
 @router.get("/issues/takeover-context", operation_id="runtime_takeover_context", summary="Takeover context for an issue", description="Returns the running task's full context (prompt, env_extra, messages) for interactive takeover in dsh-web.")
 def takeover_context(repo_key: str = Query(..., description="Repository key (e.g. gitcode:owner/repo)"),
@@ -1459,6 +2157,8 @@ def takeover_context(repo_key: str = Query(..., description="Repository key (e.g
         "issue_id": task_issue_id or "",
         "messages": messages,
     }
+
+
 @router.get("/tasks/{task_id}/detail", operation_id="runtime_task_detail", summary="Task detail (takeover)", description="Returns full task fields for interactive takeover: prompt, env_extra, skill, cwd, etc.")
 def get_task_detail(task_id: str, user: dict = Depends(require_no_session_token)):
     """任务详情（接管用）：返回完整字段供 dsh-web 创建交互式 session。"""
@@ -1482,6 +2182,7 @@ def get_task_detail(task_id: str, user: dict = Depends(require_no_session_token)
         "server_url": task.get("server_url") or "",
     }
 
+
 @router.get("/tasks/{task_id}/state")
 def runtime_task_state(task_id: str, credential_id: int = Depends(_require_credential)):
     """worker 端轻量状态查询：只返回 status，用于 sid 看门狗检测幽灵任务。
@@ -1495,6 +2196,7 @@ def runtime_task_state(task_id: str, credential_id: int = Depends(_require_crede
     if not task:
         return {"status": "not_found"}
     return {"status": task.get("status") or ""}
+
 
 @router.post("/tasks/{task_id}/cancel", operation_id="runtime_task_cancel", summary="Cancel task", description="Cancels a task (status=cancelled); the worker exits on the next heartbeat.")
 def cancel_task(task_id: str, user: dict = Depends(require_no_session_token)):
@@ -1512,6 +2214,7 @@ def cancel_task(task_id: str, user: dict = Depends(require_no_session_token)):
         except Exception as e:
             log.warning(f"Cancel: autopilot exec sync failed (task={task_id}, event_seq={task.get('event_seq')}): {e}")
     return {"message": f"任务 {task_id} 已取消", "status": "cancelled"}
+
 
 @router.post("/tasks/{task_id}/converge-event", operation_id="runtime_task_converge_event",
              summary="Converge event state to task terminal state",
@@ -1535,6 +2238,7 @@ def converge_event(task_id: str, user: dict = Depends(require_no_session_token))
             log.warning(f"converge-event: audit failed for task={task_id}: {_ae}")
     return _res
 
+
 @router.get("/runtimes/{runtime_id}/tasks", operation_id="runtime_tasks_list", summary="List runtime tasks", description="Tasks of a device (front-end device view).")
 def list_runtime_tasks(runtime_id: int, user: dict = Depends(require_no_session_token),
                              status: str = "",
@@ -1549,9 +2253,8 @@ def list_runtime_tasks(runtime_id: int, user: dict = Depends(require_no_session_
         params.append(status)
     if repo:
         _base = repo.split(":", 1)[1] if ":" in repo else repo
-        from src.kernel.repo_key import repo_key_candidates
         repo_key = f"gitcode:{_base}"
-        _rk_list = repo_key_candidates(repo_key)
+        _rk_list = [f"gitcode:{_base}", f"github:{_base}"]
         clauses.append(f"repo_key IN ({','.join('?' * len(_rk_list))})")
         params.extend(_rk_list)
     with _domain_cursor("runtime") as c:
@@ -1564,6 +2267,7 @@ def list_runtime_tasks(runtime_id: int, user: dict = Depends(require_no_session_
              "issue_id": r[10] or "", "event_seq": r[11] or 0}
             for r in c.fetchall()
         ]}
+
 
 @router.get("/runtimes/{runtime_id}/sessions", operation_id="runtime_sessions_list", summary="List runtime sessions", description="Engine sessions filtered by agent_tasks.runtime_id; only sessions with matching tasks are returned.")
 def list_runtime_sessions(runtime_id: int, user: dict = Depends(require_no_session_token),
@@ -1581,8 +2285,7 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(require_no_sessi
     params: list = []
     if repo:
         _base = repo.split(":", 1)[1] if ":" in repo else repo
-        from src.kernel.repo_key import repo_key_candidates
-        _rk_list = repo_key_candidates(repo)
+        _rk_list = [f"gitcode:{_base}", f"github:{_base}"]
         repo_clause = f" AND repo_key IN ({','.join('?' * len(_rk_list))})"
         params.extend(_rk_list)
 
@@ -1648,6 +2351,7 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(require_no_sessi
             })
         return {"sessions": sessions, "total": len(sessions)}
 
+
 @router.get("/credentials/{cid}/tasks", operation_id="runtime_credential_tasks", summary="Tasks aggregated by credential", description="Tasks aggregated by credential across all its engine instances.")
 def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_token),
                                 status: str = "", limit: int = 50):
@@ -1693,6 +2397,7 @@ def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_toke
             for r in c.fetchall()
         ]}
 
+
 def _server_url() -> str:
     try:
         # Issue #471 E1（QA 建议）：register 响应的 server_url 是 worker 回连地址
@@ -1702,6 +2407,7 @@ def _server_url() -> str:
         return get_worker_connect_url()
     except Exception:
         return ""
+
 
 @router.get("/install")
 def runtime_install_script():
@@ -1726,6 +2432,7 @@ def runtime_install_script():
     if _base:
         content = content.replace('SERVER="https://grape.example.com"', f'SERVER="{_base}"')
     return PlainTextResponse(content, media_type="text/plain")
+
 
 @router.get("/install.ps1")
 def runtime_install_script_ps1():
@@ -1758,6 +2465,7 @@ def runtime_install_script_ps1():
         content = content.replace('$Server = "https://grape.example.com"', f'$Server = "{_base}"')
     return PlainTextResponse(content, media_type="text/plain; charset=utf-8")
 
+
 @router.get("/start-worker.ps1")
 def runtime_start_worker_script_ps1():
     """返回 Windows Worker 启动脚本 start-worker.ps1（只读）。
@@ -1780,6 +2488,7 @@ def runtime_start_worker_script_ps1():
     body = b"\xef\xbb\xbf" + content.encode("utf-8")
     return PlainTextResponse(body, media_type="text/plain; charset=utf-8")
 
+
 @router.get("/install/latest")
 def runtime_install_latest(credential_id: int = Depends(_require_credential)):
     """返回当前 Worker 代码版本号（rta_ 鉴权）。
@@ -1790,6 +2499,7 @@ def runtime_install_latest(credential_id: int = Depends(_require_credential)):
     from src.kernel.worker_package import worker_code_version
     return {"version": worker_code_version()}
 
+
 @router.get("/grape-worker.tar.gz")
 def runtime_worker_package_public():
     """公开下发 Worker 绿色安装包 tar.gz（无需鉴权）。
@@ -1797,7 +2507,7 @@ def runtime_worker_package_public():
     包内仅含 worker 运行代码（无任何敏感信息，凭据由安装命令 --token 注入），
     供「凭据申请页一键安装命令」直接 curl 下载：
       curl -fsSL <server>/api/runtime/grape-worker.tar.gz -o grape-worker.tar.gz
-    首次请求动态打包 + 缓存（代码变更自动重建，见 src/kernel/worker_package.py）。
+    首次请求动态打包 + 缓存（代码变更自动重建，见 src/worker_package.py）。
 
     并发限制：同时下载不超过 PKG_DOWNLOAD_MAX_CONCURRENT（默认 3），
     超出返回 429 让 worker 重试。
@@ -1837,6 +2547,7 @@ def runtime_worker_package_public():
         with _pkg_download_lock:
             _pkg_download_count -= 1
 
+
 @router.get("/install/package")
 def runtime_install_package(credential_id: int = Depends(_require_credential)):
     """下发 Worker 安装包 tar.gz（rta_ 鉴权，首次请求动态打包 + 缓存）。
@@ -1853,6 +2564,10 @@ def runtime_install_package(credential_id: int = Depends(_require_credential)):
     if not pkg or not os.path.isfile(pkg):
         raise HTTPException(status_code=500, detail={"code": 500, "message": "worker package not found"})
     return FileResponse(pkg, media_type="application/gzip", filename="grape-worker.tar.gz")
+
+
+# ===== Engine local_skills 刷新 =====
+
 
 def engine_onboarding_repo_key(repo: str) -> str:
     """engine-onboarding 的 repo 匹配值：契约单一，只接受规范带前缀形态。
@@ -1871,6 +2586,7 @@ def engine_onboarding_repo_key(repo: str) -> str:
         return ""
     from src.kernel.repo_key import to_repo_key
     return to_repo_key(raw)
+
 
 @router.get("/engine-onboarding", operation_id="runtime_engine_onboarding",
             summary="Engine onboarding status for one-click deployments",
@@ -1908,7 +2624,7 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
     _user_visible = []  # 预置：查询异常时保守按"无可用引擎"处理（引导继续提示）
     _user = user.get("username") or ""
     _uid = str(user.get("id") or "")
-    _org_id = user.get("org_id", "") or ""
+    _org_id = user.get("org_id", 0) or 0
     # repo 匹配值：单一真源等值匹配（engine_onboarding_repo_key）——带前缀原样、
     # 裸形态查 managed_repos 定唯一前缀。不做多形态撒网 IN（跨平台同名仓库泄漏）。
     _rk = engine_onboarding_repo_key(repo or "")
@@ -1933,7 +2649,7 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
                 "FROM agent_runtimes ar "
                 "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
                 "WHERE ar.status='online' "
-                "AND (ar.org_id='' OR ar.org_id=?) "
+                "AND (ar.org_id=0 OR ar.org_id=?) "
                 "AND (ar.scope='global' OR ar.owner_id=? OR LOWER(rc.owner_name)=LOWER(?)) "
                 "ORDER BY ar.id",
                 (_org_id, _uid, _user),
@@ -1962,6 +2678,7 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
         "remote_engines": remote,
         "needs_worker": needs_worker,
     }
+
 
 def _scan_engine_skills_detail(engine_name: str) -> list[dict]:
     """本机扫描指定 engine 的 skill 详情（description / 路径 / 文件数）。"""
@@ -2020,6 +2737,7 @@ def _scan_engine_skills_detail(engine_name: str) -> list[dict]:
         skill_details.append(detail)
     return skill_details
 
+
 @router.post("/runtimes/{runtime_id}/refresh-skills", operation_id="runtime_refresh_skills", summary="Rescan runtime skills", description="Rescans an engine's local skills and returns the detail list. Local engines scan directly; remote workers set pending_skill_scan and report on the next claim.")
 def runtime_refresh_skills(runtime_id: int, force: bool = False, user: dict = Depends(require_no_session_token)):
     """重新扫描指定 engine 的本地 skill 并返回详情列表。
@@ -2070,6 +2788,7 @@ def runtime_refresh_skills(runtime_id: int, force: bool = False, user: dict = De
         db.commit()
     return {"status": "pending", "skills": [], "count": 0}
 
+
 @router.post("/runtimes/{runtime_id}/skills-report")
 def runtime_skills_report(runtime_id: int, body: dict, credential_id: int = Depends(_require_credential)):
     """worker 回报 skill 扫描结果。
@@ -2098,6 +2817,9 @@ def runtime_skills_report(runtime_id: int, body: dict, credential_id: int = Depe
         db.commit()
     return {"status": "ok"}
 
+
+# ===== Engine 角色标签 =====
+
 def _apply_tag_rules(tags: list[str]) -> list[str]:
     """应用标签互斥规则。
     - 全能与其他互斥：有其他标签时去掉全能。
@@ -2116,6 +2838,7 @@ def _apply_tag_rules(tags: list[str]) -> list[str]:
 
     return sorted(tag_set)
 
+
 @router.get("/runtimes/{runtime_id}/role-tags", operation_id="runtime_role_tags", summary="Runtime role tags", description="Role tags of an engine (web admin view).")
 def get_runtime_tags(runtime_id: int, user: dict = Depends(require_no_session_token)):
     """返回 engine 的角色标签列表（web 管理视图；worker 取 tags 用 GET /runtimes/{id}/tags）。"""
@@ -2127,6 +2850,7 @@ def get_runtime_tags(runtime_id: int, user: dict = Depends(require_no_session_to
         raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
     return {"tags": json.loads(row[0]) if row[0] else []}
 
+
 @router.put("/runtimes/{runtime_id}/tags", operation_id="runtime_tags_set", summary="Set role tags", description="Sets an engine's role tags (mutual-exclusion applied). engine_capabilities is the single source; agent_tags is the derived cache.")
 def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(require_no_session_token)):
     """设置 engine 的角色标签。应用互斥规则后写入。
@@ -2137,7 +2861,6 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(require_n
     from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
     from src.domains.mgmt.routes.settings import _sync_agent_tags
-    _require_runtime_admin(runtime_id, user)  # 扫雷⑨-H3：归属校验
     tags = _apply_tag_rules(body.get("tags") or [])
     now = datetime.now(timezone.utc).isoformat()
     with db_lock:
@@ -2164,15 +2887,17 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(require_n
     log.info(f"Runtime tags set: rid={runtime_id} tags={tags} (engine_capabilities → agent_tags synced)")
     return {"tags": tags}
 
+
 class MaxConcurrentBody(BaseModel):
     max_concurrent: int = 20
+
 
 @router.put("/runtimes/{runtime_id}/max-concurrent", operation_id="runtime_max_concurrent_set", summary="Set max concurrent", description="Sets the engine-level max concurrency.")
 def set_runtime_max_concurrent(runtime_id: int, body: MaxConcurrentBody,
                                 user: dict = Depends(require_no_session_token)):
     """设置引擎级最大并发数（方案一：并发纯引擎级，标签只做路由）。"""
-    from src.kernel.session_manager import db, db_lock
     _require_runtime_admin(runtime_id, user)  # 扫雷⑨-H3：归属校验
+    from src.kernel.session_manager import db, db_lock
     if body.max_concurrent < 1 or body.max_concurrent > 100:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "max_concurrent 必须在 1-100 之间"})
     with db_lock:
@@ -2184,6 +2909,9 @@ def set_runtime_max_concurrent(runtime_id: int, body: MaxConcurrentBody,
         db.commit()
     log.info(f"Runtime max_concurrent set: rid={runtime_id} max_concurrent={body.max_concurrent}")
     return {"max_concurrent": body.max_concurrent}
+
+
+# ===== 场景标签 =====
 
 @router.get("/scene-tags", operation_id="runtime_scene_tags_list", summary="List scene tags", description="All scenes and their available role tags for the scene picker: [{name, display_name, roles: [...]}].")
 def list_scene_tags(user: dict = Depends(require_no_session_token)):
@@ -2207,6 +2935,7 @@ def list_scene_tags(user: dict = Depends(require_no_session_token)):
         })
     return {"scenes": result}
 
+
 @router.get("/runtimes/{runtime_id}/scene-tags", operation_id="runtime_scene_tags_get", summary="Runtime scene tags", description="Scene tags of an engine.")
 def get_runtime_scene_tags(runtime_id: int, user: dict = Depends(require_no_session_token)):
     """返回引擎的场景标签列表。"""
@@ -2218,8 +2947,10 @@ def get_runtime_scene_tags(runtime_id: int, user: dict = Depends(require_no_sess
     tags = json.loads(row[0]) if row[0] else ["default"]
     return {"scene_tags": tags}
 
+
 class SceneTagsBody(BaseModel):
     scene_tags: list[str] = ["default"]
+
 
 @router.put("/runtimes/{runtime_id}/scene-tags", operation_id="runtime_scene_tags_set", summary="Set runtime scene tags", description="Sets an engine's scene tags (metadata constraining selectable role tags).")
 def set_runtime_scene_tags(runtime_id: int, body: SceneTagsBody,
@@ -2229,9 +2960,9 @@ def set_runtime_scene_tags(runtime_id: int, body: SceneTagsBody,
     场景标签是元数据，约束可选角色标签范围。
     保存时不修改角色标签——前端根据场景的可用角色自动过滤角色标签 checkbox。
     """
-    tags = body.scene_tags or ["default"]
     # 扫雷⑨-H3：归属校验
     _require_runtime_admin(runtime_id, user)
+    tags = body.scene_tags or ["default"]
     # 去重保序
     seen = set()
     deduped = []
@@ -2244,20 +2975,42 @@ def set_runtime_scene_tags(runtime_id: int, body: SceneTagsBody,
         c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
         if not c.fetchone():
             raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
+        # Issue #1208：场景标签变更必须同步派生标签（scene: 冒号行 + agent_tags 快照），
+        # 否则 selector 的 scene: 维度仍读到旧的 engine_capabilities 行，出现「改了场景却 0 命中」。
+        row = c.execute("SELECT r.name, COALESCE(r.credential_id,0), COALESCE(r.scope,'global'), "
+                        "COALESCE(r.engine_uid,''), COALESCE(rc.scope,''), COALESCE(r.runtime_info,'') "
+                        "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                        "WHERE r.id=?", (runtime_id,)).fetchone()
         c.execute("UPDATE agent_runtimes SET scene_tags=? WHERE id=?", (json.dumps(deduped, ensure_ascii=False), runtime_id))
+        if row:
+            from src.domains.runtime.engine.agent_tags import sync_derived_agent_tags
+            _cid = row[1] or 0
+            _cred_scope = (row[4] or row[2] or "global") if _cid else (row[2] or "global")
+            _et_c = ""
+            try:
+                _et_c = (json.loads(row[5] or "{}").get("engine_type") or "")
+            except Exception:
+                _et_c = ""
+            # [云引擎标签修复] engine: 维度按 engine_type 派生（云四段名不入标签）
+            sync_derived_agent_tags(c, runtime_id, row[0], _cred_scope, deduped, row[3] or "",
+                                    engine_type=_et_c)
         db.commit()
-    log.info(f"Runtime scene_tags set: rid={runtime_id} scene_tags={deduped}")
+    log.info(f"Runtime scene_tags set: rid={runtime_id} scene_tags={deduped} (derived tags synced)")
     return {"scene_tags": deduped}
+
+
+# ===== 引擎别名 =====
 
 class AliasBody(BaseModel):
     alias: str = ""
+
 
 @router.put("/runtimes/{runtime_id}/alias", operation_id="runtime_alias_set", summary="Set runtime alias", description="Sets an engine alias; an empty string clears it.")
 def set_runtime_alias(runtime_id: int, body: AliasBody,
                        user: dict = Depends(require_no_session_token)):
     """设置引擎别名。空字符串表示清除别名。"""
-    alias = (body.alias or "").strip()
     _require_runtime_admin(runtime_id, user)  # 扫雷⑨-H3：归属校验
+    alias = (body.alias or "").strip()
     if len(alias) > 64:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "alias 最长 64 字符"})
     with db_lock:
@@ -2270,6 +3023,8 @@ def set_runtime_alias(runtime_id: int, body: AliasBody,
     log.info(f"Runtime alias set: rid={runtime_id} alias={alias!r}")
     return {"alias": alias}
 
+
+
 # ===== MR-2b（2026-11-05）：worker trace 中继（LGTM 不对 worker 开放，经主控 C 进程转发）=====
 # 设计：docs/weekly-10/worker-trace-relay-layer2-design.md
 # - worker 的 OTLP/HTTP exporter 指向 {RUNTIME_SERVER_URL}/api/runtime/traces（既有通道+Bearer）
@@ -2280,7 +3035,6 @@ OTLP_RELAY_TARGET = os.environ.get("OTLP_RELAY_TARGET", "").strip()
 from fastapi.responses import Response as _RelayResponse
 
 _relay_total = None
-
 try:
     from prometheus_client import Counter as _PC
     from src.domains.insight.observability import registry as _obs_registry
@@ -2289,6 +3043,7 @@ try:
                        ["status"], registry=_obs_registry)
 except Exception:
     _relay_total = None
+
 
 @router.post("/traces", operation_id="runtime_traces_relay",
              summary="Relay worker OTLP traces to LGTM",
@@ -2343,154 +3098,790 @@ async def runtime_traces_relay(request: Request,
                               content='{"detail":"lgtm unreachable"}',
                               media_type="application/json")
 
-from pydantic import BaseModel, model_validator
 
-from src.domains.runtime.engine.health import apply_runtime_state, parse_dt  # Issue #1496 统一写入口 + 心跳解析
+@router.get("/whoami")
+def runtime_whoami(cred: CredentialContext = Depends(_require_credential_ctx)):
+    """凭据自述（rta 鉴权）——[同机多 cloud_worker spec §4.1]
 
-from src.domains.runtime.engine import health as _health_mod  # noqa: F401  (_STALE_SECONDS 经 _RUNTIME_STALE 下发)
+    返回 token 对应的凭据身份 + 主控集群指纹。两类 worker（普通/cloud）共用的
+    凭据自述入口：安装脚本据此派生实例目录/服务名/安装形态；cloud_worker 运行时
+    据此做改名跟随与身份守护；升级链路据此恢复安装形态。
 
-def _require_runtime_owned(runtime_id: int, credential_id: int) -> None:
-    """Issue #520：校验 runtime 归属当前 rta_ 凭据（agent_runtimes.credential_id）。
+    credential_uid：凭据稳定键（UUIDv4，#646 语义）——安装脚本据此派生
+    目录键（credential_uid 前 8 位，同机多 worker 单锚，跨主控天然不撞）。
 
-    他人 runtime_id → 403（fail-closed，不泄露任务信息）。
+    设计不变量：本响应永不包含凭证类字段（token/api_key）——泄露面为零。
+    凭据吊销后本端点 401（安装脚本据此在第一步报"凭据无效或已吊销"）。
     """
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT 1 FROM agent_runtimes WHERE id=? AND credential_id=?",
-                  (runtime_id, credential_id))
-        if not c.fetchone():
-            raise HTTPException(status_code=403, detail={
-                "code": 403, "message": "runtime not owned by this credential"})
-
-def _require_runtime_admin(runtime_id: int, user: dict) -> None:
-    """扫雷⑨-H3：用户通道（JWT/API Key）写引擎配置的归属校验。
-
-    - session_token / api_key：作用域已限定，与 check_repo_access 同口径豁免；
-    - scope=user：仅 owner 本人（agent_runtimes.owner_id == 用户 id，Issue #654 口径）；
-    - scope=repo：仓库托管人（check_repo_access → managed_repos 归属）；
-    - scope=global：平台级共享引擎，维持现状放行（历史行为，不收窄）。
-    """
-    auth_type = user.get("auth_type", "jwt")
-    if auth_type in ("session_token", "api_key"):
-        return
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT scope, owner_id, repo_key FROM agent_runtimes WHERE id=?", (runtime_id,))
+        c.execute(
+            "SELECT name, cred_type, platform, credential_uid FROM runtime_credentials WHERE id=? AND status='active'",
+            (cred.id,))
         row = c.fetchone()
     if not row:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
-    scope, owner_id, repo_key = row[0] or "global", row[1] or "", row[2] or ""
-    if scope == "user":
-        if owner_id and owner_id == str(user.get("id") or ""):
-            return
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅引擎 owner 可修改该引擎配置"})
-    if scope == "repo":
-        from src.api.deps import check_repo_access
-        check_repo_access(user, repo_key)
-
-def _pending_scan_request(runtime_id: int, credential_id: int) -> bool:
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT pending_skill_scan FROM agent_runtimes WHERE id=? AND credential_id=?",
-                  (runtime_id, credential_id))
-        _row = c.fetchone()
-        return bool(_row and _row[0])
-
-@router.post("/runtimes/{runtime_id}/tasks/claim-bound")
-def runtime_claim_bound(runtime_id: int, body: RuntimeClaimBody,
-                        credential_id: int = Depends(_require_credential)):
-    """Issue #520 bound claim：按 expected_task_id + expected_event_seq 原子领取指定任务。
-
-    - 鉴权：rta_ 凭据 + runtime 归属校验（他人 runtime → 403）。
-    - body 必须成对携带 expected 字段（缺 → 400；只传其一由模型校验 422 拒绝）。
-    - 未匹配返回 {"task": null}，不领取/不修改任何其他任务，绝不回退 FIFO。
-    - 未部署节点对本路径 404 → 客户端保持许可关闭（不回退通用 claim）。
-    """
-    _require_runtime_owned(runtime_id, credential_id)
-    if not body.expected_task_id or not body.expected_event_seq:
-        raise HTTPException(status_code=400, detail={
-            "code": 400,
-            "message": "claim-bound requires expected_task_id and expected_event_seq"})
-    task = service.claim(runtime_id,
-                         expected_task_id=body.expected_task_id,
-                         expected_event_seq=body.expected_event_seq)
-    scan_request = False
-    if not task:
-        scan_request = _pending_scan_request(runtime_id, credential_id)
-    else:
-        if body.prefer_fallback:
-            task["mode"] = "server-fetch"
-        else:
-            _attach_skill_obs(task)
-    return {"task": task, "scan_request": scan_request}
-
-@router.post("/runtimes/{runtime_id}/tasks/claim-by-tag-bound/{tag}")
-def runtime_claim_by_tag_bound(runtime_id: int, tag: str,
-                               body: RuntimeClaimBody,
-                               credential_id: int = Depends(_require_credential)):
-    """Issue #520 bound claim（tag 版）：tag + scope 条件不变，追加 expected 原子校验。
-
-    未匹配返回 {"task": null}，不回退 FIFO；归属校验同 claim-bound。
-    """
-    _require_runtime_owned(runtime_id, credential_id)
-    if not body.expected_task_id or not body.expected_event_seq:
-        raise HTTPException(status_code=400, detail={
-            "code": 400,
-            "message": "claim-by-tag-bound requires expected_task_id and expected_event_seq"})
-    task = service.claim_by_tag(tag, runtime_id,
-                                expected_task_id=body.expected_task_id,
-                                expected_event_seq=body.expected_event_seq)
-    scan_request = False
-    if not task:
-        scan_request = _pending_scan_request(runtime_id, credential_id)
-    else:
-        if body.prefer_fallback:
-            task["mode"] = "server-fetch"
-        else:
-            _attach_skill_obs(task)
-    return {"task": task, "scan_request": scan_request}
-
-@router.get("/runtimes/{runtime_id}/tasks/claim-capabilities")
-def runtime_claim_capabilities(runtime_id: int,
-                               credential_id: int = Depends(_require_credential)):
-    """Issue #520 能力协商（只读）：客户端 POST bound claim 前确认服务端能力。
-
-    能力位：bound_claim（claim-bound / claim-by-tag-bound）+ task_lookup（lookup）。
-    未部署节点 404 → 客户端保持许可关闭，不回退通用 claim。
-    """
-    _require_runtime_owned(runtime_id, credential_id)
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "runtime credential revoked or not found"})
+    name, cred_type, platform = row[0] or "", (row[1] or "worker").lower(), (row[2] or "").lower()
+    # [锚简化 2026-11-04 用户裁定] server_instance 去除（复合锚 instance 段唯一存在理由=
+    # credential_id 跨主控撞号，credential_uid 全局唯一后消解）；credential_uid 替位——
+    # 安装脚本据此派生目录键 CRED_KEY（同机多 worker 单锚）。旧库缺列降级 ''（迁移前启动不塌）。
+    _cred_uid = ""
+    try:
+        _cred_uid = row[3] or ""
+    except IndexError:
+        _cred_uid = ""
     return {
-        "runtime_id": runtime_id,
-        "capabilities": {
-            "bound_claim": True,
-            "task_lookup": True,
-        },
+        "credential_id": cred.id,
+        "name": name,
+        "cred_type": cred_type,          # worker | sandbox
+        "platform": platform,            # sandbox 必有, worker 为空
+        "scope": cred.scope,
+        "credential_uid": _cred_uid,
     }
 
-@router.get("/runtimes/{runtime_id}/tasks/lookup")
-def runtime_task_lookup(runtime_id: int,
-                        expected_event_seq: int = 0,
-                        credential_id: int = Depends(_require_credential)):
-    """Issue #520 许可对号 lookup：按 expected_event_seq 精确查询许可目标任务。
 
-    - 鉴权：与 /runtimes/{id}/tags 同款（rta_ + 归属校验，他人 runtime → 403）。
-    - expected_event_seq 缺失或 <=0 → 400（旧任务 event_seq 空/0 不支持）。
-    - 纯验证性 SELECT：命中返回身份字段 {task_id, issue_id, event_seq, agent_type,
-      created_at}；未命中 {"task": null}（许可保留，等待目标入队）。
+# =============================================================================
+# ===== [沙箱迁移] 云沙箱 / Provider 下发 / 白名单 API（自旧分支移植） =====
+# =============================================================================
+
+class SandboxStatusBody(BaseModel):
+    issue_id: str = ""
+    repo_key: str = ""
+    sandbox_id: str = ""
+    provider: str = ""
+    state: str = ""
+    agent_installed: int = 0
+    template_id: str = ""
+    template_name: str = ""
+    engine_type: str = ""
+    provider_id: int = 0
+    error: str = ""   # [沙箱迁移] state=setup_failed 时的失败原因（建箱/引擎初始化异常）
+
+
+def _get_task_user_id(task_id: str) -> int:
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT user_id FROM agent_tasks WHERE task_id=?", (task_id,))
+            row = c.fetchone()
+            return int(row[0]) if row and row[0] else 0
+    except Exception:
+        return 0
+
+
+def _get_task_repo_key(task_id: str) -> str:
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM agent_tasks WHERE task_id=?", (task_id,))
+            row = c.fetchone()
+            return row[0] or "" if row else ""
+    except Exception:
+        return ""
+
+
+def _check_task_access(task_id: str, cred: CredentialContext) -> int:
+    """[沙箱迁移] BOLA 校验。global 放行，repo/user 校验后放行。
+
+    核心原则：worker 认领了任务（claim_by_tag 已做 scope 过滤），
+    后续操作（start/complete/fail/progress）必须放行，否则任务卡死。
     """
-    _require_runtime_owned(runtime_id, credential_id)
-    if not expected_event_seq or expected_event_seq <= 0:
-        raise HTTPException(status_code=400, detail={
-            "code": 400,
-            "message": "lookup requires a positive expected_event_seq"})
-    task = service.lookup_task_by_event_seq(runtime_id, expected_event_seq)
-    return {"task": task}
+    if cred.scope == 'global':
+        return _get_task_user_id(task_id)
 
-try:
-    from prometheus_client import Counter as _PC
-    from src.domains.insight.observability import registry as _obs_registry
-    _relay_total = _PC("grape_trace_relay_requests_total",
-                       "Trace relay requests forwarded to LGTM",
-                       ["status"], registry=_obs_registry)
-except Exception:
-    _relay_total = None
+    if cred.scope == 'repo':
+        _task_repo = _get_task_repo_key(task_id)
+        if cred.repo_key and _task_repo:
+            try:
+                from src.kernel.repo_key import from_repo_key
+                _cred_norm = (from_repo_key(cred.repo_key) or cred.repo_key).strip()
+                _task_norm = (from_repo_key(_task_repo) or _task_repo).strip()
+            except Exception:
+                _cred_norm, _task_norm = cred.repo_key.strip(), _task_repo.strip()
+            if _cred_norm != _task_norm:
+                raise HTTPException(status_code=403, detail={"code": 403, "message": "forbidden"})
+        return _get_task_user_id(task_id)
+
+    if cred.scope == 'user':
+        _task_user_id = _get_task_user_id(task_id)
+        try:
+            _cred_user_id = int(cred.owner_id or 0)
+        except (ValueError, TypeError):
+            _cred_user_id = 0
+        if _cred_user_id and _task_user_id and _cred_user_id != _task_user_id:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "forbidden"})
+        return _task_user_id
+
+    return _get_task_user_id(task_id)
+
+
+@router.post("/tasks/{task_id}/sandbox-status")
+def runtime_sandbox_status(task_id: str, body: SandboxStatusBody, cred: CredentialContext = Depends(_require_credential_ctx)):
+    """[沙箱迁移] cloud_worker 上报沙箱创建/状态变更（无 DB，通过此端点写 cloud_sandboxes 表）。
+
+    - state=killed → UPDATE state='killed'（P2-14：不 DELETE，防 fire-and-forget 乱序复活）
+    - 新沙箱创建 → 同 task_id 旧 running/creating 标 stale
+    - INSERT OR IGNORE + UPDATE（killed 保护）
+    """
+    _task_user_id = _check_task_access(task_id, cred)
+    _now = datetime.now(timezone.utc).isoformat()
+    try:
+        with db_lock:
+            c = db.cursor()
+            if body.state == 'killed':
+                c.execute(
+                    "UPDATE cloud_sandboxes SET state='killed', last_refresh_at=? WHERE sandbox_id=?",
+                    (_now, body.sandbox_id),
+                )
+                db.commit()
+                return {"status": "ok"}
+            c.execute(
+                "UPDATE cloud_sandboxes SET state='stale' "
+                "WHERE task_id=? AND state IN ('running', 'creating') AND sandbox_id != ?",
+                (task_id, body.sandbox_id))
+            c.execute(
+                "INSERT OR IGNORE INTO cloud_sandboxes "
+                "(issue_id, repo_key, sandbox_id, provider, provider_id, state, created_at, last_refresh_at, agent_installed, task_id, created_by, "
+                "template_id, template_name, engine_type, last_error) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (body.issue_id, body.repo_key, body.sandbox_id, body.provider,
+                 body.provider_id or 0,
+                 body.state, _now, _now, body.agent_installed, task_id, _task_user_id or 0,
+                 body.template_id, body.template_name, body.engine_type, body.error or ""),
+            )
+            # 模板/引擎快照列不随 UPDATE 覆盖（建箱时固化；老上报无值时补写）
+            c.execute(
+                "UPDATE cloud_sandboxes SET provider=?, state=?, last_refresh_at=?, agent_installed=?, "
+                "template_id=CASE WHEN template_id='' THEN ? ELSE template_id END, "
+                "template_name=CASE WHEN template_name='' THEN ? ELSE template_name END, "
+                "engine_type=CASE WHEN engine_type='' THEN ? ELSE engine_type END, "
+                "last_error=CASE WHEN ?!='' THEN ? ELSE last_error END "
+                "WHERE sandbox_id=? AND state != 'killed'",
+                (body.provider, body.state, _now, body.agent_installed,
+                 body.template_id, body.template_name, body.engine_type,
+                 body.error or "", body.error or "", body.sandbox_id),
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"sandbox-status write failed: {e}")
+        return {"status": "error", "detail": str(e)}
+    return {"status": "ok"}
+
+
+@router.get("/cloud-sandboxes", operation_id="runtime_cloud_sandboxes", summary="List cloud sandboxes",
+            description="Lists all cloud sandboxes with state, provider, kill_attempts. Supports pagination, search, and filtering.")
+def runtime_list_cloud_sandboxes(
+    repo_key: str = "",
+    provider: str = "",
+    provider_id: int = 0,
+    state: str = "",
+    q: str = "",
+    page: int = 1,
+    page_size: int = 20,
+    user: dict = Depends(require_no_session_token),
+):
+    """[沙箱迁移] 列出云沙箱。只返回当前用户有权限的仓库的沙箱（BOLA 防越权）。"""
+    from src.api.deps import check_repo_access
+
+    extra_conditions = []
+    extra_params = []
+    q = (q or "").strip()
+    if q:
+        # [沙箱迁移] 搜索语义对齐 Event 列：event_seq 精确匹配（事件号是数字，模糊无意义）；
+        # task_id 仅在完整 ID（t_ 前缀）时精确参与——task_id 是 16 位 hash，
+        # 模糊 LIKE %q% 会让任何短数字串命中一堆无关行（搜"9"命中全部含 9 的 hash）。
+        _conds = ["t.event_seq = ?"]
+        _params = [q]
+        if q.startswith("t_"):
+            _conds.append("s.task_id = ?")
+            _params.append(q)
+        extra_conditions.append("(" + " OR ".join(_conds) + ")")
+        extra_params.extend(_params)
+    if provider:
+        extra_conditions.append("s.provider=?")
+        extra_params.append(provider)
+    if provider_id:
+        extra_conditions.append("s.provider_id=?")
+        extra_params.append(provider_id)
+    if state:
+        extra_conditions.append("s.state=?")
+        extra_params.append(state)
+    extra_where = (" AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
+
+    with db_lock:
+        c = db.cursor()
+        if repo_key:
+            check_repo_access(user, repo_key)
+            params = [repo_key] + extra_params
+            c.execute("SELECT COUNT(*) FROM cloud_sandboxes s WHERE s.repo_key=?" + extra_where, tuple(params))
+            total = c.fetchone()[0]
+            offset = (page - 1) * page_size
+            c.execute(
+                "SELECT s.sandbox_id, s.issue_id, s.repo_key, s.provider, s.provider_id, s.state, "
+                "s.agent_installed, s.kill_attempts, s.created_at, s.last_refresh_at, "
+                "s.task_id, s.created_by, u.username, t.event_seq, ar.name, ar.runtime_info, "
+                "s.template_id, s.template_name, s.engine_type, s.last_error, "
+                "COALESCE(rc2.name, s.provider) "
+                "FROM cloud_sandboxes s LEFT JOIN user_accounts u ON s.created_by=u.id "
+                "LEFT JOIN agent_tasks t ON t.id = s.task_id "
+                "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
+                "LEFT JOIN sandbox_provider_config spc ON spc.id = s.provider_id "
+                "LEFT JOIN runtime_credentials rc2 ON rc2.id = spc.runtime_credential_id "
+                "WHERE s.repo_key=?" + extra_where +
+                " ORDER BY s.created_at DESC LIMIT ? OFFSET ?",
+                tuple(params + [page_size, offset]))
+            def _p_ri(_raw):
+                try:
+                    import json as _j
+                    _d = _j.loads(_raw or "{}")
+                    return _d if isinstance(_d, dict) else {}
+                except Exception:
+                    return {}
+            sandboxes = [
+                # provider 显示 = 凭据名（COALESCE(rc2.name, s.provider)——跟随改名；无凭据回落建箱快照）
+                {"sandbox_id": r[0], "issue_id": r[1], "repo_key": r[2], "provider": r[20],
+                 "provider_id": r[4], "state": r[5], "agent_installed": bool(r[6]),
+                 "kill_attempts": r[7], "created_at": r[8], "last_refresh_at": r[9],
+                 "task_id": r[10], "created_by": r[11], "owner_name": r[12] or "", "event_seq": r[13],
+                 "engine": (r[18] or _p_ri(r[15]).get("engine_type", "") or (r[14] or "").split(":")[0]) or (r[14] or "").split(":")[0],
+                 "template_id": (r[16] or _p_ri(r[15]).get("template_id", "")), "template_name": (r[17] or _p_ri(r[15]).get("template_name", "")),
+                 "last_error": (r[19] or "")}
+                for r in c.fetchall()
+            ]
+        else:
+            c.execute(
+                "SELECT COUNT(*) FROM cloud_sandboxes s "
+                "LEFT JOIN agent_tasks t ON t.id = s.task_id "
+                "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id"
+                + ((" WHERE " + " AND ".join(extra_conditions)) if extra_conditions else ""),
+                tuple(extra_params))
+            total = c.fetchone()[0]
+            offset = (page - 1) * page_size
+            c.execute(
+                "SELECT s.sandbox_id, s.issue_id, s.repo_key, s.provider, s.provider_id, s.state, "
+                "s.agent_installed, s.kill_attempts, s.created_at, s.last_refresh_at, "
+                "s.task_id, s.created_by, u.username, t.event_seq, ar.name, ar.runtime_info, "
+                "s.template_id, s.template_name, s.engine_type, s.last_error, COALESCE(rc2.name, s.provider) "
+                "FROM cloud_sandboxes s LEFT JOIN user_accounts u ON s.created_by=u.id "
+                "LEFT JOIN agent_tasks t ON t.id = s.task_id "
+                "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
+                "LEFT JOIN sandbox_provider_config spc ON spc.id = s.provider_id "
+                "LEFT JOIN runtime_credentials rc2 ON rc2.id = spc.runtime_credential_id "
+                + ((" WHERE " + " AND ".join(extra_conditions)) if extra_conditions else "") +
+                " ORDER BY s.created_at DESC LIMIT ? OFFSET ?",
+                tuple(extra_params + [page_size, offset]))
+            def _p_ri(_raw):
+                try:
+                    import json as _j
+                    _d = _j.loads(_raw or "{}")
+                    return _d if isinstance(_d, dict) else {}
+                except Exception:
+                    return {}
+            sandboxes = [
+                {"sandbox_id": r[0], "issue_id": r[1], "repo_key": r[2], "provider": r[20],
+                 "provider_id": r[4], "state": r[5], "agent_installed": bool(r[6]),
+                 "kill_attempts": r[7], "created_at": r[8], "last_refresh_at": r[9],
+                 "task_id": r[10], "created_by": r[11], "owner_name": r[12] or "", "event_seq": r[13],
+                 "engine": (r[18] or _p_ri(r[15]).get("engine_type", "") or (r[14] or "").split(":")[0]) or (r[14] or "").split(":")[0],
+                 "template_id": (r[16] or _p_ri(r[15]).get("template_id", "")), "template_name": (r[17] or _p_ri(r[15]).get("template_name", "")),
+                 "last_error": (r[19] or "")}
+                for r in c.fetchall()
+            ]
+    return {"total": total, "page": page, "page_size": page_size, "sandboxes": sandboxes}
+
+
+@router.delete("/cloud-sandboxes/{sandbox_id}", operation_id="runtime_cloud_sandbox_kill",
+               summary="Kill cloud sandbox", description="Force kill a cloud sandbox by sandbox_id.")
+def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_session_token)):
+    """[沙箱迁移] 强杀云沙箱。BOLA 校验后调 provider.kill_sandbox。"""
+    from src.api.deps import check_repo_access
+    with db_lock:
+        c = db.cursor()
+        # [provider 列语义修复 2026-10-30] cloud_sandboxes.provider 列存引擎名第三段
+        # (=凭据名规整化, 实测 'cubesandbox-s1')——非 registry 的 platform 键。
+        # 统一经 provider_id JOIN spc.platform 取键(与模板检查链路同款修法);
+        # provider_id 缺失的旧行回退 provider 列原文(可能仍失败, 报错可见)。
+        c.execute(
+            "SELECT cs.provider, cs.state, cs.repo_key, cs.provider_id, "
+            "spc.platform "
+            "FROM cloud_sandboxes cs LEFT JOIN sandbox_provider_config spc ON spc.id = cs.provider_id "
+            "WHERE cs.sandbox_id=?", (sandbox_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "sandbox not found"})
+    provider_name, state, sandbox_repo_key = row[4] or row[0], row[1], row[2] or ""
+    if sandbox_repo_key:
+        check_repo_access(user, sandbox_repo_key)
+    if state in ("killed", "kill_failed"):
+        return {"status": "already_killed", "state": state}
+    from src.domains.runtime.agents.sandbox.backends import default_registry
+    registry = default_registry()
+    factory = registry.get(provider_name)
+    if not factory:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": f"provider '{provider_name}' not in registry"})
+    try:
+        provider = factory(None, None, None, None)
+        if hasattr(provider, 'kill_sandbox'):
+            success = provider.kill_sandbox(sandbox_id)
+            if success:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("UPDATE cloud_sandboxes SET state='killed', last_refresh_at=? WHERE sandbox_id=?",
+                              (datetime.now(timezone.utc).isoformat(), sandbox_id))
+                    db.commit()
+                return {"status": "killed"}
+            return {"status": "kill_failed"}
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "provider has no kill_sandbox method"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"kill cloud sandbox {sandbox_id} failed: {e}")
+        raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
+
+
+@router.post("/tasks/{task_id}/proxy-token")
+def runtime_issue_proxy_token(task_id: str, cred: CredentialContext = Depends(_require_credential_ctx)):
+    """[沙箱迁移] cloud_worker 签发 proxy token（无 DB，通过 HTTP API 写 task_proxy_tokens 表）。"""
+    _check_task_access(task_id, cred)
+    try:
+        from src.domains.runtime.agents.sandbox.token import issue_proxy_token, TokenIssueError
+        task = service.get_task(task_id)
+        _backend = "opencode"
+        if task:
+            _rn = task.get("runtime_name") or ""
+            if _rn:
+                from src.runtime.agent import _backend_for_engine
+                _backend = _backend_for_engine(_rn) or "opencode"
+        token = issue_proxy_token(task_id, _backend)
+        return {"token": token}
+    except Exception as e:
+        log.warning(f"proxy-token issue failed: {e}")
+        return {"token": "", "error": str(e)}
+
+
+@router.delete("/tasks/{task_id}/proxy-token")
+def runtime_revoke_proxy_token(task_id: str, cred: CredentialContext = Depends(_require_credential_ctx)):
+    """[沙箱迁移] cloud_worker 撤销 proxy token。"""
+    _check_task_access(task_id, cred)
+    try:
+        from src.domains.runtime.agents.sandbox.token import revoke_proxy_token
+        revoke_proxy_token(task_id)
+        return {"status": "ok"}
+    except Exception as e:
+        log.warning(f"proxy-token revoke failed: {e}")
+        return {"status": "error", "detail": str(e)}
+
+
+@router.get("/provider-configs", operation_id="runtime_provider_configs",
+            summary="Dispatch provider configs to cloud_worker",
+            description="Returns provider configs with decrypted api_key, scoped to the credential's own providers only. rta_ token can only see providers bound to itself (runtime_credential_id=cred id). v3: returns {providers: [...]} by provider_id.")
+def runtime_provider_configs(cred: CredentialContext = Depends(_require_credential_ctx)):
+    """[沙箱迁移] v3：下发 provider 配置给 cloud_worker（api_key 已解密为明文）。
+
+    [安全修正·用户裁定] rta_ token 一律只能查自己关联的 Provider——
+    按 runtime_credential_id=凭据id 过滤，无系统级全量信任。
+    （历史：曾有 source==system 门禁，但凭据生成不写 source 列致默认
+    'system' 全员放行，形同虚设——source 机制已随安全修正整体移除，
+    凭据隔离由 runtime_credential_id 单一维度承担。）
+    无凭据来源（cred_id=0）的 Provider 只能 WebUI 管理，不下发任何
+    worker；老 worker 要用需将其关联到自己的凭据。
+    """
+    from src.utils.crypto import decrypt
+    providers = []
+    with db_lock:
+        c = db.cursor()
+        # [范围由凭据承担] 附带 credential_scope（cloud_worker claim 全局任务 tags 判定用）
+        # [锚简化] 附带 credential_uid（凭据自身稳定键——worker 本地缓存键/工件命名换锚源）
+        c.execute("SELECT spc.id, rc.name AS name, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.max_sandboxes, rc.scope, rc.credential_uid "
+                  "FROM sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id WHERE spc.enabled=1 AND spc.runtime_credential_id=?",
+                  (cred.id,))
+        rows = c.fetchall()
+    for pid, name, platform, endpoint, api_key_enc, extra_json, max_sandboxes, credential_scope, _cred_uid in rows:
+        try:
+            extra = json.loads(extra_json) if extra_json else {}
+            api_key = decrypt(api_key_enc) if api_key_enc else ""
+            providers.append({
+                "id": pid,
+                "name": name or platform or "",
+                "platform": platform or "",
+                "endpoint": endpoint,
+                "api_key": api_key,
+                "extra_config": extra,
+                "max_sandboxes": max_sandboxes or 10,
+                "credential_scope": credential_scope or "",
+                "credential_uid": _cred_uid or "",
+            })
+        except Exception as e:
+            log.warning(f"provider-configs: parse failed for id={pid}: {e}")
+    return {"providers": providers}
+
+
+@router.get("/provider-configs/{provider_id}/active-sandboxes",
+            operation_id="runtime_provider_active_sandboxes",
+            summary="Get active sandbox count for a provider",
+            description="Returns active_count and max_sandboxes for throttling. System-scope credential only.")
+def runtime_provider_active_sandboxes(provider_id: int,
+                                      cred: CredentialContext = Depends(_require_credential_ctx)):
+    """[沙箱迁移] v3 F4：查指定 Provider 的活跃沙箱数（流控校验用）。
+
+    [安全修正] 与 provider-configs 同口径（用户裁定：rta_ 一律只查自己）——
+    只能查自己凭据关联的 Provider。
+    """
+    with db_lock:
+        c = db.cursor()
+        _own = c.execute("SELECT 1 FROM sandbox_provider_config WHERE id=? AND runtime_credential_id=?",
+                         (provider_id, cred.id)).fetchone()
+    if not _own:
+        raise HTTPException(status_code=403,
+                            detail={"code": 403, "message": "provider not bound to this credential"})
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COUNT(*) FROM cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')",
+                  (provider_id,))
+        active_count = c.fetchone()[0] or 0
+        c.execute("SELECT max_sandboxes FROM sandbox_provider_config WHERE id=?", (provider_id,))
+        _row = c.fetchone()
+        max_sandboxes = _row[0] if _row else 10
+    return {"active_count": active_count, "max_sandboxes": max_sandboxes or 10}
+
+
+@router.get("/cloud-runtimes", operation_id="runtime_cloud_runtimes",
+            summary="List existing cloud runtimes for this credential",
+            description="Returns cloud runtimes for _refresh_templates orphan detection. System-scope credential only.")
+def runtime_cloud_runtimes(cred: CredentialContext = Depends(_require_credential_ctx)):
+    """[沙箱迁移] v3 R16：查当前 credential 下已有的 cloud 类型 runtime。"""
+    runtimes = []
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT name, version, healthy, installed, cli_path, provider, runtime_type, runtime_info "
+            "FROM agent_runtimes WHERE credential_id=? AND runtime_type='cloud'",
+            (cred.id,))
+        for row in c.fetchall():
+            runtimes.append({
+                "name": row[0] or "", "version": row[1] or "", "healthy": bool(row[2]),
+                "installed": bool(row[3]), "cli_path": row[4] or "",
+                "provider": row[5] or "", "runtime_type": row[6] or "cloud",
+                "runtime_info": row[7] or "{}",
+            })
+    return {"runtimes": runtimes}
+
+
+@router.get("/whitelist", operation_id="runtime_whitelist",
+            summary="Dispatch sandbox whitelist domains to worker",
+            description="Returns distinct domains from engine_sandbox_whitelist table. Worker uses this to build NetworkProxy whitelist.")
+def runtime_whitelist(cred: CredentialContext = Depends(_require_credential_ctx)):
+    """[沙箱迁移] 下发沙箱白名单域名给 worker（worker 不直接查 DB）。"""
+    domains = []
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT DISTINCT domain FROM engine_sandbox_whitelist WHERE backend_name='*'")
+        rows = c.fetchall()
+    for row in rows:
+        if row[0]:
+            domains.append(row[0])
+    return {"domains": domains}
+
+
+@router.get("/sandbox-paths", operation_id="runtime_sandbox_paths",
+            summary="Dispatch sandbox paths to worker",
+            description="Returns engine_sandbox_paths for a given backend_name. Worker uses this to build bwrap mount paths.")
+def runtime_sandbox_paths(backend_name: str = "",
+                          cred: CredentialContext = Depends(_require_credential_ctx)):
+    """[沙箱迁移] 下发沙箱路径配置给 worker。"""
+    paths = []
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT path, access FROM engine_sandbox_paths WHERE backend_name=?", (backend_name,))
+        rows = c.fetchall()
+    for row in rows:
+        paths.append({"path": row[0], "access": row[1]})
+    return {"paths": paths}
+
+
+@router.get("/skill-egress", operation_id="runtime_skill_egress",
+            summary="Dispatch skill egress policy to worker",
+            description="Returns content_hash + admin_policy + admin_exceptions for a skill. Worker uses this for PolicyEngine.")
+def runtime_skill_egress(skill_name: str = "", skill_id: int = 0,
+                         cred: CredentialContext = Depends(_require_credential_ctx)):
+    """[沙箱迁移] 下发 skill egress 策略给 worker。"""
+    result = {"content_hash": "", "admin_policy": "", "admin_exceptions": []}
+    with db_lock:
+        c = db.cursor()
+        if skill_id:
+            try:
+                c.execute("SELECT content_hash_package FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
+                row = c.fetchone()
+                if row:
+                    result["content_hash"] = row[0] or ""
+            except Exception:
+                pass
+        if skill_name:
+            try:
+                c.execute("SELECT policy FROM egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1",
+                          (skill_name,))
+                row = c.fetchone()
+                if not row:
+                    c.execute("SELECT policy FROM egress_admin_policy WHERE skill_name='*' LIMIT 1")
+                    row = c.fetchone()
+                if row:
+                    result["admin_policy"] = row[0] or ""
+            except Exception:
+                pass
+        try:
+            c.execute(
+                "SELECT host, host_type, ports, methods, scope, scope_target, skill_digest "
+                "FROM egress_admin_exception "
+                "WHERE is_active=1 AND (expires_at IS NULL OR expires_at > datetime('now'))")
+            for row in c.fetchall():
+                result["admin_exceptions"].append({
+                    "host": row[0], "host_type": row[1], "ports": row[2],
+                    "methods": row[3], "scope": row[4], "scope_target": row[5],
+                    "skill_digest": row[6],
+                })
+        except Exception:
+            pass
+    return result
+
+
+@router.get("/admin/sandbox/engines", operation_id="runtime_sandbox_engines",
+            summary="查询引擎维度沙箱开关")
+def get_engine_sandbox_config(user: dict = Depends(require_no_session_token)):
+    """[沙箱迁移] 查询沙箱开关配置（全局 + 引擎维度，2e13b015d）。"""
+    _global_on = True
+    _engines = []
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT engine_type, sandbox_on FROM engine_sandbox_toggle")
+            for _et, _on in c.fetchall():
+                if _et == "global":
+                    _global_on = bool(_on)
+                else:
+                    _engines.append({"engine_type": _et, "sandbox_on": bool(_on)})
+    except Exception:
+        _global_on = os.environ.get("GRAPE_AGENT_SANDBOX", "on").lower() in ("1", "true", "on", "yes")
+    return {"global_sandbox_on": _global_on, "engines": _engines}
+
+
+# ===== [沙箱迁移] 沙箱 worker 上报：端点/SSL/模板列表（rta_ 鉴权） =====
+
+class SandboxProviderReportBody(BaseModel):
+    """「生成沙箱凭据」一键安装的 cloud_worker 启动上报体。
+
+    对接效果与普通 worker 的 register 对称：沙箱 worker 启动时把
+    平台端点、API key、SSL 证书、模板列表上报上来，服务端 UPSERT
+    Provider + 登记模板——用户装完即见沙箱页有数据，无需手工配。
+    """
+    platform: str = ""
+    endpoint: str = ""
+    api_key: str = ""           # 平台 API key（明文传输经 Bearer rta_ 通道，服务端加密落库）
+    ssl_cert: str = ""          # PEM 全文（可空）
+    device_name: str = ""
+    templates: list = []        # [{template_id, alias, description}]（可空——模板可后扫）
+    # [引擎探测 spec] 每模板预装引擎探测结果（worker 建箱实测）：
+    # [{template_id, engines: [{engine, version, source}]}]
+    # → binding UPSERT status='detected'（enabled=1 直接参与调度；manual 恒赢不降级）
+    template_engines: list = []
+
+
+@router.post("/sandbox-provider-report", operation_id="runtime_sandbox_provider_report",
+             summary="Sandbox worker reports platform info (endpoint/SSL/templates)")
+def sandbox_provider_report(body: SandboxProviderReportBody,
+                            request: Request, credential_id: int = Depends(_require_credential)):
+    """[沙箱迁移] 沙箱 worker 上报（幂等 UPSERT）。
+
+    归属：凭据生成者（credential → runtime_credentials.owner_name/user）；
+    级别：与凭据 scope 一致（repo→仓库级；user/global→用户级）。
+    已有同 platform+scope+owner 的 Provider → 更新 endpoint/key/证书（保留 enabled）；
+    无 → 创建（enabled=1）。
+    模板列表非空时逐条 UPSERT（按 provider_id+template_id 唯一语义）。
+    """
+    from src.kernel.session_manager import db, db_lock
+    from src.utils.crypto import encrypt as _enc
+    platform = (body.platform or "").strip()
+    endpoint = (body.endpoint or "").strip()
+    if not platform:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "platform 不能为空"})
+    # 平台合法性：后端注册表校验（不硬编码）
+    from src.domains.runtime.agents.sandbox.backends import get_cloud_registry
+    _cloud = get_cloud_registry()
+    if platform not in _cloud:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"未知平台: {platform}（支持: {', '.join(sorted(_cloud))}）"})
+
+    # 凭据归属（生成沙箱凭据的用户）
+    _owner_name, _owner_id, _scope, _repo_key = "", 0, "user", ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT scope, owner_name, repo_key FROM runtime_credentials WHERE id=?", (credential_id,))
+            _row = c.fetchone()
+        if _row:
+            _owner_name = _row[1] or ""
+            _scope = _row[0] or "user"
+            # 凭据 scope → Provider 级别映射：repo→user+repo_key；user/global→user
+            if _scope == "repo":
+                _repo_key = _row[2] or ""
+        # owner_name → 数字 user_id：owner_name 是 grape 登录账号（如 zjj），
+        # 先查 grape_accounts.username（本地账号），回退 gitcode 平台映射
+        # （And-ZJ2）——与 WebUI 创建 Provider 的 user.get("id") 对齐，
+        # UPSERT 才能命中同一条。
+        if _owner_name:
+            with db_lock:
+                c = db.cursor()
+                _row2 = c.execute("SELECT id FROM grape_accounts WHERE username=? AND status=1 LIMIT 1",
+                                  (_owner_name,)).fetchone()
+            if _row2:
+                _owner_id = _row2[0]
+            else:
+                from src.api.issues_center import _get_user_id_by_gitcode
+                _uid = _get_user_id_by_gitcode(_owner_name)
+                if _uid:
+                    _owner_id = _uid
+    except Exception as _e:
+        log.warning(f"sandbox report: credential lookup failed: {_e}")
+
+    _extra = {"ssl_cert_content": body.ssl_cert} if body.ssl_cert else {}
+    _extra_json = json.dumps(_extra, ensure_ascii=False)
+
+    with db_lock:
+        c = db.cursor()
+        # UPSERT：按凭据精确命中（一凭据一 Provider）。[key 机制废弃 2026-10-29]
+        # 原 cred_id=0 兜底分支（cloud-local.key 时代无凭据上报）删除——端点本身
+        # 已 _require_credential（必须 rta_），credential_id 恒>0，兜底为死代码；
+        # Provider 只能由「生成沙箱凭据」诞生，生命周期=凭据生命周期。
+        c.execute(
+            "SELECT id, api_key_enc, extra_config FROM sandbox_provider_config "
+            "WHERE runtime_credential_id=?",
+            (credential_id,))
+        row = c.fetchone()
+        if row:
+            pid, _old_key, _old_extra = row[0], row[1], (row[2] or "")
+            _new_key = _enc(body.api_key) if body.api_key else _old_key
+            # extra 合并：保留 DB 已有非空项（proxy_node_ip 等），证书覆盖
+            try:
+                _merged = json.loads(_old_extra) if _old_extra else {}
+            except Exception:
+                _merged = {}
+            _merged.update(_extra)
+            # [endpoint 直接入库] 空值不覆盖——endpoint/api_key 权威源在库（生成时入库/
+            # 页面编辑），worker 上报已降级为模板补报（不带 endpoint/api_key）
+            c.execute(
+                "SELECT endpoint FROM sandbox_provider_config WHERE id=?", (pid,))
+            _old_ep = c.fetchone()[0] or ""
+            c.execute(
+                "UPDATE sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, updated_by=? WHERE id=?",
+                ((endpoint or _old_ep), _new_key, json.dumps(_merged, ensure_ascii=False), _owner_name or "sandbox-worker", pid))
+        else:
+            c.execute(
+                # [d1e242cba 对账漏改修复] provider 列已物理删除——INSERT 去掉该列
+                # [范围由凭据承担] INSERT 不带 scope/user_id/repo_key
+                "INSERT INTO sandbox_provider_config (platform, endpoint, api_key_enc, extra_config, "
+                "enabled, max_sandboxes, updated_by, runtime_credential_id) VALUES (?,?,?,?,?,?,?,?)",
+                (platform, endpoint,
+                 _enc(body.api_key) if body.api_key else "",
+                 _extra_json, 1, 10, _owner_name or "sandbox-worker", credential_id))
+            pid = c.lastrowid
+        # 模板登记（可空）
+        _tpl_upserted = 0
+        for t in (body.templates or []):
+            if not isinstance(t, dict):
+                continue
+            _tid = (t.get("template_id") or "").strip()
+            if not _tid:
+                continue
+            c.execute("SELECT id FROM sandbox_templates WHERE provider_id=? AND template_id=?", (pid, _tid))
+            if c.fetchone():
+                continue
+            c.execute(
+                # [04c868c59 对账] provider 列已物理删除——INSERT 去掉该列
+                "INSERT INTO sandbox_templates (name, provider_id, template_id, alias, description, "
+                "enabled, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (t.get("alias") or _tid, pid, _tid,
+                 t.get("alias") or "", t.get("description") or "", 1, _owner_name or "sandbox-worker",
+                 datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()))
+            _tpl_upserted += 1
+        # [引擎探测 spec] 模板引擎探测结果 → binding UPSERT（detected 语义）
+        # manual 恒赢：已有 manual binding 的 (provider_id, engine_type) 不降级不改写；
+        # detected 直接 enabled=1 参与调度（用户裁定 2026-11-02：无需前端勾选）。
+        # 引擎类型校验 = ENGINE_REGISTRY（白名单边界与探测侧一致）。
+        _engines_bound = 0
+        _now_iso = datetime.now(timezone.utc).isoformat()
+        for te in (body.template_engines or []):
+            if not isinstance(te, dict):
+                continue
+            _te_tid = (te.get("template_id") or "").strip()
+            if not _te_tid:
+                continue
+            # 模板 db id（binding 关联的是 sandbox_templates.id 不是平台 hash）
+            # [F14 禁用传导 2026-11-13] 一并取 enabled——模板禁用（settings toggle）后，
+            # 引擎不注册/绑定不回 detected、存量引擎行下线。此前 toggle 只改
+            # sandbox_templates.enabled，注册链路不读它 → 禁用 75s+ 引擎仍 online
+            # （E2E 实证），「绑定引擎将下线」承诺无兑现端（凭据卡/引擎卡不同步根因）。
+            c.execute("SELECT id, enabled FROM sandbox_templates WHERE provider_id=? AND template_id=?",
+                      (pid, _te_tid))
+            _tr = c.fetchone()
+            if not _tr:
+                continue  # 模板未登记（本轮 templates 未带上）——跳过
+            _tpl_db_id = _tr[0]
+            _tpl_enabled = bool(_tr[1])
+            if not _tpl_enabled:
+                # 禁用模板：binding 降级 disabled + 该模板云引擎行下线（幂等，摘除即终态）
+                # [1292 修复 2026-11-14] agent_runtimes.provider_id/template_id 与
+                # engine_template_binding 的写侧均为字符串锚（注册链 UPDATE ... SET
+                # provider_id=? 传 str，见 :531）；读侧比较必须同为字符串——传 int 参数
+                # 会触发 MariaDB 把 TEXT 列 cast 成 DECIMAL，存量 '' 行即 1292
+                # "Truncated incorrect DECIMAL value: ''"（M1 E2E 实测：worker 探测批
+                # provider-report 500，cloud 引擎注册链整链阻断）。binding 表列型为
+                # int 时字符串比较 MariaDB 仍数值兼容，不受影响。
+                c.execute(
+                    "UPDATE engine_template_binding SET status='disabled', updated_at=? "
+                    "WHERE provider_id=? AND template_id=? AND status IN ('detected', '')",
+                    (_now_iso, pid, _tpl_db_id))
+                c.execute(
+                    "UPDATE agent_runtimes SET status='offline', updated_at=? "
+                    "WHERE runtime_type='cloud' AND provider_id=? AND template_id=?",
+                    (_now_iso, str(pid), str(_tpl_db_id)))
+                continue
+            from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
+            for eng in (te.get("engines") or []):
+                if not isinstance(eng, dict):
+                    continue
+                _et = (eng.get("engine") or "").strip()
+                if not _et or _et not in ENGINE_REGISTRY:
+                    continue  # 白名单外引擎不上 binding
+                # manual 恒赢：同 (provider_id, engine_type) 存在任意非 detected binding → 跳过
+                # （manual 语义按引擎级——手工绑过的引擎整体不被探测改写）
+                _manual_hits = c.execute(
+                    "SELECT COUNT(*) FROM engine_template_binding WHERE provider_id=? AND engine_type=? "
+                    "AND status NOT IN ('detected', '')",
+                    (pid, _et)).fetchone()[0]
+                if _manual_hits:
+                    continue
+                # [多模板共用引擎修复 2026-11-04] UPSERT 按 (provider, engine, template)
+                # 三元组——UNIQUE 约束本就允许同引擎绑多模板（多模板共用引擎迁移语义，
+                # db_setup 5383 起），此前实现退化成按 (provider, engine) 单行改写：
+                # 上报 [tpl-A: hermes, tpl-B: hermes, ...] 时循环内每条 UPDATE 同一行，
+                # 最后遍历的模板胜出，其余模板引擎列恒空（实测 s1/sg：4 模板同装
+                # hermes 只落 1 行 binding）。manual 路径（bind-engine API）本就按
+                # 三元组，仅探测上报这条窄了。
+                c.execute("SELECT id FROM engine_template_binding WHERE provider_id=? AND engine_type=? AND template_id=?",
+                          (pid, _et, _tpl_db_id))
+                _br = c.fetchone()
+                if _br:
+                    c.execute("UPDATE engine_template_binding SET status='detected', "
+                              "engine_version=?, updated_at=? WHERE id=?",
+                              ((eng.get("version") or "")[:64], _now_iso, _br[0]))
+                else:
+                    c.execute("INSERT INTO engine_template_binding (provider_id, engine_type, template_id, "
+                              "status, engine_version, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                              (pid, _et, _tpl_db_id, "detected", (eng.get("version") or "")[:64],
+                               _now_iso, _now_iso))
+                _engines_bound += 1
+        db.commit()
+    log.info(f"sandbox provider report: cred={credential_id} platform={platform} provider_id={pid} "
+             f"templates={_tpl_upserted} engines_detected={_engines_bound} owner={_owner_name}")
+    return {"provider_id": pid, "templates_upserted": _tpl_upserted,
+            "engines_detected": _engines_bound, "status": "ok"}
+

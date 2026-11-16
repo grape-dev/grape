@@ -244,7 +244,8 @@
     "anomaly": "异常任务",
     "errorlogs": "错误日志",
     "events": "事件",
-    "efficiency": "能效看板"
+    "efficiency": "能效看板",
+    "sandboxes": "沙箱"
   },
   "eff": {
     "total_issues": "提需求",

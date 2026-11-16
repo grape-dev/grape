@@ -364,6 +364,43 @@ def _check_skill(node: dict, tag: str, repo_key: str,
                 f"（{result.get('reason') or 'skill scope 不匹配'}）",
         suggestion=_suggestion)
 
+def _resolve_engine_refs(n: dict) -> list[int]:
+    """节点引擎引用解析（uid 优先、id 回落）——与调度层 get_scene_pool_engine_ids
+    同一判据（#646/#868 uid 改造口径 + #1208 三模式）。
+
+    - engine_runtime_uids 非空 → 按 agent_runtimes.engine_uid 解析为引擎 id 列表
+      （uid 悬空/查不到 → 0 哨兵，交由 _check_engine_binding 的存在性校验报
+      「绑定的引擎不存在」，不静默放行）；
+    - uids 为空 → 回落 engine_runtime_ids（legacy 轨，行为不变）。
+
+    注意 selector 模式节点两轨均空是**合法**（按标签圈池），调用方对 SRE 的
+    「未绑定机器」判定也因本函数的存在而只会在两轨都空时触发——SRE 走
+    selector 同样非法（SRE 无 label: 维度实践），维持原约束。
+    """
+    _uids = [u for u in (n.get("engine_runtime_uids") or []) if str(u or "").strip()]
+    if _uids:
+        from src.domains.runtime import public as _rt_pcheck
+        placeholders = ",".join("?" * len(_uids))
+        out_conn_rows = []
+        try:
+            # 动态 IN 查询经任意拓扑游标（owner 域直连；单库回落进程库）
+            with _rt_pcheck._any_cursor() as _c:
+                _c.execute(f"SELECT id, engine_uid FROM agent_runtimes WHERE engine_uid IN ({placeholders})", tuple(_uids))
+                out_conn_rows = _c.fetchall()
+            found = {row[1]: row[0] for row in out_conn_rows}
+        except Exception:
+            found = {}
+        out = []
+        for u in _uids:
+            _rid = found.get(u)
+            if not _rid:
+                out.append(0)
+            else:
+                out.append(int(_rid))
+        return out
+    return _normalize_engine_ids(n.get("engine_runtime_ids"))
+
+
 def _check_nodes(nodes: list, scene_id: str, repo_key: str, user,
                  cfg: dict, problems: list) -> None:
     names, uids = _user_identities(user)
@@ -375,7 +412,8 @@ def _check_nodes(nodes: list, scene_id: str, repo_key: str, user,
             continue
         tag = _node_key(n)
         is_sre = str(n.get("id") or n.get("tag") or "").strip().lower() == "sre"
-        eids = _normalize_engine_ids(n.get("engine_runtime_ids"))
+        # [uid 优先回落 2026-11-13] 引擎引用 uid 轨优先（#646/#868 口径），空再回落 id 轨
+        eids = _resolve_engine_refs(n)
         _check_engine_binding(tag, is_sre, eids, scene_id, repo_key, names, uids,
                               cfg, problems)
         _check_skill(n, tag, repo_key, cfg, problems)

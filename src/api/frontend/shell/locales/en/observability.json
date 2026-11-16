@@ -244,7 +244,8 @@
     "anomaly": "Anomalies",
     "errorlogs": "Error Logs",
     "events": "Events",
-    "efficiency": "Efficiency"
+    "efficiency": "Efficiency",
+    "sandboxes": "Sandboxes"
   },
   "eff": {
     "total_issues": "Issues opened",

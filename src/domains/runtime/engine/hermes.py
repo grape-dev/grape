@@ -44,6 +44,16 @@ class HermesRuntime(AgentRuntime):
         self._verbose_ok: bool | None = None
         self._verbose_probe_lock = threading.Lock()
 
+    # [沙箱迁移 i7 漏移植恢复 2026-11-11] 云沙箱路径返回 ACP backend（JSON-RPC 协议，
+    # 流式事件回传）。基类默认返回 self（NDJSON CLI 路径，hermes chat -q 无流式——
+    # 云任务执行期间前端实时日志全静默）。HermesACPBackend.protocol='acp'，
+    # _run_cloud_sandbox 走 CubeSandboxTransport + _run_acp_session，text/reasoning
+    # 事件边执行边 report_messages。此前 override 丢失 → isinstance(CloudBackendProvider)
+    # 恒 False → 云沙箱 hermes 走 CLI fallback（chat -q exit 127，VOD 沙箱任务实测）。
+    def cloud_backend(self):
+        from src.domains.runtime.agents.hermes_acp import HermesACPBackend
+        return HermesACPBackend()
+
     def _probe_cli_flag(self) -> bool:
         """探测当前 hermes 是否支持 --cli（一次性，带锁缓存）。
 

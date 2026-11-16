@@ -625,6 +625,13 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
 
     # 获取 bot token（按 provider 分流：GitHub 仓库用 get_github_token）
 
+    # Issue #646：任务落库前的引擎引用快照（uid + 展示名；未迁移旧库/引擎已删不阻断）
+    try:
+        from src.domains.mgmt.user.db import engine_ref_snapshot
+        _snap = engine_ref_snapshot(engine_id, "")
+    except Exception:
+        _snap = (None, "", "")
+
     try:
         row = _task_insert_row(_TASK_COLUMNS_LIST,
             id=task_id, agent_session_id=agent_session_id, runtime_id=engine_id,
@@ -636,6 +643,10 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
             pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids="",
+            # Issue #646：uid 引用 + 引擎展示名快照（引擎删除后历史可读；失败不阻断任务创建）
+            pool_engine_uids=_snap[2], engine_uid=_snap[0], engine_name_snapshot=_snap[1],
+            # Issue #1208：direct/failed 快照行无 selector 语义（列覆盖契约，值为空）
+            pool_selector="",
             pool_engine_source="",
             status="queued", stream_ended=0, self_reported=0,
             exit_code=None, result_text="", errors="", stderr="",
@@ -742,6 +753,10 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
             pool_agent_type=_pool_tag, affinity_runtime_id=0, pool_tag=_pool_tag, pool_engine_ids="",
+            # Issue #646：uid 引用快照（引擎不可用时多为 NULL/空，不阻断失败快照落库）
+            pool_engine_uids="", engine_uid=None, engine_name_snapshot="",
+            # Issue #1208：direct/failed 快照行无 selector 语义（列覆盖契约，值为空）
+            pool_selector="",
             pool_engine_source="",
             status="failed", stream_ended=1, self_reported=0,
             exit_code=1, result_text="", errors=_reason, stderr="",
@@ -1487,16 +1502,22 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             _fail_event(seq, f"PR 订阅派发失败：无可用引擎（scene={scene_id}, agent=qa），请检查引擎在线状态")
             return
         _be = engine_name(_engine_id) or ""
-        # Phase 3 (#699)：direct 即时执行已移除，统一入队
-        # （status=queued）由本机引擎 local_claimer 认领执行；broadcast 与 direct
-        # 分派收敛为同一条 _enqueue_pipeline_task 路径。
-        _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
-        if _pool_ids is None:
-            _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub", repo_key=repo_key)
+        # Phase 3 (#699)：direct 即时执行已移除，统一入队（status=queued）由本机引擎
+        # local_claimer 认领执行；broadcast 与 direct 分派收敛为同一条 _enqueue_pipeline_task。
+        # Issue #1208：入队三分叉 gate（selector 场景落 pool_selector，零命中 fail-closed）
+        _gm, _gp, _gf = _scene_pool_gate(scene_id, "qa", repo_key=repo_key)
+        if _gf:
+            _fail_event(seq, _gf)
             return
+        _pool_ids = _gp["pool_engine_ids"]
+        if _gm != "selector" and _pool_ids is None:
+            # Issue #259 fail-closed：uid/id 池场景绑定引擎全灭 → 不入队（PR 订阅路径）
+            _fail_scene_all_offline(seq, scene_id, "qa", "PR 订阅派发", repo_key=repo_key)
+            return
+        _pool_sel = _gp["pool_selector"] if _gm == "selector" else ""
         _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                0, qa_skill, _engine_id, _pseudo_id,
-                               pool_engine_ids=_pool_ids or "")
+                               pool_engine_ids=_pool_ids or "", pool_selector=_pool_sel)
     except Exception as e:
         log.warning(f"Pipeline: PR subscription extra dispatch failed: {e}")
 
@@ -1563,14 +1584,22 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
         if _pr_num:
             _extra_evt["_pr_sub_pr_number"] = _pr_num
 
-        # Phase 3 (#699)：direct 即时执行已移除，统一入队（同 extra 分派）
-        _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
-        if _pool_ids is None:
-            _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub", repo_key=repo_key)
+        # Phase 3 (#699)：direct 即时执行已移除，统一入队（status=queued）由本机引擎
+        # local_claimer 认领执行；broadcast 与 direct 分派收敛为同一条 _enqueue_pipeline_task。
+        # Issue #1208：入队三分叉 gate（selector 场景落 pool_selector，零命中 fail-closed）
+        _gm, _gp, _gf = _scene_pool_gate(scene_id, "qa", repo_key=repo_key)
+        if _gf:
+            _fail_event(seq, _gf)
             return
+        _pool_ids = _gp["pool_engine_ids"]
+        if _gm != "selector" and _pool_ids is None:
+            # Issue #259 fail-closed：uid/id 池场景绑定引擎全灭 → 不入队（PR 订阅路径）
+            _fail_scene_all_offline(seq, scene_id, "qa", "PR 订阅派发", repo_key=repo_key)
+            return
+        _pool_sel = _gp["pool_selector"] if _gm == "selector" else ""
         _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                0, qa_skill, _engine_id, _pseudo_id,
-                               pool_engine_ids=_pool_ids or "")
+                               pool_engine_ids=_pool_ids or "", pool_selector=_pool_sel)
 
         # 重派成功：把事件状态改回 running（重派前可能是 failed）
         from src.api.event_store import update_event_status
@@ -2825,6 +2854,24 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # Phase 3 (#699)：所有路径统一入队（queue_remote/direct 均经 enqueue_task）。
     from src.domains.runtime.engine.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
     from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT
+    # Issue #1208：入队三分叉（selector / uid 池 / legacy id）——selector 非空走 selector
+    # 路径（fail-closed 零命中不入队 + 文案分流），否则回落既有池路径（行为零变化）
+    _gate_mode, _gate_payload, _gate_fail = _scene_pool_gate(
+        _issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid)
+    if _gate_mode == "selector":
+        _pool_engine_ids = _gate_payload["pool_engine_ids"]      # 恒空串（selector 任务两池列均空）
+        _pool_selector = _gate_payload["pool_selector"]
+    elif _gate_fail:
+        # selector 零命中 fail-closed：不入队 + event failed（配置死/瞬时死文案分流）
+        log.warning(f"Pipeline: scene={_issue_scene} agent={agent_type} selector zero-hit, "
+                    f"skip enqueue (Issue #1208): {_gate_fail}")
+        _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
+                            skill_path, skill_id, evt, issue_id, runtime_id or 0)
+        _fail_event(seq, _gate_fail)
+        return result
+    else:
+        _pool_engine_ids = _gate_payload["pool_engine_ids"]
+        _pool_selector = ""
     try:
         engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0,
                                 scene_id=_issue_scene, user_id=_issue_scene_uid)
@@ -2844,7 +2891,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 场景 engine_runtime_ids 限定广播范围（写入 pool_engine_ids 字段）。
     # Issue #112 修复：所有模式都获取 pool_engine_ids，确保场景引擎绑定生效
     # Issue #259：写入前已按健康过滤（get_scene_pool_engine_ids 内部）。
-    _pool_engine_ids = get_scene_pool_engine_ids(_issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid)
+    # Issue #1208：池解析已由上方 _scene_pool_gate 三分叉统一完成（selector 场景
+    # _pool_selector 承载圈池语义、_pool_engine_ids 恒空；pool 场景语义不变），不再重复解析。
     if _pool_engine_ids is None:
         # 方案A：场景绑定的引擎全部离线/失联 → 不入队，事件置 failed 并明确提示
         log.warning(f"Pipeline: scene={_issue_scene} agent={agent_type} engines all offline, skip (Issue #259)")
@@ -2901,7 +2949,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                                    skill_id, skill_path, engine_id, issue_id,
                                    pool_engine_ids=_pool_engine_ids, user_id=_issue_scene_uid,
                                    is_scene_recommend=_is_scene_recommend,
-                                   pool_engine_source=_pes)
+                                   pool_engine_source=_pes,
+                                   pool_selector=_pool_selector)
         return result
     # backend 必须取已注册引擎的类型名（不沿用会话/字面默认），确保执行 CLI 与选中引擎一致
     _be = engine_name(engine_id) or backend
@@ -3544,9 +3593,43 @@ def reconcile_queued_a2a(repo_key: str = "") -> list:
 # src/domains/runtime/engine/local_claimer.py 的 _local_direct_engine_ids 承接。
 
 
+def _scene_pool_gate(scene_id: str, agent_type: str, repo_key: str = "",
+                     user_id: int = 0) -> tuple:
+    """Issue #1208：入队三分叉单点收口（selector / uid 池 / legacy id）。
+
+    分叉判据（§2.1）：engine_selector 非空 → selector 路径（fail-closed 即时校验，
+    零命中不入队 + 文案分流）；否则回落 get_scene_pool_engine_ids（uids 优先回落
+    ids 的既有池路径，行为零变化）。
+
+    返回 (mode, payload, fail_reason)：
+    - ("selector", {"pool_selector": <json>, "pool_engine_ids": ""}, None)：入队，
+      任务行落 pool_selector、两池列置空；
+    - ("pool", {"pool_engine_ids": <既有三方语义>}, None)：uid/id 池路径原语义；
+    - (None, None, <reason>)：selector 零命中 fail-closed，调用方不入队 + event failed。
+    """
+    import json as _sj
+    from src.domains.runtime.engine.engine_select import (get_scene_engine_selector,
+                                           selector_enqueue_failure_reason,
+                                           get_scene_pool_engine_ids)
+    try:
+        sel = get_scene_engine_selector(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
+    except Exception as _se:
+        log.warning(f"_scene_pool_gate: selector lookup failed: {_se}")
+        sel = None
+    if sel and (sel.get("tags") or []):
+        reason = selector_enqueue_failure_reason(sel, agent_type, repo_key=repo_key, user_id=user_id)
+        if reason:
+            return None, None, reason
+        return ("selector",
+                {"pool_selector": _sj.dumps(sel, ensure_ascii=False), "pool_engine_ids": ""},
+                None)
+    pool = get_scene_pool_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
+    return "pool", {"pool_engine_ids": pool}, None
+
+
 def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                            skill_id, skill_path, runtime_id, issue_id="", pool_engine_ids="", user_id=0,
-                           is_scene_recommend=False, pool_engine_source=""):
+                           is_scene_recommend=False, pool_engine_source="", pool_selector=""):
     """init_event_json -> enqueue_task (deterministic routing runtime_id).
     Local worker / remote RuntimeAgent consume.
 
@@ -3785,6 +3868,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             pool_tag=_pool_tag,
             pool_agent_type=_pool_agent_type,
             pool_engine_ids=pool_engine_ids,
+            pool_selector=pool_selector,
         )
     except Exception as e:
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
@@ -5065,13 +5149,18 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
 
     _be = engine_name(engine_id) or "opencode"
 
-    # 入队（Phase 3 #699）：direct 即时执行已移除，统一
-    # _enqueue_pipeline_task 入队（status=queued），由本机引擎 local_claimer / 远端
-    # worker 认领执行（内部会构建 prompt）
+    # 入队（Phase 3 #699）：direct 即时执行已移除，统一 _enqueue_pipeline_task
+    # 入队（status=queued），由本机引擎 local_claimer / 远端 worker 认领执行。
     _pool_eids = ""
+    _pool_sel_vod = ""
     if is_plugin_mode():
-        from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids
-        _pool_eids = get_scene_pool_engine_ids(_scene_id, "vod", repo_key=repo_key, user_id=_scene_uid)
+        # Issue #1208：智能推荐重派同走三分叉 gate（selector 场景落 pool_selector）
+        _gm3, _gp3, _gf3 = _scene_pool_gate(_scene_id, "vod", repo_key=repo_key, user_id=_scene_uid)
+        if _gf3:
+            _fail_event(seq, _gf3)
+            return False
+        _pool_eids = _gp3["pool_engine_ids"]
+        _pool_sel_vod = _gp3["pool_selector"] if _gm3 == "selector" else ""
         # Issue #259：None = 场景引擎全灭（方案A，不入队）
         if _pool_eids is None:
             _fail_scene_all_offline(seq, _scene_id, "vod", "智能推荐重派", repo_key=repo_key)
@@ -5079,7 +5168,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
     _enqueue_pipeline_task(repo_key, seq, "vod", _be, vod_skill, evt_copy,
                            skill_id, skill_path, engine_id, issue_id,
                            pool_engine_ids=_pool_eids, user_id=_scene_uid,
-                           is_scene_recommend=False)
+                           is_scene_recommend=False, pool_selector=_pool_sel_vod)
     log.info(f"智能推荐重派: enqueued VOD task, seq={seq}, skill={vod_skill}")
 
 

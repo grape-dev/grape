@@ -426,7 +426,10 @@ WHEEL_PLATFORMS = [
 # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
 # pip download cannot parse extras from pyproject.toml directly, so we list the worker
 # deps explicitly here. Keep in sync with pyproject.toml [project.optional-dependencies] worker.
-WORKER_DEPS = ["aiohttp>=3.9", "bcrypt>=4.0", "click>=8.0", "httpx>=0.24"]
+# [沙箱迁移生效性修复 2026-11-10] 与 pyproject.toml [project.optional-dependencies] worker 同源
+# （离线 wheels 打包范围）——补 cubesandbox/requests/cryptography，与 install-worker.sh 对齐。
+WORKER_DEPS = ["aiohttp>=3.9", "bcrypt>=4.0", "click>=8.0", "httpx>=0.24",
+               "cubesandbox>=0.7", "requests>=2.31", "cryptography>=42"]
 
 
 def _pip_download_wheels(dest: str, platform_args: list[str], py_version: str) -> int:

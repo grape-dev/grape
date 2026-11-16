@@ -17,33 +17,43 @@ SHELL = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "fronten
 # 页面 → {模块: 冻结版本}（2026-11-13 缓存版本回填/统一后快照）
 FROZEN = {
     "index.html": {
-        "tokens.css": "1", "app.css": "6", "all-views.css": "10", "auth.css": "1", ".min.css": "1", ".min.js": "1",
-        "faro.js": "7", "api.js": "35", "pwd-blocklist.js": "3", "worker-name.js": "2", "dashboard-view.js": "73", "pipeline.js": "54",
-        "agent-view.js": "50", "event-view.js": "57", "chat-view.js": "59", "im-channel.js": "52", "repos-view.js": "56", "issues-view.js": "61",
-        "account-view.js": "55", "scene-market.js": "58", "skills-view.js": "54", "knowledge-view.js": "49", "runtimes-view.js": "56", "observability-view.js": "55",
-        "organizations.js": "50", "feedback-dialog.js": "50", "my-feedback.js": "50", "my-feedback-detail.js": "50", "autopilot-view.js": "53", "deeplink.js": "1",
-        "platform-icons.js": "2", "app.js": "269", "login-view.js": "2", "onboarding-view.js": "7", "auto-recovery.js": "2", "oauth-buttons.js": "2",
+        "tokens.css": "1", "app.css": "6", "all-views.css": "10", "auth.css": "1", "faro.js": "7",
+        "api.js": "35", "pwd-blocklist.js": "3", "worker-name.js": "2", "dashboard-view.js": "73", "pipeline.js": "54",
+        "agent-view.js": "50", "event-view.js": "57", "chat-view.js": "59", "im-channel.js": "52", "repos-view.js": "56",
+        "issues-view.js": "61", "account-view.js": "55", "scene-market.js": "58", "skills-view.js": "54", "knowledge-view.js": "49",
+        "runtimes-view.js": "57", "observability-view.js": "55", "organizations.js": "50", "feedback-dialog.js": "50", "my-feedback.js": "50",
+        "my-feedback-detail.js": "50", "autopilot-view.js": "53", "sandbox-view.js": "2", "deeplink.js": "1", "platform-icons.js": "2",
+        "app.js": "269", "login-view.js": "2", "onboarding-view.js": "7", "auto-recovery.js": "2", "oauth-buttons.js": "2",
         "host-status.js": "1",
     },
     "admin.html": {
         "admin-view.css": "2", "tokens.css": "1", "pwd-blocklist.js": "3", "admin-view.js": "46",
     },
     "register.html": {
-        "app.css": "6", "auth.css": "1", "api.js": "35", "pwd-blocklist.js": "3", "auth.js": "8", "register-view.js": "1",
+        "app.css": "6", "auth.css": "1", "api.js": "35", "pwd-blocklist.js": "3", "auth.js": "8",
+        "register-view.js": "1",
     },
     "forgot.html": {
-        "app.css": "6", "auth.css": "1", "api.js": "35", "pwd-blocklist.js": "3", "auth.js": "8", "forgot-view.js": "1",
+        "app.css": "6", "auth.css": "1", "api.js": "35", "pwd-blocklist.js": "3", "auth.js": "8",
+        "forgot-view.js": "1",
     },
 }
 
 # 日期型版本模块：交给 i18n_locale_cache_ratchet 的「下界 + 指纹」守护
-DATE_VERSIONED = {"i18n.js"}
+DATE_VERSIONED = {
+    "i18n.js",
+}
 
 # 第三方库：版本号随 vendor 打包固定，不参与冻结校验
 VENDOR = {
-    "vue.global.prod.min.js", "jquery.min.js", "marked.min.js", "qrcode.min.js",
-    "echarts.min.js", "select2.min.js", "faro-web-sdk.iife.js",
+    "echarts.min.js",
+    "faro-web-sdk.iife.js",
     "faro-web-tracing.iife.js",
+    "jquery.min.js",
+    "marked.min.js",
+    "qrcode.min.js",
+    "select2.min.js",
+    "vue.global.prod.min.js",
 }
 
 REF = re.compile(r"([A-Za-z_.\-/]+\.(?:js|css))\?v=(\d+)(?=[\"'])")

@@ -88,7 +88,9 @@ restore_upgrade_backup nohup
         # 而非裸 "python -m src.domains.runtime.engine.agent"
         pat = pkill_lines[0]
         assert f"{install_dir}/.venv/bin/python".replace(".", r"\.") in pat, f"pkill 应为限域模式: {pat}"
-        assert "-m src\\.runtime\\.agent" in pat
+        # [rebase 适配 2026-11-12] 恢复函数用 ${WORKER_MODULE_ESC:-宽松兜底}（沙箱线
+        # 改造，模块名不再硬编码旧布局路径）——断言收敛为「-m + 转义模块形态」
+        assert "-m src\\." in pat and "[a-z_]+" in pat
         assert not pat.startswith("python "), f"pkill 不得退回裸命令: {pat}"
 
 

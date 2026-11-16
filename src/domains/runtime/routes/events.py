@@ -936,6 +936,14 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             server_url=old.get("server_url") or "",
             issue_session_id=_sid,
             pool_tag=old.get("agent_type") or "" if _is_plugin_mode() else "",
+            # [#1208 selector 重派修复 2026-11-11] 透传池三快照字段——原路径只拷
+            # pool_tag，selector/uid 池场景重派后 pool_selector 丢空、退化为广播抢单
+            # （实测 t_9db5dc22d459 selector+s2(25) → 重派 t_71bf707a1555 空选择器
+            # 被本机 2 抢走：沙箱场景静默失去圈池+隔离语义）。透传后 claim 按原
+            # selector 圈池，与首次派发同一把尺子（同源 selector_candidate_engines）。
+            pool_selector=old.get("pool_selector") or "",
+            pool_engine_ids=old.get("pool_engine_ids") or "",
+            pool_engine_source=old.get("pool_engine_source") or "",
         )
         # 本机 direct 引擎 → 触发直接执行
         if _is_local_direct and _new_task_id:
@@ -992,11 +1000,12 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             _new_rid = 0
             with db_lock:
                 c2 = db.cursor()
-                # Get pool_tag + pool_engine_ids + repo_key + user_id for scope filtering
-                c2.execute("SELECT pool_tag, pool_engine_ids, repo_key, user_id FROM agent_tasks WHERE id=?", (task_id,))
+                # Get pool_tag + pool_engine_ids + pool_selector + repo_key + user_id for scope filtering
+                c2.execute("SELECT pool_tag, pool_engine_ids, pool_selector, repo_key, user_id FROM agent_tasks WHERE id=?", (task_id,))
                 _ptag_row = c2.fetchone()
                 _ptag = ""
                 _pool_eids = []
+                _psel = ""
                 _task_repo = ""
                 _task_uid = 0
                 if _ptag_row:
@@ -1008,8 +1017,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             _pool_eids = [int(x) for x in _json_pe.loads(_raw_eids) if x]
                     except Exception:
                         pass
-                    _task_repo = _ptag_row[2] or ""
-                    _task_uid = _ptag_row[3] or 0
+                    _psel = _ptag_row[2] or ""
+                    _task_repo = _ptag_row[3] or ""
+                    _task_uid = _ptag_row[4] or 0
                 # Requeue
                 c2.execute("UPDATE agent_tasks SET status='queued', started_at=NULL WHERE id=? AND status IN ('dispatched','running')", (task_id,))
                 _requeued = c2.rowcount > 0
@@ -1024,7 +1034,14 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     # Prefer remote (credential_id > 0) so workers can claim; fall back to local direct
                     # pool_engine_ids 非空 → 限定场景绑定的引擎列表（与首次派发一致）
                     # pool_engine_ids 为空 → 加 scope 过滤（与 claim_by_tag 对齐）
-                    if _ptag:
+                    # [#1208 selector 重派修复 2026-11-11 ②贴证旁路] selector 任务跳过
+                    # tag+scope 贴证（该 SQL 无 selector 圈池，会旁路 claim 侧 selector 守卫）；
+                    # 置 runtime_id=0 → claim_by_tag 的 _selector_guard_blocks 圈池认领。
+                    if _psel:
+                        c2.execute("UPDATE agent_tasks SET runtime_id=0 WHERE id=?", (task_id,))
+                        log.info(f"[redispatch] seq={seq} plugin: selector task {task_id} "
+                                 f"kept queued for claim guard (pool_selector present)")
+                    elif _ptag:
                         if _pool_eids:
                             _ph = ",".join("?" * len(_pool_eids))
                             _scope_extra = f" AND ar.id IN ({_ph})"
@@ -1321,7 +1338,16 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 # 重派时重新解析路由：旧 task 快照的 runtime_id 可能为 0（120s 超时回收产物）。
                 # fallback 链：task.runtime_id → session.runtime_id → 拒派。
                 _rid = old.get("runtime_id") or 0
-                if not _rid:
+                # [#1208 selector 重派修复 2026-11-11 ②贴证旁路] selector 任务跳过贴证链
+                # （old.runtime_id→session→pick_engine 全程无视 selector 圈池，实测 selector
+                # 任务重派被贴证到本机 global 引擎并直跑，claim 侧 selector 守卫被完全旁路）。
+                # _rid=0 = 贴证广播合法结局（#521 守卫只入队不直跑），入队后由 claim_by_tag
+                # 的 selector 守卫（service._selector_guard_blocks）圈池认领——与首次派发同尺。
+                if old.get("pool_selector"):
+                    _rid = 0
+                # [selector 修复补丁] _rid=0 后不得进 fallback 链（session→pick_engine 会
+                # 重新选台无视圈池，实测又贴证到本机 2 直跑）——selector 任务保持 0 等认领
+                if not _rid and not old.get("pool_selector"):
                     # task runtime_id=0 → 查 session 主引擎
                     try:
                         with db_lock:
@@ -1333,17 +1359,20 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                 _rid = _sr[0]
                     except Exception:
                         pass
-                try:
-                    from src.domains.runtime.engine.engine_select import pick_engine
-                    _rid = pick_engine(old.get("repo_key") or "", old.get("agent_type") or "", fallback_runtime_id=_rid) or 0
-                except Exception:
-                    _rid = 0
+                # [selector 修复补丁] 无条件 pick_engine 也会覆盖 _rid → selector 任务跳过
+                if not old.get("pool_selector"):
+                    try:
+                        from src.domains.runtime.engine.engine_select import pick_engine
+                        _rid = pick_engine(old.get("repo_key") or "", old.get("agent_type") or "", fallback_runtime_id=_rid) or 0
+                    except Exception:
+                        _rid = 0
                 # Plugin mode: prefer an engine that has the matching tag + scope isolation
                 # pool_engine_ids 非空 → 限定场景绑定的引擎列表（与首次派发一致）
                 # pool_engine_ids 为空 → 加 scope 过滤（与 claim_by_tag 对齐）
                 # Issue #253 改动1：重读绑定 authoritative 时以场景为准（快照里的 pool 残值可能已被
                 # 撕证/中间代任务写空，以旧快照过滤会回到"凭运气"）；无绑定时才看快照值（兼容空场景）。
-                if is_plugin_mode() and old.get("pool_tag"):
+                if is_plugin_mode() and old.get("pool_tag") and not old.get("pool_selector"):
+                    # [selector 修复补丁] tag-SQL 贴证同样无视圈池 → selector 任务跳过（保持 _rid=0 等认领）
                     try:
                         _old_pool_eids = []
                         import json as _json_pe2
@@ -1439,6 +1468,13 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     pool_tag=old.get("agent_type") or "" if is_plugin_mode() else "",
                     pool_agent_type=old.get("agent_type") or "" if is_plugin_mode() else "",
                     pool_engine_ids=_pool_253,
+                    # [#1208 selector 重派修复 2026-11-11] selector 场景终态重建透传
+                    # pool_selector——#253 贴证只重读 id 池（selector 场景恒空），不重读
+                    # selector；原实现漏传导致重派任务丢圈池语义、退化为广播抢单
+                    # （实测 selector+s2(25) 任务重派后被本机 2 抢走）。重放语义下原任务
+                    # 快照的 selector 即权威值（与 uid 池快照口径一致）。
+                    pool_selector=old.get("pool_selector") or "",
+                    pool_engine_source=old.get("pool_engine_source") or "",
                 )
                 # Issue #521：终态重建的实际有效任务 = 新任务，回执不得再返回旧（终态）task_id
                 _effective_task_id = _new_task_id or "(new)"

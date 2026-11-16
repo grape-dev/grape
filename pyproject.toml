@@ -19,6 +19,7 @@ classifiers = [
     "Framework :: FastAPI",
 ]
 dependencies = [
+    "cubesandbox>=0.7",
     # --- Web framework ---
     "fastapi>=0.100",
     "uvicorn[standard]>=0.23",
@@ -73,6 +74,10 @@ worker = [
     "bcrypt>=4.0",
     "click>=8.0",
     "httpx>=0.24",
+    # [沙箱迁移] cloud_worker 依赖: 平台 SDK + 白名单/网络代理(requests) + 凭据加密(cryptography)
+    "cubesandbox>=0.7",
+    "requests>=2.31",
+    "cryptography>=42",
 ]
 # Development / testing
 dev = [

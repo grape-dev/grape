@@ -24,6 +24,7 @@ configs/db-backend.json
 configs/db-backend.json.*
 configs/db-backend.json.bak-*
 configs/server-config.json
+configs/cubesandbox-config.json
 configs/runtime-config.json
 configs/patrol-config.json
 configs/vlm-config.json
@@ -107,6 +108,7 @@ scripts/phase1_*.py
 scripts/sync_*.py
 scripts/trigger_*.py
 scripts/upgrade_*.py
+!scripts/upgrade_autopilot_engine_uids.py
 scripts/verify_*.py
 scripts/check-*-*.py
 !scripts/check-i18n-keys.py

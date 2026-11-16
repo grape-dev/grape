@@ -125,16 +125,18 @@ async def replay_pending_reports(client, queue: WorkerReportQueue):
             await _replay_messages(client, queue, entry)
             continue
         run_token = entry.get("run_token") or ""
+        # Issue #1011：重放同样走 v2-first（entry 带 engine_uid 时按 uid 校验归属）
+        _euid = str(entry.get("engine_uid") or "").strip().lower()
         try:
             if entry.get("status") == "failed":
                 resp = await client.fail(task_id, entry.get("result_text") or "", entry.get("exit_code") or -1,
-                                         run_token=run_token)
+                                         run_token=run_token, engine_uid=_euid)
             else:
                 resp = await client.complete(task_id, entry.get("result_text") or "", entry.get("exit_code") or 0,
                                              session_id=entry.get("session_id") or "",
                                              work_dir=entry.get("work_dir") or "",
                                              engine=entry.get("engine") or "",
-                                             run_token=run_token)
+                                             run_token=run_token, engine_uid=_euid)
             if resp is not None:
                 queue.remove(task_id)
                 log.info(f"worker_report_queue: replayed {task_id} ({entry.get('status')})")

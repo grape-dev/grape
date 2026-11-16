@@ -210,6 +210,12 @@
                 class="rtv-vstale"
                 :title="t('label.worker_version_stale_hint')"
                 >⬆ {{ t('label.worker_version_stale') }}</span
+              ><!-- B5：沙箱平台禁用徽标（红边框警示，不再新建沙箱） -->
+              ><span
+                v-if="rt.is_sandbox && rt.platform_enabled === false"
+                class="rtv-pdisabled"
+                :title="t('label.platform_disabled_tip')"
+                >⏸ {{ t('label.platform_disabled') }}</span
               ><span
                 v-if="rt.spawn_fail_degraded"
                 class="rtv-degraded"
@@ -322,6 +328,12 @@
                     : ' · ' + t('label.local_direct')
                 }}</span
               >
+              <span
+                v-if="platformDisabled(d)"
+                class="rtv-pdisabled"
+                :title="t('label.platform_disabled_tip')"
+                >⏸ {{ t('label.platform_disabled') }}</span
+              >
               <span :class="['rtv-sbadge', scopeKey(d)]">{{ scopeBadgeLabel(d) }}</span>
               <span class="rtv-wname">{{ workerDisplayName(d) }}</span>
               <span class="rtv-wip">{{ d.worker_ip || '' }}</span>
@@ -359,6 +371,27 @@
               >
                 {{ t('action.revoke') }}
               </button>
+            </div>
+            <!-- B5：沙箱平台行（cred_type=sandbox）——平台链接 + 详情深链 #sandbox/provider/{id} -->
+            <div v-if="d.cred_type === 'sandbox' && d.platform" class="rtv-wcard-plat">
+              <span class="rtv-k">{{ t('label.sandbox_platform') }}</span>
+              <a
+                v-if="d.provider_id > 0"
+                :href="'#sandbox/provider/' + d.provider_id"
+                class="rtv-plat-link"
+                :title="t('credential.goto_platform_page')"
+                >☁ {{ d.platform }} ↗</a
+              >
+              <button
+                v-if="d.provider_id > 0"
+                class="bt bt-o bt-s rtv-plat-btn"
+                :title="t('credential.platform_detail_btn_tip')"
+                @click.stop="gotoProviderDetail(d.provider_id)"
+                >📋 {{ t('credential.platform_detail_btn') }}</button
+              >
+              <span v-if="!(d.provider_id > 0)" class="rtv-plat-plain" :title="t('credential.goto_platform_page')"
+                >☁ {{ d.platform }}</span
+              >
             </div>
             <div class="rtv-wcard-engines">
               <span class="rtv-k">{{ t('label.hosted_engines') }}</span>
@@ -858,7 +891,164 @@
               </template>
             </div>
           </div>
-          <!-- 选项二：AI Devspace -->
+          <!-- 选项二：生成沙箱凭据（沙箱平台 worker，B1 移植） -->
+          <div class="rtv-sb-sec">
+            <div class="rtv-sb-opt" @click="toggleSbSection">
+              <div class="rtv-sb-opt-ic">
+                <svg
+                  width="22"
+                  height="22"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="var(--on-accent)"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                </svg>
+              </div>
+              <div class="rtv-sb-opt-body">
+                <div class="rtv-sb-opt-t">{{ t('credential.sandbox_gen_title') }}</div>
+                <div class="rtv-sb-opt-d">{{ t('credential.sandbox_hint') }}</div>
+              </div>
+              <svg
+                class="rtv-sb-chev"
+                :class="{ open: sbExpanded }"
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="var(--t3)"
+                stroke-width="2.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </div>
+            <div v-if="sbExpanded" class="rtv-sb-area">
+              <template v-if="!sbCredResult">
+                <div class="rtv-credbox">
+                  <div class="rtv-cred-t">{{ t('credential.sandbox_gen_title') }}</div>
+                  <div class="rtv-cred-fld">
+                    <label>{{ t('label.cred_name') }}</label>
+                    <input
+                      v-model="sbCredForm.name"
+                      class="rtv-cred-input"
+                      :placeholder="t('label.cred_name_placeholder')"
+                    />
+                  </div>
+                  <div class="rtv-cred-fld">
+                    <label>{{ t('label.owner_user') }}</label>
+                    <input :value="currentUser" disabled class="rtv-cred-input rtv-cred-disabled" />
+                  </div>
+                  <div class="rtv-cred-fld">
+                    <label>{{ t('label.scope') }}</label>
+                    <select v-model="sbCredForm.scope" class="rtv-cred-input">
+                      <option value="user">{{ t('scope.user') }}</option>
+                      <option value="repo">{{ t('scope.repo') }}</option>
+                      <option value="global">{{ t('scope.global') }}</option>
+                    </select>
+                  </div>
+                  <div v-if="sbCredForm.scope === 'repo'" class="rtv-cred-fld">
+                    <label>{{ t('label.repo_key') }}</label>
+                    <input
+                      v-model="sbCredForm.repoKey"
+                      class="rtv-cred-input"
+                      placeholder="owner/repo"
+                    />
+                  </div>
+                  <!-- 沙箱平台（后台注册表驱动，不硬编码） -->
+                  <div class="rtv-cred-fld">
+                    <label>{{ t('credential.sandbox_platform') }}</label>
+                    <select v-model="sbCredForm.platform" class="rtv-cred-input">
+                      <option value="">{{ t('credential.sandbox_platform_placeholder') }}</option>
+                      <option v-for="p in sbPlatforms" :key="p.platform" :value="p.platform">
+                        {{ p.display_name || p.platform }}
+                      </option>
+                    </select>
+                  </div>
+                  <!-- 平台连接信息：装完 worker 启动时自动上报 Provider（端点/凭据/证书） -->
+                  <div class="rtv-cred-fld">
+                    <label>{{ t('credential.sandbox_conn_title') }}</label>
+                    <label class="rtv-cred-lbl2">API URL <span class="rtv-req">{{ t('credential.sandbox_conn_required') }}</span></label>
+                    <input v-model="sbCredForm.endpoint" class="rtv-cred-input" placeholder="http://192.168.0.17:3000" />
+                    <div class="rtv-cred-desc">{{ t('credential.sandbox_endpoint_desc') }}</div>
+                    <label class="rtv-cred-lbl2">API Key</label>
+                    <input v-model="sbCredForm.apiKey" type="password" class="rtv-cred-input" autocomplete="new-password" :placeholder="t('credential.sandbox_key_ph')" />
+                    <div class="rtv-cred-desc">{{ t('credential.sandbox_key_desc') }}</div>
+                    <label class="rtv-cred-lbl2">{{ t('credential.sandbox_cert_label') }}</label>
+                    <textarea
+                      v-model="sbCredForm.certPem"
+                      class="rtv-cred-input"
+                      style="font-size: 11px; min-height: 56px; resize: vertical; font-family: inherit"
+                      placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"
+                    ></textarea>
+                    <div class="rtv-cred-desc">{{ t('credential.sandbox_cert_desc') }}</div>
+                    <div class="rtv-cred-desc">{{ t('credential.sandbox_conn_desc') }}</div>
+                  </div>
+                  <div class="rtv-cred-btns">
+                    <button class="bt bt-p rtv-cred-gen" @click="doCreateSandboxCredential()">
+                      {{ t('action.generate') }}
+                    </button>
+                    <button class="bt bt-o" @click="sbExpanded = false">
+                      {{ t('action.cancel') }}
+                    </button>
+                  </div>
+                </div>
+              </template>
+              <template v-else-if="sbCredResult.loading">
+                <div class="rtv-sb-loading">
+                  <div class="rtv-spinner"></div>
+                  <div>{{ t('toast.refreshing') }}</div>
+                </div>
+              </template>
+              <template v-else>
+                <div class="rtv-credbox">
+                  <div class="rtv-cred-warn">
+                    <svg
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="#d97706"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      style="flex-shrink: 0; margin-top: 1px"
+                    >
+                      <path
+                        d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+                      />
+                      <line x1="12" y1="9" x2="12" y2="13" />
+                      <line x1="12" y1="17" x2="12.01" y2="17" />
+                    </svg>
+                    <span>{{
+                      t('credential.sandbox_token_warning', {
+                        name: sbCredResult.name,
+                        scope: scopeLabel(sbCredResult.scope),
+                        platform: sbCredResult.platform,
+                      })
+                    }}</span>
+                  </div>
+                  <label class="rtv-cred-lbl">Token</label>
+                  <code class="rtv-cred-code">{{ sbCredResult.token }}</code>
+                  <div class="rtv-cred-sub">🐧 {{ t('credential.sandbox_install_hint') }}</div>
+                  <code class="rtv-cred-code sm">{{ sbCredResult.oneCmd }}</code>
+                  <button class="bt bt-p rtv-cred-fullbtn" @click="copyText(sbCredResult.oneCmd)">
+                    {{ t('action.copy_one_cmd') }}
+                  </button>
+                  <div class="rtv-cred-desc">{{ t('credential.sandbox_install_desc') }}</div>
+                  <button class="bt bt-o rtv-cred-fullbtn" @click="copyText(sbCredResult.token)">
+                    {{ t('action.copy_token') }}
+                  </button>
+                </div>
+              </template>
+            </div>
+          </div>
+          <!-- 选项三：AI Devspace -->
           <div class="rtv-sb-sec">
             <div class="rtv-sb-opt" @click="toggleDevSection">
               <div class="rtv-sb-opt-ic">
@@ -1353,12 +1543,22 @@ function sceneTagSummary(tags) {
     })
     .join('')
 }
+function gotoProviderDetail(providerId) {
+  // B5：凭据卡「详情」→ #sandbox/provider/{id}（app.nav 触发视图切换+history）
+  if (G.app && G.app.nav) G.app.nav('sandbox', 'provider/' + providerId)
+}
+function platformDisabled(x) {
+  // B5：沙箱引擎卡看 is_sandbox，凭据卡看 cred_type（后端两路字段）
+  return !!((x.cred_type === 'sandbox' || x.is_sandbox) && x.platform_enabled === false)
+}
 function cardLeftBorder(h, rt) {
   // Issue #475/#498：在线但健康口径异常 → 红描边强化；其余沿用健康色
   if (rt && isAbnormalEngine(rt)) {
     const red = abnormalBorderColor(rt)
     if (red) return { borderLeft: '3px solid ' + red }
   }
+  // B5：沙箱平台禁用 → 红边框警示（同 legacy _platformDisabled）
+  if (rt && platformDisabled(rt)) return { borderLeft: '3px solid #dc2626' }
   return h === 'online'
     ? { borderLeft: '1px solid var(--b)' }
     : { borderLeft: '3px solid ' + (RUNTIME_COLOR[h] || 'var(--t3)') }
@@ -2039,20 +2239,142 @@ function revokeCredential(cid) {
 function toggleCredSection() {
   credExpanded.value = !credExpanded.value
   devExpanded.value = false
+  sbExpanded.value = false
 }
 function toggleDevSection() {
   devExpanded.value = !devExpanded.value
   credExpanded.value = false
+  sbExpanded.value = false
+}
+// ═══ 生成沙箱凭据（选项二，B1 移植自 legacy runtimes.js toggleAddDeviceSandbox 族）═══
+const sbExpanded = ref(false)
+const sbCredForm = reactive({ name: '', scope: 'user', repoKey: '', platform: '', endpoint: '', apiKey: '', certPem: '' })
+const sbPlatforms = ref([])
+const sbPlatformsLoaded = ref(false)
+const sbCredResult = ref(null)
+function toggleSbSection() {
+  sbExpanded.value = !sbExpanded.value
+  credExpanded.value = false
+  devExpanded.value = false
+  if (sbExpanded.value && !sbPlatformsLoaded.value) loadSbPlatforms()
+}
+function loadSbPlatforms() {
+  // 平台列表从后端拉取（GET /settings/sandbox-platforms，注册表驱动，不硬编码）
+  API()
+    .get('/settings/sandbox-platforms')
+    .then(function (d) {
+      sbPlatforms.value = d.platforms || []
+      sbPlatformsLoaded.value = true
+    })
+    .catch(function () {
+      sbPlatformsLoaded.value = true
+    })
+}
+watch(
+  () => sbCredForm.scope,
+  function (v) {
+    // [F12 同款修复] 切到 repo 时实时回填当前仓库（仅空值时，不覆盖用户手输）
+    if (v === 'repo' && !sbCredForm.repoKey.trim()) {
+      sbCredForm.repoKey = (currentRepo() || {}).fullName || ''
+    }
+  }
+)
+function doCreateSandboxCredential() {
+  const name = sbCredForm.name
+  if (!name) {
+    app().showToast(t('credential.toast_name_required'))
+    return
+  }
+  const scope = sbCredForm.scope
+  const platform = sbCredForm.platform
+  if (!platform) {
+    app().showToast(t('credential.sandbox_toast_platform_required'))
+    return
+  }
+  const endpoint = (sbCredForm.endpoint || '').trim()
+  if (!endpoint) {
+    app().showToast(t('credential.sandbox_toast_endpoint_required'))
+    return
+  }
+  const repoKey = scope === 'repo' ? (sbCredForm.repoKey || '').trim() : ''
+  if (scope === 'repo' && !repoKey) {
+    app().showToast(t('credential.toast_repo_required'))
+    return
+  }
+  sbCredResult.value = { loading: true }
+  // [同机多实例 spec §4.2] 一键命令只有 --token/--server——凭据类型与平台经 whoami
+  // 按 token 派生（服务端是唯一事实源）。--server 用服务端权威地址：localStorage 5 分钟
+  // 缓存优先，未命中先问 /health 再渲染，失败/超时回退 origin（面板只渲染一次）。
+  API()
+    .post('/settings/runtime-credentials', {
+      name: name,
+      scope: scope,
+      repo_key: repoKey,
+      cred_type: 'sandbox',
+      platform: platform,
+      platform_endpoint: endpoint,
+      platform_api_key: (sbCredForm.apiKey || '').trim(),
+      platform_ssl_cert_pem: (sbCredForm.certPem || '').trim(),
+    })
+    .then(function (d) {
+      const token = d.token || ''
+      let serverUrl = G.window.location.origin
+      let cachedOk = false
+      try {
+        const cached = JSON.parse(localStorage.getItem('grape_server_base') || 'null')
+        if (cached && cached.url && Date.now() - (cached.ts || 0) < 300000) {
+          serverUrl = cached.url
+          cachedOk = true
+        }
+      } catch (e) {}
+      const renderSb = function () {
+        const oneCmd =
+          'curl -fsSL ' + serverUrl + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + serverUrl
+        sbCredResult.value = { name: name, scope: scope, platform: platform, token: token, oneCmd: oneCmd }
+        app().showToast(t('credential.toast_generated'))
+      }
+      if (cachedOk) {
+        renderSb()
+        return
+      }
+      API()
+        .get('/health')
+        .then(function (h) {
+          const base = (h && h.server_base_url) || ''
+          if (base) {
+            serverUrl = base
+            try {
+              localStorage.setItem('grape_server_base', JSON.stringify({ url: base, ts: Date.now() }))
+            } catch (e) {}
+          }
+        })
+        .catch(function () {})
+        .then(renderSb)
+    })
+    .catch(function (e) {
+      // 生成失败：恢复表单（reactive 表单仍持有用户输入，等价 legacy _restoreSandboxForm）
+      sbCredResult.value = null
+      app().showToast(t('credential.toast_gen_failed', { msg: e.message }))
+    })
 }
 function openAddDevicePanel() {
   addPanel.open = true
   stopDevspaceAuto()
   credExpanded.value = false
   devExpanded.value = false
+  sbExpanded.value = false
   credResult.value = null
   credForm.name = ''
   credForm.scope = 'user'
   credForm.repoKey = (currentRepo() || {}).fullName || ''
+  sbCredResult.value = null
+  sbCredForm.name = ''
+  sbCredForm.scope = 'user'
+  sbCredForm.platform = ''
+  sbCredForm.endpoint = ''
+  sbCredForm.apiKey = ''
+  sbCredForm.certPem = ''
+  sbCredForm.repoKey = (currentRepo() || {}).fullName || ''
 }
 function closeAddDevicePanel() {
   stopDevspaceAuto()
@@ -2536,6 +2858,40 @@ onBeforeUnmount(function () {
 .rtv-readd:hover {
   filter: brightness(1.08);
 }
+/* B5：沙箱平台禁用徽标 */
+.rtv-pdisabled {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: #dc2626;
+  border: 1px solid #fecaca;
+  font-weight: 700;
+}
+/* B5：凭据卡沙箱平台行 */
+.rtv-wcard-plat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--t2);
+}
+.rtv-plat-link {
+  color: #6d28d9;
+  font-weight: 500;
+  text-decoration: none;
+}
+.rtv-plat-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.rtv-plat-plain {
+  color: #6d28d9;
+  font-weight: 500;
+}
+
 .rtv-vstale {
   font-size: 10px;
   font-weight: 600;
@@ -3458,6 +3814,18 @@ onBeforeUnmount(function () {
   color: var(--t3);
   margin-bottom: 5px;
   text-transform: uppercase;
+}
+/* 沙箱凭据平台连接信息块内的小节标签（B1 移植） */
+.rtv-cred-lbl2 {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--t1);
+  margin-bottom: 4px;
+}
+.rtv-req {
+  font-weight: 400;
+  color: #d97706;
 }
 .rtv-cred-code {
   display: block;

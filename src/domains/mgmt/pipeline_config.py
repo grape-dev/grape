@@ -926,11 +926,15 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
                              user_id: int = 0) -> dict:
     """Issue #653：解析场景节点的 engine_runtime_ids 绑定状态（空值语义单点收口）。
 
-    返回 {"status": <状态>, "engine_ids": [...]}，status 四态：
+    返回 {"status": <状态>, "engine_ids": [...], "engine_uids": [...]}，status 四态：
     - "no_scene"：场景配置整体不存在（查询失败 / 未创建）
     - "no_node" ：场景存在但无该 agent 节点
-    - "unbound" ：节点存在但 engine_runtime_ids 为空（未配置 → 保持全量广播）
-    - "bound"  ：节点显式配置了非空 engine_runtime_ids（派发硬约束）
+    - "unbound" ：节点存在但引擎绑定字段全空（未配置 → 保持全量广播）
+    - "bound"  ：节点显式配置了非空绑定（ids 或 uids，派发硬约束）
+
+    Issue #1208 读侧（D11/D12）：engine_runtime_uids 非空优先（uid 池路径，ids 忽略
+    ——双非空由保存端拒绝，此处以 uids 为权威防双轨漂移），空则回落 engine_runtime_ids
+    （legacy 只读兼容）。存量 id 节点 uids 恒空 → 读侧行为零变化。
 
     此前 get_scene_engine_ids 对「节点不存在/查询失败」与「未配置」均返回 []，
     派发侧无法区分，已配置节点解析落空时被静默当作未配置回退全局池（#653 根因）。
@@ -939,13 +943,13 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
         cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     except Exception as e:
         log.warning(f"get_scene_engine_binding: scene query failed: {e}")
-        return {"status": "no_scene", "engine_ids": []}
+        return {"status": "no_scene", "engine_ids": [], "engine_uids": []}
     if not cfg:
-        return {"status": "no_scene", "engine_ids": []}
+        return {"status": "no_scene", "engine_ids": [], "engine_uids": []}
     # pipelines.json default 兜底（fallback=True）：请求的 scene_id 未解析到真实场景
     # → 视为 no_scene（Issue #653：不得把兜底 default 节点当作真实绑定语义）
     if cfg.get("fallback"):
-        return {"status": "no_scene", "engine_ids": []}
+        return {"status": "no_scene", "engine_ids": [], "engine_uids": []}
     node = None
     # Issue #955：id 优先、tag 兜底——节点 id 即角色名（agent_type），tag 为展示
     # 阶段名；非标准 tag（如中文阶段名）的存量场景按 id 匹配恢复引擎绑定
@@ -955,19 +959,22 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
             node = n
             break
     if node is None:
-        return {"status": "no_node", "engine_ids": []}
-    ids = node.get("engine_runtime_ids") or []
-    if not ids:
-        return {"status": "unbound", "engine_ids": []}
+        return {"status": "no_node", "engine_ids": [], "engine_uids": []}
+    uids = [str(u or "").strip().lower() for u in (node.get("engine_runtime_uids") or [])
+            if str(u or "").strip()]
     out_ids = []
-    for _x in ids:
+    for _x in (node.get("engine_runtime_ids") or []):
         try:
             _xi = int(_x)
         except (TypeError, ValueError):
             continue
         if _xi:
             out_ids.append(_xi)
-    return {"status": "bound", "engine_ids": out_ids}
+    if not uids and not out_ids:
+        return {"status": "unbound", "engine_ids": [], "engine_uids": []}
+    if uids:
+        return {"status": "bound", "engine_ids": [], "engine_uids": uids}
+    return {"status": "bound", "engine_ids": out_ids, "engine_uids": []}
 
 
 def get_scene_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0) -> list[int]:

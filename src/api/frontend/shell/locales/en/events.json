@@ -120,5 +120,11 @@
   "fail_collapse": "Collapse",
   "diag_target": "Target stage",
   "diag_phase": "Failure phase",
-  "diag_ref_seq": "Ref seq"
+  "diag_ref_seq": "Ref seq",
+  "status_task_completed": "task completed",
+  "status_task_failed": "task failed",
+  "status_task_cancelled": "task cancelled",
+  "status_task_timeout": "task timed out",
+  "status_task_queued": "task queued",
+  "status_task_dispatched": "task dispatched"
 }

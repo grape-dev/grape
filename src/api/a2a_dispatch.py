@@ -263,11 +263,33 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
             except Exception:
                 pass
             return {"status": "failed", "seq": seq, "agent": agent_name, "error": _err541}
+        # [#1208 A2A selector 修复 2026-11-12] 兜底广播分支补三分叉 gate（同 run_pipeline 口径）
+        _pool_sel_a2a = ""
+        try:
+            from src.domains.runtime.pipeline.event_pipeline import _scene_pool_gate
+            _gm_a2a, _gp_a2a, _gf_a2a = _scene_pool_gate(
+                _a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
+            if _gm_a2a == "selector":
+                _pool_sel_a2a = _gp_a2a["pool_selector"]
+                _pool_eids = ""
+            elif _gf_a2a:
+                log.warning(f"A2A: scene={_a2a_scene} agent={agent_name} selector zero-hit, "
+                            f"skip enqueue (Issue #1208): {_gf_a2a}")
+                try:
+                    from src.api.event_pipeline import _fail_event
+                    _fail_event(seq, _gf_a2a)
+                except Exception:
+                    from src.api.event_store import update_event_status
+                    update_event_status(seq, "failed")
+                return {"status": "failed", "seq": seq, "agent": agent_name, "error": _gf_a2a}
+        except Exception as _gate_e:
+            log.warning(f"A2A: selector gate failed (fail-open): {_gate_e}")
         _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                skill_name or agent_name, evt,
                                skill_id, skill_path or "", engine_id,
                                f"#{issue_number}" if issue_number else "",
-                               pool_engine_ids=_pool_eids, user_id=_a2a_scene_uid)
+                               pool_engine_ids=_pool_eids, user_id=_a2a_scene_uid,
+                               pool_selector=_pool_sel_a2a)
         log.info(f"A2A (plugin broadcast): enqueued pool task for {agent_name}, seq={seq}")
         return {"status": "ok", "seq": seq, "agent": agent_name, "mode": "broadcast"}
     # backend 取已注册引擎的类型名（不沿用字面默认，engine-selection-design.md v2）

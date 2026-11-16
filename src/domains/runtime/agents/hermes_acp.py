@@ -40,6 +40,9 @@ import signal
 
 from typing import Generator
 
+import shlex
+import select as _select_mod
+from typing import Generator, Protocol, Callable
 from src.kernel.config import log
 
 _bwrap_fail_notified = False
@@ -146,7 +149,37 @@ class HermesACPBackend:
     binary = "hermes"
     prompt_via_stdin = False  # ACP 模式不用 stdin 传 prompt，用 JSON-RPC
 
-    def get_env(self, account: str = "", user_id: str = "") -> dict:  # D105: TEXT PK domain
+    # ===== [沙箱迁移] ProtocolAware / PTYAware（云沙箱路径 isinstance 能力检查用）=====
+
+    @property
+    def protocol(self) -> str:
+        return "acp"
+
+    def pty_wrapper_name(self) -> str | None:
+        return "acp_wrapper.py"
+
+    def pty_needs_stdin_payload(self) -> bool:
+        return True
+
+    def pty_use_ndjson_common(self) -> bool:
+        return False  # ACP 不走 NDJSON 公共模块
+
+    def pty_prepare_env(self, env: dict, session_id: str) -> None:
+        pass  # ACP 无额外 env 注入（hermes 引擎云沙箱 PTY 路径无前置 env 需求）
+
+    def build_remote_invocation(self, prompt: str, session_id: str = "") -> tuple[list[str] | str, str | None]:
+        """hermes ACP：命令行只传 hermes acp，prompt 通过 stdin JSON-RPC 传。
+
+        ACP 协议不走命令行参数传 prompt——通过 stdin 发 JSON-RPC 消息
+        （initialize + session/prompt），hermes 进程从 stdin 读取。
+        """
+        import json as _json
+        _init_msg = _json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        _prompt_msg = _json.dumps({"jsonrpc": "2.0", "id": 2, "method": "session/prompt", "params": {"prompt": prompt}})
+        stdin_payload = _init_msg + "\n" + _prompt_msg + "\n"
+        return (["hermes", "acp"], stdin_payload)
+
+    def get_env(self, account: str = "", user_id: int = 0) -> dict:
         env = os.environ.copy()
         from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
@@ -182,6 +215,7 @@ class HermesACPBackend:
         - ("tool_finish", str)
         - ("tool_result", str)
         - ("step_finish", str)
+        - ("usage", dict)   # issue #727：PromptResponse result.usage 直报（LLM 用量采集）
         - ("done", {"exit_code": int, "text": str, "oc_session_id": str, "errors": list, "stderr": str})
         """
         label = f"{agent_label} " if agent_label else ""
@@ -657,6 +691,14 @@ class HermesACPBackend:
             stop_reason = prompt_result.get("stopReason", "")
             log.info(f"{label}hermes ACP done: stopReason={stop_reason}")
 
+            # issue #727：PromptResponse result.usage 直报——治本路径，喂事件流
+            # （("usage", {...})），由调用方（worker/主控）转给 UsageCollector.feed；
+            # state.db 读取只做兜底（缺表降级见 usage_collect._hermes_rows）。
+            _usage_rec = _extract_prompt_usage(prompt_result.get("result"))
+            if _usage_rec is not None:
+                log.info(f"{label}hermes ACP prompt usage: {json.dumps(_usage_rec, ensure_ascii=False)}")
+                yield ("usage", _usage_rec)
+
             # Issue #494：超时失败显式归因（与 hwcloud_acp 同口径）——stopReason=timeout
             # 时 stderr/errors 常为空，补「执行超时（Ns）」文案进 errors。
             if stop_reason == "timeout" and not error_events:
@@ -774,9 +816,18 @@ class HermesACPBackend:
             _res.dispose(kill_procs=False, keep_overlays=True)
 
 class _ACPSimpleClient:
-    """极简 ACP JSON-RPC 客户端：request/response + notification 处理。"""
+    """极简 ACP JSON-RPC 客户端：request/response + notification 处理。
 
-    def __init__(self, stdin, stdout, label="", on_message=None, on_prompt_done=None, on_prompt_error=None):
+    两种构造（兼容两类调用方）：
+    - transport=ACPTransport —— 云沙箱路径（_run_acp_session 传 CubeSandboxTransport），
+      用 transport.readline/write，start_reader() 自带 reader 线程
+    - stdin/stdout —— 本机 PTY 路径（HermesACPBackend.stream_execute），
+      外部 reader 线程调 handle_line
+    """
+
+    def __init__(self, stdin=None, stdout=None, label="", on_message=None, on_prompt_done=None, on_prompt_error=None,
+                 transport=None):
+        self.transport = transport
         self.stdin = stdin
         self.stdout = stdout
         self.label = label
@@ -797,11 +848,106 @@ class _ACPSimpleClient:
         self._pending_errors: dict[int, str] = {}
         self._prompt_req_id: int = 0  # session/prompt 的 req_id（只有它才触发 prompt_done）
         self._lock = threading.Lock()
+        # reader 线程生命周期管理（transport 模式用）
+        self._reader_thread: threading.Thread | None = None
+        self._running = False
+        self._reader_done = threading.Event()
+
+    def start_reader(self, silent_timeout: float = 60.0,
+                     global_deadline: float | None = None):
+        """[云沙箱路径] transport 模式的 reader 线程。
+
+        - TransportTimeout（静默超时）：检查 global_deadline，没超就 continue，超了就退出
+        - TransportClosed（断开）：直接退出
+        """
+        if not self.transport:
+            raise RuntimeError("start_reader requires transport mode")
+
+        def _reader():
+            try:
+                while self._running:
+                    if global_deadline and time.monotonic() > global_deadline:
+                        break
+                    try:
+                        line = self.transport.readline(timeout=silent_timeout)
+                    except TransportTimeout:
+                        if global_deadline and time.monotonic() < global_deadline:
+                            continue  # 静默超时但全局没超——继续等
+                        break  # 全局超时
+                    except TransportClosed:
+                        break  # 不可恢复断开
+                    line_str = line.strip()
+                    if not line_str:
+                        continue
+                    try:
+                        self.handle_line(line_str)
+                    except Exception as e:
+                        if self.label:
+                            log.debug(f"[{self.label}] acp reader handle_line: {e}")
+            finally:
+                self._reader_done.set()
+
+        self._running = True
+        self._reader_thread = threading.Thread(target=_reader, daemon=True, name="acp-reader")
+        self._reader_thread.start()
+
+    def stop_reader(self):
+        self._running = False
+        self._reader_done.wait(timeout=5)
+
+    def is_reader_done(self) -> bool:
+        return self._reader_done.is_set()
+
+    def next_id(self) -> int:
+        """分配并返回新的 JSON-RPC request id，内部管理 _next_id。"""
+        with self._lock:
+            req_id = self._next_id
+            self._next_id += 1
+        return req_id
+
+    def register_pending(self, req_id: int) -> threading.Event:
+        """注册一个 pending request，返回用于等待的 Event。"""
+        evt = threading.Event()
+        with self._lock:
+            self._pending[req_id] = evt
+        return evt
+
+    def clear_pending(self):
+        """清理所有残留的 pending entry。"""
+        with self._lock:
+            for pid in list(self._pending.keys()):
+                self._pending.pop(pid, None)
+
+    def set_prompt_req_id(self, req_id: int):
+        """设置 session/prompt 的 req_id（只有它才触发 prompt_done）。"""
+        self._prompt_req_id = req_id
+
+    def close(self):
+        """transport 模式：关闭 transport（PTY/fifo 清理由 transport.close() 负责）。"""
+        try:
+            self.stop_reader()
+        except Exception:
+            pass
+        if self.transport is not None:
+            try:
+                self.transport.close()
+            except Exception:
+                pass
+        else:
+            for f in (self.stdin, self.stdout):
+                try:
+                    if f:
+                        f.close()
+                except Exception:
+                    pass
 
     def write_line(self, data: bytes):
         with self._write_lock:
-            self.stdin.write(data)
-            self.stdin.flush()
+            if self.transport is not None:
+                self.transport.write(data)  # 云沙箱 transport 模式
+            else:
+                self.stdin.write(data)
+                self.stdin.flush()
 
     def request(self, method: str, params: dict, timeout: float = 60) -> tuple[dict | None, str | None]:
         """发送 JSON-RPC 请求，等待响应。返回 (result, error)。"""
@@ -1119,6 +1265,57 @@ def _extract_session_id(result) -> str:
             if sid:
                 return sid
     return ""
+
+
+def _extract_prompt_usage(result) -> dict | None:
+    """issue #727：从 `session/prompt` 的 PromptResponse result 里提取 `usage`。
+
+    hermes 0.9.0 起 PromptResponse result 携带 usage（token 计数字段命名跨版本
+    有波动：input_tokens/input、completion_tokens/output……），这里是治本路径——
+    用量经事件流 `("usage", {...})` 直报给 UsageCollector，不依赖 state.db 表结构。
+
+    返回形态与 UsageCollector.feed 的 usage dict 对齐：
+    {model, provider, input, output, cache_read, cache_write, reasoning}；全 0/缺失返回 None。
+    """
+    if not isinstance(result, dict):
+        return None
+    usage = result.get("usage")
+    if not isinstance(usage, dict) or not usage:
+        return None
+    tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}
+    try:
+        from src.domains.insight.observability.llm_usage import normalize_tokens
+        _n = normalize_tokens(usage)
+        tok = {
+            "input": _n.get("input_tokens", 0),
+            "output": _n.get("output_tokens", 0),
+            "cache_read": _n.get("cache_read_tokens", 0),
+            "cache_write": _n.get("cache_write_tokens", 0),
+            "reasoning": _n.get("reasoning_tokens", 0),
+        }
+    except Exception:
+        # 归一化器不可用时退化为常见 snake/camel 键的手工解析
+        for canon, aliases in (
+            ("input", ("input_tokens", "input", "prompt_tokens")),
+            ("output", ("output_tokens", "output", "completion_tokens")),
+            ("cache_read", ("cache_read_tokens", "cache_read")),
+            ("cache_write", ("cache_write_tokens", "cache_write")),
+            ("reasoning", ("reasoning_tokens", "reasoning")),
+        ):
+            for a in aliases:
+                v = usage.get(a)
+                if isinstance(v, (int, float)) and v > 0:
+                    tok[canon] = int(v)
+                    break
+    if not any(tok.values()):
+        return None
+    model = str(usage.get("model") or result.get("model") or "")
+    provider = str(usage.get("provider") or result.get("provider") or "")
+    rec = dict(tok)
+    rec["model"] = model
+    rec["provider"] = provider
+    return rec
+
 
 def _has_completion_record(chunks: list) -> bool:
     """累计 text 输出里是否已出现 agent 的收尾记录（actions + conclusion）。
@@ -1607,51 +1804,427 @@ def _cleanup_overlay(iso_home: str):
     except Exception:
         pass
 
-def _extract_prompt_usage(result) -> dict | None:
-    """issue #727：从 `session/prompt` 的 PromptResponse result 里提取 `usage`。
 
-    hermes 0.9.0 起 PromptResponse result 携带 usage（token 计数字段命名跨版本
-    有波动：input_tokens/input、completion_tokens/output……），这里是治本路径——
-    用量经事件流 `("usage", {...})` 直报给 UsageCollector，不依赖 state.db 表结构。
 
-    返回形态与 UsageCollector.feed 的 usage dict 对齐：
-    {model, provider, input, output, cache_read, cache_write, reasoning}；全 0/缺失返回 None。
+
+# ═══════════════ [USP搬迁] Transport 层已迁至 backends/（api.py 协议+异常族; 各平台文件 Transport 类）═══════════════
+# re-export 别名过渡（引用点全部切换后删除）:
+from src.domains.runtime.agents.sandbox.backends.api import (  # noqa: F401
+    TransportError, TransportTimeout, TransportClosed, ACPTransport,
+)
+from src.domains.runtime.agents.sandbox.backends.devbox import DevBoxTransport  # noqa: F401
+from src.domains.runtime.agents.sandbox.backends.cubesandbox import CubeSandboxTransport  # noqa: F401
+
+
+class PipeTransport:
+    """bwrap 路径 transport——包装 subprocess.Popen 的 stdin/stdout pipe。
+
+    现有 Popen 已设 bufsize=0，proc.stdout 是无缓冲 FileIO，
+    select + os.read 可靠（不和 BufferedReader 冲突）。
+
+    readline timeout 语义：连续静默 N 秒才超时，有数据就重置 deadline。
+    长 prompt 生成几分钟不超时，只有完全静默才判死。
     """
-    if not isinstance(result, dict):
-        return None
-    usage = result.get("usage")
-    if not isinstance(usage, dict) or not usage:
-        return None
-    tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}
+
+    def __init__(self, stdin, stdout):
+        self.stdin = stdin
+        self.stdout = stdout
+        self.buf = b""
+        self._write_lock = threading.Lock()
+
+    def write(self, data: bytes) -> None:
+        with self._write_lock:
+            self.stdin.write(data)
+            self.stdin.flush()
+
+    def readline(self, timeout: float = 30.0) -> str:
+        import os as _os
+        deadline = time.monotonic() + timeout
+        while b"\n" not in self.buf:
+            if len(self.buf) > 10 * 1024 * 1024:
+                raise TransportClosed("line exceeds 10MB")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TransportTimeout(f"readline timeout after {timeout}s silent")
+            r, _, _ = _select_mod.select([self.stdout], [], [], remaining)
+            if not r:
+                # select 超时 = 静默超时，可恢复
+                raise TransportTimeout(f"readline timeout after {timeout}s silent")
+            chunk = _os.read(self.stdout.fileno(), 65536)
+            if not chunk:
+                # pipe 关了 = 不可恢复
+                raise TransportClosed("stdout pipe closed")
+            self.buf += chunk
+            deadline = time.monotonic() + timeout
+        line, self.buf = self.buf.split(b"\n", 1)
+        return line.decode("utf-8") + "\n"
+
+    def close(self) -> None:
+        try:
+            self.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.stdout.close()
+        except Exception:
+            pass
+
+
+
+
+
+
+
+def _run_acp_session(
+    transport: ACPTransport,
+    prompt: str,
+    cwd: str,
+    session_id: str,
+    label: str,
+    max_exec_seconds: int,
+    session_mode: str = "new",  # "new" | "resume"
+    silent_timeout: float = 60.0,
+    text_idle_timeout: float = 300.0,  # P1-7 修复：60s→300s，非 chat 任务 text 后做长时间工具调用不会误判完成
+    tool_idle_timeout: float = 300.0,
+    on_message: Callable | None = None,
+) -> Generator[tuple[str, object], None, None]:
+    """ACP 协议交互——initialize → session → prompt → reader → yield 事件 → done。
+
+    职责：只做 ACP 协议交互。高内聚低耦合——不关心 transport 实现、进程生命周期、
+    stderr 收集、chat 检测、text 后处理。transport.close() 在 finally 中通过 client.close() 完成。
+
+    on_message: 业务回调 (msg_type, content, prompt_done_event) → None。
+        调用方在此做 chat 检测等业务逻辑，检测到完成后 set prompt_done_event。
+        协议层只调不解释。
+    """
+    collected_text: list[str] = []
+    new_session_id = session_id
+    error_events: list[str] = []
+
+    # 事件队列：reader 线程 → 主循环
+    event_queue: list[tuple[str, object]] = []
+    queue_lock = threading.Lock()
+    prompt_done = threading.Event()
+    prompt_result: dict = {}
+
+    # 文本缓冲区 + messageId 分桶
+    _text_buf: list[str] = []
+    _think_buf: list[str] = []
+    _text_mid: str | None = None   # 当前 text buffer 的 messageId
+    _think_mid: str | None = None  # 当前 think buffer 的 messageId
+    _BUF_MAX = 200
+
+    def _flush_text():
+        if _text_buf:
+            line = "".join(_text_buf)
+            _text_buf.clear()
+            if line.strip():
+                collected_text.append(line)
+                _enqueue("text", line)
+
+    def _flush_thinking():
+        if _think_buf:
+            line = "".join(_think_buf)
+            _think_buf.clear()
+            if line.strip():
+                _enqueue("reasoning", line)
+
+    def _on_message_internal(msg_type: str, content, message_id: str | None = None):
+        """ACP 通知回调 → 缓冲 chunk，按 turn 聚合后 flush。
+
+        flush 时机（严格"非 text 事件之前"）：
+        1. messageId 变化——前一条 message 结束，新 message 开始
+        2. tool_use / tool_finish 之前——文本排在工具调用之前
+        3. prompt_done——收尾（由主循环调用 _flush_text）
+        不再遇 \\n 就 flush——\\n 是文本内容的一部分，不是消息边界。
+        """
+        nonlocal _text_mid, _think_mid
+        if msg_type == "text":
+            if message_id is not None and message_id != _text_mid:
+                _flush_text()       # messageId 变化——先吐前一条
+                _text_mid = message_id
+            _text_buf.append(content)
+            if sum(len(s) for s in _text_buf) >= _BUF_MAX:
+                _flush_text()
+        elif msg_type == "thinking":
+            if message_id is not None and message_id != _think_mid:
+                _flush_thinking()
+                _think_mid = message_id
+            _think_buf.append(content)
+            if sum(len(s) for s in _think_buf) >= _BUF_MAX:
+                _flush_thinking()
+        elif msg_type == "tool_use":
+            _flush_text()
+            _flush_thinking()
+            _enqueue("tool_use", content)
+        elif msg_type == "tool_finish":
+            _flush_text()
+            _flush_thinking()
+            _enqueue("tool_finish", content)
+        elif msg_type == "tool_result":
+            _enqueue("tool_result", content)
+        # 调用方业务回调（chat 检测等）——收到 (msg_type, content, prompt_done_event)
+        if on_message:
+            try:
+                on_message(msg_type, content, prompt_done)
+            except Exception:
+                log.exception(f"{label}on_message callback raised; ignored")
+
+    def _enqueue(et, data):
+        with queue_lock:
+            event_queue.append((et, data))
+
+    # ── 创建 client ──
+    client = _ACPSimpleClient(
+        transport=transport,
+        label=label,
+        on_message=_on_message_internal,
+        on_prompt_done=lambda result: (
+            prompt_result.update(result),
+            prompt_done.set(),
+        ),
+        on_prompt_error=lambda err: (
+            error_events.append(err),
+            prompt_done.set(),
+        ),
+    )
+
+    # ── 启动 reader 线程 ──
+    _GLOBAL_TIMEOUT = max_exec_seconds * 2
+    _global_deadline = time.monotonic() + _GLOBAL_TIMEOUT
+    client.start_reader(
+        silent_timeout=silent_timeout,
+        global_deadline=_global_deadline,
+    )
+
     try:
-        from src.domains.insight.observability.llm_usage import normalize_tokens
-        _n = normalize_tokens(usage)
-        tok = {
-            "input": _n.get("input_tokens", 0),
-            "output": _n.get("output_tokens", 0),
-            "cache_read": _n.get("cache_read_tokens", 0),
-            "cache_write": _n.get("cache_write_tokens", 0),
-            "reasoning": _n.get("reasoning_tokens", 0),
-        }
-    except Exception:
-        # 归一化器不可用时退化为常见 snake/camel 键的手工解析
-        for canon, aliases in (
-            ("input", ("input_tokens", "input", "prompt_tokens")),
-            ("output", ("output_tokens", "output", "completion_tokens")),
-            ("cache_read", ("cache_read_tokens", "cache_read")),
-            ("cache_write", ("cache_write_tokens", "cache_write")),
-            ("reasoning", ("reasoning_tokens", "reasoning")),
-        ):
-            for a in aliases:
-                v = usage.get(a)
-                if isinstance(v, (int, float)) and v > 0:
-                    tok[canon] = int(v)
+        # ── 1. initialize 握手 ──
+        init_result, init_err = client.request("initialize", {
+            "protocolVersion": 1,
+            "clientInfo": {"name": "grape-agent", "version": "0.1.0"},
+            "clientCapabilities": {},
+        }, timeout=100)
+        if init_err:
+            error_events.append(f"initialize failed: {init_err}")
+            yield ("done", _done_result(-1, "", session_id, error_events, ""))
+            return
+
+        log.info(f"{label}hermes ACP initialized")
+
+        # ── 2. session/new 或 session/resume（按 session_mode）──
+        yield ("step_start", "Step 1 started (session: ACP)")
+        cwd_arg = cwd if cwd else "."
+        if session_mode == "resume" and session_id:
+            result, err = client.request("session/resume", {
+                "cwd": cwd_arg, "sessionId": session_id, "mcpServers": [],
+            }, timeout=100)
+            if err:
+                log.warning(f"{label}hermes ACP resume {session_id[:12]}... failed: {err}, creating new")
+                result, err = client.request("session/new", {
+                    "cwd": cwd_arg, "mcpServers": [],
+                }, timeout=100)
+            else:
+                # resume 可能返回 warning 但不是 error——检查 session ID 是否有效
+                _check_sid = _extract_session_id(result)
+                if not _check_sid or _check_sid == session_id:
+                    # resume 没有返回新 session ID（可能 session 已失效），走 session/new
+                    log.warning(f"{label}hermes ACP resume returned no new session ID, creating new")
+                    result, err = client.request("session/new", {
+                        "cwd": cwd_arg, "mcpServers": [],
+                    }, timeout=100)
+        else:
+            result, err = client.request("session/new", {
+                "cwd": cwd_arg, "mcpServers": [],
+            }, timeout=100)
+        if err:
+            error_events.append(f"session failed: {err}")
+            yield ("done", _done_result(-1, "", session_id, error_events, ""))
+            return
+        new_session_id = _extract_session_id(result) or session_id
+        log.info(f"{label}hermes ACP session: {new_session_id[:12]}...")
+
+        # 清理残留的 _pending entry（用公共方法）
+        client.clear_pending()
+
+        # ── 3. session/prompt（fire-and-forget）──
+        _prompt_id = client.next_id()
+        _prompt_evt = client.register_pending(_prompt_id)
+        client.set_prompt_req_id(_prompt_id)
+
+        def _send_prompt(_pid=_prompt_id, _sp=prompt):
+            msg = {"jsonrpc": "2.0", "id": _pid, "method": "session/prompt",
+                   "params": {"sessionId": new_session_id,
+                              "prompt": [{"type": "text", "text": _sp}]}}
+            try:
+                client.write_line((json.dumps(msg) + "\n").encode("utf-8"))
+            except Exception as e:
+                error_events.append(f"send prompt: {e}")
+                prompt_done.set()
+
+        prompt_thread = threading.Thread(target=_send_prompt, daemon=True)
+        prompt_thread.start()
+
+        # ── 4. 内循环：从队列消费事件 + 等 prompt 完成 ──
+        _last_activity = time.time()
+        _global_start = time.time()
+        _last_event_type = ""
+        # [看门狗 2026-11-12] stderr 指纹双信号: hermes 每步都打 stderr
+        # (tool completed / OpenAI client created / API call ...), 事件流静默但 stderr
+        # 尾部仍在变化 = 进程活跃, 不应判死. 每 10s 采样一次 _tail_stderr 尾指纹,
+        # 变化即刷新 _stderr_fp_ts. 判死条件收紧为「事件流 AND stderr 双静默」.
+        # bwrap/PipeTransport 无 _tail_stderr → 指纹恒定 → 行为与修复前一致(不回归).
+        _stderr_fp = None
+        _stderr_fp_ts = time.time()
+        _fp_poll_ts = 0.0
+
+        while True:
+            with queue_lock:
+                if event_queue:
+                    events = event_queue[:]
+                    event_queue.clear()
+                else:
+                    events = []
+
+            if events:
+                _last_activity = time.time()
+                for et, data in events:
+                    _last_event_type = et
+                    yield (et, data)
+
+            if prompt_done.is_set():
+                break
+
+            # hermes 进程退出但没发 PromptResponse → 兼容性兜底
+            if client.is_reader_done() and not prompt_done.is_set():
+                if collected_text:
+                    # P2-4 修复：hermes 崩溃前输出部分文本不应判为成功
+                    log.warning(f"{label}hermes ACP reader EOF with {len(collected_text)} text chunks, hermes exited unexpectedly")
+                    prompt_result["stopReason"] = "error"
+                    error_events.append("hermes exited unexpectedly with partial output (reader EOF before PromptResponse)")
                     break
-    if not any(tok.values()):
-        return None
-    model = str(usage.get("model") or result.get("model") or "")
-    provider = str(usage.get("provider") or result.get("provider") or "")
-    rec = dict(tok)
-    rec["model"] = model
-    rec["provider"] = provider
-    return rec
+                error_events.append("hermes process exited before prompt completed")
+                # P2-8 说明：通过 hasattr 检查 transport 是否有诊断方法。
+                # DevBoxTransport / CubeSandboxTransport 有 _tail_stderr + sandbox 属性，
+                # PipeTransport（bwrap）没有——bwrap 路径丢失诊断信息但不影响功能。
+                try:
+                    if hasattr(transport, '_tail_stderr'):
+                        _stderr_tail = transport._tail_stderr()
+                        if _stderr_tail:
+                            error_events.append(f"stderr: {_stderr_tail[:500]}")
+                            log.warning(f"{label}hermes process exited, stderr: {_stderr_tail[:500]}")
+                    else:
+                        log.debug(f"{label}transport has no _tail_stderr (bwrap path), no stderr diagnostics")
+                except Exception:
+                    pass
+                break
+
+            # [看门狗 2026-11-12] stderr 指纹采样(每 10s 一次, 采样的是尾 300 字节)
+            _now_fp = time.time()
+            if _now_fp - _fp_poll_ts >= 10:
+                _fp_poll_ts = _now_fp
+                _fn_fp = getattr(transport, "_tail_stderr", None)
+                if _fn_fp:
+                    try:
+                        _fp_cur = (_fn_fp(300) or "")[-150:]
+                        if _fp_cur != _stderr_fp:
+                            _stderr_fp = _fp_cur
+                            _stderr_fp_ts = _now_fp
+                    except Exception:
+                        pass
+            # 分级超时：text 后 text_idle_timeout → 视为完成；
+            #   tool 后 tool_idle_timeout → 超时终止(事件流 AND stderr 双静默才杀)
+            elapsed_silent = time.time() - _last_activity
+            if _last_event_type == "text" and elapsed_silent > text_idle_timeout:
+                log.info(f"{label}hermes ACP silent {elapsed_silent:.0f}s after text, assuming done (response lost)")
+                prompt_result["stopReason"] = "end_turn"
+                break
+            if elapsed_silent > tool_idle_timeout and (time.time() - _stderr_fp_ts) > tool_idle_timeout:
+                if elapsed_silent > tool_idle_timeout:
+                    log.info(f"{label}hermes ACP events silent {elapsed_silent:.0f}s but stderr "
+                             f"active {time.time() - _stderr_fp_ts:.0f}s ago, agent alive, keep waiting")
+                # 诊断：超时时 dump err.log + out.jsonl 尾部，定位 hermes 卡在哪
+                _stderr_tail = ""
+                _stdout_tail = ""
+                _tail_fn = getattr(transport, '_tail_stderr', None)
+                if _tail_fn:
+                    try:
+                        _stderr_tail = _tail_fn(3000) or ""
+                    except Exception as _e:
+                        _stderr_tail = f"(read stderr failed: {_e})"
+                _read_fn = getattr(transport, 'sandbox', None)
+                if _read_fn:
+                    try:
+                        _out_path = getattr(transport, 'out_path', '')
+                        if _out_path and hasattr(_read_fn, 'read_file_bytes'):
+                            _data = _read_fn.read_file_bytes(_out_path)
+                            _text = _data.decode("utf-8", errors="replace") if isinstance(_data, bytes) else str(_data)
+                            _stdout_tail = _text[-3000:]
+                    except Exception as _e:
+                        _stdout_tail = f"(read stdout failed: {_e})"
+                _diag = f"hermes ACP silent {elapsed_silent:.0f}s, timeout\n--- stderr (last 3000) ---\n{_stderr_tail}\n--- stdout (last 3000) ---\n{_stdout_tail}"
+                log.warning(f"{label}{_diag[:500]}")
+                # 上报诊断到服务端 task-log（前端可见，不用 SSH 沙箱）
+                yield ("text", f"[diagnostic] {_diag}")
+                yield ("error", f"silent timeout {elapsed_silent:.0f}s; stderr: {_stderr_tail[:300]}")
+                prompt_result["stopReason"] = "timeout"
+                prompt_result["errors"] = [f"silent timeout {elapsed_silent:.0f}s; stderr: {_stderr_tail[:300]}"]
+                break
+
+            # 全局超时
+            if time.time() - _global_start > _GLOBAL_TIMEOUT:
+                log.warning(f"{label}hermes ACP global timeout ({_GLOBAL_TIMEOUT}s) exceeded")
+                prompt_result["stopReason"] = "timeout"
+                break
+
+            time.sleep(0.05)
+
+        # ── 5. 收尾 ──
+        _flush_text()
+        _flush_thinking()
+
+        stop_reason = prompt_result.get("stopReason", "")
+        log.info(f"{label}hermes ACP done: stopReason={stop_reason}")
+
+        yield ("step_finish", f"Step 1 done (stopReason={stop_reason})")
+
+        # 消费残留事件
+        with queue_lock:
+            if event_queue:
+                for et, data in event_queue[:]:
+                    yield (et, data)
+                event_queue.clear()
+
+        # exit_code 判定
+        if stop_reason == "end_turn" and not error_events:
+            exit_code = 0
+        elif stop_reason == "timeout":
+            exit_code = -1
+        elif stop_reason == "error":
+            exit_code = -1
+        elif error_events:
+            exit_code = -1
+        else:
+            exit_code = 0
+
+        full_text = "\n".join(collected_text)
+        # 不做 _robust_join_json / _detect_structured_output——文本后处理留给调用方
+
+        # done 事件不含 stderr/backend/sandbox_id——由调用方填充
+        yield ("done", {
+            "exit_code": exit_code,
+            "text": full_text,
+            "oc_session_id": new_session_id,
+            "errors": error_events,
+        })
+
+    except Exception as e:
+        log.error(f"{label}hermes ACP exception: {e}", exc_info=True)
+        error_events.append(str(e))
+        yield ("done", {
+            "exit_code": -1, "text": "\n".join(collected_text),
+            "oc_session_id": new_session_id,
+            "errors": error_events,
+        })
+    finally:
+        client.close()
+

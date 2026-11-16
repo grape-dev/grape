@@ -822,7 +822,7 @@
     </Teleport>
 
     <!-- ═══ 引擎选择弹窗 ═══ -->
-    <div v-if="engineModal.open" class="rtv-modal-ov" @click.self="engineModal.open = false">
+    <div v-if="engineModal.open" class="rtv-modal-ov" @click.self="closeEngineModal()">
       <div class="dbv-engmodal">
         <h3>{{ t('select_engine') }} — {{ agentLabel(engineModal.agentType) }}</h3>
         <div class="dbv-eng-sub">
@@ -831,28 +831,159 @@
           }}
         </div>
         <div v-if="engineDetachHint" v-html="engineDetachHint"></div>
-        <!-- 筛选 -->
-        <div class="dbv-engfilters">
-          <span
-            v-for="ty in engModalAvailTypes"
-            :key="'et' + ty"
-            :class="{ on: engineModal.filterType === ty }"
-            @click="engineModal.filterType = engineModal.filterType === ty ? '' : ty"
-            >{{ ty }}</span
-          >
-          <span v-if="engModalAvailTypes.length" class="dbv-engsep"></span>
-          <span
-            v-for="s in engModalAvailScopes"
-            :key="'es' + s"
-            :class="{ on: engineModal.filterScope === s }"
-            @click="engineModal.filterScope = engineModal.filterScope === s ? '' : s"
-            >{{ SCOPE_LABELS_ALL[s] || s }}</span
-          >
-          <span style="flex: 1"></span>
-          <span class="dbv-engclear" @click="engCurIds = []">全不选</span>
+        <!-- Issue #1208：两模式 radio——切换只换内容，互不清空、互不派生（用户口径 2026-11-09） -->
+        <div class="dbv-engmodes">
+          <label :class="{ on: engineModal.mode === 'tag' }">
+            <input type="radio" value="tag" v-model="engineModal.mode" @change="onModeSwitch" />
+            {{ t('selector_mode_tag') }}
+          </label>
+          <label :class="{ on: engineModal.mode === 'engine' }">
+            <input type="radio" value="engine" v-model="engineModal.mode" @change="onModeSwitch" />
+            {{ t('selector_mode_engine') }}
+          </label>
         </div>
+        <!-- ══ 标签模式面板 ══ -->
+        <div v-if="engineModal.mode === 'tag'" class="dbv-selpanel">
+          <div class="dbv-selhint">{{ t('selector_tag_hint') }}</div>
+          <div class="dbv-selsummary" :style="selSummaryStyle">{{ selSummaryText }}</div>
+          <div v-for="g in selGroups" :key="'sg' + g.prefix" class="dbv-selgroup">
+            <div class="dbv-selgroup-t">{{ g.title }}</div>
+            <div class="dbv-selgroup-chips">
+              <label
+                v-for="v in g.values"
+                :key="g.prefix + ':' + v"
+                :class="{ on: engineModal.selTags.includes(g.prefix + ':' + v) }"
+                class="dbv-selchip"
+                ><input
+                  type="checkbox"
+                  :checked="engineModal.selTags.includes(g.prefix + ':' + v)"
+                  @change="toggleSelTag(g.prefix + ':' + v)"
+                />{{ g.label(v) }}</label
+              >
+            </div>
+          </div>
+          <div v-if="engineModal.selTags.length" class="dbv-selclearrow">
+            <span class="dbv-selclear" @click="clearSelTags()"
+              >{{ t('selector_clear_tags') }} · {{ engineModal.selTags.length }}</span
+            >
+          </div>
+          <div class="dbv-selprevtitle">{{ t('selector_hit_preview') }}</div>
+          <div v-if="!previewShown.length" class="dbv-selprevempty">
+            {{ t('selector_preview_empty') }}
+          </div>
+          <template v-for="sec in previewSections" v-else :key="'sec' + sec.key">
+            <div
+              v-if="sec.list.length"
+              class="dbv-secwrap"
+              :style="{ borderColor: sec.border, background: sec.bg }"
+            >
+              <div
+                class="dbv-sechead2"
+                :style="{ borderBottom: engineModal.collapse[sec.key] ? 'none' : '1px solid ' + sec.border }"
+                @click="engineModal.collapse[sec.key] = !engineModal.collapse[sec.key]"
+              >
+                <span class="dbv-secarrow" :style="{ background: engineModal.collapse[sec.key] ? '#e8e8ed' : 'rgba(0,0,0,.06)' }" :title="engineModal.collapse[sec.key] ? '展开该组' : '收起该组'">{{ engineModal.collapse[sec.key] ? '▶' : '▼' }}</span>
+                <span class="dbv-sectitle" :style="{ color: sec.color }">{{ sec.title }}</span>
+                <span v-if="engineModal.collapse[sec.key]" class="dbv-seccollapsed">（已折叠）</span>
+                <span class="dbv-seccount">{{ sec.list.length }} 台</span>
+              </div>
+              <div v-if="!engineModal.collapse[sec.key]" class="dbv-secbody">
+                <div
+                  v-for="(grp, gi) in sec.groups"
+                  :key="sec.key + '-g' + gi"
+                >
+                  <div
+                    class="dbv-secgroupt"
+                    :style="{ color: sec.groupColor }"
+                    >{{ grp.label }} ({{ grp.list.length }})</div
+                  >
+                  <div
+                    v-for="p in grp.list"
+                    :key="sec.key + '-' + p.engine.id"
+                    class="dbv-prevrow"
+                    :class="{ off: sec.key === 'offline', hit: sec.key === 'hit' }"
+                  >
+                    <div class="dbv-prevbody">
+                      <div class="dbv-prevname">
+                        {{ p.engine.alias || p.engine.name }}
+                        <span v-if="p.engine.alias" class="dbv-prevalias">({{ p.engine.name }})</span>
+                        <span
+                          v-for="tg in plainTags(p.engine)"
+                          :key="'pt' + tg"
+                          class="dbv-engtag"
+                          :style="{ background: ENG_TAG_COLORS[tg] || '#999' }"
+                          >{{ tg === 'all' ? 'All' : tg.charAt(0).toUpperCase() + tg.slice(1) }}</span
+                        >
+                        <span
+                          v-for="st in p.engine.scene_tags || []"
+                          :key="'ps' + st"
+                          class="dbv-engtag"
+                          :style="{ background: ENG_SCENE_COLORS[st] || '#10b981' }"
+                          >{{ engSceneDisplayName(st) }}</span
+                        >
+                        <span
+                          class="dbv-engtag"
+                          :style="{ background: SCOPE_COLORS_ALL[p.engine.scope] || '#999' }"
+                          >{{ SCOPE_LABELS_ALL[p.engine.scope] || p.engine.scope }}</span
+                        >
+                      </div>
+                      <div class="dbv-prevmeta">
+                        {{ p.engine.device || '' }}{{ p.engine.cred_name ? ' · ' + p.engine.cred_name : '' }}
+                      </div>
+                    </div>
+                    <span class="dbv-prevstatus" :style="{ color: engStatusColor(p.engine.status) }">{{
+                      engStatusLabel(p.engine.status)
+                    }}</span>
+                    <span v-if="sec.key === 'hit'" class="dbv-prevmark hit">{{
+                      t('selector_hit')
+                    }}</span>
+                    <template v-else-if="sec.key === 'offline'">
+                      <span class="dbv-prevmark off">⚠ {{ reasonLabel(p.reason) }}</span>
+                      <span class="dbv-prevmarkoff">恢复后可承接</span>
+                    </template>
+                    <template v-else>
+                      <span
+                        class="dbv-prevmark miss"
+                        :style="{ color: reasonColor(p.reason) }">✗ {{ reasonLabel(p.reason) }}</span>
+                      <span
+                        class="dbv-prevhelp"
+                        title=""
+                        @mouseenter="showReasonTip($event, missReasonDetail(p))"
+                        @mouseleave="hideReasonTip()"
+                        >?</span>
+                    </template>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+        <!-- ══ 实例模式面板 ══ -->
+        <template v-else>
+          <div class="dbv-selhint">{{ t('selector_engine_hint') }}</div>
+          <!-- 筛选 -->
+          <div class="dbv-engfilters">
+            <span
+              v-for="ty in engModalAvailTypes"
+              :key="'et' + ty"
+              :class="{ on: engineModal.filterType === ty }"
+              @click="engineModal.filterType = engineModal.filterType === ty ? '' : ty"
+              >{{ ty }}</span
+            >
+            <span v-if="engModalAvailTypes.length" class="dbv-engsep"></span>
+            <span
+              v-for="s in engModalAvailScopes"
+              :key="'es' + s"
+              :class="{ on: engineModal.filterScope === s }"
+              @click="engineModal.filterScope = engineModal.filterScope === s ? '' : s"
+              >{{ SCOPE_LABELS_ALL[s] || s }}</span
+            >
+            <span style="flex: 1"></span>
+            <span class="dbv-engclear" @click="engCurIds = []">全不选</span>
+          </div>
+        </template>
         <input v-model="engineModal.q" class="dbv-engsearch" placeholder="搜索引擎名称/标签..." />
-        <div class="dbv-englist">
+        <div v-if="engineModal.mode === 'engine'" class="dbv-englist">
           <div
             v-if="!engModalFiltered.length"
             style="padding: 20px 0; text-align: center; color: var(--t3); font-size: 13px"
@@ -918,11 +1049,13 @@
           </template>
         </div>
         <div class="dbv-engfoot">
-          <button class="ap-btn" @click="engineModal.open = false">{{ t('cancel') }}</button>
+          <button class="ap-btn" @click="closeEngineModal()">{{ t('cancel') }}</button>
           <button class="ap-btn" @click="confirmEnginePick()">{{ t('confirm') }}</button>
         </div>
       </div>
     </div>
+    <!-- 未命中原因自绘浮层（原生 title 不换行，长文本溢出——用户裁定改自绘） -->
+    <div v-if="reasonTip.show" class="dbv-reasontip" :style="{ left: reasonTip.x + 'px', top: reasonTip.y + 'px' }">{{ reasonTip.text }}</div>
 
     <!-- ═══ 复制场景弹窗 ═══ -->
     <div v-if="copyDlg.open" class="rtv-modal-ov" @click.self="copyDlg.open = false">
@@ -1041,6 +1174,7 @@
 <script setup>
 import { providerFromRepoKey } from '../lib/repo-provider.js'
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 
 const G = globalThis
 
@@ -1229,7 +1363,372 @@ function skillIsSelected(s) {
   )
 }
 // 引擎弹窗
-const engineModal = reactive({ open: false, agentType: '', q: '', filterType: '', filterScope: '' })
+// 两模式弹窗同尺寸几何在 CSS .dbv-engmodal（640×min(90vh,760)），切换只换内容不跳尺寸
+const engineModal = reactive({
+  open: false,
+  agentType: '',
+  q: '',
+  filterType: '',
+  filterScope: '',
+  // Issue #1208：两模式（标签 selector / 实例 engine）——打开时按已配形态初始化，
+  // 切换互不清空、互不派生（用户口径 2026-11-09）；两侧选择只活在前端内存，
+  // 确定只写当前模式字段、另一侧按 D7 清空。
+  mode: 'tag',
+  selTags: [],
+  collapse: { hit: false, offline: false, miss: false },
+  serverPreview: null, // 服务端权威 hit/reason map（id→{hit,reason}），失败降级本地匹配
+})
+let _previewSeq = 0
+let _previewTimer = null
+// 未命中原因自绘浮层（title="" 禁用原生 tooltip）
+const reasonTip = reactive({ show: false, x: 0, y: 0, text: '' })
+function showReasonTip(ev, text) {
+  if (!text) return
+  reasonTip.text = text
+  reasonTip.show = true
+  // 先显示再量尺寸（display:none 时 offsetWidth=0）
+  requestAnimationFrame(function () {
+    const w = 320
+    let x = (ev && ev.clientX ? ev.clientX : 0) + 12
+    let y = (ev && ev.clientY ? ev.clientY : 0) + 14
+    const el = document.querySelector('.dbv-reasontip')
+    const tw = el ? el.offsetWidth || w : w
+    const th = el ? el.offsetHeight || 40 : 40
+    if (x + tw > window.innerWidth - 8) x = Math.max(8, window.innerWidth - tw - 8)
+    if (y + th > window.innerHeight - 8) y = Math.max(8, (ev && ev.clientY ? ev.clientY : 0) - th - 10)
+    reasonTip.x = x
+    reasonTip.y = y
+  })
+}
+function hideReasonTip() {
+  reasonTip.show = false
+}
+
+// ── Issue #1208：selector 标签模式前端纯函数（与服务端 engine_select._selector_match
+// 同语义：组内 OR + 组间 AND，D14）。#902 后服务端默认不限角色，本地降级匹配同样只认
+// 显式 role_tags；类型→展示名映射仅用于 UI 文案（标签值仍按内部名）。
+const ENG_DEFAULT_ROLES = {}
+const ENG_TYPE_LABELS = { hwcloud: 'aishell' }
+function engEngineTypeOf(e) {
+  // 云四段名子串误判修复（2026-11-12）：冒号首段整段匹配，防 opencode:hermes-… 被派 engine:hermes
+  const raw = String(e.engine_type || e.name || '').toLowerCase()
+  const first = raw.split(':')[0]
+  const keys = ['hermes', 'opencode', 'codearts', 'codex']
+  for (let i = 0; i < keys.length; i++) {
+    if (first === keys[i] || raw === keys[i]) return keys[i]
+  }
+  return first || raw
+}
+function engDeriveTags(e) {
+  // scope 以 e.tags 的权威 scope: 行为准；e.scope 字段仅在无行时兜底（双写不一致时防假命中）
+  const tags = (e.tags || []).slice()
+  const et = engEngineTypeOf(e)
+  if (et) tags.push('engine:' + et)
+  const hasScopeRow = tags.some(function (t) {
+    return String(t || '').indexOf('scope:') === 0
+  })
+  if (!hasScopeRow && e.scope) tags.push('scope:' + e.scope)
+  ;(e.scene_tags || []).forEach(function (s) {
+    if (s) tags.push('scene:' + s)
+  })
+  return tags.map(function (t) {
+    return String(t || '').toLowerCase()
+  })
+}
+function engSelectorMatchEngine(selTags, e) {
+  if (!selTags || !selTags.length) return true
+  const groups = {}
+  selTags.forEach(function (t) {
+    const s = String(t || '').toLowerCase()
+    if (!s) return
+    const p = s.split(':', 1)[0]
+    ;(groups[p] = groups[p] || []).push(s)
+  })
+  const engineTags = engDeriveTags(e)
+  return Object.keys(groups).every(function (p) {
+    return groups[p].some(function (t) {
+      return engineTags.indexOf(t) >= 0
+    })
+  })
+}
+function engSelectorPreview(engines, selTags, agentType) {
+  // 命中预览分层标注：selector 排除 / 角色排除 / 健康排除 / 命中
+  return (engines || []).map(function (e) {
+    if (!engSelectorMatchEngine(selTags, e)) return { engine: e, hit: false, reason: 'selector' }
+    const roles = e.role_tags && e.role_tags.length ? e.role_tags : ENG_DEFAULT_ROLES[engEngineTypeOf(e)] || null
+    if (roles && agentType && roles.indexOf(agentType) < 0) {
+      return { engine: e, hit: false, reason: 'role' }
+    }
+    if (e.status && e.status !== 'online' && e.status !== 'about_to_gc') {
+      return { engine: e, hit: false, reason: 'offline' }
+    }
+    return { engine: e, hit: true, reason: '' }
+  })
+}
+function engSelectorTagLabel(tag) {
+  const s = String(tag || '')
+  const i = s.indexOf(':')
+  const p = i >= 0 ? s.slice(0, i) : ''
+  const v = i >= 0 ? s.slice(i + 1) : s
+  if (p === 'engine') return ENG_TYPE_LABELS[v] || v
+  if (p === 'scope') return ({ global: '全局', user: '个人', repo: '仓库', local: '本机' })[v] || v
+  if (p === 'scene') return engSceneDisplayName(v)
+  return s
+}
+function reasonLabel(reason) {
+  const k = {
+    selector: 'selector_reason_selector',
+    role: 'selector_reason_role',
+    offline: 'selector_reason_offline',
+    stale: 'selector_reason_stale',
+    scope: 'selector_reason_scope',
+    capability: 'selector_reason_capability',
+  }[reason]
+  return (k && t(k)) || reason || ''
+}
+function reasonColor(reason) {
+  return {
+    selector: '#8e8e93',
+    role: '#f59e0b',
+    offline: '#ff3b30',
+    stale: '#ff3b30',
+    scope: '#8e8e93',
+    capability: '#8e8e93',
+  }[reason] || '#8e8e93'
+}
+function plainTags(e) {
+  // 展示层过滤派生冒号行（engine:/scope:/scene: 只给匹配底座消费，不进能力徽章）
+  return (e.tags || []).filter(function (tg) {
+    return String(tg || '').indexOf(':') < 0
+  })
+}
+function missReasonDetail(p) {
+  const e = p.engine || {}
+  const reason = p.reason || ''
+  const agentType = engineModal.agentType
+  const selTags = engineModal.selTags
+  const tags = engDeriveTags(e)
+  const byPrefix = {}
+  ;(tags || []).forEach(function (tt) {
+    const i = String(tt).indexOf(':')
+    const p2 = i >= 0 ? String(tt).slice(0, i) : ''
+    if (!p2) return
+    ;(byPrefix[p2] = byPrefix[p2] || []).push(String(tt))
+  })
+  const vals = function (arr) {
+    return arr.map(function (tt) { return engSelectorTagLabel(tt) }).join('、') || '无'
+  }
+  if (reason === 'selector') {
+    const fails = []
+    const groups = {}
+    selTags.forEach(function (tt) {
+      const i = String(tt).indexOf(':')
+      if (i > 0) (groups[String(tt).slice(0, i)] = groups[String(tt).slice(0, i)] || []).push(tt)
+    })
+    Object.keys(groups).forEach(function (g) {
+      const hit = (groups[g] || []).some(function (tt) {
+        return (tags || []).indexOf(String(tt).toLowerCase()) >= 0
+      })
+      if (!hit) fails.push(g + ' 维：要求 ' + vals(groups[g]) + '，该引擎为 ' + vals(byPrefix[g] || []))
+    })
+    return '标签不匹配。' + (fails.length ? fails.join('；') : '要求的标签组合无交集')
+  }
+  if (reason === 'role') {
+    const roles = e.role_tags && e.role_tags.length ? e.role_tags.join('、') : '未声明（默认不限角色）'
+    return '角色不匹配。当前节点角色 ' + (agentType || '未知') + '；该引擎显式 role_tags = ' + roles
+  }
+  if (reason === 'offline' || reason === 'stale') {
+    return '健康不达标。引擎状态 ' + (e.status || '未知') + '；本机引擎看 installed+healthy，远端引擎要求 status=online 且 100 秒内有心跳（失联/离线均判为暂不可承接，恢复后自动可接）'
+  }
+  if (reason === 'scope') {
+    return '范围不匹配。SRE 节点只认「个人 / 仓库」档引擎；该引擎为「' + (SCOPE_LABELS_ALL[e.scope] || e.scope) + '」档'
+  }
+  if (reason === 'capability') {
+    return '能力不匹配。该引擎能力标签为 ' + vals((e.tags || []).filter(function (tt) { return String(tt).indexOf(':') < 0 })) + '，不含 ' + (agentType || '当前角色') + '也没有 all'
+  }
+  return ''
+}
+// selector 弹窗标签组（三组：engine/scope/scene；scope 选项从派生标签推导——本机直连引擎
+// e.scope='local' 的权威行是 scope:global，按字段筛会漏；场景组按市场注册序，未登记排末尾）
+const SEL_SCOPE_LABELS = { global: '全局', user: '个人', repo: '仓库' }
+const selGroups = computed(function () {
+  const vis = engModalVisible.value
+  const types = []
+  vis.forEach(function (e) {
+    const ty = engEngineTypeOf(e)
+    if (ty && types.indexOf(ty) < 0) types.push(ty)
+  })
+  types.sort()
+  const scopes = ['global', 'user', 'repo'].filter(function (s) {
+    return vis.some(function (e) {
+      return engDeriveTags(e).indexOf('scope:' + s) >= 0
+    })
+  })
+  const scenes = []
+  vis.forEach(function (e) {
+    ;(e.scene_tags || []).forEach(function (s) {
+      if (s && scenes.indexOf(s) < 0) scenes.push(s)
+    })
+  })
+  if (sceneTagsCache.value && sceneTagsCache.value.length) {
+    const order = {}
+    sceneTagsCache.value.forEach(function (x, i) {
+      if (x && x.name) order[x.name] = i
+    })
+    scenes.sort(function (a, b) {
+      const ia = Object.prototype.hasOwnProperty.call(order, a) ? order[a] : 1e9
+      const ib = Object.prototype.hasOwnProperty.call(order, b) ? order[b] : 1e9
+      return ia - ib
+    })
+  }
+  return [
+    {
+      prefix: 'engine',
+      title: t('selector_group_engine'),
+      values: types,
+      label: function (v) { return ENG_TYPE_LABELS[v] || v },
+    },
+    {
+      prefix: 'scope',
+      title: t('selector_group_scope'),
+      values: scopes,
+      label: function (v) { return SEL_SCOPE_LABELS[v] || v },
+    },
+    {
+      prefix: 'scene',
+      title: t('selector_group_scene'),
+      values: scenes,
+      label: function (v) { return engSceneDisplayName(v) },
+    },
+  ]
+})
+function toggleSelTag(tag) {
+  const i = engineModal.selTags.indexOf(tag)
+  if (i >= 0) engineModal.selTags.splice(i, 1)
+  else engineModal.selTags.push(tag)
+}
+function clearSelTags() {
+  engineModal.selTags = []
+}
+function onModeSwitch() {
+  // 用户口径：切换只重渲染，不清另一侧、不派生（断言见 tests/js）
+}
+// 标签变更：丢弃旧服务端命中 map（本地匹配即时反馈），250ms 防抖对齐后端
+watch(
+  function () { return engineModal.selTags.slice().sort().join(',') + '|' + engineModal.mode },
+  function () {
+    if (!engineModal.open) return
+    if (engineModal.mode !== 'tag') return
+    engineModal.serverPreview = null
+    if (_previewTimer) clearTimeout(_previewTimer)
+    _previewTimer = setTimeout(requestServerPreview, 250)
+  }
+)
+function requestServerPreview() {
+  const seq = ++_previewSeq
+  if (!engineModal.selTags.length) {
+    engineModal.serverPreview = null
+    return
+  }
+  const payload = {
+    tags: engineModal.selTags.slice(),
+    agent_type: engineModal.agentType,
+    repo: dashOwner.value && dashName.value ? dashOwner.value + '/' + dashName.value : '',
+  }
+  API()
+    .post('/scenes/engine-selector-preview', payload)
+    .then(function (d) {
+      if (seq !== _previewSeq) return
+      engineModal.serverPreview = (d && d.engines) || null
+    })
+    .catch(function () {
+      if (seq !== _previewSeq) return
+      engineModal.serverPreview = null
+    })
+}
+function selectorPreviewData() {
+  const vis = engModalVisible.value
+  const selTags = engineModal.selTags
+  if (selTags.length && engineModal.serverPreview) {
+    return vis.map(function (e) {
+      const s = engineModal.serverPreview[String(e.id)]
+      if (!s) return { engine: e, hit: false, reason: 'selector' }
+      return { engine: e, hit: !!s.hit, reason: s.reason || '' }
+    })
+  }
+  return engSelectorPreview(vis, selTags, engineModal.agentType)
+}
+// 搜索框只过滤展示，不影响命中计算；命中前置、组内按名称排序
+const previewShown = computed(function () {
+  const q = (engineModal.q || '').toLowerCase().trim()
+  const list = selectorPreviewData().slice()
+  const shown = q
+    ? list.filter(function (p) {
+        return [p.engine.name, p.engine.alias].join(' ').toLowerCase().indexOf(q) >= 0
+      })
+    : list
+  shown.sort(function (a, b) {
+    if (a.hit !== b.hit) return a.hit ? -1 : 1
+    const an = (a.engine.alias || a.engine.name || '').toLowerCase()
+    const bn = (b.engine.alias || b.engine.name || '').toLowerCase()
+    return an < bn ? -1 : an > bn ? 1 : 0
+  })
+  return shown
+})
+const previewSections = computed(function () {
+  const shown = previewShown.value
+  const hits = shown.filter(function (p) { return p.hit })
+  const off = shown.filter(function (p) { return !p.hit && (p.reason === 'offline' || p.reason === 'stale') })
+  const miss = shown.filter(function (p) { return !p.hit && p.reason !== 'offline' && p.reason !== 'stale' })
+  const mkGroups = function (list) {
+    const groups = {}
+    list.forEach(function (p) {
+      const sc = p.engine.scope || 'global'
+      ;(groups[sc] = groups[sc] || []).push(p)
+    })
+    return ['user', 'repo', 'global', 'local']
+      .filter(function (sc) { return groups[sc] && groups[sc].length })
+      .map(function (sc) { return { label: SCOPE_LABELS_ALL[sc] || sc, list: groups[sc] } })
+  }
+  return [
+    {
+      key: 'hit', title: t('selector_preview_hit_group'), color: '#15803d',
+      border: '#bbf7d0', bg: '#f0fdf4', groupColor: '#34c759', list: hits, groups: mkGroups(hits),
+    },
+    {
+      key: 'offline', title: t('selector_preview_offline_group'), color: '#b45309',
+      border: '#fde68a', bg: '#fffbeb', groupColor: '#b45309', list: off, groups: mkGroups(off),
+    },
+    {
+      key: 'miss', title: t('selector_preview_miss_group'), color: '#6b7280',
+      border: '#e8e8ed', bg: '#fafafa', groupColor: '#86868b', list: miss, groups: mkGroups(miss),
+    },
+  ]
+})
+const selSummaryText = computed(function () {
+  const preview = selectorPreviewData()
+  const hitCount = preview.filter(function (p) { return p.hit }).length
+  const offCount = preview.filter(function (p) { return !p.hit && (p.reason === 'offline' || p.reason === 'stale') }).length
+  const hasTags = engineModal.selTags.length
+  const total = hitCount + offCount
+  if (!total) return t('selector_zero_hit')
+  const head = hasTags
+    ? t('selector_hit_count', { count: total })
+    : t('selector_broadcast') + ' ' + total + ' ' + '个引擎'
+  return head + ' · ' + hitCount + ' 在线' + (offCount ? ' · ' + offCount + ' 离线' : '') + t('selector_hit_note')
+})
+const selSummaryStyle = computed(function () {
+  const preview = selectorPreviewData()
+  const hitCount = preview.filter(function (p) { return p.hit }).length
+  const offCount = preview.filter(function (p) { return !p.hit && (p.reason === 'offline' || p.reason === 'stale') }).length
+  return {
+    color: hitCount ? '#15803d' : offCount ? '#b45309' : '#d32f2f',
+  }
+})
+function closeEngineModal() {
+  hideReasonTip()
+  engineModal.open = false
+}
 const engCurIds = ref([])
 const engineDetachHint = ref('')
 // 场景标签缓存（显示名）
@@ -1557,15 +2056,71 @@ function engineBadgeState(engineIds, agentType) {
     return { total: ids.length, offline: 0 }
   }
   const availMap = {}
+  const availUidMap = {}
   ae[agentType].forEach((e) => {
-    if (e.status === 'online' || e.status === 'recently_lost') availMap[e.id] = true
+    if (e.status === 'online' || e.status === 'recently_lost') {
+      availMap[e.id] = true
+      // Issue #1208：uid 形态节点传 uid 字符串进来也要按 engine_uid 匹配（否则 uid 恒判离线）
+      if (e.engine_uid) availUidMap[String(e.engine_uid).toLowerCase()] = true
+    }
   })
-  const offline = ids.filter((id) => !availMap[id]).length
+  const offline = ids.filter(
+    (id) => !(availMap[id] || (typeof id === 'string' && availUidMap[String(id).toLowerCase()]))
+  ).length
   return { total: ids.length, offline }
 }
 function engineBadgeHtml(node) {
+  // ── Issue #1208：selector 标签模式徽章（空的 tags 数组=广播，不落回实例徽章）──
+  const selTags = ((node && node.engine_selector) || {}).tags || []
+  const selModeSaved = !!(node && node.engine_selector && Array.isArray(node.engine_selector.tags))
+  const hasInstances =
+    (((node && node.engine_runtime_uids) || []).length + ((node && node.engine_runtime_ids) || []).length) > 0
+  if (selTags.length || (selModeSaved && !hasInstances)) {
+    const agentType = node.tag || node.id
+    const ae = agentEngines.value || {}
+    // 兼容 map（按角色索引）与数组两种形态（dashboard agent_engines 是 map）
+    const engs = Array.isArray(ae) ? ae : ae[agentType] || []
+    let hit = 0
+    let off = 0
+    let miss = 0
+    if (engs.length) {
+      engSelectorPreview(engs, selTags, agentType).forEach(function (p) {
+        if (p.hit) hit += 1
+        else if (p.reason === 'offline' || p.reason === 'stale') off += 1
+        else miss += 1
+      })
+    }
+    // 后端同源（2026-11-12 用户裁定）：进页面从 /scenes/engine-selector-preview 权威加载，
+    // 本地近似仅首帧兜底（role/capability 真值本地不可知）
+    const key = agentType + '|' + selTags.slice().sort().join(',') + '|' + selHitRepo.value
+    const cached = selHitCache[key]
+    if (cached) {
+      hit = cached.hit
+      off = cached.off
+      miss = cached.miss || miss
+    } else {
+      fetchSelHit(key, agentType, selTags.slice().sort())
+    }
+    const total = hit + off
+    const txt = !selTags.length
+      ? '广播 · ' + total + ' 个引擎 · ' + hit + ' 在线' + (off ? ' · ' + off + ' 离线' : '')
+      : total
+        ? '标签命中 ' + total + ' 个引擎 · ' + hit + ' 在线' + (off ? ' · ' + off + ' 离线' : '')
+        : '标签暂无命中引擎'
+    const labels = selTags.map(engSelectorTagLabel)
+    const tip =
+      (selTags.length ? '' : '广播（未选标签，全部引擎）\n') +
+      '命中 ' + hit + ' 台可承接' + (off ? '，' + off + ' 台离线（恢复后可承接）' : '') +
+      (miss ? '，' + miss + ' 台标签/角色/能力不符' : '') +
+      (labels.length ? '\n标签：' + labels.join('、') : '')
+    const color = hit ? '#15803d' : off ? '#b45309' : '#6b7280'
+    const bg = hit ? '#f0fdf4' : off ? '#fffbeb' : '#f5f5f7'
+    return `<span class="dbv-engbadge" data-selkey="${esc(key)}" style="background:${bg};color:${color}" title="${esc(tip)}">${esc(txt)}</span>`
+  }
   const tag = node.tag || node.id
-  const ids = node.engine_runtime_ids || []
+  // Issue #1208：uid 形态优先（D11 uid 输出后徽章按 uid 匹配），旧数据/uid 缺失回退 ids
+  const uids = node.engine_runtime_uids || []
+  const ids = uids.length ? uids : node.engine_runtime_ids || []
   const st = engineBadgeState(ids, tag)
   if (!st.total) {
     if (tag === 'sre') {
@@ -1782,6 +2337,9 @@ function serializeNodes(nodes) {
       skip: n.skip,
       enabled: n.enabled,
       engine_runtime_ids: n.engine_runtime_ids,
+      // Issue #1208：草稿全量透传三模式字段（uids/selector），引擎选择确认后 F5 不丢
+      engine_runtime_uids: n.engine_runtime_uids || [],
+      engine_selector: n.engine_selector || {},
     }
   })
 }
@@ -1797,6 +2355,8 @@ function applyDraftNodes(draft) {
       en.skill_id = dn.skill_id || 0
       en.skill_display_name = dn.skill_display_name || ''
       en.engine_runtime_ids = dn.engine_runtime_ids || []
+      en.engine_runtime_uids = dn.engine_runtime_uids || []
+      en.engine_selector = dn.engine_selector || {}
     }
   })
   return true
@@ -1837,6 +2397,8 @@ function enterCreateMode() {
     skip: [],
     enabled: true,
     engine_runtime_ids: [],
+    engine_runtime_uids: [],
+    engine_selector: {},
   }))
   createName.value = ''
   createDesc.value = ''
@@ -1892,7 +2454,12 @@ function saveCreateScene() {
   }
   // SRE 必选引擎前端拦截
   const sreNoEngine = editNodes.value.find(
-    (n) => n.id === 'sre' && n.enabled && !(n.engine_runtime_ids || []).length
+    (n) =>
+      n.id === 'sre' &&
+      n.enabled &&
+      !(n.engine_runtime_ids || []).length &&
+      !(n.engine_runtime_uids || []).length &&
+      !((n.engine_selector || {}).tags || []).length
   )
   if (sreNoEngine) {
     app().showToast(t('sre_engine_personal_only'))
@@ -1999,7 +2566,10 @@ function buildNodesPayload(nodes) {
       handoff: i < arr.length - 1 ? 'a2a' : 'complete',
       skip: n.skip || [],
       enabled: true,
-      engine_runtime_ids: n.engine_runtime_ids || [],
+      // uids 与 selector 互斥随 node 全量透传；已绑 ids 且全部有 uid 时按 D11 输出 uids 清 ids
+      engine_runtime_ids: (n.engine_runtime_uids || []).length ? [] : (n.engine_runtime_ids || []),
+      engine_runtime_uids: n.engine_runtime_uids || [],
+      engine_selector: n.engine_selector || {},
     }))
 }
 function collectLinkedRepos() {
@@ -2090,6 +2660,8 @@ function toggleAgent(agentType) {
     node.skill_id = 0
     node.skill_display_name = ''
     node.engine_runtime_ids = []
+    node.engine_runtime_uids = []
+    node.engine_selector = {}
   }
   if (mode.value === 'create') saveCreateDraft()
   else if (flowEditing.value) saveEditDraft(detail.value ? detail.value.id : '')
@@ -2231,21 +2803,64 @@ function onDocClick(e) {
 }
 
 // ═══ 引擎选择弹窗 ═══
+// Issue #1208：卡片徽章命中数后端同源缓存（key=agentType|tags|repo；本地近似首帧兜底）
+const selHitCache = reactive({})
+const selHitInflight = {}
+const selHitRepo = computed(function () {
+  return dashOwner.value && dashName.value ? dashOwner.value + '/' + dashName.value : ''
+})
+function fetchSelHit(key, agentType, tags) {
+  if (!key || selHitInflight[key]) return
+  selHitInflight[key] = true
+  API()
+    .post('/scenes/engine-selector-preview', { repo: selHitRepo.value, agent_type: agentType || '', tags: tags || [] })
+    .then(function (d) {
+      const hit = (d.matched || []).length
+      let off = 0
+      let miss = 0
+      ;(d.dropped || []).forEach(function (x) {
+        const r = (x && x.reason) || ''
+        if (r === 'offline' || r === 'stale') off += 1
+        else miss += 1
+      })
+      selHitCache[key] = { hit: hit, off: off, miss: miss }
+      delete selHitInflight[key]
+    })
+    .catch(function () {
+      delete selHitInflight[key]
+    })
+}
 function openEngineModal(agentType) {
   engineModal.open = true
   engineModal.agentType = agentType
   engineModal.q = ''
   engineModal.filterType = ''
   engineModal.filterScope = ''
+  engineModal.serverPreview = null
+  engineModal.collapse = { hit: false, offline: false, miss: false }
   engineDetachHint.value = ''
   const node = editNodes.value.find((n) => n.id === agentType)
+  // Issue #1208：打开按已配形态初始化模式——已配 selector → 标签；已绑实例（ids/uids）→ 实例；全新 → 标签
+  const selTags = ((node && node.engine_selector) || {}).tags || []
+  const boundUids = (node && node.engine_runtime_uids) || []
+  const hasBinding = ((node && node.engine_runtime_ids) || []).length || boundUids.length
+  engineModal.mode = selTags.length ? 'tag' : hasBinding ? 'engine' : 'tag'
+  engineModal.selTags = selTags.slice()
   const all = (agentEngines.value[agentType] || []).slice()
   // SRE 专属：只显示个人+仓库
-  const visible =
-    agentType === 'sre' ? all.filter((e) => e.scope === 'user' || e.scope === 'repo') : all
+  const visible = agentType === 'sre' ? all.filter((e) => e.scope === 'user' || e.scope === 'repo') : all
   const visibleIds = new Set(visible.map((e) => e.id))
   // 打开即剔除不可见引擎勾选
   engCurIds.value = ((node && node.engine_runtime_ids) || []).filter((id) => visibleIds.has(id))
+  // uid 形态回显：uids 非空 → 按引擎 uid 预勾（D11 输出 uid，前端无感）
+  if (boundUids.length) {
+    const uidSet = new Set(boundUids.map((u) => String(u || '').toLowerCase()))
+    visible.forEach(function (e) {
+      if (e.engine_uid && uidSet.has(String(e.engine_uid).toLowerCase()) && !engCurIds.value.includes(e.id)) {
+        engCurIds.value.push(e.id)
+      }
+    })
+  }
   // 异步拉 detached 引擎提示
   if (dashOwner.value && dashName.value) {
     API()
@@ -2357,8 +2972,29 @@ function engStatusLabel(st) {
 }
 function confirmEnginePick() {
   const node = editNodes.value.find((n) => n.id === engineModal.agentType)
-  if (node) node.engine_runtime_ids = engCurIds.value.slice()
-  engineModal.open = false
+  if (node) {
+    // Issue #1208：两模式确认——标签模式写 engine_selector（实例两池清空）；
+    // 实例模式清 selector，选中引擎全部有 uid → 按 D11 提交 uids 清 ids
+    // （旧数据/uid 缺失回退 ids）；uid 回显经预勾后自然输出 uid。
+    if (engineModal.mode === 'tag') {
+      node.engine_selector = { tags: engineModal.selTags.slice().sort() }
+      node.engine_runtime_ids = []
+      node.engine_runtime_uids = []
+    } else {
+      node.engine_selector = {}
+      const visible = engModalVisible.value
+      const selEngines = visible.filter((e) => engCurIds.value.indexOf(e.id) >= 0)
+      const selUids = selEngines.map((e) => String(e.engine_uid || ''))
+      if (selEngines.length && selUids.every((u) => u)) {
+        node.engine_runtime_uids = selUids.map((u) => u.toLowerCase())
+        node.engine_runtime_ids = []
+      } else {
+        node.engine_runtime_ids = engCurIds.value.slice()
+        node.engine_runtime_uids = []
+      }
+    }
+  }
+  closeEngineModal()
   // Issue #407 R1: 引擎确认后同步保存草稿
   if (mode.value === 'create') saveCreateDraft()
   else if (flowEditing.value) saveEditDraft(detail.value ? detail.value.id : '')
@@ -2629,6 +3265,8 @@ function buildEditNodes(originalNodes, ags) {
         skip: node.skip || [],
         enabled: node.enabled !== false,
         engine_runtime_ids: node.engine_runtime_ids || a.engine_runtime_ids || [],
+        engine_runtime_uids: node.engine_runtime_uids || a.engine_runtime_uids || [],
+        engine_selector: node.engine_selector || a.engine_selector || {},
       }
     }
     return {
@@ -2643,6 +3281,8 @@ function buildEditNodes(originalNodes, ags) {
       skip: [],
       enabled: false,
       engine_runtime_ids: [],
+      engine_runtime_uids: [],
+      engine_selector: {},
     }
   })
 }
@@ -2660,7 +3300,13 @@ function saveSceneEdit() {
     return
   }
   const sreNoEngine = editNodes.value.find(function (n) {
-    return n.id === 'sre' && n.enabled && !(n.engine_runtime_ids || []).length
+    return (
+      n.id === 'sre' &&
+      n.enabled &&
+      !(n.engine_runtime_ids || []).length &&
+      !(n.engine_runtime_uids || []).length &&
+      !((n.engine_selector || {}).tags || []).length
+    )
   })
   if (sreNoEngine) {
     app().showToast(t('sre_engine_personal_only'))
@@ -4169,13 +4815,271 @@ onBeforeUnmount(function () {
   align-items: center;
   justify-content: center;
 }
+
+/* ── Issue #1208 selector 两模式弹窗 ── */
+.dbv-engmodes {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  flex-shrink: 0;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  background: var(--bg, #f5f5f7);
+  border-radius: 12px;
+}
+.dbv-engmodes label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--t1, #1d1d1f);
+}
+.dbv-engmodes label.on {
+  font-weight: 600;
+  color: var(--a, #0071e3);
+}
+.dbv-engmodes input {
+  accent-color: var(--a, #0071e3);
+}
+.dbv-selpanel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.dbv-selhint {
+  font-size: 11.5px;
+  color: var(--t3, #86868b);
+  line-height: 1.6;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.dbv-selsummary {
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.dbv-selgroup {
+  margin-bottom: 8px;
+}
+.dbv-selgroup-t {
+  font-size: 12px;
+  color: var(--t3, #86868b);
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.dbv-selgroup-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dbv-selchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  cursor: pointer;
+  border: 1px solid #e8e8ed;
+  color: var(--t1, #1d1d1f);
+  background: #f5f5f7;
+  font-weight: 500;
+}
+.dbv-selchip.on {
+  border-color: #5e5ce6;
+  color: #fff;
+  background: #5e5ce6;
+}
+.dbv-selchip input {
+  display: none;
+}
+.dbv-selclearrow {
+  display: flex;
+  justify-content: flex-end;
+  margin: 2px 0 6px;
+}
+.dbv-selclear {
+  cursor: pointer;
+  font-size: 11.5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid #e8e8ed;
+  color: var(--t3, #86868b);
+  background: #f5f5f7;
+  font-weight: 500;
+}
+.dbv-selclear:hover {
+  color: #d32f2f;
+}
+.dbv-selprevtitle {
+  margin-top: 8px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--t3, #86868b);
+  letter-spacing: 0.5px;
+}
+.dbv-selprevempty {
+  padding: 12px 0;
+  text-align: center;
+  color: var(--t3, #86868b);
+  font-size: 12px;
+}
+.dbv-secwrap {
+  border: 1px solid #e8e8ed;
+  border-radius: 12px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+.dbv-sechead2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  padding: 8px 12px;
+}
+.dbv-secarrow {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  flex-shrink: 0;
+  color: var(--t1, #1d1d1f);
+  font-weight: 700;
+}
+.dbv-sectitle {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.dbv-seccollapsed {
+  font-size: 11.5px;
+  color: var(--t3, #86868b);
+}
+.dbv-seccount {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--t3, #86868b);
+}
+.dbv-secbody {
+  padding: 2px 10px 8px;
+}
+.dbv-secgroupt {
+  margin-top: 12px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+.dbv-prevrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: #f5f5f7;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  margin-bottom: 4px;
+}
+.dbv-prevrow.off {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+}
+.dbv-prevrow.hit .dbv-prevname {
+  color: var(--t1, #1d1d1f);
+}
+.dbv-prevbody {
+  flex: 1;
+  min-width: 0;
+}
+.dbv-prevname {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--t3, #86868b);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.dbv-prevrow.off .dbv-prevname,
+.dbv-prevrow.miss .dbv-prevname {
+  color: var(--t3, #86868b);
+}
+.dbv-prevalias {
+  font-size: 11px;
+  color: var(--t3, #86868b);
+  font-weight: 400;
+  margin-left: 4px;
+}
+.dbv-prevmeta {
+  font-size: 12px;
+  color: var(--t3, #86868b);
+  margin-top: 3px;
+}
+.dbv-prevstatus {
+  font-size: 12px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.dbv-prevmark {
+  font-size: 11.5px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.dbv-prevmark.hit {
+  color: #34c759;
+}
+.dbv-prevmark.off {
+  color: #b45309;
+}
+.dbv-prevmarkoff {
+  font-size: 11.5px;
+  color: #b45309;
+  flex-shrink: 0;
+}
+.dbv-prevhelp {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1px solid #c7c7cc;
+  color: var(--t3, #86868b);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: help;
+  flex-shrink: 0;
+}
+/* 未命中原因自绘浮层（跟随鼠标、越界内收、可换行） */
+.dbv-reasontip {
+  position: fixed;
+  z-index: 10050;
+  max-width: 320px;
+  white-space: normal;
+  word-break: break-word;
+  background: #1d1d1f;
+  color: #fff;
+  font-size: 11.5px;
+  line-height: 1.65;
+  padding: 8px 10px;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
 .dbv-engmodal {
   background: var(--glass-hero-strong);
   backdrop-filter: blur(20px);
   border-radius: 18px;
   padding: 28px;
-  width: 460px;
-  height: 600px;
+  /* Issue #1208 用户口径 2026-11-09：两模式同尺寸（640×min(90vh,760)），切换只换内容不跳尺寸 */
+  width: min(640px, calc(100vw - 32px));
+  height: min(90vh, 760px);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
   display: flex;
   flex-direction: column;

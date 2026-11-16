@@ -134,7 +134,10 @@
     "user_vm_repos": "mgmt",
     "user_vms": "mgmt",
     "verification_codes": "mgmt",
-    "vod_conversations": "runtime"
+    "vod_conversations": "runtime",
+    "engine_template_binding": "mgmt",
+    "engine_sandbox_toggle": "mgmt",
+    "repo_llm_credentials": "mgmt"
   },
   "views": {
     "admin_accounts": [
@@ -645,6 +648,18 @@
     "vod_conversations": [
       "insight",
       "mgmt"
+    ],
+    "engine_template_binding": [
+      "insight",
+      "runtime"
+    ],
+    "engine_sandbox_toggle": [
+      "insight",
+      "runtime"
+    ],
+    "repo_llm_credentials": [
+      "insight",
+      "runtime"
     ]
   },
   "_not_in_current_schema": {

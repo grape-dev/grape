@@ -31,7 +31,8 @@
     "skill_market": "Skill Market",
     "organizations": "Organizations",
     "autopilot": "Automation",
-    "obs_cockpit": "Operations Cockpit"
+    "obs_cockpit": "Operations Cockpit",
+    "sandbox": "Cloud Sandbox"
   },
   "sidebar": {
     "workspace": "Workspace",

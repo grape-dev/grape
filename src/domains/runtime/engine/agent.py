@@ -245,7 +245,11 @@ _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎
 #   - hermes_acp.py     _SILENT_TIMEOUT 读 HERMES_SILENT_TIMEOUT
 #   - hwcloud_acp.py    _SILENT_TIMEOUT 读 RUNTIME_TOOL_SILENT_TIMEOUT（已支持）
 # coding/QA 长任务（编译/构建/PR 审查）常长时间无流式输出，300s 会在正常进行中误杀。
-_AGENT_SILENT_TIMEOUTS = {"coding": 1200, "qa": 1200}
+_AGENT_SILENT_TIMEOUTS = {"coding": 1200, "qa": 1200, "vod": 1200, "issue": 1200}
+# [看门狗 2026-11-12] vod/issue 加入放宽名单: 长工作流(2.5h/30+轮 LLM)每轮赌一次
+# "300s 内吐首 token", LLM 网关偶发停摆一次即全盘作废(实测 t_06416195392a:
+# API call #30 latency=3.8s 正常, 下一轮 OpenAI client created 后 300s 零事件被杀).
+# 与 coding/qa 同口径 1200s. 注意: 该 env 此前在 ACP 会话路径根本没被消费(见 executor.py 修复).
 _DEFAULT_SILENT_WINDOW = 300
 
 _worker_url_probe_cache: dict = {}  # {(rts, task_server_url): (ts, reachable)}
@@ -1392,6 +1396,21 @@ def _usage_retry_engine(engine_name: str | None) -> bool:
     from src.domains.runtime.engine.instances import usage_retry_engine
 
     return usage_retry_engine(engine_name)
+
+
+def backend_for_engine(engine_name: str | None = "") -> str:
+    """[沙箱迁移] 引擎实例名 → backend 名（注册驱动版，24266092b 引擎注册体系统一，i7 移植）。
+
+    从 _BACKENDS key 前缀匹配，不硬编码引擎名。按 key 长度降序匹配。
+    匹配不到时返回空字符串（不 fallback 到 opencode）。
+    """
+    name = (engine_name or "").lower()
+    from src.domains.runtime.agents.executor import _BACKENDS
+    for backend_name in sorted(_BACKENDS, key=len, reverse=True):
+        if name.startswith(backend_name):
+            return backend_name
+    log.error(f"backend_for_engine: no match for '{engine_name}', registered={list(_BACKENDS.keys())}")
+    return ""
 
 
 def _scan_local_skills() -> list[dict]:
@@ -3262,8 +3281,29 @@ async def _reregister(client, prev_installed, device_name, cli_version: str = ""
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
-        # C1：重新发现本机引擎（启动后新安装的引擎在此被拾起）
-        installed = [r for r in _discover_local_runtimes() if r.get("installed")]
+        # [云模式重注册修复 2026-11-11] prev_installed 含云引擎 → 重锚原云列表，
+        # 不做本地重发现。根因（服务端重启→云引擎孤儿态，.17 S2 cred15 实测）：
+        # _reregister 原逻辑无条件本地重发现（Issue #471 C1，为本机 worker 设计），
+        # cloud_worker 复用 _run_loop 时心跳连败≥3 / 5min 定期重注册会把云引擎
+        # 心跳列表 [22,25] 整体换成本机引擎——后果三连：
+        # ① 云引擎被挤出心跳列表 → 服务端 100s reap 永久 offline；
+        # ② 本机引擎被误注到沙箱凭据下（cred15 污染行 20/21/29，与 cred14 正身行并存）；
+        # ③ 模板 hash 未变 → _refresh_templates 不再重注册 → 非重启 worker 不可恢复。
+        # 云条目按 name 锚定注册（UPDATE 分支）拿回原 rid，心跳即刻恢复。
+        _cloud_prev = [r for r in (prev_installed or [])
+                       if (r.get("runtime_type") or "") == "cloud"]
+        if _cloud_prev:
+            installed = list(prev_installed)
+        elif (os.environ.get("CLOUD_WORKER_PROVIDER", "") or "").strip():
+            # [云模式锚定 2026-11-16] cloud_worker 的 runtime.env 恒有 CLOUD_WORKER_PROVIDER——
+            # 模板列表是云 worker 的唯一引擎源，不做本地重发现。fresh 实例实锤（aw11 E-02）：
+            # boot 时服务端模板为空（探测批 ~18min 后才上报），首个 5min 定期重注册的
+            # _cloud_prev 为空 → 走 C1 本地发现 → 本机引擎误注到沙箱凭据下 + 顶掉
+            # runtime_ids，且模板落地后不可自愈（云条目永远进不了 prev_installed）。
+            installed = list(prev_installed or [])
+        else:
+            # C1：重新发现本机引擎（启动后新安装的引擎在此被拾起）
+            installed = [r for r in _discover_local_runtimes() if r.get("installed")]
         # S3：重扫瞬时为空（快照曾有引擎）→ 沿用快照不注册（异常扫描自愈交给下轮）
         if not installed and prev_installed:
             log.warning("re-scan found no engines while snapshot had "
@@ -3362,7 +3402,7 @@ async def _presence_heartbeat_loop(client, runtime_ids, interval: float) -> None
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
                     engine_by_rid: dict | None = None, installed=None, device_name="",
                     _test_execute=None, _test_active=None, _test_active_tasks=None,
-                    _test_active_task_objs=None):
+                    _test_active_task_objs=None, _execute_fn=None):
     """主循环：claim → 执行 → 回报，含心跳 + 自动重连自修复。
 
     自修复机制（三层防护，见 worker 自修复重连设计）：
@@ -3569,6 +3609,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 try:
                     if _test_execute is not None:
                         await _test_execute(client, t, e)
+                    elif _execute_fn is not None:
+                        # [沙箱迁移] cloud_worker 注入的云沙箱执行函数（与 _test_execute 同位）
+                        _result = await _execute_fn(client, t, e)
                     else:
                         # timeout 只保护流式执行阶段，complete/fail 在 timeout 外处理。
                         # Issue #516 M2：超时失败有限次自动重试——每次超时 kill 引擎 →
@@ -3622,6 +3665,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 # 在 timeout 外处理 complete/fail（网络重试不触发 timeout 覆盖完成状态）
                 # Step 4：完成/失败先入补报队列（ms master 停机窗口不丢），ack 后出队
                 _run_token = (t or {}).get("started_at") or ""
+                # Issue #1011：上报 v2——任务行 engine_uid 快照随上报（v2-first/v1-fallback）
+                _task_engine_uid = str((t or {}).get("engine_uid") or "").strip().lower()
 
                 async def _do_report(kind: str, text: str, exit_code: int, **kw):
                     q = _report_queue()
@@ -3629,12 +3674,15 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                            "exit_code": exit_code, "run_token": _run_token,
                            "session_id": kw.get("session_id", ""),
                            "work_dir": kw.get("work_dir", ""),
-                           "engine": kw.get("engine", e)})
+                           "engine": kw.get("engine", e),
+                           "engine_uid": _task_engine_uid})
                     try:
                         if kind == "failed":
-                            resp = await client.fail(_tid, text, exit_code=exit_code, run_token=_run_token)
+                            resp = await client.fail(_tid, text, exit_code=exit_code, run_token=_run_token,
+                                                     engine_uid=_task_engine_uid)
                         else:
-                            resp = await client.complete(_tid, text, exit_code, run_token=_run_token, **kw)
+                            resp = await client.complete(_tid, text, exit_code, run_token=_run_token,
+                                                         engine_uid=_task_engine_uid, **kw)
                     except Exception:
                         return  # 保留补报队列，重连后由 replay 重放
                     if resp is not None:
@@ -3944,6 +3992,21 @@ def _read_local_worker_version() -> str:
     （2026-10-21 恢复：fbc499c4a 误删，67b11da14 为 2026-10-18 worker 升级死循环事故加的防线。）
     """
     from src.domains.runtime.engine.os_adapter import is_windows, version_file
+    # [凭据目录 i7 漏迁移恢复] 沙箱 worker 版本戳在凭据状态目录 etc/ 下
+    # (/opt/grape-cw/<cred_uid8>/etc/worker.version)——systemd WorkingDirectory=该目录,
+    # 按 cwd 优先读; 读不到(普通 worker/裸跑)回落原路径。漏改后果: local 版本
+    # 读到 /etc/grape/worker.version 的陈旧值 → 误判 mismatch → 无意义升级
+    # （2026-11-10 .17 双 worker 实证：新实例读到二期旧戳 → 50s 一轮升级重启,
+    #   60s 模板刷新环永远跑不完, 引擎永不注册——i7 agent.py:3257 同款修复回迁）
+    if os.environ.get("CLOUD_WORKER_CREDENTIAL_UID", "").strip():
+        _inst_vp = os.path.join(os.getcwd(), "etc", "worker.version")
+        try:
+            with open(_inst_vp, "r", encoding="utf-8") as f:
+                got = f.read().strip()
+            if got:
+                return got
+        except Exception:
+            pass
     if is_windows():
         vp = version_file()
     elif os.environ.get("RUNTIME_ROOT_MODE") == "1" or (hasattr(os, "geteuid") and os.geteuid() == 0):
@@ -4058,10 +4121,12 @@ async def _perform_upgrade(server: str, token: str, device_name: str = "") -> bo
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=_upgrade_env
             )
         else:
-            log.info(f"Auto-upgrade: running install-worker.sh (dir={_install_dir})")
+            # [沙箱迁移/spec §4.2] install-worker.sh 已删 --dir（安装目录由 whoami 派生，
+            # 重复安装自认家门）；这里不再传 --dir，防升级命令 60s 循环报错（.17 实测）
+            log.info(f"Auto-upgrade: running install-worker.sh (whoami-derived dir)")
             result = await asyncio.to_thread(
                 subprocess.run,
-                ["bash", tmp_script, "--server", server, "--dir", _install_dir],
+                ["bash", tmp_script, "--server", server],
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=_upgrade_env
             )
 

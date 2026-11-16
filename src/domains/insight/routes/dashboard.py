@@ -19,6 +19,45 @@ from src.kernel.config import log
 from src.domains.runtime import public as _rt_dash
 from src.domains.mgmt import public as _mgmt_dash
 
+_LOCAL_HOSTNAME_CACHE = {"v": None}
+
+
+def _parse_role_tags(raw: str) -> list:
+    """把 agent_runtimes.role_tags（JSON 数组字符串）解析成 list。
+
+    #1208 前端角色分层/建议值消费；历史脏值（非 JSON）回退逗号分隔。
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    try:
+        import json as _json
+        v = _json.loads(raw)
+        if isinstance(v, list):
+            return [str(t).strip() for t in v if str(t).strip()]
+        if isinstance(v, str):
+            raw = v
+    except Exception:
+        pass
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _local_hostname() -> str:
+    """本机 hostname（进程内缓存）。
+
+    用途：本机直连引擎（credential_id=0）无凭据 device_name，展示名用 host_name 兜底；
+    host_name 为空的历史行回落本机 hostname——与 settings 引擎列表（_hn = host_name or
+    本机hostname）同口径，保证 dashboard 引擎选择弹窗与引擎页面展示名逐字对齐。
+    """
+    if _LOCAL_HOSTNAME_CACHE["v"] is None:
+        try:
+            import socket as _socket
+            _LOCAL_HOSTNAME_CACHE["v"] = _socket.gethostname() or ""
+        except Exception:
+            _LOCAL_HOSTNAME_CACHE["v"] = ""
+    return _LOCAL_HOSTNAME_CACHE["v"]
+
+
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 def _stuck_minutes() -> int:
@@ -1607,6 +1646,11 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             if _filter_org_id:
                 _deduped = [e for e in _deduped if (e.get("org_id") or 0) == _filter_org_id]
             agent_engines[atype] = [{"id": e["runtime_id"],
+                                     # Issue #1208：本机直连无凭据 device_name，展示名用 host_name 兜底（与设置页同口径）
+                                     "name": instance_name(e["name"],
+                                                          (e.get("device_name") or "")
+                                                          or ((e.get("host_name") or _local_hostname()) if (e.get("credential_id") or 0) == 0 else ""),
+                                                          e.get("credential_id", 0)),
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
                                      # Issue #1310（对齐 origin/weekly-10）：前端 engineDisplayName() 依赖
                                      # engine_name（引擎类型名）+ worker_name（凭据名；本机直连回退 host_name）。
@@ -1614,6 +1658,9 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                                      "engine_name": to_display(e.get("name", "")),
                                      "worker_name": ((e.get("host_name") or "") if (e.get("credential_id") or 0) == 0
                                                      else _cred_name(e.get("credential_id") or 0)),
+                                     "engine_uid": e.get("engine_uid") or "",
+                                     "engine_type": e.get("name") or "",
+                                     "role_tags": _parse_role_tags(e.get("role_tags_raw") or ""),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
                                      # Issue #592（对齐 origin/weekly-10 dashboard.py）：本机直连（credential_id=0）
                                      # 不参与 worker 15s 心跳，last_seen_at 仅由 10min 本机探活循环刷新——
@@ -1626,7 +1673,10 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                                      "scene_tags": e.get("scene_tags", ["default"]),
                                      "scope": e.get("scope", "global"),
                                      "scope_label": _scope_labels.get(e.get("scope", "global"), ""),
-                                     "alias": e.get("alias", "")}
+                                     "alias": e.get("alias", ""),
+                                     # [沙箱迁移 i7] 云引擎四段名 provider 段可辨接入；普通引擎为空
+                                     "sandbox_provider": ((e.get("name") or "").split(":")[2]
+                                                          if (e.get("name") or "").count(":") >= 3 else "")}
                                     for e in _deduped]
     except Exception as e:
         log.warning(f"dashboard agent_engines failed: {e}")

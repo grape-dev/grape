@@ -22,10 +22,18 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 AGENT_TYPES = ["vod", "issue", "coding", "qa", "sre"]
 
 def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[int], user_id: int = 0):
-    """更新当前场景 node 的 engine_runtime_ids。
+    """更新当前场景 node 的引擎绑定（Issue #1208 D11：一律写 uids 清 ids）。
 
-    查找仓库当前应用的场景（managed_repos.dev_scene），更新对应 node 的 engine_runtime_ids。
+    查找仓库当前应用的场景（managed_repos.dev_scene），更新对应 node：
+    - engine_runtime_ids（数字）→ 服务端透明升格解析 engine_uid → 写
+      engine_runtime_uids + 清空 engine_runtime_ids + 清空 engine_selector
+      （三模式互斥，保存引擎清单即离开标签模式）；
+    - uid 解析失败（悬空/未迁移）→ 降级保留 ids 形态（不猜不静默，detach 链负责清理）。
     方案 B：场景只与仓库关联，无 official/user fork 逻辑。
+
+    Issue #1208 v2 审查整改：返回 ("", False)（场景不存在/未更新）或
+    (scene_id, had_selector)——had_selector=True 表示本次保存覆盖了原标签(selector)
+    模式（显式模式切换），调用方须在响应带 cleared_selector 警告。
     """
     from src.kernel.session_manager import db, db_lock
     from src.api.pipeline_config import _query_scene_by_id, update_custom_scene
@@ -41,22 +49,40 @@ def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[in
     except Exception:
         pass
     if not scene_id:
-        return
+        return "", False
     # 查场景
     scene_info = _query_scene_by_id(scene_id, repo_key=repo_key)
     if not scene_info:
-        return
-    # 更新 node 的 engine_runtime_ids
+        return "", False
+    # 数字 id → engine_uid（透明升格，D11；悬空项置 None，全部可解析才升格）
+    _uids = []
+    try:
+        from src.domains.mgmt.user.db import get_engine_uid_by_runtime_id
+        _uids = [get_engine_uid_by_runtime_id(int(x)) for x in (engine_ids or [])]
+    except (TypeError, ValueError):
+        _uids = []
+    _all_resolved = bool(engine_ids) and all(_uids)
+    # 更新 node 的引擎绑定
     nodes = scene_info.get("nodes", [])
     updated = False
+    had_selector = False
     for node in nodes:
         if (node.get("tag") or node.get("id", "")) == agent_type:
-            node["engine_runtime_ids"] = engine_ids
+            _sel = node.get("engine_selector") or {}
+            had_selector = bool(isinstance(_sel, dict) and _sel.get("tags"))
+            if _all_resolved:
+                node["engine_runtime_uids"] = [str(u).strip().lower() for u in _uids if u]
+                node["engine_runtime_ids"] = []
+            else:
+                node["engine_runtime_ids"] = list(engine_ids or [])
+                node["engine_runtime_uids"] = []
+            node["engine_selector"] = {}
             updated = True
             break
     if updated:
         update_custom_scene(
             scene_id=scene_id, repo_key=repo_key, nodes=nodes)
+    return scene_id, had_selector
 
 async def _remove_vod_bot(app_id: str) -> None:
     """从 BotManager 移除 VOD bot（仅在该 app_id 已释放、无其他仓库引用时调用）。"""
@@ -626,6 +652,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         # 旧 IM（BotManager）已下线：解绑后由新引擎下一轮扫描（≤30s）让渡，无需手工摘 bot
         return {"message": "Agent 配置已更新", "session_id": session_id}
 
+    # Issue #1208 v2 审查整改：engine_selector 仅在显式模式切换时清除（见引擎配置分支）
+    _cleared_selector = False
     # ---- 引擎配置：写入场景 node 的 engine_runtime_ids ----
     # backends 显式提供 → 解析为 runtime_id 列表，更新当前场景 node；
     # 无场景则为空（全广播/兜底）。
@@ -634,7 +662,17 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         from src.domains.mgmt.user.db import get_runtime_id_by_name
         rids = []
         for bn in body.backends:
-            # 优先按数字 ID 解析（前端传 runtime_id）；非数字才按名字解析
+            # Issue #646：优先按 uid 字符串解析（服务端校验 fail-fast）；
+            # 其次按数字 ID 解析（前端传 runtime_id）；非数字才按名字解析
+            from src.api.engine_uid import is_uid_str
+            if isinstance(bn, str) and is_uid_str(bn.strip()):
+                from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
+                _rid = get_runtime_id_by_engine_uid(bn.strip().lower())
+                if not _rid:
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400, "message": f"引擎 uid 无效: {bn.strip()}（请从引擎详情面板复制有效 uid）"})
+                rids.append(_rid)
+                continue
             _rid = None
             try:
                 _rid = int(bn)
@@ -659,9 +697,40 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             if not _rid:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"未知引擎: {bn}"})
             rids.append(_rid)
+        # Issue #1208 v2 审查整改：engine_selector 只允许显式模式切换清除——
+        # 空清单保存（backends=[]）且节点当前处于标签(selector)模式 → 拒绝 400
+        # （避免把 selector 模式静默清成全广播）；非空清单保存 = 显式离开标签模式，
+        # 清空合法但响应必须带 cleared_selector 警告。
+        if not rids:
+            try:
+                from src.api.pipeline_config import get_pipeline_config
+                _dev_scene_row = None
+                with db_lock:
+                    _c1 = db.cursor()
+                    _c1.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+                    _dev_scene_row = _c1.fetchone()
+                _ds = (_dev_scene_row[0] if _dev_scene_row else "") or ""
+                if _ds:
+                    _pc = get_pipeline_config(_ds, repo_key=repo_key)
+                    if _pc and not _pc.get("fallback"):
+                        for _n in _pc.get("nodes") or []:
+                            if (_n.get("tag") or _n.get("id", "")) == name:
+                                _sv = _n.get("engine_selector") or {}
+                                if isinstance(_sv, dict) and _sv.get("tags"):
+                                    raise HTTPException(status_code=400, detail={
+                                        "code": 400, "message": (
+                                            "该 Agent 当前为标签(selector)模式，空引擎清单保存会静默离开标签模式"
+                                            "（变为全广播）——请改为显式选择引擎清单，或在场景编辑中调整/清除标签后重试"
+                                            "（Issue #1208）")})
+                                break
+            except HTTPException:
+                raise
+            except Exception as _pre_e:
+                log.warning(f"Agent engine config: selector mode precheck failed: {_pre_e}")
         # 更新场景 node 的 engine_runtime_ids
         try:
-            _update_scene_engine_ids(repo_key, name, rids, user.get("id", 0))
+            _, _had_sel = _update_scene_engine_ids(repo_key, name, rids, user.get("id", 0))
+            _cleared_selector = bool(_had_sel)
         except Exception as e:
             log.warning(f"Agent engine config: update scene node failed: {e}")
         # 引擎绑定真实性同步 §4.3：场景侧重绑 → 该 (场景, 节点) 的解绑审计标记 rebound，
@@ -810,6 +879,12 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         except Exception as e:
             log.warning(f"VOD IM: sync grape_t_channel_installation failed: {e}")
 
+    # Issue #1208 v2 审查整改：显式模式切换（保存引擎清单覆盖标签模式）→ 响应带警告
+    if _cleared_selector:
+        return {"message": (
+                    "Agent 配置已更新（原标签(selector)模式已被引擎清单保存覆盖，"
+                    "engine_selector 已清空——如需标签模式请在场景编辑中重新配置标签，Issue #1208）"),
+                "session_id": session_id, "cleared_selector": True}
     return {"message": "Agent 配置已更新", "session_id": session_id}
 
 def _active_repo_installation(repo_key: str) -> dict:

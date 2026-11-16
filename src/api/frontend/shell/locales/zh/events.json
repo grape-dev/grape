@@ -120,5 +120,11 @@
   "fail_collapse": "收起",
   "diag_target": "目标阶段",
   "diag_phase": "失败环节",
-  "diag_ref_seq": "引用 Seq"
+  "diag_ref_seq": "引用 Seq",
+  "status_task_completed": "任务已完成",
+  "status_task_failed": "任务已失败",
+  "status_task_cancelled": "任务已取消",
+  "status_task_timeout": "任务已超时",
+  "status_task_queued": "任务排队中",
+  "status_task_dispatched": "任务已派发"
 }

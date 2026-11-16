@@ -1997,11 +1997,11 @@ _ANY_QUERIES: dict[str, str] = {
         "JOIN autopilot_tasks t ON s.task_id=t.id WHERE s.task_id=?"),
     "autopilot_tasks_enabled_full": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch "
+        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
         "FROM autopilot_tasks WHERE enabled=1"),
     "autopilot_task_full_row": (
         "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch "
+        "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch, engine_runtime_uids "
         "FROM autopilot_tasks WHERE id=?"),
     "autopilot_task_last_run": "SELECT last_run_at FROM autopilot_tasks WHERE id=?",
     "autopilot_run_info_set": (

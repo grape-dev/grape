@@ -1,3 +1,12 @@
+// inject view css + bridge tokens + shared AG css (legacy shell has no new-engine tokens)
+;(function () {
+  ;['bridge.css', 'ag-ui.css', 'viewcss/event-view.css'].forEach(function (f) {
+    var link = document.createElement('link')
+    link.rel = 'stylesheet'
+    link.href = '/static-vue/assets/' + f + '?v=58'
+    document.head.appendChild(link)
+  })
+})()
 import { createApp } from 'vue'
 import EventView from '../EventView.vue'
 

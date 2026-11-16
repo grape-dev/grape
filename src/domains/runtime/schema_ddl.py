@@ -129,6 +129,8 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     host_name VARCHAR(191) DEFAULT '',   -- 本机直连引擎归属主控机 hostname（credential_id=0 时区分多台主控）
     detached_from_scenes_at TEXT DEFAULT '',  -- 引擎离线超阈值被系统从场景绑定移除的时间（空=未处理，引擎绑定真实性同步方案）
     role_tags TEXT DEFAULT '',           -- Issue #658：引擎角色标签（JSON 数组，如 ["coding","issue"]；空=按引擎类型默认映射兜底）
+    engine_uid VARCHAR(36) DEFAULT NULL,        -- Issue #646: 稳定业务键（UUIDv5 自然键派生，UNIQUE 索引兜底），自增 id 保留兼容
+    credential_uid VARCHAR(36) DEFAULT NULL,    -- Issue #646: 引用 runtime_credentials.credential_uid（自增 credential_id 保留兼容）
     model_name TEXT DEFAULT '',          -- Issue #865：配置模型（worker 注册上报的本机配置模型名）
     model_source TEXT DEFAULT '',        -- Issue #865：配置模型来源（worker_report=worker 上报 / local_config=服务端本机解析）
     model_reported_at TEXT DEFAULT '',   -- Issue #865：配置模型上报时间（UTC ISO）
@@ -256,6 +258,10 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     project_info_file_urls TEXT DEFAULT '',       -- project-info 文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
     knowledge_file_urls    TEXT DEFAULT '',       -- 知识文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
     pool_engine_ids    TEXT DEFAULT '',           -- 限定广播引擎列表（JSON 数组如[76,77]，空=全量广播）
+    pool_engine_uids   TEXT DEFAULT '',           -- Issue #646: pool_engine_ids 的 uid 语义镜像（JSON 数组，双读期双写）
+    pool_selector      TEXT,                      -- Issue #1208: selector 标签池（JSON {"tags":[...]}，与两池列三列语义互斥；TEXT NULL 无 DEFAULT，#627 MySQL 教训）
+    engine_uid         VARCHAR(36) DEFAULT NULL,  -- Issue #646: runtime_id 的 uid 引用（孤儿/历史置 NULL）
+    engine_name_snapshot TEXT DEFAULT '',         -- Issue #646: 引擎展示名快照（引擎删除后历史可读）
     pool_engine_source TEXT DEFAULT '',           -- pool_engine_ids 来源：scene=用户场景绑定 / auto=自动选择（降级判别，local-claimer 设计）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/pending_self_report/completed/failed/timeout_failed/cancelled（Issue #537 新增 pending_self_report 中间态 + timeout_failed 终态）
     exit_code         INTEGER DEFAULT NULL,

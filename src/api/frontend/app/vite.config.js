@@ -52,6 +52,7 @@ export default defineConfig({
           'knowledge-view': /^knowledge-[vV]iew-.*\.css$/,
           'feedback-dialog': /^feedback-[dD]ialog-.*\.css$/,
           'admin-view': /^admin-[vV]iew-.*\.css$/,
+          'sandbox-view': /^sandbox-[vV]iew-.*\.css$/,
           }
         for (const [name, re] of Object.entries(viewCssMap)) {
           const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
@@ -142,6 +143,7 @@ export default defineConfig({
         'knowledge-view': fileURLToPath(new URL('./src/views/entries/knowledge-view.js', import.meta.url)),
         'feedback-dialog': fileURLToPath(new URL('./src/views/entries/feedback-dialog.js', import.meta.url)),
         'admin-view': fileURLToPath(new URL('./src/views/entries/admin-view.js', import.meta.url)),
+        'sandbox-view': fileURLToPath(new URL('./src/views/entries/sandbox-view.js', import.meta.url)),
       },
       output: {
         entryFileNames: (chunkInfo) =>

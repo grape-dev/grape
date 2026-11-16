@@ -31,7 +31,8 @@
     "skill_market": "技能市场",
     "organizations": "组织管理",
     "autopilot": "自动化",
-    "obs_cockpit": "运行驾驶舱"
+    "obs_cockpit": "运行驾驶舱",
+    "sandbox": "云沙箱"
   },
   "sidebar": {
     "workspace": "工作区",

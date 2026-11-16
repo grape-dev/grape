@@ -1609,14 +1609,33 @@ function openTaskLogModal(taskId, title) {
               ? ' <span style="color:var(--t3)">v' + esc(info.agent_version) + '</span>'
               : '')
         )
-      if (info.device_name || info.agent_name)
-        bits.push('🖥 ' + esc(logWorkerName(info.device_name)))
+      // [B5 沙箱迁移 → spec 2026-11-14 cred_uid8 修正] 云沙箱引擎：🖥 Provider 名 + #cred_uid8
+      // （title 留 systemctl 服务名线索；服务名实为 sandbox-worker-<credential_uid 前 8 位>，
+      //  非 credential_id——走读误判已勘误，spec 2026-11-14-eventview-cred-uid8-fix）
+      if (info.sandbox_provider)
+        bits.push(
+          '🖥 ' +
+            esc(info.sandbox_provider) +
+            (info.credential_uid8
+              ? ' <span style="color:var(--t3)" title="Credential (systemctl: sandbox-worker-' +
+                esc(info.credential_uid8) +
+                ')">#' +
+                esc(info.credential_uid8) +
+                '</span>'
+              : '')
+        )
+      // 🌐 沙箱 id 位本期不激活（spec 拍板②：task→sandbox 关联键未核，后端不下发 sandbox_id）
+      if (info.sandbox_id) bits.push('🌐 ' + esc(info.sandbox_id))
+      if (info.device_name) bits.push('🖥 ' + esc(info.device_name))
       if (info.last_ip) bits.push('🌐 ' + esc(info.last_ip))
       if (info.owner_name) bits.push('👤 ' + esc(info.owner_name))
       if (info.spec) bits.push('⚙️ ' + esc(info.spec))
       bits.push(logModelSegment(info))
-      if (info.cpu_percent) bits.push('📊 CPU ' + Number(info.cpu_percent).toFixed(1) + '%')
-      if (info.memory_percent) bits.push('💾 MEM ' + Number(info.memory_percent).toFixed(1) + '%')
+      // [B5 沙箱迁移] 云沙箱引擎的心跳指标是 worker 宿主机的（非沙箱容器）——不展示防语义误导
+      if (info.cpu_percent && !info.sandbox_provider)
+        bits.push('📊 CPU ' + Number(info.cpu_percent).toFixed(1) + '%')
+      if (info.memory_percent && !info.sandbox_provider)
+        bits.push('💾 MEM ' + Number(info.memory_percent).toFixed(1) + '%')
       taskLog.infoHtml = bits
         .map(function (b) {
           return '<span>' + b + '</span>'

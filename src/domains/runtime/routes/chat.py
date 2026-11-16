@@ -1228,7 +1228,15 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
         return {"reply": "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎", "conversation_id": conv_id}
     # 优先用用户配置的 runtime_id（chat_agent_session，会话引擎指针），未配置按本机直连兜底
     #（engine-selection-design.md §8.2）；Issue #400：解析出的唯一引擎同时落 devops_agent_session 指针
+    # Issue #868 (T10)：会话引擎指针 uid 优先（uid 失效/未迁移回退 runtime_id 兜底）
     runtime_id = cfg.get("runtime_id") or 0
+    _cfg_uid = cfg.get("engine_uid") or ""
+    if _cfg_uid and runtime_id:
+        try:
+            from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
+            runtime_id = get_runtime_id_by_engine_uid(_cfg_uid) or runtime_id
+        except Exception:
+            pass
     if not runtime_id:
         try:
             from src.domains.runtime.engine.engine_select import resolve_local_engine
@@ -1329,6 +1337,27 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_
         "bot_token_available": bool(bot_token),
     }
 
+
+# ====== Config ======
+
+def _ar_engine_uid(rid) -> str:
+    """Issue #868 前端 uid 消费：runtime_id → engine_uid（旧库缺列/行不存在降级 ''）。"""
+    try:
+        rid = int(rid or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not rid:
+        return ""
+    try:
+        from src.session_manager import db as _db, db_lock as _dl
+        with _dl:
+            row = _db.cursor().execute(
+                "SELECT COALESCE(engine_uid,'') FROM agent_runtimes WHERE id=?", (rid,)).fetchone()
+        return (row[0] or "") if row else ""
+    except Exception:
+        return ""
+
+
 def _chat_dedupe_backends(backends: list[dict]) -> list[dict]:
     """按引擎唯一键去重（Issue #400）：个人机器 user/repo 双档或历史重复行合并为单条。
 
@@ -1384,10 +1413,13 @@ def _chat_selected_engine(cfg: dict, backends: list[dict]) -> dict | None:
                 rscope = (rscope or "global") if cid else "local"
                 if cid:
                     ins = instance_name(ename, dev or "", cid)
+                    # Issue #868 前端 uid 消费：指针外引擎同样带 engine_uid（uid 优先、id 兜底）
                     return {"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}",
-                            "scope": rscope, "owner": owner or "", "runtime_id": rid}
+                            "scope": rscope, "owner": owner or "", "runtime_id": rid,
+                            "engine_uid": _ar_engine_uid(rid)}
                 return {"name": ename, "display_name": f"{ename} v{ver or ''}（本机直连）",
-                        "scope": "local", "owner": "", "runtime_id": rid}
+                        "scope": "local", "owner": "", "runtime_id": rid,
+                        "engine_uid": _ar_engine_uid(rid)}
         except Exception:
             pass
     if not backend:
@@ -1414,7 +1446,7 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     # 本机直连引擎（credential_id=0，已知类型且已装且健康——与 resolve_local_engine 口径一致）
     try:
         for r in _rt.read_all_any("chat_local_engines"):
-            _rid, ename, ver, _hn = r
+            _rid, ename, ver, _hn, _euid = r
             if not is_known_engine_name(ename or ""):
                 continue
             _label = f"{ename} v{ver or ''}"
@@ -1425,16 +1457,17 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
             else:
                 _label += "（本机直连）"
             backends.append({"name": ename, "display_name": _label, "scope": "local",
-                             "owner": _hn, "runtime_id": _rid})
+                             "owner": _hn, "runtime_id": _rid, "engine_uid": _euid or ""})
     except Exception as _e:  # noqa: BLE001 - 取数失败不阻断配置接口，但必须留痕
         log.warning(f"chat config: local engines unavailable: {_e}")
     # 个人引擎（scope=user，仅当前用户 + active）
     try:
         for r in _rt.read_all_any("chat_user_engines", (user["username"],)):
-            _rid, ename, ver, dev, owner, cid = r
+            _rid, ename, ver, dev, owner, cid, _euid = r
             ins = instance_name(ename, dev or "", cid or 0)
             backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}",
-                             "scope": "user", "owner": owner or "", "runtime_id": _rid})
+                             "scope": "user", "owner": owner or "", "runtime_id": _rid,
+                             "engine_uid": _euid or ""})
     except Exception as _e:  # noqa: BLE001
         log.warning(f"chat config: user engines unavailable: {_e}")
     # Load chat skills from skill table（官方 + 个人 + 当前仓库，agent_type='chat'）
@@ -1718,7 +1751,24 @@ async def update_chat_config(body: dict, request: Request,
         if not isinstance(_be, str):
             raise HTTPException(status_code=400, detail={"code": 400, "message": "backend 必须为字符串"})
         kwargs["backend"] = _be
-    if body.get("runtime_id") is not None:
+    # Issue #868 前端 uid 消费（T10 双读口径）：前端引用引擎改为 engine_uid 优先、
+    # runtime_id 兜底——uid 有效且能解析 → 以 uid 解析结果覆盖 runtime_id；
+    # uid 缺失/无效/失效 → 回退 body.runtime_id（旧数据不报错）。
+    _uid_applied = False
+    _body_uid = body.get("engine_uid")
+    if isinstance(_body_uid, str) and _body_uid.strip():
+        from src.api.engine_uid import is_uid_str
+        from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
+        _u = _body_uid.strip().lower()
+        if is_uid_str(_u):
+            try:
+                _rid_by_uid = get_runtime_id_by_engine_uid(_u)
+            except Exception:
+                _rid_by_uid = None
+            if _rid_by_uid:
+                kwargs["runtime_id"] = int(_rid_by_uid)
+                _uid_applied = True
+    if not _uid_applied and body.get("runtime_id") is not None:
         kwargs["runtime_id"] = body["runtime_id"]
     if body.get("skill_id") is not None:
         # 新方式：前端直传 skill_id

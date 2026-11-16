@@ -166,7 +166,7 @@ window._cfRevealSecretField = function(input, btn) {
 
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail','account'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail','account','sandbox'];
 
   // ── 非仓库视图清单（单一事实源）──
   // 历史上 app.js 内有 4 份内容不一致的拷贝（restore 198 / check 1125 / nav 1458 /
@@ -174,7 +174,7 @@ const app = (() => {
   // 收敛为一份并集常量：合法 VIEWS 之外的历史遗留视图（scene-detail-local /
   // autopilot / autopilot-detail / organizations）一并纳入，多排无害（它们都不
   // 依赖仓库上下文，横幅/守卫跳过它们语义正确）。
-  const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'observability', 'organizations', 'account'];
+  const NO_REPO_VIEWS = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'observability', 'organizations', 'account', 'sandbox'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -1901,6 +1901,11 @@ function loadAgentTypes() {
       try { _knowledgeVueApp.unmount(); } catch(e) {}
       _knowledgeVueApp = null;
     }
+    // [沙箱迁移] 离开 sandbox 页面时卸载 Vue 应用（与 knowledge 一致，避免内存泄漏）
+    if (view !== 'sandbox' && typeof _sandboxVueApp !== 'undefined' && _sandboxVueApp) {
+      try { _sandboxVueApp.unmount(); } catch(e) {}
+      _sandboxVueApp = null;
+    }
 
     // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不覆盖 DOM（避免 Vue 虚拟 DOM 不一致）
     if (!(view === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp)) {
@@ -2123,6 +2128,9 @@ function loadAgentTypes() {
       if (typeof _knowledgeVueApp === 'undefined' || !_knowledgeVueApp) {
         renderKnowledge();
       }
+    } else if (view === 'sandbox') {
+      title.textContent = I18N.t('app.current_project');
+      renderSandbox();  // B2: Vue chunk — 深链 #sandbox/provider/{id} 由组件自解析
     } else if (view === 'runtimes') {
       title.textContent = I18N.t('app.current_project');
       renderRuntimes();  // batch 11: Vue chunk 自管分页重置与数据加载

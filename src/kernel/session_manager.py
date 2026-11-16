@@ -596,17 +596,22 @@ def _chat_config_candidate_rows(user_id: int):
     而原先的读路径是 `... WHERE user_id=? ... LIMIT 1`（**无 ORDER BY**）→ 读到哪行由存储顺序
     决定，出现"界面改了配置读不回来"（读路径按写入的主键行取，避免同一用户多行时读到旧行）。
 
-    返回 [(row_id, (runtime_id, skill, skill_id)), ...]
+    返回 [(row_id, (runtime_id, skill, skill_id, engine_uid)), ...]
 
     A2 收尾：im_* 三列已不是凭证真相源（改读 grape_t_channel_installation），这里不再 SELECT。
+    Issue #868 (T10)：末位补 engine_uid（uid 优先、runtime_id 兜底双读）；
+    旧库缺列（迁移未跑）时降级为不含 engine_uid 的列集，行元组末位补 ''。
     """
     seen, out = set(), []
     # 必须**同时**校验 user_id：云端存在 id 与 user_id 跨空间错位的行（如 id='sess-cfg-37' 却属于 user_id=1），
     # 只按 id 取会把**别人的配置（含飞书 app_id/secret）**当成自己的（实测 user 37 读到 user 1 的行）。
     # 两条具名查询都在 owner 域（chat_agent_session 归运行域），列序与原 SQL 一致。
+    # Issue #868 (T10)：uid 版查询优先；旧库缺列降级 legacy 查询（行尾补空 uid 占位）
     for rows in (
-        _rt.read_all_any("chat_config_row_canonical", (f"sess-cfg-{user_id}", user_id)),
-        _rt.read_all_any("chat_config_rows_by_user", (user_id,)),
+        _chat_config_query_rows("chat_config_row_canonical", "chat_config_row_canonical_legacy",
+                                (f"sess-cfg-{user_id}", user_id)),
+        _chat_config_query_rows("chat_config_rows_by_user", "chat_config_rows_by_user_legacy",
+                                (user_id,)),
     ):
         for r in rows:
             if r[0] not in seen:
@@ -615,11 +620,31 @@ def _chat_config_candidate_rows(user_id: int):
     return out
 
 
-def _chat_config_row_engine(runtime_id: int):
+def _chat_config_query_rows(uid_name: str, legacy_name: str, params: tuple) -> list:
+    """uid 版具名查询失败（旧库缺 engine_uid 列）时降级 legacy 版，行尾补 '' 占位。"""
+    try:
+        return [tuple(r) for r in _rt.read_all_any(uid_name, params)]
+    except Exception:
+        return [tuple(r) + ("",) for r in _rt.read_all_any(legacy_name, params)]
+
+
+def _chat_config_row_engine(runtime_id: int, engine_uid: str = "", c=None):
     """解析配置行指向的引擎，返回 (backend_name, usable)。
 
+    Issue #868 (T10)：engine_uid 优先（uid 命中且引擎可用即用 uid 轨道），
+    uid 失效/未命中回退 runtime_id（id 兜底）。
     usable=False 覆盖既有的两种"按未配置处理"情形：引擎行已不存在、引擎名不是已知引擎。
     """
+    from src.domains.mgmt.user.db import is_known_engine_name
+    if engine_uid:
+        urow = _rt.read_one_any("agent_runtime_name_by_uid", (engine_uid,))
+        if urow and urow[0]:
+            _un = (urow[0] or "").strip().lower()
+            if is_known_engine_name(_un):
+                return urow[0], True
+            log.warning(f"get_chat_config: engine_uid={engine_uid} 指向未知引擎 '{urow[0]}'，回退 runtime_id={runtime_id}")
+        else:
+            log.warning(f"get_chat_config: engine_uid={engine_uid} 失效（引擎行已删除），回退 runtime_id={runtime_id}")
     if not runtime_id:
         return "", True
     brow = _rt.read_one_any("agent_runtime_name_by_id", (runtime_id,))
@@ -627,7 +652,6 @@ def _chat_config_row_engine(runtime_id: int):
         # runtime_id 指向的引擎行已不存在（被删除）：视为未绑定，走本机直连兜底
         log.warning(f"get_chat_config: runtime_id={runtime_id} 不存在（引擎行已删除），按未配置处理")
         return "", False
-    from src.domains.mgmt.user.db import is_known_engine_name
     _n = (brow[0] or "").strip().lower()
     if not is_known_engine_name(_n):
         # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
@@ -650,7 +674,8 @@ def _pick_chat_config_row(user_id: int):
     if not cands:
         return None, None, ""
     for rid, cand in cands:
-        name, usable = _chat_config_row_engine(cand[0])
+        # Issue #868 (T10)：uid 优先（cand 末位 engine_uid），失效回退 runtime_id
+        name, usable = _chat_config_row_engine(cand[0], cand[3] if len(cand) > 3 else "")
         if usable:
             return rid, cand, name
     rid, cand = cands[0]
@@ -687,11 +712,12 @@ def get_chat_config(user_id: int) -> dict:
         log.info(f"get_chat_config: user_id={user_id} 命中历史遗留配置行 '{picked_id}'"
                  f"（写路径行为 'sess-cfg-{user_id}'），建议迁移合并")
     return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
-                                           "", user_id=user_id)
+                                           "", engine_uid=(row[3] or "") if len(row) > 3 else "",
+                                           user_id=user_id)
 
 
 def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
-                                    updated_at, user_id: int = 0) -> dict:
+                                    updated_at, engine_uid: str = "", user_id: int = 0) -> dict:
     """backend 为空的配置行：尝试本机直连引擎兜底（engine-selection-design.md §8.2）。
 
     有本机直连引擎 → backend=其类型名、runtime_id=其 id（恒 direct）；
@@ -713,7 +739,7 @@ def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
         except Exception:
             pass
     return {"backend": backend, "runtime_id": runtime_id, "skill": skill, "skill_id": skill_id,
-            "updated_at": updated_at}
+            "engine_uid": engine_uid, "updated_at": updated_at}
 
 
 def _resolve_chat_runtime_id(backend: str) -> int:
@@ -740,10 +766,23 @@ def _resolve_chat_runtime_id(backend: str) -> int:
     return get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
 
 
+def _chat_config_engine_uid_rt(runtime_id: int) -> str:
+    """Issue #868 (T10) 双写：runtime_id → engine_uid（任意拓扑具名查询；行不存在/未迁移返回 ''）。"""
+    if not runtime_id:
+        return ""
+    try:
+        row = _rt.read_one_any("agent_runtime_engine_uid_by_id", (int(runtime_id),))
+        return (row[0] or "") if row else ""
+    except Exception:
+        return ""
+
+
 def _write_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "", skill_id: int = 0):
     # 写前收敛重复 + upsert 在 owner 域同一事务内（见 runtime public.upsert_chat_config_row）：
     # 同 user 的 repo_key='' 行只保留 'sess-cfg-{user_id}'（账号迁移残留行一并清理）。
-    _rt.upsert_chat_config_row(user_id, runtime_id=runtime_id, skill=skill, skill_id=skill_id)
+    # Issue #868 (T10)：engine_uid 双写（runtime_id 的 uid 镜像，任意拓扑具名查询）。
+    _rt.upsert_chat_config_row(user_id, runtime_id=runtime_id, skill=skill, skill_id=skill_id,
+                               engine_uid=_chat_config_engine_uid_rt(runtime_id))
 
 
 def set_chat_config(user_id: int, **kwargs):

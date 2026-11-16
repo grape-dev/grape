@@ -633,7 +633,9 @@ app.include_router(latency.router)
 app.include_router(feedback.router)
 
 app.include_router(autopilot.router)
-
+# [沙箱迁移] 沙箱管理后台路由（/api/admin/sandbox/*，i7 移植）
+from src.domains.mgmt.routes import sandbox_admin
+app.include_router(sandbox_admin.router)
 app.include_router(orgs.router)
 
 app.include_router(community.router)

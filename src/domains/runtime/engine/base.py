@@ -64,3 +64,28 @@ class AgentRuntime:
         codearts 方案E2 用此钩子启动 per-task codearts serve，返回 {port, proc, env}。
         """
         return {"port": 0, "proc": None, "env": env}
+
+    # ===== [沙箱迁移 i7 漏移植恢复 2026-11-11] Protocol 默认实现 =====
+    # （backend_protocol.py，子类按需 override）。此前只移植了 executor 消费端
+    # （isinstance(backend, CloudBackendProvider) → backend.cloud_backend() 分叉），
+    # 引擎侧供给端整段丢失——HermesRuntime 不满足 CloudBackendProvider，云沙箱
+    # hermes 永远走 CLI fallback（chat -q → exit 127，VOD 沙箱任务实测）。
+    # 与 i7 src/runtime/base.py 同款；hermes 的 override 见 engine/hermes.py。
+
+    @property
+    def protocol(self) -> str:
+        """执行协议：'acp'（JSON-RPC 握手）或 'ndjson'（CLI --format json）。默认 NDJSON。"""
+        return "ndjson"
+
+    def cloud_backend(self) -> "object":
+        """返回云沙箱路径用的 backend（满足 AgentBackend 协议）。默认返回 self。
+
+        hermes 等云路径协议不同的引擎 override 返回 ACP backend
+        （HermesACPBackend——满足 AgentBackend 协议但非 AgentRuntime 子类，
+        Pyright 协议多态按运行时 isinstance 判定，返回类型放宽为协议形态）。
+        """
+        return self
+
+    def pty_wrapper_name(self) -> str | None:
+        """PTY wrapper 脚本文件名。None = 不走 PTY wrapper。默认 None。"""
+        return None

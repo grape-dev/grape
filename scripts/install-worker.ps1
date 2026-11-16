@@ -496,8 +496,9 @@ if (-not (Test-Path $VenvPip) -or -not (_VenvPipOk)) {
 }
 
 # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
-# Worker deps list mirrors pyproject.toml [project.optional-dependencies] worker.
-$workerDeps = @("aiohttp", "bcrypt", "click", "httpx")
+# [沙箱迁移生效性修复 2026-11-10] 与 pyproject.toml [worker] extra 同源——补 cubesandbox/
+# requests/cryptography（沙箱平台 SDK / 网络代理 / 凭据加密），与 install-worker.sh 对齐。
+$workerDeps = @("aiohttp", "bcrypt", "click", "httpx", "cubesandbox", "requests", "cryptography")
 $pyprojectFile = Join-Path $Dir "pyproject.toml"
 if (Test-Path $pyprojectFile) {
     $pipIndex = $env:PIP_INDEX_URL

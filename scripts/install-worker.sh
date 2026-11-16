@@ -6,7 +6,18 @@
 #     --token <rta_...> \
 #     [--server https://<grape主控>] \
 #     [--device worker-01] \
-#     [--dir ~/grape]
+#     [--dir ~/grape] \
+#     [--root] \
+#     [--engine auto|opencode|hermes|none]
+#
+# [同机多 cloud_worker spec §4.2] --type/--platform 已删除；--dir 保留（2026-11-12
+# 用户裁定：恢复原有参数语义）：
+#   - 凭据类型/平台由 whoami（GET /api/runtime/whoami, Bearer rta_）返回——
+#     服务端是唯一事实源，用户命令不可能传错形态
+#   - 安装目录按形态隔离: 普通 worker 默认 /opt/grape（非 root ~/grape）; 沙箱
+#     worker 默认 /opt/grape-cw/<cred_uid8>/（每凭据全量独立——升级/回滚/venv
+#     互不影响）；用户显式传 --dir 时按用户目录安装（沙箱不再追加 cred_uid8）
+#   - --device 保留（两类 worker 共用，指示 worker 运行在哪台机器）
 #
 # 流程：
 #   1. 从主控公开端点下载运行包 grape-worker.tar.gz（无需鉴权，包内无敏感信息）
@@ -36,22 +47,29 @@ while [ $# -gt 0 ]; do
     --device)  DEVICE="$2"; shift 2 ;;
     --dir)     INSTALL_DIR="$2"; shift 2 ;;
     --root)    ROOT_MODE=1; shift ;;
-    *) echo "Unknown argument: $1"; echo "Usage: --token <rta_...> [--server URL] [--device name] [--dir install-dir] [--root]"; exit 1 ;;
+    # [spec §4.2] --type/--platform 已删除（whoami 派生）——显式报错引导而非
+    # 静默忽略，防旧文档命令装错形态。--dir 保留（原有参数，2026-11-12 裁定）。
+    --type|--platform)
+      echo "[install-worker] Error: $1 removed (credential form is derived from server whoami) -- use: --token <rta_...> --server <url> [--device name] [--dir install-dir] [--engine auto|opencode|hermes|none] [--root]" >&2; exit 1 ;;
+    --*=*) echo "[install-worker] Error: equals-form not supported ($1) -- use space separation: ${1%%=*} <value>" >&2; exit 1 ;;
+    *) echo "Unknown argument: $1"; echo "Usage: --token <rta_...> [--server URL] [--device name] [--engine auto|opencode|hermes|none] [--root] (arguments use space separation, no --x=y)"; exit 1 ;;
   esac
 done
 # ===== 工具函数 =====
 log() { echo "[install-worker] $*"; }
 fail() { echo "[install-worker] Error: $*" >&2; exit 1; }
 
+
+
 if [ -z "$TOKEN" ]; then
-  fail "Missing --token (rta_ credential, generated on the controller WebUI 'Workers' page)"
+  fail "Missing --token (rta_ credential, generated on the controller WebUI Workers page)"
 fi
 if [ "$(id -u)" = "0" ]; then
   ROOT_MODE=1
 fi
 if [ -z "$SERVER" ]; then
   SERVER="https://grape.example.com"
-  log "No --server given, using default $SERVER (if wrong, add --server https://<your-controller-domain>)"
+  log "No --server given, using default $SERVER (add --server https://<your-controller> if wrong)"
 fi
 SERVER="${SERVER%/}"
 # 设备名：hostname 小写，非字母数字替换为 -，清理首尾 -（hostname 输出含换行会产生尾随 -）
@@ -59,25 +77,85 @@ if [ -z "$DEVICE" ]; then
   DEVICE="worker-$(hostname | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]/-/g; s/^-*//; s/-*$//')"
 fi
 
-# 安装目录：普通用户家目录（默认 ~/grape），root 模式默认 /opt/grape
-if [ -z "$INSTALL_DIR" ]; then
-  if [ "$ROOT_MODE" = "1" ]; then
-    INSTALL_DIR="/opt/grape"
+# ===== whoami：凭据自述（服务端是唯一事实源）=====
+# [同机多 cloud_worker spec §4.1] 用 token 调 whoami 拿 cred_type/platform/
+# credential_id/credential_uid——安装形态、实例命名全部由服务端派生，不可能传错。
+_whoami_json=""
+if command -v curl >/dev/null 2>&1; then
+  _whoami_json="$(curl -fsSL --connect-timeout 15 --max-time 30 \
+    -H "Authorization: Bearer $TOKEN" \
+    "$SERVER/api/runtime/whoami" 2>/dev/null || true)"
+fi
+if [ -z "$_whoami_json" ] || ! printf '%s' "$_whoami_json" | grep -q '"credential_id"'; then
+  fail "Credential invalid or revoked (whoami unreachable/401) -- regenerate the credential on the controller WebUI and retry"
+fi
+# 解析（不依赖 jq——sed 提取）
+CRED_TYPE="$(printf '%s' "$_whoami_json" | sed -n 's/.*"cred_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+PLATFORM="$(printf '%s' "$_whoami_json" | sed -n 's/.*"platform"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+CRED_ID="$(printf '%s' "$_whoami_json" | sed -n 's/.*"credential_id"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')"
+if [ "$CRED_TYPE" != "worker" ] && [ "$CRED_TYPE" != "sandbox" ]; then
+  fail "whoami returned invalid cred_type: '$CRED_TYPE' (only worker/sandbox supported)"
+fi
+if [ "$CRED_TYPE" = "sandbox" ] && [ -z "$PLATFORM" ]; then
+  fail "whoami returned sandbox credential but platform is empty (server data abnormal)"
+fi
+# 实例键 [锚简化 2026-11-04 用户裁定]：credential_uid 前 8 位单锚——
+# UUIDv4 全局唯一，跨主控天然不撞（复合锚 instance 段随 server_instance 退役而消解）
+CRED_UID="$(printf '%s' "$_whoami_json" | sed -n 's/.*"credential_uid"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+CRED_KEY="$(printf '%s' "$CRED_UID" | cut -c1-8)"   # 凭据目录键=credential_uid 前 8 位
+# worker 入口模块：普通=runtime.agent；沙箱=runtime.cloud_worker
+WORKER_MODULE="src.domains.runtime.engine.agent"
+[ "$CRED_TYPE" = "sandbox" ] && WORKER_MODULE="src.domains.runtime.engine.cloud_worker"
+# systemd 服务名 + 注册成功日志标记（沙箱与普通 worker 区分，同机共存不互杀）
+SERVICE_NAME="runtime-agent"
+REGISTER_LOG="RuntimeAgent registered"
+if [ "$CRED_TYPE" = "sandbox" ]; then
+  SERVICE_NAME="sandbox-worker-$CRED_KEY"
+  REGISTER_LOG="cloud_worker registered"
+fi
+# pkill 匹配用转义模块名（src.runtime.agent 里的 . 是正则任意符）
+WORKER_MODULE_ESC="$(printf '%s' "$WORKER_MODULE" | sed 's/\./\\./g')"
+
+# 安装目录 [spec §五 v2 用户裁定 2026-10-30; --dir 保留 2026-11-12 用户裁定]:
+# - 普通 worker: 默认 /opt/grape（非 root ~/grape），--dir 可改（原有逻辑）
+# - 沙箱 worker: 默认 /opt/grape-cw/<cred_uid8>/ ——每凭据全量独立(代码/venv/
+#   备份/日志/配置), 升级回滚互不影响; pkill 按 venv 路径匹配天然限域,
+#   跨实例误杀结构性消失。共享目录时代实测的三个全局破坏(tar 覆盖全实例
+#   代码/回滚 rm src 影响他实例/单份 .upgrade-backup 被覆盖)全部消除。
+# - 用户显式传 --dir（2026-11-12）: 沙箱也按用户目录安装（不再追加
+#   cred_uid8 子目录）——用户自己保证目录独立性; 同机多实例场景建议用默认。
+if [ "$CRED_TYPE" = "sandbox" ]; then
+  if [ -n "$INSTALL_DIR" ]; then
+    :  # 用户显式 --dir：尊重用户目录，沙箱不追加凭据键
+  elif [ "$ROOT_MODE" = "1" ]; then
+    INSTALL_DIR="/opt/grape-cw/$CRED_KEY"
   else
-    INSTALL_DIR="$HOME/grape"
+    INSTALL_DIR="$HOME/grape-cw/$CRED_KEY"
+  fi
+else
+  if [ -z "$INSTALL_DIR" ]; then   # --dir 原有逻辑：未传时才落默认（基线守卫，沙箱线移植时曾丢失）
+    if [ "$ROOT_MODE" = "1" ]; then
+      INSTALL_DIR="/opt/grape"
+    else
+      INSTALL_DIR="$HOME/grape"
+    fi
   fi
 fi
 INSTALL_DIR="${INSTALL_DIR%/}"
 VENV="$INSTALL_DIR/.venv"
 
-# 配置目录与文件（普通用户：~/.grape/runtime.env；root：/etc/grape/runtime.env）
-if [ "$ROOT_MODE" = "1" ]; then
-  CFG_DIR="/etc/grape"
-  START_SCRIPT="/opt/grape/start-worker.sh"
+# 配置目录与文件——[实例全量独立 v2] 沙箱模式配置就在实例目录内(不再
+# etc/workers 子目录); 普通 worker 不变(/etc/grape 或 ~/.grape)。
+if [ "$CRED_TYPE" = "sandbox" ]; then
+  CFG_DIR="$INSTALL_DIR/etc"
 else
-  CFG_DIR="$HOME/.grape"
-  START_SCRIPT="$INSTALL_DIR/start-worker.sh"
+  if [ "$ROOT_MODE" = "1" ]; then
+    CFG_DIR="/etc/grape"
+  else
+    CFG_DIR="$HOME/.grape"
+  fi
 fi
+START_SCRIPT="$INSTALL_DIR/start-worker.sh"
 ENV_FILE="$CFG_DIR/runtime.env"
 VERSION_FILE="$CFG_DIR/worker.version"
 
@@ -118,7 +196,7 @@ if ! curl -fsSL --connect-timeout 15 "$PKG_URL" -o "$TMP_PKG"; then
 fi
 if ! gzip -t "$TMP_PKG" 2>/dev/null; then
   rm -f "$TMP_PKG"
-  fail "Downloaded worker package is corrupt (gzip check failed), please retry"
+  fail "Downloaded package corrupted (gzip check failed), please retry"
 fi
 
 # ===== 3. 解压到安装目录（幂等，升级前备份旧代码供回滚）=====
@@ -133,7 +211,7 @@ if [ -d "$INSTALL_DIR/src" ]; then
   mkdir -p "$_upgrade_backup_dir"
   cp -a "$INSTALL_DIR/src" "$_upgrade_backup_dir/src" 2>/dev/null || true
   [ -f "$INSTALL_DIR/VERSION" ] && cp -a "$INSTALL_DIR/VERSION" "$_upgrade_backup_dir/VERSION" 2>/dev/null || true
-  log "Backed up current code to $_upgrade_backup_dir (auto-rollback on upgrade failure)"
+  log "Current code backed up to $_upgrade_backup_dir (auto-rollback on upgrade failure)"
 fi
 log "Extracting worker package to $INSTALL_DIR"
 tar -xzf "$TMP_PKG" -C "$INSTALL_DIR" --strip-components=1 || fail "Failed to extract worker package"
@@ -167,36 +245,47 @@ _smoke_check || fail "New worker package import smoke check failed (bad package)
 # systemd: restore_upgrade_backup systemd；nohup: restore_upgrade_backup nohup
 restore_upgrade_backup() {
   _mode="${1:-nohup}"
-  log "!!! New agent failed to start, rolling back to pre-upgrade code and restarting old agent !!!"
+  # set -u 兜底：本函数会被单测独立提取执行（tests/api/test_install_rollback_regression.py，
+  # 只注入 INSTALL_DIR/VENV/_upgrade_backup_dir/START_SCRIPT），WORKER_MODULE_ESC 为脚本级
+  # 变量——缺省回退到任意 worker 模块的宽松匹配，单测/复用场景不塌。
+  _wm_esc="${WORKER_MODULE_ESC:-src\.domains\\.runtime\\.engine\.[a-z_]+}"
+  log "!!! New agent failed to start, rolling back to pre-upgrade code and restarting the old agent !!!"
   if [ ! -d "$_upgrade_backup_dir/src" ]; then
-    log "Rollback failed: no backup ($_upgrade_backup_dir missing, probably a fresh install) -- worker will stay offline, manual intervention required"
+    # [全新安装语义修复 2026-11-05] 实例 52 实测：全新安装无备份（本来就没有旧代码），
+    # 此时报错"worker will stay offline"是错的——worker 根本不需要回滚，探测/注册
+    # 都在正常跑。正确动作 = 不动它，直接确认状态返回成功。
+    if systemctl is-active --quiet "${SERVICE_NAME:-runtime-agent}" 2>/dev/null; then
+      log "No pre-upgrade backup (fresh install) -- nothing to roll back; new agent is ACTIVE, leaving it alone"
+      return 0
+    fi
+    log "Rollback failed: no backup ($_upgrade_backup_dir missing) and service is NOT active -- manual intervention needed: journalctl -u ${SERVICE_NAME:-runtime-agent}"
     return 1
   fi
   rm -rf "$INSTALL_DIR/src"
   cp -a "$_upgrade_backup_dir/src" "$INSTALL_DIR/src"
   [ -f "$_upgrade_backup_dir/VERSION" ] && cp -a "$_upgrade_backup_dir/VERSION" "$INSTALL_DIR/VERSION"
-  log "Restored old code ($(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo 'unknown'))"
+  log "Restored old code ($(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo unknown))"
   if [ "$_mode" = "systemd" ]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl restart runtime-agent >/dev/null 2>&1 || true
+    systemctl restart ${SERVICE_NAME:-runtime-agent} >/dev/null 2>&1 || true
   else
     # 2026-10-08 follow-up：先杀残留的新进程再起旧版。注册超时路径（启动验证 30s
     # 未 registered）调用本函数时，新 agent 进程可能仍存活——若不限域 pkill，
     # 旧版起成功后新旧两进程并存，残留新进程可能反向注册击穿回滚。
     # 限域模式与第 6 步停旧实例一致：按本安装目录 venv 绝对路径匹配，不误杀同机
     # 其他安装/其他用户的 worker。
-    _rollback_pat="$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g')"
-    pkill -f "${_rollback_pat}.*-m src\.runtime\.agent" >/dev/null 2>&1 || true
+    _rollback_pat="$(printf '%s' "$VENV/bin/python" | sed 's/[.\[*^$]/\\&/g')"
+    pkill -f "${_rollback_pat}.*-m ${_wm_esc}" >/dev/null 2>&1 || true
     sleep 1
     setsid nohup "$START_SCRIPT" >> "$INSTALL_DIR/data/worker.log" 2>&1 < /dev/null &
     disown 2>/dev/null || true
   fi
   sleep 5
-  if pgrep -f "$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g').*-m src\.runtime\.agent" >/dev/null 2>&1; then
+  if pgrep -f "$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g').*-m ${_wm_esc}" >/dev/null 2>&1; then
     log "Rollback OK: old agent restored and running"
     return 0
   fi
-  log "Agent still not running after rollback -- worker offline, manual intervention needed (log: $INSTALL_DIR/data/worker.log / journalctl -u runtime-agent)"
+  log "Agent still not running after rollback -- worker offline, manual intervention needed (log: $INSTALL_DIR/data/worker.log / journalctl -u $SERVICE_NAME)"
   return 1
 }
 
@@ -206,7 +295,7 @@ if [ -f "$INSTALL_DIR/SHA256SUMS" ]; then
   if ( cd "$INSTALL_DIR" && sed 's|  grape-worker/|  |' SHA256SUMS | sha256sum -c >/dev/null 2>&1 ); then
     log "Worker package content checksum verified (SHA256SUMS)"
   else
-    log "Warning: worker package content checksum FAILED, make sure the source is trusted"
+    log "Warning: package checksum mismatch, verify the source is trusted"
   fi
 fi
 mkdir -p "$CFG_DIR"
@@ -304,8 +393,11 @@ else
   fi
 fi
 # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
-# Worker deps list mirrors pyproject.toml [project.optional-dependencies] worker.
-WORKER_DEPS="aiohttp bcrypt click httpx"
+# [沙箱迁移生效性修复 2026-11-10] 列表必须与 pyproject.toml [project.optional-dependencies]
+# worker 保持一致（声明与消费同源）——此前 pyproject 加了 cubesandbox/requests/cryptography
+# 但安装脚本硬列表没跟上 → 沙箱 worker 装机缺平台 SDK（skip template scan）与凭据加密
+# （crypto 软降级告警），.17 实例 852b4efd 实证；二期 7506b5c6 靠手工 pip 补装掩盖。
+WORKER_DEPS="aiohttp bcrypt click httpx cubesandbox requests cryptography"
 if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
   # pip 镜像：默认清华（国内网络 pypi.org 直连常超时），可用 PIP_INDEX_URL 或 --pip-index 覆盖
   PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
@@ -330,6 +422,9 @@ if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
         $WORKER_DEPS; then
       fail "Dependency install failed (worker cannot start without aiohttp): retry this install command, or set PIP_INDEX_URL to a reachable pip mirror"
     fi
+    # 安装完成打印实际版本(pip list 里的 worker 依赖)
+    log "Installed dependency versions:"
+    "$PIP_CMD" list --format=freeze 2>/dev/null | grep -iE '^(aiohttp|bcrypt|click|httpx|cubesandbox|grape)==?' | sed 's/^/    /' || true
   fi
 fi
 
@@ -339,7 +434,7 @@ _install_grape_online() {
       git+https://gitcode.com/grape-dev/grape-cli.git 2>/dev/null \
     && chmod +x "$VENV/bin/grape" 2>/dev/null || true \
     && log "grape CLI installed (online): $VENV/bin/grape" \
-    || log "Warning: grape-cli online install failed, no 'grape' available in the agent for now; worker keeps running"; return 0
+    || log "Warning: grape-cli online install failed, no `grape` inside agent yet; worker runs fine without it"; return 0
 }
 if ls "$INSTALL_DIR/wheels"/grape-*.whl >/dev/null 2>&1; then
   if "$PIP_CMD" install -q --no-index --find-links "$INSTALL_DIR/wheels" grape 2>/dev/null; then
@@ -362,9 +457,23 @@ fi
 umask 077
 _PRESERVED_KEYS=""
 if [ -f "$ENV_FILE" ]; then
-  _PRESERVED_KEYS=$(grep -vE '^(RUNTIME_TOKEN|RUNTIME_SERVER_URL|RUNTIME_DEVICE_NAME|RUNTIME_MAX_CONCURRENT_TASKS|RUNTIME_POLL_INTERVAL|RUNTIME_HEARTBEAT_INTERVAL)=' "$ENV_FILE" 2>/dev/null | grep -vE '^[[:space:]]*(#|$)' || true)
+  _PRESERVED_KEYS=$(grep -vE '^(RUNTIME_TOKEN|RUNTIME_SERVER_URL|RUNTIME_DEVICE_NAME|RUNTIME_MAX_CONCURRENT_TASKS|RUNTIME_POLL_INTERVAL|RUNTIME_HEARTBEAT_INTERVAL|CLOUD_WORKER_PROVIDER|CLOUD_WORKER_SERVER_URL|CLOUD_WORKER_TOKEN|CLOUD_WORKER_DEVICE_NAME|CLOUD_WORKER_POLL_INTERVAL|CLOUD_WORKER_HEARTBEAT_INTERVAL|CLOUD_WORKER_CREDENTIAL_ID|CLOUD_WORKER_CREDENTIAL_UID)=' "$ENV_FILE" 2>/dev/null | grep -vE '^[[:space:]]*(#|$)' || true)
 fi
-cat > "$ENV_FILE" <<EOF
+if [ "$CRED_TYPE" = "sandbox" ]; then
+  # [沙箱迁移] 沙箱 worker：cloud_worker 配置（rta_ token 直用 Bearer 鉴权；
+  # platform 决定 Provider 适配器；引擎注册从服务端模板拉取）
+  cat > "$ENV_FILE" <<EOF
+CLOUD_WORKER_PROVIDER=$PLATFORM
+CLOUD_WORKER_SERVER_URL=$SERVER
+CLOUD_WORKER_TOKEN=$TOKEN
+CLOUD_WORKER_DEVICE_NAME=$DEVICE
+CLOUD_WORKER_POLL_INTERVAL=3
+CLOUD_WORKER_HEARTBEAT_INTERVAL=15
+CLOUD_WORKER_CREDENTIAL_ID=$CRED_ID
+CLOUD_WORKER_CREDENTIAL_UID=$CRED_UID
+EOF
+else
+  cat > "$ENV_FILE" <<EOF
 RUNTIME_TOKEN=$TOKEN
 RUNTIME_SERVER_URL=$SERVER
 RUNTIME_DEVICE_NAME=$DEVICE
@@ -372,6 +481,7 @@ RUNTIME_MAX_CONCURRENT_TASKS=20
 RUNTIME_POLL_INTERVAL=3
 RUNTIME_HEARTBEAT_INTERVAL=15
 EOF
+fi
 # 追加旧配置中保留的自定义 keys（防重装/升级丢 key → opencode 401 / aishell 无凭据）
 if [ -n "$_PRESERVED_KEYS" ]; then
   printf '%s\n' "$_PRESERVED_KEYS" >> "$ENV_FILE"
@@ -413,32 +523,36 @@ install_bwrap() {
     return 0
   fi
   if [ "$ROOT_MODE" = "1" ]; then
-    log "Installing bwrap (bubblewrap) + lifting AppArmor restriction (setuid)..."
+    log "Installing bwrap (bubblewrap) + relaxing AppArmor restriction (setuid)..."
     if command -v apt-get >/dev/null 2>&1; then
       apt-get update -qq >/dev/null 2>&1 || true
-      apt-get install -y -qq bubblewrap >/dev/null 2>&1 || log "Warning: apt install of bwrap failed"
+      apt-get install -y -qq bubblewrap >/dev/null 2>&1 || log "Warning: apt bwrap install failed"
       if command -v bwrap >/dev/null 2>&1; then
         chmod u+s /usr/bin/bwrap || log "Warning: failed to set bwrap setuid bit"
         dpkg-statoverride --add root root 4755 /usr/bin/bwrap >/dev/null 2>&1 || true
       fi
     elif command -v yum >/dev/null 2>&1; then
-      yum install -y -q bubblewrap >/dev/null 2>&1 || log "Warning: yum install of bwrap failed"
+      yum install -y -q bubblewrap >/dev/null 2>&1 || log "Warning: yum bwrap install failed"
       command -v bwrap >/dev/null 2>&1 && chmod u+s /usr/bin/bwrap
     else
-      log "Warning: no apt/yum found, cannot auto-install bwrap"
+      log "Warning: neither apt nor yum found, cannot auto-install bwrap"
     fi
     if _bwrap_ok; then
       log "bwrap installed (agent filesystem isolation lock ready)"
     else
-      log "Warning: bwrap still unusable (AppArmor strict), filesystem lock downgraded to off (worker runs fine)"
+      log "Warning: bwrap still unusable (AppArmor strict) -- filesystem lock downgraded OFF (worker runs normally)"
     fi
   else
-    log "Note: no usable bwrap detected (needed by the agent filesystem isolation lock). To enable it, re-run this script as root (add --root), or manually run:"
+    log "Hint: no usable bwrap detected (needed by agent filesystem isolation). To enable, re-run this script as root (add --root), or manually run:"
     log "  sudo apt-get install -y bubblewrap && sudo dpkg-statoverride --add root root 4755 /usr/bin/bwrap"
-    log "  (without bwrap the worker still runs normally, only the filesystem isolation lock is off)"
+    log "  (without bwrap the worker still runs, only the filesystem isolation lock is off)"
   fi
 }
-install_bwrap
+if [ "$CRED_TYPE" = "sandbox" ]; then
+  log "Sandbox worker mode: skipping bwrap (engines live in remote cloud sandboxes, no local isolation needed)"
+else
+  install_bwrap
+fi
 
 # ===== 5.6 安装 sshpass（SRE 远程部署密码认证；root 自动装）=====
 if [ "$ROOT_MODE" = "1" ]; then
@@ -544,19 +658,33 @@ _has_systemd() {
 
 if [ "$ROOT_MODE" = "1" ] && _has_systemd; then
   # ---- root + systemd 可用：systemd 服务 ----
-  SERVICE_FILE="/etc/systemd/system/runtime-agent.service"
+  SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+  # [spec §6.3] 沙箱 worker: on-failure + 突发限制(心跳 401/403 连续 N=10 自杀后
+  # 不被无限拉起成僵尸); 普通 worker 保持 always(现状)
+  _RESTART_POLICY="always"
+  _START_LIMIT_BURST="0"
+  if [ "$CRED_TYPE" = "sandbox" ]; then
+    _RESTART_POLICY="on-failure"
+    _START_LIMIT_BURST="5"
+  fi
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Grape RuntimeAgent (edge, $DEVICE)
 After=network-online.target
 Wants=network-online.target
+# [spec §6.3] StartLimit 属 [Unit] 段——写在 [Service] 会被 systemd 忽略回落
+# 默认 10s/5 次(.17 实证: RestartSec=5 循环 10s 窗口攒不够 5 次 → 212 次不限流)
+StartLimitIntervalSec=300
+StartLimitBurst=$_START_LIMIT_BURST
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$VENV/bin/python -m src.domains.runtime.engine.agent
-Restart=always
+ExecStart=$VENV/bin/python -m ${WORKER_MODULE}
+# [spec §6.3] 沙箱 worker: on-failure + 突发限制——worker 心跳 401/403 连续
+# N=5 次自杀退出(凭据吊销防护), 不被无限拉起成僵尸; 普通 worker 保持 always
+Restart=$_RESTART_POLICY
 RestartSec=5
 LimitNOFILE=524288
 Environment=PYTHONUNBUFFERED=1
@@ -585,8 +713,10 @@ EOF
 Environment=GRAPE_ALLOW_ROOT_ENGINE=1
 EOF
   systemctl daemon-reload
-  systemctl enable runtime-agent >/dev/null 2>&1 || true
-  systemctl restart runtime-agent || { restore_upgrade_backup systemd || true; fail "New agent failed to start (rollback attempted); check journalctl -u runtime-agent"; }
+  systemctl enable $SERVICE_NAME >/dev/null 2>&1 || true
+  # 升级链防 start-limit：刚被 systemd 停过的单元立即 restart 会被 StartLimitBurst 拦截
+  systemctl reset-failed $SERVICE_NAME >/dev/null 2>&1 || true
+  systemctl restart $SERVICE_NAME || { restore_upgrade_backup systemd || true; fail "New agent failed to start (rollback attempted); check journalctl -u $SERVICE_NAME"; }
   # 启动验证 + 失败回滚（2026-10-14 五台 worker 心跳全断事故补齐）：
   # `systemctl restart` 对 Type=simple 单元在进程 spawn 即返回成功，agent 随后
   # 崩溃（如 import 失败）它感知不到——nohup 分支自 2026-10-08 起有 3s+30s
@@ -594,32 +724,59 @@ EOF
   # 现验证两件事：3s 后单元仍 active（非 auto-restart 僵尸循环）且 journal
   # 无 Traceback；30s 内日志出现 registered。任一失败 → 回滚旧代码重启。
   sleep 3
-  _unit_state="$(systemctl show runtime-agent --property=ActiveState --value 2>/dev/null || true)"
-  _unit_sub="$(systemctl show runtime-agent --property=SubState --value 2>/dev/null || true)"
+  _unit_state="$(systemctl show $SERVICE_NAME --property=ActiveState --value 2>/dev/null || true)"
+  _unit_sub="$(systemctl show $SERVICE_NAME --property=SubState --value 2>/dev/null || true)"
   if [ "$_unit_state" != "active" ] || [ "$_unit_sub" = "auto-restart" ] \
-     || journalctl -u runtime-agent --since "-10 seconds" --no-pager 2>/dev/null | grep -q "Traceback"; then
+     || journalctl -u $SERVICE_NAME --since "-10 seconds" --no-pager 2>/dev/null | grep -q "Traceback"; then
     restore_upgrade_backup systemd || true
-    fail "New agent crashed on startup (active=$_unit_state sub=$_unit_sub, rollback attempted); logs: journalctl -u runtime-agent"
+    fail "New agent crashed on startup (active=$_unit_state sub=$_unit_sub, rollback attempted); logs: journalctl -u $SERVICE_NAME"
   fi
   _reg_ok=""
-  for _i in $(seq 1 10); do
-    if journalctl -u runtime-agent --since "-$((30 + $_i * 3)) seconds" --no-pager 2>/dev/null | grep -q "RuntimeAgent registered"; then
-      _reg_ok=1
-      break
+  # [沙箱 worker 注册窗口 2026-11-04] 30s 对沙箱 worker 不够：cloud_worker 启动先做
+  # 全量模板探测（逐模板建箱+kill，每箱 20-40s，4 模板 ~2min）探测完才打
+  # `cloud_worker registered`——-27 实测 30s 假超时→回滚旧代码（旧代码注册序在探测前）。
+  # 沙箱模式窗口扩到 240s（探测最坏 ~3min）；普通 worker 维持 30s（本地发现秒级）。
+  _reg_timeout_loops=10
+  [ "$CRED_TYPE" = "sandbox" ] && _reg_timeout_loops=80
+  # [验证修复 2026-10-30 v3] v2 锚定 ExecMainStartTimestamp 仍误判一次(实例 22)——
+  # restart 后属性填充有延迟, 轮询首刻取到空值 → 走回退旧相对窗口(已知会 miss)。
+  # v3: 每轮重新取 start_ts(空则该轮等属性稳定), 且回退窗口改为宽窗口(-15min,
+  # 全新安装场景不存在历史注册行误命中——上一实例是不同 SERVICE_NAME)。
+  for _i in $(seq 1 $_reg_timeout_loops); do
+    _start_ts="$(systemctl show $SERVICE_NAME --property=ExecMainStartTimestamp --value 2>/dev/null || true)"
+    if [ -n "$_start_ts" ]; then
+      if journalctl -u $SERVICE_NAME --since "$_start_ts" --no-pager 2>/dev/null | grep -q "$REGISTER_LOG"; then
+        _reg_ok=1; break
+      fi
+    fi
+    # [start_ts 偏晚漏洞修复 2026-11-05] 实例 52 实测：restart 返回→属性填充延迟使
+    # start_ts 晚于实际注册时刻 1-2s，--since 过滤静默切掉注册行（240s 全空→误回滚
+    # 健康新版，"no backup"报错吓人）。宽窗口兜底从 else 分支改为**每轮必查**：
+    # grep 计数 ≥1 且 worker 进程活着即算注册成功（旧实例的历史注册行由
+    # "限域杀旧+restart"语义排除——restart 后同 unit 历史行仍在，故这里必须
+    # 双条件：宽窗口有注册行 && 当前进程 cmd 含本实例 venv 路径）。
+    if journalctl -u $SERVICE_NAME --since "-15 min" --no-pager 2>/dev/null | grep -q "$REGISTER_LOG"; then
+      if pgrep -f "${_pat:-$INSTALL_DIR}.*-m ${WORKER_MODULE_ESC}" >/dev/null 2>&1; then
+        _reg_ok=1; break
+      fi
+    fi
+    # 双源兜底: worker.log(nohup 场景 systemd 不写它, 恒为第二保险)
+    if tail -n 40 "$INSTALL_DIR/data/worker.log" 2>/dev/null | grep -q "$REGISTER_LOG"; then
+      _reg_ok=1; break
     fi
     sleep 3
   done
   if [ -n "$_reg_ok" ]; then
-    log "Started via systemd and registered (runtime-agent)"
+    log "Started via systemd and registered ($SERVICE_NAME)"
   elif restore_upgrade_backup systemd; then
-    log "New agent not registered within 30s -- rolled back (new version may not reach master)"
+    log "New agent registration timed out ($((_reg_timeout_loops * 3))s) -- rolled back to old version (new version may not reach the master)"
   else
-    log "New agent registration timed out and rollback failed, worker state abnormal; manual check: journalctl -u runtime-agent"
+    log "New agent registration timed out and rollback failed, worker state abnormal; manual check: journalctl -u $SERVICE_NAME"
   fi
 else
   # ---- 普通用户 或 容器环境（无 systemd）：nohup/setsid 后台启动 ----
   if [ "$ROOT_MODE" = "1" ] && ! _has_systemd; then
-    log "root mode but systemd unavailable (container?), falling back to nohup/setsid"
+    log "Root mode but systemd unavailable (container?), falling back to nohup/setsid"
     # 容器内 root 也需要 start-worker.sh，路径用 INSTALL_DIR 而非 /opt/grape 硬编码
     START_SCRIPT="$INSTALL_DIR/start-worker.sh"
   fi
@@ -665,7 +822,7 @@ export PATH="$INSTALL_DIR/.venv/bin:\$HOME/.opencode/bin:\$HOME/.local/bin:\$HOM
 # 按 euid 放行；非 root 安装不受影响（守卫只在 root 下生效）。
 if [ "\$(id -u)" = "0" ]; then export GRAPE_ALLOW_ROOT_ENGINE=1; fi
 set -a; . "$ENV_FILE"; set +a
-exec "$VENV/bin/python" -m src.domains.runtime.engine.agent
+exec "$VENV/bin/python" -m ${WORKER_MODULE}
 EOF
   chmod +x "$START_SCRIPT"
   # 停掉旧 daemon（start-worker.sh 的 bash 进程），防止旧 daemon 重启被杀的 worker → 双 daemon 循环竞争
@@ -683,7 +840,7 @@ EOF
   #    匹配本实例实际启动命令的前缀："$VENV/bin/python" ... -m src.domains.runtime.engine.agent
   #    （$VENV 展开为绝对路径，跨目录/跨用户天然隔离；pgrep -f 按子串匹配含路径）
   _pat="$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g')"
-  pkill -f "${_pat}.*-m src\.runtime\.agent" >/dev/null 2>&1 || true
+  pkill -f "${_pat}.*-m ${WORKER_MODULE_ESC}" >/dev/null 2>&1 || true
   sleep 1
   # 脱离终端启动（setsid + nohup，退出 ssh 不中断）
   setsid nohup "$START_SCRIPT" >> "$INSTALL_DIR/data/worker.log" 2>&1 < /dev/null &
@@ -693,27 +850,47 @@ EOF
   # 现在验证两件事：进程活着 + 30s 内注册成功（日志出现 registered）。
   # 注册成功才算升级完成；任一失败 → 恢复备份旧代码重启（旧版至少能连上 master）。
   sleep 3
-  if ! pgrep -f "${_pat}.*-m src\.runtime\.agent" >/dev/null 2>&1; then
+  if ! pgrep -f "${_pat}.*-m ${WORKER_MODULE_ESC}" >/dev/null 2>&1; then
     restore_upgrade_backup nohup || true
-    fail "New agent failed to start (rollback attempted); log: $INSTALL_DIR/data/worker.log"
+    fail "New agent failed to start (rollback attempted); logs: $INSTALL_DIR/data/worker.log"
   fi
   _reg_ok=""
-  for _i in $(seq 1 10); do
-    if tail -n 40 "$INSTALL_DIR/data/worker.log" 2>/dev/null | grep -q "RuntimeAgent registered"; then
+  # [沙箱 worker 注册窗口 2026-11-04] 同 systemd 分支：沙箱 worker 探测完才注册，30s
+  # 不够——扩到 240s；普通 worker 维持 30s。
+  _reg_timeout_loops=10
+  [ "$CRED_TYPE" = "sandbox" ] && _reg_timeout_loops=80
+  # [进度输出 2026-11-05] 静默轮询最长 240s，用户观感=卡住（实例 52 用户实测反馈）。
+  # 每 30s 打一行进度点。
+  for _i in $(seq 1 $_reg_timeout_loops); do
+    if [ $((_i % 10)) -eq 0 ]; then
+      log "waiting for worker registration... ($((_i * 3))s elapsed)"
+    fi
+    if tail -n 40 "$INSTALL_DIR/data/worker.log" 2>/dev/null | grep -q "$REGISTER_LOG"; then
       _reg_ok=1
       break
     fi
     sleep 3
   done
   if [ -n "$_reg_ok" ]; then
-    log "Started in background and registered (pid $(pgrep -f "${_pat}.*-m src\.runtime\.agent" | head -1)), log: $INSTALL_DIR/data/worker.log"
+    log "Started in background and registered (pid $(pgrep -f "${_pat}.*-m ${WORKER_MODULE_ESC}" | head -1)), log: $INSTALL_DIR/data/worker.log"
   elif restore_upgrade_backup nohup; then
-    log "New agent alive but not registered within 30s -- rolled back (new version may not reach master, e.g. upgrade during a 502 window)"
+    log "New agent process alive but not registered within $((_reg_timeout_loops * 3))s -- rolled back (new version may not reach the master, e.g. a 502 window upgrade)"
   else
     log "New agent registration timed out and rollback failed, worker state abnormal; manual check: $INSTALL_DIR/data/worker.log"
   fi
 fi
 
-log "Install complete! Verify registration:"
-log "  Check log: $INSTALL_DIR/data/worker.log  -> should show RuntimeAgent registered (with no engines it is 'registered: []', which is normal)"
-log "  Controller WebUI Workers page should show device $DEVICE"
+# ===== 7. 完成提示（#499: 引擎安装提示段整段删除——空引擎注册即成功，#471 C1
+# 重注册周期自动拾起后续安装的引擎，无需引导用户当场装引擎）=====
+if [ "$CRED_TYPE" = "sandbox" ]; then
+  log "Sandbox worker install complete! Verify:"
+  log "  Check log: $INSTALL_DIR/data/worker.log  -> should show cloud_worker registered + engine list"
+  log "  Controller WebUI: runtimes page should show device $DEVICE; sandbox page should list this platform s sandboxes/templates"
+  # [spec §7.1-③] 英文服务名提示(装的人当场知道怎么管理服务)
+  log "Service installed: $SERVICE_NAME (systemctl status/restart/stop it)"
+  log "  state dir: $CFG_DIR"
+else
+  log "Install complete! Verify registration:"
+  log "  Check log: $INSTALL_DIR/data/worker.log  -> should show RuntimeAgent registered (with no engines it is 'registered: []', which is normal)"
+  log "  Controller WebUI Workers page should show device $DEVICE"
+fi

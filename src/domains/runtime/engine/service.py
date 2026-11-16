@@ -95,6 +95,9 @@ _rt_db = _DomainDbProxy()
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用
 from src.domains.mgmt.user.db import get_task_token as _get_task_token
 
+# Issue #1938：级联收敛补偿的归因模型（枚举/终态映射/文案渲染/展示判定）
+from src.domains.runtime.engine import cascade as _cascade
+
 # R16.2.1: 统一 error_code → message 映射（task errors / dashboard 展示用）
 _R16_ERROR_MESSAGES = {
     "TOKEN_EXPIRED": "user token expired or revoked",
@@ -491,6 +494,7 @@ _TASK_COLUMNS = (
     "user_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
+    "pool_engine_uids, pool_selector, engine_uid, engine_name_snapshot, "
     "pool_engine_source, "
     "status, stream_ended, self_reported, pending_since, "
     "exit_code, result_text, errors, stderr, "
@@ -524,6 +528,194 @@ _TASK_SIGNAL_COLUMNS = ("stream_ended", "self_reported")
 
 _TABLE_COLS_CACHE: dict = {}
 _TABLE_COLS_CACHE_DB_ID = id(db)   # db 对象身份标记（测试 monkeypatch 换库 → 缓存自动失效）
+
+
+# Issue #605：引擎不在 pool_engine_ids 名单 → 认领静默跳过，此前无任何日志，
+# 导致 hermes 0 派发无法从服务端解释。补取证日志（60s 去重防 claim 轮询刷屏）。
+_pool_skip_log_cache: dict = {}
+_POOL_SKIP_LOG_INTERVAL = 60.0
+
+
+def _log_pool_skip_once(task_id, runtime_id: int, allowed):
+    """记录一次「引擎被 pool 名单挡在门外」的取证日志（每 task+engine 60s 至多一条）。"""
+    key = (task_id, runtime_id)
+    now = time.time()
+    try:
+        if _pool_skip_log_cache.get(key, 0.0) + _POOL_SKIP_LOG_INTERVAL > now:
+            return
+    except Exception:
+        pass
+    _pool_skip_log_cache[key] = now
+    if len(_pool_skip_log_cache) > 1000:   # 防泄漏：粗剪枝
+        _stale = [k for k, v in _pool_skip_log_cache.items() if v + _POOL_SKIP_LOG_INTERVAL < now]
+        for k in _stale:
+            _pool_skip_log_cache.pop(k, None)
+    log.info(f"claim pool filter: engine {runtime_id} not in pool_engine_ids={allowed} "
+             f"of task {task_id}, skip (Issue #605)")
+
+
+def _pool_filter_allows_uid(c, task_id: str, runtime_id: int) -> bool:
+    """Issue #1011 UC-C1：pool 名单 uid 轨等价守卫。
+
+    任务行 pool_engine_uids 非空时，认领引擎（runtime_id 解析出的 engine_uid）
+    在 uid 池内 → 放行（即使 pool_engine_ids 镜像缺失/未同步）。uid 池为空
+    （selector 模式 / legacy 任务）→ False（不干预，走既有 id 轨判定）。
+    Lock contract：调用方已持有 db_lock。
+    """
+    try:
+        row = c.execute(
+            "SELECT pool_engine_uids FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+        uids_raw = (row[0] or "") if row else ""
+        if not uids_raw:
+            return False
+        allowed_uids = json.loads(uids_raw)
+        if not isinstance(allowed_uids, list) or not allowed_uids:
+            return False
+        urow = c.execute(
+            "SELECT engine_uid FROM agent_runtimes WHERE id=?", (runtime_id,)).fetchone()
+        uid = (urow[0] or "").strip().lower() if urow else ""
+        return bool(uid) and uid in [str(u or "").strip().lower() for u in allowed_uids]
+    except Exception:
+        return False
+
+
+# ===== Issue #1208：claim 六层守卫第 ③ 级 selector 检查 =====
+# 层级表（§2.4，顺序即语义：能力 > 角色 > 特征(selector) > 名单 > 身份 > 隔离）：
+#   ① 能力行匹配（tag 精确 OR 'all'）      —— claim/claim_by_tag 第 1 级 SQL（既有）
+#   ② 角色硬守卫（role_tags，#658）        —— _engine_roles 检查（既有）
+#   ③ selector 检查（_selector_match）      —— _selector_guard_blocks（本方案新增）
+#   ④ pool 名单守卫（pool_engine_ids）      —— FIFO 跳过段（既有，selector 任务此列为空）
+#   ⑤ uid 池守卫（pool_engine_uids，空值不误杀）—— _pool_filter_allows_uid（#1011 既有）
+#   ⑥ scope 隔离（凭据 scope）              —— 认领 SQL scope 过滤（既有）
+
+def _selector_guard_blocks(c, task_id: str, runtime_id: int) -> bool:
+    """Issue #1208 claim 第 ③ 级守卫：pool_selector 非空时认领引擎必须满足 selector。
+
+    - 空 selector（None/空串/空 tags）→ False（不干预，legacy/uid 轨零变化）；
+    - 引擎 agent_tags 快照（engine_capabilities 含派生冒号行）与 selector
+      _selector_match 不命中 → True（调用方 FIFO 跳过 / bound fail-closed）；
+    - 守卫异常 fail-safe 放行（不误杀，与既有守卫容错口径一致）。
+    统一日志前缀 `claim guard [selector]`。
+    Lock contract：调用方已持有 db_lock。
+    """
+    try:
+        row = c.execute("SELECT pool_selector FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+        raw = (row[0] or "") if row else ""
+        if not raw:
+            return False
+        sel = json.loads(raw)
+        if not isinstance(sel, dict) or not (sel.get("tags") or []):
+            return False
+        from src.domains.runtime.engine.agent_tags import load_engine_tags
+        from src.domains.runtime.engine.engine_select import _selector_match
+        tags = load_engine_tags(c, runtime_id)
+        ok = _selector_match(sel, tags)
+        if not ok:
+            log.info(f"claim guard [selector]: engine {runtime_id} "
+                     f"tags={sorted(t for t in tags if ':' in t)} mismatch "
+                     f"pool_selector={raw} of task {task_id}, skip (Issue #1208)")
+        return not ok
+    except Exception as e:
+        log.warning(f"claim guard [selector] check failed for task {task_id}: {e}")
+        return False
+
+
+def _check_pool_selector_reachable(selector: dict, tag: str, repo_key: str = "",
+                                   task_user_id: int = 0) -> bool:
+    """Issue #1208：selector 可达性 = 有引擎满足 selector 且物理可达（#259 同一把尺子）。
+
+    尺子与 _check_pool_engines_reachable 完全一致：在线 + 心跳新鲜 + healthy +
+    probe 正常 + 有 tag 能力 + scope 匹配；引擎集合按 selector 圈（不读名单列）。
+    满槽不算不可达（Issue #306 同语义）。
+    Lock contract：调用方必须已持有 db_lock。
+    """
+    if not selector or not (selector.get("tags") or []):
+        return False
+    from src.domains.runtime.engine.engine_select import _selector_match
+    from src.domains.runtime.engine.agent_tags import load_engine_tags
+    from src.kernel.repo_key import from_repo_key
+    _repo_norm = (from_repo_key(repo_key) or "").strip()
+    try:
+        c = db.cursor()
+        c.execute("SELECT id, status, healthy, probe_status, last_seen_at, credential_id "
+                  "FROM agent_runtimes")
+        for rid, status, healthy, probe, last_seen, cred_id in c.fetchall():
+            if (status or "") != "online":
+                continue
+            _ls = last_seen or ""
+            if _ls:
+                from src.domains.runtime.engine.health import parse_dt as _parse_dt
+                _ts = _parse_dt(_ls)
+                if _ts is not None and time.time() - _ts > _RUNTIME_STALE_SECONDS:
+                    continue
+            else:
+                continue
+            if (healthy if healthy is not None else 0) != 1:
+                continue
+            if (probe or "") not in ("ok", "pending", ""):
+                continue
+            if not _selector_match(selector, load_engine_tags(c, rid)):
+                continue
+            c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND enabled=1 "
+                      "AND (tag=? OR tag='all') LIMIT 1", (rid, tag))
+            if not c.fetchone():
+                continue
+            c.execute(
+                "SELECT rc.scope, rc.owner_id, rc.owner_name FROM agent_runtimes r "
+                "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id WHERE r.id=?", (rid,))
+            sr = c.fetchone()
+            if sr:
+                _scope = sr[0] or "global"
+                _owner = sr[1] or ""
+                _owner_name = sr[2] or ""
+                if _scope == "repo" and _owner:
+                    _owner_norm = (from_repo_key(_owner) or "").strip()
+                    if _repo_norm and _owner_norm != _repo_norm:
+                        continue
+                elif _scope == "user" and task_user_id > 0 and _owner_name:
+                    try:
+                        c.execute("SELECT id FROM grape_accounts WHERE username=? AND id>0 LIMIT 1",
+                                  (_owner_name,))
+                        _ur = c.fetchone()
+                        if (_ur[0] if _ur else 0) != task_user_id:
+                            continue
+                    except Exception:
+                        pass
+            return True
+    except Exception as e:
+        log.warning(f"_check_pool_selector_reachable failed: {e}")
+    return False
+
+
+def _fail_task_selector(c, task_id: str, reason: str):
+    """Issue #1208：selector 任务判死（配置死/瞬时死文案分流，单函数封装）。
+
+    与 _fail_task_pool_unreachable 同语义（宁失败不跑飞，保留 pool_selector，
+    同步事件终态），reason 由 selector_enqueue_failure_reason 现算（重派不信旧判断：
+    redispatch 时重跑即重新校验）。
+    Lock contract：调用方必须已持有 db_lock。
+    """
+    from datetime import datetime, timezone
+    _now = datetime.now(timezone.utc).isoformat()
+    try:
+        c.execute(
+            "UPDATE agent_tasks SET status='failed', result_text='', errors=?, "
+            "completed_at=?, stream_ended=1, exit_code=COALESCE(exit_code, 1) "
+            "WHERE id=? AND status='queued'",
+            (reason, _now, task_id))
+        if c.rowcount:
+            db.commit()
+            log.warning(f"task {task_id} failed: selector dead-end (Issue #1208): {reason}")
+            c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
+            _es = c.fetchone()
+            if _es and _es[0]:
+                _sync_event_failed(_es[0], reason, completed_at=_now)
+    except Exception as _e:
+        log.warning(f"_fail_task_selector failed for task {task_id}: {_e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def _table_columns(table: str) -> set:
@@ -911,10 +1103,10 @@ def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "
             _full = ""
         if _full:
             from src.domains.runtime.engine.skill_materialize import validate_skill_dir
-            # validate_skill_dir 返回 (ok, missing, extra, version_drift)；arch 线此处
-            # 仍是旧的两元解包，任何可解析到本地目录的技能都会 ValueError 打断派发
-            # （本轮移植中实测复现），改为可变长解包。
-            ok, missing, *_rest = validate_skill_dir(os.path.dirname(_full))
+            # [修复 2026-11-13] validate_skill_dir 升级为 4 返回值 (ok, missing, extra, version_drift)
+            # 后此处漏对齐（原 2 元解包），带本地技能目录的场景建单一律 ValueError
+            # 「too many values to unpack」→ create_task sync pipeline trigger failed → 建单链断（E2E #11 实证）。
+            ok, missing, _extra, _vd = validate_skill_dir(os.path.dirname(_full))
             if ok:
                 return True, "local skill dir ok", sid
             _st_note = "storage unavailable; " if _storage_unavailable else ""
@@ -947,7 +1139,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
                  project_info_file_urls=None, knowledge_file_urls=None,
                  pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids="",
-                 pool_engine_source=""):
+                 pool_engine_source="", pool_selector=""):
     """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。
 
     引擎池（agent-cluster-design.md §4.1/§4.2）：runtime_id=0 + pool_agent_type 非空
@@ -1109,7 +1301,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     _task_span = None
     _task_trace_context = ""
     try:
-        from src.kernel.otel import start_task_span, snapshot_trace_context
+        from src.observability.otel import start_task_span, snapshot_trace_context
         _pipeline_tid = ""
         if repo_key and issue_id:
             try:
@@ -1130,6 +1322,33 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     except Exception:
         _task_span = None
         _task_trace_context = ""
+    # Issue #646：任务落库前的引擎引用快照（uid + 展示名 + pool uid 镜像；
+    # 未迁移旧库/引擎已删 → (None,'','')，不阻断任务创建）
+    try:
+        from src.domains.mgmt.user.db import engine_ref_snapshot
+        # Issue #1208：selector 任务两池列均空（pool_selector 承载圈池语义），
+        # uid 镜像无源 → 不做快照（engine_ref_snapshot 空串入参返回空镜像）
+        _snap = engine_ref_snapshot(runtime_id, pool_engine_ids or "")
+        from src.kernel.otel import start_task_span, snapshot_trace_context
+        _pipeline_tid = ""
+        if repo_key and issue_id:
+            try:
+                from src.domains.insight.observability.trace import pipeline_trace_id
+                _pipeline_tid = pipeline_trace_id(repo_key, issue_id, task_id)
+            except Exception:
+                pass
+        # span 名带业务标识（task_id + agent_type）：trace 列表的 rootTraceName 从抽象的
+        # "task.enqueue" 变成可读的 "task t_xxx vod enqueue"——排查时按 SeqID/task_id 一眼定位
+        _task_span, _ = start_task_span(f"task {task_id} {agent_type or 'task'} enqueue", {
+            "task_id": task_id, "agent_type": agent_type, "skill": skill,
+            "repo_key": repo_key, "issue_id": issue_id, "runtime_id": runtime_id,
+            "pool_tag": pool_tag, "pipeline_trace_id": _pipeline_tid,
+            "event_seq": event_seq, "event_type": event_type,
+        })
+        if _task_span is not None:
+            _task_trace_context = snapshot_trace_context(_task_span)
+    except Exception:
+        _snap = (None, "", "")
     with db_lock:
         c = _rt_db.cursor()
         _avail = _table_columns("agent_tasks")
@@ -1151,6 +1370,11 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             "project_info_file_urls": json.dumps(project_info_file_urls), "knowledge_file_urls": json.dumps(knowledge_file_urls),
             "attempts": 0, "pool_agent_type": pool_agent_type or "", "affinity_runtime_id": affinity_runtime_id or 0,
             "pool_tag": pool_tag or "", "pool_engine_ids": pool_engine_ids or "",
+            # Issue #646：uid 引用 + 引擎展示名快照（引擎删除后历史可读；失败不阻断任务创建）
+            "pool_engine_uids": _snap[2], "engine_uid": _snap[0], "engine_name_snapshot": _snap[1],
+            # Issue #1208：selector 标签池（JSON {"tags":[...]}；与两池列三列语义互斥，
+            # 未迁移旧库（无列）经 _avail 过滤自然降级）
+            "pool_selector": pool_selector or "",
             "pool_engine_source": pool_engine_source or "",
             "status": "queued", "exit_code": None, "result_text": "", "errors": "", "stderr": "",
             "usage_json": "{}", "started_at": None, "completed_at": None,
@@ -1269,7 +1493,7 @@ def _issue_num(issue_id) -> int:
     return int(m.group(1)) if m else 0
 
 
-def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
+def claim(runtime_id, expected_task_id=None, expected_event_seq=None, deterministic_only: bool = False) -> dict | None:
     """原子抢单 + 串行槽（见 multi-issue-isolation-design.md §3.3 / concurrency-design.md §2.3）。
 
     串行粒度（M2）：任务带 issue_session_id → 同 Issue 严格串行（跨 Issue 并行）；
@@ -1390,27 +1614,68 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
             except Exception as _e:
                 log.warning(f"recover stale dispatched failed: {_e}")
 
-            # 确定路由：① 定向任务（runtime_id=?）② 池任务（runtime_id=0 + pool_agent_type，
-            # pool_engine_ids 为空或包含本引擎即可领；
-            # 回收逻辑会把 dispatched 超时任务归零转池任务，claim 必须兼容，否则永久死任务）
-            #
-            # 插件模式：广播任务只能走 claim_by_tag（标签匹配），legacy claim 不认领广播任务，
-            # 避免标签不匹配的机器通过兜底渠道抢到任务。
-            c.execute("""
-                SELECT id FROM agent_tasks
-                WHERE runtime_id=? AND status='queued'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM agent_tasks a2
-                    WHERE a2.status IN ('dispatched','running')
-                      AND (
-                        (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
-                        OR
-                        (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+            if expected_task_id is not None:
+                # Issue #520 bound claim：expected 身份在 db_lock 临界区内原子校验。
+                # 候选骨架与 FIFO 完全一致（定向 runtime_id / 共享池 / 串行槽 / queued）
+                # + expected 精确匹配；未命中 → 无任务，绝不回退 FIFO 领其他任务。
+                c.execute("""
+                    SELECT id FROM agent_tasks
+                    WHERE id=? AND event_seq=? AND status='queued'
+                      AND (runtime_id=? OR (runtime_id=0 AND pool_agent_type != ''))
+                      AND NOT EXISTS (
+                        SELECT 1 FROM agent_tasks a2
+                        WHERE a2.status IN ('dispatched','running')
+                          AND (
+                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                            OR
+                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                          )
                       )
-                  )
-                ORDER BY created_at ASC LIMIT 1
-            """, (runtime_id,))
-            row = c.fetchone()
+                    LIMIT 1
+                """, (expected_task_id, expected_event_seq, runtime_id))
+                row = c.fetchone()
+                if not row:
+                    db.commit()
+                    return None
+                # pool_engine_ids 广播范围守卫：目标任务不含本引擎 → fail-closed（不尝试其他任务）
+                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (row[0],))
+                _pe_row = c.fetchone()
+                if _pe_row and _pe_row[0]:
+                    try:
+                        _allowed = json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            # Issue #1011 UC-C1：uid 池轨等价守卫（uid 在 pool_engine_uids
+                            # 名单内 → 放行；ids 镜像缺失/不同步时不误杀 uid 池任务）
+                            if _pool_filter_allows_uid(c, row[0], runtime_id):
+                                _allowed = None
+                        if _allowed and runtime_id not in _allowed:
+                            db.commit()
+                            return None
+                    except Exception:
+                        pass
+                task_id = row[0]
+            else:
+                # 确定路由：① 定向任务（runtime_id=?）② 池任务（runtime_id=0 + pool_agent_type，
+                # pool_engine_ids 为空或包含本引擎即可领；
+                # 回收逻辑会把 dispatched 超时任务归零转池任务，claim 必须兼容，否则永久死任务）
+                #
+                # 插件模式：广播任务只能走 claim_by_tag（标签匹配），legacy claim 不认领广播任务，
+                # 避免标签不匹配的机器通过兜底渠道抢到任务。
+                c.execute("""
+                    SELECT id FROM agent_tasks
+                    WHERE runtime_id=? AND status='queued'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM agent_tasks a2
+                        WHERE a2.status IN ('dispatched','running')
+                          AND (
+                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                            OR
+                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                          )
+                      )
+                    ORDER BY created_at ASC LIMIT 1
+                """, (runtime_id,))
+                row = c.fetchone()
             if not row:
                 _is_plugin = False
                 try:
@@ -1445,13 +1710,28 @@ def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
             _tried_ids = [task_id]
             _max_tries = 20
             while True:
+                if expected_task_id is not None:
+                    # Issue #1208 ③：selector 守卫（bound 分支 fail-closed，与 claim_by_tag 对齐；
+                    # 否则 expected 定向认领可绕过 selector 圈池）
+                    if _selector_guard_blocks(c, task_id, runtime_id):
+                        db.commit()
+                        return None
+                    break  # Issue #520 bound claim：目标已原子校验（含 pool_engine_ids 守卫），不进入 FIFO 跳过循环
                 c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
                 _pe_row = c.fetchone()
                 _skip = False
-                if _pe_row and _pe_row[0]:
+                # Issue #1208 ③：selector 守卫（同 claim_by_tag，FIFO 跳过不阻塞）
+                if _selector_guard_blocks(c, task_id, runtime_id):
+                    _skip = True
+                if not _skip and _pe_row and _pe_row[0]:
                     import json as _json
                     try:
                         _allowed = _json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            # Issue #1011 UC-C1：uid 池轨等价守卫（uid 在 pool_engine_uids
+                            # 名单内 → 放行，ids 镜像缺失/不同步不误杀 uid 池任务）
+                            if _pool_filter_allows_uid(c, task_id, runtime_id):
+                                _allowed = None
                         if _allowed and runtime_id not in _allowed:
                             # 兜底：检查 pool_engine_ids 中的引擎是否全部不可达
                             # 不可达 = 离线 / 无对应 tag 能力 / scope 不匹配
@@ -1654,9 +1934,21 @@ def get_task(task_id) -> dict | None:
     with db_lock:
         c = _rt_db.cursor()
         _cols = [x for x in _TASK_COLUMNS_LIST if x in _table_columns("agent_tasks")]
-        c.execute(f"SELECT {', '.join(_cols)} FROM agent_tasks WHERE id=?", (task_id,))
+        # [沙箱迁移 i7] JOIN agent_runtimes 返回通用 task dict（带 runtime 属性）——
+        # sandbox_provider/runtime_info 是 cloud_worker build_context 的云沙箱路由字段
+        # （provider=cubesandbox + runtime_info{template_id,...}）；本机引擎 provider 为空 → bwrap。
+        # 原 main 版只 SELECT t.*，claim 响应缺这两个字段 → 云任务误走 bwrap 拒绝执行。
+        c.execute(
+            f"SELECT {', '.join(f't.{col}' for col in _cols)}, "
+            f"r.provider as sandbox_provider, r.runtime_type, r.runtime_info, r.name as runtime_name "
+            f"FROM agent_tasks t "
+            f"LEFT JOIN agent_runtimes r ON t.runtime_id = r.id "
+            f"WHERE t.id=?",
+            (task_id,))
         row = c.fetchone()
-    return dict(zip(_cols, row)) if row else None
+    if not row:
+        return None
+    return dict(zip(_cols + ["sandbox_provider", "runtime_type", "runtime_info", "runtime_name"], row))
 
 
 def _has_verified_executor(probe_status: str, worker_version: str,
@@ -1684,7 +1976,7 @@ def _has_verified_executor(probe_status: str, worker_version: str,
     return bool(worker_version) or probe_status not in ("pending", "failed")
 
 
-def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
+def claim_by_tag(tag: str, runtime_id: int, expected_task_id=None, expected_event_seq=None) -> dict | None:
     """按标签认领任务 + scope 隔离（event-dispatch-redesign-v2.md §2.4）
 
     scope=global → 可认领所有仓库的 queued 任务
@@ -1799,27 +2091,101 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                     "    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
                     "  )) ORDER BY created_at ASC LIMIT 1"
                 )
-            c.execute(sql, tuple(params))
-            task_row = c.fetchone()
-            if not task_row:
-                return None
-            task_id = task_row[0]
+            if expected_task_id is not None:
+                # Issue #520 bound claim（tag 版）：expected 身份 + 原有 tag/scope/串行槽
+                # 条件在同一 db_lock 临界区原子校验（scope SQL 与 FIFO 完全同源，仅在
+                # WHERE 尾部追加 expected 精确匹配）；未命中 → 无任务，绝不回退 FIFO。
+                c.execute(
+                    sql.replace(" ORDER BY", " AND id=? AND event_seq=? ORDER BY"),
+                    tuple(list(params) + [expected_task_id, expected_event_seq]))
+                task_row = c.fetchone()
+                if not task_row:
+                    return None
+                task_id = task_row[0]
+                # pool_engine_ids 广播范围守卫：目标不含本引擎 → fail-closed（不尝试其他任务）
+                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+                _pe_row = c.fetchone()
+                if _pe_row and _pe_row[0]:
+                    try:
+                        _allowed = json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            # Issue #1011 UC-C1：uid 池轨等价守卫（同 claim 处）
+                            if _pool_filter_allows_uid(c, task_id, runtime_id):
+                                _allowed = None
+                        if _allowed and runtime_id not in _allowed:
+                            return None
+                    except Exception:
+                        pass
+            else:
+                c.execute(sql, tuple(params))
+                task_row = c.fetchone()
+                if not task_row:
+                    return None
+                task_id = task_row[0]
 
             # pool_engine_ids 限定广播范围：非空时只有列表中的引擎能认领
             # 修复（2026-08-29）：原代码 return None 会阻塞队列——队首任务如果不匹配，
             # 后面的任务永远不会被尝试。改为循环跳过不匹配的任务，继续尝试下一个。
             # pool_engine_ids 是 JSON 数组如 "[76]"，SQL 难以直接过滤，
             # 这里用 Python 循环 LIMIT N 逐个检查。
+            # Issue #658：认领侧角色守卫——引擎有效角色集（显式 role_tags > 引擎类型默认映射）
+            # 非空时，任务 pool_tag（已知节点角色）必须 ∈ 角色集才可认领（堵全量广播漏洞：
+            # #90 vod 任务被 codearts 引擎按 tag='all' 认领 → rc=1）。角色集为 None
+            # （未知类型且未显式声明）不限制；pool_tag 非已知角色（自定义路由 tag）不受约束。
+            _engine_roles = None
+            try:
+                from src.domains.runtime.engine.engine_select import engine_role_tags as _ert, is_agent_role as _is_role
+                _er_row = c.execute(
+                    "SELECT name, COALESCE(role_tags,'') FROM agent_runtimes WHERE id=?",
+                    (runtime_id,)).fetchone()
+                if _er_row:
+                    _engine_roles = _ert(_er_row[0] or "", _er_row[1] or "")
+            except Exception as _ere:
+                log.warning(f"claim_by_tag: role tags lookup failed for engine {runtime_id}: {_ere}")
+                _engine_roles = None
             _tried_ids = [task_id]
             _max_tries = 20  # 防止全表扫描
             while True:
-                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+                if expected_task_id is not None:
+                    # Issue #520 bound claim：目标已原子校验（含 pool_engine_ids 守卫），
+                    # 此处补角色硬校验：不匹配 → fail-closed（不尝试其他任务）
+                    if _engine_roles is not None:
+                        _bt_row = c.execute("SELECT pool_tag FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                        _bt_tag = (_bt_row[0] or "").strip().lower() if _bt_row else ""
+                        if _is_role(_bt_tag) and _bt_tag not in _engine_roles:
+                            log.warning(f"claim_by_tag: engine {runtime_id} roles={_engine_roles} "
+                                        f"mismatch task {task_id} pool_tag={_bt_tag} (Issue #658), reject bound claim")
+                            return None
+                    # Issue #1208 ③：selector 守卫（bound fail-closed，不尝试其他任务；
+                    # 层级在角色②之后、名单④之前——顺序即语义）
+                    if _selector_guard_blocks(c, task_id, runtime_id):
+                        return None
+                    break
+                c.execute("SELECT pool_engine_ids, pool_tag FROM agent_tasks WHERE id=?", (task_id,))
                 _pe_row = c.fetchone()
+                _task_pool_tag = ""
+                if _pe_row:
+                    _task_pool_tag = (_pe_row[1] or "").strip().lower()
                 _skip = False
+                if (_engine_roles is not None and _is_role(_task_pool_tag)
+                        and _task_pool_tag not in _engine_roles):
+                    # Issue #658：角色不匹配 → 跳过该任务继续尝试下一个（与 pool 名单
+                    # 守卫同款跳过语义，不阻塞队列，也绝不认领不匹配角色任务）
+                    log.info(f"claim_by_tag: engine {runtime_id} roles={_engine_roles} mismatch "
+                             f"task {task_id} pool_tag={_task_pool_tag} (Issue #658), skip")
+                    _skip = True
+                # Issue #1208 ③：selector 守卫（层级在角色②之后、名单④之前——顺序即语义）——
+                # 不匹配跳过该任务继续尝试下一个（与 #658 同款跳过语义，不阻塞队列）
+                if not _skip and _selector_guard_blocks(c, task_id, runtime_id):
+                    _skip = True
                 if _pe_row and _pe_row[0]:
                     import json as _json
                     try:
                         _allowed = _json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            # Issue #1011 UC-C1：uid 池轨等价守卫（同 claim 处）
+                            if _pool_filter_allows_uid(c, task_id, runtime_id):
+                                _allowed = None
                         if _allowed and runtime_id not in _allowed:
                             # 兜底：检查 pool_engine_ids 中的引擎是否全部不可达
                             # 不可达 = 离线 / 无对应 tag 能力 / scope 不匹配
@@ -2162,22 +2528,59 @@ def validate_run_token(task: dict | None, run_token: str = "") -> str:
 
 _TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 
-# Issue #587: 任务终态 → 事件终态级联收敛的 result 文案
-_EVENT_CASCADE_RESULTS = {
-    "cancelled": "任务已取消：级联收敛（cancel 不作为业务通过，保留事件独立终态）",
-    "failed": "任务失败：级联收敛（update_task_status 补偿，未收到详写终态回报）",
-    "completed": "任务已完成：级联收敛（回报丢失补偿）",
-}
+# Issue #1938：级联收敛补偿的归因模型（枚举/终态映射/文案渲染/展示判定）集中在 cascade.py。
+# 原 #587 的实现把固定文案「任务已完成：级联收敛（回报丢失补偿）」直接写进 events.result，
+# 而该位置在事件列表/Issue 处理记录里就是「Agent 答复结论」——补偿伪装成 Agent 结论且不可归因。
+# 现改为结构化落库（cascade_reason/report_missing/triggered_by + 原始任务终态 + 最后已知事件状态），
+# 文案由字段渲染；有真实结论（agent_tasks.result_text）时优先回填，取不到才写补偿文案。
+
+
+def _cascade_real_result(cursor, event_seq: int, task_result_text: str = None,
+                         task_id: str = "") -> str:
+    """取本次补偿可回填的真实结论（取不到返回空串）。
+
+    优先用调用方传入的 `task_result_text`（同事务内刚 UPDATE 进 agent_tasks 的值），
+    否则按 (event_seq, task_id) 反查本任务行的 result_text（同事务同游标，可见本次写入）。
+    任务 id 必须限定：同一 event_seq 可能有多条重试任务，只按 event_seq 取最新会把
+    **另一条任务**的结论回填到本事件（结论错配，Issue #1938 QA 复审指出）。
+    已是补偿文案的文本不再当作「真实结论」回填（防自我复制成假答复）。
+    """
+    _cand = (task_result_text or "").strip()
+    if not _cand:
+        try:
+            _sql = ("SELECT result_text FROM agent_tasks WHERE event_seq=? "
+                    "AND result_text IS NOT NULL AND result_text!='' ")
+            _params: tuple = (event_seq,)
+            if task_id:
+                _sql += "AND id=? "
+                _params = (event_seq, task_id)
+            _row = cursor.execute(
+                _sql + "ORDER BY created_at DESC LIMIT 1", _params).fetchone()
+            _cand = ((_row[0] if _row else "") or "").strip()
+        except Exception as _e:
+            log.warning(f"_cascade_real_result: lookup failed for seq={event_seq} task={task_id}: {_e}")
+            return ""
+    if not _cand or _cascade.is_cascade_result_text(_cand):
+        return ""
+    return _cand
 
 
 def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int = None,
-                            result_text: str = ""):
-    """Issue #587: 任务终态级联事件收敛（事务内，幂等，终态保护）。
+                            triggered_by: str = _cascade.TRIGGER_UPDATE_TASK_STATUS,
+                            task_status: str = "", task_result_text: str = None,
+                            task_id: str = ""):
+    """Issue #587/#1938: 任务终态级联事件收敛（事务内，幂等，终态保护）。
 
     仅当事件仍处于活跃态（pending/running/dispatched）时同步为任务终态；
     已终态事件不被另一终态覆盖（与 event_store.update_event_status 同语义）。
-    `result_text`：任务已自报（self_reported=1）时传入真实结论——终态回写用它，
-    避免成功任务被盖上「回报丢失补偿」的兜底文案（事件侧真实结果还会被终态保护拒写）。
+
+    Issue #1938 变更：
+    - 补偿结论结构化落库（cascade_reason / report_missing / triggered_by / 原始任务终态 /
+      最后已知事件状态），文案由 :mod:`cascade` 由字段渲染，**不再有硬编码常量与拼串兜底**；
+    - 覆盖全部 ``TASK_TERMINAL_STATUSES``（含 ``timeout_failed``）：事件终态映射 `failed`、
+      exit_code 恒非 0，纠正「超时失败被记成 completed/0」的数据失真；
+    - 能取到真实结论（agent_tasks.result_text）时优先回填，取不到才写补偿文案。
+
     返回 True 表示本次发生收敛。
     """
     try:
@@ -2185,38 +2588,46 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
         row = cursor.fetchone()
         if not row:
             return False
-        if row[0] in _TERMINAL_STATUSES:
+        _prev_event_status = row[0] or ""
+        if _prev_event_status in _TERMINAL_STATUSES:
             return False
-        _now = datetime.now(timezone.utc).isoformat()
-        _result = _EVENT_CASCADE_RESULTS.get(status, f"级联收敛：任务{status}")
-        _self_report = (result_text or "").strip()
-        if status == "completed" and _self_report:
-            # 自报结果优先（截断与 event_store 终态回写同口径），仅在缺失时才用兜底文案
-            _result = _self_report[:8000]
-        if status == "cancelled":
-            cursor.execute(
-                "UPDATE events SET status='cancelled', exit_code=-1, completed_at=?, result=? WHERE seq=?",
-                (_now, _result, event_seq))
-        elif status == "failed":
-            cursor.execute(
-                "UPDATE events SET status='failed', exit_code=COALESCE(?, 1), completed_at=?, result=? WHERE seq=?",
-                (exit_code, _now, _result, event_seq))
+        _task_status = (task_status or status or "").strip()
+        _event_status, _event_exit = _cascade.cascade_event_terminal_state(_task_status, exit_code)
+        _real = _cascade_real_result(cursor, event_seq, task_result_text, task_id=task_id)
+        if _real:
+            _reason = _cascade.REASON_BACKFILLED
+            _result = _real
+            _structured = _real if _cascade.is_structured_agent_output(_real) else None
         else:
-            cursor.execute(
-                "UPDATE events SET status='completed', exit_code=0, completed_at=?, result=? WHERE seq=?",
-                (_now, _result, event_seq))
+            _reason = _cascade.REASON_SYNTHESIZED
+            _result = _cascade.build_cascade_result(
+                task_status=_task_status, prev_event_status=_prev_event_status,
+                triggered_by=triggered_by)
+            _structured = None
+        _now = datetime.now(timezone.utc).isoformat()
+        cursor.execute(
+            "UPDATE events SET status=?, exit_code=?, completed_at=?, result=?, "
+            "structured_output=COALESCE(?, structured_output), "
+            "cascade_reason=?, report_missing=1, triggered_by=?, "
+            "cascade_task_status=?, cascade_prev_event_status=? WHERE seq=?",
+            (_event_status, _event_exit, _now, _result, _structured,
+             _reason, (triggered_by or ""), _task_status, _prev_event_status, event_seq))
         # Issue #587 审查修复：级联收敛须同步释放 event_active_guard（与
         # update_event_status 终态路径语义一致），否则守卫残留只能靠 TTL 30min 兜底。
         # 在同一事务/游标内完成，避免嵌套获取不可重入的 db_lock。
         try:
             _g = cursor.execute(
-                "SELECT repo_key, issue_id, agent_type FROM events WHERE seq=?",
+                "SELECT repo_key, issue_id, agent_type, scene_id FROM events WHERE seq=?",
                 (event_seq,)).fetchone()
             if _g:
                 cursor.execute(
                     "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=? "
                     "AND agent_type=? AND seq=?",
                     (_g[0], _g[1] or "#0", _g[2] or "", event_seq))
+                # Issue #1938：按 agent / 场景统计「回报丢失补偿」次数（可观测）
+                _cascade.record_compensation(
+                    agent_type=_g[2] or "", scene_id=(_g[3] if len(_g) > 3 else "") or "",
+                    triggered_by=triggered_by, task_status=_task_status)
         except Exception as _ge:
             log.warning(f"_cascade_event_terminal: guard release failed for seq={event_seq}: {_ge}")
         return True
@@ -2265,6 +2676,10 @@ def converge_event_to_task(task_id: str) -> dict:
 
     供管理端补偿重试端点（routes/runtime.py /tasks/{id}/converge-event）与
     sweeper 兜底使用：任务已终态但事件仍 running/pending（回报丢失）时收敛。
+
+    Issue #1938：终态判定改用 ``TASK_TERMINAL_STATUSES``（``timeout_failed`` 任务同样可补偿，
+    此前会被误判 task_not_terminal → 超时任务的事件只能等 TTL 兜底）；补偿归因记为
+    ``triggered_by='converge_event'``，并透传真实结论用于回填。
     """
     task = get_task(task_id)
     if not task:
@@ -2273,7 +2688,7 @@ def converge_event_to_task(task_id: str) -> dict:
     _task_status = task.get("status") or ""
     if not _seq:
         return {"status": "no_event", "task_id": task_id, "task_status": _task_status}
-    if _task_status not in _TERMINAL_STATUSES:
+    if _task_status not in TASK_TERMINAL_STATUSES:
         return {"status": "task_not_terminal", "task_id": task_id,
                 "task_status": _task_status, "event_seq": _seq}
     with db_lock:
@@ -2281,9 +2696,22 @@ def converge_event_to_task(task_id: str) -> dict:
         c.execute("SELECT status FROM events WHERE seq=?", (_seq,))
         row = c.fetchone()
         before = row[0] if row else "(missing)"
-        converged = _cascade_event_terminal(c, _seq, _task_status,
-                                            exit_code=task.get("exit_code"))
-        _rt_db.commit()
+        converged = _cascade_event_terminal(
+            c, _seq, _task_status, exit_code=task.get("exit_code"),
+            triggered_by=_cascade.TRIGGER_CONVERGE_EVENT,
+            task_result_text=task.get("result_text") or "",
+            task_id=task_id)
+        db.commit()
+        # 回读真实事件终态与归因字段（老库缺列时降级为 before，不阻断补偿主流程）
+        try:
+            _after_row = c.execute(
+                "SELECT status, cascade_reason, report_missing, triggered_by, "
+                "cascade_task_status, cascade_prev_event_status FROM events WHERE seq=?",
+                (_seq,)).fetchone()
+        except Exception as _re:
+            log.warning(f"converge_event_to_task: attribution readback failed seq={_seq}: {_re}")
+            _after_row = None
+    _after = (_after_row[0] if _after_row else before)
     # Issue #1667：直接 SQL 收敛终态后补挂排队 drain（旁路兜底）
     if converged:
         try:
@@ -2294,11 +2722,21 @@ def converge_event_to_task(task_id: str) -> dict:
     return {"status": "converged" if converged else "noop",
             "task_id": task_id, "task_status": _task_status, "event_seq": _seq,
             "event_status_before": before,
-            "event_status_after": _task_status if converged else before}
+            "event_status_after": _after,
+            "cascade_reason": (_after_row[1] if _after_row else "") or "",
+            "report_missing": int((_after_row[2] if _after_row else 0) or 0),
+            "triggered_by": (_after_row[3] if _after_row else "") or "",
+            "cascade_task_status": (_after_row[4] if _after_row else "") or "",
+            "cascade_prev_event_status": (_after_row[5] if _after_row else "") or ""}
 
 
 def update_task_status(task_id, status, **kw):
-    """终态幂等(重放安全): 已终态则不再更新(见 tech-impl 2.2)."""
+    """终态幂等(重放安全): 已终态则不再更新(见 tech-impl 2.2).
+
+    Issue #1938：可选关键字 ``cascade_trigger``（``update_task_status`` / ``sweeper``）
+    用于给事件级联收敛补偿归因，不落 agent_tasks 列（不在 SQL 列清单内，安全忽略）。
+    """
+    _cascade_trigger = kw.get("cascade_trigger") or _cascade.TRIGGER_UPDATE_TASK_STATUS
     with db_lock:
         c = _rt_db.cursor()
         c.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,))
@@ -2339,27 +2777,25 @@ def update_task_status(task_id, status, **kw):
         # cancel_task / 直接判死路径（pool unreachable 等）此前只写 agent_tasks 不回写 events，
         # 事件长期 running → A2A 去重无限期阻断同角色新交接。complete_task/fail_task 的
         # 详写终态路径（update_event_complete 先行）在此为 no-op（事件已终态）。
+        # Issue #1938：触发集合扩到全部 TASK_TERMINAL_STATUSES（含 timeout_failed）。此前只覆盖
+        # completed/failed/cancelled，超时失败任务的事件永远停活跃态，只能靠 event_active_guard
+        # TTL 兜底；补偿结论按 cascade.py 的终态映射落库（timeout_failed → failed + 非零 exit_code）。
         _cascaded_seq = 0
-        if status in _TERMINAL_STATUSES:
+        if status in TASK_TERMINAL_STATUSES:
             try:
                 _evt_row = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?",
                                      (task_id,)).fetchone()
                 if _evt_row and _evt_row[0]:
-                    # 自报优先：agent 已通过 `tasks complete` 交过结论时，级联回写用真实结果，
-                    # 不要盖「回报丢失补偿」（8380/8381 这类成功任务曾被误标成回报丢失）。
-                    _self_txt = ""
-                    try:
-                        _srow = c.execute(
-                            "SELECT self_reported, result_text FROM agent_tasks WHERE id=?",
-                            (task_id,)).fetchone()
-                        if _srow and int(_srow[0] or 0) == 1 and (_srow[1] or "").strip():
-                            _self_txt = _srow[1]
-                    except Exception:
-                        _self_txt = ""
-                    if _cascade_event_terminal(c, _evt_row[0], status, result_text=_self_txt):
+                    if _cascade_event_terminal(c, _evt_row[0], status,
+                                               exit_code=kw.get("exit_code"),
+                                               triggered_by=_cascade_trigger,
+                                               task_status=status,
+                                               task_result_text=kw.get("result_text"),
+                                               task_id=task_id):
                         _cascaded_seq = _evt_row[0]
                         log.info(f"update_task_status: cascaded event {_evt_row[0]} -> "
-                                 f"{status} for task {task_id} (Issue #587 convergence)")
+                                 f"{status} for task {task_id} "
+                                 f"(Issue #587 convergence, trigger={_cascade_trigger})")
             except Exception as _ce:
                 log.warning(f"update_task_status: terminal cascade failed for task {task_id}: {_ce}")
         _rt_db.commit()
@@ -4380,6 +4816,45 @@ def _check_stale_queued_tasks():
                 "AND created_at <= ?",
                 (cutoff,))
             stale_tasks = c.fetchall()
+            # Issue #1208：selector 任务超时降级段（两池列为空，按 pool_selector 圈池判定；
+            # 文案分流走单函数现算——重派/重判不信旧结论）
+            try:
+                c.execute(
+                    "SELECT id, pool_selector, pool_tag, repo_key, user_id FROM agent_tasks "
+                    "WHERE status='queued' AND pool_selector IS NOT NULL AND pool_selector!='' "
+                    "AND created_at <= ?",
+                    (cutoff,))
+                for tid, psel, task_tag, task_repo, task_uid in c.fetchall():
+                    try:
+                        _sel = json.loads(psel)
+                    except Exception:
+                        continue
+                    if not isinstance(_sel, dict) or not (_sel.get("tags") or []):
+                        continue
+                    from src.domains.runtime.engine.engine_select import selector_enqueue_failure_reason as _sefr
+                    _reason = ""
+                    try:
+                        _reason = _sefr(_sel, task_tag or "", repo_key=task_repo or "",
+                                        user_id=task_uid or 0)
+                    except Exception as _re:
+                        log.warning(f"_check_stale_queued_tasks: selector reason failed for {tid}: {_re}")
+                    # 与 id 轨「池中有健康引擎 → 继续等待」语义对齐（审查整改）：
+                    # - 无失败原因（存在健康命中引擎）→ 继续等待，不误杀；
+                    # - 有失败原因但引擎物理可达（低健康瞬态）→ 仍在限时等待语义内，继续等待；
+                    # 仅当失败原因非空且无可达引擎时才判死（_check_pool_selector_reachable 接线）。
+                    if not _reason:
+                        continue
+                    try:
+                        _reachable = _check_pool_selector_reachable(
+                            _sel, task_tag or "", repo_key=task_repo or "", task_user_id=task_uid or 0)
+                    except Exception as _rc:
+                        log.warning(f"_check_stale_queued_tasks: selector reachable check failed for {tid}: {_rc}")
+                        _reachable = False
+                    if _reachable:
+                        continue
+                    _fail_task_selector(c, tid, _reason)
+            except Exception as _se1208:
+                log.warning(f"_check_stale_queued_tasks: selector sweep failed: {_se1208}")
             if not stale_tasks:
                 return
             import json as _json

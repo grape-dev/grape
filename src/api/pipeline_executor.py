@@ -230,6 +230,7 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
         # 传 54 给 coding），直接用它会绕过 tag 限制把任务定向到 0003。
         # 非 plugin 模式：保留原逻辑（有 runtime_id 直接用，无则 pick_engine）。
         _pool_eids = ""
+        _pool_sel_a2a = ""
         _scene_uid = 0
         if is_plugin_mode():
             # 获取 issue 级场景（A2A 交办时场景已持久化到 issue_state）
@@ -264,6 +265,25 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
                 # 方案A：场景绑定的引擎全部离线/失联 → 不入队，明确报错
                 log.warning(f"Pipeline emit: scene={_scene_id} agent={agent_type} engines all offline (Issue #259)")
                 return {"error": f"场景绑定的引擎全部离线（scene={_scene_id}, agent={agent_type}）"}
+            # [#1208 A2A selector 修复 2026-11-12] 事件驱动 A2A 入队补三分叉 gate——
+            # 原路径只读 id 池（selector 场景恒空），selector 节点的任务退化为广播抢单
+            # （实测 A2A 直发 → 任意引擎（含圈外个人级引擎）接单后被凭据门禁拦下）。
+            # 与 run_pipeline 的 gate 同口径：selector 模式落 pool_selector、两池列空；
+            # 零命中 fail-closed（上层 listener 已有 _fail_event 错误管道）。
+            _pool_sel_a2a = ""
+            try:
+                from src.domains.runtime.pipeline.event_pipeline import _scene_pool_gate
+                _gm_a2a, _gp_a2a, _gf_a2a = _scene_pool_gate(
+                    _scene_id, agent_type, repo_key=repo_key, user_id=_scene_uid)
+                if _gm_a2a == "selector":
+                    _pool_sel_a2a = _gp_a2a["pool_selector"]
+                    _pool_eids = ""   # selector 任务两池列均空（与 run_pipeline gate 契约一致）
+                elif _gf_a2a:
+                    log.warning(f"Pipeline emit: scene={_scene_id} agent={agent_type} "
+                                f"selector zero-hit, skip enqueue (Issue #1208): {_gf_a2a}")
+                    return {"error": _gf_a2a}
+            except Exception as _gate_e:
+                log.warning(f"Pipeline emit: selector gate failed (fail-open): {_gate_e}")
         elif not runtime_id:
             _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0)
             if _picked is None:
@@ -274,6 +294,7 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
             repo_key, seq, agent_type, "", skill_name, evt,
             skill_id, skill_path, runtime_id, issue_id,
             pool_engine_ids=_pool_eids, user_id=_scene_uid if is_plugin_mode() else 0,
+            pool_selector=_pool_sel_a2a,
         )
         return {"task_id": "enqueued"}
     except Exception as e:

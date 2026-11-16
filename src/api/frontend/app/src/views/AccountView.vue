@@ -242,6 +242,11 @@
           </div>
         </template>
 
+        <!-- ═══ llm（B4 移植：沙箱 agent 引擎的模型凭据）═══ -->
+        <template v-else-if="tab === 'llm'">
+          <LlmCredManager mode="user" />
+        </template>
+
         <!-- ═══ appearance ═══ -->
         <template v-else-if="tab === 'appearance'">
           <!-- 主题选择 -->
@@ -446,6 +451,7 @@ import { ref, reactive, onMounted } from 'vue'
 import BindDialog from '../components/BindDialog.vue'
 import PatDialog from '../components/PatDialog.vue'
 import CredRepoRow from '../components/CredRepoRow.vue'
+import LlmCredManager from './LlmCredManager.vue'
 
 const G = globalThis
 
@@ -462,6 +468,7 @@ const DEFAULTS = {
   nav_profile: '个人资料',
   security_tab: '账号安全',
   credentials_tab: '凭据管理',
+  llm_tab: 'LLM 凭据',
   appearance_tab: '外观',
   apikeys_tab: 'API Keys',
   basic_info: '基本信息',
@@ -565,6 +572,7 @@ const tabs = [
   { id: 'profile', label: t('nav_profile') },
   { id: 'security', label: t('security_tab') },
   { id: 'credentials', label: t('credentials_tab') },
+  { id: 'llm', label: t('llm_tab') },
   { id: 'appearance', label: t('appearance_tab') },
   { id: 'apikeys', label: 'API Keys' },
 ]
