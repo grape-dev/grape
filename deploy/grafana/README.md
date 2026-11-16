@@ -10,10 +10,10 @@ LGTM 容器**没有挂卷**，容器一重建，Grafana 里的数据源和看板
 bash deploy/grafana/import-dashboards.sh
 
 # 指向兄弟机
-GRAFANA_URL=http://192.168.0.116:3000 bash deploy/grafana/import-dashboards.sh
+GRAFANA_URL=http://<sibling-host>:3000 bash deploy/grafana/import-dashboards.sh
 
 # 只查现状，不写
-GRAFANA_URL=http://192.168.0.116:3000 bash deploy/grafana/import-dashboards.sh --check
+GRAFANA_URL=http://<sibling-host>:3000 bash deploy/grafana/import-dashboards.sh --check
 ```
 
 脚本做三件事，都是幂等的：

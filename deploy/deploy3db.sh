@@ -110,9 +110,9 @@ if [ "$_SYSTEMD_MODE" = "1" ]; then
   for _r in mgmt event worker insight; do
     ( systemctl restart "grape@$_r" || exit 9 ) &
   done
-  # 非默认租户的 agent unit（如 grape-orgtest-worker）不在 grape@ 模板里，
+  # 非默认租户的 agent unit（如 grape-<tenant>-worker）不在 grape@ 模板里，
   # 原来只有这四行重启 → 租户 agent 会连续跑十几天旧代码，而代码同步是成功的，
-  # 于是"改了代码却没生效"表现为远端症状（2026-11-16 #9811 实证：orgtest 的 agent
+  # 于是"改了代码却没生效"表现为远端症状（实例：租户 agent 仍在跑旧模块
   # 从昨天 21:36 起没重启过，skill 自愈补丁根本没加载）。这里把所有 active 的
   # grape-*.service 一并重启，跑在旧代码上的租户 agent 不再被漏掉。
   for _u in $(systemctl list-units --type=service --state=active --no-legend --no-pager \

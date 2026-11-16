@@ -2598,7 +2598,7 @@ async def _skill_consistency_gate(client, tid: str, task: dict, skill_dir: str, 
             # 自愈：绑定的技能没落在任务技能目录里 —— 最常见的原因不是"技能不存在"，
             # 而是这次的物化根本没发生（换过部署目录、换过执行用户、或源解析在服务端
             # 与引擎侧口径不一致）。此时引擎本地就能拿到官方源，直接再物化一次即可，
-            # 没有必要让整条任务失败（2026-11-16 Issue #94 实证：orgtest 侧 .grape/skills
+            # 没有必要让整条任务失败（2026-11-16 Issue #94 实证：租户 checkout 侧的 .grape/skills
             # 577 个文件齐备、resolve 成功，任务仍然报 not materialized）。
             _healed = False
             _b = (task.get("skill") or "").strip()

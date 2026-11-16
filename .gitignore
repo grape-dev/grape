@@ -183,3 +183,7 @@ docs/weekly-11/backup/
 
 # 内部运维文档（双活拓扑/事故复盘/验收记录）：只留本地，不入公开仓
 /docs/ops/
+
+# 内部运维文档（拓扑/事故复盘/主机操作记录）不入公开仓
+docs/nginx-dual-active-38080.md
+docs/engine-run-as-task-owner.md

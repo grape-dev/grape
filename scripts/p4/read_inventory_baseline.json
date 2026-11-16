@@ -1,10 +1,12 @@
 {
-  "files_scanned": 446,
+  "files_scanned": 467,
   "stats": {
-    "total": 0,
-    "bare": 0,
+    "total": 7,
+    "bare": 7,
     "converted": 0,
-    "bare_by_host": {},
+    "bare_by_host": {
+      "api": 7
+    },
     "w1_scope": {
       "bare": 0,
       "bare_by_host": {
@@ -21,14 +23,114 @@
       "bare_classification_by_table": {}
     },
     "shared_scope": {
-      "total": 0,
-      "bare": 0,
-      "by_host": {}
+      "total": 7,
+      "bare": 7,
+      "by_host": {
+        "api": 7
+      }
     },
-    "tables": 0,
-    "bare_tables": 0,
-    "table_sites": {},
-    "classification": {}
+    "tables": 3,
+    "bare_tables": 3,
+    "table_sites": {
+      "grape_t_channel_repo_link": 1,
+      "grape_t_repo_platforms": 3,
+      "meta": 3
+    },
+    "classification": {
+      "manual_non_fetch": 7
+    }
   },
-  "sites": []
+  "sites": [
+    {
+      "file": "src/api/db_setup.py",
+      "line": 7422,
+      "func": "_fn_drop_same_domain_links",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "grape_t_channel_repo_link"
+      ],
+      "dynamic": false,
+      "sql": "SELECT COUNT(*) FROM grape_t_channel_repo_link WHERE oauth_provider = repo_provider"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 7502,
+      "func": "_fn_seed_platform_bot",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "grape_t_repo_platforms"
+      ],
+      "dynamic": false,
+      "sql": "SELECT provider, bot_username, bot_token_enc FROM grape_t_repo_platforms"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 7526,
+      "func": "_fn_seed_platform_bot",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "meta"
+      ],
+      "dynamic": false,
+      "sql": "SELECT value FROM meta WHERE key=?"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 7539,
+      "func": "_fn_seed_platform_bot",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "meta"
+      ],
+      "dynamic": false,
+      "sql": "SELECT value FROM meta WHERE key=?"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 7647,
+      "func": "_fn_seed_platform_bot_from_file",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "grape_t_repo_platforms"
+      ],
+      "dynamic": false,
+      "sql": "SELECT bot_username, bot_token_enc FROM grape_t_repo_platforms WHERE provider=?"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 7743,
+      "func": "_fn_encrypt_platform_bot_tokens",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "grape_t_repo_platforms"
+      ],
+      "dynamic": false,
+      "sql": "SELECT provider, bot_token_enc FROM grape_t_repo_platforms WHERE bot_token_enc IS NOT NULL AND bot_token_enc != ''"
+    },
+    {
+      "file": "src/api/db_setup.py",
+      "line": 7783,
+      "func": "_fn_retire_vcs_platforms_hidden",
+      "host": "api",
+      "status": "bare",
+      "classification": "manual_non_fetch",
+      "tables": [
+        "meta"
+      ],
+      "dynamic": false,
+      "sql": "SELECT value FROM meta WHERE key='vcs_platforms_hidden'"
+    }
+  ]
 }

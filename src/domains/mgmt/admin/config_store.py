@@ -71,6 +71,8 @@ def load_config() -> dict:
     Runtime code reads from DB meta table via unified entry functions.
     """
     try:
+        from src.kernel.config import bot_seed_path  # 本函数的局部 import（get_config_path 里那处不覆盖这里）
+
         _seed_path = bot_seed_path()
         if os.path.exists(_seed_path):
             with open(_seed_path, "r", encoding="utf-8") as f:

@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from src.domains.mgmt.admin.api_common import Depends, load_field_docs, EnabledBody, not_found, require_admin, uow_write
+from src.kernel.config import log
 
 router = APIRouter(prefix="/repo-platforms", tags=["admin"])
 

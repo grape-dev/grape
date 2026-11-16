@@ -1,2 +1,7 @@
 table,owner_domain,consumer,refs
 chat_conversations,runtime,api,1
+external_identities,mgmt,platform,2
+grape_t_repo_credentials,runtime,platform,2
+meta,runtime,api,5
+meta,runtime,platform,1
+user_credentials,mgmt,platform,1

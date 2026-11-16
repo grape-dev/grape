@@ -8,7 +8,7 @@
 #
 # 用法：
 #   bash deploy/grafana/import-dashboards.sh                      # 默认 127.0.0.1:3000, admin:admin
-#   GRAFANA_URL=http://192.168.0.116:3000 GRAFANA_AUTH=admin:pw \
+#   GRAFANA_URL=http://<sibling-host>:3000 GRAFANA_AUTH=admin:pw \
 #     bash deploy/grafana/import-dashboards.sh
 #   GRAFANA_URL=... bash deploy/grafana/import-dashboards.sh --check   # 只查差异不写
 #
