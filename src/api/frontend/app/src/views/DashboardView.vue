@@ -1204,6 +1204,7 @@ const skillPanel = reactive({
   open: false,
   agentType: '',
   current: '',
+  currentId: 0,
   currentKey: '',
   nameCounts: {},
   q: '',
@@ -1772,6 +1773,7 @@ function serializeNodes(nodes) {
       id: n.id,
       tag: n.tag,
       skill: n.skill,
+      skill_id: n.skill_id || 0,
       skill_display_name: n.skill_display_name,
       mode: n.mode,
       next: n.next,
@@ -1791,6 +1793,7 @@ function applyDraftNodes(draft) {
     if (dn) {
       en.enabled = dn.enabled
       en.skill = dn.skill || ''
+      en.skill_id = dn.skill_id || 0
       en.skill_display_name = dn.skill_display_name || ''
       en.engine_runtime_ids = dn.engine_runtime_ids || []
     }
@@ -1825,6 +1828,7 @@ function enterCreateMode() {
     id: at,
     tag: at,
     skill: '',
+    skill_id: 0,
     skill_display_name: '',
     mode: 'emit',
     next: 'done',
@@ -1988,6 +1992,7 @@ function buildNodesPayload(nodes) {
       id: n.id,
       tag: n.tag,
       skill: n.skill || '',
+      skill_id: n.skill_id || 0,
       mode: n.mode || 'emit',
       next: i < arr.length - 1 ? arr[i + 1].id : 'done',
       handoff: i < arr.length - 1 ? 'a2a' : 'complete',
@@ -2081,6 +2086,7 @@ function toggleAgent(agentType) {
   // Issue #406：禁用时 skill/display 同清
   if (!node.enabled) {
     node.skill = ''
+    node.skill_id = 0
     node.skill_display_name = ''
     node.engine_runtime_ids = []
   }
@@ -2094,6 +2100,8 @@ function openSkillDropdown(agentType, e) {
   skillPanel.agentType = agentType
   const node = editNodes.value.find((n) => n.id === agentType)
   skillPanel.current = node ? node.skill || '' : ''
+  // Issue #979/#2324-followup：节点自带 skill_id 是用户实际选中的档位，回显优先用它
+  skillPanel.currentId = node ? node.skill_id || 0 : 0
   skillPanel.currentKey = ''
   skillPanel.q = ''
   skillPanel.x = rect.left
@@ -2115,15 +2123,29 @@ function openSkillDropdown(agentType, e) {
       const cache = (skillPickCache[agentType] = {})
       const counts = {}
       skillPanel.skills.forEach(function (s) {
-        cache[skillKeyOf(s)] = { name: s.skill_name, display: s.display_name || s.skill_name }
+        cache[skillKeyOf(s)] = {
+          name: s.skill_name,
+          id: s.skill_id || 0,
+          display: s.display_name || s.skill_name,
+        }
         counts[s.skill_name] = (counts[s.skill_name] || 0) + 1
       })
       skillPanel.nameCounts = counts
-      // 已选技能若在列表中唯一 → 用唯一键精确回显；同名多档不勾选
-      const hits = skillPanel.skills.filter(function (s) {
-        return s.skill_name === (skillPanel.current || '')
-      })
-      skillPanel.currentKey = hits.length === 1 ? skillKeyOf(hits[0]) : ''
+      // 回显顺序：节点 skill_id 精确命中 → 同名唯一才用名字；三档同名且无 id 不勾选
+      let picked = null
+      if (skillPanel.currentId) {
+        picked =
+          skillPanel.skills.filter(function (s) {
+            return Number(s.skill_id) === Number(skillPanel.currentId)
+          })[0] || null
+      }
+      if (!picked) {
+        const hits = skillPanel.skills.filter(function (s) {
+          return s.skill_name === (skillPanel.current || '')
+        })
+        picked = hits.length === 1 ? hits[0] : null
+      }
+      skillPanel.currentKey = picked ? skillKeyOf(picked) : ''
     })
     .catch(function () {
       skillPanel.skills = []
@@ -2176,6 +2198,8 @@ function pickSkill(skillName, skillKey) {
   const node = editNodes.value.find((n) => n.id === skillPanel.agentType)
   if (node) {
     node.skill = skillName || ''
+    // 清空时同步清 id，避免旧 id 残留指向已不存在的档位
+    node.skill_id = 0
     if (scopeViolations[node.id || '']) delete scopeViolations[node.id]
     applySreLockForVodSkill(node, skillName)
     const cache = skillPickCache[skillPanel.agentType] || {}
@@ -2187,6 +2211,7 @@ function pickSkill(skillName, skillKey) {
       })
       entry = hit ? cache[hit] : null
     }
+    if (entry && entry.id) node.skill_id = entry.id
     node.skill_display_name = skillName ? (entry && entry.display) || skillName : ''
   }
   skillPanel.open = false
@@ -2595,6 +2620,7 @@ function buildEditNodes(originalNodes, ags) {
         id: at,
         tag: at,
         skill: node.skill || a.skill || a.skill_display_name || '',
+        skill_id: node.skill_id || 0,
         skill_display_name: node.skill_display_name || a.skill_display_name || '',
         mode: node.mode || 'emit',
         next: node.next || 'done',
@@ -2608,6 +2634,7 @@ function buildEditNodes(originalNodes, ags) {
       id: at,
       tag: at,
       skill: '',
+      skill_id: 0,
       skill_display_name: '',
       mode: 'emit',
       next: 'done',

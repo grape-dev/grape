@@ -106,11 +106,15 @@ echo "[agent-upgrade] 切换 $STOPPED 个进程"
 for _home in $(awk -F: '$3>=1000 && $7 !~ /nologin|false/ {print $6}' /etc/passwd); do
   _co="$_home/grape-new-version2"
   [ -d "$_co" ] || continue
-  mkdir -p "$_co/.grape"
-  rsync -a --delete "$REPO/.grape/skills/" "$_co/.grape/skills/" 2>/dev/null \
-    || cp -a "$REPO/.grape/skills/." "$_co/.grape/skills/"
-  chown -R "$(stat -c %U "$_home"):$(stat -c %G "$_home")" "$_co/.grape" 2>/dev/null
-  echo "  skills -> $_co/.grape/skills ($(find "$_co/.grape/skills" -type f 2>/dev/null | wc -l) files)"
+  if [ "$DRY" -eq 0 ]; then
+    mkdir -p "$_co/.grape"
+    rsync -a --delete "$REPO/.grape/skills/" "$_co/.grape/skills/" 2>/dev/null \
+      || cp -a "$REPO/.grape/skills/." "$_co/.grape/skills/"
+    chown -R "$(stat -c %U "$_home"):$(stat -c %G "$_home")" "$_co/.grape" 2>/dev/null
+    echo "  skills -> $_co/.grape/skills ($(find "$_co/.grape/skills" -type f 2>/dev/null | wc -l) files)"
+  else
+    echo "  [dry-run] 将补齐 skills -> $_co/.grape/skills"
+  fi
 done
 # 2) 校验：每个用户至多一个 agent，且解释器指向部署目录
 for pid in $(pgrep -f "python.*-m src.domains.runtime.engine.agent" 2>/dev/null || true); do
