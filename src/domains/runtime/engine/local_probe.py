@@ -24,7 +24,7 @@ def _probe_one(eng: dict) -> dict:
     """
     cli = eng.get("cli_path") or ""
     if not cli or not eng.get("installed"):
-        return {**eng, "version": "", "healthy": False}
+        return {**eng, "version": "", "healthy": False, "probe_status": "failed", "probe_latency": 0}
     try:
         _t0 = time.monotonic()
         # hermes 固定 --version（健康由 acp_probe 握手判定）；其余引擎保留 probe_args 覆盖
@@ -34,6 +34,7 @@ def _probe_one(eng: dict) -> dict:
             _args = eng.get("probe_args") or ["--version"]
         res = subprocess.run([cli] + _args, capture_output=True, text=True,
                              timeout=LOCAL_PROBE_TIMEOUT)
+        latency_ms = int((time.monotonic() - _t0) * 1000)
         healthy = res.returncode == 0
         version = (res.stdout or "").strip().split("\n")[0][:60] if healthy else ""
         if healthy and eng.get("acp_probe"):
@@ -42,11 +43,16 @@ def _probe_one(eng: dict) -> dict:
             # 不落 ACP_CHECK_TIMEOUT 默认 20s（服务端心跳口径，超出本机直连单引擎预算）。
             _budget = round(max(1.0, LOCAL_PROBE_TIMEOUT - (time.monotonic() - _t0)), 2)
             healthy = _acp_check(cli, timeout=_budget)
-        out = {**eng, "version": version, "healthy": healthy}
+        # probe_status 必须随结果一起返回：upsert 侧只认这几个字段，
+        # 缺了它 agent_runtimes.probe_status 就永远停在 pending，
+        # 健康判定把"从未探测"当成"低分/连败"，claim 直接被拒（2026-11-15 实证）。
+        out = {**eng, "version": version, "healthy": healthy,
+               "probe_status": "ok" if healthy else "failed",
+               "probe_latency": latency_ms}
         out.pop("probe_args", None)
         return out
     except Exception:
-        out = {**eng, "version": "", "healthy": False}
+        out = {**eng, "version": "", "healthy": False, "probe_status": "failed", "probe_latency": 0}
         out.pop("probe_args", None)
         return out
 
@@ -79,9 +85,9 @@ def probe_local_engines(engines: list | None = None) -> list[dict]:
                 try:
                     results.append(fut.result())
                 except Exception:
-                    results.append({**pending[fut], "version": "", "healthy": False})
+                    results.append({**pending[fut], "version": "", "healthy": False, "probe_status": "failed", "probe_latency": 0})
         except _CFTimeout:
             for fut, eng in pending.items():
                 if not fut.done():
-                    results.append({**eng, "version": "", "healthy": False})
+                    results.append({**eng, "version": "", "healthy": False, "probe_status": "failed", "probe_latency": 0})
     return results

@@ -1054,13 +1054,24 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                     c.execute("UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id=?",
                               (now_iso, rid))
                 c.execute(
+                    # probe_* 必须一起写回：本地探测是直连引擎唯一的健康来源，
+                    # 缺了它 probe_status 永远 pending → claim 侧把"未探测"当低分 → 拒绝认领
+                    # （2026-11-15 实证：本机 4 个直连引擎全部 pending，任务无人认领或认领后不执行）。
                     "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, "
                     "healthy=?, pip_package=?, updated_at=?, local_skills=?, "
-                    "skill_scan_result=?, host_name=? WHERE id=?",
+                    "skill_scan_result=?, host_name=?, "
+                    "probe_status=?, probe_latency=?, probe_error=?, probe_last=?, "
+                    "probe_ok_streak=CASE WHEN ? THEN COALESCE(probe_ok_streak,0)+1 ELSE 0 END "
+                    "WHERE id=?",
                     (a.get("display_name", name), 1 if a.get("installed") else 0,
                      a.get("cli_path", ""), a.get("version", ""),
                      1 if a.get("healthy") else 0, a.get("pip_package", ""), now_iso,
-                     _ls, _detail_json, host_name, rid))
+                     _ls, _detail_json, host_name,
+                     (a.get("probe_status") or ("ok" if a.get("healthy") else "failed")),
+                     int(a.get("probe_latency") or 0),
+                     a.get("probe_error", ""), now_iso,
+                     1 if a.get("healthy") else 0,
+                     rid))
                 out["upserted"] += 1
                 out["ids"][name] = rid
                 continue
@@ -1069,10 +1080,15 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
             c.execute(
                 "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, "
                 "pip_package, scope, owner_id, local_skills, skill_scan_result, host_name, "
-                "last_seen_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "last_seen_at, updated_at, probe_status, probe_latency, probe_last, probe_ok_streak) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name, a.get("display_name", name), 1, a.get("cli_path", ""), a.get("version", ""),
                  1 if a.get("healthy") else 0, a.get("pip_package", ""), scope, owner_id,
-                 _ls, _detail_json, host_name, now_iso, now_iso))
+                 _ls, _detail_json, host_name, now_iso, now_iso,
+                 # 新引擎首写就带上探测结果，避免"插入即 pending"再走一轮认领被拒
+                 (a.get("probe_status") or ("ok" if a.get("healthy") else "failed")),
+                 int(a.get("probe_latency") or 0), now_iso,
+                 1 if a.get("healthy") else 0))
             rid = int(c.lastrowid or 0)
             c.execute("SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
             if not c.fetchone():
