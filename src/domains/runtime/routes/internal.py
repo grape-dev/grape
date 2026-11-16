@@ -35,6 +35,21 @@ async def list_events(repo_key: str, limit: int = 50) -> list:
     return _get_local("runtime").get_events(repo_key, limit)
 
 
+@router.post("/events/status-counts", operation_id="runtime_events_status_counts", include_in_schema=False)
+async def get_event_status_counts(body: dict) -> dict:
+    """供 RuntimeServiceRemote.get_event_status_counts() 调用。"""
+    return {"rows": _get_local("runtime").get_event_status_counts(
+        body.get("repo_keys") or [], body.get("agent_type") or "")}
+
+
+@router.post("/events/search", operation_id="runtime_events_search_internal", include_in_schema=False)
+async def search_events(body: dict) -> dict:
+    """供 RuntimeServiceRemote.search_events() 调用。"""
+    return _get_local("runtime").search_events(
+        body.get("repo_keys") or [], body.get("agent_type") or "",
+        body.get("keyword") or "", int(body.get("page") or 1), int(body.get("page_size") or 10))
+
+
 @router.get("/events/{seq}", operation_id="runtime_events_detail", include_in_schema=False)
 async def get_event(seq: int) -> dict:
     """供 RuntimeServiceRemote.get_event_detail() 调用。"""
@@ -69,21 +84,6 @@ async def get_agent_session_row(body: dict) -> dict:
     """供 RuntimeServiceRemote.get_agent_session_row() 调用（repo_keys 走 body）。"""
     return {"row": _get_local("runtime").get_agent_session_row(
         body.get("repo_keys") or [], body.get("agent_type") or "", body.get("token_field") or "")}
-
-
-@router.post("/events/status-counts", operation_id="runtime_events_status_counts", include_in_schema=False)
-async def get_event_status_counts(body: dict) -> dict:
-    """供 RuntimeServiceRemote.get_event_status_counts() 调用。"""
-    return {"rows": _get_local("runtime").get_event_status_counts(
-        body.get("repo_keys") or [], body.get("agent_type") or "")}
-
-
-@router.post("/events/search", operation_id="runtime_events_search_internal", include_in_schema=False)
-async def search_events(body: dict) -> dict:
-    """供 RuntimeServiceRemote.search_events() 调用。"""
-    return _get_local("runtime").search_events(
-        body.get("repo_keys") or [], body.get("agent_type") or "",
-        body.get("keyword") or "", int(body.get("page") or 1), int(body.get("page_size") or 10))
 
 
 @router.get("/credentials/health", operation_id="runtime_credentials_health", include_in_schema=False)
