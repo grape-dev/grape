@@ -141,10 +141,19 @@ async def lifespan(app: FastAPI):
     except SystemExit as e:
         raise
 
-    # GSB：注册本进程 + 起 30s 心跳（失败只告警，不影响 mgmt 启动）
+    # GSB：注册本进程 + 起 30s 心跳（失败只告警，不影响 mgmt 启动）。
+    # 注册走 HTTP，注册端慢或不可达时会把端口监听一起拖住；
+    # 它不是对外服务的前置条件（进程内调用方拿到 gsb 实例即可），因此给 3s 预算，
+    # 超时就把启动转到后台继续，等它自己完成/失败——端口先对外可用。
     _gsb = getattr(app.state, "gsb", None)
     if _gsb is not None:
-        await _gsb.startup()
+        try:
+            await asyncio.wait_for(_gsb.startup(), timeout=3.0)
+        except asyncio.TimeoutError:
+            log.warning("[GSB] startup 超过 3s，转后台继续注册（不阻塞端口监听）")
+            asyncio.create_task(_gsb.startup())
+        except Exception as _ge:
+            log.warning(f"[GSB] startup failed: {_ge}")
 
     # Mgmt 进程定时任务（设计 §5.1）
     _mgmt_h = await server_tasks.start_mgmt_tasks(app)
