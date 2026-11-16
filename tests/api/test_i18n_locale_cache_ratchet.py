@@ -20,7 +20,7 @@ SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / 
 LOCALES = SHELL / "locales"
 
 # 2026-11-13 快照：templates(+66 键) / tasks / admin 文案变更并 bump 四页 cacheVer 之后
-LOCALE_FINGERPRINT = "4d577b61faf9ddf8"
+LOCALE_FINGERPRINT = "403500247f9254fe"
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
