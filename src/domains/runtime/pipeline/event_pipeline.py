@@ -3272,7 +3272,14 @@ _A2A_PRIOR_ACTIVE = ("running", "dispatched", "queued")
 
 def _claim_and_dispatch_queued(qseq: int, repo_key: str, agent_type: str, issue_id: str,
                                payload: dict, qinfo: dict, prior_seq: int) -> bool:
-    """原子抢占一条排队事件（queued→running）并派发；返回是否成功派发。"""
+    """原子抢占一条排队事件（queued→running）并派发；返回是否成功派发。
+
+    Issue #2508：本路径不重复做「事件终态」判定——排队事件自身必为 queued（非
+    终态、尚无 agent_tasks），且 ``events(repo_key, idempotency_key)`` 唯一索引已在
+    入队时阻止创建「终态事件的排队副本」；drain 又只在全部 blocking 前序不再活跃
+    （`_active_prior_seqs` 为空）后才补派。因此按排队事件 seq 或幂等键双检恒不
+    命中，终态重放拦截统一由 ``run_a2a_dispatch`` 在真正投递前完成。
+    """
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
         with db_lock:

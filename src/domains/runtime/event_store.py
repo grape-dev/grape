@@ -397,6 +397,243 @@ def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: st
             log.warning(f"Event skipped FAILED: {e}")
 
 
+# ====== Issue #2508：终态 a2a 事件投递去重 ======
+def _non_replayable_task_statuses() -> tuple:
+    """不可重放的任务终态：以 ``service.TASK_TERMINAL_STATUSES`` 为单源，
+    显式排除 failed/timeout_failed（保持既有失败重试语义）。"""
+    from src.domains.runtime.engine.service import TASK_TERMINAL_STATUSES
+    return tuple(s for s in TASK_TERMINAL_STATUSES if s not in ("failed", "timeout_failed"))
+
+
+def _content_key(payload: dict) -> str:
+    """请求内容指纹（Issue #2508 review）：context + pr_number 的摘要。
+
+    fingerprint 只按 repo|issue|agent 派生，同一节点同一天的所有交办都相同，
+    单靠它 + 时间窗会把「打回后几分钟内的正常再交办」误判成重投。content_key
+    把本轮请求的实际内容带进来：内容不同 = 新的一轮交办，不拦。
+    """
+    import hashlib as _hashlib
+    if not isinstance(payload, dict):
+        return ""
+    raw = f"{str(payload.get('context') or '')[:400]}|{str(payload.get('pr_number') or '')}"
+    return _hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+
+def _completed_within(completed_at: str, window_s: int) -> bool:
+    """completed_at 是否落在最近 window_s 秒内（Issue #2508 review）。"""
+    if window_s <= 0:
+        return False
+    raw = str(completed_at or "").strip()
+    if not raw:
+        return False
+    from datetime import datetime, timezone
+    dt = None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds() <= window_s
+
+
+def find_terminal_event_replay(repo_key: str, event_seq: int = 0,
+                               idempotency_key: str = "",
+                               fingerprint: str = "",
+                               exclude_seq: int = 0,
+                               agent_type: str = "", issue_id: str = "",
+                               content_key: str = "",
+                               fingerprint_window_s: int | None = None) -> dict:
+    """投递前「事件终态 + 关联任务终态」双检（Issue #2508）。
+
+    以 ``(repo_key, event_seq)`` 为主键，``idempotency_key`` 作为无 seq 时的补充
+    查询维度（复用既有 ``find_event_by_idempotency_key``）；``exclude_seq`` 用于
+    排队 drain 排除排队事件自身、只匹配更早的同幂等键事件。命中 completed/
+    cancelled 的任一终态即返回结构化命中信息，调用方据此静默跳过投递并写
+    ``event_skipped(reason=terminal_event_replay)`` 审计。
+
+    failed/timeout 的重试语义约束：本函数仅把 completed/cancelled 视为「不可
+    重放终态」（任务口径由 ``service.TASK_TERMINAL_STATUSES`` 显式排除
+    failed/timeout_failed）；failed/timeout 返回空 dict，保持现有失败重试链路不变。
+    ``fingerprint`` 默认仅用于审计明细，不作为唯一命中键（它是 repo+issue+agent 维度
+    的请求指纹，跨轮次稳定，单靠它会误杀合法的下一轮交办）。
+
+    Issue #2508 review：调度层重投时可能生成**新的 seq** 且 payload 里
+    ``idempotency_key`` 为空（线上事故即此形态），(repo, seq) 主键与幂等键两个维度
+    都失配 → 闸门漏。补一条内容维度：同 repo + 同 issue + 同节点 + 同 fingerprint
+    且前一条事件在 ``fingerprint_window_s`` 秒内已 completed/cancelled，视为同一
+    次投递的重放。窗口默认 180 秒，``GRAPE_REPLAY_FP_WINDOW=0`` 可关闭；事故间隔约 176 秒，
+    窗口取 180 才能覆盖该形态，误杀面已由 content_key 收窄。
+    """
+    from src.api.pipeline_constants import REPLAY_BLOCKING_EVENT_STATUSES
+    if not repo_key:
+        return {}
+    try:
+        _seq = int(event_seq or 0)
+        _exclude = int(exclude_seq or 0)
+    except (TypeError, ValueError):
+        _seq, _exclude = 0, 0
+
+    row = None
+    _fp_hit = False
+    with db_lock:
+        try:
+            c = db.cursor()
+            if _seq > 0 and _seq != _exclude:
+                c.execute(
+                    "SELECT seq, status, payload FROM events WHERE repo_key=? AND seq=? LIMIT 1",
+                    (repo_key, _seq))
+                row = c.fetchone()
+            if not row and idempotency_key:
+                if _exclude:
+                    # 排队事件自身即最新同键行，需显式排除后匹配更早的行。
+                    c.execute(
+                        "SELECT seq, status, payload FROM events WHERE repo_key=? "
+                        "AND idempotency_key=? AND seq<>? ORDER BY seq DESC LIMIT 1",
+                        (repo_key, idempotency_key, _exclude))
+                    row = c.fetchone()
+                else:
+                    _hit = find_event_by_idempotency_key(repo_key, idempotency_key)
+                    if _hit:
+                        row = (_hit["seq"], _hit["status"], _hit.get("payload") or "")
+            if not row:
+                return {}
+            _hit_seq, _status, _payload_raw = row[0], str(row[1] or ""), row[2]
+            c.execute(
+                "SELECT status FROM agent_tasks WHERE event_seq=? "
+                "ORDER BY created_at DESC LIMIT 1", (_hit_seq,))
+            _task_row = c.fetchone()
+            # Issue #2508 review: the target event itself is usually the one being
+            # delivered (still running), so the content dimension only applies when
+            # neither the event nor its task is a non-replayable terminal.
+            _task_now = str((_task_row[0] if _task_row else "") or "")
+            _replayable_now = (
+                str(_status) not in REPLAY_BLOCKING_EVENT_STATUSES
+                and (not _task_now or _task_now not in _non_replayable_task_statuses()))
+            # content_key 为空表示调用方没有内容维度可比较：此时不按 fingerprint 拦，
+            # 宁可漏一次重投，也不能误杀正常交办（fingerprint 不含轮次）。
+            if (_replayable_now and fingerprint and agent_type and issue_id and content_key):
+                import os as _os
+                _win = fingerprint_window_s
+                if _win is None:
+                    try:
+                        _win = int(_os.environ.get("GRAPE_REPLAY_FP_WINDOW", "180"))
+                    except (TypeError, ValueError):
+                        _win = 180
+                if _win > 0:
+                    c.execute(
+                        "SELECT seq, status, payload, completed_at FROM events "
+                        "WHERE repo_key=? AND event_type='a2a_event' AND agent_type=? "
+                        "AND issue_id=? AND seq<>? AND status IN ('completed','cancelled') "
+                        "AND payload LIKE ? ORDER BY seq DESC LIMIT 1",
+                        (repo_key, agent_type, issue_id, _hit_seq, f"%{fingerprint}%"))
+                    _fp_row = c.fetchone()
+                    _fp_payload = {}
+                    if _fp_row:
+                        try:
+                            _fp_payload = json.loads(_fp_row[2] or "{}")
+                        except Exception:
+                            _fp_payload = {}
+                    if (_fp_row
+                            and _completed_within(_fp_row[3], _win)
+                            and _content_key(_fp_payload) == content_key):
+                        _fp_hit = True
+                        _hit_seq, _status, _payload_raw = (
+                            _fp_row[0], str(_fp_row[1] or ""), _fp_row[2])
+                        c.execute(
+                            "SELECT status FROM agent_tasks WHERE event_seq=? "
+                            "ORDER BY created_at DESC LIMIT 1", (_hit_seq,))
+                        _task_row = c.fetchone()
+        except Exception as e:
+            log.warning(f"find_terminal_event_replay query failed seq={event_seq}: {e}")
+            return {}
+
+    _task_status = str((_task_row[0] if _task_row else "") or "")
+    _event_terminal = _status in REPLAY_BLOCKING_EVENT_STATUSES
+    _task_terminal = bool(_task_status) and _task_status in _non_replayable_task_statuses()
+    if not (_event_terminal or _task_terminal):
+        return {}
+
+    _payload = {}
+    try:
+        _payload = json.loads(_payload_raw or "{}")
+    except Exception:
+        _payload = {}
+    if not isinstance(_payload, dict):
+        _payload = {}
+    return {
+        "seq": int(_hit_seq or 0),
+        "status": _status,
+        "reason": "fingerprint_window" if _fp_hit else "terminal_event_replay",
+        "task_status": _task_status,
+        "event_terminal": _event_terminal,
+        "task_terminal": _task_terminal,
+        "fingerprint": str(_payload.get("fingerprint") or fingerprint or ""),
+        "idempotency_key": str(_payload.get("idempotency_key") or idempotency_key or ""),
+    }
+
+
+def mark_event_reissue(seq: int, reissue: bool = True) -> bool:
+    """给事件 payload 打人工重派 reissue 标记（Issue #2508）。
+
+    仅由 redispatch 调用；用于让重派链路显式声明「本次为人工重放」，避免被
+    终态投递去重误拦。不改变 ``reset_event_terminal`` 仅限人工重派的语义。
+    """
+    try:
+        _seq = int(seq or 0)
+    except (TypeError, ValueError):
+        return False
+    if _seq <= 0:
+        return False
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute("SELECT payload FROM events WHERE seq=? LIMIT 1", (_seq,))
+            row = c.fetchone()
+            if not row:
+                return False
+            try:
+                _payload = json.loads(row[0] or "{}")
+            except Exception:
+                _payload = {}
+            if not isinstance(_payload, dict):
+                _payload = {}
+            from src.api.pipeline_constants import REISSUE_EVENT_PAYLOAD_KEY
+            _payload[REISSUE_EVENT_PAYLOAD_KEY] = bool(reissue)
+            c.execute("UPDATE events SET payload=? WHERE seq=?",
+                      (json.dumps(_payload, ensure_ascii=False), _seq))
+            db.commit()
+            return True
+        except Exception as e:
+            log.warning(f"mark_event_reissue failed seq={seq}: {e}")
+            return False
+
+
+def is_event_reissue(seq: int) -> bool:
+    """事件是否携带人工重派 reissue 标记（Issue #2508）。"""
+    try:
+        _seq = int(seq or 0)
+    except (TypeError, ValueError):
+        return False
+    if _seq <= 0:
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT payload FROM events WHERE seq=? LIMIT 1", (_seq,))
+            row = c.fetchone()
+        if not row:
+            return False
+        _payload = json.loads(row[0] or "{}")
+        from src.api.pipeline_constants import REISSUE_EVENT_PAYLOAD_KEY
+        return bool(isinstance(_payload, dict) and _payload.get(REISSUE_EVENT_PAYLOAD_KEY))
+    except Exception:
+        return False
+
+
 def parse_agent_output_json(final_text: str) -> dict | None:
     """从 final_text 提取结构化 JSON 产出块（鲁棒解析，兼容 ACP chunk 损坏）。
 

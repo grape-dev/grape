@@ -4515,7 +4515,7 @@ def _acquire_task_token_lock(task_id: str):
         raise
 
 
-def sync_task_session_token(task_id: str) -> str:
+def sync_task_session_token(task_id: str, force: bool = False) -> str:
     """同步任务的会话 token：保证 shell 环境快照与运行时注入值一致（Issue #990）。
 
     `agent_tasks.env_extra` 是任务创建时的 shell 环境快照；运行时进程执行前会经
@@ -4525,6 +4525,9 @@ def sync_task_session_token(task_id: str) -> str:
     规则：
     - 快照 token 有效（session_key / repo_key / agent_type 匹配且未过期）→ 原样返回，不轮换；
     - 失效或作用域不匹配 → 在同一事务内作废旧 token、签发新 token 并回写
+    - ``force=True``（人工重派）：即使快照 token 仍有效也强制轮换。重派要重新拉起
+      任务，旧进程手里的 token 必须立刻失效，否则「重派成功但还用着旧 token」的
+      现象会继续存在；force 只挂在重派路径上，普通执行前同步仍按有效即复用。
       `agent_tasks.env_extra`，使快照与运行时注入值保持一致。
 
     跨进程原子性：SQLite 用 ``BEGIN IMMEDIATE`` 取库级写锁；MySQL 用池外专用连接上的
@@ -4593,7 +4596,7 @@ def sync_task_session_token(task_id: str) -> str:
                     and info.get("repo_key") == repo_key
                     and info.get("agent_type") == agent_type
                 )
-                if token_ok:
+                if token_ok and not force:
                     _rt_db.commit()
                     return snapshot_token
 

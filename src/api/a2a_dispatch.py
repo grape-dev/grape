@@ -100,12 +100,46 @@ async def _on_handoff_dispatch(event):
 def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
                      skill_name: str = "", skill_id: int = 0, skill_path: str = "",
                      runtime_id: int = 0, backend: str = "", issue_number="",
-                     repository: str = "", ref_seq: int = 0) -> dict:
+                     repository: str = "", ref_seq: int = 0,
+                     reissue: bool = False) -> dict:
     """派发已创建的 A2A 事件（plugin 事件总线优先，legacy 派发兜底）。
 
     Issue #1667：从 webhook.a2a_endpoint 抽出，供正常 A2A 与排队 drain 复用。
     返回与 /api/a2a 兼容的响应字典。
+
+    Issue #2508：投递前执行「事件终态 + 关联任务终态」双检，命中即静默跳过并写
+    ``terminal_event_replay`` 审计；``reissue=True``（人工重派）或事件已带
+    ``_reissue`` 标记时放行，保留人工恢复能力。
     """
+    from src.api.event_store import find_terminal_event_replay, is_event_reissue
+    from src.api.pipeline_constants import TERMINAL_EVENT_REPLAY_REASON
+    if not (reissue or is_event_reissue(seq)):
+        _issue_ref = f"#{str(issue_number).lstrip('#')}" if issue_number else ""
+        # Issue #2508 review: the fingerprint alone is identical for every
+        # handoff to the same node, so the gate also compares the request
+        # content (context + pr_number) before blocking anything.
+        _evt_payload = (evt or {}).get("payload") or (evt or {}).get("payload_raw") or "{}"
+        if isinstance(_evt_payload, str):
+            import json as _json_2508
+            try:
+                _evt_payload = _json_2508.loads(_evt_payload)
+            except Exception:
+                _evt_payload = {}
+        from src.api.event_store import _content_key as _content_key_fn
+        _replay = find_terminal_event_replay(
+            repo_key, event_seq=seq,
+            idempotency_key=str((evt or {}).get("idempotency_key") or ""),
+            fingerprint=str((evt or {}).get("fingerprint") or ""),
+            agent_type=agent_name, issue_id=_issue_ref,
+            content_key=_content_key_fn(_evt_payload if isinstance(_evt_payload, dict) else {}))
+        if _replay:
+            from src.api.a2a_dispatch_guard import record_terminal_replay_skip
+            _detail = record_terminal_replay_skip(repo_key, issue_number, agent_name, _replay)
+            log.info(f"A2A: {TERMINAL_EVENT_REPLAY_REASON} skipped seq={seq} agent={agent_name} {_detail}")
+            return {"status": "skipped", "seq": int(seq or 0), "agent": agent_name,
+                    "skipped": TERMINAL_EVENT_REPLAY_REASON,
+                    "reason": f"{TERMINAL_EVENT_REPLAY_REASON}:{_replay.get('seq', seq)}",
+                    "original_event": _replay}
     try:
         from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
         from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
