@@ -185,3 +185,104 @@ class TestFeedbackIssueConverter:
             assert not m.called
         finally:
             _cleanup(fid)
+
+class TestFeedbackClaimAndTitleDedup:
+    """占位（claim）+ 同标题开放单复用：治「先建单后盖章」导致的重复建单。"""
+
+    def test_claim_blocks_concurrent_duplicate(self):
+        """同一行只能被占位一次；两轮转换只允许 create 一次。"""
+        fid = _insert(source="agent", title="并发题", task_id="t-c1",
+                      skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
+        try:
+            with mock.patch.object(conv, "_create_provider_issue",
+                                   return_value={"number": 51, "url": "u51"}) as m, \
+                 mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")), \
+                 mock.patch.object(conv, "_find_existing_open_issue", return_value=None):
+                assert conv._claim(fid) is True          # 第一次抢到
+                assert conv._claim(fid) is False         # 第二次抢不到（行上已有占位）
+                conv._release(fid)
+                conv.convert_pending_feedback(limit=10)  # 第一轮：建单并回写
+                conv.convert_pending_feedback(limit=10)  # 第二轮：issue_url 已非空，不再入选
+            assert m.call_count == 1
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT issue_url, issue_number FROM user_feedback WHERE id=?",
+                    (fid,)).fetchone()
+            assert row[0] == "u51" and str(row[1]) == "51"
+        finally:
+            _cleanup(fid)
+
+    def test_stale_claim_reclaimed(self):
+        """进程崩溃留下的过期占位会被回收并重新建单。"""
+        fid = _insert(source="agent", title="过期题", task_id="t-c2",
+                      skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r",
+                      issue_url="pending:1:deadbeef")
+        try:
+            with mock.patch.object(conv, "_create_provider_issue",
+                                   return_value={"number": 52, "url": "u52"}) as m, \
+                 mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")), \
+                 mock.patch.object(conv, "_find_existing_open_issue", return_value=None):
+                conv.convert_pending_feedback(limit=10)
+            assert m.call_count == 1
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT issue_url FROM user_feedback WHERE id=?", (fid,)).fetchone()
+            assert row[0] == "u52"
+        finally:
+            _cleanup(fid)
+
+    def test_reuse_existing_open_issue_by_title(self):
+        """目标仓已有同标题开放单 → 不新建，只回写该单号；标题按去空白/全半角归一比对。"""
+        fid = _insert(source="agent", title="复用题（已存在）", task_id="t-c3",
+                      skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
+        try:
+            seen = {}
+
+            def _fake_request(method, url, token, body=None):
+                seen["url"] = url
+                return [{"number": 77, "title": "复用题 (已存在)"}]
+
+            fake_mod = type("M", (), {
+                "API_BASE": "https://example.invalid/api/v5",
+                "request": staticmethod(_fake_request),
+            })
+            with mock.patch.object(conv, "_create_provider_issue",
+                                   return_value={"number": 99, "url": "u99"}) as m, \
+                 mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")), \
+                 mock.patch.object(conv, "_provider_module", return_value=fake_mod):
+                conv.convert_pending_feedback(limit=10)
+            assert not m.called                      # 没有新建
+            assert "state=opened" in seen["url"]     # GitCode 开放态口径
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT issue_url, issue_number FROM user_feedback WHERE id=?",
+                    (fid,)).fetchone()
+            assert str(row[1]) == "77" and row[0]
+        finally:
+            _cleanup(fid)
+
+    def test_claim_released_on_create_failure(self):
+        """建单失败必须清占位，否则该条反馈永久卡死。"""
+        fid = _insert(source="agent", title="失败题", task_id="t-c4",
+                      skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
+        try:
+            with mock.patch.object(conv, "_create_provider_issue",
+                                   side_effect=RuntimeError("boom")) as m, \
+                 mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")), \
+                 mock.patch.object(conv, "_find_existing_open_issue", return_value=None):
+                res = conv.convert_pending_feedback(limit=10)
+            assert m.call_count == 1 and res["failed"] == 1
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT issue_url FROM user_feedback WHERE id=?", (fid,)).fetchone()
+            assert (row[0] or "") == ""              # 占位已清，下一轮可重试
+        finally:
+            _cleanup(fid)

@@ -766,6 +766,8 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "feedback_internal_sync_page", "feedback_apply_statuses",
            # 反馈 → Issue 转换（api/feedback_issue_converter.py；任意拓扑）
            "feedback_pending_conversions", "feedback_mark_converted",
+           "feedback_claim_row", "feedback_release_claim", "feedback_list_claims",
+           "feedback_mark_converted_from_claim",
            # 场景计数（api/session_store.py 首次托管判定；任意拓扑）
            "count_active_scenes_any",
            # 登录白名单判定（kernel/config.py；任意拓扑）
@@ -2176,6 +2178,21 @@ _ANY_QUERIES: dict[str, str] = {
     "feedback_mark_converted": (
         "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=? "
         "WHERE id=? AND issue_url=''"),
+    # 占位（claim）：把空 issue_url 改成本次 worker 的占位值，单条条件 UPDATE 即领走该行。
+    # 多进程 / 多机（共享同一库）下只有一个能 rowcount=1，这就是跨进程去重的那道闸。
+    "feedback_claim_row": (
+        "UPDATE user_feedback SET issue_url=? "
+        "WHERE id=? AND COALESCE(issue_url,'')=''"),
+    # 占位回收（失败放回 / 过期清理）：只清掉当前的占位值，已转换行不受影响。
+    "feedback_release_claim": (
+        "UPDATE user_feedback SET issue_url='' WHERE id=? AND issue_url LIKE ?"),
+    # 列出当前所有占位行（前缀 LIKE），供过期回收逐个判定。
+    "feedback_list_claims": (
+        "SELECT id, issue_url FROM user_feedback WHERE issue_url LIKE ?"),
+    # 回写时同时接受「空」与「本次占位」：占位挡着自己回写会让建出来的单永远记不上。
+    "feedback_mark_converted_from_claim": (
+        "UPDATE user_feedback SET issue_url=?, issue_number=?, converted_at=? "
+        "WHERE id=? AND (issue_url='' OR issue_url LIKE ?)"),
     # ── 登录白名单（kernel/config.py 的登录判定；login_whitelist 归 mgmt）────────
     # 原实现在 kernel 里用进程主库游标直发：三库拓扑下进程库没有 login_whitelist
     # （无视图 → 1146），被 `_is_login_whitelist_enabled` / `is_user_allowed` 的
@@ -4948,5 +4965,47 @@ def feedback_mark_converted(items: list[tuple]) -> int:
         for url, number, converted_at, fid in todo:
             c.execute(_any_sql("feedback_mark_converted"), (url, number, converted_at, fid))
             # rowcount 读游标（pymysql 的 execute() 返回的是 int，取不到 .rowcount）
+            done += int(getattr(c, "rowcount", 0) or 0)
+    return done
+
+
+def feedback_claim_row(claim_value: str, fid) -> bool:
+    """把一行待转换反馈「占位」给当前 worker；抢到返回 True。
+
+    单条条件 UPDATE（`WHERE id=? AND COALESCE(issue_url,'')=''`）+ rowcount 判定，
+    在共享库的多进程 / 多机下是原子的：只有第一个 worker 能拿到这一行。
+    各机各自独立库时该占位只在本库可见，此时防重复靠调用方的「同标题开放单探测」。
+    """
+    with _any_tx() as c:
+        c.execute(_any_sql("feedback_claim_row"), (claim_value, fid))
+        return int(getattr(c, "rowcount", 0) or 0) == 1
+
+
+def feedback_release_claim(fid, prefix: str) -> int:
+    """清掉本 worker 的占位（建单失败 / 过期回收），返回影响行数。"""
+    with _any_tx() as c:
+        c.execute(_any_sql("feedback_release_claim"), (fid, f"{prefix}%"))
+        return int(getattr(c, "rowcount", 0) or 0)
+
+
+def feedback_list_claims(prefix: str) -> list[tuple]:
+    """当前占位行 `(id, issue_url)`：供调用方按占位里的时间戳判定是否过期。"""
+    return [tuple(r) for r in read_all_any("feedback_list_claims", (f"{prefix}%",))]
+
+
+def feedback_mark_converted_from_claim(items: list[tuple], prefix: str) -> int:
+    """同 `feedback_mark_converted`，但守卫放宽为「空 或 本次占位」。
+
+    `items` 为 `[(issue_url, issue_number, converted_at, id)]`。占位状态下回写若只认
+    `issue_url=''`，单已建出来却永远记不上（占位挡着自己写），故单列一条语句。
+    """
+    todo = [tuple(it) for it in (items or [])]
+    if not todo:
+        return 0
+    done = 0
+    with _any_tx() as c:
+        for url, number, converted_at, fid in todo:
+            c.execute(_any_sql("feedback_mark_converted_from_claim"),
+                      (url, number, converted_at, fid, f"{prefix}%"))
             done += int(getattr(c, "rowcount", 0) or 0)
     return done

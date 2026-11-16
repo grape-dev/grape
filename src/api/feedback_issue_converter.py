@@ -19,6 +19,8 @@
 import os
 
 import asyncio
+import time
+import uuid
 
 from src.domains.mgmt import public as _mgmt_public
 
@@ -114,6 +116,86 @@ def _issue_url(provider: str, owner: str, repo: str, number) -> str:
     from src.kernel.repo_key import issue_web_url
     return issue_web_url(f"{provider}:{owner}/{repo}", number)
 
+_CLAIM_PREFIX = "pending:"
+_CLAIM_TTL = 600
+_CLAIM_ON = os.environ.get("FEEDBACK_CLAIM", "1") != "0"
+_DEDUP_ON = os.environ.get("FEEDBACK_TITLE_DEDUP", "1") != "0"
+
+
+def _norm_title(t):
+    """标题归一：去全部空白 + 全角括号转半角 + 小写，用于跨任务/跨来源的同名单比对。"""
+    return "".join((t or "").split()).replace("（", "(").replace("）", ")").lower()
+
+
+def _claim_value():
+    return f"{_CLAIM_PREFIX}{int(time.time())}:{uuid.uuid4().hex[:8]}"
+
+
+def _claim(row_id) -> bool:
+    """抢先占位：只有一个 worker 能把该行空 issue_url 改成占位值（共享库下原子）。"""
+    if not _CLAIM_ON:
+        return True
+    return _mgmt_public.feedback_claim_row(_claim_value(), row_id)
+
+
+def _release(row_id) -> None:
+    """建单失败时清掉占位，留给下一轮重试（少了这步该反馈会永久卡死）。"""
+    _mgmt_public.feedback_release_claim(row_id, _CLAIM_PREFIX)
+
+
+def _reclaim_stale_claims() -> int:
+    """把进程崩溃 / 超时留下的过期占位清回待转换状态。"""
+    now = int(time.time())
+    stale = []
+    for rid, url in _mgmt_public.feedback_list_claims(_CLAIM_PREFIX):
+        try:
+            ts = int((url or "").split(":")[1])
+        except Exception:
+            ts = 0
+        if ts == 0 or ts < now - _CLAIM_TTL:
+            stale.append(rid)
+    for rid in stale:
+        _mgmt_public.feedback_release_claim(rid, _CLAIM_PREFIX)
+    if stale:
+        log.warning(f"feedback→issue: reclaimed {len(stale)} stale claim(s)")
+    return len(stale)
+
+
+def _find_existing_open_issue(provider, owner, repo, token, title):
+    """目标仓里已存在同标题的开放 issue 就复用，返回单号或 None。
+
+    跨机各库时这是唯一有效的防重复手段（目标仓是共享的，占位只在本库可见）。
+    翻页翻到短页为止（上限 10 页），避免固定页数漏掉更早的同标题单。
+    """
+    if not _DEDUP_ON:
+        return None
+    import urllib.parse
+    mod = _provider_module(provider)
+    want = _norm_title(title)
+    # 开放态参数按平台取值：GitCode / GitLab 是 opened，GitHub 是 open（用错只会查不到，退化为不复用）
+    _state = "open" if provider == "github" else "opened"
+    for page in range(1, 11):
+        url = (f"{mod.API_BASE}/repos/{urllib.parse.quote(owner, safe='')}/"
+               f"{urllib.parse.quote(repo, safe='')}/issues"
+               f"?state={_state}&per_page=100&page={page}"
+               f"&access_token={urllib.parse.quote(token, safe='')}")
+        try:
+            items = mod.request("GET", url, "")
+        except Exception as e:
+            log.warning(f"feedback→issue: title probe failed {provider}:{owner}/{repo}: {e}")
+            return None
+        if not isinstance(items, list):
+            return None
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if _norm_title(it.get("title")) == want:
+                return it.get("number")
+        if len(items) < 100:
+            break
+    return None
+
+
 def _fetch_pending(limit: int):
     """取待转换行：issue_url='' AND is_deleted=0，且
     source='agent'，或 source='user' 且带仓库上下文（repo_key 非空，Issue #673）。
@@ -121,6 +203,7 @@ def _fetch_pending(limit: int):
     SQL 与入选口径都在 mgmt owner 域（`user_feedback` 归 mgmt，本文件属 api 进程）：
     `feedback_pending_conversions` 走任意拓扑原语，单库 / 三库同一份语句。
     """
+    _reclaim_stale_claims()
     rows = _mgmt_public.feedback_pending_conversions(limit)
     return [{
         "id": r[0], "repo_key": r[1] or '', "task_id": r[2] or '',
@@ -167,19 +250,35 @@ def convert_pending_feedback(limit: int = 20) -> dict:
             log.warning(f"feedback→issue: no bot token for fid={fid} (route={provider}:{owner}/{repo})")
             result["skipped"] += 1
             continue
+        # ① 抢先占位：抢不到说明别的 worker 正在处理这一行，本轮跳过
+        if not _claim(fid):
+            log.info(f"feedback→issue: fid={fid} claimed by another worker, skip")
+            result["skipped"] += 1
+            continue
+
+        # ② 目标仓已有同标题开放单就复用（跨任务、跨人的同一毛病不再各建一条）
+        existing = _find_existing_open_issue(provider, owner, repo, token, first["title"])
+        if existing:
+            url = _issue_url(provider, owner, repo, existing)
+            _mgmt_public.feedback_mark_converted_from_claim(
+                [(url, existing, _now, row["id"]) for row in group], _CLAIM_PREFIX)
+            result["converted"] += 1
+            log.info(f"feedback→issue: reused existing #{existing} for fid={fid}")
+            continue
+
         body = _build_issue_body(first)
         try:
             issue = _create_provider_issue(provider, owner, repo, token, first["title"], body)
         except Exception as e:
+            _release(fid)  # ③ 失败必须清占位，否则该反馈永久卡死
             result["failed"] += 1
             log.warning(f"feedback→issue: create failed fid={fid}: {e}")
             continue
         number = issue.get("number")
         url = issue.get("url") or _issue_url(provider, owner, repo, number)
-        # 组内多行同一事务回写（原实现：db_lock 内逐行 UPDATE、末尾一次 commit；
-        # 同组共用同一个 Issue，半批会让同组行分属不同 Issue）。
-        written = _mgmt_public.feedback_mark_converted(
-            [(url, number, _now, row["id"]) for row in group])
+        # 组内多行同一事务回写（同组共用同一个 Issue，半批会让同组行分属不同 Issue）。
+        written = _mgmt_public.feedback_mark_converted_from_claim(
+            [(url, number, _now, row["id"]) for row in group], _CLAIM_PREFIX)
         if written < len(group):
             # 守卫 `issue_url=''` 未命中 = 并发进程已回写该行；统计口径仍按组 +1（原口径）
             log.info(f"feedback→issue: group fid={fid} guarded "
