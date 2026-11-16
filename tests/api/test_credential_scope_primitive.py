@@ -75,11 +75,11 @@ def test_change_credential_scope_merges_duplicate_engines(monkeypatch):
     assert out["merged"] == {"11": 12}
     assert out["engines"] == 1
     sqls = [e[0] for e in cur.executed]
-    assert sqls[0].startswith("UPDATE runtime_credentials SET scope=%s")
-    assert any("UPDATE engine_capabilities SET runtime_id=%s" in s for s in sqls)
+    assert sqls[0].startswith("UPDATE runtime_credentials SET scope=?")
+    assert any("UPDATE engine_capabilities SET runtime_id=?" in s for s in sqls)
     assert any(s.startswith("DELETE FROM engine_capabilities WHERE runtime_id IN") for s in sqls)
     assert any(s.startswith("DELETE FROM agent_runtimes WHERE id IN") for s in sqls)
-    assert sqls[-1].startswith("UPDATE agent_runtimes SET scope=%s")
+    assert sqls[-1].startswith("UPDATE agent_runtimes SET scope=?")
 
 
 def test_change_credential_scope_single_engine_no_merge(monkeypatch):

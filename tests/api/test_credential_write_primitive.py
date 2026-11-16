@@ -17,7 +17,7 @@ class FakeCursor:
         self.executed.append((s, args))
         if self.fail_on_insert and s.startswith("INSERT"):
             raise Exception(self.fail_on_insert)
-        return self.rowcount
+        return self          # 与 sqlite3 一致：execute 返回游标本身（调用方读 .rowcount）
 
     def close(self):
         pass
@@ -64,7 +64,9 @@ def test_insert_runtime_credential_returns_id(monkeypatch):
     assert out == {"action": "inserted", "id": 55}
     sql, args = cur.executed[0]
     assert sql.startswith("INSERT INTO runtime_credentials")
-    assert args == ("h", "cred-a", "repo", "gitcode:o/r", "liufei", "gitcode:o/r", "org1")
+    # org_id 列是 int：非数字/空串一律归一为 0（MySQL STRICT 下写空串是 1366），
+    # 所以 "org1" 落库为 0 —— 这是 RuntimePublicLib 的既定语义，不是丢参。
+    assert args == ("h", "cred-a", "repo", "gitcode:o/r", "liufei", "gitcode:o/r", 0)
 
 
 def test_insert_runtime_credential_duplicate_is_a_value_not_exception(monkeypatch):
@@ -78,7 +80,7 @@ def test_rename_runtime_credential_active_only(monkeypatch):
     cur = install(monkeypatch, FakeCursor(rowcount=1))
     assert rt.rename_runtime_credential("cid-1", "new-name") == 1
     assert cur.executed[0] == (
-        "UPDATE runtime_credentials SET name=%s WHERE id=%s AND status='active'",
+        "UPDATE runtime_credentials SET name=? WHERE id=? AND status='active'",
         ("new-name", "cid-1"))
 
 
@@ -94,7 +96,7 @@ def test_set_runtime_credential_scope(monkeypatch):
 def test_delete_runtime_credential(monkeypatch):
     cur = install(monkeypatch, FakeCursor(rowcount=1))
     assert rt.delete_runtime_credential("cid-1") == 1
-    assert cur.executed[0] == ("DELETE FROM runtime_credentials WHERE id=%s", ("cid-1",))
+    assert cur.executed[0] == ("DELETE FROM runtime_credentials WHERE id=?", ("cid-1",))
 
 
 def test_upsert_repo_credential_updates_existing(monkeypatch):
@@ -102,7 +104,7 @@ def test_upsert_repo_credential_updates_existing(monkeypatch):
     out = rt.upsert_repo_credential("gitcode:o/r", "bot", "enc", "2026-11-13 23:00:00")
     assert out["action"] == "updated"
     assert len(cur.executed) == 1
-    assert cur.executed[0][0].startswith("UPDATE grape_t_repo_credentials SET value=%s")
+    assert cur.executed[0][0].startswith("UPDATE grape_t_repo_credentials SET value=?")
 
 
 def test_upsert_repo_credential_inserts_when_missing(monkeypatch):
@@ -117,6 +119,6 @@ def test_clear_repo_credential_keeps_row(monkeypatch):
     cur = install(monkeypatch, FakeCursor(rowcount=1))
     assert rt.clear_repo_credential("gitcode:o/r", "bot", "T") == 1
     sql, args = cur.executed[0]
-    assert sql == ("UPDATE grape_t_repo_credentials SET value='', updated_at=%s "
-                   "WHERE repo_key=%s AND cred_type=%s")
+    assert sql == ("UPDATE grape_t_repo_credentials SET value='', updated_at=? "
+                   "WHERE repo_key=? AND cred_type=?")
     assert args == ("T", "gitcode:o/r", "bot")
