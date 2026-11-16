@@ -19,14 +19,14 @@ FROZEN = {
     "index.html": {
         # 共享运行时模块
         "tokens.css": "1", "app.css": "4", "auth.css": "1",
-        "all-views.css": "2",
+        "all-views.css": "3",
         "api.js": "35", "app.js": "266",
         "deeplink.js": "1",
         "auto-recovery.js": "2", "oauth-buttons.js": "2",
         "host-status.js": "1", "worker-name.js": "2", "pwd-blocklist.js": "3",
         "faro.js": "7",
         # Vue 视图 chunk
-        "dashboard-view.js": "71", "pipeline.js": "54", "agent-view.js": "49",
+        "dashboard-view.js": "71", "pipeline.js": "54", "agent-view.js": "50",
         "event-view.js": "57", "chat-view.js": "59", "im-channel.js": "50",
         "repos-view.js": "55", "issues-view.js": "61", "account-view.js": "54",
         "scene-market.js": "58", "skills-view.js": "53", "knowledge-view.js": "49",
