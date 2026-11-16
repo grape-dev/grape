@@ -1,12 +1,3 @@
-// inject view css + bridge tokens + shared AGButton css (legacy shell has no new-engine tokens)
-;(function () {
-  ;['bridge.css', 'ag-ui.css', 'viewcss/my-feedback-detail.css'].forEach(function (f) {
-    var link = document.createElement('link')
-    link.rel = 'stylesheet'
-    link.href = '/static-vue/assets/' + f + '?v=57'
-    document.head.appendChild(link)
-  })
-})()
 import { createApp } from 'vue'
 import MyFeedbackDetail from '../MyFeedbackDetail.vue'
 

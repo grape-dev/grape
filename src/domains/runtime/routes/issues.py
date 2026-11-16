@@ -1307,9 +1307,13 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
         _sre_result = {"task_ref": dict(_UNAVAILABLE_TASK_REF),
                        "result_ref": dict(_UNAVAILABLE_RESULT_REF)}
 
-    from src.api.pipeline_status import attach_stall_state
+    from src.api.pipeline_status import attach_stall_state, extract_failed_node
+    # Issue #2432：失败节点（详细路线图展示失败状态 + 失败节点名，不输出失败原因）
+    _failed_node, _failed_node_name = extract_failed_node(nodes)
     _out = {
         "scene_id": _scene_id,
+        "failed_node": _failed_node,
+        "failed_node_name": _failed_node_name,
         "scene_name": (pipe_cfg or {}).get("display_name") or (pipe_cfg or {}).get("name", _scene_id),
         "current_stage": _current_stage,
         "nodes": nodes,

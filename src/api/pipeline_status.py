@@ -48,6 +48,25 @@ EVENT_STATUS_MAP = {
 DONE_STAGES = ("done", "pending_review")
 
 
+def extract_failed_node(nodes, statuses=None):
+    """提取首个失败节点 (failed_node, failed_node_name)——路线图统一口径（Issue #2432）。
+
+    nodes 可来自 compute_node_statuses（自带 node_status），也可配合 statuses 列表使用；
+    多失败节点只取第一个，节点级 failed_node_name 优先，回退节点 name。
+    """
+    for i, node in enumerate(nodes or []):
+        if statuses is not None:
+            status = statuses[i] if i < len(statuses) else None
+        else:
+            status = node.get("node_status")
+        if status != STATUS_FAILED:
+            continue
+        failed_node = node.get("failed_node") or node.get("id", "") or node.get("tag", "")
+        failed_node_name = node.get("failed_node_name") or node.get("name") or failed_node
+        return failed_node, failed_node_name
+    return "", ""
+
+
 def compute_node_statuses(nodes, issue_events, current_stage):
     """统一计算流水线节点状态。
 
@@ -93,6 +112,15 @@ def compute_node_statuses(nodes, issue_events, current_stage):
 
         n["node_status"] = status
         n["latest_event"] = latest_event
+        # Issue #2432：失败节点输出失败节点名（不输出失败原因）。
+        # failed_node 为终态落库字段；老数据/未迁移库回退按事件 agent_type 推断。
+        if status == STATUS_FAILED:
+            _fn = (latest_event or {}).get("failed_node") or nid
+            n["failed_node"] = _fn
+            n["failed_node_name"] = n.get("name") or _fn
+        else:
+            n["failed_node"] = ""
+            n["failed_node_name"] = ""
         statuses.append(status)
 
     return nodes, statuses

@@ -1238,13 +1238,14 @@ onMounted(function () {
 <style scoped>
 .sm__top {
   margin-bottom: 20px;
-  background: color-mix(in srgb, var(--c) 72%, transparent);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
+  /* 2026-11-16：72% 玻璃叠在 --bg 页面上与背景同色，区块里的卡片没有轮廓；
+     改实心亮面 + 发丝描边（与 dashboard 场景详情同口径）。 */
+  background: var(--c);
+  border: 1px solid var(--hairline);
   border-radius: 18px;
   padding: 24px;
   text-align: center;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .sm__seg {
   margin-top: 0;
@@ -1325,10 +1326,11 @@ onMounted(function () {
   padding: 28px 32px;
   margin-bottom: 20px;
   border-radius: 18px;
-  background: color-mix(in srgb, var(--c) 72%, transparent);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  /* 2026-11-16：72% 玻璃叠在 --bg 页面上与背景同色，区块里的卡片没有轮廓；
+     改实心亮面 + 发丝描边（与 dashboard 场景详情同口径）。 */
+  background: var(--c);
+  border: 1px solid var(--hairline);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .sm__dhead-top {
   display: flex;
@@ -1429,13 +1431,14 @@ onMounted(function () {
   margin: 24px 0 12px;
 }
 .sm__flow-wrap {
-  background: color-mix(in srgb, var(--c) 72%, transparent);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
+  /* 2026-11-16：72% 玻璃叠在 --bg 页面上与背景同色，区块里的卡片没有轮廓；
+     改实心亮面 + 发丝描边（与 dashboard 场景详情同口径）。 */
+  background: var(--c);
+  border: 1px solid var(--hairline);
   border-radius: 18px;
   padding: 24px;
   margin-bottom: 16px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .sm__flow-grid {
   display: flex;
@@ -1452,19 +1455,22 @@ onMounted(function () {
   min-width: 0;
   max-width: 260px;
   min-height: 260px;
-  background: var(--bg);
+  background: color-mix(in srgb, var(--c) 62%, var(--bg));
+  border: none;
   border-radius: 18px;
   padding: 16px;
   display: flex;
   flex-direction: column;
   transition: all 0.2s;
   position: relative;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .sm__fcard:hover {
-  background: var(--c);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-  transform: translateY(-1px);
+  background: color-mix(in srgb, var(--c) 80%, var(--bg));
+  box-shadow:
+    0 14px 32px rgba(0, 0, 0, 0.14),
+    0 3px 8px rgba(0, 0, 0, 0.08);
+  transform: translateY(-3px);
 }
 .sm__fcard--del {
   border: 1px solid var(--r);
@@ -1589,7 +1595,8 @@ onMounted(function () {
   gap: 12px;
 }
 .sm__scard {
-  background: var(--bg);
+  background: color-mix(in srgb, var(--c) 62%, var(--bg));
+  border: none;
   border-radius: 18px;
   padding: 16px;
   display: flex;
@@ -1597,12 +1604,14 @@ onMounted(function () {
   gap: 12px;
   transition: all 0.2s;
   cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .sm__scard:hover {
-  background: var(--c);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-  transform: translateY(-1px);
+  background: color-mix(in srgb, var(--c) 80%, var(--bg));
+  box-shadow:
+    0 14px 32px rgba(0, 0, 0, 0.14),
+    0 3px 8px rgba(0, 0, 0, 0.08);
+  transform: translateY(-3px);
 }
 .sm__scard--del {
   border: 1px solid var(--r);
@@ -1667,7 +1676,7 @@ onMounted(function () {
   display: flex;
   align-items: center;
   gap: 12px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .sm__param-info {
   flex: 1;

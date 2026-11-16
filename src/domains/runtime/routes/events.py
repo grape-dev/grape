@@ -627,6 +627,57 @@ def _mark_event_redispatched(seq: int, new_seq, channel: str):
         result=f"事件已重新派发（{channel} 新 seq={new_seq} 接管，原事件已取消）")
 
 
+def _reissue_task_session_token(task_id: str) -> str:
+    """人工重派后签发任务级新 tk_（Issue #2508）。
+
+    经 ``sync_task_session_token(force=True)`` 强制轮换：重派意味着旧进程手里的
+    凭据立即作废，不能因为快照 token 还「看起来有效」就继续复用——那正是
+    「点了重派还是 401」的成因之一。旧 token 由 rotate_session_token 在同一事务
+    内作废，新 token 回写 env_extra，运行时拉 /tasks/{id}/env 即拿到新值。
+    """
+    if not task_id or task_id == "(new)":
+        return ""
+    try:
+        from src.domains.runtime.engine.service import sync_task_session_token
+        token = sync_task_session_token(task_id, force=True)
+        if token:
+            log.info(f"[redispatch] task {task_id} session token reissued via sync_task_session_token")
+        else:
+            log.warning(f"[redispatch] task {task_id} session token reissue skipped (sync returned empty)")
+        return token
+    except Exception as e:
+        log.warning(f"[redispatch] task {task_id} session token reissue failed: {e}")
+        return ""
+
+
+def _mark_reissue_success(seq: int) -> None:
+    """重派成功后置 reissue 标记（Issue #2508）。
+
+    仅在复用/重置原 seq 的成功路径调用；重派失败（409/404/500）不得提前置标，
+    避免永久放行终态事件重放。
+    """
+    try:
+        from src.api.event_store import mark_event_reissue
+        mark_event_reissue(seq, True)
+    except Exception as _ri:
+        log.warning(f"[redispatch] seq={seq} mark_event_reissue failed: {_ri}")
+
+
+def _redispatch_success(task_id, event_seq, token_reissued=None, **extra) -> dict:
+    """重派成功统一回执（Issue #2508）：显式声明本次为人工重放。
+
+    Issue #2508 review: ``token_reissued`` 为 False 时表示任务级 tk_ 未能重签
+    （sync 返回空串：任务行缺上下文 / 取锁失败 / 持久化失败），调用方据此判断
+    重派后仍会带着已撤销的 token，不再静默假装成功。
+    """
+    resp = {"status": "redispatched", "task_id": task_id, "event_seq": event_seq,
+            "reissue": True}
+    if token_reissued is not None:
+        resp["token_reissued"] = bool(token_reissued)
+    resp.update(extra)
+    return resp
+
+
 @router.post("/{seq}/redispatch", operation_id="events_redispatch", summary="Redispatch event", description="Manually redispatches an event task (for tasks stuck running>10min or failed). Non-terminal tasks are requeued; terminal/missing tasks are marked failed and re-enqueued. local_only forces the original runtime.")
 def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(require_no_session_token)):
     """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
@@ -740,8 +791,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         if not (_res or {}).get("ok"):
             raise HTTPException(status_code=409, detail={"code": 409,
                 "message": f"引导重派失败：{(_res or {}).get('reason', 'unknown')}"})
-        return {"status": "redispatched", "task_id": "(new)", "event_seq": (_res or {}).get("seq", 0),
-                "original_seq": seq}
+        return _redispatch_success("(new)", (_res or {}).get("seq", 0), original_seq=seq)
 
     # 2) 查关联任务
     task_id = ""
@@ -825,6 +875,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         log.warning(f"[redispatch] seq={seq} local_only: queued reuse direct failed: {e}")
                 from src.api.event_store import reset_event_terminal
                 reset_event_terminal(seq)
+                _tok_reissued = _reissue_task_session_token(task_id)
                 try:
                     from src.domains.mgmt.user.db import set_meta_value
                     import time as _time
@@ -832,7 +883,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 except Exception:
                     pass
                 log.info(f"[redispatch] seq={seq} local_only: queued task {task_id} reused on rid={_orig_rid} by={user.get('username','')}")
-                return {"status": "redispatched", "task_id": task_id, "event_seq": seq, "local_only": True}
+                _mark_reissue_success(seq)
+                return _redispatch_success(task_id, seq, local_only=True,
+                                           token_reissued=bool(_tok_reissued))
 
 
         # 校验通过 → 复用原 task 快照参数 + 原 runtime_id 新建任务（不调 pick_engine）
@@ -906,6 +959,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         # 事件状态回写 running（redispatch 语义：重置终态，允许重跑成功后 complete 覆盖）
         from src.api.event_store import reset_event_terminal
         reset_event_terminal(seq)
+        _tok_reissued = _reissue_task_session_token(_new_task_id)
         try:
             from src.domains.mgmt.user.db import set_meta_value
             import time as _time
@@ -913,7 +967,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         except Exception:
             pass
         log.info(f"[redispatch] seq={seq} local_only: same-machine retry on rid={_orig_rid} task={_new_task_id} by={user.get('username','')}")
-        return {"status": "redispatched", "task_id": _new_task_id or "(new)", "event_seq": seq, "local_only": True}
+        _mark_reissue_success(seq)
+        return _redispatch_success(_new_task_id or "(new)", seq, local_only=True,
+                                   token_reissued=bool(_tok_reissued))
 
     # 3) 分支处理
     if task_id and task_status in ("dispatched", "running"):
@@ -1435,7 +1491,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             _smv(f"redispatch:{seq}", str(_tm.time()))
                         except Exception:
                             pass
-                        return {"status": "redispatched", "task_id": "(new)", "event_seq": seq}
+                        from src.api.event_store import mark_event_redispatch_of as _mark_redisp
+                        _mark_redisp(seq, seq)
+                        return _redispatch_success("(new)", seq)
                     else:
                         raise HTTPException(status_code=409, detail={"code": 409,
                             "message": "重派失败：PR订阅场景引擎不可用或无QA节点"})
@@ -1485,8 +1543,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             _smv(f"redispatch:{seq}", str(_tm.time()))
                         except Exception:
                             pass
-                        return {"status": "redispatched", "task_id": "(new)", "event_seq": _new_seq,
-                                "original_seq": seq}
+                        from src.api.event_store import mark_event_redispatch_of as _mark_redisp
+                        _mark_redisp(_new_seq, seq)
+                        return _redispatch_success("(new)", _new_seq, original_seq=seq)
                     else:
                         raise HTTPException(status_code=409, detail={"code": 409,
                             "message": f"重派失败：A2A 重新交办未成功（{_a2a_result.get('status', 'unknown')}）"})
@@ -1521,7 +1580,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                "pull_request_opened": "Merge Request Hook", "push": "push"}
                 _header = _header_map.get(_event_type, _event_type)
                 _rp_result = _rp(_fake_raw, {"X-GitCode-Event": _header},
-                                 account=evt.get("account", ""), repo_key_override=evt.get("repo_key", ""))
+                                 account=evt.get("account", ""), repo_key_override=evt.get("repo_key", ""),
+                                 replay=True)
                 if _rp_result.get("ok"):
                     log.info(f"[redispatch] seq={seq} re-run_pipeline ok, new seq={_rp_result.get('seq')}")
                     # Issue #600：原事件标记 cancelled（被新事件接管，非失败态）
@@ -1532,8 +1592,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         _smv(f"redispatch:{seq}", str(_tm.time()))
                     except Exception:
                         pass
-                    return {"status": "redispatched", "task_id": "(new)", "event_seq": _rp_result.get("seq", 0),
-                            "original_seq": seq}
+                    from src.api.event_store import mark_event_redispatch_of as _mark_redisp
+                    _mark_redisp(_rp_result.get("seq", 0) or seq, seq)
+                    return _redispatch_success("(new)", _rp_result.get("seq", 0), original_seq=seq)
                 else:
                     raise HTTPException(status_code=409, detail={"code": 409,
                         "message": f"重派失败：run_pipeline 未成功（{_rp_result.get('event_type', 'unknown')}）"})
@@ -1547,6 +1608,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     from src.api.event_store import reset_event_terminal
     reset_event_terminal(seq)
 
+    # Issue #2508：人工重派后重签任务级 tk_，不复用旧任务快照 token。
+    _tok_reissued = _reissue_task_session_token(_effective_task_id)
+
     # 5) 记录幂等时间戳
     try:
         from src.domains.mgmt.user.db import set_meta_value
@@ -1556,7 +1620,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         pass
 
     log.info(f"[redispatch] seq={seq} repo={evt['repo_key']} agent={evt['agent_type']} task={_effective_task_id or '(new)'} by={user.get('username','')}")
-    return {"status": "redispatched", "task_id": _effective_task_id or "(new)", "event_seq": seq}
+    _mark_reissue_success(seq)
+    return _redispatch_success(_effective_task_id or "(new)", seq,
+                               token_reissued=bool(_tok_reissued))
 
 
 # ====== Event 对话（event-conversation-design.md）======

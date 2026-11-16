@@ -17,6 +17,13 @@ TERMINAL_TASK_STATUSES = ("completed", "cancelled", "pending_review")
 # 「等用户」暂停态：既非终态，也不代表流水线停滞/断链（人工等待中，禁止自动重派发）
 PAUSED_ISSUE_STATUSES = ("awaiting_input",)
 
+# Issue #2508：终态重放拦截词表（事件口径）——仅 completed/cancelled 不可重放，
+# failed/timeout 保持既有失败重试语义。任务口径以 service.TASK_TERMINAL_STATUSES
+# 为单源、调用处显式排除 failed/timeout_failed（见 event_store/auth_token）。
+REPLAY_BLOCKING_EVENT_STATUSES = ("completed", "cancelled")
+TERMINAL_EVENT_REPLAY_REASON = "terminal_event_replay"
+REISSUE_EVENT_PAYLOAD_KEY = "_reissue"
+
 # 流水线「段」事件：一次 agent 执行对应一条 a2a_event；跨场景移交另有
 # cross_scene_handoff 标记，但段本身仍以 a2a_event 计量。
 PIPELINE_SEGMENT_EVENT_TYPES = ("a2a_event",)

@@ -38,13 +38,28 @@ class NullLock:
 
 
 def install(monkeypatch, cur):
-    """把 db_registry.cursor 换成产出该 FakeCursor 的上下文管理器。"""
+    """把 db_registry.cursor 与进程主库游标都换成产出该 FakeCursor 的上下文管理器。
+
+    runtime lib 的单库/测试拓扑回落路径（`_any_cursor` → session_manager.db）
+    不经过 db_registry；只补 registry 会让 list_credential_rows 这类函数打到
+    真实空库、静默返回 []（2026-11-16 修 s80b 同批红）。
+    """
     @contextlib.contextmanager
     def _ctx(domain):
         yield cur
 
+    class _FakeDB:
+        def cursor(self):
+            return cur
+
+        def commit(self):
+            pass
+
     monkeypatch.setattr(db_registry, "cursor", _ctx)
     monkeypatch.setattr(db_registry, "domain_lock", lambda d: NullLock())
+    import src.kernel.session_manager as _sm
+    monkeypatch.setattr(_sm, "db", _FakeDB())
+    monkeypatch.setattr(_sm, "db_lock", NullLock())
     return cur
 
 

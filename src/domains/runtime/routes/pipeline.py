@@ -323,6 +323,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
                 # 仓库级场景被改名后显示真实名而非写死标签/原始 ID）。
                 "scene_id": _le.get("scene_id", "") or "",
                 "scene_name": _scene_label_for_event(_le.get("scene_id", "") or "", get_pipe_cfg, repo_key, pipe_cfg_cache),
+                # Issue #2432：失败节点名（不输出失败原因）
+                "failed_node": _le.get("failed_node", "") or "",
             }
         else:
             _latest_event = None
@@ -420,9 +422,13 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
     else:
         display_issue_id = issue_id
 
-    from src.api.pipeline_status import attach_stall_state
+    from src.api.pipeline_status import attach_stall_state, extract_failed_node
+    # Issue #2432：失败节点（供详细路线图直接展示失败状态 + 失败节点名）
+    _failed_node, _failed_node_name = extract_failed_node(_nodes, stage_statuses)
     _out = {
         "issue_id": display_issue_id,
+        "failed_node": _failed_node,
+        "failed_node_name": _failed_node_name,
         "raw_issue_id": issue_id,
         "title": title,
         "stages": stages,
@@ -571,9 +577,12 @@ def get_pipeline(owner: str, repo: str,
             if _pushdown_ok and _win_ids:
                 _where += " AND issue_id IN ({})".format(",".join("?" * len(_win_ids)))
                 _params += list(_win_ids)
+            from src.domains.runtime.schema_probe import column_exists as _col_exists
+            _failed_col = ("failed_node" if _col_exists(c, "events", "failed_node")
+                           else "'' AS failed_node")
             c.execute(
                 "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
-                "created_at, actor, duration, repo_key, scene_id, completed_at "
+                "created_at, actor, duration, repo_key, scene_id, completed_at, " + _failed_col + " "
                 f"FROM events WHERE {_where} ORDER BY seq ASC", _params)
             rows = c.fetchall()
         except Exception as e:
@@ -586,7 +595,8 @@ def get_pipeline(owner: str, repo: str,
          "status": r[6], "created_at": normalize_event_time(r[7]), "actor": r[8] or "", "payload": "",
          "duration": r[9], "repo_key": r[10] if len(r) > 10 else repo_key,
          "scene_id": r[11] if len(r) > 11 else "",
-         "completed_at": normalize_event_time(r[12]) if len(r) > 12 else ""}
+         "completed_at": normalize_event_time(r[12]) if len(r) > 12 else "",
+         "failed_node": (r[13] or "") if len(r) > 13 else ""}
         for r in rows
     ]
 

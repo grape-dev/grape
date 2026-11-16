@@ -1292,9 +1292,9 @@ def _build_cred_map(db, db_lock) -> dict:
 
     只读取**密文/元数据列**（不涉及解密）；lib 模式下由 runtime 自己的连接取数。
     """
-    _rt = _creds_via_lib()
-    if _rt is not None:
-        rows = _rt.list_credential_rows()
+    _rt_lib = _creds_via_lib()
+    if _rt_lib is not None:
+        rows = _rt_lib.list_credential_rows()
     else:
         with db_lock:
             c = db.cursor()

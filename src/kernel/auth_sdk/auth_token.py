@@ -69,26 +69,16 @@ def issue_session_token(*, session_key: str, repo_key: str, agent_type: str,
 def verify_session_token(token: str) -> dict | None:
     """校验会话级临时 token：sha256 查表 → 行存在且未过期即有效。
 
-    返回绑定上下文（session_key / repo_key / agent_type / user_id），供调用方做作用域判断。
+    SELECT 与过期判断单源收敛到 ``inspect_session_token``（Issue #2508），
+    本函数只把 ``valid`` 状态映射为绑定上下文；返回 session_key / repo_key /
+    agent_type / user_id，供调用方做作用域判断。
     """
-    if not token.startswith(SESSION_TOKEN_PREFIX):
+    if not token or not token.startswith(SESSION_TOKEN_PREFIX):
         return None
-    try:
-        row = _tokens_lib().session_token_by_sha(_sha256(token))
-        if not row:
-            return None
-        if int(row[5]) <= _now():
-            return None
-        return {
-            "session_token_id": row[0],
-            "session_key": row[1],
-            "repo_key": row[2],
-            "agent_type": row[3],
-            "user_id": row[4],
-        }
-    except Exception as e:
-        log.warning(f"Verify session token failed: {e}")
-        return None
+    state = inspect_session_token(token)
+    if state.get("status") == "valid":
+        return state.get("info")
+    return None
 
 
 def verify_session_token_for_repo(token: str, repo_key: str) -> dict | None:
@@ -106,6 +96,114 @@ def verify_session_token_for_repo(token: str, repo_key: str) -> dict | None:
 
 
 SESSION_TOKEN_REVOKE_GRACE = 180  # 任务终态后延迟撤销秒数（agent complete → A2A 仍需 token）
+
+# Issue #2508：认证失败三类细分（替代 #990 统一恢复提示）
+TOKEN_REVOKED_OR_TASK_FINISHED = "TOKEN_REVOKED_OR_TASK_FINISHED"
+SNAPSHOT_EXPIRED = "SNAPSHOT_EXPIRED"
+MISSING_TOKEN = "MISSING_TOKEN"
+
+# 各类失败的建议动作（CLI / 调用端按 code 读取后渲染差异化文案）
+SESSION_TOKEN_FAILURE_ACTIONS = {
+    TOKEN_REVOKED_OR_TASK_FINISHED: "stop_task_no_recovery",
+    SNAPSHOT_EXPIRED: "reload_runtime_env",
+    MISSING_TOKEN: "report_missing_injection",
+}
+
+SESSION_TOKEN_FAILURE_HINTS = {
+    TOKEN_REVOKED_OR_TASK_FINISHED: (
+        "Session token was revoked because the task has already finished; "
+        "terminate the task and do not retry or restore it"
+    ),
+    SNAPSHOT_EXPIRED: (
+        "Invalid or expired session token; the shell environment snapshot is stale, "
+        "re-read GRAPE_SESSION_TOKEN from the agent runtime process environment and retry"
+    ),
+    MISSING_TOKEN: (
+        "Missing session token; GRAPE_SESSION_TOKEN was not injected by the dispatcher, "
+        "report the missing injection to the scheduling layer"
+    ),
+}
+
+def _finished_task_statuses() -> tuple:
+    """任务终态集合（用于判定 token 被撤销/任务已结束）。
+
+    单源在 ``src.kernel.task_states``：kernel 不能 import domains（check-arch R1），
+    所以词表放在 kernel，runtime 域反向引用，避免两套词表漂移。
+    """
+    from src.kernel.task_states import TERMINAL_TASK_STATUSES
+    return tuple(TERMINAL_TASK_STATUSES)
+
+# 仅对 tk_ 前缀做细分；其它前缀（grape_ API Key / JWT）沿用原有错误码。
+_NOT_SESSION_TOKEN = "not_session_token"
+
+
+def inspect_session_token(token: str) -> dict:
+    """检查会话 token 状态（Issue #2508），不改变 verify 的既有语义。
+
+    返回 ``{"status": ...}``：
+    - ``missing``：未提供 token；
+    - ``not_session_token``：非 tk_ 前缀；
+    - ``unknown``：tk_ 前缀但查无此行（已轮换/已清理/伪造）；
+    - ``expired``：行存在但已过期（含撤销宽限到期）；
+    - ``valid``：行存在且未过期（附 ``info``）。
+    """
+    if not token:
+        return {"status": "missing"}
+    if not token.startswith(SESSION_TOKEN_PREFIX):
+        return {"status": _NOT_SESSION_TOKEN}
+    try:
+        # Tokens live in the mgmt domain; kernel must not import domains at
+        # module level (check-arch R1), so go through the domain public API.
+        row = _tokens_lib().session_token_by_sha(_sha256(token))
+    except Exception as e:
+        log.warning(f"Inspect session token failed: {e}")
+        return {"status": "unknown"}
+    if not row:
+        return {"status": "unknown"}
+    info = {
+        "session_token_id": row[0],
+        "session_key": row[1],
+        "repo_key": row[2],
+        "agent_type": row[3],
+        "user_id": row[4],
+    }
+    try:
+        expired = int(row[5]) <= _now()
+    except (TypeError, ValueError):
+        expired = True
+    if expired:
+        return {"status": "expired", "info": info, "session_key": row[1]}
+    return {"status": "valid", "info": info, "session_key": row[1]}
+
+
+def _is_task_finished(task_status: str) -> bool:
+    """任务状态是否已终态（token 可能已被撤销）。
+
+    Issue #2508 review: agent_tasks is owned by the runtime domain, so kernel no
+    longer queries it. Callers (src/api/deps.py) resolve the status through the
+    runtime public primitive and pass it in.
+    """
+    return str(task_status or "").strip() in _finished_task_statuses()
+
+
+def classify_session_token_failure(token: str, task_status: str = "") -> str:
+    """把失效会话 token 细分为三类错误码（Issue #2508）。
+
+    - 未提供 token → ``MISSING_TOKEN``；
+    - token 关联任务已终态 → ``TOKEN_REVOKED_OR_TASK_FINISHED``；
+    - 其余失效（过期/轮换/查无此行但任务未终态）→ ``SNAPSHOT_EXPIRED``。
+    token 仍有效时返回空串。
+    """
+    state = inspect_session_token(token)
+    status = state.get("status")
+    if status == "missing":
+        return MISSING_TOKEN
+    if status == "valid":
+        return ""
+    if _is_task_finished(task_status):
+        return TOKEN_REVOKED_OR_TASK_FINISHED
+    return SNAPSHOT_EXPIRED
+
 
 def revoke_session_token(session_key: str) -> bool:
     """会话结束延迟失效：把 expires_at 缩短到 SESSION_TOKEN_REVOKE_GRACE 秒后过期，

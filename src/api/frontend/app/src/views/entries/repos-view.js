@@ -2,15 +2,6 @@ import { createApp } from 'vue'
 import ReposView from '../ReposView.vue'
 import SettingsView from '../SettingsView.vue'
 
-// inject view css + bridge tokens + shared AG css (legacy shell has no new-engine tokens)
-;(function () {
-  ;['bridge.css', 'ag-ui.css', 'viewcss/repos-view.css'].forEach(function (f) {
-    var link = document.createElement('link')
-    link.rel = 'stylesheet'
-    link.href = '/static-vue/assets/' + f + '?v=57'
-    document.head.appendChild(link)
-  })
-})()
 
 // Batch 14 (repos+templates+settings): legacy shell contract —
 //   renderRepoSelection(repos): app.js goToRepos/loadRepos/renderReposFromData/switchOrg path

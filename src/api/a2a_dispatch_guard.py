@@ -416,6 +416,25 @@ def append_guarded_a2a_event(repo_key: str, issue_number, target_agent: str,
         return "ok", seq
 
 
+def record_terminal_replay_skip(repo_key: str, issue_number, target_agent: str,
+                                info: dict) -> str:
+    """终态重放静默跳过 + 审计（Issue #2508）。
+
+    返回写审计的 reason 明细，调用方直接用于日志/响应。failed/timeout 的
+    重试语义由 ``event_store.find_terminal_event_replay`` 的终态集合保证，
+    不在此处分支。终态双检统一在 ``run_a2a_dispatch`` 入口执行（正常 A2A 与
+    排队 drain 共用同一派发出口），故守卫侧不再维护重复的查询包装。
+    """
+    from src.api.pipeline_constants import TERMINAL_EVENT_REPLAY_REASON
+    _seq = int((info or {}).get("seq") or 0)
+    _detail = (f"target={target_agent} seq={_seq} event_status={info.get('status', '')} "
+               f"task_status={info.get('task_status', '')} "
+               f"fingerprint={info.get('fingerprint', '')} "
+               f"idempotency_key={info.get('idempotency_key', '')}")
+    record_skip(repo_key, issue_number, target_agent, TERMINAL_EVENT_REPLAY_REASON, detail=_detail)
+    return _detail
+
+
 def record_skip(repo_key: str, issue_number, target_agent: str, reason: str,
                 detail: str = ""):
     """跳过审计留痕（event_skipped，reason 可读，供流水线页/排查查询）。"""

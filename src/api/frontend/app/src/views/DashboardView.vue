@@ -3534,14 +3534,15 @@ onBeforeUnmount(function () {
 }
 /* 详情卡 */
 .det-card-wrap {
-  background: color-mix(in srgb, var(--c) 62%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: none;
+  /* 2026-11-16：原为 62% 玻璃 + blur16。场景详情页背景就是 --bg，
+     62% 白叠上去与背景几乎同色 → 区块内的 Agent 卡片/相关需求表全都“没有轮廓”。
+     改为实心亮面(--c) + 发丝描边，卡片才有可立界的父面。 */
+  background: var(--c);
+  border: 1px solid var(--hairline);
   border-radius: 18px;
   padding: 24px;
   margin-bottom: 16px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 .dbv-sechead {
   display: flex;
@@ -3579,8 +3580,12 @@ onBeforeUnmount(function () {
   min-width: 0;
   max-width: 260px;
   min-height: 260px;
-  background: color-mix(in srgb, var(--c) 62%, transparent);
-  backdrop-filter: blur(16px);
+  /* 2026-11-16（第二轮，按验收意见）：卡片干脆**无边框**——靠「父面实心 --c、
+     卡片回落 --bg」的层次 + 一层软阴影立起来，不再用 1px 描边，避免边缘割裂。
+     查看态/编辑态共用同一个 .ap-nd。 */
+  /* 2026-11-16（第四轮）：底色再往背景色靠——62% 亮面 + 38% 背景，与面板只差 4~5 级，
+     仍可分辨；抬升感留给 hover 的阴影/位移（不动布局）。 */
+  background: color-mix(in srgb, var(--c) 62%, var(--bg));
   border: none;
   border-radius: 18px;
   padding: 18px;
@@ -3588,11 +3593,16 @@ onBeforeUnmount(function () {
   flex-direction: column;
   transition: all 0.25s ease;
   position: relative;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .ap-nd:hover {
-  background: color-mix(in srgb, var(--c) 82%, transparent);
-  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.08);
+  /* 2026-11-16（第三轮）：hover 不再跳到 --c —— 那等于跟父面板同色，卡片直接消失。
+     底色只提亮一小档（始终与面板保持可见差值），抬升感交给阴影 + 上浮。 */
+  background: color-mix(in srgb, var(--c) 80%, var(--bg));
+  box-shadow:
+    0 14px 32px rgba(0, 0, 0, 0.14),
+    0 3px 8px rgba(0, 0, 0, 0.08);
+  transform: translateY(-3px);
 }
 .ap-nd.off {
   opacity: 0.35;
@@ -3691,10 +3701,11 @@ onBeforeUnmount(function () {
 .dbv-skillpick {
   width: 100%;
   padding: 6px 10px;
-  border: 1px solid var(--hairline);
+  border: none;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.06);
   border-radius: 999px;
   font-size: 11px;
-  background: var(--bg);
+  background: var(--c);
   color: var(--t);
   outline: none;
   cursor: pointer;
@@ -4002,7 +4013,7 @@ onBeforeUnmount(function () {
   text-align: center;
   padding: 8px 16px;
   background: var(--bg);
-  border: none;
+  border: 1px solid var(--b);
   border-radius: 14px;
   min-width: 64px;
 }
@@ -4026,14 +4037,14 @@ onBeforeUnmount(function () {
   padding: 10px 14px;
   font-weight: 500;
   color: var(--t3);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+  border-bottom: 1px solid var(--hairline);
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.4px;
 }
 .pl-table td {
   padding: 10px 14px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.03);
+  border-bottom: 1px solid var(--hairline);
 }
 .dbv-piperow {
   cursor: pointer;
