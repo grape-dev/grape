@@ -2119,12 +2119,15 @@ _ANY_QUERIES: dict[str, str] = {
     'runtime_credential_type_by_id': "SELECT cred_type FROM runtime_credentials WHERE id=?",
     'agent_runtime_online_by_cred': "SELECT 1 FROM agent_runtimes WHERE credential_id=? AND status='online' LIMIT 1",
     'chat_local_engines': (
-        "SELECT id, name, version, COALESCE(host_name,''), COALESCE(engine_uid,'') FROM agent_runtimes "
+        "SELECT id, name, version, COALESCE(host_name,'') FROM agent_runtimes "
         "WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id"),
     'chat_user_engines': (
-        "SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id, COALESCE(ar.engine_uid,'') "
+        "SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id "
         "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
         "WHERE rc.scope = 'user' AND rc.status='active' AND rc.owner_name = ?"),
+    # ↑ Issue #868 降级契约（2026-11-16 E2E 回归实锤）：引擎列表 SQL 不硬引用
+    # engine_uid——旧库缺列时整段查询塌空（backends=[]）。uid 统一由 chat.py 的
+    # _ar_engine_uid(rid) 补（自带缺列/缺行降级 ''），单源同尺。
     'chat_engine_by_id': (
         "SELECT ar.name, ar.version, rc.device_name, rc.owner_name, ar.credential_id, rc.scope "
         "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "

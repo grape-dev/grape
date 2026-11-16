@@ -58,6 +58,20 @@ EXPECTED_PUBLIC = {
     "runtime_task_detail": ("get", "/api/runtime/tasks/{task_id}/detail"),
     "a2a_handoff": ("post", "/api/a2a"),
     "a2a_status": ("get", "/api/a2a/status"),
+    # [基线漂移修复 2026-11-16] arch-weekly-11 基线新增的对外端点（takeover 会话/
+    # IM 出站回执/平台账号绑定链接）——基线加端点时未同步本表，E2E E-07 复跑实红
+    # （origin/arch-weekly-11 同样红，非移植引入）。补录对齐 live OpenAPI。
+    "takeover_list": ("get", "/api/takeover/sessions"),
+    "takeover_start": ("post", "/api/takeover/sessions"),
+    "takeover_get": ("get", "/api/takeover/sessions/{session_id}"),
+    "takeover_abort": ("post", "/api/takeover/sessions/{session_id}/abort"),
+    "takeover_attach": ("post", "/api/takeover/sessions/{session_id}/attach"),
+    "takeover_finish": ("post", "/api/takeover/sessions/{session_id}/finish"),
+    "takeover_progress": ("post", "/api/takeover/sessions/{session_id}/progress"),
+    "takeover_request_finish": ("post", "/api/takeover/sessions/{session_id}/request-finish"),
+    "im_outbound_api_im_outbound_get": ("get", "/api/im/outbound"),
+    "im_outbound_retry_api_im_outbound__out_track_id__retry_post": ("post", "/api/im/outbound/{out_track_id}/retry"),
+    "auth_platform_links": ("get", "/api/auth/platform-links"),
     # [rebase 2026-11-12] uuid+沙箱+#1208 线新增对外端点（42 个：沙箱管理/凭据/LLM 凭据/绑定/selector 预览）
     "external_api_audit_query": ("get", "/admin/sandbox/external-api-audit/{task_id}"),
     "runtime_cloud_sandbox_kill": ("delete", "/api/runtime/cloud-sandboxes/{sandbox_id}"),

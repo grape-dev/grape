@@ -1446,7 +1446,7 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     # 本机直连引擎（credential_id=0，已知类型且已装且健康——与 resolve_local_engine 口径一致）
     try:
         for r in _rt.read_all_any("chat_local_engines"):
-            _rid, ename, ver, _hn, _euid = r
+            _rid, ename, ver, _hn = r
             if not is_known_engine_name(ename or ""):
                 continue
             _label = f"{ename} v{ver or ''}"
@@ -1457,7 +1457,7 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
             else:
                 _label += "（本机直连）"
             backends.append({"name": ename, "display_name": _label, "scope": "local",
-                             "owner": _hn, "runtime_id": _rid, "engine_uid": _euid or ""})
+                             "owner": _hn, "runtime_id": _rid, "engine_uid": _ar_engine_uid(_rid)})
     except Exception as _e:  # noqa: BLE001 - 取数失败不阻断配置接口，但必须留痕
         log.warning(f"chat config: local engines unavailable: {_e}")
         # 旧库（engine_uid 列未迁移）降级：忽略 uid 列照常返回引擎列表
@@ -1478,11 +1478,11 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     # 个人引擎（scope=user，仅当前用户 + active）
     try:
         for r in _rt.read_all_any("chat_user_engines", (user["username"],)):
-            _rid, ename, ver, dev, owner, cid, _euid = r
+            _rid, ename, ver, dev, owner, cid = r
             ins = instance_name(ename, dev or "", cid or 0)
             backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}",
                              "scope": "user", "owner": owner or "", "runtime_id": _rid,
-                             "engine_uid": _euid or ""})
+                             "engine_uid": _ar_engine_uid(_rid)})
     except Exception as _e:  # noqa: BLE001
         log.warning(f"chat config: user engines unavailable: {_e}")
         try:

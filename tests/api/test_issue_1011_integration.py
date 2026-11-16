@@ -117,13 +117,14 @@ def _reset_queued(conn, task_id):
 
 # ---------- I-1: v2 claim-by-tag(uid) 完整链路领到任务 ----------
 
-def test_i1_v2_claim_by_tag_full_chain(env):
+async def test_i1_v2_claim_by_tag_full_chain(env):
+    # runtime_claim_by_tag_v2 已 async 化（v1 claim_by_tag 是 to_thread 包装，v2 必须 await）
     conn, = env,
     _seed_engine(conn)
     task_id = _enqueue_via_pipeline(conn, runtime_id=0, pool_ids=[2], pool_uids=[UID_A])
 
     # v2 路由直调（uid 寻址）→ 服务层真实认领
-    r = rt.runtime_claim_by_tag_v2(UID_A, "all", None, credential_id=1)
+    r = await rt.runtime_claim_by_tag_v2(UID_A, "all", None, credential_id=1)
     task = r.get("task") or {}
     assert task.get("id") == task_id, f"v2 claim-by-tag 未领到任务: {r}"
     # payload 池轨断言：pool_engine_uids（入队快照）与寻址 uid 一致；
@@ -138,14 +139,14 @@ def test_i1_v2_claim_by_tag_full_chain(env):
 
 # ---------- I-2: 未知 uid 全链 fail-closed ----------
 
-def test_i2_v2_claim_unknown_uid_404(env):
+async def test_i2_v2_claim_unknown_uid_404(env):
     conn, = env,
     _seed_engine(conn)
     task_id = _enqueue_via_pipeline(conn, runtime_id=0, pool_ids=[2], pool_uids=[UID_A])
     _reset_queued(conn, task_id)
     count_before = conn.execute("SELECT COUNT(*) FROM agent_tasks").fetchone()[0]
     with pytest.raises(HTTPException) as ei:
-        rt.runtime_claim_by_tag_v2("ffffffff-0000-0000-0000-000000000000", "all", None, credential_id=1)
+        await rt.runtime_claim_by_tag_v2("ffffffff-0000-0000-0000-000000000000", "all", None, credential_id=1)
     assert ei.value.status_code == 404
     assert ei.value.detail.get("code") == "UNKNOWN_ENGINE_UID"
     # 任务未被误领/未造行
@@ -156,7 +157,7 @@ def test_i2_v2_claim_unknown_uid_404(env):
 
 # ---------- I-3: uid 池轨等价守卫（UC-C1）----------
 
-def test_i3_uid_pool_track_equivalence(env):
+async def test_i3_uid_pool_track_equivalence(env):
     """pool_engine_uids 非空 + ids 镜像缺失（不同步）时，uid 在池内 → 放行不误杀。"""
     conn, = env,
     _seed_engine(conn)
@@ -164,19 +165,19 @@ def test_i3_uid_pool_track_equivalence(env):
     # 模拟 ids 镜像缺失（同步失败窗口）：ids 清空但 uids 保留
     conn.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
     conn.commit()
-    r = rt.runtime_claim_by_tag_v2(UID_A, "all", None, credential_id=1)
+    r = await rt.runtime_claim_by_tag_v2(UID_A, "all", None, credential_id=1)
     task = r.get("task") or {}
     assert task.get("id") == task_id, "uid 池轨等价守卫未放行（ids 镜像缺失被误杀）"
 
 
 # ---------- I-4: v1 并存行为等价 ----------
 
-def test_i4_v1_claim_by_tag_equivalent(env):
+async def test_i4_v1_claim_by_tag_equivalent(env):
     conn, = env,
     _seed_engine(conn)
     task_id = _enqueue_via_pipeline(conn, runtime_id=0, pool_ids=[2], pool_uids=[UID_A])
     # v1 端点（id 寻址）领同一形态的新任务
-    r = rt.runtime_claim_by_tag(2, "all", None, credential_id=1)  # v1 签名 (runtime_id, tag, body, credential_id)
+    r = await rt.runtime_claim_by_tag(2, "all", None, credential_id=1)  # v1 async（to_thread）；签名 (runtime_id, tag, body, credential_id)
     task = r.get("task") or {}
     assert task.get("id") == task_id, f"v1 claim-by-tag 未领到同任务（并存行为漂移）: {r}"
     row = conn.execute("SELECT status, runtime_id FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
