@@ -275,6 +275,38 @@ class TestNotInSceneEndpoint:
         assert data["scene"] == "scene-2427"
         assert "scene=scene-2427" in data["message"]
 
+    def test_not_in_scene_with_non_empty_nodes_keeps_409(self):
+        """Issue #2555/#2427：场景有节点但缺目标 agent 时仍是 409 skip，不得退化为 500。
+
+        上一版用例把 nodes mock 成空列表，`_node_id` 从未被求值，掩盖了
+        未定义符号导致的 NameError → 500。这里用真实形态（场景有节点、缺目标 agent）。
+        """
+        from unittest.mock import patch
+        _set_issue(REPO, 2555)
+        _ck = {"in_scene": False, "scene_id": "scene-2427",
+               "nodes": [{"id": "vod", "tag": "vod"}, {"id": "issue", "tag": "issue"}]}
+        _session = {"session_key": "sess-nis-2555-nodes", "user_id": 0, "username": ""}
+        with patch("src.domains.runtime.routes.webhook._authorize_a2a", return_value=_session), \
+                patch("src.domains.runtime.routes.webhook._a2a_repo_fallback_check", return_value="ok"), \
+                patch("src.domains.runtime.routes.webhook._a2a_register_repo"), \
+                patch("src.domains.runtime.routes.webhook._scene_node_check", return_value=_ck):
+            resp = _client().post("/api/a2a", json=_body(agent="coding"))
+        assert resp.status_code == 409, resp.text
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["skipped"] == "not_in_scene"
+        assert data["detail"] == {"agent": "coding"}
+        assert data["handoff_result"] == "rejected"
+        assert "nodes=['vod', 'issue']" in data["message"]
+
+    def test_node_id_falls_back_to_tag(self):
+        """Issue #2427：仅有 tag 的存量节点也要能被识别（in_scene 走同一解析）。"""
+        from src.domains.runtime.routes.webhook import _node_id
+        assert _node_id({"id": "coding", "tag": "coding"}) == "coding"
+        assert _node_id({"tag": "coding"}) == "coding"
+        assert _node_id({}) == ""
+        assert _node_id("coding") == ""
+
 
 class TestSubscriptionEndpoint:
     """Issue #2555：PR 订阅 / SRE 订阅跳过端点级 reason。"""

@@ -1070,6 +1070,13 @@ class A2AHandoffBody(BaseModel):
                     "用于审计交棒来源段与幂等键派生；兼容 payload.source_event_seq / payload.source_seq。")
 
 
+def _node_id(node) -> str:
+    """节点标识兜底：优先 id，兼容仅有 tag 的存量节点（Issue #2427）。"""
+    if not isinstance(node, dict):
+        return ""
+    return str(node.get("id") or node.get("tag") or "")
+
+
 def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     """目标 agent 是否在当前 Issue 场景的 pipeline nodes 内（nodes=单一事实源）。
 
@@ -1097,7 +1104,7 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     return {
         "scene_id": _scene_id,
         "nodes": nodes,
-        "in_scene": any(n.get("id") == agent_name for n in nodes),
+        "in_scene": any(_node_id(n) == agent_name for n in nodes),
     }
 
 
