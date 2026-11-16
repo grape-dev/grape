@@ -389,6 +389,24 @@ def _derive_health_flag(data: dict) -> dict:
     return {"health_abnormal": False, "health_reason": ""}
 
 
+def _local_probe_streak(runtime_id: int) -> int:
+    """该引擎连续探测成功次数（agent_runtimes.probe_ok_streak）。
+
+    用作「引擎本身可用」的独立证据：CLI 能起、版本答得出。连败清零点由它触发，
+    避免「判不健康 → 拒领 → 永远拿不到任务 → 永远无法成功清零」的死结。
+    """
+    try:
+        from src.kernel.session_manager import db, db_lock
+        with db_lock:
+            _row = db.cursor().execute(
+                "SELECT COALESCE(probe_ok_streak,0) FROM agent_runtimes WHERE id=?",
+                (runtime_id,)).fetchone()
+        return int(_row[0] or 0) if _row else 0
+    except Exception as _e:
+        log.debug(f"health: read probe_ok_streak failed for {runtime_id}: {_e}")
+        return 0
+
+
 def _compute_and_persist(runtime_id: int) -> dict:
     """计算健康分并持久化到 DB + 更新内存缓存。返回健康度数据 dict。
 
@@ -402,6 +420,20 @@ def _compute_and_persist(runtime_id: int) -> dict:
     failed_tasks 保留 7 天窗口信息口径便于排障对比。
     """
     stats = _fetch_task_stats(runtime_id)
+    # 自锁解除：consecutive_failures 是任务层面的连败，惩罚 + 拒领组合起来会形成死结 ——
+    # 引擎因数次失败被判 unhealthy → claim 拒绝它 → 它永远拿不到任务 → 永远无法"成功一次"
+    # 来清零连败。本机探测（probe）成功是引擎可用性的独立强证据：CLI 起得来、版本答得出。
+    # 因此 probe_ok_streak >= 2 时把任务连败按 0 计（原始值仍保留在返回字段里可观测）。
+    try:
+        _probe_streak = _local_probe_streak(runtime_id)
+        if _probe_streak >= 1 and int(stats.get("consecutive_failures") or 0) > 0:
+            _orig = int(stats.get("consecutive_failures") or 0)
+            stats["consecutive_failures"] = 0
+            stats["consecutive_failures_raw"] = _orig
+            log.info(f"health: runtime={runtime_id} probe_ok_streak={_probe_streak} "
+                     f"→ task-level consecutive_failures {_orig} treated as 0 (claim deadlock breaker)")
+    except Exception as _pe:
+        log.debug(f"health: probe streak override skipped for {runtime_id}: {_pe}")
     heartbeat_alive = _fetch_heartbeat(runtime_id)
     # 旧 mock/旧档无 failed_effective 字段 → 回退 failed（兼容）
     failed_effective = stats.get("failed_effective")
