@@ -40,6 +40,9 @@ FROZEN = {
     "OnboardingView.vue": 0,
     # 共享弹窗/行组件（aria 组件化，2026-11-14）：文案全走 app.account.* → 0
     "BindDialog.vue": 0, "PatDialog.vue": 0, "CredRepoRow.vue": 0,
+    # LLM 凭据管理页 / 沙箱页（PR#1507 sandbox-uuid 线新增，2026-11-17 登记）：
+    # 值 = t() 的 zh 兜底串（与 Login/Register 卡片同款口径），只减不增
+    "LlmCredManager.vue": 15, "SandboxView.vue": 99,
 }
 
 

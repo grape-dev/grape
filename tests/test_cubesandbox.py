@@ -16,6 +16,11 @@ import pytest
 import os, sys
 from unittest.mock import MagicMock, patch, call
 
+# PR#1507 QA 建议（2026-11-17 原子回归「环境缺 SDK」5 红）：本文件的
+# @patch("cubesandbox.Sandbox") 需要 SDK 可导入——无 SDK 环境整文件跳过
+# 而非报错（importorskip 在 mock.patch 目标不可导入时同样必需）。
+pytest.importorskip("cubesandbox")
+
 # 先触发完整 src 包初始化（避免循环导入）
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import src.api.main  # noqa: F401 — 触发完整 import 链
