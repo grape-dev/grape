@@ -159,8 +159,12 @@ class TestRepoMismatchEndpoint:
         _clean()
 
     def test_repo_mismatch_when_only_other_repo_has_issue(self):
+        from unittest.mock import patch
         _set_issue(OTHER_REPO, 2555, status="cancelled")
-        resp = _client().post("/api/a2a", json=_body())
+        # Issue #2555 第 2 轮：归属还需本仓 VCS 复核 404 才成立（避免 DB 未同步误拒）
+        with patch("src.domains.runtime.routes.webhook._a2a_issue_vcs_check",
+                   return_value="not_found"):
+            resp = _client().post("/api/a2a", json=_body())
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["ok"] is False
@@ -170,6 +174,24 @@ class TestRepoMismatchEndpoint:
         assert data["detail"]["expected_repository"] == "other/repo"
         assert data["detail"]["actual_repository"] == "owner/repo"
         assert "other/repo" in data["reason"] and "owner/repo" in data["reason"]
+
+    def test_repo_mismatch_skipped_when_local_vcs_has_the_issue(self):
+        """本仓 DB 未同步、但 VCS 命中（新建单常态）→ 不得判 repo_mismatch。"""
+        from unittest.mock import patch
+        _set_issue(OTHER_REPO, 2555, status="cancelled")
+        with patch("src.domains.runtime.routes.webhook._a2a_issue_vcs_check",
+                   return_value="exists"):
+            resp = _client().post("/api/a2a", json=_body())
+        assert resp.json().get("skipped") != "repo_mismatch", resp.text
+
+    def test_repo_mismatch_skipped_when_vcs_unverifiable(self):
+        """VCS 不可判定（无 token / 网络）→ 不误拒，沿用既有口径。"""
+        from unittest.mock import patch
+        _set_issue(OTHER_REPO, 2555, status="cancelled")
+        with patch("src.domains.runtime.routes.webhook._a2a_issue_vcs_check",
+                   return_value="unknown"):
+            resp = _client().post("/api/a2a", json=_body())
+        assert resp.json().get("skipped") != "repo_mismatch", resp.text
 
     def test_absent_in_all_repos_does_not_repo_mismatch(self):
         resp = _client().post("/api/a2a", json=_body(issue_number="987654"))

@@ -2059,13 +2059,22 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 )
 
         # Issue #2555：仓库归属校验（正向证据判定，置于取消判定之前）。
+        _issue_vcs_verdict_cache = ""
         # 仅当「本仓无该单号 + 他仓存在该单号」同时成立才返回 repo_mismatch；
         # 命中即不再执行取消判定，避免目标仓同号取消单误报 task_cancelled。
+        # QA 第 2 轮：归属还须本仓 VCS 复核——多仓同号是常态，新建单可能尚未同步进
+        # grape DB（DB 无、VCS 有）；只有 VCS 也确认本仓 404 才可定性为仓库不匹配，
+        # 否则沿用 #755 的 exists/unknown 放行口径，不误拒合法交办。
         if issue_number and repo_key:
             try:
                 if not _issue_exists_in_db(repo_key, issue_number):
                     _other_repo_key = _issue_repo_mismatch(repo_key, issue_number)
-                    if _other_repo_key:
+                    _mismatch_verdict = (
+                        _a2a_issue_vcs_check(repo_key, issue_number) if _other_repo_key else "")
+                    if _mismatch_verdict:
+                        # 供下方 #755 方案B 复用，避免同一请求重复外呼 VCS
+                        _issue_vcs_verdict_cache = _mismatch_verdict
+                    if _other_repo_key and _mismatch_verdict == "not_found":
                         _expected_repository = _repo_key_to_repository(_other_repo_key)
                         _rm_reason = _a2a_skip_reason(
                             "repo_mismatch", issue_number=issue_number,
@@ -2149,7 +2158,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # DB 快查命中（平台已知 Issue）→ 放行不外呼；VCS 明确 404 → 400；
         # 网络/无 token（unknown）→ 放行，不误杀正常链路。
         if issue_number and not _issue_exists_in_db(repo_key, issue_number):
-            _issue_verdict = _a2a_issue_vcs_check(repo_key, issue_number)
+            _issue_verdict = _issue_vcs_verdict_cache or _a2a_issue_vcs_check(repo_key, issue_number)
             if _issue_verdict == "not_found":
                 log.info(f"A2A #755: rejected — issue #{issue_number} not found in target repo {repo_key}")
                 raise HTTPException(status_code=400, detail={
