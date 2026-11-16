@@ -3368,9 +3368,12 @@ onBeforeUnmount(function () {
 }
 /* 详情卡（v-html 内容） */
 .isk :deep(.isk-card) {
-  background: rgba(0, 0, 0, 0.02);
+  background: var(--c);
   border-radius: 14px;
-  border: 0.5px solid var(--b, #e8e8ed);
+  border: none;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 3px 10px rgba(0, 0, 0, 0.03);
   padding: 14px 16px;
   margin-bottom: 12px;
 }
@@ -3438,9 +3441,12 @@ onBeforeUnmount(function () {
 }
 /* 附件 */
 .isk-attach-card {
-  background: rgba(0, 0, 0, 0.02);
+  background: var(--c);
   border-radius: 14px;
-  border: 0.5px solid var(--b, #e8e8ed);
+  border: none;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 3px 10px rgba(0, 0, 0, 0.03);
   padding: 14px 16px;
   margin-bottom: 12px;
 }

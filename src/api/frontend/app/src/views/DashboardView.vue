@@ -46,7 +46,7 @@
         </div>
         <div class="ap-grid">
           <template v-for="(node, i) in editNodes" :key="node.id">
-            <div :class="['ap-nd', { off: !node.enabled }]">
+            <div :class="['ap-nd', { off: node.enabled === false }]">
               <div class="ap-nd-top" :style="{ background: agentColor(node.id) }"></div>
               <div class="ap-nd-head">
                 <span
@@ -58,17 +58,17 @@
                 <span
                   v-if="canToggle(node.id)"
                   class="ap-nd-toggle"
-                  :style="{ color: node.enabled ? 'var(--r)' : 'var(--g)' }"
+                  :style="{ color: node.enabled === false ? 'var(--g)' : 'var(--r)' }"
                   @click.stop="toggleAgent(node.id)"
-                  >{{ node.enabled ? '✕' : '✓' }}</span
+                  >{{ node.enabled === false ? '✓' : '✕' }}</span
                 >
               </div>
-              <div v-if="node.enabled" class="ap-nd-desc">{{ agentDesc(node.id) }}</div>
+              <div v-if="node.enabled !== false" class="ap-nd-desc">{{ agentDesc(node.id) }}</div>
               <div v-else class="ap-nd-off-lbl">{{ t('not_needed_in_scene') }}</div>
               <div class="ap-nd-hr"></div>
               <div class="ap-nd-skillbox">
                 <div class="ap-nd-lbl">{{ t('label_skill') }}</div>
-                <template v-if="node.enabled">
+                <template v-if="node.enabled !== false">
                   <div class="dbv-skillpick" @click.stop="openSkillDropdown(node.id, $event)">
                     {{ node.skill_display_name || node.skill || t('select_skill') }}
                   </div>
@@ -77,7 +77,7 @@
               </div>
               <div class="ap-nd-engbox">
                 <div class="ap-nd-lbl">{{ t('label_engine') }}</div>
-                <template v-if="node.enabled">
+                <template v-if="node.enabled !== false">
                   <div v-html="engineBadgeHtml(node)"></div>
                   <button class="ap-nd-engbtn" @click.stop="openEngineModal(node.id)">
                     {{ t('select_engine') }}
@@ -323,12 +323,12 @@
                   <span
                     v-if="flowEditing && canToggle(node.id)"
                     class="ap-nd-toggle"
-                    :style="{ color: node.enabled ? 'var(--r)' : 'var(--g)' }"
+                    :style="{ color: node.enabled === false ? 'var(--g)' : 'var(--r)' }"
                     @click.stop="toggleAgent(node.id)"
-                    >{{ node.enabled ? '✕' : '✓' }}</span
+                    >{{ node.enabled === false ? '✓' : '✕' }}</span
                   >
                 </div>
-                <div v-if="node.enabled" class="ap-nd-desc">
+                <div v-if="node.enabled !== false" class="ap-nd-desc">
                   {{ agentDesc(node.tag || node.id) }}
                 </div>
                 <div v-else class="ap-nd-off-lbl">{{ t('not_needed_in_scene') }}</div>
@@ -3699,13 +3699,16 @@ onBeforeUnmount(function () {
   color: var(--t);
 }
 .dbv-skillpick {
+  position: relative;
   width: 100%;
-  padding: 6px 10px;
-  border: none;
-  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+  padding: 6px 26px 6px 12px;
+  /* 2026-11-16：原为「白底 + 0.5px 6% 黑内阴影」，压在同为近白的 .ap-nd 上等于无轮廓，
+     编辑态看着像纯文本、没人知道能点。改为真描边 + 低一档底色 + 右侧 ▾ 指示。 */
+  border: 1px solid var(--b);
   border-radius: 999px;
   font-size: 11px;
-  background: var(--c);
+  font-weight: 500;
+  background: var(--bg);
   color: var(--t);
   outline: none;
   cursor: pointer;
@@ -3713,10 +3716,25 @@ onBeforeUnmount(function () {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.dbv-skillpick::after {
+  content: '▾';
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 9px;
+  line-height: 1;
+  color: var(--t3);
+  pointer-events: none;
 }
 .dbv-skillpick:hover {
-  border-color: var(--a-text);
-  background: var(--c);
+  border-color: color-mix(in srgb, var(--a) 55%, transparent);
+  background: color-mix(in srgb, var(--a) 8%, var(--bg));
+}
+.dbv-skillpick:hover::after {
+  color: var(--a);
 }
 .ap-nd-engbtn {
   font-size: 12px;
