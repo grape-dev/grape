@@ -314,6 +314,23 @@ class TestTerminalCleanup:
             assert f.read() == "v1"
         assert _git(["rev-parse", "--abbrev-ref", "HEAD"], wt2).stdout.strip() == "feat/issue-2514"
 
+    def test_terminal_cleanup_archives_never_pushed_commits(self):
+        """远程无分支（从未 push）时，仍以 mirror 基线为起点存档本地提交。"""
+        wt = _wt(task_id="t-never")
+        with open(os.path.join(wt, "local.txt"), "w", encoding="utf-8") as f:
+            f.write("local commit body")
+        assert _git(["add", "local.txt"], wt).returncode == 0
+        assert _git(["commit", "-m", "local work never pushed"], wt).returncode == 0
+        assert repogit.remove_issue_worktree_if_pushed(
+            REPO, "coding", "2514", task_id="t-never") is True
+        assert not os.path.isdir(wt)
+        art = _artifacts("workspace-t-never-unpushed.patch")
+        assert os.path.isfile(art), "从未 push 的本地提交也必须落区间存档"
+        with open(art, encoding="utf-8") as f:
+            content = f.read()
+        assert "local work never pushed" in content
+        assert "local commit body" in content
+
 
 # ===================== 派发前巡检 =====================
 
@@ -366,8 +383,30 @@ class TestPatrol:
         os.utime(wt, (0, 0))
         repogit.patrol_workspaces(active_dirs=[], ttl_hours=1)
         assert not os.path.isdir(wt)
-        art = _artifacts("workspace-unknown-patrol.patch")
+        art = _artifacts("workspace-t-dirty-patrol.patch")
         assert os.path.isfile(art), "巡检回收脏目录前必须先存档"
+        with open(art, encoding="utf-8") as f:
+            assert "dirty in stale workspace" in f.read()
+
+    def test_patrol_distinct_archives_for_multiple_dirty_dirs(self):
+        """同仓多份超期脏工作区（marker 无 task_id）存档不得同名覆盖。"""
+        wt1 = _wt(task_id="")
+        wt2 = _wt(num="1588", task_id="")
+        with open(os.path.join(wt1, "a.txt"), "w", encoding="utf-8") as f:
+            f.write("dirty dir one")
+        with open(os.path.join(wt2, "a.txt"), "w", encoding="utf-8") as f:
+            f.write("dirty dir two")
+        for d in (wt1, wt2):
+            os.utime(d, (0, 0))
+        stats = repogit.patrol_workspaces(active_dirs=[], ttl_hours=1)
+        assert stats["removed"] >= 2
+        art1 = _artifacts("workspace-issue2514-coding-patrol.patch")
+        art2 = _artifacts("workspace-issue1588-coding-patrol.patch")
+        assert os.path.isfile(art1) and os.path.isfile(art2), "每份脏目录都必须各留一份存档"
+        with open(art1, encoding="utf-8") as f:
+            assert "dirty dir one" in f.read()
+        with open(art2, encoding="utf-8") as f:
+            assert "dirty dir two" in f.read()
 
 # ===================== 证据完整性（复审修复） =====================
 
@@ -397,6 +436,30 @@ class TestEvidenceIntegrity:
         assert os.path.isfile(os.path.join(wt, "foreign.txt")), "存档失败不得删除工作区"
         assert not os.path.exists(os.path.join(wt, repogit.WORKSPACE_MARKER)), \
             "外来脏树保留时不得重写归属标记"
+
+    def test_foreign_kept_skips_baseline_and_branch_guard(self, monkeypatch):
+        """外来脏树保留（拒绝复用失败）后，不应落保真基线/安装 pre-push 守卫。"""
+        wt = _wt(task_id="t-fk")
+        os.remove(os.path.join(wt, repogit.WORKSPACE_MARKER))
+        with open(os.path.join(wt, "foreign.txt"), "w", encoding="utf-8") as f:
+            f.write("foreign content")
+        from src.domains.runtime.engine import branch_guard, worktree_guard
+        called = {"baseline": 0, "hook": 0}
+
+        def _baseline(*a, **k):
+            called["baseline"] += 1
+
+        def _hook(*a, **k):
+            called["hook"] += 1
+            return True
+
+        monkeypatch.setattr(worktree_guard, "save_baseline", _baseline)
+        monkeypatch.setattr(branch_guard, "install_pre_push_hook", _hook)
+        monkeypatch.setattr(repogit, "_archive_workspace_patch", lambda *a, **k: "")
+        wt2 = repogit.ensure_issue_worktree(REPO, "coding", "2514", task_id="t-fk2")
+        assert wt2 == wt
+        assert called == {"baseline": 0, "hook": 0}, \
+            "外来保留树不得在其分支上落保真基线/装守卫"
 
     def test_terminal_cleanup_defers_when_archive_fails(self, monkeypatch):
         """终态清理存档失败 → 保留现场（返回 False），不静默删。"""
@@ -449,3 +512,24 @@ class TestCleanupSignature:
             REPO, "coding", "2514", token="tok", reason="task_terminal",
             task_id="t-clean") is True
         assert not os.path.isdir(wt)
+
+    def test_cleanup_returns_false_when_dir_remains(self, monkeypatch):
+        """cleanup 必须返回目录是否真的删除，而非无条件 True。"""
+        wt = _wt(task_id="t-keep")
+        monkeypatch.setattr(repogit, "_run_git", lambda *a, **k: None)
+        monkeypatch.setattr(repogit.shutil, "rmtree", lambda *a, **k: None)
+        assert repogit.cleanup_issue_worktree(
+            REPO, "coding", "2514", reason="test", task_id="t-keep") is False
+        assert os.path.isdir(wt)
+
+
+class TestPorcelainParse:
+    def test_worktree_side_rename_skips_original_path(self, monkeypatch):
+        """状态位在第二位的 rename（工作树侧 " R"）也要跳过原路径字段。"""
+        class _R:
+            returncode = 0
+            stdout = " R renamed.txt\0original.txt\0?? new.txt\0"
+
+        monkeypatch.setattr(repogit, "_run_git", lambda *a, **k: _R())
+        entries = repogit._porcelain_entries("/tmp/unused")
+        assert entries == [(" ", "renamed.txt"), ("?", "new.txt")]
