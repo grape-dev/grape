@@ -81,6 +81,48 @@ def test_numeric_zero_has_word_boundary():
     assert _classify("未通过 0 项") == "pass"
 
 
+# ── QA 第 2 轮回归：闭环豁免必须按项数对账（双向误判）─────────────────────
+
+def test_in_progress_is_not_closed():
+    """“在修复中/在处理中”不是闭环，不得豁免。"""
+    assert _classify("Critical 2 项，均已在修复中") == "fail"
+    assert _classify("Required 1 项已在处理中") == "fail"
+    assert _classify("Critical 1 项，Required 1 项，两项均已在整改中") == "fail"
+
+
+def test_partial_fix_is_not_closed():
+    """已修复数量少于声明数量 = 部分修复，不得整体豁免。"""
+    assert _classify("Required 2 项，已修复 1 项") == "fail"
+    assert _classify("Critical 3 项，已修复 2 项") == "fail"
+    # 数量相符仍应放行
+    assert _classify("Critical 2 项，已修复 2 项") == "pass"
+
+
+def test_partial_scope_marker_blocks_shared_exemption():
+    """只有/仅/前者/后者/其中 表示无法证明全部闭环。"""
+    assert _classify("Critical 1 项，Required 2 项，只有后者已闭环") == "fail"
+    assert _classify("Critical 1 项，Required 2 项，其中 1 条 Critical 已闭环") == "fail"
+    # 无部分限定词的共享闭环短语仍放行
+    assert _classify("Critical 1 项，Required 2 项，均已闭环") == "pass"
+
+
+def test_zero_residue_variants_are_not_fail():
+    """零残留的几种常见写法都不能被判失败（上轮 #2429 修的就是这类误拦）。"""
+    assert _classify("未修复 0 项") == "pass"
+    assert _classify("0 项未修复") == "pass"
+    assert _classify("尚未修复：0 项") == "pass"
+    assert _classify("未处理 0 项，结论通过") == "pass"
+    assert _classify("0 条 Required 未闭环") == "pass"
+    assert _classify("0 条 Critical 未修复，结论通过") == "pass"
+
+
+def test_unresolved_items_still_fail_after_reconciliation():
+    """对账不得放过真实残留项。"""
+    assert _classify("Critical 2 项未修复") == "fail"
+    assert _classify("有 1 条 Critical 未闭环，另有 2 条 Required 待修复") == "fail"
+    assert _classify("20 failures / 20 条阻塞") == "fail"
+
+
 def test_gate_prefers_explicit_issue_chain(monkeypatch):
     """PR 详情已有显式 issues 关联时，body 里的交叉引用 #214 不参与合门禁。"""
     from src.api import git_repo_api, qa_gate
