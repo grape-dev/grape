@@ -25,9 +25,9 @@ FROZEN = {
         "host-status.js": "1", "worker-name.js": "2", "pwd-blocklist.js": "3",
         "faro.js": "7",
         # Vue 视图 chunk
-        "dashboard-view.js": "66", "pipeline.js": "52", "agent-view.js": "48",
-        "event-view.js": "55", "chat-view.js": "58", "im-channel.js": "49",
-        "repos-view.js": "54", "issues-view.js": "58", "account-view.js": "53",
+        "dashboard-view.js": "66", "pipeline.js": "53", "agent-view.js": "48",
+        "event-view.js": "56", "chat-view.js": "58", "im-channel.js": "49",
+        "repos-view.js": "54", "issues-view.js": "59", "account-view.js": "53",
         "scene-market.js": "53", "skills-view.js": "52", "knowledge-view.js": "48",
         "runtimes-view.js": "55", "observability-view.js": "54",
         "organizations.js": "49", "feedback-dialog.js": "49", "my-feedback.js": "49",

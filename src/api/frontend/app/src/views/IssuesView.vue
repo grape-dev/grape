@@ -602,22 +602,26 @@
           <template v-else>
             <div class="isk-fld">
               <label>
-                {{ t('create.title_label') }} <span class="isk-required">*</span>
+                <span class="isk-fld-lbl"
+                  >{{ t('create.title_label') }} <span class="isk-required">*</span></span
+                >
                 <span class="isk-fld-hint">{{ t('create.title_hint') }}</span>
                 <input v-model="modal.title" :placeholder="t('create.title_placeholder')" />
               </label>
             </div>
             <div class="isk-fld">
               <label>
-                {{ t('create.desc_label') }} <span class="isk-required">*</span>
-                <!-- Issue #460：标题一键同步进描述（幂等去重，空行分隔） -->
-                <span
-                  class="isk-sync-title"
-                  role="button"
-                  :title="t('create.sync_title_to_desc')"
-                  :aria-label="t('create.sync_title_to_desc')"
-                  @click.prevent="syncTitleToDesc"
-                  >↧</span
+                <span class="isk-fld-lbl"
+                  >{{ t('create.desc_label') }} <span class="isk-required">*</span>
+                  <!-- Issue #460：标题一键同步进描述（幂等去重，空行分隔） -->
+                  <span
+                    class="isk-sync-title"
+                    role="button"
+                    :title="t('create.sync_title_to_desc')"
+                    :aria-label="t('create.sync_title_to_desc')"
+                    @click.prevent="syncTitleToDesc"
+                    >↧</span
+                  ></span
                 >
                 <span class="isk-fld-hint">{{ t('create.desc_hint') }}</span>
                 <textarea
@@ -4079,6 +4083,14 @@ onBeforeUnmount(function () {
   gap: 4px;
   font-size: 13px;
   color: var(--t2, #333);
+}
+/* label 是 column flex：标题文字与红色 * 必须包在同一行（.isk-fld-lbl）里，
+   否则每个子节点各占一行，* 会另起一行（老页用 <div>13px</div> 包住这一行）。 */
+.isk-fld-lbl {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 13px;
 }
 .isk-fld-hint {
   font-size: 11px;

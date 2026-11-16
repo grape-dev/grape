@@ -83,6 +83,9 @@
                 <div id="evStatusRow" @click="onInfoClick($event)" v-html="statusText"></div>
                 <div id="evFailReason" v-html="failReasonText"></div>
                 <div id="evLogRow" @click="onInfoClick($event)" v-html="logRowText"></div>
+                <!-- Issue #35 遗留：老页把门禁徽标放在信息区但模板里恒 display:none（从未被
+                     打开过），Vue 移植时照抄了 HTML 却漏掉了隐藏 → 信息区多出一行
+                     「✔ 评论开放中」。状态本身已由右侧对话面板的输入行表达，这里恢复隐藏。 -->
                 <div v-if="gateLoaded" id="convGate" v-html="gateText"></div>
               </div>
             </div>
@@ -201,6 +204,7 @@
               <span class="ev__tl-sub">· {{ taskLog.title }}</span></span
             >
             <span v-if="!taskLog.inline" class="ev__tl-status" v-html="taskLog.statusHtml"></span>
+            <span v-else class="ev__tl-count">{{ taskLog.inlineCount }}{{ t('log_count_suffix') }}</span>
             <button class="ev__tl-btn" :title="t('log_copy_title')" @click="copyTaskLog">
               {{ t('log_copy') }}
             </button>
@@ -1466,6 +1470,7 @@ const taskLog = reactive({
   infoHtml: '',
   logHtml: '',
   inlineHtml: '',
+  inlineCount: 0,
   hasMsg: false,
 })
 const killBtnVisible = ref(false)
@@ -1505,16 +1510,25 @@ function tlLine(payload) {
   const icon =
     type === 'error'
       ? '❌'
-      : type === 'reasoning'
-        ? '🤔'
-        : type === 'step_start'
-          ? '▶'
-          : type === 'step_finish'
-            ? '✅'
-            : type === 'text'
-              ? '💬'
-              : '·'
-  const color = type === 'error' ? '#ff5b5b' : type === 'reasoning' ? '#a0aac0' : '#e0e6f0'
+      : type === 'task:retry'
+        ? '↻'
+        : type === 'reasoning'
+          ? '🤔'
+          : type === 'step_start'
+            ? '▶'
+            : type === 'step_finish'
+              ? '✅'
+              : type === 'text'
+                ? '💬'
+                : '·'
+  const color =
+    type === 'error'
+      ? '#ff5b5b'
+      : type === 'task:retry'
+        ? '#f0a741'
+        : type === 'reasoning'
+          ? '#a0aac0'
+          : '#e0e6f0'
   return (
     '<div style="margin-bottom:8px">' +
     time +
@@ -1525,6 +1539,45 @@ function tlLine(payload) {
     esc(payload.content || '') +
     '</span></div>'
   )
+}
+// Issue #701：设备显示名唯一来源 runtime_credentials.name，空名统一占位「未命名设备」
+function logWorkerName(v) {
+  const s = String(v || '').trim()
+  if (s) return s
+  const lbl = tc('unnamed_worker')
+  return lbl && lbl !== 'unnamed_worker' ? lbl : '未命名设备'
+}
+function fmtTok(v) {
+  v = Number(v) || 0
+  return v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1000 ? (v / 1000).toFixed(1) + 'K' : String(v)
+}
+// Issue #1255：执行模型 + 该任务真实 token 明细（主模型内联 ↑in ↓out，其余模型收成 +N 悬浮）。
+// 与老页 events.js 的 _tlLoadInfo 同口径；Vue 移植时整段丢失，实时日志只剩 CPU/MEM。
+function logModelSegment(info) {
+  if (!info.model)
+    return '🧠 <span style="color:var(--t3)">' + esc(t('model_unknown')) + '</span>'
+  const ms = Array.isArray(info.models) ? info.models : []
+  const top = ms.find(function (m) {
+    return m && m.model === info.model
+  }) || ms[0] || null
+  let out = '🧠 ' + esc(info.model)
+  if (top && (top.input || top.output))
+    out +=
+      ' <span style="color:var(--t3)">· ↑' +
+      fmtTok(top.input) +
+      ' ↓' +
+      fmtTok(top.output) +
+      '</span>'
+  const others = ms.filter(function (m) {
+    return m && m.model !== info.model
+  })
+  const tip = others
+    .map(function (m) {
+      return m.model + ' (↑' + fmtTok(m.input) + ' ↓' + fmtTok(m.output) + ')'
+    })
+    .join('、')
+  if (tip) out += ' <span class="t3" title="' + esc(tip) + '">+' + others.length + '</span>'
+  return out
 }
 function openTaskLogModal(taskId, title) {
   closeTaskLog()
@@ -1549,10 +1602,12 @@ function openTaskLogModal(taskId, title) {
               ? ' <span style="color:var(--t3)">v' + esc(info.agent_version) + '</span>'
               : '')
         )
-      if (info.device_name) bits.push('🖥 ' + esc(info.device_name))
+      if (info.device_name || info.agent_name)
+        bits.push('🖥 ' + esc(logWorkerName(info.device_name)))
       if (info.last_ip) bits.push('🌐 ' + esc(info.last_ip))
       if (info.owner_name) bits.push('👤 ' + esc(info.owner_name))
       if (info.spec) bits.push('⚙️ ' + esc(info.spec))
+      bits.push(logModelSegment(info))
       if (info.cpu_percent) bits.push('📊 CPU ' + Number(info.cpu_percent).toFixed(1) + '%')
       if (info.memory_percent) bits.push('💾 MEM ' + Number(info.memory_percent).toFixed(1) + '%')
       taskLog.infoHtml = bits
@@ -1727,15 +1782,23 @@ function openInlineLog(seq, title) {
             const icon =
               type === 'error'
                 ? '❌'
-                : type === 'reasoning'
-                  ? '🤔'
-                  : type === 'step_start'
-                    ? '▶'
-                    : type === 'text'
-                      ? '💬'
-                      : '·'
+                : type === 'task:retry'
+                  ? '↻'
+                  : type === 'reasoning'
+                    ? '🤔'
+                    : type === 'step_start'
+                      ? '▶'
+                      : type === 'text'
+                        ? '💬'
+                        : '·'
             const color =
-              type === 'error' ? '#ff5b5b' : type === 'reasoning' ? '#a0aac0' : '#e0e6f0'
+              type === 'error'
+                ? '#ff5b5b'
+                : type === 'task:retry'
+                  ? '#f0a741'
+                  : type === 'reasoning'
+                    ? '#a0aac0'
+                    : '#e0e6f0'
             return (
               '<div style="margin-bottom:8px">' +
               time +
@@ -1757,6 +1820,7 @@ function openInlineLog(seq, title) {
       taskLog.open = true
       taskLog.inline = true
       taskLog.title = title || 'seq#' + seq
+      taskLog.inlineCount = logs.length
       taskLog.inlineHtml = bodyHtml
     })
     .catch(function (e) {
@@ -1905,6 +1969,10 @@ onMounted(function () {
   font-size: 11px;
   color: var(--t2);
   line-height: 1.8;
+}
+/* 门禁徽标：老页在信息区恒隐藏（模板 display:none 且无人打开），状态由右侧对话面板表达 */
+.ev__infolines #convGate {
+  display: none;
 }
 .ev__lbl {
   color: var(--t3);
@@ -2127,6 +2195,12 @@ onMounted(function () {
 .ev__tl-status {
   font-size: 11px;
   margin-left: auto;
+}
+/* 内联日志：老页在标题栏显示「N 条」（events.js openInlineLog），Vue 移植时漏掉 */
+.ev__tl-count {
+  font-size: 11px;
+  margin-left: auto;
+  color: var(--t3);
 }
 /* 日志弹窗工具按钮（Teleport 到 body，不进 #pageContent，所以样式只能写这里）*/
 .ev__tl-btn {
