@@ -78,3 +78,39 @@ sed -i '/192.168.0.116:38080/d' /etc/nginx/sites-available/grape-lb.conf && ngin
 3. 两节点静态资源版本一致（`app.js?v=266` / `chat-view.js?v=58`）。
 4. 两节点 `SWEEPER_LOCK_MODE=own`（`/etc/systemd/system/grape@.service.d/20-sweeper-lock.conf`），
    sweeper 互斥靠 MySQL `GET_LOCK`，避免两节点双跑清扫。
+
+## 事故与修复：08:56 全站 502（2026-11-16）
+
+**现象**：公网 `http://120.46.213.1:38080/` 502；`/var/log/nginx/error.log` 里全是
+`no live upstreams while connecting to upstream, upstream: "http://grape_pool_rr/..."`。
+
+**链路**（两个原因叠加，缺一不可）：
+
+1. 浏览器首屏会打一片 `POST /faro/collect`（Grafana Faro 前端 telemetry）。后端没部署 collector，
+   这个路径由 mgmt 直接回 **503**。
+2. `proxy_next_upstream` 里含 `http_503`，于是每个 faro 请求被判定为一次 upstream 失败，
+   并在重试时把 **另一个节点** 也记一次失败。
+3. 上一轮为了「节点重启立刻摘除」把 `max_fails` 设成了 **1**。于是一次页面加载的 faro 风暴
+   在几十毫秒内把两台各记满失败 → 两个 server 同时进入 down 状态 → `no live upstreams` →
+   连 `GET /` 都 502，持续到 `fail_timeout` 结束。
+
+**修复**：
+
+```nginx
+location /faro/ { access_log off; return 204; }        # 边缘收下 telemetry，毒源消失
+max_fails=3 fail_timeout=10s;                          # 单次抖动不再摘节点
+proxy_connect_timeout 2s;                              # 节点不可达时快速失败，不挂 60s
+```
+
+**验收（修复后现测）**：
+
+```
+/faro/collect        → 204（本机与公网入口均 204）
+soak 160 次混合流量   → 120×200 + 40×204，0 个 5xx
+08:58:00 之后 5xx     → 0
+最后一条 no live upstreams → 08:57:01（重载前）
+```
+
+**教训**：`max_fails` 不要设 1；`proxy_next_upstream` 里带 5xx 时，必须确认没有「稳定返回 5xx
+的路径」——它会把被动健康检查当成流量开关，一次性把整池摘空。前端 telemetry 类路径应在入口
+吞掉（204）而不是透传到未实现的业务路由。
