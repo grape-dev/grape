@@ -106,7 +106,7 @@ def _conn():
 def enqueue(*, out_track_id: str, installation_id: str, channel_type: str,
             channel_chat_id: str, payload: dict, expires_at: str,
             status: str = "pending", last_error: str = "",
-            replace: bool = False) -> bool:
+            replace: bool = False, chat_type: str = "p2p") -> bool:
     """写入一行 outbox（默认 INSERT OR IGNORE：同单号已存在 → 不动它，返回 False）。
 
     payload：kind/text/repo_key/issue_number/conv_id/user_id 等投递所需的全部字段。
@@ -125,7 +125,7 @@ def enqueue(*, out_track_id: str, installation_id: str, channel_type: str,
             " payload, status, attempt_count, next_retry_at, expires_at, last_error, "
             " created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?)",
-            (out_track_id, installation_id, channel_type, channel_chat_id or "", "p2p",
+            (out_track_id, installation_id, channel_type, channel_chat_id or "", chat_type or "p2p",
              json.dumps(payload or {}, ensure_ascii=False), status,
              now, expires_at, last_error, now, now),
         )

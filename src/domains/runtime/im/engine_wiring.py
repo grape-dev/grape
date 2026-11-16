@@ -419,11 +419,13 @@ def feishu_api(app_id: str = ""):
 
 
 def get_active_installation(scope: str = "user", *, owner_user_id: str = "", repo_key: str = "",
-                            channel_type: str = "") -> Optional[dict]:
+                            channel_type: str = "", app_id: str = "") -> Optional[dict]:
     """读 grape_t_channel_installation 的活跃安装（旧 IM 下线 A2 M2）。
 
     业务侧（如 web→飞书推送）原本经 legacy BotManager 拿 ctx/api，现在统一从这里取
     安装凭证；返回 None 表示该轨没有活跃安装。
+    ``app_id`` 非空时按安装的 legacy_app_id 精确过滤——同一仓库同渠道绑定多个 bot 时，
+    避免取「最新活跃安装」而与目标群/绑定不匹配（Issue #2432）。
     """
     scope = scope or "user"
     key = _legacy_installation_key(scope, owner_user_id, repo_key)

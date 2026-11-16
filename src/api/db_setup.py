@@ -6098,6 +6098,15 @@ def _migrate_tables():
             log.info("Added events.structured_output column")
     except Exception as e:
         log.warning(f"Add events.structured_output column failed: {e}")
+    # ===== events 表补 failed_node 列（Issue #2432：失败终态落库失败节点名）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "events", "failed_node", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added events.failed_node column")
+    except Exception as e:
+        log.warning(f"Add events.failed_node column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:

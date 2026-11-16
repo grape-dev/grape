@@ -79,6 +79,7 @@ _KIND_META = {
     "pending_review": ("🔎 需求待审核", None),
     "done": ("✅ 任务已完成", None),
     "error": ("⚠️ 任务失败", None),
+    "pipeline_failed": ("⚠️ 流水线节点失败", None),
 }
 
 
@@ -142,7 +143,8 @@ def build_card(kind: str, *, text: str, repo_key: str = "", issue_number: int = 
         blocks.append(row_block(Action(id="open-issue", label="🔗 查看 Issue", url=url)))
 
     tone = {"awaiting": Tone.WARNING, "pending_review": Tone.WARNING,
-            "done": Tone.SUCCESS, "error": Tone.DANGER}.get(kind, Tone.INFO)
+            "done": Tone.SUCCESS, "error": Tone.DANGER,
+            "pipeline_failed": Tone.DANGER}.get(kind, Tone.INFO)
     return Card(title=title, tone=tone, blocks=tuple(blocks), hint=note or "")
 
 
@@ -629,6 +631,75 @@ def notify_issue_event(repo_key: str, issue_number: int, kind: str, text: str,
                     conv_id=conv_id or conv)
 
 
-__all__ = ["notify_user", "notify_issue_event", "schedule_notify", "build_card",
-           "build_cards_from_payload", "active_targets", "p2p_chat_id", "stats",
-           "issue_url", "resolve_engine", "set_running_app"]
+def notify_repo_group(repo_key: str, kind: str, text: str, *, issue_number: int = 0,
+                      discriminator: str = "") -> dict:
+    """向仓库绑定的 IM 群推送通知（Issue #2432：流水线失败通知走飞书群）。
+
+    仅入队 outbox（同步、轻量、异常不上抛），实际发送由 IM outbox 消费者异步完成
+    ——通知失败不影响调用方（流水线终态写入）主流程。
+    Issue #2432 范围仅飞书：只处理 ``im_provider='feishu'`` 且 ``notify_enabled=1``
+    （通知开关，/notify off 后不再推送）的群绑定；并按绑定 ``im_app_id`` 选择安装。
+    ``discriminator`` 区分同一需求同一节点的不同失败周期，避免跨周期被 outbox 幂等吞掉。
+
+    返回 {"queued": int, "reason": str}；无群绑定 / 无活跃安装时 queued=0。
+    """
+    res = {"queued": 0, "reason": ""}
+    if not repo_key:
+        res["reason"] = "no_repo"
+        return res
+    try:
+        from src.kernel.session_manager import db, db_lock
+        rows = []
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute(
+                    "SELECT im_chat_id, im_provider, im_app_id, notify_enabled FROM repo_im_group_binding "
+                    "WHERE repo_key=? AND im_chat_id<>'' "
+                    "AND LOWER(COALESCE(NULLIF(im_provider,''),'feishu'))='feishu' "
+                    "AND COALESCE(notify_enabled,0)=1", (repo_key,))
+                rows = c.fetchall() or []
+            except Exception as e:
+                log.warning("[im-notify] read group binding failed repo=%s: %s", repo_key, e)
+                rows = []
+        if not rows:
+            res["reason"] = "no_binding"
+            return res
+
+        from src.domains.runtime.im import outbox as OB
+        from src.domains.runtime.im.engine_wiring import get_active_installation
+        note = f"发送时间：{time.strftime('%Y-%m-%d %H:%M')}"
+        payload = {"kind": kind, "text": text, "repo_key": repo_key,
+                   "issue_number": int(issue_number or 0), "conv_id": "",
+                   "user_id": 0, "note": note}
+        for chat_id, provider, app_id, _notify_enabled in rows:
+            provider = str(provider or "feishu").strip() or "feishu"
+            # 群绑定的 im_app_id 是发送该群的 bot；按它过滤安装，避免同仓库多 bot 时用错 app
+            inst = get_active_installation("repo", repo_key=repo_key,
+                                           channel_type=provider,
+                                           app_id=str(app_id or "").strip())
+            if not inst:
+                log.info("[im-notify] group repo=%s provider=%s app=%s no active installation",
+                         repo_key, provider, "set" if app_id else "")
+                continue
+            iid = str(inst.get("installation_id") or "")
+            track = OB.out_track_id(0, kind, repo_key, int(issue_number or 0),
+                                    provider, iid, event_key=discriminator)
+            ok = OB.enqueue(out_track_id=track, installation_id=iid,
+                            channel_type=provider, channel_chat_id=str(chat_id or ""),
+                            payload=payload, expires_at=OB.new_expiry(),
+                            chat_type="group")
+            res["queued"] += 1 if ok else 0
+        if not res["queued"]:
+            res["reason"] = "no_active_installation"
+        return res
+    except Exception as e:
+        log.warning("[im-notify] notify_repo_group failed repo=%s kind=%s: %s",
+                    repo_key, kind, e)
+        res["reason"] = "error"
+        return res
+
+
+__all__ = ["notify_user", "notify_issue_event", "notify_repo_group", "schedule_notify",
+           "build_card", "build_cards_from_payload", "active_targets", "p2p_chat_id",
+           "stats", "issue_url", "resolve_engine", "set_running_app"]
