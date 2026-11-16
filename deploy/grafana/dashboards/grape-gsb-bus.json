@@ -931,7 +931,7 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 69
+        "y": 123
       },
       "id": 22,
       "options": {
@@ -939,6 +939,22 @@
         "mode": "markdown"
       },
       "title": "怎么读这一块（接口视角）",
+      "type": "text"
+    },
+    {
+      "description": "由 scripts/gsb_inventory.py 从 attach_internal_routes() 实际挂载的 router 生成，不是手写文档：mgmt=只读白名单+xwrite/apply，runtime/insight=各自 internal router。「6h 调用」列取自 Prometheus `grape_http_requests_total{route=~\"/internal.*\"}`。",
+      "gridPos": {
+        "h": 54,
+        "w": 24,
+        "x": 0,
+        "y": 69
+      },
+      "id": 23,
+      "options": {
+        "content": "| 域 | 方法 | 接口 | 6h 调用 | 说明 |\n| --- | --- | --- | ---: | --- |\n| mgmt | GET | `/internal/accounts/{account_id}` | — | get_account |\n| mgmt | GET | `/internal/knowledge/{knowledge_id}` | — | get_knowledge |\n| mgmt | GET | `/internal/repos/{repo_key:path}` | — | get_repo_bundle ⚠️ repo_key 在路径段（含 : 和 / 会被切段 → 404），跨机调用请改 query 参数 |\n| mgmt | GET | `/internal/repos/{repo_key:path}/bot-config` | — | get_bot_config ⚠️ repo_key 在路径段（含 : 和 / 会被切段 → 404），跨机调用请改 query 参数 |\n| mgmt | GET | `/internal/repos/{repo_key:path}/webhook-config` | — | get_repo_webhook_config ⚠️ repo_key 在路径段（含 : 和 / 会被切段 → 404），跨机调用请改 query 参数 |\n| mgmt | GET | `/internal/scenes/{repo_key:path}` | — | get_scenes ⚠️ repo_key 在路径段（含 : 和 / 会被切段 → 404），跨机调用请改 query 参数 |\n| mgmt | GET | `/internal/scenes/{scene_id}/engine-ids` | — | get_scene_engine_ids |\n| mgmt | GET | `/internal/sessions/{repo_key:path}/{agent_type}` | — | get_agent_session ⚠️ repo_key 在路径段（含 : 和 / 会被切段 → 404），跨机调用请改 query 参数 |\n| mgmt | GET | `/internal/skills/{skill_id}` | — | get_skill |\n| mgmt | POST | `/internal/tokens/verify` | — | verify_token |\n| mgmt | POST | `/internal/user-mapping` | — | get_user_mapping_batch |\n| mgmt | POST | `/internal/xwrite/apply` | — | xwrite_apply_http |\n| runtime | GET | `/internal/chat/conversations` | — | list_chat_conversations |\n| runtime | GET | `/internal/chat/conversations/{conv_id}/messages` | — | get_chat_messages |\n| runtime | GET | `/internal/credentials/health` | — | get_credential_health_rows |\n| runtime | GET | `/internal/engine-capabilities` | — | list_engine_capabilities |\n| runtime | GET | `/internal/events` | — | list_events |\n| runtime | GET | `/internal/events/{seq}` | — | get_event |\n| runtime | GET | `/internal/issues/card` | 479 | get_issue_card |\n| runtime | GET | `/internal/issues/{repo_key}/{issue_number}/state` | — | get_issue_state ⚠️ repo_key 在路径段（含 : 和 / 会被切段 → 404），跨机调用请改 query 参数 |\n| runtime | POST | `/internal/issues/{repo_key}/{issue_number}/state` | — | update_issue_state ⚠️ repo_key 在路径段（含 : 和 / 会被切段 → 404），跨机调用请改 query 参数 |\n| runtime | GET | `/internal/meta/{namespace}` | — | get_meta_namespace |\n| runtime | GET | `/internal/runtime-credentials/{runtime_id}` | — | get_runtime_credential_meta |\n| runtime | GET | `/internal/runtimes` | — | list_runtimes |\n| runtime | GET | `/internal/skills` | — | list_skills |\n| runtime | GET | `/internal/skills/{skill_id}` | — | get_skill_detail |\n| runtime | POST | `/internal/stats/tasks` | — | get_task_stats |\n| runtime | GET | `/internal/tasks` | — | list_tasks |\n| runtime | POST | `/internal/tasks/batch` | — | get_tasks_batch |\n| runtime | POST | `/internal/tasks/inflight-count` | — | get_inflight_task_count |\n| runtime | GET | `/internal/tasks/{task_id}/messages` | — | get_task_messages |\n| runtime | POST | `/internal/xwrite/apply` | — | xwrite_apply |\n| insight | GET | `/internal/alerts/{repo_key}` | — | get_alerts ⚠️ repo_key 在路径段（含 : 和 / 会被切段 → 404），跨机调用请改 query 参数 |\n| insight | GET | `/internal/dashboard/overview` | — | get_dashboard_overview |\n| insight | POST | `/internal/latency` | — | log_latency |\n| insight | POST | `/internal/llm-usage` | — | log_llm_usage |\n| insight | POST | `/internal/llm-usage/aggregate` | — | aggregate_llm_usage |\n| insight | POST | `/internal/logs` | — | log_obs |\n| insight | GET | `/internal/metrics/{repo_key}` | — | get_metrics ⚠️ repo_key 在路径段（含 : 和 / 会被切段 → 404），跨机调用请改 query 参数 |\n| insight | GET | `/internal/slo/{repo_key}` | — | get_slo ⚠️ repo_key 在路径段（含 : 和 / 会被切段 → 404），跨机调用请改 query 参数 |\n| insight | POST | `/internal/xwrite/apply` | — | xwrite_apply |\n\n> 代码侧共 **41** 个可远程调用的 `/internal/*` 接口；6 小时窗口内**1** 个被真实调用（其余为 0 = 尚无调用方，属正常基线）。",
+        "mode": "markdown"
+      },
+      "title": "GSB 可远程调用接口清单（代码侧 · 谁暴露了什么）",
       "type": "text"
     }
   ],
@@ -998,5 +1014,5 @@
   "timezone": "browser",
   "title": "GSB 服务总线调用总览",
   "uid": "grape-gsb-bus",
-  "version": 7
+  "version": 13
 }
