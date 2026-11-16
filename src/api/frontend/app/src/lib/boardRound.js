@@ -30,7 +30,9 @@ export function settleBoardRound(round) {
  * 返回 {list, byId}；byId 供选中项/详情就地重绑定。
  */
 export function aggregateBoardTasks(lists) {
-  const byId = {}
+  // Issue #2649（QA 第 2 轮）：无原型索引——任务 id 若为 "__proto__"，普通对象会
+  // 把 Object.assign 写到 Object.prototype 上；null 原型对象让任意 id 都是普通键。
+  const byId = Object.create(null)
   const list = []
   ;(lists || []).forEach((items) => {
     ;(items || []).forEach((t) => {
@@ -51,7 +53,9 @@ export function decideBoardRound(round, opts) {
   if (!round || round.aborted) return { action: 'drop', reason: 'aborted' }
   if (!o.inBoardView) return { action: 'drop', reason: 'left_view' }
   if (round.failed) {
-    return o.hasOldFrame ? { action: 'keep', reason: 'failed' } : { action: 'error', reason: 'failed_no_frame' }
+    return o.hasOldFrame
+      ? { action: 'keep', reason: 'failed' }
+      : { action: 'error', reason: 'failed_no_frame' }
   }
   return { action: 'commit', reason: '' }
 }

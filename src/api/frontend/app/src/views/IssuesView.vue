@@ -1340,7 +1340,17 @@ function boardFetch(key, opts) {
   const merge = !!(opts && opts.merge)
   const round = (opts && opts.round) || null
   const epoch = boardEpoch.value // Issue #2649：捕获回合序号，reset 后过期响应整体丢弃
-  if (cur.loading) return Promise.resolve()
+  if (cur.loading) {
+    // Issue #2649（QA 第 2 轮）：列在途时本次取数跳过，但回合必须收敛——否则
+    // pending 永不归零，boardRound 长期非空会静默挡住列内翻页且不提示。按 keep
+    // 处理：保留旧帧 + 可重试软横幅。
+    if (round) {
+      round.failed = true
+      round.error = new Error('column still loading: ' + key)
+      if (settleBoardRound(round)) commitBoardRound(round)
+    }
+    return Promise.resolve()
+  }
   // Issue #2649：回合在途时暂停列内滚动追加，防回合提交后跳页
   if (!merge && !round && boardRound.value) return Promise.resolve()
   if (!merge && !round && !cur.hasMore) return Promise.resolve()

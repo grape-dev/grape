@@ -59,6 +59,12 @@ ok(agg.list.length === 3, '跨列按 id 去重')
 ok(agg.byId[1].a === 1 && agg.byId[1].b === 2, '同 id 字段合并')
 ok(agg.list[0].id === 1, '先到先得保序')
 
+// ---- 3b. 聚合索引不得命中原型链（id=__proto__ 会污染 Object.prototype）----
+const protoAgg = mod.aggregateBoardTasks([[{ id: '__proto__', polluted: 'yes' }]])
+ok(protoAgg.list.length === 1, '__proto__ 作为普通 id 参与列表')
+ok({}.polluted === undefined, '不写 Object.prototype')
+ok(Object.prototype.polluted === undefined, 'Object.prototype 未被污染')
+
 // ---- 4. 提交裁决 ----
 const failed = { pending: 0, failed: true, aborted: false }
 ok(mod.decideBoardRound(failed, { inBoardView: true, hasOldFrame: true }).action === 'keep', '失败+旧帧 → 保留')
@@ -79,6 +85,7 @@ ok(/isk-board-banner/.test(vue), '软横幅进模板')
 ok(/retryBoardRefresh/.test(vue), '软横幅带重试入口')
 ok(/board\.refresh_failed_keep/.test(vue) && /board\.retry/.test(vue), 'i18n 键与默认文案齐备')
 ok(!/tasks\.value = \[\]\n  tasksTotal/.test(vue), 'reset 不再无条件清空旧帧')
+ok(/if \(round\) \{\n\s+round\.failed = true/.test(vue), '在途列跳过时回合仍收敛（keep 而非悬挂）')
 
 const zh = JSON.parse(fs.readFileSync(path.join(root, 'src/api/frontend/shell/locales/zh/tasks.json'), 'utf8'))
 const en = JSON.parse(fs.readFileSync(path.join(root, 'src/api/frontend/shell/locales/en/tasks.json'), 'utf8'))
