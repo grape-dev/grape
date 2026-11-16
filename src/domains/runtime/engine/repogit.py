@@ -118,23 +118,37 @@ def _is_ignored_dirt(rel_path: str) -> bool:
     return any(p.startswith(prefix) for prefix in _DIRT_IGNORE_PREFIXES)
 
 
+def _porcelain_entries(issue_dir: str, token: str = "", untracked_all: bool = False):
+    """解析 `git status --porcelain=v1 -z` → [(状态字符, 路径)]；git 不可用 → None。
+
+    -z 下 rename/copy 的「原路径」为紧随的独立字段，需跳过；untracked_all=True 时
+    未跟踪目录展开为具体文件（证据存档需要逐文件内容）。
+    """
+    args = ["-C", issue_dir, "status", "--porcelain=v1", "-z"]
+    if untracked_all:
+        args.append("--untracked-files=all")
+    r = _run_git(args, token=token)
+    if r is None or r.returncode != 0:
+        return None
+    fields = (r.stdout or "").split("\0")
+    entries = []
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if not entry or len(entry) < 4:
+            continue
+        entries.append((entry[0], entry[3:]))
+        if entry[0] in "RC" and i < len(fields):
+            i += 1
+    return entries
+
+
 def _worktree_state(issue_dir: str, token: str = "") -> tuple:
     """(脏文件数, HEAD 分支, HEAD sha12)；git 不可用 → (-1, '', '')。"""
-    dirty = 0
-    r = _run_git(["-C", issue_dir, "status", "--porcelain=v1", "-z"], token=token)
-    if r is not None and r.returncode == 0:
-        fields = (r.stdout or "").split("\0")
-        i = 0
-        while i < len(fields):
-            entry = fields[i]
-            i += 1
-            if not entry or len(entry) < 4:
-                continue
-            if not _is_ignored_dirt(entry[3:]):
-                dirty += 1
-            # -z 下 rename/copy 的「原路径」为紧随的独立字段，需跳过
-            if entry[0] in "RC" and i < len(fields):
-                i += 1
+    entries = _porcelain_entries(issue_dir, token=token)
+    if entries is not None:
+        dirty = sum(1 for _flag, path in entries if not _is_ignored_dirt(path))
         branch, head = "", ""
         br = _run_git(["-C", issue_dir, "rev-parse", "--abbrev-ref", "HEAD"], token=token)
         if br is not None and br.returncode == 0:
@@ -205,34 +219,28 @@ def _exclude_marker_in_git(issue_dir: str, token: str = "") -> None:
         log.warning(f"workspace marker exclude failed {issue_dir}: {e}")
 
 
-def _untracked_files(issue_dir: str, token: str = "") -> list:
-    """白名单外的未跟踪文件清单（证据存档用）。"""
-    out = []
-    r = _run_git(["-C", issue_dir, "status", "--porcelain=v1", "-z"], token=token)
-    if r is None or r.returncode != 0:
-        return out
-    fields = (r.stdout or "").split("\0")
-    i = 0
-    while i < len(fields):
-        entry = fields[i]
-        i += 1
-        if not entry or len(entry) < 4:
-            continue
-        if entry[0] in "RC" and i < len(fields):
-            i += 1
-        if entry[0] == "?" and not _is_ignored_dirt(entry[3:]):
-            out.append(entry[3:])
-    return out
+def _untracked_files(issue_dir: str, token: str = "", expand_dirs: bool = False) -> list:
+    """白名单外的未跟踪文件清单（证据存档用）。
+
+    expand_dirs=True 时未跟踪目录展开为具体文件（-uall），供逐文件存档内容。
+    """
+    entries = _porcelain_entries(issue_dir, token=token, untracked_all=expand_dirs) or []
+    return [path for flag, path in entries
+            if flag == "?" and not _is_ignored_dirt(path)]
 
 
 def _archive_workspace_patch(issue_dir: str, repo_key: str, task_id: str = "",
                              token: str = "", suffix: str = "",
                              log_range: tuple | None = None) -> str:
-    """工作区证据存档：脏树 diff（+可选未推提交区间 log -p）→ <repo>/artifacts/workspace-<task_id>.patch。
+    """工作区证据存档：脏树 diff + 未跟踪文件内容（+可选未推提交区间）→ artifacts/*.patch。
 
     移除/重建前保留证据（绝不丢改动）：`git diff HEAD --binary`（工作树+暂存 vs HEAD）
-    + 白名单外的 untracked 清单；log_range=(from, to) 时追加 `git log -p --binary` 区间
+    + 白名单外 untracked 的**完整内容**（逐文件 `git diff --no-index --binary`，可
+    `git apply` 还原）；log_range=(from, to) 时追加 `git log -p --binary` 区间
     （未 push 提交的完整补丁，含提交信息）。
+
+    返回存档路径；**任一证据无法落盘 → 返回 ""**，调用方必须保留 worktree（不得在
+    证据链不完整时删除工作区）。
     """
     from src.kernel.repo_key import workspace_repo_dir
     try:
@@ -245,18 +253,34 @@ def _archive_workspace_patch(issue_dir: str, repo_key: str, task_id: str = "",
         parts.append(f"# grape workspace archive\n# path={issue_dir}\n"
                      f"# branch={branch} head={head} dirty_files={max(dirty, 0)}\n\n")
         r = _run_git(["-C", issue_dir, "diff", "HEAD", "--binary"], token=token)
-        if r is not None and (r.stdout or "").strip():
+        if r is None:
+            raise RuntimeError("git diff HEAD failed")
+        if (r.stdout or "").strip():
             parts.append("# --- git diff HEAD (tracked/staged) ---\n" + r.stdout + "\n")
         if log_range:
             rl = _run_git(["-C", issue_dir, "log", "-p", "--binary",
                            f"{log_range[0]}..{log_range[1]}"], token=token)
-            if rl is not None and (rl.stdout or "").strip():
+            if rl is None or rl.returncode != 0:
+                raise RuntimeError("git log -p failed")
+            if (rl.stdout or "").strip():
                 parts.append(f"# --- unpushed commits {log_range[0]}..{log_range[1]} ---\n"
                              + rl.stdout + "\n")
-        untracked = _untracked_files(issue_dir, token=token)
+        untracked = _untracked_files(issue_dir, token=token, expand_dirs=True)
         if untracked:
-            parts.append("# --- untracked (content not in diff; listed for evidence) ---\n"
-                         + "\n".join(untracked) + "\n")
+            chunks, failed = [], []
+            for rel in untracked:
+                d = _run_git(["-C", issue_dir, "diff", "--no-index", "--binary",
+                              "--", "/dev/null", rel], token=token)
+                # --no-index 有差异时 returncode=1，属正常；其余视为存档失败
+                if d is None or d.returncode not in (0, 1):
+                    failed.append(rel)
+                    continue
+                if (d.stdout or "").strip():
+                    chunks.append(d.stdout if d.stdout.endswith("\n") else d.stdout + "\n")
+            if failed:
+                raise RuntimeError(f"untracked content archive failed: {failed[:3]}")
+            parts.append("# --- untracked file contents (git diff --no-index --binary) ---\n"
+                         + "".join(chunks))
         with open(out, "w", encoding="utf-8") as f:
             f.write("".join(parts))
         log.warning(f"workspace archive written: {out} (dirty={max(dirty, 0)}, "
@@ -283,12 +307,15 @@ def _refuse_reuse(issue_dir, base, repo_key, issue_num, agent_type, reason,
 
     返回 True=已清除可重建；False=移除失败（#1891 gitdir 只读卷等），
     调用方降级为「保留原目录复用 + 显式 warn」。不做重试（只读卷重试无效）。
-    调用方须已持有 `_lock_for(repo_key)`（threading.Lock 不可重入）。
+    调用方须已持有 `_repo_lock(base)`（threading.Lock 不可重入）。
     """
     log.warning(f"workspace.reuse_refused issue={issue_num} agent={agent_type} "
                 f"path={issue_dir} reason={reason} dirty_files={max(dirty_count, 0)}")
-    _archive_workspace_patch(issue_dir, repo_key, task_id=task_id, token=token,
-                             suffix="-reuse-refused")
+    if not _archive_workspace_patch(issue_dir, repo_key, task_id=task_id, token=token,
+                                    suffix="-reuse-refused"):
+        log.warning(f"workspace.reuse_refused archive_failed keep worktree "
+                    f"issue={issue_num} path={issue_dir}")
+        return False
     _run_git(["-C", base, "worktree", "remove", "--force", issue_dir], token=token)
     _run_git(["-C", base, "worktree", "prune"], token=token)
     if os.path.isdir(issue_dir):
@@ -414,6 +441,16 @@ def _lock_for(repo_key: str) -> threading.Lock:
         if repo_key not in _repo_locks:
             _repo_locks[repo_key] = threading.Lock()
         return _repo_locks[repo_key]
+
+
+def _repo_lock(base: str) -> threading.Lock:
+    """仓库级互斥锁：统一以 bare mirror 物理路径为键。
+
+    Issue #2514：建树/重建/终态清理/巡检必须互斥，键若一半用 repo_key 一半用目录
+    路径就会各锁各的。这里一律用 `realpath(repo_base_dir)`，调用方（ensure/cleanup/
+    patrol）取同一把锁。
+    """
+    return _lock_for(os.path.realpath(base))
 
 def issue_num_from(issue_id: str) -> str:
     """"#5" / "5" → "5"；#0/空 → ''。"""
@@ -569,7 +606,7 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
     base = repo_base_dir(repo_key)
     url = clone_url_for(repo_key)
     _scheme = _clone_auth_scheme_for(repo_key)
-    with _lock_for(repo_key):
+    with _repo_lock(base):
         try:
             if not os.path.isdir(base):
                 os.makedirs(os.path.dirname(base), exist_ok=True)
@@ -736,6 +773,9 @@ def _default_base_branch(base: str, token: str = "", repo_key: str = "", env_wor
         r = _run_git(["-C", base, "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{cand}"], token=token)
         if r is not None and r.returncode == 0:
             return cand
+    # 基线口径要求 expected 已核实；此处两端均缺失时仅兜底（保留既有行为），显式告警
+    log.warning(f"repogit: no verified default branch in {base} "
+                f"(origin/main, origin/master missing), fallback unverified 'main'")
     return "main"
 
 def _write_askpass(issue_dir: str, repo_key: str = "") -> str:
@@ -855,12 +895,14 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
     # #2514：基线只解析一次并贯穿全函数（标记 baseline / 新建起点 / 闸门同一口径）
     base_branch, requested_branch, _fb_reason = _resolve_base_branch(
         base, token, repo_key, env_work_branch=work_branch)
-    with _lock_for(repo_key):
+    with _repo_lock(base):
         try:
             _has_git = os.path.isdir(issue_dir) and (
                 os.path.isdir(os.path.join(issue_dir, ".git"))
                 or os.path.isfile(os.path.join(issue_dir, ".git")))
             reuse = False
+            # 拒绝复用但移除失败 → 保留的是「外来脏树」，不得重写归属标记（跳过标记落盘）
+            foreign_kept = False
             if _has_git:
                 dirty, cur_branch, _cur_head = _worktree_state(issue_dir, token=token)
                 marker = _read_workspace_marker(issue_dir)
@@ -885,6 +927,7 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                                          agent_type, reason, dirty,
                                          token=token, task_id=task_id):
                         reuse = True
+                        foreign_kept = True
                 else:
                     log.info(f"workspace.reuse_ok issue={issue_num} agent={agent_type} "
                              f"path={issue_dir} baseline={base_branch}")
@@ -912,9 +955,14 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
             # Issue #993：worktree 建好后安装 pre-push 分支守卫（租约/merged/漂移）
             _install_branch_guard_hook(issue_dir, repo_key, branch)
             # #2514：归属标记 + git exclude（防 add -A 误提交 / status 误报脏）
-            _write_workspace_marker(issue_dir, issue_num, agent_type,
-                                    baseline=base_branch, task_id=task_id)
-            _exclude_marker_in_git(issue_dir, token=token)
+            if foreign_kept:
+                # 外来脏树（拒绝复用但移除失败）保持无归属状态，避免重标为本 Issue
+                log.warning(f"workspace.reuse_refused keep_foreign_unmarked "
+                            f"issue={issue_num} agent={agent_type} path={issue_dir}")
+            else:
+                _write_workspace_marker(issue_dir, issue_num, agent_type,
+                                        baseline=base_branch, task_id=task_id)
+                _exclude_marker_in_git(issue_dir, token=token)
             # #1954：inspector 工作区按交付提交对齐（detached），对齐后不走分支基线闸门
             _align_inspector_delivery(issue_dir, base, issue_num, delivery_branch,
                                       delivery_info=delivery_info, token=token)
@@ -977,8 +1025,8 @@ def fetch_from_bundle(wt_dir: str, bundle_path: str, token: str = "") -> tuple:
 
 
 def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num,
-                           token: str = "", base_branch: str = "",
-                           reason: str = "", task_id: str = "") -> bool:
+                           token: str = "", reason: str = "",
+                           task_id: str = "") -> bool:
     """移除 Issue 级 worktree + 删除目录（sweeper 用）。
 
     Issue #2041：删除/重置前过保全守卫——存在未推送提交或白名单外的未提交/
@@ -994,9 +1042,11 @@ def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num,
 
     Issue #2514：另一条证据链（workspace-<task_id>.patch）由调用方
     （remove_issue_worktree_if_pushed）先行落盘；本函数保留「移除目录」语义并
-    顺带清掉 worktree 外的保真基线兄弟文件。
+    顺带清掉 worktree 外的保真基线兄弟文件。`token` 只用于本地 remove，
+    `reason`/`task_id` 进结构化日志便于追溯清理来源。
 
     返回 True=已删除；False=保留（守卫拒绝/未删除）。
+    """
     """
     issue_dir = issue_dir_for(repo_key, agent_type, issue_num)
     _git_marker = os.path.join(issue_dir, ".git")
@@ -1024,10 +1074,13 @@ def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num,
                         f"{repo_key} issue={issue_num}: {_ge}")
             return False
     base = repo_base_dir(repo_key)
+    log.info(f"workspace.cleanup issue={issue_num} agent={agent_type} path={issue_dir} "
+             f"reason={reason or 'unspecified'} task_id={task_id or '-'}")
     if os.path.isdir(base):
-        with _lock_for(repo_key):
+        with _repo_lock(base):
             try:
-                _run_git(["-C", base, "worktree", "remove", "--force", issue_dir])
+                _run_git(["-C", base, "worktree", "remove", "--force", issue_dir],
+                         token=token)
             except Exception:
                 pass
     shutil.rmtree(issue_dir, ignore_errors=True)
@@ -1035,7 +1088,7 @@ def cleanup_issue_worktree(repo_key: str, agent_type: str, issue_num,
     return True
 
 def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, token: str = "",
-                                    task_id: str = "", base_branch: str = "") -> bool:
+                                    task_id: str = "") -> bool:
     """任务终态清理 Issue 级 worktree（Issue #2514 收紧语义）。
 
     旧语义 = 仅当本地 HEAD 已与远程分支一致（已 push）才删，导致失败任务/未 push 轮次的
@@ -1044,7 +1097,7 @@ def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, t
     用 `git ls-remote` 直连远程核对（不依赖 bare mirror 的 fetch，避免 fetch 滞后误判）。
     终态必清，但证据先落：
     - 脏树 → `<repo>/artifacts/workspace-<task_id>.patch`（`git diff HEAD --binary`
-      + 白名单外 untracked 清单）；
+      + 白名单外 untracked 文件完整内容）；
     - 未推送提交 → 追加 `log -p --binary <remote_head>..<HEAD>` 区间存档（含提交信息）；
     - 删除动作本身仍过 Issue #2041 保全守卫（cleanup 内部归档），守卫拒绝则保留现场；
     - 清理失败只记日志，不阻断终态上报（调用方 _cleanup_task_workdir / _cleanup_direct_workdir）。
@@ -1058,10 +1111,14 @@ def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, t
         if not os.path.isdir(issue_dir):
             return False
         branch = f"feat/issue-{issue_num}"
-        # Issue #2514：脏树先存档（无论后续删不删都落，证据一次落全）
+        # Issue #2514：脏树先存档（证据一次落全）；存档失败 → 保留工作区，不删
         dirty, _cur_branch, _cur_head = _worktree_state(issue_dir, token=token)
         if dirty > 0:
-            _archive_workspace_patch(issue_dir, repo_key, task_id=task_id, token=token)
+            if not _archive_workspace_patch(issue_dir, repo_key, task_id=task_id,
+                                            token=token):
+                log.warning(f"workspace terminal cleanup deferred (archive failed) "
+                            f"{repo_key} issue={issue_num} path={issue_dir}")
+                return False
         head = _run_git(["-C", issue_dir, "rev-parse", "HEAD"], token=token)
         if head is None or not (head.stdout or "").strip():
             return False
@@ -1077,12 +1134,17 @@ def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, t
             remote_head = remote_out.split()[0]
             if local_head != remote_head:
                 # 未推送提交：区间 log -p 存档（含提交信息）后再移除，不丢码
-                _archive_workspace_patch(issue_dir, repo_key, task_id=task_id, token=token,
-                                         suffix="-unpushed", log_range=(remote_head, local_head))
+            if local_head != remote_head:
+                # 未推送提交：区间 log -p 存档（含提交信息）后再移除，不丢码
+                if not _archive_workspace_patch(
+                        issue_dir, repo_key, task_id=task_id, token=token,
+                        suffix="-unpushed", log_range=(remote_head, local_head)):
+                    log.warning(f"workspace terminal cleanup deferred (unpushed archive "
+                                f"failed) {repo_key} issue={issue_num} path={issue_dir}")
+                    return False
         # Issue #2041：删除动作过保全守卫（cleanup 内部归档），拒绝则保留
         return cleanup_issue_worktree(repo_key, agent_type, issue_num, token=token,
-                                      base_branch=base_branch, reason="task_terminal",
-                                      task_id=task_id)
+                                      reason="task_terminal", task_id=task_id)
     except Exception as e:
         log.warning(f"repogit remove_issue_worktree_if_pushed failed {repo_key}: {e}")
         return False
@@ -1112,8 +1174,11 @@ def patrol_workspaces(active_dirs=None, ttl_hours=None, now=None) -> dict:
 
     def _scan_repo(repo_dir: str, base: str | None, repo_key: str = "") -> None:
         issues_root = os.path.join(repo_dir, "issues")
+        # Issue #2514：与 ensure/cleanup 同一把仓库锁（键 = bare mirror 物理路径），
+        # 避免巡检的 remove/prune 与建树/重建各锁各的、无互斥。
+        _lock_base = base or repo_dir
         if base and os.path.isdir(base):
-            with _lock_for(repo_dir):
+            with _repo_lock(_lock_base):
                 _run_git(["-C", base, "worktree", "prune"])
         if not os.path.isdir(issues_root):
             return
@@ -1142,11 +1207,17 @@ def patrol_workspaces(active_dirs=None, ttl_hours=None, now=None) -> dict:
                 if marker:
                     # 带归属标记 → 超期且无活跃任务 → 回收（脏树先存档再删，证据不丢）
                     dirty, _b, _h = _worktree_state(agent_dir)
-                    if dirty > 0:
-                        _archive_workspace_patch(agent_dir, repo_key, token="",
-                                                 suffix="-patrol")
+                    if dirty < 0:
+                        # 状态不可读 → 无法确认可安全删除，保留（宁可残留）
+                        stats["kept"] += 1
+                        continue
+                    if dirty > 0 and not _archive_workspace_patch(
+                            agent_dir, repo_key, token="", suffix="-patrol"):
+                        # 证据存档失败 → 不删（保留 worktree 待人工处理）
+                        stats["kept"] += 1
+                        continue
                     if base and has_git:
-                        with _lock_for(repo_dir):
+                        with _repo_lock(_lock_base):
                             _run_git(["-C", base, "worktree", "remove", "--force", agent_dir])
                     shutil.rmtree(agent_dir, ignore_errors=True)
                     _drop_fidelity_baseline(agent_dir)

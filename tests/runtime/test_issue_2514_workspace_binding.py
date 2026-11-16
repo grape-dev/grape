@@ -368,3 +368,84 @@ class TestPatrol:
         assert not os.path.isdir(wt)
         art = _artifacts("workspace-unknown-patrol.patch")
         assert os.path.isfile(art), "巡检回收脏目录前必须先存档"
+
+# ===================== 证据完整性（复审修复） =====================
+
+class TestEvidenceIntegrity:
+    def test_untracked_content_archived_on_refusal(self):
+        """未跟踪新文件必须存档**内容**（不只文件名），否则重建后改动永久丢失。"""
+        wt = _wt(task_id="t-untracked")
+        with open(os.path.join(wt, "new-note.txt"), "w", encoding="utf-8") as f:
+            f.write("untracked body 42\n")
+        _wt(task_id="t-untracked2")
+        art = _artifacts("workspace-t-untracked2-reuse-refused.patch")
+        assert os.path.isfile(art)
+        with open(art, encoding="utf-8") as f:
+            content = f.read()
+        assert "new-note.txt" in content, "存档需包含未跟踪文件补丁头"
+        assert "untracked body 42" in content, "存档需包含未跟踪文件内容"
+
+    def test_archive_failure_keeps_worktree_and_skips_marker_rewrite(self, monkeypatch):
+        """存档失败 → 保留外来脏树且**不重写归属标记**（不把外来树重标为本 Issue）。"""
+        wt = _wt(task_id="t-old")
+        os.remove(os.path.join(wt, repogit.WORKSPACE_MARKER))
+        with open(os.path.join(wt, "foreign.txt"), "w", encoding="utf-8") as f:
+            f.write("foreign content")
+        monkeypatch.setattr(repogit, "_archive_workspace_patch", lambda *a, **k: "")
+        wt2 = repogit.ensure_issue_worktree(REPO, "coding", "2514", task_id="t-new")
+        assert wt2 == wt, "移除失败/存档失败时降级为保留原目录"
+        assert os.path.isfile(os.path.join(wt, "foreign.txt")), "存档失败不得删除工作区"
+        assert not os.path.exists(os.path.join(wt, repogit.WORKSPACE_MARKER)), \
+            "外来脏树保留时不得重写归属标记"
+
+    def test_terminal_cleanup_defers_when_archive_fails(self, monkeypatch):
+        """终态清理存档失败 → 保留现场（返回 False），不静默删。"""
+        wt = _wt(task_id="t-term")
+        with open(os.path.join(wt, "a.txt"), "w", encoding="utf-8") as f:
+            f.write("dirty body before terminal")
+        monkeypatch.setattr(repogit, "_archive_workspace_patch", lambda *a, **k: "")
+        assert repogit.remove_issue_worktree_if_pushed(
+            REPO, "coding", "2514", task_id="t-term") is False
+        assert os.path.isdir(wt), "存档失败时终态清理必须保留工作区"
+
+    def test_patrol_keeps_dirty_when_archive_fails(self, monkeypatch):
+        """巡检存档失败 → 保留超期脏目录（宁可残留，不丢证据）。"""
+        wt = _wt(task_id="t-patrol-fail")
+        with open(os.path.join(wt, "a.txt"), "w", encoding="utf-8") as f:
+            f.write("dirty in patrol fail case")
+        os.utime(wt, (0, 0))
+        monkeypatch.setattr(repogit, "_archive_workspace_patch", lambda *a, **k: "")
+        stats = repogit.patrol_workspaces(active_dirs=[], ttl_hours=1)
+        assert os.path.isdir(wt), "存档失败时巡检不得删除工作区"
+        assert stats["kept"] >= 1
+
+
+# ===================== 锁键统一（复审修复） =====================
+
+class TestRepoLockUnification:
+    def test_patrol_uses_same_repo_lock_as_ensure(self, monkeypatch):
+        """巡检与建树/清理必须使用同一把仓库锁（否则 remove/prune 与重建无互斥）。"""
+        keys = []
+        _orig = repogit._lock_for
+
+        def _spy(key):
+            keys.append(key)
+            return _orig(key)
+
+        monkeypatch.setattr(repogit, "_lock_for", _spy)
+        wt = _wt(task_id="t-lock")
+        ensure_keys = set(keys)
+        keys.clear()
+        os.utime(wt, (0, 0))
+        repogit.patrol_workspaces(active_dirs=[], ttl_hours=1)
+        assert ensure_keys & set(keys), "巡检锁键必须与建树/清理一致（realpath(repo_base)）"
+
+
+class TestCleanupSignature:
+    def test_cleanup_uses_token_reason_task_id(self):
+        """cleanup 的 token/reason/task_id 形参落用（不再是无用旋钮）。"""
+        wt = _wt(task_id="t-clean")
+        assert repogit.cleanup_issue_worktree(
+            REPO, "coding", "2514", token="tok", reason="task_terminal",
+            task_id="t-clean") is True
+        assert not os.path.isdir(wt)

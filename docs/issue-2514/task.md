@@ -10,14 +10,17 @@
 - [x] T5 `agent.py`：派发前闸门阻断（`WorkspaceBaselineError` → `_error`，不进入 Agent）
 - [x] T6 `agent.py`：终态清理传 `task_id`；`_run_loop` 派发前巡检 + `main()` 启动巡检
 - [x] T7 `direct_executor.py` / `event_pipeline.py`：direct 路径同语义
-- [x] T8 `tests/test_issue_2514_workspace_binding.py`：回归（干净直通/ff、脏树拒绝、错误分支、
+- [x] T8 `tests/runtime/test_issue_2514_workspace_binding.py`：回归（干净直通/ff、脏树拒绝、错误分支、
       无标记残留、分叉结构错误、STRICT=0 降级、终态清理后重建、巡检回收与活跃保护、
       基线回退溯源）
+- [x] T9 复审修复：untracked 内容存档 + 存档失败保留现场、巡检/建树统一仓库锁、
+      外来树保留不重标、cleanup 形参落用；`tests/runtime/test_issue_2514_wiring.py` 覆盖
+      direct_executor 基线阻断与 agent 巡检接线
 
 ## 验证命令
 
 ```bash
-python3 -m pytest tests/test_issue_2514_workspace_binding.py -q
+python3 -m pytest tests/runtime/test_issue_2514_workspace_binding.py tests/runtime/test_issue_2514_wiring.py -q
 python3 -m pytest tests/runtime/test_repogit.py tests/test_worktree_reset_archive.py -q
 ```
 
@@ -27,7 +30,7 @@ python3 -m pytest tests/runtime/test_repogit.py tests/test_worktree_reset_archiv
 ## 验证结果（本单实测）
 
 ```
-tests/test_issue_2514_workspace_binding.py                       18 passed
+tests/runtime/test_issue_2514_workspace_binding.py + test_issue_2514_wiring.py  50 passed（含复审补测）
 tests/runtime/test_repogit.py + tests/test_worktree_reset_archive.py  64 passed
 tests/arch（含静默 except ratchet / 平台白名单 ratchet）              27 passed
 worktree 相关 6 文件合计                                          107 passed

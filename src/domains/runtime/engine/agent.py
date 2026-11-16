@@ -1265,6 +1265,26 @@ def _workspace_patrol_interval() -> float:
     return max(_env_float("GRAPE_WORKSPACE_PATROL_INTERVAL", 3600.0), 60.0)
 
 
+async def _run_workspace_patrol(active_cwds, label: str = "dispatch") -> None:
+    """Issue #2514：执行一轮 workspace 巡检（线程池，不阻塞事件循环）。"""
+    try:
+        from src.domains.runtime.engine import repogit
+        await asyncio.to_thread(repogit.patrol_workspaces, set(active_cwds or ()))
+    except Exception as e:
+        log.warning(f"workspace {label} patrol failed: {e}")
+
+
+async def _patrol_workspaces_startup() -> None:
+    """worker 启动巡检（无活跃任务，active_dirs 为空）。"""
+    await _run_workspace_patrol(set(), label="startup")
+
+
+async def _patrol_workspaces_active(active_task_objs) -> None:
+    """派发前巡检：在跑任务 cwd 作为活跃白名单，防 in-flight 工作树误删。"""
+    cwds = {t.get("cwd") or "" for t in (active_task_objs or {}).values()}
+    await _run_workspace_patrol(cwds, label="dispatch")
+
+
 def _watchdog_timeout_for(env: dict | None = None) -> float:
     """worker 任务级看门狗超时（秒，Issue #470 收敛点）。
 
@@ -2905,9 +2925,10 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                                           work_branch=_wb, task_id=tid,
                                           strict_override=env.get("GRAPE_WORKSPACE_STRICT"))
     except _WsBaselineError as _wb_err:
-        log.error(f"task {tid} blocked by workspace baseline guard: {_wb_err}")
+        log.error(f"task {tid} blocked by workspace baseline guard: {_wb_err} "
+                  f"fields={_wb_err.to_dict()}")
         _res.dispose()
-        return {"_error": str(_wb_err), "_started": False, "_workspace_baseline": _wb_err.to_dict()}
+        return {"_error": str(_wb_err), "_started": False}
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
@@ -3399,12 +3420,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # 带标记残留；在跑任务 cwd 经 active_dirs 白名单保护（in-flight 工作树不误删）。
         if now - _workspace_patrol_last >= _workspace_patrol_interval():
             _workspace_patrol_last = now
-            try:
-                from src.domains.runtime.engine import repogit
-                _active_cwds = {t.get("cwd") or "" for t in active_task_objs.values()}
-                await asyncio.to_thread(repogit.patrol_workspaces, _active_cwds)
-            except Exception as _pe:
-                log.warning(f"workspace patrol failed: {_pe}")
+            await _patrol_workspaces_active(active_task_objs)
         if now - last_reregister >= RE_REGISTER_INTERVAL:
             _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
             if _rr is not None:
@@ -4268,11 +4284,7 @@ def main():
 
         # Issue #2514：worker 启动巡检——worktree 对账 + prune + 跨 Issue 残留回收
         #（启动语境无活跃任务，active_dirs 为空；在跑任务由服务端 orphan 恢复后另行保护）。
-        try:
-            from src.domains.runtime.engine import repogit as _repogit_patrol
-            await asyncio.to_thread(_repogit_patrol.patrol_workspaces, [])
-        except Exception as _pe:
-            log.warning(f"workspace startup patrol failed: {_pe}")
+        await _patrol_workspaces_startup()
 
         # sweeper：worker 端定期清理本地磁盘残留（worktree/node_modules/tmp）。
         # 服务端的 sweep_loop 只扫服务端磁盘，远端 worker 的残留无人清理 → 撑满磁盘。

@@ -27,9 +27,12 @@ per-worktree `git rev-parse --git-path info/exclude`——防 Agent `add -A` 误
 | 分支 | `HEAD != feat/issue-{N}`（inspector 的 detached HEAD 放行） | `wrong_branch` |
 | 脏树 | `git status --porcelain -z` 非空（轻文件与 askpass 白名单除外） | `dirty` |
 
-拒绝处置：`git diff HEAD --binary` + untracked 清单存档 →
-`git worktree remove --force` → `worktree prune` → 重建。移除失败（只读 gitdir）→ 记 warning
-保留原目录，不无限重试。日志统一 `workspace.reuse_refused reason=... dirty_files=N`。
+拒绝处置：`git diff HEAD --binary` + untracked **文件内容**（逐文件
+`git diff --no-index --binary`，可 `git apply` 还原）存档 →
+`git worktree remove --force` → `worktree prune` → 重建。存档失败或移除失败（只读 gitdir）→
+记 warning 保留原目录，不无限重试；保留的外来脏树**不重写归属标记**。日志统一
+`workspace.reuse_refused reason=... dirty_files=N`。建树/重建/终态清理/巡检统一使用
+`_repo_lock(realpath(repo_base))` 同一把仓库锁。
 
 ### 3. 基线闸门（`_validate_issue_baseline`）——**修正 #1176 的 Critical**
 
@@ -49,9 +52,10 @@ per-worktree `git rev-parse --git-path info/exclude`——防 Agent `add -A` 误
 ### 4. 终态清理
 
 `remove_issue_worktree_if_pushed(..., task_id=)` 语义 = 任务终态必清：脏树先落
-`workspace-<task_id>.patch`、未推提交追加 `log -p remote..HEAD` 存档，再走
-`cleanup_issue_worktree` 删除目录。本基线无 #2041 归档守卫，故存档前置在
-`remove_issue_worktree_if_pushed` 内完成（证据先落盘再删，宁可残留不丢码）。
+`workspace-<task_id>.patch`（含 untracked 内容）、未推提交追加 `log -p remote..HEAD`
+存档，再走 `cleanup_issue_worktree` 删除目录。本基线无 #2041 归档守卫，故存档前置在
+`remove_issue_worktree_if_pushed` 内完成（证据先落盘再删；**存档失败则保留现场不删**，
+宁可残留不丢码）。
 清理失败只告警，不阻断终态上报。
 
 ### 5. 派发前巡检（`patrol_workspaces`）
@@ -59,7 +63,7 @@ per-worktree `git rev-parse --git-path info/exclude`——防 Agent `add -A` 误
 worker 启动 + `_run_loop` 每 `GRAPE_WORKSPACE_PATROL_INTERVAL`（默认 3600s，下限 60s）：
 
 - 逐 repo `worktree list --porcelain` 对账 + `worktree prune`；
-- 回收「超 `GRAPE_WORKSPACE_TTL_HOURS`（默认 24）+ 无活跃任务」的**带标记**目录（脏树先存档）；
+- 回收「超 `GRAPE_WORKSPACE_TTL_HOURS`（默认 24）+ 无活跃任务」的**带标记**目录（脏树先存档；存档失败或状态不可读 → 保留不删）；
 - 无 `.git` 的空目录按 orphan 回收；无标记的非空目录只计数不删（人工 worktree 防误删）；
 - 活跃任务 cwd（`active_task_objs`）走白名单保护。
 
@@ -71,7 +75,8 @@ worker 启动 + `_run_loop` 每 `GRAPE_WORKSPACE_PATROL_INTERVAL`（默认 3600s
 | `src/domains/runtime/engine/agent.py` | 派发前闸门阻断、终态清理传 `task_id`、派发前+启动巡检 |
 | `src/domains/runtime/engine/direct_executor.py` | direct 入口同语义（同 task_id/strict，基线错误上抛） |
 | `src/domains/runtime/pipeline/event_pipeline.py` | `_cleanup_direct_workdir(task_id=)` 透传 |
-| `tests/test_issue_2514_workspace_binding.py` | 新增回归（真实本地 git，零网络） |
+| `tests/runtime/test_issue_2514_workspace_binding.py` | 新增回归（真实本地 git，零网络） |
+| `tests/runtime/test_issue_2514_wiring.py` | 复审补测（direct_executor 基线阻断 / agent 巡检接线） |
 
 ## 开关
 
