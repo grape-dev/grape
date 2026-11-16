@@ -1,8 +1,10 @@
 # Plan: Issue #2514 — 工作区与 Issue/基线绑定
 
 > 实现蓝本：PR #1176（#1939，closed 未合入）。本方案按其 diff 在 `weekly-mys` 基线重建，
-> 并按当前代码形态适配（本基线 `cleanup_issue_worktree` 无 #2041 归档守卫：
-> 证据由 `remove_issue_worktree_if_pushed` 在删除前先行存档；形参仅做兼容扩展）。
+> 并按当前代码形态适配（本基线 `cleanup_issue_worktree` **已有** #2041 归档守卫：
+> 命中风险才 bundle+patch 保全、失败即拒绝删除；新语义在其之上再补一层按 task_id
+> 命名的终态证据存档，两条链并存——守卫负责“删除前风险判定与拒绝”，新存档负责
+> “终态可核对的 `workspace-<task_id>.patch`”；形参仅做兼容扩展）。
 
 ## 方案概述
 
@@ -53,9 +55,10 @@ per-worktree `git rev-parse --git-path info/exclude`——防 Agent `add -A` 误
 
 `remove_issue_worktree_if_pushed(..., task_id=)` 语义 = 任务终态必清：脏树先落
 `workspace-<task_id>.patch`（含 untracked 内容）、未推提交追加 `log -p remote..HEAD`
-存档，再走 `cleanup_issue_worktree` 删除目录。本基线无 #2041 归档守卫，故存档前置在
-`remove_issue_worktree_if_pushed` 内完成（证据先落盘再删；**存档失败则保留现场不删**，
-宁可残留不丢码）。
+存档，再走 `cleanup_issue_worktree` 删除目录。基线 `cleanup_issue_worktree` 已有
+#2041 归档守卫（`archive_worktree_before_reset`：bundle + patch + untracked 快照，
+命中风险才触发、失败即拒绝删除），新存档在其之前完成，形成“终态固定命名证据 +
+守卫风险保全”两条链；**新存档失败则保留现场不删**，宁可残留不丢码。
 清理失败只告警，不阻断终态上报。
 
 ### 5. 派发前巡检（`patrol_workspaces`）
