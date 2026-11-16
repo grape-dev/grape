@@ -55,8 +55,28 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
     from src.domains.runtime.pipeline.event_pipeline import (
         _cleanup_direct_workdir, _update_direct_task,
     )
+    from src.domains.runtime.engine.repogit import WorkspaceBaselineError
     try:
         _execute_agent_inner(repo_key, seq, agent_type, backend, skill_name, evt, runtime_id, task_id)
+    except WorkspaceBaselineError as e:
+        # Issue #2514：工作区基线分叉/不可达 = 预置阶段的结构化拒绝，不是执行崩溃。
+        # 事件/任务如实标 failed 并保留六要素错误文本，Agent 未启动。
+        from datetime import datetime, timezone
+        _msg = str(e)
+        log.error(f"Exec agent: [Agent:{agent_type}|repo:{repo_key}] "
+                  f"workspace baseline blocked before execution: {_msg}")
+        try:
+            from src.api.event_store import update_event_complete
+            update_event_complete(seq, "failed", exit_code=1,
+                                  completed_at=datetime.now(timezone.utc).isoformat(),
+                                  result=_msg)
+            if task_id:
+                from src.domains.runtime.engine.service import update_task_status
+                update_task_status(task_id, "failed", exit_code=1, result_text=_msg)
+            else:
+                _update_direct_task(seq, "failed", exit_code=1, result_text=_msg)
+        except Exception as _fe:
+            log.warning(f"Exec agent: report workspace baseline block failed: {_fe}")
     except Exception as e:
         import traceback
         _tb = traceback.format_exc()
@@ -84,11 +104,12 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             revoke_session_token(task_id or f"d_{seq}")
         except Exception as e:
             log.warning(f"Exec agent: revoke session token failed: {e}")
-        # 任务级工位清理（direct 端）：轻文件 + 确认已 push 的 worktree
+        # 任务级工位清理（direct 端）：轻文件 + worktree 终态清理（Issue #2514 存档后必清）
         try:
             _cleanup_direct_workdir(
                 repo_key, agent_type,
-                evt.get("issue_id", "") or (evt.get("payload") or {}).get("issue_number", "") or ""
+                evt.get("issue_id", "") or (evt.get("payload") or {}).get("issue_number", "") or "",
+                task_id=task_id,
             )
         except Exception:
             pass
@@ -399,6 +420,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _is_inspector = False
     _wt = ""
     _delivery_info: dict = {}
+    # Issue #2514：direct 入口与 worker 同语义——复用闸门依赖 task_id 存档证据，
+    # 基线分叉/不可达必须显式上抛（顶层兜底把 event/task 标 failed），不静默复用错基线。
+    from src.domains.runtime.engine.repogit import WorkspaceBaselineError as _WsBaselineError
     try:
         from src.domains.runtime.engine import repogit
         _gnum = repogit.issue_num_from(issue_id)
@@ -408,6 +432,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             _wt = repogit.ensure_issue_worktree(
                 repo_key, agent_type, _gnum,
                 token=repo_gitcode_token, work_branch=_wb,
+                task_id=task_id,
+                strict_override=env_extra.get("GRAPE_WORKSPACE_STRICT"),
                 delivery_branch=f"feat/issue-{_gnum}" if _is_inspector else "",
                 delivery_info=_delivery_info if _is_inspector else None)
             if _is_inspector and _wt:
@@ -419,6 +445,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                         token=repo_gitcode_token, delivery_info=_delivery_info))
                 except Exception as e:
                     log.warning(f"Exec agent: build QA delivery env failed: {e}")
+    except _WsBaselineError:
+        raise
     except Exception as e:
         log.warning(f"Exec agent: git worktree ensure failed: {e}")
 
@@ -484,7 +512,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 _gnum_lr = repogit.issue_num_from(issue_id)
                 _wt_list_dr = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list_dr, agent_type, _gnum_lr,
-                    token=repo_gitcode_token, env=env_extra)
+                    token=repo_gitcode_token, env=env_extra, task_id=task_id)
                 if _wt_list_dr:
                     env_extra["GRAPE_LINKED_WORKTREES"] = _json_lr_dr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}

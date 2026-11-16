@@ -4317,13 +4317,15 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
     _log.info(f"direct linked PR summary: {len(_created)} created, {len(_skipped)} skipped, {len(_failed)} failed")
 
 
-def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = ""):
+def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = "",
+                            task_id: str = ""):
     """direct 端任务级工位清理：删轻文件（.skills/.project-info/.knowledge）+ 安全卸载 worktree。
 
     在 _execute_agent 的 finally 中调用，覆盖正常/失败/异常全部路径且幂等。
     清理失败只告警，不影响事件结果上报。
 
     Issue #242: coding agent 多仓库时，同步清理关联仓库 worktree。
+    Issue #2514: task_id 透传给终态清理，证据存档按任务命名（workspace-<task_id>*.patch）。
     """
     try:
         ws = get_agent_workdir(repo_key, agent_type, issue_id or "")
@@ -4344,7 +4346,8 @@ def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = ""):
                 _token = Repo(repo_key).bot_token
             except Exception:
                 pass
-            repogit.remove_issue_worktree_if_pushed(repo_key, agent_type, _num, token=_token)
+            repogit.remove_issue_worktree_if_pushed(repo_key, agent_type, _num,
+                                                    token=_token, task_id=task_id)
             # Issue #242: 清理关联仓库 worktree（coding agent 多仓库）
             # 关联 worktree 路径由 repogit.issue_dir_for(repo_key, "coding", issue_num) 推导，
             # 通过查询场景 linked_repos 获取关联仓库列表（与初始化路径对称）
@@ -4357,7 +4360,7 @@ def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = ""):
                         _lrk = lr.get("repo_key") or ""
                         if _lrk:
                             repogit.remove_issue_worktree_if_pushed(
-                                _lrk, "coding", _num, token=_token)
+                                _lrk, "coding", _num, token=_token, task_id=task_id)
                 except Exception as _le:
                     log.warning(f"direct linked worktree cleanup failed: {_le}")
         # 连空 ws 目录一起删（non-git agent 删完物化文件后为空；git agent 的 worktree 已被整目录删掉）

@@ -1257,6 +1257,14 @@ def _env_float(name, default):
         return float(default)
 
 
+def _workspace_patrol_interval() -> float:
+    """Issue #2514：派发前 workspace 巡检节流秒数（GRAPE_WORKSPACE_PATROL_INTERVAL，默认 3600）。
+
+    下限 60s：巡检要扫全 WORKSPACE_DIR 并对账 worktree，过密会与 claim 循环抢 IO。
+    """
+    return max(_env_float("GRAPE_WORKSPACE_PATROL_INTERVAL", 3600.0), 60.0)
+
+
 def _watchdog_timeout_for(env: dict | None = None) -> float:
     """worker 任务级看门狗超时（秒，Issue #470 收敛点）。
 
@@ -2059,9 +2067,10 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
         from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if _num and task.get("issue_session_id"):
+            # Issue #2514：终态清理传 task_id（证据存档文件名 workspace-<task_id>*.patch）
             repogit.remove_issue_worktree_if_pushed(
                 task.get("repo_key") or "", task.get("agent_type") or "",
-                _num, token=_get_task_token(task))
+                _num, token=_get_task_token(task), task_id=task.get("id") or "")
             # Issue #242: 清理关联仓库 worktree（coding agent 多仓库）
             _ag = task.get("agent_type") or ""
             if _ag == "coding":
@@ -2076,7 +2085,8 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
                             if _lrk:
                                 repogit.remove_issue_worktree_if_pushed(
                                     _lrk, "coding", _num,
-                                    token=_get_task_token(task))
+                                    token=_get_task_token(task),
+                                    task_id=task.get("id") or "")
                     except Exception as _le:
                         log.warning(f"linked worktree cleanup failed: {_le}")
     except Exception as e:
@@ -2882,6 +2892,9 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。
     # 见 coding-worktree-skill-collision.md §4.1（方案 A）。
     # P2（vcs-env-token-boundary-audit）：不再把 GIT_ASKPASS 注入 agent env——git 操作走 `grape git`。
+    # Issue #2514：基线分叉/不可达 → WorkspaceBaselineError 在此显式阻断（不静默复用错基线），
+    # 返回 _error 由 _wrap 上报 failed，任务**不进入** Agent 执行。
+    from src.domains.runtime.engine.repogit import WorkspaceBaselineError as _WsBaselineError
     try:
         from src.domains.runtime.engine import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
@@ -2889,7 +2902,12 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
             _wb = env.get("GRAPE_WORK_BRANCH", "")
             repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
                                           _num, token=_get_task_token(task),
-                                          work_branch=_wb)
+                                          work_branch=_wb, task_id=tid,
+                                          strict_override=env.get("GRAPE_WORKSPACE_STRICT"))
+    except _WsBaselineError as _wb_err:
+        log.error(f"task {tid} blocked by workspace baseline guard: {_wb_err}")
+        _res.dispose()
+        return {"_error": str(_wb_err), "_started": False, "_workspace_baseline": _wb_err.to_dict()}
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
@@ -2903,9 +2921,10 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
             _linked_repos_list = _json_lr.loads(_linked_repos_env) if _linked_repos_env else []
             if _linked_repos_list:
                 _num_lr = repogit.issue_num_from(task.get("issue_id") or "")
+                # Issue #2514：关联仓基线分叉按仓降级（repogit 内记 baseline_blocked_linked）
                 _wt_list = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list, task.get("agent_type", ""), _num_lr,
-                    token=_get_task_token(task), env=env)
+                    token=_get_task_token(task), env=env, task_id=tid)
                 if _wt_list:
                     env["GRAPE_LINKED_WORKTREES"] = _json_lr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
@@ -3336,6 +3355,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     active_task_objs = _test_active_task_objs if _test_active_task_objs is not None else {}  # tid → task dict（sid 看门狗杀进程需要 task 的 cwd/backend 信息）
     _requeue_cooldown = {}   # sid → 上次 requeue 时间戳，60s 冷却防 claim→requeue 空转死循环
     _sid_watchdog_last = 0.0 # 上次 sid 看门狗扫描时间
+    _workspace_patrol_last = asyncio.get_running_loop().time()  # Issue #2514：巡检节流起点（worker 启动已巡检一轮）
     hermes_active = 0         # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）
     last_heartbeat = 0.0
 
@@ -3374,6 +3394,17 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     while True:
         # ---- 定期重注册（防 id 静默失效）----
         now = asyncio.get_running_loop().time()
+        # ---- Issue #2514：派发前 workspace 巡检（节流）----
+        # worktree list 对账 + prune + 回收「无活跃任务且超 GRAPE_WORKSPACE_TTL_HOURS」的
+        # 带标记残留；在跑任务 cwd 经 active_dirs 白名单保护（in-flight 工作树不误删）。
+        if now - _workspace_patrol_last >= _workspace_patrol_interval():
+            _workspace_patrol_last = now
+            try:
+                from src.domains.runtime.engine import repogit
+                _active_cwds = {t.get("cwd") or "" for t in active_task_objs.values()}
+                await asyncio.to_thread(repogit.patrol_workspaces, _active_cwds)
+            except Exception as _pe:
+                log.warning(f"workspace patrol failed: {_pe}")
         if now - last_reregister >= RE_REGISTER_INTERVAL:
             _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
             if _rr is not None:
@@ -4234,6 +4265,14 @@ def main():
         # 注册成功后立即执行一轮引擎探测（线程池，不阻塞事件循环），
         # 确保第一次心跳上报时 probe_results 非空，使服务端及时纠正 healthy（ok→升级 / fail→降级）。
         await asyncio.to_thread(_worker_probe_once)
+
+        # Issue #2514：worker 启动巡检——worktree 对账 + prune + 跨 Issue 残留回收
+        #（启动语境无活跃任务，active_dirs 为空；在跑任务由服务端 orphan 恢复后另行保护）。
+        try:
+            from src.domains.runtime.engine import repogit as _repogit_patrol
+            await asyncio.to_thread(_repogit_patrol.patrol_workspaces, [])
+        except Exception as _pe:
+            log.warning(f"workspace startup patrol failed: {_pe}")
 
         # sweeper：worker 端定期清理本地磁盘残留（worktree/node_modules/tmp）。
         # 服务端的 sweep_loop 只扫服务端磁盘，远端 worker 的残留无人清理 → 撑满磁盘。
