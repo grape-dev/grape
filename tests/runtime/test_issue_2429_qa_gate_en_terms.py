@@ -37,6 +37,19 @@ def test_negated_unresolved_is_not_fail():
     assert _classify("均已修复，无未修复") != "fail"
 
 
+def test_negated_unresolved_with_en_noun_is_not_fail():
+    """否定结构 + 英文名词 + 未闭环=等价已闭环，不能判 fail（复审残留误判）。"""
+    assert _classify("无 Critical 未闭环") == "pass"
+    assert _classify("无 Critical 未修复") == "pass"
+    assert _classify("无任何 Critical 未闭环") == "pass"
+    assert _classify("没有 Required 未处理") == "pass"
+    assert _classify("未发现 Required 未修复") == "pass"
+    assert _classify("无 Critical 未闭环项") == "pass"
+    # 否定只覆盖紧邻名词；带入真实失败项（数字/逗号分隔）仍须 fail
+    assert _classify("无 Critical，2 条 Required 未修复") == "fail"
+    assert _classify("无未修复的问题，但有 1 条 Critical 未处理") == "fail"
+
+
 def test_unresolved_quantifier_context_is_fail():
     assert _classify("上轮 2 条 Required 未修复") == "fail"
     assert _classify("有 1 条 Critical 未闭环") == "fail"

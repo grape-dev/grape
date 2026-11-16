@@ -87,8 +87,16 @@ _QA_CLOSED_LEAD_RE = re.compile(
 _QA_NEGATED_UNRESOLVED_RE = re.compile(
     r"(?:无|没有|没|不存在|未见|未发现|无需|不需要)\s*"
     r"(?:任何|的|个|条|项|遗留|剩余)?\s*"
+    # Issue #2429：否定与“未+闭环”之间可夹英文名词（无 Critical 未闭环 /
+    # 没有 Required 未处理 / 未发现 Required 未修复）。只允许名词及其
+    # 问题/项修饰与中性连接符，禁止数字和逗号——“无 Critical，2 条
+    # Required 未修复”仍须命中未闭环判 fail。
+    r"(?:(?:critical|required)\b"
+    r"(?:\s*(?:问题|项|缺陷|items?|issues?|fix(?:es)?))?"
+    r"\s*(?:[/、和及与]|and)?\s*)*"
     r"未(?:被|全部|完全|能|曾|再)?\s*"
     r"(?:修复|闭环|处理|解决|关闭|完成)",
+    re.IGNORECASE,
 )
 # Issue #2429：反向未闭环结构必须优先判 fail（未修复/未闭环/未处理…），
 # 不能被上下文豁免或否定剔除吞掉。
