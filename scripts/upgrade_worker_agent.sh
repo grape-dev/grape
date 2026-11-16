@@ -96,6 +96,22 @@ for pid in "${PIDS[@]}"; do
 done
 
 echo "[agent-upgrade] 切换 $STOPPED 个进程"
+
+# 1.5) 补齐执行侧技能树 —— 这是最容易被漏掉、后果又最隐蔽的一项。
+# 引擎物化技能时走 resolve_official_skill_path()，它读的是 <checkout>/.grape/skills/
+# （带 issue/feedback-loop 这类中间层），**不是**仓库根的 skills/。
+# 只同步 skills/ 的话引擎会报：
+#   [skill_mismatch] bound skill 'issue-cli' not materialized anywhere
+# 然后拒绝执行，任务在 agent 起来之前就失败，看起来像流水线坏了。
+for _home in $(awk -F: '$3>=1000 && $7 !~ /nologin|false/ {print $6}' /etc/passwd); do
+  _co="$_home/grape-new-version2"
+  [ -d "$_co" ] || continue
+  mkdir -p "$_co/.grape"
+  rsync -a --delete "$REPO/.grape/skills/" "$_co/.grape/skills/" 2>/dev/null \
+    || cp -a "$REPO/.grape/skills/." "$_co/.grape/skills/"
+  chown -R "$(stat -c %U "$_home"):$(stat -c %G "$_home")" "$_co/.grape" 2>/dev/null
+  echo "  skills -> $_co/.grape/skills ($(find "$_co/.grape/skills" -type f 2>/dev/null | wc -l) files)"
+done
 # 2) 校验：每个用户至多一个 agent，且解释器指向部署目录
 for pid in $(pgrep -f "python.*-m src.domains.runtime.engine.agent" 2>/dev/null || true); do
   _argv0="$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | head -1)"
