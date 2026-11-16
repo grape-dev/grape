@@ -126,12 +126,19 @@ def caller_domain() -> str | None:
 
 
 def matrix_forces_lib(target_service: str) -> bool:
-    """禁止矩阵：``runtime|insight → mgmt`` 一律 lib（不依赖配置表）。
+    """禁止矩阵：**以 mgmt 为被调方的一律 lib**（任何调用方、不依赖配置表）。
 
-    该约束在三库三机目标态（各域独立主机）下保持同一形态；
-    ``mgmt → runtime|insight`` 方向允许 remote（按配置表）。
+    两个理由叠在一起：
+
+    1. 回环风险。mgmt 的 ``/internal/*`` 自己也会经 provider 往外调，
+       一旦 mgmt 被当作 remote 目标，就会出现 ``mgmt /internal/x → 远端 mgmt /internal/x``
+       这类同域回环（provider.py 的历史注释记录过直接 500/超时）。
+    2. 运维口径。mgmt 是管理态服务，跨进程调它意味着管理面无谓地依赖网络可用性；
+       保持 Local 让 mgmt 的读路径继续是"连自己的库"，不受兄弟机抖动影响。
+
+    ``mgmt → runtime|insight`` 方向仍允许 remote（按配置表 / 内置基线）。
     """
-    return caller_domain() in ("runtime", "insight") and target_service == "mgmt"
+    return target_service == "mgmt"
 
 
 # ---------------- 按方法路由决策 ----------------

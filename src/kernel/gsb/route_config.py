@@ -50,10 +50,14 @@ CONTRACT_METHODS: dict[str, tuple[str, ...]] = {
         "list_skills", "get_skill_detail", "list_engine_capabilities",
         "get_runtime_credential_meta", "get_meta_namespace", "get_tasks_batch",
         "get_task_stats",
+        # 本轮新增（mgmt → runtime 跨域读迁移）
+        "get_issue_card", "get_credential_health_rows", "get_inflight_task_count",
     ),
     "insight": (
         "log_obs", "log_llm_usage", "log_api_latency", "query_metrics",
         "query_slo", "query_alerts", "aggregate_runtime_stats",
+        # 本轮新增（mgmt → insight 跨域读迁移）
+        "aggregate_llm_usage",
     ),
 }
 

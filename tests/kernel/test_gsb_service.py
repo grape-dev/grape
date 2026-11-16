@@ -380,8 +380,11 @@ def test_get_service_returns_remote_when_mode_remote(monkeypatch):
     monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
     monkeypatch.delenv("GRAPE_PROCESS_ROLE", raising=False)
     monkeypatch.delenv("GRAPE_SERVICE_NAME", raising=False)
+    # mgmt 作为被调方恒 Local（matrix 守卫）→ 拿不到路由代理
     svc = get_service("mgmt")
-    assert type(svc).__name__ == "_RoutedService"
+    assert type(svc).__name__ == "MgmtServiceLocal"
+    # 允许 remote 的方向仍是代理
+    assert type(get_service("runtime")).__name__ == "_RoutedService"
     # 内置基线（QA 审查修复 Required#1）：压测超阈值项基线锁 lib（get_bot_config
     # 增幅 >20%），采样错误项默认偏好 remote，热路径方法锁 lib
     assert decide_mode("mgmt", "get_bot_config") == "lib"

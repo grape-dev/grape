@@ -626,7 +626,12 @@ class TestProviderFactory:
         import src.domains.contracts  # noqa: F401
         from src.kernel.gsb.provider import decide_mode, get_mgmt_service, is_remote_mode
         assert is_remote_mode() is True
-        svc = get_mgmt_service()
+        # mgmt 作为被调方恒 lib（matrix 守卫）→ 拿到的是 Local 实例，不是路由代理
+        mgmt_svc = get_mgmt_service()
+        assert mgmt_svc.__class__.__name__ == "MgmtServiceLocal"
+        # 代理仍存在于允许 remote 的方向
+        from src.kernel.gsb.provider import get_runtime_service
+        svc = get_runtime_service()
         assert svc.__class__.__name__ == "_RoutedService"
         # 内置基线（QA 审查修复 Required#1）：压测超阈值项（get_bot_config）
         # 基线锁 lib；采样错误项默认偏好 remote；热路径方法锁 lib
