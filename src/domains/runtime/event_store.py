@@ -405,6 +405,16 @@ def _non_replayable_task_statuses() -> tuple:
     return tuple(s for s in TASK_TERMINAL_STATUSES if s not in ("failed", "timeout_failed"))
 
 
+# Issue #2508 review: named bounds for the content fingerprint, each with a
+# reason, instead of bare numbers inside the hash expression.
+# - context prefix: the A2A payload caps context at 500 chars; 400 keeps the
+#   leading, differentiating part while leaving room for pr_number.
+# - digest length: 16 hex chars = 64 bits, same width as the request
+#   fingerprint; collisions are negligible for the (repo, issue, node) scope.
+CONTENT_CONTEXT_MAX_CHARS = 400
+CONTENT_KEY_DIGEST_CHARS = 16
+
+
 def _content_key(payload: dict) -> str:
     """请求内容指纹（Issue #2508 review）：context + pr_number 的摘要。
 
@@ -415,8 +425,9 @@ def _content_key(payload: dict) -> str:
     import hashlib as _hashlib
     if not isinstance(payload, dict):
         return ""
-    raw = f"{str(payload.get('context') or '')[:400]}|{str(payload.get('pr_number') or '')}"
-    return _hashlib.sha1(raw.encode()).hexdigest()[:16]
+    raw = (f"{str(payload.get('context') or '')[:CONTENT_CONTEXT_MAX_CHARS]}"
+           f"|{str(payload.get('pr_number') or '')}")
+    return _hashlib.sha1(raw.encode()).hexdigest()[:CONTENT_KEY_DIGEST_CHARS]
 
 
 def _completed_within(completed_at: str, window_s: int) -> bool:
@@ -953,7 +964,7 @@ def _notify_pipeline_failure(repo_key: str, issue_id: str, agent_type: str, seq:
     通知失败只记日志，绝不影响终态写入与流水线主流程。
     """
     try:
-        from src.api.pipeline_failure_notify import notify_node_failure
+        from src.domains.runtime.pipeline_failure_notify import notify_node_failure
         notify_node_failure(repo_key, issue_id, agent_type, seq)
     except Exception as e:
         log.warning(f"Pipeline failure notify failed seq={seq}: {e}")
@@ -1306,12 +1317,13 @@ def get_events(repo_key: str, agent_type: str = "", issue_id: str = "",
 
 
 def _events_column_exists(c, col: str) -> bool:
-    """events 表是否已有指定列（Issue #2432 后加列兼容老库）。"""
-    try:
-        cols = [r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()]
-        return col in cols
-    except Exception:
-        return False
+    """events 表是否已有指定列（Issue #2432 后加列兼容老库）。
+
+    Issue #2432 review: PRAGMA is sqlite-only; go through the shared two-backend
+    probe so the check also works on MySQL (three-database topology).
+    """
+    from src.domains.runtime.schema_probe import column_exists
+    return column_exists(c, "events", col)
 
 
 def get_event_count(repo_key: str, status: str = "") -> int:

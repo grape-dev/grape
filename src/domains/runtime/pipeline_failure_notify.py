@@ -38,7 +38,8 @@ def load_prior_terminal_statuses(repo_key: str, issue_id: str, agent_type: str, 
     """取当前失败事件之前、同 (repo, issue, node) 的终态事件状态（seq 升序）。"""
     if not repo_key or not issue_id or not agent_type:
         return []
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("runtime")
     try:
         with db_lock:
             c = db.cursor()
@@ -65,7 +66,8 @@ def _redispatch_after_last_failure(repo_key: str, issue_id: str, agent_type: str
     if not repo_key or not issue_id or not agent_type:
         return False
     from src.api.pipeline_constants import REISSUE_EVENT_PAYLOAD_KEY
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("runtime")
     try:
         with db_lock:
             c = db.cursor()
@@ -98,7 +100,8 @@ def _issue_number(issue_id: str) -> int:
 def _issue_title(repo_key: str, issue_number: int) -> str:
     if not repo_key or not issue_number:
         return ""
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("runtime")
     try:
         with db_lock:
             c = db.cursor()

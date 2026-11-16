@@ -577,11 +577,9 @@ def get_pipeline(owner: str, repo: str,
             if _pushdown_ok and _win_ids:
                 _where += " AND issue_id IN ({})".format(",".join("?" * len(_win_ids)))
                 _params += list(_win_ids)
-            try:
-                _cols = [r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()]
-            except Exception:
-                _cols = []
-            _failed_col = "failed_node" if "failed_node" in _cols else "'' AS failed_node"
+            from src.domains.runtime.schema_probe import column_exists as _col_exists
+            _failed_col = ("failed_node" if _col_exists(c, "events", "failed_node")
+                           else "'' AS failed_node")
             c.execute(
                 "SELECT seq, issue_id, event_type, agent_type, title, summary, status, "
                 "created_at, actor, duration, repo_key, scene_id, completed_at, " + _failed_col + " "
