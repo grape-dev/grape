@@ -9,6 +9,38 @@ from src.kernel.time_utils import normalize_event_time
 from src.kernel.event_payload_view import payload_view_from_json
 from src.kernel.a2a_context import a2a_event_context_key
 
+_EVENTS_COLUMNS_CACHE = None
+
+
+def _events_columns(c) -> set:
+    """events 表的列清单（SQLite 走 PRAGMA，MySQL 走 information_schema）。
+
+    历史写法直接 `PRAGMA table_info(events)`：三库 MySQL 下这句原样发给服务端 → 1064，
+    整条终态 UPDATE 被 except 吞掉 → 事件永远停在 running（2026-11-16 #9820 实证：
+    派发失败后连「标记 failed」都写不进去，UI 一直显示 running/无引擎）。
+    """
+    global _EVENTS_COLUMNS_CACHE
+    if _EVENTS_COLUMNS_CACHE is not None:
+        return _EVENTS_COLUMNS_CACHE
+    cols: set = set()
+    for sql in (
+        "SELECT COLUMN_NAME FROM information_schema.columns "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='events'",
+        "PRAGMA table_info(events)",
+    ):
+        try:
+            rows = c.execute(sql).fetchall() or []
+            if rows:
+                # information_schema: COLUMN_NAME 在 0；PRAGMA: 列名在 1
+                cols = {(r[0] if isinstance(r[0], str) else r[1]) for r in rows}
+                break
+        except Exception as e:  # noqa: BLE001 - 后端不支持该方言时换下一种
+            log.debug(f"_events_columns: {sql.split()[0]} 不可用: {e}")
+            continue
+    _EVENTS_COLUMNS_CACHE = cols
+    return cols
+
+
 # ====== Per-repo 锁（从旧 event_processor 迁移）======
 # 2026-08-16 事故修复：由 threading.Lock 改为 asyncio.Lock。
 # 旧实现在异步事件循环里同步 acquire，同仓库并发消息会死锁整机（feishu-chat-event-loop-deadlock-fix.md）。
@@ -904,7 +936,7 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
                 log.info(f"Event {seq}: terminal write with empty result, "
                          f"backfilled default summary (#1503)")
             _structured = json.dumps(structured_output, ensure_ascii=False) if structured_output is not None else None
-            cols = [r[1] for r in c.execute(f"PRAGMA table_info(events)").fetchall()]
+            cols = _events_columns(c)
             if "structured_output" in cols and _structured is not None:
                 c.execute(
                     "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, "

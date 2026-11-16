@@ -4266,4 +4266,13 @@ def main():
 
 
 if __name__ == "__main__":
+    # fail-fast：引擎必须以任务属主身份运行。以 root 运行会在 grape-workspaces 下留下
+    # root 拥有的目录，随后业务侧（grape）写 issue/<agent> 目录直接 EACCES ——
+    # 2026-11-16 #96/#97 流水线卡死的真实根因（runtime-agent.service 里 User=root）。
+    if os.geteuid() == 0 and os.environ.get("GRAPE_ALLOW_ROOT_ENGINE") != "1":
+        print("refusing to run the engine as root: workspace files would be root-owned and "
+              "business writes (issue/<agent> dirs) would fail with EACCES. "
+              "Run as the task owner (User=grape) or set GRAPE_ALLOW_ROOT_ENGINE=1.",
+              file=sys.stderr)
+        raise SystemExit(78)
     main()
