@@ -44,8 +44,22 @@ def _env():
 
 
 def _setup_repo(repo_key, col_val, rc_val, col="bot_gitee_token", cred="bot"):  # D99: rc 值域归一
+    """建一行仓库数据；平台凭据列缺失时先补列。
+
+    F4/D106 终态后新库不再创建 gitee/gitlab 的 bot_gitee_token /
+    gitee_webhook_token 物理列（凭据只落 grape_t_repo_credentials），而这两条
+    用例验证的正是「存量列回落」老数据形态 —— 所以这里显式把库造成老样子，
+    用例才不依赖建库年代（2026-11-16 修）。
+    """
     with db_lock:
         o, r = repo_key.split(":", 1)[1].split("/", 1)
+        try:
+            _cols = {row[1] for row in
+                     db.cursor().execute("PRAGMA table_info(managed_repos)").fetchall()}
+        except Exception:
+            _cols = {col}      # 非 sqlite 拓扑：假定列已存在，交给 INSERT 报错
+        if col not in _cols:
+            db.cursor().execute(f"ALTER TABLE managed_repos ADD COLUMN {col} TEXT DEFAULT ''")
         db.cursor().execute(
             "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, "
             f"full_name, {col}) VALUES (?, ?, ?, ?, ?)",
@@ -68,12 +82,18 @@ def test_s80b_repobottoken_reads_repo_credentials_first():
 
 
 def test_s80b_repobottoken_fallback_to_column_when_rc_empty():
-    """grape_t_repo_credentials 无行 → 回落 managed_repos 列（双写期两源兜底）。"""
+    """grape_t_repo_credentials 无行 → 回落 managed_repos 卡列（gitcode 存量行）。
+
+    F4/D106 终态后卡列为空串的平台（gitee/gitlab）不再有物理列，其存量值由
+    backfill 迁入 rc、`_fetch` 对空卡列直接返回空 —— 所以列回落链只剩
+    gitcode/github 这一档，本用例按 gitcode 走（2026-11-16 修：原用例打在
+    gitee 上，测的是一条已经被 D106 退役的分支）。
+    """
     import os
     from src.kernel.token_resolver import RepoBotToken, create_provider
-    _setup_repo("s80b:o2/r2", "col-tok-2", None)
-    s = RepoBotToken(create_provider("gitee"))
-    assert s._fetch("s80b:o2/r2") == "col-tok-2"  # rc 空回落列（历史数据）
+    _setup_repo("gitcode:o2/r2", "col-tok-2", None, col="bot_gitcode_token")
+    s = RepoBotToken(create_provider("gitcode"))
+    assert s._fetch("gitcode:o2/r2") == "col-tok-2"  # rc 空回落列（历史数据）
 
 
 def test_s80b_webhook_token_card_platform():
