@@ -567,7 +567,9 @@ def build_help_html(data: dict | None = None) -> str:
         '<meta charset="UTF-8">\n'
         '<meta name="viewport" content="width=device-width,initial-scale=1.0">\n'
         '<title>Grape 帮助中心</title>\n'
-        '<link rel="icon" type="image/png" href="/static/logo-64.png">\n'
+        '<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">\n'
+        '<link rel="icon" type="image/png" sizes="48x48" href="/static/favicon-48.png">\n'
+        '<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon-180.png">\n'
         f"{_MIGRATION_COMMENT}\n"
         f"<style>{_CSS}</style>\n"
         "</head>\n<body>\n"

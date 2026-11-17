@@ -378,10 +378,10 @@ document.documentElement.classList.remove('i18n-loading');})();
         兜底会把 favicon.ico 当成页面路由返回 200 + index.html，浏览器拿到非图片
         内容就只能显示默认空白图标（下线前浏览器还爱请求它）。
         """
-        _fav = os.path.join(STATIC_DIR, "logo-64.png")
+        _fav = os.path.join(STATIC_DIR, "favicon.ico")
         if not os.path.isfile(_fav):
             raise HTTPException(status_code=404)
-        resp = FileResponse(_fav, media_type="image/png")
+        resp = FileResponse(_fav, media_type="image/x-icon")
         resp.headers["Cache-Control"] = "public, max-age=86400"
         return resp
 
