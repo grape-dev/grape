@@ -23,7 +23,7 @@ def init_dns_override(gateway_ip: str, gateway_domain: str = "devbox-s2.hwtunnel
     BUG-10 修复：支持 gateway_ip 变更更新（配置刷新后生效）。
 
     Args:
-        gateway_ip: Gateway IP 地址（例如 "110.41.63.59"）
+        gateway_ip: Gateway IP 地址（例如 "203.0.113.10"，文档保留地址段）
         gateway_domain: 隧道域名后缀（例如 "devbox-s2.hwtunnel.com"）
     """
     global _gateway_ip, _gateway_pattern

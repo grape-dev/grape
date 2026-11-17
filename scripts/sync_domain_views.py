@@ -54,6 +54,27 @@ DEFAULT_SYNC_TABLES = (
     "grape_t_repo_credentials",
     # 接管会话（weekly-11）：owner=runtime，mgmt 的接入路由与 insight 只读
     "takeover_sessions",
+    # 沙箱控制面 13 表（PR #1507 sandbox-uuid 线，owner 见 table_ownership.json；
+    # grape_t_cloud_sandboxes 归 runtime——2026-11-17 用户裁定，其余 12 张归 mgmt
+    # 但由 runtime 进程建基表，与本组其余表同形态的「owner 建表、非 owner 跨域读」）。
+    # 需求实锤：8070 三库实例 mgmt 库缺这批视图时，_build_cred_map 查
+    # grape_t_sandbox_provider_config 1146 → 设备卡 provider_id 恒空 → 沙箱凭据
+    # 「详情」按钮不渲染；takeover_sessions 同链路（自动化页 500）。准入走实例
+    # 本地 view-allowlist（repo_credentials 先例）；G-21 归属单一事实源裁定后
+    # 本清单可转为自动推导。
+    "grape_t_cloud_sandboxes",
+    "grape_t_sandbox_templates",
+    "grape_t_sandbox_provider_config",
+    "grape_t_engine_template_binding",
+    "grape_t_engine_sandbox_toggle",
+    "grape_t_engine_sandbox_config",
+    "grape_t_engine_sandbox_paths",
+    "grape_t_engine_sandbox_whitelist",
+    "grape_t_task_proxy_tokens",
+    "grape_t_user_llm_credentials",
+    "grape_t_repo_llm_credentials",
+    "grape_t_egress_admin_policy",
+    "grape_t_egress_admin_exception",
 )
 
 # 库名/表名直接拼进 DDL（反引号包裹），标识符白名单校验复用 view_ddl_builder
