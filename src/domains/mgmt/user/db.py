@@ -4234,30 +4234,41 @@ _UID_COLS_CACHE: dict = {}
 _UID_COLS_CACHE_DB_ID = None
 
 
+# ── Issue #646 双读 helper（三库独立拓扑：agent_runtimes 归**运行域**） ──
+# 历史实现在这里直查进程主库 `db`：单库/sqlite 拓扑下就是同一个库，能跑；
+# 三库拆分（GRAPE_DOMAIN_LIB=1）后 mgmt 进程主库没有 agent_runtimes →
+# `(1146, "Table 'grape_beta_mgmt.agent_runtimes' doesn't exist")` 被 except 吞掉 →
+# 一律返回 None。外部表现：场景保存/引擎绑定按 uid 提交必报「引擎 uid 无效」，
+# scene_precheck / 任务快照的 uid 轨道全线静默丢失。
+# 修法：只走运行域公开读原语（`_any_cursor` 自带自有 DSN / 回落进程库两种拓扑），
+# 不再在 mgmt 模块里拼跨域 SQL。
+
+
 def get_engine_uid_by_runtime_id(runtime_id: int) -> str | None:
     """Issue #646 双读：自增 id → engine_uid（无/未迁移返回 None）。"""
     if not runtime_id:
         return None
-    with db_lock:
-        c = db.cursor()
-        try:
-            row = c.execute("SELECT engine_uid FROM agent_runtimes WHERE id=?", (runtime_id,)).fetchone()
-            return (row[0] if row and row[0] else None)
-        except Exception:
-            return None
+    try:
+        row = _rt.read_one_any("agent_runtime_engine_uid_by_id", (int(runtime_id),))
+    except Exception:
+        return None
+    uid = row[0] if row else None
+    return str(uid) if uid else None
 
 
 def get_runtime_id_by_engine_uid(engine_uid: str) -> int | None:
     """Issue #646 双读：engine_uid → 自增 id（uid 无效/未迁移返回 None）。"""
     if not engine_uid:
         return None
-    with db_lock:
-        c = db.cursor()
-        try:
-            row = c.execute("SELECT id FROM agent_runtimes WHERE engine_uid=?", (engine_uid,)).fetchone()
-            return (row[0] if row else None)
-        except Exception:
-            return None
+    _u = str(engine_uid).strip().lower()
+    if not _u:
+        return None
+    try:
+        _ids = _rt.runtime_ids_by_engine_uids([_u])
+    except Exception:
+        return None
+    rid = int(_ids[0]) if _ids else 0
+    return rid or None
 
 
 def resolve_engine_refs(refs) -> tuple[list, list]:
@@ -4268,26 +4279,32 @@ def resolve_engine_refs(refs) -> tuple[list, list]:
     返回与输入等长的两个列表（失败项 None，调用方决定 fail-fast 或跳过）。
     """
     from src.kernel.engine_uid import is_uid_str
+    _refs = list(refs or [])
+    # uid 形态引用批量解析（运行域公开读原语：三库独立拓扑下不跨域直查）
+    _uid_refs = [str(r).strip().lower() for r in _refs
+                 if isinstance(r, str) and is_uid_str(str(r).strip())]
+    _uid_to_id: dict = {}
+    if _uid_refs:
+        try:
+            for _u, _rid in zip(_uid_refs, _rt.runtime_ids_by_engine_uids(_uid_refs)):
+                if _rid:
+                    _uid_to_id[_u] = int(_rid)
+        except Exception:
+            _uid_to_id = {}
     ids: list = []
     uids: list = []
-    with db_lock:
-        c = db.cursor()
-        try:
-            for ref in refs or []:
-                if isinstance(ref, str) and is_uid_str(ref.strip()):
-                    row = c.execute("SELECT id FROM agent_runtimes WHERE engine_uid=?", (ref.strip().lower(),)).fetchone()
-                    ids.append(row[0] if row else None)
-                    uids.append(ref.strip().lower())
-                elif isinstance(ref, int) or (isinstance(ref, str) and ref.strip().isdigit()):
-                    rid = int(ref)
-                    row = c.execute("SELECT engine_uid FROM agent_runtimes WHERE id=?", (rid,)).fetchone()
-                    ids.append(rid)
-                    uids.append(row[0] if row and row[0] else None)
-                else:
-                    ids.append(None)
-                    uids.append(None)
-        except Exception:
-            pass
+    for ref in _refs:
+        if isinstance(ref, str) and is_uid_str(ref.strip()):
+            _u = ref.strip().lower()
+            ids.append(_uid_to_id.get(_u))
+            uids.append(_u)
+        elif isinstance(ref, int) or (isinstance(ref, str) and ref.strip().isdigit()):
+            rid = int(ref)
+            ids.append(rid)
+            uids.append(get_engine_uid_by_runtime_id(rid))
+        else:
+            ids.append(None)
+            uids.append(None)
     return ids, uids
 
 
@@ -4302,14 +4319,10 @@ def engine_ref_snapshot(runtime_id: int, pool_engine_ids: str = "") -> tuple:
     engine_uid = None
     snapshot = ""
     try:
-        with db_lock:
-            c = db.cursor()
-            row = c.execute(
-                "SELECT engine_uid, COALESCE(display_name, name), name FROM agent_runtimes WHERE id=?",
-                (runtime_id,)).fetchone()
-            if row:
-                engine_uid = row[0] or None
-                snapshot = row[1] or row[2] or ""
+        row = _rt.read_one_any("agent_runtime_snapshot_by_id", (int(runtime_id),))
+        if row:
+            engine_uid = row[0] or None
+            snapshot = row[1] or row[2] or ""
     except Exception:
         engine_uid, snapshot = None, ""
     pool_uid_json = ""

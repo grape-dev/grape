@@ -2268,6 +2268,7 @@ _ANY_QUERIES: dict[str, str] = {
     "user_purge_chat_conversations": "DELETE FROM chat_conversations WHERE user_id=?",
     "user_purge_issue": "DELETE FROM issue WHERE user_id=?",
     'agent_runtime_engine_uid_by_id': 'SELECT engine_uid FROM agent_runtimes WHERE id=?',
+    'agent_runtime_snapshot_by_id': 'SELECT engine_uid, COALESCE(display_name, name), name FROM agent_runtimes WHERE id=?',
     'devops_agent_session_insert_uid': "INSERT OR IGNORE INTO devops_agent_session (id, repo_key, agent_type, runtime_id, engine_uid, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
     'agent_runtime_name_by_id': 'SELECT name FROM agent_runtimes WHERE id=?',
     'issue_card_row': 'SELECT stage, owner_agent, a2a_seq, updated_at, assignee, scene_id, scene_user_id, parent_issue_id, is_subtask_mode, allow_scene_override, carried_context, status FROM issue WHERE repo_key=? AND issue_number=?',

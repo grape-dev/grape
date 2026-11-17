@@ -162,6 +162,11 @@ class TestSeedUidUpgradeRebase:
         import src.domains.mgmt.user.db as udb
         monkeypatch.setattr(udb, "db", conn, raising=True)
         monkeypatch.setattr(udb, "db_lock", threading.RLock(), raising=True)
+        # engine_uid 双读已改走运行域公开读原语（_any_cursor 单库回落 session_manager.db）：
+        # 测试单库桩必须同步 patch 主库连接，否则读不到 agent_runtimes
+        import src.kernel.session_manager as _ksm
+        monkeypatch.setattr(_ksm, "db", conn, raising=True)
+        monkeypatch.setattr(_ksm, "db_lock", threading.RLock(), raising=True)
         return udb, conn
 
     @staticmethod
