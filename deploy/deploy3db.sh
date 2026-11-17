@@ -221,6 +221,20 @@ else
     fi
   fi
 fi
+# 技能树镜像：引擎物化技能读的是 <checkout>/.grape/skills，不是仓库根的 skills/。
+# 本脚本只部署当前 checkout，同机其它租户 checkout（如 orgtest）不会自己更新 ——
+# 缺了就会被一致性门禁判「bound skill not materialized」而拒绝执行任务。
+_SELF="$(cd "$(dirname "$0")/../.." && pwd)"
+for _co in /home/*/grape-new-version2; do
+  [ -d "$_co/.grape/skills" ] || continue
+  [ "$(cd "$_co" 2>/dev/null && pwd)" = "$_SELF" ] && continue
+  _own=$(stat -c %U "$_co" 2>/dev/null || echo root)
+  rsync -a --delete "$_SELF/.grape/skills/" "$_co/.grape/skills/" 2>/dev/null \
+    || cp -a "$_SELF/.grape/skills/." "$_co/.grape/skills/"
+  chown -R "$_own:$_own" "$_co/.grape/skills" 2>/dev/null || true
+  echo "[3db] skills mirrored -> $_co（$(find "$_co/.grape/skills" -type f 2>/dev/null | wc -l) 文件）"
+done
+
 echo "[3db] status:"
 for p in 38081 38082 38083 38084; do
   path=/api/health; case $p in 38082|38083) path=/health ;; esac
