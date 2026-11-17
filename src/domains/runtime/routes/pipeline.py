@@ -114,6 +114,27 @@ def _is_placeholder_title(t: str) -> bool:
 # Issue #2925：进程内负缓存（降级路径）——`issue.title_fetched_at` 列不可用
 # （迁移未跑到/临时库）时，仍保证「同仓第二次起 0 外呼」；有列时以列为准。
 _TITLE_NEG_CACHE: dict = {}
+# 进程内负缓存的条目上限：超过即先按 TTL 清理，避免长期运行进程无界增长。
+_TITLE_NEG_CACHE_MAX = 4096
+
+
+def _title_neg_cache_put(key, ts: float) -> None:
+    """写入进程内负缓存；超过上限时剔除过期条目（无列降级路径专用）。"""
+    if len(_TITLE_NEG_CACHE) >= _TITLE_NEG_CACHE_MAX:
+        _ttl = _title_negative_ttl()
+        _now = time.time()
+        for _k, _v in list(_TITLE_NEG_CACHE.items()):
+            if not _title_marker_fresh(_v, _now, _ttl):
+                _TITLE_NEG_CACHE.pop(_k, None)
+        if len(_TITLE_NEG_CACHE) >= _TITLE_NEG_CACHE_MAX:
+            # 仍然超限（TTL 全新鲜 / 配置为永久）→ 丢掉最早写入的一批，保持有界。
+            for _k in list(_TITLE_NEG_CACHE)[:len(_TITLE_NEG_CACHE) - _TITLE_NEG_CACHE_MAX + 1]:
+                _TITLE_NEG_CACHE.pop(_k, None)
+    _TITLE_NEG_CACHE[key] = ts
+
+
+# 写回/标记 SQL 的并发护栏（三处共用，保证与占位判定同口径）。
+_TITLE_WRITEBACK_GUARD = "(title='' OR title IS NULL OR title=?)"
 
 
 def _title_negative_ttl() -> int:
@@ -161,7 +182,9 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
     返回就地更新后的 `title_map`（真实标题立即可用于本次响应）。
     整段 best-effort：任何异常都不允许阻断流水线列表返回。
     """
-    if not title_map or not issue_ids:
+    if title_map is None:
+        title_map = {}
+    if not issue_ids:
         return title_map
     _started = time.monotonic()
     _window_ids = list(issue_ids[:window_size]) if window_size > 0 else list(issue_ids)
@@ -246,11 +269,21 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
     _by_rk: dict = {}
     for _iid, _num, _rk in _to_fetch:
         _by_rk.setdefault(_rk, []).append(_iid)
+    # 请求级共享总 deadline：多 repo_key 分组累计仍受同一预算约束（≤4s），
+    # 而不是每组各扣一次 4s 导致多仓历史数据下累计超 5s。
+    from src.domains.runtime.pipeline.event_pipeline import (
+        fetch_issue_titles_batch, _title_fetch_deadline)
+    _batch_expire_at = time.monotonic() + _title_fetch_deadline()
     for _rk, _ids in _by_rk.items():
         _stats: dict = {}
+        _remain = _batch_expire_at - time.monotonic()
+        if _remain <= 0:
+            log.info(f"[pipeline] title backfill deadline exhausted before {_rk} "
+                     f"(remaining groups skipped, keep placeholder)")
+            break
         try:
-            from src.domains.runtime.pipeline.event_pipeline import fetch_issue_titles_batch
-            for _iid, _t in (fetch_issue_titles_batch(_rk, _ids, stats=_stats) or {}).items():
+            for _iid, _t in (fetch_issue_titles_batch(
+                    _rk, _ids, deadline_seconds=_remain, stats=_stats) or {}).items():
                 _fetched[(_rk, _iid)] = _t
         except Exception as e:
             log.warning(f"[pipeline] title backfill batch error for {_rk} "
@@ -279,25 +312,28 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
                         _c.execute(
                             f"UPDATE issue SET title=?, title_fetched_at=? "
                             f"WHERE repo_key=? AND issue_number=? "
-                            f"AND (title='' OR title IS NULL OR title=?)",
+                            f"AND {_TITLE_WRITEBACK_GUARD}",
                             (_api, _now_iso, _rk, _num, _old))
                     else:
                         _c.execute(
                             f"UPDATE issue SET title=? "
                             f"WHERE repo_key=? AND issue_number=? "
-                            f"AND (title='' OR title IS NULL OR title=?)",
+                            f"AND {_TITLE_WRITEBACK_GUARD}",
                             (_api, _rk, _num, _old))
+                    # 日志计数只算真正落库的 UPDATE（并发护栏命中 rowcount=0 时
+                    # 不算 fetched），避免 no-op 虚增 fetched、低估 failed。
+                    if getattr(_c, "rowcount", -1) != 0:
+                        _written += 1
                     title_map[_iid] = _api
-                    _written += 1
                 elif _marker_ok:
                     if _rk in _attempted_rks:
                         _c.execute(
                             f"UPDATE issue SET title_fetched_at=? "
                             f"WHERE repo_key=? AND issue_number=? "
-                            f"AND (title='' OR title IS NULL OR title=?)",
+                            f"AND {_TITLE_WRITEBACK_GUARD}",
                             (_now_iso, _rk, _num, _old))
                 elif _rk in _attempted_rks:
-                    _TITLE_NEG_CACHE[(_rk, _num)] = _now
+                    _title_neg_cache_put((_rk, _num), _now)
             try:
                 _db.commit()
             except Exception:

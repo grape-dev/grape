@@ -7,7 +7,8 @@
 - [x] `event_pipeline.py`：新增 `fetch_issue_titles_batch`（token/client 复用 + 有限并发 + 总 deadline）。
 - [x] `event_pipeline.py`：`_vcs_get_issue` 支持复用 client/timeout（向后兼容）。
 - [x] 迁移 `202611170043`：`issue.title_fetched_at`（走 `register_migration`，幂等 + strict）。
-- [x] 测试 `tests/runtime/test_pipeline_title_backfill_2925.py`（11 条：口径/窗口/写回/负缓存/deadline/token 复用）。
+- [x] 测试 `tests/runtime/test_pipeline_title_backfill_2925.py`（17 条：口径/窗口/写回/负缓存/deadline/token 复用/空 map/跨仓/并发护栏/窗口接线）。
+- [x] 测试 `tests/api/test_issue_2925_title_fetched_at_migration.py`（3 条：迁移补列/幂等/strict 失败不盖章）。
 - [x] 回归：`tests/runtime/test_pipeline.py`、`test_issue_fetch_via_client.py`、
       `test_w11_gitee_issue_read_card_driven.py`、`test_d29_comment_delivery_card_driven.py`、
       `tests/api/test_migration_track_guard.py`（原有 5/9 条失败为基线既有，改动前后一致）。

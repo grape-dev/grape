@@ -8,6 +8,7 @@
 """
 import sys
 import os
+import re
 import time
 
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
@@ -22,33 +23,77 @@ import src.domains.runtime.pipeline.event_pipeline as ep_mod
 
 
 class _FakeCursor:
-    """最小可用的 issue 表假游标：支持标记读取 + title/title_fetched_at 写回。"""
+    """最小可用的 issue 表假游标：解析 WHERE，支持标记读取 + title/title_fetched_at 写回。
+
+    Issue #2925 review：此前忽略 SQL WHERE，导致「跨仓同号不串仓」「并发 title=? 护栏」
+    「窗口外不写回」等断言形同虚设。现在按 SQL 里的 repo_key/issue_number 等值条件
+    与 `(title='' OR title IS NULL OR title=?)` 护栏语义执行，并维护 rowcount。
+
+    issues 支持两种键：
+      - `{num: {...}}`：全部归属默认 repo_key（旧用例）；
+      - `{(repo_key, num): {...}}`：多仓同号场景。
+    """
 
     def __init__(self, issues, repo_key="gitcode:o/r"):
-        self.issues = issues          # {num: {"title": str, "marker": str}}
+        self.issues = issues
         self.repo_key = repo_key
         self.rows = []
         self.updates = []
+        self.rowcount = -1
+
+    def _get(self, rk, num):
+        if (rk, num) in self.issues:
+            return self.issues[(rk, num)]
+        if rk == self.repo_key and num in self.issues:
+            return self.issues[num]
+        return None
+
+    def _all_rows(self):
+        for k, v in self.issues.items():
+            if isinstance(k, tuple):
+                yield k[0], k[1], v
+            else:
+                yield self.repo_key, k, v
 
     def execute(self, sql, params=()):
         s = " ".join(str(sql).split())
+        self.rowcount = -1
         if s.startswith("SELECT repo_key, issue_number, title_fetched_at"):
-            self.rows = [(self.repo_key, n, v.get("marker", ""))
-                         for n, v in self.issues.items()]
+            m = re.search(r"repo_key IN \(([^)]*)\) AND issue_number IN \(([^)]*)\)", s)
+            rk_n = m.group(1).count("?")
+            num_n = m.group(2).count("?")
+            repo_keys = set(params[:rk_n])
+            nums = set(params[rk_n:rk_n + num_n])
+            self.rows = [(rk, num, v.get("marker", ""))
+                         for rk, num, v in self._all_rows()
+                         if rk in repo_keys and num in nums]
             return self
         if s.startswith("UPDATE issue SET"):
             self.updates.append((s, params))
-            _set = s.split("WHERE")[0]
+            _set, _where = s.split("WHERE", 1)
+            _rk = params[-3]
             _num = params[-2]
-            if _num not in self.issues:
+            row = None
+            if "repo_key=?" in _where and "issue_number=?" in _where:
+                row = self._get(_rk, _num)
+            if row is None:
+                self.rowcount = 0
                 return self
+            # 并发护栏：仅当库里仍是空 / 本次观测到的占位值时才覆盖。
+            if "(title='' OR title IS NULL OR title=?)" in _where:
+                _old = params[-1]
+                _cur = row.get("title", "")
+                if not (_cur in ("", None) or _cur == _old):
+                    self.rowcount = 0
+                    return self
             if "SET title=?" in _set and "title_fetched_at=?" in _set:
-                self.issues[_num]["title"] = params[0]
-                self.issues[_num]["marker"] = params[1]
+                row["title"] = params[0]
+                row["marker"] = params[1]
             elif "SET title=?" in _set:
-                self.issues[_num]["title"] = params[0]
+                row["title"] = params[0]
             elif "SET title_fetched_at=?" in _set:
-                self.issues[_num]["marker"] = params[0]
+                row["marker"] = params[0]
+            self.rowcount = 1
             return self
         return self
 
@@ -309,3 +354,136 @@ def test_batch_deadline_bounds_elapsed(monkeypatch):
     elapsed = time.monotonic() - started
     assert elapsed < 1.0, elapsed
     assert isinstance(out, dict)
+
+# ===== QA review round 2：空 title_map / 跨仓同号 / 并发护栏 / 共享 deadline / 窗口接线 =====
+
+
+def test_empty_title_map_still_backfills(monkeypatch):
+    """issue 表批量读取失败（title_map 为空）时仍按 issue_ids 构造候选并兜底。
+
+    review [中]：原实现空 map 直接 return，而列表路径已删除逐条 API 兜底 →
+    标题永久占位。空 map 时候选 _cur 视为 '' 继续走窗口批量。
+    """
+    issues = {1: {"title": "", "marker": ""}}
+    _setup_db(monkeypatch, issues)
+    calls = []
+
+    def _fake_batch(repo_key, ids, **kw):
+        calls.append(list(ids))
+        _mark_attempted(kw, ids)
+        return {"#1": "真实标题"}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
+    out = pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], {}, ["#1"], {}, window_size=1)
+
+    assert calls == [["#1"]]
+    assert out == {"#1": "真实标题"}
+    assert issues[1]["title"] == "真实标题"
+
+    # 第二次请求仍拿不到 issue 表批量结果（title_map 为空）→ 命中已尝试标记，0 外呼
+    out2 = pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], {}, ["#1"], {}, window_size=1)
+    assert calls == [["#1"]]
+    assert out2.get("#1", "") == ""
+
+
+def test_cross_repo_same_number_only_hits_matching_repo(monkeypatch):
+    """多仓同号：候选以事件行 repo_key 为准，只回写命中的仓库。"""
+    issues = {
+        ("gitcode:o/r", 7): {"title": "issue_opened", "marker": ""},
+        ("gitcode:o/r2", 7): {"title": "issue_opened", "marker": ""},
+    }
+    _setup_db(monkeypatch, issues)
+    calls = []
+
+    def _fake_batch(repo_key, ids, **kw):
+        calls.append((repo_key, list(ids)))
+        _mark_attempted(kw, ids)
+        return {"#7": "r2 真实标题"}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
+    events_by_issue = {"#7": [{"repo_key": "gitcode:o/r2", "title": "issue_opened"}]}
+    out = pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r", "gitcode:o/r2"],
+        {"#7": "issue_opened"}, ["#7"], events_by_issue, window_size=1)
+
+    assert calls == [("gitcode:o/r2", ["#7"])]
+    assert out["#7"] == "r2 真实标题"
+    assert issues[("gitcode:o/r2", 7)]["title"] == "r2 真实标题"
+    assert issues[("gitcode:o/r", 7)]["title"] == "issue_opened"
+    assert issues[("gitcode:o/r", 7)]["marker"] == ""
+
+
+def test_concurrent_real_title_guard(monkeypatch):
+    """并发护栏：写回前库里已被并发写入真实标题 → title=? 护栏拒绝覆盖。"""
+    issues = {1: {"title": "别人写入的真实标题", "marker": ""}}
+    _setup_db(monkeypatch, issues)
+
+    def _fake_batch(repo_key, ids, **kw):
+        _mark_attempted(kw, ids)
+        return {"#1": "API 标题"}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
+    out = pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], {"#1": "issue_opened"}, ["#1"], {}, 1)
+
+    assert issues[1]["title"] == "别人写入的真实标题"
+    assert issues[1]["marker"] == ""
+    # 本次响应仍可用 API 拿到的标题（只影响展示，不改库）
+    assert out["#1"] == "API 标题"
+
+
+def test_shared_deadline_across_repo_groups(monkeypatch):
+    """请求级共享总 deadline：第二个 repo 组拿到的是剩余预算，而非再扣一份。"""
+    issues = {
+        ("gitcode:a/x", 1): {"title": "", "marker": ""},
+        ("gitcode:b/y", 2): {"title": "", "marker": ""},
+    }
+    _setup_db(monkeypatch, issues)
+    monkeypatch.setattr(ep_mod, "_title_fetch_deadline", lambda: 0.5)
+    deadlines = []
+
+    def _fake_batch(repo_key, ids, **kw):
+        deadlines.append(kw.get("deadline_seconds"))
+        time.sleep(0.2)
+        _mark_attempted(kw, ids)
+        return {iid: f"T{iid}" for iid in ids}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
+    events_by_issue = {
+        "#1": [{"repo_key": "gitcode:a/x", "title": ""}],
+        "#2": [{"repo_key": "gitcode:b/y", "title": ""}],
+    }
+    pipeline_mod._backfill_window_titles(
+        "gitcode:a/x", ["gitcode:a/x", "gitcode:b/y"], {"#2": "", "#1": ""},
+        ["#1", "#2"], events_by_issue, window_size=2)
+
+    assert len(deadlines) == 2
+    assert deadlines[0] <= 0.5
+    assert deadlines[1] < deadlines[0]
+
+
+def test_get_pipeline_window_size_wiring(monkeypatch):
+    """get_pipeline 把 `1 + history_offset + history_limit` 接到窗口兜底。"""
+    captured = {}
+
+    def _cap(repo_key, repo_keys, title_map, issue_ids,
+             events_by_issue=None, window_size=0):
+        captured["window_size"] = window_size
+        captured["issue_ids"] = list(issue_ids)
+        return title_map
+
+    monkeypatch.setattr(pipeline_mod, "_backfill_window_titles", _cap)
+    monkeypatch.setattr(pipeline_mod, "_pipeline_window",
+                        lambda repo_keys, scene, need: (["#1"], 1, set()))
+    import src.api.deps as deps
+    monkeypatch.setattr(deps, "check_repo_access", lambda user, repo_key: None)
+
+    resp = pipeline_mod.get_pipeline(
+        owner="o", repo="r", history_limit=3, history_offset=2,
+        scene_id="", user={"id": 1, "username": "tester"})
+
+    assert captured["window_size"] == 1 + 2 + 3
+    assert captured["issue_ids"] == ["#1"]
+    assert isinstance(resp, dict)

@@ -3227,11 +3227,10 @@ def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
     读路径统一走卡驱动命令层 `_vcs_get_issue`（同 `_fetch_issue_assignee`）：
     取代 "github 否则 gitcode v5" 二分，gitee/gitlab 仓不再打成 gitcode API。
     无法核实 / 404 一律返回空串（不抛异常）。
-    用于 pipeline 展示兜底：当 tasks/events 表中 title 均为占位符时，
-    通过 API 获取真实标题并回写。
 
-    Issue #2925：pipeline 列表已改为窗口内批量兜底（`fetch_issue_titles_batch`），
-    逐条调用不再在列表主路径上使用；保留本函数供单条场景（任务详情等）复用。
+    Issue #2925：pipeline 列表主路径已改为窗口内批量兜底
+    （`fetch_issue_titles_batch`），本函数不再从列表路径调用，也不再负责回写；
+    仅保留给需要单条标题的场景（如任务详情）复用。
     """
     num = _issue_num_from(issue_id)
     if not num:
@@ -3288,15 +3287,23 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
     _timeout = max(0.1, min(float(timeout or _title_fetch_timeout()), _deadline))
     _expire_at = time.monotonic() + _deadline
     _out: dict = {}
-    if stats is not None:
-        stats["attempted"] = len(_num_by_id)
     try:
         # 不用 with：退出时 shutdown(wait=True) 会等所有排队任务跑完，deadline 失去意义。
         _ex = ThreadPoolExecutor(max_workers=min(_conc, len(_num_by_id)),
                                  thread_name_prefix="pipeline-title")
         try:
-            _futs = {_ex.submit(_vcs_get_issue, repo_key, num, client, _timeout): iid
-                     for iid, num in _num_by_id.items()}
+            # 逐条 submit 并累加 attempted：只有真正提交进线程池（即真的会发起
+            # 上游请求）的条数才算「尝试过」。线程池创建/部分 submit 失败时，
+            # attempted 只反映实际提交数，避免零外呼却落 6h 负缓存。
+            _futs = {}
+            try:
+                for iid, num in _num_by_id.items():
+                    _futs[_ex.submit(_vcs_get_issue, repo_key, num, client, _timeout)] = iid
+                    if stats is not None:
+                        stats["attempted"] = len(_futs)
+            except Exception as e:
+                log.warning(f"[pipeline] title backfill submit failed for {repo_key} "
+                            f"(submitted={len(_futs)}/{len(_num_by_id)}): {e}")
             _pending = set(_futs)
             while _pending:
                 _remain = _expire_at - time.monotonic()
@@ -5950,7 +5957,7 @@ def _list_issue_comments_card(repo_key: str, repository: str, issue_num, bot_tok
         f"/issues/{issue_num}/notes?per_page=100&sort=created&direction=asc"))
     return _resp if isinstance(_resp, list) else []
 
-def _vcs_get_issue(repo_key: str, num: str, client=None, timeout: int = 30) -> "tuple[str, dict]":
+def _vcs_get_issue(repo_key: str, num: str, client=None, timeout: float = 30.0) -> "tuple[str, dict]":
     """D18/S28：统一命令层读 Issue——(state, data)。
 
     state ∈ exists / missing / unknown；token 解析语义与旧实现一致
