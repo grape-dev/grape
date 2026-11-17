@@ -169,7 +169,7 @@
     "sandbox_toast_platform_required": "请选择沙箱平台",
     "sandbox_token_warning": "沙箱凭据 {name}（{scope}·{platform}）已生成。token 仅显示一次，请立即保存；泄露请到凭据列表吊销。",
     "sandbox_install_hint": "🐧 在沙箱平台的 Linux 机器上一键安装接入",
-    "sandbox_install_desc": "在沙箱平台所在机器上执行（需 Python ≥ 3.10 + curl）。安装后 worker 自动上报平台端点/SSL 证书/模板列表，云沙箱页即可见该平台。当前暂不支持 Windows 与手动模式。",
+    "sandbox_install_desc": "在沙箱平台所在机器上执行（需 Python ≥ 3.10 + curl）。平台端点/API Key/SSL 证书以本表单为准（生成凭据时已保存）。安装后 worker 启动自动扫描上报模板列表与预装引擎（需平台 SDK），云沙箱页即可见该平台。当前暂不支持 Windows 与手动模式。",
     "sandbox_conn_title": "平台连接信息",
     "sandbox_key_ph": "平台 API Key（如 e2b_xxx，无鉴权留空）",
     "sandbox_conn_desc": "以上信息将保存在 grape 服务端数据库（API Key 加密存储），一键安装命令无需携带；worker 启动后自动上报模板列表。",

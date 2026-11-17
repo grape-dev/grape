@@ -169,7 +169,7 @@
     "sandbox_toast_platform_required": "Please select a sandbox platform",
     "sandbox_token_warning": "Sandbox credential {name} ({scope}·{platform}) generated. Token shown only once — save it now; revoke from the credential list if leaked.",
     "sandbox_install_hint": "🐧 One-click install on the sandbox platform Linux machine",
-    "sandbox_install_desc": "Run on the machine hosting the sandbox platform (Python ≥ 3.10 + curl required). The worker auto-reports platform endpoint/SSL cert/template list; the sandbox page will show the platform. Windows and manual mode are not supported yet.",
+    "sandbox_install_desc": "Run on the machine hosting the sandbox platform (Python ≥ 3.10 + curl required). Platform endpoint/API key/SSL cert come from this form (saved when the credential is generated). After install the worker auto-scans and reports the template list and preinstalled engines (platform SDK required); the sandbox page will then show the platform. Windows and manual mode are not supported yet.",
     "sandbox_conn_title": "Platform Connection",
     "sandbox_key_ph": "Platform API Key (e.g. e2b_xxx, empty if no auth)",
     "sandbox_conn_desc": "The above info is stored in the grape server database (API Key encrypted); the install command does not carry it. The worker reports the template list on startup.",
