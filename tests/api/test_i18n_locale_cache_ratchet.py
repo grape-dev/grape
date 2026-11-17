@@ -19,12 +19,12 @@ import re
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
-# 2026-11-13 快照：templates(+66 键) / tasks / admin 文案变更并 bump 四页 cacheVer 之后
-LOCALE_FINGERPRINT = "403500247f9254fe"
+# 2026-11-17 快照：G-18 词条化（sandbox/observability/dashboard 三包新增 sbx/dv2 分组）后 bump index cacheVer 56
+LOCALE_FINGERPRINT = "e6544fe1eebadc4e"
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
-    "index.html": ("55", "53"),
+    "index.html": ("56", "53"),
     "admin.html": ("20261116-2", "20261114-23"),
     "register.html": ("47", "45"),
     "forgot.html": ("47", "45"),

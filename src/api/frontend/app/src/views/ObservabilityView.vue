@@ -308,23 +308,23 @@
           <input
             v-model="sbx.searchQ"
             class="obv-sbxsearch"
-            :placeholder="isZh ? '搜索 Event 号...' : 'Search event...'"
-            :title="isZh ? '输入事件编号（精确）或完整任务 ID（t_ 开头）' : 'Event seq (exact) or full task ID (t_ prefix)'"
+            :placeholder="t('sbx.sbx_search_ph')"
+            :title="t('sbx.sbx_search_tip')"
             @keyup.enter="sbxFilter()"
           />
           <select v-model="sbx.providerFilter" class="obv-sbxsel" @change="sbxFilter()">
-            <option :value="0">{{ isZh ? '全部平台' : 'All Platforms' }}</option>
+            <option :value="0">{{ t('sbx.sbx_all_platforms') }}</option>
             <option v-for="p in sbx.providers" :key="p.id" :value="p.id">{{ p.name }}</option>
           </select>
           <select v-model="sbx.stateFilter" class="obv-sbxsel" @change="sbxFilter()">
-            <option value="">{{ isZh ? '全部状态' : 'All States' }}</option>
+            <option value="">{{ t('sbx.sbx_all_states') }}</option>
             <option v-for="st in ['running', 'killed', 'kill_failed', 'stale', 'creating', 'setup_failed']" :key="st" :value="st">{{ st }}</option>
           </select>
-          <button class="bt bt-o bt-s" @click="sbxFilter()">{{ isZh ? '查找' : 'Search' }}</button>
-          <button class="bt bt-o bt-s" @click="sbxLoad()">{{ isZh ? '刷新' : 'Refresh' }}</button>
+          <button class="bt bt-o bt-s" @click="sbxFilter()">{{ t('sbx.sbx_search_btn') }}</button>
+          <button class="bt bt-o bt-s" @click="sbxLoad()">{{ t('sbx.sbx_refresh') }}</button>
         </div>
         <div v-if="!sbx.rows.length" class="ts t2" style="padding: 24px; text-align: center">
-          {{ isZh ? '暂无沙箱' : 'No sandboxes' }}
+          {{ t('sbx.sbx_empty') }}
         </div>
         <div v-else style="overflow-x: auto">
           <table style="width: 100%; font-size: 11px; border-collapse: collapse">
@@ -332,14 +332,14 @@
               <tr style="border-bottom: 2px solid var(--b); text-align: left">
                 <th style="padding: 8px">Sandbox ID</th>
                 <th style="padding: 8px">Event</th>
-                <th style="padding: 8px">{{ isZh ? '平台' : 'Platform' }}</th>
-                <th style="padding: 8px">{{ isZh ? '模板' : 'Template' }}</th>
-                <th style="padding: 8px">{{ isZh ? '引擎' : 'Engine' }}</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_platform') }}</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_template') }}</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_engine') }}</th>
                 <th style="padding: 8px">State</th>
-                <th style="padding: 8px" :title="isZh ? '沙箱内引擎/环境是否初始化完成' : 'Engine/env initialized in sandbox'">{{ isZh ? '初始化' : 'Init' }}</th>
-                <th style="padding: 8px">{{ isZh ? '创建人' : 'Created By' }}</th>
-                <th style="padding: 8px">{{ isZh ? '创建时间' : 'Created' }}</th>
-                <th style="padding: 8px">{{ isZh ? '最后刷新' : 'Last Refresh' }}</th>
+                <th style="padding: 8px" :title="t('sbx.sbx_init_tip')">{{ t('sbx.sbx_col_init') }}</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_created_by') }}</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_created_at') }}</th>
+                <th style="padding: 8px">{{ t('sbx.sbx_col_last_refresh') }}</th>
               </tr>
             </thead>
             <tbody>
@@ -357,7 +357,7 @@
                   }}<span
                     v-if="s.state === 'setup_failed' && s.last_error"
                     style="cursor: pointer; margin-left: 4px"
-                    :title="isZh ? '点击查看失败原因' : 'Click to view error'"
+                    :title="t('sbx.sbx_view_error_tip')"
                     @click="sbxError.open = true; sbxError.id = s.sandbox_id; sbxError.text = s.last_error"
                     >⚠️</span>
                 </td>
@@ -1799,12 +1799,12 @@
       @click.self="sbxError.open = false"
     >
       <div style="background: var(--c); border-radius: 14px; padding: 20px; max-width: 560px; width: 90%; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15)">
-        <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 4px">{{ isZh ? '沙箱启动失败原因' : 'Sandbox Setup Error' }}</h3>
+        <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 4px">{{ t('sbx.sbx_error_title') }}</h3>
         <div style="font-size: 10px; color: var(--t3); font-family: monospace; margin-bottom: 10px; word-break: break-all" :title="sbxError.id">{{ sbxError.id }}</div>
-        <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #b91c1c; line-height: 1.6; max-height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; user-select: text">{{ sbxError.text || (isZh ? '（无失败原因记录）' : '(no error recorded)') }}</div>
+        <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #b91c1c; line-height: 1.6; max-height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; user-select: text">{{ sbxError.text || (t('sbx.sbx_no_error')) }}</div>
         <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px">
-          <button class="bt bt-o bt-s" @click="sbxCopyError()">📋 {{ isZh ? '复制' : 'Copy' }}</button>
-          <button class="bt bt-p bt-s" @click="sbxError.open = false">✕ {{ isZh ? '关闭' : 'Close' }}</button>
+          <button class="bt bt-o bt-s" @click="sbxCopyError()">📋 {{ t('sbx.sbx_copy') }}</button>
+          <button class="bt bt-p bt-s" @click="sbxError.open = false">✕ {{ t('sbx.sbx_close') }}</button>
         </div>
       </div>
     </div>
@@ -2181,7 +2181,7 @@ function sbxCopyError() {
   const text = sbxError.text || ''
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(function () {
-      G.app.showToast(isZh ? '失败原因已复制' : 'Error copied')
+      G.app.showToast(t('sbx.sbx_error_copied'))
     })
   }
 }

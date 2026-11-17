@@ -241,7 +241,7 @@
                 <button
                   v-else
                   class="dbv-globe-empty"
-                  title="登记场景访问地址"
+                  title="t('dv2.reg_url_tip')"
                   @click="startDeployUrlEdit()"
                 >
                   🌐
@@ -882,7 +882,7 @@
                 :style="{ borderBottom: engineModal.collapse[sec.key] ? 'none' : '1px solid ' + sec.border }"
                 @click="engineModal.collapse[sec.key] = !engineModal.collapse[sec.key]"
               >
-                <span class="dbv-secarrow" :style="{ background: engineModal.collapse[sec.key] ? '#e8e8ed' : 'rgba(0,0,0,.06)' }" :title="engineModal.collapse[sec.key] ? '展开该组' : '收起该组'">{{ engineModal.collapse[sec.key] ? '▶' : '▼' }}</span>
+                <span class="dbv-secarrow" :style="{ background: engineModal.collapse[sec.key] ? '#e8e8ed' : 'rgba(0,0,0,.06)' }" :title="engineModal.collapse[sec.key] ? t('dv2.expand_group') : t('dv2.collapse_group')">{{ engineModal.collapse[sec.key] ? '▶' : '▼' }}</span>
                 <span class="dbv-sectitle" :style="{ color: sec.color }">{{ sec.title }}</span>
                 <span v-if="engineModal.collapse[sec.key]" class="dbv-seccollapsed">（已折叠）</span>
                 <span class="dbv-seccount">{{ sec.list.length }} 台</span>
@@ -924,7 +924,7 @@
                         <span
                           class="dbv-engtag"
                           :style="{ background: SCOPE_COLORS_ALL[p.engine.scope] || '#999' }"
-                          >{{ SCOPE_LABELS_ALL[p.engine.scope] || p.engine.scope }}</span
+                          >{{ (SCOPE_LABELS_ALL[p.engine.scope] && SCOPE_LABELS_ALL[p.engine.scope]()) || p.engine.scope }}</span
                         >
                       </div>
                       <div class="dbv-prevmeta">
@@ -976,13 +976,13 @@
               :key="'es' + s"
               :class="{ on: engineModal.filterScope === s }"
               @click="engineModal.filterScope = engineModal.filterScope === s ? '' : s"
-              >{{ SCOPE_LABELS_ALL[s] || s }}</span
+              >{{ (SCOPE_LABELS_ALL[s] && SCOPE_LABELS_ALL[s]()) || s }}</span
             >
             <span style="flex: 1"></span>
             <span class="dbv-engclear" @click="engCurIds = []">全不选</span>
           </div>
         </template>
-        <input v-model="engineModal.q" class="dbv-engsearch" placeholder="搜索引擎名称/标签..." />
+        <input v-model="engineModal.q" class="dbv-engsearch" placeholder="t('dv2.engine_search_ph')" />
         <div v-if="engineModal.mode === 'engine'" class="dbv-englist">
           <div
             v-if="!engModalFiltered.length"
@@ -997,7 +997,7 @@
           <template v-for="s in SCOPE_ORDER2" :key="'eg' + s">
             <template v-if="engModalByScope[s]">
               <div class="dbv-enggroup">
-                {{ SCOPE_LABELS_ALL[s] }} ({{ engModalByScope[s].length }})<span
+                {{ SCOPE_LABELS_ALL[s] && SCOPE_LABELS_ALL[s]() }} ({{ engModalByScope[s].length }})<span
                   v-if="s === 'user'"
                   class="dbv-engpersonalhint"
                   >{{ t('engine_personal_scope_hint') }}</span
@@ -1034,7 +1034,7 @@
                     <span
                       class="dbv-engtag"
                       :style="{ background: SCOPE_COLORS_ALL[e.scope] || '#999' }"
-                      >{{ SCOPE_LABELS_ALL[e.scope] || e.scope }}</span
+                      >{{ (SCOPE_LABELS_ALL[e.scope] && SCOPE_LABELS_ALL[e.scope]()) || e.scope }}</span
                     >
                   </div>
                   <div class="dbv-engmeta">
@@ -1092,7 +1092,7 @@
           v-model="revealDlg.password"
           type="password"
           class="dbv-copy-input"
-          placeholder="Grape 密码"
+          placeholder="t('dv2.grape_password')"
           @keyup.enter="submitReveal()"
         />
         <div v-if="revealDlg.error" class="dbv-reveal-err">{{ revealDlg.error }}</div>
@@ -1173,7 +1173,6 @@
 
 <script setup>
 import { providerFromRepoKey } from '../lib/repo-provider.js'
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 
 const G = globalThis
@@ -1232,7 +1231,7 @@ const ENG_TAG_COLORS = {
   sre: '#f59e0b',
 }
 const SCOPE_COLORS_ALL = { global: '#6366f1', user: 'var(--g)', repo: '#f59e0b', local: 'var(--t3)' }
-const SCOPE_LABELS_ALL = { global: '全局', user: '个人', repo: '仓库', local: '本机' }
+const SCOPE_LABELS_ALL = { global: () => t('dv2.scope_global'), user: () => t('dv2.scope_user'), repo: () => t('dv2.scope_repo'), local: () => t('dv2.scope_local') }
 const SCOPE_ORDER2 = ['user', 'repo', 'global', 'local']
 const ENG_SCENE_COLORS = {
   default: '#10b981',
@@ -1471,7 +1470,7 @@ function engSelectorTagLabel(tag) {
   const p = i >= 0 ? s.slice(0, i) : ''
   const v = i >= 0 ? s.slice(i + 1) : s
   if (p === 'engine') return ENG_TYPE_LABELS[v] || v
-  if (p === 'scope') return ({ global: '全局', user: '个人', repo: '仓库', local: '本机' })[v] || v
+  if (p === 'scope') return ({ global: t('dv2.scope_global'), user: t('dv2.scope_user'), repo: t('dv2.scope_repo'), local: t('dv2.scope_local') })[v] || v
   if (p === 'scene') return engSceneDisplayName(v)
   return s
 }
@@ -1516,7 +1515,7 @@ function missReasonDetail(p) {
     ;(byPrefix[p2] = byPrefix[p2] || []).push(String(tt))
   })
   const vals = function (arr) {
-    return arr.map(function (tt) { return engSelectorTagLabel(tt) }).join('、') || '无'
+    return arr.map(function (tt) { return engSelectorTagLabel(tt) }).join('、') || t('dv2.none')
   }
   if (reason === 'selector') {
     const fails = []
@@ -1529,28 +1528,28 @@ function missReasonDetail(p) {
       const hit = (groups[g] || []).some(function (tt) {
         return (tags || []).indexOf(String(tt).toLowerCase()) >= 0
       })
-      if (!hit) fails.push(g + ' 维：要求 ' + vals(groups[g]) + '，该引擎为 ' + vals(byPrefix[g] || []))
+      if (!hit) fails.push(t('dv2.reason_tag_dim') + vals(groups[g]) + t('dv2.reason_tag_have') + vals(byPrefix[g] || []))
     })
-    return '标签不匹配。' + (fails.length ? fails.join('；') : '要求的标签组合无交集')
+    return t('dv2.reason_tag') + (fails.length ? fails.join('；') : t('dv2.reason_tag_nointer'))
   }
   if (reason === 'role') {
-    const roles = e.role_tags && e.role_tags.length ? e.role_tags.join('、') : '未声明（默认不限角色）'
-    return '角色不匹配。当前节点角色 ' + (agentType || '未知') + '；该引擎显式 role_tags = ' + roles
+    const roles = e.role_tags && e.role_tags.length ? e.role_tags.join('、') : t('dv2.no_role_declared')
+    return t('dv2.reason_role') + (agentType || t('dv2.unknown')) + t('dv2.reason_role_decl') + roles
   }
   if (reason === 'offline' || reason === 'stale') {
-    return '健康不达标。引擎状态 ' + (e.status || '未知') + '；本机引擎看 installed+healthy，远端引擎要求 status=online 且 100 秒内有心跳（失联/离线均判为暂不可承接，恢复后自动可接）'
+    return t('dv2.reason_health') + (e.status || t('dv2.unknown')) + t('dv2.reason_health_hint')
   }
   if (reason === 'scope') {
-    return '范围不匹配。SRE 节点只认「个人 / 仓库」档引擎；该引擎为「' + (SCOPE_LABELS_ALL[e.scope] || e.scope) + '」档'
+    return t('dv2.reason_scope') + ((SCOPE_LABELS_ALL[e.scope] && SCOPE_LABELS_ALL[e.scope]()) || e.scope) + t('dv2.reason_scope_suffix')
   }
   if (reason === 'capability') {
-    return '能力不匹配。该引擎能力标签为 ' + vals((e.tags || []).filter(function (tt) { return String(tt).indexOf(':') < 0 })) + '，不含 ' + (agentType || '当前角色') + '也没有 all'
+    return t('dv2.reason_cap') + vals((e.tags || []).filter(function (tt) { return String(tt).indexOf(':') < 0 })) + t('dv2.reason_cap_suffix') + (agentType || t('dv2.cur_role')) + t('dv2.reason_cap_none_all')
   }
   return ''
 }
 // selector 弹窗标签组（三组：engine/scope/scene；scope 选项从派生标签推导——本机直连引擎
 // e.scope='local' 的权威行是 scope:global，按字段筛会漏；场景组按市场注册序，未登记排末尾）
-const SEL_SCOPE_LABELS = { global: '全局', user: '个人', repo: '仓库' }
+const SEL_SCOPE_LABELS = { global: t('dv2.sel_scope_global'), user: t('dv2.sel_scope_user'), repo: t('dv2.sel_scope_repo') }
 const selGroups = computed(function () {
   const vis = engModalVisible.value
   const types = []
@@ -1688,7 +1687,7 @@ const previewSections = computed(function () {
     })
     return ['user', 'repo', 'global', 'local']
       .filter(function (sc) { return groups[sc] && groups[sc].length })
-      .map(function (sc) { return { label: SCOPE_LABELS_ALL[sc] || sc, list: groups[sc] } })
+      .map(function (sc) { return { label: (SCOPE_LABELS_ALL[sc] && SCOPE_LABELS_ALL[sc]()) || sc, list: groups[sc] } })
   }
   return [
     {
@@ -2103,16 +2102,16 @@ function engineBadgeHtml(node) {
     }
     const total = hit + off
     const txt = !selTags.length
-      ? '广播 · ' + total + ' 个引擎 · ' + hit + ' 在线' + (off ? ' · ' + off + ' 离线' : '')
+      ? t('dv2.sum_broadcast', { total: total, hit: hit }) + (off ? t('dv2.sum_offline', { off: off }) : '')
       : total
-        ? '标签命中 ' + total + ' 个引擎 · ' + hit + ' 在线' + (off ? ' · ' + off + ' 离线' : '')
-        : '标签暂无命中引擎'
+        ? t('dv2.sum_tag_hit', { total: total, hit: hit }) + (off ? t('dv2.sum_offline', { off: off }) : '')
+        : t('dv2.sum_zero')
     const labels = selTags.map(engSelectorTagLabel)
     const tip =
-      (selTags.length ? '' : '广播（未选标签，全部引擎）\n') +
-      '命中 ' + hit + ' 台可承接' + (off ? '，' + off + ' 台离线（恢复后可承接）' : '') +
-      (miss ? '，' + miss + ' 台标签/角色/能力不符' : '') +
-      (labels.length ? '\n标签：' + labels.join('、') : '')
+      (selTags.length ? '' : t('dv2.sum_broadcast_note')) +
+      t('dv2.sum_hit_take', { hit: hit }) + (off ? t('dv2.sum_hit_off', { off: off }) : '') +
+      (miss ? t('dv2.sum_hit_miss', { miss: miss }) : '') +
+      (labels.length ? t('dv2.sum_labels') + labels.join('、') : '')
     const color = hit ? '#15803d' : off ? '#b45309' : '#6b7280'
     const bg = hit ? '#f0fdf4' : off ? '#fffbeb' : '#f5f5f7'
     return `<span class="dbv-engbadge" data-selkey="${esc(key)}" style="background:${bg};color:${color}" title="${esc(tip)}">${esc(txt)}</span>`
@@ -2126,14 +2125,14 @@ function engineBadgeHtml(node) {
     if (tag === 'sre') {
       return `<span class="dbv-engbadge gray">${esc(t('sre_engine_required'))}</span>`
     }
-    return `<span class="dbv-engbadge green">${esc(t('broadcast') || '广播')}</span>`
+    return `<span class="dbv-engbadge green">${esc(t('dv2.broadcast_fb'))}</span>`
   }
   if (st.offline > 0) {
     const label =
       st.offline < st.total
         ? t('engine_offline_partial', { total: st.total, offline: st.offline }) ||
           `${st.total} 台引擎 · ${st.offline} 离线`
-        : t('engine_offline_all') || '绑定失效 · 全部离线'
+        : t('engine_offline_all')
     return `<span class="dbv-engbadge red">${esc(label)}</span>`
   }
   return `<span class="dbv-engbadge blue">${esc(t('engine_count', { count: st.total }))}</span>`
@@ -2166,12 +2165,12 @@ const hostBanner = computed(() => {
   if (hs === 'bot_missing')
     return {
       error: true,
-      text: '该项目 grape_bot 未成功加入项目，请手动添加 bot 至项目，或点击「重检修复」自动处理',
-      btn: '重检修复',
+      text: t('dv2.host_bot_missing'),
+      btn: t('dv2.host_recheck'),
     }
   if (hs === 'webhook_missing')
-    return { error: false, text: '项目 webhook 缺失，Grape 无法接收仓库事件', btn: '补建 webhook' }
-  return { error: false, text: '该项目托管流程未完成，Grape 部分功能不可用', btn: '重检修复' }
+    return { error: false, text: t('dv2.host_webhook_missing'), btn: t('dv2.host_build_webhook') }
+  return { error: false, text: t('dv2.host_flow_incomplete'), btn: t('dv2.host_recheck') }
 })
 function repairHost() {
   let owner = ''
@@ -2190,14 +2189,14 @@ function repairHost() {
     .post('/repos/' + owner + '/' + name + '/repair-host', {})
     .then(function (d) {
       if (d && d.status === 'ok') {
-        app().showToast('托管已修复')
+        app().showToast(t('dv2.host_fixed'))
         G.window.location.reload()
       } else {
-        app().showToast((d && d.message) || '修复失败，请稍后手动重试')
+        app().showToast((d && d.message) || t('dv2.host_fix_failed'))
       }
     })
     .catch(function (e) {
-      app().showToast('修复请求失败：' + (e.detail?.message || e.message || '未知错误'))
+      app().showToast(t('dv2.host_fix_req_failed') + (e.detail?.message || e.message || t('dv2.unknown')))
     })
 }
 
@@ -2515,7 +2514,7 @@ function saveCreateScene() {
         app().showToast(
           (e.detail && e.detail.message) ||
             t('skill_scope_mismatch') ||
-            '技能 scope 不匹配，请修正标红节点'
+            t('dv2.skill_scope_fix')
         )
         return
       }
@@ -2543,7 +2542,7 @@ function scopeViolationHint(v) {
   const actual = v.actual_scope || ''
   const expected = v.expected_scope || 'repo'
   return (
-    (t('skill_scope_mismatch') || '技能 scope 不匹配') +
+    t('skill_scope_mismatch') +
     '：' +
     skill +
     '（' +
@@ -2733,9 +2732,9 @@ const skillGroups = computed(() => {
       )
     : skillPanel.skills.slice()
   const groups = [
-    { key: 'official', label: '官方技能' },
-    { key: 'repo', label: '仓库技能' },
-    { key: 'user', label: '个人技能' },
+    { key: 'official', label: t('dv2.skill_official') },
+    { key: 'repo', label: t('dv2.skill_repo') },
+    { key: 'user', label: t('dv2.skill_user') },
   ]
   return groups
     .map(function (g) {
@@ -2879,11 +2878,11 @@ function openEngineModal(agentType) {
         })
         engineDetachHint.value =
           '<div class="dbv-detach">' +
-          '以下引擎因离线超过 8 小时被系统移除：' +
+          t('dv2.stale_removed_prefix') +
           '<b>' +
           esc(uniq.join('、')) +
           '</b>' +
-          '，如需使用请在下方列表重新勾选绑定。' +
+          t('dv2.stale_removed_suffix') +
           '</div>'
       })
       .catch(function () {})
@@ -2966,8 +2965,8 @@ function engStatusColor(st) {
 }
 function engStatusLabel(st) {
   return (
-    { online: t('online'), recently_lost: '失联', offline: '离线', about_to_gc: '待回收' }[st] ||
-    '离线'
+    { online: t('online'), recently_lost: t('dv2.st_recently_lost'), offline: t('dv2.st_offline'), about_to_gc: t('dv2.st_gc') }[st] ||
+    t('dv2.st_offline')
   )
 }
 function confirmEnginePick() {
@@ -3029,7 +3028,7 @@ function loadSceneDetail(sceneId) {
         return s.id === sceneId
       })
       if (!scene) {
-        detailError.value = '场景不存在'
+        detailError.value = t('dv2.scene_not_found')
         return
       }
       const scenePipeline = (scenesData.scenes || []).find(function (s) {
@@ -3184,7 +3183,7 @@ function saveInlineEdit(field) {
         })
     })
     .catch(function (err) {
-      app().showToast('加载场景数据失败: ' + (err.message || ''))
+      app().showToast(t('dv2.load_scene_failed') + (err.message || ''))
     })
 }
 // PR 订阅
@@ -3200,12 +3199,12 @@ function togglePrSubscription() {
       { pr_subscription_enabled: newOn }
     )
     .then(function () {
-      app().showToast(newOn ? 'PR 订阅已开启' : 'PR 订阅已关闭')
+      app().showToast(newOn ? t('dv2.pr_sub_on') : t('dv2.pr_sub_off'))
       if (detail.value) detail.value.pr_subscription_enabled = newOn
     })
     .catch(function (e) {
       detailPrSub.value = !newOn
-      app().showToast('保存失败: ' + (e.detail?.message || e.message))
+      app().showToast(t('dv2.save_failed_prefix') + (e.detail?.message || e.message))
     })
 }
 // 流程编辑
@@ -3337,7 +3336,7 @@ function saveSceneEdit() {
         app().showToast(
           (e.detail && e.detail.message) ||
             t('skill_scope_mismatch') ||
-            '技能 scope 不匹配，请修正标红节点'
+            t('dv2.skill_scope_fix')
         )
         return
       }
@@ -3427,7 +3426,7 @@ function doCopyScene() {
     .then(function (r) {
       copyDlg.open = false
       let msg = t('scene_copied')
-      if (dropped) msg += '（不可用引擎已剔除）'
+      if (dropped) msg += t('dv2.dropped_note')
       app().showToast(msg)
       app().nav('scene-detail-local', r.scene_id)
     })
@@ -3487,7 +3486,7 @@ function cancelDeployUrlEdit() {
 function saveDeployUrl() {
   const v = (deployUrlDraft.value || '').trim()
   if (v && !/^https?:\/\//i.test(v)) {
-    app().showToast('访问地址需以 http:// 或 https:// 开头')
+    app().showToast(t('dv2.url_scheme_invalid'))
     return
   }
   const sceneId = detail.value ? detail.value.id : ''
@@ -3579,7 +3578,7 @@ function loadScenePipePage(sceneId, page) {
     })
 }
 function stageLabel(stage) {
-  const map = { vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE', done: '完成' }
+  const map = { vod: 'VOD', issue: 'Issue', coding: 'Coding', qa: 'QA', sre: 'SRE', done: t('dv2.stage_done') }
   return map[stage] || stage
 }
 function pipeDuration(p) {
@@ -3660,7 +3659,7 @@ function openSceneRecommendModal() {
       recDlg.loaded = true // Issue #487：场景列表就绪前禁用添加/保存，避免空选项静默丢规则
     })
     .catch(function (e) {
-      app().showToast('加载推荐配置失败: ' + (e.message || ''))
+      app().showToast(t('dv2.load_recommend_failed') + (e.message || ''))
     })
 }
 function saveSceneRecommend() {
@@ -3686,7 +3685,7 @@ function saveSceneRecommend() {
       rules: rules,
     })
     .then(function () {
-      app().showToast('智能推荐规则已保存')
+      app().showToast(t('dv2.recommend_saved'))
       recDlg.open = false
     })
     .catch(function (e) {
@@ -3724,7 +3723,7 @@ onMounted(function () {
           loaded.value = true
         })
     } else {
-      loadError.value = '请先选择仓库'
+      loadError.value = t('dv2.pick_repo_first')
       loaded.value = true
     }
   }

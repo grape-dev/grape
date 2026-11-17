@@ -1,5 +1,5 @@
 <template>
-  <div style="padding: 0">
+  <div style="padding: 0" :data-langver="langVer">
     <!-- ============ Provider 详情页 ============ -->
     <div v-if="activeTab === 'providers' && view === 'detail' && selectedProvider">
       <!-- Provider 信息卡片 -->
@@ -10,31 +10,31 @@
             <span
               v-if="selectedProvider.credential_name"
               style="font-size: 10px; font-weight: 400; color: #6d28d9; background: #ede9fe; border-radius: 999px; padding: 1px 8px; margin-left: 8px"
-              :title="isZh ? '来自沙箱凭据 ' + selectedProvider.credential_name : 'From credential ' + selectedProvider.credential_name"
-            >{{ isZh ? '凭据 ' : 'cred ' }}{{ selectedProvider.credential_name }}</span>
+              :title="t('sbx.cred_from_title', { name: selectedProvider.credential_name })"
+            >{{ t('sbx.cred_prefix') }}{{ selectedProvider.credential_name }}</span>
             <span
               v-else
               style="font-size: 10px; font-weight: 400; color: var(--t3); margin-left: 8px"
-              :title="isZh ? '非沙箱凭据生成（手工创建或存量）' : 'Not from a sandbox credential (manual or legacy)'"
-            >{{ isZh ? '手工创建' : 'manual' }}</span>
+              :title="t('sbx.cred_manual_title')"
+            >{{ t('sbx.cred_manual') }}</span>
           </h2>
-          <span v-if="!selectedProvider.enabled" style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #fee2e2; color: #dc2626">{{ isZh ? '已禁用' : 'Disabled' }}</span>
+          <span v-if="!selectedProvider.enabled" style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #fee2e2; color: #dc2626">{{ t('sbx.badge_disabled') }}</span>
           <span style="margin-left: auto; display: inline-flex; gap: 6px">
             <button
               class="bt bt-o bt-s"
-              :title="isZh ? '编辑沙箱平台配置（API Key 留空保留旧值）' : 'Edit platform config (empty API key keeps existing)'"
+              :title="t('sbx.provider_edit_tip')"
               @click="openEditProvider(selectedProvider)"
-            >✏ {{ isZh ? '编辑' : 'Edit' }}</button>
+            >✏ {{ t('sbx.edit') }}</button>
             <button
               class="bt bt-o bt-s"
-              :title="isZh ? '检查平台连通性（endpoint/API key 可达性）' : 'Check platform connectivity'"
+              :title="t('sbx.provider_check_tip')"
               @click="healthCheck(selectedProvider)"
-            >🩺 {{ isZh ? '检查' : 'Check' }}</button>
+            >🩺 {{ t('sbx.check') }}</button>
             <button
               class="bt bt-o bt-s"
-              :title="selectedProvider.enabled ? (isZh ? '禁用该沙箱平台（现有沙箱不受影响，不再新建；worker 约 1 分钟收敛）' : 'Disable platform (existing sandboxes unaffected, no new creates; workers converge in ~1 min)') : (isZh ? '启用该沙箱平台' : 'Enable platform')"
+              :title="selectedProvider.enabled ? (t('sbx.provider_disable_tip')) : (t('sbx.provider_enable_tip'))"
               @click="toggleProvider(selectedProvider)"
-            >{{ selectedProvider.enabled ? '⏸ ' + (isZh ? '禁用' : 'Disable') : '▶ ' + (isZh ? '启用' : 'Enable') }}</button>
+            >{{ selectedProvider.enabled ? '⏸ ' + (t('sbx.disable')) : '▶ ' + (t('sbx.enable')) }}</button>
           </span>
         </div>
         <!-- 健康检查结果位 -->
@@ -43,13 +43,13 @@
           style="font-size: 11px; margin-bottom: 10px; padding: 5px 10px; border-radius: 6px"
           :style="healthResults[selectedProvider.id].loading ? 'background:var(--bg);color:var(--t3)' : (healthResults[selectedProvider.id].healthy ? 'background:#dcfce7;color:#166534' : 'background:#fee2e2;color:#dc2626')"
         >
-          {{ healthResults[selectedProvider.id].loading ? (isZh ? '检查中…' : 'Checking…') : (healthResults[selectedProvider.id].healthy ? (isZh ? '✓ 平台可达' : '✓ Platform reachable') : '✗ ' + (healthResults[selectedProvider.id].reason || (isZh ? '不可达' : 'unreachable'))) }}
+          {{ healthResults[selectedProvider.id].loading ? (t('sbx.checking')) : (healthResults[selectedProvider.id].healthy ? (t('sbx.reachable')) : '✗ ' + (healthResults[selectedProvider.id].reason || (t('sbx.unreachable')))) }}
         </div>
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; font-size: 12px">
           <div :title="selectedProvider.platform"><span style="color: var(--t3)">Platform:</span> {{ selectedProvider.platform }}</div>
           <div :title="selectedProvider.endpoint"><span style="color: var(--t3)">API URL:</span> <span class="mono">{{ truncate(selectedProvider.endpoint, 30) }}</span></div>
-          <div :title="selectedProvider.scope"><span style="color: var(--t3)">Scope:</span> {{ selectedProvider.scope === 'global' ? (isZh ? '全局（凭据）' : 'global (credential)') : (selectedProvider.scope === 'repo' ? (isZh ? '仓库（凭据）' : 'repo (credential)') : (isZh ? '个人（凭据）' : 'user (credential)')) }}</div>
-          <div v-if="selectedProvider.scope === 'repo' && selectedProvider.repo_key" :title="selectedProvider.repo_key"><span style="color: var(--t3)">{{ isZh ? '绑定仓库' : 'Repo' }}:</span> {{ truncate(selectedProvider.repo_key, 30) }}</div>
+          <div :title="selectedProvider.scope"><span style="color: var(--t3)">Scope:</span> {{ selectedProvider.scope === 'global' ? (t('sbx.scope_global')) : (selectedProvider.scope === 'repo' ? (t('sbx.scope_repo')) : (t('sbx.scope_user'))) }}</div>
+          <div v-if="selectedProvider.scope === 'repo' && selectedProvider.repo_key" :title="selectedProvider.repo_key"><span style="color: var(--t3)">{{ t('sbx.repo_col') }}:</span> {{ truncate(selectedProvider.repo_key, 30) }}</div>
           <div :title="String(selectedProvider.max_sandboxes || 10)"><span style="color: var(--t3)">Max Sandboxes:</span> {{ selectedProvider.max_sandboxes || 10 }}</div>
           <!-- 动态展示平台特有字段 -->
           <template v-for="group in getProviderSchema(selectedProvider.platform).groups" :key="group.title">
@@ -60,77 +60,76 @@
           </template>
         </div>
         <div style="margin-top: 10px">
-          <button class="bt bt-o bt-s" style="font-size: 10px" @click="viewSandboxes(selectedProvider.id)">📦 {{ isZh ? '查看沙箱实例' : 'View Sandboxes' }}</button>
+          <button class="bt bt-o bt-s" style="font-size: 10px" @click="viewSandboxes(selectedProvider.id)">📦 {{ t('sbx.view_sandboxes') }}</button>
         </div>
       </div>
 
       <!-- 模板列表 -->
       <div class="apple-card" style="padding: 16px">
         <div class="cd-h" style="justify-content: space-between; margin-bottom: 12px">
-          <h2 style="font-size: 14px; font-weight: 600">📋 {{ isZh ? '引擎模板' : 'Engine Templates' }}</h2>
+          <h2 style="font-size: 14px; font-weight: 600">📋 {{ t('sbx.engine_templates') }}</h2>
           <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
             <div
               style="padding: 4px 10px; border-radius: 6px; font-size: 11px"
               :style="llmCredReady === false ? 'background:#fef3c7;color:#92400e' : 'background:var(--bg);color:var(--t3)'"
-              :title="isZh ? '模型凭据按平台凭据级别路由：全局/仓库级→仓库设置，个人级→用户设置' : 'Model credentials route by credential scope: global/repo → repo settings, user → user settings'"
+              :title="t('sbx.llm_route_hint')"
             >
-              <template v-if="isZh">🤖 模型凭据取自：{{ llmCredSourceLabel }}{{ llmCredReady === false ? ' —— ⚠ 未配置，任务将无法执行' : '' }}<a v-if="llmCredReady === false" :href="(selectedProvider.scope === 'user') ? '#account/llm' : '#settings/llm'" style="color: var(--a); margin-left: 6px" title="前往配置">去配置 ↗</a></template>
-              <template v-else>🤖 Model credentials from: {{ llmCredSourceLabelEn }}{{ llmCredReady === false ? ' — ⚠ not configured, tasks will fail' : '' }}</template>
+              <template>🤖 {{ t('sbx.llm_from') }}{{ llmCredSourceLabel }}{{ llmCredReady === false ? t('sbx.llm_not_ready') : '' }}<a v-if="llmCredReady === false" :href="(selectedProvider.scope === 'user') ? '#account/llm' : '#settings/llm'" style="color: var(--a); margin-left: 6px" :title="t('sbx.go_config')">{{ t('sbx.go_config') }} ↗</a></template>
             </div>
             <button
               v-if="scanCapable !== false"
               class="bt bt-o bt-s"
               style="font-size: 10px"
               :disabled="scanningTemplates"
-              :title="isZh ? '自动扫描平台侧模板，有效且未登记的直接导入' : 'Auto-scan platform templates and import valid new ones'"
+              :title="t('sbx.scan_tip')"
               @click="scanTemplates"
-            >{{ scanningTemplates ? (isZh ? '扫描中…' : 'Scanning…') : '🔍 ' + (isZh ? '扫描模板' : 'Scan') }}</button>
+            >{{ scanningTemplates ? (t('sbx.scanning')) : '🔍 ' + (t('sbx.scan_btn')) }}</button>
             <button
               v-else
               class="bt bt-o bt-s"
               style="font-size: 10px"
               disabled
-              :title="isZh ? '该平台不支持模板扫描（能力声明缺失）' : 'This platform does not support template scanning (capability not declared)'"
-            >🔍 {{ isZh ? '扫描模板' : 'Scan' }}</button>
+              :title="t('sbx.scan_unsupported')"
+            >🔍 {{ t('sbx.scan_btn') }}</button>
           </div>
         </div>
-        <div v-if="templateLoading" class="tx t2" style="padding: 16px; text-align: center">{{ isZh ? '加载中...' : 'Loading...' }}</div>
-        <div v-else-if="templates.length === 0" class="tx t2" style="padding: 16px; text-align: center">{{ isZh ? '暂无模板' : 'No templates' }}</div>
+        <div v-if="templateLoading" class="tx t2" style="padding: 16px; text-align: center">{{ t('sbx.loading') }}</div>
+        <div v-else-if="templates.length === 0" class="tx t2" style="padding: 16px; text-align: center">{{ t('empty.no_templates') }}</div>
         <div v-else style="overflow-x: auto">
           <table style="width: 100%; font-size: 11px; border-collapse: collapse">
             <thead>
               <tr style="border-bottom: 2px solid var(--b); text-align: left">
-                <th style="padding: 8px">{{ isZh ? '名称' : 'Name' }}</th>
+                <th style="padding: 8px">{{ t('sbx.name') }}</th>
                 <th style="padding: 8px">Template ID</th>
                 <th style="padding: 8px">Alias</th>
-                <th style="padding: 8px">{{ isZh ? '描述' : 'Description' }}</th>
-                <th style="padding: 8px">{{ isZh ? '引擎' : 'Engines' }}</th>
+                <th style="padding: 8px">{{ t('sbx.description') }}</th>
+                <th style="padding: 8px">{{ t('sbx.engines') }}</th>
                 <th style="padding: 8px">Preinstalled</th>
                 <th style="padding: 8px">Disk MB</th>
-                <th style="padding: 8px">{{ isZh ? '启用' : 'Enabled' }}</th>
+                <th style="padding: 8px">{{ t('sbx.status_enabled') }}</th>
                 <th style="padding: 8px">Last Check</th>
-                <th style="padding: 8px">{{ isZh ? '操作' : 'Actions' }}</th>
+                <th style="padding: 8px">{{ t('sbx.actions') }}</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="t in templates" :key="t.id" style="border-bottom: 1px solid var(--b)">
-                <td style="padding: 8px; font-weight: 600" :title="t.name">{{ t.name }} <span style="font-size: 9px; color: var(--t3); font-weight: 400" :title="isZh ? '模板 DB ID（不可变，引擎名第四段锚定用）' : 'Template DB ID (immutable; anchors engine name segment)'">#{{ t.id }}</span></td>
-                <td style="padding: 8px; font-family: monospace; font-size: 10px" :title="t.template_id">{{ truncate(t.template_id, 18) }}</td>
-                <td style="padding: 8px" :title="t.alias || '—'">{{ t.alias || '—' }}</td>
-                <td style="padding: 8px; font-size: 10px; max-width: 120px; overflow: hidden; text-overflow: ellipsis" :title="t.description">{{ truncate(t.description, 20) }}</td>
+              <tr v-for="tpl in templates" :key="tpl.id" style="border-bottom: 1px solid var(--b)">
+                <td style="padding: 8px; font-weight: 600" :title="tpl.name">{{ tpl.name }} <span style="font-size: 9px; color: var(--t3); font-weight: 400" :title="t('sbx.tpl_dbid_tip')">#{{ tpl.id }}</span></td>
+                <td style="padding: 8px; font-family: monospace; font-size: 10px" :title="tpl.template_id">{{ truncate(tpl.template_id, 18) }}</td>
+                <td style="padding: 8px" :title="tpl.alias || '—'">{{ tpl.alias || '—' }}</td>
+                <td style="padding: 8px; font-size: 10px; max-width: 120px; overflow: hidden; text-overflow: ellipsis" :title="tpl.description">{{ truncate(tpl.description, 20) }}</td>
                 <td style="padding: 8px">
-                  <span v-if="parseEngines(t) !== '—'" style="padding: 2px 6px; border-radius: 4px; background: #eef; border: 1px solid #ccd; font-size: 10px">{{ parseEngines(t) }}</span>
+                  <span v-if="parseEngines(tpl) !== '—'" style="padding: 2px 6px; border-radius: 4px; background: #eef; border: 1px solid #ccd; font-size: 10px">{{ parseEngines(tpl) }}</span>
                   <span v-else style="color: var(--t3); font-size: 10px">—</span>
                 </td>
-                <td style="padding: 8px; font-size: 10px; max-width: 100px; overflow: hidden; text-overflow: ellipsis" :title="t.preinstalled">{{ truncate(t.preinstalled, 15) }}</td>
-                <td style="padding: 8px">{{ t.disk_size_mb || 0 }}</td>
-                <td style="padding: 8px"><span :style="{ color: t.enabled ? '#16a34a' : '#dc2626' }">{{ t.enabled ? '✅' : '❌' }}</span></td>
-                <td style="padding: 8px; font-size: 10px; color: var(--t3)">{{ t.last_check_status || '—' }}</td>
+                <td style="padding: 8px; font-size: 10px; max-width: 100px; overflow: hidden; text-overflow: ellipsis" :title="tpl.preinstalled">{{ truncate(tpl.preinstalled, 15) }}</td>
+                <td style="padding: 8px">{{ tpl.disk_size_mb || 0 }}</td>
+                <td style="padding: 8px"><span :style="{ color: tpl.enabled ? '#16a34a' : '#dc2626' }">{{ tpl.enabled ? '✅' : '❌' }}</span></td>
+                <td style="padding: 8px; font-size: 10px; color: var(--t3)">{{ tpl.last_check_status || '—' }}</td>
                 <td style="padding: 8px; display: flex; gap: 3px; flex-wrap: wrap">
-                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px" :title="isZh ? '编辑模板配置（含引擎）' : 'Edit template config (incl. engines)'" @click="openEditTemplate(t)">✏ {{ isZh ? '编辑' : 'Edit' }}</button>
-                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px" :title="t.enabled ? (isZh ? '禁用该模板（绑定引擎将下线，不再建箱）' : 'Disable template (bound engines go offline, no new sandboxes)') : (isZh ? '启用该模板（绑定引擎重新注册）' : 'Enable template (bound engines re-register)')" @click="toggleTemplate(t)">{{ t.enabled ? '⏸ ' + (isZh ? '禁用' : 'Disable') : '▶ ' + (isZh ? '启用' : 'Enable') }}</button>
-                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px" :title="isZh ? '手动检查：真实建箱+销毁验证模板可用性' : 'Manual check: real create+kill to verify template'" :disabled="checkingTemplateId === t.id" @click="checkTemplate(t)">{{ checkingTemplateId === t.id ? (isZh ? '检查中…' : 'Checking…') : '🏥 ' + (isZh ? '检查' : 'Check') }}</button>
-                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px; color: #dc2626" :title="isZh ? '删除该模板' : 'Delete this template'" @click="deleteTemplate(t)">🗑 {{ isZh ? '删除' : 'Delete' }}</button>
+                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px" :title="t('sbx.tpl_edit_tip')" @click="openEditTemplate(tpl)">✏ {{ t('sbx.edit') }}</button>
+                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px" :title="tpl.enabled ? (t('sbx.tpl_disable_tip')) : (t('sbx.tpl_enable_tip'))" @click="toggleTemplate(tpl)">{{ tpl.enabled ? '⏸ ' + (t('sbx.disable')) : '▶ ' + (t('sbx.enable')) }}</button>
+                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px" :title="t('sbx.tpl_check_tip')" :disabled="checkingTemplateId === tpl.id" @click="checkTemplate(tpl)">{{ checkingTemplateId === tpl.id ? (t('sbx.checking')) : '🏥 ' + (t('sbx.check')) }}</button>
+                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px; color: #dc2626" :title="t('sbx.tpl_delete_tip')" @click="deleteTemplate(tpl)">🗑 {{ t('sbx.delete') }}</button>
                 </td>
               </tr>
             </tbody>
@@ -142,15 +141,15 @@
     <!-- ============ 弹窗：新增/编辑 Provider ============ -->
     <div v-if="showProviderDialog" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.4); display: flex; align-items: center; justify-content: center; z-index: 9999" @click.self="showProviderDialog = false">
       <div class="apple-card" style="padding: 24px; width: 440px; max-width: 90vw; max-height: 85vh; overflow-y: auto">
-        <h2 style="font-size: 15px; margin-bottom: 16px">{{ editingProvider ? (isZh ? '编辑沙箱平台' : 'Edit Platform') : (isZh ? '新增沙箱平台' : 'Add Platform') }}</h2>
+        <h2 style="font-size: 15px; margin-bottom: 16px">{{ editingProvider ? (t('sbx.dialog_edit_title')) : (t('sbx.dialog_add_title')) }}</h2>
         <div style="margin-bottom: 10px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ isZh ? '名称' : 'Name' }}</label>
+          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('sbx.name') }}</label>
           <!-- Provider 名=凭据名（Worker 设备页改凭据名全链跟随），编辑态只读展示 -->
           <input
             v-model="providerForm.name"
             style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px; color: var(--t3); cursor: not-allowed"
             disabled
-            :title="isZh ? 'Provider 名跟随凭据名——在 Worker 设备页修改凭据名即可（引擎名约 1 分钟内跟随）' : 'Provider name follows the credential name (rename on Workers page; engine names follow in ~1 min)'"
+            :title="t('sbx.provider_name_hint')"
           >
         </div>
         <div style="margin-bottom: 10px">
@@ -164,14 +163,14 @@
           <input v-model="providerForm.endpoint" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px" placeholder="https://cube.example.com">
         </div>
         <div style="margin-bottom: 10px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">API Key {{ editingProvider ? '(' + (isZh ? '留空保留旧值' : 'empty=keep') + ')' : '' }}</label>
+          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">API Key {{ editingProvider ? '(' + (t('sbx.keep_empty')) + ')' : '' }}</label>
           <input v-model="providerForm.api_key" type="password" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px">
         </div>
         <div style="margin-bottom: 10px">
           <!-- 级别只读展示——范围在凭据上改（重新生成凭据），平台编辑只管接入配置 -->
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ isZh ? '级别（跟随凭据，不可在此修改）' : 'Scope (follows credential, read-only)' }}</label>
-          <div style="padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--bg); font-size: 12px; color: var(--t3)" :title="isZh ? 'Provider 的范围由关联凭据决定：如需变更全局/仓库/个人，请重新生成对应级别的凭据' : 'Provider scope follows its credential; regenerate a credential at the desired level to change it'">
-            {{ providerForm.scope_level === 'global' ? (isZh ? '全局（凭据）' : 'Global (credential)') : providerForm.scope_level === 'repo' ? (isZh ? '仓库级（凭据）' : 'Repo (credential)') : (isZh ? '个人级（凭据）' : 'User (credential)') }}
+          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('sbx.scope_ro_label') }}</label>
+          <div style="padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--bg); font-size: 12px; color: var(--t3)" :title="t('sbx.scope_hint')">
+            {{ providerForm.scope_level === 'global' ? (t('sbx.scope_global_label')) : providerForm.scope_level === 'repo' ? (t('sbx.scope_repo_label')) : (t('sbx.scope_user_label')) }}
           </div>
         </div>
         <div style="margin-bottom: 10px">
@@ -216,8 +215,8 @@
           </div>
         </div>
         <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px">
-          <button class="bt bt-o bt-s" @click="showProviderDialog = false">{{ isZh ? '取消' : 'Cancel' }}</button>
-          <button class="bt bt-o bt-s" style="background: var(--a); color: #fff; border-color: var(--a)" @click="saveProvider">{{ isZh ? '保存' : 'Save' }}</button>
+          <button class="bt bt-o bt-s" @click="showProviderDialog = false">{{ t('sbx.cancel') }}</button>
+          <button class="bt bt-o bt-s" style="background: var(--a); color: #fff; border-color: var(--a)" @click="saveProvider">{{ t('sbx.save') }}</button>
         </div>
       </div>
     </div>
@@ -225,12 +224,12 @@
     <!-- ============ 弹窗：沙箱启动失败原因 ============ -->
     <div v-if="sandboxErrorModal.visible" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.4); display: flex; align-items: center; justify-content: center; z-index: 9999" @click.self="sandboxErrorModal.visible = false">
       <div style="background: var(--c); border-radius: 14px; padding: 20px; max-width: 560px; width: 90%; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15)">
-        <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 4px">{{ isZh ? '沙箱启动失败原因' : 'Sandbox Setup Error' }}</h3>
+        <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 4px">{{ t('sbx.setup_error_title') }}</h3>
         <div style="font-size: 10px; color: var(--t3); font-family: monospace; margin-bottom: 10px; word-break: break-all" :title="sandboxErrorModal.sandboxId">{{ sandboxErrorModal.sandboxId }}</div>
         <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #b91c1c; line-height: 1.6; max-height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; user-select: text">{{ sandboxErrorModal.error }}</div>
         <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px">
-          <button class="bt bt-o bt-s" @click="copySandboxError()">📋 {{ isZh ? '复制' : 'Copy' }}</button>
-          <button class="bt bt-p bt-s" @click="sandboxErrorModal.visible = false">{{ isZh ? '关闭' : 'Close' }}</button>
+          <button class="bt bt-o bt-s" @click="copySandboxError()">📋 {{ t('sbx.copy') }}</button>
+          <button class="bt bt-p bt-s" @click="sandboxErrorModal.visible = false">{{ t('sbx.close') }}</button>
         </div>
       </div>
     </div>
@@ -238,12 +237,12 @@
     <!-- ============ 弹窗：新增/编辑模板 ============ -->
     <div v-if="showTemplateDialog" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.4); display: flex; align-items: center; justify-content: center; z-index: 9999; padding: 20px" @click.self="showTemplateDialog = false">
       <div class="apple-card" style="padding: 24px; width: 400px; max-width: 90vw; max-height: calc(100vh - 40px); overflow-y: auto">
-        <h2 style="font-size: 14px; margin-bottom: 12px">{{ editingTemplate ? (isZh ? '编辑模板' : 'Edit Template') : (isZh ? '新增模板' : 'Add Template') }}</h2>
-        <div v-if="editingTemplate" style="font-size: 10px; color: #92400e; background: #fef3c7; border: 1px solid #fde68a; border-radius: 6px; padding: 6px 10px; margin-bottom: 12px; line-height: 1.6" :title="isZh ? '模板改名后引擎名随之变化（约 1 分钟内生效）' : 'Engine names follow the template name after rename (~1 min)'">
-          ⚠ {{ isZh ? '修改名称会同步变更引擎名（如 hermes:旧名:… → hermes:新名:…，约 1 分钟生效）；引擎身份不变，已绑定的场景/Agent 无需改绑；Template ID 与引擎绑定关系不受影响。' : 'Renaming changes engine names (e.g. hermes:old:… → hermes:new:…, effective in ~1 min). Engine identity is unchanged — bound scenes/agents need no rebinding. Template ID and engine bindings are unaffected.' }}
+        <h2 style="font-size: 14px; margin-bottom: 12px">{{ editingTemplate ? (t('sbx.tpl_edit')) : (t('sbx.tpl_add')) }}</h2>
+        <div v-if="editingTemplate" style="font-size: 10px; color: #92400e; background: #fef3c7; border: 1px solid #fde68a; border-radius: 6px; padding: 6px 10px; margin-bottom: 12px; line-height: 1.6" :title="t('sbx.tpl_rename_hint')">
+          ⚠ {{ t('sbx.tpl_rename_full') }}
         </div>
         <div style="margin-bottom: 8px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ isZh ? '名称' : 'Name' }}</label>
+          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('sbx.name') }}</label>
           <input v-model="templateForm.name" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px">
         </div>
         <div style="margin-bottom: 8px">
@@ -253,7 +252,7 @@
             :disabled="!!editingTemplate"
             style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px"
             :style="editingTemplate ? 'color:var(--t3);cursor:not-allowed;background:var(--bg)' : ''"
-            :title="editingTemplate ? (isZh ? 'Template ID 创建后不可修改' : 'Template ID is immutable after creation') : ''"
+            :title="editingTemplate ? (t('sbx.tplid_immutable')) : ''"
           >
         </div>
         <div style="margin-bottom: 8px">
@@ -261,7 +260,7 @@
           <input v-model="templateForm.alias" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px">
         </div>
         <div style="margin-bottom: 8px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ isZh ? '描述' : 'Description' }}</label>
+          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('sbx.description') }}</label>
           <input v-model="templateForm.description" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px">
         </div>
         <div style="margin-bottom: 8px">
@@ -273,11 +272,11 @@
           <input v-model="templateForm.preinstalled" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 12px; font-family: monospace" placeholder='{"python":"3.14","git":"2.39.5"}'>
         </div>
         <div style="margin-bottom: 8px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ isZh ? '引擎' : 'Engines' }}</label>
+          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('sbx.engines') }}</label>
           <div v-if="availableEngines.length" style="border: 1px solid var(--b); border-radius: 8px; overflow: hidden">
             <div style="display: grid; grid-template-columns: 1fr 88px 88px; padding: 5px 12px; background: var(--bg); font-size: 10px; color: var(--t3); border-bottom: 1px solid var(--b)">
               <span></span>
-              <span style="text-align: center">{{ isZh ? '绑定引擎（模板已预装）' : 'Bind (preinstalled)' }}</span>
+              <span style="text-align: center">{{ t('sbx.bind_header') }}</span>
             </div>
             <div
               v-for="e in availableEngines"
@@ -286,17 +285,17 @@
               :style="templateForm.engines[e.engine_type] ? '' : 'color:var(--t3)'"
             >
               <span :style="templateForm.engines[e.engine_type] ? 'color:var(--t1)' : 'color:var(--t3)'">{{ e.engine_type }}</span>
-              <span style="text-align: center" :title="isZh ? '绑定该引擎：模板镜像须已预装它（云沙箱不支持建箱时安装，未预装会在建箱时报错）' : 'Bind engine: image must preinstall it (cloud sandboxes do not auto-install; missing engine fails at create)'">
+              <span style="text-align: center" :title="t('sbx.bind_tip')">
                 <input type="checkbox" :checked="!!templateForm.engines[e.engine_type]" @change="toggleEngineMode(e.engine_type, 'preinstalled')" style="accent-color: var(--a); cursor: pointer">
               </span>
             </div>
           </div>
-          <div v-else style="font-size: 11px; color: var(--t3)">{{ isZh ? '加载引擎列表中…' : 'Loading engines…' }}</div>
-          <div style="font-size: 10px; color: var(--t3); margin-top: 4px; line-height: 1.5">{{ isZh ? '勾选 = 该模板绑定此引擎（模板镜像须已预装；云沙箱不支持建箱时安装）。不勾 = 不绑定（名字灰色）。' : 'Checked = bind engine to this template (image must preinstall it; cloud sandboxes do not auto-install on create). Unchecked = not bound (grey name).' }}</div>
+          <div v-else style="font-size: 11px; color: var(--t3)">{{ t('sbx.loading_engines') }}</div>
+          <div style="font-size: 10px; color: var(--t3); margin-top: 4px; line-height: 1.5">{{ t('sbx.bind_full_hint') }}</div>
         </div>
         <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px">
-          <button class="bt bt-o bt-s" @click="showTemplateDialog = false">{{ isZh ? '取消' : 'Cancel' }}</button>
-          <button class="bt bt-o bt-s" style="background: var(--a); color: #fff; border-color: var(--a)" @click="saveTemplate">{{ isZh ? '保存' : 'Save' }}</button>
+          <button class="bt bt-o bt-s" @click="showTemplateDialog = false">{{ t('sbx.cancel') }}</button>
+          <button class="bt bt-o bt-s" style="background: var(--a); color: #fff; border-color: var(--a)" @click="saveTemplate">{{ t('sbx.save') }}</button>
         </div>
       </div>
     </div>
@@ -316,6 +315,7 @@ export default {
       activeTab: 'providers',
       view: 'list', // list | detail（列表视图已按 2026-10-30 裁定移除，仅深链/单 Provider 落详情）
       isZh: typeof G.I18N !== 'undefined' && G.I18N && G.I18N.getLang ? G.I18N.getLang() === 'zh' : true,
+      langVer: 0, // 语言切换重渲染锚（setLang 就位后派发 grape:langchange）
       platforms: [],
       providers: [],
       providerLoading: false,
@@ -355,11 +355,7 @@ export default {
     // [repo-llm-credential] 凭据来源标签（按 Provider 关联凭据 scope——列表输出已 JOIN）
     llmCredSourceLabel() {
       const sc = (this.selectedProvider && this.selectedProvider.scope) || ''
-      return sc === 'global' ? '仓库设置（全局平台）' : sc === 'repo' ? '仓库设置（仓库级平台）' : '用户设置（个人级平台）'
-    },
-    llmCredSourceLabelEn() {
-      const sc = (this.selectedProvider && this.selectedProvider.scope) || ''
-      return sc === 'global' ? 'repo settings (global platform)' : sc === 'repo' ? 'repo settings (repo-level platform)' : 'user settings (personal platform)'
+      return this.t(sc === 'global' ? 'sbx.src_global' : sc === 'repo' ? 'sbx.src_repo' : 'sbx.src_user')
     },
     currentPlatformSchema() {
       const p = (this.platforms || []).find((x) => x.platform === this.providerForm.platform)
@@ -389,10 +385,19 @@ export default {
       G._sbHashListener = true
       G.addEventListener('hashchange', () => this._maybeDeepLink())
     }
+    if (!G._sbLangListener) {
+      G._sbLangListener = true
+      // G-18 词条化后文案走 t()：切换语言需触发整组件重渲染（模板读 langVer 锚）
+      G.addEventListener('grape:langchange', () => {
+        this.isZh = G.I18N && G.I18N.getLang ? G.I18N.getLang() === 'zh' : true
+        this.langVer += 1
+      })
+    }
   },
   methods: {
-    t(key) {
-      return G.I18N && G.I18N.t ? G.I18N.t(key) || key : key
+    t(key, vars) {
+      // i18n pack 按模块名分层（shell/locales/<lang>/sandbox.json → 'sandbox.'），同 ObservabilityView 的 observability. 前缀模式
+      return G.I18N && G.I18N.t ? G.I18N.t('sandbox.' + key, vars) || G.I18N.t(key, vars) || key : key
     },
     async loadPlatforms() {
       try {
@@ -567,7 +572,7 @@ export default {
     },
     async saveProvider() {
       if (!this.providerForm.name || !this.providerForm.endpoint) {
-        alert(this.isZh ? '名称和 endpoint 不能为空' : 'Name and endpoint are required')
+        alert(this.t('sbx.name_endpoint_required'))
         return
       }
       // 前端必填校验
@@ -576,7 +581,7 @@ export default {
         for (let fi = 0; fi < (schema.groups[gi].fields || []).length; fi++) {
           const f = schema.groups[gi].fields[fi]
           if (f.required && (!this.providerForm[f.name] || this.providerForm[f.name] === '')) {
-            alert((this.isZh ? '必填项不能为空：' : 'Required: ') + (f.label || f.name))
+            alert((this.t('sbx.required_prefix')) + (f.label || f.name))
             return
           }
         }
@@ -608,8 +613,8 @@ export default {
         this.showProviderDialog = false
         if (G.app) {
           G.app.showToast(this.editingProvider
-            ? this.isZh ? '沙箱平台已更新（worker 约 1 分钟内使用最新配置）' : 'Platform updated (workers pick up new config in ~1 min)'
-            : this.isZh ? '沙箱平台已创建。下一步：扫描模板并绑定引擎后即可使用' : 'Platform created. Next: scan templates and bind engines to use it')
+            ? this.t('sbx.platform_updated')
+            : this.t('sbx.platform_created'))
         }
         await this.loadProviders()
       } catch (e) {
@@ -698,7 +703,7 @@ export default {
     },
     async saveTemplate() {
       if (!this.templateForm.name || !this.templateForm.template_id) {
-        alert(this.isZh ? '名称和模板 ID 不能为空' : 'Name and template ID are required')
+        alert(this.t('sbx.name_tplid_required'))
         return
       }
       try {
@@ -725,7 +730,7 @@ export default {
               try {
                 await G.API.post('/settings/sandbox-templates/' + tid + '/bind-engine', { engine_type: want[wi] })
               } catch (e) {
-                if (G.app) G.app.showToast((this.isZh ? '引擎 ' : 'Engine ') + want[wi] + (this.isZh ? ' 绑定失败：' : ' bind failed: ') + (e.message || e), '', 6000)
+                if (G.app) G.app.showToast((this.t('sbx.engine_prefix')) + want[wi] + (this.t('sbx.bind_failed_suffix')) + (e.message || e), '', 6000)
                 else alert(e.message || e)
               }
             }
@@ -735,7 +740,7 @@ export default {
               try {
                 await G.API.del('/settings/sandbox-templates/' + tid + '/bind-engine/' + have[hi])
               } catch (e) {
-                if (G.app) G.app.showToast((this.isZh ? '引擎 ' : 'Engine ') + have[hi] + (this.isZh ? ' 解绑失败：' : ' unbind failed: ') + (e.message || e), '', 6000)
+                if (G.app) G.app.showToast((this.t('sbx.engine_prefix')) + have[hi] + (this.t('sbx.unbind_failed_suffix')) + (e.message || e), '', 6000)
                 else alert(e.message || e)
               }
             }
@@ -748,7 +753,7 @@ export default {
       }
     },
     async deleteTemplate(t) {
-      if (!confirm(this.isZh ? '确认删除模板？' : 'Delete template?')) return
+      if (!confirm(this.t('sbx.confirm_delete_tpl'))) return
       try {
         await G.API.del('/settings/sandbox-templates/' + t.id)
         await this.loadTemplates(this.selectedProvider.id)
@@ -758,12 +763,12 @@ export default {
     },
     // ===== 沙箱错误查看 =====
     openSandboxError(s) {
-      this.sandboxErrorModal = { visible: true, sandboxId: s.sandbox_id, error: s.last_error || (this.isZh ? '（无失败原因记录）' : '(no error recorded)') }
+      this.sandboxErrorModal = { visible: true, sandboxId: s.sandbox_id, error: s.last_error || (this.t('sbx.no_error_recorded')) }
     },
     copySandboxError() {
       const text = this.sandboxErrorModal.error
       const _toast = () => {
-        if (G.app) G.app.showToast(this.isZh ? '失败原因已复制' : 'Error copied')
+        if (G.app) G.app.showToast(this.t('sbx.error_copied'))
       }
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).then(_toast).catch(() => this._copyFallback(text, _toast))
@@ -787,10 +792,10 @@ export default {
       this.scanningTemplates = true
       try {
         const d = await G.API.post('/settings/sandbox-providers/' + this.selectedProvider.id + '/scan-templates')
-        const msg = (this.isZh ? '扫描完成：发现有效模板 ' : 'Scan done: ') + (d.valid != null ? d.valid : 0) +
-          (this.isZh ? ' 个，已绑定 ' : ' valid, ') + (d.existing != null ? d.existing : 0) +
-          (this.isZh ? ' 个，新增绑定 ' : ' existing, newly added ') + (d.added != null ? d.added : 0) +
-          (this.isZh ? ' 个' : '')
+        const msg = (this.t('sbx.scan_done_prefix')) + (d.valid != null ? d.valid : 0) +
+          (this.t('sbx.scan_valid_mid')) + (d.existing != null ? d.existing : 0) +
+          (this.t('sbx.scan_added_mid')) + (d.added != null ? d.added : 0) +
+          (this.t('sbx.count_suffix'))
         alert(msg)
         await this.loadTemplates(this.selectedProvider.id)
       } catch (e) {
@@ -805,8 +810,8 @@ export default {
         const d = await G.API.post('/settings/sandbox-templates/' + t.id + '/check')
         t.last_check_status = d.status || 'error'
         t.last_check_error = d.error || ''
-        if (d.status === 'ok') alert(this.isZh ? '检查通过：模板可在平台侧正常创建沙箱' : 'Check passed: template can create sandbox on platform')
-        else alert((this.isZh ? '检查失败：' : 'Check failed: ') + (d.status || '') + (d.error ? ' — ' + d.error : ''))
+        if (d.status === 'ok') alert(this.t('sbx.check_passed'))
+        else alert((this.t('sbx.check_failed_prefix')) + (d.status || '') + (d.error ? ' — ' + d.error : ''))
         await this.loadTemplates(this.selectedProvider.id)
       } catch (e) {
         this._handleError(e)
