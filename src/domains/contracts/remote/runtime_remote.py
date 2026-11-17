@@ -128,3 +128,20 @@ class RuntimeServiceRemote(RuntimeService):
     def get_task_stats(self, repo_key: str = "", since: str = "") -> dict:
         return self.client.post("/internal/stats/tasks",
                                 json_data={"repo_key": repo_key, "since": since})
+
+    # ---- Issue #3097：占位账号业务数据判定 / 引擎引用对账 ----
+
+    def user_business_table_counts(self, user_id) -> dict:
+        return self.client.get("/internal/business-table-counts",
+                               params={"user_id": str(user_id)})
+
+    def reconcile_engine_references(self, runtime_ids: list, keep_id: int = 0,
+                                    reason: str = "") -> dict:
+        return self.client.post("/internal/reconcile-engine-references",
+                                json_data={"runtime_ids": list(runtime_ids or []),
+                                           "keep_id": int(keep_id), "reason": reason})
+
+    def transfer_user_business_data(self, from_user_id, to_user_id) -> dict:
+        return self.client.post("/internal/transfer-user-business-data",
+                                json_data={"from_user_id": str(from_user_id),
+                                           "to_user_id": str(to_user_id)})

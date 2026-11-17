@@ -33,8 +33,8 @@ def _check_login_method_before_unbind(user_id: str, provider: str):
     - 无密码但有其他活跃绑定（identity_count > 1）→ 允许解绑
     - 无密码且只有当前这一条绑定 → 拒绝解绑
     """
-    from src.domains.mgmt.auth.grape_account_db import has_password, count_user_identities
-    if not has_password(user_id) and count_user_identities(user_id) <= 1:
+    from src.domains.mgmt.auth.auth_guards import LoginMethodPolicy
+    if LoginMethodPolicy.would_lock_out(user_id):
         raise HTTPException(
             status_code=400,
             detail={
@@ -849,8 +849,12 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
 @router.get("/oauth", operation_id="settings_oauth_get", summary="Get GitCode OAuth config", description="Returns whether GitCode OAuth is configured (client id/redirect uri; secret masked).")
 def get_oauth_config(user: dict = Depends(require_no_session_token)):
     from src.domains.mgmt.user.db import get_meta_value
+
+    # Issue #3054 P1-1：configured 与运行时同源（渠道表加密列），不再看 meta
+    from src.domains.mgmt.auth.providers import channel_configured
+
     return {
-        "gitcode_oauth_client_id": bool(get_meta_value("oauth_gitcode_client_id")),
+        "gitcode_oauth_client_id": channel_configured("gitcode"),
         "gitcode_oauth_redirect_uri": get_meta_value("oauth_gitcode_redirect_uri"),
     }
 
@@ -862,10 +866,17 @@ class OAuthConfig(BaseModel):
 @router.put("/oauth", operation_id="settings_oauth_update", summary="Update GitCode OAuth config", description="Updates the GitCode OAuth client config.")
 def update_oauth_config(body: OAuthConfig, user: dict = Depends(require_no_session_token)):
     from src.domains.mgmt.user.db import set_meta_value
+
+    # Issue #3054 P1-1：client_id/secret 只落渠道表加密列，明文 secret 不写 meta
+    if body.gitcode_oauth_client_id or body.gitcode_oauth_client_secret:
+        from src.domains.mgmt.admin.config_store import save_oauth_credentials
+
+        save_oauth_credentials({
+            "gitcode_oauth_client_id": body.gitcode_oauth_client_id,
+            "gitcode_oauth_client_secret": body.gitcode_oauth_client_secret,
+        })
     if body.gitcode_oauth_client_id:
         set_meta_value("oauth_gitcode_client_id", body.gitcode_oauth_client_id)
-    if body.gitcode_oauth_client_secret:
-        set_meta_value("oauth_gitcode_client_secret", body.gitcode_oauth_client_secret)
     if body.gitcode_oauth_redirect_uri:
         set_meta_value("oauth_gitcode_redirect_uri", body.gitcode_oauth_redirect_uri)
     return {"message": "OAuth 配置已更新"}
@@ -878,18 +889,27 @@ class GitHubOAuthConfig(BaseModel):
 @router.get("/oauth-github", operation_id="settings_oauth_github_get", summary="Get GitHub OAuth config", description="Returns GitHub OAuth configuration status (secret masked).")
 def get_github_oauth_config(user: dict = Depends(require_no_session_token)):
     from src.domains.mgmt.user.db import get_meta_value
+    from src.domains.mgmt.auth.providers import channel_configured
+
     return {
-        "github_oauth_client_id": bool(get_meta_value("oauth_github_client_id")),
+        "github_oauth_client_id": channel_configured("github"),
         "github_oauth_redirect_uri": get_meta_value("oauth_github_redirect_uri"),
     }
 
 @router.put("/oauth-github", operation_id="settings_oauth_github_update", summary="Update GitHub OAuth config", description="Updates the GitHub OAuth client config.")
 def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(require_no_session_token)):
     from src.domains.mgmt.user.db import set_meta_value
+
+    # Issue #3054 P1-1：同 /oauth —— 凭据只落渠道表加密列
+    if body.github_oauth_client_id or body.github_oauth_client_secret:
+        from src.domains.mgmt.admin.config_store import save_oauth_credentials
+
+        save_oauth_credentials({
+            "github_oauth_client_id": body.github_oauth_client_id,
+            "github_oauth_client_secret": body.github_oauth_client_secret,
+        })
     if body.github_oauth_client_id:
         set_meta_value("oauth_github_client_id", body.github_oauth_client_id)
-    if body.github_oauth_client_secret:
-        set_meta_value("oauth_github_client_secret", body.github_oauth_client_secret)
     if body.github_oauth_redirect_uri:
         set_meta_value("oauth_github_redirect_uri", body.github_oauth_redirect_uri)
     return {"message": "GitHub OAuth 配置已更新"}

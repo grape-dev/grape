@@ -34,6 +34,9 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from src.kernel.config import CONFIG_DIR, log
+from src.kernel.issue_ident import (
+    native_issue_number, is_actionable_issue_number,
+)  # Issue #3055
 
 from src.kernel.session_manager import db, db_lock
 from src.api.pipeline_constants import (
@@ -427,11 +430,11 @@ def issue_stage_value(repo_key: str, issue_id: str) -> str:
     if not repo_key or not issue_id:
         return ""
     num = str(issue_id).lstrip("#")
-    if not num.isdigit():
+    if not is_actionable_issue_number(num):
         return ""
     stage = ""
     try:
-        row = _rt_patrol.read_one_any("issue_stage_by_repo_number", (repo_key, int(num)))
+        row = _rt_patrol.read_one_any("issue_stage_by_repo_number", (repo_key, native_issue_number(num)))
         if row and row[0]:
             stage = str(row[0]).strip()
     except Exception as e:

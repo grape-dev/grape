@@ -9659,3 +9659,134 @@ register_migration(
     kind="safe",
     fn=_fn_add_issue_title_fetched_at,
 )
+
+
+def _fn_issue3055_ident_schema(conn=None):
+    """[Issue #3055 B 项] issue ident 列宽度 + `(repo_key, issue_number)` 键空间收敛。
+
+    实现不在本文件（9000+ 行启动模块只留接线）：见
+    `src/domains/runtime/migrations/issue_ident_columns.py`
+    `IssueIdentColumnsMigration`。口径 = 设计文档
+    `docs/weekly-11/issue-3055-issue-ident-hardening.md` §2.3 / §3 / §4-B：
+
+    * MySQL：`issue.issue_number` / `issue.parent_issue_number` /
+      `chat_conversations.issue_number` MODIFY VARCHAR(191)（INT 列在非严格
+      sql_mode 下把 ident 静默截断成 0）；
+    * SQLite：**不改列类型**——INTEGER 亲和是有意契约（#995/#2072 数字编号读侧
+      恒 int），非数字 ident 由动态类型原样存 text，本无截断；
+    * 存量 `issue.issue_number=0` → `pr:<主键 id>` 后再建唯一索引（同仓多行 0 会
+      撞 1062，历史 `log.warning` 吞异常 → 唯一索引静默缺失）；
+    * `chat_conversations.issue_number=0` 是通用会话合法哨兵，不动。
+
+    跨域守卫：两张表归 runtime，非 owner 域（不在本库/是视图）由实现侧抛
+    `_NonOwnerObject`，执行器跳过且不盖章。失败一律 raise（不盖章、下次启动重试）。
+    """
+    from src.domains.runtime.migrations.issue_ident_columns import (
+        IssueIdentColumnsMigration,
+    )
+
+    return IssueIdentColumnsMigration(conn=conn).run()
+
+
+# ===== Issue #3054：身份墓碑独立表（metadata_json → 唯一表 + 索引）=====
+_EXTERNAL_IDENTITY_TOMBSTONES_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_external_identity_tombstones (
+  id VARCHAR(36) PRIMARY KEY,
+  provider VARCHAR(64) NOT NULL,
+  external_id VARCHAR(191) NOT NULL,
+  grape_user_id VARCHAR(36) NOT NULL DEFAULT '',
+  unbound_at VARCHAR(32) NOT NULL DEFAULT '',
+  reason VARCHAR(64) NOT NULL DEFAULT '',
+  UNIQUE (provider, external_id)
+)
+"""
+
+
+def _fn_issue3054_tombstone_table(conn=None):
+    """建墓碑表并从 external_identities.metadata 回填（幂等、owner 自判）。
+
+    背景（Issue #3054 QA）：墓碑原先寄居 metadata JSON —— 不可索引（每次未命中
+    身份的登录要扫该 provider 全量行并逐行解析）、无唯一约束（同一 external_id
+    可能同时存在于两个用户台账，遍历命中第一条就可能登进错账号）、只保留 10 条
+    （第 11 次换绑后最早那个账号回登会新建第二个 Grape 号）。
+
+    本迁移只建表 + 回填；写路径由 identity_lifecycle.TombstoneStore 双写，
+    metadata 保留最近 N 条作降级读（过渡期，不一次性清空）。
+    """
+    if _owned_skip("grape_t_external_identity_tombstones", "create table"):
+        raise _NonOwnerObject("grape_t_external_identity_tombstones 不在本库，由 owner 域执行")
+
+    from src.kernel.session_manager import db as _db
+    c = conn.cursor() if conn is not None else _db.cursor()
+    c.execute(_EXTERNAL_IDENTITY_TOMBSTONES_DDL)
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uk_ext_tomb_provider_ext "
+              "ON grape_t_external_identity_tombstones (provider, external_id)")
+    if conn is not None:
+        conn.commit()
+
+    # 回填：只处理 metadata 里带 tombstones 的行；解析失败跳过（不阻塞启动）
+    import json as _json
+    import time as _time
+
+    from src.kernel.id_gen import uuid7_str as _uid
+
+    now = _time.strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("SELECT grape_user_id, provider, COALESCE(metadata,'') FROM external_identities "
+              "WHERE metadata LIKE '%tombstones%'")
+    rows = c.fetchall() or []
+    filled = 0
+    for grape_user_id, provider, meta in rows:
+        try:
+            data = _json.loads(meta or "{}")
+        except Exception:
+            continue
+        items = data.get("tombstones") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            continue
+        for t in items:
+            if not isinstance(t, dict):
+                continue
+            ext = str(t.get("external_id") or "").strip()
+            if not ext:
+                continue
+            c.execute("SELECT 1 FROM grape_t_external_identity_tombstones "
+                      "WHERE provider=? AND external_id=?", (provider, ext))
+            if c.fetchone():
+                continue
+            c.execute(
+                "INSERT INTO grape_t_external_identity_tombstones "
+                "(id, provider, external_id, grape_user_id, unbound_at, reason) "
+                "VALUES (?,?,?,?,?,?)",
+                (_uid(), provider, ext, str(grape_user_id or ""),
+                 str(t.get("unbound_at") or now), str(t.get("reason") or "legacy_backfill")))
+            filled += 1
+    if conn is not None:
+        conn.commit()
+    if filled:
+        log.info(f"[Issue #3054] 墓碑回填 {filled} 条（metadata → grape_t_external_identity_tombstones）")
+    return {"filled": filled}
+
+
+register_migration(
+    version="202611172100",
+    name="issue3054-external-identity-tombstones",
+    kind="safe",
+    fn=_fn_issue3054_tombstone_table,
+)
+
+register_migration(
+    # 版本号 = 合并基线（d2c635e97）现有最大号 202611171846 之后。必须写字面量：撞号守卫
+    # （tests/kernel/test_migration_no_baseline_version_collision.py）与
+    # tests/api/test_migration_track_guard.py 用 ast.literal_eval 静态解析注册链。
+    version="202611172020",
+    name="issue3055-issue-ident-schema",
+    # kind=backfill：本迁移会 UPDATE 存量 issue 行（0 号行 → pr_<id>），不是纯 DDL。
+    # 标 safe 会让「迁移动过数据」在版本表里不可见（Issue #3054 QA）。
+    kind="backfill",
+    # 基线 arch-weekly-11 起「每域只跑自己域的迁移」+ 跨域迁移必须显式标域：
+    # issue / chat_conversations 归 runtime 库，不标会被判 mgmt（默认）→ runtime
+    # 进程永远不执行 → 列宽不收敛、ident 仍被 INT 截断。
+    domains=("runtime",),
+    fn=_fn_issue3055_ident_schema,
+)
+

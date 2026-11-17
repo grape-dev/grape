@@ -84,8 +84,8 @@
           />
         </div>
         <div style="display: flex; gap: 8px; justify-content: flex-end">
-          <button class="bt bt-o" style="padding: 8px 16px; font-size: 12px" @click="dlg.open = false">{{ t('dialog.cancel') }}</button>
-          <button class="bt bt-p" style="padding: 8px 16px; font-size: 12px" @click="save">{{ t('dialog.save') }}</button>
+          <button class="bt bt-o" @click="dlg.open = false">{{ t('dialog.cancel') }}</button>
+          <button class="bt bt-p" @click="save">{{ t('dialog.save') }}</button>
         </div>
       </div>
     </div>

@@ -122,9 +122,17 @@ def _title_marker_fresh(ts, now: float, ttl: int) -> bool:
 
 
 def _issue_number_of(issue_id: str):
-    """`#123` → 123；PR 伪 id / 非数值 → None（不参与 issue 表回写）。"""
-    s = str(issue_id or "").lstrip("#")
-    return int(s) if s.isdigit() else None
+    """`#123` → 123；平台 ident（`IKW28R`/`I1J8U4`）→ 原样字符串；PR 伪 id / 空 → None。
+
+    Issue #3055：基线实现用 `isdigit()` 判定，会把字符串 ident 判成 None →
+    pipeline 的标题回填对 gitee/ident 单完全不生效（与入口收口同源问题）。
+    判据统一走 kernel.issue_ident（数字恒 int、ident 恒 str、pr_/空恒 None）。
+    """
+    from src.kernel.issue_ident import native_issue_number, normalize_issue_ident
+
+    if not normalize_issue_ident(issue_id):
+        return None
+    return native_issue_number(issue_id)
 
 
 def _default_db():

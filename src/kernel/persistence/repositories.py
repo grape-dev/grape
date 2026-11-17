@@ -191,6 +191,42 @@ class IdentityAdminRepository:
         return [_identity_dto(m) for m in rows]
 
     @staticmethod
+    def get_by_user_provider(session: Session, grape_user_id: str, provider: str,
+                             statuses: "tuple[int, ...]" = (0, 1, 4)) -> "IdentityDTO | None":
+        """按 (用户, 平台) 查一行（默认含解绑/过期态）。
+
+        Issue #3054 P2：[UNIQUE(grape_user_id, provider)] 决定一人一平台只有一行，
+        「换绑/过期后重绑」必须复用本行而不是 INSERT，否则唯一键冲突被吞成 False。
+        """
+        m = session.execute(select(ExternalIdentityModel).where(
+            ExternalIdentityModel.grape_user_id == str(grape_user_id),
+            ExternalIdentityModel.provider == provider,
+            ExternalIdentityModel.status.in_(statuses))).scalars().all()
+        if not m:
+            return None
+        # 脏数据兜底（旧库可能同用户同平台多行）：活跃(1) > 过期(4) > 解绑(0)
+        _rank = {1: 0, 4: 1, 0: 2}
+        return _identity_dto(sorted(m, key=lambda r: _rank.get(int(r.status or 0), 9))[0])
+
+    @staticmethod
+    def list_by_provider_statuses(session: Session, provider: str,
+                                  statuses: "tuple[int, ...]" = (0, 1, 4)) -> "list[IdentityDTO]":
+        """按平台列出各状态行（P2 墓碑查找：低基数，仅用于旧 external_id 归属解析）。"""
+        rows = session.execute(select(ExternalIdentityModel).where(
+            ExternalIdentityModel.provider == provider,
+            ExternalIdentityModel.status.in_(statuses))).scalars().all()
+        return [_identity_dto(m) for m in rows]
+
+    @staticmethod
+    def update_metadata_by_id(session: Session, identity_id: str, metadata_json: str) -> None:
+        """只更新 metadata（墓碑账本），不动状态机列（P2 换绑/解绑墓碑）。"""
+        m = session.get(ExternalIdentityModel, str(identity_id))
+        if m is None:
+            raise ValueError(f"external_identities id={identity_id} not found")
+        m.metadata_json = metadata_json or "{}"
+        session.flush()
+
+    @staticmethod
     def update_by_id(session: Session, identity_id: str, external_id: str,
                      external_login: str, external_name: str,
                      external_avatar: str, access_token_cipher: str,

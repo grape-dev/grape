@@ -8,6 +8,8 @@
 
 import os
 
+import re
+
 import hashlib
 
 import time
@@ -38,9 +40,9 @@ from src.domains.mgmt.auth.grape_account_db import (
     get_grape_account_by_id, verify_grape_account,
     update_password, set_password as db_set_password, update_email,
     update_profile, get_token_version, increment_token_version,
-    is_email_registered, is_username_taken, soft_delete_account,
+    is_email_registered, is_username_taken,
     get_user_identities, create_external_identity,
-    delete_external_identity, count_user_identities, has_password,
+    delete_external_identity, has_password,
     get_external_identity, get_external_identity_any_status,
     update_external_identity_tokens,
     _sync_um_platform_col,
@@ -51,6 +53,14 @@ from src.domains.mgmt.auth.grape_account_db import (
     save_binding_ticket, validate_binding_ticket, consume_binding_ticket,
     transfer_external_identity,
     transfer_external_identity_in_tx, transfer_business_data,
+)
+
+from src.domains.mgmt.auth.auth_guards import (
+    AccountDeactivationCascade,
+    ChannelGate,
+    LoginThrottlePolicy,
+    OAuthStateStore,
+    UnbindGuard,
 )
 
 from src.kernel.auth_sdk.cookie_utils import (
@@ -812,9 +822,8 @@ def delete_account(body: DeleteAccountBody, user: dict = Depends(require_jwt_onl
                     "message": f"您是组织「{org.get('name', '')}」的唯一管理员，请先转移管理员权限后再注销",
                 })
 
-    # 软删除
-    soft_delete_account(user["id"])
-    increment_token_version(user["id"])
+    # 软删除（P3-3：级联失效身份行/清 token，并回收 token_version 使 JWT 立即失效）
+    AccountDeactivationCascade.soft_delete(user["id"])
     invalidate_user_cache(user["id"])
 
     # D43: 清理关联数据——注销后这些缓存/映射不应残留
@@ -980,21 +989,20 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
                 "need_confirm": True,
             })
 
-    # 检查至少保留一种登录方式
-    identity_count = count_user_identities(user["id"])
-    user_has_password = has_password(user["id"])
+    # 检查至少保留一种登录方式（判据唯一来源：auth_guards.LoginMethodPolicy）
+    from src.domains.mgmt.auth.auth_guards import LoginMethodPolicy
 
-    if not user_has_password and identity_count <= 1:
+    if LoginMethodPolicy.would_lock_out(user["id"]):
         raise HTTPException(status_code=400, detail={
             "code": 400,
             "message": "至少保留一种登录方式，请先设置 Grape 密码",
             "need_set_password": True,
         })
 
-    # 删除绑定关系
-    deleted = delete_external_identity(user["id"], provider)
-    if not deleted:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "未绑定该平台"})
+    # 删除绑定关系（P3-1：原子「至少保留一种登录方式」由单条条件 UPDATE 裁决；
+    # 并发下另一端会拿到 keep-one 文案而不是「未绑定该平台」）
+    if not UnbindGuard.remove(user["id"], provider):
+        raise UnbindGuard.rejection(user["id"])
 
     # 需求 10：解绑后清理 placeholder 邮箱（走数据访问层，不绕过 grape_account_db）
     from src.domains.mgmt.auth.grape_account_db import clear_placeholder_email
@@ -1207,18 +1215,24 @@ def _build_redirect_url(request: Request, path: str = "/", params: dict | None =
 
 
 def _oauth_error_redirect(request: Request, message: str, popup: bool = False):
-    """OAuth 回调失败 → 重定向到前端登录页并带错误信息。"""
+    """OAuth 回调失败 → 重定向到前端登录页并带错误信息。
+
+    P0-3（Issue #3054）：只做一次编码——_build_redirect_url 里的 urlencode 已经负责
+    转义，这里再 quote 一遍会变成双重编码（前端被迫二次 decode，遇裸 % 就抛 URIError）。
+    """
     from fastapi.responses import RedirectResponse
-    import urllib.parse as _up
-    url = _build_redirect_url(request, "/", {"oauth_error": _up.quote(message)}, popup=popup)
+    url = _build_redirect_url(request, "/", {"oauth_error": message}, popup=popup)
     return RedirectResponse(url=url, status_code=302)
 
 def _bind_error_redirect(request: Request, message: str, popup: bool = False):
-    """绑定流程失败 → 重定向到用户中心并带错误提示。"""
+    """绑定流程失败 → 重定向到用户中心并带错误提示。（P0-3：编码口径同 _oauth_error_redirect）"""
     from fastapi.responses import RedirectResponse
-    import urllib.parse as _up
-    url = _build_redirect_url(request, "/", {"bind_error": _up.quote(message)}, hash_frag="account", popup=popup)
+    url = _build_redirect_url(request, "/", {"bind_error": message}, hash_frag="account", popup=popup)
     return RedirectResponse(url=url, status_code=302)
+
+# P0-1（Issue #3054）：错误跳转里允许出现的 provider key 形态——渠道 key 只可能是
+# 小写标识符，第三方可控字符串（含 HTML/JS 元字符）一律不往 URL 里放。
+_WL_PROVIDER_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 # D35 保留字列表
 _USERNAME_RESERVED = {"admin", "root", "system", "default", "api", "auth", "grape"}
@@ -1408,24 +1422,17 @@ def oauth_login(provider: str, popup: bool = False, request: Request = None, lan
         raise HTTPException(status_code=500, detail={"code": 500, "message": "构建授权 URL 失败"})
 
     # 需求 1：login flow 通过 Set-Cookie 返回 nonce
-    from src.domains.mgmt.auth.security_config import is_production
+    # P3-4：多流程并存——追加而非覆盖，双标签页各持自己的 nonce
     resp = JSONResponse({"redirect_url": result["redirect_url"]})
     if is_login_flow:
-        resp.set_cookie(
-            key="oauth_nonce",
-            value=nonce,
-            max_age=600,
-            httponly=True,
-            samesite="lax",
-            secure=is_production(),
-            path="/",
-        )
+        OAuthStateStore.add(resp, request, nonce)
     return resp
 
 def _handle_oauth_delete(request, provider, external_id, user_info, delete_account_user_id, popup=False):
     """注销 OAuth 认证流程（需求 14 修正）。"""
     from src.domains.mgmt.auth.grape_account_db import get_external_identity
-    existing = get_external_identity(provider, external_id)
+    # Issue #3054 P2-1：status=4（token 过期）仍属有效身份，注销 OAuth 校验不得误判 mismatch
+    existing = get_external_identity(provider, external_id, statuses=(1, 4))
     if not existing or str(existing["grape_user_id"] or "") != str(delete_account_user_id or ""):
         return _oauth_error_redirect(request, "delete_mismatch", popup=popup)
 
@@ -1544,9 +1551,11 @@ def _handle_oauth_bind(request, provider, external_id, user_info, access_token, 
                 # 真实用户活跃绑定 → 冲突错误
                 return _bind_error_redirect(request, "bind_conflict", popup=popup)
 
-    # 检查历史绑定（status=0）是否属于其他用户 → 需要转移确认
+    # 检查历史绑定（status=0 解绑 / status=4 token 过期）是否属于其他用户 → 需要转移确认
     existing_any = get_external_identity_any_status(provider, external_id)
-    if existing_any and existing_any["status"] == 0 and str(existing_any["grape_user_id"] or "") != str(binding_user_id or ""):
+    if existing_any and existing_any["status"] in (0, 4) and str(existing_any["grape_user_id"] or "") != str(binding_user_id or ""):
+        # Issue #3054 P2-1：status=4 与 status=0 同等可发票据（单次消费、10 分钟
+        # TTL、绑定 session 与目标 external_id），不再落 bind_failed 死路。
         # 生成转移票据，通过 URL 参数传递给前端展示确认页
         _ticket = save_binding_ticket(
             initiating_user_id=binding_user_id,
@@ -1603,7 +1612,9 @@ def _handle_oauth_bind(request, provider, external_id, user_info, access_token, 
 def _handle_oauth_login(request, provider, external_id, user_info, access_token, refresh_token, popup=False, state_data=None, expires_in=0):
     """登录流程——已绑定直接登录 / 未绑定自动创建或跳关联页。"""
     from src.domains.mgmt.auth.grape_account_db import get_external_identity
-    binding = get_external_identity(provider, external_id)
+    # Issue #3054 P2-1：status=4（token 过期）仍是「已绑定」，必须进登录分支——
+    # 只看 status=1 会让过期用户走建号/绑定失败，产出 status=3 孤儿账号。
+    binding = get_external_identity(provider, external_id, statuses=(1, 4))
 
     if binding:
         # 已绑定 → 直接登录（P0-2: 已绑定用户不再检查白名单，需求4"已绑定的用户授权后直接登录成功"）
@@ -1612,7 +1623,10 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         if not account:
             return _oauth_error_redirect(request, "account_not_found", popup=popup)
         if account.get("status", 1) != 1:
-            return _oauth_error_redirect(request, "account_disabled", popup=popup)
+            # P3-3：注销冷静期 / 已禁用 / 已删除 三分（与历史绑定分支同口径）
+            return _oauth_error_redirect(
+                request, AccountDeactivationCascade.oauth_error_code(int(account.get("status") or 0)),
+                popup=popup)
 
         from src.domains.mgmt.auth.grape_account_db import update_external_identity_tokens
         # P2-8 修复：检查 token 更新返回值，失败时记录日志（不阻断登录）
@@ -1664,6 +1678,21 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
 
     # 未绑定 → 查历史绑定（D22: 软删除记录）
     unbound = get_unbound_identity(provider, external_id)
+    _via_tombstone = False
+    if not unbound:
+        # Issue #3054 P2-2：换绑（旧 id 只在 metadata 墓碑）/ status=4 解绑后，
+        # 旧平台账号再登录必须回到原账号——查墓碑而不是新建第二个 Grape 号。
+        from src.domains.mgmt.auth.grape_account_db import find_identity_by_tombstone
+        _tomb = find_identity_by_tombstone(provider, external_id)
+        if _tomb:
+            unbound = {
+                "grape_user_id": _tomb["grape_user_id"],
+                "external_login": _tomb.get("external_login", ""),
+                "external_name": _tomb.get("external_name", ""),
+                "external_avatar": _tomb.get("external_avatar", ""),
+                "unbound_at": _tomb.get("unbound_at", ""),
+            }
+            _via_tombstone = True
     if unbound:
         # 找到历史绑定 → 检查原账号状态
         original_user_id = unbound["grape_user_id"]
@@ -1674,19 +1703,33 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
             if original_account.get("status") == 0:
                 return _oauth_error_redirect(request, "original_account_disabled", popup=popup)
             if original_account.get("status") == 3:
-                return _oauth_error_redirect(request, "original_account_deleted", popup=popup)
-            return _oauth_error_redirect(request, "original_account_unavailable", popup=popup)
+                # P3-3：冷静期≠已删除——冷静期内可由管理员恢复
+                return _oauth_error_redirect(request, "original_account_deactivating", popup=popup)
+            return _oauth_error_redirect(request, "original_account_deleted", popup=popup)
 
         # 原账号正常 → 自动恢复绑定并登录
-        restored = restore_external_identity(
-            grape_user_id=original_user_id,
-            provider=provider,
-            access_token=access_token,
-            refresh_token=refresh_token,
-            external_name=user_info.get("external_name", ""),
-            external_avatar=user_info.get("external_avatar", ""),
-            expires_in=expires_in,
-        )
+        if _via_tombstone:
+            from src.domains.mgmt.auth.grape_account_db import restore_tombstoned_identity
+            restored = restore_tombstoned_identity(
+                grape_user_id=original_user_id,
+                provider=provider,
+                external_id=external_id,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                external_name=user_info.get("external_name", ""),
+                external_avatar=user_info.get("external_avatar", ""),
+                expires_in=expires_in,
+            )
+        else:
+            restored = restore_external_identity(
+                grape_user_id=original_user_id,
+                provider=provider,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                external_name=user_info.get("external_name", ""),
+                external_avatar=user_info.get("external_avatar", ""),
+                expires_in=expires_in,
+            )
         if not restored:
             return _oauth_error_redirect(request, "rebind_failed", popup=popup)
 
@@ -1726,7 +1769,8 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         _set_refresh_cookie(resp, jwt_refresh)
         auth_audit.log_audit("rebind", user_id=original_account["id"],
                              ip=_get_client_ip(request),
-                             detail={"provider": provider})
+                             detail={"provider": provider,
+                                     **({"via": "tombstone"} if _via_tombstone else {})})
         auth_audit.log_audit("login_success", user_id=original_account["id"],
                              ip=_get_client_ip(request),
                              detail={"method": "oauth", "provider": provider, "via": "rebind"})
@@ -1737,10 +1781,17 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
     # 无历史绑定 → 查邮箱冲突（现有逻辑不变）
     external_login = user_info.get("external_login", "")
     if not _check_whitelist(provider, external_login):
-        return _oauth_error_redirect(request, f"WHITELIST:{provider}:{external_login}", popup=popup)
+        # P0-1（Issue #3054）：错误跳转只放错误码，不放第三方用户数据。
+        # external_login 来自第三方（可任意构造），拼进跳转 URL 后会被前端读取渲染，
+        # 构成反射型 DOM XSS 面；provider 只接受渠道 key 形态。
+        _wl_code = "WHITELIST:" + provider if _WL_PROVIDER_KEY_RE.match(provider or "") else "WHITELIST"
+        return _oauth_error_redirect(request, _wl_code, popup=popup)
 
     oauth_email = user_info.get("email", "")
-    if oauth_email and is_email_registered(oauth_email):
+    # Issue #3054：只有**已验证**的邮箱才允许进入「注册新账号 / 关联已有账号」二选一。
+    # 未验证邮箱可被任意构造（provider 不返回 email_verified 时也是 False），当归属证据
+    # 既会把用户送进二选一死路，也会被用来探测邮箱是否已注册。未验证 → 走正常建号/登录。
+    if oauth_email and user_info.get("email_verified") and is_email_registered(oauth_email):
         return _oauth_associate_redirect(
             request, provider, external_id,
             external_login, user_info.get("external_name", ""),
@@ -1758,6 +1809,14 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
     else:
         username = _generate_username(external_login, provider)
     oauth_email_verified = user_info.get("email_verified", False)
+    # P3-6（Issue #3054 QA）：自动建号是注册行为，必须与 /register 同受注册策略约束。
+    # 原实现只对「邮箱已注册 → 二选一页」两分支做了 check_signup_allowed，
+    # 自动建号这条主路径直接 create_grape_account_oauth → 关注册/域白名单形同虚设。
+    from src.domains.mgmt.auth import signup_policy as _signup_policy
+
+    if not _signup_policy.check_oauth_signup_allowed(oauth_email, bool(oauth_email_verified)):
+        log.warning(f"OAuth auto-create blocked by signup policy: provider={provider}")
+        return _oauth_error_redirect(request, "signup_closed", popup=popup)
     account = create_grape_account_oauth(
         username=username,
         email=oauth_email or "",
@@ -1782,7 +1841,7 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
     _readback_account = get_grape_account_by_id(account["id"])
     if not _readback_account:
         log.error(f"OAuth auto-create READBACK FAILED: account {account['id']} ({username}) not persisted for provider={provider}; returning failure")
-        soft_delete_account(account["id"])
+        AccountDeactivationCascade.rollback_signup(account["id"])
         return _oauth_error_redirect(request, "create_failed", popup=popup)
 
     bind_ok = create_external_identity(
@@ -1798,14 +1857,14 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
     )
     if not bind_ok:
         log.warning(f"OAuth auto-create: bind failed for user {account['id']}, provider={provider}, rolling back")
-        soft_delete_account(account["id"])
+        AccountDeactivationCascade.rollback_signup(account["id"])
         return _oauth_error_redirect(request, "bind_failed", popup=popup)
 
     # S87/D63：绑定读回校验全渠道化（原 github 特判；一致性校验与平台无关）
     _readback_binding = get_external_identity(provider, external_id)
     if not _readback_binding:
         log.error(f"OAuth auto-create READBACK FAILED: binding for user {account['id']} ({username}) not persisted for provider={provider}; rolling back and returning failure")
-        soft_delete_account(account["id"])
+        AccountDeactivationCascade.rollback_signup(account["id"])
         return _oauth_error_redirect(request, "bind_failed", popup=popup)
 
     # FR-18.6: 补写 um 平台列
@@ -1870,10 +1929,15 @@ def oauth_callback(request: Request, provider: str, code: str = "", state: str =
     if state_data is None:          # 契约上不可达（state 无效必有 err_resp）
         return _oauth_error_redirect(request, "state_invalid", popup=popup)
 
+    # P3-7：state 签发后渠道被停用 → 本次登录不得再完成（与 /login 同源判据）
+    if ChannelGate.is_disabled(provider):
+        log.warning(f"oauth_callback: channel disabled, reject (provider={provider})")
+        return _oauth_error_redirect(request, "channel_disabled", popup=popup)
+
     if error:
         resp = _oauth_error_redirect(request, "auth_failed", popup=popup)
         if is_login_flow:
-            resp.delete_cookie("oauth_nonce", path="/")
+            OAuthStateStore.consume(resp, request, state_data.get("session_nonce", ""))
         return resp
 
     binding_user_id = state_data.get("binding_user_id")
@@ -1893,7 +1957,7 @@ def oauth_callback(request: Request, provider: str, code: str = "", state: str =
         err_fn = _bind_error_redirect if binding_user_id else _oauth_error_redirect
         resp = err_fn(request, token_err or "token_failed", popup=popup)
         if is_login_flow:
-            resp.delete_cookie("oauth_nonce", path="/")
+            OAuthStateStore.consume(resp, request, state_data.get("session_nonce", ""))
         return resp
 
     access_token = token_data.get("access_token", "")
@@ -1903,7 +1967,7 @@ def oauth_callback(request: Request, provider: str, code: str = "", state: str =
         err_fn = _bind_error_redirect if binding_user_id else _oauth_error_redirect
         resp = err_fn(request, "token_failed", popup=popup)
         if is_login_flow:
-            resp.delete_cookie("oauth_nonce", path="/")
+            OAuthStateStore.consume(resp, request, state_data.get("session_nonce", ""))
         return resp
 
     user_info = get_user_info(provider, access_token)
@@ -1944,7 +2008,7 @@ def oauth_callback(request: Request, provider: str, code: str = "", state: str =
             err_fn = _bind_error_redirect if binding_user_id else _oauth_error_redirect
             resp = err_fn(request, "user_info_failed", popup=popup)
             if is_login_flow:
-                resp.delete_cookie("oauth_nonce", path="/")
+                OAuthStateStore.consume(resp, request, state_data.get("session_nonce", ""))
             return resp
 
     external_id = user_info["external_id"]
@@ -1952,7 +2016,7 @@ def oauth_callback(request: Request, provider: str, code: str = "", state: str =
         err_fn = _bind_error_redirect if binding_user_id else _oauth_error_redirect
         resp = err_fn(request, "no_external_id", popup=popup)
         if is_login_flow:
-            resp.delete_cookie("oauth_nonce", path="/")
+            OAuthStateStore.consume(resp, request, state_data.get("session_nonce", ""))
         return resp
 
     # 分流
@@ -1964,7 +2028,7 @@ def oauth_callback(request: Request, provider: str, code: str = "", state: str =
     # login flow：_handle_oauth_login 返回的 RedirectResponse 上清除 nonce cookie
     login_resp = _handle_oauth_login(request, provider, external_id, user_info, access_token, refresh_token, popup=popup, state_data=state_data, expires_in=expires_in)
     if is_login_flow and hasattr(login_resp, "delete_cookie"):
-        login_resp.delete_cookie("oauth_nonce", path="/")
+        OAuthStateStore.consume(login_resp, request, state_data.get("session_nonce", ""))
     return login_resp
 
 class ExchangeCodeBody(BaseModel):
@@ -2063,8 +2127,18 @@ def oauth_associate(provider: str, body: OAuthAssociateBody, request: Request, r
 
     验证通过 → 写入 external_identities → 登录。
     """
-    from src.domains.mgmt.user import db as user_db
-    state_data = user_db.validate_oauth_state(body.state, provider)
+
+    # P3-2：与 /login 同口径限流——原实现直调 verify_grape_account，被锁账号可
+    # 用「错几次 + 正确密码走 associate」绕过锁定拿 JWT。
+    ip = _get_client_ip(request)
+    identifier = (body.identifier or "").strip().lower()
+    LoginThrottlePolicy.check_or_raise(identifier, ip)
+
+    # P3-7：渠道开关复查
+    ChannelGate.raise_if_disabled(provider)
+
+    # P3-5：先 peep 不消费——密码输错一次不能让关联会话失效（原实现一进来就烧 state）
+    state_data = OAuthStateStore.peek(body.state, provider)
     if state_data is None:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "关联会话已过期，请重新登录"})
 
@@ -2080,6 +2154,7 @@ def oauth_associate(provider: str, body: OAuthAssociateBody, request: Request, r
             raise HTTPException(status_code=400, detail={"code": 400, "message": "请输入邮箱"})
         result = auth_verification.verify_code(email, "oauth_associate", body.code)
         if not result["ok"]:
+            LoginThrottlePolicy.record_failure(identifier or email, ip)
             raise HTTPException(status_code=400, detail={"code": 400, "message": result["message"]})
         # 验证码通过 → 按邮箱查账号
         account = get_grape_account_by_email(email)
@@ -2091,17 +2166,18 @@ def oauth_associate(provider: str, body: OAuthAssociateBody, request: Request, r
             raise HTTPException(status_code=400, detail={"code": 400, "message": "请输入用户名或邮箱"})
         account = verify_grape_account(body.identifier, body.password)
         if not account:
+            # P3-2：失败计数与 /login 同源（同一 identifier 维度锁定）
+            LoginThrottlePolicy.record_failure(identifier, ip)
+            auth_audit.log_audit("login_failed", ip=ip,
+                                 detail={"identifier": auth_audit.mask_identifier(identifier),
+                                         "via": "oauth_associate"})
             raise HTTPException(status_code=401, detail={"code": 401, "error_code": "CREDENTIAL_INCORRECT", "message": "账号或密码不正确，请重新输入"})
     else:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "请提供密码或验证码"})
 
-    # 检查账号状态
+    # 检查账号状态（P3-3：冷静期/禁用/已删除 三分）
     if account.get("status", 1) != 1:
-        if account.get("status") == 0:
-            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "ACCOUNT_DEACTIVATED", "message": "该账号已被停用，请联系管理员"})
-        if account.get("status") == 3:
-            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "ACCOUNT_DEACTIVATING", "message": "该账号正在注销中，暂时无法登录"})
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "账号状态异常，请联系客服"})
+        raise AccountDeactivationCascade.http_error(int(account.get("status") or 0))
 
     # 检查该第三方账号是否已被其他 Grape 账号绑定（仅活跃绑定 status=1）
     # 解绑记录（status=0）属于其他用户时 → 生成转移票据，要求前端确认
@@ -2112,8 +2188,8 @@ def oauth_associate(provider: str, body: OAuthAssociateBody, request: Request, r
 
     # 检查是否存在解绑记录（status=0）属于其他用户
     any_status = get_external_identity_any_status(provider, external_id)
-    if any_status and any_status["status"] == 0 and str(any_status["grape_user_id"] or "") != str(account["id"] or ""):
-        # 解绑记录属于其他用户 → 生成转移票据，要求前端确认
+    if any_status and any_status["status"] in (0, 4) and str(any_status["grape_user_id"] or "") != str(account["id"] or ""):
+        # 解绑记录（status=0）或 token 过期记录（status=4）属于其他用户 → 生成转移票据，要求前端确认
         _ticket = save_binding_ticket(
             initiating_user_id=account["id"],
             provider=provider,
@@ -2136,6 +2212,10 @@ def oauth_associate(provider: str, body: OAuthAssociateBody, request: Request, r
         )
 
     # 写入绑定关系（create_external_identity 内部会自动恢复同账号的解绑记录）
+    # P3-5：所有校验通过后才真正消费 state（此前的失败可原地重试）
+    if OAuthStateStore.consume_state(body.state, provider) is None:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "关联会话已过期，请重新登录"})
+
     # P2 加固：access_token 从 state 解密，解密失败则走失败路径
     _state_token, _token_ok = _get_state_access_token(state_data)
     if not _token_ok:
@@ -2168,6 +2248,8 @@ def oauth_associate(provider: str, body: OAuthAssociateBody, request: Request, r
                          detail={"provider": provider, "external_id": external_id, "via": "associate"})
     auth_audit.log_audit("login_success", user_id=account["id"], ip=_get_client_ip(request),
                          detail={"method": "oauth", "provider": provider, "via": "associate"})
+    # P3-2：成功即清失败记录（与 /login 同口径）
+    LoginThrottlePolicy.clear(identifier, ip)
     _hook_platform_link(account["id"], provider)
 
     return {
@@ -2189,8 +2271,16 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
 
     有密码（邮箱注册）或无密码（纯 OAuth 注册）。
     """
-    from src.domains.mgmt.user import db as user_db
-    state_data = user_db.validate_oauth_state(body.state, provider)
+
+    # P3-7：渠道开关复查（state 签发后禁用渠道不得再完成注册）
+    ChannelGate.raise_if_disabled(provider)
+
+    # P3-2：注册入口接入同口径 IP 限流
+    ip = _get_client_ip(request)
+    LoginThrottlePolicy.enforce_ip_rate_limit(ip)
+
+    # P3-5：先 peep 不消费——校验失败（用户名占用等）可原地改参数重试
+    state_data = OAuthStateStore.peek(body.state, provider)
     if state_data is None:
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "OAUTH_STATE_EXPIRED", "message": "关联会话已过期，请重新登录"})
 
@@ -2198,11 +2288,15 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
     if _t.time() > state_data.get("expires", 0):
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "OAUTH_STATE_EXPIRED", "message": "关联会话已过期，请重新登录"})
 
+    # P3-2：注册失败计数键 = 渠道 + IP（不拿用户名/邮箱做键，避免锁他人账号）
+
     # 用户名校验
     username_err = _validate_username(body.username)
     if username_err:
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "USERNAME_INVALID", "message": username_err})
     if is_username_taken(body.username):
+        # P3-2：注册入口失败计入同一限流维度（与 /login 同源表）
+        LoginThrottlePolicy.record_registration_failure(provider, ip)
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "USERNAME_TAKEN", "message": "用户名已被占用"})
 
     external_id = state_data.get("external_id", "")
@@ -2214,7 +2308,9 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
 
     # 检查该第三方账号是否已被活跃绑定（status=1）
     # 解绑记录（status=0）不阻止新用户注册绑定——解绑意味着放弃绑定关系
-    existing = get_external_identity(provider, external_id)
+    # Issue #3054 P2-1：status=4（token 过期）仍占 UNIQUE(provider, external_id)，
+    # 注册前就认作「已绑定」直接 409，避免建号后绑定失败 → status=3 孤儿账号。
+    existing = get_external_identity(provider, external_id, statuses=(1, 4))
     if existing:
         raise HTTPException(status_code=409, detail={"code": 409, "error_code": "OAUTH_ALREADY_BOUND", "message": "该平台账号已绑定其他账号"})
 
@@ -2232,9 +2328,24 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
             raise HTTPException(status_code=403, detail={"code": 403, "error_code": "EMAIL_NOT_ALLOWED", "message": "该邮箱不在允许注册范围内"})
         if oauth_email and is_email_registered(oauth_email):
             raise HTTPException(status_code=409, detail={"code": 409, "error_code": "EMAIL_ALREADY_REGISTERED", "message": "该邮箱已注册，请直接登录或关联账号"})
+        # P3-5：所有校验通过后才真正消费 state（可原地改参数重试）
+        if OAuthStateStore.consume_state(body.state, provider) is None:
+            raise HTTPException(status_code=400, detail={"code": 400, "error_code": "OAUTH_STATE_EXPIRED", "message": "关联会话已过期，请重新登录"})
         account = create_grape_account(body.username, oauth_email, body.password)
     else:
         # 纯 OAuth 注册（无密码）
+        # P3-6：与密码注册共用注册策略——原实现纯 OAuth 分支完全跳过
+        # signup_policy.check_signup_allowed 与 is_email_registered。
+        # 有邮箱才有策略判据；无邮箱（平台不下发 email）保持既有占位账号行为，
+        # 准入仍由上方 OAuth 白名单闸控制。
+        if oauth_email:
+            if not signup_policy.check_signup_allowed(oauth_email):
+                raise HTTPException(status_code=403, detail={"code": 403, "error_code": "EMAIL_NOT_ALLOWED", "message": "该邮箱不在允许注册范围内"})
+            if is_email_registered(oauth_email):
+                raise HTTPException(status_code=409, detail={"code": 409, "error_code": "EMAIL_ALREADY_REGISTERED", "message": "该邮箱已注册，请直接登录或关联账号"})
+        # P3-5：所有校验通过后才真正消费 state
+        if OAuthStateStore.consume_state(body.state, provider) is None:
+            raise HTTPException(status_code=400, detail={"code": 400, "error_code": "OAUTH_STATE_EXPIRED", "message": "关联会话已过期，请重新登录"})
         account = create_grape_account_oauth(
             username=body.username,
             email=oauth_email,
@@ -2248,6 +2359,7 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
         if account == "email_conflict":
             raise HTTPException(status_code=409, detail={"code": 409, "error_code": "EMAIL_ALREADY_REGISTERED", "message": "该邮箱已注册，请直接登录或关联账号"})
         if account == "username_conflict":
+            LoginThrottlePolicy.record_registration_failure(provider, ip)
             raise HTTPException(status_code=409, detail={"code": 409, "error_code": "USERNAME_TAKEN", "message": "用户名已被占用"})
         raise HTTPException(status_code=500, detail={"code": 500, "error_code": "ACCOUNT_CREATE_FAILED", "message": "创建账号失败"})
 
@@ -2255,7 +2367,7 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
     # P2 加固：access_token 从 state 解密，解密失败则走失败路径
     _state_token, _token_ok = _get_state_access_token(state_data)
     if not _token_ok:
-        soft_delete_account(account["id"])
+        AccountDeactivationCascade.rollback_signup(account["id"])
         raise HTTPException(status_code=500, detail={"code": 500, "error_code": "OAUTH_TOKEN_DECRYPT_FAILED", "message": "凭据解密失败，请重新发起"})
     # 写入绑定关系（失败时回滚 grape_accounts——软删除）
     bind_ok = create_external_identity(
@@ -2269,7 +2381,8 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
     )
     if not bind_ok:
         log.warning(f"OAuth register: create_external_identity failed for user {account['id']}, rolling back")
-        soft_delete_account(account["id"])
+        AccountDeactivationCascade.rollback_signup(account["id"])
+        LoginThrottlePolicy.record_registration_failure(provider, ip)
         raise HTTPException(status_code=409, detail={"code": 409, "error_code": "OAUTH_ALREADY_BOUND", "message": "该平台账号已被绑定"})
 
     # FR-18.6: 补写 um 平台列
@@ -2391,11 +2504,11 @@ def transfer_bind(body: TransferBindBody, user: dict = Depends(require_jwt_only)
                       and original_account.get("email_is_placeholder")
                       and original_account.get("created_by_oauth"))
     if not is_placeholder:
-        original_has_password = has_password(original_user_id)
-        original_identity_count = count_user_identities(original_user_id)
-        # count_user_identities 统计 status=1 的活跃绑定，包含正在转移的这个
-        # 原账号需要至少还有 1 种其他登录方式：密码 或 其他第三方绑定（identity_count > 1）
-        if not original_has_password and original_identity_count <= 1:
+        # 原账号需要至少还有 1 种其他登录方式（密码 / 其他第三方绑定，含 status=4 可恢复）。
+        # 判据唯一来源：auth_guards.LoginMethodPolicy（与解绑前置闸同口径）。
+        from src.domains.mgmt.auth.auth_guards import LoginMethodPolicy
+
+        if LoginMethodPolicy.would_lock_out(original_user_id):
             raise HTTPException(status_code=400, detail={
                 "code": 400,
                 "message": "原账号无其他登录方式，转移会导致账号无法访问，请联系客服",
@@ -2510,7 +2623,13 @@ def _validate_channel_callback(request: Request, state: str, provider: str,
     """
     from src.domains.mgmt.user import db as user_db
 
-    state_data = user_db.validate_oauth_state(state)
+    # P3-5（Issue #3054 QA）：先 peek（不消费）→ provider / nonce 全部通过后才
+    # 真正 DELETE。原实现 validate_oauth_state(state) 默认 consume=True，错平台
+    # 回调或 nonce 失配会把**本可成功的合法 state 烧掉**（线上 state_invalid 的
+    # 一个来源），与 user/db.py 自己写的「先比 provider 再 DELETE」口径相反。
+    # peek 不传 provider：provider 比对留在这里做，才能区分 provider_mismatch 与
+    # state_invalid（两码前端文案不同），且两者都不消费 state。
+    state_data = user_db.validate_oauth_state(state, "", consume=False)
     if state_data is None:
         # state 无效——无法判断 popup 模式，统一走中间页。
         if error:
@@ -2527,14 +2646,21 @@ def _validate_channel_callback(request: Request, state: str, provider: str,
 
     is_login_flow = bool(state_data.get("login_flow"))
     if is_login_flow:
-        cookie_nonce = request.cookies.get("oauth_nonce", "")
+        # P3-4：nonce cookie 是多槽集合，命中即通过；不匹配时**不清 cookie**
+        # （只有自己那槽失配，清整条会把另一标签页的登录打挂）。
         state_nonce = state_data.get("session_nonce", "")
-        if not cookie_nonce or not state_nonce or cookie_nonce != state_nonce:
-            resp = _oauth_error_redirect(request, "state_mismatch", popup=popup)
-            resp.delete_cookie("oauth_nonce", path="/")
-            return None, popup, is_login_flow, resp
+        if not OAuthStateStore.nonce_ok(request, state_nonce):
+            log.warning("channel callback: nonce mismatch (state=%s..., cookie_slots=%d)",
+                        state[:12], len(OAuthStateStore.tokens(request)))
+            return None, popup, is_login_flow, _oauth_error_redirect(
+                request, "state_mismatch", popup=popup)
 
-    return state_data, popup, is_login_flow, None
+    # 校验链全通过 → 原子消费（rowcount 裁决；被并发抢走按 state_invalid 处理）。
+    consumed = user_db.validate_oauth_state(state, provider, consume=True)
+    if consumed is None:
+        log.warning(f"channel callback: state consumed concurrently (state={state[:12]}...)")
+        return None, popup, False, _oauth_error_redirect(request, "state_invalid", popup=popup)
+    return consumed, popup, is_login_flow, None
 
 @router.post("/callback/{provider}")
 def saml_callback(request: Request, provider: str,
@@ -2571,6 +2697,11 @@ def saml_callback(request: Request, provider: str,
     if state_data is None:          # 契约上不可达（state 无效必有 err_resp）
         return _oauth_error_redirect(request, "state_invalid", popup=popup)
 
+    # P3-7：渠道开关复查（POST 入口与 GET 同源判据）
+    if ChannelGate.is_disabled(provider):
+        log.warning(f"saml_callback: channel disabled, reject (provider={provider})")
+        return _oauth_error_redirect(request, "channel_disabled", popup=popup)
+
     if not SAMLResponse:
         return _oauth_error_redirect(request, "saml_response_missing", popup=popup)
 
@@ -2581,7 +2712,7 @@ def saml_callback(request: Request, provider: str,
         log.warning(f"saml_callback: rejected ({_e})")
         resp = _oauth_error_redirect(request, "saml_verify_failed", popup=popup)
         if is_login_flow:
-            resp.delete_cookie("oauth_nonce", path="/")
+            OAuthStateStore.consume(resp, request, state_data.get("session_nonce", ""))
         return resp
 
     # 归一声明 → 既有 user_info 形态（SAML 无 token，空值语义与 S42 一致）
@@ -2611,5 +2742,5 @@ def saml_callback(request: Request, provider: str,
                                       user_info, "", "", popup=popup,
                                       state_data=state_data, expires_in=0)
     if is_login_flow and hasattr(login_resp, "delete_cookie"):
-        login_resp.delete_cookie("oauth_nonce", path="/")
+        OAuthStateStore.consume(login_resp, request, state_data.get("session_nonce", ""))
     return login_resp

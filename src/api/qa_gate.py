@@ -20,6 +20,9 @@ import threading
 from collections import OrderedDict
 
 from src.kernel.config import log
+from src.kernel.issue_ident import (
+    native_issue_number, is_actionable_issue_number,
+)  # Issue #3055
 
 # 失败语义（顺序：显式否定优先于泛化的“失败”）
 _QA_FAIL_TERMS = (
@@ -299,14 +302,18 @@ def _is_annotated(key: tuple[str, int, str]) -> bool:
 def _issue_tags(issue_number) -> tuple[str, str] | None:
     """归一 Issue 编号为 (#N, N) 两种历史 issue_id 形态。非法编号返回 None。"""
     _s = str(issue_number or "").strip().lstrip("#")
-    if not _s.isdigit() or _s == "0":
+    if not is_actionable_issue_number(_s):
         return None
     return f"#{_s}", _s
 
 
-def _issue_number_int(issue_number) -> int:
+def _issue_number_int(issue_number):
+    """Issue 编号平台原生形态（数字→int，平台 ident→str）；非法返回 0。
+
+    Issue #3055：原实现 int() 强转对 gitee IK* 抛 ValueError，标注/PR 关联全跳过。
+    """
     _tags = _issue_tags(issue_number)
-    return int(_tags[1]) if _tags else 0
+    return native_issue_number(_tags[1]) if _tags else 0
 
 
 def _issue_scene_key(repo_key: str, issue_number) -> str | None:

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
 from src.kernel.config import log
+from src.kernel.issue_ident import native_issue_number, is_native_issue_ident  # Issue #3055
 
 
 class _OwnedCursor:
@@ -617,9 +618,9 @@ def get_pipeline(owner: str, repo: str,
     if issue_ids:
         _iss_nums = []
         for iid in issue_ids:
-            _n = str(iid).lstrip("#")
-            if _n.isdigit():
-                _iss_nums.append(int(_n))
+            # Issue #3055：ident 同样进入批量查询（原 isdigit 把 IK* 全部漏掉）
+            if is_native_issue_ident(iid):
+                _iss_nums.append(native_issue_number(iid))
         if _iss_nums:
             try:
                 with db_lock:

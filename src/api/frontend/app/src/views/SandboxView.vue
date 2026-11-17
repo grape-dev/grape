@@ -60,7 +60,7 @@
           </template>
         </div>
         <div style="margin-top: 10px">
-          <button class="bt bt-o bt-s" style="font-size: 10px" @click="viewSandboxes(selectedProvider.id)">📦 {{ t('sbx.view_sandboxes') }}</button>
+          <button class="bt bt-o bt-xs" @click="viewSandboxes(selectedProvider.id)">📦 {{ t('sbx.view_sandboxes') }}</button>
         </div>
       </div>
 
@@ -78,16 +78,14 @@
             </div>
             <button
               v-if="scanCapable !== false"
-              class="bt bt-o bt-s"
-              style="font-size: 10px"
+              class="bt bt-o bt-xs"
               :disabled="scanningTemplates"
               :title="t('sbx.scan_tip')"
               @click="scanTemplates"
             >{{ scanningTemplates ? (t('sbx.scanning')) : '🔍 ' + (t('sbx.scan_btn')) }}</button>
             <button
               v-else
-              class="bt bt-o bt-s"
-              style="font-size: 10px"
+              class="bt bt-o bt-xs"
               disabled
               :title="t('sbx.scan_unsupported')"
             >🔍 {{ t('sbx.scan_btn') }}</button>
@@ -126,10 +124,10 @@
                 <td style="padding: 8px"><span :style="{ color: tpl.enabled ? '#16a34a' : '#dc2626' }">{{ tpl.enabled ? '✅' : '❌' }}</span></td>
                 <td style="padding: 8px; font-size: 10px; color: var(--t3)">{{ tpl.last_check_status || '—' }}</td>
                 <td style="padding: 8px; display: flex; gap: 3px; flex-wrap: wrap">
-                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px" :title="t('sbx.tpl_edit_tip')" @click="openEditTemplate(tpl)">✏ {{ t('sbx.edit') }}</button>
-                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px" :title="tpl.enabled ? (t('sbx.tpl_disable_tip')) : (t('sbx.tpl_enable_tip'))" @click="toggleTemplate(tpl)">{{ tpl.enabled ? '⏸ ' + (t('sbx.disable')) : '▶ ' + (t('sbx.enable')) }}</button>
-                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px" :title="t('sbx.tpl_check_tip')" :disabled="checkingTemplateId === tpl.id" @click="checkTemplate(tpl)">{{ checkingTemplateId === tpl.id ? (t('sbx.checking')) : '🏥 ' + (t('sbx.check')) }}</button>
-                  <button class="bt bt-o bt-s" style="font-size: 9px; padding: 2px 6px; color: #dc2626" :title="t('sbx.tpl_delete_tip')" @click="deleteTemplate(tpl)">🗑 {{ t('sbx.delete') }}</button>
+                  <button class="bt bt-o bt-xs" :title="t('sbx.tpl_edit_tip')" @click="openEditTemplate(tpl)">✏ {{ t('sbx.edit') }}</button>
+                  <button class="bt bt-o bt-xs" :title="tpl.enabled ? (t('sbx.tpl_disable_tip')) : (t('sbx.tpl_enable_tip'))" @click="toggleTemplate(tpl)">{{ tpl.enabled ? '⏸ ' + (t('sbx.disable')) : '▶ ' + (t('sbx.enable')) }}</button>
+                  <button class="bt bt-o bt-xs" :title="t('sbx.tpl_check_tip')" :disabled="checkingTemplateId === tpl.id" @click="checkTemplate(tpl)">{{ checkingTemplateId === tpl.id ? (t('sbx.checking')) : '🏥 ' + (t('sbx.check')) }}</button>
+                  <button class="bt bt-o bt-xs" style="color: #dc2626" :title="t('sbx.tpl_delete_tip')" @click="deleteTemplate(tpl)">🗑 {{ t('sbx.delete') }}</button>
                 </td>
               </tr>
             </tbody>

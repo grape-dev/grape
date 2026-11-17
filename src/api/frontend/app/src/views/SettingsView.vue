@@ -56,7 +56,7 @@
             <h2 class="sv__unhost-title">{{ t('settings.host.unhost_title') }}</h2>
           </div>
           <p class="tx t2 sv__unhost-warn">{{ t('settings.host.unhost_warning') }}</p>
-          <button class="bt sv__unhost-btn" @click="unhost">
+          <button class="bt bt-r sv__unhost-btn" @click="unhost">
             {{ t('settings.host.unhost_title') }}
           </button>
         </div>

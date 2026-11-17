@@ -4,6 +4,9 @@ from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from src.kernel.config import log
+from src.kernel.issue_ident import (
+    is_native_issue_ident, is_actionable_issue_number, native_issue_number,
+)  # Issue #3055
 from src.api.deps import get_user_or_none
 from src.domains.runtime.pipeline.event_pipeline import run_pipeline, resolve_actor_account
 from src.api.a2a_dispatch import _on_handoff_dispatch, run_a2a_dispatch
@@ -510,27 +513,13 @@ def _a2a_skip_response(skipped: str, *, reason: str = "", detail: dict | None = 
 
 
 def _issue_repo_mismatch(repo_key: str, issue_number) -> str:
-    """Issue #2555：归属正向证据反查——本仓无该单号、他仓存在 → 返回他仓 repo_key。
+    """Issue #2555/#3055：归属正向证据反查（实现见 IssueRepoScope）。
 
-    仅作为「仓库不匹配」的正向证据；任一侧不成立都不改行为（新单未同步/跨仓回填单
-    不误拒）。调用方须先确认本仓不存在，再调用本函数。
+    仅作为「仓库不匹配」的正向证据：本仓无该编号、**同 provider** 他仓存在才返回
+    他仓 repo_key；调用方须先确认本仓不存在再调用（新单未同步/跨仓回填不误拒）。
     """
-    try:
-        _num = int(str(issue_number).strip().lstrip("#"))
-    except (TypeError, ValueError):
-        return ""
-    try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT repo_key FROM issue WHERE issue_number=? AND repo_key<>? LIMIT 1",
-                (_num, repo_key))
-            row = c.fetchone()
-            return str(row[0]) if row and row[0] else ""
-    except Exception as _e:
-        log.warning(f"A2A #2555: cross-repo issue lookup failed for issue=#{issue_number}: {_e}")
-        return ""
+    from src.domains.runtime.a2a_repo_scope import IssueRepoScope
+    return IssueRepoScope(repo_key).other_repo_with_issue(issue_number)
 
 
 def _a2a_event_payload(seq, status, agent, issue_id, created_at=None) -> dict:
@@ -711,7 +700,7 @@ def _enqueue_a2a_queued(repo_key: str, issue_number, agent_name: str, *,
     _title = ""
     try:
         from src.api.issues_center import _get_issue_title
-        _title = _get_issue_title(repo_key, int(issue_number)) or ""
+        _title = _get_issue_title(repo_key, native_issue_number(issue_number)) or ""
     except Exception:
         pass
     if not _title:
@@ -929,29 +918,14 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
 
 
 def _resolve_a2a_repo_key(repository: str) -> str:
-    """A2A 端点 repo_key 统一解析（Issue #544 审查修正②）。
+    """A2A 端点 repo_key 统一解析（Issue #544 / #3055 C 项）。
 
-    - 已带 provider 前缀（github:/gitcode:）→ 幂等返回；
-    - 无前缀 → 查 managed_repos 反查实际 provider（github: / gitcode:）；
-    - 未命中/查表异常 → 默认 gitcode。
-    POST /api/a2a 与 GET /api/a2a/status 共用，保证两端点指纹/幂等键的
-    repo_key 维度一致（否则 github 托管仓无前缀传入时核对接口假阴性）。
+    实现收敛在 `src.domains.runtime.a2a_repo_scope.resolve_a2a_repo_key`：
+    裸 owner/repo 按平台卡驱动的全 provider 候选反查 managed_repos，未命中才回落
+    默认前缀并 warning。POST /api/a2a 与 GET /api/a2a/status 共用同一口径。
     """
-    from src.kernel.repo_key import to_repo_key
-    if not repository:
-        return ""
-    if ":" in repository:
-        return to_repo_key(repository)
-    try:
-        from src.domains.mgmt import public as _mg_pub_rk
-        _hit = _mg_pub_rk.repo_key_in_candidates(
-            [f"github:{repository}", f"gitcode:{repository}"])
-        if _hit:
-            return _hit
-    except Exception:
-        pass
-    return to_repo_key(repository)
-
+    from src.domains.runtime.a2a_repo_scope import resolve_a2a_repo_key
+    return resolve_a2a_repo_key(repository)
 
 def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
     """A2A 端点仓库级鉴权：bot token 或会话级临时 token（repo 作用域）二选一通过。
@@ -1311,7 +1285,7 @@ def _cross_pipeline_handoff(
                      f"(via {_resolved_via}, repo={repo_key})")
             issue_number = _resolved_num
             if isinstance(carried_context, dict):
-                carried_context["target_issue_number"] = int(_resolved_num)
+                carried_context["target_issue_number"] = native_issue_number(_resolved_num)
     except Exception as _755_e:
         log.warning(f"A2A #755: cross-pipeline issue_number backfill failed, keep original: {_755_e}")
 
@@ -1335,7 +1309,7 @@ def _cross_pipeline_handoff(
         from src.api.session_store import set_issue_scene, set_issue_stage
         from src.kernel.session_manager import db, db_lock
         _issue_key = f"#{issue_number}"
-        _issue_num = int(issue_number)
+        _issue_num = native_issue_number(issue_number)
         # Read current assignee BEFORE writing (audit trail needs the old value)
         with db_lock:
             c = db.cursor()
@@ -1364,8 +1338,8 @@ def _cross_pipeline_handoff(
     # 后续 A2A 入口按该字段做源仓单号 → 真实落地单号映射兜底（方案B）。
     try:
         _tgt_num_755 = str(issue_number).strip().lstrip("#")
-        if _tgt_num_755.isdigit():
-            _cc["target_issue_number"] = int(_tgt_num_755)
+        if is_native_issue_ident(_tgt_num_755):
+            _cc["target_issue_number"] = native_issue_number(_tgt_num_755)
     except Exception:
         pass
     if _cc:
@@ -1376,7 +1350,7 @@ def _cross_pipeline_handoff(
                 _sc = _sdb.cursor()
                 _sc.execute(
                     "UPDATE issue SET carried_context=? WHERE repo_key=? AND issue_number=?",
-                    (_cc_json, repo_key, int(issue_number)))
+                    (_cc_json, repo_key, native_issue_number(issue_number)))
                 _sdb.commit()
         except Exception:
             # carried_context column may not exist yet — store in issue_state metadata
@@ -1479,7 +1453,7 @@ def _cross_pipeline_handoff(
         _a2a_title = f"Cross-pipeline A2A → {target_node}"
         try:
             from src.api.issues_center import _get_issue_title
-            _a2a_title = _get_issue_title(repo_key, int(issue_number)) or _a2a_title
+            _a2a_title = _get_issue_title(repo_key, native_issue_number(issue_number)) or _a2a_title
         except Exception:
             pass
         seq = append_event(
@@ -1605,8 +1579,11 @@ async def a2a_status_endpoint(request: Request,
     """
     if not repository or repository.count("/") != 1:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "repository is required in 'owner/repo' format"})
-    if not issue_number or not str(issue_number).isdigit():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "issue_number is required (plain number)"})
+    if not _is_valid_issue_number(issue_number):
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "issue_number must be a plain number (e.g. '1') or a platform issue "
+                       "ident (alnum, no '#', no spaces, <= 32 chars)"})
 
     # repo_key 解析：与 POST /api/a2a 同口径（Issue #544 审查修正②：
     # 无前缀时经 managed_repos 反查 provider，github 托管仓不再假阴性）
@@ -1738,10 +1715,9 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
 
 def _issue_exists_in_db(repo_key: str, issue_number) -> bool:
     """Issue #755：目标仓 issue 表存在性快查（平台已知 Issue 直接放行，避免每条 A2A 外呼 VCS）。"""
-    try:
-        _num = int(str(issue_number).strip().lstrip("#"))
-    except (TypeError, ValueError):
+    if not is_native_issue_ident(issue_number):
         return False
+    _num = native_issue_number(issue_number)
     try:
         from src.kernel.session_manager import db, db_lock
         with db_lock:
@@ -1768,13 +1744,14 @@ def _resolve_cross_repo_issue_number(repo_key: str, issue_number, carried_contex
     返回 (resolved_number_str, via)，via ∈ {"kept","target_field","db_mapping","unresolved"}。
     """
     _num = str(issue_number or "").strip().lstrip("#")
-    if not _num.isdigit():
+    # Issue #3055：ident 同样走映射解析（原 isdigit 门槛让 IK* 映射恒 unresolved）
+    if not is_native_issue_ident(_num):
         return _num, "unresolved"
     if _issue_exists_in_db(repo_key, _num):
         return _num, "kept"
     _cc = carried_context if isinstance(carried_context, dict) else {}
     _tgt = str(_cc.get("target_issue_number", "") or "").strip().lstrip("#")
-    if _tgt.isdigit() and _tgt != _num and _issue_exists_in_db(repo_key, _tgt):
+    if is_native_issue_ident(_tgt) and _tgt != _num and _issue_exists_in_db(repo_key, _tgt):
         return _tgt, "target_field"
     try:
         from src.kernel.session_manager import db, db_lock
@@ -1795,9 +1772,11 @@ def _resolve_cross_repo_issue_number(repo_key: str, issue_number, carried_contex
         except Exception:
             continue
         if isinstance(_ctx, dict) and str(_ctx.get("source_issue_number", "") or "").strip().lstrip("#") == _num:
-            _hits.append(int(_n))
+            # Issue #3055：数字→int / ident→str（max 只在同型数字间取最新落地单）
+            _hits.append(native_issue_number(_n))
     if _hits:
-        return str(max(_hits)), "db_mapping"
+        _ints = [h for h in _hits if isinstance(h, int)]
+        return str(max(_ints) if _ints else _hits[-1]), "db_mapping"
     return _num, "unresolved"
 
 
@@ -1822,10 +1801,9 @@ def _a2a_issue_vcs_check(repo_key: str, issue_number) -> str:
             return "unknown"
     except Exception:
         return "unknown"
-    try:
-        _num = int(str(issue_number).strip().lstrip("#"))
-    except (TypeError, ValueError):
+    if not is_native_issue_ident(issue_number):
         return "not_found"
+    _num = native_issue_number(issue_number)
     token = ""
     try:
         from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
@@ -1929,9 +1907,15 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     # 1. agent 名必须在平台白名单内（agent 写错目标名时立刻暴露）
     if agent_name not in DISPATCHABLE_AGENTS:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid agent '{agent_name}': must be one of {', '.join(DISPATCHABLE_AGENTS)}"})
-    # 2. issue_number 必须是纯数字（防止传 "#1"、issue 标题、随机文本）
-    if not issue_number_early.isdigit():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid issue_number '{issue_number_early[:50]}': must be a plain number like '1' (no '#', no text)"})
+    # 2. issue_number 形态校验（Issue #3055）：判据唯一来源 = kernel.issue_ident；
+    #    纯数字（GitCode/GitHub）与平台字符串 ident（gitee IK*）同为合法形态，
+    #    "纯数字"文案退役（原 isdigit 把自家 DB 的合法 ident 拦成 400）。
+    if not _is_valid_issue_number(issue_number_early):
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"invalid issue_number '{issue_number_early[:50]}': expected a plain "
+                       f"number (e.g. '1') or a platform issue ident (alnum, no '#', "
+                       f"no spaces, <= 32 chars)"})
     # 3. repository 必须是 owner/repo 二段格式
     if repository_early.count("/") != 1 or not all(p.strip() for p in repository_early.split("/")):
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid repository '{repository_early[:100]}': must be full 'owner/repo' format, bare repo name is not accepted"})
@@ -1961,7 +1945,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             issue_number_early = _mapped_num
             issue_number = _mapped_num
             if isinstance(payload.get("carried_context"), dict):
-                payload["carried_context"]["target_issue_number"] = int(_mapped_num)
+                payload["carried_context"]["target_issue_number"] = native_issue_number(_mapped_num)
             log.info(f"A2A #755: issue_number backfilled to {_mapped_num} (via {_mapped_via}, repo={repo_key})")
     except Exception as _755_e:
         log.warning(f"A2A #755: entry issue_number backfill failed, keep original: {_755_e}")
@@ -2125,7 +2109,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                             "repo_mismatch", agent=agent_name, source_seq=_source_seq,
                             reason=_rm_reason,
                             detail={
-                                "issue_number": int(issue_number),
+                                "issue_number": native_issue_number(issue_number),
                                 "expected_repository": _expected_repository,
                                 "actual_repository": repository,
                             })
@@ -2139,7 +2123,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 with _ck_lock:
                     _ck_c = _ck_db.cursor()
                     _ck_c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
-                                  (repo_key, int(issue_number)))
+                                  (repo_key, native_issue_number(issue_number)))
                     if _ck_c.fetchone():
                         _cancel_reason = _a2a_skip_reason(
                             "task_cancelled", issue_number=issue_number)
@@ -2152,7 +2136,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                             "task_cancelled", agent=agent_name, source_seq=_source_seq,
                             reason=_cancel_reason,
                             detail={
-                                "issue_number": int(issue_number),
+                                "issue_number": native_issue_number(issue_number),
                                 "repository": repository,
                                 "status": "cancelled",
                             })
@@ -2247,7 +2231,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     return _a2a_skip_response(
                         "pr_subscription_a2a_disabled", agent=agent_name,
                         source_seq=_source_seq,
-                        detail={"issue_number": int(issue_number)} if issue_number else {})
+                        detail={"issue_number": native_issue_number(issue_number)} if issue_number else {})
             except Exception as _prsub_e:
                 log.warning(f"A2A: PR subscription check failed: {_prsub_e}")
 
@@ -2668,7 +2652,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                             return _a2a_skip_response(
                                 "sre_subscribed", agent=agent_name,
                                 source_seq=_source_seq,
-                                detail={"issue_number": int(issue_number)})
+                                detail={"issue_number": native_issue_number(issue_number)})
             except Exception:
                 pass
 
@@ -2767,7 +2751,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         if issue_number:
             try:
                 from src.api.issues_center import _get_issue_title
-                _a2a_title = _get_issue_title(repo_key, int(issue_number)) or ""
+                _a2a_title = _get_issue_title(repo_key, native_issue_number(issue_number)) or ""
             except Exception:
                 pass
         if not _a2a_title:
@@ -2895,18 +2879,13 @@ async def pipeline_handoff_endpoint(request: Request, body: A2AHandoffBody,
 # ==== arch-only port (kept from arch-weekly-11; absent in weekly-mys) ====
 
 def _is_valid_issue_number(v) -> bool:
-    """D102-G：A2A issue_number 合法形态校验（对齐 S70 平台现实）。
-    - 2026-10-14 事故防线保留：拒绝空白 / '#1' 前缀 / 标题文本（含空格、
-      连字符等分隔符）/ 超长——垃圾仍进不来；
-    - S70 字符串 ident 平台（gitee 'IKTREU'）合法化：字母数字 ≤32 视为
-      合法 ident。原 isdigit() 把内部代理链（需求中心移交直调，payload
-      来自自家 DB 的合法原生形态）误拦成 400。
-    """
-    s = str(v or "").strip()
-    if not s or len(s) > 32:
-        return False
-    return s.isalnum()  # 纯数字或字母数字 ident；空格/连字符/# 等即假
+    """A2A 入口 issue_number 合法形态（Issue #3055：判据唯一来源 = 内核）。
 
+    一行转发 `src.kernel.issue_ident.is_valid_issue_number_input`：纯数字与
+    平台字符串 ident（gitee IK*）合法；`#` 前缀 / 空白 / 分隔符文本 / 超长仍拒绝。
+    """
+    from src.kernel.issue_ident import is_valid_issue_number_input
+    return is_valid_issue_number_input(v)
 
 @router.post("/webhook/{provider}")
 async def generic_vcs_webhook(provider: str, request: Request):

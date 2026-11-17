@@ -3,6 +3,7 @@
 import json, os, re, sys
 
 from src.kernel.config import SKILLS_DIR, WORKSPACE_DIR, DB_PATH, resolve_official_skill_path
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 
 # 部署根目录（历史遗留路径 devops-bot 已迁至 grape；统一由 DB_PATH 推导）
 _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
@@ -426,11 +427,9 @@ def _build_cross_pipeline_baseline(repo_key: str, issue_id: str = "") -> str:
     （与运行时 GRAPE_WORK_BRANCH 同源）。承接侧 issue Agent 生成/刷新 Spec 前需以该值为准，
     发现 Spec 头部目标分支不一致时纠正并留痕（原文 → 纠正值）。无转交上下文时返回空串。
     """
-    _num = None
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-    except Exception:
-        _num = None
+    # Issue #3055：数字→int / 平台 ident→str（原 int() 强转对 ident 抛错成空串）
+    _raw_issue = str(issue_id or "").strip().lstrip("#")
+    _num = native_issue_number(_raw_issue) if _raw_issue else None
     if not _num or not repo_key:
         return ""
     try:

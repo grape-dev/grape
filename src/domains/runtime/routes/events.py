@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
 from src.kernel.config import log
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 
 
 class _OwnedCursor:
@@ -2241,8 +2242,8 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
                 "mgmt", "knowledge_event_delete",
                 _xw_kdel.unique_key(f"knowledge-event-delete:{evt['repo_key']}:{scope}:{_ag}:{_in}"),
                 {"repo_key": evt["repo_key"], "scope": scope, "agent_type": _ag,
-                 "issue_num": int(_in)},
-                lambda: _mg_kdel.delete_event_knowledge(evt["repo_key"], scope, _ag, int(_in)))
+                 "issue_num": native_issue_number(_in)},
+                lambda: _mg_kdel.delete_event_knowledge(evt["repo_key"], scope, _ag, native_issue_number(_in)))
             if _res_kdel.get("status") == "failed":
                 log.warning(f"event knowledge delete queued for retry: {_res_kdel.get('error')}")
             return {"ok": True, "scope": scope, "message": "知识已删除"}

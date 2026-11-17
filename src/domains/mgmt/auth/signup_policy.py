@@ -48,6 +48,28 @@ def _is_allow_signup() -> bool:
         return False
 
 
+def check_oauth_signup_allowed(email: str, email_verified: bool = False) -> bool:
+    """OAuth 自动建号策略（Issue #3054 P3-6 主路径补齐）。
+
+    与 `/register` 的判定同源，但多一层归属证据要求：**只有 provider 标记为已验证
+    的邮箱**才参与邮箱/域名白名单判定（未验证邮箱可被任意构造，不能作为加入域白名单
+    的证据）。无邮箱（未下发 / 未验证 / 私有中转域）时无法命中白名单，只能看开放
+    注册开关；白名单非空则拒绝。
+
+    查询失败一律 fail-closed（与 check_signup_allowed 一致）。
+    """
+    e = (email or "").strip().lower()
+    if e and email_verified and "@" in e:
+        return check_signup_allowed(e)
+    email_whitelist = _get_whitelist_emails()
+    domain_whitelist = _get_whitelist_domains()
+    if email_whitelist is None or domain_whitelist is None:
+        return False
+    if email_whitelist or domain_whitelist:
+        return False  # 白名单非空，但无可用邮箱 → 无从命中
+    return _is_allow_signup()
+
+
 def check_signup_allowed(email: str) -> bool:
     """检查邮箱是否允许注册。
 

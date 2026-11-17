@@ -255,19 +255,31 @@ function startOauth() {
       }
       function onMsg(ev) {
         if (ev.origin !== G.window.location.origin) return
+        // P0-2（Issue #3054）：source 必须是本流程打开的 popup——同源其它窗口
+        // 伪造 {type:'oauth_result',action:'bind'} 会直接伪绑定成功。
+        if (ev.source !== popup) return
         const d2 = ev.data || {}
         if (d2.type !== 'oauth_result' || d2.action !== 'bind') return
         if (d2.success) finish(true)
         else if (d2.need_transfer) {
-          done = true
-          cleanup()
-          busy.value = false
-          G.API.get('/auth/me').then(function (me) {
-            const id = (me.identities || []).find(function (x) {
-              return x.provider === props.provider
+          // Issue #3097：票据只在服务端（popup 模式不回传 body/URL），必须调
+          // GET /auth/transfer-context 取票；取不到/接口失败都必须有可见结果。
+          // 注意：不能先 done=true —— 否则失败时 finish 的 toast 通道被焊死。
+          G.API.get('/auth/transfer-context')
+            .then(function (ctx) {
+              const ticket = ctx && ctx.binding_ticket
+              if (!ticket) {
+                finish(false, t('transfer_context_expired'))
+                return
+              }
+              transferTicket.value = ticket
+              done = true
+              cleanup()
+              busy.value = false
             })
-            if (id && id.binding_ticket) transferTicket.value = id.binding_ticket
-          })
+            .catch(function () {
+              finish(false, t('transfer_context_expired'))
+            })
         } else finish(false, d2.error)
       }
       G.window.addEventListener('message', onMsg)

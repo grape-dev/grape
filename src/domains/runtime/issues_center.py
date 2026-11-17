@@ -3495,7 +3495,7 @@ def _notify_done(repo_key: str, issue_number: int, text: str) -> None:
     """完成通知（A4）：扇出到该用户全部已连接渠道；异常不影响结单主流程。"""
     try:
         from src.domains.runtime.im.notify import notify_issue_event
-        notify_issue_event(repo_key, int(issue_number or 0), "done", text)
+        notify_issue_event(repo_key, issue_number or 0, "done", text)
     except Exception as _e:
         log.warning(f"[im-notify] done notify failed {repo_key}#{issue_number}: {_e}")
 

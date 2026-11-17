@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3, json, threading, os, time, shutil
 from datetime import datetime
 from src.kernel.config import log
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from src.api.time_utils import normalize_event_time
 # unified_user_mapping 归 mgmt 域：DDL / 启动引导 / 读写原语统一由该域 public lib 提供（P4 收口）
 from src.domains.mgmt import public as _mgmt_public
@@ -430,8 +431,11 @@ def create_conversation(user_id: int, repo_key: str = "", im_channel_id: str = "
         if not ("1062" in msg or "Duplicate" in msg or "UNIQUE" in msg):
             raise
         # 复用既有读路径（不新增跨域 SQL）：命中同键会话即返回其 id
+        _want = native_issue_number(_issue_no)
         for conv in get_user_conversations(user_id, repo_key, limit=50):
-            if int(conv.get("issue_number") or 0) == int(_issue_no) \
+            # Issue #3055：两侧统一原生形态比较（数字 int / 平台 ident str），
+            # 不得再 int() 强转（ident 会抛 ValueError 打断 get-or-create）。
+            if native_issue_number(conv.get("issue_number") or 0) == _want \
                     and (conv.get("conv_type") or "general") == _conv_type:
                 return str(conv["id"])
         raise

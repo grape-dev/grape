@@ -138,7 +138,8 @@
     "grape_t_engine_template_binding": "mgmt",
     "grape_t_engine_sandbox_toggle": "mgmt",
     "grape_t_repo_llm_credentials": "mgmt",
-    "grape_t_category_dict": "mgmt"
+    "grape_t_category_dict": "mgmt",
+    "grape_t_external_identity_tombstones": "mgmt"
   },
   "views": {
     "admin_accounts": [

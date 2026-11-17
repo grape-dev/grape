@@ -1250,10 +1250,6 @@
 :root .bt-tg:hover {
   background: rgba(0,113,227,0.12);
 }
-:root .bt-s {
-  font-size: 12px;
-  padding: 6px 16px;
-}
 
 /* ── 7. Cards ── */
 :root .cd {
@@ -1766,11 +1762,6 @@
 }
 
 /* Small button variant: tighter padding */
-:root .bt-s {
-  padding: 5px 14px !important;
-  font-size: 12px !important;
-  min-height: 30px !important;
-}
 
 /* Task Center buttons */
 :root .tsk-btn,
@@ -1795,14 +1786,6 @@
   min-height: 36px !important;
 }
 
-/* Save buttons in settings */
-:root .srow ~ .bt,
-:root .cd .bt-p {
-  padding: 8px 22px !important;
-  font-size: 13px !important;
-  border-radius: 999px !important;
-  min-height: 36px !important;
-}
 
 /* ── 22b. Unified Type Scale (4 levels) ── */
 /* Level 1: Page/Section titles → 17px, weight 600 */
@@ -2382,9 +2365,7 @@
 :root .bt {
   border-radius: 999px !important;
   border: 1px solid transparent;
-  font-size: 13px;
   font-weight: 500;
-  padding: 7px 18px;
   transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease,
     filter 0.18s ease;
 }
@@ -2445,11 +2426,6 @@
   filter: brightness(1.06);
 }
 /* 小号 */
-:root .bt-s {
-  font-size: 12px;
-  padding: 4px 14px;
-  min-height: 26px;
-}
 
 /* ── 性能：帮助抽屉未打开时完全不渲染（2026-11-12 卡顿修复）──────────
  * 原来 #helpOverlay(1500×950) + #helpDrawer(520×950) 常驻 DOM，带 8px/28px 混合，
@@ -2493,4 +2469,74 @@
   background: rgba(0, 0, 0, 0.45) !important;
   -webkit-backdrop-filter: blur(6px) !important;
   backdrop-filter: blur(6px) !important;
+}
+
+
+/* ── 23b. 按钮尺寸单一源（Issue #3081）────────────────────────────────
+ * 背景：本文件曾有四代 `.bt*` 尺寸规则（1251 / 1754 / 1767 / 1795 / 2380 / 2446 一代），
+ * 尺寸类声明叠在 `!important` 上互相覆盖，最新一代（小号 12px / 4-14 / 26px）整段是死代码，
+ * 而 `:root .cd .bt-p` / `:root .srow ~ .bt` 这种**容器派生**尺寸会把卡内小号主按钮放大到 36px。
+ *
+ * 定稿口径：
+ * - 尺寸只由 class 决定（`.bt` / `.bt.bt-s` / `.bt.bt-xs`），全部走下面的 CSS 变量；
+ * - 容器/位置规则只许改颜色/间距/圆角，不许再声明 padding/font-size/min-height；
+ * - `!important` 只保留在这一处：视图 scoped 规则带属性选择器 = 权重 +1，
+ *   普通全局声明压不住（同 §23 弹窗的教训），这是「唯一一份」而不是「第四代叠加」。
+ */
+:root {
+  --btn-h: 36px; --btn-h-sm: 30px; --btn-h-xs: 26px;
+  --btn-pad-x: 18px; --btn-pad-x-sm: 14px; --btn-pad-x-xs: 10px;
+  --btn-fs: 13px; --btn-fs-sm: 12px; --btn-fs-xs: 12px;
+}
+:root .bt {
+  min-height: var(--btn-h) !important;
+  padding: 8px var(--btn-pad-x) !important;
+  font-size: var(--btn-fs) !important;
+}
+:root .bt.bt-s {
+  min-height: var(--btn-h-sm) !important;
+  padding: 5px var(--btn-pad-x-sm) !important;
+  font-size: var(--btn-fs-sm) !important;
+}
+:root .bt.bt-xs {
+  min-height: var(--btn-h-xs) !important;
+  padding: 4px var(--btn-pad-x-xs) !important;
+  font-size: var(--btn-fs-xs) !important;
+}
+
+/* ── 23c. 列表行容器单一源（Issue #3081 第 5/6 条）────────────────────
+ * 1) 行容器尺寸只由变量决定；账号卡 `.ac__prow` 与凭据行 `.cred-row` 共用同一套，
+ *    消除 14·16 vs 12·16 的 4px 永久差；两处 scoped 只保留各自布局细节。
+ * 2) 四态等高：grid 三列（头像 / 内容 / 按钮）+ 统一 min-height；hint/timeline
+ *    单行 ellipsis，行数变化不再改变行高。
+ */
+:root {
+  --row-pad-y: 14px; --row-pad-x: 16px;
+  --row-radius: 12px; --row-gap: 14px; --row-min-h: 88px;
+}
+:root .ac__prow,
+:root .cred-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--row-gap);
+  padding: var(--row-pad-y) var(--row-pad-x);
+  border: 1px solid var(--b);
+  border-radius: var(--row-radius);
+  background: var(--c);
+  margin-bottom: 10px;
+  box-shadow: var(--sh);
+  min-height: var(--row-min-h);
+}
+/* 凭据行只有「内容 + 按钮」两列：内容跨前两列，按钮固定第 3 列 */
+:root .cred-row .cred-main {
+  grid-column: 1 / 3;
+}
+:root .ac__idline,
+:root .ac__timeline,
+:root .ac__linkhint,
+:root .ac__expired-hint {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

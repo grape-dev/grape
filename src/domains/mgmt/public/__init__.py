@@ -13,6 +13,7 @@ import re
 from contextlib import contextmanager
 
 from src.kernel.config import log
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 
 from typing import Any
 
@@ -388,14 +389,14 @@ def ensure_scene_knowledge_ref(knowledge_id: int, scene_id: str = "", agent_type
         c.execute("INSERT IGNORE INTO scene_knowledge_ref "
                   "(knowledge_id, scene_id, agent_type, issue_num, enabled, created_by) "
                   "VALUES (%s, %s, %s, %s, 1, %s)",
-                  (int(knowledge_id), scene_id, agent_type, int(issue_num), created_by))
+                  (int(knowledge_id), scene_id, agent_type, native_issue_number(issue_num), created_by))
         return int(c.rowcount or 0)
 
 
 def delete_event_knowledge(repo_key: str, scope: str, agent_type: str, issue_num: int) -> dict[str, int]:
     """删除某事件的知识记录：先按 knowledge_id 删 ref，再删主表（顺序与原实现一致）。"""
     with db_registry.cursor("mgmt") as c:
-        params = (repo_key, scope, agent_type, int(issue_num))
+        params = (repo_key, scope, agent_type, native_issue_number(issue_num))
         c.execute("SELECT id FROM agent_shared_knowledge WHERE repo_key=%s AND scope=%s "
                   "AND agent_type=%s AND issue_num=%s", params)
         kids = [int(r[0]) for r in c.fetchall()]

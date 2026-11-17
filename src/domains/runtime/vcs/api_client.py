@@ -242,11 +242,11 @@ def _dedup_error_text(data: dict) -> str:
 
 
 def _native_issue_number(n):
-    """D41/S61：issue number 保持平台原生形态——int 平台（GitCode/GitHub）
+    """D41/S61/#3055：issue number 保持平台原生形态——int 平台（GitCode/GitHub）
     返回 int；字符串 ident 平台（gitee "IKSQ4O"）返回 str（int() 强转
-    会炸且丢形态）。"""
-    s = str(n)
-    return int(s) if s.isdigit() else s
+    会炸且丢形态）。转发内核唯一实现 `src.kernel.issue_ident.native_issue_number`。"""
+    from src.kernel.issue_ident import native_issue_number
+    return native_issue_number(n)
 
 
 class VcsApiClient:

@@ -81,7 +81,13 @@ def get_jwt_kid_current() -> str:
 
 
 def get_credential_keys() -> str:
-    """凭据加密密钥。security.json credential_keys > 从 JWT_SECRET 派生 > 默认测试密钥。"""
+    """凭据加密密钥。security.json credential_keys > 从 JWT_SECRET 派生 > 默认测试密钥。
+
+    Issue #3054 P1-3（只加可观测性，不改派生语义）：JWT_SECRET 兜底派生出的 kid 恒为
+    ``derived``——两台主机 JWT_SECRET 不同时 kid 相同、密钥字节不同，密文跨主机解不开
+    而 kid 对不上号，是"Decrypt failed: 空异常 + 静默回落 meta"的根因。兜底路径打一次
+    WARNING，让"没配 credential_keys"在日志里可见。
+    """
     cfg = _load()
     val = cfg.get("credential_keys", "").strip()
     if val:
@@ -89,6 +95,20 @@ def get_credential_keys() -> str:
     # 兜底：从 JWT_SECRET 派生 32 字节密钥
     jwt_secret = os.environ.get("JWT_SECRET", "")
     if jwt_secret and len(jwt_secret) >= 32:
+        _warn_derived_keys_once()
         derived = hashlib.sha256(jwt_secret.encode()).digest()
         return "derived:" + base64.b64encode(derived).decode()
     return "dev:MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
+
+
+_derived_warned = False
+
+
+def _warn_derived_keys_once() -> None:
+    global _derived_warned
+    if _derived_warned:
+        return
+    _derived_warned = True
+    log.warning("credential_keys 未配置：凭据密钥由 JWT_SECRET 派生（kid 恒为 derived）。"
+                "多主机 JWT_SECRET 不一致时密文互通不了且 kid 无法区分密钥字节 —— "
+                "建议在 security.json 显式配置 credential_keys（kid:base64, ...）。")

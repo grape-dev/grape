@@ -35,6 +35,14 @@ from src.kernel.session_manager import db, db_lock
 
 from src.domains.mgmt.user import db as user_db
 
+# 凭据真源与解析序全部收在 credential_source（Issue #3054 P1）：本模块只做适配，
+# 不再自写「表优先 / meta 兜底」——登录换 code、token 刷新、configured 三处共用同一实现。
+from src.domains.mgmt.auth.credential_source import (  # noqa: E402
+    CredentialDecryptError,
+    provider_credentials,
+)
+from src.domains.mgmt.auth.retry_policy import DEFAULT_TOKEN_RETRY, RetryPolicy  # noqa: E402
+
 # 渠道卡真源 = configs/oauth-providers.json（一份聚合文件，与仓库侧的
 # configs/platforms/<provider>.json 同一纪律）。代码里不再持有任何平台卡字面量——
 # 加渠道/换端点 = 加一个文件，零代码、零发版（多平台解耦在登录渠道侧的收口）。
@@ -376,9 +384,9 @@ def _catalog_from_object() -> "list[dict]":
             out.append({
                 "provider": provider,
                 "name": str(row.name or cfg.get("name") or provider),
-                # configured 走与取用同一解析链：表内加密列优先，空列回落 meta
-                # （迁移窗口）。两边都没有才是真未配置。
-                "configured": bool(_get_client_id(provider)),
+                # configured 走与取用同一解析链（credential_source）：表内加密列优先，
+                # 两列皆空才整对回落 meta（迁移窗口）。两边都没有才是真未配置。
+                "configured": channel_configured(provider),
                 "brand_color": str(row.brand_color or cfg.get("brand_color") or ""),
                 "pat_create_url": pat_url,
             })
@@ -416,7 +424,6 @@ def providers_catalog() -> "list[dict]":
 
     for key in keys:
         cfg = get_provider(key) or {}
-        client_id = _get_client_id(key)
         pat_url = str(cfg.get("pat_create_url") or "").strip()
         try:
             card = get_platform_card(key)
@@ -427,7 +434,7 @@ def providers_catalog() -> "list[dict]":
         result.append({
             "provider": key,
             "name": cfg.get("name", key),
-            "configured": bool(client_id),
+            "configured": channel_configured(key),
             "brand_color": cfg.get("brand_color", ""),
             "pat_create_url": pat_url,
         })
@@ -482,6 +489,13 @@ def build_auth_url(provider: str, state: str, redirect_uri: str,
     if not cfg:
         return None
 
+    # Issue #3054 QA：渠道凭证缺失时**不能**用空 client_id 拼 URL ——那会把用户送到
+    # 第三方授权页看一个与其无关的报错。这里直接返回 None，由调用方给可见错误。
+    _cid = _get_client_id(provider)
+    if not _cid:
+        log.warning(f"build_auth_url: {provider} client_id 未配置（渠道凭证缺失），拒绝拼 URL")
+        return None
+
     # PKCE
     code_verifier = ""
     code_challenge = ""
@@ -498,7 +512,7 @@ def build_auth_url(provider: str, state: str, redirect_uri: str,
     user_db.save_oauth_state(state, provider, state_data)
 
     params = {
-        "client_id": _get_client_id(provider),
+        "client_id": _cid,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "state": state,
@@ -516,24 +530,32 @@ def build_auth_url(provider: str, state: str, redirect_uri: str,
     return {"redirect_url": auth_url, "code_verifier": code_verifier}
 
 def exchange_token(provider: str, code: str, redirect_uri: str,
-                   code_verifier: str = "") -> "tuple[dict | None, str]":
+                   code_verifier: str = "",
+                   policy: "RetryPolicy | None" = None) -> "tuple[dict | None, str]":
     """用 code 换 access_token。
 
     P2-3: 统一用 requests 替代 urllib.request，与 get_user_info 保持一致。
     返回 (token_dict, error_type) tuple：
     - 成功：(token_dict, "")
-    - 失败：(None, "network_timeout") 或 (None, "token_exchange_failed")
-    - Provider 不存在/无 client_id：(None, "not_configured")
+    - 失败：(None, "network_timeout") / (None, "token_exchange_failed") /
+      (None, "credential_decrypt_failed") / (None, "not_configured")
 
-    超时策略：连接超时 5s，读超时 10s，重试 2 次，指数退避（1s, 2s）。
-    最坏情况约 5+10+1+5+10+2 = 33s（比原来 63s 快一倍）。
+    Issue #3054 P1-4：重试语义由 :class:`RetryPolicy` 决定——**只对瞬时错误重试**
+    （超时 / 连接类异常 / 5xx），4xx 立即返回并落 provider 的 error/error_description。
+    原实现除超时外一律 `except Exception` 重试 3 次且不读响应体，把 invalid_client /
+    redirect_uri_mismatch / invalid_grant 伪装成 token_exchange_failed；而按 RFC 6749
+    重复出示已用 code 会撤销先前 token —— 一次确定性失败被放大成「用户被登出」。
     """
     cfg = get_provider(provider)
     if not cfg:
         return None, "not_configured"
 
-    client_id = _get_client_id(provider)
-    client_secret = _get_client_secret(provider)
+    # 唯一取凭据入口（P1-2）：client_id + client_secret 同源成对。
+    try:
+        client_id, client_secret = get_client_credentials(provider)
+    except CredentialDecryptError as e:
+        log.error(f"Exchange token for {provider} blocked by credential failure: {e}")
+        return None, CredentialDecryptError.code
     if not client_id:
         return None, "not_configured"
 
@@ -547,13 +569,13 @@ def exchange_token(provider: str, code: str, redirect_uri: str,
     if code_verifier:
         data["code_verifier"] = code_verifier
 
+    retry = policy or DEFAULT_TOKEN_RETRY
     try:
         import requests as _req
         _proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
         _proxies = {"https": _proxy, "http": _proxy} if _proxy else None
-        # 境外平台网络不稳定，重试 2 次（共 3 次尝试），指数退避
         last_err_type = "token_exchange_failed"
-        for _attempt in range(3):
+        for _attempt in range(retry.attempts):
             try:
                 resp = _req.post(
                     cfg["token_url"],
@@ -562,28 +584,87 @@ def exchange_token(provider: str, code: str, redirect_uri: str,
                     timeout=(5, 10),  # (connect_timeout, read_timeout)
                     proxies=_proxies,
                 )
-                resp.raise_for_status()
-                return resp.json(), ""
-            except _req.exceptions.ConnectTimeout:
-                last_err_type = "network_timeout"
-                if _attempt < 2:
-                    import time as _t
-                    _t.sleep(1 * (2 ** _attempt))  # 1s, 2s
-            except _req.exceptions.ReadTimeout:
-                last_err_type = "network_timeout"
-                if _attempt < 2:
-                    import time as _t
-                    _t.sleep(1 * (2 ** _attempt))
             except Exception as e:
-                last_err_type = "token_exchange_failed"
-                if _attempt < 2:
+                if not retry.should_retry_exception(e):
+                    log.error(f"Exchange token for {provider} non-retryable error: "
+                              f"{type(e).__name__}: {e}")
+                    return None, "token_exchange_failed"
+                last_err_type = "network_timeout" if "Timeout" in {
+                    c.__name__ for c in type(e).__mro__} else "token_exchange_failed"
+                log.warning(f"Exchange token for {provider} transient failure "
+                            f"(attempt {_attempt + 1}/{retry.attempts}): "
+                            f"{type(e).__name__}: {e}")
+                if not retry.is_last_attempt(_attempt):
                     import time as _t
-                    _t.sleep(1 * (2 ** _attempt))
-        log.warning(f"Exchange token for {provider} failed after 3 retries: {last_err_type}")
+                    _t.sleep(retry.delay_for(_attempt))
+                continue
+
+            status = int(getattr(resp, "status_code", 0) or 0)
+            if retry.should_retry_status(status):
+                last_err_type = "token_exchange_failed"
+                log.warning(f"Exchange token for {provider} provider 5xx (attempt "
+                            f"{_attempt + 1}/{retry.attempts}): status={status} "
+                            f"body={_resp_body_snippet(resp)}")
+                if retry.should_retry_server_error(_attempt):
+                    import time as _t
+                    _t.sleep(retry.delay_for(_attempt))
+                    continue
+                # Issue #3054 QA：5xx 可能发生在 code 已被消费之后，再出示会撤销已发
+                # token（RFC 6749）→ 到此为止，返回原始失败，不再二次出示。
+                log.error(f"Exchange token for {provider} 5xx: code may already be "
+                          f"consumed, not re-presenting it (status={status})")
+                return None, "token_exchange_failed"
+            if status >= 400:
+                # 4xx = 确定性失败（invalid_client / invalid_grant / redirect_uri_mismatch…）
+                # 立即返回，并把 provider 的错误码与描述写进日志（P1-4 可观测性）
+                oauth_err, desc = _parse_oauth_error(resp)
+                log.error(f"Exchange token for {provider} rejected by provider: "
+                          f"status={status} error={oauth_err or '-'} "
+                          f"error_description={desc or '-'} "
+                          f"body={_resp_body_snippet(resp)}")
+                return None, "token_exchange_failed"
+
+            try:
+                return resp.json(), ""
+            except Exception as e:
+                log.error(f"Exchange token for {provider} invalid JSON response: "
+                          f"status={status} {type(e).__name__}: {e} "
+                          f"body={_resp_body_snippet(resp)}")
+                return None, "token_exchange_failed"
+        log.warning(f"Exchange token for {provider} failed after {retry.attempts} attempts: "
+                    f"{last_err_type}")
         return None, last_err_type
     except Exception as e:
         log.warning(f"Exchange token for {provider} failed: {e}")
         return None, "token_exchange_failed"
+
+
+def _resp_body_snippet(resp, limit: int = 300) -> str:
+    """响应体摘要（日志用；避免整页 HTML/超长 body 灌日志，也不落我方 secret）。"""
+    try:
+        return str(resp.text or "")[:limit].replace("\n", " ")
+    except Exception:
+        return ""
+
+
+def _parse_oauth_error(resp) -> "tuple[str, str]":
+    """从 token 端点 4xx 响应解析 (error, error_description)（RFC 6749 §5.2）。
+
+    兼容 JSON 与 form-encoded 两种响应体；解析不出就返回 ("", "")。
+    """
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            return str(body.get("error") or ""), str(body.get("error_description") or "")
+    except Exception:
+        pass
+    try:
+        import urllib.parse as _up
+
+        parsed = _up.parse_qs(str(resp.text or ""))
+        return (parsed.get("error", [""])[0], parsed.get("error_description", [""])[0])
+    except Exception:
+        return "", ""
 
 def get_user_info(provider: str, access_token: str) -> "dict | None":
     """获取第三方平台用户信息。
@@ -662,53 +743,43 @@ def get_user_info(provider: str, access_token: str) -> "dict | None":
 
     return result
 
-def _object_credential(provider: str, column: str) -> "str | None":
-    """D109 对象层凭据读口：grape_t_oauth_channels.client_id_enc / client_secret_enc。
+# 凭据入口见模块顶部导入的 provider_credentials（成对/单列两种读法都在这里适配）。
 
-    表就绪时表是唯一真源（凭据已迁加密列，meta 只是导入源）；表未就绪 / 无该行 /
-    解密失败 → 返回 None，调用方回落 meta（fail-open，登录不被新表拖挂）。
+
+def get_client_credentials(provider: str) -> "tuple[str, str]":
+    """**唯一取凭据入口**（登录换 code / token 刷新 / configured 共用）。
+
+    返回 ``(client_id, client_secret)``——同源成对；密文不可解抛
+    :class:`CredentialDecryptError`，调用方必须显式失败（禁止回落 meta）。
     """
-    try:
-        from src.domains.platform.importer import is_table_backed
-
-        if not is_table_backed():
-            return None
-        from sqlalchemy.orm import Session
-
-        from src.domains.mgmt.auth.credential_crypto import decrypt
-        from src.kernel.persistence.engine import get_engine
-        from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
-
-        with Session(get_engine()) as s:
-            row = OAuthChannelRepo.get(s, provider)
-        if row is None:
-            return None
-        blob = getattr(row, column, "") or ""
-        if not blob:
-            # 行在但凭据列为空 = 迁移未落地（如历史库只配了 meta，或迁移因缺
-            # secret 跳过该条）。此时返回 None 交给 meta 兜底，避免登录被误判
-            # "未配置"（fail-open，与 §16 影响 #1 同口径）。
-            return None
-        return decrypt(blob) or ""
-    except Exception as e:
-        log.warning(f"oauth channel credential read failed ({provider}.{column}), "
-                    f"fallback to meta: {e}")
-        return None
+    cid, sec = provider_credentials.pair(provider)
+    if cid.error or sec.error:
+        err = cid.error or sec.error
+        raise CredentialDecryptError(provider, (cid.field if cid.error else sec.field), err)
+    return cid.value, sec.value
 
 
 def _get_client_id(provider: str) -> str:
-    """获取 OAuth client_id：表就绪读对象层加密列，否则回落 meta。"""
-    _from_object = _object_credential(provider, "client_id_enc")
-    if _from_object is not None:
-        return _from_object
-    return user_db.get_meta_value(f"oauth_{provider}_client_id") or ""
+    """client_id（宽容版：解密失败=空串，绝不回落 meta）。"""
+    try:
+        return get_client_credentials(provider)[0]
+    except CredentialDecryptError as e:
+        log.error("get_client_id blocked: %s", e)
+        return ""
+
 
 def _get_client_secret(provider: str) -> str:
-    """获取 OAuth client_secret：表就绪读对象层加密列，否则回落 meta。"""
-    _from_object = _object_credential(provider, "client_secret_enc")
-    if _from_object is not None:
-        return _from_object
-    return user_db.get_meta_value(f"oauth_{provider}_client_secret") or ""
+    """client_secret（宽容版：解密失败=空串，绝不回落 meta）。"""
+    try:
+        return get_client_credentials(provider)[1]
+    except CredentialDecryptError as e:
+        log.error("get_client_secret blocked: %s", e)
+        return ""
+
+
+def channel_configured(provider: str) -> bool:
+    """``configured`` 判定：与运行时同一取凭据入口（Issue #3054 P1-1）。"""
+    return provider_credentials.configured(provider)
 
 def get_redirect_uri(request, provider: str = "") -> str:
     """获取 OAuth 回调 URI。

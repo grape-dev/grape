@@ -83,9 +83,9 @@ def _unbind_mocks():
     return [
         patch("src.domains.mgmt.routes.grape_auth.auth_audit.log_audit"),
         patch("src.domains.mgmt.routes.grape_auth.get_user_identities", return_value=[]),
-        patch("src.domains.mgmt.routes.grape_auth.delete_external_identity", return_value=True),
-        patch("src.domains.mgmt.routes.grape_auth.has_password", return_value=True),
-        patch("src.domains.mgmt.routes.grape_auth.count_user_identities", return_value=2),
+        patch("src.domains.mgmt.auth.grape_account_db.delete_external_identity", return_value=True),
+        patch("src.domains.mgmt.auth.grape_account_db.has_password", return_value=True),
+        patch("src.domains.mgmt.auth.grape_account_db.count_user_identities", return_value=2),
         patch("src.domains.mgmt.user.db.delete_credential"),
     ]
 
@@ -97,7 +97,7 @@ def test_s59_unbind_gitee_with_card(gitee_card, client):
     with contextlib.ExitStack() as st:
         for m in _unbind_mocks():
             st.enter_context(m)
-        mock_del = st.enter_context(patch("src.domains.mgmt.routes.grape_auth.delete_external_identity", return_value=True))
+        mock_del = st.enter_context(patch("src.domains.mgmt.auth.grape_account_db.delete_external_identity", return_value=True))
         st.enter_context(patch("src.kernel.session_manager.db", mock_db))
         st.enter_context(patch("src.kernel.session_manager.db_lock", mock_lock))
         r = client.delete("/api/auth/bind/gitee?confirm=true")

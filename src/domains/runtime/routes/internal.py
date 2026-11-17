@@ -183,6 +183,32 @@ async def get_task_stats(body: dict) -> dict:
         str(body.get("repo_key") or ""), str(body.get("since") or ""))
 
 
+@router.get("/business-table-counts", operation_id="runtime_business_table_counts",
+            include_in_schema=False)
+async def business_table_counts(user_id: str) -> dict:
+    """N14 某账号业务数据按表计数（供 RuntimeServiceRemote 调用；缺表 → count=None）。"""
+    return _get_local("runtime").user_business_table_counts(user_id)
+
+
+@router.post("/reconcile-engine-references", operation_id="runtime_reconcile_engine_refs",
+             include_in_schema=False)
+async def reconcile_engine_references(body: dict) -> dict:
+    """N15 引擎引用对账（跨域写；幂等可重放）。"""
+    body = body or {}
+    return _get_local("runtime").reconcile_engine_references(
+        list(body.get("runtime_ids") or []), int(body.get("keep_id") or 0),
+        str(body.get("reason") or ""))
+
+
+@router.post("/transfer-user-business-data", operation_id="runtime_transfer_user_data",
+             include_in_schema=False)
+async def transfer_user_business_data(body: dict) -> dict:
+    """N16 占位账号合并：本域业务数据归属转移（幂等）。"""
+    body = body or {}
+    return _get_local("runtime").transfer_user_business_data(
+        body.get("from_user_id"), body.get("to_user_id"))
+
+
 @router.post("/xwrite/apply", operation_id="runtime_xwrite_apply", include_in_schema=False)
 async def xwrite_apply(body: dict) -> dict:
     """N13 跨域写补偿应用（幂等键必填；action 白名单）。"""

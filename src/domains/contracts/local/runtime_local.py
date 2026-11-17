@@ -11,6 +11,7 @@ import json
 from typing import Any
 
 from src.kernel import db_registry, session_manager
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from src.kernel.db import t_runtime
 from src.domains.contracts.runtime_service import RuntimeService
 
@@ -175,7 +176,7 @@ class RuntimeServiceLocal(RuntimeService):
         保证 Local 与 Remote 两条路径返回同一结构。
         """
         from src.domains.runtime.public import read_one_any
-        _num = int(str(issue_number).lstrip("#"))
+        _num = native_issue_number(issue_number)
         row = read_one_any("issue_card_row", (repo_key, _num))
         if not row:
             return {}
@@ -407,3 +408,47 @@ class RuntimeServiceLocal(RuntimeService):
                 "aggregate": {"total": total, "done": done,
                               "failed": by_status.get("failed", 0),
                               "completion_rate": round(done / total, 4) if total else 0.0}}
+
+    # ---- Issue #3097：占位账号业务数据判定 / 引擎引用对账 ----
+
+    def user_business_table_counts(self, user_id) -> dict:
+        """N14 本域业务数据按表计数；缺表/不可读 → count=None（不抛，语义交调用方）。"""
+        out: dict[str, dict] = {}
+        for table in ("agent_tasks", "chat_agent_session", "chat_conversations", "issue"):
+            try:
+                with self._lock:
+                    c = self._db.cursor()
+                    c.execute(f"SELECT COUNT(*) FROM {self._t(table)} WHERE user_id=?", (user_id,))
+                    row = c.fetchone()
+                out[table] = {"count": int(row[0] or 0) if row else 0}
+            except Exception as exc:  # noqa: BLE001  # 缺表/不可读：交给调用方按定稿语义处理
+                code = ""
+                args = getattr(exc, "args", ())
+                if args and isinstance(args[0], int):
+                    code = str(args[0])
+                text = f"{exc}"
+                lowered = text.lower()
+                out[table] = {
+                    "count": None, "error": text, "code": code,
+                    "missing_table": (code == "1146" or "1146" in text
+                                      or "doesn't exist" in lowered
+                                      or "no such table" in lowered),
+                }
+        return out
+
+    def reconcile_engine_references(self, runtime_ids: list, keep_id: int = 0,
+                                    reason: str = "") -> dict:
+        """N15 引用对账（本域写；判定/SQL 在 engine.refs_reconcile）。"""
+        from src.domains.runtime.public import reconcile_engine_references as _apply
+        return _apply(list(runtime_ids or []), keep_id, reason=reason)
+
+    def transfer_user_business_data(self, from_user_id, to_user_id) -> dict:
+        """N16 本域业务数据归属转移（幂等 UPDATE；失败抛异常）。"""
+        done: dict[str, int] = {}
+        with self._lock:
+            c = self._db.cursor()
+            for table in ("agent_tasks", "chat_agent_session", "chat_conversations", "issue"):
+                c.execute(f"UPDATE {self._t(table)} SET user_id=? WHERE user_id=?",
+                          (to_user_id, from_user_id))
+                done[table] = int(c.rowcount or 0)
+        return done

@@ -1,13 +1,14 @@
 table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,10
 agent_runtimes,runtime,insight,1
-agent_runtimes,runtime,mgmt,15
+agent_runtimes,runtime,mgmt,5
 agent_tasks,runtime,api,4
-agent_tasks,runtime,mgmt,3
 chat_conversations,runtime,api,1
 devops_pipeline_scene,mgmt,api,2
 engine_capabilities,runtime,api,1
+external_identities,mgmt,api,1
 external_identities,mgmt,platform,2
+grape_t_external_identity_tombstones,mgmt,api,2
 grape_accounts,mgmt,runtime,2
 grape_t_channel_repo_link,mgmt,api,2
 grape_t_egress_admin_exception,mgmt,runtime,2
@@ -21,7 +22,7 @@ grape_t_engine_template_binding,mgmt,runtime,6
 grape_t_repo_credentials,insight,platform,2
 grape_t_repo_llm_credentials,mgmt,runtime,2
 grape_t_repo_platforms,mgmt,api,9
-grape_t_sandbox_provider_config,mgmt,runtime,12
+grape_t_sandbox_provider_config,mgmt,runtime,11
 grape_t_sandbox_templates,mgmt,runtime,4
 grape_t_schema_migrations,mgmt,api,1
 grape_t_task_proxy_tokens,mgmt,runtime,3
@@ -31,5 +32,5 @@ meta,runtime,api,5
 meta,runtime,platform,1
 runtime_credentials,runtime,api,6
 task_messages,runtime,api,2
-user_accounts,mgmt,runtime,4
+user_accounts,mgmt,runtime,3
 user_credentials,mgmt,platform,1

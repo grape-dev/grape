@@ -357,55 +357,17 @@ def cleanup_expired_exchange_codes() -> int:
     except Exception:
         return 0
 
-def validate_oauth_state(state: str, provider: str = "") -> dict | None:
-    """验证并原子消费 OAuth state（SELECT + DELETE + rowcount 检查）。
+def validate_oauth_state(state: str, provider: str = "", consume: bool = True) -> dict | None:
+    """校验 OAuth state（薄委托：实现见 auth_guards.OAuthStateStore.validate）。
 
-    需求 2：原子消费，确保只有一个请求拿到 state 数据。
-    - SQLite/单实例：db_lock 保证线程安全
-    - MySQL 多实例：db_lock 跨实例无效，原子性靠 DELETE rowcount 保证
-    - 不使用 FOR UPDATE，避免方言判断
-
-    D26 修复：provider 参数改为可选——统一回调地址时不传 provider，
-    从查询结果取 provider 返回给调用方。传了 provider 则做额外校验。
-
-    返回的 dict 额外包含 "_provider" 字段（从 DB 记录恢复）。
+    P3-5 口径：先比 provider 再 DELETE（不匹配不消费），`consume=False` 只读校验，
+    原子性靠 `DELETE ... WHERE state=? AND expires>?` 的 rowcount。本函数只为既有
+    import 面（路由/测试）保留同名入口，判定与 SQL 都在 auth_guards 里。
     """
-    import json as _json
-    import time as _time
-    try:
-        with db_lock:
-            c = _mg_db.cursor()
-            c.execute(
-                "SELECT provider, data_json, expires FROM oauth_states WHERE state=?",
-                (state,),
-            )
-            row = c.fetchone()
-            if row:
-                # 原子消费：DELETE 带 state + expires 条件
-                # rowcount=0 说明已被其他请求消费或已过期
-                c.execute(
-                    "DELETE FROM oauth_states WHERE state=? AND expires > ?",
-                    (state, _time.time()),
-                )
-                if c.rowcount == 0:
-                    # 已被消费或已过期，不能使用 SELECT 到的数据
-                    _mg_db.commit()
-                    log.warning(f"validate_oauth_state: state={state[:20]}... already consumed or expired")
-                    return None
-            _mg_db.commit()
-        if not row:
-            log.warning(f"validate_oauth_state: state={state[:20]}... NOT FOUND")
-            return None
-        db_provider = row[0]
-        if provider and provider != db_provider:
-            log.warning(f"validate_oauth_state: provider mismatch (expected={provider}, db={db_provider})")
-            return None
-        data = _json.loads(row[1] or "{}")
-        data["_provider"] = db_provider
-        return data
-    except Exception as e:
-        log.warning(f"validate_oauth_state failed: {e}")
-        return None
+    from src.domains.mgmt.auth.auth_guards import OAuthStateStore
+
+    return OAuthStateStore.validate(state, provider, consume=consume)
+
 
 @_deprecated_user_accounts_fn("grape_account_db.get_external_identity")
 def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
@@ -3856,14 +3818,27 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
         log.warning(f"refresh_oauth: no refresh_token for user={user_id}, provider={provider}")
         return None
 
-    client_id = get_meta_value(f"oauth_{provider}_client_id")
-    client_secret = get_meta_value(f"oauth_{provider}_client_secret")
+    # 凭据（Issue #3054 P1-2）：走与换 code 完全相同的取凭据入口，client_id+secret
+    # 同源成对取——原实现直接读 meta，凭据迁表后就是"登录用新凭据、刷新用旧/空凭据"，
+    # 刷新必然失败 → 身份行被打 status=4。
+    from src.domains.mgmt.auth.providers import (
+        CredentialDecryptError,
+        get_client_credentials,
+        get_provider,
+    )
+
+    try:
+        client_id, client_secret = get_client_credentials(provider)
+    except CredentialDecryptError as e:
+        # 密文不可解是密钥事故，不是"凭据过期"：不刷新、不打 status=4、绝不回落 meta。
+        log.error(f"refresh_oauth: credential_decrypt_failed for user={user_id}, "
+                  f"provider={provider}: {e}")
+        return None
     if not client_id or not client_secret:
         log.warning(f"refresh_oauth: OAuth client_id/secret not configured for {provider}")
         return None
 
     # 2. 获取 token_url（从 provider 配置）
-    from src.domains.mgmt.auth.providers import get_provider
     cfg = get_provider(provider)
     if not cfg:
         log.warning(f"refresh_oauth: provider {provider} not configured")
@@ -4213,25 +4188,14 @@ def migrate_agent_runtimes_utc_caliber(tolerance_seconds: int = 60, throttle_sec
 
 
 def _columns_exist(c, table: str, cols: tuple) -> bool:
-    """Issue #646：表是否已具备指定列（未迁移旧库降级判定，进程内缓存）。"""
-    global _UID_COLS_CACHE, _UID_COLS_CACHE_DB_ID
-    key = f"{table}:{','.join(cols)}"
-    if _UID_COLS_CACHE_DB_ID != id(db):
-        _UID_COLS_CACHE = {}
-        _UID_COLS_CACHE_DB_ID = id(db)
-    if key in _UID_COLS_CACHE:
-        return _UID_COLS_CACHE[key]
-    try:
-        present = {r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
-        ok = all(col in present for col in cols)
-    except Exception:
-        ok = False
-    _UID_COLS_CACHE[key] = ok
-    return ok
+    """Issue #646：表是否已具备指定列（未迁移旧库降级判定）。
 
-
-_UID_COLS_CACHE: dict = {}
-_UID_COLS_CACHE_DB_ID = None
+    Issue #3097：实现迁至 runtime 域（`runtime.engine.refs_reconcile.columns_exist`）
+    ——被探测的表（agent_runtimes / agent_type_runtime_pool / 会话表）归 runtime 库，
+    mgmt 域不再持有这些表的 SQL；本别名只为既有调用方（engine_select 等）过渡。
+    """
+    from src.domains.runtime.engine.refs_reconcile import columns_exist
+    return columns_exist(c, table, cols)
 
 
 # ── Issue #646 双读 helper（三库独立拓扑：agent_runtimes 归**运行域**） ──
@@ -4386,210 +4350,28 @@ def ensure_credential_uid(credential_id: int, c=None) -> str:
 
 
 def _session_uid_mirror_sql(tbl: str) -> str:
-    """Issue #868 QA 复审（MySQL 方言兼容）：会话表 engine_uid 镜像对账 UPDATE。
+    """Issue #868：会话表 engine_uid 镜像对账 UPDATE（跨方言 NULL-safe）。
 
-    原 `engine_uid IS NOT (SELECT ...)` 为 SQLite 专用方言语法（MySQL 8.0 无该
-    运算符，报 1064；mysql_compat.translate_sql 亦无对应翻译规则），MySQL 部署下
-    该语句抛错被 except 吞掉 → runtime_id 已改绑成功而 uid 残留 stale，双读
-    uid 优先路由错引擎且 006 回填无法矫正。改为跨方言 NULL-safe 写法：
-    NULLIF(engine_uid,'') 归一 NULL/''，与子查询结果 COALESCE 归一后 <> 比较，
-    语义与 IS NOT 等价（NULL/''/stale 均命中、已一致行不重写、计数=实际矫正行数）；
-    runtime 行不存在（子查询 NULL）时 stale uid 归一后 <> '' 命中置 NULL。
+    Issue #3097：SQL 生成与实现随对账例程一并迁至 runtime 域
+    （`runtime.engine.refs_reconcile.session_uid_mirror_sql`）。
     """
-    _sub = f"(SELECT ar.engine_uid FROM agent_runtimes ar WHERE ar.id={tbl}.runtime_id)"
-    _keep_norm = f"COALESCE({_sub}, '')"
-    return (
-        f"UPDATE {tbl} SET engine_uid={_sub} "
-        f"WHERE runtime_id>0 AND "
-        f"COALESCE(NULLIF(engine_uid, ''), '')<>{_keep_norm}"
-    )
+    from src.domains.runtime.engine.refs_reconcile import session_uid_mirror_sql
+    return session_uid_mirror_sql(tbl)
 
 
 def _rebind_runtime_references(c, dup_ids: list, keep_id: int, reason: str = "") -> dict:
-    """Issue #646：引擎行删除前的引用改绑/显式清理统一例程（全部删除路径共用）。
+    """Issue #646 / #3097：引擎行删除前的引用改绑/显式清理（薄接线，无判定逻辑）。
 
-    - keep_id 非 0（改绑模式，去重路径：save_agent_runtimes / 凭据 scope 切换重复行）：
-      把待删行的引用改绑到保留行——agent_tasks.runtime_id / 会话 / 绑定表直接改绑；
-      agent_type_runtime_pool / engine_capabilities 同键绑定已在保留行存在则删重复绑定，
-      否则改绑（UNIQUE(agent_type,runtime_id)/UNIQUE(runtime_id,tag) 冲突安全），
-      engine_uid 镜像统一指向保留行 uid。
-    - keep_id=0（显式清理模式，删除路径：吊销 settings.revoke / devstage 删环境 / 刷新过期行）：
-      池/能力绑定显式删除（runtime_id 或 engine_uid 命中），devops_agent_session.runtime_id
-      置 0、devops_agent_runtime_binding 删除、场景 nodes_json engine_runtime_ids 悬空引用
-      清理（复用 Issue #250 链路）；agent_tasks 按快照语义保留（engine_uid/
-      engine_name_snapshot/runtime_id 原样不动，恢复走 /api/events/{seq}/redispatch 重绑）。
-    - 两种模式均返回对账报告（dict）并 log.info。配合迁移 202611020003 的
-      ON DELETE RESTRICT FK 兜底：引用未清干净时 DELETE 报错可见，不静默级联蒸发。
-    - 未迁移旧库（缺 engine_uid 列）自动降级为 runtime_id 单轨清理。
+    判定逻辑与 SQL 全部在 runtime 域
+    `src/domains/runtime/engine/refs_reconcile.py`；本例程碰的 6 张表
+    （agent_runtimes / agent_tasks / agent_type_runtime_pool / engine_capabilities /
+    devops_agent_session / chat_agent_session）按 `docs/weekly-11/table-owner.tsv`
+    **全归 runtime 库**。`reconcile_for_caller` 按进程域选通道：mgmt 进程（删用户/
+    合并账号）经 runtime public 原语落到 runtime 域连接；runtime 进程内复用调用方
+    游标（同域事务）。
     """
-    ids = [i for i in (dup_ids or []) if i]
-    mode = "rebind" if keep_id else "explicit_cleanup"
-    report = {
-        "mode": mode,
-        "reason": reason or ("dedup-rebind" if keep_id else "engine-delete"),
-        "runtime_ids": ids,
-        "tasks_rebound": 0,
-        "tasks_snapshot_kept": 0,
-        "pool_rows_deleted": 0,
-        "capability_rows_deleted": 0,
-        "sessions_rebound": 0,
-        "sessions_reset": 0,
-        "sessions_uid_rebound": 0,
-        "sessions_uid_nulled": 0,
-        "chat_sessions_rebound": 0,
-        "chat_sessions_reset": 0,
-        "chat_sessions_uid_rebound": 0,
-        "chat_sessions_uid_nulled": 0,
-        "runtime_bindings_deleted": 0,
-        "scene_bindings_cleaned": 0,
-    }
-    if not ids:
-        return report
-    ph = ",".join("?" for _ in ids)
-    _uid_ready = (_columns_exist(c, "agent_runtimes", ("engine_uid",))
-                  and _columns_exist(c, "agent_type_runtime_pool", ("engine_uid",)))
-    drop_uids: list = []
-    keep_uid = ""
-    keep_name = ""
-    if _uid_ready:
-        try:
-            drop_uids = [r[0] for r in c.execute(
-                f"SELECT engine_uid FROM agent_runtimes WHERE id IN ({ph})", ids).fetchall() if r and r[0]]
-            if keep_id:
-                _kr = c.execute(
-                    "SELECT engine_uid, COALESCE(display_name, name), name FROM agent_runtimes WHERE id=?",
-                    (keep_id,)).fetchone()
-                if _kr and _kr[0]:
-                    keep_uid = _kr[0]
-                    keep_name = _kr[1] or _kr[2] or ""
-        except Exception:
-            drop_uids = []
-
-    # ── 1. agent_tasks：改绑（去重）或快照保留（删除，恢复走 redispatch 重绑） ──
-    try:
-        _n = c.execute(f"SELECT COUNT(*) FROM agent_tasks WHERE runtime_id IN ({ph})", ids).fetchone()[0]
-        if keep_id:
-            c.execute(f"UPDATE agent_tasks SET runtime_id=? WHERE runtime_id IN ({ph})", (keep_id, *ids))
-            report["tasks_rebound"] = _n
-            # QA 复审 R2：改绑后 uid 轨道补齐——「先回填去重（重复行 uid 置 NULL）再改绑」
-            # 顺序下，引用行 engine_uid 为 NULL，镜像 UPDATE IN(drop_uids) 匹配不到；
-            # 按保留行 uid/名称补齐（与 runtime_id 轨道一致，不留 NULL 尾巴）。
-            if keep_uid:
-                c.execute(
-                    "UPDATE agent_tasks SET engine_uid=?, "
-                    "engine_name_snapshot=CASE WHEN engine_name_snapshot IS NULL OR engine_name_snapshot='' "
-                    "THEN ? ELSE engine_name_snapshot END "
-                    "WHERE runtime_id=? AND (engine_uid IS NULL OR engine_uid='')",
-                    (keep_uid, keep_name, keep_id))
-        else:
-            report["tasks_snapshot_kept"] = _n
-    except Exception as _e:
-        log.warning(f"_rebind_runtime_references agent_tasks: {_e}")
-
-    # ── 2. 池/能力绑定：改绑（去重）或显式删除（删除路径，RESTRICT 兜底前清理） ──
-    for tbl, key_col, cnt_key in (("agent_type_runtime_pool", "agent_type", "pool_rows_deleted"),
-                                  ("engine_capabilities", "tag", "capability_rows_deleted")):
-        try:
-            if keep_id:
-                rows = c.execute(
-                    f"SELECT id, {key_col} FROM {tbl} WHERE runtime_id IN ({ph})", ids).fetchall()
-                for pid, key_val in rows:
-                    keep_row = c.execute(
-                        f"SELECT id FROM {tbl} WHERE runtime_id=? AND {key_col}=? LIMIT 1",
-                        (keep_id, key_val)).fetchone()
-                    if keep_row:
-                        c.execute(f"DELETE FROM {tbl} WHERE id=?", (pid,))
-                        report[cnt_key] += 1
-                    else:
-                        c.execute(f"UPDATE {tbl} SET runtime_id=? WHERE id=?", (keep_id, pid))
-                # uid 镜像统一指向保留行（旧行/双轨残留行补齐，防 RESTRICT 兜底误伤）
-                if drop_uids:
-                    _phu = ",".join("?" for _ in drop_uids)
-                    if keep_uid:
-                        c.execute(f"UPDATE {tbl} SET engine_uid=? WHERE engine_uid IN ({_phu})",
-                                  (keep_uid, *drop_uids))
-                    else:
-                        c.execute(f"UPDATE {tbl} SET engine_uid=NULL WHERE engine_uid IN ({_phu})",
-                                  drop_uids)
-                # QA 复审 R2：改绑到保留行的行 uid 为 NULL（去重回填置 NULL 顺序）时，
-                # IN(drop_uids) 匹配不到 → 按保留行 uid 补齐（uid 轨道不留 NULL）
-                if keep_uid:
-                    c.execute(
-                        f"UPDATE {tbl} SET engine_uid=? WHERE runtime_id=? AND (engine_uid IS NULL OR engine_uid='')",
-                        (keep_uid, keep_id))
-            else:
-                if drop_uids:
-                    _phu = ",".join("?" for _ in drop_uids)
-                    cond = f"runtime_id IN ({ph}) OR engine_uid IN ({_phu})"
-                    params = (*ids, *drop_uids)
-                else:
-                    cond = f"runtime_id IN ({ph})"
-                    params = tuple(ids)
-                report[cnt_key] = c.execute(
-                    f"SELECT COUNT(*) FROM {tbl} WHERE {cond}", params).fetchone()[0]
-                c.execute(f"DELETE FROM {tbl} WHERE {cond}", params)
-        except Exception as _e:
-            log.warning(f"_rebind_runtime_references {tbl}: {_e}")
-
-    # ── 3. 会话引用：改绑到保留行（去重）或置 0（删除，dashboard 红字如实反映无 engine）──
-    #    Issue #868 (T10)：同步 uid 轨道——改绑后镜像指向保留行 uid；孤儿/删除 uid 置 NULL
-    #    并入报告（不静默丢弃）；chat_agent_session 同步处理（缺列/缺表容错降级）。
-    for _tbl, _prefix in (("devops_agent_session", ""), ("chat_agent_session", "chat_")):
-        try:
-            _n = c.execute(
-                f"SELECT COUNT(*) FROM {_tbl} WHERE runtime_id IN ({ph})", ids).fetchone()[0]
-            if keep_id:
-                c.execute(f"UPDATE {_tbl} SET runtime_id=? WHERE runtime_id IN ({ph})",
-                          (keep_id, *ids))
-                report[_prefix + "sessions_rebound"] = _n
-            else:
-                c.execute(f"UPDATE {_tbl} SET runtime_id=0 WHERE runtime_id IN ({ph})", ids)
-                report[_prefix + "sessions_reset"] = _n
-            # uid 轨道对账：QA 复审——原 WHERE (engine_uid IS NULL OR engine_uid!='')
-            # 恒真且漏 engine_uid='' 行，sessions_uid_rebound 计数失真；
-            # 改为 NULL-safe 对账条件：仅同步 uid 与 runtime 行不一致的行
-            # （NULL/''/stale 均命中，已一致行不重写），计数 = 实际矫正行数；
-            # 孤儿残留 uid（runtime 行不存在）由下方置 NULL 语句处理（不静默丢弃）
-            # 二次复审（MySQL 1064）：语句抽取为 _session_uid_mirror_sql 跨方言写法
-            # （IS NOT 子查询为 SQLite 专用，MySQL 8.0 报 1064 被吞错）
-            if _columns_exist(c, _tbl, ("engine_uid",)):
-                _mirror = c.execute(_session_uid_mirror_sql(_tbl)).rowcount
-                report[_prefix + "sessions_uid_rebound"] = _mirror
-                _nulled = c.execute(
-                    f"SELECT COUNT(*) FROM {_tbl} WHERE engine_uid IS NOT NULL "
-                    f"AND runtime_id NOT IN (SELECT id FROM agent_runtimes)").fetchone()[0]
-                if _nulled:
-                    c.execute(
-                        f"UPDATE {_tbl} SET engine_uid=NULL WHERE runtime_id NOT IN (SELECT id FROM agent_runtimes)")
-                report[_prefix + "sessions_uid_nulled"] = _nulled
-        except Exception as _e:
-            if _tbl == "devops_agent_session":
-                log.warning(f"_rebind_runtime_references devops_agent_session: {_e}")
-            # chat_agent_session 为 chat 专用表（历史库可能缺列/缺表）：静默降级跳过 uid 轨道
-
-    # ── 4. devops_agent_runtime_binding（历史绑定表，库未建时容错跳过） ──
-    try:
-        if keep_id:
-            c.execute(f"UPDATE devops_agent_runtime_binding SET runtime_id=? WHERE runtime_id IN ({ph})",
-                      (keep_id, *ids))
-        else:
-            report["runtime_bindings_deleted"] = c.execute(
-                f"SELECT COUNT(*) FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})",
-                ids).fetchone()[0]
-            c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})", ids)
-    except Exception:
-        pass
-
-    # ── 5. 场景绑定（仅删除路径）：清理 nodes_json engine_runtime_ids 悬空引用 ──
-    if not keep_id:
-        try:
-            from src.domains.runtime.engine.engine_select import cleanup_scene_engine_bindings
-            report["scene_bindings_cleaned"] = cleanup_scene_engine_bindings(ids)
-        except Exception as _e:
-            log.warning(f"_rebind_runtime_references scene bindings: {_e}")
-
-    log.info(f"Issue #646 引用{mode}对账报告: {json.dumps(report, ensure_ascii=False)}")
-    return report
+    from src.domains.runtime.engine.refs_reconcile import reconcile_for_caller
+    return reconcile_for_caller(c, list(dup_ids or []), keep_id, reason=reason)
 
 
 def rebind_runtime_references(c, dup_ids: list, keep_id: int, reason: str = "") -> dict:

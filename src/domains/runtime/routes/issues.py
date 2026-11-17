@@ -26,6 +26,9 @@ from src.api.deps import get_current_user_or_api_key, require_no_session_token, 
 from src.api.pipeline_constants import DISPATCHABLE_AGENTS as _DEV_OPS_AGENTS
 
 from src.kernel.config import log
+from src.kernel.issue_ident import (
+    native_issue_number, normalize_issue_ident, is_actionable_issue_number,
+)  # Issue #3055
 
 
 class _OwnedCursor:
@@ -128,8 +131,8 @@ def _num_from_issue_id(issue_id: str) -> str:
     # D105 字符串 ident（gitee IK*）：无数字时返回去 # 原始 ident——
     # 此前回退 ''，gitee 事件被全量归到空键组，events/pipeline/detail 查不到
     # （2026-11-10 部署实例实测：IKUDWW events 返回空、pipeline 422）。
-    _ident = _raw.lstrip("#")
-    return _ident if re.fullmatch(r"[A-Z]{2,}[A-Z0-9]*", _ident) else ""
+    # Issue #3055：ident 判据转发内核唯一实现（禁止在此复制正则）
+    return normalize_issue_ident(_raw)
 
 def _enforce_session_repo_scope(user: dict, repo_keys: list[str]):
     """tk_ 会话 token 限定其绑定仓库：请求 repo_keys 含该 repo 才放行（防 agent 跨仓库读事件）。"""
@@ -429,9 +432,9 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
     latest = events[-1] if events else None
     # D105 字符串 ident：数字 ident 保持 int 契约不变；平台字符串 ident（gitee IK*）
     # 原样透传——对 IK* 裸强转 int 会抛 ValueError（2026-11-10 :3001 实测 500）。
-    _num = str(number)
+    # Issue #3055：数字→int（#995/#2072 契约），平台 ident 原样 str
     return {
-        "number": int(_num) if _num.isdigit() else _num,
+        "number": native_issue_number(number),
         # Issue #569：内部需求卡片 id（issue 表主键）——awaiting-input/pending-review/review-pass
         # 的 --issue_id 用此值；与 GitCode 侧 issue number 语义不同，与 git-repo issues get 的
         # id（GitCode 侧 id）不可混用。无 issue 卡片行（过渡期兜底）时为 null。
@@ -829,7 +832,8 @@ def _close_vcs_issues(repo_key: str, issue_number, user: dict) -> dict:
     # result，VCS 侧永不自动关闭（V1 实测：confirm-done 后 gitee issue 仍 open）。
     from src.domains.runtime.vcs.api_client import _native_issue_number
     issue_number = _native_issue_number(issue_number)
-    _ident_is_numeric = isinstance(issue_number, int) or str(issue_number).isdigit()
+    # Issue #3055：原生形态即判据——数字编号恒 int，平台 ident 恒 str
+    _ident_is_numeric = isinstance(issue_number, int)
 
     # 旧业务语义（用户裁定 2026-11-10 保留原方向性）：镜像外关仅
     # 「非 github 主仓 → 其 github 孪生行」单向（#656 口径）。github 主仓
@@ -1352,7 +1356,9 @@ def _load_issue_repo_scene(issue_id: int) -> tuple[str, int, str]:
     # 对全角 '２００' 也会转 int（依赖隐式特性，窄化边界处拒绝）。
     _raw_num = row[1] if row[1] is not None else 0
     _num_s = str(_raw_num).strip()
-    issue_number = int(_num_s) if _num_s and all('0' <= ch <= '9' for ch in _num_s) else _raw_num
+    # Issue #3055：数字串→int（#2072 契约），其余原样保留（不得 int() 强转 ident）
+    _norm_num = normalize_issue_ident(_raw_num)
+    issue_number = int(_norm_num) if _norm_num and _norm_num.isdigit() else _raw_num
     return row[0], issue_number, _scene_id
 
 @router.get("/{issue_id}/handoff/targets", operation_id="issues_handoff_targets",
@@ -1693,8 +1699,8 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
     if not irow:
         # Issue #667：卡片 id 无行 → 支持按 (会话仓库作用域, body.issue_number) 兜底解析：
         # 行已存在则复用；VCS 侧存在则 ensure_issue_task 自动补建（缺行同步缺口自动修复）。
-        _fb_num = int(getattr(body, "issue_number", 0) or 0)
-        if _fb_num > 0:
+        _fb_num = native_issue_number(getattr(body, "issue_number", 0) or 0)
+        if is_actionable_issue_number(_fb_num):
             from src.kernel.repo_key import to_repo_key as _trk
             _fb_repo = _trk(session_repo)
             with _dl:

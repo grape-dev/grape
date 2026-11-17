@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.kernel.config import log
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from src.kernel.lock import acquire_lock, release_lock
 from src.kernel.owner_db import db_pair
 db, db_lock = db_pair("runtime")
@@ -207,7 +208,7 @@ def _issue_row(repo_key: str, issue_number: str) -> dict:
             c.execute(
                 "SELECT issue_number, title, status, stage, owner_agent, scene_id, assignee "
                 "FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
-                (repo_key, int(issue_number)),
+                (repo_key, native_issue_number(issue_number)),
             )
             row = _row_dict(c, c.fetchone())
             return row or {}
@@ -1258,7 +1259,7 @@ def _advance_stage(repo_key: str, issue_number: str, current_agent: str) -> tupl
                 c = db.cursor()
                 c.execute("UPDATE issue SET status='completed', stage='done', completed_at=?, "
                           "completed_reason='takeover_done' WHERE repo_key=? AND issue_number=?",
-                          (_now_iso(), repo_key, int(issue_number)))
+                          (_now_iso(), repo_key, native_issue_number(issue_number)))
                 db.commit()
         except Exception as e:
             log.warning(f"takeover: mark issue done failed: {e}")

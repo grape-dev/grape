@@ -57,9 +57,9 @@ class TestUnbindWarehouseCheck:
 
     @patch("src.domains.mgmt.routes.grape_auth.auth_audit.log_audit")
     @patch("src.domains.mgmt.routes.grape_auth.get_user_identities", return_value=[])
-    @patch("src.domains.mgmt.routes.grape_auth.delete_external_identity", return_value=True)
-    @patch("src.domains.mgmt.routes.grape_auth.has_password", return_value=True)
-    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities", return_value=2)
+    @patch("src.domains.mgmt.auth.grape_account_db.delete_external_identity", return_value=True)
+    @patch("src.domains.mgmt.auth.grape_account_db.has_password", return_value=True)
+    @patch("src.domains.mgmt.auth.grape_account_db.count_user_identities", return_value=2)
     @patch("src.domains.mgmt.user.db.delete_credential")
     def test_unbind_no_active_warehouses(self, mock_del_cred, mock_count, mock_has_pwd,
                                           mock_delete, mock_identities, mock_audit, client):
@@ -71,8 +71,8 @@ class TestUnbindWarehouseCheck:
         assert r.status_code == 200
         assert "解绑成功" in r.json()["message"]
 
-    @patch("src.domains.mgmt.routes.grape_auth.has_password", return_value=True)
-    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities", return_value=2)
+    @patch("src.domains.mgmt.auth.grape_account_db.has_password", return_value=True)
+    @patch("src.domains.mgmt.auth.grape_account_db.count_user_identities", return_value=2)
     @patch("src.domains.mgmt.user.db.delete_credential")
     def test_unbind_with_active_warehouses_returns_409(self, mock_del_cred, mock_count, mock_has_pwd, client):
         """有正在使用仓库时返回 409 + 仓库列表。"""
@@ -90,9 +90,9 @@ class TestUnbindWarehouseCheck:
 
     @patch("src.domains.mgmt.routes.grape_auth.auth_audit.log_audit")
     @patch("src.domains.mgmt.routes.grape_auth.get_user_identities", return_value=[])
-    @patch("src.domains.mgmt.routes.grape_auth.delete_external_identity", return_value=True)
-    @patch("src.domains.mgmt.routes.grape_auth.has_password", return_value=True)
-    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities", return_value=2)
+    @patch("src.domains.mgmt.auth.grape_account_db.delete_external_identity", return_value=True)
+    @patch("src.domains.mgmt.auth.grape_account_db.has_password", return_value=True)
+    @patch("src.domains.mgmt.auth.grape_account_db.count_user_identities", return_value=2)
     @patch("src.domains.mgmt.user.db.delete_credential")
     def test_unbind_confirm_bypasses_warehouse_check(self, mock_del_cred, mock_count, mock_has_pwd,
                                                        mock_delete, mock_identities, mock_audit, client):

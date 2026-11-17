@@ -28,6 +28,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.kernel.config import log
+from src.kernel.issue_ident import (
+    native_issue_number, is_native_issue_ident,
+)  # Issue #3055
 
 from src.api.pipeline_constants import (
     PAUSED_ISSUE_STATUSES,
@@ -276,7 +279,11 @@ class ModeHandler(Handler):
         ctx.mode_payload = dict(st)
         # carried_context 一并恢复（在 issue 表，D15）
         try:
-            num = int(str(ctx.issue_id).lstrip("#"))
+            # Issue #3055：ident 保形（原 int() 对 gitee IK* 抛 ValueError → 静默丢上下文）
+            _raw_num = str(ctx.issue_id).lstrip("#")
+            if not is_native_issue_ident(_raw_num):
+                raise ValueError(f"invalid issue ident: {ctx.issue_id!r}")
+            num = native_issue_number(_raw_num)
             ctx.mode_payload["carried_context"] = get_carried_context(ctx.repo_key, num)
         except (ValueError, TypeError):
             ctx.mode_payload["carried_context"] = {}

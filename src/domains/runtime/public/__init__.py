@@ -1658,7 +1658,7 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # P3-5g 写原语（mgmt / insight 进程写 runtime 基表）
            "purge_user_rows", "delete_chat_conversations", "delete_vod_conversations",
            "detach_agent_sessions", "clear_agent_session_runtime", "ensure_agent_session",
-           "stamp_task_traces",
+           "stamp_task_traces", "reconcile_engine_references",
            # 飞书扫码 onboarding 换绑清理（任意拓扑原语；SQL 只留本模块）
            "vod_session_id_by_repo_any", "chat_conversations_delete_by_im_channel_any",
            "vod_conversation_delete_by_session_any", "vod_agent_session_ensure_any",
@@ -1773,6 +1773,10 @@ def xwrite_apply(action: str, payload: dict[str, Any], idempotency_key: str) -> 
             str(p.get("updated_at", ""))),
         "repo_credential_clear": lambda p: {"cleared": clear_repo_credential(
             str(p["repo_key"]), str(p["cred_type"]), str(p.get("updated_at", "")))},
+        # Issue #3097：mgmt 删用户/合并账号时引用对账失败的重放（幂等）
+        "engine_refs_reconcile": lambda p: reconcile_engine_references(
+            list(p.get("runtime_ids") or []), int(p.get("keep_id") or 0),
+            reason=str(p.get("reason") or "")),
     }
     fn = handlers.get(action)
     if fn is None:
@@ -4487,6 +4491,24 @@ def _any_tx():
             except Exception as exc:  # noqa: BLE001 - 回滚失败不掩盖原异常
                 log.debug(f"runtime public rollback skipped: {exc}")
             raise
+
+
+def reconcile_engine_references(runtime_ids: list, keep_id: int = 0, reason: str = "") -> dict:
+    """Issue #3097：引擎行引用对账的跨域写原语（供 mgmt 等**非 runtime 进程**调用）。
+
+    为什么需要这个原语：引用对账碰的 6 张表（agent_runtimes / agent_tasks /
+    agent_type_runtime_pool / engine_capabilities / devops_agent_session /
+    chat_agent_session）按 `docs/weekly-11/table-owner.tsv` 全归 runtime 库。
+    其它进程若拿自己的游标执行这些 SQL，三库拓扑下每条都是 1146 —— 因此跨进程调用
+    必须落到 **runtime 域连接**上：`_any_tx()` 在自有 DSN 时开 runtime 真事务连接
+    （独立提交，调用方事务不含这些表的写），单库/复用进程库时回落进程库。
+
+    判定逻辑在 `engine.refs_reconcile.RuntimeRefReconciler`；本函数只做通道接线。
+    """
+    from src.domains.runtime.engine.refs_reconcile import reconcile_runtime_references
+
+    with _any_tx() as c:
+        return reconcile_runtime_references(c, list(runtime_ids or []), keep_id, reason=reason)
 
 
 def upsert_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "",

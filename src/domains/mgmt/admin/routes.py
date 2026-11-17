@@ -992,6 +992,34 @@ def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_a
 class AuthChannelsBody(BaseModel):
     providers: dict  # {provider: {name, type, auth_url, ..., client_id?, client_secret?}}
 
+def _channel_secret_set(provider: str) -> bool:
+    """表内 client_secret_enc 可解即视为「已配置」；表不可用/空值时回退 meta（过渡）。
+
+    Issue #3054 QA：原实现读 meta，而运行时凭据来自表 —— 两处不同源会出现
+    「页面显示已配置，实际登录用空 secret」。
+    """
+    try:
+        from sqlalchemy.orm import Session
+
+        from src.domains.mgmt.auth.credential_crypto import decrypt
+        from src.kernel.persistence.engine import get_engine
+        from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
+        with Session(get_engine()) as s:
+            row = OAuthChannelRepo.get(s, provider)
+            blob = str(getattr(row, "client_secret_enc", "") or "") if row else ""
+        if blob:
+            try:
+                return bool(decrypt(blob))
+            except Exception:  # noqa: BLE001  密文坏掉 → 视为未配置（不回退明文）
+                return False
+    except Exception:  # noqa: BLE001  表不可用 → 回退 meta（过渡期）
+        pass
+    from src.domains.mgmt.user.db import get_meta_value
+
+    return bool(get_meta_value(f"oauth_{provider}_client_secret"))
+
+
 @router.get("/auth-channels", operation_id="admin_auth_channels_list",
             summary="List login channel cards (oauth login providers, creds masked)")
 def auth_channels_list(admin: dict = Depends(require_admin)):
@@ -1013,7 +1041,7 @@ def auth_channels_list(admin: dict = Depends(require_admin)):
             "configured": bool(_get_client_id(provider)),
             "card": full,
             "client_id": _get_client_id(provider) or "",
-            "client_secret_set": bool(get_meta_value(f"oauth_{provider}_client_secret")),
+            "client_secret_set": _channel_secret_set(provider),
         })
     return {"providers": out}
 
@@ -1060,9 +1088,39 @@ def auth_channels_put(body: AuthChannelsBody, admin: dict = Depends(require_admi
     # 基线 = 文件卡真源（configs/oauth-providers.json），不再引用代码内置表：
     # 保存动作不得把"代码里的平台"写回 DB，否则解耦被管理面悄悄撤销。
     extra_meta = {}
+    # Issue #3054 QA：client_secret 只写 mgmt 域的表 grape_t_oauth_channels（owner=mgmt），
+    # meta（owner=runtime、经 runtime public 原语写）只留非敏感 client_id —— 不再把明文
+    # secret 复制进 meta。编辑留空（csec 为空）= 不修改。
+    from sqlalchemy.orm import Session as _Session
+
+    from src.domains.mgmt.auth.credential_crypto import encrypt as _cred_encrypt
+    from src.kernel.persistence.engine import get_engine
+    from src.kernel.persistence.repositories_platform_object import OAuthChannelRepo
+
     for provider, (cid, csec) in creds.items():
         extra_meta[f"oauth_{provider}_client_id"] = cid
-        extra_meta[f"oauth_{provider}_client_secret"] = csec
+        if not csec:
+            continue
+        try:
+            with _Session(get_engine()) as _s:
+                ok = OAuthChannelRepo.set_client_credentials(
+                    _s, provider, _cred_encrypt(cid or ""), _cred_encrypt(csec))
+                _s.commit()
+            if not ok:
+                # 渠道行尚未派生（表无该 provider）：回退 meta 保住凭据，记 warn 待迁移补齐
+                # 过渡口注记（QA 已确认属有意保留，不是遗漏）：
+                #   保留条件 —— 只有「grape_t_oauth_channels 无该 provider 行」或
+                #   「写加密表失败」两种情况下才回退，避免运维改渠道配置时把唯一凭据丢掉；
+                #   退出条件 —— 渠道行派生迁移补齐、且 set_client_credentials 连续成功一轮后，
+                #   删掉这两处 extra_meta 赋值，届时 meta 里只允许 client_id。
+                #   遗留风险（已知）—— 回退期间 meta 里是明文 secret，能读 meta 的进程都能看到；
+                #   每次回退都打 warning，监控侧按 "client_secret 回退 meta" 抓即可。
+                extra_meta[f"oauth_{provider}_client_secret"] = csec
+                log.warning(f"auth-channels: {provider} 表行缺失，client_secret 回退 meta 过渡")
+        except Exception as _e:  # noqa: BLE001  写表失败不得静默丢凭据
+            # 同上注记（过渡口）：写加密表失败也回退 meta，条件与退出条件一致
+            extra_meta[f"oauth_{provider}_client_secret"] = csec
+            log.warning(f"auth-channels: {provider} 凭据写表失败，回退 meta: {_e}")
     merged = _rt.merge_meta_json_any("oauth_providers_config", protocol_cards,
                                      base=builtin_channels(), extra=extra_meta)
     invalidate_provider_cache()

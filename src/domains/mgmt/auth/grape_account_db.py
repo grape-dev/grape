@@ -6,6 +6,7 @@ Grape 账号表（grape_accounts）只存账号自身字段，不含任何第三
 
 import time
 
+from src.domains.mgmt.auth.business_data import BusinessDataProbe, legacy_table_tuples
 from src.kernel.config import log
 
 
@@ -160,8 +161,12 @@ def create_grape_account_oauth(
     email_source: 记录邮箱来源（gitcode/github/user），解绑时按来源清理 placeholder 邮箱。
     占位账号: 空邮箱时 email_is_placeholder=1，created_by_oauth=1。
     """
-    email = (email or "").lower().strip() or None
-    is_placeholder = 1 if not email else 0
+    raw_email = (email or "").lower().strip() or None
+    # Issue #3054：provider 私有/中转邮箱（gitee noreply 等）不可收信，不能按真实邮箱
+    # 落库（否则占 email 唯一键、把登录推进二选一页）。归一判定单一来源见 identity_email。
+    from src.domains.mgmt.auth.identity_email import ProviderEmailPolicy
+
+    email_stored, is_placeholder = ProviderEmailPolicy.for_storage(raw_email)
     uid = uuid7_str()                   # D105 第二批：主键应用层 UUIDv7（插入即所得）
     try:
         with db_lock:
@@ -171,22 +176,69 @@ def create_grape_account_oauth(
                 "(id, username, email, email_source, password_hash, nickname, avatar_url, "
                 "status, token_version, email_verified, email_is_placeholder, created_by_oauth) "
                 "VALUES (?,?,?,?, '',?,?,1,0,?,?,1)",
-                (uid, username, email, provider, nickname, avatar_url,
+                (uid, username, email_stored, provider, nickname, avatar_url,
                  1 if email_verified else 0, is_placeholder),
             )
             _mg_db.commit()
             log.info(f"Grape account created (OAuth): {username} (id={uid}, placeholder={is_placeholder})")
-            return {"id": uid, "username": username, "email": email or ""}
+            return {"id": uid, "username": username, "email": email_stored or ""}
     except Exception as e:
         err_str = str(e).lower()
         if "unique" in err_str and "username" in err_str:
             log.warning(f"Create grape account (OAuth) username conflict: {username}")
             return "username_conflict"
         if "unique" in err_str and "email" in err_str:
-            log.warning(f"Create grape account (OAuth) email conflict: {email}")
+            log.warning(f"Create grape account (OAuth) email conflict: {email_stored}")
             return "email_conflict"
         log.warning(f"Create grape account (OAuth) failed: {e}")
         return None
+
+def release_failed_signup_account(user_id: str) -> bool:
+    """OAuth 建号后中途失败的回滚：释放 email / username，不进冷静期占坑。
+
+    与 `soft_delete_account`（用户主动注销：冷静期 30 天保留 email/username 以便恢复）
+    语义不同：这类账号从未被用户使用，若按冷静期保留，同一邮箱/用户名在 30 天内对
+    所有人不可用，且同一第三方账号重登仍撞唯一键、再次落回「注册新账号 / 关联已有
+    账号」二选一页（Issue #3054 验收缺口）。
+
+    做法（同一事务）：
+    - grape_accounts：status=3、email=NULL、email_is_placeholder=1、
+      username 追加 `_void_<id 前 8 位>` 后缀（释放用户名唯一键，同时留可审计痕迹）；
+    - external_identities：该用户所有身份行置 status=0 并清 token（与注销级联同口径）。
+    """
+    import time as _time
+
+    now = _time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with db_lock:
+            c = _mg_db.cursor()
+            c.execute("SELECT username FROM grape_accounts WHERE id=? AND status=1", (user_id,))
+            row = c.fetchone()
+            if not row:
+                _mg_db.commit()
+                return False
+            suffix = "_void_" + str(user_id)[:8]
+            void_name = (f"{row[0] or 'user'}{suffix}")[:64]
+            c.execute(
+                "UPDATE grape_accounts SET status=3, email=NULL, email_is_placeholder=1, "
+                "username=?, updated_at=? WHERE id=? AND status=1",
+                (void_name, now, user_id),
+            )
+            if c.rowcount <= 0:
+                _mg_db.commit()
+                return False
+            c.execute(
+                "UPDATE external_identities SET status=0, access_token='', "
+                "refresh_token='', token_expires_at='', updated_at=? "
+                "WHERE grape_user_id=? AND status IN (1,4)",
+                (now, user_id),
+            )
+            _mg_db.commit()
+            log.info(f"failed signup rolled back: id={user_id} username→{void_name} (email released)")
+            return True
+    except Exception as e:
+        log.warning(f"release_failed_signup_account failed: {e}")
+        return False
 
 def get_grape_account_by_id(user_id: str) -> "dict | None":
     """按 ID 查询 Grape 账号。"""
@@ -448,22 +500,13 @@ def get_status_and_token_version(user_id: str) -> "tuple[int, int, str] | None":
 def is_placeholder_email(email: str, email_source: str = "") -> bool:
     """检查是否为 OAuth 提供商生成的 placeholder 邮箱。
 
-    placeholder 邮箱不可收信、不可找回密码，不参与冲突检查。
-    判断方式：
-    1. email_source 非 'user' 且邮箱包含 noreply 域名 → placeholder
-    2. 仅靠域名匹配（兼容 email_source 缺失时的老数据）
+    Issue #3054：判定单一来源迁到 `auth/identity_email.ProviderEmailPolicy`（域名后缀
+    匹配，覆盖 gitee/gitcode/github/gitlab/apple 私有中转邮箱）。本函数保留为兼容别名，
+    新增域名只需改那一个模块。
     """
-    if not email:
-        return False
-    e = email.lower()
-    is_noreply = "noreply.gitcode.com" in e or "noreply.github.com" in e
-    if not is_noreply:
-        return False
-    # noreply 邮箱 + email_source 非 'user' → 确认是 placeholder
-    if email_source and email_source != "user":
-        return True
-    # email_source 缺失时，noreply 域名即可判定（兼容老数据）
-    return True
+    from src.domains.mgmt.auth.identity_email import ProviderEmailPolicy
+
+    return ProviderEmailPolicy.is_private(email)
 
 def is_email_registered(email: str) -> bool:
     """检查邮箱是否已注册（激活状态或冷静期）。
@@ -514,7 +557,14 @@ def is_username_taken(username: str) -> bool:
         return False
 
 def soft_delete_account(user_id: str) -> bool:
-    """软删除账号（标记为冷静期 status=3）。"""
+    """软删除账号（标记为冷静期 status=3）+ 级联失效第三方身份行。
+
+    P3-3（状态机/生命周期）：原实现只改 grape_accounts.status，身份行仍是
+    status=1 且保留 token——注销后 OAuth 再登录会命中「已绑定」分支，只报
+    「账号已禁用」，与历史绑定分支的 deleted/cooldown 文案不一致，且凭据在
+    冷静期内仍可被取回。现在同一事务内把该用户 external_identities 置 status=0
+    并清空 access_token/refresh_token/token_expires_at。
+    """
     # D46 P1-14: 用 Python 时间戳替代 datetime('now')，兼容 MySQL
     import time as _time
     now = _time.strftime("%Y-%m-%d %H:%M:%S")
@@ -526,50 +576,51 @@ def soft_delete_account(user_id: str) -> bool:
                 "WHERE id=? AND status=1",
                 (now, user_id),
             )
+            if c.rowcount <= 0:
+                _mg_db.commit()
+                return False
+            # 级联：注销账号不再持有任何可登录的第三方身份 / 凭据，**并释放**
+            # UNIQUE(provider, external_id)（旧值进墓碑；Issue #3054 遗留缺口）。
+            # 判定/SQL 在 identity_lifecycle.release_on_deactivation（状态机单一来源）。
+            from src.domains.mgmt.auth.identity_lifecycle import IdentityLifecycleService
+
+            IdentityLifecycleService().release_on_deactivation(c, user_id, now)
             _mg_db.commit()
-            return c.rowcount > 0
+            return True
     except Exception as e:
         log.warning(f"Soft delete account failed: {e}")
         return False
 
-def get_external_identity(provider: str, external_id: str) -> "dict | None":
-    """按平台 ID 查询活跃绑定关系。D10: access_token/refresh_token 解密。
-    D22: 只查 status=1 的活跃绑定。
+# Issue #3054 P2：身份行状态机（status=4 恢复/解绑释放/换绑墓碑/一次性票据）
+# 收进 identity_lifecycle.IdentityLifecycleService，本文件只保留薄转发——
+# 避免状态判断与 SQL 散落到调用方（路由/账号模块）。
+# 服务实例在文件底部 import 段绑定（避免模块级循环导入）。
+
+
+def get_external_identity(provider: str, external_id: str,
+                          statuses: "tuple[int, ...]" = (1,)) -> "dict | None":
+    """按平台 ID 查询绑定关系（token 已解密）。D22: 默认只查 status=1。
+
+    Issue #3054 P2-1：登录决策链传 statuses=(1, 4)——status=4 是「绑定仍在、token
+    过期」，必须仍被认作已绑定（否则重登会走建号/绑定失败 → status=3 孤儿账号）。
+    其它调用方（绑定冲突判定等）保持默认 (1,)，语义不变。
     """
-    from src.domains.mgmt.auth.credential_crypto import decrypt
-    # S79：ORM 路径（DTO 携带 DB 原值=密文，解密与裸 SQL 路径同位）
-    try:
-        with _uow() as session:
-            from src.kernel.persistence.engine import get_engine as _ge
-            d = _iar.get_by_platform(session, provider, external_id, statuses=(1,))
-        if not d:
-            return None
-        return {
-            "id": d.id, "grape_user_id": d.grape_user_id, "provider": d.provider,
-            "external_id": d.external_id, "external_login": d.external_login,
-            "external_name": d.external_name, "external_avatar": d.external_avatar,
-            "access_token": _safe_decrypt(d.access_token or ""),
-            "refresh_token": _safe_decrypt(d.refresh_token or ""),
-        }
-    except Exception as e:
-        log.warning(f"Get external identity failed: {e}")
-        return None
+    return _identity_lifecycle.get(provider, external_id, statuses=statuses)
+
 
 def get_external_identity_any_status(provider: str, external_id: str) -> "dict | None":
-    """按平台 ID 查询绑定关系（含解绑记录 status=0）。
+    """按平台 ID 查询绑定关系（含解绑 status=0 / 过期 status=4）。
 
-    BUG-6 修复：用于 oauth_associate/oauth_register 检查是否存在解绑记录。
-    如果解绑记录属于其他用户，不允许恢复绑定。
+    BUG-6 修复：用于 oauth_associate/oauth_register 检查是否存在历史记录。
+    历史记录属于其他用户时，不允许静默恢复绑定（合法路径是票据/转移）。
     """
-    try:
-        with _uow() as session:
-            d = _iar.get_by_platform_any_status(session, provider, external_id)
-        if not d:
-            return None
-        return {"id": d.id, "grape_user_id": d.grape_user_id, "status": d.status}
-    except Exception as e:
-        log.warning(f"Get external identity any status failed: {e}")
-        return None
+    return _identity_lifecycle.get_any_status(provider, external_id)
+
+
+def find_identity_by_tombstone(provider: str, external_id: str) -> "dict | None":
+    """按墓碑（曾绑定过的旧 external_id）反查归属行（Issue #3054 P2-2）。"""
+    return _identity_lifecycle.find_tombstone(provider, external_id)
+
 
 def get_user_identities(grape_user_id: str) -> list[dict]:
     """获取用户的所有第三方活跃绑定（不含 access_token，防止 token 泄露到前端）。
@@ -738,107 +789,34 @@ def create_external_identity(
     refresh_token: str = "",
     expires_in: int = 0,
 ) -> bool:
-    """创建或恢复第三方绑定关系。D10: access_token/refresh_token 加密存储。
+    """创建/恢复/换绑第三方绑定（token 加密存储）。
 
-    BUG-6 修复：如果存在 status=0 的解绑记录（曾绑定后解绑），
-    恢复为 status=1 并更新 token/用户信息，而非 INSERT（会因 UNIQUE 约束冲突失败）。
+    BUG-6 + Issue #3054 P2：一人一平台一行（UNIQUE(grape_user_id, provider)），
+    换绑/解绑恢复/过期后重登统一由 IdentityLifecycleService.bind 复用本行，
+    旧 external_id 进 metadata 墓碑。
     """
-    from src.domains.mgmt.auth.credential_crypto import encrypt
-    import time as _time
-    _expires_at_str = ""
-    if expires_in:
-        _expires_at_str = _time.strftime("%Y-%m-%d %H:%M:%S",
-                                         _time.gmtime(_time.time() + expires_in))
+    return _identity_lifecycle.bind(
+        grape_user_id=grape_user_id, provider=provider, external_id=external_id,
+        external_login=external_login, external_name=external_name,
+        external_avatar=external_avatar, access_token=access_token,
+        refresh_token=refresh_token, expires_in=expires_in)
 
-    # S79：ORM 路径——三分支语义（活跃重绑/解绑恢复/新建）与加密同位
-    try:
-        _now = _time.strftime("%Y-%m-%d %H:%M:%S")
-        _at_cipher, _rt_cipher = encrypt(access_token), encrypt(refresh_token)
-        with _uow() as session:
-            active = _iar.get_active_by_user_provider(session, grape_user_id, provider)
-            if active is not None:
-                _prev_ext = str(getattr(active, "external_id", "") or "")
-                if _prev_ext and _prev_ext != str(external_id):
-                    # 同平台换账号（换 PAT）。表约束 UNIQUE(grape_user_id, provider)
-                    # 决定同一用户每平台只留一行——旧身份无法另存为解绑行。
-                    # 原实现直接原地改 external_id：目标身份若已有行会撞
-                    # UNIQUE(provider, external_id)，异常被外层 catch 成 return False，
-                    # 而调用方多已写入凭据 → 半成功且无提示。此处显式处理：
-                    # 目标被他人占用 → 拒绝；目标为本用户旧历史行 → 先删再切换。
-                    _other = _iar.get_by_platform_any_status(session, provider, str(external_id))
-                    if (_other is not None
-                            and str(getattr(_other, "grape_user_id", "") or "") != str(grape_user_id)):
-                        log.warning(
-                            "create_external_identity: target identity owned by another user "
-                            "provider=%s external_id=%s owner=%s caller=%s",
-                            provider, external_id,
-                            getattr(_other, "grape_user_id", ""), grape_user_id)
-                        return False
-                    if _other is not None:
-                        _iar.delete_by_id(session, _other.id)
-                    log.warning(
-                        "create_external_identity: switch platform account provider=%s user=%s "
-                        "external_id %s -> %s (single active row per platform; previous "
-                        "identity is replaced by constraint)",
-                        provider, grape_user_id, _prev_ext, external_id)
-                _iar.update_by_id(session, active.id, external_id, external_login,
-                                  external_name, external_avatar or (active.external_avatar or ""),
-                                  _at_cipher, _rt_cipher, _expires_at_str, _now, status=1)
-                return True
-            unbound = _iar.get_by_platform(session, provider, external_id, statuses=(0, 4))
-            if unbound is not None:
-                # 归属守卫（2026-11-13）：他人的解绑记录不得静默复活。
-                # 原实现只把 status 改回 1、不改 grape_user_id，一旦调用方漏查
-                # any_status（settings 泛型 platform_tokens 路径曾如此），就会
-                # 出现「身份行仍归 A、PAT 凭据写进 B、前端提示绑定成功」的半转移
-                # 态——既没转移也没报错。合法转移走 transfer_external_identity
-                #（INSERT 新归属行），因此这里只拒绝，不做隐式改归属。
-                if str(getattr(unbound, "grape_user_id", "") or "") != str(grape_user_id):
-                    log.warning(
-                        "create_external_identity: refuse to revive other user's unbound "
-                        "identity provider=%s external_id=%s owner=%s caller=%s",
-                        provider, external_id,
-                        getattr(unbound, "grape_user_id", ""), grape_user_id)
-                    return False
-                _iar.update_by_id(session, unbound.id, external_id, external_login,
-                                  external_name, external_avatar or (unbound.external_avatar or ""),
-                                  _at_cipher, _rt_cipher, _expires_at_str, _now, status=1)
-                return True
-            _iar.create(session, grape_user_id, provider, external_id, external_login,
-                        external_name, external_avatar or "", _at_cipher, _rt_cipher,
-                        _expires_at_str, status=1, created_at=_now)
-        return True
-    except Exception as e:
-        log.warning(f"Create external identity failed: {e}")
-        return False
 
 def delete_external_identity(grape_user_id: str, provider: str,
                              require_keep_one: bool = True) -> bool:
-    """软删除第三方绑定关系（D22: 改为 status=0，不硬删除）。
+    """软删绑定（status=0，清 token）；status=4 可解绑并释放 UNIQUE 键。
 
-    清空 access_token/refresh_token（安全），保留 external_id 哈希记录用于恢复绑定。
-    require_keep_one: 为 True 时，原子检查并保证删除后至少保留一种登录方式
-    （密码或至少一个活跃第三方绑定），防止并发解绑导致用户失去所有登录方式。
+    Issue #3054 P2-1：status=4 与 status=1 同等可解绑；status=4 解绑额外
+    记墓碑 + 换行级占位 external_id（释放 UNIQUE(provider, external_id)）。
+    require_keep_one: 删除后必须仍有一种登录方式（密码或另一条可用绑定）。
+
+    Issue #3054 P3-1：「至少保留一种登录方式」的判据在
+    `IdentityLifecycleService.unbind` 的单条条件 UPDATE 内求值（并发解绑由数据库
+    语句原子性裁决 ≥ 一端失败），此处只做参数整形与委托。
     """
-    import time as _time
-    now = _time.strftime("%Y-%m-%d %H:%M:%S")
-    # S79：ORM 路径——require_keep_one 原子语义由 UoW 事务 + 状态检查保持
-    try:
-        with _uow() as session:
-            active = _iar.list_by_user_statuses(session, grape_user_id, statuses=(1,))
-            if require_keep_one and len(active) <= 1 and not has_password(grape_user_id):
-                return False  # 拒绝删除：会失去所有登录方式
-            target = next((d for d in active if d.provider == provider), None)
-            if target is None:
-                return False  # 无活跃绑定（等价 rowcount=0）
-            _iar.update_by_id(session, target.id, target.external_id,
-                              target.external_login, target.external_name,
-                              target.external_avatar, "", "", "",
-                              updated_at=now, status=0)
-        return True
-    except Exception as e:
-        log.warning(f"Delete external identity failed: {e}")
-        return False
+    return _identity_lifecycle.unbind(
+        grape_user_id, provider, require_keep_one=require_keep_one,
+        user_has_password=has_password(grape_user_id))
 
 def is_placeholder_account_mergeable(grape_user_id: str) -> bool:
     """检查占位账号是否可安全自动转移绑定。
@@ -879,44 +857,26 @@ def is_placeholder_account_mergeable(grape_user_id: str) -> bool:
             if ident_count != 1:
                 return False
             # 业务数据检查：有业务数据的占位账号不能自动转移
-            return not _has_business_data(c, grape_user_id)
+            return not _has_business_data(grape_user_id, c)
     except Exception as e:
         log.warning(f"is_placeholder_account_mergeable failed: {e}")
         return False
 
-# (table, user_id_column, where_clause) — where_clause 为额外过滤条件，空字符串表示无
-_BUSINESS_TABLES = [
-    ("user_repos",         "user_id", "is_admin=1"),    # 只检查托管仓库，普通缓存可重建
-    ("agent_tasks",        "user_id", ""),
-    ("chat_agent_session", "user_id", ""),
-    ("chat_conversations", "user_id", ""),
-    ("issue",              "user_id", ""),
-    ("user_feedback",      "user_id", ""),
-    ("user_credentials",   "user_id", ""),
-    ("api_tokens",         "user_id", ""),
-    ("session_api_tokens", "user_id", ""),
-    ("scene_likes",        "user_id", ""),
-    ("skill_likes",        "user_id", ""),
-]
+# 业务表清单与判定逻辑见 `auth/business_data.py`（Issue #3097：跨域表走 reader，
+# 缺表/不可读 = 视为无数据 + 结构化 warn）。此处保留旧三元组结构供
+# `transfer_business_data`（数据转移写路径）迭代，单一来源仍是那个模块。
+_BUSINESS_TABLES = legacy_table_tuples()
 
-def _has_business_data(cursor, grape_user_id: str) -> bool:
-    """检查指定用户是否有业务数据。在调用方的 db_lock 内执行。
 
-    任何一张业务表有数据即返回 True。
+def _has_business_data(grape_user_id, cursor=None) -> bool:
+    """占位账号「是否有业务数据」判定（薄接线，零判定逻辑）。
+
+    判定、读通道（本域表用调用方游标；runtime 表走 runtime public 具名读原语）与
+    缺表语义全在 `auth/business_data.py::BusinessDataProbe`：缺表/不可读 = 视为无数据
+    + 结构化 warn（不再「保守判有数据」，否则三库拓扑下占位账号自动合并永久失效）。
     """
-    for table, col, extra_where in _BUSINESS_TABLES:
-        where = f"{col}=?"
-        if extra_where:
-            where += f" AND {extra_where}"
-        try:
-            cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", (grape_user_id,))
-            if cursor.fetchone()[0] > 0:
-                return True
-        except Exception as e:
-            # 表可能不存在（旧库未迁移），保守认为有数据
-            log.warning(f"_has_business_data: table {table} check failed: {e}")
-            return True
-    return False
+    return BusinessDataProbe(cursor=cursor).has_business_data(grape_user_id)
+
 
 def transfer_business_data(from_user_id: str, to_user_id: str) -> bool:
     """将一个用户的全部业务数据转移到另一个用户。在调用方的 db_lock + 事务内执行。
@@ -958,6 +918,14 @@ def transfer_business_data(from_user_id: str, to_user_id: str) -> bool:
             log.warning(f"transfer_business_data: table {table} failed: {e}")
             # 不 return False——继续转移其他表，最终返回 False 让调用方决定是否回滚
             return False
+    # runtime 归属表（agent_tasks / 会话 / 对话 / issue）的转移走契约：
+    # 表名与 UPDATE 语句不出域（Issue #3097 三库四进程）；失败返回 False 让调用方回滚。
+    try:
+        from src.kernel.provider import get_runtime_service
+        get_runtime_service().transfer_user_business_data(from_user_id, to_user_id)
+    except Exception as e:
+        log.warning(f"transfer_business_data: runtime business rows transfer failed: {e}")
+        return False
     return True
 
 def transfer_external_identity_in_tx(cursor, new_user_id: str, provider: str,
@@ -974,27 +942,29 @@ def transfer_external_identity_in_tx(cursor, new_user_id: str, provider: str,
     try:
         c = cursor
         # 1. 旧绑定标记为 transferred（status=0, 清 token）
+        # Issue #3054 P2：status=4（token 过期）同样是「已有绑定」，转移后不得继续
+        # 占用 UNIQUE(provider, external_id)——owner 已放弃却占键 = 转移必失败。
         if original_user_id:
             c.execute(
                 "UPDATE external_identities SET status=0, access_token='', refresh_token='', "
-                "unbound_at=? WHERE grape_user_id=? AND provider=? AND status=1",
+                "unbound_at=? WHERE grape_user_id=? AND provider=? AND status IN (1, 4)",
                 (now, original_user_id, provider),
             )
-        # 检查并处理目标用户已有的同 provider 活跃绑定（status=1）
+        # 检查并处理目标用户已有的同 provider 活跃绑定（status=1/4）
         # 用条件 UPDATE 代替 SELECT+UPDATE，避免 MySQL auto-commit 架空事务
         c.execute(
             "UPDATE external_identities SET status=0, access_token='', refresh_token='', "
-            "unbound_at=? WHERE grape_user_id=? AND provider=? AND status=1",
+            "unbound_at=? WHERE grape_user_id=? AND provider=? AND status IN (1, 4)",
             (now, new_user_id, provider),
         )
-        # 清理同 provider+external_id 的旧解绑记录（防止 UNIQUE 冲突）
+        # 清理同 provider+external_id 的旧记录（status 0/4），防止 UNIQUE 冲突
         c.execute(
-            "DELETE FROM external_identities WHERE provider=? AND external_id=? AND status=0",
+            "DELETE FROM external_identities WHERE provider=? AND external_id=? AND status IN (0, 4)",
             (provider, external_id),
         )
-        # 清理目标用户已有的同 provider 旧记录（status=0），防止 UNIQUE(grape_user_id, provider) 冲突
+        # 清理目标用户已有的同 provider 旧记录（status 0/4），防止 UNIQUE(grape_user_id, provider) 冲突
         c.execute(
-            "DELETE FROM external_identities WHERE grape_user_id=? AND provider=? AND status=0",
+            "DELETE FROM external_identities WHERE grape_user_id=? AND provider=? AND status IN (0, 4)",
             (new_user_id, provider),
         )
         # 2. 创建新活跃绑定
@@ -1193,14 +1163,23 @@ def clear_placeholder_email(user_id: str, provider: str) -> bool:
         log.warning(f"clear_placeholder_email failed: {e}")
         return False
 
-def count_user_identities(grape_user_id: str) -> int:
-    """统计用户的第三方活跃绑定数量。D22: 只计 status=1。"""
+def count_user_identities(grape_user_id: str, statuses: tuple = (1,)) -> int:
+    """统计用户的第三方绑定数量。
+
+    D22 默认只计 status=1（活跃）。Issue #3054 QA：status=4 是「绑定仍在、token 过期」，
+    重新授权即可恢复，同样构成一种可用登录方式——「至少保留一种登录方式」的判据
+    必须传 statuses=(1, 4)，否则持有 (1) + (4) 的无密码用户会被前置闸 400 挡住，
+    服务层那条原子解绑判据根本走不到。
+    """
     try:
+        wanted = tuple(int(s) for s in (statuses or (1,)))
+        ph = ",".join("?" for _ in wanted)
         with db_lock:
             c = _mg_db.cursor()
             c.execute(
-                "SELECT COUNT(*) FROM external_identities WHERE grape_user_id=? AND status=1",
-                (grape_user_id,),
+                f"SELECT COUNT(*) FROM external_identities WHERE grape_user_id=? "
+                f"AND status IN ({ph})",
+                (grape_user_id, *wanted),
             )
             return c.fetchone()[0]
     except Exception:
@@ -1231,34 +1210,16 @@ def update_external_identity_tokens(
     external_name: str = "",
     external_avatar: str = "",
 ) -> bool:
-    """更新第三方绑定的 token 和用户信息（每次 OAuth 登录刷新）。D10: token 加密存储。
+    """每次 OAuth 授权刷新 token；status=4（过期）随之恢复 status=1。
 
-    Issue #372 R10: 更新时无条件设置 status=1，会将 status=4（token 过期）的记录恢复为活跃。
-    这是设计意图——token 刷新成功即代表凭据重新有效，应清除过期状态。
+    Issue #372 R10 + #3054 P2-1：一次新授权即代表凭据重新有效——服务层在
+    status=4 → 1 时打 ``identity_status4_recovered`` 结构化事件。
     """
-    from src.domains.mgmt.auth.credential_crypto import encrypt
-    # S79：ORM 路径——无条件恢复 status=1（R10 语义：刷新成功即凭据重有效）
-    import time as _time
-    try:
-        _now = _time.strftime("%Y-%m-%d %H:%M:%S")
-        with _uow() as session:
-            ds = _iar.list_by_user_statuses(session, grape_user_id, statuses=(1, 4))
-            target = next((d for d in ds if d.provider == provider), None)
-            if target is None:
-                return False
-            _iar.update_by_id(session, target.id, target.external_id,
-                              target.external_login,
-                              external_name or target.external_name,
-                              external_avatar or target.external_avatar,
-                              encrypt(access_token) if access_token else target.access_token,
-                              encrypt(refresh_token) if refresh_token else target.refresh_token,
-                              (_time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(_time.time() + expires_in))
-                               if expires_in else target.token_expires_at),
-                              updated_at=_now, status=1)
-        return True
-    except Exception as e:
-        log.warning(f"Update external identity tokens failed: {e}")
-        return False
+    return _identity_lifecycle.update_tokens(
+        grape_user_id, provider, access_token=access_token,
+        refresh_token=refresh_token, expires_in=expires_in,
+        external_name=external_name, external_avatar=external_avatar)
+
 
 def sync_external_login_on_rename(
     grape_user_id: str,
@@ -1352,47 +1313,18 @@ def sync_external_login_on_rename(
     return True
 
 def mark_identity_expired(grape_user_id: str, provider: str) -> bool:
-    """Issue #372 R10: 标记用户 token 过期（status=4）。
+    """Issue #372 R10: 标记 token 过期（status=4），保留 token 供用户查看原账号。
 
-    PAT 被撤销/过期后 pipeline 检测到 401 时调用。不清空 access_token/
-    refresh_token（保留凭据数据供用户查看之前绑了哪个账号），仅改 status。
-    用户重新绑定 token 时 create_external_identity/update_external_identity_tokens
-    会恢复 status=1。
-
-    与 status=0（解绑）区别：解绑清空 token 数据，过期保留（用户可能在
-    GitCode 重新生成 PAT 后用同一个账号绑定）。
+    与 status=0（解绑，清 token）区别：过期只是凭据失效，重新授权即恢复。
+    调用方：刷新失败 / 401 重试链 —— Issue #3054 P2 后不再造成死锁（重登即恢复）。
     """
-    try:
-        with db_lock:
-            c = _mg_db.cursor()
-            c.execute(
-                "UPDATE external_identities SET status=4 "
-                "WHERE grape_user_id=? AND provider=? AND status=1",
-                (grape_user_id, provider),
-            )
-            _mg_db.commit()
-            if c.rowcount > 0:
-                log.info(f"mark_identity_expired: {provider} token expired for user={grape_user_id}")
-                return True
-            return False
-    except Exception as e:
-        log.warning(f"mark_identity_expired failed: {e}")
-        return False
+    return _identity_lifecycle.mark_expired(grape_user_id, provider)
+
 
 def is_identity_expired(grape_user_id: str, provider: str) -> bool:
     """Issue #372 R10: 检查用户 token 是否已过期（status=4）。"""
-    try:
-        with db_lock:
-            c = _mg_db.cursor()
-            c.execute(
-                "SELECT status FROM external_identities "
-                "WHERE grape_user_id=? AND provider=? LIMIT 1",
-                (grape_user_id, provider),
-            )
-            row = c.fetchone()
-            return bool(row and row[0] == 4)
-    except Exception:
-        return False
+    return _identity_lifecycle.is_expired(grape_user_id, provider)
+
 
 def get_unbound_identity(provider: str, external_id: str) -> "dict | None":
     """查询历史绑定记录（status=0）。用于 OAuth 登录时检测曾绑定过的账号。
@@ -1492,6 +1424,28 @@ def restore_external_identity(
         log.warning(f"Restore external identity failed: {e}")
         return False
 
+def restore_tombstoned_identity(
+    grape_user_id: str,
+    provider: str,
+    external_id: str,
+    access_token: str = "",
+    refresh_token: str = "",
+    external_name: str = "",
+    external_avatar: str = "",
+    expires_in: int = 0,
+) -> bool:
+    """凭墓碑把旧平台账号重新绑回原账号（Issue #3054 P2-2）。
+
+    换绑后旧账号登录、status=4 解绑后旧账号登录都走这里——按 (用户, 平台)
+    复用唯一一行，绝不新建第二个 Grape 号。
+    """
+    return _identity_lifecycle.restore_from_tombstone(
+        grape_user_id=grape_user_id, provider=provider, external_id=external_id,
+        access_token=access_token, refresh_token=refresh_token,
+        external_name=external_name, external_avatar=external_avatar,
+        expires_in=expires_in)
+
+
 def delete_unbound_identity(provider: str, external_id: str) -> bool:
     """硬删除历史绑定记录（status=0）。
 
@@ -1511,8 +1465,6 @@ def delete_unbound_identity(provider: str, external_id: str) -> bool:
         log.warning(f"Delete unbound identity failed: {e}")
         return False
 
-_TICKET_TTL = 600  # 10 分钟
-
 def save_binding_ticket(
     initiating_user_id: str,
     provider: str,
@@ -1522,156 +1474,39 @@ def save_binding_ticket(
     external_avatar: str = "",
     original_user_id: str = "",
 ) -> str | None:
-    """生成并保存一次性 binding_ticket（10 分钟过期）。
+    """发放一次性转移票据（10 分钟 TTL，绑 session 与目标 external_id）。
 
-    安全设计：票据不存 access_token/refresh_token，避免凭据泄露。
-    票据只存定位信息（provider + external_id + 用户信息），
-    转移后新绑定的 access_token 留空，用户下次 OAuth 登录时自动刷新。
+    票据不存 access_token/refresh_token——凭据不出库；转移成功后新绑定 token
+    留空，用户下次 OAuth 授权时自动补齐。
+    Issue #3054 P2-1：status=4 与 status=0 同等可发票据（同一入口）。
     """
-    import time as _t
-    import secrets as _secrets
-    ticket = _secrets.token_urlsafe(32)
-    try:
-        with db_lock:
-            c = _mg_db.cursor()
-            # 懒清理过期票据
-            c.execute("DELETE FROM binding_tickets WHERE expires < ?", (_t.time(),))
-            # FR-14.2: INSERT + 冲突重试（不覆盖未消费旧票）
-            try:
-                c.execute(
-                    "INSERT INTO binding_tickets "
-                    "(ticket, initiating_user_id, provider, external_id, "
-                    "external_login, external_name, external_avatar, "
-                    "original_user_id, created_at, expires) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (ticket, initiating_user_id, provider, external_id,
-                     external_login, external_name, external_avatar,
-                     original_user_id,
-                     _t.time(), _t.time() + _TICKET_TTL),
-                )
-            except Exception as _exc:
-                # FR-CQ-5: 约束冲突时删旧票重试（提取为 _is_constraint_error）
-                from src.kernel.session_manager import _is_constraint_error
-                if not _is_constraint_error(_exc):
-                    raise
-                c.execute("DELETE FROM binding_tickets WHERE ticket=?", (ticket,))
-                c.execute(
-                    "INSERT INTO binding_tickets "
-                    "(ticket, initiating_user_id, provider, external_id, "
-                    "external_login, external_name, external_avatar, "
-                    "original_user_id, created_at, expires) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (ticket, initiating_user_id, provider, external_id,
-                     external_login, external_name, external_avatar,
-                     original_user_id,
-                     _t.time(), _t.time() + _TICKET_TTL),
-                )
-            _mg_db.commit()
-        return ticket
-    except Exception as e:
-        log.warning(f"save_binding_ticket failed: {e}")
-        return None
+    return _identity_lifecycle.issue_ticket(
+        initiating_user_id=initiating_user_id, provider=provider,
+        external_id=external_id, external_login=external_login,
+        external_name=external_name, external_avatar=external_avatar,
+        original_user_id=original_user_id)
 
-def validate_binding_ticket(ticket: str, initiating_user_id: str, consume: bool = True) -> dict | None:
-    """校验 binding_ticket，返回数据或 None。默认消费（查 + 删），consume=False 只校验不删。
 
-    校验：票据存在、未过期、initiating_user_id 与当前会话用户一致。
-    安全：不返回 access_token/refresh_token（票据不存这些）。
+def validate_binding_ticket(ticket: str, initiating_user_id: str,
+                            consume: bool = True) -> dict | None:
+    """校验票据（存在/未过期/发起人一致）；consume=False 只校验不消费。
 
-    Issue #376：transfer-bind 端点改为「先校验（consume=False）→ 业务事务成功后
-    再消费（consume_binding_ticket）」。业务失败（500 回滚）时票据不被连带作废，
-    用户在剩余有效期内重试不再必然 410。
+    Issue #376：transfer-bind 走「先校验 → 业务事务成功后再消费」，
+    业务失败不再连带作废票据。
     """
-    import time as _t
-    row = None
-    try:
-        with db_lock:
-            c = _mg_db.cursor()
-            c.execute(
-                "SELECT initiating_user_id, provider, external_id, "
-                "external_login, external_name, external_avatar, "
-                "original_user_id, expires "
-                "FROM binding_tickets WHERE ticket=?",
-                (ticket,),
-            )
-            row = c.fetchone()
-            if row and consume:
-                c.execute("DELETE FROM binding_tickets WHERE ticket=?", (ticket,))
-                _mg_db.commit()
-        if not row:
-            return None
-        if _t.time() > row[7]:
-            return None
-        # D105 uuid-pk + 根修A（202611091000）/根修C：grape_accounts.id 已 TEXT、
-        # binding_tickets.initiating_user_id 归一后恒 text——双端 str() 比较
-        # 兼容 legacy int 形态与 uuid 串混用（线上实锤 24 != '24' 秒 410）。 (fix(auth): uuid-safe user id handling in account binding paths)
-        if str(row[0]) != str(initiating_user_id):
-            log.warning(f"binding_ticket user mismatch: ticket_user={row[0]}, session_user={initiating_user_id}")
-            return None
-        return {
-            "provider": row[1], "external_id": row[2],
-            "external_login": row[3], "external_name": row[4],
-            "external_avatar": row[5],
-            "original_user_id": row[6],
-        }
-    except Exception as e:
-        log.warning(f"validate_binding_ticket failed: {e}")
-        return None
+    return _identity_lifecycle.validate_ticket(ticket, initiating_user_id,
+                                               consume=consume)
+
 
 def consume_binding_ticket(ticket: str) -> bool:
-    """消费（删除）binding_ticket。
+    """消费（删除）票据——一次性语义；业务 commit 成功后调用。"""
+    return _identity_lifecycle.consume_ticket(ticket)
 
-    Issue #376：由 transfer-bind 端点在业务事务 commit 成功后调用——
-    票据一次性消费语义保留（成功转移后不可重放），但失败路径不再连带作废票据。
-    删除幂等：票据不存在返回 False（如已被并发请求消费）。
-    """
-    try:
-        with db_lock:
-            c = _mg_db.cursor()
-            c.execute("DELETE FROM binding_tickets WHERE ticket=?", (ticket,))
-            _mg_db.commit()
-            return c.rowcount > 0
-    except Exception as e:
-        log.warning(f"consume_binding_ticket failed: {e}")
-        return False
 
 def get_pending_transfer_context(initiating_user_id: str) -> dict | None:
-    """查询当前用户最近的待转移票据（只读，不消费）。
+    """当前用户最近一条待转移票据（只读，不消费；popup 模式用）。"""
+    return _identity_lifecycle.pending_ticket(initiating_user_id)
 
-    用于 popup 模式：binding_ticket 不通过 URL 传递，
-    父窗口用 JWT 调后端接口获取待转移信息展示确认页。
-    确认后调 POST /auth/transfer-bind 完成转移（票据在 validate_binding_ticket 中消费）。
-    """
-    import time as _t
-    try:
-        with db_lock:
-            c = _mg_db.cursor()
-            # 懒清理过期票据
-            c.execute("DELETE FROM binding_tickets WHERE expires < ?", (_t.time(),))
-            c.execute(
-                "SELECT ticket, provider, external_login, external_name, "
-                "external_avatar, original_user_id, expires "
-                "FROM binding_tickets WHERE initiating_user_id=? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (initiating_user_id,),
-            )
-            row = c.fetchone()
-            _mg_db.commit()
-        if not row:
-            return None
-        if _t.time() > row[6]:
-            return None
-        return {
-            "binding_ticket": row[0],
-            "provider": row[1],
-            "external_login": row[2],
-            "external_name": row[3],
-            "external_avatar": row[4],
-            "original_user_id": row[5],
-        }
-    except Exception as e:
-        log.warning(f"get_pending_transfer_context failed: {e}")
-        return None
 
 def transfer_external_identity(
     new_user_id: str,
@@ -1695,28 +1530,29 @@ def transfer_external_identity(
         with db_lock:
             c = _mg_db.cursor()
             # 1. 旧绑定标记为 transferred（status=0, 清 token）
+            # Issue #3054 P2：status=4（token 过期）同为已有绑定，一并迁出
             if original_user_id:
                 c.execute(
                     "UPDATE external_identities SET status=0, access_token='', refresh_token='', "
-                    "unbound_at=? WHERE grape_user_id=? AND provider=? AND status=1",
+                    "unbound_at=? WHERE grape_user_id=? AND provider=? AND status IN (1, 4)",
                     (now, original_user_id, provider),
                 )
-            # 处理目标用户已有的同 provider 活跃绑定（status=1）
+            # 处理目标用户已有的同 provider 活跃绑定（status=1/4）
             # 用条件 UPDATE 代替 SELECT+UPDATE，避免 MySQL auto-commit 架空事务
             c.execute(
                 "UPDATE external_identities SET status=0, access_token='', refresh_token='', "
-                "unbound_at=? WHERE grape_user_id=? AND provider=? AND status=1",
+                "unbound_at=? WHERE grape_user_id=? AND provider=? AND status IN (1, 4)",
                 (now, new_user_id, provider),
             )
-            # 同时清理同 provider+external_id 的旧解绑记录（防止 UNIQUE 冲突）
+            # 同时清理同 provider+external_id 的旧记录（status 0/4），防止 UNIQUE 冲突
             c.execute(
-                "DELETE FROM external_identities WHERE provider=? AND external_id=? AND status=0",
+                "DELETE FROM external_identities WHERE provider=? AND external_id=? AND status IN (0, 4)",
                 (provider, external_id),
             )
-            # 还要清理目标用户已有的同 provider 旧记录（status=0），
+            # 还要清理目标用户已有的同 provider 旧记录（status 0/4），
             # 否则 UNIQUE(grape_user_id, provider) 约束会冲突
             c.execute(
-                "DELETE FROM external_identities WHERE grape_user_id=? AND provider=? AND status=0",
+                "DELETE FROM external_identities WHERE grape_user_id=? AND provider=? AND status IN (0, 4)",
                 (new_user_id, provider),
             )
             # 2. 创建新活跃绑定
@@ -1745,6 +1581,7 @@ import uuid
 from src.kernel.id_gen import uuid7_str
 
 from src.kernel.persistence.repositories import identity_admin_repository as _iar
+from src.domains.mgmt.auth.identity_lifecycle import identity_lifecycle as _identity_lifecycle
 
 from src.kernel.persistence.uow import uow as _uow
 

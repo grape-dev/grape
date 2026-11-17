@@ -901,20 +901,25 @@ function loadAgentTypes() {
       window.history.replaceState({}, '', cleanUrl);
     }
     if (bindError) {
-      var rawErr = decodeURIComponent(bindError.replace(/\+/g, ' '));
-      var friendlyMsg = _translateOAuthError(rawErr);
+      // P0-3：解码失败按“参数无效”处理（bind_error=100%25 会抛 URIError 中断 init）
+      var rawErr = _safeDecodeParam(bindError.replace(/\+/g, ' '));
+      var friendlyMsg = _translateOAuthError(rawErr || '');
       showToast(I18N.t('app.login.bind_failed'), friendlyMsg);
       var cleanUrl2 = window.location.pathname + window.location.hash;
       window.history.replaceState({}, '', cleanUrl2);
     }
     // OAuth 绑定命中历史绑定 → 转移确认
+    // Issue #3097：票据不由回调 URL 传递（服务端 popup 模式故意不回传），
+    // 必须调 GET /auth/transfer-context 取票；取票失败在页面内可见，不得静默。
     var needTransfer = params.get('need_transfer');
-    var transferTicket = params.get('binding_ticket');
-    if (needTransfer && transferTicket) {
-      // 延迟调用，确保 account.js 已加载
+    if (needTransfer) {
+      // 延迟调用，确保 account 视图已加载并注册取票函数
       setTimeout(function() {
-        if (typeof _accountShowTransferConfirm === 'function') {
-          _accountShowTransferConfirm(needTransfer, transferTicket);
+        if (typeof window._accountFetchTransferContext === 'function') {
+          window._accountFetchTransferContext(needTransfer);
+        } else {
+          showToast(I18N.t('app.login.bind_failed'),
+                    I18N.t('app.account.transfer_context_expired'));
         }
       }, 500);
       var cleanUrl3 = window.location.pathname + window.location.hash;
@@ -3155,19 +3160,75 @@ function openBetaApply() {
     }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
+  // P0-1（Issue #3054）：?oauth_error= 反射型 DOM XSS 防护。
+  // 静态兜底集合 = 渠道配置里的已知 key；运行时再叠加服务端注入的渠道目录
+  // （window.__OAUTH_PROVIDERS__）。URL 里带的 provider 只允许取这些值，其余一律丢弃。
+  var _STATIC_OAUTH_PROVIDERS = ['gitcode', 'github', 'gitee', 'gitlab', 'huawei', 'codearts'];
+  // 渠道 key 形态白名单：先钉死字符集，任何 HTML/JS 元字符都不可能进 DOM。
+  var _OAUTH_PROVIDER_KEY_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+  function _isKnownOAuthProvider(p) {
+    if (!p || !_OAUTH_PROVIDER_KEY_RE.test(p)) return false;
+    var list = (typeof window !== 'undefined' && Array.isArray(window.__OAUTH_PROVIDERS__))
+      ? window.__OAUTH_PROVIDERS__ : [];
+    for (var i = 0; i < list.length; i++) {
+      var k = list[i] && (list[i].provider || list[i]);
+      if (k === p) return true;
+    }
+    return _STATIC_OAUTH_PROVIDERS.indexOf(p) >= 0;
+  }
+
+  // P0-3（Issue #3054）：URL 参数解码兜底——decodeURIComponent('100%') 会抛 URIError，
+  // 异常冒到顶层会中断 init（弹窗版则永久停在 Processing）。失败返回 null，调用方按
+  // “参数无效”处理。
+  function _safeDecodeParam(v) {
+    if (v === null || v === undefined) return null;
+    try {
+      return decodeURIComponent(v);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // P0-1/P0-3（Issue #3054）：?oauth_error= 统一处理入口（init 与测试共用）。
+  //   - 解码失败（?oauth_error=100%25）按“参数无效”提示，不中断初始化；
+  //   - WHITELIST:<provider>[:<username>] 走引导弹窗，provider 必须过已知 key 白名单；
+  //   - 其它值按错误码走 I18N，不直接回显后端/第三方原文。
+  function _handleOAuthErrorParam(params) {
+    var oauthError = params && typeof params.get === 'function' ? params.get('oauth_error') : null;
+    if (!oauthError) return;
+    var decoded = _safeDecodeParam(oauthError);
+    if (decoded === null) {
+      showToast(I18N.t('app.login.oauth_error_invalid_param', null, '授权回调参数无效'), 6000);
+      return;
+    }
+    if (decoded.indexOf('WHITELIST:') === 0) {
+      var parts = decoded.split(':');
+      _showWhitelistGuidance(parts[1] || 'gitcode', parts[2] || '');
+      return;
+    }
+    var errorKey = 'app.login.oauth_error_' + decoded;
+    var translated = I18N.t(errorKey);
+    showToast(translated && translated !== errorKey ? translated : decoded, 6000);
+  }
+
   function _showWhitelistGuidance(platform, username) {
+    // P0-1：platform 未转义时会被拼进 innerHTML 与 onclick 的 JS 字符串，未知 key 直接丢弃。
+    if (!_isKnownOAuthProvider(platform)) return;
     var overlay = document.createElement('div');
     overlay.id = 'whitelistModal';
     overlay.style.cssText = 'position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center';
     var platName = (typeof window.platformLabel === 'function' && window.platformLabel(platform)) || platform;
+    // onclick 里的字符串：encodeURIComponent 不转义单引号，补 %27 防止跳出 JS 串
+    var _platQ = encodeURIComponent(platform).replace(/'/g, '%27');
+    var _userQ = encodeURIComponent(username || '').replace(/'/g, '%27');
     overlay.innerHTML =
       '<div style="background:var(--c,#fff);border-radius:20px;padding:40px;text-align:center;width:400px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25)">'
         + '<div style="font-size:48px;margin-bottom:16px">🔒</div>'
         + '<h2 style="font-size:18px;font-weight:700;color:var(--t,#1d1d1f);margin-bottom:8px">' + I18N.t('app.login.whitelist_title') + '</h2>'
-        + '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:6px">' + I18N.t('app.login.whitelist_desc', {platform: platName, username: username ? ' <b>' + _esc(username) + '</b> ' : ' '}) + '</p>'
+        + '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:6px">' + I18N.t('app.login.whitelist_desc', {platform: _esc(platName), username: username ? ' <b>' + _esc(username) + '</b> ' : ' '}) + '</p>'
         + '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:24px">' + I18N.t('app.login.whitelist_apply_hint') + '</p>'
         + '<div style="display:flex;gap:8px;justify-content:center">'
-          + '<button onclick="window.location.href=\'/static/beta-apply.html?platform=' + platform + '&username=' + encodeURIComponent(username) + '\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">' + I18N.t('app.login.whitelist_apply_btn') + '</button>'
+          + '<button onclick="window.location.href=\'/static/beta-apply.html?platform=' + _platQ + '&username=' + _userQ + '\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">' + I18N.t('app.login.whitelist_apply_btn') + '</button>'
           + '<button onclick="document.getElementById(\'whitelistModal\').remove()" style="padding:12px 24px;border:1px solid var(--b,#e3e6ee);border-radius:12px;background:transparent;color:var(--t,#1d1d1f);font-size:14px;font-weight:500;cursor:pointer">' + I18N.t('common.close') + '</button>'
         + '</div>'
       + '</div>';
@@ -3217,6 +3278,7 @@ function openBetaApply() {
         'CREDENTIAL_INCORRECT': 'app.login.credential_incorrect',
         'ACCOUNT_DEACTIVATED': 'app.login.account_deactivated',
         'ACCOUNT_DEACTIVATING': 'app.login.account_deactivating',
+        'ACCOUNT_DELETED': 'app.login.account_deleted',
         'TOO_MANY_ATTEMPTS': 'app.login.too_many_attempts',
       }[code];
     }
@@ -3436,6 +3498,54 @@ function openBetaApply() {
     if (drawer) drawer.classList.remove('show');
   }
 
+  // P0-2（Issue #3054）：popup 结果消费方——origin + source 双校验后处理
+  // oauth_result。只认本页亲自打开的 popup（window.__oauthPopupWin），
+  // 同源其它窗口的伪造消息在这里被丢弃。
+  //
+  // 休眠说明（勿当垃圾删除）：登录场景走全页重定向（见 oauthLogin），从不打开 popup，
+  // 因此本监听当前收不到 action='login' 的消息；__oauthPopupWin 也只有绑定场景
+  // （AccountView.registerOAuthPopup）会赋值。它保留的理由是这份 origin+source 双校验
+  // 是 P0-2 的唯一实现——将来登录若改回 popup 模式，删除后必须重写（且容易只校验
+  // origin 而漏掉 source，退回被同源窗口伪造 oauth_result 的洞）。
+  function _onOAuthPopupMessage(event) {
+    // origin + source 双校验：同源任意窗口都能伪造 oauth_result（伪登录成功 /
+    // 提交任意 exchange_code）。未记录 popup 引用时一律丢弃。
+    if (event.origin !== window.location.origin) return;
+    if (!window.__oauthPopupWin || event.source !== window.__oauthPopupWin) return;
+    var d = event.data;
+    if (!d || d.type !== 'oauth_result' || d.action !== 'login') return;
+    if (d.success && d.exchange_code) {
+      fetch('/api/auth/exchange', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({code: d.exchange_code}),
+      }).then(function(r) {
+        if (!r.ok) {
+          return r.json().catch(function() { return null; }).then(function(b) {
+            var det = (b && b.detail) || {};
+            throw new Error(det.message || det.error_code || 'exchange_failed');
+          });
+        }
+        return r.json();
+      }).then(function(t) {
+        localStorage.setItem('token', t.token);
+        localStorage.setItem('app_cache_ver', '46');
+        localStorage.removeItem('repo_member_cache');
+        localStorage.removeItem('currentRepo');
+        localStorage.removeItem('current_org_id');
+        sessionStorage.removeItem('currentRepo');
+        // UC15g（外审发现）：保留 /en 语言前缀——硬编码 '/' 会把英文用户
+        // 打回中文首页。与原 exchangeCode 分支 lang0/prefix0 同款逻辑。
+        var _lg = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
+        location.replace((_lg === 'en' ? '/en' : '') + '/');
+      }).catch(function(e) {
+        showToast((e && e.message) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
+      });
+    } else if (d.error) {
+      showToast(_safeDecodeParam((d.error + '').replace(/\+/g, ' ')) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
+    }
+  }
+
   function init() {
     // Issue #231: 最先执行 currentRepo 迁移（localStorage → sessionStorage），
     // 必须在 cache 版本检查之前，避免 localStorage.clear() 抹掉待迁移值，保证已有用户无感知。
@@ -3453,21 +3563,8 @@ function openBetaApply() {
     // Check for OAuth token in URL first
     const p = new URLSearchParams(window.location.search);
     // Check for OAuth error in URL (e.g. github.com timeout)
-    const oauthError = p.get('oauth_error');
-    if (oauthError) {
-      const decoded = decodeURIComponent(oauthError);
-      if (decoded.startsWith('WHITELIST:')) {
-        // 白名单不通过——显示引导弹窗
-        var parts = decoded.split(':');
-        var platform = parts[1] || 'gitcode';
-        var username = parts[2] || '';
-        _showWhitelistGuidance(platform, username);
-      } else {
-        // P2-i18n: 错误码走 I18N 翻译，不直接显示后端消息
-        var errorKey = 'app.login.oauth_error_' + decoded;
-        var translated = I18N.t(errorKey);
-        showToast(translated && translated !== errorKey ? translated : decoded, 6000);
-      }
+    if (p.get('oauth_error')) {
+      _handleOAuthErrorParam(p);
       if (window.history.replaceState) {
         window.history.replaceState(null, '', window.location.pathname);
       }
@@ -3484,41 +3581,7 @@ function openBetaApply() {
     // 不改变默认 UX。幂等守卫防止 init 重复注册。
     if (!window.__oauthPopupLoginListener) {
       window.__oauthPopupLoginListener = true;
-      window.addEventListener('message', function(event) {
-        if (event.origin !== window.location.origin) return;
-        var d = event.data;
-        if (!d || d.type !== 'oauth_result' || d.action !== 'login') return;
-        if (d.success && d.exchange_code) {
-          fetch('/api/auth/exchange', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({code: d.exchange_code}),
-          }).then(function(r) {
-            if (!r.ok) {
-              return r.json().catch(function() { return null; }).then(function(b) {
-                var det = (b && b.detail) || {};
-                throw new Error(det.message || det.error_code || 'exchange_failed');
-              });
-            }
-            return r.json();
-          }).then(function(t) {
-            localStorage.setItem('token', t.token);
-            localStorage.setItem('app_cache_ver', '46');
-            localStorage.removeItem('repo_member_cache');
-            localStorage.removeItem('currentRepo');
-            localStorage.removeItem('current_org_id');
-            sessionStorage.removeItem('currentRepo');
-            // UC15g（外审发现）：保留 /en 语言前缀——硬编码 '/' 会把英文用户
-            // 打回中文首页。与原 exchangeCode 分支 lang0/prefix0 同款逻辑。
-            var _lg = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
-            location.replace((_lg === 'en' ? '/en' : '') + '/');
-          }).catch(function(e) {
-            showToast((e && e.message) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
-          });
-        } else if (d.error) {
-          showToast(decodeURIComponent((d.error + '').replace(/\+/g, ' ')) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
-        }
-      });
+      window.addEventListener('message', _onOAuthPopupMessage);
     }
 
     // P0-3: Check for exchange_code in URL (new secure flow)

@@ -54,11 +54,7 @@ def get_issue_stage(repo_key: str, issue_id: str) -> dict | None:
     `issue_state` 仅作停写过渡期的兜底（存量未清理前的兼容）。
     """
     # 1. issue 单表（权威）
-    _num = None
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-    except Exception:
-        _num = None
+    _num = _issue_num_or_ident(issue_id)
     if _num:
         # 走 provider 通道（GSB）：同域 → Local 实例直接查；跨域且 GRAPE_PROVIDER_MODE=remote
         # → Remote 实例打 /internal/issues/.../card（一次 HTTP hop，同机实测 +0.3~0.8ms）。
@@ -109,10 +105,7 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
     - ensure_row=False：仅 UPDATE 已有行（默认，保持既有行为）。
     幂等：UPDATE 按 repo_key+issue_number，无行建档仅一次。
     """
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-    except Exception:
-        return
+    _num = _issue_num_or_ident(issue_id)
     if not _num:
         return
     if not fields:
@@ -158,7 +151,7 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
     _task_status = _STAGE_TO_TASK_STATUS.get(stage)
     if _task_status:
         try:
-            _issue_num = int(issue_id.lstrip("#"))
+            _issue_num = _issue_num_or_ident(issue_id)
             rt.exec_any("issue_status_sync", (_task_status, repo_key, _issue_num))
         except Exception as _e:
             log.warning(f"set_issue_stage: sync task.status failed: {_e}")
@@ -203,13 +196,14 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
     if st and st.get("scene_id"):
         return st["scene_id"], st.get("scene_user_id", 0) or 0
     # 回退：从 issue 表直接读 scene_id（Phase C3 权威源）
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-        r = rt.read_one_any("issue_card_row", (repo_key, _num))
-        if r and r[5]:
-            return r[5], r[6] or 0
-    except Exception:
-        pass
+    _num = _issue_num_or_ident(issue_id)
+    if _num:
+        try:
+            r = rt.read_one_any("issue_card_row", (repo_key, _num))
+            if r and r[5]:
+                return r[5], r[6] or 0
+        except Exception:
+            pass
     # Issue #415: Issue 级场景为空 → 回退仓库默认场景（managed_repos.dev_scene），
     # 与 _resolve_scene_id / repogit / prompt_builder 的仓库默认场景语义一致；
     # 仓库未配置默认场景时保持 ("", 0)，由调用方决定走智能推荐。
@@ -245,13 +239,14 @@ def get_issue_bound_scene(repo_key: str, issue_id: str) -> tuple:
     st = get_issue_stage(repo_key, issue_id)
     if st and st.get("scene_id"):
         return st["scene_id"], st.get("scene_user_id", 0) or 0
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-        r = rt.read_one_any("issue_card_row", (repo_key, _num))
-        if r and r[5]:
-            return r[5], r[6] or 0
-    except Exception:
-        pass
+    _num = _issue_num_or_ident(issue_id)
+    if _num:
+        try:
+            r = rt.read_one_any("issue_card_row", (repo_key, _num))
+            if r and r[5]:
+                return r[5], r[6] or 0
+        except Exception:
+            pass
     return "", 0
 
 
@@ -288,11 +283,7 @@ def set_scene_override_flag(repo_key: str, issue_id: str, allowed: bool):
 
 def get_scene_override_flag(repo_key: str, issue_id: str) -> bool:
     """读取 Issue 是否允许 VOD 覆盖场景。默认 False。Phase C3：读 issue 单表。"""
-    _num = None
-    try:
-        _num = int(str(issue_id or "").lstrip("#"))
-    except Exception:
-        _num = None
+    _num = _issue_num_or_ident(issue_id)
     if _num:
         try:
             row = rt.read_one_any("issue_card_row", (repo_key, _num))
@@ -348,13 +339,15 @@ def list_release_subissues(repo_key: str, parent_issue_number: int) -> list[dict
 
     返回最新在前，含绑定要素 / 生命周期状态 / 结果三分支 / 失败原因。
     """
-    rows = rt.read_all_any("issue_release_children", (repo_key, int(parent_issue_number)))
+    # Issue #3055：父单号同样走内核原生形态（数字→int，ident→str）
+    _parent = _issue_num_or_ident(parent_issue_number)
+    rows = rt.read_all_any("issue_release_children", (repo_key, _parent))
     out = []
     for r in rows:
         out.append({
             "issue_id": r[0],
             "sub_issue_number": r[1],
-            "parent_issue_number": int(parent_issue_number),
+            "parent_issue_number": _parent,
             "title": r[2] or "",
             "status": r[3] or "active",
             "stage": r[4] or "vod",
@@ -748,7 +741,9 @@ def _issue_num_or_ident(issue_id) -> "int | str | None":
     _raw = str(issue_id or "").lstrip("#")
     if not _raw:
         return None
-    return int(_raw) if _raw.isdigit() else _raw
+    # Issue #3055：判定/强转统一走内核唯一入口（数字→int，ident→str）
+    from src.kernel.issue_ident import native_issue_number
+    return native_issue_number(_raw)
 
 
 def _scene_binding_active(repo_key: str, scene_id: str) -> bool:

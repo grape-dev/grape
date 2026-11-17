@@ -11,6 +11,7 @@ from src.kernel.session_manager import db, db_lock
 from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
 from src.kernel.token_service import is_auth_401_error
+from src.kernel.issue_ident import native_issue_number, is_native_issue_ident  # Issue #3055
 
 
 class _OwnedCursor:
@@ -3287,13 +3288,13 @@ def _backfill_release_subissue_on_complete(task: dict | None, exit_code: int,
         return
     _issue_id = task.get("issue_id") or ""
     _issue_num = str(_issue_id).lstrip("#")
-    if not _issue_num.isdigit():
+    if not is_native_issue_ident(_issue_num):
         return
     try:
         from src.api.issues_center import _backfill_release_subissue_result
         _backfill_release_subissue_result(
             repo_key=task.get("repo_key") or "",
-            issue_number=int(_issue_num),
+            issue_number=native_issue_number(_issue_num),
             exit_code=int(exit_code or 0),
             result_text=result_text or "")
     except Exception as _e:
@@ -3881,7 +3882,8 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     _evt = {
         "repository": task.get("account") or "",
         "issue_id": issue_id,
-        "payload": {"issue_number": _issue_num, "issue": {"number": int(_issue_num) if _issue_num.isdigit() else _issue_num}},
+        "payload": {"issue_number": _issue_num,
+                    "issue": {"number": native_issue_number(_issue_num) if is_native_issue_ident(_issue_num) else _issue_num}},
     }
     _runtime_id = task.get("runtime_id") or 0
     # Issue #565: bot 建单只做场景判定不进执行棒——worker 侧 evt 是重建的、无原始标记，

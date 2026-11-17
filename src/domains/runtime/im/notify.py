@@ -32,6 +32,9 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterable, Optional
 
+# Issue #3055：issue 编号判定/强转内核唯一入口
+from src.kernel.issue_ident import native_issue_number, is_actionable_issue_number
+
 log = logging.getLogger(__name__)
 
 RETRY = 2                 # 每渠发送尝试次数（1 次首发 + 1 次重试）
@@ -89,8 +92,9 @@ def issue_url(repo_key: str, issue_number: int) -> str:
         # P1-12：host/路径段按平台卡方言派生（kernel.repo_key.issue_web_url 单源），
         # 不再二分 github/gitlab/其余 gitcode —— gitee 仓此前会指向 gitcode.com。
         from src.kernel.repo_key import issue_web_url
-        n = int(issue_number or 0)
-        if not repo_key or not n:
+        # Issue #3055：ident 保形（原 int() 对 IK* 抛错 → 链接恒空）
+        n = native_issue_number(issue_number or 0)
+        if not repo_key or not is_actionable_issue_number(issue_number):
             return ""
         return issue_web_url(repo_key, n)
     except Exception:
@@ -156,7 +160,7 @@ def build_cards_from_payload(payload: dict) -> tuple:
     payload = payload or {}
     text = str(payload.get("text", ""))
     repo_key = str(payload.get("repo_key", ""))
-    issue_number = int(payload.get("issue_number") or 0)
+    issue_number = native_issue_number(payload.get("issue_number") or 0)
     conv_id = str(payload.get("conv_id", ""))
     note = str(payload.get("note", ""))
     kind = str(payload.get("kind", "task"))
@@ -292,7 +296,7 @@ def _engine():
     return resolve_engine()
 
 
-def _issue_owner(repo_key: str, issue_number: int) -> tuple[int, str, str]:
+def _issue_owner(repo_key: str, issue_number: "int | str") -> tuple[int, str, str]:
     """(user_id, conv_id, title) —— 通知目标缺失时为空值。"""
     try:
         from src.kernel.session_manager import db, db_lock
@@ -301,7 +305,7 @@ def _issue_owner(repo_key: str, issue_number: int) -> tuple[int, str, str]:
             row = c.execute(
                 "SELECT user_id, COALESCE(conversation_id,''), COALESCE(title,'') "
                 "FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
-                (repo_key, int(issue_number))).fetchone()
+                (repo_key, native_issue_number(issue_number))).fetchone()
         if not row:
             return 0, "", ""
         return int(row[0] or 0), str(row[1] or ""), str(row[2] or "")
@@ -387,7 +391,7 @@ def _make_payload(kind: str, text: str, repo_key: str, issue_number: int,
                   conv_id: str, uid: int, note: str) -> dict:
     """入队 payload（键集 = _PAYLOAD_KEYS，消费侧 build_cards_from_payload 同口径）。"""
     return {"kind": kind, "text": text, "repo_key": repo_key or "",
-            "issue_number": int(issue_number or 0), "conv_id": conv_id or "",
+            "issue_number": native_issue_number(issue_number or 0), "conv_id": conv_id or "",
             "user_id": uid, "note": note}
 
 
@@ -620,7 +624,7 @@ def schedule_notify(user_id: int, kind: str, text: str, **kw) -> None:
     task.add_done_callback(_done)
 
 
-def notify_issue_event(repo_key: str, issue_number: int, kind: str, text: str,
+def notify_issue_event(repo_key: str, issue_number: "int | str", kind: str, text: str,
                        conv_id: str = "") -> None:
     """按 repo/issue 解析归属用户后扇出（auto-finalize / review-pass 等路径用）。"""
     uid, conv, _title = _issue_owner(repo_key, issue_number)
@@ -670,7 +674,7 @@ def notify_repo_group(repo_key: str, kind: str, text: str, *, issue_number: int 
         from src.domains.runtime.im.engine_wiring import get_active_installation
         note = f"发送时间：{time.strftime('%Y-%m-%d %H:%M')}"
         payload = {"kind": kind, "text": text, "repo_key": repo_key,
-                   "issue_number": int(issue_number or 0), "conv_id": "",
+                   "issue_number": native_issue_number(issue_number or 0), "conv_id": "",
                    "user_id": 0, "note": note}
         for chat_id, provider, app_id, _notify_enabled in rows:
             provider = str(provider or "feishu").strip() or "feishu"
@@ -683,7 +687,7 @@ def notify_repo_group(repo_key: str, kind: str, text: str, *, issue_number: int 
                          repo_key, provider, "set" if app_id else "")
                 continue
             iid = str(inst.get("installation_id") or "")
-            track = OB.out_track_id(0, kind, repo_key, int(issue_number or 0),
+            track = OB.out_track_id(0, kind, repo_key, native_issue_number(issue_number or 0),
                                     provider, iid, event_key=discriminator)
             ok = OB.enqueue(out_track_id=track, installation_id=iid,
                             channel_type=provider, channel_chat_id=str(chat_id or ""),

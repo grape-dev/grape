@@ -121,3 +121,28 @@ class RuntimeService(ABC):
     @abstractmethod
     def get_task_stats(self, repo_key: str = "", since: str = "") -> dict:
         """N12 任务聚合统计（替代洞察侧宽 SQL）。"""
+
+    # ---- Issue #3097：占位账号业务数据判定 / 引擎引用对账 ----
+
+    @abstractmethod
+    def user_business_table_counts(self, user_id: Any) -> dict:
+        """N14 某账号在本域的业务数据按表计数（mgmt 占位账号合并判定用）。
+
+        返回 ``{表名: {"count": int}}``；缺表/不可读返回 ``{"count": None, ...}``
+        （缺表语义由调用方决定：定稿为「视为无数据 + 结构化告警」）。
+        """
+
+    @abstractmethod
+    def reconcile_engine_references(self, runtime_ids: list, keep_id: int = 0,
+                                    reason: str = "") -> dict:
+        """N15 引擎行删除/去重前的运行态引用对账（跨域写，幂等可重放）。
+
+        对账语义见 ``runtime.engine.refs_reconcile``；mgmt 进程删用户/合并账号时调用。
+        """
+
+    @abstractmethod
+    def transfer_user_business_data(self, from_user_id: Any, to_user_id: Any) -> dict:
+        """N16 把某账号在本域的业务数据归属转到另一账号（占位账号自动合并，幂等）。
+
+        返回 ``{表名: 受影响行数}``；任一表失败抛异常（调用方据此回滚身份转移）。
+        """

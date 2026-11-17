@@ -87,6 +87,11 @@ from src.kernel.token_service import is_auth_401_error
 # 裸名 _native_issue_number 调用（cancelled 检查/关单/标题回写等），无此
 # import 全部 NameError 被各自 try/except 吞成静默 no-op。别名字导入口（_nin_*）保留不动。
 from src.domains.runtime.vcs.api_client import _native_issue_number
+# Issue #3055：issue 编号判定/强转内核唯一入口（isdigit 门禁与 int() 强转全族收口）
+from src.kernel.issue_ident import (
+    is_native_issue_ident, is_actionable_issue_number, native_issue_number,
+    normalize_issue_ident,
+)
 
 from src.domains.runtime.engine.direct_executor import (  # noqa: F401 — Phase 3 (#699) 迁往 direct_executor
     _DIRECT_FUTURES, _DIRECT_FUTURES_LOCK,
@@ -103,14 +108,14 @@ _COMMENT_EVENT_TYPES = ("issue_comment", "note_hook_pr")
 def _get_issue_creator(repo_key: str, issue_number: str) -> str:
     """Issue #1668: 读取 Issue 创建人登录名（issue.created_by，建档固化）。"""
     num = str(issue_number or "").strip().lstrip("#")
-    if not repo_key or not num.isdigit():
+    if not repo_key or not is_native_issue_ident(num):
         return ""
     try:
         with db_lock:
             c = _rt_db.cursor()
             c.execute(
                 "SELECT created_by FROM issue WHERE repo_key=? AND issue_number=? "
-                "ORDER BY id LIMIT 1", (repo_key, int(num)))
+                "ORDER BY id LIMIT 1", (repo_key, num))
             row = c.fetchone()
         return (row[0] or "").strip() if row else ""
     except Exception as e:
@@ -1336,11 +1341,11 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
     from src.kernel.session_manager import db as _ck_db, db_lock as _ck_lock
     try:
         _ck_issue_num = str(issue_id).lstrip("#")
-        if _ck_issue_num.isdigit():
+        if is_native_issue_ident(_ck_issue_num):
             with _ck_lock:
                 _ck_c = _rt_db.cursor()
                 _ck_c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
-                              (repo_key, int(_ck_issue_num)))
+                              (repo_key, native_issue_number(_ck_issue_num)))
                 if _ck_c.fetchone():
                     return ""
     except Exception as _ck_err:
@@ -1689,10 +1694,10 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         # 从 tasks 表获取 Issue 真实标题（避免 Pipeline 列表显示 "A2A (订阅): xxx"）
         _sub_title = ""
         _sub_iss_num = str(issue_id).lstrip("#")
-        if _sub_iss_num and _sub_iss_num.isdigit():
+        if is_native_issue_ident(_sub_iss_num):
             try:
                 from src.api.issues_center import _get_issue_title
-                _sub_title = _get_issue_title(repo_key, int(_sub_iss_num)) or ""
+                _sub_title = _get_issue_title(repo_key, native_issue_number(_sub_iss_num)) or ""
             except Exception:
                 pass
         if not _sub_title:
@@ -1870,8 +1875,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                                  or (_payload.get("issue", {}) or {}).get("number") or "").lstrip("#")
             except Exception:
                 pass
-            if _issue_num and _issue_num.isdigit():
-                _issue_num_int = int(_issue_num)
+            if is_native_issue_ident(_issue_num):
+                # Issue #3055：数字→int、平台 ident→str（对外 int 契约保留）
+                _issue_num_int = native_issue_number(_issue_num)
                 if any(kw in _note_lower for kw in ["/done", "完成任务", "任务完成", "确认完成"]):
                     from src.api.issues_center import confirm_issue_done
                     confirm_issue_done(repo_key, _issue_num_int, confirmed_by="issue_comment")
@@ -1898,10 +1904,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             # 恢复 processing。bot 自评在下方 2.0 自循环检测跳过；note_hook_pr 不适用（PR 讨论非 issue 澄清）。
             # Issue #2381：redispatch 重放旧评论（replay=True）不是新的用户输入，
             # 保留 pending_review 审核点，避免重放把审核点再次消费掉后 review-pass 恒 noop。
-            if event_type == "issue_comment" and _issue_num and _issue_num.isdigit() and int(_issue_num) > 0:
+            if event_type == "issue_comment" and is_actionable_issue_number(_issue_num):
                 try:
                     from src.api.issues_center import _resume_issue_waiting
-                    if _resume_issue_waiting(repo_key, int(_issue_num), preserve_review=replay):
+                    if _resume_issue_waiting(repo_key, native_issue_number(_issue_num), preserve_review=replay):
                         _resume_applied = True  # 等待态恢复已消费用户输入 → 2.0a 台账跳过不成立
                         log.info(f"Pipeline: issue #{_issue_num} awaiting/pending_review → processing "
                                  f"(issue_comment reply, preserve_review={replay})")
@@ -2187,8 +2193,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     from src.api.issues_center import close_issue_tasks
                     _ce_id = (evt.get("payload", {}) or {}).get("object_attributes", {}) or {}
                     _ce_num = str(_ce_id.get("iid") or _ce_id.get("number") or "").lstrip("#")
-                    if _ce_num.isdigit() and int(_ce_num) > 0:
-                        _ce_n = close_issue_tasks(repo_key, int(_ce_num))
+                    if is_actionable_issue_number(_ce_num):
+                        _ce_n = close_issue_tasks(repo_key, native_issue_number(_ce_num))
                         log.info(f"Pipeline (L1 side_effect): closed tasks for issue #{_ce_num} ({_ce_n} rows)")
                 except Exception as _ce:
                     log.warning(f"Pipeline L1 side_effect close_issue_tasks failed: {_ce}")
@@ -2402,9 +2408,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     from src.api.session_store import get_issue_status as _gist
                     if _gist(repo_key, _rid_sre) == "pending_review":
                         _num_sre = str(_rid_sre).lstrip("#")
-                        if _num_sre.isdigit():
+                        if is_native_issue_ident(_num_sre):
                             from src.api.issues_center import _resume_issue_waiting
-                            if _resume_issue_waiting(repo_key, int(_num_sre)):
+                            if _resume_issue_waiting(repo_key, native_issue_number(_num_sre)):
                                 log.info(f"Pipeline: PR merged treated as review pass, "
                                          f"pending_review→processing for {_rid_sre}")
                 except Exception as _resume_e:
@@ -2421,13 +2427,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         _iid3 = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "") or ""
         if _iid3:
             _num3 = str(_iid3).lstrip("#")
-            if _num3.isdigit() and int(_num3) > 0:
+            if is_actionable_issue_number(_num3):
                 _p3 = evt.get("payload", {}) or {}
                 _o3 = _p3.get("object_attributes", {}) or {}
                 _act3 = str(_o3.get("action", "") or "").lower()
                 _closed = _act3 in ("close", "closed") or str(_o3.get("state", "") or "").lower() == "closed"
                 if _closed:
-                    _n3 = close_issue_tasks(repo_key, int(_num3))
+                    _n3 = close_issue_tasks(repo_key, native_issue_number(_num3))
                     log.info(f"Pipeline: issue closed -> complete tasks #{_num3} ({_n3} rows)")
                 elif event_type in ISSUE_EVENT_TYPES:
                     _asg3 = ""
@@ -2453,7 +2459,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     _t3 = str(_o3.get("title", "") or "") if isinstance(_o3, dict) else ""
                     if not _t3:
                         _t3 = evt.get("title", "") or ""
-                    ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3,
+                    ensure_issue_task(repo_key, native_issue_number(_num3), title=_t3, assignee=_asg3,
                                       event_type=event_type, sender=_sender3)
                     log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or _sender3 or '(owner)'}")
     except Exception as _e:
@@ -4269,9 +4275,10 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
         pass
     # ── Issue #573：BOT_USERNAME/AGENT_NAME 注入全部 devops agent（原仅 coding 注 BOT_USERNAME）──
     _inject_bot_agent_env(env, repo_key, agent_type)
-    # ── issue/pr 编号（Issue #528：仅注入纯数字，伪 id/占位值不注入）──
+    # ── issue/pr 编号（Issue #528/#3055：issue 走内核 ident 判据——纯数字与平台
+    #    字符串 ident 均注入；伪 id/占位值仍不注入。PR 号维持纯数字口径）──
     _in = str(issue_number or "").lstrip("#")
-    if _in.isdigit():
+    if is_native_issue_ident(_in):
         env["ISSUE_NUMBER"] = _in
     _pn = str(pr_number or "").lstrip("#")
     if _pn.isdigit():
@@ -5290,7 +5297,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
     _issue_num = str(issue_id).lstrip("#")
     try:
         from src.api.issues_center import _get_issue_title
-        _title = _get_issue_title(repo_key, int(_issue_num)) or ""
+        _title = _get_issue_title(repo_key, native_issue_number(_issue_num)) or ""
     except Exception:
         pass
     if not _title:
@@ -5523,29 +5530,18 @@ def _norm_issue_id(s) -> str:
     """
     if s is None:
         return ""
-    t = str(s).strip().lstrip("#").strip()
+    # Issue #3055：归一判定转发内核唯一实现（保留 #0/空 → "" 的历史出口语义）
+    t = normalize_issue_ident(s)
     if not t or t == "0":
         return ""
-    if t.isdigit():
-        return f"#{t}"
-    import re as _re
-    if _re.fullmatch(r"[A-Z]{2,}[A-Z0-9]*", t):
-        return f"#{t}"
-    return ""
+    return f"#{t}"
 
 def _is_native_issue_ident(value) -> bool:
-    """S75：issue ident 门槛——纯数字或平台字符串 ident（gitee IK*，口径同
-    _norm_issue_id 的 IK 正则）均为真；空值与 PR 订阅伪 id（pr_*，不匹配
-    IK 正则）等其余形态为假。替代旧 isdigit 门槛：字符串 ident 不再被
-    功能性拒掉（ISSUE_NUMBER 不注入 / cancelled 检查跳过 / 评论指令失效 /
-    等态恢复跳过）。"""
-    t = str(value or "").strip().lstrip("#")
-    if not t:
-        return False
-    if t.isdigit():
-        return True
-    import re as _re
-    return bool(_re.fullmatch(r"[A-Z]{2,}[A-Z0-9]*", t))
+    """S75/#3055：issue ident 门槛——转发内核唯一判据
+    `src.kernel.issue_ident.is_native_issue_ident`（纯数字或平台字符串
+    ident；空值 / pr_* 订阅伪 id / 含文本形态为假）。本函数只保留旧名
+    供既有调用点与测试锚使用，禁止在此复制判据。"""
+    return is_native_issue_ident(value)
 
 def _max_issue_from_issues(issues, exclude_num: str = "") -> str:
     """Issue #680: issues 关联列表取编号最大（原"取第一个"会误取正文背景引用的旧 issue）。

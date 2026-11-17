@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import time
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ def out_track_id(user_id: int, kind: str, repo_key: str, issue_number: int,
     被历史行静默吞掉（架构守护 Critical-2）。
     """
     import hashlib
-    raw = f"{int(user_id or 0)}|{kind or ''}|{repo_key or ''}|{int(issue_number or 0)}" \
+    raw = f"{int(user_id or 0)}|{kind or ''}|{repo_key or ''}|{native_issue_number(issue_number or 0)}" \
           f"|{channel_type or ''}|{installation_id or ''}"
     if event_key:
         raw += f"|{event_key}"
@@ -712,7 +713,7 @@ class OutboxConsumer:
                     degraded_marks.append({"chat_id": chat_id,
                                            "conv": payload.get("conv_id") or "",
                                            "repo_key": payload.get("repo_key", ""),
-                                           "issue_number": int(payload.get("issue_number") or 0)})
+                                           "issue_number": native_issue_number(payload.get("issue_number") or 0)})
             else:
                 failed.append((row["out_track_id"], reason or "send_failed"))
 

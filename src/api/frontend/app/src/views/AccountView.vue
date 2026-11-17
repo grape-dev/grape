@@ -104,6 +104,10 @@
                 v-else-if="isBound(p.provider) && isExpired(p.provider)"
                 class="ac__prow ac__prow--expired"
               >
+                <span
+                  class="ac__avatar ac__avatar--icon"
+                  v-html="platformIcon(p.provider, 20)"
+                ></span>
                 <div class="ac__flex1">
                   <div class="ac__pname">
                     <span v-html="platformIcon(p.provider, 20)"></span>
@@ -142,7 +146,7 @@
                   <button class="bt bt-s bt-o" @click="openBind(p.provider)">
                     {{ t('update') }}
                   </button>
-                  <button class="bt bt-s ac__unbind-btn" @click="unbindProvider(p.provider)">
+                  <button class="bt bt-s bt-r ac__unbind-btn" @click="unbindProvider(p.provider)">
                     {{ t('unbind') }}
                   </button>
                 </div>
@@ -355,7 +359,7 @@
                   >
                 </div>
               </div>
-              <button class="bt bt-s ac__revoke-btn" @click="revokeApiKey(k)">
+              <button class="bt bt-s bt-r ac__revoke-btn" @click="revokeApiKey(k)">
                 {{ t('revoke') }}
               </button>
             </div>
@@ -697,7 +701,7 @@ function oauthOpenCenteredPopup(url) {
   const parentH = G.window.innerHeight || document.documentElement.clientHeight || 900
   const left = Math.round(screenLeft + (parentW - w) / 2)
   const top = Math.round(screenTop + (parentH - h) / 2)
-  return G.window.open(
+  const popup = G.window.open(
     url,
     'oauth_popup',
     'width=' +
@@ -710,6 +714,18 @@ function oauthOpenCenteredPopup(url) {
       top +
       ',resizable=yes,scrollbars=yes,status=yes'
   )
+  return registerOAuthPopup(popup)
+}
+// P0-2（Issue #3054）：把本页打开的 popup 引用登记到 window，供 shell 的
+// _onOAuthPopupMessage 做 event.source 双校验（未登记的窗口一律丢弃）。
+// 原实现只读取 __oauthPopupWin，全仓没有赋值点 → 该校验恒失效。
+function registerOAuthPopup(win) {
+  try {
+    G.window.__oauthPopupWin = win || null
+  } catch (e) {
+    /* 跨域/受限环境忽略 */
+  }
+  return win
 }
 function translateOAuthError(errorCode) {
   const key = 'app.login.oauth_error_' + errorCode
@@ -761,23 +777,22 @@ function confirmBindSuccess(provider, btn, fromPostMessage) {
     })
 }
 function fetchTransferContext(provider, btn) {
-  G.API.get('/auth/me')
-    .then(function (d) {
-      const identity = (d.identities || []).find(function (i) {
-        return i.provider === provider
-      })
-      const ticket = identity && identity.binding_ticket
+  // Issue #3097：票据只在服务端（popup 模式不回传 body/URL），取票一律走
+  // GET /auth/transfer-context；失败必须可见（i18n），不得静默只报「操作失败」。
+  G.API.get('/auth/transfer-context')
+    .then(function (ctx) {
+      const ticket = ctx && ctx.binding_ticket
       if (ticket) showTransferConfirm(provider, ticket)
       else {
         if (btn) btn.disabled = false
         closeModal()
-        G.app.showToast('操作失败')
+        G.app.showToast(t('transfer_context_expired'))
       }
     })
     .catch(function () {
       if (btn) btn.disabled = false
       closeModal()
-      G.app.showToast('操作失败')
+      G.app.showToast(t('transfer_context_expired'))
     })
 }
 function showTransferConfirm(provider, ticket, token) {
@@ -1401,6 +1416,9 @@ function doDeleteOauth(provider) {
       }
       function handler(ev) {
         if (ev.origin !== G.window.location.origin) return
+        // P0-2（Issue #3054）：除 origin 外还须校验 source 是本流程打开的 popup，
+        // 否则同源任意窗口可伪造 oauth_result（伪注销 / 提交任意 delete_oauth_state）。
+        if (ev.source !== popup) return
         const data = ev.data
         if (!data || data.type !== 'oauth_result') return
         if (handled) return
@@ -1896,6 +1914,8 @@ function loadApiKeys() {
 
 // app.js 契约：OAuth 回调页 (need_transfer) 延迟调 _accountShowTransferConfirm
 G.window._accountShowTransferConfirm = showTransferConfirm
+// app.js 契约：回调页 need_transfer 但 URL 不带票据 → 由本函数调接口取票（失败可见）
+G.window._accountFetchTransferContext = fetchTransferContext
 
 onMounted(function () {
   tab.value = resolveInitialTab()
@@ -1919,15 +1939,8 @@ onMounted(function () {
   margin-bottom: 0;
 }
 .ac__prow {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 14px 16px;
-  border: 1px solid var(--b);
-  border-radius: 12px;
-  background: var(--c);
-  margin-bottom: 10px;
-  box-shadow: var(--sh);
+  /* 尺寸/边框/圆角/背景/阴影统一由 app.css §23c（行容器单一源）提供，
+     此处只保留账号卡自身的布局细节（Issue #3081 第 5 条）。 */
 }
 .ac__prow--expired {
   border-color: var(--r);

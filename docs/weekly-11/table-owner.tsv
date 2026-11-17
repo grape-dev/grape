@@ -116,3 +116,4 @@ grape_insight_db	obs_metric_rollup
 grape_insight_db	obs_runtime_samples
 grape_insight_db	obs_slo
 grape_insight_db	obs_slo_snapshots
+grape_mgmt_db	grape_t_external_identity_tombstones

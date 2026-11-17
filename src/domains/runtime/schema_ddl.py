@@ -213,6 +213,11 @@ CREATE TABLE IF NOT EXISTS vod_conversations (
 )
 """
 
+# Issue #3055 B 项口径（勿改本声明）：SQLite 侧 issue_number 的 INTEGER 亲和是**有意
+# 契约**（#995/#2072：数字编号落盘即 int、读侧恒 int；字符串 ident 由 SQLite 动态类型
+# 原样存 text，不存在截断）。MySQL 侧翻译层会把它变成 INT 并在非严格 sql_mode 下静默
+# 截断 ident → 由注册迁移 202611172020（db_setup._fn_issue3055_ident_schema）
+# 在启动时 MODIFY 成 VARCHAR(191)，因此这里保持 INTEGER 声明不动。
 _ISSUE_DDL = """
 CREATE TABLE IF NOT EXISTS issue (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,

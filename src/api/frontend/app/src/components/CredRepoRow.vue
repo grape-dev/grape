@@ -19,7 +19,7 @@
       <button class="bt bt-s bt-p" @click="emit('configure', platform.provider)">
         {{ hasPat ? t('pat_btn_reconfigure') : t('pat_btn_configure') }}
       </button>
-      <button v-if="hasPat" class="bt bt-s" :title="t('pat_btn_clear_title')" @click="emit('clear', platform.provider)">
+      <button v-if="hasPat" class="bt bt-s bt-o" :title="t('pat_btn_clear_title')" @click="emit('clear', platform.provider)">
         {{ t('pat_btn_clear') }}
       </button>
     </div>
@@ -27,18 +27,8 @@
 </template>
 
 <style scoped>
-/* 行样式自带（不依赖 AccountView 的 scoped class，避免右对齐失效）：
-   与账号页原 .ac__prow 同款尺寸 —— flex 行、左信息右按钮 */
-.cred-row {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 12px 16px;
-  border: 1px solid var(--b);
-  border-radius: 12px;
-  background: var(--c);
-  margin-bottom: 10px;
-}
+/* 行尺寸（padding/gap/圆角/边框/阴影）由 app.css §23c 行容器单一源统一提供，
+   与账号页 `.ac__prow` 同款且同源（Issue #3081 第 5 条：12·16 vs 14·16 的 4px 差已消除）。 */
 .cred-main {
   flex: 1;
   min-width: 0;

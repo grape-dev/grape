@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from src.kernel.config import log
+from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from src.kernel.repo_key import parse_repo_key
 
 # 索引 TTL（秒）：GitCode/GitHub 侧删除/新建卡片在该窗口内可容忍短暂不一致。
@@ -271,8 +272,10 @@ def _apply_existence(repo_key: str, numbers: frozenset[int]) -> Optional[frozens
     for row in rows:
         _id, _num, _exists, _checked = row
         try:
-            if _exists != 0 and int(_num) not in numbers:
-                candidates.append(int(_num))
+            # Issue #3055：原生形态比较（数字→int 与 platform 数字集同型；ident→str 走单条复核）
+            _n_native = native_issue_number(_num)
+            if _exists != 0 and _n_native not in numbers:
+                candidates.append(_n_native)
         except (TypeError, ValueError):
             continue
     # 索引未命中的“当前仍标记为存在”的卡片，逐条复核后才判定删除（防 TTL 内新建卡片误杀）。
@@ -284,7 +287,7 @@ def _apply_existence(repo_key: str, numbers: frozenset[int]) -> Optional[frozens
     for row in rows:
         _id, _num, _exists, _checked = row
         try:
-            _num_int = int(_num)
+            _num_int = native_issue_number(_num)
             exists = _num_int in numbers
         except (TypeError, ValueError):
             continue

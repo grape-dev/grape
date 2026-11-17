@@ -5,6 +5,7 @@ from src.kernel.owner_db import db_pair
 
 db, db_lock = db_pair("runtime")
 from src.kernel.config import log
+from src.kernel.issue_ident import is_actionable_issue_number, normalize_issue_ident  # Issue #3055
 from src.kernel.time_utils import normalize_event_time
 from src.kernel.event_payload_view import payload_view_from_json
 from src.kernel.a2a_context import a2a_event_context_key
@@ -181,8 +182,9 @@ def append_event(repo_key: str, event_type: str, title: str = "",
                             break
             if num:
                 _num = str(num).lstrip("#")
-                if _num.isdigit() and _num != "0":
-                    issue_id = f"#{_num}"
+                # Issue #3055：ident（gitee IK*）同样兜底为 #<ident>；0 占位仍不兜底
+                if is_actionable_issue_number(_num):
+                    issue_id = f"#{normalize_issue_ident(_num)}"
         if not issue_id:
             issue_id = _extract_issue_id_from_link(result) or _extract_issue_id_from_link(summary) \
                 or _extract_issue_id_from_link(title)
