@@ -156,13 +156,27 @@ def _require_credential_ctx(request: Request) -> CredentialContext:
     h = hashlib.sha256(token.encode()).hexdigest()
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "SELECT rc.id, rc.scope, rc.owner_name, rc.owner_id, rc.repo_key, ua.id "
-            "FROM runtime_credentials rc "
-            "LEFT JOIN user_accounts ua ON rc.owner_name = ua.username "
-            "WHERE rc.token_hash=? AND rc.status='active'",
-            (h,))
-        row = c.fetchone()
+        try:
+            c.execute(
+                "SELECT rc.id, rc.scope, rc.owner_name, rc.owner_id, rc.repo_key, ua.id "
+                "FROM runtime_credentials rc "
+                "LEFT JOIN user_accounts ua ON rc.owner_name = ua.username "
+                "WHERE rc.token_hash=? AND rc.status='active'",
+                (h,))
+            row = c.fetchone()
+        except Exception as _e_ua:  # noqa: BLE001
+            # 三库拓扑：user_accounts 归 mgmt 域，runtime 进程库没有该表（1146）。
+            # 回落成不 JOIN 的查询：owner_id 取 runtime_credentials 自带列（worker 凭据
+            # 为空 → 下游按 fail-closed 处理），whoami 本身不消费 owner_id。
+            log.warning(f"whoami ctx: user_accounts join unavailable ({_e_ua}); "
+                        "fallback without owner id resolution")
+            c = db.cursor()
+            c.execute(
+                "SELECT rc.id, rc.scope, rc.owner_name, rc.owner_id, rc.repo_key, NULL "
+                "FROM runtime_credentials rc "
+                "WHERE rc.token_hash=? AND rc.status='active'",
+                (h,))
+            row = c.fetchone()
     if not row:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "runtime credential revoked or not found"})
     _scope = (row[1] or "global").strip().lower()
@@ -3285,6 +3299,32 @@ def runtime_sandbox_status(task_id: str, body: SandboxStatusBody, cred: Credenti
     return {"status": "ok"}
 
 
+def _fetch_across_domains(sql: str, params=(), domains=("runtime", "mgmt")) -> list:
+    """按域依次尝试执行一条只读 SQL，返回全部行。
+
+    三库拓扑下同一张表在不同环境可能落在不同域（例：table_ownership 声明
+    ``grape_t_cloud_sandboxes`` 归 runtime，而 beta 实际存在 grape_beta_mgmt）。
+    只在「表不存在」（1146 / doesn't exist）时换下一个域重试；其余异常原样抛出，
+    不静默降级成空列表（否则查询错误会被读成「没有数据」）。
+    """
+    from src.kernel.bulk_read import reader
+
+    last = None
+    for dom in domains:
+        try:
+            with reader(dom) as c:
+                c.execute(sql, params)
+                return c.fetchall() or []
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "1146" not in msg and "doesn't exist" not in msg:
+                raise
+            last = e
+    if last is not None:
+        raise last
+    return []
+
+
 @router.get("/cloud-sandboxes", operation_id="runtime_cloud_sandboxes", summary="List cloud sandboxes",
             description="Lists all cloud sandboxes with state, provider, kill_attempts. Supports pagination, search, and filtering.")
 def runtime_list_cloud_sandboxes(
@@ -3302,18 +3342,38 @@ def runtime_list_cloud_sandboxes(
 
     extra_conditions = []
     extra_params = []
+    from src.kernel.bulk_read import reader
+
+    # 三库拓扑：grape_t_cloud_sandboxes / user_accounts / grape_t_sandbox_provider_config
+    # 归 mgmt，agent_tasks / agent_runtimes / runtime_credentials 归 runtime。
+    # 单条跨域 JOIN 在分库下必然 1146（beta 实测 grape_beta_runtime 无 sandboxes 表），
+    # 改为「mgmt 分页查询 + runtime 侧富化」两段读：计数/分页/排序只由 mgmt 单表决定。
+    from src.kernel.bulk_read import reader
+
+    # 三库拓扑：grape_t_cloud_sandboxes / user_accounts / grape_t_sandbox_provider_config
+    # 归 mgmt，agent_tasks / agent_runtimes / runtime_credentials 归 runtime。
+    # 单条跨域 JOIN 在分库下必然 1146（beta 实测 grape_beta_runtime 无 sandboxes 表），
+    # 改为「mgmt 分页查询 + runtime 侧富化」两段读：计数/分页/排序只由 mgmt 单表决定。
+    # 三库拓扑：沙箱/owner/provider 配置与 agent_tasks/agent_runtimes/runtime_credentials
+    # 分属不同域库，单条跨域 JOIN 必然 1146（beta 实测：进程库是 grape_beta_runtime）。
+    # 改为「沙箱分页查询 + runtime 侧富化」两段读，分页/计数/排序只由沙箱单表决定；
+    # 每段用 _fetch_across_domains 按域重试，避免把表的实际落库位置写死。
     q = (q or "").strip()
     if q:
-        # [沙箱迁移] 搜索语义对齐 Event 列：event_seq 精确匹配（事件号是数字，模糊无意义）；
-        # task_id 仅在完整 ID（t_ 前缀）时精确参与——task_id 是 16 位 hash，
-        # 模糊 LIKE %q% 会让任何短数字串命中一堆无关行（搜"9"命中全部含 9 的 hash）。
-        _conds = ["t.event_seq = ?"]
-        _params = [q]
+        # 事件号（t.event_seq）不在沙箱表上：先在任务域解析成 task_id 集合，再回沙箱表过滤。
+        # 语义与原 (event_seq = ? OR task_id = ?) 等价；task_id 只在完整 ID（t_ 前缀）时
+        # 精确参与（16 位 hash 模糊匹配会命中一堆无关行）。
         if q.startswith("t_"):
-            _conds.append("s.task_id = ?")
-            _params.append(q)
-        extra_conditions.append("(" + " OR ".join(_conds) + ")")
-        extra_params.extend(_params)
+            extra_conditions.append("s.task_id = ?")
+            extra_params.append(q)
+        else:
+            _q_rows = _fetch_across_domains("SELECT id FROM agent_tasks WHERE event_seq=?",
+                                            (q,), ("runtime", "mgmt"))
+            _q_task_ids = [r[0] for r in _q_rows if r[0]]
+            if not _q_task_ids:
+                return {"total": 0, "page": page, "page_size": page_size, "sandboxes": []}
+            extra_conditions.append("s.task_id IN (" + ",".join(["?"] * len(_q_task_ids)) + ")")
+            extra_params.extend(_q_task_ids)
     if provider:
         extra_conditions.append("s.provider=?")
         extra_params.append(provider)
@@ -3324,86 +3384,83 @@ def runtime_list_cloud_sandboxes(
         extra_conditions.append("s.state=?")
         extra_params.append(state)
     extra_where = (" AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
+    _domains = ("mgmt", "runtime")
+    _sel = (
+        "SELECT s.sandbox_id, s.issue_id, s.repo_key, s.provider, s.provider_id, s.state, "
+        "s.agent_installed, s.kill_attempts, s.created_at, s.last_refresh_at, "
+        "s.task_id, s.created_by, u.username, "
+        "s.template_id, s.template_name, s.engine_type, s.last_error, "
+        "spc.runtime_credential_id "
+        "FROM grape_t_cloud_sandboxes s LEFT JOIN user_accounts u ON s.created_by=u.id "
+        "LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = s.provider_id "
+    )
+    offset = (page - 1) * page_size
+    if repo_key:
+        check_repo_access(user, repo_key)
+        params = [repo_key] + extra_params
+        total = _fetch_across_domains(
+            "SELECT COUNT(*) FROM grape_t_cloud_sandboxes s WHERE s.repo_key=?" + extra_where,
+            tuple(params), _domains)[0][0]
+        _rows = _fetch_across_domains(
+            _sel + "WHERE s.repo_key=?" + extra_where + " ORDER BY s.created_at DESC LIMIT ? OFFSET ?",
+            tuple(params + [page_size, offset]), _domains)
+    else:
+        _where = (" WHERE " + " AND ".join(extra_conditions)) if extra_conditions else ""
+        # 计数只依赖沙箱单表（原实现的 LEFT JOIN 不改变行数：一沙箱一个 task_id）
+        total = _fetch_across_domains(
+            "SELECT COUNT(*) FROM grape_t_cloud_sandboxes s" + _where,
+            tuple(extra_params), _domains)[0][0]
+        _rows = _fetch_across_domains(
+            _sel + _where + " ORDER BY s.created_at DESC LIMIT ? OFFSET ?",
+            tuple(extra_params + [page_size, offset]), _domains)
 
-    from src.kernel.bulk_read import reader
-    with reader() as c:
-        if repo_key:
-            check_repo_access(user, repo_key)
-            params = [repo_key] + extra_params
-            c.execute("SELECT COUNT(*) FROM grape_t_cloud_sandboxes s WHERE s.repo_key=?" + extra_where, tuple(params))
-            total = c.fetchone()[0]
-            offset = (page - 1) * page_size
-            c.execute(
-                "SELECT s.sandbox_id, s.issue_id, s.repo_key, s.provider, s.provider_id, s.state, "
-                "s.agent_installed, s.kill_attempts, s.created_at, s.last_refresh_at, "
-                "s.task_id, s.created_by, u.username, t.event_seq, ar.name, ar.runtime_info, "
-                "s.template_id, s.template_name, s.engine_type, s.last_error, "
-                "COALESCE(rc2.name, s.provider) "
-                "FROM grape_t_cloud_sandboxes s LEFT JOIN user_accounts u ON s.created_by=u.id "
-                "LEFT JOIN agent_tasks t ON t.id = s.task_id "
-                "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
-                "LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = s.provider_id "
-                "LEFT JOIN runtime_credentials rc2 ON rc2.id = spc.runtime_credential_id "
-                "WHERE s.repo_key=?" + extra_where +
-                " ORDER BY s.created_at DESC LIMIT ? OFFSET ?",
-                tuple(params + [page_size, offset]))
-            def _p_ri(_raw):
-                try:
-                    import json as _j
-                    _d = _j.loads(_raw or "{}")
-                    return _d if isinstance(_d, dict) else {}
-                except Exception:
-                    return {}
-            sandboxes = [
-                # provider 显示 = 凭据名（COALESCE(rc2.name, s.provider)——跟随改名；无凭据回落建箱快照）
-                {"sandbox_id": r[0], "issue_id": r[1], "repo_key": r[2], "provider": r[20],
-                 "provider_id": r[4], "state": r[5], "agent_installed": bool(r[6]),
-                 "kill_attempts": r[7], "created_at": r[8], "last_refresh_at": r[9],
-                 "task_id": r[10], "created_by": r[11], "owner_name": r[12] or "", "event_seq": r[13],
-                 "engine": (r[18] or _p_ri(r[15]).get("engine_type", "") or (r[14] or "").split(":")[0]) or (r[14] or "").split(":")[0],
-                 "template_id": (r[16] or _p_ri(r[15]).get("template_id", "")), "template_name": (r[17] or _p_ri(r[15]).get("template_name", "")),
-                 "last_error": (r[19] or "")}
-                for r in c.fetchall()
-            ]
-        else:
-            c.execute(
-                "SELECT COUNT(*) FROM grape_t_cloud_sandboxes s "
-                "LEFT JOIN agent_tasks t ON t.id = s.task_id "
-                "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id"
-                + ((" WHERE " + " AND ".join(extra_conditions)) if extra_conditions else ""),
-                tuple(extra_params))
-            total = c.fetchone()[0]
-            offset = (page - 1) * page_size
-            c.execute(
-                "SELECT s.sandbox_id, s.issue_id, s.repo_key, s.provider, s.provider_id, s.state, "
-                "s.agent_installed, s.kill_attempts, s.created_at, s.last_refresh_at, "
-                "s.task_id, s.created_by, u.username, t.event_seq, ar.name, ar.runtime_info, "
-                "s.template_id, s.template_name, s.engine_type, s.last_error, COALESCE(rc2.name, s.provider) "
-                "FROM grape_t_cloud_sandboxes s LEFT JOIN user_accounts u ON s.created_by=u.id "
-                "LEFT JOIN agent_tasks t ON t.id = s.task_id "
-                "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
-                "LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = s.provider_id "
-                "LEFT JOIN runtime_credentials rc2 ON rc2.id = spc.runtime_credential_id "
-                + ((" WHERE " + " AND ".join(extra_conditions)) if extra_conditions else "") +
-                " ORDER BY s.created_at DESC LIMIT ? OFFSET ?",
-                tuple(extra_params + [page_size, offset]))
-            def _p_ri(_raw):
-                try:
-                    import json as _j
-                    _d = _j.loads(_raw or "{}")
-                    return _d if isinstance(_d, dict) else {}
-                except Exception:
-                    return {}
-            sandboxes = [
-                {"sandbox_id": r[0], "issue_id": r[1], "repo_key": r[2], "provider": r[20],
-                 "provider_id": r[4], "state": r[5], "agent_installed": bool(r[6]),
-                 "kill_attempts": r[7], "created_at": r[8], "last_refresh_at": r[9],
-                 "task_id": r[10], "created_by": r[11], "owner_name": r[12] or "", "event_seq": r[13],
-                 "engine": (r[18] or _p_ri(r[15]).get("engine_type", "") or (r[14] or "").split(":")[0]) or (r[14] or "").split(":")[0],
-                 "template_id": (r[16] or _p_ri(r[15]).get("template_id", "")), "template_name": (r[17] or _p_ri(r[15]).get("template_name", "")),
-                 "last_error": (r[19] or "")}
-                for r in c.fetchall()
-            ]
+    # runtime 侧富化：event_seq / 引擎名 / runtime_info / 凭据名（provider 跟随改名）
+    _task_ids = [r[10] for r in _rows if r[10]]
+    _cred_ids = [r[17] for r in _rows if r[17]]
+    _t_map: dict = {}
+    _cr_map: dict = {}
+    if _task_ids:
+        for _r in _fetch_across_domains(
+                "SELECT t.id, t.event_seq, ar.name, ar.runtime_info "
+                "FROM agent_tasks t LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
+                "WHERE t.id IN (" + ",".join(["?"] * len(_task_ids)) + ")",
+                tuple(_task_ids), ("runtime", "mgmt")):
+            _t_map[_r[0]] = {"event_seq": _r[1], "name": _r[2], "runtime_info": _r[3]}
+    if _cred_ids:
+        for _r in _fetch_across_domains(
+                "SELECT id, name FROM runtime_credentials WHERE id IN ("
+                + ",".join(["?"] * len(_cred_ids)) + ")",
+                tuple(_cred_ids), ("runtime", "mgmt")):
+            _cr_map[_r[0]] = _r[1] or ""
+
+    def _p_ri(_raw):
+        try:
+            import json as _j
+            _d = _j.loads(_raw or "{}")
+            return _d if isinstance(_d, dict) else {}
+        except Exception:
+            return {}
+
+    sandboxes = []
+    for r in _rows:
+        _t = _t_map.get(r[10]) or {}
+        _ri = _p_ri(_t.get("runtime_info"))
+        _ar_name = _t.get("name") or ""
+        sandboxes.append({
+            # provider 显示 = 凭据名（跟随改名；无凭据/空名回落建箱快照 s.provider）
+            "sandbox_id": r[0], "issue_id": r[1], "repo_key": r[2],
+            "provider": _cr_map.get(r[17]) or r[3],
+            "provider_id": r[4], "state": r[5], "agent_installed": bool(r[6]),
+            "kill_attempts": r[7], "created_at": r[8], "last_refresh_at": r[9],
+            "task_id": r[10], "created_by": r[11], "owner_name": r[12] or "",
+            "event_seq": _t.get("event_seq"),
+            "engine": ((r[15] or _ri.get("engine_type", "") or _ar_name.split(":")[0])
+                       or _ar_name.split(":")[0]),
+            "template_id": (r[13] or _ri.get("template_id", "")),
+            "template_name": (r[14] or _ri.get("template_name", "")),
+            "last_error": (r[16] or ""),
+        })
+
     return {"total": total, "page": page, "page_size": page_size, "sandboxes": sandboxes}
 
 
