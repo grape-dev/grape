@@ -574,6 +574,16 @@ EOF
 [Service]
 LimitNOFILE=524288
 EOF
+  # root 模式 worker 必须显式放行 root 引擎：agent.py 在 geteuid()==0 时以 78/CONFIG
+  # 退出（除非 GRAPE_ALLOW_ROOT_ENGINE=1）。本分支的 unit 模板就是 User=root，
+  # 也没有 grape 用户可切 —— 不带这一行时新装/重装 worker 会立刻进入
+  # auto-restart 死循环（exit 78），心跳一次都发不出，平台上整批引擎掉线
+  # （2026-11-16 0002/0003/0004/0005/0006 五台实测，重启计数 5000~9000 次）。
+  # 非 root 安装（User=grape）走上面的分支，不需要也不应该带这个放行。
+  cat > "$_DROPIN_DIR/30-allow-root.conf" <<EOF
+[Service]
+Environment=GRAPE_ALLOW_ROOT_ENGINE=1
+EOF
   systemctl daemon-reload
   systemctl enable runtime-agent >/dev/null 2>&1 || true
   systemctl restart runtime-agent || { restore_upgrade_backup systemd || true; fail "New agent failed to start (rollback attempted); check journalctl -u runtime-agent"; }
@@ -651,6 +661,9 @@ fi
 
 cd "$INSTALL_DIR"
 export PATH="$INSTALL_DIR/.venv/bin:\$HOME/.opencode/bin:\$HOME/.local/bin:\$HOME/.local/npm-global/bin:\$PATH"
+# 容器/无 systemd 的 root 回退路径同样会撞 agent.py 的 root 引擎守卫（exit 78）：
+# 按 euid 放行；非 root 安装不受影响（守卫只在 root 下生效）。
+if [ "\$(id -u)" = "0" ]; then export GRAPE_ALLOW_ROOT_ENGINE=1; fi
 set -a; . "$ENV_FILE"; set +a
 exec "$VENV/bin/python" -m src.domains.runtime.engine.agent
 EOF
