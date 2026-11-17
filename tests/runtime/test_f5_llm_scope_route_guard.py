@@ -1,6 +1,6 @@
 """F-5 regression guard: LLM cred scope routing must not use in-SQL json_extract joins.
 
-Background (2026-11-17, aw11-3db E2E): the task_env scope route joined
+Background (2026-11-17, split-DB E2E): the task_env scope route joined
 grape_t_sandbox_provider_config on json_extract(r.runtime_info, '$.provider_id').
 MariaDB returns the quoted JSON string ("2") where SQLite returned the bare
 value, so after the split-DB migration the join silently missed and the

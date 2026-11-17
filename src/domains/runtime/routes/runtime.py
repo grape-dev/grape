@@ -1277,7 +1277,7 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
             # F-5 修复（2026-11-17）：原单条 SQL 用 json_extract(r.runtime_info,'$.provider_id')
             # 直接 JOIN spc.id——MariaDB 的 json_extract 返回带引号 "2"，SQLite 不带；
             # 拆库到 MariaDB 后 JOIN 恒 miss，被 except:pass 静默吞成 mode=user（注入
-            # 错误 scope 的 LLM key，E2E 定位证据见 aw11 用例库 F-5）。改为 Python 侧
+            # 错误 scope 的 LLM key，E2E 定位证据见用例库 F-5）。改为 Python 侧
             # json.loads 归一 provider_id 后再查两步——跨库语义恒定，miss 显式日志不静默。
             with db_lock:
                 c = db.cursor()
