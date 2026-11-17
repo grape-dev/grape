@@ -268,6 +268,14 @@ if [ -d "$_APP/node_modules" ] && command -v npm >/dev/null 2>&1; then
   else
     echo "[3db] frontend: 产物已最新，跳过构建"
   fi
+  # 把 index.html 里的 ?v= 同步成产物内容哈希：手写数字容易漏改，
+  # 改了视图内容却没改版本号时，浏览器会一直用缓存里的旧文件。
+  # 用绝对路径调解释器：部署脚本常被 root 在 /root 下执行，相对 venv/bin/python 会找不到
+  if "$_SELF/venv/bin/python" "$_SELF/scripts/bump_asset_versions.py" >/tmp/grape-fe-versions.log 2>&1; then
+    tail -1 /tmp/grape-fe-versions.log | sed 's/^/  [3db] frontend: /'
+  else
+    echo "[3db] frontend: WARN 资产版本号同步失败（日志 /tmp/grape-fe-versions.log）" >&2
+  fi
 else
   echo "[3db] frontend: 无 node_modules 或 npm，跳过构建（页面可能用了旧产物）"
 fi
@@ -289,7 +297,9 @@ for _co in /home/*/grape-new-version2; do
   if [ -d "$_co/src/api/frontend/static-dist" ] && [ -d "$_SELF/src/api/frontend/static-dist" ]; then
     rsync -a --delete "$_SELF/src/api/frontend/static-dist/" "$_co/src/api/frontend/static-dist/" 2>/dev/null \
       || cp -a "$_SELF/src/api/frontend/static-dist/." "$_co/src/api/frontend/static-dist/"
-    chown -R "$_own:$_own" "$_co/src/api/frontend/static-dist" 2>/dev/null || true
+    mkdir -p "$_co/src/api/frontend/shell"
+    cp -f "$_SELF/src/api/frontend/shell/index.html" "$_co/src/api/frontend/shell/index.html" 2>/dev/null || true
+    chown -R "$_own:$_own" "$_co/src/api/frontend/static-dist" "$_co/src/api/frontend/shell" 2>/dev/null || true
     echo "[3db] frontend dist mirrored -> $_co（$(ls "$_co/src/api/frontend/static-dist/viewjs" 2>/dev/null | wc -l) 个 view）"
   fi
 done
