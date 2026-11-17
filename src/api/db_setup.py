@@ -1916,6 +1916,10 @@ class Migration:
     name: str
     kind: str                          # MIGRATION_KINDS 之一
     fn: Optional[Callable[[], None]] = None   # legacy-stamp 无 fn
+    # 这条迁移该由哪个域库执行（三库模式：各域进程只跑自己域的条目）。
+    # 默认 mgmt = 历史行为；只碰 runtime 表的迁移必须标 ("runtime",)，否则
+    # mgmt 进程会「加列被归属守卫跳过、预检又判未完成」永远不盖章。
+    domains: tuple = ("mgmt",)
 
     def __post_init__(self):
         if self.kind not in MIGRATION_KINDS:
@@ -2405,7 +2409,8 @@ _ORG_SENTINEL_COLS = _ORG_DOMAIN_TEXT_COLS
 _TEXT_IDENT_COLS = ("issue_number", "parent_issue_number")
 
 def register_migration(version: str, name: str, kind: str,
-                       fn: Optional[Callable[[], None]] = None) -> Migration:
+                       fn: Optional[Callable[[], None]] = None,
+                       domains: tuple = ("mgmt",)) -> Migration:
     """登记一条迁移（新增迁移一律走这里 + kind 规则）。
 
     ⚠️ 新增补列/补表/回填必须走这里，不要写进老轨 _run_all_migrations()
@@ -2429,7 +2434,8 @@ def register_migration(version: str, name: str, kind: str,
        （读写版本台账表的 version/name 两列）——测试连不了真实库，
        跨分支撞号只能靠这一步发现；执行器对「同号不同名」会报 ERROR 但不阻断启动。
     """
-    mig = Migration(version=version, name=name, kind=kind, fn=fn)
+    mig = Migration(version=version, name=name, kind=kind, fn=fn,
+                    domains=tuple(domains) or ("mgmt",))
     # 撞号守卫（对齐 weekly-10 #1412）：runner 只按 version 判「已执行」不比对 name，
     # 源内同号后登记者将被永久跳过（跨线教训 202611040001/002 与 weekly-10 撞号，
     # 8082 实锤 #1011 两条被顶替跳过 → autopilot 500）。
@@ -3931,7 +3937,7 @@ def _ensure_migration_session_lock_timeout(seconds: int = 10) -> None:
 
 
 def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
-                              mdl_holders=None) -> None:
+                              mdl_holders=None, allow_legacy: bool = True) -> None:
     """执行器核心（可注入连接，供测试与生产共用同一语义）。
 
     流程：读版本表 → legacy-stamp 判定（表空则先全量 _run_all_migrations 并盖帽）
@@ -3963,7 +3969,11 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
     applied = _applied_versions()
 
     # ── legacy-stamp：版本表无任何盖章行 → 存量库首跑 ──
-    if not applied:
+    # allow_legacy=False（三库模式的 non-mgmt 域进程）：域库台账天然是"空"的，
+    # 绝不能再跑老轨全量迁移（那是 mgmt 单库语义，会把别域 DDL 打在错库上）。
+    if not applied and not allow_legacy:
+        log.info(f"域库台账为空：只跑本域登记迁移（{len(registry)} 条），不跑 legacy 全量")
+    if not applied and allow_legacy:
         _LEGACY_BLOCKED_DDL.clear()   # 每次首跑前重置，防跨启动残留
         log.info("grape_t_schema_migrations 为空：按 legacy-stamp 首跑全量迁移"
                  "（行为与历史版本完全一致），完成后一次性盖帽收敛")
@@ -4093,6 +4103,40 @@ def run_pending_migrations() -> None:
         _backfill_missing_migration_reports()
     except Exception as e:
         log.warning(f"Issue #1011 迁移报告补写异常（不阻断启动）: {e}")
+
+
+def _ensure_migrations_ledger(conn) -> None:
+    """在**本域库**建版本台账（每域一份，不是跨域副本）。"""
+    c = conn.cursor()
+    c.execute(_SCHEMA_MIGRATIONS_DDL)
+    conn.commit()
+
+
+def run_domain_migrations() -> None:
+    """三库模式：本域进程只跑本域登记的迁移（不跑 legacy 全量）。
+
+    由 scripts/grape-systemd-run.sh 按角色导出 GRAPE_MIGRATION_OWNER 决定谁来跑：
+    runtime 表只由 event 进程跑（worker 与 event 共库，避免并发重复 DDL），
+    insight 由 insight 进程跑；mgmt 仍走 init_database() 的常规路径。
+    """
+    domain = (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip().lower()
+    if domain not in ("runtime", "insight"):
+        return  # mgmt：init_database() 已经跑；worker：与 event 共库，不重复跑
+    registry = [m for m in _MIGRATIONS if domain in (m.domains or ())]
+    if not registry:
+        log.info(f"{domain} 域无登记的迁移，跳过")
+        return
+    try:
+        _ensure_migrations_ledger(db)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"{domain} 域台账建立失败（不阻断启动）: {e}")
+        return
+    try:
+        _ensure_migration_session_lock_timeout()
+        _run_migrations_with_conn(db, registry=registry, allow_legacy=False)
+        log.info(f"{domain} 域迁移完成（{len(registry)} 条登记）")
+    except Exception as e:  # noqa: BLE001
+        log.error(f"{domain} 域迁移执行器异常（不阻塞启动，下次重试）: {e}")
 
 
 def _run_all_migrations():
@@ -8092,9 +8136,16 @@ def _issue_646_column_ddl(ddl: str) -> str:
 
 
 def _issue_646_columns_missing(c) -> list:
-    """QA 复审 R1：加列迁移落库核验——返回仍未建成的 (table, column) 清单。"""
+    """QA 复审 R1：加列迁移落库核验——返回仍未建成的 (table, column) 清单。
+
+    三库模式：别的域拥有的表（agent_runtimes 等在 runtime 库）本进程根本不建——
+    `_ensure_column` 已被归属守卫跳过。预检若照旧判定「未完成」，本迁移永远不盖章，
+    每次启动都报 ERROR。故外来表一律视为「由属主域进程负责」，不计入缺失。
+    """
     missing = []
     for tbl, col, _ddl in _ISSUE_646_UID_COLUMNS:
+        if _owned_skip(tbl, "precheck"):
+            continue
         cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
         if col not in cols:
             missing.append(f"{tbl}.{col}")
@@ -8150,6 +8201,10 @@ def _migration_646_backfill_uids(conn=None) -> dict:
     """
     from src.kernel.engine_uid import derive_engine_uid, new_credential_uid
     conn = conn if conn is not None else db
+    # 三库模式：这些表归 runtime 域，本进程（mgmt）库里没有它们。DDL 已被归属守卫
+    # 跳过，回填同样由 runtime 域进程负责——这里不抛错、直接收敛，避免「不盖章」。
+    if _owned_skip("runtime_credentials", "backfill"):
+        return {}
     report = {"duplicated_engine_rows": [], "orphan_pool_rows": [], "orphan_capability_rows": [],
               "orphan_task_runtime": [], "orphan_task_pool_ids": [], "orphan_task_messages": 0,
               "credentials_backfilled": 0, "engines_backfilled": 0, "tasks_backfilled": 0,
@@ -8310,7 +8365,8 @@ _ISSUE_646_FK_DDLS = (
 
 
 def _migration_646_mysql_fks(conn=None) -> None:
-    """[202611080006 safe] 阶段3 MySQL 真实 FK（SQLite 跳过，悬挂防护由迁移回填 + 显式清理链保证）。
+    """
+    [202611080006 safe] 阶段3 MySQL 真实 FK（SQLite 跳过，悬挂防护由迁移回填 + 显式清理链保证）。
 
     Issue #646 复审裁定（CASCADE→RESTRICT）：静默级联蒸发比可见悬挂更危险——
     - agent_type_runtime_pool.engine_uid → agent_runtimes.engine_uid ON DELETE RESTRICT
@@ -8322,6 +8378,9 @@ def _migration_646_mysql_fks(conn=None) -> None:
     不静默蒸发）。幂等：先 DROP 同名约束（兼容早期 CASCADE 形态/重复执行）再 ADD；
     孤儿行 uid=NULL 不受 FK 约束（预期）。
     """
+    if _owned_skip("agent_runtimes", "fk"):
+        return  # 三库模式：FK 属于 runtime 域，由 runtime 域进程建立
+
     if not _mysql_backend():
         log.info("Issue #646: SQLite 后端跳过 MySQL FK（回填+显式清理链已保证无悬挂）")
         return
@@ -8346,13 +8405,16 @@ def _migration_646_mysql_fks(conn=None) -> None:
 
 register_migration(
     "202611080011", "issue-646-add-uid-columns", "safe",
-    lambda: _migration_646_add_uid_columns())
+    lambda: _migration_646_add_uid_columns(),
+    domains=("runtime",))
 register_migration(
     "202611080012", "issue-646-backfill-uids", "backfill",
-    lambda: _migration_646_backfill_uids())
+    lambda: _migration_646_backfill_uids(),
+    domains=("runtime",))
 register_migration(
     "202611080013", "issue-646-mysql-fks", "safe",
-    lambda: _migration_646_mysql_fks())
+    lambda: _migration_646_mysql_fks(),
+    domains=("runtime",))
 
 
 # =====================================================================
@@ -8432,9 +8494,14 @@ def get_issue_868_session_uid_migration_report() -> dict:
 
 
 def _issue_868_session_columns_missing(c) -> list:
-    """加列迁移落库核验——返回仍未建成的 (table, column) 清单（模式同 #646 R1）。"""
+    """加列迁移落库核验——返回仍未建成的 (table, column) 清单（模式同 #646 R1）。
+
+    外来表同 #646：归属守卫已跳过，缺列由属主域进程负责，不计入缺失。
+    """
     missing = []
     for tbl, col, _ddl in _ISSUE_868_SESSION_UID_COLUMNS:
+        if _owned_skip(tbl, "precheck"):
+            continue
         try:
             cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
         except Exception:
@@ -8481,6 +8548,9 @@ def _migration_868_backfill_session_uids(conn=None) -> dict:
     - 会话表行数量级小（千级），整表遍历即可，无需分批。
     """
     conn = conn if conn is not None else db
+    # 三库模式：会话表归 runtime 域，回填由 runtime 域进程做（见 #646 同款说明）。
+    if _owned_skip("devops_agent_session", "backfill"):
+        return {}
     report = {"devops_sessions_backfilled": 0, "chat_sessions_backfilled": 0,
               "orphan_devops_sessions": [], "orphan_chat_sessions": [],
               "update_unmatched_sessions": []}
@@ -8554,10 +8624,12 @@ def _migration_868_backfill_session_uids(conn=None) -> dict:
 
 register_migration(
     "202611030005", "issue-868-session-uid-columns", "safe",
-    lambda: _migration_868_add_session_uid_columns())
+    lambda: _migration_868_add_session_uid_columns(),
+    domains=("runtime",))
 register_migration(
     "202611030006", "issue-868-backfill-session-uids", "backfill",
-    lambda: _migration_868_backfill_session_uids())
+    lambda: _migration_868_backfill_session_uids(),
+    domains=("runtime",))
 
 
 # =====================================================================
@@ -8614,6 +8686,10 @@ def _migration_1011_backfill_rederive_engine_uids(conn=None) -> dict:
 
     c = conn.cursor()
     # 预检：锚快照列已建成（001 不盖章时 002 不盖章，下次启动重试）
+    # 三库模式：agent_runtimes 归 runtime 域，本进程（mgmt）看不到这些列，
+    # 由 runtime 域进程在建列后自己跑回填；此处不预检、不阻断。
+    if _owned_skip("agent_runtimes", "precheck"):
+        return report
     cols = [r[1] for r in c.execute("PRAGMA table_info(agent_runtimes)").fetchall()]
     missing = [col for (_t, col, _d) in _ISSUE_1011_ANCHOR_COLUMNS if col not in cols]
     if missing:
@@ -8706,10 +8782,12 @@ def _backfill_missing_migration_reports(conn=None) -> dict:
 
 register_migration(
     "202611080014", "issue-1011-engine-anchor-columns", "safe",
-    lambda: _migration_1011_add_engine_anchor_columns())
+    lambda: _migration_1011_add_engine_anchor_columns(),
+    domains=("runtime",))
 register_migration(
     "202611080015", "issue-1011-backfill-rederive-engine-uids", "backfill",
-    lambda: _migration_1011_backfill_rederive_engine_uids())
+    lambda: _migration_1011_backfill_rederive_engine_uids(),
+    domains=("runtime",))
 
 
 # ======================================================================

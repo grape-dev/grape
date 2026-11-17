@@ -378,6 +378,14 @@ def init_process_db() -> None:
     if _os.environ.get("GRAPE_DOMAIN_LIB") == "1":
         from src.kernel.config import log as _log
         _log.info("three-database mode: skip full bootstrap (schema provisioned by P4)")
+        # 但本域登记的增量迁移仍要跑：台账（grape_t_schema_migrations）与 DDL 都落在
+        # 本域库，归属守卫保证不会碰别域的表；只有 GRAPE_MIGRATION_OWNER 指定的那个
+        # 进程执行（runtime=event / insight=insight / mgmt 由 init_database 走常规路径）。
+        try:
+            from src.api.db_setup import run_domain_migrations as _run_domain_migrations
+            _run_domain_migrations()
+        except Exception as _mig_err:  # noqa: BLE001
+            _log.warning(f"three-database mode: domain migrations skipped ({_mig_err})")
         try:
             from src.kernel.config import _load_accounts
             _load_accounts()

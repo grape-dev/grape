@@ -24,6 +24,14 @@ case "$role" in
     event|worker) _db_name="grape_runtime_db"; _db_user="grape_runtime" ;;
     insight)      _db_name="grape_insight_db"; _db_user="grape_insight" ;;
 esac
+# 谁跑本域迁移：mgmt 走 init_database；runtime 表只由 event 跑（worker 与 event 共库，
+# 重复跑会并发下发同一 DDL）；insight 由 insight 跑。
+case "$role" in
+    mgmt)    export GRAPE_MIGRATION_OWNER="mgmt" ;;
+    event)   export GRAPE_MIGRATION_OWNER="runtime" ;;
+    insight) export GRAPE_MIGRATION_OWNER="insight" ;;
+    worker)  export GRAPE_MIGRATION_OWNER="" ;;
+esac
 export DEVOPS_DB_NAME="$_db_name"
 export DEVOPS_DB_USER="$_db_user"
 # 库口令不能有内置默认值（等于把生产口令写进公开仓库）。
