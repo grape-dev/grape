@@ -40,12 +40,13 @@ _FETCH_TIMEOUT_SECONDS = int(os.environ.get("A2A_TERMINAL_GUARD_TIMEOUT", "5"))
 # 单次 miss 的 VCS 读取总预算（秒）：Issue 详情 + 评论分页 + 载体 PR 评论分页。
 # 复审要求「限制总页数/总超时」——最坏从 ~400s 收敛到「预算 + 单请求超时」量级。
 _FETCH_BUDGET_SECONDS = int(os.environ.get("A2A_TERMINAL_GUARD_BUDGET", "20"))
-_MAX_COMMENT_PAGES = 2
-_MAX_CARRIER_PRS = 2
-# 判定缓存上限（条）：一条键 ≈ 4 个短字符串 + 判定 dict，实测 ~0.6KB/条；
-# 2048 条 ≈ 1.2MB 常驻，覆盖单个 API 进程一天内活跃单据量级（万级用户、30% 日活、
-# 单日派发千级），超限按 LRU 淘汰。与 TTL=60s 共同约束缓存规模。
-_MAX_CACHE_ENTRIES = 2048
+_MAX_COMMENT_PAGES = int(os.environ.get("A2A_TERMINAL_GUARD_MAX_COMMENT_PAGES", "2"))
+_MAX_CARRIER_PRS = int(os.environ.get("A2A_TERMINAL_GUARD_MAX_CARRIER_PRS", "2"))
+# 判定缓存上限（条）：条目只存判定结果（约 15 个短键 + marker 行 ≤500 字），
+# 实测（sys.getsizeof 递归统计 (key, (ts, state))）：命中态 2.8KB / 未命中态 1.7KB /
+# 负结果 0.14KB，取最大 2.8KB × 2048 ≈ 5.7MB 常驻；量级按「万级用户、30% 日活、
+# 单日派发千级 × TTL=60s」估算，活跃单据数远低于上限，超限按 LRU 淘汰。
+_MAX_CACHE_ENTRIES = int(os.environ.get("A2A_TERMINAL_GUARD_MAX_CACHE", "2048"))
 
 _CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
 

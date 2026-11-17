@@ -867,7 +867,7 @@ def test_list_issue_comments_paginates_all_pages():
     }
     _calls = []
 
-    def _fake_github_request(method, path, data=None):
+    def _fake_github_request(method, path, data=None, **_kw):
         _calls.append(path)
         _page = 1 if "page=1" in path else 2
         return _pages.get(_page, [])

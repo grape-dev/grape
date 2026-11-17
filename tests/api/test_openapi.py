@@ -350,6 +350,7 @@ EXPECTED_PUBLIC = {
     "scenes_market_applied": ("get", "/api/scenes/market/{market_id}/applied"),
     "scenes_market_apply": ("post", "/api/scenes/market/{market_id}/apply"),
     "categories_tree": ("get", "/api/categories/tree"),
+    "issues_terminal_disposition": ("post", "/api/issues/{issue_id}/terminal-disposition"),
     "scenes_tag_suggest": ("get", "/api/scenes/tag-suggest"),
     "scenes_market_categories": ("get", "/api/scenes/market/categories"),
     "scenes_market_create": ("post", "/api/scenes/market"),
