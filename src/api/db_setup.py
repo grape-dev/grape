@@ -2408,9 +2408,44 @@ _ORG_SENTINEL_COLS = _ORG_DOMAIN_TEXT_COLS
 
 _TEXT_IDENT_COLS = ("issue_number", "parent_issue_number")
 
+# ── 存量迁移的域归属补正（review M1）─────────────────────────────────────────
+# 早期迁移一律登记成默认的 ("mgmt",)，但其中不少只碰 runtime/insight 域的表。分库
+# 模式下 mgmt 进程执行它们时 DDL 被归属守卫跳过、预检却判「已落库」→ 盖章假绿，
+# 真正的列/索引从未真正核验过。这里按**实测拓扑**（information_schema：该表只在这
+# 一个域库里存在）把归属补正，执行交给属主域进程。
+# 只补「单库独存」的表；两库同时存在同名表的迁移（branch_guard_state /
+# takeover_sessions / grape_t_system_credentials / grape_t_credential_usage_log /
+# grape_t_repo_credentials）暂不动 —— 那是历史拆库留下的双份副本，需要先决定
+# 唯一权威副本再改归属，不属于本 PR 的处理范围（已在 PR 评论里列为待决策项）。
+_LEGACY_DOMAIN_LABELS = {
+    # runtime_credentials / agent_runtimes / agent_tasks / issue / events /
+    # chat_conversations / task_messages / autopilot_executions（均只在 runtime 库）
+    "202611020003": ("runtime",),
+    "202611040002": ("runtime",),
+    "202611040003": ("runtime",),
+    "202611060004": ("runtime",),
+    "202611070001": ("runtime",),
+    "202611080004": ("runtime",),
+    "202611090001": ("runtime",),
+    "202611100001": ("runtime",),
+    "202611110004": ("runtime",),
+    "202611110006": ("runtime",),
+    "202611130001": ("runtime",),
+    "202611140003": ("runtime",),
+    "202611150007": ("runtime",),
+    "202611150008": ("runtime",),
+    "202611160007": ("runtime",),
+    "202611160020": ("runtime",),
+    "202611170009": ("runtime",),
+    "202611170043": ("runtime",),   # #2925 issue.title_fetched_at（issue 表在 runtime 库）
+    "202611170045": ("runtime",),   # runtime_credentials.cred_type/platform
+    # obs_llm_usage（只在 insight 库）
+    "202611030003": ("insight",),
+}
+
 def register_migration(version: str, name: str, kind: str,
                        fn: Optional[Callable[[], None]] = None,
-                       domains: tuple = ("mgmt",)) -> Migration:
+                       domains: Optional[tuple] = None) -> Migration:
     """登记一条迁移（新增迁移一律走这里 + kind 规则）。
 
     ⚠️ 新增补列/补表/回填必须走这里，不要写进老轨 _run_all_migrations()
@@ -2434,8 +2469,9 @@ def register_migration(version: str, name: str, kind: str,
        （读写版本台账表的 version/name 两列）——测试连不了真实库，
        跨分支撞号只能靠这一步发现；执行器对「同号不同名」会报 ERROR 但不阻断启动。
     """
-    mig = Migration(version=version, name=name, kind=kind, fn=fn,
-                    domains=tuple(domains) or ("mgmt",))
+    # 未显式声明域时，套用存量补正表（见 _LEGACY_DOMAIN_LABELS 注释）
+    _doms = tuple(domains) if domains else _LEGACY_DOMAIN_LABELS.get(version, ("mgmt",))
+    mig = Migration(version=version, name=name, kind=kind, fn=fn, domains=_doms)
     # 撞号守卫（对齐 weekly-10 #1412）：runner 只按 version 判「已执行」不比对 name，
     # 源内同号后登记者将被永久跳过（跨线教训 202611040001/002 与 weekly-10 撞号，
     # 8082 实锤 #1011 两条被顶替跳过 → autopilot 500）。
@@ -4168,10 +4204,15 @@ def run_domain_migrations() -> None:
     except Exception as e:  # noqa: BLE001
         log.warning(f"{domain} 域台账建立失败（不阻断启动）: {e}")
         return
-    try:
+    def _apply() -> None:
         _ensure_migration_session_lock_timeout()
         _run_migrations_with_conn(db, registry=registry, allow_legacy=False)
         log.info(f"{domain} 域迁移完成（{len(registry)} 条登记）")
+
+    try:
+        # 与 init_database() 走同一把 MySQL GET_LOCK（review M3）：
+        # 同域多实例（systemd Restart=always 重叠、两台机滚动升级）不能在同一个库上并发 DDL。
+        _run_with_migrate_lock(_apply)
     except Exception as e:  # noqa: BLE001
         log.error(f"{domain} 域迁移执行器异常（不阻塞启动，下次重试）: {e}")
 
@@ -4739,6 +4780,69 @@ def _migrate_allow_signup_default():
         log.warning(f"_migrate_allow_signup_default failed: {e}")
 
 
+def _run_with_migrate_lock(runner) -> None:
+    """在迁移锁保护下执行 runner（同库多实例/重启重叠互斥）。
+
+    MySQL：GET_LOCK 绑池外专用连接（取锁/放锁必须同一物理连接），finally 先显式
+    RELEASE 再 close 兜底；SQLite：单实例，直接跑。
+    `init_database()` 与 `run_domain_migrations()` 共用本函数
+    （review M3：域迁移执行器原先绕过了这条互斥，滚动升级/重启重叠时同域并发 DDL）。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+    if get_db_backend() != "mysql":
+        runner()
+        return
+
+    try:
+        from src.kernel.mysql_compat import mysql_config
+        _lock_name = "grape_migrate_" + (mysql_config().get("database") or "default")
+    except Exception:
+        _lock_name = "grape_migrate"
+
+    _factory = getattr(db, "dedicated_connection", None)
+    if _factory is None:
+        log.error("migrate lock UNAVAILABLE (db 后端为 mysql 但无 dedicated_connection 支持)；"
+                  "以无锁方式继续迁移（迁移幂等，但同库多实例可能并发迁移，请关注）")
+        with db_lock:
+            runner()
+        return
+    try:
+        _dconn = _factory()
+    except Exception as _lock_err:
+        log.error(f"migrate lock UNAVAILABLE (dedicated conn failed: {_lock_err})；"
+                  f"以无锁方式继续迁移（迁移幂等，但同库多实例可能并发迁移，请关注）")
+        with db_lock:
+            runner()
+        return
+
+    try:
+        _acquired = False
+        try:
+            _acquired, _waited = _acquire_migrate_lock(_dconn, _lock_name)
+        except Exception as _ae:
+            log.error(f"migrate lock acquire failed: {_ae}；以无锁方式继续迁移（迁移幂等）")
+        if not _acquired:
+            _holder = _query_lock_holder_info(_dconn, _lock_name)
+            log.error(f"migrate lock NOT acquired: {_lock_name}，继续迁移（迁移幂等）"
+                      + (f"；holder: {_holder}" if _holder else "（无持锁者信息）"))
+        _set_migration_session_lock_timeout(_dconn, 10)
+        try:
+            with db_lock:
+                runner()
+        finally:
+            if _acquired:
+                try:
+                    _cur = _dconn.cursor()
+                    _cur.execute("SELECT RELEASE_LOCK(%s)", (_lock_name,))
+                    _r = _cur.fetchone()
+                    log.info(f"migrate lock released: {_lock_name}"
+                             f"（RELEASE_LOCK={_r[0] if _r else None}）")
+                except Exception as _re:
+                    log.warning(f"migrate lock release failed（连接 close 会兜底释放）: {_re}")
+    finally:
+        _dconn.close()
+
+
 def init_database():
     """初始化所有新表(幂等),启动时调用。
 
@@ -4758,69 +4862,7 @@ def init_database():
     except Exception as _pb:
         log.warning(f"DB backup prune skipped: {_pb}")
 
-    # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移；SQLite 单实例不需要锁
-    from src.kernel.mysql_compat import get_db_backend
-    if get_db_backend() == "mysql":
-        # 锁名按数据库隔离（2026-10-16）：GET_LOCK 是 MySQL 服务器级全局锁，多环境共用同一
-        # MySQL 实例时固定锁名会让不同环境互相排队（实测 0007 重启等待 210s+）。追加库名后
-        # 各环境互不干扰，同库多实例（真正的迁移竞争）仍互斥。滚动升级期间新旧锁名不同，
-        # 可能同库两实例同时迁移——迁移幂等，风险可控。
-        try:
-            from src.kernel.mysql_compat import mysql_config
-            _lock_name = "grape_migrate_" + (mysql_config().get("database") or "default")
-        except Exception:
-            _lock_name = "grape_migrate"
-        # 锁必须绑**池外专用连接**（2026-10-18）：池化连接会被 commit 还池，锁随之泄漏
-        _dconn = None
-        _factory = getattr(db, "dedicated_connection", None)
-        if _factory is None:
-            log.error("migrate lock UNAVAILABLE (db 后端为 mysql 但无 dedicated_connection 支持)；"
-                      "以无锁方式继续迁移（迁移幂等，但同库多实例可能并发迁移，请关注）")
-        else:
-            try:
-                _dconn = _factory()
-            except Exception as _lock_err:
-                # 专用连接建不起来（DB 闪断等）：接下来同库多实例可能并发迁移，
-                # 属异常态而非正常降级，用 ERROR 让人注意到
-                log.error(f"migrate lock UNAVAILABLE (dedicated conn failed: {_lock_err})；"
-                          f"以无锁方式继续迁移（迁移幂等，但同库多实例可能并发迁移，请关注）")
-        if _dconn is None:
-            with db_lock:
-                run_pending_migrations()
-        else:
-            _acquired = False
-            try:
-                try:
-                    _acquired, _waited = _acquire_migrate_lock(_dconn, _lock_name)
-                except Exception as _ae:
-                    log.error(f"migrate lock acquire failed: {_ae}；以无锁方式继续迁移（迁移幂等）")
-                if not _acquired:
-                    _holder = _query_lock_holder_info(_dconn, _lock_name)
-                    log.error(f"migrate lock NOT acquired: {_lock_name}，继续迁移（迁移幂等）"
-                              + (f"；holder: {_holder}" if _holder else "（无持锁者信息）"))
-                # Issue #536: 迁移专用连接上会话级 MDL 锁超时——DDL 拿 MDL 超时（默认
-                # 无限等待）由执行器捕获跳过该条迁移，不无限等待、不影响业务会话。
-                _set_migration_session_lock_timeout(_dconn, 10)
-                try:
-                    with db_lock:
-                        run_pending_migrations()
-                finally:
-                    # 显式释放（正常路径日志可读），close 兜底：连接一断 MySQL 就放锁
-                    if _acquired:
-                        try:
-                            _cur = _dconn.cursor()
-                            _cur.execute("SELECT RELEASE_LOCK(%s)", (_lock_name,))
-                            _r = _cur.fetchone()
-                            log.info(f"migrate lock released: {_lock_name}"
-                                     f"（RELEASE_LOCK={_r[0] if _r else None}）")
-                        except Exception as _re:
-                            log.warning(f"migrate lock release failed（连接 close 会兜底释放）: {_re}")
-            finally:
-                _dconn.close()
-    else:
-        # SQLite——单实例不需要锁
-        run_pending_migrations()
-
+    _run_with_migrate_lock(run_pending_migrations)
     # S70（实弹发现）：config 派生存储列（bot_<p>_token 等）必须每次启动幂等补齐——
     # 盖章库的迁移段一次性跳过，而平台卡可任意时刻注册（新平台加卡后注册 → 列不创建
     # → add_managed_repo 静默 False → webhook_secret 不落库 → webhook 验签必 404）。
@@ -8172,16 +8214,44 @@ def _issue_646_column_ddl(ddl: str) -> str:
     return ddl
 
 
+def _foreign_owner_will_run(table: str) -> bool:
+    """域外表的落库核验能否交给属主域进程（review M2）。
+
+    只有本进程**确实**注入了迁移域（三库模式 GRAPE_DOMAIN_LIB=1 + owner）时才返回
+    True，并打 WARNING 明示「本进程不核验」；单库部署里 `current_domain()` 会按角色
+    回落（src/kernel/table_ownership.py 自述「单库部署下会误判成非 owner」），
+    此时归属只是配置推断、不能替代落库实测 —— 返回 False，让预检按「未建成」上报，
+    保持改造前「不盖章 + 可见 ERROR」的行为。
+    """
+    try:
+        from src.kernel import table_ownership as _own
+        owner = _own.foreign_owner(table)
+        if not owner:
+            return False
+        dom = current_migration_domain()
+        if not dom:
+            log.warning(f"[PRECHECK] `{table}` 归 {owner} 域，但本进程未注入迁移域"
+                        f"（单库/角色回落）：归属不能替代实测，按未建成处理")
+            return False
+        log.warning(f"[PRECHECK_SKIP] `{table}` 归 {owner} 域，由该域进程执行并核验；"
+                    f"本进程（{dom}）不核验")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[PRECHECK] ownership probe failed on `{table}`: {exc}")
+        return False
+
+
 def _issue_646_columns_missing(c) -> list:
     """QA 复审 R1：加列迁移落库核验——返回仍未建成的 (table, column) 清单。
 
     三库模式：别的域拥有的表（agent_runtimes 等在 runtime 库）本进程根本不建——
-    `_ensure_column` 已被归属守卫跳过。预检若照旧判定「未完成」，本迁移永远不盖章，
-    每次启动都报 ERROR。故外来表一律视为「由属主域进程负责」，不计入缺失。
+    `_ensure_column` 已被归属守卫跳过。此时预检交给 `_foreign_owner_will_run()` 判定：
+    只有确认本进程已注入迁移域（三库模式）才跳过核验并明示 WARNING；单库/角色回落
+    形态下归属只是推断，仍按「未建成」上报，不盖章、留可见 ERROR（review M2）。
     """
     missing = []
     for tbl, col, _ddl in _ISSUE_646_UID_COLUMNS:
-        if _owned_skip(tbl, "precheck"):
+        if _foreign_owner_will_run(tbl):
             continue
         cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
         if col not in cols:
@@ -8537,7 +8607,7 @@ def _issue_868_session_columns_missing(c) -> list:
     """
     missing = []
     for tbl, col, _ddl in _ISSUE_868_SESSION_UID_COLUMNS:
-        if _owned_skip(tbl, "precheck"):
+        if _foreign_owner_will_run(tbl):
             continue
         try:
             cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
@@ -8725,7 +8795,7 @@ def _migration_1011_backfill_rederive_engine_uids(conn=None) -> dict:
     # 预检：锚快照列已建成（001 不盖章时 002 不盖章，下次启动重试）
     # 三库模式：agent_runtimes 归 runtime 域，本进程（mgmt）看不到这些列，
     # 由 runtime 域进程在建列后自己跑回填；此处不预检、不阻断。
-    if _owned_skip("agent_runtimes", "precheck"):
+    if _foreign_owner_will_run("agent_runtimes"):
         return report
     cols = [r[1] for r in c.execute("PRAGMA table_info(agent_runtimes)").fetchall()]
     missing = [col for (_t, col, _d) in _ISSUE_1011_ANCHOR_COLUMNS if col not in cols]
@@ -8831,7 +8901,7 @@ register_migration(
 # 走登记式迁移而不是手工 ALTER：本域进程各自补本域列（Route A 归属）。
 # ======================================================================
 
-def _migration_202611170043_agent_tasks_pool_selector() -> None:
+def _migration_202611170047_agent_tasks_pool_selector() -> None:
     """agent_tasks.pool_selector：selector 模式入队落列；缺列时 sweeper 全段失效。"""
     with db_lock:
         c = db.cursor()
@@ -8854,8 +8924,8 @@ register_migration(
     domains=("runtime",))
 
 register_migration(
-    "202611170043", "agent-tasks-pool-selector-definition", "safe",
-    lambda: _migration_202611170043_agent_tasks_pool_selector(), domains=("runtime",))
+    "202611170047", "agent-tasks-pool-selector-definition", "safe",
+    lambda: _migration_202611170047_agent_tasks_pool_selector(), domains=("runtime",))
 
 def _migration_202611170046_autopilot_engine_runtime_uids() -> None:
     """autopilot_tasks.engine_runtime_uids（Issue #1011 In Scope 2 姊妹字段）。

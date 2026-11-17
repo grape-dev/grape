@@ -56,7 +56,7 @@ if row and str(row[0]).upper() == "VIEW":
 
 ## 二、盖章表是共享视图：三库都盖章 ≠ 三库都执行
 
-`grape_t_schema_migrations` 在 `grape_mgmt_db` 是基表，在 runtime / insight 是**指向 mgmt 的视图**。
+`grape_t_schema_migrations` 在 `grape_mgmt_db` / runtime / insight **各是一张本域基表**（per-domain ledger，不跨域、也不是指向 mgmt 的视图 —— 视图模式已随 lib 模式改造移除）。各域进程只跑本域登记迁移（`db_setup.run_domain_migrations()`）。
 因此：
 
 - 只有抢到迁移锁的那个进程真正执行 fn（并写入 mgmt 基表）；

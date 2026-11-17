@@ -415,10 +415,7 @@
     "grape_t_repo_platforms": [
       "runtime"
     ],
-    "grape_t_schema_migrations": [
-      "insight",
-      "runtime"
-    ],
+    "_note_schema_migrations": "grape_t_schema_migrations 在 runtime/insight 是**本域基表**（per-domain ledger 例外），不是指向 mgmt 的视图：见 db_setup.run_domain_migrations()；切勿再按 views 段重建视图（同名视图会挡住 CREATE TABLE IF NOT EXISTS，该域迁移一条都跑不了）",
     "grape_t_system_credentials": [
       "mgmt"
     ],
