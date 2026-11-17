@@ -22,7 +22,7 @@
 (function(){var p=new URLSearchParams(location.search);if(localStorage.getItem('token')||p.get('token')||p.get('exchange_code'))document.documentElement.setAttribute('data-logged-in','1');})();
 // Early i18n loading — hide [data-i18n] elements until i18n.js applies translations.
 // Only for non-zh users (zh fallback text in HTML is already correct).
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='61';})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='62';})();
 // i18n 加载超时兜底：5 秒后强制移除隐藏状态
 setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
