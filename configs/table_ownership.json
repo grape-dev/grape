@@ -70,6 +70,8 @@
     "grape_t_credential_reveal_log": "mgmt",
     "grape_t_credential_usage_log": "runtime",
     "grape_t_engine_lifecycle_audit": "runtime",
+    "grape_t_guard_check": "insight",
+    "grape_t_guard_finding": "insight",
     "grape_t_merge_gate_log": "insight",
     "grape_t_oauth_channels": "mgmt",
     "grape_t_patrol_findings": "mgmt",
