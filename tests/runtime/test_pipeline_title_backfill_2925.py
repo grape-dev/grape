@@ -122,16 +122,19 @@ class _FakeDb:
 @pytest.fixture(autouse=True)
 def _reset_process_cache():
     pipeline_mod._TITLE_NEG_CACHE.clear()
+    pipeline_mod._TITLE_REAL_CACHE.clear()
     yield
     pipeline_mod._TITLE_NEG_CACHE.clear()
+    pipeline_mod._TITLE_REAL_CACHE.clear()
 
 
 def _mark_attempted(kw, ids):
-    """假 batch 需同步 stats.attempted / attempted_ids，模拟「确实开始执行」。"""
+    """假 batch 需同步 stats.attempted / attempted_ids / submitted，模拟「确实开始执行」。"""
     _st = kw.get("stats")
     if isinstance(_st, dict):
         _st["attempted"] = len(ids)
         _st["attempted_ids"] = set(ids)
+        _st["submitted"] = len(ids)
     return _st
 
 
@@ -595,6 +598,51 @@ def test_cancelled_futures_not_marked_as_attempted(monkeypatch):
     assert issues[1]["marker"] != ""
     assert issues[2]["marker"] == ""
     assert issues[3]["marker"] == ""
+
+
+# ===== QA review round 4：无行成功分支不再重复外呼 / submitted 与 started 口径分离 =====
+
+
+def test_real_title_without_issue_row_served_from_process_cache(monkeypatch):
+    """events 有记录、issue 表无行且取到真实标题：第二次请求 0 外呼且仍展示真实标题。"""
+    _setup_db(monkeypatch, {}, marker_ok=True)
+    calls = []
+
+    def _fake_batch(repo_key, ids, **kw):
+        calls.append(list(ids))
+        _mark_attempted(kw, ids)
+        return {"#7": "真实标题 7"}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
+    events_by_issue = {"#7": [{"repo_key": "gitcode:o/r", "title": "issue_opened"}]}
+
+    out1 = pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], {"#7": "issue_opened"}, ["#7"],
+        events_by_issue, 1)
+    assert calls == [["#7"]]
+    assert out1["#7"] == "真实标题 7"
+    # 无行可回写 → 必须落进程内真实标题缓存
+    assert ("gitcode:o/r", 7) in pipeline_mod._TITLE_REAL_CACHE
+
+    out2 = pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], {"#7": "issue_opened"}, ["#7"],
+        events_by_issue, 1)
+    assert calls == [["#7"]]
+    assert out2["#7"] == "真实标题 7"
+
+
+def test_batch_submitted_counts_queued_tasks(monkeypatch):
+    """submitted 统计提交到线程池的条数，attempted 只统计真正开始的条数。"""
+    monkeypatch.setattr(ep_mod, "_resolve_issue_read_token", lambda rk: "tok")
+    monkeypatch.setattr(ep_mod, "_build_issue_read_client",
+                        lambda *a: _fake_client(delay=0.6))
+    stats = {}
+    ep_mod.fetch_issue_titles_batch(
+        "gitcode:o/r", ["#1", "#2", "#3"], max_workers=1,
+        deadline_seconds=0.3, timeout=0.3, stats=stats)
+    assert stats["submitted"] == 3
+    assert stats["attempted"] == 1
+    assert stats["submitted"] - stats["attempted"] == 2
 
 
 def test_batch_attempted_counts_started_only(monkeypatch):

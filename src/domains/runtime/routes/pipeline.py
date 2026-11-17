@@ -114,24 +114,40 @@ def _is_placeholder_title(t: str) -> bool:
 # Issue #2925：进程内负缓存（降级路径）——`issue.title_fetched_at` 列不可用
 # （迁移未跑到/临时库）时，仍保证「同仓第二次起 0 外呼」；有列时以列为准。
 _TITLE_NEG_CACHE: dict = {}
-# 进程内负缓存的条目上限：超过即先按 TTL 清理，避免长期运行进程无界增长。
+# 进程内「真实标题」缓存（降级路径）：`events` 有记录但 `issue` 表无该行时，
+# 取到的真实标题无处回写。若只更新本次响应，该 issue 后续每次请求都会重复外呼。
+# 键 (repo_key, issue_number) → (title, ts)，TTL 与负缓存同口径。
+_TITLE_REAL_CACHE: dict = {}
+# 进程内缓存的条目上限：超过即先按 TTL 清理，避免长期运行进程无界增长。
 _TITLE_NEG_CACHE_MAX = 4096
+
+
+def _title_cache_put(cache: dict, key, value) -> None:
+    """写入进程内缓存；超过上限时剔除过期条目，保证有界。"""
+    if len(cache) >= _TITLE_NEG_CACHE_MAX:
+        _ttl = _title_negative_ttl()
+        _now = time.time()
+        for _k, _v in list(cache.items()):
+            # 负缓存值为 ts；真实缓存值为 (title, ts)。
+            _ts = _v[1] if isinstance(_v, tuple) else _v
+            if not _title_marker_fresh(_ts, _now, _ttl):
+                cache.pop(_k, None)
+        if len(cache) >= _TITLE_NEG_CACHE_MAX:
+            # 仍然超限（TTL 全新鲜 / 配置为永久）→ 按插入顺序丢掉最早的一批，
+            # 保持有界；同 key 重写不刷新插入序，仍按首次写入位置淘汰。
+            for _k in list(cache)[:len(cache) - _TITLE_NEG_CACHE_MAX + 1]:
+                cache.pop(_k, None)
+    cache[key] = value
 
 
 def _title_neg_cache_put(key, ts: float) -> None:
     """写入进程内负缓存；超过上限时剔除过期条目（无列降级路径专用）。"""
-    if len(_TITLE_NEG_CACHE) >= _TITLE_NEG_CACHE_MAX:
-        _ttl = _title_negative_ttl()
-        _now = time.time()
-        for _k, _v in list(_TITLE_NEG_CACHE.items()):
-            if not _title_marker_fresh(_v, _now, _ttl):
-                _TITLE_NEG_CACHE.pop(_k, None)
-        if len(_TITLE_NEG_CACHE) >= _TITLE_NEG_CACHE_MAX:
-            # 仍然超限（TTL 全新鲜 / 配置为永久）→ 按插入顺序丢掉最早的一批，
-            # 保持有界；同 key 重写不刷新插入序，仍按首次写入位置淘汰。
-            for _k in list(_TITLE_NEG_CACHE)[:len(_TITLE_NEG_CACHE) - _TITLE_NEG_CACHE_MAX + 1]:
-                _TITLE_NEG_CACHE.pop(_k, None)
-    _TITLE_NEG_CACHE[key] = ts
+    _title_cache_put(_TITLE_NEG_CACHE, key, ts)
+
+
+def _title_real_cache_put(key, title: str, ts: float) -> None:
+    """写入进程内真实标题缓存（issue 表无行时避免重复外呼）。"""
+    _title_cache_put(_TITLE_REAL_CACHE, key, (title, ts))
 
 
 # 写回/标记 SQL 的并发护栏（三处共用，保证与占位判定同口径）。
@@ -191,6 +207,8 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
     if not issue_ids:
         return title_map
     _started = time.monotonic()
+    _now = time.time()
+    _ttl = _title_negative_ttl()
     _window_ids = list(issue_ids[:window_size]) if window_size > 0 else list(issue_ids)
     _candidates = []
     _cache_hit = 0
@@ -213,6 +231,13 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
         # 否则多仓同号时会回写到最旧事件所属的仓。
         _ev = _evts[-1] if _evts else {}
         _rk = _ev.get("repo_key") or repo_key
+        # issue 表无该行时上一轮取到的真实标题无处回写，命中进程内真实标题缓存
+        # 直接复用，避免该 issue 每次请求都重复外呼。
+        _real_cached = _TITLE_REAL_CACHE.get((_rk, _num))
+        if _real_cached and _title_marker_fresh(_real_cached[1], _now, _ttl):
+            title_map[_iid] = _real_cached[0]
+            _cache_hit += 1
+            continue
         _candidates.append((_iid, _num, _rk))
     if not _candidates:
         log.info("[pipeline] title_backfill repo=%s window=%d candidates=0 "
@@ -223,7 +248,6 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
     # ① 持久已尝试标记（列存在才用；否则走进程内负缓存）
     _marker_ok = False
     _marked: dict = {}
-    _now = time.time()
     try:
         from src.kernel.session_manager import db_lock
         from src.domains.runtime.schema_probe import column_exists
@@ -254,7 +278,6 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
         log.warning(f"[pipeline] title backfill marker read failed (degrade to "
                     f"process cache): {e}")
 
-    _ttl = _title_negative_ttl()
     _to_fetch = []
     _skipped_marked = 0
     for _iid, _num, _rk in _candidates:
@@ -279,6 +302,7 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
     # 逐条记录「确实开始执行」的候选：被 deadline 取消、从未发过请求的排队任务
     # 不得落负缓存（否则会把未尝试的 issue 锁 6h 不再重试）。
     _attempted_ids: set = set()
+    _submitted = 0
     _by_rk: dict = {}
     for _iid, _num, _rk in _to_fetch:
         _by_rk.setdefault(_rk, []).append(_iid)
@@ -303,6 +327,7 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
                         f"(degrade to placeholder): {e}")
         # 只有真正开始执行（wrapper 已置位）的候选才允许落已尝试标记：
         # 无 token 时不得形成负缓存，deadline 取消的排队任务也不得被标记。
+        _submitted += int(_stats.get("submitted") or 0)
         for _started_iid in (_stats.get("attempted_ids") or ()):
             _attempted_ids.add((_rk, _started_iid))
 
@@ -338,6 +363,11 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
                     # 不算 fetched），避免 no-op 虚增 fetched、低估 failed。
                     if getattr(_c, "rowcount", -1) != 0:
                         _written += 1
+                    else:
+                        # 取到真实标题但 issue 表无该行（events 有记录、issue 表
+                        # 缺行）：无处回写，落进程内真实标题缓存，后续请求直接
+                        # 复用该标题且 0 外呼（与失败分支的负缓存对称）。
+                        _title_real_cache_put((_rk, _num), _api, _now)
                     title_map[_iid] = _api
                 elif _marker_ok:
                     if (_rk, _iid) in _attempted_ids:
@@ -362,11 +392,12 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
         log.warning(f"[pipeline] title backfill writeback failed: {e}")
 
     log.info("[pipeline] title_backfill repo=%s window=%d candidates=%d "
-             "vcs_calls=%d fetched=%d failed=%d cache_hit=%d skipped_marked=%d "
-             "elapsed=%.3fs",
-             repo_key, len(_window_ids), len(_candidates), len(_to_fetch),
-             _written, len(_to_fetch) - _written, _cache_hit, _skipped_marked,
-             time.monotonic() - _started)
+             "submitted=%d vcs_calls=%d cancelled=%d fetched=%d failed=%d "
+             "cache_hit=%d skipped_marked=%d elapsed=%.3fs",
+             repo_key, len(_window_ids), len(_candidates), _submitted,
+             len(_attempted_ids), max(0, _submitted - len(_attempted_ids)),
+             _written, max(0, len(_attempted_ids) - _written),
+             _cache_hit, _skipped_marked, time.monotonic() - _started)
     return title_map
 
 

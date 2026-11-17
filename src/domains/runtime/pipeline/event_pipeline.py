@@ -3255,10 +3255,11 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
     返回 {issue_id: title}，只收录非空标题（是否占位由调用方按同一口径复核）。
     无 token / 客户端构建失败 / 上游异常一律降级为空结果，绝不抛出。
 
-    `stats`（可选出参）：写入 `attempted`（真正开始执行的条数）与
-    `attempted_ids`（真正开始执行的 issue_id 集合）。调用方据此区分「确实发起过
-    上游请求但没拿到」与「没 token / 排队中被 deadline 取消」——后者不得落负缓存
-    标记，否则一次临时 token 缺失或超时会把这些 issue 锁 6h 不再重试。
+    `stats`（可选出参）：写入 `attempted`（真正开始执行的条数）、
+    `attempted_ids`（真正开始执行的 issue_id 集合）与 `submitted`（成功提交到线程池
+    的条数）。调用方据此区分「确实发起过上游请求但没拿到」与「没 token / 排队中被
+    deadline 取消」——后者不得落负缓存标记，否则一次临时 token 缺失或超时会把这些
+    issue 锁 6h 不再重试。`submitted - attempted` 即被 deadline 取消、从未外呼的条数。
     """
     from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
     # 总 deadline 从入口开始计时：token 解析 / 客户端构建也计入预算，避免刷新慢时
@@ -3267,9 +3268,11 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
     _expire_at = time.monotonic() + _deadline
     # 只记录真正开始执行的任务：被 cancel_futures 取消的排队任务从未发请求。
     _started_ids: set = set()
+    _submitted = 0
     if stats is not None:
         stats["attempted"] = 0
         stats["attempted_ids"] = _started_ids
+        stats["submitted"] = 0
     _num_by_id: dict = {}
     for _iid in (issue_ids or []):
         _iid = str(_iid)
@@ -3321,9 +3324,10 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
             try:
                 for iid, num in _num_by_id.items():
                     _futs[_ex.submit(_run_one, iid, num)] = iid
+                    _submitted += 1
             except Exception as e:
                 log.warning(f"[pipeline] title backfill submit failed for {repo_key} "
-                            f"(submitted={len(_futs)}/{len(_num_by_id)}): {e}")
+                            f"(submitted={_submitted}/{len(_num_by_id)}): {e}")
             _pending = set(_futs)
             while _pending:
                 _remain = _expire_at - time.monotonic()
@@ -3351,6 +3355,7 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
     finally:
         if stats is not None:
             stats["attempted"] = len(_started_ids)
+            stats["submitted"] = _submitted
     return _out
 
 
