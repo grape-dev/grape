@@ -120,3 +120,22 @@ def test_migration_passes_strict_to_ensure_column(monkeypatch):
     db_setup._fn_runtime_cred_type_platform(conn=conn)
     assert seen == [("runtime_credentials", "cred_type", True),
                     ("runtime_credentials", "platform", True)], seen
+
+
+def test_migration_raises_non_owner_object_when_table_absent(monkeypatch):
+    """C1 第 2 轮：非 owner 库（表不存在）必须抛 _NonOwnerObject 跳过不盖章。
+
+    否则 fn 正常返回 → 执行器在非 owner 库盖死版本号，而列并未建成。
+    """
+    import contextlib
+    import sqlite3
+
+    import pytest as _pytest
+
+    from src.api import db_setup
+
+    monkeypatch.setattr(db_setup, "_owned_skip", lambda *a, **k: False)
+    monkeypatch.setattr(db_setup, "db_lock", contextlib.nullcontext())
+    conn = sqlite3.connect(":memory:")          # 空的非 owner 库：没有 runtime_credentials
+    with _pytest.raises(db_setup._NonOwnerObject):
+        db_setup._fn_runtime_cred_type_platform(conn=conn)

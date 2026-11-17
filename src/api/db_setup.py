@@ -7978,6 +7978,13 @@ def _fn_runtime_cred_type_platform(conn=None):
     conn = conn if conn is not None else db
     with (db_lock if conn is db else nullcontext()):
         c = conn.cursor()
+        # 非 owner 域（三库模式下 runtime_credentials 在 mgmt 库不存在/是视图）：
+        # 抛 _NonOwnerObject 让执行器「跳过且不盖章」——否则 fn 正常返回就会在
+        # 非 owner 库盖死版本号，而列并没有建成（与 2026-11-06 issue.vcs_exists 事故同型）。
+        _present = _table_present(c, "runtime_credentials")
+        if not _present or not _is_base_table(c, "runtime_credentials"):
+            raise _NonOwnerObject(
+                "runtime_credentials 不在本库（非 owner 域），cred_type/platform 由 runtime 库补")
         _want = ("cred_type", "platform")
         before = {r[1] for r in c.execute("PRAGMA table_info(runtime_credentials)").fetchall()}
         for col, ddl in (("cred_type", "VARCHAR(32) NOT NULL DEFAULT 'worker'"),
