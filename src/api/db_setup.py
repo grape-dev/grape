@@ -9340,7 +9340,7 @@ def _fn_category_dict_prefix_and_explicit_ids() -> None:
                         log.warning(f"202611171845 remap {tbl}.{col} 跳过: {e}")
         db.commit()
         try:
-            c.execute("DROP TABLE category_dict")
+            c.execute("DROP TABLE IF EXISTS category_dict")
             db.commit()
             log.info(f"202611171845 旧 category_dict 已迁移并删除，重映射 {len(old_to_new)} 个 id")
         except Exception as e:  # noqa: BLE001
