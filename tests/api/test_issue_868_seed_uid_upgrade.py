@@ -25,7 +25,7 @@ import uuid
 
 import pytest
 
-from src.api.engine_uid import (
+from src.kernel.engine_uid import (
     GRAPE_ENGINE_UID_NAMESPACE,
     cloud_anchor_from_runtime_info,
     derive_engine_uid,

@@ -390,7 +390,7 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
         # engine_uid 由服务端按自然键（credential_uid|name|scope|owner_id|host_name）
         # 确定性派生（UUIDv5）——本机 worker 零配置，重复注册/表重建 uid 不漂移。
         from src.domains.mgmt.user.db import ensure_credential_uid
-        from src.api.engine_uid import derive_engine_uid, cloud_anchor_from_runtime_info
+        from src.kernel.engine_uid import derive_engine_uid, cloud_anchor_from_runtime_info
         from src.domains.mgmt.user.db import rebase_engine_uid_references
         _cred_uid = ensure_credential_uid(credential_id, c)
         # local_skills：per-engine skill 列表，按 engine name 匹配 runtime 行
@@ -3502,7 +3502,7 @@ def runtime_provider_configs(cred: CredentialContext = Depends(_require_credenti
     无凭据来源（cred_id=0）的 Provider 只能 WebUI 管理，不下发任何
     worker；老 worker 要用需将其关联到自己的凭据。
     """
-    from src.utils.crypto import decrypt
+    from src.kernel.crypto import decrypt
     providers = []
     with db_lock:
         c = db.cursor()
@@ -3714,7 +3714,7 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
     模板列表非空时逐条 UPSERT（按 provider_id+template_id 唯一语义）。
     """
     from src.kernel.session_manager import db, db_lock
-    from src.utils.crypto import encrypt as _enc
+    from src.kernel.crypto import encrypt as _enc
     platform = (body.platform or "").strip()
     endpoint = (body.endpoint or "").strip()
     if not platform:

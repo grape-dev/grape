@@ -30,7 +30,7 @@ import time
 import urllib.request
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 # ===== 配置 =====
 GRAPE_URL = os.environ.get("GRAPE_URL", "http://localhost:3000")

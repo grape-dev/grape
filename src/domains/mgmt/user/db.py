@@ -4248,7 +4248,7 @@ def resolve_engine_refs(refs) -> tuple[list, list]:
     - uid 字符串：按 uid 查 id（服务端校验；无效 uid 对应项为 None）
     返回与输入等长的两个列表（失败项 None，调用方决定 fail-fast 或跳过）。
     """
-    from src.api.engine_uid import is_uid_str
+    from src.kernel.engine_uid import is_uid_str
     ids: list = []
     uids: list = []
     with db_lock:
@@ -4309,7 +4309,7 @@ def ensure_credential_uid(credential_id: int, c=None) -> str:
 
     注册/心跳链路调用；未迁移库（无列）返回 ''。可在已有 cursor/锁内复用 c。
     """
-    from src.api.engine_uid import new_credential_uid
+    from src.kernel.engine_uid import new_credential_uid
     own = c is None
     if own:
         c = db.cursor()
@@ -4612,7 +4612,7 @@ def rebase_engine_uids_by_anchor(c, anchor_rows: list) -> dict:
     保证改名/升格场景 uid 变更一次性收敛、引用不留孤儿。
     幂等可重跑：uid 已是目标值时为 no-op。普通引擎行不在清单内则零影响。
     """
-    from src.api.engine_uid import derive_engine_uid
+    from src.kernel.engine_uid import derive_engine_uid
     report = {"engines_rebased": 0, "skipped": 0, "pool_rows": 0, "capability_rows": 0,
               "task_rows": 0, "task_message_rows": 0,
               "devops_sessions": 0, "chat_sessions": 0}

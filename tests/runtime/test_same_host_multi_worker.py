@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.domains.runtime.engine import cloud_worker as cw
 
@@ -175,7 +175,7 @@ class TestLocalVersionInstanceAware:
 
 class TestInstallScriptArgs:
     def _script(self):
-        p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        p = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                          "scripts", "install-worker.sh")
         return open(p, encoding="utf-8").read()
 

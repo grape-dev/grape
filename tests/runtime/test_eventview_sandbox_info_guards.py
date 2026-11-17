@@ -10,7 +10,7 @@ dist（static-dist/viewjs/）是 gitignore 的本地产物，守卫锚在 .vue �
 """
 import os
 
-_REPO = os.path.join(os.path.dirname(__file__), "..")
+_REPO = os.path.join(os.path.dirname(__file__), "..", "..")
 _VIEW = os.path.join(_REPO, "src/api/frontend/app/src/views/EventView.vue")
 
 

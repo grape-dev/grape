@@ -69,7 +69,7 @@ class TestProviderUidColumn:
 
     def test_uuid_shape(self):
         """uid 生成器输出 36 位小写连字符 UUID（UUIDv4）。"""
-        from src.api.sandbox_uid import new_provider_uid, is_uid_str
+        from src.kernel.sandbox_uid import new_provider_uid, is_uid_str
         for _ in range(3):
             u = new_provider_uid()
             assert is_uid_str(u), f"new_provider_uid 输出非法: {u}"

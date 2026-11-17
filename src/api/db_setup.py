@@ -8103,7 +8103,7 @@ def _migration_646_backfill_uids(conn=None) -> dict:
     - task_messages.engine_uid ← 经 agent_tasks.engine_uid 快照带入（分批）
     - 大表（agent_tasks/task_messages）按 id 游标分批（每批 1000），失败下次续跑。
     """
-    from src.api.engine_uid import derive_engine_uid, new_credential_uid
+    from src.kernel.engine_uid import derive_engine_uid, new_credential_uid
     conn = conn if conn is not None else db
     report = {"duplicated_engine_rows": [], "orphan_pool_rows": [], "orphan_capability_rows": [],
               "orphan_task_runtime": [], "orphan_task_pool_ids": [], "orphan_task_messages": 0,
@@ -8561,7 +8561,7 @@ def _migration_1011_backfill_rederive_engine_uids(conn=None) -> dict:
       uid 引用轨道整体跟随，旧行 uid 从行内读取，不按 runtime_id 重派 JOIN）。
     - 对账报告落盘（tag=1011，幂等：文件每次执行覆盖重写为最新对账结果）。
     """
-    from src.api.engine_uid import derive_engine_uid
+    from src.kernel.engine_uid import derive_engine_uid
     from src.domains.mgmt.user.db import rebase_engine_uid_references
     conn = conn if conn is not None else db
     report = {"engines_total": 0, "engines_rederived": 0, "engines_unchanged": 0,

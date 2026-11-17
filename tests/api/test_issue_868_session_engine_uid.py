@@ -13,7 +13,7 @@ import threading
 import pytest
 
 from src.api import db_setup
-from src.api.engine_uid import derive_engine_uid, is_uid_str
+from src.kernel.engine_uid import derive_engine_uid, is_uid_str
 
 
 UID_HERMES = derive_engine_uid("", "hermes", "global", "", "")

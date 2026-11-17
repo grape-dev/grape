@@ -664,7 +664,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         for bn in body.backends:
             # Issue #646：优先按 uid 字符串解析（服务端校验 fail-fast）；
             # 其次按数字 ID 解析（前端传 runtime_id）；非数字才按名字解析
-            from src.api.engine_uid import is_uid_str
+            from src.kernel.engine_uid import is_uid_str
             if isinstance(bn, str) and is_uid_str(bn.strip()):
                 from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
                 _rid = get_runtime_id_by_engine_uid(bn.strip().lower())

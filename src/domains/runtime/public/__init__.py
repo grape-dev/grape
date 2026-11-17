@@ -1041,7 +1041,7 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
             log.debug(f"src/domains/runtime/public/__init__.py best-effort skipped: {_e}")
         # Issue #646：engine_uid 派生轨道（UUIDv5 按自然键确定性派生，幂等防 id 漂移）；
         # 旧库缺列时整段 uid 逻辑降级跳过（与 legacy 双读路径一致）。
-        from src.api.engine_uid import derive_engine_uid
+        from src.kernel.engine_uid import derive_engine_uid
         _uid_ready = False
         try:
             c.execute("SELECT engine_uid FROM agent_runtimes LIMIT 1")
@@ -2132,6 +2132,19 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT ar.name, ar.version, rc.device_name, rc.owner_name, ar.credential_id, rc.scope "
         "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
         "WHERE ar.id=?"),
+    # Issue #868 指针外引擎反查 uid（chat 守卫口径：chat.py 不得直查 agent_runtimes，
+    # 走本登记层；缺列/缺行由调用侧 except 降级 ''，旧库语义不变）
+    'chat_engine_uid_by_id': (
+        "SELECT COALESCE(engine_uid,'') FROM agent_runtimes WHERE id=?"),
+    # 旧库降级路径（engine_uid 列未迁移时 get_chat_config 的 fallback 查询；
+    # 与 chat_local_engines/chat_user_engines 同构、不含 engine_uid 列）
+    'chat_local_engines_legacy': (
+        "SELECT id, name, version, COALESCE(host_name,'') FROM agent_runtimes "
+        "WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id"),
+    'chat_user_engines_legacy': (
+        "SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id "
+        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
+        "WHERE rc.scope='user' AND rc.status='active' AND rc.owner_name = ?"),
     'chat_skill_id_scope': (
         "SELECT id FROM skill WHERE skill_name=? AND scope=? AND is_active=1 LIMIT 1"),
     'chat_skill_id_scope_owner': (

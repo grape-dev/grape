@@ -244,7 +244,7 @@ def _write_provider_configs_cache(configs: dict) -> None:
     """
     try:
         import json as _json
-        from src.utils.crypto import encrypt as _encrypt
+        from src.kernel.crypto import encrypt as _encrypt
         # 深拷贝 + 加密每个 provider 的 api_key 字段
         _safe = {}
         for _prov, _cfg in configs.items():
@@ -329,7 +329,7 @@ def _read_provider_configs_cache() -> dict:
     """读磁盘缓存——api_key 用 crypto.decrypt 解密后返回。"""
     try:
         import json as _json
-        from src.utils.crypto import decrypt as _decrypt
+        from src.kernel.crypto import decrypt as _decrypt
         with open(_provider_configs_cache_path(), "r") as f:
             _raw = _json.load(f)
         # 解密每个 provider 的 api_key 字段。JSON key 是字符串，转回 int（v3 provider_id 索引）
@@ -1646,7 +1646,7 @@ def main():
     _exit_code = asyncio.run(_amain())
     # BUG-10 修复：退出时清理 DNS override（进程级 monkey-patch 恢复）
     try:
-        from src.utils.devbox_dns import cleanup_dns_override
+        from src.kernel.devbox_dns import cleanup_dns_override
         cleanup_dns_override()
     except Exception as _e:
         log.warning(f"DNS override cleanup failed: {_e}")

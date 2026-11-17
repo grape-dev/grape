@@ -732,7 +732,7 @@ class DevBoxProvider(CloudProviderBase):
                     # 初始化 Gateway DNS override（*.devbox-s2.hwtunnel.com -> gateway_ip）
                     gateway_ip = self._config.get("gateway_ip", "")
                     if gateway_ip:
-                        from src.utils.devbox_dns import init_dns_override
+                        from src.kernel.devbox_dns import init_dns_override
                         init_dns_override(gateway_ip)
                     # TLS 证书校验——配置了 gateway_skip_tls_verify=true 时跳过
                     # （证书 CN 不匹配 gateway 域名，设计文档 §9 确认点 #10）
@@ -814,7 +814,7 @@ class DevBoxProvider(CloudProviderBase):
 
         cloud_worker 退出时调用，防止 DNS override 永久生效。
         """
-        from src.utils.devbox_dns import cleanup_dns_override
+        from src.kernel.devbox_dns import cleanup_dns_override
         cleanup_dns_override()
 
 

@@ -4,7 +4,7 @@
   ① 引擎专属: WHERE user_id=? AND engine_type=<引擎> AND enabled=1
   ② 通用兜底: WHERE user_id=? AND engine_type='common' AND enabled=1
 """
-from src.utils.crypto import decrypt
+from src.kernel.crypto import decrypt
 
 
 def select_llm_cred(cursor, user_id: int, engine_type: str = "",

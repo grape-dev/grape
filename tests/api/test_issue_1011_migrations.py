@@ -16,7 +16,7 @@ import sqlite3
 import pytest
 
 from src.api import db_setup
-from src.api.engine_uid import derive_engine_uid
+from src.kernel.engine_uid import derive_engine_uid
 
 
 CRED_UID = "cu-1011-0001"

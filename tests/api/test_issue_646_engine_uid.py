@@ -15,7 +15,7 @@ import types
 
 import pytest
 
-from src.api.engine_uid import (
+from src.kernel.engine_uid import (
     GRAPE_ENGINE_UID_NAMESPACE,
     derive_engine_uid,
     is_uid_str,

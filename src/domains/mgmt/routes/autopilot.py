@@ -144,7 +144,7 @@ def _validate_engine_runtime_uids(user: dict, repo_key: str, engine_uids: list) 
     from src.kernel.repo_key import from_repo_key
     from src.domains.mgmt.user import db as user_db
     from src.domains.mgmt.routes.settings import _build_cred_map, _make_visible_credential_fn
-    from src.api.engine_uid import is_uid_str
+    from src.kernel.engine_uid import is_uid_str
     uid = user.get("id") or 0
     uname = user.get("username") or ""
     user_repos = {r["full_name"] for r in (user_db.get_user_repos(uid) if uid else [])}

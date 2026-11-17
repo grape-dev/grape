@@ -19,7 +19,7 @@ from fastapi import HTTPException
 
 import src.domains.mgmt.routes.autopilot as ap
 import src.domains.mgmt.user.db as udb
-from src.api.engine_uid import derive_engine_uid
+from src.kernel.engine_uid import derive_engine_uid
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

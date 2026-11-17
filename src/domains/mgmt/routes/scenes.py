@@ -2123,7 +2123,7 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
             _legacy_dual = False
             if not _sel_tags:
                 try:
-                    from src.api.engine_uid import is_uid_str as _is_uid
+                    from src.kernel.engine_uid import is_uid_str as _is_uid
                     from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid as _rid_of
                     _uid_rids = set()
                     for _u in uids:
@@ -2170,7 +2170,7 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
             continue
         # Issue #646：绑定入口支持 uid（字符串）——先解析为 id（服务端校验），
         # 无效 uid fail-fast 400（防手抄拼错静默丢失）；数字 id 维持原语义。
-        from src.api.engine_uid import is_uid_str
+        from src.kernel.engine_uid import is_uid_str
         _resolved_eids = []
         for eid in eids:
             if isinstance(eid, str) and is_uid_str(eid.strip()):

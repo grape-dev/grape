@@ -344,8 +344,8 @@ EXEMPT_FILES: dict = {
     # ── domains/runtime/routes/runtime.py（可选列/可选数据探测回退族（pool_fill/content_hash/admin_policy/skill 详情缺列回空）+ Prom 计数器旁路（无 collector 时 inc 失败无害）+ 标签 INSERT 幂等——探测与计量旁路）──
     ('domains/runtime/routes/runtime.py', 'except Exception:'): 9,
 
-    # ── utils/crypto.py（crypto.json 读取异常吞掉后落显式 RuntimeError fail-closed（PermissionError 仍上抛；key 为空必炸，非静默降级））──
-    ('utils/crypto.py', 'except Exception:'): 1,
+    # ── kernel/crypto.py（原 utils/crypto.py，架构守卫 G-17 上移 kernel；crypto.json 读取异常吞掉后落显式 RuntimeError fail-closed（PermissionError 仍上抛；key 为空必炸，非静默降级））──
+    ('kernel/crypto.py', 'except Exception:'): 1,
 }
 
 

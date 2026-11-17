@@ -1959,7 +1959,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
         # 同步直连，**不进幂等意图队列**：token 明文只在本次响应里出现一次，
         # 若落成可重放意图，排水重放时会造出无主凭据（孤儿 token，无法对账）。
         try:
-            from src.api.sandbox_uid import new_provider_uid as _npuid_sb
+            from src.kernel.sandbox_uid import new_provider_uid as _npuid_sb
             _cc_out.update(_rt_cc_ok.insert_runtime_credential(
                 _cc_hash, name, scope, _cc_owner_id, owner, repo_key, _cred_org_id,
                 cred_type=getattr(body, "cred_type", "worker") or "worker",
@@ -1976,7 +1976,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     else:
         # runtime_credentials 归运行域：插入原语返回 {action, id}；唯一键冲突以 duplicate 返回（不抛）
         try:
-            from src.api.sandbox_uid import new_provider_uid as _npuid_sb2
+            from src.kernel.sandbox_uid import new_provider_uid as _npuid_sb2
             _cc_res = _rt.insert_runtime_credential(
                 hashlib.sha256(token.encode()).hexdigest(), name, scope,
                 repo_key if scope == "repo" else "", owner, repo_key, _cred_org_id,
@@ -1996,7 +1996,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
             _sb_uid = 0 if scope == "global" else (user.get("id") or 0)
             _sb_repo = repo_key if scope == "repo" else ""
             _sb_name = f"{platform}-{name}"
-            from src.utils.crypto import encrypt as _enc_sb
+            from src.kernel.crypto import encrypt as _enc_sb
             _sb_endpoint = (body.platform_endpoint or "").strip().rstrip("/")
             _sb_key_enc = _enc_sb(body.platform_api_key.strip()) if (body.platform_api_key or "").strip() else ""
             _sb_extra = {"ssl_cert": body.platform_ssl_cert_pem} if body.platform_ssl_cert_pem else {}
@@ -2013,7 +2013,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
                         (_sb_endpoint, _sb_key_enc,
                          json.dumps(_sb_extra, ensure_ascii=False), _sb_pid))
                 else:
-                    from src.api.sandbox_uid import new_provider_uid as _npuid
+                    from src.kernel.sandbox_uid import new_provider_uid as _npuid
                     c.execute(
                         "INSERT INTO sandbox_provider_config (platform, endpoint, api_key_enc, extra_config, "
                         "enabled, max_sandboxes, updated_by, runtime_credential_id, provider_uid) "
@@ -3354,7 +3354,7 @@ def create_sandbox_provider(body: dict, user: dict = Depends(require_no_session_
         except HTTPException:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "仅管理员可创建全局 Provider"})
 
-    from src.utils.crypto import encrypt
+    from src.kernel.crypto import encrypt
     from src.kernel.session_manager import db, db_lock
     api_key_enc = encrypt(api_key_plain) if api_key_plain else ""
     _uid = user.get("id", 0)
@@ -3414,7 +3414,7 @@ def update_sandbox_provider(provider_id: int, body: dict, user: dict = Depends(r
                 extra = {}
         extra_json = json.dumps(extra, ensure_ascii=False)
 
-        from src.utils.crypto import encrypt
+        from src.kernel.crypto import encrypt
         api_key_plain = body.get("api_key")
         if api_key_plain is not None:
             api_key_enc = encrypt(api_key_plain) if api_key_plain else ""
@@ -3523,7 +3523,7 @@ def health_sandbox_provider(provider_id: int, user: dict = Depends(require_no_se
             "endpoint": row[3], "api_key_enc": row[4], "extra_config": row[5],
             "max_sandboxes": row[6] or 10}
     _platform = prov["platform"]
-    from src.utils.crypto import decrypt
+    from src.kernel.crypto import decrypt
     _api_key = decrypt(prov["api_key_enc"]) if prov["api_key_enc"] else ""
 
     from src.domains.runtime.agents.sandbox.backends import get_adapter
@@ -3742,7 +3742,7 @@ def _provider_config_from_db(platform: str, provider_id: int | None = None) -> d
         row = c.fetchone()
     if not row:
         return None
-    from src.utils.crypto import decrypt
+    from src.kernel.crypto import decrypt
     _api_key = decrypt(row[3]) if row[3] else ""
     from src.domains.runtime.agents.sandbox.backends import get_adapter
     adapter = get_adapter(row[1])
@@ -3876,7 +3876,7 @@ def update_provider_config(provider: str, body: dict, user: dict = Depends(requi
     extra = _validate_extra_config(provider, extra)
     extra_json = json.dumps(extra, ensure_ascii=False)
 
-    from src.utils.crypto import encrypt
+    from src.kernel.crypto import encrypt
     from src.kernel.session_manager import db, db_lock
 
     with db_lock:
@@ -4044,7 +4044,7 @@ def list_repo_llm_credentials(repo_key: str = "", user: dict = Depends(require_n
              summary="Create or update repo LLM credential")
 def upsert_repo_llm_credential(body: RepoLLMCredentialBody, user: dict = Depends(require_no_session_token)):
     """新增/更新（repo_key+engine_type UPSERT）。api_key 留空=保留旧值。仅仓库管理员。"""
-    from src.utils.crypto import encrypt
+    from src.kernel.crypto import encrypt
     from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
     repo_key = (body.repo_key or "").strip()
@@ -4119,7 +4119,7 @@ def delete_repo_llm_credential(cred_id: int, user: dict = Depends(require_no_ses
 @router.post("/llm-credentials", operation_id="settings_llm_credential_create", summary="Create LLM credential", description="Save LLM API key (encrypted). One credential per engine_type per user.")
 def create_llm_credential(body: LLMCredentialBody, user: dict = Depends(require_no_session_token)):
     """创建/更新 LLM 凭据（加密存储到 user_llm_credentials 表）。"""
-    from src.utils.crypto import encrypt
+    from src.kernel.crypto import encrypt
     from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
 

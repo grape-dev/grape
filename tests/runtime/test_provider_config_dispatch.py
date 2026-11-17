@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
 
 
@@ -430,7 +430,7 @@ class TestProviderConfigsEndpoint:
         """插入一条 provider 配置到 DB（cred_id 非空时关联到该凭据——
         provider-configs 已按 [安全修正] 收敛为 rta_ 只查自己关联的 Provider）。"""
         from src.kernel.session_manager import db, db_lock
-        from src.utils.crypto import encrypt
+        from src.kernel.crypto import encrypt
         with db_lock:
             c = db.cursor()
             c.execute(

@@ -39,7 +39,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Ensure src/ is importable (conftest already does this, but be explicit for standalone)
-ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
 
 from src.domains.runtime.engine.claim_predicate import (

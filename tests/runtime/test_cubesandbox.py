@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch, call
 pytest.importorskip("cubesandbox")
 
 # 先触发完整 src 包初始化（避免循环导入）
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import src.api.main  # noqa: F401 — 触发完整 import 链
 
 from src.domains.runtime.agents.sandbox.backends.cubesandbox import (

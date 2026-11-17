@@ -1349,10 +1349,8 @@ def _ar_engine_uid(rid) -> str:
     if not rid:
         return ""
     try:
-        from src.kernel.session_manager import db as _db, db_lock as _dl
-        with _dl:
-            row = _db.cursor().execute(
-                "SELECT COALESCE(engine_uid,'') FROM agent_runtimes WHERE id=?", (rid,)).fetchone()
+        # 跨域读守卫口径：chat.py 不直查 agent_runtimes，走 runtime/public 登记层
+        row = _rt.read_one_any("chat_engine_uid_by_id", (rid,))
         return (row[0] or "") if row else ""
     except Exception:
         return ""
@@ -1462,16 +1460,13 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
         log.warning(f"chat config: local engines unavailable: {_e}")
         # 旧库（engine_uid 列未迁移）降级：忽略 uid 列照常返回引擎列表
         try:
-            with db_lock:
-                c = db.cursor()
-                for _rid, ename, ver, _hn in c.execute(
-                        "SELECT id, name, version, COALESCE(host_name,'') FROM agent_runtimes "
-                        "WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id"):
-                    if not is_known_engine_name(ename or ""):
-                        continue
-                    _label = f"{ename} v{ver or ''}"
-                    _label += f"（{_hn.replace('ecs-grape-', '')} 直连）" if _hn else "（本机直连）"
-                    backends.append({"name": ename, "display_name": _label, "scope": "local",
+            # 旧库降级查询走 runtime/public 登记层（chat 域读守卫口径）
+            for _rid, ename, ver, _hn in _rt.read_all_any("chat_local_engines_legacy"):
+                if not is_known_engine_name(ename or ""):
+                    continue
+                _label = f"{ename} v{ver or ''}"
+                _label += f"（{_hn.replace('ecs-grape-', '')} 直连）" if _hn else "（本机直连）"
+                backends.append({"name": ename, "display_name": _label, "scope": "local",
                                      "owner": _hn, "runtime_id": _rid, "engine_uid": ""})
         except Exception as _e2:  # noqa: BLE001
             log.warning(f"chat config: legacy local engines unavailable: {_e2}")
@@ -1486,15 +1481,11 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     except Exception as _e:  # noqa: BLE001
         log.warning(f"chat config: user engines unavailable: {_e}")
         try:
-            with db_lock:
-                c = db.cursor()
-                for _rid, ename, ver, dev, owner, cid in c.execute(
-                        "SELECT ar.id, ar.name, ar.version, rc.device_name, rc.owner_name, rc.id "
-                        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc "
-                        "ON rc.id=ar.credential_id WHERE rc.scope='user' AND rc.status='active' "
-                        "AND rc.owner_name = ?", (user["username"],)):
-                    ins = instance_name(ename, dev or "", cid or 0)
-                    backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}",
+            # 旧库降级查询走 runtime/public 登记层（chat 域读守卫口径）
+            for _rid, ename, ver, dev, owner, cid in _rt.read_all_any(
+                    "chat_user_engines_legacy", (user["username"],)):
+                ins = instance_name(ename, dev or "", cid or 0)
+                backends.append({"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}",
                                      "scope": "user", "owner": owner or "", "runtime_id": _rid,
                                      "engine_uid": ""})
         except Exception as _e2:  # noqa: BLE001
@@ -1786,7 +1777,7 @@ async def update_chat_config(body: dict, request: Request,
     _uid_applied = False
     _body_uid = body.get("engine_uid")
     if isinstance(_body_uid, str) and _body_uid.strip():
-        from src.api.engine_uid import is_uid_str
+        from src.kernel.engine_uid import is_uid_str
         from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
         _u = _body_uid.strip().lower()
         if is_uid_str(_u):

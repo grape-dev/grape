@@ -17,7 +17,7 @@ import threading
 
 import pytest
 
-from src.api.engine_uid import derive_engine_uid
+from src.kernel.engine_uid import derive_engine_uid
 
 
 UID_HERMES = derive_engine_uid("", "hermes", "global", "", "")
