@@ -127,10 +127,11 @@ def _reset_process_cache():
 
 
 def _mark_attempted(kw, ids):
-    """假 batch 需同步 stats.attempted，模拟「确实提交过上游请求」。"""
+    """假 batch 需同步 stats.attempted / attempted_ids，模拟「确实开始执行」。"""
     _st = kw.get("stats")
     if isinstance(_st, dict):
         _st["attempted"] = len(ids)
+        _st["attempted_ids"] = set(ids)
     return _st
 
 
@@ -277,11 +278,18 @@ def test_no_token_does_not_poison_negative_cache(monkeypatch):
 
 
 def test_get_issue_pipeline_no_serial_vcs_call(monkeypatch):
-    """列表聚合路径不再逐条外呼（API 兜底已移到窗口批量层）。"""
-    def _boom(*a, **kw):
-        raise AssertionError("逐条 VCS 调用不应出现在 _get_issue_pipeline")
+    """列表聚合路径不再逐条外呼（API 兜底已移到窗口批量层）。
 
-    monkeypatch.setattr(ep_mod, "_fetch_issue_title_via_api", _boom)
+    review：旧实现用 `except Exception: pass` 包裹逐条外呼，抛 AssertionError 会被
+    吞掉、基线也通过。这里改为记录调用列表并断言为空，锁住「调用被删除」。
+    """
+    calls = []
+
+    def _record(*a, **kw):
+        calls.append((a, kw))
+        return ""
+
+    monkeypatch.setattr(ep_mod, "_fetch_issue_title_via_api", _record)
     with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=[]), \
          patch("src.domains.runtime.pipeline.event_pipeline.get_agent_display_name",
                side_effect=lambda a: a):
@@ -293,6 +301,7 @@ def test_get_issue_pipeline_no_serial_vcs_call(monkeypatch):
             "gitcode:o/r", "#1", events, {"#1": "issue_opened"})
     assert p is not None
     assert p["title"] == "issue_opened"
+    assert calls == []
 
 
 def _fake_client(delay=0.0, titles=None):
@@ -487,3 +496,172 @@ def test_get_pipeline_window_size_wiring(monkeypatch):
     assert captured["window_size"] == 1 + 2 + 3
     assert captured["issue_ids"] == ["#1"]
     assert isinstance(resp, dict)
+
+
+# ===== QA review round 3：无行降级 / 取消任务不标记 / token 计入 deadline / 最新仓 / 分片 =====
+
+
+def test_events_without_issue_row_falls_back_to_process_cache(monkeypatch):
+    """events 有记录但 issue 表无行：持久标记写 0 行 → 降级进程负缓存，第二次 0 外呼。"""
+    db = _setup_db(monkeypatch, {}, marker_ok=True)
+    calls = []
+
+    def _fake_batch(repo_key, ids, **kw):
+        calls.append(list(ids))
+        _mark_attempted(kw, ids)
+        return {}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
+    events_by_issue = {"#7": [{"repo_key": "gitcode:o/r", "title": "issue_opened"}]}
+
+    pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], {"#7": ""}, ["#7"], events_by_issue, 1)
+    assert calls == [["#7"]]
+    assert db.cur.updates and all(u[0].startswith("UPDATE issue") for u in db.cur.updates)
+    # 持久标记命中 0 行 → 必须落进程内负缓存兜底
+    assert ("gitcode:o/r", 7) in pipeline_mod._TITLE_NEG_CACHE
+
+    out2 = pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], {"#7": ""}, ["#7"], events_by_issue, 1)
+    assert calls == [["#7"]]
+    assert out2["#7"] == ""
+
+
+def test_no_token_and_no_marker_column_does_not_poison(monkeypatch):
+    """无标记列 + 无 token 组合：不得落进程负缓存，每个请求都应可重试。"""
+    _setup_db(monkeypatch, {1: {"title": "", "marker": ""}}, marker_ok=False)
+    tok_calls = []
+
+    def _no_token(rk):
+        tok_calls.append(rk)
+        return ""
+
+    monkeypatch.setattr(ep_mod, "_resolve_issue_read_token", _no_token)
+    pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], {"#1": ""}, ["#1"], {}, 1)
+    pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], {"#1": ""}, ["#1"], {}, 1)
+
+    assert tok_calls == ["gitcode:o/r", "gitcode:o/r"]
+    assert pipeline_mod._TITLE_NEG_CACHE == {}
+
+
+def test_latest_event_repo_key_wins_for_duplicate_numbers(monkeypatch):
+    """多仓同号：events 为 seq ASC，应取最新事件（末尾）的 repo_key 回写。"""
+    issues = {
+        ("gitcode:o/r", 7): {"title": "issue_opened", "marker": ""},
+        ("gitcode:o/r2", 7): {"title": "issue_opened", "marker": ""},
+    }
+    _setup_db(monkeypatch, issues)
+    calls = []
+
+    def _fake_batch(repo_key, ids, **kw):
+        calls.append((repo_key, list(ids)))
+        _mark_attempted(kw, ids)
+        return {"#7": "r2 最新标题"}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
+    events_by_issue = {"#7": [
+        {"repo_key": "gitcode:o/r", "title": "issue_opened"},
+        {"repo_key": "gitcode:o/r2", "title": "issue_opened"},
+    ]}
+    out = pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r", "gitcode:o/r2"],
+        {"#7": "issue_opened"}, ["#7"], events_by_issue, 1)
+
+    assert calls == [("gitcode:o/r2", ["#7"])]
+    assert out["#7"] == "r2 最新标题"
+    assert issues[("gitcode:o/r2", 7)]["title"] == "r2 最新标题"
+    assert issues[("gitcode:o/r", 7)]["title"] == "issue_opened"
+
+
+def test_cancelled_futures_not_marked_as_attempted(monkeypatch):
+    """排队后被取消（从未发请求）的候选不得落已尝试标记。"""
+    issues = {n: {"title": "", "marker": ""} for n in (1, 2, 3)}
+    _setup_db(monkeypatch, issues)
+
+    def _fake_batch(repo_key, ids, **kw):
+        st = kw.get("stats")
+        if isinstance(st, dict):
+            st["attempted"] = 1
+            st["attempted_ids"] = {ids[0]}
+        return {}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
+    pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], {"#1": "", "#2": "", "#3": ""},
+        ["#1", "#2", "#3"], {}, 3)
+
+    assert issues[1]["marker"] != ""
+    assert issues[2]["marker"] == ""
+    assert issues[3]["marker"] == ""
+
+
+def test_batch_attempted_counts_started_only(monkeypatch):
+    """attempted 只统计真正开始执行的任务，排队被取消的不算。"""
+    monkeypatch.setattr(ep_mod, "_resolve_issue_read_token", lambda rk: "tok")
+    monkeypatch.setattr(ep_mod, "_build_issue_read_client",
+                        lambda *a: _fake_client(delay=0.6))
+    stats = {}
+    ep_mod.fetch_issue_titles_batch(
+        "gitcode:o/r", ["#1", "#2", "#3"], max_workers=1,
+        deadline_seconds=0.3, timeout=0.3, stats=stats)
+    assert stats["attempted"] == 1
+    assert len(stats["attempted_ids"]) == 1
+
+
+def test_batch_deadline_includes_token_resolution(monkeypatch):
+    """token 解析耗时计入总 deadline：解析超预算后不再构建客户端/发起请求。"""
+    def _slow_token(rk):
+        time.sleep(0.2)
+        return "tok"
+
+    monkeypatch.setattr(ep_mod, "_resolve_issue_read_token", _slow_token)
+    client = _fake_client(titles={1: "T1"})
+    built = []
+    monkeypatch.setattr(ep_mod, "_build_issue_read_client",
+                        lambda *a: built.append(1) or client)
+    stats = {}
+    started = time.monotonic()
+    out = ep_mod.fetch_issue_titles_batch(
+        "gitcode:o/r", ["#1"], max_workers=1,
+        deadline_seconds=0.1, timeout=0.1, stats=stats)
+    elapsed = time.monotonic() - started
+
+    assert out == {}
+    assert stats["attempted"] == 0
+    assert built == []
+    assert client.calls == []
+    assert elapsed < 0.5, elapsed
+
+
+def test_marker_read_chunks_large_window(monkeypatch):
+    """标记读取按分片执行：大窗口不把所有 issue_number 塞进一条 IN。"""
+    n = 450
+    issues = {i: {"title": "", "marker": ""} for i in range(1, n + 1)}
+    db = _setup_db(monkeypatch, issues)
+    select_sizes = []
+    _orig_execute = db.cur.execute
+
+    def _exec(sql, params=()):
+        s = " ".join(str(sql).split())
+        if s.startswith("SELECT repo_key, issue_number, title_fetched_at"):
+            m = re.search(r"issue_number IN \(([^)]*)\)", s)
+            select_sizes.append(m.group(1).count("?"))
+        return _orig_execute(sql, params)
+
+    monkeypatch.setattr(db.cur, "execute", _exec)
+
+    def _fake_batch(repo_key, ids, **kw):
+        _mark_attempted(kw, ids)
+        return {}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
+    ids = [f"#{i}" for i in range(1, n + 1)]
+    title_map = {iid: "" for iid in ids}
+    events_by_issue = {iid: [{"repo_key": "gitcode:o/r", "title": "issue_opened"}]
+                       for iid in ids}
+    pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], title_map, ids, events_by_issue, n)
+
+    assert select_sizes == [200, 200, 50]

@@ -398,7 +398,7 @@ class VcsApiClient:
         return self._request("POST", self._generic_path(
             f"/repos/{self.owner}/{self.repo}/issues", "/issues"), data, form=_form)
 
-    def get_issue(self, issue_number: int, timeout: int = 30) -> dict:
+    def get_issue(self, issue_number: int, timeout: float = 30.0) -> dict:
         """获取 Issue 详情。"""
         return self._request("GET", self._generic_path(
             f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",

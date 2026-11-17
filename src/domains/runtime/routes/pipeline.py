@@ -127,7 +127,8 @@ def _title_neg_cache_put(key, ts: float) -> None:
             if not _title_marker_fresh(_v, _now, _ttl):
                 _TITLE_NEG_CACHE.pop(_k, None)
         if len(_TITLE_NEG_CACHE) >= _TITLE_NEG_CACHE_MAX:
-            # 仍然超限（TTL 全新鲜 / 配置为永久）→ 丢掉最早写入的一批，保持有界。
+            # 仍然超限（TTL 全新鲜 / 配置为永久）→ 按插入顺序丢掉最早的一批，
+            # 保持有界；同 key 重写不刷新插入序，仍按首次写入位置淘汰。
             for _k in list(_TITLE_NEG_CACHE)[:len(_TITLE_NEG_CACHE) - _TITLE_NEG_CACHE_MAX + 1]:
                 _TITLE_NEG_CACHE.pop(_k, None)
     _TITLE_NEG_CACHE[key] = ts
@@ -135,6 +136,9 @@ def _title_neg_cache_put(key, ts: float) -> None:
 
 # 写回/标记 SQL 的并发护栏（三处共用，保证与占位判定同口径）。
 _TITLE_WRITEBACK_GUARD = "(title='' OR title IS NULL OR title=?)"
+# 标记读取按分片执行：`issue_number IN (...)` 随窗口（1+offset+limit）增长，
+# 大 offset 下会触碰 SQLite 变量上限，分片保证单条 SQL 的占位符数量有界。
+_TITLE_MARKER_QUERY_CHUNK = 200
 
 
 def _title_negative_ttl() -> int:
@@ -205,7 +209,9 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
             continue
         # 多仓场景下 issue 号可能在不同 repo 重复：回写必须带该 issue 实际所属
         # repo_key（优先取事件行，缺失回退调用方 repo_key），避免串仓覆盖。
-        _ev = _evts[0] if _evts else {}
+        # events 查询为 ORDER BY seq ASC，最新事件在末尾；取最新一条的 repo_key，
+        # 否则多仓同号时会回写到最旧事件所属的仓。
+        _ev = _evts[-1] if _evts else {}
         _rk = _ev.get("repo_key") or repo_key
         _candidates.append((_iid, _num, _rk))
     if not _candidates:
@@ -226,18 +232,23 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
             _marker_ok = column_exists(_c, "issue", "title_fetched_at")
             if _marker_ok:
                 _ph_rk = ",".join("?" * len(repo_keys))
-                _ph_num = ",".join("?" * len(_candidates))
-                _c.execute(
-                    f"SELECT repo_key, issue_number, title_fetched_at FROM issue "
-                    f"WHERE repo_key IN ({_ph_rk}) AND issue_number IN ({_ph_num})",
-                    (*repo_keys, *[n for _, n, _ in _candidates]))
-                # 逐行取（窗口最多几百条）：不触发静态检查的 A7「持锁批量扫描」形态，
-                # 也避免为一次标记读取引入额外的大结果集。
-                while True:
-                    _r = _c.fetchone()
-                    if not _r:
-                        break
-                    _marked[(_r[0], _r[1])] = _r[2] or ""
+                # 分片读取：窗口大小 = 1+offset+limit，offset 无上限；单条 SQL 的
+                # issue_number 占位符数量固定 ≤ _TITLE_MARKER_QUERY_CHUNK，
+                # 避免大 offset 触发 SQLite 变量上限导致标记读取整体降级。
+                for _ci in range(0, len(_candidates), _TITLE_MARKER_QUERY_CHUNK):
+                    _chunk = _candidates[_ci:_ci + _TITLE_MARKER_QUERY_CHUNK]
+                    _ph_num = ",".join("?" * len(_chunk))
+                    _c.execute(
+                        f"SELECT repo_key, issue_number, title_fetched_at FROM issue "
+                        f"WHERE repo_key IN ({_ph_rk}) AND issue_number IN ({_ph_num})",
+                        (*repo_keys, *[n for _, n, _ in _chunk]))
+                    # 逐行取（单次分片最多 200 条）：不触发静态检查的 A7「持锁批量
+                    # 扫描」形态，也避免为一次标记读取引入额外的大结果集。
+                    while True:
+                        _r = _c.fetchone()
+                        if not _r:
+                            break
+                        _marked[(_r[0], _r[1])] = _r[2] or ""
     except Exception as e:
         _marker_ok = False
         log.warning(f"[pipeline] title backfill marker read failed (degrade to "
@@ -247,11 +258,11 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
     _to_fetch = []
     _skipped_marked = 0
     for _iid, _num, _rk in _candidates:
-        if _marker_ok:
-            if _title_marker_fresh(_marked.get((_rk, _num), ""), _now, _ttl):
-                _skipped_marked += 1
-                continue
-        elif _title_marker_fresh(_TITLE_NEG_CACHE.get((_rk, _num)), _now, _ttl):
+        # 有列时以持久标记为主；进程内缓存是补充路径——issue 表没有该行
+        # （events 有记录、issue 表无行）时持久标记无处落，只能靠进程缓存收敛。
+        _marker_ts = _marked.get((_rk, _num), "") if _marker_ok else ""
+        if (_title_marker_fresh(_marker_ts, _now, _ttl)
+                or _title_marker_fresh(_TITLE_NEG_CACHE.get((_rk, _num)), _now, _ttl)):
             _skipped_marked += 1
             continue
         _to_fetch.append((_iid, _num, _rk))
@@ -265,7 +276,9 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
     # ② 有界执行：token/客户端复用 + 有限并发 + 总 deadline（见 event_pipeline）
     # 按 issue 实际所属 repo_key 分组，每组内 token/客户端只解析构建一次。
     _fetched: dict = {}
-    _attempted_rks: set = set()
+    # 逐条记录「确实开始执行」的候选：被 deadline 取消、从未发过请求的排队任务
+    # 不得落负缓存（否则会把未尝试的 issue 锁 6h 不再重试）。
+    _attempted_ids: set = set()
     _by_rk: dict = {}
     for _iid, _num, _rk in _to_fetch:
         _by_rk.setdefault(_rk, []).append(_iid)
@@ -288,9 +301,10 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
         except Exception as e:
             log.warning(f"[pipeline] title backfill batch error for {_rk} "
                         f"(degrade to placeholder): {e}")
-        # 只有真的提交过上游请求才允许落已尝试标记（无 token 时不得形成负缓存）
-        if _stats.get("attempted"):
-            _attempted_rks.add(_rk)
+        # 只有真正开始执行（wrapper 已置位）的候选才允许落已尝试标记：
+        # 无 token 时不得形成负缓存，deadline 取消的排队任务也不得被标记。
+        for _started_iid in (_stats.get("attempted_ids") or ()):
+            _attempted_ids.add((_rk, _started_iid))
 
     # ③ 状态有界：只写真实标题（同口径），失败落已尝试标记形成负缓存
     _now_iso = str(int(_now))
@@ -326,18 +340,24 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
                         _written += 1
                     title_map[_iid] = _api
                 elif _marker_ok:
-                    if _rk in _attempted_rks:
+                    if (_rk, _iid) in _attempted_ids:
                         _c.execute(
                             f"UPDATE issue SET title_fetched_at=? "
                             f"WHERE repo_key=? AND issue_number=? "
                             f"AND {_TITLE_WRITEBACK_GUARD}",
                             (_now_iso, _rk, _num, _old))
-                elif _rk in _attempted_rks:
+                        # events 有记录但 issue 表无该行：持久标记命中 0 行，
+                        # 降级落进程内负缓存，避免该 issue 每次请求都继续外呼。
+                        if getattr(_c, "rowcount", -1) == 0:
+                            _title_neg_cache_put((_rk, _num), _now)
+                elif (_rk, _iid) in _attempted_ids:
                     _title_neg_cache_put((_rk, _num), _now)
             try:
                 _db.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                # 不静默：commit 失败会让标记/标题回写整体丢失，必须留可观测信号。
+                log.warning(f"[pipeline] title backfill commit failed "
+                            f"(markers may be lost): {e}")
     except Exception as e:
         log.warning(f"[pipeline] title backfill writeback failed: {e}")
 

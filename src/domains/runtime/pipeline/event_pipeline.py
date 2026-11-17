@@ -3255,11 +3255,21 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
     返回 {issue_id: title}，只收录非空标题（是否占位由调用方按同一口径复核）。
     无 token / 客户端构建失败 / 上游异常一律降级为空结果，绝不抛出。
 
-    `stats`（可选出参）：写入 `attempted`（实际提交给上游的条数）。调用方据此区分
-    「确实尝试过但没拿到」与「根本没 token 没发起」——后者不得落负缓存标记，
-    否则一次临时 token 缺失会让该仓 6h 内不再重试。
+    `stats`（可选出参）：写入 `attempted`（真正开始执行的条数）与
+    `attempted_ids`（真正开始执行的 issue_id 集合）。调用方据此区分「确实发起过
+    上游请求但没拿到」与「没 token / 排队中被 deadline 取消」——后者不得落负缓存
+    标记，否则一次临时 token 缺失或超时会把这些 issue 锁 6h 不再重试。
     """
     from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+    # 总 deadline 从入口开始计时：token 解析 / 客户端构建也计入预算，避免刷新慢时
+    # 穿透调用方传入的共享剩余时间（多组累计仍应 ≤ 请求级预算）。
+    _deadline = max(0.1, float(deadline_seconds or _title_fetch_deadline()))
+    _expire_at = time.monotonic() + _deadline
+    # 只记录真正开始执行的任务：被 cancel_futures 取消的排队任务从未发请求。
+    _started_ids: set = set()
+    if stats is not None:
+        stats["attempted"] = 0
+        stats["attempted_ids"] = _started_ids
     _num_by_id: dict = {}
     for _iid in (issue_ids or []):
         _iid = str(_iid)
@@ -3270,10 +3280,15 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
     if not _num_by_id:
         return {}
     token = _resolve_issue_read_token(repo_key)
-    if stats is not None:
-        stats["attempted"] = 0
     if not token:
         log.warning(f"[pipeline] title backfill skipped: no VCS token for {repo_key} "
+                    f"(candidates={len(_num_by_id)})")
+        return {}
+    # token 刷新可能访问 DB/网络，必须在发起任何请求前扣减总预算。
+    _remain = _expire_at - time.monotonic()
+    if _remain <= 0:
+        log.warning(f"[pipeline] title backfill skipped: deadline exhausted during "
+                    f"token resolution for {repo_key} "
                     f"(candidates={len(_num_by_id)})")
         return {}
     try:
@@ -3282,25 +3297,30 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
         log.warning(f"[pipeline] title backfill skipped: client init failed for "
                     f"{repo_key}: {e}")
         return {}
+    _remain = _expire_at - time.monotonic()
+    if _remain <= 0:
+        log.warning(f"[pipeline] title backfill skipped: deadline exhausted during "
+                    f"client init for {repo_key} "
+                    f"(candidates={len(_num_by_id)})")
+        return {}
     _conc = max(1, int(max_workers or _title_fetch_concurrency()))
-    _deadline = max(0.1, float(deadline_seconds or _title_fetch_deadline()))
-    _timeout = max(0.1, min(float(timeout or _title_fetch_timeout()), _deadline))
-    _expire_at = time.monotonic() + _deadline
+    # 单请求超时不得超过剩余总预算。
+    _timeout = max(0.1, min(float(timeout or _title_fetch_timeout()), _remain))
     _out: dict = {}
     try:
         # 不用 with：退出时 shutdown(wait=True) 会等所有排队任务跑完，deadline 失去意义。
         _ex = ThreadPoolExecutor(max_workers=min(_conc, len(_num_by_id)),
                                  thread_name_prefix="pipeline-title")
         try:
-            # 逐条 submit 并累加 attempted：只有真正提交进线程池（即真的会发起
-            # 上游请求）的条数才算「尝试过」。线程池创建/部分 submit 失败时，
-            # attempted 只反映实际提交数，避免零外呼却落 6h 负缓存。
+            def _run_one(_iid, _num):
+                # wrapper 置位：只有线程真正开始执行，才算「尝试过上游请求」。
+                _started_ids.add(_iid)
+                return _vcs_get_issue(repo_key, _num, client, _timeout)
+
             _futs = {}
             try:
                 for iid, num in _num_by_id.items():
-                    _futs[_ex.submit(_vcs_get_issue, repo_key, num, client, _timeout)] = iid
-                    if stats is not None:
-                        stats["attempted"] = len(_futs)
+                    _futs[_ex.submit(_run_one, iid, num)] = iid
             except Exception as e:
                 log.warning(f"[pipeline] title backfill submit failed for {repo_key} "
                             f"(submitted={len(_futs)}/{len(_num_by_id)}): {e}")
@@ -3328,6 +3348,9 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
             _ex.shutdown(wait=False, cancel_futures=True)
     except Exception as e:
         log.warning(f"[pipeline] title backfill batch failed for {repo_key}: {e}")
+    finally:
+        if stats is not None:
+            stats["attempted"] = len(_started_ids)
     return _out
 
 
