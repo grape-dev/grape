@@ -1,5 +1,5 @@
 """Bot 配置：全局常量、事件路由、多账户配置"""
-import os, json, logging, logging.handlers, urllib.request, socket
+import os, json, logging, logging.handlers, urllib.request, socket, sys
 import ssl
 
 # api.gitcode.com 被 GFW SNI 拦截（返回自签名证书），全局禁用 urllib SSL 验证。
@@ -134,24 +134,51 @@ def _parse_level(s: str) -> int:
 
 _LOG_LEVEL = _parse_level(os.environ.get("LOG_LEVEL", ""))
 _LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data/logs"))
-os.makedirs(_LOG_DIR, exist_ok=True)
 
-_file_handler = logging.handlers.TimedRotatingFileHandler(
-    os.path.join(_LOG_DIR, "devops-bot.log"),
-    when="midnight", interval=1, backupCount=30, encoding="utf-8",
-)
-_file_handler.setLevel(_LOG_LEVEL)
-_file_handler.setFormatter(_JsonFormatter())
-_file_handler.addFilter(_RequestIdFilter())
+# Issue #2933：导入期日志初始化降级。容器/沙箱把 data/logs 挂成只读时，
+# os.makedirs 与 TimedRotatingFileHandler 构造都会抛 OSError，导致
+# ``import src.kernel.config`` 失败，进而让 pre-push 分支守卫在鉴权前崩溃阻断 push。
+# 处理原则：环境只读 ≠ 业务失败——文件 handler 构造失败仅降级为 stderr，绝不上抛。
+LOG_FILE_DEGRADED = False
+LOG_FILE_DEGRADED_REASON = ""
+LOG_FILE_DEGRADED_WARN_FAILED = False
+_file_handler = None
+try:
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    _file_handler = logging.handlers.TimedRotatingFileHandler(
+        os.path.join(_LOG_DIR, "devops-bot.log"),
+        when="midnight", interval=1, backupCount=30, encoding="utf-8",
+    )
+    _file_handler.setLevel(_LOG_LEVEL)
+    _file_handler.setFormatter(_JsonFormatter())
+    _file_handler.addFilter(_RequestIdFilter())
+except (OSError, PermissionError) as _log_init_err:
+    LOG_FILE_DEGRADED = True
+    LOG_FILE_DEGRADED_REASON = f"{_log_init_err.__class__.__name__}: {_log_init_err}"
+    _file_handler = None
+    # 降级提示直接写 sys.stderr（不能经 logger：坏掉的正是文件 handler，
+    # 经 logger 有递归/被吞风险）；只输出一条中文提示，不带 traceback。
+    try:
+        sys.stderr.write(
+            f"[grape] WARNING 日志目录不可写({_LOG_DIR})："
+            "已降级为仅 stderr 输出，不影响业务功能\n")
+        sys.stderr.flush()
+    except Exception:
+        # stderr 同不可写（极端环境）：提示丢失但绝不能让导入失败。
+        LOG_FILE_DEGRADED_WARN_FAILED = True
 
 _stream_handler = logging.StreamHandler()
 _stream_handler.setLevel(_LOG_LEVEL)
 _stream_handler.setFormatter(_JsonFormatter())
 _stream_handler.addFilter(_RequestIdFilter())
 
+_handlers = [_h for _h in (_file_handler, _stream_handler) if _h is not None]
+if not _handlers:
+    _handlers = [logging.NullHandler()]
+
 logging.basicConfig(
     level=_LOG_LEVEL,
-    handlers=[_file_handler, _stream_handler],
+    handlers=_handlers,
 )
 log = logging.getLogger("devops-bot")
 log.addFilter(_RequestIdFilter())
@@ -272,8 +299,23 @@ def _resolve_workspace_dir() -> str:
 
 WORKSPACE_DIR = _resolve_workspace_dir()
 LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data/logs"))
-os.makedirs(WORKSPACE_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
+
+# Issue #2933：只读挂载下目录创建失败只记降级标志，不在导入期抛异常。
+WORKSPACE_DIR_DEGRADED = False
+WORKSPACE_DIR_DEGRADED_REASON = ""
+try:
+    os.makedirs(WORKSPACE_DIR, exist_ok=True)
+except (OSError, PermissionError) as _ws_err:
+    WORKSPACE_DIR_DEGRADED = True
+    WORKSPACE_DIR_DEGRADED_REASON = f"{_ws_err.__class__.__name__}: {_ws_err}"
+
+LOG_DIR_DEGRADED = False
+LOG_DIR_DEGRADED_REASON = ""
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except (OSError, PermissionError) as _dir_err:
+    LOG_DIR_DEGRADED = True
+    LOG_DIR_DEGRADED_REASON = f"{_dir_err.__class__.__name__}: {_dir_err}"
 
 # Chat 工作目录下发的逻辑基准（远端 worker _remap_cwd 的默认映射契约）。
 # 服务端必须用逻辑基准下发而非本机 WORKSPACE_DIR，否则非 root 用户 worker
