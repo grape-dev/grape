@@ -3,7 +3,7 @@
 
 和 agent.py（本机 worker）的区别：
 - 引擎发现：配置文件静态声明（不扫本机 CLI）
-- 沙箱选择：从配置文件读 provider（不查 DB engine_sandbox_config）
+- 沙箱选择：从配置文件读 provider（不查 DB grape_t_engine_sandbox_config）
 - 认证：key 文件（本机 seed 或 B 机器 scp）
 - 执行：通过 SDK commands.run 在沙箱内执行 agent（不走 Popen）
 
@@ -131,7 +131,7 @@ def _expand_templates(templates: list[dict]) -> list[dict]:
             _scope = "global"
         if not _platform or _platform == "disabled":
             continue
-        # v3：引擎列表从 binding 表返回的 engines 字段取（已 JOIN engine_template_binding）
+        # v3：引擎列表从 binding 表返回的 engines 字段取（已 JOIN grape_t_engine_template_binding）
         engines_raw = t.get("engines", "[]")
         try:
             _engines = json.loads(engines_raw) if isinstance(engines_raw, str) else (engines_raw or [])

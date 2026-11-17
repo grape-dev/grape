@@ -32,7 +32,7 @@
     "chat_agent_session": "runtime",
     "chat_conversations": "runtime",
     "chat_messages": "runtime",
-    "cloud_sandboxes": "mgmt",
+    "grape_t_cloud_sandboxes": "mgmt",
     "community_comments": "mgmt",
     "community_post_likes": "mgmt",
     "community_posts": "mgmt",
@@ -40,12 +40,12 @@
     "devops_agent_session": "runtime",
     "devops_pipeline_scene": "mgmt",
     "distributed_locks": "runtime",
-    "egress_admin_exception": "mgmt",
-    "egress_admin_policy": "mgmt",
+    "grape_t_egress_admin_exception": "mgmt",
+    "grape_t_egress_admin_policy": "mgmt",
     "engine_capabilities": "runtime",
-    "engine_sandbox_config": "mgmt",
-    "engine_sandbox_paths": "mgmt",
-    "engine_sandbox_whitelist": "mgmt",
+    "grape_t_engine_sandbox_config": "mgmt",
+    "grape_t_engine_sandbox_paths": "mgmt",
+    "grape_t_engine_sandbox_whitelist": "mgmt",
     "event_action_filter": "mgmt",
     "event_active_guard": "runtime",
     "event_route_config": "mgmt",
@@ -106,8 +106,8 @@
     "repo_platform_tokens": "mgmt",
     "runtime_credentials": "runtime",
     "runtime_health_scores": "runtime",
-    "sandbox_provider_config": "mgmt",
-    "sandbox_templates": "mgmt",
+    "grape_t_sandbox_provider_config": "mgmt",
+    "grape_t_sandbox_templates": "mgmt",
     "sandbox_whitelist": "mgmt",
     "scene_category": "runtime",
     "scene_engine_detach_log": "runtime",
@@ -122,22 +122,22 @@
     "skill_likes": "mgmt",
     "takeover_sessions": "runtime",
     "task_messages": "runtime",
-    "task_proxy_tokens": "mgmt",
+    "grape_t_task_proxy_tokens": "mgmt",
     "template_usage": "mgmt",
     "unified_user_mapping": "mgmt",
     "uploaded_files": "mgmt",
     "user_accounts": "mgmt",
     "user_credentials": "mgmt",
     "user_feedback": "mgmt",
-    "user_llm_credentials": "mgmt",
+    "grape_t_user_llm_credentials": "mgmt",
     "user_repos": "mgmt",
     "user_vm_repos": "mgmt",
     "user_vms": "mgmt",
     "verification_codes": "mgmt",
     "vod_conversations": "runtime",
-    "engine_template_binding": "mgmt",
-    "engine_sandbox_toggle": "mgmt",
-    "repo_llm_credentials": "mgmt"
+    "grape_t_engine_template_binding": "mgmt",
+    "grape_t_engine_sandbox_toggle": "mgmt",
+    "grape_t_repo_llm_credentials": "mgmt"
   },
   "views": {
     "admin_accounts": [
@@ -272,7 +272,7 @@
       "insight",
       "mgmt"
     ],
-    "cloud_sandboxes": [
+    "grape_t_cloud_sandboxes": [
       "insight",
       "runtime"
     ],
@@ -308,11 +308,11 @@
       "insight",
       "mgmt"
     ],
-    "egress_admin_exception": [
+    "grape_t_egress_admin_exception": [
       "insight",
       "runtime"
     ],
-    "egress_admin_policy": [
+    "grape_t_egress_admin_policy": [
       "insight",
       "runtime"
     ],
@@ -320,15 +320,15 @@
       "insight",
       "mgmt"
     ],
-    "engine_sandbox_config": [
+    "grape_t_engine_sandbox_config": [
       "insight",
       "runtime"
     ],
-    "engine_sandbox_paths": [
+    "grape_t_engine_sandbox_paths": [
       "insight",
       "runtime"
     ],
-    "engine_sandbox_whitelist": [
+    "grape_t_engine_sandbox_whitelist": [
       "insight",
       "runtime"
     ],
@@ -533,11 +533,11 @@
       "insight",
       "mgmt"
     ],
-    "sandbox_provider_config": [
+    "grape_t_sandbox_provider_config": [
       "insight",
       "runtime"
     ],
-    "sandbox_templates": [
+    "grape_t_sandbox_templates": [
       "insight",
       "runtime"
     ],
@@ -593,7 +593,7 @@
       "insight",
       "mgmt"
     ],
-    "task_proxy_tokens": [
+    "grape_t_task_proxy_tokens": [
       "insight",
       "runtime"
     ],
@@ -625,7 +625,7 @@
       "insight",
       "runtime"
     ],
-    "user_llm_credentials": [
+    "grape_t_user_llm_credentials": [
       "insight",
       "runtime"
     ],
@@ -649,15 +649,15 @@
       "insight",
       "mgmt"
     ],
-    "engine_template_binding": [
+    "grape_t_engine_template_binding": [
       "insight",
       "runtime"
     ],
-    "engine_sandbox_toggle": [
+    "grape_t_engine_sandbox_toggle": [
       "insight",
       "runtime"
     ],
-    "repo_llm_credentials": [
+    "grape_t_repo_llm_credentials": [
       "insight",
       "runtime"
     ]

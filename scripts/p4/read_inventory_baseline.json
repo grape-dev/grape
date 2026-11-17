@@ -50,22 +50,22 @@
       "bare_by_table": {
         "agent_runtimes": 13,
         "agent_tasks": 1,
-        "cloud_sandboxes": 6,
-        "egress_admin_exception": 2,
-        "egress_admin_policy": 4,
-        "engine_sandbox_config": 3,
-        "engine_sandbox_paths": 2,
-        "engine_sandbox_toggle": 1,
-        "engine_sandbox_whitelist": 4,
-        "engine_template_binding": 2,
         "grape_accounts": 2,
-        "repo_llm_credentials": 2,
+        "grape_t_cloud_sandboxes": 6,
+        "grape_t_egress_admin_exception": 2,
+        "grape_t_egress_admin_policy": 4,
+        "grape_t_engine_sandbox_config": 3,
+        "grape_t_engine_sandbox_paths": 2,
+        "grape_t_engine_sandbox_toggle": 1,
+        "grape_t_engine_sandbox_whitelist": 4,
+        "grape_t_engine_template_binding": 2,
+        "grape_t_repo_llm_credentials": 2,
+        "grape_t_sandbox_provider_config": 9,
+        "grape_t_sandbox_templates": 3,
+        "grape_t_task_proxy_tokens": 1,
+        "grape_t_user_llm_credentials": 3,
         "runtime_credentials": 15,
-        "sandbox_provider_config": 9,
-        "sandbox_templates": 3,
-        "task_proxy_tokens": 1,
-        "user_accounts": 3,
-        "user_llm_credentials": 3
+        "user_accounts": 3
       },
       "bare_classification_by_table": {
         "agent_runtimes": {
@@ -82,62 +82,6 @@
           "manual_dynamic_other": 0,
           "manual_non_fetch": 0
         },
-        "cloud_sandboxes": {
-          "auto": 1,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 4,
-          "manual_non_fetch": 1
-        },
-        "egress_admin_exception": {
-          "auto": 0,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 0,
-          "manual_non_fetch": 2
-        },
-        "egress_admin_policy": {
-          "auto": 2,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 0,
-          "manual_non_fetch": 2
-        },
-        "engine_sandbox_config": {
-          "auto": 0,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 2,
-          "manual_dynamic_other": 0,
-          "manual_non_fetch": 1
-        },
-        "engine_sandbox_paths": {
-          "auto": 1,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 0,
-          "manual_non_fetch": 1
-        },
-        "engine_sandbox_toggle": {
-          "auto": 0,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 0,
-          "manual_non_fetch": 1
-        },
-        "engine_sandbox_whitelist": {
-          "auto": 1,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 0,
-          "manual_non_fetch": 3
-        },
-        "engine_template_binding": {
-          "auto": 1,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 0,
-          "manual_non_fetch": 1
-        },
         "grape_accounts": {
           "auto": 1,
           "manual_dynamic_column": 0,
@@ -145,8 +89,92 @@
           "manual_dynamic_other": 0,
           "manual_non_fetch": 1
         },
-        "repo_llm_credentials": {
+        "grape_t_cloud_sandboxes": {
+          "auto": 1,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 4,
+          "manual_non_fetch": 1
+        },
+        "grape_t_egress_admin_exception": {
+          "auto": 0,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 0,
+          "manual_non_fetch": 2
+        },
+        "grape_t_egress_admin_policy": {
           "auto": 2,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 0,
+          "manual_non_fetch": 2
+        },
+        "grape_t_engine_sandbox_config": {
+          "auto": 0,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 2,
+          "manual_dynamic_other": 0,
+          "manual_non_fetch": 1
+        },
+        "grape_t_engine_sandbox_paths": {
+          "auto": 1,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 0,
+          "manual_non_fetch": 1
+        },
+        "grape_t_engine_sandbox_toggle": {
+          "auto": 0,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 0,
+          "manual_non_fetch": 1
+        },
+        "grape_t_engine_sandbox_whitelist": {
+          "auto": 1,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 0,
+          "manual_non_fetch": 3
+        },
+        "grape_t_engine_template_binding": {
+          "auto": 1,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 0,
+          "manual_non_fetch": 1
+        },
+        "grape_t_repo_llm_credentials": {
+          "auto": 2,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 0,
+          "manual_non_fetch": 0
+        },
+        "grape_t_sandbox_provider_config": {
+          "auto": 5,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 2,
+          "manual_non_fetch": 2
+        },
+        "grape_t_sandbox_templates": {
+          "auto": 1,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 1,
+          "manual_non_fetch": 1
+        },
+        "grape_t_task_proxy_tokens": {
+          "auto": 0,
+          "manual_dynamic_column": 0,
+          "manual_dynamic_in": 0,
+          "manual_dynamic_other": 0,
+          "manual_non_fetch": 1
+        },
+        "grape_t_user_llm_credentials": {
+          "auto": 3,
           "manual_dynamic_column": 0,
           "manual_dynamic_in": 0,
           "manual_dynamic_other": 0,
@@ -159,39 +187,11 @@
           "manual_dynamic_other": 3,
           "manual_non_fetch": 4
         },
-        "sandbox_provider_config": {
-          "auto": 5,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 2,
-          "manual_non_fetch": 2
-        },
-        "sandbox_templates": {
-          "auto": 1,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 1,
-          "manual_non_fetch": 1
-        },
-        "task_proxy_tokens": {
-          "auto": 0,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 0,
-          "manual_non_fetch": 1
-        },
         "user_accounts": {
           "auto": 1,
           "manual_dynamic_column": 0,
           "manual_dynamic_in": 0,
           "manual_dynamic_other": 2,
-          "manual_non_fetch": 0
-        },
-        "user_llm_credentials": {
-          "auto": 3,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 0,
           "manual_non_fetch": 0
         }
       }
@@ -208,29 +208,29 @@
     "table_sites": {
       "agent_runtimes": 19,
       "agent_tasks": 3,
-      "cloud_sandboxes": 6,
       "devops_pipeline_scene": 1,
-      "egress_admin_exception": 2,
-      "egress_admin_policy": 4,
       "engine_capabilities": 1,
-      "engine_sandbox_config": 3,
-      "engine_sandbox_paths": 2,
-      "engine_sandbox_toggle": 1,
-      "engine_sandbox_whitelist": 4,
-      "engine_template_binding": 2,
       "grape_accounts": 2,
       "grape_t_channel_repo_link": 1,
+      "grape_t_cloud_sandboxes": 6,
+      "grape_t_egress_admin_exception": 2,
+      "grape_t_egress_admin_policy": 4,
+      "grape_t_engine_sandbox_config": 3,
+      "grape_t_engine_sandbox_paths": 2,
+      "grape_t_engine_sandbox_toggle": 1,
+      "grape_t_engine_sandbox_whitelist": 4,
+      "grape_t_engine_template_binding": 2,
+      "grape_t_repo_llm_credentials": 2,
       "grape_t_repo_platforms": 3,
+      "grape_t_sandbox_provider_config": 9,
+      "grape_t_sandbox_templates": 3,
       "grape_t_schema_migrations": 1,
+      "grape_t_task_proxy_tokens": 1,
+      "grape_t_user_llm_credentials": 3,
       "meta": 3,
-      "repo_llm_credentials": 2,
       "runtime_credentials": 19,
-      "sandbox_provider_config": 9,
-      "sandbox_templates": 3,
       "task_messages": 1,
-      "task_proxy_tokens": 1,
-      "user_accounts": 3,
-      "user_llm_credentials": 3
+      "user_accounts": 3
     },
     "classification": {
       "auto": 25,
@@ -604,7 +604,7 @@
         "runtime_credentials"
       ],
       "dynamic": true,
-      "sql": "SELECT spc.id, rc.name, spc.platform, rc.scope FROM sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.i"
+      "sql": "SELECT spc.id, rc.name, spc.platform, rc.scope FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc"
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
@@ -643,7 +643,7 @@
         "runtime_credentials"
       ],
       "dynamic": true,
-      "sql": "SELECT COUNT(*) FROM sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id ? "
+      "sql": "SELECT COUNT(*) FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credentia"
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
@@ -695,7 +695,7 @@
         "runtime_credentials"
       ],
       "dynamic": false,
-      "sql": "SELECT rc.name AS name, spc.platform, spc.runtime_credential_id FROM sandbox_provider_config spc LEFT JOIN runtime_crede"
+      "sql": "SELECT rc.name AS name, spc.platform, spc.runtime_credential_id FROM grape_t_sandbox_provider_config spc LEFT JOIN runti"
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
@@ -900,10 +900,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "engine_sandbox_paths"
+        "grape_t_engine_sandbox_paths"
       ],
       "dynamic": false,
-      "sql": "SELECT path, access FROM engine_sandbox_paths WHERE backend_name = ?"
+      "sql": "SELECT path, access FROM grape_t_engine_sandbox_paths WHERE backend_name = ?"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/isolation/network.py",
@@ -913,10 +913,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "engine_sandbox_whitelist"
+        "grape_t_engine_sandbox_whitelist"
       ],
       "dynamic": false,
-      "sql": "SELECT DISTINCT domain FROM engine_sandbox_whitelist WHERE backend_name='*'"
+      "sql": "SELECT DISTINCT domain FROM grape_t_engine_sandbox_whitelist WHERE backend_name='*'"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/isolation/policy.py",
@@ -926,10 +926,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "egress_admin_policy"
+        "grape_t_egress_admin_policy"
       ],
       "dynamic": false,
-      "sql": "SELECT policy FROM egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1"
+      "sql": "SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/isolation/policy.py",
@@ -939,10 +939,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "egress_admin_policy"
+        "grape_t_egress_admin_policy"
       ],
       "dynamic": false,
-      "sql": "SELECT policy FROM egress_admin_policy WHERE skill_name='*' LIMIT 1"
+      "sql": "SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name='*' LIMIT 1"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/isolation/policy.py",
@@ -952,10 +952,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "egress_admin_exception"
+        "grape_t_egress_admin_exception"
       ],
       "dynamic": false,
-      "sql": "SELECT host, host_type, ports, methods, scope, scope_target, skill_digest FROM egress_admin_exception WHERE is_active=1 "
+      "sql": "SELECT host, host_type, ports, methods, scope, scope_target, skill_digest FROM grape_t_egress_admin_exception WHERE is_a"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/llm_cred_selector.py",
@@ -965,10 +965,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "repo_llm_credentials"
+        "grape_t_repo_llm_credentials"
       ],
       "dynamic": false,
-      "sql": "SELECT provider, api_key_enc, base_url, model FROM repo_llm_credentials WHERE repo_key=? AND engine_type=? AND enabled=1"
+      "sql": "SELECT provider, api_key_enc, base_url, model FROM grape_t_repo_llm_credentials WHERE repo_key=? AND engine_type=? AND e"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/llm_cred_selector.py",
@@ -978,10 +978,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "repo_llm_credentials"
+        "grape_t_repo_llm_credentials"
       ],
       "dynamic": false,
-      "sql": "SELECT provider, api_key_enc, base_url, model FROM repo_llm_credentials WHERE repo_key=? AND engine_type='common' AND en"
+      "sql": "SELECT provider, api_key_enc, base_url, model FROM grape_t_repo_llm_credentials WHERE repo_key=? AND engine_type='common"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/llm_cred_selector.py",
@@ -991,10 +991,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "user_llm_credentials"
+        "grape_t_user_llm_credentials"
       ],
       "dynamic": false,
-      "sql": "SELECT provider, api_key_enc, base_url, model FROM user_llm_credentials WHERE user_id=? AND engine_type=? AND enabled=1 "
+      "sql": "SELECT provider, api_key_enc, base_url, model FROM grape_t_user_llm_credentials WHERE user_id=? AND engine_type=? AND en"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/llm_cred_selector.py",
@@ -1004,10 +1004,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "user_llm_credentials"
+        "grape_t_user_llm_credentials"
       ],
       "dynamic": false,
-      "sql": "SELECT provider, api_key_enc, base_url, model FROM user_llm_credentials WHERE user_id=? AND engine_type='common' AND ena"
+      "sql": "SELECT provider, api_key_enc, base_url, model FROM grape_t_user_llm_credentials WHERE user_id=? AND engine_type='common'"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/llm_cred_selector.py",
@@ -1017,10 +1017,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "user_llm_credentials"
+        "grape_t_user_llm_credentials"
       ],
       "dynamic": false,
-      "sql": "SELECT provider, api_key_enc, base_url, model FROM user_llm_credentials WHERE engine_type='common' AND enabled=1 LIMIT 1"
+      "sql": "SELECT provider, api_key_enc, base_url, model FROM grape_t_user_llm_credentials WHERE engine_type='common' AND enabled=1"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/repository.py",
@@ -1030,10 +1030,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "engine_sandbox_config"
+        "grape_t_engine_sandbox_config"
       ],
       "dynamic": false,
-      "sql": "SELECT sandbox_mode, degrade_policy FROM engine_sandbox_config WHERE runtime_id=? AND engine_name=?"
+      "sql": "SELECT sandbox_mode, degrade_policy FROM grape_t_engine_sandbox_config WHERE runtime_id=? AND engine_name=?"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/repository.py",
@@ -1043,10 +1043,10 @@
       "status": "bare",
       "classification": "manual_dynamic_other",
       "tables": [
-        "sandbox_templates"
+        "grape_t_sandbox_templates"
       ],
       "dynamic": true,
-      "sql": "SELECT template_id, provider FROM sandbox_templates WHERE engines LIKE ? AND enabled=1 AND last_check_status='ok' ORDER "
+      "sql": "SELECT template_id, provider FROM grape_t_sandbox_templates WHERE engines LIKE ? AND enabled=1 AND last_check_status='ok"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/repository.py",
@@ -1056,10 +1056,10 @@
       "status": "bare",
       "classification": "manual_dynamic_in",
       "tables": [
-        "engine_sandbox_config"
+        "grape_t_engine_sandbox_config"
       ],
       "dynamic": true,
-      "sql": "SELECT sandbox_provider FROM engine_sandbox_config WHERE runtime_id=? AND engine_name=? AND sandbox_provider IN ( ? )"
+      "sql": "SELECT sandbox_provider FROM grape_t_engine_sandbox_config WHERE runtime_id=? AND engine_name=? AND sandbox_provider IN "
     },
     {
       "file": "src/domains/runtime/agents/sandbox/repository.py",
@@ -1069,10 +1069,10 @@
       "status": "bare",
       "classification": "manual_dynamic_in",
       "tables": [
-        "engine_sandbox_config"
+        "grape_t_engine_sandbox_config"
       ],
       "dynamic": true,
-      "sql": "SELECT sandbox_provider FROM engine_sandbox_config WHERE sandbox_provider IN ( ? ) LIMIT 1"
+      "sql": "SELECT sandbox_provider FROM grape_t_engine_sandbox_config WHERE sandbox_provider IN ( ? ) LIMIT 1"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/schema.py",
@@ -1082,10 +1082,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "engine_sandbox_whitelist"
+        "grape_t_engine_sandbox_whitelist"
       ],
       "dynamic": false,
-      "sql": "SELECT COUNT(*) FROM engine_sandbox_whitelist"
+      "sql": "SELECT COUNT(*) FROM grape_t_engine_sandbox_whitelist"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/token.py",
@@ -1095,10 +1095,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "task_proxy_tokens"
+        "grape_t_task_proxy_tokens"
       ],
       "dynamic": false,
-      "sql": "SELECT task_id, backend_name, expires_at FROM task_proxy_tokens WHERE token_hash=?"
+      "sql": "SELECT task_id, backend_name, expires_at FROM grape_t_task_proxy_tokens WHERE token_hash=?"
     },
     {
       "file": "src/domains/runtime/agents/sandbox/whitelist.py",
@@ -1108,10 +1108,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "engine_sandbox_whitelist"
+        "grape_t_engine_sandbox_whitelist"
       ],
       "dynamic": false,
-      "sql": "SELECT id, backend_name, domain, method, path_prefix, scheme, port FROM engine_sandbox_whitelist WHERE backend_name=?"
+      "sql": "SELECT id, backend_name, domain, method, path_prefix, scheme, port FROM grape_t_engine_sandbox_whitelist WHERE backend_n"
     },
     {
       "file": "src/domains/runtime/engine/service.py",
@@ -1147,10 +1147,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "sandbox_provider_config"
+        "grape_t_sandbox_provider_config"
       ],
       "dynamic": false,
-      "sql": "SELECT rc.scope, rc.repo_key FROM agent_tasks t LEFT JOIN agent_runtimes r ON t.runtime_id=r.id LEFT JOIN sandbox_provid"
+      "sql": "SELECT rc.scope, rc.repo_key FROM agent_tasks t LEFT JOIN agent_runtimes r ON t.runtime_id=r.id LEFT JOIN grape_t_sandbo"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1160,10 +1160,10 @@
       "status": "bare",
       "classification": "manual_dynamic_other",
       "tables": [
-        "cloud_sandboxes"
+        "grape_t_cloud_sandboxes"
       ],
       "dynamic": true,
-      "sql": "SELECT COUNT(*) FROM cloud_sandboxes s WHERE s.repo_key=? ? "
+      "sql": "SELECT COUNT(*) FROM grape_t_cloud_sandboxes s WHERE s.repo_key=? ? "
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1173,8 +1173,8 @@
       "status": "bare",
       "classification": "manual_dynamic_other",
       "tables": [
-        "cloud_sandboxes",
-        "sandbox_provider_config",
+        "grape_t_cloud_sandboxes",
+        "grape_t_sandbox_provider_config",
         "user_accounts"
       ],
       "dynamic": true,
@@ -1188,10 +1188,10 @@
       "status": "bare",
       "classification": "manual_dynamic_other",
       "tables": [
-        "cloud_sandboxes"
+        "grape_t_cloud_sandboxes"
       ],
       "dynamic": true,
-      "sql": "SELECT COUNT(*) FROM cloud_sandboxes s LEFT JOIN agent_tasks t ON t.id = s.task_id LEFT JOIN agent_runtimes ar ON ar.id "
+      "sql": "SELECT COUNT(*) FROM grape_t_cloud_sandboxes s LEFT JOIN agent_tasks t ON t.id = s.task_id LEFT JOIN agent_runtimes ar O"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1201,8 +1201,8 @@
       "status": "bare",
       "classification": "manual_dynamic_other",
       "tables": [
-        "cloud_sandboxes",
-        "sandbox_provider_config",
+        "grape_t_cloud_sandboxes",
+        "grape_t_sandbox_provider_config",
         "user_accounts"
       ],
       "dynamic": true,
@@ -1216,11 +1216,11 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "cloud_sandboxes",
-        "sandbox_provider_config"
+        "grape_t_cloud_sandboxes",
+        "grape_t_sandbox_provider_config"
       ],
       "dynamic": false,
-      "sql": "SELECT cs.provider, cs.state, cs.repo_key, cs.provider_id, spc.platform FROM cloud_sandboxes cs LEFT JOIN sandbox_provid"
+      "sql": "SELECT cs.provider, cs.state, cs.repo_key, cs.provider_id, spc.platform FROM grape_t_cloud_sandboxes cs LEFT JOIN grape_"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1230,7 +1230,7 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "sandbox_provider_config"
+        "grape_t_sandbox_provider_config"
       ],
       "dynamic": false,
       "sql": "SELECT spc.id, rc.name AS name, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.max_sandboxes, rc.sco"
@@ -1243,10 +1243,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "sandbox_provider_config"
+        "grape_t_sandbox_provider_config"
       ],
       "dynamic": false,
-      "sql": "SELECT 1 FROM sandbox_provider_config WHERE id=? AND runtime_credential_id=?"
+      "sql": "SELECT 1 FROM grape_t_sandbox_provider_config WHERE id=? AND runtime_credential_id=?"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1256,10 +1256,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "cloud_sandboxes"
+        "grape_t_cloud_sandboxes"
       ],
       "dynamic": false,
-      "sql": "SELECT COUNT(*) FROM cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')"
+      "sql": "SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1269,10 +1269,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "sandbox_provider_config"
+        "grape_t_sandbox_provider_config"
       ],
       "dynamic": false,
-      "sql": "SELECT max_sandboxes FROM sandbox_provider_config WHERE id=?"
+      "sql": "SELECT max_sandboxes FROM grape_t_sandbox_provider_config WHERE id=?"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1282,10 +1282,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "engine_sandbox_whitelist"
+        "grape_t_engine_sandbox_whitelist"
       ],
       "dynamic": false,
-      "sql": "SELECT DISTINCT domain FROM engine_sandbox_whitelist WHERE backend_name='*'"
+      "sql": "SELECT DISTINCT domain FROM grape_t_engine_sandbox_whitelist WHERE backend_name='*'"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1295,10 +1295,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "engine_sandbox_paths"
+        "grape_t_engine_sandbox_paths"
       ],
       "dynamic": false,
-      "sql": "SELECT path, access FROM engine_sandbox_paths WHERE backend_name=?"
+      "sql": "SELECT path, access FROM grape_t_engine_sandbox_paths WHERE backend_name=?"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1308,10 +1308,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "egress_admin_policy"
+        "grape_t_egress_admin_policy"
       ],
       "dynamic": false,
-      "sql": "SELECT policy FROM egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1"
+      "sql": "SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1321,10 +1321,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "egress_admin_policy"
+        "grape_t_egress_admin_policy"
       ],
       "dynamic": false,
-      "sql": "SELECT policy FROM egress_admin_policy WHERE skill_name='*' LIMIT 1"
+      "sql": "SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name='*' LIMIT 1"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1334,10 +1334,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "egress_admin_exception"
+        "grape_t_egress_admin_exception"
       ],
       "dynamic": false,
-      "sql": "SELECT host, host_type, ports, methods, scope, scope_target, skill_digest FROM egress_admin_exception WHERE is_active=1 "
+      "sql": "SELECT host, host_type, ports, methods, scope, scope_target, skill_digest FROM grape_t_egress_admin_exception WHERE is_a"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1347,10 +1347,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "engine_sandbox_toggle"
+        "grape_t_engine_sandbox_toggle"
       ],
       "dynamic": false,
-      "sql": "SELECT engine_type, sandbox_on FROM engine_sandbox_toggle"
+      "sql": "SELECT engine_type, sandbox_on FROM grape_t_engine_sandbox_toggle"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1373,10 +1373,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "sandbox_provider_config"
+        "grape_t_sandbox_provider_config"
       ],
       "dynamic": false,
-      "sql": "SELECT id, api_key_enc, extra_config FROM sandbox_provider_config WHERE runtime_credential_id=?"
+      "sql": "SELECT id, api_key_enc, extra_config FROM grape_t_sandbox_provider_config WHERE runtime_credential_id=?"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1386,10 +1386,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "sandbox_provider_config"
+        "grape_t_sandbox_provider_config"
       ],
       "dynamic": false,
-      "sql": "SELECT endpoint FROM sandbox_provider_config WHERE id=?"
+      "sql": "SELECT endpoint FROM grape_t_sandbox_provider_config WHERE id=?"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1399,10 +1399,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "sandbox_templates"
+        "grape_t_sandbox_templates"
       ],
       "dynamic": false,
-      "sql": "SELECT id FROM sandbox_templates WHERE provider_id=? AND template_id=?"
+      "sql": "SELECT id FROM grape_t_sandbox_templates WHERE provider_id=? AND template_id=?"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1412,10 +1412,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "sandbox_templates"
+        "grape_t_sandbox_templates"
       ],
       "dynamic": false,
-      "sql": "SELECT id, enabled FROM sandbox_templates WHERE provider_id=? AND template_id=?"
+      "sql": "SELECT id, enabled FROM grape_t_sandbox_templates WHERE provider_id=? AND template_id=?"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1425,10 +1425,10 @@
       "status": "bare",
       "classification": "manual_non_fetch",
       "tables": [
-        "engine_template_binding"
+        "grape_t_engine_template_binding"
       ],
       "dynamic": false,
-      "sql": "SELECT COUNT(*) FROM engine_template_binding WHERE provider_id=? AND engine_type=? AND status NOT IN ('detected', '')"
+      "sql": "SELECT COUNT(*) FROM grape_t_engine_template_binding WHERE provider_id=? AND engine_type=? AND status NOT IN ('detected'"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1438,10 +1438,10 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "engine_template_binding"
+        "grape_t_engine_template_binding"
       ],
       "dynamic": false,
-      "sql": "SELECT id FROM engine_template_binding WHERE provider_id=? AND engine_type=? AND template_id=?"
+      "sql": "SELECT id FROM grape_t_engine_template_binding WHERE provider_id=? AND engine_type=? AND template_id=?"
     }
   ]
 }

@@ -330,7 +330,7 @@ class PolicyEngine:
         1. 解析 raw_egress → EgressRule 列表（schema 校验，非法值拒绝整个 skill）
         2. 计算整包 digest（compute_skill_package_digest）
         3. 对比 DB content_hash → 不一致拒绝（fail-closed）
-        4. 查 egress_admin_policy → auto_approve / manual_approve / deny
+        4. 查 grape_t_egress_admin_policy → auto_approve / manual_approve / deny
            - manual_approve/deny → 返回 None（无出站模式启动）
            - DB 查询失败 → 返回 None（fail-closed，任务启动失败）
         5. 拒绝规则校验：绝对拒绝的 host 从规则中剔除
@@ -516,18 +516,18 @@ class PolicyEngine:
                         result["content_hash"] = row[0]
                 if skill_name:
                     row = db.execute(
-                        "SELECT policy FROM egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1",
+                        "SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1",
                         (skill_name,)
                     ).fetchone()
                     if not row:
                         row = db.execute(
-                            "SELECT policy FROM egress_admin_policy WHERE skill_name='*' LIMIT 1"
+                            "SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name='*' LIMIT 1"
                         ).fetchone()
                     if row and row[0]:
                         result["admin_policy"] = row[0]
                 rows = db.execute(
                     "SELECT host, host_type, ports, methods, scope, scope_target, skill_digest "
-                    "FROM egress_admin_exception "
+                    "FROM grape_t_egress_admin_exception "
                     "WHERE is_active=1 AND (expires_at IS NULL OR expires_at > datetime('now'))"
                 ).fetchall()
                 for r in rows:

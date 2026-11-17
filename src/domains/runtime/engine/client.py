@@ -415,7 +415,7 @@ class RuntimeClient:
     # [沙箱迁移 i7 漏移植恢复 2026-11-11] cloud_worker 经 remote_services 走 HTTP 签发/
     # 撤销 proxy token（B 机器无 DB）。此前 client 缺这两个方法 → worker claim 后
     # "proxy token issue failed: 'RuntimeClient' object has no attribute
-    # 'issue_proxy_token_remote'"（仅 WARNING，task_proxy_tokens 链路空转）。i7 client.py:434。
+    # 'issue_proxy_token_remote'"（仅 WARNING，grape_t_task_proxy_tokens 链路空转）。i7 client.py:434。
     async def issue_proxy_token_remote(self, task_id: str, backend_name: str = "") -> str:
         """cloud_worker 签发 proxy token（B 机器无 DB，通过 HTTP API）。返回 token 或空字符串。"""
         body = {"backend_name": backend_name} if backend_name else {}
@@ -531,9 +531,9 @@ class RuntimeClient:
                                     template_id: str = "", template_name: str = "",
                                     engine_type: str = "", provider_id: int = 0,
                                     error: str = ""):
-        """cloud_worker 上报沙箱状态（B 机器无 DB，通过 HTTP API 写 cloud_sandboxes 表）。
+        """cloud_worker 上报沙箱状态（B 机器无 DB，通过 HTTP API 写 grape_t_cloud_sandboxes 表）。
 
-        [沙箱迁移] template_id/template_name/engine_type 为建箱时快照——cloud_sandboxes
+        [沙箱迁移] template_id/template_name/engine_type 为建箱时快照——grape_t_cloud_sandboxes
         行内固化，防 runtime_info 刷新（换模板重绑）改写历史沙箱的展示。
         """
         await self._request("POST", f"/api/runtime/tasks/{task_id}/sandbox-status",

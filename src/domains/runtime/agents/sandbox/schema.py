@@ -32,7 +32,7 @@ def ensure_sandbox_tables() -> None:
     from src.kernel.session_manager import db, db_lock
 
     _DDL = [
-        """CREATE TABLE IF NOT EXISTS engine_sandbox_paths (
+        """CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_paths (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     backend_name  TEXT NOT NULL,
     path          TEXT NOT NULL,
@@ -40,7 +40,7 @@ def ensure_sandbox_tables() -> None:
     created_at    TEXT DEFAULT (datetime('now')),
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(backend_name, path))""",
-        """CREATE TABLE IF NOT EXISTS engine_sandbox_config (
+        """CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_config (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     runtime_id    INTEGER NOT NULL,
     engine_name   TEXT NOT NULL,
@@ -49,7 +49,7 @@ def ensure_sandbox_tables() -> None:
     created_at    TEXT DEFAULT (datetime('now')),
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(runtime_id, engine_name))""",
-        """CREATE TABLE IF NOT EXISTS engine_sandbox_whitelist (
+        """CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_whitelist (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     backend_name  TEXT NOT NULL,
     domain        TEXT NOT NULL,
@@ -60,7 +60,7 @@ def ensure_sandbox_tables() -> None:
     created_at    TEXT DEFAULT (datetime('now')),
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(backend_name, domain, method, scheme, port))""",
-        """CREATE TABLE IF NOT EXISTS task_proxy_tokens (
+        """CREATE TABLE IF NOT EXISTS grape_t_task_proxy_tokens (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id      TEXT NOT NULL,
     token_hash   TEXT NOT NULL,
@@ -69,7 +69,7 @@ def ensure_sandbox_tables() -> None:
     expires_at   TEXT,
     UNIQUE(task_id, backend_name))""",
         # ===== DevBox 云沙箱集成：统一云沙箱表 + LLM 凭据表 =====
-        """CREATE TABLE IF NOT EXISTS cloud_sandboxes (
+        """CREATE TABLE IF NOT EXISTS grape_t_cloud_sandboxes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     issue_id VARCHAR(255) NOT NULL,
     repo_key VARCHAR(255) NOT NULL,
@@ -87,7 +87,7 @@ def ensure_sandbox_tables() -> None:
     expire_at VARCHAR(32) DEFAULT '',
     attempt INTEGER DEFAULT 0,
     UNIQUE(sandbox_id))""",
-        """CREATE TABLE IF NOT EXISTS user_llm_credentials (
+        """CREATE TABLE IF NOT EXISTS grape_t_user_llm_credentials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id VARCHAR(36) NOT NULL,
     provider VARCHAR(64) NOT NULL,
@@ -100,7 +100,7 @@ def ensure_sandbox_tables() -> None:
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE(user_id, engine_type))""",
-        """CREATE TABLE IF NOT EXISTS sandbox_templates (
+        """CREATE TABLE IF NOT EXISTS grape_t_sandbox_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name VARCHAR(255) NOT NULL,
     provider VARCHAR(64) NOT NULL,
@@ -135,7 +135,7 @@ def ensure_sandbox_tables() -> None:
 
     # seed 官方域名（幂等——INSERT OR IGNORE + 表空检查）
     try:
-        count = db.execute("SELECT COUNT(*) FROM engine_sandbox_whitelist").fetchone()[0]
+        count = db.execute("SELECT COUNT(*) FROM grape_t_engine_sandbox_whitelist").fetchone()[0]
         if count == 0:
             _OFFICIAL_DOMAINS = [
                 ("opengw.clouddeveloper.club", "POST", "*", "https", 443),
@@ -165,12 +165,12 @@ def ensure_sandbox_tables() -> None:
             with db_lock:
                 for domain, method, path_prefix, scheme, port in _OFFICIAL_DOMAINS:
                     db.execute(
-                        "INSERT OR IGNORE INTO engine_sandbox_whitelist "
+                        "INSERT OR IGNORE INTO grape_t_engine_sandbox_whitelist "
                         "(backend_name, domain, method, path_prefix, scheme, port) "
                         "VALUES (?, ?, ?, ?, ?, ?)",
                         ("*", domain, method, path_prefix, scheme, port))
                 db.commit()
-            log.info(f"Seeded engine_sandbox_whitelist: {len(_OFFICIAL_DOMAINS)} official domains")
+            log.info(f"Seeded grape_t_engine_sandbox_whitelist: {len(_OFFICIAL_DOMAINS)} official domains")
     except (SchemaError, TransientError):
         raise
     except Exception as e:

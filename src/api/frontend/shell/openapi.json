@@ -8504,7 +8504,7 @@
           "settings"
         ],
         "summary": "Revoke runtime credential",
-        "description": "Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes via the unified explicit cleanup chain (pool/capabilities/session/binding/scene references cleaned with a reconciliation report); runtime_session bindings are reset. For sandbox credentials (spec 8.1 v3): returns 409 with active_sandboxes when running sandbox records exist unless confirm=true (platform sandboxes are NOT killed — they time out on the platform or are cleaned manually per preserved cloud_sandboxes records); provider/templates deleted in DB, cloud_sandboxes rows preserved as orphaned.",
+        "description": "Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes via the unified explicit cleanup chain (pool/capabilities/session/binding/scene references cleaned with a reconciliation report); runtime_session bindings are reset. For sandbox credentials (spec 8.1 v3): returns 409 with active_sandboxes when running sandbox records exist unless confirm=true (platform sandboxes are NOT killed — they time out on the platform or are cleaned manually per preserved grape_t_cloud_sandboxes records); provider/templates deleted in DB, grape_t_cloud_sandboxes rows preserved as orphaned.",
         "operationId": "settings_runtime_credential_revoke",
         "parameters": [
           {

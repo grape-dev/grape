@@ -27,12 +27,12 @@ def _fn_source(mig) -> str:
 class TestTemplateUidColumn:
     def _ddl(self):
         from src.api import db_setup
-        return dict(db_setup._SANDBOX_CONTROL_TABLES)["sandbox_templates"]
+        return dict(db_setup._SANDBOX_CONTROL_TABLES)["grape_t_sandbox_templates"]
 
     def test_new_ddl_has_template_uid(self):
         """S1：全新库 DDL 直接含 template_uid 列。"""
         ddl = self._ddl().lower()
-        assert "template_uid" in ddl, "sandbox_templates DDL 缺 template_uid 列"
+        assert "template_uid" in ddl, "grape_t_sandbox_templates DDL 缺 template_uid 列"
 
     def test_migration_registered(self):
         """S2：迁移进版本表执行器（register_migration 幂等加列）。"""
@@ -52,7 +52,7 @@ class TestTemplateUidColumn:
         src = _fn_source(migs[0])
         assert "_SANDBOX_CONTROL_TABLES" in src, "迁移 fn 未走 _SANDBOX_CONTROL_TABLES 建表"
         from src.api import db_setup as _dbs
-        _ddl = dict(_dbs._SANDBOX_CONTROL_TABLES)["sandbox_templates"]
+        _ddl = dict(_dbs._SANDBOX_CONTROL_TABLES)["grape_t_sandbox_templates"]
         assert "template_uid" in _ddl, "控制面 DDL 缺 template_uid 列"
         assert ("IF NOT EXISTS" in _ddl or "_ensure_column" in src), "缺幂等手段（两跑不能重发 uid）"
 

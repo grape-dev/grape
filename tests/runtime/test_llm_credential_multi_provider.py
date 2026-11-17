@@ -28,7 +28,7 @@ def test_db():
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute("""
-CREATE TABLE user_llm_credentials (
+CREATE TABLE grape_t_user_llm_credentials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     provider VARCHAR(64) NOT NULL,
@@ -54,7 +54,7 @@ def insert_cred(test_db):
                 model="gpt-4o", enabled=1, engine_type="common"):
         c = test_db.cursor()
         c.execute(
-            "INSERT INTO user_llm_credentials (user_id, provider, api_key_enc, base_url, model, enabled, engine_type) "
+            "INSERT INTO grape_t_user_llm_credentials (user_id, provider, api_key_enc, base_url, model, enabled, engine_type) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (user_id, provider, api_key_enc, base_url, model, enabled, engine_type)
         )

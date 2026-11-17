@@ -2,7 +2,7 @@
 
 零 DB 依赖——cloud_base 不管部署在 A 机器还是 B 机器都不直接查 DB。
 状态上报通过 state_reporter 回调注入：
-- A 机器（manager.prepare）：传 DB 版回调，直接写 cloud_sandboxes 表
+- A 机器（manager.prepare）：传 DB 版回调，直接写 grape_t_cloud_sandboxes 表
 - B 机器（cloud_worker）：传 HTTP 版回调，调 report_sandbox_status API
 - state_reporter=None：不上报（debugging 用）
 
@@ -116,7 +116,7 @@ class CloudSandboxBase:
         self.issue_id = issue_id
         self.repo_key = repo_key
         self.provider_name = provider_name
-        # [沙箱平台列显示] provider_id 随上报传给服务端——cloud_sandboxes.provider_id
+        # [沙箱平台列显示] provider_id 随上报传给服务端——grape_t_cloud_sandboxes.provider_id
         # 落库后列表 JOIN 凭据名显示（跟随改名），不再依赖建箱时快照
         self.provider_id = provider_id
         self.platform = platform or provider_name
@@ -622,7 +622,7 @@ class CloudProviderBase:
     def create_sandbox(self, cwd="", exec_backend="", task_id="", runtime_id=None, template_id="", **kwargs):
         """创建云沙箱——子类实现 _do_create。
 
-        template_id 从 sandbox_templates 表查出来传入（模板路由）。
+        template_id 从 grape_t_sandbox_templates 表查出来传入（模板路由）。
         空字符串表示用配置文件的默认 template_id（向后兼容）。
         state_reporter 通过 kwargs 传入（调用方决定 DB 版或 HTTP 版）。
         """

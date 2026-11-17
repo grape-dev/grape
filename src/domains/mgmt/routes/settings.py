@@ -1368,12 +1368,12 @@ def _build_cred_map(db, db_lock) -> dict:
                          "cred_type": ccred_type or "worker", "platform": cplatform or ""}
 
     # [沙箱迁移 i7] 沙箱凭据关联的平台 id + 启用态（设备卡片禁用徽标 / 跳 Provider 详情用）
-    # sandbox_provider_config 归 mgmt：mgmt 进程本地游标
+    # grape_t_sandbox_provider_config 归 mgmt：mgmt 进程本地游标
     try:
         with db_lock:
             c = db.cursor()
             _prov_rows = c.execute(
-                "SELECT id, enabled, runtime_credential_id FROM sandbox_provider_config "
+                "SELECT id, enabled, runtime_credential_id FROM grape_t_sandbox_provider_config "
                 "WHERE runtime_credential_id > 0").fetchall()
         for _pid, _pen, _pcid in _prov_rows:
             if _pcid in cred_map:
@@ -2003,19 +2003,19 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
             with db_lock:
                 c = db.cursor()
                 c.execute(
-                    "SELECT id FROM sandbox_provider_config WHERE runtime_credential_id=? AND runtime_credential_id>0",
+                    "SELECT id FROM grape_t_sandbox_provider_config WHERE runtime_credential_id=? AND runtime_credential_id>0",
                     (cred_id,))
                 _row = c.fetchone()
                 if _row:
                     _sb_pid = _row[0]
                     c.execute(
-                        "UPDATE sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=? WHERE id=?",
+                        "UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=? WHERE id=?",
                         (_sb_endpoint, _sb_key_enc,
                          json.dumps(_sb_extra, ensure_ascii=False), _sb_pid))
                 else:
                     from src.kernel.sandbox_uid import new_provider_uid as _npuid
                     c.execute(
-                        "INSERT INTO sandbox_provider_config (platform, endpoint, api_key_enc, extra_config, "
+                        "INSERT INTO grape_t_sandbox_provider_config (platform, endpoint, api_key_enc, extra_config, "
                         "enabled, max_sandboxes, updated_by, runtime_credential_id, provider_uid) "
                         "VALUES (?,?,?,?,?,?,?,?,?)",
                         (platform, _sb_endpoint, _sb_key_enc,
@@ -2216,9 +2216,9 @@ def _sb_revoke_cleanup(cid: int) -> dict:
     运行中沙箱由吊销端点前置弹窗确认（409 + confirm=true），用户知情后自行决定。
 
     级联（全本地 DB，无平台调用）：
-    1. 删 engine_template_binding + sandbox_templates（该 Provider 的）
-    2. 删 sandbox_provider_config 行
-    3. cloud_sandboxes 保留（用户裁定：系统识别到的运行沙箱记录是用户去平台
+    1. 删 grape_t_engine_template_binding + grape_t_sandbox_templates（该 Provider 的）
+    2. 删 grape_t_sandbox_provider_config 行
+    3. grape_t_cloud_sandboxes 保留（用户裁定：系统识别到的运行沙箱记录是用户去平台
        手动清理的对账依据）——仅 state 置 orphaned、provider 清零防悬空 JOIN
     4. 孤儿 Provider 兜底（悬空 runtime_credential_id 的行，历史产物残留）
     """
@@ -2228,7 +2228,7 @@ def _sb_revoke_cleanup(cid: int) -> dict:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT id FROM sandbox_provider_config WHERE runtime_credential_id=? AND runtime_credential_id>0",
+                "SELECT id FROM grape_t_sandbox_provider_config WHERE runtime_credential_id=? AND runtime_credential_id>0",
                 (cid,))
             prov = c.fetchone()
             # [吊销文案分流] 关联 Provider 存在 = 沙箱凭据（普通 worker 凭据无 Provider 关联）
@@ -2236,21 +2236,21 @@ def _sb_revoke_cleanup(cid: int) -> dict:
             result["cred_type"] = "sandbox" if prov else "worker"
             if prov:
                 provider_id = prov[0]
-                c.execute("SELECT COUNT(*) FROM sandbox_templates WHERE provider_id=?", (provider_id,))
+                c.execute("SELECT COUNT(*) FROM grape_t_sandbox_templates WHERE provider_id=?", (provider_id,))
                 result["deleted_templates"] = c.fetchone()[0] or 0
-                c.execute("DELETE FROM engine_template_binding WHERE provider_id=?", (provider_id,))
-                c.execute("DELETE FROM sandbox_templates WHERE provider_id=?", (provider_id,))
-                c.execute("DELETE FROM sandbox_provider_config WHERE id=?", (provider_id,))
+                c.execute("DELETE FROM grape_t_engine_template_binding WHERE provider_id=?", (provider_id,))
+                c.execute("DELETE FROM grape_t_sandbox_templates WHERE provider_id=?", (provider_id,))
+                c.execute("DELETE FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
                 # 沙箱记录保留：state 置 orphaned（凭据已删无人再更新），provider 清零防悬空
                 try:
-                    c.execute("UPDATE cloud_sandboxes SET state='orphaned', provider_id=0 WHERE provider_id=?",
+                    c.execute("UPDATE grape_t_cloud_sandboxes SET state='orphaned', provider_id=0 WHERE provider_id=?",
                               (provider_id,))
                 except Exception as _se:
                     log.warning(f"revoke-cleanup mark sandboxes orphaned failed: {_se}")
                 result["provider_deleted"] = True
             # 孤儿 Provider 兜底：runtime_credential_id 悬空的行整体清理
             c.execute(
-                "DELETE FROM sandbox_provider_config WHERE runtime_credential_id>0 "
+                "DELETE FROM grape_t_sandbox_provider_config WHERE runtime_credential_id>0 "
                 "AND runtime_credential_id NOT IN (SELECT id FROM runtime_credentials)")
             result["orphan_providers"] = c.rowcount if c.rowcount and c.rowcount > 0 else 0
             db.commit()
@@ -2261,7 +2261,7 @@ def _sb_revoke_cleanup(cid: int) -> dict:
     return result
 
 
-@router.post("/runtime-credentials/{cid}/revoke", operation_id="settings_runtime_credential_revoke", summary="Revoke runtime credential", description="Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes via the unified explicit cleanup chain (pool/capabilities/session/binding/scene references cleaned with a reconciliation report); runtime_session bindings are reset. For sandbox credentials (spec 8.1 v3): returns 409 with active_sandboxes when running sandbox records exist unless confirm=true (platform sandboxes are NOT killed — they time out on the platform or are cleaned manually per preserved cloud_sandboxes records); provider/templates deleted in DB, cloud_sandboxes rows preserved as orphaned.")
+@router.post("/runtime-credentials/{cid}/revoke", operation_id="settings_runtime_credential_revoke", summary="Revoke runtime credential", description="Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes via the unified explicit cleanup chain (pool/capabilities/session/binding/scene references cleaned with a reconciliation report); runtime_session bindings are reset. For sandbox credentials (spec 8.1 v3): returns 409 with active_sandboxes when running sandbox records exist unless confirm=true (platform sandboxes are NOT killed — they time out on the platform or are cleaned manually per preserved grape_t_cloud_sandboxes records); provider/templates deleted in DB, grape_t_cloud_sandboxes rows preserved as orphaned.")
 def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depends(require_no_session_token)):
     """吊销并删除 worker 记录：删 runtime_credentials 行 + 级联删其 agent_runtimes 行。
 
@@ -2299,8 +2299,8 @@ def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depe
         if _cred_type == "sandbox" and not confirm:
             try:
                 c.execute(
-                    "SELECT COUNT(*) FROM cloud_sandboxes WHERE provider_id IN "
-                    "(SELECT id FROM sandbox_provider_config WHERE runtime_credential_id=?) "
+                    "SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id IN "
+                    "(SELECT id FROM grape_t_sandbox_provider_config WHERE runtime_credential_id=?) "
                     "AND state IN ('creating','running')",
                     (cid,))
                 _active = c.fetchone()[0] or 0
@@ -2986,7 +2986,7 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: in
     授权：rta_ 凭据任意 scope（global/user/repo——按自己 Provider 过滤模板）；
     前端用户正常认证即可
     
-    cloud_worker 拉取时 JOIN sandbox_provider_config.enabled——跳过凭据已禁用的 provider 的模板。
+    cloud_worker 拉取时 JOIN grape_t_sandbox_provider_config.enabled——跳过凭据已禁用的 provider 的模板。
     这样 cloud_worker 不会注册无法创建沙箱的模板（provider 凭据被禁用 = 无 api_key 可用）。
     前端用户查询时返回全部模板（管理界面需展示所有模板，包括禁用凭据的 provider 的模板）。
     
@@ -3042,7 +3042,7 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: in
     with db_lock:
         c = db.cursor()
         if _is_cloud_worker:
-            # cloud_worker：JOIN sandbox_provider_config——跳过凭据已禁用的 provider 的模板
+            # cloud_worker：JOIN grape_t_sandbox_provider_config——跳过凭据已禁用的 provider 的模板
             # + 跳过模板自身 enabled=0 的行（禁用模板的引擎不应注册；provider_id 关联按 v3 语义，
             #  旧 t.provider 字符串 JOIN 会跨实例误匹配同平台所有 Provider）
             if provider_id:
@@ -3064,18 +3064,18 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: in
             full_params = base_params + search_params
             
             if use_paging:
-                c.execute(f"SELECT COUNT(*) FROM sandbox_templates t LEFT JOIN sandbox_provider_config pc ON t.provider_id = pc.id {full_where}", tuple(full_params))
+                c.execute(f"SELECT COUNT(*) FROM grape_t_sandbox_templates t LEFT JOIN grape_t_sandbox_provider_config pc ON t.provider_id = pc.id {full_where}", tuple(full_params))
                 total = c.fetchone()[0]
                 offset = (page - 1) * page_size
                 c.execute(
-                    f"SELECT t.* FROM sandbox_templates t "
-                    f"LEFT JOIN sandbox_provider_config pc ON t.provider_id = pc.id "
+                    f"SELECT t.* FROM grape_t_sandbox_templates t "
+                    f"LEFT JOIN grape_t_sandbox_provider_config pc ON t.provider_id = pc.id "
                     f"{full_where} ORDER BY t.id LIMIT ? OFFSET ?",
                     tuple(full_params + [int(page_size), int(offset)]))
             else:
                 c.execute(
-                    f"SELECT t.* FROM sandbox_templates t "
-                    f"LEFT JOIN sandbox_provider_config pc ON t.provider_id = pc.id "
+                    f"SELECT t.* FROM grape_t_sandbox_templates t "
+                    f"LEFT JOIN grape_t_sandbox_provider_config pc ON t.provider_id = pc.id "
                     f"{full_where} ORDER BY t.id",
                     tuple(full_params))
         else:
@@ -3090,19 +3090,19 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: in
             full_params = base_params + search_params
             
             if use_paging:
-                c.execute(f"SELECT COUNT(*) FROM sandbox_templates {full_where}", tuple(full_params))
+                c.execute(f"SELECT COUNT(*) FROM grape_t_sandbox_templates {full_where}", tuple(full_params))
                 total = c.fetchone()[0]
                 offset = (page - 1) * page_size
                 c.execute(
-                    f"SELECT * FROM sandbox_templates {full_where} ORDER BY id LIMIT ? OFFSET ?",
+                    f"SELECT * FROM grape_t_sandbox_templates {full_where} ORDER BY id LIMIT ? OFFSET ?",
                     tuple(full_params + [int(page_size), int(offset)]))
             else:
                 c.execute(
-                    f"SELECT * FROM sandbox_templates {full_where} ORDER BY id",
+                    f"SELECT * FROM grape_t_sandbox_templates {full_where} ORDER BY id",
                     tuple(full_params))
         cols = [d[0] for d in c.description]
         rows = [dict(zip(cols, r)) for r in c.fetchall()]
-    # v3：补 platform/provider_name/scope（从 sandbox_provider_config JOIN 取）
+    # v3：补 platform/provider_name/scope（从 grape_t_sandbox_provider_config JOIN 取）
     if rows:
         _provider_ids = set(r.get("provider_id", 0) for r in rows if r.get("provider_id"))
         if _provider_ids:
@@ -3112,7 +3112,7 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: in
                 # [删 name 列] provider_name=凭据名（rc.name JOIN）——引擎名 provider 段
                 # 跟随凭据名，凭据改名 → 60s 内引擎名换新（rename-cleanup 兜底清旧行）
                 c.execute(
-                    f"SELECT spc.id, rc.name, spc.platform, rc.scope FROM sandbox_provider_config spc "
+                    f"SELECT spc.id, rc.name, spc.platform, rc.scope FROM grape_t_sandbox_provider_config spc "
                     f"LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id WHERE spc.id IN ({_placeholders})",
                     tuple(_provider_ids))
                 _pc_map = {row[0]: {"provider_name": row[1] or "", "platform": row[2], "scope": row[3]} for row in c.fetchall()}
@@ -3121,12 +3121,12 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: in
                 r["platform"] = _pc.get("platform", "")
                 r["provider_name"] = _pc.get("provider_name", "")
                 r["scope"] = _pc.get("scope", "system")
-        # v3.1：engines 从 engine_template_binding 取（模板行的 engines 列已废弃恒 '[]'）——
+        # v3.1：engines 从 grape_t_engine_template_binding 取（模板行的 engines 列已废弃恒 '[]'）——
         # 前端 Engines 列与 cloud_worker 引擎注册都消费这里
         if rows:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT provider_id, engine_type, template_id FROM engine_template_binding")
+                c.execute("SELECT provider_id, engine_type, template_id FROM grape_t_engine_template_binding")
                 _bind_rows = c.fetchall()
             _tpl_ids = set(r.get("id", 0) for r in rows)
             _bind_map = {}
@@ -3161,7 +3161,7 @@ def create_sandbox_template(body: SandboxTemplateBody, user: dict = Depends(requ
         c.execute(
             "SELECT platform, runtime_credential_id, "
             "(SELECT rc.name FROM runtime_credentials rc WHERE rc.id=spc.runtime_credential_id) "
-            "FROM sandbox_provider_config spc WHERE spc.id=?", (body.provider_id,))
+            "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (body.provider_id,))
         prow = c.fetchone()
         if not prow:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "Provider 不存在"})
@@ -3171,7 +3171,7 @@ def create_sandbox_template(body: SandboxTemplateBody, user: dict = Depends(requ
         _provider_name = prow[2] or body.provider or ""
         c.execute(
             # [删 provider 列] INSERT 去掉该列
-            "INSERT INTO sandbox_templates (name, provider_id, template_id, alias, description, "
+            "INSERT INTO grape_t_sandbox_templates (name, provider_id, template_id, alias, description, "
             "engines, preinstalled, disk_size_mb, enabled, created_at, updated_at, created_by, updated_by) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             # 新建模板默认 enabled=1（用户显式创建即生效；启用/禁用走操作栏 toggle）
@@ -3197,7 +3197,7 @@ def update_sandbox_template(tpl_id: int, body: SandboxTemplateBody, user: dict =
     with db_lock:
         c = db.cursor()
         # v3：校验 Provider 权限
-        c.execute("SELECT provider_id, template_id FROM sandbox_templates WHERE id=?", (tpl_id,))
+        c.execute("SELECT provider_id, template_id FROM grape_t_sandbox_templates WHERE id=?", (tpl_id,))
         tpl_row = c.fetchone()
         if not tpl_row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "模板不存在"})
@@ -3214,7 +3214,7 @@ def update_sandbox_template(tpl_id: int, body: SandboxTemplateBody, user: dict =
         c.execute(
             "SELECT platform, runtime_credential_id, "
             "(SELECT rc.name FROM runtime_credentials rc WHERE rc.id=spc.runtime_credential_id) "
-            "FROM sandbox_provider_config spc WHERE spc.id=?", (tpl_row[0] or body.provider_id,))
+            "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (tpl_row[0] or body.provider_id,))
         prow = c.fetchone()
         # [删系统类别] 权限单一条件：凭据 owner
         if prow and not (prow[1] and _sb_cred_report_owner(prow[1], user)):
@@ -3223,7 +3223,7 @@ def update_sandbox_template(tpl_id: int, body: SandboxTemplateBody, user: dict =
         # enabled 不随编辑更新（走操作栏 toggle；编辑表单已无该项）
         c.execute(
             # [删 provider 列] provider 列已删——UPDATE 去掉
-            "UPDATE sandbox_templates SET name=?, template_id=?, alias=?, description=?, "
+            "UPDATE grape_t_sandbox_templates SET name=?, template_id=?, alias=?, description=?, "
             "preinstalled=?, disk_size_mb=?, updated_at=?, updated_by=? WHERE id=?",
             (body.name, body.template_id, body.alias, body.description,
              body.preinstalled, body.disk_size_mb,
@@ -3244,17 +3244,17 @@ def delete_sandbox_template(tpl_id: int, user: dict = Depends(require_no_session
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT provider_id FROM sandbox_templates WHERE id=?", (tpl_id,))
+        c.execute("SELECT provider_id FROM grape_t_sandbox_templates WHERE id=?", (tpl_id,))
         tpl_row = c.fetchone()
         if not tpl_row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "模板不存在"})
-        c.execute("SELECT runtime_credential_id FROM sandbox_provider_config WHERE id=?", (tpl_row[0],))
+        c.execute("SELECT runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=?", (tpl_row[0],))
         prow = c.fetchone()
         # [删系统类别] 权限单一条件：凭据 owner
         if prow and not (prow[0] and _sb_cred_report_owner(prow[0], user)):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
-        c.execute("DELETE FROM engine_template_binding WHERE template_id=?", (tpl_id,))
-        c.execute("DELETE FROM sandbox_templates WHERE id=?", (tpl_id,))
+        c.execute("DELETE FROM grape_t_engine_template_binding WHERE template_id=?", (tpl_id,))
+        c.execute("DELETE FROM grape_t_sandbox_templates WHERE id=?", (tpl_id,))
         db.commit()
     return {"status": "deleted"}
 
@@ -3287,20 +3287,20 @@ def list_sandbox_providers(q: str = "", page: int = 1, page_size: int = 20,
         full_params = base_params + search_params
 
         if use_paging:
-            c.execute(f"SELECT COUNT(*) FROM sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id {full_where}", tuple(full_params))
+            c.execute(f"SELECT COUNT(*) FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id {full_where}", tuple(full_params))
             total = c.fetchone()[0]
             offset = (page - 1) * page_size
             c.execute(
                 f"SELECT spc.id, rc.name AS name, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.enabled, "
                 f"rc.scope, rc.owner_id, rc.repo_key, spc.max_sandboxes, spc.updated_at, spc.runtime_credential_id, rc.name "
-                f"FROM sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id "
+                f"FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id "
                 f"{full_where} ORDER BY spc.id LIMIT ? OFFSET ?",
                 tuple(full_params + [int(page_size), int(offset)]))
         else:
             c.execute(
                 f"SELECT spc.id, rc.name AS name, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.enabled, "
                 f"rc.scope, rc.owner_id, rc.repo_key, spc.max_sandboxes, spc.updated_at, spc.runtime_credential_id, rc.name "
-                f"FROM sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id "
+                f"FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id "
                 f"{full_where} ORDER BY spc.id",
                 tuple(full_params))
             total = 0
@@ -3376,7 +3376,7 @@ def update_sandbox_provider(provider_id: int, body: dict, user: dict = Depends(r
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT api_key_enc, runtime_credential_id FROM sandbox_provider_config WHERE id=?", (provider_id,))
+        c.execute("SELECT api_key_enc, runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "Provider 不存在"})
@@ -3394,7 +3394,7 @@ def update_sandbox_provider(provider_id: int, body: dict, user: dict = Depends(r
             raise HTTPException(status_code=400, detail={"code": 400, "message": "endpoint 不能为空"})
 
         # platform 不可改，从 DB 取
-        c.execute("SELECT platform, extra_config FROM sandbox_provider_config WHERE id=?", (provider_id,))
+        c.execute("SELECT platform, extra_config FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
         _prow = c.fetchone()
         platform = _prow[0]
         # extra_config 语义（与 api_key 同款）：
@@ -3430,11 +3430,11 @@ def update_sandbox_provider(provider_id: int, body: dict, user: dict = Depends(r
 
         if enabled_val is not None:
             c.execute(
-                f"UPDATE sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, enabled=?, max_sandboxes=?, updated_by=? WHERE id=?",
+                f"UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, enabled=?, max_sandboxes=?, updated_by=? WHERE id=?",
                 [endpoint, api_key_enc, extra_json, 1 if enabled_val else 0, max_sandboxes, user["username"], provider_id])
         else:
             c.execute(
-                f"UPDATE sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, max_sandboxes=?, updated_by=? WHERE id=?",
+                f"UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, max_sandboxes=?, updated_by=? WHERE id=?",
                 [endpoint, api_key_enc, extra_json, max_sandboxes, user["username"], provider_id])
         db.commit()
     log.info(f"provider updated: user={user['username']} id={provider_id}")
@@ -3453,7 +3453,7 @@ def toggle_sandbox_provider(provider_id: int, body: dict, user: dict = Depends(r
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT runtime_credential_id FROM sandbox_provider_config WHERE id=?", (provider_id,))
+        c.execute("SELECT runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "Provider 不存在"})
@@ -3461,7 +3461,7 @@ def toggle_sandbox_provider(provider_id: int, body: dict, user: dict = Depends(r
         _sb_cred = row[0] or 0
         if not (_sb_cred and _sb_cred_report_owner(_sb_cred, user)):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
-        c.execute("UPDATE sandbox_provider_config SET enabled=?, updated_by=? WHERE id=?",
+        c.execute("UPDATE grape_t_sandbox_provider_config SET enabled=?, updated_by=? WHERE id=?",
                   (1 if body.get("enabled") else 0, user["username"], provider_id))
         db.commit()
     return {"message": "Provider 已更新"}
@@ -3481,8 +3481,8 @@ def toggle_sandbox_template(tpl_id: int, body: dict, user: dict = Depends(requir
         c.execute(
             # [db9d2fb7f 对账漏改修复 2026-10-30] pc.scope/pc.user_id 列已删——SELECT 只留
             # 需要的两列, row 索引相应改(tpl_row[0]=provider_id, tpl_row[1]=cred_id)
-            "SELECT t.provider_id, pc.runtime_credential_id FROM sandbox_templates t "
-            "LEFT JOIN sandbox_provider_config pc ON pc.id = t.provider_id WHERE t.id=?",
+            "SELECT t.provider_id, pc.runtime_credential_id FROM grape_t_sandbox_templates t "
+            "LEFT JOIN grape_t_sandbox_provider_config pc ON pc.id = t.provider_id WHERE t.id=?",
             (tpl_id,))
         row = c.fetchone()
         if not row:
@@ -3492,7 +3492,7 @@ def toggle_sandbox_template(tpl_id: int, body: dict, user: dict = Depends(requir
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
         if not row[1]:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无凭据 Provider（已废弃类别）"})
-        c.execute("UPDATE sandbox_templates SET enabled=?, updated_at=?, updated_by=? WHERE id=?",
+        c.execute("UPDATE grape_t_sandbox_templates SET enabled=?, updated_at=?, updated_by=? WHERE id=?",
                   (1 if body.get("enabled") else 0,
                    datetime.now(timezone.utc).isoformat(), user["username"], tpl_id))
         db.commit()
@@ -3512,7 +3512,7 @@ def health_sandbox_provider(provider_id: int, user: dict = Depends(require_no_se
         c.execute("SELECT runtime_credential_id, "
                   "(SELECT rc.name FROM runtime_credentials rc WHERE rc.id = spc.runtime_credential_id) AS name, "
                   "platform, endpoint, api_key_enc, extra_config, max_sandboxes "
-                  "FROM sandbox_provider_config spc WHERE spc.id=?", (provider_id,))
+                  "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (provider_id,))
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "Provider 不存在"})
@@ -3552,13 +3552,13 @@ def bind_engine(tpl_id: int, body: dict, user: dict = Depends(require_no_session
     _now = datetime.now(timezone.utc).isoformat()
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT provider_id FROM sandbox_templates WHERE id=?", (tpl_id,))
+        c.execute("SELECT provider_id FROM grape_t_sandbox_templates WHERE id=?", (tpl_id,))
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "模板不存在"})
         provider_id = row[0]
         # 权限校验：查 Provider scope
-        c.execute("SELECT runtime_credential_id FROM sandbox_provider_config WHERE id=?", (provider_id,))
+        c.execute("SELECT runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
         prow = c.fetchone()
         # [删系统类别] 权限单一条件：凭据 owner
         if not (prow and prow[0] and _sb_cred_report_owner(prow[0], user)):
@@ -3566,7 +3566,7 @@ def bind_engine(tpl_id: int, body: dict, user: dict = Depends(require_no_session
         # [多模板共用引擎] 同 Provider 下同一引擎可绑多个模板（四段式引擎名区分）——
         # R5 一引擎一模板的 409 冲突检测废除；UNIQUE(provider_id,engine_type,template_id)
         # 保证同模板重复绑定幂等
-        c.execute("INSERT OR IGNORE INTO engine_template_binding (provider_id, engine_type, template_id, created_at, updated_at) VALUES (?,?,?,?,?)",
+        c.execute("INSERT OR IGNORE INTO grape_t_engine_template_binding (provider_id, engine_type, template_id, created_at, updated_at) VALUES (?,?,?,?,?)",
                   (provider_id, engine_type, tpl_id, _now, _now))
         db.commit()
     return {"message": "引擎已绑定"}
@@ -3579,18 +3579,18 @@ def unbind_engine(tpl_id: int, engine_type: str, user: dict = Depends(require_no
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT provider_id FROM sandbox_templates WHERE id=?", (tpl_id,))
+        c.execute("SELECT provider_id FROM grape_t_sandbox_templates WHERE id=?", (tpl_id,))
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "模板不存在"})
         provider_id = row[0]
-        c.execute("SELECT runtime_credential_id FROM sandbox_provider_config WHERE id=?", (provider_id,))
+        c.execute("SELECT runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
         prow = c.fetchone()
         # [删系统类别] 权限单一条件：凭据 owner
         if not (prow and prow[0] and _sb_cred_report_owner(prow[0], user)):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
         # [多模板共用引擎] 精确解绑该 (引擎,模板)——不误删同引擎在其他模板上的绑定
-        c.execute("DELETE FROM engine_template_binding WHERE provider_id=? AND engine_type=? AND template_id=?", (provider_id, engine_type, tpl_id))
+        c.execute("DELETE FROM grape_t_engine_template_binding WHERE provider_id=? AND engine_type=? AND template_id=?", (provider_id, engine_type, tpl_id))
         db.commit()
     return {"message": "引擎已解绑"}
 
@@ -3607,7 +3607,7 @@ def scan_sandbox_templates(provider_id: int, user: dict = Depends(require_no_ses
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT rc.name AS name, spc.platform, spc.runtime_credential_id FROM sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id WHERE spc.id=?",
+        c.execute("SELECT rc.name AS name, spc.platform, spc.runtime_credential_id FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id WHERE spc.id=?",
                   (provider_id,))
         prow = c.fetchone()
     if not prow:
@@ -3644,7 +3644,7 @@ def scan_sandbox_templates(provider_id: int, user: dict = Depends(require_no_ses
         c = db.cursor()
         for t in valid:
             tid = t["template_id"]
-            c.execute("SELECT id, name FROM sandbox_templates WHERE provider_id=? AND template_id=?",
+            c.execute("SELECT id, name FROM grape_t_sandbox_templates WHERE provider_id=? AND template_id=?",
                       (provider_id, tid))
             row = c.fetchone()
             if row:
@@ -3652,7 +3652,7 @@ def scan_sandbox_templates(provider_id: int, user: dict = Depends(require_no_ses
                 continue
             _name = t.get("name") or tid
             c.execute(
-                "INSERT INTO sandbox_templates (name, provider_id, template_id, alias, "
+                "INSERT INTO grape_t_sandbox_templates (name, provider_id, template_id, alias, "
                 "description, preinstalled, disk_size_mb, enabled, created_at, updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 # [删 provider 列 2026-10-30] provider 列已删——INSERT 同步去列
@@ -3682,7 +3682,7 @@ def check_sandbox_template(tpl_id: int, user: dict = Depends(require_no_session_
         # 'provider s1 not in registry' 即此混用。
         c.execute(
             "SELECT t.template_id, t.provider_id, spc.platform, spc.runtime_credential_id "
-            "FROM sandbox_templates t LEFT JOIN sandbox_provider_config spc ON spc.id = t.provider_id "
+            "FROM grape_t_sandbox_templates t LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = t.provider_id "
             "WHERE t.id=?", (tpl_id,))
         row = c.fetchone()
     if not row:
@@ -3695,7 +3695,7 @@ def check_sandbox_template(tpl_id: int, user: dict = Depends(require_no_session_
     _now = datetime.now(timezone.utc).isoformat()
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE sandbox_templates SET last_check_at=?, last_check_status=?, last_check_error=? WHERE id=?",
+        c.execute("UPDATE grape_t_sandbox_templates SET last_check_at=?, last_check_status=?, last_check_error=? WHERE id=?",
                   (_now, result["status"], result["error"], tpl_id))
         db.commit()
     return {"status": result["status"], "error": result["error"]}
@@ -3710,8 +3710,8 @@ def _check_template_sync(tpl_id: int, provider: str, template_id: str):
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT spc.platform, t.provider_id FROM sandbox_templates t "
-                "LEFT JOIN sandbox_provider_config spc ON spc.id = t.provider_id WHERE t.id=?",
+                "SELECT spc.platform, t.provider_id FROM grape_t_sandbox_templates t "
+                "LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = t.provider_id WHERE t.id=?",
                 (tpl_id,))
             _row = c.fetchone()
         if not _row:
@@ -3722,7 +3722,7 @@ def _check_template_sync(tpl_id: int, provider: str, template_id: str):
 
 
 def _provider_config_from_db(platform: str, provider_id: int | None = None) -> dict | None:
-    """从 sandbox_provider_config 取配置，经 adapter 归一化。
+    """从 grape_t_sandbox_provider_config 取配置，经 adapter 归一化。
 
     health 端点同款逻辑；无记录/无 adapter 返回 None。
     优先按 provider_id 精确取（模板校验场景），无 id 时回退 system scope 行。
@@ -3734,11 +3734,11 @@ def _provider_config_from_db(platform: str, provider_id: int | None = None) -> d
         if provider_id:
             c.execute("SELECT (SELECT rc.name FROM runtime_credentials rc WHERE rc.id = spc.runtime_credential_id) AS name, spc.platform, spc.endpoint, spc.api_key_enc, "
                       "extra_config, max_sandboxes "
-                      "FROM sandbox_provider_config spc WHERE spc.id=?", (provider_id,))
+                      "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (provider_id,))
         else:
             c.execute("SELECT (SELECT rc.name FROM runtime_credentials rc WHERE rc.id = spc.runtime_credential_id) AS name, spc.platform, spc.endpoint, spc.api_key_enc, "
                       "extra_config, max_sandboxes "
-                      "FROM sandbox_provider_config spc WHERE spc.platform=?", (platform,))
+                      "FROM grape_t_sandbox_provider_config spc WHERE spc.platform=?", (platform,))
         row = c.fetchone()
     if not row:
         return None
@@ -3830,7 +3830,7 @@ def list_provider_configs(user: dict = Depends(require_no_session_token)):
         c.execute(
             "SELECT p.id, p.platform, p.endpoint, p.api_key_enc, p.extra_config, "
             "p.enabled, p.updated_at, p.runtime_credential_id, rc.name, p.provider_uid "
-            "FROM sandbox_provider_config p "
+            "FROM grape_t_sandbox_provider_config p "
             "LEFT JOIN runtime_credentials rc ON rc.id = p.runtime_credential_id "
             "ORDER BY p.id"
         )
@@ -3881,7 +3881,7 @@ def update_provider_config(provider: str, body: dict, user: dict = Depends(requi
 
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, api_key_enc FROM sandbox_provider_config WHERE provider=?", (provider,))
+        c.execute("SELECT id, api_key_enc FROM grape_t_sandbox_provider_config WHERE provider=?", (provider,))
         row = c.fetchone()
         # enabled 处理：传了值 → 覆盖；没传 → 保留 DB 旧值（UPDATE）/ 默认 1（INSERT）
         enabled_val = body.get("enabled")
@@ -3894,12 +3894,12 @@ def update_provider_config(provider: str, body: dict, user: dict = Depends(requi
                 api_key_enc = row[1]  # 保留旧值
             if enabled_val is not None:
                 c.execute(
-                    "UPDATE sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, enabled=?, updated_by=? WHERE id=?",
+                    "UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, enabled=?, updated_by=? WHERE id=?",
                     (endpoint, api_key_enc, extra_json, 1 if enabled_val else 0, user["username"], row[0]),
                 )
             else:
                 c.execute(
-                    "UPDATE sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, updated_by=? WHERE id=?",
+                    "UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, updated_by=? WHERE id=?",
                     (endpoint, api_key_enc, extra_json, user["username"], row[0]),
                 )
         else:
@@ -3907,7 +3907,7 @@ def update_provider_config(provider: str, body: dict, user: dict = Depends(requi
             api_key_plain = body.get("api_key") or ""
             api_key_enc = encrypt(api_key_plain) if api_key_plain else ""
             c.execute(
-                "INSERT INTO sandbox_provider_config (endpoint, api_key_enc, extra_config, enabled, updated_by) "
+                "INSERT INTO grape_t_sandbox_provider_config (endpoint, api_key_enc, extra_config, enabled, updated_by) "
                 "VALUES (?,?,?,?,?)",
                 (endpoint, api_key_enc, extra_json, 1 if enabled_val is None or enabled_val else 0, user["username"]),
             )
@@ -3976,7 +3976,7 @@ def list_sandbox_engines(user: dict = Depends(require_no_session_token)):
 
 
 # ===== [沙箱迁移] 用户 LLM 凭据管理（feat/devbox-sandbox-integration 迁移）=====
-# user_llm_credentials 表的写入入口——沙箱 agent 引擎的模型凭据配置
+# grape_t_user_llm_credentials 表的写入入口——沙箱 agent 引擎的模型凭据配置
 class LLMCredentialBody(BaseModel):
     """用户 LLM API key（加密存储）。"""
     provider: str = "custom"
@@ -4033,7 +4033,7 @@ def list_repo_llm_credentials(repo_key: str = "", user: dict = Depends(require_n
     with db_lock:
         c = db.cursor()
         rows = c.execute("SELECT id, engine_type, provider, api_key_enc, base_url, model, enabled, updated_by, updated_at "
-                         "FROM repo_llm_credentials WHERE repo_key=? ORDER BY id", (repo_key,)).fetchall()
+                         "FROM grape_t_repo_llm_credentials WHERE repo_key=? ORDER BY id", (repo_key,)).fetchall()
     return {"credentials": [
         {"id": r[0], "engine_type": r[1], "provider": r[2], "has_key": bool(r[3]),
          "base_url": r[4], "model": r[5], "enabled": bool(r[6]), "updated_by": r[7], "updated_at": r[8]}
@@ -4060,7 +4060,7 @@ def upsert_repo_llm_credential(body: RepoLLMCredentialBody, user: dict = Depends
     _now = datetime.now(timezone.utc).isoformat()
     with db_lock:
         c = db.cursor()
-        row = c.execute("SELECT id, api_key_enc FROM repo_llm_credentials WHERE repo_key=? AND engine_type=?",
+        row = c.execute("SELECT id, api_key_enc FROM grape_t_repo_llm_credentials WHERE repo_key=? AND engine_type=?",
                         (repo_key, body.engine_type)).fetchone()
         # 留空不改：api_key 非空才 encrypt 覆盖；空则沿用旧值（首建必须提供）
         if body.api_key.strip():
@@ -4070,13 +4070,13 @@ def upsert_repo_llm_credential(body: RepoLLMCredentialBody, user: dict = Depends
         else:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "首次配置必须提供 API key"})
         if row:
-            c.execute("UPDATE repo_llm_credentials SET provider=?, api_key_enc=?, base_url=?, model=?, "
+            c.execute("UPDATE grape_t_repo_llm_credentials SET provider=?, api_key_enc=?, base_url=?, model=?, "
                       "enabled=?, updated_by=?, updated_at=? WHERE id=?",
                       (body.provider, _enc, body.base_url, body.model, 1 if body.enabled else 0,
                        user["username"], _now, row[0]))
             rid = row[0]
         else:
-            c.execute("INSERT INTO repo_llm_credentials (repo_key, engine_type, provider, api_key_enc, "
+            c.execute("INSERT INTO grape_t_repo_llm_credentials (repo_key, engine_type, provider, api_key_enc, "
                       "base_url, model, enabled, updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
                       (repo_key, body.engine_type, body.provider, _enc, body.base_url, body.model,
                        1 if body.enabled else 0, user["username"], _now))
@@ -4091,11 +4091,11 @@ def toggle_repo_llm_credential(cred_id: int, body: dict, user: dict = Depends(re
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        row = c.execute("SELECT repo_key FROM repo_llm_credentials WHERE id=?", (cred_id,)).fetchone()
+        row = c.execute("SELECT repo_key FROM grape_t_repo_llm_credentials WHERE id=?", (cred_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
         _require_repo_llm_admin(row[0], user)
-        c.execute("UPDATE repo_llm_credentials SET enabled=? WHERE id=?",
+        c.execute("UPDATE grape_t_repo_llm_credentials SET enabled=? WHERE id=?",
                   (1 if body.get("enabled") else 0, cred_id))
         db.commit()
     return {"message": "已更新"}
@@ -4107,18 +4107,18 @@ def delete_repo_llm_credential(cred_id: int, user: dict = Depends(require_no_ses
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        row = c.execute("SELECT repo_key FROM repo_llm_credentials WHERE id=?", (cred_id,)).fetchone()
+        row = c.execute("SELECT repo_key FROM grape_t_repo_llm_credentials WHERE id=?", (cred_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "凭据不存在"})
         _require_repo_llm_admin(row[0], user)
-        c.execute("DELETE FROM repo_llm_credentials WHERE id=?", (cred_id,))
+        c.execute("DELETE FROM grape_t_repo_llm_credentials WHERE id=?", (cred_id,))
         db.commit()
     return {"message": "已删除"}
 
 
 @router.post("/llm-credentials", operation_id="settings_llm_credential_create", summary="Create LLM credential", description="Save LLM API key (encrypted). One credential per engine_type per user.")
 def create_llm_credential(body: LLMCredentialBody, user: dict = Depends(require_no_session_token)):
-    """创建/更新 LLM 凭据（加密存储到 user_llm_credentials 表）。"""
+    """创建/更新 LLM 凭据（加密存储到 grape_t_user_llm_credentials 表）。"""
     from src.kernel.crypto import encrypt
     from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
@@ -4143,16 +4143,16 @@ def create_llm_credential(body: LLMCredentialBody, user: dict = Depends(require_
         with db_lock:
             c = db.cursor()
             # UPSERT：同 user + engine_type 覆盖
-            c.execute("SELECT id FROM user_llm_credentials WHERE user_id=? AND engine_type=?", (user["id"], body.engine_type))
+            c.execute("SELECT id FROM grape_t_user_llm_credentials WHERE user_id=? AND engine_type=?", (user["id"], body.engine_type))
             existing = c.fetchone()
             if existing:
                 c.execute(
-                    "UPDATE user_llm_credentials SET provider=?, api_key_enc=?, base_url=?, model=?, updated_at=? WHERE id=?",
+                    "UPDATE grape_t_user_llm_credentials SET provider=?, api_key_enc=?, base_url=?, model=?, updated_at=? WHERE id=?",
                     (body.provider, _enc, body.base_url, body.model, _now, existing[0])
                 )
             else:
                 c.execute(
-                    "INSERT INTO user_llm_credentials (user_id, provider, api_key_enc, base_url, model, enabled, engine_type, created_at, updated_at) "
+                    "INSERT INTO grape_t_user_llm_credentials (user_id, provider, api_key_enc, base_url, model, enabled, engine_type, created_at, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
                     (user["id"], body.provider, _enc, body.base_url, body.model, body.engine_type, _now, _now)
                 )
@@ -4172,7 +4172,7 @@ def list_llm_credentials(user: dict = Depends(require_no_session_token)):
         c = db.cursor()
         c.execute(
             "SELECT id, provider, base_url, model, enabled, engine_type, created_at, updated_at "
-            "FROM user_llm_credentials WHERE user_id=? ORDER BY id",
+            "FROM grape_t_user_llm_credentials WHERE user_id=? ORDER BY id",
             (user["id"],)
         )
         rows = c.fetchall()
@@ -4204,7 +4204,7 @@ def delete_llm_credential(cred_id: int, user: dict = Depends(require_no_session_
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_llm_credentials WHERE id=? AND user_id=?", (cred_id, user["id"]))
+        c.execute("DELETE FROM grape_t_user_llm_credentials WHERE id=? AND user_id=?", (cred_id, user["id"]))
         db.commit()
         if c.rowcount == 0:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "LLM 凭据不存在"})

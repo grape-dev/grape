@@ -1084,7 +1084,7 @@ class _WhitelistCache:
             from src.kernel.session_manager import db, db_lock
             with db_lock:
                 rows = db.execute(
-                    "SELECT DISTINCT domain FROM engine_sandbox_whitelist "
+                    "SELECT DISTINCT domain FROM grape_t_engine_sandbox_whitelist "
                     "WHERE backend_name='*'"
                 ).fetchall()
             self._domains = {r[0] for r in rows if r[0]}
@@ -1168,7 +1168,7 @@ class NetworkProxy:
                 domain = domain.strip()
                 if domain and domain not in wl:
                     wl.append(domain)
-        # DB engine_sandbox_whitelist 表的官方域名从内存缓存读（异步加载 + 线程锁）
+        # DB grape_t_engine_sandbox_whitelist 表的官方域名从内存缓存读（异步加载 + 线程锁）
         # 避免每次 start() 都同步查 DB
         _wl_cache = _WhitelistCache.get()
         for domain in _wl_cache.load():

@@ -96,7 +96,7 @@ class SandboxManager:
         """查 sandbox_mode + degrade_policy，转换为 SandboxMode。
 
         数据源按 worker 类型决定：
-        - 本地 worker（WORKER_MODE=local）：查 DB engine_sandbox_config 表（有 DB 连接）
+        - 本地 worker（WORKER_MODE=local）：查 DB grape_t_engine_sandbox_config 表（有 DB 连接）
         - 远程 worker / 云 worker：查 ConfigSync（通过心跳同步的安全策略，无 DB 连接）
         """
         if exec_backend in ("chat",):
@@ -329,14 +329,14 @@ class SandboxManager:
         """@deprecated 旧方法——prepare() 不再调用此方法（改用 _select_provider_from_context）。
         保留供 _select_provider 旧路径和测试引用。
 
-        从 sandbox_templates 表按 engine_name 查模板。
+        从 grape_t_sandbox_templates 表按 engine_name 查模板。
 
         返回 (provider, template_id)——provider 是 SDK 实例，template_id 传给 create_sandbox。
-        模板路由：engine_name → sandbox_templates → provider + template_id。
+        模板路由：engine_name → grape_t_sandbox_templates → provider + template_id。
 
         三级 fallback：
-        1. DB sandbox_templates（按 engine_name 匹配）
-        2. engine_sandbox_config（旧表，兼容）
+        1. DB grape_t_sandbox_templates（按 engine_name 匹配）
+        2. grape_t_engine_sandbox_config（旧表，兼容）
         3. 配置文件
         """
         # 懒加载缓存
@@ -352,7 +352,7 @@ class SandboxManager:
         if cached and (now - cached_time) < 60:
             return cached
 
-        # 1. 查 sandbox_templates 表——按 engine_name 匹配（通过 Repository DAO）
+        # 1. 查 grape_t_sandbox_templates 表——按 engine_name 匹配（通过 Repository DAO）
         template_id = ""
         provider_name = ""
         try:

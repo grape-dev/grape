@@ -1,4 +1,4 @@
-"""provider_uid 稳定键列（2026-11-04 用户裁定：sandbox_provider_config 加 UUIDv4 列，
+"""provider_uid 稳定键列（2026-11-04 用户裁定：grape_t_sandbox_provider_config 加 UUIDv4 列，
 暂无消费者也先落——为后续沙箱 uid 化/分布式合流预留身份锚）。
 
 契约（同 #646 credential_uid 语义，UUIDv4 创建时一次性生成终身不变）：
@@ -16,10 +16,10 @@ import pytest
 
 
 def _fresh_conn_with_table(conn_sqlite: sqlite3.Connection):
-    """手工建最小 sandbox_provider_config 表（不含 uid 列），模拟存量库。"""
+    """手工建最小 grape_t_sandbox_provider_config 表（不含 uid 列），模拟存量库。"""
     c = conn_sqlite.cursor()
     c.execute("""
-        CREATE TABLE IF NOT EXISTS sandbox_provider_config (
+        CREATE TABLE IF NOT EXISTS grape_t_sandbox_provider_config (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             platform VARCHAR(64) NOT NULL DEFAULT '',
             endpoint VARCHAR(512) NOT NULL DEFAULT '',
@@ -51,12 +51,12 @@ def _fn_source(mig) -> str:
 class TestProviderUidColumn:
     def _ddl(self):
         from src.api import db_setup
-        return dict(db_setup._SANDBOX_CONTROL_TABLES)["sandbox_provider_config"]
+        return dict(db_setup._SANDBOX_CONTROL_TABLES)["grape_t_sandbox_provider_config"]
 
     def test_new_ddl_has_provider_uid(self):
         """S1：全新库 DDL 直接含 provider_uid 列。"""
         ddl = self._ddl().lower()
-        assert "provider_uid" in ddl, "sandbox_provider_config DDL 缺 provider_uid 列"
+        assert "provider_uid" in ddl, "grape_t_sandbox_provider_config DDL 缺 provider_uid 列"
 
     def test_migration_registered(self):
         """S2：迁移进版本表执行器（register_migration 幂等加列）。"""
@@ -86,6 +86,6 @@ class TestProviderUidColumn:
         # 列定义在常量 DDL 内不在 fn 字面——守卫改为: fn 引用该常量 + DDL 含列 + 幂等手段
         assert "_SANDBOX_CONTROL_TABLES" in src, "迁移 fn 未走 _SANDBOX_CONTROL_TABLES 建表"
         from src.api import db_setup as _dbs
-        _ddl = dict(_dbs._SANDBOX_CONTROL_TABLES)["sandbox_provider_config"]
+        _ddl = dict(_dbs._SANDBOX_CONTROL_TABLES)["grape_t_sandbox_provider_config"]
         assert "provider_uid" in _ddl, "控制面 DDL 缺 provider_uid 列"
         assert ("IF NOT EXISTS" in _ddl or "_ensure_column" in src), "缺幂等手段（两跑不能重发 uid）"

@@ -700,7 +700,7 @@ class CubeSandboxProvider(CloudProviderBase):
     def create_sandbox(self, cwd="", exec_backend="", task_id="", runtime_id=None, template_id="", **kwargs) -> CubeSandboxInstance:
         """创建 CubeSandbox 沙箱实例。
 
-        template_id 从 sandbox_templates 表查出来传入（模板路由）。
+        template_id 从 grape_t_sandbox_templates 表查出来传入（模板路由）。
         空字符串表示用配置文件的默认 template_id（向后兼容）。
         """
         issue_id = kwargs.get("issue_id", task_id)

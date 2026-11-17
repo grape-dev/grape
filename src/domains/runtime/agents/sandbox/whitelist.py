@@ -176,7 +176,7 @@ class RuleCache:
             with db_lock:
                 rows = db.execute(
                     "SELECT id, backend_name, domain, method, path_prefix, scheme, port "
-                    "FROM engine_sandbox_whitelist WHERE backend_name=?",
+                    "FROM grape_t_engine_sandbox_whitelist WHERE backend_name=?",
                     (backend_name,)
                 ).fetchall()
             for row in rows:

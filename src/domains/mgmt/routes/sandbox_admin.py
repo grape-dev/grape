@@ -183,13 +183,13 @@ def list_whitelist(
         if backend_name:
             rows = db.execute(
                 "SELECT id, backend_name, domain, method, path_prefix, scheme, port, created_at, updated_at "
-                "FROM engine_sandbox_whitelist WHERE backend_name=? ORDER BY id",
+                "FROM grape_t_engine_sandbox_whitelist WHERE backend_name=? ORDER BY id",
                 (backend_name,)
             ).fetchall()
         else:
             rows = db.execute(
                 "SELECT id, backend_name, domain, method, path_prefix, scheme, port, created_at, updated_at "
-                "FROM engine_sandbox_whitelist ORDER BY id"
+                "FROM grape_t_engine_sandbox_whitelist ORDER BY id"
             ).fetchall()
     return {"rules": [
         {"id": r[0], "backend_name": r[1], "domain": r[2], "method": r[3],
@@ -220,7 +220,7 @@ def create_whitelist(
     try:
         with db_lock:
             db.execute(
-                "INSERT INTO engine_sandbox_whitelist (backend_name, domain, method, path_prefix, scheme, port) "
+                "INSERT INTO grape_t_engine_sandbox_whitelist (backend_name, domain, method, path_prefix, scheme, port) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (body.backend_name, body.domain, method, body.path_prefix, scheme, port)
             )
@@ -257,7 +257,7 @@ def update_whitelist(
     try:
         with db_lock:
             cursor = db.execute(
-                "UPDATE engine_sandbox_whitelist SET backend_name=?, domain=?, method=?, "
+                "UPDATE grape_t_engine_sandbox_whitelist SET backend_name=?, domain=?, method=?, "
                 "path_prefix=?, scheme=?, port=?, updated_at=datetime('now') WHERE id=?",
                 (body.backend_name, body.domain, method, body.path_prefix, scheme, body.port, rule_id)
             )
@@ -288,13 +288,13 @@ def delete_whitelist(
     db, db_lock = _get_db()
     with db_lock:
         cursor = db.execute(
-            "SELECT backend_name FROM engine_sandbox_whitelist WHERE id=?", (rule_id,)
+            "SELECT backend_name FROM grape_t_engine_sandbox_whitelist WHERE id=?", (rule_id,)
         )
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
         backend_name = row[0]
-        db.execute("DELETE FROM engine_sandbox_whitelist WHERE id=?", (rule_id,))
+        db.execute("DELETE FROM grape_t_engine_sandbox_whitelist WHERE id=?", (rule_id,))
         db.commit()
 
     from src.domains.runtime.agents.sandbox.whitelist import invalidate_cache
@@ -319,13 +319,13 @@ def list_paths(
         if backend_name:
             rows = db.execute(
                 "SELECT id, backend_name, path, access, created_at, updated_at "
-                "FROM engine_sandbox_paths WHERE backend_name=? ORDER BY id",
+                "FROM grape_t_engine_sandbox_paths WHERE backend_name=? ORDER BY id",
                 (backend_name,)
             ).fetchall()
         else:
             rows = db.execute(
                 "SELECT id, backend_name, path, access, created_at, updated_at "
-                "FROM engine_sandbox_paths ORDER BY id"
+                "FROM grape_t_engine_sandbox_paths ORDER BY id"
             ).fetchall()
     return {"paths": [
         {"id": r[0], "backend_name": r[1], "path": r[2], "access": r[3],
@@ -347,7 +347,7 @@ def create_paths(
     try:
         with db_lock:
             db.execute(
-                "INSERT INTO engine_sandbox_paths (backend_name, path, access) VALUES (?, ?, ?)",
+                "INSERT INTO grape_t_engine_sandbox_paths (backend_name, path, access) VALUES (?, ?, ?)",
                 (body.backend_name, body.path, body.access)
             )
             db.commit()
@@ -372,7 +372,7 @@ def update_paths(
     try:
         with db_lock:
             cursor = db.execute(
-                "UPDATE engine_sandbox_paths SET backend_name=?, path=?, access=?, "
+                "UPDATE grape_t_engine_sandbox_paths SET backend_name=?, path=?, access=?, "
                 "updated_at=datetime('now') WHERE id=?",
                 (body.backend_name, body.path, body.access, path_id)
             )
@@ -397,7 +397,7 @@ def delete_paths(
     """删除文件系统路径。"""
     db, db_lock = _get_db()
     with db_lock:
-        cursor = db.execute("DELETE FROM engine_sandbox_paths WHERE id=?", (path_id,))
+        cursor = db.execute("DELETE FROM grape_t_engine_sandbox_paths WHERE id=?", (path_id,))
         db.commit()
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail=f"Path {path_id} not found")
@@ -419,13 +419,13 @@ def list_config(
         if runtime_id:
             rows = db.execute(
                 "SELECT id, runtime_id, engine_name, sandbox_mode, degrade_policy, created_at, updated_at "
-                "FROM engine_sandbox_config WHERE runtime_id=? ORDER BY id",
+                "FROM grape_t_engine_sandbox_config WHERE runtime_id=? ORDER BY id",
                 (runtime_id,)
             ).fetchall()
         else:
             rows = db.execute(
                 "SELECT id, runtime_id, engine_name, sandbox_mode, degrade_policy, created_at, updated_at "
-                "FROM engine_sandbox_config ORDER BY id"
+                "FROM grape_t_engine_sandbox_config ORDER BY id"
             ).fetchall()
     return {"configs": [
         {"id": r[0], "runtime_id": r[1], "engine_name": r[2],
@@ -451,7 +451,7 @@ def update_config(
     try:
         with db_lock:
             cursor = db.execute(
-                "UPDATE engine_sandbox_config SET sandbox_mode=?, degrade_policy=?, "
+                "UPDATE grape_t_engine_sandbox_config SET sandbox_mode=?, degrade_policy=?, "
                 "updated_at=datetime('now') WHERE id=?",
                 (body.sandbox_mode, body.degrade_policy, config_id)
             )

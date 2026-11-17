@@ -63,7 +63,7 @@ class TokenManager:
             db, db_lock = self._get_db()
             with db_lock:
                 db.execute(
-                    "INSERT OR REPLACE INTO task_proxy_tokens (task_id, token_hash, backend_name, expires_at) "
+                    "INSERT OR REPLACE INTO grape_t_task_proxy_tokens (task_id, token_hash, backend_name, expires_at) "
                     "VALUES (?, ?, ?, ?)",
                     (task_id, token_hash, backend_name, _expires_at)
                 )
@@ -84,7 +84,7 @@ class TokenManager:
             db, db_lock = self._get_db()
             with db_lock:
                 row = db.execute(
-                    "SELECT task_id, backend_name, expires_at FROM task_proxy_tokens WHERE token_hash=?",
+                    "SELECT task_id, backend_name, expires_at FROM grape_t_task_proxy_tokens WHERE token_hash=?",
                     (token_hash,)
                 ).fetchone()
             if not row:
@@ -117,7 +117,7 @@ class TokenManager:
         try:
             db, db_lock = self._get_db()
             with db_lock:
-                db.execute("DELETE FROM task_proxy_tokens WHERE task_id=?", (task_id,))
+                db.execute("DELETE FROM grape_t_task_proxy_tokens WHERE task_id=?", (task_id,))
                 db.commit()
         except Exception as e:
             log.error(f"revoke proxy token failed: {e}")

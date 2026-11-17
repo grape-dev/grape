@@ -288,7 +288,7 @@ def build_bwrap_argv(
             from src.kernel.session_manager import db, db_lock
             with db_lock:
                 rows = db.execute(
-                    "SELECT path, access FROM engine_sandbox_paths WHERE backend_name = ?",
+                    "SELECT path, access FROM grape_t_engine_sandbox_paths WHERE backend_name = ?",
                     (exec_backend,)
                 ).fetchall()
             for path, access in rows:
@@ -874,7 +874,7 @@ class BwrapProvider:
     def _get_whitelist(exec_backend: str, engine_type: str = "") -> list[str]:
         """NetworkProxy 白名单：grape host + 引擎 LLM API 域名。
 
-        五维白名单从服务端 DB（engine_sandbox_whitelist 表）通过 API 获取，
+        五维白名单从服务端 DB（grape_t_engine_sandbox_whitelist 表）通过 API 获取，
         动态可配置。bwrap 在本机 worker 进程中，不直接查 DB。
         """
         server_url = os.environ.get("GRAPE_SERVER_URL", "http://127.0.0.1:3000")

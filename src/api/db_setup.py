@@ -8674,8 +8674,8 @@ register_migration(
 # =============================================================================
 
 _SANDBOX_CONTROL_TABLES: list[tuple[str, str]] = [
-    ("cloud_sandboxes", """
-CREATE TABLE IF NOT EXISTS cloud_sandboxes (
+    ("grape_t_cloud_sandboxes", """
+CREATE TABLE IF NOT EXISTS grape_t_cloud_sandboxes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     issue_id VARCHAR(255) NOT NULL,
     repo_key VARCHAR(255) NOT NULL,
@@ -8699,8 +8699,8 @@ CREATE TABLE IF NOT EXISTS cloud_sandboxes (
     last_error TEXT DEFAULT '',
     UNIQUE(sandbox_id)
 )"""),
-    ("sandbox_templates", """
-CREATE TABLE IF NOT EXISTS sandbox_templates (
+    ("grape_t_sandbox_templates", """
+CREATE TABLE IF NOT EXISTS grape_t_sandbox_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     provider_id INTEGER NOT NULL DEFAULT 0,
     name VARCHAR(255) NOT NULL,
@@ -8720,8 +8720,8 @@ CREATE TABLE IF NOT EXISTS sandbox_templates (
     created_by VARCHAR(64) DEFAULT '',
     updated_by VARCHAR(64) DEFAULT ''
 )"""),
-    ("sandbox_provider_config", """
-CREATE TABLE IF NOT EXISTS sandbox_provider_config (
+    ("grape_t_sandbox_provider_config", """
+CREATE TABLE IF NOT EXISTS grape_t_sandbox_provider_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     platform VARCHAR(64) NOT NULL DEFAULT '',
     endpoint VARCHAR(512) NOT NULL DEFAULT '',
@@ -8736,8 +8736,8 @@ CREATE TABLE IF NOT EXISTS sandbox_provider_config (
     provider_uid VARCHAR(36) DEFAULT NULL,
     UNIQUE(provider_uid)
 )"""),
-    ("engine_template_binding", """
-CREATE TABLE IF NOT EXISTS engine_template_binding (
+    ("grape_t_engine_template_binding", """
+CREATE TABLE IF NOT EXISTS grape_t_engine_template_binding (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     provider_id INTEGER NOT NULL,
     engine_type VARCHAR(64) NOT NULL,
@@ -8753,19 +8753,19 @@ CREATE TABLE IF NOT EXISTS engine_template_binding (
     -- 建表 DDL 漏对齐——E2E 实证多模板同引擎上报 500 Duplicate entry '1-hermes'）。
     -- 存量窄约束库由迁移 202611160001 收敛。
     UNIQUE(provider_id, engine_type, template_id),
-    FOREIGN KEY (provider_id) REFERENCES sandbox_provider_config(id) ON DELETE CASCADE,
-    FOREIGN KEY (template_id) REFERENCES sandbox_templates(id) ON DELETE CASCADE
+    FOREIGN KEY (provider_id) REFERENCES grape_t_sandbox_provider_config(id) ON DELETE CASCADE,
+    FOREIGN KEY (template_id) REFERENCES grape_t_sandbox_templates(id) ON DELETE CASCADE
 )"""),
-    ("engine_sandbox_toggle", """
-CREATE TABLE IF NOT EXISTS engine_sandbox_toggle (
+    ("grape_t_engine_sandbox_toggle", """
+CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_toggle (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     engine_type VARCHAR(64) NOT NULL UNIQUE,
     sandbox_on INTEGER NOT NULL DEFAULT 1,
     created_at TEXT,
     updated_at TEXT
 )"""),
-    ("user_llm_credentials", """
-CREATE TABLE IF NOT EXISTS user_llm_credentials (
+    ("grape_t_user_llm_credentials", """
+CREATE TABLE IF NOT EXISTS grape_t_user_llm_credentials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     provider VARCHAR(64) NOT NULL,
@@ -8779,8 +8779,8 @@ CREATE TABLE IF NOT EXISTS user_llm_credentials (
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE(user_id, engine_type)
 )"""),
-    ("repo_llm_credentials", """
-CREATE TABLE IF NOT EXISTS repo_llm_credentials (
+    ("grape_t_repo_llm_credentials", """
+CREATE TABLE IF NOT EXISTS grape_t_repo_llm_credentials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_key VARCHAR(512) NOT NULL,
     engine_type VARCHAR(64) NOT NULL DEFAULT 'common',
@@ -8792,8 +8792,8 @@ CREATE TABLE IF NOT EXISTS repo_llm_credentials (
     updated_by VARCHAR(64) DEFAULT '',
     updated_at TEXT
 )"""),
-    ("egress_admin_policy", """
-CREATE TABLE IF NOT EXISTS egress_admin_policy (
+    ("grape_t_egress_admin_policy", """
+CREATE TABLE IF NOT EXISTS grape_t_egress_admin_policy (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     skill_name    VARCHAR(191) NOT NULL,
     skill_scope   VARCHAR(64) NOT NULL DEFAULT 'official',
@@ -8805,8 +8805,8 @@ CREATE TABLE IF NOT EXISTS egress_admin_policy (
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(skill_name, skill_scope)
 )"""),
-    ("engine_sandbox_config", """
-CREATE TABLE IF NOT EXISTS engine_sandbox_config (
+    ("grape_t_engine_sandbox_config", """
+CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_config (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     runtime_id    INTEGER NOT NULL,
     engine_name   TEXT NOT NULL,
@@ -8817,8 +8817,8 @@ CREATE TABLE IF NOT EXISTS engine_sandbox_config (
     UNIQUE(runtime_id, engine_name),
     FOREIGN KEY (runtime_id) REFERENCES agent_runtimes(id)
 )"""),
-    ("engine_sandbox_paths", """
-CREATE TABLE IF NOT EXISTS engine_sandbox_paths (
+    ("grape_t_engine_sandbox_paths", """
+CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_paths (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     backend_name  TEXT NOT NULL,
     path          TEXT NOT NULL,
@@ -8827,8 +8827,8 @@ CREATE TABLE IF NOT EXISTS engine_sandbox_paths (
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(backend_name, path)
 )"""),
-    ("engine_sandbox_whitelist", """
-CREATE TABLE IF NOT EXISTS engine_sandbox_whitelist (
+    ("grape_t_engine_sandbox_whitelist", """
+CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_whitelist (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     backend_name  TEXT NOT NULL,
     domain        TEXT NOT NULL,
@@ -8840,8 +8840,8 @@ CREATE TABLE IF NOT EXISTS engine_sandbox_whitelist (
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(backend_name, domain, method, scheme, port)
 )"""),
-    ("task_proxy_tokens", """
-CREATE TABLE IF NOT EXISTS task_proxy_tokens (
+    ("grape_t_task_proxy_tokens", """
+CREATE TABLE IF NOT EXISTS grape_t_task_proxy_tokens (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id      TEXT NOT NULL,
     token_hash   TEXT NOT NULL,
@@ -8850,8 +8850,8 @@ CREATE TABLE IF NOT EXISTS task_proxy_tokens (
     expires_at   TEXT,
     UNIQUE(task_id, backend_name)
 )"""),
-    ("egress_admin_exception", """
-CREATE TABLE IF NOT EXISTS egress_admin_exception (
+    ("grape_t_egress_admin_exception", """
+CREATE TABLE IF NOT EXISTS grape_t_egress_admin_exception (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     host          VARCHAR(255) NOT NULL,
     host_type     VARCHAR(16) NOT NULL,
@@ -8919,7 +8919,7 @@ def _migration_sandbox_control_plane_schema() -> None:
         for domain, method, path_prefix, scheme, port in _OFFICIAL_DOMAINS:
             try:
                 c.execute(
-                    "INSERT OR IGNORE INTO engine_sandbox_whitelist "
+                    "INSERT OR IGNORE INTO grape_t_engine_sandbox_whitelist "
                     "(backend_name, domain, method, path_prefix, scheme, port) VALUES (?, ?, ?, ?, ?, ?)",
                     ("*", domain, method, path_prefix, scheme, port))
             except Exception:
@@ -9173,7 +9173,7 @@ register_migration(
 
 
 def _migration_engine_template_binding_widen(conn=None) -> dict:
-    """[202611160001 safe] engine_template_binding 唯一约束三元组化（spec B1 兑现）。
+    """[202611160001 safe] grape_t_engine_template_binding 唯一约束三元组化（spec B1 兑现）。
 
     多模板共用引擎 spec（docs/sandbox/platform/multi-template-per-engine-spec.md B1）
     2026-11-04 已裁定 UNIQUE(provider_id, engine_type) → (provider_id, engine_type,
@@ -9195,7 +9195,7 @@ def _migration_engine_template_binding_widen(conn=None) -> dict:
         try:
             rows = c.execute(
                 "SELECT index_name FROM information_schema.statistics "
-                "WHERE table_schema=DATABASE() AND table_name='engine_template_binding' "
+                "WHERE table_schema=DATABASE() AND table_name='grape_t_engine_template_binding' "
                 "GROUP BY index_name HAVING COUNT(*)=2 "
                 "AND SUM(column_name IN ('provider_id','engine_type'))=2 "
                 "AND SUM(column_name='template_id')=0"
@@ -9209,14 +9209,14 @@ def _migration_engine_template_binding_widen(conn=None) -> dict:
             return report
         _idx = rows[0][0]
         try:
-            c.execute(f"ALTER TABLE engine_template_binding DROP INDEX `{_idx}`")
-            c.execute("ALTER TABLE engine_template_binding ADD UNIQUE KEY "
+            c.execute(f"ALTER TABLE grape_t_engine_template_binding DROP INDEX `{_idx}`")
+            c.execute("ALTER TABLE grape_t_engine_template_binding ADD UNIQUE KEY "
                       "`uq_provider_engine_template` (provider_id, engine_type, template_id)")
             conn.commit()
             report.update(action="widened", detail=f"dropped {_idx}, added uq_provider_engine_template")
         except Exception as e:
             conn.rollback()
-            raise RuntimeError(f"engine_template_binding widen failed: {e}") from e
-    log.info(f"[migration 202611160001] engine_template_binding widen: {report['action']} ({report['detail']})")
+            raise RuntimeError(f"grape_t_engine_template_binding widen failed: {e}") from e
+    log.info(f"[migration 202611160001] grape_t_engine_template_binding widen: {report['action']} ({report['detail']})")
     return report
 

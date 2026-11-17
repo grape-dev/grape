@@ -3,8 +3,8 @@
 背景（用户评论 id=198288127 / QA 复核 id=198288768）：
 - 云引擎派生种子的 provider_id/template_id 两个自增 id 分量在分布式与库恢复场景不可靠
   （多主控聚合撞号 / 部分恢复 id 错配 / 表重建 id 全量换值）。
-- 升格方案（与 credential_uid 同构）：i5 侧 sandbox_provider_config 加 provider_uid、
-  sandbox_templates 加 template_uid（UUIDv4，创建时一次性生成、终身不变，backfill 沿
+- 升格方案（与 credential_uid 同构）：i5 侧 grape_t_sandbox_provider_config 加 provider_uid、
+  grape_t_sandbox_templates 加 template_uid（UUIDv4，创建时一次性生成、终身不变，backfill 沿
   旧行值按旧 id 映射拷贝、不新发 UUID），worker 注册 payload runtime 条目透传 uid；
   grape 侧种子切换为
   ``credential_uid|engine_type|scope|owner_id|host_name|provider_uid|template_uid``。

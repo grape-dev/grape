@@ -1,4 +1,4 @@
-"""AES-256-GCM 加密/解密工具——用于 user_llm_credentials.api_key_enc。
+"""AES-256-GCM 加密/解密工具——用于 grape_t_user_llm_credentials.api_key_enc。
 
 AES-256-GCM 是 AEAD（认证加密）——加密和认证一体化，比 CBC + HMAC 更安全更高效。
 密钥从环境变量 GRAPE_DB_ENCRYPTION_KEY 读取（32 字节 base64url 编码）。

@@ -15,8 +15,8 @@ def select_llm_cred(cursor, user_id: int, engine_type: str = "",
         cursor: DB cursor（调用方负责 db_lock）
         user_id: 用户 ID（mode='user' 用）
         engine_type: 引擎类型(hermes/opencode)，空串走通用兜底
-        mode: 'user'=用户凭据（user_llm_credentials，原行为）|
-              'repo'=仓库凭据（repo_llm_credentials，仓库资产）
+        mode: 'user'=用户凭据（grape_t_user_llm_credentials，原行为）|
+              'repo'=仓库凭据（grape_t_repo_llm_credentials，仓库资产）
         repo_key: mode='repo' 时的仓库键（如 gitcode:owner/repo）
 
     Returns:
@@ -24,14 +24,14 @@ def select_llm_cred(cursor, user_id: int, engine_type: str = "",
         注意: engine_type='common' 时第一段等价于第二段，不影响结果。
         **跨 mode 零回退**（用户裁定：仓库取不到不得降级用户级，反之亦然）。
     """
-    # [repo-llm-credential] mode='repo'：查 repo_llm_credentials（表内两级同 user 版）
+    # [repo-llm-credential] mode='repo'：查 grape_t_repo_llm_credentials（表内两级同 user 版）
     if mode == "repo":
         if not repo_key:
             return None
         if engine_type:
             cursor.execute(
                 "SELECT provider, api_key_enc, base_url, model "
-                "FROM repo_llm_credentials "
+                "FROM grape_t_repo_llm_credentials "
                 "WHERE repo_key=? AND engine_type=? AND enabled=1 LIMIT 1",
                 (repo_key, engine_type),
             )
@@ -41,7 +41,7 @@ def select_llm_cred(cursor, user_id: int, engine_type: str = "",
         # repo 版通用兜底（common）
         cursor.execute(
             "SELECT provider, api_key_enc, base_url, model "
-            "FROM repo_llm_credentials "
+            "FROM grape_t_repo_llm_credentials "
             "WHERE repo_key=? AND engine_type='common' AND enabled=1 LIMIT 1",
             (repo_key,),
         )
@@ -54,7 +54,7 @@ def select_llm_cred(cursor, user_id: int, engine_type: str = "",
     if engine_type:
         cursor.execute(
             "SELECT provider, api_key_enc, base_url, model "
-            "FROM user_llm_credentials "
+            "FROM grape_t_user_llm_credentials "
             "WHERE user_id=? AND engine_type=? AND enabled=1 LIMIT 1",
             (user_id, engine_type),
         )
@@ -65,7 +65,7 @@ def select_llm_cred(cursor, user_id: int, engine_type: str = "",
     # ② 通用兜底
     cursor.execute(
         "SELECT provider, api_key_enc, base_url, model "
-        "FROM user_llm_credentials "
+        "FROM grape_t_user_llm_credentials "
         "WHERE user_id=? AND engine_type='common' AND enabled=1 LIMIT 1",
         (user_id,),
     )
@@ -80,7 +80,7 @@ def select_llm_cred(cursor, user_id: int, engine_type: str = "",
     # → "No LLM provider configured"）。对齐本地引擎能力，两级查不到即兜底。
     cursor.execute(
         "SELECT provider, api_key_enc, base_url, model "
-        "FROM user_llm_credentials "
+        "FROM grape_t_user_llm_credentials "
         "WHERE engine_type='common' AND enabled=1 LIMIT 1",
     )
     row = cursor.fetchone()

@@ -60,7 +60,7 @@ class SandboxRepository:
         return "", "", 0
 
     def query_llm_env(self, user_id: int, engine_type: str = "") -> dict[str, str]:
-        """查 user_llm_credentials 拿 LLM 凭据。两级 fallback: 引擎专属 → 通用兜底。
+        """查 grape_t_user_llm_credentials 拿 LLM 凭据。两级 fallback: 引擎专属 → 通用兜底。
 
         Args:
             user_id: 用户 ID
@@ -89,7 +89,7 @@ class SandboxRepository:
         return {}
 
     def query_sandbox_config(self, runtime_id: int, engine_name: str) -> tuple[str, str]:
-        """查 engine_sandbox_config 拿 sandbox_mode + degrade_policy。
+        """查 grape_t_engine_sandbox_config 拿 sandbox_mode + degrade_policy。
 
         Returns:
             (mode_str, degrade_str) — 查不到返回 ("", "")
@@ -98,7 +98,7 @@ class SandboxRepository:
             db, db_lock = self._get_session()
             with db_lock:
                 row = db.execute(
-                    "SELECT sandbox_mode, degrade_policy FROM engine_sandbox_config "
+                    "SELECT sandbox_mode, degrade_policy FROM grape_t_engine_sandbox_config "
                     "WHERE runtime_id=? AND engine_name=?",
                     (runtime_id, engine_name)
                 ).fetchone()
@@ -128,7 +128,7 @@ class SandboxRepository:
         return {}
 
     def query_sandbox_template(self, engine_name: str, runtime_id: int | None = None) -> tuple[str, str]:
-        """查沙箱模板——先查 sandbox_templates 表，再 fallback engine_sandbox_config。
+        """查沙箱模板——先查 grape_t_sandbox_templates 表，再 fallback grape_t_engine_sandbox_config。
 
         Returns:
             (template_id, provider_name) — 查不到返回 ("", "")
@@ -148,7 +148,7 @@ class SandboxRepository:
                             f"WHEN ? THEN {i}" for i, _ in enumerate(_cloud_platforms)
                         )
                         c.execute(
-                            f"SELECT template_id, provider FROM sandbox_templates "
+                            f"SELECT template_id, provider FROM grape_t_sandbox_templates "
                             f"WHERE engines LIKE ? AND enabled=1 AND last_check_status='ok' "
                             f"ORDER BY "
                             f"  CASE provider {_case_parts} ELSE 999 END, "
@@ -159,7 +159,7 @@ class SandboxRepository:
                         row = c.fetchone()
                         if row:
                             return row[0] or "", row[1] or ""
-                # fallback：engine_sandbox_config 旧表（查 sandbox_provider）
+                # fallback：grape_t_engine_sandbox_config 旧表（查 sandbox_provider）
                 from src.domains.runtime.agents.sandbox.backends import get_cloud_platforms as _get_cp
                 _cloud_list = _get_cp()
                 if not _cloud_list:
@@ -167,14 +167,14 @@ class SandboxRepository:
                 _in_placeholders = ",".join("?" * len(_cloud_list))
                 if runtime_id is not None and engine_name:
                     c.execute(
-                        f"SELECT sandbox_provider FROM engine_sandbox_config "
+                        f"SELECT sandbox_provider FROM grape_t_engine_sandbox_config "
                         f"WHERE runtime_id=? AND engine_name=? "
                         f"AND sandbox_provider IN ({_in_placeholders})",
                         (runtime_id, engine_name, *_cloud_list),
                     )
                 else:
                     c.execute(
-                        f"SELECT sandbox_provider FROM engine_sandbox_config "
+                        f"SELECT sandbox_provider FROM grape_t_engine_sandbox_config "
                         f"WHERE sandbox_provider IN ({_in_placeholders}) LIMIT 1",
                         tuple(_cloud_list)
                     )
@@ -186,7 +186,7 @@ class SandboxRepository:
         return "", ""
 
     def make_db_state_reporter(self) -> Callable:
-        """构造 DB 版 state_reporter——写 cloud_sandboxes 表。
+        """构造 DB 版 state_reporter——写 grape_t_cloud_sandboxes 表。
 
         返回的 reporter 每次调用时创建短生命周期 session（with db_lock），
         不长期持有 DB 连接。测试时可注入 mock session_factory。
@@ -204,7 +204,7 @@ class SandboxRepository:
                     c = db.cursor()
                     if state == "creating":
                         c.execute(
-                            "INSERT OR IGNORE INTO cloud_sandboxes "
+                            "INSERT OR IGNORE INTO grape_t_cloud_sandboxes "
                             "(issue_id, repo_key, sandbox_id, provider, state, created_at, last_refresh_at, agent_installed) "
                             "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
                             (issue_id, repo_key, sandbox_id, provider, state, _ts, _ts),
@@ -212,26 +212,26 @@ class SandboxRepository:
                         # UPDATE 按 sandbox_id（每环节新建，sandbox_id 全局唯一）
                         if sandbox_id:
                             c.execute(
-                                "UPDATE cloud_sandboxes SET provider=?, state=?, last_refresh_at=? "
+                                "UPDATE grape_t_cloud_sandboxes SET provider=?, state=?, last_refresh_at=? "
                                 "WHERE sandbox_id=?",
                                 (provider, state, _ts, sandbox_id),
                             )
                     else:
                         if last_refresh_at:
                             c.execute(
-                                "UPDATE cloud_sandboxes SET state=?, last_refresh_at=? "
+                                "UPDATE grape_t_cloud_sandboxes SET state=?, last_refresh_at=? "
                                 "WHERE sandbox_id=?",
                                 (state, last_refresh_at, sandbox_id),
                             )
                         else:
                             c.execute(
-                                "UPDATE cloud_sandboxes SET state=? "
+                                "UPDATE grape_t_cloud_sandboxes SET state=? "
                                 "WHERE sandbox_id=?",
                                 (state, sandbox_id),
                             )
                         if agent_installed is not None:
                             c.execute(
-                                "UPDATE cloud_sandboxes SET agent_installed=? "
+                                "UPDATE grape_t_cloud_sandboxes SET agent_installed=? "
                                 "WHERE sandbox_id=?",
                                 (agent_installed, sandbox_id),
                             )

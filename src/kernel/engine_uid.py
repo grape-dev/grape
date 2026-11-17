@@ -56,7 +56,7 @@ def cloud_anchor_from_runtime_info(rt: dict) -> tuple:
     - provider_id（不变的平台侧 Provider 主键）
     - template_id（别名 template_db_id，模板库自增 id，模板改名不影响）
     - provider_uid / template_uid（Issue #868 种子分量 id→uid 升格：i5 侧
-      sandbox_provider_config.provider_uid / sandbox_templates.template_uid，
+      grape_t_sandbox_provider_config.provider_uid / grape_t_sandbox_templates.template_uid，
       UUIDv4 创建时一次性生成终身不变；升格后 id 可不透传，uid 已足够定位行）
 
     返回五元组 ``(engine_type, provider_id, template_id, provider_uid, template_uid)``。

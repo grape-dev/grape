@@ -1,4 +1,4 @@
-"""engine_template_binding 三元组唯一约束守卫（spec B1 兑现 / 迁移 202611160001）。
+"""grape_t_engine_template_binding 三元组唯一约束守卫（spec B1 兑现 / 迁移 202611160001）。
 
 背景（多模板共用引擎 spec docs/sandbox/platform/multi-template-per-engine-spec.md B1）：
 - 建表 DDL 曾残留窄 UNIQUE(provider_id, engine_type)，与 provider-report handler 的
@@ -21,14 +21,14 @@ def _binding_ddl():
         val = getattr(db_setup, attr, None)
         if isinstance(val, list):
             for item in val:
-                if isinstance(item, tuple) and len(item) == 2 and item[0] == "engine_template_binding":
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "grape_t_engine_template_binding":
                     return item[1]
     return None
 
 
 def test_binding_ddl_is_3tuple_unique():
     ddl = _binding_ddl()
-    assert ddl, "engine_template_binding 建表 DDL 不在 _TABLES"
+    assert ddl, "grape_t_engine_template_binding 建表 DDL 不在 _TABLES"
     assert "UNIQUE(provider_id, engine_type, template_id)" in ddl, \
         "spec B1：唯一约束必须是三元组 (provider_id, engine_type, template_id)"
     # 窄约束残留检测：UNIQUE(provider_id, engine_type) 不以 template_id 收尾
@@ -42,7 +42,7 @@ def test_migration_sqlite_safe_skip(tmp_path):
     from src.api import db_setup
     c = sqlite3.connect(str(tmp_path / "mig.db"))
     c.executescript("""
-    CREATE TABLE engine_template_binding (
+    CREATE TABLE grape_t_engine_template_binding (
         id INTEGER PRIMARY KEY, provider_id INTEGER NOT NULL,
         engine_type VARCHAR(64) NOT NULL, template_id INTEGER NOT NULL,
         status VARCHAR(32) DEFAULT '', engine_version VARCHAR(64) DEFAULT '',
@@ -62,4 +62,4 @@ def test_handler_upsert_matches_3tuple():
     import inspect
     from src.domains.runtime.routes import runtime as rt
     src = inspect.getsource(rt.sandbox_provider_report)
-    assert "SELECT id FROM engine_template_binding WHERE provider_id=? AND engine_type=? AND template_id=?" in src
+    assert "SELECT id FROM grape_t_engine_template_binding WHERE provider_id=? AND engine_type=? AND template_id=?" in src

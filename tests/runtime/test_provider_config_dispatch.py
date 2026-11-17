@@ -418,12 +418,12 @@ class TestProviderConfigsEndpoint:
         from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.cursor().execute("DELETE FROM runtime_credentials")
-            db.cursor().execute("DELETE FROM sandbox_provider_config")
+            db.cursor().execute("DELETE FROM grape_t_sandbox_provider_config")
             db.commit()
         yield
         with db_lock:
             db.cursor().execute("DELETE FROM runtime_credentials")
-            db.cursor().execute("DELETE FROM sandbox_provider_config")
+            db.cursor().execute("DELETE FROM grape_t_sandbox_provider_config")
             db.commit()
 
     def _seed_provider_config(self, cred_id=None):
@@ -434,7 +434,7 @@ class TestProviderConfigsEndpoint:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "INSERT INTO sandbox_provider_config (platform, endpoint, api_key_enc, extra_config, enabled, runtime_credential_id) "
+                "INSERT INTO grape_t_sandbox_provider_config (platform, endpoint, api_key_enc, extra_config, enabled, runtime_credential_id) "
                 "VALUES (?,?,?,?,1,?)",
                 ("devbox", "https://devbox-test.example.com",
                  encrypt("db-key-456"),

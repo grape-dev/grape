@@ -1265,7 +1265,7 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
                 c.execute(
                     "SELECT rc.scope, rc.repo_key FROM agent_tasks t "
                     "LEFT JOIN agent_runtimes r ON t.runtime_id=r.id "
-                    "LEFT JOIN sandbox_provider_config spc ON spc.id = "
+                    "LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = "
                     "  json_extract(r.runtime_info, '$.provider_id') "
                     "LEFT JOIN runtime_credentials rc ON rc.id = spc.runtime_credential_id "
                     "WHERE t.id=?",
@@ -3233,7 +3233,7 @@ def _check_task_access(task_id: str, cred: CredentialContext) -> int:
 
 @router.post("/tasks/{task_id}/sandbox-status")
 def runtime_sandbox_status(task_id: str, body: SandboxStatusBody, cred: CredentialContext = Depends(_require_credential_ctx)):
-    """[沙箱迁移] cloud_worker 上报沙箱创建/状态变更（无 DB，通过此端点写 cloud_sandboxes 表）。
+    """[沙箱迁移] cloud_worker 上报沙箱创建/状态变更（无 DB，通过此端点写 grape_t_cloud_sandboxes 表）。
 
     - state=killed → UPDATE state='killed'（P2-14：不 DELETE，防 fire-and-forget 乱序复活）
     - 新沙箱创建 → 同 task_id 旧 running/creating 标 stale
@@ -3246,17 +3246,17 @@ def runtime_sandbox_status(task_id: str, body: SandboxStatusBody, cred: Credenti
             c = db.cursor()
             if body.state == 'killed':
                 c.execute(
-                    "UPDATE cloud_sandboxes SET state='killed', last_refresh_at=? WHERE sandbox_id=?",
+                    "UPDATE grape_t_cloud_sandboxes SET state='killed', last_refresh_at=? WHERE sandbox_id=?",
                     (_now, body.sandbox_id),
                 )
                 db.commit()
                 return {"status": "ok"}
             c.execute(
-                "UPDATE cloud_sandboxes SET state='stale' "
+                "UPDATE grape_t_cloud_sandboxes SET state='stale' "
                 "WHERE task_id=? AND state IN ('running', 'creating') AND sandbox_id != ?",
                 (task_id, body.sandbox_id))
             c.execute(
-                "INSERT OR IGNORE INTO cloud_sandboxes "
+                "INSERT OR IGNORE INTO grape_t_cloud_sandboxes "
                 "(issue_id, repo_key, sandbox_id, provider, provider_id, state, created_at, last_refresh_at, agent_installed, task_id, created_by, "
                 "template_id, template_name, engine_type, last_error) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -3267,7 +3267,7 @@ def runtime_sandbox_status(task_id: str, body: SandboxStatusBody, cred: Credenti
             )
             # 模板/引擎快照列不随 UPDATE 覆盖（建箱时固化；老上报无值时补写）
             c.execute(
-                "UPDATE cloud_sandboxes SET provider=?, state=?, last_refresh_at=?, agent_installed=?, "
+                "UPDATE grape_t_cloud_sandboxes SET provider=?, state=?, last_refresh_at=?, agent_installed=?, "
                 "template_id=CASE WHEN template_id='' THEN ? ELSE template_id END, "
                 "template_name=CASE WHEN template_name='' THEN ? ELSE template_name END, "
                 "engine_type=CASE WHEN engine_type='' THEN ? ELSE engine_type END, "
@@ -3329,7 +3329,7 @@ def runtime_list_cloud_sandboxes(
         if repo_key:
             check_repo_access(user, repo_key)
             params = [repo_key] + extra_params
-            c.execute("SELECT COUNT(*) FROM cloud_sandboxes s WHERE s.repo_key=?" + extra_where, tuple(params))
+            c.execute("SELECT COUNT(*) FROM grape_t_cloud_sandboxes s WHERE s.repo_key=?" + extra_where, tuple(params))
             total = c.fetchone()[0]
             offset = (page - 1) * page_size
             c.execute(
@@ -3338,10 +3338,10 @@ def runtime_list_cloud_sandboxes(
                 "s.task_id, s.created_by, u.username, t.event_seq, ar.name, ar.runtime_info, "
                 "s.template_id, s.template_name, s.engine_type, s.last_error, "
                 "COALESCE(rc2.name, s.provider) "
-                "FROM cloud_sandboxes s LEFT JOIN user_accounts u ON s.created_by=u.id "
+                "FROM grape_t_cloud_sandboxes s LEFT JOIN user_accounts u ON s.created_by=u.id "
                 "LEFT JOIN agent_tasks t ON t.id = s.task_id "
                 "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
-                "LEFT JOIN sandbox_provider_config spc ON spc.id = s.provider_id "
+                "LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = s.provider_id "
                 "LEFT JOIN runtime_credentials rc2 ON rc2.id = spc.runtime_credential_id "
                 "WHERE s.repo_key=?" + extra_where +
                 " ORDER BY s.created_at DESC LIMIT ? OFFSET ?",
@@ -3366,7 +3366,7 @@ def runtime_list_cloud_sandboxes(
             ]
         else:
             c.execute(
-                "SELECT COUNT(*) FROM cloud_sandboxes s "
+                "SELECT COUNT(*) FROM grape_t_cloud_sandboxes s "
                 "LEFT JOIN agent_tasks t ON t.id = s.task_id "
                 "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id"
                 + ((" WHERE " + " AND ".join(extra_conditions)) if extra_conditions else ""),
@@ -3378,10 +3378,10 @@ def runtime_list_cloud_sandboxes(
                 "s.agent_installed, s.kill_attempts, s.created_at, s.last_refresh_at, "
                 "s.task_id, s.created_by, u.username, t.event_seq, ar.name, ar.runtime_info, "
                 "s.template_id, s.template_name, s.engine_type, s.last_error, COALESCE(rc2.name, s.provider) "
-                "FROM cloud_sandboxes s LEFT JOIN user_accounts u ON s.created_by=u.id "
+                "FROM grape_t_cloud_sandboxes s LEFT JOIN user_accounts u ON s.created_by=u.id "
                 "LEFT JOIN agent_tasks t ON t.id = s.task_id "
                 "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
-                "LEFT JOIN sandbox_provider_config spc ON spc.id = s.provider_id "
+                "LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = s.provider_id "
                 "LEFT JOIN runtime_credentials rc2 ON rc2.id = spc.runtime_credential_id "
                 + ((" WHERE " + " AND ".join(extra_conditions)) if extra_conditions else "") +
                 " ORDER BY s.created_at DESC LIMIT ? OFFSET ?",
@@ -3413,14 +3413,14 @@ def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_
     from src.api.deps import check_repo_access
     with db_lock:
         c = db.cursor()
-        # [provider 列语义修复 2026-10-30] cloud_sandboxes.provider 列存引擎名第三段
+        # [provider 列语义修复 2026-10-30] grape_t_cloud_sandboxes.provider 列存引擎名第三段
         # (=凭据名规整化, 实测 'cubesandbox-s1')——非 registry 的 platform 键。
         # 统一经 provider_id JOIN spc.platform 取键(与模板检查链路同款修法);
         # provider_id 缺失的旧行回退 provider 列原文(可能仍失败, 报错可见)。
         c.execute(
             "SELECT cs.provider, cs.state, cs.repo_key, cs.provider_id, "
             "spc.platform "
-            "FROM cloud_sandboxes cs LEFT JOIN sandbox_provider_config spc ON spc.id = cs.provider_id "
+            "FROM grape_t_cloud_sandboxes cs LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = cs.provider_id "
             "WHERE cs.sandbox_id=?", (sandbox_id,))
         row = c.fetchone()
     if not row:
@@ -3442,7 +3442,7 @@ def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_
             if success:
                 with db_lock:
                     c = db.cursor()
-                    c.execute("UPDATE cloud_sandboxes SET state='killed', last_refresh_at=? WHERE sandbox_id=?",
+                    c.execute("UPDATE grape_t_cloud_sandboxes SET state='killed', last_refresh_at=? WHERE sandbox_id=?",
                               (datetime.now(timezone.utc).isoformat(), sandbox_id))
                     db.commit()
                 return {"status": "killed"}
@@ -3457,7 +3457,7 @@ def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_
 
 @router.post("/tasks/{task_id}/proxy-token")
 def runtime_issue_proxy_token(task_id: str, cred: CredentialContext = Depends(_require_credential_ctx)):
-    """[沙箱迁移] cloud_worker 签发 proxy token（无 DB，通过 HTTP API 写 task_proxy_tokens 表）。"""
+    """[沙箱迁移] cloud_worker 签发 proxy token（无 DB，通过 HTTP API 写 grape_t_task_proxy_tokens 表）。"""
     _check_task_access(task_id, cred)
     try:
         from src.domains.runtime.agents.sandbox.token import issue_proxy_token, TokenIssueError
@@ -3509,7 +3509,7 @@ def runtime_provider_configs(cred: CredentialContext = Depends(_require_credenti
         # [范围由凭据承担] 附带 credential_scope（cloud_worker claim 全局任务 tags 判定用）
         # [锚简化] 附带 credential_uid（凭据自身稳定键——worker 本地缓存键/工件命名换锚源）
         c.execute("SELECT spc.id, rc.name AS name, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.max_sandboxes, rc.scope, rc.credential_uid "
-                  "FROM sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id WHERE spc.enabled=1 AND spc.runtime_credential_id=?",
+                  "FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id WHERE spc.enabled=1 AND spc.runtime_credential_id=?",
                   (cred.id,))
         rows = c.fetchall()
     for pid, name, platform, endpoint, api_key_enc, extra_json, max_sandboxes, credential_scope, _cred_uid in rows:
@@ -3545,17 +3545,17 @@ def runtime_provider_active_sandboxes(provider_id: int,
     """
     with db_lock:
         c = db.cursor()
-        _own = c.execute("SELECT 1 FROM sandbox_provider_config WHERE id=? AND runtime_credential_id=?",
+        _own = c.execute("SELECT 1 FROM grape_t_sandbox_provider_config WHERE id=? AND runtime_credential_id=?",
                          (provider_id, cred.id)).fetchone()
     if not _own:
         raise HTTPException(status_code=403,
                             detail={"code": 403, "message": "provider not bound to this credential"})
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT COUNT(*) FROM cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')",
+        c.execute("SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')",
                   (provider_id,))
         active_count = c.fetchone()[0] or 0
-        c.execute("SELECT max_sandboxes FROM sandbox_provider_config WHERE id=?", (provider_id,))
+        c.execute("SELECT max_sandboxes FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
         _row = c.fetchone()
         max_sandboxes = _row[0] if _row else 10
     return {"active_count": active_count, "max_sandboxes": max_sandboxes or 10}
@@ -3585,13 +3585,13 @@ def runtime_cloud_runtimes(cred: CredentialContext = Depends(_require_credential
 
 @router.get("/whitelist", operation_id="runtime_whitelist",
             summary="Dispatch sandbox whitelist domains to worker",
-            description="Returns distinct domains from engine_sandbox_whitelist table. Worker uses this to build NetworkProxy whitelist.")
+            description="Returns distinct domains from grape_t_engine_sandbox_whitelist table. Worker uses this to build NetworkProxy whitelist.")
 def runtime_whitelist(cred: CredentialContext = Depends(_require_credential_ctx)):
     """[沙箱迁移] 下发沙箱白名单域名给 worker（worker 不直接查 DB）。"""
     domains = []
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT DISTINCT domain FROM engine_sandbox_whitelist WHERE backend_name='*'")
+        c.execute("SELECT DISTINCT domain FROM grape_t_engine_sandbox_whitelist WHERE backend_name='*'")
         rows = c.fetchall()
     for row in rows:
         if row[0]:
@@ -3601,14 +3601,14 @@ def runtime_whitelist(cred: CredentialContext = Depends(_require_credential_ctx)
 
 @router.get("/sandbox-paths", operation_id="runtime_sandbox_paths",
             summary="Dispatch sandbox paths to worker",
-            description="Returns engine_sandbox_paths for a given backend_name. Worker uses this to build bwrap mount paths.")
+            description="Returns grape_t_engine_sandbox_paths for a given backend_name. Worker uses this to build bwrap mount paths.")
 def runtime_sandbox_paths(backend_name: str = "",
                           cred: CredentialContext = Depends(_require_credential_ctx)):
     """[沙箱迁移] 下发沙箱路径配置给 worker。"""
     paths = []
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT path, access FROM engine_sandbox_paths WHERE backend_name=?", (backend_name,))
+        c.execute("SELECT path, access FROM grape_t_engine_sandbox_paths WHERE backend_name=?", (backend_name,))
         rows = c.fetchall()
     for row in rows:
         paths.append({"path": row[0], "access": row[1]})
@@ -3634,11 +3634,11 @@ def runtime_skill_egress(skill_name: str = "", skill_id: int = 0,
                 pass
         if skill_name:
             try:
-                c.execute("SELECT policy FROM egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1",
+                c.execute("SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1",
                           (skill_name,))
                 row = c.fetchone()
                 if not row:
-                    c.execute("SELECT policy FROM egress_admin_policy WHERE skill_name='*' LIMIT 1")
+                    c.execute("SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name='*' LIMIT 1")
                     row = c.fetchone()
                 if row:
                     result["admin_policy"] = row[0] or ""
@@ -3647,7 +3647,7 @@ def runtime_skill_egress(skill_name: str = "", skill_id: int = 0,
         try:
             c.execute(
                 "SELECT host, host_type, ports, methods, scope, scope_target, skill_digest "
-                "FROM egress_admin_exception "
+                "FROM grape_t_egress_admin_exception "
                 "WHERE is_active=1 AND (expires_at IS NULL OR expires_at > datetime('now'))")
             for row in c.fetchall():
                 result["admin_exceptions"].append({
@@ -3669,7 +3669,7 @@ def get_engine_sandbox_config(user: dict = Depends(require_no_session_token)):
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT engine_type, sandbox_on FROM engine_sandbox_toggle")
+            c.execute("SELECT engine_type, sandbox_on FROM grape_t_engine_sandbox_toggle")
             for _et, _on in c.fetchall():
                 if _et == "global":
                     _global_on = bool(_on)
@@ -3767,7 +3767,7 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
         # 已 _require_credential（必须 rta_），credential_id 恒>0，兜底为死代码；
         # Provider 只能由「生成沙箱凭据」诞生，生命周期=凭据生命周期。
         c.execute(
-            "SELECT id, api_key_enc, extra_config FROM sandbox_provider_config "
+            "SELECT id, api_key_enc, extra_config FROM grape_t_sandbox_provider_config "
             "WHERE runtime_credential_id=?",
             (credential_id,))
         row = c.fetchone()
@@ -3783,16 +3783,16 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
             # [endpoint 直接入库] 空值不覆盖——endpoint/api_key 权威源在库（生成时入库/
             # 页面编辑），worker 上报已降级为模板补报（不带 endpoint/api_key）
             c.execute(
-                "SELECT endpoint FROM sandbox_provider_config WHERE id=?", (pid,))
+                "SELECT endpoint FROM grape_t_sandbox_provider_config WHERE id=?", (pid,))
             _old_ep = c.fetchone()[0] or ""
             c.execute(
-                "UPDATE sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, updated_by=? WHERE id=?",
+                "UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, updated_by=? WHERE id=?",
                 ((endpoint or _old_ep), _new_key, json.dumps(_merged, ensure_ascii=False), _owner_name or "sandbox-worker", pid))
         else:
             c.execute(
                 # [d1e242cba 对账漏改修复] provider 列已物理删除——INSERT 去掉该列
                 # [范围由凭据承担] INSERT 不带 scope/user_id/repo_key
-                "INSERT INTO sandbox_provider_config (platform, endpoint, api_key_enc, extra_config, "
+                "INSERT INTO grape_t_sandbox_provider_config (platform, endpoint, api_key_enc, extra_config, "
                 "enabled, max_sandboxes, updated_by, runtime_credential_id) VALUES (?,?,?,?,?,?,?,?)",
                 (platform, endpoint,
                  _enc(body.api_key) if body.api_key else "",
@@ -3806,12 +3806,12 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
             _tid = (t.get("template_id") or "").strip()
             if not _tid:
                 continue
-            c.execute("SELECT id FROM sandbox_templates WHERE provider_id=? AND template_id=?", (pid, _tid))
+            c.execute("SELECT id FROM grape_t_sandbox_templates WHERE provider_id=? AND template_id=?", (pid, _tid))
             if c.fetchone():
                 continue
             c.execute(
                 # [04c868c59 对账] provider 列已物理删除——INSERT 去掉该列
-                "INSERT INTO sandbox_templates (name, provider_id, template_id, alias, description, "
+                "INSERT INTO grape_t_sandbox_templates (name, provider_id, template_id, alias, description, "
                 "enabled, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (t.get("alias") or _tid, pid, _tid,
                  t.get("alias") or "", t.get("description") or "", 1, _owner_name or "sandbox-worker",
@@ -3829,12 +3829,12 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
             _te_tid = (te.get("template_id") or "").strip()
             if not _te_tid:
                 continue
-            # 模板 db id（binding 关联的是 sandbox_templates.id 不是平台 hash）
+            # 模板 db id（binding 关联的是 grape_t_sandbox_templates.id 不是平台 hash）
             # [F14 禁用传导 2026-11-13] 一并取 enabled——模板禁用（settings toggle）后，
             # 引擎不注册/绑定不回 detected、存量引擎行下线。此前 toggle 只改
-            # sandbox_templates.enabled，注册链路不读它 → 禁用 75s+ 引擎仍 online
+            # grape_t_sandbox_templates.enabled，注册链路不读它 → 禁用 75s+ 引擎仍 online
             # （E2E 实证），「绑定引擎将下线」承诺无兑现端（凭据卡/引擎卡不同步根因）。
-            c.execute("SELECT id, enabled FROM sandbox_templates WHERE provider_id=? AND template_id=?",
+            c.execute("SELECT id, enabled FROM grape_t_sandbox_templates WHERE provider_id=? AND template_id=?",
                       (pid, _te_tid))
             _tr = c.fetchone()
             if not _tr:
@@ -3844,14 +3844,14 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
             if not _tpl_enabled:
                 # 禁用模板：binding 降级 disabled + 该模板云引擎行下线（幂等，摘除即终态）
                 # [1292 修复 2026-11-14] agent_runtimes.provider_id/template_id 与
-                # engine_template_binding 的写侧均为字符串锚（注册链 UPDATE ... SET
+                # grape_t_engine_template_binding 的写侧均为字符串锚（注册链 UPDATE ... SET
                 # provider_id=? 传 str，见 :531）；读侧比较必须同为字符串——传 int 参数
                 # 会触发 MariaDB 把 TEXT 列 cast 成 DECIMAL，存量 '' 行即 1292
                 # "Truncated incorrect DECIMAL value: ''"（M1 E2E 实测：worker 探测批
                 # provider-report 500，cloud 引擎注册链整链阻断）。binding 表列型为
                 # int 时字符串比较 MariaDB 仍数值兼容，不受影响。
                 c.execute(
-                    "UPDATE engine_template_binding SET status='disabled', updated_at=? "
+                    "UPDATE grape_t_engine_template_binding SET status='disabled', updated_at=? "
                     "WHERE provider_id=? AND template_id=? AND status IN ('detected', '')",
                     (_now_iso, pid, _tpl_db_id))
                 c.execute(
@@ -3869,7 +3869,7 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
                 # manual 恒赢：同 (provider_id, engine_type) 存在任意非 detected binding → 跳过
                 # （manual 语义按引擎级——手工绑过的引擎整体不被探测改写）
                 _manual_hits = c.execute(
-                    "SELECT COUNT(*) FROM engine_template_binding WHERE provider_id=? AND engine_type=? "
+                    "SELECT COUNT(*) FROM grape_t_engine_template_binding WHERE provider_id=? AND engine_type=? "
                     "AND status NOT IN ('detected', '')",
                     (pid, _et)).fetchone()[0]
                 if _manual_hits:
@@ -3881,15 +3881,15 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
                 # 最后遍历的模板胜出，其余模板引擎列恒空（实测 s1/sg：4 模板同装
                 # hermes 只落 1 行 binding）。manual 路径（bind-engine API）本就按
                 # 三元组，仅探测上报这条窄了。
-                c.execute("SELECT id FROM engine_template_binding WHERE provider_id=? AND engine_type=? AND template_id=?",
+                c.execute("SELECT id FROM grape_t_engine_template_binding WHERE provider_id=? AND engine_type=? AND template_id=?",
                           (pid, _et, _tpl_db_id))
                 _br = c.fetchone()
                 if _br:
-                    c.execute("UPDATE engine_template_binding SET status='detected', "
+                    c.execute("UPDATE grape_t_engine_template_binding SET status='detected', "
                               "engine_version=?, updated_at=? WHERE id=?",
                               ((eng.get("version") or "")[:64], _now_iso, _br[0]))
                 else:
-                    c.execute("INSERT INTO engine_template_binding (provider_id, engine_type, template_id, "
+                    c.execute("INSERT INTO grape_t_engine_template_binding (provider_id, engine_type, template_id, "
                               "status, engine_version, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
                               (pid, _et, _tpl_db_id, "detected", (eng.get("version") or "")[:64],
                                _now_iso, _now_iso))
