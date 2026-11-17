@@ -275,7 +275,7 @@ def _isolate_guard_state():
 
 def test_fail_closed_pr_merged_unchanged():
     r = bg.check_push_allowed(REPO_KEY, BRANCH, remote_sha="aaa", pr_state="merged",
-                              pr_number=42, base_branch="weekly-mys")
+                              pr_number=42, base_branch="arch-weekly-11")
     assert r["allowed"] is False and r["reason"] == "pr_merged"
 
 
@@ -318,7 +318,7 @@ def _run_hook_main(monkeypatch, *, lease=None, pr=None, expected=""):
 
 def test_hook_main_exits_1_on_pr_merged(monkeypatch):
     rc = _run_hook_main(monkeypatch,
-                        pr={"state": "merged", "number": 42, "base": "weekly-mys"})
+                        pr={"state": "merged", "number": 42, "base": "arch-weekly-11"})
     assert rc == 1
 
 

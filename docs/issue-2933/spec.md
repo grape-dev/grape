@@ -1,6 +1,6 @@
 # Issue #2933 Spec：只读日志路径下 pre-push 分支守卫不得阻断 push
 
-> 来源：Issue #2933（user feedback #8289）｜目标分支 `weekly-mys`
+> 来源：Issue #2933｜目标分支 `arch-weekly-11`
 
 ## 背景
 

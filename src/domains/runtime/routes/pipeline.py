@@ -1,5 +1,4 @@
 """Pipeline 路由：Issue 工作流聚合展示"""
-import os
 import time
 from fastapi import APIRouter, Depends, Query
 from src.api.deps import require_no_session_token

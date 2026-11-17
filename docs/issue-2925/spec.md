@@ -1,6 +1,6 @@
 # Issue #2925 — `/api/pipeline` 标题兜底有界收敛（需求文档）
 
-> 生成：Coding Agent | 2026-11-17 | 基线分支：weekly-mys
+> 生成：Coding Agent | 2026-11-17 | 基线分支：arch-weekly-11
 
 ## 背景
 
