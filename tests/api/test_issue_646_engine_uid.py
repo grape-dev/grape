@@ -532,12 +532,17 @@ class TestDualReadHelpers:
 class TestEngineUidHelpersDomainRouted:
     """三库独立拓扑回归：mgmt 进程主库**没有** agent_runtimes（归运行域）。
 
-    旧实现直查 `udb.db` → `(1146, "Table 'grape_beta_mgmt.agent_runtimes' doesn't exist")`
-    被 except 吞掉 → 一律 None → 场景保存按 uid 绑定必报「引擎 uid 无效」。
-    本用例把进程主库换成空库并给运行域公开读原语打桩：命中桩即证明不再走进程主库。
+    旧实现直查 `udb.db` → 1146（Table '<mgmt 库>.agent_runtimes' doesn't exist）被
+    except 吞掉 → 一律 None → 场景保存按 uid 绑定必报「引擎 uid 无效」。
+    本组用例把进程主库换成空库并给运行域公开读原语打桩：命中桩即证明不再走进程主库，
+    覆盖四个 helper（uid/id 互转、批量解析、任务快照）与失败告警去重。
     """
 
-    def test_helpers_use_runtime_public_surface(self, monkeypatch):
+    UID = "00000000-0000-4000-8000-000000000000"
+    RID = 42
+
+    @pytest.fixture()
+    def patched(self, monkeypatch):
         import sqlite3
         import threading
         import src.domains.mgmt.user.db as udb
@@ -546,20 +551,57 @@ class TestEngineUidHelpersDomainRouted:
         empty = sqlite3.connect(":memory:")  # 无 agent_runtimes —— 等价 mgmt 库形态
         monkeypatch.setattr(udb, "db", empty, raising=True)
         monkeypatch.setattr(udb, "db_lock", threading.RLock(), raising=True)
-        uid = "6128c333-e4f6-5f9d-9432-d71611313a1b"
+        uid, rid = self.UID, self.RID
 
-        monkeypatch.setattr(_rt, "runtime_ids_by_engine_uids",
-                            lambda uids: [17365 if u == uid else 0 for u in uids], raising=True)
-        monkeypatch.setattr(
-            _rt, "read_one_any",
-            lambda name, params=(): ((uid,) if name == "agent_runtime_engine_uid_by_id"
-                                     and params and params[0] == 17365 else None),
-            raising=True)
+        def fake_ids(uids):
+            return [rid if u == uid else 0 for u in uids]
 
-        assert udb.get_runtime_id_by_engine_uid(uid) == 17365
-        assert udb.get_runtime_id_by_engine_uid(uid.upper()) == 17365  # 大小写归一
-        assert udb.get_engine_uid_by_runtime_id(17365) == uid
-        assert udb.get_runtime_id_by_engine_uid("deadbeef-0000-0000-0000-000000000000") is None
+        def fake_read(name, params=()):
+            if name == "agent_runtime_engine_uid_by_id" and params and params[0] == rid:
+                return (uid,)
+            if name == "agent_runtime_snapshot_by_id" and params and params[0] == rid:
+                return (uid, "example-engine", "example-engine")
+            return None
+
+        monkeypatch.setattr(_rt, "runtime_ids_by_engine_uids", fake_ids, raising=True)
+        monkeypatch.setattr(_rt, "read_one_any", fake_read, raising=True)
+        return udb, uid, rid
+
+    def test_helpers_use_runtime_public_surface(self, patched):
+        udb, uid, rid = patched
+        assert udb.get_runtime_id_by_engine_uid(uid) == rid
+        assert udb.get_runtime_id_by_engine_uid(uid.upper()) == rid  # 大小写归一
+        assert udb.get_engine_uid_by_runtime_id(rid) == uid
+        assert udb.get_runtime_id_by_engine_uid("deadbeef-0000-4000-8000-000000000000") is None
+
+    def test_resolve_engine_refs_domain_routed(self, patched):
+        udb, uid, rid = patched
+        ids, uids = udb.resolve_engine_refs([uid, rid, "not-a-uid"])
+        assert ids == [rid, rid, None]
+        assert uids == [uid, uid, None]
+
+    def test_engine_ref_snapshot_domain_routed(self, patched):
+        import json as _j
+        udb, uid, rid = patched
+        e_uid, name, pool_json = udb.engine_ref_snapshot(rid, "[%d]" % rid)
+        assert e_uid == uid and name == "example-engine"
+        assert _j.loads(pool_json) == [uid]
+
+    def test_lookup_failure_warns_once(self, patched, monkeypatch, caplog):
+        """取数失败不能全静默：同一 (调用点, 错误) 只告警一次，保留可诊断线索。"""
+        udb, uid, rid = patched
+        from src.domains.runtime import public as _rt
+        udb._UID_LOOKUP_WARNED.clear()
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("runtime db unreachable")
+
+        monkeypatch.setattr(_rt, "runtime_ids_by_engine_uids", boom, raising=True)
+        with caplog.at_level("WARNING"):
+            assert udb.get_runtime_id_by_engine_uid(uid) is None
+            assert udb.get_runtime_id_by_engine_uid(uid) is None
+        hits = [r for r in caplog.records if "engine uid lookup failed" in r.getMessage()]
+        assert len(hits) == 1, "同一失败只应告警一次（不刷屏）"
 
 
 # ---------------------------------------------------------------------------

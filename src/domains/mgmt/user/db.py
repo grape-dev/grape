@@ -4237,11 +4237,30 @@ _UID_COLS_CACHE_DB_ID = None
 # ── Issue #646 双读 helper（三库独立拓扑：agent_runtimes 归**运行域**） ──
 # 历史实现在这里直查进程主库 `db`：单库/sqlite 拓扑下就是同一个库，能跑；
 # 三库拆分（GRAPE_DOMAIN_LIB=1）后 mgmt 进程主库没有 agent_runtimes →
-# `(1146, "Table 'grape_beta_mgmt.agent_runtimes' doesn't exist")` 被 except 吞掉 →
-# 一律返回 None。外部表现：场景保存/引擎绑定按 uid 提交必报「引擎 uid 无效」，
+# 1146（Table '<mgmt 库>.agent_runtimes' doesn't exist）被 except 吞掉 → 一律
+# 返回 None。外部表现：场景保存/引擎绑定按 uid 提交必报「引擎 uid 无效」，
 # scene_precheck / 任务快照的 uid 轨道全线静默丢失。
 # 修法：只走运行域公开读原语（`_any_cursor` 自带自有 DSN / 回落进程库两种拓扑），
-# 不再在 mgmt 模块里拼跨域 SQL。
+# 不在 mgmt 模块里拼跨域 SQL；取数失败按「调用点+错误」告警一次，避免把后端
+# 不可达继续伪装成「用户抄错 uid」（同文件其余取数路径均 log.warning）。
+
+_UID_LOOKUP_WARNED: set = set()
+
+
+def _warn_uid_lookup_once(where: str, exc: BaseException) -> None:
+    """uid 双读取数失败去重告警：同一 (调用点, 错误摘要) 只记一次 WARNING。
+
+    这些 helper 的 except 是刻意降级（不阻断保存/建任务），但完全静默会把
+    「运行域库不可达/缺表」与「uid 真不存在」抹成同一个 None，故障只能从
+    400「引擎 uid 无效」反推。去重后既不刷屏也保留可诊断线索。
+    """
+    key = (where, f"{type(exc).__name__}: {str(exc)[:120]}")
+    if key in _UID_LOOKUP_WARNED:
+        return
+    if len(_UID_LOOKUP_WARNED) > 64:
+        _UID_LOOKUP_WARNED.clear()
+    _UID_LOOKUP_WARNED.add(key)
+    log.warning(f"engine uid lookup failed ({where}): {exc}")
 
 
 def get_engine_uid_by_runtime_id(runtime_id: int) -> str | None:
@@ -4250,7 +4269,8 @@ def get_engine_uid_by_runtime_id(runtime_id: int) -> str | None:
         return None
     try:
         row = _rt.read_one_any("agent_runtime_engine_uid_by_id", (int(runtime_id),))
-    except Exception:
+    except Exception as e:
+        _warn_uid_lookup_once("get_engine_uid_by_runtime_id", e)
         return None
     uid = row[0] if row else None
     return str(uid) if uid else None
@@ -4265,7 +4285,8 @@ def get_runtime_id_by_engine_uid(engine_uid: str) -> int | None:
         return None
     try:
         _ids = _rt.runtime_ids_by_engine_uids([_u])
-    except Exception:
+    except Exception as e:
+        _warn_uid_lookup_once("get_runtime_id_by_engine_uid", e)
         return None
     rid = int(_ids[0]) if _ids else 0
     return rid or None
@@ -4289,7 +4310,8 @@ def resolve_engine_refs(refs) -> tuple[list, list]:
             for _u, _rid in zip(_uid_refs, _rt.runtime_ids_by_engine_uids(_uid_refs)):
                 if _rid:
                     _uid_to_id[_u] = int(_rid)
-        except Exception:
+        except Exception as e:
+            _warn_uid_lookup_once("resolve_engine_refs", e)
             _uid_to_id = {}
     ids: list = []
     uids: list = []
@@ -4323,7 +4345,8 @@ def engine_ref_snapshot(runtime_id: int, pool_engine_ids: str = "") -> tuple:
         if row:
             engine_uid = row[0] or None
             snapshot = row[1] or row[2] or ""
-    except Exception:
+    except Exception as e:
+        _warn_uid_lookup_once("engine_ref_snapshot", e)
         engine_uid, snapshot = None, ""
     pool_uid_json = ""
     if pool_engine_ids:
