@@ -61,6 +61,16 @@ def _pack_skill_zip(skill_dir: str) -> bytes:
     return buf.getvalue()
 
 
+def _resolve_skill_category(info: dict, dict_map: dict) -> tuple[int, int]:
+    """按 skill-description.json 的分类 slug 解析 (cat_l1_id, cat_l2_id)。
+
+    解析口径统一在 src.kernel.category（与 scene_sync 共用）；未命中返回 (0, 0)，
+    调用方保留旧值（不写 0 覆盖）。Issue #2761。
+    """
+    from src.kernel.category import resolve_category_slugs  # noqa: PLC0415
+    return resolve_category_slugs(info, dict_map, logger=logger, label="skill_sync")
+
+
 def _sync_skills_to_db(data: dict) -> int:
     """从 skill-description.json 数据同步官方技能元信息到 DB（INSERT/UPDATE，含 category_id）。
 
@@ -87,6 +97,13 @@ def _sync_skills_to_db(data: dict) -> int:
             cat_map = _mgmt_public_cat.skill_category_active_map()
         except Exception as exc:  # noqa: BLE001 - 分类不可用只降级为 category_id=0（与原实现同口径）
             logger.debug(f"skill_category map unavailable, category_id falls back to 0: {exc}")
+        dict_map = {}
+        try:
+            from src.domains.mgmt import public as _mgmt_public_dict  # noqa: PLC0415
+            dict_map = _mgmt_public_dict.category_dict_active_map("skill")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"category_dict map unavailable, keep existing category: {exc}")
+        from src.kernel.tags import MAX_TAGS, encode_tags, merge_tags  # noqa: PLC0415
         for skill_name, info in data.items():
             try:
                 display_name = info.get("name", skill_name)
@@ -97,33 +114,56 @@ def _sync_skills_to_db(data: dict) -> int:
                 category_id = cat_map.get(sub_scene, 0)
                 if sub_scene and category_id == 0:
                     logger.warning(f"skill '{skill_name}' sub_scene='{sub_scene}' has no matching skill_category slug, category_id=0")
+                new_l1, new_l2 = _resolve_skill_category(info, dict_map)
+                raw_tags = info.get("tags")
+                if isinstance(raw_tags, str):
+                    raw_tags = [t for t in raw_tags.replace("，", ",").split(",") if t.strip()]
+                tag_items = [{"name": str(t).strip(), "source": "auto"}
+                             for t in (raw_tags or []) if str(t).strip()]
+                tags_json = (encode_tags(tag_items, limit=MAX_TAGS)
+                             if "tags" in info else None)
+
                 row = c.execute(
-                    "SELECT display_name, description, agent_type, skill_path, file_path, sub_scene, category_id FROM skill WHERE skill_name=? AND scope='official'",
+                    "SELECT display_name, description, agent_type, skill_path, file_path, sub_scene, category_id, cat_l1_id, cat_l2_id, tags FROM skill WHERE skill_name=? AND scope='official'",
                     (skill_name,)
                 ).fetchone()
                 if row:
-                    old_display, old_desc, old_agent, old_path, old_fp, old_sub, old_cat = row
+                    (old_display, old_desc, old_agent, old_path, old_fp, old_sub,
+                     old_cat, old_l1, old_l2, old_tags) = row
+                    # 一级变更时才重置二级（一级未变且来源未给二级时保留旧二级，
+                    # 避免「未命中不覆盖旧值」与跨父级脏数据两种问题）
+                    from src.kernel.category import sync_category_target  # noqa: PLC0415
+                    l1_id, l2_id = sync_category_target(new_l1, new_l2, old_l1, old_l2)
+                    # Issue #2761：只补 auto 标签，保留既有 manual 标签
+                    new_tags = (encode_tags(merge_tags(old_tags, tag_items))
+                                if "tags" in info else (old_tags or ""))
                     # 只在数据实际变更时才 UPDATE（避免 blanket UPDATE 刷新 updated_at 架空 sort=latest）
                     fp_nonempty = old_fp and old_fp != ""
                     changed = (old_display != display_name or old_desc != description
                                or old_agent != agent_type or old_sub != sub_scene
                                or old_cat != category_id
+                               or int(old_l1 or 0) != int(l1_id or 0)
+                               or int(old_l2 or 0) != int(l2_id or 0)
+                               or (old_tags or "") != new_tags
                                or (not fp_nonempty and old_path != skill_path_val))
                     if changed:
                         if fp_nonempty:
                             c.execute(
-                                "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
-                                (display_name, description, agent_type, sub_scene, category_id, skill_name)
+                                "UPDATE skill SET display_name=?, description=?, agent_type=?, sub_scene=?, category_id=?, cat_l1_id=?, cat_l2_id=?, tags=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
+                                (display_name, description, agent_type, sub_scene, category_id,
+                                 l1_id, l2_id, new_tags, skill_name)
                             )
                         else:
                             c.execute(
-                                "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
-                                (display_name, description, agent_type, skill_path_val, sub_scene, category_id, skill_name)
+                                "UPDATE skill SET display_name=?, description=?, agent_type=?, skill_path=?, sub_scene=?, category_id=?, cat_l1_id=?, cat_l2_id=?, tags=?, updated_at=datetime('now') WHERE skill_name=? AND scope='official'",
+                                (display_name, description, agent_type, skill_path_val, sub_scene,
+                                 category_id, l1_id, l2_id, new_tags, skill_name)
                             )
                 else:
                     c.execute(
-                        "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id) VALUES (?,?,?,?,?,'official','','',?,?)",
-                        (skill_name, display_name, description, agent_type, skill_path_val, sub_scene, category_id)
+                        "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, content_hash, sub_scene, category_id, cat_l1_id, cat_l2_id, tags) VALUES (?,?,?,?,?,'official','','',?,?,?,?,?)",
+                        (skill_name, display_name, description, agent_type, skill_path_val,
+                         sub_scene, category_id, new_l1, new_l2, tags_json or "")
                     )
                 count += 1
             except Exception:

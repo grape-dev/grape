@@ -22,6 +22,7 @@ from src.domains.runtime import public as _rt
 from src.domains.insight import public as _insight_public
 
 from src.kernel.config import log
+from src.kernel.tags import MAX_TAGS, encode_tags, parse_tags
 
 
 class _OwnedCursor:
@@ -1333,7 +1334,8 @@ def resolve_skill_id(skill_name: str, owner_id: str = "",
 
 def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
                            repo_key: str = "", user_id: str | int = "",
-                           scene_id: str = "", node_tag: str = "") -> dict:
+                           scene_id: str = "", node_tag: str = "",
+                           agent_type: str = "") -> dict:
     """派发技能解析（Issue #979）：skill_id 权威直查 → 名字降级 + warning。
 
     - skill_id 非零且 skill 表命中（is_active=1）→ 直接返回该档（显式绑定，
@@ -1343,10 +1345,15 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
       warning（含场景/节点/降级原因），行为与既有名字派发一致；
     - 两者都解析不到 → skill_id=0（调用方按 #657 scope 门禁/内置包兜底）。
 
-    返回 {skill_id, skill_name, skill_path, degraded, skill}。
+    agent_type 非空时做职责校验：解析到的技能 agent_type 与该节点角色不一致时，
+    记 warning 并标 ``role_mismatch=True``——存量错绑（过滤上线前绑的）只告警不阻断，
+    避免老场景突然停摆；新绑定由场景页下拉的职责过滤挡住。
+
+    返回 {skill_id, skill_name, skill_path, degraded, skill, role_mismatch}。
     """
     out = {"skill_id": 0, "skill_name": skill_name or "",
-           "skill_path": skill_name or "", "degraded": False, "skill": None}
+           "skill_path": skill_name or "", "degraded": False, "skill": None,
+           "role_mismatch": False}
     if not skill_name and not skill_id:
         return out
     if skill_id:
@@ -1355,6 +1362,12 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
             _name = row.get("skill_name") or skill_name or ""
             out.update(skill_id=int(skill_id), skill_name=_name,
                        skill_path=row.get("skill_path") or _name, skill=row)
+            _role = (row.get("agent_type") or "").strip().lower()
+            if agent_type and _role and _role != agent_type.strip().lower():
+                out["role_mismatch"] = True
+                log.warning(f"resolve_skill_dispatch: skill agent_type mismatch "
+                            f"skill={_name} skill_role={_role} node_role={agent_type} "
+                            f"(scene={scene_id or '-'} node={node_tag or '-'}, warn only)")
             return out
         log.warning(
             f"resolve_skill_dispatch: skill_id={skill_id} invalid/inactive "
@@ -1375,6 +1388,12 @@ def resolve_skill_dispatch(skill_name: str, skill_id: int = 0,
         if row:
             out["skill_name"] = row.get("skill_name") or skill_name
             out["skill_path"] = row.get("skill_path") or out["skill_name"]
+            _role = (row.get("agent_type") or "").strip().lower()
+            if agent_type and _role and _role != agent_type.strip().lower():
+                out["role_mismatch"] = True
+                log.warning(f"resolve_skill_dispatch: skill agent_type mismatch (name path) "
+                            f"skill={out['skill_name']} skill_role={_role} node_role={agent_type} "
+                            f"(scene={scene_id or '-'} node={node_tag or '-'}, warn only)")
     else:
         out["degraded"] = True
     return out
@@ -4973,11 +4992,216 @@ def get_skill_category(category_id: int) -> dict | None:
         return None
     return {"id": row[0], "name": row[1], "slug": row[2] or "", "icon": row[3] or ""}
 
+def list_category_dict(scope: str = "") -> list[dict]:
+    """返回启用的统一分类字典（Issue #2761）。
+
+    scope: scene / skill / 空（全部）。applies_to='both' 的行对两种 scope 都可见。
+    """
+    scope = (scope or "").strip().lower()
+    with db_lock:
+        c = _mg_db.cursor()
+        sql = ("SELECT id, parent_id, level, name, slug, icon, order_num, applies_to "
+               "FROM grape_t_category_dict WHERE is_active=1")
+        params: list = []
+        if scope in ("scene", "skill"):
+            sql += " AND applies_to IN ('both', ?)"
+            params.append(scope)
+        sql += " ORDER BY level, parent_id, order_num, id"
+        c.execute(sql, params)
+        rows = c.fetchall()
+    return [{"id": r[0], "parent_id": r[1] or 0, "level": r[2] or 1,
+             "name": r[3], "slug": r[4] or "", "icon": r[5] or "",
+             "order_num": r[6] or 0, "applies_to": r[7] or "both"} for r in rows]
+
+
+def list_category_tree(scope: str = "") -> list[dict]:
+    """两级分类树：[{...一级, children:[{...二级}]}]（Issue #2761）。"""
+    rows = list_category_dict(scope)
+    l1 = [dict(r, children=[]) for r in rows if int(r.get("level") or 1) == 1]
+    by_id = {r["id"]: r for r in l1}
+    for r in rows:
+        if int(r.get("level") or 1) == 2:
+            parent = by_id.get(int(r.get("parent_id") or 0))
+            if parent is not None:
+                parent["children"].append(dict(r))
+    return l1
+
+
+def category_path_from_map(cat_map: dict, l1_id: int = 0, l2_id: int = 0) -> dict:
+    """用预取字典构造分类路径 {l1, l2}（批量列表用，避免逐行查库）。"""
+    l1 = cat_map.get(int(l1_id or 0))
+    l2 = cat_map.get(int(l2_id or 0))
+    if l2 and not l1:
+        l1 = cat_map.get(int(l2.get("parent_id") or 0))
+    return {
+        "l1": ({k: l1[k] for k in ("id", "name", "slug")} if l1 else None),
+        "l2": ({k: l2[k] for k in ("id", "name", "slug")} if l2 else None),
+    }
+
+
+def get_category_dict_entry(category_id: int) -> dict | None:
+    """按 id 取分类字典单行；不存在/停用返回 None。"""
+    if not category_id or int(category_id) <= 0:
+        return None
+    with db_lock:
+        c = _mg_db.cursor()
+        c.execute(
+            "SELECT id, parent_id, level, name, slug, icon, order_num, applies_to "
+            "FROM grape_t_category_dict WHERE id=? AND is_active=1", (int(category_id),))
+        row = c.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "parent_id": row[1] or 0, "level": row[2] or 1,
+            "name": row[3], "slug": row[4] or "", "icon": row[5] or "",
+            "order_num": row[6] or 0, "applies_to": row[7] or "both"}
+
+
+def category_path(l1_id: int = 0, l2_id: int = 0) -> dict:
+    """构造分类路径 {l1, l2}（缺失侧为 None），用于场景/技能读接口。"""
+    l1 = get_category_dict_entry(l1_id)
+    l2 = get_category_dict_entry(l2_id)
+    if l2 and not l1:
+        l1 = get_category_dict_entry(l2.get("parent_id") or 0)
+    return {
+        "l1": ({k: l1[k] for k in ("id", "name", "slug")} if l1 else None),
+        "l2": ({k: l2[k] for k in ("id", "name", "slug")} if l2 else None),
+    }
+
+
+#: (parent_slug, level, name, slug, icon, order_num)；parent_slug 为空表示一级域
+_CATEGORY_DICT_SEED = [
+    ("", 1, "IT研发", "it-rd", "💻", 1),
+    ("it-rd", 2, "研发工程", "it-rd-engineering", "🧱", 1),
+    ("it-rd", 2, "AI应用", "it-rd-ai-app", "🤖", 2),
+    ("it-rd", 2, "基础设施", "it-rd-infra", "☁", 3),
+    ("it-rd", 2, "测试与质量", "it-rd-test-quality", "🧪", 4),
+    ("it-rd", 2, "移动开发", "it-rd-mobile-dev", "📱", 5),
+    ("it-rd", 2, "运维与观测", "it-rd-ops-observability", "📊", 6),
+    ("it-rd", 2, "安全与合规", "it-rd-security-compliance", "🛡", 7),
+    ("it-rd", 2, "成本治理", "it-rd-cost-governance", "💰", 8),
+    ("", 1, "运营域", "operations", "📈", 2),
+    ("operations", 2, "用户与增长", "ops-user-growth", "🚀", 1),
+    ("operations", 2, "内容与商品", "ops-content-goods", "🛒", 2),
+    ("operations", 2, "渠道与营销", "ops-channel-marketing", "📣", 3),
+    ("operations", 2, "客户体验", "ops-customer-experience", "😊", 4),
+    ("operations", 2, "文档与知识管理", "ops-doc-knowledge", "📚", 5),
+    ("operations", 2, "经营研究", "ops-business-research", "🔎", 6),
+    ("operations", 2, "资源与成本", "ops-resource-cost", "🧮", 7),
+    ("operations", 2, "流程运营", "ops-process-ops", "🔁", 8),
+    ("", 1, "客户支持", "customer-support", "🎧", 3),
+    ("customer-support", 2, "客户服务", "cs-customer-service", "💬", 1),
+    ("customer-support", 2, "售前支持", "cs-pre-sales", "🤝", 2),
+    ("customer-support", 2, "售后与技术支持", "cs-after-sales-tech", "🛠", 3),
+    ("", 1, "人力资源", "hr", "👥", 4),
+    ("hr", 2, "招聘与录用", "hr-recruiting", "🧑‍💼", 1),
+    ("hr", 2, "培训与发展", "hr-training", "🎓", 2),
+    ("hr", 2, "绩效与组织", "hr-performance-org", "🏢", 3),
+    ("", 1, "财务与会计", "finance", "💰", 5),
+    ("finance", 2, "费用与报销", "fin-expense-reimburse", "🧾", 1),
+    ("finance", 2, "应收应付", "fin-receivable-payable", "📑", 2),
+    ("finance", 2, "财务分析与合规", "fin-analysis-compliance", "📉", 3),
+    ("", 1, "供应链与采购", "supply-chain", "🚚", 6),
+    ("supply-chain", 2, "采购管理", "scm-procurement", "📦", 1),
+    ("supply-chain", 2, "仓储物流", "scm-warehousing-logistics", "🏬", 2),
+    ("supply-chain", 2, "供应商协同", "scm-supplier-collab", "🤝", 3),
+    ("", 1, "生产制造", "manufacturing", "🏭", 7),
+    ("manufacturing", 2, "生产计划", "mfg-production-planning", "🗓", 1),
+    ("manufacturing", 2, "质量控制", "mfg-quality-control", "🔬", 2),
+    ("manufacturing", 2, "生产制造", "mfg-production", "⚙", 3),
+    ("", 1, "销售域", "sales", "🤝", 8),
+    ("sales", 2, "营销与增长", "sales-marketing-growth", "📣", 1),
+    ("sales", 2, "市场调研", "sales-market-research", "🔎", 2),
+    ("sales", 2, "商机跟进", "sales-opportunity-followup", "🎯", 3),
+    ("", 1, "办公协作", "collaboration", "🗂", 9),
+    ("collaboration", 2, "行政办公", "collab-admin-office", "🏢", 1),
+    ("collaboration", 2, "数据分析", "collab-data-analysis", "📊", 2),
+    ("", 1, "其他", "other", "📌", 10),
+    ("other", 2, "个人生活", "other-personal-life", "🌱", 1),
+    ("other", 2, "其他", "other-misc", "📌", 2),
+]
+
+
+def category_dict_seed_id(level_tuples: list, index: int) -> int:
+    """种子行的显式 id（Issue #2761/A12）：一级 = 1000+order，二级 = 一级 id*100+order。
+
+    与建表 DDL 的「id INTEGER PRIMARY KEY（非自增）」配套：id 由种子规则直接算出，
+    不依赖 AUTOINCREMENT / lastrowid，迁移与同步两侧可独立复算。
+    """
+    parent_slug, level, _name, _slug, _icon, order_num = level_tuples[index]
+    if int(level) == 1:
+        return 1000 + int(order_num or 0)
+    parent_id = 0
+    for j in range(index):
+        if level_tuples[j][0] == "" and level_tuples[j][3] == parent_slug:
+            parent_id = category_dict_seed_id(level_tuples, j)
+            break
+    return parent_id * 100 + int(order_num or 0)
+
+
+def seed_category_dict() -> None:
+    """幂等写入分类字典种子（Issue #2761；id 显式分配，一级先落库再写二级）。"""
+    with db_lock:
+        c = _mg_db.cursor()
+        id_by_slug: dict[str, int] = {}
+        for idx, (parent_slug, level, name, slug, icon, order_num) in enumerate(_CATEGORY_DICT_SEED):
+            parent_id = int(id_by_slug.get(parent_slug, 0)) if parent_slug else 0
+            row_id = category_dict_seed_id(_CATEGORY_DICT_SEED, idx)
+            id_by_slug[slug] = row_id
+            try:
+                c.execute(
+                    "INSERT OR IGNORE INTO grape_t_category_dict "
+                    "(id, parent_id, level, name, slug, icon, order_num, applies_to, is_active) "
+                    "VALUES (?,?,?,?,?,?,?,'both',1)",
+                    (row_id, parent_id, level, name, slug, icon, order_num))
+            except Exception:  # noqa: BLE001 - MySQL 方言兜底（重复行忽略）
+                c.execute(
+                    "INSERT IGNORE INTO grape_t_category_dict "
+                    "(id, parent_id, level, name, slug, icon, order_num, applies_to, is_active) "
+                    "VALUES (?,?,?,?,?,?,?,'both',1)",
+                    (row_id, parent_id, level, name, slug, icon, order_num))
+        _mg_db.commit()
+
+
+
+
+
+def backfill_scene_market_legacy_tags() -> int:
+    """把 scene_market 旧逗号串标签就地回填为 JSON [{name, source:"manual"}]。
+
+    Issue #2761 迁移专用（幂等：已是规范 JSON 的行跳过）。返回迁移行数。
+    """
+    with db_lock:
+        c = _mg_db.cursor()
+        c.execute("SELECT id, tags FROM scene_market WHERE tags IS NOT NULL AND tags != ''")
+        rows = c.fetchall()
+        migrated = 0
+        for row in rows:
+            raw = row[1]
+            if isinstance(raw, str) and raw.strip().startswith("["):
+                try:
+                    data = json.loads(raw)
+                except (ValueError, TypeError):
+                    data = None
+                if isinstance(data, list) and all(
+                        isinstance(x, dict) and str(x.get("name") or "").strip()
+                        for x in data):
+                    continue
+            parsed = parse_tags(raw)
+            if not parsed:
+                continue
+            c.execute("UPDATE scene_market SET tags=? WHERE id=?",
+                      (encode_tags(parsed), int(row[0])))
+            migrated += 1
+        _mg_db.commit()
+        return migrated
+
+
 def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
                       featured_only: int = 0, limit: int = 0,
                       page: int = 1, page_size: int = 20,
                       scope: str = "", repo_key: str = "",
-                      user_id: int = 0) -> tuple[list[dict], int]:
+                      user_id: int = 0, cat_l1_id: int = 0,
+                      cat_l2_id: int = 0) -> tuple[list[dict], int]:
     """查询场景市场列表（is_active=1），支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页 + scope 过滤。
 
     sort: latest（按 updated_at 降序）/ hot（按 like_count 降序）。
@@ -4996,6 +5220,12 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
     if category_id and category_id > 0:
         where.append("category_id=?")
         params.append(category_id)
+    if cat_l1_id and cat_l1_id > 0:
+        where.append("cat_l1_id=?")
+        params.append(cat_l1_id)
+    if cat_l2_id and cat_l2_id > 0:
+        where.append("cat_l2_id=?")
+        params.append(cat_l2_id)
     if featured_only:
         where.append("is_featured=1")
     if scope:
@@ -5033,7 +5263,7 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
         c.execute(
             f"SELECT id, name, display_name, version, description, market_description, "
             f"icon, obs_icon_key, category_id, is_featured, like_count, source, recommended_template, "
-            f"nodes_json, onboarding, created_at, scope "
+            f"nodes_json, onboarding, created_at, scope, cat_l1_id, cat_l2_id, tags "
             f"FROM scene_market WHERE {where_sql} ORDER BY {order_by}{limit_sql}",
             params,
         )
@@ -5064,6 +5294,8 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
             "nodes_json": r[13] or "[]", "onboarding": r[14] or "repo-onboarding",
             "created_at": str(r[15] or ""),
             "scope": r[16] or "official",
+            "cat_l1_id": r[17] or 0, "cat_l2_id": r[18] or 0,
+            "tags": parse_tags(r[19] if len(r) > 19 else "", limit=MAX_TAGS),
         })
     return result, total
 
@@ -5075,7 +5307,7 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
             "SELECT id, name, display_name, version, description, market_description, "
             "icon, obs_icon_key, category_id, is_featured, like_count, source, source_user_id, "
             "recommended_template, nodes_json, onboarding, is_active, created_at, updated_at, "
-            "scope, repo_key, preset_custom_fields "
+            "scope, repo_key, preset_custom_fields, cat_l1_id, cat_l2_id, tags "
             "FROM scene_market WHERE id=?",
             (market_id,),
         )
@@ -5094,6 +5326,8 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
         "created_at": str(row[17] or ""), "updated_at": str(row[18] or ""),
         "scope": row[19] or "official", "repo_key": row[20] or "",
         "preset_custom_fields": row[21] or "[]",
+        "cat_l1_id": row[22] or 0, "cat_l2_id": row[23] or 0,
+        "tags": parse_tags(row[24] if len(row) > 24 else "", limit=MAX_TAGS),
     }
 
 def create_scene_market(name: str, display_name: str = "", description: str = "",
@@ -5101,22 +5335,25 @@ def create_scene_market(name: str, display_name: str = "", description: str = ""
                         nodes_json: str = "[]", icon: str = "", obs_icon_key: str = "",
                         category_id: int = 1, recommended_template: str = "",
                         onboarding: str = "repo-onboarding", created_by: str = "",
-                        market_description: str = "") -> int:
+                        market_description: str = "", cat_l1_id: int = 0,
+                        cat_l2_id: int = 0, tags: str = "") -> int:
     """创建用户自定义场景（写入 scene_market 表）。返回新记录 id。
 
     UNIQUE (name, scope, source_user_id, repo_key) 约束冲突时抛 IntegrityError。
+    Issue #2761：新增 cat_l1_id / cat_l2_id / tags（tags 传 JSON 串，空串=无标签）。
     """
     with db_lock:
         c = _mg_db.cursor()
         c.execute(
             "INSERT INTO scene_market "
             "(name, display_name, version, description, market_description, icon, obs_icon_key, "
-            "category_id, is_featured, like_count, source, source_user_id, recommended_template, "
-            "nodes_json, onboarding, tags, author, content_hash, is_active, scope, repo_key, "
+            "category_id, cat_l1_id, cat_l2_id, tags, is_featured, like_count, source, source_user_id, "
+            "recommended_template, nodes_json, onboarding, author, content_hash, is_active, scope, repo_key, "
             "created_by, updated_by, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,0,0,'user',?,?,?,?, '','', '', 1, ?,?, ?,?, datetime('now'),datetime('now'))",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0,'user',?,?,?,?, '','', 1, ?,?, ?,?, datetime('now'),datetime('now'))",
             (name, display_name or name, "1.0.0", description, market_description or description,
-             icon, obs_icon_key, category_id, source_user_id,
+             icon, obs_icon_key, category_id, int(cat_l1_id or 0), int(cat_l2_id or 0),
+             tags or "", source_user_id,
              recommended_template, nodes_json, onboarding,
              scope, repo_key, created_by, created_by),
         )
@@ -5127,7 +5364,9 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
                         description: str = "", nodes_json: str = "",
                         icon: str = "", obs_icon_key: str = "",
                         category_id: int = 0, recommended_template: str = "",
-                        updated_by: str = "") -> bool:
+                        updated_by: str = "", cat_l1_id: int = 0,
+                        cat_l2_id: int = 0, tags: str | None = None,
+                        clear_category: bool = False) -> bool:
     """更新用户自定义场景（scope != 'official'）。返回是否更新成功。
 
     版本号自动管理：只有内容真正变更才 patch+1，无变更不涨。
@@ -5138,7 +5377,8 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
         # 读取旧数据做内容比对
         c.execute(
             "SELECT name, display_name, description, market_description, nodes_json, "
-            "icon, obs_icon_key, category_id, recommended_template, version "
+            "icon, obs_icon_key, category_id, recommended_template, version, "
+            "cat_l1_id, cat_l2_id, tags "
             "FROM scene_market WHERE id=? AND scope!='official'",
             [market_id],
         )
@@ -5146,7 +5386,9 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
         if not row:
             return False
 
-        old_name, old_display, old_desc, old_mkt_desc, old_nodes, old_icon, old_obs_key, old_cat, old_tpl, old_version = row
+        (old_name, old_display, old_desc, old_mkt_desc, old_nodes, old_icon,
+         old_obs_key, old_cat, old_tpl, old_version, old_l1, old_l2,
+         old_tags) = row
 
         # 比对变更
         changed = False
@@ -5167,6 +5409,24 @@ def update_scene_market(market_id: int, name: str = "", display_name: str = "",
             sets.append("obs_icon_key=?"); params.append(obs_icon_key); changed = True
         if category_id and category_id != old_cat:
             sets.append("category_id=?"); params.append(category_id); changed = True
+        if clear_category:
+            # Issue #2761：显式清空分类（0 是「不修改」的哨兵值，故需要独立开关）
+            if int(old_l1 or 0) != 0:
+                sets.append("cat_l1_id=?"); params.append(0); changed = True
+            if int(old_l2 or 0) != 0:
+                sets.append("cat_l2_id=?"); params.append(0); changed = True
+        elif cat_l1_id:
+            new_l1 = int(cat_l1_id)
+            if new_l1 != int(old_l1 or 0):
+                sets.append("cat_l1_id=?"); params.append(new_l1); changed = True
+            # 一级变更而二级未提供：重置旧二级，避免「新一级 + 旧二级」跨父级脏数据
+            new_l2 = int(cat_l2_id or 0)
+            if new_l2 != int(old_l2 or 0):
+                sets.append("cat_l2_id=?"); params.append(new_l2); changed = True
+        elif cat_l2_id and int(cat_l2_id) != int(old_l2 or 0):
+            sets.append("cat_l2_id=?"); params.append(int(cat_l2_id)); changed = True
+        if tags is not None and (tags or "") != (old_tags or ""):
+            sets.append("tags=?"); params.append(tags or ""); changed = True
         if recommended_template and recommended_template != old_tpl:
             sets.append("recommended_template=?"); params.append(recommended_template); changed = True
 

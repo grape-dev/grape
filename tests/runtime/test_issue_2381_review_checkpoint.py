@@ -167,13 +167,14 @@ def test_last_node_predicate_unknown_stage_is_false():
 # ---------- review-pass 末节点 next="" ----------
 
 def test_review_pass_done_on_last_node_next_empty():
-    """此前 next=="" 不算末节点 → 非末节点通道只认 pending_review → 恒 noop（#2381 主回归）。"""
+    """人工闸（2026-11-17）：agent 的 target=done 一律拒绝，末节点也不行；
+    需求完成后由人工 confirm-done 收尾（原 #2381 的「末节点放宽终态」已下线）。"""
     _seed(status="processing", stage="sre")
     with patch("src.api.pipeline_config.get_pipeline_config", return_value=_LAST_CFG):
         res = ic._review_pass(RK, NUM, target="done", evidence="用户确认合入")
-    assert res == "passed_done", res
+    assert res == "noop:agent_finalize_forbidden", res
     st = _status()
-    assert st[0] == "completed" and st[1] == "done"
+    assert st[0] != "completed"
 
 
 def test_review_pass_done_middle_node_still_noop():

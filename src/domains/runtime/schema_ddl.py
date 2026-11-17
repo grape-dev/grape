@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS skill (
     is_active INTEGER DEFAULT 1,
     sub_scene TEXT DEFAULT '',
     category_id INTEGER DEFAULT 0,
+    cat_l1_id INTEGER DEFAULT 0,
+    cat_l2_id INTEGER DEFAULT 0,
+    tags TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (skill_name, scope, owner_id)

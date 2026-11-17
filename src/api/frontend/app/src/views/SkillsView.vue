@@ -123,6 +123,46 @@
           <div class="sk__main">
             <div class="sk__tags">
               <a
+                :class="['skill-tag-filter', { ac: activeL1 === 0 }]"
+                href="javascript:void(0)"
+                :style="tagStyle(activeL1 === 0)"
+                @click="onL1Change(0)"
+                >{{ tt('filter_all_l1') }}</a
+              >
+              <a
+                v-for="c in catTree"
+                :key="'l1-' + c.id"
+                :class="['skill-tag-filter', { ac: activeL1 === c.id }]"
+                href="javascript:void(0)"
+                :style="tagStyle(activeL1 === c.id)"
+                @click="onL1Change(c.id)"
+              >
+                <span v-if="c.icon" class="sk__tag-ic">{{ c.icon }}</span
+                >{{ c.name }}
+              </a>
+            </div>
+            <div v-if="l2Options.length" class="sk__tags">
+              <a
+                :class="['skill-tag-filter', { ac: activeL2 === 0 }]"
+                href="javascript:void(0)"
+                :style="tagStyle(activeL2 === 0)"
+                @click="onL2Change(0)"
+                >{{ tt('filter_all_l2') }}</a
+              >
+              <a
+                v-for="c in l2Options"
+                :key="'l2-' + c.id"
+                :class="['skill-tag-filter', { ac: activeL2 === c.id }]"
+                href="javascript:void(0)"
+                :style="tagStyle(activeL2 === c.id)"
+                @click="onL2Change(c.id)"
+              >
+                <span v-if="c.icon" class="sk__tag-ic">{{ c.icon }}</span
+                >{{ c.name }}
+              </a>
+            </div>
+            <div class="sk__tags">
+              <a
                 :class="['skill-tag-filter', { ac: activeTag === 'all' }]"
                 href="javascript:void(0)"
                 :style="tagStyle(activeTag === 'all')"
@@ -186,6 +226,12 @@
                     </div>
                     <div class="rd" style="margin-bottom: 8px" :title="s.description || ''">
                       {{ s.description || '' }}
+                    </div>
+                    <div v-if="catPath(s)" class="sk__catpath">{{ catPath(s) }}</div>
+                    <div v-if="(s.tags || []).length" class="sk__chips">
+                      <span v-for="(t, i) in (s.tags || []).slice(0, 3)" :key="'st' + i" class="sk__chip">{{
+                        t.name
+                      }}</span>
                     </div>
                     <div v-if="scenesShort(s)" class="ro sk__scenes" :title="scenesFull(s)">
                       {{ tt('info_scenes') }}：{{ scenesShort(s) }}
@@ -410,6 +456,18 @@
           <label>{{ tt2('upload.category') }}</label>
           <AGSelect v-model="uploadForm.categoryId" :options="categoryOpts" class="sk__f1" />
         </div>
+        <div class="srow sk__srow">
+          <label>{{ tt('upload_cat_l1') }}</label>
+          <AGSelect v-model="uploadForm.catL1" :options="l1Opts" class="sk__f1" />
+        </div>
+        <div class="srow sk__srow">
+          <label>{{ tt('upload_cat_l2') }}</label>
+          <AGSelect v-model="uploadForm.catL2" :options="uploadL2Opts" class="sk__f1" />
+        </div>
+        <div class="srow sk__srow">
+          <label>{{ tt('upload_tags') }}</label>
+          <input v-model="uploadForm.tags" class="sk__f1" :placeholder="tt('upload_tags_ph')" />
+        </div>
         <div class="sk__file-fld">
           <label>{{ tt2('upload.file_label') }}</label>
           <input
@@ -520,7 +578,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import AGButton from '@/components/ui/AGButton.vue'
 import AGModal from '@/components/ui/AGModal.vue'
 import AGSelect from '@/components/ui/AGSelect.vue'
@@ -563,6 +621,12 @@ const KEY_DEFAULTS = {
   all_skills: '全部技能',
   featured_skills: '精选技能',
   all_categories: '全部',
+  filter_all_l1: '全部一级分类',
+  filter_all_l2: '全部二级分类',
+  upload_cat_l1: '一级分类',
+  upload_cat_l2: '二级分类',
+  upload_tags: '标签（≤3，逗号分隔）',
+  upload_tags_ph: '如 AI,自动化',
   sort_latest: '最新',
   sort_hot: '最热',
   skill_search_placeholder: '搜索技能名称或描述',
@@ -664,6 +728,25 @@ function agentMetaOf(at) {
 function gradient(s) {
   return FEAT_GRADIENT[s.agent_type] || { g1: 'var(--a-text)', g2: '#2556c2' }
 }
+function catPath(s) {
+  var c = s && s.category
+  if (!c) return ''
+  var l1 = c.l1 && c.l1.name
+  var l2 = c.l2 && c.l2.name
+  if (l1 && l2) return l1 + ' / ' + l2
+  return l1 || l2 || ''
+}
+function onL1Change(v) {
+  activeL1.value = parseInt(v, 10) || 0
+  activeL2.value = 0
+  page.value = 1
+  loadSkills()
+}
+function onL2Change(v) {
+  activeL2.value = parseInt(v, 10) || 0
+  page.value = 1
+  loadSkills()
+}
 function tagClass(s) {
   return s.scope === 'official' ? 'tg-c' : s.scope === 'repo' ? 'tg-i' : 'tg-d'
 }
@@ -705,6 +788,28 @@ const skills = ref([])
 const featured = ref([])
 const agentStats = ref({})
 const categories = ref([])
+const catTree = ref([])
+const activeL1 = ref(0)
+const activeL2 = ref(0)
+const l2Options = computed(function () {
+  var hit = catTree.value.filter(function (c) { return c.id === activeL1.value })[0]
+  return (hit && hit.children) || []
+})
+const l1Opts = computed(function () {
+  var opts = [{ value: '0', label: '未分类' }]
+  catTree.value.forEach(function (c) {
+    opts.push({ value: String(c.id), label: (c.icon || '') + ' ' + c.name })
+  })
+  return opts
+})
+const uploadL2Opts = computed(function () {
+  var hit = catTree.value.filter(function (c) { return String(c.id) === String(uploadForm.catL1) })[0]
+  var opts = [{ value: '0', label: '未分类' }]
+  ;((hit && hit.children) || []).forEach(function (c) {
+    opts.push({ value: String(c.id), label: (c.icon || '') + ' ' + c.name })
+  })
+  return opts
+})
 const activeAgent = ref(-1)
 const activeTag = ref('all')
 const activeTagId = ref('')
@@ -721,6 +826,7 @@ function loadCategories() {
   G.API.get('/skills/categories')
     .then(function (d) {
       categories.value = d.categories || []
+      catTree.value = d.tree || []
     })
     .catch(function () {})
 }
@@ -748,6 +854,8 @@ function loadSkills() {
   if (activeAgent.value >= 0 && agentList[activeAgent.value])
     params.push('agent_type=' + agentList[activeAgent.value])
   if (activeTagId.value) params.push('category_id=' + encodeURIComponent(activeTagId.value))
+  if (activeL1.value) params.push('cat_l1_id=' + activeL1.value)
+  if (activeL2.value) params.push('cat_l2_id=' + activeL2.value)
   params.push('page=' + page.value)
   params.push('page_size=' + pageSize.value)
   G.API.get('/skills?' + params.join('&'))
@@ -1077,7 +1185,14 @@ const showUpload = ref(false)
 const uploading = ref(false)
 const uploadDone = ref(false)
 const uploadPct = ref(0)
-const uploadForm = reactive({ agentType: '', categoryId: '0', file: null })
+const uploadForm = reactive({ agentType: '', categoryId: '0', catL1: '0', catL2: '0', tags: '', file: null })
+// 一级分类变更时重置二级，避免提交旧一级下的二级形成跨父级组合
+watch(
+  () => uploadForm.catL1,
+  function (next, prev) {
+    if (next !== prev) uploadForm.catL2 = '0'
+  }
+)
 const agentOpts = agentList.map(function (at) {
   return { value: at, label: (AGENT_META[at] ? AGENT_META[at].label : at) + ' Agent' }
 })
@@ -1110,6 +1225,9 @@ function doUpload() {
   fd.append('scope', tab.value)
   fd.append('agent_type', uploadForm.agentType)
   fd.append('category_id', String(parseInt(uploadForm.categoryId, 10)))
+  fd.append('cat_l1_id', String(parseInt(uploadForm.catL1, 10) || 0))
+  fd.append('cat_l2_id', String(parseInt(uploadForm.catL2, 10) || 0))
+  fd.append('tags', uploadForm.tags || '')
   if (tab.value === 'repo' && currentRepo.value) fd.append('repo', currentRepo.value)
   uploading.value = true
   uploadPct.value = 0
@@ -1432,6 +1550,25 @@ onMounted(function () {
 .sk__featcount {
   margin-top: auto;
   padding-top: 8px;
+}
+.sk__catpath {
+  font-size: 10px;
+  color: var(--t3);
+  margin-bottom: 4px;
+}
+.sk__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.sk__chip {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--a) 12%, transparent);
+  color: var(--a);
 }
 .sk__cat-tag {
   font-size: 9px;

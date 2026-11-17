@@ -113,6 +113,29 @@ _VALID_MODES = {"emit"}
 
 # category slug → id 缓存（每次同步刷新）
 _cat_cache: dict[str, int] = {}
+# Issue #2761：统一分类字典 slug → {id, level, parent_id}（一级/二级）
+_category_dict_cache: dict[str, dict] = {}
+
+
+def _refresh_category_dict_cache() -> None:
+    """刷新统一分类字典缓存（category_dict 归 mgmt 域，走 owner 域 public）。"""
+    _category_dict_cache.clear()
+    try:
+        from src.domains.mgmt import public as _mgmt_public_dict  # noqa: PLC0415
+        _category_dict_cache.update(_mgmt_public_dict.category_dict_active_map("scene") or {})
+    except Exception as exc:  # noqa: BLE001 - 字典不可用只降级为「不写分类」
+        logger.warning(f"Scene sync: category_dict map unavailable: {exc}")
+
+
+def _resolve_scene_category(scene_data: dict) -> tuple[int, int]:
+    """按场景 JSON 的分类 slug 解析 (cat_l1_id, cat_l2_id)。
+
+    解析口径统一在 src.kernel.category（与 skill_sync 共用）；未命中返回 (0, 0)，
+    由调用方保留库内旧值（不写 0 制造脏数据）。
+    """
+    from src.kernel.category import resolve_category_slugs  # noqa: PLC0415
+    return resolve_category_slugs(scene_data, _category_dict_cache,
+                                  logger=logger, label="Scene sync")
 
 
 def _compute_scene_hash(scene_dir: str) -> str:
@@ -535,6 +558,7 @@ async def sync_official_scenes(repo_root: str | None = None):
 
         # 3. 刷新 category 缓存
         _refresh_cat_cache()
+        _refresh_category_dict_cache()
         if not _cat_cache:
             log.warning("Scene sync: scene_category slug cache is empty, category_id will be 0 (unclassified)")
 
@@ -620,20 +644,33 @@ async def sync_official_scenes(repo_root: str | None = None):
                 description = scene_data.get("description", "")
                 recommended_template = scene_data.get("recommended_template", "")
                 onboarding = scene_data.get("onboarding", "repo-onboarding")
-                tags_str = ",".join(scene_data.get("tags", []))
+                # Issue #2761：标签统一 JSON（来源 auto）；分类 slug 命中才写新字段
+                from src.kernel.tags import MAX_TAGS, encode_tags  # noqa: PLC0415
+                _raw_tags = scene_data.get("tags", []) or []
+                if isinstance(_raw_tags, str):
+                    _raw_tags = [_raw_tags]
+                _tag_items = [{"name": str(t).strip(), "source": "auto"}
+                              for t in _raw_tags if str(t).strip()]
+                tags_json = encode_tags(_tag_items, limit=MAX_TAGS)
+                cat_l1_id, cat_l2_id = _resolve_scene_category(scene_data)
                 author = scene_data.get("author", "")
                 nodes_json = json.dumps(nodes, ensure_ascii=False)
                 preset_custom_fields = json.dumps(scene_data.get("custom_fields", []), ensure_ascii=False)
 
                 # 返回口径是 (scene_id, action)（与 docstring 一致）；这里曾按 (action, market_id)
                 # 解包 → action 恒为整数，skipped 判断失效、icon 以 "<action>" 当 id 回写 0 行。
-                market_id, action = _persist_scene_row(name, {
+                _content_fields = {
                     "display_name": display_name, "version": version, "description": description,
                     "market_desc": market_desc, "category_id": category_id,
                     "recommended_template": recommended_template, "nodes_json": nodes_json,
-                    "onboarding": onboarding, "tags_str": tags_str, "author": author,
+                    "onboarding": onboarding, "tags": tags_json, "author": author,
                     "content_hash": content_hash, "preset_custom_fields": preset_custom_fields,
-                }, stats)
+                }
+                if cat_l1_id:
+                    _content_fields["cat_l1_id"] = cat_l1_id
+                    # 一级命中：二级一并写入（0 表示重置旧二级，避免跨父级脏数据）
+                    _content_fields["cat_l2_id"] = cat_l2_id
+                market_id, action = _persist_scene_row(name, _content_fields, stats)
                 if action == "skipped":
                     continue
                 _apply_scene_icon(name, market_id, icon_file_data, icon_file_ext)

@@ -207,6 +207,7 @@ def mark_default_featured(names: list[str]) -> int:
 
 _SCENE_CONTENT_COLS = (
     "display_name", "version", "description", "market_description", "icon", "category_id",
+    "cat_l1_id", "cat_l2_id",
     "recommended_template", "nodes_json", "onboarding", "tags", "author", "content_hash",
     "obs_icon_key", "preset_custom_fields",
 )
@@ -437,15 +438,27 @@ def upsert_scene_content(name: str, payload: dict[str, Any], source: str = "offi
     payload = {_SCENE_FIELD_ALIASES.get(k, k): v for k, v in (payload or {}).items()}
     cols = [c for c in _SCENE_CONTENT_COLS if c in payload]
     with db_registry.cursor("mgmt") as cur:
-        cur.execute("SELECT id, content_hash FROM scene_market "
+        cur.execute("SELECT id, content_hash, tags, cat_l1_id, cat_l2_id FROM scene_market "
                     "WHERE name=%s AND source=%s LIMIT 1", (name, source))
         row = cur.fetchone()
         if row:
-            sid, old_hash = row[0], (row[1] or "")
+            sid, old_hash, old_tags = row[0], (row[1] or ""), (row[2] or "")
+            old_l1, old_l2 = (row[3] if len(row) > 3 else 0), (row[4] if len(row) > 4 else 0)
             if payload.get("content_hash") and payload.get("content_hash") == old_hash:
                 return {"action": "skipped", "id": sid, "changed": 0}
             if not cols:
                 return {"action": "skipped", "id": sid, "changed": 0}
+            if "tags" in payload:
+                # Issue #2761：同步写入只补 auto 标签，保留人工(manual)标签
+                from src.kernel.tags import encode_tags, merge_tags  # noqa: PLC0415
+                payload["tags"] = encode_tags(merge_tags(old_tags, payload["tags"]))
+            if "cat_l1_id" in payload:
+                # Issue #2761：一级未变且来源未给二级时保留旧二级（未命中不覆盖旧值）
+                from src.kernel.category import sync_category_target  # noqa: PLC0415
+                payload["cat_l1_id"], payload["cat_l2_id"] = sync_category_target(
+                    payload.get("cat_l1_id"), payload.get("cat_l2_id"), old_l1, old_l2)
+                if "cat_l2_id" not in cols:
+                    cols.append("cat_l2_id")
             sets = ", ".join(f"{c}=%s" for c in cols)
             cur.execute(f"UPDATE scene_market SET {sets}, updated_at=NOW() WHERE id=%s",
                         tuple(payload[c] for c in cols) + (sid,))
@@ -470,6 +483,29 @@ def get_official_scene_id(scene_name: str) -> Any:
     """按场景名取 official 模板的 id（无则 None）。"""
     row = fetch_one("scene_market", ["id"], "name=%s AND source='official'", (scene_name,))
     return row[0] if row else None
+
+
+def category_dict_rows(scope: str = "") -> list[dict[str, Any]]:
+    """统一分类字典（Issue #2761）：供 runtime 同步层按 slug 解析分类，不直接读 mgmt 表。"""
+    scope = (scope or "").strip().lower()
+    sql = ("SELECT id, parent_id, level, name, slug, applies_to FROM grape_t_category_dict "
+           "WHERE is_active=1")
+    params: list[Any] = []
+    if scope in ("scene", "skill"):
+        sql += " AND applies_to IN ('both', ?)"
+        params.append(scope)
+    sql += " ORDER BY level, parent_id, id"
+    with _any_cursor() as c:
+        c.execute(sql, tuple(params))
+        return [{"id": int(r[0]), "parent_id": int(r[1] or 0), "level": int(r[2] or 1),
+                 "name": r[3], "slug": r[4] or "", "applies_to": r[5] or "both"}
+                for r in (c.fetchall() or [])]
+
+
+def category_dict_active_map(scope: str = "") -> dict[str, dict[str, Any]]:
+    """slug → {id, level, parent_id}（同步层用）。"""
+    return {r["slug"]: {"id": r["id"], "level": r["level"], "parent_id": r["parent_id"]}
+            for r in category_dict_rows(scope) if r.get("slug")}
 
 
 def count_rows(table: str, where: str = "", params: tuple = ()) -> int:
@@ -711,6 +747,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "user_mapping_row_by_open_id", "feishu_open_id_by_platform_column",
            "clear_feishu_by_app", "clear_feishu_by_user", "set_gitcode_nickname_any",
            "upsert_scene_content", "set_scene_icon", "set_scene_deploy_url", "set_scene_nodes", "mark_default_featured", "list_baseline_knowledge_files", "list_knowledge_obs_keys",
+           "category_dict_rows", "category_dict_active_map",
            "get_official_scene_id", "count_rows", "count_official_scenes", "list_enabled_autopilot_tasks", "get_autopilot_task_brief",
            # P2 服务接口补齐（N6/N8/N9/N10）
            "repo_bundle", "get_account_public", "get_knowledge_entry", "user_mapping_batch",
@@ -3341,16 +3378,28 @@ def upsert_scene_content_any(name: str, fields: dict[str, Any], source: str = "o
     content_hash = payload.get("content_hash") or ""
     cols = [c for c in _SCENE_CONTENT_COLS if c in payload]
     with _any_tx() as c:
-        c.execute("SELECT id, version, content_hash, is_active FROM scene_market "
-                  "WHERE name=? AND source=? LIMIT 1", (name, source))
+        c.execute("SELECT id, version, content_hash, is_active, tags, cat_l1_id, cat_l2_id "
+                  "FROM scene_market WHERE name=? AND source=? LIMIT 1", (name, source))
         row = c.fetchone()
         if row:
-            sid, old_version, old_hash, preserved_active = (
-                int(row[0]), row[1], (row[2] or ""), row[3])
+            sid, old_version, old_hash, preserved_active, old_tags = (
+                int(row[0]), row[1], (row[2] or ""), row[3], (row[4] or ""))
+            old_l1, old_l2 = (row[5] if len(row) > 5 else 0), (row[6] if len(row) > 6 else 0)
             if old_hash == content_hash:
                 return {"action": "skipped", "id": sid, "old_version": old_version}
             if not cols:
                 return {"action": "skipped", "id": sid, "old_version": old_version}
+            if "tags" in payload:
+                # Issue #2761：同步写入只补 auto 标签，保留人工(manual)标签
+                from src.kernel.tags import encode_tags, merge_tags  # noqa: PLC0415
+                payload["tags"] = encode_tags(merge_tags(old_tags, payload["tags"]))
+            if "cat_l1_id" in payload:
+                # Issue #2761：一级未变且来源未给二级时保留旧二级（未命中不覆盖旧值）
+                from src.kernel.category import sync_category_target  # noqa: PLC0415
+                payload["cat_l1_id"], payload["cat_l2_id"] = sync_category_target(
+                    payload.get("cat_l1_id"), payload.get("cat_l2_id"), old_l1, old_l2)
+                if "cat_l2_id" not in cols:
+                    cols.append("cat_l2_id")
             sets = ", ".join(f"{col}=?" for col in cols)
             # is_active 原样回写库内既有值（原 SQL 同样是 is_active=? 传 preserved_active，
             # 语义是"不改成 1"，admin 停用状态在同步后保持）
@@ -3362,13 +3411,14 @@ def upsert_scene_content_any(name: str, fields: dict[str, Any], source: str = "o
         c.execute(
             "INSERT INTO scene_market "
             "(name, display_name, version, description, market_description, icon, obs_icon_key, "
-            "category_id, is_featured, like_count, source, source_user_id, "
+            "category_id, cat_l1_id, cat_l2_id, is_featured, like_count, source, source_user_id, "
             "recommended_template, nodes_json, onboarding, tags, author, "
             "content_hash, preset_custom_fields, is_active, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
             (name, payload.get("display_name", ""), payload.get("version", ""),
              payload.get("description", ""), payload.get("market_description", ""),
              "", "", payload.get("category_id", 0),
+             payload.get("cat_l1_id", 0), payload.get("cat_l2_id", 0),
              payload.get("recommended_template", ""), payload.get("nodes_json", ""),
              payload.get("onboarding", ""), payload.get("tags", ""), payload.get("author", ""),
              content_hash, payload.get("preset_custom_fields", "")))

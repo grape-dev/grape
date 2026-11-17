@@ -225,6 +225,27 @@ CREATE TABLE IF NOT EXISTS skill_category (
 )
 """
 
+# Issue #2761：场景/技能统一分类字典（一级域 + 二级子类）。
+# 旧 scene_category / skill_category 保留不动，仅新字段 cat_l1_id / cat_l2_id 引用本表。
+_CATEGORY_DICT_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_category_dict (
+    -- id 显式分配、非自增（A12）：一级 = 1000 + order_num，二级 = 一级 id * 100 + order_num。
+    -- 稳定可预测，种子与同步两侧都按同一规则算，无需 lastrowid 回查。
+    id          INTEGER PRIMARY KEY,
+    parent_id   INTEGER NOT NULL DEFAULT 0,
+    level       INTEGER NOT NULL DEFAULT 1,
+    name        TEXT NOT NULL,
+    slug        VARCHAR(64) NOT NULL,
+    icon        TEXT DEFAULT '',
+    order_num   INTEGER DEFAULT 0,
+    applies_to  VARCHAR(16) NOT NULL DEFAULT 'both',
+    is_active   INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT DEFAULT (datetime('now')),
+    updated_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE (parent_id, slug)
+)
+"""
+
 _SCENE_MARKET_DDL = """
 CREATE TABLE IF NOT EXISTS scene_market (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,6 +256,8 @@ CREATE TABLE IF NOT EXISTS scene_market (
     market_description TEXT DEFAULT '',
     icon        TEXT DEFAULT '',
     category_id INTEGER DEFAULT 1,
+    cat_l1_id   INTEGER DEFAULT 0,     -- Issue #2761：统一分类字典一级域
+    cat_l2_id   INTEGER DEFAULT 0,     -- Issue #2761：统一分类字典二级子类
     is_featured INTEGER DEFAULT 0,
     like_count  INTEGER DEFAULT 0,
     source      TEXT DEFAULT 'official',

@@ -32,7 +32,21 @@
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 > CLI：`grape skills categories`（operation_id=`skills_categories`）。
 
-| 出参 | `{categories: [...]}`（Issue #179 skill-sync-category） |
+| 出参 | `{categories: [...], tree: [...]}`（`categories` 为 Issue #179 旧一级列表；`tree` 为 Issue #2761 统一分类树） |
+| 返回 | 200 |
+
+---
+
+## GET /api/skills/tag-suggest — 技能标签推荐
+
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Query | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `name` | string | 否 | 技能名称（关键词候选） |
+| `description` | string | 否 | 技能描述（关键词候选） |
+
+| 出参 | `{tags: [string]}`（规则型候选，最多 3 个） |
 | 返回 | 200 |
 
 ---

@@ -66,6 +66,20 @@
               {{ tt('sort_hot') }}
             </button>
           </div>
+          <div class="sm__catfilters">
+            <select class="sm__pgsize" :value="activeL1" @change="onL1Change($event.target.value)">
+              <option value="0">{{ tt('filter_all_l1') }}</option>
+              <option v-for="c in catTree" :key="'l1-' + c.id" :value="c.id">
+                {{ c.icon ? c.icon + ' ' : '' }}{{ c.name }}
+              </option>
+            </select>
+            <select class="sm__pgsize" :value="activeL2" @change="onL2Change($event.target.value)">
+              <option value="0">{{ tt('filter_all_l2') }}</option>
+              <option v-for="c in l2Options" :key="'l2-' + c.id" :value="c.id">
+                {{ c.icon ? c.icon + ' ' : '' }}{{ c.name }}
+              </option>
+            </select>
+          </div>
           <div class="stabs">
             <a
               v-for="c in catList"
@@ -509,6 +523,8 @@ const keyDefaults = {
   scene_scope_official: '场景市场',
   featured_scenes: '精选场景',
   all_scenes: '全部场景',
+  filter_all_l1: '全部一级分类',
+  filter_all_l2: '全部二级分类',
   search_placeholder: '搜索场景名称或描述',
   query: '查询',
   sort_latest: '最新',
@@ -638,6 +654,13 @@ function badgeStyle(sk) {
 
 // ── 市场列表状态 ──
 const cats = ref([])
+const catTree = ref([])
+const activeL1 = ref(0)
+const activeL2 = ref(0)
+const l2Options = computed(function () {
+  var hit = catTree.value.filter(function (c) { return String(c.id) === String(activeL1.value) })[0]
+  return (hit && hit.children) || []
+})
 const featured = ref([])
 const scenes = ref([])
 const total = ref(0)
@@ -663,6 +686,8 @@ function loadList() {
     '&scope=official'
   if (q.value) qs += '&q=' + encodeURIComponent(q.value)
   if (activeCat.value) qs += '&category_id=' + activeCat.value
+  if (activeL1.value) qs += '&cat_l1_id=' + activeL1.value
+  if (activeL2.value) qs += '&cat_l2_id=' + activeL2.value
   G.API.get('/scenes/market' + qs)
     .then(function (d) {
       if (stale()) return
@@ -690,7 +715,10 @@ function loadMarket() {
   if (!cats.value.length) {
     G.API.get('/scenes/market/categories')
       .then(function (d) {
-        if (!stale()) cats.value = d.categories || []
+        if (!stale()) {
+          cats.value = d.categories || []
+          catTree.value = d.tree || []
+        }
       })
       .catch(function () {})
   }
@@ -715,6 +743,17 @@ function setSort(s) {
 }
 function setCat(c) {
   activeCat.value = c
+  page.value = 1
+  loadList()
+}
+function onL1Change(v) {
+  activeL1.value = parseInt(v, 10) || 0
+  activeL2.value = 0
+  page.value = 1
+  loadList()
+}
+function onL2Change(v) {
+  activeL2.value = parseInt(v, 10) || 0
   page.value = 1
   loadList()
 }

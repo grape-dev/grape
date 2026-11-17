@@ -1,6 +1,7 @@
 """Scenes 路由：场景列表获取、CRUD、应用"""
 
 import json, os, re, threading, time
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query, Request, Response
 
@@ -11,6 +12,7 @@ from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.api.oauth_token import with_oauth_token
 
 from src.kernel.config import log
+from src.kernel.tags import MAX_TAGS, encode_tags, prepare_tags, suggest_tags
 
 # 技能/引擎/任务表归运行域：查询走该域 public（三库独立后 mgmt 连接看不到这些表）
 from src.domains.runtime import public as _rt_scenes
@@ -551,6 +553,29 @@ def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "") -> 
     cat = get_scene_category(category_id)
     return cat.get('icon', '⚙') if cat else '⚙'
 
+def _scene_category_payload(cat_l1_id: int = 0, cat_l2_id: int = 0) -> dict:
+    """分类路径 {l1, l2}（Issue #2761）。"""
+    from src.domains.mgmt.user.db import category_path
+    return category_path(int(cat_l1_id or 0), int(cat_l2_id or 0))
+
+
+def _scene_tag_suggestions(name: str = "", description: str = "") -> list[str]:
+    """规则型标签候选：仅返回真实命中项（最多 3 个）。"""
+    return suggest_tags(name, description, candidates=(
+        "开发", "运维", "测试", "部署", "自动化", "AI", "数据", "安全", "文档", "监控"))
+
+
+def _normalize_scene_category(cat_l1_id: int, cat_l2_id: int) -> tuple[int, int]:
+    """校验并归一化场景分类（Issue #2761）。
+
+    统一口径见 `_category.normalize_category_pair`（与技能写路径共用）：
+    - 一级/二级 ID 必须存在且层级正确（一级 level=1、二级 level=2）；
+    - 二级必须属于所给一级（只给二级时由 parent_id 反推一级）。
+    """
+    from src.domains.mgmt.routes._category import normalize_category_pair
+    return normalize_category_pair(cat_l1_id, cat_l2_id)
+
+
 def _parse_scene_skills(nodes_json: str) -> list[str]:
     """从 nodes_json 提取技能名称列表"""
     try:
@@ -561,9 +586,10 @@ def _parse_scene_skills(nodes_json: str) -> list[str]:
 
 @router.get("/market/categories", operation_id="scenes_market_categories", summary="List scene market categories", description="Scene categories ordered by order_num; only is_active=1.")
 def list_scene_categories(user: dict = Depends(require_no_session_token)):
-    """场景分类列表：按 order_num 排序，只返回 is_active=1 的"""
+    """场景分类列表：保持旧一级列表（旧分类 tab），并附统一分类树（Issue #2761）。"""
     from src.domains.mgmt.user.db import list_scene_categories as _list_cats
-    return {"categories": _list_cats()}
+    from src.domains.mgmt.user.db import list_category_tree
+    return {"categories": _list_cats(), "tree": list_category_tree("scene")}
 
 @router.get("/market", operation_id="scenes_market_list", summary="List scene market", description="Scene market list with search/category/sort/featured/paging/scope filters. limit>0 skips paging.")
 def list_scenes_market(user: dict = Depends(require_no_session_token),
@@ -571,14 +597,16 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
                        scope: str = "", repo: str = "",
                        featured_only: int = 0, limit: int = 0,
                        page: int = Query(default=1, ge=1),
-                       page_size: int = Query(default=20, ge=1)):
+                       page_size: int = Query(default=20, ge=1),
+                       cat_l1_id: int = 0, cat_l2_id: int = 0):
     """场景市场列表：支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页 + scope 过滤。
     limit>0 时不分页（精选场景用），否则按 page/page_size 分页。
     scope: official / repo，空=全部。
     repo: scope=repo 时按 repo_key 过滤（owner/repo 格式）。
     """
     from src.domains.mgmt.user.db import (list_scene_market, batch_scene_liked,
-                             batch_scene_repo_count)
+                             batch_scene_repo_count, list_category_dict,
+                             category_path_from_map)
     from src.kernel.repo_key import to_repo_key
 
     repo_key = ""
@@ -596,7 +624,8 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
                                featured_only=featured_only, limit=limit,
                                page=page, page_size=page_size,
                                scope=scope, repo_key=repo_key,
-                               user_id=user.get("id", 0))
+                               user_id=user.get("id", 0),
+                               cat_l1_id=cat_l1_id, cat_l2_id=cat_l2_id)
     if not scenes:
         return {"scenes": [], "total": total, "page": page, "page_size": page_size}
 
@@ -606,6 +635,10 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
     # 批量查 repo_count
     repo_count_map = batch_scene_repo_count(scene_ids)
 
+    try:
+        _cat_map = {c["id"]: c for c in list_category_dict("scene")}
+    except Exception:
+        _cat_map = {}
     result = []
     for s in scenes:
         result.append({
@@ -616,6 +649,11 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
             "market_description": s["market_description"],
             "icon": _resolve_scene_icon(s["icon"], s["category_id"], s.get("obs_icon_key", "")),
             "category_id": s["category_id"],
+            "cat_l1_id": s.get("cat_l1_id", 0),
+            "cat_l2_id": s.get("cat_l2_id", 0),
+            "category": category_path_from_map(
+                _cat_map, s.get("cat_l1_id", 0), s.get("cat_l2_id", 0)),
+            "tags": s.get("tags", [])[:MAX_TAGS],
             "is_featured": s["is_featured"],
             "like_count": s["like_count"],
             "liked_by_me": liked_map.get(s["id"], False),
@@ -654,6 +692,13 @@ def _pick_node_skill_id(node: dict, ref_map: dict) -> int:
         return int((ref_map or {}).get(node.get("skill", ""), 0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+@router.get("/tag-suggest", operation_id="scenes_tag_suggest",
+            summary="Suggest scene tags", description="Rule-based tag candidates (max 3) for scene name/description.")
+def suggest_scene_tags(name: str = "", description: str = "",
+                       user: dict = Depends(require_no_session_token)):
+    return {"tags": _scene_tag_suggestions(name, description)}
 
 
 @router.get("/market/{market_id}", operation_id="scenes_market_detail", summary="Get market scene detail", description="Scene market detail: full intro + skill chain + recommended template + used repo list.")
@@ -753,6 +798,10 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
         "icon": _resolve_scene_icon(scene["icon"], scene["category_id"], scene.get("obs_icon_key", "")),
         "category_id": scene["category_id"],
         "category_name": category_name,
+        "cat_l1_id": scene.get("cat_l1_id", 0),
+        "cat_l2_id": scene.get("cat_l2_id", 0),
+        "category": _scene_category_payload(scene.get("cat_l1_id", 0), scene.get("cat_l2_id", 0)),
+        "tags": (scene.get("tags") or [])[:MAX_TAGS],
         "is_featured": scene["is_featured"],
         "like_count": scene["like_count"],
         "liked_by_me": is_scene_liked(user.get("id", 0), market_id),
@@ -1450,6 +1499,9 @@ class CreateMarketSceneRequest(BaseModel):
     obs_icon_key: str = ""
     file_id: int = 0  # uploaded_files 表 id（图标临时文件）
     category_id: int = 1
+    cat_l1_id: int = 0
+    cat_l2_id: int = 0
+    tags: Optional[list] = None
     recommended_template: str = ""
     linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
 
@@ -1499,7 +1551,16 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     # Issue #1564 R1：市场模板为全仓共享配置，保存即强制拒绝 user scope（含创建者本人）
     _validate_scene_skill_scope(body.nodes, repo_key)
 
+    # Issue #2761：一/二级分类必须存在且层级匹配（二级归属一级）
+    cat_l1_id, cat_l2_id = _normalize_scene_category(body.cat_l1_id, body.cat_l2_id)
+
     nodes_json = json.dumps(body.nodes, ensure_ascii=False)
+    tag_items, overflow = prepare_tags(body.tags)
+    if overflow:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"标签最多 {MAX_TAGS} 个，超出：{'、'.join(overflow)}",
+            "overflow": overflow})
 
     try:
         market_id = create_scene_market(
@@ -1507,7 +1568,8 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
             scope=body.scope, repo_key=repo_key, source_user_id=user.get("id", 0),
             nodes_json=nodes_json, icon=body.icon, obs_icon_key=body.obs_icon_key,
             category_id=body.category_id, recommended_template=body.recommended_template,
-            created_by=user.get("username", ""),
+            created_by=user.get("username", ""), cat_l1_id=cat_l1_id,
+            cat_l2_id=cat_l2_id, tags=encode_tags(tag_items),
         )
     except Exception as e:
         err_upper = str(e).upper()
@@ -1549,6 +1611,10 @@ class UpdateMarketSceneRequest(BaseModel):
     obs_icon_key: str = ""
     file_id: int = 0  # 新上传的图标临时文件 id（0=未更换图标）
     category_id: int = 0
+    cat_l1_id: int = 0
+    cat_l2_id: int = 0
+    clear_category: bool = False  # Issue #2761：显式清空一/二级分类
+    tags: Optional[list] = None
     recommended_template: str = ""
     linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
 
@@ -1603,12 +1669,28 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
         ):
             raise HTTPException(status_code=409, detail={"code": 409, "message": f"场景 '{body.name}' 已存在"})
 
+    tags_json = None
+    if body.tags is not None:
+        tag_items, overflow = prepare_tags(body.tags)
+        if overflow:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"标签最多 {MAX_TAGS} 个，超出：{'、'.join(overflow)}",
+                "overflow": overflow})
+        tags_json = encode_tags(tag_items)
+
+    # Issue #2761：分类校验（存在 + 二级归属一级）；clear_category 显式清空
+    cat_l1_id, cat_l2_id = (0, 0)
+    if not body.clear_category and (body.cat_l1_id or body.cat_l2_id):
+        cat_l1_id, cat_l2_id = _normalize_scene_category(body.cat_l1_id, body.cat_l2_id)
+
     success = update_scene_market(
         market_id=market_id, name=body.name, display_name=body.display_name,
         description=body.description, nodes_json=nodes_json,
         icon=body.icon, obs_icon_key=body.obs_icon_key,
         category_id=body.category_id, recommended_template=body.recommended_template,
-        updated_by=user.get("username", ""),
+        updated_by=user.get("username", ""), cat_l1_id=cat_l1_id,
+        cat_l2_id=cat_l2_id, tags=tags_json, clear_category=body.clear_category,
     )
     if not success:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "场景不存在或无更新"})
@@ -1973,11 +2055,14 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_sessi
                           q: str = "", scope: str = "", repo: str = "",
                           page: int = Query(1, ge=1, description="页码，从 1 开始"),
                           page_size: int = Query(20, ge=1, le=200, description="每页条数，1-200")):
-    """返回该 agent_type 可选的 skill 列表（支持搜索 + scope 过滤 + 分页）。"""
+    """返回该 agent_type 可选的 skill 列表（职责过滤 + 搜索 + scope 过滤 + 分页）。
+
+    职责过滤口径：只返回 agent_type 相同的技能，以及 agent_type 为空的历史通用技能；
+    过滤在 owner 域（scene_skill_search）的 SQL 里做——原实现造了 where/params 却从未使用，
+    导致任意角色都能选到其它角色的技能（绑定后技能会跑在错误的节点里）。
+    """
     from src.kernel.session_manager import db, db_lock
     skills = []
-    where = ["agent_type=?", "is_active=1"]
-    params: list = [agent_type]
 
     # skill 可见范围：official + 个人 user skill + 当前仓库的 repo skill
     repo_key = ""
@@ -1994,7 +2079,8 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_sessi
             pass
     user_id = str(user.get("id", ""))
     total, _skill_rows = _rt_scenes.scene_skill_search(
-        user_id, repo_key, q=q or "", scope=scope or "", page=page, page_size=page_size)
+        user_id, repo_key, q=q or "", scope=scope or "", page=page, page_size=page_size,
+        agent_type=(agent_type or "").strip().lower())
     for r in _skill_rows:
         # Issue #978 契约固化：skill 表 UNIQUE(skill_name, scope, owner_id) 允许
         # official/repo/user 三档同名技能共存；本响应中 (skill_id, scope, skill_name)

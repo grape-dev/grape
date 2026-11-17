@@ -252,5 +252,11 @@
   "update.title": "Update Skill",
   "update.tip": "Upload a new ZIP to overwrite this skill. Skill ID, scene refs and likes are kept; the top folder in the ZIP must match the skill name",
   "toast.update_success": "Skill updated",
-  "toast.update_failed": "Update failed: {{msg}}"
+  "toast.update_failed": "Update failed: {{msg}}",
+  "filter_all_l1": "All level-1 categories",
+  "filter_all_l2": "All level-2 categories",
+  "upload_cat_l1": "Level-1 category",
+  "upload_cat_l2": "Level-2 category",
+  "upload_tags": "Tags (max 3, comma separated)",
+  "upload_tags_ph": "e.g. AI, automation"
 }

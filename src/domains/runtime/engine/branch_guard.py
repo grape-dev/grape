@@ -16,6 +16,7 @@ PR 已合并后继续向 head 分支 push 无任何提示，修复静默丢失�
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import importlib
 import json
@@ -41,6 +42,32 @@ class _LazyLog:
 
 
 log = _LazyLog()
+
+# Issue #2890：pre-push 钩子内守卫自身异常聚合。
+# 各环节独立失败时不再各自 log.warning（缺 branch_guard_state 表时一次 push 会刷出
+# 「state read ×3 / PR query / state write」共 5 条 WARNING JSON，上层 Agent 易误判为
+# 推送失败而重试）。改由 hook_main 建立收集器，结束时统一输出唯一一条结构化告警
+# （含 attempts/reason/fail_open=true）；单点异常降 debug 保留排障明细。
+# 无收集器（服务端 preflight_push 等）时维持原有 warning 语义。
+_guard_issue_sink: contextvars.ContextVar = contextvars.ContextVar(
+    "branch_guard_issue_sink", default=None)
+
+
+def _guard_stage_failed(stage: str, message: str) -> None:
+    """记录单点守卫异常：钩子收集器在场时仅入集合 + debug；否则照常 warning。"""
+    sink = _guard_issue_sink.get()
+    if sink is not None:
+        sink.append({"stage": stage, "error": message})
+        try:
+            log.debug(message)
+        except Exception:
+            return
+        return
+    try:
+        log.warning(message)
+    except Exception:
+        return
+
 
 LEASE_PREFIX = "branch_guard:"
 DEFAULT_TTL = 1800  # 30 分钟；租约仅覆盖一次写窗口，过期自动释放
@@ -97,7 +124,8 @@ def load_lease_state(repo_key: str, head_branch: str) -> dict:
             "pending_prev_sha": str(row[5] or ""),
         }
     except Exception as e:
-        log.warning(f"branch guard state read failed {repo_key}:{head_branch}: {e}")
+        _guard_stage_failed(
+            "state_read", f"branch guard state read failed {repo_key}:{head_branch}: {e}")
         return {}
 
 
@@ -135,7 +163,8 @@ def save_lease_state(repo_key: str, head_branch: str, **fields) -> dict:
                     (repo_key, head_branch, *vals))
             db.commit()
     except Exception as e:
-        log.warning(f"branch guard state write failed {repo_key}:{head_branch}: {e}")
+        _guard_stage_failed(
+            "state_write", f"branch guard state write failed {repo_key}:{head_branch}: {e}")
     return state
 
 
@@ -474,11 +503,14 @@ def fetch_pr_state(repo_key: str, head_branch: str, token: str = "") -> dict:
         client = VcsApiClient(provider=provider, token=token, owner=owner, repo=repo)
         items = client.list_prs(state="all", head=head_branch)
         if isinstance(items, dict) and items.get("error"):
-            log.warning(f"branch guard PR query failed (fail-open) {repo_key}: {items.get('error')}")
+            _guard_stage_failed(
+                "pr_query",
+                f"branch guard PR query failed (fail-open) {repo_key}: {items.get('error')}")
             return {"state": "", "error": items.get("error")}
         return _match_pr(items, head_branch)
     except Exception as e:
-        log.warning(f"branch guard PR query failed (fail-open) {repo_key}: {e}")
+        _guard_stage_failed(
+            "pr_query", f"branch guard PR query failed (fail-open) {repo_key}: {e}")
         return {"state": "", "error": str(e)}
 
 
@@ -494,8 +526,10 @@ def _fetch_pr_state_via_grape(repo_key: str, head_branch: str) -> dict:
                    "--state", "all", "--per_page", "100", "--page", str(page), "--json-out"]
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if r.returncode != 0:
-                log.warning(f"branch guard grape PR query failed (fail-open) {repo_key}: "
-                            f"{(r.stderr or '')[:200]}")
+                _guard_stage_failed(
+                    "pr_query",
+                    f"branch guard grape PR query failed (fail-open) {repo_key}: "
+                    f"{(r.stderr or '')[:200]}")
                 return {"error": (r.stderr or "")[:200]}
             return json.loads(r.stdout or "[]")
 
@@ -504,7 +538,8 @@ def _fetch_pr_state_via_grape(repo_key: str, head_branch: str) -> dict:
             return {"state": ""}
         return _match_pr(items, head_branch)
     except Exception as e:
-        log.warning(f"branch guard grape PR query failed (fail-open) {repo_key}: {e}")
+        _guard_stage_failed(
+            "pr_query", f"branch guard grape PR query failed (fail-open) {repo_key}: {e}")
         return {"state": ""}
 
 
@@ -682,17 +717,74 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
         return False
 
 
+def _emit_fail_open_alert(repo_key: str, issues: list) -> None:
+    """Issue #2890：把钩子内收集到的守卫异常聚合为唯一一条结构化告警。
+
+    缺表等守卫自身异常一律 fail-open 放行；此聚合行是单次 push 的**唯一**结论行，
+    显式带 ``fail_open=true``，避免上层 Agent 把多条单点 WARNING 误判为推送失败。
+    聚合输出本身必须可失败：序列化/stderr 写入异常不得阻断 push。
+    """
+    stages = []
+    for issue in issues:
+        stage = str((issue or {}).get("stage") or "")
+        if stage and stage not in stages:
+            stages.append(stage)
+    reason = ("branch guard degraded, push allowed (fail-open): "
+              + (", ".join(stages) if stages else "unknown"))
+    payload = {
+        "level": "WARNING",
+        "component": "branch_guard",
+        "event": "branch_guard.fail_open",
+        "message": "branch guard errors aggregated, push allowed (fail-open)",
+        "reason": reason,
+        "repo_key": repo_key,
+        "attempts": issues,
+        "fail_open": True,
+    }
+    try:
+        sys.stderr.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        return
+
+
 def hook_main(argv: list | None = None) -> int:
     """pre-push 钩子入口（fail-open 兜底）。
 
     Issue #2028：守卫自身任何未预期异常（含依赖 ImportError）都不得阻断交付，
     统一 stderr 告警 + 返回 0；真实拦截由 ``_hook_main`` 显式返回 1。
+
+    Issue #2890：守卫各环节的单点异常在此聚合——收集后仅输出一条结构化
+    WARNING JSON（attempts/reason/fail_open=true），不再逐条刷 WARNING。
     """
+    args = argv if argv is not None else sys.argv[1:]
+    repo_key = args[0] if len(args) > 0 else ""
+    issues: list = []
+    token = _guard_issue_sink.set(issues)
     try:
-        return _hook_main(argv)
-    except Exception as e:
-        _fail_open(f"branch guard runtime error {e.__class__.__name__}: {e}")
-        return 0
+        try:
+            rc = _hook_main(argv)
+        except Exception as e:
+            # 顶层兜底告警本身已是唯一结论行，避免与聚合行重复输出。
+            issues.clear()
+            _fail_open(f"branch guard runtime error {e.__class__.__name__}: {e}")
+            rc = 0
+    finally:
+        _guard_issue_sink.reset(token)
+    # 真实拦截（rc=1）已有独立阻断提示，不再向 stderr 附加 fail-open 聚合告警；
+    # 但守卫异常明细不能因此丢失（同一 push 里可能既有阻断分支又有守卫异常分支），
+    # 此时降为一条 WARNING 日志留痕，不进 stderr 结论行。
+    if issues:
+        if rc == 0:
+            _emit_fail_open_alert(repo_key, list(issues))
+        else:
+            _stages = ", ".join(sorted({str((i or {}).get("stage") or "") for i in issues} - {""}))
+            try:
+                log.warning(f"branch guard errors aggregated (push blocked separately) "
+                            f"{repo_key}: {_stages}")
+            except Exception:
+                pass
+    return rc
 
 
 def _hook_main(argv: list | None = None) -> int:

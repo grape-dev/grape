@@ -307,7 +307,7 @@ class VcsApiClient:
         return _resp
 
     def list_issue_comments(self, issue_number: int, per_page: int = 100,
-                            max_pages: int = 20) -> list:
+                            max_pages: int = 20, timeout: int = 30) -> list:
         """获取 Issue 评论列表（Issue #1739：门禁标注跨进程幂等去重用）。
 
         分页拉取全部评论：只取首页会让评论超过 per_page 的 Issue 漏查旧标记，
@@ -325,7 +325,41 @@ class VcsApiClient:
             _resp = self._request("GET", self._generic_path(
                 f"/repos/{self.owner}/{self.repo}/issues/{issue_number}"
                 f"/comments?per_page={per_page}&page={_page}",
-                f"/issues/{issue_number}/notes?per_page={per_page}&page={_page}"))
+                f"/issues/{issue_number}/notes?per_page={per_page}&page={_page}"),
+                timeout=timeout)
+            if not isinstance(_resp, list) or not _resp:
+                break
+            if _resp == _prev:
+                break
+            _prev = _resp
+            _out.extend(_resp)
+            if len(_resp) < per_page:
+                break
+        return _out
+
+    def list_pr_comments(self, pr_number: int, per_page: int = 100,
+                         max_pages: int = 20, timeout: int = 30) -> list:
+        """获取 PR 评论列表（分页全量，Issue #2816）。
+
+        路径由平台卡 ``pr_comment_endpoint`` 派生：github 系 PR 与 Issue 共用
+        ``/issues/{n}/comments``；gitcode/gitee 系用 ``/pulls/{n}/comments``；
+        gitlab 方言用 ``/merge_requests/{n}/notes``。分页策略与
+        ``list_issue_comments`` 一致（空页/重复页/短页停止，最多 max_pages）。
+        """
+        card = self._platform_card()
+        if card is None:
+            return []
+        if card.dialect == "gitlab":
+            _base = f"/projects/{self.owner}%2F{self.repo}/merge_requests/{pr_number}/notes"
+        elif (getattr(card, "pr_comment_endpoint", "") or "pulls") == "issues":
+            _base = f"/repos/{self.owner}/{self.repo}/issues/{pr_number}/comments"
+        else:
+            _base = f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/comments"
+        _out: list = []
+        _prev = None
+        for _page in range(1, max_pages + 1):
+            _resp = self._request(
+                "GET", f"{_base}?per_page={per_page}&page={_page}", timeout=timeout)
             if not isinstance(_resp, list) or not _resp:
                 break
             if _resp == _prev:
@@ -364,11 +398,11 @@ class VcsApiClient:
         return self._request("POST", self._generic_path(
             f"/repos/{self.owner}/{self.repo}/issues", "/issues"), data, form=_form)
 
-    def get_issue(self, issue_number: int) -> dict:
+    def get_issue(self, issue_number: int, timeout: int = 30) -> dict:
         """获取 Issue 详情。"""
         return self._request("GET", self._generic_path(
             f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
-            f"/issues/{issue_number}"))
+            f"/issues/{issue_number}"), timeout=timeout)
 
     # === Issue 关闭 ===
 
@@ -719,7 +753,7 @@ class VcsApiClient:
             return None
 
     def _card_request(self, method: str, path: str, data: dict | None = None,
-                      form: bool = False) -> dict:
+                      form: bool = False, timeout: int = 30) -> dict:
         """卡驱动通用请求（D13/S14）：api_base + api_auth 按平台卡，零平台代码。
 
         - query_token（Gitee 系 v5）：?access_token= 查询参数（header 会 401，实测坑）
@@ -747,8 +781,9 @@ class VcsApiClient:
         if form and data:
             import urllib.parse as _up
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-            return self._do_request(url, method, _up.urlencode(data), headers=headers)
-        return self._do_request(url, method, data, headers=headers)
+            return self._do_request(url, method, _up.urlencode(data), headers=headers,
+                                    timeout=timeout)
+        return self._do_request(url, method, data, headers=headers, timeout=timeout)
 
     def _generic_path(self, github_style: str, gitlab_style: str = "") -> str:
         """按卡方言选择路径模板（github 系直接用；gitlab 系用 project 编码路径）。"""
@@ -763,18 +798,18 @@ class VcsApiClient:
         return {"error": f"unsupported provider: {self.provider}"}
 
     def _request(self, method: str, path: str, data: dict | None = None,
-                 form: bool = False) -> dict:
+                 form: bool = False, timeout: int = 30) -> dict:
         """统一请求入口（D22：所有平台含存量三平台走卡驱动，消 _xxx_request 平行族）。
 
         鉴权四态按卡 api_auth（query_token / token_header / private_token /
         bearer_header），存量平台请求头逐字节保留原形态（S14 回归锁）。
         """
-        return self._card_request(method, path, data, form=form)
+        return self._card_request(method, path, data, form=form, timeout=timeout)
 
     @staticmethod
     def _do_request(url: str, method: str, data: "dict | str | bytes | None" = None,
                     headers: dict | None = None,
-                    _span_target: str = "") -> dict:
+                    _span_target: str = "", timeout: int = 30) -> dict:
         """执行 HTTP 请求，返回 JSON dict。
 
         _span_target：调用方传入的脱敏目标（provider + path，不含 token/url），
@@ -794,7 +829,7 @@ class VcsApiClient:
                 else:
                     body = json.dumps(data).encode("utf-8") if data else None
                 req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
                     if _span is not None:
                         _span.set_attribute("http.status_code", 200)

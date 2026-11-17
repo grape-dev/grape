@@ -921,7 +921,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         try:
             from src.api.session_store import is_subtask_mode_enabled, set_issue_stage
             if is_subtask_mode_enabled(repo_key, issue_id):
-                set_issue_stage(repo_key, issue_id, "done", "issue")
+                set_issue_stage(repo_key, issue_id, "pending_review", "issue")
                 log.info(f"Multi-task mode: parent issue {issue_id} stage=done (subtasks will trigger independently)")
         except Exception as _e:
             log.warning(f"Multi-task mode stage=done check failed: {_e}")

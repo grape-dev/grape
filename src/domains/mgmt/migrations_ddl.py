@@ -61,6 +61,7 @@ ALTER_LOGIN_WHITELIST__FN_LOGIN_WHITELIST_ROW_COLUM = (
 # ── 自 db_setup._init_skill_category_data() 下沉 ─────────────────────
 INSERT_IGNORE_SKILL_CATEGORY = "INSERT OR IGNORE INTO skill_category (name, slug, icon, order_num, is_active) VALUES (?,?,?,?,1)"
 
+
 # ── 自 db_setup._init_scene_market_data() 下沉 ───────────────────────
 SELECT_SCENE_MARKET__INIT_SCENE_MARKET_DATA_2 = "SELECT COUNT(*) FROM scene_market WHERE source='official'"
 SELECT_SCENE_MARKET__INIT_SCENE_MARKET_DATA = "SELECT DISTINCT name, display_name, description, nodes_json, onboarding FROM scene_market WHERE source='official' AND is_active=1"

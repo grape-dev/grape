@@ -252,5 +252,11 @@
   "update.title": "上传更新技能",
   "update.tip": "上传新 ZIP 覆盖当前技能内容，技能 ID、场景引用与点赞保留；ZIP 内目录名需与技能名一致",
   "toast.update_success": "技能更新成功",
-  "toast.update_failed": "更新失败: {{msg}}"
+  "toast.update_failed": "更新失败: {{msg}}",
+  "filter_all_l1": "全部一级分类",
+  "filter_all_l2": "全部二级分类",
+  "upload_cat_l1": "一级分类",
+  "upload_cat_l2": "二级分类",
+  "upload_tags": "标签（≤3，逗号分隔）",
+  "upload_tags_ph": "如 AI,自动化"
 }

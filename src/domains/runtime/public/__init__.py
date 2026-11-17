@@ -699,6 +699,17 @@ def update_skill_obs(skill_id: int, object_key: str, display_name: str, agent_ty
         return int(c.rowcount or 0)
 
 
+def update_skill_category_tags(skill_id: int, cat_l1_id: int = 0, cat_l2_id: int = 0,
+                               tags: str = "") -> int:
+    """写入技能的一/二级分类与标签（Issue #2761；tags 为 JSON 字符串）。
+
+    走任意拓扑具名写语句：三库（自有 DSN）与单库/测试拓扑都可用。
+    """
+    return exec_any("skill_category_tags_update",
+                    (int(cat_l1_id or 0), int(cat_l2_id or 0), tags or "",
+                     int(skill_id)))
+
+
 def insert_skill(skill_name: str, display_name: str, description: str, agent_type: str,
                  file_path: str, scope: str, owner_id: str, created_by: str,
                  updated_by: str, category_id: str = "", content_hash: str = "") -> int:
@@ -1618,7 +1629,7 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            "set_repo_im_notifications", "add_event_action_filter",
            "update_event_action_filter", "delete_event_action_filter",
            # P3-5f 写原语（skill / 凭据）
-           "update_skill_content", "update_skill_obs", "insert_skill", "create_skill_row",
+           "update_skill_content", "update_skill_obs", "update_skill_category_tags", "insert_skill", "create_skill_row",
            "delete_skill_row", "delete_skill_by_id", "adjust_skill_like_count",
            "insert_runtime_credential", "rename_runtime_credential",
            "set_runtime_credential_scope", "delete_runtime_credential",
@@ -1871,7 +1882,8 @@ def list_featured_skills(ordered_ids: list[int] | None = None, limit: int = 5) -
     为空时直接 like_count 降序。列与 mgmt `get_featured_skills` 完全一致。
     """
     cols = ("id", "skill_name", "display_name", "description", "agent_type",
-            "is_featured", "like_count", "category_id")
+            "is_featured", "like_count", "category_id",
+            "cat_l1_id", "cat_l2_id", "tags")
     sel = f"SELECT {', '.join(cols)} FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official'"
     out: list[dict[str, Any]] = []
     with db_registry.cursor("runtime") as c:
@@ -1897,7 +1909,10 @@ def _skill_row(r: dict[str, Any]) -> dict[str, Any]:
             "display_name": r["display_name"] or r["skill_name"],
             "description": r["description"] or "", "agent_type": r["agent_type"] or "",
             "is_featured": r["is_featured"], "like_count": r["like_count"],
-            "category_id": r["category_id"] or 0}
+            "category_id": r["category_id"] or 0,
+            "cat_l1_id": r.get("cat_l1_id") or 0,
+            "cat_l2_id": r.get("cat_l2_id") or 0,
+            "tags": r.get("tags") or ""}
 
 
 def list_active_credential_ids() -> list[int]:
@@ -2342,17 +2357,19 @@ _ANY_QUERIES: dict[str, str] = {
         "WHERE is_active=1 AND scope='official' ORDER BY agent_type, skill_name"),
     "skill_detail_by_id": (
         "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, "
-        "is_featured, like_count, sub_scene, category_id FROM skill WHERE id=? AND is_active=1"),
+        "is_featured, like_count, sub_scene, category_id, cat_l1_id, cat_l2_id, tags "
+        "FROM skill WHERE id=? AND is_active=1"),
     "skill_detail_by_name": (
         "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, "
-        "is_featured, like_count, sub_scene, category_id FROM skill WHERE skill_name=? AND is_active=1 "
+        "is_featured, like_count, sub_scene, category_id, cat_l1_id, cat_l2_id, tags "
+        "FROM skill WHERE skill_name=? AND is_active=1 "
         "AND (scope='official' OR (scope='user' AND owner_id=?) OR scope='repo') "
         "ORDER BY CASE scope WHEN 'user' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END, id DESC LIMIT 1"),
     "skill_path_owner_scope": (
         "SELECT skill_name, owner_id, skill_path, scope FROM skill WHERE id=? AND is_active=1"),
     "skill_meta_row": (
-        "SELECT skill_name, scope, owner_id, agent_type, category_id FROM skill "
-        "WHERE id=? AND is_active=1"),
+        "SELECT skill_name, scope, owner_id, agent_type, category_id, "
+        "cat_l1_id, cat_l2_id, tags FROM skill WHERE id=? AND is_active=1"),
     "skill_name_path": "SELECT skill_name, skill_path FROM skill WHERE id=? AND is_active=1",
     "skill_repo_full_row": (
         "SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id "
@@ -2602,6 +2619,9 @@ _ANY_QUERIES: dict[str, str] = {
         "INSERT INTO skill (skill_name, display_name, description, agent_type, file_path, "
         "scope, owner_id, created_by, updated_by, is_active, category_id, content_hash) "
         "VALUES (?,?,?,?,?,?,?,?,?,1,?,?)"),
+    "skill_category_tags_update": (
+        "UPDATE skill SET cat_l1_id=?, cat_l2_id=?, tags=?, updated_at=datetime('now') "
+        "WHERE id=?"),
     "skill_row_create_ignore": (
         "INSERT OR IGNORE INTO skill (skill_name, display_name, description, agent_type, "
         "skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,?,?,?,?)"),
@@ -3691,13 +3711,17 @@ def merge_meta_json_any(key: str, patch: dict, base: dict | None = None,
 
 
 _FEATURED_SKILL_COLS = ("id", "skill_name", "display_name", "description", "agent_type",
-                        "is_featured", "like_count", "category_id")
+                        "is_featured", "like_count", "category_id",
+                        "cat_l1_id", "cat_l2_id", "tags")
 
 
 def _featured_skill_row(r) -> dict[str, Any]:
     return {"id": r[0], "skill_name": r[1], "display_name": r[2] or r[1],
             "description": r[3] or "", "agent_type": r[4] or "",
-            "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0}
+            "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0,
+            "cat_l1_id": (r[8] if len(r) > 8 else 0) or 0,
+            "cat_l2_id": (r[9] if len(r) > 9 else 0) or 0,
+            "tags": (r[10] if len(r) > 10 else "") or ""}
 
 
 def list_featured_skills_any(ordered_ids: list[int] | None = None, limit: int = 5) -> list[dict]:
@@ -5159,7 +5183,7 @@ def scene_detach_log_rebound(scene_row_id, node_tag: str, rebound_at: str) -> in
 
 _SKILL_LIST_COLS = (
     "id, skill_name, display_name, description, agent_type, scope, owner_id, "
-    "is_featured, like_count, sub_scene, category_id")
+    "is_featured, like_count, sub_scene, category_id, cat_l1_id, cat_l2_id, tags")
 
 
 def _skill_scope_conditions(scope=None, user_id="", repo_key="", org_id="") -> tuple[list, list]:
@@ -5194,7 +5218,8 @@ def _skill_scope_conditions(scope=None, user_id="", repo_key="", org_id="") -> t
 
 def skill_search(scope=None, user_id="", repo_key="", org_id="", q: str = "",
                  agent_type: str = "", category_id: int = 0, sort: str = "",
-                 page: int = 1, page_size: int = 0) -> tuple[int, list[tuple]]:
+                 page: int = 1, page_size: int = 0, cat_l1_id: int = 0,
+                 cat_l2_id: int = 0) -> tuple[int, list[tuple]]:
     """技能列表查询：返回 (total, rows)。page_size<=0 表示不分页（total 为 0）。"""
     conds, params = _skill_scope_conditions(scope, user_id, repo_key, org_id)
     kw = (q or "").strip()
@@ -5209,6 +5234,12 @@ def skill_search(scope=None, user_id="", repo_key="", org_id="", q: str = "",
     if category_id and int(category_id) > 0:
         conds.append("category_id=?")
         params.append(int(category_id))
+    if cat_l1_id and int(cat_l1_id) > 0:
+        conds.append("cat_l1_id=?")
+        params.append(int(cat_l1_id))
+    if cat_l2_id and int(cat_l2_id) > 0:
+        conds.append("cat_l2_id=?")
+        params.append(int(cat_l2_id))
 
     where_sql = " WHERE " + " AND ".join(conds)
     order_by = ("ORDER BY updated_at DESC" if sort == "latest"
@@ -5722,13 +5753,18 @@ def skill_ids_active(skill_ids) -> list[int]:
 
 
 def scene_skill_search(user_id: str, repo_key: str, q: str = "", scope: str = "",
-                       page: int = 1, page_size: int = 50) -> tuple:
-    """场景页技能下拉：可见范围 = 官方 + 本人 + 该仓，可按关键词/范围过滤，返回 (total, rows)。
+                       page: int = 1, page_size: int = 50, agent_type: str = "") -> tuple:
+    """场景页技能下拉：可见范围 = 官方 + 本人 + 该仓，可按关键词/范围/角色过滤，返回 (total, rows)。
 
     条件在本域拼（skill 归运行域），调用方只给口径参数。
+    agent_type 非空时按职责过滤：只返回同角色技能与「未标注角色」的通用技能
+    （存量内建包 agent_type 为空，一律视为通用，否则下拉会被清空）。
     """
     where = ["(scope='official' OR (scope='user' AND owner_id=?) OR (scope='repo' AND owner_id=?))"]
     params: list = [user_id, repo_key]
+    if agent_type:
+        where.append("(agent_type=? OR agent_type='' OR agent_type IS NULL)")
+        params.append(agent_type)
     if q:
         where.append("(skill_name LIKE ? OR display_name LIKE ?)")
         params += [f"%{q}%", f"%{q}%"]

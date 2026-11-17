@@ -14,6 +14,7 @@ from src.domains.mgmt.user import db as user_db
 from src.domains.mgmt.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
+from src.kernel.tags import MAX_TAGS, encode_tags, parse_tags, prepare_tags, suggest_tags
 
 # skill 归运行域：列表/统计/单行读取走该域原语或具名查询
 from src.domains.runtime import public as _rt_skills
@@ -58,6 +59,29 @@ def _resolve_repo_key(repo: str, strict: bool = False) -> str:
         pass
     return rk
 
+def _skill_category_payload(cat_l1_id: int = 0, cat_l2_id: int = 0) -> dict:
+    """分类路径 {l1, l2}（Issue #2761）。"""
+    from src.domains.mgmt.user.db import category_path
+    return category_path(int(cat_l1_id or 0), int(cat_l2_id or 0))
+
+
+def _normalize_skill_category(cat_l1_id: int, cat_l2_id: int) -> tuple[int, int]:
+    """校验并归一化技能分类（Issue #2761）。
+
+    统一口径见 `_category.normalize_category_pair`（与场景写路径共用）：
+    - 一级/二级 ID 必须存在且层级正确（一级 level=1、二级 level=2）；
+    - 二级必须属于所给一级（只给二级时由 parent_id 反推一级）。
+    """
+    from src.domains.mgmt.routes._category import normalize_category_pair
+    return normalize_category_pair(cat_l1_id, cat_l2_id)
+
+
+def _skill_tag_suggestions(name: str = "", description: str = "") -> list[str]:
+    """规则型标签候选（仅返回真实命中项，最多 3 个）。"""
+    return suggest_tags(name, description, candidates=(
+        "AI", "自动化", "测试", "部署", "代码评审", "文档", "安全", "监控", "数据", "协作"))
+
+
 def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
     """规范化重打包技能 zip：根 = {skill_name}/，逐文件保留权限位（external_attr），
     丢弃系统目录。返回 zip 字节（OBS 存储正体，见 obs-skill-storage-design.md §2.2）。"""
@@ -79,6 +103,7 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
 def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope: str = "",
                 agent_type: str = "", category_id: int = 0,
+                cat_l1_id: int = 0, cat_l2_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
     scope 参数：official/repo/user 按维度过滤；all = 不限 scope（官方+个人+所有仓库）；不传 = 返回全部（兼容旧逻辑）。
@@ -92,7 +117,8 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
     from src.kernel.session_manager import db, db_lock
     from src.kernel.repo_key import to_repo_key
     from src.domains.mgmt.user.db import (batch_skill_liked, get_skill_usage_stats,
-                             batch_skill_scenes, list_skill_categories)
+                             batch_skill_scenes, list_skill_categories,
+                             list_category_dict, category_path_from_map)
 
     # repo 参数可能是 fullName（xiaowu2119/hello-skill），转成 repo_key（gitcode:xiaowu2119/hello-skill）
     repo_key = _resolve_repo_key(repo) if repo else ""
@@ -113,14 +139,22 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
             cat_map[cat["id"]] = cat["name"]
     except Exception:
         pass
+    try:
+        _cat_dict_map = {c["id"]: c for c in list_category_dict("skill")}
+    except Exception:
+        _cat_dict_map = {}
     total = 0
     try:
         total, _skill_rows = _rt_skills.skill_search(
             scope=scope, user_id=user.get("id"), repo_key=repo_key, org_id=_org_id,
             q=q, agent_type=agent_type, category_id=category_id or 0, sort=sort,
-            page=page, page_size=page_size if use_paging else 0)
+            page=page, page_size=page_size if use_paging else 0,
+            cat_l1_id=cat_l1_id or 0, cat_l2_id=cat_l2_id or 0)
         for r in _skill_rows:
             cat_id = r[10] or 0
+            l1_id = r[11] if len(r) > 11 else 0
+            l2_id = r[12] if len(r) > 12 else 0
+            raw_tags = r[13] if len(r) > 13 else ""
             skills.append({
                 "id": r[0],
                 "name": r[1],
@@ -133,6 +167,10 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
                 "like_count": r[8] or 0,
                 "category_id": cat_id,
                 "category_name": cat_map.get(cat_id, ""),
+                "cat_l1_id": l1_id or 0,
+                "cat_l2_id": l2_id or 0,
+                "category": category_path_from_map(_cat_dict_map, l1_id, l2_id),
+                "tags": parse_tags(raw_tags, limit=MAX_TAGS),
             })
             skill_ids.append(r[0])
     except Exception:
@@ -203,6 +241,10 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
         s["repo_count"] = stats.get("repo_count", 0)
         s["scenes"] = scenes_map.get(s["id"], [])
         s["category_name"] = cat_map.get(s.get("category_id", 0), "")
+        s["cat_l1_id"] = s.get("cat_l1_id", 0)
+        s["cat_l2_id"] = s.get("cat_l2_id", 0)
+        s["category"] = _skill_category_payload(s["cat_l1_id"], s["cat_l2_id"])
+        s["tags"] = parse_tags(s.get("tags", ""), limit=MAX_TAGS)
     # 精选技能按 admin 管理台设置的顺序排列
     if skills:
         try:
@@ -255,9 +297,15 @@ def get_skill_stats(user: dict = Depends(require_no_session_token)):
 @router.get("/categories", operation_id="skills_categories", summary="List skill categories",
             description="Lists skill categories (Issue #179 skill-sync-category).")
 def list_categories(user: dict = Depends(require_no_session_token)):
-    """返回技能分类列表（Issue #179）。"""
-    from src.domains.mgmt.user.db import list_skill_categories
-    return {"categories": list_skill_categories()}
+    """返回技能分类列表（Issue #179）；附统一分类树（Issue #2761）。"""
+    from src.domains.mgmt.user.db import list_skill_categories, list_category_tree
+    return {"categories": list_skill_categories(), "tree": list_category_tree("skill")}
+
+@router.get("/tag-suggest", operation_id="skills_tag_suggest",
+            summary="Suggest skill tags", description="Rule-based tag candidates (max 3) for skill name/description.")
+def suggest_skill_tags(name: str = "", description: str = "",
+                       user: dict = Depends(require_no_session_token)):
+    return {"tags": _skill_tag_suggestions(name, description)}
 
 @router.get("/search", operation_id="skills_search", summary="Search skills",
             description="Skill lookup for a task description: exact skill_name match first, then keyword match on description/display_name/agent_type.")
@@ -463,6 +511,11 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
     from src.domains.mgmt.user.db import get_skill_category
     cat = get_skill_category(category_id) if category_id else None
     category_name = cat["name"] if cat else ""
+    l1_id = row[12] if len(row) > 12 else 0
+    l2_id = row[13] if len(row) > 13 else 0
+    raw_tags = row[14] if len(row) > 14 else ""
+    category_payload = _skill_category_payload(l1_id, l2_id)
+    tags = parse_tags(raw_tags, limit=MAX_TAGS)
 
     # 归属校验
     if scope == "user" and owner_id != str(user["id"]):
@@ -512,6 +565,10 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
             "scenes": scenes,
             "category_id": category_id,
             "category_name": category_name,
+            "cat_l1_id": l1_id or 0,
+            "cat_l2_id": l2_id or 0,
+            "category": category_payload,
+            "tags": tags,
         }
     # ===== local 分支 =====
     # user/repo 技能：均衡负载环境下 local 存储会导致文件只存在单机，OBS 不可用时直接报 503
@@ -547,13 +604,22 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
         "scenes": scenes,
         "category_id": category_id,
         "category_name": category_name,
+        "cat_l1_id": l1_id or 0,
+        "cat_l2_id": l2_id or 0,
+        "category": category_payload,
+        "tags": tags,
     }
 
 @router.post("/upload", operation_id="skills_upload", summary="Upload skill (user personal / repo)", description="Uploads a skill ZIP. scope=user stores a personal skill; scope=repo requires repo. agent_type is required.")
 async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_current_user_or_api_key),
                        scope: str = Form("user"), repo: str = Form(""), agent_type: str = Form(""),
-                       category_id: int = Form(0)):
+                       category_id: int = Form(0), cat_l1_id: int = Form(0),
+                       cat_l2_id: int = Form(0), tags: str = Form(""),
+                       clear_category: bool = Form(False)):
     """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。category_id 可选（分类ID，Issue #179）。"""
+    # 直接调用（非 FastAPI 注入）时 Form 默认值不是 bool，避免误判为「清空分类」
+    if not isinstance(clear_category, bool):
+        clear_category = False
     VALID_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat", "auto"}
     if scope not in ("user", "repo"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 user 或 repo"})
@@ -578,6 +644,15 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         from src.domains.mgmt.user.db import get_skill_category
         if not get_skill_category(category_id):
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"分类 ID {category_id} 不存在"})
+    if not clear_category and (int(cat_l1_id or 0) or int(cat_l2_id or 0)):
+        _normalize_skill_category(cat_l1_id, cat_l2_id)
+    tag_items, overflow = prepare_tags(tags)
+    if overflow:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"标签最多 {MAX_TAGS} 个，超出：{'、'.join(overflow)}",
+            "overflow": overflow})
+    tags_json = encode_tags(tag_items)
 
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
@@ -665,6 +740,23 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                     if _prev_bytes is not None:
                         storage.save_bytes(object_key, _prev_bytes)   # 恢复旧对象（DB 行未动）
                     raise HTTPException(status_code=409, detail={"code": 409, "message": f"技能 {skill_name} 记录写入失败（同名冲突或并发上传）"})
+                if cat_l1_id or cat_l2_id or tags or clear_category:
+                    try:
+                        # 仅写实际提供的字段：未提供的一侧回填既有值，避免仅改标签时
+                        # 以 0 覆盖既有分类（Issue #2761 QA）；clear_category 显式清空。
+                        from src.domains.mgmt.routes._category import prepare_category_write
+                        _cur = _rt_skills.read_one_any("skill_meta_row", (skill_id,))
+                        _cur_l1 = int(_cur[5] or 0) if _cur and len(_cur) > 5 else 0
+                        _cur_l2 = int(_cur[6] or 0) if _cur and len(_cur) > 6 else 0
+                        _cur_tags = (_cur[7] if _cur and len(_cur) > 7 else "") or ""
+                        _target_l1, _target_l2 = prepare_category_write(
+                            cat_l1_id, cat_l2_id, _cur_l1, _cur_l2, clear_category)
+                        _target_tags = tags_json if tags else _cur_tags
+                        _rt_skills.update_skill_category_tags(
+                            skill_id, _target_l1, _target_l2, _target_tags)
+                    except Exception as _te:  # noqa: BLE001 - 分类/标签写入失败不阻断主流程
+                        from src.kernel.config import log as _log
+                        _log.warning(f"skill upload: category/tags update failed: {_te}")
                 zip_cache_put(object_key, zip_bytes, content_hash, skill_id or 0)  # put 覆盖同名 key + hash + id 锚点供读时校验
                 mem_cache_invalidate(object_key)      # 覆盖后显式失效内存提取缓存（object_key 口径，P49）
                 log.info(f"skill uploaded (storage={storage.backend_name()}, key={object_key})")
@@ -770,7 +862,9 @@ VALID_SKILL_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat", "auto"
              description="Overwrites an existing skill's content by uploading a new ZIP. Keeps skill id/scope/owner/scene refs/likes, refreshes content_hash and invalidates both cache levels. official skills cannot be updated; user scope requires ownership; repo scope requires the caller to manage the repo.")
 async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
                              user: dict = Depends(require_no_session_token),
-                             agent_type: str = Form(""), category_id: str = Form("")):
+                             agent_type: str = Form(""), category_id: str = Form(""),
+                             cat_l1_id: int = Form(0), cat_l2_id: int = Form(0),
+                             tags: str = Form(""), clear_category: bool = Form(False)):
     """按 skill_id 上传 ZIP 覆盖更新既有技能（Issue #561：卡片直接更新，免删了重传）。
 
     权限对齐 delete：official 不允许更新；user 需本人；repo 需当前用户托管该仓库。
@@ -780,6 +874,8 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
     agent_type / category_id 可选，缺省沿用原记录值。
     """
     from src.kernel.session_manager import db, db_lock
+    if not isinstance(clear_category, bool):
+        clear_category = False
 
     # 1. 查既有记录（按主键 id 精确）
     with db_lock:
@@ -794,6 +890,9 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
     skill_name, skill_scope, owner_id, cur_agent_type, cur_category_id = row[0], row[1] or "user", row[2] or "", row[3] or "", row[4] or 0
+    cur_l1 = row[5] if len(row) > 5 else 0
+    cur_l2 = row[6] if len(row) > 6 else 0
+    cur_tags = row[7] if len(row) > 7 else ""
 
     # 2. 权限校验（对齐 delete）
     if skill_scope == "official":
@@ -822,6 +921,21 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"分类 ID {new_category_id} 不存在"})
     else:
         new_category_id = int(cur_category_id or 0)
+
+    if not clear_category and (int(cat_l1_id or 0) or int(cat_l2_id or 0)):
+        _normalize_skill_category(cat_l1_id, cat_l2_id)
+    tag_items, overflow = prepare_tags(tags)
+    if overflow:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"标签最多 {MAX_TAGS} 个，超出：{'、'.join(overflow)}",
+            "overflow": overflow})
+    tags_json = encode_tags(tag_items)
+    update_cat_tags = bool(cat_l1_id or cat_l2_id or tags or clear_category)
+    from src.domains.mgmt.routes._category import prepare_category_write
+    target_l1, target_l2 = prepare_category_write(
+        cat_l1_id, cat_l2_id, cur_l1, cur_l2, clear_category)
+    target_tags = tags_json if tags else (cur_tags or "")
 
     # 4. ZIP 校验（复用 upload 链：大小/炸弹/结构/SKILL.md）
     content = await file.read()
@@ -897,6 +1011,13 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
                 if _prev_bytes is not None:
                     storage.save_bytes(object_key, _prev_bytes)  # 回滚旧对象（DB 行未动）
                 raise HTTPException(status_code=409, detail={"code": 409, "message": f"技能 {skill_name} 记录更新失败（并发冲突或同名记录漂移），已回滚，请重试"})
+            if update_cat_tags:
+                try:
+                    _rt_skills.update_skill_category_tags(
+                        int(new_id), target_l1, target_l2, target_tags)
+                except Exception as _te:  # noqa: BLE001 - 分类/标签写入失败不阻断主流程
+                    from src.kernel.config import log as _log
+                    _log.warning(f"skill update: category/tags update failed: {_te}")
             zip_cache_put(object_key, zip_bytes, content_hash, int(new_id))
             mem_cache_invalidate(object_key)
             log.info(f"skill updated (storage={storage.backend_name()}, key={object_key}, skill_id={skill_id})")

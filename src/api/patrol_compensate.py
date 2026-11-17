@@ -404,6 +404,15 @@ class DispatchHandler(Handler):
             _set_finding(ctx.finding_id, "open", f"dispatch_error: {e}")
             ctx.verdict, ctx.action_meta = "dispatch_error", str(e)
             return False
+        # Issue #2816：终态载体守卫在 a2a 端点上短路（HTTP 200 + skipped 回执）时，
+        # 这次补发实际没发生。按「检测误报」收口（链路没断，是单据已终态），
+        # 不能落 compensated —— 否则统计把「没派发」算成「已补偿」。
+        _skip = self._terminal_skip_reason(res)
+        if _skip:
+            _set_finding(ctx.finding_id, "false_positive",
+                         f"terminal guard skip: {_skip}")
+            ctx.verdict, ctx.action_meta = "terminal_skip", f"guard skip: {_skip}"
+            return False
         ok, summary = self._summarize(res)
         if ok:
             # 评审八轮修正③：审计键退役——compensated:{task_id} 曾再写一行 meta
@@ -443,6 +452,26 @@ class DispatchHandler(Handler):
         _set_finding(ctx.finding_id, "open", f"dispatch_failed: {summary}")
         ctx.verdict, ctx.action_meta = "dispatch_failed", summary
         return False
+
+    @staticmethod
+    def _terminal_skip_reason(res) -> str:
+        """从派发回执里取「终态守卫跳过」原因（dict 或 JSONResponse 均支持）。"""
+        payload: dict = {}
+        if isinstance(res, dict):
+            payload = res
+        else:
+            try:
+                body = getattr(res, "body", b"") or b""
+                if isinstance(body, memoryview):
+                    body = body.tobytes()
+                import json as _json_local
+                payload = _json_local.loads(body.decode("utf-8", "replace")) if body else {}
+            except Exception:
+                payload = {}
+        if not isinstance(payload, dict):
+            return ""
+        val = payload.get("skipped")
+        return str(val) if val else ""
 
     @staticmethod
     def _is_permanent_failure(res) -> bool:

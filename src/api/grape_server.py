@@ -506,7 +506,7 @@ app = server_common.build_app(
 from src.domains.mgmt.routes import (
     auth, grape_auth, repos, agents, settings, skills, scenes, templates,
     feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, community,
-    patrol,
+    patrol, categories as categories_routes,
 )
 
 app.include_router(grape_auth.router)
@@ -522,6 +522,8 @@ app.include_router(settings.router)
 app.include_router(skills.router)
 
 app.include_router(scenes.router)
+
+app.include_router(categories_routes.router)
 
 app.include_router(templates.router)
 

@@ -57,6 +57,7 @@ EVENT_TYPES = frozenset({
     "sandbox_path_updated",         # admin 更新沙箱文件系统路径
     "sandbox_path_deleted",         # admin 删除沙箱文件系统路径
     "sandbox_config_updated",       # admin 更新沙箱配置（detail 含 config_id/mode/degrade_policy）
+    "issue_terminal_disposition",   # 终态载体单人工处置（Issue #2816：new_carrier/reassign/close，detail 含 repo_key/issue_id/action/结果，不含 secret）
 })
 
 

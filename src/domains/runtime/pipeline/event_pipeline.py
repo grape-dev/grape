@@ -2552,7 +2552,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             from src.domains.mgmt.user.db import resolve_skill_dispatch
             _res = resolve_skill_dispatch(skill_name, _sub_sid, repo_key=repo_key,
                                           user_id=_issue_scene_uid,
-                                          scene_id=_issue_scene, node_tag="qa")
+                                          scene_id=_issue_scene, node_tag="qa",
+                                          agent_type="qa")
             skill_id = _res["skill_id"]
             if _res.get("skill_name"):
                 skill_name = _res["skill_name"]
@@ -2583,7 +2584,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                                                     user_id=_issue_scene_uid)
             _res = resolve_skill_dispatch(_pipe_skill, _node_sid, repo_key=repo_key,
                                           user_id=_issue_scene_uid,
-                                          scene_id=_issue_scene, node_tag=agent_type)
+                                          scene_id=_issue_scene, node_tag=agent_type,
+                                          agent_type=agent_type)
             if _res["skill_id"]:
                 skill_id = _res["skill_id"]
                 skill_path = _res.get("skill_path") or _pipe_skill
@@ -3365,6 +3367,19 @@ def _claim_and_dispatch_queued(qseq: int, repo_key: str, agent_type: str, issue_
     evt = dispatch_info.get("evt") or {}
     if not isinstance(evt, dict):
         evt = {}
+    # Issue #2816 复审（Spec）：队列行 payload 里的载体提示（pr_number/carrier_pr）
+    # 必须在 evt.payload 缺失时透传给派发入口，否则派发阶段会丢掉显式载体优先级、
+    # 回退到 Issue 文本派生的旧载体。
+    if isinstance(payload, dict):
+        _evt_payload = evt.get("payload")
+        _evt_payload = dict(_evt_payload) if isinstance(_evt_payload, dict) else {}
+        _merged = False
+        for _hint_key in ("pr_number", "carrier_pr"):
+            if not _evt_payload.get(_hint_key) and payload.get(_hint_key):
+                _evt_payload[_hint_key] = payload.get(_hint_key)
+                _merged = True
+        if _merged:
+            evt = dict(evt, payload=_evt_payload)
     try:
         from src.api.a2a_dispatch import run_a2a_dispatch
         result = run_a2a_dispatch(
@@ -3378,6 +3393,12 @@ def _claim_and_dispatch_queued(qseq: int, repo_key: str, agent_type: str, issue_
             repository=payload.get("repository") or "",
             ref_seq=int(payload.get("ref_seq") or 0),
         )
+        if isinstance(result, dict) and result.get("status") == "skipped":
+            # Issue #2816 复审：派发入口终态短路命中的排队事件不是失败，也不是
+            # 「已派发」——事件已由 run_a2a_dispatch 落 cancelled 并写 event_skipped。
+            log.info(f"a2a queue drain: queue_seq={qseq} skipped "
+                     f"({result.get('skipped') or 'guard skip'})")
+            return True
         if not isinstance(result, dict) or result.get("status") == "failed" or not result.get("seq"):
             _reason = (result or {}).get("error") if isinstance(result, dict) else ""
             _fail_event(qseq, f"A2A 排队派发失败（queue_seq={qseq}，前序 seq={prior_seq}）: "
@@ -6483,12 +6504,13 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as _le:
             log.warning(f"Exec agent: direct linked PR submit failed: {_le}")
 
-    # 多任务模式：父任务 Issue Agent 完成后 → stage=done（不 A2A coding，子任务由 webhook 自动触发）
+    # 多任务模式：父任务 Issue Agent 完成后 → stage=pending_review（人工闸：等人工确认，
+    # 不自动 done；子任务仍由 webhook 自动触发）
     if new_status == "completed" and agent_type == "issue" and issue_id:
         try:
             from src.api.session_store import is_subtask_mode_enabled, set_issue_stage
             if is_subtask_mode_enabled(repo_key, issue_id):
-                set_issue_stage(repo_key, issue_id, "done", "issue")
+                set_issue_stage(repo_key, issue_id, "pending_review", "issue")
                 log.info(f"Multi-task mode: parent issue {issue_id} stage=done (subtasks will trigger independently)")
         except Exception as _e:
             log.warning(f"Multi-task mode stage=done check failed: {_e}")
@@ -6550,18 +6572,18 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as _e:
             log.warning(f"scene deploy_url register failed: {_e}")
 
-    # Issue #656: 末节点完成后 → issue 级自动结单（全部节点 completed + 无阻断
-    # → stage=done / status=completed / completed_at 落库 + 联动关闭 VCS Issue；
-    # failed 阻断回退 pending_review 保留人工 confirm done 路径）。
-    # 泛化原 Issue #51 仅 sre 硬编码的收尾入口：函数自带 stage/末节点守卫，非末节点 noop。
+    # 末节点完成后 → 推进到「待人工确认」（人工闸 2026-11-17：不再自动结单）。
+    # 全部节点 completed + 无阻断 → status=stage=pending_review，等人工 confirm-done；
+    # failed/QA 阻断同样回退 pending_review 并保留原因标注。
+    # 函数自带 stage/末节点守卫，非末节点 noop。
     if new_status == "completed" and issue_id and agent_type:
         try:
-            from src.api.issues_center import auto_finalize_issue_on_last_node
-            _fin = auto_finalize_issue_on_last_node(repo_key, issue_id, agent_type, source="exec")
+            from src.api.issues_center import finalize_issue_to_pending_review
+            _fin = finalize_issue_to_pending_review(repo_key, issue_id, agent_type, source="exec")
             if _fin not in ("noop:not_last_node", "noop:not_issue", "noop:terminal"):
-                log.info(f"Exec agent: issue finalize result={_fin} issue={issue_id}")
+                log.info(f"Exec agent: last-node finalize result={_fin} issue={issue_id}")
         except Exception as _e:
-            log.warning(f"Exec agent: issue auto-finalize failed: {_e}")
+            log.warning(f"Exec agent: last-node finalize to pending_review failed: {_e}")
 
     # 子任务 SRE 完成后 → 登记完成情况到父 Issue
     if new_status == "completed" and agent_type == "sre" and issue_id:

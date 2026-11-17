@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from src.api import server_common
 
 from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, community
+from src.domains.mgmt.routes import categories as categories_routes
 
 from src.domains.runtime.routes import events, chat, pipeline, webhook, tasks, runtime, task_logs, issues
 
@@ -603,6 +604,8 @@ app.include_router(pipeline.router)
 app.include_router(webhook.router)
 
 app.include_router(scenes.router)
+
+app.include_router(categories_routes.router)
 
 app.include_router(templates.router)
 

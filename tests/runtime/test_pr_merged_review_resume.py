@@ -10,7 +10,7 @@
 - 降级：恢复抛异常不阻断 stage 推进，仅 warning。
 
 C2 回归：
-- `auto_finalize_issue_on_last_node` 在 status=pending_review 时仍返回 noop:pending_review；
+- `finalize_issue_to_pending_review` 在 status=pending_review 时仍返回 noop:pending_review；
 - status=processing + 全节点 completed → auto_done。
 """
 import json
@@ -210,24 +210,25 @@ class TestAutoFinalizeRegression:
 
     def test_pending_review_still_noop(self):
         """C2：pending_review 仍返回 noop:pending_review。"""
-        from src.api.issues_center import auto_finalize_issue_on_last_node
+        from src.api.issues_center import finalize_issue_to_pending_review
         _seed_issue("pending_review", "sre")
         self._seed_events(self._ALL_COMPLETED)
         with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
-            _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
+            _res = finalize_issue_to_pending_review(_REPO, f"#{_NUM}", "sre", source="test")
             assert _res == "noop:pending_review", _res
             _cli.return_value.close_issue.assert_not_called()
         assert _issue_row()[0] == "pending_review"
 
-    def test_processing_all_completed_auto_done(self):
-        """C2：processing + 全节点 completed → auto_done。"""
-        from src.api.issues_center import auto_finalize_issue_on_last_node
+    def test_processing_all_completed_to_pending_review(self):
+        """人工闸：processing + 全节点 completed → pending_review（不再 completed）。"""
+        from src.api.issues_center import finalize_issue_to_pending_review
         _seed_issue("processing", "sre")
         self._seed_events(self._ALL_COMPLETED)
         with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
             _inst = _cli.return_value
             _inst.get_issue_state.return_value = "open"
             _inst.close_issue.return_value = {"ok": True}
-            _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
-            assert _res == "auto_done", _res
-        assert _issue_row() == ("completed", "done"), _issue_row()
+            _res = finalize_issue_to_pending_review(_REPO, f"#{_NUM}", "sre", source="test")
+            assert _res == "pending_review", _res
+            _inst.close_issue.assert_not_called()
+        assert _issue_row() == ("pending_review", "pending_review"), _issue_row()

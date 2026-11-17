@@ -169,12 +169,12 @@ def test_qa_gate_ignores_other_pipeline_events():
 # ===================== 自动结单 =====================
 
 def test_auto_finalize_blocked_when_qa_failed_status():
-    from src.api.issues_center import auto_finalize_issue_on_last_node
+    from src.api.issues_center import finalize_issue_to_pending_review
     _clear_annotation_cache()
     _seed()
     _seed_events({**_ALL_COMPLETED, "qa": "failed"}, qa_result="[skill_mismatch] qa 未执行")
     with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
-        _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
+        _res = finalize_issue_to_pending_review(_REPO, f"#{_NUM}", "sre", source="test")
         assert _res in ("pending_review_fallback", "qa_failed_blocked"), _res
         _cli.return_value.close_issue.assert_not_called()
     _st, _at, _reason, _stage = _issue_row()
@@ -183,12 +183,12 @@ def test_auto_finalize_blocked_when_qa_failed_status():
 
 
 def test_auto_finalize_blocked_when_qa_completed_but_failed_text():
-    from src.api.issues_center import auto_finalize_issue_on_last_node
+    from src.api.issues_center import finalize_issue_to_pending_review
     _clear_annotation_cache()
     _seed()
     _seed_events(_ALL_COMPLETED, qa_result="PR #9 审查完成：不通过（1 项阻塞）")
     with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
-        _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
+        _res = finalize_issue_to_pending_review(_REPO, f"#{_NUM}", "sre", source="test")
         assert _res == "qa_failed_blocked", _res
         _cli.return_value.close_issue.assert_not_called()
     _st, _at, _reason, _stage = _issue_row()
@@ -201,8 +201,8 @@ def test_auto_finalize_blocked_when_qa_completed_but_failed_text():
     assert not _at
 
 
-def test_auto_finalize_closes_when_qa_passed():
-    from src.api.issues_center import auto_finalize_issue_on_last_node
+def test_finalize_to_pending_review_when_qa_passed():
+    from src.api.issues_center import finalize_issue_to_pending_review
     _clear_annotation_cache()
     _seed()
     _seed_events(_ALL_COMPLETED, qa_result="pass，无 Critical/Required")
@@ -210,17 +210,17 @@ def test_auto_finalize_closes_when_qa_passed():
         _inst = _cli.return_value
         _inst.get_issue_state.return_value = "open"
         _inst.close_issue.return_value = {"ok": True}
-        _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
-        assert _res == "auto_done", _res
-        _inst.close_issue.assert_called_once_with(_NUM)
+        _res = finalize_issue_to_pending_review(_REPO, f"#{_NUM}", "sre", source="test")
+        assert _res == "pending_review", _res
+        _inst.close_issue.assert_not_called()   # 人工闸：自动路径不关 VCS
     _st, _at, _reason, _stage = _issue_row()
-    assert _st == "completed"
-    assert _stage == "done"
-    assert _reason == "auto_finalized"
+    assert _st == "pending_review"
+    assert _stage == "pending_review"
+    assert not _reason
 
 
-def test_auto_finalize_closes_when_pipeline_has_no_qa_node():
-    from src.api.issues_center import auto_finalize_issue_on_last_node
+def test_finalize_to_pending_review_when_pipeline_has_no_qa_node():
+    from src.api.issues_center import finalize_issue_to_pending_review
     _clear_annotation_cache()
     _seed()
     _seed_events({k: v for k, v in _ALL_COMPLETED.items() if k != "qa"})
@@ -233,15 +233,16 @@ def test_auto_finalize_closes_when_pipeline_has_no_qa_node():
         _inst = _cli.return_value
         _inst.get_issue_state.return_value = "open"
         _inst.close_issue.return_value = {"ok": True}
-        _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
-        assert _res == "auto_done", _res
-        _inst.close_issue.assert_called_once_with(_NUM)
-    assert _issue_row()[0] == "completed"
+        _res = finalize_issue_to_pending_review(_REPO, f"#{_NUM}", "sre", source="test")
+        assert _res == "pending_review", _res
+        _inst.close_issue.assert_not_called()
+    assert _issue_row()[0] == "pending_review"
 
 
 # ===================== 审核收尾 =====================
 
-def test_review_pass_done_blocked_when_qa_failed():
+def test_review_pass_done_rejected_for_agents():
+    """人工闸：agent 调 review-pass target=done 一律拒绝（不论 QA 结论）。"""
     from src.api.issues_center import _review_pass
     _clear_annotation_cache()
     _seed(status="processing", stage="sre")
@@ -252,7 +253,7 @@ def test_review_pass_done_blocked_when_qa_failed():
     _seed_events(_ALL_COMPLETED, qa_result="审查完成：不通过")
     with patch("src.domains.runtime.vcs.api_client.VcsApiClient"):
         _res = _review_pass(_REPO, _NUM, target="done", evidence="test")
-    assert _res == "noop:qa_failed", _res
+    assert _res == "noop:agent_finalize_forbidden", _res
     assert _issue_row()[0] == "pending_review"
 
 
@@ -692,8 +693,8 @@ def test_pr_link_uses_provider_specific_path():
     assert _pr_link("github:org/issue1739", 1094).endswith("/pull/1094")
 
 
-def test_review_pass_done_runs_qa_gate_once():
-    """review-pass(done) 收尾只查询/标注一次 QA 门禁。"""
+def test_review_pass_done_skips_qa_gate_entirely():
+    """人工闸：target=done 直接拒绝，连 QA 门禁都不查（不做无意义标注）。"""
     from src.api import qa_gate
     from src.api.issues_center import _review_pass
     _clear_annotation_cache()
@@ -707,8 +708,8 @@ def test_review_pass_done_runs_qa_gate_once():
                       wraps=qa_gate.gate_or_annotate) as _g, \
             patch("src.domains.runtime.vcs.api_client.VcsApiClient"):
         _res = _review_pass(_REPO, _NUM, target="done", evidence="test")
-    assert _res == "passed_done", _res
-    assert _g.call_count == 1, _g.call_count
+    assert _res == "noop:agent_finalize_forbidden", _res
+    assert _g.call_count == 0, _g.call_count
 
 
 def test_merge_reuses_single_pull_detail_request():

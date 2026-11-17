@@ -558,6 +558,9 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
     _issue_id = f"#{issue_number}"
     _stage_info = get_issue_stage(repo_key, _issue_id)
     _stage = (_stage_info or {}).get("stage", "") if _stage_info else ""
+    # 人工闸（2026-11-17）：stage=done 只当「人推进的」才算开发者确认。
+    # owner_agent 是落库的推进方：user/admin = 人；agent/pipeline/issue = 自动路径。
+    _stage_owner = ((_stage_info or {}).get("owner_agent") or "").strip().lower()
 
     with db_lock:
         c = _rt_db.cursor()
@@ -567,11 +570,22 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
             (repo_key, _issue_id))
         _has_running = c.fetchone() is not None
 
-        if _stage == "done":
-            # stage=done 表示开发者已确认 → 直接 completed
+        if _stage == "done" and _stage_owner in ("user", "admin"):
+            # 只认人工推进的 done（Web 确认 / 管理员确认）→ directly completed
             c.execute(
                 "UPDATE issue SET status='completed', completed_reason='issue_closed', completed_at=datetime('now') "
                 "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input','pending_review')",
+                (repo_key, issue_number)
+            )
+        elif _stage == "done":
+            # stage=done 但推进方不是人（历史自动收尾残留 / 脏数据）→ 不结单，
+            # 收口到待人工确认，等人工走 confirm-done。
+            log.info(f"close_issue_tasks: stage=done by '{_stage_owner or 'unknown'}' is not "
+                     f"human-driven, downgrade {repo_key}/#{issue_number} to pending_review")
+            set_issue_stage(repo_key, _issue_id, "pending_review", "pipeline")
+            c.execute(
+                "UPDATE issue SET status='pending_review', completed_reason=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status='active'",
                 (repo_key, issue_number)
             )
         elif _stage == "pending_review":
@@ -654,6 +668,67 @@ def _resume_stage(owner_agent: str) -> str:
     _owner = (owner_agent or "").strip()
     return "issue" if _owner in _RESUME_STAGE_SENTINELS else _owner
 
+def _resume_issue_rows(repo_key: str, issue_number: int, from_statuses: tuple,
+                       new_stage: str = "", new_owner: str = "",
+                       fallback_pending_review_stage: bool = False) -> tuple:
+    """`from_statuses → processing` 的**唯一**状态迁移实现（幂等）。
+
+    返回 ``(changed, stage, owner_agent)``：``stage``/``owner_agent`` 为翻转前读到的
+    库内值，供调用方决定 stage 落点。Issue #2816 复审：``_resume_issue_waiting`` 与
+    ``resume_issue_from_manual`` 曾各写一份 UPDATE，状态集合与 stage 策略各异；
+    此处收敛为单源，两条入口只保留各自的 stage 策略差异。
+
+    Issue #2816 复审（硬违规，MySQL `rowcount` 语义）：生产集群走 MySQL，PyMySQL
+    未启用 ``CLIENT_FOUND_ROWS``，匹配但值未变的 UPDATE 返回 ``rowcount=0``。
+    ``RESUMABLE_ISSUE_STATUSES`` 含 ``processing``，对已是 processing 的单执行
+    new_carrier/reassign 时 UPDATE 匹配但值不变 → 旧实现误判未恢复并 409。这里在
+    0 行时回读 status，若仍在 ``from_statuses``（尤其 processing）视为已恢复。
+
+    复审（判断项，事务一致性）：状态翻转与 stage 落点在同一 ``db_lock``/事务内完成，
+    避免先提交 status 再单独提交 stage；stage 写失败时不会留下「status=processing
+    但 stage 仍旧」的中间态。
+    """
+    with db_lock:
+        c = _rt_db.cursor()
+        c.execute(
+            "SELECT stage, owner_agent FROM issue WHERE repo_key=? AND issue_number=?",
+            (repo_key, issue_number))
+        _row = c.fetchone()
+        _stage = ((_row[0] if _row else "") or "").strip()
+        _owner = ((_row[1] if _row else "") or "").strip()
+        _ph = ",".join("?" * len(from_statuses))
+        c.execute(
+            f"UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
+            f"WHERE repo_key=? AND issue_number=? AND status IN ({_ph})",
+            (repo_key, issue_number, *from_statuses))
+        _changed = c.rowcount > 0
+        if not _changed:
+            # MySQL 未启用 CLIENT_FOUND_ROWS：matched-but-unchanged → 0 行。
+            # 回读当前 status，仍处于可恢复集合时按「已恢复」处理（幂等重试）。
+            c.execute(
+                "SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                (repo_key, issue_number))
+            _again = c.fetchone()
+            _cur = ((_again[0] if _again else "") or "").strip()
+            if _cur in from_statuses:
+                _changed = True
+        if _changed:
+            _target_stage = ""
+            _target_owner = _owner
+            if new_stage:
+                _target_stage = new_stage
+                _target_owner = new_owner or _owner
+            elif fallback_pending_review_stage and _stage == "pending_review":
+                _target_stage = _resume_stage(_owner)
+            if _target_stage:
+                c.execute(
+                    "UPDATE issue SET stage=?, owner_agent=? "
+                    "WHERE repo_key=? AND issue_number=?",
+                    (_target_stage, _target_owner, repo_key, issue_number))
+        _rt_db.commit()
+    return _changed, _stage, _owner
+
+
 def _resume_issue_waiting(repo_key: str, issue_number: int,
                           preserve_review: bool = False) -> bool:
     """「等用户」双态恢复（幂等）：`awaiting_input / pending_review → processing`。
@@ -669,28 +744,24 @@ def _resume_issue_waiting(repo_key: str, issue_number: int,
 
     Issue #2381：``preserve_review=True`` 表示本次是 redispatch 重放历史评论，不是新的
     用户输入，`pending_review` 审核点不得再次被消费（保留审核点，只恢复 awaiting_input）。
+
+    Issue #2816 复审：状态迁移走 ``_resume_issue_rows`` 单源；仅真实翻转时才回落
+    stage（``pending_review`` → ``_resume_stage(owner_agent)``）。
     """
+    _from_statuses = ("awaiting_input",) if preserve_review else ("awaiting_input", "pending_review")
     try:
-        with db_lock:
-            c = _rt_db.cursor()
-            c.execute(
-                "SELECT stage, owner_agent FROM issue WHERE repo_key=? AND issue_number=?",
-                (repo_key, issue_number))
-            _row = c.fetchone()
-            _stage = ((_row[0] if _row else "") or "").strip()
-            _owner = ((_row[1] if _row else "") or "").strip()
-            _from_statuses = ("awaiting_input",) if preserve_review else ("awaiting_input", "pending_review")
-            _ph = ",".join("?" * len(_from_statuses))
-            c.execute(
-                f"UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
-                f"WHERE repo_key=? AND issue_number=? AND status IN ({_ph})",
-                (repo_key, issue_number, *_from_statuses))
-            _changed = c.rowcount > 0
-            if _changed and _stage == "pending_review":
-                c.execute(
-                    "UPDATE issue SET stage=? WHERE repo_key=? AND issue_number=?",
-                    (_resume_stage(_owner), repo_key, issue_number))
-            _rt_db.commit()
+        _changed, _stage, _owner = _resume_issue_rows(
+            repo_key, issue_number, _from_statuses,
+            fallback_pending_review_stage=True)
+        if _changed and _stage == "pending_review":
+            # stage 已在 _resume_issue_rows 的同一事务内提交；这里只补 task.status
+            # 同步（幂等，重复写同值不影响一致性）。
+            try:
+                from src.api.session_store import set_issue_stage
+                set_issue_stage(repo_key, f"#{issue_number}", _resume_stage(_owner), _owner)
+            except Exception as _se:
+                log.warning(f"resume waiting: sync task status failed "
+                            f"{repo_key}/#{issue_number}: {_se}")
         if _changed:
             log.info(f"Issue waiting resume: {repo_key}/#{issue_number} awaiting/pending_review → processing "
                      f"(preserve_review={preserve_review})")
@@ -759,48 +830,6 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
         return False
     except Exception:
         return False
-
-def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
-                         statuses: tuple = ("pending_review",),
-                         qa_info: dict | None = None) -> bool:
-    """把给定 status 集合内的问题置 completed + stage=done（合入/收尾）。返回是否变更。
-
-    Issue #1739：落 completed 前统一校验同一流水线 qa 最新结论，fail 时不收尾。
-    ``qa_info`` 为调用方已完成的门禁结果：传入时直接复用，避免同一收尾动作重复
-    查询/标注；未传入（None）时自行校验，保持既有调用契约。
-    """
-    if qa_info is None:
-        try:
-            from src.api.qa_gate import gate_or_annotate
-            qa_info = gate_or_annotate(repo_key, issue_number)
-        except Exception as _qe:
-            # 门禁自身异常 fail-open，保持既有收尾链路
-            log.warning(f"Issue #1739: qa gate check failed (fail-open) "
-                        f"{repo_key}/#{issue_number}: {_qe}")
-            qa_info = {}
-    if qa_info.get("blocked"):
-        log.info(f"Issue #1739: qa failed → refuse complete "
-                 f"{repo_key}/#{issue_number} (seq={qa_info.get('event_seq')})")
-        return False
-    with db_lock:
-        c = _rt_db.cursor()
-        _ph = ",".join("?" * len(statuses))
-        c.execute(
-            f"UPDATE issue SET status='completed', completed_reason='review_passed', completed_at=datetime('now') "
-            f"WHERE repo_key=? AND issue_number=? AND status IN ({_ph})",
-            (repo_key, issue_number, *statuses))
-        _rt_db.commit()
-        _changed = c.rowcount > 0
-    if _changed:
-        try:
-            from src.api.session_store import set_issue_stage
-            set_issue_stage(repo_key, f"#{issue_number}", "done", "agent")
-        except Exception as _se:
-            log.warning(f"review_pass stage=done failed {repo_key}/#{issue_number}: {_se}")
-        log.info(f"Issue review-pass(done): {repo_key}/#{issue_number} evidence={evidence[:60]}")
-        # A4：完成通知扇出到该用户全部已连接渠道（去重窗口内只发一轮）
-        _notify_done(repo_key, issue_number, "审核已通过，该需求已完成。")
-    return _changed
 
 # Issue #1599：审核动作未命中原因分类所依赖的终态集合
 _ISSUE_TERMINAL_STATUSES = ("completed", "cancelled")
@@ -925,70 +954,6 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
         log.warning(f"find github mirror for {repo_key} failed: {e}")
         return ""
 
-def _close_vcs_one_auto(repo_key: str, issue_number) -> str:
-    """对单个 repo_key 幂等关闭 VCS Issue（bot token，降级不阻断）。"""
-    try:
-        from src.kernel.repo_key import parse_repo_key
-        provider, owner, repo = parse_repo_key(repo_key)
-        if not owner or not repo:
-            return "skipped"
-        # D44/S65：token 统一入口 TokenResolver 策略链（bot 列→全局→用户
-        # 降级，get_github_token/get_repo_bot_token 内部即此形态）
-        token = ""
-        try:
-            from src.kernel.token_resolver import TokenResolver, create_provider
-            token = TokenResolver(create_provider(provider)).get_token(repo_key) or ""
-        except Exception:
-            token = ""
-        if not token:
-            log.info(f"auto-finalize: no bot token for {repo_key}, skip VCS close")
-            return "skipped"
-        from src.domains.runtime.vcs.api_client import VcsApiClient
-        client = VcsApiClient(provider, token, owner, repo)
-        try:
-            if client.get_issue_state(issue_number) == "closed":
-                return "skipped"
-        except Exception as _se:
-            log.warning(f"auto-finalize: get_issue_state {repo_key}#{issue_number} failed: {_se}")
-        resp = client.close_issue(issue_number)
-        if isinstance(resp, dict) and "error" not in resp:
-            log.info(f"auto-finalize: closed VCS issue {repo_key}#{issue_number}")
-            return "success"
-        log.warning(f"auto-finalize: close_issue {repo_key}#{issue_number} -> {resp}")
-        return "failed"
-    except Exception as _e:
-        log.warning(f"auto-finalize: close VCS issue {repo_key}#{issue_number} failed: {_e}")
-        return "failed"
-
-def _close_vcs_issue_auto(repo_key: str, issue_number) -> str:
-    """Issue #656: 服务端自动结单后联动关闭 VCS Issue（bot token，降级不阻断）。
-
-    与 confirm-done 人工路径语义一致：GitCode 仓库同时尝试关闭绑定的 GitHub 镜像 Issue
-    （镜像 repo_key 解析失败按降级语义 skip）；github: 仓库仅关闭 GitHub 侧。
-
-    幂等：VCS 侧已 closed → skipped。返回 "success" / "skipped" / "failed"（聚合：
-    任一侧 success 即 success，否则任一侧 failed 即 failed，全 skipped 即 skipped；
-    失败仅记日志，不影响本地已完成状态，与 confirm-done 的降级语义一致）。
-    """
-    if not issue_number:
-        return "skipped"
-    _results = {}
-    try:
-        # S104/D78：镜像查找统一 _mirror_repo_keys（全平台，S97 同族；
-        # 手写 github-only 镜像漏 gitee/gitlab 绑定仓）
-        _results[repo_key] = _close_vcs_one_auto(repo_key, issue_number)
-        for _m_rk in _mirror_repo_keys(repo_key):
-            _results[_m_rk] = _close_vcs_one_auto(_m_rk, issue_number)
-    except Exception as _e:
-        log.warning(f"auto-finalize: close VCS issue {repo_key}#{issue_number} failed: {_e}")
-        return "failed"
-    _vals = list(_results.values())
-    if "success" in _vals:
-        return "success"
-    if "failed" in _vals:
-        return "failed"
-    return "skipped"
-
 def _issue_latest_event_status_by_agent(repo_key: str, issue_id_tag: str) -> dict:
     """该 issue 每个 agent_type 的最新事件状态（seq 最大者），用于「全部节点 completed」检测。
 
@@ -1020,21 +985,25 @@ def _issue_latest_event_status_by_agent(repo_key: str, issue_id_tag: str) -> dic
         log.warning(f"auto-finalize: latest event status query failed {repo_key}/{issue_id_tag}: {_e}")
         return out
 
-def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: str,
+def finalize_issue_to_pending_review(repo_key: str, issue_id: str, agent_type: str,
                                      source: str = "pipeline") -> str:
-    """Issue #656: 末节点完成后 issue 级自动收尾迁移（自动结单）。
+    """末节点完成后把需求推进到「待人工确认」（不再自动结单）。
 
-    触发条件（全部满足才自动结单）：
+    人工闸口径（需求确认只能由人做）：末节点全绿时只写
+    ``status=pending_review`` + ``stage=pending_review``，不写 completed、不关 VCS Issue；
+    VCS 关单与 completed 只发生在人工 confirm-done（routes/issues.py）。
+    失败/QA 拦截分支维持原有「回退 pending_review」语义。
+
+    触发条件（全部满足才推进）：
     - 完成的 agent == issue 当前 stage，且该节点为流水线末节点（next=='done' 或无下游）；
     - 该 issue 全部流水线节点最新事件均 completed（无 running/dispatched），且无 failed 阻断；
     - issue.status 非 pending_review（显式待人工确认场景不自动结单，保留 confirm done 人工路径）。
 
-    迁移：status→completed、completed_reason='auto_finalized'、completed_at 落库（#368）、
-    stage→done，并联动关闭 VCS（GitCode/GitHub）Issue（bot token，降级不阻断，幂等）。
+    迁移：status→pending_review、stage→pending_review（completed_reason/at 清空）。
 
-    有 failed 阻断时回退 stage=pending_review（保留 Issue #51 人工确认语义）。
+    有 failed 阻断时同样回退 stage=pending_review（保留 Issue #51 人工确认语义）。
 
-    返回："auto_done" / "pending_review_fallback" / "noop:<reason>"（幂等可重入）。
+    返回："pending_review" / "pending_review_fallback" / "noop:<reason>"（幂等可重入）。
     """
     try:
         _num_s = (issue_id or "").strip().lstrip("#")
@@ -1139,89 +1108,85 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
             log.warning(f"Issue #1739: qa gate check failed (fail-open) "
                         f"{repo_key}/{_tag}: {_qe}")
 
-        # 条件齐备 → issue 级收尾迁移（幂等：仅可变状态放行）
+        # 条件齐备 → 推进到待人工确认（幂等：仅可变状态放行；不写 completed、不关 VCS）
         with db_lock:
             c = _rt_db.cursor()
             c.execute(
-                "UPDATE issue SET status='completed', completed_reason=?, completed_at=datetime('now') "
+                "UPDATE issue SET status='pending_review', completed_reason=NULL, completed_at=NULL "
                 "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input')",
-                (_AUTO_FINALIZED_REASON, repo_key, _num))
+                (repo_key, _num))
             _rt_db.commit()
             _changed = c.rowcount > 0
         if not _changed:
             return "noop:not_mutable"
         try:
             from src.api.session_store import set_issue_stage
-            set_issue_stage(repo_key, _tag, "done", source or "pipeline")
+            set_issue_stage(repo_key, _tag, "pending_review", source or "pipeline")
         except Exception as _se:
-            # UPDATE completed 与 set_issue_stage 非原子 → 立即补偿重试一次，仍失败仅记日志
-            log.warning(f"auto-finalize stage=done failed {repo_key}/{_tag}: {_se}, retry once")
+            # UPDATE 与 set_issue_stage 非原子 → 立即补偿重试一次，仍失败仅记日志
+            log.warning(f"finalize stage=pending_review failed {repo_key}/{_tag}: {_se}, retry once")
             try:
-                set_issue_stage(repo_key, _tag, "done", source or "pipeline")
+                set_issue_stage(repo_key, _tag, "pending_review", source or "pipeline")
             except Exception as _se2:
-                log.warning(f"auto-finalize stage=done retry failed {repo_key}/{_tag}: {_se2} "
+                log.warning(f"finalize stage=pending_review retry failed {repo_key}/{_tag}: {_se2} "
                             f"(will be compensated on next event)")
-        _closed = _close_vcs_issue_auto(repo_key, _num)
-        _notify_done(repo_key, _num, "流水线全部节点已完成，需求已自动结单。")
-        log.info(f"Issue #656: auto-finalized {repo_key}/{_tag} by {source} "
-                 f"(agent={agent_type}, vcs_close={_closed})")
-        return "auto_done"
+        _notify_done(repo_key, _num, "流水线全部节点已完成，需求进入待确认，请人工确认完成。")
+        log.info(f"last-node finalize -> pending_review {repo_key}/{_tag} by {source} "
+                 f"(agent={agent_type})")
+        return "pending_review"
     except Exception as _e:
-        log.warning(f"auto-finalize failed {repo_key}/{issue_id}: {_e}")
+        log.warning(f"finalize to pending_review failed {repo_key}/{issue_id}: {_e}")
         return "noop:error"
 
 def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
                  evidence: str = "") -> str:
-    """Agent 判定用户通过审核（幂等）。
+    """Agent 判定用户通过审核（只推进，不终态）。
 
-    - target=done：pending_review → completed+done（合入/收尾）；
-      **末节点放宽（#2266）**：若当前 stage 为流水线末节点（next=='done'），status 处于
-      active/processing/awaiting_input 也放行 done（CLI 流水线可从未进入 pending_review，
-      如 PR 已合入但需求卡 active → 原路径 noop）。防中间节点误终态：非末节点仍仅 pending_review 可退出。
-    - target=processing：仅 pending_review → processing（继续流水线）；末节点触达则归一 done
-      （review-pass-last-node-force-done-design.md，无下游可续）。
+    - target=done：**拒绝**。需求完成只能由人工确认（confirm-done / admin-confirm-done），
+      agent 没有任何终态通道；返回 ``noop:agent_finalize_forbidden``（路由转 400）。
+    - target=processing：pending_review → processing（继续流水线）；
+      末节点触达时无下游可续 → 归一为 pending_review（待人工确认），而不是 done。
     - 未命中 → `noop:already_target|terminal|not_pending_review|error`（Issue #1599：
       回读真实 status 后分类，调用方据此给出 changed=false + 真实 status + 原因码）。
     """
     try:
-        # Issue #1739：统一 QA 结论门禁——仅在本次调用会收尾（target=done 或末节点归一
-        # done）时校验；target=processing 的「继续处理」不受影响。
-        _will_done = (target == "done") or _is_last_stage_node(repo_key, issue_number)
+        if str(target or "").strip().lower() == "done":
+            log.warning(f"Issue review-pass: agent tried to finalize "
+                        f"{repo_key}/#{issue_number} -> rejected (human confirm only)")
+            return "noop:agent_finalize_forbidden"
+        # Issue #1739：末节点走到「待确认」前仍过一次 QA 结论门禁，但只用于标注/记录——
+        # 人工闸下 AI 不再自动收尾，QA 失败不能把人挡在待确认列之外（否则卡片停在原
+        # stage，既进不了待审核也无人被通知）。人工确认时自行判断 QA 结论。
         _qa_info: dict | None = None
-        if _will_done:
+        if _is_last_stage_node(repo_key, issue_number):
             try:
                 from src.api.qa_gate import gate_or_annotate
                 _qa_info = gate_or_annotate(repo_key, issue_number)
                 if _qa_info.get("blocked"):
-                    log.info(f"Issue #1739: qa failed → review-pass blocked "
-                             f"{repo_key}/#{issue_number} target={target}")
-                    return "noop:qa_failed"
+                    log.info(f"Issue #1739: qa failed → still route to pending_review "
+                             f"(human decides) {repo_key}/#{issue_number}")
             except Exception as _qe:
                 log.warning(f"Issue #1739: qa gate check failed (fail-open) "
                             f"{repo_key}/#{issue_number}: {_qe}")
                 _qa_info = {}
-        if target == "done":
-            if _is_last_stage_node(repo_key, issue_number):
-                # 末节点：兼容 pending_review + 放宽 active/processing/awaiting_input（方向 A）
-                if _complete_issue_done(repo_key, issue_number, evidence,
-                                        ("pending_review", "active", "processing", "awaiting_input"),
-                                        qa_info=_qa_info):
-                    return "passed_done"
-                return _review_noop_reason(repo_key, issue_number, "completed")
-            # 非末节点：保持原契约（仅 pending_review），防中间节点误终态
-            if _complete_issue_done(repo_key, issue_number, evidence, ("pending_review",),
-                                    qa_info=_qa_info):
-                return "passed_done"
-            return _review_noop_reason(repo_key, issue_number, "completed")
         if _is_last_stage_node(repo_key, issue_number):
-            # 末节点 + processing → 归一 done（无下游可续）
-            log.info(f"Issue review-pass normalized last-node target=processing→done: "
-                     f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
-            if _complete_issue_done(repo_key, issue_number, evidence,
-                                    ("pending_review", "active", "processing", "awaiting_input"),
-                                    qa_info=_qa_info):
-                return "passed_done"
-            return _review_noop_reason(repo_key, issue_number, "completed")
+            # 末节点 + processing → 归一 pending_review（无下游可续，等人工确认；不再 done）
+            with db_lock:
+                c = _rt_db.cursor()
+                c.execute(
+                    "UPDATE issue SET status='pending_review', completed_reason=NULL, completed_at=NULL "
+                    "WHERE repo_key=? AND issue_number=? "
+                    "AND status IN ('active','processing','awaiting_input','pending_review')",
+                    (repo_key, issue_number))
+                _rt_db.commit()
+                _changed = c.rowcount > 0
+            if _changed:
+                from src.api.session_store import set_issue_stage
+                set_issue_stage(repo_key, f"#{issue_number}", "pending_review", "agent")
+                log.info(f"Issue review-pass normalized last-node -> pending_review: "
+                         f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
+                return "pending_review"
+            return _review_noop_reason(repo_key, issue_number, "pending_review")
         with db_lock:
             c = _rt_db.cursor()
             c.execute(
@@ -1617,24 +1582,134 @@ def _cleanup_issue_attachments(repo_key: str, issue_number):
     except Exception as _e:
         log.warning(f"Attachment cleanup failed: {_e}")
 
-def confirm_issue_done(repo_key: str, issue_number: "int | str", confirmed_by: str = "issue_comment"):
-    """Issue 评论确认完成 → 关闭该 issue 所有 active 任务 + stage=done"""
+def confirm_issue_done(repo_key: str, issue_number: "int | str", confirmed_by: str = "issue_comment",
+                       extra_statuses: tuple = (), skip_stage_if_no_change: bool = False):
+    """Issue 评论确认完成 → 关闭该 issue 所有 active 任务 + stage=done
+
+    ``extra_statuses``：在主路径状态（active/processing）之外额外允许收敛的状态，
+    供终态载体单处置复用（awaiting_input/pending_review）。
+    ``skip_stage_if_no_change``：无真实状态变更时不推进 stage，避免落成
+    「status=awaiting_input + stage=done」的不一致（Issue #2816 审查）。
+    """
+    statuses = ("active", "processing") + tuple(extra_statuses or ())
     with db_lock:
         c = _rt_db.cursor()
         c.execute(
             "UPDATE issue SET status='completed', completed_reason=?, completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
-            (confirmed_by, repo_key, issue_number))
+            "WHERE repo_key=? AND issue_number=? AND status IN ("
+            + ",".join("?" for _ in statuses) + ")",
+            (confirmed_by, repo_key, issue_number, *statuses))
         affected = c.rowcount
         _rt_db.commit()
-    from src.api.session_store import set_issue_stage
-    set_issue_stage(repo_key, f"#{issue_number}", "done", "user")
+    if affected or not skip_stage_if_no_change:
+        from src.api.session_store import set_issue_stage
+        set_issue_stage(repo_key, f"#{issue_number}", "done", "user")
     log.info(f"Issue #{issue_number} confirmed done by {confirmed_by} ({affected} tasks closed)")
     if affected:
         _notify_done(repo_key, issue_number, f"需求已确认完成（{confirmed_by}）。")
     # Issue #1748 补充：关闭后回收平台自动转存的评论媒体/编辑器图片（保留用户手工附件）
     _cleanup_auto_transferred_attachments(repo_key, issue_number)
     return affected
+
+def mark_issue_manual_status(repo_key: str, issue_number: "int | str",
+                              reason: str = "needs_human_terminal") -> str:
+    """把 issue 置「等用户」人工态（status+stage）并返回当前状态（域内状态迁移单源）。
+
+    Issue #2816：终态载体单被短路后由 a2a_terminal_guard 调用；状态/阶段取自
+    ``pipeline_constants``（``PAUSED_ISSUE_STATUSES`` / ``MANUAL_ISSUE_STAGE``），
+    避免 api 模块内再硬编码。Spec 要求「folded + 载体 terminal 的单据 stage 置人工态」，
+    故 stage 同步写为 ``MANUAL_ISSUE_STAGE``；``patrol.issue_terminal`` 依据 status
+    判定终态，不会因 stage 变更产生额外影响。
+    可标记起始状态含 ``pending_review``（终态载体命中的在途审核态也要落人工态）；
+    已处于暂停态时 UPDATE 不命中，但返回实际状态，供响应如实呈现。
+    """
+    from src.api.pipeline_constants import (
+        MANUAL_ISSUE_STAGE, MARKABLE_PAUSE_STATUSES, PAUSED_ISSUE_STATUSES)
+    from src.domains.runtime.vcs.api_client import _native_issue_number
+    _paused = PAUSED_ISSUE_STATUSES[0]
+    num = _native_issue_number(str(issue_number).lstrip("#"))
+    with db_lock:
+        c = _rt_db.cursor()
+        c.execute(
+            "UPDATE issue SET status=?, completed_reason=?, completed_at=NULL "
+            "WHERE repo_key=? AND issue_number=? AND status IN ("
+            + ",".join("?" for _ in MARKABLE_PAUSE_STATUSES) + ")",
+            (_paused, reason, repo_key, num, *MARKABLE_PAUSE_STATUSES))
+        _rt_db.commit()
+        c.execute("SELECT status, stage, owner_agent FROM issue "
+                  "WHERE repo_key=? AND issue_number=?", (repo_key, num))
+        row = c.fetchone()
+    status = (row[0] or "") if row else ""
+    if status == _paused:
+        _owner = (row[2] or "") if row else ""
+        try:
+            from src.api.session_store import set_issue_stage
+            set_issue_stage(repo_key, f"#{num}", MANUAL_ISSUE_STAGE, _owner)
+        except Exception as _e:
+            log.warning(f"mark_issue_manual_status: set stage failed "
+                        f"{repo_key}/#{num}: {_e}")
+        log.info(f"Issue #{issue_number} → {_paused}/{MANUAL_ISSUE_STAGE} ({reason})")
+    return status
+
+
+def resume_issue_from_manual(repo_key: str, issue_number: "int | str",
+                             stage: str = "coding", owner_agent: str = "coding") -> bool:
+    """把人工态/暂停态恢复为 processing 并推进 stage（幂等）。
+
+    Issue #2816：``terminal_disposition.new_carrier`` / ``reassign`` 处置后调用。
+    api 层不再直写 ``UPDATE issue``，状态集合单源于
+    ``pipeline_constants.RESUMABLE_ISSUE_STATUSES``；状态迁移与
+    ``_resume_issue_waiting`` 共用 ``_resume_issue_rows`` 单源。
+
+    Issue #2816 复审（硬违规）：``UPDATE`` 未命中（``completed`` / ``cancelled`` 等
+    已收敛单据、或并发改写）时**不得**再写 stage——否则 ``set_issue_stage`` 会把
+    任务状态同步回 ``processing``，落成「status 终态 + stage=coding」并复活派发。
+    """
+    from src.api.pipeline_constants import RESUMABLE_ISSUE_STATUSES
+    from src.domains.runtime.vcs.api_client import _native_issue_number
+    num = _native_issue_number(str(issue_number).lstrip("#"))
+    try:
+        # 状态翻转与 stage 落点在同一事务内完成；已是 processing 的单（MySQL
+        # rowcount=0）由 _resume_issue_rows 回读 status 视为幂等恢复。
+        changed, _cur_stage, _ = _resume_issue_rows(
+            repo_key, num, tuple(RESUMABLE_ISSUE_STATUSES),
+            new_stage=stage, new_owner=owner_agent)
+    except Exception as e:
+        log.warning(f"resume_issue_from_manual: status update failed {repo_key}/#{num}: {e}")
+        return False
+    if not changed:
+        log.info(f"Issue #{issue_number} not resumable (terminal or changed concurrently), "
+                 f"stage untouched")
+        return False
+    try:
+        # stage 已随状态事务提交；此处仅同步 task.status（幂等）。
+        from src.api.session_store import set_issue_stage
+        set_issue_stage(repo_key, f"#{num}", stage, owner_agent)
+    except Exception as e:
+        log.warning(f"resume_issue_from_manual: sync task status failed: {e}")
+    log.info(f"Issue #{issue_number} resumed from manual → processing/{stage}")
+    return True
+
+
+def get_issue_lifecycle_status(repo_key: str, issue_number: "int | str") -> str:
+    """读 Issue 当前 ``status``（只读；无记录/异常返回空串）。
+
+    Issue #2816 复审：人工处置入口需在恢复前判状态上限——``completed`` /
+    ``cancelled`` 等已收敛单据不得再被 ``new_carrier`` / ``reassign`` 拉回。
+    """
+    from src.domains.runtime.vcs.api_client import _native_issue_number
+    num = _native_issue_number(str(issue_number).lstrip("#"))
+    try:
+        with db_lock:
+            c = _rt_db.cursor()
+            c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                      (repo_key, num))
+            row = c.fetchone()
+        return ((row[0] if row else "") or "").strip()
+    except Exception as e:
+        log.warning(f"get_issue_lifecycle_status failed {repo_key}/#{num}: {e}")
+        return ""
+
 
 def cancel_issue_task(repo_key: str, issue_number: int):
     """Issue 评论取消任务（Issue #1741：状态集合补齐 awaiting_input/pending_review，避免静默失效）"""

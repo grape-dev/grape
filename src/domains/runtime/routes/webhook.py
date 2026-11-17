@@ -8,6 +8,7 @@ from src.api.deps import get_user_or_none
 from src.domains.runtime.pipeline.event_pipeline import run_pipeline, resolve_actor_account
 from src.api.a2a_dispatch import _on_handoff_dispatch, run_a2a_dispatch
 from src.api.pipeline_constants import (
+    DISPATCHABLE_AGENTS,
     HANDOFF_RESULT_FAILED,
     HANDOFF_RESULT_OK,
     HANDOFF_RESULT_REJECTED,
@@ -1157,7 +1158,8 @@ def _handoff_dispatch_retry_limit() -> int:
 def _dispatch_handoff_a2a(repo_key: str, seq: int, target_node: str, evt: dict,
                           issue_number, repository: str, ref_seq: int = 0,
                           skill_name: str = "", skill_id: int = 0,
-                          skill_path: str = "", backend: str = "") -> dict:
+                          skill_path: str = "", backend: str = "",
+                          guard_state: dict | None = None) -> dict:
     """Issue #2327：handoff 建事件后统一走正常 A2A 派发实现（引擎选择 + 入队）。
 
     不再自行构造 `agent/handoff` 事件手搓 payload（原实现绕过 `run_a2a_dispatch`，
@@ -1182,9 +1184,17 @@ def _dispatch_handoff_a2a(repo_key: str, seq: int, target_node: str, evt: dict,
                 runtime_id=0, backend=backend,
                 issue_number=str(issue_number or ""),
                 repository=repository, ref_seq=int(ref_seq or 0),
+                guard_state=guard_state,
             )
         except Exception as _de:
             result = {"status": "failed", "seq": 0, "error": str(_de)}
+        if isinstance(result, dict) and result.get("status") == "skipped":
+            # Issue #2816 复审（判断项）：终态 guard 的 skipped 不是成功；直接返回
+            # rejected，避免把「被短路」记成「已派发」。
+            log.info(f"A2A #2327: handoff dispatch rejected seq={seq} "
+                     f"reason={result.get('skipped') or 'skipped'}")
+            return {"status": "rejected", "attempts": attempt, "dispatch": result,
+                    "reason": result.get("reason") or result.get("skipped") or ""}
         if isinstance(result, dict) and result.get("status") != "failed" and result.get("seq"):
             if attempt > 1:
                 log.info(f"A2A #2327: handoff dispatch succeeded on attempt {attempt} seq={seq}")
@@ -1211,6 +1221,7 @@ def _cross_pipeline_handoff(
     repo_key: str, issue_number: str, target_scene_id: str, target_node: str,
     carried_context: dict, target_assignee: str, engine_config, context: str,
     repository: str, account: str, source_seq: int = 0,
+    guard_state: dict | None = None,
 ) -> dict:
     """Issue #329: Cross-pipeline handoff — redirect A2A to target scene's vod node.
 
@@ -1535,7 +1546,22 @@ def _cross_pipeline_handoff(
             repo_key, seq, target_node, _handoff_evt,
             issue_number=issue_number, repository=repository,
             ref_seq=int(source_seq or 0), skill_name=_handoff_skill,
+            guard_state=guard_state,
         )
+        if _dispatch_res.get("status") == "rejected":
+            # 终态 guard 短路：事件已由 run_a2a_dispatch 落 cancelled + event_skipped，
+            # 按 A2A 契约回显 skipped/rejected，供调用方（页面/Agent）识别为拦截。
+            _rej = _dispatch_res.get("dispatch") or {}
+            log.info(f"A2A #329: cross-pipeline handoff rejected by terminal guard "
+                     f"seq={seq} reason={_rej.get('skipped') or 'skipped'}")
+            return {"ok": True, "response": {
+                "status": "ok", "seq": seq, "agent": target_node,
+                "scene": target_scene_id, "cross_pipeline": True,
+                "skipped": _rej.get("skipped") or "needs_human_terminal",
+                "handoff_result": HANDOFF_RESULT_REJECTED,
+                "source_seq": int(source_seq or 0),
+                "reason": _rej.get("reason") or "",
+            }}
         if _dispatch_res.get("status") != "ok":
             # 失败已由 _dispatch_handoff_a2a 落 dispatch_failed 终态（可见、非僵尸），
             # 仍按 A2A 契约回显 seq 供调用方定位。
@@ -1901,8 +1927,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     repository_early = payload.get("repository") or ""
     issue_number_early = str(payload.get("issue_number") or "")
     # 1. agent 名必须在平台白名单内（agent 写错目标名时立刻暴露）
-    if agent_name not in ("vod", "issue", "coding", "qa", "sre"):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid agent '{agent_name}': must be one of vod/issue/coding/qa/sre"})
+    if agent_name not in DISPATCHABLE_AGENTS:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid agent '{agent_name}': must be one of {', '.join(DISPATCHABLE_AGENTS)}"})
     # 2. issue_number 必须是纯数字（防止传 "#1"、issue 标题、随机文本）
     if not issue_number_early.isdigit():
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid issue_number '{issue_number_early[:50]}': must be a plain number like '1' (no '#', no text)"})
@@ -2029,10 +2055,20 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             _source_seq = int(_a2a_ref_seq)
 
         if target_scene_id and issue_number:
+            # Issue #2816 复审（判断项）：跨流水线派发的终态 guard 在 async 端点内
+            # 用 executor 预判，避免 run_a2a_dispatch 在事件循环里同步读 VCS。
+            _cross_guard = None
+            if not _force:
+                import asyncio as _aio_cross
+                from src.api.a2a_terminal_guard import guard_terminal_dispatch
+                _cross_guard = await _aio_cross.to_thread(
+                    guard_terminal_dispatch, repo_key, issue_number,
+                    target_node or "vod",
+                    (payload if isinstance(payload, dict) else {}))
             _redirect = _cross_pipeline_handoff(
                 repo_key, issue_number, target_scene_id, target_node or "vod",
                 carried_context, target_assignee, engine_config, context, repository, account,
-                source_seq=_source_seq,
+                source_seq=_source_seq, guard_state=_cross_guard,
             )
             if _redirect.get("ok"):
                 # Issue #2327 评审 O7：ok=True 只表示「redirect 分支已处理」，不代表派发成功——
@@ -2374,7 +2410,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         _res = resolve_skill_dispatch(
                             _pipe_skill, _node_sid, repo_key=repo_key,
                             user_id=_a2a_issue_uid, scene_id=_a2a_issue_scene,
-                            node_tag=agent_name)
+                            node_tag=agent_name, agent_type=agent_name)
                         skill_id = _res["skill_id"]
                         skill_name = _res.get("skill_name") or _pipe_skill
                         skill_path = _res.get("skill_path") or _pipe_skill
@@ -2458,6 +2494,47 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 find_active_duplicate, resolve_scene)
             _guard_scene, _guard_nodes = resolve_scene(repo_key, issue_number)
             _event_scene = _guard_scene
+            # Issue #2816：折叠进已终态载体 PR 的单不再重派 coding。命中
+            # needs-human 标签或载体 PR 的 needs-human-terminal 标记行即短路，
+            # 并把 Issue 置人工态（awaiting_input），巡检据此不再补偿派发。
+            import asyncio as _aio
+            from src.api.a2a_terminal_guard import guard_terminal_dispatch
+            _terminal = await _aio.to_thread(
+                guard_terminal_dispatch, repo_key, issue_number, agent_name,
+                (payload if isinstance(payload, dict) else {}))
+            if _terminal:
+                from src.api.terminal_disposition import available_actions
+                _terminal_reason = _terminal.get("reason") or "needs_human_terminal"
+                _terminal_content = {
+                    "status": "ok", "seq": 0, "agent": agent_name,
+                    "skipped": _terminal_reason, "queued": False,
+                    "scene": _guard_scene,
+                    "reason": f"{_terminal_reason}:{_terminal.get('detail') or ''}",
+                    "triggers": _terminal.get("triggers") or [],
+                    "carrier_pr": _terminal.get("carrier_pr") or 0,
+                    "folded": bool(_terminal.get("folded")),
+                    "conflict_scope": _terminal.get("conflict_scope") or "",
+                    "manual_status": _terminal.get("manual_status") or "",
+                    "manual_applied": bool(_terminal.get("manual_applied")),
+                    "manual_actions": available_actions(_terminal),
+                    "message": ("issue is folded into a terminal carrier PR "
+                                "(needs-human/needs-human-terminal); coding dispatch skipped "
+                                "and the issue moved to a manual state. Use the terminal "
+                                "disposition entry (new_carrier/reassign/close) or force=true "
+                                "to override manually."),
+                }
+                log.info(f"A2A terminal guard: skip coding dispatch issue=#{issue_number} "
+                         f"triggers={_terminal.get('triggers')}")
+                from src.api.a2a_dispatch_guard import detect_dispatch_storm
+                try:
+                    detect_dispatch_storm(repo_key, issue_number, agent_name, upcoming=0)
+                except Exception as _tse:
+                    log.warning(f"A2A #2816: storm detection failed: {_tse}")
+                return JSONResponse(
+                    status_code=200,
+                    content={**_terminal_content,
+                             "handoff_result": HANDOFF_RESULT_REJECTED,
+                             "source_seq": int(_source_seq or 0)})
             _down = find_running_downstream(
                 repo_key, issue_number, agent_name, _guard_scene, _guard_nodes,
                 exclude_seq=_a2a_ref_seq)
@@ -2758,6 +2835,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             runtime_id=runtime_id or 0, backend=backend,
             issue_number=issue_number, repository=repository,
             ref_seq=_a2a_ref_seq,
+            # Issue #2816 复审：入口已按 _force 做过终态短路；派发入口的同款
+            # 复查必须继承 force 语义，否则人工强制派发会在第二道门被拦回。
+            # 同时透传入口已算好的 guard 结果，避免在事件循环内二次同步读 VCS。
+            force=bool(_force),
+            guard_state=(_terminal if (issue_number and not _force) else None),
         )
         return _augment_a2a_dispatch_response(
             _dispatch_result, agent_name, issue_number, source_seq=_source_seq)

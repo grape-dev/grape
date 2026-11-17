@@ -101,7 +101,8 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
                      skill_name: str = "", skill_id: int = 0, skill_path: str = "",
                      runtime_id: int = 0, backend: str = "", issue_number="",
                      repository: str = "", ref_seq: int = 0,
-                     reissue: bool = False) -> dict:
+                     reissue: bool = False, force: bool = False,
+                     guard_state: dict | None = None) -> dict:
     """派发已创建的 A2A 事件（plugin 事件总线优先，legacy 派发兜底）。
 
     Issue #1667：从 webhook.a2a_endpoint 抽出，供正常 A2A 与排队 drain 复用。
@@ -110,28 +111,91 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
     Issue #2508：投递前执行「事件终态 + 关联任务终态」双检，命中即静默跳过并写
     ``terminal_event_replay`` 审计；``reissue=True``（人工重派）或事件已带
     ``_reissue`` 标记时放行，保留人工恢复能力。
+
+    Issue #2816 复审：终态载体短路由 ``POST /api/a2a`` 门禁执行，而排队事件
+    随 drain 直接进入本函数投递，不再读标签/标记行。故在**本函数入口**复查同一
+    guard，避免终态标记前入队的 coding 事件在终态后落地。``force=True``（人工
+    处置/强制派发）与 ``reissue`` 手动重派同样放行。
+
+    Issue #2816 复审（判断项）：入口 guard 已在 async 端点经 ``to_thread`` 计算过，
+    同步调用方无需再次做阻塞 VCS 读。``guard_state`` 为「已预判结果」透传：
+    ``None`` = 未预判（drain 等线程内自行判定），``{}`` = 已预判放行，非空 = 命中。
     """
     from src.api.event_store import find_terminal_event_replay, is_event_reissue
     from src.api.pipeline_constants import TERMINAL_EVENT_REPLAY_REASON
-    if not (reissue or is_event_reissue(seq)):
-        _issue_ref = f"#{str(issue_number).lstrip('#')}" if issue_number else ""
+    _manual_replay = bool(reissue or is_event_reissue(seq))
+    _issue_ref = f"#{str(issue_number).lstrip('#')}" if issue_number else ""
+    _evt_payload = (evt or {}).get("payload") or (evt or {}).get("payload_raw") or "{}"
+    if isinstance(_evt_payload, str):
+        import json as _json_2508
+        try:
+            _evt_payload = _json_2508.loads(_evt_payload)
+        except Exception:
+            _evt_payload = {}
+    if not isinstance(_evt_payload, dict):
+        _evt_payload = {}
+    # 载体提示兜底：evt 顶层字段（非仅 payload）也参与显式载体判定，避免排队行
+    # 缺 payload 时丢失 pr_number/carrier_pr 优先级。
+    if isinstance(evt, dict):
+        for _hint_key in ("carrier_pr", "pr_number"):
+            if not _evt_payload.get(_hint_key) and evt.get(_hint_key):
+                _evt_payload[_hint_key] = evt.get(_hint_key)
+    if issue_number and not _manual_replay and not force:
+        if guard_state is not None:
+            # 调用方已（在 executor 中）完成判定：直接复用，避免事件循环内二次阻塞。
+            _terminal = guard_state if isinstance(guard_state, dict) else {}
+        else:
+            try:
+                from src.api.a2a_terminal_guard import guard_terminal_dispatch
+                _terminal = guard_terminal_dispatch(
+                    repo_key, issue_number, agent_name, _evt_payload)
+            except Exception as _te:
+                # 判定数据源/依赖异常一律放行（与 guard 内部保守放行同口径）。
+                log.warning(f"A2A #2816: terminal guard failed seq={seq}: {_te}")
+                _terminal = {}
+        if _terminal:
+            _t_reason = _terminal.get("reason") or "needs_human_terminal"
+            # 排队事件已被 drain 抢占为 running；短路后必须落终态，否则巡检会把
+            # 这条永远不会执行的 running 事件当成停滞。
+            if int(seq or 0) > 0:
+                try:
+                    from src.api.event_store import update_event_status
+                    update_event_status(
+                        int(seq), "cancelled",
+                        result=(f"{_t_reason}: terminal carrier guard skipped "
+                                f"dispatch (carrier_pr={_terminal.get('carrier_pr') or 0})"))
+                except Exception as _ue:
+                    log.warning(f"A2A #2816: mark skipped event terminal failed seq={seq}: {_ue}")
+            from src.api.terminal_disposition import available_actions
+            log.info(f"A2A terminal guard (dispatch entry): skip seq={seq} "
+                     f"agent={agent_name} issue=#{issue_number} reason={_t_reason}")
+            return {"status": "skipped", "seq": int(seq or 0), "agent": agent_name,
+                    "skipped": _t_reason, "queued": False,
+                    "reason": f"{_t_reason}:{_terminal.get('detail') or ''}",
+                    "triggers": _terminal.get("triggers") or [],
+                    "carrier_pr": _terminal.get("carrier_pr") or 0,
+                    "folded": bool(_terminal.get("folded")),
+                    "conflict_scope": _terminal.get("conflict_scope") or "",
+                    "manual_status": _terminal.get("manual_status") or "",
+                    "manual_applied": bool(_terminal.get("manual_applied")),
+                    "manual_actions": available_actions(_terminal),
+                    "handoff_result": "rejected",
+                    "message": ("issue is folded into a terminal carrier PR "
+                                "(needs-human/needs-human-terminal); coding dispatch skipped "
+                                "and the issue moved to a manual state. Use the terminal "
+                                "disposition entry (new_carrier/reassign/close) or force=true "
+                                "to override manually.")}
+    if not _manual_replay:
         # Issue #2508 review: the fingerprint alone is identical for every
         # handoff to the same node, so the gate also compares the request
         # content (context + pr_number) before blocking anything.
-        _evt_payload = (evt or {}).get("payload") or (evt or {}).get("payload_raw") or "{}"
-        if isinstance(_evt_payload, str):
-            import json as _json_2508
-            try:
-                _evt_payload = _json_2508.loads(_evt_payload)
-            except Exception:
-                _evt_payload = {}
         from src.api.event_store import _content_key as _content_key_fn
         _replay = find_terminal_event_replay(
             repo_key, event_seq=seq,
             idempotency_key=str((evt or {}).get("idempotency_key") or ""),
             fingerprint=str((evt or {}).get("fingerprint") or ""),
             agent_type=agent_name, issue_id=_issue_ref,
-            content_key=_content_key_fn(_evt_payload if isinstance(_evt_payload, dict) else {}))
+            content_key=_content_key_fn(_evt_payload))
         if _replay:
             from src.api.a2a_dispatch_guard import record_terminal_replay_skip
             _detail = record_terminal_replay_skip(repo_key, issue_number, agent_name, _replay)

@@ -90,10 +90,36 @@
 
 ---
 
+## GET /api/categories/tree — 统一分类树
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape categories tree`（operation_id=`categories_tree`）。
+
+| Query | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `scope` | string | 否 | `scene` / `skill`；缺省=全部 |
+
+| 出参 | `{scope, categories: [{id, parent_id, level, name, slug, icon, order_num, applies_to, children: [...]}]}`（Issue #2761 两级分类树） |
+| 返回 | 200 |
+
+---
+
 ## GET /api/scenes/market/categories — 场景市场分类
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
-| 出参 | `[{id, name, slug, icon, order_num}]` |
+| 出参 | `{categories: [{id, name, slug, icon, order_num}], tree: [...]}`（`categories` 保留旧一级列表，`tree` 为 Issue #2761 统一分类树） |
+| 返回 | 200 |
+
+---
+
+## GET /api/scenes/tag-suggest — 场景标签推荐
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Query | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `name` | string | 否 | 场景名称（关键词候选） |
+| `description` | string | 否 | 场景描述（关键词候选） |
+
+| 出参 | `{tags: [string]}`（规则型候选，最多 3 个） |
 | 返回 | 200 |
 
 ---
@@ -101,10 +127,12 @@
 ## GET /api/scenes/market — 场景市场列表
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
-| Query | 参数 | 类型 | 必填 | 说明 |
-|------|------|------|:---:|------|
+| Query | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
 | `q` | string | 否 | 关键字 |
-| `category_id` | int | 否 | 分类 id |
+| `category_id` | int | 否 | 旧分类 id（保留兼容） |
+| `cat_l1_id` | int | 否 | 统一分类一级域 id（Issue #2761） |
+| `cat_l2_id` | int | 否 | 统一分类二级子类 id（Issue #2761） |
 | `sort` | string | 否 | 排序 |
 | `scope` | string | 否 | official / repo（缺省=全部） |
 | `repo` | string | 否 | scope=repo 时的 repo_key 过滤（owner/repo） |

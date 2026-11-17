@@ -23,6 +23,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile
 from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
+from src.api.pipeline_constants import DISPATCHABLE_AGENTS as _DEV_OPS_AGENTS
 
 from src.kernel.config import log
 
@@ -1367,6 +1368,39 @@ async def targets_issue(issue_id: int, user: dict = Depends(require_no_session_t
     return {"issue_id": issue_id, "issue_number": issue_number, "repo_key": repo_key,
             "current_scene_id": out["current_scene_id"], "targets": out["targets"]}
 
+def _a2a_identity(repo_key: str, user: dict | None) -> tuple[str, str]:
+    """从 repo_key / 用户派生 A2A payload 的 repository 与 account（handoff 与人工处置共用）。"""
+    repository = repo_key.split(":", 1)[1] if ":" in repo_key else repo_key
+    account = (user or {}).get("username") or ""
+    if not account:
+        account = (repository.split("/", 1)[0] if "/" in repository else repository)
+    return repository, account
+
+
+async def _dispatch_a2a(agent: str, payload: dict, user: dict | None,
+                        force: bool = False) -> dict:
+    """服务内直调标准 /api/a2a 链路（jwt 分支），并把 JSONResponse 解包为 dict。
+
+    Issue #2816 复审：handoff 与 terminal-disposition 曾各写一份派生 + 解包逻辑，
+    此处收敛为单入口，保持「拦截类 skipped」原样透传。
+    """
+    import json as _rjson
+    from src.domains.runtime.routes.webhook import a2a_endpoint, A2AHandoffBody
+    _dispatch_user = dict(user or {})
+    _dispatch_user["auth_type"] = "jwt"
+    _a2a_body = A2AHandoffBody(agent=agent, force=force, payload=payload)
+    _res = await a2a_endpoint(None, _a2a_body, _dispatch_user)  # type: ignore[arg-type]  # jwt 分支不读 request
+    if not isinstance(_res, dict):
+        _raw = getattr(_res, "body", b"") or b""
+        if isinstance(_raw, memoryview):
+            _raw = _raw.tobytes()
+        try:
+            _res = _rjson.loads(bytes(_raw).decode("utf-8"))
+        except Exception:
+            _res = {"status": "error", "message": "A2A 返回解析失败"}
+    return _res
+
+
 @router.post("/{issue_id}/handoff", operation_id="issues_handoff",
              summary="Hand off issue to another pipeline",
              description="Hands the issue off to a target pipeline (Issue #337 list-view entry). Backend proxy: validates repo access + target membership (vod required; Issue #450: current pipeline allowed as target), 30s idempotency guard, then reuses the standard A2A cross-pipeline handoff path (a2a_endpoint -> _cross_pipeline_handoff). Result (including 'skipped' interceptions like duplicate_handoff) is passed through to the frontend.")
@@ -1374,7 +1408,6 @@ async def handoff_issue(issue_id: int, body: IssueHandoffBody,
                         user: dict = Depends(require_no_session_token)):
     """Issue #337: 移交提交——服务内直调 a2a_endpoint（与 a2a-redo 同模式），复用 #329 链路。"""
     import time as _time
-    import json as _rjson
     from src.api.deps import check_repo_access
     from src.api.issues_center import get_handoff_targets
 
@@ -1412,16 +1445,12 @@ async def handoff_issue(issue_id: int, body: IssueHandoffBody,
     _src_cfg = get_pipeline_config(current_scene_id, repo_key=repo_key) or {}
     _carried.setdefault("source_scene_name", _src_cfg.get("display_name") or _src_cfg.get("name") or current_scene_id)
 
-    _repository = repo_key.split(":", 1)[1] if ":" in repo_key else repo_key
-    _account = (user.get("username") or "") or _repository.split("/", 1)[0]
+    _repository, _account = _a2a_identity(repo_key, user)
     _context = (f"用户在需求中心发起跨流水线移交（Issue #{issue_number}）："
                 f"目标场景 {target_scene_id}，请快速复核后流转至 issue 确认 Spec。")
 
     # 5) 服务内直调标准 /api/a2a 链路（jwt 分支内部再校验 managed_repos，双保险）
-    from src.domains.runtime.routes.webhook import a2a_endpoint, A2AHandoffBody
-    _handoff_user = dict(user or {})
-    _handoff_user["auth_type"] = "jwt"
-    _a2a_body = A2AHandoffBody(agent="vod", payload={
+    _res = await _dispatch_a2a("vod", {
         "repository": _repository,
         "account": _account,
         "issue_number": issue_number,
@@ -1432,23 +1461,152 @@ async def handoff_issue(issue_id: int, body: IssueHandoffBody,
         "carried_context": _carried,
         "target_assignee": "",
         "engine_config": None,
-    })
-    _res = await a2a_endpoint(None, _a2a_body, _handoff_user)  # type: ignore[arg-type]  # jwt 分支不读 request
-    # JSONResponse（拦截类 skipped）原样透传
-    if not isinstance(_res, dict):
-        _raw = getattr(_res, "body", b"") or b""
-        if isinstance(_raw, memoryview):
-            _raw = _raw.tobytes()
-        try:
-            _res = _rjson.loads(bytes(_raw).decode("utf-8"))
-        except Exception:
-            _res = {"status": "error", "message": "A2A 返回解析失败"}
+    }, user)
 
     # 6) 记录幂等时间戳（真实入队/拦截都记，防连点）
     set_meta_value(_mk, str(_time.time()))
     log.info(f"[issue-handoff] issue_id={issue_id} #{issue_number} → scene={target_scene_id} "
              f"by={user.get('username', '')}: {_res}")
     return _res
+
+
+class IssueTerminalDispositionBody(BaseModel):
+    action: str = ""
+    carrier_pr: int = 0
+    target_agent: str = ""
+    reason: str = ""
+
+
+def _audit_terminal_disposition(user: dict, repo_key: str, issue_number, action: str,
+                                by: str, carrier_pr: int, target_agent: str,
+                                ok: bool, blocked: str = "", dispatch_seq: int = 0) -> None:
+    """终态载体单人工处置留痕（Issue #2816 / 架构审查 C3）。
+
+    写端点必须落 audit_logs，不只写 meta：处置动作会恢复 Issue 状态并强制派发。
+    失败（审计链路异常）只告警，不影响处置结果。
+    """
+    try:
+        from src.domains.mgmt.auth.audit import log_audit
+        log_audit("issue_terminal_disposition",
+                  operator_id=user.get("id", 0) or 0,
+                  detail={"repo_key": repo_key, "issue_number": issue_number,
+                          "action": action, "by": by, "carrier_pr": int(carrier_pr or 0),
+                          "target_agent": target_agent, "ok": bool(ok),
+                          "blocked": blocked, "dispatch_seq": int(dispatch_seq or 0)})
+    except Exception as e:  # noqa: BLE001 - 审计失败不阻断人工处置
+        log.warning(f"[terminal-disposition] audit failed #{issue_number}: {e}")
+
+
+@router.post("/{issue_id}/terminal-disposition", operation_id="issues_terminal_disposition",
+             summary="Dispose a folded issue whose carrier PR is terminal",
+             description="Issue #2816: manual disposition for a folded issue whose carrier PR is marked needs-human-terminal (CONFLICT_SCOPE=intersect). Actions: new_carrier (carrier_pr required; resumes processing/coding and force-dispatches), reassign (target_agent required; force-dispatches to that agent), close (converges the issue via confirm-done). Bypasses the terminal dispatch guard only for this manual action.")
+async def issue_terminal_disposition(issue_id: int, body: IssueTerminalDispositionBody,
+                                     user: dict = Depends(require_no_session_token)):
+    """人工处置入口：指定新载体 / 改派 / 关闭（Issue #2816）。
+
+    终态载体单被 ``a2a_terminal_guard`` 短路后，自动循环不再推进；本入口提供
+    显式人工出口，替代 B1/B11-fallback 空转。
+    """
+    from src.api.deps import check_repo_access
+    from src.api.terminal_disposition import (
+        clear_carrier_override, clear_manual_override, close_issue,
+        record_disposition, resume_issue, set_carrier_override,
+        set_manual_override, validate_disposition)
+    from src.api.a2a_terminal_guard import clear_cache
+
+    repo_key, issue_number, _scene = _load_issue_repo_scene(issue_id)
+    check_repo_access(user, repo_key)
+
+    action = (body.action or "").strip().lower()
+    _err = validate_disposition(action, body.carrier_pr, body.target_agent)
+    if _err:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": _err})
+
+    _repository, _account = _a2a_identity(repo_key, user)
+    _by = user.get("username") or ""
+    # 调用方 reason 进 agent context 前清洗/截断，收敛提示注入面。
+    _reason = re.sub(r"\s+", " ", (body.reason or "")).strip()[:200]
+
+    if action == "close":
+        affected = close_issue(repo_key, issue_number,
+                               confirmed_by=f"terminal_disposition:{_by or 'manual'}")
+        record_disposition(repo_key, issue_number, action,
+                           {"by": _by, "ok": bool(affected), "affected": affected})
+        _audit_terminal_disposition(user, repo_key, issue_number, action, _by, 0, "",
+                                    bool(affected))
+        clear_manual_override(repo_key, issue_number)
+        # Issue #2816 复审：关闭时连载体 meta 一起清掉，避免单据重开后被旧载体判定假阴性。
+        clear_carrier_override(repo_key, issue_number)
+        clear_cache(repo_key, issue_number)
+        return {"status": "ok" if affected else "blocked", "action": action,
+                "issue_number": issue_number, "closed": bool(affected)}
+
+    # Issue #2816 复审（硬违规）：处置入口只对可恢复状态开放。completed/cancelled
+    # 等已收敛单据必须走 close，否则 resume 不命中却仍 force 派发 → status 不变 +
+    # stage=coding + 复活 coding，与「正常单据行为不变」相悖。
+    from src.api.pipeline_constants import RESUMABLE_ISSUE_STATUSES
+    from src.domains.runtime.issues_center import get_issue_lifecycle_status
+    _cur_status = get_issue_lifecycle_status(repo_key, issue_number)
+    if _cur_status not in RESUMABLE_ISSUE_STATUSES:
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "message": (f"需求当前状态为 {_cur_status or '未知'}，已收敛单据不支持 {action}；"
+                        "如需结束本单请使用 close")})
+
+    # validate_disposition 已校验 reassign 的 target_agent，这里不再二次校验。
+    _target_agent = ("coding" if action == "new_carrier"
+                     else (body.target_agent or "").strip().lower())
+    _carrier_pr = int(body.carrier_pr) if action == "new_carrier" else 0
+    # 先恢复状态再落 meta/派发：恢复未命中（并发改写/状态已收敛）时不得写 stage，
+    # 也不得留下「已人工越过」的持久标记后仍去 force 派发。
+    _resumed = resume_issue(repo_key, issue_number,
+                            stage=_target_agent, owner_agent=_target_agent)
+    if not _resumed:
+        record_disposition(repo_key, issue_number, action, {
+            "by": _by, "carrier_pr": _carrier_pr, "blocked": "not_resumable"})
+        _audit_terminal_disposition(user, repo_key, issue_number, action, _by,
+                                    _carrier_pr, _target_agent, False,
+                                    blocked="not_resumable")
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "message": "需求已收敛或状态已变更，未恢复派发；请刷新状态后改用 close"})
+    if action == "new_carrier":
+        set_carrier_override(repo_key, issue_number, _carrier_pr)
+    # 记录人工越过：处置后旧 needs-human 标签不再在下一轮非 force 派发中反噬。
+    set_manual_override(repo_key, issue_number, action, _carrier_pr, _by)
+    clear_cache(repo_key, issue_number)
+
+    _context = (f"人工处置终态载体单[compensated_by=manual:{_by}]：action={action}"
+                + (f"，新载体 PR #{_carrier_pr}" if action == "new_carrier" else "")
+                + "。请基于新载体/人工指定继续推进。"
+                + (f" 处置说明：{_reason}" if _reason else ""))
+
+    _res = await _dispatch_a2a(_target_agent, {
+        "repository": _repository,
+        "account": _account,
+        "issue_number": issue_number,
+        "pr_number": _carrier_pr if action == "new_carrier" else "",
+        "carrier_pr": _carrier_pr,
+        "context": _context,
+    }, user, force=True)
+    record_disposition(repo_key, issue_number, action, {
+        "by": _by, "carrier_pr": _carrier_pr,
+        "target_agent": _target_agent, "reason": _reason,
+        "dispatch_seq": _res.get("seq") if isinstance(_res, dict) else 0,
+    })
+    _audit_terminal_disposition(user, repo_key, issue_number, action, _by, _carrier_pr,
+                                _target_agent, True,
+                                dispatch_seq=int((_res.get("seq") if isinstance(_res, dict) else 0) or 0))
+    log.info(f"[terminal-disposition] issue_id={issue_id} #{issue_number} action={action} "
+             f"by={_by}: {_res}")
+    # 与 handoff 一致：直接返回 A2A 结果（不再包一层 result），附加处置元信息。
+    _out = dict(_res) if isinstance(_res, dict) else {}
+    _out.update({"action": action, "issue_number": issue_number,
+                 "target_agent": _target_agent,
+                 "disposition": {"by": _by, "carrier_pr": _carrier_pr,
+                                 "reason": _reason}})
+    return _out
+
 
 @router.get("/{issue_id}/clarifications", operation_id="issues_clarifications", summary="Issue clarification history", description="Fetches the agent's clarification messages for the Issue.")
 async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
@@ -1613,8 +1771,6 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
 
     return {"ok": True, "issue_id": issue_card_id, "status": "awaiting_input", "changed": changed}
 
-_DEV_OPS_AGENTS = ("vod", "issue", "coding", "qa", "sre")
-
 def _session_devops_issue(issue_id: int, user: dict) -> dict:
     """待审核系列端点通用鉴权：仅 tk_ 会话；agent_type∈(devops 白名单 ∪ issue 绑定场景节点集)（Issue #655）；
     issue.repo_key==token.repo_key；返回 issue 行。
@@ -1717,10 +1873,16 @@ def _review_outcome(_out: str) -> tuple:
 
 @router.post("/{issue_id}/review-pass", operation_id="issues_review-pass",
              summary="Agent decides review passed",
-             description="Agent 判定用户已通过审核：pending_review → processing（继续）；target=done → completed+stage=done（合入/收尾）。响应回读 issue 表真实 status 并返回 changed(bool)；未命中附 reason（already_target/terminal/not_pending_review），不再回显名义 status 冒充成功。Session-only (tk_)，repo 匹配，devops agent。")
+             description="Agent 判定用户已通过审核，只能推进、不能终态：target=processing → pending_review→processing（继续），末节点归一 pending_review；target=done 一律 400（需求完成只能由人工 confirm-done）。响应回读 issue 表真实 status 并返回 changed(bool)；未命中附 reason（already_target/terminal/not_pending_review/agent_finalize_forbidden）。Session-only (tk_)，repo 匹配，devops agent。")
 async def issue_review_pass(issue_id: int, body: _ReviewPassBody,
                             user: dict = Depends(get_current_user_or_api_key)):
     it = _session_devops_issue(issue_id, user)
+    if str(body.target or "").strip().lower() == "done":
+        # 人工闸：agent 没有终态通道，完成只能由人在平台上确认
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "agent 不能直接完成需求（target=done 已禁用）；请调用 review-pass target=processing 让需求进入 pending_review，由人工确认完成",
+            "reason": "agent_finalize_forbidden"})
     _out = _review_pass(it["repo_key"], it["issue_number"],
                         target=body.target or "processing", evidence=body.evidence or "")
     _result, _reason = _review_outcome(_out)

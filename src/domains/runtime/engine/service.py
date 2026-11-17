@@ -3486,7 +3486,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
                 try:
                     from src.api.session_store import is_subtask_mode_enabled, set_issue_stage
                     if is_subtask_mode_enabled(_repo_key, _issue_id):
-                        set_issue_stage(_repo_key, _issue_id, "done", "issue")
+                        set_issue_stage(_repo_key, _issue_id, "pending_review", "issue")
                         log.info(f"Multi-task mode: parent issue {_issue_id} stage=done (subtasks will trigger independently)")
                 except Exception as _se:
                     log.warning(f"complete_task multi-task stage=done failed: {_se}")

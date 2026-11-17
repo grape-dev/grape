@@ -35,6 +35,7 @@ from src.domains.mgmt.schema_ddl import (
     _FEATURED_TEMPLATES_DDL,
     _LOGIN_WHITELIST_DDL,
     _SKILL_CATEGORY_DDL,
+    _CATEGORY_DICT_DDL,
     _SCENE_MARKET_DDL,
     _SCENE_LIKES_DDL,
     _SCENE_SKILL_REF_DDL,
@@ -244,6 +245,7 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("login_whitelist", _LOGIN_WHITELIST_DDL),
     # ===== Issue-11: DevOps 市场表 =====
     ("scene_category", _SCENE_CATEGORY_DDL),
+    ("grape_t_category_dict", _CATEGORY_DICT_DDL),
     ("scene_market", _SCENE_MARKET_DDL),
     ("scene_likes", _SCENE_LIKES_DDL),
     ("scene_skill_ref", _SCENE_SKILL_REF_DDL),
@@ -7973,7 +7975,7 @@ register_migration(
     kind="backfill",
     fn=_fn_retire_vcs_platforms_hidden,
 )
-# =====================================================================
+# ==============================================================
 # ===== Issue #646: engine_uid / credential_uid 稳定键迁移 ============
 # 设计依据 Spec v3（Issue #646 评论）：UUIDv5 自然键派生（幂等防漂移）/
 # UUIDv4 凭据键（名可变）/ 五阶段在线迁移中的前三阶段（加列→回填→FK）。
@@ -9221,3 +9223,133 @@ def _migration_engine_template_binding_widen(conn=None) -> dict:
     log.info(f"[migration 202611160001] grape_t_engine_template_binding widen: {report['action']} ({report['detail']})")
     return report
 
+
+
+# ===== Issue #2761：场景/技能统一分类字典 + 标签存储 =====
+#
+# 分类字典（category_dict）是场景/技能一二级分类的唯一真源；旧 scene_category /
+# skill_category 与 scene_market.category_id / skill.category_id 保留不动（零破坏）。
+# 标签统一 JSON [{name, source}]，旧逗号串在本迁移里就地回填为 manual 标签。
+
+def _fn_category_dict_and_tags() -> None:
+    """Issue #2761 M1：统一分类字典表 + 场景/技能分类引用列 + 标签 JSON 化。
+
+    - 建 grape_t_category_dict 并落 10 个一级域及二级种子；
+    - scene_market / skill 补 cat_l1_id / cat_l2_id；skill 补 tags；
+    - scene_market.tags 旧逗号串就地回填为 [{name, source:"manual"}]；
+    - 幂等：IF NOT EXISTS / _ensure_column / INSERT OR IGNORE / 已规范化行跳过。
+    """
+    with db_lock:
+        c = db.cursor()
+        if not _owned_skip("grape_t_category_dict", "create"):
+            c.execute(_CATEGORY_DICT_DDL)
+            from src.domains.mgmt.user.db import seed_category_dict
+            seed_category_dict()
+        for _tbl, _col, _ddl in (
+            ("scene_market", "cat_l1_id", "INTEGER DEFAULT 0"),
+            ("scene_market", "cat_l2_id", "INTEGER DEFAULT 0"),
+            ("skill", "cat_l1_id", "INTEGER DEFAULT 0"),
+            ("skill", "cat_l2_id", "INTEGER DEFAULT 0"),
+            ("skill", "tags", "TEXT DEFAULT ''"),
+        ):
+            _ensure_column(c, _tbl, _col, _ddl)
+        db.commit()
+        if not _owned_skip("scene_market", "backfill tags"):
+            try:
+                from src.domains.mgmt.user.db import backfill_scene_market_legacy_tags
+                migrated = backfill_scene_market_legacy_tags()
+                if migrated:
+                    log.info(f"202611171846 scene_market.tags 旧逗号串回填 {migrated} 行")
+            except Exception as e:  # noqa: BLE001 - 表可能尚未由 owner 建出
+                log.warning(f"202611171846 回填 scene_market.tags 失败，跳过: {e}")
+
+
+register_migration(
+    version="202611171846",
+    name="issue2761-category-dict-and-tags",
+    kind="safe",
+    fn=_fn_category_dict_and_tags,
+)
+
+
+# ===== Issue #2761 复审（架构 A6/A12）：表名前缀 + 显式 id 迁迁移 =====
+# 原表 `category_dict` 无前缀、主键自增；改为 `grape_t_category_dict` + 显式 id
+# （一级 = 1000+order，二级 = 一级 id*100+order）。已跑过 202611171846 前身的库
+# 需要把存量行与 scene_market/skill 的 cat_l1_id / cat_l2_id 一起重映射。
+def _fn_category_dict_prefix_and_explicit_ids() -> None:
+    """把旧 category_dict 迁到 grape_t_category_dict 并重算显式 id（幂等）。"""
+    with db_lock:
+        c = db.cursor()
+        legacy_rows: list = []
+        try:
+            legacy_rows = c.execute(
+                "SELECT id, parent_id, level, name, slug, icon, order_num, applies_to, is_active "
+                "FROM category_dict").fetchall()
+        except Exception:
+            legacy_rows = []
+        if not _owned_skip("grape_t_category_dict", "create"):
+            c.execute(_CATEGORY_DICT_DDL)
+        from src.domains.mgmt.user.db import (
+            category_dict_seed_id, seed_category_dict)
+        if not _owned_skip("grape_t_category_dict", "seed"):
+            seed_category_dict()
+        db.commit()
+        if not legacy_rows:
+            return
+
+        # 旧 id → 新 id：官方行按 slug 命中种子；其余（管理台手工增补）按 900000+ 顺序兜底。
+        from src.domains.mgmt.user.db import _CATEGORY_DICT_SEED as _seed
+        _new_by_slug = {}
+        for idx, row in enumerate(_seed):
+            _new_by_slug[row[3]] = category_dict_seed_id(_seed, idx)
+        old_to_new: dict[int, int] = {}
+        extra = 900000
+        for r in legacy_rows:
+            old_id, slug = int(r[0] or 0), str(r[4] or "")
+            new_id = _new_by_slug.get(slug)
+            if new_id:
+                old_to_new[old_id] = new_id
+                continue
+            extra += 1
+            old_to_new[old_id] = extra
+            try:
+                c.execute(
+                    "INSERT OR IGNORE INTO grape_t_category_dict "
+                    "(id, parent_id, level, name, slug, icon, order_num, applies_to, is_active) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (extra, int(old_to_new.get(int(r[1] or 0), 0)), int(r[2] or 1), r[3], slug,
+                     r[5] or "", int(r[6] or 0), r[7] or "both", int(r[8] or 1)))
+            except Exception:
+                c.execute(
+                    "INSERT IGNORE INTO grape_t_category_dict "
+                    "(id, parent_id, level, name, slug, icon, order_num, applies_to, is_active) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (extra, int(old_to_new.get(int(r[1] or 0), 0)), int(r[2] or 1), r[3], slug,
+                     r[5] or "", int(r[6] or 0), r[7] or "both", int(r[8] or 1)))
+        db.commit()
+
+        # 引用重映射：scene_market / skill 的 cat_l1_id、cat_l2_id。
+        for old_id, new_id in old_to_new.items():
+            if old_id == new_id:
+                continue
+            for tbl in ("scene_market", "skill"):
+                for col in ("cat_l1_id", "cat_l2_id"):
+                    try:
+                        c.execute(f"UPDATE {tbl} SET {col}=? WHERE {col}=?", (new_id, old_id))
+                    except Exception as e:  # noqa: BLE001 - 表/列可能不存在（旧库）
+                        log.warning(f"202611171845 remap {tbl}.{col} 跳过: {e}")
+        db.commit()
+        try:
+            c.execute("DROP TABLE category_dict")
+            db.commit()
+            log.info(f"202611171845 旧 category_dict 已迁移并删除，重映射 {len(old_to_new)} 个 id")
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"202611171845 删除旧 category_dict 失败: {e}")
+
+
+register_migration(
+    version="202611171845",
+    name="issue2761-category-dict-prefix-and-explicit-ids",
+    kind="safe",
+    fn=_fn_category_dict_prefix_and_explicit_ids,
+)
