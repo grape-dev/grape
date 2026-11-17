@@ -3367,9 +3367,32 @@ function openBetaApply() {
       body.innerHTML = '<iframe src="/static/help.html" title="Grape 使用帮助"></iframe>';
     }
   }
+  // Issue #2089: 全屏/还原切换——只切换 CSS 类，不重建 iframe，保留阅读位置
+  function toggleHelpFullscreen() {
+    const drawer = document.getElementById('helpDrawer');
+    if (!drawer) return;
+    const on = drawer.classList.toggle('fullscreen');
+    const btn = document.getElementById('helpFullscreenBtn');
+    if (btn) {
+      btn.textContent = on ? '⇲' : '⛶';
+      btn.title = I18N.t(on ? 'app.help.exit_fullscreen' : 'app.help.fullscreen') || (on ? '退出全屏' : '全屏');
+      btn.setAttribute('aria-label', btn.title);
+    }
+  }
+  // Issue #2089: 新标签页打开帮助（独立全屏页面，非 iframe）
+  function openHelpNewTab() {
+    window.open('/static/help.html', '_blank', 'noopener');
+  }
   function closeHelp() {
     const overlay = document.getElementById('helpOverlay');
     const drawer = document.getElementById('helpDrawer');
+    // Issue #2089: 关闭前先退出全屏态（fullscreen 类若残留，抽屉下次打开直接铺满）
+    if (drawer) drawer.classList.remove('fullscreen');
+    const fsBtn = document.getElementById('helpFullscreenBtn');
+    if (fsBtn) {
+      fsBtn.textContent = '⛶';
+      fsBtn.title = I18N.t('app.help.fullscreen') || '全屏';
+    }
     if (overlay) overlay.classList.remove('show');
     if (drawer) drawer.classList.remove('show');
   }
@@ -3664,7 +3687,7 @@ function openBetaApply() {
 
   // 注：`search` 已随旧版顶栏搜索框一起移除（全仓无调用方），不要再挂进导出表——
   // 悬空引用会让 IIFE 求值即抛 ReferenceError，window.app 永不出现（壳整页空白）。
-  return {nav, refreshRepoLinks, syncAppPath: _syncAppPath, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleUserMenu, _toggleLobbyUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _blurValidateLogin, _clearLoginError, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, _openBindModal, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
+  return {nav, refreshRepoLinks, syncAppPath: _syncAppPath, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, toggleHelpFullscreen, openHelpNewTab, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleUserMenu, _toggleLobbyUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _blurValidateLogin, _clearLoginError, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, _openBindModal, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

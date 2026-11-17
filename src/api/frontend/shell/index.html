@@ -259,7 +259,7 @@ function _toggleAppLang(){
 <script type="module" src="/static-vue/viewjs/sandbox-view.js?v=3"></script>
 <script src="/static/js/deeplink.js?v=1" defer></script><!-- 深链解析 /app/<owner>/<repo>/#tasks/N -->
 <script src="/static/js/platform-icons.js?v=2" defer></script><!-- 平台图标卡派生（D109 解耦：不写死 gitcode/github） -->
-<script src="/static/js/app.js?v=269" defer></script>
+<script src="/static/js/app.js?v=270" defer></script>
 <script type="module" src="/static-vue/viewjs/login-view.js?v=2"></script>
 <script type="module" src="/static-vue/viewjs/onboarding-view.js?v=7"></script>
 <script src="/static/js/auto-recovery.js?v=2" defer></script>
@@ -268,7 +268,11 @@ function _toggleAppLang(){
 <div class="help-drawer" id="helpDrawer">
   <div class="help-drawer-hdr">
     <h2 data-i18n="app.help.drawer_title">📖 使用帮助 & FAQ</h2>
-    <button class="help-drawer-close" onclick="app.closeHelp()">✕</button>
+    <div class="help-drawer-hdr-actions">
+      <button class="help-drawer-close" id="helpNewTabBtn" onclick="app.openHelpNewTab()" data-i18n-title="app.help.open_new_tab" title="在新标签页打开">↗</button>
+      <button class="help-drawer-close" id="helpFullscreenBtn" onclick="app.toggleHelpFullscreen()" data-i18n-title="app.help.fullscreen" title="全屏">⛶</button>
+      <button class="help-drawer-close" onclick="app.closeHelp()" data-i18n-title="common.close" title="关闭">✕</button>
+    </div>
   </div>
   <div class="help-drawer-body">
     <div class="help-loading" data-i18n="app.help.loading">加载中...</div>
