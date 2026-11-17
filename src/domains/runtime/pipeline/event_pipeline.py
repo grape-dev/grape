@@ -3189,6 +3189,17 @@ def _env_number(name: str, default, lo, hi, cast=float):
 # Issue #2925：pipeline 窗口内标题兜底的执行边界（默认 8 并发 / 4s 总 deadline /
 # 3.5s 单请求超时）。可配置是为了压测与线上限流时无需发版：并发越高越逼近 VCS
 # 限流阈值，deadline 保证冷请求上限，单请求超时保证线程最迟在 deadline 附近退出。
+#
+# 数值来源（架构闸 C-1 补齐）：
+#   · 并发 8 / 范围 1~16：`docs/issue-2925/spec.md` 验收项 2 与 `plan.md` §三层收敛
+#     明确要求「有限并发」；8 是「97 条在 4s 内跑完」的最小并发
+#     （97×0.22s/8 ≈ 2.7s），上限 16 给压测留一倍余量。
+#   · 总 deadline 4.0s / 范围 0.5~30：spec 验收项 2 要求冷请求 ≤5s，4s 留 1s 给
+#     响应组装；0.5 为避免误配成 0 秒让功能整体失效。
+#   · 单请求超时 3.5s：略小于总 deadline（须在 deadline 附近退出），
+#     issue 实测单次 issue 详情 0.44s，3.5s ≈ 8 倍余量。
+#   · 上界 30.0s（deadline / timeout）：与「单次 HTTP 请求不可超过 30s」同量级，
+#     超过即等同本请求不返回，无业务意义。
 def _title_fetch_concurrency() -> int:
     return _env_number("GRAPE_PIPELINE_TITLE_FETCH_CONCURRENCY", 8, 1, 16, int)
 
