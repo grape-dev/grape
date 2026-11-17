@@ -27,8 +27,10 @@ setTimeout(function(){document.documentElement.classList.remove('i18n-loading');
 <style>
 /* Default: show login overlay, hide workbench (sidebar+mainView) */
 .sb,.mn{display:none}
-/* Logged-in: hide login overlay, show workbench */
-[data-logged-in="1"] .auth-page{opacity:0;pointer-events:none}
+/* Logged-in: hide login overlay entirely (display:none, not opacity:0).
+   Chrome treats opacity:0 login form as a visible fillable form and pops the
+   password-autofill bubble on every shell page refresh (#fix 2026-11-17). */
+[data-logged-in="1"] .auth-page{display:none}
 [data-logged-in="1"] .sb{display:flex}
 /* i18n loading: hide [data-i18n] text until translations applied (prevents zh→en flash) */
 html.i18n-loading [data-i18n]{visibility:hidden}
