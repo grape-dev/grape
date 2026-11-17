@@ -3936,6 +3936,35 @@ def _ensure_migration_session_lock_timeout(seconds: int = 10) -> None:
         log.warning(f"SET SESSION lock_wait_timeout on migration session failed: {e}")
 
 
+def current_migration_domain() -> str:
+    """本进程负责的迁移域（只在三库分库模式下返回非空）。
+
+    - `GRAPE_DOMAIN_LIB=1`（三库模式，各域有独立 DSN）且 `GRAPE_MIGRATION_OWNER`
+      有值时才筛域；单库部署（含 sqlite / 单 MySQL 库）返回空串 = 跑全量，
+      行为与历史完全一致。
+    - 返回空串的语义是「不筛」，调用方据此决定是否按 `Migration.domains` 过滤。
+    """
+    if (os.environ.get("GRAPE_DOMAIN_LIB") or "").strip() not in ("1", "true", "yes"):
+        return ""
+    dom = (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip().lower()
+    return dom if dom in ("mgmt", "runtime", "insight") else ""
+
+
+def filter_migration_registry(registry: Optional[List[Migration]]) -> List["Migration"]:
+    """按当前进程的迁移域过滤登记表；单库/无 owner 时原样返回。"""
+    owner = current_migration_domain()
+    if not owner:
+        return list(registry or [])
+    return [m for m in (registry or []) if _migration_domain_allows(m, owner)]
+
+
+def _migration_domain_allows(m: "Migration", owner: str) -> bool:
+    """owner 非空时：只允许 owner 域登记过的迁移（缺省登记域=mgmt）。"""
+    if not owner:
+        return True
+    return owner in (m.domains or ("mgmt",))
+
+
 def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
                               mdl_holders=None, allow_legacy: bool = True) -> None:
     """执行器核心（可注入连接，供测试与生产共用同一语义）。
@@ -3951,6 +3980,14 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
     """
     if registry is None:
         registry = _MIGRATIONS
+    # 三库模式：域外登记条目在这里统一剔除。否则被 `_owned_skip` 跳过 DDL 的迁移
+    # 仍会因「预检看到外来表=无事可做」而正常返回 → 在本域台账盖章，形成
+    # 「盖章表有记录、列没建」的假绿（review F1/F4）。
+    _filtered = filter_migration_registry(registry)
+    if len(_filtered) != len(registry):
+        log.info(f"域迁移过滤（owner={current_migration_domain()}）："
+                 f"{len(registry)} → {len(_filtered)} 条（域外条目由对应域进程负责）")
+    registry = _filtered
     if mdl_holders is None:
         mdl_holders = _query_mdl_holders
 
@@ -8658,13 +8695,13 @@ def _migration_1011_add_engine_anchor_columns(conn=None) -> None:
     - agent_runtimes 五列锚快照（engine_type/provider_id/template_id/
       provider_uid/template_uid）——注册路径（runtime.py register）持久化
       i5 透传锚，使派生源修正后存量行可离线重算（第 002 号迁移消费）。
-    - autopilot_tasks.engine_runtime_uids（姊妹字段方案，Issue #1011 In Scope 2）。
+    姊妹字段 autopilot_tasks.engine_runtime_uids 归 mgmt 域，已拆到 202611170046
+    （本迁移只标 runtime；在本迁移里建 mgmt 表列会被归属守卫跳过，导致该列永不落地）。
     """
     conn = conn if conn is not None else db
     c = conn.cursor()
     for tbl, col, ddl in _ISSUE_1011_ANCHOR_COLUMNS:
         _ensure_column(c, tbl, col, ddl)
-    _ensure_column(c, "autopilot_tasks", "engine_runtime_uids", "TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -8820,9 +8857,24 @@ register_migration(
     "202611170043", "agent-tasks-pool-selector-definition", "safe",
     lambda: _migration_202611170043_agent_tasks_pool_selector(), domains=("runtime",))
 
+def _migration_202611170046_autopilot_engine_runtime_uids() -> None:
+    """autopilot_tasks.engine_runtime_uids（Issue #1011 In Scope 2 姊妹字段）。
+
+    原挂在与 agent_runtimes 同一条 runtime 域迁移（202611080014）里，跨域混表：
+    分库后 runtime 进程建不了 mgmt 库的表、mgmt 进程又被域过滤掉，列永远不会落地。
+    """
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "autopilot_tasks", "engine_runtime_uids", "TEXT NOT NULL DEFAULT ''")
+        db.commit()
+
 register_migration(
     "202611170044", "autopilot-task-columns-definition", "safe",
     lambda: _migration_202611170044_autopilot_task_columns(), domains=("mgmt",))
+
+register_migration(
+    "202611170046", "autopilot-task-engine-runtime-uids", "safe",
+    lambda: _migration_202611170046_autopilot_engine_runtime_uids(), domains=("mgmt",))
 
 
 # ======================================================================

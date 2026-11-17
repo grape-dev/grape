@@ -88,12 +88,22 @@ stop_ports() {
 
 start_one() {
   role=$1; module=$2; port=$3; mport=$4; dsn=$5
+  # 谁跑本域迁移（与 scripts/grape-systemd-run.sh 同一口径）：runtime 表只由 event 跑，
+  # worker 与 event 共库不重复下发 DDL；mgmt / insight 各自跑本域。缺这一步时
+  # 四个进程都拿不到 owner → run_domain_migrations() 早退 → runtime 域迁移无人执行。
+  case "$role" in
+    mgmt)    _mig_owner="mgmt" ;;
+    event)   _mig_owner="runtime" ;;
+    insight) _mig_owner="insight" ;;
+    *)       _mig_owner="" ;;
+  esac
   # 主库也指向该角色的 stage 库（三库模式下进程主库=本域库，*_any 原语再走各自 DSN）
   _c=${dsn#mysql://}; _u=${_c%%:*}; _r=${_c#*:}; _p=${_r%%@*}; _hp=${_r#*@}
   _h=${_hp%%:*}; _pp=${_hp#*:}; _pp=${_pp%%/*}; _d=${_hp#*/}
   DEVOPS_DB_HOST="$_h" DEVOPS_DB_PORT="$_pp" DEVOPS_DB_USER="$_u" \
   DEVOPS_DB_PASSWORD="$_p" DEVOPS_DB_NAME="$_d" \
   METRICS_ADDR="127.0.0.1:$mport" GRAPE_SERVICE_NAME="$role" \
+  GRAPE_MIGRATION_OWNER="$_mig_owner" GRAPE_DOMAIN_LIB="1" \
   GRAPE_OTLP_ENDPOINT="http://127.0.0.1:4317" GRAPE_TRACE_SERVICE="grape-$role" \
   GRAPE_TRACE_RATIO="0.5" \
   nohup "$PY" -m uvicorn "$module:app" --host 0.0.0.0 --port "$port" --workers 1 \

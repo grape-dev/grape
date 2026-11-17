@@ -24,14 +24,6 @@ case "$role" in
     event|worker) _db_name="grape_runtime_db"; _db_user="grape_runtime" ;;
     insight)      _db_name="grape_insight_db"; _db_user="grape_insight" ;;
 esac
-# 谁跑本域迁移：mgmt 走 init_database；runtime 表只由 event 跑（worker 与 event 共库，
-# 重复跑会并发下发同一 DDL）；insight 由 insight 跑。
-case "$role" in
-    mgmt)    export GRAPE_MIGRATION_OWNER="mgmt" ;;
-    event)   export GRAPE_MIGRATION_OWNER="runtime" ;;
-    insight) export GRAPE_MIGRATION_OWNER="insight" ;;
-    worker)  export GRAPE_MIGRATION_OWNER="" ;;
-esac
 export DEVOPS_DB_NAME="$_db_name"
 export DEVOPS_DB_USER="$_db_user"
 # 库口令不能有内置默认值（等于把生产口令写进公开仓库）。
@@ -107,6 +99,17 @@ else
     : "${GRAPE_DOMAIN_DB_PASSWORD:?GRAPE_DOMAIN_DB_PASSWORD 未设置：单库分支需要显式提供库口令（不允许内置默认值）}"
     export DEVOPS_DB_PASSWORD="$GRAPE_DOMAIN_DB_PASSWORD"
 fi
+
+# 谁跑本域迁移：mgmt 走 init_database；runtime 表只由 event 跑（worker 与 event 共库，
+# 重复跑会并发下发同一 DDL）；insight 由 insight 跑。
+# 必须在上面 `set -a; . "$GRAPE_3DB_ENV"` **之后**按角色强制赋值 —— DSN 文件用 set -a
+# 导入时，同名变量会把前面的导出覆盖掉（review F2）。
+case "$role" in
+    mgmt)    export GRAPE_MIGRATION_OWNER="mgmt" ;;
+    event)   export GRAPE_MIGRATION_OWNER="runtime" ;;
+    insight) export GRAPE_MIGRATION_OWNER="insight" ;;
+    worker)  export GRAPE_MIGRATION_OWNER="" ;;
+esac
 
 # GSB 注册地址必须是其它节点可达的地址：留空时客户端回落 127.0.0.1，
 # 跨节点 round_robin 会全部打回本机（registry 里 base_url=http://127.0.0.1:3808x）。
