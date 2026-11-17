@@ -256,7 +256,7 @@ const pageTitle = computed(() =>
     ? String(t('app.login.associate_title', '关联 {provider} 账号')).replace('{provider}', providerLabel.value)
     : t('app.login.register_title', '注册 Grape 账号')
 )
-const pageSub = computed(() => (oauthMode.value ? t('app.login.select_tab_hint', '选择注册新账号或关联已有账号') : t('app.login.register_sub', 'Multi-Agent DevOps')))
+const pageSub = computed(() => (oauthMode.value ? t('app.login.select_tab_hint', '选择注册新账号或关联已有账号') : t('app.login.register_sub', 'AI Native DevOps')))
 const oauthInfoHtml = computed(() =>
   oauthMode.value
     ? String(t('app.login.oauth_not_associated', '你正在使用 {name}（{login}）授权，请选择注册新账号或关联已有账号'))

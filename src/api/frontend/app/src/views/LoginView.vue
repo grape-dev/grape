@@ -2,7 +2,7 @@
   <div class="auth-card" id="loginCard">
     <img class="logo" :src="logoUrl" alt="Grape" />
     <h1>Grape</h1>
-    <p class="subtitle" data-i18n="app.login.register_sub">{{ t('app.login.register_sub', 'Multi-Agent DevOps') }}</p>
+    <p class="subtitle" data-i18n="app.login.register_sub">{{ t('app.login.register_sub', 'AI Native DevOps') }}</p>
 
     <!-- 登录表单：保持旧壳的 id/name 契约，app.js 的 pwdLogin/校验函数按 id 取元素，行为零改动 -->
     <form id="pwdLogin" @submit.prevent="onSubmit">

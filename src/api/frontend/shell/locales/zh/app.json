@@ -99,7 +99,7 @@
     "oauth_error_provider_mismatch": "授权平台不匹配，请重试",
     "oauth_error_state_mismatch": "授权会话验证失败，请重新登录",
     "register_title": "注册 Grape 账号",
-    "register_sub": "Multi-Agent DevOps",
+    "register_sub": "AI Native DevOps",
     "username_placeholder": "3-32字符，字母、数字、下划线",
     "email": "邮箱",
     "email_placeholder": "you@example.com",

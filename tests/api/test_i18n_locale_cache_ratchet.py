@@ -19,13 +19,12 @@ import re
 SHELL = pathlib.Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
 LOCALES = SHELL / "locales"
 
-# 2026-11-17 快照：G-18 词条化（sandbox/observability/dashboard 三包新增 sbx/dv2 分组）后 bump index cacheVer 56
-LOCALE_FINGERPRINT = "e6544fe1eebadc4e"
+LOCALE_FINGERPRINT = "b42ba55472b55357"
 
 # 页面 → (当前 cacheVer, 历史下界=base 分支 arch-weekly-11 取值)
 CACHE_VER = {
     "index.html": ("56", "53"),
-    "admin.html": ("20261116-2", "20261114-23"),
+    "admin.html": ("20261117-1", "20261114-23"),
     "register.html": ("47", "45"),
     "forgot.html": ("47", "45"),
 }
@@ -94,7 +93,7 @@ def test_page_cache_ver_is_current_and_monotonic():
 
 # shell/js/i18n.js 自身的脚本缓存键：日期型版本，同样「只升不降」
 # （复审 R-1：棘轮只认纯数字，这类版本此前没有任何下界检查）
-I18N_JS_VER = ("20261116-2", "20261114-23")  # (当前, base 下界)
+I18N_JS_VER = ("20261117-1", "20261114-23")  # (当前, base 下界)
 
 
 def test_i18n_js_script_version_monotonic():
