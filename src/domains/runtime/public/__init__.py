@@ -5209,9 +5209,12 @@ def _skill_scope_conditions(scope=None, user_id="", repo_key="", org_id="") -> t
     else:
         conds.append("(scope='official' OR (scope='user' AND owner_id=?))")
         params.append(str(user_id))
-    # 组织隔离：official 对全组织可见；repo/user 的可见性靠 owner，不追加 org_id
+    # 组织隔离：official 对全组织可见；repo/user 的可见性靠 owner，不追加 org_id。
+    # 哨兵值：'' 与 '0' 都表示「不归属任何组织」（官方技能存的是 '0'，旧数据还有 NULL），
+    # 三者都必须视为全局可见 —— 只认 '' 会把 73 条官方技能对已归属组织的用户全部过滤掉
+    # （列表接口返回 total=0，前端显示「无技能」）。
     if org_id and scope not in ("repo", "user"):
-        conds.append("(org_id='' OR org_id=?)")
+        conds.append("(COALESCE(org_id,'') IN ('', '0') OR org_id=?)")
         params.append(org_id)
     return conds, params
 
