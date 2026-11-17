@@ -4314,15 +4314,15 @@ def ensure_credential_uid(credential_id: int, c=None) -> str:
     if own:
         c = db.cursor()
     try:
-        # G-02：runtime_credentials 归 runtime——SQL 文本与注册在 runtime public（owner 域），
-        # mgmt 只引用具名常量并经**调用方游标**执行：与 rebase/回填同事务（跨连接读陈旧
-        # 快照，#868 实测），且保留测试 fixture 的连接注入缝。
+        # G-02/F1（守卫复检 201339604）：runtime_credentials 归 runtime——读/写经
+        # runtime public **可调用原语**（进 lib 注册面），游标由调用方传入：与 rebase/
+        # 回填同事务（跨连接读陈旧快照，#868 实测），且保留测试 fixture 的连接注入缝。
         from src.domains.runtime import public as _rt_pub
-        row = c.execute(_rt_pub.SQL_CREDENTIAL_UID_BY_ID, (credential_id,)).fetchone()
-        if row and row[0]:
-            return row[0]
+        existing = _rt_pub.credential_uid_by_id(c, credential_id)
+        if existing:
+            return existing
         uid = new_credential_uid()
-        c.execute(_rt_pub.SQL_CREDENTIAL_SET_UID, (uid, credential_id))
+        _rt_pub.set_credential_uid(c, credential_id, uid)
         if own:
             db.commit()
         return uid
@@ -4620,10 +4620,10 @@ def rebase_engine_uids_by_anchor(c, anchor_rows: list) -> dict:
               "devops_sessions": 0, "chat_sessions": 0}
     cred_uid_by_id = {}
     try:
-        # G-02：同上——具名常量 + 调用方游标（同事务读，fixture 注入缝保留）
+        # G-02/F1：同上——public 可调用原语 + 调用方游标（同事务读，fixture 注入缝保留）
         from src.domains.runtime import public as _rt_pub
         cred_uid_by_id = {int(r[0]): (r[1] or "") for r in
-                          c.execute(_rt_pub.SQL_CREDENTIAL_ID_UID_PAIRS, ()).fetchall()}
+                          _rt_pub.credential_id_uid_pairs(c)}
     except Exception:
         cred_uid_by_id = {}
     for row in anchor_rows or []:

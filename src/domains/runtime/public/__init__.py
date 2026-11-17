@@ -6306,8 +6306,25 @@ def mark_cloud_sandboxes_orphaned_by_provider(provider_id) -> int:
 
 # G-02 补充形态：mgmt user/db.py 的 uid 换锚/回填链需要与调用方**同一事务**读写凭据表
 # （rebase 报表读旧 uid → 改绑 → 同事务提交，跨连接会读到陈旧快照，#868 实测测试缝
-# 即此形态）。故这两条语句以常量导出，SQL 文本与注册留在 owner 域，mgmt 只引用查询名，
-# 并在**调用方传入的游标**上执行（事务一致 + fixture 可注入连接）。
+# 即此形态）。F1（守卫复检 201339604）：SQL 文本与执行面均留在 owner 域——导出**可调用
+# 原语**（进 lib 注册面，`check_lib_query_names.py` 只认非下划线 callable），调用方游标
+# 作参数传入以保同事务语义与 fixture 连接注入缝；mgmt 不再执行 runtime 表 SQL。
 SQL_CREDENTIAL_UID_BY_ID = "SELECT credential_uid FROM runtime_credentials WHERE id=?"
 SQL_CREDENTIAL_SET_UID = "UPDATE runtime_credentials SET credential_uid=? WHERE id=?"
 SQL_CREDENTIAL_ID_UID_PAIRS = "SELECT id, credential_uid FROM runtime_credentials"
+
+
+def credential_uid_by_id(cursor: Any, credential_id: int) -> str:
+    """F1/A11：runtime_credentials 单行 credential_uid 读原语（调用方游标，同事务）。"""
+    row = cursor.execute(SQL_CREDENTIAL_UID_BY_ID, (credential_id,)).fetchone()
+    return (row[0] or "") if row else ""
+
+
+def set_credential_uid(cursor: Any, credential_id: int, uid: str) -> None:
+    """F1/A11：runtime_credentials credential_uid 写原语（调用方游标，同事务提交）。"""
+    cursor.execute(SQL_CREDENTIAL_SET_UID, (uid, credential_id))
+
+
+def credential_id_uid_pairs(cursor: Any) -> list[tuple]:
+    """F1/A11：全表 (id, credential_uid) 对读原语（调用方游标，回填报表用）。"""
+    return cursor.execute(SQL_CREDENTIAL_ID_UID_PAIRS, ()).fetchall()

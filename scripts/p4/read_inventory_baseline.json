@@ -1,28 +1,27 @@
 {
-  "files_scanned": 534,
+  "files_scanned": 535,
   "stats": {
-    "total": 92,
-    "bare": 92,
+    "total": 74,
+    "bare": 74,
     "converted": 0,
     "bare_by_host": {
       "api": 21,
       "insight": 1,
-      "mgmt": 28,
-      "runtime": 42
+      "mgmt": 13,
+      "runtime": 39
     },
     "w1_scope": {
-      "bare": 71,
+      "bare": 53,
       "bare_by_host": {
         "insight": 1,
-        "mgmt": 28,
-        "runtime": 42
+        "mgmt": 13,
+        "runtime": 39
       },
       "converted": 0,
       "by_file_bare": {
         "src/domains/insight/observability/trace.py": 1,
         "src/domains/mgmt/routes/autopilot.py": 3,
-        "src/domains/mgmt/routes/settings.py": 13,
-        "src/domains/mgmt/user/db.py": 12,
+        "src/domains/mgmt/user/db.py": 10,
         "src/domains/runtime/agents/sandbox/backends/bwrap.py": 1,
         "src/domains/runtime/agents/sandbox/isolation/network.py": 1,
         "src/domains/runtime/agents/sandbox/isolation/policy.py": 3,
@@ -32,26 +31,25 @@
         "src/domains/runtime/agents/sandbox/token.py": 1,
         "src/domains/runtime/agents/sandbox/whitelist.py": 1,
         "src/domains/runtime/engine/service.py": 1,
-        "src/domains/runtime/routes/runtime.py": 24
+        "src/domains/runtime/routes/runtime.py": 21
       },
       "classification": {
-        "auto": 25,
-        "manual_dynamic_in": 8,
-        "manual_dynamic_other": 9,
-        "manual_non_fetch": 29
+        "auto": 18,
+        "manual_dynamic_in": 7,
+        "manual_dynamic_other": 4,
+        "manual_non_fetch": 24
       },
       "bare_classification": {
-        "auto": 25,
-        "manual_dynamic_in": 8,
-        "manual_dynamic_other": 9,
-        "manual_non_fetch": 29
+        "auto": 18,
+        "manual_dynamic_in": 7,
+        "manual_dynamic_other": 4,
+        "manual_non_fetch": 24
       },
-      "bare_tables": 18,
+      "bare_tables": 16,
       "bare_by_table": {
         "agent_runtimes": 13,
         "agent_tasks": 1,
         "grape_accounts": 2,
-        "grape_t_cloud_sandboxes": 6,
         "grape_t_egress_admin_exception": 2,
         "grape_t_egress_admin_policy": 4,
         "grape_t_engine_sandbox_config": 3,
@@ -64,7 +62,6 @@
         "grape_t_sandbox_templates": 3,
         "grape_t_task_proxy_tokens": 1,
         "grape_t_user_llm_credentials": 3,
-        "runtime_credentials": 15,
         "user_accounts": 3
       },
       "bare_classification_by_table": {
@@ -87,13 +84,6 @@
           "manual_dynamic_column": 0,
           "manual_dynamic_in": 0,
           "manual_dynamic_other": 0,
-          "manual_non_fetch": 1
-        },
-        "grape_t_cloud_sandboxes": {
-          "auto": 1,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 0,
-          "manual_dynamic_other": 4,
           "manual_non_fetch": 1
         },
         "grape_t_egress_admin_exception": {
@@ -180,13 +170,6 @@
           "manual_dynamic_other": 0,
           "manual_non_fetch": 0
         },
-        "runtime_credentials": {
-          "auto": 7,
-          "manual_dynamic_column": 0,
-          "manual_dynamic_in": 1,
-          "manual_dynamic_other": 3,
-          "manual_non_fetch": 4
-        },
         "user_accounts": {
           "auto": 1,
           "manual_dynamic_column": 0,
@@ -203,8 +186,8 @@
         "api": 21
       }
     },
-    "tables": 25,
-    "bare_tables": 25,
+    "tables": 24,
+    "bare_tables": 24,
     "table_sites": {
       "agent_runtimes": 19,
       "agent_tasks": 3,
@@ -212,7 +195,6 @@
       "engine_capabilities": 1,
       "grape_accounts": 2,
       "grape_t_channel_repo_link": 1,
-      "grape_t_cloud_sandboxes": 6,
       "grape_t_egress_admin_exception": 2,
       "grape_t_egress_admin_policy": 4,
       "grape_t_engine_sandbox_config": 3,
@@ -228,15 +210,15 @@
       "grape_t_task_proxy_tokens": 1,
       "grape_t_user_llm_credentials": 3,
       "meta": 3,
-      "runtime_credentials": 19,
+      "runtime_credentials": 4,
       "task_messages": 1,
       "user_accounts": 3
     },
     "classification": {
-      "auto": 25,
-      "manual_dynamic_in": 8,
-      "manual_dynamic_other": 9,
-      "manual_non_fetch": 50
+      "auto": 18,
+      "manual_dynamic_in": 7,
+      "manual_dynamic_other": 4,
+      "manual_non_fetch": 45
     }
   },
   "sites": [
@@ -568,175 +550,6 @@
       "sql": "SELECT id FROM agent_runtimes WHERE LOWER(engine_uid) IN ( ? )"
     },
     {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 2974,
-      "func": "_sb_cred_report_owner",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "auto",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": false,
-      "sql": "SELECT owner_name FROM runtime_credentials WHERE id=?"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3011,
-      "func": "list_sandbox_templates",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "auto",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": false,
-      "sql": "SELECT id, scope FROM runtime_credentials WHERE token_hash=? AND status='active'"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3114,
-      "func": "list_sandbox_templates",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "manual_dynamic_in",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": true,
-      "sql": "SELECT spc.id, rc.name, spc.platform, rc.scope FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3161,
-      "func": "create_sandbox_template",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "auto",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": false,
-      "sql": "SELECT platform, runtime_credential_id, (SELECT rc.name FROM runtime_credentials rc WHERE rc.id=spc.runtime_credential_i"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3215,
-      "func": "update_sandbox_template",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "auto",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": false,
-      "sql": "SELECT platform, runtime_credential_id, (SELECT rc.name FROM runtime_credentials rc WHERE rc.id=spc.runtime_credential_i"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3291,
-      "func": "list_sandbox_providers",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "manual_dynamic_other",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": true,
-      "sql": "SELECT COUNT(*) FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credentia"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3294,
-      "func": "list_sandbox_providers",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "manual_dynamic_other",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": true,
-      "sql": "SELECT spc.id, rc.name AS name, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.enabled, rc.scope, rc"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3301,
-      "func": "list_sandbox_providers",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "manual_dynamic_other",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": true,
-      "sql": "SELECT spc.id, rc.name AS name, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.enabled, rc.scope, rc"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3513,
-      "func": "health_sandbox_provider",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "auto",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": false,
-      "sql": "SELECT runtime_credential_id, (SELECT rc.name FROM runtime_credentials rc WHERE rc.id = spc.runtime_credential_id) AS na"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3612,
-      "func": "scan_sandbox_templates",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "auto",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": false,
-      "sql": "SELECT rc.name AS name, spc.platform, spc.runtime_credential_id FROM grape_t_sandbox_provider_config spc LEFT JOIN runti"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3738,
-      "func": "_provider_config_from_db",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "manual_non_fetch",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": false,
-      "sql": "SELECT (SELECT rc.name FROM runtime_credentials rc WHERE rc.id = spc.runtime_credential_id) AS name, spc.platform, spc.e"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3742,
-      "func": "_provider_config_from_db",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "manual_non_fetch",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": false,
-      "sql": "SELECT (SELECT rc.name FROM runtime_credentials rc WHERE rc.id = spc.runtime_credential_id) AS name, spc.platform, spc.e"
-    },
-    {
-      "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3833,
-      "func": "list_provider_configs",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "auto",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": false,
-      "sql": "SELECT p.id, p.platform, p.endpoint, p.api_key_enc, p.extra_config, p.enabled, p.updated_at, p.runtime_credential_id, rc"
-    },
-    {
       "file": "src/domains/mgmt/user/db.py",
       "line": 4225,
       "func": "get_engine_uid_by_runtime_id",
@@ -803,20 +616,7 @@
     },
     {
       "file": "src/domains/mgmt/user/db.py",
-      "line": 4317,
-      "func": "ensure_credential_uid",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "manual_non_fetch",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": false,
-      "sql": "SELECT credential_uid FROM runtime_credentials WHERE id=?"
-    },
-    {
-      "file": "src/domains/mgmt/user/db.py",
-      "line": 4399,
+      "line": 4401,
       "func": "_rebind_runtime_references",
       "host": "mgmt",
       "status": "bare",
@@ -829,7 +629,7 @@
     },
     {
       "file": "src/domains/mgmt/user/db.py",
-      "line": 4402,
+      "line": 4404,
       "func": "_rebind_runtime_references",
       "host": "mgmt",
       "status": "bare",
@@ -842,7 +642,7 @@
     },
     {
       "file": "src/domains/mgmt/user/db.py",
-      "line": 4413,
+      "line": 4415,
       "func": "_rebind_runtime_references",
       "host": "mgmt",
       "status": "bare",
@@ -855,7 +655,7 @@
     },
     {
       "file": "src/domains/mgmt/user/db.py",
-      "line": 4501,
+      "line": 4503,
       "func": "_rebind_runtime_references",
       "host": "mgmt",
       "status": "bare",
@@ -868,20 +668,7 @@
     },
     {
       "file": "src/domains/mgmt/user/db.py",
-      "line": 4622,
-      "func": "rebase_engine_uids_by_anchor",
-      "host": "mgmt",
-      "status": "bare",
-      "classification": "manual_non_fetch",
-      "tables": [
-        "runtime_credentials"
-      ],
-      "dynamic": false,
-      "sql": "SELECT id, credential_uid FROM runtime_credentials"
-    },
-    {
-      "file": "src/domains/mgmt/user/db.py",
-      "line": 4631,
+      "line": 4635,
       "func": "rebase_engine_uids_by_anchor",
       "host": "mgmt",
       "status": "bare",
@@ -1154,44 +941,17 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3333,
-      "func": "runtime_list_cloud_sandboxes",
-      "host": "runtime",
-      "status": "bare",
-      "classification": "manual_dynamic_other",
-      "tables": [
-        "grape_t_cloud_sandboxes"
-      ],
-      "dynamic": true,
-      "sql": "SELECT COUNT(*) FROM grape_t_cloud_sandboxes s WHERE s.repo_key=? ? "
-    },
-    {
-      "file": "src/domains/runtime/routes/runtime.py",
       "line": 3336,
       "func": "runtime_list_cloud_sandboxes",
       "host": "runtime",
       "status": "bare",
       "classification": "manual_dynamic_other",
       "tables": [
-        "grape_t_cloud_sandboxes",
         "grape_t_sandbox_provider_config",
         "user_accounts"
       ],
       "dynamic": true,
       "sql": "SELECT s.sandbox_id, s.issue_id, s.repo_key, s.provider, s.provider_id, s.state, s.agent_installed, s.kill_attempts, s.c"
-    },
-    {
-      "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3369,
-      "func": "runtime_list_cloud_sandboxes",
-      "host": "runtime",
-      "status": "bare",
-      "classification": "manual_dynamic_other",
-      "tables": [
-        "grape_t_cloud_sandboxes"
-      ],
-      "dynamic": true,
-      "sql": "SELECT COUNT(*) FROM grape_t_cloud_sandboxes s LEFT JOIN agent_tasks t ON t.id = s.task_id LEFT JOIN agent_runtimes ar O"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
@@ -1201,7 +961,6 @@
       "status": "bare",
       "classification": "manual_dynamic_other",
       "tables": [
-        "grape_t_cloud_sandboxes",
         "grape_t_sandbox_provider_config",
         "user_accounts"
       ],
@@ -1216,7 +975,6 @@
       "status": "bare",
       "classification": "auto",
       "tables": [
-        "grape_t_cloud_sandboxes",
         "grape_t_sandbox_provider_config"
       ],
       "dynamic": false,
@@ -1247,19 +1005,6 @@
       ],
       "dynamic": false,
       "sql": "SELECT 1 FROM grape_t_sandbox_provider_config WHERE id=? AND runtime_credential_id=?"
-    },
-    {
-      "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3556,
-      "func": "runtime_provider_active_sandboxes",
-      "host": "runtime",
-      "status": "bare",
-      "classification": "manual_non_fetch",
-      "tables": [
-        "grape_t_cloud_sandboxes"
-      ],
-      "dynamic": false,
-      "sql": "SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')"
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
