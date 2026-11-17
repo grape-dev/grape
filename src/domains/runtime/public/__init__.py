@@ -756,18 +756,19 @@ def insert_runtime_credential(token_hash: str, name: str, scope: str, owner_id: 
     """新建 runtime 凭据。名称全局唯一：撞唯一约束时返回 duplicate（**不抛异常**），
     调用方据此回 400 —— 若这里抛异常，意图会被当成可重试失败而无限重放。
 
-    org_id 归一：runtime_credentials.org_id 是 int 列（NULL 默认 0），而调用方在
-    「个人设备/未归属组织」时通常传空串。MySQL STRICT_TRANS_TABLES 下空串写 int 直接
-    1366，整条凭据生成失败（「添加设备生成凭据」那个报错）。这里统一转 int，空 → 0。
+    org_id 归一（D105 第三批后 TEXT 列）：org_id 列已 TEXT 化（''=未归属哨兵，
+    db_setup 幂等补列 + 迁移 2026111700xx 同形）。「个人设备/未归属组织」空串直存
+    ''；uuid/组织 id 字符串原样存。**不再 int() 强转**——旧 int 列时代空串写 int 会
+    1366 才做的 0 归一，在 TEXT 列上会产出 '0' 脏值：可见性过滤按新口径
+    （org_id in ('', <org uuid>)）比对时 '0' 永不匹配 → 个人组织下 global 凭据
+    全部不可见（s3/s4 生成后页面消失的实测根因）。历史 '0' 行由调用方可见性
+    过滤按哨兵兼容（见 settings 列表端点），本函数不再制造新脏值。
     """
-    try:
-        _org_int = int(str(org_id).strip()) if str(org_id if org_id is not None else "").strip() not in ("", "None") else 0
-    except (TypeError, ValueError):
-        _org_int = 0
+    _org_val = str(org_id).strip() if str(org_id if org_id is not None else "").strip() not in ("", "None") else ""
     with _any_cursor(write=True) as c:
         try:
             _rc_cols = ["token_hash", "name", "scope", "owner_id", "owner_name", "repo_key", "org_id"]
-            _rc_vals = [token_hash, name, scope, owner_id, owner_name, repo_key, _org_int]
+            _rc_vals = [token_hash, name, scope, owner_id, owner_name, repo_key, _org_val]
             # [沙箱迁移 i7] cred_type/platform 列；#646 credential_uid 稳定键——旧库缺列由迁移兜底
             for _col, _val in (("status", "active"),
                                ("cred_type", cred_type or "worker"), ("platform", platform or ""),

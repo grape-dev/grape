@@ -1124,7 +1124,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     _devices_cached = cached
     if _filter_org_id:
         _devices_cred_map = {k: v for k, v in cred_map.items()
-                             if (v.get("org_id") or "") == _filter_org_id
+                             if not _org_unassigned(v) and (v.get("org_id") or "") == _filter_org_id
                              or v.get("scope") == "repo"}
         _devices_cached = [rt for rt in cached if (rt.get("org_id") or "") == _filter_org_id
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
@@ -1137,7 +1137,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
         # user_repos 判定收敛，不越权。
         _devices_cred_map = {k: v for k, v in cred_map.items()
-                             if (v.get("org_id") or "") in ("", _org_id)
+                             if _org_unassigned(v) or (v.get("org_id") or "") == _org_id
                              or v.get("scope") == "repo"
                              or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
         _devices_cached = [rt for rt in cached if (rt.get("org_id") or "") in ("", _org_id)
@@ -1657,7 +1657,7 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
         _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or "") == _filter_org_id
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
-                    if (v.get("org_id") or "") == _filter_org_id
+                    if not _org_unassigned(v) and (v.get("org_id") or "") == _filter_org_id
                     or v.get("scope") == "repo"}
     elif _is_personal_org:
         # 个人组织：只保留 org_id=''（全局）和 org_id=自身 的凭据/引擎；
@@ -1666,11 +1666,11 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
         # Issue #430：repo scope 设备豁免（与 #371 非个人组织分支同口径）——
         # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
         # user_repos 判定收敛，不越权。
-        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or "") == ""
+        _local_runtimes = [rt for rt in _local_runtimes if _org_unassigned(rt)
                            or (rt.get("org_id") or "") == _org_id
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
-                    if (v.get("org_id") or "") in ("", _org_id)
+                    if _org_unassigned(v) or (v.get("org_id") or "") == _org_id
                     or v.get("scope") == "repo"
                     or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
 
@@ -2960,6 +2960,13 @@ def _require_admin(user: dict):
 
 
 
+def _org_unassigned(v) -> bool:
+    """org_id 未归属判定：''（D105 第三批哨兵）与历史脏值 '0'/'None'（旧 int 列
+    时代 insert 归一遗留）同权——可见性过滤必须把未归属凭据对个人组织放行，
+    否则 s3/s4 这类 global 凭据在个人组织视图下会整批消失（实测根因）。"""
+    return (v.get("org_id") or "").strip() in ("", "0", "None")
+
+
 def _sb_cred_brief_map() -> dict:
     """沙箱 Provider 端点族的凭据速查 map（G-02 收敛后的唯一 rc 读取口）。
 
@@ -3321,7 +3328,7 @@ def list_sandbox_providers(q: str = "", page: int = 1, page_size: int = 20,
         rows = _filt[offset:offset + int(page_size)]
     result = []
     for r in rows:
-        extra = json.loads(r[5]) if r[5] else {}
+        extra = json.loads(r[4]) if r[4] else {}
         cid = r[8] or 0
         b = _brief.get(int(cid)) if cid else None
         result.append({
