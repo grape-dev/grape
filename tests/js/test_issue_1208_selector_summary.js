@@ -51,6 +51,11 @@ assertContains('server hit cache', 'selHitCache[key]');
 assertContains('server hit fetch', "post('/scenes/engine-selector-preview'");
 assertContains('backend matched consumed', '(d.matched || []).length');
 assertContains('badge key carries repo', "agentType + '|' + selTags.slice().sort().join(',') + '|' + selHitRepo.value");
+// 广播（空 tags）不得被后端空集合清零：preview 对空 selector 返回空集合，
+// 覆盖本地全量近似会让徽章显示「广播 · 0 个引擎 · 0 在线」。
+assertContains('broadcast skips server cache', 'const cached = selTags.length ? selHitCache[key] : null');
+assertContains('broadcast skips server fetch', '} else if (selTags.length) {');
+assertContains('fetch guarded against empty tags', '!tags || !tags.length');
 
 // 零命中文案（更通顺的表述）
 count++;

@@ -2104,12 +2104,15 @@ function engineBadgeHtml(node) {
     // 后端同源（2026-11-12 用户裁定）：进页面从 /scenes/engine-selector-preview 权威加载，
     // 本地近似仅首帧兜底（role/capability 真值本地不可知）
     const key = agentType + '|' + selTags.slice().sort().join(',') + '|' + selHitRepo.value
-    const cached = selHitCache[key]
+    // 空 selector = 广播：后端 preview 对空 selector 返回空集合（语义上「不做约束」，
+    // 由前端全命中处理）。拿它覆盖本地全量近似，会把徽章清成「广播 · 0 个引擎 · 0 在线」，
+    // 与弹窗里看到的引擎数矛盾——广播只认本地全量近似，不读也不写后端缓存。
+    const cached = selTags.length ? selHitCache[key] : null
     if (cached) {
       hit = cached.hit
       off = cached.off
       miss = cached.miss || miss
-    } else {
+    } else if (selTags.length) {
       fetchSelHit(key, agentType, selTags.slice().sort())
     }
     const total = hit + off
@@ -2821,7 +2824,8 @@ const selHitRepo = computed(function () {
   return dashOwner.value && dashName.value ? dashOwner.value + '/' + dashName.value : ''
 })
 function fetchSelHit(key, agentType, tags) {
-  if (!key || selHitInflight[key]) return
+  // 广播（空 tags）不请求后端：preview 对空 selector 返回空集合，写进缓存会把徽章清零
+  if (!key || !tags || !tags.length || selHitInflight[key]) return
   selHitInflight[key] = true
   API()
     .post('/scenes/engine-selector-preview', { repo: selHitRepo.value, agent_type: agentType || '', tags: tags || [] })
