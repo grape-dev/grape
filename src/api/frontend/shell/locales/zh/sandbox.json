@@ -118,6 +118,7 @@
     "title": "LLM 凭据",
     "add_btn": "+ 添加凭据",
     "desc": "LLM API Key 用于云沙箱内的 agent 推理。加密存储（AES-256-GCM），不回显明文。每个引擎类型一个凭据。",
+    "env_inject_hint": "当前凭据直接通过环境变量传递给沙箱中的引擎使用，会话级凭据功能待支持",
     "empty": "暂无 LLM 凭据，点击上方按钮添加",
     "dialog": {
       "add_title": "添加 LLM 凭据",

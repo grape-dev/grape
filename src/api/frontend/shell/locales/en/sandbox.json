@@ -118,6 +118,7 @@
     "title": "LLM Credentials",
     "add_btn": "+ Add Credential",
     "desc": "LLM API Keys are used for agent inference inside cloud sandboxes. Encrypted with AES-256-GCM, plaintext is never displayed. One credential per engine type.",
+    "env_inject_hint": "Credentials are currently passed to sandbox engines via environment variables; per-session credentials are not supported yet",
     "empty": "No LLM credentials yet. Add one above.",
     "dialog": {
       "add_title": "Add LLM Credential",

@@ -4,7 +4,11 @@
       <h2>{{ t('title') }}</h2>
       <button class="bt bt-p" @click="openAdd">{{ t('add_btn') }}</button>
     </div>
-    <p class="tx t2" style="font-size: 11px; line-height: 1.6; margin-bottom: 12px">{{ t('desc') }}</p>
+    <p class="tx t2" style="font-size: 11px; line-height: 1.6; margin-bottom: 4px">{{ t('desc') }}</p>
+    <!-- 告警：凭据以 env 方式整段注入沙箱引擎，非会话级隔离（会话级凭据待支持） -->
+    <p class="tx" style="font-size: 11px; line-height: 1.6; margin-bottom: 12px; color: var(--c-warning, #ff9500)">
+      ⚠ {{ t('env_inject_hint') }}
+    </p>
     <div v-if="loading" class="loading">…</div>
     <div v-else-if="error" style="color: var(--r); font-size: 12px">{{ error }}</div>
     <div v-else-if="!creds.length" class="tx t2" style="padding: 16px; text-align: center">{{ t('empty') }}</div>
