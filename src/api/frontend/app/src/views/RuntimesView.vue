@@ -1523,9 +1523,14 @@ function healthScoreHtml(rt) {
   )
 }
 function engineTagSummary(tags) {
-  if (!tags || !tags.length)
+  // 引擎卡片标签行只展示能力标签；engine:/scope:/scene: 为派生匹配行（卡片上已有
+  // 「引擎类型」「场景」「范围」行可读，口径同 DashboardView.plainTags），不重复显示
+  const shown = (tags || []).filter(function (x) {
+    return String(x || '').indexOf(':') < 0
+  })
+  if (!shown.length)
     return `<span style="color:var(--t3);font-size:10px">${t('empty.unassigned')}</span>`
-  return tags
+  return shown
     .map(
       (x) =>
         `<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;color: var(--on-accent);background:${RT_TAG_COLORS[x] || '#666'};margin:0 2px">${esc(rtTagLabel(x)) || esc(x)}</span>`
