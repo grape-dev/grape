@@ -342,7 +342,9 @@
     "load_failed": "无法加载仓库列表，请确认 GitCode Token 是否有效",
     "back_to_select": "返回仓库选择",
     "back_to_website": "返回官网",
-    "add_new": "新增仓库托管"
+    "add_new": "新增仓库托管",
+    "pick_first": "请先在仓库下拉里选择一个仓库",
+    "forbidden": "没有该仓库的访问权限，已切回仓库大厅"
   },
   "toast": {
     "theme_switched_default": "已切换到默认风格",

@@ -23,7 +23,7 @@ FROZEN = {
         "issues-view.js": "61", "account-view.js": "55", "scene-market.js": "58", "skills-view.js": "54", "knowledge-view.js": "49",
         "runtimes-view.js": "57", "observability-view.js": "56", "organizations.js": "50", "feedback-dialog.js": "50", "my-feedback.js": "50",
         "my-feedback-detail.js": "50", "autopilot-view.js": "53", "sandbox-view.js": "3", "deeplink.js": "1", "platform-icons.js": "2",
-        "app.js": "270", "login-view.js": "2", "onboarding-view.js": "7", "auto-recovery.js": "2", "oauth-buttons.js": "2",
+        "app.js": "271", "login-view.js": "2", "onboarding-view.js": "7", "auto-recovery.js": "2", "oauth-buttons.js": "2",
         "host-status.js": "1",
     },
     "admin.html": {

@@ -342,7 +342,9 @@
     "load_failed": "Failed to load repositories, please check your GitCode Token",
     "back_to_select": "Back to repository selection",
     "back_to_website": "Back to website",
-    "add_new": "Add new repository"
+    "add_new": "Add new repository",
+    "pick_first": "Pick a repository from the dropdown first",
+    "forbidden": "No access to this repository; back to the repository lobby"
   },
   "toast": {
     "theme_switched_default": "Switched to Default theme",

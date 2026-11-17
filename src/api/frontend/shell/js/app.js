@@ -282,6 +282,16 @@ const app = (() => {
         // 缓存里有、服务端没有 → 已被解绑/无权限：清掉，别拿旧仓库打开别人的单
         try { sessionStorage.removeItem('currentRepo'); } catch (e) {}
       }
+      // 2026-11-17 现场：只弹 toast 不动地址栏，用户会停在 /app/<owner>/<repo>/ 上——
+      // 每次刷新重放同一次失败，且所有仓库维度菜单都只是「静默回大厅」，现象就是
+      // 「项目场景/流水线点了没反应」。这里把路径改回大厅（保留 /en 语言前缀），
+      // 并丢掉指向别人仓库的 hash，避免脏 URL 反复把用户拽回同一个坑。
+      try {
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState(window.history.state, '',
+            (ctx.prefix || '') + '/' + (window.location.search || ''));
+        }
+      } catch (e) {}
       showToast(I18N.t('app.deeplink.repo_not_found') ||
                 '无法通过该链接进入：仓库不存在、未托管或你没有权限', '', 6000);
       return false;
@@ -1809,6 +1819,15 @@ function loadAgentTypes() {
     }
   });
 
+  // 仓库维度页面拿到 403（仓库不属于当前用户 / 已解绑 / 已改名）：清掉当前仓库上下文
+  // 并回仓库大厅，而不是把裸错误文本丢在内容区（2026-11-17 现场：用户从旧链接进到别人的
+  // 仓库，流水线页只剩一行 "No permission to access this repository"，且 URL 仍钉着脏路径）。
+  function _bailRepoForbidden() {
+    try { sessionStorage.removeItem('currentRepo'); } catch (e) {}
+    showToast(I18N.t('app.repo.forbidden') || '没有该仓库的访问权限，已切回仓库大厅');
+    goToRepos();
+  }
+
   function nav(view, param) {
     // 离开引导页模式：清理 .ct.ob-mode 标记
     _obExitMode();
@@ -1837,10 +1856,18 @@ function loadAgentTypes() {
         return;
       }
       // 已绑定但无选中仓库 → loadRepos
+      // 2026-11-17 现场：深链仓库无权时 currentRepo 被清空，此后每个仓库维度菜单
+      // 都只是静默回仓库大厅——用户看到的现象是「点了没反应」。这里必须给一句话，
+      // 否则"回到大厅"和"点了没生效"在视觉上无法区分。
+      showToast(I18N.t('app.repo.pick_first') || '请先在仓库下拉里选择一个仓库');
       loadRepos();
       return;
     }
-    if (!repo && _nonRepoViews.indexOf(view) < 0) { loadRepos(); return; }
+    if (!repo && _nonRepoViews.indexOf(view) < 0) {
+      showToast(I18N.t('app.repo.pick_first') || '请先在仓库下拉里选择一个仓库');
+      loadRepos();
+      return;
+    }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -2062,14 +2089,26 @@ function loadAgentTypes() {
     } else if (view === 'pipe') {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
-      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
+      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => {
+        if (e.name === 'AbortError' && e.silent) return;
+        if (window._currentView !== 'pipe') return;
+        // 403/404 = 仓库不属于当前用户 / 已解绑 / 已改名：清上下文回大厅，
+        // 不再把一行裸 "No permission to access this repository" 留在内容区。
+        if (e.status === 403 || e.status === 404) { _bailRepoForbidden(); return; }
+        pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>';
+      });
       // Issue #600：流水线卡片轮询——重派成功/新终态到达后自动刷新，无手动刷新依赖
       if (typeof startPipePolling === 'function') startPipePolling();
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       var _agentQs = param ? '?issue_number=' + encodeURIComponent(param) : '';
-      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
+      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => {
+        if (e.name === 'AbortError' && e.silent) return;
+        if (window._currentView !== view) return;
+        if (e.status === 403 || e.status === 404) { _bailRepoForbidden(); return; }
+        pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>';
+      });
     } else if (view === 'event') {
       // 路由入口清理：非 _jumpToNodeEvent 触发的进入（如全局搜索 / 直接路由）清除残留来源标志，
       // 防止上次任务详情遗留的 _eventFromTask 导致事件页错误显示「返回需求详情」按钮。
