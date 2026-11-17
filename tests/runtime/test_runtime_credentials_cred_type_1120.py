@@ -73,3 +73,50 @@ def test_fresh_schema_declares_both_columns():
     start = ddl.index("CREATE TABLE IF NOT EXISTS runtime_credentials (")
     block = ddl[start:ddl.index("\n)", start)]
     assert "cred_type" in block and "platform" in block
+
+
+def test_migration_raises_instead_of_stamping_when_ensure_column_fails(monkeypatch):
+    """C1 回归：_ensure_column 失败必须抛给执行器（不盖章、下次启动重试）。
+
+    历史事故同型：fn 吞异常 → 版本被钉死 → 列永不补齐 → 线上 1054 永久化。
+    """
+    import contextlib
+
+    import pytest as _pytest
+
+    from src.api import db_setup
+
+    monkeypatch.setattr(db_setup, "_owned_skip", lambda *a, **k: False)
+    monkeypatch.setattr(db_setup, "db_lock", contextlib.nullcontext())
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("MDL wait timeout (1205)")
+
+    monkeypatch.setattr(db_setup, "_ensure_column", _boom)
+    conn = _legacy_conn()
+    with _pytest.raises(RuntimeError):
+        db_setup._fn_runtime_cred_type_platform(conn=conn)
+    assert "cred_type" not in _cols(conn)
+
+
+def test_migration_passes_strict_to_ensure_column(monkeypatch):
+    """降级到 COPY/人工清单时必须 raise（strict=True），不能静默返回。"""
+    import contextlib
+
+    from src.api import db_setup
+
+    monkeypatch.setattr(db_setup, "_owned_skip", lambda *a, **k: False)
+    monkeypatch.setattr(db_setup, "db_lock", contextlib.nullcontext())
+    seen = []
+
+    real = db_setup._ensure_column
+
+    def _spy(c, tbl, col, ddl, **kw):
+        seen.append((tbl, col, kw.get("strict")))
+        return real(c, tbl, col, ddl, **kw)
+
+    monkeypatch.setattr(db_setup, "_ensure_column", _spy)
+    conn = _legacy_conn()
+    db_setup._fn_runtime_cred_type_platform(conn=conn)
+    assert seen == [("runtime_credentials", "cred_type", True),
+                    ("runtime_credentials", "platform", True)], seen

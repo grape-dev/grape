@@ -7963,27 +7963,31 @@ def _fn_audit_logs_operator_id_widen() -> None:
 
 
 def _fn_runtime_cred_type_platform(conn=None):
-    """[202611170043 safe] runtime_credentials 补 cred_type / platform 列。
+    """[202611170045 safe] runtime_credentials 补 cred_type / platform 列。
 
-    沙箱移植(i7)起，凭据生成会写这两列，但 schema_ddl 与迁移都没补：
+    沙箱移植起，凭据生成会写这两列，但 schema_ddl 与迁移都没补：
     旧库一生成凭据就 (1054, "Unknown column 'cred_type' in 'field list'")。
     SQLite 走 ADD COLUMN；MySQL 走 _ensure_column 的 INSTANT/INPLACE 在线路径，停机≈0。
+
+    异常协议（执行器契约）：fn 正常返回=盖章，所以这里 **不吞异常**、并传 strict=True —
+    MDL 超时 / 非 owner 视图 / 连 COPY 都失败时一律抛出，版本不盖章、下次启动重试。
+    吞掉异常会把版本钉死，列永不补齐，与本迁移要修的事故同型。
+    _ensure_column 无返回值（None），补列与否靠执行前后 PRAGMA 列集差判定。
     表归属 runtime：在 mgmt 进程里 _owned_skip 会跳过（由 runtime 进程补），跳过不算失败。
     """
     conn = conn if conn is not None else db
     with (db_lock if conn is db else nullcontext()):
         c = conn.cursor()
-        added = []
+        _want = ("cred_type", "platform")
+        before = {r[1] for r in c.execute("PRAGMA table_info(runtime_credentials)").fetchall()}
         for col, ddl in (("cred_type", "VARCHAR(32) NOT NULL DEFAULT 'worker'"),
                          ("platform", "VARCHAR(32) NOT NULL DEFAULT ''")):
-            try:
-                if _ensure_column(c, "runtime_credentials", col, ddl):
-                    added.append(col)
-            except Exception as e:  # noqa: BLE001
-                log.warning(f"runtime_credentials.{col} 加列失败（幂等重试）: {e}")
+            _ensure_column(c, "runtime_credentials", col, ddl, strict=True)
+        after = {r[1] for r in c.execute("PRAGMA table_info(runtime_credentials)").fetchall()}
         conn.commit()
+        added = [k for k in _want if k not in before and k in after]
         if added:
-            log.info("[migration 202611170043] runtime_credentials 补列: "
+            log.info("[migration 202611170045] runtime_credentials 补列: "
                      + ", ".join(added))
 
 
@@ -7995,7 +7999,7 @@ register_migration(
 )
 
 register_migration(
-    version="202611170043",
+    version="202611170045",
     name="runtime-credentials-cred-type-platform",
     kind="safe",
     fn=_fn_runtime_cred_type_platform,
