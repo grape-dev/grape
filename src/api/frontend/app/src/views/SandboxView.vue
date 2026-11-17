@@ -497,7 +497,7 @@ export default {
         if (!this.providers || !this.providers.length) return
         if (m) {
           const pid = m[1]
-          const p = this.providers.find((x) => String(x.id) === pid
+          const p = this.providers.find((x) => String(x.id) === pid)
           if (p) {
             this.selectProvider(p)
             return
