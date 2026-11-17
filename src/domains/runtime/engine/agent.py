@@ -3402,7 +3402,8 @@ async def _presence_heartbeat_loop(client, runtime_ids, interval: float) -> None
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
                     engine_by_rid: dict | None = None, installed=None, device_name="",
                     _test_execute=None, _test_active=None, _test_active_tasks=None,
-                    _test_active_task_objs=None, _execute_fn=None):
+                    _test_active_task_objs=None, _execute_fn=None,
+                    _test_active_run_tokens=None):
     """主循环：claim → 执行 → 回报，含心跳 + 自动重连自修复。
 
     自修复机制（三层防护，见 worker 自修复重连设计）：
@@ -3414,11 +3415,50 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     active_sessions = _test_active if _test_active is not None else set()  # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
     active_tasks = _test_active_tasks if _test_active_tasks is not None else {}  # tid → sid 映射（task_id 去重 + sid 看门狗反查）
     active_task_objs = _test_active_task_objs if _test_active_task_objs is not None else {}  # tid → task dict（sid 看门狗杀进程需要 task 的 cwd/backend 信息）
+    # tid → 认领时的 started_at（执行代次 / run_token）。服务端每次回炉 + 重新派发都会刷新
+    # started_at，所以它天然就是「这是第几轮」的标识，不必新增字段、不必猜状态字符串。
+    active_run_tokens = (_test_active_run_tokens if _test_active_run_tokens is not None else {})
+    _restart_count = {}       # tid → 因代次变化重启的次数；上限 2，坏引擎被反复回炉时收敛
+    # 被回炉摘掉的旧执行轮标识 (tid, run_token)：旧协程稍后退出/上报时据此判定「已过期」，
+    # 既不覆盖新一轮账本、也不把上一轮结果重复上报（服务端会按 run_token 409）。
+    _stale_tokens: set = set()
+    hermes_active_tids = set()  # hermes 在跑任务的 tid 集合（限并发 1；集合幂等，避免计数泄漏）
     _requeue_cooldown = {}   # sid → 上次 requeue 时间戳，60s 冷却防 claim→requeue 空转死循环
     _sid_watchdog_last = 0.0 # 上次 sid 看门狗扫描时间
     _workspace_patrol_last = asyncio.get_running_loop().time()  # Issue #2514：巡检节流起点（worker 启动已巡检一轮）
-    hermes_active = 0         # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）
+    # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）——限量由
+    # hermes_active_tids 承担；旧实现用 int 计数且只在正常收尾里 -= 1，
+    # 三条提前 return 路径会永久泄漏，攒够次数后这台 hermes 再也不接活。
     last_heartbeat = 0.0
+
+    async def _purge_active_task(tid: str) -> None:
+        """清掉本地一条残留活跃记录（代次已变 / 看门狗判定幽灵时用）。
+
+        顺序硬性要求：先把旧引擎进程杀干净（同步阻塞的 SIGTERM→SIGKILL 放线程池，
+        且必须 await 完），再清本地状态、再让调用方重新 claim —— 否则旧进程还占着
+        同一个 cwd，新进程起来后按 cwd 匹配的 kill 会把新进程误杀。
+        """
+        _obj = active_task_objs.get(tid)
+        _sid = active_tasks.get(tid, "")
+        _old_tok = str(active_run_tokens.get(tid, "") or "")
+        if _old_tok:
+            _stale_tokens.add((tid, _old_tok))
+        if _obj:
+            try:
+                _bk = _backend_for_engine(_obj.get("_engine_name") or "")
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _kill_stale_engine, _obj, _bk)
+            except Exception as _ke:
+                log.warning(f"purge {tid}: kill stale engine failed: {_ke}")
+        active_sessions.discard(_sid)
+        active_tasks.pop(tid, None)
+        active_task_objs.pop(tid, None)
+        active_run_tokens.pop(tid, None)
+        try:
+            # 丢掉该 tid 用旧 run_token 的补报，免得重放时被服务端 409 刷日志
+            _report_queue().remove(tid)
+        except Exception as _qe:
+            log.debug(f"purge {tid}: drop pending reports skipped: {_qe}")
 
     # 启动 worker 引擎探测线程（每 10 分钟对本机引擎发起 CLI 测试对话）
     _start_worker_probe()
@@ -3525,8 +3565,25 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             # 否则任务被 requeue 回 queued → 下轮又 claim 到 → sid 冲突 → 再 requeue →
             # 无限循环饿死同 runtime 后续任务（seq#1477 SRE 被 chat 任务死循环阻塞 20min）。
             if tid in active_tasks:
-                log.debug(f"task {tid} already active, skip")
-                continue
+                # 代次比对：run_token = 认领结果的 started_at，服务端每次回炉 + 重新派发
+                # 都会刷新它。代次变了说明本地这条是上一个执行轮的残留（孤儿），杀掉重启；
+                # 代次没变则维持原语义「已在跑，跳过」（守住 seq#1477 的 claim 死循环）。
+                _rt_new = str((task or {}).get("started_at") or "")
+                _rt_old = str(active_run_tokens.get(tid, "") or "")
+                if _rt_new and _rt_old and _rt_new != _rt_old:
+                    if _restart_count.get(tid, 0) >= 2:
+                        # 坏引擎会被平台反复回炉：重启两次还不行就交给平台判死，别无限重起
+                        log.warning(f"task {tid} re-dispatched again (run_token {_rt_old} -> "
+                                    f"{_rt_new}), restart cap reached, skip")
+                        continue
+                    _restart_count[tid] = _restart_count.get(tid, 0) + 1
+                    log.warning(f"task {tid} re-dispatched (run_token {_rt_old} -> {_rt_new}), "
+                                f"purge stale engine and restart (restart #{_restart_count[tid]})")
+                    await _purge_active_task(tid)
+                    # 落下去走正常 claim 流程（active_tasks 已清，不会再次命中本分支）
+                else:
+                    log.debug(f"task {tid} already active, skip")
+                    continue
             # 并发槽 key 与服务端 claim 串行粒度一致（multi-issue-isolation-design.md §3.3）：
             # 有关联 Issue → 按 issue_session_id（跨 Issue 并行）；无（#0/旧任务）→ 回退 agent_session_id。
             # 修复：此前一律用 agent_session_id，导致不同 Issue 的任务在客户端被误判冲突拒收
@@ -3558,7 +3615,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 continue
             if len(active_sessions) >= max_concurrent:
                 continue
-            if e == "hermes" and hermes_active >= 1:
+            if e == "hermes" and hermes_active_tids:
                 # hermes 引擎限并发 1（模型 API 分钟限流，双开实测 429 → 假完成，见 #53）
                 continue
             active_sessions.add(sid)
@@ -3566,11 +3623,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             task["_engine_name"] = e  # 供 sid 看门狗杀进程用
             task["_claim_time"] = asyncio.get_running_loop().time()  # B2: zombie task age tracking
             active_task_objs[tid] = task
+            active_run_tokens[tid] = str((task or {}).get("started_at") or "")
             if e == "hermes":
-                hermes_active += 1
+                hermes_active_tids.add(tid)
 
-            async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
-                nonlocal hermes_active
+            async def _wrap_inner(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 # Issue #516 M1：超时上限配置化——读取链 per-skill > per-repo > agent 默认
                 # （coding=7200）> 全局 env RUNTIME_TASK_TIMEOUT > 3600，见 src/domains/runtime/engine/task_timeout.py。
                 # （#470 任务级 env_extra 优先语义已包含：链条第 1 优先级即任务级显式 env。）
@@ -3669,6 +3726,13 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 _task_engine_uid = str((t or {}).get("engine_uid") or "").strip().lower()
 
                 async def _do_report(kind: str, text: str, exit_code: int, **kw):
+                    # 代次守卫：本协程若已被回炉摘掉（当前 token 已换成别的），这条结果属于
+                    # 上一执行轮，不得再上报（否则服务端 409、补报队列反复重放）。
+                    _cur_tok = str(active_run_tokens.get(_tid, "") or "")
+                    if (_tid, _run_token) in _stale_tokens or (_run_token and _cur_tok and _cur_tok != _run_token):
+                        log.info(f"task {_tid}: drop stale report {kind} "
+                                 f"(run_token {_run_token} != current {_cur_tok})")
+                        return
                     q = _report_queue()
                     q.add({"task_id": _tid, "status": kind, "result_text": text,
                            "exit_code": exit_code, "run_token": _run_token,
@@ -3733,11 +3797,32 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     except Exception as _ce:
                         log.warning(f"task {_tid} complete/fail callback error: {_ce}")
                     # tmp cleanup handled by TaskResourceStack.dispose() in _execute_task
-                active_sessions.discard(s)
-                active_tasks.pop(_tid, None)
-                active_task_objs.pop(_tid, None)
-                if e == "hermes":
-                    hermes_active -= 1
+
+            async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
+                """清理不变量：只要协程退出（正常结束 / 三条提前 return / 异常 / 取消），
+                本地活跃状态必须清干净。放在 finally 里——原实现把收尾写在函数末尾，
+                task_start 三次失败、凭据吊销、执行崩溃三条 return 会跳过收尾，
+                tid 永久留在 active_tasks，后续同 tid claim 永远 skip。
+                """
+                _my_token = str(active_run_tokens.get(_tid, "") or "")
+                _my_key = (_tid, _my_token)
+                try:
+                    await _wrap_inner(t=t, _tid=_tid, s=s, e=e)
+                finally:
+                    # 代次守卫：被 _purge_active_task 摘掉的旧协程晚些退出时，账本已经属于
+                    # 新一轮（token 已换）。此时清账会把新一轮的状态抹掉，故只在「我仍是
+                    # 当前代次」时清理。
+                    if _my_key in _stale_tokens:
+                        # 注意：finally 里不能 return（会吞掉在飞异常），只跳过清理
+                        _stale_tokens.discard(_my_key)
+                        log.info(f"task {_tid}: stale wrapper exit (run_token {_my_token} "
+                                 f"superseded), keep current round state")
+                    else:
+                        active_sessions.discard(s)
+                        active_tasks.pop(_tid, None)
+                        active_task_objs.pop(_tid, None)
+                        active_run_tokens.pop(_tid, None)
+                        hermes_active_tids.discard(_tid)
 
             asyncio.create_task(_wrap())
 
@@ -3864,8 +3949,12 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # 长时间 dispatched 的任务（引擎进程 hang 住，_wrap 的 finally 不执行）会
         # 让 active_tasks 永不空 → "空闲才升级" 条件永不满足。超龄阈值后查服务端
         # 终态，已终态→直接摘除；未终态但超龄→也摘除并回调 fail（任务实际已卡死）。
-        _zombie_threshold = _env_float("RUNTIME_ZOMBIE_TASK_THRESHOLD", 6 * 3600)
-        if active_tasks and pending_upgrade:
+        # 改动 1/2/3 生效后这条基本不会命中，保留作第三道兜底：
+        # 每轮都跑（原实现要求 pending_upgrade 才跑，未升级的 worker 等于没有兜底），
+        # 阈值降到 30 分钟。注意这里只在服务端**已终态**时摘除——非终态的大任务
+        # （coding 上限 7200s）还在正常跑，强制 fail 会砍掉健康任务。
+        _zombie_threshold = _env_float("RUNTIME_ZOMBIE_TASK_THRESHOLD", 30 * 60)
+        if active_tasks:
             _znow = asyncio.get_running_loop().time()
             _zombie_tids = []
             for _ztid, _zsid in list(active_tasks.items()):
@@ -3880,13 +3969,14 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     except Exception:
                         _zstate = ""
                     if _zstate in ("failed", "cancelled", "completed", "not_found"):
-                        _zombie_tids.append((_ztid, _zsid, _zstate, True))
-                    else:
-                        # 服务端未终态但 worker 端已超龄→任务卡死，摘除并回调 fail
-                        _zombie_tids.append((_ztid, _zsid, _zstate or "unknown", False))
-            for _ztid, _zsid, _zstate, _is_terminal in _zombie_tids:
+                        _zombie_tids.append((_ztid, _zsid, _zstate))
+                    # 非终态一律不动：可能是健康长任务（coding 上限 2h），也可能是本地
+                    # 记录泄漏——泄漏由代次比对 / finally / queued 幽灵三层处理。
+            for _ztid, _zsid, _zstate in _zombie_tids:
                 active_sessions.discard(_zsid)
                 active_tasks.pop(_ztid, None)
+                active_run_tokens.pop(_ztid, None)
+                hermes_active_tids.discard(_ztid)
                 _zt = active_task_objs.pop(_ztid, None)
                 if _zt:
                     _backend = _backend_for_engine(_zt.get("_engine_name") or "")
@@ -3894,13 +3984,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         _kill_stale_engine(_zt, _backend)
                     except Exception:
                         pass
-                if not _is_terminal:
-                    try:
-                        await client.fail(_ztid, f"zombie task reclaimed (age>{_zombie_threshold:.0f}s, server_state={_zstate})")
-                    except Exception:
-                        pass
-                log.warning(f"zombie reclamation: tid={_ztid} sid={_zsid} state={_zstate} "
-                            f"terminal={_is_terminal}, removed from active_tasks")
+                log.warning(f"zombie reclamation: tid={_ztid} sid={_zsid} state={_zstate}, "
+                            f"removed from active_tasks")
 
         # ---- 升级执行（待升级 && 无活跃任务 && 退避已过）----
         if pending_upgrade and not active_tasks:
@@ -3953,7 +4038,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     _state = await client.get_task_state(_tid)
                 except Exception:
                     _state = ""
-                if _state in ("failed", "cancelled", "completed", "not_found", "") and _state:
+                # queued 也算幽灵：worker 认领成功的那个事务里服务端已置 running，
+                # 「我手里在跑、服务端说 queued」只可能是被回炉/被 stale 降级回队，
+                # 本地这条已经是孤儿。这层兜底让残留最迟 60s 被清掉，而不是等 6 小时。
+                if _state in ("failed", "cancelled", "completed", "not_found", "queued") and _state:
                     _ghost_tids.append((_tid, _sid, _state))
                 elif not _state:
                     # 查询失败（网络抖动/服务端 500）：跳过，下次再查
@@ -3961,6 +4049,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             for _tid, _sid, _state in _ghost_tids:
                 active_sessions.discard(_sid)
                 active_tasks.pop(_tid, None)
+                active_run_tokens.pop(_tid, None)
+                hermes_active_tids.discard(_tid)
                 _task = active_task_objs.pop(_tid, None)
                 # 杀掉残留引擎进程：用户终止/超时后服务端已标终态，但 worker 上的
                 # 引擎进程可能仍在跑（没有服务端→worker 的推送通道通知停进程）。
