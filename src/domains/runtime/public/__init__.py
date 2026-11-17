@@ -764,9 +764,15 @@ def insert_runtime_credential(token_hash: str, name: str, scope: str, owner_id: 
         _org_int = 0
     with _any_cursor(write=True) as c:
         try:
+            # status 必须显式写：SQLite DDL 里的 `status TEXT DEFAULT 'active'` 在 MySQL
+            # 翻译层会被剥掉（MySQL TEXT 不接受字面量 DEFAULT，见 mysql_compat
+            # _translate_create_table），列默认值变成 NULL → _auth_credential 的
+            # `WHERE status='active'` 永远查不到新凭据 → worker 拿到 401
+            # "runtime credential revoked or not found"，在注册前退出，安装脚本
+            # 判定进程缺失而回滚，设备注册不上。
             c.execute("INSERT INTO runtime_credentials "
-                      "(token_hash, name, scope, owner_id, owner_name, repo_key, org_id) "
-                      "VALUES (?,?,?,?,?,?,?)",
+                      "(token_hash, name, status, scope, owner_id, owner_name, repo_key, org_id) "
+                      "VALUES (?,?,'active',?,?,?,?,?)",
                       (token_hash, name, scope, owner_id, owner_name, repo_key, _org_int))
             return {"action": "inserted", "id": int(c.lastrowid or 0)}
         except Exception as exc:  # noqa: BLE001
