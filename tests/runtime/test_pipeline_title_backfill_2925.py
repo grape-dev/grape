@@ -81,6 +81,14 @@ def _reset_process_cache():
     pipeline_mod._TITLE_NEG_CACHE.clear()
 
 
+def _mark_attempted(kw, ids):
+    """假 batch 需同步 stats.attempted，模拟「确实提交过上游请求」。"""
+    _st = kw.get("stats")
+    if isinstance(_st, dict):
+        _st["attempted"] = len(ids)
+    return _st
+
+
 def _setup_db(monkeypatch, issues, marker_ok=True):
     db = _FakeDb(issues)
     monkeypatch.setattr(pipeline_mod, "_rt_db", db)
@@ -110,6 +118,7 @@ def test_window_only_backfill_and_writeback(monkeypatch):
 
     def _fake_batch(repo_key, ids, **kw):
         calls.append(list(ids))
+        _mark_attempted(kw, ids)
         return {iid: f"真实标题 {iid}" for iid in ids}
 
     monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
@@ -133,8 +142,11 @@ def test_placeholder_result_not_written_but_marked(monkeypatch):
     issues = {1: {"title": "", "marker": ""}}
     db = _setup_db(monkeypatch, issues)
     title_map = {"#1": ""}
-    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch",
-                        lambda repo_key, ids, **kw: {"#1": "issue_opened"})
+    def _fake_batch(repo_key, ids, **kw):
+        _mark_attempted(kw, ids)
+        return {"#1": "issue_opened"}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
 
     out = pipeline_mod._backfill_window_titles(
         "gitcode:o/r", ["gitcode:o/r"], title_map, ["#1"], {}, window_size=1)
@@ -175,8 +187,12 @@ def test_expired_marker_retries(monkeypatch):
     """标记超过 TTL → 允许重试（避免上游改标题后永久占位）。"""
     _setup_db(monkeypatch, {1: {"title": "", "marker": "1"}})
     called = []
-    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch",
-                        lambda repo_key, ids, **kw: called.append(ids) or {"#1": "新标题"})
+    def _fake_batch(repo_key, ids, **kw):
+        called.append(ids)
+        _mark_attempted(kw, ids)
+        return {"#1": "新标题"}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
     out = pipeline_mod._backfill_window_titles(
         "gitcode:o/r", ["gitcode:o/r"], {"#1": ""}, ["#1"], {}, 1)
     assert called == [["#1"]]
@@ -187,8 +203,12 @@ def test_no_marker_column_uses_process_cache(monkeypatch):
     """无 title_fetched_at 列时降级为进程内负缓存：第二次请求 0 外呼。"""
     _setup_db(monkeypatch, {1: {"title": "", "marker": ""}}, marker_ok=False)
     calls = []
-    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch",
-                        lambda repo_key, ids, **kw: calls.append(ids) or {})
+    def _fake_batch(repo_key, ids, **kw):
+        calls.append(ids)
+        _mark_attempted(kw, ids)
+        return {}
+
+    monkeypatch.setattr(ep_mod, "fetch_issue_titles_batch", _fake_batch)
 
     pipeline_mod._backfill_window_titles(
         "gitcode:o/r", ["gitcode:o/r"], {"#1": ""}, ["#1"], {}, 1)
@@ -198,6 +218,17 @@ def test_no_marker_column_uses_process_cache(monkeypatch):
     pipeline_mod._backfill_window_titles(
         "gitcode:o/r", ["gitcode:o/r"], {"#1": ""}, ["#1"], {}, 1)
     assert calls == [["#1"]]
+
+
+def test_no_token_does_not_poison_negative_cache(monkeypatch):
+    """无 token 时不得落已尝试标记：临时凭据问题不能导致 6h 内不再重试。"""
+    issues = {1: {"title": "", "marker": ""}}
+    _setup_db(monkeypatch, issues)
+    monkeypatch.setattr(ep_mod, "_resolve_issue_read_token", lambda rk: "")
+    pipeline_mod._backfill_window_titles(
+        "gitcode:o/r", ["gitcode:o/r"], {"#1": ""}, ["#1"], {}, 1)
+    assert issues[1]["marker"] == ""
+    assert pipeline_mod._TITLE_NEG_CACHE == {}
 
 
 def test_get_issue_pipeline_no_serial_vcs_call(monkeypatch):
@@ -245,10 +276,12 @@ def test_batch_resolves_token_and_client_once(monkeypatch):
     monkeypatch.setattr(ep_mod, "_build_issue_read_client",
                         lambda rk, tok: built.append((rk, tok)) or client)
 
+    stats = {}
     out = ep_mod.fetch_issue_titles_batch(
         "gitcode:o/r", ["#1", "#2", "#3", "#pr_9_x"],
-        max_workers=3, deadline_seconds=2, timeout=1)
+        max_workers=3, deadline_seconds=2, timeout=1, stats=stats)
     assert out == {"#1": "T1", "#2": "T2", "#3": "T3"}
+    assert stats["attempted"] == 3
     assert tok_calls == ["gitcode:o/r"]
     assert built == [("gitcode:o/r", "tok")]
     assert sorted(client.calls) == [1, 2, 3]

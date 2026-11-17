@@ -3244,7 +3244,7 @@ def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
 
 def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
                              deadline_seconds: float = None,
-                             timeout: float = None) -> dict:
+                             timeout: float = None, stats: dict = None) -> dict:
     """Issue #2925：窗口内占位标题的批量兜底（有界可收敛）。
 
     与逐条 `_fetch_issue_title_via_api` 的差别在「执行有界」：
@@ -3255,6 +3255,10 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
 
     返回 {issue_id: title}，只收录非空标题（是否占位由调用方按同一口径复核）。
     无 token / 客户端构建失败 / 上游异常一律降级为空结果，绝不抛出。
+
+    `stats`（可选出参）：写入 `attempted`（实际提交给上游的条数）。调用方据此区分
+    「确实尝试过但没拿到」与「根本没 token 没发起」——后者不得落负缓存标记，
+    否则一次临时 token 缺失会让该仓 6h 内不再重试。
     """
     from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
     _num_by_id: dict = {}
@@ -3267,6 +3271,8 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
     if not _num_by_id:
         return {}
     token = _resolve_issue_read_token(repo_key)
+    if stats is not None:
+        stats["attempted"] = 0
     if not token:
         log.warning(f"[pipeline] title backfill skipped: no VCS token for {repo_key} "
                     f"(candidates={len(_num_by_id)})")
@@ -3282,6 +3288,8 @@ def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
     _timeout = max(0.1, min(float(timeout or _title_fetch_timeout()), _deadline))
     _expire_at = time.monotonic() + _deadline
     _out: dict = {}
+    if stats is not None:
+        stats["attempted"] = len(_num_by_id)
     try:
         # 不用 with：退出时 shutdown(wait=True) 会等所有排队任务跑完，deadline 失去意义。
         _ex = ThreadPoolExecutor(max_workers=min(_conc, len(_num_by_id)),

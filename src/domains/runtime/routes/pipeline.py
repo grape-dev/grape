@@ -242,17 +242,22 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
     # ② 有界执行：token/客户端复用 + 有限并发 + 总 deadline（见 event_pipeline）
     # 按 issue 实际所属 repo_key 分组，每组内 token/客户端只解析构建一次。
     _fetched: dict = {}
+    _attempted_rks: set = set()
     _by_rk: dict = {}
     for _iid, _num, _rk in _to_fetch:
         _by_rk.setdefault(_rk, []).append(_iid)
     for _rk, _ids in _by_rk.items():
+        _stats: dict = {}
         try:
             from src.domains.runtime.pipeline.event_pipeline import fetch_issue_titles_batch
-            for _iid, _t in (fetch_issue_titles_batch(_rk, _ids) or {}).items():
+            for _iid, _t in (fetch_issue_titles_batch(_rk, _ids, stats=_stats) or {}).items():
                 _fetched[(_rk, _iid)] = _t
         except Exception as e:
             log.warning(f"[pipeline] title backfill batch error for {_rk} "
                         f"(degrade to placeholder): {e}")
+        # 只有真的提交过上游请求才允许落已尝试标记（无 token 时不得形成负缓存）
+        if _stats.get("attempted"):
+            _attempted_rks.add(_rk)
 
     # ③ 状态有界：只写真实标题（同口径），失败落已尝试标记形成负缓存
     _now_iso = str(int(_now))
@@ -285,12 +290,13 @@ def _backfill_window_titles(repo_key: str, repo_keys: list, title_map: dict,
                     title_map[_iid] = _api
                     _written += 1
                 elif _marker_ok:
-                    _c.execute(
-                        f"UPDATE issue SET title_fetched_at=? "
-                        f"WHERE repo_key=? AND issue_number=? "
-                        f"AND (title='' OR title IS NULL OR title=?)",
-                        (_now_iso, _rk, _num, _old))
-                else:
+                    if _rk in _attempted_rks:
+                        _c.execute(
+                            f"UPDATE issue SET title_fetched_at=? "
+                            f"WHERE repo_key=? AND issue_number=? "
+                            f"AND (title='' OR title IS NULL OR title=?)",
+                            (_now_iso, _rk, _num, _old))
+                elif _rk in _attempted_rks:
                     _TITLE_NEG_CACHE[(_rk, _num)] = _now
             try:
                 _db.commit()
