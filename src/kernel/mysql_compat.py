@@ -191,6 +191,71 @@ def _split_create_columns(body: str) -> list[str]:
     return cols
 
 
+def run_virtual_sql(raw_cursor, sql: str, params=None) -> bool:
+    """执行「翻译层标记为游标特判」的 SQLite 方言 SQL，返回是否已处理。
+
+    这几种语句无法翻译成等价的 MySQL **文本**（要先读 information_schema 再按
+    sqlite 的结果形状重排列），所以 `translate_sql()` 原样返回并打标记，由游标
+    自己执行。`mysql_compat.Cursor.execute` 内置了这段逻辑，但三库分域拓扑走的是
+    `db_registry._CompatCursor`——那里只调 `translate_sql()` 没有特判，于是
+    PRAGMA / sqlite_master 原样透传给 MySQL，直接 1064 语法错误。
+
+    症状（分域三库拓扑 db_registry._CompatCursor 下启动迁移）：
+        Migrate managed_repos failed: (1064) ... near 'PRAGMA table_info(managed_repos)'
+        Migrate user_repos failed: (1064) ... near 'PRAGMA table_info(user_repos)'
+        Migrate events repo_key prefix failed: (1064) ... PRAGMA table_info(events)
+    三条迁移全部静默失败（异常被 except 吞成 warning），升级动作等于没做。
+
+    只处理结果形状与 sqlite 一致的四类；`SHOW CREATE TABLE`（需重排为单列 sql）
+    与 `CREATE INDEX IF NOT EXISTS`（可直接翻译成带存在性检查的 DDL）不在此处
+    改写，保持原行为，避免在兼容游标上引入结果列错位。
+    """
+    # PRAGMA table_info(X) → information_schema.columns（列序与 sqlite 对齐）
+    m = _PRAGMA_TABLE_INFO_RE.match(sql)
+    if m:
+        raw_cursor.execute(
+            "SELECT ORDINAL_POSITION-1, COLUMN_NAME, COLUMN_TYPE, "
+            "IF(IS_NULLABLE='NO',1,0), COLUMN_DEFAULT, IF(COLUMN_KEY='PRI',1,0) "
+            "FROM information_schema.columns WHERE TABLE_SCHEMA=DATABASE() "
+            "AND TABLE_NAME=%s ORDER BY ORDINAL_POSITION",
+            (m.group(2),),
+        )
+        return True
+    # PRAGMA index_list(X) → (seq, name, unique)
+    m = _PRAGMA_INDEX_LIST_RE.match(sql)
+    if m:
+        raw_cursor.execute(
+            "SELECT 0, INDEX_NAME, IF(NON_UNIQUE=0,1,0) "
+            "FROM information_schema.statistics WHERE TABLE_SCHEMA=DATABASE() "
+            "AND TABLE_NAME=%s GROUP BY INDEX_NAME, NON_UNIQUE",
+            (m.group(1).strip("`\"'"),),
+        )
+        return True
+    # PRAGMA index_info(X) → (seqno, cid, name)
+    m = _PRAGMA_INDEX_INFO_RE.match(sql)
+    if m:
+        raw_cursor.execute(
+            "SELECT SEQ_IN_INDEX-1, 0, COLUMN_NAME FROM information_schema.statistics "
+            "WHERE TABLE_SCHEMA=DATABASE() AND INDEX_NAME=%s ORDER BY SEQ_IN_INDEX",
+            (m.group(1).strip("`\"'"),),
+        )
+        return True
+    # SELECT name FROM sqlite_master WHERE type='table' → SHOW TABLES（单列同形）
+    if _SQLITE_MASTER_NAME_RE.match(sql):
+        raw_cursor.execute("SHOW TABLES")
+        return True
+    # 参数化判存：SELECT name FROM sqlite_master WHERE type='table' AND name=?
+    if _SQLITE_MASTER_NAME_PARAM_RE.match(sql) and params:
+        tbl = params[0] if isinstance(params, (tuple, list)) else params
+        raw_cursor.execute(
+            "SELECT TABLE_NAME FROM information_schema.tables "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
+            (tbl,),
+        )
+        return True
+    return False
+
+
 def _translate_create_table(sql: str) -> str:
     """翻译 CREATE TABLE：TEXT 主键/唯一列→VARCHAR(191)、AUTOINCREMENT→AUTO_INCREMENT、
     TEXT DEFAULT 字面量→表达式、datetime('now')→CAST(NOW() AS CHAR)。"""
