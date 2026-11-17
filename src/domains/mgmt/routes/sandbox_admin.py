@@ -169,6 +169,16 @@ def _get_db():
     return db, db_lock
 
 
+def _admin_write_audit(request: Request, user: dict, event_type: str, detail: dict) -> None:
+    """管理面写路由审计（arch-guard F7/C3）：谁/何时/改了什么标识。
+
+    detail 只记标识与前后语义（backend/rule_id 等），不落敏感值。
+    """
+    from src.domains.mgmt.auth import audit as auth_audit
+    ip = request.client.host if request and request.client else ""
+    auth_audit.log_audit(event_type, operator_id=user.get("id") or 0, ip=ip, detail=detail)
+
+
 # --- 五维白名单 CRUD ---
 
 @router.get("/whitelist", operation_id="sandbox_whitelist_list")
@@ -202,6 +212,7 @@ def list_whitelist(
 @router.post("/whitelist", operation_id="sandbox_whitelist_create")
 def create_whitelist(
     body: WhitelistBody,
+    request: Request,
     user: dict = Depends(require_no_session_token),
 ):
     _require_admin(user)
@@ -236,6 +247,10 @@ def create_whitelist(
     from src.domains.runtime.agents.sandbox.isolation.network import _WhitelistCache
     _WhitelistCache.get().refresh()
     log.info(f"whitelist rule created: backend={body.backend_name} domain={body.domain} method={method}")
+    _admin_write_audit(request, user, "sandbox_whitelist_created", {
+        "backend_name": body.backend_name, "domain": body.domain,
+        "method": method, "path_prefix": body.path_prefix,
+        "scheme": scheme, "port": port})
     return {"status": "ok"}
 
 
@@ -243,6 +258,7 @@ def create_whitelist(
 def update_whitelist(
     rule_id: str,
     body: WhitelistBody,
+    request: Request,
     user: dict = Depends(require_no_session_token),
 ):
     _require_admin(user)
@@ -276,12 +292,17 @@ def update_whitelist(
     from src.domains.runtime.agents.sandbox.isolation.network import _WhitelistCache
     _WhitelistCache.get().refresh()
     log.info(f"whitelist rule updated: id={rule_id}")
+    _admin_write_audit(request, user, "sandbox_whitelist_updated", {
+        "rule_id": rule_id, "backend_name": body.backend_name,
+        "domain": body.domain, "method": method,
+        "path_prefix": body.path_prefix, "scheme": scheme, "port": body.port})
     return {"status": "ok"}
 
 
 @router.delete("/whitelist/{rule_id}", operation_id="sandbox_whitelist_delete")
 def delete_whitelist(
     rule_id: str,
+    request: Request,
     user: dict = Depends(require_no_session_token),
 ):
     _require_admin(user)
@@ -303,6 +324,8 @@ def delete_whitelist(
     from src.domains.runtime.agents.sandbox.isolation.network import _WhitelistCache
     _WhitelistCache.get().refresh()
     log.info(f"whitelist rule deleted: id={rule_id} backend={backend_name}")
+    _admin_write_audit(request, user, "sandbox_whitelist_deleted", {
+        "rule_id": rule_id, "backend_name": backend_name})
     return {"status": "ok"}
 
 
@@ -338,6 +361,7 @@ def list_paths(
 @router.post("/paths", operation_id="sandbox_paths_create")
 def create_paths(
     body: PathsBody,
+    request: Request,
     user: dict = Depends(require_no_session_token),
 ):
     _require_admin(user)
@@ -357,6 +381,8 @@ def create_paths(
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
     log.info(f"sandbox path created: backend={body.backend_name} path={body.path}")
+    _admin_write_audit(request, user, "sandbox_path_created", {
+        "backend_name": body.backend_name, "path": body.path, "access": body.access})
     return {"status": "ok"}
 
 
@@ -364,6 +390,7 @@ def create_paths(
 def update_paths(
     path_id: str,
     body: PathsBody,
+    request: Request,
     user: dict = Depends(require_no_session_token),
 ):
     _require_admin(user)
@@ -387,12 +414,16 @@ def update_paths(
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
     log.info(f"sandbox path updated: id={path_id}")
+    _admin_write_audit(request, user, "sandbox_path_updated", {
+        "path_id": path_id, "backend_name": body.backend_name,
+        "path": body.path, "access": body.access})
     return {"status": "ok"}
 
 
 @router.delete("/paths/{path_id}", operation_id="sandbox_paths_delete")
 def delete_paths(
     path_id: str,
+    request: Request,
     user: dict = Depends(require_no_session_token),
 ):
     _require_admin(user)
@@ -404,6 +435,7 @@ def delete_paths(
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail=f"Path {path_id} not found")
     log.info(f"sandbox path deleted: id={path_id}")
+    _admin_write_audit(request, user, "sandbox_path_deleted", {"path_id": path_id})
     return {"status": "ok"}
 
 
@@ -441,6 +473,7 @@ def list_config(
 def update_config(
     config_id: str,
     body: ConfigBody,
+    request: Request,
     user: dict = Depends(require_no_session_token),
 ):
     _require_admin(user)
@@ -466,4 +499,7 @@ def update_config(
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
     log.info(f"sandbox config updated: id={config_id} mode={body.sandbox_mode}")
+    _admin_write_audit(request, user, "sandbox_config_updated", {
+        "config_id": config_id, "sandbox_mode": body.sandbox_mode,
+        "degrade_policy": body.degrade_policy})
     return {"status": "ok"}

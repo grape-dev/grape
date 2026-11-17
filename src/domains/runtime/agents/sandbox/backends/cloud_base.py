@@ -580,6 +580,22 @@ class CloudProviderBase:
         self._health_cache: HealthStatus | None = None
         self._health_cache_time: float = 0.0
 
+    def _audit_external_call(self, op: str, task_id: str, outcome: str,
+                             duration_ms: int, detail: dict | None = None) -> None:
+        """外部平台调用审计（arch-guard F6/C2）：把 create/connect/kill 等外部调用
+        写入注入的 audit 链——调用方、操作、结果、耗时。best-effort：审计失败
+        不影响主流程，仅告警。"""
+        if not self._audit:
+            return
+        from src.domains.runtime.agents.common.audit import AuditEvent, AuditKind, now_iso
+        try:
+            self._audit.log(AuditEvent(
+                ts=now_iso(), task_id=task_id or "",
+                kind=AuditKind.SANDBOX_ACCESS, outcome=outcome,
+                detail={"op": op, "duration_ms": duration_ms, **(detail or {})}))
+        except Exception as e:
+            log.warning(f"[cloud] external call audit write failed (op={op}): {e}")
+
     def is_available(self) -> bool:
         """组合判断：is_configured AND health.healthy。"""
         return self.is_configured() and self.health().healthy

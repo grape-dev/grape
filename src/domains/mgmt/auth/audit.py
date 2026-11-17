@@ -50,6 +50,13 @@ EVENT_TYPES = frozenset({
     "scene_pin",                    # 场景置顶/取消置顶（Issue #1735：仓库共享状态变更留痕，detail 含 scene_id/repo_key/pinned）
     "im_installation_change",       # IM 渠道安装变更（凭证保存/解绑/引擎启停/卡片配置；detail 只记动作与标识，不含 secret）
     "cross_write_apply",            # 跨域补偿写应用（/internal/xwrite/apply：action/幂等键/调用方/结果摘要，detail 不落 payload 原文）
+    "sandbox_whitelist_created",    # admin 新增沙箱五维白名单规则（PR #1507 F7：detail 只记标识，不记凭据）
+    "sandbox_whitelist_updated",    # admin 更新沙箱白名单规则（detail 含 rule_id/backend/domain）
+    "sandbox_whitelist_deleted",    # admin 删除沙箱白名单规则（detail 含 rule_id/backend）
+    "sandbox_path_created",         # admin 新增沙箱文件系统路径（detail 含 backend/path/access）
+    "sandbox_path_updated",         # admin 更新沙箱文件系统路径
+    "sandbox_path_deleted",         # admin 删除沙箱文件系统路径
+    "sandbox_config_updated",       # admin 更新沙箱配置（detail 含 config_id/mode/degrade_policy）
 })
 
 

@@ -222,18 +222,30 @@ class CubeSandboxInstance(CloudSandboxBase):
         return self._sandbox_id
 
     def _do_connect(self, sandbox_id: str) -> None:
-        """CubeSandbox SDK: Sandbox.connect()。"""
-        from cubesandbox import Sandbox, Config
-        cfg = Config(
-            api_url=self._config.get("api_url", ""),
-            api_key=self._config.get("api_key") or None,
-            sandbox_domain=self._config.get("sandbox_domain", "cube.app"),
-            proxy_node_ip=self._config.get("proxy_node_ip") or None,
-            request_timeout=self._config.get("request_timeout", 30),
-        )
-        self._sandbox = Sandbox.connect(sandbox_id, config=cfg)
-        self._sandbox_id = sandbox_id
-        self._post_create_hook()
+        """CubeSandbox SDK: Sandbox.connect()。
+
+        arch-guard F6/C2：外部平台调用记录请求/结果/耗时接口日志。
+        """
+        import time as _t
+        _start = _t.monotonic()
+        try:
+            from cubesandbox import Sandbox, Config
+            cfg = Config(
+                api_url=self._config.get("api_url", ""),
+                api_key=self._config.get("api_key") or None,
+                sandbox_domain=self._config.get("sandbox_domain", "cube.app"),
+                proxy_node_ip=self._config.get("proxy_node_ip") or None,
+                request_timeout=self._config.get("request_timeout", 30),
+            )
+            self._sandbox = Sandbox.connect(sandbox_id, config=cfg)
+            self._sandbox_id = sandbox_id
+            self._post_create_hook()
+            log.info(f"[cubesandbox] connect ok: sandbox={sandbox_id} "
+                     f"duration_ms={int((_t.monotonic() - _start) * 1000)}")
+        except Exception as e:
+            log.error(f"[cubesandbox] connect failed: sandbox={sandbox_id} "
+                      f"duration_ms={int((_t.monotonic() - _start) * 1000)} error={e}")
+            raise
 
     def _do_kill(self) -> bool:
         """CubeSandbox SDK: Sandbox.kill()（无返回值，成功不抛异常即 True）。
@@ -243,22 +255,33 @@ class CubeSandboxInstance(CloudSandboxBase):
         """
         if not self._sandbox:
             return False  # 未 connect，不能确认远端沙箱已销毁
+        import time as _t
+        _start = _t.monotonic()
         try:
             self._sandbox.kill()
+            log.info(f"[cubesandbox] kill ok: sandbox={self._sandbox_id} "
+                     f"duration_ms={int((_t.monotonic() - _start) * 1000)}")
             return True
         except Exception as e:
-            log.error(f"[cubesandbox] kill failed: {e}")
+            log.error(f"[cubesandbox] kill failed: sandbox={self._sandbox_id} "
+                      f"duration_ms={int((_t.monotonic() - _start) * 1000)} error={e}")
             return False
 
     def _do_is_running(self) -> bool:
         """CubeSandbox SDK: get_info().state == RUNNING。"""
         if not self._sandbox:
             return False
+        import time as _t
+        _start = _t.monotonic()
         try:
             info = self._sandbox.get_info()
             state = str(info.get("state", "")).upper() if isinstance(info, dict) else str(getattr(info, "state", "")).upper()
+            log.info(f"[cubesandbox] get_info: sandbox={self._sandbox_id} state={state} "
+                     f"duration_ms={int((_t.monotonic() - _start) * 1000)}")
             return state == "RUNNING"
-        except Exception:
+        except Exception as e:
+            log.warning(f"[cubesandbox] get_info failed: sandbox={self._sandbox_id} "
+                        f"duration_ms={int((_t.monotonic() - _start) * 1000)} error={e}")
             return False
 
     def _do_refresh(self) -> None:
@@ -282,7 +305,20 @@ class CubeSandboxInstance(CloudSandboxBase):
         """
         if not self._sandbox:
             raise RuntimeError("sandbox not connected")
-        return self._sandbox.commands.run(cmd, envs=envs, timeout=timeout)
+        import time as _t
+        _start = _t.monotonic()
+        # arch-guard F6/C2：接口日志记命令摘要（截断）+ 耗时，不落 envs 明文
+        _cmd_summary = (cmd[:200] + "...") if cmd and len(cmd) > 200 else (cmd or "")
+        try:
+            _result = self._sandbox.commands.run(cmd, envs=envs, timeout=timeout)
+            log.info(f"[cubesandbox] run_command ok: sandbox={self._sandbox_id} "
+                     f"cmd={_cmd_summary!r} duration_ms={int((_t.monotonic() - _start) * 1000)}")
+            return _result
+        except Exception as e:
+            log.error(f"[cubesandbox] run_command failed: sandbox={self._sandbox_id} "
+                      f"cmd={_cmd_summary!r} "
+                      f"duration_ms={int((_t.monotonic() - _start) * 1000)} error={e}")
+            raise
 
     def _run_long_command(self, cmd: str, timeout: int = 900, poll_interval: int = 15,
                           envs: dict | None = None) -> tuple[int, str]:
@@ -723,35 +759,65 @@ class CubeSandboxProvider(CloudProviderBase):
         issue_id/repo_key 可选传入——连接恢复的实例 kill 后 state_reporter 需要
         这些信息更新 DB（每环节新建模式下按 sandbox_id 匹配，issue_id/repo_key
         仅用于记录完整性）。
+
+        arch-guard F6/C2：外部平台 connect 调用写审计链（耗时 + 结果）。
         """
-        inst = CubeSandboxInstance(
-            issue_id=issue_id,
-            repo_key=repo_key,
-            user_id=0,
-            config=self._config,
-        )
-        inst._sandbox_id = sandbox_id
-        inst._do_connect(sandbox_id)
-        return inst
+        import time as _t
+        _start = _t.monotonic()
+        try:
+            inst = CubeSandboxInstance(
+                issue_id=issue_id,
+                repo_key=repo_key,
+                user_id=0,
+                config=self._config,
+            )
+            inst._sandbox_id = sandbox_id
+            inst._do_connect(sandbox_id)
+            self._audit_external_call("connect_sandbox", issue_id, "allow",
+                                      int((_t.monotonic() - _start) * 1000),
+                                      {"sandbox_id": sandbox_id})
+            return inst
+        except Exception as e:
+            self._audit_external_call("connect_sandbox", issue_id, "deny",
+                                      int((_t.monotonic() - _start) * 1000),
+                                      {"sandbox_id": sandbox_id, "error": str(e)[:200]})
+            raise
 
     def _do_kill_sandbox(self, sandbox_id: str) -> bool:
-        """CubeSandbox SDK: connect + get_info + kill（不覆盖 self._sandbox）。"""
-        from cubesandbox import Sandbox, Config
-        cfg = Config(
-            api_url=self._config.get("api_url", ""),
-            api_key=self._config.get("api_key") or None,
-            sandbox_domain=self._config.get("sandbox_domain", "cube.app"),
-            proxy_node_ip=self._config.get("proxy_node_ip") or None,
-            request_timeout=10,
-        )
-        sb = Sandbox.connect(sandbox_id, config=cfg)
-        info = sb.get_info()
-        state = str(info.get("state", "")).upper() if isinstance(info, dict) else str(getattr(info, "state", "")).upper()
-        if state in ("STOPPED", "KILLED", "EXPIRED", "DELETED", "PAUSED"):
-            log.info(f"[cubesandbox] kill_sandbox: {sandbox_id} already {state}")
+        """CubeSandbox SDK: connect + get_info + kill（不覆盖 self._sandbox）。
+
+        arch-guard F6/C2：外部平台 kill 调用写审计链（耗时 + 结果）。
+        """
+        import time as _t
+        _start = _t.monotonic()
+        try:
+            from cubesandbox import Sandbox, Config
+            cfg = Config(
+                api_url=self._config.get("api_url", ""),
+                api_key=self._config.get("api_key") or None,
+                sandbox_domain=self._config.get("sandbox_domain", "cube.app"),
+                proxy_node_ip=self._config.get("proxy_node_ip") or None,
+                request_timeout=10,
+            )
+            sb = Sandbox.connect(sandbox_id, config=cfg)
+            info = sb.get_info()
+            state = str(info.get("state", "")).upper() if isinstance(info, dict) else str(getattr(info, "state", "")).upper()
+            if state in ("STOPPED", "KILLED", "EXPIRED", "DELETED", "PAUSED"):
+                log.info(f"[cubesandbox] kill_sandbox: {sandbox_id} already {state}")
+                self._audit_external_call("kill_sandbox", sandbox_id, "stopped",
+                                          int((_t.monotonic() - _start) * 1000),
+                                          {"sandbox_id": sandbox_id, "state": state})
+                return True
+            sb.kill()
+            self._audit_external_call("kill_sandbox", sandbox_id, "allow",
+                                      int((_t.monotonic() - _start) * 1000),
+                                      {"sandbox_id": sandbox_id})
             return True
-        sb.kill()
-        return True
+        except Exception as e:
+            self._audit_external_call("kill_sandbox", sandbox_id, "deny",
+                                      int((_t.monotonic() - _start) * 1000),
+                                      {"sandbox_id": sandbox_id, "error": str(e)[:200]})
+            raise
 
 
 class CubeSandboxAdapter:
