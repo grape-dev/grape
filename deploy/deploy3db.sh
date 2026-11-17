@@ -221,14 +221,36 @@ else
     fi
   fi
 fi
-# 本 checkout 根（前端构建与技能树镜像都要用，必须在使用前定义）
+# 本 checkout 根（前端构建与技能树镜像都要用，必须在使用前定义）。
+# 注意：这个脚本常被复制/软链到 ~/deploy3db.sh —— 那时 dirname/.. 会算成家目录，
+# 于是前端构建静默跳过（"无 node_modules 或 npm"），页面继续用旧产物。
+# 所以先用候选路径校验，不成立再回落到"第一个含前端工作区的 checkout"。
 _SELF="$(readlink -f "$(dirname "$0")/..")"
+if [ ! -d "$_SELF/src/api/frontend/app" ]; then
+  _fallback=""
+  for _c in /home/*/grape-new-version2; do
+    [ -d "$_c/src/api/frontend/app" ] || continue
+    # root 部署时优先选调用者自己的 checkout（$PWD 在它下面）
+    case "$(readlink -f "${PWD:-/}")/" in
+      "$(readlink -f "$_c")/"*) _fallback="$(readlink -f "$_c")"; break ;;
+    esac
+    [ -z "$_fallback" ] && _fallback="$(readlink -f "$_c")"
+  done
+  [ -n "$_fallback" ] && _SELF="$_fallback"
+fi
 
 # 前端构建：static-dist/ 是构建产物且被 gitignore，只同步 src 不会更新它。
 # 产物缺失或落后时，index.html 里新引用的 view 会 404 → SPA fallback 返回 index.html →
 # 浏览器按 module script 严格校验 MIME，报 "Expected a JavaScript-or-Wasm module script"。
 _APP="$_SELF/src/api/frontend/app"
 _DIST="$_SELF/src/api/frontend/static-dist/viewjs"
+# npm 常装在 checkout 属主的用户目录（~/.local/node/bin），root 跑部署时 PATH 里看不到它；
+# 用 root 自带的 /usr/bin/npm 又可能指向不存在的 node。按属主补 PATH 最稳。
+_self_owner=$(stat -c %U "$_SELF" 2>/dev/null || echo root)
+for _nbin in "/home/$_self_owner/.local/node/bin" "/home/$_self_owner/.nvm/versions/node/"*/bin; do
+  [ -x "$_nbin/npm" ] && PATH="$_nbin:$PATH"
+done
+export PATH
 if [ -d "$_APP/node_modules" ] && command -v npm >/dev/null 2>&1; then
   _stale=0
   [ -d "$_DIST" ] || _stale=1
