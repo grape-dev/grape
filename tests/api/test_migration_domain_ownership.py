@@ -72,7 +72,9 @@ def test_run_domain_migrations_filters_by_domain_and_never_runs_legacy(monkeypat
         # 只跑 runtime 域登记的条目（真实仓库里是 #646/#868/#1011 那 7 条 + 本测试的 1 条）
         assert "299901010004" in captured["versions"]
         assert "299901010003" not in captured["versions"]
-        assert all(v.startswith(("2026110", "202611030", "2999")) for v in captured["versions"])
+        # 每条都必须带 runtime 域标签（mgmt-only 条目一条都不许混进来）
+        assert all("runtime" in m.domains for m in db_setup._MIGRATIONS
+                   if m.version in captured["versions"])
         assert captured["allow_legacy"] is False
 
         # worker 与 event 共库：不设 owner → 一条都不跑；mgmt 走 init_database 常规路径

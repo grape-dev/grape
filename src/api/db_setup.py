@@ -8784,10 +8784,45 @@ register_migration(
     "202611080014", "issue-1011-engine-anchor-columns", "safe",
     lambda: _migration_1011_add_engine_anchor_columns(),
     domains=("runtime",))
+
+
+# ======================================================================
+# 缺列补齐（2026-11-17）：线上库由旧快照 provision，比代码少几列，导致每轮扫描
+# 1054 报错（sweeper 每 30s / autopilot 每 60s 各一条，功能静默失效）：
+#   - agent_tasks.pool_selector（Issue #1208 selector 入队落列，runtime 域）
+#   - autopilot_tasks.engine_runtime_ids / custom_fields / work_branch（mgmt 域）
+# 走登记式迁移而不是手工 ALTER：本域进程各自补本域列（Route A 归属）。
+# ======================================================================
+
+def _migration_202611170043_agent_tasks_pool_selector() -> None:
+    """agent_tasks.pool_selector：selector 模式入队落列；缺列时 sweeper 全段失效。"""
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "agent_tasks", "pool_selector", "TEXT DEFAULT ''")
+        db.commit()
+
+
+def _migration_202611170044_autopilot_task_columns() -> None:
+    """autopilot_tasks 的三列（调度器 enabled-full / 触发器读取全列）。"""
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "autopilot_tasks", "engine_runtime_ids", "TEXT DEFAULT ''")
+        _ensure_column(c, "autopilot_tasks", "custom_fields", "TEXT DEFAULT ''")
+        _ensure_column(c, "autopilot_tasks", "work_branch", "TEXT DEFAULT ''")
+        db.commit()
+
 register_migration(
     "202611080015", "issue-1011-backfill-rederive-engine-uids", "backfill",
     lambda: _migration_1011_backfill_rederive_engine_uids(),
     domains=("runtime",))
+
+register_migration(
+    "202611170043", "agent-tasks-pool-selector-definition", "safe",
+    lambda: _migration_202611170043_agent_tasks_pool_selector(), domains=("runtime",))
+
+register_migration(
+    "202611170044", "autopilot-task-columns-definition", "safe",
+    lambda: _migration_202611170044_autopilot_task_columns(), domains=("mgmt",))
 
 
 # ======================================================================
