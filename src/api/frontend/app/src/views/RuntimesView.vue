@@ -376,20 +376,20 @@
             <div v-if="d.cred_type === 'sandbox' && d.platform" class="rtv-wcard-plat">
               <span class="rtv-k">{{ t('label.sandbox_platform') }}</span>
               <a
-                v-if="d.provider_id > 0"
+                v-if="!!d.provider_id"
                 :href="'#sandbox/provider/' + d.provider_id"
                 class="rtv-plat-link"
                 :title="t('credential.goto_platform_page')"
                 >☁ {{ d.platform }} ↗</a
               >
               <button
-                v-if="d.provider_id > 0"
+                v-if="!!d.provider_id"
                 class="bt bt-o bt-s rtv-plat-btn"
                 :title="t('credential.platform_detail_btn_tip')"
                 @click.stop="gotoProviderDetail(d.provider_id)"
                 >📋 {{ t('credential.platform_detail_btn') }}</button
               >
-              <span v-if="!(d.provider_id > 0)" class="rtv-plat-plain" :title="t('credential.goto_platform_page')"
+              <span v-if="!d.provider_id" class="rtv-plat-plain" :title="t('credential.goto_platform_page')"
                 >☁ {{ d.platform }}</span
               >
             </div>

@@ -8676,12 +8676,12 @@ register_migration(
 _SANDBOX_CONTROL_TABLES: list[tuple[str, str]] = [
     ("grape_t_cloud_sandboxes", """
 CREATE TABLE IF NOT EXISTS grape_t_cloud_sandboxes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     issue_id VARCHAR(255) NOT NULL,
     repo_key VARCHAR(255) NOT NULL,
     sandbox_id VARCHAR(255) NOT NULL,
     provider VARCHAR(64) NOT NULL,
-    provider_id INTEGER DEFAULT 0,
+    provider_id TEXT DEFAULT '',
     state VARCHAR(32) DEFAULT 'creating',
     sandbox_url VARCHAR(512) DEFAULT '',
     created_at TEXT,
@@ -8701,8 +8701,8 @@ CREATE TABLE IF NOT EXISTS grape_t_cloud_sandboxes (
 )"""),
     ("grape_t_sandbox_templates", """
 CREATE TABLE IF NOT EXISTS grape_t_sandbox_templates (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider_id INTEGER NOT NULL DEFAULT 0,
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL DEFAULT '',
     name VARCHAR(255) NOT NULL,
     template_id VARCHAR(255) NOT NULL,
     alias VARCHAR(255) DEFAULT '',
@@ -8722,7 +8722,7 @@ CREATE TABLE IF NOT EXISTS grape_t_sandbox_templates (
 )"""),
     ("grape_t_sandbox_provider_config", """
 CREATE TABLE IF NOT EXISTS grape_t_sandbox_provider_config (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     platform VARCHAR(64) NOT NULL DEFAULT '',
     endpoint VARCHAR(512) NOT NULL DEFAULT '',
     api_key_enc TEXT,
@@ -8738,10 +8738,10 @@ CREATE TABLE IF NOT EXISTS grape_t_sandbox_provider_config (
 )"""),
     ("grape_t_engine_template_binding", """
 CREATE TABLE IF NOT EXISTS grape_t_engine_template_binding (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider_id INTEGER NOT NULL,
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL,
     engine_type VARCHAR(64) NOT NULL,
-    template_id INTEGER NOT NULL,
+    template_id TEXT NOT NULL,
     -- [沙箱迁移 i7 _ensure_column 散段] 探测上报用状态/版本列（provider-report 写入）
     status VARCHAR(32) DEFAULT '',
     engine_version VARCHAR(64) DEFAULT '',
@@ -8758,7 +8758,7 @@ CREATE TABLE IF NOT EXISTS grape_t_engine_template_binding (
 )"""),
     ("grape_t_engine_sandbox_toggle", """
 CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_toggle (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     engine_type VARCHAR(64) NOT NULL UNIQUE,
     sandbox_on INTEGER NOT NULL DEFAULT 1,
     created_at TEXT,
@@ -8766,8 +8766,8 @@ CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_toggle (
 )"""),
     ("grape_t_user_llm_credentials", """
 CREATE TABLE IF NOT EXISTS grape_t_user_llm_credentials (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
+    id TEXT PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
     provider VARCHAR(64) NOT NULL,
     api_key_enc TEXT NOT NULL,
     base_url VARCHAR(512) DEFAULT '',
@@ -8781,7 +8781,7 @@ CREATE TABLE IF NOT EXISTS grape_t_user_llm_credentials (
 )"""),
     ("grape_t_repo_llm_credentials", """
 CREATE TABLE IF NOT EXISTS grape_t_repo_llm_credentials (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     repo_key VARCHAR(512) NOT NULL,
     engine_type VARCHAR(64) NOT NULL DEFAULT 'common',
     provider VARCHAR(64) NOT NULL DEFAULT '',
@@ -8794,7 +8794,7 @@ CREATE TABLE IF NOT EXISTS grape_t_repo_llm_credentials (
 )"""),
     ("grape_t_egress_admin_policy", """
 CREATE TABLE IF NOT EXISTS grape_t_egress_admin_policy (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     skill_name    VARCHAR(191) NOT NULL,
     skill_scope   VARCHAR(64) NOT NULL DEFAULT 'official',
     policy        VARCHAR(32) NOT NULL,
@@ -8807,7 +8807,7 @@ CREATE TABLE IF NOT EXISTS grape_t_egress_admin_policy (
 )"""),
     ("grape_t_engine_sandbox_config", """
 CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_config (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     runtime_id    INTEGER NOT NULL,
     engine_name   TEXT NOT NULL,
     sandbox_mode  TEXT NOT NULL DEFAULT 'required',
@@ -8819,7 +8819,7 @@ CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_config (
 )"""),
     ("grape_t_engine_sandbox_paths", """
 CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_paths (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     backend_name  TEXT NOT NULL,
     path          TEXT NOT NULL,
     access        TEXT NOT NULL DEFAULT 'ro',
@@ -8829,7 +8829,7 @@ CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_paths (
 )"""),
     ("grape_t_engine_sandbox_whitelist", """
 CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_whitelist (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     backend_name  TEXT NOT NULL,
     domain        TEXT NOT NULL,
     method        TEXT NOT NULL CHECK(method IN ('GET','POST','PUT','DELETE','PATCH')),
@@ -8842,7 +8842,7 @@ CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_whitelist (
 )"""),
     ("grape_t_task_proxy_tokens", """
 CREATE TABLE IF NOT EXISTS grape_t_task_proxy_tokens (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     task_id      TEXT NOT NULL,
     token_hash   TEXT NOT NULL,
     backend_name TEXT NOT NULL,
@@ -8852,7 +8852,7 @@ CREATE TABLE IF NOT EXISTS grape_t_task_proxy_tokens (
 )"""),
     ("grape_t_egress_admin_exception", """
 CREATE TABLE IF NOT EXISTS grape_t_egress_admin_exception (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     host          VARCHAR(255) NOT NULL,
     host_type     VARCHAR(16) NOT NULL,
     ports         VARCHAR(256) NOT NULL,
@@ -8918,10 +8918,11 @@ def _migration_sandbox_control_plane_schema() -> None:
         ]
         for domain, method, path_prefix, scheme, port in _OFFICIAL_DOMAINS:
             try:
+                from src.kernel.sandbox_uid import new_row_uid as _nru
                 c.execute(
                     "INSERT OR IGNORE INTO grape_t_engine_sandbox_whitelist "
-                    "(backend_name, domain, method, path_prefix, scheme, port) VALUES (?, ?, ?, ?, ?, ?)",
-                    ("*", domain, method, path_prefix, scheme, port))
+                    "(id, backend_name, domain, method, path_prefix, scheme, port) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (_nru(), "*", domain, method, path_prefix, scheme, port))
             except Exception:
                 pass
         db.commit()

@@ -219,10 +219,11 @@ def create_whitelist(
     db, db_lock = _get_db()
     try:
         with db_lock:
+            from src.kernel.sandbox_uid import new_row_uid as _nru
             db.execute(
-                "INSERT INTO grape_t_engine_sandbox_whitelist (backend_name, domain, method, path_prefix, scheme, port) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (body.backend_name, body.domain, method, body.path_prefix, scheme, port)
+                "INSERT INTO grape_t_engine_sandbox_whitelist (id, backend_name, domain, method, path_prefix, scheme, port) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (_nru(), body.backend_name, body.domain, method, body.path_prefix, scheme, port)
             )
             db.commit()
     except Exception as e:
@@ -240,7 +241,7 @@ def create_whitelist(
 
 @router.put("/whitelist/{rule_id}", operation_id="sandbox_whitelist_update")
 def update_whitelist(
-    rule_id: int,
+    rule_id: str,
     body: WhitelistBody,
     user: dict = Depends(require_no_session_token),
 ):
@@ -280,7 +281,7 @@ def update_whitelist(
 
 @router.delete("/whitelist/{rule_id}", operation_id="sandbox_whitelist_delete")
 def delete_whitelist(
-    rule_id: int,
+    rule_id: str,
     user: dict = Depends(require_no_session_token),
 ):
     _require_admin(user)
@@ -346,9 +347,10 @@ def create_paths(
     db, db_lock = _get_db()
     try:
         with db_lock:
+            from src.kernel.sandbox_uid import new_row_uid as _nru
             db.execute(
-                "INSERT INTO grape_t_engine_sandbox_paths (backend_name, path, access) VALUES (?, ?, ?)",
-                (body.backend_name, body.path, body.access)
+                "INSERT INTO grape_t_engine_sandbox_paths (id, backend_name, path, access) VALUES (?, ?, ?, ?)",
+                (_nru(), body.backend_name, body.path, body.access)
             )
             db.commit()
     except Exception as e:
@@ -360,7 +362,7 @@ def create_paths(
 
 @router.put("/paths/{path_id}", operation_id="sandbox_paths_update")
 def update_paths(
-    path_id: int,
+    path_id: str,
     body: PathsBody,
     user: dict = Depends(require_no_session_token),
 ):
@@ -390,7 +392,7 @@ def update_paths(
 
 @router.delete("/paths/{path_id}", operation_id="sandbox_paths_delete")
 def delete_paths(
-    path_id: int,
+    path_id: str,
     user: dict = Depends(require_no_session_token),
 ):
     _require_admin(user)
@@ -437,7 +439,7 @@ def list_config(
 
 @router.put("/config/{config_id}", operation_id="sandbox_config_update")
 def update_config(
-    config_id: int,
+    config_id: str,
     body: ConfigBody,
     user: dict = Depends(require_no_session_token),
 ):

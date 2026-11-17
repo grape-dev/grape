@@ -33,3 +33,14 @@ def is_uid_str(value) -> bool:
         return str(uuid.UUID(v)) == v
     except (ValueError, AttributeError, TypeError):
         return False
+def new_row_uid() -> str:
+    """技术主键 uid：13 张沙箱表（grape_t_*）的 TEXT 主键取值器，UUIDv4 小写连字符。
+
+    依据（arch-guard A12/G-8 裁定，2026-11-17 用户裁定弃雪花改 UUIDv4 文本主键，
+    对齐 D105 UuidPkMigration 三批 TEXT PK 先例与 credential_uid/provider_uid 形态）：
+    自增 id 仅单库内唯一——多主控独立库聚合撞号、部分恢复/旧快照搬库后
+    AUTOINCREMENT 序列断裂、表重建 delete-重插 id 全量换值；UUIDv4 一次性生成
+    终身不变，三场景零漂移。跨域/跨库业务身份仍由 engine_uid/provider_uid 等
+    uid 列承担，本 id 仅为库内行技术键。
+    """
+    return str(uuid.uuid4())

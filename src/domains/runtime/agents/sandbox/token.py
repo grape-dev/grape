@@ -62,10 +62,11 @@ class TokenManager:
         try:
             db, db_lock = self._get_db()
             with db_lock:
+                from src.kernel.sandbox_uid import new_row_uid as _nru
                 db.execute(
-                    "INSERT OR REPLACE INTO grape_t_task_proxy_tokens (task_id, token_hash, backend_name, expires_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (task_id, token_hash, backend_name, _expires_at)
+                    "INSERT OR REPLACE INTO grape_t_task_proxy_tokens (id, task_id, token_hash, backend_name, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (_nru(), task_id, token_hash, backend_name, _expires_at)
                 )
                 db.commit()
         except Exception as e:

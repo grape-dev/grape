@@ -493,11 +493,11 @@ export default {
       // legacy 直设 hash 不编码，两种形态 decode 后统一为字面 /。（Vue 移植回归：编码形态
       // 曾失配 → 兜底 nav('runtimes') 弹回设备页，实测 push:#sandbox/provider%2F3）
       try {
-        const m = decodeURIComponent(location.hash || '').match(/^#sandbox\/provider\/(\d+)/)
+        const m = decodeURIComponent(location.hash || '').match(/^#sandbox\/provider\/([^/?#]+)/)
         if (!this.providers || !this.providers.length) return
         if (m) {
-          const pid = parseInt(m[1], 10)
-          const p = this.providers.find((x) => x.id === pid)
+          const pid = m[1]
+          const p = this.providers.find((x) => String(x.id) === pid
           if (p) {
             this.selectProvider(p)
             return

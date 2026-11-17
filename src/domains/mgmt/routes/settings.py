@@ -1521,7 +1521,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                         "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
                         "owner": cred.get("owner_name", ""),
                         "cred_type": cred.get("cred_type", "worker"), "platform": cred.get("platform", ""),
-                        "provider_id": cred.get("provider_id", 0) or 0,
+                        "provider_id": cred.get("provider_id", "") or "",
                         "platform_enabled": cred.get("platform_enabled", None),
                         "repo_key": from_repo_key(cred.get("repo_key", "")),
                         "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
@@ -2013,15 +2013,15 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
                         (_sb_endpoint, _sb_key_enc,
                          json.dumps(_sb_extra, ensure_ascii=False), _sb_pid))
                 else:
-                    from src.kernel.sandbox_uid import new_provider_uid as _npuid
+                    from src.kernel.sandbox_uid import new_provider_uid as _npuid, new_row_uid as _nru
+                    _sb_pid = _nru()
                     c.execute(
-                        "INSERT INTO grape_t_sandbox_provider_config (platform, endpoint, api_key_enc, extra_config, "
+                        "INSERT INTO grape_t_sandbox_provider_config (id, platform, endpoint, api_key_enc, extra_config, "
                         "enabled, max_sandboxes, updated_by, runtime_credential_id, provider_uid) "
-                        "VALUES (?,?,?,?,?,?,?,?,?)",
-                        (platform, _sb_endpoint, _sb_key_enc,
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (_sb_pid, platform, _sb_endpoint, _sb_key_enc,
                          json.dumps(_sb_extra, ensure_ascii=False), 1, 10, owner, cred_id,
                          _npuid()))
-                    _sb_pid = c.lastrowid
                 db.commit()
             log.info(f"sandbox credential created, provider registered: cred={cred_id} platform={platform} "
                      f"provider_id={_sb_pid} endpoint={_sb_endpoint or '(empty)'}")
@@ -2942,7 +2942,7 @@ class SandboxTemplateBody(BaseModel):
     name: str
     provider: str = ""
     template_id: str
-    provider_id: int = 0
+    provider_id: str = ""
     alias: str = ""
     description: str = ""
     engines: str | dict | list = "[]"
@@ -2979,7 +2979,7 @@ def _sb_cred_report_owner(cred_id: int, user) -> bool:
 
 
 @router.get("/sandbox-templates", operation_id="settings_sandbox_templates_list", summary="List sandbox templates")
-def list_sandbox_templates(request: Request, provider: str = "", provider_id: int = 0, q: str = "", page: int = 1, page_size: int = 20):
+def list_sandbox_templates(request: Request, provider: str = "", provider_id: str = "", q: str = "", page: int = 1, page_size: int = 20):
     """列出沙箱模板。支持 provider 筛选、搜索、分页。
     
     认证：rta_ runtime 凭据（cloud_worker）或 session token / API key（前端用户）
@@ -3169,17 +3169,18 @@ def create_sandbox_template(body: SandboxTemplateBody, user: dict = Depends(requ
         if not (prow[1] and _sb_cred_report_owner(prow[1], user)):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
         _provider_name = prow[2] or body.provider or ""
+        from src.kernel.sandbox_uid import new_row_uid as _nru_tpl
+        tpl_id = _nru_tpl()
         c.execute(
             # [删 provider 列] INSERT 去掉该列
-            "INSERT INTO grape_t_sandbox_templates (name, provider_id, template_id, alias, description, "
+            "INSERT INTO grape_t_sandbox_templates (id, name, provider_id, template_id, alias, description, "
             "engines, preinstalled, disk_size_mb, enabled, created_at, updated_at, created_by, updated_by) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             # 新建模板默认 enabled=1（用户显式创建即生效；启用/禁用走操作栏 toggle）
-            (body.name, _provider_name, body.provider_id, body.template_id, body.alias, body.description,
+            (tpl_id, body.name, _provider_name, body.provider_id, body.template_id, body.alias, body.description,
              "[]", body.preinstalled, body.disk_size_mb, 1,
              _now, _now, user.get("username", ""), user.get("username", "")))
         db.commit()
-        tpl_id = c.lastrowid
     # 异步校验（不阻塞创建）
     try:
         _check_template_sync(tpl_id, _provider_name, body.template_id)
@@ -3189,7 +3190,7 @@ def create_sandbox_template(body: SandboxTemplateBody, user: dict = Depends(requ
 
 
 @router.put("/sandbox-templates/{tpl_id}", operation_id="settings_sandbox_template_update", summary="Update sandbox template")
-def update_sandbox_template(tpl_id: int, body: SandboxTemplateBody, user: dict = Depends(require_no_session_token)):
+def update_sandbox_template(tpl_id: str, body: SandboxTemplateBody, user: dict = Depends(require_no_session_token)):
     """v3：更新沙箱模板。权限按 Provider scope 校验。"""
     from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
@@ -3239,7 +3240,7 @@ def update_sandbox_template(tpl_id: int, body: SandboxTemplateBody, user: dict =
 
 
 @router.delete("/sandbox-templates/{tpl_id}", operation_id="settings_sandbox_template_delete", summary="Delete sandbox template")
-def delete_sandbox_template(tpl_id: int, user: dict = Depends(require_no_session_token)):
+def delete_sandbox_template(tpl_id: str, user: dict = Depends(require_no_session_token)):
     """v3：删除沙箱模板。权限按 Provider scope 校验。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -3371,7 +3372,7 @@ def create_sandbox_provider(body: dict, user: dict = Depends(require_no_session_
 
 @router.put("/sandbox-providers/{provider_id}", operation_id="settings_sandbox_provider_update",
              summary="Update a sandbox provider")
-def update_sandbox_provider(provider_id: int, body: dict, user: dict = Depends(require_no_session_token)):
+def update_sandbox_provider(provider_id: str, body: dict, user: dict = Depends(require_no_session_token)):
     """v3 §3.1.3：更新 Provider。级别规则：全局(system)可降级为用户/仓库级；用户/仓库级不可升为全局。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -3443,7 +3444,7 @@ def update_sandbox_provider(provider_id: int, body: dict, user: dict = Depends(r
 
 @router.put("/sandbox-providers/{provider_id}/toggle", operation_id="settings_sandbox_provider_toggle",
              summary="Toggle a sandbox provider")
-def toggle_sandbox_provider(provider_id: int, body: dict, user: dict = Depends(require_no_session_token)):
+def toggle_sandbox_provider(provider_id: str, body: dict, user: dict = Depends(require_no_session_token)):
     """v3 §3.1.5：启停 Provider。
 
     [沙箱凭据口径对齐 64a02adde] 沙箱凭据生成的 Provider（global 凭据 → scope=system），
@@ -3469,7 +3470,7 @@ def toggle_sandbox_provider(provider_id: int, body: dict, user: dict = Depends(r
 
 @router.put("/sandbox-templates/{tpl_id}/toggle", operation_id="settings_sandbox_template_toggle",
             summary="Toggle a sandbox template")
-def toggle_sandbox_template(tpl_id: int, body: dict, user: dict = Depends(require_no_session_token)):
+def toggle_sandbox_template(tpl_id: str, body: dict, user: dict = Depends(require_no_session_token)):
     """启停模板。enabled=0 的模板不参与 cloud_worker 引擎展开（引擎不注册）。
 
     与 Provider toggle 同款权限语义（system scope 拒改 / owner 校验）。
@@ -3501,7 +3502,7 @@ def toggle_sandbox_template(tpl_id: int, body: dict, user: dict = Depends(requir
 
 @router.post("/sandbox-providers/{provider_id}/health", operation_id="settings_sandbox_provider_health",
               summary="Health check a sandbox provider")
-def health_sandbox_provider(provider_id: int, user: dict = Depends(require_no_session_token)):
+def health_sandbox_provider(provider_id: str, user: dict = Depends(require_no_session_token)):
     """v3 §3.1.6：健康检查。通过 adapter.health_check。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -3542,7 +3543,7 @@ def health_sandbox_provider(provider_id: int, user: dict = Depends(require_no_se
 
 @router.post("/sandbox-templates/{tpl_id}/bind-engine", operation_id="settings_bind_engine",
              summary="Bind engine to template")
-def bind_engine(tpl_id: int, body: dict, user: dict = Depends(require_no_session_token)):
+def bind_engine(tpl_id: str, body: dict, user: dict = Depends(require_no_session_token)):
     """v3 §3.2.5：绑定引擎到模板。UNIQUE(provider_id, engine_type) DB 级保证。幂等。"""
     engine_type = (body.get("engine_type") or "").strip()
     if not engine_type:
@@ -3566,15 +3567,16 @@ def bind_engine(tpl_id: int, body: dict, user: dict = Depends(require_no_session
         # [多模板共用引擎] 同 Provider 下同一引擎可绑多个模板（四段式引擎名区分）——
         # R5 一引擎一模板的 409 冲突检测废除；UNIQUE(provider_id,engine_type,template_id)
         # 保证同模板重复绑定幂等
-        c.execute("INSERT OR IGNORE INTO grape_t_engine_template_binding (provider_id, engine_type, template_id, created_at, updated_at) VALUES (?,?,?,?,?)",
-                  (provider_id, engine_type, tpl_id, _now, _now))
+        from src.kernel.sandbox_uid import new_row_uid as _nru_bd
+        c.execute("INSERT OR IGNORE INTO grape_t_engine_template_binding (id, provider_id, engine_type, template_id, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                  (_nru_bd(), provider_id, engine_type, tpl_id, _now, _now))
         db.commit()
     return {"message": "引擎已绑定"}
 
 
 @router.delete("/sandbox-templates/{tpl_id}/bind-engine/{engine_type}", operation_id="settings_unbind_engine",
                 summary="Unbind engine from template")
-def unbind_engine(tpl_id: int, engine_type: str, user: dict = Depends(require_no_session_token)):
+def unbind_engine(tpl_id: str, engine_type: str, user: dict = Depends(require_no_session_token)):
     """v3 §3.2.5：解绑引擎。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -3596,7 +3598,7 @@ def unbind_engine(tpl_id: int, engine_type: str, user: dict = Depends(require_no
 
 @router.post("/sandbox-providers/{provider_id}/scan-templates", operation_id="settings_sandbox_provider_scan_templates",
              summary="Scan platform templates and import new ones")
-def scan_sandbox_templates(provider_id: int, user: dict = Depends(require_no_session_token)):
+def scan_sandbox_templates(provider_id: str, user: dict = Depends(require_no_session_token)):
     """扫描 Provider 平台侧模板，自动导入未登记的有效模板。
 
     解耦设计：扫描能力由 adapter 的 list_templates(config) 提供
@@ -3651,13 +3653,14 @@ def scan_sandbox_templates(provider_id: int, user: dict = Depends(require_no_ses
                 existing.append({"template_id": tid, "name": row[1] or t.get("name", "")})
                 continue
             _name = t.get("name") or tid
+            from src.kernel.sandbox_uid import new_row_uid as _nru_sc
             c.execute(
-                "INSERT INTO grape_t_sandbox_templates (name, provider_id, template_id, alias, "
+                "INSERT INTO grape_t_sandbox_templates (id, name, provider_id, template_id, alias, "
                 "description, preinstalled, disk_size_mb, enabled, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 # [删 provider 列 2026-10-30] provider 列已删——INSERT 同步去列
                 # 扫描导入默认 enabled=0：需用户在操作栏显式启用（防止误扫入直接生效）
-                (_name, provider_id, tid, "", t.get("description", ""), "{}", 0, 0, _now, _now))
+                (_nru_sc(), _name, provider_id, tid, "", t.get("description", ""), "{}", 0, 0, _now, _now))
             added.append({"template_id": tid, "name": _name})
         db.commit()
     return {
@@ -3671,7 +3674,7 @@ def scan_sandbox_templates(provider_id: int, user: dict = Depends(require_no_ses
 
 
 @router.post("/sandbox-templates/{tpl_id}/check", operation_id="settings_sandbox_template_check", summary="Check template validity")
-def check_sandbox_template(tpl_id: int, user: dict = Depends(require_no_session_token)):
+def check_sandbox_template(tpl_id: str, user: dict = Depends(require_no_session_token)):
     """v3：手动触发模板校验。权限按 Provider scope 校验。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -3701,7 +3704,7 @@ def check_sandbox_template(tpl_id: int, user: dict = Depends(require_no_session_
     return {"status": result["status"], "error": result["error"]}
 
 
-def _check_template_sync(tpl_id: int, provider: str, template_id: str):
+def _check_template_sync(tpl_id: str, provider: str, template_id: str):
     """[provider 列语义修复 2026-10-30] 内部统一按 provider_id JOIN spc.platform
     取 registry 键——传入 provider 参数仅保留签名兼容(其值可能是凭据名/平台名
     混用, 不再使用)。"""
@@ -3721,7 +3724,7 @@ def _check_template_sync(tpl_id: int, provider: str, template_id: str):
         pass
 
 
-def _provider_config_from_db(platform: str, provider_id: int | None = None) -> dict | None:
+def _provider_config_from_db(platform: str, provider_id: str | None = None) -> dict | None:
     """从 grape_t_sandbox_provider_config 取配置，经 adapter 归一化。
 
     health 端点同款逻辑；无记录/无 adapter 返回 None。
@@ -3755,7 +3758,7 @@ def _provider_config_from_db(platform: str, provider_id: int | None = None) -> d
     })
 
 
-def _do_check_template(provider: str, template_id: str, provider_id: int | None = None) -> dict:
+def _do_check_template(provider: str, template_id: str, provider_id: str | None = None) -> dict:
     """校验模板在平台侧是否可用。返回 {status, error}。"""
     from src.domains.runtime.agents.sandbox.backends import default_registry
     registry = default_registry()
@@ -3906,10 +3909,11 @@ def update_provider_config(provider: str, body: dict, user: dict = Depends(requi
             # 新增行
             api_key_plain = body.get("api_key") or ""
             api_key_enc = encrypt(api_key_plain) if api_key_plain else ""
+            from src.kernel.sandbox_uid import new_row_uid as _nru_pc
             c.execute(
-                "INSERT INTO grape_t_sandbox_provider_config (endpoint, api_key_enc, extra_config, enabled, updated_by) "
-                "VALUES (?,?,?,?,?)",
-                (endpoint, api_key_enc, extra_json, 1 if enabled_val is None or enabled_val else 0, user["username"]),
+                "INSERT INTO grape_t_sandbox_provider_config (id, endpoint, api_key_enc, extra_config, enabled, updated_by) "
+                "VALUES (?,?,?,?,?,?)",
+                (_nru_pc(), endpoint, api_key_enc, extra_json, 1 if enabled_val is None or enabled_val else 0, user["username"]),
             )
         db.commit()
     log.info(f"provider config updated: user={user['username']} provider={provider}")
@@ -4076,17 +4080,18 @@ def upsert_repo_llm_credential(body: RepoLLMCredentialBody, user: dict = Depends
                        user["username"], _now, row[0]))
             rid = row[0]
         else:
-            c.execute("INSERT INTO grape_t_repo_llm_credentials (repo_key, engine_type, provider, api_key_enc, "
-                      "base_url, model, enabled, updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                      (repo_key, body.engine_type, body.provider, _enc, body.base_url, body.model,
+            from src.kernel.sandbox_uid import new_row_uid as _nru_rc
+            rid = _nru_rc()
+            c.execute("INSERT INTO grape_t_repo_llm_credentials (id, repo_key, engine_type, provider, api_key_enc, "
+                      "base_url, model, enabled, updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                      (rid, repo_key, body.engine_type, body.provider, _enc, body.base_url, body.model,
                        1 if body.enabled else 0, user["username"], _now))
-            rid = c.lastrowid
         db.commit()
     return {"id": rid, "message": "仓库 LLM 凭据已保存"}
 
 
 @router.put("/llm-credentials/repo/{cred_id}/toggle", operation_id="settings_repo_llm_credential_toggle")
-def toggle_repo_llm_credential(cred_id: int, body: dict, user: dict = Depends(require_no_session_token)):
+def toggle_repo_llm_credential(cred_id: str, body: dict, user: dict = Depends(require_no_session_token)):
     """启停。仅仓库管理员。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -4102,7 +4107,7 @@ def toggle_repo_llm_credential(cred_id: int, body: dict, user: dict = Depends(re
 
 
 @router.delete("/llm-credentials/repo/{cred_id}", operation_id="settings_repo_llm_credential_delete")
-def delete_repo_llm_credential(cred_id: int, user: dict = Depends(require_no_session_token)):
+def delete_repo_llm_credential(cred_id: str, user: dict = Depends(require_no_session_token)):
     """删除。仅仓库管理员。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -4151,10 +4156,11 @@ def create_llm_credential(body: LLMCredentialBody, user: dict = Depends(require_
                     (body.provider, _enc, body.base_url, body.model, _now, existing[0])
                 )
             else:
+                from src.kernel.sandbox_uid import new_row_uid as _nru_uc
                 c.execute(
-                    "INSERT INTO grape_t_user_llm_credentials (user_id, provider, api_key_enc, base_url, model, enabled, engine_type, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
-                    (user["id"], body.provider, _enc, body.base_url, body.model, body.engine_type, _now, _now)
+                    "INSERT INTO grape_t_user_llm_credentials (id, user_id, provider, api_key_enc, base_url, model, enabled, engine_type, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                    (_nru_uc(), user["id"], body.provider, _enc, body.base_url, body.model, body.engine_type, _now, _now)
                 )
             db.commit()
     except Exception as e:
@@ -4199,7 +4205,7 @@ def list_llm_engine_types(user: dict = Depends(require_no_session_token)):
 
 
 @router.delete("/llm-credentials/{cred_id}", operation_id="settings_llm_credential_delete", summary="Delete LLM credential")
-def delete_llm_credential(cred_id: int, user: dict = Depends(require_no_session_token)):
+def delete_llm_credential(cred_id: str, user: dict = Depends(require_no_session_token)):
     """删除 LLM 凭据。"""
     from src.kernel.session_manager import db, db_lock
     with db_lock:

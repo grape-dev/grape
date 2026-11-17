@@ -464,7 +464,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9017,
+      "line": 9018,
       "func": "_migration_1208_backfill_scene_uids",
       "host": "api",
       "status": "bare",
@@ -477,7 +477,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9059,
+      "line": 9060,
       "func": "_migration_1208_backfill_scene_uids",
       "host": "api",
       "status": "bare",
@@ -490,7 +490,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9125,
+      "line": 9126,
       "func": "_migration_1208_backfill_derived_agent_tags",
       "host": "api",
       "status": "bare",
@@ -504,7 +504,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9147,
+      "line": 9148,
       "func": "_migration_1208_backfill_derived_agent_tags",
       "host": "api",
       "status": "bare",
@@ -621,7 +621,7 @@
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3214,
+      "line": 3215,
       "func": "update_sandbox_template",
       "host": "mgmt",
       "status": "bare",
@@ -634,7 +634,7 @@
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3290,
+      "line": 3291,
       "func": "list_sandbox_providers",
       "host": "mgmt",
       "status": "bare",
@@ -647,7 +647,7 @@
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3293,
+      "line": 3294,
       "func": "list_sandbox_providers",
       "host": "mgmt",
       "status": "bare",
@@ -660,7 +660,7 @@
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3300,
+      "line": 3301,
       "func": "list_sandbox_providers",
       "host": "mgmt",
       "status": "bare",
@@ -673,7 +673,7 @@
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3512,
+      "line": 3513,
       "func": "health_sandbox_provider",
       "host": "mgmt",
       "status": "bare",
@@ -686,7 +686,7 @@
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3610,
+      "line": 3612,
       "func": "scan_sandbox_templates",
       "host": "mgmt",
       "status": "bare",
@@ -699,7 +699,7 @@
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3735,
+      "line": 3738,
       "func": "_provider_config_from_db",
       "host": "mgmt",
       "status": "bare",
@@ -712,7 +712,7 @@
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3739,
+      "line": 3742,
       "func": "_provider_config_from_db",
       "host": "mgmt",
       "status": "bare",
@@ -725,7 +725,7 @@
     },
     {
       "file": "src/domains/mgmt/routes/settings.py",
-      "line": 3830,
+      "line": 3833,
       "func": "list_provider_configs",
       "host": "mgmt",
       "status": "bare",
@@ -1089,7 +1089,7 @@
     },
     {
       "file": "src/domains/runtime/agents/sandbox/token.py",
-      "line": 86,
+      "line": 87,
       "func": "verify",
       "host": "runtime",
       "status": "bare",
@@ -1154,7 +1154,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3332,
+      "line": 3333,
       "func": "runtime_list_cloud_sandboxes",
       "host": "runtime",
       "status": "bare",
@@ -1167,7 +1167,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3335,
+      "line": 3336,
       "func": "runtime_list_cloud_sandboxes",
       "host": "runtime",
       "status": "bare",
@@ -1182,7 +1182,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3368,
+      "line": 3369,
       "func": "runtime_list_cloud_sandboxes",
       "host": "runtime",
       "status": "bare",
@@ -1195,7 +1195,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3376,
+      "line": 3377,
       "func": "runtime_list_cloud_sandboxes",
       "host": "runtime",
       "status": "bare",
@@ -1210,7 +1210,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3420,
+      "line": 3421,
       "func": "runtime_kill_cloud_sandbox",
       "host": "runtime",
       "status": "bare",
@@ -1224,7 +1224,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3511,
+      "line": 3512,
       "func": "runtime_provider_configs",
       "host": "runtime",
       "status": "bare",
@@ -1237,7 +1237,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3548,
+      "line": 3549,
       "func": "runtime_provider_active_sandboxes",
       "host": "runtime",
       "status": "bare",
@@ -1250,7 +1250,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3555,
+      "line": 3556,
       "func": "runtime_provider_active_sandboxes",
       "host": "runtime",
       "status": "bare",
@@ -1263,7 +1263,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3558,
+      "line": 3559,
       "func": "runtime_provider_active_sandboxes",
       "host": "runtime",
       "status": "bare",
@@ -1276,7 +1276,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3594,
+      "line": 3595,
       "func": "runtime_whitelist",
       "host": "runtime",
       "status": "bare",
@@ -1289,7 +1289,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3611,
+      "line": 3612,
       "func": "runtime_sandbox_paths",
       "host": "runtime",
       "status": "bare",
@@ -1302,7 +1302,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3637,
+      "line": 3638,
       "func": "runtime_skill_egress",
       "host": "runtime",
       "status": "bare",
@@ -1315,7 +1315,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3641,
+      "line": 3642,
       "func": "runtime_skill_egress",
       "host": "runtime",
       "status": "bare",
@@ -1328,7 +1328,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3648,
+      "line": 3649,
       "func": "runtime_skill_egress",
       "host": "runtime",
       "status": "bare",
@@ -1341,7 +1341,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3672,
+      "line": 3673,
       "func": "get_engine_sandbox_config",
       "host": "runtime",
       "status": "bare",
@@ -1354,7 +1354,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3748,
+      "line": 3749,
       "func": "sandbox_provider_report",
       "host": "runtime",
       "status": "bare",
@@ -1367,7 +1367,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3769,
+      "line": 3770,
       "func": "sandbox_provider_report",
       "host": "runtime",
       "status": "bare",
@@ -1380,7 +1380,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3785,
+      "line": 3786,
       "func": "sandbox_provider_report",
       "host": "runtime",
       "status": "bare",
@@ -1393,7 +1393,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3809,
+      "line": 3811,
       "func": "sandbox_provider_report",
       "host": "runtime",
       "status": "bare",
@@ -1406,7 +1406,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3837,
+      "line": 3840,
       "func": "sandbox_provider_report",
       "host": "runtime",
       "status": "bare",
@@ -1419,7 +1419,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3871,
+      "line": 3874,
       "func": "sandbox_provider_report",
       "host": "runtime",
       "status": "bare",
@@ -1432,7 +1432,7 @@
     },
     {
       "file": "src/domains/runtime/routes/runtime.py",
-      "line": 3884,
+      "line": 3887,
       "func": "sandbox_provider_report",
       "host": "runtime",
       "status": "bare",

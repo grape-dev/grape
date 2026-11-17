@@ -9235,7 +9235,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Tpl Id"
             }
           }
@@ -9296,7 +9296,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Tpl Id"
             }
           }
@@ -9475,7 +9475,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Provider Id"
             }
           }
@@ -9540,7 +9540,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Provider Id"
             }
           }
@@ -9605,7 +9605,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Tpl Id"
             }
           }
@@ -9670,7 +9670,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Provider Id"
             }
           }
@@ -9723,7 +9723,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Tpl Id"
             }
           }
@@ -9788,7 +9788,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Tpl Id"
             }
           },
@@ -9850,7 +9850,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Provider Id"
             }
           }
@@ -9903,7 +9903,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Tpl Id"
             }
           }
@@ -10221,7 +10221,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Cred Id"
             }
           }
@@ -10286,7 +10286,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Cred Id"
             }
           }
@@ -10453,7 +10453,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Cred Id"
             }
           }
@@ -17464,8 +17464,8 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "default": 0,
+              "type": "string",
+              "default": "",
               "title": "Provider Id"
             }
           },
@@ -20119,7 +20119,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Rule Id"
             }
           }
@@ -20179,7 +20179,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Rule Id"
             }
           }
@@ -20339,7 +20339,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Path Id"
             }
           }
@@ -20399,7 +20399,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Path Id"
             }
           }
@@ -20510,7 +20510,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
               "title": "Config Id"
             }
           }
@@ -26649,9 +26649,9 @@
             "default": ""
           },
           "provider_id": {
-            "type": "integer",
+            "type": "string",
             "title": "Provider Id",
-            "default": 0
+            "default": ""
           },
           "error": {
             "type": "string",
@@ -26678,9 +26678,9 @@
             "title": "Template Id"
           },
           "provider_id": {
-            "type": "integer",
+            "type": "string",
             "title": "Provider Id",
-            "default": 0
+            "default": ""
           },
           "alias": {
             "type": "string",

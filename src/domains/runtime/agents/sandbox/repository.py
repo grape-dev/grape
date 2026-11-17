@@ -203,11 +203,12 @@ class SandboxRepository:
                 with db_lock:
                     c = db.cursor()
                     if state == "creating":
+                        from src.kernel.sandbox_uid import new_row_uid as _nru
                         c.execute(
                             "INSERT OR IGNORE INTO grape_t_cloud_sandboxes "
-                            "(issue_id, repo_key, sandbox_id, provider, state, created_at, last_refresh_at, agent_installed) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-                            (issue_id, repo_key, sandbox_id, provider, state, _ts, _ts),
+                            "(id, issue_id, repo_key, sandbox_id, provider, state, created_at, last_refresh_at, agent_installed) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                            (_nru(), issue_id, repo_key, sandbox_id, provider, state, _ts, _ts),
                         )
                         # UPDATE 按 sandbox_id（每环节新建，sandbox_id 全局唯一）
                         if sandbox_id:

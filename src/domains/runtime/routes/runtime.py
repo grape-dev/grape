@@ -3170,7 +3170,7 @@ class SandboxStatusBody(BaseModel):
     template_id: str = ""
     template_name: str = ""
     engine_type: str = ""
-    provider_id: int = 0
+    provider_id: str = ""
     error: str = ""   # [沙箱迁移] state=setup_failed 时的失败原因（建箱/引擎初始化异常）
 
 
@@ -3255,13 +3255,14 @@ def runtime_sandbox_status(task_id: str, body: SandboxStatusBody, cred: Credenti
                 "UPDATE grape_t_cloud_sandboxes SET state='stale' "
                 "WHERE task_id=? AND state IN ('running', 'creating') AND sandbox_id != ?",
                 (task_id, body.sandbox_id))
+            from src.kernel.sandbox_uid import new_row_uid as _nru_cs
             c.execute(
                 "INSERT OR IGNORE INTO grape_t_cloud_sandboxes "
-                "(issue_id, repo_key, sandbox_id, provider, provider_id, state, created_at, last_refresh_at, agent_installed, task_id, created_by, "
+                "(id, issue_id, repo_key, sandbox_id, provider, provider_id, state, created_at, last_refresh_at, agent_installed, task_id, created_by, "
                 "template_id, template_name, engine_type, last_error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (body.issue_id, body.repo_key, body.sandbox_id, body.provider,
-                 body.provider_id or 0,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (_nru_cs(), body.issue_id, body.repo_key, body.sandbox_id, body.provider,
+                 body.provider_id or "",
                  body.state, _now, _now, body.agent_installed, task_id, _task_user_id or 0,
                  body.template_id, body.template_name, body.engine_type, body.error or ""),
             )
@@ -3289,7 +3290,7 @@ def runtime_sandbox_status(task_id: str, body: SandboxStatusBody, cred: Credenti
 def runtime_list_cloud_sandboxes(
     repo_key: str = "",
     provider: str = "",
-    provider_id: int = 0,
+    provider_id: str = "",
     state: str = "",
     q: str = "",
     page: int = 1,
@@ -3536,7 +3537,7 @@ def runtime_provider_configs(cred: CredentialContext = Depends(_require_credenti
             operation_id="runtime_provider_active_sandboxes",
             summary="Get active sandbox count for a provider",
             description="Returns active_count and max_sandboxes for throttling. System-scope credential only.")
-def runtime_provider_active_sandboxes(provider_id: int,
+def runtime_provider_active_sandboxes(provider_id: str,
                                       cred: CredentialContext = Depends(_require_credential_ctx)):
     """[沙箱迁移] v3 F4：查指定 Provider 的活跃沙箱数（流控校验用）。
 
@@ -3789,15 +3790,16 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
                 "UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, updated_by=? WHERE id=?",
                 ((endpoint or _old_ep), _new_key, json.dumps(_merged, ensure_ascii=False), _owner_name or "sandbox-worker", pid))
         else:
+            from src.kernel.sandbox_uid import new_row_uid as _nru_pc
+            pid = _nru_pc()
             c.execute(
                 # [d1e242cba 对账漏改修复] provider 列已物理删除——INSERT 去掉该列
                 # [范围由凭据承担] INSERT 不带 scope/user_id/repo_key
-                "INSERT INTO grape_t_sandbox_provider_config (platform, endpoint, api_key_enc, extra_config, "
-                "enabled, max_sandboxes, updated_by, runtime_credential_id) VALUES (?,?,?,?,?,?,?,?)",
-                (platform, endpoint,
+                "INSERT INTO grape_t_sandbox_provider_config (id, platform, endpoint, api_key_enc, extra_config, "
+                "enabled, max_sandboxes, updated_by, runtime_credential_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                (pid, platform, endpoint,
                  _enc(body.api_key) if body.api_key else "",
                  _extra_json, 1, 10, _owner_name or "sandbox-worker", credential_id))
-            pid = c.lastrowid
         # 模板登记（可空）
         _tpl_upserted = 0
         for t in (body.templates or []):
@@ -3809,11 +3811,12 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
             c.execute("SELECT id FROM grape_t_sandbox_templates WHERE provider_id=? AND template_id=?", (pid, _tid))
             if c.fetchone():
                 continue
+            from src.kernel.sandbox_uid import new_row_uid as _nru_tp
             c.execute(
                 # [04c868c59 对账] provider 列已物理删除——INSERT 去掉该列
-                "INSERT INTO grape_t_sandbox_templates (name, provider_id, template_id, alias, description, "
-                "enabled, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (t.get("alias") or _tid, pid, _tid,
+                "INSERT INTO grape_t_sandbox_templates (id, name, provider_id, template_id, alias, description, "
+                "enabled, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (_nru_tp(), t.get("alias") or _tid, pid, _tid,
                  t.get("alias") or "", t.get("description") or "", 1, _owner_name or "sandbox-worker",
                  datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()))
             _tpl_upserted += 1
@@ -3889,9 +3892,10 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
                               "engine_version=?, updated_at=? WHERE id=?",
                               ((eng.get("version") or "")[:64], _now_iso, _br[0]))
                 else:
-                    c.execute("INSERT INTO grape_t_engine_template_binding (provider_id, engine_type, template_id, "
-                              "status, engine_version, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-                              (pid, _et, _tpl_db_id, "detected", (eng.get("version") or "")[:64],
+                    from src.kernel.sandbox_uid import new_row_uid as _nru_bd
+                    c.execute("INSERT INTO grape_t_engine_template_binding (id, provider_id, engine_type, template_id, "
+                              "status, engine_version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                              (_nru_bd(), pid, _et, _tpl_db_id, "detected", (eng.get("version") or "")[:64],
                                _now_iso, _now_iso))
                 _engines_bound += 1
         db.commit()

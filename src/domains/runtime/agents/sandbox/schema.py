@@ -33,7 +33,7 @@ def ensure_sandbox_tables() -> None:
 
     _DDL = [
         """CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_paths (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     backend_name  TEXT NOT NULL,
     path          TEXT NOT NULL,
     access        TEXT NOT NULL DEFAULT 'ro',
@@ -41,7 +41,7 @@ def ensure_sandbox_tables() -> None:
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(backend_name, path))""",
         """CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_config (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     runtime_id    INTEGER NOT NULL,
     engine_name   TEXT NOT NULL,
     sandbox_mode  TEXT NOT NULL DEFAULT 'required',
@@ -50,7 +50,7 @@ def ensure_sandbox_tables() -> None:
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(runtime_id, engine_name))""",
         """CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_whitelist (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     backend_name  TEXT NOT NULL,
     domain        TEXT NOT NULL,
     method        TEXT NOT NULL CHECK(method IN ('GET','POST','PUT','DELETE','PATCH')),
@@ -61,7 +61,7 @@ def ensure_sandbox_tables() -> None:
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(backend_name, domain, method, scheme, port))""",
         """CREATE TABLE IF NOT EXISTS grape_t_task_proxy_tokens (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     task_id      TEXT NOT NULL,
     token_hash   TEXT NOT NULL,
     backend_name TEXT NOT NULL,
@@ -70,12 +70,12 @@ def ensure_sandbox_tables() -> None:
     UNIQUE(task_id, backend_name))""",
         # ===== DevBox 云沙箱集成：统一云沙箱表 + LLM 凭据表 =====
         """CREATE TABLE IF NOT EXISTS grape_t_cloud_sandboxes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     issue_id VARCHAR(255) NOT NULL,
     repo_key VARCHAR(255) NOT NULL,
     sandbox_id VARCHAR(255) NOT NULL,
     provider VARCHAR(64) NOT NULL,
-    provider_id INTEGER DEFAULT 0,
+    provider_id TEXT DEFAULT '',
     state VARCHAR(32) DEFAULT 'creating',
     sandbox_url VARCHAR(512) DEFAULT '',
     created_at TEXT,
@@ -88,7 +88,7 @@ def ensure_sandbox_tables() -> None:
     attempt INTEGER DEFAULT 0,
     UNIQUE(sandbox_id))""",
         """CREATE TABLE IF NOT EXISTS grape_t_user_llm_credentials (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     user_id VARCHAR(36) NOT NULL,
     provider VARCHAR(64) NOT NULL,
     api_key_enc TEXT NOT NULL,
@@ -101,7 +101,7 @@ def ensure_sandbox_tables() -> None:
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE(user_id, engine_type))""",
         """CREATE TABLE IF NOT EXISTS grape_t_sandbox_templates (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     provider VARCHAR(64) NOT NULL,
     template_id VARCHAR(255) NOT NULL,
@@ -162,13 +162,14 @@ def ensure_sandbox_tables() -> None:
                 ("api.github.com", "PATCH", "*", "https", 443),
                 ("api.github.com", "DELETE", "*", "https", 443),
             ]
+            from src.kernel.sandbox_uid import new_row_uid as _nru
             with db_lock:
                 for domain, method, path_prefix, scheme, port in _OFFICIAL_DOMAINS:
                     db.execute(
                         "INSERT OR IGNORE INTO grape_t_engine_sandbox_whitelist "
-                        "(backend_name, domain, method, path_prefix, scheme, port) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        ("*", domain, method, path_prefix, scheme, port))
+                        "(id, backend_name, domain, method, path_prefix, scheme, port) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (_nru(), "*", domain, method, path_prefix, scheme, port))
                 db.commit()
             log.info(f"Seeded grape_t_engine_sandbox_whitelist: {len(_OFFICIAL_DOMAINS)} official domains")
     except (SchemaError, TransientError):
