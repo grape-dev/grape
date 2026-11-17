@@ -9396,3 +9396,31 @@ register_migration(
     kind="safe",
     fn=_fn_category_dict_prefix_and_explicit_ids,
 )
+
+
+def _fn_add_issue_title_fetched_at() -> None:
+    """Issue #2925：issue 表补 `title_fetched_at`（pipeline 标题兜底「已尝试」标记）。
+
+    背景：`GET /api/pipeline` 对占位标题逐条串行外呼 VCS，且回写条件只看
+    `title='' OR title IS NULL`，标题本身是事件类型名时写回后仍判占位 → 永不收敛。
+    新列记录「尝试过的标题回填时间」（epoch 秒字符串），形成负缓存，使同仓后续
+    请求不再重复外呼；取到真实标题时同时写回 title。
+
+    幂等：_ensure_column 先探测列是否存在。strict=True 让补列失败抛出、不盖章，
+    避免「版本盖死、列永不创建」的假绿。
+    """
+    with db_lock:
+        c = db.cursor()
+        if _owned_skip("issue", "ensure column title_fetched_at"):
+            return
+        _ensure_column(c, "issue", "title_fetched_at", "VARCHAR(64) DEFAULT ''",
+                       strict=True)
+        db.commit()
+
+
+register_migration(
+    version="202611170043",
+    name="issue2925-issue-title-fetched-at",
+    kind="safe",
+    fn=_fn_add_issue_title_fetched_at,
+)

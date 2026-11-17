@@ -3174,6 +3174,53 @@ def _issue_num_from(issue_id: str) -> str:
     return s if s and s != "0" else ""
 
 
+def _env_number(name: str, default, lo, hi, cast=float):
+    """Issue #2925：环境变量取数值并夹到 [lo, hi]；非法/缺失回落默认值。"""
+    try:
+        raw = os.environ.get(name)
+        if raw is None or str(raw).strip() == "":
+            return default
+        v = cast(str(raw).strip())
+        return max(lo, min(hi, v))
+    except Exception:
+        return default
+
+
+# Issue #2925：pipeline 窗口内标题兜底的执行边界（默认 8 并发 / 4s 总 deadline /
+# 3.5s 单请求超时）。可配置是为了压测与线上限流时无需发版：并发越高越逼近 VCS
+# 限流阈值，deadline 保证冷请求上限，单请求超时保证线程最迟在 deadline 附近退出。
+def _title_fetch_concurrency() -> int:
+    return _env_number("GRAPE_PIPELINE_TITLE_FETCH_CONCURRENCY", 8, 1, 16, int)
+
+
+def _title_fetch_deadline() -> float:
+    return _env_number("GRAPE_PIPELINE_TITLE_FETCH_DEADLINE", 4.0, 0.5, 30.0)
+
+
+def _title_fetch_timeout() -> float:
+    return _env_number("GRAPE_PIPELINE_TITLE_FETCH_TIMEOUT", 3.5, 0.5, 30.0)
+
+
+def _resolve_issue_read_token(repo_key: str) -> str:
+    """Issue #2925：Issue 读路径 token 解析（口径与 `_vcs_get_issue` 完全一致），
+    供批量兜底在单次请求内只解析一次，杜绝逐条 token 查询。"""
+    if _is_github_repo(repo_key):
+        from src.domains.mgmt.user.db import get_github_token
+        return get_github_token(repo_key=repo_key) or ""
+    from src.domains.mgmt.user.db import get_repo_token_with_refresh
+    return get_repo_token_with_refresh(repo_key) or ""
+
+
+def _build_issue_read_client(repo_key: str, token: str):
+    """Issue #2925：单次请求内复用的 VcsApiClient（卡驱动 api_base/auth 语义不变）。"""
+    from src.domains.runtime.vcs.api_client import VcsApiClient
+    from src.kernel.repo_key import to_repo_key, split_owner_repo, parse_repo_key
+    _rk = to_repo_key(repo_key)
+    owner, rname = split_owner_repo(_rk)
+    _prov, _o, _r = parse_repo_key(_rk)
+    return VcsApiClient(_prov, token, owner, rname)
+
+
 def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
     """调 VCS API 获取 Issue 标题。失败返回空。
 
@@ -3182,6 +3229,9 @@ def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
     无法核实 / 404 一律返回空串（不抛异常）。
     用于 pipeline 展示兜底：当 tasks/events 表中 title 均为占位符时，
     通过 API 获取真实标题并回写。
+
+    Issue #2925：pipeline 列表已改为窗口内批量兜底（`fetch_issue_titles_batch`），
+    逐条调用不再在列表主路径上使用；保留本函数供单条场景（任务详情等）复用。
     """
     num = _issue_num_from(issue_id)
     if not num:
@@ -3190,6 +3240,80 @@ def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
     if _state != "exists" or not isinstance(_d, dict):
         return ""
     return _d.get("title", "") or ""
+
+
+def fetch_issue_titles_batch(repo_key: str, issue_ids, max_workers: int = None,
+                             deadline_seconds: float = None,
+                             timeout: float = None) -> dict:
+    """Issue #2925：窗口内占位标题的批量兜底（有界可收敛）。
+
+    与逐条 `_fetch_issue_title_via_api` 的差别在「执行有界」：
+      - token 与 `VcsApiClient` 单次请求只解析/构建一次，多线程共享（客户端无状态）；
+      - 有限并发（默认 8，可配 `GRAPE_PIPELINE_TITLE_FETCH_CONCURRENCY`）；
+      - 总 deadline（默认 4s，可配 `GRAPE_PIPELINE_TITLE_FETCH_DEADLINE`）到点即停，
+        未完成的 future 直接放弃——单个 issue 的网络慢/失败不阻塞列表返回。
+
+    返回 {issue_id: title}，只收录非空标题（是否占位由调用方按同一口径复核）。
+    无 token / 客户端构建失败 / 上游异常一律降级为空结果，绝不抛出。
+    """
+    from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+    _num_by_id: dict = {}
+    for _iid in (issue_ids or []):
+        _iid = str(_iid)
+        _num = _issue_num_from(_iid)
+        # issue 表的 issue_number 是数值列，PR 伪 id（#pr_*）与非法标识不参与兜底
+        if _num and _num.isdigit():
+            _num_by_id[_iid] = _num
+    if not _num_by_id:
+        return {}
+    token = _resolve_issue_read_token(repo_key)
+    if not token:
+        log.warning(f"[pipeline] title backfill skipped: no VCS token for {repo_key} "
+                    f"(candidates={len(_num_by_id)})")
+        return {}
+    try:
+        client = _build_issue_read_client(repo_key, token)
+    except Exception as e:
+        log.warning(f"[pipeline] title backfill skipped: client init failed for "
+                    f"{repo_key}: {e}")
+        return {}
+    _conc = max(1, int(max_workers or _title_fetch_concurrency()))
+    _deadline = max(0.1, float(deadline_seconds or _title_fetch_deadline()))
+    _timeout = max(0.1, min(float(timeout or _title_fetch_timeout()), _deadline))
+    _expire_at = time.monotonic() + _deadline
+    _out: dict = {}
+    try:
+        # 不用 with：退出时 shutdown(wait=True) 会等所有排队任务跑完，deadline 失去意义。
+        _ex = ThreadPoolExecutor(max_workers=min(_conc, len(_num_by_id)),
+                                 thread_name_prefix="pipeline-title")
+        try:
+            _futs = {_ex.submit(_vcs_get_issue, repo_key, num, client, _timeout): iid
+                     for iid, num in _num_by_id.items()}
+            _pending = set(_futs)
+            while _pending:
+                _remain = _expire_at - time.monotonic()
+                if _remain <= 0:
+                    break
+                _done, _pending = wait(_pending, timeout=_remain,
+                                       return_when=FIRST_COMPLETED)
+                if not _done:
+                    break
+                for _f in _done:
+                    _iid = _futs[_f]
+                    try:
+                        _state, _d = _f.result()
+                    except Exception:
+                        continue
+                    if _state != "exists" or not isinstance(_d, dict):
+                        continue
+                    _title = _d.get("title", "") or ""
+                    if _title:
+                        _out[_iid] = _title
+        finally:
+            _ex.shutdown(wait=False, cancel_futures=True)
+    except Exception as e:
+        log.warning(f"[pipeline] title backfill batch failed for {repo_key}: {e}")
+    return _out
 
 
 def fetch_issue_via_vcs(repo_key: str, issue_number) -> tuple:
@@ -5818,13 +5942,16 @@ def _list_issue_comments_card(repo_key: str, repository: str, issue_num, bot_tok
         f"/issues/{issue_num}/notes?per_page=100&sort=created&direction=asc"))
     return _resp if isinstance(_resp, list) else []
 
-def _vcs_get_issue(repo_key: str, num: str) -> "tuple[str, dict]":
+def _vcs_get_issue(repo_key: str, num: str, client=None, timeout: int = 30) -> "tuple[str, dict]":
     """D18/S28：统一命令层读 Issue——(state, data)。
 
     state ∈ exists / missing / unknown；token 解析语义与旧实现一致
     （github=get_github_token，其余=get_repo_token_with_refresh），
     请求走 VcsApiClient（卡驱动 api_base/auth——gitee 自动 query_token，
     gitcode 不再错配 Bearer header）。404→missing 映射保持。
+
+    Issue #2925：可选 `client` / `timeout` 供批量兜底复用同一 token 与客户端，
+    避免逐条重建（客户端无状态，多线程共享安全）；不传时行为与旧实现一致。
     """
     from src.kernel.repo_key import to_repo_key, split_owner_repo
     _rk = to_repo_key(repo_key)
@@ -5832,19 +5959,12 @@ def _vcs_get_issue(repo_key: str, num: str) -> "tuple[str, dict]":
     if not owner or not rname or not num:
         return ("unknown", {})
     try:
-        if _is_github_repo(_rk):
-            from src.domains.mgmt.user.db import get_github_token
-            tok = get_github_token(repo_key=_rk) or ""
-        else:
-            from src.domains.mgmt.user.db import get_repo_token_with_refresh
-            tok = get_repo_token_with_refresh(_rk) or ""
-        if not tok:
-            return ("unknown", {})
-        from src.domains.runtime.vcs.api_client import VcsApiClient
-        from src.kernel.repo_key import parse_repo_key
-        _prov, _o, _r = parse_repo_key(_rk)
-        client = VcsApiClient(_prov, tok, owner, rname)
-        d = client.get_issue(_native_issue_number(num))
+        if client is None:
+            tok = _resolve_issue_read_token(_rk)
+            if not tok:
+                return ("unknown", {})
+            client = _build_issue_read_client(_rk, tok)
+        d = client.get_issue(_native_issue_number(num), timeout=timeout)
         if isinstance(d, dict) and "error" not in d:
             return ("exists", d)
         if isinstance(d, dict) and str(d.get("status_code", "")) == "404":
