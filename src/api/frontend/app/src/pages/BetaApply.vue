@@ -281,7 +281,7 @@ import { reactive, ref, watch, onMounted } from 'vue'
 
 const G = globalThis
 import AGCard from '@/components/ui/AGCard.vue'
-const logoSrc = '/static/logo-64.png'
+const logoSrc = '/static/img/grape-logo.jpg?v=1'
 import AGButton from '@/components/ui/AGButton.vue'
 
 const _FORM_KEY = 'beta_apply_form'
@@ -621,6 +621,7 @@ function submitForm() {
   width: 64px;
   height: 64px;
   border-radius: var(--r-card);
+  object-fit: cover;
 }
 .beta__logo h1 {
   font-size: var(--f-head-2);
