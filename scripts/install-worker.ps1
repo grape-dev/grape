@@ -660,11 +660,24 @@ Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Execution
 # 1. 进程存活检查（3s 后）
 # 2. 注册成功检查（最多等 30s，日志出现 "registered"）
 # 3. 任一失败 → restore_upgrade_backup 恢复旧代码重启
-Start-Sleep -Seconds 3
-
-$workerProc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
-    Test-GrapeAgentProcess $_
-} | Select-Object -First 1
+# 进程存活检查：轮询最多 30s（不是固定 3s 只看一眼）。
+# Windows 上 python 冷启动 + 74MB 新文件被 Defender 实时扫描，首个进程常要 8~15s
+# 才出现；固定 3s 判活会把「正常启动中」误判成「起不来」→ 假回滚 + 装完实际没新版本。
+$workerProc = $null
+for ($i = 1; $i -le 30; $i++) {
+    Start-Sleep -Seconds 1
+    if ($i -eq 3) {
+        # 第 3 秒起先看 daemon 是否还活着：daemon 已退出说明是硬失败，不必等满 30s
+        $daemonAlive = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $_.CommandLine -like "*$startScript*"
+        } | Select-Object -First 1
+        if (-not $daemonAlive) { Log "Worker daemon exited early (no powershell holding $startScript)" }
+    }
+    $workerProc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        Test-GrapeAgentProcess $_
+    } | Select-Object -First 1
+    if ($workerProc) { break }
+}
 
 if (-not $workerProc) {
     Log "New agent failed to start (process missing), rolling back..."
