@@ -24,7 +24,7 @@ from ..types import (
 )
 from .cloud_base import CloudSandboxBase, CloudProviderBase
 # [USP搬迁] Transport 异常族随 api.py 随迁——Transport 类 raise 用
-from .api import TransportError, TransportTimeout, TransportClosed  # noqa: F401
+from .api import TransportError, TransportTimeout, TransportClosed, coerce_provider_id  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -894,7 +894,7 @@ class DevBoxAdapter:
             "api_url": db_row.get("endpoint", ""),
             "api_key": db_row.get("api_key", ""),
             "max_sandboxes": db_row.get("max_sandboxes", 10),
-                    "provider_id": int(db_row.get("provider_id", 0) or db_row.get("id", 0) or 0),
+            "provider_id": coerce_provider_id(db_row.get("provider_id", 0) or db_row.get("id", 0)),
         }
         cfg.update(_extra)
         for key in list(cfg.keys()):
@@ -1008,7 +1008,7 @@ class DevBoxAdapter:
             ]),
         ])
 
-    def cleanup(self, provider_id: int, workdir: str) -> None:
+    def cleanup(self, provider_id: "int | str", workdir: str) -> None:
         pass
 
     def build_transport(self, sandbox, hermes_bin: str, envs: dict):

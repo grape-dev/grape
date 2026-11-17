@@ -35,7 +35,7 @@ class SandboxContext:
     engine_type: str = ""
     sandbox_provider: str = ""
     template_id: str = ""
-    provider_id: int = 0
+    provider_id: "int | str" = 0
     platform: str = ""
     skill_name: str = ""
     skill_id: int = 0

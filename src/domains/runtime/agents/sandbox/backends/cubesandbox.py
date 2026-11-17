@@ -21,7 +21,7 @@ from typing import Any, Iterator
 
 from .cloud_base import CloudSandboxBase, CloudProviderBase, ExecSession, _now_iso
 # [USP搬迁] Transport 异常族随 api.py 随迁——Transport 类 raise 用
-from .api import TransportError, TransportTimeout, TransportClosed  # noqa: F401
+from .api import TransportError, TransportTimeout, TransportClosed, coerce_provider_id  # noqa: F401
 from ..types import Capability, ExecutionMode
 
 log = logging.getLogger("devops-bot")
@@ -89,7 +89,7 @@ class CubeSandboxInstance(CloudSandboxBase):
             user_id=user_id,
             engine_type=engine_type,
             state_reporter=state_reporter,
-            provider_id=int(config.get("provider_id", 0) or 0),
+            provider_id=coerce_provider_id(config.get("provider_id", 0)),
         )
         self._config = config
         self._sandbox: Any = None  # cubesandbox.Sandbox 实例
@@ -990,7 +990,7 @@ class CubeSandboxAdapter:
             "api_url": db_row.get("endpoint", ""),
             "api_key": db_row.get("api_key", ""),
             "max_sandboxes": db_row.get("max_sandboxes", 10),
-            "provider_id": int(db_row.get("provider_id", 0) or db_row.get("id", 0) or 0),
+            "provider_id": coerce_provider_id(db_row.get("provider_id", 0) or db_row.get("id", 0)),
         }
         cfg.update(_extra)
         for key in list(cfg.keys()):
@@ -999,7 +999,7 @@ class CubeSandboxAdapter:
                 del cfg[key]
         return cfg
 
-    def prepare_artifacts(self, config, workdir: str, provider_id: int) -> None:
+    def prepare_artifacts(self, config, workdir: str, provider_id: "int | str") -> None:
         cert_content = config.get("ssl_cert_content", "")
         if not cert_content:
             return
@@ -1104,7 +1104,7 @@ class CubeSandboxAdapter:
             ]),
         ])
 
-    def cleanup(self, provider_id: int, workdir: str) -> None:
+    def cleanup(self, provider_id: "int | str", workdir: str) -> None:
         from src.domains.runtime.agents.sandbox.backends.api import cert_artifact_key
         cert_path = os.path.join(workdir, f"cube-rootCA-{cert_artifact_key(provider_id, self._config)}.pem")
         try:

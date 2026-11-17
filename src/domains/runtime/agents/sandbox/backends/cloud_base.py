@@ -111,7 +111,7 @@ class CloudSandboxBase:
         user_id: int = 0,
         engine_type: str = "",
         state_reporter: Callable | None = None,
-        provider_id: int = 0,
+        provider_id: "int | str" = 0,
     ):
         self.issue_id = issue_id
         self.repo_key = repo_key

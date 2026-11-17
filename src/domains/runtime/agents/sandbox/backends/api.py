@@ -86,6 +86,21 @@ class FormSchema:
         }
 
 
+def coerce_provider_id(value) -> "int | str":
+    """A12 后 provider 主键是 UUIDv4 TEXT（grape_t_sandbox_provider_config.id）。
+
+    历史库仍存在数字 id 行（'1'/'2'/1），缓存/配置文件也可能携带数字形态。
+    统一收敛口：数字形态 → int（保住字典键排序/比较的既有语义），
+    非数字（UUID）→ 原样 str，不做 int() 强转——那是 UUID 时代前残留，
+    会在 provider-configs 拉取链上每分钟炸 `invalid literal for int()`（实测 .17 worker）。
+    空/None → 0（无 provider 兜底）。
+    """
+    if value is None or value == "":
+        return 0
+    s = str(value).strip()
+    return int(s) if s.isdigit() else s
+
+
 @runtime_checkable
 class PlatformAdapter(Protocol):
     """平台适配器契约——每个平台实现自己的适配器实例。
@@ -117,7 +132,7 @@ class PlatformAdapter(Protocol):
         白名单 = _PROVIDER_FIELDS ∪ ui_schema 字段名。不豁免 _ 前缀。"""
         ...
 
-    def prepare_artifacts(self, config: dict, workdir: str, provider_id: int) -> None:
+    def prepare_artifacts(self, config: dict, workdir: str, provider_id: "int | str") -> None:
         """落盘平台特有文件（如 SSL 证书）。
         允许原地修改 config（如注入 _ssl_cert_path），注入的字段名由 adapter 定义。"""
         ...
@@ -155,7 +170,7 @@ class PlatformAdapter(Protocol):
         ...
 
     # --- 生命周期 ---
-    def cleanup(self, provider_id: int, workdir: str) -> None:
+    def cleanup(self, provider_id: "int | str", workdir: str) -> None:
         """清理落盘文件（provider 删除时调用）。workdir 和 prepare_artifacts 一致。"""
         ...
 

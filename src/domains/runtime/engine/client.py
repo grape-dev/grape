@@ -515,7 +515,7 @@ class RuntimeClient:
             return []
         return data.get("runtimes", [])
 
-    async def get_provider_active_sandboxes(self, provider_id: int) -> dict:
+    async def get_provider_active_sandboxes(self, provider_id: "int | str") -> dict:
         """查指定 Provider 的活跃沙箱数（用于流控校验）。
 
         返回 {"active_count": N, "max_sandboxes": M}。
@@ -529,7 +529,7 @@ class RuntimeClient:
                                     sandbox_id: str, state: str = "running",
                                     provider: str = "", agent_installed: int = 0,
                                     template_id: str = "", template_name: str = "",
-                                    engine_type: str = "", provider_id: int = 0,
+                                    engine_type: str = "", provider_id: "int | str" = 0,
                                     error: str = ""):
         """cloud_worker 上报沙箱状态（B 机器无 DB，通过 HTTP API 写 grape_t_cloud_sandboxes 表）。
 

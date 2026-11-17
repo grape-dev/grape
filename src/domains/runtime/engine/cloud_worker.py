@@ -562,6 +562,7 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
     # HTTP 版 state_reporter——通过 report_sandbox_status API 上报，不碰 DB
     def _http_state_reporter(*, state, sandbox_id="", issue_id="", repo_key="",
                              provider="", provider_id=0, agent_installed=None, **_kwargs):
+        from src.domains.runtime.agents.sandbox.backends.api import coerce_provider_id
         try:
             # to_thread 线程中无 running loop，用 run_coroutine_threadsafe 提交到主线程
             try:
@@ -578,7 +579,7 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
                         sandbox_id=sandbox_id,
                         state=state,
                         provider=provider,
-                        provider_id=int(provider_id or 0),
+                        provider_id=coerce_provider_id(provider_id),
                         agent_installed=agent_installed or 0,
                     ),
                     _main_loop,
