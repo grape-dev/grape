@@ -1274,23 +1274,49 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
         # （spec A——消灭「静默跳过引擎死半路」盲区）。
         _llm_mode, _llm_repo_key = "user", ""
         try:
+            # F-5 修复（2026-11-17）：原单条 SQL 用 json_extract(r.runtime_info,'$.provider_id')
+            # 直接 JOIN spc.id——MariaDB 的 json_extract 返回带引号 "2"，SQLite 不带；
+            # 拆库到 MariaDB 后 JOIN 恒 miss，被 except:pass 静默吞成 mode=user（注入
+            # 错误 scope 的 LLM key，E2E 定位证据见 aw11 用例库 F-5）。改为 Python 侧
+            # json.loads 归一 provider_id 后再查两步——跨库语义恒定，miss 显式日志不静默。
             with db_lock:
                 c = db.cursor()
                 c.execute(
-                    "SELECT rc.scope, rc.repo_key FROM agent_tasks t "
+                    "SELECT r.runtime_info FROM agent_tasks t "
                     "LEFT JOIN agent_runtimes r ON t.runtime_id=r.id "
-                    "LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = "
-                    "  json_extract(r.runtime_info, '$.provider_id') "
-                    "LEFT JOIN runtime_credentials rc ON rc.id = spc.runtime_credential_id "
                     "WHERE t.id=?",
                     (task_id,),
                 )
-                _scope_row = c.fetchone()
+                _ri_row2 = c.fetchone()
+            _pid = None
+            if _ri_row2 and _ri_row2[0]:
+                try:
+                    _pid = (_json.loads(_ri_row2[0]) or {}).get("provider_id")
+                except Exception as _pe:
+                    log.warning(f"task_env: runtime_info JSON 解析失败，scope 路由回落 user: task={task_id}: {_pe}")
+            # spc.id 是 varchar，行值两种形态（本地 "2" / 远端 UUID）——json.loads 产物
+            # 本就是无引号字符串，直接等值传参即可；不做 int() 强转（UUID 会炸→except 回落，
+            # 第一版修复的实测教训）。None/空归一为 miss。
+            _pid = str(_pid).strip() if _pid is not None else ""
+            _scope_row = None
+            if _pid:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT rc.scope, rc.repo_key "
+                        "FROM grape_t_sandbox_provider_config spc "
+                        "LEFT JOIN runtime_credentials rc ON rc.id = spc.runtime_credential_id "
+                        "WHERE spc.id=?",
+                        (_pid,),
+                    )
+                    _scope_row = c.fetchone()
+                if not _scope_row:
+                    log.warning(f"task_env: scope 路由未命中 provider 行（pid={_pid}），回落 user 级凭据: task={task_id}")
             if _scope_row and (_scope_row[0] in ("global", "repo")):
                 _llm_mode = "repo"
                 _llm_repo_key = task_repo_key or (_scope_row[1] or "")
-        except Exception:
-            pass
+        except Exception as _se:
+            log.warning(f"task_env: scope 路由异常，回落 user 级凭据: task={task_id}: {_se}")
         from src.domains.runtime.agents.sandbox.llm_cred_selector import select_llm_cred
         with db_lock:
             c = db.cursor()
