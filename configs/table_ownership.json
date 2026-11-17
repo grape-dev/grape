@@ -32,7 +32,7 @@
     "chat_agent_session": "runtime",
     "chat_conversations": "runtime",
     "chat_messages": "runtime",
-    "grape_t_cloud_sandboxes": "mgmt",
+    "grape_t_cloud_sandboxes": "runtime",
     "community_comments": "mgmt",
     "community_post_likes": "mgmt",
     "community_posts": "mgmt",
@@ -274,7 +274,7 @@
     ],
     "grape_t_cloud_sandboxes": [
       "insight",
-      "runtime"
+      "mgmt"
     ],
     "community_comments": [
       "insight",

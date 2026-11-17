@@ -2117,6 +2117,24 @@ _ANY_QUERIES: dict[str, str] = {
     # 任务维度取该轮全部消息（chat 任务状态/SSE 兜底：跨机器或进程重启后内存无常驻任务）
     # chat 配置面（引擎/技能下拉）：三张表都归 runtime，mgmt 进程直查会 1146 → 下拉永远空
     'runtime_credential_type_by_id': "SELECT cred_type FROM runtime_credentials WHERE id=?",
+    # G-02（A11 裁定 2026-11-17：grape_t_cloud_sandboxes 归 runtime）：mgmt 吊销链 409 门禁
+    # 的低频读点改走本 public 面。mgmt 侧禁止再直连该表（foreign_table_refs 收缩方向）。
+    'cloud_sandboxes_active_count_by_cred': (
+        "SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id IN "
+        "(SELECT id FROM grape_t_sandbox_provider_config WHERE runtime_credential_id=?) "
+        "AND state IN ('creating','running')"),
+    # G-02（A11）：runtime_credentials 归 runtime，mgmt 侧沙箱 Provider 端点族对它的
+    # JOIN/子查询全部收敛为以下具名读（mgmt 库视图依赖随之消除，单库/三库均可移植）。
+    # brief 全量 map：管理列表页单请求取一次，行数 = 凭据数（管理面小表）。
+    'sandbox_provider_cred_brief_map': (
+        "SELECT id, name, scope, owner_name, owner_id, repo_key FROM runtime_credentials"),
+    'runtime_credential_owner_name_by_id': "SELECT owner_name FROM runtime_credentials WHERE id=?",
+    'runtime_credential_scope_by_token': (
+        "SELECT id, scope FROM runtime_credentials WHERE token_hash=? AND status='active'"),
+    'runtime_credential_all_ids': "SELECT id FROM runtime_credentials",
+    'runtime_credential_uid_by_id': "SELECT credential_uid FROM runtime_credentials WHERE id=?",
+    'runtime_credential_id_uid_pairs': "SELECT id, credential_uid FROM runtime_credentials",
+
     'agent_runtime_online_by_cred': "SELECT 1 FROM agent_runtimes WHERE credential_id=? AND status='online' LIMIT 1",
     'chat_local_engines': (
         "SELECT id, name, version, COALESCE(host_name,'') FROM agent_runtimes "
@@ -6266,3 +6284,30 @@ def task_status_by_id(task_id: str) -> str:
     except Exception as e:
         log.warning(f"task_status_by_id failed id={task_id}: {e}")
         return ""
+
+
+# ── G-02（A11 裁定 2026-11-17）：grape_t_cloud_sandboxes 归 runtime 后，mgmt 吊销链的写点 ──
+# mgmt 凭据吊销时把该凭据名下沙箱行标记 orphaned（记录保留：用户去平台手动清理的对账
+# 依据）。写发生在 runtime 归属表上，mgmt 进程不得直连——经本原语在 runtime 域内执行。
+
+def mark_cloud_sandboxes_orphaned_by_provider(provider_id) -> int:
+    """吊销级联：该 Provider 名下沙箱行 state='orphaned'、provider_id 清零（防悬空 JOIN）。
+
+    返回受影响行数（0 = 该 Provider 无沙箱记录，吊销照常）。
+    """
+    with _any_cursor(write=True) as c:
+        c.execute(
+            "UPDATE grape_t_cloud_sandboxes SET state='orphaned', provider_id=0 "
+            "WHERE provider_id=?",
+            (provider_id,))
+        return int(c.rowcount or 0)
+
+
+
+# G-02 补充形态：mgmt user/db.py 的 uid 换锚/回填链需要与调用方**同一事务**读写凭据表
+# （rebase 报表读旧 uid → 改绑 → 同事务提交，跨连接会读到陈旧快照，#868 实测测试缝
+# 即此形态）。故这两条语句以常量导出，SQL 文本与注册留在 owner 域，mgmt 只引用查询名，
+# 并在**调用方传入的游标**上执行（事务一致 + fixture 可注入连接）。
+SQL_CREDENTIAL_UID_BY_ID = "SELECT credential_uid FROM runtime_credentials WHERE id=?"
+SQL_CREDENTIAL_SET_UID = "UPDATE runtime_credentials SET credential_uid=? WHERE id=?"
+SQL_CREDENTIAL_ID_UID_PAIRS = "SELECT id, credential_uid FROM runtime_credentials"

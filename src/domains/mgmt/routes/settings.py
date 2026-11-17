@@ -2241,17 +2241,23 @@ def _sb_revoke_cleanup(cid: int) -> dict:
                 c.execute("DELETE FROM grape_t_engine_template_binding WHERE provider_id=?", (provider_id,))
                 c.execute("DELETE FROM grape_t_sandbox_templates WHERE provider_id=?", (provider_id,))
                 c.execute("DELETE FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
-                # 沙箱记录保留：state 置 orphaned（凭据已删无人再更新），provider 清零防悬空
+                # 沙箱记录保留：state 置 orphaned（凭据已删无人再更新），provider 清零防悬空。
+                # G-02：该表归 runtime，mgmt 不得直连——经 runtime public 原语执行
                 try:
-                    c.execute("UPDATE grape_t_cloud_sandboxes SET state='orphaned', provider_id=0 WHERE provider_id=?",
-                              (provider_id,))
+                    _rt.mark_cloud_sandboxes_orphaned_by_provider(provider_id)
                 except Exception as _se:
                     log.warning(f"revoke-cleanup mark sandboxes orphaned failed: {_se}")
                 result["provider_deleted"] = True
-            # 孤儿 Provider 兜底：runtime_credential_id 悬空的行整体清理
-            c.execute(
-                "DELETE FROM grape_t_sandbox_provider_config WHERE runtime_credential_id>0 "
-                "AND runtime_credential_id NOT IN (SELECT id FROM runtime_credentials)")
+            # 孤儿 Provider 兜底：runtime_credential_id 悬空的行整体清理。
+            # G-02：runtime_credentials 归 runtime——存活 id 集经 public 具名查询取
+            _cred_ids = [int(r[0]) for r in (_rt.read_all_any("runtime_credential_all_ids", ()) or [])]
+            if _cred_ids:
+                _ph = ",".join("?" * len(_cred_ids))
+                c.execute(
+                    f"DELETE FROM grape_t_sandbox_provider_config WHERE runtime_credential_id>0 "
+                    f"AND runtime_credential_id NOT IN ({_ph})", tuple(_cred_ids))
+            else:
+                c.execute("DELETE FROM grape_t_sandbox_provider_config WHERE runtime_credential_id>0")
             result["orphan_providers"] = c.rowcount if c.rowcount and c.rowcount > 0 else 0
             db.commit()
         log.info(f"revoke-cleanup: cred={cid} provider={prov[0] if prov else 0} "
@@ -2298,12 +2304,8 @@ def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depe
         # 前置门禁（仅沙箱凭据，spec §8.1 v3）：running 沙箱记录存在 → 409 弹窗
         if _cred_type == "sandbox" and not confirm:
             try:
-                c.execute(
-                    "SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id IN "
-                    "(SELECT id FROM grape_t_sandbox_provider_config WHERE runtime_credential_id=?) "
-                    "AND state IN ('creating','running')",
-                    (cid,))
-                _active = c.fetchone()[0] or 0
+                # G-02：grape_t_cloud_sandboxes 归 runtime——409 门禁读走 runtime public 具名查询
+                _active = int(_rt.read_one_any("cloud_sandboxes_active_count_by_cred", (cid,))[0] or 0)
                 if _active > 0:
                     raise HTTPException(status_code=409, detail={
                         "code": 409, "active_sandboxes": _active,
@@ -2958,6 +2960,22 @@ def _require_admin(user: dict):
 
 
 
+def _sb_cred_brief_map() -> dict:
+    """沙箱 Provider 端点族的凭据速查 map（G-02 收敛后的唯一 rc 读取口）。
+
+    runtime_credentials 归 runtime——mgmt 侧不得直连；经 runtime public 具名
+    查询取全量 brief（管理面小表，单请求一次）。返回 {cred_id: (name, scope,
+    owner_name, owner_id, repo_key)}；public 不可用（如单库测试拓扑异常）时降级
+    空 map，调用方按凭据缺失口径处理（与旧行为的 LEFT JOIN NULL 行对齐）。
+    """
+    try:
+        rows = _rt.read_all_any("sandbox_provider_cred_brief_map", ())
+        return {int(r[0]): ((r[1] or ""), (r[2] or ""), (r[3] or ""), (r[4] or ""), (r[5] or "")) for r in rows}
+    except Exception as e:
+        log.warning(f"sandbox cred brief map unavailable: {e}")
+        return {}
+
+
 def _sb_cred_report_owner(cred_id: int, user) -> bool:
     """[沙箱凭据] 判定当前用户是否为「沙箱凭据上报 Provider」的管理者（i7 移植）：
 
@@ -2967,12 +2985,8 @@ def _sb_cred_report_owner(cred_id: int, user) -> bool:
     """
     if (user.get("is_admin") or 0):
         return True
-    from src.kernel.session_manager import db, db_lock
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT owner_name FROM runtime_credentials WHERE id=?", (cred_id,))
-            row = c.fetchone()
+        row = _rt.read_one_any("runtime_credential_owner_name_by_id", (cred_id,))
         return bool(row and (row[0] or "") == (user.get("username") or ""))
     except Exception:
         return False
@@ -3006,10 +3020,7 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: st
     _is_cloud_worker = False
     if token.startswith("rta_"):
         _sha = hashlib.sha256(token.encode()).hexdigest()
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT id, scope FROM runtime_credentials WHERE token_hash=? AND status='active'", (_sha,))
-            row = c.fetchone()
+        row = _rt.read_one_any("runtime_credential_scope_by_token", (_sha,))
         if not row:
             raise HTTPException(status_code=401, detail={"code": 401, "message": "Invalid runtime credential"})
         # [scope 打通 2026-10-30 用户裁定] user/repo 沙箱凭据同权拉模板——不再 403 硬拦。
@@ -3106,15 +3117,20 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: st
     if rows:
         _provider_ids = set(r.get("provider_id", 0) for r in rows if r.get("provider_id"))
         if _provider_ids:
+            # [删 name 列] provider_name=凭据名——引擎名 provider 段跟随凭据名，凭据
+            # 改名 → 60s 内引擎名换新（rename-cleanup 兜底清旧行）。
+            # G-02：runtime_credentials 归 runtime——rc 列改自 brief map（mgmt 不直连）
             with reader() as c:
                 _placeholders = ",".join("?" * len(_provider_ids))
-                # [删 name 列] provider_name=凭据名（rc.name JOIN）——引擎名 provider 段
-                # 跟随凭据名，凭据改名 → 60s 内引擎名换新（rename-cleanup 兜底清旧行）
                 c.execute(
-                    f"SELECT spc.id, rc.name, spc.platform, rc.scope FROM grape_t_sandbox_provider_config spc "
-                    f"LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id WHERE spc.id IN ({_placeholders})",
+                    f"SELECT spc.id, spc.platform, spc.runtime_credential_id FROM grape_t_sandbox_provider_config spc "
+                    f"WHERE spc.id IN ({_placeholders})",
                     tuple(_provider_ids))
-                _pc_map = {row[0]: {"provider_name": row[1] or "", "platform": row[2], "scope": row[3]} for row in c.fetchall()}
+                _spc_rows = c.fetchall()
+            _brief = _sb_cred_brief_map()
+            _pc_map = {r[0]: {"provider_name": (_brief.get(int(r[2]), ("",))[0] if r[2] else ""),
+                              "platform": r[1] or "", "scope": (_brief.get(int(r[2]), ("", ""))[1] if r[2] else "system")}
+                       for r in _spc_rows}
             for r in rows:
                 _pc = _pc_map.get(r.get("provider_id", 0), {})
                 r["platform"] = _pc.get("platform", "")
@@ -3157,8 +3173,7 @@ def create_sandbox_template(body: SandboxTemplateBody, user: dict = Depends(requ
         # v3：校验 Provider 权限
         # [d1e242cba 对账漏改修复 2026-10-30] 同 PUT 端点: 2 列 SELECT 访问 prow[2]
         c.execute(
-            "SELECT platform, runtime_credential_id, "
-            "(SELECT rc.name FROM runtime_credentials rc WHERE rc.id=spc.runtime_credential_id) "
+            "SELECT platform, runtime_credential_id "
             "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (body.provider_id,))
         prow = c.fetchone()
         if not prow:
@@ -3166,7 +3181,8 @@ def create_sandbox_template(body: SandboxTemplateBody, user: dict = Depends(requ
         # [删系统类别 2026-10-30] 权限单一条件：凭据 owner（cred_id NOT NULL——无凭据 Provider 已不存在）
         if not (prow[1] and _sb_cred_report_owner(prow[1], user)):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
-        _provider_name = prow[2] or body.provider or ""
+        _brief = _sb_cred_brief_map()
+        _provider_name = (_brief.get(int(prow[1]), ("",))[0] if prow[1] else "") or body.provider or ""
         from src.kernel.sandbox_uid import new_row_uid as _nru_tpl
         tpl_id = _nru_tpl()
         c.execute(
@@ -3211,14 +3227,14 @@ def update_sandbox_template(tpl_id: str, body: SandboxTemplateBody, user: dict =
         # out of range(绑定引擎保存 PUT 500 根因, 模板 58/62 实证); name 列已删,
         # provider 名改关联子查询取凭据名
         c.execute(
-            "SELECT platform, runtime_credential_id, "
-            "(SELECT rc.name FROM runtime_credentials rc WHERE rc.id=spc.runtime_credential_id) "
+            "SELECT platform, runtime_credential_id "
             "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (tpl_row[0] or body.provider_id,))
         prow = c.fetchone()
         # [删系统类别] 权限单一条件：凭据 owner
         if prow and not (prow[1] and _sb_cred_report_owner(prow[1], user)):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
-        _provider_name = (prow[2] if prow else "") or body.provider or ""
+        _brief = _sb_cred_brief_map()
+        _provider_name = (_brief.get(int(prow[1]), ("",))[0] if (prow and prow[1]) else "") or body.provider or ""
         # enabled 不随编辑更新（走操作栏 toggle；编辑表单已无该项）
         c.execute(
             # [删 provider 列] provider 列已删——UPDATE 去掉
@@ -3267,54 +3283,55 @@ def list_sandbox_providers(q: str = "", page: int = 1, page_size: int = 20,
     from src.kernel.session_manager import db, db_lock
     q = (q or "").strip()
     search_where = ""
-    search_params = []
-    if q:
-        search_where = " AND (rc.name LIKE ? OR spc.endpoint LIKE ? OR spc.platform LIKE ?)"
-        search_params = [f"%{q}%", f"%{q}%", f"%{q}%"]
-
     use_paging = page_size and page_size > 0
     from src.kernel.bulk_read import reader
+    # G-02：runtime_credentials 归 runtime——可见性/搜索/展示三用的 rc 列全部经 brief
+    # map 在 Python 侧合并（mgmt 不直连）；spc 本地全量取（管理面小表），过滤+分页
+    # 在内存完成，语义与旧 JOIN 逐条对齐：
+    #   可见 = 凭据缺失(cred_id=0) 或 (scope='global' 或 owner_name=当前用户)；
+    #   搜索 = 凭据名/endpoint/platform 之一 LIKE。
+    _brief = _sb_cred_brief_map()
+    _me = (user.get("username") or "")
     with reader() as c:
-        # [范围由凭据承担] 可见性修复(2026-10-30): owner_id 形态错配——user 凭据的
-        # owner 在 owner_name(用户名字符串), repo 凭据 owner_id=repo_key 字符串, 与
-        # user.id(数字) 永不匹配 → 非 global 凭据全部不可见(443 实测 count=0)。
-        # 正确语义(与模板列表同款): global 可见 / owner_name=当前用户 /
-        # repo 凭据按 repo_key 归属用户(owner_name 匹配即可, 页面按当前仓库过滤展示)
-        base_where = "WHERE (rc.scope='global' OR rc.owner_name=?)"
-        base_params = [user.get("username", "")]
-        full_where = base_where + search_where
-        full_params = base_params + search_params
-
-        if use_paging:
-            c.execute(f"SELECT COUNT(*) FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id {full_where}", tuple(full_params))
-            total = c.fetchone()[0]
-            offset = (page - 1) * page_size
-            c.execute(
-                f"SELECT spc.id, rc.name AS name, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.enabled, "
-                f"rc.scope, rc.owner_id, rc.repo_key, spc.max_sandboxes, spc.updated_at, spc.runtime_credential_id, rc.name "
-                f"FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id "
-                f"{full_where} ORDER BY spc.id LIMIT ? OFFSET ?",
-                tuple(full_params + [int(page_size), int(offset)]))
-        else:
-            c.execute(
-                f"SELECT spc.id, rc.name AS name, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.enabled, "
-                f"rc.scope, rc.owner_id, rc.repo_key, spc.max_sandboxes, spc.updated_at, spc.runtime_credential_id, rc.name "
-                f"FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id "
-                f"{full_where} ORDER BY spc.id",
-                tuple(full_params))
-            total = 0
-        rows = c.fetchall()
+        c.execute(
+            "SELECT spc.id, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.enabled, "
+            "spc.max_sandboxes, spc.updated_at, spc.runtime_credential_id "
+            "FROM grape_t_sandbox_provider_config spc ORDER BY spc.id")
+        _all_rows = c.fetchall()
+    def _vis(r):
+        cid = r[8] or 0
+        if not cid:
+            return True  # 旧 LEFT JOIN 凭据缺失行：可见（历史 key_file 形态）
+        b = _brief.get(int(cid))
+        if b is None:
+            return True  # 凭据已删（吊销保留孤儿）：旧 JOIN 行 rc.* 为 NULL → 可见
+        return b[1] == 'global' or b[2] == _me
+    def _match(r):
+        if not q:
+            return True
+        cid = r[8] or 0
+        b = _brief.get(int(cid)) if cid else None
+        name = (b[0] if b else "") or ""
+        return (q in name) or (q in (r[2] or "")) or (q in (r[1] or ""))
+    _filt = [r for r in _all_rows if _vis(r) and _match(r)]
+    total = len(_filt)
+    rows = []
+    if use_paging:
+        offset = (page - 1) * page_size
+        rows = _filt[offset:offset + int(page_size)]
     result = []
     for r in rows:
         extra = json.loads(r[5]) if r[5] else {}
+        cid = r[8] or 0
+        b = _brief.get(int(cid)) if cid else None
         result.append({
-            "id": r[0], "name": r[1], "platform": r[2], "endpoint": r[3],
-            "api_key": "***" if r[4] else "", "extra_config": extra,
-            "enabled": r[6], "scope": r[7], "user_id": r[8],
-            "repo_key": r[9], "max_sandboxes": r[10] or 10,
-            "updated_at": str(r[11]) if r[11] else "",
-            "runtime_credential_id": r[12] or 0,
-            "credential_name": r[13] or "",
+            "id": r[0], "name": (b[0] if b else ""), "platform": r[1], "endpoint": r[2],
+            "api_key": "***" if r[3] else "", "extra_config": extra,
+            "enabled": r[5], "scope": (b[1] if b else ""), "user_id": (b[3] if b else ""),
+            "repo_key": (b[4] if b else ""), "max_sandboxes": r[6] or 10,
+            "updated_at": str(r[7]) if r[7] else "",
+            "runtime_credential_id": cid or 0,
+            "credential_name": (b[0] if b else ""),
         })
     return {"providers": result, "total": total, "page": page, "page_size": page_size}
 
@@ -3509,7 +3526,6 @@ def health_sandbox_provider(provider_id: str, user: dict = Depends(require_no_se
         # 换), 访问 row[7] 越界(7 列数据) + scope 权限判断用 credential_id 值 → 500。
         # 修: 7 列明确命名, 权限改凭据 owner 判定(同 bind-engine/_sb_cred_report_owner)。
         c.execute("SELECT runtime_credential_id, "
-                  "(SELECT rc.name FROM runtime_credentials rc WHERE rc.id = spc.runtime_credential_id) AS name, "
                   "platform, endpoint, api_key_enc, extra_config, max_sandboxes "
                   "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (provider_id,))
         row = c.fetchone()
@@ -3517,10 +3533,12 @@ def health_sandbox_provider(provider_id: str, user: dict = Depends(require_no_se
             raise HTTPException(status_code=404, detail={"code": 404, "message": "Provider 不存在"})
         if not (row[0] and _sb_cred_report_owner(row[0], user)):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
+    _brief = _sb_cred_brief_map()
+    _cred_name = (_brief.get(int(row[0]), ("",))[0] if row[0] else "")
 
-    prov = {"runtime_credential_id": row[0], "name": row[1], "platform": row[2],
-            "endpoint": row[3], "api_key_enc": row[4], "extra_config": row[5],
-            "max_sandboxes": row[6] or 10}
+    prov = {"runtime_credential_id": row[0], "name": _cred_name, "platform": row[1],
+            "endpoint": row[2], "api_key_enc": row[3], "extra_config": row[4],
+            "max_sandboxes": row[5] or 10}
     _platform = prov["platform"]
     from src.kernel.crypto import decrypt
     _api_key = decrypt(prov["api_key_enc"]) if prov["api_key_enc"] else ""
@@ -3607,33 +3625,33 @@ def scan_sandbox_templates(provider_id: str, user: dict = Depends(require_no_ses
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT rc.name AS name, spc.platform, spc.runtime_credential_id FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id WHERE spc.id=?",
+        c.execute("SELECT spc.platform, spc.runtime_credential_id FROM grape_t_sandbox_provider_config spc WHERE spc.id=?",
                   (provider_id,))
         prow = c.fetchone()
     if not prow:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "Provider 不存在"})
     # [删系统类别] 权限单一条件：凭据 owner（扫描导入新增行归凭据 owner）
-    if not (prow[2] and _sb_cred_report_owner(prow[2], user)):
+    if not (prow[1] and _sb_cred_report_owner(prow[1], user)):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
 
     # 取 adapter 与配置（复用 health 的配置读取路径）
     from src.domains.runtime.agents.sandbox.backends import get_adapter
-    adapter = get_adapter(prow[1])
+    adapter = get_adapter(prow[0])
     if adapter is None:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"平台 {prow[1]} 无 adapter"})
-    _cfg = _provider_config_from_db(prow[1], provider_id) or {}
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"平台 {prow[0]} 无 adapter"})
+    _cfg = _provider_config_from_db(prow[0], provider_id) or {}
     if not _cfg.get("api_url") and not _cfg.get("endpoint"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "Provider 未配置 endpoint"})
 
     # 能力探测：adapter 未实现 list_templates
     if not hasattr(adapter, "list_templates"):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"平台 {prow[3]} 不支持模板扫描"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"平台 {prow[0]} 不支持模板扫描"})
     try:
         scanned = adapter.list_templates(_cfg)
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"扫描失败: {e}"})
     if scanned is None:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"平台 {prow[3]} 不支持模板扫描"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"平台 {prow[0]} 不支持模板扫描"})
 
     valid = [t for t in scanned
              if t.get("template_id") and str(t.get("status", "")).lower() in ("ready", "ok")]
@@ -3731,26 +3749,28 @@ def _provider_config_from_db(platform: str, provider_id: str | None = None) -> d
     from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        # [d1e242cba 对账漏改修复] SELECT 引用 rc.name 但 FROM 无 JOIN——补关联子查询
         if provider_id:
-            c.execute("SELECT (SELECT rc.name FROM runtime_credentials rc WHERE rc.id = spc.runtime_credential_id) AS name, spc.platform, spc.endpoint, spc.api_key_enc, "
+            c.execute("SELECT spc.platform, spc.endpoint, spc.api_key_enc, spc.runtime_credential_id, "
                       "extra_config, max_sandboxes "
                       "FROM grape_t_sandbox_provider_config spc WHERE spc.id=?", (provider_id,))
         else:
-            c.execute("SELECT (SELECT rc.name FROM runtime_credentials rc WHERE rc.id = spc.runtime_credential_id) AS name, spc.platform, spc.endpoint, spc.api_key_enc, "
+            c.execute("SELECT spc.platform, spc.endpoint, spc.api_key_enc, spc.runtime_credential_id, "
                       "extra_config, max_sandboxes "
                       "FROM grape_t_sandbox_provider_config spc WHERE spc.platform=?", (platform,))
         row = c.fetchone()
     if not row:
         return None
+    # G-02：runtime_credentials 归 runtime——凭据名经 brief map 取（mgmt 不直连）
+    _brief = _sb_cred_brief_map()
+    _cred_name = (_brief.get(int(row[3]), ("",))[0] if row[3] else "")
     from src.kernel.crypto import decrypt
-    _api_key = decrypt(row[3]) if row[3] else ""
+    _api_key = decrypt(row[2]) if row[2] else ""
     from src.domains.runtime.agents.sandbox.backends import get_adapter
-    adapter = get_adapter(row[1])
+    adapter = get_adapter(row[0])
     if not adapter:
         return None
     return adapter.normalize_db_config({
-        "platform": row[1], "name": row[0], "endpoint": row[2],
+        "platform": row[0], "name": _cred_name, "endpoint": row[1],
         "api_key": _api_key, "extra_config": row[4],
         "max_sandboxes": row[5],
     })
@@ -3829,19 +3849,20 @@ def list_provider_configs(user: dict = Depends(require_no_session_token)):
         # LEFT JOIN 凭据名做展示名 + runtime_credential_id 供前端深链
         c.execute(
             "SELECT p.id, p.platform, p.endpoint, p.api_key_enc, p.extra_config, "
-            "p.enabled, p.updated_at, p.runtime_credential_id, rc.name, p.provider_uid "
+            "p.enabled, p.updated_at, p.runtime_credential_id, p.provider_uid "
             "FROM grape_t_sandbox_provider_config p "
-            "LEFT JOIN runtime_credentials rc ON rc.id = p.runtime_credential_id "
             "ORDER BY p.id"
         )
         rows = c.fetchall()
+    # G-02：runtime_credentials 归 runtime——凭据名经 brief map 合并（mgmt 不直连）
+    _brief = _sb_cred_brief_map()
     result = []
     for r in rows:
         extra = json.loads(r[4]) if r[4] else {}
         result.append({
             "id": r[0],
             "provider": r[1],
-            "name": r[8] or "",
+            "name": (_brief.get(int(r[7]), ("",))[0] if r[7] else "") or "",
             "endpoint": r[2],
             "api_key": "***" if r[3] else "",
             "extra_config": extra,
