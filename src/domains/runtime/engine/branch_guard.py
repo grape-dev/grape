@@ -649,15 +649,22 @@ def _fail_open(reason: str) -> None:
 def _hook_not_upgraded(repo_key: str, wt_dir: str, reason: str) -> None:
     """Issue #2933：钩子安装/升级失败必须可观测。
 
-    只读 gitdir（容器只读挂载）下 hooks 目录无法重写时，旧模板（2028-03 及更早）
+    只读 gitdir（容器只读挂载）下 hooks 目录无法重写时，旧模板（2028-04 及更早）
     不含导入期保护；本轮由 ``src.kernel.config`` 导入期降级兜底，但「守卫未升级」
     本身必须留下可定位告警，禁止静默 ``return False``。
+
+    告警文案按真实 ``reason`` 拼接（hooks 目录不可解析 / 写权限不足 / 其它异常），
+    不恒定声明「只读 hooks 目录」；logger 自身失败时兜底写 stderr，绝不静默。
     """
-    message = (f"branch guard hook not upgraded (read-only hooks dir) "
-               f"{repo_key} {wt_dir}: {reason}")
+    message = f"branch guard hook not upgraded {repo_key} {wt_dir}: {reason}"
     try:
         log.warning(message)
-    except Exception:
+    except Exception as e:
+        message = f"{message} (log failed: {e.__class__.__name__}: {e})"
+    try:
+        sys.stderr.write(f"[branch-guard] WARNING {message}\n")
+        sys.stderr.flush()
+    except OSError:
         return
 
 

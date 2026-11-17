@@ -47,6 +47,7 @@ def test_import_survives_readonly_log_dir():
     assert "Traceback" not in r.stderr
     assert r.stderr.count("日志目录不可写") == 1
     assert "已降级为仅 stderr 输出" in r.stderr
+    assert "probe-log-line" in r.stderr, "文件 handler 失效后 log.info 必须仍输出到 stderr"
 
 
 def test_import_survives_file_handler_construction_failure():
@@ -66,7 +67,9 @@ def test_import_survives_file_handler_construction_failure():
     assert "IMPORT_OK" in r.stdout
     assert "DEGRADED=True" in r.stdout
     assert "Traceback" not in r.stderr
-    assert r.stderr.count("日志目录不可写") == 1
+    assert "日志文件 handler 构造失败" in r.stderr
+    assert "日志目录不可写" not in r.stderr
+    assert "probe-warning" in r.stderr, "文件 handler 失效后 log.warning 必须仍输出到 stderr"
 
 
 def test_log_file_not_degraded_in_normal_env():
@@ -76,13 +79,6 @@ def test_log_file_not_degraded_in_normal_env():
 
 
 # ===================== 钩子 shell 层 stdin 暂存 fail-open =====================
-
-class _R:
-    def __init__(self, returncode=0, stdout="", stderr=""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
 
 def _git(*args, cwd=None):
     env = os.environ.copy()
@@ -138,14 +134,12 @@ def test_hook_template_fail_open_warning_mentions_no_verify():
 
 def test_hook_template_version_bumped():
     assert bg.HOOK_TEMPLATE_VERSION == "2028-05"
-    assert bg.HOOK_VERSION_LINE in ("# hook-template-version: " + bg.HOOK_TEMPLATE_VERSION)
+    assert bg.HOOK_VERSION_LINE == "# hook-template-version: " + bg.HOOK_TEMPLATE_VERSION
 
 
 # ===================== 只读 hooks 目录：安装失败可观测 =====================
 
-def test_install_failure_is_not_silent(tmp_path, monkeypatch):
-    """hooks 目录只读导致 makedirs 抛 OSError 时，必须留下「未升级」告警。"""
-    repo = _init_repo(tmp_path / "repo")
+def _record_guard_log(monkeypatch):
     warnings = []
 
     class _Recorder:
@@ -156,6 +150,13 @@ def test_install_failure_is_not_silent(tmp_path, monkeypatch):
             return lambda *a, **k: None
 
     monkeypatch.setattr(bg, "log", _Recorder())
+    return warnings
+
+
+def test_install_failure_is_not_silent(tmp_path, monkeypatch):
+    """hooks 目录只读导致 makedirs 抛 OSError 时，必须留下真实原因告警。"""
+    repo = _init_repo(tmp_path / "repo")
+    warnings = _record_guard_log(monkeypatch)
 
     def _boom(*a, **k):
         raise OSError(30, "Read-only file system")
@@ -165,6 +166,46 @@ def test_install_failure_is_not_silent(tmp_path, monkeypatch):
     assert warnings, "安装失败不得静默"
     assert "not upgraded" in warnings[0]
     assert "Read-only file system" in warnings[0]
+    assert "read-only hooks dir" not in warnings[0]
+
+
+def test_install_failure_when_hook_write_permission_denied(tmp_path, monkeypatch):
+    """hooks 目录存在但写 pre-push 权限不足：走真实 open() PermissionError 路径。"""
+    repo = _init_repo(tmp_path / "repo")
+    hooks = repo / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    warnings = _record_guard_log(monkeypatch)
+
+    import builtins
+    real_open = builtins.open
+
+    def _denied(path, mode="r", *a, **k):
+        if str(path) == str(hooks / "pre-push") and "w" in mode:
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", _denied)
+    assert bg.install_pre_push_hook(str(repo), REPO_KEY) is False
+    assert warnings, "写 pre-push 权限不足不得静默"
+    assert "not upgraded" in warnings[0]
+    assert "Permission denied" in warnings[0]
+
+
+def test_hook_not_upgraded_falls_back_to_stderr(tmp_path, monkeypatch, capsys):
+    """logger 自身失败时，_hook_not_upgraded 必须兜底写 stderr。"""
+    class _BoomLog:
+        def warning(self, message):
+            raise RuntimeError("logger down")
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    monkeypatch.setattr(bg, "log", _BoomLog())
+    bg._hook_not_upgraded(REPO_KEY, str(tmp_path), "hooks dir not resolvable")
+    err = capsys.readouterr().err
+    assert "not upgraded" in err
+    assert "hooks dir not resolvable" in err
+    assert "logger down" in err or "RuntimeError" in err
 
 
 def test_install_upgrades_stale_2028_03_template(tmp_path):
@@ -188,20 +229,26 @@ def test_install_upgrades_stale_2028_03_template(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _isolate_guard_state():
+    import logging
     from src.kernel.session_manager import db
-    try:
-        db.execute("DELETE FROM distributed_locks WHERE lock_key LIKE 'branch_guard:%'")
-        db.execute("DELETE FROM branch_guard_state")
-        db.commit()
-    except Exception:
-        pass
+    lock_key = bg.lease_key(REPO_KEY, BRANCH)
+
+    def _cleanup():
+        for sql, params in (
+            ("DELETE FROM distributed_locks WHERE lock_key=?", (lock_key,)),
+            ("DELETE FROM branch_guard_state WHERE repo_key=? AND head_branch=?",
+             (REPO_KEY, BRANCH)),
+        ):
+            try:
+                db.execute(sql, params)
+                db.commit()
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "guard state cleanup failed (may be unavailable): %s", e)
+
+    _cleanup()
     yield
-    try:
-        db.execute("DELETE FROM distributed_locks WHERE lock_key LIKE 'branch_guard:%'")
-        db.execute("DELETE FROM branch_guard_state")
-        db.commit()
-    except Exception:
-        pass
+    _cleanup()
 
 
 def test_fail_closed_pr_merged_unchanged():
@@ -226,3 +273,38 @@ def test_fail_closed_lease_contention_unchanged(monkeypatch):
     second = bg.acquire_branch_lease(REPO_KEY, BRANCH)
     assert second["ok"] is False and second["reason"] == "branch_locked"
     assert "host-task-A" in second["message"]
+
+
+# ===================== hook_main 真实退出码 =====================
+
+_PUSH_INPUT = (f"refs/heads/{BRANCH} {'a' * 40} refs/heads/{BRANCH} {'b' * 40}\n")
+
+
+def _run_hook_main(monkeypatch, *, lease=None, pr=None, expected=""):
+    import io
+    monkeypatch.setattr(bg, "_missing_hook_deps", lambda: [])
+    monkeypatch.setattr(bg, "acquire_branch_lease",
+                        lambda *a, **k: lease or {"ok": True})
+    monkeypatch.setattr(bg, "release_branch_lease", lambda *a, **k: None)
+    monkeypatch.setattr(bg, "reconcile_pending", lambda *a, **k: expected)
+    monkeypatch.setattr(bg, "_fetch_pr_state_via_grape",
+                        lambda *a, **k: pr or {"state": ""})
+    monkeypatch.setattr(bg, "record_pending_push", lambda *a, **k: {})
+    monkeypatch.setattr(bg.sys, "stdin", io.StringIO(_PUSH_INPUT))
+    return bg.hook_main([REPO_KEY])
+
+
+def test_hook_main_exits_1_on_pr_merged(monkeypatch):
+    rc = _run_hook_main(monkeypatch,
+                        pr={"state": "merged", "number": 42, "base": "weekly-mys"})
+    assert rc == 1
+
+
+def test_hook_main_exits_1_on_lease_contention(monkeypatch):
+    rc = _run_hook_main(monkeypatch, lease={"ok": False, "message": "branch locked"})
+    assert rc == 1
+
+
+def test_hook_main_exits_1_on_remote_drift(monkeypatch):
+    rc = _run_hook_main(monkeypatch, pr={"state": "open"}, expected="aaa")
+    assert rc == 1

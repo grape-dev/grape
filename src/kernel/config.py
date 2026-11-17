@@ -132,8 +132,31 @@ def _parse_level(s: str) -> int:
     return logging.INFO
 
 
+def _ensure_dir(path: str) -> str:
+    """尽力创建目录；失败返回 ``"<异常类>: <消息>"``（空串=成功），绝不上抛。
+
+    Issue #2933：容器/沙箱把目录挂成只读时 ``os.makedirs`` 抛 ``OSError``，
+    这里只把真实原因回传给调用方，由调用方决定降级与告警文案。
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+        return ""
+    except OSError as e:
+        return f"{e.__class__.__name__}: {e}"
+
+
+def _warn_stderr(message: str) -> bool:
+    """尽力把降级提示写到 stderr，返回是否成功；stderr 不可写时仅返回 False。"""
+    try:
+        sys.stderr.write(message)
+        sys.stderr.flush()
+        return True
+    except OSError:
+        return False
+
+
 _LOG_LEVEL = _parse_level(os.environ.get("LOG_LEVEL", ""))
-_LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data/logs"))
+LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data/logs"))
 
 # Issue #2933：导入期日志初始化降级。容器/沙箱把 data/logs 挂成只读时，
 # os.makedirs 与 TimedRotatingFileHandler 构造都会抛 OSError，导致
@@ -141,31 +164,32 @@ _LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "
 # 处理原则：环境只读 ≠ 业务失败——文件 handler 构造失败仅降级为 stderr，绝不上抛。
 LOG_FILE_DEGRADED = False
 LOG_FILE_DEGRADED_REASON = ""
-LOG_FILE_DEGRADED_WARN_FAILED = False
 _file_handler = None
-try:
-    os.makedirs(_LOG_DIR, exist_ok=True)
-    _file_handler = logging.handlers.TimedRotatingFileHandler(
-        os.path.join(_LOG_DIR, "devops-bot.log"),
-        when="midnight", interval=1, backupCount=30, encoding="utf-8",
-    )
-    _file_handler.setLevel(_LOG_LEVEL)
-    _file_handler.setFormatter(_JsonFormatter())
-    _file_handler.addFilter(_RequestIdFilter())
-except (OSError, PermissionError) as _log_init_err:
+_log_init_stage = ""
+_log_dir_error = _ensure_dir(LOG_DIR)
+if _log_dir_error:
+    _log_init_stage = f"日志目录不可写({LOG_DIR})"
+else:
+    try:
+        _file_handler = logging.handlers.TimedRotatingFileHandler(
+            os.path.join(LOG_DIR, "devops-bot.log"),
+            when="midnight", interval=1, backupCount=30, encoding="utf-8",
+        )
+        _file_handler.setLevel(_LOG_LEVEL)
+        _file_handler.setFormatter(_JsonFormatter())
+        _file_handler.addFilter(_RequestIdFilter())
+    except OSError as _log_init_err:
+        _log_dir_error = f"{_log_init_err.__class__.__name__}: {_log_init_err}"
+        _log_init_stage = "日志文件 handler 构造失败"
+if _log_dir_error:
     LOG_FILE_DEGRADED = True
-    LOG_FILE_DEGRADED_REASON = f"{_log_init_err.__class__.__name__}: {_log_init_err}"
+    LOG_FILE_DEGRADED_REASON = _log_dir_error
     _file_handler = None
     # 降级提示直接写 sys.stderr（不能经 logger：坏掉的正是文件 handler，
     # 经 logger 有递归/被吞风险）；只输出一条中文提示，不带 traceback。
-    try:
-        sys.stderr.write(
-            f"[grape] WARNING 日志目录不可写({_LOG_DIR})："
-            "已降级为仅 stderr 输出，不影响业务功能\n")
-        sys.stderr.flush()
-    except Exception:
-        # stderr 同不可写（极端环境）：提示丢失但绝不能让导入失败。
-        LOG_FILE_DEGRADED_WARN_FAILED = True
+    _warn_stderr(
+        f"[grape] WARNING {_log_init_stage}：{_log_dir_error}；"
+        "已降级为仅 stderr 输出，不影响业务功能\n")
 
 _stream_handler = logging.StreamHandler()
 _stream_handler.setLevel(_LOG_LEVEL)
@@ -298,24 +322,13 @@ def _resolve_workspace_dir() -> str:
 
 
 WORKSPACE_DIR = _resolve_workspace_dir()
-LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data/logs"))
 
-# Issue #2933：只读挂载下目录创建失败只记降级标志，不在导入期抛异常。
-WORKSPACE_DIR_DEGRADED = False
-WORKSPACE_DIR_DEGRADED_REASON = ""
-try:
-    os.makedirs(WORKSPACE_DIR, exist_ok=True)
-except (OSError, PermissionError) as _ws_err:
-    WORKSPACE_DIR_DEGRADED = True
-    WORKSPACE_DIR_DEGRADED_REASON = f"{_ws_err.__class__.__name__}: {_ws_err}"
-
-LOG_DIR_DEGRADED = False
-LOG_DIR_DEGRADED_REASON = ""
-try:
-    os.makedirs(LOG_DIR, exist_ok=True)
-except (OSError, PermissionError) as _dir_err:
-    LOG_DIR_DEGRADED = True
-    LOG_DIR_DEGRADED_REASON = f"{_dir_err.__class__.__name__}: {_dir_err}"
+# Issue #2933：只读挂载下目录创建失败不得在导入期抛异常；真实原因写 stderr 告警。
+_workspace_dir_error = _ensure_dir(WORKSPACE_DIR)
+if _workspace_dir_error:
+    _warn_stderr(
+        f"[grape] WARNING 工作区目录不可写({WORKSPACE_DIR})：{_workspace_dir_error}；"
+        "已跳过创建，不影响导入\n")
 
 # Chat 工作目录下发的逻辑基准（远端 worker _remap_cwd 的默认映射契约）。
 # 服务端必须用逻辑基准下发而非本机 WORKSPACE_DIR，否则非 root 用户 worker
