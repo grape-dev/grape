@@ -191,6 +191,28 @@ def test_install_failure_when_hook_write_permission_denied(tmp_path, monkeypatch
     assert "Permission denied" in warnings[0]
 
 
+def test_install_missing_context_reports_real_reason(tmp_path, monkeypatch):
+    """安装上下文缺失（wt_dir/repo_key 为空）同样不得静默，且带真实 reason。"""
+    warnings = _record_guard_log(monkeypatch)
+    assert bg.install_pre_push_hook("", REPO_KEY) is False
+    assert warnings and "missing wt_dir/repo_key" in warnings[0]
+    assert "read-only hooks dir" not in warnings[0]
+
+    warnings.clear()
+    assert bg.install_pre_push_hook(str(tmp_path), "") is False
+    assert warnings and "missing wt_dir/repo_key" in warnings[0]
+
+
+def test_repogit_does_not_double_report_install_failure(tmp_path, monkeypatch, capsys):
+    """安装失败告警由安装侧统一输出，repogit 不得重复上报覆盖真实原因。"""
+    from src.domains.runtime.engine import repogit
+
+    monkeypatch.setattr(bg, "install_pre_push_hook", lambda *a, **k: False)
+    repogit._install_branch_guard_hook(str(tmp_path), REPO_KEY, BRANCH)
+    err = capsys.readouterr().err
+    assert "not upgraded" not in err
+
+
 def test_hook_not_upgraded_falls_back_to_stderr(tmp_path, monkeypatch, capsys):
     """logger 自身失败时，_hook_not_upgraded 必须兜底写 stderr。"""
     class _BoomLog:

@@ -190,6 +190,8 @@ if _log_dir_error:
     _warn_stderr(
         f"[grape] WARNING {_log_init_stage}：{_log_dir_error}；"
         "已降级为仅 stderr 输出，不影响业务功能\n")
+# 导入期一次性临时变量，用完即删，避免残留为模块公开属性。
+del _log_init_stage, _log_dir_error
 
 _stream_handler = logging.StreamHandler()
 _stream_handler.setLevel(_LOG_LEVEL)

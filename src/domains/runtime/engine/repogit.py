@@ -852,14 +852,13 @@ def askpass_path(issue_dir: str) -> str:
 def _install_branch_guard_hook(issue_dir: str, repo_key: str, branch: str) -> None:
     """Issue #993：安装 worktree 级 pre-push 钩子（失败仅告警，不阻断建树）。"""
     try:
-        from src.domains.runtime.engine.branch_guard import (
-            _hook_not_upgraded, install_pre_push_hook)
+        from src.domains.runtime.engine.branch_guard import install_pre_push_hook
         if not install_pre_push_hook(issue_dir, repo_key):
-            # Issue #2933：只读 hooks 目录下钩子无法升级时必须可见（不静默）；
-            # 推送本身由 config 导入期日志降级兜底，不受影响。
-            _hook_not_upgraded(
-                repo_key, issue_dir,
-                f"install_pre_push_hook returned False ({branch})")
+            # Issue #2933：安装失败的可见告警（含真实 reason）由安装函数统一输出，
+            # 这里只留调试线索，避免同一次失败重复告警、且不覆盖真实原因。
+            log.debug(
+                f"repogit branch guard hook install returned False "
+                f"{repo_key}:{branch}")
     except Exception as e:
         log.warning(f"repogit branch guard hook install error {repo_key}:{branch}: {e}")
 

@@ -653,8 +653,9 @@ def _hook_not_upgraded(repo_key: str, wt_dir: str, reason: str) -> None:
     不含导入期保护；本轮由 ``src.kernel.config`` 导入期降级兜底，但「守卫未升级」
     本身必须留下可定位告警，禁止静默 ``return False``。
 
-    告警文案按真实 ``reason`` 拼接（hooks 目录不可解析 / 写权限不足 / 其它异常），
-    不恒定声明「只读 hooks 目录」；logger 自身失败时兜底写 stderr，绝不静默。
+    告警文案按真实 ``reason`` 拼接（安装上下文缺失 / hooks 目录不可解析 /
+    写权限不足 / 其它异常），不恒定声明「只读 hooks 目录」；logger 自身失败时
+    兜底写 stderr；两者都不可写时放弃告警（环境已无可用输出通道），但不阻断安装。
     """
     message = f"branch guard hook not upgraded {repo_key} {wt_dir}: {reason}"
     try:
@@ -681,6 +682,10 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
     本地钩子与本守卫，避免本地钩子消费 stdin 后守卫读到空串而静默放行。
     """
     if not wt_dir or not repo_key:
+        # 调用方漏传安装上下文同样是失败路径，必须留下可定位告警（Issue #2933 复审）：
+        # 由安装函数统一负责告警，调用方不必再重复上报。
+        _hook_not_upgraded(
+            repo_key, wt_dir, "missing wt_dir/repo_key for hook install")
         return False
     try:
         hooks_dir = _hooks_dir(wt_dir)
