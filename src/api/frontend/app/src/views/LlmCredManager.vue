@@ -34,29 +34,42 @@
       </div>
     </div>
 
-    <!-- 添加/编辑弹窗 -->
-    <div
-      v-if="dlg.open"
-      style="position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 9999"
-      @click.self="dlg.open = false"
-    >
-      <div style="background: var(--c); border-radius: 14px; padding: 24px; max-width: 480px; width: 90%; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15)">
-        <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 16px">{{ dlg.id ? t('dialog.edit_title') : t('dialog.add_title') }}</h3>
-        <div style="margin-bottom: 12px">
+    <!-- 添加/编辑弹窗：Teleport 到 body——.cd 卡片带 backdrop-filter 会把 position:fixed
+         困成相对卡片定位（containing block 陷阱），弹窗会溢出视口且不居中 -->
+    <Teleport to="body">
+      <div
+        v-if="dlg.open"
+        style="position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 9999"
+        @click.self="dlg.open = false"
+      >
+      <div
+        style="
+          background: var(--c);
+          border-radius: 14px;
+          padding: 18px;
+          max-width: 480px;
+          width: 90%;
+          max-height: calc(100vh - 32px);
+          overflow-y: auto;
+          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+        "
+      >
+        <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 12px">{{ dlg.id ? t('dialog.edit_title') : t('dialog.add_title') }}</h3>
+        <div style="margin-bottom: 8px">
           <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('dialog.engine_type') }}</label>
           <select v-model="dlg.engineType" style="width: 100%; padding: 8px 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 12px; background: var(--c)">
             <option v-for="et in engineTypes" :key="et.value" :value="et.value">{{ et.label || et.value }}</option>
           </select>
           <p style="font-size: 10px; color: var(--t3); margin-top: 4px; line-height: 1.4">{{ t('dialog.engine_type_desc') }}</p>
         </div>
-        <div style="margin-bottom: 12px">
+        <div style="margin-bottom: 8px">
           <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('dialog.provider') }}</label>
           <select v-model="dlg.provider" style="width: 100%; padding: 8px 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 12px; background: var(--c)">
             <option v-for="k in presetKeys" :key="k" :value="k">{{ k }}</option>
           </select>
           <p style="font-size: 10px; color: var(--t3); margin-top: 4px; line-height: 1.4">{{ presets[dlg.provider] ? presets[dlg.provider].desc : '' }}</p>
         </div>
-        <div style="margin-bottom: 12px">
+        <div style="margin-bottom: 8px">
           <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px"
             >{{ t('dialog.api_key') }}{{ dlg.id ? ' (' + t('dialog.api_key_keep_empty') + ')' : '' }}</label
           >
@@ -68,7 +81,7 @@
             style="width: 100%; padding: 8px 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 12px"
           />
         </div>
-        <div style="margin-bottom: 12px">
+        <div style="margin-bottom: 8px">
           <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('dialog.base_url') }}</label>
           <input
             v-model="dlg.baseUrl"
@@ -77,7 +90,7 @@
             style="width: 100%; padding: 8px 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 12px; color: var(--t)"
           />
         </div>
-        <div style="margin-bottom: 16px">
+        <div style="margin-bottom: 12px">
           <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('dialog.model') }}</label>
           <input
             v-model="dlg.model"
@@ -92,7 +105,8 @@
           <button class="bt bt-p" @click="save">{{ t('dialog.save') }}</button>
         </div>
       </div>
-    </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
