@@ -371,6 +371,20 @@ document.documentElement.classList.remove('i18n-loading');})();
         resp.headers["Referrer-Policy"] = "no-referrer"
         return resp
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def serve_favicon():
+        """页签图标：浏览器/书签直连 /favicon.ico，不能落到 SPA 兜底。
+
+        兜底会把 favicon.ico 当成页面路由返回 200 + index.html，浏览器拿到非图片
+        内容就只能显示默认空白图标（下线前浏览器还爱请求它）。
+        """
+        _fav = os.path.join(STATIC_DIR, "logo-64.png")
+        if not os.path.isfile(_fav):
+            raise HTTPException(status_code=404)
+        resp = FileResponse(_fav, media_type="image/png")
+        resp.headers["Cache-Control"] = "public, max-age=86400"
+        return resp
+
     @app.get("/{path:path}")
     async def spa_catch_all(path: str):
         if path.startswith("api/") or path.startswith("static/"):
