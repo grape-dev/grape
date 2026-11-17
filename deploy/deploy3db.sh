@@ -224,10 +224,12 @@ fi
 # 技能树镜像：引擎物化技能读的是 <checkout>/.grape/skills，不是仓库根的 skills/。
 # 本脚本只部署当前 checkout，同机其它租户 checkout（如 orgtest）不会自己更新 ——
 # 缺了就会被一致性门禁判「bound skill not materialized」而拒绝执行任务。
-_SELF="$(cd "$(dirname "$0")/../.." && pwd)"
+_SELF="$(readlink -f "$(dirname "$0")/../..")"
 for _co in /home/*/grape-new-version2; do
   [ -d "$_co/.grape/skills" ] || continue
-  [ "$(cd "$_co" 2>/dev/null && pwd)" = "$_SELF" ] && continue
+  # 必须用 readlink -f 比较：cd+pwd 在软链 checkout 下返回解析后的路径，会和 _SELF 不等，
+  # 于是把自己也当成"其它 checkout"镜像一遍（rsync 同源同目标，无害但多余）。
+  [ "$(readlink -f "$_co")" = "$_SELF" ] && continue
   _own=$(stat -c %U "$_co" 2>/dev/null || echo root)
   rsync -a --delete "$_SELF/.grape/skills/" "$_co/.grape/skills/" 2>/dev/null \
     || cp -a "$_SELF/.grape/skills/." "$_co/.grape/skills/"
