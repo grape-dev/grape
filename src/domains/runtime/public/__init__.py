@@ -117,8 +117,11 @@ def append_task_message(task_id: str, actor: str, content: str,
             return {"ok": True, "deduped": False, "id": getattr(c, "lastrowid", None), "seq": seq}
 
 
+# 列序必须与 mgmt._build_cred_map 的解包一一对应（14 列）：少 cred_type/platform
+# 时该处抛出 "not enough values to unpack (expected 14, got 12)"，设备/引擎页整体 500。
 _CRED_COLS = ("id", "name", "device_name", "scope", "owner_id", "owner_name",
-              "status", "last_seen_at", "last_ip", "repo_key", "org_id", "spec")
+              "status", "last_seen_at", "last_ip", "repo_key", "org_id", "spec",
+              "cred_type", "platform")
 
 
 def list_credential_rows() -> list[tuple]:

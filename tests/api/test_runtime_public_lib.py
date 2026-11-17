@@ -192,15 +192,19 @@ def test_task_brief_missing(monkeypatch):
     assert rt.task_brief(-1) is None
 
 def test_list_credential_rows_columns_and_passthrough(monkeypatch):
-    row = (1, "rt-cred", "dev-1", "global", "", "alice", "active", "t0", "1.2.3.4", "", 1, "")
+    row = (1, "rt-cred", "dev-1", "global", "", "alice", "active", "t0", "1.2.3.4", "", 1,
+           "", "worker", "")
     cur = install(monkeypatch, FakeCursor(rows=[row], desc=[("id",)]))
     out = rt.list_credential_rows()
     assert out == [row]
     sql, _args = cur.executed[0]
     for col in ("id", "name", "device_name", "scope", "owner_id", "owner_name",
-                "status", "last_seen_at", "last_ip", "repo_key", "org_id", "spec"):
+                "status", "last_seen_at", "last_ip", "repo_key", "org_id", "spec",
+                "cred_type", "platform"):
         assert col in sql
     assert "FROM runtime_credentials" in sql
+    # 列序契约：mgmt._build_cred_map 按 14 列解包，列数少了整页 500
+    assert len(row) == 14
 
 
 def test_list_credential_rows_empty(monkeypatch):
