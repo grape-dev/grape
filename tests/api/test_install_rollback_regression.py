@@ -91,6 +91,9 @@ restore_upgrade_backup nohup
         # [rebase 适配 2026-11-12] 恢复函数用 ${WORKER_MODULE_ESC:-宽松兜底}（沙箱线
         # 改造，模块名不再硬编码旧布局路径）——断言收敛为「-m + 转义模块形态」
         assert "-m src\\." in pat and "[a-z_]+" in pat
+        # 右边界：不带 ( |$) 时 ...engine.agent_pool / cloud_worker_xxx 会被同模式命中，
+        # 判活误成功、pkill 误杀同前缀模块。
+        assert "( |$)" in pat, f"pkill/判活模式必须带右边界: {pat}"
         assert not pat.startswith("python "), f"pkill 不得退回裸命令: {pat}"
 
 
@@ -119,3 +122,121 @@ restore_upgrade_backup systemd
         assert r.returncode == 0, f"harness 失败: {r.stderr}"
         calls = open(call_log).read()
         assert "restart runtime-agent" in calls, f"systemd 路径应 restart: {calls}"
+
+def _extract_function(name):
+    """提取 scripts/install-worker.sh 中指定函数（含函数头）的文本。"""
+    script = open(os.path.join(ROOT, "scripts", "install-worker.sh"), encoding="utf-8").read()
+    start_marker = f"{name}() {{"
+    start = script.find(start_marker)
+    assert start != -1, f"install-worker.sh 应包含 {name}()"
+    depth = 0
+    for i in range(start + len(start_marker) - 1, len(script)):
+        ch = script[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return "#!/usr/bin/env bash\n" + script[start:i + 1]
+    raise AssertionError(f"未能定位 {name} 闭合大括号")
+
+
+def _run(harness):
+    return subprocess.run(["bash", "-c", harness], capture_output=True, text=True, timeout=120)
+
+
+def test_wait_new_agent_alive_ignores_stale_pid():
+    """判活只认启动前快照里没有的新 PID：残留旧实例不能顶替本次新起的 worker。"""
+    fns = _extract_function("wait_new_agent_alive")
+    harness = f"""
+set -u
+{fns}
+sleep() {{ :; }}
+_AGENT_START_POLL_MAX=3
+_AGENT_START_POLL_INTERVAL=1
+PGREP_OUT="${{PGREP_OUT}}"
+pgrep() {{ printf '%s\\n' "$PGREP_OUT"; }}
+alive="$(wait_new_agent_alive "${{SNAP}}" "PREFIX" "MODULE")" && rc=0 || rc=$?
+echo "alive=$alive rc=$rc"
+"""
+    # 旧 PID 仍在 + 新 PID 出现 → 必须认新 PID
+    env = dict(os.environ, PGREP_OUT="100\n200", SNAP=" 100 ")
+    r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, timeout=60, env=env)
+    assert r.returncode == 0, r.stderr
+    assert "alive=200 rc=0" in r.stdout, f"应命中新 PID: {r.stdout}"
+    # 只有旧 PID（本次没起来）→ 必须判失败
+    env = dict(os.environ, PGREP_OUT="100", SNAP=" 100 ")
+    r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, timeout=60, env=env)
+    assert "rc=1" in r.stdout and "alive=" in r.stdout, f"旧 PID 不得判活: {r.stdout}"
+
+
+def test_registration_watermark_ignores_history():
+    """注册判据只看水位之后的新行：历史 registered 不能顶替本次启动的注册。"""
+    fns = _extract_function("log_line_watermark") + "\n" + _extract_function("wait_runtime_registered")
+    with tempfile.TemporaryDirectory(prefix="grape-watermark-") as tmp:
+        log = os.path.join(tmp, "worker.log")
+        with open(log, "w") as f:
+            f.write("boot\nRuntimeAgent registered: ['old']\n")
+        harness = f"""
+set -u
+{fns}
+sleep() {{ :; }}
+log() {{ :; }}
+REGISTER_LOG="RuntimeAgent registered"
+wm="$(log_line_watermark {log!r})"
+wait_runtime_registered {log!r} "$((wm + 1))" "$REGISTER_LOG" 2 && rc=0 || rc=$?
+echo "wm=$wm hist_rc=$rc"
+"""
+        r = _run(harness)
+        assert r.returncode == 0, r.stderr
+        assert "wm=2" in r.stdout, f"水位应为历史行数: {r.stdout}"
+        assert "hist_rc=0" not in r.stdout, f"历史注册行不得判成功: {r.stdout}"
+        with open(log, "a") as f:
+            f.write("RuntimeAgent registered: ['new']\n")
+        harness2 = f"""
+set -u
+{fns}
+sleep() {{ :; }}
+log() {{ :; }}
+REGISTER_LOG="RuntimeAgent registered"
+wait_runtime_registered {log!r} 3 "$REGISTER_LOG" 2 && rc=0 || rc=$?
+echo "after_rc=$rc"
+"""
+        r2 = _run(harness2)
+        assert "after_rc=0" in r2.stdout, f"水位之后新增的注册行必须认到: {r2.stdout}"
+
+
+def test_registration_watermark_counts_unterminated_last_line():
+    """历史末行无换行时也计入水位（wc -l 会少算 → 历史注册行被重新扫描成假成功）。"""
+    fns = _extract_function("log_line_watermark") + "\n" + _extract_function("wait_runtime_registered")
+    with tempfile.TemporaryDirectory(prefix="grape-watermark-trunc-") as tmp:
+        log = os.path.join(tmp, "worker.log")
+        with open(log, "w") as f:
+            f.write("boot\nRuntimeAgent registered: ['old']")  # 故意不写结尾换行
+        harness = f"""
+set -u
+{fns}
+sleep() {{ :; }}
+log() {{ :; }}
+REGISTER_LOG="RuntimeAgent registered"
+wm="$(log_line_watermark {log!r})"
+wait_runtime_registered {log!r} "$((wm + 1))" "$REGISTER_LOG" 2 && rc=0 || rc=$?
+echo "wm=$wm rc=$rc"
+"""
+        r = _run(harness)
+        assert "wm=2" in r.stdout, f"末行无换行也必须计入水位: {r.stdout}"
+        assert "rc=0" not in r.stdout.replace("wm=2", ""), f"历史末行不得判成功: {r.stdout}"
+
+
+def test_registration_watermark_sampled_before_agent_start():
+    """结构守卫：日志水位与 PID 快照都必须在启动新进程之前采样（C1 缺陷复发守卫）。"""
+    script = open(os.path.join(ROOT, "scripts", "install-worker.sh"), encoding="utf-8").read().splitlines()
+    wm = [i for i, l in enumerate(script) if l.strip().startswith("_log_start=\"$(log_line_watermark")]
+    assert wm, "主路径应有 _log_start 采样"
+    snap = [i for i, l in enumerate(script) if l.strip().startswith("_pids_before=")]
+    assert snap, "主路径应有 _pids_before 快照"
+    starts = [i for i, l in enumerate(script) if 'setsid nohup "$START_SCRIPT"' in l]
+    assert starts, "应能找到主路径的 setsid nohup 启动行"
+    main_start = max(starts)  # 最后一条是主路径（更早的是回滚函数里的）
+    assert wm[0] < main_start, "日志水位必须在启动新进程之前采样"
+    assert snap[0] < main_start, "PID 快照必须在启动新进程之前采样"

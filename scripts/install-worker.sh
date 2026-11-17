@@ -115,6 +115,18 @@ if [ "$CRED_TYPE" = "sandbox" ]; then
 fi
 # pkill 匹配用转义模块名（src.runtime.agent 里的 . 是正则任意符）
 WORKER_MODULE_ESC="$(printf '%s' "$WORKER_MODULE" | sed 's/\./\\./g')"
+# 判活/pkill 用的模块正则：转义名 + 右边界。不带 ( |$) 时同前缀模块（如
+# ...engine.agent_pool / cloud_worker_xxx）会被当成 worker 本身，误杀或误判活。
+WORKER_MODULE_PAT="${WORKER_MODULE_ESC}( |\$)"
+
+# 启动判活窗口（等进程出现）。原实现是固定 sleep 3：慢盘 / 首次装依赖时新 worker 还没
+# 起来就被判「启动失败」并回滚，等于把一次成功的安装撤掉。取值口径：
+#   * 上限要小于下方「等注册」窗口（普通 worker 10×3s=30s；沙箱 80×3s=240s）；
+#   * 间隔 1s 只是采样粒度，避免 pgrep 空转；
+#   * 15 / 1 为占位值，待真实冷启动耗时分布（P50/P95，含慢盘与首装依赖）实测后再定；
+#     与平台心跳 RUNTIME_HEARTBEAT_INTERVAL=15 无语义关系，勿混用。
+_AGENT_START_POLL_MAX=15
+_AGENT_START_POLL_INTERVAL=1
 
 # 安装目录 [spec §五 v2 用户裁定 2026-10-30; --dir 保留 2026-11-12 用户裁定]:
 # - 普通 worker: 默认 /opt/grape（非 root ~/grape），--dir 可改（原有逻辑）
@@ -249,6 +261,7 @@ restore_upgrade_backup() {
   # 只注入 INSTALL_DIR/VENV/_upgrade_backup_dir/START_SCRIPT），WORKER_MODULE_ESC 为脚本级
   # 变量——缺省回退到任意 worker 模块的宽松匹配，单测/复用场景不塌。
   _wm_esc="${WORKER_MODULE_ESC:-src\.domains\\.runtime\\.engine\.[a-z_]+}"
+  _wm_pat="${_wm_esc}( |\$)"
   log "!!! New agent failed to start, rolling back to pre-upgrade code and restarting the old agent !!!"
   if [ ! -d "$_upgrade_backup_dir/src" ]; then
     # [全新安装语义修复 2026-11-05] 实例 52 实测：全新安装无备份（本来就没有旧代码），
@@ -275,17 +288,69 @@ restore_upgrade_backup() {
     # 限域模式与第 6 步停旧实例一致：按本安装目录 venv 绝对路径匹配，不误杀同机
     # 其他安装/其他用户的 worker。
     _rollback_pat="$(printf '%s' "$VENV/bin/python" | sed 's/[.\[*^$]/\\&/g')"
-    pkill -f "${_rollback_pat}.*-m ${_wm_esc}" >/dev/null 2>&1 || true
+    pkill -f "${_rollback_pat}.*-m ${_wm_pat}" >/dev/null 2>&1 || true
     sleep 1
     setsid nohup "$START_SCRIPT" >> "$INSTALL_DIR/data/worker.log" 2>&1 < /dev/null &
     disown 2>/dev/null || true
   fi
   sleep 5
-  if pgrep -f "$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g').*-m ${_wm_esc}" >/dev/null 2>&1; then
+  if pgrep -f "$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g').*-m ${_wm_pat}" >/dev/null 2>&1; then
     log "Rollback OK: old agent restored and running"
     return 0
   fi
   log "Agent still not running after rollback -- worker offline, manual intervention needed (log: $INSTALL_DIR/data/worker.log / journalctl -u $SERVICE_NAME)"
+  return 1
+}
+
+# 日志水位：注册判据只认「本次启动之后」写入的行，历史运行留下的 registered 不算。
+# 用 awk 的 NR（记录数）而不是 wc -l（换行数）：日志末行若没有结尾换行（上次运行被
+# SIGKILL 截断写入的形态），wc -l 会少算一行，那一行历史注册行就会被 tail 重新纳入
+# 扫描窗口 → 本次根本没注册也被判成功。文件不存在返回 0。
+log_line_watermark() {
+  local _f="${1:-}"
+  if [ -n "$_f" ] && [ -f "$_f" ]; then
+    awk 'END { printf "%d\n", NR }' "$_f" 2>/dev/null || printf '0\n'
+  else
+    printf '0\n'
+  fi
+}
+
+# 判活：只认启动前 PID 快照里没有的新 PID（区分「本次新起的 worker」与「尚未退出的旧实例」）。
+# 用法：wait_new_agent_alive "<pids_before>" "<限域前缀>" "<模块正则>"；命中时 stdout 打印新 PID。
+wait_new_agent_alive() {
+  local _before="${1:- }" _pat="${2:-}"
+  local _mod="${3:-${WORKER_MODULE_PAT:-src\\.domains\\.runtime\\.engine\\.[a-z_]+( |\\$)}}"
+  local _max="${_AGENT_START_POLL_MAX:-15}" _gap="${_AGENT_START_POLL_INTERVAL:-1}"
+  local _alive="" _p _i
+  for _i in $(seq 1 "$_max"); do
+    for _p in $(pgrep -f "${_pat}.*-m ${_mod}" 2>/dev/null || true); do
+      case "$_before" in
+        *" $_p "*) : ;;
+        *) _alive="$_p" ;;
+      esac
+      [ -n "$_alive" ] && break
+    done
+    [ -n "$_alive" ] && break
+    sleep "$_gap"
+  done
+  [ -n "$_alive" ] || return 1
+  printf '%s\n' "$_alive"
+}
+
+# 注册判据：只看日志水位之后新写入的行（历史注册行不参与判定）。
+# 用法：wait_runtime_registered "<log>" "<起始行号>" "<注册日志标记>" "<轮数>"；默认 10 × 3s。
+wait_runtime_registered() {
+  local _f="${1:-}" _from="${2:-1}" _mark="${3:-${REGISTER_LOG:-RuntimeAgent registered}}"
+  local _loops="${4:-${_reg_timeout_loops:-10}}" _i
+  for _i in $(seq 1 "$_loops"); do
+    if [ $((_i % 10)) -eq 0 ]; then
+      log "waiting for worker registration... ($((_i * 3))s elapsed)"
+    fi
+    if tail -n "+${_from}" "$_f" 2>/dev/null | grep -q "$_mark"; then
+      return 0
+    fi
+    sleep 3
+  done
   return 1
 }
 
@@ -716,6 +781,9 @@ EOF
   systemctl enable $SERVICE_NAME >/dev/null 2>&1 || true
   # 升级链防 start-limit：刚被 systemd 停过的单元立即 restart 会被 StartLimitBurst 拦截
   systemctl reset-failed $SERVICE_NAME >/dev/null 2>&1 || true
+  # 重启前记日志水位：后面的 worker.log 兜底判据只认本次重启之后写入的注册行，
+  # 否则同 unit 历史行会让「重启没成功」被读成「已注册」。
+  _log_start_sd="$(log_line_watermark "$INSTALL_DIR/data/worker.log")"
   systemctl restart $SERVICE_NAME || { restore_upgrade_backup systemd || true; fail "New agent failed to start (rollback attempted); check journalctl -u $SERVICE_NAME"; }
   # 启动验证 + 失败回滚（2026-10-14 五台 worker 心跳全断事故补齐）：
   # `systemctl restart` 对 Type=simple 单元在进程 spawn 即返回成功，agent 随后
@@ -756,12 +824,13 @@ EOF
     # "限域杀旧+restart"语义排除——restart 后同 unit 历史行仍在，故这里必须
     # 双条件：宽窗口有注册行 && 当前进程 cmd 含本实例 venv 路径）。
     if journalctl -u $SERVICE_NAME --since "-15 min" --no-pager 2>/dev/null | grep -q "$REGISTER_LOG"; then
-      if pgrep -f "${_pat:-$INSTALL_DIR}.*-m ${WORKER_MODULE_ESC}" >/dev/null 2>&1; then
+      if pgrep -f "${_pat:-$INSTALL_DIR}.*-m ${WORKER_MODULE_PAT}" >/dev/null 2>&1; then
         _reg_ok=1; break
       fi
     fi
     # 双源兜底: worker.log(nohup 场景 systemd 不写它, 恒为第二保险)
-    if tail -n 40 "$INSTALL_DIR/data/worker.log" 2>/dev/null | grep -q "$REGISTER_LOG"; then
+    # 只认重启之后新写入的行（_log_start_sd 为重启前水位）
+    if tail -n "+$((_log_start_sd + 1))" "$INSTALL_DIR/data/worker.log" 2>/dev/null | grep -q "$REGISTER_LOG"; then
       _reg_ok=1; break
     fi
     sleep 3
@@ -840,7 +909,13 @@ EOF
   #    匹配本实例实际启动命令的前缀："$VENV/bin/python" ... -m src.domains.runtime.engine.agent
   #    （$VENV 展开为绝对路径，跨目录/跨用户天然隔离；pgrep -f 按子串匹配含路径）
   _pat="$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g')"
-  pkill -f "${_pat}.*-m ${WORKER_MODULE_ESC}" >/dev/null 2>&1 || true
+  # 停旧进程前采样两样东西（都必须在新进程启动之前）：
+  #   * PID 快照：判活只认启动后新增的 PID，否则旧实例忽略 SIGTERM 慢退出时会被判成功；
+  #   * 日志水位：注册判据只认水位之后的行。若在启动后（哪怕判活窗口之后）采样，新 worker
+  #     在窗口内写下的注册行会被当成历史行，永远读不到 → 健康新版被误判未注册并回滚。
+  _pids_before=" $(pgrep -f "${_pat}.*-m ${WORKER_MODULE_PAT}" 2>/dev/null | tr '\n' ' ')"
+  _log_start="$(log_line_watermark "$INSTALL_DIR/data/worker.log")"
+  pkill -f "${_pat}.*-m ${WORKER_MODULE_PAT}" >/dev/null 2>&1 || true
   sleep 1
   # 脱离终端启动（setsid + nohup，退出 ssh 不中断）
   setsid nohup "$START_SCRIPT" >> "$INSTALL_DIR/data/worker.log" 2>&1 < /dev/null &
@@ -849,30 +924,20 @@ EOF
   # 旧 agent 已被杀、新 agent 没起来 → worker 永久失联无人拉回（k8gtld1 实锤）。
   # 现在验证两件事：进程活着 + 30s 内注册成功（日志出现 registered）。
   # 注册成功才算升级完成；任一失败 → 恢复备份旧代码重启（旧版至少能连上 master）。
-  sleep 3
-  if ! pgrep -f "${_pat}.*-m ${WORKER_MODULE_ESC}" >/dev/null 2>&1; then
+  # 判活窗口见文件顶部 _AGENT_START_POLL_*：固定 sleep 3 在慢盘/首装依赖场景会把已经
+  # 正常起来的 worker 误判成失败并回滚。只认启动后新增的 PID。
+  if ! _alive="$(wait_new_agent_alive "$_pids_before" "$_pat" "$WORKER_MODULE_PAT")"; then
     restore_upgrade_backup nohup || true
     fail "New agent failed to start (rollback attempted); logs: $INSTALL_DIR/data/worker.log"
   fi
-  _reg_ok=""
   # [沙箱 worker 注册窗口 2026-11-04] 同 systemd 分支：沙箱 worker 探测完才注册，30s
   # 不够——扩到 240s；普通 worker 维持 30s。
   _reg_timeout_loops=10
   [ "$CRED_TYPE" = "sandbox" ] && _reg_timeout_loops=80
   # [进度输出 2026-11-05] 静默轮询最长 240s，用户观感=卡住（实例 52 用户实测反馈）。
-  # 每 30s 打一行进度点。
-  for _i in $(seq 1 $_reg_timeout_loops); do
-    if [ $((_i % 10)) -eq 0 ]; then
-      log "waiting for worker registration... ($((_i * 3))s elapsed)"
-    fi
-    if tail -n 40 "$INSTALL_DIR/data/worker.log" 2>/dev/null | grep -q "$REGISTER_LOG"; then
-      _reg_ok=1
-      break
-    fi
-    sleep 3
-  done
-  if [ -n "$_reg_ok" ]; then
-    log "Started in background and registered (pid $(pgrep -f "${_pat}.*-m ${WORKER_MODULE_ESC}" | head -1)), log: $INSTALL_DIR/data/worker.log"
+  # 每 30s 打一行进度点。判据只认水位之后新写入的行（历史注册行不算）。
+  if wait_runtime_registered "$INSTALL_DIR/data/worker.log" "$((_log_start + 1))" "$REGISTER_LOG" "$_reg_timeout_loops"; then
+    log "Started in background and registered (pid $_alive), log: $INSTALL_DIR/data/worker.log"
   elif restore_upgrade_backup nohup; then
     log "New agent process alive but not registered within $((_reg_timeout_loops * 3))s -- rolled back (new version may not reach the master, e.g. a 502 window upgrade)"
   else
