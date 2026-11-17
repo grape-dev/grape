@@ -505,27 +505,27 @@ class PolicyEngine:
         # DB fallback（仅本机 worker）
         result = {"content_hash": "", "admin_policy": "", "admin_exceptions": []}
         try:
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
+            from src.kernel.bulk_read import reader
+            with reader() as _r:
                 if skill_id:
-                    row = db.execute(
+                    row = _r.execute(
                         "SELECT content_hash_package FROM skill WHERE id=? AND is_active=1",
                         (int(skill_id),)
                     ).fetchone()
                     if row and row[0]:
                         result["content_hash"] = row[0]
                 if skill_name:
-                    row = db.execute(
+                    row = _r.execute(
                         "SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1",
                         (skill_name,)
                     ).fetchone()
                     if not row:
-                        row = db.execute(
+                        row = _r.execute(
                             "SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name='*' LIMIT 1"
                         ).fetchone()
                     if row and row[0]:
                         result["admin_policy"] = row[0]
-                rows = db.execute(
+                rows = _r.execute(
                     "SELECT host, host_type, ports, methods, scope, scope_target, skill_digest "
                     "FROM grape_t_egress_admin_exception "
                     "WHERE is_active=1 AND (expires_at IS NULL OR expires_at > datetime('now'))"

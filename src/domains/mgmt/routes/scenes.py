@@ -2071,9 +2071,8 @@ def _selector_scene_values() -> list:
     ["default"]（引擎侧 scene_tags 空回退同口径）。
     """
     try:
-        from src.kernel.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.bulk_read import reader
+        with reader() as c:
             rows = c.execute("SELECT DISTINCT name FROM scene_market WHERE is_active=1").fetchall()
         vals = sorted({str(r[0]).strip().lower() for r in rows if r and str(r[0] or "").strip()})
         return vals + ["default"] if "default" not in vals else vals

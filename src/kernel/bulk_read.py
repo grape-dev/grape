@@ -1,0 +1,89 @@
+"""批量读通道——请求路径长查询免进程锁（G-01 整改，A6/A7 棘轮正解）。
+
+设计依据（scripts/check_async_blocking.py 故障谱）：进程级 `db_lock` 是 SQLite
+单连接时代的串行化手段；持锁的批量扫描会让心跳、claim、/tags、tasks/complete
+一起排队，实测表现为 nginx 504 与「引擎失联」（该守卫文件头记录已复发四次）。
+
+本模块给「读」提供两条免锁通道，语义与 `with db_lock: c = db.cursor()` 对齐：
+
+- **MySQL 后端**：`MySQLCompatDB` 自身线程安全（池化/每线程连接 + 内部兜底锁），
+  不需要进程级 db_lock。指定 ``domain`` 时先走 ``db_registry``（三库拓扑下取目标
+  域连接；同域自动复用 session db，跨域用 DSN）；未开域库（单库）时目标表就在
+  主库，直接用 session db。
+- **SQLite 后端**：session_manager 建库即设 WAL + busy_timeout（跨进程读写安全），
+  读侧开**短连接**即可与写侧并发——不共享连接，也就不需要 db_lock。
+
+只用于**读**（SELECT / PRAGMA）。写仍走既有 db_lock 通道；需要跨域写的走
+``cross_write`` / 域 public 原语（G-02 另行整改）。
+
+用法（等价替换 ``with db_lock: c = db.cursor()`` 的读块）::
+
+    from src.kernel.bulk_read import reader
+    with reader() as c:                    # 本域读
+        rows = c.execute("SELECT ...", ()).fetchall()
+    with reader("mgmt") as c:               # 跨域读（runtime 进程读 mgmt 归属表）
+        rows = c.execute("SELECT ...", ()).fetchall()
+"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+from typing import Iterator
+
+
+@contextmanager
+def reader(domain: str = "") -> Iterator:
+    """读游标上下文（免 db_lock）。出块自动关游标/短连接。
+
+    :param domain: 目标表归属域（"mgmt" / "runtime" / "insight"）。空 = 本域。
+        三库拓扑下跨域读经 db_registry 走目标域 DSN；同域/单库自动回落 session db。
+    """
+    from src.kernel.session_manager import _is_mysql_backend
+    if _is_mysql_backend():
+        if domain:
+            try:
+                from src.kernel import db_registry as _dbreg
+                with _dbreg.cursor(domain) as c:
+                    yield c
+                return
+            except RuntimeError:
+                pass  # 未开域库（单库 MySQL）：目标表就在主库，走 session db
+        from src.kernel.session_manager import db
+        c = db.cursor()
+        try:
+            yield c
+        finally:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001  # best-effort，勿掩蔽调用方异常
+                pass
+        return
+    # SQLite：短连接读（WAL 读者与写者并发；不与 session 共享连接故无需 db_lock）
+    import sqlite3
+    from src.kernel import session_manager as _sm
+    conn = sqlite3.connect(_sm._db_path, timeout=5)
+    try:
+        c = conn.cursor()
+        try:
+            yield c
+        finally:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def read_all(sql: str, params=(), domain: str = "") -> list:
+    """批量读一行集（免锁通道的便捷封装）。"""
+    with reader(domain) as c:
+        return c.execute(sql, params or ()).fetchall()
+
+
+def read_one(sql: str, params=(), domain: str = "") -> tuple | None:
+    """读单行（免锁通道的便捷封装）。"""
+    with reader(domain) as c:
+        return c.execute(sql, params or ()).fetchone()

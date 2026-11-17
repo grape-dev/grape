@@ -1,6 +1,7 @@
 """Agent 路由：详情、配置、类型元数据"""
 
 import json
+import asyncio
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 
@@ -704,11 +705,15 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         if not rids:
             try:
                 from src.api.pipeline_config import get_pipeline_config
-                _dev_scene_row = None
-                with db_lock:
-                    _c1 = db.cursor()
-                    _c1.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
-                    _dev_scene_row = _c1.fetchone()
+                # G-01（A6）：async 路由内同步读经 to_thread——dev_scene 单行
+                # fetchone 读持 db_lock 会卡事件循环（守卫实测该形态复发四次）
+                def _fetch_dev_scene_row(_rk):
+                    from src.kernel.session_manager import db as _sdb, db_lock as _sdl
+                    with _sdl:
+                        _c1 = _sdb.cursor()
+                        _c1.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (_rk,))
+                        return _c1.fetchone()
+                _dev_scene_row = await asyncio.to_thread(_fetch_dev_scene_row, repo_key)
                 _ds = (_dev_scene_row[0] if _dev_scene_row else "") or ""
                 if _ds:
                     _pc = get_pipeline_config(_ds, repo_key=repo_key)

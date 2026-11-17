@@ -75,6 +75,11 @@ fi
 # 掩盖了 head 上真实失败的守卫。此处纳入统一门禁。
 "$PY" -m pytest -q tests/api/test_frontend_cache_version_ratchet.py \
                       tests/api/test_i18n_locale_cache_ratchet.py || exit 1
+# G-01（QA 第 6 轮守卫轴）：异步阻塞棘轮——db_lock 长扫描会让心跳/claim/complete
+# 一起排队（实测 4 次复发为 nginx 504 + 引擎失联）。此前不在本门禁内，PR #1507
+# 曾以 +28 新增形态绕过所有「守卫全绿」自述。请求路径新增读一律走
+# src/kernel/bulk_read.reader()（免进程锁读通道）。
+"$PY" scripts/check_async_blocking.py || exit 1
 if command -v node >/dev/null 2>&1; then
   _rc=0
   for _f in tests/js/test_*.js; do

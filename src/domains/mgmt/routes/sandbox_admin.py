@@ -188,16 +188,16 @@ def list_whitelist(
 ):
     _require_admin(user)
     """列出白名单规则。"""
-    db, db_lock = _get_db()
-    with db_lock:
+    from src.kernel.bulk_read import reader
+    with reader() as _r:
         if backend_name:
-            rows = db.execute(
+            rows = _r.execute(
                 "SELECT id, backend_name, domain, method, path_prefix, scheme, port, created_at, updated_at "
                 "FROM grape_t_engine_sandbox_whitelist WHERE backend_name=? ORDER BY id",
                 (backend_name,)
             ).fetchall()
         else:
-            rows = db.execute(
+            rows = _r.execute(
                 "SELECT id, backend_name, domain, method, path_prefix, scheme, port, created_at, updated_at "
                 "FROM grape_t_engine_sandbox_whitelist ORDER BY id"
             ).fetchall()
@@ -338,16 +338,16 @@ def list_paths(
 ):
     _require_admin(user)
     """列出文件系统路径。"""
-    db, db_lock = _get_db()
-    with db_lock:
+    from src.kernel.bulk_read import reader
+    with reader() as _r:
         if backend_name:
-            rows = db.execute(
+            rows = _r.execute(
                 "SELECT id, backend_name, path, access, created_at, updated_at "
                 "FROM grape_t_engine_sandbox_paths WHERE backend_name=? ORDER BY id",
                 (backend_name,)
             ).fetchall()
         else:
-            rows = db.execute(
+            rows = _r.execute(
                 "SELECT id, backend_name, path, access, created_at, updated_at "
                 "FROM grape_t_engine_sandbox_paths ORDER BY id"
             ).fetchall()
@@ -448,16 +448,16 @@ def list_config(
 ):
     _require_admin(user)
     """列出沙箱配置。"""
-    db, db_lock = _get_db()
-    with db_lock:
+    from src.kernel.bulk_read import reader
+    with reader() as _r:
         if runtime_id:
-            rows = db.execute(
+            rows = _r.execute(
                 "SELECT id, runtime_id, engine_name, sandbox_mode, degrade_policy, created_at, updated_at "
                 "FROM grape_t_engine_sandbox_config WHERE runtime_id=? ORDER BY id",
                 (runtime_id,)
             ).fetchall()
         else:
-            rows = db.execute(
+            rows = _r.execute(
                 "SELECT id, runtime_id, engine_name, sandbox_mode, degrade_policy, created_at, updated_at "
                 "FROM grape_t_engine_sandbox_config ORDER BY id"
             ).fetchall()

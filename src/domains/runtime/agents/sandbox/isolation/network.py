@@ -1081,9 +1081,9 @@ class _WhitelistCache:
                     log.info(f"WhitelistCache loaded from API: {len(self._domains)} domains")
                     return
             # API 不可用时 fallback 到本地 DB（仅本机 worker 有 DB）
-            from src.kernel.session_manager import db, db_lock
-            with db_lock:
-                rows = db.execute(
+            from src.kernel.bulk_read import reader
+            with reader() as _r:
+                rows = _r.execute(
                     "SELECT DISTINCT domain FROM grape_t_engine_sandbox_whitelist "
                     "WHERE backend_name='*'"
                 ).fetchall()

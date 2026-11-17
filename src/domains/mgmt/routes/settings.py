@@ -1370,8 +1370,8 @@ def _build_cred_map(db, db_lock) -> dict:
     # [沙箱迁移 i7] 沙箱凭据关联的平台 id + 启用态（设备卡片禁用徽标 / 跳 Provider 详情用）
     # grape_t_sandbox_provider_config 归 mgmt：mgmt 进程本地游标
     try:
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.bulk_read import reader
+        with reader() as c:
             _prov_rows = c.execute(
                 "SELECT id, enabled, runtime_credential_id FROM grape_t_sandbox_provider_config "
                 "WHERE runtime_credential_id > 0").fetchall()
@@ -3039,8 +3039,8 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: st
     use_paging = page_size and page_size > 0
     total = 0
     
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         if _is_cloud_worker:
             # cloud_worker：JOIN grape_t_sandbox_provider_config——跳过凭据已禁用的 provider 的模板
             # + 跳过模板自身 enabled=0 的行（禁用模板的引擎不应注册；provider_id 关联按 v3 语义，
@@ -3106,8 +3106,7 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: st
     if rows:
         _provider_ids = set(r.get("provider_id", 0) for r in rows if r.get("provider_id"))
         if _provider_ids:
-            with db_lock:
-                c = db.cursor()
+            with reader() as c:
                 _placeholders = ",".join("?" * len(_provider_ids))
                 # [删 name 列] provider_name=凭据名（rc.name JOIN）——引擎名 provider 段
                 # 跟随凭据名，凭据改名 → 60s 内引擎名换新（rename-cleanup 兜底清旧行）
@@ -3124,8 +3123,7 @@ def list_sandbox_templates(request: Request, provider: str = "", provider_id: st
         # v3.1：engines 从 grape_t_engine_template_binding 取（模板行的 engines 列已废弃恒 '[]'）——
         # 前端 Engines 列与 cloud_worker 引擎注册都消费这里
         if rows:
-            with db_lock:
-                c = db.cursor()
+            with reader() as c:
                 c.execute("SELECT provider_id, engine_type, template_id FROM grape_t_engine_template_binding")
                 _bind_rows = c.fetchall()
             _tpl_ids = set(r.get("id", 0) for r in rows)
@@ -3275,8 +3273,8 @@ def list_sandbox_providers(q: str = "", page: int = 1, page_size: int = 20,
         search_params = [f"%{q}%", f"%{q}%", f"%{q}%"]
 
     use_paging = page_size and page_size > 0
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         # [范围由凭据承担] 可见性修复(2026-10-30): owner_id 形态错配——user 凭据的
         # owner 在 owner_name(用户名字符串), repo 凭据 owner_id=repo_key 字符串, 与
         # user.id(数字) 永不匹配 → 非 global 凭据全部不可见(443 实测 count=0)。
@@ -3824,9 +3822,8 @@ def list_provider_configs(user: dict = Depends(require_no_session_token)):
 
     GET 不需要 admin 权限——登录用户即可查看（api_key 已脱敏）。
     """
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         # [provider 列已删 2026-11-06 修复] 列表 SQL 仍引用已物理删除的 provider 列
         # （500 no such column: provider，E2E 校准实证）——改按 platform 展示 +
         # LEFT JOIN 凭据名做展示名 + runtime_credential_id 供前端深链
@@ -4034,8 +4031,8 @@ def list_repo_llm_credentials(repo_key: str = "", user: dict = Depends(require_n
     from src.kernel.session_manager import db, db_lock
     if not repo_key:
         return {"credentials": []}
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         rows = c.execute("SELECT id, engine_type, provider, api_key_enc, base_url, model, enabled, updated_by, updated_at "
                          "FROM grape_t_repo_llm_credentials WHERE repo_key=? ORDER BY id", (repo_key,)).fetchall()
     return {"credentials": [
@@ -4173,9 +4170,8 @@ def create_llm_credential(body: LLMCredentialBody, user: dict = Depends(require_
 @router.get("/llm-credentials", operation_id="settings_llm_credentials", summary="List LLM credentials", description="List user's LLM credentials without plaintext keys.")
 def list_llm_credentials(user: dict = Depends(require_no_session_token)):
     """列出用户的 LLM 凭据（不含明文 key）。"""
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         c.execute(
             "SELECT id, provider, base_url, model, enabled, engine_type, created_at, updated_at "
             "FROM grape_t_user_llm_credentials WHERE user_id=? ORDER BY id",

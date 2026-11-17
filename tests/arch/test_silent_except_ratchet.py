@@ -346,6 +346,15 @@ EXEMPT_FILES: dict = {
 
     # ── kernel/crypto.py（原 utils/crypto.py，架构守卫 G-17 上移 kernel；crypto.json 读取异常吞掉后落显式 RuntimeError fail-closed（PermissionError 仍上抛；key 为空必炸，非静默降级））──
     ('kernel/crypto.py', 'except Exception:'): 1,
+
+    # ── kernel/bulk_read.py（G-01 免锁读通道）：reader() 出块关游标/短连接是
+    # best-effort 清理——调用方业务异常永远优先上抛，清理失败只降 debug 日志，
+    # 不允许让一次资源回收失败把正常读路径变成 500（与 crypto.py fail-closed
+    # 理由对称：这里是 fail-open 的资源清理面，非异常吞噬面）。
+    # RuntimeError: 单库拓扑下 db_registry 无该域 DSN 是**预期形态**（注释载明
+    # 回落语义），pass 即降级本身。──
+    ('kernel/bulk_read.py', 'except Exception:'): 3,
+    ('kernel/bulk_read.py', 'except RuntimeError:'): 1,
 }
 
 

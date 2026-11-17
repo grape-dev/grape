@@ -158,8 +158,8 @@ def _validate_engine_runtime_uids(user: dict, repo_key: str, engine_uids: list) 
         if not is_uid_str(v):
             raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid engine_runtime_uids"})
         norm.append(v)
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         ph = ",".join("?" * len(norm))
         try:
             rows = c.execute(
@@ -199,8 +199,8 @@ def _reject_dual_engine_fields(uids: list, ids: list) -> None:
 
 def _autopilot_exec_cols() -> list:
     """返回 autopilot_executions 表的实际列名（v3.0 迁移后 issue_number 可能不存在）。"""
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         c.execute("PRAGMA table_info(autopilot_executions)")
         return [r[1] for r in c.fetchall()]
 
@@ -373,8 +373,8 @@ def list_tasks(
                 _all_uids.add(str(_u or "").strip().lower())
         if _all_uids:
             try:
-                with db_lock:
-                    _c = db.cursor()
+                from src.kernel.bulk_read import reader
+                with reader() as _c:
                     _ph = ",".join("?" * len(_all_uids))
                     for _rid in _c.execute(
                             f"SELECT id FROM agent_runtimes WHERE LOWER(engine_uid) IN ({_ph})",
@@ -422,8 +422,8 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
         _uids = [str(u).strip().lower() for u in (task.get("engine_runtime_uids") or [])]
         if _uids:
             try:
-                with db_lock:
-                    _cu = db.cursor()
+                from src.kernel.bulk_read import reader
+                with reader() as _cu:
                     _phu = ",".join("?" * len(_uids))
                     for _r in _cu.execute(
                             f"SELECT id FROM agent_runtimes WHERE LOWER(engine_uid) IN ({_phu})",

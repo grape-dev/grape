@@ -3325,8 +3325,8 @@ def runtime_list_cloud_sandboxes(
         extra_params.append(state)
     extra_where = (" AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
 
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         if repo_key:
             check_repo_access(user, repo_key)
             params = [repo_key] + extra_params
@@ -3505,8 +3505,8 @@ def runtime_provider_configs(cred: CredentialContext = Depends(_require_credenti
     """
     from src.kernel.crypto import decrypt
     providers = []
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         # [范围由凭据承担] 附带 credential_scope（cloud_worker claim 全局任务 tags 判定用）
         # [锚简化] 附带 credential_uid（凭据自身稳定键——worker 本地缓存键/工件命名换锚源）
         c.execute("SELECT spc.id, rc.name AS name, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.max_sandboxes, rc.scope, rc.credential_uid "
@@ -3568,8 +3568,8 @@ def runtime_provider_active_sandboxes(provider_id: str,
 def runtime_cloud_runtimes(cred: CredentialContext = Depends(_require_credential_ctx)):
     """[沙箱迁移] v3 R16：查当前 credential 下已有的 cloud 类型 runtime。"""
     runtimes = []
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         c.execute(
             "SELECT name, version, healthy, installed, cli_path, provider, runtime_type, runtime_info "
             "FROM agent_runtimes WHERE credential_id=? AND runtime_type='cloud'",
@@ -3590,8 +3590,8 @@ def runtime_cloud_runtimes(cred: CredentialContext = Depends(_require_credential
 def runtime_whitelist(cred: CredentialContext = Depends(_require_credential_ctx)):
     """[沙箱迁移] 下发沙箱白名单域名给 worker（worker 不直接查 DB）。"""
     domains = []
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         c.execute("SELECT DISTINCT domain FROM grape_t_engine_sandbox_whitelist WHERE backend_name='*'")
         rows = c.fetchall()
     for row in rows:
@@ -3607,8 +3607,8 @@ def runtime_sandbox_paths(backend_name: str = "",
                           cred: CredentialContext = Depends(_require_credential_ctx)):
     """[沙箱迁移] 下发沙箱路径配置给 worker。"""
     paths = []
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         c.execute("SELECT path, access FROM grape_t_engine_sandbox_paths WHERE backend_name=?", (backend_name,))
         rows = c.fetchall()
     for row in rows:
@@ -3623,8 +3623,8 @@ def runtime_skill_egress(skill_name: str = "", skill_id: int = 0,
                          cred: CredentialContext = Depends(_require_credential_ctx)):
     """[沙箱迁移] 下发 skill egress 策略给 worker。"""
     result = {"content_hash": "", "admin_policy": "", "admin_exceptions": []}
-    with db_lock:
-        c = db.cursor()
+    from src.kernel.bulk_read import reader
+    with reader() as c:
         if skill_id:
             try:
                 c.execute("SELECT content_hash_package FROM skill WHERE id=? AND is_active=1", (int(skill_id),))
@@ -3668,8 +3668,8 @@ def get_engine_sandbox_config(user: dict = Depends(require_no_session_token)):
     _global_on = True
     _engines = []
     try:
-        with db_lock:
-            c = db.cursor()
+        from src.kernel.bulk_read import reader
+        with reader() as c:
             c.execute("SELECT engine_type, sandbox_on FROM grape_t_engine_sandbox_toggle")
             for _et, _on in c.fetchall():
                 if _et == "global":
