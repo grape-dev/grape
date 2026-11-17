@@ -982,7 +982,7 @@
             <span class="dbv-engclear" @click="engCurIds = []">全不选</span>
           </div>
         </template>
-        <input v-model="engineModal.q" class="dbv-engsearch" placeholder="t('dv2.engine_search_ph')" />
+        <input v-model="engineModal.q" class="dbv-engsearch" :placeholder="t('dv2.engine_search_ph')" />
         <div v-if="engineModal.mode === 'engine'" class="dbv-englist">
           <div
             v-if="!engModalFiltered.length"
@@ -1092,7 +1092,7 @@
           v-model="revealDlg.password"
           type="password"
           class="dbv-copy-input"
-          placeholder="t('dv2.grape_password')"
+          :placeholder="t('dv2.grape_password')"
           @keyup.enter="submitReveal()"
         />
         <div v-if="revealDlg.error" class="dbv-reveal-err">{{ revealDlg.error }}</div>
