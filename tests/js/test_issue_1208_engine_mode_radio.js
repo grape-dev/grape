@@ -29,7 +29,7 @@ assertContains('hint tag line in tag panel', "t('selector_tag_hint')");
 assertContains('hint engine line in engine panel', "t('selector_engine_hint')");
 // 3. selector 复选组三组：engine: / scope:（UI 标签「范围」）/ scene:（D15 勿造新词）
 assertContains('engine group', "prefix: 'engine',");
-assertContains('scope group label 范围', "const SEL_SCOPE_LABELS = { global: '全局', user: '个人', repo: '仓库' }");
+assertContains('scope group label i18n', "const SEL_SCOPE_LABELS = { global: t('dv2.sel_scope_global'), user: t('dv2.sel_scope_user'), repo: t('dv2.sel_scope_repo') }");
 assertContains('scene group', "prefix: 'scene',");
 // 4. 匹配语义组内 OR + 组间 AND（D14 客户端同语义）
 assertContains('match groups every(AND)', '.every(function (p)');
@@ -67,7 +67,7 @@ assertContains('edit nodes carry uids/selector', 'engine_runtime_uids: node.engi
 assertContains('nodes payload carries selector', 'engine_selector: n.engine_selector || {}');
 assertContains('disable clears all three modes', 'node.engine_selector = {}')
 // 9. selector 徽章（摘要展示人类可读维度标签：引擎/范围/场景）
-assertContains('selector badge', "'标签命中 ' + total + ' 个引擎");
+assertContains('selector badge', "t('dv2.sum_tag_hit', { total: total, hit: hit })");
 assertContains('selector badge label helper', 'function engSelectorTagLabel(tag)');
 assertContains('badge entry', 'function engineBadgeHtml(node)');
 
