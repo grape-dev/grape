@@ -77,7 +77,9 @@ HOOK_MARKER = "# grape-branch-guard (Issue #993)"
 # 2028-03：固化元数据改为单行 marker 注释（hook-interpreter/hook-module-path/
 # hook-repo-key），修复 _existing_hook_usable 解析多行内联代码恒 False 的缺陷。
 # 2028-04：spec 构建并入钩子 try/except（I-3），_spec is None 时不再 fail-closed。
-HOOK_TEMPLATE_VERSION = "2028-04"
+# 2028-05：shell 包装层 stdin 暂存失败改 fail-open（TMPDIR 不可写不再 exit 1），
+# 告警单行含 --no-verify 指引（Issue #2933）。
+HOOK_TEMPLATE_VERSION = "2028-05"
 HOOK_VERSION_LINE = f"# hook-template-version: {HOOK_TEMPLATE_VERSION}"
 # 钩子运行时自检依赖：缺失时 fail-open 并输出可定位告警（避免 Agent 反复盲重试）。
 HOOK_DEP_MODULES = ("src.lock", "src.kernel.session_manager")
@@ -616,7 +618,8 @@ def _hook_entry_code(root: str, module_path: str) -> str:
         "    _rc = _m.hook_main()\n"
         "except Exception as _e:\n"
         f"    sys.stderr.write('\\n[branch-guard] WARNING 守卫自身异常，已放行本次 push "
-        f"(fail-open): %r [module=%s]\\n' % (_e, {json.dumps(module_path)}))\n"
+        f"(fail-open): %r [module=%s]；如需跳过本钩子可加 --no-verify\\n' "
+        f"% (_e, {json.dumps(module_path)}))\n"
         "    _rc = 0\n"
         "sys.exit(_rc)"
     )
@@ -635,11 +638,27 @@ def _missing_hook_deps() -> list:
 
 def _fail_open(reason: str) -> None:
     """守卫自身异常/依赖缺失：放行本次 push 并输出可定位告警。"""
-    sys.stderr.write(f"\n[branch-guard] WARNING {reason}；守卫已放行本次 push（fail-open）\n")
+    sys.stderr.write(f"\n[branch-guard] WARNING {reason}；守卫已放行本次 push（fail-open）；"
+                     f"如需跳过本钩子可加 --no-verify\n")
     try:
         log.warning(f"branch guard fail-open: {reason}")
     except Exception:
         pass
+
+
+def _hook_not_upgraded(repo_key: str, wt_dir: str, reason: str) -> None:
+    """Issue #2933：钩子安装/升级失败必须可观测。
+
+    只读 gitdir（容器只读挂载）下 hooks 目录无法重写时，旧模板（2028-03 及更早）
+    不含导入期保护；本轮由 ``src.kernel.config`` 导入期降级兜底，但「守卫未升级」
+    本身必须留下可定位告警，禁止静默 ``return False``。
+    """
+    message = (f"branch guard hook not upgraded (read-only hooks dir) "
+               f"{repo_key} {wt_dir}: {reason}")
+    try:
+        log.warning(message)
+    except Exception:
+        return
 
 
 def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
@@ -659,6 +678,7 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
     try:
         hooks_dir = _hooks_dir(wt_dir)
         if not hooks_dir:
+            _hook_not_upgraded(repo_key, wt_dir, "hooks dir not resolvable")
             return False
         os.makedirs(hooks_dir, exist_ok=True)
         hook_path = os.path.join(hooks_dir, "pre-push")
@@ -699,7 +719,14 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
             'STDIN_TMP="$(mktemp "${TMPDIR:-/tmp}/grape-pre-push.XXXXXX" 2>/dev/null)" || STDIN_TMP=""',
             'if [ -z "$STDIN_TMP" ]; then STDIN_TMP="${TMPDIR:-/tmp}/grape-pre-push.$$"; fi',
             "trap 'rm -f \"$STDIN_TMP\"' EXIT INT TERM HUP",
-            'cat > "$STDIN_TMP" || exit 1',
+            # Issue #2933：stdin 暂存失败（TMPDIR 只读/不可写）属环境问题，不得 exit 1
+            # 拒推；告警单行且含 --no-verify 指引，之后 fail-open 退出。
+            'if ! cat > "$STDIN_TMP" 2>/dev/null; then',
+            ('    echo "[branch-guard] WARNING 无法暂存 pre-push stdin（临时目录不可写）；'
+             '守卫已放行本次 push（fail-open）。如需跳过本钩子可加 --no-verify" >&2'),
+            '    rm -f "$STDIN_TMP" 2>/dev/null || true',
+            "    exit 0",
+            "fi",
             'LOCAL="$(dirname "$0")/pre-push.grape-local"',
             'if [ -x "$LOCAL" ]; then "$LOCAL" "$@" < "$STDIN_TMP" || exit $?; fi',
             f'{shlex.quote(interpreter)} -c {shlex.quote(code)} {shlex.quote(repo_key)} < "$STDIN_TMP"',
@@ -713,7 +740,7 @@ def install_pre_push_hook(wt_dir: str, repo_key: str) -> bool:
             pass
         return True
     except Exception as e:
-        log.warning(f"branch guard install pre-push hook failed {wt_dir}: {e}")
+        _hook_not_upgraded(repo_key, wt_dir, f"{e.__class__.__name__}: {e}")
         return False
 
 

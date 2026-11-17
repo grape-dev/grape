@@ -9,7 +9,7 @@
   辅助脚本读已注入的 `$BOT_GITCODE_TOKEN`（不落盘、随目录清理）。
 """
 
-import base64, json, os, re, shutil, subprocess, threading, time
+import base64, json, os, re, shutil, subprocess, sys, threading, time
 
 from src.kernel import config
 
@@ -855,6 +855,16 @@ def _install_branch_guard_hook(issue_dir: str, repo_key: str, branch: str) -> No
         from src.domains.runtime.engine.branch_guard import install_pre_push_hook
         if not install_pre_push_hook(issue_dir, repo_key):
             log.warning(f"repogit branch guard hook install failed {repo_key}:{branch}")
+            # Issue #2933：只读 hooks 目录下钩子无法升级时必须可见（不静默）；
+            # 推送本身由 config 导入期日志降级兜底，不受影响。
+            try:
+                sys.stderr.write(
+                    "[branch-guard] WARNING 守卫钩子未升级（hooks 目录可能只读）；"
+                    "本次依赖导入期日志降级兜底，不影响 push。"
+                    "如需跳过本钩子可加 --no-verify\n")
+                sys.stderr.flush()
+            except Exception:
+                return
     except Exception as e:
         log.warning(f"repogit branch guard hook install error {repo_key}:{branch}: {e}")
 
