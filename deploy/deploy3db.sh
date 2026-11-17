@@ -35,7 +35,33 @@ if [ "$_units_on" = "1" ]; then
   echo "[3db] systemd 模式：将通过 systemctl restart grape@{mgmt,event,worker,insight} 部署"
   echo "[3db] （回到 nohup 方式: systemctl disable --now grape@{mgmt,event,worker,insight}）"
 fi
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# 本 checkout 根：脚本常被复制/软链到 ~/deploy3db.sh，那时 dirname/.. 会算成家目录。
+# REPO / PY / cd / 前端构建 / 技能镜像必须共用这同一个解析结果，否则主流程仍指向家目录。
+_self_candidate="$(readlink -f "$(dirname "$0")/.." 2>/dev/null || true)"
+_SELF="$_self_candidate"
+_is_checkout() { [ -d "$1/src/api/frontend/app" ]; }
+if ! _is_checkout "$_SELF"; then
+  _pwd_real="$(readlink -f "${PWD:-/}" 2>/dev/null || echo /)"
+  _fallback=""
+  for _c in /home/*/grape-new-version2; do
+    _c="$(readlink -f "$_c" 2>/dev/null)" || continue
+    _is_checkout "$_c" || continue
+    # 优先选调用者自己的 checkout（$PWD 在它下面）
+    case "$_pwd_real/" in
+      "$_c/"*) _fallback="$_c"; break ;;
+    esac
+    [ -z "$_fallback" ] && _fallback="$_c"
+  done
+  if [ -n "$_fallback" ]; then
+    _SELF="$_fallback"
+    echo "[3db] WARN: 脚本不在 checkout 内（$_self_candidate），改用 $_SELF" >&2
+  fi
+fi
+if ! _is_checkout "$_SELF"; then
+  echo "[3db] FAIL: 找不到可用 checkout（需含 src/api/frontend/app），请从 checkout 内运行" >&2
+  exit 1
+fi
+REPO="$_SELF"
 LOGS=/home/grape/grape-logs
 mkdir -p "$LOGS"
 cd "$REPO" || exit 1
@@ -221,24 +247,6 @@ else
     fi
   fi
 fi
-# 本 checkout 根（前端构建与技能树镜像都要用，必须在使用前定义）。
-# 注意：这个脚本常被复制/软链到 ~/deploy3db.sh —— 那时 dirname/.. 会算成家目录，
-# 于是前端构建静默跳过（"无 node_modules 或 npm"），页面继续用旧产物。
-# 所以先用候选路径校验，不成立再回落到"第一个含前端工作区的 checkout"。
-_SELF="$(readlink -f "$(dirname "$0")/..")"
-if [ ! -d "$_SELF/src/api/frontend/app" ]; then
-  _fallback=""
-  for _c in /home/*/grape-new-version2; do
-    [ -d "$_c/src/api/frontend/app" ] || continue
-    # root 部署时优先选调用者自己的 checkout（$PWD 在它下面）
-    case "$(readlink -f "${PWD:-/}")/" in
-      "$(readlink -f "$_c")/"*) _fallback="$(readlink -f "$_c")"; break ;;
-    esac
-    [ -z "$_fallback" ] && _fallback="$(readlink -f "$_c")"
-  done
-  [ -n "$_fallback" ] && _SELF="$_fallback"
-fi
-
 # 前端构建：static-dist/ 是构建产物且被 gitignore，只同步 src 不会更新它。
 # 产物缺失或落后时，index.html 里新引用的 view 会 404 → SPA fallback 返回 index.html →
 # 浏览器按 module script 严格校验 MIME，报 "Expected a JavaScript-or-Wasm module script"。
@@ -268,14 +276,6 @@ if [ -d "$_APP/node_modules" ] && command -v npm >/dev/null 2>&1; then
   else
     echo "[3db] frontend: 产物已最新，跳过构建"
   fi
-  # 把 index.html 里的 ?v= 同步成产物内容哈希：手写数字容易漏改，
-  # 改了视图内容却没改版本号时，浏览器会一直用缓存里的旧文件。
-  # 用绝对路径调解释器：部署脚本常被 root 在 /root 下执行，相对 venv/bin/python 会找不到
-  if "$_SELF/venv/bin/python" "$_SELF/scripts/bump_asset_versions.py" >/tmp/grape-fe-versions.log 2>&1; then
-    tail -1 /tmp/grape-fe-versions.log | sed 's/^/  [3db] frontend: /'
-  else
-    echo "[3db] frontend: WARN 资产版本号同步失败（日志 /tmp/grape-fe-versions.log）" >&2
-  fi
 else
   echo "[3db] frontend: 无 node_modules 或 npm，跳过构建（页面可能用了旧产物）"
 fi
@@ -283,24 +283,47 @@ fi
 # 技能树镜像：引擎物化技能读的是 <checkout>/.grape/skills，不是仓库根的 skills/。
 # 本脚本只部署当前 checkout，同机其它租户 checkout（如 orgtest）不会自己更新 ——
 # 缺了就会被一致性门禁判「bound skill not materialized」而拒绝执行任务。
+# 镜像用「备份目标 → 合并覆盖」而不是 rsync --delete：租户侧可能有本机自建文件，
+# 直接删除不可恢复；cp 回退也保持同样的合并语义，两条路径行为一致。
+_mirror_dir() {
+  _src=$1; _dst=$2; _dst_owner=$3
+  [ -d "$_src" ] || return 0
+  mkdir -p "$_dst" || return 1
+  rm -rf "$_dst.bak" 2>/dev/null
+  cp -a "$_dst/." "$_dst.bak/" 2>/dev/null || true
+  _rc=0
+  if command -v rsync >/dev/null 2>&1; then
+    # --checksum：同大小同 mtime 但内容不同时也必须覆盖（默认 size+mtime 会漏同步）
+    rsync -a --checksum "$_src/" "$_dst/" || _rc=$?
+  else
+    cp -a "$_src/." "$_dst/" || _rc=$?
+  fi
+  if [ -n "$_dst_owner" ]; then
+    chown -R "$_dst_owner:$_dst_owner" "$_dst" 2>/dev/null || true
+  fi
+  return "$_rc"
+}
 for _co in /home/*/grape-new-version2; do
   [ -d "$_co/.grape/skills" ] || continue
   # 必须用 readlink -f 比较：cd+pwd 在软链 checkout 下返回解析后的路径，会和 _SELF 不等，
-  # 于是把自己也当成"其它 checkout"镜像一遍（rsync 同源同目标，无害但多余）。
+  # 于是把自己也当成"其它 checkout"镜像一遍（同源同目标，无害但多余）。
   [ "$(readlink -f "$_co")" = "$_SELF" ] && continue
   _own=$(stat -c %U "$_co" 2>/dev/null || echo root)
-  rsync -a --delete "$_SELF/.grape/skills/" "$_co/.grape/skills/" 2>/dev/null \
-    || cp -a "$_SELF/.grape/skills/." "$_co/.grape/skills/"
-  chown -R "$_own:$_own" "$_co/.grape/skills" 2>/dev/null || true
-  echo "[3db] skills mirrored -> $_co（$(find "$_co/.grape/skills" -type f 2>/dev/null | wc -l) 文件）"
+  if _mirror_dir "$_SELF/.grape/skills" "$_co/.grape/skills" "$_own"; then
+    echo "[3db] skills mirrored -> $_co（$(find "$_co/.grape/skills" -type f 2>/dev/null | wc -l) 文件，备份 $_co/.grape/skills.bak）"
+  else
+    echo "[3db] WARN: skills 镜像失败 -> $_co（备份仍保留在 $_co/.grape/skills.bak）" >&2
+  fi
   # 前端产物同样不随源码同步（gitignore），租户 checkout 需要同一份 view 才能正常出页面
   if [ -d "$_co/src/api/frontend/static-dist" ] && [ -d "$_SELF/src/api/frontend/static-dist" ]; then
-    rsync -a --delete "$_SELF/src/api/frontend/static-dist/" "$_co/src/api/frontend/static-dist/" 2>/dev/null \
-      || cp -a "$_SELF/src/api/frontend/static-dist/." "$_co/src/api/frontend/static-dist/"
-    mkdir -p "$_co/src/api/frontend/shell"
-    cp -f "$_SELF/src/api/frontend/shell/index.html" "$_co/src/api/frontend/shell/index.html" 2>/dev/null || true
-    chown -R "$_own:$_own" "$_co/src/api/frontend/static-dist" "$_co/src/api/frontend/shell" 2>/dev/null || true
-    echo "[3db] frontend dist mirrored -> $_co（$(ls "$_co/src/api/frontend/static-dist/viewjs" 2>/dev/null | wc -l) 个 view）"
+    if _mirror_dir "$_SELF/src/api/frontend/static-dist" "$_co/src/api/frontend/static-dist" "$_own"; then
+      mkdir -p "$_co/src/api/frontend/shell"
+      cp -f "$_SELF/src/api/frontend/shell/index.html" "$_co/src/api/frontend/shell/index.html" 2>/dev/null || true
+      chown -R "$_own:$_own" "$_co/src/api/frontend/shell" 2>/dev/null || true
+      echo "[3db] frontend dist mirrored -> $_co（$(ls "$_co/src/api/frontend/static-dist/viewjs" 2>/dev/null | wc -l) 个 view，备份 $_co/src/api/frontend/static-dist.bak）"
+    else
+      echo "[3db] WARN: frontend dist 镜像失败 -> $_co（备份仍保留在 $_co/src/api/frontend/static-dist.bak）" >&2
+    fi
   fi
 done
 
