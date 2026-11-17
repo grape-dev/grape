@@ -224,7 +224,9 @@ fi
 # 技能树镜像：引擎物化技能读的是 <checkout>/.grape/skills，不是仓库根的 skills/。
 # 本脚本只部署当前 checkout，同机其它租户 checkout（如 orgtest）不会自己更新 ——
 # 缺了就会被一致性门禁判「bound skill not materialized」而拒绝执行任务。
-_SELF="$(readlink -f "$(dirname "$0")/../..")"
+# 脚本在 <repo>/deploy/deploy3db.sh，所以 dirname 已是 <repo>/deploy，只需上跳一级；
+# 写成 ../.. 会算成 /home/<user>，镜像源随之指向不存在的路径（脚本会静默退化）。
+_SELF="$(readlink -f "$(dirname "$0")/..")"
 for _co in /home/*/grape-new-version2; do
   [ -d "$_co/.grape/skills" ] || continue
   # 必须用 readlink -f 比较：cd+pwd 在软链 checkout 下返回解析后的路径，会和 _SELF 不等，
