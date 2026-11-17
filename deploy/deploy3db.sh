@@ -221,12 +221,38 @@ else
     fi
   fi
 fi
+# 本 checkout 根（前端构建与技能树镜像都要用，必须在使用前定义）
+_SELF="$(readlink -f "$(dirname "$0")/..")"
+
+# 前端构建：static-dist/ 是构建产物且被 gitignore，只同步 src 不会更新它。
+# 产物缺失或落后时，index.html 里新引用的 view 会 404 → SPA fallback 返回 index.html →
+# 浏览器按 module script 严格校验 MIME，报 "Expected a JavaScript-or-Wasm module script"。
+_APP="$_SELF/src/api/frontend/app"
+_DIST="$_SELF/src/api/frontend/static-dist/viewjs"
+if [ -d "$_APP/node_modules" ] && command -v npm >/dev/null 2>&1; then
+  _stale=0
+  [ -d "$_DIST" ] || _stale=1
+  if [ "$_stale" = "0" ]; then
+    # 源码目录里有比产物更新的文件（新增/修改视图）才算落后
+    [ -n "$(find "$_APP/src" -type f -newer "$_DIST" -print -quit 2>/dev/null)" ] && _stale=1
+  fi
+  if [ "$_stale" = "1" ]; then
+    echo "[3db] frontend: 源码比产物新，开始构建"
+    if ( cd "$_APP" && npm run build >/tmp/grape-fe-build.log 2>&1 ); then
+      echo "[3db] frontend: 构建完成（$(ls "$_DIST" 2>/dev/null | wc -l) 个 view）"
+    else
+      echo "[3db] WARN: 前端构建失败，页面可能白屏（日志 /tmp/grape-fe-build.log）" >&2
+    fi
+  else
+    echo "[3db] frontend: 产物已最新，跳过构建"
+  fi
+else
+  echo "[3db] frontend: 无 node_modules 或 npm，跳过构建（页面可能用了旧产物）"
+fi
+
 # 技能树镜像：引擎物化技能读的是 <checkout>/.grape/skills，不是仓库根的 skills/。
 # 本脚本只部署当前 checkout，同机其它租户 checkout（如 orgtest）不会自己更新 ——
 # 缺了就会被一致性门禁判「bound skill not materialized」而拒绝执行任务。
-# 脚本在 <repo>/deploy/deploy3db.sh，所以 dirname 已是 <repo>/deploy，只需上跳一级；
-# 写成 ../.. 会算成 /home/<user>，镜像源随之指向不存在的路径（脚本会静默退化）。
-_SELF="$(readlink -f "$(dirname "$0")/..")"
 for _co in /home/*/grape-new-version2; do
   [ -d "$_co/.grape/skills" ] || continue
   # 必须用 readlink -f 比较：cd+pwd 在软链 checkout 下返回解析后的路径，会和 _SELF 不等，
@@ -237,6 +263,13 @@ for _co in /home/*/grape-new-version2; do
     || cp -a "$_SELF/.grape/skills/." "$_co/.grape/skills/"
   chown -R "$_own:$_own" "$_co/.grape/skills" 2>/dev/null || true
   echo "[3db] skills mirrored -> $_co（$(find "$_co/.grape/skills" -type f 2>/dev/null | wc -l) 文件）"
+  # 前端产物同样不随源码同步（gitignore），租户 checkout 需要同一份 view 才能正常出页面
+  if [ -d "$_co/src/api/frontend/static-dist" ] && [ -d "$_SELF/src/api/frontend/static-dist" ]; then
+    rsync -a --delete "$_SELF/src/api/frontend/static-dist/" "$_co/src/api/frontend/static-dist/" 2>/dev/null \
+      || cp -a "$_SELF/src/api/frontend/static-dist/." "$_co/src/api/frontend/static-dist/"
+    chown -R "$_own:$_own" "$_co/src/api/frontend/static-dist" 2>/dev/null || true
+    echo "[3db] frontend dist mirrored -> $_co（$(ls "$_co/src/api/frontend/static-dist/viewjs" 2>/dev/null | wc -l) 个 view）"
+  fi
 done
 
 echo "[3db] status:"
