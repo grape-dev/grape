@@ -526,12 +526,33 @@ def engine_selector_preview(body: EngineSelectorPreviewBody,
 
 # ===== Scene Market API（场景市场）=====
 
-def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "") -> str:
+def _scene_cat_icon(category_id: int, cat_map: dict | None = None) -> str:
+    """分类 emoji 兜底图标（Issue #2761 性能）。
+
+    列表页先用 ``list_scene_categories()`` 建一次 map 传进来，避免每行一次
+    ``scene_category`` 单条查询（N+1）；map 未命中（例如停用分类）再回落到
+    原单条查询，保持既有语义不变。
+    """
+    cat = None
+    if cat_map is not None and category_id:
+        try:
+            cat = cat_map.get(int(category_id))
+        except (TypeError, ValueError):
+            cat = None
+    if cat is None and category_id:
+        from src.domains.mgmt.user.db import get_scene_category
+        cat = get_scene_category(category_id)
+    return cat.get('icon', '⚙') if cat else '⚙'
+
+
+def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "",
+                        cat_map: dict | None = None) -> str:
     """解析场景图标为可访问的 URL 或 emoji。
     obs_icon_key 非空 → OBS 模式，动态生成签名 URL。
     icon 非空且是本地路径（/static/ 开头）→ 本地路径。
     icon 非空且是 emoji → 直接返回。
-    都为空或 OBS 失败 → 查 scene_category 表拿分类 emoji 图标兜底。
+    都为空或 OBS 失败 → 查 scene_category 表拿分类 emoji 图标兜底
+    （``cat_map`` 为该请求的预取分类表 id→分类 dict，省掉逐行查询）。
     """
     if obs_icon_key:
         try:
@@ -544,14 +565,10 @@ def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "") -> 
         # OBS 失败时先尝试 icon 字段（可能是有效的本地路径/emoji），再 emoji 兜底
         if icon:
             return icon
-        from src.domains.mgmt.user.db import get_scene_category
-        cat = get_scene_category(category_id)
-        return cat.get('icon', '⚙') if cat else '⚙'
+        return _scene_cat_icon(category_id, cat_map)
     if icon:
         return icon
-    from src.domains.mgmt.user.db import get_scene_category
-    cat = get_scene_category(category_id)
-    return cat.get('icon', '⚙') if cat else '⚙'
+    return _scene_cat_icon(category_id, cat_map)
 
 def _scene_category_payload(cat_l1_id: int = 0, cat_l2_id: int = 0) -> dict:
     """分类路径 {l1, l2}（Issue #2761）。"""
@@ -606,7 +623,7 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
     """
     from src.domains.mgmt.user.db import (list_scene_market, batch_scene_liked,
                              batch_scene_repo_count, list_category_dict,
-                             category_path_from_map)
+                             category_path_from_map, list_scene_categories)
     from src.kernel.repo_key import to_repo_key
 
     repo_key = ""
@@ -639,6 +656,11 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
         _cat_map = {c["id"]: c for c in list_category_dict("scene")}
     except Exception:
         _cat_map = {}
+    # Issue #2761 性能：分类 emoji 兜底一次取全表，替代逐行 scene_category 单条查询（N+1）。
+    try:
+        _icon_map = {c["id"]: c for c in list_scene_categories()}
+    except Exception:
+        _icon_map = {}
     result = []
     for s in scenes:
         result.append({
@@ -647,7 +669,8 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
             "display_name": s["display_name"],
             "version": s["version"],
             "market_description": s["market_description"],
-            "icon": _resolve_scene_icon(s["icon"], s["category_id"], s.get("obs_icon_key", "")),
+            "icon": _resolve_scene_icon(s["icon"], s["category_id"], s.get("obs_icon_key", ""),
+                                        cat_map=_icon_map),
             "category_id": s["category_id"],
             "cat_l1_id": s.get("cat_l1_id", 0),
             "cat_l2_id": s.get("cat_l2_id", 0),
