@@ -1033,6 +1033,37 @@ def touch_device_credential_any(hostname: str, last_seen_at: str, last_ip: str =
 
 # ---------- 引擎行写原语（P3-5f-2：mgmt 进程写 runtime 基表 agent_runtimes） ----------
 
+def _sync_local_derived_tags(c, rid: int, name: str, scope: str,
+                             engine_uid: str = "") -> None:
+    """Issue #1208：本机直连引擎（credential_id=0）补派生 engine:/scope:/scene: 标签。
+
+    本机直连引擎既不走 worker 注册链（runtime.py 注册分支），也没有 worker 心跳——
+    心跳链的派生刷新按 `r.credential_id=?` 过滤，credential_id=0 的行永远匹配不到，
+    于是这些行只带平铺 'all' 行、没有任何冒号派生行。selector 按 engine:<name> 圈池时
+    它们恒判「标签不匹配」（reason=selector），命中预览里本机引擎永远进不了命中组。
+
+    本机探测快照 upsert 是这些行唯一的写入口，所以在 UPDATE/INSERT 两处都补这一步；
+    sync_derived_agent_tags 自带写放大防护与幂等替换，失败只告警，不阻断探测快照落库。
+    """
+    try:
+        import json as _json
+
+        from src.domains.runtime.engine.agent_tags import sync_derived_agent_tags
+        c.execute("SELECT scene_tags, runtime_info FROM agent_runtimes WHERE id=?", (rid,))
+        row = c.fetchone()
+        scene_tags = row[0] if row else ""
+        engine_type = ""
+        try:
+            engine_type = (_json.loads((row[1] if row and len(row) > 1 else "") or "{}")
+                           .get("engine_type") or "")
+        except Exception:  # noqa: BLE001 - runtime_info 脏数据按无 engine_type 处理
+            engine_type = ""
+        sync_derived_agent_tags(c, rid, name, scope, scene_tags,
+                                engine_uid=engine_uid or "", engine_type=engine_type)
+    except Exception as e:  # noqa: BLE001 - 派生失败不阻断本机探测快照
+        log.warning(f"upsert_local_runtimes: agent_tags derive failed for runtime {rid}: {e}")
+
+
 def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_name: str,
                           now_iso: str) -> dict[str, Any]:
     """本机直连引擎行批量 upsert：SELECT → UPDATE/INSERT → prune → dedupe，**同一事务**。
@@ -1117,6 +1148,8 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                     # Issue #646：uid 派生轨道写回（UPDATE 路径）
                     c.execute("UPDATE agent_runtimes SET engine_uid=? WHERE id=?",
                               (_engine_uid, rid))
+                # Issue #1208：本机直连引擎补三维度派生标签（否则 selector 圈池恒不命中）
+                _sync_local_derived_tags(c, rid, name, scope, _engine_uid)
                 out["upserted"] += 1
                 out["ids"][name] = rid
                 continue
@@ -1158,6 +1191,8 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
             tags = [r[0] for r in c.fetchall()]
             c.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?",
                       (_json.dumps(tags, ensure_ascii=False), rid))
+            # Issue #1208：新建的本机直连引擎同样补三维度派生标签（与 UPDATE 路径同口径）
+            _sync_local_derived_tags(c, rid, name, scope, _engine_uid)
             out["inserted"] += 1
             out["ids"][name] = rid
 

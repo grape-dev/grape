@@ -217,3 +217,73 @@ class TestLegacyDualWriteSaveCompat:
             "SELECT nodes_json FROM devops_pipeline_scene WHERE scene_id='sc-valid'").fetchone()[0])[0]
         assert saved["engine_runtime_uids"] == [UID1, UID2]
         assert saved["engine_runtime_ids"] == []
+
+
+@pytest.fixture()
+def tags_mig_conn():
+    """派生标签 backfill（202611110006）用库：真实列序 id,name,scene_tags,engine_uid,
+    runtime_info,COALESCE(rc.scope,'global')。"""
+    c = sqlite3.connect(":memory:")
+    c.executescript("""
+    CREATE TABLE agent_runtimes (
+        id INTEGER PRIMARY KEY, name TEXT DEFAULT '', engine_uid VARCHAR(36) DEFAULT NULL,
+        credential_id INTEGER DEFAULT 0, scope TEXT DEFAULT 'global', owner_id TEXT DEFAULT '',
+        status TEXT DEFAULT 'online', healthy INTEGER DEFAULT 1, installed INTEGER DEFAULT 1,
+        last_seen_at TEXT DEFAULT '', role_tags TEXT DEFAULT '',
+        scene_tags TEXT DEFAULT '["default"]', runtime_info TEXT DEFAULT '',
+        agent_tags TEXT DEFAULT '[]'
+    );
+    CREATE TABLE runtime_credentials (
+        id INTEGER PRIMARY KEY, scope TEXT DEFAULT 'global', owner_id TEXT DEFAULT ''
+    );
+    CREATE TABLE engine_capabilities (
+        runtime_id INTEGER, tag TEXT, max_concurrent INTEGER DEFAULT 4,
+        priority INTEGER DEFAULT 50, enabled INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT '', updated_at TEXT DEFAULT '',
+        engine_uid VARCHAR(36) DEFAULT NULL
+    );
+    """)
+    yield c
+    c.close()
+
+
+class TestBackfillDerivedAgentTagsColumnOrder:
+    """202611110006 backfill 的列序回归：SELECT 末两列是 runtime_info、scope，不是 scope、runtime_info。
+
+    列序错位的症状是静默取错值（scope 被 engine_uid 的 uuid 顶成 global、engine_type 恒空），
+    所以这里按「scope 用 user」「engine_type 用四段云引擎的短类型名」两条断言锁死。
+    """
+
+    def _seed(self, c):
+        # 1：本机直连引擎，scope 回退 global，name==engine_type
+        c.execute("INSERT INTO agent_runtimes (id, name, credential_id, engine_uid, scene_tags) "
+                  "VALUES (1, 'hermes', 0, ?, '[\"default\"]')", (UID1,))
+        # 2：user 级凭据 + 云四段名 + runtime_info.engine_type='hermes'
+        c.execute("INSERT INTO runtime_credentials (id, scope, owner_id) VALUES (7, 'user', 'u7')")
+        c.execute("INSERT INTO agent_runtimes (id, name, credential_id, engine_uid, runtime_info, "
+                  "scene_tags) VALUES (2, 'hermes:hermes-git-acp:s2:4', 7, ?, ?, '[\"default\"]')",
+                  (UID2, json.dumps({"engine_type": "hermes"})))
+        c.commit()
+
+    def test_scope_and_engine_type_come_from_the_right_columns(self, tags_mig_conn):
+        from src.api.db_setup import _migration_1208_backfill_derived_agent_tags
+        self._seed(tags_mig_conn)
+        report = _migration_1208_backfill_derived_agent_tags(conn=tags_mig_conn)
+        assert report["engines_total"] == 2 and report["synced"] == 2 and report["errors"] == 0
+
+        def tags(rid):
+            return {r[0] for r in tags_mig_conn.execute(
+                "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,))}
+
+        assert tags(1) == {"engine:hermes", "scope:global", "scene:default"}
+        # 列序正确时 scope 取 runtime_credentials.scope='user'；错位时会写成 scope:global
+        assert tags(2) == {"engine:hermes", "scope:user", "scene:default"}
+
+    def test_engine_type_from_runtime_info_not_the_four_segment_name(self, tags_mig_conn):
+        from src.api.db_setup import _migration_1208_backfill_derived_agent_tags
+        self._seed(tags_mig_conn)
+        _migration_1208_backfill_derived_agent_tags(conn=tags_mig_conn)
+        cloud = {r[0] for r in tags_mig_conn.execute(
+            "SELECT tag FROM engine_capabilities WHERE runtime_id=2")}
+        assert "engine:hermes" in cloud
+        assert not any(t.startswith("engine:hermes:hermes-git-acp") for t in cloud)

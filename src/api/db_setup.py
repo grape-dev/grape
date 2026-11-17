@@ -9136,7 +9136,7 @@ def _migration_1208_backfill_derived_agent_tags(conn=None) -> dict:
                 conn.commit()
             return report
         from src.domains.runtime.engine.agent_tags import sync_derived_agent_tags, derive_agent_tags
-        for (rid, name, scene_tags, engine_uid, cred_scope, rt_info) in rows:
+        for (rid, name, scene_tags, engine_uid, rt_info, cred_scope) in rows:
             report["engines_total"] += 1
             try:
                 _et_m = ""
