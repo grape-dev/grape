@@ -241,7 +241,7 @@
                 <button
                   v-else
                   class="dbv-globe-empty"
-                  title="t('dv2.reg_url_tip')"
+                  :title="t('dv2.reg_url_tip')"
                   @click="startDeployUrlEdit()"
                 >
                   🌐
@@ -867,6 +867,13 @@
               >{{ t('selector_clear_tags') }} · {{ engineModal.selTags.length }}</span
             >
           </div>
+          <!-- Issue #1208 修复：标签模式下搜索框上移至「命中预览」标题上方（原在弹窗最底部） -->
+          <input
+            v-if="engineModal.mode === 'tag'"
+            v-model="engineModal.q"
+            class="dbv-engsearch"
+            :placeholder="t('dv2.engine_search_ph')"
+          />
           <div class="dbv-selprevtitle">{{ t('selector_hit_preview') }}</div>
           <div v-if="!previewShown.length" class="dbv-selprevempty">
             {{ t('selector_preview_empty') }}
@@ -982,7 +989,12 @@
             <span class="dbv-engclear" @click="engCurIds = []">全不选</span>
           </div>
         </template>
-        <input v-model="engineModal.q" class="dbv-engsearch" :placeholder="t('dv2.engine_search_ph')" />
+        <input
+          v-if="engineModal.mode === 'engine'"
+          v-model="engineModal.q"
+          class="dbv-engsearch"
+          :placeholder="t('dv2.engine_search_ph')"
+        />
         <div v-if="engineModal.mode === 'engine'" class="dbv-englist">
           <div
             v-if="!engModalFiltered.length"

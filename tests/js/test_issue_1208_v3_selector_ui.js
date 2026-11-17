@@ -50,7 +50,16 @@ assertContains('preview layered reason label', src, "selector: 'selector_reason_
 assertContains('preview stale reason', src, "stale: 'selector_reason_stale'");
 
 // 4. 标签模式保留搜索框并即时过滤预览（只过滤展示，不影响命中）
-assertContains('search row always shown', src, 'v-model="engineModal.q" class="dbv-engsearch"');
+// 2026-11-17 修复：搜索框上移至「命中预览」标题上方（原在弹窗最底部）；placeholder 绑定 t()（原字面量裸串）
+const tagPanel = section('══ 标签模式面板', '══ 实例模式面板');
+assertContains('tag search box exists', tagPanel, 'v-model="engineModal.q"');
+assertContains('tag search bound placeholder', tagPanel, ':placeholder="t(\'dv2.engine_search_ph\')"');
+const searchIdx = tagPanel.indexOf('v-model="engineModal.q"');
+const prevTitleIdx = tagPanel.indexOf('dbv-selprevtitle');
+if (searchIdx === -1 || prevTitleIdx === -1 || searchIdx > prevTitleIdx) failures.push('missing: tag search above hit-preview title');
+count++;
+assertContains('engine mode keeps search below filters', src, 'v-if="engineModal.mode === \'engine\'"\n          v-model="engineModal.q"');
+assertNotContains('no unbound literal placeholder', src, ' placeholder="t(\'dv2.engine_search_ph\')"');
 assertContains('search filters preview', src, 'return [p.engine.name, p.engine.alias].join');
 assertContains('preview computed consumes q', src, "const q = (engineModal.q || '').toLowerCase().trim()");
 
@@ -71,7 +80,7 @@ assertContains('debounced preview request', src, 'setTimeout(requestServerPrevie
 assertContains('local fallback retained', src, 'engSelectorPreview(vis, selTags, engineModal.agentType)');
 
 // 7. 静态资源版本号 bump（Vue chunk 走 viewjs 入口）
-assertContains('dashboard cache bumped', html, 'dashboard-view.js?v=74');  // 棘轮对齐 FROZEN：index.html bump 时同步（QA 复核 F2：硬编码 v=66 已过期）
+assertContains('dashboard cache bumped', html, 'dashboard-view.js?v=75');  // 棘轮对齐 FROZEN：index.html bump 时同步（QA 复核 F2：硬编码 v=66 已过期）
 
 // 8. 未命中列表：复用「指定引擎实例」列表排布（scope 分组/无复选框/行尾不命中原因）
 assertContains('miss grouped by scope order', src, "['user', 'repo', 'global', 'local']");
