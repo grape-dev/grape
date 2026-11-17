@@ -75,7 +75,7 @@ def test_w11_gitee_issue_read_via_card(monkeypatch):
 
     calls = {}
 
-    def _fake_request(self, method, path, data=None, form=False):
+    def _fake_request(self, method, path, data=None, form=False, **kw):
         calls.update(provider=self.provider, method=method, path=path, token=self.token)
         return {"title": "gitee issue title", "state": "open", "assignee": {"login": "alice"}}
 
@@ -104,7 +104,7 @@ def test_w11_gitlab_issue_read_via_card(monkeypatch):
 
     calls = {}
 
-    def _fake_request(self, method, path, data=None, form=False):
+    def _fake_request(self, method, path, data=None, form=False, **kw):
         calls.update(provider=self.provider, path=path)
         return {"title": "gitlab issue title", "state": "opened"}
 
@@ -158,7 +158,7 @@ def test_w11_list_comments_card_gitee(monkeypatch):
 
     calls = {}
 
-    def _fake_request(self, method, path, data=None, form=False):
+    def _fake_request(self, method, path, data=None, form=False, **kw):
         calls.update(provider=self.provider, method=method, path=path)
         return [{"body": "[QA Agent] hi"}]
 

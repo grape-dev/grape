@@ -64,7 +64,7 @@ def _mock_transport(responses=None):
     calls = []
     seq = list(responses or [])
 
-    def _fake(url, method, data=None, headers=None):
+    def _fake(url, method, data=None, headers=None, **kw):
         calls.append({"url": url, "method": method, "data": data, "headers": headers or {}})
         if seq:
             out = seq.pop(0)

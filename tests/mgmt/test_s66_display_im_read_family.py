@@ -54,7 +54,7 @@ def test_s66_create_branch_gitcode_form_parity():
     """gitcode（form 默认）：POST /repos/{o}/{r}/branches + form {branch_name, refs}。"""
     c = _client("gitcode")
     with patch.object(VcsApiClient, "_do_request",
-                      side_effect=lambda m, u, d=None, headers=None: {"name": "feat/x"}) as m_req:
+                      side_effect=lambda m, u, d=None, headers=None, **kw: {"name": "feat/x"}) as m_req:
         r = c.create_branch("feat/x", refs="main")
     assert r["name"] == "feat/x"
     url = m_req.call_args.args[0].split("?")[0]
@@ -70,7 +70,7 @@ def test_s66_create_branch_github_refs_sha_parity():
     c = _client("github")
     calls = []
 
-    def _fake(url, method, data=None, headers=None):
+    def _fake(url, method, data=None, headers=None, **kw):
         # _do_request 位置参数序：(url, method, data, headers)
         calls.append((method, url, data))
         if url.endswith("/branches/main"):
@@ -92,7 +92,7 @@ def test_s66_create_branch_github_default_branch_fallback():
     """refs=main 查不到 sha → 回退默认分支（存量语义）。"""
     c = _client("github")
 
-    def _fake(url, method, data=None, headers=None):
+    def _fake(url, method, data=None, headers=None, **kw):
         if url.endswith("/branches/main"):
             return {"error": "HTTP 404"}
         if url.endswith("/repos/acme/web"):
@@ -110,7 +110,7 @@ def test_s66_create_branch_gitlab_path():
     """gitlab 方言：POST /projects/{o}%2F{r}/repository/branches。"""
     c = _client("gitlab")
     with patch.object(VcsApiClient, "_do_request",
-                      side_effect=lambda m, u, d=None, headers=None: {"name": "b"}) as m_req:
+                      side_effect=lambda m, u, d=None, headers=None, **kw: {"name": "b"}) as m_req:
         c.create_branch("b", refs="main")
     url = m_req.call_args.args[0].split("?")[0]
     assert url == "https://gitlab.com/api/v4/projects/acme%2Fweb/repository/branches"
@@ -123,7 +123,7 @@ def test_s66_get_readme_github_endpoint():
     import base64
     content = base64.b64encode("hello".encode()).decode()
     with patch.object(VcsApiClient, "_do_request",
-                      side_effect=lambda u, m, d=None, headers=None: {"content": content}) as m_req:
+                      side_effect=lambda u, m, d=None, headers=None, **kw: {"content": content}) as m_req:
         r = c.get_readme()
     assert r["content"] == "hello"
     assert m_req.call_args.args[0].split("?")[0].endswith("/repos/acme/web/readme")
@@ -136,7 +136,7 @@ def test_s66_get_readme_gitcode_contents_fallback():
     content = base64.b64encode("readme-body".encode()).decode()
     urls = []
 
-    def _fake(url, method, data=None, headers=None):
+    def _fake(url, method, data=None, headers=None, **kw):
         path = url.split("?")[0]
         urls.append(path)
         if path.endswith("/readme"):
@@ -152,7 +152,7 @@ def test_s66_get_readme_gitcode_contents_fallback():
 def test_s66_get_readme_all_miss_empty():
     c = _client("gitcode")
     with patch.object(VcsApiClient, "_do_request",
-                      side_effect=lambda u, m, d=None, headers=None: {"error": "HTTP 404"}):
+                      side_effect=lambda u, m, d=None, headers=None, **kw: {"error": "HTTP 404"}):
         r = c.get_readme()
     assert r == {"content": "", "endpoint": ""}
 
