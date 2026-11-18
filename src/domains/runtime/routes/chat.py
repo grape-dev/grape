@@ -6,7 +6,10 @@ from src.kernel.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
 
 from src.kernel.prompt_builder import build_general_chat_prompt, resolve_task_server_env
 
-from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username as _get_acc
+# 账号查询走 owner 域 public
+def _get_acc(username: str):
+    from src.domains.mgmt import public as _mgmt_acc
+    return _mgmt_acc.grape_account_by_username(username)
 
 from src.kernel.token_service import is_auth_401_error
 
@@ -53,7 +56,6 @@ from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 
-from src.domains.mgmt.user import db as user_db
 
 # 渠道安装表 / 用户映射 / 扫码任务都归 mgmt：SQL 只在该域 public 留一份（任意拓扑原语），
 # 本模块不再持外域表语句，也不再借 engine_wiring 的 runtime 库句柄读 mgmt 表。

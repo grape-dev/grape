@@ -14,7 +14,9 @@ import urllib.error as _ue
 import urllib.parse as _up
 import urllib.request as _ur
 
-from src.domains.mgmt.user.repo_manager import UpstreamAPIError
+# 上游异常类型走 owner 域 public
+from src.domains.mgmt import public as _mgmt_pub
+UpstreamAPIError = _mgmt_pub.UpstreamAPIError
 
 
 import re as _re

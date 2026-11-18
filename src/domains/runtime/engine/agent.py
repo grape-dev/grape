@@ -38,7 +38,12 @@ from src.domains.runtime.engine.acp_bootstrap import _is_spawn_failure
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用。
 # （2026-10-21 恢复：fbc499c4a 曾把调用点换成裸 task.get("repo_gitcode_token")，
 #   丢失路径 B 托管仓库的实时获取+自动刷新回退，6/29 近期任务 token 为空会受影响。）
-from src.domains.mgmt.user.db import get_task_token as _get_task_token
+# token 取值走 owner 域 public（原 import mgmt.user.db 内部函数）
+from src.domains.mgmt import public as _mgmt_token
+
+
+def _get_task_token(task: dict) -> str:
+    return _mgmt_token.task_token(task)
 
 # 凭据吊销信号（全局）：_wrap 独立 task 中感知 401 时置位，主循环检查后退出进程。
 # create_task 的异常不穿透主循环，用 Event 跨 task 传递退出信号。

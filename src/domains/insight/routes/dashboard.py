@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends
 
 from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
-from src.domains.mgmt.user import db as user_db
+# 托管仓库列表走 owner 域 public（原 import mgmt.user.db 内部函数）
 
 from src.api.deps import require_no_session_token, require_org_member
 
@@ -1507,7 +1507,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     # 获取用户角色
     role = "Member"
     try:
-        repos = user_db.get_managed_repos(user["id"])
+        repos = _mgmt_dash.managed_repos_for_user(user["id"])
         for r in repos:
             if r["repo_owner"] == owner and r["repo_name"] == repo:
                 role = "Maintainer" if r.get("is_admin") else "Member"

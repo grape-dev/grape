@@ -94,7 +94,12 @@ _rt_db = _DomainDbProxy()
 
 
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用
-from src.domains.mgmt.user.db import get_task_token as _get_task_token
+# token 取值走 owner 域 public（原 import mgmt.user.db 内部函数）
+from src.domains.mgmt import public as _mgmt_token
+
+
+def _get_task_token(task: dict) -> str:
+    return _mgmt_token.task_token(task)
 
 # Issue #1938：级联收敛补偿的归因模型（枚举/终态映射/文案渲染/展示判定）
 from src.domains.runtime.engine import cascade as _cascade

@@ -27,7 +27,9 @@ from src.kernel.config import log
 from src.domains.runtime import public as _rt_alerts
 from src.domains.mgmt import public as _mgmt_alerts
 from src.domains.insight.observability import alert_policy as _policy
-from src.domains.runtime.engine.task_timeout import TIMEOUT_FAIL_SIGNATURE as _TIMEOUT_FAIL_SIGNATURE
+# 超时失败签名走 owner 域 public（原 import runtime.engine.task_timeout 内部模块）
+from src.domains.runtime import public as _rt_timeout
+_TIMEOUT_FAIL_SIGNATURE = _rt_timeout.timeout_fail_signature()
 
 # ===== 种子规则 =====
 # 7 条与 deploy/alerts.yml 一一对应（seed_source 记原名）；后 3 条是 P1-3 新增的

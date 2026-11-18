@@ -6,17 +6,18 @@ import os
 from pydantic import BaseModel
 from src.api.deps import require_no_session_token
 from src.domains.mgmt.user import db as user_db
-from src.domains.runtime.im.devstage_client import (
-    DevStageError,
-    list_environments as _list_envs,
-    create_environment as _create_env,
-    start_environment as _start_env,
-    stop_environment as _stop_env,
-    delete_environment as _delete_env,
-    list_specs as _list_specs,
-    _resolve_base_url,
-    _request,
-)
+# DevStage 客户端走 owner 域 public（原 import runtime.im.devstage_client 内部符号）
+from src.domains.runtime import public as _rt_devstage
+
+DevStageError = _rt_devstage.DevStageError
+_resolve_base_url = _rt_devstage.devstage_base_url
+_request = _rt_devstage.devstage_request
+_list_envs = _rt_devstage.devstage_list_environments
+_create_env = _rt_devstage.devstage_create_environment
+_start_env = _rt_devstage.devstage_start_environment
+_stop_env = _rt_devstage.devstage_stop_environment
+_delete_env = _rt_devstage.devstage_delete_environment
+_list_specs = _rt_devstage.devstage_list_specs
 from src.kernel.config import log
 
 router = APIRouter(prefix="/api/devstage", tags=["devstage"])

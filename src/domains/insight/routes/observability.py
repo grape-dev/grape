@@ -16,7 +16,9 @@ from pydantic import BaseModel
 
 from src.api.deps import require_org_member
 
-from src.domains.runtime.routes.runtime import _require_credential
+# 认证依赖走 owner 域 public（原 import runtime.routes.runtime 内部函数）
+from src.domains.runtime import public as _rt_auth
+_require_credential = _rt_auth.require_credential
 
 from src.kernel.config import log
 
