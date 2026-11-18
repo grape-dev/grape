@@ -6194,3 +6194,35 @@ def scene_by_id(scene_id: str, repo_key: str = "") -> dict:
 get_pipeline_config = pipeline_config
 get_scenes = scene_list
 _query_scene_by_id = scene_by_id
+
+
+# ---- 出网口原语：mgmt.user.repo_manager 的 GitCode REST 通道（vcs provider 用） ----
+# runtime 的 vcs providers 原先函数内 `from src.domains.mgmt.user import repo_manager
+# as _rm` 直接摸内部 `_req` / `_requests` / `UpstreamAPIError`。这里收敛成 public 具名
+# 入口：转发体在函数内取模块对象再按属性调用，故测试对
+# `src.domains.mgmt.user.repo_manager._req` / `._requests` 的 monkeypatch 契约不变
+# （from-import 旧符号会让 patch 失效并真出网——实测教训）。
+
+
+def gitcode_req(method: str, url: str, token: str = "", body: dict | None = None):
+    """GitCode REST 请求（JSON body；>=400 抛 UpstreamAPIError）。"""
+    from src.domains.mgmt.user.repo_manager import _req as _impl
+
+    return _impl(method, url, token, body)
+
+
+def gitcode_req_form(method: str, url: str, token: str, data):
+    """GitCode REST 请求（x-www-form-urlencoded body；Spring form 形态端点专用）。
+
+    只负责编码与 >=400 抛错，**端点是否需要 form 由调用方判定**。
+    """
+    from src.domains.mgmt.user import repo_manager as _impl
+
+    headers = {"Content-Type": "application/x-www-form-urlencoded",
+               "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = _impl._requests.request(method, url, data=data, headers=headers, timeout=30)
+    if resp.status_code >= 400:
+        raise _impl.UpstreamAPIError(method, url, resp.status_code, resp.text)
+    return resp.json() if resp.text.strip() else {}
