@@ -3102,6 +3102,18 @@ def egress_policy_for_skill(skill_name: str) -> str:
         return str(row[0] or "") if row else ""
 
 
+def egress_admin_exceptions() -> list[tuple]:
+    """(host, host_type, ports, methods, scope, scope_target, skill_digest) —— 生效中的放行例外。
+
+    原 SQL 用 datetime('now')（SQLite 语法），这里改 CURRENT_TIMESTAMP，MySQL/MariaDB/SQLite 都认。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT host, host_type, ports, methods, scope, scope_target, skill_digest "
+                  "FROM grape_t_egress_admin_exception "
+                  "WHERE is_active=1 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)")
+        return [tuple(r) for r in c.fetchall()]
+
+
 def egress_policy_global() -> str:
     """全局兜底策略（skill_name='*'）；无行返回空串。"""
     with db_registry.cursor("mgmt") as c:
@@ -3127,6 +3139,42 @@ def task_proxy_token_row(token_hash: str) -> tuple:
                   "WHERE token_hash=%s", (token_hash,))
         row = c.fetchone()
         return tuple(row) if row else ()
+
+
+def repo_llm_credential_row(repo_key: str, engine_type: str) -> tuple:
+    """(provider, api_key_enc, base_url, model) —— 仓库级 LLM 凭据，enabled=1 首条。
+
+    engine_type 传具体引擎名或 'common'（通用兜底）；无行返回 ()。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT provider, api_key_enc, base_url, model FROM grape_t_repo_llm_credentials "
+                  "WHERE repo_key=%s AND engine_type=%s AND enabled=1 LIMIT 1",
+                  (repo_key, engine_type))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def user_llm_credential_row(user_id, engine_type: str = "common", any_user: bool = False) -> tuple:
+    """(provider, api_key_enc, base_url, model) —— 用户级 LLM 凭据，enabled=1 首条。
+
+    any_user=True 时忽略 user_id（系统级兜底：用户无凭据 / A2A 任务 user_id=0）。
+    """
+    sql = ("SELECT provider, api_key_enc, base_url, model FROM grape_t_user_llm_credentials "
+           "WHERE engine_type=%s AND enabled=1 LIMIT 1") if any_user else           ("SELECT provider, api_key_enc, base_url, model FROM grape_t_user_llm_credentials "
+           "WHERE user_id=%s AND engine_type=%s AND enabled=1 LIMIT 1")
+    args = (engine_type,) if any_user else (user_id, engine_type)
+    with db_registry.cursor("mgmt") as c:
+        c.execute(sql, args)
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def engine_sandbox_whitelist_rows(backend_name: str) -> list[tuple]:
+    """(id, backend_name, domain, method, path_prefix, scheme, port) —— 该后端的完整白名单行。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id, backend_name, domain, method, path_prefix, scheme, port "
+                  "FROM grape_t_engine_sandbox_whitelist WHERE backend_name=%s", (backend_name,))
+        return [tuple(r) for r in c.fetchall()]
 
 
 def purge_task_proxy_tokens(task_id: str) -> int:

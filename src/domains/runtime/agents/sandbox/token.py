@@ -107,10 +107,9 @@ class TokenManager:
         P0-9 修复：revoke 失败时 raise（不再静默吞，调用方知道 token 未失效）。
         """
         try:
-            db, db_lock = self._get_db()
-            with db_lock:
-                db.execute("DELETE FROM grape_t_task_proxy_tokens WHERE task_id=?", (task_id,))
-                db.commit()
+            # 表归 mgmt：SQL 在 mgmt public 一份
+            from src.domains.mgmt import public as _mg_tk3
+            _mg_tk3.purge_task_proxy_tokens(task_id)
         except Exception as e:
             log.error(f"revoke proxy token failed: {e}")
             raise  # 不再静默吞——调用方需要知道 token 仍然有效

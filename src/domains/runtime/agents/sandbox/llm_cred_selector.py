@@ -28,48 +28,27 @@ def select_llm_cred(cursor, user_id: int, engine_type: str = "",
     if mode == "repo":
         if not repo_key:
             return None
+        # 表归 mgmt：SQL 在 mgmt public 一份
+        from src.domains.mgmt import public as _mg_llm
         if engine_type:
-            cursor.execute(
-                "SELECT provider, api_key_enc, base_url, model "
-                "FROM grape_t_repo_llm_credentials "
-                "WHERE repo_key=? AND engine_type=? AND enabled=1 LIMIT 1",
-                (repo_key, engine_type),
-            )
-            row = cursor.fetchone()
+            row = _mg_llm.repo_llm_credential_row(repo_key, engine_type) or None
             if row:
                 return (row[0] or "", decrypt(row[1]) if row[1] else "", row[2] or "", row[3] or "")
         # repo 版通用兜底（common）
-        cursor.execute(
-            "SELECT provider, api_key_enc, base_url, model "
-            "FROM grape_t_repo_llm_credentials "
-            "WHERE repo_key=? AND engine_type='common' AND enabled=1 LIMIT 1",
-            (repo_key,),
-        )
-        row = cursor.fetchone()
+        row = _mg_llm.repo_llm_credential_row(repo_key, "common") or None
         if row:
             return (row[0] or "", decrypt(row[1]) if row[1] else "", row[2] or "", row[3] or "")
         return None
 
     # ① 引擎专属（mode='user'，原行为）
+    from src.domains.mgmt import public as _mg_ull
     if engine_type:
-        cursor.execute(
-            "SELECT provider, api_key_enc, base_url, model "
-            "FROM grape_t_user_llm_credentials "
-            "WHERE user_id=? AND engine_type=? AND enabled=1 LIMIT 1",
-            (user_id, engine_type),
-        )
-        row = cursor.fetchone()
+        row = _mg_ull.user_llm_credential_row(user_id, engine_type) or None
         if row:
             return (row[0] or "", decrypt(row[1]) if row[1] else "", row[2] or "", row[3] or "")
 
     # ② 通用兜底
-    cursor.execute(
-        "SELECT provider, api_key_enc, base_url, model "
-        "FROM grape_t_user_llm_credentials "
-        "WHERE user_id=? AND engine_type='common' AND enabled=1 LIMIT 1",
-        (user_id,),
-    )
-    row = cursor.fetchone()
+    row = _mg_ull.user_llm_credential_row(user_id, "common") or None
     if row:
         return (row[0] or "", decrypt(row[1]) if row[1] else "", row[2] or "", row[3] or "")
 
@@ -78,12 +57,7 @@ def select_llm_cred(cursor, user_id: int, engine_type: str = "",
     # 本地引擎（opencode/hermes 直跑）直接用服务器侧凭据不查此表——云沙箱
     # 必须拿到 LLM 配置否则引擎装了没模型可用（event#29 实锤：用户 1 无凭据
     # → "No LLM provider configured"）。对齐本地引擎能力，两级查不到即兜底。
-    cursor.execute(
-        "SELECT provider, api_key_enc, base_url, model "
-        "FROM grape_t_user_llm_credentials "
-        "WHERE engine_type='common' AND enabled=1 LIMIT 1",
-    )
-    row = cursor.fetchone()
+    row = _mg_ull.user_llm_credential_row(user_id, "common", any_user=True) or None
     if row:
         return (row[0] or "", decrypt(row[1]) if row[1] else "", row[2] or "", row[3] or "")
 

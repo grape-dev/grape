@@ -3716,11 +3716,8 @@ def runtime_skill_egress(skill_name: str = "", skill_id: int = 0,
             except Exception:
                 pass
         try:
-            c.execute(
-                "SELECT host, host_type, ports, methods, scope, scope_target, skill_digest "
-                "FROM grape_t_egress_admin_exception "
-                "WHERE is_active=1 AND (expires_at IS NULL OR expires_at > datetime('now'))")
-            for row in c.fetchall():
+            from src.domains.mgmt import public as _mg_exc
+            for row in _mg_exc.egress_admin_exceptions():
                 result["admin_exceptions"].append({
                     "host": row[0], "host_type": row[1], "ports": row[2],
                     "methods": row[3], "scope": row[4], "scope_target": row[5],

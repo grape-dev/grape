@@ -172,13 +172,9 @@ class RuleCache:
         """从 DB 加载 + 编译 + 缓存。"""
         raw_rules: list[WhitelistRule] = []
         try:
-            from src.kernel.bulk_read import reader
-            with reader() as _r:
-                rows = _r.execute(
-                    "SELECT id, backend_name, domain, method, path_prefix, scheme, port "
-                    "FROM grape_t_engine_sandbox_whitelist WHERE backend_name=?",
-                    (backend_name,)
-                ).fetchall()
+            # 表归 mgmt：SQL 在 mgmt public 一份
+            from src.domains.mgmt import public as _mg_wl2
+            rows = _mg_wl2.engine_sandbox_whitelist_rows(backend_name)
             for row in rows:
                 raw_rules.append(WhitelistRule(
                     id=row[0], backend_name=row[1], domain=row[2],

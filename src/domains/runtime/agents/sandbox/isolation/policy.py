@@ -520,11 +520,8 @@ class PolicyEngine:
                     _pol2 = _mg_eg2.egress_policy_for_skill(skill_name) or _mg_eg2.egress_policy_global()
                     if _pol2:
                         result["admin_policy"] = _pol2
-                rows = _r.execute(
-                    "SELECT host, host_type, ports, methods, scope, scope_target, skill_digest "
-                    "FROM grape_t_egress_admin_exception "
-                    "WHERE is_active=1 AND (expires_at IS NULL OR expires_at > datetime('now'))"
-                ).fetchall()
+                from src.domains.mgmt import public as _mg_exc2
+                rows = _mg_exc2.egress_admin_exceptions()
                 for r in rows:
                     result["admin_exceptions"].append({
                         "host": r[0], "host_type": r[1], "ports": r[2],
