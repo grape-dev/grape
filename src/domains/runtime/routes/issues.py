@@ -18,11 +18,6 @@ import re
 
 import asyncio
 
-import copy as _copy_cache
-import functools as _ft_cache
-import threading as _th_cache
-import time as _time_cache
-
 from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile
 
 from pydantic import BaseModel
@@ -456,39 +451,7 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
         "latest_event": latest,
     }
 
-# 需求中心列表按状态分组并发取数（看板模式 6 个请求/次刷新），每个请求都会调
-# _issue_attachments_batch；而它每次都要向 OBS 做前缀枚举（含 cursor 分页循环），
-# 实测约 500ms 且是纯网络 IO。6 并发各自枚举一次 = 3.2s，叠加 db_lock 串行后
-# 直接把首屏推过前端 8s 看门狗阈值，表现就是「需求中心一直加载中 → 加载失败」。
-# temporary_url 有效期 7 天，缓存 15 秒既不会让新附件不可见，又能把并发打回 1 次。
-# 锁内 double-check：避免 6 个线程同时 miss 后各自去枚举（缓存击穿）。
-_ATTACH_CACHE: dict[tuple, tuple[float, dict]] = {}
-_ATTACH_LOCK = __import__("threading").Lock()
-_ATTACH_TTL = 15.0
-
-
 def _issue_attachments_batch(repo_keys: list[str]) -> dict[str, list[dict]]:
-    import copy as _copy
-    import time as _time
-    _ck = tuple(sorted(repo_keys or []))
-    _now = _time.time()
-    _hit = _ATTACH_CACHE.get(_ck)
-    if _hit and (_now - _hit[0]) < _ATTACH_TTL:
-        return _copy.deepcopy(_hit[1])
-    with _ATTACH_LOCK:
-        _hit = _ATTACH_CACHE.get(_ck)
-        _now = _time.time()
-        if _hit and (_now - _hit[0]) < _ATTACH_TTL:
-            return _copy.deepcopy(_hit[1])
-        _fresh = _issue_attachments_batch_uncached(repo_keys)
-        _ATTACH_CACHE[_ck] = (_now, _copy.deepcopy(_fresh))
-        if len(_ATTACH_CACHE) > 32:
-            for _k in list(_ATTACH_CACHE)[:-32]:
-                _ATTACH_CACHE.pop(_k, None)
-        return _fresh
-
-
-def _issue_attachments_batch_uncached(repo_keys: list[str]) -> dict[str, list[dict]]:
     """Issue #648 性能修复：按仓库前缀一次 ListObjects 拉全量附件清单，内存按 issue 编号分组。
 
     原实现（_issue_attachments）逐卡调一次 OBS list（~16-110ms），几百卡串行 = 十几秒，
@@ -1982,8 +1945,9 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
     if _is_github:
         from src.domains.mgmt.user.repo_manager import _github_req
         try:
-            _gh_resp = _github_req("POST", f"https://api.github.com/repos/{owner}/{rname}/issues/{issue_number}/comments",
-                        api_token, {"body": comment_body})
+            _gh_resp = await asyncio.to_thread(
+                _github_req, "POST", f"https://api.github.com/repos/{owner}/{rname}/issues/{issue_number}/comments",
+                api_token, {"body": comment_body})
             # Issue #453 台账（S19-4）：GitHub 澄清评论入账——响应 dict 带 comment id
             try:
                 from src.kernel.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
@@ -2005,7 +1969,9 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
         _provider = parse_repo_key(repo_key)[0]
         try:
             _client = VcsApiClient(_provider, api_token, owner, rname)
-            _resp = _client.post_issue_comment(_native_issue_number(issue_number), comment_body)
+            # 同步 urllib 出站不得跑在事件循环上（GitCode 慢响应会冻住整个进程）
+            _resp = await asyncio.to_thread(
+                _client.post_issue_comment, _native_issue_number(issue_number), comment_body)
             if isinstance(_resp, dict) and _resp.get("error"):
                 raise RuntimeError(str(_resp.get("error"))[:300])
             log.info(f"Issue clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
@@ -2241,52 +2207,7 @@ def _filter_pr_items(pr_items: list[dict], q: str, statuses_set: set) -> list[di
                or _needle in str(it.get("issue_number") or "")]
     return out
 
-def _cached_repo_list(ttl: float = 5.0):
-    """需求中心列表的短 TTL 结果缓存。
-
-    为什么必须加：列表接口单发 580ms，但 4 并发时每个请求涨到 1.8-2.5s —— 因为
-    session_manager 是单连接 + 全局 db_lock，所有 DB 访问在 MySQL 下仍被串行化。
-    而看板模式一次刷新会按状态分组并发打 6 个请求，串行叠加后直接顶穿前端 8s
-    看门狗（症状：需求中心一直「加载中」→「加载失败: request aborted or timed out」）。
-    彻底解法是把 DB 访问换成连接池（架构级改造），这里先用 5s 结果缓存把并发削成 1 次。
-
-    key 含 user 标识：不同用户看到的需求集合不同，不能跨用户复用。
-    """
-    def deco(fn):
-        _cache: dict = {}
-        _lock = _th_cache.Lock()
-
-        @_ft_cache.wraps(fn)
-        def wrapper(*args, **kwargs):
-            _u = kwargs.get("user") or {}
-            _uid = (_u.get("id") if isinstance(_u, dict) else None) or ""
-            _key = (
-                _uid,
-                tuple(str(a) for a in args),
-                tuple(sorted((k, str(v)) for k, v in kwargs.items() if k != "user")),
-            )
-            _now = _time_cache.time()
-            _hit = _cache.get(_key)
-            if _hit and (_now - _hit[0]) < ttl:
-                return _copy_cache.deepcopy(_hit[1])
-            with _lock:
-                _hit = _cache.get(_key)
-                _now = _time_cache.time()
-                if _hit and (_now - _hit[0]) < ttl:
-                    return _copy_cache.deepcopy(_hit[1])
-                _res = fn(*args, **kwargs)
-                _cache[_key] = (_now, _copy_cache.deepcopy(_res))
-                if len(_cache) > 64:
-                    for _k in list(_cache)[:-64]:
-                        _cache.pop(_k, None)
-                return _res
-
-        return wrapper
-    return deco
-
-
 @router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events. Issue #542 paging: `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set). Issue #926: PR pseudo-cards merge into the same LIMIT/OFFSET paging window (counted in total); `q` (title/number substring) and `statuses` (comma-separated multi-status) add server-side filtering; paged responses slim attachments to `attachments_count`.")
-@_cached_repo_list(5.0)
 def list_repo_issues(owner: str, repo: str,
                      status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
                      sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),

@@ -42,3 +42,19 @@ def test_no_bare_urlopen_in_async_issue_path():
     src = inspect.getsource(ic)
     assert "urllib.request.urlopen(" not in src, (
         "issues_center 内不应再有同步 urlopen（出站应经 VcsApiClient 且在线程池执行）")
+
+
+def test_clarify_issue_offloads_outbound():
+    """clarify_issue 的两路同步出站（GitHub / GitCode）必须走 to_thread。"""
+    import inspect
+
+    from src.domains.runtime.routes import issues as rt
+
+    src = inspect.getsource(rt.clarify_issue)
+    direct_gh = [ln.strip() for ln in src.splitlines()
+                 if ln.strip().startswith("_gh_resp = _github_req(")]
+    assert not direct_gh, f"GitHub 出站仍直调: {direct_gh}"
+    direct_gc = [ln.strip() for ln in src.splitlines()
+                 if ln.strip().startswith("_resp = _client.post_issue_comment(")]
+    assert not direct_gc, f"GitCode 出站仍直调: {direct_gc}"
+    assert src.count("asyncio.to_thread(") >= 2
