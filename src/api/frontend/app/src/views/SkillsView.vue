@@ -414,7 +414,6 @@
 
         <!-- 概览 -->
         <div v-if="skdTab === 'overview'" class="skd-panel">
-          <div class="skd-card skd-summary">{{ detailSummary }}</div>
           <div class="skd-card skd-metatable">
             <div class="skd-row"><span>{{ tt('info_scenes') }}</span><div class="skd-scene-chips">
               <a v-for="sc in sceneChips" :key="'sc-' + sc.id" class="skd-chip skd-chip-link" @click="openScene(sc)">{{ sc.name }}</a>
@@ -425,21 +424,20 @@
             <div class="skd-row"><span>{{ tt('info_author') }}</span><b>{{ detail.created_by || '—' }}</b></div>
             <div class="skd-row"><span>{{ tt('updated_at') }}</span><b>{{ formatDate(detail.updated_at) }}</b></div>
           </div>
-          <div v-if="hasOverview" class="skd-card skd-overview">
-            <h2 class="skd-h2">{{ tt('structured_overview') }}</h2>
-            <div v-for="slot in overviewSlots" :key="'ov-' + slot.key" class="skd-ov-slot">
-              <h3 class="skd-h3">{{ slot.title }}</h3>
-              <ol v-if="slot.kind === 'steps'">
-                <li v-for="(line, i) in slot.items" :key="'ovl-' + i">{{ line }}</li>
-              </ol>
-              <ul v-else>
-                <li v-for="(line, i) in slot.items" :key="'ovl-' + i">{{ line }}</li>
-              </ul>
-            </div>
+          <div v-if="detailSummaryTitle" class="skd-card skd-summary">
+            <h2 class="skd-summary-title">{{ detailSummaryTitle }}</h2>
+            <p v-if="detailSummaryBody" class="skd-summary-body">{{ detailSummaryBody }}</p>
           </div>
           <div class="skd-card">
-            <h2 class="skd-h2">{{ tt('description_original') }}</h2>
+            <h2 class="skd-h2">{{ tt('skill_overview') }}</h2>
             <p class="skd-desc">{{ detail.description || '—' }}</p>
+          </div>
+          <div v-if="hasOverview" class="skd-card skd-overview">
+            <h2 class="skd-h2">{{ tt('skill_intro') }}</h2>
+            <div v-for="slot in overviewSlots" :key="'ov-' + slot.key" class="skd-ov-slot">
+              <h3 class="skd-h3">{{ slot.title }}</h3>
+              <p class="skd-ov-text">{{ slot.text }}</p>
+            </div>
           </div>
           <div class="skd-card skd-comments">
             <h2 class="skd-h2">
@@ -944,8 +942,8 @@ const KEY_DEFAULTS = {
   downloads: '次下载',
   orchestrated_in: '已编排进',
   scenes_unit: '个场景',
-  structured_overview: '结构化概述',
-  description_original: '概述原文',
+  skill_intro: '技能介绍',
+  skill_overview: '技能概述',
   user_comments: '用户评论',
   comment_placeholder: '写下你的使用体验…',
   comment_submit: '发表评论',
@@ -962,7 +960,6 @@ const KEY_DEFAULTS = {
   published_at: '发布时间',
   change_note: '变更说明',
   no_versions: '暂无版本历史',
-  ov_summary: '总体说明',
   ov_steps: '关键步骤链',
   ov_constraints: '约束简述',
   ov_products: '产物说明',
@@ -1473,12 +1470,23 @@ const skdRelated = computed(function () {
 const detailTags = computed(function () {
   return (detail.value && detail.value.tags) || []
 })
-const detailSummary = computed(function () {
+const detailSummaryTitle = computed(function () {
   var d = detail.value
   if (!d) return ''
-  var s = d.summary || d.description || ''
-  s = String(s).replace(/\r?\n/g, ' ').split(/→|->/)[0].trim()
-  return s.length > 50 ? s.slice(0, 50) : s || '—'
+  var s = summaryInline(d.summary || '')
+  if (!s) s = firstSentence(d.description || '')
+  return shortenTitle(s, 50)
+})
+const detailSummaryBody = computed(function () {
+  var d = detail.value
+  if (!d) return ''
+  var title = detailSummaryTitle.value
+  var body = sentenceClamp(firstSentence(d.description || ''), 15, 50)
+  if (!body) body = sentenceClamp(d.description || '', 15, 50)
+  if (!body) body = sentenceClamp(skillMdDescription(d.content || ''), 15, 50)
+  if (!body) body = sentenceClamp(firstSentence(sectionText(d.content || '', ['定位'])), 15, 50)
+  if (!body || body === title) return ''
+  return body
 })
 const detailVersion = computed(function () {
   var d = detail.value
@@ -1569,70 +1577,252 @@ function formatSize(n) {
   if (v >= 1024) return (v / 1024).toFixed(1) + ' KB'
   return v + ' B'
 }
+function findHeading(lines, names) {
+  for (var rank = 0; rank < 3; rank++) {
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(/^(#{1,4})\s+(.+)$/)
+      if (!m) continue
+      var title = m[2].trim()
+      for (var j = 0; j < names.length; j++) {
+        var n = names[j]
+        var r = title === n ? 0 : title.indexOf(n) === 0 ? 1 : title.indexOf(n) > 0 ? 2 : 99
+        if (r === rank) return { index: i, level: m[1].length }
+      }
+    }
+  }
+  return null
+}
 function sectionText(content, names) {
   var lines = String(content || '').split(/\r?\n/)
+  var head = findHeading(lines, names)
+  if (!head) return ''
   var out = []
-  var hit = false
-  var level = 0
-  for (var i = 0; i < lines.length; i++) {
+  for (var i = head.index + 1; i < lines.length; i++) {
     var m = lines[i].match(/^(#{1,4})\s+(.+)$/)
-    if (m) {
-      var title = m[2].trim()
-      var matched = names.some(function (n) {
-        return title.indexOf(n) >= 0
-      })
-      if (hit && matched) break
-      if (matched) {
-        hit = true
-        level = m[1].length
-        continue
-      }
-      if (hit && m[1].length <= level) break
-      if (hit) out.push(lines[i])
-      continue
-    }
-    if (hit) out.push(lines[i])
+    if (m && m[1].length <= head.level) break
+    out.push(lines[i])
   }
   return out.join('\n').trim()
 }
-function cleanLines(text, limit, stripBullet) {
-  if (!text) return []
+var SENTENCE_END = '。！？；!?;'
+var CLAUSE_PUNCT = ['，', '、', '；', '：', ',', ';', ':']
+function normalizeInline(text) {
+  return String(text || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[-*+]\s+/, '')
+    .replace(/^[#>\s]+/, '')
+    .replace(/[`*]+/g, '')
+    .trim()
+}
+function summaryInline(text) {
+  return normalizeInline(text).split(/→|->/)[0].trim()
+}
+function splitSentences(text) {
+  var src = normalizeInline(text)
   var out = []
-  String(text)
+  var buf = ''
+  for (var i = 0; i < src.length; i++) {
+    buf += src.charAt(i)
+    if (SENTENCE_END.indexOf(src.charAt(i)) >= 0) {
+      if (buf.trim()) out.push(buf.trim())
+      buf = ''
+    }
+  }
+  if (buf.trim()) out.push(buf.trim())
+  return out
+}
+function firstSentence(text) {
+  var parts = splitSentences(text)
+  return parts.length ? parts[0] : normalizeInline(text)
+}
+function cutAtPunct(text, max) {
+  var s = normalizeInline(text)
+  if (s.length <= max) return s
+  var head = s.slice(0, max)
+  var idx = -1
+  for (var i = 0; i < CLAUSE_PUNCT.length; i++) {
+    var p = head.lastIndexOf(CLAUSE_PUNCT[i])
+    if (p > idx) idx = p
+  }
+  if (idx >= Math.floor(max / 2)) return head.slice(0, idx)
+  return head
+}
+function shortenTitle(text, max) {
+  var s = normalizeInline(text)
+  if (s.length <= max) return s
+  return cutAtPunct(s, max)
+    .replace(/[，、；：,;:]+$/, '')
+    .trim()
+}
+function sentenceClamp(text, min, max) {
+  var sentences = splitSentences(text)
+  if (!sentences.length) return ''
+  var acc = ''
+  for (var i = 0; i < sentences.length; i++) {
+    var s = sentences[i]
+    if (!acc) acc = s
+    else if ((acc + s).length <= max) acc = acc + s
+    else {
+      if (acc.length < min) acc = acc + s.slice(0, Math.max(0, max - acc.length))
+      break
+    }
+    if (acc.length >= min) break
+  }
+  if (!acc) return ''
+  if (acc.length > max) acc = cutAtPunct(acc, max)
+  acc = acc.replace(/[，、；：,;:]+$/, '').trim()
+  return acc.length >= min ? acc : ''
+}
+function skillMdDescription(content) {
+  var s = String(content || '')
+  var fm = s.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+  if (!fm) return ''
+  var lines = fm[1].split(/\r?\n/)
+  var buf = ''
+  var collecting = false
+  for (var i = 0; i < lines.length; i++) {
+    var ln = lines[i]
+    if (/^description\s*:/.test(ln)) {
+      collecting = true
+      buf = ln.replace(/^description\s*:\s*/, '')
+      continue
+    }
+    if (collecting) {
+      if (/^[A-Za-z0-9_-]+\s*:/.test(ln)) break
+      buf += ' ' + ln
+    }
+  }
+  return normalizeInline(buf.replace(/^[>|]\s*/, '').replace(/^['"]|['"]$/g, ''))
+}
+function proseLines(text) {
+  var out = []
+  String(text || '')
     .split(/\r?\n/)
     .forEach(function (ln) {
       var t = ln.trim()
       if (!t) return
-      t = t.replace(/^[-*+]\s+/, '')
-      if (stripBullet) t = t.replace(/^\d+[.)]\s+/, '')
-      t = t.replace(/^[✅❌]\s*/, '')
-      if (t.length > 120) t = t.slice(0, 120)
-      if (t) out.push(t)
+      if (/^#{1,6}\s+/.test(t)) return
+      if (/^```/.test(t)) return
+      if (t.charAt(0) === '|' || /^\|?[\s:|-]+\|?$/.test(t)) return
+      out.push(t)
     })
-  return out.slice(0, limit || 5)
+  return out.join(' ')
+}
+function pointText(text) {
+  return normalizeInline(
+    String(text || '')
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .replace(/\s*\|\s*/g, '，')
+  )
+}
+function sectionSentence(content, names, min, max) {
+  for (var n = 0; n < names.length; n++) {
+    var sec = sectionText(content, [names[n]])
+    if (!sec) continue
+    var points = []
+    String(sec)
+      .split(/\r?\n/)
+      .forEach(function (ln) {
+        var m = ln.trim().match(/^(?:[-*+]|\d+[.)])\s+(.+)$/)
+        if (m) points.push(pointText(m[1]))
+      })
+    if (points.length) {
+      var pointOut = sentenceClamp(points.join(' '), min, max)
+      if (pointOut) return pointOut
+    }
+    var proseOut = sentenceClamp(proseLines(sec), min, max)
+    if (proseOut) return proseOut
+  }
+  return ''
+}
+function stepLabel(text) {
+  var s = normalizeInline(String(text || '').replace(/^[✅❌]\s*/, ''))
+  s = s.replace(/^Step\s*\d+[\s:：.-]*/i, '')
+  s = s.replace(/^\d+\s+/, '')
+  s = s.split(/[，。；：,;:]/)[0]
+  if (s.length > 14) s = s.slice(0, 14)
+  return s.trim()
+}
+function stepChain(content) {
+  var sec = sectionText(content, ['处理流程', '流程', 'Workflow', 'Process'])
+  var labels = []
+  String(sec)
+    .split(/\r?\n/)
+    .forEach(function (ln) {
+      var m = ln.trim().match(/^\d+[.)、]\s+(.+)$/)
+      if (m) labels.push(stepLabel(m[1]))
+    })
+  if (!labels.length) {
+    String(content)
+      .split(/\r?\n/)
+      .forEach(function (ln) {
+        var m = ln.trim().match(/^#{2,4}\s+Step\s*\d+[\s:：.-]*(.+)$/i)
+        if (m) labels.push(stepLabel(m[1]))
+      })
+  }
+  if (!labels.length) {
+    var arrowLine = ''
+    String(sec)
+      .split(/\r?\n/)
+      .forEach(function (ln) {
+        if (!arrowLine && /→|->/.test(ln)) arrowLine = ln
+      })
+    if (arrowLine) {
+      labels = arrowLine
+        .split(/→|->/)
+        .map(function (seg) {
+          return stepLabel(seg.split(/[：:]/).pop())
+        })
+        .filter(function (x) {
+          return !!x
+        })
+    }
+  }
+  labels = labels.filter(function (x) {
+    return !!x
+  })
+  labels = labels.slice(0, 5)
+  return labels.length ? labels.join(' → ') + '。' : ''
+}
+function scopeSentence(d) {
+  var at = agentMetaOf(d.agent_type).label || d.agent_type || ''
+  var scs = sceneChips.value
+    .map(function (x) {
+      return x.name
+    })
+    .filter(function (x) {
+      return !!x
+    })
+  if (!at && !scs.length) return ''
+  var parts = []
+  if (at) parts.push(at + ' Agent')
+  if (scs.length) parts.push('场景：' + scs.slice(0, 4).join('、'))
+  var s = parts.join('；') + '。'
+  if (s.length > 50) {
+    s = cutAtPunct(s, 49).replace(/[，、；：,;:。]+$/, '') + '。'
+  }
+  return s
 }
 function extractOverview(d) {
   if (!d || !d.content) return []
   var content = d.content
   var slots = []
-  var positioning = cleanLines(sectionText(content, ['定位']), 3)
-  if (positioning.length) slots.push({ key: 'summary', title: tt('ov_summary'), items: positioning, kind: 'list' })
-  var steps = cleanLines(sectionText(content, ['处理流程', '流程']), 6, true)
-  if (steps.length) slots.push({ key: 'steps', title: tt('ov_steps'), items: steps, kind: 'steps' })
-  var constraints = cleanLines(sectionText(content, ['操作边界', '约束']), 5)
-  if (constraints.length)
-    slots.push({ key: 'constraints', title: tt('ov_constraints'), items: constraints, kind: 'list' })
-  var products = cleanLines(sectionText(content, ['任务完成流程', '输出规范']), 4)
-  if (products.length) slots.push({ key: 'products', title: tt('ov_products'), items: products, kind: 'list' })
-  var scopeLines = []
-  var at = agentMetaOf(d.agent_type).label || d.agent_type || ''
-  if (at) scopeLines.push(at + ' Agent')
-  var scs = sceneChips.value.map(function (x) {
-    return x.name
-  })
-  if (scs.length) scopeLines.push('适用场景：' + scs.join('、'))
-  if (scopeLines.length)
-    slots.push({ key: 'scope', title: tt('ov_scope'), items: scopeLines, kind: 'list' })
+  var scope = scopeSentence(d)
+  if (scope) slots.push({ key: 'scope', title: tt('ov_scope'), text: scope })
+  var steps = stepChain(content)
+  if (steps) slots.push({ key: 'steps', title: tt('ov_steps'), text: steps })
+  var products = sectionSentence(
+    content,
+    ['任务完成流程', '输出规范', '任务完成', '产物', '交付'],
+    30,
+    50
+  )
+  if (products) slots.push({ key: 'products', title: tt('ov_products'), text: products })
+  var constraints = sectionSentence(content, ['操作边界', '硬约束', '约束', 'Constraints'], 30, 50)
+  if (constraints)
+    slots.push({ key: 'constraints', title: tt('ov_constraints'), text: constraints })
   return slots
 }
 function setSkdTab(key) {
@@ -1680,7 +1870,7 @@ function loadMoreComments() {
 function submitComment() {
   var d = detail.value
   if (!d || !d.id) return
-  var u = null
+  var u
   try {
     u = JSON.parse(G.window.localStorage.getItem('user') || 'null')
   } catch (e) {
@@ -3005,9 +3195,18 @@ onMounted(function () {
   font-size: 13px;
   color: var(--t2);
 }
-.skd-summary {
-  font-size: 15px;
+.skd-summary-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--t);
+}
+.skd-summary-body {
+  margin: 8px 0 0;
+  font-size: 13px;
   line-height: 1.6;
+  color: var(--t2);
 }
 .skd-metatable .skd-row {
   display: flex;
@@ -3040,16 +3239,11 @@ onMounted(function () {
   border-bottom: 0;
   padding-bottom: 0;
 }
-.skd-ov-slot ul,
-.skd-ov-slot ol {
+.skd-ov-text {
   margin: 0;
-  padding-left: 20px;
-}
-.skd-ov-slot li {
   font-size: 13px;
   line-height: 1.7;
   color: var(--t2);
-  margin: 2px 0;
 }
 .skd-desc {
   margin: 0;
