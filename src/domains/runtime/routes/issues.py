@@ -2116,6 +2116,8 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
                     mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
                     created_by_me: str = Query("", description="仅我创建的任务"),
                     assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
+                    per_page: int = Query(0, ge=0, le=200, description="服务端分页：每页条数（Issue #926 同款；0=全量，兼容旧调用方）"),
+                    page: int = Query(1, ge=1, description="服务端分页：页码（per_page>0 时生效）"),
                     user: dict = Depends(require_org_member)):
     """我的需求列表（需求中心·个人维度）。
 
@@ -2167,8 +2169,27 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
         # Issue #926：与 issues_list / _merge_sort_items 同源（_status_order_sql），
         # 修复旧版仅 3 桶（active/processing/else）与 Python 4 级优先序口径不一致
         _order_by = f"{_status_order_sql()}, created_at {_order_dir}"
-    issues_out = _query_tasks(where, params, _order_by, include_user_id=False)
-    return {"issues": issues_out, "sort_order": sort_order, "mode": mode}
+    issues_out = _query_tasks(where, params, _order_by, include_user_id=False,
+                              limit=per_page or None,
+                              offset=((page - 1) * per_page) if per_page else 0)
+    # 分页元数据（per_page>0 时；全量模式不破坏旧响应结构）
+    _out = {"issues": issues_out, "sort_order": sort_order, "mode": mode}
+    if per_page:
+        from src.kernel.session_manager import db_lock as _db_lock
+        try:
+            with _db_lock:
+                c = _rt_db.cursor()
+                c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
+                _total = int(c.fetchone()[0])
+        except Exception:
+            _total = len(issues_out)
+        _out.update({
+            "total": _total,
+            "page": page,
+            "per_page": per_page,
+            "has_more": (page * per_page) < _total,
+        })
+    return _out
 
 _STATUS_PRIORITY = {"active": 0, "processing": 1, "awaiting_input": 2, "pending_review": 3}
 

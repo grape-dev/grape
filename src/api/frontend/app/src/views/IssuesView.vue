@@ -752,9 +752,6 @@ const tasksLoading = ref(false) // 分屏请求在途（列表尾 sentinel 展�
 const tasksAppendLoading = ref(false) // 滚动追加在途（防并发重复拉同屏）
 let taskReqSeq = 0 // Issue #2984d027a：请求序号——重置类请求让旧在途响应失效
 let taskServerPage = 1 // 下一次要拉的服务端页码（成功后才推进）
-// 首屏请求被 silent abort（导航取消）后自动重拉一次；重拉再被取消才转终态，
-// 避免「同 hash 重复点菜单 → abort 旧请求但视图不重挂载 → 无人重发」造成永久加载中。
-let _silentAbortRetried = false
 const listScrollEl = ref(null) // 列表滚动容器（IntersectionObserver 的 root）
 const listSentinelEl = ref(null) // 列表尾部哨兵
 let listObserver = null
@@ -2834,10 +2831,12 @@ function loadTasks(opts) {
   if (append && tasksAppendLoading.value) return // 追加去重；重置请求一律放行
   const seq = ++taskReqSeq
   const reqPage = merge ? 1 : append ? taskServerPage : 1
-  // 「仓库全部」视图：服务端分页 + q/statuses 过滤；「我的需求」：条数有限，保持全量拉取
-  const usePaging = viewMode.value === 'repo_all' && !!repo
+  // 「仓库全部」与「我的需求」都走服务端分页（需求量大的账号全量拉取要 4MB/3.6s
+  // —— _batch_* 富化 2935 条 + 巨型 JSON）。URL 按 viewMode 分支；分页响应处理共用。
+  const usePaging = true
+  const repoAll = viewMode.value === 'repo_all' && !!repo
   let apiUrl
-  if (usePaging) {
+  if (repoAll) {
     const apiStatuses = [
       ...new Set(
         filterStatuses.value.reduce(function (acc, k) {
@@ -2866,7 +2865,10 @@ function loadTasks(opts) {
       encodeURIComponent(repoKey) +
       '&sort_order=' +
       sortOrder.value +
-      '&mode=time' +
+      '&mode=time&per_page=' +
+      SERVER_PAGE +
+      '&page=' +
+      reqPage +
       (filterAssignees.value.length
         ? '&creators=' + encodeURIComponent(filterAssignees.value.join(','))
         : '')
@@ -2909,7 +2911,7 @@ function loadTasks(opts) {
       } else {
         tasks.value = items
       }
-      if (usePaging && d.page !== undefined) {
+      if (d.page !== undefined) {
         tasksTotal.value = d.total === null || d.total === undefined ? null : d.total
         // 已滚动超过第 1 屏时，has_more 只能按已加载量对账（避免第 1 屏口径误停滚动）
         const beyondFirst = taskServerPage > 2
@@ -2922,8 +2924,9 @@ function loadTasks(opts) {
         // 成功后才推进页码：失败不推进 → 重试不跳屏
         if (!merge) taskServerPage = reqPage + 1
       } else {
-        tasksTotal.value = items.length
-        tasksHasMore.value = false
+        // mine 无分页元数据（旧后端）：按已加载量兜底
+        tasksTotal.value = d.total !== undefined ? d.total : items.length
+        tasksHasMore.value = d.has_more !== undefined ? !!d.has_more : false
       }
       loaded.value = true
       loadError.value = ''
@@ -2981,29 +2984,7 @@ function loadTasks(opts) {
       if (seq !== taskReqSeq) return // 已被更新的请求取代，静默丢弃
       tasksAppendLoading.value = false
       tasksLoading.value = false
-      // silent abort 只允许一种含义：用户确实离开了这个视图。
-      // 之前这里无条件 return，于是「视图还在、但请求被 nav signal 取消」也被当成
-      // 静默丢弃 —— 而那一刻已经没有别的请求会来置 loaded，页面就永久停在「加载中」，
-      // 直到 18s 后看门狗兜底报「加载失败: request aborted or timed out」。
-      // 实测证据：请求已返回 200、signal 却已 abort（st=200 且 ab=1），then 不执行、
-      // catch 静默 return，加载终态无人写。
-      if (e.name === 'AbortError' && e.silent) {
-        if (G.window._currentView !== 'tasks') return   // 真离开了：静默丢弃
-        if (loaded.value) return                        // 已有数据：保留旧帧，不打扰
-        // 视图还在且首屏仍空 → 先自动重拉一次（此刻导航已结束，新 signal 是活的）
-        if (!_silentAbortRetried) {
-          _silentAbortRetried = true
-          // 3s 窗口内只自动重拉一次：既让「被取消的首屏」有机会落地，
-          // 又不会在确实反复被取消时打成死循环。
-          setTimeout(function () { _silentAbortRetried = false }, 3000)
-          loadTasks()
-          return
-        }
-        // 重拉仍被取消 → 给可重试的终态，绝不让 loading 成为终态
-        loadError.value = t('load_failed', { msg: 'request aborted or timed out' })
-        loaded.value = true
-        return
-      }
+      if (e.name === 'AbortError' && e.silent) return
       if (G.window._currentView !== 'tasks') return
       G.window._pendingTaskDetailId = null
       G.window._deeplinkIssueNumber = null
@@ -3098,28 +3079,6 @@ function teardownListObserver() {
 }
 
 // ═══════════ 轮询（场景识别，30s） ═══════════
-// 加载看门狗：首屏数据若因「请求被静默取消」而永远不落地（loaded=false），
-// 页面会永久停在「加载中」。8s 兜底重拉一次；再 10s 仍空则显示错误+重试按钮。
-let _loadWatchdog = null
-function armLoadWatchdog() {
-  if (_loadWatchdog) clearTimeout(_loadWatchdog)
-  _loadWatchdog = setTimeout(function () {
-    _loadWatchdog = null
-    if (loaded.value || G.window._currentView !== 'tasks') return
-    try {
-      loadTasks()
-    } catch (e) {}
-    _loadWatchdog = setTimeout(function () {
-      _loadWatchdog = null
-      if (loaded.value || G.window._currentView !== 'tasks') return
-      loadError.value = t('load_failed', { msg: 'request aborted or timed out' })
-      loaded.value = true
-    }, 10000)
-  }, 8000)
-}
-function disarmLoadWatchdog() {
-  if (_loadWatchdog) { clearTimeout(_loadWatchdog); _loadWatchdog = null }
-}
 function startPoll() {
   if (pollTimer) clearInterval(pollTimer)
   pollTimer = setInterval(function () {
@@ -3193,10 +3152,8 @@ onMounted(function () {
   loadTakeovers()
   startPoll()
   loadDeployLink()
-  armLoadWatchdog()
 })
 onBeforeUnmount(function () {
-  disarmLoadWatchdog()
   stopPoll()
   teardownListObserver()
   if (deployLongPressTimer) clearTimeout(deployLongPressTimer)
