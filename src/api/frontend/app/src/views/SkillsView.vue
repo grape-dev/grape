@@ -320,53 +320,192 @@
       </div>
     </template>
 
-    <!-- ═══ 技能详情页 ═══（分支顺序：detail → subSkill → pkg——子技能查看时 pkg 仍在，须先判 subSkill） -->
+    <!-- ═══ 技能详情页（Issue #3168 五 Tab，D12 skd-* 隔离） ═══ -->
     <template v-else-if="detail">
-      <button class="det-back" @click="backFromDetail">← {{ tc('back') }}</button>
-      <div class="det">
-        <div class="det-head">
+      <button class="skd-back" @click="backFromDetail">← {{ tc('back') }}</button>
+      <div class="skd-page">
+        <div class="skd-card skd-head">
           <span
-            class="det-ico"
+            class="skd-ico"
             :style="{ '--fg1': gradient(detail).g1, '--fg2': gradient(detail).g2 }"
             >{{ agentMeta(detail).icon || '◈' }}</span
           >
-          <h1 class="det-name">{{ detail.display_name || detail.name }}</h1>
-          <span class="agent-badge">{{ agentMeta(detail).label }}</span>
-          <div class="det-actions">
+          <div class="skd-head-main">
+            <div class="skd-name-row">
+              <h1 class="skd-name">{{ detail.display_name || detail.name }}</h1>
+              <span class="agent-badge">{{ agentMeta(detail).label }}</span>
+              <span v-if="detail.is_featured" class="skd-badge">★ {{ tt('featured_badge') }}</span>
+            </div>
+            <div v-if="detailTags.length" class="skd-tags">
+              <span v-for="t in detailTags" :key="'dt-' + t" class="skd-chip">{{ t }}</span>
+            </div>
+            <div v-else class="skd-meta"><span>{{ tt('no_tags') }} —</span></div>
+            <div class="skd-meta">
+              <span class="skd-chip">v{{ detailVersion }}</span>
+              <span>{{ scopeLabel }}</span>
+              <span>{{ tt('updated_at') }} {{ formatDate(detail.updated_at) }}</span>
+              <span>⬇ {{ detail.download_count || 0 }} {{ tt('downloads') }}</span>
+              <span>{{ tt('orchestrated_in') }} {{ sceneCount(detail) }} {{ tt('scenes_unit') }}</span>
+              <span v-if="detail.created_by" class="skd-contributor">{{ detail.created_by }}</span>
+            </div>
+          </div>
+          <div class="skd-head-actions">
             <button
               v-if="detail.scope !== 'user'"
-              :class="['det-like', { liked: detail.liked_by_me }]"
+              :class="['skd-btn', 'skd-like', { liked: detail.liked_by_me }]"
               @click="onLike(detail)"
             >
               {{ detail.liked_by_me ? '❤️' : '🤍' }} {{ detail.like_count || 0 }}
             </button>
             <button
               v-if="detail.is_obs || detail.zip_url"
-              class="det-dl"
+              class="skd-btn skd-dl"
               @click="downloadZip(detail.id)"
             >
               {{ tt('download_skill') }}
             </button>
           </div>
         </div>
-        <p class="det-sum">{{ detail.description || '' }}</p>
-        <div class="fn-card">
-          <div class="fn-label">{{ tt('info_function') }}</div>
-          <!-- eslint-disable-next-line vue/no-v-html — 老代码同样用 renderMarkdown 产出 HTML 注入 -->
-          <div class="fn-body" v-html="detailHtml"></div>
+
+        <div class="skd-tabs">
+          <button
+            v-for="t in skdTabs"
+            :key="'skdtab-' + t.key"
+            :class="['skd-tab', { on: skdTab === t.key }]"
+            @click="setSkdTab(t.key)"
+          >
+            {{ t.label }}<span v-if="t.count !== null" class="skd-count">{{ t.count }}</span>
+          </button>
         </div>
-        <div class="info-grid">
-          <div class="info-cell">
-            <div class="il">{{ tt('info_scenes') }}</div>
-            <div class="iv">{{ detailScenesStr }}</div>
+
+        <!-- 概览 -->
+        <div v-if="skdTab === 'overview'" class="skd-panel">
+          <div class="skd-card skd-summary">{{ detailSummary }}</div>
+          <div class="skd-card skd-metatable">
+            <div class="skd-row"><span>{{ tt('info_scenes') }}</span><div class="skd-scene-chips">
+              <a v-for="sc in sceneChips" :key="'sc-' + sc.id" class="skd-chip skd-chip-link" @click="openScene(sc)">{{ sc.name }}</a>
+              <span v-if="!sceneChips.length">—</span>
+            </div></div>
+            <div class="skd-row"><span>{{ tt('info_category') }}</span><b>{{ catPath(detail) || detail.category_name || '—' }}</b></div>
+            <div class="skd-row"><span>{{ tt('info_version') }}</span><b>v{{ detailVersion }}</b></div>
+            <div class="skd-row"><span>{{ tt('info_author') }}</span><b>{{ detail.created_by || '—' }}</b></div>
+            <div class="skd-row"><span>{{ tt('updated_at') }}</span><b>{{ formatDate(detail.updated_at) }}</b></div>
           </div>
-          <div class="info-cell">
-            <div class="il">{{ tt('info_tags') }}</div>
-            <div class="iv">{{ detail.category_name || '—' }}</div>
+          <div v-if="hasOverview" class="skd-card skd-overview">
+            <h2 class="skd-h2">{{ tt('structured_overview') }}</h2>
+            <div v-for="slot in overviewSlots" :key="'ov-' + slot.key" class="skd-ov-slot">
+              <h3 class="skd-h3">{{ slot.title }}</h3>
+              <ol v-if="slot.kind === 'steps'">
+                <li v-for="(line, i) in slot.items" :key="'ovl-' + i">{{ line }}</li>
+              </ol>
+              <ul v-else>
+                <li v-for="(line, i) in slot.items" :key="'ovl-' + i">{{ line }}</li>
+              </ul>
+            </div>
           </div>
-          <div class="info-cell">
-            <div class="il">{{ tt('info_version') }}</div>
-            <div class="iv">{{ detailVersion }}</div>
+          <div class="skd-card">
+            <h2 class="skd-h2">{{ tt('description_original') }}</h2>
+            <p class="skd-desc">{{ detail.description || '—' }}</p>
+          </div>
+          <div class="skd-card skd-comments">
+            <h2 class="skd-h2">
+              {{ tt('user_comments') }}<span class="skd-count">{{ skdComments.total }}</span>
+            </h2>
+            <div class="skd-comment-form">
+              <textarea
+                v-model="commentDraft"
+                class="skd-textarea"
+                rows="3"
+                maxlength="1000"
+                :placeholder="tt('comment_placeholder')"
+              ></textarea>
+              <div class="skd-comment-actions">
+                <span class="skd-hint">{{ commentDraft.length }}/1000</span>
+                <button class="skd-btn skd-btn-primary" :disabled="commentBusy" @click="submitComment">
+                  {{ commentBusy ? tt('comment_submitting') : tt('comment_submit') }}
+                </button>
+              </div>
+            </div>
+            <div v-if="!skdComments.comments.length" class="skd-empty">{{ tt('comment_empty') }}</div>
+            <div v-for="c in skdComments.comments" :key="'cm-' + c.id" class="skd-comment">
+              <div class="skd-comment-head">
+                <b>{{ c.user_name || '用户' }}</b><span>{{ formatDate(c.created_at) }}</span>
+              </div>
+              <div class="skd-comment-body">{{ c.content }}</div>
+            </div>
+            <div v-if="skdComments.total > skdComments.comments.length" class="skd-more">
+              <button class="skd-btn" @click="loadMoreComments">{{ tt('load_more') }}</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- SKILL.md -->
+        <div v-else-if="skdTab === 'skillmd'" class="skd-panel">
+          <div class="skd-card skd-md-layout">
+            <aside v-if="skillToc.length" class="skd-toc">
+              <div class="skd-toc-title">{{ tt('toc_title') }}</div>
+              <a v-for="h in skillToc" :key="'toc-' + h.id" @click="jumpToHeading(h.id)">{{ h.text }}</a>
+            </aside>
+            <div class="skd-md-body">
+              <!-- eslint-disable-next-line vue/no-v-html — 复用既有 renderSkillContent 渲染链路 -->
+              <div v-html="detailHtml"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 资源 -->
+        <div v-else-if="skdTab === 'resources'" class="skd-panel">
+          <div class="skd-card skd-actions">
+            <a class="skd-btn" :href="sourceUrl" target="_blank" rel="noopener">{{ tt('view_source') }}</a>
+            <a class="skd-btn" :href="issueUrl" target="_blank" rel="noopener">{{ tt('report_issue') }}</a>
+            <button v-if="detail.is_obs || detail.zip_url" class="skd-btn" @click="downloadZip(detail.id)">
+              {{ tt('download_skill') }}
+            </button>
+          </div>
+          <div class="skd-card skd-filetree">
+            <h2 class="skd-h2">{{ tt('file_tree') }}<span class="skd-count">{{ detail.file_count || 0 }}</span></h2>
+            <div v-if="!skdFiles.length" class="skd-empty">{{ tt('no_files') }}</div>
+            <div v-for="f in skdFiles" :key="'f-' + f.path" class="skd-file">
+              <span class="skd-file-name">{{ f.path }}</span>
+              <span class="skd-file-size">{{ formatSize(f.size) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 相关技能 -->
+        <div v-else-if="skdTab === 'related'" class="skd-panel">
+          <div v-if="!skdRelated.length" class="skd-card skd-empty">{{ tt('no_related') }}</div>
+          <div v-else class="skd-related-grid">
+            <div v-for="r in skdRelated" :key="'rel-' + r.id" class="skd-card skd-related" @click="openDetail(r.id)">
+              <div class="skd-related-name">{{ r.display_name || r.name }}</div>
+              <div class="skd-related-desc">{{ r.summary || r.description || '—' }}</div>
+              <div class="skd-related-meta">
+                <span class="skd-chip">{{ agentMetaOf(r.agent_type).label || r.agent_type }}</span>
+                <span>❤️ {{ r.like_count || 0 }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 版本历史 -->
+        <div v-else-if="skdTab === 'versions'" class="skd-panel">
+          <div class="skd-card">
+            <table class="skd-table">
+              <thead>
+                <tr><th>{{ tt('version') }}</th><th>{{ tt('published_at') }}</th><th>{{ tt('change_note') }}</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="v in skdVersions" :key="'ver-' + v.version + '-' + v.uploaded_at">
+                  <td>
+                    {{ v.version }}
+                    <span v-if="v.is_latest" class="skd-badge">Latest</span>
+                  </td>
+                  <td>{{ formatDate(v.uploaded_at) }}</td>
+                  <td>{{ v.change_note || '—' }}</td>
+                </tr>
+                <tr v-if="!skdVersions.length"><td colspan="3" class="skd-empty">{{ tt('no_versions') }}</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -468,6 +607,10 @@
           <label>{{ tt('upload_tags') }}</label>
           <input v-model="uploadForm.tags" class="sk__f1" :placeholder="tt('upload_tags_ph')" />
         </div>
+        <div class="srow sk__srow">
+          <label>{{ tt('upload_summary') }}</label>
+          <input v-model="uploadForm.summary" class="sk__f1" :placeholder="tt('upload_summary_ph')" />
+        </div>
         <div class="sk__file-fld">
           <label>{{ tt2('upload.file_label') }}</label>
           <input
@@ -506,6 +649,14 @@
     >
       <div class="sk__form">
         <div class="sk__fmt-hint">{{ tt2('update.tip') }}</div>
+        <div class="srow sk__srow">
+          <label>{{ tt('upload_summary') }}</label>
+          <input v-model="updateCtx.summary" class="sk__f1" :placeholder="tt('upload_summary_ph')" />
+        </div>
+        <div class="srow sk__srow">
+          <label>{{ tt('change_note') }}</label>
+          <input v-model="updateCtx.changeNote" class="sk__f1" :placeholder="tt('change_note_ph')" />
+        </div>
         <div class="sk__file-fld">
           <label>{{ tt2('upload.file_label') }}</label>
           <input
@@ -627,6 +778,9 @@ const KEY_DEFAULTS = {
   upload_cat_l2: '二级分类',
   upload_tags: '标签（≤3，逗号分隔）',
   upload_tags_ph: '如 AI,自动化',
+  upload_summary: '摘要（≤50 字）',
+  upload_summary_ph: '一句话说明用途，不要使用 → 或 -> 流程链',
+  change_note_ph: '本次更新说明（可选）',
   sort_latest: '最新',
   sort_hot: '最热',
   skill_search_placeholder: '搜索技能名称或描述',
@@ -636,8 +790,45 @@ const KEY_DEFAULTS = {
   per_page_suffix: '/页',
   info_scenes: '所属场景',
   info_tags: '分类',
+  info_category: '分类',
   info_version: '版本',
+  info_author: '作者',
   info_function: '内容说明',
+  featured_badge: '精选',
+  no_tags: '标签',
+  updated_at: '更新于',
+  downloads: '次下载',
+  orchestrated_in: '已编排进',
+  scenes_unit: '个场景',
+  structured_overview: '结构化概述',
+  description_original: '概述原文',
+  user_comments: '用户评论',
+  comment_placeholder: '写下你的使用体验…',
+  comment_submit: '发表评论',
+  comment_submitting: '发表中...',
+  comment_empty: '暂无评论，来抢沙发',
+  load_more: '加载更多',
+  toc_title: '章节目录',
+  view_source: '查看源码',
+  report_issue: '提 Issue',
+  file_tree: '文件树',
+  no_files: '暂无文件清单',
+  no_related: '暂无相关技能',
+  version: '版本号',
+  published_at: '发布时间',
+  change_note: '变更说明',
+  no_versions: '暂无版本历史',
+  ov_summary: '总体说明',
+  ov_steps: '关键步骤链',
+  ov_constraints: '约束简述',
+  ov_products: '产物说明',
+  ov_scope: '适用范围',
+  tab_overview: '概览',
+  tab_skillmd: 'SKILL.md',
+  tab_resources: '资源',
+  tab_related: '相关技能',
+  tab_versions: '版本历史',
+  login_required: '请先登录后再发表评论',
   info_title: '信息',
   info_name: '名称',
   info_description: '描述',
@@ -972,25 +1163,271 @@ function onLike(s) {
 // ── 详情页 ──
 const detail = ref(null)
 const detailLoading = ref(false)
-const detailHtml = computed(function () {
-  if (!detail.value || !detail.value.content) return ''
-  return renderSkillContent(detail.value.content)
+const skdTab = ref('overview')
+const commentDraft = ref('')
+const commentBusy = ref(false)
+const skdComments = reactive({ comments: [], total: 0, page: 1, pageSize: 20 })
+const skdFiles = computed(function () {
+  return (detail.value && detail.value.files) || []
 })
-const detailScenesStr = computed(function () {
-  if (!detail.value) return '—'
-  const a = scenesArrOf(detail.value)
-  return a.length ? a.join('、') : '—'
+const skdVersions = computed(function () {
+  return (detail.value && detail.value.versions) || []
+})
+const skdRelated = computed(function () {
+  return (detail.value && detail.value.related) || []
+})
+const detailTags = computed(function () {
+  return (detail.value && detail.value.tags) || []
+})
+const detailSummary = computed(function () {
+  var d = detail.value
+  if (!d) return ''
+  var s = d.summary || d.description || ''
+  s = String(s).replace(/\r?\n/g, ' ').split(/→|->/)[0].trim()
+  return s.length > 50 ? s.slice(0, 50) : s || '—'
 })
 const detailVersion = computed(function () {
-  if (!detail.value) return '—'
-  const m = (detail.value.content || '').match(/^---[\s\S]*?^version:\s*(.+?)$/m)
+  var d = detail.value
+  if (!d) return '—'
+  if (d.version) return d.version
+  var m = (d.content || '').match(/^---[\s\S]*?^version:\s*(.+?)$/m)
   return m ? m[1].trim() : '—'
 })
-function openDetail(id) {
+const scopeLabel = computed(function () {
+  return scopeName((detail.value && detail.value.scope) || 'official')
+})
+const sceneChips = computed(function () {
+  if (!detail.value) return []
+  return (detail.value.scenes || []).map(function (sc) {
+    if (typeof sc === 'string') return { id: '', name: sc }
+    return { id: sc.id || sc.scene_id || sc.name || '', name: sc.display_name || sc.name || '' }
+  })
+})
+const skillToc = computed(function () {
+  var content = (detail.value && detail.value.content) || ''
+  var out = []
+  var seen = {}
+  content.replace(/^##\s+(.+)$/gm, function (_m, title) {
+    var id = headingId(title)
+    if (seen[id]) id = id + '-' + out.length
+    seen[id] = true
+    out.push({ id: id, text: title.trim() })
+    return _m
+  })
+  return out
+})
+const detailHtml = computed(function () {
+  if (!detail.value || !detail.value.content) return ''
+  var html = renderSkillContent(detail.value.content)
+  var toc = skillToc.value
+  var i = 0
+  return html.replace(/<h2([^>]*)>([\s\S]*?)<\/h2>/g, function (m, attrs, inner) {
+    var id = toc[i] ? toc[i].id : 'skd-sec-' + i
+    i++
+    return '<h2' + attrs + ' id="' + id + '">' + inner + '</h2>'
+  })
+})
+const overviewSlots = computed(function () {
+  return extractOverview(detail.value)
+})
+const hasOverview = computed(function () {
+  return overviewSlots.value.length > 0
+})
+const skdTabs = computed(function () {
+  return [
+    { key: 'overview', label: tt('tab_overview'), count: null },
+    { key: 'skillmd', label: tt('tab_skillmd'), count: null },
+    { key: 'resources', label: tt('tab_resources'), count: (detail.value && detail.value.file_count) || 0 },
+    { key: 'related', label: tt('tab_related'), count: skdRelated.value.length },
+    { key: 'versions', label: tt('tab_versions'), count: skdVersions.value.length },
+  ]
+})
+const sourceUrl = computed(function () {
+  var d = detail.value || {}
+  if (d.scope === 'official') {
+    return 'https://gitcode.com/grape-dev/grape-skills/tree/main/' + encodeURIComponent(d.name || '')
+  }
+  var repo = (G.app && G.app.currentRepo && G.app.currentRepo()) || null
+  return repo && repo.htmlUrl ? repo.htmlUrl : 'https://gitcode.com/grape-dev/grape'
+})
+const issueUrl = computed(function () {
+  var d = detail.value || {}
+  return (
+    'https://gitcode.com/grape-dev/grape/issues/new?title=' +
+    encodeURIComponent('[技能] ' + (d.display_name || d.name || '') + ' 问题反馈')
+  )
+})
+function headingId(title) {
+  return 'skd-h-' + String(title || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w\u4e00-\u9fa5]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+function formatDate(v) {
+  if (!v) return '—'
+  var s = String(v).replace('T', ' ')
+  return s.slice(0, 10)
+}
+function formatSize(n) {
+  var v = Number(n) || 0
+  if (v >= 1024 * 1024) return (v / (1024 * 1024)).toFixed(1) + ' MB'
+  if (v >= 1024) return (v / 1024).toFixed(1) + ' KB'
+  return v + ' B'
+}
+function sectionText(content, names) {
+  var lines = String(content || '').split(/\r?\n/)
+  var out = []
+  var hit = false
+  var level = 0
+  for (var i = 0; i < lines.length; i++) {
+    var m = lines[i].match(/^(#{1,4})\s+(.+)$/)
+    if (m) {
+      var title = m[2].trim()
+      var matched = names.some(function (n) {
+        return title.indexOf(n) >= 0
+      })
+      if (hit && matched) break
+      if (matched) {
+        hit = true
+        level = m[1].length
+        continue
+      }
+      if (hit && m[1].length <= level) break
+      if (hit) out.push(lines[i])
+      continue
+    }
+    if (hit) out.push(lines[i])
+  }
+  return out.join('\n').trim()
+}
+function cleanLines(text, limit, stripBullet) {
+  if (!text) return []
+  var out = []
+  String(text)
+    .split(/\r?\n/)
+    .forEach(function (ln) {
+      var t = ln.trim()
+      if (!t) return
+      t = t.replace(/^[-*+]\s+/, '')
+      if (stripBullet) t = t.replace(/^\d+[.)]\s+/, '')
+      t = t.replace(/^[✅❌]\s*/, '')
+      if (t.length > 120) t = t.slice(0, 120)
+      if (t) out.push(t)
+    })
+  return out.slice(0, limit || 5)
+}
+function extractOverview(d) {
+  if (!d || !d.content) return []
+  var content = d.content
+  var slots = []
+  var positioning = cleanLines(sectionText(content, ['定位']), 3)
+  if (positioning.length) slots.push({ key: 'summary', title: tt('ov_summary'), items: positioning, kind: 'list' })
+  var steps = cleanLines(sectionText(content, ['处理流程', '流程']), 6, true)
+  if (steps.length) slots.push({ key: 'steps', title: tt('ov_steps'), items: steps, kind: 'steps' })
+  var constraints = cleanLines(sectionText(content, ['操作边界', '约束']), 5)
+  if (constraints.length)
+    slots.push({ key: 'constraints', title: tt('ov_constraints'), items: constraints, kind: 'list' })
+  var products = cleanLines(sectionText(content, ['任务完成流程', '输出规范']), 4)
+  if (products.length) slots.push({ key: 'products', title: tt('ov_products'), items: products, kind: 'list' })
+  var scopeLines = []
+  var at = agentMetaOf(d.agent_type).label || d.agent_type || ''
+  if (at) scopeLines.push(at + ' Agent')
+  var scs = sceneChips.value.map(function (x) {
+    return x.name
+  })
+  if (scs.length) scopeLines.push('适用场景：' + scs.join('、'))
+  if (scopeLines.length)
+    slots.push({ key: 'scope', title: tt('ov_scope'), items: scopeLines, kind: 'list' })
+  return slots
+}
+function setSkdTab(key) {
+  skdTab.value = key
+  try {
+    var id = detail.value && detail.value.id
+    if (id) {
+      G.window.history.replaceState(
+        { view: 'skill', param: String(id) },
+        '',
+        '#skill/' + encodeURIComponent(id) + '/' + key
+      )
+    }
+  } catch (e) {
+    /* ignore */
+  }
+}
+function jumpToHeading(id) {
+  var el = document.getElementById(id)
+  if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+function openScene(sc) {
+  if (!sc || !sc.id) return
+  if (G.window.renderSceneDetail) G.window.renderSceneDetail(sc.id)
+  else if (G.app && G.app.nav) G.app.nav('scene-detail', sc.id)
+}
+function loadDetailComments(reset) {
+  var d = detail.value
+  if (!d || !d.id) return
+  var page = reset ? 1 : skdComments.page + 1
+  G.API.get(
+    '/skills/by-id/' + encodeURIComponent(d.id) + '/comments?page=' + page + '&page_size=' + skdComments.pageSize
+  )
+    .then(function (r) {
+      var list = r.comments || []
+      skdComments.comments = reset ? list : skdComments.comments.concat(list)
+      skdComments.total = r.total || 0
+      skdComments.page = page
+    })
+    .catch(function () {})
+}
+function loadMoreComments() {
+  loadDetailComments(false)
+}
+function submitComment() {
+  var d = detail.value
+  if (!d || !d.id) return
+  var u = null
+  try {
+    u = JSON.parse(G.window.localStorage.getItem('user') || 'null')
+  } catch (e) {
+    u = null
+  }
+  if (!u) {
+    G.app.showToast(tt('login_required'))
+    if (G.app.showLogin) G.app.showLogin()
+    return
+  }
+  var content = (commentDraft.value || '').trim()
+  if (!content) return
+  commentBusy.value = true
+  G.API.post('/skills/by-id/' + encodeURIComponent(d.id) + '/comments', { content: content })
+    .then(function (r) {
+      commentBusy.value = false
+      commentDraft.value = ''
+      if (r && r.comment) {
+        skdComments.comments.unshift(r.comment)
+        skdComments.total += 1
+        if (d) d.comment_count = (d.comment_count || 0) + 1
+      }
+    })
+    .catch(function (e) {
+      commentBusy.value = false
+      G.app.showToast((e && e.message) || '评论发表失败')
+    })
+}
+function resetDetailPanels() {
+  skdTab.value = 'overview'
+  commentDraft.value = ''
+  skdComments.comments = []
+  skdComments.total = 0
+  skdComments.page = 1
+}
+function openDetail(id, tabKey) {
   G.window._currentView = 'skill'
   detail.value = null
   pkg.value = null
   subSkill.value = null
+  resetDetailPanels()
   detailLoading.value = true
   G.API.get('/skills/by-id/' + encodeURIComponent(id))
     .then(function (d) {
@@ -1001,6 +1438,8 @@ function openDetail(id) {
         loadSubSkills(d.id)
       } else {
         detail.value = d
+        if (tabKey) skdTab.value = tabKey
+        loadDetailComments(true)
       }
       detailLoading.value = false
     })
@@ -1185,7 +1624,7 @@ const showUpload = ref(false)
 const uploading = ref(false)
 const uploadDone = ref(false)
 const uploadPct = ref(0)
-const uploadForm = reactive({ agentType: '', categoryId: '0', catL1: '0', catL2: '0', tags: '', file: null })
+const uploadForm = reactive({ agentType: '', categoryId: '0', catL1: '0', catL2: '0', tags: '', summary: '', file: null })
 // 一级分类变更时重置二级，避免提交旧一级下的二级形成跨父级组合
 watch(
   () => uploadForm.catL1,
@@ -1228,6 +1667,7 @@ function doUpload() {
   fd.append('cat_l1_id', String(parseInt(uploadForm.catL1, 10) || 0))
   fd.append('cat_l2_id', String(parseInt(uploadForm.catL2, 10) || 0))
   fd.append('tags', uploadForm.tags || '')
+  fd.append('summary', uploadForm.summary || '')
   if (tab.value === 'repo' && currentRepo.value) fd.append('repo', currentRepo.value)
   uploading.value = true
   uploadPct.value = 0
@@ -1257,6 +1697,8 @@ const updateCtx = reactive({
   id: 0,
   name: '',
   file: null,
+  summary: '',
+  changeNote: '',
   busy: false,
   pct: 0,
   done: false,
@@ -1266,6 +1708,8 @@ function askUpdate(s) {
   updateCtx.id = s && s.id
   updateCtx.name = (s && (s.display_name || s.name)) || ''
   updateCtx.file = null
+  updateCtx.summary = ''
+  updateCtx.changeNote = ''
   updateCtx.busy = false
   updateCtx.pct = 0
   updateCtx.done = false
@@ -1277,6 +1721,8 @@ function doUpdate() {
   }
   const fd = new FormData()
   fd.append('file', updateCtx.file)
+  fd.append('summary', updateCtx.summary || '')
+  fd.append('change_note', updateCtx.changeNote || '')
   updateCtx.busy = true
   updateCtx.pct = 0
   updateCtx.done = false
@@ -1400,6 +1846,9 @@ onMounted(function () {
       loadSubSkills(props.initialDetail.id)
     } else {
       detail.value = props.initialDetail
+      var m = (G.window.location.hash || '').match(/^#skill\/[^/]+\/([a-z]+)/)
+      if (m) skdTab.value = m[1]
+      loadDetailComments(true)
     }
     return
   }
@@ -1799,5 +2248,410 @@ onMounted(function () {
   font-size: 13px;
   line-height: 1.7;
   white-space: pre-wrap;
+}
+
+/* ===== Issue #3168 技能详情页（skd-* 隔离，D12 规范） ===== */
+.skd-back {
+  margin-bottom: 12px;
+  border: 1px solid var(--hairline);
+  background: var(--c);
+  border-radius: var(--rd);
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--t2);
+  cursor: pointer;
+}
+.skd-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.skd-card {
+  background: var(--c);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r2);
+  box-shadow: var(--sh);
+  padding: 20px;
+}
+@media (max-width: 760px) {
+  .skd-card {
+    padding: 16px;
+  }
+}
+.skd-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+.skd-ico {
+  width: 52px;
+  height: 52px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  color: #fff;
+  border-radius: var(--rd);
+  background: linear-gradient(145deg, var(--fg1, var(--a)), var(--fg2, var(--a-text)));
+}
+.skd-head-main {
+  flex: 1;
+  min-width: 0;
+}
+.skd-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.skd-name {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.3;
+}
+.skd-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: var(--chip-bg);
+  color: var(--t2);
+  padding: 2px 10px;
+  font-size: 11px;
+  margin-left: 4px;
+}
+.skd-tags {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+.skd-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: var(--chip-bg);
+  color: var(--t2);
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.skd-chip-link {
+  color: var(--a);
+  cursor: pointer;
+}
+.skd-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--t3);
+  margin-top: 8px;
+}
+.skd-contributor {
+  color: var(--t2);
+}
+.skd-head-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.skd-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--hairline);
+  background: var(--c);
+  color: var(--t);
+  border-radius: var(--rd);
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.skd-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.skd-btn-primary {
+  background: var(--a);
+  border-color: var(--a);
+  color: #fff;
+}
+.skd-like.liked {
+  color: var(--a);
+}
+.skd-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  background: var(--c);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r2);
+  box-shadow: var(--sh);
+  padding: 0 8px;
+}
+.skd-tab {
+  border: 0;
+  background: transparent;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--t2);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.skd-tab.on {
+  color: var(--a);
+  border-bottom-color: var(--a);
+  font-weight: 600;
+}
+.skd-count {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--t3);
+}
+.skd-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.skd-h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+.skd-h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--t2);
+}
+.skd-summary {
+  font-size: 15px;
+  line-height: 1.6;
+}
+.skd-metatable .skd-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 13px;
+}
+.skd-metatable .skd-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.skd-metatable .skd-row > span {
+  width: 76px;
+  flex-shrink: 0;
+  color: var(--t3);
+  font-size: 12px;
+}
+.skd-scene-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.skd-ov-slot {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.skd-ov-slot:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.skd-ov-slot ul,
+.skd-ov-slot ol {
+  margin: 0;
+  padding-left: 20px;
+}
+.skd-ov-slot li {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--t2);
+  margin: 2px 0;
+}
+.skd-desc {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.7;
+  font-size: 13px;
+  color: var(--t2);
+}
+.skd-comment-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.skd-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--hairline);
+  border-radius: var(--rd);
+  padding: 10px;
+  background: var(--bg);
+  color: var(--t);
+  font: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+.skd-comment-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.skd-hint {
+  font-size: 11px;
+  color: var(--t3);
+}
+.skd-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--t3);
+  font-size: 13px;
+}
+.skd-comment {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.skd-comment:last-child {
+  border-bottom: 0;
+}
+.skd-comment-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--t3);
+}
+.skd-comment-head b {
+  color: var(--t2);
+}
+.skd-comment-body {
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  color: var(--t);
+}
+.skd-more {
+  padding-top: 12px;
+  text-align: center;
+}
+.skd-md-layout {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 16px;
+}
+@media (max-width: 760px) {
+  .skd-md-layout {
+    grid-template-columns: 1fr;
+  }
+  .skd-toc {
+    display: none;
+  }
+}
+.skd-toc {
+  position: sticky;
+  top: 56px;
+  align-self: start;
+  max-height: 70vh;
+  overflow: auto;
+  border-right: 1px solid var(--hairline);
+  padding-right: 12px;
+}
+.skd-toc-title {
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--t3);
+}
+.skd-toc a {
+  display: block;
+  padding: 6px 0;
+  font-size: 12px;
+  color: var(--t2);
+  cursor: pointer;
+}
+.skd-md-body {
+  min-width: 0;
+  overflow-x: auto;
+}
+.skd-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.skd-file {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 13px;
+}
+.skd-file:last-child {
+  border-bottom: 0;
+}
+.skd-file-name {
+  word-break: break-all;
+}
+.skd-file-size {
+  flex-shrink: 0;
+  color: var(--t3);
+}
+.skd-related-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+}
+.skd-related {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: pointer;
+}
+.skd-related-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+.skd-related-desc {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--t2);
+}
+.skd-related-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--t3);
+}
+.skd-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.skd-table th {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--hairline);
+  text-align: left;
+  font-weight: 600;
+  color: var(--t2);
+}
+.skd-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: top;
 }
 </style>
