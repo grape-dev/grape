@@ -98,6 +98,15 @@ def generate_key() -> str:
     return base64.urlsafe_b64encode(_os.urandom(32)).decode()
 
 
+def crypto_config_path() -> str:
+    """crypto.json 的期望路径。
+
+    供启动自检把"该配哪个文件"告诉运维；路径按运行时部署根目录拼出，
+    源码里不写死部署绝对路径（仓库有脱敏门禁会拦）。
+    """
+    return os.path.join(_CONFIG_DIR, "crypto.json")
+
+
 def key_status() -> dict:
     """探测数据库加密密钥是否可用（不抛异常，供启动自检/健康检查用）。
 

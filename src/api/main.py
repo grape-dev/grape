@@ -50,16 +50,16 @@ def _startup_security_check():
     # 缺密钥时：沙箱凭据的平台登记会失败（凭据建好、平台没绑，详情按钮消失），
     # LLM 凭据也无法保存。历史上这条失败在调用处被吞成 WARNING，用户完全看不出原因。
     # 生产环境按启动门禁处理（fail-closed）；开发/测试只告警不拦。
-    from src.kernel.crypto import key_status as _key_status
+    from src.kernel.crypto import key_status as _key_status, crypto_config_path as _crypto_path
     _ks = _key_status()
     if not _ks.get("configured"):
         _key_hint = (
             "数据库加密密钥未配置（沙箱平台 api_key / 用户 LLM 凭据的加密密钥）。"
             "配置方式二选一："
-            "① 写 /opt/grape/configs/crypto.json，内容 "
+            f"① 写 {_crypto_path()}，内容 "
             '{"encryption_key": "<32字节base64url>"}，权限必须 0600（chmod 600）；'
-            "② 或设环境变量 GRAPE_DB_ENCRYPTION_KEY=<32字节base64url>（systemd 用 "
-            "/etc/grape/grape.env，改完 systemctl daemon-reload && systemctl restart 'grape@*'）。"
+            "② 或设环境变量 GRAPE_DB_ENCRYPTION_KEY=<32字节base64url>（systemd 部署写在 "
+            "/etc/grape/grape.env，改完 daemon-reload 后重启 grape 相关服务）。"
             "生成密钥：python3 -c \"import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())\"。"
             "多主控实例必须使用同一把密钥。"
             f"当前探测错误：{_ks.get('error')}"
