@@ -80,6 +80,23 @@ def get_runtime(runtime_id: int) -> dict[str, Any]:
         return rows[0] if rows else {}
 
 
+def cloud_sandboxes_active_count(provider_ids) -> int:
+    """给定 provider id 列表里状态为 creating/running 的沙箱数。
+
+    原实现在名为 cloud_sandboxes_active_count_by_cred 的具名查询里用子查询读 mgmt 的
+    sandbox_provider_config，三库拓扑下跨库执行必失败。现在拆成：mgmt 出 provider 列表，
+    本域按列表计数。
+    """
+    keys = [str(x) for x in (provider_ids or []) if x]
+    if not keys:
+        return 0
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id IN ({ph}) "
+                  f"AND state IN ('creating','running')", tuple(keys))
+        return int((c.fetchone() or [0])[0] or 0)
+
+
 def list_runtime_uid_rows() -> list[tuple]:
     """engine_uid 回填/校验用：id, credential_id, name, scope, owner_id, host_name, engine_uid。
 
@@ -2257,10 +2274,9 @@ _ANY_QUERIES: dict[str, str] = {
     'runtime_credential_type_by_id': "SELECT cred_type FROM runtime_credentials WHERE id=?",
     # G-02（A11 裁定 2026-11-17：grape_t_cloud_sandboxes 归 runtime）：mgmt 吊销链 409 门禁
     # 的低频读点改走本 public 面。mgmt 侧禁止再直连该表（foreign_table_refs 收缩方向）。
-    'cloud_sandboxes_active_count_by_cred': (
-        "SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id IN "
-        "(SELECT id FROM grape_t_sandbox_provider_config WHERE runtime_credential_id=?) "
-        "AND state IN ('creating','running')"),
+    # [跨域拆解 2026-11-18] 原来的具名查询用子查询读 mgmt 的 sandbox_provider_config ——
+    # 跨库必然失败（服务的是读，不是 DDL）。改为具名函数 cloud_sandboxes_active_count()，
+    # provider 列表由 mgmt.public 提供，调用方编排。
     # G-02（A11）：runtime_credentials 归 runtime，mgmt 侧沙箱 Provider 端点族对它的
     # JOIN/子查询全部收敛为以下具名读（mgmt 库视图依赖随之消除，单库/三库均可移植）。
     # brief 全量 map：管理列表页单请求取一次，行数 = 凭据数（管理面小表）。

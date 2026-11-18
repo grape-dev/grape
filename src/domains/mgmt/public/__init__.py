@@ -3019,6 +3019,69 @@ def sandbox_provider_by_credential(credential_id: int) -> tuple:
         return tuple(row) if row else ()
 
 
+def sandbox_provider_ids_by_credential(credential_id: int) -> list[str]:
+    """该凭据关联的 provider id 列表（吊销前的在制动静检查用）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id FROM grape_t_sandbox_provider_config WHERE runtime_credential_id=%s",
+                  (credential_id,))
+        return [str(r[0]) for r in c.fetchall()]
+
+
+def sandbox_providers_by_credential(credential_id: int) -> list[tuple]:
+    """(id, platform, endpoint, api_key_enc, extra_config, max_sandboxes) —— enabled 的 provider 行。
+
+    原 SQL 把它和 runtime_credentials LEFT JOIN 在一起（跨库）；凭据侧列由调用方本域再查。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id, platform, endpoint, api_key_enc, extra_config, max_sandboxes "
+                  "FROM grape_t_sandbox_provider_config "
+                  "WHERE enabled=1 AND runtime_credential_id=%s", (credential_id,))
+        return [tuple(r) for r in c.fetchall()]
+
+
+def usernames_by_ids(user_ids) -> dict:
+    """{user_id: username} —— 沙箱列表把 created_by 还原成 owner 名（原 LEFT JOIN user_accounts）。"""
+    keys = [int(x) for x in (user_ids or []) if x]
+    if not keys:
+        return {}
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"SELECT id, username FROM grape_accounts WHERE id IN ({ph})", tuple(keys))
+        return {r[0]: (r[1] or "") for r in c.fetchall()}
+
+
+def sandbox_provider_credential_ids(provider_ids) -> dict:
+    """{provider_id: runtime_credential_id} —— 原 LEFT JOIN grape_t_sandbox_provider_config。"""
+    keys = [str(x) for x in (provider_ids or []) if x]
+    if not keys:
+        return {}
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"SELECT id, runtime_credential_id FROM grape_t_sandbox_provider_config "
+                  f"WHERE id IN ({ph})", tuple(keys))
+        return {r[0]: (r[1] or 0) for r in c.fetchall()}
+
+
+def sandbox_provider_platform(provider_id: str) -> str:
+    """provider 的 platform 键（沙箱杀灭时用来查后端工厂）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT platform FROM grape_t_sandbox_provider_config WHERE id=%s", (provider_id,))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def sandbox_provider_credential_id(provider_id: str) -> int:
+    """provider 关联的 runtime_credential_id（0 = 未关联）。
+
+    LLM 凭据路由要按 provider 的凭据 scope 决定走仓库级还是用户级凭据。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT runtime_credential_id FROM grape_t_sandbox_provider_config WHERE id=%s",
+                  (provider_id,))
+        row = c.fetchone()
+        return int((row or [0])[0] or 0)
+
+
 def sandbox_provider_endpoint(provider_id: str) -> str:
     """provider 当前 endpoint（空值不覆盖语义要用它）。"""
     with db_registry.cursor("mgmt") as c:
@@ -3214,6 +3277,19 @@ def sandbox_provider_max_sandboxes(provider_id: str) -> int:
         c.execute("SELECT max_sandboxes FROM grape_t_sandbox_provider_config WHERE id=%s", (provider_id,))
         row = c.fetchone()
         return int((row or [0])[0] or 0)
+
+
+def sandbox_template_candidates(engine_like: str) -> list[tuple]:
+    """(template_id, provider, engines, updated_at) —— engines LIKE 且启用且探测通过的行。
+
+    原 SQL 在库里用 ORDER BY CASE provider ... 做优先级排序（依赖调用方传入的
+    platform 顺序）。跨库后排序挪到调用方 Python 侧做，这里只取候选集。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT template_id, provider, engines, updated_at FROM grape_t_sandbox_templates "
+                  "WHERE engines LIKE %s AND enabled=1 AND last_check_status='ok'",
+                  (engine_like,))
+        return [tuple(r) for r in c.fetchall()]
 
 
 def sandbox_template_provider_of(template_id: str) -> tuple:

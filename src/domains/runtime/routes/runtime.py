@@ -156,27 +156,22 @@ def _require_credential_ctx(request: Request) -> CredentialContext:
     h = hashlib.sha256(token.encode()).hexdigest()
     with db_lock:
         c = db.cursor()
-        try:
-            c.execute(
-                "SELECT rc.id, rc.scope, rc.owner_name, rc.owner_id, rc.repo_key, ua.id "
-                "FROM runtime_credentials rc "
-                "LEFT JOIN user_accounts ua ON rc.owner_name = ua.username "
-                "WHERE rc.token_hash=? AND rc.status='active'",
-                (h,))
-            row = c.fetchone()
-        except Exception as _e_ua:  # noqa: BLE001
-            # 三库拓扑：user_accounts 归 mgmt 域，runtime 进程库没有该表（1146）。
-            # 回落成不 JOIN 的查询：owner_id 取 runtime_credentials 自带列（worker 凭据
-            # 为空 → 下游按 fail-closed 处理），whoami 本身不消费 owner_id。
-            log.warning(f"whoami ctx: user_accounts join unavailable ({_e_ua}); "
-                        "fallback without owner id resolution")
-            c = db.cursor()
-            c.execute(
-                "SELECT rc.id, rc.scope, rc.owner_name, rc.owner_id, rc.repo_key, NULL "
-                "FROM runtime_credentials rc "
-                "WHERE rc.token_hash=? AND rc.status='active'",
-                (h,))
-            row = c.fetchone()
+        # 三库拓扑：user_accounts 归 mgmt，不能 JOIN（JOIN 要求同库）。
+        # 先读本域凭据行，再按 username 通过 mgmt public 解析数值 owner id。
+        c.execute(
+            "SELECT id, scope, owner_name, owner_id, repo_key "
+            "FROM runtime_credentials WHERE token_hash=? AND status='active'", (h,))
+        row = c.fetchone()
+        _ua_id = None
+        if row and (row[1] or "").strip().lower() == "user" and (row[2] or ""):
+            try:
+                from src.domains.mgmt import public as _mg_ua
+                _ua_id = _mg_ua.active_account_id_by_username(row[2]) or None
+            except Exception as _e_ua:  # noqa: BLE001
+                # 解析失败不该拦住鉴权：下游按 fail-closed 处理（owner_id 退回自带列）
+                log.warning(f"whoami ctx: owner id resolution failed ({_e_ua})")
+        if row:
+            row = (row[0], row[1], row[2], row[3], row[4], _ua_id)
     if not row:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "runtime credential revoked or not found"})
     _scope = (row[1] or "global").strip().lower()
@@ -1274,49 +1269,34 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
         # （spec A——消灭「静默跳过引擎死半路」盲区）。
         _llm_mode, _llm_repo_key = "user", ""
         try:
-            # F-5 修复（2026-11-17）：原单条 SQL 用 json_extract(r.runtime_info,'$.provider_id')
-            # 直接 JOIN spc.id——MariaDB 的 json_extract 返回带引号 "2"，SQLite 不带；
-            # 拆库到 MariaDB 后 JOIN 恒 miss，被 except:pass 静默吞成 mode=user（注入
-            # 错误 scope 的 LLM key，E2E 定位证据见用例库 F-5）。改为 Python 侧
-            # json.loads 归一 provider_id 后再查两步——跨库语义恒定，miss 显式日志不静默。
+            # 原来是四表 JOIN 且用 json_extract（SQLite 方言）—— 三库/MySQL 下必然失败，
+            # 一直被 except 吞掉等于从未生效。改为分步读 + Python 解析 JSON。
             with db_lock:
                 c = db.cursor()
-                c.execute(
-                    "SELECT r.runtime_info FROM agent_tasks t "
-                    "LEFT JOIN agent_runtimes r ON t.runtime_id=r.id "
-                    "WHERE t.id=?",
-                    (task_id,),
-                )
-                _ri_row2 = c.fetchone()
-            _pid = None
-            if _ri_row2 and _ri_row2[0]:
-                try:
-                    _pid = (_json.loads(_ri_row2[0]) or {}).get("provider_id")
-                except Exception as _pe:
-                    log.warning(f"task_env: runtime_info JSON 解析失败，scope 路由回落 user: task={task_id}: {_pe}")
-            # spc.id 是 varchar，行值两种形态（本地 "2" / 远端 UUID）——json.loads 产物
-            # 本就是无引号字符串，直接等值传参即可；不做 int() 强转（UUID 会炸→except 回落，
-            # 第一版修复的实测教训）。None/空归一为 miss。
-            _pid = str(_pid).strip() if _pid is not None else ""
-            _scope_row = None
-            if _pid:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute(
-                        "SELECT rc.scope, rc.repo_key "
-                        "FROM grape_t_sandbox_provider_config spc "
-                        "LEFT JOIN runtime_credentials rc ON rc.id = spc.runtime_credential_id "
-                        "WHERE spc.id=?",
-                        (_pid,),
-                    )
-                    _scope_row = c.fetchone()
-                if not _scope_row:
-                    log.warning(f"task_env: scope 路由未命中 provider 行（pid={_pid}），回落 user 级凭据: task={task_id}")
+                c.execute("SELECT runtime_id FROM agent_tasks WHERE id=?", (task_id,))
+                _t_row = c.fetchone()
+                _prov_id = ""
+                if _t_row and _t_row[0]:
+                    c.execute("SELECT runtime_info FROM agent_runtimes WHERE id=?", (_t_row[0],))
+                    _r_row = c.fetchone()
+                    if _r_row and _r_row[0]:
+                        try:
+                            _prov_id = str(json.loads(_r_row[0]).get("provider_id") or "")
+                        except (ValueError, TypeError):
+                            _prov_id = ""
+                _scope_row = None
+                if _prov_id:
+                    from src.domains.mgmt import public as _mg_prov
+                    _cred_id = _mg_prov.sandbox_provider_credential_id(_prov_id)
+                    if _cred_id:
+                        c.execute("SELECT scope, repo_key FROM runtime_credentials WHERE id=?",
+                                  (_cred_id,))
+                        _scope_row = c.fetchone()
             if _scope_row and (_scope_row[0] in ("global", "repo")):
                 _llm_mode = "repo"
                 _llm_repo_key = task_repo_key or (_scope_row[1] or "")
-        except Exception as _se:
-            log.warning(f"task_env: scope 路由异常，回落 user 级凭据: task={task_id}: {_se}")
+        except Exception:
+            pass
         from src.domains.runtime.agents.sandbox.llm_cred_selector import select_llm_cred
         with db_lock:
             c = db.cursor()
@@ -3411,14 +3391,16 @@ def runtime_list_cloud_sandboxes(
         extra_params.append(state)
     extra_where = (" AND " + " AND ".join(extra_conditions)) if extra_conditions else ""
     _domains = ("mgmt", "runtime")
+    # 原 SQL 有两个跨域 LEFT JOIN（user_accounts / sandbox_provider_config 都归 mgmt）。
+    # JOIN 要求同库，三库拓扑下必须拆：这里只查本域单表，两个 mgmt 列留 NULL 占位，
+    # 由下面的富化段批量补齐（列数与顺序保持不变，下游下标不动）。
     _sel = (
         "SELECT s.sandbox_id, s.issue_id, s.repo_key, s.provider, s.provider_id, s.state, "
         "s.agent_installed, s.kill_attempts, s.created_at, s.last_refresh_at, "
-        "s.task_id, s.created_by, u.username, "
+        "s.task_id, s.created_by, NULL, "
         "s.template_id, s.template_name, s.engine_type, s.last_error, "
-        "spc.runtime_credential_id "
-        "FROM grape_t_cloud_sandboxes s LEFT JOIN user_accounts u ON s.created_by=u.id "
-        "LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = s.provider_id "
+        "NULL "
+        "FROM grape_t_cloud_sandboxes s "
     )
     offset = (page - 1) * page_size
     if repo_key:
@@ -3458,6 +3440,17 @@ def runtime_list_cloud_sandboxes(
                 + ",".join(["?"] * len(_cred_ids)) + ")",
                 tuple(_cred_ids), ("runtime", "mgmt")):
             _cr_map[_r[0]] = _r[1] or ""
+    # 两个跨域列改为批量补齐（原 LEFT JOIN 的等价物；无匹配 → 空，保持 LEFT 语义）
+    _u_map: dict = {}
+    _pcred_map: dict = {}
+    _owner_ids = [r[11] for r in _rows if r[11]]
+    _prov_ids = [r[4] for r in _rows if r[4]]
+    if _owner_ids or _prov_ids:
+        from src.domains.mgmt import public as _mg_sb
+        if _owner_ids:
+            _u_map = _mg_sb.usernames_by_ids(_owner_ids)
+        if _prov_ids:
+            _pcred_map = _mg_sb.sandbox_provider_credential_ids(_prov_ids)
 
     def _p_ri(_raw):
         try:
@@ -3475,10 +3468,11 @@ def runtime_list_cloud_sandboxes(
         sandboxes.append({
             # provider 显示 = 凭据名（跟随改名；无凭据/空名回落建箱快照 s.provider）
             "sandbox_id": r[0], "issue_id": r[1], "repo_key": r[2],
-            "provider": _cr_map.get(r[17]) or r[3],
+            "provider": _cr_map.get(_pcred_map.get(r[4]) or r[17]) or r[3],
             "provider_id": r[4], "state": r[5], "agent_installed": bool(r[6]),
             "kill_attempts": r[7], "created_at": r[8], "last_refresh_at": r[9],
-            "task_id": r[10], "created_by": r[11], "owner_name": r[12] or "",
+            "task_id": r[10], "created_by": r[11],
+            "owner_name": (_u_map.get(r[11]) if _u_map else None) or r[12] or "",
             "event_seq": _t.get("event_seq"),
             "engine": ((r[15] or _ri.get("engine_type", "") or _ar_name.split(":")[0])
                        or _ar_name.split(":")[0]),
@@ -3501,15 +3495,20 @@ def runtime_kill_cloud_sandbox(sandbox_id: str, user: dict = Depends(require_no_
         # (=凭据名规整化, 实测 'cubesandbox-s1')——非 registry 的 platform 键。
         # 统一经 provider_id JOIN spc.platform 取键(与模板检查链路同款修法);
         # provider_id 缺失的旧行回退 provider 列原文(可能仍失败, 报错可见)。
-        c.execute(
-            "SELECT cs.provider, cs.state, cs.repo_key, cs.provider_id, "
-            "spc.platform "
-            "FROM grape_t_cloud_sandboxes cs LEFT JOIN grape_t_sandbox_provider_config spc ON spc.id = cs.provider_id "
-            "WHERE cs.sandbox_id=?", (sandbox_id,))
+        # 原 SQL LEFT JOIN spc.platform（跨域）→ 拆成本域单表 + mgmt public 补 platform
+        c.execute("SELECT provider, state, repo_key, provider_id "
+                  "FROM grape_t_cloud_sandboxes WHERE sandbox_id=?", (sandbox_id,))
         row = c.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "sandbox not found"})
-    provider_name, state, sandbox_repo_key = row[4] or row[0], row[1], row[2] or ""
+    _platform_key = ""
+    if row[3]:
+        try:
+            from src.domains.mgmt import public as _mg_plat
+            _platform_key = _mg_plat.sandbox_provider_platform(row[3])
+        except Exception as _e:  # noqa: BLE001 - 补不到就回退 provider 列原文
+            log.warning(f"kill cloud sandbox: platform lookup failed ({_e})")
+    provider_name, state, sandbox_repo_key = _platform_key or row[0], row[1], row[2] or ""
     if sandbox_repo_key:
         check_repo_access(user, sandbox_repo_key)
     if state in ("killed", "kill_failed"):
@@ -3588,19 +3587,18 @@ def runtime_provider_configs(cred: CredentialContext = Depends(_require_credenti
     """
     from src.kernel.crypto import decrypt
     providers = []
-    # 三库拓扑：grape_t_sandbox_provider_config 归 mgmt，runtime_credentials 归 runtime，
-    # 单条跨域 JOIN 在 worker 进程库（runtime 域）必然 1146。拆两段读，各自按
-    # 归属域优先（provider→mgmt，凭据→runtime），只在 1146 时反向兜底。
-    rows = _fetch_across_domains(
-        "SELECT id, platform, endpoint, api_key_enc, extra_config, max_sandboxes "
-        "FROM grape_t_sandbox_provider_config WHERE enabled=1 AND runtime_credential_id=?",
-        (cred.id,), ("mgmt", "runtime"))
-    _rc_rows = _fetch_across_domains(
-        "SELECT name, scope, credential_uid FROM runtime_credentials WHERE id=?",
-        (cred.id,), ("runtime", "mgmt"))
-    _rc_name, credential_scope, _cred_uid = (_rc_rows[0] if _rc_rows else (None, None, None))
-    for pid, platform, endpoint, api_key_enc, extra_json, max_sandboxes in rows:
-        name = _rc_name
+    # 原 SQL 把 mgmt 的 provider 配置和本域 runtime_credentials 做跨库 LEFT JOIN。
+    # 拆成：mgmt public 取 provider 行 + 本域按 cred.id 取凭据列（rc.id 恒等于该凭据 id）。
+    from src.domains.mgmt import public as _mg_pv
+    from src.kernel.bulk_read import reader
+    _prov_rows = _mg_pv.sandbox_providers_by_credential(cred.id)
+    with reader() as c:
+        c.execute("SELECT name, scope, credential_uid FROM runtime_credentials WHERE id=?", (cred.id,))
+        _rc_row = c.fetchone() or ("", "", "")
+    _rc_name, _rc_scope, _rc_uid = _rc_row[0] or "", _rc_row[1] or "", _rc_row[2] or ""
+    rows = [(p_[0], _rc_name, p_[1], p_[2], p_[3], p_[4], p_[5], _rc_scope, _rc_uid)
+            for p_ in _prov_rows]
+    for pid, name, platform, endpoint, api_key_enc, extra_json, max_sandboxes, credential_scope, _cred_uid in rows:
         try:
             extra = json.loads(extra_json) if extra_json else {}
             api_key = decrypt(api_key_enc) if api_key_enc else ""

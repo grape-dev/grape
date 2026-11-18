@@ -140,43 +140,39 @@ class SandboxRepository:
                         key=lambda p: getattr(get_adapter(p), "priority", 100),
                     )
                     if _cloud_platforms:
-                        _case_parts = " ".join(
-                            f"WHEN ? THEN {i}" for i, _ in enumerate(_cloud_platforms)
-                        )
-                        c.execute(
-                            f"SELECT template_id, provider FROM grape_t_sandbox_templates "
-                            f"WHERE engines LIKE ? AND enabled=1 AND last_check_status='ok' "
-                            f"ORDER BY "
-                            f"  CASE provider {_case_parts} ELSE 999 END, "
-                            f"  CASE WHEN engines = ? THEN 0 ELSE 1 END, "
-                            f"  updated_at DESC LIMIT 1",
-                            (*_cloud_platforms, f'%"{engine_name}"%', f'["{engine_name}"]'),
-                        )
-                        row = c.fetchone()
-                        if row:
-                            return row[0] or "", row[1] or ""
+                        # 表归 mgmt：候选集从 public 取，原先库里的 ORDER BY CASE provider
+                        # 排序挪到这里做（跨库后无法在 SQL 里按调用方的 platform 顺序排）。
+                        from src.domains.mgmt import public as _mg_tpl
+                        _prio = {p_: i for i, p_ in enumerate(_cloud_platforms)}
+                        _cands = _mg_tpl.sandbox_template_candidates(f'%"{engine_name}"%')
+                        if _cands:
+                            # 等价于原来的
+                            #   ORDER BY CASE provider <_cloud_platforms 顺序> ELSE 999 END,
+                            #           CASE WHEN engines = '["<engine>"]' THEN 0 ELSE 1 END,
+                            #           updated_at DESC
+                            #   LIMIT 1
+                            _exact = f'["{engine_name}"]'
+
+                            def _rank(x):
+                                return (_prio.get(x[1], 999), 0 if x[2] == _exact else 1)
+
+                            _best_rank = min(_rank(x) for x in _cands)
+                            _tied = [x for x in _cands if _rank(x) == _best_rank]
+                            _top = max(_tied, key=lambda x: str(x[3] or ""))   # updated_at 降序
+                            return _top[0] or "", _top[1] or ""
                 # fallback：grape_t_engine_sandbox_config 旧表（查 sandbox_provider）
                 from src.domains.runtime.agents.sandbox.backends import get_cloud_platforms as _get_cp
                 _cloud_list = _get_cp()
                 if not _cloud_list:
                     return "", ""
-                _in_placeholders = ",".join("?" * len(_cloud_list))
+                # 表归 mgmt：两个分支都有现成 public 原语（单点 + 任意行兜底）
+                from src.domains.mgmt import public as _mg_esc
                 if runtime_id is not None and engine_name:
-                    c.execute(
-                        f"SELECT sandbox_provider FROM grape_t_engine_sandbox_config "
-                        f"WHERE runtime_id=? AND engine_name=? "
-                        f"AND sandbox_provider IN ({_in_placeholders})",
-                        (runtime_id, engine_name, *_cloud_list),
-                    )
+                    _sp = _mg_esc.engine_sandbox_provider_of(runtime_id, engine_name, _cloud_list)
                 else:
-                    c.execute(
-                        f"SELECT sandbox_provider FROM grape_t_engine_sandbox_config "
-                        f"WHERE sandbox_provider IN ({_in_placeholders}) LIMIT 1",
-                        tuple(_cloud_list)
-                    )
-                row = c.fetchone()
-                if row:
-                    return "", row[0] or ""
+                    _sp = _mg_esc.any_engine_sandbox_provider(_cloud_list)
+                if _sp:
+                    return "", _sp
         except Exception:
             pass
         return "", ""

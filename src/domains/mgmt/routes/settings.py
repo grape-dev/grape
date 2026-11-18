@@ -2405,8 +2405,12 @@ def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depe
         # 前置门禁（仅沙箱凭据，spec §8.1 v3）：running 沙箱记录存在 → 409 弹窗
         if _cred_type == "sandbox" and not confirm:
             try:
-                # G-02：grape_t_cloud_sandboxes 归 runtime——409 门禁读走 runtime public 具名查询
-                _active = int(_rt.read_one_any("cloud_sandboxes_active_count_by_cred", (cid,))[0] or 0)
+                # G-02：grape_t_cloud_sandboxes 归 runtime、sandbox_provider_config 归 mgmt。
+                # 原具名查询用子查询跨库读（必然失败），改为两步编排。
+                from src.domains.mgmt import public as _mg_pids
+                from src.domains.runtime import public as _rt_cnt
+                _pids = _mg_pids.sandbox_provider_ids_by_credential(cid)
+                _active = _rt_cnt.cloud_sandboxes_active_count(_pids)
                 if _active > 0:
                     raise HTTPException(status_code=409, detail={
                         "code": 409, "active_sandboxes": _active,
