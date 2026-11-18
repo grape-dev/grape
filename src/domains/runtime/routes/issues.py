@@ -2156,6 +2156,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
                     assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
                     creators: str = Query("", description="按创建人过滤(逗号分隔, Issue #805；前端 mine 分支同款参数，此前被静默丢弃)"),
                     statuses: str = Query("", description="多状态过滤(逗号分隔；Issue #926 列表同款)。与单 status 二选一，同时给出时以 statuses 为准"),
+                    q: str = Query("", max_length=200, description="Issue #926：标题/编号模糊搜索（服务端过滤；前端 mine 分支已下推 &q=，此前被静默丢弃）"),
                     per_page: int = Query(0, ge=0, le=200, description="服务端分页：每页条数（Issue #926 同款；0=全量，兼容旧调用方）"),
                     page: int = Query(1, ge=1, description="服务端分页：页码（per_page>0 时生效）"),
                     user: dict = Depends(require_org_member)):
@@ -2194,23 +2195,28 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     else:
         clauses.append("user_id=?")
         params.append(user["id"])
-    if status:
-        clauses.append("status=?")
-        params.append(status)
-    # Issue #926 同款多状态过滤：statuses 优先于单 status（mine 列表分页后的服务端列过滤）
-    _st_list = [s.strip() for s in (statuses or "").split(",") if s.strip()]
+    # Issue #926 同款多状态过滤：statuses 优先于单 status（mine 列表分页后的服务端列过滤）。
+    # N7 整改：互斥判定在构造期完成——statuses 合法则只压 IN 子句，否则只压单 status
+    # 子句。不做后置 pop（clauses 与 params 下标不一一对应：'repo_key IN (?,?,?,?)'
+    # 一条子句对应 4 个参数；按子句下标 pop 参数会删错位置的值 → 绑定整体错位）。
+    _st_list = [x.strip() for x in (statuses or "").split(",") if x.strip()]
     if _st_list:
         _allowed = {"active", "processing", "awaiting_input",
                     "pending_review", "completed", "cancelled", "timeout_failed"}
         _st_ok = [x for x in _st_list if x in _allowed]
-        if _st_ok:
-            # 单 status 子句若已压入则先移除（statuses 为准）
-            if status and "status=?" in clauses:
-                _si = clauses.index("status=?")
-                clauses.pop(_si)
-                params.pop(_si)
-            clauses.append(f"status IN ({','.join('?' * len(_st_ok))})")
-            params.extend(_st_ok)
+    else:
+        _st_ok = []
+    if _st_ok:
+        clauses.append(f"status IN ({','.join('?' * len(_st_ok))})")
+        params.extend(_st_ok)
+    elif status:
+        clauses.append("status=?")
+        params.append(status)
+    # Issue #926：q 服务端过滤（与 issues_list 同口径：标题/编号 LIKE，参数化）
+    _q = (q or "").strip()
+    if _q:
+        clauses.append("(title LIKE ? OR issue_number LIKE ?)")
+        params.extend([f"%{_q}%", f"%{_q}%"])
     # 组织隔离
     if _filter_org_id:
         clauses.append("org_id=?")
