@@ -15,7 +15,7 @@ grape_t_engine_template_binding,mgmt,runtime,1
 grape_t_external_identity_tombstones,mgmt,api,2
 grape_t_repo_credentials,insight,platform,2
 grape_t_repo_llm_credentials,mgmt,runtime,2
-grape_t_repo_platforms,mgmt,api,9
+grape_t_repo_platforms,mgmt,api,5
 grape_t_sandbox_provider_config,mgmt,runtime,5
 grape_t_sandbox_templates,mgmt,runtime,1
 grape_t_schema_migrations,mgmt,api,1

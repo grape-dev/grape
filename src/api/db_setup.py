@@ -7821,65 +7821,10 @@ register_migration(
 
 # 注意：函数体内 docstring 提到的 platform-bots.example.json 是盖章时的文件名，
 # 现已改回 configs/global-bot-token.example.json（docstring 属 checksum 冻结面，不改）。
-def _fn_seed_platform_bot_from_file() -> None:
-    """把平台 bot 种子文件播进平台行（D110）。
+# 迁移内容住 owner 域：src/domains/mgmt/migrations/seed_platform_bot_from_file.py
+from src.domains.mgmt.migrations.seed_platform_bot_from_file import MIGRATION as _M_SEED_BOT
 
-    文件格式（两种并存，见 configs/platform-bots.example.json）：
-      1) 旧扁平键：gitcode_api_token / github_bot_token / github_bot_username / <p>_bot_token …
-      2) 新数组：platform_bot: [{provider, bot_name, bot_token}]（别名 platform_type / bit_token 兼容）
-    配置文件只作**初始化种子**，运行时不读；凭据落库前加密；平台行对应列非空则不覆盖。
-    """
-    from src.kernel.config import read_bot_seed_file
-    from src.kernel.mysql_compat import get_db_backend
-    from src.kernel.session_manager import db, db_lock
-
-    seeds = read_bot_seed_file()
-    if not seeds:
-        log.info("202611170037 未发现平台 bot 种子（或文件为空），跳过")
-        return
-
-    from src.domains.mgmt.auth.credential_crypto import encrypt
-
-    backend = get_db_backend()
-    filled = []
-    with db_lock:
-        c = db.cursor()
-        if backend == "mysql":
-            exists = bool(c.execute(
-                "SELECT table_name FROM information_schema.tables"
-                " WHERE table_schema = DATABASE() AND table_name = 'grape_t_repo_platforms'"
-            ).fetchone())
-        else:
-            exists = bool(c.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='grape_t_repo_platforms'"
-            ).fetchone())
-        if not exists:
-            log.info("202611170037 平台表不存在，跳过种子")
-            return
-        for provider, fields in sorted(seeds.items()):
-            row = c.execute("SELECT bot_username, bot_token_enc FROM grape_t_repo_platforms"
-                            " WHERE provider=?", (provider,)).fetchone()
-            if row is None:
-                log.info(f"202611170037 平台行 {provider} 未导入，跳过该平台种子")
-                continue
-            cur_username, cur_token = (row[0] or ""), (row[1] or "")
-            new_username = cur_username or fields.get("username", "")
-            new_token = cur_token or (encrypt(fields["token"]) if fields.get("token") else "")
-            if (new_username, new_token) != (cur_username, cur_token):
-                c.execute("UPDATE grape_t_repo_platforms SET bot_username=?, bot_token_enc=?,"
-                          " updated_at=datetime('now') WHERE provider=?",
-                          (new_username, new_token, provider))
-                filled.append(provider)
-        db.commit()
-    log.info(f"202611170037 平台 bot 种子完成（本轮写入 {filled or '无'}）")
-
-
-register_migration(
-    version="202611170037",
-    name="seed-platform-bot-from-config-file",
-    kind="backfill",
-    fn=_fn_seed_platform_bot_from_file,
-)
+register_migration(**_M_SEED_BOT)
 
 
 # ===== D110 收尾：删除已无读者的 bot 账号目录表（先导出，导出失败拒绝 DROP）=====
@@ -7940,41 +7885,10 @@ register_migration(
 
 # ===== D110 修正：平台行的 bot token 必须是密文（014 从 meta 搬来的是历史明文）=====
 
-def _fn_encrypt_platform_bot_tokens() -> None:
-    """把 `bot_token_enc` 里仍是明文的 token 就地加密（幂等）。
+# 迁移内容住 owner 域：src/domains/mgmt/migrations/encrypt_platform_bot_tokens.py
+from src.domains.mgmt.migrations.encrypt_platform_bot_tokens import MIGRATION as _M_ENCRYPT_BOT
 
-    为什么需要：202611170035 从 meta 兜底搬 token，而 meta 的
-    `global_bot_*_token` 是历史明文值（列名 bot_token_enc 是承诺，不是事实）。
-    密文形态判定见 `credential_crypto.is_ciphertext`；已加密的行原样不动。
-    """
-    from src.domains.mgmt.auth.credential_crypto import encrypt, is_ciphertext
-    from src.kernel.session_manager import db, db_lock
-
-    with db_lock:
-        c = db.cursor()
-        try:
-            rows = c.execute("SELECT provider, bot_token_enc FROM grape_t_repo_platforms "
-                             "WHERE bot_token_enc IS NOT NULL AND bot_token_enc != ''").fetchall()
-        except Exception:
-            log.info("202611170039 平台表不存在，跳过")
-            return
-        encrypted_now = []
-        for provider, token in rows:
-            if is_ciphertext(token):
-                continue
-            c.execute("UPDATE grape_t_repo_platforms SET bot_token_enc=?, "
-                      "updated_at=datetime('now') WHERE provider=?", (encrypt(token), provider))
-            encrypted_now.append(provider)
-        db.commit()
-    log.info(f"202611170039 平台 bot token 就地加密完成（本轮 {encrypted_now or '无'}）")
-
-
-register_migration(
-    version="202611170039",
-    name="encrypt-platform-bot-tokens",
-    kind="backfill",
-    fn=_fn_encrypt_platform_bot_tokens,
-)
+register_migration(**_M_ENCRYPT_BOT)
 
 
 # ===== 甲方案：可见性真源收敛到平台行 enabled，退役部署级隐藏名单 =====
