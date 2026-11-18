@@ -97,6 +97,13 @@ def _find(result, exec_id):
 
 @pytest.fixture(autouse=True)
 def _setup():
+    # 测试隔离：src.kernel.session_manager 在 **import 时** 就按当时的 DSN 环境变量
+    # 建好连接并缓存。若同一 pytest 进程里先跑过 tests/scripts/test_smoke_chat_submit.py
+    # （它 monkeypatch.setenv("DEVOPS_DB_HOST", "127.0.0.1") 并加载客户端脚本），
+    # 之后的用例会拿一个连到 127.0.0.1 的连接，于是本文件里 seed 到进程库的
+    # autopilot_executions 行查不出来 —— 单独跑全绿、合跑 2 红就是这个原因。
+    # 这里在 fixture 里显式确认模块已按当前进程配置加载（幂等，已加载则不重复建连）。
+    import src.kernel.session_manager  # noqa: F401
     _clean()
     yield
     _clean()
