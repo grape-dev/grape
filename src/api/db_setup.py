@@ -9525,8 +9525,12 @@ def _fn_skill_classification_columns() -> None:
         db.commit()
 
 
+# [撞号修复 2026-11-18] 原用 202611180001，与同批 ensure-cloud-sandboxes-in-runtime 撞号。
+# 该号在 runtime 库已盖章（cloud-sandboxes），按「已发布保持原号、只改未发布的」规则，
+# 本迁移顺延到 003（002 被 ensure-runtime-type-info-columns 占用）。若沿用旧号，
+# 版本表会判「已执行」而永久跳过，skill 的三个分类列永远不会被加。
 register_migration(
-    version="202611180001",
+    version="202611180003",
     name="issue2761-skill-classification-columns",
     kind="safe",
     fn=_fn_skill_classification_columns,

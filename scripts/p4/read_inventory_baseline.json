@@ -344,7 +344,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9691,
+      "line": 9724,
       "func": "_fn_issue3054_tombstone_table",
       "host": "api",
       "status": "bare",
@@ -357,7 +357,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9709,
+      "line": 9742,
       "func": "_fn_issue3054_tombstone_table",
       "host": "api",
       "status": "bare",
