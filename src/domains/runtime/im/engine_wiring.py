@@ -38,8 +38,15 @@ from typing import Awaitable, Callable, Optional
 # 由调用方传入自己的连接（3921a54c6 归位时漏了这行 import，运行期 NameError 被
 # except 吞成 "读不到安装 → None"，IM 推送静默失效）。
 from src.domains.mgmt import public as _mgmt_public
-# 渠道族 DDL 归 mgmt 域（2026-11-15）：本模块只引用 owner 的建表语句，不再自带副本。
-from src.domains.mgmt.schema_ddl import _CHANNEL_INBOUND_MESSAGE_DDL as _MESSAGE_TABLE
+# 渠道族 DDL 归 mgmt 域（2026-11-15）。2026-11-18 修正：原先这里 import mgmt 的
+# _CHANNEL_INBOUND_MESSAGE_DDL 并在本进程 conn.execute() 建表 —— 该表归 mgmt
+# （configs/table_ownership.json），runtime 进程在三库拓扑下会把它建到 **自己的库**，
+# 既是越权建表、又会造出一张空的同名表。那张单表已删。
+#
+# 注意：渠道族其余 7 张表（grape_t_channel_*）同样归 mgmt，仍由本文件的
+# ensure_channel_tables 调用建/补，但**按归属逐次判断**（table_ownership.should_skip）：
+# 只有 owner 域进程（mgmt）才真正执行 DDL，runtime/insight 进程跳过。这样注释与行为一致，
+# 也不再往别域库里造空壳表。
 
 
 def _im_now() -> str:
@@ -261,7 +268,9 @@ def run_startup_migration(db_path: str) -> dict:
             log.info("[DDL_SKIP] `bot_seen_messages`: owner=runtime，非本域进程跳过")
         else:
             conn.execute(_APP_SEEN_TABLE)     # 测试库无则补空表
-        migrations.ensure_channel_tables(conn)
+        # 渠道族 7 表全归 mgmt：仅 owner 域进程执行，别域跳过（见文件头说明）。
+        if not _own_tbl.should_skip("grape_t_channel_installation"):
+            migrations.ensure_channel_tables(conn)
         try:
             mig004 = _load_migration_004()
             if mig004 is not None:
@@ -274,7 +283,8 @@ def run_startup_migration(db_path: str) -> dict:
                 mig005.ensure_purge_index(conn)
         except Exception as e:            # 索引缺失只影响性能，不阻断启动
             log.warning("[startup-migration] 005 purge index failed: %s", e)
-        conn.execute(_MESSAGE_TABLE)
+        # （已移除）conn.execute(_MESSAGE_TABLE) —— 见文件头说明：渠道入站消息表归 mgmt，
+        # 本进程不再建表；此处 commit 保留，用于上面 004/005 两个本域迁移的落库。
         conn.commit()
         return {"user": 0, "repo": 0, "installations": [],
                 "backfill": "moved-to-002_drop_legacy_im"}
@@ -393,7 +403,14 @@ class _SharedConn:
 
 
 def ensure_channel_schema(conn) -> None:
-    """建/补齐 IM 渠道 4 表（幂等）。db_setup 启动建表与引擎启动迁移共用同一份 DDL。"""
+    """建/补齐 IM 渠道族 7 表（幂等）。db_setup 启动建表与引擎启动迁移共用同一份 DDL。
+
+    渠道族表归 mgmt（configs/table_ownership.json）：非 owner 域进程直接返回，
+    避免在三库拓扑下把表建进自己的库。返回值无意义，调用方只依赖幂等性。
+    """
+    from src.kernel import table_ownership as _own
+    if _own.should_skip("grape_t_channel_installation"):
+        return
     _load_migration_module().ensure_channel_tables(conn)
 
 
