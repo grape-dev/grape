@@ -114,7 +114,7 @@ def test_register_and_forgot_agree():
             assert chunk not in _scan(other), f"{chunk} 不应出现在 {other} 上"
 
 
-# —— all-views.css「内容指纹 + 版本」绑定（架构守护第 8 轮 I-1 收口）——
+# —— all-views.css「内容指纹 + 版本」绑定——
 # `all-views.css` 是 vite 构建产物（不入库）：= bridge.css + ag-ui.css（AG 组件样式聚合）
 # + 各 view 的 scoped CSS 合并，`admin-view.css` 除外（AdminView.vue 的样式非 scoped、
 # 只进 admin.html，见 vite.config.js 的 viewCssMap 与合并逻辑）。此前它只有版本号冻结、

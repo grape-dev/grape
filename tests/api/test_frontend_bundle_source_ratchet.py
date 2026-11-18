@@ -21,7 +21,7 @@
     注入版本没抬 → 红。它堵的是「改了源、只重冻指纹、`?v=` 原地不动」。
     健康树上两张表逐字段相同；抬档时一起更新（这是唯一被允许的更新方式）。
     另一路径「两表同抬版本再一起重冻指纹」属越权重写：浏览器实持的 tuple
-    是仓外事实，本守卫不设防（架构守护第 8 轮 P-F / I-7 显式登记）。
+    是仓外事实，本守卫不设防（此前曾靠约定而非断言看管，本守卫显式登记为不设防项）。
 """
 import hashlib
 import re
@@ -252,9 +252,9 @@ def test_every_entry_is_covered():
         f"仅 SHIPPED={sorted(set(SHIPPED)-set(FROZEN))}")
     unlinked = sorted(b for b, row in _bundles().items() if row[0] == NO_PAGE)
     assert not unlinked, f"这些 chunk 没有任何壳页以 ?v= 引用（无从判缓存）：{unlinked}"
-    # 抬档忘更 SHIPPED（架构守护第 8 轮 M-1R 收口）：两表前三字段（页面版本/注入版本/源指纹）
+    # 抬档忘更 SHIPPED：两表前三字段（页面版本/注入版本/源指纹）
     # 必须逐 chunk 相同。一旦分叉，该 chunk 的 SHIPPED 锚点会因 `ver == s_ver` 恒不成立
-    # 而永久短路——第 7 轮 9 chunk 分叉就是这么静默复发的，当场拦。
+    # 而永久短路，静默复发难以察觉，当场拦。
     for b in sorted(FROZEN):
         assert SHIPPED[b][:3] == FROZEN[b][:3], (
             f"{b}: 抬档必须 FROZEN 与 SHIPPED 一起更新："
