@@ -6978,6 +6978,7 @@ _LAZY_CLASS_ATTRS = {
     "PlatformCard": ("src.domains.runtime.vcs.platform_card", "PlatformCard"),
     "PlatformCardError": ("src.domains.runtime.vcs.platform_card", "PlatformCardError"),
     "VcsApiClient": ("src.domains.runtime.vcs.api_client", "VcsApiClient"),
+    "UsageCollector": ("src.domains.runtime.engine.usage_collect", "UsageCollector"),
 }
 
 
@@ -6989,3 +6990,221 @@ def __getattr__(name: str):
     import importlib
 
     return getattr(importlib.import_module(target[0]), target[1])
+
+
+# ── 引擎面（health / scorer / scheduler / executor / service）2026-11-18 ─────
+# 外域（mgmt 路由与 user 域、insight 观测面）此前逐个
+#   from src.domains.runtime.engine.<mod> import <sym>
+# 直接 import runtime 内部实现模块（QA 跨域 import 清理项）。
+# 依赖方向收敛为 外域 → runtime.public；实现仍只有 engine.* 一份。
+# 转发体一律函数内 import：engine 内部模块在加载期会反向引用别域 public，顶层 import 会成环。
+
+
+def runtime_credential_id(runtime_id: int):
+    """取 runtime 绑定的凭据 id（无绑定 → None）。"""
+    from src.domains.runtime.engine.service import runtime_credential_id as _impl
+
+    return _impl(runtime_id)
+
+
+def probe_aishell_dsh_acp(cli_path: str) -> dict:
+    """探测 aishell-dsh ACP 引擎可用性。"""
+    from src.domains.runtime.engine.agent import _probe_aishell_dsh_acp as _impl
+
+    return _impl(cli_path)
+
+
+_probe_aishell_dsh_acp = probe_aishell_dsh_acp
+
+
+def discover_backends() -> list[dict]:
+    """枚举已注册的 Agent 执行后端（含 installed/cli_path 探测结果）。"""
+    from src.domains.runtime.agents.executor import discover_backends as _impl
+
+    return _impl()
+
+
+# 原名别名：registry.discover_runtimes 即 executor.discover_backends 的 runtime 命名
+discover_runtimes = discover_backends
+
+
+def usage_payload(u: dict, engine: str = "") -> dict:
+    """用量事件字段归一的唯一入口（worker 侧与观测侧同一份）。"""
+    from src.domains.runtime.engine.agent import _usage_payload as _impl
+
+    return _impl(u, engine)
+
+
+_usage_payload = usage_payload
+
+
+def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
+    """runtime 健康分（缺省走 TTL 缓存）。"""
+    from src.domains.runtime.engine.health_scorer import get_health_score as _impl
+
+    return _impl(runtime_id, force_refresh)
+
+
+def reset_health(runtime_id: int) -> dict | None:
+    """清空指定 runtime 的健康分累计。"""
+    from src.domains.runtime.engine.health_scorer import reset_health as _impl
+
+    return _impl(runtime_id)
+
+
+def derive_local_runtime_health(installed: bool, healthy: bool) -> str:
+    """本机引擎在线态派生（无 credential 的本地引擎）。"""
+    from src.domains.runtime.engine.health import derive_local_runtime_health as _impl
+
+    return _impl(installed, healthy)
+
+
+def parse_dt(s: str) -> float | None:
+    """解析 runtime 时间戳为 epoch 秒（不可解析 → None）。"""
+    from src.domains.runtime.engine.health import parse_dt as _impl
+
+    return _impl(s)
+
+
+def apply_runtime_state(c, runtime_id: int, status: str, last_seen_at: str) -> None:
+    """写 agent_runtimes 在线态（owner 域原语，调用方传自己的游标）。"""
+    from src.domains.runtime.engine.health import apply_runtime_state as _impl
+
+    return _impl(c, runtime_id, status, last_seen_at)
+
+
+def aggregate_skill_consistency(days: int = 7) -> dict:
+    """技能一致性聚合（观测面看板用）。"""
+    from src.domains.runtime.engine.health import aggregate_skill_consistency as _impl
+
+    return _impl(days)
+
+
+def recover_engine(runtime_id: int, trigger: str = "manual", force: bool = False) -> dict:
+    """engine 重挂载（readd）。"""
+    from src.domains.runtime.engine.recovery import recover_engine as _impl
+
+    return _impl(runtime_id, trigger, force)
+
+
+def probe_local_engines(engines: list | None = None) -> list[dict]:
+    """本机引擎探测（缺省枚举全部已注册后端）。"""
+    from src.domains.runtime.engine.local_probe import probe_local_engines as _impl
+
+    return _impl(engines)
+
+
+def scan_local_skills() -> list[dict]:
+    """扫描本机已装技能列表。"""
+    from src.domains.runtime.engine.agent import _scan_local_skills as _impl
+
+    return _impl()
+
+
+def scan_local_skills_with_detail(engine_type: str) -> list[dict]:
+    """扫描本机技能并带明细（按引擎类型）。"""
+    from src.domains.runtime.engine.agent import _scan_local_skills_with_detail as _impl
+
+    return _impl(engine_type)
+
+
+_scan_local_skills = scan_local_skills
+_scan_local_skills_with_detail = scan_local_skills_with_detail
+
+
+def get_execution_mode() -> str:
+    """当前执行模式（auto/direct/queue_remote）。"""
+    from src.domains.runtime.engine.service import get_execution_mode as _impl
+
+    return _impl()
+
+
+def set_execution_mode(mode: str):
+    """切换执行模式（owner 域校验 + 落库）。"""
+    from src.domains.runtime.engine.service import set_execution_mode as _impl
+
+    return _impl(mode)
+
+
+def load_project_info(repo_key: str) -> tuple[dict, dict]:
+    """取仓库 project-info（原始 + 派生）。"""
+    from src.domains.runtime.engine.service import load_project_info as _impl
+
+    return _impl(repo_key)
+
+
+def detect_engine_model(name: str) -> str:
+    """按引擎名推断默认模型。"""
+    from src.domains.runtime.engine.engine_model import detect_engine_model as _impl
+
+    return _impl(name)
+
+
+async def trigger_task_now(task_id: int) -> dict:
+    """立即触发一次任务调度（scheduler 单一入口）。"""
+    from src.domains.runtime.engine.scheduler import trigger_task_now as _impl
+
+    return await _impl(task_id)
+
+
+def normalize_dedup_level(raw) -> str:
+    """去重级别归一。"""
+    from src.domains.runtime.engine.scheduler import normalize_dedup_level as _impl
+
+    return _impl(raw)
+
+
+def sanitize_dedup_note(raw) -> str:
+    """去重备注清洗。"""
+    from src.domains.runtime.engine.scheduler import sanitize_dedup_note as _impl
+
+    return _impl(raw)
+
+
+def sanitize_dedup_confirmed_by(raw) -> str:
+    """去重确认人清洗。"""
+    from src.domains.runtime.engine.scheduler import sanitize_dedup_confirmed_by as _impl
+
+    return _impl(raw)
+
+
+def dedup_auto_merge_allowed(dedup_level, dedup_confirmed: bool = False) -> bool:
+    """自动合并门禁判定。"""
+    from src.domains.runtime.engine.scheduler import dedup_auto_merge_allowed as _impl
+
+    return _impl(dedup_level, dedup_confirmed)
+
+
+def dedup_level_suspected() -> str:
+    """疑似重复级别常量（常量不外露，包成函数以满足 lib 门禁登记口径）。"""
+    from src.domains.runtime.engine.scheduler import DEDUP_LEVEL_SUSPECTED
+
+    return DEDUP_LEVEL_SUSPECTED
+
+
+def columns_exist(cursor, table: str, cols: tuple) -> bool:
+    """判断表的列是否齐备（cursor 由调用方提供）。"""
+    from src.domains.runtime.engine.refs_reconcile import columns_exist as _impl
+
+    return _impl(cursor, table, cols)
+
+
+def session_uid_mirror_sql(tbl: str) -> str:
+    """session uid 镜像 SQL 片段（SQL 归 owner 域产出）。"""
+    from src.domains.runtime.engine.refs_reconcile import session_uid_mirror_sql as _impl
+
+    return _impl(tbl)
+
+
+def reconcile_for_caller(caller_cursor, runtime_ids: list, keep_id: int, reason: str = "") -> dict:
+    """按调用方游标做 runtime 引用归并。"""
+    from src.domains.runtime.engine.refs_reconcile import reconcile_for_caller as _impl
+
+    return _impl(caller_cursor, runtime_ids, keep_id, reason)
+
+
+def backend_registered(name: str) -> bool:
+    """后端是否已注册（替代直接 import 注册表对象 _BACKENDS）。"""
+    from src.domains.runtime.agents.executor import _BACKENDS
+
+    return name in _BACKENDS

@@ -71,7 +71,7 @@ def health():
     # 免鉴权端点只暴露计数与状态，不含仓库/技能明细；查询失败显式 unknown。
     skill_consistency = {"status": "unknown", "refused_recent": 0, "detail": ""}
     try:
-        from src.domains.runtime.engine.health import aggregate_skill_consistency
+        from src.domains.runtime.public import aggregate_skill_consistency
         _sk = aggregate_skill_consistency()
         skill_consistency = {"status": _sk.get("status", "unknown"),
                              "refused_recent": int(_sk.get("refused_recent") or 0),

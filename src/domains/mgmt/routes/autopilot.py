@@ -573,7 +573,7 @@ def delete_task(task_id: int, user: dict = Depends(get_current_user)):
 async def trigger_task(task_id: int, user: dict = Depends(get_current_user)):
     """手动触发自动化任务执行。"""
     _check_task_access(user, task_id)
-    from src.domains.runtime.engine.scheduler import trigger_task_now
+    from src.domains.runtime.public import trigger_task_now
     result = await trigger_task_now(task_id)
     if not result["ok"]:
         raise HTTPException(status_code=409, detail={"code": 409, "message": result["message"]})
@@ -699,15 +699,16 @@ class DispatchBody(BaseModel):
 
 # Issue #697：判定级别枚举/归一/门禁判定统一取自 scheduler（单一事实源，禁止双源漂移）
 try:
-    from src.domains.runtime.engine.scheduler import (
-        DEDUP_LEVEL_SUSPECTED,
+    from src.domains.runtime.public import (
+        dedup_level_suspected,
         dedup_auto_merge_allowed,
         normalize_dedup_level,
         sanitize_dedup_note,
         sanitize_dedup_confirmed_by,
     )
 except Exception:  # scheduler 不可达时兜底（与 AUTOPILOT_DEDUP_RULE 同策略）
-    DEDUP_LEVEL_SUSPECTED = "suspected_duplicate"
+    def dedup_level_suspected():
+        return "suspected_duplicate"
 
     def normalize_dedup_level(raw):
         level = str(raw or "").strip().lower()
@@ -740,7 +741,7 @@ def _dedup_dispatch_guard(finding: dict, dedup_confirmed: bool = False) -> None:
             "code": 409,
             "message": "疑似重复（suspected_duplicate）：根因比对不一致，"
                        "需跟踪单 owner agent 确认后方可派发并入；确认后携带 dedup_confirmed=true 重试",
-            "dedup_level": DEDUP_LEVEL_SUSPECTED,
+            "dedup_level": dedup_level_suspected(),
             "dedup_note": sanitize_dedup_note(finding.get("dedup_note")),
         })
 
@@ -756,7 +757,7 @@ def _append_dedup_note(description: str, finding: dict) -> str:
     lines = [description.rstrip(), "", f"[dedup] level={level}"]
     if note:
         lines.append(f"[dedup] 差异说明: {note}")
-    if level == DEDUP_LEVEL_SUSPECTED:
+    if level == dedup_level_suspected():
         lines.append("[dedup] 疑似重复：待跟踪单 owner agent 确认后方可并入")
     return "\n".join(lines)
 

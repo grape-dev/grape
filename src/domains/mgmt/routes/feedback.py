@@ -147,7 +147,7 @@ def _collect_feedback_context(event_seq: int, user: dict):
                 engine = None
         if engine and runtime_id:
             try:
-                from src.domains.runtime.engine.health_scorer import get_health_score
+                from src.domains.runtime.public import get_health_score
                 hd = get_health_score(runtime_id)
                 engine["health_score"] = hd.get("health_score")
             except Exception:

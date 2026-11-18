@@ -1182,7 +1182,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # Issue #498: 透出统一异常口径（health_abnormal/health_reason）与自愈留痕
         # （最近失败时间/衰减窗口有效失败数），前端两口径一致呈现、异常原因可见
         try:
-            from src.domains.runtime.engine.health_scorer import get_health_score
+            from src.domains.runtime.public import get_health_score
             _hd = get_health_score(rt["id"])
             rt["health_score"] = _hd.get("health_score")
             rt["health_total_tasks"] = _hd.get("total_tasks", 0)
@@ -1374,7 +1374,7 @@ def _runtime_health(rt: dict, now: float) -> str:
     - credential_id>0（远端边端）：status+last_seen 四态
     - credential_id=0（本地引擎）：installed/healthy 派生（就绪=online，未装=offline）
     """
-    from src.domains.runtime.engine.health import derive_runtime_health, derive_local_runtime_health
+    from src.domains.runtime.public import derive_runtime_health, derive_local_runtime_health
     if rt.get("credential_id"):
         return derive_runtime_health(rt.get("status") or "offline", rt.get("last_seen_at"), now)
     if rt.get("installed") and rt.get("healthy"):
@@ -1389,7 +1389,7 @@ def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
     凭据 `status` 恒为 'active'（不表达在线），不能像 runtime 行那样按 `status='online'` 判定；
     在线 = 最近心跳在 _DEVICE_ONLINE_WINDOW 内；失联 <5min = 刚失联；>6d = 待回收；其余离线。
     """
-    from src.domains.runtime.engine.health import parse_dt
+    from src.domains.runtime.public import parse_dt
     ts = parse_dt(last_seen_at)
     if ts is None:
         return "offline"
@@ -1896,7 +1896,7 @@ def reset_agent_runtime_health(rid: int, user: dict = Depends(require_org_member
         raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
     if (rt.get("scope") or "global") not in ("user", "repo"):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库级/个人级 worker 设备的引擎支持重置健康分，全局引擎不开放"})
-    from src.domains.runtime.engine.health_scorer import reset_health
+    from src.domains.runtime.public import reset_health
     data = reset_health(rid)
     if data is None:
         log.warning(f"health-reset failed for runtime={rid} operator={user.get('username') or user.get('id')}")
@@ -1926,7 +1926,7 @@ def readd_agent_runtime(rid: int, user: dict = Depends(require_org_member), repo
     # 仅仓库级/个人级 worker 设备的引擎可一键加回（I-c，QA 第2轮）。
     if (rt.get("scope") or "global") not in ("user", "repo"):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库级/个人级 worker 设备的引擎支持一键加回，全局引擎不开放"})
-    from src.domains.runtime.engine.recovery import recover_engine
+    from src.domains.runtime.public import recover_engine
     out = recover_engine(rid, trigger="manual", force=True)
     if not out.get("recovered"):
         log.warning(f"engine readd failed runtime={rid} operator={user.get('username') or user.get('id')} "
@@ -1946,9 +1946,9 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
     P0 修复：save_agent_runtimes 可能因 MySQL Lock wait timeout (1205) 抛异常，
     这里接住返回 500 JSON 而非让异常冒泡导致 uvicorn 进程崩溃（→ 502）。
     """
-    from src.domains.runtime.engine.registry import discover_runtimes
-    from src.domains.runtime.engine.local_probe import probe_local_engines
-    from src.domains.runtime.engine.agent import _scan_local_skills
+    from src.domains.runtime.public import discover_runtimes
+    from src.domains.runtime.public import probe_local_engines
+    from src.domains.runtime.public import _scan_local_skills
     from src.domains.mgmt.user import db as user_db
     from src.kernel.config import log
     _hostname = engine_host()
@@ -1957,7 +1957,7 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
         results = probe_local_engines(discovered)
 
         # 扫描本机 local_skills 详情并注入
-        from src.domains.runtime.engine.agent import _scan_local_skills_with_detail
+        from src.domains.runtime.public import _scan_local_skills_with_detail
         for r in results:
             _name = (r.get("name") or "").strip().lower()
             r["local_skills_detail"] = _scan_local_skills_with_detail(_name)
@@ -2457,7 +2457,7 @@ class ExecModeBody(BaseModel):
 
 @router.get("/execution-mode", operation_id="settings_execution_mode_get", summary="Get execution mode", description="Returns the current execution mode.")
 def get_execution_mode_api(user: dict = Depends(require_no_session_token)):
-    from src.domains.runtime.engine.service import get_execution_mode
+    from src.domains.runtime.public import get_execution_mode
     return {"mode": get_execution_mode()}
 
 @router.get("/pipeline-mode", operation_id="settings_pipeline_mode_get", summary="Get pipeline mode", description="Returns the current pipeline mode.")
@@ -2476,7 +2476,7 @@ def set_pipeline_mode_api(body: dict, user: dict = Depends(require_no_session_to
 
 @router.put("/execution-mode", operation_id="settings_execution_mode_set", summary="Set execution mode", description="Sets the execution mode.")
 def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(require_no_session_token)):
-    from src.domains.runtime.engine.service import set_execution_mode
+    from src.domains.runtime.public import set_execution_mode
     if body.mode not in ("auto", "direct", "queue_remote"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 auto/direct/queue_remote（queue_local 已废除）"})
     set_execution_mode(body.mode)
@@ -3016,7 +3016,7 @@ def _attach_engine_models(runtimes: list[dict]) -> None:
       服务端读本机配置兜底（model_source=local_config，复用 worker 同一解析器）
     仅附加模型名字段，绝不输出 base_url/api_key/环境变量值。
     """
-    from src.domains.runtime.engine.engine_model import detect_engine_model
+    from src.domains.runtime.public import detect_engine_model
     recent = _recent_models_by_runtime([rt.get("id") for rt in runtimes])
     for rt in runtimes:
         rt["recent_models"] = recent.get(rt.get("id"), [])

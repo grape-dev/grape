@@ -897,7 +897,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                 })
                 # 引擎健康分（Issue #134 展示增强）
                 try:
-                    from src.domains.runtime.engine.health_scorer import get_health_score
+                    from src.domains.runtime.public import get_health_score
                     _hd = get_health_score(rid)
                     runtime_list[-1]["health_score"] = _hd.get("health_score")
                     runtime_list[-1]["health_consecutive_failures"] = _hd.get("consecutive_failures", 0)
@@ -1631,7 +1631,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                            + query_engines(repo_key, "repo", agent_type=atype)
                            + query_engines(repo_key, "local", agent_type=atype, username=_uname))
             _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
-            from src.domains.runtime.engine.health import derive_runtime_health, derive_local_runtime_health
+            from src.domains.runtime.public import derive_runtime_health, derive_local_runtime_health
             import time as _time
             _now = _time.time()
             _seen_ids = set()

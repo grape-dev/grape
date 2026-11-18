@@ -51,7 +51,7 @@ class MasterRun:
 
     # ---- 内部：构造采集器（引擎账本读取复用 worker 侧同一份实现）----
     def _new_collector(self):
-        from src.domains.runtime.engine.usage_collect import UsageCollector
+        from src.domains.runtime.public import UsageCollector
         return UsageCollector(self.engine, cwd=self.cwd, session_id=self.session_id)
 
     def start(self) -> None:
@@ -105,7 +105,7 @@ class MasterRun:
     def _write(self, usages: List[Dict[str, Any]]) -> int:
         """逐条落台账（保留 per-record 的 source，例如 `hermes:title_generation`）。"""
         from src.domains.insight.observability import llm_usage as lu
-        from src.domains.runtime.engine.agent import _usage_payload     # 与 worker 侧同一份字段归一
+        from src.domains.runtime.public import _usage_payload     # 与 worker 侧同一份字段归一
 
         n = 0
         for u in usages:

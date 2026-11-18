@@ -102,7 +102,7 @@ def _apply_runtime_state_compat(c, runtime_id: int, status: str, last_seen_at: s
     user.db → runtime.health → runtime/__init__ → service → user.db 环；
     运行期（调用点）再解析则无环。
     """
-    from src.domains.runtime.engine.health import apply_runtime_state
+    from src.domains.runtime.public import apply_runtime_state
     apply_runtime_state(c, runtime_id, status, last_seen_at)
 
 def _deprecated_user_accounts_fn(replacement: str = ""):
@@ -4232,7 +4232,7 @@ def _columns_exist(c, table: str, cols: tuple) -> bool:
     ——被探测的表（agent_runtimes / agent_type_runtime_pool / 会话表）归 runtime 库，
     mgmt 域不再持有这些表的 SQL；本别名只为既有调用方（engine_select 等）过渡。
     """
-    from src.domains.runtime.engine.refs_reconcile import columns_exist
+    from src.domains.runtime.public import columns_exist
     return columns_exist(c, table, cols)
 
 
@@ -4393,7 +4393,7 @@ def _session_uid_mirror_sql(tbl: str) -> str:
     Issue #3097：SQL 生成与实现随对账例程一并迁至 runtime 域
     （`runtime.engine.refs_reconcile.session_uid_mirror_sql`）。
     """
-    from src.domains.runtime.engine.refs_reconcile import session_uid_mirror_sql
+    from src.domains.runtime.public import session_uid_mirror_sql
     return session_uid_mirror_sql(tbl)
 
 
@@ -4408,7 +4408,7 @@ def _rebind_runtime_references(c, dup_ids: list, keep_id: int, reason: str = "")
     合并账号）经 runtime public 原语落到 runtime 域连接；runtime 进程内复用调用方
     游标（同域事务）。
     """
-    from src.domains.runtime.engine.refs_reconcile import reconcile_for_caller
+    from src.domains.runtime.public import reconcile_for_caller
     return reconcile_for_caller(c, list(dup_ids or []), keep_id, reason=reason)
 
 
@@ -4690,14 +4690,14 @@ def is_known_engine_name(name: str) -> bool:
     if name in _KNOWN:
         return True
     try:
-        from src.domains.runtime.engine.executor import discover_backends
+        from src.domains.runtime.public import discover_backends
         if any((b.get("name") or "").strip().lower() == name for b in discover_backends()):
             return True
     except Exception:
         pass
     try:
-        from src.domains.runtime.engine.executor import _BACKENDS
-        if name in _BACKENDS:
+        from src.domains.runtime.public import backend_registered
+        if backend_registered(name):
             return True
     except Exception:
         pass
@@ -4706,7 +4706,7 @@ def is_known_engine_name(name: str) -> bool:
 def _local_engine_info(name: str) -> tuple[bool, str]:
     """按引擎类型名返回本机是否已安装 + cli_path（discover_backends 真实探测，见 engine-selection §7.3）。"""
     try:
-        from src.domains.runtime.engine.executor import discover_backends
+        from src.domains.runtime.public import discover_backends
         for b in discover_backends():
             if (b.get("name") or "").strip().lower() == (name or "").strip().lower():
                 return bool(b.get("installed")), (b.get("cli_path") or "")
@@ -4741,7 +4741,7 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
         healthy, version = 0, ""
         if installed and cli_path:
             try:
-                from src.domains.runtime.engine.local_probe import probe_local_engines
+                from src.domains.runtime.public import probe_local_engines
                 probed = probe_local_engines([{"name": name, "cli_path": cli_path, "installed": True}])
                 if probed:
                     healthy = 1 if probed[0].get("healthy") else 0
