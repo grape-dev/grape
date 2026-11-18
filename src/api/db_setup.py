@@ -9955,3 +9955,88 @@ register_migration(
     domains=("runtime",),
     fn=_fn_issue3168_official_version_backfill,
 )
+
+
+# ===== 分类收敛 202611180004：一级只留 IT研发/运营域/其他；老 skill.category_id 废止 =====
+def _fn_category_collapse_three_domains() -> None:
+    """一级分类收敛为 IT研发/运营域/其他（用户决策）。
+
+    - grape_t_category_dict：停用（is_active=0）除 it-rd/operations/other 外的一级
+      及其全部二级；运营域/其他 二级重新编号补齐；
+    - skill/scene_market：cat_l1_id 指向被停用一级的行改挂 1010（其他）；
+    - skill.category_id（老分类）：全部清零（老分类废止）。
+    幂等：纯 UPDATE，可重复执行。
+    """
+    keep_l1_slugs = ("it-rd", "operations", "other")
+    with db_lock:
+        c = db.cursor()
+        if _owned_skip("grape_t_category_dict", "collapse three domains"):
+            return
+        keep_ids = []
+        try:
+            rows = c.execute(
+                "SELECT id, slug FROM grape_t_category_dict WHERE level=1").fetchall()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"202611180004 read dict failed: {exc}")
+            return
+        drop_ids = []
+        for rid, slug in rows or []:
+            rid = int(rid or 0)
+            (keep_ids if (slug or "") in keep_l1_slugs else drop_ids).append(rid)
+        if drop_ids:
+            marks = ",".join("?" for _ in drop_ids)
+            # 停用被删一级及其二级
+            c.execute(
+                f"UPDATE grape_t_category_dict SET is_active=0 "
+                f"WHERE parent_id IN ({marks})", tuple(drop_ids))
+            c.execute(
+                f"UPDATE grape_t_category_dict SET is_active=0 "
+                f"WHERE id IN ({marks})", tuple(drop_ids))
+            # 引用重映射：挂在被删一级下的 skill/scene_market 归入 1010（其他）
+            for tbl in ("skill", "scene_market"):
+                try:
+                    c.execute(
+                        f"UPDATE {tbl} SET cat_l1_id=1010 "
+                        f"WHERE cat_l1_id IN ({marks})", tuple(drop_ids))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(f"202611180004 remap {tbl}.cat_l1_id failed: {exc}")
+        # 老分类废止：skill.category_id 清零 + skill_category 全部停用
+        try:
+            c.execute("UPDATE skill SET category_id=0 WHERE category_id<>0")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"202611180004 clear skill.category_id failed: {exc}")
+        try:
+            c.execute("UPDATE skill_category SET is_active=0 WHERE is_active=1")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"202611180004 deactivate skill_category failed: {exc}")
+        db.commit()
+
+
+register_migration(
+    version="202611180004",
+    name="category-collapse-three-domains",
+    kind="safe",
+    fn=_fn_category_collapse_three_domains,
+)
+
+
+# ===== 概览 Tab 技能介绍可编辑：skill.intro_override（JSON，槽位→人工改写文本） =====
+def _fn_skill_intro_override_schema() -> None:
+    """skill 表补 intro_override 列（TEXT，存 JSON：{scope/steps/products/constraints/review}）。
+
+    幂等：_ensure_column 先探测。
+    """
+    with db_lock:
+        c = db.cursor()
+        if not _owned_skip("skill", "ensure column intro_override"):
+            _ensure_column(c, "skill", "intro_override", "TEXT DEFAULT ''", strict=True)
+        db.commit()
+
+
+register_migration(
+    version="202611180003",
+    name="skill-intro-override-schema",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_skill_intro_override_schema,
+)

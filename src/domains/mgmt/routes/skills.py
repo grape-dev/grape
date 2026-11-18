@@ -109,7 +109,7 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 
 # ===== Issue #3168 技能详情页：摘要 / 版本 / 文件清单 / 评论 =====
-_SUMMARY_MAX = 50
+_SUMMARY_MAX = 120
 _COMMENT_MAX = 1000
 
 
@@ -357,7 +357,20 @@ def _related_skills(skill_id: int, scope: str, agent_type: str, tags: list[str],
             repo_keys = {r["repo_key"] for r in (get_user_repos(user["id"]) or [])}
         except Exception:
             repo_keys = set()
-    my_tags = {t for t in tags if t}
+    # tags 入参可能是字符串列表（详情 payload）或 dict 列表（parse_tags 产物），
+    # 统一取「标签名」做集合交集（dict 不可 hash，混用必抛 TypeError）
+    def _tag_names(items) -> set:
+        out = set()
+        for t in items or []:
+            if isinstance(t, dict):
+                n = str(t.get("name") or "").strip()
+                if n:
+                    out.add(n)
+            elif t:
+                out.add(str(t))
+        return out
+
+    my_tags = _tag_names(tags)
     ranked = []
     for r in rows:
         rid, name, disp, desc, atype, rscope, owner, raw_tags = r[0], r[1], r[2], r[3], r[4], r[5], r[6] or "", r[7] or ""
@@ -366,7 +379,7 @@ def _related_skills(skill_id: int, scope: str, agent_type: str, tags: list[str],
         if rscope == "repo" and owner not in repo_keys:
             continue
         rtags = parse_tags(raw_tags, limit=SKILL_MAX_TAGS)
-        shared = len(my_tags & set(rtags))
+        shared = len(my_tags & _tag_names(rtags))
         same_agent = 1 if atype == agent_type else 0
         if my_tags and shared == 0:
             continue
@@ -401,6 +414,12 @@ def _decorate_skill_detail(payload: dict, user: dict, scope: str, content: str) 
     payload["created_by"] = (extra[4] if extra else "") or ""
     payload["updated_by"] = (extra[5] if extra else "") or ""
     payload["summary"] = _clean_summary(summary or payload.get("description") or "")
+    # 概览 Tab 技能介绍人工改写（issue：概览可编辑）——JSON 解析失败按空处理
+    try:
+        _ov = _rt_skills.read_one_any("skill_intro_override_by_id", (sid,))
+        payload["intro_override"] = json.loads((_ov[0] if _ov else "") or "{}") or {}
+    except Exception:
+        payload["intro_override"] = {}
 
     if scope == "official":
         payload["version"] = _ensure_official_skill_version(
@@ -918,6 +937,7 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
             "content": content,
             "zip_url": zip_url,
             "is_obs": True,  # OBS/集群模式（skill_path 为对象键）
+            "skill_path": skill_dir or "",
             "is_featured": is_featured,
             "like_count": like_count,
             "liked_by_me": liked_by_me,
@@ -957,6 +977,7 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
         "scope": scope or "",
         "content": content,
         "is_obs": False,
+        "skill_path": skill_dir or "",
         "is_featured": is_featured,
         "like_count": like_count,
         "liked_by_me": liked_by_me,
@@ -1531,7 +1552,7 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
 
     body = body if isinstance(body, dict) else {}
     allowed = {"tags", "summary", "description", "category_id",
-               "cat_l1_id", "cat_l2_id", "agent_type", "clear_category"}
+               "cat_l1_id", "cat_l2_id", "agent_type", "clear_category", "intro"}
     unknown = sorted(set(body) - allowed)
     if unknown:
         raise HTTPException(status_code=400, detail={
@@ -1589,6 +1610,30 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
     new_summary = cur_summary
     if "summary" in body:
         new_summary = _require_skill_summary(str(body.get("summary") or ""))
+
+    if "intro" in body:
+        intro = body.get("intro")
+        if intro is None:
+            intro = {}
+        if not isinstance(intro, dict):
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": "intro 必须为对象（槽位名→文本）"})
+        cleaned_intro = {}
+        for k, v in (intro or {}).items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                raise HTTPException(status_code=400, detail={
+                    "code": 400, "message": "intro 的键值必须均为字符串"})
+            key = k.strip()
+            val = v.strip()
+            if not key or len(key) > 32:
+                continue
+            if len(val) > 400:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400, "message": "intro 单项文本不得超过 400 字"})
+            if val:
+                cleaned_intro[key] = val
+        _rt_skills.exec_any("skill_intro_override_update", (
+            json.dumps(cleaned_intro, ensure_ascii=False), int(skill_id)))
 
     _rt_skills.exec_any("skill_meta_patch_update", (
         new_desc, new_agent, int(new_category_id or 0), int(target_l1 or 0),

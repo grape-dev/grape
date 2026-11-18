@@ -30,10 +30,14 @@ defineEmits(['close'])
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  padding: 16px;
 }
 .a-modal {
   min-width: 320px;
   max-width: min(92vw, 520px);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
   background: var(--glass-bg-strong);
   -webkit-backdrop-filter: blur(var(--glass-blur));
   backdrop-filter: blur(var(--glass-blur));
@@ -46,15 +50,19 @@ defineEmits(['close'])
   font-size: var(--f-head-2);
   font-weight: 600;
   margin-bottom: var(--s-3);
+  flex-shrink: 0;
 }
 .a-modal__body {
   font-size: var(--f-body);
+  overflow-y: auto;
+  min-height: 0;
 }
 .a-modal__footer {
   margin-top: var(--s-4);
   display: flex;
   justify-content: flex-end;
   gap: var(--s-2);
+  flex-shrink: 0;
 }
 .a-modal-enter-active,
 .a-modal-leave-active {

@@ -2786,6 +2786,10 @@ _ANY_QUERIES: dict[str, str] = {
         "WHERE id=?"),
     "skill_download_inc": (
         "UPDATE skill SET download_count=COALESCE(download_count,0)+1 WHERE id=?"),
+    "skill_intro_override_update": (
+        "UPDATE skill SET intro_override=?, updated_at=datetime('now') WHERE id=?"),
+    "skill_intro_override_by_id": (
+        "SELECT intro_override FROM skill WHERE id=?"),
     "skill_version_latest": (
         "SELECT version, uploaded_at, uploaded_by, change_note FROM skill_version "
         "WHERE skill_id=? ORDER BY uploaded_at DESC, id DESC LIMIT 1"),
