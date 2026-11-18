@@ -582,7 +582,7 @@ def _raws_from_table() -> dict:
     未就绪 / 读失败 → 空 dict，调用方保持「meta > 文件 > 代码兜底」原路径。
     """
     try:
-        from src.domains.platform.importer import is_table_backed
+        from src.domains.platform.public import is_table_backed
 
         if not is_table_backed():
             return {}

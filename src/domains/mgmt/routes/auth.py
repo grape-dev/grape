@@ -194,7 +194,7 @@ def _repo_platform_links(user_id: str) -> "dict | None":
     D109 读路径同口径）。
     """
     try:
-        from src.domains.platform.importer import is_table_backed
+        from src.domains.platform.public import is_table_backed
 
         if not is_table_backed():
             return None

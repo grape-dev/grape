@@ -166,7 +166,7 @@ def _channels_from_table() -> dict:
     未就绪 / 读失败 → 返回空 dict，调用方保持原有「文件 + meta」路径（§16 #1 回落）。
     """
     try:
-        from src.domains.platform.importer import is_table_backed
+        from src.domains.platform.public import is_table_backed
 
         if not is_table_backed():
             return {}
@@ -283,7 +283,7 @@ def is_channel_enabled(provider: str) -> bool:
     否则 DB 抖动会把所有登录打挂。只有明确读到 enabled=0 才拒绝。
     """
     try:
-        from src.domains.platform.importer import is_table_backed
+        from src.domains.platform.public import is_table_backed
 
         if not is_table_backed():
             return True
@@ -351,7 +351,7 @@ def _catalog_from_object() -> "list[dict]":
     表未就绪 / 读失败 → 返回空列表，调用方回落 file+meta（§16 影响 #1 fail-open）。
     """
     try:
-        from src.domains.platform.importer import is_table_backed
+        from src.domains.platform.public import is_table_backed
 
         if not is_table_backed():
             return []

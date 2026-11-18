@@ -464,7 +464,7 @@ def save_oauth_credentials(oauth_payload: dict) -> "dict[str, bool]":
             written[provider] = True
         s.commit()
     if any(written.values()):
-        from src.domains.platform.importer import bump_epoch
+        from src.domains.platform.public import bump_epoch
 
         bump_epoch()
     return written
