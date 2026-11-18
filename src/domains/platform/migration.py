@@ -63,7 +63,7 @@ class MigrationStats:
 
 
 def _meta(key: str) -> str:
-    from src.domains.mgmt.user.db import get_meta_value
+    from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
 
     return (get_meta_value(key) or "").strip()
 

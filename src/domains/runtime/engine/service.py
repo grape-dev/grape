@@ -338,7 +338,7 @@ def get_execution_mode() -> str:
     if _m:
         return _m
     try:
-        from src.domains.mgmt.user.db import get_meta_value
+        from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
         _m = get_meta_value("execution_mode") or ""
     except Exception:
         pass
@@ -348,7 +348,7 @@ def get_execution_mode() -> str:
 def set_execution_mode(mode: str):
     """设置执行模式（落 meta 表，运维可改键值；读取实时生效，无需重启）。"""
     try:
-        from src.domains.mgmt.user.db import set_meta_value
+        from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
         set_meta_value("execution_mode", mode)
         log.info(f"execution_mode set to {mode}")
     except Exception as e:
@@ -3895,7 +3895,7 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     # 按该 issue 首个事件 actor（建单人）是否 bot 还原 _bot_opened，
     # _redispatch_vod_after_recommend 内据此短路重派（查询失败降级为不标记，人建单行为不变）。
     try:
-        from src.domains.mgmt.user.db import get_all_bot_usernames
+        from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
         _evt["_bot_opened"] = _vod_issue_creator in (get_all_bot_usernames() or [])
     except Exception:
         pass

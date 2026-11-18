@@ -158,7 +158,7 @@ import re
 def _efficiency_bot_usernames() -> set:
     """bot 用户名集合（bot 是执行方不是需求方，不计入协作者）。失败按空集合降级。"""
     try:
-        from src.domains.mgmt.user.db import get_all_bot_usernames
+        from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
         return {u for u in (get_all_bot_usernames() or []) if u}
     except Exception as e:
         log.warning(f"Dashboard efficiency: bot usernames load failed: {e}")
@@ -1310,7 +1310,7 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
     import asyncio as _asyncio
     import time as _time
     import requests as _requests
-    from src.domains.mgmt.user.db import get_server_base_url
+    from src.domains.mgmt.public import get_server_base_url  # 跨域走 owner public
 
     base_url = get_server_base_url()
 

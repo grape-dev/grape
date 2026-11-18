@@ -1469,7 +1469,7 @@ async def handoff_issue(issue_id: int, body: IssueHandoffBody,
             "code": 404, "message": "目标流水线不存在或不可移交（需含 vod 节点且不归属当前仓库）"})
 
     # 3) 幂等防连点：30s 内同一需求重复提交拒绝（复用 a2a-redo 的 meta 键模式）
-    from src.domains.mgmt.user.db import get_meta_value, set_meta_value
+    from src.domains.mgmt.public import get_meta_value, set_meta_value  # 跨域走 owner public
     _mk = f"issue-handoff:{issue_id}"
     _last = get_meta_value(_mk) or ""
     try:
@@ -1964,7 +1964,7 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
     _is_github = repo_key.startswith("github:")
     if _is_github:
         # Issue #343: GitHub 写操作走仓库 bot token
-        from src.domains.mgmt.user.db import get_github_token
+        from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
         from src.kernel.repo_key import to_repo_key
         api_token = get_github_token(repo_key=to_repo_key(repo_key, provider="github"))
         if not api_token:
@@ -2708,7 +2708,7 @@ def create_production_release_endpoint(issue_id: int, body: _ProductionReleaseBo
     # 平台建单 token：优先仓库 bot token，其次用户 GitCode token（测试环境可为空，由建单失败兜底）
     _api_token = ""
     try:
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
         _api_token = get_repo_token_with_refresh(_repo_key) or ""
     except Exception:
         _api_token = ""

@@ -85,7 +85,7 @@ class ScanReport:
 # ---------- meta 状态（epoch / 锁 / 就绪） ----------
 
 def _read_state() -> dict:
-    from src.domains.mgmt.user.db import get_meta_value
+    from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
 
     raw = get_meta_value(STATE_META_KEY) or ""
     if not raw:
@@ -101,7 +101,7 @@ def _read_state() -> dict:
 
 
 def _write_state(state: dict) -> None:
-    from src.domains.mgmt.user.db import set_meta_value
+    from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
 
     payload = dict(state)
     payload["epoch"] = int(payload.get("epoch") or 0)
@@ -150,7 +150,7 @@ def mark_migrated() -> None:
 
 def acquire_import_lock(owner: str, ttl_s: int = 120) -> bool:
     """meta 层租约锁：`owner|expire_ts`。过期可抢占（防实例崩溃后永久锁）。"""
-    from src.domains.mgmt.user.db import get_meta_value
+    from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
 
     now = time.time()
     raw = get_meta_value(LOCK_META_KEY) or ""
@@ -163,7 +163,7 @@ def acquire_import_lock(owner: str, ttl_s: int = 120) -> bool:
             # 锁值形如 "<owner>|<exp>"；脏值按「过期」处理，允许重新获取
             log.debug(f"platform importer: unparsable lock value {raw!r}: {e}")
     # 先写再读回校验（并发下两个实例同时写，后写者赢；再读一次确认自己是持有者）
-    from src.domains.mgmt.user.db import set_meta_value
+    from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
 
     set_meta_value(LOCK_META_KEY, f"{owner}|{now + ttl_s}")
     got = get_meta_value(LOCK_META_KEY) or ""
@@ -171,7 +171,7 @@ def acquire_import_lock(owner: str, ttl_s: int = 120) -> bool:
 
 
 def release_import_lock(owner: str) -> None:
-    from src.domains.mgmt.user.db import get_meta_value, set_meta_value
+    from src.domains.mgmt.public import get_meta_value, set_meta_value  # 跨域走 owner public
 
     raw = get_meta_value(LOCK_META_KEY) or ""
     if raw.split("|", 1)[0] == owner:

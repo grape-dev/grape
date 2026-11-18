@@ -195,10 +195,10 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     repo_gitcode_token = ""
     try:
         if repo_key.startswith("github:"):
-            from src.domains.mgmt.user.db import get_github_token
+            from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
             repo_gitcode_token = get_github_token(repo_key=repo_key) or ""
         else:
-            from src.domains.mgmt.user.db import get_repo_token_with_refresh
+            from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
             repo_gitcode_token = get_repo_token_with_refresh(repo_key=repo_key) or ""
     except Exception as e:
         log.warning(f"Exec agent: get bot token failed: {e}")

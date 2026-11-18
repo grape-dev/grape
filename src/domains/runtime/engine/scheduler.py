@@ -667,7 +667,7 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     _skill_id = 0
     if skill_name:
         try:
-            from src.domains.mgmt.user.db import resolve_skill_id
+            from src.domains.mgmt.public import resolve_skill_id  # 跨域走 owner public
             _skill_id = resolve_skill_id(skill_name, repo_key=repo_key,
                                          user_id=task.get("created_by") or 0)
             if not _skill_id:

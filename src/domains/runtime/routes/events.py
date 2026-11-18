@@ -705,7 +705,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
 
     # 1) 幂等：30s 内已重派过则拒绝
     try:
-        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.public import get_meta_value, set_meta_value  # 跨域走 owner public
         _last = get_meta_value(f"redispatch:{seq}") or ""
         if _last:
             import time as _time
@@ -791,7 +791,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         except Exception:
             pass
         try:
-            from src.domains.mgmt.user.db import set_meta_value as _smv
+            from src.domains.mgmt.public import set_meta_value as _smv  # 跨域走 owner public
             import time as _time
             _smv(f"redispatch:{seq}", str(_time.time()))
         except Exception:
@@ -885,7 +885,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 reset_event_terminal(seq)
                 _tok_reissued = _reissue_task_session_token(task_id)
                 try:
-                    from src.domains.mgmt.user.db import set_meta_value
+                    from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
                     import time as _time
                     set_meta_value(f"redispatch:{seq}", str(_time.time()))
                 except Exception:
@@ -977,7 +977,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         reset_event_terminal(seq)
         _tok_reissued = _reissue_task_session_token(_new_task_id)
         try:
-            from src.domains.mgmt.user.db import set_meta_value
+            from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
             import time as _time
             set_meta_value(f"redispatch:{seq}", str(_time.time()))
         except Exception:
@@ -1530,7 +1530,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     if _res:
                         log.info(f"[redispatch] seq={seq} PR subscription re-dispatch ok, scene={_scene_id}")
                         try:
-                            from src.domains.mgmt.user.db import set_meta_value as _smv
+                            from src.domains.mgmt.public import set_meta_value as _smv  # 跨域走 owner public
                             import time as _tm
                             _smv(f"redispatch:{seq}", str(_tm.time()))
                         except Exception:
@@ -1582,7 +1582,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         # 避免流水线卡片/segments 长期残留失败红卡片
                         _mark_event_redispatched(seq, _new_seq, "A2A")
                         try:
-                            from src.domains.mgmt.user.db import set_meta_value as _smv
+                            from src.domains.mgmt.public import set_meta_value as _smv  # 跨域走 owner public
                             import time as _tm
                             _smv(f"redispatch:{seq}", str(_tm.time()))
                         except Exception:
@@ -1631,7 +1631,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     # Issue #600：原事件标记 cancelled（被新事件接管，非失败态）
                     _mark_event_redispatched(seq, _rp_result.get("seq", 0), "run_pipeline")
                     try:
-                        from src.domains.mgmt.user.db import set_meta_value as _smv
+                        from src.domains.mgmt.public import set_meta_value as _smv  # 跨域走 owner public
                         import time as _tm
                         _smv(f"redispatch:{seq}", str(_tm.time()))
                     except Exception:
@@ -1657,7 +1657,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
 
     # 5) 记录幂等时间戳
     try:
-        from src.domains.mgmt.user.db import set_meta_value
+        from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
         import time as _time
         set_meta_value(f"redispatch:{seq}", str(_time.time()))
     except Exception:
@@ -1758,7 +1758,7 @@ async def a2a_redo_event(seq: int, body: A2ARedoBody, user: dict = Depends(requi
     check_repo_access(user, evt.get("repo_key", "") or "")
 
     # 3) 幂等：30s 内同 seq+agent 已补发过则拒绝（同 redispatch:{seq} 模式）
-    from src.domains.mgmt.user.db import get_meta_value, set_meta_value
+    from src.domains.mgmt.public import get_meta_value, set_meta_value  # 跨域走 owner public
     _mk = f"a2a-redo:{seq}:{agent_name}"
     _last = get_meta_value(_mk) or ""
     if _last and (_time.time() - float(_last or 0)) < 30:

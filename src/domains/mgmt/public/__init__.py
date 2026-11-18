@@ -5485,3 +5485,142 @@ def feedback_mark_converted_from_claim(items: list[tuple], prefix: str) -> int:
                       (url, number, converted_at, fid, f"{prefix}%"))
             done += int(getattr(c, "rowcount", 0) or 0)
     return done
+
+# ── 跨域异常类再导出（2026-11-18）──────────────────────────────────────────
+# runtime 的 VCS providers（gitcode/gitee/gitlab/card_module）在调用上游 API 失败时
+# 要抛/捕获与 mgmt repo_manager 同一套异常类型，调用方才能统一处理。此前直接
+# from src.domains.mgmt.user.repo_manager import UpstreamAPIError，属跨域 import
+# 别域内部实现。改为由 owner 域 public 提供类型，定义仍只在 repo_manager.py 一份。
+from src.domains.mgmt.user.repo_manager import UpstreamAPIError  # noqa: E402
+
+__all_error_exports__ = ("UpstreamAPIError",)
+
+# ── 跨域函数原语（2026-11-18）──────────────────────────────────────────────
+# runtime 的 engine（agent.py / service.py）与 routes/chat.py 此前直接
+# `from src.domains.mgmt.user.db import ...` / `...auth.grape_account_db import ...`，
+# 属跨域 import 别域内部实现（QA 顶层硬耦合清理项）。改为由 owner 域 public 提供
+# 具名入口：调用方只依赖契约面，实现仍只有一份。
+
+
+def task_token(task: dict) -> str:
+    """取任务可用的 GitCode/GitHub token（含按需刷新）。
+
+    原语实现见 mgmt.user.db.get_task_token（路径 A 的 bot token 优先，
+    空则走路径 B 实时获取并自动刷新；按 repo_key 前缀分流 github / gitcode）。
+    这里只做契约转发，不复制逻辑。
+    """
+    from src.domains.mgmt.user.db import get_task_token as _impl
+
+    return _impl(task)
+
+
+def grape_account_by_username(username: str) -> dict | None:
+    """按用户名取 Grape 账号行（不存在返回 None）。"""
+    from src.domains.mgmt.auth.grape_account_db import (
+        get_grape_account_by_username as _impl,
+    )
+
+    return _impl(username)
+
+def managed_repos_for_user(user_id: int, org_id: int = 0,
+                           personal_org: bool = False) -> list[dict]:
+    """某用户可见的托管仓库列表（JOIN user_repos；full_name 无前缀、repo_key 带前缀）。
+
+    insight 的看板/搜索需要按用户列出托管仓库，此前直接
+    `from src.domains.mgmt.user import db as user_db` 调内部函数（跨域硬耦合）。
+    org_id 语义与内部实现一致：>0 按组织过滤，0 返回全部；personal_org=True 放宽
+    个人组织口径（详见 mgmt.user.db.get_managed_repos 的说明）。
+    """
+    from src.domains.mgmt.user.db import get_managed_repos as _impl
+
+    return _impl(user_id, org_id, personal_org)
+
+# ── 跨域读/写原语：mgmt.user.db 高频面（2026-11-18）────────────────────────
+# runtime / insight 有 165 处函数内 `from src.domains.mgmt.user.db import ...`
+# （44 个文件），属跨域引别域内部实现。这里按调用次数把最高频的一批收敛为
+# public 具名入口，调用方改成依赖契约面；实现仍只有 mgmt.user.db 一份。
+#
+# 转发体一律函数内 import：mgmt.user.db 自身在模块加载期会引用别域 public，
+# 顶层 import 会把它拉进 import 环。
+
+
+def meta_value(key: str) -> str:
+    """读 meta 配置值（不存在返回空串）。"""
+    from src.domains.mgmt.user.db import get_meta_value as _impl
+
+    return _impl(key)
+
+
+def set_meta_value(key: str, value: str):
+    """写 meta 配置值（幂等 upsert）。"""
+    from src.domains.mgmt.user.db import set_meta_value as _impl
+
+    return _impl(key, value)
+
+
+def repo_token_with_refresh(repo_key: str) -> str:
+    """取仓库 VCS token（按需自动刷新）。"""
+    from src.domains.mgmt.user.db import get_repo_token_with_refresh as _impl
+
+    return _impl(repo_key)
+
+
+def github_token(repo_key: str = "") -> str:
+    """取 GitHub token（repo_key 为空时取全局）。"""
+    from src.domains.mgmt.user.db import get_github_token as _impl
+
+    return _impl(repo_key)
+
+
+def skill_by_id(skill_id, *, raise_on_error: bool = False) -> dict | None:
+    """按 id 取 skill 行。"""
+    from src.domains.mgmt.user.db import get_skill_by_id as _impl
+
+    return _impl(skill_id, raise_on_error=raise_on_error)
+
+
+def repo_scene(repo_key: str) -> str:
+    """取仓库所属 dev scene。"""
+    from src.domains.mgmt.user.db import get_repo_scene as _impl
+
+    return _impl(repo_key)
+
+
+def resolve_skill_id(skill_name: str, owner_id: str = "", repo_key: str = "",
+                     user_id: str | int = "") -> int:
+    """按名称/归属解析 skill 的数值 id。"""
+    from src.domains.mgmt.user.db import resolve_skill_id as _impl
+
+    return _impl(skill_name, owner_id, repo_key, user_id)
+
+
+def all_bot_usernames() -> list[str]:
+    """全部 bot 用户名（去重）。"""
+    from src.domains.mgmt.user.db import get_all_bot_usernames as _impl
+
+    return _impl()
+
+
+def skill_path(skill_id) -> str:
+    """skill 的物化路径。"""
+    from src.domains.mgmt.user.db import get_skill_path as _impl
+
+    return _impl(skill_id)
+
+
+def server_base_url() -> str:
+    """服务对外 base url。"""
+    from src.domains.mgmt.user.db import get_server_base_url as _impl
+
+    return _impl()
+
+# 原名别名：让调用点的 `from ... import get_meta_value` 只需把模块路径换成
+# src.domains.mgmt.public，函数名不变（批量收敛时改动面最小）。
+get_meta_value = meta_value
+get_repo_token_with_refresh = repo_token_with_refresh
+get_github_token = github_token
+get_skill_by_id = skill_by_id
+get_repo_scene = repo_scene
+get_all_bot_usernames = all_bot_usernames
+get_skill_path = skill_path
+get_server_base_url = server_base_url

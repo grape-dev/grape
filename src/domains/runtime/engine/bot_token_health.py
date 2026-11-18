@@ -298,7 +298,7 @@ def _set_repo_bot_token_status(repo_key: str, status: str):
 def _get_health_status() -> dict | None:
     """从 DB meta 表读取上次健康状态。"""
     try:
-        from src.domains.mgmt.user.db import get_meta_value
+        from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
         raw = get_meta_value("bot_token_health")
         if raw:
             return json.loads(raw)
@@ -311,7 +311,7 @@ def _update_health_status(result: dict):
 
     R21.3.4: FAILURE_THRESHOLD=1 只对 401（auth）生效，超时/5xx（network）不计入。
     """
-    from src.domains.mgmt.user.db import set_meta_value
+    from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
 
     prev = _get_health_status()
     prev_platforms = (prev or {}).get("platforms", {})

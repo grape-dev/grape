@@ -523,7 +523,7 @@ def is_plugin_mode() -> bool:
     Priority: meta table `pipeline_mode` > env var GRAPE_PIPELINE_MODE > default (plugin)
     """
     try:
-        from src.domains.mgmt.user.db import get_meta_value
+        from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
         _mode = (get_meta_value("pipeline_mode") or "").strip().lower()
         if _mode:
             return _mode == "plugin"
@@ -1637,7 +1637,7 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
                 runtime_id = row[0] or 0
                 if row[2]:
                     skill_id = row[2]
-                    from src.domains.mgmt.user.db import get_skill_by_id
+                    from src.domains.mgmt.public import get_skill_by_id  # 跨域走 owner public
                     _sk = get_skill_by_id(row[2])
                     if _sk:
                         skill_name = _sk.get("skill_name") or skill_name
@@ -1665,7 +1665,7 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
                 _scene = _defaults.get("scenes", {}).get("default", {})
                 # 读仓库开发场景（managed_repos.dev_scene），按场景读映射
                 try:
-                    from src.domains.mgmt.user.db import get_repo_scene
+                    from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
                     _scene_id = get_repo_scene(repo_key) or "default"
                     _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
                 except Exception:
@@ -1789,7 +1789,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     log.info(f"Pipeline: actor={actor}, event_type={event_type}")
     _bot_usernames_early = []
     if actor:
-        from src.domains.mgmt.user.db import get_all_bot_usernames
+        from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
         _bot_usernames_early = get_all_bot_usernames()
     _is_bot_actor = actor in _bot_usernames_early if actor else False
 
@@ -2391,7 +2391,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         # 是 PR 号，resolve_issue_id 会跳过（其 docstring 自警告此陷阱）→ 必须先用
         # resolve_pr_issue_id（title #N / 分支 issue-N / issues 列表 / PR 详情 API 兜底）。
         try:
-            from src.domains.mgmt.user.db import get_repo_token_with_refresh
+            from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
             _sre_api_token = get_repo_token_with_refresh(repo_key) or ""
             _rid_sre = resolve_pr_issue_id(evt.get("payload", {}) or {}, _sre_api_token, repo_key=repo_key) \
                 or resolve_issue_id(evt.get("payload", {}) or {}) \
@@ -2512,7 +2512,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 skill_name = row[1] or ""
                 # skill_id 优先：关联 skill 表拿 skill_name + skill_path
                 if skill_id:
-                    from src.domains.mgmt.user.db import get_skill_by_id
+                    from src.domains.mgmt.public import get_skill_by_id  # 跨域走 owner public
                     _sk = get_skill_by_id(skill_id)
                     if _sk:
                         skill_name = _sk.get("skill_name") or skill_name
@@ -2651,7 +2651,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         # 不用 resolve_issue_id——GitCode MR payload 的 object_attributes.iid 是 PR 号，
         # 会误当 issue_id（_is_pr_payload 只识别带 pull_request/issues 键的 payload）。
         try:
-            from src.domains.mgmt.user.db import get_repo_token_with_refresh
+            from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
             _pr_api_token = get_repo_token_with_refresh(repo_key) or ""
             _pr_issue = resolve_pr_issue_id(payload, _pr_api_token, repo_key=repo_key)
             if _pr_issue:
@@ -3022,7 +3022,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             log.info(f"Pipeline: engine_id=0, auto-selecting local engine for seq={seq}")
             # 尝试取一个本机在线引擎（优先 opencode，其次 codearts，最后 hermes）
             # org_id 隔离：从 managed_repos 推断仓库 org_id，非个人组织只选该组织引擎
-            from src.domains.mgmt.user.db import get_meta_value as _gmv
+            from src.domains.mgmt.public import get_meta_value as _gmv  # 跨域走 owner public
             try:
                 from src.kernel.session_manager import db as _db, db_lock as _dbl
                 from src.domains.mgmt.user.org_db import is_org_personal
@@ -3092,12 +3092,12 @@ def _get_repo_api_token(repo_key: str) -> str:
     """
     if _is_github_repo(repo_key):
         try:
-            from src.domains.mgmt.user.db import get_github_token
+            from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
             return get_github_token(repo_key=repo_key) or ""
         except Exception:
             return ""
     try:
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
         return get_repo_token_with_refresh(repo_key) or ""
     except Exception:
         return ""
@@ -3222,9 +3222,9 @@ def _resolve_issue_read_token(repo_key: str) -> str:
     """Issue #2925：Issue 读路径 token 解析（口径与 `_vcs_get_issue` 完全一致），
     供批量兜底在单次请求内只解析一次，杜绝逐条 token 查询。"""
     if _is_github_repo(repo_key):
-        from src.domains.mgmt.user.db import get_github_token
+        from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
         return get_github_token(repo_key=repo_key) or ""
-    from src.domains.mgmt.user.db import get_repo_token_with_refresh
+    from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
     return get_repo_token_with_refresh(repo_key) or ""
 
 
@@ -4357,7 +4357,7 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
 
         def _skill_primary():
             _skill_local = ""  # 本地技能根目录（非空则 copytree）
-            from src.domains.mgmt.user.db import get_skill_by_id, get_skill_path
+            from src.domains.mgmt.public import get_skill_by_id, get_skill_path  # 跨域走 owner public
             _skill_id = evt.get("_skill_id") or 0
             if _skill_id:
                 _sk = get_skill_by_id(_skill_id)
@@ -5331,7 +5331,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
         _scene_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
 
     # skill 解析
-    from src.domains.mgmt.user.db import resolve_skill_id, get_skill_by_id, get_skill_path
+    from src.domains.mgmt.public import resolve_skill_id, get_skill_by_id, get_skill_path  # 跨域走 owner public
     skill_name = vod_skill
     skill_id = resolve_skill_id(vod_skill, repo_key=repo_key, user_id=_scene_uid) or 0
     skill_path = vod_skill
@@ -6136,10 +6136,10 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     repo_gitcode_token = ""
     try:
         if repo_key.startswith("github:"):
-            from src.domains.mgmt.user.db import get_github_token
+            from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
             repo_gitcode_token = get_github_token(repo_key=repo_key) or ""
         else:
-            from src.domains.mgmt.user.db import get_repo_token_with_refresh
+            from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
             repo_gitcode_token = get_repo_token_with_refresh(repo_key=repo_key) or ""
     except Exception as e:
         log.warning(f"Exec agent: get bot token failed: {e}")

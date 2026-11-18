@@ -24,23 +24,23 @@ _DEFAULT_TITLES = {
 
 
 def _is_onboarded(repo_key: str) -> bool:
-    from src.domains.mgmt.user.db import get_meta_value
+    from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
     return get_meta_value(f"onboarded:{repo_key}") == "1"
 
 
 def _mark_onboarding_started(repo_key: str):
-    from src.domains.mgmt.user.db import set_meta_value
+    from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
     set_meta_value(f"onboarded:{repo_key}", "1")
 
 
 def _mark_task_done(repo_key: str, task_type: str):
     """按任务 type 记录完成态（稳定键，不随标题变更丢失）。"""
-    from src.domains.mgmt.user.db import set_meta_value
+    from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
     set_meta_value(f"onboarded_task:{repo_key}:{task_type}", "1")
 
 
 def _task_done(repo_key: str, task_type: str) -> bool:
-    from src.domains.mgmt.user.db import get_meta_value
+    from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
     return get_meta_value(f"onboarded_task:{repo_key}:{task_type}") == "1"
 
 
@@ -303,7 +303,7 @@ def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
     # 读取仓库当前场景（managed_repos.dev_scene），用于绑定到每个 onboarding Issue
     _repo_scene = ""
     try:
-        from src.domains.mgmt.user.db import get_repo_scene
+        from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
         _repo_scene = get_repo_scene(repo_key) or ""
     except Exception:
         pass

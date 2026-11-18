@@ -267,7 +267,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     skill_path = ""
     if agent_session.get("skill_id"):
         try:
-            from src.domains.mgmt.user.db import get_skill_path
+            from src.domains.mgmt.public import get_skill_path  # 跨域走 owner public
             skill_path = get_skill_path(agent_session.get("skill_id"))
         except Exception:
             pass

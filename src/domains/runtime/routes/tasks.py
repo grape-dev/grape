@@ -246,7 +246,7 @@ async def notify_task(body: TaskNotifyBody, request: Request,
 
     # 责任人若是 bot（grape_bot）→ 视为"接管"：关闭该 issue 用户 active/processing 任务（bot_takeover），
     # 不建 bot 任务。见 task-lifecycle-design.md §2.3/§3.1。
-    from src.domains.mgmt.user.db import get_all_bot_usernames
+    from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
     if body.assignee in get_all_bot_usernames():
         closed = _close_issue_tasks_bot_takeover(body.repo_key, body.issue_number)
         log.info(f"Task notify: bot_takeover assignee={body.assignee} repo={body.repo_key} issue=#{body.issue_number} closed={closed} (task_id=0)")

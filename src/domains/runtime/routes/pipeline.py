@@ -383,7 +383,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
                     if actor:
                         _bots = bot_usernames if bot_usernames is not None else set()
                         if not _bots:
-                            from src.domains.mgmt.user.db import get_all_bot_usernames
+                            from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
                             _bots = get_all_bot_usernames()
                         if actor in _bots:
                             from src.domains.runtime.pipeline.event_pipeline import get_agent_display_name

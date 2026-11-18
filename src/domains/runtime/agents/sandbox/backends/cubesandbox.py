@@ -175,7 +175,7 @@ class CubeSandboxInstance(CloudSandboxBase):
             if not _base and _os.environ.get("GRAPE_SERVER_URL"):
                 _base = _os.environ.get("GRAPE_SERVER_URL", "")
             if not _base:
-                from src.domains.mgmt.user.db import get_server_base_url
+                from src.domains.mgmt.public import get_server_base_url  # 跨域走 owner public
                 _base = get_server_base_url()
             _host = (_up(_base).hostname or "") if _base else ""
             # 域名形式（非 IP）不放进 allow_out——平台域名流量走 SNI 代理本就放行；

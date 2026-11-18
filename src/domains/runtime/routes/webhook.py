@@ -2330,7 +2330,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     skill_name = row[1] or ""
                     skill_id = row[2] or 0
                     if row[2]:
-                        from src.domains.mgmt.user.db import get_skill_by_id
+                        from src.domains.mgmt.public import get_skill_by_id  # 跨域走 owner public
                         _sk = get_skill_by_id(row[2])
                         if _sk:
                             skill_name = _sk.get("skill_name") or skill_name
@@ -2423,7 +2423,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                             _defaults = json.load(_f)
                         _scene = _defaults.get("scenes", {}).get("default", {})
                         try:
-                            from src.domains.mgmt.user.db import get_repo_scene
+                            from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
                             _scene_id = get_repo_scene(repo_key) or "default"
                             _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
                         except Exception:

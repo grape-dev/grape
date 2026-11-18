@@ -2659,7 +2659,7 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
     - remote_engines：agent_runtimes 在线引擎（按上述可见性过滤）
     - needs_worker：无任何可用引擎（本地全未装 且 可见远端零在线）时 true
     """
-    from src.domains.mgmt.user.db import get_server_base_url
+    from src.domains.mgmt.public import get_server_base_url  # 跨域走 owner public
     from src.domains.runtime.engine.executor import discover_backends
     from src.kernel.repo_key import from_repo_key
 

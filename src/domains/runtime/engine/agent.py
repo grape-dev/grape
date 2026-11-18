@@ -2349,7 +2349,7 @@ def _materialize_worker_skill(task: dict, env: dict, prompt: str, skill_dir: str
         _skill_scope = ""
         try:
             if _skill_id:
-                from src.domains.mgmt.user.db import get_skill_by_id
+                from src.domains.mgmt.public import get_skill_by_id  # 跨域走 owner public
                 _skill_scope = (get_skill_by_id(_skill_id) or {}).get("scope") or ""
         except Exception as _sse:
             log.warning(f"[skill] scope resolve failed: {_sse}")

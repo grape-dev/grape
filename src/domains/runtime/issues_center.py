@@ -2439,7 +2439,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         # B2 补齐（对齐 gitcode/gitee 链）：bot token 缺席时回落用户 token
         # （get_user_token_for_repo 按 repo_key 前缀派生 provider——github PAT
         # 绑定后建单不再 400「Bot Token 未配置」）。
-        from src.domains.mgmt.user.db import get_github_token
+        from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
         api_token = get_github_token(repo_key=repo_key) or ""
         if not api_token:
             from src.api.deps import get_user_token_for_repo
@@ -2550,7 +2550,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         _scene_is_explicit = bool(_scene_for_precheck)
         if not _scene_for_precheck:
             try:
-                from src.domains.mgmt.user.db import get_repo_scene
+                from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
                 _scene_for_precheck = get_repo_scene(repo_key) or ""
             except Exception as _rs_err:
                 log.warning(f"create_task: get_repo_scene for precheck failed: {_rs_err}")
@@ -2730,7 +2730,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         else:
             # 无显式场景 → 仓库默认场景兜底（未配置则保持空，走智能推荐）
             try:
-                from src.domains.mgmt.user.db import get_repo_scene
+                from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
                 _scene_to_write = get_repo_scene(repo_key) or ""
             except Exception as _re:
                 log.warning(f"create_task: get_repo_scene failed: {_re}")
@@ -2935,7 +2935,7 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     if storage:
         prefix_key = _attach_obs_key(owner, repo, issue_number, "")
         items, _ = storage.list_objects_with_meta(prefix_key)
-        from src.domains.mgmt.user.db import get_meta_value as _gmv
+        from src.domains.mgmt.public import get_meta_value as _gmv  # 跨域走 owner public
         result = []
         for item in items:
             fname = item["key"].rsplit("/", 1)[-1]
@@ -3028,7 +3028,7 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
         _md = _attachments_markdown_block([_att])
         if not _md:
             return False
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
         token = get_repo_token_with_refresh(repo_key) or ""
         if not token:
             log.warning(f"attachment sync comment skipped: no repo token repo={repo_key}")
@@ -3396,7 +3396,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         if _rk in _repo_default_scene:
             continue
         try:
-            from src.domains.mgmt.user.db import get_repo_scene
+            from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
             _repo_default_scene[_rk] = get_repo_scene(_rk) or ""
         except Exception:
             _repo_default_scene[_rk] = ""

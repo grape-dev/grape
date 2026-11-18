@@ -1358,7 +1358,7 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_
     }
 
     # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token）
-    from src.domains.mgmt.user.db import get_repo_token_with_refresh
+    from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
     bot_token = get_repo_token_with_refresh(repo_key) if repo_key else ""
 
     return {
@@ -1827,7 +1827,7 @@ async def update_chat_config(body: dict, request: Request,
         skill_name = ""
         skill_scope = ""
         if skill_id:
-            from src.domains.mgmt.user.db import get_skill_by_id
+            from src.domains.mgmt.public import get_skill_by_id  # 跨域走 owner public
             _sk = get_skill_by_id(skill_id)
             if _sk:
                 skill_name = _sk.get("skill_name") or ""
