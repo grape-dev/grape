@@ -9558,10 +9558,11 @@ def _migration_engine_template_binding_widen(conn=None) -> dict:
 # 标签统一 JSON [{name, source}]，旧逗号串在本迁移里就地回填为 manual 标签。
 
 def _fn_category_dict_and_tags() -> None:
-    """Issue #2761 M1：统一分类字典表 + 场景/技能分类引用列 + 标签 JSON 化。
+    """Issue #2761 M1：统一分类字典表 + 场景分类引用列 + 标签 JSON 化。
 
     - 建 grape_t_category_dict 并落 10 个一级域及二级种子；
-    - scene_market / skill 补 cat_l1_id / cat_l2_id；skill 补 tags；
+    - scene_market 补 cat_l1_id / cat_l2_id（mgmt 域；skill 的三列同号需求
+      归 runtime 域，见 202611180001）；
     - scene_market.tags 旧逗号串就地回填为 [{name, source:"manual"}]；
     - 幂等：IF NOT EXISTS / _ensure_column / INSERT OR IGNORE / 已规范化行跳过。
     """

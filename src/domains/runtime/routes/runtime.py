@@ -3630,22 +3630,23 @@ def runtime_provider_active_sandboxes(provider_id: str,
     [安全修正] 与 provider-configs 同口径（用户裁定：rta_ 一律只查自己）——
     只能查自己凭据关联的 Provider。
     """
-    # 三库拓扑：本函数涉及的两张表（provider_config / cloud_sandboxes）都归 mgmt，
-    # 在 worker 进程库上直读会 1146；provider 归属行走跨域读，计数走 mgmt reader。
-    from src.kernel.bulk_read import reader
-    _own = _fetch_across_domains(
-        "SELECT 1 FROM grape_t_sandbox_provider_config WHERE id=? AND runtime_credential_id=?",
-        (provider_id, cred.id))
-    if not _own:
+    # 三库拓扑：provider_config / cloud_sandboxes 的落库域取决于部署（归属清单记
+    # runtime，beta 实况在 mgmt），都不写死——统一走 _fetch_across_domains，
+    # 只在 1146/表不存在时切域；其它异常原样抛，不静默降级成空计数。
+    # 归属行与 max_sandboxes 合并成一次查询（同一行、同一域）。
+    _own_rows = _fetch_across_domains(
+        "SELECT max_sandboxes FROM grape_t_sandbox_provider_config "
+        "WHERE id=? AND runtime_credential_id=?",
+        (provider_id, cred.id), ("runtime", "mgmt"))
+    if not _own_rows:
         raise HTTPException(status_code=403,
                             detail={"code": 403, "message": "provider not bound to this credential"})
-    with reader("mgmt") as c:
-        c.execute("SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')",
-                  (provider_id,))
-        active_count = c.fetchone()[0] or 0
-        c.execute("SELECT max_sandboxes FROM grape_t_sandbox_provider_config WHERE id=?", (provider_id,))
-        _row = c.fetchone()
-        max_sandboxes = _row[0] if _row else 10
+    max_sandboxes = (_own_rows[0][0] if _own_rows[0] else 10)
+    _cnt_rows = _fetch_across_domains(
+        "SELECT COUNT(*) FROM grape_t_cloud_sandboxes "
+        "WHERE provider_id=? AND state IN ('creating','running')",
+        (provider_id,), ("runtime", "mgmt"))
+    active_count = (_cnt_rows[0][0] if _cnt_rows else 0) or 0
     return {"active_count": active_count, "max_sandboxes": max_sandboxes or 10}
 
 
