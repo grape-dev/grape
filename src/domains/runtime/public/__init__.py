@@ -2771,6 +2771,39 @@ _ANY_QUERIES: dict[str, str] = {
         "skill_path, scope, owner_id, created_by, updated_by) VALUES (?,?,?,?,?,?,?,?,?)"),
     "skill_like_inc": "UPDATE skill SET like_count=like_count+1 WHERE id=?",
     "skill_like_dec": "UPDATE skill SET like_count=like_count-1 WHERE id=?",
+    # Issue #3168 技能详情页：版本 / 文件清单 / 评论 / 下载计数
+    "skill_detail_extra_by_id": (
+        "SELECT summary, download_count, created_at, updated_at, created_by, updated_by "
+        "FROM skill WHERE id=?"),
+    "skill_summary_update": "UPDATE skill SET summary=?, updated_at=datetime('now') WHERE id=?",
+    "skill_download_inc": (
+        "UPDATE skill SET download_count=COALESCE(download_count,0)+1 WHERE id=?"),
+    "skill_version_latest": (
+        "SELECT version, uploaded_at, uploaded_by, change_note FROM skill_version "
+        "WHERE skill_id=? ORDER BY uploaded_at DESC, id DESC LIMIT 1"),
+    "skill_versions_by_skill": (
+        "SELECT version, uploaded_at, uploaded_by, change_note FROM skill_version "
+        "WHERE skill_id=? ORDER BY uploaded_at DESC, id DESC"),
+    "skill_version_insert": (
+        "INSERT INTO skill_version (id, skill_id, version, change_note, uploaded_at, uploaded_by) "
+        "VALUES (?,?,?,?,?,?)"),
+    "skill_file_delete_by_skill": "DELETE FROM skill_file WHERE skill_id=?",
+    "skill_file_insert": (
+        "INSERT INTO skill_file (id, skill_id, path, size) VALUES (?,?,?,?)"),
+    "skill_files_by_skill": (
+        "SELECT path, size FROM skill_file WHERE skill_id=? ORDER BY path"),
+    "skill_file_count": "SELECT COUNT(*) FROM skill_file WHERE skill_id=?",
+    "skill_comment_count": "SELECT COUNT(*) FROM skill_comment WHERE skill_id=?",
+    "skill_comments_page": (
+        "SELECT id, user_id, user_name, content, created_at FROM skill_comment "
+        "WHERE skill_id=? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"),
+    "skill_comment_insert": (
+        "INSERT INTO skill_comment (id, skill_id, user_id, user_name, content, created_at) "
+        "VALUES (?,?,?,?,?,?)"),
+    "skills_related_pool": (
+        "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, tags, "
+        "like_count, category_id, summary FROM skill "
+        "WHERE is_active=1 AND id<>? ORDER BY like_count DESC, id DESC LIMIT 300"),
     # agent_runtimes
     "runtimes_all": (
         "SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, "

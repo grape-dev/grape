@@ -67,6 +67,9 @@ from src.domains.runtime.schema_ddl import (
     _AGENT_SESSIONS_TABLE_DDL,
     _AGENT_TYPE_DDL,
     _SKILL_DDL,
+    _SKILL_VERSION_DDL,
+    _SKILL_FILE_DDL,
+    _SKILL_COMMENT_DDL,
     _META_TABLE_DDL,
     _AGENT_RUNTIMES_DDL,
     _CHAT_CONVERSATIONS_DDL,
@@ -225,6 +228,9 @@ _NEW_TABLES = [
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type", _AGENT_TYPE_DDL),
     ("skill", _SKILL_DDL),
+    ("skill_version", _SKILL_VERSION_DDL),
+    ("skill_file", _SKILL_FILE_DDL),
+    ("skill_comment", _SKILL_COMMENT_DDL),
     ("grape_im_instance", _IM_INSTANCE_DDL),
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("feishu_onboard_task", _FEISHU_ONBOARD_TASK_DDL),
@@ -9874,4 +9880,78 @@ register_migration(
     kind="safe",
     domains=("mgmt",),
     fn=_fn_category_columns_repair_mgmt,
+)
+
+
+# ===== Issue #3168 技能详情页：skill 扩展列 + 版本/文件/评论表 =====
+def _fn_issue3168_skill_detail_schema() -> None:
+    """skill 表补 summary/download_count 列，建 skill_version/skill_file/skill_comment。
+
+    幂等：_ensure_column 先探测；CREATE TABLE IF NOT EXISTS 可重复执行。
+    skill 及三张扩展表归 runtime 域，故 domains=("runtime",)。
+    """
+    from src.domains.runtime.schema_ddl import (
+        _SKILL_VERSION_DDL, _SKILL_FILE_DDL, _SKILL_COMMENT_DDL,
+    )
+    with db_lock:
+        c = db.cursor()
+        if not _owned_skip("skill", "ensure column summary"):
+            _ensure_column(c, "skill", "summary", "TEXT DEFAULT ''", strict=True)
+            _ensure_column(c, "skill", "download_count", "INTEGER DEFAULT 0", strict=True)
+        for _name, _ddl in (("skill_version", _SKILL_VERSION_DDL),
+                            ("skill_file", _SKILL_FILE_DDL),
+                            ("skill_comment", _SKILL_COMMENT_DDL)):
+            if _owned_skip(_name, "create table"):
+                continue
+            c.execute(_ddl)
+        db.commit()
+
+
+register_migration(
+    # [rebase 到 arch-weekly-11 改号] 原用 202611180001/002，基线已分别被
+    # ensure-cloud-sandboxes-in-runtime / ensure-runtime-type-info-columns 占用（撞号守卫），
+    # 顺延到 202611181201/202611181202。
+    version="202611181201",
+    name="issue3168-skill-detail-schema",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_issue3168_skill_detail_schema,
+)
+
+
+def _fn_issue3168_official_version_backfill() -> None:
+    """73 个官方技能各补一行 1.0.0（时间取 skill.created_at，不伪造中间版本）。"""
+    from src.kernel.id_gen import uuid7_str
+    with db_lock:
+        c = db.cursor()
+        if _owned_skip("skill_version", "backfill official versions"):
+            return
+        try:
+            rows = c.execute(
+                "SELECT s.id, s.created_at FROM skill s "
+                "WHERE s.scope='official' AND s.is_active=1 "
+                "AND NOT EXISTS (SELECT 1 FROM skill_version v WHERE v.skill_id=s.id)"
+            ).fetchall()
+        except Exception as exc:  # noqa: BLE001 - 表不存在时由 schema 迁移负责
+            log.warning(f"202611181202 official version backfill skipped: {exc}")
+            return
+        for sid, created_at in rows or []:
+            try:
+                c.execute(
+                    "INSERT INTO skill_version "
+                    "(id, skill_id, version, change_note, uploaded_at, uploaded_by) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (uuid7_str(), int(sid), "1.0.0", "存量官方技能版本补录",
+                     created_at or "", "system"))
+            except Exception as exc:  # noqa: BLE001 - 单行失败不阻断
+                log.warning(f"202611181202 version row failed for skill {sid}: {exc}")
+        db.commit()
+
+
+register_migration(
+    version="202611181202",
+    name="issue3168-official-skill-version-backfill",
+    kind="backfill",
+    domains=("runtime",),
+    fn=_fn_issue3168_official_version_backfill,
 )
