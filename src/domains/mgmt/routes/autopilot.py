@@ -30,7 +30,9 @@ from src.kernel.session_manager import db, db_lock
 # 运行域表（autopilot_executions）走 owner 域原语；autopilot_tasks 归本域
 from src.domains.runtime import public as _rt_ap
 
-from src.domains.runtime.engine.scheduler import _get_exec_agent_task
+# 执行记录→任务行解析走 owner 域 public（原 import runtime.engine.scheduler 内部函数，
+# 且 public 版本不再要求调用方传游标）
+
 
 router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
 
@@ -357,7 +359,7 @@ def list_tasks(
              (r[2].split(":", 1)[1] if ":" in r[2] else r[2]) in _repo_base]
     # 引擎绑定真实性同步 §5.1b：绑定引擎已被系统 detach 的任务带提示（两表协同，不删绑定）
     try:
-        from src.domains.runtime.engine.engine_select import get_detached_engine_hints
+        from src.domains.runtime.public import get_detached_engine_hints
         import json as _json_hint
         _all_eids = set()
         for t in tasks:
@@ -410,13 +412,13 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
     task = _row_to_task(row)
     # 引擎绑定真实性同步 §5.1b：详情同样带 engine_detached 提示（与列表口径一致）
     try:
-        from src.domains.runtime.engine.engine_select import get_detached_engine_hints
+        from src.domains.runtime.public import get_detached_engine_hints
         # Issue #1011：读侧 uid 优先——uid 模式任务的绑定引擎解析为 id 参与提示
         _uids = [str(u).strip().lower() for u in (task.get("engine_runtime_uids") or [])]
         if _uids:
             try:
-                from src.domains.runtime import public as _rt_pub
-                for _rid in _rt_pub.runtime_ids_by_engine_uids(_uids):
+                from src.domains.runtime import public as _rt_ap
+                for _rid in _rt_ap.runtime_ids_by_engine_uids(_uids):
                     _rid = _rid or 0
                     task.setdefault("engine_runtime_ids", [])
                     if _rid not in (task.get("engine_runtime_ids") or []):
@@ -573,7 +575,7 @@ def delete_task(task_id: int, user: dict = Depends(get_current_user)):
 async def trigger_task(task_id: int, user: dict = Depends(get_current_user)):
     """手动触发自动化任务执行。"""
     _check_task_access(user, task_id)
-    from src.domains.runtime.engine.scheduler import trigger_task_now
+    from src.domains.runtime.public import trigger_task_now
     result = await trigger_task_now(task_id)
     if not result["ok"]:
         raise HTTPException(status_code=409, detail={"code": 409, "message": result["message"]})
@@ -633,10 +635,12 @@ def list_executions(
         if not agent_task_id:
             try:
                 with db_lock:
-                    c2 = db.cursor()
-                    at_row = _get_exec_agent_task(c2, exec_id, "", r[6], r[8])
+                    # public 契约返回 dict（列名→值），不是行元组：按列名取值，
+                    # 用 at_row[0] 会恒抛 KeyError:0 被下面的 except 吞掉，
+                    # 历史执行记录的 agent_task_id 关联静默失效。
+                    at_row = _rt_ap.exec_agent_task(exec_id, "", r[6], r[8])
                     if at_row:
-                        agent_task_id = at_row[0]
+                        agent_task_id = at_row.get("id") or ""
             except Exception as e:
                 log.warning(f"Autopilot: resolve agent_task_id failed for exec {exec_id}: {e}")
         # Issue #258: 查 agent_task_ids（issue_number + repo_key 关联，支持多阶段）
@@ -645,7 +649,7 @@ def list_executions(
             rk = repo_key_map.get(tid, "")
             if rk:
                 try:
-                    from src.domains.runtime.vcs.api_client import _native_issue_number
+                    from src.domains.runtime.public import _native_issue_number
                     agent_task_ids = _find_agent_task_ids(rk, _native_issue_number(issue_number))
                 except Exception:
                     agent_task_ids = []
@@ -699,15 +703,16 @@ class DispatchBody(BaseModel):
 
 # Issue #697：判定级别枚举/归一/门禁判定统一取自 scheduler（单一事实源，禁止双源漂移）
 try:
-    from src.domains.runtime.engine.scheduler import (
-        DEDUP_LEVEL_SUSPECTED,
+    from src.domains.runtime.public import (
+        dedup_level_suspected,
         dedup_auto_merge_allowed,
         normalize_dedup_level,
         sanitize_dedup_note,
         sanitize_dedup_confirmed_by,
     )
 except Exception:  # scheduler 不可达时兜底（与 AUTOPILOT_DEDUP_RULE 同策略）
-    DEDUP_LEVEL_SUSPECTED = "suspected_duplicate"
+    def dedup_level_suspected():
+        return "suspected_duplicate"
 
     def normalize_dedup_level(raw):
         level = str(raw or "").strip().lower()
@@ -740,7 +745,7 @@ def _dedup_dispatch_guard(finding: dict, dedup_confirmed: bool = False) -> None:
             "code": 409,
             "message": "疑似重复（suspected_duplicate）：根因比对不一致，"
                        "需跟踪单 owner agent 确认后方可派发并入；确认后携带 dedup_confirmed=true 重试",
-            "dedup_level": DEDUP_LEVEL_SUSPECTED,
+            "dedup_level": dedup_level_suspected(),
             "dedup_note": sanitize_dedup_note(finding.get("dedup_note")),
         })
 
@@ -756,7 +761,7 @@ def _append_dedup_note(description: str, finding: dict) -> str:
     lines = [description.rstrip(), "", f"[dedup] level={level}"]
     if note:
         lines.append(f"[dedup] 差异说明: {note}")
-    if level == DEDUP_LEVEL_SUSPECTED:
+    if level == dedup_level_suspected():
         lines.append("[dedup] 疑似重复：待跟踪单 owner agent 确认后方可并入")
     return "\n".join(lines)
 

@@ -50,12 +50,12 @@ def _strip_closing_refs(body: str) -> str:
 
 
 def request(method, url, token, body=None):
-    from src.domains.mgmt.user.repo_manager import _github_req
+    from src.domains.mgmt.public import _github_req
     return _github_req(method, url, token, body)
 
 
 def bot_token(repo_key):
-    from src.domains.mgmt.user.db import get_github_token
+    from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
     return get_github_token(repo_key=repo_key) or ""
 
 

@@ -5485,3 +5485,744 @@ def feedback_mark_converted_from_claim(items: list[tuple], prefix: str) -> int:
                       (url, number, converted_at, fid, f"{prefix}%"))
             done += int(getattr(c, "rowcount", 0) or 0)
     return done
+
+# ── 跨域异常类再导出（2026-11-18）──────────────────────────────────────────
+# runtime 的 VCS providers（gitcode/gitee/gitlab/card_module）在调用上游 API 失败时
+# 要抛/捕获与 mgmt repo_manager 同一套异常类型，调用方才能统一处理。此前直接
+# from src.domains.mgmt.user.repo_manager import UpstreamAPIError，属跨域 import
+# 别域内部实现。改为由 owner 域 public 提供类型，定义仍只在 repo_manager.py 一份。
+from src.domains.mgmt.user.repo_manager import UpstreamAPIError  # noqa: E402
+
+__all_error_exports__ = ("UpstreamAPIError",)
+
+# ── 跨域函数原语（2026-11-18）──────────────────────────────────────────────
+# runtime 的 engine（agent.py / service.py）与 routes/chat.py 此前直接
+# `from src.domains.mgmt.user.db import ...` / `...auth.grape_account_db import ...`，
+# 属跨域 import 别域内部实现（QA 顶层硬耦合清理项）。改为由 owner 域 public 提供
+# 具名入口：调用方只依赖契约面，实现仍只有一份。
+
+
+def task_token(task: dict) -> str:
+    """取任务可用的 GitCode/GitHub token（含按需刷新）。
+
+    原语实现见 mgmt.user.db.get_task_token（路径 A 的 bot token 优先，
+    空则走路径 B 实时获取并自动刷新；按 repo_key 前缀分流 github / gitcode）。
+    这里只做契约转发，不复制逻辑。
+    """
+    from src.domains.mgmt.user.db import get_task_token as _impl
+
+    return _impl(task)
+
+
+def grape_account_by_username(username: str) -> dict | None:
+    """按用户名取 Grape 账号行（不存在返回 None）。"""
+    from src.domains.mgmt.auth.grape_account_db import (
+        get_grape_account_by_username as _impl,
+    )
+
+    return _impl(username)
+
+def managed_repos_for_user(user_id: int, org_id: int = 0,
+                           personal_org: bool = False) -> list[dict]:
+    """某用户可见的托管仓库列表（JOIN user_repos；full_name 无前缀、repo_key 带前缀）。
+
+    insight 的看板/搜索需要按用户列出托管仓库，此前直接
+    `from src.domains.mgmt.user import db as user_db` 调内部函数（跨域硬耦合）。
+    org_id 语义与内部实现一致：>0 按组织过滤，0 返回全部；personal_org=True 放宽
+    个人组织口径（详见 mgmt.user.db.get_managed_repos 的说明）。
+    """
+    from src.domains.mgmt.user.db import get_managed_repos as _impl
+
+    return _impl(user_id, org_id, personal_org)
+
+# ── 跨域读/写原语：mgmt.user.db 高频面（2026-11-18）────────────────────────
+# runtime / insight 有 165 处函数内 `from src.domains.mgmt.user.db import ...`
+# （44 个文件），属跨域引别域内部实现。这里按调用次数把最高频的一批收敛为
+# public 具名入口，调用方改成依赖契约面；实现仍只有 mgmt.user.db 一份。
+#
+# 转发体一律函数内 import：mgmt.user.db 自身在模块加载期会引用别域 public，
+# 顶层 import 会把它拉进 import 环。
+
+
+def meta_value(key: str) -> str:
+    """读 meta 配置值（不存在返回空串）。"""
+    from src.domains.mgmt.user.db import get_meta_value as _impl
+
+    return _impl(key)
+
+
+def set_meta_value(key: str, value: str):
+    """写 meta 配置值（幂等 upsert）。"""
+    from src.domains.mgmt.user.db import set_meta_value as _impl
+
+    return _impl(key, value)
+
+
+def repo_token_with_refresh(repo_key: str) -> str:
+    """取仓库 VCS token（按需自动刷新）。"""
+    from src.domains.mgmt.user.db import get_repo_token_with_refresh as _impl
+
+    return _impl(repo_key)
+
+
+def github_token(repo_key: str = "") -> str:
+    """取 GitHub token（repo_key 为空时取全局）。"""
+    from src.domains.mgmt.user.db import get_github_token as _impl
+
+    return _impl(repo_key)
+
+
+def skill_by_id(skill_id, *, raise_on_error: bool = False) -> dict | None:
+    """按 id 取 skill 行。"""
+    from src.domains.mgmt.user.db import get_skill_by_id as _impl
+
+    return _impl(skill_id, raise_on_error=raise_on_error)
+
+
+def repo_scene(repo_key: str) -> str:
+    """取仓库所属 dev scene。"""
+    from src.domains.mgmt.user.db import get_repo_scene as _impl
+
+    return _impl(repo_key)
+
+
+def resolve_skill_id(skill_name: str, owner_id: str = "", repo_key: str = "",
+                     user_id: str | int = "") -> int:
+    """按名称/归属解析 skill 的数值 id。"""
+    from src.domains.mgmt.user.db import resolve_skill_id as _impl
+
+    return _impl(skill_name, owner_id, repo_key, user_id)
+
+
+def all_bot_usernames() -> list[str]:
+    """全部 bot 用户名（去重）。"""
+    from src.domains.mgmt.user.db import get_all_bot_usernames as _impl
+
+    return _impl()
+
+
+def skill_path(skill_id) -> str:
+    """skill 的物化路径。"""
+    from src.domains.mgmt.user.db import get_skill_path as _impl
+
+    return _impl(skill_id)
+
+
+def server_base_url() -> str:
+    """服务对外 base url。"""
+    from src.domains.mgmt.user.db import get_server_base_url as _impl
+
+    return _impl()
+
+# 原名别名：让调用点的 `from ... import get_meta_value` 只需把模块路径换成
+# src.domains.mgmt.public，函数名不变（批量收敛时改动面最小）。
+get_meta_value = meta_value
+get_repo_token_with_refresh = repo_token_with_refresh
+get_github_token = github_token
+get_skill_by_id = skill_by_id
+get_repo_scene = repo_scene
+get_all_bot_usernames = all_bot_usernames
+get_skill_path = skill_path
+get_server_base_url = server_base_url
+
+# ── 跨域原语：mgmt.user.db 凭据 / bot token 面（2026-11-18 batch 2）─────────
+# runtime 的 engine / vcs / routes / pipeline 有 24 处函数内
+# `from src.domains.mgmt.user.db import <token 读取函数>`，属跨域引别域内部实现。
+# 这里把这一批统一收敛成 public 具名入口，调用方只依赖契约面；实现仍只有一份。
+
+
+def credential_list(user_id: "int | str", include_unreadable: bool = False) -> list[dict]:
+    """某用户的凭据列表（kind 维度；不含历史旧复合键行）。"""
+    from src.domains.mgmt.user.db import get_credentials as _impl
+
+    return _impl(user_id, include_unreadable)
+
+
+def gitcode_token(repo_key: str = "", user_id: str = "") -> str:
+    """统一取 GitCode API token（内部走统一入口 + 自动刷新）。"""
+    from src.domains.mgmt.user.db import get_gitcode_token as _impl
+
+    return _impl(repo_key, user_id)
+
+
+def repo_bot_token(repo_key: str = "") -> str:
+    """仓库级 bot token（用户交互写操作用途，不含 agent session token）。"""
+    from src.domains.mgmt.user.db import get_repo_bot_token as _impl
+
+    return _impl(repo_key)
+
+
+def repo_bot_token_no_global(repo_key: str) -> str:
+    """仓库级 bot token（不含全局兜底）：服务端内部端点鉴权用。"""
+    from src.domains.mgmt.user.db import get_repo_bot_token_no_global as _impl
+
+    return _impl(repo_key)
+
+
+def repo_token_for(repo_key: str) -> str:
+    """仓库 token 统一读入口（provider 策略链 + 刷新）。"""
+    from src.domains.mgmt.user.db import get_repo_token_for as _impl
+
+    return _impl(repo_key)
+
+
+def global_bot_token_for(provider: str) -> str:
+    """任意平台的全局 bot token（meta key 按 provider 派生）。"""
+    from src.domains.mgmt.user.db import get_global_bot_token_for as _impl
+
+    return _impl(provider)
+
+
+def global_gitcode_bot_token() -> str:
+    """全局 GitCode bot token（统一入口的向后兼容名）。"""
+    from src.domains.mgmt.user.db import _get_global_bot_token as _impl
+
+    return _impl()
+
+
+def global_github_bot_token() -> str:
+    """全局 GitHub bot token（平台行 → meta → 文件 fallback）。"""
+    from src.domains.mgmt.user.db import get_global_github_bot_token as _impl
+
+    return _impl()
+
+
+def repo_credential_value(repo_key: str, cred_type: str) -> str:
+    """读 grape_t_repo_credentials 单表值（已解密；空串=无值）。"""
+    from src.domains.mgmt.user.db import get_repo_credential_value as _impl
+
+    return _impl(repo_key, cred_type)
+
+
+def repo_secret_decrypt(raw: str) -> str:
+    """repo 凭据读侧统一解密（历史明文行原样返回，空串直通）。"""
+    from src.domains.mgmt.user.db import _decrypt_repo_secret as _impl
+
+    return _impl(raw)
+
+
+# 原名别名：调用点只换模块路径，函数名与 `as` 别名一律不动。
+get_credentials = credential_list
+get_gitcode_token = gitcode_token
+get_repo_bot_token = repo_bot_token
+get_repo_bot_token_no_global = repo_bot_token_no_global
+get_repo_token_for = repo_token_for
+get_global_bot_token_for = global_bot_token_for
+_get_global_bot_token = global_gitcode_bot_token
+get_global_github_bot_token = global_github_bot_token
+get_repo_credential_value = repo_credential_value
+_decrypt_repo_secret = repo_secret_decrypt
+get_task_token = task_token
+
+
+# ── 跨域原语：mgmt.user 组织 / 仓库 / host 读取面（2026-11-18 batch 3）───────
+# insight 的 observability/routes、runtime 的 pipeline/im/routes/vcs 共 35 处函数内
+# `from src.domains.mgmt.user.{db,org_db,repo_manager} import <读函数>`，属跨域引
+# 别域内部实现。这里把这一批收敛成 public 具名入口（实现仍只有 mgmt.user 一份）。
+# is_org_personal / get_org_id_by_repo_key 在 mgmt.user.org_db，其余在 mgmt.user.db，
+# github_req 在 mgmt.user.repo_manager。
+
+
+def is_org_personal(org_id) -> bool:
+    """组织是否为个人组织（个人组织不隔离其他个人组织）。"""
+    from src.domains.mgmt.user.org_db import is_org_personal as _impl
+
+    return _impl(org_id)
+
+
+def get_org_id_by_repo_key(repo_key: str) -> str:
+    """按 repo_key 取所属组织 id（无归属返回空串）。"""
+    from src.domains.mgmt.user.org_db import get_org_id_by_repo_key as _impl
+
+    return _impl(repo_key)
+
+
+def get_user_repos(user_id: int, org_id: int = 0) -> list[dict]:
+    """某用户可见的仓库行（user_repos 视角）。"""
+    from src.domains.mgmt.user.db import get_user_repos as _impl
+
+    return _impl(user_id, org_id)
+
+
+def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False) -> list[dict]:
+    """某用户可见的托管仓库（full_name 无前缀、repo_key 带前缀）。"""
+    from src.domains.mgmt.user.db import get_managed_repos as _impl
+
+    return _impl(user_id, org_id, personal_org)
+
+
+def get_host_user_id(repo_key: str):
+    """仓库 host 用户 id（D105 后为 UUID TEXT，按字符串判定）。"""
+    from src.domains.mgmt.user.db import get_host_user_id as _impl
+
+    return _impl(repo_key)
+
+
+def resolve_skill_dispatch(skill_name: str, skill_id: int = 0, repo_key: str = "",
+                           user_id: "str | int" = "", scene_id: str = "",
+                           node_tag: str = "", agent_type: str = "") -> dict:
+    """派发技能解析：skill_id 权威直查 → 名字降级（user→repo→official）。"""
+    from src.domains.mgmt.user.db import resolve_skill_dispatch as _impl
+
+    return _impl(skill_name, skill_id, repo_key, user_id, scene_id, node_tag, agent_type)
+
+
+def get_browser_callback_url() -> str:
+    """浏览器面回调 base url（附件等外链用）。"""
+    from src.domains.mgmt.user.db import get_browser_callback_url as _impl
+
+    return _impl()
+
+
+def github_req(method: str, url: str, token: str = "", body: dict | None = None):
+    """GitHub REST 请求（Bearer token；失败抛异常）。"""
+    from src.domains.mgmt.user.repo_manager import _github_req as _impl
+
+    return _impl(method, url, token, body)
+
+
+# 原名别名：调用点只换模块路径，函数名与 `as` 别名一律不动。
+_github_req = github_req
+
+
+# --- 跨域 import 收敛 batch：mgmt.user.db 转发面（调用方只换模块路径，函数名不动）---
+
+def get_host_detail(repo_key: str) -> Any:
+    """取仓库 host（部署）详情。"""
+    from src.domains.mgmt.user.db import get_host_detail as _impl
+
+    return _impl(repo_key)
+
+
+def set_host_status(repo_key: str, status: str = '', step: str = '', error: str = '') -> Any:
+    """写仓库 host 部署状态。"""
+    from src.domains.mgmt.user.db import set_host_status as _impl
+
+    return _impl(repo_key, status, step, error)
+
+
+def managed_webhook_id(repo_key: str) -> Any:
+    """取仓库绑定的管理 webhook id。"""
+    from src.domains.mgmt.user.db import _get_managed_webhook_id as _impl
+
+    return _impl(repo_key)
+
+
+def is_server_base_url_configured() -> Any:
+    """server base url 是否已配置。"""
+    from src.domains.mgmt.user.db import is_server_base_url_configured as _impl
+
+    return _impl()
+
+
+def get_server_base_url_warning() -> Any:
+    """server base url 配置告警文案（空=无告警）。"""
+    from src.domains.mgmt.user.db import get_server_base_url_warning as _impl
+
+    return _impl()
+
+
+def get_worker_connect_url() -> Any:
+    """worker 连接地址。"""
+    from src.domains.mgmt.user.db import get_worker_connect_url as _impl
+
+    return _impl()
+
+
+def get_business_api_url() -> Any:
+    """业务 API base url。"""
+    from src.domains.mgmt.user.db import get_business_api_url as _impl
+
+    return _impl()
+
+
+def get_url_split_warning() -> Any:
+    """多入口 URL 不一致告警文案（空=无告警）。"""
+    from src.domains.mgmt.user.db import get_url_split_warning as _impl
+
+    return _impl()
+
+
+def invalidate_global_bot_cache() -> Any:
+    """失效全局 bot 用户名缓存。"""
+    from src.domains.mgmt.user.db import _invalidate_global_bot_cache as _impl
+
+    return _impl()
+
+
+def is_known_engine_name(name: str) -> Any:
+    """是否为已登记引擎名。"""
+    from src.domains.mgmt.user.db import is_known_engine_name as _impl
+
+    return _impl(name)
+
+
+def get_skill_object_key(skill_id) -> Any:
+    """取技能对象存储 key。"""
+    from src.domains.mgmt.user.db import get_skill_object_key as _impl
+
+    return _impl(skill_id)
+
+
+def engine_ref_snapshot(runtime_id: int, pool_engine_ids: str = '') -> Any:
+    """引擎引用快照（JSON 友好）。"""
+    from src.domains.mgmt.user.db import engine_ref_snapshot as _impl
+
+    return _impl(runtime_id, pool_engine_ids)
+
+
+def get_host_vcs_username(repo_key: str, provider: str = '') -> Any:
+    """取仓库 host 的 VCS 用户名。"""
+    from src.domains.mgmt.user.db import get_host_vcs_username as _impl
+
+    return _impl(repo_key, provider)
+
+
+def get_global_bot_usernames_for(provider: str) -> Any:
+    """取该 provider 下全局 bot 用户名列表。"""
+    from src.domains.mgmt.user.db import get_global_bot_usernames_for as _impl
+
+    return _impl(provider)
+
+
+def get_runtime_id_by_engine_uid(engine_uid: str) -> Any:
+    """按 engine_uid 取 runtime 主键。"""
+    from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid as _impl
+
+    return _impl(engine_uid)
+
+
+def resolve_official_checker_skill(agent_type: str) -> Any:
+    """解析官方 checker 技能。"""
+    from src.domains.mgmt.user.db import resolve_official_checker_skill as _impl
+
+    return _impl(agent_type)
+
+
+def list_scene_market(q: str = '', category_id: int = 0, sort: str = 'latest', featured_only: int = 0, limit: int = 0, page: int = 1, page_size: int = 20, scope: str = '', repo_key: str = '', user_id: int = 0, cat_l1_id: int = 0, cat_l2_id: int = 0) -> Any:
+    """场景市场列表（分页）。"""
+    from src.domains.mgmt.user.db import list_scene_market as _impl
+
+    return _impl(q, category_id, sort, featured_only, limit, page, page_size, scope, repo_key, user_id, cat_l1_id, cat_l2_id)
+
+
+def get_all_managed_repos() -> Any:
+    """全部托管仓库。"""
+    from src.domains.mgmt.user.db import get_all_managed_repos as _impl
+
+    return _impl()
+
+
+def remove_managed_repo(repo_key: str) -> Any:
+    """删除托管仓库登记行。"""
+    from src.domains.mgmt.user.db import remove_managed_repo as _impl
+
+    return _impl(repo_key)
+
+
+def get_credential(user_id: 'int | str', provider: str, kind: str = '', diagnostics: 'dict | None' = None) -> Any:
+    """取用户凭据（诊断体可选）。"""
+    from src.domains.mgmt.user.db import get_credential as _impl
+
+    return _impl(user_id, provider, kind, diagnostics)
+
+
+def get_skill_hash_by_key(skill_name: str, scope: str, owner_id: str = '') -> Any:
+    """按 name+scope(+owner) 取技能内容 hash。"""
+    from src.domains.mgmt.user.db import get_skill_hash_by_key as _impl
+
+    return _impl(skill_name, scope, owner_id)
+
+
+def get_skill_hashes_by_name_scope(skill_name: str, scope: str) -> Any:
+    """按 name+scope 取多份技能 hash。"""
+    from src.domains.mgmt.user.db import get_skill_hashes_by_name_scope as _impl
+
+    return _impl(skill_name, scope)
+
+
+def get_skill_hash_by_id(skill_id: int) -> Any:
+    """按技能主键取内容 hash。"""
+    from src.domains.mgmt.user.db import get_skill_hash_by_id as _impl
+
+    return _impl(skill_id)
+
+
+def get_skill_content_hash(skill_name: str, scope: str = 'official') -> Any:
+    """取技能内容 hash（默认 official 域）。"""
+    from src.domains.mgmt.user.db import get_skill_content_hash as _impl
+
+    return _impl(skill_name, scope)
+
+
+def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str = '') -> Any:
+    """更新技能内容 hash。"""
+    from src.domains.mgmt.user.db import update_skill_content_hash as _impl
+
+    return _impl(skill_id, content_hash, file_path)
+
+
+def list_temp_uploaded_files_before(hours: int = 24) -> Any:
+    """列出 N 小时前的临时上传文件。"""
+    from src.domains.mgmt.user.db import list_temp_uploaded_files_before as _impl
+
+    return _impl(hours)
+
+
+def hard_delete_uploaded_file(file_id: int) -> Any:
+    """硬删除上传文件记录。"""
+    from src.domains.mgmt.user.db import hard_delete_uploaded_file as _impl
+
+    return _impl(file_id)
+
+
+def invalidate_user_repos(user_id: 'str | int') -> Any:
+    """失效用户仓库缓存。"""
+    from src.domains.mgmt.user.db import invalidate_user_repos as _impl
+
+    return _impl(user_id)
+
+
+# 原名别名：下划线内部名保持可用（调用点零改动）。
+_get_managed_webhook_id = managed_webhook_id
+_invalidate_global_bot_cache = invalidate_global_bot_cache
+
+
+# ── 账号/身份/审计面：跨域（runtime、platform）只读+审计写契约 ──────────────
+# 归属说明：grape_accounts / external_identities / unified_user_mapping / audit_log
+# 均归 mgmt 域；外域只经下列转发函数读取，不再直连 mgmt.auth.* 内部模块。
+def get_grape_account_by_id(user_id: 'str | int') -> Any:
+    """按主键取 grape 账号（dict | None）。"""
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id as _impl
+
+    return _impl(user_id)
+
+
+def get_grape_account_by_username(username: str) -> Any:
+    """按用户名取 grape 账号（dict | None）。"""
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username as _impl
+
+    return _impl(username)
+
+
+def get_user_identities(grape_user_id: 'str | int', strict: bool = False) -> list:
+    """取账号的外部身份绑定列表。"""
+    from src.domains.mgmt.auth.grape_account_db import get_user_identities as _impl
+
+    return _impl(grape_user_id, strict)
+
+
+def list_platform_links(grape_user_id: 'str | int', strict: bool = False) -> list:
+    """取账号的平台登录名绑定列表。"""
+    from src.domains.mgmt.auth.grape_account_db import list_platform_links as _impl
+
+    return _impl(grape_user_id, strict)
+
+
+def resolve_user_id_by_platform_login(provider: str, platform_login: str) -> Any:
+    """按 provider + 平台登录名反查 grape user_id。"""
+    from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login as _impl
+
+    return _impl(provider, platform_login)
+
+
+def has_refresh_token(user_id: 'str | int', provider: str) -> bool:
+    """账号在该 provider 上是否持有 refresh token。"""
+    from src.domains.mgmt.auth.grape_account_db import _has_refresh_token as _impl
+
+    return _impl(user_id, provider)
+
+
+def get_repo_admin_identity(user: dict, repo_key: str) -> Any:
+    """取用户在该仓库的管理员平台身份（dict | None）。"""
+    from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity as _impl
+
+    return _impl(user, repo_key)
+
+
+def log_audit(event_type: str, user_id: 'str | int' = 0, operator_id: 'str | int' = 0,
+              ip: str = '', detail: 'dict | None' = None) -> None:
+    """写审计日志（哈希链）。"""
+    from src.domains.mgmt.auth.audit import log_audit as _impl
+
+    return _impl(event_type, user_id=user_id, operator_id=operator_id, ip=ip, detail=detail)
+
+
+def encrypt(plaintext: str) -> str:
+    """凭据加密（mgmt 持密钥）。"""
+    from src.domains.mgmt.auth.credential_crypto import encrypt as _impl
+
+    return _impl(plaintext)
+
+
+def decrypt(encrypted: str) -> str:
+    """凭据解密（mgmt 持密钥）。"""
+    from src.domains.mgmt.auth.credential_crypto import decrypt as _impl
+
+    return _impl(encrypted)
+
+
+def list_providers() -> list[str]:
+    """已配置的认证 provider 列表。"""
+    from src.domains.mgmt.auth.providers import list_providers as _impl
+
+    return _impl()
+
+
+def invalidate_provider_cache() -> None:
+    """失效 provider 缓存。"""
+    from src.domains.mgmt.auth.providers import invalidate_provider_cache as _impl
+
+    return _impl()
+
+
+# 原名别名：下划线内部名保持可用（调用点零改动）。
+_has_refresh_token = has_refresh_token
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 路由层判定口径复用（内部 routes/*.py → public 转发）
+#
+# 这些符号是 mgmt **Web 路由里的判定/口径函数**，不是查询面。runtime / insight 侧
+# 需要与路由完全同源的实现（否则同一业务出现两套判定 → 静默漂移），故以转发函数
+# 收敛到 public；转发体一律函数内 import，避免内部模块加载期反向引别域 public 成环。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def filter_repos(user_id: int, repos: list[dict], org_id: int = 0) -> list[dict]:
+    """按用户身份 + 组织隔离过滤仓库列表（与 /repos/member 同源）。"""
+    from src.domains.mgmt.routes.repos import _filter_repos as _impl
+
+    return _impl(user_id, repos, org_id=org_id)
+
+
+def check_repo_member(user: dict, repo_key: str) -> None:
+    """校验知识读取权限；无权限抛 HTTPException(403)（会话 token 走仓库作用域）。"""
+    from src.domains.mgmt.routes.knowledge import _check_repo_member as _impl
+
+    return _impl(user, repo_key)
+
+
+def resolve_repo_key(repo: str) -> str:
+    """把前端 owner/repo 解析为 managed 表里实际使用的 repo_key（含平台前缀）。"""
+    from src.domains.mgmt.routes.knowledge import _resolve_repo_key as _impl
+
+    return _impl(repo)
+
+
+async def dispatch_finding_core(exec_id: int, finding_id: str,
+                                title: str = "", description: str = "",
+                                scene_id: str = "", user: dict = None,
+                                dedup_confirmed: bool = False,
+                                dedup_confirmed_by: str = "") -> dict:
+    """派发 autopilot finding（Web 路由与飞书 /finding-dispatch 共用口径）。
+
+    语义错误抛 HTTPException（404/409/400），由调用方捕获转回复卡；返回 JSON 友好 dict。
+    """
+    from src.domains.mgmt.routes.autopilot import _dispatch_finding_core as _impl
+
+    return await _impl(exec_id, finding_id, title=title, description=description,
+                       scene_id=scene_id, user=user,
+                       dedup_confirmed=dedup_confirmed,
+                       dedup_confirmed_by=dedup_confirmed_by)
+
+
+def sync_agent_tags(rid: int) -> None:
+    """engine_capabilities 变更后回写 agent_runtimes.agent_tags（派生缓存，幂等）。
+
+    原实现带一个未使用的 cursor 形参（历史回落残留），public 面不再暴露游标。
+    """
+    from src.domains.mgmt.routes.settings import _sync_agent_tags as _impl
+
+    return _impl(rid, None)
+
+
+def max_content_bytes() -> int:
+    """知识正文大小上限（字节，由 KNOWLEDGE_MAX_CONTENT_BYTES 派生并钳制）。"""
+    from src.domains.mgmt.routes.knowledge import MAX_CONTENT_BYTES as _impl
+
+    return int(_impl)
+
+
+def format_content_limit(limit_bytes: int) -> str:
+    """把字节上限格式化为可读 KB/MB 文案（报错口径统一）。"""
+    from src.domains.mgmt.routes.knowledge import _format_content_limit as _impl
+
+    return _impl(limit_bytes)
+
+
+def content_limit_config_hint() -> str:
+    """知识正文超限报错里追加的配置方法提示文案。"""
+    from src.domains.mgmt.routes.knowledge import _CONTENT_LIMIT_CONFIG_HINT as _impl
+
+    return _impl
+
+
+# 原名别名：调用点只换模块路径，函数名与 as 别名零改动。
+_filter_repos = filter_repos
+_check_repo_member = check_repo_member
+_resolve_repo_key = resolve_repo_key
+_dispatch_finding_core = dispatch_finding_core
+
+
+# ---- 场景/流水线配置（pipeline_config 收口） ----
+
+def pipeline_config(scene_id: str = "default", repo_key: str = "", use_cache: bool = True) -> dict:
+    """取仓库场景的流水线配置（{name, display_name, nodes, onboarding, ...}）。"""
+    from src.domains.mgmt.pipeline_config import get_pipeline_config as _impl
+
+    return _impl(scene_id, repo_key=repo_key, use_cache=use_cache) or {}
+
+
+def scene_list(repo_key: str = "", limit: int = None, offset: int = 0, q: str = "",
+               sort: str = "id", minimal: bool = False) -> list:
+    """列出仓库场景（[{id, name, display_name, nodes, ...}]）。"""
+    from src.domains.mgmt.pipeline_config import get_scenes as _impl
+
+    return _impl(repo_key=repo_key, limit=limit, offset=offset, q=q,
+                 sort=sort, minimal=minimal) or []
+
+
+def scene_by_id(scene_id: str, repo_key: str = "") -> dict:
+    """按 scene_id 取单个仓库场景（缺省回退官方模板）。"""
+    from src.domains.mgmt.pipeline_config import _query_scene_by_id as _impl
+
+    return _impl(scene_id, repo_key=repo_key) or {}
+
+
+# 原名别名：调用点只换模块路径。
+get_pipeline_config = pipeline_config
+get_scenes = scene_list
+_query_scene_by_id = scene_by_id
+
+
+# ---- 出网口原语：mgmt.user.repo_manager 的 GitCode REST 通道（vcs provider 用） ----
+# runtime 的 vcs providers 原先函数内 `from src.domains.mgmt.user import repo_manager
+# as _rm` 直接摸内部 `_req` / `_requests` / `UpstreamAPIError`。这里收敛成 public 具名
+# 入口：转发体在函数内取模块对象再按属性调用，故测试对
+# `src.domains.mgmt.user.repo_manager._req` / `._requests` 的 monkeypatch 契约不变
+# （from-import 旧符号会让 patch 失效并真出网——实测教训）。
+
+
+def gitcode_req(method: str, url: str, token: str = "", body: dict | None = None):
+    """GitCode REST 请求（JSON body；>=400 抛 UpstreamAPIError）。"""
+    from src.domains.mgmt.user.repo_manager import _req as _impl
+
+    return _impl(method, url, token, body)
+
+
+def gitcode_req_form(method: str, url: str, token: str, data):
+    """GitCode REST 请求（x-www-form-urlencoded body；Spring form 形态端点专用）。
+
+    只负责编码与 >=400 抛错，**端点是否需要 form 由调用方判定**。
+    """
+    from src.domains.mgmt.user import repo_manager as _impl
+
+    headers = {"Content-Type": "application/x-www-form-urlencoded",
+               "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = _impl._requests.request(method, url, data=data, headers=headers, timeout=30)
+    if resp.status_code >= 400:
+        raise _impl.UpstreamAPIError(method, url, resp.status_code, resp.text)
+    return resp.json() if resp.text.strip() else {}

@@ -6,7 +6,10 @@ from src.kernel.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
 
 from src.kernel.prompt_builder import build_general_chat_prompt, resolve_task_server_env
 
-from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username as _get_acc
+# 账号查询走 owner 域 public
+def _get_acc(username: str):
+    from src.domains.mgmt import public as _mgmt_acc
+    return _mgmt_acc.grape_account_by_username(username)
 
 from src.kernel.token_service import is_auth_401_error
 
@@ -53,7 +56,6 @@ from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 
-from src.domains.mgmt.user import db as user_db
 
 # 渠道安装表 / 用户映射 / 扫码任务都归 mgmt：SQL 只在该域 public 留一份（任意拓扑原语），
 # 本模块不再持外域表语句，也不再借 engine_wiring 的 runtime 库句柄读 mgmt 表。
@@ -71,6 +73,37 @@ from src.kernel.session_manager import (
 )
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+# 孤儿轮次判定：user 行已落库、agent 行始终没有（执行进程死掉/任务丢失），
+# 超过这个时长就不再报 running，直接判「任务已中断」，避免页面永久"处理中"。
+# 取值来源（2026-11-18 本机库 chat_messages 实测，可用 user→agent 配对样本 n=3）：
+# 轮次时长 27s / 182s / 318s（p50=182s，max=318s≈5.3min）；30min ≈ 5.6× 实测最长轮次。
+# 样本量小 → 必须可配置：GRAPE_CHAT_ORPHAN_TURN_TIMEOUT_SECS（秒），
+# 长任务占比高的部署把它调大即可，无需改代码。
+def _orphan_timeout_secs() -> float:
+    raw = os.environ.get("GRAPE_CHAT_ORPHAN_TURN_TIMEOUT_SECS", "")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 30 * 60.0
+    return value if value > 0 else 30 * 60.0
+
+
+ORPHAN_TURN_TIMEOUT_SECS = 30 * 60.0
+
+
+def _turn_age_secs(created_at: str) -> float | None:
+    """DB 时间戳 → 距今秒数（解析失败/未来时间返回 None，调用方按"未知"处理）。"""
+    try:
+        from src.domains.runtime.engine.health import parse_dt
+        import time as _t
+        ts = parse_dt(str(created_at or ""))
+        if ts is None:
+            return None
+        age = _t.time() - ts
+        return age if age >= 0 else None
+    except Exception:
+        return None
 
 class ChatMessage(BaseModel):
     message: str
@@ -458,7 +491,7 @@ def _build_web_user_info(user: dict, acc: dict | None = None) -> str:
         lines.append(f"  Grape 账号：{username}")
         # 平台登录名（按卡目录顺序，身份域权威）
         try:
-            from src.domains.mgmt.auth.grape_account_db import list_platform_links
+            from src.domains.mgmt.public import list_platform_links
             from src.domains.runtime.vcs.platform_card import (
                 list_vcs_platforms as _lvp, display_name_for_repo_key as _dname)
             # A 批：注入登录名清单取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
@@ -747,9 +780,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
 
     def run_agent():
         nonlocal new_runtime_session_id, _send_error
-        from src.domains.insight.observability.master_usage import MasterRun, new_run_id
+        from src.domains.insight.public import master_run, new_run_id
         # 用量采集（审计 2026-10-17 + P2-1 口径 B）：本机直连 chat 引擎以前不记 token
-        _mu = MasterRun("chat", new_run_id("chat"), engine=backend_name,
+        _mu = master_run("chat", new_run_id("chat"), engine=backend_name,
                         cwd=_get_chat_cwd(user["id"], repo_key, conv_id),
                         session_id=runtime_session_id,
                         attr={"repo_key": repo_key, "scene_id": conv_id,
@@ -1037,9 +1070,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                 return
             collected = []
             worker_error = ""
-            from src.domains.insight.observability.master_usage import MasterRun
+            from src.domains.insight.public import master_run
             # 用量采集（审计 2026-10-17）：SSE 本机直连路径同样漏记 token
-            _mu = MasterRun("chat", chat_task_id, engine=backend_name,
+            _mu = master_run("chat", chat_task_id, engine=backend_name,
                             cwd=_get_chat_cwd(user["id"], repo_key, conv_id),
                             session_id=runtime_session_id,
                             attr={"repo_key": repo_key, "scene_id": conv_id,
@@ -1233,7 +1266,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     _cfg_uid = cfg.get("engine_uid") or ""
     if _cfg_uid and runtime_id:
         try:
-            from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
+            from src.domains.mgmt.public import get_runtime_id_by_engine_uid
             runtime_id = get_runtime_id_by_engine_uid(_cfg_uid) or runtime_id
         except Exception:
             pass
@@ -1327,7 +1360,7 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_
     }
 
     # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token）
-    from src.domains.mgmt.user.db import get_repo_token_with_refresh
+    from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
     bot_token = get_repo_token_with_refresh(repo_key) if repo_key else ""
 
     return {
@@ -1435,7 +1468,7 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     cfg = _get_chat_config(user["id"])
     # Chat 后端可选面：本机直连（默认兜底，engine-selection-design.md §8.2）+ 个人引擎（scope=user，显式选择）
     from src.domains.runtime.engine.instances import instance_name
-    from src.domains.mgmt.user.db import is_known_engine_name
+    from src.domains.mgmt.public import is_known_engine_name
     from src.kernel.session_manager import db, db_lock
     backends = []
     # agent_runtimes / runtime_credentials 归 runtime：必须走归属域具名查询。
@@ -1778,7 +1811,7 @@ async def update_chat_config(body: dict, request: Request,
     _body_uid = body.get("engine_uid")
     if isinstance(_body_uid, str) and _body_uid.strip():
         from src.kernel.engine_uid import is_uid_str
-        from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
+        from src.domains.mgmt.public import get_runtime_id_by_engine_uid
         _u = _body_uid.strip().lower()
         if is_uid_str(_u):
             try:
@@ -1796,7 +1829,7 @@ async def update_chat_config(body: dict, request: Request,
         skill_name = ""
         skill_scope = ""
         if skill_id:
-            from src.domains.mgmt.user.db import get_skill_by_id
+            from src.domains.mgmt.public import get_skill_by_id  # 跨域走 owner public
             _sk = get_skill_by_id(skill_id)
             if _sk:
                 skill_name = _sk.get("skill_name") or ""
@@ -1869,16 +1902,32 @@ async def update_chat_config(body: dict, request: Request,
             log.warning(f"Chat IM: reconcile unified_user_mapping failed: {e}")
 
     # Issue #871 写方向反转：保存/解绑/换 app 直写 grape_t_channel_installation（请求内生效，
-    # 不依赖扫描窗口）；new 模式下写桥自动反向回写 legacy。失败只告警不阻断。
-    # Issue #956：revoke 按「旧渠道类型」匹配安装行（钉钉行走 channel_type=dingtalk，
-    # 不传会用默认 feishu 导致 revoke 落空 → 安装行不 revoked、引擎不归零）
+    # 不依赖扫描窗口）；new 模式下写桥自动反向回写 legacy。
+    # 2026-11-18 失败可见：A2 收尾后安装表是 IM 凭证**唯一真相源**（legacy im_* 三列不再写），
+    # 所以这里写失败必须让用户看到——原实现只 log.warning 仍返回 200，页面提示“配置已更新”、
+    # 徽标却永远“未连接”（本机曾因渠道表缺失 + 库路径错，静默失败数天）。
+    # 口径：保存(sync)失败 / 解绑(revoke)失败 → 502；换 app 时旧行 revoke 失败只告警
+    # （新配置已生效，且下次 old_app_id 已变，重试不会再命中旧行）。
+    _inst_problem = ""
     try:
         from src.domains.runtime.im.engine_wiring import revoke_installation, sync_installation
         _uid = str(user["id"])
         _old_channel = old_channel
-        if explicit_unbind and old_app_id:
-            revoke_installation("user", owner_user_id=_uid, app_id=old_app_id,
-                                       channel_type=_old_channel)
+        # 解绑：优先撤"本次请求仍看得见的旧 app"；若配置已在上一步被清空（old_app_id 为空，
+        # 典型场景 = 上一次解绑 revoke 失败返回 502 后用户重试），退化为按 provider 撤销
+        # 当前仍 active 的安装行 —— 否则重试路径恒跳过 revoke，返回 200 但 bot 继续工作
+        # （架构审查 I3：解绑不可自愈）。
+        _revoke_app = old_app_id
+        if explicit_unbind and not _revoke_app:
+            try:
+                _still_active = _get_provider_installation(user["id"], _old_channel) or {}
+                _revoke_app = str((_still_active.get("config") or {}).get("app_id", "") or "")
+            except Exception:
+                _revoke_app = ""
+        if explicit_unbind and _revoke_app:
+            if not revoke_installation("user", owner_user_id=_uid, app_id=_revoke_app,
+                                       channel_type=_old_channel):
+                _inst_problem = "渠道安装未撤销（revoke 未命中）"
         elif _new_app:
             # Issue #956：写入口透传 channel_type=provider（feishu|dingtalk），
             # 引擎侧按渠道类型路由到对应工厂（#936 DINGTALK 工厂已注册）
@@ -1895,26 +1944,38 @@ async def update_chat_config(body: dict, request: Request,
             elif (provider or "") == "wechat":
                 # Issue #1728：微信 ilink bot_token → config 落 bot_token 语义键
                 _extra = {"bot_token": kwargs.get("im_app_secret", "") or _new_app}
-            sync_installation("user", owner_user_id=_uid, app_id=_new_app,
+            if not sync_installation("user", owner_user_id=_uid, app_id=_new_app,
                                      app_secret=kwargs.get("im_app_secret", "") or "",
                                      channel_type=provider or "feishu",
-                                     extra_config=_extra)
+                                     extra_config=_extra):
+                _inst_problem = "渠道安装未写入（grape_t_channel_installation）"
         if _new_app and old_app_id and old_app_id != _new_app:
-            revoke_installation("user", owner_user_id=_uid, app_id=old_app_id,
-                                       channel_type=_old_channel)
+            if not revoke_installation("user", owner_user_id=_uid, app_id=old_app_id,
+                                       channel_type=_old_channel):
+                log.warning(f"Chat IM: revoke old installation missed (user={user['id']} "
+                            f"app={_safe_im_app_ref(old_app_id, _old_channel)})")
     except Exception as e:
         log.warning(f"Chat IM: sync grape_t_channel_installation failed: {e}")
+        _inst_problem = f"{type(e).__name__}: {e}"
+    if _inst_problem:
+        log.error(f"Chat IM: installation write failed user={user['id']} "
+                  f"provider={_hit_prov}: {_inst_problem}")
+        raise HTTPException(status_code=502, detail={
+            "code": 502,
+            "message": "IM 渠道配置未保存成功：服务端安装记录写入失败，请重试；若持续失败请联系管理员",
+            "reason": _inst_problem,
+        })
 
     # C3 审计：IM 凭证保存/解绑留痕（detail 只记渠道与 app 摘要，绝不落 secret）
     if channel_hit:
         try:
-            from src.domains.mgmt.auth import audit as auth_audit
+            from src.domains.mgmt.public import log_audit as auth_audit
             _ip = ""
             try:
                 _ip = (request.client.host if request.client else "") or ""
             except Exception:
                 _ip = ""
-            auth_audit.log_audit(
+            auth_audit(
                 "im_installation_change",
                 user_id=int(user["id"]),
                 operator_id=int(user["id"]),
@@ -2056,7 +2117,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
         def agent_fn():
             """agent generator — yield 事件 + finally 写 DB"""
             from src.domains.runtime.engine.executor import stream_chat_agent
-            from src.domains.insight.observability.master_usage import MasterRun
+            from src.domains.insight.public import master_run
             _final_text = ""
             _new_sid = ""
             _ctm_error_detail = ""  # R20.8.7: 保存 error 信息用于 401 标记
@@ -2064,7 +2125,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
             # 用量采集（审计 2026-10-17）：本机直连的 chat 引擎以前**一条 token 都不记**。
             # 归属口径 B：无 agent_tasks 行 → task_id 空、主体 run_id=chat_task_id；
             # 采集/写库失败只打日志，绝不影响对话主链路。
-            _mu = MasterRun("chat", chat_task_id, engine=backend_name, cwd=cwd,
+            _mu = master_run("chat", chat_task_id, engine=backend_name, cwd=cwd,
                             attr={"repo_key": repo_key, "scene_id": conv_id,
                                   "agent_type": "chat", "user_id": user["id"],
                                   "engine_id": int(rid or 0)})
@@ -2755,7 +2816,22 @@ def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token
     if has_user and not has_assistant:
         # user 已写但 assistant 未写 → agent 可能仍在另一台机器执行
         # 返回 running 让前端继续等待 + 重连 SSE 轮询 DB（跨机器容灾）
-        conv_id = rows[0][3] if rows else ""
+        #
+        # 孤儿轮次兜底（2026-11-18）：执行进程若中途死掉（ACP 秒死/服务重启），
+        # 这一轮永远不会补 agent 行，恒返 running 会让页面永远显示"处理中"。
+        # 超过 ORPHAN_TURN_TIMEOUT_SECS 仍无 agent 行 → 判中断（error）。
+        # 列序（messages_by_task）：0=id 1=role 2=generate_status 3=content
+        # 4=conversation_id 5=created_at
+        conv_id = (rows[0][4] if rows and len(rows[0]) > 4 else "") or ""
+        age = _turn_age_secs(rows[0][5] if rows and len(rows[0]) > 5 else "")
+        _orphan_timeout = _orphan_timeout_secs()
+        if age is not None and age > _orphan_timeout:
+            log.info(f"chat task status: orphan turn {task_id} aged {int(age)}s "
+                     f"→ error (no agent row)")
+            return {"task_id": task_id, "status": "error", "result": "",
+                    "text": "", "conversation_id": conv_id,
+                    "error": f"任务已中断（超过 {int(_orphan_timeout // 60)} 分钟无回复记录）",
+                    "source": "db"}
         return {"task_id": task_id, "status": "running", "result": "",
                 "text": "",
                 "conversation_id": conv_id, "error": "",
@@ -2901,8 +2977,8 @@ def _persist_wechat_login(user: dict, credentials: dict) -> bool:
     log.info(f"Chat IM: wechat bound app_id={_safe_im_app_ref(bot_id, 'wechat')} user={user['id']}")
     # C3 审计：扫码绑定=凭证写入类操作，必须留痕（detail 只带 app 摘要，绝不含 bot_token）
     try:
-        from src.domains.mgmt.auth import audit as auth_audit
-        auth_audit.log_audit(
+        from src.domains.mgmt.public import log_audit as auth_audit
+        auth_audit(
             "im_installation_change",
             user_id=int(user["id"]), operator_id=int(user["id"]),
             detail={"action": "wechat_qr_bind", "provider": "wechat",

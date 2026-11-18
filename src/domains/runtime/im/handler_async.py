@@ -179,7 +179,7 @@ async def _send_repo_card(ctx: "BotContext", egress: "HandlerEgress", chat_id: s
       - "sent"：卡片已发出（含渠道降级为文本后发出）；
       - "failed"：有仓库但卡片没发出去 → 调用方必须报"发送失败"，不得说没仓库。
     """
-    from src.domains.mgmt.user.db import get_managed_repos
+    from src.domains.mgmt.public import get_managed_repos
     from src.kernel.repo_key import from_repo_key
     repos = get_managed_repos(uid)
     if not repos:
@@ -392,7 +392,7 @@ def _autopilot_user_allowed(uid: int, repo_key: str) -> bool:
     if not uid or not repo_key:
         return False
     try:
-        from src.domains.mgmt.user.db import get_managed_repos
+        from src.domains.mgmt.public import get_managed_repos
         repos = get_managed_repos(uid) or []
         return any(r.get("repo_key") == repo_key for r in repos)
     except Exception as e:
@@ -554,10 +554,10 @@ async def _autopilot_finding_dispatch(ctx, egress, msg_id, uid, exec_id, finding
         await egress.reply_card(ctx, msg_id, "**你没有该仓库的访问权限**")
         return
     try:
-        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+        from src.domains.mgmt.public import get_grape_account_by_id
         _acc = get_grape_account_by_id(uid) or {}
         _uname = _acc.get("username", "")
-        from src.domains.mgmt.routes.autopilot import _dispatch_finding_core
+        from src.domains.mgmt.public import _dispatch_finding_core
         result = await _dispatch_finding_core(exec_id, finding_id, scene_id=scene_id,
                                               user={"id": uid, "username": _uname},
                                               dedup_confirmed=dedup_confirmed,
@@ -1356,12 +1356,11 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
         chat_type = parsed.get("chat_type", "")
         if sender_open_id and chat_type == "p2p":
             try:
-                from src.domains.mgmt.user import db as user_db
                 from src.kernel.session_manager import bind_feishu_identity, get_feishu_open_id
                 uid = get_user_id_by_app_id(ctx.app_id)
                 if uid:
                     # D32: 从 grape_accounts 读 username + nickname
-                    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                    from src.domains.mgmt.public import get_grape_account_by_id
                     user_row = get_grape_account_by_id(uid)
                     username = (user_row or {}).get("username", "") if user_row else ""
                     if username and user_row:
@@ -1630,7 +1629,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
             # 路径 B 仓库需要 user_token 注入 USER_*_TOKEN env → GIT_ASKPASS fallback
             if has_user_id(user_id) and repo_key:
                 try:
-                    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                    from src.domains.mgmt.public import get_grape_account_by_id
                     _feishu_acc = get_grape_account_by_id(user_id)
                     if _feishu_acc and _feishu_acc.get("username"):
                         # D37/S57：provider 由 repo_key 前缀派生（gitee 不再折叠为 gitcode）
@@ -1830,8 +1829,8 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                     issue_number=(conv or {}).get("issue_number") or "")
                 _direct_env["IM_CHAT_ID"] = chat_id
                 # 用量采集（合并保留双方功能）：审计 2026-10-17 起 IM 直连也要记 token（P2-1 口径 B）
-                from src.domains.insight.observability.master_usage import MasterRun, new_run_id
-                _mu = MasterRun("im", new_run_id("im"), engine=backend, cwd=wsd,
+                from src.domains.insight.public import master_run, new_run_id
+                _mu = master_run("im", new_run_id("im"), engine=backend, cwd=wsd,
                                 session_id=oc_sid,
                                 attr={"repo_key": repo_key, "scene_id": chat_id or "",
                                       "agent_type": "chat", "user_id": int(user_id or 0),

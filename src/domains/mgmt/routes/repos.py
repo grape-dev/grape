@@ -52,7 +52,7 @@ class MigrateRepoBody(BaseModel):
 # 又让「无任何线索」的托管请求默认打到 github（2026-11-14 gitee 仓库被当 GitHub 托管的根因之一）。
 def _default_token_provider_order() -> tuple[str, ...]:
     try:
-        from src.domains.platform.capabilities import hosting_providers
+        from src.domains.platform.public import hosting_providers
 
         return tuple(sorted(hosting_providers()))
     except Exception:
@@ -177,7 +177,7 @@ _HOOKS_404_DELETED_PROVIDERS = frozenset({"gitcode"})
 # 不能兜底成别的平台（否则 webhook 建到错误平台、repo_key 前缀错）。
 def _hosting_implemented_providers() -> frozenset:
     """D109 判据收敛：统一走能力视图（与 _MODULES 声明逐字节等价，test_d109_dual_predicate 对拍）。"""
-    from src.domains.platform.capabilities import hosting_providers
+    from src.domains.platform.public import hosting_providers
     return hosting_providers()
 
 # 仓库平台目录 = 平台卡（卡驱动，2026-11-12）：不再在 routes 里二分平台字面量。
@@ -187,7 +187,7 @@ def _hosting_implemented_providers() -> frozenset:
 def _repo_listable_providers() -> set:
     """可列仓平台集合 = 在册平台卡目录。"""
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        from src.domains.runtime.public import list_vcs_platforms
         return set(list_vcs_platforms())
     except Exception as e:
         log.warning(f"repo platform directory unavailable: {e}")
@@ -339,7 +339,7 @@ def _platform_api_root(provider: str, owner: str, repo: str) -> str:
     - 其余（github 方言：gitcode/gitee/github）：`{api_base}/repos/{owner}/{repo}`
     """
     import urllib.parse
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     card = get_platform_card(provider)
     if card is None:
         raise ValueError(f"平台卡缺失: {provider}")
@@ -359,7 +359,7 @@ def _platform_api_get(provider: str, token: str, url: str, timeout: int = 5):
     """按卡 api_auth 施加凭据并发 GET：query_token→access_token 查询参数；
     private_token→PRIVATE-TOKEN 头；其余→Bearer 头。"""
     import urllib.parse, urllib.request
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     card = get_platform_card(provider)
     auth = ((card.api_auth if card else "") or "").lower()
     headers = {"Accept": "application/json", "User-Agent": "Grape-DevOps"}
@@ -406,7 +406,7 @@ def _probe_stale_repos(user_id):
         return
 
     # 平台卡目录：未在册平台不探活（不判定=不删数据）
-    from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+    from src.domains.runtime.public import list_vcs_platforms
     try:
         _listable = set(list_vcs_platforms())
     except Exception:
@@ -589,7 +589,7 @@ def _start_stale_probe_async(user: dict, providers: list[str]) -> None:
     - token 解析下移到 _probe_stale_repos（按每个 repo_key 的 provider 各自取）。
     """
     import time as _time
-    from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+    from src.domains.runtime.public import list_vcs_platforms
     try:
         _listable = set(list_vcs_platforms())
     except Exception:
@@ -682,14 +682,14 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     # 口径乙（2026-11-18）：坏平台仓库一律不进返回列表，但每个 200 出口都必须带
     # hint + _credential_broken —— member / sync 同口径，禁止静默剔除。
     # 平台被本实例关闭（enabled=0）时用户面根本不存在该平台，别把它写进提示条。
-    from src.domains.platform.visibility import is_platform_visible as _is_platform_visible
+    from src.domains.platform.public import is_platform_visible as _is_platform_visible
     _notice = _credential_broken_notice(
         {p for p in _broken_providers if _is_platform_visible(p)}, _broken_reason)
 
     # 用户面可见性（2026-11-15 方案甲）：真源=平台行 enabled。disabled 平台对用户面不提供，
     # 内网/脚本面照旧可用（托管/建仓/bot/webhook 不经这里）。判定必须排在"无绑定早退"之前，
     # 否则"已禁用"会被解释成"你没绑定"（线上实跑抓到过的顺序 bug）。
-    from src.domains.platform.visibility import is_platform_visible
+    from src.domains.platform.public import is_platform_visible
     if provider and not is_platform_visible(provider):
         raise HTTPException(status_code=403, detail={
             "code": 403, "error_code": "PLATFORM_DISABLED",
@@ -930,7 +930,7 @@ def sync_repos(user: dict = Depends(require_org_member)):
                     if i.get("provider") in _listable and not i.get("token_usable", True)}
     _broken_reason_sync = {i["provider"]: str(i.get("credential_error") or "")
                            for i in _links if i.get("provider") in _broken_sync}
-    from src.domains.platform.visibility import is_platform_visible as _is_platform_visible_sync
+    from src.domains.platform.public import is_platform_visible as _is_platform_visible_sync
     _notice_sync = _credential_broken_notice(
         {p for p in _broken_sync if _is_platform_visible_sync(p)}, _broken_reason_sync)
     if not _providers:
@@ -1029,7 +1029,7 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
     # B 批（2026-11-13）：平台无关——登录名走 provider.verify_token（卡驱动 /user），
     # 存在性走 VcsApiClient.get_repo_info（卡驱动 repo 端点），零平台名分支。
     from src.kernel.token_resolver import create_provider
-    from src.domains.runtime.vcs.api_client import VcsApiClient
+    from src.domains.runtime.public import VcsApiClient
     try:
         _uinfo = create_provider(provider).verify_token(api_token)
         login = str((_uinfo or {}).get("login", "") or "") if isinstance(_uinfo, dict) else ""
@@ -1463,7 +1463,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
 
     if not api_token:
         # B 批：文案按平台卡名派生（零平台分支，原 GitHub/GitCode 两套文案合并）
-        from src.domains.runtime.vcs.platform_card import get_platform_card as _gpc_tok
+        from src.domains.runtime.public import get_platform_card as _gpc_tok
         _pc_tok = _gpc_tok(provider)
         _pname_tok = ((_pc_tok.name if _pc_tok is not None else "") or provider)
         raise HTTPException(status_code=400, detail={
@@ -1655,7 +1655,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
     from src.domains.mgmt.user.repo_manager import _check_collaborator_admin, _req
     # B 批（2026-11-13）：v5 API 基址从平台卡派生（gitee/gitcode 同方言不同域）；
     # 原硬编码 https://gitcode.com/api/v5 会让 gitee 仓的预检打错平台。
-    from src.domains.runtime.vcs.platform_card import get_platform_card as _gpc_host
+    from src.domains.runtime.public import get_platform_card as _gpc_host
     _pc_host = _gpc_host(provider)
     _v5_base = ((_pc_host.api_base if _pc_host is not None else "")
                 or "https://gitcode.com/api/v5").rstrip("/")
@@ -1897,7 +1897,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
             raise
         _self_ok = False
         try:
-            from src.domains.runtime.vcs.api_client import VcsApiClient
+            from src.domains.runtime.public import VcsApiClient
             _info = VcsApiClient(_provider, api_token, owner, repo).get_repo_info() or {}
             _self_ok = not str(_info.get("error", "") or "")
         except Exception as _ve:
@@ -2153,7 +2153,7 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
 
     # 确定 provider（B 批：bot token 列名走平台卡派生，零平台分支）
     _provider_str, _, _ = parse_repo_key(repo_key)
-    from src.domains.runtime.vcs.platform_card import get_platform_card as _get_pc
+    from src.domains.runtime.public import get_platform_card as _get_pc
     _pc = _get_pc(_provider_str)
     _bot_col = getattr(_pc, "token_storage_field", "") if _pc is not None else ""
     _bot_col = _bot_col or f"bot_{_provider_str}_token"
@@ -2384,7 +2384,7 @@ def _ensure_vcs_maintainer(user: dict, provider: str, owner: str, repo_name: str
     """
     from src.domains.mgmt.user.repo_manager import (
         vcs_user_login, vcs_user_permission, _RateLimitedError)
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
 
     _pc = get_platform_card(provider)
     _pname = ((_pc.name if _pc is not None else "") or provider)
@@ -2765,7 +2765,7 @@ def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_curren
     JWT / API Key 用户维持现状（依赖 x-token-scope 的 user 通道）。
     """
     from src.kernel.repo_key import split_owner_repo, to_repo_key
-    from src.domains.runtime.engine.service import load_project_info
+    from src.domains.runtime.public import load_project_info
     # 前缀必须解析真实平台：裸 to_repo_key 默认 gitcode:，gitee/github 托管仓会读错 key
     # （2026-11-14 实锤：gitee:yang-aiwu-new/... 的 project-info 返回 gitcode: 前缀 + 空基线）
     from src.domains.mgmt.user.db import resolve_managed_repo_key
@@ -2869,14 +2869,14 @@ def _transport_providers() -> frozenset:
 
 def _clone_host(provider: str) -> str:
     """按平台卡取 clone/web 域名（无卡时回退 provider key 自身）。"""
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     card = get_platform_card(provider)
     return ((card.host if card and card.host else "") or provider or "").strip()
 
 
 def _provider_display(provider: str) -> str:
     """平台展示名（卡 name；无卡回退 provider key）。"""
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     card = get_platform_card(provider)
     return ((card.name if card and card.name else "") or provider or "").strip()
 

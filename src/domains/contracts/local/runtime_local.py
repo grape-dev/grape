@@ -319,7 +319,7 @@ class RuntimeServiceLocal(RuntimeService):
         key = out.pop("file_path", "") or ""
         if key:
             try:
-                from src.domains.runtime.storage import get_storage
+                from src.domains.runtime.public import get_storage
 
                 storage = get_storage()
                 if storage is not None:

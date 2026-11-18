@@ -1576,11 +1576,26 @@ def main():
                                    for t in _tpl_list if t.get("template_id")],
                         template_engines=_tpl_engines,
                     )
-                    log.info(f"sandbox provider reported: provider_id={_rep.get('provider_id', '')} "
-                             f"templates={_rep.get('templates_upserted', 0)} "
-                             f"engines_detected={_rep.get('engines_detected', 0)}")
+                    # The platform answers {"status": "ok"} on success. Judging by
+                    # "non-empty dict" alone would count a degraded 200 body as a
+                    # stored report; a missing status keeps the old meaning.
+                    if _rep and _rep.get("status", "ok") == "ok":
+                        log.info(f"sandbox provider reported: provider_id={_rep.get('provider_id', '')} "
+                                 f"templates={_rep.get('templates_upserted', 0)} "
+                                 f"engines_detected={_rep.get('engines_detected', 0)}")
+                    else:
+                        # The client swallows 5xx/timeout into an empty dict, so this used
+                        # to log "reported: templates=0" as if it had worked while the
+                        # platform stored nothing and no retry was scheduled. Count an
+                        # empty response as pending so _probe_retry_loop re-reports with
+                        # backoff until the data really lands.
+                        log.warning("sandbox provider report did not succeed (empty or "
+                                    "non-ok response), counted as pending: "
+                                    f"templates={len(_tpl_list)} engines={len(_tpl_engines)}")
+                        _failed += 1
                 except Exception as _re:
                     log.warning(f"sandbox provider report failed: {_re}")
+                    _failed += 1
             return _failed
 
         # 启动先跑一轮（注册后，不阻塞注册——本函数含建箱探测，耗时长）
@@ -1613,8 +1628,10 @@ def main():
                         _backoff = _probe_max_backoff
                     else:
                         _backoff = min(_backoff * 2, _probe_max_backoff)
-                    log.info(f"[engine-probe] retry scheduled: {_pending} template(s) "
-                             f"still failing, next retry in {_backoff}s"
+                    # _pending counts both unprobed templates and whole-report
+                    # failures, so the log must not call every unit a template.
+                    log.info(f"[engine-probe] retry scheduled: {_pending} pending item(s) "
+                             f"(unprobed templates or failed reports), next retry in {_backoff}s"
                              + (f" (stalled {_stall_rounds} rounds, max backoff)" if _stall_rounds >= 3 else ""))
                 else:
                     _backoff = 120

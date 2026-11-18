@@ -242,10 +242,10 @@ def create_whitelist(
         raise HTTPException(status_code=400, detail=str(e))
 
     # 失效缓存
-    from src.domains.runtime.agents.sandbox.whitelist import invalidate_cache
+    from src.domains.runtime.public import invalidate_cache
     invalidate_cache(body.backend_name)
-    from src.domains.runtime.agents.sandbox.isolation.network import _WhitelistCache
-    _WhitelistCache.get().refresh()
+    from src.domains.runtime.public import refresh_whitelist_cache
+    refresh_whitelist_cache()
     log.info(f"whitelist rule created: backend={body.backend_name} domain={body.domain} method={method}")
     _admin_write_audit(request, user, "sandbox_whitelist_created", {
         "backend_name": body.backend_name, "domain": body.domain,
@@ -287,10 +287,10 @@ def update_whitelist(
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
 
-    from src.domains.runtime.agents.sandbox.whitelist import invalidate_cache
+    from src.domains.runtime.public import invalidate_cache
     invalidate_cache(body.backend_name)
-    from src.domains.runtime.agents.sandbox.isolation.network import _WhitelistCache
-    _WhitelistCache.get().refresh()
+    from src.domains.runtime.public import refresh_whitelist_cache
+    refresh_whitelist_cache()
     log.info(f"whitelist rule updated: id={rule_id}")
     _admin_write_audit(request, user, "sandbox_whitelist_updated", {
         "rule_id": rule_id, "backend_name": body.backend_name,
@@ -319,10 +319,10 @@ def delete_whitelist(
         db.execute("DELETE FROM grape_t_engine_sandbox_whitelist WHERE id=?", (rule_id,))
         db.commit()
 
-    from src.domains.runtime.agents.sandbox.whitelist import invalidate_cache
+    from src.domains.runtime.public import invalidate_cache
     invalidate_cache(backend_name)
-    from src.domains.runtime.agents.sandbox.isolation.network import _WhitelistCache
-    _WhitelistCache.get().refresh()
+    from src.domains.runtime.public import refresh_whitelist_cache
+    refresh_whitelist_cache()
     log.info(f"whitelist rule deleted: id={rule_id} backend={backend_name}")
     _admin_write_audit(request, user, "sandbox_whitelist_deleted", {
         "rule_id": rule_id, "backend_name": backend_name})

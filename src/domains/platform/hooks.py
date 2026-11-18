@@ -84,7 +84,7 @@ def _has_pat(session, user_id: str, repo_provider: str) -> bool:
 def _active_identities(user_id: str) -> list[str]:
     """该用户仍活跃的登录渠道（status ∈ {1,4}，与前端绑定列表同口径）。"""
     try:
-        from src.domains.mgmt.auth.grape_account_db import get_user_identities
+        from src.domains.mgmt.public import get_user_identities
 
         return [str(i.get("provider")) for i in (get_user_identities(str(user_id)) or []) if i.get("provider")]
     except Exception:
@@ -111,7 +111,7 @@ def _kick_user_projects_refresh(user_id: str) -> None:
     """
     def _do():
         try:
-            from src.domains.mgmt.user.db import invalidate_user_repos
+            from src.domains.mgmt.public import invalidate_user_repos
 
             # P1-3：grape_accounts 主键自 D105 起是 UUIDv7 字符串，int() 必抛 ValueError
             # 并被下面 except 吞成 warning —— 全量 UUID 用户的关系变更刷新从未执行。

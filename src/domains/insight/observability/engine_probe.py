@@ -48,7 +48,7 @@ def _probe_engine(engine_name: str, cli_path: str) -> dict:
     # （worker 侧同函数，已实测）——engine_probe 曾因缺此分支每 10 分钟对本机行写出
     # skip "unknown engine: aishell-dsh"，可观测页恒显「跳过」（2026-11-06 实测）。
     if engine_name == "aishell-dsh":
-        from src.domains.runtime.engine.agent import _probe_aishell_dsh_acp
+        from src.domains.runtime.public import _probe_aishell_dsh_acp
         return _probe_aishell_dsh_acp(cli_path)
 
     cmd = _PROBE_COMMANDS.get(engine_name)
@@ -199,7 +199,7 @@ def _probe_loop():
         with _probe_lock:
             _probing = True
         try:
-            from src.domains.runtime.engine.executor import discover_backends
+            from src.domains.runtime.public import discover_backends
             engines = discover_backends()
             for eng in engines:
                 if not eng.get("installed"):
@@ -244,7 +244,7 @@ def get_probe_results() -> dict:
 
 def probe_now(engine_name: str = "") -> dict:
     """手动触发一次探测（可选：只探测指定引擎）。"""
-    from src.domains.runtime.engine.executor import discover_backends
+    from src.domains.runtime.public import discover_backends
     engines = discover_backends()
     for eng in engines:
         if engine_name and eng["name"] != engine_name:
@@ -267,7 +267,7 @@ def probe_all_now():
     with _probe_lock:
         _probing = True
     try:
-        from src.domains.runtime.engine.executor import discover_backends
+        from src.domains.runtime.public import discover_backends
         engines = discover_backends()
         for eng in engines:
             if not eng.get("installed"):

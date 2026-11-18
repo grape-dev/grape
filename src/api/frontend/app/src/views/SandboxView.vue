@@ -74,7 +74,7 @@
               :style="llmCredReady === false ? 'background:#fef3c7;color:#92400e' : 'background:var(--bg);color:var(--t3)'"
               :title="t('sbx.llm_route_hint')"
             >
-              <template>🤖 {{ t('sbx.llm_from') }}{{ llmCredSourceLabel }}{{ llmCredReady === false ? t('sbx.llm_not_ready') : '' }}<a v-if="llmCredReady === false" :href="(selectedProvider.scope === 'user') ? '#account/llm' : '#settings/llm'" style="color: var(--a); margin-left: 6px" :title="t('sbx.go_config')">{{ t('sbx.go_config') }} ↗</a></template>
+              <span>🤖 {{ t('sbx.llm_from') }}{{ llmCredSourceLabel }}{{ llmCredReady === false ? t('sbx.llm_not_ready') : '' }}<a v-if="llmCredReady === false" :href="(selectedProvider.scope === 'user') ? '#account/llm' : '#settings/llm'" style="color: var(--a); margin-left: 6px" :title="t('sbx.go_config')">{{ t('sbx.go_config') }} ↗</a></span>
             </div>
             <button
               v-if="scanCapable !== false"
@@ -97,31 +97,42 @@
           <table style="width: 100%; font-size: 11px; border-collapse: collapse">
             <thead>
               <tr style="border-bottom: 2px solid var(--b); text-align: left">
-                <th style="padding: 8px">{{ t('sbx.name') }}</th>
-                <th style="padding: 8px">Template ID</th>
-                <th style="padding: 8px">Alias</th>
-                <th style="padding: 8px">{{ t('sbx.description') }}</th>
-                <th style="padding: 8px">{{ t('sbx.engines') }}</th>
-                <th style="padding: 8px">Preinstalled</th>
-                <th style="padding: 8px">Disk MB</th>
-                <th style="padding: 8px">{{ t('sbx.status_enabled') }}</th>
-                <th style="padding: 8px">Last Check</th>
-                <th style="padding: 8px">{{ t('sbx.actions') }}</th>
+                <th class="sbx-td">{{ t('sbx.name') }}</th>
+                <th class="sbx-td">Template ID</th>
+                <th class="sbx-td">Alias</th>
+                <th class="sbx-td">{{ t('sbx.description') }}</th>
+                <th class="sbx-td">{{ t('sbx.engines') }}</th>
+                <th class="sbx-td">Preinstalled</th>
+                <th class="sbx-td">Disk MB</th>
+                <th class="sbx-td">{{ t('sbx.status_enabled') }}</th>
+                <th class="sbx-td">Last Check</th>
+                <th class="sbx-td">{{ t('sbx.actions') }}</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="tpl in templates" :key="tpl.id" style="border-bottom: 1px solid var(--b)">
                 <td style="padding: 8px; font-weight: 600" :title="tpl.name">{{ tpl.name }} <span style="font-size: 9px; color: var(--t3); font-weight: 400" :title="t('sbx.tpl_dbid_tip')">#{{ tpl.id }}</span></td>
                 <td style="padding: 8px; font-family: monospace; font-size: 10px" :title="tpl.template_id">{{ truncate(tpl.template_id, 18) }}</td>
-                <td style="padding: 8px" :title="tpl.alias || '—'">{{ tpl.alias || '—' }}</td>
+                <td class="sbx-td" :title="tpl.alias || '—'">{{ tpl.alias || '—' }}</td>
                 <td style="padding: 8px; font-size: 10px; max-width: 120px; overflow: hidden; text-overflow: ellipsis" :title="tpl.description">{{ truncate(tpl.description, 20) }}</td>
-                <td style="padding: 8px">
-                  <span v-if="parseEngines(tpl) !== '—'" style="padding: 2px 6px; border-radius: 4px; background: #eef; border: 1px solid #ccd; font-size: 10px">{{ parseEngines(tpl) }}</span>
+                <td class="sbx-td">
+                  <span
+                  v-if="parseEngines(tpl) !== '—'"
+                  style="
+                    padding: 2px 6px;
+                    border-radius: 4px;
+                    font-size: 10px;
+                    color: var(--t);
+                    background: color-mix(in srgb, var(--a) 10%, transparent);
+                    border: 1px solid color-mix(in srgb, var(--a) 30%, transparent);
+                  "
+                  >{{ parseEngines(tpl) }}</span
+                >
                   <span v-else style="color: var(--t3); font-size: 10px">—</span>
                 </td>
                 <td style="padding: 8px; font-size: 10px; max-width: 100px; overflow: hidden; text-overflow: ellipsis" :title="tpl.preinstalled">{{ truncate(tpl.preinstalled, 15) }}</td>
-                <td style="padding: 8px">{{ tpl.disk_size_mb || 0 }}</td>
-                <td style="padding: 8px"><span :style="{ color: tpl.enabled ? '#16a34a' : '#dc2626' }">{{ tpl.enabled ? '✅' : '❌' }}</span></td>
+                <td class="sbx-td">{{ tpl.disk_size_mb || 0 }}</td>
+                <td class="sbx-td"><span :style="{ color: tpl.enabled ? '#16a34a' : '#dc2626' }">{{ tpl.enabled ? '✅' : '❌' }}</span></td>
                 <td style="padding: 8px; font-size: 10px; color: var(--t3)">{{ tpl.last_check_status || '—' }}</td>
                 <td style="padding: 8px; display: flex; gap: 3px; flex-wrap: wrap">
                   <button class="bt bt-o bt-xs" :title="t('sbx.tpl_edit_tip')" @click="openEditTemplate(tpl)">✏ {{ t('sbx.edit') }}</button>
@@ -137,11 +148,11 @@
     </div>
 
     <!-- ============ 弹窗：新增/编辑 Provider ============ -->
-    <div v-if="showProviderDialog" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.4); display: flex; align-items: center; justify-content: center; z-index: 9999" @click.self="showProviderDialog = false">
+    <div v-if="showProviderDialog" class="sbx-modal" @click.self="showProviderDialog = false">
       <div class="apple-card" style="padding: 24px; width: 440px; max-width: 90vw; max-height: 85vh; overflow-y: auto">
         <h2 style="font-size: 15px; margin-bottom: 16px">{{ editingProvider ? (t('sbx.dialog_edit_title')) : (t('sbx.dialog_add_title')) }}</h2>
         <div style="margin-bottom: 10px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('sbx.name') }}</label>
+          <label class="sbx-label">{{ t('sbx.name') }}</label>
           <!-- Provider 名=凭据名（Worker 设备页改凭据名全链跟随），编辑态只读展示 -->
           <input
             v-model="providerForm.name"
@@ -151,35 +162,35 @@
           >
         </div>
         <div style="margin-bottom: 10px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">Platform</label>
-          <select v-model="providerForm.platform" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px" :disabled="!!editingProvider">
+          <label class="sbx-label">Platform</label>
+          <select v-model="providerForm.platform" class="sbx-input" :disabled="!!editingProvider">
             <option v-for="p in platforms" :key="p.platform" :value="p.platform">{{ p.platform }}</option>
           </select>
         </div>
         <div style="margin-bottom: 10px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">API URL</label>
-          <input v-model="providerForm.endpoint" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px" placeholder="https://cube.example.com">
+          <label class="sbx-label">API URL</label>
+          <input v-model="providerForm.endpoint" class="sbx-input" placeholder="https://cube.example.com">
         </div>
         <div style="margin-bottom: 10px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">API Key {{ editingProvider ? '(' + (t('sbx.keep_empty')) + ')' : '' }}</label>
-          <input v-model="providerForm.api_key" type="password" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px">
+          <label class="sbx-label">API Key {{ editingProvider ? '(' + (t('sbx.keep_empty')) + ')' : '' }}</label>
+          <input v-model="providerForm.api_key" type="password" class="sbx-input">
         </div>
         <div style="margin-bottom: 10px">
           <!-- 级别只读展示——范围在凭据上改（重新生成凭据），平台编辑只管接入配置 -->
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('sbx.scope_ro_label') }}</label>
+          <label class="sbx-label">{{ t('sbx.scope_ro_label') }}</label>
           <div style="padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--bg); font-size: 12px; color: var(--t3)" :title="t('sbx.scope_hint')">
             {{ providerForm.scope_level === 'global' ? (t('sbx.scope_global_label')) : providerForm.scope_level === 'repo' ? (t('sbx.scope_repo_label')) : (t('sbx.scope_user_label')) }}
           </div>
         </div>
         <div style="margin-bottom: 10px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">Max Sandboxes</label>
-          <input v-model.number="providerForm.max_sandboxes" type="number" min="1" max="20" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px">
+          <label class="sbx-label">Max Sandboxes</label>
+          <input v-model.number="providerForm.max_sandboxes" type="number" min="1" max="20" class="sbx-input">
         </div>
         <!-- 动态平台专属字段 -->
         <div v-for="group in currentPlatformSchema.groups" :key="group.title" style="border-top: 1px solid var(--b); padding-top: 10px; margin-top: 10px">
-          <label v-if="group.title" style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ group.title }}</label>
+          <label v-if="group.title" class="sbx-label">{{ group.title }}</label>
           <div v-for="field in group.fields" :key="field.name" style="margin-bottom: 8px">
-            <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">
+            <label class="sbx-label">
               {{ field.label }}<span v-if="field.required" style="color: #dc2626">*</span>
             </label>
             <input
@@ -187,26 +198,26 @@
               v-model="providerForm[field.name]"
               :placeholder="field.placeholder"
               autocomplete="off"
-              style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 12px"
+              class="sbx-input sm"
             >
             <textarea
               v-else-if="field.type === 'textarea'"
               v-model="providerForm[field.name]"
               :placeholder="field.placeholder"
               autocomplete="off"
-              style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 11px; height: 80px; font-family: monospace"
+              class="sbx-input mono ta"
             ></textarea>
             <input v-else-if="field.type === 'bool'" type="checkbox" v-model="providerForm[field.name]">
             <input
               v-else-if="field.type === 'number'"
               v-model.number="providerForm[field.name]"
               type="number"
-              style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 12px"
+              class="sbx-input sm"
             >
             <select
               v-else-if="field.type === 'select'"
               v-model="providerForm[field.name]"
-              style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 12px"
+              class="sbx-input sm"
             >
               <option v-for="opt in field.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
@@ -220,12 +231,12 @@
     </div>
 
     <!-- ============ 弹窗：沙箱启动失败原因 ============ -->
-    <div v-if="sandboxErrorModal.visible" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.4); display: flex; align-items: center; justify-content: center; z-index: 9999" @click.self="sandboxErrorModal.visible = false">
+    <div v-if="sandboxErrorModal.visible" class="sbx-modal" @click.self="sandboxErrorModal.visible = false">
       <div style="background: var(--c); border-radius: 14px; padding: 20px; max-width: 560px; width: 90%; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15)">
         <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 4px">{{ t('sbx.setup_error_title') }}</h3>
         <div style="font-size: 10px; color: var(--t3); font-family: monospace; margin-bottom: 10px; word-break: break-all" :title="sandboxErrorModal.sandboxId">{{ sandboxErrorModal.sandboxId }}</div>
         <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #b91c1c; line-height: 1.6; max-height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; user-select: text">{{ sandboxErrorModal.error }}</div>
-        <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px">
+        <div class="sbx-foot">
           <button class="bt bt-o bt-s" @click="copySandboxError()">📋 {{ t('sbx.copy') }}</button>
           <button class="bt bt-p bt-s" @click="sandboxErrorModal.visible = false">{{ t('sbx.close') }}</button>
         </div>
@@ -233,46 +244,46 @@
     </div>
 
     <!-- ============ 弹窗：新增/编辑模板 ============ -->
-    <div v-if="showTemplateDialog" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.4); display: flex; align-items: center; justify-content: center; z-index: 9999; padding: 20px" @click.self="showTemplateDialog = false">
+    <div v-if="showTemplateDialog" class="sbx-modal sbx-modal--pad" @click.self="showTemplateDialog = false">
       <div class="apple-card" style="padding: 24px; width: 400px; max-width: 90vw; max-height: calc(100vh - 40px); overflow-y: auto">
         <h2 style="font-size: 14px; margin-bottom: 12px">{{ editingTemplate ? (t('sbx.tpl_edit')) : (t('sbx.tpl_add')) }}</h2>
         <div v-if="editingTemplate" style="font-size: 10px; color: #92400e; background: #fef3c7; border: 1px solid #fde68a; border-radius: 6px; padding: 6px 10px; margin-bottom: 12px; line-height: 1.6" :title="t('sbx.tpl_rename_hint')">
           ⚠ {{ t('sbx.tpl_rename_full') }}
         </div>
         <div style="margin-bottom: 8px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('sbx.name') }}</label>
-          <input v-model="templateForm.name" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px">
+          <label class="sbx-label">{{ t('sbx.name') }}</label>
+          <input v-model="templateForm.name" class="sbx-input">
         </div>
         <div style="margin-bottom: 8px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">Template ID</label>
+          <label class="sbx-label">Template ID</label>
           <input
             v-model="templateForm.template_id"
             :disabled="!!editingTemplate"
-            style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px"
+            class="sbx-input"
             :style="editingTemplate ? 'color:var(--t3);cursor:not-allowed;background:var(--bg)' : ''"
             :title="editingTemplate ? (t('sbx.tplid_immutable')) : ''"
           >
         </div>
         <div style="margin-bottom: 8px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">Alias</label>
-          <input v-model="templateForm.alias" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px">
+          <label class="sbx-label">Alias</label>
+          <input v-model="templateForm.alias" class="sbx-input">
         </div>
         <div style="margin-bottom: 8px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('sbx.description') }}</label>
-          <input v-model="templateForm.description" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px">
+          <label class="sbx-label">{{ t('sbx.description') }}</label>
+          <input v-model="templateForm.description" class="sbx-input">
         </div>
         <div style="margin-bottom: 8px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">Disk Size (MB)</label>
-          <input v-model.number="templateForm.disk_size_mb" type="number" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px">
+          <label class="sbx-label">Disk Size (MB)</label>
+          <input v-model.number="templateForm.disk_size_mb" type="number" class="sbx-input">
         </div>
         <div style="margin-bottom: 8px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">Preinstalled (JSON)</label>
-          <input v-model="templateForm.preinstalled" style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 12px; font-family: monospace" placeholder='{"python":"3.14","git":"2.39.5"}'>
+          <label class="sbx-label">Preinstalled (JSON)</label>
+          <input v-model="templateForm.preinstalled" class="sbx-input sm mono" placeholder='{"python":"3.14","git":"2.39.5"}'>
         </div>
         <div style="margin-bottom: 8px">
-          <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('sbx.engines') }}</label>
+          <label class="sbx-label">{{ t('sbx.engines') }}</label>
           <div v-if="availableEngines.length" style="border: 1px solid var(--b); border-radius: 8px; overflow: hidden">
-            <div style="display: grid; grid-template-columns: 1fr 88px 88px; padding: 5px 12px; background: var(--bg); font-size: 10px; color: var(--t3); border-bottom: 1px solid var(--b)">
+            <div style="display: grid; grid-template-columns: 1fr 88px; padding: 5px 12px; background: var(--bg); font-size: 10px; color: var(--t3); border-bottom: 1px solid var(--b)">
               <span></span>
               <span style="text-align: center">{{ t('sbx.bind_header') }}</span>
             </div>
@@ -291,7 +302,7 @@
           <div v-else style="font-size: 11px; color: var(--t3)">{{ t('sbx.loading_engines') }}</div>
           <div style="font-size: 10px; color: var(--t3); margin-top: 4px; line-height: 1.5">{{ t('sbx.bind_full_hint') }}</div>
         </div>
-        <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px">
+        <div class="sbx-foot">
           <button class="bt bt-o bt-s" @click="showTemplateDialog = false">{{ t('sbx.cancel') }}</button>
           <button class="bt bt-o bt-s" style="background: var(--a); color: #fff; border-color: var(--a)" @click="saveTemplate">{{ t('sbx.save') }}</button>
         </div>
@@ -857,9 +868,12 @@ export default {
       return val || '—'
     },
     parseEngines(t) {
+      // 空数组不能返回空串——模板行会渲染出一颗「有底无边距无字」的空药丸（2026-11-18 实测），
+      // 没有绑定引擎时统一显示占位符，与 v-else 分支同口径。
       try {
         const e = JSON.parse(t.engines || '[]')
-        return Array.isArray(e) ? e.join(', ') : t.engines
+        if (Array.isArray(e)) return e.length ? e.join(', ') : '—'
+        return t.engines || '—'
       } catch (_) {
         return t.engines || '—'
       }
@@ -867,3 +881,61 @@ export default {
   },
 }
 </script>
+
+<style scoped>
+/* 本页原先「零 style 块、样式全内联」（2026-11-18 收敛）：把四处重复内联抽成类，
+   暗色/主题适配只改一处；独有几何仍留在行内，避免大改模板结构。 */
+.sbx-label {
+  font-size: 11px;
+  color: var(--t3);
+  display: block;
+  margin-bottom: 4px;
+}
+.sbx-input {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--b);
+  border-radius: 8px;
+  background: var(--c);
+  color: var(--t);
+  font-size: 13px;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+.sbx-input.sm {
+  font-size: 12px;
+}
+.sbx-input.mono {
+  font-family: monospace;
+}
+/* 证书/JSON 这类多行文本域：等宽 + 定高 + 可纵向拉伸 */
+.sbx-input.ta {
+  height: 80px;
+  font-size: 11px;
+  resize: vertical;
+}
+.sbx-input:disabled {
+  cursor: not-allowed;
+}
+.sbx-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.sbx-modal--pad {
+  padding: 20px;
+}
+.sbx-foot {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+.sbx-td {
+  padding: 8px;
+}
+</style>

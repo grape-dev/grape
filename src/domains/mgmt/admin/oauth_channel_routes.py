@@ -26,7 +26,7 @@ def _links_of(provider: str) -> list[dict]:
 
 
 def _item(r) -> dict:
-    from src.domains.platform.capabilities import platform_capabilities
+    from src.domains.platform.public import platform_capabilities
 
     cap = platform_capabilities(r.provider)
     return {
@@ -75,7 +75,7 @@ def list_channels(admin: dict = Depends(require_admin)):
         log.warning("oauth-channels: table read failed, fallback: %s", e)
 
     from src.domains.mgmt.auth.providers import get_provider, list_providers
-    from src.domains.platform.capabilities import platform_capabilities
+    from src.domains.platform.public import platform_capabilities
 
     out = []
     for provider in list_providers():

@@ -94,7 +94,12 @@ _rt_db = _DomainDbProxy()
 
 
 # R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用
-from src.domains.mgmt.user.db import get_task_token as _get_task_token
+# token 取值走 owner 域 public（原 import mgmt.user.db 内部函数）
+from src.domains.mgmt import public as _mgmt_token
+
+
+def _get_task_token(task: dict) -> str:
+    return _mgmt_token.task_token(task)
 
 # Issue #1938：级联收敛补偿的归因模型（枚举/终态映射/文案渲染/展示判定）
 from src.domains.runtime.engine import cascade as _cascade
@@ -338,7 +343,7 @@ def get_execution_mode() -> str:
     if _m:
         return _m
     try:
-        from src.domains.mgmt.user.db import get_meta_value
+        from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
         _m = get_meta_value("execution_mode") or ""
     except Exception:
         pass
@@ -348,7 +353,7 @@ def get_execution_mode() -> str:
 def set_execution_mode(mode: str):
     """设置执行模式（落 meta 表，运维可改键值；读取实时生效，无需重启）。"""
     try:
-        from src.domains.mgmt.user.db import set_meta_value
+        from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
         set_meta_value("execution_mode", mode)
         log.info(f"execution_mode set to {mode}")
     except Exception as e:
@@ -821,7 +826,7 @@ def _collect_server_env(user_id, account):
     env = {}
     if has_user_id(user_id):
         try:
-            from src.domains.mgmt.user.db import get_credentials
+            from src.domains.mgmt.public import get_credentials
             for c in get_credentials(user_id):
                 provider = c.get("provider", "")
                 cfg = c.get("config", {})
@@ -1059,7 +1064,7 @@ def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "
     skill = (skill or "").strip()
     if not skill:
         return True, "skill not configured", 0
-    from src.domains.mgmt.user.db import (
+    from src.domains.mgmt.public import (
         resolve_skill_id, get_skill_by_id, get_skill_path, get_skill_object_key,
     )
     sid = int(skill_id or 0)
@@ -1174,7 +1179,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     _skill_obs_key = ""
     if skill:
         try:
-            from src.domains.mgmt.user.db import resolve_skill_id, get_skill_path, get_skill_object_key, get_skill_by_id
+            from src.domains.mgmt.public import resolve_skill_id, get_skill_path, get_skill_object_key, get_skill_by_id
             if skill_id:
                 _sk = get_skill_by_id(skill_id)
                 if _sk:
@@ -1298,7 +1303,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     if not _server_url:
         try:
             # Issue #471 E1：任务下发的 server_url 是 worker 回连地址
-            from src.domains.mgmt.user.db import get_worker_connect_url
+            from src.domains.mgmt.public import get_worker_connect_url
             _server_url = get_worker_connect_url()
         except Exception:
             pass
@@ -1311,7 +1316,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         _pipeline_tid = ""
         if repo_key and issue_id:
             try:
-                from src.domains.insight.observability.trace import pipeline_trace_id
+                from src.domains.insight.public import pipeline_trace_id
                 _pipeline_tid = pipeline_trace_id(repo_key, issue_id, task_id)
             except Exception:
                 pass
@@ -1331,7 +1336,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     # Issue #646：任务落库前的引擎引用快照（uid + 展示名 + pool uid 镜像；
     # 未迁移旧库/引擎已删 → (None,'','')，不阻断任务创建）
     try:
-        from src.domains.mgmt.user.db import engine_ref_snapshot
+        from src.domains.mgmt.public import engine_ref_snapshot
         # Issue #1208：selector 任务两池列均空（pool_selector 承载圈池语义），
         # uid 镜像无源 → 不做快照（engine_ref_snapshot 空串入参返回空镜像）
         _snap = engine_ref_snapshot(runtime_id, pool_engine_ids or "")
@@ -1339,7 +1344,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         _pipeline_tid = ""
         if repo_key and issue_id:
             try:
-                from src.domains.insight.observability.trace import pipeline_trace_id
+                from src.domains.insight.public import pipeline_trace_id
                 _pipeline_tid = pipeline_trace_id(repo_key, issue_id, task_id)
             except Exception:
                 pass
@@ -1409,16 +1414,16 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             pass
     # 可观察性埋点：任务入队
     try:
-        from src.domains.insight.observability import record_task_enqueued
+        from src.domains.insight.public import record_task_enqueued
         record_task_enqueued(task_id, event_type or agent_type or "other", runtime_id)
     except Exception:
         pass
     # 事件总线：任务创建
     try:
-        from src.domains.insight.observability.events import bus, Event
-        bus.publish(Event(type="task:enqueued", task_id=task_id,
-                          payload={"agent_type": agent_type, "runtime_id": runtime_id,
-                                    "repo_key": repo_key, "skill": skill}))
+        from src.domains.insight import public as _obs_public
+        _obs_public.emit_event("task:enqueued", task_id=task_id,
+                               payload={"agent_type": agent_type, "runtime_id": runtime_id,
+                                        "repo_key": repo_key, "skill": skill})
     except Exception:
         pass
     return task_id
@@ -1921,7 +1926,7 @@ def claim(runtime_id, expected_task_id=None, expected_event_seq=None, determinis
                 log.warning(f"claim: inject token failed for task {task_id}: {_te}")
         # 可观察性埋点：任务被 claim/dispatched
         try:
-            from src.domains.insight.observability import record_task_dispatched
+            from src.domains.insight.public import record_task_dispatched
             if task:
                 _queue_wait = -1
                 if task.get("created_at"):
@@ -3583,7 +3588,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
             log.warning(f"complete_task post-completion hooks failed: {_pe}")
     # 可观察性埋点：任务到达终态
     try:
-        from src.domains.insight.observability import record_task_terminal
+        from src.domains.insight.public import record_task_terminal
         _terminal = "completed" if exit_code == 0 else "failed"
         _run_s = -1
         _total_s = -1
@@ -3605,9 +3610,9 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
         pass
     # 事件总线：任务完成
     try:
-        from src.domains.insight.observability.events import bus, Event
-        bus.publish(Event(type="task:completed" if exit_code == 0 else "task:failed",
-                          task_id=task_id, payload={"exit_code": exit_code}))
+        from src.domains.insight import public as _obs_public
+        _obs_public.emit_event("task:completed" if exit_code == 0 else "task:failed",
+                               task_id=task_id, payload={"exit_code": exit_code})
     except Exception:
         pass
 
@@ -3895,7 +3900,7 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     # 按该 issue 首个事件 actor（建单人）是否 bot 还原 _bot_opened，
     # _redispatch_vod_after_recommend 内据此短路重派（查询失败降级为不标记，人建单行为不变）。
     try:
-        from src.domains.mgmt.user.db import get_all_bot_usernames
+        from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
         _evt["_bot_opened"] = _vod_issue_creator in (get_all_bot_usernames() or [])
     except Exception:
         pass
@@ -4216,19 +4221,19 @@ def fail_task(task_id, error, exit_code=-1):
                         else:
                             # 无 handler → fallback 到全局 bot token
                             if _rk.startswith("github:"):
-                                from src.domains.mgmt.user.db import get_global_github_bot_token
+                                from src.domains.mgmt.public import get_global_github_bot_token
                                 _comment_token = get_global_github_bot_token() or ""
                             else:
-                                from src.domains.mgmt.user.db import _get_global_bot_token
+                                from src.domains.mgmt.public import _get_global_bot_token
                                 _comment_token = _get_global_bot_token() or ""
                     except Exception as _cte:
                         log.warning(f"fail_task: handler.get_comment_token failed: {_cte}")
                         # fallback 到原有逻辑
                         if _rk.startswith("github:"):
-                            from src.domains.mgmt.user.db import get_global_github_bot_token
+                            from src.domains.mgmt.public import get_global_github_bot_token
                             _comment_token = get_global_github_bot_token() or ""
                         else:
-                            from src.domains.mgmt.user.db import _get_global_bot_token
+                            from src.domains.mgmt.public import _get_global_bot_token
                             _comment_token = _get_global_bot_token() or ""
                         if not _comment_token:
                             _comment_token = _get_task_token(task) or ""
@@ -4416,7 +4421,7 @@ def fail_task(task_id, error, exit_code=-1):
     log.warning(f"Task failed: {task_id} agent={_ft.get('agent_type', '')} repo={_ft.get('repo_key', '')} issue={_ft.get('issue_id', '') or '-'} skill={_ft.get('skill', '')} exit={exit_code} outcome=failed err={str(error)[:120]}")
     # 可观察性埋点：任务失败
     try:
-        from src.domains.insight.observability import record_task_terminal, record_task_failed
+        from src.domains.insight.public import record_task_terminal, record_task_failed
         _run_s = -1
         _total_s = -1
         if task:
@@ -4439,9 +4444,9 @@ def fail_task(task_id, error, exit_code=-1):
         pass
     # 事件总线：任务失败
     try:
-        from src.domains.insight.observability.events import bus, Event
-        bus.publish(Event(type="task:failed", task_id=task_id,
-                          payload={"exit_code": exit_code, "error": str(error)[:200]}))
+        from src.domains.insight import public as _obs_public
+        _obs_public.emit_event("task:failed", task_id=task_id,
+                               payload={"exit_code": exit_code, "error": str(error)[:200]})
     except Exception:
         pass
 

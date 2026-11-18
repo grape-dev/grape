@@ -32,7 +32,7 @@ def _cleanup_temp_files():
     集群分布式锁互斥，抢不到锁直接跳过。
     """
     from src.kernel.lock import acquire_lock, release_lock
-    from src.domains.mgmt.user.db import list_temp_uploaded_files_before, hard_delete_uploaded_file
+    from src.domains.mgmt.public import list_temp_uploaded_files_before, hard_delete_uploaded_file
 
     acquired = acquire_lock(_LOCK_KEY, ttl=_LOCK_TTL)
     if not acquired:

@@ -67,6 +67,8 @@
       <!-- 筛选标签栏 -->
       <div class="rtv-filters">
         <span class="rtv-filter-lbl">筛选</span>
+        <!-- 分组标题（用户 2026-11-18 裁定：范围 / 类型 / 归属 三组各带标题，只改文案不改行为） -->
+        <span class="rtv-fgrp">{{ t('fgrp_range') }}</span>
         <!-- Issue #473：范围筛选（全部/仓库/个人） -->
         <span
           v-for="opt in RT_RANGE_OPTIONS"
@@ -75,6 +77,9 @@
           @click="setRange(opt.key)"
           >{{ t(opt.labelKey) }}</span
         >
+        <!-- 范围组 → 引擎类型组：竖线分隔（用户 2026-11-18 裁定） -->
+        <span v-if="availTypes.length" class="rtv-chip-sep"></span>
+        <span v-if="availTypes.length" class="rtv-fgrp">{{ t('fgrp_type') }}</span>
         <span
           v-for="ty in availTypes"
           :key="'t' + ty"
@@ -84,7 +89,10 @@
           ><span class="rtv-chip-dot" :style="{ background: ENGINE_DOT[ty] || '#999' }"></span
           >{{ ty }}</span
         >
-        <span v-if="availTypes.length" class="rtv-chip-sep"></span>
+        <!-- 类型组/范围组 → 归属组：竖线按归属组自身渲染条件挂，不能挂在 availTypes 上
+             （某些范围下没有已知类型档时，两根竖线会一起消失，两个「个人」就贴在一起了） -->
+        <span v-if="availScopes.length" class="rtv-chip-sep"></span>
+        <span v-if="availScopes.length" class="rtv-fgrp">{{ t('fgrp_scope') }}</span>
         <span
           v-for="s in availScopes"
           :key="'s' + s"
@@ -211,7 +219,7 @@
                 :title="t('label.worker_version_stale_hint')"
                 >⬆ {{ t('label.worker_version_stale') }}</span
               ><!-- B5：沙箱平台禁用徽标（红边框警示，不再新建沙箱） -->
-              ><span
+              <span
                 v-if="rt.is_sandbox && rt.platform_enabled === false"
                 class="rtv-pdisabled"
                 :title="t('label.platform_disabled_tip')"
@@ -315,7 +323,7 @@
             v-for="d in sortedDevices"
             :key="d.credential_id + '-' + workerDisplayName(d)"
             class="rtv-wcard"
-            :style="cardLeftBorder(d.health, d)"
+            :style="workerCardBorder(d)"
           >
             <div class="rtv-wcard-head">
               <span :class="['rtv-hbadge', d.health || 'offline']"
@@ -337,12 +345,12 @@
               <span :class="['rtv-sbadge', scopeKey(d)]">{{ scopeBadgeLabel(d) }}</span>
               <span class="rtv-wname">{{ workerDisplayName(d) }}</span>
               <span class="rtv-wip">{{ d.worker_ip || '' }}</span>
-              <button v-if="canManage(d)" class="bt bt-o bt-s rtv-wbtn" @click="openScopeSwitcher(d)">
+              <button v-if="canManage(d)" class="bt bt-o rtv-wbtn rtv-wbtn-scope" @click="openScopeSwitcher(d)">
                 {{ scopeShort(d.scope) }}
               </button>
               <button
                 v-if="d.credential_id && isOwner(d)"
-                class="bt bt-o bt-s rtv-wbtn"
+                class="bt bt-o rtv-wbtn"
                 @click="renameCredential(d.credential_id)"
               >
                 {{ t('action.rename') }}
@@ -366,31 +374,24 @@
               </div>
               <button
                 v-if="d.credential_id && isOwner(d)"
-                class="bt bt-r bt-s rtv-wbtn"
+                class="bt bt-r rtv-wbtn"
                 @click="revokeCredential(d.credential_id)"
               >
                 {{ t('action.revoke') }}
               </button>
             </div>
-            <!-- B5：沙箱平台行（cred_type=sandbox）——平台链接 + 详情深链 #sandbox/provider/{id} -->
+            <!-- B5：沙箱平台行（cred_type=sandbox）——平台名只读展示；进平台页走右侧「详情」按钮
+                 （2026-11-18 用户裁定：去掉带 ↗ 的平台链接，点详情按钮即可，避免同一行两个入口） -->
             <div v-if="d.cred_type === 'sandbox' && d.platform" class="rtv-wcard-plat">
               <span class="rtv-k">{{ t('label.sandbox_platform') }}</span>
-              <a
-                v-if="!!d.provider_id"
-                :href="'#sandbox/provider/' + d.provider_id"
-                class="rtv-plat-link"
-                :title="t('credential.goto_platform_page')"
-                >☁ {{ d.platform }} ↗</a
-              >
+              <span class="rtv-plat-name">☁ {{ d.platform }}</span>
+              <span v-if="!d.provider_id" class="rtv-plat-unbound">{{ t('credential.platform_unbound') }}</span>
               <button
                 v-if="!!d.provider_id"
                 class="bt bt-o bt-s rtv-plat-btn"
                 :title="t('credential.platform_detail_btn_tip')"
                 @click.stop="gotoProviderDetail(d.provider_id)"
                 >📋 {{ t('credential.platform_detail_btn') }}</button
-              >
-              <span v-if="!d.provider_id" class="rtv-plat-plain" :title="t('credential.goto_platform_page')"
-                >☁ {{ d.platform }} · {{ t('credential.platform_unbound') }}</span
               >
             </div>
             <div class="rtv-wcard-engines">
@@ -456,7 +457,7 @@
           <span v-if="engineDetail.alias" class="rtv-ename-s"
             >({{ engineDisplayName(engineDetail) }})</span
           >
-          <button class="bt bt-o bt-s rtv-ed-alias" @click="editRuntimeAlias(engineDetail)">
+          <button class="bt bt-o rtv-ed-alias" @click="editRuntimeAlias(engineDetail)">
             {{ t('action.edit_alias') }}
           </button>
           <span v-if="engineDetail.is_local" class="rtv-localpill">{{
@@ -710,7 +711,7 @@
             type="radio"
             :value="sc"
             name="scopeRadio"
-            :style="{ accentColor: 'var(--a-text)', width: '16px', height: '16px' }"
+            :style="{ accentColor: 'var(--a)', width: '16px', height: '16px' }"
           />
           <span>{{ scopeShort(sc) }}</span>
         </label>
@@ -764,7 +765,7 @@
                   height="22"
                   viewBox="0 0 24 24"
                   fill="none"
-                  stroke="var(--on-accent)"
+                  stroke="#2563eb"
                   stroke-width="2"
                   stroke-linecap="round"
                   stroke-linejoin="round"
@@ -1050,8 +1051,8 @@
           </div>
           <!-- 选项三：AI Devspace -->
           <div class="rtv-sb-sec">
-            <div class="rtv-sb-opt" @click="toggleDevSection">
-              <div class="rtv-sb-opt-ic">
+            <div class="rtv-sb-opt dev" @click="toggleDevSection">
+              <div class="rtv-sb-opt-ic dev">
                 <svg
                   width="22"
                   height="22"
@@ -1209,7 +1210,7 @@ const HEALTH_BADGE = {
   about_to_gc: { color: 'var(--r)', bg: '#fee2e2' },
 }
 const SCOPE_BADGE_CFG = {
-  global: { label: '全局', color: 'var(--a-text)', bg: '#e3edfd' },
+  global: { label: '全局', color: '#3168e0', bg: '#e3edfd' },
   repo: { label: '仓库', color: '#8b5cf6', bg: '#ede9fe' },
   user: { label: '个人', color: '#1ca44c', bg: '#dcfce7' },
   local: { label: '本机', color: '#0e7490', bg: '#cffafe' },
@@ -1222,8 +1223,6 @@ const ENGINE_DOT = {
   codex: '#10a37f',
   aishell: '#0a8cd8',
 }
-// 场景/引擎标签色：9~11px 白字药丸嵌在饱和色上，饱和度太高白字只有 2.1~3.7:1（看不清）。
-// 统一压深到白字 ≥4.6:1 的同色相档。
 const SCENE_TAG_COLORS = {
   default: '#0b7a55',
   'cloud-native': '#2563b0',
@@ -1245,9 +1244,9 @@ const RT_TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre']
 const HEALTH_ORDER = { online: 0, recently_lost: 1, offline: 2, about_to_gc: 3 }
 const DEV_STATUS_COLORS = {
   'cde.0000': '#6b7280',
-  'cde.0001': 'var(--a-text)',
+  'cde.0001': '#2563eb',
   'cde.0002': '#16a34a',
-  'cde.0003': 'var(--a-text)',
+  'cde.0003': '#2563eb',
   'cde.0004': '#16a34a',
   'cde.0005': '#d97706',
   'cde.0006': '#dc2626',
@@ -1258,6 +1257,22 @@ const DEV_STATUS_COLORS = {
   'cde.1002': '#dc2626',
   'cde.1003': '#dc2626',
   'cde.1004': '#dc2626',
+}
+const DEV_STATUS_BGS = {
+  'cde.0000': '#f3f4f6',
+  'cde.0001': '#dbeafe',
+  'cde.0002': '#dcfce7',
+  'cde.0003': '#dbeafe',
+  'cde.0004': '#dcfce7',
+  'cde.0005': '#fef3c7',
+  'cde.0006': '#fee2e2',
+  'cde.0007': '#fef3c7',
+  'cde.0008': '#fef3c7',
+  'cde.0009': '#f9fafb',
+  'cde.1001': '#fee2e2',
+  'cde.1002': '#fee2e2',
+  'cde.1003': '#fee2e2',
+  'cde.1004': '#fee2e2',
 }
 const BUSY_STATES = ['cde.0001', 'cde.0003', 'cde.0005', 'cde.0006', 'cde.0007', 'cde.0008']
 const PAGE_SIZE = 20
@@ -1542,7 +1557,7 @@ function engineTagSummary(tags) {
   return shown
     .map(
       (x) =>
-        `<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;color: var(--on-accent);background:${RT_TAG_COLORS[x] || '#666'};margin:0 2px">${esc(rtTagLabel(x)) || esc(x)}</span>`
+        `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color: var(--on-accent);background:${RT_TAG_COLORS[x] || '#666'};margin:0 2px">${esc(rtTagLabel(x)) || esc(x)}</span>`
     )
     .join('')
 }
@@ -1553,7 +1568,7 @@ function sceneTagSummary(tags) {
     .map((x) => {
       const dn = sceneDisplayName(x)
       const color = SCENE_TAG_COLORS[x] || '#10b981'
-      return `<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;color: var(--on-accent);background:${color};margin:0 2px">${esc(dn)}</span>`
+      return `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color: var(--on-accent);background:${color};margin:0 2px">${esc(dn)}</span>`
     })
     .join('')
 }
@@ -1565,17 +1580,25 @@ function platformDisabled(x) {
   // B5：沙箱引擎卡看 is_sandbox，凭据卡看 cred_type（后端两路字段）
   return !!((x.cred_type === 'sandbox' || x.is_sandbox) && x.platform_enabled === false)
 }
+const ABNORMAL_RING = 'var(--sh), 0 0 0 1px var(--r)'
 function cardLeftBorder(h, rt) {
   // Issue #475/#498：在线但健康口径异常 → 红描边强化；其余沿用健康色
   if (rt && isAbnormalEngine(rt)) {
     const red = abnormalBorderColor(rt)
-    if (red) return { borderLeft: '3px solid ' + red }
+    if (red) return { borderLeft: '3px solid ' + red, boxShadow: ABNORMAL_RING }
   }
   // B5：沙箱平台禁用 → 红边框警示（同 legacy _platformDisabled）
-  if (rt && platformDisabled(rt)) return { borderLeft: '3px solid #dc2626' }
-  return h === 'online'
-    ? { borderLeft: '1px solid var(--b)' }
-    : { borderLeft: '3px solid ' + (RUNTIME_COLOR[h] || 'var(--t3)') }
+  if (rt && platformDisabled(rt)) return { borderLeft: '3px solid #dc2626', boxShadow: ABNORMAL_RING }
+  // 旧页（origin/weekly-11）引擎卡：任何健康态都给 3px 状态色左边条，在线即绿条
+  return { borderLeft: '3px solid ' + (RUNTIME_COLOR[h] || 'var(--t3)') }
+}
+// 旧页设备卡（Workers）：在线不出彩条只留 1px 中性描边；异常态取同一套左边条颜色，
+// 但设备卡旧页没有整卡红圈（legacy 只给引擎卡加 box-shadow 红环），这里把 boxShadow 剥掉。
+function workerCardBorder(d) {
+  const h = (d && d.health) || 'offline'
+  if (h === 'online') return { borderLeft: '1px solid var(--b)' }
+  const s = cardLeftBorder(h, d)
+  return { borderLeft: s.borderLeft }
 }
 function isOwner(d) {
   return !!(d.owner && grapeUsername && d.owner === grapeUsername)
@@ -1585,8 +1608,16 @@ function canManage(d) {
 }
 
 // ═══ 数据加载 ═══
+// Issue #1167（MR 1008 口径）：空数据只在「无任何激活筛选」时才算真·空组织。
+// 有筛选时保持主内容渲染（筛选栏 + ✕ 清除 + 列表区内联「暂无引擎」），
+// 否则整条筛选栏会被居中空态顶掉，用户只能 F5 才能撤销筛选。
 const isEmpty = computed(
-  () => loaded.value && !loadError.value && !runtimes.value.length && !devices.value.length
+  () =>
+    loaded.value &&
+    !loadError.value &&
+    !runtimes.value.length &&
+    !devices.value.length &&
+    !hasActiveFilters.value
 )
 function loadRuntimesData() {
   let qs = '?page=' + page.value + '&page_size=' + PAGE_SIZE
@@ -1821,9 +1852,9 @@ const availScopes = computed(() =>
 const availScenes = computed(() =>
   [...new Set(runtimes.value.flatMap((rt) => rt.scene_tags || []))].filter(Boolean)
 )
-const availTags = computed(() =>
-  [...new Set(runtimes.value.flatMap((rt) => rt.agent_tags || []))].filter(Boolean)
-)
+// 「角色标签」筛选下拉 = 固定角色档（与引擎详情弹窗 edTagOptions 同源）；
+// 数据派生的 agent_tags 里混着 engine:/scope:/scene: 冒号行，不能当角色档展示（用户 2026-11-18 裁定）
+const availTags = RT_TAG_OPTIONS
 // Issue #432: 共享过滤（统计与列表同口径）
 function filterEngines(list) {
   const q = (search.value || '').toLowerCase().trim()
@@ -2492,7 +2523,7 @@ function devStatusColor(st) {
   return DEV_STATUS_COLORS[st] || '#8d97a8'
 }
 function devStatusBg(st) {
-  return 'color-mix(in srgb, ' + devStatusColor(st) + ' 15%, transparent)'
+  return DEV_STATUS_BGS[st] || '#f3f4f6'
 }
 function devStatusLabel(st) {
   return t('devspace.status.' + (st || 'unknown').replace(/\./g, '_'))
@@ -2723,7 +2754,202 @@ onBeforeUnmount(function () {
 
 <style scoped>
 .rtv {
+  /* 旧风格（origin/weekly-11 legacy 页）调色板/几何：本页自锁，不跟随 apple 主题 token */
+  --bg: #f5f6f8;
+  --c: #fff;
+  --b: #e3e6ee;
+  --t: #101724;
+  --t1: #101724;
+  --t2: #5b667b;
+  --t3: #8d97a8;
+  --a: #0071e3;
+  --ah: #0077ed;
+  --g: #1ca44c;
+  --y: #d49c0f;
+  --r: #dc2828;
+  --rd: 12px;
+  --r2: 18px;
+  --sh: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --on-accent: #fff;
+  --chip-bg: #f5f6f8;
   min-height: 100%;
+}
+/* 暗色档（2026-11-18 用户报「暗色下 Engines/Workers 卡片还是白底」）：
+ * 本页 token 是自锁的（S-01），不自锁一套暗色值就会永远停在浅色。
+ * 取值与 legacy apple-theme 暗色档逐项对齐；键位与 bridge.css 同源——
+ * data-theme-mode="dark" 无条件深色，"auto" 才跟随系统偏好。 */
+:root[data-theme-mode='dark'] .rtv {
+  --bg: #000;
+  --c: #1c1c1e;
+  --b: #38383a;
+  --t: #f5f5f7;
+  --t1: #f5f5f7;
+  --t2: #aeaeb2;
+  --t3: #8e8e93;
+  --a: #0a84ff;
+  --ah: #409cff;
+  --g: #30d158;
+  --y: #ff9f0a;
+  --r: #ff453a;
+  --sh: 0 1px 3px rgba(0, 0, 0, 0.5);
+  --chip-bg: #2c2c2e;
+}
+
+/* 暗色档：徽章/危险按钮的深色变体（2026-11-18 用户裁定）
+ * —— pastel 徽章在深色卡片上太亮，改「同色系低透明度底 + 提亮字」；
+ * —— 吊销按钮（.bt-r）由实心红改成「卡片同色底 + 红描边 + 红字」（危险但不高饱和铺色）。 */
+:root[data-theme-mode='dark'] .rtv .rtv-hbadge.online {
+  color: #30d158;
+  background: rgba(48, 209, 88, 0.18);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-hbadge.recently_lost {
+  color: #ff9f0a;
+  background: rgba(255, 159, 10, 0.18);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-hbadge.offline {
+  color: #aeaeb2;
+  background: rgba(235, 235, 245, 0.1);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-hbadge.about_to_gc {
+  color: #ff453a;
+  background: rgba(255, 69, 58, 0.18);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-sbadge.global {
+  color: #5b9eff;
+  background: rgba(41, 151, 255, 0.18);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-sbadge.repo {
+  color: #bf9bff;
+  background: rgba(191, 155, 255, 0.18);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-sbadge.user {
+  color: #30d158;
+  background: rgba(48, 209, 88, 0.18);
+}
+:root[data-theme-mode='dark'] .rtv .rtv-sbadge.local {
+  color: #5ad2e6;
+  background: rgba(90, 210, 230, 0.18);
+}
+:root[data-theme-mode='dark'] .rtv .bt-r {
+  background: var(--c) !important;
+  color: #ff453a !important;
+  border: 1px solid color-mix(in srgb, #ff453a 55%, transparent) !important;
+}
+:root[data-theme-mode='dark'] .rtv .bt-r:hover {
+  background: color-mix(in srgb, #ff453a 16%, transparent) !important;
+  border-color: #ff453a !important;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] .rtv .rtv-hbadge.online {
+    color: #30d158;
+    background: rgba(48, 209, 88, 0.18);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-hbadge.recently_lost {
+    color: #ff9f0a;
+    background: rgba(255, 159, 10, 0.18);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-hbadge.offline {
+    color: #aeaeb2;
+    background: rgba(235, 235, 245, 0.1);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-hbadge.about_to_gc {
+    color: #ff453a;
+    background: rgba(255, 69, 58, 0.18);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-sbadge.global {
+    color: #5b9eff;
+    background: rgba(41, 151, 255, 0.18);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-sbadge.repo {
+    color: #bf9bff;
+    background: rgba(191, 155, 255, 0.18);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-sbadge.user {
+    color: #30d158;
+    background: rgba(48, 209, 88, 0.18);
+  }
+  :root[data-theme-mode='auto'] .rtv .rtv-sbadge.local {
+    color: #5ad2e6;
+    background: rgba(90, 210, 230, 0.18);
+  }
+  :root[data-theme-mode='auto'] .rtv .bt-r {
+    background: var(--c) !important;
+    color: #ff453a !important;
+    border: 1px solid color-mix(in srgb, #ff453a 55%, transparent) !important;
+  }
+  :root[data-theme-mode='auto'] .rtv .bt-r:hover {
+    background: color-mix(in srgb, #ff453a 16%, transparent) !important;
+    border-color: #ff453a !important;
+  }
+}
+
+/* 暗色下「浅底 accent 药丸」8% 透明度在黑底上看不见，抬到 18%（tint 随手 --a 走） */
+:root[data-theme-mode='dark'] .rtv .bt-p {
+  background: color-mix(in srgb, var(--a) 18%, transparent) !important;
+  border-color: color-mix(in srgb, var(--a) 28%, transparent) !important;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] .rtv {
+    --bg: #000;
+    --c: #1c1c1e;
+    --b: #38383a;
+    --t: #f5f5f7;
+    --t1: #f5f5f7;
+    --t2: #aeaeb2;
+    --t3: #8e8e93;
+    --a: #0a84ff;
+    --ah: #409cff;
+    --g: #30d158;
+    --y: #ff9f0a;
+    --r: #ff453a;
+    --sh: 0 1px 3px rgba(0, 0, 0, 0.5);
+    --chip-bg: #2c2c2e;
+  }
+  :root[data-theme-mode='auto'] .rtv .bt-p {
+    background: color-mix(in srgb, var(--a) 18%, transparent) !important;
+    border-color: color-mix(in srgb, var(--a) 28%, transparent) !important;
+  }
+}
+/* 工具栏/卡片按钮：对齐 origin/weekly-11 的 apple 主题口径
+   （apple-theme.css §6 + §22a：药丸 980px、13px、8px 18px、min-height 36px；
+    .bt-p 浅蓝底蓝字、.bt-o 白底蓝字、.bt-r 实心红） */
+.rtv :is(.bt, .bt-p, .bt-o, .bt-g, .bt-r) {
+  border-radius: 980px !important;
+  font-size: 13px !important;
+  padding: 8px 18px !important;
+  font-weight: 500 !important;
+  line-height: 1.2 !important;
+  min-height: 36px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+.rtv .bt-p {
+  background: color-mix(in srgb, var(--a) 8%, transparent) !important;
+  color: var(--a) !important;
+  border: 1px solid color-mix(in srgb, var(--a) 12%, transparent) !important;
+}
+.rtv .bt-p:hover {
+  background: color-mix(in srgb, var(--a) 12%, transparent) !important;
+}
+.rtv .bt-o {
+  background: var(--c) !important;
+  color: var(--a) !important;
+  border: 1px solid var(--b) !important;
+}
+.rtv .bt-o:hover {
+  background: color-mix(in srgb, var(--a) 4%, transparent) !important;
+  border-color: var(--a) !important;
+}
+.rtv .bt-r {
+  background: var(--r) !important;
+  color: #fff !important;
+  border: none !important;
+}
+.rtv .bt-s {
+  padding: 5px 14px !important;
+  font-size: 12px !important;
+  min-height: 30px !important;
 }
 .rtv .loading,
 .rtv .error {
@@ -2738,76 +2964,64 @@ onBeforeUnmount(function () {
   align-items: center;
   flex-wrap: wrap;
 }
-/* 搜索：整组一个药丸（输入框无边框 + 图标按钮嵌在右端） */
 .rtv-searchgrp {
   display: flex;
   align-items: center;
   flex: 1;
   max-width: 300px;
-  border: 1px solid var(--b);
-  border-radius: 999px;
-  background: var(--bg);
-  overflow: hidden;
-  transition:
-    border-color 0.18s,
-    background 0.18s;
-}
-.rtv-searchgrp:focus-within {
-  border-color: var(--a-text);
-  background: var(--c);
 }
 .rtv-search {
   flex: 1;
-  padding: 7px 6px 7px 14px;
-  border: none;
-  border-radius: 0;
+  padding: 7px 12px 7px 14px;
+  border: 1px solid var(--b);
+  border-radius: 10px 0 0 10px;
   font-size: 13px;
-  background: transparent;
+  background: var(--bg);
   color: var(--t);
+  transition: border-color 0.2s;
   outline: none;
   min-width: 0;
 }
 .rtv-search:focus {
-  background: transparent;
+  border-color: var(--a);
+  background: var(--c);
 }
 .rtv-searchbtn {
-  border: none;
-  background: transparent;
+  padding: 7px 14px;
+  border: 1px solid var(--b);
+  border-left: none;
+  border-radius: 0 10px 10px 0;
+  background: var(--bg);
   color: var(--t3);
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 3px;
+  font-size: 13px;
   cursor: pointer;
   flex-shrink: 0;
-  transition:
-    background 0.18s,
-    color 0.18s;
+  transition: all 0.15s;
 }
 .rtv-searchbtn:hover {
-  background: color-mix(in srgb, var(--a) 16%, transparent);
-  color: var(--a);
+  background: var(--a);
+  color: var(--on-accent);
 }
-/* 主操作：实心 accent + 白字（几何由 bridge.css 统一） */
 .rtv-addbtn {
   margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  padding: 8px 18px;
   border: none;
-  background: var(--a);
+  border-radius: 10px;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
   color: var(--on-accent);
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+  box-shadow: 0 2px 12px rgba(59, 130, 246, 0.35);
+  transition: all 0.2s;
   font-family: inherit;
-  transition:
-    background 0.18s,
-    filter 0.18s;
 }
 .rtv-addbtn:hover {
-  background: var(--ah);
-  filter: brightness(1.06);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(59, 130, 246, 0.45);
 }
 /* 空态 */
 .rtv-empty {
@@ -2896,19 +3110,19 @@ onBeforeUnmount(function () {
   font-size: 12px;
   color: var(--t2);
 }
-.rtv-plat-link {
-  color: #6d28d9;
+/* 平台名只读（进平台页走右侧「详情」按钮，不再做行内链接）。值色同其它字段：
+   次级文字色 + 500 字重；未绑定时追加的「未绑定」后缀再降一档。 */
+.rtv-plat-name {
+  color: var(--t2);
   font-weight: 500;
-  text-decoration: none;
 }
 .rtv-plat-btn {
   font-size: 10px;
   padding: 2px 8px;
   border-radius: 4px;
 }
-.rtv-plat-plain {
-  color: #6d28d9;
-  font-weight: 500;
+.rtv-plat-unbound {
+  color: var(--t3);
 }
 
 .rtv-vstale {
@@ -2952,6 +3166,15 @@ onBeforeUnmount(function () {
   font-weight: 500;
   margin-right: 2px;
 }
+/* 分组标题（范围 / 类型 / 归属）：只做维度标注，不参与点击 */
+.rtv-fgrp {
+  font-size: 11px;
+  color: var(--t2);
+  font-weight: 600;
+  white-space: nowrap;
+  margin-right: 2px;
+  cursor: default;
+}
 .rtv-chip {
   display: inline-flex;
   align-items: center;
@@ -2967,7 +3190,7 @@ onBeforeUnmount(function () {
   transition: all 0.2s;
 }
 .rtv-chip.on {
-  border-color: var(--a-text);
+  border-color: var(--a);
   color: var(--on-accent);
   background: var(--a);
 }
@@ -2996,7 +3219,7 @@ onBeforeUnmount(function () {
   font-weight: 400;
 }
 .rtv-clear:hover {
-  color: var(--r);
+  color: #d32f2f;
 }
 .rtv-ddwrap {
   position: relative;
@@ -3027,11 +3250,8 @@ onBeforeUnmount(function () {
   background: var(--bg);
 }
 .rtv-tagpill {
-  /* 9px 中文在饱和色上肉眼糊成一片；11px + 600 + 深一档的底色 */
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.4;
-  padding: 2px 8px;
+  font-size: 9px;
+  padding: 1px 7px;
   border-radius: 999px;
   color: var(--on-accent);
 }
@@ -3108,19 +3328,19 @@ onBeforeUnmount(function () {
 }
 .rtv-hbadge.online {
   color: var(--g);
-  background: color-mix(in srgb, var(--g) 15%, transparent);
+  background: #dcfce7;
 }
 .rtv-hbadge.recently_lost {
   color: var(--y);
-  background: color-mix(in srgb, var(--y) 16%, transparent);
+  background: #fef3c7;
 }
 .rtv-hbadge.offline {
   color: var(--t3);
-  background: var(--chip-bg);
+  background: #eef0f3;
 }
 .rtv-hbadge.about_to_gc {
   color: var(--r);
-  background: color-mix(in srgb, var(--r) 15%, transparent);
+  background: #fee2e2;
 }
 .rtv-dot7 {
   width: 7px;
@@ -3128,6 +3348,7 @@ onBeforeUnmount(function () {
   border-radius: 50%;
   background: currentColor;
 }
+/* 范围徽标：旧页口径 = 浅色底 + 同色系深字（不是实心底白字） */
 .rtv-sbadge {
   display: inline-flex;
   align-items: center;
@@ -3137,19 +3358,22 @@ onBeforeUnmount(function () {
   padding: 1px 8px;
   white-space: nowrap;
   vertical-align: middle;
-  color: var(--on-accent);
 }
 .rtv-sbadge.global {
-  background: #2f63d6;
+  color: #3168e0;
+  background: #e3edfd;
 }
 .rtv-sbadge.repo {
-  background: #7152c9;
+  color: #8b5cf6;
+  background: #ede9fe;
 }
 .rtv-sbadge.user {
-  background: #157f3d;
+  color: #1ca44c;
+  background: #dcfce7;
 }
 .rtv-sbadge.local {
-  background: #0b6276;
+  color: #0e7490;
+  background: #cffafe;
 }
 .rtv-ename {
   display: inline-flex;
@@ -3258,11 +3482,6 @@ onBeforeUnmount(function () {
   color: var(--t3);
   font-size: 12px;
 }
-.rtv-wbtn {
-  font-size: 11px;
-  padding: 4px 10px;
-  border-radius: 4px;
-}
 .rtv-wcard-meta {
   display: flex;
   align-items: center;
@@ -3293,7 +3512,7 @@ onBeforeUnmount(function () {
 }
 .rtv-cli {
   cursor: pointer;
-  color: var(--a-text);
+  color: #235ec7;
   text-decoration: underline;
 }
 /* 分页 */
@@ -3306,10 +3525,9 @@ onBeforeUnmount(function () {
   flex-wrap: wrap;
 }
 .rtv-pager button {
-  padding: 4px 11px;
-  min-width: 28px;
+  padding: 4px 10px;
   border: 1px solid var(--b);
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--c);
   color: var(--t);
   font-size: 12px;
@@ -3324,7 +3542,6 @@ onBeforeUnmount(function () {
 }
 .rtv-pager button:disabled {
   color: var(--t3);
-  opacity: 0.4;
   cursor: default;
 }
 .rtv-ellipsis {
@@ -3398,8 +3615,8 @@ onBeforeUnmount(function () {
 .rtv-localpill {
   font-size: 11px;
   font-weight: 600;
-  color: var(--t2);
-  background: var(--chip-bg);
+  color: #0e7490;
+  background: #cffafe;
   border-radius: 999px;
   padding: 1px 8px;
 }
@@ -3448,6 +3665,11 @@ onBeforeUnmount(function () {
 .rtv-ed-taglbl input {
   width: 14px;
   height: 14px;
+}
+/* 引擎详情弹窗「场景标签/角色标签」药丸字号（用户 2026-11-18：9px 太小，放大一档） */
+.rtv-ed-tags .rtv-tagpill {
+  font-size: 12px;
+  padding: 2px 9px;
 }
 .rtv-tagdesc {
   color: var(--t3);
@@ -3581,8 +3803,8 @@ onBeforeUnmount(function () {
   color: var(--t);
 }
 .rtv-sm-item.on {
-  border-color: var(--a-text);
-  background: rgba(0, 113, 227, 0.06);
+  border-color: var(--a);
+  background: color-mix(in srgb, var(--a) 6%, transparent);
   font-weight: 600;
 }
 .rtv-sm-repo {
@@ -3640,7 +3862,7 @@ onBeforeUnmount(function () {
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  background: var(--a);
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3665,22 +3887,18 @@ onBeforeUnmount(function () {
 .rtv-sb-close {
   width: 32px;
   height: 32px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-  background: var(--chip-bg);
+  border-radius: 8px;
+  border: 1px solid var(--b);
+  background: var(--bg);
   cursor: pointer;
   color: var(--t2);
   font-size: 16px;
   flex-shrink: 0;
-  transition:
-    background 0.18s,
-    color 0.18s,
-    border-color 0.18s;
 }
 .rtv-sb-close:hover {
-  background: color-mix(in srgb, var(--r) 16%, transparent);
-  color: var(--r);
-  border-color: color-mix(in srgb, var(--r) 40%, transparent);
+  background: #fee2e2;
+  color: #dc2626;
+  border-color: #fecaca;
 }
 .rtv-sb-body {
   padding: 24px;
@@ -3694,25 +3912,35 @@ onBeforeUnmount(function () {
   align-items: center;
   gap: 14px;
   padding: 16px 18px;
-  background: color-mix(in srgb, var(--a) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--a) 20%, transparent);
+  background: var(--bg);
+  border: 1px solid var(--b);
   border-radius: 12px;
   cursor: pointer;
   transition: all 0.2s;
 }
 .rtv-sb-opt:hover {
-  border-color: color-mix(in srgb, var(--a) 50%, transparent);
-  box-shadow: 0 2px 12px color-mix(in srgb, var(--a) 12%, transparent);
+  border-color: #3b82f6;
+  box-shadow: 0 2px 12px rgba(59, 130, 246, 0.08);
+}
+.rtv-sb-opt.dev {
+  background: linear-gradient(135deg, rgba(96, 165, 250, 0.08), rgba(167, 139, 250, 0.08));
+  border-color: rgba(96, 165, 250, 0.2);
+}
+.rtv-sb-opt.dev:hover {
+  border-color: rgba(96, 165, 250, 0.5);
 }
 .rtv-sb-opt-ic {
   width: 42px;
   height: 42px;
   border-radius: 10px;
-  background: var(--a);
+  background: #dbeafe;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+}
+.rtv-sb-opt-ic.dev {
+  background: linear-gradient(135deg, #60a5fa, #a78bfa);
 }
 .rtv-sb-opt-body {
   flex: 1;
@@ -3742,15 +3970,15 @@ onBeforeUnmount(function () {
 .rtv-sb-loading {
   padding: 32px;
   text-align: center;
-  color: var(--t3);
+  color: #a78bfa;
   font-size: 13px;
 }
 .rtv-spinner {
   display: inline-block;
   width: 24px;
   height: 24px;
-  border: 2.5px solid color-mix(in srgb, var(--a) 20%, transparent);
-  border-top-color: var(--a);
+  border: 2.5px solid rgba(59, 130, 246, 0.2);
+  border-top-color: #3b82f6;
   border-radius: 50%;
   animation: rtvSpin 0.8s linear infinite;
   margin-bottom: 12px;
@@ -3758,8 +3986,8 @@ onBeforeUnmount(function () {
 .rtv-spinner.purple {
   width: 20px;
   height: 20px;
-  border-color: color-mix(in srgb, var(--a) 20%, transparent);
-  border-top-color: var(--a);
+  border-color: rgba(167, 139, 250, 0.2);
+  border-top-color: #a78bfa;
 }
 @keyframes rtvSpin {
   to {
@@ -3802,7 +4030,7 @@ onBeforeUnmount(function () {
   font-family: inherit;
 }
 .rtv-cred-disabled {
-  background: var(--chip-bg);
+  background: #f1f5f9;
   color: var(--t2);
 }
 .rtv-cred-btns {
@@ -3819,11 +4047,11 @@ onBeforeUnmount(function () {
   align-items: flex-start;
   gap: 8px;
   padding: 10px 12px;
-  background: color-mix(in srgb, var(--y) 16%, transparent);
+  background: #fef3c7;
   border-radius: 8px;
   margin-bottom: 14px;
   font-size: 12px;
-  color: var(--y);
+  color: #92400e;
   line-height: 1.5;
 }
 .rtv-cred-lbl {
@@ -3889,53 +4117,36 @@ onBeforeUnmount(function () {
   align-items: center;
   gap: 10px;
   border-bottom: 1px solid var(--b);
-  background: color-mix(in srgb, var(--a) 14%, var(--c));
+  background: linear-gradient(135deg, #60a5fa, #a78bfa);
 }
 .rtv-dev-title {
   font-size: 14px;
   font-weight: 600;
   flex: 1;
-  color: var(--t);
+  color: var(--on-accent);
 }
 .rtv-dev-auto {
   font-size: 10px;
-  color: var(--t3);
+  color: rgba(255, 255, 255, 0.7);
 }
 .rtv-dev-create {
-  background: var(--a);
+  background: rgba(255, 255, 255, 0.2);
   color: var(--on-accent);
-  border: 1px solid transparent;
-  border-radius: 999px;
-  padding: 6px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  padding: 5px 12px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition:
-    background 0.18s,
-    filter 0.18s;
-}
-.rtv-dev-create:hover {
-  background: var(--ah);
-  filter: brightness(1.06);
 }
 .rtv-dev-refresh {
-  background: transparent;
-  color: var(--a);
-  border: 1px solid color-mix(in srgb, var(--a) 42%, transparent);
-  border-radius: 999px;
-  padding: 5px 12px;
-  font-size: 14px;
-  line-height: 1.2;
-  cursor: pointer;
-  transition:
-    background 0.18s,
-    color 0.18s,
-    border-color 0.18s;
-}
-.rtv-dev-refresh:hover {
-  background: var(--a);
+  background: rgba(255, 255, 255, 0.12);
   color: var(--on-accent);
-  border-color: var(--a);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 14px;
+  cursor: pointer;
 }
 .rtv-dev-body {
   background: var(--bg);
@@ -4020,7 +4231,7 @@ onBeforeUnmount(function () {
 .rtv-dev-progfill {
   width: 40%;
   height: 100%;
-  background: var(--a);
+  background: linear-gradient(90deg, #60a5fa, #a78bfa);
   border-radius: 3px;
   animation: rtvDevPulse 2s ease-in-out infinite;
 }

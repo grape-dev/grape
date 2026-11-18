@@ -49,7 +49,7 @@ def get_user_link(user_id: str, repo_provider: str, admin: dict = Depends(requir
 
 @router.delete("/{user_id}/{repo_provider}", summary="用户禁用该平台（写 disabled_by_user，不删凭据）")
 def disable_platform(user_id: str, repo_provider: str, admin: dict = Depends(require_admin)):
-    from src.domains.platform.hooks import on_platform_disabled
+    from src.domains.platform.public import on_platform_disabled
 
     on_platform_disabled(user_id, repo_provider)
     return {"ok": True, "user_id": user_id, "repo_provider": repo_provider,

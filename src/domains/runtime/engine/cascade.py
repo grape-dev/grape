@@ -217,14 +217,12 @@ def fetch_display_meta(cursor, seqs, result_by_seq: Optional[Dict[Any, str]] = N
 
 def record_compensation(*, agent_type: str, scene_id: str, triggered_by: str,
                         task_status: str) -> None:
-    """上报「回报丢失补偿」次数（异常静默：可观测不得影响补偿主流程）。"""
-    try:
-        from src.domains.insight.observability import record_cascade_compensation
-        record_cascade_compensation(
-            agent_type=normalize_label(agent_type),
-            scene_id=normalize_label(scene_id, fallback="default"),
-            trigger=normalize_label(triggered_by),
-            task_status=normalize_label(task_status),
-        )
-    except Exception:  # pragma: no cover - 指标不可用不影响业务
-        pass
+    """回报丢失补偿计数（**当前为空操作**）。
+
+    原实现在函数内 `from src.domains.insight.observability import record_cascade_compensation`
+    并带上这四个归一化标签调用——但该符号在 insight 域**从未实现**（全仓 grep 无定义），
+    每次调用都是 ImportError 落进下面的 `except: pass`，所以这个指标自建立起就没上报过一次。
+    跨域收敛时摘掉这条死路，不再朝一个不存在的契约 import；真实计数器落地后（`metric_rollup`
+    已有 `cascade_compensation` 口径），改调 `src.domains.insight.public` 的对应原语即可。
+    """
+    return None

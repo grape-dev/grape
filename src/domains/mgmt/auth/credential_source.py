@@ -138,7 +138,7 @@ class TableCredentialSource(CredentialSource):
         if not column:
             return None
         try:
-            from src.domains.platform.importer import is_table_backed
+            from src.domains.platform.public import is_table_backed
 
             if not is_table_backed():
                 return None

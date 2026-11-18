@@ -14,7 +14,9 @@ import urllib.error as _ue
 import urllib.parse as _up
 import urllib.request as _ur
 
-from src.domains.mgmt.user.repo_manager import UpstreamAPIError
+# 上游异常类型走 owner 域 public
+from src.domains.mgmt import public as _mgmt_pub
+UpstreamAPIError = _mgmt_pub.UpstreamAPIError
 
 
 import re as _re
@@ -72,7 +74,7 @@ class CardProviderModule:
 
     def bot_token(self, repo_key):
         # 通用 bot 链：rc 单表（bot 列→全局→用户降级；S82，平台通用）
-        from src.domains.mgmt.user.db import get_repo_bot_token
+        from src.domains.mgmt.public import get_repo_bot_token
         return get_repo_bot_token(repo_key=repo_key) or ""
 
     def user_token(self, username, user_id):

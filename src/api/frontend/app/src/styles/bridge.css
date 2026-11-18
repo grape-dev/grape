@@ -107,7 +107,7 @@
 :is(#pageContent, #adminVueHost) :where(.tsk-btn, .tsk-btn-primary, .tsk-btn-ghost, .ap-btn, .ap-btn-d, .btn, .btn-o,
 .btn-p, .btn-sm, .lang-btn, .rv-dd-btn, .project-new-btn, .project-refresh-btn,
 .project-card-btn, .project-card-btn-outline, .ev__fsbtn, .ev__dreambtn, .ev__clearbtn,
-.ev__tl-btn, .kb-page-btn, .pl__pbtn, .rtv-searchbtn, .rtv-addbtn, .template-card-item-btn,
+.ev__tl-btn, .kb-page-btn, .pl__pbtn, .template-card-item-btn,
 .apv-logbtn, .fb-file-btn, .ac__modebtn, .isk-deploy-btn, .dbv-addbtn-sm, .ap-nd-engbtn,
 .msg-recall-btn, .chat-inpicker-btn, .tmpl-page-btn, .top1000-pager button, .project-pager button) {
   border-radius: 999px;
@@ -121,7 +121,7 @@
     filter 0.18s ease;
 }
 /* 主按钮级别保持 13px / 7px 18px（视觉重量） */
-:is(#pageContent, #adminVueHost) :is(.ap-btn, .btn-p, .tsk-btn-primary, .isk-deploy-btn, .project-new-btn, .rtv-addbtn) {
+:is(#pageContent, #adminVueHost) :is(.ap-btn, .btn-p, .tsk-btn-primary, .isk-deploy-btn, .project-new-btn) {
   font-size: 13px;
   padding: 7px 18px;
 }

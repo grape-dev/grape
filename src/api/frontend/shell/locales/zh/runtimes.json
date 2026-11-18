@@ -25,6 +25,7 @@
   "stats": {
     "total": "共 {count} 台"
   },
+  "search_placeholder": "搜索名称、设备、标签…",
   "tab": {
     "engines": "Engines 引擎",
     "workers": "Workers 设备"
@@ -178,7 +179,6 @@
     "sandbox_cert_label": "SSL 证书",
     "sandbox_cert_desc": "平台使用自签/私有 CA 的 HTTPS 时的证书 PEM 内容，用于 grape 校验平台连接；普通 HTTP 或公共 CA 留空。",
     "sandbox_toast_endpoint_required": "请填写平台 API URL（沙箱平台 API 地址）",
-    "goto_platform_page": "查看沙箱平台",
     "platform_detail_btn": "详情",
     "revoke_active_sandboxes": "当前有 {n} 个运行中的沙箱",
     "revoke_active_sandboxes_body": "删除凭据后，这些沙箱将不再被管理，可能导致资源占用和持续计费，请手动去平台清理沙箱。",
@@ -295,6 +295,9 @@
       "unknown": "未知"
     }
   },
+  "fgrp_range": "范围",
+  "fgrp_type": "引擎",
+  "fgrp_scope": "归属",
   "rt_range_all": "全部",
   "rt_range_repo": "仓库",
   "rt_range_user": "个人",

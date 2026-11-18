@@ -63,19 +63,19 @@ class MigrationStats:
 
 
 def _meta(key: str) -> str:
-    from src.domains.mgmt.user.db import get_meta_value
+    from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
 
     return (get_meta_value(key) or "").strip()
 
 
 def _encrypt(value: str) -> str:
-    from src.domains.mgmt.auth.credential_crypto import encrypt
+    from src.domains.mgmt.public import encrypt
 
     return encrypt(value) if value else ""
 
 
 def _decrypt(value: str) -> str:
-    from src.domains.mgmt.auth.credential_crypto import decrypt
+    from src.domains.mgmt.public import decrypt
 
     return decrypt(value) if value else ""
 

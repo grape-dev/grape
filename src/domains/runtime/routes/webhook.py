@@ -75,7 +75,7 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
     """
     from src.kernel.repo_key import to_repo_key
     from src.kernel.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
-    from src.domains.mgmt.user import db as user_db
+    from src.domains.mgmt import public as user_db
 
     repo_key = to_repo_key(repo, provider=provider)
     owner, _, repo_name = repo.partition("/")
@@ -948,7 +948,7 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
     if not repo_key:
         log.warning("A2A: missing repository, reject")
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
-    from src.domains.mgmt.user.db import get_repo_bot_token_no_global
+    from src.domains.mgmt.public import get_repo_bot_token_no_global
     from src.kernel.auth_sdk.auth_token import verify_session_token, verify_session_token_for_repo
     _expected = get_repo_bot_token_no_global(repo_key) or ""
     _bot_ok = bool(_expected) and _auth == _expected
@@ -970,7 +970,7 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
                 return None
             # Issue #372: 检查 1b: 两仓 host_user_id 相同（路径 B 用户 token 托管场景）
             try:
-                from src.domains.mgmt.user.db import get_host_user_id
+                from src.domains.mgmt.public import get_host_user_id
                 # D105 后 host_user_id 是 UUID TEXT（get_host_user_id 返回 str）——
                 # 原 `_session_host > 0` 会对 str 抛 TypeError 并被下面的 except 吞掉，
                 # 导致 A2A 同信任域判定恒不成立（静默）。按该函数文档口径字符串判定。
@@ -1591,7 +1591,7 @@ async def a2a_status_endpoint(request: Request,
 
     # 鉴权：与 POST /api/a2a 同口径（用户级身份校验托管仓库 / 内部 bot、会话 token）
     if user and user.get("auth_type") in ("jwt", "api_key"):
-        from src.domains.mgmt.user.db import get_managed_repos
+        from src.domains.mgmt.public import get_managed_repos
         managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
         if repo_key not in managed:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权查询该仓库的 A2A 交接"})
@@ -1685,7 +1685,7 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
             _uid = int(user_hint.get("id") or user_hint.get("user_id") or 0)
             _username = user_hint.get("username") or ""
             if not _username and _uid > 0:
-                from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                from src.domains.mgmt.public import get_grape_account_by_id
                 _username = (get_grape_account_by_id(_uid) or {}).get("username", "")
             if _username or _uid > 0:
                 from src.kernel.token_resolver import create_provider_from_repo_key
@@ -2021,7 +2021,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
 
         _a2a_session_info = None
         if user and user.get("auth_type") in ("jwt", "api_key"):
-            from src.domains.mgmt.user.db import get_managed_repos
+            from src.domains.mgmt.public import get_managed_repos
             managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
             if repo_key not in managed:
                 raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
@@ -2330,7 +2330,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     skill_name = row[1] or ""
                     skill_id = row[2] or 0
                     if row[2]:
-                        from src.domains.mgmt.user.db import get_skill_by_id
+                        from src.domains.mgmt.public import get_skill_by_id  # 跨域走 owner public
                         _sk = get_skill_by_id(row[2])
                         if _sk:
                             skill_name = _sk.get("skill_name") or skill_name
@@ -2390,7 +2390,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                          "handoff_result": HANDOFF_RESULT_FAILED,
                                          "source_seq": _source_seq,
                                          "message": _reason})
-                        from src.domains.mgmt.user.db import resolve_skill_dispatch
+                        from src.domains.mgmt.public import resolve_skill_dispatch
                         _res = resolve_skill_dispatch(
                             _pipe_skill, _node_sid, repo_key=repo_key,
                             user_id=_a2a_issue_uid, scene_id=_a2a_issue_scene,
@@ -2423,7 +2423,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                             _defaults = json.load(_f)
                         _scene = _defaults.get("scenes", {}).get("default", {})
                         try:
-                            from src.domains.mgmt.user.db import get_repo_scene
+                            from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
                             _scene_id = get_repo_scene(repo_key) or "default"
                             _scene = _defaults.get("scenes", {}).get(_scene_id, _defaults.get("scenes", {}).get("default", {}))
                         except Exception:

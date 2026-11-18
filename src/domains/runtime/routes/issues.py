@@ -504,7 +504,7 @@ def _issue_attachments_batch(repo_keys: list[str]) -> dict[str, list[dict]]:
             else:
                 # 本地磁盘后端：一次 listdir 顶层目录 = 全部 issue 编号
                 from src.api.issues_center import _attach_base_dir
-                from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
+                from src.domains.mgmt.public import get_browser_callback_url as _bcb
                 _base_url = (_bcb() or "").rstrip("/")
                 base = _attach_base_dir(owner, rname, "")
                 if _os.path.isdir(base):
@@ -775,7 +775,7 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
         # 仓库访问 + 真实角色校验（fail-closed：未绑定/查询失败均视为非 admin），
         # 与 admin-confirm-done 同款口径；VCS 权限查询可能耗时，故在 db_lock 之外执行。
         from src.api.deps import check_repo_access
-        from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity
+        from src.domains.mgmt.public import get_repo_admin_identity
         check_repo_access(user, row[2])
         _admin_ident = get_repo_admin_identity(user, row[2])
         if not _admin_ident:
@@ -789,7 +789,7 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
         _actor_role = "admin" if _admin_ident else "owner"
         _actor_name = (_admin_ident or {}).get("username") or user.get("username", "")
         try:
-            from src.domains.mgmt.auth.audit import log_audit
+            from src.domains.mgmt.public import log_audit
             log_audit("issue_reverted_to_pending_review", operator_id=user.get("id", 0) or 0,
                       detail={
                           "repo_key": row[2],
@@ -876,7 +876,7 @@ def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict) -> s
         # resolve_repo_token 派生（TokenResolver 策略链 + 卡能力位
         # owner_identity_token_fallback 的 owner-identity 回落，原 github 专属
         # get_github_token 尾段语义），所有平台含新平台同链零分支。
-        from src.domains.mgmt.user.db import get_repo_token_for as _get_rt
+        from src.domains.mgmt.public import get_repo_token_for as _get_rt
         token = _get_rt(repo_key=repo_key) or ""
         if not token:
             # bot token 未配置，fallback 用户 token（走 with_oauth_token 保护）
@@ -1062,7 +1062,7 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
     幂等：completed → already_done:true（不重复关 VCS、不重复审计）；cancelled → 400。
     """
     from src.api.session_store import set_issue_stage
-    from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity
+    from src.domains.mgmt.public import get_repo_admin_identity
     from src.kernel.session_manager import db, db_lock
 
     # 1) 定位需求（admin 可跨归属确认，仅要求仓库访问权）
@@ -1105,7 +1105,7 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
 
     # 6) 审计留痕（操作人/时间/目标需求；log_audit 自带 created_at + operator_id）
     try:
-        from src.domains.mgmt.auth.audit import log_audit
+        from src.domains.mgmt.public import log_audit
         log_audit("issue_admin_confirmed", operator_id=user.get("id", 0) or 0,
                   detail={
                       "repo_key": _repo_key,
@@ -1432,7 +1432,7 @@ async def handoff_issue(issue_id: int, body: IssueHandoffBody,
             "code": 404, "message": "目标流水线不存在或不可移交（需含 vod 节点且不归属当前仓库）"})
 
     # 3) 幂等防连点：30s 内同一需求重复提交拒绝（复用 a2a-redo 的 meta 键模式）
-    from src.domains.mgmt.user.db import get_meta_value, set_meta_value
+    from src.domains.mgmt.public import get_meta_value, set_meta_value  # 跨域走 owner public
     _mk = f"issue-handoff:{issue_id}"
     _last = get_meta_value(_mk) or ""
     try:
@@ -1492,7 +1492,7 @@ def _audit_terminal_disposition(user: dict, repo_key: str, issue_number, action:
     失败（审计链路异常）只告警，不影响处置结果。
     """
     try:
-        from src.domains.mgmt.auth.audit import log_audit
+        from src.domains.mgmt.public import log_audit
         log_audit("issue_terminal_disposition",
                   operator_id=user.get("id", 0) or 0,
                   detail={"repo_key": repo_key, "issue_number": issue_number,
@@ -1927,14 +1927,14 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
     _is_github = repo_key.startswith("github:")
     if _is_github:
         # Issue #343: GitHub 写操作走仓库 bot token
-        from src.domains.mgmt.user.db import get_github_token
+        from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
         from src.kernel.repo_key import to_repo_key
         api_token = get_github_token(repo_key=to_repo_key(repo_key, provider="github"))
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "仓库 GitHub Bot Token 未配置"})
     else:
         # Issue #343: GitCode 写操作走仓库 bot token（跳过 agent session token）
-        from src.domains.mgmt.user.db import get_repo_bot_token
+        from src.domains.mgmt.public import get_repo_bot_token
         from src.kernel.repo_key import to_repo_key
         api_token = get_repo_bot_token(repo_key=to_repo_key(repo_key))
         if not api_token:
@@ -1943,7 +1943,7 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
     owner, rname = split_owner_repo(repo_key)
     comment_body = f"💬 **开发者澄清**\n\n{msg}"
     if _is_github:
-        from src.domains.mgmt.user.repo_manager import _github_req
+        from src.domains.mgmt.public import _github_req
         try:
             _gh_resp = await asyncio.to_thread(
                 _github_req, "POST", f"https://api.github.com/repos/{owner}/{rname}/issues/{issue_number}/comments",
@@ -2130,7 +2130,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     """
     from src.api.issues_center import (_query_tasks, _build_assignee_filter, _build_creator_filter,
                                        _get_gitcode_user_by_user_id)
-    from src.domains.mgmt.user.org_db import is_org_personal
+    from src.domains.mgmt.public import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal else _org_id
@@ -2277,7 +2277,7 @@ def list_repo_issues(owner: str, repo: str,
       PR 伪卡片同口径过滤（statuses 匹配映射后的 task_status）。
     """
     from src.api.issues_center import _query_tasks, _build_assignee_filter, _build_creator_filter
-    from src.domains.mgmt.user.org_db import is_org_personal
+    from src.domains.mgmt.public import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal else _org_id
@@ -2490,7 +2490,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     # 解析真前缀（与知识面 _resolve_repo_key 同口径）；显式传 repo_key 不受影响。
     _rk_in = _body.get("repo_key") or ""
     if ":" not in _rk_in:
-        from src.domains.mgmt.routes.knowledge import _resolve_repo_key as _resolve_rk
+        from src.domains.mgmt.public import _resolve_repo_key as _resolve_rk
         _rk_in = _resolve_rk(f"{owner}/{repo}")
     b = TaskCreateBody(
         repo_key=_rk_in,
@@ -2665,7 +2665,7 @@ def create_production_release_endpoint(issue_id: int, body: _ProductionReleaseBo
     # 平台建单 token：优先仓库 bot token，其次用户 GitCode token（测试环境可为空，由建单失败兜底）
     _api_token = ""
     try:
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
         _api_token = get_repo_token_with_refresh(_repo_key) or ""
     except Exception:
         _api_token = ""

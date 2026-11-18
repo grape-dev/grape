@@ -526,7 +526,7 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     final_text = ""
 
     # 用量采集（审计 2026-10-17）：autopilot DIRECT 模式跑在主控进程里，以前不记 token
-    from src.domains.insight.observability.master_usage import for_task as _master_for_task
+    from src.domains.insight.public import master_usage_for_task as _master_for_task
     _mu = _master_for_task(task_id, backend, cwd=ws, session_id="", seq=exec_id,
                            repo_key=repo_key, agent_type=agent_type,
                            engine_id=int(engine_id or 0))
@@ -667,7 +667,7 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     _skill_id = 0
     if skill_name:
         try:
-            from src.domains.mgmt.user.db import resolve_skill_id
+            from src.domains.mgmt.public import resolve_skill_id  # 跨域走 owner public
             _skill_id = resolve_skill_id(skill_name, repo_key=repo_key,
                                          user_id=task.get("created_by") or 0)
             if not _skill_id:

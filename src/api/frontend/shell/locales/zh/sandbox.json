@@ -215,7 +215,7 @@
     "tpl_rename_hint": "模板改名后引擎名随之变化（约 1 分钟内生效）",
     "tpl_rename_full": "修改名称会同步变更引擎名（如 hermes:旧名:… → hermes:新名:…，约 1 分钟生效）；引擎身份不变，已绑定的场景/Agent 无需改绑；Template ID 与引擎绑定关系不受影响。",
     "tplid_immutable": "Template ID 创建后不可修改",
-    "bind_header": "绑定引擎（模板已预装）",
+    "bind_header": "绑定预装引擎",
     "bind_tip": "绑定该引擎：模板镜像须已预装它（云沙箱不支持建箱时安装，未预装会在建箱时报错）",
     "loading_engines": "加载引擎列表中…",
     "bind_full_hint": "勾选 = 该模板绑定此引擎（模板镜像须已预装；云沙箱不支持建箱时安装）。不勾 = 不绑定（名字灰色）。",

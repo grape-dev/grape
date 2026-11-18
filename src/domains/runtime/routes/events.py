@@ -492,7 +492,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
 
     # Issue #1255：执行模型展示（用量优先、配置模型回落，与 task-logs info 同一取值函数）
     try:
-        from src.domains.insight.observability.llm_usage import task_model_summary
+        from src.domains.insight.public import task_model_summary
         _ms = task_model_summary(str(task_info.get("task_id") or ""),
                                  int(task_info.get("runtime_id") or 0))
     except Exception:
@@ -568,7 +568,7 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
                         from datetime import datetime, timezone
                         from src.api.event_store import update_event_complete
                         from src.api.event_archive import finalize_event_archive
-                        from src.domains.mgmt.user.db import get_task_token as _get_task_token
+                        from src.domains.mgmt.public import get_task_token as _get_task_token
                         finalize_event_archive(
                             _task.get("repo_key", ""), _task["event_seq"], "cancelled",
                             exit_code=-1,
@@ -705,7 +705,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
 
     # 1) 幂等：30s 内已重派过则拒绝
     try:
-        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.public import get_meta_value, set_meta_value  # 跨域走 owner public
         _last = get_meta_value(f"redispatch:{seq}") or ""
         if _last:
             import time as _time
@@ -791,7 +791,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         except Exception:
             pass
         try:
-            from src.domains.mgmt.user.db import set_meta_value as _smv
+            from src.domains.mgmt.public import set_meta_value as _smv  # 跨域走 owner public
             import time as _time
             _smv(f"redispatch:{seq}", str(_time.time()))
         except Exception:
@@ -885,7 +885,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 reset_event_terminal(seq)
                 _tok_reissued = _reissue_task_session_token(task_id)
                 try:
-                    from src.domains.mgmt.user.db import set_meta_value
+                    from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
                     import time as _time
                     set_meta_value(f"redispatch:{seq}", str(_time.time()))
                 except Exception:
@@ -977,7 +977,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         reset_event_terminal(seq)
         _tok_reissued = _reissue_task_session_token(_new_task_id)
         try:
-            from src.domains.mgmt.user.db import set_meta_value
+            from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
             import time as _time
             set_meta_value(f"redispatch:{seq}", str(_time.time()))
         except Exception:
@@ -1530,7 +1530,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     if _res:
                         log.info(f"[redispatch] seq={seq} PR subscription re-dispatch ok, scene={_scene_id}")
                         try:
-                            from src.domains.mgmt.user.db import set_meta_value as _smv
+                            from src.domains.mgmt.public import set_meta_value as _smv  # 跨域走 owner public
                             import time as _tm
                             _smv(f"redispatch:{seq}", str(_tm.time()))
                         except Exception:
@@ -1555,7 +1555,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     _repo_key = evt.get("repo_key", "") or ""
                     _bot_token = ""
                     try:
-                        from src.domains.mgmt.user.db import get_repo_bot_token_no_global
+                        from src.domains.mgmt.public import get_repo_bot_token_no_global
                         _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
                     except Exception:
                         pass
@@ -1582,7 +1582,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         # 避免流水线卡片/segments 长期残留失败红卡片
                         _mark_event_redispatched(seq, _new_seq, "A2A")
                         try:
-                            from src.domains.mgmt.user.db import set_meta_value as _smv
+                            from src.domains.mgmt.public import set_meta_value as _smv  # 跨域走 owner public
                             import time as _tm
                             _smv(f"redispatch:{seq}", str(_tm.time()))
                         except Exception:
@@ -1631,7 +1631,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     # Issue #600：原事件标记 cancelled（被新事件接管，非失败态）
                     _mark_event_redispatched(seq, _rp_result.get("seq", 0), "run_pipeline")
                     try:
-                        from src.domains.mgmt.user.db import set_meta_value as _smv
+                        from src.domains.mgmt.public import set_meta_value as _smv  # 跨域走 owner public
                         import time as _tm
                         _smv(f"redispatch:{seq}", str(_tm.time()))
                     except Exception:
@@ -1657,7 +1657,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
 
     # 5) 记录幂等时间戳
     try:
-        from src.domains.mgmt.user.db import set_meta_value
+        from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
         import time as _time
         set_meta_value(f"redispatch:{seq}", str(_time.time()))
     except Exception:
@@ -1758,7 +1758,7 @@ async def a2a_redo_event(seq: int, body: A2ARedoBody, user: dict = Depends(requi
     check_repo_access(user, evt.get("repo_key", "") or "")
 
     # 3) 幂等：30s 内同 seq+agent 已补发过则拒绝（同 redispatch:{seq} 模式）
-    from src.domains.mgmt.user.db import get_meta_value, set_meta_value
+    from src.domains.mgmt.public import get_meta_value, set_meta_value  # 跨域走 owner public
     _mk = f"a2a-redo:{seq}:{agent_name}"
     _last = get_meta_value(_mk) or ""
     if _last and (_time.time() - float(_last or 0)) < 30:
@@ -1901,7 +1901,7 @@ def _require_event_bot_token(request: Request, repo_key: str):
     token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
     if not token:
         token = request.headers.get("X-Bot-Token", "") or ""
-    from src.domains.mgmt.user.db import get_repo_bot_token_no_global
+    from src.domains.mgmt.public import get_repo_bot_token_no_global
     from src.kernel.auth_sdk.auth_token import verify_session_token_for_repo
     expected = get_repo_bot_token_no_global(repo_key) or ""
     if expected and token == expected:
@@ -2181,7 +2181,7 @@ def get_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
 def delete_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     """Issue #100: 清理事件关联的对话消息（event_thread 记录）。"""
     evt = _load_event(seq)
-    from src.domains.mgmt.routes.knowledge import _check_repo_member
+    from src.domains.mgmt.public import _check_repo_member
     _check_repo_member(user, evt["repo_key"])
     from src.kernel.session_manager import db_lock
     db = _rt_db
@@ -2198,7 +2198,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
     evt = _load_event(seq)
     if scope not in ("project", "issue", "issue_agent"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 project/issue/issue_agent"})
-    from src.domains.mgmt.routes.knowledge import _check_repo_member
+    from src.domains.mgmt.public import _check_repo_member
     _check_repo_member(user, evt["repo_key"])
 
     from src.api.knowledge import knowledge_path, _issue_num_from
@@ -2431,7 +2431,7 @@ def _execute_conv_task(task_id: str, loop):
         _worker_final_text = ""
         _conv_error_detail = ""  # R20.8b.1: 保存 error 信息用于 401 标记
         # 用量采集（审计 2026-10-17）：本机直跑的事件对话以前不记 token
-        from src.domains.insight.observability.master_usage import for_task as _master_for_task
+        from src.domains.insight.public import master_usage_for_task as _master_for_task
         _mu = _master_for_task(task_id, "hermes", cwd=ws, session_id=oc_session_id,
                                seq=anchor_seq, repo_key=repo_key, agent_type=agent_type)
         _mu.start()
@@ -2650,9 +2650,10 @@ def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
     # Issue #358：agent 写入路径也加大小校验，与 member 手动创建/更新对齐
     # Issue #372：报错文案追加配置方法提示，与 member 创建/更新口径一致
-    from src.domains.mgmt.routes.knowledge import MAX_CONTENT_BYTES, _format_content_limit, _CONTENT_LIMIT_CONFIG_HINT
-    if len((body.content or "").encode("utf-8")) > MAX_CONTENT_BYTES:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}{_CONTENT_LIMIT_CONFIG_HINT}"})
+    from src.domains.mgmt.public import max_content_bytes, format_content_limit, content_limit_config_hint
+    _mcb = max_content_bytes()
+    if len((body.content or "").encode("utf-8")) > _mcb:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {format_content_limit(_mcb)}{content_limit_config_hint()}"})
     from src.api.knowledge import write_knowledge, _issue_num_from
     issue_num = _issue_num_from(evt["issue_id"])
     task_id = write_knowledge(repo_key=evt["repo_key"], scope=body.scope, content=body.content,

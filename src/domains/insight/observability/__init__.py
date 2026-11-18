@@ -333,7 +333,7 @@ def _normalize_terminal(status: str) -> str:
 def _runtime_mode(runtime_id: int) -> str:
     """从 runtime_id 推导 runtime_mode（local/remote）。"""
     try:
-        from src.domains.runtime.engine.service import runtime_credential_id
+        from src.domains.runtime.public import runtime_credential_id
         cid = runtime_credential_id(runtime_id)
         if cid is None:
             return "unknown"
@@ -620,7 +620,7 @@ def collect_business_sampler():
     # 采集新快照
     try:
         from src.domains.runtime import public as runtime_public
-        from src.domains.runtime.engine.health import derive_runtime_health
+        from src.domains.runtime.public import derive_runtime_health
         from datetime import datetime, timezone, timedelta
 
         now_ts = _time.time()

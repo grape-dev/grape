@@ -135,7 +135,7 @@ def _collect_feedback_context(event_seq: int, user: dict):
             try:
                 ar = _rt_public.read_one_any("runtime_engine_attribution", (runtime_id,))
                 if ar:
-                    from src.domains.runtime.engine.instances import instance_name
+                    from src.domains.runtime.public import instance_name
                     engine = {
                         "runtime": row[5] or ar[4] or '',
                         "engine_instance": instance_name(ar[0] or "engine", ar[2] or "", ar[1] or 0),
@@ -147,7 +147,7 @@ def _collect_feedback_context(event_seq: int, user: dict):
                 engine = None
         if engine and runtime_id:
             try:
-                from src.domains.runtime.engine.health_scorer import get_health_score
+                from src.domains.runtime.public import get_health_score
                 hd = get_health_score(runtime_id)
                 engine["health_score"] = hd.get("health_score")
             except Exception:
@@ -295,7 +295,7 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user_or
 
     # M-1（feedback-issue-body-redact-m1-design.md）：fail_summary 会进入转换器生成的公开仓库 Issue 正文，
     # 落库前先脱敏（防明文囤积库内）；出转时 _build_issue_body 再打码一次兜存量明文。两层皆幂等。
-    from src.domains.insight.observability.redact_issue_body import redact_issue_text
+    from src.domains.insight.public import redact_issue_text
     fail_summary = redact_issue_text(fail_summary, 500)
 
     engine_info = ''
@@ -583,7 +583,7 @@ async def upload_feedback_attachment(file: UploadFile = File(...),
     # 生成唯一 key
     file_key = f"feedback/{uuid.uuid4().hex[:16]}{ext}"
 
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
     storage = get_storage()
     if storage:
         # OBS 模式：存到 OBS 桶

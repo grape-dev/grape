@@ -892,9 +892,8 @@ def _index_table(ddl: str) -> str:
 
 
 def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
-                   strict: bool = False, force: bool = False):
-    if not force and _owned_skip(tbl, "ensure column"):
-        return False
+                   strict: bool = False, force: bool = False,
+                   raise_on_guard: bool = False):
     """Idempotent column add: PRAGMA check if column missing then ALTER.
 
     Column name wrapped in backticks for MySQL compatibility (e.g. `binary` is reserved).
@@ -918,6 +917,17 @@ def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
     列没建成也会盖死版本号，下次启动不再重试，线上表现为查询该列 1054 且接口
     静默返回空 —— 与 2026-11-06 issue.vcs_exists 事故同态（QA 审查 M1）。
     """
+    if not force and _owned_skip(tbl, "ensure column"):
+        # 2026-11-18 事故（category_dict 迁移 202611171846）：进程域判定不出/不是属主时
+        # 这里静默 return False，调用方 fn 正常返回 → 迁移照样盖章 → 列永不创建也不重试，
+        # 线上表现是 /api/runtime/scene-tags 500 `Unknown column 'cat_l1_id'`。
+        # ⚠️ 默认保持静默：存量 14 个 strict=True 调用点里有 7 条迁移的属主域与注册域不一致，
+        # 全局改成抛错会把它们一起引爆。需要「跳过即失败」的迁移显式传 raise_on_guard=True。
+        if raise_on_guard:
+            raise RuntimeError(
+                f"_ensure_column({tbl}.{col}) 被域归属守卫跳过（本进程非该表属主），"
+                f"raise_on_guard=True 拒绝静默盖章——迁移应在属主域执行或改用 force=True")
+        return False
     cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
     if col in cols:
         return
@@ -2645,6 +2655,33 @@ register_migration(
     name="login-whitelist-row-columns",
     kind="safe",
     fn=_fn_login_whitelist_row_columns,
+)
+
+
+def _fn_ensure_im_channel_tables() -> None:
+    """存量库补建 IM 渠道表族（2026-11-18）。
+
+    渠道 8 表原先只挂在老轨 `_create_tables()`（`_NEW_TABLES`）里，而存量库
+    （已盖 legacy-stamp 202610300001）启动**不跑老轨** → 表永不创建：
+    页面保存渠道时 `sync_installation` 撞 `no such table` 被吞成 warning
+    （接口仍返回成功、AI 徽标一直「未连接」），安装读取/通知扇出全部静默失效。
+    DDL 与引擎启动迁移共用同一份 001/004，幂等（IF NOT EXISTS + 列判存在），
+    存量库重跑零写入。
+    """
+    from src.kernel.session_manager import db as _c_db, db_lock as _c_lock
+    from src.domains.runtime.im.engine_wiring import (ensure_channel_schema,
+                                                      ensure_notify_outbox_schema)
+    with _c_lock:
+        ensure_channel_schema(_c_db)
+        ensure_notify_outbox_schema(_c_db)
+        _c_db.commit()
+
+
+register_migration(
+    version="202611182001",
+    name="ensure-im-channel-tables",
+    kind="safe",
+    fn=_fn_ensure_im_channel_tables,
 )
 
 
@@ -9487,22 +9524,27 @@ def _fn_category_dict_and_tags() -> None:
             ("scene_market", "cat_l1_id", "INTEGER DEFAULT 0"),
             ("scene_market", "cat_l2_id", "INTEGER DEFAULT 0"),
         ):
-            _ensure_column(c, _tbl, _col, _ddl)
+            # strict=True：本进程不是 _tbl 属主时抛错而不是静默跳过（2026-11-18 事故：
+            # 静默跳过仍盖章 → 列永不创建 → /api/runtime/scene-tags 500 Unknown column）。
+            _ensure_column(c, _tbl, _col, _ddl, strict=True)
         db.commit()
         if not _owned_skip("scene_market", "backfill tags"):
-            try:
-                from src.domains.mgmt.user.db import backfill_scene_market_legacy_tags
-                migrated = backfill_scene_market_legacy_tags()
-                if migrated:
-                    log.info(f"202611171846 scene_market.tags 旧逗号串回填 {migrated} 行")
-            except Exception as e:  # noqa: BLE001 - 表可能尚未由 owner 建出
-                log.warning(f"202611171846 回填 scene_market.tags 失败，跳过: {e}")
+            # 回填失败**不吞**：与补列同理，失败即抛错让迁移不盖章、下次重试。
+            # 该回填幂等（只处理仍含旧逗号串的行），重跑代价低；吞掉会留下「列在、数据没收敛」
+            # 且永不重试，与 G-07 事故同态（架构复审：回填归属 mgmt 段、失败必须可见）。
+            from src.domains.mgmt.user.db import backfill_scene_market_legacy_tags
+            migrated = backfill_scene_market_legacy_tags()
+            if migrated:
+                log.info(f"202611171846 scene_market.tags 旧逗号串回填 {migrated} 行")
 
 
 register_migration(
     version="202611171846",
     name="issue2761-category-dict-and-tags",
     kind="safe",
+    # 显式标域：本迁移只碰 mgmt 属主的 grape_t_category_dict / scene_market；runtime 的
+    # skill 三列由 202611180003（runtime 域）负责。不标会被默认成 mgmt。
+    domains=("mgmt",),
     fn=_fn_category_dict_and_tags,
 )
 
@@ -9780,3 +9822,56 @@ register_migration(
     fn=_fn_issue3055_ident_schema,
 )
 
+
+
+# ===== 2026-11-18 补正：category_dict 列被域归属守卫静默跳过（线上 1054） =====
+# 事故链：202611171846 在「进程域判定不出/非属主」时，_ensure_column 静默 return False，
+# fn 正常返回 → 迁移盖章 → scene_market / skill 的 cat_l1_id 永不创建也不重试 →
+# /api/runtime/scene-tags 500 `Unknown column 'cat_l1_id'`（引擎详情「场景标签」空白）
+# + skill_sync 每轮 ERROR。修法两条：
+#   ① _ensure_column(strict=True) 跳过即抛错（执行器不盖章，下次在属主域重试）；
+#   ② 按属主域各补一条幂等补正迁移，把已盖章库里缺失的列补上（存量库不会重跑老号）。
+_CATEGORY_COLUMN_PLANS = (
+    # (属主域, 表, ((列, DDL), ...), 需重建视图的消费域)
+    # 只留 mgmt：skill 的三列归 runtime 域，已由 202611180001 补（基线自带），
+    # 在这里重复补只会与它抢写同一批列（架构复审 F3 / 基线 085f736a5）。
+    ("mgmt", "scene_market",
+     (("cat_l1_id", "INTEGER DEFAULT 0"), ("cat_l2_id", "INTEGER DEFAULT 0")),
+     ("insight", "runtime")),
+)
+
+# skill 的消费域视图：列由 202611180001 补，但 MariaDB 视图列清单在 CREATE 时固化，
+# 补列不会让既有视图自愈 —— 读 mgmt/insight 上的 skill 视图仍 1054。本迁移只重建视图。
+_SKILL_VIEW_OWNER = "runtime"
+_SKILL_VIEW_TABLE = "skill"
+_SKILL_VIEW_TARGETS = ("mgmt", "insight")
+
+
+def _fn_category_columns_repair(owner_domain: str) -> None:
+    """按属主域补齐 category_dict 相关列 + 刷新消费域视图（幂等，可重跑）。"""
+    plan = next((p for p in _CATEGORY_COLUMN_PLANS if p[0] == owner_domain), None)
+    if plan is None:
+        raise RuntimeError(f"未知属主域: {owner_domain}")
+    _dom, table, cols, targets = plan
+    with db_lock:
+        c = db.cursor()
+        for col, ddl in cols:
+            # raise_on_guard=True：本进程不是属主时抛错（不盖章、下次在属主域重试）
+            _ensure_column(c, table, col, ddl, strict=True, raise_on_guard=True)
+        db.commit()
+    log.info(f"category_columns_repair({owner_domain}.{table}) 完成（列已就绪；消费域视图由部署步骤重建）")
+
+
+def _fn_category_columns_repair_mgmt() -> None:
+    _fn_category_columns_repair("mgmt")
+
+
+register_migration(
+    # 补正 202611171846 在存量库漏掉的列（该号已盖章，不会再跑）。号段取 20261118-1200，
+    # 提交前已核对：源码与 grape_aw11_* 三库 grape_t_schema_migrations 均未占用。
+    version="202611181200",
+    name="issue2761-category-columns-repair-mgmt",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_category_columns_repair_mgmt,
+)

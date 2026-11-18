@@ -40,24 +40,39 @@ def test_no_in_sql_json_extract_join():
     )
 
 
-def test_scope_route_uses_python_side_parse_and_lookup():
-    """New-shape anchor: scope route parses runtime_info via json.loads then queries spc.id=?."""
+def test_scope_route_uses_python_side_parse_and_public_lookup():
+    """New-shape anchor: scope route parses runtime_info in Python, then resolves
+    the provider's credential through the mgmt domain instead of joining the
+    foreign table on the process cursor."""
     src = _src()
     # provider_id 取值走 Python json.loads（非 SQL json_extract）
-    assert re.search(
-        r'_json\.loads\([^)]*\).*provider_id|provider_id.*_json\.loads',
-        src), "scope 路由未走 Python 侧 json.loads 取 provider_id"
-    # spc 查询是等值参数化查询（spc.id=?），且在修复段附近
-    assert "FROM grape_t_sandbox_provider_config spc" in src
-    seg = src[src.find("F-5 修复"):]
-    assert seg and "WHERE spc.id=?" in seg, "scope 路由缺参数化等值查询 WHERE spc.id=?"
-    # miss 不静默：必须有 warning 日志（except: pass 静默吞是原缺陷的放大器）
-    assert "scope 路由未命中 provider 行" in src, "scope 路由 miss 无显式日志"
+    assert re.search(r'json\.loads\([^)\n]*\)[^\n]*provider_id', src), \
+        "scope 路由未走 Python 侧 json.loads 取 provider_id"
+    # 表归 mgmt：本域代码行不得直查该表（拆库下必然 1146；注释提及不算）
+    code_lines = [ln for ln in src.splitlines() if not ln.strip().startswith("#")]
+    assert not any("grape_t_sandbox_provider_config" in ln for ln in code_lines), (
+        "runtime.py 又直查了 mgmt 域的 grape_t_sandbox_provider_config——"
+        "应走 mgmt.public.sandbox_provider_credential_id()")
+    assert "sandbox_provider_credential_id" in src, \
+        "scope 路由未通过 mgmt public 解析 provider 的 credential_id"
+    # scope 行仍在本域取（runtime_credentials 归 runtime）
+    assert "scope, repo_key FROM runtime_credentials" in src, \
+        "scope/repo_key 应在本域 runtime_credentials 上取"
+    # miss 不静默：静默 except 是原缺陷的放大器——失败必须折算成显式 marker
+    assert '"llm_cred_missing": True' in src and '"llm_cred_source": "env_error"' in src, \
+        "env 组装失败仍可能静默返回空 env（缺 llm_cred_missing 失败标记）"
 
 
 def test_no_int_coercion_on_provider_id():
     """First-attempt regression ban: provider_id 不可 int() 强转（UUID 形态 spc.id 会炸→except 回落）。"""
     src = _src()
-    seg = src[src.find("F-5 修复"):]
-    assert seg
-    assert not re.search(r"int\(_pid\)", seg), "provider_id 被 int() 强转——UUID provider 行会异常回落 user 级"
+    # 锚点必须指向真实存在的取值行：旧锚点 `src.find("F-5 修复")` 在上游清理删掉该
+    # 注释后返回 -1、分段退化为文件末尾，断言恒真（变异测试不会报红）。
+    idx = src.find('.get("provider_id")')
+    assert idx != -1, "provider_id 取值行缺失——锚点失效，需按当前实现重锚"
+    line_start = src.rfind("\n", 0, idx) + 1
+    line_end = src.find("\n", idx)
+    value_line = src[line_start:line_end]
+    assert "provider_id" in value_line, "锚点未落在 provider_id 取值行上"
+    assert "int(" not in value_line, \
+        "provider_id 被 int() 强转——UUID provider 行会异常回落 user 级"

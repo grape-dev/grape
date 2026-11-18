@@ -89,8 +89,8 @@ def get_template_readme(template_id: str, user: dict = Depends(require_no_sessio
         return {"content": "", "source": "git"}
 
     try:
-        from src.domains.runtime.vcs.api_client import VcsApiClient
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import VcsApiClient
+        from src.domains.runtime.public import get_platform_card
         _card = get_platform_card(source_platform)
         # token 走平台卡用户级 env（空=匿名拉取，公开仓库仍可用）
         _token = os.environ.get(_card.user_token_env_name(), "") if _card else ""
@@ -140,7 +140,7 @@ def _pick_platform_token(user: dict) -> tuple[str, str]:
     """
     from src.api.deps import get_user_token_for
     from src.domains.mgmt.auth.grape_account_db import list_platform_links
-    from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
+    from src.domains.runtime.public import list_vcs_platforms as _lvp
     _uid = str(user.get("id") or "")
     _uname = user.get("username") or ""
     try:
@@ -177,7 +177,7 @@ async def create_from_template(body: CreateTemplateRequest,
     # D88/S115：卡在册即走显式平台（消基线白名单二元分叉 in ("gitcode","github")——
     # D71 登记收口项）。下游全链路已卡驱动：建仓/身份（create_provider 卡工厂）、
     # 模板 push（S90 卡派生 host）、bot 配置（卡派生 meta key）、host_repo 托管。
-    from src.domains.runtime.vcs.platform_card import get_platform_card as _gate_card
+    from src.domains.runtime.public import get_platform_card as _gate_card
     if body.provider and _gate_card(body.provider) is not None:
         # D44/S66：显式平台 token 统一走 D3 入口（provider 传参，无平台名分支）
         provider = body.provider

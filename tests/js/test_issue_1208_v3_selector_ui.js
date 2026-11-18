@@ -80,7 +80,13 @@ assertContains('debounced preview request', src, 'setTimeout(requestServerPrevie
 assertContains('local fallback retained', src, 'engSelectorPreview(vis, selTags, engineModal.agentType)');
 
 // 7. 静态资源版本号 bump（Vue chunk 走 viewjs 入口）
-assertContains('dashboard cache bumped', html, 'dashboard-view.js?v=75');  // 棘轮对齐 FROZEN：index.html bump 时同步（QA 复核 F2：硬编码 v=66 已过期）
+// 2026-11-18：改为「动态取值 + 下界断言」——硬编码具体版本号每 bump 一次就假红一次
+// （同一事实被抄成 N 份，见用例库 S-10）。下界只增不减，bump 时无需再改这里。
+const dashVerMatch = html.match(/dashboard-view\.js\?v=(\d+)/);
+count++;
+if (!(dashVerMatch && Number(dashVerMatch[1]) >= 76)) {
+  failures.push(`dashboard cache version should be >= 76, got: ${dashVerMatch && dashVerMatch[1]}`);
+}
 
 // 8. 未命中列表：复用「指定引擎实例」列表排布（scope 分组/无复选框/行尾不命中原因）
 assertContains('miss grouped by scope order', src, "['user', 'repo', 'global', 'local']");
@@ -115,10 +121,18 @@ assertContains('collapsed hint label', src, '（已折叠）');
 assertContains('group boxed with border', src, '.dbv-secwrap {\n  border: 1px solid #e8e8ed;\n  border-radius: 12px;');
 assertContains('group counts right aligned', src, '.dbv-seccount {\n  margin-left: auto;');
 assertContains('group count unit', src, '{{ sec.list.length }} 台');
-assertContains('hit box green tint', src, "border: '#bbf7d0', bg: '#f0fdf4'");
-assertContains('offline box amber tint', src, "border: '#fde68a', bg: '#fffbeb'");
-assertContains('miss box gray tint', src, "border: '#e8e8ed', bg: '#fafafa'");
+// 2026-11-18：三组配色从内联 style 搬到 CSS 状态类（暗色档需要能覆盖），断言跟着改源锚
+assertContains('hit box green tint', src, '.dbv-secwrap.hit {\n  border-color: #bbf7d0;\n  background: #f0fdf4;');
+assertContains('offline box amber tint', src, '.dbv-secwrap.offline {\n  border-color: #fde68a;\n  background: #fffbeb;');
+assertContains('miss box gray tint', src, '.dbv-secwrap.miss {\n  border-color: #e8e8ed;\n  background: #fafafa;');
+assertContains('section box consumes state class', src, ':class="sec.key"');
+assertContains('dark hit box tint', src, ":global([data-theme-mode='dark'] .dbv-secwrap.hit) {\n  border-color: rgba(48, 209, 88, 0.32);\n  background: rgba(48, 209, 88, 0.1);");
+assertContains('dark prev row surface', src, ":global([data-theme-mode='dark'] .dbv-prevrow) {\n  background: rgba(255, 255, 255, 0.04);");
 assertContains('collapsed keeps body hidden', src, 'v-if="!engineModal.collapse[sec.key]"');
+
+// 13b. 清除已选标签药丸暗色档（2026-11-18：浅底在暗色弹窗里过亮、灰字看不清）
+assertContains('dark clear-tags pill', src, ":global([data-theme-mode='dark'] .dbv-selclear) {\n  border-color: #3a3a3c;\n  background: rgba(255, 255, 255, 0.06);\n  color: #d1d1d6;");
+assertContains('dark clear-tags hover', src, ":global([data-theme-mode='dark'] .dbv-selclear:hover) {\n  color: #ff453a;");
 
 // 14. 命中徽章不重复打勾（i18n selector_hit 自带 ✓，勿再拼前缀）
 assertContains('hit badge uses i18n value as-is', src, "t('selector_hit')");

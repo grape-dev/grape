@@ -102,7 +102,7 @@ def _user_identities(user) -> tuple[set[str], set[str]]:
     if uid.isdigit() and int(uid) > 0:
         uids.add(uid)
     try:
-        from src.domains.mgmt.auth.grape_account_db import (
+        from src.domains.mgmt.public import (
             get_grape_account_by_id,
             get_grape_account_by_username,
         )
@@ -196,7 +196,7 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
     skill_id = _node_skill_id(node)
     if skill_id:
         try:
-            from src.domains.mgmt.user.db import get_skill_by_id
+            from src.domains.mgmt.public import get_skill_by_id  # 跨域走 owner public
             if get_skill_by_id(skill_id):
                 return True
         except Exception as e:
@@ -205,7 +205,7 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
     if not skill_name:
         return False
     try:
-        from src.domains.mgmt.user.db import resolve_skill_id
+        from src.domains.mgmt.public import resolve_skill_id  # 跨域走 owner public
         return bool(resolve_skill_id(skill_name, repo_key=repo_key, user_id=user_id or ""))
     except Exception as e:
         log.warning(f"scene_precheck: resolve_skill_id failed (fail-open): {e}")

@@ -58,14 +58,14 @@ def table_not_ready() -> HTTPException:
 def uow_write(fn):
     """统一写入：uow + bump epoch + 失效缓存。"""
     from src.kernel.persistence.uow import uow
-    from src.domains.platform.importer import bump_epoch
+    from src.domains.platform.public import bump_epoch
 
     with uow() as s:
         fn(s)
     bump_epoch()
     try:
         from src.domains.mgmt.auth.providers import invalidate_provider_cache
-        from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
+        from src.domains.runtime.public import invalidate_platform_card_cache
 
         invalidate_provider_cache()
         invalidate_platform_card_cache()

@@ -567,7 +567,7 @@ def load_skill_egress(skill_name: str, skill_id: int = 0,
 
     if not skill_md_path and skill_id:
         try:
-            from src.domains.mgmt.user.db import get_skill_path
+            from src.domains.mgmt.public import get_skill_path  # 跨域走 owner public
             skill_md_path = get_skill_path(skill_id) or ""
         except Exception:
             pass

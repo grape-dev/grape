@@ -78,6 +78,20 @@ def test_join_other_user_conversation_rejected():
     _clean()
 
 
+def test_join_accepts_string_uid_from_im_identity():
+    """IM 侧 uid 是字符串（渠道安装表 TEXT），会话 owner 列是 INTEGER。
+
+    /chat 选号 → join_feishu_chat(chat, conv, "1")，此前 Python 层 "1" != 1 恒定 deny，
+    用户侧表现为「❌ 加入失败」。
+    """
+    _clean()
+    cid = _mk_conv(1, title="A")
+    assert join_feishu_chat("ou_111", cid, "1") is True
+    assert get_conversation(cid)["im_channel_id"] == "ou_111"
+    assert join_feishu_chat("ou_111", cid, "2") is False
+    _clean()
+
+
 def test_join_concurrent_switch_single_holder():
     """T04 并发 join：终态只有一条 conversation 持有 chat_id（db_lock 保证）"""
     _clean()

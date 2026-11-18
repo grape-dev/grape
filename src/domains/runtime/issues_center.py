@@ -163,7 +163,7 @@ def _get_user_id_by_gitcode(gitcode_user: str, repo_key: str = "") -> int | None
     # S51 身份优先归属：external_identities 命中即权威
     try:
         from src.kernel.repo_key import parse_repo_key
-        from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login
+        from src.domains.mgmt.public import resolve_user_id_by_platform_login
         _provider, _, _ = parse_repo_key(repo_key or "")
         _uid = resolve_user_id_by_platform_login(_provider, gitcode_user)
         if _uid:
@@ -239,7 +239,7 @@ def _get_gitcode_user_by_user_id(user_id) -> str:
         return ""
     # ① 身份域（权威）
     try:
-        from src.domains.mgmt.auth.grape_account_db import list_platform_links, get_grape_account_by_id
+        from src.domains.mgmt.public import list_platform_links, get_grape_account_by_id
         # A 批：平台登录名解析取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
         _idents = [i for i in (list_platform_links(uid) or [])
                    if i.get("provider") and (i.get("external_login") or "").strip()]
@@ -384,7 +384,7 @@ def _resolve_issue_org_id(repo_key: str, explicit_org: str = "") -> str:
     - 无托管记录 / 无显式 org → 0（个人视图豁免 org 过滤，创建者仍可见）。
     """
     if repo_key:
-        from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
+        from src.domains.mgmt.public import get_org_id_by_repo_key
         org_id = get_org_id_by_repo_key(repo_key) or ""
         return "" if str(org_id) == "0" else str(org_id)  # D105-15：哨兵 0/'0' 统一 ''
     return explicit_org or ""
@@ -443,7 +443,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     # org 归属 = 仓库托管组织（repo 关联需求的唯一权威，issue-244-org-attribution-fix-design.md 方案 B）。
     # 不再信任调用方传入的任意 org_id（如请求上下文 user.org_id），杜绝 #244 式串货漂移；
     # 调用方传入的 org_id 仅与仓库值比对，不一致时告警并校准为仓库值。
-    from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
+    from src.domains.mgmt.public import get_org_id_by_repo_key
     _repo_org = get_org_id_by_repo_key(repo_key) or ""
     if org_id and org_id != _repo_org:
         log.warning(f"ensure_issue_task: org drift rejected repo={repo_key} issue=#{issue_number} "
@@ -826,7 +826,7 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
     """
     try:
         from src.api.session_store import get_issue_stage, get_issue_scene
-        from src.domains.mgmt.pipeline_config import get_pipeline_config
+        from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
         _issue_id = f"#{issue_number}"
         _st = get_issue_stage(repo_key, _issue_id) or {}
         _cur = (_st.get("stage") or "").strip()
@@ -919,7 +919,7 @@ def _pipeline_last_node_check(repo_key: str, issue_number, agent_type: str) -> b
     """完成的 agent 是否为该 issue 流水线末节点（next=='done' 或 next 无下游节点）。"""
     try:
         from src.api.session_store import get_issue_stage, get_issue_scene
-        from src.domains.mgmt.pipeline_config import get_pipeline_config
+        from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
         _issue_id = f"#{issue_number}"
         _st = get_issue_stage(repo_key, _issue_id) or {}
         _cur = (_st.get("stage") or "").strip()
@@ -1056,7 +1056,7 @@ def finalize_issue_to_pending_review(repo_key: str, issue_id: str, agent_type: s
 
         # 「全部节点 completed + 无阻断」检测：每个流水线节点的最新事件
         from src.api.session_store import get_issue_scene
-        from src.domains.mgmt.pipeline_config import get_pipeline_config
+        from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
         _scene = get_issue_scene(repo_key, _tag)
         _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
         _nodes = (get_pipeline_config(_scene_id, repo_key=repo_key) or {}).get("nodes") or []
@@ -2284,7 +2284,7 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
 def _post_github_issue(api_token: str, owner: str, repo: str, title: str,
                        body_text: str = "", assignee: str = "") -> dict:
     """创建 GitHub Issue（POST /repos/{owner}/{repo}/issues，JSON body + Bearer token）。"""
-    from src.domains.mgmt.user.repo_manager import _github_req
+    from src.domains.mgmt.public import _github_req
     body = {"title": title}
     if body_text:
         body["body"] = body_text
@@ -2317,7 +2317,7 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
 
 def _patch_github_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（GitHub 版）。"""
-    from src.domains.mgmt.user.repo_manager import _github_req
+    from src.domains.mgmt.public import _github_req
     _out = _github_req("PATCH", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}",
                        api_token, {"body": body_text})
     # Issue #453 台账（S21，第六轮补漏）：GitHub 多任务模式 patch issue body → issue_edit 记账
@@ -2439,7 +2439,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         # B2 补齐（对齐 gitcode/gitee 链）：bot token 缺席时回落用户 token
         # （get_user_token_for_repo 按 repo_key 前缀派生 provider——github PAT
         # 绑定后建单不再 400「Bot Token 未配置」）。
-        from src.domains.mgmt.user.db import get_github_token
+        from src.domains.mgmt.public import get_github_token  # 跨域走 owner public
         api_token = get_github_token(repo_key=repo_key) or ""
         if not api_token:
             from src.api.deps import get_user_token_for_repo
@@ -2476,7 +2476,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 单独解析 _creator_login，绝不回填到 assignee（Issue #343: external_login 优先）。
     _creator_login = user["username"]
     try:
-        from src.domains.mgmt.auth.grape_account_db import list_platform_links
+        from src.domains.mgmt.public import list_platform_links
         _provider_name = _provider
         # A 批：创建者平台登录名取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
         for ident in list_platform_links(user["id"]):
@@ -2551,7 +2551,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         _scene_for_precheck = body.scene_id if (body.scene_id and body.scene_id != "vod-auto") else ""
         if not _scene_for_precheck:
             try:
-                from src.domains.mgmt.user.db import get_repo_scene
+                from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
                 _scene_for_precheck = get_repo_scene(repo_key) or ""
             except Exception as _rs_err:
                 log.warning(f"create_task: get_repo_scene for precheck failed: {_rs_err}")
@@ -2731,7 +2731,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         else:
             # 无显式场景 → 仓库默认场景兜底（未配置则保持空，走智能推荐）
             try:
-                from src.domains.mgmt.user.db import get_repo_scene
+                from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
                 _scene_to_write = get_repo_scene(repo_key) or ""
             except Exception as _re:
                 log.warning(f"create_task: get_repo_scene failed: {_re}")
@@ -2751,7 +2751,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     _auto_subtask_mode = 0
     if body.scene_id and body.scene_id != "vod-auto":
         try:
-            from src.domains.mgmt.pipeline_config import _query_scene_by_id
+            from src.domains.mgmt.public import _query_scene_by_id  # 跨域走 owner public
             _scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key)
             if _scene_obj:
                 _nodes = _scene_obj.get("nodes", []) or []
@@ -2895,7 +2895,7 @@ def _attach_save(owner: str, repo: str, issue_number, filename: str, content: by
     fpath = os.path.join(attach_dir, filename)
     with open(fpath, "wb") as f:
         f.write(content)
-    from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
+    from src.domains.mgmt.public import get_browser_callback_url as _bcb
     _base_url = (_bcb() or "").rstrip("/")
     return f"{_base_url}/static/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"
 
@@ -2936,7 +2936,7 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     if storage:
         prefix_key = _attach_obs_key(owner, repo, issue_number, "")
         items, _ = storage.list_objects_with_meta(prefix_key)
-        from src.domains.mgmt.user.db import get_meta_value as _gmv
+        from src.domains.mgmt.public import get_meta_value as _gmv  # 跨域走 owner public
         result = []
         for item in items:
             fname = item["key"].rsplit("/", 1)[-1]
@@ -2953,7 +2953,7 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     # 本地降级
     attach_dir = _attach_base_dir(owner, repo, issue_number)
     # Issue #471 E1：附件 URL 是浏览器面地址——走 browser_callback_url
-    from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
+    from src.domains.mgmt.public import get_browser_callback_url as _bcb
     _base_url = (_bcb() or "").rstrip("/")
     result = []
     if os.path.isdir(attach_dir):
@@ -3029,7 +3029,7 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
         _md = _attachments_markdown_block([_att])
         if not _md:
             return False
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
         token = get_repo_token_with_refresh(repo_key) or ""
         if not token:
             log.warning(f"attachment sync comment skipped: no repo token repo={repo_key}")
@@ -3325,7 +3325,7 @@ def get_handoff_targets(repo_key: str, issue_number: int, current_scene_id: str 
     - 返回 {targets: [{id, name, display_name, description, work_branch, scene_type}],
             current_scene_id}。空列表照常返回（前端展示「无可用目标」，非静默失败）。
     """
-    from src.domains.mgmt.pipeline_config import get_scenes
+    from src.domains.mgmt.public import get_scenes  # 跨域走 owner public
     _cur = (current_scene_id or "").strip() or "default"
     targets = []
     try:
@@ -3382,7 +3382,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         return []
 
     from src.kernel.repo_key import to_repo_key, from_repo_key
-    from src.domains.mgmt.pipeline_config import get_pipeline_config
+    from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
 
     _keys = [(r[2] or "", f"#{r[3]}") for r in rows]
     _stage_map = _batch_fetch_issue_state(_keys)
@@ -3397,7 +3397,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         if _rk in _repo_default_scene:
             continue
         try:
-            from src.domains.mgmt.user.db import get_repo_scene
+            from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
             _repo_default_scene[_rk] = get_repo_scene(_rk) or ""
         except Exception:
             _repo_default_scene[_rk] = ""
@@ -3632,7 +3632,7 @@ def _collect_authed_attachments(owner: str, repo: str, issue_number, texts, repo
         repo_key = repo_key or f"gitcode:{owner}/{repo}"
         token = ""
         try:
-            from src.domains.mgmt.user.db import get_gitcode_token
+            from src.domains.mgmt.public import get_gitcode_token
             token = get_gitcode_token(repo_key=repo_key) or ""
         except Exception:
             token = ""

@@ -48,8 +48,8 @@ async def handle_card_action(app_id: str, request: Request):
             )
 
         # 用 _parse_card_action 解析（兼容直接 POST 和 WS 两种格式）
-        from src.domains.runtime.im.feishu_async import _parse_card_action
-        parsed = _parse_card_action(body)
+        from src.domains.runtime.public import parse_card_action
+        parsed = parse_card_action(body)
 
         if not parsed or not parsed.get("text"):
             log.warning(f"[card-callback] parse failed: {json.dumps(body, ensure_ascii=False)[:300]}")

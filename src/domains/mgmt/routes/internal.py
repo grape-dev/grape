@@ -14,15 +14,18 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from src.domains.contracts.local.mgmt_local import MgmtServiceLocal
 from src.domains.mgmt import public as _mgmt_public
 from src.kernel.gsb.provider import get_local_service as _get_local
 
 
-def _mgmt_local() -> MgmtServiceLocal:
+def _mgmt_local():
     """P2 新端点显式走 Local：服务端永远不 HTTP 回环调用自己（provider 可能被其它
-    进程的路由配置成 remote，不能用来判定"本进程实现"）。"""
-    return MgmtServiceLocal()
+    进程的路由配置成 remote，不能用来判定"本进程实现"）。
+
+    走 kernel 的 ``get_local_service``（强制 Local、忽略 GRAPE_PROVIDER_MODE 与路由表），
+    不再直接 import ``contracts.local.mgmt_local``：跨域实现路径只经 kernel provider
+    这一个入口取，contracts 的 Local/Remote 仍是唯一实现。"""
+    return _get_local("mgmt")
 
 router = APIRouter(prefix="/internal", tags=["internal-mgmt"], include_in_schema=False)
 readonly_router = APIRouter(prefix="/internal", tags=["internal-mgmt-readonly"],

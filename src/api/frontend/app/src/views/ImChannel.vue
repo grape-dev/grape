@@ -132,21 +132,6 @@
                 />
               </div>
             </div>
-            <div v-if="qr.open" class="imc__qr">
-              <img v-if="qr.img" :src="qr.img" alt="wechat qr" class="imc__qr-img" />
-              <div class="imc__qr-side">
-                <div class="imc__qr-status">{{ qr.text }}</div>
-                <div v-if="qr.needPin" class="imc__field">
-                  <label>{{ imt('wechat_pin_label') }}</label>
-                  <input v-model="qr.pin" type="text" placeholder="1234" />
-                </div>
-                <div class="imc__qr-actions">
-                  <AGButton v-if="qr.needPin" size="sm" @click="submitWechatPin">{{ imt('wechat_pin_submit') }}</AGButton>
-                  <AGButton variant="plain" size="sm" @click="closeQr">{{ imt('wechat_qr_close') }}</AGButton>
-                </div>
-              </div>
-            </div>
-
             <div class="imc__cfg-actions">
               <AGButton v-if="current === 'wechat'" variant="plain" @click="startWechatBind">
                 {{ imt('btn_scan_wechat') }}
@@ -200,12 +185,84 @@
         </div>
       </div>
     </template>
+
+    <!-- 微信扫码绑定弹窗（Issue #1728）：ilink 返回的是扫码页链接，用 QRCode 库画成二维码 -->
+    <div v-if="qr.open" class="imc__ob-mask" @click.self="closeQr">
+      <div class="imc__ob">
+        <div class="imc__ob-hdr">
+          <b>{{ imt('wechat_modal_title') }}</b>
+          <span class="imc__ob-x" @click="closeQr">✕</span>
+        </div>
+        <div class="imc__ob-body">
+          <div class="imc__ob-qrwrap">
+            <div :id="qrEl" class="imc__ob-qr"></div>
+            <div v-if="qr.failed" class="imc__qr-fallback">{{ qr.link }}</div>
+          </div>
+          <div class="imc__ob-pk">{{ qr.text }}</div>
+          <div v-if="qr.needPin" class="imc__ob-pin">
+            <label>{{ imt('wechat_pin_label') }}</label>
+            <input v-model="qr.pin" type="text" placeholder="1234" />
+          </div>
+          <div class="imc__ob-btns">
+            <AGButton v-if="qr.needPin" size="sm" @click="submitWechatPin">{{ imt('wechat_pin_submit') }}</AGButton>
+            <AGButton v-if="qr.expired" variant="plain" size="sm" @click="startWechatBind">
+              {{ ct('chat.onboard.rescan') }}
+            </AGButton>
+            <AGButton variant="plain" size="sm" @click="closeQr">{{ imt('wechat_qr_close') }}</AGButton>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 飞书扫码配置弹窗（Issues #294/#428 语义：409 询问重开、重绑确认、状态轮询） -->
+    <div v-if="ob.open" class="imc__ob-mask" @click.self="cancelOnboard">
+      <div class="imc__ob">
+        <div class="imc__ob-hdr">
+          <b>{{ ct('chat.onboard.modal_title') }}</b>
+          <span class="imc__ob-x" @click="cancelOnboard">✕</span>
+        </div>
+        <div class="imc__ob-body">
+          <template v-if="ob.status === 'pending'">{{ ct('chat.onboard.generating_qr') }}</template>
+          <template v-else-if="ob.status === 'waiting_confirm' && ob.qrUrl">
+            <div class="imc__ob-qrwrap">
+              <div :id="obEl" class="imc__ob-qr"></div>
+              <div v-if="ob.qrFailed" class="imc__qr-fallback">{{ ob.qrUrl }}</div>
+            </div>
+            <div class="imc__ob-t">{{ ct('chat.onboard.step1_scan') }}</div>
+            <div class="imc__ob-t3">{{ ct('chat.onboard.step2_confirm') }}</div>
+            <div :id="obCountEl" class="imc__ob-pk">{{ ct('chat.onboard.waiting_confirm') }}</div>
+            <div class="imc__ob-warn">{{ ct('chat.onboard.close_warning') }}</div>
+          </template>
+          <template v-else-if="ob.status === 'connected'">
+            <div class="imc__ob-big">✅</div>
+            <div class="imc__ob-t">{{ ct('chat.onboard.success_title') }}</div>
+            <div class="imc__ob-t2">
+              App ID: <span class="imc__mono">{{ ob.appId || '' }}</span>
+            </div>
+            <div class="imc__ob-t2">{{ ct('chat.onboard.secret_saved') }}</div>
+            <div class="imc__ob-pk">{{ ct('chat.onboard.bot_connected') }}</div>
+            <AGButton @click="closeOnboard(true)">{{ ct('chat.onboard.close') }}</AGButton>
+          </template>
+          <template v-else-if="ob.status === 'failed'">
+            <div class="imc__ob-big">❌</div>
+            <div class="imc__ob-r">{{ ct('chat.onboard.failed_title') }}</div>
+            <div class="imc__ob-t2">{{ onboardError }}</div>
+            <div class="imc__ob-btns">
+              <AGButton variant="plain" size="sm" @click="restartOnboard">{{ ct('chat.onboard.rescan') }}</AGButton>
+              <AGButton variant="plain" size="sm" @click="closeOnboard(false)">{{ ct('chat.onboard.cancel') }}</AGButton>
+            </div>
+          </template>
+          <template v-else>{{ ct('chat.onboard.generating_qr') }}</template>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import AGCard from '@/components/ui/AGCard.vue'
+import { ONBOARD_POLL_MS } from '@/lib/onboard.js'
 import AGButton from '@/components/ui/AGButton.vue'
 
 const G = globalThis
@@ -296,8 +353,8 @@ const isConfigured = computed(() => !!curConfig.value.app_id)
 const curGuide = computed(() => guideOf(current.value))
 const guideTitle = computed(() => imt('guide_title', { n: String(curGuide.value.steps.length) }))
 
-function ct(key) {
-  return G.I18N.t(key)
+function ct(key, vars) {
+  return G.I18N.t(key, vars)
 }
 function imt(key, vars) {
   const full = 'chat.im_channel.' + key
@@ -419,8 +476,176 @@ function unbind() {
   )
 }
 
+// ── 二维码渲染（qrcode.min.js 由 shell index.html defer 加载，全局 QRCode）──
+const uid = Math.random().toString(36).slice(2, 8)
+const qrEl = 'imcQr' + uid
+const obEl = 'imcObQr' + uid
+const obCountEl = 'imcObCountdown' + uid
+
+function renderQr(url, elId, size) {
+  const el = document.getElementById(elId)
+  if (!el) return false
+  el.innerHTML = ''
+  if (!url || typeof G.QRCode !== 'function') return false
+  try {
+    new G.QRCode(el, { text: url, width: size || 148, height: size || 148 })
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
 function scanOnboard() {
-  G.startFeishuOnboard('chat_bot')
+  startFeishuOnboard(false)
+}
+
+// ── 飞书扫码配置（与 Chat 页同一后端契约：start/status/cancel，409 询问重开、重绑确认）──
+const ob = reactive({ open: false, status: 'pending', qrUrl: '', qrFailed: false, appId: '', error: '' })
+let obTimer = null
+let obCountdownTimer = null
+let obTaskId = null
+let obExpireAt = 0
+let obQrRendered = false
+const onboardError = computed(function () {
+  const s = String(ob.error || '')
+  if (s.includes('access_denied')) return ct('chat.onboard.error_access_denied')
+  if (s.includes('expired') || s.includes('timeout')) return ct('chat.onboard.qr_expired')
+  return s || ct('chat.onboard.error_unknown')
+})
+
+function startFeishuOnboard(skipRebind) {
+  if (!skipRebind) {
+    const existing = (curConfig.value && curConfig.value.app_id) || ''
+    if (existing) {
+      G.app.showConfirm(ct('chat.onboard.confirm_rebind', { appId: existing }), function () {
+        startFeishuOnboard(true)
+      }, { danger: true })
+      return
+    }
+  }
+  G.API.post('/feishu/onboard/start', { bot_type: 'chat_bot' })
+    .then(function (d) {
+      obTaskId = (d && d.task_id) || ''
+      ob.open = true
+      ob.status = 'pending'
+      ob.qrUrl = ''
+      ob.qrFailed = false
+      ob.appId = ''
+      ob.error = ''
+      obQrRendered = false
+      obExpireAt = 0
+      pollOnboard()
+    })
+    .catch(function (e) {
+      const detail = (e && e.detail) || {}
+      if (e && e.status === 409) {
+        const oldTaskId = detail.task_id || ''
+        G.app.showConfirm(ct('chat.onboard.confirm_restart'), function () {
+          if (oldTaskId) {
+            G.API.post('/feishu/onboard/cancel', { task_id: oldTaskId }).finally(function () {
+              startFeishuOnboard(true)
+            })
+          } else startFeishuOnboard(true)
+        }, { danger: true })
+        return
+      }
+      G.app.showToast(ct('chat.onboard.start_failed', { msg: (e && e.message) || '' }))
+    })
+}
+
+function pollOnboard() {
+  if (obTimer) clearInterval(obTimer)
+  obTimer = setInterval(function () {
+    if (!obTaskId) {
+      stopOnboardTimers()
+      return
+    }
+    G.API.get('/feishu/onboard/status?task_id=' + encodeURIComponent(obTaskId))
+      .then(function (d) {
+        if (!d) return
+        ob.status = d.status || ob.status
+        ob.appId = d.app_id || ob.appId
+        ob.error = d.error || ''
+        if (d.status === 'waiting_confirm' && d.qr_url && !obQrRendered) {
+          obQrRendered = true
+          ob.qrUrl = d.qr_url
+          obExpireAt = d.expire_in ? Date.now() + Number(d.expire_in) * 1000 : 0
+          nextTick(function () {
+            ob.qrFailed = !renderQr(ob.qrUrl, obEl, 200)
+            startOnboardCountdown()
+          })
+        }
+        if (d.status === 'connected' || d.status === 'failed') {
+          stopOnboardTimers()
+          if (d.status === 'connected') load()
+        }
+      })
+      .catch(function () { stopOnboardTimers() })
+  }, ONBOARD_POLL_MS)
+}
+
+function startOnboardCountdown() {
+  if (obCountdownTimer) clearInterval(obCountdownTimer)
+  obCountdownTimer = setInterval(function () {
+    const el = document.getElementById(obCountEl)
+    if (!el || !obExpireAt) {
+      clearInterval(obCountdownTimer)
+      obCountdownTimer = null
+      return
+    }
+    const remain = Math.max(0, Math.round((obExpireAt - Date.now()) / 1000))
+    if (remain <= 0) {
+      el.textContent = ct('chat.onboard.qr_expired')
+      clearInterval(obCountdownTimer)
+      obCountdownTimer = null
+      return
+    }
+    const mm = String(Math.floor(remain / 60)).padStart(2, '0')
+    const ss = String(remain % 60).padStart(2, '0')
+    el.textContent = ct('chat.onboard.waiting_countdown', { time: mm + ':' + ss })
+  }, 1000)
+}
+
+function stopOnboardTimers() {
+  if (obTimer) {
+    clearInterval(obTimer)
+    obTimer = null
+  }
+  if (obCountdownTimer) {
+    clearInterval(obCountdownTimer)
+    obCountdownTimer = null
+  }
+}
+
+function closeOnboard(refresh) {
+  stopOnboardTimers()
+  obTaskId = null
+  ob.open = false
+  ob.status = 'pending'
+  ob.qrUrl = ''
+  ob.qrFailed = false
+  obExpireAt = 0
+  obQrRendered = false
+  if (refresh) load()
+}
+
+function cancelOnboard() {
+  if (obTaskId) {
+    G.app.showConfirm(ct('chat.onboard.confirm_close'), function () {
+      const id = obTaskId
+      closeOnboard(false)
+      if (id) G.API.post('/feishu/onboard/cancel', { task_id: id }).catch(function () {})
+    }, { danger: true })
+    return
+  }
+  closeOnboard(false)
+}
+
+function restartOnboard() {
+  const id = obTaskId
+  closeOnboard(false)
+  if (id) G.API.post('/feishu/onboard/cancel', { task_id: id }).catch(function () {})
+  startFeishuOnboard(true)
 }
 
 function copyManifest() {
@@ -437,45 +662,72 @@ function copyManifest() {
 }
 
 // ── 微信 ilink 扫码绑定（Issue #1728）──
-const qr = reactive({ open: false, id: '', img: '', text: '', needPin: false, pin: '' })
+// 后端 start 返回 {login_id, qrcode_img_content, expires_in}；qrcode_img_content 是扫码页
+// 链接（不是图片），必须用 QRCode 库画成二维码——直接塞 <img src> 只会 broken。
+const qr = reactive({ open: false, id: '', link: '', failed: false, expired: false, text: '', needPin: false, pin: '' })
 let qrTimer = null
+let qrSeq = 0
+
+const WECHAT_STATUS_TEXT = {
+  wait: 'wechat_wait',
+  scaned: 'wechat_scaned',
+  need_verifycode: 'wechat_need_pin',
+  confirmed: 'wechat_confirmed',
+  expired: 'wechat_expired',
+  verify_code_blocked: 'wechat_expired',
+}
 
 function startWechatBind() {
+  closeQr()
   qr.open = true
-  qr.img = ''
-  qr.needPin = false
-  qr.pin = ''
-  qr.text = G.I18N.t('chat.im_channel.loading') || '…'
+  qr.text = imt('wechat_wait') || '…'
   G.API.post('/chat/im/wechat/login/start', {})
     .then(function (res) {
-      qr.id = (res && res.id) || ''
-      qr.img = (res && (res.qrcode_img_content || res.qrcode_url)) || ''
-      pollWechat()
+      qr.id = (res && (res.login_id || res.id)) || ''
+      qr.link = (res && (res.qrcode_img_content || res.qrcode_url)) || ''
+      nextTick(function () {
+        qr.failed = !renderQr(qr.link, qrEl, 200)
+      })
+      if (qr.id) pollWechat()
+      else qr.text = imt('err_qr_failed')
     })
     .catch(function (e) {
-      qr.text = imt('err_qr_failed') + (e && e.message ? e.message : '')
+      qr.text = imt('err_qr_failed') + ((e && e.message) || '')
     })
 }
 
 function pollWechat() {
   if (qrTimer) clearTimeout(qrTimer)
+  const seq = qrSeq
   qrTimer = setTimeout(function () {
-    if (!qr.id) return
+    if (!qr.id || seq !== qrSeq) return
     G.API.get('/chat/im/wechat/login/status?id=' + encodeURIComponent(qr.id) + (qr.needPin && qr.pin ? '&verify_code=' + encodeURIComponent(qr.pin) : ''))
       .then(function (res) {
+        if (seq !== qrSeq) return
         const st = (res && res.status) || ''
         qr.needPin = st === 'need_verifycode'
-        qr.text = st + (res && res.message ? ' · ' + res.message : '')
+        qr.text = (imt(WECHAT_STATUS_TEXT[st] || '') || st) + (res && res.message ? ' · ' + res.message : '')
+        if (res && res.refreshed && res.qrcode_img_content) {
+          qr.link = res.qrcode_img_content
+          nextTick(function () {
+            qr.failed = !renderQr(qr.link, qrEl)
+          })
+        }
         if (st === 'confirmed') {
-          qr.text = imt('connected')
+          qr.text = imt('wechat_confirmed')
           load()
           setTimeout(closeQr, 1200)
           return
         }
-        if (st === 'expired') return
+        if (st === 'expired' || st === 'verify_code_blocked') {
+          qr.expired = true
+          return
+        }
         pollWechat()
       })
-      .catch(function () { pollWechat() })
+      .catch(function () {
+        if (seq === qrSeq) pollWechat()
+      })
   }, 2500)
 }
 
@@ -484,16 +736,22 @@ function submitWechatPin() {
 }
 
 function closeQr() {
+  qrSeq++
   if (qrTimer) clearTimeout(qrTimer)
   qrTimer = null
   qr.open = false
   qr.id = ''
-  qr.img = ''
+  qr.link = ''
+  qr.failed = false
+  qr.expired = false
   qr.needPin = false
   qr.pin = ''
 }
 
-onBeforeUnmount(closeQr)
+onBeforeUnmount(function () {
+  closeQr()
+  stopOnboardTimers()
+})
 
 load()
 </script>
@@ -770,7 +1028,6 @@ load()
   margin-bottom: 3px;
   color: var(--c-text-2);
 }
-</style>
 /* 2026-11-13：六渠道版新增样式（字段/引导/二维码） */
 .imc__field--wide {
   grid-column: 1 / -1;
@@ -815,35 +1072,132 @@ load()
   cursor: pointer;
   text-decoration: none;
 }
-.imc__qr {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-  margin: 12px 0 4px;
-  padding: 14px;
-  border: 1px solid var(--glass-border);
-  border-radius: 14px;
-  background: var(--c-bg);
+.imc__qr-fallback {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--c-text-3);
+  word-break: break-all;
+  padding: 8px;
+  max-width: 210px;
 }
-.imc__qr-img {
-  width: 148px;
-  height: 148px;
-  object-fit: contain;
-  border-radius: 10px;
-  background: #fff;
-}
-.imc__qr-side {
-  flex: 1;
-  min-width: 0;
+/* 微信弹窗内的 PIN 输入（复用飞书弹窗的 imc__ob-* 骨架） */
+.imc__ob-pin {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-.imc__qr-status {
-  font-size: 12px;
+  gap: 6px;
+  align-items: center;
+  margin: 6px 0 10px;
   color: var(--c-text-2);
 }
-.imc__qr-actions {
+.imc__ob-pin input {
+  width: 140px;
+  text-align: center;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-size: 13px;
+  letter-spacing: 2px;
+  outline: none;
+}
+.imc__ob-pin input:focus {
+  border-color: var(--c-text-2);
+}
+/* 飞书扫码弹窗 */
+.imc__ob-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.imc__ob {
+  width: 340px;
+  background: var(--c-bg-elevated);
+  border: 1px solid var(--glass-border);
+  border-radius: 18px;
+  padding: 20px;
+  box-shadow: var(--shadow-2);
+  font-size: 12px;
+  color: var(--c-text);
+}
+.imc__ob-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.imc__ob-hdr b {
+  font-size: 14px;
+}
+.imc__ob-x {
+  cursor: pointer;
+  color: var(--c-text-3);
+}
+.imc__ob-body {
+  text-align: center;
+  color: var(--c-text-3);
+  padding: 10px 0;
+}
+.imc__ob-qrwrap {
+  background: #fff;
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  padding: 12px;
+  display: inline-block;
+  margin-bottom: 10px;
+}
+.imc__ob-qr {
+  width: 200px;
+  min-height: 40px;
+}
+.imc__ob-qr canvas,
+.imc__ob-qr img {
+  display: block;
+}
+.imc__ob-t {
+  color: var(--c-text);
+  margin-bottom: 4px;
+}
+.imc__ob-t2 {
+  color: var(--c-text-2);
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+.imc__ob-t3 {
+  color: var(--c-text-3);
+  margin-bottom: 10px;
+}
+.imc__ob-pk {
+  color: var(--c-text-2);
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.imc__ob-warn {
+  color: var(--c-danger);
+  font-size: 11px;
+  font-weight: 600;
+  border-top: 1px solid var(--glass-border);
+  padding-top: 8px;
+}
+.imc__ob-big {
+  font-size: 34px;
+  margin-bottom: 8px;
+}
+.imc__ob-r {
+  color: var(--c-danger);
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.imc__ob-btns {
   display: flex;
   gap: 8px;
+  justify-content: center;
 }
+.imc__mono {
+  font-family: monospace;
+}
+</style>

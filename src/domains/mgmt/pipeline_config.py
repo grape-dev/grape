@@ -592,7 +592,7 @@ def get_node_by_tag(scene_id: str, tag: str, repo_key: str = "", user_id: int = 
     default 兜底）后补查用户个人场景（scene_market scope='user'），避免个人
     场景节点查不到而静默走名字降级（user_id 此前为死参数）。
     """
-    from src.domains.runtime.engine.engine_select import node_matches_agent_role
+    from src.domains.runtime.public import node_matches_agent_role
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     node = None
     if cfg:
@@ -977,7 +977,7 @@ def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
     node = None
     # Issue #955：id 优先、tag 兜底——节点 id 即角色名（agent_type），tag 为展示
     # 阶段名；非标准 tag（如中文阶段名）的存量场景按 id 匹配恢复引擎绑定
-    from src.domains.runtime.engine.engine_select import node_matches_agent_role
+    from src.domains.runtime.public import node_matches_agent_role
     for n in cfg.get("nodes") or []:
         if node_matches_agent_role(n, agent_type):
             node = n

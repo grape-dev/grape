@@ -938,7 +938,7 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     # 在内置卡/内置渠道中恒在；config-only 平台须已配卡。
     try:
         from src.domains.mgmt.auth.providers import list_providers as _list_channels
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        from src.domains.runtime.public import list_vcs_platforms
         _allowed = set(_list_channels() or []) | set(list_vcs_platforms() or [])
     except Exception as _e:
         from src.kernel.config import log as _alog
@@ -1071,8 +1071,8 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     remaining_bindings = [ident["provider"] for ident in remaining_identities]
 
     try:
-        from src.domains.platform import hooks as _pl_unbind_hooks
-        _pl_unbind_hooks.on_oauth_unbound(str(user["id"]), str(provider))
+        from src.domains.platform.public import on_oauth_unbound
+        on_oauth_unbound(str(user["id"]), str(provider))
     except Exception as _hook_err:
         log.warning(f"platform-link hook (oauth unbound) skipped: {_hook_err}")
     return {"message": "解绑成功", "bindings": remaining_bindings, "affected_repos": affected_count,
@@ -1897,9 +1897,9 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
 def _hook_platform_link(user_id, provider: str) -> None:
     """D109：登录成功 → 写 user_platform_link（fail-safe，绝不阻断登录）。"""
     try:
-        from src.domains.platform import hooks as _pl_hooks
+        from src.domains.platform.public import on_oauth_login
 
-        _pl_hooks.on_oauth_login(str(user_id), str(provider))
+        on_oauth_login(str(user_id), str(provider))
     except Exception as e:  # 钩子失败只告警
         log.warning(f"platform-link hook (oauth login) skipped: {e}")
 

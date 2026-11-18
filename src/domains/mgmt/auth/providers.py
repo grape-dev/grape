@@ -166,7 +166,7 @@ def _channels_from_table() -> dict:
     未就绪 / 读失败 → 返回空 dict，调用方保持原有「文件 + meta」路径（§16 #1 回落）。
     """
     try:
-        from src.domains.platform.importer import is_table_backed
+        from src.domains.platform.public import is_table_backed
 
         if not is_table_backed():
             return {}
@@ -283,7 +283,7 @@ def is_channel_enabled(provider: str) -> bool:
     否则 DB 抖动会把所有登录打挂。只有明确读到 enabled=0 才拒绝。
     """
     try:
-        from src.domains.platform.importer import is_table_backed
+        from src.domains.platform.public import is_table_backed
 
         if not is_table_backed():
             return True
@@ -351,7 +351,7 @@ def _catalog_from_object() -> "list[dict]":
     表未就绪 / 读失败 → 返回空列表，调用方回落 file+meta（§16 影响 #1 fail-open）。
     """
     try:
-        from src.domains.platform.importer import is_table_backed
+        from src.domains.platform.public import is_table_backed
 
         if not is_table_backed():
             return []
@@ -364,7 +364,7 @@ def _catalog_from_object() -> "list[dict]":
             rows = list(OAuthChannelRepo.list_all(s, enabled_only=True))
         if not rows:
             return []
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
 
         out = []
         for row in rows:
@@ -420,7 +420,7 @@ def providers_catalog() -> "list[dict]":
     # 2026-11-13：手动绑定令牌弹窗需要「前往令牌创建页面」的直达链接。
     # 单一来源=平台卡 pat_create_url（gitee/gitlab 等按卡派生）；取不到就返回空串，
     # 由前端对 github/gitcode 用官方预选参数链接兜底（见 AccountView.patCreateUrl）。
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
 
     for key in keys:
         cfg = get_provider(key) or {}
@@ -884,7 +884,7 @@ def _channel_emails_endpoint(provider: str, cfg: "dict | None" = None) -> str:
         pass
     # 内置默认：仅 github 渠道有补抓端点（存量语义，经渠道内置卡派生）
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         card = get_platform_card(provider)
         if card is not None and card.git_tree_family == "github_api":
             return f"https://{card.host.rstrip('/')}/user/emails" if card.host != "github.com" else "https://api.github.com/user/emails"

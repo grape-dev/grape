@@ -271,11 +271,45 @@ def test_upload_failure_is_reported_not_silent():
 
 def test_send_failure_when_transport_not_connected():
     clock = lambda: 1000.0  # noqa: E731
-    transport = WecomTransport("bot_1", clock=clock)
+    # connect_wait=0 = 不等建连，立即失败（等待语义见 test_send_waits_for_connect_then_succeeds）
+    transport = WecomTransport("bot_1", clock=clock, connect_wait=0)
     sender = WecomSender(transport, WecomReplyRegistry(clock=clock), clock=clock)
     res = asyncio.run(sender.send(OutboundMessage(chat_id="u1", text="hi")))
     assert res.ok is False
     assert "not established" in res.error
+
+
+def test_send_waits_for_connect_then_succeeds():
+    """凭证刚保存、WS 还在握手的窗口里发送：应等建连后成功，而不是记 failed。"""
+    async def _run():
+        clock = lambda: 1000.0  # noqa: E731
+        transport = WecomTransport("bot_1", clock=clock, connect_wait=2.0)
+        registry = WecomReplyRegistry(clock=clock)
+        registry.register("u1", "", 1)          # 无回复令牌 → 走 aibot_send_msg
+        sender = WecomSender(transport, registry, clock=clock)
+        task = asyncio.ensure_future(sender.send(OutboundMessage(chat_id="u1", text="hi")))
+        await asyncio.sleep(0.05)
+        assert not task.done()                  # 还在等建连，没有立即判失败
+        ws = FakeWS(transport)
+        transport.attach(ws)                    # 握手完成
+        res = await task
+        return res, ws
+
+    res, ws = asyncio.run(_run())
+    assert res.ok is True, res.error
+    assert [f["cmd"] for f in ws.sent] == ["aibot_send_msg"]
+
+
+def test_send_wait_times_out_when_never_connected():
+    async def _run():
+        clock = lambda: 1000.0  # noqa: E731
+        transport = WecomTransport("bot_1", clock=clock, connect_wait=0.1)
+        sender = WecomSender(transport, WecomReplyRegistry(clock=clock), clock=clock)
+        return await sender.send(OutboundMessage(chat_id="u1", text="hi"))
+
+    res = asyncio.run(_run())
+    assert res.ok is False
+    assert "not established" in res.error and "waited" in res.error
 
 
 def test_transport_ack_timeout_counts_miss():

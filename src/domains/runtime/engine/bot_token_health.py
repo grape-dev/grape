@@ -60,7 +60,7 @@ def _verify_bot_token(provider: str) -> dict:
     _vcs = create_provider(provider)
 
     # D19：全局 bot token 走统一来源链（get_global_bot_token_for，新平台自动支持）
-    from src.domains.mgmt.user.db import get_global_bot_token_for
+    from src.domains.mgmt.public import get_global_bot_token_for
     token = get_global_bot_token_for(provider)
 
     # R25.4/S96：platform_label 走平台卡 name（卡缺位回退 capitalize——
@@ -98,7 +98,7 @@ def _verify_global_bot_token() -> dict:
     # D19：config-only 平台配了全局 bot token（meta global_bot_<p>_token）自动纳入巡检
     try:
         from src.domains.runtime.vcs.platform_card import list_vcs_platforms
-        from src.domains.mgmt.user.db import get_global_bot_token_for
+        from src.domains.mgmt.public import get_global_bot_token_for
         for _prov in list_vcs_platforms():
             if _prov in results or not get_global_bot_token_for(_prov):
                 continue
@@ -134,7 +134,7 @@ def _update_global_token_status(provider: str, result: dict):
     超时/5xx (network) → 不改变标记状态（等下次检查）
     config (no token) → 不改变标记状态
     """
-    from src.domains.mgmt.user.db import set_meta_value, _invalidate_global_bot_cache
+    from src.domains.mgmt.public import set_meta_value, _invalidate_global_bot_cache
     status_key = f"global_{provider}_bot_token_status"
 
     if result["healthy"]:
@@ -161,7 +161,7 @@ async def _verify_repo_bot_tokens():
     R21.3.7: 超时/5xx 不标记
     """
     from src.kernel.token_resolver import create_provider
-    from src.domains.mgmt.user.db import set_meta_value, _invalidate_global_bot_cache
+    from src.domains.mgmt.public import set_meta_value, _invalidate_global_bot_cache
 
     # 查询有 bot token 的仓库
     repos_to_check = []
@@ -223,7 +223,7 @@ def _verify_single_repo_token(repo_key: str, provider: str):
     field = create_provider(provider).token_storage_field()
     token = ""
     try:
-        from src.domains.mgmt.user.db import get_repo_credential_value
+        from src.domains.mgmt.public import get_repo_credential_value
         token = get_repo_credential_value(repo_key, "bot")
     except Exception as e:
         log.warning(f"_verify_single_repo_token: rc read failed for {repo_key}: {e}")
@@ -237,7 +237,7 @@ def _verify_single_repo_token(repo_key: str, provider: str):
             if raw:
                 # N3：列值通道加密，verify 前解密（明文兼容覆盖存量行）
                 # legacy 列回落命中（下线判据=零命中）
-                from src.domains.mgmt.user.db import _decrypt_repo_secret
+                from src.domains.mgmt.public import _decrypt_repo_secret
                 log.warning(f"bot_token_health: legacy column fallback hit "
                             f"repo={repo_key} field={field}")
                 token = _decrypt_repo_secret(raw)
@@ -298,7 +298,7 @@ def _set_repo_bot_token_status(repo_key: str, status: str):
 def _get_health_status() -> dict | None:
     """从 DB meta 表读取上次健康状态。"""
     try:
-        from src.domains.mgmt.user.db import get_meta_value
+        from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
         raw = get_meta_value("bot_token_health")
         if raw:
             return json.loads(raw)
@@ -311,7 +311,7 @@ def _update_health_status(result: dict):
 
     R21.3.4: FAILURE_THRESHOLD=1 只对 401（auth）生效，超时/5xx（network）不计入。
     """
-    from src.domains.mgmt.user.db import set_meta_value
+    from src.domains.mgmt.public import set_meta_value  # 跨域走 owner public
 
     prev = _get_health_status()
     prev_platforms = (prev or {}).get("platforms", {})

@@ -500,7 +500,7 @@ def mark_task_processing_by_conversation(conv_id: str):
     _rt.mark_issue_processing(conv_id, conv_user_id, to_repo_key(repo_key), issue_number)
 
 
-def join_feishu_chat(chat_id: str, conv_id: str, user_id: int) -> bool:
+def join_feishu_chat(chat_id: str, conv_id: str, user_id: "int | str") -> bool:
     """原子切换飞书接入指针（feishu-web-chat-unified-design.md §3.1）。
 
     im_channel_id 从"永久绑定"降级为"当前飞书接入指针"：任一时刻一个飞书接入点

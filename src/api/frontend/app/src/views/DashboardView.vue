@@ -833,13 +833,13 @@
         <div v-if="engineDetachHint" v-html="engineDetachHint"></div>
         <!-- Issue #1208：两模式 radio——切换只换内容，互不清空、互不派生（用户口径 2026-11-09） -->
         <div class="dbv-engmodes">
-          <label :class="{ on: engineModal.mode === 'tag' }">
-            <input type="radio" value="tag" v-model="engineModal.mode" @change="onModeSwitch" />
-            {{ t('selector_mode_tag') }}
-          </label>
           <label :class="{ on: engineModal.mode === 'engine' }">
             <input type="radio" value="engine" v-model="engineModal.mode" @change="onModeSwitch" />
             {{ t('selector_mode_engine') }}
+          </label>
+          <label :class="{ on: engineModal.mode === 'tag' }">
+            <input type="radio" value="tag" v-model="engineModal.mode" @change="onModeSwitch" />
+            {{ t('selector_mode_tag') }}
           </label>
         </div>
         <!-- ══ 标签模式面板 ══ -->
@@ -882,7 +882,7 @@
             <div
               v-if="sec.list.length"
               class="dbv-secwrap"
-              :style="{ borderColor: sec.border, background: sec.bg }"
+              :class="sec.key"
             >
               <div
                 class="dbv-sechead2"
@@ -890,7 +890,7 @@
                 @click="engineModal.collapse[sec.key] = !engineModal.collapse[sec.key]"
               >
                 <span class="dbv-secarrow" :style="{ background: engineModal.collapse[sec.key] ? '#e8e8ed' : 'rgba(0,0,0,.06)' }" :title="engineModal.collapse[sec.key] ? t('dv2.expand_group') : t('dv2.collapse_group')">{{ engineModal.collapse[sec.key] ? '▶' : '▼' }}</span>
-                <span class="dbv-sectitle" :style="{ color: sec.color }">{{ sec.title }}</span>
+                <span class="dbv-sectitle" :class="sec.key">{{ sec.title }}</span>
                 <span v-if="engineModal.collapse[sec.key]" class="dbv-seccollapsed">（已折叠）</span>
                 <span class="dbv-seccount">{{ sec.list.length }} 台</span>
               </div>
@@ -899,11 +899,9 @@
                   v-for="(grp, gi) in sec.groups"
                   :key="sec.key + '-g' + gi"
                 >
-                  <div
-                    class="dbv-secgroupt"
-                    :style="{ color: sec.groupColor }"
-                    >{{ grp.label }} ({{ grp.list.length }})</div
-                  >
+                  <div class="dbv-secgroupt" :class="sec.key">
+                    {{ grp.label }} ({{ grp.list.length }})
+                  </div>
                   <div
                     v-for="p in grp.list"
                     :key="sec.key + '-' + p.engine.id"
@@ -970,6 +968,7 @@
           <div class="dbv-selhint">{{ t('selector_engine_hint') }}</div>
           <!-- 筛选 -->
           <div class="dbv-engfilters">
+            <span v-if="engModalAvailTypes.length" class="dbv-enggrp">{{ t('fgrp_type') }}</span>
             <span
               v-for="ty in engModalAvailTypes"
               :key="'et' + ty"
@@ -977,7 +976,8 @@
               @click="engineModal.filterType = engineModal.filterType === ty ? '' : ty"
               >{{ ty }}</span
             >
-            <span v-if="engModalAvailTypes.length" class="dbv-engsep"></span>
+            <span v-if="engModalAvailScopes.length" class="dbv-engsep"></span>
+            <span v-if="engModalAvailScopes.length" class="dbv-enggrp">{{ t('fgrp_scope') }}</span>
             <span
               v-for="s in engModalAvailScopes"
               :key="'es' + s"
@@ -985,7 +985,31 @@
               @click="engineModal.filterScope = engineModal.filterScope === s ? '' : s"
               >{{ (SCOPE_LABELS_ALL[s] && SCOPE_LABELS_ALL[s]()) || s }}</span
             >
-            <span style="flex: 1"></span>
+            <!-- 场景多选筛选（Issue #198 旧版口径回归：新版实例面板遗漏，用户 2026-11-18 要求补回） -->
+            <span v-if="engModalAvailScenes.length" class="dbv-engsep"></span>
+            <div v-if="engModalAvailScenes.length" class="dbv-ddwrap">
+              <span
+                class="dbv-engdd"
+                :class="{ on: engineModal.filterScene.length }"
+                @click.stop="engineModal.sceneDd = !engineModal.sceneDd"
+                >{{ t('engine_filter_scene') }}{{ engineModal.filterScene.length ? '(' + engineModal.filterScene.length + ')' : ''
+                }}<span class="dbv-ddcaret">▼</span></span
+              >
+              <div v-if="engineModal.sceneDd" class="dbv-ddpane">
+                <label v-for="sn in engModalAvailScenes" :key="'fs' + sn" class="dbv-dditem">
+                  <input
+                    type="checkbox"
+                    :checked="engineModal.filterScene.includes(sn)"
+                    :style="{ accentColor: ENG_SCENE_COLORS[sn] || '#10b981' }"
+                    @change="toggleEngFilterScene(sn)"
+                  />
+                  <span class="dbv-engtag" :style="{ background: ENG_SCENE_COLORS[sn] || '#10b981' }">{{
+                    engSceneDisplayName(sn)
+                  }}</span>
+                </label>
+              </div>
+            </div>
+            <span class="dbv-engspacer"></span>
             <span class="dbv-engclear" @click="engCurIds = []">全不选</span>
           </div>
         </template>
@@ -1030,7 +1054,7 @@
                     {{ e.alias || engineDisplayName(e) }}
                     <span v-if="e.alias" class="dbv-engalias">({{ engineDisplayName(e) }})</span>
                     <span
-                      v-for="tg in e.tags || []"
+                      v-for="tg in plainTags(e)"
                       :key="tg"
                       class="dbv-engtag"
                       :style="{ background: ENG_TAG_COLORS[tg] || '#999' }"
@@ -1381,10 +1405,13 @@ const engineModal = reactive({
   q: '',
   filterType: '',
   filterScope: '',
+  // 场景多选筛选 + 下拉展开态（旧版 Issue #198 口径；用户 2026-11-18 要求补回）
+  filterScene: [],
+  sceneDd: false,
   // Issue #1208：两模式（标签 selector / 实例 engine）——打开时按已配形态初始化，
   // 切换互不清空、互不派生（用户口径 2026-11-09）；两侧选择只活在前端内存，
   // 确定只写当前模式字段、另一侧按 D7 清空。
-  mode: 'tag',
+  mode: 'engine',
   selTags: [],
   collapse: { hit: false, offline: false, miss: false },
   serverPreview: null, // 服务端权威 hit/reason map（id→{hit,reason}），失败降级本地匹配
@@ -1701,19 +1728,12 @@ const previewSections = computed(function () {
       .filter(function (sc) { return groups[sc] && groups[sc].length })
       .map(function (sc) { return { label: (SCOPE_LABELS_ALL[sc] && SCOPE_LABELS_ALL[sc]()) || sc, list: groups[sc] } })
   }
+  // 2026-11-18：配色从内联样式搬到 CSS 状态类（.dbv-secwrap/.dbv-sectitle/.dbv-secgroupt + sec.key），
+  // 否则暗色模式下三组命中预览仍是浅色底（用户报「没有暗夜模式」）。
   return [
-    {
-      key: 'hit', title: t('selector_preview_hit_group'), color: '#15803d',
-      border: '#bbf7d0', bg: '#f0fdf4', groupColor: '#34c759', list: hits, groups: mkGroups(hits),
-    },
-    {
-      key: 'offline', title: t('selector_preview_offline_group'), color: '#b45309',
-      border: '#fde68a', bg: '#fffbeb', groupColor: '#b45309', list: off, groups: mkGroups(off),
-    },
-    {
-      key: 'miss', title: t('selector_preview_miss_group'), color: '#6b7280',
-      border: '#e8e8ed', bg: '#fafafa', groupColor: '#86868b', list: miss, groups: mkGroups(miss),
-    },
+    { key: 'hit', title: t('selector_preview_hit_group'), list: hits, groups: mkGroups(hits) },
+    { key: 'offline', title: t('selector_preview_offline_group'), list: off, groups: mkGroups(off) },
+    { key: 'miss', title: t('selector_preview_miss_group'), list: miss, groups: mkGroups(miss) },
   ]
 })
 const selSummaryText = computed(function () {
@@ -2127,9 +2147,10 @@ function engineBadgeHtml(node) {
       t('dv2.sum_hit_take', { hit: hit }) + (off ? t('dv2.sum_hit_off', { off: off }) : '') +
       (miss ? t('dv2.sum_hit_miss', { miss: miss }) : '') +
       (labels.length ? t('dv2.sum_labels') + labels.join('、') : '')
-    const color = hit ? '#15803d' : off ? '#b45309' : '#6b7280'
-    const bg = hit ? '#f0fdf4' : off ? '#fffbeb' : '#f5f5f7'
-    return `<span class="dbv-engbadge" data-selkey="${esc(key)}" style="background:${bg};color:${color}" title="${esc(tip)}">${esc(txt)}</span>`
+    // 2026-11-18 暗色修正：徽章配色改由 CSS 状态类承载（原先内联浅色背景在暗色下过亮）。
+    // hit=命中(绿) / off=仅离线(琥珀) / zero=零命中(灰)；浅色与暗色各一套，见样式区。
+    const state = hit ? 'hit' : off ? 'off' : 'zero'
+    return `<span class="dbv-engbadge ${state}" data-selkey="${esc(key)}" title="${esc(tip)}">${esc(txt)}</span>`
   }
   const tag = node.tag || node.id
   // Issue #1208：uid 形态优先（D11 uid 输出后徽章按 uid 匹配），旧数据/uid 缺失回退 ids
@@ -2814,6 +2835,8 @@ function onDocClick(e) {
   ) {
     skillPanel.open = false
   }
+  // 关闭引擎弹窗内的场景筛选下拉
+  if (engineModal.sceneDd && !e.target.closest('.dbv-ddwrap')) engineModal.sceneDd = false
 }
 
 // ═══ 引擎选择弹窗 ═══
@@ -2851,15 +2874,20 @@ function openEngineModal(agentType) {
   engineModal.q = ''
   engineModal.filterType = ''
   engineModal.filterScope = ''
+  engineModal.filterScene = []
+  engineModal.sceneDd = false
   engineModal.serverPreview = null
   engineModal.collapse = { hit: false, offline: false, miss: false }
   engineDetachHint.value = ''
   const node = editNodes.value.find((n) => n.id === agentType)
-  // Issue #1208：打开按已配形态初始化模式——已配 selector → 标签；已绑实例（ids/uids）→ 实例；全新 → 标签
-  const selTags = ((node && node.engine_selector) || {}).tags || []
+  const selTagsRaw = ((node && node.engine_selector) || {}).tags
+  const selTags = selTagsRaw || []
+  // Issue #1208：打开按已配形态初始化模式——已配 selector → 标签；其余（已绑实例或全新）→ 实例。
+  // 实例模式是改造前的原始默认形态，用户裁定放第一页并作为缺省。
+  // 广播（已存 selector 但 tags 为空数组）同样是标签模式：不能因长度 0 就掉回实例面板
+  // （#1208 broadcast 口径，用户 2026-11-18 报「广播模式重新点选择引擎会跳到指定引擎实例」）。
   const boundUids = (node && node.engine_runtime_uids) || []
-  const hasBinding = ((node && node.engine_runtime_ids) || []).length || boundUids.length
-  engineModal.mode = selTags.length ? 'tag' : hasBinding ? 'engine' : 'tag'
+  engineModal.mode = Array.isArray(selTagsRaw) ? 'tag' : 'engine'
   engineModal.selTags = selTags.slice()
   const all = (agentEngines.value[agentType] || []).slice()
   // SRE 专属：只显示个人+仓库
@@ -2915,20 +2943,28 @@ const engModalVisible = computed(() => {
 const engModalAvailTypes = computed(() => {
   const types = []
   engModalVisible.value.forEach(function (e) {
-    const n = (e.name || '').toLowerCase()
-    const tn = n.includes('hermes')
-      ? 'hermes'
-      : n.includes('opencode')
-        ? 'opencode'
-        : n.includes('codearts')
-          ? 'codearts'
-          : n.includes('codex')
-            ? 'codex'
-            : ''
+    const tn = engFilterTypeOf(e)
     if (tn && !types.includes(tn)) types.push(tn)
   })
   return types
 })
+// 实例面板引擎类型归一：先按冒号首段（防 opencode:hermes-… 被误判 hermes），
+// 再按关键字收敛成短名，其余引擎保留自身首段成组（保证「没有其他引擎」的筛选项齐全）
+function engFilterTypeOf(e) {
+  const ty = String(engEngineTypeOf(e) || '').toLowerCase()
+  if (['hermes', 'opencode', 'codearts', 'codex'].includes(ty)) return ty
+  if (ty.includes('aishell') || ty.includes('hwcloud')) return 'aishell'
+  if (ty.includes('atomcode')) return 'atomcode'
+  return ty
+}
+const engModalAvailScenes = computed(() => [
+  ...new Set(engModalVisible.value.flatMap((e) => e.scene_tags || [])),
+].filter(Boolean))
+function toggleEngFilterScene(sn) {
+  const i = engineModal.filterScene.indexOf(sn)
+  if (i >= 0) engineModal.filterScene.splice(i, 1)
+  else engineModal.filterScene.push(sn)
+}
 const engModalAvailScopes = computed(() => [
   ...new Set(engModalVisible.value.map((e) => e.scope || 'global')),
 ])
@@ -2951,10 +2987,13 @@ const engModalFiltered = computed(() => {
       if (!hay.includes(q)) return false
     }
     if (engineModal.filterType) {
-      const ename = (e.name || '').toLowerCase()
-      if (!ename.includes(engineModal.filterType)) return false
+      if (engFilterTypeOf(e) !== engineModal.filterType) return false
     }
     if (engineModal.filterScope && (e.scope || 'global') !== engineModal.filterScope) return false
+    if (engineModal.filterScene.length) {
+      const stags = e.scene_tags || []
+      if (!engineModal.filterScene.some((s) => stags.includes(s))) return false
+    }
     return true
   })
 })
@@ -4432,11 +4471,13 @@ onBeforeUnmount(function () {
   border-radius: 999px;
 }
 :deep(.dbv-engbadge.green) {
-  background: var(--g-fill)14;
+  /* 原写法 `var(--g-fill)14` 是无效语法（变量后直接拼两位十六进制），浏览器整条丢弃 → 无底色；
+     统一改成 color-mix 派生（浅色 12% / 暗色同值），与 red/gray 口径一致 */
+  background: color-mix(in srgb, var(--g) 12%, transparent);
   color: var(--g);
 }
 :deep(.dbv-engbadge.blue) {
-  background: var(--a)14;
+  background: color-mix(in srgb, var(--a) 10%, transparent);
   color: var(--a-text);
 }
 :deep(.dbv-engbadge.red) {
@@ -4446,6 +4487,47 @@ onBeforeUnmount(function () {
 :deep(.dbv-engbadge.gray) {
   background: #86868b14;
   color: var(--t3);
+}
+/* selector 摘要徽章（广播 · N 个引擎 · M 离线）三态：浅色/暗色各一套。
+   浅色值沿用原内联口径（#f0fdf4/#fffbeb/#f5f5f7），暗色换成同色系低透明度底 + 提亮字。 */
+:deep(.dbv-engbadge.hit) {
+  background: #f0fdf4;
+  color: #15803d;
+}
+:deep(.dbv-engbadge.off) {
+  background: #fffbeb;
+  color: #b45309;
+}
+:deep(.dbv-engbadge.zero) {
+  background: #f5f5f7;
+  color: #6b7280;
+}
+/* 暗色：用整段 :global(...) 包裹（:global 与 :deep 叠用会产出不可控选择器） */
+:global([data-theme-mode='dark'] .dbv-engbadge.hit) {
+  background: rgba(48, 209, 88, 0.18);
+  color: #30d158;
+}
+:global([data-theme-mode='dark'] .dbv-engbadge.off) {
+  background: rgba(255, 159, 10, 0.18);
+  color: #ff9f0a;
+}
+:global([data-theme-mode='dark'] .dbv-engbadge.zero) {
+  background: rgba(235, 235, 245, 0.1);
+  color: #aeaeb2;
+}
+@media (prefers-color-scheme: dark) {
+  :global([data-theme-mode='auto'] .dbv-engbadge.hit) {
+    background: rgba(48, 209, 88, 0.18);
+    color: #30d158;
+  }
+  :global([data-theme-mode='auto'] .dbv-engbadge.off) {
+    background: rgba(255, 159, 10, 0.18);
+    color: #ff9f0a;
+  }
+  :global([data-theme-mode='auto'] .dbv-engbadge.zero) {
+    background: rgba(235, 235, 245, 0.1);
+    color: #aeaeb2;
+  }
 }
 /* PR 订阅 */
 .dbv-prsub {
@@ -4849,7 +4931,7 @@ onBeforeUnmount(function () {
   cursor: pointer;
   font-size: 12px;
   font-weight: 400;
-  color: var(--t1, #1d1d1f);
+  color: var(--t1, var(--t, #1d1d1f));
 }
 .dbv-engmodes label.on {
   font-weight: 600;
@@ -4897,10 +4979,24 @@ onBeforeUnmount(function () {
   border-radius: 999px;
   font-size: 12.5px;
   cursor: pointer;
+  /* 2026-11-18：浅色保持原值不动，暗色另给覆盖块（暗色下不再是一排亮白药丸） */
   border: 1px solid #e8e8ed;
-  color: var(--t1, #1d1d1f);
+  color: var(--t1, var(--t, #1d1d1f));
   background: #f5f5f7;
   font-weight: 500;
+}
+/* 暗色：实例/标签面板的选项药丸跟随暗色卡片（浅色值上面一条保持原样） */
+:global([data-theme-mode='dark'] .dbv-selchip) {
+  border-color: #3a3a3c;
+  background: #1e1e20;
+  color: #fff;
+}
+@media (prefers-color-scheme: dark) {
+  :global([data-theme-mode='auto'] .dbv-selchip) {
+    border-color: #3a3a3c;
+    background: #1e1e20;
+    color: #fff;
+  }
 }
 .dbv-selchip.on {
   border-color: #5e5ce6;
@@ -4927,6 +5023,27 @@ onBeforeUnmount(function () {
 }
 .dbv-selclear:hover {
   color: #d32f2f;
+}
+/* 暗色：清除已选标签药丸（浅色值上面保持原样）——浅底在暗色弹窗里过亮、灰字看不清 */
+:global([data-theme-mode='dark'] .dbv-selclear) {
+  border-color: #3a3a3c;
+  background: rgba(255, 255, 255, 0.06);
+  color: #d1d1d6;
+}
+:global([data-theme-mode='dark'] .dbv-selclear:hover) {
+  color: #ff453a;
+  border-color: rgba(255, 69, 58, 0.45);
+}
+@media (prefers-color-scheme: dark) {
+  :global([data-theme-mode='auto'] .dbv-selclear) {
+    border-color: #3a3a3c;
+    background: rgba(255, 255, 255, 0.06);
+    color: #d1d1d6;
+  }
+  :global([data-theme-mode='auto'] .dbv-selclear:hover) {
+    color: #ff453a;
+    border-color: rgba(255, 69, 58, 0.45);
+  }
 }
 .dbv-selprevtitle {
   margin-top: 8px;
@@ -4965,7 +5082,7 @@ onBeforeUnmount(function () {
   font-size: 15px;
   line-height: 1;
   flex-shrink: 0;
-  color: var(--t1, #1d1d1f);
+  color: var(--t1, var(--t, #1d1d1f));
   font-weight: 700;
 }
 .dbv-sectitle {
@@ -5006,7 +5123,107 @@ onBeforeUnmount(function () {
   border: 1px solid #fde68a;
 }
 .dbv-prevrow.hit .dbv-prevname {
-  color: var(--t1, #1d1d1f);
+  color: var(--t1, var(--t, #1d1d1f));
+}
+/* 三组命中预览：状态类承载配色（浅色值与原内联值逐字一致） */
+.dbv-secwrap.hit {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+.dbv-secwrap.offline {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+.dbv-secwrap.miss {
+  border-color: #e8e8ed;
+  background: #fafafa;
+}
+.dbv-sectitle.hit {
+  color: #15803d;
+}
+.dbv-sectitle.offline {
+  color: #b45309;
+}
+.dbv-sectitle.miss {
+  color: #6b7280;
+}
+.dbv-secgroupt.hit {
+  color: #34c759;
+}
+.dbv-secgroupt.offline {
+  color: #b45309;
+}
+.dbv-secgroupt.miss {
+  color: #86868b;
+}
+/* 暗色档：三组预览与行卡片（用户 2026-11-18：暗色下这三组没有暗夜效果） */
+:global([data-theme-mode='dark'] .dbv-secwrap.hit) {
+  border-color: rgba(48, 209, 88, 0.32);
+  background: rgba(48, 209, 88, 0.1);
+}
+:global([data-theme-mode='dark'] .dbv-secwrap.offline) {
+  border-color: rgba(255, 159, 10, 0.32);
+  background: rgba(255, 159, 10, 0.1);
+}
+:global([data-theme-mode='dark'] .dbv-secwrap.miss) {
+  border-color: rgba(235, 235, 245, 0.16);
+  background: rgba(235, 235, 245, 0.05);
+}
+:global([data-theme-mode='dark'] .dbv-sectitle.hit),
+:global([data-theme-mode='dark'] .dbv-secgroupt.hit) {
+  color: #30d158;
+}
+:global([data-theme-mode='dark'] .dbv-sectitle.offline),
+:global([data-theme-mode='dark'] .dbv-secgroupt.offline),
+:global([data-theme-mode='dark'] .dbv-prevmarkoff) {
+  color: #ff9f0a;
+}
+:global([data-theme-mode='dark'] .dbv-sectitle.miss),
+:global([data-theme-mode='dark'] .dbv-secgroupt.miss) {
+  color: #aeaeb2;
+}
+:global([data-theme-mode='dark'] .dbv-prevrow) {
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: none;
+}
+:global([data-theme-mode='dark'] .dbv-prevrow.off) {
+  background: rgba(255, 159, 10, 0.1);
+  border-color: rgba(255, 159, 10, 0.3);
+}
+@media (prefers-color-scheme: dark) {
+  :global([data-theme-mode='auto'] .dbv-secwrap.hit) {
+    border-color: rgba(48, 209, 88, 0.32);
+    background: rgba(48, 209, 88, 0.1);
+  }
+  :global([data-theme-mode='auto'] .dbv-secwrap.offline) {
+    border-color: rgba(255, 159, 10, 0.32);
+    background: rgba(255, 159, 10, 0.1);
+  }
+  :global([data-theme-mode='auto'] .dbv-secwrap.miss) {
+    border-color: rgba(235, 235, 245, 0.16);
+    background: rgba(235, 235, 245, 0.05);
+  }
+  :global([data-theme-mode='auto'] .dbv-sectitle.hit),
+  :global([data-theme-mode='auto'] .dbv-secgroupt.hit) {
+    color: #30d158;
+  }
+  :global([data-theme-mode='auto'] .dbv-sectitle.offline),
+  :global([data-theme-mode='auto'] .dbv-secgroupt.offline),
+  :global([data-theme-mode='auto'] .dbv-prevmarkoff) {
+    color: #ff9f0a;
+  }
+  :global([data-theme-mode='auto'] .dbv-sectitle.miss),
+  :global([data-theme-mode='auto'] .dbv-secgroupt.miss) {
+    color: #aeaeb2;
+  }
+  :global([data-theme-mode='auto'] .dbv-prevrow) {
+    background: rgba(255, 255, 255, 0.04);
+    box-shadow: none;
+  }
+  :global([data-theme-mode='auto'] .dbv-prevrow.off) {
+    background: rgba(255, 159, 10, 0.1);
+    border-color: rgba(255, 159, 10, 0.3);
+  }
 }
 .dbv-prevbody {
   flex: 1;
@@ -5152,6 +5369,86 @@ onBeforeUnmount(function () {
   padding: 0 !important;
   border: none !important;
   cursor: default !important;
+}
+/* 右侧弹簧：`.dbv-engfilters > span` 的胶囊样式会给空 span 画出长条，必须整类摘掉 */
+.dbv-engspacer {
+  flex: 1;
+  border: none !important;
+  background: none !important;
+  padding: 0 !important;
+  cursor: default !important;
+}
+/* 分组标题（类型 / 归属）：不能被 `.dbv-engfilters > span` 的胶囊样式收编 */
+/* 选择器必须带 .dbv-engfilters 前缀提高优先级：`.dbv-engfilters > span` 也是 (0,1,1)，
+   只写 .dbv-enggrp 会被它的胶囊字色/字重盖掉（只有 !important 的几何生效） */
+.dbv-engfilters > .dbv-enggrp {
+  font-size: 11px;
+  color: var(--t2);
+  font-weight: 600;
+  white-space: nowrap;
+  border: none !important;
+  background: none !important;
+  padding: 0 !important;
+  margin-right: 2px;
+  cursor: default !important;
+}
+/* 场景多选下拉（实例面板） */
+.dbv-engfilters .dbv-ddwrap {
+  position: relative;
+  display: inline-block;
+}
+.dbv-engfilters .dbv-engdd {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  color: var(--t);
+  background: var(--bg);
+  font-weight: 500;
+}
+.dbv-engfilters .dbv-engdd.on {
+  border-color: var(--a-text);
+  color: var(--on-accent);
+  background: var(--a);
+}
+.dbv-ddcaret {
+  font-size: 8px;
+  opacity: 0.6;
+}
+.dbv-ddpane {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 1200;
+  min-width: 170px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--c);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+}
+.dbv-dditem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.dbv-dditem:hover {
+  background: var(--bg);
+}
+.dbv-dditem input {
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
 }
 .dbv-engclear {
   color: var(--t3) !important;

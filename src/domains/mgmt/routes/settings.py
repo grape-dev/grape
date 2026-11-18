@@ -76,13 +76,13 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
     # 仓外脚本若按旧语义判断"PAT 已配置"需同步调整。
     # D32: 从 user_credentials 表 + external_identities 读凭据，不查 user_accounts
     from src.api.deps import get_user_token_for
-    from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvcs
+    from src.domains.runtime.public import list_vcs_platforms as _lvcs
     _vcs_platform_list = list(_lvcs())  # D102-P 统一：全平台走泛型 <p>_pat 存在性键
     # S63 守卫收口（LABEL_COLOR 同款契约开关派生）：存量专用字段平台（表单键
     # <p>_token，provider 模块声明 SETTINGS_TOKEN_FIELD_SUFFIX="token"）的 PAT
     # 存在性回退不按平台名比较——按开关派生在下方 _legacy_dedicated_pat 里
     # 现取（get_user_token_for 按平台卡派生 provider），未声明平台恒空。
-    from src.domains.runtime.vcs.providers import module_for as _vcs_module_for
+    from src.domains.runtime.public import module_for as _vcs_module_for
 
     def _legacy_dedicated_pat(p: str) -> str:
         """**仅**凭据域里的 PAT（不再回落到 OAuth 登录令牌）。
@@ -464,7 +464,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校
                     # 用 INSERT OR IGNORE + UPDATE（不用 INSERT OR REPLACE，避免覆盖 github_login 等其他平台字段）
                     try:
                         # S99/D74：昵称写收敛 channel_directory（单一权威访问层）
-                        from src.domains.runtime.im.channel_directory import set_gitcode_nickname
+                        from src.domains.runtime.public import set_gitcode_nickname
                         set_gitcode_nickname(user["id"], _gc_user.get("name", ""))
                         log.info(f"unified_user_mapping synced: user_id={user['id']}, gitcode_user={gc_login}")
                     except Exception as _um_e:
@@ -501,7 +501,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # 因此没有 409/转移票据；空值=清除 PAT 凭据（identity 解绑走既有解绑流程）。
     _platform_tokens = explicit.get("platform_tokens") or {}
     if _platform_tokens:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        from src.domains.runtime.public import list_vcs_platforms
         _known_platforms = set(list_vcs_platforms())
         from src.domains.mgmt.user.db import set_credential
         for _p, _raw_tok in (_platform_tokens.items() if isinstance(_platform_tokens, dict) else []):
@@ -584,14 +584,14 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # （与凭据域 D31 存储口径一致）；模块缺失/未声明时回退 <p>_pat 泛型口径。
     _scope_warnings = []
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
+        from src.domains.runtime.public import list_vcs_platforms as _lvp
         _probe_platforms = _lvp()
     except Exception:
         # 卡目录不可用 → 不探测（不做平台名兜底：探测范围必须来自卡目录）
         _probe_platforms = []
     for _provider in _probe_platforms:
         try:
-            from src.domains.runtime.vcs.providers import module_for as _module_for
+            from src.domains.runtime.public import module_for as _module_for
             _suffix = getattr(_module_for(_provider), "SETTINGS_TOKEN_FIELD_SUFFIX", "pat")
         except Exception:
             _suffix = "pat"
@@ -602,7 +602,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                 try:
                     # D43/S63：探测 URL/鉴权形态按平台卡派生（query_token→参数、其余→头）
                     import requests as _req
-                    from src.domains.runtime.vcs.platform_card import get_platform_card
+                    from src.domains.runtime.public import get_platform_card
                     _card = get_platform_card(_provider)
                     if _card is None:
                         raise RuntimeError(f"platform card missing: {_provider}")
@@ -1015,7 +1015,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     user=仅当前登录用户名下 user scope（含 owner=当前用户的本机引擎）。
     """
     from src.domains.mgmt.user import db as user_db
-    from src.domains.runtime.engine.instances import instance_name
+    from src.domains.runtime.public import instance_name
     from src.kernel.session_manager import db, db_lock
 
     uid = str(user.get("id") or "")
@@ -1114,7 +1114,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         rt["worker_name"] = cred["name"]
         # AIShell 显示名（2026-10-13）：出口统一转换 name/display_name，
         # 前端读 rt.name 的所有位置一次生效；内部路由键（DB 行本身）不变
-        from src.domains.runtime.engine.instances import to_display
+        from src.domains.runtime.public import to_display
         rt["display_name"] = to_display(rt.get("display_name") or rt["name"])
         rt["name"] = to_display(rt["name"])
         rt["worker_ip"] = cred["last_ip"]
@@ -1182,7 +1182,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # Issue #498: 透出统一异常口径（health_abnormal/health_reason）与自愈留痕
         # （最近失败时间/衰减窗口有效失败数），前端两口径一致呈现、异常原因可见
         try:
-            from src.domains.runtime.engine.health_scorer import get_health_score
+            from src.domains.runtime.public import get_health_score
             _hd = get_health_score(rt["id"])
             rt["health_score"] = _hd.get("health_score")
             rt["health_total_tasks"] = _hd.get("total_tasks", 0)
@@ -1324,7 +1324,7 @@ def _engine_type_of(rt: dict) -> str:
     n = (rt.get("instance_name") or rt.get("name") or "").lower()
     if not n:
         return ""
-    from src.domains.runtime.engine.instances import canonical_engine
+    from src.domains.runtime.public import canonical_engine
 
     c = canonical_engine(n)
     if c == "aishell-dsh":
@@ -1374,7 +1374,7 @@ def _runtime_health(rt: dict, now: float) -> str:
     - credential_id>0（远端边端）：status+last_seen 四态
     - credential_id=0（本地引擎）：installed/healthy 派生（就绪=online，未装=offline）
     """
-    from src.domains.runtime.engine.health import derive_runtime_health, derive_local_runtime_health
+    from src.domains.runtime.public import derive_runtime_health, derive_local_runtime_health
     if rt.get("credential_id"):
         return derive_runtime_health(rt.get("status") or "offline", rt.get("last_seen_at"), now)
     if rt.get("installed") and rt.get("healthy"):
@@ -1389,7 +1389,7 @@ def _device_health(cstatus: str, last_seen_at: str | None, now: float) -> str:
     凭据 `status` 恒为 'active'（不表达在线），不能像 runtime 行那样按 `status='online'` 判定；
     在线 = 最近心跳在 _DEVICE_ONLINE_WINDOW 内；失联 <5min = 刚失联；>6d = 待回收；其余离线。
     """
-    from src.domains.runtime.engine.health import parse_dt
+    from src.domains.runtime.public import parse_dt
     ts = parse_dt(last_seen_at)
     if ts is None:
         return "offline"
@@ -1541,8 +1541,8 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                       两个端点均已查询，传入复用避免二次全量扫描）
       now: 当前时间戳
     """
-    from src.domains.runtime.engine.health import derive_runtime_health
-    from src.domains.runtime.engine.instances import instance_name
+    from src.domains.runtime.public import derive_runtime_health
+    from src.domains.runtime.public import instance_name
     import json as _json
 
     devices = []
@@ -1570,7 +1570,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
             # agent_runtimes 归运行域：具名查询（任意拓扑）
             _lr_rows = _rt.read_all_any("runtimes_by_credential_full", (cid,))
         # AIShell 显示名（2026-10-13 收口补漏）：worker 设备视图的承载引擎列表
-        from src.domains.runtime.engine.instances import to_display as _td2
+        from src.domains.runtime.public import to_display as _td2
         runtimes = [
             {"id": x[0], "name": _td2(x[1]), "version": x[2], "healthy": bool(x[3]),
              "installed": bool(x[4]),
@@ -1624,7 +1624,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
     except Exception:
         pass
     _device_by_name = {d.get("device_name", ""): d for d in devices}
-    from src.domains.runtime.engine.instances import engine_mounts_to_credential as _mounts_to
+    from src.domains.runtime.public import engine_mounts_to_credential as _mounts_to
 
     for rt in local_runtimes:
         if (rt.get("credential_id") or 0) != 0:
@@ -1637,7 +1637,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
         rt["health"] = _runtime_health(rt, now)
         _hn = rt.get("host_name") or _local_hostname or ""
         rt["instance_name"] = instance_name(rt["name"], _hn, 0)
-        from src.domains.runtime.engine.instances import to_display as _td
+        from src.domains.runtime.public import to_display as _td
         rt["name"] = _td(rt["name"])
         target_device = next((d for d in devices
                               if _mounts_to(0, rt.get("host_name"), d.get("device_name", ""))), None)
@@ -1896,7 +1896,7 @@ def reset_agent_runtime_health(rid: int, user: dict = Depends(require_org_member
         raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
     if (rt.get("scope") or "global") not in ("user", "repo"):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库级/个人级 worker 设备的引擎支持重置健康分，全局引擎不开放"})
-    from src.domains.runtime.engine.health_scorer import reset_health
+    from src.domains.runtime.public import reset_health
     data = reset_health(rid)
     if data is None:
         log.warning(f"health-reset failed for runtime={rid} operator={user.get('username') or user.get('id')}")
@@ -1926,7 +1926,7 @@ def readd_agent_runtime(rid: int, user: dict = Depends(require_org_member), repo
     # 仅仓库级/个人级 worker 设备的引擎可一键加回（I-c，QA 第2轮）。
     if (rt.get("scope") or "global") not in ("user", "repo"):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库级/个人级 worker 设备的引擎支持一键加回，全局引擎不开放"})
-    from src.domains.runtime.engine.recovery import recover_engine
+    from src.domains.runtime.public import recover_engine
     out = recover_engine(rid, trigger="manual", force=True)
     if not out.get("recovered"):
         log.warning(f"engine readd failed runtime={rid} operator={user.get('username') or user.get('id')} "
@@ -1946,9 +1946,9 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
     P0 修复：save_agent_runtimes 可能因 MySQL Lock wait timeout (1205) 抛异常，
     这里接住返回 500 JSON 而非让异常冒泡导致 uvicorn 进程崩溃（→ 502）。
     """
-    from src.domains.runtime.engine.registry import discover_runtimes
-    from src.domains.runtime.engine.local_probe import probe_local_engines
-    from src.domains.runtime.engine.agent import _scan_local_skills
+    from src.domains.runtime.public import discover_runtimes
+    from src.domains.runtime.public import probe_local_engines
+    from src.domains.runtime.public import _scan_local_skills
     from src.domains.mgmt.user import db as user_db
     from src.kernel.config import log
     _hostname = engine_host()
@@ -1957,7 +1957,7 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
         results = probe_local_engines(discovered)
 
         # 扫描本机 local_skills 详情并注入
-        from src.domains.runtime.engine.agent import _scan_local_skills_with_detail
+        from src.domains.runtime.public import _scan_local_skills_with_detail
         for r in results:
             _name = (r.get("name") or "").strip().lower()
             r["local_skills_detail"] = _scan_local_skills_with_detail(_name)
@@ -2016,7 +2016,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     if cred_type not in ("worker", "sandbox"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"无效的凭据类型: {cred_type}（仅支持 worker/sandbox）"})
     if cred_type == "sandbox":
-        from src.domains.runtime.agents.sandbox.backends import get_cloud_registry
+        from src.domains.runtime.public import get_cloud_registry
         _cloud = get_cloud_registry()
         if not platform or platform not in _cloud:
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"沙箱凭据必须指定有效平台（当前支持: {', '.join(sorted(_cloud))}）"})
@@ -2304,7 +2304,7 @@ def _cleanup_scene_engine_runtime_ids(rid_list: list):
     引擎绑定真实性同步：实现已抽至 engine_select.cleanup_scene_engine_bindings（与
     离线超阈值解绑共用），本函数保留为薄包装（调用点不变，行为等价）。
     """
-    from src.domains.runtime.engine.engine_select import cleanup_scene_engine_bindings
+    from src.domains.runtime.public import cleanup_scene_engine_bindings
     cleanup_scene_engine_bindings(rid_list)
 
 
@@ -2432,7 +2432,7 @@ def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depe
             _purged = _rt_purge.purge_runtime_credential(str(cid))
             _purged_rids = [int(x) for x in (_purged.get("rids") or [])]
             if _purged_rids:
-                from src.domains.runtime.engine.engine_select import cleanup_scene_engine_bindings as _csb_purge
+                from src.domains.runtime.public import cleanup_scene_engine_bindings as _csb_purge
                 # commit=False：修掉"在调用方事务中途提前提交"的旧缺陷
                 _csb_purge(_purged_rids, commit=False)
             db.commit()
@@ -2457,12 +2457,12 @@ class ExecModeBody(BaseModel):
 
 @router.get("/execution-mode", operation_id="settings_execution_mode_get", summary="Get execution mode", description="Returns the current execution mode.")
 def get_execution_mode_api(user: dict = Depends(require_no_session_token)):
-    from src.domains.runtime.engine.service import get_execution_mode
+    from src.domains.runtime.public import get_execution_mode
     return {"mode": get_execution_mode()}
 
 @router.get("/pipeline-mode", operation_id="settings_pipeline_mode_get", summary="Get pipeline mode", description="Returns the current pipeline mode.")
 def get_pipeline_mode_api(user: dict = Depends(require_no_session_token)):
-    from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
+    from src.domains.runtime.public import is_plugin_mode
     return {"mode": "plugin" if is_plugin_mode() else "legacy"}
 
 @router.put("/pipeline-mode", operation_id="settings_pipeline_mode_set", summary="Set pipeline mode", description="Sets the pipeline mode.")
@@ -2476,7 +2476,7 @@ def set_pipeline_mode_api(body: dict, user: dict = Depends(require_no_session_to
 
 @router.put("/execution-mode", operation_id="settings_execution_mode_set", summary="Set execution mode", description="Sets the execution mode.")
 def set_execution_mode_api(body: ExecModeBody, user: dict = Depends(require_no_session_token)):
-    from src.domains.runtime.engine.service import set_execution_mode
+    from src.domains.runtime.public import set_execution_mode
     if body.mode not in ("auto", "direct", "queue_remote"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "mode 必须为 auto/direct/queue_remote（queue_local 已废除）"})
     set_execution_mode(body.mode)
@@ -2905,7 +2905,7 @@ def _cascade_pat_clear(user: dict, provider: str) -> dict:
     """
     from src.domains.mgmt.auth.grape_account_db import (
         get_user_identities, delete_external_identity, revoke_provider_credentials)
-    from src.domains.platform import hooks as _pl_hooks
+    from src.domains.platform.public import on_pat_deleted
     ident = next((i for i in get_user_identities(user["id"]) if i["provider"] == provider), None)
     has_oauth = bool(ident and ident.get("has_oauth_token"))
     _check_login_method_before_unbind(user["id"], provider)
@@ -2929,7 +2929,7 @@ def _cascade_pat_clear(user: dict, provider: str) -> dict:
     # 有 OAuth 保有 → 关系行保留；无 OAuth → revoke）。此路径不经过 delete_credential，
     # 漏掉这一步就会出现「PAT 清空、无 OAuth，但用户仍在项目页而进不了引导页」。
     try:
-        _pl_hooks.on_pat_deleted(str(user["id"]), str(provider))
+        on_pat_deleted(str(user["id"]), str(provider))
     except Exception as _e:
         log.warning(f"_cascade_pat_clear: platform-link hook skipped: {_e}")
     return {"oauth_kept": has_oauth}
@@ -2937,8 +2937,8 @@ def _cascade_pat_clear(user: dict, provider: str) -> dict:
 def _pr_web_path_of(provider: str) -> str:
     """provider 模块 PR_WEB_PATH 能力位（前端链接权威）。"""
     try:
-        from src.domains.runtime.vcs.providers import _MODULES
-        return getattr(_MODULES.get(provider), "PR_WEB_PATH", "pull") or "pull"
+        from src.domains.runtime.public import pr_web_path
+        return pr_web_path(provider)
     except Exception:
         return "pull"
 
@@ -2948,11 +2948,11 @@ def _pr_web_path_of(provider: str) -> str:
 def list_vcs_platforms_public():
     # D109 读路径：平台目录以对象模型为权威（grape_t_repo_platforms + caps），
     # 平台卡只是导入源（migrated 前/表未就绪时兜底）——见 kernel.platform_object.registry。
-    from src.domains.platform.registry import platform_descriptors
+    from src.domains.platform.public import platform_descriptors
     # 平台可见性唯一口径（2026-11-15 方案甲）：平台行 `enabled`。
     # 判据单一实现见 src/domains/platform/visibility.py（/repos/member 403 也用同一份）。
     # meta.vcs_platforms_hidden 已退役（迁移 202611170021 把名单写成 enabled=0 并删键）。
-    from src.domains.platform.visibility import is_platform_visible
+    from src.domains.platform.public import is_platform_visible
     out = []
     for row in platform_descriptors():
         provider = str(row.get("provider") or "")
@@ -3016,7 +3016,7 @@ def _attach_engine_models(runtimes: list[dict]) -> None:
       服务端读本机配置兜底（model_source=local_config，复用 worker 同一解析器）
     仅附加模型名字段，绝不输出 base_url/api_key/环境变量值。
     """
-    from src.domains.runtime.engine.engine_model import detect_engine_model
+    from src.domains.runtime.public import detect_engine_model
     recent = _recent_models_by_runtime([rt.get("id") for rt in runtimes])
     for rt in runtimes:
         rt["recent_models"] = recent.get(rt.get("id"), [])
@@ -3676,7 +3676,7 @@ def health_sandbox_provider(provider_id: str, user: dict = Depends(require_no_se
     from src.kernel.crypto import decrypt
     _api_key = decrypt(prov["api_key_enc"]) if prov["api_key_enc"] else ""
 
-    from src.domains.runtime.agents.sandbox.backends import get_adapter
+    from src.domains.runtime.public import get_adapter
     adapter = get_adapter(_platform)
     if not adapter:
         return {"healthy": False, "reason": f"no adapter for platform '{_platform}'"}
@@ -3768,7 +3768,7 @@ def scan_sandbox_templates(provider_id: str, user: dict = Depends(require_no_ses
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
 
     # 取 adapter 与配置（复用 health 的配置读取路径）
-    from src.domains.runtime.agents.sandbox.backends import get_adapter
+    from src.domains.runtime.public import get_adapter
     adapter = get_adapter(prow[0])
     if adapter is None:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"平台 {prow[0]} 无 adapter"})
@@ -3898,7 +3898,7 @@ def _provider_config_from_db(platform: str, provider_id: str | None = None) -> d
     _cred_name = (_brief.get(int(row[3]), ("",))[0] if row[3] else "")
     from src.kernel.crypto import decrypt
     _api_key = decrypt(row[2]) if row[2] else ""
-    from src.domains.runtime.agents.sandbox.backends import get_adapter
+    from src.domains.runtime.public import get_adapter
     adapter = get_adapter(row[0])
     if not adapter:
         return None
@@ -3911,7 +3911,7 @@ def _provider_config_from_db(platform: str, provider_id: str | None = None) -> d
 
 def _do_check_template(provider: str, template_id: str, provider_id: str | None = None) -> dict:
     """校验模板在平台侧是否可用。返回 {status, error}。"""
-    from src.domains.runtime.agents.sandbox.backends import default_registry
+    from src.domains.runtime.public import default_registry
     registry = default_registry()
     factory = registry.get(provider)
     if not factory:
@@ -3957,7 +3957,7 @@ def _do_check_template(provider: str, template_id: str, provider_id: str | None 
 def _validate_extra_config(platform: str, extra: dict) -> dict:
     """通过 adapter 校验 extra_config——必填+类型+白名单。
     不合法时 adapter 抛 ValueError，此处捕获转 HTTPException 400。"""
-    from src.domains.runtime.agents.sandbox.backends import get_adapter
+    from src.domains.runtime.public import get_adapter
     adapter = get_adapter(platform)
     if adapter:
         try:
@@ -4018,7 +4018,7 @@ def update_provider_config(provider: str, body: dict, user: dict = Depends(requi
     - api_key 传空字符串 → 清除（置空）
     """
     _require_admin(user)
-    from src.domains.runtime.agents.sandbox.backends import get_cloud_platforms
+    from src.domains.runtime.public import get_cloud_platforms
     if provider not in get_cloud_platforms():
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"platform 必须为 {get_cloud_platforms()}"})
 
@@ -4075,7 +4075,7 @@ def update_provider_config(provider: str, body: dict, user: dict = Depends(requi
 
 def _validate_platform(platform: str) -> str:
     """从 adapter registry 动态获取支持的平台列表。"""
-    from src.domains.runtime.agents.sandbox.backends import get_cloud_platforms
+    from src.domains.runtime.public import get_cloud_platforms
     supported = get_cloud_platforms()
     if platform not in supported:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"platform 必须为 {supported}"})
@@ -4088,7 +4088,7 @@ def _validate_platform(platform: str) -> str:
 def list_sandbox_platforms(user: dict = Depends(require_no_session_token)):
     """返回云沙箱平台列表 + 每个平台的 ui_schema。本地沙箱不在此列表中。
     按 adapter.priority 排序（小的优先），前端默认选第一个。"""
-    from src.domains.runtime.agents.sandbox.backends import get_all_adapters
+    from src.domains.runtime.public import get_all_adapters
     cloud_adapters = sorted(
         [a for a in get_all_adapters() if getattr(a, "is_cloud", True)],
         key=lambda a: getattr(a, "priority", 100),
@@ -4119,15 +4119,8 @@ def list_sandbox_engines(user: dict = Depends(require_no_session_token)):
     installable: Installer.install_cmd 非空 = 建箱时可自动安装（hermes/opencode）；
     False = 无安装脚本，只能预装进镜像（codearts 模式）。
     """
-    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
-    engines = []
-    for et, plugin in sorted(ENGINE_REGISTRY.items()):
-        engines.append({
-            "engine_type": et,
-            "display_name": et,
-            "installable": bool(getattr(plugin.installer, "install_cmd", "")),
-        })
-    return {"engines": engines}
+    from src.domains.runtime.public import engine_plugins_info
+    return {"engines": engine_plugins_info()}
 
 
 # ===== [沙箱迁移] 用户 LLM 凭据管理（feat/devbox-sandbox-integration 迁移）=====
@@ -4206,8 +4199,8 @@ def upsert_repo_llm_credential(body: RepoLLMCredentialBody, user: dict = Depends
     if not repo_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key 不能为空"})
     _require_repo_llm_admin(repo_key, user)
-    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
-    if body.engine_type not in {"common", *ENGINE_REGISTRY.keys()}:
+    from src.domains.runtime.public import has_engine_type
+    if body.engine_type != "common" and not has_engine_type(body.engine_type):
         raise HTTPException(400, detail={"code": 400, "message": f"invalid engine_type: {body.engine_type}"})
     VALID_PROVIDERS = {"openai", "azure", "deepseek", "zhipu", "moonshot", "qwen", "custom"}
     if body.provider not in VALID_PROVIDERS:
@@ -4283,8 +4276,8 @@ def create_llm_credential(body: LLMCredentialBody, user: dict = Depends(require_
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API key 不能为空"})
 
     # 白名单校验 engine_type（惰性导入防循环依赖）
-    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
-    if body.engine_type not in {"common", *ENGINE_REGISTRY.keys()}:
+    from src.domains.runtime.public import has_engine_type
+    if body.engine_type != "common" and not has_engine_type(body.engine_type):
         raise HTTPException(400, detail={"code": 400, "message": f"invalid engine_type: {body.engine_type}"})
 
     # provider 白名单——防止用户填不认识的 provider（如 anthropic），让错误在配置阶段暴露
@@ -4347,9 +4340,9 @@ def list_llm_credentials(user: dict = Depends(require_no_session_token)):
 @router.get("/llm-engine-types", operation_id="settings_llm_engine_types", summary="List available engine types for LLM credentials")
 def list_llm_engine_types(user: dict = Depends(require_no_session_token)):
     """返回引擎类型列表（common + ENGINE_REGISTRY keys）。"""
-    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
+    from src.domains.runtime.public import engine_types
     types = [{"value": "common", "label": "通用（兜底）"}]
-    for engine in ENGINE_REGISTRY.keys():
+    for engine in engine_types():
         types.append({"value": engine, "label": engine})
     return {"engine_types": types}
 

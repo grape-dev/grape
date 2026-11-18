@@ -29,7 +29,7 @@ def health():
     business_url = ""
     split_warning = ""
     try:
-        from src.domains.mgmt.user.db import (get_server_base_url, is_server_base_url_configured,
+        from src.domains.mgmt.public import (get_server_base_url, is_server_base_url_configured,
                                  get_server_base_url_warning,
                                  get_browser_callback_url, get_worker_connect_url,
                                  get_business_api_url, get_url_split_warning)
@@ -71,7 +71,7 @@ def health():
     # 免鉴权端点只暴露计数与状态，不含仓库/技能明细；查询失败显式 unknown。
     skill_consistency = {"status": "unknown", "refused_recent": 0, "detail": ""}
     try:
-        from src.domains.runtime.engine.health import aggregate_skill_consistency
+        from src.domains.runtime.public import aggregate_skill_consistency
         _sk = aggregate_skill_consistency()
         skill_consistency = {"status": _sk.get("status", "unknown"),
                              "refused_recent": int(_sk.get("refused_recent") or 0),

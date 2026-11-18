@@ -102,7 +102,7 @@ def _apply_runtime_state_compat(c, runtime_id: int, status: str, last_seen_at: s
     user.db → runtime.health → runtime/__init__ → service → user.db 环；
     运行期（调用点）再解析则无环。
     """
-    from src.domains.runtime.engine.health import apply_runtime_state
+    from src.domains.runtime.public import apply_runtime_state
     apply_runtime_state(c, runtime_id, status, last_seen_at)
 
 def _deprecated_user_accounts_fn(replacement: str = ""):
@@ -462,8 +462,8 @@ def set_credential(user_id: "int | str", provider: str, config: dict, kind: str 
             _mg_db.commit()
             if (kind or "") == "pat":
                 try:
-                    from src.domains.platform import hooks as _pl_pat_hooks
-                    _pl_pat_hooks.on_pat_saved(str(user_id), str(provider))
+                    from src.domains.platform.public import on_pat_saved
+                    on_pat_saved(str(user_id), str(provider))
                 except Exception as _hook_err:
                     log.warning(f"platform-link hook (pat saved) skipped: {_hook_err}")
             return True
@@ -587,8 +587,8 @@ def delete_credential(user_id: "int | str", provider: str, kind: str = "") -> bo
             _mg_db.commit()
             if (kind or "") == "pat" and deleted:
                 try:
-                    from src.domains.platform import hooks as _pl_pat_del_hooks
-                    _pl_pat_del_hooks.on_pat_deleted(str(user_id), str(provider))
+                    from src.domains.platform.public import on_pat_deleted
+                    on_pat_deleted(str(user_id), str(provider))
                 except Exception as _hook_err:
                     log.warning(f"platform-link hook (pat deleted) skipped: {_hook_err}")
             return deleted
@@ -2530,7 +2530,7 @@ def get_global_github_bot_username() -> str:
     if _plat:
         return _plat
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         _card = get_platform_card("github")
         if _card is not None and _card.bot_username:
             return _card.bot_username
@@ -2562,7 +2562,7 @@ def get_global_bot_usernames() -> list[str]:
     except Exception:
         pass
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms, get_platform_card
+        from src.domains.runtime.public import list_vcs_platforms, get_platform_card
         for _p in list_vcs_platforms():
             _card = get_platform_card(_p)
             if _card is not None and _card.bot_username and _card.bot_username not in out:
@@ -3254,7 +3254,7 @@ def get_webhook_token_by_repo(full_name: str, provider: str = "") -> str:
             # 消除 `provider in (gitcode,github)` 二元枚举与列名映射硬编码；
             # 有列平台（gitcode/github 派生列名）行为不变。
             try:
-                from src.domains.runtime.vcs.platform_card import get_platform_card
+                from src.domains.runtime.public import get_platform_card
                 _wt_col = (getattr(get_platform_card(provider), "webhook_token_field", "") or "") \
                     if provider else ""
                 if _wt_col:
@@ -4232,7 +4232,7 @@ def _columns_exist(c, table: str, cols: tuple) -> bool:
     ——被探测的表（agent_runtimes / agent_type_runtime_pool / 会话表）归 runtime 库，
     mgmt 域不再持有这些表的 SQL；本别名只为既有调用方（engine_select 等）过渡。
     """
-    from src.domains.runtime.engine.refs_reconcile import columns_exist
+    from src.domains.runtime.public import columns_exist
     return columns_exist(c, table, cols)
 
 
@@ -4365,26 +4365,12 @@ def ensure_credential_uid(credential_id: int, c=None) -> str:
     """Issue #646：确保凭据行有 credential_uid（UUIDv4，一次性终身不变）。
 
     注册/心跳链路调用；未迁移库（无列）返回 ''。可在已有 cursor/锁内复用 c。
+    实现与 SQL 全在 owner 域（runtime_credentials 归 runtime）：
+    `src.domains.runtime.public.ensure_credential_uid`。本壳只为既有 mgmt 调用面
+    与测试连接注入缝保留，不再持有判定逻辑。
     """
-    from src.kernel.engine_uid import new_credential_uid
-    own = c is None
-    if own:
-        c = db.cursor()
-    try:
-        # G-02/F1（守卫复检 201339604）：runtime_credentials 归 runtime——读/写经
-        # runtime public **可调用原语**（进 lib 注册面），游标由调用方传入：与 rebase/
-        # 回填同事务（跨连接读陈旧快照，#868 实测），且保留测试 fixture 的连接注入缝。
-        from src.domains.runtime import public as _rt_pub
-        existing = _rt_pub.credential_uid_by_id(c, credential_id)
-        if existing:
-            return existing
-        uid = new_credential_uid()
-        _rt_pub.set_credential_uid(c, credential_id, uid)
-        if own:
-            db.commit()
-        return uid
-    except Exception:
-        return ""
+    from src.domains.runtime import public as _rt_pub
+    return _rt_pub.ensure_credential_uid(credential_id, c)
 
 
 def _session_uid_mirror_sql(tbl: str) -> str:
@@ -4393,7 +4379,7 @@ def _session_uid_mirror_sql(tbl: str) -> str:
     Issue #3097：SQL 生成与实现随对账例程一并迁至 runtime 域
     （`runtime.engine.refs_reconcile.session_uid_mirror_sql`）。
     """
-    from src.domains.runtime.engine.refs_reconcile import session_uid_mirror_sql
+    from src.domains.runtime.public import session_uid_mirror_sql
     return session_uid_mirror_sql(tbl)
 
 
@@ -4408,7 +4394,7 @@ def _rebind_runtime_references(c, dup_ids: list, keep_id: int, reason: str = "")
     合并账号）经 runtime public 原语落到 runtime 域连接；runtime 进程内复用调用方
     游标（同域事务）。
     """
-    from src.domains.runtime.engine.refs_reconcile import reconcile_for_caller
+    from src.domains.runtime.public import reconcile_for_caller
     return reconcile_for_caller(c, list(dup_ids or []), keep_id, reason=reason)
 
 
@@ -4427,51 +4413,19 @@ def explicit_cleanup_runtime_references(c, runtime_ids: list, reason: str = "") 
 
 
 # ── Issue #868 交叉预警修正：engine_uid 派生源锚定后的存量回填/改绑 ──
-
-_UID_REF_TABLES = (
-    # (表名, 计数键, 引用列说明)
-    ("agent_type_runtime_pool", "pool_rows"),
-    ("engine_capabilities", "capability_rows"),
-    ("agent_tasks", "task_rows"),
-    ("task_messages", "task_message_rows"),
-    ("devops_agent_session", "devops_sessions"),
-    ("chat_agent_session", "chat_sessions"),
-)
+# 表清单与 SQL 随实现一并归 runtime 域（`runtime.public._ENGINE_UID_REF_TABLES`），
+# mgmt 侧不再保留第二份真源。
 
 
 def rebase_engine_uid_references(c, old_uid: str, new_uid: str) -> dict:
     """Issue #868：单个 engine_uid 变更的引用轨道整体改绑（old_uid → new_uid）。
 
-    交叉预警修正配套：云引擎 uid 派生源从「含四段名 name」切换为「不可变身份锚」后，
-    存量按旧键派生的 uid 需要重算回填；本函数保证改绑不留孤儿（池/能力/任务/
-    消息/会话 uid 轨道同步指向新 uid），并输出对账报告（不静默丢弃）。
-    缺列/缺表（未迁移旧库、chat 专用表历史库缺列）容错降级跳过。
-    old_uid == new_uid 或任一为空 → no-op（幂等）。
+    实现（引擎行 + 池/能力/任务/消息/会话 uid 轨道，碰的表全归 runtime）已在
+    owner 域：`src.domains.runtime.public.rebase_engine_uid_references`。本壳保留
+    mgmt 侧既有调用面（db_setup 启动期回填 / 测试连接注入缝），不再持有 SQL。
     """
-    report = {"engines_rebased": 0, "pool_rows": 0, "capability_rows": 0,
-              "task_rows": 0, "task_message_rows": 0,
-              "devops_sessions": 0, "chat_sessions": 0}
-    old_uid = (old_uid or "").strip()
-    new_uid = (new_uid or "").strip()
-    if not old_uid or not new_uid or old_uid == new_uid:
-        return report
-    try:
-        # agent_runtimes 归 runtime 域：SQL 在 runtime public 一份
-        from src.domains.runtime import public as _rt_public
-        report["engines_rebased"] = _rt_public.rename_runtime_engine_uid(old_uid, new_uid)
-    except Exception as _e:
-        log.warning(f"rebase_engine_uid_references agent_runtimes: {_e}")
-    for tbl, key in _UID_REF_TABLES:
-        if not _columns_exist(c, tbl, ("engine_uid",)):
-            continue
-        try:
-            report[key] = c.execute(
-                f"UPDATE {tbl} SET engine_uid=? WHERE engine_uid=?",
-                (new_uid, old_uid)).rowcount
-        except Exception as _e:
-            log.warning(f"rebase_engine_uid_references {tbl}: {_e}")
-    log.info("Issue #868 uid锚定改绑报告: " + json.dumps(report, ensure_ascii=False))
-    return report
+    from src.domains.runtime import public as _rt_public
+    return _rt_public.rebase_engine_uid_references(c, old_uid, new_uid)
 
 
 def rebase_engine_uids_by_anchor(c, anchor_rows: list) -> dict:
@@ -4606,7 +4560,7 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
 def _rows_to_runtimes(rows) -> list[dict]:
     """将 DB 行列表转为 runtime dict 列表（供 get_agent_runtimes / paged 复用）。"""
     # AIShell 显示名（2026-10-13）：出口统一转换 name/display_name（内部键不变）
-    from src.domains.runtime.engine.instances import to_display as _td
+    from src.domains.runtime.public import to_display as _td
     return [
         {"id": r[0], "name": _td(r[1]), "display_name": _td(r[2] or r[1]), "installed": bool(r[3]),
          "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
@@ -4690,14 +4644,14 @@ def is_known_engine_name(name: str) -> bool:
     if name in _KNOWN:
         return True
     try:
-        from src.domains.runtime.engine.executor import discover_backends
+        from src.domains.runtime.public import discover_backends
         if any((b.get("name") or "").strip().lower() == name for b in discover_backends()):
             return True
     except Exception:
         pass
     try:
-        from src.domains.runtime.engine.executor import _BACKENDS
-        if name in _BACKENDS:
+        from src.domains.runtime.public import backend_registered
+        if backend_registered(name):
             return True
     except Exception:
         pass
@@ -4706,7 +4660,7 @@ def is_known_engine_name(name: str) -> bool:
 def _local_engine_info(name: str) -> tuple[bool, str]:
     """按引擎类型名返回本机是否已安装 + cli_path（discover_backends 真实探测，见 engine-selection §7.3）。"""
     try:
-        from src.domains.runtime.engine.executor import discover_backends
+        from src.domains.runtime.public import discover_backends
         for b in discover_backends():
             if (b.get("name") or "").strip().lower() == (name or "").strip().lower():
                 return bool(b.get("installed")), (b.get("cli_path") or "")
@@ -4741,7 +4695,7 @@ def ensure_default_runtime(name: str = "opencode", scope: str = "global"):
         healthy, version = 0, ""
         if installed and cli_path:
             try:
-                from src.domains.runtime.engine.local_probe import probe_local_engines
+                from src.domains.runtime.public import probe_local_engines
                 probed = probe_local_engines([{"name": name, "cli_path": cli_path, "installed": True}])
                 if probed:
                     healthy = 1 if probed[0].get("healthy") else 0
@@ -5880,7 +5834,7 @@ def _webhook_url_for_provider(base_url: str, provider: str) -> str:
     if not base_url:
         return base_url
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         _card = get_platform_card(provider)
         _path = getattr(_card, "webhook_path", "") if _card is not None else ""
     except Exception:
@@ -6016,7 +5970,7 @@ def _rebuild_webhook_url_for_provider(webhook_url: str, provider: str) -> str:
     if not webhook_url:
         return webhook_url
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         card = get_platform_card(provider)
     except Exception:
         card = None
@@ -6090,8 +6044,8 @@ def _path_b_prefix_clause(provider: str) -> str:
     存量数据）；其余平台（github/gitee 等）精确前缀。
     """
     try:
-        from src.domains.runtime.vcs.platform_card import _DEFAULT_CARDS_RAW
-        _default = next(iter(_DEFAULT_CARDS_RAW))
+        from src.domains.runtime.public import default_vcs_provider
+        _default = default_vcs_provider()
     except Exception:
         _default = ""
     if provider == _default:

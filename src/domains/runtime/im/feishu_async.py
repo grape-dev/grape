@@ -467,8 +467,10 @@ class FeishuAsync:
             headers = {"Authorization": f"Bearer {token}"}
 
             # 第一次尝试：chat_id 方式
-            url = f"{FEISHU_BASE}/im/v1/messages?receive_id={chat_id}&receive_id_type=chat_id"
-            payload = {"msg_type": "interactive", "content": card_content}
+            # receive_id 必须走请求体（query 里带 receive_id 的旧写法已被飞书判 230001
+            # invalid receive_id，2026-11-18 实测：query 形式 230001 / body 形式 0 success）
+            url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=chat_id"
+            payload = {"receive_id": chat_id, "msg_type": "interactive", "content": card_content}
             try:
                 async with session.post(url, json=payload, headers=headers) as resp:
                     data = await resp.json()
@@ -509,6 +511,41 @@ class FeishuAsync:
                     ctx.metrics.messages_failed += 1
                     log.warning(f"[{ctx.name}] send_card_to_chat open_id fallback exception: {e}")
             return ""
+
+    async def send_card_raw_to_chat(self, ctx: BotContext, chat_id: str, card: dict,
+                                    fallback_open_id: str = "") -> str:
+        """主动发送**已有卡片体**（不 reply，chat_id 直发，失败回落 open_id）。
+
+        为什么需要：待审核/待澄清这类主动通知没有入站 msg_id，reply API 不可用；
+        若退回 `send_card_to_chat(text)` 会丢掉已构建好的卡片内容（用户侧看到空卡片，
+        只剩「❓ 帮助」按钮 —— 2026-11-18 实障）。这里原样投递 raw card。
+        """
+        content = json.dumps(card, ensure_ascii=False)
+        for rid, rtype in ((chat_id, "chat_id"), (fallback_open_id, "open_id")):
+            if not rid:
+                continue
+            token = await self._ensure_token(ctx)
+            if not token:
+                return ""
+            session = await self._get_session()
+            url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type={rtype}"
+            payload = {"receive_id": rid, "msg_type": "interactive", "content": content}
+            headers = {"Authorization": f"Bearer {token}"}
+            try:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    data = await resp.json()
+                    code = data.get("code", -1)
+                    msg_id = (data.get("data") or {}).get("message_id", "")
+                    if code == 0:
+                        ctx.metrics.messages_sent += 1
+                        log.info(f"[{ctx.name}] send_card_raw_to_chat({rtype}) ok: msg_id={msg_id}")
+                        return msg_id or "ok"
+                    log.warning(f"[{ctx.name}] send_card_raw_to_chat({rtype}) failed: "
+                                f"code={code} msg={data.get('msg','')}")
+            except Exception as e:  # noqa: BLE001 - 逐通道回落，最后返回空
+                ctx.metrics.messages_failed += 1
+                log.warning(f"[{ctx.name}] send_card_raw_to_chat({rtype}) error: {e}")
+        return ""
 
     async def send_text_to_user(self, ctx: BotContext, open_id: str, text: str) -> str:
         """主动发送文本消息给用户"""

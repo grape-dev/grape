@@ -118,8 +118,8 @@ def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
 
     released = False
     try:
-        from src.domains.runtime.im.engine_wiring import _connect, default_db_path
-        conn = _connect(default_db_path())
+        from src.domains.runtime.public import im_db_connection
+        conn = im_db_connection()
         try:
             released = int(conn.execute(
                 "SELECT COUNT(*) FROM grape_t_channel_installation WHERE legacy_app_id=? "
@@ -153,7 +153,7 @@ def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
 
     log.info(f"VOD IM: unbound app_id={old_app_id[:30]} repo={repo_key} (released={released})")
     try:
-        from src.domains.runtime.im.engine_wiring import revoke_installation
+        from src.domains.runtime.public import revoke_installation
         if revoke_installation("repo", repo_key=repo_key, app_id=old_app_id):
             log.info(f"VOD IM: grape_t_channel_installation revoked for {repo_key}")
     except Exception as e:
@@ -295,7 +295,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                         if brow[1]:
                             _d = _rt_agents.read_one_any("credential_device_name", (brow[1],))
                             _dev = _d[0] if _d else ""
-                        from src.domains.runtime.engine.instances import instance_name
+                        from src.domains.runtime.public import instance_name
                         instance_name_val = instance_name(brow[0], _dev or "", brow[1] or 0)
                 _sub_evts = []
                 try:
@@ -389,7 +389,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     pool = []
     _eids = []  # Issue #524: 场景声明引擎集合（声明配置），供 declared/effective 区分
     try:
-        from src.domains.runtime.engine.instances import instance_name
+        from src.domains.runtime.public import instance_name
         from src.api.pipeline_config import get_scene_engine_ids
         from src.kernel.session_manager import db, db_lock
         # Issue #1310：凭据名（runtime_credentials.name）查询；本机直连（cid=0）回退 host_name
@@ -453,7 +453,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
 
         _eids = get_scene_engine_ids(_scene_id, name, repo_key=repo_key, user_id=_uid)
         if _eids:
-            from src.domains.runtime.engine.engine_select import _engines_by_ids, load_engine_selection, _norm_repo
+            from src.domains.runtime.public import _engines_by_ids, load_engine_selection, _norm_repo
             _cfg = load_engine_selection()
             _repo = _norm_repo(repo_key)
             pool = _engines_by_ids(_eids, _repo, _cfg)
@@ -480,7 +480,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                             (_dev_scene, *_repo_keys))
                 _sr = _sc.fetchone()
             if _sr:
-                from src.domains.runtime.engine.engine_select import get_detached_engine_hints
+                from src.domains.runtime.public import get_detached_engine_hints
                 detached_engines = get_detached_engine_hints(scene_row_id=_sr[0])
     except Exception as _de:
         log.warning(f"get_agent_detail: detached_engines lookup failed: {_de}")
@@ -616,8 +616,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             app_secret = str(_inst_cfg.get("app_secret", "") or "")
         if app_secret:
             # 类型独占校验：该 app_id 是否已被 user 轨（Chat）的 active 安装占用
-            from src.domains.runtime.im.engine_wiring import _connect as _ew_connect, default_db_path as _ew_db_path
-            _conn = _ew_connect(_ew_db_path())
+            from src.domains.runtime.public import im_db_connection as _ew_db_conn
+            _conn = _ew_db_conn()
             try:
                 _holders = _conn.execute(
                     "SELECT scope FROM grape_t_channel_installation WHERE legacy_app_id=? AND status='active'",
@@ -659,7 +659,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     # backends 显式提供 → 解析为 runtime_id 列表，更新当前场景 node；
     # 无场景则为空（全广播/兜底）。
     if body.backends is not None:
-        from src.domains.runtime.engine.instances import resolve_instance_id, scope_of_runtime
+        from src.domains.runtime.public import resolve_instance_id, scope_of_runtime
         from src.domains.mgmt.user.db import get_runtime_id_by_name
         rids = []
         for bn in body.backends:
@@ -785,7 +785,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         c = db.cursor()
         try:
             from src.domains.mgmt.user.db import ensure_default_backend, get_runtime_id_by_name
-            from src.domains.runtime.engine.instances import resolve_instance_id, scope_of_runtime
+            from src.domains.runtime.public import resolve_instance_id, scope_of_runtime
             # runtime_id：优先按 backends 集合首项解析；其次 body.backend；否则按类型名兜底
             _backend_for_rid = body.backend
             if not _backend_for_rid and body.backends:
@@ -865,7 +865,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     # config，请求内生效不依赖扫描窗口），new 模式下自动反向回写 legacy 双轨表。
     if name == "vod" and body.im_app_id and app_secret:
         try:
-            from src.domains.runtime.im.engine_wiring import revoke_installation, sync_installation
+            from src.domains.runtime.public import revoke_installation, sync_installation
             if sync_installation("repo", repo_key=repo_key, app_id=body.im_app_id,
                                         app_secret=app_secret):
                 log.info(f"VOD IM: grape_t_channel_installation synced for {repo_key}")
@@ -895,7 +895,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 def _active_repo_installation(repo_key: str) -> dict:
     """仓库轨 active 的 IM 安装（A2 收尾后 VOD 凭证真相源；无则 {}）。"""
     try:
-        from src.domains.runtime.im.engine_wiring import get_active_installation
+        from src.domains.runtime.public import get_active_installation
         return get_active_installation("repo", repo_key=repo_key) or {}
     except Exception as e:
         log.warning(f"VOD IM: read installation failed: {e}")

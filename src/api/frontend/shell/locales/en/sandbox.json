@@ -215,7 +215,7 @@
     "tpl_rename_hint": "Engine names follow the template name after rename (~1 min)",
     "tpl_rename_full": "Renaming changes engine names (e.g. hermes:old:… → hermes:new:…, effective in ~1 min). Engine identity is unchanged — bound scenes/agents need no rebinding. Template ID and engine bindings are unaffected.",
     "tplid_immutable": "Template ID is immutable after creation",
-    "bind_header": "Bind (preinstalled)",
+    "bind_header": "Bind preinstalled engines",
     "bind_tip": "Bind engine: image must preinstall it (cloud sandboxes do not auto-install; missing engine fails at create)",
     "loading_engines": "Loading engines…",
     "bind_full_hint": "Checked = bind engine to this template (image must preinstall it; cloud sandboxes do not auto-install on create). Unchecked = not bound (grey name).",

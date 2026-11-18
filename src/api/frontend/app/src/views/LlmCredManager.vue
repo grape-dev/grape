@@ -57,14 +57,14 @@
         <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 12px">{{ dlg.id ? t('dialog.edit_title') : t('dialog.add_title') }}</h3>
         <div style="margin-bottom: 8px">
           <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('dialog.engine_type') }}</label>
-          <select v-model="dlg.engineType" style="width: 100%; padding: 8px 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 12px; background: var(--c)">
+          <select v-model="dlg.engineType" class="llmc-fld">
             <option v-for="et in engineTypes" :key="et.value" :value="et.value">{{ et.label || et.value }}</option>
           </select>
           <p style="font-size: 10px; color: var(--t3); margin-top: 4px; line-height: 1.4">{{ t('dialog.engine_type_desc') }}</p>
         </div>
         <div style="margin-bottom: 8px">
           <label style="font-size: 11px; color: var(--t3); display: block; margin-bottom: 4px">{{ t('dialog.provider') }}</label>
-          <select v-model="dlg.provider" style="width: 100%; padding: 8px 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 12px; background: var(--c)">
+          <select v-model="dlg.provider" class="llmc-fld">
             <option v-for="k in presetKeys" :key="k" :value="k">{{ k }}</option>
           </select>
           <p style="font-size: 10px; color: var(--t3); margin-top: 4px; line-height: 1.4">{{ presets[dlg.provider] ? presets[dlg.provider].desc : '' }}</p>
@@ -78,7 +78,7 @@
             type="password"
             :placeholder="dlg.id ? t('dialog.api_key_keep_empty') : 'sk-...'"
             autocomplete="new-password"
-            style="width: 100%; padding: 8px 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 12px"
+            class="llmc-fld"
           />
         </div>
         <div style="margin-bottom: 8px">
@@ -87,7 +87,7 @@
             v-model="dlg.baseUrl"
             type="text"
             placeholder="https://api.openai.com/v1"
-            style="width: 100%; padding: 8px 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 12px; color: var(--t)"
+            class="llmc-fld"
           />
         </div>
         <div style="margin-bottom: 12px">
@@ -97,7 +97,7 @@
             type="text"
             :placeholder="isZh ? '单个模型名，如 gpt-4o / glm-4' : 'single model name, e.g. gpt-4o'"
             :title="isZh ? '仅支持单个模型名——引擎按此调用 LLM，多个候选请分别保存凭据' : 'Single model name only; save separate credentials for alternates'"
-            style="width: 100%; padding: 8px 12px; border: 1px solid var(--b); border-radius: 8px; font-size: 12px; color: var(--t)"
+            class="llmc-fld"
           />
         </div>
         <div style="display: flex; gap: 8px; justify-content: flex-end">
@@ -109,6 +109,30 @@
     </Teleport>
   </div>
 </template>
+
+<style scoped>
+/* 添加/编辑弹窗的表单控件：暗色下面板是 --c(#2c2c2e)，而控件要么只写了
+   `background: var(--c)` 没写字色（字落回 UA 黑）、要么只写了字色没写底色
+   （底色落回 UA 白：白底白字完全看不见）。统一由 .llmc-fld 承载字色+底色，
+   option / placeholder 一并跟随主题，浅色档取到的仍是原来的白底近黑字。 */
+.llmc-fld {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border: 1px solid var(--b);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--t);
+  background: var(--c);
+}
+.llmc-fld::placeholder {
+  color: var(--t3);
+}
+.llmc-fld option {
+  background: var(--c);
+  color: var(--t);
+}
+</style>
 
 <script>
 // LLM 凭据管理（B4 移植，legacy account.js _llm* 族 + settings.js _repoLlm* 族）。

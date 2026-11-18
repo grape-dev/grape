@@ -13,7 +13,7 @@ def _resolve_base_url():
     if env:
         return env
     try:
-        from src.domains.mgmt.user.db import get_meta_value
+        from src.domains.mgmt.public import get_meta_value  # 跨域走 owner public
         db_val = get_meta_value("devstage_base_url")
         if db_val:
             return db_val.strip()

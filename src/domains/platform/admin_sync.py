@@ -24,7 +24,7 @@ OAUTH_FLAT_MAP = {
 
 
 def _enc(value: str) -> str:
-    from src.domains.mgmt.auth.credential_crypto import encrypt
+    from src.domains.mgmt.public import encrypt
 
     return encrypt(value) if value else ""
 
@@ -76,8 +76,8 @@ def sync_from_admin_payload(payload: dict) -> None:
             from src.domains.platform.importer import bump_epoch
 
             bump_epoch()
-            from src.domains.mgmt.auth.providers import invalidate_provider_cache
-            from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
+            from src.domains.mgmt.public import invalidate_provider_cache
+            from src.domains.runtime.public import invalidate_platform_card_cache
 
             invalidate_provider_cache()
             invalidate_platform_card_cache()

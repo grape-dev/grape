@@ -66,7 +66,7 @@ def _branches_cache_invalidate(owner: str, repo: str):
     """按 owner/repo 失效两平台缓存键（建分支后立即可见）。"""
     with _branches_cache_lock:
         try:
-            from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
+            from src.domains.runtime.public import list_vcs_platforms as _lvp
             _pros = _lvp() or []
         except Exception:
             _pros = []
@@ -109,7 +109,7 @@ def _scene_user_provider(user: dict) -> str:
     禁止平台名字面量（gitee/gitlab/华为等一律由卡目录派生）。
     """
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        from src.domains.runtime.public import list_vcs_platforms
         _catalog = list(list_vcs_platforms())
     except Exception:
         _catalog = []
@@ -135,7 +135,7 @@ def _scene_user_login_via_card(user: dict, provider: str) -> str:
     （provider 无关包装器）。login 为空时按 401 抛错触发刷新（存量口径）。
     """
     from src.kernel.token_resolver import create_provider
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
 
     _prov = create_provider(provider)
     _card = get_platform_card(provider)
@@ -415,7 +415,7 @@ def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "") -> 
     selector_dead_nodes: list[str] = []
     selector_offline_nodes: list[str] = []
     try:
-        from src.domains.runtime.engine.engine_select import (get_scene_pool_engine_ids as _gspei,
+        from src.domains.runtime.public import (get_scene_pool_engine_ids as _gspei,
                                                get_scene_engine_selector,
                                                selector_candidate_engines)
         for n in (cfg_nodes or []):
@@ -510,7 +510,7 @@ def engine_selector_preview(body: EngineSelectorPreviewBody,
     返回 engines：{runtime_id(str): {hit, reason}}，reason ∈
     selector/role/offline/stale/scope/capability（空 selector 时不做约束，由前端全命中处理）。
     """
-    from src.domains.runtime.engine.engine_select import selector_candidate_engines
+    from src.domains.runtime.public import selector_candidate_engines
     repo_key = _resolve_repo_key(body.repo) if body.repo else ""
     matched, dropped = selector_candidate_engines(
         {"tags": body.tags or []}, body.agent_type or "",
@@ -556,7 +556,7 @@ def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "",
     """
     if obs_icon_key:
         try:
-            from src.domains.runtime.storage import get_storage
+            from src.domains.runtime.public import get_storage
             storage = get_storage()
             if storage is not None:
                 return storage.temporary_url(obs_icon_key)
@@ -1337,7 +1337,7 @@ def _detect_repo_provider(owner: str, repo: str) -> str:
     """
     from src.domains.mgmt.user.db import db_lock, db
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+    from src.domains.runtime.public import list_vcs_platforms
 
     try:
         _provs = list(list_vcs_platforms())
@@ -1389,7 +1389,7 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
         provider = provider or _prov
     # 显式 provider：平台卡在册即采信（不再被双平台白名单打回猜测逻辑，
     # gitee/gitlab 显式传参生效）；否则按托管事实源判定。
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     if provider and get_platform_card(provider) is not None:
         _detected = provider
     else:
@@ -1408,8 +1408,8 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
 
     from src.domains.mgmt.user.db import get_repo_token_with_refresh
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.vcs.api_client import VcsApiClient
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import VcsApiClient
+    from src.domains.runtime.public import get_platform_card
     _card = get_platform_card(provider)
     _pname = _card.name if _card is not None else provider
     _rk = to_repo_key(f"{owner}/{repo}", provider=provider)
@@ -1464,7 +1464,7 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
         provider = provider or _prov
     # 显式 provider：平台卡在册即采信（不再被双平台白名单打回猜测逻辑，
     # gitee/gitlab 显式传参生效）；否则按托管事实源判定。
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     if provider and get_platform_card(provider) is not None:
         _detected = provider
     else:
@@ -1476,8 +1476,8 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
 
     from src.domains.mgmt.user.db import get_repo_token_with_refresh
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.vcs.api_client import VcsApiClient
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import VcsApiClient
+    from src.domains.runtime.public import get_platform_card
     _card = get_platform_card(provider)
     _pname = _card.name if _card is not None else provider
 
@@ -1539,7 +1539,7 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     from src.domains.mgmt.user.db import (create_scene_market, commit_uploaded_file,
                              delete_uploaded_file, get_uploaded_file)
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
 
     if body.scope not in ("repo",):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 repo"})
@@ -1618,7 +1618,7 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
 
     # 重建 scene_skill_ref（仓库场景也需要）
     try:
-        from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref
+        from src.domains.runtime.public import _rebuild_scene_skill_ref
         _rebuild_scene_skill_ref(market_id, body.nodes, body.name, repo_key)
     except Exception as e:
         log.warning(f"create_market_scene: rebuild scene_skill_ref failed: {e}")
@@ -1720,7 +1720,7 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
 
     # 重建 scene_skill_ref
     try:
-        from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref
+        from src.domains.runtime.public import _rebuild_scene_skill_ref
         _rebuild_scene_skill_ref(market_id, body.nodes, body.name or scene.get("name", ""),
                                   scene.get("repo_key", "") or "")
     except Exception as e:
@@ -1787,7 +1787,7 @@ async def upload_scene_icon(file: UploadFile = File(...),
     """
     import uuid as _uuid
     from src.domains.mgmt.user.db import insert_uploaded_file
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
 
     # 校验格式
     allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/svg+xml"}
@@ -1840,7 +1840,7 @@ def _finalize_scene_icon(file_id: int, market_id: int, obs_icon_key: str, user: 
     """将临时图标文件落定为正式文件（重命名 key + 更新 uploaded_files + 更新 scene_market icon 字段）。"""
     from src.domains.mgmt.user.db import (get_uploaded_file, commit_uploaded_file,
                              delete_uploaded_file)
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
     from src.kernel.session_manager import db, db_lock
 
     file_rec = get_uploaded_file(file_id)
@@ -1887,7 +1887,7 @@ def _delete_scene_icon_file(file_key: str):
     """删除图标物理文件（OBS 或本地）。"""
     if not file_key:
         return
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
 
     storage = get_storage()
     if storage:
@@ -2163,8 +2163,8 @@ def _validate_scene_node_roles(nodes: list):
     Spec 注明（Issue #955）：空 id / 非 dict 节点静默放行——为兼容存量
     tag-only 节点与历史数据（此类节点无角色名可校验，读侧走 tag 兜底）。
     """
-    from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
-    _roles = set(KNOWN_AGENT_ROLES)
+    from src.domains.runtime.public import known_agent_roles
+    _roles = known_agent_roles()
     for node in nodes:
         _id = (node.get("id") or "").strip() if isinstance(node, dict) else ""
         if _id and _id not in _roles:
@@ -2211,7 +2211,7 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     """
     from src.kernel.session_manager import db, db_lock
     from src.kernel.repo_key import from_repo_key
-    from src.domains.runtime.engine.engine_select import node_agent_role, validate_selector_tags
+    from src.domains.runtime.public import node_agent_role, validate_selector_tags
     _repo_norm = (from_repo_key(repo_key) or "").strip()
     for node in nodes:
         # Issue #955：节点 id 即角色名（id 优先、tag 兜底——兼容历史仅含 tag 的纯函数调用）
@@ -2482,7 +2482,7 @@ def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
     口径对齐 dashboard agent_engines：SRE 仅 user+repo 两档；其它角色
     global+user+repo+local 四档；非个人组织按 org_id 隔离。
     """
-    from src.domains.runtime.engine.engine_select import query_engines
+    from src.domains.runtime.public import query_engines
     _filter_org = 0
     try:
         from src.domains.mgmt.user.org_db import is_org_personal
@@ -2942,7 +2942,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.kernel.repo_key import to_repo_key
     from src.kernel.session_manager import db, db_lock
     from src.api.session_store import upsert_agent_session
-    from src.domains.runtime.engine.engine_select import node_agent_role
+    from src.domains.runtime.public import node_agent_role
 
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
     cfg = get_pipeline_config(body.scene_id, repo_key=repo_key)
@@ -3028,7 +3028,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                     except Exception:
                         runtime_id = 0
                     if not runtime_id:
-                        from src.domains.runtime.engine.engine_select import resolve_default_engine
+                        from src.domains.runtime.public import resolve_default_engine
                         runtime_id = resolve_default_engine(repo_key, agent_type) or 0
                 receipt.update({
                     "status": "applied",

@@ -398,9 +398,10 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
         # Issue #646：注册前确保凭据有 credential_uid（UUIDv4，一次性终身不变）；
         # engine_uid 由服务端按自然键（credential_uid|name|scope|owner_id|host_name）
         # 确定性派生（UUIDv5）——本机 worker 零配置，重复注册/表重建 uid 不漂移。
-        from src.domains.mgmt.user.db import ensure_credential_uid
+        # 这两条链路碰的表全归 runtime 域（configs/table_ownership.json），原语在
+        # 本域 public 一份；此前绕 mgmt.user.db 属跨域 import 别域内部模块。
+        from src.domains.runtime.public import ensure_credential_uid, rebase_engine_uid_references
         from src.kernel.engine_uid import derive_engine_uid, cloud_anchor_from_runtime_info
-        from src.domains.mgmt.user.db import rebase_engine_uid_references
         _cred_uid = ensure_credential_uid(credential_id, c)
         # local_skills：per-engine skill 列表，按 engine name 匹配 runtime 行
         skills_by_name = {}
@@ -625,8 +626,8 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                     pass
             # capabilities 写入后同步 agent_tags 派生缓存（注册路径原先漏了这一步，
             # 导致新机器 agent_tags 为空、前端按 tags 过滤时被漏掉——sre-personal-machine 修复）
-            from src.domains.mgmt.routes.settings import _sync_agent_tags
-            _sync_agent_tags(rid, c)
+            from src.domains.mgmt.public import sync_agent_tags
+            sync_agent_tags(rid)
             # Issue #1208：三维度派生标签（engine:/scope:/scene:）落 capabilities 冒号行
             # + JSON 快照刷新（selector 圈池数据底座；注册链先写，心跳链幂等收敛）
             try:
@@ -901,11 +902,11 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
         # `[task t_xxx] [seq=N|issue:#M|agent:x|repo:gitcode:o/r] ...`），抽不到的行
         # 因没有仓库维度而不会出现在用户面（平台/进程类日志归 L2/L3）。
         try:
-            from src.domains.insight.observability import logs as _obs_logs
+            from src.domains.insight import public as _obs_public
             _recs = [{"ts": (ll.ts or now), "level": ll.level, "component": "worker",
                       "msg": ll.message, "source": _wname or f"worker-{credential_id}",
                       "runtime_id": 0} for ll in body.log_lines]
-            _obs_logs.ingest(_recs, default_source=_wname or f"worker-{credential_id}")
+            _obs_public.ingest_logs(_recs, default_source=_wname or f"worker-{credential_id}")
         except Exception as _ole:
             log.warning(f"obs_log worker ingest failed: {_ole}")
 
@@ -1058,7 +1059,7 @@ def _attach_skill_obs(task: dict) -> None:
         skill = (task.get("skill") or "").strip()
         if not skill:
             return
-        from src.domains.mgmt.user.db import resolve_skill_id, get_skill_object_key, get_skill_by_id
+        from src.domains.mgmt.public import resolve_skill_id, get_skill_object_key, get_skill_by_id
         _skill_id = task.get("skill_id") or 0
         _task_repo = task.get("repo_key") or ""
         _task_uid = task.get("user_id") or ""
@@ -1078,7 +1079,7 @@ def _attach_skill_obs(task: dict) -> None:
             # 官方检查器（worker 无库，服务端解析后以 skill_fallback 下发：名字 + id，
             # worker 物化其 zip 并提示 `grape skills detail --skill_id <id>`）
             try:
-                from src.domains.mgmt.user.db import resolve_official_checker_skill
+                from src.domains.mgmt.public import resolve_official_checker_skill
                 _fb = resolve_official_checker_skill(task.get("agent_type") or "")
                 if _fb and _fb.get("file_path"):
                     _okey = _fb.get("file_path")
@@ -1310,7 +1311,17 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
                     "llm_cred_hint": f"缺少 LLM 凭据：该任务使用{'仓库级' if _llm_mode == 'repo' else '个人级'}沙箱平台，"
                                      f"请在【{_src_zh} → LLM 凭据】为引擎 {engine_type or 'common'} 配置后重试"}
     except Exception as _e:
-        log.warning(f"task_env: attach LLM credentials failed: {_e}")
+        # Previously this only logged a WARNING and returned an empty env, which the
+        # worker reported as "no LLM credentials, config skipped" and the engine then
+        # turned into "No LLM provider configured" -- unreadable even for a user who
+        # had credentials configured. The env is now failed explicitly instead of
+        # silently empty, but the attribution stays honest: this block covers env
+        # assembly (task/runtime lookups, scene reconcile, credential selection), so
+        # the user-facing hint must not claim the credentials are unreadable, and the
+        # raw exception (which can carry schema/table names) stays in the server log.
+        log.warning(f"task_env: env assembly failed: {_e}")
+        return {"env": env, "llm_cred_missing": True, "llm_cred_source": "env_error",
+                "llm_cred_hint": "任务环境准备失败（LLM 凭据注入阶段），请查看平台日志后重试"}
     return {"env": env}
 
 
@@ -1737,7 +1748,7 @@ def runtime_task_skill_zip(task_id: str, credential_id: int = Depends(_require_c
     if not skill:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "task has no skill"})
     try:
-        from src.domains.mgmt.user.db import resolve_skill_id, get_skill_object_key, get_skill_by_id
+        from src.domains.mgmt.public import resolve_skill_id, get_skill_object_key, get_skill_by_id
         from src.domains.runtime.storage import get_skill_zip_bytes
         _skill_id = task.get("skill_id") or 0
         _task_repo = task.get("repo_key") or ""
@@ -1827,13 +1838,13 @@ def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int = Depen
         "turn": body.turn, "cost_usd": body.cost_usd, "cost_status": body.cost_status,
     }
     try:
-        from src.domains.insight.observability.llm_usage import record_usage
+        from src.domains.insight.public import record_usage
         record_usage(task_id, [usage], source=body.source or "report")
     except Exception as e:      # 用量采集绝不能拖垮任务主链路
         log.warning(f"record usage ledger failed task={task_id}: {e}")
     # Prometheus 埋点(与台账同源,保留供外部 Prometheus 抓取)
     try:
-        from src.domains.insight.observability import record_llm_usage
+        from src.domains.insight.public import record_llm_usage
         record_llm_usage(body.provider, body.model, body.input, body.output,
                          body.cache_read or body.cache)
     except Exception:
@@ -2438,7 +2449,7 @@ def _server_url() -> str:
         # Issue #471 E1（QA 建议）：register 响应的 server_url 是 worker 回连地址
         # （设备/CLI 回连服务端用），与 devstage RUNTIME_SERVER_URL / 任务 server_url
         # 同语义——对齐 get_worker_connect_url（未配置回退 server_base_url）。
-        from src.domains.mgmt.user.db import get_worker_connect_url
+        from src.domains.mgmt.public import get_worker_connect_url
         return get_worker_connect_url()
     except Exception:
         return ""
@@ -2649,7 +2660,7 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
     - remote_engines：agent_runtimes 在线引擎（按上述可见性过滤）
     - needs_worker：无任何可用引擎（本地全未装 且 可见远端零在线）时 true
     """
-    from src.domains.mgmt.user.db import get_server_base_url
+    from src.domains.mgmt.public import get_server_base_url  # 跨域走 owner public
     from src.domains.runtime.engine.executor import discover_backends
     from src.kernel.repo_key import from_repo_key
 
@@ -2891,11 +2902,11 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(require_n
     """设置 engine 的角色标签。应用互斥规则后写入。
 
     以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。
-    写入顺序：先写 engine_capabilities，再 _sync_agent_tags 回写 agent_tags。
+    写入顺序：先写 engine_capabilities，再 sync_agent_tags 回写 agent_tags。
     """
     from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
-    from src.domains.mgmt.routes.settings import _sync_agent_tags
+    from src.domains.mgmt.public import sync_agent_tags
     tags = _apply_tag_rules(body.get("tags") or [])
     now = datetime.now(timezone.utc).isoformat()
     with db_lock:
@@ -2917,7 +2928,7 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(require_n
         # 标记用户已手动设过标签，心跳注册不再自动补 'all'
         c.execute("UPDATE agent_runtimes SET tags_user_set=1 WHERE id=?", (runtime_id,))
         # 再回写 agent_tags（派生缓存，保持与 engine_capabilities 一致）
-        _sync_agent_tags(runtime_id, c)
+        sync_agent_tags(runtime_id)
         db.commit()
     log.info(f"Runtime tags set: rid={runtime_id} tags={tags} (engine_capabilities → agent_tags synced)")
     return {"tags": tags}
@@ -2954,7 +2965,7 @@ def list_scene_tags(user: dict = Depends(require_no_session_token)):
 
     返回格式：[{name, display_name, roles: ["vod","issue","coding","qa","sre"]}, ...]
     """
-    from src.domains.mgmt.user.db import list_scene_market
+    from src.domains.mgmt.public import list_scene_market
     scenes, _ = list_scene_market(limit=0)
     result = []
     for s in scenes:
@@ -3072,10 +3083,10 @@ from fastapi.responses import Response as _RelayResponse
 _relay_total = None
 try:
     from prometheus_client import Counter as _PC
-    from src.domains.insight.observability import registry as _obs_registry
+    from src.domains.insight import public as _obs_public
     _relay_total = _PC("grape_trace_relay_requests_total",
                        "Trace relay requests forwarded to LGTM",
-                       ["status"], registry=_obs_registry)
+                       ["status"], registry=_obs_public.prometheus_registry())
 except Exception:
     _relay_total = None
 

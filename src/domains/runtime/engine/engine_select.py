@@ -475,7 +475,7 @@ def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
             continue
         # 本机直连引擎（credential_id=0）必须为已知引擎类型（防幽灵 `default-cred0` 占位，见 engine-selection-design.md §7.3）
         if (m.get("credential_id") or 0) == 0:
-            from src.domains.mgmt.user.db import is_known_engine_name
+            from src.domains.mgmt.public import is_known_engine_name
             if not is_known_engine_name(m.get("name") or ""):
                 continue
         out.append(m)
@@ -561,7 +561,7 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
             if not issue_creator.strip():
                 return 0
             from src.kernel.repo_key import parse_repo_key
-            from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login
+            from src.domains.mgmt.public import resolve_user_id_by_platform_login
             _provider, _, _ = parse_repo_key(repo_key)
             # M5/S51（D31）：身份优先——平台登录名权威域命中即权威；
             # 原二级回退里已有同一身份查询，此处置前并保留原链兜底
@@ -1520,7 +1520,7 @@ def _candidate_reject_reasons(m: dict, cfg: dict, agent_type: str = "") -> list:
             reasons.append(f"stale_heartbeat>{_RUNTIME_STALE_SECONDS}s")
     if (m.get("credential_id") or 0) == 0:
         try:
-            from src.domains.mgmt.user.db import is_known_engine_name
+            from src.domains.mgmt.public import is_known_engine_name
             if not is_known_engine_name(m.get("name") or ""):
                 reasons.append("unknown_local_engine")
         except Exception:
@@ -1672,7 +1672,8 @@ def _merge_duplicate_engine_rows_locked(credential_id: int, c, commit: bool) -> 
     # 指向存活行（否则 dup 行 uid 悬挂；MySQL FK RESTRICT 会拦截删除 → 注册静默失败）。
     _uid_ready = False
     try:
-        from src.domains.mgmt.user.db import _columns_exist
+        # 列探测实现归 runtime 域（refs_reconcile），同域直import，不再绕 mgmt.user.db
+        from src.domains.runtime.engine.refs_reconcile import columns_exist as _columns_exist
         _uid_ready = (_columns_exist(c, "agent_runtimes", ("engine_uid",))
                       and _columns_exist(c, "engine_capabilities", ("engine_uid",)))
     except Exception:

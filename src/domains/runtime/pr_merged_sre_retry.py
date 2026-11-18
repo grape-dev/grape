@@ -266,7 +266,7 @@ def _notify_issue_broken_chain(repo_key: str, issue_id: str, note: str) -> bool:
     if not num or num == "0" or num.startswith("pr_"):
         return False
     try:
-        from src.domains.mgmt.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.public import get_repo_token_with_refresh  # 跨域走 owner public
         from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         from src.kernel.repo_key import from_repo_key
         token = get_repo_token_with_refresh(repo_key) or ""

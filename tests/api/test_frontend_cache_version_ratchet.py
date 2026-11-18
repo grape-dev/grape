@@ -9,32 +9,34 @@
   `tests/api/test_i18n_locale_cache_ratchet.py` 用「历史下界 + 内容指纹」守护；
 - 第三方 vendor 库版本随打包固定，走白名单。
 """
+import hashlib
 import re
 from pathlib import Path
 
 SHELL = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
+APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "app" / "src"
 
 # 页面 → {模块: 冻结版本}（2026-11-13 缓存版本回填/统一后快照）
 FROZEN = {
     "index.html": {
-        "tokens.css": "1", "app.css": "8", "all-views.css": "11", "auth.css": "1", "faro.js": "7",
-        "api.js": "36", "pwd-blocklist.js": "3", "worker-name.js": "2", "dashboard-view.js": "75", "pipeline.js": "54",
-        "agent-view.js": "50", "event-view.js": "57", "chat-view.js": "59", "im-channel.js": "52", "repos-view.js": "57",
-        "issues-view.js": "62", "account-view.js": "59", "scene-market.js": "58", "skills-view.js": "54", "knowledge-view.js": "49",
-        "runtimes-view.js": "59", "observability-view.js": "56", "organizations.js": "50", "feedback-dialog.js": "50", "my-feedback.js": "50",
-        "my-feedback-detail.js": "50", "autopilot-view.js": "53", "sandbox-view.js": "3", "deeplink.js": "1", "platform-icons.js": "2",
-        "app.js": "274", "login-view.js": "2", "onboarding-view.js": "8", "auto-recovery.js": "2", "oauth-buttons.js": "2",
+        "tokens.css": "1", "app.css": "9", "all-views.css": "41", "auth.css": "1", "faro.js": "7",
+        "api.js": "36", "pwd-blocklist.js": "3", "worker-name.js": "2", "dashboard-view.js": "84", "pipeline.js": "54",
+        "agent-view.js": "50", "event-view.js": "59", "chat-view.js": "61", "im-channel.js": "54", "repos-view.js": "59",
+        "issues-view.js": "62", "account-view.js": "60", "scene-market.js": "58", "skills-view.js": "54", "knowledge-view.js": "49",
+        "runtimes-view.js": "77", "observability-view.js": "57", "organizations.js": "50", "feedback-dialog.js": "50", "my-feedback.js": "50",
+        "my-feedback-detail.js": "50", "autopilot-view.js": "54", "sandbox-view.js": "10", "deeplink.js": "1", "platform-icons.js": "2",
+        "app.js": "274", "login-view.js": "2", "onboarding-view.js": "9", "auto-recovery.js": "2", "oauth-buttons.js": "2",
         "host-status.js": "1",
     },
     "admin.html": {
         "admin-view.css": "2", "tokens.css": "1", "pwd-blocklist.js": "3", "admin-view.js": "46",
     },
     "register.html": {
-        "app.css": "8", "auth.css": "1", "api.js": "36", "pwd-blocklist.js": "3", "auth.js": "8",
+        "app.css": "9", "auth.css": "1", "api.js": "36", "pwd-blocklist.js": "3", "auth.js": "8",
         "register-view.js": "1",
     },
     "forgot.html": {
-        "app.css": "8", "auth.css": "1", "api.js": "36", "pwd-blocklist.js": "3", "auth.js": "8",
+        "app.css": "9", "auth.css": "1", "api.js": "36", "pwd-blocklist.js": "3", "auth.js": "8",
         "forgot-view.js": "1",
     },
 }
@@ -110,3 +112,57 @@ def test_register_and_forgot_agree():
         for chunk in chunks:
             assert chunk in _scan(page), f"{page} 缺少专属 view chunk {chunk}"
             assert chunk not in _scan(other), f"{chunk} 不应出现在 {other} 上"
+
+
+# —— all-views.css「内容指纹 + 版本」绑定——
+# `all-views.css` 是 vite 构建产物（不入库）：= bridge.css + ag-ui.css（AG 组件样式聚合）
+# + 各 view 的 scoped CSS 合并，`admin-view.css` 除外（AdminView.vue 的样式非 scoped、
+# 只进 admin.html，见 vite.config.js 的 viewCssMap 与合并逻辑）。此前它只有版本号冻结、
+# 无内容绑定——改了 scoped 样式却不动 `all-views.css?v=40` 时版本棘轮全绿，持缓存的
+# 客户端继续吃旧样式。本守卫直接指纹其**源**（仿 i18n 棘轮）：
+#   · 源集 = styles/bridge.css + 全部带 <style> 的 .vue（pages/ 未参与构建、admin 三件
+#     的 CSS 单独走 admin-view.css，均排除）；任一源文件内容变化 → 红。
+# 纪律：改上述任一源 → bump index.html 的 `all-views.css?v=`，并同步更新本处
+# （版本, 指纹）对与上方 FROZEN（同一次提交）。
+
+# all-views.css 与其源的（页面版本, 内容指纹）配对登记
+ALL_VIEWS = ("41", "4f5d2714b5aeca5f")
+
+# admin 三件：AdminView.vue（非 scoped，样式走 admin-view.css）+ 只被 admin chunk
+# 引用的 AdminChannels/AdminPlatforms（其 CSS 并入 admin-view.css，不进 all-views）
+ALL_VIEWS_EXCLUDED = {"AdminView.vue", "AdminChannels.vue", "AdminPlatforms.vue"}
+
+
+def _all_views_sources() -> list:
+    srcs = [APP / "styles" / "bridge.css"]
+    srcs += sorted(
+        p for p in APP.rglob("*.vue")
+        if "<style" in p.read_text(encoding="utf-8")
+        and p.relative_to(APP).parts[0] != "pages"
+        and p.name not in ALL_VIEWS_EXCLUDED
+    )
+    return srcs
+
+
+def _all_views_fingerprint() -> str:
+    h = hashlib.sha1()
+    for s in _all_views_sources():
+        h.update(str(s.relative_to(APP)).encode())
+        h.update(b"\0")
+        h.update(s.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+def test_all_views_css_content_bound_to_version():
+    """all-views.css 的源内容变了就必须抬版本并同步本文件的配对登记。"""
+    href = re.search(r"all-views\.css\?v=(\d+)", (SHELL / "index.html").read_text(encoding="utf-8"))
+    assert href, "index.html 未以 ?v= 引用 all-views.css"
+    actual_ver, actual_fp = href.group(1), _all_views_fingerprint()
+    reg_ver, reg_fp = ALL_VIEWS
+    assert (actual_ver, actual_fp) == (reg_ver, reg_fp), (
+        f"all-views.css 源内容/版本与登记不符：页面 ?v={actual_ver} 指纹={actual_fp}，"
+        f"登记 ?v={reg_ver} 指纹={reg_fp}——改了 bridge.css / AG 组件 / 任一 view 的 "
+        f"scoped 样式就必须 bump index.html 的 all-views.css?v=，"
+        f"并同步更新本文件 ALL_VIEWS 与 FROZEN（同一次提交）"
+    )

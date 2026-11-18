@@ -378,7 +378,7 @@ def _update_knowledge_content(knowledge_id: int, row: dict, new_content: str):
     obs_key = row.get("obs_key", "")
     content_hash = ""
     try:
-        from src.domains.runtime.storage import get_storage
+        from src.domains.runtime.public import get_storage
         storage = get_storage()
         if storage is not None and obs_key:
             with open(full, "rb") as f:
@@ -405,7 +405,7 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
     obs_key = row.get("obs_key", "")
     if obs_key:
         try:
-            from src.domains.runtime.storage import get_storage
+            from src.domains.runtime.public import get_storage
             storage = get_storage()
             if storage is not None:
                 storage.delete_object(obs_key)
@@ -496,7 +496,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
 
     obs_key = ""
     try:
-        from src.domains.runtime.storage import get_storage
+        from src.domains.runtime.public import get_storage
         storage = get_storage()
         if storage is not None:
             obs_key = f"{knowledge_obs_prefix(repo_key)}/member/{username}/{filename}"
@@ -553,7 +553,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
             pass
         if obs_key:
             try:
-                from src.domains.runtime.storage import get_storage
+                from src.domains.runtime.public import get_storage
                 storage = get_storage()
                 if storage is not None:
                     storage.delete_object(obs_key)

@@ -509,7 +509,7 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
     source = template.get("source", "git")
     # D105-17：目标平台卡 fail-closed 前置——未知/未配卡平台在拉取模板源之前
     # 即显式报错（不再事后才在 push 阶段暴露）
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     _tgt_card = get_platform_card(provider)
     if _tgt_card is None:
         raise ValueError(
@@ -543,7 +543,7 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
                 log.warning(
                     f"template '{template.get('id', '')}' missing source_platform; "
                     f"treating as gitcode once (backfill pending)")
-            from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+            from src.domains.runtime.public import list_vcs_platforms
             if source_platform not in set(list_vcs_platforms()):
                 raise ValueError(
                     f"模板源平台 '{source_platform}' 未支持（允许 gitcode/github）；"
@@ -565,7 +565,7 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         _wf = (credential_workflows_write(user_id, provider)
                if user_id else None)
         if _wf is None:
-            from src.domains.runtime.vcs.platform_card import get_platform_card as _gpc
+            from src.domains.runtime.public import get_platform_card as _gpc
             _pc_wf = _gpc(provider)
             _wf = (getattr(_pc_wf, "workflows_write", True) if _pc_wf is not None else True)
         _wf_denied = not _wf
@@ -741,7 +741,7 @@ def get_hosting_provider_config(provider: str) -> dict:
     fail-closed ValueError（不再按 gitcode 存量配置静默放行）。
     """
     from src.domains.mgmt.user.db import get_global_bot_token_for
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     _pc = get_platform_card(provider)
     if _pc is None:
         raise ValueError(
@@ -1110,7 +1110,7 @@ def _host_of_url(url: str) -> str:
 def _webhook_path_from_card(provider: str, fallback: str) -> str:
     """D12/W3：webhook 回调后缀优先取平台卡 webhook_path，无卡用历史默认。"""
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         card = get_platform_card(provider)
         if card is not None:
             return card.webhook_path
@@ -1155,12 +1155,12 @@ def resolve_bot_username(provider: str) -> str:
 
 def _KNOWN_VCS_PROVIDERS():
     """D109 判据收敛：已知平台集合 = 能力视图（存量三平台 ∪ 平台卡 ∪ 表内平台）。"""
-    from src.domains.platform.capabilities import known_providers
+    from src.domains.platform.public import known_providers
     return known_providers()
 
 def _card_bot_username(provider: str) -> str:
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         card = get_platform_card(provider)
         if card is not None:
             return card.bot_username
@@ -1236,7 +1236,7 @@ def _template_source_downloader(source_platform: str, ref: str = ""):
     _impl = _TEMPLATE_SOURCE_DOWNLOADERS.get(source_platform)
     if _impl is not None:
         return _impl
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     card = get_platform_card(source_platform)
     if card is None:
         raise ValueError(
@@ -1260,7 +1260,7 @@ _COLLAB_FUNC_NAMES = {
 
 def get_collaborator_funcs(provider: str):
     """返回该平台的 (add, remove) 协作者函数对（卡驱动，未支持方言 fail-closed）。"""
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     _pc = get_platform_card(provider)
     if _pc is None:
         raise ValueError(
@@ -1316,7 +1316,7 @@ _ACCEPT_NAMES = {"github_web": "accept_github_invite", "gitee_v5": "accept_invit
 
 
 def _dialect_of(provider: str) -> str:
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     _pc = get_platform_card(provider)
     if _pc is None:
         raise ValueError(

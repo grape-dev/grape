@@ -123,7 +123,7 @@ def _card_action_url() -> str:
     url = (os.environ.get("GRAPE_PUBLIC_BASE_URL") or "").strip()
     if not url:
         try:
-            from src.domains.mgmt.user.db import get_server_base_url
+            from src.domains.mgmt.public import get_server_base_url  # 跨域走 owner public
             url = (get_server_base_url() or "").strip()
         except Exception:
             url = ""
