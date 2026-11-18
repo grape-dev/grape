@@ -30,7 +30,9 @@ from src.kernel.session_manager import db, db_lock
 # 运行域表（autopilot_executions）走 owner 域原语；autopilot_tasks 归本域
 from src.domains.runtime import public as _rt_ap
 
-from src.domains.runtime.engine.scheduler import _get_exec_agent_task
+# 执行记录→任务行解析走 owner 域 public（原 import runtime.engine.scheduler 内部函数，
+# 且 public 版本不再要求调用方传游标）
+
 
 router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
 
@@ -415,8 +417,8 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
         _uids = [str(u).strip().lower() for u in (task.get("engine_runtime_uids") or [])]
         if _uids:
             try:
-                from src.domains.runtime import public as _rt_pub
-                for _rid in _rt_pub.runtime_ids_by_engine_uids(_uids):
+                from src.domains.runtime import public as _rt_ap
+                for _rid in _rt_ap.runtime_ids_by_engine_uids(_uids):
                     _rid = _rid or 0
                     task.setdefault("engine_runtime_ids", [])
                     if _rid not in (task.get("engine_runtime_ids") or []):
@@ -633,10 +635,12 @@ def list_executions(
         if not agent_task_id:
             try:
                 with db_lock:
-                    c2 = db.cursor()
-                    at_row = _get_exec_agent_task(c2, exec_id, "", r[6], r[8])
+                    # public 契约返回 dict（列名→值），不是行元组：按列名取值，
+                    # 用 at_row[0] 会恒抛 KeyError:0 被下面的 except 吞掉，
+                    # 历史执行记录的 agent_task_id 关联静默失效。
+                    at_row = _rt_ap.exec_agent_task(exec_id, "", r[6], r[8])
                     if at_row:
-                        agent_task_id = at_row[0]
+                        agent_task_id = at_row.get("id") or ""
             except Exception as e:
                 log.warning(f"Autopilot: resolve agent_task_id failed for exec {exec_id}: {e}")
         # Issue #258: 查 agent_task_ids（issue_number + repo_key 关联，支持多阶段）
