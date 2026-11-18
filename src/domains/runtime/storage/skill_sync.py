@@ -24,10 +24,58 @@ from src.kernel.config import SKILLS_DIR, CONFIG_DIR, log, resolve_official_skil
 logger = logging.getLogger(__name__)
 _bg_tasks: set[asyncio.Task] = set()
 
+# Issue #3229：SKILL.md 等文本文件首部的 UTF-8 BOM 会让前端 frontmatter 正则失配，
+# 入库时统一剥离；_compute_skill_hash 对 BOM 不敏感，保证归一化后能命中 skip。
+_UTF8_BOM = b"\xef\xbb\xbf"
+_BOM_TEXT_EXTS = {".md", ".markdown", ".txt", ".yaml", ".yml", ".json"}
+
+
+def _strip_utf8_bom(data: bytes) -> bytes:
+    """剥离字节流首部连续的 UTF-8 BOM。"""
+    while data.startswith(_UTF8_BOM):
+        data = data[len(_UTF8_BOM):]
+    return data
+
+
+def _is_bom_text_file(name: str) -> bool:
+    """判断文件是否属于做 BOM 规范化的文本类型（至少覆盖 SKILL.md）。"""
+    base = os.path.basename(name).lower()
+    return base == "skill.md" or os.path.splitext(base)[1] in _BOM_TEXT_EXTS
+
+
+def _normalize_skill_dir_bom(skill_dir: str) -> int:
+    """剥离技能目录内文本文件首部 BOM（原地改写），返回被改写的文件数。
+
+    幂等：无 BOM 的文件不改写，第二轮调用返回 0。
+    """
+    if not os.path.isdir(skill_dir):
+        return 0
+    changed = 0
+    for root, dirs, files in os.walk(skill_dir):
+        dirs[:] = sorted(d for d in dirs if d not in ("__pycache__", "__MACOSX", ".git"))
+        for name in sorted(files):
+            if not _is_bom_text_file(name):
+                continue
+            path = os.path.join(root, name)
+            try:
+                with open(path, "rb") as fp:
+                    data = fp.read()
+                stripped = _strip_utf8_bom(data)
+                if stripped == data:
+                    continue
+                with open(path, "wb") as fp:
+                    fp.write(stripped)
+                changed += 1
+            except OSError as exc:
+                logger.warning(f"skill sync: strip BOM failed for {path}: {exc}")
+    return changed
+
 
 def _compute_skill_hash(skill_dir: str) -> str:
     """计算技能目录的内容 hash（遍历所有文件，按文件名排序，取完整 SHA-256）。
 
+    文本文件参与 hash 前剥离首部 BOM（Issue #3229），使 BOM 有/无的同一技能
+    得到相同 hash，避免每轮同步重复覆盖。
     返回 64 字符十六进制字符串。目录不存在返回空串。
     """
     if not os.path.isdir(skill_dir):
@@ -40,7 +88,10 @@ def _compute_skill_hash(skill_dir: str) -> str:
             h.update(rel.encode())
             try:
                 with open(os.path.join(root, f), "rb") as fp:
-                    h.update(fp.read())
+                    data = fp.read()
+                if _is_bom_text_file(f):
+                    data = _strip_utf8_bom(data)
+                h.update(data)
             except Exception:
                 pass
     return h.hexdigest()  # 完整 64 字符十六进制
@@ -209,6 +260,9 @@ async def sync_official_skills_to_obs() -> dict:
 
         # 计算当前 content_hash（放线程池，不阻塞事件循环）
         loop = asyncio.get_running_loop()
+        # Issue #3229：先做 BOM 归一化，确保 OBS zip 打包的是无 BOM 的字节流；
+        # 归一化有实际改写时即使 hash 相同也重传一次，避免旧 zip 残留 BOM。
+        bom_normalized = await loop.run_in_executor(None, _normalize_skill_dir_bom, skill_dir)
         current_hash = await loop.run_in_executor(None, _compute_skill_hash, skill_dir)
         if not current_hash:
             continue
@@ -216,13 +270,12 @@ async def sync_official_skills_to_obs() -> dict:
         # 查 DB 的 content_hash 和 file_path（按 skill_name + scope 查主键 id + hash + file_path）
         skill_id, db_hash, db_file_path = get_skill_content_hash(skill_name)
 
-        # skip 条件：hash 相同且（非OBS模式 或 file_path非空）
-        # 非OBS模式：hash匹配就skip（不需要file_path）
-        # OBS模式：hash匹配但file_path为空时不skip（需要上传OBS补file_path）
-        if db_hash == current_hash:
-            if storage is None or db_file_path:
-                result["skipped"] += 1
-                continue
+        # skip 条件：hash 相同且（非OBS模式 或 file_path非空）；
+        # 本轮刚剥离过 BOM 时 OBS 需重传一次以刷新存量 zip。
+        if (db_hash == current_hash and (storage is None or db_file_path)
+                and not (storage is not None and bom_normalized)):
+            result["skipped"] += 1
+            continue
 
         # hash 不同或技能不存在 → 需要同步
         object_key = ""
@@ -249,6 +302,9 @@ async def sync_official_skills_to_obs() -> dict:
             elif db_hash == current_hash and not db_file_path and object_key:
                 result["updated"] += 1
                 logger.info(f"skill file_path synced: {skill_name} (hash unchanged, file_path was empty)")
+            elif db_hash == current_hash and bom_normalized:
+                result["updated"] += 1
+                logger.info(f"skill re-uploaded after BOM normalization: {skill_name}")
             else:
                 result["added"] += 1
                 logger.info(f"skill added: {skill_name} (hash: {current_hash[:8]}...)")
@@ -375,12 +431,17 @@ async def sync_official_skills() -> dict:
                                     continue
                                 local_hash = _compute_skill_hash(local_skill_dir)
                                 if remote_hash == local_hash:
+                                    # Issue #3229：hash 相同也不放过存量 BOM，就地归一化本地目录
+                                    if _normalize_skill_dir_bom(local_skill_dir):
+                                        logger.info(f"skill sync: normalized BOM in local dir {skill_name}")
                                     result["dirs_skipped"] += 1
                                     continue
                                 if os.path.isdir(local_skill_dir):
                                     shutil.rmtree(local_skill_dir, ignore_errors=True)
                                 os.makedirs(os.path.dirname(local_skill_dir), exist_ok=True)
                                 shutil.copytree(remote_skill_dir, local_skill_dir, dirs_exist_ok=True)
+                                # Issue #3229：拷入后统一剥 BOM，保证本地目录与后续 OBS zip 无 BOM
+                                _normalize_skill_dir_bom(local_skill_dir)
                                 result["dirs_synced"] += 1
                                 logger.info(f"skill sync: synced directory {skill_name}")
                     finally:
