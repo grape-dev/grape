@@ -5435,7 +5435,7 @@ def _pr_number_exists(repo_key: str, pr_num: str) -> bool:
         return cached[1]
     exists = True
     try:
-        from src.domains.mgmt.user.db import get_gitcode_token
+        from src.domains.mgmt.public import get_gitcode_token
         from src.domains.runtime.vcs.api_client import create_client
         token = get_gitcode_token(repo_key=repo_key) or ""
         if token:

@@ -5624,3 +5624,92 @@ get_repo_scene = repo_scene
 get_all_bot_usernames = all_bot_usernames
 get_skill_path = skill_path
 get_server_base_url = server_base_url
+
+# ── 跨域原语：mgmt.user.db 凭据 / bot token 面（2026-11-18 batch 2）─────────
+# runtime 的 engine / vcs / routes / pipeline 有 24 处函数内
+# `from src.domains.mgmt.user.db import <token 读取函数>`，属跨域引别域内部实现。
+# 这里把这一批统一收敛成 public 具名入口，调用方只依赖契约面；实现仍只有一份。
+
+
+def credential_list(user_id: "int | str", include_unreadable: bool = False) -> list[dict]:
+    """某用户的凭据列表（kind 维度；不含历史旧复合键行）。"""
+    from src.domains.mgmt.user.db import get_credentials as _impl
+
+    return _impl(user_id, include_unreadable)
+
+
+def gitcode_token(repo_key: str = "", user_id: str = "") -> str:
+    """统一取 GitCode API token（内部走统一入口 + 自动刷新）。"""
+    from src.domains.mgmt.user.db import get_gitcode_token as _impl
+
+    return _impl(repo_key, user_id)
+
+
+def repo_bot_token(repo_key: str = "") -> str:
+    """仓库级 bot token（用户交互写操作用途，不含 agent session token）。"""
+    from src.domains.mgmt.user.db import get_repo_bot_token as _impl
+
+    return _impl(repo_key)
+
+
+def repo_bot_token_no_global(repo_key: str) -> str:
+    """仓库级 bot token（不含全局兜底）：服务端内部端点鉴权用。"""
+    from src.domains.mgmt.user.db import get_repo_bot_token_no_global as _impl
+
+    return _impl(repo_key)
+
+
+def repo_token_for(repo_key: str) -> str:
+    """仓库 token 统一读入口（provider 策略链 + 刷新）。"""
+    from src.domains.mgmt.user.db import get_repo_token_for as _impl
+
+    return _impl(repo_key)
+
+
+def global_bot_token_for(provider: str) -> str:
+    """任意平台的全局 bot token（meta key 按 provider 派生）。"""
+    from src.domains.mgmt.user.db import get_global_bot_token_for as _impl
+
+    return _impl(provider)
+
+
+def global_gitcode_bot_token() -> str:
+    """全局 GitCode bot token（统一入口的向后兼容名）。"""
+    from src.domains.mgmt.user.db import _get_global_bot_token as _impl
+
+    return _impl()
+
+
+def global_github_bot_token() -> str:
+    """全局 GitHub bot token（平台行 → meta → 文件 fallback）。"""
+    from src.domains.mgmt.user.db import get_global_github_bot_token as _impl
+
+    return _impl()
+
+
+def repo_credential_value(repo_key: str, cred_type: str) -> str:
+    """读 grape_t_repo_credentials 单表值（已解密；空串=无值）。"""
+    from src.domains.mgmt.user.db import get_repo_credential_value as _impl
+
+    return _impl(repo_key, cred_type)
+
+
+def repo_secret_decrypt(raw: str) -> str:
+    """repo 凭据读侧统一解密（历史明文行原样返回，空串直通）。"""
+    from src.domains.mgmt.user.db import _decrypt_repo_secret as _impl
+
+    return _impl(raw)
+
+
+# 原名别名：调用点只换模块路径，函数名与 `as` 别名一律不动。
+get_credentials = credential_list
+get_gitcode_token = gitcode_token
+get_repo_bot_token = repo_bot_token
+get_repo_bot_token_no_global = repo_bot_token_no_global
+get_repo_token_for = repo_token_for
+get_global_bot_token_for = global_bot_token_for
+_get_global_bot_token = global_gitcode_bot_token
+get_global_github_bot_token = global_github_bot_token
+get_repo_credential_value = repo_credential_value
+_decrypt_repo_secret = repo_secret_decrypt
+get_task_token = task_token

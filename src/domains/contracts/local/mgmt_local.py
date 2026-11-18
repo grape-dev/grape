@@ -78,7 +78,7 @@ def _repo_credential(repo_key: str, cred_type: str) -> str:
     if not raw:
         return ""
     try:
-        from src.domains.mgmt.user.db import _decrypt_repo_secret
+        from src.domains.mgmt.public import _decrypt_repo_secret
         return _decrypt_repo_secret(raw) or ""
     except Exception as e:
         log.warning(f"mgmt_local: repo credential decrypt failed ({repo_key}, {cred_type}): {e}")

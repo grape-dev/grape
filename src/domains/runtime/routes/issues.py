@@ -913,7 +913,7 @@ def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict) -> s
         # resolve_repo_token 派生（TokenResolver 策略链 + 卡能力位
         # owner_identity_token_fallback 的 owner-identity 回落，原 github 专属
         # get_github_token 尾段语义），所有平台含新平台同链零分支。
-        from src.domains.mgmt.user.db import get_repo_token_for as _get_rt
+        from src.domains.mgmt.public import get_repo_token_for as _get_rt
         token = _get_rt(repo_key=repo_key) or ""
         if not token:
             # bot token 未配置，fallback 用户 token（走 with_oauth_token 保护）
@@ -1971,7 +1971,7 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
             raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "仓库 GitHub Bot Token 未配置"})
     else:
         # Issue #343: GitCode 写操作走仓库 bot token（跳过 agent session token）
-        from src.domains.mgmt.user.db import get_repo_bot_token
+        from src.domains.mgmt.public import get_repo_bot_token
         from src.kernel.repo_key import to_repo_key
         api_token = get_repo_bot_token(repo_key=to_repo_key(repo_key))
         if not api_token:

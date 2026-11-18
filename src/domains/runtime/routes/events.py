@@ -568,7 +568,7 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
                         from datetime import datetime, timezone
                         from src.api.event_store import update_event_complete
                         from src.api.event_archive import finalize_event_archive
-                        from src.domains.mgmt.user.db import get_task_token as _get_task_token
+                        from src.domains.mgmt.public import get_task_token as _get_task_token
                         finalize_event_archive(
                             _task.get("repo_key", ""), _task["event_seq"], "cancelled",
                             exit_code=-1,
@@ -1555,7 +1555,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     _repo_key = evt.get("repo_key", "") or ""
                     _bot_token = ""
                     try:
-                        from src.domains.mgmt.user.db import get_repo_bot_token_no_global
+                        from src.domains.mgmt.public import get_repo_bot_token_no_global
                         _bot_token = get_repo_bot_token_no_global(_repo_key) or ""
                     except Exception:
                         pass
@@ -1901,7 +1901,7 @@ def _require_event_bot_token(request: Request, repo_key: str):
     token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
     if not token:
         token = request.headers.get("X-Bot-Token", "") or ""
-    from src.domains.mgmt.user.db import get_repo_bot_token_no_global
+    from src.domains.mgmt.public import get_repo_bot_token_no_global
     from src.kernel.auth_sdk.auth_token import verify_session_token_for_repo
     expected = get_repo_bot_token_no_global(repo_key) or ""
     if expected and token == expected:

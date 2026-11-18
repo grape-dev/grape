@@ -44,7 +44,7 @@ def request(method, url, token, body=None):
 
 
 def bot_token(repo_key):
-    from src.domains.mgmt.user.db import get_repo_bot_token
+    from src.domains.mgmt.public import get_repo_bot_token
     return get_repo_bot_token(repo_key=repo_key) or ""
 
 

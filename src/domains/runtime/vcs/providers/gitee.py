@@ -66,7 +66,7 @@ def request(method, url, token, body=None):
 
 def bot_token(repo_key):
     # S82：rc 单表唯一权威（bot 列→全局→用户降级，跳 session 级，平台通用）
-    from src.domains.mgmt.user.db import get_repo_bot_token
+    from src.domains.mgmt.public import get_repo_bot_token
     return get_repo_bot_token(repo_key=repo_key) or ""
 
 

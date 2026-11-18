@@ -876,7 +876,7 @@ def create_client(repo_key: str, token: str = "") -> "VcsApiClient":
     if not token:
         # 从 DB 获取 token
         try:
-            from src.domains.mgmt.user.db import get_gitcode_token
+            from src.domains.mgmt.public import get_gitcode_token
             token = get_gitcode_token(repo_key=repo_key) or ""
         except Exception:
             pass

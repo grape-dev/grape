@@ -72,7 +72,7 @@ class CardProviderModule:
 
     def bot_token(self, repo_key):
         # 通用 bot 链：rc 单表（bot 列→全局→用户降级；S82，平台通用）
-        from src.domains.mgmt.user.db import get_repo_bot_token
+        from src.domains.mgmt.public import get_repo_bot_token
         return get_repo_bot_token(repo_key=repo_key) or ""
 
     def user_token(self, username, user_id):

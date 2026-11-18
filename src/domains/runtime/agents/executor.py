@@ -940,7 +940,7 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
     # #219：huawei_cloud / codearts 的 AK-SK 不再经 env 注入（按需获取或自定义场景变量），跳过。
     if has_user_id(user_id):
         try:
-            from src.domains.mgmt.user.db import get_credentials
+            from src.domains.mgmt.public import get_credentials
             for c in get_credentials(user_id):
                 provider = c.get("provider", "")
                 cfg = c.get("config", {})

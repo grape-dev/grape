@@ -35,7 +35,7 @@ def request(method, url, token, body=None):
 
 
 def bot_token(repo_key):
-    from src.domains.mgmt.user.db import get_gitcode_token
+    from src.domains.mgmt.public import get_gitcode_token
     return get_gitcode_token(repo_key=repo_key) or ""
 
 def user_token(username, user_id):

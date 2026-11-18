@@ -948,7 +948,7 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
     if not repo_key:
         log.warning("A2A: missing repository, reject")
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
-    from src.domains.mgmt.user.db import get_repo_bot_token_no_global
+    from src.domains.mgmt.public import get_repo_bot_token_no_global
     from src.kernel.auth_sdk.auth_token import verify_session_token, verify_session_token_for_repo
     _expected = get_repo_bot_token_no_global(repo_key) or ""
     _bot_ok = bool(_expected) and _auth == _expected

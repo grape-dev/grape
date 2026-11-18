@@ -821,7 +821,7 @@ def _collect_server_env(user_id, account):
     env = {}
     if has_user_id(user_id):
         try:
-            from src.domains.mgmt.user.db import get_credentials
+            from src.domains.mgmt.public import get_credentials
             for c in get_credentials(user_id):
                 provider = c.get("provider", "")
                 cfg = c.get("config", {})
@@ -4216,19 +4216,19 @@ def fail_task(task_id, error, exit_code=-1):
                         else:
                             # 无 handler → fallback 到全局 bot token
                             if _rk.startswith("github:"):
-                                from src.domains.mgmt.user.db import get_global_github_bot_token
+                                from src.domains.mgmt.public import get_global_github_bot_token
                                 _comment_token = get_global_github_bot_token() or ""
                             else:
-                                from src.domains.mgmt.user.db import _get_global_bot_token
+                                from src.domains.mgmt.public import _get_global_bot_token
                                 _comment_token = _get_global_bot_token() or ""
                     except Exception as _cte:
                         log.warning(f"fail_task: handler.get_comment_token failed: {_cte}")
                         # fallback 到原有逻辑
                         if _rk.startswith("github:"):
-                            from src.domains.mgmt.user.db import get_global_github_bot_token
+                            from src.domains.mgmt.public import get_global_github_bot_token
                             _comment_token = get_global_github_bot_token() or ""
                         else:
-                            from src.domains.mgmt.user.db import _get_global_bot_token
+                            from src.domains.mgmt.public import _get_global_bot_token
                             _comment_token = _get_global_bot_token() or ""
                         if not _comment_token:
                             _comment_token = _get_task_token(task) or ""
