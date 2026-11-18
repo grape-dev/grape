@@ -142,7 +142,7 @@ def read_with_cache(storage_key: str, db_hash: str) -> str | None:
             _knowledge_cache[storage_key] = cached  # 重新插入到末尾（LRU）
             return cached[0]
     # 缓存 miss 或 hash 不一致 → 从存储拉
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
     storage = get_storage()
     if storage is None:
         return None
@@ -174,7 +174,7 @@ def read_entry_content(repo_key: str, obs_key: str, file_path: str, content_hash
                 content = read_with_cache(obs_key, content_hash)
                 if content is not None:
                     return content
-            from src.domains.runtime.storage import get_storage
+            from src.domains.runtime.public import get_storage
             storage = get_storage()
             if storage is not None:
                 data = storage.read_bytes(obs_key)
@@ -485,7 +485,7 @@ def _do_write_knowledge(*, repo_key, scope, agent_type, issue_num, content, stat
     obs_key = ""
     content_hash = ""
     try:
-        from src.domains.runtime.storage import get_storage
+        from src.domains.runtime.public import get_storage
         storage = get_storage()
         if storage is not None:
             obs_key = knowledge_storage_key(repo_key, scope, agent_type=agent_type, issue_num=issue_num)
@@ -865,7 +865,7 @@ async def knowledge_sync_loop():
     """
     import asyncio, hashlib, time
     from src.kernel.session_manager import db, db_lock
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
     from src.domains.mgmt.user.db import get_meta_value, set_meta_value
 
     storage = get_storage()
@@ -1014,7 +1014,7 @@ def _sync_baseline_files():
     """
     import hashlib as _hl
     from src.kernel.repo_key import parse_repo_key
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
 
     storage = get_storage()
     if not storage:

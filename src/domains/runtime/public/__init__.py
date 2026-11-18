@@ -6873,6 +6873,106 @@ def native_issue_number(value):
 _native_issue_number = native_issue_number
 
 
+# 对象存储 / 技能包缓存面：跨域调用方（mgmt、contracts）只能用这层转发，
+# 不直接触达 runtime.storage 内部模块（storage 在加载期反向引用别域 public，顶层 import 会成环）
+def get_storage():
+    """取对象存储后端（未配置返回 None）。"""
+    from src.domains.runtime.storage import get_storage as _impl
+
+    return _impl()
+
+
+def get_skill_storage():
+    """取技能包对象存储后端（未配置返回 None）。"""
+    from src.domains.runtime.storage import get_skill_storage as _impl
+
+    return _impl()
+
+
+def skill_key(scope: str, owner: str, skill_name: str, version: int | None = None,
+              rand8: str | None = None) -> str:
+    """生成技能 zip 对象键（与 storage 同一口径）。"""
+    from src.domains.runtime.storage import skill_key as _impl
+
+    return _impl(scope, owner, skill_name, version, rand8)
+
+
+def zip_cache_get(object_key: str):
+    """读磁盘 zip 缓存字节（未命中返回 None）。"""
+    from src.domains.runtime.storage import zip_cache_get as _impl
+
+    return _impl(object_key)
+
+
+def zip_cache_get_with_hash(object_key: str):
+    """读磁盘 zip 缓存字节 + 内容哈希 + skill_id（未命中返回 None）。"""
+    from src.domains.runtime.storage import zip_cache_get_with_hash as _impl
+
+    return _impl(object_key)
+
+
+def zip_cache_put(object_key: str, data: bytes, content_hash: str = "",
+                  skill_id: int = 0) -> None:
+    """写入磁盘 zip 缓存（原子替换 + LRU 清理）。"""
+    from src.domains.runtime.storage import zip_cache_put as _impl
+
+    return _impl(object_key, data, content_hash, skill_id)
+
+
+def mem_cache_invalidate(key: str) -> None:
+    """失效单个内存缓存项。"""
+    from src.domains.runtime.storage import mem_cache_invalidate as _impl
+
+    return _impl(key)
+
+
+def invalidate_skill_caches(object_key: str) -> None:
+    """失效某个技能对象键相关的内存缓存。"""
+    from src.domains.runtime.storage import invalidate_skill_caches as _impl
+
+    return _impl(object_key)
+
+
+def get_skill_zip_bytes(object_key: str, skill_name: str = ""):
+    """取技能 zip 字节（缓存优先，回源后端）。"""
+    from src.domains.runtime.storage import get_skill_zip_bytes as _impl
+
+    return _impl(object_key, skill_name)
+
+
+def skill_md_content(object_key: str, skill_name: str):
+    """读技能包内 SKILL.md 文本（不存在返回 None）。"""
+    from src.domains.runtime.storage import skill_md_content as _impl
+
+    return _impl(object_key, skill_name)
+
+
+def list_zip_sub_skills(zip_bytes: bytes, skill_name: str) -> list:
+    """列出技能 zip 内的子技能。"""
+    from src.domains.runtime.storage import list_zip_sub_skills as _impl
+
+    return _impl(zip_bytes, skill_name)
+
+
+def read_zip_sub_skill(zip_bytes: bytes, skill_name: str, sub_name: str):
+    """读技能 zip 内指定子技能（不存在返回 None）。"""
+    from src.domains.runtime.storage import read_zip_sub_skill as _impl
+
+    return _impl(zip_bytes, skill_name, sub_name)
+
+
+def rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = "",
+                           repo_key: str = ""):
+    """重建 scene_skill_ref（DELETE + INSERT）。"""
+    from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref as _impl
+
+    return _impl(market_id, nodes, scene_name, repo_key)
+
+
+# 原名别名：调用点只改模块路径，函数名保持不变（改动面最小）
+_rebuild_scene_skill_ref = rebuild_scene_skill_ref
+
+
 # 值对象/客户端类：属性访问时再导入（顶层 import 会成环，类也无法用转发函数包住）
 _LAZY_CLASS_ATTRS = {
     "PlatformCard": ("src.domains.runtime.vcs.platform_card", "PlatformCard"),

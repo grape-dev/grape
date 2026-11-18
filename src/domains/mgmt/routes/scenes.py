@@ -556,7 +556,7 @@ def _resolve_scene_icon(icon: str, category_id: int, obs_icon_key: str = "",
     """
     if obs_icon_key:
         try:
-            from src.domains.runtime.storage import get_storage
+            from src.domains.runtime.public import get_storage
             storage = get_storage()
             if storage is not None:
                 return storage.temporary_url(obs_icon_key)
@@ -1539,7 +1539,7 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     from src.domains.mgmt.user.db import (create_scene_market, commit_uploaded_file,
                              delete_uploaded_file, get_uploaded_file)
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
 
     if body.scope not in ("repo",):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 repo"})
@@ -1618,7 +1618,7 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
 
     # 重建 scene_skill_ref（仓库场景也需要）
     try:
-        from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref
+        from src.domains.runtime.public import _rebuild_scene_skill_ref
         _rebuild_scene_skill_ref(market_id, body.nodes, body.name, repo_key)
     except Exception as e:
         log.warning(f"create_market_scene: rebuild scene_skill_ref failed: {e}")
@@ -1720,7 +1720,7 @@ def update_market_scene(market_id: int, body: UpdateMarketSceneRequest,
 
     # 重建 scene_skill_ref
     try:
-        from src.domains.runtime.storage.scene_sync import _rebuild_scene_skill_ref
+        from src.domains.runtime.public import _rebuild_scene_skill_ref
         _rebuild_scene_skill_ref(market_id, body.nodes, body.name or scene.get("name", ""),
                                   scene.get("repo_key", "") or "")
     except Exception as e:
@@ -1787,7 +1787,7 @@ async def upload_scene_icon(file: UploadFile = File(...),
     """
     import uuid as _uuid
     from src.domains.mgmt.user.db import insert_uploaded_file
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
 
     # 校验格式
     allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/svg+xml"}
@@ -1840,7 +1840,7 @@ def _finalize_scene_icon(file_id: int, market_id: int, obs_icon_key: str, user: 
     """将临时图标文件落定为正式文件（重命名 key + 更新 uploaded_files + 更新 scene_market icon 字段）。"""
     from src.domains.mgmt.user.db import (get_uploaded_file, commit_uploaded_file,
                              delete_uploaded_file)
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
     from src.kernel.session_manager import db, db_lock
 
     file_rec = get_uploaded_file(file_id)
@@ -1887,7 +1887,7 @@ def _delete_scene_icon_file(file_key: str):
     """删除图标物理文件（OBS 或本地）。"""
     if not file_key:
         return
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
 
     storage = get_storage()
     if storage:

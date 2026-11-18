@@ -583,7 +583,7 @@ async def upload_feedback_attachment(file: UploadFile = File(...),
     # 生成唯一 key
     file_key = f"feedback/{uuid.uuid4().hex[:16]}{ext}"
 
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
     storage = get_storage()
     if storage:
         # OBS 模式：存到 OBS 桶

@@ -415,7 +415,7 @@ def download_skill_template():
                 zf.write(full, rel)
     buf.seek(0)
     # ===== OBS 分支（N8）：打包 → 传 OBS → 返回临时签名 URL（前端点击下载时动态获取）=====
-    from src.domains.runtime.storage import get_storage
+    from src.domains.runtime.public import get_storage
     storage = get_storage()
     if storage is not None:
         key = "skills/template/skill-template.zip"
@@ -447,7 +447,7 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能不存在"})
     skill_id, skill_path, scope, owner_id, name = row
 
-    from src.domains.runtime.storage import get_skill_storage
+    from src.domains.runtime.public import get_skill_storage
     storage = get_skill_storage()
     if storage is not None:
         from src.domains.mgmt.user.db import get_skill_object_key
@@ -536,14 +536,14 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
     current_id = row[7]
     from src.kernel.config import SKILLS_DIR  # 本地兜底分支按官方技能根解析
     # ===== 存储分支（N5）：两级缓存 + 内存解压提取 + zip_url 临时地址/local 直接读 =====
-    from src.domains.runtime.storage import get_skill_storage
+    from src.domains.runtime.public import get_skill_storage
     storage = get_skill_storage()
     object_key = ""
     if storage is not None:
         from src.domains.mgmt.user.db import get_skill_object_key
         object_key = get_skill_object_key(current_id)  # 官方技能转集群后 skill_path 也是对象键
     if object_key:
-        from src.domains.runtime.storage import skill_md_content
+        from src.domains.runtime.public import skill_md_content
         content = skill_md_content(object_key, row[0]) or ""
         zip_url = ""
         try:
@@ -711,10 +711,10 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         from src.kernel.session_manager import db, db_lock
         # ===== OBS/本地存储分支（N4）：规范化重打包 → 存固定 key（原子覆盖）→ DB upsert → 缓存 =====
         from src.kernel.config import log
-        from src.domains.runtime.storage import get_skill_storage
+        from src.domains.runtime.public import get_skill_storage
         storage = get_skill_storage()
         if storage is not None:
-            from src.domains.runtime.storage import skill_key, zip_cache_put, mem_cache_invalidate
+            from src.domains.runtime.public import skill_key, zip_cache_put, mem_cache_invalidate
             from src.domains.mgmt.user.db import upsert_skill_obs
             from src.kernel.repo_key import to_repo_key
             owner = _resolve_repo_key(repo, strict=True) if scope == "repo" else str(user["id"])
@@ -815,7 +815,7 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权删除该技能"})
 
     # 存储对象清理（OBS 或单机本地）
-    from src.domains.runtime.storage import get_skill_storage
+    from src.domains.runtime.public import get_skill_storage
     storage = get_skill_storage()
     object_key = ""
     if storage is not None:
@@ -846,7 +846,7 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
         log.warning("存储后端不可用，仅清理 DB 记录，对象文件需手动清理 (skill_id=%s, scope=%s, name=%s)", skill_id, skill_scope, skill_name)
 
     if object_key:
-        from src.domains.runtime.storage import invalidate_skill_caches
+        from src.domains.runtime.public import invalidate_skill_caches
         try:
             storage.delete_object(object_key)
         except Exception:
@@ -991,11 +991,11 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
 
         # 5. 存储写序（对齐 #444：留存旧字节 → 覆盖 → upsert → 失败回滚 → 缓存失效）
         from src.kernel.config import log
-        from src.domains.runtime.storage import get_skill_storage
+        from src.domains.runtime.public import get_skill_storage
         storage = get_skill_storage()
         if storage is None:
             raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用且本地存储被禁用，技能更新失败。请检查服务端存储配置后重试。"})
-        from src.domains.runtime.storage import skill_key, zip_cache_put, mem_cache_invalidate
+        from src.domains.runtime.public import skill_key, zip_cache_put, mem_cache_invalidate
         from src.domains.mgmt.user.db import upsert_skill_obs, get_skill_object_key
         object_key = get_skill_object_key(skill_id) or skill_key(
             "custom" if skill_scope == "user" else skill_scope, owner_id, skill_name)
@@ -1101,10 +1101,10 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         raise HTTPException(status_code=409, detail={"code": 409, "message": dedup_msg})
 
     # ===== 存储分支：copy → DB 回写（OBS copyObject / 本地 copy）=====
-    from src.domains.runtime.storage import get_skill_storage
+    from src.domains.runtime.public import get_skill_storage
     storage = get_skill_storage()
     if storage is not None:
-        from src.domains.runtime.storage import skill_key, zip_cache_get, zip_cache_put, mem_cache_invalidate, zip_cache_get_with_hash, get_skill_zip_bytes
+        from src.domains.runtime.public import skill_key, zip_cache_get, zip_cache_put, mem_cache_invalidate, zip_cache_get_with_hash, get_skill_zip_bytes
         from src.domains.mgmt.user.db import get_skill_object_key, upsert_skill_obs
         src_key = get_skill_object_key(skill_rec["id"])
         if not src_key:
@@ -1144,7 +1144,7 @@ def _get_sub_skill_zip(skill_id: int, skill_name: str) -> bytes | None:
     （沿用既有 404/空列表口径）；有对象键但存储未启用 → 503（对齐 detail 端点）。
     """
     from src.domains.mgmt.user.db import get_skill_object_key
-    from src.domains.runtime.storage import get_skill_storage, get_skill_zip_bytes
+    from src.domains.runtime.public import get_skill_storage, get_skill_zip_bytes
     object_key = get_skill_object_key(skill_id)
     if not object_key:
         return None
@@ -1179,7 +1179,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
 
     if not os.path.isdir(ref_dir):
         # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取 references/ =====
-        from src.domains.runtime.storage import list_zip_sub_skills
+        from src.domains.runtime.public import list_zip_sub_skills
         zip_bytes = _get_sub_skill_zip(skill_id, skill_name)
         if zip_bytes is not None:
             return {"skill_name": skill_name, "sub_skills": list_zip_sub_skills(zip_bytes, skill_name)}
@@ -1245,7 +1245,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
 
     if not os.path.isfile(sub_md):
         # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取子技能 =====
-        from src.domains.runtime.storage import read_zip_sub_skill
+        from src.domains.runtime.public import read_zip_sub_skill
         zip_bytes = _get_sub_skill_zip(skill_id, row[0])
         sub_data = read_zip_sub_skill(zip_bytes, row[0], sub_name) if zip_bytes else None
         if sub_data is None:
@@ -1312,7 +1312,7 @@ def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_curre
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
     else:
         # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取子技能 =====
-        from src.domains.runtime.storage import read_zip_sub_skill
+        from src.domains.runtime.public import read_zip_sub_skill
         zip_bytes = _get_sub_skill_zip(pkg_id, row[0])
         sub_data = read_zip_sub_skill(zip_bytes, row[0], sub_name) if zip_bytes else None
         content = sub_data["content"] if sub_data else None
