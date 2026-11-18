@@ -194,7 +194,11 @@ def resolve_redispatch_pool(*, scene_authoritative: bool, scene_engine_ids,
         # Q2 裁定），若先短路 None，则配了「按标签」的 SRE 场景重派会被判成「引擎全部离线」
         # 并 409——与首次派发 `_scene_pool_gate` 的 selector 优先口径相反（selector 模式本就
         # 不依赖 id 池）。绑定全灭只在 selector 模式不成立时才 fail-closed。
-        if scene_selector:
+        #
+        # 判据与 `_scene_pool_gate`（event_pipeline.py:3824 `sel and (sel.get("tags") or [])`）
+        # 逐字一致：`{"tags": []}` 不是 selector 模式（dict 真值判定会把它当 selector，从而丢掉
+        # 同节点的 id/uid 绑定，与派发侧口径相反）。
+        if scene_selector and (scene_selector.get("tags") or []):
             # 场景现行 = selector 模式：id/uid 池必须清空（模式互斥，B-01 同尺）
             return "", _json.dumps(scene_selector, ensure_ascii=False)
         if scene_engine_ids is None:

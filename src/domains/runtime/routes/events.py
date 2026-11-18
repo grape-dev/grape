@@ -532,8 +532,12 @@ def _redispatch_pool_columns(old: dict) -> tuple:
         log.warning(f"[redispatch] pool columns: scene lookup failed for {repo_key}#{issue_id}: {e}")
     if scene_id:
         try:
-            ids = get_scene_pool_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=scene_uid)
+            # 读序与 `_scene_pool_gate` 一致：先 selector，selector 模式（tags 非空）下根本
+            # 不问 id 池——SRE 空绑定恒定返回 None，若先读 id 池，一次异常/None 就会把
+            # selector 模式误判成「绑定全灭」（409「引擎全部离线」），文案还会误导人去查在线状态。
             sel = get_scene_engine_selector(scene_id, agent_type, repo_key=repo_key, user_id=scene_uid)
+            ids = None if (sel and (sel.get("tags") or [])) else \
+                get_scene_pool_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=scene_uid)
             ids, sel = resolve_redispatch_pool(
                 scene_authoritative=True, scene_engine_ids=ids, scene_selector=sel,
                 snapshot_engine_ids=snapshot_ids, snapshot_selector=snapshot_sel)

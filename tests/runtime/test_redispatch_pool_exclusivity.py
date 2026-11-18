@@ -406,3 +406,58 @@ def test_pool_log_line_reports_stale_selector_and_stays_silent_for_broadcast():
     silent = events_route._redispatch_pool_log_line(
         {"pool_engine_ids": "", "pool_selector": ""}, "", "", "")
     assert silent == ""
+
+
+# ===== 7) selector 判据与派发侧同尺：tags 非空才算 selector 模式 =====
+#
+# 派发侧 `_scene_pool_gate` 用 `sel and (sel.get("tags") or [])`；本模块曾用 dict 真值
+# `if scene_selector:`，把 `{"tags": []}` 当成 selector 模式 → 同节点的 id/uid 绑定被丢掉。
+
+def test_empty_tags_dict_is_not_selector_mode_and_keeps_id_pool():
+    """`{"tags": []}` 不是 selector 模式：id 池必须保留（与 _scene_pool_gate 同判据）。"""
+    ids, sel = resolve_redispatch_pool(
+        scene_authoritative=True, scene_engine_ids="[17382]",
+        scene_selector={"tags": []},
+        snapshot_engine_ids="", snapshot_selector="")
+    assert ids == "[17382]", "空 tags 不能吞掉同节点的 id/uid 绑定"
+    assert sel == ""
+
+
+def test_empty_tags_dict_with_no_binding_still_fail_closed():
+    """空 tags 不算 selector → 绑定全灭仍按 #259 fail-closed（不得降级广播）。"""
+    ids, sel = resolve_redispatch_pool(
+        scene_authoritative=True, scene_engine_ids=None,
+        scene_selector={"tags": []}, snapshot_engine_ids="[1]", snapshot_selector="")
+    assert ids is None
+    assert sel == ""
+
+
+def test_columns_empty_tags_read_id_pool(monkeypatch):
+    """粘合层：场景 selector 为空 tags → 照旧读 id 池（不当成 selector 模式）。"""
+    monkeypatch.setattr("src.api.session_store.get_issue_scene",
+                        lambda repo_key, issue_id: ("sc-qa", 0))
+    monkeypatch.setattr(engine_select_mod, "get_scene_engine_selector",
+                        lambda *a, **kw: {"tags": []})
+    monkeypatch.setattr(engine_select_mod, "get_scene_pool_engine_ids",
+                        lambda *a, **kw: "[17382]")
+    ids, sel, _scene, _uid, auth = events_route._redispatch_pool_columns(OLD_SELECTOR_MODE)
+    assert auth is True
+    assert ids == "[17382]"
+    assert sel == ""
+
+
+def test_columns_selector_mode_does_not_read_id_pool(monkeypatch):
+    """selector 模式不读 id 池：即便 id 池读取抛错（SRE 空绑定形态），selector 仍然生效。"""
+    monkeypatch.setattr("src.api.session_store.get_issue_scene",
+                        lambda repo_key, issue_id: ("sc-qa", 0))
+    monkeypatch.setattr(engine_select_mod, "get_scene_engine_selector",
+                        lambda *a, **kw: {"tags": ["scope:global"]})
+
+    def _boom(*a, **kw):
+        raise RuntimeError("SRE scene has no bound engines (returns None upstream)")
+
+    monkeypatch.setattr(engine_select_mod, "get_scene_pool_engine_ids", _boom)
+    ids, sel, _scene, _uid, auth = events_route._redispatch_pool_columns(OLD_ID_MODE)
+    assert auth is True, "selector 模式不应因 id 池读取失败而回落快照/报全离线"
+    assert ids == ""
+    assert json.loads(sel) == {"tags": ["scope:global"]}
