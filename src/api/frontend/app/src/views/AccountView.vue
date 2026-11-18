@@ -89,12 +89,12 @@
               <div v-if="!channelConfigured(p.provider)" class="ac__prow">
                 <span
                   class="ac__avatar ac__avatar--icon"
-                  v-html="platformIcon(p.provider, 20)"
+                  v-html="platformIcon(p.provider, 22)"
                 ></span>
                 <div class="ac__flex1">
                   <div class="ac__pname">
                     <span class="ac__name">{{ pName(p.provider) }}</span>
-                    <span class="tg tg-d ac__tag10">{{ t('bind_unavailable_badge') }}</span>
+                    <span class="ac__stag ac__stag--idle">{{ t('bind_unavailable_badge') }}</span>
                   </div>
                   <div class="ac__linkhint">{{ t('bind_unavailable_hint') }}</div>
                 </div>
@@ -106,13 +106,12 @@
               >
                 <span
                   class="ac__avatar ac__avatar--icon"
-                  v-html="platformIcon(p.provider, 20)"
+                  v-html="platformIcon(p.provider, 22)"
                 ></span>
                 <div class="ac__flex1">
                   <div class="ac__pname">
-                    <span v-html="platformIcon(p.provider, 20)"></span>
                     <span class="ac__name">{{ pName(p.provider) }}</span>
-                    <span class="tg ac__expired-tag">{{ t('token_expired') }}</span>
+                    <span class="ac__stag ac__stag--warn">{{ t('token_expired') }}</span>
                   </div>
                   <div class="ac__expired-hint">{{ t('token_expired_hint') }}</div>
                 </div>
@@ -122,31 +121,32 @@
               </div>
               <!-- 已绑定 -->
               <div v-else-if="isBound(p.provider)" class="ac__prow ac__prow--bound">
-                <span v-if="identityOf(p.provider)?.external_avatar" class="ac__avatar">
-                  <img
-                    :src="identityOf(p.provider).external_avatar"
-                    @error="$event.target.style.display = 'none'"
-                  />
-                </span>
-                <span v-else class="ac__avatar ac__avatar--text">{{
-                  (identityOf(p.provider)?.external_login || pName(p.provider))[0].toUpperCase()
-                }}</span>
+                <span
+                  class="ac__avatar ac__avatar--brand"
+                  v-html="platformIcon(p.provider, 22)"
+                ></span>
                 <div class="ac__flex1 ac__min0">
                   <div class="ac__pname">
-                    <span v-html="platformIcon(p.provider, 20)"></span>
                     <span class="ac__name">{{ pName(p.provider) }}</span>
-                    <span class="tg tg-d ac__tag10">{{ t('linked_badge') }}</span>
+                    <span class="ac__stag ac__stag--bound">{{ t('linked_badge') }}</span>
                   </div>
-                  <div class="ac__idline">{{ identityLine(p.provider) }}</div>
-                  <div v-if="identityOf(p.provider)?.created_at" class="ac__timeline">
-                    {{ t('linked_on') }}{{ identityOf(p.provider).created_at.substring(0, 10) }}
+                  <div class="ac__meta">
+                    <span class="ac__idline">{{ identityLine(p.provider) }}</span>
+                    <template v-if="identityOf(p.provider)?.created_at">
+                      <span class="ac__dot">·</span>
+                      <span class="ac__timeline"
+                        >{{ t('linked_on') }}{{
+                          identityOf(p.provider).created_at.substring(0, 10)
+                        }}</span
+                      >
+                    </template>
                   </div>
                 </div>
                 <div class="ac__prow-btns">
                   <button class="bt bt-s bt-o" @click="openBind(p.provider)">
                     {{ t('update') }}
                   </button>
-                  <button class="bt bt-s bt-r ac__unbind-btn" @click="unbindProvider(p.provider)">
+                  <button class="bt bt-s bt-o ac__unbind-btn" @click="unbindProvider(p.provider)">
                     {{ t('unbind') }}
                   </button>
                 </div>
@@ -155,12 +155,12 @@
               <div v-else class="ac__prow">
                 <span
                   class="ac__avatar ac__avatar--icon"
-                  v-html="platformIcon(p.provider, 20)"
+                  v-html="platformIcon(p.provider, 22)"
                 ></span>
                 <div class="ac__flex1">
                   <div class="ac__pname">
                     <span class="ac__name">{{ pName(p.provider) }}</span>
-                    <span class="tg tg-d ac__tag10">{{ t('not_linked') }}</span>
+                    <span class="ac__stag ac__stag--idle">{{ t('not_linked') }}</span>
                   </div>
                   <div class="ac__linkhint">{{ t('link_to_manage_repos') }}</div>
                 </div>
@@ -1956,7 +1956,7 @@ onMounted(function () {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 2px;
+  margin-bottom: 4px;
 }
 .ac__name {
   font-size: 14px;
@@ -1966,12 +1966,36 @@ onMounted(function () {
 .ac__tag10 {
   font-size: 10px;
 }
-.ac__expired-tag {
+.ac__stag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
   font-size: 10px;
-  background: var(--r);
-  color: var(--on-accent);
-  padding: 2px 6px;
-  border-radius: 4px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.ac__stag--bound {
+  background: rgba(28, 164, 76, 0.12);
+  color: var(--g);
+}
+.ac__stag::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.9;
+}
+.ac__stag--idle {
+  background: var(--bg);
+  color: var(--t2);
+}
+.ac__stag--warn {
+  background: rgba(220, 40, 40, 0.12);
+  color: var(--r);
 }
 .ac__expired-hint {
   font-size: 12px;
@@ -1979,9 +2003,11 @@ onMounted(function () {
   margin-bottom: 8px;
 }
 .ac__avatar {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px rgba(16, 23, 36, 0.06);
   overflow: hidden;
   flex-shrink: 0;
   display: flex;
@@ -2003,27 +2029,53 @@ onMounted(function () {
   background: var(--bg);
   opacity: 0.5;
 }
-.ac__idline {
+/* 已绑定行：平台 logo 与原未绑定行同一槽位（不再在名字前重复渲染，避免名字右移） */
+.ac__avatar--brand {
+  background: var(--bg);
+}
+/* 账号 + 绑定时间合成一行元信息（与未绑定行的 hint 行同一视觉重量） */
+.ac__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
   font-size: 12px;
+  line-height: 1.5;
   color: var(--t2);
+}
+.ac__idline {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ac__timeline {
-  font-size: 11px;
+.ac__dot {
   color: var(--t3);
-  margin-top: 2px;
+  flex-shrink: 0;
+}
+.ac__timeline {
+  color: var(--t3);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .ac__prow-btns {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
 }
+.ac__prow :deep(button.bt) {
+  min-width: 56px;
+  justify-content: center;
+  height: 28px;
+  padding: 0 12px;
+}
 .ac__unbind-btn {
-  color: var(--r);
-  border-color: var(--r);
-  font-size: 11px;
+  color: var(--r) !important;
+  border-color: var(--b) !important;
+}
+.ac__unbind-btn:hover {
+  border-color: var(--r) !important;
+  background: rgba(220, 40, 40, 0.06);
 }
 .ac__linkhint {
   font-size: 12px;
