@@ -426,12 +426,17 @@ def _load_user_scene_nodes(scene_id: str, uids: set[str]):
             return nodes
     return None
 
-def precheck_scene(scene_id: str, repo_key: str, user=None) -> dict:
+def precheck_scene(scene_id: str, repo_key: str, user=None, explicit: bool = True) -> dict:
     """建单前场景可用性预校验。
 
     返回 {"ok", "problems", "warnings", "trace_id"}；problems 非空即 ok=False。
     配置 enforce=false、场景不存在、查询异常一律放行（fail-open）。
     标准解析未命中时会补查 user 个人场景（scene_market scope='user'）。
+
+    explicit=False 表示场景不是用户显式选的（建单选智能推荐/留空时由仓库
+    dev_scene 或内置 default 兜底）：这种场景的节点问题用户无从修复，
+    转为 warnings 放行，不拦建单（否则 default 模板自带的 sre 节点会把
+    所有走智能推荐的仓库全部拦死）。
     """
     trace_id = "pc_" + uuid.uuid4().hex[:16]
     out = {"ok": True, "problems": [], "warnings": [], "trace_id": trace_id}
@@ -447,7 +452,9 @@ def precheck_scene(scene_id: str, repo_key: str, user=None) -> dict:
         return out
     try:
         from src.api.pipeline_config import get_pipeline_config
-        scene = get_pipeline_config(scene_id, repo_key=repo_key)
+        # 预校验判断的是「此刻能不能执行」：必须读真实配置，不能命中 60s 进程缓存
+        # （双主各自持有缓存，另一台删/改场景后本机仍会用幽灵节点判定并发拦单）。
+        scene = get_pipeline_config(scene_id, repo_key=repo_key, use_cache=False)
         if _scene_unresolved(scene, scene_id):
             _names, uids = _user_identities(user)
             personal_nodes = _load_user_scene_nodes(scene_id, uids) if uids else None
@@ -464,6 +471,15 @@ def precheck_scene(scene_id: str, repo_key: str, user=None) -> dict:
         problems = out["problems"]
         _check_structure(nodes, cfg, problems)
         _check_nodes(nodes, scene_id, repo_key, user, cfg, problems)
+        if problems and not explicit:
+            # 非用户显式选择的场景：问题降级为告警放行（用户没有可操作的修复入口）
+            out["warnings"].extend(
+                str(p.get("message") or p.get("reason_code") or "") for p in problems)
+            log.warning(
+                f"scene_precheck: non-explicit scene={scene_id} repo={repo_key} has "
+                f"{len(problems)} problem(s), downgraded to warnings: {summarize_problems(problems)}")
+            out["problems"] = []
+            problems = out["problems"]
         out["ok"] = not problems
     except Exception as e:
         # fail-open：预校验自身的异常不得误拦正常建单

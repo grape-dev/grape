@@ -27,7 +27,8 @@ def _patch_scene(monkeypatch, nodes):
     import src.api.pipeline_config as pc
 
     cfg = _scene(nodes)
-    monkeypatch.setattr(pc, "get_pipeline_config", lambda scene_id, repo_key="": cfg)
+    monkeypatch.setattr(pc, "get_pipeline_config",
+                        lambda scene_id, repo_key="", use_cache=True: cfg)
 
 
 def _insert_engine(name, *, credential_id=0, status="online", healthy=1, installed=1,
@@ -300,6 +301,36 @@ def test_sre_empty_binding_rejected(monkeypatch):
     out = _run(monkeypatch, [_node("sre", eids=[])])
     assert out["ok"] is False
     assert any(p["reason_code"] == "engine_missing" for p in out["problems"])
+
+
+def test_sre_empty_binding_downgraded_for_non_explicit_scene(monkeypatch):
+    """非用户显式选择的场景（dev_scene/default 回落）只告警不拦单。
+
+    beta 实测故障：删场景后 60s 内建单落到另一台，请求命中旧缓存里的场景，
+    该场景带未绑机的 sre 节点 → 智能推荐路径被 400 拦死，而用户无从修复。
+    """
+    _patch_scene(monkeypatch, [_node("sre", eids=[])])
+    out = scene_precheck.precheck_scene(_SCENE_ID, _REPO,
+                                        {"username": "me", "id": ""}, explicit=False)
+    assert out["ok"] is True
+    assert out["problems"] == []
+    assert any("SRE" in w for w in out["warnings"])
+
+
+def test_precheck_bypasses_scene_cache(monkeypatch):
+    """预校验必须读实时场景配置：调用 get_pipeline_config 时 use_cache=False。"""
+    import src.api.pipeline_config as pc
+
+    seen = {}
+    cfg = _scene([_node("vod", eids=[])])
+
+    def _spy(scene_id, repo_key="", use_cache=True):
+        seen["use_cache"] = use_cache
+        return cfg
+
+    monkeypatch.setattr(pc, "get_pipeline_config", _spy)
+    scene_precheck.precheck_scene(_SCENE_ID, _REPO, {"username": "me", "id": ""})
+    assert seen.get("use_cache") is False
 
 
 def test_fail_open_on_query_exception(monkeypatch):

@@ -476,7 +476,8 @@ def get_scenes(repo_key: str = "", limit: int = None, offset: int = 0,
              "pinned_at": s.get("pinned_at") or ""} for s in db_scenes]
 
 
-def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
+def get_pipeline_config(scene_id: str = "default", repo_key: str = "",
+                        use_cache: bool = True) -> Optional[dict]:
     """Return pipeline config for a repo-scoped scene: {name, nodes: [...], onboarding}.
 
     Resolution priority (Issue #502, aligns docs/new-version3/scene-center-design.md):
@@ -494,11 +495,16 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Option
     Results are cached at process level (TTL 60s) to eliminate N+1 in _query_tasks
     (P1-B, Issue #357). Write paths (create/update/delete_custom_scene) invalidate
     immediately via invalidate_scene_cache().
+
+    use_cache=False 只给「必须反映此刻真实配置」的调用方用（建单前场景预校验、
+    dev_scene 悬空探测）：缓存是进程级的，双主各自持有，另一台删除/修改场景后
+    60s 窗口内仍会读到旧节点，用缓存做可执行性判定会拿幽灵场景拦单。
     """
     # Check cache first
-    cached, hit = _cache_get(scene_id, repo_key)
-    if hit:
-        return cached
+    if use_cache:
+        cached, hit = _cache_get(scene_id, repo_key)
+        if hit:
+            return cached
 
     scene = None
     fallback = False
@@ -832,6 +838,24 @@ def delete_custom_scene(scene_id: str, repo_key: str):
             (scene_id, repo_key))
         db.commit()
     invalidate_scene_cache(scene_id, repo_key)
+
+    # 自检默认场景：仓库 dev_scene 正好指向被删场景 → 清空（回到智能推荐）。
+    # 不清就会留悬空指针：建单预校验 / 派发读到幽灵 id，或回落内置 default
+    # 被其 sre 节点拦死（beta 实测：删场景 17 秒后建单被拦）。
+    try:
+        from src.domains.mgmt.user.db import set_repo_scene
+        _dbr, _lockr = _db()
+        _cur_dev = ""
+        with _lockr:
+            _cr = _dbr.cursor()
+            _cr.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+            _rowr = _cr.fetchone()
+            _cur_dev = (_rowr[0] or "") if _rowr else ""
+        if _cur_dev == scene_id:
+            set_repo_scene(repo_key, "")
+            log.info(f"RepoScene: cleared dangling dev_scene={scene_id} for {repo_key}")
+    except Exception as _e:
+        log.warning(f"RepoScene: clear dangling dev_scene failed ({repo_key}/{scene_id}): {_e}")
 
     # 自检推荐配置：清理指向被删场景的规则/兜底
     try:

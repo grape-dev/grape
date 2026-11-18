@@ -1855,7 +1855,13 @@ def set_repo_scene(repo_key: str, scene_id: str):
         log.warning(f"Set repo scene failed: {e}")
 
 def get_repo_scene(repo_key: str) -> str:
-    """读取仓库开发场景（managed_repos.dev_scene），无记录或未设置返回空字符串。"""
+    """读取仓库开发场景（managed_repos.dev_scene），无记录或未设置返回空字符串。
+
+    悬空防护：dev_scene 指向的场景已被删除/从未存在时返回空串（按未配置处理）。
+    典型成因是删除场景不清 dev_scene，悬空 id 会让建单预校验和派发读到幽灵场景
+    （或回落内置 default 被其 sre 节点拦死）。解析查询本身失败时保持原值返回，
+    不改变既有行为。
+    """
     from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     try:
@@ -1863,10 +1869,22 @@ def get_repo_scene(repo_key: str) -> str:
             c = _mg_db.cursor()
             c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
             row = c.fetchone()
-            return (row[0] or "") if row else ""
+            _scene = (row[0] or "") if row else ""
     except Exception as e:
         log.warning(f"Get repo scene failed: {e}")
         return ""
+    if not _scene:
+        return ""
+    try:
+        from src.domains.mgmt.pipeline_config import get_pipeline_config
+        _cfg = get_pipeline_config(_scene, repo_key=repo_key, use_cache=False)
+        if not _cfg or _cfg.get("fallback"):
+            log.warning(f"Repo dev_scene dangling: repo={repo_key} scene={_scene}"
+                        f" -> treated as unset")
+            return ""
+    except Exception as e:
+        log.warning(f"Repo dev_scene validity check failed ({repo_key}/{_scene}): {e}")
+    return _scene
 
 def get_scene_recommend_config(repo_key: str) -> dict:
     """读取仓库智能推荐配置（managed_repos.scene_recommend_config）。
