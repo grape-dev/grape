@@ -106,7 +106,8 @@ def test_board_round_must_be_shallow_ref():
         encoding="utf-8")
     assert "const boardRound = shallowRef(null)" in vue, (
         "boardRound 仍用 ref() → #2649 粘合层身份比较恒 false → 看板列翻页死锁")
-    assert "shallowRef" in vue.split("from 'vue'")[0] or "shallowRef" in vue.split("\n")[0:5].__str__() or True
+    assert "shallowRef" in vue.split("from 'vue'")[0], (
+        "import 未引入 shallowRef（M2：此前是恒真断言，无守卫力）")
 
 
 def test_board_foot_loadmore_is_clickable():
@@ -117,3 +118,49 @@ def test_board_foot_loadmore_is_clickable():
         encoding="utf-8")
     assert 'class="isk-loadmore-btn"' in vue, "列底加载更多缺点击处理器"
     assert '@click="boardFetch(BOARD_CURSOR_OF_COL[col.k])"' in vue
+    # D1 回归：title 必须是绑定（:title），不得是 mustache 字面量
+    assert ":title=\"t('load_more')\"" in vue, (
+        "title 写成 mustache 插值 → 编译为字面量 '{{ t(...) }}'")
+    assert "title=\"{{ t('load_more') }}\"" not in vue
+
+
+def test_create_task_precheck_keeps_explicit_semantics():
+    """F1/A14 回归：建单预检必须保留 explicit 语义（回落场景只告警不拦）。"""
+    from pathlib import Path
+
+    src = Path("src/domains/runtime/issues_center.py").read_text(encoding="utf-8")
+    assert "_scene_is_explicit = bool(_scene_for_precheck)" in src, (
+        "explicit 语义被删 → 回落场景(仓库 dev_scene/内置 default)从告警放行变 400 拦单，"
+        "用户无修复入口")
+    assert "explicit=_scene_is_explicit" in src
+
+
+def test_routes_keep_attach_and_repo_list_caches():
+    """G1 回归：附件批量缓存与列表 TTL 缓存不得再被删。"""
+    from pathlib import Path
+
+    src = Path("src/domains/runtime/routes/issues.py").read_text(encoding="utf-8")
+    assert "_ATTACH_CACHE" in src, "附件批量缓存被删 → 看板 6 并发各自 OBS 枚举 3.2s"
+    assert "_cached_repo_list" in src, "列表 TTL 缓存被删 → db_lock 串行叠加顶穿 8s 看门狗"
+    assert "@_cached_repo_list(5.0)" in src
+
+
+def test_watchdog_survives_board_changes():
+    """N3 回归：静默 abort 看门狗不得被看板改造挤掉。"""
+    from pathlib import Path
+
+    vue = Path("src/api/frontend/app/src/views/IssuesView.vue").read_text(
+        encoding="utf-8")
+    assert "function armLoadWatchdog()" in vue, "armLoadWatchdog 被删 → 静默 abort 永久加载态"
+    assert "function disarmLoadWatchdog()" in vue
+    assert "_silentAbortRetried" in vue
+
+
+def test_mine_issues_accepts_creators_filter():
+    """N2 回归：my_issues 必须消费 creators（此前静默丢弃）。"""
+    from pathlib import Path
+
+    src = Path("src/domains/runtime/routes/issues.py").read_text(encoding="utf-8")
+    assert 'creators: str = Query("", description="按创建人过滤' in src, (
+        "my_issues 缺 creators 参数 → 前端 mine 分支的创建人过滤被服务端丢弃")
+    assert "_build_creator_filter(creators, clauses, params)" in src

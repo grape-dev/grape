@@ -403,7 +403,7 @@
               <span
                 v-else-if="boardCursorOf(col.k).hasMore"
                 class="isk-loadmore-btn"
-                title="{{ t('load_more') }}"
+                :title="t('load_more')"
                 @click="boardFetch(BOARD_CURSOR_OF_COL[col.k])"
                 >↓ {{ t('load_more') }}</span
               >
@@ -758,6 +758,9 @@ const tasksLoading = ref(false) // 分屏请求在途（列表尾 sentinel 展�
 const tasksAppendLoading = ref(false) // 滚动追加在途（防并发重复拉同屏）
 let taskReqSeq = 0 // Issue #2984d027a：请求序号——重置类请求让旧在途响应失效
 let taskServerPage = 1 // 下一次要拉的服务端页码（成功后才推进）
+// 首屏请求被 silent abort（导航取消）后自动重拉一次；重拉再被取消才转终态，
+// 避免「同 hash 重复点菜单 → abort 旧请求但视图不重挂载 → 无人重发」造成永久加载中。
+let _silentAbortRetried = false
 const listScrollEl = ref(null) // 列表滚动容器（IntersectionObserver 的 root）
 const listSentinelEl = ref(null) // 列表尾部哨兵
 let listObserver = null
@@ -1118,9 +1121,8 @@ const filtered = computed(() => {
 function repoOf() {
   return currentRepo()
 }
-const serverPagedView = computed(
-  () => viewMode.value === 'repo_all' && taskView.value === 'list' && !!repoOf()
-)
+// 列表分屏：mine 同样分页（N2-①：此前只认 repo_all → mine 列表第 2 屏不可达）
+const serverPagedView = computed(() => taskView.value === 'list' && !!repoOf())
 // 看板按列分页：仓库全部 / 我的需求 一视同仁（mine 也走列游标，各自一页懒加载）
 const boardPagedView = computed(() => taskView.value === 'board' && !!repoOf())
 const totalPages = computed(() => Math.max(1, Math.ceil(filtered.value.length / PER_PAGE)))
@@ -1280,7 +1282,7 @@ const BOARD_CURSOR_STATUSES = {
 const colCursor = reactive({}) // cursor -> {page, hasMore, loading, total, seq}
 // Issue #2649：整刷回合化（旧前端 issues.js 的语义等价迁移）
 const boardEpoch = ref(0) // 全局回合序号：reset 自增，旧 epoch 的在途响应一律丢弃
-const boardRound = shallowRef(null) // 进行中的整刷回合（createBoardRound 产出）。必须 shallowRef：ref 会把 round 深度 reactive 化 → round !== boardRound.value 恒成立 → commitBoardRound 永早退、boardRound 永不清空 → 列内翻页(滚动/点击)全被 boardRound 守卫拦死（实测 #2649 粘合层潜在缺陷）
+const boardRound = shallowRef(null) // 进行中的整刷回合（createBoardRound 产出）。必须 shallowRef：ref 会把 round 深度 reactive 化 → round !== boardRound.value 恒成立 → commitBoardRound 永早退、boardRound 永不清空 → 列内翻页(滚动/点击)全被 boardRound 守卫拦死（#2649 粘合层缺陷，浏览器内实测 identity=false）
 const boardRefreshFailed = ref(false) // 软失败态：保留旧帧 + 可重试提示
 const boardFrameId = ref('') // 帧身份：只有身份变化才允许清空旧帧
 function boardFrameIdNow() {
@@ -1342,7 +1344,6 @@ function mergeBoardItems(items) {
 function boardFetch(key, opts) {
   const repo = repoOf()
   const cur = colCursor[key]
-
   if (!repo || !cur) return Promise.resolve()
   const merge = !!(opts && opts.merge)
   const round = (opts && opts.round) || null
@@ -1364,7 +1365,6 @@ function boardFetch(key, opts) {
   cur.loading = true
   const seq = ++cur.seq
   const page = merge ? 1 : cur.page
-  console.log('[dbg-boardFetch]', key, 'merge=', merge, 'round=', !!round, 'page=', page, 'hasMore=', cur.hasMore, 'loading=', cur.loading)
   // URL 按 viewMode 分支：仓库全部→仓库列表；我的需求→mine（statuses 下推同口径）
   const baseMine =
     viewMode.value === 'mine'
@@ -1380,7 +1380,7 @@ function boardFetch(key, opts) {
     page +
     '&statuses=' +
     encodeURIComponent(BOARD_CURSOR_STATUSES[key])
-  if (query.value && viewMode.value !== 'mine') url += '&q=' + encodeURIComponent(query.value)
+  if (query.value) url += '&q=' + encodeURIComponent(query.value)
   if (filterAssignees.value.length)
     url += '&creators=' + encodeURIComponent(filterAssignees.value.join(','))
   return API()
@@ -1503,7 +1503,6 @@ function loadBoardAll(opts) {
 }
 // Issue #2649：回合收敛点——成功=单次赋值原子替换；失败=保留旧帧 + 可重试软横幅
 function commitBoardRound(round) {
-
   if (round !== boardRound.value) return // 已被更新的整刷取代
   boardRound.value = null
   const decision = decideBoardRound(round, {
@@ -1545,24 +1544,10 @@ function retryBoardRefresh() {
 }
 // 列内滚到接近底部 → 只加载该列所属游标的下一页
 function onBoardScroll(colKey, ev) {
-  // [TEMP-DEBUG v69] 滚动触发链路探针（定位"加载更多不触发"）
-  try {
-    console.log('[dbg-scroll]', colKey,
-      'bpv=', boardPagedView.value,
-      'repo=', JSON.stringify(repoOf() || null),
-      'el=', !!(ev && ev.target),
-      'st=', ev && ev.target ? Math.round(ev.target.scrollTop) : -1,
-      'sh=', ev && ev.target ? ev.target.scrollHeight : -1,
-      'ch=', ev && ev.target ? ev.target.clientHeight : -1)
-  } catch (e) { console.log('[dbg-scroll] err', e) }
   if (!boardPagedView.value) return
   const el = ev && ev.target
   if (!el) return
   if (el.scrollTop + el.clientHeight >= el.scrollHeight - 48) {
-    try {
-      const cur = colCursor[BOARD_CURSOR_OF_COL[colKey]]
-      console.log('[dbg-fetch-enter]', colKey, 'cursor=', JSON.stringify(cur))
-    } catch (e) {}
     boardFetch(BOARD_CURSOR_OF_COL[colKey])
   }
 }
@@ -2869,6 +2854,7 @@ function loadTasks(opts) {
   if (append && tasksAppendLoading.value) return // 追加去重；重置请求一律放行
   const seq = ++taskReqSeq
   const reqPage = merge ? 1 : append ? taskServerPage : 1
+  // 「仓库全部」视图：服务端分页 + q/statuses 过滤；「我的需求」：条数有限，保持全量拉取
   // 「仓库全部」与「我的需求」都走服务端分页（需求量大的账号全量拉取要 4MB/3.6s
   // —— _batch_* 富化 2935 条 + 巨型 JSON）。URL 按 viewMode 分支；分页响应处理共用。
   const usePaging = true
@@ -2916,6 +2902,7 @@ function loadTasks(opts) {
       SERVER_PAGE +
       '&page=' +
       reqPage +
+      (query.value ? '&q=' + encodeURIComponent(query.value) : '') +
       (mineStatuses ? '&statuses=' + encodeURIComponent(mineStatuses) : '') +
       (filterAssignees.value.length
         ? '&creators=' + encodeURIComponent(filterAssignees.value.join(','))
@@ -3032,7 +3019,29 @@ function loadTasks(opts) {
       if (seq !== taskReqSeq) return // 已被更新的请求取代，静默丢弃
       tasksAppendLoading.value = false
       tasksLoading.value = false
-      if (e.name === 'AbortError' && e.silent) return
+      // silent abort 只允许一种含义：用户确实离开了这个视图。
+      // 之前这里无条件 return，于是「视图还在、但请求被 nav signal 取消」也被当成
+      // 静默丢弃 —— 而那一刻已经没有别的请求会来置 loaded，页面就永久停在「加载中」，
+      // 直到 18s 后看门狗兜底报「加载失败: request aborted or timed out」。
+      // 实测证据：请求已返回 200、signal 却已 abort（st=200 且 ab=1），then 不执行、
+      // catch 静默 return，加载终态无人写。
+      if (e.name === 'AbortError' && e.silent) {
+        if (G.window._currentView !== 'tasks') return   // 真离开了：静默丢弃
+        if (loaded.value) return                        // 已有数据：保留旧帧，不打扰
+        // 视图还在且首屏仍空 → 先自动重拉一次（此刻导航已结束，新 signal 是活的）
+        if (!_silentAbortRetried) {
+          _silentAbortRetried = true
+          // 3s 窗口内只自动重拉一次：既让「被取消的首屏」有机会落地，
+          // 又不会在确实反复被取消时打成死循环。
+          setTimeout(function () { _silentAbortRetried = false }, 3000)
+          loadTasks()
+          return
+        }
+        // 重拉仍被取消 → 给可重试的终态，绝不让 loading 成为终态
+        loadError.value = t('load_failed', { msg: 'request aborted or timed out' })
+        loaded.value = true
+        return
+      }
       if (G.window._currentView !== 'tasks') return
       G.window._pendingTaskDetailId = null
       G.window._deeplinkIssueNumber = null
@@ -3127,6 +3136,28 @@ function teardownListObserver() {
 }
 
 // ═══════════ 轮询（场景识别，30s） ═══════════
+// 加载看门狗：首屏数据若因「请求被静默取消」而永远不落地（loaded=false），
+// 页面会永久停在「加载中」。8s 兜底重拉一次；再 10s 仍空则显示错误+重试按钮。
+let _loadWatchdog = null
+function armLoadWatchdog() {
+  if (_loadWatchdog) clearTimeout(_loadWatchdog)
+  _loadWatchdog = setTimeout(function () {
+    _loadWatchdog = null
+    if (loaded.value || G.window._currentView !== 'tasks') return
+    try {
+      loadTasks()
+    } catch (e) {}
+    _loadWatchdog = setTimeout(function () {
+      _loadWatchdog = null
+      if (loaded.value || G.window._currentView !== 'tasks') return
+      loadError.value = t('load_failed', { msg: 'request aborted or timed out' })
+      loaded.value = true
+    }, 10000)
+  }, 8000)
+}
+function disarmLoadWatchdog() {
+  if (_loadWatchdog) { clearTimeout(_loadWatchdog); _loadWatchdog = null }
+}
 function startPoll() {
   if (pollTimer) clearInterval(pollTimer)
   pollTimer = setInterval(function () {
@@ -3200,8 +3231,10 @@ onMounted(function () {
   loadTakeovers()
   startPoll()
   loadDeployLink()
+  armLoadWatchdog()
 })
 onBeforeUnmount(function () {
+  disarmLoadWatchdog()
   stopPoll()
   teardownListObserver()
   if (deployLongPressTimer) clearTimeout(deployLongPressTimer)

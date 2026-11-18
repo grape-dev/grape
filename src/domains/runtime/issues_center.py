@@ -2549,6 +2549,10 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         # 显式场景直接校验；智能推荐（vod-auto）/留空时回落到仓库默认场景一并校验，
         # 与后续写入 issue 的 scene_id 口径一致，避免默认/推荐路径产生死单。
         _scene_for_precheck = body.scene_id if (body.scene_id and body.scene_id != "vod-auto") else ""
+        # 显式选择的场景严格拦单；以下回落的（仓库 dev_scene / 内置 default）
+        # 只告警不拦——用户没有修复入口，拦了也只会得到无法处理的错误。
+        # （3576aaa 语义；此段曾在 to_thread 改造提交中被误删，QA A14 判 BLOCKED）
+        _scene_is_explicit = bool(_scene_for_precheck)
         if not _scene_for_precheck:
             try:
                 from src.domains.mgmt.public import get_repo_scene  # 跨域走 owner public
@@ -2558,7 +2562,10 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 _scene_for_precheck = ""
         if _scene_for_precheck:
             from src.domains.runtime.scene_precheck import precheck_scene, summarize_problems
-            _precheck = precheck_scene(_scene_for_precheck, repo_key, user)
+            # 显式选择的场景严格拦单；以下回落的只告警不拦——用户没有修复入口
+            # （3576aaa 语义；此段曾在 to_thread 改造时被误删，QA A14 判 BLOCKED）
+            _precheck = precheck_scene(_scene_for_precheck, repo_key, user,
+                                       explicit=_scene_is_explicit)
             if not _precheck.get("ok"):
                 _pc_problems = _precheck.get("problems") or []
                 _pc_summary = summarize_problems(_pc_problems)

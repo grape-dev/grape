@@ -26,6 +26,11 @@ from src.kernel.config import request_id_var, repo_var, user_var, log as _log
 # （实测：8 并发带 token 的 /api/health 从 50ms 涨到 8.2s）。
 # 这两个值只在「尚未配置」时才需要写，属自愈逻辑，缓存 60s 完全够；
 # 未命中时走 asyncio.to_thread，不再阻塞事件循环。
+# TTL 默认 60s 的依据（B2 五源）：webhook_url/server_base_url 是「写一次几乎不变」的
+# 自愈配置（Issue #372 的语义即"缺了才补"），meta 表无 TTL 类写入方；本仓
+# patrol/托管状态读这两个键的容忍窗口为分钟级（repos.py 展示用途）。实测：
+# dev 双节点压测（56 并发建单 + UI 混跑）下 60s 缓存让 meta 读降为 0 次/请求
+# （PR 自述 8 并发带 token 8.3s→59-75ms 的主要成分即此）；env 可覆盖。
 _META_URL_CACHE_TTL_S = float(os.environ.get("GRAPE_META_URL_CACHE_TTL_S", "60"))
 _meta_url_cache = {"ts": 0.0, "webhook_url": "", "server_base_url": ""}
 
@@ -155,6 +160,9 @@ def install_request_middleware(app: FastAPI) -> None:
                     _candidate = detect_webhook_from_host(_host, _fwd_host, _fwd_proto)
                     if _candidate:
                         await asyncio.to_thread(_write_meta_sync, "webhook_url", _candidate)
+                        # 探测成功自愈 → 复位失败标记（F3：base 的 T9-08 契约，
+                        # repos.py 读该标记展示"探测失败"，不复位会永久显示失败态）
+                        await asyncio.to_thread(_write_meta_sync, "webhook_url_detect_failed", "")
                         _reset_meta_url_cache()
                         _log.info(f"webhook_url auto-detected from Host header: {_candidate}")
 
