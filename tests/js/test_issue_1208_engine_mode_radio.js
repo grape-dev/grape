@@ -23,7 +23,19 @@ assertContains('mode radio tag', '<input type="radio" value="tag" v-model="engin
 assertContains('mode radio tag label', "t('selector_mode_tag')");
 assertContains('mode radio engine', '<input type="radio" value="engine" v-model="engineModal.mode"');
 assertContains('mode radio engine label', "t('selector_mode_engine')");
-assertContains('new scene default tag mode', "engineModal.mode = selTags.length ? 'tag' : hasBinding ? 'engine' : 'tag'");
+// 2026-11-18：改为「已存 selector（tags 是数组，含广播的空数组）→ 标签模式」，
+// 原来用 selTags.length 会让广播节点重开时掉回实例面板（用户实测报障）
+assertContains('new scene default engine mode', "engineModal.mode = Array.isArray(selTagsRaw) ? 'tag' : 'engine'");
+assertContains('broadcast selector detected by array shape', "const selTagsRaw = ((node && node.engine_selector) || {}).tags");
+assertContains(
+  'no length-based mode switch',
+  src.indexOf("engineModal.mode = selTags.length ? 'tag' : 'engine'") === -1 ? 'Array.isArray(selTagsRaw)' : 'OLD_EXPR_STILL_THERE',
+);
+// 2026-11-18 用户裁定：指定引擎实例是改造前的原始默认形态，放第一页
+const iEng = src.indexOf('<input type="radio" value="engine" v-model="engineModal.mode"');
+const iTag = src.indexOf('<input type="radio" value="tag" v-model="engineModal.mode"');
+count++;
+if (!(iEng >= 0 && iTag >= 0 && iEng < iTag)) failures.push('order: engine radio must come before tag radio');
 // 2. 模式提示灰字在各自面板内（D19 对仗；tag hint 在标签面板、engine hint 在实例面板）
 assertContains('hint tag line in tag panel', "t('selector_tag_hint')");
 assertContains('hint engine line in engine panel', "t('selector_engine_hint')");

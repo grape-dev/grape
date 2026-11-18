@@ -4624,12 +4624,20 @@ onBeforeUnmount(function () {
 }
 /* 资源曲线 */
 /* ── B3 沙箱实例列表 ── */
+/* 表单控件基线字色（2026-11-18）：这些输入框/下拉只设了背景，字色走 UA 默认黑，
+   暗色下等于深底黑字。统一钉到 --t，浅色不变（--t 浅色即 #1d1d1f）。 */
+.obv input,
+.obv select,
+.obv textarea {
+  color: var(--t);
+}
 .obv-sbxsearch {
   padding: 6px 12px;
   border: 1px solid var(--b);
   border-radius: 8px;
   font-size: 12px;
   background: var(--c);
+  color: var(--t);
   width: 180px;
 }
 .obv-sbxsel {
@@ -4638,6 +4646,7 @@ onBeforeUnmount(function () {
   border-radius: 8px;
   font-size: 12px;
   background: var(--c);
+  color: var(--t);
 }
 
 .obv-ressection {

@@ -25,6 +25,7 @@
   "stats": {
     "total": "Total {count}"
   },
+  "search_placeholder": "Search name, device or tag…",
   "tab": {
     "engines": "Engines",
     "workers": "Workers"
@@ -178,7 +179,6 @@
     "sandbox_cert_label": "SSL Certificate",
     "sandbox_cert_desc": "PEM content of the platform certificate (self-signed / private CA HTTPS) for grape to verify the connection; leave empty for HTTP or public CA.",
     "sandbox_toast_endpoint_required": "Platform EndPoint is required (sandbox platform API address)",
-    "goto_platform_page": "View sandbox platforms",
     "platform_detail_btn": "Detail",
     "revoke_active_sandboxes": "{n} sandboxes are currently running",
     "revoke_active_sandboxes_body": "After deleting this credential, these sandboxes will no longer be managed, may keep consuming resources and billing. Please clean them up on the platform manually.",
@@ -295,6 +295,9 @@
       "unknown": "Unknown"
     }
   },
+  "fgrp_range": "Range",
+  "fgrp_type": "Engine",
+  "fgrp_scope": "Owner",
   "rt_range_all": "All",
   "rt_range_repo": "Repo",
   "rt_range_user": "Personal",

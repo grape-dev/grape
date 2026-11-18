@@ -42,6 +42,10 @@ export default defineConfig({
           'bind-dialog': /^BindDialog-.*\.css$/,
           'pat-dialog': /^PatDialog-.*\.css$/,
           'cred-repo-row': /^CredRepoRow-.*\.css$/,
+          // LLM 凭据弹窗：AccountView(user) 与 SettingsView(repo) 两个 entry 共用 →
+          // Vite 拆成独立 CSS chunk；不进这张表就没有任何 <link> 加载它（entry 自注入已废弃），
+          // 组件样式会整段失效（表单控件落回 UA 默认灰底黑边）。
+          'llm-cred-manager': /^LlmCredManager-.*\.css$/,
           'event-view': /^event-[vV]iew-.*\.css$/,
           'issues-view': /^issues-[vV]iew-.*\.css$/,
           'autopilot-view': /^autopilot-[vV]iew-.*\.css$/,
