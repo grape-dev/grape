@@ -604,6 +604,9 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
         env["AGENT_NAME"] = agent_name
     if env_extra:
         env.update(env_extra)
+    _apply_runtime_env_contract(env, event_type=event_type, account=account,
+                                repo_key=repo_key, label=label,
+                                backend_name=(getattr(backend, "name", "") or ""))
 
     # 技能路径占位符替换（direct 模式：按 skills/<agent_type>/<skill>/ 结构解析）
     try:
@@ -672,6 +675,9 @@ def _stream_hwcloud_acp(prompt, cwd, session_id, event_type, backend,
         env["AGENT_NAME"] = agent_name
     if env_extra:
         env.update(env_extra)
+    _apply_runtime_env_contract(env, event_type=event_type, account=account,
+                                repo_key=repo_key, label=label,
+                                backend_name=(getattr(backend, "name", "") or ""))
 
     # 技能路径占位符替换（direct 模式）
     try:
@@ -738,6 +744,9 @@ def _stream_aishell_dsh_acp(prompt, cwd, session_id, event_type, backend,
         env["AGENT_NAME"] = agent_name
     if env_extra:
         env.update(env_extra)
+    _apply_runtime_env_contract(env, event_type=event_type, account=account,
+                                repo_key=repo_key, label=label,
+                                backend_name=(getattr(backend, "name", "") or ""))
 
     # 任务级 env 合并完成后的收尾钩子（同 executor 通用 CLI 路径语义）：
     # aishell（dsh 框架）会 scrub env 里 /TOKEN/i 变量，prepare_env 把
@@ -949,6 +958,71 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
         except Exception as e:
             log.warning(f"Failed to inject user credentials: {e}")
 
+# ── 运行时环境变量注入契约（Issue #2395）──────────────────────────────────
+# 四个变量在 VOD/Issue/Coding/QA 各引擎路径必须口径一致：
+#   DEVOPS_EVENT_TYPE  真实事件类型（唯一口径 = executor.stream_agent 的 event_type 参数）
+#   ACCOUNT            触发人账号（不是仓库名/仓库全名，历史 Issue #1746）
+#   GRAPE_ISSUE_ID     平台内部需求卡片 id（issue 表主键，历史 Issue #667；≠ ISSUE_NUMBER）
+#   GRAPE_WORK_BRANCH  场景开发基线分支（服务端场景/Issue 快照解析，历史 Issue #2322）
+# 各引擎 get_env() 不再预置空串；任务级 env_extra 合并后由本函数统一补齐/覆盖，
+# 缺失时输出可诊断告警（仅变量名与引擎标识，不打印值），并降级继续执行不阻断任务。
+_RUNTIME_CONTRACT_ENV = (
+    "DEVOPS_EVENT_TYPE",
+    "ACCOUNT",
+    "GRAPE_ISSUE_ID",
+    "GRAPE_WORK_BRANCH",
+)
+
+
+def _apply_runtime_env_contract(env: dict, *, event_type: str = "", account: str = "",
+                                repo_key: str = "", label: str = "",
+                                backend_name: str = "") -> dict:
+    """任务级 env 合并后统一补齐运行时契约四变量（Issue #2395）。
+
+    - DEVOPS_EVENT_TYPE 以本次真实 event_type 为权威值（覆盖 env_extra 中的空串/旧值）；
+    - ACCOUNT 缺失时回退调用方 account，但拒绝把仓库标识（含 `/`/`:`）误当账号；
+    - GRAPE_ISSUE_ID 缺失时按 ISSUE_NUMBER（仓库 Issue 编号）解析内部卡片 id，
+      语义与 ISSUE_NUMBER 区分：前者是 issue 表主键，后者是仓库 Issue 编号；
+    - GRAPE_WORK_BRANCH 缺失时回退场景配置（与 event_pipeline 同源）：回退查询按
+      **仓库 Issue 编号**（ISSUE_NUMBER）索引 issue 表，不得用内部卡片 id（GRAPE_ISSUE_ID）——
+      后者是 issue 表主键，命中恒错键会让场景回退恒空。
+    任一必需变量仍缺失 → WARNING（只列变量名 + 引擎/agent 标签，不打印值），不阻断。
+    """
+    if event_type:
+        env["DEVOPS_EVENT_TYPE"] = event_type
+    if not (env.get("ACCOUNT") or "").strip():
+        candidate = (account or "").strip()
+        if candidate and "/" not in candidate and ":" not in candidate:
+            env["ACCOUNT"] = candidate
+    if not (env.get("GRAPE_ISSUE_ID") or "").strip():
+        issue_number = str(env.get("ISSUE_NUMBER") or "").lstrip("#").strip()
+        if issue_number and repo_key:
+            try:
+                from src.domains.runtime.pipeline.event_pipeline import resolve_issue_card_id
+                card_id = resolve_issue_card_id(repo_key, issue_number)
+                if card_id:
+                    env["GRAPE_ISSUE_ID"] = card_id
+            except Exception as exc:
+                log.warning(f"{label}runtime env contract: GRAPE_ISSUE_ID resolve failed "
+                            f"(backend={backend_name or '-'}): {exc}")
+    if not (env.get("GRAPE_WORK_BRANCH") or "").strip() and repo_key:
+        try:
+            from src.domains.runtime.engine.repogit import _read_scene_work_branch
+            # R1（PR #1460 审查）：_read_scene_work_branch 的 issue_id 形参按
+            # issue 表 issue_number（仓库 Issue 编号）索引，与 direct_executor 同口径；
+            # 传 GRAPE_ISSUE_ID（内部卡片 id）会命中恒错键，回退查询恒空。
+            work_branch = _read_scene_work_branch(repo_key, env.get("ISSUE_NUMBER") or "")
+            if work_branch:
+                env["GRAPE_WORK_BRANCH"] = work_branch
+        except Exception as exc:
+            log.warning(f"{label}runtime env contract: GRAPE_WORK_BRANCH resolve failed "
+                        f"(backend={backend_name or '-'}): {exc}")
+    missing = [name for name in _RUNTIME_CONTRACT_ENV if not (env.get(name) or "").strip()]
+    if missing:
+        log.warning(f"{label}runtime env contract missing: {','.join(missing)} "
+                    f"(backend={backend_name or '-'}); task continues with degraded env")
+    return env
+
 
 def stream_chat_agent(prompt: str, cwd: str, session_id: str = "",
                       account: str = "", user_id: int = 0,
@@ -1096,6 +1170,9 @@ def _stream_agent_impl(prompt: str, cwd: str, session_id: str = "",
         env["AGENT_NAME"] = agent_name
     if env_extra:
         env.update(env_extra)
+    _apply_runtime_env_contract(env, event_type=event_type, account=account,
+                                repo_key=repo_key, label=label,
+                                backend_name=(getattr(backend, "name", "") or ""))
 
     # 任务级 env 合并完成后的收尾钩子（可选，backend 自行实现）。
     # dsh 在这里把 GRAPE_SESSION_TOKEN 落成 0600 临时文件 + GRAPE_AUTH_FILE，
@@ -1783,11 +1860,16 @@ async def consume_stream_async(prompt: str, cwd: str, session_id: str = "",
                                account: str = "", user_id: int = 0,
                                env_extra: dict | None = None,
                                bot_token: str = "", user_token: str = "",
-                               agent_name: str = "", agent_label: str = "") -> AsyncGenerator:
+                               agent_name: str = "", agent_label: str = "",
+                               repo_key: str = "") -> AsyncGenerator:
     """async 桥接：在线程池中消费 stream_agent 生成器，逐事件桥接回 event loop。
 
     避免 agent 的同步生成器阻塞整个 event loop（否则 WS ping 超时掉线、其他消息/API 全卡住）。
     stream_agent 内部的"无输出 10 分钟优雅终止"保护在后台线程中照常生效。
+
+    repo_key（R2，PR #1460 审查）：必须与 stream_agent 同口径透传。运行时四变量契约里
+    GRAPE_ISSUE_ID / GRAPE_WORK_BRANCH 的补齐都依赖 repo_key；不透传则该解析整体跳过
+    （VOD direct 路径会静默拿不到这两个变量）。
     """
     import asyncio
     q = asyncio.Queue()
@@ -1800,6 +1882,7 @@ async def consume_stream_async(prompt: str, cwd: str, session_id: str = "",
                 backend_name=backend_name, account=account, user_id=user_id,
                 env_extra=env_extra, bot_token=bot_token, user_token=user_token,
                 agent_name=agent_name, agent_label=agent_label,
+                repo_key=repo_key,
             ):
                 loop.call_soon_threadsafe(q.put_nowait, (evt_type, data))
         except Exception as e:

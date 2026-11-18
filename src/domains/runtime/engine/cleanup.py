@@ -6,11 +6,9 @@
 - 对超 TTL 未活跃的僵尸 workdir 兜底清理；
 - 对 chat / feishu / vod / history 目录做 TTL 清理（无活跃会话时删除）。
 """
-
-import asyncio, contextlib, os, shutil, time
+import asyncio, contextlib, os, shutil, tempfile, time
 
 from src.kernel import config, db_registry
-
 from src.kernel.config import log, CHAT_CWD_BASE
 
 from src.kernel.session_manager import db, db_lock
@@ -27,8 +25,30 @@ _SESSION_DIR_TTL_DAYS = int(os.environ.get("SWEEPER_SESSION_DIR_TTL_DAYS", "3"))
 # queued 超时无人认领 / running·dispatched 所属 runtime 已离线或不存在且 started_at 超时 /
 # running·dispatched 超长未收敛（worker 侧任务超时 RUNTIME_TASK_TIMEOUT=1h，6h 仍运行必为孤儿）
 _QUEUED_STALE_MINUTES = int(os.environ.get("SWEEPER_QUEUED_STALE_MINUTES", "180"))
+# Issue #2225：会话暂存目录 / 存量平铺文件 TTL（默认 2h；worker 单任务超时 1h）。
+_TASK_TMPDIR_TTL_SECONDS = int(os.environ.get("SWEEPER_TASK_TMPDIR_TTL_SECONDS", "7200"))
+# QA round-2 F6：历史固定名平铺残留白名单——sweeper 只清理这些约定文件名，
+# 非约定文件名（第三方工具可能写入共享暂存根）不触碰。
+_OPCODE_FLAT_RESIDUAL_NAMES = frozenset({
+    "body.md", "req.json", "spec.md",
+})
+# 会话子目录归属标记（与 session_tmpdir._MARKER_NAME 同步）。
+_SESSION_DIR_MARKER = ".grape-session-tmpdir"
 
 _DEAD_RUNTIME_MINUTES = int(os.environ.get("SWEEPER_DEAD_RUNTIME_MINUTES", "30"))
+
+# Issue #2281：sweeper 清理判据的对比基线。worktree 的未推送判定应以场景开发基线
+# （GRAPE_WORK_BRANCH）为准，而不是恒为 origin/main——否则基线分支上的正常提交会被
+# 误计为「未推送」，反复归档/拒绝删除。取值与 ensure_issue_worktree 同源：
+# 进程 env（API 注入） → 本地 DB 场景配置（API 直连 MySQL 时有效）。
+def _sweep_base_branch(repo_key: str) -> str:
+    _wb = (os.environ.get("GRAPE_WORK_BRANCH") or "").strip()
+    if _wb:
+        return _wb
+    try:
+        return repogit._read_scene_work_branch(repo_key) or ""
+    except Exception:
+        return ""
 
 def _long_running_minutes() -> int:
     """running·dispatched 孤儿回收阈值（分钟）。
@@ -802,6 +822,7 @@ def sweep_once() -> int:
                         # 守卫拒绝（归档失败）→ 返回 False，不计数（目录保留）。
                         if repogit.cleanup_issue_worktree(repo_key, agent_type, num,
                                                           token=_tok(repo_key),
+                                                          base_branch=_sweep_base_branch(repo_key),
                                                           reason="sweep_done_issue"):
                             cleaned += 1
                     except Exception as e:
@@ -856,6 +877,83 @@ def sweep_once() -> int:
     except Exception as e:
         log.warning(f"sweep_once failed: {e}")
         return 0
+
+
+def _opencode_staging_roots() -> set:
+    """Issue #2225：会话暂存根集合（worker 临时目录 + 兼容 `/tmp`）。"""
+    bases = set()
+    try:
+        from src.domains.runtime.engine.session_tmpdir import staging_base
+        bases.add(staging_base())
+    except Exception as e:
+        log.warning(f"sweeper opencode staging root resolve failed: {e}")
+    bases.add(os.path.join(tempfile.gettempdir(), "opencode"))
+    bases.add("/tmp/opencode")
+    return bases
+
+
+def _active_session_task_ids() -> set:
+    """Issue #2225：仍在 queued/dispatched/running 的任务 id（其会话子目录跳过）。"""
+    ids = set()
+    try:
+        # G-01/A7 棘轮正解：读侧走免锁通道 bulk_read.reader()，不持 db_lock
+        # （持锁 fetchall 会让心跳/claim 路径排队，check_async_blocking 拦截）。
+        from src.kernel.bulk_read import reader
+        with reader() as c:
+            c.execute("SELECT id FROM agent_tasks "
+                      "WHERE status IN ('queued','dispatched','running')")
+            ids = {str(r[0]) for r in c.fetchall() if r and r[0]}
+    except Exception as e:
+        log.warning(f"sweeper opencode active-task lookup failed: {e}")
+    return ids
+
+
+def _sweep_opencode_tmpdirs(now: float, roots=None) -> int:
+    """Issue #2225：清理 `/tmp/opencode` 存量平铺固定名文件与超 TTL 会话子目录。
+
+    - 平铺文件仅清理约定固定名残留（body.md/req.json/spec.md/a2a_*.json 等，
+      ``_OPCODE_FLAT_RESIDUAL_NAMES`` 白名单），超过 ``_TASK_TMPDIR_TTL_SECONDS``
+      即删除，避免误导后续会话。非约定文件名不触碰——暂存根是与 /tmp 同级的
+      共享目录，无权清理第三方工具的文件（QA round-2 F6）。
+    - 会话子目录必须携带 ``.grape-session-tmpdir`` 标记才视为 grape 会话目录；
+      超同一 TTL 兜底清理，活跃会话持续写入会刷新 mtime，不会被误删。无标记
+      的目录（非 grape 创建）跳过。
+    - QA 复审 R3：``roots`` 显式传入时只扫描这些目录——共享 worker 上跑 pytest 必须
+      收敛扫描根到 tmp_path，否则会删掉其他会话的真实暂存目录。
+    - QA 复审 Nice-to-have：``{task_id}`` 目录即便超 TTL，只要任务仍处
+      queued/dispatched/running 就跳过，避免「长时间不写暂存」的活跃会话被误清。
+    """
+    import shutil as _shutil
+    cleaned = 0
+    bases = list(roots) if roots is not None else sorted(_opencode_staging_roots())
+    active = _active_session_task_ids()
+    for base in bases:
+        if not os.path.isdir(base):
+            continue
+        try:
+            for name in os.listdir(base):
+                p = os.path.join(base, name)
+                try:
+                    if now - os.path.getmtime(p) < _TASK_TMPDIR_TTL_SECONDS:
+                        continue
+                    if os.path.isdir(p) and not os.path.islink(p):
+                        if name in active:
+                            continue
+                        if not os.path.isfile(os.path.join(p, _SESSION_DIR_MARKER)):
+                            continue
+                        _shutil.rmtree(p, ignore_errors=True)
+                        cleaned += 1
+                    elif os.path.isfile(p) or os.path.islink(p):
+                        if name not in _OPCODE_FLAT_RESIDUAL_NAMES:
+                            continue
+                        os.remove(p)
+                        cleaned += 1
+                except Exception as e:
+                    log.warning(f"sweeper opencode residual cleanup failed {p}: {e}")
+        except Exception as e:
+            log.warning(f"sweeper opencode residual scan failed {base}: {e}")
+    return cleaned
+
 
 def _sweep_tmp_residuals() -> int:
     """兜底清理 /tmp 及 ~/.cache 下 agent 残留（sweeper 每 15min 调一次）。
@@ -919,6 +1017,9 @@ def _sweep_tmp_residuals() -> int:
                     cleaned += 1
             except Exception:
                 pass
+
+    # Issue #2225：/tmp/opencode 治理（平铺固定名文件 + 超 TTL 会话子目录）
+    cleaned += _sweep_opencode_tmpdirs(_now)
 
     # 文件类清理（hermes-results 目录内的文件 + 散落文件）
     _file_targets = [
@@ -1109,9 +1210,12 @@ async def sweep_events_loop() -> None:
                     try:
                         # Issue #2041：同 sweep_once——守卫拒绝时不计数（目录保留）。
                         # cleanup_issue_worktree 内含 git 子进程与 ls-remote，必须入线程池。
+                        # Issue #2281：未推送判定以场景开发基线（GRAPE_WORK_BRANCH）为对比 ref。
                         _gone = await _aio.to_thread(
                             repogit.cleanup_issue_worktree, repo_key, agent_type, num,
-                            token=await _tok(repo_key), reason="event_sweep_done_issue")
+                            token=await _tok(repo_key),
+                            base_branch=_sweep_base_branch(repo_key),
+                            reason="event_sweep_done_issue")
                         if _gone:
                             cleaned += 1
                     except Exception as e:
@@ -1331,6 +1435,15 @@ def sweep_events_once() -> int:
         from src.domains.runtime.engine import repogit
         if _has_db_tables:
             active = _active_issue_sessions()
+            # Issue #2281：与 sweep_once / sweep_events_loop 同口径——清理前过
+            # worktree_guard 保全闸，且未推送判定以场景开发基线为对比 ref。
+            _tok_cache: dict = {}
+
+            def _tok(key: str) -> str:
+                if key not in _tok_cache:
+                    _tok_cache[key] = _resolve_repo_git_token(key)
+                return _tok_cache[key]
+
             for repo_key, issue_id in _done_issues():
                 num = str(issue_id or "").lstrip("#")
                 if not num or num == "0":
@@ -1342,14 +1455,25 @@ def sweep_events_once() -> int:
                     if not os.path.isdir(issue_dir):
                         continue
                     try:
-                        repogit.cleanup_issue_worktree(repo_key, agent_type, num)
-                        cleaned += 1
+                        if repogit.cleanup_issue_worktree(
+                                repo_key, agent_type, num,
+                                token=_tok(repo_key),
+                                base_branch=_sweep_base_branch(repo_key),
+                                reason="event_sweep_done_issue"):
+                            cleaned += 1
                     except Exception as e:
                         log.warning(f"sweeper cleanup failed {issue_dir}: {e}")
         # 僵尸兜底
         ttl = _ZOMBIE_TTL_DAYS * 86400
         for p in _zombie_issue_dirs(ttl):
             try:
+                # Issue #2281：僵尸路径同样过保全闸（与 sweep_once 一致）。
+                from src.domains.runtime.engine.worktree_guard import (
+                    guard_issue_workdir_removal, parse_issue_workdir)
+                _zrk, _znum, _zag = parse_issue_workdir(p)
+                if not guard_issue_workdir_removal(p, reason="zombie_ttl",
+                                                   token=_resolve_repo_git_token(_zrk)):
+                    continue
                 shutil.rmtree(p, ignore_errors=True)
                 cleaned += 1
             except Exception as e:

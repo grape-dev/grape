@@ -139,7 +139,6 @@ class AishellDshACPBackend:
             env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         except Exception:
             pass
-        env["DEVOPS_EVENT_TYPE"] = ""
         env["NO_COLOR"] = "1"
         env["TERM"] = "dumb"
         return env

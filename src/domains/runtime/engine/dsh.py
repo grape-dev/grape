@@ -213,7 +213,6 @@ class DshRuntime(AgentRuntime):
         env = os.environ.copy()
         from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
-        env["DEVOPS_EVENT_TYPE"] = ""
         return env
 
     def prepare_env(self, env: dict) -> None:

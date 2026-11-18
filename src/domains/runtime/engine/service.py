@@ -1261,6 +1261,13 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
+    # Issue #2225：会话级唯一暂存目录——平台只下发路径，worker 侧负责创建与回退。
+    # 每次任务独立 task_id 派生，避免并发会话共用固定名 /tmp/opencode/body.md。
+    try:
+        from src.domains.runtime.engine.session_tmpdir import inject_session_tmpdir_env
+        inject_session_tmpdir_env(env, task_id)
+    except Exception as _tmp_e:
+        log.warning(f"enqueue: inject session tmpdir failed for {task_id}: {_tmp_e}")
     # Issue #470：统一超时配置下发（setdefault——上层 env_extra 显式设置优先）。
     # worker 端看门狗 + ACP 全局超时均任务级 env 优先，管理台/配置文件改后对新任务生效。
     for k, v in _runtime_timeout_env_kv().items():

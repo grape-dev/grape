@@ -152,15 +152,26 @@ jobs:
           python -m pytest tests/runtime/test_runtime_agent.py::TestReregister -v
           python -m pytest tests/runtime/test_runtime_agent_concurrency.py::test_reregister_unpacks_register_tuple tests/runtime/test_runtime_agent_concurrency.py::test_reregister_default_does_not_recover -v
           python -m pytest tests/runtime/test_runtime_client.py -v
-      - name: Branch guard fail-open + worktree reset archive regression tests (issues #2028/#2041)
+      - name: Branch guard fail-open + worktree reset archive regression tests (issues #2028/#2041/#2292)
         # Issue #2028（QA 第3/4轮）：branch_guard fail-open/fail-closed 边界、
         # 存量钩子版本升级与幂等/自愈回归（17 项）+ worker 发布闭包回归（29 项）。
         # Issue #2041：worktree 重置归档守卫回归（40 项）。两文件此前均未接入
         # CI，回退只能靠人工 pytest；接入后同类回退由门禁拦截。
+        # Issue #2292（同 #2147）：canonical src.kernel.lock 导入/钩子模板版本/
+        # fail-open 修复指引/install-worker.sh 冒烟自检回归。
+        # Issue #2706（user feedback #7415，第 8 次同类复发终修）：租约层
+        # _lock_module() 收敛点 + 缺 lock 模块 fail-open 回归（两个测试文件：
+        # fail_open 为主干用例，fallback 增补端到端缺模块部署树 + 降级不吞
+        # 真实阻断）；并显式跑守卫/lock 模块 import 冒烟（含 src.lock 旧别名），
+        # 防「包缺文件、钩子启动即崩」在发布门禁静默通过。
         env:
           GITCODE_API_TOKEN: test_token
         run: |
+          python -c "import src.domains.runtime.engine.branch_guard; import src.kernel.lock; from src import lock"
           python -m pytest tests/test_issue_2028_branch_guard_fail_open.py tests/runtime/test_worker_package.py -v
+          python -m pytest tests/runtime/test_issue_2292_branch_guard_canonical_lock.py -v
+          python -m pytest tests/runtime/test_issue_2706_branch_guard_lease_fail_open.py -v
+          python -m pytest tests/runtime/test_issue_2706_branch_guard_lease_fallback.py -v
           python -m pytest tests/test_worktree_reset_archive.py -v
       - name: "Issue #1982 probe tri-state + fd regression tests"
         # Issue #1982/#2134：fd 收口与探活三态/服务端分账回归用例此前未接入
@@ -199,3 +210,19 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/mgmt/test_issue_3167_org_unassigned_int.py -v
+      - name: Coding worktree git writability regression tests (issue #2245)
+        # Issue #2245 QA 审查修复（W1 Required）：新增用例 test_issue_2245_git_writable.py
+        # 此前未接入 CI 门禁（先例 #1613/#2133），只读 gitdir 迁移、common 只读探测、
+        # detached HEAD 保真与 worktree add 失败门禁只能靠人工 pytest，回退无法被 CI 发现。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_2245_git_writable.py -v
+      - name: Session tmpdir isolation + release guard tests (issue #2225)
+        # Issue #2225 QA 审查修复（R1 Required）：新增用例 test_issue_2225_session_tmpdir.py
+        # 与 test_issue_2225_release_guard.py 此前未接入 linux-backend 门禁（先例 #2133/
+        # #1982/#1613），并发暂存隔离与跨 Issue 写拦截回归只能靠人工 pytest，重构可静默
+        # 打破而 CI 不红。用例内 sweeper 扫描根已收敛到 tmp_path（R3 修复），不会触碰共享
+        # worker 的真实 /tmp/opencode。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/runtime/test_issue_2225_session_tmpdir.py tests/runtime/test_issue_2225_release_guard.py -v

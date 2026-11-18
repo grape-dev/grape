@@ -1000,6 +1000,37 @@ def guard_issue_workdir_removal(path: str, reason: str = "zombie_ttl",
         return False
 
 
+def mark_worktree_restored(repo_key: str, issue_num, agent_type: str,
+                           head: str = "", bundle_path: str = "",
+                           source: str = "bundle") -> bool:
+    """Issue #2281：记录「新回合已自动找回上一轮未推送 commit」。
+
+    ensure_issue_worktree 重建成功恢复后调用：把 auto_restored/auto_restored_at/
+    auto_restored_head/auto_restored_source 写回最新重置记录，使
+    inject_reset_context 能区分「已找回（只需重试 push）」与「仍未找回（需手工
+    fetch+reset）」，同时保留 lost_commits/bundle_path 作为审计依据。
+
+    source: "bundle"（从归档 bundle fetch+reset）/ "branch"（分支 ref 复用）。
+    """
+    from datetime import datetime, timezone
+    rec = load_reset_record(repo_key, issue_num, agent_type)
+    if not rec:
+        return False
+    rec["auto_restored"] = True
+    rec["auto_restored_at"] = datetime.now(timezone.utc).isoformat()
+    rec["auto_restored_head"] = head or ""
+    rec["auto_restored_source"] = source or "bundle"
+    if bundle_path:
+        rec["auto_restored_bundle"] = bundle_path
+    path = reset_record_path(repo_key, issue_num, agent_type)
+    if not _atomic_json_write(path, rec):
+        log.warning(f"worktree reset guard: mark auto-restored failed {path}")
+        return False
+    log.info(f"worktree reset guard: worktree auto-restored ({rec['auto_restored_source']}) "
+             f"(repo={repo_key} issue={issue_num} agent={agent_type} head={head[:12]})")
+    return True
+
+
 def inject_reset_context(task: dict, env: dict, prompt: str) -> tuple:
     """下一轮任务注入重置告知（worker _execute_task / direct_executor 调用）。
 
@@ -1008,6 +1039,8 @@ def inject_reset_context(task: dict, env: dict, prompt: str) -> tuple:
       （机器可读，AC-b）；
     - prompt 追加显式提示块：本地实现已归档、不可假定仍在 worktree、恢复命令
       与「仅当本轮工作区无改动时才执行恢复」的前置条件；
+    - Issue #2281：记录带 auto_restored=true（ensure_issue_worktree 已从 bundle
+      找回）时，提示块改为「已自动找回、只需重试 push」，不再引导手工 reset；
     - 注入后立即标记 consumed（同一记录只告知一次，避免每轮重复注入/reset 误用）。
     无记录 / 已消费 / 非 git agent → 原样返回（零副作用）。返回 (prompt, injected)。
     """
@@ -1028,23 +1061,50 @@ def inject_reset_context(task: dict, env: dict, prompt: str) -> tuple:
         env["GRAPE_WORKTREE_RESET_INFO"] = json.dumps(record, ensure_ascii=False)
         fields = {k: record.get(k) for k in
                   ("worktree_reset", "lost_commits", "bundle_path", "archived_at",
-                   "reset_reason", "unpushed_count")}
-        block = (
-            "\n\n[grape runtime] NOTE: the worktree for this issue was reset at "
-            f"{record.get('archived_at', '?')} (reason: {record.get('reset_reason', '?')}). "
-            "Do NOT assume the previous local implementation is still in the worktree. "
-            f"Unpushed work was archived to: {record.get('bundle_path', '?')} "
-            f"(unpushed commits: {record.get('unpushed_count', '?')}). "
-            "Recover with: git fetch <bundle_path> && git reset --hard FETCH_HEAD "
-            "ONLY IF the current worktree has no local changes of this run; never "
-            "run reset --hard while this run has uncommitted or untracked work - "
-            "keep the current implementation and rebuild on top of it instead. "
-            "(env GRAPE_WORKTREE_RESET_INFO carries the full machine-readable record; "
-            "this notice is delivered once per reset record.) "
-            "Machine-readable context: "
-            + json.dumps(fields, ensure_ascii=False)
-            + "\n"
-        )
+                   "reset_reason", "unpushed_count", "auto_restored",
+                   "auto_restored_head", "auto_restored_source")}
+        _branch = record.get("branch") or f"feat/issue-{num}"
+        _push_retry = (f"git push origin HEAD:refs/heads/{_branch}")
+        if record.get("auto_restored"):
+            _src = record.get("auto_restored_source") or "bundle"
+            _how = ("the branch ref was kept and the worktree reused it"
+                    if _src == "branch"
+                    else "the worktree was restored from the archived bundle")
+            block = (
+                "\n\n[grape runtime] NOTE: the worktree for this issue was reset at "
+                f"{record.get('archived_at', '?')} (reason: {record.get('reset_reason', '?')}), "
+                f"but {_how} (HEAD {str(record.get('auto_restored_head') or '')[:12]}, "
+                f"unpushed commits recovered: {record.get('unpushed_count', '?')}). "
+                "The previous local commits are present again - verify with "
+                f"`git log origin/<base_branch>..HEAD` / `git status`, do NOT re-implement. "
+                "If the previous push was blocked, retry it first: "
+                f"{_push_retry}. Recovery audit entry: "
+                f"{record.get('bundle_path', '?')}. "
+                "(env GRAPE_WORKTREE_RESET_INFO carries the full machine-readable record; "
+                "this notice is delivered once per reset record.) "
+                "Machine-readable context: "
+                + json.dumps(fields, ensure_ascii=False)
+                + "\n"
+            )
+        else:
+            block = (
+                "\n\n[grape runtime] NOTE: the worktree for this issue was reset at "
+                f"{record.get('archived_at', '?')} (reason: {record.get('reset_reason', '?')}). "
+                "Do NOT assume the previous local implementation is still in the worktree. "
+                f"Unpushed work was archived to: {record.get('bundle_path', '?')} "
+                f"(unpushed commits: {record.get('unpushed_count', '?')}). "
+                "If the previous round committed locally and only the push was blocked, "
+                f"retry the push first: {_push_retry}. "
+                "Otherwise recover with: git fetch <bundle_path> && git reset --hard FETCH_HEAD "
+                "ONLY IF the current worktree has no local changes of this run; never "
+                "run reset --hard while this run has uncommitted or untracked work - "
+                "keep the current implementation and rebuild on top of it instead. "
+                "(env GRAPE_WORKTREE_RESET_INFO carries the full machine-readable record; "
+                "this notice is delivered once per reset record.) "
+                "Machine-readable context: "
+                + json.dumps(fields, ensure_ascii=False)
+                + "\n"
+            )
         _task_id = str((task or {}).get("task_id") or (task or {}).get("id") or "")
         mark_reset_record_consumed(rk, num, ag, task_id=_task_id)
         return prompt + block, True

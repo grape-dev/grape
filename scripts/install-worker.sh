@@ -239,15 +239,25 @@ rm -f "$TMP_PKG"
 # 注意：全新安装（无旧代码）时冒烟失败同样 fail，避免装出必死的实例。
 _smoke_check() {
   [ -x "$VENV/bin/python" ] || return 0   # venv 未建（首次安装后续步骤才建）：跳过，由第 6 步启动验证兜底
-  if "$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.kernel.config; import src.domains.runtime.engine.agent" >/dev/null 2>&1; then
+  # Issue #2292（issue #2147 同根因）：pre-push 分支守卫在**钩子进程**里懒加载
+  # src.kernel.lock / branch_guard，顶层 import agent 察觉不到缺这两个模块——
+  # 坏包装上后所有 grape git push 都会 ImportError 被阻断（用户只能 --no-verify）。
+  # 冒烟因此显式校验：canonical lock、存量别名 src.lock（老导入方）、新布局守卫。
+  _smoke_imports="import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.kernel.config; import src.domains.runtime.engine.agent; import src.kernel.lock; from src import lock; import src.domains.runtime.engine.branch_guard"
+  if "$VENV/bin/python" -c "$_smoke_imports" >/dev/null 2>&1; then
     log "New code import smoke check passed"
     return 0
   else
-    # worker 侧埋点依赖 otel：缺包直接中止升级（架构守护 BLOCKED-1）
-    _smoke_err="$("$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.kernel.config; import src.domains.runtime.engine.agent; import src.observability.otel" 2>&1 | tail -1)"
+    # worker 侧埋点依赖 otel：缺包直接中止升级（架构守护 BLOCKED-1）。
+    # 诊断 import 列表与主检查保持一致（否则报错指向无关模块）；otel 优先校验
+    # canonical src/kernel/otel.py（域内 src.domains.insight.observability.otel
+    # 只是转发薄壳，安装期不额外耦合 insight 域；src/observability 不存在，旧写法恒误报）。
+    _smoke_err="$("$VENV/bin/python" -c "$_smoke_imports; import src.kernel.otel" 2>&1 | tail -1)"
 
+    # Issue #2292：告警给出可执行修复动作，而不是只留裸栈让运维/Agent 猜。
     log "!!! New code import smoke check failed: $_smoke_err"
     log "!!! Upgrade rejected (old code untouched, worker keeps running the current version) -- please report this log to the controller maintainer"
+    log "!!! Fix: the downloaded package is incomplete (missing src/kernel/lock.py, src/domains/runtime/engine/branch_guard.py or src/kernel/otel.py). Re-run install-worker.sh to fetch a rebuilt package, and report the missing module above to the controller maintainer."
     return 1
   fi
 }
@@ -511,6 +521,23 @@ if ls "$INSTALL_DIR/wheels"/grape-*.whl >/dev/null 2>&1; then
   fi
 else
   _install_grape_online
+fi
+
+# 能力校验（Issue #2227）：同一版本号也可能是不同构建（如离线 wheel 过旧缺 --sha），
+# 因此探测实际 --help 而不是信任 `grape --version`。缺失时显式告警并记录实际版本，
+# worker 仍继续运行（守卫退出码：scripts/check_grape_cli_drift.py；降级核验见
+# help/api/10-git-repos.md「提交历史」）。
+if [ -x "$VENV/bin/grape" ]; then
+  _grape_version="$("$VENV/bin/grape" --version 2>/dev/null | head -1 || true)"
+  _grape_commits_help="$("$VENV/bin/grape" git-repo commits --help 2>&1 || true)"
+  case "$_grape_commits_help" in
+    *--sha*)
+      log "grape CLI capability verified: git-repo commits --sha available (version: ${_grape_version:-unknown})" ;;
+    *)
+      log "Warning: grape CLI lacks 'git-repo commits --sha' (version: ${_grape_version:-unknown}); branch/SHA commit verification is unavailable on this worker. Upgrade grape-cli, or use the fallback in help/api/10-git-repos.md (pulls get / contents --ref + local git log)." ;;
+  esac
+else
+  log "Warning: no 'grape' CLI installed in $VENV/bin; 'git-repo commits --sha' is unavailable on this worker (worker keeps running)."
 fi
 
 # ===== 5. 写入接入配置（凭据 + 主系统地址，权限 600）=====

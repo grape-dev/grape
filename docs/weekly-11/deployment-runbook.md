@@ -107,6 +107,7 @@ pytest tests/arch tests/contracts tests/scripts -q
 | 引擎 online 但心跳 60-300s | 服务端是否跑了旧代码（启动时间校验）／是否跨机 DB 拥塞 |
 | `WARN: agent 工作目录不在部署目录` | 该 agent 的 cwd 是否指向旧 checkout（`<legacy-checkout>`、`<tenant-checkout>`） |
 | 非默认租户 worker 反复重启（NRestarts 飙升） | unit 是否还指向旧代码目录；熔断见 `deploy/systemd/grape-tenant-worker-ratelimit.conf` |
+| `grape git push` 报 `[branch-guard] WARNING … src.kernel.lock … fail-open` 或 ImportError | worker 包缺 lock 模块（Issue #2706，第 8 次同类复发）。修复：重装/升级 worker 包（`scripts/install-worker.sh`，内置 import 冒烟会拦截坏包）。**`grape git push --no-verify` 仅作故障期临时规避**：会同时绕过分支租约与漂移校验，不可日常化；推送成功后必须尽快重装/升级 worker 包恢复守卫 |
 
 ## 6. 相关文件
 

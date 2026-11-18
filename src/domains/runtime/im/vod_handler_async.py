@@ -293,6 +293,16 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     exit_code = -1
     _error_detail = ""  # R20.9.5: 保存 error 信息用于 401 标记
     start_time = time.time()
+    # Issue #2395：VOD 路径同样注入运行时契约四变量（ACCOUNT/GRAPE_ISSUE_ID/
+    # DEVOPS_EVENT_TYPE/GRAPE_WORK_BRANCH）。ACCOUNT=触发人账号（≠ repo_key）；
+    # ISSUE_NUMBER 供 executor 解析内部 GRAPE_ISSUE_ID，work_branch 由 executor 按场景回退。
+    _contract_env = {}
+    _vod_actor = str(evt.get("actor") or "").strip()
+    if _vod_actor:
+        _contract_env["ACCOUNT"] = _vod_actor
+    _vod_issue_num = str(evt.get("issue_id") or "").lstrip("#").strip()
+    if _vod_issue_num:
+        _contract_env["ISSUE_NUMBER"] = _vod_issue_num
     # engine-selection-design.md v2：按引擎集合/会话主引擎选引擎；无引擎 → 明确不可用，不隐式 opencode
     from src.domains.runtime.engine.engine_select import pick_engine, engine_name
     engine_id = pick_engine(repo_key, "vod", fallback_runtime_id=agent_session.get("runtime_id") or 0) or 0
@@ -329,7 +339,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                 # Issue #1577：与事件/Web chat 同源注入两项服务基址，远端 VOD worker
                 # 的业务命令（issues/git-repo）免 --base-url 可用。
                 env_extra={**resolve_task_server_env(runtime_id),
-                           **chat_repo_env(repo_key)},
+                           **chat_repo_env(repo_key), **_contract_env},
             )
             log.info(f"[VOD agent|repo:{repo_key}] enqueued task={tid} mode={kind}")
             task = await wait_task_terminal(tid)
@@ -368,11 +378,15 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                               "engine_id": int(engine_id or 0)})
         _mu.start()
         async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,
+                                                           event_type=str(evt.get("type") or "vod_signal"),
                                                            backend_name=_be, account=repo_key,
                                                            bot_token=repo_token, user_token=_user_token,
                                                            agent_name="VOD Agent",
                                                            agent_label=f"[Agent:vod|repo:{repo_key}]",
-                                                           env_extra=chat_repo_env(repo_key)):
+                                                           # R2（PR #1460 审查）：repo_key 必须透传，
+                                                           # 否则 GRAPE_ISSUE_ID/GRAPE_WORK_BRANCH 解析整体跳过。
+                                                           repo_key=repo_key,
+                                                           env_extra={**chat_repo_env(repo_key), **_contract_env}):
             _mu.feed(event_type, data)
             if event_type == "done":
                 final_text = data.get("text", "")

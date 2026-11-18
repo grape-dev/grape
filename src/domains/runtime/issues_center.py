@@ -504,13 +504,21 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 log.info(f"ensure_issue_task: ownership calibrated issue #{issue_number} "
                          f"user_id {_existing_user_id}->{user_id}")
             if target and target != _existing_assignee:
-                c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
+                # Issue #827: 新 assignee 未注册平台（解析 user_id 为空/0）时保留已有非零归属，
+                # 防止跨流水线/场景移交把创建人 user_id 清零（「我的需求」随之不可见）。
+                # D105 起 user_id 为 uuid 字符串：一律 str 归一比较，不用数值大小判定。
+                _resolved_uid = str(user_id or "").strip()
+                _preserve_uid = user_id if _resolved_uid not in ("", "0") else (_existing_user_id or "0")
+                c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (target, _preserve_uid, task_id))
                 try:
                     _close_other_assignee_tasks(repo_key, issue_number, keep_assignee=target)
                 except Exception:
                     pass
             # Issue #805: 创建人幂等补写——仅 created_by 为空时回填，绝不覆盖已有创建人
-            _creator_val = (creator or "").strip()
+            # Issue #827: creator 未提供时回退 sender（webhook 操作用户 = 真实创建人），
+            # 保证空 created_by 仍能被回补；幂等语义不变（仍只填空值）。
+            # 刻意不回退 assignee/target——责任人流转 ≠ 创建人，避免把归属误写成 assignee。
+            _creator_val = (creator or "").strip() or (sender or "").strip()
             if _creator_val:
                 c.execute(
                     "UPDATE issue SET created_by=? WHERE id=? AND (created_by IS NULL OR created_by='')",
@@ -523,12 +531,15 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 description = f"{event_type or 'Issue'}：请在任务中心查看并处理。"
             _subtask_val = subtask_mode if subtask_mode >= 0 else _get_issue_subtask_mode(repo_key, issue_number)
             _parent_val = _get_issue_parent(repo_key, issue_number)
+            # Issue #827: 创建人落库——creator 优先，缺失时回退 sender（webhook 操作用户）；
+            # 不回退 assignee/target（责任人 ≠ 创建人），与 #805 创建人口径一致。
+            _created_by_insert = (creator or "").strip() or (sender or "").strip()
             c.execute(
                 "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, org_id, created_by) "
                 "VALUES (?,?,?,?,?,?,'active',?,?,?,?,?)",
                 (user_id, target, repo_key, issue_number, title, description,
                  _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number), org_id,
-                 (creator or "").strip())
+                 _created_by_insert)
             )
             _rt_db.commit()
             task_id = c.lastrowid

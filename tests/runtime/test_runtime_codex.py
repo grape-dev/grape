@@ -316,9 +316,16 @@ class TestParseOutput:
 class TestGetEnv:
     def test_env_contains_skills_dir(self):
         b = CodexRuntime()
-        env = b.get_env()
+        _saved = os.environ.pop("DEVOPS_EVENT_TYPE", None)
+        try:
+            env = b.get_env()
+        finally:
+            if _saved is not None:
+                os.environ["DEVOPS_EVENT_TYPE"] = _saved
         assert "DEVOPS_SKILLS_DIR" in env
-        assert env["DEVOPS_EVENT_TYPE"] == ""
+        # Issue #2395：DEVOPS_EVENT_TYPE 改由 executor 按真实任务 event_type 注入，
+        # get_env() 不再预置空串（历史空值导致 VOD/技能误判事件类型）。
+        assert "DEVOPS_EVENT_TYPE" not in env
 
     def test_env_copies_os_environ(self):
         b = CodexRuntime()

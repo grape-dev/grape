@@ -32,6 +32,10 @@ MANIFEST = [
     # Issue #699: canonical layers only. Legacy top-level shim dirs
     # (src/runtime, src/agent, ...) were removed once every importer migrated;
     # worker entrypoint is python -m src.domains.runtime.engine.agent.
+    # Issue #2292（同 #2147）: pre-push branch guard imports lock from the canonical
+    # ``src.kernel.lock`` (covered by this entry). 顶层 ``src/lock.py`` 是
+    # ``src/__init__.py`` 一跳别名，不是文件；MANIFEST 不要再加 "src/lock.py"
+    # （加了会在全新 checkout 上打空/报错），旧导入方由别名解析满足。
     "src/kernel/",
     # 历史导入路径 src.domains.runtime.routes.runtime 已彻底移除（所有导入已迁到 src.domains.runtime.engine.*），
     # 兼容包若再出现会违反 tests/arch 的 legacy-shim 规则，勿再加入 MANIFEST。

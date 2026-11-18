@@ -440,6 +440,12 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     _task_work_branch = task.get("work_branch") or ""
     if _task_work_branch:
         env_extra["GRAPE_WORK_BRANCH"] = _task_work_branch
+    # Issue #2225：会话级唯一暂存目录（同一自动化任务每次触发独立目录，避免并发互覆写）。
+    try:
+        from src.domains.runtime.engine.session_tmpdir import inject_session_tmpdir_env
+        inject_session_tmpdir_env(env_extra, f"autopilot-{exec_id}")
+    except Exception as _tmp_e:
+        log.warning(f"Autopilot exec {exec_id}: inject session tmpdir failed: {_tmp_e}")
 
     # Issue #1811：定时调度与 event_pipeline 同源注入 bot 身份，单点覆盖 DIRECT/REMOTE。
     # 函数内延迟 import，避免 scheduler ↔ event_pipeline 模块级循环依赖。
@@ -527,6 +533,11 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     _mu.start()
 
     try:
+        from src.domains.runtime.engine.session_tmpdir import ensure_session_tmpdir
+        ensure_session_tmpdir(env_extra, f"autopilot-{exec_id}")
+    except Exception as _tmp_e:
+        log.warning(f"Autopilot exec {exec_id}: ensure session tmpdir failed: {_tmp_e}")
+    try:
         from src.domains.runtime.engine.executor import stream_devops_agent
         for evt_type, data in stream_devops_agent(
             prompt, ws, session_id="",
@@ -548,6 +559,12 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
         final_text = f"执行异常: {e}"
         exit_code = 1
 
+    # Issue #2225：direct 自动化任务结束清理自身暂存目录。
+    try:
+        from src.domains.runtime.engine.session_tmpdir import cleanup_session_tmpdir
+        cleanup_session_tmpdir(env_extra)
+    except Exception as _tmp_e:
+        log.warning(f"Autopilot exec {exec_id}: session tmpdir cleanup failed: {_tmp_e}")
     # 更新 agent_tasks 状态（用 task_id 精确更新）
     _finalize_autopilot_task(task_id, exec_id, exit_code, final_text)
     # 用量落台账：放在任务终态之后（引擎已退出、账本已落盘），失败只打日志

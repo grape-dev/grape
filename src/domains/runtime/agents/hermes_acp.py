@@ -183,7 +183,6 @@ class HermesACPBackend:
         env = os.environ.copy()
         from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
-        env["DEVOPS_EVENT_TYPE"] = ""
         env["NO_COLOR"] = "1"
         env["TERM"] = "dumb"
         # ACP 模式自动批准工具执行（等效旧 --yolo）

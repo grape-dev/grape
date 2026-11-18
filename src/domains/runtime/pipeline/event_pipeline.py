@@ -6306,6 +6306,18 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception as e:
         log.warning(f"Exec agent: git worktree ensure failed: {e}")
 
+    # Issue #2245（M2）：git 写权限自检——只读会话注入标记与降级提示，避免编码中途失败
+    try:
+        from src.domains.runtime.engine.repogit import inject_git_write_context
+        prompt, _git_write = inject_git_write_context(
+            {"repo_key": repo_key, "agent_type": agent_type, "issue_id": issue_id},
+            env_extra, prompt)
+        if _git_write and not _git_write.get("writable"):
+            log.warning(f"Exec agent: git worktree is read-only "
+                        f"({_git_write.get('reason', '')}), read-only mode marked")
+    except Exception as _gwe:
+        log.warning(f"Exec agent: git write context inject failed: {_gwe}")
+
     # Issue #242: 关联仓库 worktree 初始化（direct 模式 coding/sre agent 多仓库并行操作）
     # 与 worker 端 _execute_task 中的逻辑等价：遍历 GRAPE_LINKED_REPOS → ensure_linked_repo_worktrees
     # → 注入 GRAPE_LINKED_WORKTREES（供 _submit_linked_repo_prs 消费 / SRE 构建部署消费）

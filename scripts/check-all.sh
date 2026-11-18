@@ -22,6 +22,10 @@ echo "=== Running all contract checks ==="
 "$PY" scripts/check-secrets.py || exit 1
 # Issue #536：危险 DDL 卡点——db_setup.py 新增 DROP/RENAME/MODIFY COLUMN 必须收口
 "$PY" scripts/check-destructive-ddl.py || exit 1
+# Issue #2227：grape CLI 能力漂移卡点——部署线必须支持 `git-repo commits --sha`
+# （按分支/SHA 核验目标分支是否已实现）。无 grape 环境显式 SKIP 不误报；存在但缺
+# `--sha` 时 FAIL 并输出实际版本与缺失项。可用 GRAPE_CLI_BIN 指定被测二进制。
+"$PY" scripts/check_grape_cli_drift.py || exit 1
 # Issue #2462 A3：跨域读查询名闭包——代码引用的 lib 函数与命名查询必须都在
 # 目标域 public 模块的注册面内（lib 开关关闭时这类漂移在测试里不可见，
 # 只会在三库三机切换时以 AttributeError/KeyError 暴露，因此做成静态门禁）。

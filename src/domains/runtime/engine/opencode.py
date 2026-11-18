@@ -44,7 +44,6 @@ class OpencodeRuntime(AgentRuntime):
     def get_env(self, account: str = "", user_id: str = "") -> dict:
         env = os.environ.copy()
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
-        env["DEVOPS_EVENT_TYPE"] = ""
         import logging
 
         from src.domains.runtime.engine.os_adapter import bun_cache_dir, bun_cache_fallback_dir

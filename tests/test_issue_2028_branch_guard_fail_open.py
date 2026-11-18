@@ -126,7 +126,8 @@ def test_hook_main_missing_dependency_reports_locatable_error(monkeypatch, capsy
     real_import = importlib.import_module
 
     def _fake_import(name, *a, **k):
-        if name == "src.lock":
+        # Issue #2292（同 #2147）：自检依赖已迁 canonical ``src.kernel.lock``。
+        if name == "src.kernel.lock":
             raise ImportError("cannot import name lock from src")
         return real_import(name, *a, **k)
 
@@ -134,7 +135,7 @@ def test_hook_main_missing_dependency_reports_locatable_error(monkeypatch, capsy
     monkeypatch.setattr(bg.sys, "stdin", io.StringIO(_ref_line()))
     assert bg.hook_main([REPO_KEY]) == 0
     err = capsys.readouterr().err
-    assert "src.lock" in err and "fail-open" in err
+    assert "src.kernel.lock" in err and "fail-open" in err
 
 
 def test_hook_main_still_fail_closed_on_real_block(monkeypatch, capsys):

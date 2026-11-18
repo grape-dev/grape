@@ -2119,8 +2119,11 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     返回当前用户的需求（Issue 卡片行，user_id 过滤）+ 富化
     （scene/stage/is_running/agent_statuses）。
     组织隔离：非个人组织只返回 org_id 匹配的 issue。
+    Issue #827: 过滤口径由单一 user_id 扩为 user_id OR created_by OR assignee（绑定集合兜底），
+    移交后 user_id 被清零时创建人仍可见。
     """
-    from src.api.issues_center import _query_tasks, _build_assignee_filter, _build_creator_filter
+    from src.api.issues_center import (_query_tasks, _build_assignee_filter, _build_creator_filter,
+                                       _get_gitcode_user_by_user_id)
     from src.domains.mgmt.user.org_db import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
@@ -2137,8 +2140,15 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
             _rk_ph = ",".join("?" * len(_rk_list))
             clauses.append(f"repo_key IN ({_rk_ph})")
             params.extend(_rk_list)
-    clauses.append("user_id=?")
-    params.append(user["id"])
+    # Issue #827: 绑定集合兜底——user_id 直接命中 OR created_by/assignee 命中当前用户平台用户名
+    # （按 user_id 身份域反查登录名；查不到时退回原单一 user_id 口径，不放大可见范围）
+    _login = _get_gitcode_user_by_user_id(user["id"])
+    if _login:
+        clauses.append("(user_id=? OR created_by=? OR assignee=?)")
+        params.extend([user["id"], _login, _login])
+    else:
+        clauses.append("user_id=?")
+        params.append(user["id"])
     if status:
         clauses.append("status=?")
         params.append(status)

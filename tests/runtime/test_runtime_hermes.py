@@ -56,9 +56,15 @@ class TestHermesRuntime:
         assert evt["text"] == '{"type": "text"}'
 
     def test_get_env(self):
-        env = self.backend.get_env()
+        _saved = os.environ.pop("DEVOPS_EVENT_TYPE", None)
+        try:
+            env = self.backend.get_env()
+        finally:
+            if _saved is not None:
+                os.environ["DEVOPS_EVENT_TYPE"] = _saved
         assert env.get("DEVOPS_SKILLS_DIR")
-        assert env.get("DEVOPS_EVENT_TYPE") == ""
+        # Issue #2395：真实 event_type 由 executor 注入，get_env 不再预置空串。
+        assert "DEVOPS_EVENT_TYPE" not in env
 
     def test_registered_in_backends(self):
         assert "hermes" in _BACKENDS

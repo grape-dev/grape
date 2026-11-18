@@ -103,4 +103,4 @@ class AtomCodeRuntime(AgentRuntime):
 
     def get_env(self, account: str = "", user_id: int = 0) -> dict:
         from src.kernel.config import SKILLS_DIR
-        return {**os.environ, "DEVOPS_SKILLS_DIR": SKILLS_DIR, "DEVOPS_EVENT_TYPE": ""}
+        return {**os.environ, "DEVOPS_SKILLS_DIR": SKILLS_DIR}

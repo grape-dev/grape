@@ -162,7 +162,26 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
 > CLI：`grape git-repo commits --owner {owner} --repo {repo}`（operation_id=`gitrepo_commits`）。
 
-**入参**：Path owner/repo；Query `?per_page=`（可选）。
+**入参**：Path owner/repo；Query `?per_page=`（可选）、`?sha=`（可选，分支名/tag/commit sha；省略 = 默认分支）。
+
+**版本要求（Issue #2227）**：`--sha` 需要 **grape-cli >= 0.3.3** 的构建。版本号相同也可能是
+不同构建（离线 wheel 过旧），**以能力探测为准**：
+
+```bash
+grape git-repo commits --help | grep -- --sha   # 有输出 = 支持
+python3 scripts/check_grape_cli_drift.py        # 漂移守卫：缺失时 exit 1，无 grape 时 SKIP
+```
+
+**降级核验（部署线 CLI 无 `--sha` 时）**：不要静默改用默认分支猜测，按下面组合旁证：
+
+```bash
+# ① PR 目标分支/head sha（pulls get 返回 base/head 的 ref 与 sha）
+grape git-repo pulls get --owner {owner} --repo {repo} --number <PR> --json-out
+# ② 指定 ref/view 下的文件内容（确认改动已落在目标分支）
+grape git-repo contents --owner {owner} --repo {repo} --path <file> --ref <branch>
+# ③ 本地 worktree 的提交历史旁证（自基线所在 ref 起）
+git log origin/<branch> --oneline -30
+```
 
 **返回（200）**：提交对象数组
 ```json
@@ -239,6 +258,10 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 服务端按 provider 归一（`vcs/providers`）：gitcode 收 `{title,body,assignee}`；github 收 `{title,body,assignees}`。
 
+> **发布前一致性断言（Issue #2225 P2）**：新建 Issue 无目标号可比，比对**正文首个
+> `Issue #N` 主语锚点**与当前会话任务 Issue；不一致返回 **409**（`error_code=ISSUE_ASSERT_MISMATCH`）
+> 且不产生线上写入。正文无锚点放行，不阻断正常发布。该断言无放行参数；如确需为其他 Issue 建单，请在目标 Issue 自己的会话（或用户 JWT / API Key 身份）下发起。
+
 **返回（201）**：创建后的 Issue 对象（同 GET 单个结构）。
 
 ### GET /api/git-repo/{owner}/{repo}/issues/{number}
@@ -261,7 +284,12 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 | `state` | string | Issue 状态迁移（对齐 GitHub `state_event`）：仅接受 `"reopen"` / `"close"`，其他取值后端返回 400 |
 | `body` | string | Issue 正文（空值忽略，不影响其他字段） |
 
-**返回（200）**：更新后的 Issue 对象。**错误**：400/404/403/422/502。
+**返回（200）**：更新后的 Issue 对象。**错误**：400/404/403/409/422/502。
+
+> **发布前一致性断言（Issue #2225）**：带 `body` 更新时，目标 Issue 号与正文主语 `Issue #N`
+> 必须与当前会话任务 Issue 一致；不一致返回 **409**（`error_code=ISSUE_ASSERT_MISMATCH`）且
+> 不产生线上写入。
+> 元数据类更新（labels/assignee/milestone/state）不做标签一致性拦截。
 
 > **里程碑（#640 / #1005 / #1076）**：
 > - GitCode：`milestone_id` 服务端映射为上游 `milestone`（int）；PATCH 必填 `repo`+`title` 由服务端自动补齐
@@ -292,6 +320,10 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 - **GET**：返回评论数组 `[{"id":1,"body":"...","user":{"username":"x"},"created_at":"..."}]`
 - **POST**：Body `{body}`（必填）→ 返回（201）创建后的评论对象。
+
+> **发布前一致性断言（Issue #2225 P1）**：会话任务可确定时，评论目标 Issue 与正文首个
+> `Issue #N` 主语锚点必须与当前任务一致；不一致返回 **409**（`ISSUE_ASSERT_MISMATCH`）
+> 且不产生线上写入。讨论区 chat 会话代发与用户 JWT / API Key 不受影响。该断言无放行参数；确需在其他 Issue 评论区发言时，请在目标 Issue 自己的会话（或用户 JWT / API Key 身份）下发起。
 
 ---
 
@@ -325,8 +357,10 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 | `auto_close_issues` | bool | 否 | true=合并后自动关闭关联 Issue |
 
 > 关联 Issue 的关闭由服务端按 provider 适配（gitcode 原生支持；github 自动在 body 追加 `Closes #N`）。
+> **发布前一致性断言（Issue #2225）**：标题首个 `#N`、正文主语 `Issue #N`、`related_issue_nums`
+> 必须包含当前会话任务 Issue；不一致返回 **409**（`ISSUE_ASSERT_MISMATCH`）且不产生线上写入。该断言无放行参数。
 
-**返回（201）**：创建的 PR 对象。**错误**：400（缺 head/base）/ 404 / 403。
+**返回（201）**：创建的 PR 对象。**错误**：400（缺 head/base）/ 404 / 403 / 409。
 
 ### GET /api/git-repo/{owner}/{repo}/pulls/{number}
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
@@ -373,7 +407,10 @@ approval_reviewers_required_passed`；仅当
 
 **入参 Body（JSON）**：`title` / `body` / `labels`（按需更新字段）。
 
-**返回（200）**：更新后的 PR 对象。
+> **发布前一致性断言（Issue #2225）**：标题首个 `#N` / 正文主语 `Issue #N` 与当前会话任务
+> Issue 不一致 → **409**（`ISSUE_ASSERT_MISMATCH`），不产生线上写入。该断言无放行参数；确需更新其他 Issue/PR 时，请在目标 Issue 自己的会话（或用户 JWT / API Key 身份）下发起。
+
+**返回（200）**：更新后的 PR 对象。**错误**：409。
 
 ### PUT /api/git-repo/{owner}/{repo}/pulls/{number}/merge
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
@@ -399,6 +436,11 @@ approval_reviewers_required_passed`；仅当
 - **GET**：返回 PR 行内评论数组 `[{"id":1,"body":"LGTM","path":"a.py","line":5,"user":{"username":"x"},"created_at":"..."}]`
 - **POST**：Body `{body}`（必填）→ 返回（201）评论对象。
 - **PUT /pulls/{number}/comments/{discussion_id}**：标记 resolved → 更新后的评论对象。
+
+> **发布前一致性断言（Issue #2225 P1）**：PR 评论正文首个 `Issue #N` 主语锚点与当前会话
+> 任务不一致（疑似暂存被覆写）返回 **409**（`ISSUE_ASSERT_MISMATCH`）且不产生线上写入。
+> PR 号与任务 Issue 号属不同号段空间，不做目标号比对；讨论区 chat 会话代发与用户
+> JWT / API Key 不受影响。
 
 ### PATCH/DELETE /api/git-repo/{owner}/{repo}/pulls/{number}/comments/{comment_id}
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
@@ -450,7 +492,7 @@ approval_reviewers_required_passed`；仅当
 | GET/tree | `grape git-repo tree --owner Jason7602 --repo hello --ref main --depth single` |
 | GET/contents 根 | `grape git-repo contents --owner Jason7602 --repo hello` |
 | GET/contents/{path} | `grape git-repo contents --owner Jason7602 --repo hello --path CODEOWNERS --ref codeowner` |
-| GET/commits | `grape git-repo commits --owner Jason7602 --repo hello --per-page 10` |
+| GET/commits | `grape git-repo commits --owner Jason7602 --repo hello --per-page 10`（按分支/SHA：`--sha weekly-11`，需 grape-cli >= 0.3.3） |
 | GET/labels | `grape git-repo labels --owner Jason7602 --repo hello` |
 | POST/labels | `grape git-repo labels create --owner Jason7602 --repo hello --json '{"name":"bug","color":"d73a4a"}'` |
 | GET/milestones | `grape git-repo milestones --owner Jason7602 --repo hello --state all` |

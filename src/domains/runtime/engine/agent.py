@@ -2092,6 +2092,12 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
     """
     import os as _os
     import shutil as _shutil
+    # Issue #2225：会话结束先清理自身暂存子目录（成功/异常/吊销路径都经本函数）。
+    try:
+        from src.domains.runtime.engine.session_tmpdir import cleanup_session_tmpdir
+        cleanup_session_tmpdir(env or {})
+    except Exception as _tmp_e:
+        log.warning(f"session tmpdir cleanup failed for task {task.get('id')}: {_tmp_e}")
     cwd = task.get("cwd") or ""
     if not cwd or not _os.path.isdir(cwd):
         return
@@ -2883,6 +2889,13 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
         env.setdefault("AGENT_SILENT_WINDOW", str(_ag_silent))
         env.setdefault("HERMES_SILENT_TIMEOUT", str(_ag_silent))
         env.setdefault("RUNTIME_TOOL_SILENT_TIMEOUT", str(_ag_silent))
+    # Issue #2225：会话级唯一暂存目录——平台已下发路径则创建校验；缺失/不可写时回退
+    # mktemp -d 并告警，禁止静默退回固定名 /tmp/opencode/body.md。
+    try:
+        from src.domains.runtime.engine.session_tmpdir import ensure_session_tmpdir
+        ensure_session_tmpdir(env, tid)
+    except Exception as _tmp_e:
+        log.warning(f"task {tid}: ensure session tmpdir failed: {_tmp_e}")
     # 本机 worker 修正对外服务地址：任务入队时 plugin 广播 runtime_id=0，server_url 被写成
     # 公网 server_base_url（如 http://123.249.19.227）。本机 worker 抢到任务后，agent 内部
     # A2A/tasks 等调用若走公网会 NAT 回环不通（超时）；必须覆盖为 localhost 直连。
@@ -3008,6 +3021,15 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                         f"reset context injected into env/prompt")
     except Exception as _rge:
         log.warning(f"task {tid}: worktree reset context inject failed: {_rge}")
+    # Issue #2245（M2）：git 写权限自检——只读会话注入标记与降级提示，避免编码中途失败
+    try:
+        from src.domains.runtime.engine.repogit import inject_git_write_context
+        prompt, _git_write = inject_git_write_context(task, env, prompt)
+        if _git_write and not _git_write.get("writable"):
+            log.warning(f"task {tid}: git worktree is read-only "
+                        f"({_git_write.get('reason', '')}), read-only mode marked")
+    except Exception as _gwe:
+        log.warning(f"task {tid}: git write context inject failed: {_gwe}")
     # Issue #607：技能物化块提取为 _materialize_worker_skill（可单测）；物化失败分支
     # 向 .skills/<skill>/ 写入 FALLBACK.md 降级指引 + log.warning 结构化留痕。
     prompt = _materialize_worker_skill(task, env, prompt, skill_dir)

@@ -51,3 +51,22 @@ class TestVodHandlerQueueMode:
 
         assert reply == "VOD_LOCAL_OK"
         m_enq.assert_not_called(), "direct 模式不应入队"
+
+    def test_direct_mode_forwards_repo_key_to_consume_stream_async(self, monkeypatch):
+        """R2（PR #1460 审查）：VOD direct 路径必须把 repo_key 透传给 consume_stream_async，
+        否则 executor 的 GRAPE_ISSUE_ID / GRAPE_WORK_BRANCH 场景解析整体跳过。"""
+        monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
+
+        async def _fake_consume(*a, **k):
+            yield ("done", {"exit_code": 0, "text": "VOD_LOCAL_OK", "oc_session_id": "ses_v"})
+
+        _tok = type("_Tok", (), {"token": "tk_fake", "level": "bot"})()
+        with patch("src.kernel.token_service.resolve_repo_token", return_value=_tok), \
+             patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.vod_handler_async.consume_stream_async",
+                   side_effect=_fake_consume) as m_consume:
+            asyncio.run(_execute_vod_agent(*_args()))
+
+        assert m_consume.call_args.kwargs["repo_key"] == "gitcode:Jason7602/test"
+        assert m_consume.call_args.kwargs["event_type"] == "vod_signal"

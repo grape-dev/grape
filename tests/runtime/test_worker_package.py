@@ -39,6 +39,14 @@ class TestWorkerPackage:
         assert "grape-worker/VERSION" in names
         assert "grape-worker/SHA256SUMS" in names
         assert "grape-worker/src/kernel/config.py" in names  # Issue #2010: 顶层模块的 canonical 实现
+        # Issue #2706（第 8 次同类复发终修）：pre-push branch_guard 租约路径依赖
+        # src.kernel.lock（#2292 起为 canonical）。它不在 agent 顶层 import 闭包里
+        # （钩子进程懒加载），MANIFEST 漏列时 worker 端所有 grape git push 即
+        # ImportError 被阻断/被迫 --no-verify——包内容断言固化，漏列即红。
+        assert "grape-worker/src/kernel/lock.py" in names
+        # 守卫本体与别名入口（src.lock 由 src/__init__.py 一跳解析，老导入方仍可用）
+        assert "grape-worker/src/domains/runtime/engine/branch_guard.py" in names
+        assert "grape-worker/src/__init__.py" in names
         assert "grape-worker/src/domains/runtime/engine/agent.py" in names
         assert "grape-worker/src/api/merge_gate.py" in names
         assert "grape-worker/src/domains/runtime/engine/worktree_guard.py" in names

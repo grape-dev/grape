@@ -194,7 +194,6 @@ class CodeArtsRuntime(AgentRuntime):
         env.setdefault("NODE_TLS_REJECT_UNAUTHORIZED", "0")
         from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
-        env["DEVOPS_EVENT_TYPE"] = ""
         # self-check: 关键变量缺失时打 warning，便于 worker journalctl 定位
         _required = ["CODEARTS_CLI_AK", "CODEARTS_CLI_SK", "KERNEL_DATA_DIR",
                      "OPENCODE_CONFIG", "OPENCODE_MODE", "SCENARIO"]

@@ -165,7 +165,6 @@ class HwcloudACPBackend:
         env = os.environ.copy()
         from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
-        env["DEVOPS_EVENT_TYPE"] = ""
         env["NO_COLOR"] = "1"
         env["TERM"] = "dumb"
         # provider 凭据经 env_extra 按 task 注入（_build_task_settings 读取），

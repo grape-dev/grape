@@ -312,13 +312,23 @@ def test_residue_with_git_marker_still_fail_closed(repo):
     assert os.path.isdir(issue_dir), "含 .git 的残留必须 fail-closed 保留"
 
 
-def test_remove_if_pushed_keeps_unpushed_worktree(repo, git_src):
-    """remove_issue_worktree_if_pushed：未推送 → 保留且不归档（未发生重置）。"""
+def test_remove_if_pushed_unpushed_archives_then_removes(repo, git_src):
+    """#2514 收紧语义：未推送提交 → 区间证据存档后仍删除（终态必清、不丢码）。
+
+    旧断言（未推送 → 保留不删）是 #2281 时代的宽松语义，与合并带入的
+    #2514 终态清理闸门互斥；新语义 = unpushed 提交先落
+    ``artifacts/workspace-*-unpushed.patch``（log -p --binary 区间）再移除。
+    """
     wt = _wt(repo, "18")
     _commit(wt, "unpushed work", ("d.txt", "v\n"))
-    assert repogit.remove_issue_worktree_if_pushed(repo, "coding", "18") is False
-    assert os.path.isdir(wt)
-    assert wg.load_reset_record(repo, "18", "coding") is None, "未重置不应有记录"
+    assert repogit.remove_issue_worktree_if_pushed(repo, "coding", "18") is True
+    assert not os.path.isdir(wt), "#2514：终态必清（证据已存档）"
+    from src.kernel.repo_key import workspace_repo_dir
+    art = os.path.join(workspace_repo_dir(repo), "artifacts")
+    patches = [p for p in os.listdir(art) if p.endswith("-unpushed.patch")]
+    assert patches, "未推送提交必须有 -unpushed 区间存档"
+    body = open(os.path.join(art, patches[0]), encoding="utf-8", errors="replace").read()
+    assert "unpushed work" in body, "存档须含未推送提交信息"
 
 
 def test_remove_if_pushed_archives_dirty_then_removes(repo, git_src):
@@ -751,3 +761,121 @@ def test_archive_tree_dirs_private(repo):
                     (os.path.dirname(archive_root), ".grape 目录")):
         assert oct(os.stat(d).st_mode & 0o777) == oct(0o700), \
             f"{name} 必须 0700: {d}"
+
+# ===================== Issue #2281：重建找回 + 推送重试通道 =====================
+
+def test_ensure_worktree_reuses_branch_with_unpushed_commits(repo):
+    """AC2：清理后分支 ref 仍在 → 新一轮 ensure 复用 feat/issue-N，未推送 commit 保留。"""
+    wt = _wt(repo, "50")
+    _commit(wt, "local unpushed work", ("impl.py", "x = 1\n"))
+    head = _git(["rev-parse", "HEAD"], wt).stdout.strip()
+    assert repogit.cleanup_issue_worktree(repo, "coding", "50") is True
+    assert not os.path.isdir(wt)
+    wt2 = repogit.ensure_issue_worktree(repo, "coding", "50")
+    assert wt2 and os.path.isdir(wt2)
+    assert _git(["rev-parse", "HEAD"], wt2).stdout.strip() == head
+    assert "local unpushed work" in _git(["log", "--oneline"], wt2).stdout
+    assert _git(["status", "--porcelain"], wt2).stdout.strip() == ""
+    rec = wg.load_reset_record(repo, "50", "coding")
+    assert rec and rec.get("auto_restored") is True
+    assert rec.get("auto_restored_source") == "branch", "分支复用标记 source=branch"
+
+
+def test_ensure_worktree_recovers_from_bundle_when_branch_ref_gone(repo):
+    """AC2：分支 ref 已从 bare mirror 消失 → 从最近归档 bundle fetch+reset 找回。"""
+    wt = _wt(repo, "51")
+    _commit(wt, "bundle-recovered work", ("impl.py", "y = 2\n"))
+    head = _git(["rev-parse", "HEAD"], wt).stdout.strip()
+    assert repogit.cleanup_issue_worktree(repo, "coding", "51") is True
+    base = repogit.repo_base_dir(repo)
+    assert _git(["branch", "-D", "feat/issue-51"], base).returncode == 0
+    wt2 = repogit.ensure_issue_worktree(repo, "coding", "51")
+    assert wt2 and os.path.isdir(wt2)
+    assert _git(["rev-parse", "HEAD"], wt2).stdout.strip() == head, \
+        "bundle 恢复必须还原到归档 HEAD"
+    assert "bundle-recovered work" in _git(["log", "--oneline"], wt2).stdout
+    assert _git(["status", "--porcelain"], wt2).stdout.strip() == ""
+    rec = wg.load_reset_record(repo, "51", "coding")
+    assert rec and rec.get("auto_restored") is True
+    assert rec.get("auto_restored_head") == head
+
+
+def test_ensure_worktree_without_bundle_keeps_baseline(repo):
+    """无归档/无未推送 commit → 行为不变：基线重建、无副作用、无记录。"""
+    wt = _wt(repo, "52")
+    assert repogit.cleanup_issue_worktree(repo, "coding", "52") is True
+    assert wg.load_reset_record(repo, "52", "coding") is None
+    base = repogit.repo_base_dir(repo)
+    _git(["branch", "-D", "feat/issue-52"], base)
+    wt2 = repogit.ensure_issue_worktree(repo, "coding", "52")
+    assert wt2 and os.path.isdir(wt2)
+    _st = [ln for ln in _git(["status", "--porcelain"], wt2).stdout.splitlines()
+           if ".git-askpass" not in ln]
+    assert _st == []
+    assert wg.load_reset_record(repo, "52", "coding") is None
+
+
+def test_ensure_worktree_dirty_wip_refused_but_archived(repo):
+    """#2514 闸门语义：脏 worktree → 拒绝复用，WIP 先存档再重建干净基线树。
+
+    旧断言（脏树直接复用、wip.txt 原样保留）是 #2281 时代的宽松语义；
+    #2514 dirty 闸门下同一场景 = 证据落 artifacts 后隔离重建，改动不丢
+    （可从存档 patch 还原），但重建树必须是干净的基线工作区。
+    """
+    wt = _wt(repo, "53")
+    with open(os.path.join(wt, "wip.txt"), "w", encoding="utf-8") as f:
+        f.write("wip\n")
+    wt2 = repogit.ensure_issue_worktree(repo, "coding", "53")
+    assert wt2 and os.path.isdir(wt2)
+    assert not os.path.isfile(os.path.join(wt2, "wip.txt")), \
+        "#2514 dirty 闸门：重建后的工作区不得携带拒绝复用前的 WIP 文件"
+    from src.kernel.repo_key import workspace_repo_dir
+    art = os.path.join(workspace_repo_dir(repo), "artifacts")
+    patches = [p for p in os.listdir(art)
+              if "reuse-refused" in p or "issue53" in p]
+    assert patches, "拒绝复用的 WIP 必须有证据存档"
+    body = open(os.path.join(art, patches[0]), encoding="utf-8", errors="replace").read()
+    assert "wip" in body, "存档须含被拒复用工作区的内容（可还原）"
+
+
+def test_inject_reset_context_push_retry_entry(repo):
+    """AC3：未自动找回 → prompt 给出推送重试入口（而非只引导手工 reset）。"""
+    record = {"worktree_reset": True, "lost_commits": ["abc"], "unpushed_count": 1,
+              "bundle_path": "/ws/x/worktree.bundle", "branch": "feat/issue-2281",
+              "archived_at": "2026-11-12T10:00:00+00:00",
+              "reset_reason": "sweep_done_issue"}
+    assert wg._atomic_json_write(wg.reset_record_path(repo, "2281", "coding"), record)
+    env, prompt = {}, "BASE"
+    p, injected = wg.inject_reset_context(
+        {"repo_key": repo, "agent_type": "coding", "issue_id": "#2281",
+         "task_id": "t_push"}, env, prompt)
+    assert injected is True
+    assert "git push origin HEAD:refs/heads/feat/issue-2281" in p
+    assert "git fetch <bundle_path>" in p
+
+
+def test_inject_reset_context_auto_restored_no_manual_reset(repo):
+    """AC2/AC4：auto_restored 记录 → prompt 声明已自动找回，只需重试 push，不再要求手工 reset。"""
+    record = {"worktree_reset": True, "lost_commits": ["abc"], "unpushed_count": 1,
+              "bundle_path": "/ws/x/worktree.bundle", "branch": "feat/issue-2282",
+              "archived_at": "2026-11-12T10:00:00+00:00",
+              "reset_reason": "sweep_done_issue",
+              "auto_restored": True, "auto_restored_head": "d" * 40}
+    assert wg._atomic_json_write(wg.reset_record_path(repo, "2282", "coding"), record)
+    env, prompt = {}, "BASE"
+    p, injected = wg.inject_reset_context(
+        {"repo_key": repo, "agent_type": "coding", "issue_id": "#2282",
+         "task_id": "t_auto"}, env, prompt)
+    assert injected is True
+    assert "restored from the archived bundle" in p
+    assert "do NOT re-implement" in p
+    assert "git push origin HEAD:refs/heads/feat/issue-2282" in p
+    info = json.loads(env["GRAPE_WORKTREE_RESET_INFO"])
+    assert info["auto_restored"] is True
+
+
+def test_sweep_base_branch_env_precedence(monkeypatch):
+    """sweeper 未推送判定使用场景开发基线（env 优先），而非恒为 origin/main。"""
+    from src.domains.runtime.engine import cleanup
+    monkeypatch.setenv("GRAPE_WORK_BRANCH", "arch-weekly-11-zj")
+    assert cleanup._sweep_base_branch("gitcode:owner/repo") == "arch-weekly-11-zj"
