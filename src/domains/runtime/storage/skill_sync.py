@@ -424,12 +424,10 @@ async def sync_official_skills() -> dict:
         #    §6.3 外层锁续期（to_thread 卸载）：锁被抢 → 中止本轮剩余步骤。
         #    §8.8 滚动升级避让：非阻塞试探旧 scene_sync 锁，抢不到=旧实例在跑 → 跳过本轮场景步骤。
         try:
-            from src.kernel.lock import acquire_lock as _al, release_lock as _rl, renew_lock as _rn
+            from src.kernel.lock import acquire_lock as _al, release_lock as _rl
             from src.domains.runtime.storage.scene_sync import sync_official_scenes
             # §6.3 外层锁续期（to_thread 卸载，与下方 acquire/release 一致）
-            if not await asyncio.to_thread(_rn, "skill_sync", 1800):
-                logger.error("skill sync: outer lock lost before scene step, aborting remaining steps")
-            else:
+            if await _ensure_outer_lock():
                 scene_lock = await asyncio.to_thread(_al, "scene_sync", 300)
                 if not scene_lock:
                     logger.warning("skill sync: legacy scene_sync lock held, skipping scene step this cycle")
@@ -484,18 +482,57 @@ async def _skill_sync_worker(interval: float = 1800.0):
         await asyncio.sleep(interval)
 
 
+async def _ensure_outer_lock(ttl: int = 1800) -> bool:
+    """续期外层 `skill_sync` 锁；续不上时按同一 holder 重抢一次。
+
+    为什么需要重抢：同一进程里可能存在不止一个调度器（历史上 main / server_tasks /
+    grape_server 三个入口各调一次 start_skill_sync_scheduler，而它并不幂等）。
+    两个 worker 共用模块级的锁 holder，A 的 release 会按 holder 删掉 B 刚拿到的行，
+    B 在下一轮续期时就必然失败并放弃剩余步骤——日志表现为每轮一条
+    `outer lock lost before scene step`，而场上其实只有一个存活进程。
+
+    重抢成功说明「行被自己人删了」（竞态）；抢不到说明锁真被别的实例接管，
+    这时确实该中止本轮剩余步骤。
+    """
+    from src.kernel.lock import acquire_lock as _al, renew_lock as _rn
+
+    if await asyncio.to_thread(_rn, "skill_sync", ttl):
+        return True
+    if await asyncio.to_thread(_al, "skill_sync", ttl):
+        logger.warning("skill sync: outer lock re-acquired before scene step (lock row was dropped)")
+        return True
+    logger.error("skill sync: outer lock lost before scene step, aborting remaining steps")
+    return False
+
+
+_scheduler_task: "asyncio.Task | None" = None
+
+
 def start_skill_sync_scheduler():
-    """启动定时同步调度（任何模式都启动）。"""
+    """启动定时同步调度（任何模式都启动，**且幂等**）。
+
+    三个入口都会调用本函数（`src/api/main.py`、`src/api/server_tasks.py`、
+    `src/api/grape_server.py`）。此前每次调用都新建一个 worker，同一进程里便跑着
+    2 个定时任务：它们共用模块级 holder，互相删对方的锁行，触发
+    `outer lock lost before scene step` 并让场景同步步骤被跳过。
+    现在只保留一个实例；已存在且未结束则直接返回。
+    """
+    global _scheduler_task
+    if _scheduler_task is not None and not _scheduler_task.done():
+        log.info("skill sync scheduler already running, skip duplicate start")
+        return
     interval = max(float(os.environ.get("SKILL_SYNC_INTERVAL", "1800")), 60)
-    t = asyncio.create_task(_skill_sync_worker(interval), name="skill-sync")
-    _bg_tasks.add(t)
-    t.add_done_callback(_bg_tasks.discard)
+    _scheduler_task = asyncio.create_task(_skill_sync_worker(interval), name="skill-sync")
+    _bg_tasks.add(_scheduler_task)
+    _scheduler_task.add_done_callback(_bg_tasks.discard)
     log.info(f"skill sync scheduler started (interval={interval}s)")
 
 
 async def stop_skill_sync_scheduler():
     """优雅关闭：cancel 所有定时任务并等待退出。"""
+    global _scheduler_task
     for t in _bg_tasks:
         t.cancel()
     await asyncio.gather(*_bg_tasks, return_exceptions=True)
+    _scheduler_task = None
     log.info("skill sync scheduler stopped")
