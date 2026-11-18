@@ -557,7 +557,7 @@ async def _autopilot_finding_dispatch(ctx, egress, msg_id, uid, exec_id, finding
         from src.domains.mgmt.public import get_grape_account_by_id
         _acc = get_grape_account_by_id(uid) or {}
         _uname = _acc.get("username", "")
-        from src.domains.mgmt.routes.autopilot import _dispatch_finding_core
+        from src.domains.mgmt.public import _dispatch_finding_core
         result = await _dispatch_finding_core(exec_id, finding_id, scene_id=scene_id,
                                               user={"id": uid, "username": _uname},
                                               dedup_confirmed=dedup_confirmed,

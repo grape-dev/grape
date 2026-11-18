@@ -625,8 +625,8 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                     pass
             # capabilities 写入后同步 agent_tags 派生缓存（注册路径原先漏了这一步，
             # 导致新机器 agent_tags 为空、前端按 tags 过滤时被漏掉——sre-personal-machine 修复）
-            from src.domains.mgmt.routes.settings import _sync_agent_tags
-            _sync_agent_tags(rid, c)
+            from src.domains.mgmt.public import sync_agent_tags
+            sync_agent_tags(rid)
             # Issue #1208：三维度派生标签（engine:/scope:/scene:）落 capabilities 冒号行
             # + JSON 快照刷新（selector 圈池数据底座；注册链先写，心跳链幂等收敛）
             try:
@@ -2901,11 +2901,11 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(require_n
     """设置 engine 的角色标签。应用互斥规则后写入。
 
     以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。
-    写入顺序：先写 engine_capabilities，再 _sync_agent_tags 回写 agent_tags。
+    写入顺序：先写 engine_capabilities，再 sync_agent_tags 回写 agent_tags。
     """
     from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
-    from src.domains.mgmt.routes.settings import _sync_agent_tags
+    from src.domains.mgmt.public import sync_agent_tags
     tags = _apply_tag_rules(body.get("tags") or [])
     now = datetime.now(timezone.utc).isoformat()
     with db_lock:
@@ -2927,7 +2927,7 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(require_n
         # 标记用户已手动设过标签，心跳注册不再自动补 'all'
         c.execute("UPDATE agent_runtimes SET tags_user_set=1 WHERE id=?", (runtime_id,))
         # 再回写 agent_tags（派生缓存，保持与 engine_capabilities 一致）
-        _sync_agent_tags(runtime_id, c)
+        sync_agent_tags(runtime_id)
         db.commit()
     log.info(f"Runtime tags set: rid={runtime_id} tags={tags} (engine_capabilities → agent_tags synced)")
     return {"tags": tags}

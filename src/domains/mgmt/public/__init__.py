@@ -6078,3 +6078,88 @@ def invalidate_provider_cache() -> None:
 
 # 原名别名：下划线内部名保持可用（调用点零改动）。
 _has_refresh_token = has_refresh_token
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 路由层判定口径复用（内部 routes/*.py → public 转发）
+#
+# 这些符号是 mgmt **Web 路由里的判定/口径函数**，不是查询面。runtime / insight 侧
+# 需要与路由完全同源的实现（否则同一业务出现两套判定 → 静默漂移），故以转发函数
+# 收敛到 public；转发体一律函数内 import，避免内部模块加载期反向引别域 public 成环。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def filter_repos(user_id: int, repos: list[dict], org_id: int = 0) -> list[dict]:
+    """按用户身份 + 组织隔离过滤仓库列表（与 /repos/member 同源）。"""
+    from src.domains.mgmt.routes.repos import _filter_repos as _impl
+
+    return _impl(user_id, repos, org_id=org_id)
+
+
+def check_repo_member(user: dict, repo_key: str) -> None:
+    """校验知识读取权限；无权限抛 HTTPException(403)（会话 token 走仓库作用域）。"""
+    from src.domains.mgmt.routes.knowledge import _check_repo_member as _impl
+
+    return _impl(user, repo_key)
+
+
+def resolve_repo_key(repo: str) -> str:
+    """把前端 owner/repo 解析为 managed 表里实际使用的 repo_key（含平台前缀）。"""
+    from src.domains.mgmt.routes.knowledge import _resolve_repo_key as _impl
+
+    return _impl(repo)
+
+
+async def dispatch_finding_core(exec_id: int, finding_id: str,
+                                title: str = "", description: str = "",
+                                scene_id: str = "", user: dict = None,
+                                dedup_confirmed: bool = False,
+                                dedup_confirmed_by: str = "") -> dict:
+    """派发 autopilot finding（Web 路由与飞书 /finding-dispatch 共用口径）。
+
+    语义错误抛 HTTPException（404/409/400），由调用方捕获转回复卡；返回 JSON 友好 dict。
+    """
+    from src.domains.mgmt.routes.autopilot import _dispatch_finding_core as _impl
+
+    return await _impl(exec_id, finding_id, title=title, description=description,
+                       scene_id=scene_id, user=user,
+                       dedup_confirmed=dedup_confirmed,
+                       dedup_confirmed_by=dedup_confirmed_by)
+
+
+def sync_agent_tags(rid: int) -> None:
+    """engine_capabilities 变更后回写 agent_runtimes.agent_tags（派生缓存，幂等）。
+
+    原实现带一个未使用的 cursor 形参（历史回落残留），public 面不再暴露游标。
+    """
+    from src.domains.mgmt.routes.settings import _sync_agent_tags as _impl
+
+    return _impl(rid, None)
+
+
+def max_content_bytes() -> int:
+    """知识正文大小上限（字节，由 KNOWLEDGE_MAX_CONTENT_BYTES 派生并钳制）。"""
+    from src.domains.mgmt.routes.knowledge import MAX_CONTENT_BYTES as _impl
+
+    return int(_impl)
+
+
+def format_content_limit(limit_bytes: int) -> str:
+    """把字节上限格式化为可读 KB/MB 文案（报错口径统一）。"""
+    from src.domains.mgmt.routes.knowledge import _format_content_limit as _impl
+
+    return _impl(limit_bytes)
+
+
+def content_limit_config_hint() -> str:
+    """知识正文超限报错里追加的配置方法提示文案。"""
+    from src.domains.mgmt.routes.knowledge import _CONTENT_LIMIT_CONFIG_HINT as _impl
+
+    return _impl
+
+
+# 原名别名：调用点只换模块路径，函数名与 as 别名零改动。
+_filter_repos = filter_repos
+_check_repo_member = check_repo_member
+_resolve_repo_key = resolve_repo_key
+_dispatch_finding_core = dispatch_finding_core

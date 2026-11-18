@@ -73,7 +73,7 @@ def visible_repo_keys(user: Dict[str, Any]) -> List[str]:
         return []
     try:
         from src.domains.mgmt.public import get_user_repos
-        from src.domains.mgmt.routes.repos import _filter_repos     # 口径同源，勿另写一套
+        from src.domains.mgmt.public import _filter_repos     # 口径同源，勿另写一套
         from src.domains.mgmt.public import is_org_personal
     except Exception:
         return []

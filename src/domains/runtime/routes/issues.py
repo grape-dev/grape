@@ -2533,7 +2533,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     # 解析真前缀（与知识面 _resolve_repo_key 同口径）；显式传 repo_key 不受影响。
     _rk_in = _body.get("repo_key") or ""
     if ":" not in _rk_in:
-        from src.domains.mgmt.routes.knowledge import _resolve_repo_key as _resolve_rk
+        from src.domains.mgmt.public import _resolve_repo_key as _resolve_rk
         _rk_in = _resolve_rk(f"{owner}/{repo}")
     b = TaskCreateBody(
         repo_key=_rk_in,

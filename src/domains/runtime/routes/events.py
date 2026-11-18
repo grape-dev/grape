@@ -2181,7 +2181,7 @@ def get_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
 def delete_event_thread(seq: int, user: dict = Depends(require_no_session_token)):
     """Issue #100: 清理事件关联的对话消息（event_thread 记录）。"""
     evt = _load_event(seq)
-    from src.domains.mgmt.routes.knowledge import _check_repo_member
+    from src.domains.mgmt.public import _check_repo_member
     _check_repo_member(user, evt["repo_key"])
     from src.kernel.session_manager import db_lock
     db = _rt_db
@@ -2198,7 +2198,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
     evt = _load_event(seq)
     if scope not in ("project", "issue", "issue_agent"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 project/issue/issue_agent"})
-    from src.domains.mgmt.routes.knowledge import _check_repo_member
+    from src.domains.mgmt.public import _check_repo_member
     _check_repo_member(user, evt["repo_key"])
 
     from src.api.knowledge import knowledge_path, _issue_num_from
@@ -2650,9 +2650,10 @@ def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
     # Issue #358：agent 写入路径也加大小校验，与 member 手动创建/更新对齐
     # Issue #372：报错文案追加配置方法提示，与 member 创建/更新口径一致
-    from src.domains.mgmt.routes.knowledge import MAX_CONTENT_BYTES, _format_content_limit, _CONTENT_LIMIT_CONFIG_HINT
-    if len((body.content or "").encode("utf-8")) > MAX_CONTENT_BYTES:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}{_CONTENT_LIMIT_CONFIG_HINT}"})
+    from src.domains.mgmt.public import max_content_bytes, format_content_limit, content_limit_config_hint
+    _mcb = max_content_bytes()
+    if len((body.content or "").encode("utf-8")) > _mcb:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {format_content_limit(_mcb)}{content_limit_config_hint()}"})
     from src.api.knowledge import write_knowledge, _issue_num_from
     issue_num = _issue_num_from(evt["issue_id"])
     task_id = write_knowledge(repo_key=evt["repo_key"], scope=body.scope, content=body.content,
