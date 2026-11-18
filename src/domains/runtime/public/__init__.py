@@ -7579,3 +7579,10 @@ def refresh_whitelist_cache() -> None:
     from src.domains.runtime.agents.sandbox.isolation.network import _WhitelistCache
 
     _WhitelistCache.get().refresh()
+
+
+def is_plugin_mode() -> bool:
+    """当前管线模式是否为 plugin（plugin/legacy 二选一）。"""
+    from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode as _impl
+
+    return _impl()

@@ -2462,7 +2462,7 @@ def get_execution_mode_api(user: dict = Depends(require_no_session_token)):
 
 @router.get("/pipeline-mode", operation_id="settings_pipeline_mode_get", summary="Get pipeline mode", description="Returns the current pipeline mode.")
 def get_pipeline_mode_api(user: dict = Depends(require_no_session_token)):
-    from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
+    from src.domains.runtime.public import is_plugin_mode
     return {"mode": "plugin" if is_plugin_mode() else "legacy"}
 
 @router.put("/pipeline-mode", operation_id="settings_pipeline_mode_set", summary="Set pipeline mode", description="Sets the pipeline mode.")
