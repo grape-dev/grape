@@ -174,13 +174,10 @@ def _engine_uid(runtime_id: int) -> str:
     """Issue #868 前端 uid 消费：runtime_id → engine_uid（旧库缺列/行不存在降级 ''）。"""
     if not runtime_id:
         return ""
-    from src.kernel.session_manager import db, db_lock
+    # agent_runtimes 归 runtime 域：SQL 在 runtime public 一份，这里只调原语（跨域读收口）
     try:
-        with db_lock:
-            row = db.cursor().execute(
-                "SELECT COALESCE(engine_uid,'') FROM agent_runtimes WHERE id=?",
-                (int(runtime_id),)).fetchone()
-        return (row[0] or "") if row else ""
+        from src.domains.runtime import public as runtime_public
+        return runtime_public.runtime_uid_of(int(runtime_id))
     except Exception:
         return ""
 

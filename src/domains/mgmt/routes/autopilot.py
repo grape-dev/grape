@@ -158,16 +158,13 @@ def _validate_engine_runtime_uids(user: dict, repo_key: str, engine_uids: list) 
         if not is_uid_str(v):
             raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid engine_runtime_uids"})
         norm.append(v)
-    from src.kernel.bulk_read import reader
-    with reader() as c:
-        ph = ",".join("?" * len(norm))
-        try:
-            rows = c.execute(
-                f"SELECT engine_uid, id, credential_id FROM agent_runtimes "
-                f"WHERE engine_uid IN ({ph})", norm).fetchall()
-        except Exception as e:
-            raise HTTPException(status_code=400, detail={
-                "code": 400, "message": f"engine_runtime_uids validation failed: {e}"})
+    # agent_runtimes 归 runtime 域，SQL 在 runtime public 一份
+    from src.domains.runtime import public as runtime_public
+    try:
+        rows = runtime_public.runtime_cred_rows_by_engine_uids(norm)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": f"engine_runtime_uids validation failed: {e}"})
     by_uid = {(r[0] or "").strip().lower(): ((r[1] or 0), (r[2] or 0)) for r in rows}
     for v in norm:
         hit = by_uid.get(v)
@@ -373,13 +370,9 @@ def list_tasks(
                 _all_uids.add(str(_u or "").strip().lower())
         if _all_uids:
             try:
-                from src.kernel.bulk_read import reader
-                with reader() as _c:
-                    _ph = ",".join("?" * len(_all_uids))
-                    for _rid in _c.execute(
-                            f"SELECT id FROM agent_runtimes WHERE LOWER(engine_uid) IN ({_ph})",
-                            tuple(_all_uids)).fetchall():
-                        _all_eids.add(_rid[0] or 0)
+                from src.domains.runtime import public as runtime_public
+                for _rid in runtime_public.runtime_ids_by_engine_uids(_all_uids):
+                    _all_eids.add(_rid or 0)
             except Exception as _ue:
                 log.warning(f"list_tasks: uid->id hints resolve failed: {_ue}")
         if _all_eids:
@@ -422,15 +415,12 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
         _uids = [str(u).strip().lower() for u in (task.get("engine_runtime_uids") or [])]
         if _uids:
             try:
-                from src.kernel.bulk_read import reader
-                with reader() as _cu:
-                    _phu = ",".join("?" * len(_uids))
-                    for _r in _cu.execute(
-                            f"SELECT id FROM agent_runtimes WHERE LOWER(engine_uid) IN ({_phu})",
-                            tuple(_uids)).fetchall():
-                        task.setdefault("engine_runtime_ids", [])
-                        if (_r[0] or 0) not in (task.get("engine_runtime_ids") or []):
-                            task["engine_runtime_ids"] = list(task.get("engine_runtime_ids") or []) + [(_r[0] or 0)]
+                from src.domains.runtime import public as _rt_pub
+                for _rid in _rt_pub.runtime_ids_by_engine_uids(_uids):
+                    _rid = _rid or 0
+                    task.setdefault("engine_runtime_ids", [])
+                    if _rid not in (task.get("engine_runtime_ids") or []):
+                        task["engine_runtime_ids"] = list(task.get("engine_runtime_ids") or []) + [_rid]
             except Exception:
                 pass
         _eids = [int(x) for x in (task.get("engine_runtime_ids") or [])]

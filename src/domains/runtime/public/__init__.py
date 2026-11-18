@@ -80,6 +80,86 @@ def get_runtime(runtime_id: int) -> dict[str, Any]:
         return rows[0] if rows else {}
 
 
+def list_runtime_uid_rows() -> list[tuple]:
+    """engine_uid 回填/校验用：id, credential_id, name, scope, owner_id, host_name, engine_uid。
+
+    原来散在 src/api/db_setup.py 的启动期回填里直查本表；lib 模式下 SQL 只留 owner 域一份。
+    """
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT id, credential_id, name, scope, owner_id, host_name, engine_uid "
+                  "FROM agent_runtimes ORDER BY id")
+        return [tuple(r) for r in c.fetchall()]
+
+
+def set_runtime_engine_uid(runtime_id: int, engine_uid: str | None) -> int:
+    """写单个运行时的 engine_uid（None/'' = 置空）。返回影响行数。"""
+    val = engine_uid or None
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE agent_runtimes SET engine_uid=%s WHERE id=%s", (val, runtime_id))
+        return int(c.rowcount or 0)
+
+
+def list_runtime_name_rows() -> list[tuple]:
+    """id, 展示名, name —— 引擎别名迁移/展示映射用。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT id, COALESCE(display_name, name), name FROM agent_runtimes ORDER BY id")
+        return [tuple(r) for r in c.fetchall()]
+
+
+def list_runtime_id_uid_rows() -> list[tuple]:
+    """id, engine_uid —— uid 唯一性校验与批量回填用。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT id, engine_uid FROM agent_runtimes ORDER BY id")
+        return [tuple(r) for r in c.fetchall()]
+
+
+def runtime_ids_by_engine_uids(engine_uids) -> list[int]:
+    """按 engine_uid（大小写不敏感）反查运行时 id 列表。"""
+    keys = [str(u).lower() for u in (engine_uids or []) if u]
+    if not keys:
+        return []
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"SELECT id FROM agent_runtimes WHERE LOWER(engine_uid) IN ({ph})", tuple(keys))
+        return [int(r[0]) for r in c.fetchall()]
+
+
+def runtime_cred_rows_by_engine_uids(engine_uids) -> list[tuple]:
+    """按 engine_uid 精确匹配取 engine_uid, id, credential_id —— 自动编排的引擎校验用。"""
+    keys = [str(u) for u in (engine_uids or []) if u]
+    if not keys:
+        return []
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("runtime") as c:
+        c.execute(f"SELECT engine_uid, id, credential_id FROM agent_runtimes "
+                  f"WHERE engine_uid IN ({ph})", tuple(keys))
+        return [tuple(r) for r in c.fetchall()]
+
+
+def rename_runtime_engine_uid(old_uid: str, new_uid: str) -> int:
+    """把一个 engine_uid 的所有运行时改名为新 uid（引擎重命名级联）。返回影响行数。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("UPDATE agent_runtimes SET engine_uid=%s WHERE engine_uid=%s", (new_uid, old_uid))
+        return int(c.rowcount or 0)
+
+
+def runtime_rebase_row(runtime_id: int) -> tuple:
+    """credential_id, name, scope, owner_id, host_name, engine_uid —— uid 重算需要原始行。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT credential_id, name, scope, owner_id, host_name, engine_uid "
+                  "FROM agent_runtimes WHERE id=%s", (runtime_id,))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def runtime_uid_of(runtime_id: int) -> str:
+    """单个运行时的 engine_uid（缺省空串）—— 追踪打点用。"""
+    with db_registry.cursor("runtime") as c:
+        c.execute("SELECT COALESCE(engine_uid,'') FROM agent_runtimes WHERE id=%s", (runtime_id,))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
 def task_stats(repo_key: str, since: str | None = None) -> dict[str, Any]:
     """任务聚合（insight 面板用；替代之前的跨库 JOIN/子查询）。"""
     sql = ("SELECT status, COUNT(*) AS n FROM agent_tasks WHERE repo_key=%s")

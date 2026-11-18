@@ -4456,9 +4456,9 @@ def rebase_engine_uid_references(c, old_uid: str, new_uid: str) -> dict:
     if not old_uid or not new_uid or old_uid == new_uid:
         return report
     try:
-        report["engines_rebased"] = c.execute(
-            "UPDATE agent_runtimes SET engine_uid=? WHERE engine_uid=?",
-            (new_uid, old_uid)).rowcount
+        # agent_runtimes 归 runtime 域：SQL 在 runtime public 一份
+        from src.domains.runtime import public as _rt_public
+        report["engines_rebased"] = _rt_public.rename_runtime_engine_uid(old_uid, new_uid)
     except Exception as _e:
         log.warning(f"rebase_engine_uid_references agent_runtimes: {_e}")
     for tbl, key in _UID_REF_TABLES:
@@ -4507,9 +4507,8 @@ def rebase_engine_uids_by_anchor(c, anchor_rows: list) -> dict:
             if not rid:
                 report["skipped"] += 1
                 continue
-            erow = c.execute(
-                "SELECT credential_id, name, scope, owner_id, host_name, engine_uid "
-                "FROM agent_runtimes WHERE id=?", (rid,)).fetchone()
+            from src.domains.runtime import public as _rt_public2
+            erow = _rt_public2.runtime_rebase_row(rid)
             if not erow:
                 report["skipped"] += 1
                 continue
