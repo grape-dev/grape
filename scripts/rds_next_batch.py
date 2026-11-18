@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     scanner = load_scanner()
-    owner = scanner.load_owner(OWNER_TSV)
+    owner = scanner.load_owner_json(OWNER_TSV)
     queries = {d: named_queries(d) for d in DOMAIN_KW}
 
     rows: list[tuple[int, str, dict[str, list[int]], str]] = []

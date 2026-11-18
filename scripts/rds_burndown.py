@@ -41,7 +41,7 @@ def _load_scanner():
 def static_backlog() -> tuple[list[dict], int]:
     """按表统计剩余跨域引用（消费域不在 owner 域内即计入）。"""
     scanner = _load_scanner()
-    owner = scanner.load_owner(OWNER)
+    owner = scanner.load_owner_json(OWNER)
     rows = scanner.scan(REPO / "src", owner)
     backlog = []
     total = 0
@@ -76,7 +76,7 @@ def rank_files(top: int = 12) -> None:
     mod_sys = __import__("sys")
     mod_sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
-    owner = mod.load_owner(REPO / "docs" / "weekly-11" / "table_ownership.json")
+    owner = mod.load_owner_json(OWNER)
     per: collections.Counter = collections.Counter()
     tabs: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     for path in sorted((REPO / "src").rglob("*.py")):

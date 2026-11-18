@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import ast
 import re
 from collections import defaultdict
@@ -40,7 +41,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 DB_SETUP = REPO / "src/api/db_setup.py"
-OWNER_TSV = REPO / "configs/table_ownership.json"
+OWNER_JSON = REPO / "configs/table_ownership.json"
 
 SCHEMA_DOMAIN = {"grape_mgmt_db": "mgmt", "grape_runtime_db": "runtime",
                  "grape_insight_db": "insight"}
@@ -105,12 +106,15 @@ MODULE_DOC = '''"""迁移 SQL：{domain} 域归属表的 DDL/DML（由 db_setup 
 
 
 def load_owner() -> dict[str, str]:
-    owner: dict[str, str] = {}
-    for line in OWNER_TSV.read_text(encoding="utf-8").splitlines():
-        schema, _, table = line.partition("\t")
-        if table and schema in SCHEMA_DOMAIN:
-            owner[table.strip()] = SCHEMA_DOMAIN[schema]
-    return owner
+    """table → 归属域（唯一权威 configs/table_ownership.json）。
+
+    原实现按 TSV 逐行 partition("\t") 解析，而清单已改为 JSON —— JSON 无制表符，
+    owner 恒为空，工具于是报「合计下沉 0 处」。改为直接读 JSON，同 load_owner_json 口径。
+    """
+    data = json.loads(OWNER_JSON.read_text(encoding="utf-8"))
+    per_domain = set(((data.get("_per_domain_tables") or {}).get("tables") or []))
+    return {k: v for k, v in (data.get("tables") or {}).items()
+            if v in set(SCHEMA_DOMAIN.values()) and k not in per_domain}
 
 
 def domains_of(text: str, owner: dict[str, str]) -> tuple[set[str], list[str]]:

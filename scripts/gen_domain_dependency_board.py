@@ -29,7 +29,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 DOCS = REPO / "docs" / "weekly-11"
-OWNER_TSV = DOCS / "table_ownership.json"
+OWNER_JSON = REPO / "configs" / "table_ownership.json"
 DISPOSITION = DOCS / "cross-domain-disposition.csv"
 CHANNEL = DOCS / "cross-domain-write-channel.csv"
 BASELINE = DOCS / "foreign-refs-allowlist.csv"
@@ -57,7 +57,7 @@ def _csv_map(path: Path, key: str) -> dict[str, dict]:
 
 def collect() -> dict:
     scanner = _load_scanner()
-    owner = scanner.load_owner(OWNER_TSV)
+    owner = scanner.load_owner_json(OWNER_JSON)
     rows = scanner.scan(REPO / "src", owner)
     dispositions = _csv_map(DISPOSITION, "table")
     channels = _csv_map(CHANNEL, "table")
