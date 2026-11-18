@@ -106,7 +106,9 @@ def _call_upload(wdb, zip_bytes, filename, user_id=7):
     uf = UploadFile(file=io.BytesIO(zip_bytes), filename=filename)
     user = {"id": user_id, "auth_type": "api_key"}
     return asyncio.run(upload_skill(file=uf, user=user, scope="user", repo="",
-                                    agent_type="coding", category_id=0))
+                                    agent_type="coding", category_id=0,
+                                    cat_l1_id=0, cat_l2_id=0,
+                                    summary="测试摘要", clear_category=False))
 
 
 def _call_update(wdb, skill_id, zip_bytes, filename, user_id=7):
@@ -115,7 +117,9 @@ def _call_update(wdb, skill_id, zip_bytes, filename, user_id=7):
     uf = UploadFile(file=io.BytesIO(zip_bytes), filename=filename)
     user = {"id": user_id, "auth_type": "api_key"}
     return asyncio.run(update_skill_by_id(skill_id=skill_id, file=uf, user=user,
-                                          agent_type="", category_id=""))
+                                          agent_type="", category_id="",
+                                          cat_l1_id=0, cat_l2_id=0,
+                                          summary="测试摘要", clear_category=False))
 
 
 def _seed_skill(wdb, user_id=7, name="my-skill"):

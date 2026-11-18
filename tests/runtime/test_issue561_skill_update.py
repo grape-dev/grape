@@ -157,7 +157,9 @@ def _call_update(wdb, skill_id, zip_bytes, zip_name="s.zip", user_id=7, agent_ty
     uf = UploadFile(file=io.BytesIO(zip_bytes), filename=zip_name)
     user = {"id": user_id, "auth_type": "api_key"}
     return asyncio.run(update_skill_by_id(
-        skill_id=skill_id, file=uf, user=user, agent_type=agent_type, category_id=category_id))
+        skill_id=skill_id, file=uf, user=user, agent_type=agent_type,
+        category_id=category_id, cat_l1_id=0, cat_l2_id=0,
+        summary="测试摘要", clear_category=False))
 
 
 # ---------------------------------------------------------------------------

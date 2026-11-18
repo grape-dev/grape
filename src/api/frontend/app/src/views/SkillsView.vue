@@ -40,13 +40,34 @@
             :style="{ '--fg1': gradient(s).g1, '--fg2': gradient(s).g2 }"
             @click="openDetail(s.id)"
           >
-            <span class="feat-badge">★</span>
-            <div class="feat-ico">{{ agentMeta(s).icon || '◈' }}</div>
-            <div class="feat-name">
-              {{ s.display_name || s.name }}<span class="feat-agent">{{ agentMeta(s).label }}</span>
+            <div class="sk__title-row">
+              <div class="sk__title-wrap">
+                <span class="feat-name" :title="titleOf(s)">{{ titleOf(s) }}</span>
+                <span v-if="s.scope === 'official'" class="sk__official">官网</span>
+              </div>
+              <span
+                v-if="agentMeta(s).label"
+                :class="['tg', tagClass(s), 'sk__agent-chip', 'sk__agent-chip--feat']"
+                >{{ agentMeta(s).label }}</span
+              >
             </div>
-            <div class="feat-desc">{{ s.description || '' }}</div>
-            <div class="feat-scenes">{{ scenesShort(s) }}</div>
+            <div class="feat-desc sk__summary" :title="skillSummary(s)">{{ skillSummary(s) }}</div>
+            <div class="sk__meta-row sk__meta-row--feat">
+              <div class="sk__user-tags">
+                <span
+                  v-for="(t, i) in cardTags(s).slice(0, 3)"
+                  :key="'ft' + i"
+                  class="sk__chip sk__chip--feat"
+                  >{{ t.name }}</span
+                >
+                <span v-if="extraTags(s) > 0" class="sk__chip sk__chip--feat"
+                  >+{{ extraTags(s) }}</span
+                >
+              </div>
+              <span v-if="categoryLabel(s)" class="tg sk__cat-tag sk__cat-tag--feat">{{
+                categoryLabel(s)
+              }}</span>
+            </div>
             <div class="feat-scenes sk__featcount">
               {{ sceneCount(s) }} {{ td('scenes_in_use') }} · {{ s.repo_count || 0 }}
               {{ td('repos_in_use') }}
@@ -196,13 +217,17 @@
                   <!-- 华为云技能包 -->
                   <template v-if="s.name === 'huawei-cloud'">
                     <div class="rh">
-                      <span class="sk__hw-ic">📁</span>
-                      <span :class="['tg', tagClass(s)]" style="font-size: 9px">{{
-                        agentMeta(s).label
-                      }}</span>
-                      <span class="rn">{{ s.display_name || s.name }}</span>
+                      <div class="sk__title-wrap">
+                        <span class="rn" :title="titleOf(s)">{{ titleOf(s) }}</span>
+                        <span v-if="s.scope === 'official'" class="sk__official">官网</span>
+                      </div>
+                      <span
+                        v-if="agentMeta(s).label"
+                        :class="['tg', tagClass(s), 'sk__agent-chip']"
+                        >{{ agentMeta(s).label }}</span
+                      >
                     </div>
-                    <div class="rd">{{ s.description || '' }}</div>
+                    <div class="rd sk__summary" :title="skillSummary(s)">{{ skillSummary(s) }}</div>
                     <div class="rf">
                       <span class="s">{{ tt2('action.view') }} →</span>
                     </div>
@@ -210,31 +235,32 @@
                   <!-- 普通技能卡 -->
                   <template v-else>
                     <div class="rh">
-                      <span style="font-size: 14px">{{ agentMeta(s).icon || '' }}</span>
-                      <span :class="['tg', tagClass(s)]" style="font-size: 9px">{{
-                        agentMeta(s).label
-                      }}</span>
-                      <span v-if="s.category_name" class="tg sk__cat-tag">{{
-                        s.category_name
-                      }}</span>
-                      <span class="rn" :title="s.display_name || s.name">{{
-                        s.display_name || s.name
-                      }}</span>
-                      <span v-if="s.is_featured && s.scope !== 'user'" class="tg sk__feat-tag"
-                        >🌟</span
+                      <div class="sk__title-wrap">
+                        <span class="rn" :title="titleOf(s)">{{ titleOf(s) }}</span>
+                        <span v-if="s.scope === 'official'" class="sk__official">官网</span>
+                      </div>
+                      <span
+                        v-if="agentMeta(s).label"
+                        :class="['tg', tagClass(s), 'sk__agent-chip']"
+                        >{{ agentMeta(s).label }}</span
                       >
                     </div>
-                    <div class="rd" style="margin-bottom: 8px" :title="s.description || ''">
-                      {{ s.description || '' }}
-                    </div>
-                    <div v-if="catPath(s)" class="sk__catpath">{{ catPath(s) }}</div>
-                    <div v-if="(s.tags || []).length" class="sk__chips">
-                      <span v-for="(t, i) in (s.tags || []).slice(0, 3)" :key="'st' + i" class="sk__chip">{{
-                        t.name
+                    <div class="rd sk__summary" :title="skillSummary(s)">{{ skillSummary(s) }}</div>
+                    <div class="sk__meta-row">
+                      <div class="sk__user-tags">
+                        <span
+                          v-for="(t, i) in cardTags(s).slice(0, 3)"
+                          :key="'st' + i"
+                          class="sk__chip"
+                          >{{ t.name }}</span
+                        >
+                        <span v-if="extraTags(s) > 0" class="sk__chip sk__chip-more"
+                          >+{{ extraTags(s) }}</span
+                        >
+                      </div>
+                      <span v-if="categoryLabel(s)" class="tg sk__cat-tag">{{
+                        categoryLabel(s)
                       }}</span>
-                    </div>
-                    <div v-if="scenesShort(s)" class="ro sk__scenes" :title="scenesFull(s)">
-                      {{ tt('info_scenes') }}：{{ scenesShort(s) }}
                     </div>
                     <div v-if="sceneCount(s) > 0 || (s.repo_count || 0) > 0" class="ro">
                       {{ sceneCount(s) }} {{ td('scenes_in_use') }}，{{ s.repo_count || 0 }}
@@ -253,6 +279,14 @@
                           @click.stop="openDetail(s.id)"
                         >
                           {{ tt2('action.view') }}
+                        </button>
+                        <!-- C8：仓库/个人技能免传包编辑元信息 -->
+                        <button
+                          v-if="s.scope !== 'official'"
+                          class="bt bt-o bt-s"
+                          @click.stop="askEditMeta(s)"
+                        >
+                          {{ tt2('action.edit_meta') }}
                         </button>
                         <!-- Issue #561：直接覆盖更新（免删了重传；ID/场景引用/点赞保留） -->
                         <button
@@ -605,20 +639,35 @@
         </div>
         <div class="srow sk__srow">
           <label>{{ tt('upload_tags') }}</label>
-          <input v-model="uploadForm.tags" class="sk__f1" :placeholder="tt('upload_tags_ph')" />
+          <div class="sk__f1 sk__chip-input">
+            <span v-for="(t, i) in uploadForm.tagsArr" :key="'ut' + i" class="sk__chip sk__chip--edit">
+              {{ t.name }}<a class="sk__chip-x" @click="removeTag(uploadForm, i)">×</a>
+            </span>
+            <input
+              v-if="uploadForm.tagsArr.length < SKILL_MAX_TAGS"
+              v-model="uploadForm.tagDraft"
+              class="sk__chip-entry"
+              :placeholder="tt('upload_tags_ph')"
+              @keydown="onTagKeydown($event, uploadForm)"
+              @blur="commitTag(uploadForm)"
+            />
+          </div>
         </div>
         <div class="srow sk__srow">
           <label>{{ tt('upload_summary') }}</label>
-          <input v-model="uploadForm.summary" class="sk__f1" :placeholder="tt('upload_summary_ph')" />
+          <div class="sk__f1 sk__summary-fld">
+            <input
+              v-model="uploadForm.summary"
+              :maxlength="SKILL_SUMMARY_MAX"
+              class="sk__f1"
+              :placeholder="tt('upload_summary_ph')"
+            />
+            <span class="sk__counter">{{ (uploadForm.summary || '').length }}/50</span>
+          </div>
         </div>
         <div class="sk__file-fld">
           <label>{{ tt2('upload.file_label') }}</label>
-          <input
-            type="file"
-            accept=".zip"
-            class="sk__file"
-            @change="uploadForm.file = $event.target.files[0] || null"
-          />
+          <input type="file" accept=".zip" class="sk__file" @change="onUploadFileChange($event)" />
         </div>
         <div class="sk__fmt-hint">
           {{ tt2('upload.format_req') }}
@@ -650,8 +699,32 @@
       <div class="sk__form">
         <div class="sk__fmt-hint">{{ tt2('update.tip') }}</div>
         <div class="srow sk__srow">
+          <label>{{ tt('upload_tags') }}</label>
+          <div class="sk__f1 sk__chip-input">
+            <span v-for="(t, i) in updateCtx.tagsArr" :key="'upt' + i" class="sk__chip sk__chip--edit">
+              {{ t.name }}<a class="sk__chip-x" @click="removeTag(updateCtx, i)">×</a>
+            </span>
+            <input
+              v-if="updateCtx.tagsArr.length < SKILL_MAX_TAGS"
+              v-model="updateCtx.tagDraft"
+              class="sk__chip-entry"
+              :placeholder="tt('upload_tags_ph')"
+              @keydown="onTagKeydown($event, updateCtx)"
+              @blur="commitTag(updateCtx)"
+            />
+          </div>
+        </div>
+        <div class="srow sk__srow">
           <label>{{ tt('upload_summary') }}</label>
-          <input v-model="updateCtx.summary" class="sk__f1" :placeholder="tt('upload_summary_ph')" />
+          <div class="sk__f1 sk__summary-fld">
+            <input
+              v-model="updateCtx.summary"
+              :maxlength="SKILL_SUMMARY_MAX"
+              class="sk__f1"
+              :placeholder="tt('upload_summary_ph')"
+            />
+            <span class="sk__counter">{{ (updateCtx.summary || '').length }}/50</span>
+          </div>
         </div>
         <div class="srow sk__srow">
           <label>{{ tt('change_note') }}</label>
@@ -678,6 +751,68 @@
         <AGButton size="sm" :disabled="updateCtx.busy" @click="doUpdate">
           {{ updateCtx.busy ? tt2('upload.uploading') : tt2('action.confirm_update') }}
         </AGButton>
+      </template>
+    </AGModal>
+
+    <!-- ═══ Issue #3202：免传包编辑元信息（仓库/个人技能） ═══ -->
+    <AGModal
+      :open="metaCtx.open"
+      :title="tt('edit_meta') + (metaCtx.name ? ' — ' + metaCtx.name : '')"
+      @close="metaCtx.open = false"
+    >
+      <div class="sk__form">
+        <div class="srow sk__srow">
+          <label>{{ tt2('upload.agent_type') }}</label>
+          <AGSelect v-model="metaCtx.agentType" :options="agentOpts" class="sk__f1" />
+        </div>
+        <div class="srow sk__srow">
+          <label>{{ tt('upload_cat_l1') }}</label>
+          <AGSelect v-model="metaCtx.catL1" :options="l1Opts" class="sk__f1" />
+        </div>
+        <div class="srow sk__srow">
+          <label>{{ tt('upload_cat_l2') }}</label>
+          <AGSelect v-model="metaCtx.catL2" :options="metaL2Opts" class="sk__f1" />
+        </div>
+        <div class="srow sk__srow">
+          <label>{{ tt('upload_tags') }}</label>
+          <div class="sk__f1 sk__chip-input">
+            <span v-for="(t, i) in metaCtx.tagsArr" :key="'mt' + i" class="sk__chip sk__chip--edit">
+              {{ t.name }}<a class="sk__chip-x" @click="removeTag(metaCtx, i)">×</a>
+            </span>
+            <input
+              v-if="metaCtx.tagsArr.length < SKILL_MAX_TAGS"
+              v-model="metaCtx.tagDraft"
+              class="sk__chip-entry"
+              :placeholder="tt('upload_tags_ph')"
+              @keydown="onTagKeydown($event, metaCtx)"
+              @blur="commitTag(metaCtx)"
+            />
+          </div>
+        </div>
+        <div class="srow sk__srow">
+          <label>{{ tt('upload_summary') }}</label>
+          <div class="sk__f1 sk__summary-fld">
+            <input
+              v-model="metaCtx.summary"
+              :maxlength="SKILL_SUMMARY_MAX"
+              class="sk__f1"
+              :placeholder="tt('upload_summary_ph')"
+            />
+            <span class="sk__counter">{{ (metaCtx.summary || '').length }}/50</span>
+          </div>
+        </div>
+        <div class="sk__file-fld">
+          <label>{{ tt('field_description') }}</label>
+          <textarea v-model="metaCtx.description" class="sk__textarea" rows="4"></textarea>
+        </div>
+      </div>
+      <template #footer>
+        <AGButton size="sm" variant="plain" @click="metaCtx.open = false">{{
+          tt2('action.cancel')
+        }}</AGButton>
+        <AGButton size="sm" :disabled="metaCtx.busy" @click="doEditMeta">{{
+          metaCtx.busy ? tt2('action.saving') : tt2('action.save')
+        }}</AGButton>
       </template>
     </AGModal>
 
@@ -776,10 +911,19 @@ const KEY_DEFAULTS = {
   filter_all_l2: '全部二级分类',
   upload_cat_l1: '一级分类',
   upload_cat_l2: '二级分类',
-  upload_tags: '标签（≤3，逗号分隔）',
-  upload_tags_ph: '如 AI,自动化',
-  upload_summary: '摘要（≤50 字）',
+  upload_tags: '标签（最多 5 个，每个 ≤12 字）',
+  upload_tags_ph: '输入后回车或逗号确认',
+  upload_summary: '摘要（必填，≤50 字）',
   upload_summary_ph: '一句话说明用途，不要使用 → 或 -> 流程链',
+  edit_meta: '编辑信息',
+  field_description: '概述',
+  tag_limit: '标签最多 5 个',
+  tag_too_long: '单个标签最多 12 个字符',
+  tag_duplicate: '标签不能重复',
+  tag_system_conflict: '标签不能与 Agent 类型或分类名重名',
+  summary_required: '摘要不能为空',
+  save: '保存',
+  saving: '保存中...',
   change_note_ph: '本次更新说明（可选）',
   sort_latest: '最新',
   sort_hot: '最热',
@@ -858,6 +1002,9 @@ const KEY2_DEFAULTS = {
   'upload.uploading': '上传中',
   // Issue #561：覆盖更新
   'action.update_skill': '上传更新',
+  'action.edit_meta': '编辑信息',
+  'action.save': '保存',
+  'action.saving': '保存中...',
   'action.confirm_update': '确认覆盖更新',
   'update.title': '上传更新技能',
   'update.tip':
@@ -910,6 +1057,10 @@ const FEAT_GRADIENT = {
   chat: { g1: '#45B8B8', g2: '#0A7A7A' },
 }
 const agentList = ['vod', 'issue', 'coding', 'qa', 'sre', 'chat', 'auto']
+//: 技能标签上限（Issue #3202；场景市场仍为 3）
+const SKILL_MAX_TAGS = 5
+const SKILL_MAX_TAG_LEN = 12
+const SKILL_SUMMARY_MAX = 50
 function agentMeta(s) {
   return AGENT_META[s.agent_type] || {}
 }
@@ -954,16 +1105,159 @@ function scenesArrOf(s) {
     return sc.display_name || sc.name || sc
   })
 }
-function scenesShort(s) {
-  const a = scenesArrOf(s)
-  if (!a.length) return ''
-  return a.length <= 2 ? a.join(' · ') : a.slice(0, 2).join(' · ') + '(+' + (a.length - 2) + ')'
-}
-function scenesFull(s) {
-  return scenesArrOf(s).join(' · ')
-}
 function sceneCount(s) {
   return s.scene_count || scenesArrOf(s).length || 0
+}
+function titleOf(s) {
+  return (s && (s.display_name || s.name)) || ''
+}
+function skillSummary(s) {
+  var t = ((s && s.summary) || '').trim()
+  if (!t) t = ((s && s.description) || '').trim()
+  return t
+}
+function cardTags(s) {
+  return (s && s.tags) || []
+}
+function extraTags(s) {
+  return Math.max(0, cardTags(s).length - 3)
+}
+function categoryLabel(s) {
+  return (s && (s.category_name || catPath(s))) || ''
+}
+
+// ── C1/C7：标签 chips 输入（≤5 个、每个 ≤12 字、去重、禁系统标签重名）──
+function systemTagNames() {
+  var names = []
+  Object.keys(AGENT_META).forEach(function (k) {
+    names.push(k)
+    if (AGENT_META[k].label) names.push(AGENT_META[k].label)
+  })
+  ;(categories.value || []).forEach(function (c) {
+    if (c.name) names.push(c.name)
+  })
+  ;(catTree.value || []).forEach(function (c) {
+    if (c.name) names.push(c.name)
+    ;(c.children || []).forEach(function (x) {
+      if (x.name) names.push(x.name)
+    })
+  })
+  return names.map(function (n) {
+    return String(n).trim().toLowerCase()
+  })
+}
+function isSystemTag(name) {
+  return systemTagNames().indexOf(String(name || '').trim().toLowerCase()) >= 0
+}
+function tagToast(key) {
+  G.app.showToast(tt(key))
+}
+function addTagTo(form) {
+  var draft = String((form && form.tagDraft) || '').trim()
+  if (!draft) return
+  form.tagDraft = ''
+  draft.split(/[,，]/).forEach(function (piece) {
+    var name = piece.trim()
+    if (!name) return
+    if (Array.from(name).length > SKILL_MAX_TAG_LEN) {
+      tagToast('tag_too_long')
+      return
+    }
+    if ((form.tagsArr || []).some(function (t) { return t.name.toLowerCase() === name.toLowerCase() })) {
+      tagToast('tag_duplicate')
+      return
+    }
+    if (isSystemTag(name)) {
+      tagToast('tag_system_conflict')
+      return
+    }
+    if (form.tagsArr.length >= SKILL_MAX_TAGS) {
+      tagToast('tag_limit')
+      return
+    }
+    form.tagsArr.push({ name: name, source: 'manual' })
+  })
+}
+function commitTag(form) {
+  addTagTo(form)
+}
+function onTagKeydown(e, form) {
+  if (e.key === 'Enter' || e.key === ',' || e.key === '，') {
+    e.preventDefault()
+    addTagTo(form)
+  }
+}
+function removeTag(form, idx) {
+  form.tagsArr.splice(idx, 1)
+}
+// C7：从技能包 SKILL.md frontmatter description 首句预填摘要（用户可改）
+function firstSentenceOfSkillMd(text) {
+  var raw = String(text || '').replace(/\r/g, '')
+  var m = raw.match(/^---\s*\n([\s\S]*?)\n---/)
+  var desc = ''
+  if (m) {
+    m[1].split('\n').forEach(function (line) {
+      var i = line.indexOf(':')
+      if (i <= 0) return
+      var k = line.slice(0, i).trim()
+      var v = line.slice(i + 1).trim().replace(/^["']|["']$/g, '')
+      if (k === 'description') desc = v
+    })
+  }
+  if (!desc) desc = raw.replace(/^---[\s\S]*?---/, '').trim()
+  var head = desc.split(/[。！？!?\n]/)[0].trim()
+  return Array.from(head).slice(0, SKILL_SUMMARY_MAX).join('')
+}
+function readSkillMdFromZip(file) {
+  return file.arrayBuffer().then(function (ab) {
+    var buf = new Uint8Array(ab)
+    var view = new DataView(buf.buffer)
+    var eocd = -1
+    for (var i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocd = i
+        break
+      }
+    }
+    if (eocd < 0) return ''
+    var count = view.getUint16(eocd + 10, true)
+    var p = view.getUint32(eocd + 16, true)
+    for (var n = 0; n < count; n++) {
+      if (view.getUint32(p, true) !== 0x02014b50) break
+      var method = view.getUint16(p + 10, true)
+      var csize = view.getUint32(p + 20, true)
+      var nameLen = view.getUint16(p + 28, true)
+      var extraLen = view.getUint16(p + 30, true)
+      var commentLen = view.getUint16(p + 32, true)
+      var localOffset = view.getUint32(p + 42, true)
+      var name = new TextDecoder().decode(buf.subarray(p + 46, p + 46 + nameLen))
+      p += 46 + nameLen + extraLen + commentLen
+      if (!/(^|\/)SKILL\.md$/i.test(name)) continue
+      if (view.getUint32(localOffset, true) !== 0x04034b50) return ''
+      var lNameLen = view.getUint16(localOffset + 26, true)
+      var lExtraLen = view.getUint16(localOffset + 28, true)
+      var start = localOffset + 30 + lNameLen + lExtraLen
+      var data = buf.subarray(start, start + csize)
+      if (method === 0) return new TextDecoder().decode(data)
+      if (method === 8 && typeof G.window.DecompressionStream !== 'undefined') {
+        var stream = new Blob([data]).stream().pipeThrough(new G.window.DecompressionStream('deflate-raw'))
+        return new G.window.Response(stream).text()
+      }
+      return ''
+    }
+    return ''
+  })
+}
+function onUploadFileChange(e) {
+  uploadForm.file = (e.target.files && e.target.files[0]) || null
+  if (!uploadForm.file || uploadForm.summary) return
+  readSkillMdFromZip(uploadForm.file)
+    .then(function (text) {
+      if (!text || uploadForm.summary) return
+      var s = firstSentenceOfSkillMd(text)
+      if (s) uploadForm.summary = s
+    })
+    .catch(function () {})
 }
 
 // ── 列表状态 ──
@@ -1624,7 +1918,16 @@ const showUpload = ref(false)
 const uploading = ref(false)
 const uploadDone = ref(false)
 const uploadPct = ref(0)
-const uploadForm = reactive({ agentType: '', categoryId: '0', catL1: '0', catL2: '0', tags: '', summary: '', file: null })
+const uploadForm = reactive({
+  agentType: '',
+  categoryId: '0',
+  catL1: '0',
+  catL2: '0',
+  tagsArr: [],
+  tagDraft: '',
+  summary: '',
+  file: null,
+})
 // 一级分类变更时重置二级，避免提交旧一级下的二级形成跨父级组合
 watch(
   () => uploadForm.catL1,
@@ -1659,6 +1962,11 @@ function doUpload() {
     G.app.showToast('请选择 Agent 类型')
     return
   }
+  if (!String(uploadForm.summary || '').trim()) {
+    tagToast('summary_required')
+    return
+  }
+  commitTag(uploadForm)
   var fd = new FormData()
   fd.append('file', uploadForm.file)
   fd.append('scope', tab.value)
@@ -1666,7 +1974,7 @@ function doUpload() {
   fd.append('category_id', String(parseInt(uploadForm.categoryId, 10)))
   fd.append('cat_l1_id', String(parseInt(uploadForm.catL1, 10) || 0))
   fd.append('cat_l2_id', String(parseInt(uploadForm.catL2, 10) || 0))
-  fd.append('tags', uploadForm.tags || '')
+  fd.append('tags', JSON.stringify(uploadForm.tagsArr || []))
   fd.append('summary', uploadForm.summary || '')
   if (tab.value === 'repo' && currentRepo.value) fd.append('repo', currentRepo.value)
   uploading.value = true
@@ -1697,6 +2005,8 @@ const updateCtx = reactive({
   id: 0,
   name: '',
   file: null,
+  tagsArr: [],
+  tagDraft: '',
   summary: '',
   changeNote: '',
   busy: false,
@@ -1708,7 +2018,11 @@ function askUpdate(s) {
   updateCtx.id = s && s.id
   updateCtx.name = (s && (s.display_name || s.name)) || ''
   updateCtx.file = null
-  updateCtx.summary = ''
+  updateCtx.tagsArr = cardTags(s).map(function (t) {
+    return { name: t.name, source: t.source || 'manual' }
+  })
+  updateCtx.tagDraft = ''
+  updateCtx.summary = (s && s.summary) || ''
   updateCtx.changeNote = ''
   updateCtx.busy = false
   updateCtx.pct = 0
@@ -1719,8 +2033,14 @@ function doUpdate() {
     G.app.showToast(tt2('toast.select_zip'))
     return
   }
+  if (!String(updateCtx.summary || '').trim()) {
+    tagToast('summary_required')
+    return
+  }
+  commitTag(updateCtx)
   const fd = new FormData()
   fd.append('file', updateCtx.file)
+  fd.append('tags', JSON.stringify(updateCtx.tagsArr || []))
   fd.append('summary', updateCtx.summary || '')
   fd.append('change_note', updateCtx.changeNote || '')
   updateCtx.busy = true
@@ -1742,6 +2062,84 @@ function doUpdate() {
       let msg = (e && e.message) || tt2('toast.update_failed')
       if (e && e.errors && Array.isArray(e.errors) && e.errors.length > 0) msg = e.errors.join('；')
       G.app.showToast(msg)
+    })
+}
+
+// ── C8：免传包编辑元信息（PATCH /api/skills/{id}） ──
+const metaCtx = reactive({
+  open: false,
+  id: 0,
+  name: '',
+  agentType: '',
+  catL1: '0',
+  catL2: '0',
+  tagsArr: [],
+  tagDraft: '',
+  summary: '',
+  description: '',
+  busy: false,
+})
+const metaL2Opts = computed(function () {
+  var hit = catTree.value.filter(function (c) {
+    return String(c.id) === String(metaCtx.catL1)
+  })[0]
+  var opts = [{ value: '0', label: '未分类' }]
+  ;((hit && hit.children) || []).forEach(function (c) {
+    opts.push({ value: String(c.id), label: (c.icon || '') + ' ' + c.name })
+  })
+  return opts
+})
+watch(
+  () => metaCtx.catL1,
+  function (next, prev) {
+    if (next !== prev) metaCtx.catL2 = '0'
+  }
+)
+function askEditMeta(s) {
+  metaCtx.open = true
+  metaCtx.id = s && s.id
+  metaCtx.name = (s && (s.display_name || s.name)) || ''
+  metaCtx.agentType = (s && s.agent_type) || ''
+  metaCtx.catL1 = String((s && s.cat_l1_id) || 0)
+  metaCtx.catL2 = String((s && s.cat_l2_id) || 0)
+  metaCtx.tagsArr = cardTags(s).map(function (t) {
+    return { name: t.name, source: t.source || 'manual' }
+  })
+  metaCtx.tagDraft = ''
+  metaCtx.summary = (s && s.summary) || ''
+  metaCtx.description = (s && s.description) || ''
+  metaCtx.busy = false
+}
+function doEditMeta() {
+  if (!String(metaCtx.summary || '').trim()) {
+    tagToast('summary_required')
+    return
+  }
+  commitTag(metaCtx)
+  var l1 = parseInt(metaCtx.catL1, 10) || 0
+  var l2 = parseInt(metaCtx.catL2, 10) || 0
+  var payload = {
+    agent_type: metaCtx.agentType,
+    tags: (metaCtx.tagsArr || []).map(function (t) {
+      return { name: t.name, source: 'manual' }
+    }),
+    summary: metaCtx.summary,
+    description: metaCtx.description,
+    cat_l1_id: l1,
+    cat_l2_id: l2,
+  }
+  if (!l1 && !l2) payload.clear_category = true
+  metaCtx.busy = true
+  G.API.patch('/skills/' + encodeURIComponent(metaCtx.id), payload)
+    .then(function (r) {
+      metaCtx.busy = false
+      metaCtx.open = false
+      G.app.showToast((r && r.message) || tt('save'))
+      loadAll()
+    })
+    .catch(function (e) {
+      metaCtx.busy = false
+      G.app.showToast((e && e.message) || '保存失败')
     })
 }
 
@@ -2013,21 +2411,197 @@ onMounted(function () {
 }
 .sk__chip {
   font-size: 10px;
-  line-height: 1;
-  padding: 2px 6px;
+  line-height: 1.3;
+  padding: 2px 7px;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--a) 12%, transparent);
-  color: var(--a);
+  background: var(--bg);
+  border: 1px solid var(--b);
+  color: var(--t2);
+}
+.sk__chip-more {
+  font-weight: 600;
 }
 .sk__cat-tag {
-  font-size: 9px;
+  font-size: 10px;
   background: rgba(49, 104, 224, 0.08);
   color: var(--a);
+  flex-shrink: 0;
 }
 .sk__feat-tag {
-  font-size: 9px;
+  font-size: 10px;
   background: rgba(212, 156, 15, 0.12);
   color: var(--y);
+}
+
+/* Issue #3202：卡片布局/标签分层（C2–C6） */
+.sk .rc {
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.sk .rc:hover {
+  transform: translateY(-2px);
+}
+.sk__title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.sk .rc .rh .sk__title-wrap .rn {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.sk__official {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: #8a6d1f;
+  background: #fdf3d6;
+  border: 1px solid #f0dc9a;
+  white-space: nowrap;
+}
+.sk__agent-chip {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.sk .rc .rd.sk__summary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  line-height: 1.5;
+  min-height: calc(1.5em * 3);
+  margin-bottom: 6px;
+}
+.sk__meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0;
+  min-height: 20px;
+}
+.sk__user-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.sk__chip-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--b);
+  border-radius: 6px;
+  background: var(--bg);
+  min-height: 34px;
+}
+.sk__chip-entry {
+  flex: 1;
+  min-width: 120px;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 12px;
+  color: var(--t);
+}
+.sk__chip--edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(49, 104, 224, 0.1);
+  border: none;
+  color: var(--a);
+}
+.sk__chip-x {
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--a);
+  opacity: 0.7;
+}
+.sk__chip-x:hover {
+  opacity: 1;
+}
+.sk__summary-fld {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sk__counter {
+  flex-shrink: 0;
+  min-width: 36px;
+  text-align: right;
+  font-size: 10px;
+  color: var(--t3);
+}
+.sk__textarea {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--b);
+  border-radius: 6px;
+  font-size: 12px;
+  background: var(--bg);
+  outline: none;
+  color: var(--t);
+  font-family: inherit;
+  resize: vertical;
+}
+.sk__textarea:focus {
+  border-color: var(--a);
+}
+.sk__title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+.feat-card .feat-name {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 15px;
+  line-height: 1.35;
+}
+.feat-card .feat-desc {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  line-height: 1.5;
+  margin-top: 6px;
+}
+.sk__agent-chip--feat {
+  font-size: 10px;
+  margin-left: 0;
+}
+.sk__meta-row--feat {
+  align-self: stretch;
+  margin-top: 8px;
+}
+.sk__chip--feat {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.3);
+  color: #fff;
+}
+.sk__cat-tag--feat {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
 }
 .sk__scenes {
   color: var(--a);

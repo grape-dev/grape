@@ -10562,6 +10562,26 @@
             }
           },
           {
+            "name": "cat_l1_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Cat L1 Id"
+            }
+          },
+          {
+            "name": "cat_l2_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Cat L2 Id"
+            }
+          },
+          {
             "name": "q",
             "in": "query",
             "required": false,
@@ -10871,6 +10891,70 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/skills/tag-suggest": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Suggest skill tags",
+        "description": "Rule-based tag candidates (max 3) for skill name/description.",
+        "operationId": "skills_tag_suggest",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "description",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Description"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/skills/search": {
       "get": {
         "tags": [
@@ -11122,6 +11206,301 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/skills/by-id/{skill_id}/versions": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Skill version history",
+        "description": "Returns the skill version history (latest first) for the detail page.",
+        "operationId": "skills_versions",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/files": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Skill package file tree",
+        "description": "Returns the skill package file list with sizes for the detail page resources tab.",
+        "operationId": "skills_files",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/related": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Related skills",
+        "description": "Related skills: shared tags first, falls back to same agent_type.",
+        "operationId": "skills_related",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/skills/by-id/{skill_id}/comments": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "List skill comments",
+        "description": "Paged user comments for a skill (newest first).",
+        "operationId": "skills_comments_list",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      },
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Post skill comment",
+        "description": "Posts a plain-text user comment (login required, max 1000 chars).",
+        "operationId": "skills_comments_create",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/skills/upload": {
       "post": {
         "tags": [
@@ -11199,6 +11578,71 @@
             "multipart/form-data": {
               "schema": {
                 "$ref": "#/components/schemas/Body_skills_update"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/skills/{skill_id}": {
+      "patch": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Update skill metadata without re-uploading the package",
+        "description": "Issue #3202: updates tags/summary/description/category/agent_type in place. official skills are read-only (403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.",
+        "operationId": "skills_patch_meta",
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
               }
             }
           }
@@ -12370,6 +12814,26 @@
               "default": 20,
               "title": "Page Size"
             }
+          },
+          {
+            "name": "cat_l1_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Cat L1 Id"
+            }
+          },
+          {
+            "name": "cat_l2_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Cat L2 Id"
+            }
           }
         ],
         "responses": {
@@ -12434,6 +12898,70 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/scenes/tag-suggest": {
+      "get": {
+        "tags": [
+          "scenes"
+        ],
+        "summary": "Suggest scene tags",
+        "description": "Rule-based tag candidates (max 3) for scene name/description.",
+        "operationId": "scenes_tag_suggest",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "description",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Description"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -14147,6 +14675,60 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/categories/tree": {
+      "get": {
+        "tags": [
+          "categories"
+        ],
+        "summary": "Category tree",
+        "description": "Unified one/two-level category dictionary (Issue #2761); scope=scene|skill filters applies_to. Only is_active=1.",
+        "operationId": "categories_tree",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Scope"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/project-templates": {
       "get": {
         "tags": [
@@ -15031,6 +15613,69 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/issues/{issue_id}/terminal-disposition": {
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Dispose a folded issue whose carrier PR is terminal",
+        "description": "Issue #2816: manual disposition for a folded issue whose carrier PR is marked needs-human-terminal (CONFLICT_SCOPE=intersect). Actions: new_carrier (carrier_pr required; resumes processing/coding and force-dispatches), reassign (target_agent required; force-dispatches to that agent), close (converges the issue via confirm-done). Bypasses the terminal dispatch guard only for this manual action.",
+        "operationId": "issues_terminal_disposition",
+        "parameters": [
+          {
+            "name": "issue_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Issue Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueTerminalDispositionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/issues/{issue_id}/clarifications": {
       "get": {
         "tags": [
@@ -15216,7 +15861,7 @@
           "issues"
         ],
         "summary": "Agent decides review passed",
-        "description": "Agent 判定用户已通过审核：pending_review → processing（继续）；target=done → completed+stage=done（合入/收尾）。响应回读 issue 表真实 status 并返回 changed(bool)；未命中附 reason（already_target/terminal/not_pending_review），不再回显名义 status 冒充成功。Session-only (tk_)，repo 匹配，devops agent。",
+        "description": "Agent 判定用户已通过审核，只能推进、不能终态：target=processing → pending_review→processing（继续），末节点归一 pending_review；target=done 一律 400（需求完成只能由人工 confirm-done）。响应回读 issue 表真实 status 并返回 changed(bool)；未命中附 reason（already_target/terminal/not_pending_review/agent_finalize_forbidden）。Session-only (tk_)，repo 匹配，devops agent。",
         "operationId": "issues_review-pass",
         "parameters": [
           {
@@ -23796,6 +24441,36 @@
             "type": "string",
             "title": "Category Id",
             "default": ""
+          },
+          "cat_l1_id": {
+            "type": "integer",
+            "title": "Cat L1 Id",
+            "default": 0
+          },
+          "cat_l2_id": {
+            "type": "integer",
+            "title": "Cat L2 Id",
+            "default": 0
+          },
+          "tags": {
+            "type": "string",
+            "title": "Tags",
+            "default": ""
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "change_note": {
+            "type": "string",
+            "title": "Change Note",
+            "default": ""
+          },
+          "clear_category": {
+            "type": "boolean",
+            "title": "Clear Category",
+            "default": false
           }
         },
         "type": "object",
@@ -23830,6 +24505,36 @@
             "type": "integer",
             "title": "Category Id",
             "default": 0
+          },
+          "cat_l1_id": {
+            "type": "integer",
+            "title": "Cat L1 Id",
+            "default": 0
+          },
+          "cat_l2_id": {
+            "type": "integer",
+            "title": "Cat L2 Id",
+            "default": 0
+          },
+          "tags": {
+            "type": "string",
+            "title": "Tags",
+            "default": ""
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary",
+            "default": ""
+          },
+          "change_note": {
+            "type": "string",
+            "title": "Change Note",
+            "default": ""
+          },
+          "clear_category": {
+            "type": "boolean",
+            "title": "Clear Category",
+            "default": false
           }
         },
         "type": "object",
@@ -24263,6 +24968,28 @@
             "type": "integer",
             "title": "Category Id",
             "default": 1
+          },
+          "cat_l1_id": {
+            "type": "integer",
+            "title": "Cat L1 Id",
+            "default": 0
+          },
+          "cat_l2_id": {
+            "type": "integer",
+            "title": "Cat L2 Id",
+            "default": 0
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
           },
           "recommended_template": {
             "type": "string",
@@ -25394,6 +26121,32 @@
         },
         "type": "object",
         "title": "IssueHandoffBody"
+      },
+      "IssueTerminalDispositionBody": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "title": "Action",
+            "default": ""
+          },
+          "carrier_pr": {
+            "type": "integer",
+            "title": "Carrier Pr",
+            "default": 0
+          },
+          "target_agent": {
+            "type": "string",
+            "title": "Target Agent",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "IssueTerminalDispositionBody"
       },
       "IssueUpdateBody": {
         "properties": {
@@ -27278,6 +28031,33 @@
             "type": "integer",
             "title": "Category Id",
             "default": 0
+          },
+          "cat_l1_id": {
+            "type": "integer",
+            "title": "Cat L1 Id",
+            "default": 0
+          },
+          "cat_l2_id": {
+            "type": "integer",
+            "title": "Cat L2 Id",
+            "default": 0
+          },
+          "clear_category": {
+            "type": "boolean",
+            "title": "Clear Category",
+            "default": false
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
           },
           "recommended_template": {
             "type": "string",

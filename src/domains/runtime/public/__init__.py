@@ -1580,7 +1580,7 @@ def read_all(query: str, params: tuple = ()) -> list[Any]:
 # N1 列表返回列：不含 file_path（OBS 明文地址）与 owner 敏感列
 _SKILL_LIST_COLS = ("id", "skill_name", "display_name", "description", "agent_type",
                     "scope", "owner_id", "category_id", "is_active", "is_featured",
-                    "like_count", "updated_at", "org_id")
+                    "like_count", "updated_at", "org_id", "summary")
 
 
 def list_skills(repo_key: str = "", q: str = "", limit: int = 50, offset: int = 0,
@@ -2024,7 +2024,7 @@ def list_featured_skills(ordered_ids: list[int] | None = None, limit: int = 5) -
     """
     cols = ("id", "skill_name", "display_name", "description", "agent_type",
             "is_featured", "like_count", "category_id",
-            "cat_l1_id", "cat_l2_id", "tags")
+            "cat_l1_id", "cat_l2_id", "tags", "summary")
     sel = f"SELECT {', '.join(cols)} FROM skill WHERE is_active=1 AND is_featured=1 AND scope='official'"
     out: list[dict[str, Any]] = []
     with db_registry.cursor("runtime") as c:
@@ -2053,7 +2053,8 @@ def _skill_row(r: dict[str, Any]) -> dict[str, Any]:
             "category_id": r["category_id"] or 0,
             "cat_l1_id": r.get("cat_l1_id") or 0,
             "cat_l2_id": r.get("cat_l2_id") or 0,
-            "tags": r.get("tags") or ""}
+            "tags": r.get("tags") or "",
+            "summary": r.get("summary") or ""}
 
 
 def list_active_credential_ids() -> list[int]:
@@ -2499,6 +2500,9 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_official_all": (
         "SELECT id, skill_name, display_name, description, agent_type, category_id FROM skill "
         "WHERE is_active=1 AND scope='official' ORDER BY agent_type, skill_name"),
+    "skill_official_summary_rows": (
+        "SELECT id, skill_name, description, summary FROM skill "
+        "WHERE is_active=1 AND scope='official' ORDER BY agent_type, skill_name"),
     "skill_detail_by_id": (
         "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, "
         "is_featured, like_count, sub_scene, category_id, cat_l1_id, cat_l2_id, tags "
@@ -2776,6 +2780,10 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT summary, download_count, created_at, updated_at, created_by, updated_by "
         "FROM skill WHERE id=?"),
     "skill_summary_update": "UPDATE skill SET summary=?, updated_at=datetime('now') WHERE id=?",
+    "skill_meta_patch_update": (
+        "UPDATE skill SET description=?, agent_type=?, category_id=?, cat_l1_id=?, "
+        "cat_l2_id=?, tags=?, summary=?, updated_by=?, updated_at=datetime('now') "
+        "WHERE id=?"),
     "skill_download_inc": (
         "UPDATE skill SET download_count=COALESCE(download_count,0)+1 WHERE id=?"),
     "skill_version_latest": (
@@ -3889,7 +3897,7 @@ def merge_meta_json_any(key: str, patch: dict, base: dict | None = None,
 
 _FEATURED_SKILL_COLS = ("id", "skill_name", "display_name", "description", "agent_type",
                         "is_featured", "like_count", "category_id",
-                        "cat_l1_id", "cat_l2_id", "tags")
+                        "cat_l1_id", "cat_l2_id", "tags", "summary")
 
 
 def _featured_skill_row(r) -> dict[str, Any]:
@@ -3898,7 +3906,8 @@ def _featured_skill_row(r) -> dict[str, Any]:
             "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0,
             "cat_l1_id": (r[8] if len(r) > 8 else 0) or 0,
             "cat_l2_id": (r[9] if len(r) > 9 else 0) or 0,
-            "tags": (r[10] if len(r) > 10 else "") or ""}
+            "tags": (r[10] if len(r) > 10 else "") or "",
+            "summary": (r[11] if len(r) > 11 else "") or ""}
 
 
 def list_featured_skills_any(ordered_ids: list[int] | None = None, limit: int = 5) -> list[dict]:
@@ -5381,7 +5390,7 @@ def scene_detach_log_rebound(scene_row_id, node_tag: str, rebound_at: str) -> in
 
 _SKILL_LIST_COLS = (
     "id, skill_name, display_name, description, agent_type, scope, owner_id, "
-    "is_featured, like_count, sub_scene, category_id, cat_l1_id, cat_l2_id, tags")
+    "is_featured, like_count, sub_scene, category_id, cat_l1_id, cat_l2_id, tags, summary")
 
 
 def _skill_scope_conditions(scope=None, user_id="", repo_key="", org_id="") -> tuple[list, list]:

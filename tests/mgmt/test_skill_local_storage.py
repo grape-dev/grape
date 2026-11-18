@@ -143,7 +143,7 @@ class TestSkillStorageSelector:
 class TestUploadLocalEndToEnd:
     def test_upload_detail_download_without_obs(self):
         tok = _session_token()
-        r = _client.post("/api/skills/upload", data={"scope": "repo", "repo": "org/u-local", "agent_type": "sre"},
+        r = _client.post("/api/skills/upload", data={"scope": "repo", "repo": "org/u-local", "agent_type": "sre", "summary": "测试摘要"},
                          files={"file": ("s.zip", _make_zip(), "application/zip")},
                          headers={"Authorization": f"Bearer {tok}"})
         assert r.status_code == 200, r.text

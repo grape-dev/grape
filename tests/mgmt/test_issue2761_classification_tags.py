@@ -292,9 +292,9 @@ def test_skill_upload_tags_over_limit_rejected():
         asyncio.run(upload_skill(
             file=_upload_file(), user=USER, scope="user", repo="",
             agent_type="coding", category_id=0, cat_l1_id=0, cat_l2_id=0,
-            tags="a,b,c,d"))
+            tags="a,b,c,d,e,f"))
     assert exc.value.status_code == 400
-    assert exc.value.detail["overflow"] == ["d"]
+    assert exc.value.detail["overflow"] == ["f"]
 
 
 def test_skill_update_tags_over_limit_rejected():
@@ -315,9 +315,9 @@ def test_skill_update_tags_over_limit_rejected():
         with pytest.raises(HTTPException) as exc:
             asyncio.run(update_skill_by_id(
                 sid, file=_upload_file(), user=USER, agent_type="", category_id="",
-                cat_l1_id=0, cat_l2_id=0, tags="a,b,c,d"))
+                cat_l1_id=0, cat_l2_id=0, tags="a,b,c,d,e,f"))
         assert exc.value.status_code == 400
-        assert exc.value.detail["overflow"] == ["d"]
+        assert exc.value.detail["overflow"] == ["f"]
     finally:
         with db_lock:
             db.execute("DELETE FROM skill WHERE id=?", (sid,))
@@ -644,7 +644,7 @@ def test_skill_upload_success_keeps_category_when_only_tags(monkeypatch, cat_ids
         asyncio.run(upload_skill(
             file=_upload_file(_valid_skill_zip(name)), user=USER, scope="user", repo="",
             agent_type="coding", category_id=0, cat_l1_id=0, cat_l2_id=0,
-            tags="仅标签", clear_category=False))
+            tags="仅标签", summary="测试摘要", clear_category=False))
         l1, l2, raw_tags = _read_skill(sid)
         assert (l1, l2) == (cat_ids["l1"], cat_ids["l2"])
         assert [t["name"] for t in parse_tags(raw_tags)] == ["仅标签"]
@@ -667,14 +667,14 @@ def test_skill_upload_success_resets_child_on_l1_change_and_clear(monkeypatch, c
         asyncio.run(upload_skill(
             file=_upload_file(zip_bytes), user=USER, scope="user", repo="",
             agent_type="coding", category_id=0, cat_l1_id=other_l1["id"],
-            cat_l2_id=0, tags="", clear_category=False))
+            cat_l2_id=0, tags="", summary="测试摘要", clear_category=False))
         assert _read_skill(sid)[:2] == (other_l1["id"], 0)
 
         # 显式清空：一/二级都归零
         asyncio.run(upload_skill(
             file=_upload_file(zip_bytes), user=USER, scope="user", repo="",
             agent_type="coding", category_id=0, cat_l1_id=0, cat_l2_id=0,
-            tags="", clear_category=True))
+            tags="", summary="测试摘要", clear_category=True))
         assert _read_skill(sid)[:2] == (0, 0)
     finally:
         _delete_skill(sid)
@@ -694,7 +694,7 @@ def test_skill_update_success_keeps_category_and_resets_child(monkeypatch, cat_i
         # 仅带 tags：分类保留
         asyncio.run(update_skill_by_id(
             sid, file=_upload_file(zip_bytes), user=USER, agent_type="", category_id="",
-            cat_l1_id=0, cat_l2_id=0, tags="仅标签", clear_category=False))
+            cat_l1_id=0, cat_l2_id=0, tags="仅标签", summary="测试摘要", clear_category=False))
         l1, l2, raw_tags = _read_skill(sid)
         assert (l1, l2) == (cat_ids["l1"], cat_ids["l2"])
         assert [t["name"] for t in parse_tags(raw_tags)] == ["仅标签"]
@@ -702,19 +702,19 @@ def test_skill_update_success_keeps_category_and_resets_child(monkeypatch, cat_i
         # 换一级且未给二级：旧二级归零
         asyncio.run(update_skill_by_id(
             sid, file=_upload_file(zip_bytes), user=USER, agent_type="", category_id="",
-            cat_l1_id=other_l1["id"], cat_l2_id=0, tags="", clear_category=False))
+            cat_l1_id=other_l1["id"], cat_l2_id=0, tags="", summary="测试摘要", clear_category=False))
         assert _read_skill(sid)[:2] == (other_l1["id"], 0)
 
         # 只给二级：由 parent_id 反推一级
         asyncio.run(update_skill_by_id(
             sid, file=_upload_file(zip_bytes), user=USER, agent_type="", category_id="",
-            cat_l1_id=0, cat_l2_id=cat_ids["l2"], tags="", clear_category=False))
+            cat_l1_id=0, cat_l2_id=cat_ids["l2"], tags="", summary="测试摘要", clear_category=False))
         assert _read_skill(sid)[:2] == (cat_ids["l1"], cat_ids["l2"])
 
         # 显式清空
         asyncio.run(update_skill_by_id(
             sid, file=_upload_file(zip_bytes), user=USER, agent_type="", category_id="",
-            cat_l1_id=0, cat_l2_id=0, tags="", clear_category=True))
+            cat_l1_id=0, cat_l2_id=0, tags="", summary="测试摘要", clear_category=True))
         assert _read_skill(sid)[:2] == (0, 0)
     finally:
         _delete_skill(sid)

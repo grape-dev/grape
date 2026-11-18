@@ -237,7 +237,7 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip("obs-test-upload")
         r = client.post("/api/skills/upload",
                         files={"file": ("obs-test-upload.zip", zip_bytes)},
-                        data={"agent_type": "chat"}, headers=_headers)
+                        data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         assert r.status_code == 200, r.text
 
         # DB 记录：file_path 为固定对象键（v2.5 字段职责分离）
@@ -256,7 +256,7 @@ class TestSkillsObs:
         # 再次上传 → 同 key 原子覆盖（对象数不变，仍 1 个固定 key 对象）
         r2 = client.post("/api/skills/upload",
                          files={"file": ("obs-test-upload.zip", zip_bytes)},
-                         data={"agent_type": "chat"}, headers=_headers)
+                         data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         assert r2.status_code == 200, r2.text
         with db_lock:
             row2 = db.execute(
@@ -269,7 +269,7 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip("obs-test-script", binary_extra="scripts/libevil.so")
         r = client.post("/api/skills/upload",
                         files={"file": ("obs-test-script.zip", zip_bytes)},
-                        data={"agent_type": "chat"}, headers=_headers)
+                        data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         assert r.status_code == 400
         errs = r.json()["detail"].get("errors") or []
         assert any("可执行文件" in e for e in errs), r.text
@@ -280,7 +280,7 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip("obs-script-ok", with_script=True)
         r = client.post("/api/skills/upload",
                         files={"file": ("obs-script-ok.zip", zip_bytes)},
-                        data={"agent_type": "chat"}, headers=_headers)
+                        data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         assert r.status_code == 200, r.text
         with db_lock:
             row = db.execute(
@@ -315,7 +315,7 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip("obs-test-dl")
         r = client.post("/api/skills/upload",
                         files={"file": ("obs-test-dl.zip", zip_bytes)},
-                        data={"agent_type": "chat"}, headers=_headers)
+                        data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         assert r.status_code == 200, r.text
         sid = _skill_id("obs-test-dl")
         assert sid, "上传后应查到技能 id"
@@ -340,7 +340,7 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip("obs-test-detail")
         client.post("/api/skills/upload",
                     files={"file": ("obs-test-detail.zip", zip_bytes)},
-                    data={"agent_type": "chat"}, headers=_headers)
+                    data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         sid = _skill_id("obs-test-detail")
         assert sid, "上传后应查到技能 id"
         r = client.get(f"/api/skills/by-id/{sid}", headers=_headers)
@@ -355,7 +355,7 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip("obs-test-convert")
         client.post("/api/skills/upload",
                     files={"file": ("obs-test-convert.zip", zip_bytes)},
-                    data={"agent_type": "chat"}, headers=_headers)
+                    data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         r = client.post("/api/skills/convert",
                         json={"skill_name": "obs-test-convert", "repo": "testobs/repo1"},
                         headers=_headers)
@@ -374,10 +374,10 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip("obs-test-delete")
         client.post("/api/skills/upload",
                     files={"file": ("obs-test-delete.zip", zip_bytes)},
-                    data={"agent_type": "chat"}, headers=_headers)
+                    data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         client.post("/api/skills/upload",  # 覆盖同一固定 key
                     files={"file": ("obs-test-delete.zip", zip_bytes)},
-                    data={"agent_type": "chat"}, headers=_headers)
+                    data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         with db_lock:
             keys = db.execute(
                 "SELECT file_path FROM skill WHERE skill_name='obs-test-delete' AND scope='user'").fetchall()
@@ -416,7 +416,7 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip(skill_name, version=version)
         return client.post("/api/skills/upload",
                            files={"file": (f"{skill_name}.zip", zip_bytes)},
-                           data={"agent_type": "chat"}, headers=_headers)
+                           data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
 
     def test_upload_version_single_segment_user_scope(self, _obs_env):
         """version: 1（单段数字）user scope 上传成功（#336 核心场景）。"""
@@ -432,7 +432,7 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip("obs-test-ver-repo", version="1")
         r = client.post("/api/skills/upload",
                         files={"file": ("obs-test-ver-repo.zip", zip_bytes)},
-                        data={"agent_type": "chat", "scope": "repo", "repo": "testobs/repo1"},
+                        data={"agent_type": "chat", "scope": "repo", "repo": "testobs/repo1", "summary": "测试摘要"},
                         headers=_headers)
         assert r.status_code == 200, r.text
         with db_lock:
@@ -474,7 +474,7 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip("obs-mjs-ok", mjs_script=True)
         r = client.post("/api/skills/upload",
                         files={"file": ("obs-mjs-ok.zip", zip_bytes)},
-                        data={"agent_type": "chat"}, headers=_headers)
+                        data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         assert r.status_code == 200, r.text
         with db_lock:
             row = db.execute(
@@ -500,7 +500,7 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip(f"obs-desc-{desc_len}", description=desc)
         r = client.post("/api/skills/upload",
                         files={"file": (f"obs-desc-{desc_len}.zip", zip_bytes)},
-                        data={"agent_type": "chat"}, headers=_headers)
+                        data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         assert r.status_code == 200, f"desc_len={desc_len} 应通过: {r.text}"
 
     def test_upload_description_exceeds_limit(self, _obs_env):
@@ -509,7 +509,7 @@ class TestSkillsObs:
         zip_bytes = _make_skill_zip("obs-desc-over", description=desc)
         r = client.post("/api/skills/upload",
                         files={"file": ("obs-desc-over.zip", zip_bytes)},
-                        data={"agent_type": "chat"}, headers=_headers)
+                        data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         assert r.status_code == 400, r.text
         errs = r.json()["detail"].get("errors") or []
         assert any("2048" in e for e in errs), f"errors 应含 2048 提示: {errs}"

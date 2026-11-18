@@ -14,6 +14,8 @@ import json
 from typing import Any, Iterable
 
 MAX_TAGS = 3
+#: 单个标签名的最大字符数（技能侧强校验；场景侧保持原契约不变）
+MAX_TAG_LEN = 12
 VALID_SOURCES = ("manual", "auto")
 
 
@@ -90,6 +92,19 @@ def prepare_tags(raw: Any, limit: int = MAX_TAGS) -> tuple[list[dict[str, str]],
     kept = normalized[:limit]
     overflow = [t["name"] for t in normalized[limit:]]
     return kept, overflow
+
+
+def oversized_tags(items: Any, max_len: int = MAX_TAG_LEN) -> list[str]:
+    """返回超过 max_len 字符的标签名（保持输入顺序，供调用方 400 点名）。"""
+    out: list[str] = []
+    for item in items or []:
+        parsed = _entry(item)
+        if parsed is None:
+            continue
+        name = parsed[0]
+        if len(name) > max_len:
+            out.append(name)
+    return out
 
 
 def encode_tags(items: Any, limit: int | None = None) -> str:

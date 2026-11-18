@@ -1564,7 +1564,7 @@ class TestSkills:
     def test_skills_upload_too_big(self):
         r = client.post("/api/skills/upload",
                         files={"file": ("big.zip", b"x" * 11 * 1024 * 1024)},
-                        data={"agent_type": "vod"},
+                        data={"agent_type": "vod", "summary": "测试摘要"},
                         headers=_headers)
         assert r.status_code == 400
 
@@ -1576,7 +1576,7 @@ class TestSkills:
         tmp.close()
         with open(tmp.name, "rb") as f:
             r = client.post("/api/skills/upload", files={"file": ("empty.zip", f.read())},
-                            data={"agent_type": "vod"}, headers=_headers)
+                            data={"agent_type": "vod", "summary": "测试摘要"}, headers=_headers)
         os.unlink(tmp.name)
         # Should validate and fail (no SKILL.md)
         assert r.status_code == 400
@@ -1603,7 +1603,7 @@ class TestSkills:
         tmp.close()
         with open(tmp.name, "rb") as f:
             r = client.post("/api/skills/upload", files={"file": ("skill-x.zip", f.read())},
-                            data={"agent_type": "unknown-type"}, headers=_headers)
+                            data={"agent_type": "unknown-type", "summary": "测试摘要"}, headers=_headers)
         os.unlink(tmp.name)
         assert r.status_code == 400
 
@@ -1617,7 +1617,7 @@ class TestSkills:
         tmp.close()
         with open(tmp.name, "rb") as f:
             r = client.post("/api/skills/upload", files={"file": ("skill-uploadtest.zip", f.read())},
-                            data={"agent_type": "chat"}, headers=_headers)
+                            data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         os.unlink(tmp.name)
         assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
         # 验证 agent_type 与 description（从 SKILL.md Front Matter 解析）均已保存
@@ -1637,7 +1637,7 @@ class TestSkills:
         tmp.close()
         with open(tmp.name, "rb") as f:
             r = client.post("/api/skills/upload", files={"file": ("skill-nosections.zip", f.read())},
-                            data={"agent_type": "issue"}, headers=_headers)
+                            data={"agent_type": "issue", "summary": "测试摘要"}, headers=_headers)
         os.unlink(tmp.name)
         assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
         with db_lock:
@@ -1661,7 +1661,7 @@ class TestSkills:
         tmp.close()
         with open(tmp.name, "rb") as f:
             r = client.post("/api/skills/upload", files={"file": ("skill-bomtest.zip", f.read())},
-                            data={"agent_type": "chat"}, headers=_headers)
+                            data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         os.unlink(tmp.name)
         assert r.status_code == 200, f"Upload failed: {r.status_code}: {r.text[:200]}"
         # 验证 description 从 BOM frontmatter 正确解析
@@ -1724,7 +1724,7 @@ class TestSkills:
         tmp.close()
         with open(tmp.name, "rb") as f:
             r = client.post("/api/skills/upload", files={"file": ("skill-repoupload.zip", f.read())},
-                            data={"scope": "repo", "repo": "owner/repo-x", "agent_type": "sre"}, headers=_headers)
+                            data={"scope": "repo", "repo": "owner/repo-x", "agent_type": "sre", "summary": "测试摘要"}, headers=_headers)
         os.unlink(tmp.name)
         assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
         with db_lock:

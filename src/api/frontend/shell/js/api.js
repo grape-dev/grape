@@ -454,6 +454,9 @@ const API = (() => {
   function _put(path, body, timeout) {
     return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {method: 'PUT', headers: h, body: JSON.stringify(body)}, timeout, false, true).then(r => handleResp(r, () => _put(path, body, timeout))));
   }
+  function _patch(path, body, timeout) {
+    return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {method: 'PATCH', headers: h, body: JSON.stringify(body)}, timeout, false, true).then(r => handleResp(r, () => _patch(path, body, timeout))));
+  }
   function _del(path, timeout) {
     return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {method: 'DELETE', headers: h}, timeout, false, true).then(r => handleResp(r, () => _del(path, timeout))));
   }
@@ -512,6 +515,7 @@ const API = (() => {
     get: _get,
     post: _post,
     put: _put,
+    patch: _patch,
     del: _del,
     deleteFeedback: deleteFeedback,  // Issue #177: 删除反馈封装
     scheduleProactiveRefresh: scheduleProactiveRefresh,  // Issue #86: app.js 登录成功后调用

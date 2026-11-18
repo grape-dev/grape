@@ -5,7 +5,7 @@ import io as _io
 
 import hashlib, os, tempfile, zipfile, json, shutil, stat as _stat
 
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response, Body
 
 from pydantic import BaseModel
 
@@ -14,7 +14,14 @@ from src.domains.mgmt.user import db as user_db
 from src.domains.mgmt.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
-from src.kernel.tags import MAX_TAGS, encode_tags, parse_tags, prepare_tags, suggest_tags
+from src.kernel.tags import (MAX_TAG_LEN, encode_tags, oversized_tags,
+                             parse_tags, prepare_tags, suggest_tags)
+
+#: 技能标签上限（Issue #3202）：技能侧显式传参，kernel 默认 3 保持场景市场契约不变。
+SKILL_MAX_TAGS = 5
+#: 系统标签（agent 类型名）——用户自定义标签不得与之重名。
+_SYSTEM_AGENT_TAGS = {"vod", "issue", "coding", "qa", "sre", "chat", "auto",
+                      "VOD", "Issue", "Coding", "QA", "SRE", "Chat", "Auto"}
 
 # skill 归运行域：列表/统计/单行读取走该域原语或具名查询
 from src.domains.runtime import public as _rt_skills
@@ -174,6 +181,53 @@ def _validate_manual_summary(summary: str) -> str:
     return _clean_summary(s)
 
 
+def _require_skill_summary(summary: str) -> str:
+    """Issue #3202：摘要录入必填（≤50 字由 _clean_summary 截断保证）。"""
+    s = (summary or "").strip()
+    if not s:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "摘要不能为空（必填，≤50 字）"})
+    return _validate_manual_summary(s)
+
+
+def _system_tag_names() -> set[str]:
+    """系统标签集合：agent 类型名 + 分类名（大小写不敏感）。"""
+    names = {n.lower() for n in _SYSTEM_AGENT_TAGS}
+    try:
+        from src.domains.mgmt.user.db import list_skill_categories
+        for cat in list_skill_categories() or []:
+            name = str(cat.get("name") or "").strip()
+            if name:
+                names.add(name.lower())
+    except Exception:  # noqa: BLE001 - 分类读取失败不影响系统标签硬约束
+        pass
+    return names
+
+
+def _validate_skill_tags(raw) -> list[dict[str, str]]:
+    """技能标签写侧校验（Issue #3202）：≤5 个 / 每个 ≤12 字符 / 去重 / 禁系统标签重名。"""
+    tag_items, overflow = prepare_tags(raw, limit=SKILL_MAX_TAGS)
+    if overflow:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"标签最多 {SKILL_MAX_TAGS} 个，超出：{'、'.join(overflow)}",
+            "overflow": overflow})
+    too_long = oversized_tags(tag_items, max_len=MAX_TAG_LEN)
+    if too_long:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"单个标签最多 {MAX_TAG_LEN} 个字符，超出：{'、'.join(too_long)}",
+            "oversized": too_long})
+    system_names = _system_tag_names()
+    conflicts = [t["name"] for t in tag_items if t["name"].lower() in system_names]
+    if conflicts:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"标签不能与系统标签（Agent 类型/分类名）重名：{'、'.join(conflicts)}",
+            "conflicts": conflicts})
+    return tag_items
+
+
 def _list_zip_entries(zip_bytes: bytes) -> list[tuple[str, int]]:
     """解析 zip 文件清单（去公共顶层目录，路径相对技能根）。"""
     if not zip_bytes:
@@ -311,7 +365,7 @@ def _related_skills(skill_id: int, scope: str, agent_type: str, tags: list[str],
             continue
         if rscope == "repo" and owner not in repo_keys:
             continue
-        rtags = parse_tags(raw_tags, limit=MAX_TAGS)
+        rtags = parse_tags(raw_tags, limit=SKILL_MAX_TAGS)
         shared = len(my_tags & set(rtags))
         same_agent = 1 if atype == agent_type else 0
         if my_tags and shared == 0:
@@ -439,11 +493,13 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
             l1_id = r[11] if len(r) > 11 else 0
             l2_id = r[12] if len(r) > 12 else 0
             raw_tags = r[13] if len(r) > 13 else ""
+            raw_summary = r[14] if len(r) > 14 else ""
             skills.append({
                 "id": r[0],
                 "name": r[1],
                 "display_name": r[2] or r[1],
                 "description": r[3] or "",
+                "summary": _clean_summary(raw_summary or r[3] or ""),
                 "agent_type": r[4] or "",
                 "type": "official" if r[5] == "official" else "repo" if r[5] == "repo" else "user-uploaded",
                 "scope": r[5] or "",
@@ -454,7 +510,7 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
                 "cat_l1_id": l1_id or 0,
                 "cat_l2_id": l2_id or 0,
                 "category": category_path_from_map(_cat_dict_map, l1_id, l2_id),
-                "tags": parse_tags(raw_tags, limit=MAX_TAGS),
+                "tags": parse_tags(raw_tags, limit=SKILL_MAX_TAGS),
             })
             skill_ids.append(r[0])
     except Exception:
@@ -528,7 +584,8 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
         s["cat_l1_id"] = s.get("cat_l1_id", 0)
         s["cat_l2_id"] = s.get("cat_l2_id", 0)
         s["category"] = _skill_category_payload(s["cat_l1_id"], s["cat_l2_id"])
-        s["tags"] = parse_tags(s.get("tags", ""), limit=MAX_TAGS)
+        s["tags"] = parse_tags(s.get("tags", ""), limit=SKILL_MAX_TAGS)
+        s["summary"] = _clean_summary(s.get("summary") or s.get("description") or "")
     # 精选技能按 admin 管理台设置的顺序排列
     if skills:
         try:
@@ -807,7 +864,7 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
     l2_id = row[13] if len(row) > 13 else 0
     raw_tags = row[14] if len(row) > 14 else ""
     category_payload = _skill_category_payload(l1_id, l2_id)
-    tags = parse_tags(raw_tags, limit=MAX_TAGS)
+    tags = parse_tags(raw_tags, limit=SKILL_MAX_TAGS)
 
     # 归属校验
     if scope == "user" and owner_id != str(user["id"]):
@@ -949,7 +1006,7 @@ def list_related_skills(skill_id: int, user: dict = Depends(get_current_user_or_
     """相关技能（D5）。"""
     row = _ensure_skill_access(skill_id, user)
     raw_tags = row[7] if len(row) > 7 else ""
-    tags = parse_tags(raw_tags, limit=MAX_TAGS)
+    tags = parse_tags(raw_tags, limit=SKILL_MAX_TAGS)
     skill = _rt_skills.read_one_any("skill_detail_by_id", (int(skill_id),))
     agent_type = skill[3] if skill else ""
     return {"skills": _related_skills(int(skill_id), row[1] or "", agent_type or "", tags, user)}
@@ -1035,13 +1092,8 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"分类 ID {category_id} 不存在"})
     if not clear_category and (int(cat_l1_id or 0) or int(cat_l2_id or 0)):
         _normalize_skill_category(cat_l1_id, cat_l2_id)
-    tag_items, overflow = prepare_tags(tags)
-    if overflow:
-        raise HTTPException(status_code=400, detail={
-            "code": 400,
-            "message": f"标签最多 {MAX_TAGS} 个，超出：{'、'.join(overflow)}",
-            "overflow": overflow})
-    tags_json = encode_tags(tag_items)
+    tag_items = _validate_skill_tags(tags)
+    tags_json = encode_tags(tag_items, limit=SKILL_MAX_TAGS)
 
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
@@ -1095,7 +1147,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         # 从 SKILL.md Front Matter 提取描述（上传后技能列表需要展示）
         fm = parse_skill_frontmatter(skill_dir)
         description = fm.get("description", "") or ""
-        summary_value = _validate_manual_summary(summary) or _clean_summary(description)
+        summary_value = _require_skill_summary(summary)
         incoming_version = (fm.get("version") or "").strip()
 
         import shutil
@@ -1329,13 +1381,8 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
 
     if not clear_category and (int(cat_l1_id or 0) or int(cat_l2_id or 0)):
         _normalize_skill_category(cat_l1_id, cat_l2_id)
-    tag_items, overflow = prepare_tags(tags)
-    if overflow:
-        raise HTTPException(status_code=400, detail={
-            "code": 400,
-            "message": f"标签最多 {MAX_TAGS} 个，超出：{'、'.join(overflow)}",
-            "overflow": overflow})
-    tags_json = encode_tags(tag_items)
+    tag_items = _validate_skill_tags(tags)
+    tags_json = encode_tags(tag_items, limit=SKILL_MAX_TAGS)
     update_cat_tags = bool(cat_l1_id or cat_l2_id or tags or clear_category)
     from src.domains.mgmt.routes._category import prepare_category_write
     target_l1, target_l2 = prepare_category_write(
@@ -1393,7 +1440,7 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
 
         fm = parse_skill_frontmatter(skill_dir)
         description = fm.get("description", "") or ""
-        summary_value = _validate_manual_summary(summary) or _clean_summary(description)
+        summary_value = _require_skill_summary(summary)
         incoming_version = (fm.get("version") or "").strip()
         target_version = _next_skill_version(int(skill_id), incoming_version)
 
@@ -1448,6 +1495,121 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"更新失败: {e}"})
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+@router.patch("/{skill_id}", operation_id="skills_patch_meta",
+              summary="Update skill metadata without re-uploading the package",
+              description="Issue #3202: updates tags/summary/description/category/agent_type in place. official skills are read-only (403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.")
+def patch_skill_meta(skill_id: int, body: dict = Body(...),
+                     user: dict = Depends(require_no_session_token)):
+    """免传包更新技能元信息（C8）：tags/summary/description/category/agent_type。
+
+    权限对齐 delete/update：official 403；user 需本人；repo 需当前用户托管该仓库。
+    版本号不变（不写 skill_version），仅刷新 updated_at。
+    """
+    row = _rt_skills.read_one_any("skill_detail_by_id", (int(skill_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+    skill_name = row[0] or ""
+    cur_desc = row[2] or ""
+    cur_agent = row[3] or ""
+    skill_scope = row[5] or "user"
+    owner_id = row[6] or ""
+    cur_cat_id = int(row[11] or 0)
+    cur_l1 = int(row[12] or 0) if len(row) > 12 else 0
+    cur_l2 = int(row[13] or 0) if len(row) > 13 else 0
+    cur_tags = row[14] if len(row) > 14 else ""
+
+    if skill_scope == "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方技能不允许修改"})
+    if skill_scope == "user" and owner_id != str(user.get("id")):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权修改该技能"})
+    if skill_scope == "repo":
+        from src.domains.mgmt.user.db import get_user_repos
+        user_repo_keys = {r["repo_key"] for r in (get_user_repos(user["id"]) if user.get("id") else [])}
+        if owner_id not in user_repo_keys:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权修改该技能"})
+
+    body = body if isinstance(body, dict) else {}
+    allowed = {"tags", "summary", "description", "category_id",
+               "cat_l1_id", "cat_l2_id", "agent_type", "clear_category"}
+    unknown = sorted(set(body) - allowed)
+    if unknown:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": f"不支持更新的字段：{'、'.join(unknown)}"})
+    if not any(k in body for k in allowed):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "没有可更新的字段"})
+
+    extra = _rt_skills.read_one_any("skill_detail_extra_by_id", (int(skill_id),))
+    cur_summary = (extra[0] if extra else "") or ""
+
+    new_desc = cur_desc
+    if "description" in body:
+        new_desc = str(body.get("description") or "")
+
+    new_agent = cur_agent
+    if "agent_type" in body:
+        new_agent = str(body.get("agent_type") or "").strip()
+        if new_agent not in VALID_SKILL_AGENT_TYPES:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"技能类型不合法，可选: {', '.join(sorted(VALID_SKILL_AGENT_TYPES))}"})
+
+    new_category_id = cur_cat_id
+    if "category_id" in body:
+        try:
+            new_category_id = int(body.get("category_id") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "分类 ID 必须为整数"})
+        if new_category_id > 0:
+            from src.domains.mgmt.user.db import get_skill_category
+            if not get_skill_category(new_category_id):
+                raise HTTPException(status_code=400, detail={"code": 400, "message": f"分类 ID {new_category_id} 不存在"})
+
+    clear_category = body.get("clear_category")
+    if not isinstance(clear_category, bool):
+        clear_category = False
+    target_l1, target_l2 = cur_l1, cur_l2
+    if "cat_l1_id" in body or "cat_l2_id" in body or clear_category:
+        try:
+            in_l1 = int(body.get("cat_l1_id") or 0) if "cat_l1_id" in body else 0
+            in_l2 = int(body.get("cat_l2_id") or 0) if "cat_l2_id" in body else 0
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "分类 ID 必须为整数"})
+        if not clear_category and (in_l1 or in_l2):
+            _normalize_skill_category(in_l1, in_l2)
+        from src.domains.mgmt.routes._category import prepare_category_write
+        target_l1, target_l2 = prepare_category_write(
+            in_l1, in_l2, cur_l1, cur_l2, clear_category)
+
+    tags_json = cur_tags or ""
+    if "tags" in body:
+        tag_items = _validate_skill_tags(body.get("tags"))
+        tags_json = encode_tags(tag_items, limit=SKILL_MAX_TAGS)
+
+    new_summary = cur_summary
+    if "summary" in body:
+        new_summary = _require_skill_summary(str(body.get("summary") or ""))
+
+    _rt_skills.exec_any("skill_meta_patch_update", (
+        new_desc, new_agent, int(new_category_id or 0), int(target_l1 or 0),
+        int(target_l2 or 0), tags_json, new_summary,
+        str(user.get("username") or user.get("id") or "")[:64], int(skill_id)))
+
+    latest = _rt_skills.read_one_any("skill_version_latest", (int(skill_id),))
+    updated = _rt_skills.read_one_any("skill_detail_extra_by_id", (int(skill_id),))
+    return {
+        "message": f"技能 {skill_name} 信息已更新",
+        "skill_id": int(skill_id),
+        "summary": new_summary,
+        "tags": parse_tags(tags_json, limit=SKILL_MAX_TAGS),
+        "agent_type": new_agent,
+        "category_id": int(new_category_id or 0),
+        "cat_l1_id": int(target_l1 or 0),
+        "cat_l2_id": int(target_l2 or 0),
+        "updated_at": (updated[3] if updated else "") or "",
+        "version": (latest[0] if latest else "") or "",
+    }
+
 
 class ConvertSkillRequest(BaseModel):
     skill_name: str

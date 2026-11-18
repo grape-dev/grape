@@ -257,6 +257,20 @@
   "filter_all_l2": "全部二级分类",
   "upload_cat_l1": "一级分类",
   "upload_cat_l2": "二级分类",
-  "upload_tags": "标签（≤3，逗号分隔）",
-  "upload_tags_ph": "如 AI,自动化"
+  "upload_tags": "标签（最多 5 个，每个 ≤12 字）",
+  "upload_tags_ph": "输入后回车或逗号确认",
+  "upload_summary": "摘要（必填，≤50 字）",
+  "upload_summary_ph": "一句话说明用途，不要使用 → 或 -> 流程链",
+  "action.edit_meta": "编辑信息",
+  "action.save": "保存",
+  "action.saving": "保存中...",
+  "edit_meta": "编辑信息",
+  "field_description": "概述",
+  "tag_limit": "标签最多 5 个",
+  "tag_too_long": "单个标签最多 12 个字符",
+  "tag_duplicate": "标签不能重复",
+  "tag_system_conflict": "标签不能与 Agent 类型或分类名重名",
+  "summary_required": "摘要不能为空",
+  "save": "保存",
+  "saving": "保存中..."
 }

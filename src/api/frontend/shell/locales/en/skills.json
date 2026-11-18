@@ -257,6 +257,20 @@
   "filter_all_l2": "All level-2 categories",
   "upload_cat_l1": "Level-1 category",
   "upload_cat_l2": "Level-2 category",
-  "upload_tags": "Tags (max 3, comma separated)",
-  "upload_tags_ph": "e.g. AI, automation"
+  "upload_tags": "Tags (max 5, each up to 12 chars)",
+  "upload_tags_ph": "Press Enter or comma to add",
+  "upload_summary": "Summary (required, max 50 chars)",
+  "upload_summary_ph": "One sentence on what it does; avoid -> flow chains",
+  "action.edit_meta": "Edit info",
+  "action.save": "Save",
+  "action.saving": "Saving...",
+  "edit_meta": "Edit skill info",
+  "field_description": "Overview",
+  "tag_limit": "At most 5 tags",
+  "tag_too_long": "Each tag can be at most 12 characters",
+  "tag_duplicate": "Duplicate tag",
+  "tag_system_conflict": "Tags cannot reuse an agent type or category name",
+  "summary_required": "Summary is required",
+  "save": "Save",
+  "saving": "Saving..."
 }
