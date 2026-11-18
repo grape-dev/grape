@@ -1,7 +1,7 @@
 """Dashboard 路由：仓库概览、指标、Agent 状态、运维可观察性"""
 import re
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from src.user import db as user_db
 from src.api.deps import require_no_session_token, require_org_member
 from src.api.time_utils import normalize_event_time
@@ -1482,9 +1482,9 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 
-    # 跨平台 repo_key 候选：DB 中可能是 gitcode: 或 github: 前缀
+    # 跨平台 repo_key 候选：DB 中可能是 gitcode: / github: / gitlab: 前缀
     _owner_repo = f"{owner}/{repo}"
-    _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
+    _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}", f"gitlab:{_owner_repo}"]
     _rk_placeholders = ",".join("?" * len(_repo_keys))
 
     from src.session_manager import db, db_lock
@@ -1494,7 +1494,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         recent_events = []
         try:
             c.execute(
-                "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (?,?) ORDER BY seq DESC LIMIT 5",
+                "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") ORDER BY seq DESC LIMIT 5",
                 (_repo_keys)
             )
             recent_events = [
@@ -1511,7 +1511,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                 "SELECT s.agent_type, r.name, s.status, s.last_active_at, s.enable, COALESCE(rc.status,'') "
                 "FROM devops_agent_session s LEFT JOIN agent_runtimes r ON s.runtime_id=r.id "
                 "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
-                "WHERE s.repo_key IN (?,?) ORDER BY s.agent_type",
+                "WHERE s.repo_key IN (" + _rk_placeholders + ") ORDER BY s.agent_type",
                 (_repo_keys)
             )
             agent_sessions = []
@@ -1532,7 +1532,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         try:
             for atype in ["vod", "issue", "coding", "qa", "sre"]:
                 c.execute(
-                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (?,?) AND agent_type=? ORDER BY seq DESC LIMIT 2",
+                    "SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND agent_type=? ORDER BY seq DESC LIMIT 2",
                     (_repo_keys + [atype])
                 )
                 agent_recent_events[atype] = [
@@ -1572,7 +1572,9 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     try:
         repos = user_db.get_managed_repos(user["id"])
         for r in repos:
-            if r["repo_owner"] == owner and r["repo_name"] == repo:
+            # GitLab 子组仓库的 repo_owner/repo_name 切分口径可能与 URL 不完全一致，
+            # 同时用 full_name 兜底匹配
+            if (r["repo_owner"] == owner and r["repo_name"] == repo) or r.get("full_name") == _owner_repo:
                 role = "Maintainer" if r.get("is_admin") else "Member"
                 break
     except Exception:
@@ -1736,17 +1738,17 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         with db_lock:
             # total_issues: 统计不同 issue_id 的数量（去重）
             c.execute(
-                "SELECT COUNT(DISTINCT issue_id) FROM events WHERE repo_key IN (?,?) AND issue_id!='' AND issue_id IS NOT NULL",
+                "SELECT COUNT(DISTINCT issue_id) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND issue_id!='' AND issue_id IS NOT NULL",
                 (_repo_keys))
             metrics["total_issues"] = c.fetchone()[0] or 0
             # Auto-Resolution: completed / (completed + failed)
             c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND status='completed'",
+                "SELECT COUNT(*) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND status='completed'",
                 (_repo_keys)
             )
             completed = c.fetchone()[0] or 0
             c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND status='failed'",
+                "SELECT COUNT(*) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND status='failed'",
                 (_repo_keys)
             )
             failed = c.fetchone()[0] or 0
@@ -1761,14 +1763,14 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             from src.api.time_utils import db_now_str as _db_now_str
             _week_cutoff = _db_now_str(-7 * 86400)
             c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND created_at >= ?",
-                (_repo_keys[0], _repo_keys[1], _week_cutoff)
+                "SELECT COUNT(*) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND created_at >= ?",
+                tuple(_repo_keys) + (_week_cutoff,)
             )
             metrics["events_week"] = c.fetchone()[0] or 0
 
             # Avg Response: 已完成事件的平均 duration（秒）
             c.execute(
-                "SELECT AVG(duration) FROM events WHERE repo_key IN (?,?) AND status='completed' AND duration IS NOT NULL AND duration > 0",
+                "SELECT AVG(duration) FROM events WHERE repo_key IN (" + _rk_placeholders + ") AND status='completed' AND duration IS NOT NULL AND duration > 0",
                 (_repo_keys)
             )
             avg_dur = c.fetchone()[0]
@@ -1788,7 +1790,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             with db_lock:
                 c.execute(
                     "SELECT advanced_options FROM devops_pipeline_scene "
-                    "WHERE scene_id=? AND repo_key IN (?,?) AND is_active=1 LIMIT 1",
+                    "WHERE scene_id=? AND repo_key IN (" + _rk_placeholders + ") AND is_active=1 LIMIT 1",
                     ([dev_scene] + _repo_keys))
                 _adv_row = c.fetchone()
             if _adv_row and _adv_row[0]:
@@ -1809,3 +1811,22 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         "scene_nodes": scene_nodes,
         "host_status": host_status,
     }
+
+
+@router.get(
+    "/{full_name:path}",
+    operation_id="dashboard_repo_nested",
+    summary="Repository dashboard (nested namespace)",
+    description="GitLab 子组仓库（group/subgroup/repo）看板：多段 full_name 由该路由承接。",
+)
+def get_dashboard_nested(full_name: str, user: dict = Depends(require_org_member)):
+    """兼容 GitLab 子组命名空间：biz/jmbos/devops/probehub 这类多段路径。
+
+    拆分口径与 host_repo 保持一致（首段为 owner，其余为 repo），
+    校验/查询逻辑复用 get_dashboard。
+    """
+    _fn = (full_name or "").strip("/")
+    if "/" not in _fn:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+    owner, repo = _fn.split("/", 1)
+    return get_dashboard(owner, repo, user)

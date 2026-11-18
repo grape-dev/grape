@@ -853,9 +853,8 @@ window._openPRDetail = function(t) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   var _backLabel = I18N.t('tasks.back_to_board')||'返回看板';
-  var _vcsBase = t.repo_key.startsWith('github:') ? 'github.com' : 'gitcode.com';
   var _vcsPath = '/pull/' + t.issue_number;
-  var _vcsUrl = 'https://' + _vcsBase + '/' + t.repo_key.replace(/^(github|gitcode):/, '') + _vcsPath;
+  var _prUrl = _vcsUrl(t.repo_key, _vcsPath);
   var _statusColor = t.status === 'completed' ? '#34c759' : t.status === 'cancelled' ? '#ff3b30' : t.status === 'processing' ? '#3b82f6' : '#86868b';
   var _statusText = t.status === 'completed' ? '审查完成' : t.status === 'cancelled' ? '审查失败' : t.status === 'processing' ? '审查中' : '待处理';
   var _cardStyle = 'background:rgba(0,0,0,.02);border-radius:14px;border:0.5px solid var(--b,#e8e8ed);padding:14px 16px;margin-bottom:12px';
@@ -871,15 +870,15 @@ window._openPRDetail = function(t) {
       <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
-      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl}','_blank')">查看 PR ↗</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_prUrl}','_blank')">查看 PR ↗</button>
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="app.nav('event','${t.pr_seq}')">事件详情</button>
       <button class="tsk-btn tsk-btn-primary" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openPrInterveneModal()">介入解决</button>
     </div>
     <div style="${_cardStyle}">
       <div style="${_cardTitle}">PR 审查</div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">状态</span><b style="${_valueStyle};color:${_statusColor}">${_statusText}</b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">PR</span><b style="${_valueStyle}"><a href="${_vcsUrl}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">仓库</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">PR</span><b style="${_valueStyle}"><a href="${_prUrl}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">仓库</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode|gitlab):/, '')}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">触发者</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">触发时间</span><b style="${_valueStyle}">${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
       <div style="${_rowStyle};border-bottom:none"><span style="${_labelStyle}">事件数</span><b style="${_valueStyle}">${t.events_count || 0}</b></div>
@@ -985,11 +984,12 @@ window._openPRDetail = function(t) {
 window._jumpToPipeline = function(nodeId) {
   const t = window._currentDetailTask;
   if (!t || !t.repo_key) { console.warn('jumpToPipeline: no current detail task'); return; }
-  const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
-  const parts = repoKey.split('/');
-  if (parts.length < 2) { console.warn('jumpToPipeline: bad repo_key', t.repo_key); return; }
+  const repoKey = t.repo_key.replace(/^(github|gitcode|gitlab):/, '');
+  const _idx = repoKey.lastIndexOf('/');
+  if (_idx < 1) { console.warn('jumpToPipeline: bad repo_key', t.repo_key); return; }
+  const _owner = repoKey.slice(0, _idx), _name = repoKey.slice(_idx + 1);
   // 设置当前 repo 到 sessionStorage（app.currentRepo 从这里读）
-  const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1], repoKey: t.repo_key};
+  const repoObj = {owner: _owner, name: _name, fullName: repoKey, repoKey: t.repo_key};
   sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
   // 导航到流水线页面
   if (typeof app !== 'undefined' && app.nav) {
@@ -1012,10 +1012,10 @@ window._jumpToNodeEvent = function(seq) {
   window._eventNavFromTask = true;
   // 设置当前 repo 到 sessionStorage（与 _jumpToPipePage 一致）
   if (t && t.repo_key) {
-    const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
-    const parts = repoKey.split('/');
-    if (parts.length >= 2) {
-      const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1], repoKey: t.repo_key};
+    const repoKey = t.repo_key.replace(/^(github|gitcode|gitlab):/, '');
+    const _idx = repoKey.lastIndexOf('/');
+    if (_idx >= 1) {
+      const repoObj = {owner: repoKey.slice(0, _idx), name: repoKey.slice(_idx + 1), fullName: repoKey, repoKey: t.repo_key};
       sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
     }
   }
@@ -1027,10 +1027,10 @@ window._jumpToNodeEvent = function(seq) {
 window._jumpToPipePage = function() {
   const t = window._currentDetailTask;
   if (!t || !t.repo_key) { console.warn('jumpToPipePage: no current detail task'); return; }
-  const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
-  const parts = repoKey.split('/');
-  if (parts.length < 2) return;
-  const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1], repoKey: t.repo_key};
+  const repoKey = t.repo_key.replace(/^(github|gitcode|gitlab):/, '');
+  const _idx = repoKey.lastIndexOf('/');
+  if (_idx < 1) return;
+  const repoObj = {owner: repoKey.slice(0, _idx), name: repoKey.slice(_idx + 1), fullName: repoKey, repoKey: t.repo_key};
   sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
   if (typeof app !== 'undefined' && app.nav) {
     // 传递 issue_number 让流水线页高亮对应任务
@@ -1234,7 +1234,7 @@ function _boardCardHtml(t, colKey, meta) {
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${(_isPR ? t.assignee : t.creator) ? '👤 ' + (_isPR ? t.assignee : t.creator) : ((t.repo_key || '').replace(/^(github|gitcode):/, ''))}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${(_isPR ? t.assignee : t.creator) ? '👤 ' + (_isPR ? t.assignee : t.creator) : ((t.repo_key || '').replace(/^(github|gitcode|gitlab):/, ''))}</span>
             <span style="margin-left:auto;white-space:nowrap">${(t.created_at || '').substring(5, 10)}</span>
           </div>
         </div>`;
@@ -1319,7 +1319,7 @@ function _taskRowHtml(t) {
       <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
       <div class="tsk-r-main">
         <div class="tsk-r-title">PR #${t.issue_number} · ${t.title || ''}</div>
-        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_assigneeHtml}</div>
+        <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode|gitlab):/, '')}${_assigneeHtml}</div>
       </div>
       <span style="font-size:10px;font-weight:500;padding:3px 10px;border-radius:999px;background:rgba(175,82,222,.1);color:#af52de;border:1px solid rgba(175,82,222,.2)">PR</span>
     </div>`;
@@ -1328,7 +1328,7 @@ function _taskRowHtml(t) {
     <div class="tsk-r-ic ${si.rIc}">${si.ic}</div>
     <div class="tsk-r-main">
       <div class="tsk-r-title">Issue #${t.issue_number} · ${t.title || ''}</div>
-      <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode):/, '')}${_creatorHtml}</div>
+      <div class="tsk-r-meta">⏱ ${fmtLocalTime(t.created_at).substring(0,16)} · ${t.repo_key.replace(/^(github|gitcode|gitlab):/, '')}${_creatorHtml}</div>
     </div>
     <span class="tsk-tag ${si.cls}">${si.text}</span>
   </div>`;
@@ -1707,7 +1707,7 @@ function _detailHtml(t) {
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.issue_id')}</span><b style="${_valueStyle}">#${t.id}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.assignee')||'创建人'}</span><b style="${_valueStyle}">${t.creator || '—'}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${t.is_pr ? 'PR' : 'Issue'}</span><b style="${_valueStyle}"><a href="${_vcsUrl(t.repo_key, (t.is_pr ? '/pull/' : '/issues/') + t.issue_number)}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.repo')}</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.repo')}</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode|gitlab):/, '')}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">Stage</span><b style="${_valueStyle}">${_stageLabel}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.pipeline_scene')||'流水线场景'}</span><b style="${_valueStyle}">${sceneName}${sceneBadge}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.task_mode')}</span><b style="${_valueStyle}">${subtaskBadge}${parentIssue}</b></div>
@@ -1899,7 +1899,7 @@ function _isRepoAdmin393(repoKey) {
     const cached = JSON.parse(localStorage.getItem('repo_member_cache') || 'null');
     const repos = (cached && cached.repos) || [];
     const rk = String(repoKey || '');
-    const bare = rk.replace(/^(github|gitcode):/, '');
+    const bare = rk.replace(/^(github|gitcode|gitlab):/, '');
     const hit = repos.find(function(r) {
       return r.repo_key === rk || r.repo_key === bare || r.full_name === bare;
     });
@@ -2071,7 +2071,7 @@ function openPrInterveneModal() {
   var t = window._currentDetailTask;
   if (!t || !t.is_pr_event) return;
   const repo = app.currentRepo();
-  const defaultRepo = repo ? repo.fullName : (t.repo_key || '').replace(/^(github|gitcode):/, '');
+  const defaultRepo = repo ? repo.fullName : (t.repo_key || '').replace(/^(github|gitcode|gitlab):/, '');
   var prUrl = _vcsUrl(t.repo_key, '/pull/' + t.issue_number) || '';
   // 从 qa_history 提取去重的场景列表
   var scenes = {};
@@ -2333,7 +2333,7 @@ function openTaskCopyModal(taskId) {
   const t = window._tasksById[taskId] || window._currentDetailTask;
   if (!t) return;
   const repo = app.currentRepo();
-  const defaultRepo = repo ? repo.fullName : (t.repo_key || '').replace(/^(github|gitcode):/, '');
+  const defaultRepo = repo ? repo.fullName : (t.repo_key || '').replace(/^(github|gitcode|gitlab):/, '');
   if (_taskCopyModal) _taskCopyModal.remove();
   _createAttachments = [];
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

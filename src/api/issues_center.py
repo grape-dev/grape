@@ -1196,7 +1196,8 @@ def _vcs_issue_url(repo_key: str, issue_number: int) -> str:
     if _p == "github":
         return f"https://github.com/{owner}/{repo}/issues/{issue_number}"
     if _p == "gitlab":
-        return f"https://gitlab.com/{owner}/{repo}/-/issues/{issue_number}"
+        from src.vcs.gitlab import get_gitlab_base_url
+        return f"{get_gitlab_base_url()}/{owner}/{repo}/-/issues/{issue_number}"
     return f"https://gitcode.com/{owner}/{repo}/issues/{issue_number}"
 
 
@@ -1827,6 +1828,9 @@ def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str
         if _provider == "github":
             _resp = _post_github_issue(api_token or "", _owner, _rname, _title,
                                        _body_txt, assignee="")
+        elif _provider == "gitlab":
+            _resp = _post_gitlab_issue(api_token or "", _owner, _rname, _title,
+                                       _body_txt, assignee="")
         else:
             _resp = _post_gitcode_issue(api_token or "", _owner, _rname, _title,
                                         _body_txt, assignee="")
@@ -2096,6 +2100,8 @@ def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
                 if n:
                     return int(n)
         return None
+    if provider == "gitlab":
+        return _find_open_issue_by_title_gitlab(api_token, owner, repo, title)
     # GitCode — Issue #344: 取消 10 页上限，while True 靠末页终止
     # 安全阀：最多遍历 1000 页（50000 条），防止 API 异常时无限循环
     from src.user.repo_manager import _req
@@ -2251,6 +2257,127 @@ def _patch_github_issue_body(api_token: str, owner: str, repo: str, issue_num: i
     return _out
 
 
+# === GitLab v4 Issue helpers（自建实例地址由 get_gitlab_api_base 动态解析） ===
+
+def _gitlab_issues_request(api_token: str, owner: str, repo: str, method: str,
+                           path: str = "", data: dict | None = None, query: str = "") -> dict | list:
+    """GitLab v4 issues 请求：projects/{path}/issues 端点，Bearer 认证。
+
+    返回解析后的 JSON（dict 或 list）；HTTP/网络错误抛 RuntimeError（带 "(code)"，
+    供 create_task_via_issue 现有的状态码提取逻辑消费）。
+    """
+    import json as _json
+    import urllib.request as _ur
+    import urllib.error as _uerr
+    from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+    _base = f"{get_gitlab_api_base()}/projects/{gitlab_project_path(owner, repo)}/issues"
+    url = f"{_base}{path}{query}"
+    body = _json.dumps(data).encode() if data is not None else None
+    req = _ur.Request(url, data=body, method=method, headers={
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    })
+    try:
+        with _ur.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+            return _json.loads(raw) if raw.strip() else {}
+    except _uerr.HTTPError as e:
+        raise RuntimeError(f"GitLab API {method} issues failed ({e.code}): {e.read().decode(errors='replace')[:300]}")
+    except _uerr.URLError as e:
+        raise RuntimeError(f"Cannot reach GitLab API: {e.reason}")
+
+
+def _find_open_issue_by_title_gitlab(api_token: str, owner: str, repo: str,
+                                     title: str) -> "int | None":
+    """GitLab v4 幂等查重：分页遍历 state=opened issues，命中 title → 返回 iid。"""
+    page = 1
+    _max_pages = 1000
+    while page <= _max_pages:
+        try:
+            data = _gitlab_issues_request(
+                api_token, owner, repo, "GET",
+                query=f"?state=opened&per_page=50&page={page}")
+        except Exception as e:
+            raise RuntimeError(f"幂等查重失败（token 可能失效）: {e}")
+        items = data if isinstance(data, list) else []
+        if not items:
+            break
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if str(it.get("title") or "").strip() == title.strip():
+                st = str(it.get("state") or "").lower()
+                if st in ("opened", "open", "active", "1"):
+                    n = it.get("iid") or it.get("number") or it.get("id")
+                    if n:
+                        return int(n)
+        if len(items) < 50:
+            break
+        page += 1
+    return None
+
+
+def _gitlab_resolve_assignee_ids(api_token: str, assignee: str) -> list:
+    """GitLab 只接受 assignee_ids（用户 ID），把用户名解析成 ID 列表。
+
+    best-effort：查不到（组名 / 无 users 读权限 / 网络异常）时返回空列表，
+    不阻断建单，避免把用户名塞进 assignee_ids 触发上游 400。
+    """
+    if not (assignee or "").strip():
+        return []
+    import urllib.parse as _up
+    try:
+        from src.user.repo_manager import _gitlab_req
+        from src.vcs.gitlab import get_gitlab_api_base
+        _url = (f"{get_gitlab_api_base()}/users?username="
+                f"{_up.quote(assignee.strip(), safe='')}")
+        data = _gitlab_req("GET", _url, api_token)
+        if isinstance(data, list):
+            return [int(u["id"]) for u in data
+                    if isinstance(u, dict) and str(u.get("id", "")).isdigit()]
+    except Exception as e:
+        from src.config import log as _log
+        _log.warning(f"_gitlab_resolve_assignee_ids failed (best-effort): {e}")
+    return []
+
+
+def _post_gitlab_issue(api_token: str, owner: str, repo: str, title: str,
+                       body_text: str = "", assignee: str = "") -> dict:
+    """创建 GitLab Issue（POST /projects/:id/issues，JSON body + Bearer token）。
+
+    GitLab 正文字段是 description（非 body）；响应 iid → 补 number 供上层统一提取。
+    中性 assignee 是用户名，需先解析成 assignee_ids；解析不到则留空由仓库方分派。
+    """
+    data = {"title": title}
+    if body_text:
+        data["description"] = body_text
+    _ids = _gitlab_resolve_assignee_ids(api_token, assignee)
+    if _ids:
+        data["assignee_ids"] = _ids
+    resp = _gitlab_issues_request(api_token, owner, repo, "POST", data=data)
+    if isinstance(resp, dict) and "number" not in resp and resp.get("iid"):
+        resp["number"] = resp["iid"]
+    return resp
+
+
+def _patch_gitlab_issue_body(api_token: str, owner: str, repo: str,
+                             issue_num: int, body_text: str):
+    """PUT GitLab Issue description（多任务模式标记），与 GitCode/GitHub 版对称。"""
+    _out = _gitlab_issues_request(api_token, owner, repo, "PUT",
+                                  path=f"/{int(issue_num)}", data={"description": body_text})
+    try:
+        from src.outbound_ledger import record_outbound, content_hash_md5
+        from src.repo_key import to_repo_key
+        record_outbound("gitlab", to_repo_key(f"{owner}/{repo}", "gitlab"), "issue_edit",
+                        str(issue_num), issue_number=str(issue_num),
+                        content_hash=content_hash_md5(body_text))
+    except Exception as _le:
+        from src.config import log as _log
+        _log.warning(f"outbound_ledger record (_patch_gitlab_issue_body) failed: {_le}")
+    return _out
+
+
 def create_standard_task(repo_key: str, title: str, description: str,
                          bot_token: str, assignee: str = "", labels=None) -> dict:
     """真实 GitCode Issue 创建 + 标准任务建档（onboarding 模块调用，与手动创建任务同一原子路径）。
@@ -2272,7 +2399,7 @@ def create_standard_task(repo_key: str, title: str, description: str,
         assignee = owner or ""
     # Issue #344: 查重失败时返回明确错误，不抛异常中断 onboarding 流程
     try:
-        issue_num = _find_open_issue_by_title(bot_token, owner, rname, title.strip())
+        issue_num = _find_open_issue_by_title(bot_token, owner, rname, title.strip(), provider=_provider)
     except RuntimeError as e:
         return {"ok": False, "code": 502, "message": f"查重失败，Bot Token 可能失效: {str(e)[:200]}"}
     created = False
@@ -2282,6 +2409,9 @@ def create_standard_task(repo_key: str, title: str, description: str,
     else:
         if _provider == "github":
             resp = _post_github_issue(bot_token, owner, rname, title.strip(),
+                                      (description or "").strip(), assignee=assignee)
+        elif _provider == "gitlab":
+            resp = _post_gitlab_issue(bot_token, owner, rname, title.strip(),
                                       (description or "").strip(), assignee=assignee)
         else:
             resp = _post_gitcode_issue(bot_token, owner, rname, title.strip(),
@@ -2339,8 +2469,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         raise HTTPException(status_code=400, detail={"code": 400, "message": "任务描述必填"})
     repo_key = to_repo_key(body.repo_key)
     owner, rname = split_owner_repo(repo_key)
-    # provider 分流：github: → GitHub API，gitcode: → GitCode API
+    # provider 分流：github: → GitHub API，gitlab: → GitLab v4 API，gitcode: → GitCode API
     _is_github = repo_key.startswith("github:")
+    _is_gitlab = repo_key.startswith("gitlab:")
     # _preauth_token: autopilot 等内部调用（auth_type=api_key/internal）预注入 bot token
     # JWT 登录用户的 token 是 session JWT 不是 GitCode API token，不能走此路径
     # grape_ 前缀的是用户级 API Key（CLI 用户），同样不是 GitCode token，不能走此路径
@@ -2357,6 +2488,21 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         api_token = get_github_token(repo_key=repo_key)
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 GitHub Bot Token 未配置"})
+    elif _is_gitlab:
+        # 用户 token 优先（assign 需用户身份）；只配了仓库级 token 的部署（用 PAT
+        # 托管、账号未绑定 GitLab）仍要能建单，故回退到仓库 token 四级策略链，
+        # 与 /api/git-repo 网关的解析保持一致，避免控制台建单直接 400。
+        from src.api.deps import get_user_gitlab_token_with_refresh
+        api_token = get_user_gitlab_token_with_refresh(user["username"], user_id=user["id"]) or ""
+        if not api_token:
+            from src.user.db import get_repo_token_with_refresh
+            api_token = get_repo_token_with_refresh(repo_key) or ""
+        if not api_token:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": "GitLab Token 未配置或已失效，请在设置中绑定 GitLab 账号，"
+                           "或为该仓库配置 Bot Token 后重试",
+            })
     else:
         # 用户建单必须用用户自己的 GitCode token：assign 需用户身份（bot token 无 assign 权限，
         # GitCode 403）。token 缺失/失效 ≠ 回落 bot——明确引导用户重新绑定/登录 GitCode。
@@ -2369,7 +2515,8 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             })
     # 是否使用「用户自己的 GitCode token」：用于 401 时区分「用户登录失效」（引导重新绑定）
     # 与「仓库 bot token 失效」（提示检查仓库 Bot Token 配置）两套文案。
-    _using_user_token = (not _preauth_token) and (not _is_github)
+    # GitLab 用户 token 的刷新路径与 GitCode 不同，不复用下方 GitCode 刷新重试逻辑。
+    _using_user_token = (not _preauth_token) and (not _is_github) and (not _is_gitlab)
     # Issue #649: assignee 不再默认填创建者——非成员默认指派会触发上游 403，
     # 误导排查方向。不传 assignee 时留空，由仓库方后续分派；显式传入时走下方成员资格预校验。
     assignee = (body.assignee or "").strip()
@@ -2378,7 +2525,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     _creator_login = user["username"]
     try:
         from src.auth.grape_account_db import get_user_identities
-        _provider_name = "github" if _is_github else "gitcode"
+        _provider_name = "github" if _is_github else ("gitlab" if _is_gitlab else "gitcode")
         for ident in get_user_identities(user["id"]):
             if ident.get("provider") == _provider_name and ident.get("external_login"):
                 _creator_login = ident["external_login"]
@@ -2392,7 +2539,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # Issue #343: 查重失败（token 失效）时给明确提示，不静默放行导致重复建单
     try:
         issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
-                                              provider="github" if _is_github else "gitcode")
+                                              provider="github" if _is_github else ("gitlab" if _is_gitlab else "gitcode"))
     except RuntimeError as _dedup_err:
         from src.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG, GITCODE_USER_TOKEN_INVALID_MSG
         if is_auth_error_exc(_dedup_err) and _using_user_token:
@@ -2409,7 +2556,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     _dedup_err = None
             if _dedup_err is not None:
                 # 用户自己的 GitCode token 确认失效（刷新失败或重试仍 401）
-                # → 401 + reauth_required：前端 handleResp 收到后自动跳 GitCode OAuth 授权页，强制重新授权
+                # → 401 + reauth_required：前端 handleResp 收到后按 provider 跳对应平台 OAuth 授权页，强制重新授权
                 raise HTTPException(status_code=401, detail={
                     "code": 401,
                     "message": f"查重失败，{GITCODE_USER_TOKEN_INVALID_MSG}",
@@ -2429,7 +2576,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     if issue_num is None:
         # Issue #649: 显式 assignee + GitCode → 上游创建前预校验成员资格；
         # 非成员直接给出「非成员」语义错误（含 trace_id），不再无谓打上游 403 再误报。
-        if (not _is_github) and assignee:
+        if (not _is_github) and (not _is_gitlab) and assignee:
             _member_state = _gitcode_assignee_member_check(api_token, owner, rname, assignee)
             if _member_state == "not_member":
                 raise HTTPException(status_code=403, detail={
@@ -2474,6 +2621,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         try:
             if _is_github:
                 resp = _post_github_issue(api_token, owner, rname, body.title.strip(),
+                                          _desc_with_attach, assignee=assignee)
+            elif _is_gitlab:
+                resp = _post_gitlab_issue(api_token, owner, rname, body.title.strip(),
                                           _desc_with_attach, assignee=assignee)
             else:
                 # Issue #343: GitCode 写操作 token（用户建单恒为用户 token）
@@ -2676,6 +2826,8 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             if _is_github:
                 # Issue #343: GitHub 写操作走 bot token
                 _patch_github_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
+            elif _is_gitlab:
+                _patch_gitlab_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
             else:
                 # Issue #343: GitCode 写操作走 bot token
                 _patch_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
@@ -2890,12 +3042,12 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
     """Issue #648 过渡方案：附件上传后向 VCS issue 同步「## 附件」链接清单评论。
 
     best-effort：token 获取 / VCS 调用失败仅记日志并返回 False，不影响上传主流程。
-    仅支持 gitcode（GitHub 附件同步不在本次范围）。
+    按 repo_key provider 走统一客户端，GitCode / GitHub / GitLab 均可同步。
     """
     try:
         from src.repo_key import parse_repo_key
         _prov, owner, rname = parse_repo_key(repo_key)
-        if _prov != "gitcode":
+        if not owner or not rname:
             return False
         _att = dict(attachment) if isinstance(attachment, dict) else {}
         _url = str(_att.get("url") or "")
@@ -2921,14 +3073,16 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
         _md = _attachments_markdown_block([_att])
         if not _md:
             return False
-        from src.user.db import get_gitcode_token
-        token = get_gitcode_token(repo_key=repo_key) or ""
+        from src.user.db import get_repo_token_with_refresh
+        token = get_repo_token_with_refresh(repo_key) or ""
         if not token:
             log.warning(f"attachment sync comment skipped: no repo token repo={repo_key}")
             return False
-        from src.vcs.api_client import VcsApiClient
-        client = VcsApiClient("gitcode", token, owner, rname)
-        client.post_issue_comment(int(issue_number), _md.strip())
+        from src.vcs.api_client import create_client
+        resp = create_client(repo_key, token).post_issue_comment(int(issue_number), _md.strip())
+        if isinstance(resp, dict) and resp.get("error"):
+            log.warning(f"attachment sync comment failed upstream repo={repo_key}: {resp.get('error')}")
+            return False
         log.info(f"attachment sync comment posted: repo={repo_key} issue=#{issue_number}"
                  f" file={(attachment or {}).get('filename')}")
         return True

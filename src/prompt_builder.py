@@ -42,24 +42,53 @@ def _is_github_repo(repo_key: str) -> bool:
     return bool(repo_key and repo_key.startswith("github:"))
 
 
+def _vcs_provider(repo_key: str) -> str:
+    """repo_key → provider（github/gitlab/gitcode），无前缀默认 gitcode；复用 parse_repo_key。"""
+    from src.repo_key import parse_repo_key
+    return parse_repo_key(repo_key)[0]
+
+
 def _vcs_api_base(repo_key: str) -> str:
     """返回 VCS API 基础 URL。"""
-    return "https://api.github.com" if _is_github_repo(repo_key) else "https://gitcode.com/api/v5"
+    _p = _vcs_provider(repo_key)
+    if _p == "gitlab":
+        from src.vcs.gitlab import get_gitlab_api_base
+        return get_gitlab_api_base()
+    return "https://api.github.com" if _p == "github" else "https://gitcode.com/api/v5"
 
 
 def _vcs_token_env(repo_key: str) -> str:
     """返回 VCS token 环境变量名。"""
-    return "USER_GITHUB_TOKEN" if _is_github_repo(repo_key) else "USER_GITCODE_TOKEN"
+    _p = _vcs_provider(repo_key)
+    if _p == "gitlab":
+        return "USER_GITLAB_TOKEN"
+    return "USER_GITHUB_TOKEN" if _p == "github" else "USER_GITCODE_TOKEN"
 
 
 def _vcs_bot_token_env(repo_key: str) -> str:
     """返回 VCS bot token 环境变量名。"""
-    return "BOT_GITHUB_TOKEN" if _is_github_repo(repo_key) else "BOT_GITCODE_TOKEN"
+    _p = _vcs_provider(repo_key)
+    if _p == "gitlab":
+        return "BOT_GITLAB_TOKEN"
+    return "BOT_GITHUB_TOKEN" if _p == "github" else "BOT_GITCODE_TOKEN"
 
 
 def _vcs_name(repo_key: str) -> str:
     """返回 VCS 平台名称。"""
-    return "GitHub" if _is_github_repo(repo_key) else "GitCode"
+    _p = _vcs_provider(repo_key)
+    if _p == "gitlab":
+        return "GitLab"
+    return "GitHub" if _p == "github" else "GitCode"
+
+
+def _is_loopback_url(url: str) -> bool:
+    """URL 是否指向本机回环（容器/沙盒里的 agent 无法回访主控）。"""
+    try:
+        from urllib.parse import urlsplit
+        host = (urlsplit(url).hostname or "").lower()
+        return host in ("localhost", "0.0.0.0", "::1") or host.startswith("127.")
+    except Exception:
+        return False
 
 
 def _runtime_is_local(runtime_id: int = 0) -> bool | None:
@@ -90,8 +119,8 @@ def _runtime_is_local(runtime_id: int = 0) -> bool | None:
         return None
 
 
-def _resolve_server_url(runtime_id: int = 0) -> str:
-    """返回 worker runtime / A2A 回连基址（RUNTIME_SERVER_URL、task.server_url 用）。
+def _resolve_server_url(runtime_id: int = 0, request_base: str = "") -> str:
+    """返回 worker runtime / A2A 回连基址（RUNTIME_SERVER_URL、task.server_url 用），保证非空。
 
     本地引擎走 localhost 直连，避免 NAT 回环不通
     （服务端无法通过自己的公网 IP 访问自己）；
@@ -99,21 +128,47 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
     未配置回退 server_base_url）。
 
     判定本地：credential_id == 0（本机直连引擎）或 credential.last_ip == 127.0.0.1（本机 worker）。
+
+    request_base：本次 HTTP 请求的实际访问基址。未显式配置对外基址时优先采用它，
+    因为浏览器能访问到的域名通常也能被 agent 沙盒回访；否则 grape-cli 只能回落到
+    自己默认的 http://localhost:8000（沙盒内无监听端口，Issue 读写全部发不出去）。
     """
+    _local = f"http://127.0.0.1:{_local_port()}"
     try:
-        from src.user.db import get_worker_connect_url
-        public_url = get_worker_connect_url()
+        from src.user.db import (get_worker_connect_url,
+                                 _split_url_configured_value,
+                                 _server_base_url_configured_value)
+        # 复用 ours 新增的本机判定 helper（None=locality 查询异常，未知）。
         local = _runtime_is_local(runtime_id)
         if local is None:
             # DB 查询异常：保留改造前「异常回退 localhost」语义（Issue #372 §15.5）。
             raise RuntimeError("runtime locality lookup failed")
         if local:
-            return f"http://127.0.0.1:{_local_port()}"
-        return public_url
+            return _local
+        # 显式配置优先（server-config.json / meta）
+        explicit = (_split_url_configured_value("worker_connect_url")
+                    or _server_base_url_configured_value())
+        explicit = (explicit or "").strip().rstrip("/")
+        if explicit:
+            return explicit
+        # 其次：由 webhook_url 派生的对外基址（get_server_base_url 内部会兜底 localhost）
+        derived = (get_worker_connect_url() or "").strip().rstrip("/")
+        if derived and not _is_loopback_url(derived):
+            return derived
+        # 运维显式注入的运行时地址（devstage 等），优先于「按请求推断」
+        rts = (os.environ.get("RUNTIME_SERVER_URL") or "").strip().rstrip("/")
+        if rts and not _is_loopback_url(rts):
+            return rts
+        # 未配置对外基址：用本次请求实际访问地址，避免 agent 沙盒落到 localhost:8000
+        rb = (request_base or "").strip().rstrip("/")
+        if rb and not _is_loopback_url(rb):
+            return rb
+        if derived:
+            return derived
     except Exception:
         pass
     # Issue #372 §15.5: 异常 fallback 用 _local_port()，非硬编码 8080
-    return f"http://localhost:{_local_port()}"
+    return _local
 
 
 # ===== Issue #1731：业务 API 基址可用性探测 =====

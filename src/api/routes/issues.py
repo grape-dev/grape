@@ -200,21 +200,66 @@ def _repo_key_of(owner: str, repo: str) -> str:
 
 
 def _repo_keys_of(owner: str, repo: str) -> list[str]:
-    """跨 provider 双查：返回 [gitcode:owner/repo, github:owner/repo] 两个前缀。
+    """跨 provider 三查：返回 [gitcode:owner/repo, github:owner/repo, gitlab:owner/repo]。
 
-    与 pipeline.py 的双查逻辑一致——用户可能通过 GitHub Webhook 接入仓库，
-    DB 中数据存为 github: 前缀，但前端传入的 owner/repo 无 provider 信息，
-    _repo_key_of 默认返回 gitcode: 前缀会漏查 GitHub 仓库数据。
+    与 pipeline.py 的多查逻辑一致——用户可能通过 GitHub Webhook / 自建 GitLab 接入仓库，
+    DB 中数据存为 github: / gitlab: 前缀，但前端传入的 owner/repo 无 provider 信息，
+    _repo_key_of 默认返回 gitcode: 前缀会漏查其它平台仓库数据。
     """
     from src.repo_key import to_repo_key
     _owner_repo = f"{owner}/{repo}"
     repo_key = to_repo_key(_owner_repo)
     keys = [repo_key]
-    if repo_key.startswith("gitcode:"):
-        keys.append(f"github:{_owner_repo}")
-    elif repo_key.startswith("github:"):
-        keys.append(f"gitcode:{_owner_repo}")
+    for _p in ("github", "gitlab"):
+        _k = f"{_p}:{_owner_repo}"
+        if _k not in keys:
+            keys.append(_k)
     return keys
+
+
+def _provider_for_full_name(full_name: str) -> str:
+    """按 managed_repos 登记的 repo_key 解析 full_name 的真实 provider。
+
+    前端 / 嵌套 namespace 路径常只传 ``owner/repo``（无前缀），``to_repo_key``
+    默认补 ``gitcode:``，会把 GitLab 仓库判成 GitCode，进而走错 token 与 API
+    （典型表现：POST /api/issues/{group}/{sub}/{repo} 直接 400）。
+    托管登记是 provider 的权威来源；未登记时保持旧行为（gitcode）。
+    同一 full_name 被多平台托管时优先非默认平台（gitlab > github > gitcode）。
+    """
+    from src.user.db import provider_for_full_name
+    return provider_for_full_name(full_name)
+
+
+def _split_nested_repo(full_name: str):
+    """把嵌套命名空间路径（GitLab 子组）拆成 (owner, repo, 剩余段)。
+
+    repo 取 managed_repos 登记 full_name 的最长前缀匹配，剩余段用于区分
+    detail / events / pipeline 等子路径。无登记匹配时返回 None，由调用方兜底。
+    """
+    _fn = (full_name or "").strip("/")
+    parts = [p for p in _fn.split("/") if p]
+    if len(parts) < 2:
+        return None
+    _candidates = []
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM managed_repos")
+            _candidates = [(r[0] or "").split(":", 1)[-1] for r in c.fetchall()]
+    except Exception:
+        _candidates = []
+    best = ""
+    for cand in _candidates:
+        if not cand:
+            continue
+        cp = cand.split("/")
+        if len(parts) >= len(cp) and parts[:len(cp)] == cp and len(cand) > len(best):
+            best = cand
+    if not best:
+        return None
+    bp = best.split("/")
+    return bp[0], "/".join(bp[1:]), parts[len(bp):]
 
 
 def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
@@ -786,12 +831,12 @@ def _close_vcs_issues(repo_key: str, issue_number, user: dict) -> dict:
 
     Returns:
         {"gitcode": "success|failed|skipped|bot_token_failed", "github": "...",
-         "message": str}
-        — gitcode 始终尝试关闭（无 issue_number 时 skipped）；github 仅当 repo_key
-        以 github: 开头时尝试关闭，否则 skipped。
+         "gitlab": "...", "message": str}
+        — 主仓侧按 provider 归位到对应键（无 issue_number 时 skipped）；github 仅当
+        repo_key 以 github: 开头时直接关闭，否则尝试查找镜像 Issue。
         bot_token_failed: bot token 可能失效，issue 未关闭（方向3 降级提示）。
     """
-    result = {"gitcode": "skipped", "github": "skipped", "message": ""}
+    result = {"gitcode": "skipped", "github": "skipped", "gitlab": "skipped", "message": ""}
     if not issue_number:
         return result
     try:
@@ -800,23 +845,25 @@ def _close_vcs_issues(repo_key: str, issue_number, user: dict) -> dict:
         return result
 
     is_github = repo_key.startswith("github:")
+    is_gitlab = repo_key.startswith("gitlab:")
 
-    # --- 确定 GitCode 侧的 repo_key 与 issue（GitHub 仓库时 GitCode 侧 skip）---
+    # --- 主仓侧：GitLab 结果写 gitlab 键，不能再误记为 gitcode ---
     if not is_github:
-        result["gitcode"] = _try_close_issue_for_repo(repo_key, issue_number, user, is_github=False)
+        _primary_key = "gitlab" if is_gitlab else "gitcode"
+        result[_primary_key] = _try_close_issue_for_repo(repo_key, issue_number, user, is_github=False)
 
     # --- GitHub 侧：repo_key 本身是 github:，或需要查找镜像 ---
     if is_github:
         result["github"] = _try_close_issue_for_repo(repo_key, issue_number, user, is_github=True)
     else:
-        # GitCode 仓库可能绑定了 GitHub 镜像，尝试查找并关闭镜像 Issue
+        # GitCode / GitLab 仓库可能绑定了 GitHub 镜像，尝试查找并关闭镜像 Issue
         _gh_rk = _find_github_mirror_repo_key(repo_key)
         if _gh_rk:
             result["github"] = _try_close_issue_for_repo(_gh_rk, issue_number, user, is_github=True)
         # 无镜像 → 保持 skipped
 
     # Issue #345: bot_token_failed 时设置用户可见提示
-    if "bot_token_failed" in (result["gitcode"], result["github"]):
+    if "bot_token_failed" in (result["gitcode"], result["github"], result["gitlab"]):
         from src.vcs.token_error import BOT_TOKEN_INVALID_MSG
         result["message"] = f"Issue 关闭失败：{BOT_TOKEN_INVALID_MSG}"
 
@@ -863,7 +910,8 @@ def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict, is_g
         try:
             from src.api.oauth_token import with_oauth_token
             from src.vcs.api_client import VcsApiClient
-            _provider_name = "github" if is_github else "gitcode"
+            # GitLab 用户 token 不能走 GitCode 刷新通道（with_oauth_token 按 provider 分发）
+            _provider_name = provider if provider in ("github", "gitlab", "gitcode") else "gitcode"
             def _do_close(token, _provider=provider, _owner=owner, _repo=repo, _num=issue_number):
                 c = VcsApiClient(_provider, token, _owner, _repo)
                 # 幂等检查
@@ -935,7 +983,7 @@ async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict 
         if _status == 'completed' or _status == 'done':
             # 幂等：已关闭的 Issue 再次 confirm-done 不重复调用关闭 API
             return {"ok": True, "already_done": True,
-                    "issue_closed": {"gitcode": "skipped", "github": "skipped"}}
+                    "issue_closed": {"gitcode": "skipped", "github": "skipped", "gitlab": "skipped"}}
         if _status == 'cancelled':
             raise HTTPException(status_code=400, detail={"code": 400, "message": "已取消需求不可确认完成"})
         c.execute(
@@ -1037,7 +1085,7 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
     # 4) 状态机
     if _status == 'completed' or _status == 'done':
         return {"ok": True, "already_done": True, "confirmed_by": "admin",
-                "issue_closed": {"gitcode": "skipped", "github": "skipped"}}
+                "issue_closed": {"gitcode": "skipped", "github": "skipped", "gitlab": "skipped"}}
     if _status == 'cancelled':
         raise HTTPException(status_code=400, detail={"code": 400, "message": "已取消需求不可确认完成"})
 
@@ -1561,9 +1609,18 @@ async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_n
     if conv_id:
         from src.session_manager import get_messages
         conv_messages = get_messages(conv_id, limit=30)
-    _issue_host = "github.com" if repo_key.startswith("github:") else "gitcode.com"
+    from src.repo_key import from_repo_key, parse_repo_key
+    _owner_repo = from_repo_key(repo_key)
+    _provider, _, _ = parse_repo_key(repo_key)
+    if _provider == "github":
+        _issue_url = f"https://github.com/{_owner_repo}/issues/{issue_number}"
+    elif _provider == "gitlab":
+        from src.vcs.gitlab import get_gitlab_base_url
+        _issue_url = f"{get_gitlab_base_url()}/{_owner_repo}/-/issues/{issue_number}"
+    else:
+        _issue_url = f"https://gitcode.com/{_owner_repo}/issues/{issue_number}"
     return {"messages": messages, "conversation_id": conv_id,
-            "issue_url": f"https://{_issue_host}/{repo_key}/issues/{issue_number}"}
+            "issue_url": _issue_url}
 
 
 @router.post("/{issue_id}/awaiting-input", operation_id="issues_awaiting-input",
@@ -1715,13 +1772,14 @@ def _scene_agent_allowlist(repo_key: str, scene_id: str) -> set:
 def _vcs_issue_lookup(owner: str, repo: str, number: int, user: dict) -> dict | None:
     """Issue #672：按 GitCode number + owner/repo 走 git-repo 通道核对远端 issue 是否存在。
 
-    双路径兜底之一（内部需求库 issue_id 解析失败时使用）：provider 双试 gitcode→github，
-    token 优先仓库 bot token（devops 场景），会话用户 token 交叉回退。
+    兜底路径之一（内部需求库 issue_id 解析失败时使用）：provider 三试
+    gitcode→github→gitlab，token 优先仓库 bot token（devops 场景），
+    会话用户 token 交叉回退。
     任何失败都视为未命中（兜底不放大错误），返回 None 或 {"provider", "issue"}。
     """
     from src.api.git_repo_api import _PROVIDER_MODULES, _vcs_req, _vcs_url
     from src.repo_key import to_repo_key
-    for _p in ("gitcode", "github"):
+    for _p in ("gitcode", "github", "gitlab"):
         try:
             _mod = _PROVIDER_MODULES.get(_p)
             if _mod is None:
@@ -1946,6 +2004,7 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
     repo_key, issue_number, conv_id = info
     _is_github = repo_key.startswith("github:")
+    _is_gitlab = repo_key.startswith("gitlab:")
     if _is_github:
         # Issue #343: GitHub 写操作走仓库 bot token
         from src.user.db import get_github_token
@@ -1953,6 +2012,9 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
         api_token = get_github_token(repo_key=to_repo_key(repo_key, provider="github"))
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "仓库 GitHub Bot Token 未配置"})
+    elif _is_gitlab:
+        # GitLab token 由 create_client 按 repo_key 前缀自动解析（不误用 GitCode token）
+        api_token = ""
     else:
         # Issue #343: GitCode 写操作走仓库 bot token（跳过 agent session token）
         from src.user.db import get_repo_bot_token
@@ -1981,6 +2043,20 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
         except Exception as e:
             raise HTTPException(status_code=502, detail={"code": 502,
                                                          "message": f"GitHub 评论失败: {str(e)[:200]}"})
+    elif _is_gitlab:
+        # GitLab 澄清评论：复用统一客户端 notes 端点（Bearer 认证），token 由 create_client
+        # 按 repo_key 前缀自动解析，台账由 VcsApiClient.post_issue_comment 内部统一入账。
+        from src.vcs.api_client import create_client
+        try:
+            _gl_resp = create_client(repo_key, api_token).post_issue_comment(int(issue_number), comment_body)
+            if isinstance(_gl_resp, dict) and "error" in _gl_resp:
+                raise RuntimeError(str(_gl_resp.get("error")))
+            log.info(f"Issue clarify: posted comment to {repo_key}/-/issues/{issue_number} by {user['username']}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502,
+                                                         "message": f"GitLab 评论失败: {str(e)[:200]}"})
     else:
         def _post_comment(token: str, _owner=owner, _rname=rname, _issue_num=issue_number, _body=comment_body):
             import urllib.parse as _up
@@ -2188,11 +2264,17 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     clauses = []
     params = []
     if repo_key:
-        # 跨 provider 双查：前端传入 owner/repo 无 provider 信息，
-        # to_repo_key 默认 gitcode: 前缀会漏查 GitHub 仓库数据。
+        # 跨 provider 三查：前端传入 owner/repo 无 provider 信息，
+        # to_repo_key 默认 gitcode: 前缀会漏查 GitHub / GitLab 仓库数据。
+        # GitLab 嵌套 namespace（group/sub/repo）整段保留，不能按 "/" 截断。
         _rk = to_repo_key(repo_key)
-        _rk_alt = ("github:" + repo_key) if _rk.startswith("gitcode:") else ("gitcode:" + repo_key)
-        _rk_list = [_rk, _rk_alt]
+        _bare = repo_key.split(":", 1)[-1] if ":" in repo_key else repo_key
+        _rk_list = list(dict.fromkeys([
+            _rk,
+            to_repo_key(_bare, provider="gitcode"),
+            to_repo_key(_bare, provider="github"),
+            to_repo_key(_bare, provider="gitlab"),
+        ]))
         _rk_ph = ",".join("?" * len(_rk_list))
         clauses.append(f"repo_key IN ({_rk_ph})")
         params.extend(_rk_list)
@@ -2539,9 +2621,15 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     repo_key 可选（缺省按 {owner}/{repo} 拼）。返回 {ok, issue_number, task_id, created, ...}
     """
     from src.api.issues_center import TaskCreateBody, create_task_via_issue
+    from src.repo_key import to_repo_key
     _body = body or {}
+    # 前端常传无前缀的 owner/repo（嵌套 namespace 尤其如此）；以 managed_repos 登记
+    # 为准补全 provider，避免 GitLab 仓库被 to_repo_key 默认成 gitcode: 而走错链路。
+    _rk = (_body.get("repo_key") or "").strip() or f"{owner}/{repo}"
+    if ":" not in _rk:
+        _rk = to_repo_key(_rk, provider=_provider_for_full_name(_rk))
     b = TaskCreateBody(
-        repo_key=_body.get("repo_key") or f"{owner}/{repo}",
+        repo_key=_rk,
         title=_body.get("title", "") or "",
         description=_body.get("description", "") or "",
         assignee=_body.get("assignee", "") or "",
@@ -2668,3 +2756,61 @@ def get_issue_pipeline(owner: str, repo: str, number: int,
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
     return pipeline
+
+
+def _nested_issue_route(full_name: str):
+    """解析嵌套路径 → (owner, repo, 视角)。视角 ∈ list/detail/events/pipeline。"""
+    parts = [p for p in (full_name or "").strip("/").split("/") if p]
+    resolved = _split_nested_repo(full_name)
+    if resolved is None:
+        if not parts:
+            return None
+        resolved = (parts[0], "/".join(parts[1:]), []) if len(parts) >= 2 else None
+    if not resolved:
+        return None
+    owner, repo, rest = resolved
+    if not rest:
+        return owner, repo, ("list", "")
+    if len(rest) == 1 and rest[0].lstrip("#").isdigit():
+        return owner, repo, ("detail", rest[0].lstrip("#"))
+    if len(rest) == 2 and rest[0].lstrip("#").isdigit() and rest[1] in ("events", "pipeline"):
+        return owner, repo, (rest[1], rest[0].lstrip("#"))
+    return None
+
+
+@router.get("/{full_name:path}", operation_id="issues_nested_get",
+            summary="Issue endpoints for nested namespaces (GitLab subgroups)",
+            description="Nested-namespace variant: resolves the longest registered repo full_name, then dispatches to list / detail / events / pipeline.")
+def issues_nested_get(full_name: str,
+                      status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
+                      sort_order: str = Query("desc", pattern="^(desc|asc)$"),
+                      mode: str = Query("default", pattern="^(default|time)$"),
+                      assignees: str = Query(""),
+                      page: int = Query(1, ge=1),
+                      per_page: int = Query(0, ge=0, le=500),
+                      recent_terminal: int = Query(30, ge=0),
+                      user: dict = Depends(require_org_member)):
+    _route = _nested_issue_route(full_name)
+    if not _route:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+    owner, repo, (view, number) = _route
+    if view == "list":
+        return list_repo_issues(owner, repo, status, sort_order, mode, assignees,
+                                page, per_page, recent_terminal, user)
+    if view == "detail":
+        return get_issue_detail(owner, repo, int(number), user)
+    if view == "events":
+        return get_issue_events(owner, repo, number, user)
+    return get_issue_pipeline(owner, repo, int(number), user)
+
+
+@router.post("/{full_name:path}", operation_id="issues_nested_create",
+             summary="Create issue for nested namespaces (GitLab subgroups)",
+             description="Nested-namespace variant of issues_create.")
+async def issues_nested_create(full_name: str, body: dict = None,
+                               user: dict = Depends(require_org_member)):
+    _route = _nested_issue_route(full_name)
+    if not _route or _route[2][0] != "list":
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+    owner, repo, _ = _route
+    return await create_issue(owner, repo, body, user)

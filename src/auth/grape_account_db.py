@@ -1189,6 +1189,7 @@ def update_external_identity_tokens(
     expires_in: int = 0,
     external_name: str = "",
     external_avatar: str = "",
+    clear_oauth_state: bool = False,
 ) -> bool:
     """更新第三方绑定的 token 和用户信息（每次 OAuth 登录刷新）。D10: token 加密存储。
 
@@ -1219,6 +1220,11 @@ def update_external_identity_tokens(
             if external_avatar:
                 sets.append("external_avatar=?")
                 params.append(external_avatar)
+            if clear_oauth_state:
+                # PAT 覆盖既有 OAuth 身份：清掉残留 refresh_token / 过期时间，
+                # 否则后续会拿已轮换的 OAuth refresh_token 去刷新 PAT 身份并误标过期。
+                sets.append("refresh_token=''")
+                sets.append("token_expires_at=''")
             if not sets:
                 return True
             params.extend([grape_user_id, provider])

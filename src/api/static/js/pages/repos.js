@@ -12,6 +12,7 @@
 var PLATFORM_BRAND_COLOR = {
   gitcode: '#F54A36',
   github: '#1F2328',
+  gitlab: '#FC6D26',
 };
 
 function platformIcon(provider, size) {
@@ -20,6 +21,9 @@ function platformIcon(provider, size) {
   var color = PLATFORM_BRAND_COLOR[provider] || 'var(--a)';
   if (provider === 'github') {
     return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 1024 1024" fill="' + color + '" class="platform-icon" style="' + s + '"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>';
+  }
+  if (provider === 'gitlab') {
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="' + color + '" class="platform-icon" style="' + s + '"><path d="M23.955 13.587l-1.342-4.135-2.648-8.106a.555.555 0 00-.53-.377.555.555 0 00-.532.378l-2.646 8.106H5.18L2.532 1.347a.555.555 0 00-.53-.378.555.555 0 00-.532.378L-.178 9.452a1.11 1.11 0 00.402 1.243l11.314 8.22a1.113 1.113 0 001.346 0l11.314-8.221a1.11 1.11 0 00.402-1.243l-.001-.002.001.001z"/></svg>';
   }
   // gitcode
   return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 1024 1024" fill="' + color + '" class="platform-icon" style="' + s + '"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
@@ -198,6 +202,7 @@ function _getAvailablePlatforms() {
   var platforms = [];
   if (bindings.indexOf('gitcode') >= 0) platforms.push({key: 'gitcode', name: 'GitCode'});
   if (bindings.indexOf('github') >= 0) platforms.push({key: 'github', name: 'GitHub'});
+  if (bindings.indexOf('gitlab') >= 0) platforms.push({key: 'gitlab', name: 'GitLab'});
   return platforms;
 }
 
@@ -228,8 +233,11 @@ function _filterByPlatform(repos) {
   if (!_activePlatformFilter) return repos;
   return repos.filter(function(r) {
     var rk = r.repo_key || '';
-    if (_activePlatformFilter === 'github') return rk.indexOf('github:') === 0;
-    return rk.indexOf('github:') !== 0; // gitcode = everything not github:
+    var pfx = _activePlatformFilter + ':';
+    if (rk.indexOf(pfx) === 0) return true;
+    // 兼容无前缀的历史缓存（视为 gitcode）
+    return _activePlatformFilter === 'gitcode' &&
+           rk.indexOf('github:') !== 0 && rk.indexOf('gitlab:') !== 0;
   });
 }
 
@@ -341,22 +349,34 @@ function goRepoPage(dir) {
   }
 }
 
+function _repoProvider(r) {
+  var rk = r.repo_key || '';
+  if (rk.indexOf('github:') === 0) return 'github';
+  if (rk.indexOf('gitlab:') === 0) return 'gitlab';
+  return 'gitcode';
+}
 function _repoUrl(r) {
   var rk = r.repo_key || '';
   var fn = r.full_name || (r.owner ? r.owner + '/' + r.name : '');
-  if (rk.indexOf('github:') === 0) return 'https://github.com/' + fn;
+  var provider = _repoProvider(r);
+  if (provider === 'github') return 'https://github.com/' + fn;
+  if (provider === 'gitlab') {
+    // 自建 GitLab：优先使用接口返回的 web_url，其次按实例地址拼接
+    if (r.web_url) return r.web_url;
+    var base = (typeof _vcsGitlabBase === 'function') ? _vcsGitlabBase() : 'https://gitlab.com';
+    return base + '/' + fn;
+  }
   return 'https://gitcode.com/' + fn;
 }
 function _repoPlatform(r) {
-  var rk = r.repo_key || '';
-  if (rk.indexOf('github:') === 0) return 'GitHub';
+  var provider = _repoProvider(r);
+  if (provider === 'github') return 'GitHub';
+  if (provider === 'gitlab') return 'GitLab';
   return 'GitCode';
 }
 
 function _repoPlatformIcon(r) {
-  var rk = r.repo_key || '';
-  var provider = (rk.indexOf('github:') === 0) ? 'github' : 'gitcode';
-  return platformIcon(provider, 14);
+  return platformIcon(_repoProvider(r), 14);
 }
 
 function _buildProjectCard(r) {
@@ -506,7 +526,8 @@ function refreshRepos(btn) {
 function hostAndSelect(fullName, owner, name, repoKey, event) {
   // 按仓库来源平台透传 provider，避免后端按登录平台误判（host-repo-provider-routing-fix-design.md）
   var _provider = (String(repoKey || '').indexOf('github:') === 0) ? 'github' :
-                  (String(repoKey || '').indexOf('gitcode:') === 0) ? 'gitcode' : '';
+                  (String(repoKey || '').indexOf('gitcode:') === 0) ? 'gitcode' :
+                  (String(repoKey || '').indexOf('gitlab:') === 0) ? 'gitlab' : '';
   var _url = '/repos/host' + (_provider ? '?provider=' + _provider : '');
   var doHost = function() {
     API.post(_url, {full_name: fullName}).then(r => {

@@ -101,7 +101,13 @@ def _create_provider_issue(provider: str, owner: str, repo: str, token: str,
     import urllib.parse
     from src.vcs.providers import translate_inbound
     mod = _provider_module(provider)
-    url = f"{mod.API_BASE}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/issues"
+    # GitLab 实例地址是动态的，provider 模块不提供静态 API_BASE；必须用 build_url
+    # 生成 /projects/{urlencoded}/issues，否则会拼出 "/repos/.../issues" 这种无效相对 URL。
+    if hasattr(mod, "build_url"):
+        url = mod.build_url(owner, repo, "/issues")
+    else:
+        url = (f"{mod.API_BASE}/repos/{urllib.parse.quote(owner, safe='')}/"
+               f"{urllib.parse.quote(repo, safe='')}/issues")
     neutral = {"title": title, "body": body, "assignee": ""}
     payload = translate_inbound(provider, "issues", "create", neutral,
                                 {"owner_repo": f"{owner}/{repo}"})
@@ -118,7 +124,8 @@ def _issue_url(provider: str, owner: str, repo: str, number) -> str:
     if provider == "github":
         return f"https://github.com/{owner}/{repo}/issues/{number}"
     if provider == "gitlab":
-        return f"https://gitlab.com/{owner}/{repo}/-/issues/{number}"
+        from src.vcs.gitlab import get_gitlab_base_url
+        return f"{get_gitlab_base_url()}/{owner}/{repo}/-/issues/{number}"
     return f"https://gitcode.com/{owner}/{repo}/issues/{number}"
 
 

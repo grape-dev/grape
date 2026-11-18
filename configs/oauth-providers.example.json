@@ -32,5 +32,23 @@
     "accept_header": "application/vnd.github+json",
     "client_id": "",
     "client_secret": ""
+  },
+  "gitlab": {
+    "name": "GitLab",
+    "base_url": "https://gitlab.example.com",
+    "auth_url": "https://gitlab.example.com/oauth/authorize",
+    "token_url": "https://gitlab.example.com/oauth/token",
+    "user_url": "https://gitlab.example.com/api/v4/user",
+    "redirect_uri": "https://grape.example.com/api/auth/callback/gitlab",
+    "scope": "read_user api",
+    "id_field": "id",
+    "login_field": "username",
+    "name_field": "name",
+    "pkce_enabled": false,
+    "brand_color": "#fc6d26",
+    "whitelist_column": "gitlab_username",
+    "accept_header": "application/json",
+    "client_id": "",
+    "client_secret": ""
   }
 }

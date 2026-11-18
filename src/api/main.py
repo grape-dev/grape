@@ -372,6 +372,89 @@ def _start_vcs_exists_backfill_task():
 
 
 # ===== main.py lifespan（单进程兼容模式，Issue #596 后保留）=====
+
+def _seed_codex_runtime(host_name: str = "") -> dict:
+    """幂等种子：本机直连 codex 引擎存在且具备认领能力。
+
+    历史缺陷：此处仅把 agent_tags 写死为 '[]'，且从不写 engine_capabilities。
+    后果有两层：
+
+    1. 派发侧 `query_engines(agent_type=...)` 按 agent_tags 过滤，空标签的
+       codex 恒被排除 → pick_engine 返回 0 → 任务以 runtime_id=0 广播入队；
+    2. 认领侧 `service.claim_by_tag()` 只认 engine_capabilities 中的
+       `tag=issue|all`，无行直接返回 None → 广播任务永久 queued。
+
+    修复：新行与存量行都补齐 `all` 能力标签并回写 agent_tags 派生缓存，
+    使本机 claimer 与远端 worker 走同一条认领链。`tags_user_set=1` 表示
+    用户在控制台手动配过标签，此时完全不碰，尊重人工配置。
+    """
+    import json as _json
+    import socket as _sock
+    from datetime import datetime as _dt, timezone as _tz
+
+    from src.config import log
+    from src.session_manager import db as _sm_db, db_lock as _sm_dl
+
+    _hn = host_name or _sock.gethostname()
+    _result = {"runtime_id": 0, "tagged": False, "user_set": False}
+    with _sm_dl:
+        _c = _sm_db.cursor()
+        _c.execute(
+            "SELECT id, tags_user_set FROM agent_runtimes WHERE name='codex' AND host_name=?",
+            (_hn,))
+        _row = _c.fetchone()
+        if _row:
+            _rid = _row[0]
+            _user_set = int(_row[1] or 0)
+            _c.execute(
+                "UPDATE agent_runtimes SET installed=1, healthy=1, status='online' WHERE id=?",
+                (_rid,))
+        else:
+            _c.execute("DELETE FROM agent_runtimes WHERE name='codex'")
+            _c.execute(
+                "INSERT INTO agent_runtimes "
+                "(credential_id, name, display_name, installed, healthy, scope, status, "
+                " host_name, pip_package, max_concurrent, agent_tags, scene_tags) "
+                "VALUES (0, 'codex', 'Codex Agent', 1, 1, 'global', 'online', "
+                "?, 'openai-codex', 10, '[\"all\"]', '[\"default\"]')",
+                (_hn,))
+            _rid = _c.lastrowid
+            _user_set = 0
+        _result["runtime_id"] = _rid
+        _result["user_set"] = bool(_user_set)
+
+        if not _user_set:
+            # 先查后写，跨 SQLite/MySQL 都幂等（不用 INSERT OR IGNORE / ON DUPLICATE KEY）
+            _c.execute(
+                "SELECT id, enabled FROM engine_capabilities WHERE runtime_id=? AND tag='all'",
+                (_rid,))
+            _cap = _c.fetchone()
+            _now = _dt.now(_tz.utc).isoformat()
+            if _cap:
+                if not _cap[1]:
+                    _c.execute(
+                        "UPDATE engine_capabilities SET enabled=1, updated_at=? WHERE id=?",
+                        (_now, _cap[0]))
+            else:
+                _c.execute(
+                    "INSERT INTO engine_capabilities "
+                    "(runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                    "VALUES (?, 'all', 1, 50, 1, ?, ?)",
+                    (_rid, _now, _now))
+            # agent_tags 是 capabilities 的派生缓存，必须与之一致
+            _c.execute(
+                "SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1 ORDER BY tag",
+                (_rid,))
+            _tags = [r[0] for r in _c.fetchall()]
+            _c.execute("UPDATE agent_runtimes SET agent_tags=? WHERE id=?",
+                       (_json.dumps(_tags, ensure_ascii=False), _rid))
+            _result["tagged"] = True
+        _sm_db.commit()
+    log.info(f"Runtime seed: codex rid={_rid} host={_hn} tags=all "
+             f"(user_set={bool(_user_set)})")
+    return _result
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from src.config import log
@@ -425,6 +508,14 @@ async def lifespan(app: FastAPI):
             log.warning("Templates: auto-sync attempted but issues remain, check logs")
     except Exception as e:
         log.warning(f"Templates: startup check failed: {e}")
+
+    # === 启动种子：codex runtime ===
+    # agent_runtimes 表在空 DB 首次启动时无行，Chat Agent 直接"无可用引擎"。
+    # 幂等 seed + 补齐 all 能力标签：否则 codex 既不参与派发过滤，也不认领广播任务。
+    try:
+        _seed_codex_runtime()
+    except Exception as _se:
+        log.warning(f"Runtime seed skipped: {_se}")
 
     # Issue #541：存量场景错误绑定幂等修复——dev_scene / issue.scene_id 曾误写
     # 模板场景名，扫描后按 market_scene_id 改绑仓内副本真实 scene_id（可安全重跑）
@@ -718,6 +809,14 @@ async def lifespan(app: FastAPI):
                             r["local_skills_detail"] = _scan_local_skills_with_detail(_name)
                             r["local_skills"] = [s["name"] for s in r["local_skills_detail"]]
                         user_db.save_agent_runtimes(probed, host_name=_hostname)
+                        # 对账会把本机已消失的引擎行物理删除（含去重），此时必须清掉
+                        # 指向这些行的 session 指针，否则 chat 配置行长期悬空：
+                        # 每次读配置都回落"未配置"并刷 WARNING（runtime_id=N 不存在）。
+                        try:
+                            from src.session_manager import purge_dangling_runtime_refs
+                            purge_dangling_runtime_refs()
+                        except Exception as _pd_e:
+                            log.warning(f"purge dangling runtime refs failed: {_pd_e}")
                     return len(probed)
                 try:
                     n = await asyncio.to_thread(_run)
@@ -728,6 +827,12 @@ async def lifespan(app: FastAPI):
 
         _probe_task = asyncio.create_task(_local_probe_loop())
         log.info("Local probe loop started (10min)")
+        # 启动期一次性对账：把历史遗留的悬空 runtime_id 指针归零（幂等，只清失效值）
+        try:
+            from src.session_manager import purge_dangling_runtime_refs
+            await asyncio.to_thread(purge_dangling_runtime_refs)
+        except Exception as _pd_e:
+            log.warning(f"startup purge dangling runtime refs failed: {_pd_e}")
     except Exception as e:
         log.warning(f"Local probe loop start failed: {e}")
 

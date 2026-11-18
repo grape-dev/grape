@@ -58,6 +58,26 @@ _DEFAULT_PROVIDERS: dict[str, dict] = {
         "whitelist_column": "github_username",
         "accept_header": "application/vnd.github+json",
     },
+    "gitlab": {
+        "name": "GitLab",
+        # 自建 GitLab：在 configs/oauth-providers.json 中覆盖为实例地址
+        #（同时可配 base_url，供 OpenAPI/webhook/页面链接复用）
+        "base_url": "https://gitlab.com",
+        "auth_url": "https://gitlab.com/oauth/authorize",
+        "token_url": "https://gitlab.com/oauth/token",
+        "user_url": "https://gitlab.com/api/v4/user",
+        # api：仓库读写 + webhook + Issue/MR；read_user：读取用户信息
+        "scope": "read_user api",
+        "id_field": "id",
+        "login_field": "username",
+        "name_field": "name",
+        "pkce_enabled": False,
+        "brand_color": "#fc6d26",
+        "whitelist_column": "gitlab_username",
+        "accept_header": "application/json",
+        # 手动 PAT 绑定页（自建实例在 oauth_providers_config.gitlab.pat_url 覆盖）
+        "pat_url": "https://gitlab.com/-/user_settings/personal_access_tokens",
+    },
 }
 
 # 运行时内存缓存——从 meta 表加载，无则用代码内置默认
@@ -66,6 +86,30 @@ _loaded: bool = False
 _cache_ts: float = 0.0          # P2-2: 上次加载时间戳
 _CACHE_TTL: float = 300.0       # P2-2: 缓存 TTL 5 分钟（兜底，admin 改配置时主动失效）
 _providers_lock = __import__("threading").Lock()
+
+
+def _normalize_gitlab_provider():
+    """自建 GitLab：实例地址是唯一事实源，所有端点由 base_url 派生。
+
+    优先级：GITLAB_BASE_URL 环境变量 > oauth_providers_config.gitlab.base_url。
+    避免配置里残留 gitlab.example.com 占位地址导致 OAuth 授权/令牌链接全部失效。
+    """
+    cfg = _PROVIDERS_CACHE.get("gitlab")
+    if not isinstance(cfg, dict):
+        return
+    base = (os.environ.get("GITLAB_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        base = (cfg.get("base_url") or "").strip().rstrip("/")
+    if not base:
+        return
+    cfg["base_url"] = base
+    cfg["auth_url"] = f"{base}/oauth/authorize"
+    cfg["token_url"] = f"{base}/oauth/token"
+    cfg["user_url"] = f"{base}/api/v4/user"
+    cfg["pat_url"] = f"{base}/-/user_settings/personal_access_tokens"
+    # 占位域名不可用于真实回调，留空以回退 Host 自动推断
+    if "example.com" in (cfg.get("redirect_uri") or ""):
+        cfg["redirect_uri"] = ""
 
 
 def _load_providers():
@@ -88,8 +132,18 @@ def _load_providers():
         if raw:
             try:
                 data = json.loads(raw)
+                # DB 配置只覆盖同名 provider，缺失的平台补代码内置默认——
+                # 否则历史配置（仅 gitcode/github）会让新增平台 get_provider() 返回 None，
+                # 表现为「/auth/bind/gitlab 400 不支持的平台」「回调路径不存在」。
+                merged = {k: dict(v) for k, v in _DEFAULT_PROVIDERS.items()}
+                for _k, _v in (data or {}).items():
+                    if isinstance(_v, dict):
+                        _base = merged.get(_k, {})
+                        _base.update(_v)
+                        merged[_k] = _base
                 _PROVIDERS_CACHE.clear()
-                _PROVIDERS_CACHE.update(data)
+                _PROVIDERS_CACHE.update(merged)
+                _normalize_gitlab_provider()
                 log.info(f"Loaded {len(_PROVIDERS_CACHE)} OAuth providers from DB: {list(_PROVIDERS_CACHE.keys())}")
                 _loaded = True
                 _cache_ts = time.time()
@@ -100,6 +154,7 @@ def _load_providers():
         # meta 表无配置 → 用代码内置默认
         _PROVIDERS_CACHE.clear()
         _PROVIDERS_CACHE.update(_DEFAULT_PROVIDERS)
+        _normalize_gitlab_provider()
         log.info(f"Using built-in default providers: {list(_PROVIDERS_CACHE.keys())}")
         _loaded = True
         _cache_ts = time.time()

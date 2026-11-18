@@ -603,7 +603,9 @@ from src.api.chat_session_env import chat_session_env_extra
 
 
 @router.post("/send", operation_id="chat_send", summary="Send message", description="Sends a chat message and returns the full assistant reply (text/structured).")
-async def send_message(body: ChatMessage, user: dict = Depends(require_no_session_token)):
+async def send_message(body: ChatMessage, request: Request, user: dict = Depends(require_no_session_token)):
+    # 网关基址：未显式配置对外地址时，用浏览器实际访问地址兜底注入 agent env
+    _req_base = str(request.base_url).rstrip("/")
     conv_id = body.conversation_id
     # Issue #344: 不再缓存明文 token 到 chat_conversations，agent 端实时从 external_identities 获取
     if conv_id:
@@ -714,7 +716,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     kind = runtime_execution_kind(_rid)
     if kind != EXEC_MODE_DIRECT:
         # M2 D5：入队 + 前端轮询任务状态（打字机效果降级）
-        return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data, body.video_data)
+        return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id,
+                             gitcode_token, body.image_data, body.video_data,
+                             request_base=_req_base)
 
     from src.runtime.executor import stream_chat_agent
     loop = asyncio.get_event_loop()
@@ -806,7 +810,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
             except Exception as _e:
                 log.warning(f"Chat post-exec 401 detect failed: {_e}")
             if _error_code:
-                _pName = "GitHub" if repo_key.startswith("github:") else "GitCode"
+                _pName = ("GitLab" if repo_key.startswith("gitlab:")
+                          else ("GitHub" if repo_key.startswith("github:") else "GitCode"))
                 reply = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
 
     add_message(conv_id, "agent", reply)
@@ -824,7 +829,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
 
 
 @router.post("/send/stream", operation_id="chat_send_stream", summary="Send message (SSE stream)", description="Sends a chat message over SSE: data:{delta} ... then data:{done}.")
-async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no_session_token)):
+async def send_message_stream(body: ChatMessage, request: Request, user: dict = Depends(require_no_session_token)):
+    _req_base = str(request.base_url).rstrip("/")
     conv_id = body.conversation_id
     # Issue #344: 不再缓存明文 token 到 chat_conversations
     if conv_id:
@@ -1189,12 +1195,14 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
     )
 
 
-def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token, image_data="", video_data=""):
+def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcode_token,
+                  image_data="", video_data="", request_base=""):
     """M2 D5：chat 入队 + 轮询任务状态（打字机效果降级，见 implementation-plan §三）。
 
     返回 {task_id, reply(占位), conversation_id}；前端轮询 GET /api/runtime/tasks/{id}/status。
     """
     from src.runtime.service import enqueue_task, get_execution_mode
+    from src.prompt_builder import _resolve_server_url
     from src.api.session_store import get_or_create_agent_session
     from src.config import log as _log
     import os as _os
@@ -1983,7 +1991,7 @@ def _format_chat_failure_text(enqueue_tid: str) -> str:
     return f"查询失败：{hint}；{action}"
 
 @router.post("/submit", operation_id="chat_submit", summary="Submit (task scenario)", description="Submits a chat query and immediately returns {task_id, conversation_id, status}; the agent runs in the background.")
-async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session_token)):
+async def chat_submit(body: ChatMessage, request: Request, user: dict = Depends(require_no_session_token)):
     """提交 chat 查询 → 立即返回 {task_id, conversation_id, status}。
 
     学习 Admin AI submit/stream 分离：
@@ -2056,6 +2064,8 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
         return {"task_id": chat_task_id, "conversation_id": conv_id, "status": "error",
                 "error": _reply}
 
+    # 网关基址：direct 分支的 agent_fn 闭包要用它注入 GRAPE_SERVER_URL
+    _req_base = str(request.base_url).rstrip("/")
     # 引擎路由（与 send/stream 一致）
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT, runtime_credential_id
     rid = cfg.get("runtime_id") or 0
@@ -2421,14 +2431,15 @@ def _chat_task_cleanup():
 
 
 @router.post("/send/async", operation_id="chat_send_async", summary="Send message (async)", description="Async message send: DB/engine work runs in executors. Local engines return a fallback stream; remote engines return task_id.")
-async def send_message_async(body: ChatMessage, user: dict = Depends(require_no_session_token)):
+async def send_message_async(body: ChatMessage, request: Request, user: dict = Depends(require_no_session_token)):
     """异步发送消息：所有同步 DB/引擎操作在 run_in_executor 中执行，不阻塞 event loop。
 
     本机直连 → 返回 fallback_stream（前端回退到 send/stream）
     远端引擎 → 返回 task_id（前端轮询 status）
     """
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _sync_send_async, body, user)
+    result = await loop.run_in_executor(None, _sync_send_async, body, user,
+                                        str(request.base_url).rstrip("/"))
     # 远端引擎 → 启动异步轮询（在主 event loop 中，不阻塞）
     if result.get("_enqueue_task_id"):
         asyncio.ensure_future(_poll_worker(result["task_id"], result["_enqueue_task_id"], result["conversation_id"]))
@@ -2436,7 +2447,7 @@ async def send_message_async(body: ChatMessage, user: dict = Depends(require_no_
     return result
 
 
-def _sync_send_async(body: ChatMessage, user: dict) -> dict:
+def _sync_send_async(body: ChatMessage, user: dict, request_base: str = "") -> dict:
     """send/async 的同步实现（在线程池中执行，不阻塞 event loop）。"""
     import time as _t, uuid as _uuid
     conv_id = body.conversation_id
@@ -2687,7 +2698,8 @@ def _execute_chat_task(task_id: str):
                     from src.token_service import detect_and_mark_expired
                     _task_error_code = detect_and_mark_expired(_task_repo_key) or ""
                     if _task_error_code:
-                        _pName = "GitHub" if _task_repo_key.startswith("github:") else "GitCode"
+                        _pName = ("GitLab" if _task_repo_key.startswith("gitlab:")
+                                  else ("GitHub" if _task_repo_key.startswith("github:") else "GitCode"))
                         final_text = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
                 except Exception as _te:
                     from src.config import log as _cte_log

@@ -25,38 +25,58 @@ def _repo_base(repo_key: str) -> str:
     return workspace_repo_dir(repo_key)
 
 
+_PROVIDER_PREFIXES = ("gitcode", "github", "gitlab")
+
+
 def _resolve_repo_key(repo: str) -> str:
-    """将前端传入的 owner/repo 解析为 DB 中实际使用的 repo_key。
-    
-    to_repo_key 默认 gitcode: 前缀，但 GitHub OAuth 仓库在 DB 中是 github: 前缀。
-    查 managed_repos 表确定实际前缀，找不到则回退 to_repo_key 默认值。
+    """将前端传入的 owner/repo（或已带前缀的 repo_key）解析为 DB 中实际使用的 repo_key。
+
+    历史实现只查 managed_repos 的 gitcode:/github: 两个前缀，两个失败模式：
+    ① GitLab 托管仓恒被解析成 gitcode:（前缀写死），下游权限/查询全落空 → 知识库直接 403；
+    ② 仓库只在 user_repos 缓存里、没有 managed_repos 行时，只能靠默认前缀猜。
+    改为三前缀 × 两个来源（managed_repos 优先，其次 user_repos），命中即用命中的 key。
+    嵌套 namespace（group/sub/repo）天然支持——只做前缀探测，不切割路径。
     """
     from src.repo_key import to_repo_key
+    if not repo:
+        return ""
     repo_key = to_repo_key(repo)
-    if ":" in repo:
-        return repo_key  # 已带前缀，直接返回
-    # 查 DB 确定实际前缀
+    if ":" in repo:            # 已带 provider 前缀，直接归一
+        return repo_key
     base = repo
-    candidates = [f"gitcode:{base}", f"github:{base}"]
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            placeholders = ",".join("?" * len(candidates))
-            row = c.execute(f"SELECT repo_key FROM managed_repos WHERE repo_key IN ({placeholders}) LIMIT 1", candidates).fetchone()
-            if row:
-                return row[0]
-    except Exception:
-        pass
+    candidates = [f"{p}:{base}" for p in _PROVIDER_PREFIXES]
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        placeholders = ",".join("?" * len(candidates))
+        for table in ("managed_repos", "user_repos"):
+            try:
+                row = c.execute(
+                    f"SELECT repo_key FROM {table} WHERE repo_key IN ({placeholders}) LIMIT 1",
+                    candidates).fetchone()
+                if row and row[0]:
+                    return row[0]
+            except Exception:
+                continue
     return repo_key
 
 
 def _check_repo_member(user: dict, repo_key: str):
-    """校验知识读取权限。
+    """校验知识读写权限。
 
-    - 会话 token（`tk_`，devops agent 无 user_repos）：按 token 绑定的仓库作用域匹配
-      （provider + owner/repo 一致才放行，防绑 A 读 B，见 issue-219 知识按需获取）。
-    - 用户（JWT / `grape_` API Key）：仓库成员（托管者或已加入）。
+    放行条件（任一命中）：
+    1. 会话 token（`tk_`）：token 绑定的仓库作用域与目标仓库一致（provider + owner/repo），
+       防绑 A 读 B（issue-219 知识按需获取）；
+    2. 目标仓库在该用户的 `user_repos`（VCS 可见仓库缓存）内；
+    3. 同一 owner/repo 在**其他 provider 前缀**下命中 user_repos（前缀漂移容忍，
+       例如前端/库里一边是 gitcode: 一边是 gitlab:）；
+    4. 仓库已托管在本平台，且用户是**托管组织成员**——托管是组织的显式行为，
+       知识属于组织资产；`user_repos` 是易失缓存（每次同步整表 DELETE 重写，
+       且只继承 is_join=1 AND is_admin=1 的行），只靠它判定会让合法成员在缓存漏同步时
+       直接 403（"项目知识库打开失败"就是这样来的：仓库在，权限却查不到）。
+
+    拒绝时记录可诊断原因（哪个分支、用户可见仓库数、是否在其他前缀下存在），
+    避免生产上只看到 403 无从判断。
     """
     if user.get("auth_type") == "session_token":
         from src.repo_key import parse_repo_key
@@ -64,20 +84,49 @@ def _check_repo_member(user: dict, repo_key: str):
         _req_prov, _req_owner, _req_repo = parse_repo_key(repo_key)
         if _tok_owner and (_tok_prov, _tok_owner, _tok_repo) == (_req_prov, _req_owner, _req_repo):
             return
+        log.warning(f"knowledge access denied (403): session token scope mismatch | "
+                    f"token_repo={user.get('repo_key')} requested={repo_key} "
+                    f"user_id={user.get('id')}")
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问此仓库的知识库（仓库作用域不匹配）"})
+
     from src.user.db import get_user_repos
+    from src.repo_key import parse_repo_key, from_repo_key
     user_id = user.get("id")
     if not user_id:
+        log.warning(f"knowledge access denied (403): no user id | requested={repo_key}")
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无法识别用户身份"})
     try:
         repos = get_user_repos(user_id) or []
-        is_member = any(r.get("repo_key") == repo_key for r in repos)
-        if not is_member:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问此仓库的知识库"})
-    except HTTPException:
-        raise
-    except Exception:
+    except Exception as e:
+        log.warning(f"knowledge access denied (403): load user_repos failed | "
+                    f"user_id={user_id} requested={repo_key} err={e}")
         raise HTTPException(status_code=403, detail={"code": 403, "message": "权限校验失败"})
+
+    if any(r.get("repo_key") == repo_key for r in repos):
+        return
+    # 3) 前缀漂移容忍：同一 owner/repo 在别的 provider 下命中
+    _req_prov, _req_owner, _req_repo = parse_repo_key(repo_key)
+    for r in repos:
+        _p, _o, _n = parse_repo_key(r.get("repo_key") or "")
+        if _o and _n and (_o, _n) == (_req_owner, _req_repo):
+            return
+    # 4) 托管仓库 + 组织成员兜底
+    try:
+        from src.user.org_db import get_org_id_by_repo_key, is_org_member
+        _org_id = get_org_id_by_repo_key(repo_key)
+        if _org_id and is_org_member(user_id, _org_id):
+            return
+    except Exception as e:
+        log.warning(f"knowledge access: org fallback check failed | "
+                    f"user_id={user_id} repo={repo_key} err={e}")
+        _org_id = 0
+
+    log.warning(
+        f"knowledge access denied (403): not a member | user_id={user_id} "
+        f"requested={repo_key} visible_repos={len(repos)} org_id={_org_id} "
+        f"hint=该用户 user_repos 缓存无此仓库，且非托管组织成员；"
+        f"可让用户重新同步仓库或确认仓库所属组织")
+    raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问此仓库的知识库"})
 
 
 @router.get("", operation_id="knowledge_list", summary="List knowledge (paged)", description="Unified knowledge list: paged rows from DB only (stats live in a separate endpoint).")

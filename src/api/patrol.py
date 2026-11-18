@@ -680,6 +680,49 @@ def _iter_completed_tasks(cutoff: str, chunk: int = 500):
         last_id = rows[-1][0]
 
 
+def expected_next_agent(repo_key: str, issue_id: str, agent_type: str) -> tuple[bool, str]:
+    """该任务所在节点是否**本应有**下一棒；返回 (expects_handoff, next_agent)。
+
+    为什么需要：D6 让 `next_step` 成为交棒意图的单源，但 `detect_broken_chains`
+    原来对"next_step 为空/不以 a2a 开头"直接 `continue`——于是"任务 completed 却
+    根本没声明下一棒"这类断链**巡检零感知**：不产生 finding、不进补偿队列、
+    Issue 永久停在原阶段，只能靠人肉发现（vod 跑完不进 Issue 就是这个形态）。
+    而 `patrol_compensate` 里 `target_agent` 为空的 `needs_human` 分支因此成了
+    死代码，永远执行不到。
+
+    判定依据是场景节点定义（`get_pipeline_config` 四源解析）：找到 agent_type
+    对应节点，`next` 非空且非 "done"、`handoff == "a2a"` → 本应有下一棒。
+    场景解析不到（fallback / 无该节点）→ 返回 (False, "")，**不做乐观判定**：
+    宁可漏报也不误报，误报会让补偿对正常收尾的末棒派发下游、把已收敛的链复活。
+    """
+    if not repo_key or not issue_id or not agent_type:
+        return False, ""
+    try:
+        from src.api.session_store import get_issue_stage
+        st = get_issue_stage(repo_key, issue_id) or {}
+        scene_id = (st.get("scene_id") or "").strip()
+        if not scene_id:
+            return False, ""
+        from src.api.pipeline_config import get_pipeline_config
+        cfg = get_pipeline_config(scene_id, repo_key=repo_key)
+        if not cfg or cfg.get("fallback"):
+            return False, ""
+        for node in (cfg.get("nodes") or []):
+            _ids = {str(node.get("id") or ""), str(node.get("tag") or "")}
+            if agent_type not in _ids:
+                continue
+            next_id = str(node.get("next") or "").strip()
+            if not next_id or next_id == "done":
+                return False, ""          # 末棒正常收尾
+            if str(node.get("handoff") or "") != "a2a":
+                return False, ""          # 该节点非交棒语义
+            return True, next_id
+    except Exception as e:
+        log.warning(f"[patrol] expected_next_agent failed "
+                    f"repo={repo_key} issue={issue_id} agent={agent_type}: {e}")
+    return False, ""
+
+
 def detect_broken_chains(lookback_cutoff_iso: str = "", known: set = None) -> list[dict]:
     """三层判定断链（Phase 1 只读）。返回 finding 描述列表（不落库，由调用方聚合）。
 
@@ -723,9 +766,43 @@ def detect_broken_chains(lookback_cutoff_iso: str = "", known: set = None) -> li
     for (tid, repo_key, issue_id, agent_type, completed_at, age_min) in prefiltered:
         try:
             next_step = extract_next_step(texts.get(tid) or "")
-            if not next_step.lower().startswith("a2a"):
+            _a2a_intent = next_step.lower().startswith("a2a")
+            target_agent = parse_target_agent(next_step) if _a2a_intent else ""
+            if not target_agent and not _a2a_intent:
+                # 「根本没声明下一棒」：原实现此处直接 continue，于是这类断链对巡检
+                # **完全不可见**（不落 finding → 不进补偿队列 → Issue 永久停在原阶段，
+                # 零告警）。vod 跑完不进 Issue 就是这个形态：交办请求被 A2A 端点 400
+                # 拒掉后，agent 输出里 next_step/actions 都是空的。
+                # 只有场景节点确实还有下一棒才登记；末棒正常收尾不报（防误报复活已收敛链）。
+                _expects, _exp_next = expected_next_agent(repo_key, issue_id, agent_type or "")
+                if not _expects:
+                    continue
+                # 终检：下游任务其实已经起来了（交棒成功但没写 next_step）→ 非断链
+                if l2_downstream_exists(repo_key, issue_id, _exp_next, completed_at or "",
+                                        _subtask_parent(repo_key, issue_id or "")):
+                    continue
+                findings.append({
+                    "kind": "broken_chain",
+                    "task_id": tid,
+                    "event_seq": 0,
+                    "repo_key": repo_key,
+                    "issue_id": issue_id,
+                    "detail": json.dumps({
+                        "agent_type": agent_type or "",
+                        "next_step": next_step,
+                        "target_agent": "",
+                        "expected_next": _exp_next,
+                        "reason": "no_next_step",
+                        "completed_at": completed_at or "",
+                        "age_minutes": round(age_min, 1),
+                        "l1": "miss", "l2": "miss",
+                    }, ensure_ascii=False),
+                    "suggestion": (f"任务已完成但未声明下一棒（next_step 为空或非 a2a），"
+                                   f"按场景节点应交给 {_exp_next}："
+                                   f"核对 agent 交办是否被拒（查 A2A rejected 日志），"
+                                   f"或用 POST /api/events/{{seq}}/a2a-redo 补发该 Agent"),
+                })
                 continue
-            target_agent = parse_target_agent(next_step)
             if l1_event_exists(repo_key, issue_id, completed_at or "", target_agent):
                 continue  # L1 命中：交棒已发生
             if l2_downstream_exists(repo_key, issue_id, target_agent, completed_at or "",

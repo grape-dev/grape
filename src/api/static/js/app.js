@@ -614,7 +614,8 @@ function loadAgentTypes() {
     var bindSuccess = params.get('bind_success');
     var bindError = params.get('bind_error');
     if (bindSuccess) {
-      var label = bindSuccess === 'gitcode' ? 'GitCode' : 'GitHub';
+      var label = bindSuccess === 'gitcode' ? 'GitCode'
+                : bindSuccess === 'gitlab' ? 'GitLab' : 'GitHub';
       showToast(I18N.t('app.login.bind_success', {label: label}),
                 I18N.t('app.login.bind_success_desc'));
       // D43: 绑定成功后清除仓库缓存，下次拉取获取含新平台的仓库
@@ -985,24 +986,22 @@ function loadAgentTypes() {
         sel.innerHTML = '<option value="__add__">＋ ' + (I18N.t('app.repo.add_new') || '新增仓库托管') + '</option>';
         sel.onclick = function() { switchRepo('__add__'); };
       } else {
-        // 按平台分组：optgroup label 为平台名称
-        var gitcodeRepos = repos.filter(function(r) { return !(r.repo_key || '').startsWith('github:'); });
-        var githubRepos = repos.filter(function(r) { return (r.repo_key || '').startsWith('github:'); });
+        // 按平台分组：optgroup label 为平台名称（GitLab 单列，不再并入 GitCode）
+        var _groupDefs = [
+          {key: 'gitcode', label: 'GitCode'},
+          {key: 'github', label: 'GitHub'},
+          {key: 'gitlab', label: 'GitLab'}
+        ];
         var html = '';
-        if (gitcodeRepos.length > 0) {
-          html += '<optgroup label="GitCode">';
-          gitcodeRepos.forEach(function(r) {
+        _groupDefs.forEach(function(g) {
+          var list = repos.filter(function(r) { return _vcsProviderOf(r.repo_key) === g.key; });
+          if (list.length === 0) return;
+          html += '<optgroup label="' + g.label + '">';
+          list.forEach(function(r) {
             html += `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`;
           });
           html += '</optgroup>';
-        }
-        if (githubRepos.length > 0) {
-          html += '<optgroup label="GitHub">';
-          githubRepos.forEach(function(r) {
-            html += `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`;
-          });
-          html += '</optgroup>';
-        }
+        });
         html += '<option value="__add__">＋ ' + I18N.t('app.repo.add_new') + '</option>';
         sel.innerHTML = html;
         sel.onclick = null;
@@ -1114,6 +1113,8 @@ function loadAgentTypes() {
     // R7.5: 不过滤 configured——所有平台始终显示，未配 OAuth App 时点击走手动令牌绑定
     API.get('/auth/providers').then(function(d) {
       var providers = d.providers || [];
+      // 记录 GitLab 实例地址（自建域名），供仓库外链拼接
+      _cacheVcsProviders(d);
       // #535 修复：写入共享缓存 _accountProvidersData——引导页 → bindProvider →
       // _accountBindProvider 读同一缓存判断 OAuth tab；此前只有账号安全 tab 填充它，
       // 引导路径缓存为 null 被保守猜成「未配置」（配合 account.js 的 fetch 兜底双保险）
@@ -1123,7 +1124,8 @@ function loadAgentTypes() {
       // Fallback: show both platforms
       _renderOnboardingShell([
         {provider: 'gitcode', name: 'GitCode', brand_color: '#F54A36'},
-        {provider: 'github', name: 'GitHub', brand_color: '#1F2328'}
+        {provider: 'github', name: 'GitHub', brand_color: '#1F2328'},
+        {provider: 'gitlab', name: 'GitLab', brand_color: '#FC6D26'}
       ], isZh, name, avatar);
     });
   }
@@ -1728,11 +1730,19 @@ function loadAgentTypes() {
       if (!$('repoSelect') || $('repoSelect').options.length <= 1) initSidebarRepos();
       var _rk = repo.repoKey || repo.repo_key || '';
       var _fn = repo.fullName || (repo.owner + '/' + repo.name);
-      var _isGithub = _rk.indexOf('github:') === 0;
-      var _repoLink = _isGithub ? 'https://github.com/' + _fn : 'https://gitcode.com/' + _fn;
-      var _logo = _isGithub
-        ? '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px;margin-right:5px;color:var(--t2)"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>'
-        : '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px;margin-right:5px;color:var(--t2)"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
+      var _provider = _vcsProviderOf(_rk);
+      // 外链按平台分派：GitLab 优先用接口返回的 web_url（自建实例域名各异），
+      // 其余平台按 base + full_name 拼接，不再一律兜底到 gitcode.com
+      var _repoLink = repo.webUrl || repo.web_url || _vcsUrl(_rk || (_provider + ':' + _fn), '');
+      var _svgStyle = 'width="14" height="14" fill="currentColor" style="vertical-align:-2px;margin-right:5px;color:var(--t2)"';
+      var _logo;
+      if (_provider === 'gitlab') {
+        _logo = '<svg ' + _svgStyle + ' viewBox="0 0 24 24"><path d="M23.955 13.587l-1.342-4.135-2.648-8.106a.555.555 0 00-.53-.377.555.555 0 00-.532.378l-2.646 8.106H5.18L2.532 1.347a.555.555 0 00-.53-.378.555.555 0 00-.532.378L-.178 9.452a1.11 1.11 0 00.402 1.243l11.314 8.22a1.113 1.113 0 001.346 0l11.314-8.221a1.11 1.11 0 00.402-1.243l-.001-.002.001.001z"/></svg>';
+      } else if (_provider === 'github') {
+        _logo = '<svg ' + _svgStyle + ' viewBox="0 0 1024 1024"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>';
+      } else {
+        _logo = '<svg ' + _svgStyle + ' viewBox="0 0 1024 1024"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
+      }
       repoTitle.innerHTML = `${_logo}<a href="${_repoLink}" target="_blank" rel="noopener" style="color:var(--a);font-weight:500;text-decoration:none" title="打开 ${_fn}">${repo.fullName} ↗</a>`;
     } else {
       repoTitle.textContent = '';
@@ -1997,7 +2007,7 @@ function loadAgentTypes() {
     // B+（Issue #535）：配置状态已知且未配置 → 不发请求直接给出原因+文档入口；
     // 状态未知（providers 未返回/检测失败）→ 走下方 API 的 A 兜底路径
     if (_oauthConfiguredMap && _oauthConfiguredMap[provider] === false) {
-      var _nm0 = {gitcode: 'GitCode', github: 'GitHub'}[provider] || provider;
+      var _nm0 = {gitcode: 'GitCode', github: 'GitHub', gitlab: 'GitLab'}[provider] || provider;
       var _lt0 = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
       showToast(
         I18N.t('app.login.oauth_not_configured', {name: _nm0}, _nm0 + ' OAuth 未配置，' + _nm0 + ' 登录暂不可用'),
@@ -2020,10 +2030,11 @@ function loadAgentTypes() {
         return;
       }
       // R7.5: 未配 OAuth App 时提示用户用用户名+密码注册；附帮助文档链接（OAuth App 配置指南）
-      var _nm = {gitcode: 'GitCode', github: 'GitHub'}[provider] || provider;
+      var _nm = {gitcode: 'GitCode', github: 'GitHub', gitlab: 'GitLab'}[provider] || provider;
       var _doc = {
         gitcode: '/static/help.html#/developer/01-gitcode-integration',
-        github: '/static/help.html#/developer/02-github-integration'
+        github: '/static/help.html#/developer/02-github-integration',
+        gitlab: '/static/help.html#/developer/00-overview'
       }[provider] || '/static/help.html';
       var _linkText = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
       showToast(
@@ -2066,7 +2077,7 @@ function loadAgentTypes() {
       });
       if (anyUnconfigured) {
         var providers = Object.keys(inj).map(function(k) {
-          return { provider: k, name: {gitcode: 'GitCode', github: 'GitHub'}[k] || k, configured: !!inj[k] };
+          return { provider: k, name: {gitcode: 'GitCode', github: 'GitHub', gitlab: 'GitLab'}[k] || k, configured: !!inj[k] };
         });
         _renderOAuthUnconfiguredHint(container, providers);
       }
@@ -2076,7 +2087,8 @@ function loadAgentTypes() {
   function _oauthDocUrl(provider) {
     return {
       gitcode: '/static/help.html#/developer/01-gitcode-integration',
-      github: '/static/help.html#/developer/02-github-integration'
+      github: '/static/help.html#/developer/02-github-integration',
+      gitlab: '/static/help.html#/developer/00-overview'
     }[provider] || '/static/help.html';
   }
 
@@ -2139,7 +2151,7 @@ function loadAgentTypes() {
           var icon = _oauthIcon(p.provider, p.name);
           var i18nKey = 'app.login.' + p.provider + '_login';
           // 品牌色前端覆盖——后端返回的原始色值不适配 Apple 设计风格
-          var _brandOverride = {gitcode: '#F54A36', github: '#1F2328'};
+          var _brandOverride = {gitcode: '#F54A36', github: '#1F2328', gitlab: '#FC6D26'};
           var _brandColor = _brandOverride[p.provider] || p.brand_color || '';
           var brandVar = _brandColor ? ' style="--brand:' + _brandColor + '"' : '';
           var ariaVar = p.configured ? '' : ' aria-disabled="true"';
@@ -2178,7 +2190,7 @@ function loadAgentTypes() {
       return;
     }
     var names = unconfigured.map(function(p) {
-      return {gitcode: 'GitCode', github: 'GitHub'}[p.provider] || (p.name || p.provider);
+      return {gitcode: 'GitCode', github: 'GitHub', gitlab: 'GitLab'}[p.provider] || (p.name || p.provider);
     }).join(' / ');
     var linkText = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
     var hint = I18N.t('app.login.oauth_needs_config', {name: names},
@@ -2221,6 +2233,7 @@ function openBetaApply() {
             <select id="betaPlatform" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
               <option value="gitcode">GitCode</option>
               <option value="github">GitHub</option>
+              <option value="gitlab">GitLab</option>
             </select>
           </div>
           <div>
@@ -2870,7 +2883,7 @@ function openBetaApply() {
     var overlay = document.createElement('div');
     overlay.id = 'whitelistModal';
     overlay.style.cssText = 'position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center';
-    var platName = platform === 'github' ? 'GitHub' : 'GitCode';
+    var platName = platform === 'github' ? 'GitHub' : (platform === 'gitlab' ? 'GitLab' : 'GitCode');
     overlay.innerHTML =
       '<div style="background:var(--c,#fff);border-radius:20px;padding:40px;text-align:center;width:400px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25)">'
         + '<div style="font-size:48px;margin-bottom:16px">🔒</div>'
@@ -3128,6 +3141,8 @@ function openBetaApply() {
     // Issue #231: 最先执行 currentRepo 迁移（localStorage → sessionStorage），
     // 必须在 cache 版本检查之前，避免 localStorage.clear() 抹掉待迁移值，保证已有用户无感知。
     _migrateCurrentRepo();
+    // 缓存 VCS 平台实例地址（自建 GitLab 域名），供仓库外链/Issue 链接复用
+    _loadVcsProviderBases();
     console.log("[init] start", JSON.stringify({
       hasToken: !!localStorage.getItem('token'),
       cacheVer: localStorage.getItem('app_cache_ver'),
@@ -3410,13 +3425,63 @@ function openBetaApply() {
   return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
 })();
 
+/** VCS 平台基地址缓存：自建 GitLab 的实例地址因部署而异，由 /auth/providers 提供。 */
+window._vcsProviderBases = window._vcsProviderBases || {};
+
+/** 从 repo_key 前缀解析平台标识。 */
+function _vcsProviderOf(repoKey) {
+  var rk = repoKey || '';
+  if (rk.indexOf('github:') === 0) return 'github';
+  if (rk.indexOf('gitlab:') === 0) return 'gitlab';
+  return 'gitcode';
+}
+
+/** GitLab 站点根地址：优先用缓存的实例地址，其次 localStorage，最后官方站。 */
+function _vcsGitlabBase() {
+  if (window._vcsProviderBases.gitlab) return window._vcsProviderBases.gitlab;
+  try {
+    var _save = localStorage.getItem('vcs_gitlab_base');
+    if (_save) return _save;
+  } catch (e) {}
+  return 'https://gitlab.com';
+}
+
+/** 缓存 /auth/providers 返回的实例地址（pat_url 的 origin 即实例根地址）。 */
+function _cacheVcsProviders(data) {
+  var list = (data && data.providers) || [];
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i];
+    if (!p || p.provider !== 'gitlab' || !p.pat_url) continue;
+    var m = /^(https?:\/\/[^\/]+)/i.exec(p.pat_url);
+    if (!m) continue;
+    window._vcsProviderBases.gitlab = m[1];
+    try { localStorage.setItem('vcs_gitlab_base', m[1]); } catch (e) {}
+  }
+}
+
+/** 启动时补齐 provider 实例地址缓存（/auth/providers 为公开接口，幂等）。 */
+function _loadVcsProviderBases() {
+  if (window._vcsProviderBasesLoaded) return;
+  window._vcsProviderBasesLoaded = true;
+  try {
+    API.get('/auth/providers').then(function(d) { _cacheVcsProviders(d); }).catch(function() {});
+  } catch (e) {}
+}
+
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */
 function _vcsUrl(repoKey, path) {
   var rk = repoKey || '';
-  var host = rk.indexOf('github:') === 0 ? 'https://github.com' : 'https://gitcode.com';
-  var parts = rk.split(':');
-  var repoPath = parts.length > 1 ? parts[1] : rk;
-  return host + '/' + repoPath + (path || '');
+  var repoPath = rk.replace(/^(gitcode|github|gitlab):/, '');
+  var p = path || '';
+  var host = 'https://gitcode.com';
+  if (rk.indexOf('github:') === 0) {
+    host = 'https://github.com';
+  } else if (rk.indexOf('gitlab:') === 0) {
+    try { host = _vcsGitlabBase(); } catch (e) { host = 'https://gitlab.com'; }
+    // GitLab 的 Issue / MR 路径与 GitHub/GitCode 不同
+    p = p.replace(/^\/issues\//, '/-/issues/').replace(/^\/pull\//, '/-/merge_requests/');
+  }
+  return host + '/' + repoPath + p;
 }
 document.addEventListener('DOMContentLoaded', function() {
   // 等 i18n 语言包异步加载完成后初始化，避免刷新页面时 I18N.t() 返回 key

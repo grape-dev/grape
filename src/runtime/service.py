@@ -1204,6 +1204,16 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     except Exception:
         _task_span = None
         _task_trace_context = ""
+    # 所有任务（尤其 chat / autopilot 的裸 enqueue）都必须带网关地址：缺了
+    # GRAPE_SERVER_URL 时 grape-cli 会回落到自己默认的 http://localhost:8000，
+    # 容器/沙盒内无服务 → Issue 读写全部失败。setdefault 保留调用方显式值。
+    try:
+        from src.prompt_builder import _resolve_server_url
+        _gateway = _server_url or _resolve_server_url(runtime_id)
+    except Exception:
+        _gateway = _server_url
+    if _gateway:
+        env.setdefault("GRAPE_SERVER_URL", _gateway)
     with db_lock:
         c = db.cursor()
         _avail = _table_columns("agent_tasks")
@@ -3413,7 +3423,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
                         # 无 handler（无 token 配置）→ fallback 直接调 _post_result_to_issue
                         from src.api.event_pipeline import _post_result_to_issue
                         _post_result_to_issue(_repo, _issue_num, _result_text, _token, _agent_type,
-                                              agent_result=True, task_id=task_id,
+                                              _repo_key, agent_result=True, task_id=task_id,
                                               seq=task.get("event_seq"))
                 except Exception as _pe:
                     log.warning(f"complete_task: handler.post_issue_comment failed: {_pe}")
@@ -3421,7 +3431,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
                     if _token:
                         from src.api.event_pipeline import _post_result_to_issue
                         _post_result_to_issue(_repo, _issue_num, _result_text, _token, _agent_type,
-                                              agent_result=True, task_id=task_id,
+                                              _repo_key, agent_result=True, task_id=task_id,
                                               seq=task.get("event_seq"))
             # 2. 子任务 SRE 完成 → 登记到父 Issue
             if _agent_type == "sre" and _issue_num and _token:
@@ -3432,11 +3442,14 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
                         _parent_num = _issue_num_from(_parent)
                         _sub_num = _issue_num
                         if _parent_num and _sub_num and _repo:
-                            _post_subtask_completion_to_parent(_repo, _sub_num, _parent_num, _result_text, _token)
+                            _post_subtask_completion_to_parent(
+                                _repo, _sub_num, _parent_num, _result_text, _token,
+                                repo_key=_repo_key)
                             _subs = get_subtask_issues(_repo_key, _parent)
                             _all_done = all(s.get("stage") == "done" or s.get("issue_id") == _issue_id for s in _subs)
                             if _all_done and len(_subs) > 0:
-                                _post_all_subtasks_done(_repo, _parent_num, _subs, _token)
+                                _post_all_subtasks_done(
+                                    _repo, _parent_num, _subs, _token, repo_key=_repo_key)
                 except Exception as _se:
                     log.warning(f"complete_task subtask post failed: {_se}")
             # 3. 同步结果到任务会话
@@ -3808,6 +3821,7 @@ def _fetch_issue_comments(repo_key: str, repo: str, issue_num: str, token: str) 
     Issue #372 R10 P2-1: fail_task 发"Token 已过期"回帖前去重用。
     GitHub: GET /repos/{owner}/{repo}/issues/{num}/comments
     GitCode: GET /api/v5/repos/{repo}/issues/{num}/comments
+    GitLab: GET /api/v4/projects/{urlencoded}/issues/{iid}/notes（note 归一为 body）
     返回评论 dict 列表（每项含 body 字段），失败返回空列表。
     """
     try:
@@ -3821,14 +3835,51 @@ def _fetch_issue_comments(repo_key: str, repo: str, issue_num: str, token: str) 
                 token,
             )
             return _result if isinstance(_result, list) else []
-        else:
-            import urllib.request, json as _json
-            _url = f"https://gitcode.com/api/v5/repos/{repo}/issues/{issue_num}/comments?per_page=100"
-            _req = urllib.request.Request(_url, headers={"Authorization": f"Bearer {token}"})
-            _resp = urllib.request.urlopen(_req, timeout=15)
-            return _json.loads(_resp.read())
+        if repo_key.startswith("gitlab:"):
+            # 自建 GitLab：base URL 动态读取；owner/repo 支持 group/subgroup/repo 嵌套
+            from src.repo_key import split_owner_repo
+            from src.user.repo_manager import _gitlab_req
+            from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+            _o, _r = split_owner_repo(repo_key)
+            _url = (f"{get_gitlab_api_base()}/projects/{gitlab_project_path(_o, _r)}"
+                    f"/issues/{issue_num}/notes?per_page=100")
+            _result = _gitlab_req("GET", _url, token)
+            _items = _result if isinstance(_result, list) else []
+            for _c in _items:
+                if isinstance(_c, dict) and "body" not in _c and "note" in _c:
+                    _c["body"] = _c["note"]
+            return _items
+        import urllib.request, json as _json
+        _url = f"https://gitcode.com/api/v5/repos/{repo}/issues/{issue_num}/comments?per_page=100"
+        _req = urllib.request.Request(_url, headers={"Authorization": f"Bearer {token}"})
+        _resp = urllib.request.urlopen(_req, timeout=15)
+        return _json.loads(_resp.read())
     except Exception:
         return []
+
+
+def _global_bot_token_by_repo(repo_key: str) -> str:
+    """fail_task 回帖降级用的全局 bot token，按 provider 分流。
+
+    GitLab 不能拿 GitCode 全局 bot token（不同平台 token 不通用，会 401）。
+    """
+    if str(repo_key or "").startswith("github:"):
+        try:
+            from src.user.db import get_global_github_bot_token
+            return get_global_github_bot_token() or ""
+        except Exception:
+            return ""
+    if str(repo_key or "").startswith("gitlab:"):
+        try:
+            from src.token_resolver import create_provider, global_bot_token_for_provider
+            return global_bot_token_for_provider(create_provider("gitlab")) or ""
+        except Exception:
+            return ""
+    try:
+        from src.user.db import _get_global_bot_token
+        return _get_global_bot_token() or ""
+    except Exception:
+        return ""
 
 
 def _task_created_key(value):
@@ -4118,22 +4169,12 @@ def fail_task(task_id, error, exit_code=-1):
                         if _handler:
                             _comment_token = _handler.get_comment_token(_resolve_result) or ""
                         else:
-                            # 无 handler → fallback 到全局 bot token
-                            if _rk.startswith("github:"):
-                                from src.user.db import get_global_github_bot_token
-                                _comment_token = get_global_github_bot_token() or ""
-                            else:
-                                from src.user.db import _get_global_bot_token
-                                _comment_token = _get_global_bot_token() or ""
+                            # 无 handler → fallback 到该平台的全局 bot token
+                            _comment_token = _global_bot_token_by_repo(_rk) or ""
                     except Exception as _cte:
                         log.warning(f"fail_task: handler.get_comment_token failed: {_cte}")
-                        # fallback 到原有逻辑
-                        if _rk.startswith("github:"):
-                            from src.user.db import get_global_github_bot_token
-                            _comment_token = get_global_github_bot_token() or ""
-                        else:
-                            from src.user.db import _get_global_bot_token
-                            _comment_token = _get_global_bot_token() or ""
+                        # fallback 到原有逻辑（按 provider 分流）
+                        _comment_token = _global_bot_token_by_repo(_rk) or ""
                         if not _comment_token:
                             _comment_token = _get_task_token(task) or ""
 

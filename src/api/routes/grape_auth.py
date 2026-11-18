@@ -999,7 +999,7 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     # F6 加固：provider 白名单——um_column_for_provider() 对未知 provider 会默认
     # 清 gitcode_user 列（行为错误）；白名单同时是下方 LIKE 前缀为常量、
     # 无通配符这一安全前提的显式保证。
-    if provider not in ("gitcode", "github"):
+    if provider not in ("gitcode", "github", "gitlab"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的平台: {provider}"})
 
     # 需求17: 解绑前检查该平台下是否有正在使用的仓库（已建立 webhook 的托管仓库）
@@ -1069,8 +1069,10 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     from src.session_manager import db as _sm_db, db_lock as _sm_dl
     with _sm_dl:
         _c = _sm_db.cursor()
-        _c.execute(f"UPDATE unified_user_mapping SET {_um_col}='' WHERE user_id=?", (user["id"],))
-        _sm_db.commit()
+        # um_column_for_provider 已按三平台分流（gitlab_user 列由迁移保证存在）
+        if _um_col:
+            _c.execute(f"UPDATE unified_user_mapping SET {_um_col}='' WHERE user_id=?", (user["id"],))
+            _sm_db.commit()
 
     # R30: 先计算受影响仓库数量（在删除 user_repos 之前）
     affected_count = 0
@@ -1149,7 +1151,7 @@ def get_me(user: dict = Depends(require_no_session_token)):
     expired_providers = []
     try:
         from src.auth.grape_account_db import is_identity_expired
-        for _p in ("gitcode", "github"):
+        for _p in ("gitcode", "github", "gitlab"):
             if is_identity_expired(user["id"], _p):
                 expired_providers.append({
                     "provider": _p,
@@ -2333,11 +2335,19 @@ def list_oauth_providers():
         cfg = get_provider(key) or {}
         client_id = get_meta_value(f"oauth_{key}_client_id") or ""
 
+        _pat_url = cfg.get("pat_url") or ""
+        if key == "gitlab":
+            # 自建 GitLab：令牌页链接跟随实例地址，不写死 gitlab.com
+            from src.vcs.gitlab import get_gitlab_base_url
+            _gl_base = get_gitlab_base_url()
+            if _gl_base and _gl_base != "https://gitlab.com":
+                _pat_url = f"{_gl_base}/-/user_settings/personal_access_tokens"
         result.append({
             "provider": key,
             "name": cfg.get("name", key),
             "configured": bool(client_id),
             "brand_color": cfg.get("brand_color", ""),
+            "pat_url": _pat_url,
         })
     # R7: 返回 email_configured 供前端判断无邮箱配置降级
     from src.auth.email_service import is_email_configured

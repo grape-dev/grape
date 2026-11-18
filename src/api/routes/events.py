@@ -2477,7 +2477,8 @@ def list_events(owner: str, repo: str,
     # tk_ 会话 token：限定其绑定仓库（防 Agent 跨仓库读事件列表）
     if user.get("auth_type") == "session_token":
         _tok_repo = user.get("repo_key") or ""
-        if _tok_repo and _tok_repo not in (repo_key, f"github:{owner}/{repo}", f"gitcode:{owner}/{repo}"):
+        if _tok_repo and _tok_repo not in (repo_key, f"github:{owner}/{repo}",
+                                           f"gitcode:{owner}/{repo}", f"gitlab:{owner}/{repo}"):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 无权访问该仓库事件"})
 
     # 权限校验：用户必须有权访问该仓库
@@ -2486,9 +2487,9 @@ def list_events(owner: str, repo: str,
 
     from src.session_manager import db, db_lock
 
-    # 跨平台 repo_key 候选（用户可能通过 GitHub OAuth 登录）
+    # 跨平台 repo_key 候选（用户可能通过 GitHub OAuth / 自建 GitLab 登录）
     _owner_repo = f"{owner}/{repo}"
-    _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
+    _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}", f"gitlab:{_owner_repo}"]
     _rk_placeholders = ",".join("?" * len(_repo_keys))
 
     where_clauses = [f"e.repo_key IN ({_rk_placeholders})"]
@@ -2583,3 +2584,18 @@ def _register_ops_routes() -> None:
 
 
 _register_ops_routes()
+
+
+@router.get("/{full_name:path}", operation_id="events_list_nested",
+            summary="List repository events (nested namespace)",
+            description="Nested-namespace variant of events_list for GitLab subgroups (owner may contain slashes).")
+def list_events_nested(full_name: str,
+                       page: int = Query(1, ge=1),
+                       page_size: int = Query(20, ge=1, le=100),
+                       status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
+                       user: dict = Depends(get_current_user_or_api_key)):
+    _fn = (full_name or "").strip("/")
+    if "/" not in _fn:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+    owner, repo = _fn.split("/", 1)
+    return list_events(owner, repo, page, page_size, status, user)

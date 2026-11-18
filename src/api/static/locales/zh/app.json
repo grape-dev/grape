@@ -48,6 +48,7 @@
   "login": {
     "gitcode_login": "GitCode",
     "github_login": "GitHub",
+    "gitlab_login": "GitLab",
     "beta_apply": "申请内测",
     "admin": "管理后台",
     "pwd_login": "← 用户名密码登录",
@@ -562,6 +563,7 @@
     "authorize": "前往授权",
     "github_token_help": "1. 前往 github.com → Settings<br>2. Developer settings → Personal access tokens<br>3. 生成新令牌（需 repo 权限）",
     "gitcode_token_help": "1. 前往 gitcode.com → 设置<br>2. 私人令牌 → 新建令牌<br>3. 勾选项目读写权限",
+    "gitlab_token_help": "1. 前往 GitLab → 用户设置 → 访问令牌<br>2. 勾选 api、read_user 权限范围<br>3. 创建令牌并复制（自建实例地址以页面按钮为准）",
     "access_token": "访问令牌",
     "paste_token": "粘贴令牌",
     "how_to_get_token": "如何获取令牌？",

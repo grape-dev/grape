@@ -232,21 +232,129 @@ class GitHubProvider(VCSProvider):
         return get_user_github_token_with_refresh(username, user_id) or ""
 
 
-def create_provider(provider: str) -> VCSProvider:
-    """根据 provider 标识创建 VCSProvider 实例。
+class GitLabProvider(VCSProvider):
+    """GitLab 平台实现（支持自建实例）。"""
 
-    provider: "github" / "gitcode"（默认）
-    """
-    if provider == "github":
-        return GitHubProvider()
-    return GitCodeProvider()
+    @property
+    def provider_name(self) -> str:
+        return "gitlab"
+
+    @property
+    def API_BASE(self) -> str:
+        from src.vcs.gitlab import get_gitlab_api_base
+        return get_gitlab_api_base()
+
+    def verify_token(self, token: str) -> dict:
+        from src.user.repo_manager import _gitlab_req
+        return _gitlab_req("GET", f"{self.API_BASE}/user", token)
+
+    def get_user_login(self, token: str) -> str:
+        from src.user.repo_manager import get_user_gitlab_login
+        return get_user_gitlab_login(token)
+
+    def add_collaborator(self, api_token, owner, repo, username, permission="maintainer"):
+        from src.user.repo_manager import add_gitlab_member
+        return add_gitlab_member(api_token, owner, repo, username, permission)
+
+    def remove_collaborator(self, api_token, owner, repo, username):
+        from src.user.repo_manager import remove_gitlab_member
+        try:
+            remove_gitlab_member(api_token, owner, repo, username)
+            return True
+        except Exception:
+            return False
+
+    def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
+        from src.user.repo_manager import setup_gitlab_webhook
+        return setup_gitlab_webhook(api_token, owner, repo, webhook_url, webhook_secret=webhook_secret)
+
+    def remove_webhook(self, api_token, owner, repo, hook_id):
+        from src.user.repo_manager import remove_gitlab_webhook
+        try:
+            remove_gitlab_webhook(api_token, owner, repo, int(hook_id))
+            return True
+        except Exception:
+            return False
+
+    def token_storage_field(self) -> str:
+        return "bot_gitlab_token"
+
+    def webhook_token_field(self) -> str:
+        return "gitlab_webhook_token"
+
+    def session_token_field(self) -> str:
+        return "repo_gitlab_token"
+
+    def global_bot_meta_key(self) -> str:
+        return "global_bot_gitlab_token"
+
+    def global_bot_status_meta_key(self) -> str:
+        return "global_gitlab_bot_token_status"
+
+    def pat_create_url(self) -> str:
+        from src.vcs.gitlab import get_gitlab_base_url
+        return f"{get_gitlab_base_url()}/-/user_settings/personal_access_tokens"
+
+    def fetch_user_token(self, username: str, user_id: int) -> str:
+        from src.api.deps import get_user_gitlab_token_with_refresh
+        return get_user_gitlab_token_with_refresh(username, user_id) or ""
+
+
+def create_provider(provider: str) -> VCSProvider:
+    """根据 provider 标识创建 VCSProvider 实例。"""
+    _providers = {"github": GitHubProvider, "gitcode": GitCodeProvider, "gitlab": GitLabProvider}
+    _cls = _providers.get(provider)
+    if not _cls:
+        raise ValueError(f"Unsupported VCS provider: {provider}")
+    return _cls()
 
 
 def create_provider_from_repo_key(repo_key: str) -> VCSProvider:
     """根据 repo_key 前缀创建 VCSProvider。"""
-    if repo_key and repo_key.startswith("github:"):
-        return GitHubProvider()
-    return GitCodeProvider()
+    _prefix = (repo_key or "").split(":", 1)[0] if ":" in (repo_key or "") else "gitcode"
+    return create_provider(_prefix)
+
+
+def global_bot_token_for_provider(provider) -> str:
+    """按 provider 取全局 bot token（含文件兜底）。
+
+    历史实现只对 github 分流、其余一律回退 GitCode 全局 bot，导致 GitLab 仓库
+    在 bot token 过期/降级时拿到 GitCode token（401）。此处显式三平台分流。
+    """
+    try:
+        from src.user.db import (_get_global_bot_token, get_global_github_bot_token,
+                                 _cached_get_meta, _read_gbt_file_field)
+        name = (getattr(provider, "provider_name", None)
+                or (provider if isinstance(provider, str) else "gitcode"))
+        if name == "github":
+            return get_global_github_bot_token() or ""
+        if name == "gitlab":
+            return _cached_get_meta(
+                "global_bot_gitlab_token",
+                file_fallback_fn=lambda: _read_gbt_file_field("gitlab_bot_token")) or ""
+        return _get_global_bot_token() or ""
+    except Exception as e:
+        from src.config import log
+        log.warning(f"global_bot_token_for_provider failed: {e}")
+        return ""
+
+
+def global_bot_usernames_for_provider(provider) -> list[str]:
+    """按 provider 取全局 bot 用户名列表（自循环判定用）。"""
+    try:
+        from src.user.db import (get_global_github_bot_username,
+                                 get_global_bot_usernames, get_meta_value)
+        name = (getattr(provider, "provider_name", None)
+                or (provider if isinstance(provider, str) else "gitcode"))
+        if name == "github":
+            _n = get_global_github_bot_username()
+            return [_n] if _n else []
+        if name == "gitlab":
+            _raw = get_meta_value("global_gitlab_bot_usernames") or ""
+            return [x.strip() for x in _raw.split(",") if x.strip()]
+        return get_global_bot_usernames() or []
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -528,14 +636,8 @@ class GlobalBotToken(TokenStrategy):
         # 路径 B 仓库跳过全局 bot token（§13.1）
         if self._is_path_b(repo_key):
             return ""
-        # 复用现有 _cached_get_meta 缓存逻辑
-        meta_key = self.provider.global_bot_meta_key()
-        from src.user.db import _cached_get_meta, _read_gbt_file_field
-        if self.provider.provider_name == "github":
-            return _cached_get_meta(meta_key,
-                                    file_fallback_fn=lambda: _read_gbt_file_field("github_bot_token"))
-        return _cached_get_meta(meta_key,
-                                file_fallback_fn=lambda: _read_gbt_file_field("gitcode_api_token"))
+        # 按 provider 取全局 bot token（GitLab 不再回退到 GitCode token）
+        return global_bot_token_for_provider(self.provider)
 
     def _is_expired(self, repo_key: str) -> bool:
         status_key = self.provider.global_bot_status_meta_key()
@@ -908,13 +1010,7 @@ class RepoBotTokenHandler(TokenActionHandler):
             return result.token
         # 仓库级 bot 过期 → fallback 到全局 bot
         if result.provider:
-            try:
-                from src.user.db import _get_global_bot_token, get_global_github_bot_token
-                if result.provider.provider_name == "github":
-                    return get_global_github_bot_token() or ""
-                return _get_global_bot_token() or ""
-            except Exception:
-                pass
+            return global_bot_token_for_provider(result.provider)
         return ""
 
     def post_issue_comment(self, repo_key, issue_num, body, result, agent_type="agent"):
@@ -941,14 +1037,7 @@ class GlobalBotTokenHandler(TokenActionHandler):
         if not actor:
             return False
         try:
-            if result.provider.provider_name == "github":
-                from src.user.db import get_global_github_bot_username
-                _bot_name = get_global_github_bot_username()
-            else:
-                from src.user.db import get_global_bot_usernames
-                _bot_names = get_global_bot_usernames()
-                return actor in _bot_names if _bot_names else False
-            return actor == _bot_name if _bot_name else False
+            return actor in global_bot_usernames_for_provider(result.provider)
         except Exception:
             return False
 
@@ -1024,13 +1113,7 @@ class UserTokenHandler(TokenActionHandler):
                 pass
         # 用户 token 完全不可用 → fallback 全局 bot token
         if result.provider:
-            try:
-                from src.user.db import _get_global_bot_token, get_global_github_bot_token
-                if result.provider.provider_name == "github":
-                    return get_global_github_bot_token() or ""
-                return _get_global_bot_token() or ""
-            except Exception:
-                pass
+            return global_bot_token_for_provider(result.provider)
         return ""
 
     def post_issue_comment(self, repo_key, issue_num, body, result, agent_type="agent"):

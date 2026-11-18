@@ -1,5 +1,5 @@
 """Pipeline 路由：Issue 工作流聚合展示"""
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
 from src.config import log
@@ -446,6 +446,27 @@ def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
     return ordered, total, failed
 
 
+def _resolve_managed_repo_key(candidates) -> str:
+    """返回 managed_repos 中登记的候选 repo_key（优先级同入参顺序），无登记返回空串。"""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT repo_key FROM managed_repos WHERE repo_key IN ({})".format(
+                    ",".join("?" * len(candidates))
+                ),
+                tuple(candidates)
+            )
+            found = {r[0] for r in c.fetchall() if r[0]}
+        for k in candidates:
+            if k in found:
+                return k
+    except Exception:
+        pass
+    return ""
+
+
 @router.get("/{owner}/{repo}", operation_id="pipeline_get", summary="Repository pipeline roadmap", description="Repository pipeline roadmap (stage/nodes/events) for the current user. Issue #542: `history_limit` (default 50) caps the returned history items (most recent first); `history_total` carries the untruncated count. Issue #1077-S: optional `scene_id` scopes the whole response (active/history/stats/history_total) to one scene, so the scene detail page is no longer limited by the repo-wide recent window.")
 def get_pipeline(owner: str, repo: str,
                  history_limit: int = Query(50, ge=1, le=500, description="history 截断条数（最近优先），默认 50"),
@@ -454,18 +475,17 @@ def get_pipeline(owner: str, repo: str,
                  user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     _owner_repo = f"{owner}/{repo}"
+    # 跨平台 repo_key 候选：DB 中可能是 gitcode: / github: / gitlab: 前缀
+    _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}", f"gitlab:{_owner_repo}"]
     repo_key = to_repo_key(_owner_repo)
 
     # 权限校验：用户必须有权访问该仓库
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 
-    # 同时查 gitcode: 和 github: 前缀的事件（用户可能切换了 provider）
-    _repo_keys = [repo_key]
-    if repo_key.startswith("gitcode:"):
-        _repo_keys.append(f"github:{_owner_repo}")
-    elif repo_key.startswith("github:"):
-        _repo_keys.append(f"gitcode:{_owner_repo}")
+    # 以 managed_repos 中登记的真实 repo_key 为准（GitLab 子组仓库为 gitlab: 前缀），
+    # 供场景配置/事件归属等下游逻辑使用
+    repo_key = _resolve_managed_repo_key(_repo_keys) or repo_key
 
     from src.session_manager import db, db_lock
 
@@ -666,3 +686,21 @@ def get_pipeline(owner: str, repo: str,
         "tasks_without_events": tasks_without_events,
         "has_tasks_without_events": len(tasks_without_events) > 0,
     }
+
+
+@router.get(
+    "/{full_name:path}",
+    operation_id="pipeline_get_nested",
+    summary="Repository pipeline roadmap (nested namespace)",
+    description="GitLab 子组仓库（group/subgroup/repo）流水线：多段 full_name 由该路由承接。",
+)
+def get_pipeline_nested(full_name: str,
+                        history_limit: int = Query(50, ge=1, le=500),
+                        history_offset: int = Query(0, ge=0),
+                        user: dict = Depends(require_no_session_token)):
+    """兼容 GitLab 子组命名空间：首段为 owner，其余为 repo。"""
+    _fn = (full_name or "").strip("/")
+    if "/" not in _fn:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+    owner, repo = _fn.split("/", 1)
+    return get_pipeline(owner, repo, history_limit, history_offset, user)

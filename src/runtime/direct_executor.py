@@ -178,6 +178,10 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 if repo_key.startswith("github:"):
                     from src.api.deps import get_user_github_token_with_refresh
                     _user_token_for_redact = get_user_github_token_with_refresh(_host_acc["username"], _host_uid) or ""
+                elif repo_key.startswith("gitlab:"):
+                    from src.api.deps import get_user_gitlab_token_with_refresh
+                    _user_token_for_redact = get_user_gitlab_token_with_refresh(
+                        _host_acc["username"], user_id=_host_uid) or ""
                 else:
                     from src.api.deps import get_user_token_with_refresh
                     _user_token_for_redact = get_user_token_with_refresh(_host_acc["username"], _host_uid) or ""

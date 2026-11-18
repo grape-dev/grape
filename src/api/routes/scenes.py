@@ -41,14 +41,14 @@ def _branches_cache_put(key: str, payload: dict):
 
 
 def _branches_cache_invalidate(owner: str, repo: str):
-    """按 owner/repo 失效两平台缓存键（建分支后立即可见）。"""
+    """按 owner/repo 失效三平台缓存键（建分支后立即可见）。"""
     with _branches_cache_lock:
-        for prov in ("gitcode", "github"):
+        for prov in ("gitcode", "github", "gitlab"):
             _branches_cache.pop(_branches_cache_key(prov, owner, repo), None)
 
 
 def _resolve_repo_key(repo: str) -> str:
-    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
+    """查 DB 确定实际 repo_key 前缀（gitcode: / github: / gitlab:）。"""
     from src.repo_key import to_repo_key
     rk = to_repo_key(repo)
     if ":" in repo:
@@ -57,8 +57,8 @@ def _resolve_repo_key(repo: str) -> str:
         from src.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
-                            (f"gitcode:{repo}", f"github:{repo}")).fetchone()
+            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?, ?) LIMIT 1",
+                            (f"gitcode:{repo}", f"github:{repo}", f"gitlab:{repo}")).fetchone()
             if row:
                 return row[0]
     except Exception:
@@ -1058,7 +1058,7 @@ def _detect_repo_provider(owner: str, repo: str) -> str:
             return False
 
     # 第一轮：managed_repos（托管事实源，查到即返回）
-    for prov in ("github", "gitcode"):
+    for prov in ("github", "gitcode", "gitlab"):
         rk = to_repo_key(f"{owner}/{repo}", provider=prov)
         if _hit("managed_repos", rk):
             return prov
@@ -1090,7 +1090,7 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
         # repo_key 优先：自带前缀，直接解析
         _prov = repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode"
         provider = provider or _prov
-    if provider in ("github", "gitcode"):
+    if provider in ("github", "gitcode", "gitlab"):
         _detected = provider
     else:
         _detected = _detect_repo_provider(owner, repo)
@@ -1128,6 +1128,37 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
                 page += 1
         except Exception as e:
             log.warning(f"List branches failed for GitHub {owner}/{repo}: {e}")
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
+        payload = {"branches": branches}
+        _branches_cache_put(_cache_key, payload)
+        return {**payload, "cached": False}
+
+    if provider == "gitlab":
+        from src.repo_key import to_repo_key
+        from src.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.user.repo_manager import _gitlab_req, _gitlab_project_url
+        rk = to_repo_key(f"{owner}/{repo}", provider="gitlab")
+        token = TokenResolver(create_provider_from_repo_key(rk)).get_token(rk) or ""
+        if not token:
+            raise HTTPException(status_code=503, detail={"code": 503, "message": "GitLab Token 未配置，无法查询分支"})
+        _proj_url = _gitlab_project_url(owner, repo)
+        branches = []
+        try:
+            page = 1
+            while page <= 5:
+                data = _gitlab_req("GET", f"{_proj_url}/repository/branches?per_page=100&page={page}", token)
+                if not isinstance(data, list) or not data:
+                    break
+                for b in data:
+                    branches.append({
+                        "name": b.get("name", ""),
+                        "protected": bool(b.get("protected", False)),
+                    })
+                if len(data) < 100:
+                    break
+                page += 1
+        except Exception as e:
+            log.warning(f"List branches failed for GitLab {owner}/{repo}: {e}")
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
         payload = {"branches": branches}
         _branches_cache_put(_cache_key, payload)
@@ -1180,11 +1211,40 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
     if repo_key:
         _prov = repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode"
         provider = provider or _prov
-    if provider in ("github", "gitcode"):
+    if provider in ("github", "gitcode", "gitlab"):
         _detected = provider
     else:
         _detected = _detect_repo_provider(owner, repo)
     provider = _detected
+
+    if not body.branch_name or not body.branch_name.strip():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "分支名不能为空"})
+
+    if provider == "gitlab":
+        from src.repo_key import to_repo_key
+        from src.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.user.repo_manager import _gitlab_req, _gitlab_project_url
+        rk = to_repo_key(f"{owner}/{repo}", provider="gitlab")
+        token = TokenResolver(create_provider_from_repo_key(rk)).get_token(rk) or ""
+        if not token:
+            raise HTTPException(status_code=503, detail={"code": 503, "message": "GitLab Token 未配置，无法创建分支"})
+        _proj_url = _gitlab_project_url(owner, repo)
+        try:
+            url = f"{_proj_url}/repository/branches"
+            _gitlab_req("POST", url, token, {
+                "branch": body.branch_name.strip(),
+                "ref": body.refs or "main",
+            })
+            log.info(f"Branch created: {body.branch_name} in GitLab {owner}/{repo}")
+            _branches_cache_invalidate(owner, repo)
+            return {"name": body.branch_name.strip(), "message": "分支已创建"}
+        except Exception as e:
+            err_msg = str(e)
+            if "409" in err_msg or "already exists" in err_msg:
+                raise HTTPException(status_code=409, detail={"code": 409, "message": "分支已存在"})
+            if "403" in err_msg:
+                raise HTTPException(status_code=403, detail={"code": 403, "message": "需要维护者权限才能创建分支"})
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {err_msg}"})
 
     if provider == "github":
         from src.user.db import get_github_token
@@ -2935,3 +2995,46 @@ def set_scene_deploy_url(scene_id: str, body: SceneDeployUrlBody,
         db.commit()
     log.info(f"Scene deploy url saved: scene={scene_id} repo={repo_key}")
     return {"message": "场景访问地址已更新", "deploy_url": deploy_url}
+
+
+def _split_nested_owner_repo(full_name: str):
+    """嵌套命名空间路径（GitLab 子组）→ (owner, repo)；不足两段返回 None。"""
+    parts = [p for p in (full_name or "").strip("/").split("/") if p]
+    if len(parts) < 2:
+        return None
+    return parts[0], "/".join(parts[1:])
+
+
+@router.get("/branches/{full_name:path}", operation_id="scenes_branches_nested",
+            summary="List repo branches (nested namespace)",
+            description="Nested-namespace variant of scenes_branches for GitLab subgroups.")
+def list_repo_branches_nested(full_name: str, provider: str = "", repo_key: str = "",
+                              refresh: int = Query(0, description="1=绕过缓存强制刷新（手动刷新入口）"),
+                              user: dict = Depends(require_no_session_token)):
+    _pair = _split_nested_owner_repo(full_name)
+    if not _pair:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+    return list_repo_branches(_pair[0], _pair[1], provider, repo_key, refresh, user)
+
+
+@router.post("/branches/{full_name:path}", operation_id="scenes_branch_create_nested",
+             summary="Create repo branch (nested namespace)",
+             description="Nested-namespace variant of scenes_branch_create for GitLab subgroups.")
+def create_repo_branch_nested(full_name: str, body: CreateBranchRequest,
+                              provider: str = "", repo_key: str = "",
+                              user: dict = Depends(require_no_session_token)):
+    _pair = _split_nested_owner_repo(full_name)
+    if not _pair:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+    return create_repo_branch(_pair[0], _pair[1], body, provider, repo_key, user)
+
+
+@router.post("/apply/{full_name:path}", operation_id="scenes_apply_nested",
+             summary="Apply scene to repository (nested namespace)",
+             description="Nested-namespace variant of scenes_apply for GitLab subgroups.")
+def apply_scene_nested(full_name: str, body: ApplySceneRequest,
+                       user: dict = Depends(require_no_session_token)):
+    _pair = _split_nested_owner_repo(full_name)
+    if not _pair:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+    return apply_scene(_pair[0], _pair[1], body, user)

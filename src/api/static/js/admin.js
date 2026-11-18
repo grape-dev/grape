@@ -167,6 +167,7 @@
       var os = c.oauth_status || {};
       applyToField('f_gitcode_api_token', c.gitcode_api_token_present, c.gitcode_api_token_tail);
       applyToField('f_github_bot_token', c.github_bot_token_present, c.github_bot_token_tail);
+      applyToField('f_gitlab_bot_token', c.gitlab_bot_token_present, c.gitlab_bot_token_tail);
       // github_bot_username 非敏感，回显明文
       $2('f_github_bot_username').value = c.github_bot_username || '';
       $2('f_github_bot_username').placeholder = c.github_bot_username_present ? I18N.t('admin.config.configured') : 'GitHub bot username';
@@ -183,6 +184,14 @@
       $2('f_gitcode_oauth_redirect_uri').placeholder = I18N.t('admin.config.auto_infer');
       $2('f_github_oauth_redirect_uri').value = c.github_oauth_redirect_uri || '';
       $2('f_github_oauth_redirect_uri').placeholder = I18N.t('admin.config.auto_infer');
+      $2('f_gitlab_oauth_base_url').value = c.gitlab_oauth_base_url || '';
+      $2('f_gitlab_oauth_base_url').placeholder = c.gitlab_oauth_base_url_present ? I18N.t('admin.config.configured') : 'https://gitlab.example.com';
+      $2('f_gitlab_oauth_client_id').value = c.gitlab_oauth_client_id || '';
+      $2('f_gitlab_oauth_client_id').placeholder = c.gitlab_oauth_client_id_present ? I18N.t('admin.config.configured') : 'GitLab OAuth Application ID';
+      $2('f_gitlab_oauth_client_secret').value = '';
+      $2('f_gitlab_oauth_client_secret').placeholder = os.gitlab ? I18N.t('admin.config.configured_update') : 'GitLab OAuth Application Secret';
+      $2('f_gitlab_oauth_redirect_uri').value = c.gitlab_oauth_redirect_uri || '';
+      $2('f_gitlab_oauth_redirect_uri').placeholder = I18N.t('admin.config.auto_infer');
       $2('f_bot_usernames').value = (c.bot_usernames || []).join(', ');
       // webhook_url non-sensitive, show plaintext; gitcode_webhook_token sensitive, masked
       $2('f_webhook_url').value = c.webhook_url || '';
@@ -219,6 +228,8 @@
     var githubTok = $2('f_github_bot_token').value.trim();
     if (gitcodeTok) body.gitcode_api_token = gitcodeTok;
     if (githubTok) body.github_bot_token = githubTok;
+    var gitlabTok = $2('f_gitlab_bot_token').value.trim();
+    if (gitlabTok) body.gitlab_bot_token = gitlabTok;
     var githubBotUser = $2('f_github_bot_username').value.trim();
     if (githubBotUser) body.github_bot_username = githubBotUser;
     var gcdClientId = $2('f_gitcode_oauth_client_id').value.trim();
@@ -233,6 +244,14 @@
     if (ghClientSec) body.github_oauth_client_secret = ghClientSec;
     var ghRedirect = $2('f_github_oauth_redirect_uri').value.trim();
     if (ghRedirect) body.github_oauth_redirect_uri = ghRedirect;
+    var glBaseUrl = $2('f_gitlab_oauth_base_url').value.trim();
+    if (glBaseUrl && glBaseUrl.indexOf('●') < 0) body.gitlab_oauth_base_url = glBaseUrl;
+    var glClientId = $2('f_gitlab_oauth_client_id').value.trim();
+    if (glClientId && glClientId.indexOf('●') < 0) body.gitlab_oauth_client_id = glClientId;
+    var glClientSec = $2('f_gitlab_oauth_client_secret').value.trim();
+    if (glClientSec) body.gitlab_oauth_client_secret = glClientSec;
+    var glRedirect = $2('f_gitlab_oauth_redirect_uri').value.trim();
+    if (glRedirect) body.gitlab_oauth_redirect_uri = glRedirect;
     var us = $2('f_bot_usernames').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
     if (us.length) body.bot_usernames = us;
     var webhookUrl = $2('f_webhook_url').value.trim();

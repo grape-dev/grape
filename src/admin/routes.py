@@ -50,8 +50,13 @@ class ConfigBody(BaseModel):
     gitcode_oauth_client_secret: str = ""
     github_bot_token: str = ""
     github_bot_username: str = ""
+    gitlab_bot_token: str = ""
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
+    gitlab_oauth_client_id: str = ""
+    gitlab_oauth_client_secret: str = ""
+    gitlab_oauth_base_url: str = ""
+    gitlab_oauth_redirect_uri: str = ""
     bot_usernames: list[str] = []
     webhook_url: str = ""
     gitcode_webhook_token: str = ""
@@ -217,8 +222,8 @@ def put_config(body: ConfigBody, admin: dict = Depends(require_admin)):
 @router.post("/config/verify-token", operation_id="admin_config_verify_token",
              summary="Verify platform token", description="Calls platform /user API to validate token and returns username.")
 def verify_platform_token(body: VerifyTokenBody, admin: dict = Depends(require_admin)):
-    if body.provider not in ("gitcode", "github"):
-        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "INVALID_PROVIDER", "message": "provider must be gitcode or github"})
+    if body.provider not in ("gitcode", "github", "gitlab"):
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "INVALID_PROVIDER", "message": "provider must be gitcode, github or gitlab"})
     if not body.token:
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_REQUIRED", "message": "token is required"})
     try:
@@ -417,8 +422,8 @@ def admin_list_login_whitelist(admin: dict = Depends(require_admin)):
               summary="Add OAuth login whitelist entry")
 def admin_add_login_whitelist(body: LoginWhitelistBody, admin: dict = Depends(require_admin)):
     """Issue #332: Add OAuth login whitelist entry."""
-    if body.provider not in ("gitcode", "github"):
-        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "INVALID_PROVIDER", "message": "provider must be gitcode or github"})
+    if body.provider not in ("gitcode", "github", "gitlab"):
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "INVALID_PROVIDER", "message": "provider must be gitcode, github or gitlab"})
     if not body.username.strip():
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "USERNAME_REQUIRED", "message": "username required"})
     ok = admin_db.add_login_whitelist(body.provider, body.username.strip(), body.remark)

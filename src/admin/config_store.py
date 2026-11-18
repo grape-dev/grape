@@ -22,6 +22,8 @@ _BOT_FIELDS = [
     "gitcode_api_token",
     "github_bot_token",
     "github_bot_username",
+    "gitlab_bot_token",
+    "gitlab_bot_usernames",
     "gitcode_webhook_token",
     "webhook_url",
     "bot_usernames",
@@ -46,6 +48,10 @@ _OAUTH_FIELD_MAP = {
     "gitcode_oauth_client_secret": ("gitcode", "client_secret"),
     "github_oauth_client_id": ("github", "client_id"),
     "github_oauth_client_secret": ("github", "client_secret"),
+    "gitlab_oauth_client_id": ("gitlab", "client_id"),
+    "gitlab_oauth_client_secret": ("gitlab", "client_secret"),
+    "gitlab_oauth_base_url": ("gitlab", "base_url"),
+    "gitlab_oauth_redirect_uri": ("gitlab", "redirect_uri"),
 }
 
 # 全字段清单（前端展示用）
@@ -86,6 +92,7 @@ def read_public_config() -> dict:
         "gitcode_api_token": "global_bot_gitcode_token",
         "github_bot_token": "global_bot_github_token",
         "github_bot_username": "global_bot_github_username",
+        "gitlab_bot_token": "global_bot_gitlab_token",
         "gitcode_webhook_token": "gitcode_webhook_token",
         "webhook_url": "webhook_url",
         "bot_usernames": "global_bot_usernames",
@@ -194,6 +201,8 @@ def save_config(payload: dict) -> dict:
             "gitcode_api_token": "global_bot_gitcode_token",
             "github_bot_token": "global_bot_github_token",
             "github_bot_username": "global_bot_github_username",
+            "gitlab_bot_token": "global_bot_gitlab_token",
+            "gitlab_bot_usernames": "global_gitlab_bot_usernames",
             "gitcode_webhook_token": "gitcode_webhook_token",
             "webhook_url": "webhook_url",
             "bot_usernames": "global_bot_usernames",
@@ -209,16 +218,20 @@ def save_config(payload: dict) -> dict:
                 if field in bot_payload:
                     val = bot_payload[field]
                     # 检测从无到有 / 有→有换账号
-                    if field in ("gitcode_api_token", "github_bot_token") and val:
+                    if field in ("gitcode_api_token", "github_bot_token", "gitlab_bot_token") and val:
                         _old = get_meta_value(meta_key) or ""
-                        provider = "github" if field == "github_bot_token" else "gitcode"
+                        provider = {"github_bot_token": "github",
+                                    "gitlab_bot_token": "gitlab"}.get(field, "gitcode")
                         if not _old:
                             # 从无到有 → auto_upgrade
                             _upgrade_triggers.append((provider, str(val)))
                         elif _old != str(val):
                             # 有→有换账号 → global_bot_token_swap
                             _swap_triggers.append((provider, _old, str(val)))
-                    if isinstance(val, list):
+                    if field == "gitlab_bot_usernames" and isinstance(val, list):
+                        # token_resolver / repos.py 按逗号分隔字符串读取
+                        set_meta_value(meta_key, ",".join(str(x).strip() for x in val if str(x).strip()))
+                    elif isinstance(val, list):
                         set_meta_value(meta_key, _json.dumps(val))
                     else:
                         set_meta_value(meta_key, str(val) if val else "")
@@ -232,6 +245,8 @@ def save_config(payload: dict) -> dict:
             set_meta_value("global_gitcode_bot_token_status", "")
         if "github_bot_token" in bot_payload:
             set_meta_value("global_github_bot_token_status", "")
+        if "gitlab_bot_token" in bot_payload:
+            set_meta_value("global_gitlab_bot_token_status", "")
         log.info("admin config_store: bot config updated (DB)")
 
         # Issue #372 §13.2: bot token 从无到有时异步升级路径 B 仓库
@@ -242,6 +257,9 @@ def save_config(payload: dict) -> dict:
                 _bot_username = ""
                 if _provider == "github":
                     _bot_username = get_global_github_bot_username()
+                elif _provider == "gitlab":
+                    _gl = get_meta_value("global_gitlab_bot_usernames") or ""
+                    _bot_username = _gl.split(",")[0].strip() if _gl else ""
                 else:
                     _us = get_global_bot_usernames()
                     _bot_username = _us[0] if _us else ""
@@ -302,6 +320,15 @@ def _save_oauth_providers(oauth_payload: dict):
             if provider not in existing:
                 existing[provider] = {}
             existing[provider][cred_field] = oauth_payload[flat_field]
+    # GitLab：base_url 变更后同步派生端点，避免配置里端点与实例地址不一致
+    _gl = existing.get("gitlab")
+    if isinstance(_gl, dict) and _gl.get("base_url"):
+        _base = str(_gl["base_url"]).strip().rstrip("/")
+        _gl["base_url"] = _base
+        _gl["auth_url"] = f"{_base}/oauth/authorize"
+        _gl["token_url"] = f"{_base}/oauth/token"
+        _gl["user_url"] = f"{_base}/api/v4/user"
+        _gl["pat_url"] = f"{_base}/-/user_settings/personal_access_tokens"
     # 原子写
     tmp = _OAUTH_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -314,6 +341,7 @@ def verify_token(provider: str, token: str) -> dict:
 
     - provider=gitcode:  GET https://gitcode.com/api/v5/user
     - provider=github:   GET https://api.github.com/user
+    - provider=gitlab:   GET {gitlab_api_base}/user（自建实例，Bearer 兼容 PAT/OAuth）
     """
     import os as _os
     _proxies = None
@@ -325,6 +353,14 @@ def verify_token(provider: str, token: str) -> dict:
         user_data = _github_req("GET", "https://api.github.com/user", token)
         login = user_data.get("login", "")
         return {"provider": "github", "login": login, "name": user_data.get("name") or login}
+    if provider == "gitlab":
+        from src.user.repo_manager import _gitlab_req
+        from src.vcs.gitlab import get_gitlab_api_base
+        user_data = _gitlab_req("GET", f"{get_gitlab_api_base()}/user", token)
+        if user_data.get("error"):
+            raise ValueError(str(user_data.get("error"))[:200])
+        login = user_data.get("username", "") or ""
+        return {"provider": "gitlab", "login": login, "name": user_data.get("name") or login}
     from src.user.repo_manager import _req
     user_data = _req("GET", "https://gitcode.com/api/v5/user", token)
     login = user_data.get("login", "") or ""
@@ -367,7 +403,8 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
     """
     from src.token_resolver import create_provider
     from src.session_manager import db, db_lock
-    from src.user.db import get_webhook_url, _get_managed_webhook_id
+    from src.user.db import (get_webhook_url, _get_managed_webhook_id,
+                             webhook_url_for_provider)
     from src.repo_key import split_owner_repo
 
     _vcs = create_provider(provider)
@@ -381,7 +418,10 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
         return
 
     # 步骤 2: 获取新 bot username
-    new_bot_username = (user_data.get("login") or "") if isinstance(user_data, dict) else ""
+    # GitLab GET /user 返回 username（GitCode/GitHub 返回 login）
+    new_bot_username = ""
+    if isinstance(user_data, dict):
+        new_bot_username = user_data.get("login") or user_data.get("username") or ""
     if not new_bot_username:
         log.warning(f"global_bot_token_swap: new {platform_label} token verify OK but no login")
         return
@@ -389,8 +429,9 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
     log.info(f"global_bot_token_swap: starting for {platform_label}, new bot={new_bot_username}")
 
     # 步骤 3: 遍历路径 A 仓库
-    token_field = "bot_github_token" if provider == "github" else "bot_gitcode_token"
-    webhook_token_field = "github_webhook_token" if provider == "github" else "gitcode_webhook_token"
+    # GitLab 必须写自己的列，否则换号会把 bot_gitlab_token 留旧值、却更新 GitCode 列
+    token_field = _vcs.token_storage_field()
+    webhook_token_field = _vcs.webhook_token_field()
     repos = []
     try:
         with db_lock:
@@ -416,8 +457,7 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
     if not _wh_url:
         log.warning("global_bot_token_swap: webhook_url not configured")
         return
-    if provider == "github":
-        _wh_url = _wh_url.replace("/webhook/gitcode", "/webhook/github")
+    _wh_url = webhook_url_for_provider(_wh_url, provider)
 
     # 遍历每个仓库执行步骤 4-6
     for repo_info in repos:

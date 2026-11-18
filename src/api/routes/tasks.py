@@ -463,9 +463,15 @@ def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
             task["latest_event"] = evs[-1] if evs else None
             from src.api.session_store import get_issue_stage
             st = get_issue_stage(_repo, f"#{_num}")
-            _host = "github.com" if _repo.startswith("github:") else "gitcode.com"
-            from src.repo_key import split_owner_repo
-            _owner, _rname = split_owner_repo(_repo)
+            from src.repo_key import from_repo_key, parse_repo_key
+            _owner_repo = from_repo_key(_repo)
+            _provider, _, _ = parse_repo_key(_repo)
+            if _provider == "gitlab":
+                from src.vcs.gitlab import get_gitlab_base_url
+                _issue_page = f"{get_gitlab_base_url()}/{_owner_repo}/-/issues/{_num}"
+            else:
+                _host = "github.com" if _provider == "github" else "gitcode.com"
+                _issue_page = f"https://{_host}/{_owner_repo}/issues/{_num}"
             with db_lock:
                 c2 = db.cursor()
                 c2.execute("SELECT id, issue_number, title, assignee, status "
@@ -479,7 +485,7 @@ def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
                 "stage": (st or {}).get("stage", "vod"),
                 "status": ir[4] if ir else "",
                 "scene_id": (st or {}).get("scene_id", ""),
-                "url": f"https://{_host}/{_owner}/{_rname}/issues/{_num}",
+                "url": _issue_page,
             }
         except Exception as _e:
             from src.config import log

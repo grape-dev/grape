@@ -50,9 +50,14 @@ class TestRepoApiBase:
         from src.repo import Repo
         assert Repo("github:owner/repo").api_base == "https://api.github.com"
 
+    def test_gitlab_api_base(self):
+        # 自建 GitLab：实例地址来自配置，仅断言 API v4 后缀
+        from src.repo import Repo
+        assert Repo("gitlab:owner/repo").api_base.endswith("/api/v4")
+
     def test_unknown_provider_falls_back_gitcode(self):
         from src.repo import Repo
-        assert Repo("gitlab:owner/repo").api_base == "https://gitcode.com/api/v5"
+        assert Repo("unknown:owner/repo").api_base == "https://gitcode.com/api/v5"
 
 
 class TestRepoCloneUrl:
@@ -66,57 +71,53 @@ class TestRepoCloneUrl:
 
 
 class TestRepoBotToken:
-    def test_github_calls_get_github_token(self, monkeypatch):
-        from src.repo import Repo
-        called = {"fn": ""}
-        def _fake_github_token(repo_key=""):
-            called["fn"] = "github"
-            called["repo_key"] = repo_key
-            return "gh-token-123"
-        def _fake_gitcode_token(repo_key="", user_id=0):
-            called["fn"] = "gitcode"
-            return "gc-token-456"
-        monkeypatch.setattr("src.user.db.get_github_token", _fake_github_token)
-        monkeypatch.setattr("src.user.db.get_gitcode_token", _fake_gitcode_token)
-        token = Repo("github:owner/repo").bot_token
-        assert token == "gh-token-123"
-        assert called["fn"] == "github"
-        assert called["repo_key"] == "github:owner/repo"
+    """Repo.bot_token 委托 token_service → TokenResolver（按 repo_key 前缀选 provider）。"""
 
-    def test_gitcode_calls_get_gitcode_token(self, monkeypatch):
-        from src.repo import Repo
-        called = {"fn": ""}
-        def _fake_github_token(repo_key=""):
-            called["fn"] = "github"
-            return "gh-token-123"
-        def _fake_repo_token(repo_key):
-            called["fn"] = "gitcode"
-            called["repo_key"] = repo_key
-            return "gc-token-456"
-        monkeypatch.setattr("src.user.db.get_github_token", _fake_github_token)
-        monkeypatch.setattr("src.user.db.get_repo_token_with_refresh", _fake_repo_token)
-        token = Repo("gitcode:owner/repo").bot_token
-        assert token == "gc-token-456"
-        assert called["fn"] == "gitcode"
-        assert called["repo_key"] == "gitcode:owner/repo"
+    @staticmethod
+    def _stub_resolver(monkeypatch, token="tok"):
+        from src.token_resolver import TokenResolver
+        seen = {}
 
-    def test_no_prefix_calls_get_gitcode_token(self, monkeypatch):
+        def _fake_get_token(self, repo_key):
+            seen["provider"] = self.provider.provider_name
+            seen["repo_key"] = repo_key
+            return token
+
+        monkeypatch.setattr(TokenResolver, "get_token", _fake_get_token)
+        return seen
+
+    def test_github_provider(self, monkeypatch):
         from src.repo import Repo
-        called = {"fn": ""}
-        def _fake_repo_token(repo_key):
-            called["fn"] = "gitcode"
-            return "gc-token"
-        monkeypatch.setattr("src.user.db.get_repo_token_with_refresh", _fake_repo_token)
-        token = Repo("owner/repo").bot_token
-        assert token == "gc-token"
-        assert called["fn"] == "gitcode"
+        seen = self._stub_resolver(monkeypatch, "gh-token-123")
+        assert Repo("github:owner/repo").bot_token == "gh-token-123"
+        assert seen["provider"] == "github"
+        assert seen["repo_key"] == "github:owner/repo"
+
+    def test_gitlab_provider(self, monkeypatch):
+        from src.repo import Repo
+        seen = self._stub_resolver(monkeypatch, "gl-token-789")
+        assert Repo("gitlab:group/sub/repo").bot_token == "gl-token-789"
+        assert seen["provider"] == "gitlab"
+
+    def test_gitcode_provider(self, monkeypatch):
+        from src.repo import Repo
+        seen = self._stub_resolver(monkeypatch, "gc-token-456")
+        assert Repo("gitcode:owner/repo").bot_token == "gc-token-456"
+        assert seen["provider"] == "gitcode"
+        assert seen["repo_key"] == "gitcode:owner/repo"
+
+    def test_no_prefix_defaults_gitcode(self, monkeypatch):
+        from src.repo import Repo
+        seen = self._stub_resolver(monkeypatch, "gc-token")
+        assert Repo("owner/repo").bot_token == "gc-token"
+        assert seen["provider"] == "gitcode"
 
     def test_empty_token_returns_empty_string(self, monkeypatch):
         from src.repo import Repo
-        monkeypatch.setattr("src.user.db.get_repo_token_with_refresh", lambda repo_key: "")
+        self._stub_resolver(monkeypatch, "")
         assert Repo("gitcode:owner/repo").bot_token == ""
 
     def test_none_token_returns_empty_string(self, monkeypatch):
         from src.repo import Repo
-        monkeypatch.setattr("src.user.db.get_repo_token_with_refresh", lambda repo_key: "")
-        assert Repo("gitcode:owner/repo").bot_token == ""
+        self._stub_resolver(monkeypatch, None)
+        assert not Repo("gitcode:owner/repo").bot_token

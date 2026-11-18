@@ -822,6 +822,13 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
                   label=label, bot_token=bot_token, user_token=user_token,
                   user_id=user_id, repo_key=repo_key)
+    # 兜底：任何 direct 执行通道都必须有可达网关地址，否则 grape-cli 落回
+    # localhost:8000（沙盒内无监听端口）。env_extra 的显式值随后 update 覆盖。
+    try:
+        from src.prompt_builder import _resolve_server_url
+        env.setdefault("GRAPE_SERVER_URL", _resolve_server_url(0))
+    except Exception:
+        pass
     # Agent 显示名（skill 中 [$AGENT_NAME] 使用，如 "Issue Agent" / "QA Agent"）
     if agent_name:
         env["AGENT_NAME"] = agent_name
@@ -905,6 +912,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         else:
             _serve_env = env
 
+        # CodexRuntime.build_args 需读取任务级 env（模型网关 CODEX_BASE_URL 等，
+        # 该配置可能来自用户云凭据，只在 _assemble_env 组装后的 env 中，不在 os.environ）。
+        # 与 _serve_port 同一模式：_run_once 串行执行，执行前设置即可。
+        backend._task_env = _serve_env
         args = backend.build_args(prompt, use_session_id)
         log.info(f"{label}{backend.name} args: {' '.join(args)[:2000]}...")
         log.info(f"{label}{backend.name} cwd: {cwd}")

@@ -377,13 +377,32 @@ async def _download_repo_zip_with_retry(client: httpx.AsyncClient, token: str) -
     raise last_exc
 
 
+# 历史官方场景更名映射（旧名 → 现名）：仓库里是改名不是删除，不能按「已删除」告警。
+# 依据 grape-skills 仓库现名 display_name 对齐：
+#   skill-dev     → grape-skill-dev            "Grape Skill 开发流程"
+#   api-skill-dev → common-restapi-skill-dev   "通用Skill开发（标准API管理）"
+# 判定条件是两个名字同时成立才跳过（新名确实在仓库里），避免映射写错时吞掉真删除。
+_RENAMED_OFFICIAL_SCENES = {
+    "skill-dev": "grape-skill-dev",
+    "api-skill-dev": "common-restapi-skill-dev",
+}
+
+# 上一轮告警/提示的名单签名：同一名单只在变化时输出，避免每 30 分钟刷同一条。
+_last_stale_report: tuple[str, ...] | None = None
+_last_renamed_report: tuple[str, ...] | None = None
+
+
 def _detect_stale_official_scenes(repo_scene_names: set, traversal_complete: bool) -> int:
     """P46.1 stale 检测（只读，铁律 1.0：零 DB 写）。
 
-    DB 中 source='official' 但仓库已不存在的行 → warning + 计数，供管理员发现；
-    下架/清理由管理台管理员手工执行。完成守卫仅护报告准确性：遍历不完整时
-    跳过本轮（不出具可能误报的名单），最坏后果是"本轮没有报告"。
+    DB 中 source='official'、仍在启用（is_active=1）但仓库已不存在的行 →
+    分类报告，供管理员发现；下架/清理由管理台管理员手工执行。
+    - 命中更名映射且新名在仓库里 → INFO 提示「改名残留，请停用旧行」（不是删除）；
+    - 其余 → WARNING「已从仓库移除」。
+    只统计启用行：管理员停用后报告自然消失（旧实现连已停用行也算，永远报）。
+    完成守卫仅护报告准确性：遍历不完整时跳过本轮（不出具可能误报的名单）。
     """
+    global _last_stale_report, _last_renamed_report
     if not traversal_complete:
         logger.warning("Scene sync: traversal incomplete, skipping stale detection this cycle")
         return 0
@@ -391,16 +410,45 @@ def _detect_stale_official_scenes(repo_scene_names: set, traversal_complete: boo
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            stale = [name for (_id, name) in
-                     c.execute("SELECT id, name FROM scene_market WHERE source='official'").fetchall()
-                     if name not in repo_scene_names]
+            rows = c.execute(
+                "SELECT id, name FROM scene_market "
+                "WHERE source='official' AND is_active=1").fetchall()
     except Exception:
         logger.exception("Scene sync: stale detection query failed")
         return 0
+    stale: list[str] = []
+    renamed: list[str] = []
+    for _id, name in rows:
+        if name in repo_scene_names:
+            continue
+        # 已更名的旧场景：新名字确实在仓库里 → 不是"被删除"，只是旧行待停用
+        successor = _RENAMED_OFFICIAL_SCENES.get(name)
+        if successor and successor in repo_scene_names:
+            renamed.append(f"{name}→{successor}")
+            continue
+        stale.append(name)
     if stale:
-        logger.warning(
-            f"Scene sync: stale official scenes (removed from repo, "
-            f"admin should deactivate manually): {', '.join(stale)}")
+        sig = tuple(sorted(stale))
+        if sig != _last_stale_report:
+            _last_stale_report = sig
+            logger.warning(
+                f"Scene sync: stale official scenes (removed from repo, "
+                f"admin should deactivate manually): {', '.join(stale)}")
+        else:
+            logger.info(
+                f"Scene sync: stale official scenes unchanged ({len(stale)}), "
+                f"already reported: {', '.join(stale)}")
+    else:
+        _last_stale_report = ()
+    if renamed:
+        sig_r = tuple(sorted(renamed))
+        if sig_r != _last_renamed_report:
+            _last_renamed_report = sig_r
+            logger.info(
+                f"Scene sync: renamed official scenes still active in DB "
+                f"(deactivate the old row; not a deletion): {', '.join(renamed)}")
+    else:
+        _last_renamed_report = ()
     return len(stale)
 
 
@@ -448,6 +496,8 @@ async def sync_official_scenes(repo_root: str | None = None):
             log.warning("Scene sync: scene_category slug cache is empty, category_id will be 0 (unclassified)")
 
         stats = {"added": 0, "updated": 0, "skipped": 0, "failed": 0, "stale_official": 0}
+        # 同一轮里同一未知分类 slug 只告警一次（一个分类下多个场景不刷屏）
+        _unknown_cat_slugs: set[str] = set()
 
         # P46.1 完成守卫 + 仓库场景集收集（与遍历同一份 listing）
         traversal_complete = True
@@ -520,8 +570,12 @@ async def sync_official_scenes(repo_root: str | None = None):
                 # e. category slug → id
                 category_slug = scene_data.get("category", "general")
                 category_id = _cat_cache.get(category_slug, 0)
-                if category_id == 0:
-                    logger.warning(f"Scene sync: {name} category slug '{category_slug}' not found in scene_category, using 0 (unclassified)")
+                if category_id == 0 and category_slug not in _unknown_cat_slugs:
+                    _unknown_cat_slugs.add(category_slug)
+                    logger.warning(
+                        f"Scene sync: category slug '{category_slug}' not found in scene_category "
+                        f"(first seen on {name}), using 0 (unclassified). "
+                        f"Seed it in src/api/db_setup.py _init_scene_category_data if official.")
 
                 # f. 查 DB
                 version = scene_data.get("version", "1.0.0")

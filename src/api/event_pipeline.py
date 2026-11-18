@@ -1339,19 +1339,14 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "", repo_key: str = "") 
                 repo_path = repo.get("full_name", "")
         if repo_path and "/" in repo_path:
             try:
-                if _is_github_repo(repo_key):
-                    url = f"https://api.github.com/repos/{repo_path}/pulls/{pr_number}"
-                    hdrs = {"Authorization": f"Bearer {api_token}",
-                            "Accept": "application/vnd.github+json",
-                            "User-Agent": "Grape-DevOps"}
-                else:
-                    url = f"https://gitcode.com/api/v5/repos/{repo_path}/pulls/{pr_number}"
-                    hdrs = {"Authorization": f"Bearer {api_token}"}
-                req = urllib.request.Request(url, headers=hdrs)
-                data = json.loads(urllib.request.urlopen(req, timeout=10).read())
+                # 按 provider 走统一客户端取 PR 详情（GitLab 为 merge_request）
+                from src.vcs.api_client import create_client
+                data = create_client(repo_key, token=api_token).get_pr(pr_number)
                 # 4.1 head.ref 分支名 issue-N（同规则优先）
+                # GitLab 归一后 head 为 source_branch 字符串（GitHub/GitCode 为 dict）
                 head = data.get("head", {}) or {}
-                m = re.search(r'issue[-_](\d+)', str(head.get("ref", "")))
+                _head_ref = head.get("ref", "") if isinstance(head, dict) else (head or "")
+                m = re.search(r'issue[-_](\d+)', str(_head_ref))
                 if m and m.group(1) != "0":
                     return f"#{m.group(1)}"
                 # 4.2 title #N（含 Issue #252 自引用跳过）
@@ -1715,7 +1710,7 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
         # 补全 build_devops_agent_prompt 必需的字段（_load_event 不返回 repository/source）
         from src.repo_key import from_repo_key
         _extra_evt["repository"] = _extra_evt.get("repository") or from_repo_key(repo_key)
-        _extra_evt["source"] = _extra_evt.get("source") or (repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode")
+        _extra_evt["source"] = _extra_evt.get("source") or _repo_provider(repo_key)
         _extra_evt["repo_key"] = repo_key
         _extra_evt["_pr_sub_scene_id"] = scene_id
         _extra_evt["_pr_sub_skill"] = qa_skill
@@ -2058,11 +2053,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _note_lower = _note.lower().strip()
             _issue_num = ""
             try:
-                # GitCode Note Hook 的 issue 号在 noteable_iid（iid 是评论自身的 id，非 issue 号）——
+                # GitCode/GitLab Note Hook 的 issue 号在 noteable_iid（iid 是评论自身的 id，非 issue 号）——
                 # 与 resolve_issue_id（对齐 noteable_iid）语义一致，漏读会导致恢复/指令永不到达
                 # （issue-comment-resume-outbound-ledger-fix-design.md RC-B）
-                _issue_num = str(_oa.get("iid") or _oa.get("number") or _oa.get("noteable_iid")
-                                 or (_payload.get("issue", {}) or {}).get("number") or "").lstrip("#")
+                # GitLab issue/merge_request 的编号在 iid，一并补读
+                _issue_num = str(_oa.get("noteable_iid") or _oa.get("number") or _oa.get("iid")
+                                 or (_payload.get("issue", {}) or {}).get("iid")
+                                 or (_payload.get("issue", {}) or {}).get("number")
+                                 or (_payload.get("merge_request", {}) or {}).get("iid")
+                                 or "").lstrip("#")
             except Exception:
                 pass
             if _issue_num and _issue_num.isdigit():
@@ -3359,10 +3358,56 @@ def _is_github_repo(repo_key: str) -> bool:
     return bool(repo_key) and repo_key.startswith("github:")
 
 
+def _repo_provider(repo_key: str) -> str:
+    """返回 repo_key 的 provider（gitcode/github/gitlab），无前缀默认 gitcode。"""
+    from src.repo_key import parse_repo_key
+    return parse_repo_key(repo_key)[0]
+
+
+def _list_issue_comments_vcs(repo_key: str, repository: str, issue_number,
+                             token: str, per_page: int = 100) -> list:
+    """按 provider 获取 Issue 评论列表，统一归一为含 body 字段的 dict 列表。
+
+    VcsApiClient 未提供评论列表方法，此处按 provider 分流裸发 GET：
+    GitHub / GitCode 用 issues/{n}/comments，GitLab 用 issues/{iid}/notes。
+    GitLab note 字段归一为 body，供上层去重逻辑按中性字段消费。失败抛异常。
+    """
+    import urllib.request
+    import json as _json
+    _provider = _repo_provider(repo_key)
+    if _provider == "github":
+        _url = (f"https://api.github.com/repos/{repository}/issues/"
+                f"{issue_number}/comments?per_page={per_page}")
+        _hdrs = {"Authorization": f"Bearer {token}",
+                 "Accept": "application/vnd.github+json",
+                 "User-Agent": "Grape-DevOps"}
+    elif _provider == "gitlab":
+        from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+        from src.repo_key import parse_repo_key
+        _, _o, _r = parse_repo_key(repo_key)
+        _url = (f"{get_gitlab_api_base()}/projects/{gitlab_project_path(_o, _r)}"
+                f"/issues/{issue_number}/notes?per_page={per_page}")
+        _hdrs = {"Authorization": f"Bearer {token}"}
+    else:
+        _url = (f"https://gitcode.com/api/v5/repos/{repository}/issues/"
+                f"{issue_number}/comments?per_page={per_page}")
+        _hdrs = {"Authorization": f"Bearer {token}"}
+    _req = urllib.request.Request(_url, headers=_hdrs)
+    _data = _json.loads(urllib.request.urlopen(_req, timeout=15).read())
+    if not isinstance(_data, list):
+        return []
+    if _provider == "gitlab":
+        for _c in _data:
+            if isinstance(_c, dict) and "body" not in _c and "note" in _c:
+                _c["body"] = _c["note"]
+    return _data
+
+
 def _get_repo_api_token(repo_key: str) -> str:
     """根据 repo_key 的 provider 获取对应 VCS API token。
 
-    GitHub → get_github_token；GitCode → get_repo_token_with_refresh。
+    GitHub → get_github_token；GitCode / GitLab → get_repo_token_with_refresh
+    （内部按 repo_key 前缀走 TokenResolver，GitLab 不会误用 GitCode token）。
     """
     if _is_github_repo(repo_key):
         try:
@@ -3426,35 +3471,29 @@ def _ledger_record_comment(provider: str, repo_key: str, repository: str, issue_
 
 def _gitcode_post_issue_comment_ledgered(repository: str, issue_num, comment: str, bot_token: str,
                                           repo_key: str = "", origin_task: str = "") -> None:
-    """GitCode 裸 urllib 发 Issue 评论 + 记账（S16-1：该路径原先连响应体都不读）。
+    """按 provider 走 VcsApiClient 发 Issue 评论 + 记账。
 
     供 _post_result_to_issue / _post_subtask_completion_to_parent / _post_all_subtasks_done
-    共用；失败抛异常（调用方原有 try/except 兜底）。
+    共用；失败抛异常（调用方原有 try/except 兜底）。repo_key 为空时按 repository 兜底
+    为 gitcode（向后兼容）。
     """
-    import urllib.request, json as _json
-    _data = _json.dumps({"body": comment}).encode("utf-8")
-    _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_num}/comments"
-    _req = urllib.request.Request(_url, data=_data,
-        headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
-    _resp = urllib.request.urlopen(_req, timeout=15)
-    _body_resp = b""
-    try:
-        _body_resp = _resp.read()
-    except Exception:
-        pass
-    _parsed = {}
-    try:
-        _parsed = _json.loads(_body_resp) if _body_resp else {}
-    except Exception:
-        _parsed = {}
-    _ledger_record_comment("gitcode", repo_key, repository, issue_num, comment,
+    from src.vcs.api_client import create_client
+    from src.repo_key import to_repo_key
+    _rk = repo_key or to_repo_key(repository)
+    # 台账由本函数统一记账（带 origin_task），关掉客户端内置记账避免重复写
+    _parsed = create_client(_rk, token=bot_token).post_issue_comment(
+        issue_num, comment, record_ledger=False)
+    # 客户端把 HTTP 错误收敛为 {"error": ...} 而不抛异常；此处转抛以保留调用方 try/except 语义
+    if isinstance(_parsed, dict) and _parsed.get("error"):
+        raise RuntimeError(str(_parsed.get("error")))
+    _ledger_record_comment(_repo_provider(_rk), repo_key, repository, issue_num, comment,
                            _parsed if isinstance(_parsed, dict) else {}, origin_task=origin_task)
 
 
 def _fetch_issue_assignee(repo_key: str, issue_id: str) -> str:
     """调 VCS API 获取 Issue 责任人（assignee.login）。失败返回空。
 
-    根据 repo_key provider 分流 GitHub/GitCode。
+    根据 repo_key provider 分流 GitHub/GitCode/GitLab（空 repo_key 向后兼容按 GitCode 处理）。
     用于 pipeline 责任人显示（issue_state.assignee），取代"从事件 payload 猜 assignee"。
     """
     num = _issue_num_from(issue_id)
@@ -3475,19 +3514,15 @@ def _fetch_issue_assignee(repo_key: str, issue_id: str) -> str:
             asg = d.get("assignee") or {}
             login = asg.get("login", "") if isinstance(asg, dict) else ""
             return login or ""
-        # GitCode 原逻辑
-        import urllib.request
+        # GitCode / GitLab：按 repo_key provider 走统一客户端取 Issue 详情
+        from src.vcs.api_client import create_client
         from src.user.db import get_repo_token_with_refresh
         tok = get_repo_token_with_refresh(repo_key) or ""
         if not tok:
             # FR-12.1: token 空时记 warning（不再静默）
-            log.warning(f"_fetch_issue_assignee: no gitcode token for {repo_key}, assignee resolution degraded")
+            log.warning(f"_fetch_issue_assignee: no token for {repo_key}, assignee resolution degraded")
             return ""
-        req = urllib.request.Request(
-            f"https://gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",
-            headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
-        import json as _json
-        d = _json.load(urllib.request.urlopen(req, timeout=15))
+        d = create_client(repo_key, token=tok).get_issue(num)
         asg = d.get("assignee") or {}
         login = asg.get("login", "") if isinstance(asg, dict) else ""
         return login or ""
@@ -3503,7 +3538,7 @@ def _issue_num_from(issue_id: str) -> str:
 def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
     """调 VCS API 获取 Issue 标题。失败返回空。
 
-    根据 repo_key provider 分流 GitHub/GitCode。
+    根据 repo_key provider 分流 GitHub/GitCode/GitLab（空 repo_key 向后兼容按 GitCode 处理）。
     用于 pipeline 展示兜底：当 tasks/events 表中 title 均为占位符时，
     通过 API 获取真实标题并回写。
     """
@@ -3521,17 +3556,13 @@ def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
                 return ""
             d = _github_fetch_issue(owner, rname, num, tok)
             return d.get("title", "") or ""
-        # GitCode 原逻辑
-        import urllib.request
+        # GitCode / GitLab：按 repo_key provider 走统一客户端取 Issue 详情
+        from src.vcs.api_client import create_client
         from src.user.db import get_repo_token_with_refresh
         tok = get_repo_token_with_refresh(repo_key) or ""
         if not tok:
             return ""
-        req = urllib.request.Request(
-            f"https://gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",
-            headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
-        import json as _json
-        d = _json.load(urllib.request.urlopen(req, timeout=15))
+        d = create_client(repo_key, token=tok).get_issue(num)
         return d.get("title", "") or ""
     except Exception:
         return ""
@@ -3562,16 +3593,18 @@ def fetch_issue_via_vcs(repo_key: str, issue_number) -> tuple:
                 return ("unknown", {})
             d = _github_fetch_issue(owner, rname, num, tok)
             return ("exists", d if isinstance(d, dict) else {})
-        import urllib.request
-        import json as _json
+        # GitCode / GitLab：按 repo_key provider 走统一客户端取 Issue 详情
+        from src.vcs.api_client import create_client
         from src.user.db import get_repo_token_with_refresh
         tok = get_repo_token_with_refresh(_rk) or ""
         if not tok:
             return ("unknown", {})
-        req = urllib.request.Request(
-            f"https://gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",
-            headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
-        d = _json.load(urllib.request.urlopen(req, timeout=15))
+        d = create_client(_rk, token=tok).get_issue(num)
+        # 客户端把 HTTP 错误收敛为 dict，显式还原 404 → missing / 其它错误 → unknown
+        if isinstance(d, dict) and d.get("error"):
+            if d.get("status_code") == 404 or str(d.get("error", "")).strip() == "HTTP 404":
+                return ("missing", {})
+            return ("unknown", {})
         return ("exists", d if isinstance(d, dict) else {})
     except urllib.error.HTTPError as _he:
         if int(_he.code) == 404:
@@ -5106,6 +5139,102 @@ _ERROR_TEXT_PATTERNS = (
 _RESULT_POST_POLICY_WARNED = False
 
 
+def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
+                         backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
+                         task_id: str = ""):
+    """_execute_agent 的实际逻辑（被顶层 try/except 包裹）。"""
+    from src.runtime.executor import stream_devops_agent
+    from src.prompt_builder import build_devops_agent_prompt
+    from src.api.event_store import (
+        update_event_config, update_event_status, update_event_complete, evaluate_agent_output, _extract_tool_command,
+        append_skipped_event,
+    )
+    from src.runtime.instances import runtime_instance_name
+
+    # 引擎实例名（`{type}-{device}`，与 UI 同源）；查不到回退类型名
+    inst_name = runtime_instance_name(runtime_id) or backend or ""
+
+    # direct 执行开始 → 更新 task status 为 running（direct 路径无 worker task_start 调用）
+    if task_id:
+        try:
+            from src.runtime.service import update_task_status
+            update_task_status(task_id, "running")
+            log.info(f"direct exec: task {task_id} status -> running")
+            # Write back actual runtime_id for plugin broadcast self-run tasks
+            # (task created with runtime_id=0 for broadcast, but executed locally)
+            if runtime_id and runtime_id > 0:
+                from src.session_manager import db as _sdb, db_lock as _sdl
+                with _sdl:
+                    c = _sdb.cursor()
+                    c.execute("UPDATE agent_tasks SET runtime_id=? WHERE id=? AND (runtime_id IS NULL OR runtime_id=0)", (runtime_id, task_id))
+                    _sdb.commit()
+                log.info(f"direct exec: task {task_id} runtime_id -> {runtime_id}")
+        except Exception as e:
+            log.warning(f"direct exec: failed to update task {task_id} to running: {e}")
+
+    from src.repo_key import from_repo_key
+    repository = evt.get("repository", from_repo_key(repo_key))
+    issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
+    ws = get_agent_workdir(repo_key, agent_type, issue_id)
+    os.makedirs(ws, exist_ok=True)
+
+    # 读取上次的 oc_session_id（用于延续对话上下文）——Issue 级执行会话优先，回退 repo 级
+    # 注意：有关联 Issue 时只用该 Issue 自己的会话（每 Issue 独立 session，见 vod-agent-hang-rootcause-fix.md 方案 A）；
+    #       repo 级 session 仅用于无关联 Issue（push/#0）。
+    repo_name = repo_key
+    oc_session_id = ""
+    issue_session_id = ""
+    _has_issue = bool(_issue_num_from(issue_id))
+    try:
+        if _has_issue:
+            from src.api.session_store import get_or_create_issue_session, guard_issue_session_pointer
+            _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
+            issue_session_id = _isess.get("id") or ""
+            # session 引擎守卫：backend 即本次引擎名，跨引擎指针弃用（防 hermes resume
+            # opencode 会话号静默挂死）；引擎未知 → 放行。
+            oc_session_id = guard_issue_session_pointer(_isess, backend or "")
+        # 无关联 Issue 任务不执行（push 忽略），不再回退读 repo 级 runtime_session_id。
+    except Exception:
+        pass
+
+    log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] type={agent_type}, backend={inst_name}, skill={skill_name}, oc_session={oc_session_id[:20] if oc_session_id else 'none'}")
+
+    # 获取 bot token（按 provider 分流：GitHub 仓库用 get_github_token，其他用 get_repo_token_with_refresh）
+    repo_gitcode_token = ""
+    try:
+        if repo_key.startswith("github:"):
+            from src.user.db import get_github_token
+            repo_gitcode_token = get_github_token(repo_key=repo_key) or ""
+        else:
+            from src.user.db import get_repo_token_with_refresh
+            repo_gitcode_token = get_repo_token_with_refresh(repo_key=repo_key) or ""
+    except Exception as e:
+        log.warning(f"Exec agent: get bot token failed: {e}")
+    log.info(f"Exec agent: bot_token={'set' if repo_gitcode_token else 'none'} (provider={_repo_provider(repo_key)})")
+
+    # R20.25.4: 获取 user_token 用于脱敏（路径 B 仓库的 host 用户 token，agent 可能复述）
+    _user_token_for_redact = ""
+    try:
+        from src.user.db import get_host_user_id
+        _host_uid = get_host_user_id(repo_key)
+        if _host_uid > 0:
+            from src.auth.grape_account_db import get_grape_account_by_id
+            _host_acc = get_grape_account_by_id(_host_uid)
+            if _host_acc and _host_acc.get("username"):
+                if repo_key.startswith("github:"):
+                    from src.api.deps import get_user_github_token_with_refresh
+                    _user_token_for_redact = get_user_github_token_with_refresh(_host_acc["username"], _host_uid) or ""
+                elif repo_key.startswith("gitlab:"):
+                    from src.api.deps import get_user_gitlab_token_with_refresh
+                    _user_token_for_redact = get_user_gitlab_token_with_refresh(
+                        _host_acc["username"], user_id=_host_uid) or ""
+                else:
+                    from src.api.deps import get_user_token_with_refresh
+                    _user_token_for_redact = get_user_token_with_refresh(_host_acc["username"], _host_uid) or ""
+    except Exception:
+        pass
+
+
 def _looks_like_error_text(text: str) -> bool:
     """Issue #1545 B1：判断文本是否为引擎/上游报错文本（固定规则集，不得增删）。"""
     t = text or ""
@@ -5246,7 +5375,7 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
                           repo_key: str = "", *, agent_result: bool, task_id: str = "", seq=None):
     """Agent 执行完成后，将结果作为评论发回 VCS Issue。
 
-    根据 repo_key provider 分流 GitHub/GitCode。
+    根据 repo_key provider 分流 GitHub/GitCode/GitLab（空 repo_key 向后兼容按 GitCode 处理）。
     方案 B：先 GET Issue 评论列表，若已有 agent 发的评论则跳过系统回帖，
     避免与 agent 自己发的评论重复（"一鱼两吃"问题）。
     agent 忘了发评论时系统补发，保证 Issue 不会静悄悄。
@@ -5319,16 +5448,10 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
             log.warning(f"Exec agent: failed to post result comment (GitHub): {e}")
         return
 
-    # GitCode 原逻辑
+    # GitCode / GitLab 原逻辑（按 provider 取评论列表）
     try:
-        import urllib.request, json as _json
         # 先查 Issue 已有评论，若已有 agent 评论则跳过（方案 B）
-        _list_url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments?per_page=100"
-        _list_req = urllib.request.Request(_list_url, headers={
-            "Authorization": f"Bearer {bot_token}",
-        })
-        _resp = urllib.request.urlopen(_list_req, timeout=15)
-        _existing = _json.loads(_resp.read())
+        _existing = _list_issue_comments_vcs(repo_key, repository, issue_number, bot_token)
         _agent_tag_lower = agent_type.lower()
         for _c in _existing:
             _body = (_c.get("body") or "").lower()
@@ -5408,6 +5531,7 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
     GitHub:  POST /repos/{owner}/{repo}/issues/{pr_number}/comments（PR 共用 Issue 评论 API）
 
     Issue #1545：`agent_result` 必填以区分「agent 产出」与「系统通知」，语义同 Issue 回帖。
+    GitLab:  POST /projects/{urlencoded}/merge_requests/{iid}/notes（正文字段 body）
     """
     if not repository or not pr_number or not bot_token:
         return
@@ -5444,22 +5568,33 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
     _comment += "\n<!-- grape-auto-comment -->"
     try:
         import urllib.request, urllib.error, json as _json
+        _provider = _repo_provider(repo_key)
         if _is_github_repo(repo_key):
             # GitHub: PR 共用 Issue 评论 API
             _url = f"https://api.github.com/repos/{repository}/issues/{pr_number}/comments"
-            _data = _json.dumps({"body": _comment}).encode("utf-8")
-            _req = urllib.request.Request(_url, data=_data,
-                headers={"Authorization": f"Bearer {bot_token}",
-                         "Accept": "application/vnd.github+json",
-                         "User-Agent": "Grape-DevOps",
-                         "Content-Type": "application/json"}, method="POST")
+            _payload = {"body": _comment}
+            _hdrs = {"Authorization": f"Bearer {bot_token}",
+                     "Accept": "application/vnd.github+json",
+                     "User-Agent": "Grape-DevOps",
+                     "Content-Type": "application/json"}
+        elif _provider == "gitlab":
+            # GitLab: MR notes（REST v4 正文字段是 body；note 只在 webhook 载荷里）
+            from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+            from src.repo_key import parse_repo_key
+            _, _o, _r = parse_repo_key(repo_key)
+            _url = (f"{get_gitlab_api_base()}/projects/{gitlab_project_path(_o, _r)}"
+                    f"/merge_requests/{pr_number}/notes")
+            _payload = {"body": _comment}
+            _hdrs = {"Authorization": f"Bearer {bot_token}",
+                     "Content-Type": "application/json"}
         else:
             # GitCode: PR 评论 API
             _url = f"https://gitcode.com/api/v5/repos/{repository}/pulls/{pr_number}/comments"
-            _data = _json.dumps({"body": _comment}).encode("utf-8")
-            _req = urllib.request.Request(_url, data=_data,
-                headers={"Authorization": f"Bearer {bot_token}",
-                         "Content-Type": "application/json"}, method="POST")
+            _payload = {"body": _comment}
+            _hdrs = {"Authorization": f"Bearer {bot_token}",
+                     "Content-Type": "application/json"}
+        _data = _json.dumps(_payload).encode("utf-8")
+        _req = urllib.request.Request(_url, data=_data, headers=_hdrs, method="POST")
         _resp = urllib.request.urlopen(_req, timeout=15)
         # Issue #453 台账（审查 P1-1 补漏，写点9）：qa 审查结论回帖 PR → note_hook_pr 回流对账。
         # 原先响应丢弃不入账；GitCode PR 评论与 issue 评论 ID 同值域，按 issue_comment 键记。
@@ -5474,7 +5609,7 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
                 _parsed_pr = _json.loads(_body_resp) if _body_resp else {}
             except Exception:
                 _parsed_pr = {}
-            _ledger_record_comment("github" if _is_github_repo(repo_key) else "gitcode",
+            _ledger_record_comment(_provider,
                                    repo_key, repository, pr_number, _comment,
                                    _parsed_pr if isinstance(_parsed_pr, dict) else {})
         except Exception as _le:
@@ -5520,7 +5655,7 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
                                          agent_type: str = "", repository: str = ""):
     """从 VCS Issue 拉取 agent 发的评论，去重后同步到任务会话。
 
-    根据 repo_key provider 分流 GitHub/GitCode。
+    根据 repo_key provider 分流 GitHub/GitCode/GitLab（空 repo_key 向后兼容按 GitCode 处理）。
     VOD 等 agent 通过技能 curl 直接在 Issue 上发澄清追问评论，这些评论内容
     不会出现在 result_text（结构化输出摘要）中。此函数补拉 Issue 上的实际评论，
     与会话已有消息去重后写入，确保 Chat Agent「去对话」可见完整内容。
@@ -5559,17 +5694,11 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
             _owner, _repo = split_owner_repo(rk)
             comments = _github_list_issue_comments(_owner, _repo, str(issue_number), bot_token)
         else:
-            # GitCode API 原逻辑
-            import urllib.request
-            import json as _json
+            # GitCode / GitLab：按 provider 取评论列表（GitLab note 归一为 body）
             if not repository:
                 from src.repo_key import from_repo_key
                 repository = from_repo_key(rk)
-            api_url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
-            req = urllib.request.Request(api_url)
-            req.add_header("Authorization", f"Bearer {bot_token}")
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                comments = _json.loads(resp.read())
+            comments = _list_issue_comments_vcs(rk, repository, issue_number, bot_token)
     except Exception as e:
         log.warning(f"Sync issue comments: fetch from VCS failed: {e}")
         return

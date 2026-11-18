@@ -11,6 +11,7 @@ import re
 import urllib.request
 import urllib.error
 from src.config import log
+from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
 
 
 # Issue #315: GitCode 编辑器上传图片（raw.gitcode.com/user-images/...）链接识别与鉴权下载。
@@ -236,8 +237,13 @@ class VcsApiClient:
             from src.config import log
             log.warning(f"VcsApiClient ledger record failed (non-blocking): {e}")
 
-    def post_issue_comment(self, issue_number: int, body: str) -> dict:
-        """在 Issue 上发表评论。"""
+    def post_issue_comment(self, issue_number: int, body: str,
+                           record_ledger: bool = True) -> dict:
+        """在 Issue 上发表评论。
+
+        record_ledger=False 供调用方自行记账（例如需要携带 origin_task 的
+        _gitcode_post_issue_comment_ledgered），避免重复写同一条 outbound 台账。
+        """
         if self.provider == "gitcode":
             _resp = self._gitcode_request(
                 "POST", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}/comments",
@@ -247,14 +253,16 @@ class VcsApiClient:
                 "POST", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}/comments",
                 {"body": body})
         elif self.provider == "gitlab":
-            project_id = f"{self.owner}%2F{self.repo}"
+            project_id = gitlab_project_path(self.owner, self.repo)
+            # GitLab Notes API 的请求/响应正文字段都是 body；note 只出现在
+            # Note Hook webhook 的 object_attributes 里。传 note 会被上游以 400 拒绝。
             _resp = self._gitlab_request(
                 "POST", f"/projects/{project_id}/issues/{issue_number}/notes",
                 {"body": body})
         else:
             return {"error": f"unsupported provider: {self.provider}"}
         # Issue #453 台账：响应 dict 里的评论 ID 入账（无 ID 时记 issue_number 兼值）
-        if isinstance(_resp, dict) and "error" not in _resp:
+        if record_ledger and isinstance(_resp, dict) and "error" not in _resp:
             from src.outbound_ledger import extract_content_id
             _cid = extract_content_id(_resp, "issue_comment")
             self._ledger("issue_comment", _cid or issue_number, issue_number, body)
@@ -310,7 +318,7 @@ class VcsApiClient:
             return self._github_request(
                 "GET", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}")
         elif self.provider == "gitlab":
-            project_id = f"{self.owner}%2F{self.repo}"
+            project_id = gitlab_project_path(self.owner, self.repo)
             return self._gitlab_request(
                 "GET", f"/projects/{project_id}/issues/{issue_number}")
         return {"error": f"unsupported provider: {self.provider}"}
@@ -339,7 +347,7 @@ class VcsApiClient:
                 "PATCH", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
                 {"state": "closed"})
         elif self.provider == "gitlab":
-            project_id = f"{self.owner}%2F{self.repo}"
+            project_id = gitlab_project_path(self.owner, self.repo)
             _resp = self._gitlab_request(
                 "PUT", f"/projects/{project_id}/issues/{issue_number}",
                 {"state_event": "close"})
@@ -369,9 +377,12 @@ class VcsApiClient:
             _resp = self._github_request(
                 "POST", f"/repos/{self.owner}/{self.repo}/pulls", data)
         elif self.provider == "gitlab":
-            project_id = f"{self.owner}%2F{self.repo}"
+            # GitLab 字段名与中性契约不同：head/base → source_branch/target_branch
+            project_id = gitlab_project_path(self.owner, self.repo)
+            _gl_data = {"title": title, "source_branch": head,
+                        "target_branch": base, "description": body}
             _resp = self._gitlab_request(
-                "POST", f"/projects/{project_id}/merge_requests", data)
+                "POST", f"/projects/{project_id}/merge_requests", _gl_data)
         else:
             return {"error": f"unsupported provider: {self.provider}"}
         # Issue #453 台账（写点11）：建 PR 入账——PR 编号（number/iid）为对账键
@@ -396,7 +407,7 @@ class VcsApiClient:
             _resp = self._github_request(
                 "PUT", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge", _body or {})
         elif self.provider == "gitlab":
-            project_id = f"{self.owner}%2F{self.repo}"
+            project_id = gitlab_project_path(self.owner, self.repo)
             _gl_body = {"squash": True} if _body.get("merge_method") == "squash" else {}
             _resp = self._gitlab_request(
                 "PUT", f"/projects/{project_id}/merge_requests/{pr_number}/merge", _gl_body)
@@ -416,7 +427,7 @@ class VcsApiClient:
             return self._github_request(
                 "GET", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}")
         elif self.provider == "gitlab":
-            project_id = f"{self.owner}%2F{self.repo}"
+            project_id = gitlab_project_path(self.owner, self.repo)
             return self._gitlab_request(
                 "GET", f"/projects/{project_id}/merge_requests/{pr_number}")
         return {"error": f"unsupported provider: {self.provider}"}
@@ -458,7 +469,7 @@ class VcsApiClient:
         elif self.provider == "github":
             return self._github_request("GET", f"/repos/{self.owner}/{self.repo}")
         elif self.provider == "gitlab":
-            project_id = f"{self.owner}%2F{self.repo}"
+            project_id = gitlab_project_path(self.owner, self.repo)
             return self._gitlab_request("GET", f"/projects/{project_id}")
         return {"error": f"unsupported provider: {self.provider}"}
 
@@ -515,11 +526,26 @@ class VcsApiClient:
         })
 
     def _gitlab_request(self, method: str, path: str, data: dict | None = None) -> dict:
-        url = f"https://gitlab.com/api/v4{path}"
-        return self._do_request(url, method, data, headers={
-            "PRIVATE-TOKEN": self.token,
+        # 自建 GitLab：base URL 从 GITLAB_BASE_URL / meta 配置读取（默认 gitlab.com）
+        url = f"{get_gitlab_api_base()}{path}"
+        _headers = {
+            # Bearer 同时兼容 PAT 与 OAuth access_token（GitLab 官方支持两种写法）
+            "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
-        })
+        }
+        _resp = self._do_request(url, method, data, headers=_headers)
+        # 与 repo_manager._gitlab_req 对齐：部分自建实例 PAT 仅接受 PRIVATE-TOKEN，
+        # Bearer 返回 401 时用同一 token 重试一次（401 表示请求未被处理，写操作也安全）。
+        if isinstance(_resp, dict) and _resp.get("status_code") == 401 and self.token:
+            _alt_headers = {k: v for k, v in _headers.items() if k != "Authorization"}
+            _alt_headers["PRIVATE-TOKEN"] = self.token
+            _resp = self._do_request(url, method, data, headers=_alt_headers)
+        # 归一 iid/description/web_url → number/body/html_url，供按中性字段消费的上层使用
+        try:
+            from src.vcs.providers.gitlab import _normalize
+            return _normalize(_resp)
+        except Exception:
+            return _resp
 
     @staticmethod
     def _do_request(url: str, method: str, data: dict | None = None, headers: dict | None = None,
@@ -585,10 +611,10 @@ def create_client(repo_key: str, token: str = "") -> "VcsApiClient":
     from src.repo_key import parse_repo_key
     provider, owner, repo = parse_repo_key(repo_key)
     if not token:
-        # 从 DB 获取 token
+        # 从 DB 获取 token（按 repo_key 前缀走 TokenResolver，GitLab 不再误用 GitCode token）
         try:
-            from src.user.db import get_gitcode_token
-            token = get_gitcode_token(repo_key=repo_key) or ""
+            from src.user.db import get_repo_token_with_refresh
+            token = get_repo_token_with_refresh(repo_key) or ""
         except Exception:
             pass
     return VcsApiClient(provider, token, owner, repo)

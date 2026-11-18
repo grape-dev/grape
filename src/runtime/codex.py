@@ -59,8 +59,40 @@ class CodexRuntime(AgentRuntime):
         session_id 暂不启用——codex resume 与 opencode --session 形态不同，首期不做。
         """
         args = ["exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check"]
+        args.extend(self._model_provider_args())
         if prompt:
             args.append("-")  # stdin 占位标记
+        return args
+
+    def _model_provider_args(self) -> list[str]:
+        """按需注入自定义模型网关（OpenAI 兼容端点）的 -c 覆盖参数。
+
+        codex CLI **不读 OPENAI_BASE_URL**（实测 0.142.5 仍直连 api.openai.com），
+        只能通过 config.toml 的 model_provider 或命令行 `-c` 覆盖改入口。
+        配置来源：任务 env（含用户云凭据，_assemble_env 会把 config 键名大写注入）
+          CODEX_BASE_URL     必填，网关地址，如 https://gw.example.com/v1
+          CODEX_PROVIDER_ID  可选，默认 gateway
+          CODEX_WIRE_API     可选，responses（默认）/ chat（网关仅支持 chat completions 时）
+          CODEX_MODEL        可选，指定模型名
+        未配置 CODEX_BASE_URL 时返回空列表，行为与原先一致（直连官方端点）。
+        """
+        env = getattr(self, "_task_env", None) or os.environ
+        base = (env.get("CODEX_BASE_URL") or "").strip()
+        if not base:
+            return []
+        provider_id = (env.get("CODEX_PROVIDER_ID") or "gateway").strip() or "gateway"
+        args = [
+            "-c", f"model_provider={provider_id}",
+            "-c", f"model_providers.{provider_id}.name={provider_id}",
+            "-c", f"model_providers.{provider_id}.base_url={base.rstrip('/')}",
+            "-c", f"model_providers.{provider_id}.env_key=OPENAI_API_KEY",
+        ]
+        wire = (env.get("CODEX_WIRE_API") or "").strip()
+        if wire:
+            args += ["-c", f"model_providers.{provider_id}.wire_api={wire}"]
+        model = (env.get("CODEX_MODEL") or "").strip()
+        if model:
+            args += ["-c", f"model={model}"]
         return args
 
     def parse_output(self, line: str) -> dict | None:

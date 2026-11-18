@@ -112,9 +112,9 @@ def knowledge_obs_prefix(repo_key: str) -> str:
 def um_column_for_provider(provider: str) -> str:
     """根据 provider 字符串返回 unified_user_mapping 对应列名。
 
-    gitcode → "gitcode_user"；github → "github_login"。
+    gitcode → "gitcode_user"；github → "github_login"；gitlab → "gitlab_user"。
     """
-    return "github_login" if provider == "github" else "gitcode_user"
+    return {"github": "github_login", "gitlab": "gitlab_user"}.get(provider, "gitcode_user")
 
 
 def um_column_for_repo(repo_key: str) -> str:

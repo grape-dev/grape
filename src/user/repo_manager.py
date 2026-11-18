@@ -509,7 +509,7 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
 
     template: 配置中的模板对象（含 source / source_repo / id）
     target_repo: 目标仓库名（不含 owner）
-    provider: "gitcode" 或 "github"，决定 push 目标 URL
+    provider: "gitcode"/"github"/"gitlab"，决定 push 目标 URL（GitLab 实例地址动态解析）
     来源:
       - source="local" → 复制 examples/{template_id}/（或旧路径 configs/project-templates/{id} 兜底）到临时目录
       - source="git"   → git clone source_repo（用 bot_token 拉取）
@@ -571,6 +571,12 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
             if os.path.isdir(_wf_dir):
                 shutil.rmtree(_wf_dir, ignore_errors=True)
                 log.info(f"Removed .github/workflows from template (GitHub App token lacks workflow permission)")
+        elif provider == "gitlab":
+            # GitLab HTTP 推送：oauth2 + PAT/OAuth token 作为 Basic 认证（实例地址动态）
+            from src.vcs.gitlab import get_gitlab_base_url
+            from urllib.parse import urlparse
+            _gl_host = urlparse(get_gitlab_base_url()).netloc
+            target_url = f"https://oauth2:{user_token}@{_gl_host}/{owner_login}/{target_repo}.git"
         else:
             target_url = f"https://oauth2:{user_token}@gitcode.com/{owner_login}/{target_repo}.git"
         if _run_git_has_origin(workdir):
@@ -734,6 +740,22 @@ def get_hosting_provider_config(provider: str) -> dict:
             "webhook_url_suffix": "/webhook/github",
             "db_token_field": "github_webhook_token",
             "db_bot_token_field": "bot_github_token",
+        }
+    if provider == "gitlab":
+        # 之前缺此分支 → GitLab 仓库 repair_host 会用 GitCode 的 bot token、
+        # /webhook/gitcode 回调和 gitcode_webhook_token 列，托管修复后 webhook 必然 403。
+        from src.token_resolver import (global_bot_token_for_provider,
+                                        global_bot_usernames_for_provider)
+        _names = global_bot_usernames_for_provider("gitlab")
+        return {
+            "bot_token": global_bot_token_for_provider("gitlab"),
+            "bot_username": _names[0] if _names else "",
+            "find_webhook": find_existing_gitlab_webhook,
+            "setup_webhook": setup_gitlab_webhook,
+            "remove_webhook": remove_gitlab_webhook,
+            "webhook_url_suffix": "/webhook/gitlab",
+            "db_token_field": "gitlab_webhook_token",
+            "db_bot_token_field": "bot_gitlab_token",
         }
     else:
         from src.user.db import get_global_gitcode_bot_token, get_global_bot_usernames
@@ -1041,3 +1063,256 @@ def create_github_repo(api_token: str, name: str, description: str = "", private
     if not full_name:
         raise RuntimeError(f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
     return result
+
+
+# ====== GitLab（支持自建实例，base URL 可配置） ======
+
+def _gitlab_req(method: str, url: str, token: str = "", body: dict | None = None) -> dict:
+    """GitLab REST v4 请求。Bearer 同时兼容 PAT 与 OAuth access_token。
+
+    2026-11-16 fix: 部分自建 GitLab 实例 PAT 仅接受 PRIVATE-TOKEN header，
+    Bearer 会返回 401。先试 Bearer，401 时自动 fallback 到 PRIVATE-TOKEN。
+    """
+    base_headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+    def _do(headers):
+        if method == "GET":
+            resp = _requests.get(url, headers=headers, timeout=30)
+        elif method == "POST":
+            resp = _requests.post(url, json=body, headers=headers, timeout=30)
+        elif method == "PUT":
+            resp = _requests.put(url, json=body, headers=headers, timeout=30)
+        elif method == "DELETE":
+            resp = _requests.delete(url, headers=headers, timeout=30)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+        return resp
+
+    try:
+        if token:
+            # 先 Bearer（OAuth access_token 规范）
+            headers = {**base_headers, "Authorization": f"Bearer {token}"}
+            resp = _do(headers)
+            if resp.status_code == 401 and token:
+                # fallback: PRIVATE-TOKEN（PAT 规范）
+                headers2 = {**base_headers, "PRIVATE-TOKEN": token}
+                resp2 = _do(headers2)
+                if resp2.status_code < 400:
+                    resp = resp2
+                else:
+                    resp = resp2  # 用第二次的结果（更确定）
+        else:
+            resp = _do(base_headers)
+
+        if resp.status_code >= 400:
+            raise UpstreamAPIError(method, url, resp.status_code, resp.text, provider="GitLab")
+        if resp.text.strip():
+            return resp.json()
+        return {}
+    except _requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Cannot reach GitLab API: {e}")
+
+
+def _gitlab_project_url(owner: str, repo: str) -> str:
+    """项目 URL：owner/repo 整段编码，支持 group/subgroup/repo 嵌套命名空间。"""
+    from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+    return f"{get_gitlab_api_base()}/projects/{gitlab_project_path(owner, repo)}"
+
+
+def fetch_gitlab_repos_with_role(api_token: str) -> list[dict]:
+    """获取用户可访问的 GitLab 项目列表（membership=true，含所属 group 项目）。
+
+    返回：[{"full_name": "group/sub/repo", "owner": "group/sub", "name": "repo", "is_admin": bool}, ...]
+    is_admin：项目/组权限 access_level >= 40（Maintainer 及以上）。
+    """
+    if not api_token:
+        raise RuntimeError("GitLab API Token 未配置")
+    from src.vcs.gitlab import get_gitlab_api_base
+    repos = []
+    page = 1
+    while True:
+        url = (f"{get_gitlab_api_base()}/projects?membership=true&per_page=100&page={page}"
+               "&order_by=path&sort=asc")
+        data = _gitlab_req("GET", url, api_token)
+        items = data if isinstance(data, list) else []
+        if not items:
+            break
+        for r in items:
+            full_name = r.get("path_with_namespace", "") or ""
+            if not full_name or "/" not in full_name:
+                continue
+            perm = r.get("permissions") or {}
+            level = 0
+            for _k in ("project_access", "group_access"):
+                _v = perm.get(_k) or {}
+                try:
+                    level = max(level, int(_v.get("access_level") or 0))
+                except (TypeError, ValueError):
+                    pass
+            ns = r.get("namespace") or {}
+            repos.append({
+                "full_name": full_name,
+                "owner": full_name.rsplit("/", 1)[0],
+                "name": r.get("path") or full_name.rsplit("/", 1)[1],
+                "is_admin": level >= 40 or ns.get("kind") == "user",
+                "created_at": r.get("created_at", "") or "",
+                "web_url": r.get("web_url", "") or "",
+            })
+        if len(items) < 100:
+            break
+        page += 1
+    return repos
+
+
+def get_user_gitlab_login(api_token: str) -> str:
+    """获取当前 token 的 GitLab 用户名。"""
+    if not api_token:
+        return ""
+    from src.vcs.gitlab import get_gitlab_api_base
+    try:
+        data = _gitlab_req("GET", f"{get_gitlab_api_base()}/user", api_token)
+        return data.get("username", "") or ""
+    except RuntimeError as e:
+        log.warning(f"get_user_gitlab_login failed: {e}")
+        return ""
+
+
+def get_gitlab_project(api_token: str, owner: str, repo: str) -> dict:
+    """获取 GitLab 项目信息（含 permissions）；无权/不存在时抛 UpstreamAPIError(404)。"""
+    return _gitlab_req("GET", _gitlab_project_url(owner, repo), api_token)
+
+
+def find_existing_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int | None:
+    """查找指向 webhook_url 的项目 webhook。"""
+    if not webhook_url:
+        return None
+    try:
+        hooks = _gitlab_req("GET", f"{_gitlab_project_url(owner, repo)}/hooks?per_page=100", api_token)
+        if isinstance(hooks, list):
+            for h in hooks:
+                if h.get("url") == webhook_url:
+                    return h.get("id")
+    except RuntimeError:
+        pass
+    return None
+
+
+def setup_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
+                         webhook_secret: str = "") -> int:
+    """创建 GitLab 项目 webhook，返回 hook id。
+
+    GitLab 用 X-Gitlab-Token 头做密钥校验（非 HMAC）；token 字段即共享密钥。
+    """
+    body = {
+        "url": webhook_url,
+        "token": webhook_secret or api_token,
+        "push_events": True,
+        "issues_events": True,
+        "merge_requests_events": True,
+        "note_events": True,
+        "tag_push_events": True,
+        "pipeline_events": True,
+        "releases_events": True,
+        "enable_ssl_verification": False,
+    }
+    result = _gitlab_req("POST", f"{_gitlab_project_url(owner, repo)}/hooks", api_token, body)
+    hook_id = result.get("id", 0)
+    if not hook_id:
+        raise RuntimeError(
+            f"Created GitLab webhook but got no id: {json.dumps(result, ensure_ascii=False)[:200]}")
+    return hook_id
+
+
+def update_gitlab_webhook_token(api_token: str, owner: str, repo: str,
+                                hook_id: int, webhook_secret: str) -> None:
+    """原地覆盖已有 GitLab webhook 的共享密钥（X-Gitlab-Token）。
+
+    GitLab API 无法读回已有 hook 的 token。若「删旧重建」失败却仍把新生成的
+    secret 写入 DB，上游会继续用旧 token 投递，webhook 将稳定 403。
+    用 PUT 直接把旧 hook 的 token 对齐到写库值，同时保留原有事件订阅配置。
+    """
+    _gitlab_req("PUT", f"{_gitlab_project_url(owner, repo)}/hooks/{int(hook_id)}",
+                api_token, {"token": webhook_secret})
+
+
+def remove_gitlab_webhook(api_token: str, owner: str, repo: str, webhook_id: int) -> None:
+    _gitlab_req("DELETE", f"{_gitlab_project_url(owner, repo)}/hooks/{webhook_id}", api_token)
+
+
+def _gitlab_user_id(api_token: str, username: str) -> int:
+    """GitLab /members 端点只接受数字 user_id，把用户名解析为 ID。
+
+    `/projects/:id/members` 的 user_id 与 `/members/:user_id` 路径参数都是数字 ID；
+    直接塞用户名会让上游返回 400/404。已是数字时直接透传。
+    """
+    if not username:
+        return 0
+    if str(username).isdigit():
+        return int(username)
+    try:
+        from src.vcs.gitlab import get_gitlab_api_base
+        _url = (f"{get_gitlab_api_base()}/users?username="
+                f"{urllib.parse.quote(str(username), safe='')}")
+        data = _gitlab_req("GET", _url, api_token)
+        if isinstance(data, list):
+            for u in data:
+                if (isinstance(u, dict) and u.get("id")
+                        and str(u.get("username", "")).lower() == str(username).lower()):
+                    return int(u["id"])
+    except Exception as e:
+        log.warning(f"_gitlab_user_id resolve failed for {username}: {e}")
+    return 0
+
+
+def add_gitlab_member(api_token: str, owner: str, repo: str, username: str,
+                      permission: str = "maintainer") -> bool:
+    """邀请用户加入项目；GitLab access_level：30=Developer, 40=Maintainer。"""
+    if not api_token or not username:
+        return False
+    _level = {"guest": 10, "reporter": 20, "developer": 30, "push": 30,
+              "maintainer": 40, "owner": 50}.get((permission or "").lower(), 40)
+    _uid = _gitlab_user_id(api_token, username)
+    if not _uid:
+        log.warning(f"add_gitlab_member: cannot resolve GitLab user id for {username}")
+        return False
+    try:
+        _gitlab_req("POST", f"{_gitlab_project_url(owner, repo)}/members", api_token,
+                    {"user_id": _uid, "access_level": _level})
+        return True
+    except RuntimeError as e:
+        log.warning(f"add_gitlab_member failed: {e}")
+        return False
+
+
+def remove_gitlab_member(api_token: str, owner: str, repo: str, username: str) -> None:
+    _uid = _gitlab_user_id(api_token, username)
+    if not _uid:
+        log.warning(f"remove_gitlab_member: cannot resolve GitLab user id for {username}")
+        return
+    _gitlab_req("DELETE", f"{_gitlab_project_url(owner, repo)}/members/{_uid}", api_token)
+
+
+def create_gitlab_repo(api_token: str, name: str, description: str = "", private: bool = True) -> dict:
+    """在当前 token 用户的个人命名空间创建项目（返回 normalized 仓库信息）。"""
+    if not api_token:
+        raise RuntimeError("GitLab API Token 未配置")
+    from src.vcs.gitlab import get_gitlab_api_base
+    body = {
+        "name": name,
+        "path": name,
+        "description": description,
+        "visibility": "private" if private else "public",
+        "initialize_with_readme": False,
+    }
+    result = _gitlab_req("POST", f"{get_gitlab_api_base()}/projects", api_token, body)
+    full_name = result.get("path_with_namespace", "")
+    if not full_name:
+        raise RuntimeError(
+            f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
+    ns = result.get("namespace") or {}
+    return {
+        "full_name": full_name,
+        "owner": ns.get("full_path", "") or full_name.rsplit("/", 1)[0],
+        "name": result.get("path", "") or name,
+        "web_url": result.get("web_url", ""),
+    }

@@ -285,7 +285,7 @@ const API = (() => {
         return _safeErrJson(r).then(err => {
           if (err?.detail?.action === 'reauth_required') {
             // GitCode OAuth token 过期且 refresh_token 也失效——跳授权页
-            _redirectToGitcodeAuth();
+            _redirectToGitcodeAuth(err?.detail?.provider);
             throw new Error(err.detail.message);
           }
           // R1 fix: credential 401 on public auth endpoints — user has no token
@@ -310,7 +310,7 @@ const API = (() => {
         // 没有 retryFn——检查是否 GitCode reauth，否则直接跳登录
         return _safeErrJson(r).then(err => {
           if (err?.detail?.action === 'reauth_required') {
-            _redirectToGitcodeAuth();
+            _redirectToGitcodeAuth(err?.detail?.provider);
             throw new Error(err.detail.message);
           }
           // P33 fix: don't clear token for public auth endpoint 401s
@@ -369,11 +369,12 @@ const API = (() => {
   // Issue #52: GitCode OAuth token 过期且无法刷新时跳转授权页
   // R9-2: Added _reauthRedirecting dedup guard
   var _reauthRedirecting = false;
-  function _redirectToGitcodeAuth() {
+  function _redirectToGitcodeAuth(provider) {
     if (_reauthRedirecting) return;  // R9-2: dedup — already redirecting
     if (_isOnLoginPage()) return;    // R7: already on login page
     _reauthRedirecting = true;
-    API.get('/auth/login/gitcode').then(d => {
+    var _p = ['gitcode', 'github', 'gitlab'].indexOf(provider) >= 0 ? provider : 'gitcode';
+    API.get('/auth/login/' + _p).then(d => {
       if (d.redirect_url) {
         location.href = d.redirect_url;
       } else {

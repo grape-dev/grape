@@ -48,6 +48,7 @@
   "login": {
     "gitcode_login": "GitCode",
     "github_login": "GitHub",
+    "gitlab_login": "GitLab",
     "beta_apply": "Apply for Beta",
     "admin": "Admin Console",
     "pwd_login": "← Sign in with username",
@@ -562,6 +563,7 @@
     "authorize": "Authorize",
     "github_token_help": "1. Go to github.com → Settings<br>2. Developer settings → Personal access tokens<br>3. Generate new token (repo scope)",
     "gitcode_token_help": "1. Go to gitcode.com → Settings<br>2. Personal Access Tokens → New<br>3. Select project read/write scope",
+    "gitlab_token_help": "1. Go to GitLab → User Settings → Access Tokens<br>2. Select api and read_user scopes<br>3. Create the token and copy it (use the button above for self-hosted instances)",
     "access_token": "Access Token",
     "paste_token": "Paste token",
     "how_to_get_token": "How to get a token?",
