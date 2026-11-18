@@ -174,3 +174,38 @@ def test_fingerprint_ignores_runtime_cursor():
     rotated = {"app_id": "a", "app_secret": "s2", "cursor": "c2"}
     assert fingerprint(base) == fingerprint(next_cursor)
     assert fingerprint(base) != fingerprint(rotated)
+
+
+def test_kick_wakes_scan_wait_immediately():
+    """凭证保存后不等 30s 扫描窗口：kick 必须立刻触发下一轮扫描。"""
+    leases = FakeLeaseStore()
+    rounds = []
+
+    async def provider():
+        rounds.append(1)
+        return []
+
+    sup = Supervisor(
+        registry=Registry(), instance_id="r1", lease_store=leases,
+        installation_provider=provider, scan_interval=3600.0,
+    )
+
+    async def scenario():
+        await sup.start()
+        await asyncio.sleep(0.05)
+        before = len(rounds)
+        assert sup.kick() is True
+        await asyncio.sleep(0.05)
+        after_kick = len(rounds)
+        await sup.stop()
+        return before, after_kick
+
+    before, after_kick = asyncio.run(scenario())
+    assert before >= 1                 # 启动即扫一轮
+    assert after_kick > before         # kick 没有等 3600s 窗口
+
+
+def test_kick_before_start_is_noop_not_error():
+    sup = Supervisor(registry=Registry(), instance_id="r1",
+                     installation_provider=None or (lambda: None))
+    assert sup.kick() is False         # 未 start → 交给自然扫描，不抛

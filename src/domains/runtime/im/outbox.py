@@ -697,16 +697,26 @@ class OutboxConsumer:
         sent: list[str] = []
         failed: list[tuple[str, str]] = []
         degraded_marks: list[dict] = []
-        for row in rows:
-            payload = row.get("payload") or {}
-            chat_id = row.get("channel_chat_id") or ""
-            target = {"installation_id": row["installation_id"],
-                      "channel_type": row["channel_type"]}
-            card, text_card = build_cards_from_payload(payload)
-            try:
-                ok, degraded, reason = await _deliver(engine, target, chat_id, card, text_card)
-            except Exception as e:
-                ok, degraded, reason = False, False, repr(e)[:_REASON_LEN]
+        # 多渠并发投递（2026-11-18）：逐行顺序 await 会让先排到的渠道先到、另一个晚 1~2s，
+        # 用户侧体感「不是同时收到」。这里按行并发，但同一 (installation, chat) 内用锁串行保序。
+        _locks: dict[tuple, "asyncio.Lock"] = {}
+
+        async def _deliver_one(_row):
+            _payload = _row.get("payload") or {}
+            _chat = _row.get("channel_chat_id") or ""
+            _target = {"installation_id": _row["installation_id"],
+                       "channel_type": _row["channel_type"]}
+            _lock = _locks.setdefault((_row["installation_id"], _chat), asyncio.Lock())
+            _card, _text_card = build_cards_from_payload(_payload)
+            async with _lock:
+                try:
+                    _ok, _degraded, _reason = await _deliver(engine, _target, _chat, _card, _text_card)
+                except Exception as _e:
+                    _ok, _degraded, _reason = False, False, repr(_e)[:_REASON_LEN]
+            return _row, _payload, _chat, _ok, _degraded, _reason
+
+        results = await asyncio.gather(*[_deliver_one(r) for r in rows])
+        for row, payload, chat_id, ok, degraded, reason in results:
             if ok:
                 sent.append(row["out_track_id"])
                 if degraded:

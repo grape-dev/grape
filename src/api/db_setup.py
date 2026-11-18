@@ -2648,6 +2648,33 @@ register_migration(
 )
 
 
+def _fn_ensure_im_channel_tables() -> None:
+    """存量库补建 IM 渠道表族（2026-11-18）。
+
+    渠道 8 表原先只挂在老轨 `_create_tables()`（`_NEW_TABLES`）里，而存量库
+    （已盖 legacy-stamp 202610300001）启动**不跑老轨** → 表永不创建：
+    页面保存渠道时 `sync_installation` 撞 `no such table` 被吞成 warning
+    （接口仍返回成功、AI 徽标一直「未连接」），安装读取/通知扇出全部静默失效。
+    DDL 与引擎启动迁移共用同一份 001/004，幂等（IF NOT EXISTS + 列判存在），
+    存量库重跑零写入。
+    """
+    from src.kernel.session_manager import db as _c_db, db_lock as _c_lock
+    from src.domains.runtime.im.engine_wiring import (ensure_channel_schema,
+                                                      ensure_notify_outbox_schema)
+    with _c_lock:
+        ensure_channel_schema(_c_db)
+        ensure_notify_outbox_schema(_c_db)
+        _c_db.commit()
+
+
+register_migration(
+    version="202611182001",
+    name="ensure-im-channel-tables",
+    kind="safe",
+    fn=_fn_ensure_im_channel_tables,
+)
+
+
 def _fn_create_repo_credentials_table() -> None:
     """S80/D55 建 rc 单表；D99（2026-11-08）语义重设计——目标态一步建对。
 

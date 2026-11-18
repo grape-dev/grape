@@ -54,6 +54,9 @@ WECOM_CAPABILITIES = (Capability.TEXT | Capability.RICH_CARD | Capability.CARD_A
 REPLY_WINDOW_SECS = 24 * 3600.0   # 官方：收到消息回调后 24h 内可回复
 CHAT_DIR_TTL = 7 * 24 * 3600.0    # 会话类型台账（主动推送需要 chat_type）
 REQUEST_TIMEOUT = 10.0
+# 发送时若长连接还没建好（凭证刚保存/正在重连），先等这么久再判定失败：
+# 否则首条通知直接撞 "long connection is not established"，脚本/监控口径显示 failed。
+CONNECT_WAIT_SECS = 8.0
 CHUNK_BYTES = 512 * 1024          # 上传分片上限（base64 编码前）
 MAX_CHUNKS = 100
 MEDIA_LIMITS = {"file": 20 * 1024 * 1024, "image": 10 * 1024 * 1024,
@@ -81,10 +84,15 @@ class WecomTransport:
     outbound/上传通过 `request()`（等 ack）或 `notify()`（不等 ack）发帧。
     """
 
-    def __init__(self, bot_id: str = "", *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, bot_id: str = "", *, clock: Callable[[], float] = time.monotonic,
+                 connect_wait: float | None = None) -> None:
         self.bot_id = str(bot_id or "")
         self._ws: Any = None
         self._lock = asyncio.Lock()
+        # 建连闸：attach 置位 / detach 复位，send_frame 在未连接时短暂等它
+        # （loop 在 3.10+ 不绑定创建时的 loop，跨 loop 复用一个 transport 也安全）
+        self._attached = asyncio.Event()
+        self.connect_wait = CONNECT_WAIT_SECS if connect_wait is None else float(connect_wait)
         self._seq = 0
         self._pending: dict[str, asyncio.Future] = {}
         self._clock = clock
@@ -95,11 +103,13 @@ class WecomTransport:
 
     def attach(self, ws: Any) -> None:
         self._ws = ws
+        self._attached.set()
 
     def detach(self, ws: Any = None) -> None:
         if ws is not None and ws is not self._ws:
             return
         self._ws = None
+        self._attached.clear()
         for fut in list(self._pending.values()):
             if not fut.done():
                 fut.set_exception(WecomTransportError("ws detached"))
@@ -129,11 +139,35 @@ class WecomTransport:
         fut.set_result(payload)
         return True
 
-    async def send_frame(self, frame: dict) -> None:
-        """发一帧原始 WS 消息（发送串行化；未连接即显式失败）。"""
+    async def wait_connected(self, timeout: float | None = None) -> Any:
+        """取当前 ws；未连接则等 `timeout`（默认 connect_wait）秒，超时显式失败。
+
+        存在意义：凭证刚保存时 supervisor 建连需要握手 + 订阅 ack，期间的第一条
+        通知不该被判定失败（旧行为：立即 raise → outbox 记 failed 再重试）。
+        `timeout=0` 恢复「不等待、立即失败」语义。
+        """
+        ws = self._ws
+        if ws is not None:
+            return ws
+        wait = self.connect_wait if timeout is None else float(timeout)
+        if wait > 0:
+            try:
+                await asyncio.wait_for(self._attached.wait(), timeout=wait)
+            except asyncio.TimeoutError:
+                # 超时不在这里抛：统一落到下面「仍无 ws → 显式失败」，只留一条调试线索
+                log.debug("[wecom:%s] connect wait timed out after %.1fs",
+                          self.bot_id[:12], wait)
         ws = self._ws
         if ws is None:
+            if wait > 0:
+                raise WecomTransportError(
+                    f"wecom long connection is not established (waited {wait:g}s)")
             raise WecomTransportError("wecom long connection is not established")
+        return ws
+
+    async def send_frame(self, frame: dict) -> None:
+        """发一帧原始 WS 消息（发送串行化；未连接先等建连，超时才失败）。"""
+        ws = await self.wait_connected()
         async with self._lock:
             await ws.send(json.dumps(frame, ensure_ascii=False))
         # 观察哨不落明文 secret：订阅帧 body 里的 secret 一律抹掉（token/密钥不入内存副本）

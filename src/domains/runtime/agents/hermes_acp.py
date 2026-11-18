@@ -1606,6 +1606,32 @@ def ensure_overlay_writable_dirs(iso_home: str):
         except Exception as _e:
             log.warning(f"hermes ACP overlay: ensure real dir '{name}' failed: {_e}")
 
+_PLATFORM_ENABLE_CRED_KEYS = frozenset({
+    # 键名对应 hermes 各平台插件的 gateway_env.ENV_ENABLE_CREDENTIALS（plugins/platforms/*/）：
+    # 网关在 .env 里看到这些键就**自动启用**对应 IM 平台适配器。
+    "FEISHU_APP_ID", "FEISHU_APP_SECRET",
+    "DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET",
+    "WECOM_BOT_ID", "WECOM_SECRET",
+    "WEIXIN_TOKEN", "WEIXIN_ACCOUNT_ID",
+    "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "DISCORD_BOT_TOKEN",
+    "MATTERMOST_TOKEN", "MATRIX_ACCESS_TOKEN", "MATRIX_PASSWORD",
+    "SIGNAL_HTTP_URL", "QQ_APP_ID", "QQ_CLIENT_SECRET",
+    "YUANBAO_APP_ID", "YUANBAO_APP_SECRET",
+    "BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD",
+    "WHATSAPP_CLOUD_PHONE_NUMBER_ID", "WHATSAPP_CLOUD_ACCESS_TOKEN", "WHATSAPP_ENABLED",
+    "TWILIO_ACCOUNT_SID", "GATEWAY_RELAY_URL",
+})  # 升级 hermes 后核对该清单是否仍与 plugins/platforms/*/gateway_env.py 一致
+
+
+def _is_platform_enable_cred(line: str) -> bool:
+    """该 .env 行是否是某个 IM 平台的「启用凭据」（`export ` 前缀也认）。"""
+    key = line.strip()
+    if key.startswith("export "):
+        key = key[len("export "):].strip()
+    key = key.split("=", 1)[0].strip()
+    return key in _PLATFORM_ENABLE_CRED_KEYS
+
+
 def _build_overlay_home(iso_home: str, src_home: str):
     """构建 per-task HERMES_HOME overlay（学习 multica mirrorSharedHermesHome）。
 
@@ -1733,6 +1759,14 @@ def _build_overlay_home(iso_home: str, src_home: str):
                         stripped = line.strip()
                         if stripped.startswith("HERMES_HOME=") or stripped.startswith("export HERMES_HOME="):
                             continue  # 删掉源 HERMES_HOME 行
+                        if _is_platform_enable_cred(stripped):
+                            # 平台适配器启用凭据不带给子 home（2026-11-18 修复）：
+                            # hermes 网关「env 里有平台凭据 ⇒ 自动启用该平台」，于是每个
+                            # ACP 子 home 的网关都去抢同一个飞书 app_id；宿主网关已占用 →
+                            # 子网关 non-retryable 启动冲突 → 直接退出 → prompt 无人处理，
+                            # IM 侧表现为「发消息完全没有回复」（task status=error text_len=0）。
+                            # chat/task 任务不需要任何 IM 适配器（收发是 grape 自己的引擎）。
+                            continue
                         env_body += line
             except Exception:
                 pass

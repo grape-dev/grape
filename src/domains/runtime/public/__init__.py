@@ -2327,7 +2327,10 @@ _ANY_QUERIES: dict[str, str] = {
         "FROM skill WHERE is_active=1 AND agent_type='chat' ORDER BY scope, skill_name"),
     'chat_skill_scope_by_id': 'SELECT scope FROM skill WHERE id=? AND is_active=1',
     'messages_by_task': (
-        "SELECT id, role, generate_status, content, conversation_id "
+        # 列序固定（tests/arch/test_chat_domain_reads.py 守）：0=id 1=role
+        # 2=generate_status 3=content 4=conversation_id；5=created_at 为本轮新增的
+        # 末列（孤儿轮次时间兜底用，老消费者按下标取前 5 列不受影响）。
+        "SELECT id, role, generate_status, content, conversation_id, created_at "
         "FROM chat_messages WHERE task_id=? ORDER BY id"),
     'message_recall_by_task': (
         "UPDATE chat_messages SET deleted=1 WHERE task_id=? "
@@ -4637,7 +4640,10 @@ def join_feishu_chat(chat_id: str, conv_id: str, user_id) -> bool:
     with _any_tx() as c:
         c.execute(_any_sql("conversation_owner"), (conv_id,))
         row = c.fetchone()
-        if not row or row[0] != user_id:
+        # IM 侧 uid 来自渠道安装/身份表（TEXT：uuid 或 "1"，见 installation_owner_by_app_any 的
+        # str 保形），而 chat_conversations.user_id 在 sqlite 是 INTEGER。Python 层比较不做类型
+        # 亲和，"1" != 1 会恒定 deny（表现：/chat 选号回「❌ 加入失败」）。统一按字符串比对。
+        if not row or str(row[0]) != str(user_id):
             return False
         c.execute(_any_sql("conversation_clear_im_channel"), (chat_id, conv_id))
         c.execute(_any_sql("conversation_set_im_channel"), (chat_id, conv_id))

@@ -586,11 +586,15 @@ async def notify_user(user_id: int, kind: str, text: str, *,
         OB = None                                   # outbox 不可用 → 退化旧行为（直投）
 
     _bump("attempted")
-    for target in pick:
-        await _handle_target(target, uid=uid, kind=kind, text=text,
-                             repo_key=repo_key, issue_number=issue_number,
-                             conv_id=conv_id, note=note, eng=eng,
-                             dedupe=dedupe, OB=OB)
+    # 多渠并发（2026-11-18）：顺序 await 会让微信先到、飞书晚 1~2s（用户体感"不是同时"）。
+    # 每个 target 内部自成闭环（独立 outbox 行/独立成败），并发互不影响。
+    await asyncio.gather(*[
+        _handle_target(target, uid=uid, kind=kind, text=text,
+                       repo_key=repo_key, issue_number=issue_number,
+                       conv_id=conv_id, note=note, eng=eng,
+                       dedupe=dedupe, OB=OB)
+        for target in pick
+    ])
 
     sent = [c for t in pick for c in t.pop("_sent", [])]
     failed = [c for t in pick for c in t.pop("_failed", [])]

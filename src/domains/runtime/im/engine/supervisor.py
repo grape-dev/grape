@@ -80,11 +80,43 @@ class Supervisor:
         self._task: Optional[asyncio.Task] = None
         self._run_tasks: dict[str, asyncio.Task] = {}   # inst_id → 连接循环任务（stop 收敛用）
         self._running = False
+        # 配置保存后打断「等 30s 扫描」的唤醒闸（kick）：Event 在 loop 内等，
+        # 保存接口在任何线程都能唤醒（call_soon_threadsafe 兜底）。
+        self._wake = asyncio.Event()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.instances: list = [instance_id]  # 扫描前由 list_active_instances 刷新
 
     async def start(self) -> None:
         self._running = True
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
         self._task = asyncio.get_running_loop().create_task(self._scan_loop())
+
+    def kick(self) -> bool:
+        """立刻打断扫描等待（凭证保存/解绑后秒级建连或让渡，不等 30s 窗口）。
+
+        同步、绝不抛：Event.set 必须在持有 loop 的线程上执行，跨线程走
+        call_soon_threadsafe；loop 未起（start 前）或已停 → 留待自然扫描。
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return False
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            self._wake.set()
+            log.info("[supervisor] scan kicked (config change)")
+            return True
+        try:
+            loop.call_soon_threadsafe(self._wake.set)
+            log.info("[supervisor] scan kicked (config change, cross-thread)")
+            return True
+        except RuntimeError:
+            return False
 
     async def stop(self) -> None:
         """A7：stop → release_all + 入口 _running 检查。"""
@@ -120,7 +152,16 @@ class Supervisor:
                 # 一直没被建连，日志里连一行都没有——异常在这里被 pass 吞掉了，
                 # 排查只能靠猜）。记栈 + 退避后下一轮继续。
                 log.warning("[supervisor] scan round failed: %s", exc, exc_info=True)
-            await asyncio.sleep(self._scan_interval)
+            # 等下一轮，但配置保存（kick）可以立刻打断：否则新保存的凭证最多要等
+            # 一整个扫描窗口才建连（企微首条通知就撞上 "long connection is not
+            # established"）。Event 语义：被 kick → 立即下一轮；否则睡满窗口。
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=self._scan_interval)
+                # 只在真被唤醒时清位：避免清了之后 kick 恰好落在 wait 之前被吃掉
+                # （多扫一轮无副作用，漏掉一次 kick 就是 30s 窗口）。
+                self._wake.clear()
+            except asyncio.TimeoutError:
+                log.debug("[supervisor] scan window elapsed (%.0fs)", self._scan_interval)
 
     async def _scan_once(self) -> None:
         if not self._running:

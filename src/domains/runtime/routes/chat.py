@@ -72,6 +72,25 @@ from src.kernel.session_manager import (
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
+# 孤儿轮次判定：user 行已落库、agent 行始终没有（执行进程死掉/任务丢失），
+# 超过这个时长就不再报 running，直接判「任务已中断」，避免页面永久"处理中"。
+# 取 30 分钟：正常长任务（多轮工具调用）远达不到，又不至于让用户白等半天。
+ORPHAN_TURN_TIMEOUT_SECS = 30 * 60.0
+
+
+def _turn_age_secs(created_at: str) -> float | None:
+    """DB 时间戳 → 距今秒数（解析失败/未来时间返回 None，调用方按"未知"处理）。"""
+    try:
+        from src.domains.runtime.engine.health import parse_dt
+        import time as _t
+        ts = parse_dt(str(created_at or ""))
+        if ts is None:
+            return None
+        age = _t.time() - ts
+        return age if age >= 0 else None
+    except Exception:
+        return None
+
 class ChatMessage(BaseModel):
     message: str
     repo_key: str = ""
@@ -1869,16 +1888,21 @@ async def update_chat_config(body: dict, request: Request,
             log.warning(f"Chat IM: reconcile unified_user_mapping failed: {e}")
 
     # Issue #871 写方向反转：保存/解绑/换 app 直写 grape_t_channel_installation（请求内生效，
-    # 不依赖扫描窗口）；new 模式下写桥自动反向回写 legacy。失败只告警不阻断。
-    # Issue #956：revoke 按「旧渠道类型」匹配安装行（钉钉行走 channel_type=dingtalk，
-    # 不传会用默认 feishu 导致 revoke 落空 → 安装行不 revoked、引擎不归零）
+    # 不依赖扫描窗口）；new 模式下写桥自动反向回写 legacy。
+    # 2026-11-18 失败可见：A2 收尾后安装表是 IM 凭证**唯一真相源**（legacy im_* 三列不再写），
+    # 所以这里写失败必须让用户看到——原实现只 log.warning 仍返回 200，页面提示“配置已更新”、
+    # 徽标却永远“未连接”（本机曾因渠道表缺失 + 库路径错，静默失败数天）。
+    # 口径：保存(sync)失败 / 解绑(revoke)失败 → 502；换 app 时旧行 revoke 失败只告警
+    # （新配置已生效，且下次 old_app_id 已变，重试不会再命中旧行）。
+    _inst_problem = ""
     try:
         from src.domains.runtime.im.engine_wiring import revoke_installation, sync_installation
         _uid = str(user["id"])
         _old_channel = old_channel
         if explicit_unbind and old_app_id:
-            revoke_installation("user", owner_user_id=_uid, app_id=old_app_id,
-                                       channel_type=_old_channel)
+            if not revoke_installation("user", owner_user_id=_uid, app_id=old_app_id,
+                                       channel_type=_old_channel):
+                _inst_problem = "渠道安装未撤销（revoke 未命中）"
         elif _new_app:
             # Issue #956：写入口透传 channel_type=provider（feishu|dingtalk），
             # 引擎侧按渠道类型路由到对应工厂（#936 DINGTALK 工厂已注册）
@@ -1895,15 +1919,27 @@ async def update_chat_config(body: dict, request: Request,
             elif (provider or "") == "wechat":
                 # Issue #1728：微信 ilink bot_token → config 落 bot_token 语义键
                 _extra = {"bot_token": kwargs.get("im_app_secret", "") or _new_app}
-            sync_installation("user", owner_user_id=_uid, app_id=_new_app,
+            if not sync_installation("user", owner_user_id=_uid, app_id=_new_app,
                                      app_secret=kwargs.get("im_app_secret", "") or "",
                                      channel_type=provider or "feishu",
-                                     extra_config=_extra)
+                                     extra_config=_extra):
+                _inst_problem = "渠道安装未写入（grape_t_channel_installation）"
         if _new_app and old_app_id and old_app_id != _new_app:
-            revoke_installation("user", owner_user_id=_uid, app_id=old_app_id,
-                                       channel_type=_old_channel)
+            if not revoke_installation("user", owner_user_id=_uid, app_id=old_app_id,
+                                       channel_type=_old_channel):
+                log.warning(f"Chat IM: revoke old installation missed (user={user['id']} "
+                            f"app={_safe_im_app_ref(old_app_id, _old_channel)})")
     except Exception as e:
         log.warning(f"Chat IM: sync grape_t_channel_installation failed: {e}")
+        _inst_problem = f"{type(e).__name__}: {e}"
+    if _inst_problem:
+        log.error(f"Chat IM: installation write failed user={user['id']} "
+                  f"provider={_hit_prov}: {_inst_problem}")
+        raise HTTPException(status_code=502, detail={
+            "code": 502,
+            "message": "IM 渠道配置未保存成功：服务端安装记录写入失败，请重试；若持续失败请联系管理员",
+            "reason": _inst_problem,
+        })
 
     # C3 审计：IM 凭证保存/解绑留痕（detail 只记渠道与 app 摘要，绝不落 secret）
     if channel_hit:
@@ -2755,7 +2791,21 @@ def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token
     if has_user and not has_assistant:
         # user 已写但 assistant 未写 → agent 可能仍在另一台机器执行
         # 返回 running 让前端继续等待 + 重连 SSE 轮询 DB（跨机器容灾）
-        conv_id = rows[0][3] if rows else ""
+        #
+        # 孤儿轮次兜底（2026-11-18）：执行进程若中途死掉（ACP 秒死/服务重启），
+        # 这一轮永远不会补 agent 行，恒返 running 会让页面永远显示"处理中"。
+        # 超过 ORPHAN_TURN_TIMEOUT_SECS 仍无 agent 行 → 判中断（error）。
+        # 列序（messages_by_task）：0=id 1=role 2=generate_status 3=content
+        # 4=conversation_id 5=created_at
+        conv_id = (rows[0][4] if rows and len(rows[0]) > 4 else "") or ""
+        age = _turn_age_secs(rows[0][5] if rows and len(rows[0]) > 5 else "")
+        if age is not None and age > ORPHAN_TURN_TIMEOUT_SECS:
+            log.info(f"chat task status: orphan turn {task_id} aged {int(age)}s "
+                     f"→ error (no agent row)")
+            return {"task_id": task_id, "status": "error", "result": "",
+                    "text": "", "conversation_id": conv_id,
+                    "error": f"任务已中断（超过 {int(ORPHAN_TURN_TIMEOUT_SECS // 60)} 分钟无回复记录）",
+                    "source": "db"}
         return {"task_id": task_id, "status": "running", "result": "",
                 "text": "",
                 "conversation_id": conv_id, "error": "",

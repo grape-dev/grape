@@ -103,12 +103,12 @@
               </div>
               <div class="project-stats">
                 <div class="project-stat">
-                  <b>{{ repos.length }}</b
-                  ><span>{{ t('repos.lobby.stat_projects') }}</span>
-                </div>
-                <div class="project-stat">
                   <b>{{ hostedCount }}</b
                   ><span>{{ t('repos.lobby.stat_hosted') }}</span>
+                </div>
+                <div class="project-stat">
+                  <b>{{ repos.length }}</b
+                  ><span>{{ t('repos.lobby.stat_visible') }}</span>
                 </div>
               </div>
             </div>
@@ -136,6 +136,13 @@
                       <line x1="5" y1="12" x2="19" y2="12" />
                     </svg>
                     <span>{{ t('repos.lobby.new_project_btn') }}</span>
+                  </button>
+                  <button
+                    class="project-refresh-btn"
+                    :title="onlyHosted ? t('repos.lobby.scope_hosted_title') : t('repos.lobby.scope_all_title')"
+                    @click="onlyHosted = !onlyHosted"
+                  >
+                    {{ onlyHosted ? t('repos.lobby.scope_hosted') : t('repos.lobby.scope_all') }}
                   </button>
                   <button
                     class="project-refresh-btn"
@@ -216,9 +223,9 @@
                   </div>
                 </div>
                 <div v-if="filteredRepos.length === 0" class="lobby-empty rv-empty">
-                  <div class="lobby-empty-ic">🔭</div>
-                  <h3>{{ t('repos.lobby.empty_title') }}</h3>
-                  <p>{{ t('repos.lobby.empty_desc') }}</p>
+                  <div class="lobby-empty-ic">{{ onlyHosted ? '📦' : '🔭' }}</div>
+                  <h3>{{ onlyHosted ? t('repos.lobby.empty_hosted_title') : t('repos.lobby.empty_title') }}</h3>
+                  <p>{{ onlyHosted ? t('repos.lobby.empty_hosted_desc') : t('repos.lobby.empty_desc') }}</p>
                 </div>
                 <div v-if="pages > 1" class="project-pager">
                   <button :disabled="repoPage === 0" @click="goPage(-1)">‹</button>
@@ -402,6 +409,9 @@ const projectsHint = ref('')
 const projectsBroken = ref([])
 const searchQuery = ref('')
 const repoPage = ref(0)
+// 项目大厅默认只列「已托管」：VCS 能看到的仓库动辄上百（组织仓库全在里面），
+// 混在一起看不出哪些真在本平台托管。切到「全部仓库」才会显示可托管的候选。
+const onlyHosted = ref(true)
 const platformFilter = ref('')
 const refreshing = ref(false)
 const wsLoaded = ref(false)
@@ -503,6 +513,7 @@ const hostedCount = computed(() => repos.value.filter((r) => r.is_hosted).length
 // ── list / search / pager (identical sort+filter logic) ──
 const allRepos = computed(() => {
   let list = repos.value.slice()
+  if (onlyHosted.value) list = list.filter((r) => r.is_hosted)
   if (platformFilter.value) {
     list = list.filter((r) => {
       const rk = r.repo_key || ''
