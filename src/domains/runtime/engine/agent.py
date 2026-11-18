@@ -3110,7 +3110,7 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
             if has_user_id(_task_user_id):
                 try:
                     from src.api.deps import get_user_token_with_refresh
-                    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                    from src.domains.mgmt.public import get_grape_account_by_id
                     _acc = get_grape_account_by_id(_task_user_id)
                     if _acc:
                         user_token = get_user_token_with_refresh(_acc["username"], user_id=_task_user_id) or ""

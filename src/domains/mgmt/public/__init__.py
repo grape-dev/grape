@@ -5986,3 +5986,95 @@ def invalidate_user_repos(user_id: 'str | int') -> Any:
 # 原名别名：下划线内部名保持可用（调用点零改动）。
 _get_managed_webhook_id = managed_webhook_id
 _invalidate_global_bot_cache = invalidate_global_bot_cache
+
+
+# ── 账号/身份/审计面：跨域（runtime、platform）只读+审计写契约 ──────────────
+# 归属说明：grape_accounts / external_identities / unified_user_mapping / audit_log
+# 均归 mgmt 域；外域只经下列转发函数读取，不再直连 mgmt.auth.* 内部模块。
+def get_grape_account_by_id(user_id: 'str | int') -> Any:
+    """按主键取 grape 账号（dict | None）。"""
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id as _impl
+
+    return _impl(user_id)
+
+
+def get_grape_account_by_username(username: str) -> Any:
+    """按用户名取 grape 账号（dict | None）。"""
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username as _impl
+
+    return _impl(username)
+
+
+def get_user_identities(grape_user_id: 'str | int', strict: bool = False) -> list:
+    """取账号的外部身份绑定列表。"""
+    from src.domains.mgmt.auth.grape_account_db import get_user_identities as _impl
+
+    return _impl(grape_user_id, strict)
+
+
+def list_platform_links(grape_user_id: 'str | int', strict: bool = False) -> list:
+    """取账号的平台登录名绑定列表。"""
+    from src.domains.mgmt.auth.grape_account_db import list_platform_links as _impl
+
+    return _impl(grape_user_id, strict)
+
+
+def resolve_user_id_by_platform_login(provider: str, platform_login: str) -> Any:
+    """按 provider + 平台登录名反查 grape user_id。"""
+    from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login as _impl
+
+    return _impl(provider, platform_login)
+
+
+def has_refresh_token(user_id: 'str | int', provider: str) -> bool:
+    """账号在该 provider 上是否持有 refresh token。"""
+    from src.domains.mgmt.auth.grape_account_db import _has_refresh_token as _impl
+
+    return _impl(user_id, provider)
+
+
+def get_repo_admin_identity(user: dict, repo_key: str) -> Any:
+    """取用户在该仓库的管理员平台身份（dict | None）。"""
+    from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity as _impl
+
+    return _impl(user, repo_key)
+
+
+def log_audit(event_type: str, user_id: 'str | int' = 0, operator_id: 'str | int' = 0,
+              ip: str = '', detail: 'dict | None' = None) -> None:
+    """写审计日志（哈希链）。"""
+    from src.domains.mgmt.auth.audit import log_audit as _impl
+
+    return _impl(event_type, user_id=user_id, operator_id=operator_id, ip=ip, detail=detail)
+
+
+def encrypt(plaintext: str) -> str:
+    """凭据加密（mgmt 持密钥）。"""
+    from src.domains.mgmt.auth.credential_crypto import encrypt as _impl
+
+    return _impl(plaintext)
+
+
+def decrypt(encrypted: str) -> str:
+    """凭据解密（mgmt 持密钥）。"""
+    from src.domains.mgmt.auth.credential_crypto import decrypt as _impl
+
+    return _impl(encrypted)
+
+
+def list_providers() -> list[str]:
+    """已配置的认证 provider 列表。"""
+    from src.domains.mgmt.auth.providers import list_providers as _impl
+
+    return _impl()
+
+
+def invalidate_provider_cache() -> None:
+    """失效 provider 缓存。"""
+    from src.domains.mgmt.auth.providers import invalidate_provider_cache as _impl
+
+    return _impl()
+
+
+# 原名别名：下划线内部名保持可用（调用点零改动）。
+_has_refresh_token = has_refresh_token

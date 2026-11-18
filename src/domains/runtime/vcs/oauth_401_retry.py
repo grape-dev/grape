@@ -72,7 +72,7 @@ def oauth_401_retry(user_id: str, provider: str, current_token: str, api_call,
         return first, False
 
     # 401 → 判定凭据类型（有 refresh_token 才是 OAuth 链；PAT 直接抛/返回）
-    from src.domains.mgmt.auth.grape_account_db import _has_refresh_token
+    from src.domains.mgmt.public import _has_refresh_token
     if not _has_refresh_token(user_id, provider):
         log.warning(f"401 on PAT-type credential (no refresh, P-6③): "
                     f"user={user_id} provider={provider}")

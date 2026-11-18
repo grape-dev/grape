@@ -66,7 +66,7 @@ def _pat_token(user_id: str, repo_provider: str) -> str:
 def _active_channels(user_id: str) -> list[dict]:
     """活跃绑定（status ∈ {1,4}）；4=过期，仍列出以便给出 TOKEN_EXPIRED 而不是 NO_CHANNEL。"""
     try:
-        from src.domains.mgmt.auth.grape_account_db import get_user_identities
+        from src.domains.mgmt.public import get_user_identities
 
         return list(get_user_identities(str(user_id)) or [])
     except Exception as e:
@@ -79,7 +79,7 @@ def _channel_token(session, user_id: str, channel: str) -> str:
     try:
         from sqlalchemy import text
 
-        from src.domains.mgmt.auth.credential_crypto import decrypt
+        from src.domains.mgmt.public import decrypt
 
         # 表归 mgmt：SQL 在 mgmt public 一份（返回密文，解密仍在这里做）
         from src.domains.mgmt import public as _mg_tok

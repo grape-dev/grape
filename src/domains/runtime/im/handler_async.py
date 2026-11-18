@@ -554,7 +554,7 @@ async def _autopilot_finding_dispatch(ctx, egress, msg_id, uid, exec_id, finding
         await egress.reply_card(ctx, msg_id, "**你没有该仓库的访问权限**")
         return
     try:
-        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+        from src.domains.mgmt.public import get_grape_account_by_id
         _acc = get_grape_account_by_id(uid) or {}
         _uname = _acc.get("username", "")
         from src.domains.mgmt.routes.autopilot import _dispatch_finding_core
@@ -1360,7 +1360,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                 uid = get_user_id_by_app_id(ctx.app_id)
                 if uid:
                     # D32: 从 grape_accounts 读 username + nickname
-                    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                    from src.domains.mgmt.public import get_grape_account_by_id
                     user_row = get_grape_account_by_id(uid)
                     username = (user_row or {}).get("username", "") if user_row else ""
                     if username and user_row:
@@ -1629,7 +1629,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
             # 路径 B 仓库需要 user_token 注入 USER_*_TOKEN env → GIT_ASKPASS fallback
             if has_user_id(user_id) and repo_key:
                 try:
-                    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                    from src.domains.mgmt.public import get_grape_account_by_id
                     _feishu_acc = get_grape_account_by_id(user_id)
                     if _feishu_acc and _feishu_acc.get("username"):
                         # D37/S57：provider 由 repo_key 前缀派生（gitee 不再折叠为 gitcode）

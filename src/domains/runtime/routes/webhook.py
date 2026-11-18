@@ -1685,7 +1685,7 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
             _uid = int(user_hint.get("id") or user_hint.get("user_id") or 0)
             _username = user_hint.get("username") or ""
             if not _username and _uid > 0:
-                from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                from src.domains.mgmt.public import get_grape_account_by_id
                 _username = (get_grape_account_by_id(_uid) or {}).get("username", "")
             if _username or _uid > 0:
                 from src.kernel.token_resolver import create_provider_from_repo_key

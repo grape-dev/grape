@@ -84,7 +84,7 @@ def _has_pat(session, user_id: str, repo_provider: str) -> bool:
 def _active_identities(user_id: str) -> list[str]:
     """该用户仍活跃的登录渠道（status ∈ {1,4}，与前端绑定列表同口径）。"""
     try:
-        from src.domains.mgmt.auth.grape_account_db import get_user_identities
+        from src.domains.mgmt.public import get_user_identities
 
         return [str(i.get("provider")) for i in (get_user_identities(str(user_id)) or []) if i.get("provider")]
     except Exception:

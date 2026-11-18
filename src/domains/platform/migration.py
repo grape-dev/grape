@@ -69,13 +69,13 @@ def _meta(key: str) -> str:
 
 
 def _encrypt(value: str) -> str:
-    from src.domains.mgmt.auth.credential_crypto import encrypt
+    from src.domains.mgmt.public import encrypt
 
     return encrypt(value) if value else ""
 
 
 def _decrypt(value: str) -> str:
-    from src.domains.mgmt.auth.credential_crypto import decrypt
+    from src.domains.mgmt.public import decrypt
 
     return decrypt(value) if value else ""
 

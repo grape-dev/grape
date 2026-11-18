@@ -561,7 +561,7 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
             if not issue_creator.strip():
                 return 0
             from src.kernel.repo_key import parse_repo_key
-            from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login
+            from src.domains.mgmt.public import resolve_user_id_by_platform_login
             _provider, _, _ = parse_repo_key(repo_key)
             # M5/S51（D31）：身份优先——平台登录名权威域命中即权威；
             # 原二级回退里已有同一身份查询，此处置前并保留原链兜底

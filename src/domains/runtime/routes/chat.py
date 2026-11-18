@@ -489,7 +489,7 @@ def _build_web_user_info(user: dict, acc: dict | None = None) -> str:
         lines.append(f"  Grape 账号：{username}")
         # 平台登录名（按卡目录顺序，身份域权威）
         try:
-            from src.domains.mgmt.auth.grape_account_db import list_platform_links
+            from src.domains.mgmt.public import list_platform_links
             from src.domains.runtime.vcs.platform_card import (
                 list_vcs_platforms as _lvp, display_name_for_repo_key as _dname)
             # A 批：注入登录名清单取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
@@ -1967,13 +1967,13 @@ async def update_chat_config(body: dict, request: Request,
     # C3 审计：IM 凭证保存/解绑留痕（detail 只记渠道与 app 摘要，绝不落 secret）
     if channel_hit:
         try:
-            from src.domains.mgmt.auth import audit as auth_audit
+            from src.domains.mgmt.public import log_audit as auth_audit
             _ip = ""
             try:
                 _ip = (request.client.host if request.client else "") or ""
             except Exception:
                 _ip = ""
-            auth_audit.log_audit(
+            auth_audit(
                 "im_installation_change",
                 user_id=int(user["id"]),
                 operator_id=int(user["id"]),
@@ -2975,8 +2975,8 @@ def _persist_wechat_login(user: dict, credentials: dict) -> bool:
     log.info(f"Chat IM: wechat bound app_id={_safe_im_app_ref(bot_id, 'wechat')} user={user['id']}")
     # C3 审计：扫码绑定=凭证写入类操作，必须留痕（detail 只带 app 摘要，绝不含 bot_token）
     try:
-        from src.domains.mgmt.auth import audit as auth_audit
-        auth_audit.log_audit(
+        from src.domains.mgmt.public import log_audit as auth_audit
+        auth_audit(
             "im_installation_change",
             user_id=int(user["id"]), operator_id=int(user["id"]),
             detail={"action": "wechat_qr_bind", "provider": "wechat",

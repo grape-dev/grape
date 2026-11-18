@@ -876,14 +876,14 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
                 # D37/S57：repo 上下文按 repo_key 前缀派生 provider；无 repo_key 时
                 # 按用户已绑定身份的第一条（由数据决定，代码不写平台名）
                 from src.api.deps import get_user_token_for, get_user_token_for_repo
-                from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+                from src.domains.mgmt.public import get_grape_account_by_id
                 _acc = get_grape_account_by_id(user_id)
                 if _acc:
                     if repo_key:
                         user_token = get_user_token_for_repo(repo_key, _acc["username"],
                                                              user_id=user_id) or ""
                     else:
-                        from src.domains.mgmt.auth.grape_account_db import list_platform_links
+                        from src.domains.mgmt.public import list_platform_links
                         # A 批：兜底平台也要覆盖"只有 PAT、无 OAuth 身份行"的账号
                         _ids = list_platform_links(str(user_id)) or []
                         _prov = str((_ids[0] or {}).get("provider") or "") if _ids else ""

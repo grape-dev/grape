@@ -212,7 +212,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         from src.domains.mgmt.public import get_host_user_id
         _host_uid = get_host_user_id(repo_key)
         if str(_host_uid or "") not in ("", "0"):
-            from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+            from src.domains.mgmt.public import get_grape_account_by_id
             _host_acc = get_grape_account_by_id(_host_uid)
             if _host_acc and _host_acc.get("username"):
                 # D37/S57：provider 由 repo_key 前缀派生（gitee 不再折叠为 gitcode），

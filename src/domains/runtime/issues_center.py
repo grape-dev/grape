@@ -163,7 +163,7 @@ def _get_user_id_by_gitcode(gitcode_user: str, repo_key: str = "") -> int | None
     # S51 身份优先归属：external_identities 命中即权威
     try:
         from src.kernel.repo_key import parse_repo_key
-        from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login
+        from src.domains.mgmt.public import resolve_user_id_by_platform_login
         _provider, _, _ = parse_repo_key(repo_key or "")
         _uid = resolve_user_id_by_platform_login(_provider, gitcode_user)
         if _uid:
@@ -239,7 +239,7 @@ def _get_gitcode_user_by_user_id(user_id) -> str:
         return ""
     # ① 身份域（权威）
     try:
-        from src.domains.mgmt.auth.grape_account_db import list_platform_links, get_grape_account_by_id
+        from src.domains.mgmt.public import list_platform_links, get_grape_account_by_id
         # A 批：平台登录名解析取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
         _idents = [i for i in (list_platform_links(uid) or [])
                    if i.get("provider") and (i.get("external_login") or "").strip()]
@@ -2476,7 +2476,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 单独解析 _creator_login，绝不回填到 assignee（Issue #343: external_login 优先）。
     _creator_login = user["username"]
     try:
-        from src.domains.mgmt.auth.grape_account_db import list_platform_links
+        from src.domains.mgmt.public import list_platform_links
         _provider_name = _provider
         # A 批：创建者平台登录名取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
         for ident in list_platform_links(user["id"]):

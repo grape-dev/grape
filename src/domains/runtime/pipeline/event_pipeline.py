@@ -974,7 +974,7 @@ def _resolve_bot_username(repo_key: str) -> str:
         # TypeError 并被外层 except 吞掉（登录名解析恒空）。按文档口径字符串判定。
         if str(_hid or "") not in ("", "0"):
             try:
-                from src.domains.mgmt.auth.grape_account_db import list_platform_links
+                from src.domains.mgmt.public import list_platform_links
                 # A 批：host 平台登录名取"身份行 ∪ PAT 凭据域"（PAT 的 login 同样有效）
                 for _ident in list_platform_links(_hid):
                     if _ident.get("provider") == _prov:
@@ -6153,7 +6153,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         from src.domains.mgmt.public import get_host_user_id
         _host_uid = str(get_host_user_id(repo_key) or "").strip()
         if _host_uid not in ("", "0"):
-            from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+            from src.domains.mgmt.public import get_grape_account_by_id
             _host_acc = get_grape_account_by_id(_host_uid)
             if _host_acc and _host_acc.get("username"):
                 # D37/S57：provider 由 repo_key 前缀派生（gitee 不再折叠为 gitcode）

@@ -48,7 +48,7 @@ def _login_providers() -> set:
     （d109 §11：huawei 应为 login=true / configured=false）。
     """
     try:
-        from src.domains.mgmt.auth.providers import list_providers
+        from src.domains.mgmt.public import list_providers
 
         return set(list_providers())
     except Exception as e:

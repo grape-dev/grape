@@ -96,7 +96,7 @@ def resolve_open_id_for_login(gitcode_user: str, repo_key: str = "") -> str:
     # S54 身份优先
     try:
         from src.kernel.repo_key import parse_repo_key
-        from src.domains.mgmt.auth.grape_account_db import resolve_user_id_by_platform_login
+        from src.domains.mgmt.public import resolve_user_id_by_platform_login
         _prov, _, _ = parse_repo_key(repo_key or "")
         _uid = resolve_user_id_by_platform_login(_prov, gitcode_user)
         if _uid:

@@ -812,7 +812,7 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
         # 仓库访问 + 真实角色校验（fail-closed：未绑定/查询失败均视为非 admin），
         # 与 admin-confirm-done 同款口径；VCS 权限查询可能耗时，故在 db_lock 之外执行。
         from src.api.deps import check_repo_access
-        from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity
+        from src.domains.mgmt.public import get_repo_admin_identity
         check_repo_access(user, row[2])
         _admin_ident = get_repo_admin_identity(user, row[2])
         if not _admin_ident:
@@ -826,7 +826,7 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
         _actor_role = "admin" if _admin_ident else "owner"
         _actor_name = (_admin_ident or {}).get("username") or user.get("username", "")
         try:
-            from src.domains.mgmt.auth.audit import log_audit
+            from src.domains.mgmt.public import log_audit
             log_audit("issue_reverted_to_pending_review", operator_id=user.get("id", 0) or 0,
                       detail={
                           "repo_key": row[2],
@@ -1099,7 +1099,7 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
     幂等：completed → already_done:true（不重复关 VCS、不重复审计）；cancelled → 400。
     """
     from src.api.session_store import set_issue_stage
-    from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity
+    from src.domains.mgmt.public import get_repo_admin_identity
     from src.kernel.session_manager import db, db_lock
 
     # 1) 定位需求（admin 可跨归属确认，仅要求仓库访问权）
@@ -1142,7 +1142,7 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
 
     # 6) 审计留痕（操作人/时间/目标需求；log_audit 自带 created_at + operator_id）
     try:
-        from src.domains.mgmt.auth.audit import log_audit
+        from src.domains.mgmt.public import log_audit
         log_audit("issue_admin_confirmed", operator_id=user.get("id", 0) or 0,
                   detail={
                       "repo_key": _repo_key,
@@ -1529,7 +1529,7 @@ def _audit_terminal_disposition(user: dict, repo_key: str, issue_number, action:
     失败（审计链路异常）只告警，不影响处置结果。
     """
     try:
-        from src.domains.mgmt.auth.audit import log_audit
+        from src.domains.mgmt.public import log_audit
         log_audit("issue_terminal_disposition",
                   operator_id=user.get("id", 0) or 0,
                   detail={"repo_key": repo_key, "issue_number": issue_number,
