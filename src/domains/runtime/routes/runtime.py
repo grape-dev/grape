@@ -3708,14 +3708,11 @@ def runtime_skill_egress(skill_name: str = "", skill_id: int = 0,
                 pass
         if skill_name:
             try:
-                c.execute("SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1",
-                          (skill_name,))
-                row = c.fetchone()
-                if not row:
-                    c.execute("SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name='*' LIMIT 1")
-                    row = c.fetchone()
-                if row:
-                    result["admin_policy"] = row[0] or ""
+                # 表归 mgmt：SQL 在 mgmt public 一份
+                from src.domains.mgmt import public as _mg_eg
+                _pol = _mg_eg.egress_policy_for_skill(skill_name) or _mg_eg.egress_policy_global()
+                if _pol:
+                    result["admin_policy"] = _pol
             except Exception:
                 pass
         try:
@@ -3815,13 +3812,9 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
         # （平台账号）——与 WebUI 创建 Provider 的 user.get("id") 对齐，
         # UPSERT 才能命中同一条。
         if _owner_name:
-            with db_lock:
-                c = db.cursor()
-                _row2 = c.execute("SELECT id FROM grape_accounts WHERE username=? AND status=1 LIMIT 1",
-                                  (_owner_name,)).fetchone()
-            if _row2:
-                _owner_id = _row2[0]
-            else:
+            from src.domains.mgmt import public as _mg_acc
+            _owner_id = _mg_acc.active_account_id_by_username(_owner_name)
+            if not _owner_id:
                 from src.api.issues_center import _get_user_id_by_gitcode
                 _uid = _get_user_id_by_gitcode(_owner_name)
                 if _uid:

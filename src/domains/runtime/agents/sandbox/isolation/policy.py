@@ -515,16 +515,11 @@ class PolicyEngine:
                     if row and row[0]:
                         result["content_hash"] = row[0]
                 if skill_name:
-                    row = _r.execute(
-                        "SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name=? ORDER BY skill_scope DESC LIMIT 1",
-                        (skill_name,)
-                    ).fetchone()
-                    if not row:
-                        row = _r.execute(
-                            "SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name='*' LIMIT 1"
-                        ).fetchone()
-                    if row and row[0]:
-                        result["admin_policy"] = row[0]
+                    # 表归 mgmt：SQL 在 mgmt public 一份
+                    from src.domains.mgmt import public as _mg_eg2
+                    _pol2 = _mg_eg2.egress_policy_for_skill(skill_name) or _mg_eg2.egress_policy_global()
+                    if _pol2:
+                        result["admin_policy"] = _pol2
                 rows = _r.execute(
                     "SELECT host, host_type, ports, methods, scope, scope_target, skill_digest "
                     "FROM grape_t_egress_admin_exception "

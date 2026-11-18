@@ -3079,6 +3079,66 @@ def sandbox_template_row(provider_id: str, template_id: str) -> tuple:
 
 
 # ── 沙箱配置读侧（runtime 执行链读管理面配置）────────────────────────────
+# ── 出口策略读侧（runtime 执行链按技能查放行策略）──────────────────────
+def egress_policy_for_skill(skill_name: str) -> str:
+    """该技能的放行策略（skill_scope 降序取第一条）；无行返回空串。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name=%s "
+                  "ORDER BY skill_scope DESC LIMIT 1", (skill_name,))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def egress_policy_global() -> str:
+    """全局兜底策略（skill_name='*'）；无行返回空串。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT policy FROM grape_t_egress_admin_policy WHERE skill_name='*' LIMIT 1")
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+# ── 沙箱任务代理令牌（runtime 签发/校验，表归 mgmt）────────────────────
+def upsert_task_proxy_token(row_id: str, task_id: str, token_hash: str, backend_name: str,
+                            expires_at: str) -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("REPLACE INTO grape_t_task_proxy_tokens "
+                  "(id, task_id, token_hash, backend_name, expires_at) VALUES (%s,%s,%s,%s,%s)",
+                  (row_id, task_id, token_hash, backend_name, expires_at))
+        return int(c.rowcount or 0)
+
+
+def task_proxy_token_row(token_hash: str) -> tuple:
+    """(task_id, backend_name, expires_at)；无行返回 ()。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT task_id, backend_name, expires_at FROM grape_t_task_proxy_tokens "
+                  "WHERE token_hash=%s", (token_hash,))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def purge_task_proxy_tokens(task_id: str) -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("DELETE FROM grape_t_task_proxy_tokens WHERE task_id=%s", (task_id,))
+        return int(c.rowcount or 0)
+
+
+# ── 账号 id 解析（runtime 引擎注册按用户名找 mgmt 账号）──────────────────
+def active_account_id_by_username(username: str) -> int:
+    """status=1 的账号 id；无行返回 0。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id FROM grape_accounts WHERE username=%s AND status=1 LIMIT 1", (username,))
+        row = c.fetchone()
+        return int((row or [0])[0] or 0)
+
+
+def account_id_by_username(username: str) -> int:
+    """任意状态、id>0 的账号 id；无行返回 0。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id FROM grape_accounts WHERE username=%s AND id>0 LIMIT 1", (username,))
+        row = c.fetchone()
+        return int((row or [0])[0] or 0)
+
+
 def sandbox_provider_owned_by(provider_id: str, credential_id: int) -> bool:
     """provider 是否属于该凭据（worker 上报越权校验）。"""
     with db_registry.cursor("mgmt") as c:

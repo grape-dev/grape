@@ -60,15 +60,10 @@ class TokenManager:
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         _expires_at = (datetime.now(timezone.utc) + timedelta(seconds=_TOKEN_TTL)).isoformat()
         try:
-            db, db_lock = self._get_db()
-            with db_lock:
-                from src.kernel.sandbox_uid import new_row_uid as _nru
-                db.execute(
-                    "INSERT OR REPLACE INTO grape_t_task_proxy_tokens (id, task_id, token_hash, backend_name, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (_nru(), task_id, token_hash, backend_name, _expires_at)
-                )
-                db.commit()
+            # 表归 mgmt：SQL 在 mgmt public 一份
+            from src.domains.mgmt import public as _mg_tk
+            from src.kernel.sandbox_uid import new_row_uid as _nru
+            _mg_tk.upsert_task_proxy_token(_nru(), task_id, token_hash, backend_name, _expires_at)
         except Exception as e:
             log.error(f"issue proxy token failed: {e}")
             raise TokenIssueError(f"failed to issue proxy token: {e}") from e
@@ -82,12 +77,8 @@ class TokenManager:
         """
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         try:
-            db, db_lock = self._get_db()
-            with db_lock:
-                row = db.execute(
-                    "SELECT task_id, backend_name, expires_at FROM grape_t_task_proxy_tokens WHERE token_hash=?",
-                    (token_hash,)
-                ).fetchone()
+            from src.domains.mgmt import public as _mg_tk2
+            row = _mg_tk2.task_proxy_token_row(token_hash) or None
             if not row:
                 raise TokenError("Invalid proxy token")
             task_id, backend_name, expires_at = row[0], row[1], row[2]

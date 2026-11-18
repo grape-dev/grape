@@ -675,10 +675,8 @@ def _check_pool_selector_reachable(selector: dict, tag: str, repo_key: str = "",
                         continue
                 elif _scope == "user" and task_user_id > 0 and _owner_name:
                     try:
-                        c.execute("SELECT id FROM grape_accounts WHERE username=? AND id>0 LIMIT 1",
-                                  (_owner_name,))
-                        _ur = c.fetchone()
-                        if (_ur[0] if _ur else 0) != task_user_id:
+                        from src.domains.mgmt import public as _mg_acc2
+                        if _mg_acc2.account_id_by_username(_owner_name) != task_user_id:
                             continue
                     except Exception:
                         pass
