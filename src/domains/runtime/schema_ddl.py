@@ -140,8 +140,8 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     -- 2026-11-18：7794d05ee 的沙箱/引擎改造在 7 处代码里引用了这两列，却没加进表里，
     -- 导致 claim 查询 1054（Unknown column）→ 引擎进程从未 spawn → 任务挂到超时判 failed。
     -- 老库由迁移 202611180002 补列；这里让新库建表即带。
-    runtime_type VARCHAR(64) NOT NULL DEFAULT '',  -- 引擎类型标识（与既有 engine_type 并存，读取方各取所需）
-    runtime_info TEXT,                              -- 云沙箱路由 JSON（template_id 等）；本机引擎为空 → bwrap
+    runtime_type VARCHAR(32) NOT NULL DEFAULT 'local',  -- 引擎类型 local/sandbox（与既有 engine_type 并存）
+    runtime_info TEXT,                                  -- 云沙箱路由 JSON（template_id 等）；本机引擎为空 → bwrap
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (credential_id, name, scope, owner_id, host_name)
 )

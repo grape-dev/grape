@@ -26,7 +26,8 @@
   python3 scripts/split_migration_sql.py --dry-run   # 只打印计划（默认）
   python3 scripts/split_migration_sql.py --apply     # 落地改写
 校验（搬完必做）：
-  1. `python3 scripts/foreign_table_refs.py --owner configs/table_ownership.json --check`
+  1. `python3 scripts/foreign_table_refs.py --owner-json configs/table_ownership.json --check`
+     （必须是 --owner-json：--owner 是 TSV 解析器，喂 JSON 归属恒空 → 假绿灯）
   2. 空库 init_database() 重建后逐表比对列名与搬前快照一致
   3. `pytest tests/arch tests/contracts tests/scripts -q`
 """

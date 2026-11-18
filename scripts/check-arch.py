@@ -72,7 +72,7 @@ REMOVED_LEGACY_PREFIXES = (
 # 归属口径：configs/table_ownership.json（102 张基表，三库实况）。
 # 棘轮：白名单按 (文件, 表) 登记**当前数量**；新增文件/表或数量上升 → 红。
 # 每条存量以「目标阶段」标注，P1/P3 迁移完成后应逐条删除（只减不增）。
-# 归属唯一权威：configs/table_ownership.json（原 configs/table_ownership.json 已并入并删除 ——
+# 归属唯一权威：configs/table_ownership.json（原 docs/weekly-11/table-owner.tsv 已并入本文件后删除 ——
 # 两份清单曾漂移 19 张，json 是超集且代码只读它）。
 R8_OWNER_JSON = os.path.join(REPO_ROOT, "configs", "table_ownership.json")
 R8_WHITELIST: dict[str, dict[str, int]] = {

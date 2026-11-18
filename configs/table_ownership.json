@@ -684,5 +684,24 @@
       "grape_t_schema_migrations",
       "grape_t_xwrite_log"
     ]
+  },
+  "_provenance": {
+    "_comment": "「库上有表、本仓代码零引用」的表为什么仍留在 tables 段 —— 逐条给出外部来源证据。判据不是「本仓 grep 命中」，而是「是否仍在被活跃写入」：零引用但持续写入说明写入方在本仓之外，移入 _not_in_current_schema 会让归属检查放过真实的跨域引用。",
+    "tables": {
+      "grape_t_guard_check": {
+        "owner": "insight",
+        "writer": "外部巡检守护（不在本仓代码内），按角色巡检进程/端口/健康码/库表一致性",
+        "evidence": "grape_stage_insight 实存 1412 行；checked_at 2026-11-17T11:18:38 ~ 2026-11-18T17:32:29（核对时刻 2 分钟前仍有写入）",
+        "columns_prove_runtime": "role/unit_active/unit_restarts/pid/port_listening/health_code/db_name/expected_tables/actual_tables/missing_tables/foreign_tables",
+        "decision": "保留在 tables 段：活跃写入、且巡检对象就是三库拓扑本身，属运行时观测面"
+      },
+      "grape_t_guard_finding": {
+        "owner": "insight",
+        "writer": "同上巡检守护的告警侧",
+        "evidence": "grape_stage_insight 实存 2621 行；checked_at 同区间，最新 2026-11-18T17:32:29",
+        "columns_prove_runtime": "kind/scope/severity/detail/metric_value",
+        "decision": "保留在 tables 段，理由同上"
+      }
+    }
   }
 }

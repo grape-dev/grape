@@ -9116,8 +9116,10 @@ def _migration_sandbox_control_plane_schema() -> None:
         # [沙箱迁移] 沙箱凭据平台列（cubesandbox/devbox...）
         _ensure_column(c, "runtime_credentials", "platform", "TEXT DEFAULT ''")
         # [沙箱迁移] 引擎注册改造：runtime_type(local/sandbox)+runtime_info(JSON 模板/平台信息)
-        _ensure_column(c, "agent_runtimes", "runtime_type", "VARCHAR(32) DEFAULT 'local'")
-        _ensure_column(c, "agent_runtimes", "runtime_info", "TEXT DEFAULT '{}'", allow_copy=True)
+        # 列定义与 src/domains/runtime/schema_ddl.py::_AGENT_RUNTIMES_DDL 及
+        # 迁移 202611180002 保持一致（QA M-2：同列三处定义漂移会让新库/存量库行为分叉）。
+        _ensure_column(c, "agent_runtimes", "runtime_type", "VARCHAR(32) NOT NULL DEFAULT 'local'")
+        _ensure_column(c, "agent_runtimes", "runtime_info", "TEXT", allow_copy=True)
         # [沙箱迁移 i7 _seed_sandbox_whitelist] Issue #156: 官方域名白名单种子（幂等）
         _OFFICIAL_DOMAINS = [
             ("opengw.clouddeveloper.club", "POST", "*", "https", 443),

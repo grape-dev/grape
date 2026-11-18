@@ -9,7 +9,11 @@
 #   SIBLING_PWD='...' bash scripts/sync_to_sibling.sh --sync-only   # 只同步，不部署
 #   SIBLING=192.168.0.116 SIBLING_PWD='...' ...                     # 覆盖目标机
 #
-# 需要 sshpass（已装）。口令只从环境变量取，不写入文件、不出现在进程标题里以外的地方。
+# 需要 sshpass（已装）。口令从环境变量取，不写入任何文件。
+# 用 `sshpass -e`（读 SSHPASS 环境变量）而不是 `-p <口令>` —— 后者会把口令放进 argv，
+# `ps`/`/proc/*/cmdline` 一览即得（QA I-3）。环境变量只对本进程及其子进程可见。
+#
+# SIBLING 默认值是内网拓扑（192.168.0.116），开源分发时请由部署方覆盖，勿依赖该默认。
 set -euo pipefail
 
 SIBLING="${SIBLING:-192.168.0.116}"
@@ -19,11 +23,13 @@ TENANT_DST="${TENANT_DST:-/home/orgtest/grape-new-version2}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=15"
 
-_ssh() { sshpass -p "$SIBLING_PWD" ssh $SSH_OPTS "root@$SIBLING" "$@"; }
+# sshpass -e 从环境变量读口令：口令不进 argv，ps 与 /proc cmdline 都看不到
+export SSHPASS="$SIBLING_PWD"
+_ssh() { sshpass -e ssh $SSH_OPTS "root@$SIBLING" "$@"; }
 
 echo "[sync] $SRC -> $SIBLING:$DST（rsync 增量）"
 _T0=$(date +%s)
-sshpass -p "$SIBLING_PWD" rsync -az --delete \
+sshpass -e rsync -az --delete \
   --exclude='__pycache__' --exclude='*.pyc' --exclude='data/' \
   --exclude='.grape/skills.bak' --exclude='static-dist.bak' \
   -e "ssh $SSH_OPTS" \

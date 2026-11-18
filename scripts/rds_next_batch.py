@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-OWNER_TSV = REPO / "configs/table_ownership.json"
+OWNER_JSON = REPO / "configs/table_ownership.json"  # 唯一权威清单（JSON，用 load_owner_json 读）
 PUBLIC_GLOB = "src/domains/{domain}/public/__init__.py"
 DOMAIN_KW = {"mgmt": "mgmt", "runtime": "runtime", "insight": "insight"}
 
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     scanner = load_scanner()
-    owner = scanner.load_owner_json(OWNER_TSV)
+    owner = scanner.load_owner_json(OWNER_JSON)
     queries = {d: named_queries(d) for d in DOMAIN_KW}
 
     rows: list[tuple[int, str, dict[str, list[int]], str]] = []
@@ -111,7 +111,9 @@ def main(argv: list[str] | None = None) -> int:
             out.append(f"  - {hint}")
         out.append("")
     out.append("## 每批验收口径（不要跳）")
-    out.append("1) `python3 scripts/foreign_table_refs.py --owner configs/table_ownership.json "
+    # --owner 是 TSV 解析器（按 schema<TAB>table 切行），喂 JSON 会解析出空归属 →
+    # 全部判「清零」+ exit 0 = 假绿灯。清单已是 JSON，必须用 --owner-json。
+    out.append("1) `python3 scripts/foreign_table_refs.py --owner-json configs/table_ownership.json "
                "--baseline docs/weekly-11/foreign-refs-allowlist.csv --check`")
     out.append("2) `venv/bin/python -m pytest tests/arch tests/contracts tests/scripts -q -p no:cacheprovider`")
     out.append("3) `bash scripts/rds_gate.sh`（含 check-arch / 契约 / 看板 / 排序）")
