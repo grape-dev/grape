@@ -77,6 +77,21 @@ def test_scene_all_offline_keeps_fail_closed():
     assert sel == ""
 
 
+def test_selector_wins_over_all_offline_ids():
+    """O-1：绑定全灭（None）+ 场景配了标签 → 按 selector 生效，不得判「引擎全部离线」。
+
+    SRE 场景在 ids/uids 皆空时 `get_scene_pool_engine_ids` 恒返回 None（不广播，Q2 裁定），
+    与是否配了 selector 无关；旧顺序先短路 None 会让 SRE 的「按标签」场景重派 409，而首次
+    派发的 `_scene_pool_gate` 是 selector 优先 —— 两边口径必须一致。
+    """
+    ids, sel = resolve_redispatch_pool(
+        scene_authoritative=True, scene_engine_ids=None,
+        scene_selector={"tags": ["scope:global"]},
+        snapshot_engine_ids="[17382]", snapshot_selector="")
+    assert ids == "", "selector 模式下 id 池必须清空，哪怕快照/场景还残留 id 绑定"
+    assert json.loads(sel) == {"tags": ["scope:global"]}
+
+
 def test_empty_list_placeholder_is_not_a_pool():
     """`"[]"` 占位不算非空 id 池：快照轨迹下 selector 应保留。"""
     ids, sel = resolve_redispatch_pool(
@@ -291,7 +306,6 @@ def test_redispatch_enqueue_passes_named_columns():
 
 
 # ===== 5) 贴证闸门按「生效池模式」判定（D-1 / D-2，QA 架构守护第二轮） =====
-#
 # 缺陷形态：池三列虽然按场景解析正确，但紧随其后的三条贴证闸门（session 主引擎回落 /
 # pick_engine / tag-SQL 贴证）仍按**旧任务快照** old.get("pool_selector") 判空。场景改过
 # 模式后快照与生效模式不同源，于是：
@@ -367,3 +381,28 @@ def test_redispatch_gates_do_not_key_on_snapshot_selector():
                  if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id == "_sel_mode_253"]
     assert len(sel_loads) >= 1, (
         "tag-SQL 贴证必须按 _sel_mode_253（生效 selector 模式）跳过，而不是按快照键")
+
+
+# ===== 6) 池列日志措辞（I-4 条件化，QA 原子回归 grey 面：需可断言） =====
+
+def test_pool_log_line_cleared_only_when_snapshot_had_ids():
+    """selector 生效：快照确有空 id 池才说 cleared，否则明说没有可清空的。"""
+    with_ids = events_route._redispatch_pool_log_line(
+        {"pool_engine_ids": "[17382]"}, POOL_SEL, "", "sc-qa")
+    assert "cleared (was [17382])" in with_ids
+    empty = events_route._redispatch_pool_log_line(
+        {"pool_engine_ids": ""}, POOL_SEL, "", "sc-qa")
+    assert "no snapshot pool_engine_ids to clear" in empty
+    placeholder = events_route._redispatch_pool_log_line(
+        {"pool_engine_ids": "[]"}, POOL_SEL, "", "sc-qa")
+    assert "no snapshot pool_engine_ids to clear" in placeholder
+
+
+def test_pool_log_line_reports_stale_selector_and_stays_silent_for_broadcast():
+    """id 池生效且快照有旧 selector → 打 stale 丢弃；纯广播 → 不打印任何池列日志。"""
+    stale = events_route._redispatch_pool_log_line(
+        {"pool_selector": POOL_SEL}, "", "[17382]", "sc-qa")
+    assert "stale pool_selector dropped" in stale
+    silent = events_route._redispatch_pool_log_line(
+        {"pool_engine_ids": "", "pool_selector": ""}, "", "", "")
+    assert silent == ""

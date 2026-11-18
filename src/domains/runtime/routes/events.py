@@ -546,6 +546,25 @@ def _redispatch_pool_columns(old: dict) -> tuple:
     return ids, sel, scene_id, scene_uid, False
 
 
+def _redispatch_pool_log_line(old: dict, pool_selector, pool_ids, scene_id) -> str:
+    """重派池列归一的日志措辞（纯函数，QA 原子回归的 grey 面：日志条件化需可断言）。
+
+    返回值为 `log.info("[redispatch] seq=<n> " + 返回值)` 的后半段；空串 = 不打印。
+    I-4：只有**真的丢弃**了快照 id 池才说 cleared；快照本来就空则明说没有可清空的。
+    """
+    scene = scene_id or "-"
+    if (pool_selector or "").strip():
+        snapshot_ids = (old.get("pool_engine_ids") or "").strip()
+        if snapshot_ids not in ("", "[]"):
+            return (f"scene {scene} is selector mode, "
+                    f"pool_engine_ids cleared (was {old.get('pool_engine_ids')})")
+        return f"scene {scene} is selector mode, no snapshot pool_engine_ids to clear"
+    if (pool_ids or "").strip() not in ("", "[]") and (old.get("pool_selector") or "").strip():
+        return (f"scene {scene} is engine-list mode, "
+                f"stale pool_selector dropped (three-column exclusivity)")
+    return ""
+
+
 def _redispatch_claims_by_pool(pool_selector, pool_ids, scene_authoritative: bool,
                                plugin_mode: bool) -> bool:
     """重派任务是否只能由「生效池」圈定认领（Issue #1208 补漏·第二轮）。
@@ -1406,17 +1425,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         "message": _msg_541})
                 _pool_253 = _pool_ids_253 or ""
                 _pool_253_authoritative = _auth_253
-                if _rp_sel_253:
-                    # I-4：只有真的丢弃了快照 id 池才说 cleared（原实现无条件打印）
-                    if (old.get("pool_engine_ids") or "").strip() not in ("", "[]"):
-                        log.info(f"[redispatch] seq={seq} scene {_scene_253 or '-'} is selector mode, "
-                                 f"pool_engine_ids cleared (was {old.get('pool_engine_ids')})")
-                    else:
-                        log.info(f"[redispatch] seq={seq} scene {_scene_253 or '-'} is selector mode, "
-                                 f"no snapshot pool_engine_ids to clear")
-                elif _pool_253 and (old.get("pool_selector") or ""):
-                    log.info(f"[redispatch] seq={seq} scene {_scene_253 or '-'} is engine-list mode, "
-                             f"stale pool_selector dropped (three-column exclusivity)")
+                _pool_log_253 = _redispatch_pool_log_line(old, _rp_sel_253, _pool_253, _scene_253)
+                if _pool_log_253:
+                    log.info(f"[redispatch] seq={seq} {_pool_log_253}")
                 # 重派时重新解析路由：旧 task 快照的 runtime_id 可能为 0（120s 超时回收产物）。
                 # fallback 链：task.runtime_id → session.runtime_id → 拒派。
                 _rid = old.get("runtime_id") or 0

@@ -189,11 +189,16 @@ def resolve_redispatch_pool(*, scene_authoritative: bool, scene_engine_ids,
     """
     import json as _json
     if scene_authoritative:
-        if scene_engine_ids is None:
-            return None, ""
+        # O-1（QA 架构守护第 3 轮）：selector 判定必须早于「绑定全灭」短路。SRE 场景在
+        # engine_runtime_ids/uids 皆空时 get_scene_pool_engine_ids 恒返回 None（不广播，
+        # Q2 裁定），若先短路 None，则配了「按标签」的 SRE 场景重派会被判成「引擎全部离线」
+        # 并 409——与首次派发 `_scene_pool_gate` 的 selector 优先口径相反（selector 模式本就
+        # 不依赖 id 池）。绑定全灭只在 selector 模式不成立时才 fail-closed。
         if scene_selector:
             # 场景现行 = selector 模式：id/uid 池必须清空（模式互斥，B-01 同尺）
             return "", _json.dumps(scene_selector, ensure_ascii=False)
+        if scene_engine_ids is None:
+            return None, ""
         return (scene_engine_ids or ""), ""
     ids = (snapshot_engine_ids or "").strip()
     if ids and ids != "[]":
