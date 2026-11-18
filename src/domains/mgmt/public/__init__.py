@@ -3007,6 +3007,33 @@ def record_outbound_ledger(provider: str, repo_key: str, content_type: str, cont
               origin_channel, origin_task, content_hash, created_at))
 
 
+def reassign_runtime_binding(ids, keep_id: str) -> int:
+    """历史绑定表（devops_agent_runtime_binding）里指向待回收 runtime 的行改指到 keep_id。
+
+    本表归 mgmt；runtime 域的 refs_reconcile 只调本原语，不自己写 SQL（跨域写收口）。
+    返回影响行数。
+    """
+    keys = [i for i in (ids or []) if i]
+    if not keys:
+        return 0
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"UPDATE devops_agent_runtime_binding SET runtime_id=%s WHERE runtime_id IN ({ph})",
+                  (keep_id, *keys))
+        return int(c.rowcount or 0)
+
+
+def purge_runtime_binding(ids) -> int:
+    """删除历史绑定表里指向待回收 runtime 的行，返回删除行数（归 mgmt，同上）。"""
+    keys = [i for i in (ids or []) if i]
+    if not keys:
+        return 0
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})", tuple(keys))
+        return int(c.rowcount or 0)
+
+
 def purge_outbound_ledger_before(cutoff: str) -> int:
     """删除 created_at 早于 cutoff 的记录（保留期清理），返回删除行数。"""
     return exec_any("outbound_ledger_purge_before", (cutoff,))

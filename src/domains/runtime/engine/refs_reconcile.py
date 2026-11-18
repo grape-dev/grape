@@ -294,16 +294,14 @@ class RuntimeRefReconciler:
 
     # ── 4. 历史绑定表 ─────────────────────────────────────────────────────
     def _reconcile_binding_table(self, ids, keep_id, ph) -> None:
-        c = self.cursor
+        # 该表归 mgmt：SQL 只在 mgmt public 一份，这里只调原语（跨域写收口）。
+        # ph 参数保留在签名里是为了兼容既有调用方，原语内部自己按列表长度拼占位符。
         try:
+            from src.domains.mgmt.public import purge_runtime_binding, reassign_runtime_binding
             if keep_id:
-                c.execute(f"UPDATE devops_agent_runtime_binding SET runtime_id=? WHERE runtime_id IN ({ph})",
-                          (keep_id, *ids))
+                reassign_runtime_binding(ids, keep_id)
             else:
-                self.report["runtime_bindings_deleted"] = c.execute(
-                    f"SELECT COUNT(*) FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})",
-                    ids).fetchone()[0]
-                c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})", ids)
+                self.report["runtime_bindings_deleted"] = purge_runtime_binding(ids)
         except Exception as _e:  # noqa: BLE001  # 历史库未建表=预期降级，但仍登记
             self._warn("devops_agent_runtime_binding", _e, action="table-unavailable")
 

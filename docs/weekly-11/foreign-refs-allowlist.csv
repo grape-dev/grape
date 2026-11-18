@@ -9,6 +9,7 @@ engine_capabilities,runtime,api,1
 external_identities,mgmt,api,1
 external_identities,mgmt,platform,2
 grape_accounts,mgmt,runtime,2
+grape_t_category_dict,mgmt,api,2
 grape_t_channel_repo_link,mgmt,api,2
 grape_t_egress_admin_exception,mgmt,runtime,2
 grape_t_egress_admin_policy,mgmt,runtime,4
@@ -22,7 +23,7 @@ grape_t_external_identity_tombstones,mgmt,api,2
 grape_t_repo_credentials,insight,platform,2
 grape_t_repo_llm_credentials,mgmt,runtime,2
 grape_t_repo_platforms,mgmt,api,9
-grape_t_sandbox_provider_config,mgmt,runtime,10
+grape_t_sandbox_provider_config,mgmt,runtime,11
 grape_t_sandbox_templates,mgmt,runtime,4
 grape_t_schema_migrations,mgmt,api,1
 grape_t_task_proxy_tokens,mgmt,runtime,3
@@ -34,5 +35,3 @@ runtime_credentials,runtime,api,6
 task_messages,runtime,api,2
 user_accounts,mgmt,runtime,3
 user_credentials,mgmt,platform,1
-devops_agent_runtime_binding,mgmt,runtime,3
-grape_t_category_dict,mgmt,api,2
