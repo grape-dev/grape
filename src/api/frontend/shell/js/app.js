@@ -1486,7 +1486,14 @@ function loadAgentTypes() {
     // 引擎。仓库列表/绑定后不弹（避免在没托管仓库前提引擎）。
     if (!_hasVcsBinding()) return;  // 无接入关系：引导页专心配 token（PAT 接入同样算已接入）
     if (!currentRepo()) return;                     // 未进入仓库：不提引擎
-    if (localStorage.getItem('engine_banner_skipped_' + (_bu.username || ''))) return;
+    // 读取侧与写入侧（_dismissEngineBanner）同口径：从 localStorage.user 取 username。
+    // 曾写成 `_bu.username`，而 `_bu` 在整个前端从未定义 → ReferenceError 在这里抛出，
+    // 把 renderReposFromData 后半段（含结尾的 nav('dash')）整段打断：
+    // _currentView 永远是空、主区永远是 showApp 写的「加载中」占位，
+    // 需求中心等所有视图都进不去（2026-11-18 定位）。
+    var _skipUser = {};
+    try { _skipUser = JSON.parse(localStorage.getItem('user') || '{}') || {}; } catch (e) {}
+    if (localStorage.getItem('engine_banner_skipped_' + (_skipUser.username || ''))) return;
     API.get('/runtime/engine-onboarding').then(function(d) {
       if (!d || !d.needs_worker) return;
       // 视图守卫：引擎引导是仓库维度的提示，非仓库视图（用户设置/任务/事件等）
