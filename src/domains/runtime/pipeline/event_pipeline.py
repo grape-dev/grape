@@ -2864,6 +2864,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                    "repo_key": from_repo_key(repo_key), "ok": True, "issue_id": issue_id,
                    "repository": evt["repository"]})
 
+    # Issue #3201：接管守门放在分派入口，先于引擎可用性判定。
+    # 否则「引擎不可用 / 场景引擎全部离线 / 自动选机失败」等早退分支仍会建 failed task，
+    # 并把事件置 failed，违背「接管期间被拦事件一律 skipped_takeover、不建 task」的契约。
+    if _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type):
+        result["skipped"] = "already_taken_over"
+        return result
+
     # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
     # Phase 3 (#699)：所有路径统一入队（queue_remote/direct 均经 enqueue_task）。
     from src.domains.runtime.engine.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids

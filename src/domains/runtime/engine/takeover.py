@@ -156,7 +156,11 @@ def skipped_dispatch_count(sess: dict | None) -> int:
     """本次接管期间已被守门忽略的自动派发条数（events.status=skipped_takeover）。
 
     以溯源的 event_seq 为下界：只统计接管开始后产生的事件，历史接管的忽略记录
-    不会串到本次会话。finish / 详情接口用它给面板展示「已忽略 N 条」。
+    不会串到本次会话。
+
+    上界（Issue #3201 审查意见）：同 Issue 下一次接管的 event_seq。会话结束后的
+    新接管产生的 skipped_takeover 不能让已结束会话的计数继续累加——否则「已忽略 N 条」
+    会随后续接管无限增长。用下一会话的溯源 seq 作为边界，无需在 finish 时冻结。
     """
     if not sess:
         return 0
@@ -167,14 +171,29 @@ def skipped_dispatch_count(sess: dict | None) -> int:
         return 0
     if not issue_id.startswith("#"):
         issue_id = f"#{issue_id}"
+    next_seq = 0
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key=? AND issue_id=? "
-                "AND status='skipped_takeover' AND seq>?",
+                "SELECT MIN(event_seq) FROM takeover_sessions "
+                "WHERE repo_key=? AND issue_id=? AND event_seq>?",
                 (repo_key, issue_id, event_seq),
             )
+            row = c.fetchone()
+            next_seq = int(row[0] or 0) if row else 0
+    except Exception as e:
+        log.warning(f"takeover: query next takeover boundary failed: {e}")
+    sql = ("SELECT COUNT(*) FROM events WHERE repo_key=? AND issue_id=? "
+           "AND status='skipped_takeover' AND seq>?")
+    params: list[Any] = [repo_key, issue_id, event_seq]
+    if next_seq > 0:
+        sql += " AND seq<?"
+        params.append(next_seq)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(sql, params)
             row = c.fetchone()
             return int(row[0] or 0) if row else 0
     except Exception as e:

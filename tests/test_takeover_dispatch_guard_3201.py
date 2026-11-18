@@ -236,3 +236,78 @@ def test_finish_returns_skipped_count_and_closes_before_dispatch(monkeypatch):
     assert res["skipped_dispatches"] == 2
     assert "2" in res["skipped_message"]
     assert res["session"]["skipped_dispatches"] == 2
+
+
+def test_run_pipeline_engine_unavailable_under_takeover_marks_skipped(monkeypatch):
+    """审查修复：守门必须在引擎可用性判定之前。
+
+    引擎不可用的早退分支原会 `_create_failed_task` + `_fail_event`，把接管期间
+    本应跳过的事件落成 failed 并留下 failed task 快照；守门前移后应统一落
+    skipped_takeover 且不建任何 task。
+    """
+    import json
+
+    from src.domains.runtime.pipeline import event_pipeline as ep
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR REPLACE INTO event_route_config (repo_key, event_type, skill) "
+                  "VALUES ('','issue_opened','issue')")
+        c.execute(
+            "INSERT OR REPLACE INTO agent_type (agent_type, display_name, enable, order_num, subscribe_events) "
+            "VALUES ('issue','Issue Agent',1,2,'[\"issue_opened\",\"issue_updated\",\"issue_comment\"]')"
+        )
+        db.commit()
+
+    _seed_takeover(770020, agent="issue", session_id="tkos_3201_run")
+
+    # 模拟引擎全部不可用：若守门仍只在建 task 出口，会走 failed 分支。
+    monkeypatch.setattr(
+        "src.domains.runtime.engine.engine_select.pick_engine",
+        lambda *a, **k: None,
+    )
+
+    raw = json.dumps({
+        "object_kind": "issue",
+        "project": {"path_with_namespace": "takeover3201/repo"},
+        "object_attributes": {"id": 3201, "iid": 3201, "title": "T", "action": "open"},
+        "user": {"username": "alice"},
+    }).encode()
+    res = ep.run_pipeline(
+        raw, {"X-GitCode-Event": "issue_opened"},
+        account="alice", repo_key_override="takeover3201/repo",
+    )
+    assert res.get("skipped") == "already_taken_over", res
+
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT seq, status FROM events WHERE repo_key=? AND issue_id=? "
+            "ORDER BY seq DESC LIMIT 1", (REPO, ISSUE),
+        )
+        seq, status = c.fetchone()
+        c.execute("SELECT COUNT(*) FROM agent_tasks WHERE repo_key=? AND event_seq=?", (REPO, seq))
+        tasks = int(c.fetchone()[0])
+    assert status == "skipped_takeover", status
+    assert tasks == 0, "接管期间引擎不可用也不得建 failed task"
+
+
+def test_skipped_dispatch_count_stops_at_next_takeover():
+    """审查修复：已结束会话的忽略计数必须冻结在下一次接管边界，不被累加。"""
+    from src.domains.runtime.engine import takeover as svc
+
+    first_seq = 770100
+    _seed_takeover(first_seq, session_id="tkos_3201_a")
+    _seed_event(first_seq + 1, status="skipped_takeover")
+    _seed_event(first_seq + 2, status="skipped_takeover")
+    first_sess = svc.get_session("tkos_3201_a")
+    assert svc.skipped_dispatch_count(first_sess) == 2
+
+    # 同一 Issue 的后续接管产生新的 skipped 事件，不得累加到上一会话。
+    _seed_takeover(first_seq + 10, session_id="tkos_3201_b")
+    _seed_event(first_seq + 11, status="skipped_takeover")
+    _seed_event(first_seq + 12, status="skipped_takeover")
+
+    assert svc.skipped_dispatch_count(first_sess) == 2, "已结束会话计数必须冻结在下一次接管前"
+    second_sess = svc.get_session("tkos_3201_b")
+    assert svc.skipped_dispatch_count(second_sess) == 2
