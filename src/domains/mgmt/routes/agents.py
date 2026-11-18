@@ -118,8 +118,8 @@ def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
 
     released = False
     try:
-        from src.domains.runtime.im.engine_wiring import _connect, default_db_path
-        conn = _connect(default_db_path())
+        from src.domains.runtime.public import im_db_connection
+        conn = im_db_connection()
         try:
             released = int(conn.execute(
                 "SELECT COUNT(*) FROM grape_t_channel_installation WHERE legacy_app_id=? "
@@ -153,7 +153,7 @@ def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
 
     log.info(f"VOD IM: unbound app_id={old_app_id[:30]} repo={repo_key} (released={released})")
     try:
-        from src.domains.runtime.im.engine_wiring import revoke_installation
+        from src.domains.runtime.public import revoke_installation
         if revoke_installation("repo", repo_key=repo_key, app_id=old_app_id):
             log.info(f"VOD IM: grape_t_channel_installation revoked for {repo_key}")
     except Exception as e:
@@ -616,8 +616,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             app_secret = str(_inst_cfg.get("app_secret", "") or "")
         if app_secret:
             # 类型独占校验：该 app_id 是否已被 user 轨（Chat）的 active 安装占用
-            from src.domains.runtime.im.engine_wiring import _connect as _ew_connect, default_db_path as _ew_db_path
-            _conn = _ew_connect(_ew_db_path())
+            from src.domains.runtime.public import im_db_connection as _ew_db_conn
+            _conn = _ew_db_conn()
             try:
                 _holders = _conn.execute(
                     "SELECT scope FROM grape_t_channel_installation WHERE legacy_app_id=? AND status='active'",
@@ -865,7 +865,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     # config，请求内生效不依赖扫描窗口），new 模式下自动反向回写 legacy 双轨表。
     if name == "vod" and body.im_app_id and app_secret:
         try:
-            from src.domains.runtime.im.engine_wiring import revoke_installation, sync_installation
+            from src.domains.runtime.public import revoke_installation, sync_installation
             if sync_installation("repo", repo_key=repo_key, app_id=body.im_app_id,
                                         app_secret=app_secret):
                 log.info(f"VOD IM: grape_t_channel_installation synced for {repo_key}")
@@ -895,7 +895,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 def _active_repo_installation(repo_key: str) -> dict:
     """仓库轨 active 的 IM 安装（A2 收尾后 VOD 凭证真相源；无则 {}）。"""
     try:
-        from src.domains.runtime.im.engine_wiring import get_active_installation
+        from src.domains.runtime.public import get_active_installation
         return get_active_installation("repo", repo_key=repo_key) or {}
     except Exception as e:
         log.warning(f"VOD IM: read installation failed: {e}")

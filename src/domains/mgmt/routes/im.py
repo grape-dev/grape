@@ -53,8 +53,8 @@ def _audit_im(user: dict, request: Request | None, action: str, *,
 
 
 def _db_conn():
-    from src.domains.runtime.im import engine_wiring
-    return engine_wiring._connect(engine_wiring.default_db_path())
+    from src.domains.runtime.public import im_db_connection
+    return im_db_connection()
 
 
 def _engine():
@@ -63,8 +63,8 @@ def _engine():
     不再 import src.api.main（四进程部署下不跑单进程入口），统一走 notify.resolve_engine
     的 注册点 → A 进程模块属性 → app.state 顺序。
     """
-    from src.domains.runtime.im import notify as _notify
-    return _notify.resolve_engine()
+    from src.domains.runtime.public import resolve_engine
+    return resolve_engine()
 
 
 def _masked_config(raw: str) -> dict:
@@ -96,9 +96,9 @@ def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
     注：旧 BotManager 已下线（A2 M2），active_engine 只剩 new/idle 两态。
     Issue #2261 C：新增 outbox 段（未送达计数 + 最近未送达明细）。
     """
-    from src.domains.runtime.im import engine_wiring
+    from src.domains.runtime.public import engine_mode
     eng = _engine()
-    mode = engine_wiring.engine_mode()
+    mode = engine_mode()
     health = {}
     if eng is not None:
         try:
@@ -133,10 +133,10 @@ def im_engine_status(user: dict = Depends(get_current_user_or_api_key)):
 def _outbox_status() -> dict:
     """通知 outbox 状态（#2261 C）：计数 + 最近 20 条未送达。读失败降级空段。"""
     try:
-        from src.domains.runtime.im import outbox as OB
+        from src.domains.runtime.public import outbox_counts, outbox_recent_undelivered
         return {
-            "counts": OB.counts(),
-            "recent_undelivered": OB.recent_undelivered(limit=20),
+            "counts": outbox_counts(),
+            "recent_undelivered": outbox_recent_undelivered(limit=20),
         }
     except Exception:
         return {"counts": {}, "recent_undelivered": []}
@@ -150,8 +150,8 @@ def im_outbound(status: str = "", limit: int = 50,
     if status and status not in ("pending", "sending", "sent", "failed", "expired"):
         raise HTTPException(status_code=400, detail={
             "code": 400, "message": "status 只支持 pending/sending/sent/failed/expired 或留空"})
-    from src.domains.runtime.im import outbox as OB
-    rows = OB.list_rows(status=status, limit=limit)
+    from src.domains.runtime.public import outbox_list_rows
+    rows = outbox_list_rows(status=status, limit=limit)
     return {"outbound": rows, "total": len(rows)}
 
 
@@ -159,8 +159,8 @@ def im_outbound(status: str = "", limit: int = 50,
 def im_outbound_retry(out_track_id: str,
                       user: dict = Depends(get_current_user_or_api_key)):
     """手动重发（#2261 C）：failed/expired → pending（消费者 ≤1s 接力重投）。"""
-    from src.domains.runtime.im import outbox as OB
-    row = OB.get_row(out_track_id)
+    from src.domains.runtime.public import outbox_get_row, outbox_requeue_for_retry
+    row = outbox_get_row(out_track_id)
     if not row:
         raise HTTPException(status_code=404, detail={
             "code": 404, "message": "outbox 行不存在", "out_track_id": out_track_id})
@@ -169,7 +169,7 @@ def im_outbound_retry(out_track_id: str,
             "code": 400,
             "message": "只有 failed/expired 状态的行可以重发",
             "status": row.get("status")})
-    ok = OB.requeue_for_retry(out_track_id)
+    ok = outbox_requeue_for_retry(out_track_id)
     if not ok:
         raise HTTPException(status_code=409, detail={
             "code": 409, "message": "重发失败（状态已变化）", "status": row.get("status")})
@@ -183,8 +183,8 @@ def im_outbound_retry(out_track_id: str,
 def _notify_stats() -> dict:
     """通知扇出计数（A4：任务分配/待澄清/待审核/完成 全渠道）。"""
     try:
-        from src.domains.runtime.im.notify import stats
-        return stats()
+        from src.domains.runtime.public import notify_stats
+        return notify_stats()
     except Exception:
         return {}
 
@@ -250,13 +250,13 @@ async def im_notify_test(body: NotifyTestBody, user: dict = Depends(get_current_
     用于真机验证「任务分配 / 待澄清 / 待审核 / 完成」通知是否各渠道都收到；
     走与线上完全相同的 notify_user 路径（不去重，方便重复点）。
     """
-    from src.domains.runtime.im.notify import notify_user, stats
+    from src.domains.runtime.public import notify_stats, notify_user
     kind = body.kind if body.kind in ("task", "awaiting", "pending_review", "done", "error") else "task"
     res = await notify_user(int(user.get("id") or 0), kind,
                             (body.text or "这是一条多渠道通知测试。"),
                             repo_key=body.repo_key, issue_number=body.issue_number,
                             dedupe=False)
-    return {"ok": bool(res.get("sent")), **res, "stats": stats()}
+    return {"ok": bool(res.get("sent")), **res, "stats": notify_stats()}
 
 
 @router.put("/installations/{installation_id}")
@@ -383,8 +383,8 @@ async def im_dingtalk_card_setup_save(
             if not app_id or not secret:
                 raise HTTPException(status_code=400, detail={
                     "code": 400, "message": "安装缺少 app_id/app_secret，先把钉钉应用凭证配好"})
-            from src.domains.runtime.im.adapters.dingtalk.cards import DingtalkCardClient, new_out_track_id
-            client = DingtalkCardClient(app_id, secret)
+            from src.domains.runtime.public import dingtalk_card_client, new_out_track_id
+            client = dingtalk_card_client(app_id, secret)
             ok, data = await client.create_instance(
                 tpl, new_out_track_id("probe"), {"title": "grape", "body_md": "card probe"})
             if not ok:
@@ -401,12 +401,11 @@ async def im_dingtalk_card_setup_save(
             cfg["dingtalk_cards"] = {"card": str((cfg.get("dingtalk_cards") or {}).get("card") or "")}
             cfg["cards_enabled"] = False
 
-        from src.domains.runtime.im.engine.supervisor import fingerprint
-        from src.domains.runtime.im.adapters.dingtalk.cards import set_card_mode_file
+        from src.domains.runtime.public import installation_fingerprint, set_card_mode_file
         conn.execute(
             "UPDATE grape_t_channel_installation SET config=?, config_fingerprint=?, "
             "updated_at=datetime('now') WHERE id=?",
-            (json.dumps(cfg, ensure_ascii=False), fingerprint(cfg), body.installation_id),
+            (json.dumps(cfg, ensure_ascii=False), installation_fingerprint(cfg), body.installation_id),
         )
         conn.commit()
         # 全局开关：还有别的安装启用着就不能关（订阅 topic 是进程级/渠道级）

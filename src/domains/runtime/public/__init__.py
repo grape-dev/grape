@@ -7232,3 +7232,185 @@ def backend_registered(name: str) -> bool:
     from src.domains.runtime.agents.executor import _BACKENDS
 
     return name in _BACKENDS
+
+
+# ── IM 渠道安装 / 引擎 / 通知门面（2026-11-18 跨域 import 批次 runtime.im）──────
+# 外域（mgmt 路由 im/agents/feishu_onboard/feishu_card/settings，insight 告警）此前
+# 直接 import runtime.im 的内部模块：
+#   from src.domains.runtime.im.engine_wiring import _connect, default_db_path, ...
+#   from src.domains.runtime.im import outbox as OB / notify as _notify
+#   from src.domains.runtime.im.adapters.dingtalk.cards import DingtalkCardClient ...
+# 依赖方向改为 外域 → runtime.public；实现仍只有 runtime.im 一份。
+# 转发体一律函数内 import：runtime.im.* 在加载期会反向引用别域 public，顶层 import 成环。
+#
+# 注：grape_t_channel_installation 归属 mgmt（configs/table_ownership.json），但该表实际
+# 落在 IM 共享域库（GRAPE_IM_DB_NAME 钉库），只有 engine_wiring 的连接解析知道目标库，
+# 因此这里暴露 im_db_connection() 让 mgmt 用同一连接做同库读写，不另起连接猜测库名。
+
+
+def im_db_connection():
+    """IM 共享域库连接（跨进程同库口径；调用方负责 close()）。
+
+    返回连接而非行对象：调用方需要在同库内做「查-改-提交」事务（安装行归属 mgmt），
+    public 无法在不引入跨库事务的前提下替它包成一个纯查询函数。
+    """
+    from src.domains.runtime.im.engine_wiring import _connect, default_db_path as _path
+
+    return _connect(_path())
+
+
+def engine_mode() -> str:
+    """IM 引擎模式（on | off，data/im_engine_mode 优先）。"""
+    from src.domains.runtime.im.engine_wiring import engine_mode as _impl
+
+    return _impl()
+
+
+def feishu_api(app_id: str = ""):
+    """按 app_id 取（进程内缓存的）飞书 Async 客户端。"""
+    from src.domains.runtime.im.engine_wiring import feishu_api as _impl
+
+    return _impl(app_id)
+
+
+def get_active_installation(scope: str = "user", *, owner_user_id: str = "", repo_key: str = "",
+                            channel_type: str = "", app_id: str = "") -> dict | None:
+    """读 IM 渠道活跃安装（返回 dict，不含游标）；无则 None。"""
+    from src.domains.runtime.im.engine_wiring import get_active_installation as _impl
+
+    return _impl(scope, owner_user_id=owner_user_id, repo_key=repo_key,
+                 channel_type=channel_type, app_id=app_id)
+
+
+def sync_installation(scope: str, *, owner_user_id: str = "", repo_key: str = "",
+                      app_id: str = "", app_secret: str = "", channel_type: str = "feishu",
+                      extra_config: dict | None = None) -> bool:
+    """UI 保存/换 app 的安装写入口（幂等 upsert，active）。"""
+    from src.domains.runtime.im.engine_wiring import sync_installation as _impl
+
+    return _impl(scope, owner_user_id=owner_user_id, repo_key=repo_key, app_id=app_id,
+                 app_secret=app_secret, channel_type=channel_type, extra_config=extra_config)
+
+
+def revoke_installation(scope: str, *, owner_user_id: str = "", repo_key: str = "",
+                        app_id: str = "", channel_type: str = "feishu") -> bool:
+    """UI 解绑/换 app：安装行置 revoked。"""
+    from src.domains.runtime.im.engine_wiring import revoke_installation as _impl
+
+    return _impl(scope, owner_user_id=owner_user_id, repo_key=repo_key, app_id=app_id,
+                 channel_type=channel_type)
+
+
+def resolve_engine():
+    """本进程 IM 引擎（4 进程口径：只有持有引擎的进程返回实例，其余 None）。"""
+    from src.domains.runtime.im.notify import resolve_engine as _impl
+
+    return _impl()
+
+
+def notify_stats() -> dict:
+    """通知扇出计数（全渠道）。"""
+    from src.domains.runtime.im.notify import stats as _impl
+
+    return _impl()
+
+
+async def notify_user(user_id: int, kind: str, text: str, *, repo_key: str = "",
+                      issue_number: int = 0, conv_id: str = "", targets=None,
+                      engine=None, dedupe: bool = True) -> dict:
+    """主动通知该用户的全部已连接渠道（每渠独立成败）。"""
+    from src.domains.runtime.im.notify import notify_user as _impl
+
+    return await _impl(user_id, kind, text, repo_key=repo_key, issue_number=issue_number,
+                       conv_id=conv_id, targets=targets, engine=engine, dedupe=dedupe)
+
+
+def outbox_counts() -> dict:
+    """通知 outbox 计数（按状态）。"""
+    from src.domains.runtime.im.outbox import counts as _impl
+
+    return _impl()
+
+
+def outbox_recent_undelivered(limit: int = 20) -> list:
+    """最近未送达的 outbox 行（dict 列表）。"""
+    from src.domains.runtime.im.outbox import recent_undelivered as _impl
+
+    return _impl(limit=limit)
+
+
+def outbox_list_rows(status: str = "", limit: int = 50) -> list:
+    """outbox 明细（可按状态筛，倒序）。"""
+    from src.domains.runtime.im.outbox import list_rows as _impl
+
+    return _impl(status=status, limit=limit)
+
+
+def outbox_get_row(out_track_id: str) -> dict | None:
+    """按 out_track_id 取 outbox 行。"""
+    from src.domains.runtime.im.outbox import get_row as _impl
+
+    return _impl(out_track_id)
+
+
+def outbox_requeue_for_retry(out_track_id: str) -> bool:
+    """手动重发：failed/expired → pending。"""
+    from src.domains.runtime.im.outbox import requeue_for_retry as _impl
+
+    return _impl(out_track_id)
+
+
+def dingtalk_card_client(app_id: str, app_secret: str):
+    """构造钉钉互动卡片实例客户端。"""
+    from src.domains.runtime.im.adapters.dingtalk.cards import DingtalkCardClient as _C
+
+    return _C(app_id, app_secret)
+
+
+def new_out_track_id(seed: str = "") -> str:
+    """生成 out_track_id（跨进程幂等键）。"""
+    from src.domains.runtime.im.adapters.dingtalk.cards import new_out_track_id as _impl
+
+    return _impl(seed)
+
+
+def set_card_mode_file(enabled: bool) -> str:
+    """写钉钉卡片模式开关文件，返回写入值。"""
+    from src.domains.runtime.im.adapters.dingtalk.cards import set_card_mode_file as _impl
+
+    return _impl(enabled)
+
+
+def installation_fingerprint(cfg: dict) -> str:
+    """安装 config 指纹（与 IM 引擎扫描同一口径）。"""
+    from src.domains.runtime.im.engine.supervisor import fingerprint as _impl
+
+    return _impl(cfg)
+
+
+def parse_card_action(event_data: dict) -> dict | None:
+    """解析飞书卡片回调（兼容直接 POST 与 WS 两种格式）。"""
+    from src.domains.runtime.im.feishu_async import _parse_card_action as _impl
+
+    return _impl(event_data)
+
+
+def feishu_client():
+    """构造飞书 Async 客户端（调用方自行 close）。"""
+    from src.domains.runtime.im.feishu_async import FeishuAsync as _C
+
+    return _C()
+
+
+def bot_context(app_id: str = "", app_secret: str = "", bot_type: str = "chat_bot", name: str = ""):
+    """构造单 Bot 隔离上下文。"""
+    from src.domains.runtime.im.feishu_async import BotContext as _C
+
+    return _C(app_id=app_id, app_secret=app_secret, bot_type=bot_type, name=name)
+
+
+def set_gitcode_nickname(user_id, nickname: str) -> None:
+    """写 GitCode 昵称（channel_directory 单一权威访问层）。"""
+    from src.domains.runtime.im.channel_directory import set_gitcode_nickname as _impl
+
+    return _impl(user_id, nickname)

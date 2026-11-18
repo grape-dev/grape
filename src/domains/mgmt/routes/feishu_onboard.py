@@ -120,13 +120,13 @@ def _apply_chat_credentials(user_id: str, app_id: str, app_secret: str) -> tuple
 
     返回 (error_msg, old_app_id)。error_msg 非空表示校验/写入失败。
     """
-    from src.domains.runtime.im.engine_wiring import (_connect, default_db_path, get_active_installation,
-                                       revoke_installation, sync_installation)
+    from src.domains.runtime.public import (get_active_installation, im_db_connection,
+                                            revoke_installation, sync_installation)
     _inst = get_active_installation("user", owner_user_id=str(user_id)) or {}
     old_app_id = str((_inst.get("config") or {}).get("app_id", "") or "")
 
     # 强约束：一个 app_id 全局唯一（查 active 安装行：repo 轨=VOD 占用，user 轨他人=被占用）
-    _conn = _connect(default_db_path())
+    _conn = im_db_connection()
     try:
         _holders = _conn.execute(
             "SELECT scope, owner_user_id FROM grape_t_channel_installation "
@@ -177,13 +177,13 @@ def _apply_vod_credentials(repo_key: str, app_id: str, app_secret: str) -> tuple
     repo_key = to_repo_key(repo_key)
     import uuid
     from src.domains.runtime import public as _rt_public_av
-    from src.domains.runtime.im.engine_wiring import (_connect, default_db_path, get_active_installation,
-                                       revoke_installation, sync_installation)
+    from src.domains.runtime.public import (get_active_installation, im_db_connection,
+                                            revoke_installation, sync_installation)
     _inst = get_active_installation("repo", repo_key=repo_key) or {}
     old_app_id = str((_inst.get("config") or {}).get("app_id", "") or "")
 
     # 类型独占校验：该 app_id 是否已被 user 轨（Chat）的 active 安装占用
-    _conn = _connect(default_db_path())
+    _conn = im_db_connection()
     try:
         _holders = _conn.execute(
             "SELECT scope FROM grape_t_channel_installation WHERE legacy_app_id=? AND status='active'",
@@ -290,10 +290,10 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
             try:
                 # 用新 bot 的通讯录读权限取扫码者飞书名（contact:user.base:readonly 已在 _ADDONS 申请；
                 # 存量 bot 无权限则留空，由 p2p 确认/sync 兜底，见 feishu-app-scoped-openid-fix.md §2.4）
-                from src.domains.runtime.im.feishu_async import FeishuAsync, BotContext
-                _api = FeishuAsync()
+                from src.domains.runtime.public import bot_context, feishu_client
+                _api = feishu_client()
                 _n = await _api.get_user_name(
-                    BotContext(app_id=app_id, app_secret=app_secret, bot_type="chat_bot"),
+                    bot_context(app_id=app_id, app_secret=app_secret, bot_type="chat_bot"),
                     open_id, user_id_type="open_id")
                 if _n and isinstance(_n, str):
                     feishu_name = _n

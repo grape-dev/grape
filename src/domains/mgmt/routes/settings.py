@@ -464,7 +464,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校
                     # 用 INSERT OR IGNORE + UPDATE（不用 INSERT OR REPLACE，避免覆盖 github_login 等其他平台字段）
                     try:
                         # S99/D74：昵称写收敛 channel_directory（单一权威访问层）
-                        from src.domains.runtime.im.channel_directory import set_gitcode_nickname
+                        from src.domains.runtime.public import set_gitcode_nickname
                         set_gitcode_nickname(user["id"], _gc_user.get("name", ""))
                         log.info(f"unified_user_mapping synced: user_id={user['id']}, gitcode_user={gc_login}")
                     except Exception as _um_e:
