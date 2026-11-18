@@ -583,7 +583,8 @@ function switchTab(tab) {
   }
   activeTab.value = 'projects'
   localStorage.setItem('sidebarTab', 'projects')
-  if (!projectsLoaded.value && !props.initialRepos) loadProjects()
+  if (!projectsLoaded.value) loadProjects()
+  else if (!projectsHint.value) loadProjects({ silent: true })
 }
 function setAppLang(lg) {
   G._setAppLang(lg)
@@ -640,11 +641,15 @@ function openRepoUrl(r) {
 }
 
 // ── data load ──
-function loadProjects() {
-  projectsLoaded.value = false
+function loadProjects(opts) {
+  // silent：只补拉提示条/列表，不动已渲染的首屏（initialRepos 缓存种子路径用），避免闪烁
+  const silent = !!(opts && opts.silent)
+  if (!silent) projectsLoaded.value = false
   projectsError.value = ''
-  projectsHint.value = ''
-  projectsBroken.value = []
+  if (!silent) {
+    projectsHint.value = ''
+    projectsBroken.value = []
+  }
   G.API.get('/repos/member')
     .then((d) => {
       repos.value = d.repos || []
@@ -667,14 +672,17 @@ function loadProjects() {
 }
 // 「去修复凭据」：账号页的凭据 tab（resolveInitialTab 支持 #account-<tab> 形态）
 function goFixCredential() {
-  window.location.hash = '#account-credentials'
+  // shell 的 nav(view, param) 会把 hash 写成 '#account/<param>'；先设 hash 会被它覆盖，
+  // 所以把 tab 作为 param 传进去（AccountView 的 resolveInitialTab 兼容该形态）。
   if (G.app && typeof G.app.nav === 'function') {
     try {
-      G.app.nav('account')
+      G.app.nav('account', 'credentials')
+      return
     } catch (e) {
       /* 老壳没有 nav 时靠 hash 也能进 */
     }
   }
+  window.location.hash = '#account-credentials'
 }
 function refresh() {
   refreshing.value = true
@@ -1002,6 +1010,9 @@ onMounted(() => {
   if (props.initialRepos) {
     repos.value = props.initialRepos
     projectsLoaded.value = true
+    // 2026-11-18：initialRepos 只是首屏种子；hint / _credential_broken 只存在于
+    // /repos/member 响应里，不补拉一次，"已隐藏其仓库"提示条在缓存恢复路径上永远不出现。
+    if (activeTab.value === 'projects') loadProjects({ silent: true })
   } else if (activeTab.value === 'projects') {
     loadProjects()
   } else if (activeTab.value === 'templates') {

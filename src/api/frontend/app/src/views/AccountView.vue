@@ -595,7 +595,9 @@ function resolveInitialTab() {
   )
     return props.initialTab
   if (G.window.location.hash && G.window.location.hash !== '#account') {
-    const hashTab = G.window.location.hash.replace('#account', '').replace('#', '')
+    // 兼容 '#account-credentials' 与 '#account/credentials'（shell nav 用后者）：
+    // 只 replace('#account') 会留下 '-credentials'/'/credentials'，永远匹配不到 tab。
+    const hashTab = G.window.location.hash.replace(/^#account[-/]?/, '').replace(/^#/, '')
     if (
       tabs.some(function (x) {
         return x.id === hashTab

@@ -252,6 +252,11 @@ def _repo_platform_links(user_id: str) -> "dict | None":
         _broken_out = {p: r for p, r in _broken.items() if p in merged}
         if _broken_out:
             out["credential_error"] = _broken_out
+        # 2026-11-18：坏凭据平台可能既没有关系行也不是可用 PAT（merged 为空），
+        # 只外放 credential_error 会让壳层判成"无绑定"→ 引导页，项目页的
+        # "已隐藏其仓库"提示条永远不可达。这里单独给一份完整清单，供壳层路由用。
+        if _broken:
+            out["credential_broken"] = sorted(_broken)
         return out
     except Exception as e:
         log.warning(f"repo platform link read failed, fallback to identities: {e}")

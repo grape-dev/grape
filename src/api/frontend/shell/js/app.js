@@ -487,7 +487,14 @@ function loadAgentTypes() {
     // 未撤销行）。绑定 identities 只是登录身份，不是接入关系（huawei 纯登录渠道即为反例）。
     // 表未就绪时后端返回 source='identities'，此时沿用旧判据，避免误判。
     var _links = window.__repoPlatformLinks;
-    if (_links && (_links.source === 'table' || _links.source === 'identities')) return !!_links.has_any;
+    if (_links && (_links.source === 'table' || _links.source === 'identities')) {
+      // 2026-11-18：关系行在、但凭据全部失效（credential_error 非空）时仍要进项目页——
+      // 项目页的凭据提示条（"已隐藏其仓库，请重新配置"）是这批用户唯一的可处置入口；
+      // 判成"无绑定"会把他们送回引导页，复现 #3200 的"系统说我绑错了平台"。
+      if (_links.has_any) return true;
+      return ((_links.credential_broken || []).length
+              || Object.keys(_links.credential_error || {}).length) > 0;
+    }
     // 快照未就绪：不按 identities 猜「已接入仓库平台」——Vue 线没有 _appVcsCatalog，
     // 旧判据会把纯登录渠道（huawei 之类）当成仓库平台绑定，把无关系用户送进项目页。
     // 无快照一律按「无关系」处理，落引导页；后端 /repos/member 的 _no_vcs_binding 仍有终裁权。
@@ -1116,7 +1123,9 @@ function loadAgentTypes() {
     // 我的项目 / 项目模板 / 工作区入口统一守卫：关系为空 → 只渲染引导页，不拉仓库。
     // （重入保护：引导页本身不调用 loadRepos，不会递归）
     _ensureRepoLinksFresh(0).then(function(links) {
-      if (!(links && links.has_any)) {
+      var _broken = (((links && links.credential_broken) || []).length
+                     || Object.keys((links && links.credential_error) || {}).length) > 0;
+      if (!(links && links.has_any) && !_broken) {
         goToRepos();
         return;
       }
