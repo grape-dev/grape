@@ -2488,8 +2488,11 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
     # Issue #343: 查重失败（token 失效）时给明确提示，不静默放行导致重复建单
     try:
-        issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
-                                              provider=_provider)
+        # 同步 urllib 出站调用必须离开事件循环（否则 GitCode 慢响应会把整个进程卡住，
+        # 实测单次 15~20s 期间所有 UI 请求一起排队）
+        issue_num = await asyncio.to_thread(
+            _find_open_issue_by_title, api_token, owner, rname, body.title.strip(),
+            provider=_provider)
     except RuntimeError as _dedup_err:
         from src.domains.runtime.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG, GITCODE_USER_TOKEN_INVALID_MSG
         if is_auth_error_exc(_dedup_err) and _using_user_token:
@@ -2498,8 +2501,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             if _renewed:
                 api_token = _renewed
                 try:
-                    issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
-                                                          provider=_provider)
+                    issue_num = await asyncio.to_thread(
+                        _find_open_issue_by_title, api_token, owner, rname, body.title.strip(),
+                        provider=_provider)
                 except RuntimeError as _dedup_err2:
                     _dedup_err = _dedup_err2
                 else:
@@ -2545,9 +2549,6 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         # 显式场景直接校验；智能推荐（vod-auto）/留空时回落到仓库默认场景一并校验，
         # 与后续写入 issue 的 scene_id 口径一致，避免默认/推荐路径产生死单。
         _scene_for_precheck = body.scene_id if (body.scene_id and body.scene_id != "vod-auto") else ""
-        # 显式选择的场景严格拦单；以下回落的（仓库 dev_scene / 内置 default）
-        # 只告警不拦——用户没有修复入口，拦了也只会得到无法处理的错误。
-        _scene_is_explicit = bool(_scene_for_precheck)
         if not _scene_for_precheck:
             try:
                 from src.domains.mgmt.user.db import get_repo_scene
@@ -2557,8 +2558,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 _scene_for_precheck = ""
         if _scene_for_precheck:
             from src.domains.runtime.scene_precheck import precheck_scene, summarize_problems
-            _precheck = precheck_scene(_scene_for_precheck, repo_key, user,
-                                       explicit=_scene_is_explicit)
+            _precheck = precheck_scene(_scene_for_precheck, repo_key, user)
             if not _precheck.get("ok"):
                 _pc_problems = _precheck.get("problems") or []
                 _pc_summary = summarize_problems(_pc_problems)
@@ -2577,9 +2577,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         # Issue #343 问题十一修复: 捕获建单 API 403/422，转成友好报错而非 500
         try:
             # D35/S55：统一建单入口（卡驱动；gitee 自动正确，存量平台内置卡对齐）
-            resp = _create_issue_unified(api_token, _provider, owner, rname,
-                                         body.title.strip(), _desc_with_attach,
-                                         assignee=assignee)
+            resp = await asyncio.to_thread(
+                _create_issue_unified, api_token, _provider, owner, rname,
+                body.title.strip(), _desc_with_attach, assignee=assignee)
         except Exception as _create_err:
             _err_msg = str(_create_err)
             # 从 RuntimeError 消息提取 HTTP code（格式: "failed (403): ..."）
@@ -2592,8 +2592,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 if _renewed:
                     api_token = _renewed
                     try:
-                        resp = _create_issue_unified(api_token, _provider, owner, rname,
-                                                     body.title.strip(), _desc_with_attach,
+                        resp = await asyncio.to_thread(
+                            _create_issue_unified, api_token, _provider, owner, rname,
+                            body.title.strip(), _desc_with_attach,
                                                      assignee=assignee)
                     except Exception as _create_err2:
                         _create_err = _create_err2
