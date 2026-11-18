@@ -9027,6 +9027,11 @@ CREATE TABLE IF NOT EXISTS grape_t_egress_admin_policy (
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(skill_name, skill_scope)
 )"""),
+    # 2026-11-18：原 DDL 带 FOREIGN KEY (runtime_id) REFERENCES agent_runtimes(id)。
+    # 三库拆分后 agent_runtimes 归 runtime，mgmt 库里没有它 → MySQL 报
+    # (1824, "Failed to open the referenced table 'agent_runtimes'")，整条迁移
+    # 202611110007 失败且从不盖章，本组的 5 张表（含本表）因此一张都没建出来。
+    # 跨库外键在三库拓扑下本来就不该存在（连通性由应用层保证），故移除。
     ("grape_t_engine_sandbox_config", """
 CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_config (
     id TEXT PRIMARY KEY,
@@ -9036,8 +9041,7 @@ CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_config (
     degrade_policy TEXT DEFAULT 'compatible',
     created_at    TEXT DEFAULT (datetime('now')),
     updated_at    TEXT DEFAULT (datetime('now')),
-    UNIQUE(runtime_id, engine_name),
-    FOREIGN KEY (runtime_id) REFERENCES agent_runtimes(id)
+    UNIQUE(runtime_id, engine_name)
 )"""),
     ("grape_t_engine_sandbox_paths", """
 CREATE TABLE IF NOT EXISTS grape_t_engine_sandbox_paths (
