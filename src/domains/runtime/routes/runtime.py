@@ -901,11 +901,11 @@ def _heartbeat_impl(body: HeartbeatBody, request: Request, credential_id: int):
         # `[task t_xxx] [seq=N|issue:#M|agent:x|repo:gitcode:o/r] ...`），抽不到的行
         # 因没有仓库维度而不会出现在用户面（平台/进程类日志归 L2/L3）。
         try:
-            from src.domains.insight.observability import logs as _obs_logs
+            from src.domains.insight import public as _obs_public
             _recs = [{"ts": (ll.ts or now), "level": ll.level, "component": "worker",
                       "msg": ll.message, "source": _wname or f"worker-{credential_id}",
                       "runtime_id": 0} for ll in body.log_lines]
-            _obs_logs.ingest(_recs, default_source=_wname or f"worker-{credential_id}")
+            _obs_public.ingest_logs(_recs, default_source=_wname or f"worker-{credential_id}")
         except Exception as _ole:
             log.warning(f"obs_log worker ingest failed: {_ole}")
 
@@ -3082,10 +3082,10 @@ from fastapi.responses import Response as _RelayResponse
 _relay_total = None
 try:
     from prometheus_client import Counter as _PC
-    from src.domains.insight.observability import registry as _obs_registry
+    from src.domains.insight import public as _obs_public
     _relay_total = _PC("grape_trace_relay_requests_total",
                        "Trace relay requests forwarded to LGTM",
-                       ["status"], registry=_obs_registry)
+                       ["status"], registry=_obs_public.prometheus_registry())
 except Exception:
     _relay_total = None
 

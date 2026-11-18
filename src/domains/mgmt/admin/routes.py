@@ -608,16 +608,15 @@ def admin_obs_alert_rules(admin: dict = Depends(require_admin)):
 
     全局视图：**不按仓库过滤**（平台运营视角）。用户面只有 `level='user'` 的一部分。
     """
-    from src.domains.insight.observability import alerts as alerts_mod
-    from src.domains.insight.observability import alert_policy as policy
+    from src.domains.insight import public as _obs_public
     try:
-        rules = alerts_mod.list_rules()
+        rules = _obs_public.list_alert_rules()
     except Exception as e:
         log.warning(f"admin obs alert rules failed: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "load rules failed"})
     return {"rules": rules, "count": len(rules),
-            "severities": list(policy.SEVERITIES),
-            "aggregate_modes": list(policy.AGG_MODES),
+            "severities": _obs_public.alert_severities(),
+            "aggregate_modes": _obs_public.alert_aggregate_modes(),
             "global": True}
 
 
@@ -629,11 +628,11 @@ def admin_obs_alert_policy_put(rule_id: int, body: AlertPolicyBody,
 
     这是管理台 T-A1/T-A2 的唯一写入口——校验口径只在这里（不在管理台重复实现）。
     """
-    from src.domains.insight.observability import alerts as alerts_mod
+    from src.domains.insight import public as _obs_public
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
     if not payload:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "no policy field"})
-    res = alerts_mod.set_rule_policy(rule_id, payload)
+    res = _obs_public.set_alert_rule_policy(rule_id, payload)
     if not res.get("ok"):
         not_found = res.get("errors") == ["rule not found"]
         raise HTTPException(status_code=404 if not_found else 400,
@@ -651,8 +650,8 @@ def admin_obs_alert_policy_put(rule_id: int, body: AlertPolicyBody,
             description="每个后台循环的运行/失败/连续失败/上次成功时间与上次错误（进程内快照）。"
                         "审计（2026-10-17）：循环失败不能只写日志，要能被 /metrics 与管理台看到。")
 def admin_obs_loops(_: dict = Depends(require_admin)):
-    from src.domains.insight.observability import loops as obs_loops
-    rows = obs_loops.snapshot()
+    from src.domains.insight import public as _obs_public
+    rows = _obs_public.obs_loop_snapshot()
     return {"loops": rows,
             "unhealthy": [r["loop"] for r in rows if not r.get("healthy")],
             "count": len(rows)}
@@ -668,9 +667,9 @@ def admin_obs_gaps(include_retired: bool = True, admin: dict = Depends(require_a
       但仍是死凭证，需要运维清理；列表里用 `beyond_retire_window` 标出
     - `never_reported=true` 表示从未上报过（没装成），不算缺失——列出仅供排查
     """
-    from src.domains.insight.observability import gap as gap_mod
+    from src.domains.insight import public as _obs_public
     try:
-        data = gap_mod.silent_targets(include_retired=bool(include_retired))
+        data = _obs_public.obs_silent_targets(include_retired=bool(include_retired))
     except Exception as e:
         log.warning(f"admin obs gaps failed: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "gaps failed"})
@@ -689,13 +688,13 @@ def admin_obs_events(sources: str = "", state: str = "", repo: str = "", limit: 
     差别只有三点：① 全局（不按可见范围过滤）② 含 `audit`（平台动作）③ 不返回平台级告警之外的
     平台指标事件（那些走 admin 健康中心）。
     """
-    from src.domains.insight.observability import events_view
+    from src.domains.insight import public as _obs_public
     _limit = max(1, min(int(limit or 200), 1000))
     want = [s.strip() for s in str(sources or "").split(",") if s.strip()]
     try:
-        data = events_view.unified_events(_GLOBAL_SCOPE_USER, sources=want, state=state,
-                                          repo=repo, limit=_limit, allow_audit=True,
-                                          global_scope=True, q=q, before=before)
+        data = _obs_public.unified_events(_GLOBAL_SCOPE_USER, sources=want, state=state,
+                                         repo=repo, limit=_limit, allow_audit=True,
+                                         global_scope=True, q=q, before=before)
     except Exception as e:
         log.warning(f"admin obs events failed: {e}")
         raise HTTPException(status_code=500, detail={"code": 500, "message": "events failed"})
@@ -713,19 +712,19 @@ def admin_obs_metrics_series(metric: str = "task_success_rate,task_done,task_fai
     与用户面共用 `metric_rollup.series`，保证两端同一口径；差别是这里**全局**（含 `global` 维度）。
     """
     from datetime import datetime, timedelta, timezone
-    from src.domains.insight.observability import metric_rollup
+    from src.domains.insight import public as _obs_public
     res = (resolution or "minute").strip().lower()
-    if res not in (metric_rollup.RES_MINUTE, metric_rollup.RES_HOUR):
+    if res not in _obs_public.metric_resolutions():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "resolution must be minute|hour"})
     mets = [m.strip() for m in str(metric or "").split(",") if m.strip()]
-    bad = [m for m in mets if m not in metric_rollup.ALL_METRICS]
+    bad = [m for m in mets if m not in _obs_public.all_metrics()]
     if not mets or bad:
         raise HTTPException(status_code=400, detail={"code": 400,
                                                      "message": f"unknown metric: {bad or 'empty'}"})
     sc = (scope or "global").strip().lower()
     dims: List[str] = []
     if sc == "global":
-        dims = [metric_rollup.DIM_GLOBAL]
+        dims = [_obs_public.metric_global_dim()]
     elif sc == "repo":
         if not repo:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "repo required"})
@@ -738,7 +737,7 @@ def admin_obs_metrics_series(metric: str = "task_success_rate,task_done,task_fai
     span = max(1, min(int(hours or 24), 24 * 40))
     now = datetime.now(timezone.utc)
     start = now - timedelta(hours=span)
-    data = metric_rollup.series(mets, dims, start, now, res)
+    data = _obs_public.metric_series(mets, dims, start, now, res)
     return {"resolution": res, "hours": span, "scope": sc, "dim_keys": dims, "series": data,
             "global": True}
 
@@ -760,9 +759,9 @@ def _all_rollup_dims() -> List[str]:
             summary="SLO / error budget (platform, incl. engine availability)")
 def admin_obs_slo(repo: str = "", admin: dict = Depends(require_admin)):
     """SLO 列表（管理台）：平台视角、含引擎可用率；`repo` 给了就只看该仓（不校验可见性）。"""
-    from src.domains.insight.observability import slo as slo_mod
+    from src.domains.insight import public as _obs_public
     try:
-        return {"slos": slo_mod.list_summaries(global_scope=True, repo=repo),
+        return {"slos": _obs_public.list_slo_summaries(global_scope=True, repo=repo),
                 "global": True, "repo": str(repo or "")}
     except Exception as e:
         log.warning(f"admin obs slo failed: {e}")
@@ -772,8 +771,8 @@ def admin_obs_slo(repo: str = "", admin: dict = Depends(require_admin)):
 @router.get("/obs/slo/{slo_id}", operation_id="admin_obs_slo_detail",
             summary="One SLO with burn-down series (platform)")
 def admin_obs_slo_detail(slo_id: int, repo: str = "", admin: dict = Depends(require_admin)):
-    from src.domains.insight.observability import slo as slo_mod
-    data = slo_mod.detail(int(slo_id), global_scope=True, repo=repo)
+    from src.domains.insight import public as _obs_public
+    data = _obs_public.slo_detail(int(slo_id), global_scope=True, repo=repo)
     if not data:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "slo not found"})
     return data
@@ -791,16 +790,16 @@ class SloUpdateBody(BaseModel):
 def admin_obs_slo_update(slo_id: int, body: SloUpdateBody,
                          admin: dict = Depends(require_admin)):
     """目标值由管理台统一设定（§6.7）。"""
-    from src.domains.insight.observability import slo as slo_mod
+    from src.domains.insight import public as _obs_public
     try:
-        ok = slo_mod.update_slo(int(slo_id),
-                                target=body.target, window_days=body.window_days,
-                                threshold_json=body.threshold_json, enabled=body.enabled)
+        ok = _obs_public.update_slo(int(slo_id),
+                                    target=body.target, window_days=body.window_days,
+                                    threshold_json=body.threshold_json, enabled=body.enabled)
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": 400, "message": str(e)})
     if not ok:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "slo not found"})
-    return {"ok": True, "slo": slo_mod.get_slo(int(slo_id))}
+    return {"ok": True, "slo": _obs_public.get_slo(int(slo_id))}
 
 
 class SloCreateBody(BaseModel):
@@ -815,15 +814,15 @@ class SloCreateBody(BaseModel):
 
 @router.post("/obs/slo", operation_id="admin_obs_slo_create", summary="Create an SLO (admin)")
 def admin_obs_slo_create(body: SloCreateBody, admin: dict = Depends(require_admin)):
-    from src.domains.insight.observability import slo as slo_mod
+    from src.domains.insight import public as _obs_public
     try:
-        sid = slo_mod.create_slo(body.name, body.sli_type, scope_type=body.scope_type,
-                                 scope_key=body.scope_key, target=body.target,
-                                 window_days=body.window_days, threshold_json=body.threshold_json,
-                                 created_by=str((admin or {}).get("username") or ""))
+        sid = _obs_public.create_slo(body.name, body.sli_type, scope_type=body.scope_type,
+                                     scope_key=body.scope_key, target=body.target,
+                                     window_days=body.window_days, threshold_json=body.threshold_json,
+                                     created_by=str((admin or {}).get("username") or ""))
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": 400, "message": str(e)})
-    return {"ok": True, "id": sid, "slo": slo_mod.get_slo(sid)}
+    return {"ok": True, "id": sid, "slo": _obs_public.get_slo(sid)}
 
 
 class VcsPlatformCardBody(BaseModel):

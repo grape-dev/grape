@@ -1415,10 +1415,10 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         pass
     # 事件总线：任务创建
     try:
-        from src.domains.insight.observability.events import bus, Event
-        bus.publish(Event(type="task:enqueued", task_id=task_id,
-                          payload={"agent_type": agent_type, "runtime_id": runtime_id,
-                                    "repo_key": repo_key, "skill": skill}))
+        from src.domains.insight import public as _obs_public
+        _obs_public.emit_event("task:enqueued", task_id=task_id,
+                               payload={"agent_type": agent_type, "runtime_id": runtime_id,
+                                        "repo_key": repo_key, "skill": skill})
     except Exception:
         pass
     return task_id
@@ -3605,9 +3605,9 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
         pass
     # 事件总线：任务完成
     try:
-        from src.domains.insight.observability.events import bus, Event
-        bus.publish(Event(type="task:completed" if exit_code == 0 else "task:failed",
-                          task_id=task_id, payload={"exit_code": exit_code}))
+        from src.domains.insight import public as _obs_public
+        _obs_public.emit_event("task:completed" if exit_code == 0 else "task:failed",
+                               task_id=task_id, payload={"exit_code": exit_code})
     except Exception:
         pass
 
@@ -4439,9 +4439,9 @@ def fail_task(task_id, error, exit_code=-1):
         pass
     # 事件总线：任务失败
     try:
-        from src.domains.insight.observability.events import bus, Event
-        bus.publish(Event(type="task:failed", task_id=task_id,
-                          payload={"exit_code": exit_code, "error": str(error)[:200]}))
+        from src.domains.insight import public as _obs_public
+        _obs_public.emit_event("task:failed", task_id=task_id,
+                               payload={"exit_code": exit_code, "error": str(error)[:200]})
     except Exception:
         pass
 

@@ -593,3 +593,142 @@ __all__ += ["redact_issue_text", "normalize_tokens", "pipeline_trace_id",
             "record_task_enqueued", "record_task_dispatched", "record_task_terminal",
             "record_task_failed", "record_llm_usage", "record_usage",
             "task_model_summary", "master_usage_for_task", "master_run", "new_run_id"]
+
+
+# ===== observability 观测面（告警/循环/缺口/事件视图/指标序列/SLO/日志/注册表）=====
+# 管理台与 runtime 只经本方 public 取用，不再 import
+# `src.domains.insight.observability.*` 内部模块（跨域 import 收敛）。
+
+
+def list_alert_rules(level: str = "") -> list:
+    """全部告警规则（`level=''` 不过滤）。"""
+    from src.domains.insight.observability import alerts as _impl
+    return _impl.list_rules(level)
+
+
+def set_alert_rule_policy(rule_id: int, payload: dict) -> dict:
+    """写告警规则策略字段，返回 `{ok, applied, errors}`。"""
+    from src.domains.insight.observability import alerts as _impl
+    return _impl.set_rule_policy(int(rule_id), dict(payload or {}))
+
+
+def alert_severities() -> list:
+    """告警严重度取值全集（顺序即优先级）。常量以函数暴露，避免跨域再导出。"""
+    from src.domains.insight.observability import alert_policy as _impl
+    return list(_impl.SEVERITIES)
+
+
+def alert_aggregate_modes() -> list:
+    """聚合模式取值全集。"""
+    from src.domains.insight.observability import alert_policy as _impl
+    return list(_impl.AGG_MODES)
+
+
+def obs_loop_snapshot() -> list:
+    """观测后台循环健康快照（进程内）。"""
+    from src.domains.insight.observability import loops as _impl
+    return _impl.snapshot()
+
+
+def obs_silent_targets(include_retired: bool = True) -> dict:
+    """静默目标名单（应报数却没报的设备/仓库）。"""
+    from src.domains.insight.observability import gap as _impl
+    return _impl.silent_targets(include_retired=bool(include_retired))
+
+
+def unified_events(user: dict, sources=None, state: str = "", repo: str = "", limit: int = 100,
+                   allow_audit: bool = False, global_scope: bool = False, q=None,
+                   before=None) -> dict:
+    """统一事件视图（用户面/管理台同一聚合口径）。"""
+    from src.domains.insight.observability import events_view as _impl
+    return _impl.unified_events(dict(user or {}), sources=sources, state=state, repo=repo,
+                                limit=int(limit), allow_audit=bool(allow_audit),
+                                global_scope=bool(global_scope), q=q, before=before)
+
+
+def metric_series(metrics, dim_keys, start, end, resolution: str = "minute") -> dict:
+    """业务指标时间序列（按桶聚合）。"""
+    from src.domains.insight.observability import metric_rollup as _impl
+    return _impl.series(list(metrics or []), list(dim_keys or []), start, end, resolution)
+
+
+def metric_resolutions() -> list:
+    """序列分辨率取值（minute/hour）。"""
+    from src.domains.insight.observability import metric_rollup as _impl
+    return [_impl.RES_MINUTE, _impl.RES_HOUR]
+
+
+def all_metrics() -> list:
+    """可查指标名全集。"""
+    from src.domains.insight.observability import metric_rollup as _impl
+    return list(_impl.ALL_METRICS)
+
+
+def metric_global_dim() -> str:
+    """平台汇总维度的 dim_key。"""
+    from src.domains.insight.observability import metric_rollup as _impl
+    return _impl.DIM_GLOBAL
+
+
+def list_slo_summaries(global_scope: bool = False, repo: str = "", user=None, now=None) -> list:
+    """SLO 列表（不含燃尽序列）。"""
+    from src.domains.insight.observability import slo as _impl
+    return _impl.list_summaries(user=user, global_scope=bool(global_scope), now=now, repo=repo)
+
+
+def slo_detail(slo_id: int, global_scope: bool = False, repo: str = "", user=None,
+               now=None):
+    """单条 SLO 详情（含燃尽序列）；不存在/不可见 → None。"""
+    from src.domains.insight.observability import slo as _impl
+    return _impl.detail(int(slo_id), user=user, global_scope=bool(global_scope), now=now,
+                        repo=repo)
+
+
+def create_slo(name: str, sli_type: str, scope_type: str = "global", scope_key: str = "",
+               target: float = 0.99, window_days: int = 30, threshold_json: str = "{}",
+               created_by: str = "") -> int:
+    """建 SLO，返回 id。"""
+    from src.domains.insight.observability import slo as _impl
+    return _impl.create_slo(name, sli_type, scope_type=scope_type, scope_key=scope_key,
+                            target=target, window_days=window_days,
+                            threshold_json=threshold_json, created_by=created_by)
+
+
+def update_slo(slo_id: int, target=None, window_days=None, threshold_json=None,
+               enabled=None) -> bool:
+    """改 SLO 目标/窗口/开关；不存在 → False。"""
+    from src.domains.insight.observability import slo as _impl
+    return _impl.update_slo(int(slo_id), target=target, window_days=window_days,
+                            threshold_json=threshold_json, enabled=enabled)
+
+
+def get_slo(slo_id: int):
+    """取单条 SLO 原始行；不存在 → None。"""
+    from src.domains.insight.observability import slo as _impl
+    return _impl.get_slo(int(slo_id))
+
+
+def ingest_logs(records: list, default_source: str = "master") -> int:
+    """批量落 obs 日志（返回写入行数）。"""
+    from src.domains.insight.observability import logs as _impl
+    return _impl.ingest(list(records or []), default_source=default_source)
+
+
+def prometheus_registry():
+    """insight 的 Prometheus 收集器注册表对象（跨域 Counter/Gauge 需挂同一个 registry）。"""
+    from src.domains.insight.observability import registry as _reg
+    return _reg
+
+
+def emit_event(event_type: str, task_id: str = "", payload=None) -> None:
+    """向观测事件总线发一条事件（进程内总线；跨进程请走 GSB）。"""
+    from src.domains.insight.observability.events import Event as _Event
+    from src.domains.insight.observability.events import bus as _bus
+    _bus.publish(_Event(type=event_type, task_id=task_id, payload=payload))
+
+
+__all__ += ["list_alert_rules", "set_alert_rule_policy", "alert_severities",
+            "alert_aggregate_modes", "obs_loop_snapshot", "obs_silent_targets",
+            "unified_events", "metric_series", "metric_resolutions", "all_metrics",
+            "metric_global_dim", "list_slo_summaries", "slo_detail", "create_slo",
+            "update_slo", "get_slo", "ingest_logs", "prometheus_registry", "emit_event"]
