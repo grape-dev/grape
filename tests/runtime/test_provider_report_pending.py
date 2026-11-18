@@ -45,15 +45,16 @@ def _report_branch(src: str) -> str:
 
 def test_empty_report_response_is_counted_as_pending():
     seg = _report_branch(_worker_src())
-    assert "if _rep:" in seg, "空响应必须与成功分支分开处理（此前一律打成功日志）"
-    assert "returned an empty response" in seg, "空响应缺少显式 WARNING"
+    assert 'if _rep and _rep.get("status", "ok") == "ok":' in seg, \
+        "成功判据须看 status（仅判非空会把降级 200 体当成功）"
+    assert "did not succeed" in seg, "失败响应缺少显式 WARNING"
     # 切片必须收窄到 else 分支自身：segment 后面紧跟的 except 分支也含
     # `_failed += 1`，切到段尾会让断言命中 except 的计数而恒过（变异测试会暴露）。
     else_start = seg.find("else:")
     except_start = seg.find("except Exception as _re:")
     assert else_start != -1 and except_start > else_start, "空响应分支或其后 except 分支缺失"
     empty_branch = seg[else_start:except_start]
-    assert "returned an empty response" in empty_branch, "WARNING 不在空响应分支内"
+    assert "did not succeed" in empty_branch, "WARNING 不在失败分支内"
     assert "_failed += 1" in empty_branch, "空响应必须计入 pending（否则重试循环首轮即退出）"
 
 
@@ -74,5 +75,9 @@ def test_task_env_failure_returns_explicit_missing_marker():
     assert '"llm_cred_source": "env_error"' in branch, \
         "失败来源需与「用户确实没配凭据」区分（env_error，而非 user/repo/error）"
     assert "任务环境准备失败" in branch, "提示需中性描述（本块涵盖取任务/场景/凭据多步）"
-    assert "_e}" not in branch.split("llm_cred_hint")[1], \
-        "用户可见提示不得回显原始异常（可能含库名/表名）"
+    # 泄漏断言按 hint 整行判定：不只拦 {_e} 这类紧邻形态，"+ str(_e)" / "% (_e,)"
+    # 等拼接同样属于回显原始异常。
+    hint_lines = [ln for ln in branch.splitlines() if "llm_cred_hint" in ln]
+    assert hint_lines, "异常分支缺少 llm_cred_hint"
+    for ln in hint_lines:
+        assert "_e" not in ln, f"用户可见提示回显了原始异常：{ln.strip()}"
