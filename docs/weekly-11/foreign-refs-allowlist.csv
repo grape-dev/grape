@@ -34,3 +34,5 @@ runtime_credentials,runtime,api,6
 task_messages,runtime,api,2
 user_accounts,mgmt,runtime,3
 user_credentials,mgmt,platform,1
+devops_agent_runtime_binding,mgmt,runtime,3
+grape_t_category_dict,mgmt,api,2

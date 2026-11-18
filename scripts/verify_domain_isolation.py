@@ -92,7 +92,8 @@ def check_code_refs() -> list[str]:
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
-    owner = mod.load_owner(REPO / "docs" / "weekly-11" / "table-owner.tsv")
+    # 唯一权威 = configs/table_ownership.json（tsv 已并入并删除）
+    owner = mod.load_owner_json(REPO / "configs" / "table_ownership.json")
     rows = mod.scan(REPO / "src", owner)
     base = mod.load_baseline(REPO / "docs" / "weekly-11" / "foreign-refs-allowlist.csv")
     violations, improvements = mod.check(rows, base)

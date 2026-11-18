@@ -149,7 +149,7 @@ mgmt 在兄弟节点 `:3311`、insight 在兄弟节点 `:3312`、runtime 在本�
 - 其余 6 张不建，并从 `configs/table_ownership.json` 移除（迁到 `_not_in_current_schema` 记录）：
   5 张 `backup_*_20260817` 是历史快照、`flyway_schema_history` 是 Java 迁移遗留；
   同时删掉 `credential_reveal_log` 这条旧名重复登记（真名 `grape_t_credential_reveal_log`，
-  权威 `docs/weekly-11/table-owner.tsv` 里只有真名）。
+  权威 `configs/table_ownership.json` 里只有真名）。
 
 清单 135 → 128 张，`tests/api/test_table_ownership.py` 18 例通过；守卫行为复核：
 `agent_tasks` 在 mgmt 进程 skip=True、`admin_users` skip=False、未登记表放行。

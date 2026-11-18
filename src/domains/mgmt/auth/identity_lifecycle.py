@@ -74,7 +74,7 @@ def _default_cipher():
 
 
 def _default_db_access():
-    """票据表在 mgmt 库（docs/weekly-11/table-owner.tsv: grape_mgmt_db）。
+    """票据表在 mgmt 库（configs/table_ownership.json: grape_mgmt_db）。
 
     延迟导入避免与 grape_account_db 形成模块级循环（后者在顶层 import 本服务）。
     """

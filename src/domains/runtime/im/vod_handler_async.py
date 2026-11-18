@@ -45,7 +45,7 @@ def _repo_app_ids(repo_key: str) -> set:
 
     A2 收尾（Phase B）后 `devops_agent_session.im_app_id` 已 DROP：原来靠那一列判断
     "这个仓库是不是当前 bot 配的 VOD"，改由安装表回答（一个仓库可能有多渠道安装）。
-    表归 mgmt（docs/weekly-11/table-owner.tsv），SQL 只在 mgmt public 一份，本函数只留
+    表归 mgmt（configs/table_ownership.json），SQL 只在 mgmt public 一份，本函数只留
     拓扑无关的调用；查询失败 → 空集合（原口径：调用方据此判「未配置本 bot 的 VOD」）。
     """
     try:

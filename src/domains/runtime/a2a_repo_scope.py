@@ -12,7 +12,7 @@
   （gitee #1 与 gitcode #1）是完全不同的单，不得互证。
 
 SQL 只出现在本模块（``issue`` = runtime 域基表，归属见
-docs/weekly-11/table-owner.tsv），跨域读一律走 mgmt public。
+configs/table_ownership.json），跨域读一律走 mgmt public。
 """
 
 from dataclasses import dataclass, field

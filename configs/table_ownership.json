@@ -1,7 +1,7 @@
 {
-  "_comment": "表归属清单：唯一权威 = docs/weekly-11/table-owner.tsv（P0 冻结判决）；本文件由它派生，DDL 守卫据此阻止进程创建'别家'的表；多份基表的裁决与证据记录在 configs/table_ownership_notes.md",
+  "_comment": "表归属清单 —— 唯一权威。此文件是归属判断的唯一来源：运行期与检查器都读它（src/kernel/table_ownership.py::owner_map、scripts/check-arch.py 的 R8、scripts/foreign_table_refs.py、scripts/scan_pgconn.py）。原 docs/weekly-11/table-owner.tsv 已并入本文件并删除 —— 两份清单曾并行维护，漂移 19 张（本文件有、tsv 无），其中 grape_t_oauth_channels / devops_agent_runtime_binding / grape_t_category_dict 三张是生产代码正在使用的；因为 tsv 里查不到归属，跨域引用检查对它们无法判定、给出的是假绿灯。改归属只改这里，不要再引入第二份清单。",
   "schema_version": 1,
-  "generated_from": "docs/weekly-11/table-owner.tsv (P0 frozen, 101 unique base tables) + configs/table_ownership_notes.md adjudication",
+  "generated_from": "configs/table_ownership.json (P0 frozen, 101 unique base tables) + configs/table_ownership_notes.md adjudication",
   "tables": {
     "admin_accounts": "mgmt",
     "admin_agent_alert": "mgmt",
@@ -662,7 +662,7 @@
     ]
   },
   "_not_in_current_schema": {
-    "_comment": "以下名字只出现在旧库 grape_dev_mgmt / 打包脚本的种子表清单里，docs/weekly-11/table-owner.tsv（权威）与当前代码均无它们：5 张是 2026-08-17 的历史备份快照，flyway_schema_history 是 Java 迁移遗留，credential_reveal_log 是 grape_t_credential_reveal_log 的旧名重复登记。2026-11-15 从 tables 里移除，避免三库缺口检查把它们报成『缺表』。",
+    "_comment": "以下名字只出现在旧库 grape_dev_mgmt / 打包脚本的种子表清单里，configs/table_ownership.json（权威）与当前代码均无它们：5 张是 2026-08-17 的历史备份快照，flyway_schema_history 是 Java 迁移遗留，credential_reveal_log 是 grape_t_credential_reveal_log 的旧名重复登记。2026-11-15 从 tables 里移除，避免三库缺口检查把它们报成『缺表』。",
     "tables": {
       "credential_reveal_log": "mgmt",
       "backup_agent_runtimes_revoked_20260817": "mgmt",

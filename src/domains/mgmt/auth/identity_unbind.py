@@ -1,6 +1,6 @@
 """外部身份解绑：单语句条件 UPDATE 的语句构造与执行（Issue #3054 P1/P3 整合）。
 
-## 架构归属（三库四进程，`docs/weekly-11/table-owner.tsv`）
+## 架构归属（三库四进程，`configs/table_ownership.json`）
 
 `external_identities` 与 `grape_accounts` 都归 **mgmt** 库 / grape_server(mgmt 路由)
 进程。本模块只发 mgmt 域内 SQL：解绑的目标行与「至少保留一种登录方式」判据都在同库，

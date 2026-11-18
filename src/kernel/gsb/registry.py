@@ -12,7 +12,7 @@ purge_stale()（把心跳超时的 online 行标为 offline），供 /internal/g
 与巡检脚本使用；register/discover 行为保持设计稿语义不变。
 
 2026-11 跨域收口：注册表 SQL 全部下沉 mgmt 域 public（`gsb_service_registry` 归
-mgmt，见 docs/weekly-11/table-owner.tsv）。本模块只保留 GSB 语义——心跳超时判定、
+mgmt，见 configs/table_ownership.json）。本模块只保留 GSB 语义——心跳超时判定、
 实例派生字段、负载均衡依赖的排序口径；不再直连进程库。三库拓扑下各域进程写的是
 同一张 mgmt 表（改前各写各的库：注册不报错但互相发现不到），单库 / 测试拓扑由
 owner 域的「任意拓扑」原语回落进程主库，行为与改前逐字一致。

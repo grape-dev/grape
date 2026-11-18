@@ -65,7 +65,7 @@ def _repo_credential(repo_key: str, cred_type: str) -> str:
     cred_type ∈ {'bot','webhook'}（平台语义由 repo_key 前缀承载，D99）；
     表不存在（旧库/裁剪库）或读失败 → 空串（调用方回落历史列），并留 warning。
 
-    表归 insight（table-owner.tsv），读写只经 insight public 的
+    表归 insight（table_ownership.json），读写只经 insight public 的
     `repo_credential_value`（任意拓扑原语：自有 DSN 走 insight 连接，单库回落进程库），
     本模块不再持有该表的 SQL——原先在 mgmt 连接上直读，独立三库拓扑下必然 1146。
     """

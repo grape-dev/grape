@@ -2,7 +2,7 @@
 """生成「跨域依赖矩阵看板」（P0-4）。
 
 输入（随仓维护，可离线跑）：
-  docs/weekly-11/table-owner.tsv                     P0 冻结归属清单
+  configs/table_ownership.json                     P0 冻结归属清单
   docs/weekly-11/cross-domain-disposition.csv        读/写处置分类（D/C1/C2/B/E）
   docs/weekly-11/cross-domain-write-channel.csv      写通道分配（W1/W2/W3/X）
   scripts/foreign_table_refs.py                      实际代码扫描（唯一计数口径）
@@ -29,7 +29,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 DOCS = REPO / "docs" / "weekly-11"
-OWNER_TSV = DOCS / "table-owner.tsv"
+OWNER_TSV = DOCS / "table_ownership.json"
 DISPOSITION = DOCS / "cross-domain-disposition.csv"
 CHANNEL = DOCS / "cross-domain-write-channel.csv"
 BASELINE = DOCS / "foreign-refs-allowlist.csv"

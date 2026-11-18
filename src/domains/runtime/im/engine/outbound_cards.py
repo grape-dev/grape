@@ -8,7 +8,7 @@ conversationId。所以点按钮时只能拿 `outTrackId` 回来反查"这张卡
   - DB 表 `grape_t_channel_outbound_card`（进程重启后回调仍能反查）
 读取顺序：内存 → DB。写入只增不改（同一 outTrackId 不复用，见 cards.new_out_track_id）。
 
-SQL 归属：该表归 **mgmt** 域（docs/weekly-11/table-owner.tsv），语句只在该域 public
+SQL 归属：该表归 **mgmt** 域（configs/table_ownership.json），语句只在该域 public
 留一份（`outbound_card_put_any` / `outbound_card_chat_row_any`）；本模块只提供「调用期
 的进程库句柄」当执行上下文，不写 SQL、也不判断表归谁。
 """

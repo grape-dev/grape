@@ -25,7 +25,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 DB_SETUP = REPO / "src/api/db_setup.py"
-OWNER_TSV = REPO / "docs/weekly-11/table-owner.tsv"
+OWNER_TSV = REPO / "configs/table_ownership.json"
 TABLE_RE = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?(\w+)[`\"]?", re.I)
 
 
@@ -34,7 +34,7 @@ SCHEMA_DOMAIN = {"grape_mgmt_db": "mgmt", "grape_runtime_db": "runtime",
 
 
 def load_owner() -> dict[str, str]:
-    """table → 归属域（冻结清单 docs/weekly-11/table-owner.tsv）。"""
+    """table → 归属域（冻结清单 configs/table_ownership.json）。"""
     owner = {}
     for line in OWNER_TSV.read_text(encoding="utf-8").splitlines():
         schema, _, table = line.partition("\t")

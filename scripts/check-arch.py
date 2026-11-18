@@ -69,10 +69,12 @@ REMOVED_LEGACY_PREFIXES = (
 )
 
 # ── R8：kernel 不得写「域归属表」（三库独立化 P1 硬约束）────────────────────
-# 归属口径：docs/weekly-11/table-owner.tsv（102 张基表，三库实况）。
+# 归属口径：configs/table_ownership.json（102 张基表，三库实况）。
 # 棘轮：白名单按 (文件, 表) 登记**当前数量**；新增文件/表或数量上升 → 红。
 # 每条存量以「目标阶段」标注，P1/P3 迁移完成后应逐条删除（只减不增）。
-R8_OWNER_TSV = os.path.join(REPO_ROOT, "docs", "weekly-11", "table-owner.tsv")
+# 归属唯一权威：configs/table_ownership.json（原 configs/table_ownership.json 已并入并删除 ——
+# 两份清单曾漂移 19 张，json 是超集且代码只读它）。
+R8_OWNER_JSON = os.path.join(REPO_ROOT, "configs", "table_ownership.json")
 R8_WHITELIST: dict[str, dict[str, int]] = {
     # src/kernel/repo_migrate.py 已清零（改名迁移按域下沉到 mgmt/runtime public）
     "src/kernel/session_manager.py": {
@@ -99,16 +101,22 @@ _R8_WRITE_RE = re.compile(
 
 
 def load_r8_owner(path: str) -> dict[str, str]:
+    """读归属清单：.json 走 configs/table_ownership.json 的 tables 段，其它按两列 tsv。"""
     owner: dict[str, str] = {}
     try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                if not line.strip() or line.startswith("#"):
-                    continue
-                parts = line.rstrip("\n").split("\t")
-                if len(parts) >= 2:
-                    owner[parts[1].strip()] = parts[0].strip()
-    except OSError as exc:
+        if path.endswith(".json"):
+            import json as _json
+            data = _json.loads(open(path, encoding="utf-8").read())
+            owner = dict(data.get("tables") or {})
+        else:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip() or line.startswith("#"):
+                        continue
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) >= 2:
+                        owner[parts[1].strip()] = parts[0].strip()
+    except (OSError, ValueError) as exc:
         # QA G4：清单缺失/不可读时此前静默 pass → scan_r8 返回空 → 报告里显示 R8 通过，
         # 实际这条检查根本没跑。必须显式说明「跳过」，否则门禁给出的是假绿灯。
         print(f"R8: SKIP —— 归属清单不可读（{path}: {exc}）；跨域基表直查检查本轮未执行")
@@ -117,10 +125,10 @@ def load_r8_owner(path: str) -> dict[str, str]:
 
 def scan_r8() -> list[tuple[str, str, str, int]]:
     """返回 [(relpath, table, owner_schema, count)]；owner tsv 缺失时返回空并跳过。"""
-    owner = load_r8_owner(R8_OWNER_TSV)
+    owner = load_r8_owner(R8_OWNER_JSON)
     if not owner:
         # 与 load_r8_owner 的 SKIP 提示配套：空清单 = 检查没跑，不能当成「无违规」。
-        print(f"R8: SKIP —— 归属清单为空（{R8_OWNER_TSV}），本轮未做跨域基表直查检查")
+        print(f"R8: SKIP —— 归属清单为空（{R8_OWNER_JSON}），本轮未做跨域基表直查检查")
         return []
     out = []
     for path in iter_py(os.path.join(SRC, "kernel")):

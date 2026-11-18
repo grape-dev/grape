@@ -6,7 +6,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 PY=${PY:-venv/bin/python}
-OWNER=docs/weekly-11/table-owner.tsv
+OWNER=configs/table_ownership.json
 BASE=docs/weekly-11/foreign-refs-allowlist.csv
 rc=0
 step() { echo; echo "=== $* ==="; }

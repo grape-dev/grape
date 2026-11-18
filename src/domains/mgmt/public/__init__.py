@@ -4806,7 +4806,7 @@ def outbound_card_chat_row_any(out_track_id: str, cursor: Any = None) -> Any | N
 # ---------- GSB 服务注册表（kernel/gsb/registry.py 的 SQL 全部收在此处） ----------
 #
 # 归位理由：gsb_service_registry 是唯一一张「所有域进程都写」的基础设施表，归属 mgmt
-# （docs/weekly-11/table-owner.tsv）。原实现在 kernel 里用进程主库直连——单库拓扑没问
+# （configs/table_ownership.json）。原实现在 kernel 里用进程主库直连——单库拓扑没问
 # 题，三库拓扑下每个域把注册写进自己那个库：注册不报错，但跨域互相发现不到（静默失效，
 # 不是能看到 1146 的那种故障）。SQL 收到本域后，任一域进程的注册/心跳/发现都落同一张
 # mgmt 表；单库 / 测试拓扑由任意拓扑原语回落进程主库，行为与改前逐字一致。

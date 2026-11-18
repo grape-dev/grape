@@ -2,7 +2,7 @@
 
 **为什么在 runtime 域**：本例程碰的 6 张表（agent_runtimes / agent_tasks /
 agent_type_runtime_pool / engine_capabilities / devops_agent_session /
-chat_agent_session）**全部归 runtime 库**（见 `docs/weekly-11/table-owner.tsv`）。
+chat_agent_session）**全部归 runtime 库**（见 `configs/table_ownership.json`）。
 它原先长在 `src/domains/mgmt/user/db.py` 里，等于 mgmt 域直连 runtime 表——三库
 拆分后每一条 SQL 都要靠 mgmt 连接去访问别域的表，既违反域边界，也让「表不存在」
 变成难以观测的静默分支。

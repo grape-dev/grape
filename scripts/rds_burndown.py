@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-OWNER = REPO / "docs/weekly-11/table-owner.tsv"
+OWNER = REPO / "configs/table_ownership.json"
 BASELINE = REPO / "docs/weekly-11/foreign-refs-allowlist.csv"
 
 
@@ -76,7 +76,7 @@ def rank_files(top: int = 12) -> None:
     mod_sys = __import__("sys")
     mod_sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
-    owner = mod.load_owner(REPO / "docs" / "weekly-11" / "table-owner.tsv")
+    owner = mod.load_owner(REPO / "docs" / "weekly-11" / "table_ownership.json")
     per: collections.Counter = collections.Counter()
     tabs: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     for path in sorted((REPO / "src").rglob("*.py")):

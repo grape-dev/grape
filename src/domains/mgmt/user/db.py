@@ -4403,7 +4403,7 @@ def _rebind_runtime_references(c, dup_ids: list, keep_id: int, reason: str = "")
     判定逻辑与 SQL 全部在 runtime 域
     `src/domains/runtime/engine/refs_reconcile.py`；本例程碰的 6 张表
     （agent_runtimes / agent_tasks / agent_type_runtime_pool / engine_capabilities /
-    devops_agent_session / chat_agent_session）按 `docs/weekly-11/table-owner.tsv`
+    devops_agent_session / chat_agent_session）按 `configs/table_ownership.json`
     **全归 runtime 库**。`reconcile_for_caller` 按进程域选通道：mgmt 进程（删用户/
     合并账号）经 runtime public 原语落到 runtime 域连接；runtime 进程内复用调用方
     游标（同域事务）。

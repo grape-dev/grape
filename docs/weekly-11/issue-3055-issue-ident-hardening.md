@@ -136,7 +136,7 @@
 
 三库 = `grape_mgmt_db` / `grape_runtime_db` / `grape_insight_db`；四进程 = grape_server(mgmt 路由) /
 event_server(runtime 事件) / worker_server(runtime 执行) / insight_server(insight)。
-归属真源：`docs/weekly-11/table-owner.tsv`（P0 冻结 102 表）+ `configs/table_ownership.json`（DDL 守卫）。
+归属真源：`configs/table_ownership.json`（P0 冻结 102 表）+ `configs/table_ownership.json`（DDL 守卫）。
 
 ### 7.1 本次触及表的归属
 

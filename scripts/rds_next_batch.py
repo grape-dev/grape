@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-OWNER_TSV = REPO / "docs/weekly-11/table-owner.tsv"
+OWNER_TSV = REPO / "configs/table_ownership.json"
 PUBLIC_GLOB = "src/domains/{domain}/public/__init__.py"
 DOMAIN_KW = {"mgmt": "mgmt", "runtime": "runtime", "insight": "insight"}
 
@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
             out.append(f"  - {hint}")
         out.append("")
     out.append("## 每批验收口径（不要跳）")
-    out.append("1) `python3 scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv "
+    out.append("1) `python3 scripts/foreign_table_refs.py --owner configs/table_ownership.json "
                "--baseline docs/weekly-11/foreign-refs-allowlist.csv --check`")
     out.append("2) `venv/bin/python -m pytest tests/arch tests/contracts tests/scripts -q -p no:cacheprovider`")
     out.append("3) `bash scripts/rds_gate.sh`（含 check-arch / 契约 / 看板 / 排序）")

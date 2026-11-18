@@ -16,7 +16,7 @@
 * **失败即 raise**：执行器约定「抛错 = 不盖章，下次启动重试」。这里不做
   「log.warning 后正常返回」的静默降级。
 
-三库边界（`docs/weekly-11/table-owner.tsv`）：两张表都归 **runtime**。非 owner 域
+三库边界（`configs/table_ownership.json`）：两张表都归 **runtime**。非 owner 域
 （表不在本库，或在本库是跨库只读视图）抛 `_NonOwnerObject`，执行器跳过且**不盖章**，
 等 runtime 的 worker 进程执行——绝不能 log 后正常返回，那会把版本号盖死在 mgmt /
 insight 库上，真 owner 库永不执行。

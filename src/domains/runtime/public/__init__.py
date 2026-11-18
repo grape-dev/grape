@@ -2778,7 +2778,7 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT name, status, last_seen_at FROM runtime_credentials WHERE status != 'revoked'"),
     "credential_id_by_name": "SELECT id FROM runtime_credentials WHERE name=?",
     # ── 分钟/小时指标桶取数（insight/observability/metric_rollup 跨域收口）──
-    # agent_tasks / events / runtime_credentials 三张表全归本域（table-owner.tsv）。
+    # agent_tasks / events / runtime_credentials 三张表全归本域（table_ownership.json）。
     # 列序/谓词与原 insight SQL 逐字一致（调用方按行下标取值，错位即静默串列），
     # 只把连接换成「任意拓扑」游标；`repo_key` 空值排除谓词照抄，不改口径。
     "rollup_task_counts_by_created": (
@@ -4498,7 +4498,7 @@ def reconcile_engine_references(runtime_ids: list, keep_id: int = 0, reason: str
 
     为什么需要这个原语：引用对账碰的 6 张表（agent_runtimes / agent_tasks /
     agent_type_runtime_pool / engine_capabilities / devops_agent_session /
-    chat_agent_session）按 `docs/weekly-11/table-owner.tsv` 全归 runtime 库。
+    chat_agent_session）按 `configs/table_ownership.json` 全归 runtime 库。
     其它进程若拿自己的游标执行这些 SQL，三库拓扑下每条都是 1146 —— 因此跨进程调用
     必须落到 **runtime 域连接**上：`_any_tx()` 在自有 DSN 时开 runtime 真事务连接
     （独立提交，调用方事务不含这些表的写），单库/复用进程库时回落进程库。
@@ -5882,7 +5882,7 @@ def devops_session_runtime_id(repo_key: str, agent_type: str) -> str:
 
 
 # ── 分布式锁协议（`distributed_locks`，本域基表）──────────────────────────────
-# 归属：`docs/weekly-11/table-owner.tsv` → grape_runtime_db.distributed_locks。
+# 归属：`configs/table_ownership.json` → grape_runtime_db.distributed_locks。
 # 调用方是 `src/kernel/lock.py`（任何进程都会抢锁：mgmt/insight/runtime 各自后台线程）。
 # 三库独立后 kernel 进程库里没有这张表（视图已退役 → 1146），因此协议整体上移到
 # owner 域，kernel 只保留 holder 标识与时间戳计算。
@@ -5955,7 +5955,7 @@ def lock_lease_status_any(lock_key: str) -> tuple | None:
 
 
 # ── 指标桶取数（insight/observability/metric_rollup 跨域收口）─────────────────────
-# 归属：`docs/weekly-11/table-owner.tsv` → grape_runtime_db.{agent_tasks,events,
+# 归属：`configs/table_ownership.json` → grape_runtime_db.{agent_tasks,events,
 # runtime_credentials}。原实现在 insight 侧持进程主库游标直查这三张表：单库拓扑能跑，
 # 三库拓扑下 insight 进程库没有这些表（视图已退役 → 1146），被上层 `except` 吞成
 # 「空桶 / 在线数恒 0」——聚合看板静默缺数据。取数上移本域后，SQL 只留这一份。
@@ -6122,7 +6122,7 @@ def health_runtime_rows() -> list[tuple]:
 
 # ---------- 业务采样器（insight/observability/__init__.collect_business_sampler）----------
 #
-# 归属：`docs/weekly-11/table-owner.tsv` → agent_tasks / agent_runtimes 均归本域。
+# 归属：`configs/table_ownership.json` → agent_tasks / agent_runtimes 均归本域。
 # 原实现在 insight 侧持 insight 进程库游标直发 4 条语句（`with db_lock: c = db.cursor()`，
 # 每条各自 `try/except: pass`）。三库拓扑下 insight 库没有这两张表（视图 0）→ 4 条必
 # 1146 并被吞成「队列/执行/卡住全 0、在线 0」，/metrics 上的业务 gauge 静默归零：
@@ -6183,7 +6183,7 @@ def task_sampler_snapshot_any(stuck_cutoff: str) -> dict[str, Any]:
 
 # ---------- 可观测性「failed 空 result 占比」取数（insight/observability/failed_gap.py）----------
 #
-# 归属：`docs/weekly-11/table-owner.tsv` → grape_runtime_db.events（本域）。
+# 归属：`configs/table_ownership.json` → grape_runtime_db.events（本域）。
 # 原实现在 insight 侧是双路径：`runtime_lib()` 可用（本域配了自有 DSN）→ 具名查询
 # `count_events` / `query_events`；不可用 → insight 进程主库上直发 4 条 events SQL。
 # 后者是单库兜底，也正是 insight 文件里跨域引用恒计 4 处的原因；而三库拓扑下

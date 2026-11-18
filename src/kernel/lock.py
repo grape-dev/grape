@@ -5,7 +5,7 @@
 单进程内由 owner 域原语的 `db_lock`/事务保证原子，跨进程由 distributed_locks 表
 PRIMARY KEY 保证互斥。
 
-三库独立：`distributed_locks` 归 runtime 域（`docs/weekly-11/table-owner.tsv`），
+三库独立：`distributed_locks` 归 runtime 域（`configs/table_ownership.json`），
 抢锁/续期/释放/清理四个协议全部由 `runtime.public` 承担，「任意拓扑」自适应连接
 （自有 DSN 走 runtime 库，单库/测试拓扑回落进程库）——本模块不再持有任何 SQL，
 也不再直连进程库（kernel 里查 runtime 表在三库拓扑下必然 1146）。

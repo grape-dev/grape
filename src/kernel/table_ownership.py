@@ -45,6 +45,16 @@ def _load_manifest() -> dict:
         return _cache
 
 
+def owner_map() -> dict[str, str]:
+    """返回 {table: owner_domain}，供脚本/测试统一取归属。
+
+    唯一权威是 configs/table_ownership.json。原 configs/table_ownership.json 已合并进来并删除
+    （两份清单曾漂移 19 张：json 有、tsv 无，其中 grape_t_oauth_channels /
+    devops_agent_runtime_binding / grape_t_category_dict 三张是生产代码在用的）。
+    """
+    return dict((_load_manifest().get("tables") or {}))
+
+
 def _domain_from(name: str) -> str | None:
     """从库名/角色名推断域。"""
     low = (name or "").strip().lower()

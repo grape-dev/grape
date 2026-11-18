@@ -43,7 +43,7 @@
 | 三库基表 | 102（唯一表名 101；`grape_t_merge_gate_log` 在 insight/runtime 各有一份，按 disposition 判给 insight） | `scripts/rds_cutover_check.py --mode baseline` |
 | 三库跨域视图 | **122**（mgmt 30 / runtime 34 / insight 58；P0 已删 60 个零引用视图） | `information_schema.views` + `view-allowlist.txt` |
 | 视图覆盖的非本域表 | 91 张；其中 30 张（60 视图）代码零跨域引用，已于 2026-11-14 删除 | `docs/weekly-11/backup/p0-prune-dryrun.txt`、`no-view-tables.txt` |
-| 代码外域表引用 | 68 张表 / 1232 处跨域（`表×消费域` 135 对）；含归属域共 2711 处 | `scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv` |
+| 代码外域表引用 | 68 张表 / 1232 处跨域（`表×消费域` 135 对）；含归属域共 2711 处 | `scripts/foreign_table_refs.py --owner configs/table_ownership.json` |
 | 域×域分布 | api→mgmt 252 / api→runtime 388；mgmt→runtime 193；kernel→mgmt 88、→runtime 89 | `docs/weekly-11/dependency-matrix.md` |
 | kernel 写域表（R8 存量） | 77 处 / 10 文件（R8 已锁死不得新增；本次未改 kernel 模块布局） | `scripts/check-arch.py` |
 | 内部端点 | 36 条（P2 新增 12 条 + 既有补齐 operationId 16 条） | `docs/weekly-11/internal-contract.json` |
@@ -80,7 +80,7 @@
 | `src/domains/insight/public/__init__.py` | insight 域 lib（W3：api_latency_log / merge_gate_log） |
 | `src/kernel/domain_read.py` | 新增 `mgmt_write_lib()`（W2 写通道，独立于读开关） |
 | `tests/mgmt/test_channel_w2_writes.py` | W2 写原语幂等分支 + runtime→mgmt lib 切换（lib 可用/不可用两向） |
-| `docs/weekly-11/table-owner.tsv` | P0 冻结归属清单（101 张唯一基表） |
+| `configs/table_ownership.json` | P0 冻结归属清单（101 张唯一基表） |
 | `docs/weekly-11/foreign-refs-allowlist.csv` | 棘轮基线 138 对 / 1306 处 |
 
 ---
@@ -103,7 +103,7 @@
 
 ```bash
 # 外域引用棘轮（新增/上升即红）
-python3 scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv \
+python3 scripts/foreign_table_refs.py --owner configs/table_ownership.json \
   --baseline docs/weekly-11/foreign-refs-allowlist.csv --check
 
 # 架构守卫（R1–R8，R8 = kernel 不得写域表）
@@ -819,7 +819,7 @@ SRC_HOST=… SRC_PWD=… REMOTE_HOST=… REMOTE_PORT=3307 REMOTE_USER=rds_admin 
 
 ### kernel/gsb/registry 注册表 SQL 下沉 mgmt（-9，本文件清零）
 - 文件：`src/kernel/gsb/registry.py`（258 行，GSB 服务注册表）。9 处跨域引用全部指向
-  `gsb_service_registry`（**归 mgmt**，`table-owner.tsv` / `table_ownership.json` 一致），
+  `gsb_service_registry`（**归 mgmt**，`table_ownership.json` / `table_ownership.json` 一致），
   消费方是 kernel：`ALTER`(49) / `INSERT OR REPLACE`(87) / `UPDATE`(101, 240, 255) /
   `SELECT`(118, 142, 182, 218)。动态拼接站点 2 处（`list_instances` 按 include_offline 拼
   `AND status='online' AND last_heartbeat > ?`；`list_all_services` 拼 `WHERE status='online'`），
@@ -997,7 +997,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.3 mgmt 反馈路由读路径收口（2026-11-14 本批）
 
 - 文件：`src/domains/mgmt/routes/feedback.py`（mgmt 域消费、8 处跨域 SQL → 0）。
-  表分布（全部归 **runtime**，`docs/weekly-11/table-owner.tsv` 冻结）：
+  表分布（全部归 **runtime**，`configs/table_ownership.json` 冻结）：
   `skill` 1 / `events` 1 / `issue` 1 / `agent_tasks` 2 / `devops_agent_session` 1 /
   `agent_runtimes` 1 / `runtime_credentials` 1（后者与 `agent_runtimes` 同属一条 LEFT JOIN）。
 - owner 侧新增 7 条具名查询（`?` 占位符、列序照抄原 SQL）到 runtime `public._ANY_QUERIES`：
@@ -1042,7 +1042,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.4 mgmt admin 路由跨域读写收口（2026-11-15 本批）
 
 - 文件：`src/domains/mgmt/admin/routes.py`（mgmt 域消费、8 处跨域 SQL → 0）。
-  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  表分布（`configs/table_ownership.json` 冻结）：
   `meta`（归 runtime）7 处——行 961 vcs 平台卡、975 bot token、987 webhook token、
   1066 oauth 渠道卡读、1074 渠道卡写、1078 client_id、1081 client_secret；
   `obs_metric_rollup`（归 insight）1 处——行 751 `scope=all` 的维度枚举。
@@ -1105,7 +1105,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.5 runtime IM 路由渠道安装表收口（2026-11-15 本批）
 
 - 文件：`src/domains/runtime/routes/im.py`（runtime 域消费、7 处跨域 SQL → 0）。
-  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`grape_t_channel_installation`（归 mgmt）7 处——
+  表分布（`configs/table_ownership.json` 冻结）：`grape_t_channel_installation`（归 mgmt）7 处——
   行 118 状态分组计数、159 安装列表八列、234 启停前归属判定、246 启停写 status、
   271 钉钉安装详情五列、363 写 config + 指纹、372 钉钉活跃安装 config 枚举。
 - owner 侧新增（`?` 占位符、列序/排序逐字照抄原语句、写语句用可移植 `datetime('now')`）：
@@ -1171,7 +1171,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.6 runtime 事件路由账户名与知识清理收口（2026-11-15 本批）
 
 - 文件：`src/domains/runtime/routes/events.py`（runtime 域消费、7 处跨域 SQL → 0）。
-  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  表分布（`configs/table_ownership.json` 冻结）：
   - `grape_accounts`（归 mgmt）3 处，行 875 / 1009 / 1224：重派/重派队列/重派重读三处
     「引擎候选 scope 过滤」里的 `rc.owner_name = (SELECT username FROM grape_accounts WHERE id=?)`；
   - `agent_shared_knowledge`（归 mgmt）3 处，行 2035 / 2071 / 2077：obs_key 枚举、
@@ -1254,7 +1254,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.7 需求中心外域读收口（2026-11-15 本批）
 
 - 文件：`src/domains/runtime/issues_center.py`（runtime 域消费、7 处跨域 SQL → 0）。
-  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  表分布（`configs/table_ownership.json` 冻结）：
   - `unified_user_mapping`（归 mgmt）3 处，行 111 / 117 / 195：`_get_user_id_by_gitcode`
     的两跳平台列查找（优先「登录账号存在且启用」→ 任意映射行）与
     `_get_gitcode_user_by_user_id` 的平台登录名兜底（`COALESCE(NULLIF(gitcode_user,''),
@@ -1314,7 +1314,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.8 巡检任务执行记录外域读收口（2026-11-15 本批）
 
 - 文件：`src/domains/mgmt/routes/autopilot.py`（mgmt 域消费、7 处跨域 SQL → 0）。
-  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  表分布（`configs/table_ownership.json` 冻结）：
   - `autopilot_executions`（归 runtime）5 处，行 448 / 505 / 506 / 596 / 703：
     删除执行记录、执行列表分页（主查询 + COUNT）、单行读 `findings_json, result`、
     回写 `findings_json`；
@@ -1388,7 +1388,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.9 令牌解析器外域读写收口（2026-11-15 本批）
 
 - 文件：`src/kernel/token_resolver.py`（kernel 域消费、6 处跨域 SQL → 0）。
-  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  表分布（`configs/table_ownership.json` 冻结）：
   - `managed_repos`（归 mgmt）5 处，行 794 / 830 / 850 / 867 / 1275：
     `RepoBotToken._fetch` 的 legacy 列回落读（动态列 `{field}` + `IS NOT NULL` + `!=''`）、
     `_is_expired` 的状态列单行读、`mark_expired` / `clear_expired` 的两条状态列 UPDATE、
@@ -1461,7 +1461,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.10 代发台账外域读写收口（2026-11-15 本批）
 
 - 文件：`src/kernel/outbound_ledger.py`（kernel 域消费、6 处跨域 SQL → 0）。
-  表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+  表分布（`configs/table_ownership.json` 冻结）：
   - `outbound_content_ledger`（归 mgmt）6 处，行 137 / 166 / 224 / 234 / 240 / 249：
     `_cleanup_expired` 的保留期 DELETE、`record_outbound` 的 INSERT OR IGNORE、
     `is_our_outbound` 的 4 条读（issue_edit 指纹双命中 / issue_close·issue_meta 时效窗口 /
@@ -1586,7 +1586,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.12 runtime Chat IM 解绑/回显跨域读写收口（2026-11-15 本批）
 
 - 文件：`src/domains/runtime/routes/chat.py`（runtime 域），**6 处 → 0**（单轮做完，未分两轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，全部归 mgmt）：
+- 表分布（`configs/table_ownership.json` 冻结，全部归 mgmt）：
   - `grape_t_channel_installation` × 3：原行 1561（解绑前判「除本人外还有几条 active 引用」）、
     1703（保存前查 app_id 的全部 active 持有轨）、2792（前端多渠表单回显：该用户各渠道安装行）；
   - `unified_user_mapping` × 2：原行 1600（app 释放清飞书映射）、1606（按 user_id 精确清本人映射）；
@@ -1654,7 +1654,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.13 runtime IM 异步处理器身份解析 / 巡检执行卡收口（2026-11-15 本批）
 
 - 文件：`src/domains/runtime/im/handler_async.py`（runtime 域），**6 处 → 0**（单轮做完，未分两轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，全部归 mgmt）：
+- 表分布（`configs/table_ownership.json` 冻结，全部归 mgmt）：
   - `grape_t_channel_installation` × 2：原行 347（身份反查与身份表 JOIN）、359（user 轨安装的
     owner_user_id 兜底）；
   - `grape_t_channel_sender_identity` × 1：原行 346（身份反查的 FROM 侧，与上行是同一条语句）；
@@ -1721,7 +1721,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.14 runtime 巡检任务调度跨域读写收口（2026-11-15 本批）
 
 - 文件：`src/domains/runtime/engine/scheduler.py`（runtime 域），**6 处 → 0**（单轮做完，未分两轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，两张表都归 mgmt）：
+- 表分布（`configs/table_ownership.json` 冻结，两张表都归 mgmt）：
   - `autopilot_tasks` × 5：原行 909（`_notify_subscribers` 的 JOIN 右侧）、993（`_get_enabled_tasks`
     取启用任务全列）、1089（`_update_task_run_info` 回写运行时间）、1629（`scheduler_loop`
     取 last_run_at）、1687（`trigger_task_now` 取单任务全列）；
@@ -1789,7 +1789,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.15 mgmt DevStage 环境凭据清理收口（2026-11-15 本批）
 
 - 文件：`src/domains/mgmt/routes/devstage.py`（mgmt 域），**6 处 → 0**（单轮做完，未分两轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，三张表全归 runtime）：
+- 表分布（`configs/table_ownership.json` 冻结，三张表全归 runtime）：
   - `runtime_credentials` × 3：原行 56（`_annotate_worker_online` 取全部未吊销凭据的
     name/status/last_seen_at）、371（删除环境时按 `env.name` 定位凭据 id）、415（删凭据行）；
   - `agent_runtimes` × 2：原行 385（按 credential_id 取引擎实例 id）、414（删引擎行）；
@@ -1858,7 +1858,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.16 insight 指标聚合桶取数下沉 runtime（2026-11-15 本批）
 
 - 文件：`src/domains/insight/observability/metric_rollup.py`（insight 域），**6 处 → 0**（单轮做完，未分两轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，三张表全归 runtime）：
+- 表分布（`configs/table_ownership.json` 冻结，三张表全归 runtime）：
   - `agent_tasks` × 4：原行 147（按 `created_at` 的 `(repo_key, status)` 计数）、155（按 `completed_at`
     同款）、173（`status='failed'` 且 `result_text|errors` 命中超时签名的按仓库计数）、
     199（按 `started_at` 取 `repo_key, created_at, started_at, completed_at` 四列）；
@@ -1914,7 +1914,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.17 api 技能显示名解析下沉 runtime（2026-11-15 本批）
 
 - 文件：`src/api/skill_display.py`（api 域），**6 处 → 0**（单轮做完，未分两轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，六处全为 `skill`，归 runtime）：
+- 表分布（`configs/table_ownership.json` 冻结，六处全为 `skill`，归 runtime）：
   - 原行 52（`skill_id` 精确档）、60（显式 `(scope, owner_id)` 档）、69（`scope='user'` +
     `owner_id=user_id`）、78（`scope='repo'` + `owner_id=repo_key`）、86（`scope='official'` 兜底）、
     113（批量版一次取全部 active 行）。
@@ -1971,7 +1971,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.18 api 存量场景绑定修复迁移下沉 owner 域（2026-11-15 本批）
 
 - 文件：`src/api/scene_binding_repair.py`（api 域，Issue #541 启动期迁移），**6 处 → 0**（单轮做完）。
-- 表分布（`table-owner.tsv` 冻结）：
+- 表分布（`table_ownership.json` 冻结）：
   - `managed_repos`（归 mgmt）× 2：原行 76 `SELECT repo_key, dev_scene ... WHERE dev_scene != ''`、
     行 85 `UPDATE ... SET dev_scene=? WHERE repo_key=? AND dev_scene=?`；
   - `issue`（归 runtime）× 2：原行 99 `SELECT id, repo_key, issue_number, scene_id ... WHERE scene_id != ''`、
@@ -2024,7 +2024,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.19 api 侧 VCS 编号索引台账读写下沉 runtime 域（2026-11-15 本批）
 
 - 文件：`src/api/issue_vcs_index.py`（api 域，Issue #995 provider 感知 VCS 编号索引），**6 处 → 0**（单轮做完）。
-- 表分布（`table-owner.tsv` 冻结）：
+- 表分布（`table_ownership.json` 冻结）：
   - `issue`（归 runtime）× 6：原行 273 `SELECT id, issue_number, vcs_exists, vcs_checked_at
     FROM issue WHERE repo_key=?`（读台账）；行 317/321/325 三组 `UPDATE issue SET
     vcs_exists=0|1|不动, vcs_checked_at=datetime('now') WHERE id IN (…)`（标删/恢复/仅盖戳）；
@@ -2088,7 +2088,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 - 文件：`src/domains/insight/observability/efficiency.py`（insight 域，Flow Efficiency
   看板 10 卡聚合），**5 处 → 0**（单轮做完，未分两轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+- 表分布（`configs/table_ownership.json` 冻结）：
   - `issue`（归 runtime）× 2：原行 138 `SELECT status, created_at, completed_at,
     created_by, assignee, user_id ... WHERE repo_key IN (…) AND is_subtask_mode=0`
     （看板轻量行，②③①⑥⑤⑦⑧⑨⑩ 的基础数据）；行 619 下钻详情 10 列（`issue_number,
@@ -2176,7 +2176,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 - 文件：`src/api/server_common.py`（api 域，共享 FastAPI 脚手架：慢请求指标中间件 +
   `attach_health` 的 readiness / realtime 诊断），**5 处 → 0**（单轮做完，未分两轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+- 表分布（`configs/table_ownership.json` 冻结）：
   - `api_latency_log`（归 insight）× 1：原行 357 慢请求中间件
     `INSERT INTO api_latency_log (request_id, method, path, status, duration_ms,
     repo_key, user_id, source) VALUES (?,…,?, 'backend')`（8 列，created_at 由列默认值给）；
@@ -2242,7 +2242,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 - 文件：`src/api/feedback_status.py`（api 域；#673 反馈状态口径 + #22 通知复用的联动同步），
   **5 处 → 0**（单轮做完，5 处未超 25，未分轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+- 表分布（`configs/table_ownership.json` 冻结）：
   - `user_feedback`（归 mgmt）× 4：原行 152 外部联动待同步页
     `SELECT f.id, f.status, f.repo_key, f.issue_number, f.issue_url FROM user_feedback f
     WHERE f.source='user' AND f.issue_url!='' AND (f.issue_id IS NULL OR f.issue_id=0)
@@ -2335,7 +2335,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 - 文件：`src/api/a2a_dispatch_guard.py`（api 域；#1770 派发去重门禁 + #1962 手动补发排除），
   **5 处 → 0**（单轮做完，5 处未超 25，未分轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+- 表分布（`configs/table_ownership.json` 冻结）：
   - `events`（归 runtime）× 4：原行 132 下游/排队活跃事件面
     `SELECT seq, agent_type, status, created_at, scene_id FROM events WHERE repo_key=?
     AND issue_id=? AND event_type='a2a_event' AND status IN (…) ORDER BY seq DESC LIMIT 50`；
@@ -2420,7 +2420,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 - 文件：`src/kernel/config.py`（kernel 域；登录白名单开关判定 + OAuth 放行判定），
   **4 处 → 0**（单轮做完，4 处未超 25，未分轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+- 表分布（`configs/table_ownership.json` 冻结）：
   - `login_whitelist`（归 mgmt）× 4：
     行 662 `_is_login_whitelist_enabled` 隐式启用判定 `SELECT COUNT(*) FROM login_whitelist`；
     行 730 `is_user_allowed` fail-closed 判定 `SELECT COUNT(*) FROM login_whitelist`；
@@ -2501,7 +2501,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 
 - 文件：`src/domains/runtime/project_info/builder.py`（runtime 域；project-info 的
   OBS + 知识表落库路径 `_write_to_obs`），**4 处 → 0**（单轮做完，4 处未超 25，未分轮）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，两表都在 `grape_mgmt_db`）：
+- 表分布（`configs/table_ownership.json` 冻结，两表都在 `grape_mgmt_db`）：
   - `agent_shared_knowledge`（归 mgmt）× 3：
     行 315 命中读 `SELECT id FROM agent_shared_knowledge WHERE repo_key=? AND
     scope='baseline' AND name=? AND archived=0`；
@@ -2586,7 +2586,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 - 文件：`src/domains/runtime/engine/service.py`（runtime 域；引擎可达性判定 + claim 认领 +
   project-info 读），**4 处 → 0**（单轮做完，4 处未超 25，未分轮）。改完该文件后 runtime 域
   对这两张表的引用：`agent_shared_knowledge` 清零、`grape_accounts` 只剩 1 处（`routes/runtime.py`）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，两表都在 `grape_mgmt_db`）：
+- 表分布（`configs/table_ownership.json` 冻结，两表都在 `grape_mgmt_db`）：
   - `grape_accounts`（归 mgmt）× 2：
     行 111 `_check_pool_engines_reachable` 的 user scope 判定
     `SELECT id FROM grape_accounts WHERE username=? AND id IS NOT NULL AND id NOT IN ('', '0') LIMIT 1`；
@@ -2753,7 +2753,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.28 飞书扫码 onboarding 的换绑清理下沉 runtime owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/mgmt/routes/feishu_onboard.py` **4 处 → 0**（单轮做完，4 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，三表都在 `grape_runtime_db`，全归 **runtime**）：
+- 表分布（`configs/table_ownership.json` 冻结，三表都在 `grape_runtime_db`，全归 **runtime**）：
   - `devops_agent_session` × 2：L205 `_apply_vod_credentials` 的
     `SELECT id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'`；
     L238 同函数的 `INSERT INTO devops_agent_session (id, repo_key, agent_type, status,
@@ -2828,7 +2828,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.29 冷静期账号匿名化的 runtime 级联删除收口到 owner 域原语（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/mgmt/admin/cooldown.py` **4 处 → 0**（单轮做完，4 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，四表都在 `grape_runtime_db`，全归 **runtime**）：
+- 表分布（`configs/table_ownership.json` 冻结，四表都在 `grape_runtime_db`，全归 **runtime**）：
   L135 `agent_tasks` / L136 `chat_agent_session` / L137 `chat_conversations` / L138 `issue`，
   均在 `_anonymize_account()` 的「lib 不可用」兜底分支里，形态是定表 + 定谓词
   `DELETE FROM <t> WHERE user_id=?`；**无动态表名/列名、无跨域 JOIN**。
@@ -2893,7 +2893,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.30 insight failed 空 result 占比取数下沉 runtime owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/insight/observability/failed_gap.py` **4 处 → 0**（单轮做完，4 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，`grape_runtime_db.events`，归 **runtime**）：
+- 表分布（`configs/table_ownership.json` 冻结，`grape_runtime_db.events`，归 **runtime**）：
   L57 / L68 / L80 / L96 四条 `events` 语句（1 条 `COUNT(*)` 全量 failed、1 条 `COUNT(*)` 真空、
   1 条 `COUNT(*)` legacy、1 条 7 列样本 `ORDER BY seq DESC LIMIT`）。四条都在
   `_lib is None` 的**单库兜底分支**里；`IN ({placeholders})` 由 repo_key 个数拼占位符，
@@ -2961,7 +2961,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.31 insight 业务采样器按 source 的任务计数下沉 runtime owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/insight/observability/__init__.py` **4 处 → 0**（单轮做完，4 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结，均归 **runtime**）：
+- 表分布（`configs/table_ownership.json` 冻结，均归 **runtime**）：
   L618 / L630 / L642 三条 `agent_tasks`（`COALESCE(agent_type,'unknown')` + `COUNT(*)` 分组：
   `status='queued'` / `status IN ('dispatched','running')` / `status='running' AND started_at < ?`），
   L656 一条 `agent_runtimes`（`SELECT status, last_seen_at, credential_id`）。
@@ -3023,7 +3023,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.32 api 会话存储的场景读取按表归位 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/api/session_store.py` **4 处 → 0**（单轮做完，4 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+- 表分布（`configs/table_ownership.json` 冻结）：
   - `devops_pipeline_scene`（归 **mgmt**）× 3：L486 `ensure_default_agent_sessions` 的
     `SELECT COUNT(*) ... WHERE repo_key=? AND is_active=1`（「是否已有默认场景」闸门）；
     L698 `_scene_binding_active` 的 `SELECT is_active ... WHERE scene_id=? AND (repo_key=? OR repo_key='')`；
@@ -3092,7 +3092,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.33 api 进程三层健康检查取数归位 runtime owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/api/health_endpoints.py` **4 处 → 0**（单轮做完，4 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+- 表分布（`configs/table_ownership.json` 冻结）：
   - `agent_tasks`（归 **runtime**）× 3：L91 `/healthz` 表探活 `SELECT COUNT(*) FROM agent_tasks`；
     L143 `/health/realtime` 的 `SELECT status, COUNT(*) ... GROUP BY status`（队列分布）；
     L146 `SELECT COUNT(*) ... WHERE status IN ('dispatched','running')`（在制数）。
@@ -3155,7 +3155,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.34 api 进程 OAuth 身份取 token / 预刷新判定归位 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/api/deps.py` **4 处 → 0**（单轮做完，4 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`external_identities`（归 **mgmt**）× 4。
+- 表分布（`configs/table_ownership.json` 冻结）：`external_identities`（归 **mgmt**）× 4。
   - L374 `_get_oauth_token_from_identity`：`SELECT access_token, status ... WHERE grape_user_id=?
     AND provider=? AND status IN (1, 4)`（取 OAuth token 的主路径，GitHub 与平台卡遗留符号共用）。
   - L451 `try_refresh_gitcode_token` 等锁分支：`SELECT access_token ... provider='gitcode' ...
@@ -4316,7 +4316,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
   行 502 `INSERT INTO … (id, repo_key, cred_type, value)`（rowcount==0 时才发）。均在 `db_lock` 内、
   走本进程 `db.cursor()`（静态正则可判，无动态拼接）。
 - **口径纠正（作业单也已过期）**：作业单与文件内注释都写着「insight public 无具名查询，需先建」
-  「`grape_t_repo_credentials` 在 runtime 域」，两处都不成立 —— `table-owner.tsv` 是
+  「`grape_t_repo_credentials` 在 runtime 域」，两处都不成立 —— `table_ownership.json` 是
   `grape_insight_db → insight`，且 insight public **已**有 `_ANY_QUERIES`（`repo_cred_update` /
   `repo_cred_insert` 等 14 条）+ 单条 `upsert_repo_credential_value`。所以本批**没有新建具名查询键**，
   只补了一个多行组合原语（理由见下），避免两套同义键并存。
@@ -4390,7 +4390,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.35 insight 全局搜索的两张 runtime 表下沉 owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/insight/routes/search.py` **2 处 → 0**（单轮做完，2 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+- 表分布（`configs/table_ownership.json` 冻结）：
   - `events`（归 **runtime**）× 1：L26 `global_search` 的 event 分档
     `SELECT seq, repo_key, event_type, title, status FROM events WHERE LOWER(title) LIKE ?
      OR LOWER(event_type) LIKE ? OR LOWER(repo_key) LIKE ? ORDER BY seq DESC LIMIT 10`，
@@ -4463,7 +4463,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.36 insight 可观测性两处 runtime_credentials 下沉 owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/insight/routes/observability.py` **2 处 → 0**（单轮做完，2 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`runtime_credentials`（归 **runtime**）× 2
+- 表分布（`configs/table_ownership.json` 冻结）：`runtime_credentials`（归 **runtime**）× 2
   - L225 `obs_logs_ingest`：凭据显示名的**兜底 SQL** `SELECT name, device_name FROM runtime_credentials
     WHERE id=?`（同一行的 legacy lib 分支 `read_one("runtime_credentials_911d7f")` 不直接计数，
     但静态正则只认这条兜底语句）。
@@ -4544,7 +4544,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.37 insight 免鉴权健康端点的 agent_runtime 就绪判定下沉 owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/insight/routes/health.py` **2 处 → 0**（单轮做完，2 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`agent_runtimes`（归 **runtime**）× 2
+- 表分布（`configs/table_ownership.json` 冻结）：`agent_runtimes`（归 **runtime**）× 2
   - L61 `health`：旗舰在线行 `SELECT name, status, healthy FROM agent_runtimes WHERE
     status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts'
     THEN 1 ELSE 2 END LIMIT 1`（`else` 兜底分支；同一行的 lib 分支走
@@ -4616,7 +4616,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.38 insight 设备资源采样的两张 runtime 表下沉 owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/insight/observability/rollup.py` **2 处 → 0**（单轮做完，2 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：**同一条语句贡献 2 处**，两张表都归 **runtime**
+- 表分布（`configs/table_ownership.json` 冻结）：**同一条语句贡献 2 处**，两张表都归 **runtime**
   - L67–71 `snapshot_runtimes` 的采样基集
     `SELECT rc.id, rc.device_name, rc.cpu_percent, rc.memory_percent, rc.disk_percent,
     rc.bandwidth_percent, COALESCE(hs.health_score, 0), rc.status, rc.last_seen_at
@@ -4702,7 +4702,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.39 insight 总览聚合的任务/设备基集下沉 runtime owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/insight/observability/overview.py` **2 处 → 0**（单轮做完，2 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：两处、两张表，**都归 runtime**
+- 表分布（`configs/table_ownership.json` 冻结）：两处、两张表，**都归 runtime**
   - L140（改前）`_fetch_tasks`：
     `SELECT id, status, repo_key, agent_type, created_at, started_at, completed_at
     FROM agent_tasks WHERE repo_key IN (<动态占位符>)` —— `agent_tasks` 1 处，`IN` 列表由
@@ -4787,7 +4787,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.40 insight 统一事件视图的 events / audit_logs 下沉 owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/insight/observability/events_view.py` **2 处 → 0**（单轮做完，2 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：两处、两张表，**分属两个 owner**
+- 表分布（`configs/table_ownership.json` 冻结）：两处、两张表，**分属两个 owner**
   - L322（改前）`_change_events`：`SELECT seq, repo_key, event_type, issue_id, title, actor,
     duration, started_at, completed_at, created_at, entity_type FROM events WHERE
     event_type='pull_request_merged' [AND repo_key IN (<n 个 ?，按可见仓库键展开>)]
@@ -4874,7 +4874,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.41 api 场景技能 scope 判定的 skill 查询下沉 runtime owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/api/scene_skill_scope.py` **2 处 → 0**（单轮做完，2 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：两处同一张表 `skill`（归 **runtime**，`grape_runtime_db`）：
+- 表分布（`configs/table_ownership.json` 冻结）：两处同一张表 `skill`（归 **runtime**，`grape_runtime_db`）：
   - L105（改前）`skill_agent_type_by_name`：`SELECT agent_type FROM skill WHERE skill_name=? AND is_active=1
     ORDER BY CASE WHEN scope='repo' AND owner_id=? THEN 0 WHEN scope='official' THEN 1
     WHEN scope='repo' THEN 2 ELSE 3 END LIMIT 1` —— 静态语句，2 个占位符。
@@ -4952,7 +4952,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.42 api QA 门禁的 events 查询下沉 runtime owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/api/qa_gate.py` **2 处 → 0**（单轮做完，2 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：两处同一张表 `events`（归 **runtime**，
+- 表分布（`configs/table_ownership.json` 冻结）：两处同一张表 `events`（归 **runtime**，
   `grape_runtime_db`）：
   - L263（改前）`latest_qa_event`：`SELECT seq, status, result, summary{structured_col}
     FROM events WHERE repo_key=? AND issue_id IN (?, ?) AND agent_type='qa' AND {scene_clause}
@@ -5030,7 +5030,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.43 api 仓库透传的接管会话校验下沉 runtime owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/api/git_repo_api.py` **2 处 → 0**（单轮做完，2 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：
+- 表分布（`configs/table_ownership.json` 冻结）：
   - L388 真 SQL，`takeover_sessions`（归 **runtime**）：`SELECT status FROM takeover_sessions
     WHERE task_id=? ORDER BY created_at DESC LIMIT 1` —— `_repo_token()` 里对 `tko_` 接管
     token 的二次校验（token 有效不等于会话仍 active，finish/abort 会吊销）。
@@ -5103,7 +5103,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.44 runtime 401 兜底的凭据失效标记下沉 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/runtime/vcs/oauth_401_retry.py` **1 处 → 0**（单轮做完，1 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`external_identities`（归 **mgmt**，
+- 表分布（`configs/table_ownership.json` 冻结）：`external_identities`（归 **mgmt**，
   `grape_mgmt_db`）× 1：L129（改前）`_mark_credential_expired()` 的**本地兜底语句**
   `UPDATE external_identities SET status=4 WHERE grape_user_id=? AND provider=? AND status=1`
   —— 前面已有「mgmt lib + cross_write 幂等意图」分支，只有 lib 不可用（单库/测试拓扑、
@@ -5186,7 +5186,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.45 runtime 技能同步的分类映射下沉 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/runtime/storage/skill_sync.py` **1 处 → 0**（单轮做完，1 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`skill_category`（归 **mgmt**，`grape_mgmt_db`）
+- 表分布（`configs/table_ownership.json` 冻结）：`skill_category`（归 **mgmt**，`grape_mgmt_db`）
   × 1：L80（改前）`_sync_skills_to_db()` 里构建分类缓存时直发
   `SELECT slug, id FROM skill_category WHERE is_active=1`。
   同函数里的 `skill` 表（L95 读、L109/L114 UPDATE、L119 INSERT）归 **runtime**，属本域 SQL，
@@ -5259,7 +5259,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.46 runtime 任务建档的仓库 org 推断下沉 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/runtime/routes/tasks.py` **1 处 → 0**（单轮做完，1 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`managed_repos`（归 **mgmt**，`grape_mgmt_db`）× 1：
+- 表分布（`configs/table_ownership.json` 冻结）：`managed_repos`（归 **mgmt**，`grape_mgmt_db`）× 1：
   L142（改前）在 `ensure_issue_task()` 的「未显式传 `org_id` 时从仓库推断组织」分支里，
   `SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1` —— 它是
   `mgmt_lib` 不可用时的**本地兜底语句**，也正是本文件唯一的跨域表引用。
@@ -5325,7 +5325,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.47 runtime 注册的 owner_id 账号对齐下沉 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/runtime/routes/runtime.py` **1 处 → 0**（单轮做完，1 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`grape_accounts`（归 **mgmt**，`grape_mgmt_db`）× 1：
+- 表分布（`configs/table_ownership.json` 冻结）：`grape_accounts`（归 **mgmt**，`grape_mgmt_db`）× 1：
   L330（改前）在 `runtime_register()` 的 D32 回填段——
   `SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) LIMIT 1`：user scope 凭据注册时把
   `owner_id` 对齐到 `grape_accounts.id`（个人引擎的 scope 判定/选机靠它）。
@@ -5397,7 +5397,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.48 runtime confirm-done 的 GitHub 镜像仓查找下沉 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/runtime/routes/issues.py` **1 处 → 0**（单轮做完，1 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`managed_repos`（归 **mgmt**，`grape_mgmt_db`）× 1：
+- 表分布（`configs/table_ownership.json` 冻结）：`managed_repos`（归 **mgmt**，`grape_mgmt_db`）× 1：
   L889（改前）在 `_find_github_mirror_repo_key()`（def 在 L869）里 ——
   `SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1`，按 `github:<owner>/<repo>`
   查 GitCode 仓的 GitHub 孪生行，命中回 `repo_key` 原值、无行回空串（confirm-done 关镜像 Issue 用）。
@@ -5467,7 +5467,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.49 runtime autopilot 任务创建者解析下沉 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/runtime/pipeline/account_env.py` **1 处 → 0**（单轮做完，1 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`user_accounts`（归 **mgmt**，`grape_mgmt_db`）× 1：
+- 表分布（`configs/table_ownership.json` 冻结）：`user_accounts`（归 **mgmt**，`grape_mgmt_db`）× 1：
   L44（改前）在 `task_creator_account()`——autopilot 定时任务没有事件触发人，按
   `autopilot_tasks.created_by` 反查任务创建者账号作为 `$ACCOUNT` 来源：
   `SELECT username FROM user_accounts WHERE id=?`（lib 不可用时的本地兜底句）。
@@ -5546,7 +5546,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.50 runtime 飞书群成员映射的平台身份查询下沉 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/runtime/im/feishu_async.py` **1 处 → 0**（单轮做完，1 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`external_identities`（归 **mgmt**，`grape_mgmt_db`）× 1：
+- 表分布（`configs/table_ownership.json` 冻结）：`external_identities`（归 **mgmt**，`grape_mgmt_db`）× 1：
   改前 L212 在 `_resolve_uid_by_platform_login()`——FR-21.2 群成员映射里，异源平台（github 等）的
   协作者平台 login 必须先解析成 grape 账号 id 才能 `bind_feishu_identity`：
   `SELECT ei.grape_user_id FROM external_identities ei WHERE ei.provider=? AND ei.external_login=? AND ei.status=1 LIMIT 1`
@@ -5628,7 +5628,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.51 runtime 安装枚举来源的渠道安装表查询下沉 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/runtime/im/engine/installations.py` **1 处 → 0**（单轮做完，1 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`grape_t_channel_installation`（归 **mgmt**，
+- 表分布（`configs/table_ownership.json` 冻结）：`grape_t_channel_installation`（归 **mgmt**，
   `grape_mgmt_db`）× 1：改前 L15–18 模块常量 `_PROVIDER_SELECT`，由
   `_list_installations_with_factory()` 在 `conn.execute(_PROVIDER_SELECT)` 上直发
   （conn 来自 `engine_wiring._connect(db_path)`，钉住 runtime 库的 IM 句柄）：
@@ -5708,7 +5708,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.52 runtime 场景节点写语句下沉 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/runtime/engine/scene_nodes_write.py` **1 处 → 0**（单轮做完，1 处未超 25）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`devops_pipeline_scene`（归 **mgmt**，
+- 表分布（`configs/table_ownership.json` 冻结）：`devops_pipeline_scene`（归 **mgmt**，
   `grape_mgmt_db`）× 1：改前 L47–49，在 `write_scene_nodes()` 的
   `if _mg is None:` 分支（`mgmt_lib(foreign_only=True)` 不可用时）用**调用方本地游标**直发
   `UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?`。
@@ -5803,7 +5803,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.53 runtime 场景节点按 id 读取下沉 mgmt owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/runtime/engine/recovery.py` **1 处 → 0**（该文件清零；1 处未超 25，单轮做完）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`devops_pipeline_scene`（归 **mgmt**，
+- 表分布（`configs/table_ownership.json` 冻结）：`devops_pipeline_scene`（归 **mgmt**，
   `grape_mgmt_db`）× 1：改前 L197–199，在 `_readd_scene_bindings()` 的
   `mgmt_lib(foreign_only=True) is None` 兜底分支里，用**调用方游标**直发
   `SELECT nodes_json FROM devops_pipeline_scene WHERE id=?`。
@@ -5889,7 +5889,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.54 mgmt 接管 progress 心跳写下沉 runtime owner 域（2026-11-15 本批）
 
 - 文件 / 处数：`src/domains/mgmt/routes/takeover.py` **1 处 → 0**（该文件清零；1 处未超 25，单轮做完）。
-- 表分布（`docs/weekly-11/table-owner.tsv` 冻结）：`takeover_sessions`（归 **runtime**，
+- 表分布（`configs/table_ownership.json` 冻结）：`takeover_sessions`（归 **runtime**，
   `grape_runtime_db`）× 1：改前 L204–211，在 `takeover_progress()`（`POST
   /api/takeover/sessions/{id}/progress`）的心跳块里用**接管引擎自己的进程库句柄**直发
   `UPDATE takeover_sessions SET updated_at=? WHERE id=?`，并 `svc.db.commit()`。
@@ -6047,7 +6047,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.56 insight 采样租约状态读下沉 runtime owner 域（2026-11-15 本批）
 
 - **文件**：`src/domains/insight/observability/sample_lease.py`（insight 域），**1 处 → 0**。
-- **表分布**：`distributed_locks` 归 **runtime**（`table-owner.tsv` → `grape_runtime_db`）。
+- **表分布**：`distributed_locks` 归 **runtime**（`table_ownership.json` → `grape_runtime_db`）。
   该表跨域引用 10 → 9，消费方由 `runtime:9;insight:1` 收敛为 `runtime:9`，**已退出跨域榜单**。
 - 原形态：`lease_status()` 是「双路径」读 ——
   ```python
@@ -6128,7 +6128,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.57 contracts mgmt_local 的仓库凭据读下沉 insight owner 域（2026-11-15 本批）
 
 - **文件**：`src/domains/contracts/local/mgmt_local.py`（contracts 域），**1 处 → 0（本文件清零）**。
-- **表分布**：`grape_t_repo_credentials` 归 **insight**（`table-owner.tsv` → `grape_insight_db`）。
+- **表分布**：`grape_t_repo_credentials` 归 **insight**（`table_ownership.json` → `grape_insight_db`）。
   该表跨域引用 17 → 16，消费方由 `insight:16;contracts:1` 收敛为 `insight:16`，
   **已退出跨域榜单**（tables 7 → 6、pairs 7 → 6、cross_domain_refs 12 → 11）。
 - 原形态：`_repo_credential(c, repo_key, cred_type)` 收**调用方（mgmt）游标** `c` 直读
@@ -6209,7 +6209,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.58 api 派发前 runtime 有效性校验下沉 runtime owner 域（2026-11-15 本批）
 
 - **文件**：`src/api/pipeline_executor.py`（api 域），**1 处 → 0（本文件清零）**。
-- **表分布**：`agent_runtimes` 归 **runtime**（`table-owner.tsv` → `grape_runtime_db`）。
+- **表分布**：`agent_runtimes` 归 **runtime**（`table_ownership.json` → `grape_runtime_db`）。
   该表跨域引用 242 → 241，消费方由 `runtime:240;api:2` 收敛为 `runtime:240;api:1`；
   全局 `cross_domain_refs` **11 → 10**、`tables` 仍 6、`pairs` 仍 6
   （`api→runtime` 这对**未消失**：`src/api/a2a_dispatch.py` 还有 1 处同表读，属下一批）。
@@ -6302,7 +6302,7 @@ python3 scripts/verify_domain_isolation.py --host <baseline-host> --user root --
 ### 7.59 api 慢请求延迟指标落库下沉 insight owner 域（2026-11-15 本批）
 
 - **文件**：`src/api/middleware.py`（api 域），**1 处 → 0（本文件清零）**。
-- **表分布**：`api_latency_log` 归 **insight**（`table-owner.tsv` → `grape_insight_db`）。
+- **表分布**：`api_latency_log` 归 **insight**（`table_ownership.json` → `grape_insight_db`）。
   该表跨域引用 11 → 0（消费方 `insight:10;api:1` → `insight:10` 同域），
   `api→insight` 对消失 → 全局 `cross_domain_refs` **10 → 9**、`pairs` 6 → 5、`tables` 6 → 5
   （`api_latency_log` 整表退出跨域榜单）。

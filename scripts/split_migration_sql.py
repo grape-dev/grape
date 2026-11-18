@@ -26,7 +26,7 @@
   python3 scripts/split_migration_sql.py --dry-run   # 只打印计划（默认）
   python3 scripts/split_migration_sql.py --apply     # 落地改写
 校验（搬完必做）：
-  1. `python3 scripts/foreign_table_refs.py --owner docs/weekly-11/table-owner.tsv --check`
+  1. `python3 scripts/foreign_table_refs.py --owner configs/table_ownership.json --check`
   2. 空库 init_database() 重建后逐表比对列名与搬前快照一致
   3. `pytest tests/arch tests/contracts tests/scripts -q`
 """
@@ -40,7 +40,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 DB_SETUP = REPO / "src/api/db_setup.py"
-OWNER_TSV = REPO / "docs/weekly-11/table-owner.tsv"
+OWNER_TSV = REPO / "configs/table_ownership.json"
 
 SCHEMA_DOMAIN = {"grape_mgmt_db": "mgmt", "grape_runtime_db": "runtime",
                  "grape_insight_db": "insight"}
