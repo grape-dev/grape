@@ -11,6 +11,7 @@ webhook 路径 redact + 分级请求日志 + 慢请求入库 + Host 头 webhook_
 
 注意：本模块只注册中间件，不注册路由/静态资源——各入口按需组装。
 """
+import asyncio
 import os
 import time
 import uuid as _uuid
@@ -18,6 +19,47 @@ import uuid as _uuid
 from fastapi import FastAPI, Request
 
 from src.kernel.config import request_id_var, repo_var, user_var, log as _log
+
+# ── meta URL 自愈探测的进程内缓存（Issue: 压测下 UI 卡顿）───────────────────
+# 每个带登录态的请求原本要同步查 2~3 次 meta（webhook_url / server_base_url），
+# 这些同步查询跑在事件循环上并共用进程级 db_lock，压测时把整个进程串行化
+# （实测：8 并发带 token 的 /api/health 从 50ms 涨到 8.2s）。
+# 这两个值只在「尚未配置」时才需要写，属自愈逻辑，缓存 60s 完全够；
+# 未命中时走 asyncio.to_thread，不再阻塞事件循环。
+_META_URL_CACHE_TTL_S = float(os.environ.get("GRAPE_META_URL_CACHE_TTL_S", "60"))
+_meta_url_cache = {"ts": 0.0, "webhook_url": "", "server_base_url": ""}
+
+
+def _reset_meta_url_cache() -> None:
+    """测试/写入后失效缓存。"""
+    _meta_url_cache.update({"ts": 0.0, "webhook_url": "", "server_base_url": ""})
+
+
+def _read_meta_urls_sync() -> "tuple[str, str]":
+    """同步读 meta（只在线程池里调用）。"""
+    from src.domains.mgmt.user.db import get_meta_value
+
+    return (get_meta_value("webhook_url") or "",
+            get_meta_value("server_base_url") or "")
+
+
+def _write_meta_sync(key: str, value: str) -> None:
+    """同步写 meta（只在线程池里调用）。"""
+    from src.domains.mgmt.user.db import set_meta_value
+
+    set_meta_value(key, value)
+
+
+async def _meta_urls_cached() -> "tuple[str, str]":
+    """带 TTL 的 meta URL 读取：命中缓存不碰数据库，未命中丢线程池。"""
+    now = time.time()
+    if _meta_url_cache["ts"] and (now - _meta_url_cache["ts"]) < _META_URL_CACHE_TTL_S:
+        return _meta_url_cache["webhook_url"], _meta_url_cache["server_base_url"]
+    webhook_url, server_base = await asyncio.to_thread(_read_meta_urls_sync)
+    _meta_url_cache.update({"ts": now, "webhook_url": webhook_url,
+                            "server_base_url": server_base})
+    return webhook_url, server_base
+
 
 # webhook 路径中的 token 需要 redact（参考 multica redactWebhookPath）
 _WEBHOOK_PREFIX = "/webhook/"
@@ -83,7 +125,8 @@ def install_request_middleware(app: FastAPI) -> None:
                     _uid = str(_payload["sub"])
                 else:
                     from src.domains.mgmt.user.db import validate_token
-                    _uid_val = validate_token(_auth[7:])
+                    # 同步查库不能跑在事件循环上（压测下会串行化整个进程）
+                    _uid_val = await asyncio.to_thread(validate_token, _auth[7:])
                     if _uid_val:
                         _uid = str(_uid_val)
             except Exception:
@@ -93,7 +136,7 @@ def install_request_middleware(app: FastAPI) -> None:
         # Issue #372 §14.2.2: 已认证请求到达时从 Host 头推导 webhook_url / server_base_url
         if _uid:
             try:
-                from src.domains.mgmt.user.db import get_meta_value, set_meta_value, detect_webhook_from_host
+                from src.domains.mgmt.user.db import detect_webhook_from_host
                 _host = request.headers.get("host", "")
                 _fwd_host = request.headers.get("x-forwarded-host", "")
                 _fwd_proto = request.headers.get("x-forwarded-proto", "")
@@ -106,19 +149,21 @@ def install_request_middleware(app: FastAPI) -> None:
                         "http://0.0.0.0", "https://0.0.0.0",
                         "http://[::1]", "https://[::1]"))
 
-                if not get_meta_value("webhook_url"):
+                _webhook_url, _server_base = await _meta_urls_cached()
+
+                if not _webhook_url:
                     _candidate = detect_webhook_from_host(_host, _fwd_host, _fwd_proto)
                     if _candidate:
-                        set_meta_value("webhook_url", _candidate)
-                        if get_meta_value("webhook_url_detect_failed"):
-                            set_meta_value("webhook_url_detect_failed", "")
+                        await asyncio.to_thread(_write_meta_sync, "webhook_url", _candidate)
+                        _reset_meta_url_cache()
                         _log.info(f"webhook_url auto-detected from Host header: {_candidate}")
 
-                if _is_local_base(get_meta_value("server_base_url")):
+                if _is_local_base(_server_base):
                     _base_candidate = detect_webhook_from_host(_host, _fwd_host, _fwd_proto)
                     if _base_candidate:
                         _base = _base_candidate[: -len("/webhook/gitcode")]
-                        set_meta_value("server_base_url", _base)
+                        await asyncio.to_thread(_write_meta_sync, "server_base_url", _base)
+                        _reset_meta_url_cache()
                         _log.info(f"server_base_url auto-detected from Host header: {_base}")
             except Exception:
                 pass
