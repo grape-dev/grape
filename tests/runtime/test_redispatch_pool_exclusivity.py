@@ -288,3 +288,82 @@ def test_redispatch_enqueue_passes_named_columns():
                 f"必须传解析后的局部名（禁止内联快照透传）")
             assert val.id in known, (
                 f"第 {i+1} 处 enqueue_task 的 {key}={val.id} 在作用域内没有绑定来源（NameError）")
+
+
+# ===== 5) 贴证闸门按「生效池模式」判定（D-1 / D-2，QA 架构守护第二轮） =====
+#
+# 缺陷形态：池三列虽然按场景解析正确，但紧随其后的三条贴证闸门（session 主引擎回落 /
+# pick_engine / tag-SQL 贴证）仍按**旧任务快照** old.get("pool_selector") 判空。场景改过
+# 模式后快照与生效模式不同源，于是：
+#   D-1（绑定引擎 → 按标签）：快照 selector 空 → 三闸门全放行 → 任务被钉在池外引擎；
+#   D-2（按标签 → 绑定引擎）：快照 selector 非空 → 三闸门全跳过 → 沿用旧 runtime_id，
+#       旧引擎不在新池内 → 名单守卫 fail-closed，其它引擎认领不了 → 卡死。
+# 修法：统一用 `_redispatch_claims_by_pool` 看解析后的生效值，命中即保持 runtime_id=0。
+
+POOL_SEL = json.dumps({"tags": ["scope:global"]})
+
+
+def test_claims_by_pool_true_for_resolved_selector():
+    """D-1：生效 selector 非空（快照 selector 为空）也必须走池认领。"""
+    assert events_route._redispatch_claims_by_pool(POOL_SEL, "", False, True) is True
+    assert events_route._redispatch_claims_by_pool(POOL_SEL, "[17382]", True, True) is True
+
+
+def test_claims_by_pool_true_for_scene_engine_list():
+    """D-2：场景权威 id 池非空（快照 selector 非空）也必须归零 runtime_id。"""
+    assert events_route._redispatch_claims_by_pool("", "[17382]", True, True) is True
+
+
+def test_claims_by_pool_false_for_broadcast_and_snapshot_modes():
+    """其余形态保持原行为：无场景 / 空池占位 / 非插件模式（广播任务不可认领）/ 全广播。"""
+    assert events_route._redispatch_claims_by_pool("", "", True, True) is False
+    assert events_route._redispatch_claims_by_pool("", "[]", True, True) is False
+    assert events_route._redispatch_claims_by_pool("", None, True, True) is False
+    assert events_route._redispatch_claims_by_pool("", "[17382]", False, True) is False  # 无场景=快照兜底
+    assert events_route._redispatch_claims_by_pool("", "[17382]", True, False) is False  # legacy 无池广播
+
+
+def test_redispatch_gates_do_not_key_on_snapshot_selector():
+    """静态守卫：三条贴证闸门（决定 `_rid` 的 If）不得再按旧快照 `old.get("pool_selector")` 判空。
+
+    只允许出现「解析后的局部名」判定；出现快照键的 If 判定即说明退回缺陷形态。
+    纯日志判定不在此列（「快照 selector 被丢弃」的措辞本来就要看快照），故只检查会写 `_rid`
+    的 If 及其嵌套体。
+    """
+
+    def _is_snapshot_selector_call(node):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get" and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "old"
+                and node.args and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "pool_selector")
+
+    def _writes_rid(if_node):
+        body = if_node.body + (if_node.orelse or [])
+        for stmt in body:
+            for sub in ast.walk(stmt):
+                if (isinstance(sub, ast.Name) and sub.id == "_rid"
+                        and isinstance(sub.ctx, (ast.Store, ast.Del))):
+                    return True
+        return False
+
+    src_path = __import__("pathlib").Path(events_route.__file__)
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+    fn = [n for n in ast.walk(tree)
+          if isinstance(n, ast.FunctionDef) and n.name == "redispatch_event"][0]
+    hits = [n for n in ast.walk(fn) if isinstance(n, ast.If)
+            and _writes_rid(n)
+            and any(_is_snapshot_selector_call(sub) for sub in ast.walk(n.test))]
+    assert not hits, (
+        f"redispatch_event 里有 {len(hits)} 处决定 _rid 的 If 仍按旧快照 pool_selector 判定"
+        f"（行号 {[h.lineno for h in hits]}）——应改用 _pool_only_253（生效池模式）")
+    loads = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id == "_pool_only_253"]
+    assert len(loads) >= 2, (
+        f"_pool_only_253 在 redispatch_event 里只被读了 {len(loads)} 处，"
+        f"少于两条必须跳过的贴证闸门（session 主引擎回落 / pick_engine）")
+    # id 池轨仍保留 #253 的池内定向贴证（本机直跑），但它只看 selector 生效模式
+    sel_loads = [n for n in ast.walk(fn)
+                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id == "_sel_mode_253"]
+    assert len(sel_loads) >= 1, (
+        "tag-SQL 贴证必须按 _sel_mode_253（生效 selector 模式）跳过，而不是按快照键")

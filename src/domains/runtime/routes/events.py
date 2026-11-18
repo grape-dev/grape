@@ -505,7 +505,11 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
 
 
 def _redispatch_pool_columns(old: dict) -> tuple:
-    """重派池列解析（Issue #1208 补漏，2026-11-18）：返回 (pool_engine_ids, pool_selector)。
+    """重派池列解析（Issue #1208 补漏，2026-11-18）。
+
+    返回 5 元组 `(pool_engine_ids, pool_selector, scene_id, scene_uid, scene_authoritative)`：
+    前两列是要落库的互斥池列（`None` = 场景绑定全灭，调用方按 #259 fail-closed），后三列供
+    调用方判定贴证闸门与报错文案。
 
     重派此前只重读场景 id 池、selector 走旧任务快照透传 —— 场景改过配置后两者不同源：
       · selector → id/uid 池：新 id 池 + 旧 selector 并存，claim 双闸门互斥，无人能认领；
@@ -540,6 +544,35 @@ def _redispatch_pool_columns(old: dict) -> tuple:
         scene_authoritative=False, scene_engine_ids="", scene_selector=None,
         snapshot_engine_ids=snapshot_ids, snapshot_selector=snapshot_sel)
     return ids, sel, scene_id, scene_uid, False
+
+
+def _redispatch_claims_by_pool(pool_selector, pool_ids, scene_authoritative: bool,
+                               plugin_mode: bool) -> bool:
+    """重派任务是否只能由「生效池」圈定认领（Issue #1208 补漏·第二轮）。
+
+    两条轨道同一把尺：生效 selector 非空 → claim 侧 `_selector_guard_blocks` 圈池；场景权威
+    且 id/uid 池非空 + 插件模式（池任务可广播）→ claim 侧 `pool_engine_ids` 名单守卫圈池。
+    命中即表示任务不能进「无圈池的贴证链」——`old.runtime_id` / session 主引擎 / `pick_engine`
+    都会把 runtime_id 钉到某个具体引擎上；一旦该引擎不在生效池内，名单守卫 fail-closed、其它
+    引擎又认领不了 `runtime_id>0` 的任务 → 重派任务卡死、事件长挂 running。所以命中时先把
+    `runtime_id` 归零（池任务广播语义），id 池轨再由 #253 的 tag-SQL 在**池名单内**定向贴证。
+
+    判定只看**解析后的生效值**（`_rp_sel_253` / 场景权威的 `_pool_ids_253`），禁止再看旧任务
+    快照 `old.get("pool_selector")`：场景改过模式后快照与生效模式不同源，按旧键判定会把
+    「绑定引擎 → 按标签」（快照 selector 空 → 三条闸门全放行 → 被贴证）与「按标签 → 绑定引擎」
+    （快照 selector 非空 → 三条闸门全跳过 → 沿用旧 runtime_id）两个方向整条放行。
+    """
+    if (pool_selector or "").strip():
+        return True
+    if not plugin_mode or not scene_authoritative:
+        return False
+    if not pool_ids:
+        return False
+    try:
+        import json as _json_pp
+        return bool(_json_pp.loads(pool_ids)) if isinstance(pool_ids, str) else bool(pool_ids)
+    except Exception:
+        return False
 
 
 @router.post("/{seq}/terminate", operation_id="events_terminate", summary="Terminate event", description="Forcefully terminates a running event task. Worker mode cancels the task (cancelled); direct mode fail_task + cancels the subprocess. The event is marked failed.")
@@ -1374,8 +1407,13 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 _pool_253 = _pool_ids_253 or ""
                 _pool_253_authoritative = _auth_253
                 if _rp_sel_253:
-                    log.info(f"[redispatch] seq={seq} scene {_scene_253 or '-'} is selector mode, "
-                             f"pool_engine_ids cleared (was {old.get('pool_engine_ids') or 'empty'})")
+                    # I-4：只有真的丢弃了快照 id 池才说 cleared（原实现无条件打印）
+                    if (old.get("pool_engine_ids") or "").strip() not in ("", "[]"):
+                        log.info(f"[redispatch] seq={seq} scene {_scene_253 or '-'} is selector mode, "
+                                 f"pool_engine_ids cleared (was {old.get('pool_engine_ids')})")
+                    else:
+                        log.info(f"[redispatch] seq={seq} scene {_scene_253 or '-'} is selector mode, "
+                                 f"no snapshot pool_engine_ids to clear")
                 elif _pool_253 and (old.get("pool_selector") or ""):
                     log.info(f"[redispatch] seq={seq} scene {_scene_253 or '-'} is engine-list mode, "
                              f"stale pool_selector dropped (three-column exclusivity)")
@@ -1387,11 +1425,20 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 # 任务重派被贴证到本机 global 引擎并直跑，claim 侧 selector 守卫被完全旁路）。
                 # _rid=0 = 贴证广播合法结局（#521 守卫只入队不直跑），入队后由 claim_by_tag
                 # 的 selector 守卫（service._selector_guard_blocks）圈池认领——与首次派发同尺。
-                if _rp_sel_253:
+                # [Issue #1208 补漏第二轮] 贴证闸门一律按**生效池模式**判定（selector 生效 /
+                # 场景权威 id 池），不再看旧任务快照 old.get("pool_selector")：
+                #   D-1 selector 生效但快照 selector 空 → 旧键放行 session/pick_engine/tag 贴证，
+                #       任务被钉在池外引擎（selector 守卫 fail-closed）→ 卡死；
+                #   D-2 场景切 id 池且快照 selector 非空 → 旧键让三条闸门全部跳过，沿用旧
+                #       runtime_id，旧引擎不在新池内 → 名单守卫 fail-closed → 卡死。
+                _sel_mode_253 = bool((_rp_sel_253 or "").strip())
+                _pool_only_253 = _redispatch_claims_by_pool(
+                    _rp_sel_253, _pool_ids_253, _auth_253, is_plugin_mode())
+                if _pool_only_253:
                     _rid = 0
                 # [selector 修复补丁] _rid=0 后不得进 fallback 链（session→pick_engine 会
-                # 重新选台无视圈池，实测又贴证到本机 2 直跑）——selector 任务保持 0 等认领
-                if not _rid and not old.get("pool_selector"):
+                # 重新选台无视圈池，实测又贴证到本机 2 直跑）——池任务保持 0 等认领
+                if not _rid and not _pool_only_253:
                     # task runtime_id=0 → 查 session 主引擎
                     try:
                         with db_lock:
@@ -1404,7 +1451,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     except Exception:
                         pass
                 # [selector 修复补丁] 无条件 pick_engine 也会覆盖 _rid → selector 任务跳过
-                if not old.get("pool_selector"):
+                if not _pool_only_253:
                     try:
                         from src.domains.runtime.engine.engine_select import pick_engine
                         _rid = pick_engine(old.get("repo_key") or "", old.get("agent_type") or "", fallback_runtime_id=_rid) or 0
@@ -1415,7 +1462,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 # pool_engine_ids 为空 → 加 scope 过滤（与 claim_by_tag 对齐）
                 # Issue #253 改动1：重读绑定 authoritative 时以场景为准（快照里的 pool 残值可能已被
                 # 撕证/中间代任务写空，以旧快照过滤会回到"凭运气"）；无绑定时才看快照值（兼容空场景）。
-                if is_plugin_mode() and old.get("pool_tag") and not old.get("pool_selector"):
+                # 场景权威 id 池轨仍走这里（#253 本机直跑路径）：下方在 _pool_253 名单内定向
+                # 贴证，不会落到池外；selector 轨才整段跳过（保持 _rid=0 由 selector 守卫认领）。
+                if is_plugin_mode() and old.get("pool_tag") and not _sel_mode_253:
                     # [selector 修复补丁] tag-SQL 贴证同样无视圈池 → selector 任务跳过（保持 _rid=0 等认领）
                     try:
                         _old_pool_eids = []
