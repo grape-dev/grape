@@ -16,13 +16,13 @@ grape_t_engine_sandbox_paths,mgmt,runtime,2
 grape_t_engine_sandbox_toggle,mgmt,runtime,1
 grape_t_engine_sandbox_whitelist,mgmt,api,1
 grape_t_engine_sandbox_whitelist,mgmt,runtime,6
-grape_t_engine_template_binding,mgmt,runtime,6
+grape_t_engine_template_binding,mgmt,runtime,1
 grape_t_external_identity_tombstones,mgmt,api,2
 grape_t_repo_credentials,insight,platform,2
 grape_t_repo_llm_credentials,mgmt,runtime,2
 grape_t_repo_platforms,mgmt,api,9
-grape_t_sandbox_provider_config,mgmt,runtime,11
-grape_t_sandbox_templates,mgmt,runtime,4
+grape_t_sandbox_provider_config,mgmt,runtime,8
+grape_t_sandbox_templates,mgmt,runtime,1
 grape_t_schema_migrations,mgmt,api,1
 grape_t_task_proxy_tokens,mgmt,runtime,3
 grape_t_user_llm_credentials,mgmt,runtime,3

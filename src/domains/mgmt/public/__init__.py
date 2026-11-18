@@ -3007,6 +3007,116 @@ def record_outbound_ledger(provider: str, repo_key: str, content_type: str, cont
               origin_channel, origin_task, content_hash, created_at))
 
 
+# ── 沙箱 provider / template 注册（worker 上报链）────────────────────────────
+# 这些表归 mgmt（管理面配置，多租户共享）。runtime 侧的 worker 上报只调下面这些
+# 原语，不再自己写 SQL；编排（加密、引擎白名单校验）仍留在 runtime。
+def sandbox_provider_by_credential(credential_id: int) -> tuple:
+    """按 runtime_credential_id 取 (id, api_key_enc, extra_config)；无行返回 ()。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id, api_key_enc, extra_config FROM grape_t_sandbox_provider_config "
+                  "WHERE runtime_credential_id=%s", (credential_id,))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def sandbox_provider_endpoint(provider_id: str) -> str:
+    """provider 当前 endpoint（空值不覆盖语义要用它）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT endpoint FROM grape_t_sandbox_provider_config WHERE id=%s", (provider_id,))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def update_sandbox_provider(provider_id: str, endpoint: str, api_key_enc: str,
+                            extra_config: str, updated_by: str) -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE grape_t_sandbox_provider_config SET endpoint=%s, api_key_enc=%s, "
+                  "extra_config=%s, updated_by=%s WHERE id=%s",
+                  (endpoint, api_key_enc, extra_config, updated_by, provider_id))
+        return int(c.rowcount or 0)
+
+
+def insert_sandbox_provider(provider_id: str, platform: str, endpoint: str, api_key_enc: str,
+                            extra_config: str, enabled: int, max_sandboxes: int,
+                            updated_by: str, runtime_credential_id: int) -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("INSERT INTO grape_t_sandbox_provider_config (id, platform, endpoint, api_key_enc, "
+                  "extra_config, enabled, max_sandboxes, updated_by, runtime_credential_id) "
+                  "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                  (provider_id, platform, endpoint, api_key_enc, extra_config, enabled,
+                   max_sandboxes, updated_by, runtime_credential_id))
+        return int(c.rowcount or 0)
+
+
+def sandbox_template_id(provider_id: str, template_id: str) -> str:
+    """(provider, template_id) 对应的行 id；不存在返回空串。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id FROM grape_t_sandbox_templates WHERE provider_id=%s AND template_id=%s",
+                  (provider_id, template_id))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def insert_sandbox_template(row_id: str, name: str, provider_id: str, template_id: str,
+                            alias: str, description: str, enabled: int,
+                            created_by: str, now_iso: str) -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("INSERT INTO grape_t_sandbox_templates (id, name, provider_id, template_id, alias, "
+                  "description, enabled, created_by, created_at, updated_at) "
+                  "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                  (row_id, name, provider_id, template_id, alias, description, enabled,
+                   created_by, now_iso, now_iso))
+        return int(c.rowcount or 0)
+
+
+def sandbox_template_row(provider_id: str, template_id: str) -> tuple:
+    """(id, enabled) —— 探测上报要按启用态决定 binding 走向。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id, enabled FROM grape_t_sandbox_templates "
+                  "WHERE provider_id=%s AND template_id=%s", (provider_id, template_id))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def disable_sandbox_template_bindings(provider_id: str, template_db_id, now_iso: str) -> int:
+    """模板被禁用时把 detected/空态 binding 降级为 disabled。返回影响行数。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("UPDATE grape_t_engine_template_binding SET status='disabled', updated_at=%s "
+                  "WHERE provider_id=%s AND template_id=%s AND status IN ('detected', '')",
+                  (now_iso, provider_id, template_db_id))
+        return int(c.rowcount or 0)
+
+
+def count_manual_sandbox_bindings(provider_id: str, engine_type: str) -> int:
+    """(provider, engine) 上非 detected 的 binding 数 —— manual 恒赢判定。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT COUNT(*) FROM grape_t_engine_template_binding "
+                  "WHERE provider_id=%s AND engine_type=%s AND status NOT IN ('detected', '')",
+                  (provider_id, engine_type))
+        return int((c.fetchone() or [0])[0] or 0)
+
+
+def upsert_sandbox_template_binding(provider_id: str, engine_type: str, template_db_id,
+                                    engine_version: str, now_iso: str, new_row_id: str = "") -> str:
+    """按 (provider, engine, template) 三元组 upsert binding，返回 'updated' / 'inserted'。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT id FROM grape_t_engine_template_binding "
+                  "WHERE provider_id=%s AND engine_type=%s AND template_id=%s",
+                  (provider_id, engine_type, template_db_id))
+        row = c.fetchone()
+        if row:
+            c.execute("UPDATE grape_t_engine_template_binding SET status='detected', "
+                      "engine_version=%s, updated_at=%s WHERE id=%s",
+                      (engine_version, now_iso, row[0]))
+            return "updated"
+        from src.kernel.sandbox_uid import new_row_uid as _nru
+        c.execute("INSERT INTO grape_t_engine_template_binding (id, provider_id, engine_type, template_id, "
+                  "status, engine_version, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                  (new_row_id or _nru(), provider_id, engine_type, template_db_id, "detected",
+                   engine_version, now_iso, now_iso))
+        return "inserted"
+
+
 def reassign_runtime_binding(ids, keep_id: str) -> int:
     """历史绑定表（devops_agent_runtime_binding）里指向待回收 runtime 的行改指到 keep_id。
 

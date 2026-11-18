@@ -3873,23 +3873,20 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
             _merged.update(_extra)
             # [endpoint 直接入库] 空值不覆盖——endpoint/api_key 权威源在库（生成时入库/
             # 页面编辑），worker 上报已降级为模板补报（不带 endpoint/api_key）
-            c.execute(
-                "SELECT endpoint FROM grape_t_sandbox_provider_config WHERE id=?", (pid,))
-            _old_ep = c.fetchone()[0] or ""
-            c.execute(
-                "UPDATE grape_t_sandbox_provider_config SET endpoint=?, api_key_enc=?, extra_config=?, updated_by=? WHERE id=?",
-                ((endpoint or _old_ep), _new_key, json.dumps(_merged, ensure_ascii=False), _owner_name or "sandbox-worker", pid))
+            # 表归 mgmt：SQL 在 mgmt public 一份
+            from src.domains.mgmt import public as _mg_pub
+            _old_ep = _mg_pub.sandbox_provider_endpoint(pid)
+            _mg_pub.update_sandbox_provider(
+                pid, (endpoint or _old_ep), _new_key,
+                json.dumps(_merged, ensure_ascii=False), _owner_name or "sandbox-worker")
         else:
             from src.kernel.sandbox_uid import new_row_uid as _nru_pc
             pid = _nru_pc()
-            c.execute(
-                # [d1e242cba 对账漏改修复] provider 列已物理删除——INSERT 去掉该列
-                # [范围由凭据承担] INSERT 不带 scope/user_id/repo_key
-                "INSERT INTO grape_t_sandbox_provider_config (id, platform, endpoint, api_key_enc, extra_config, "
-                "enabled, max_sandboxes, updated_by, runtime_credential_id) VALUES (?,?,?,?,?,?,?,?,?)",
-                (pid, platform, endpoint,
-                 _enc(body.api_key) if body.api_key else "",
-                 _extra_json, 1, 10, _owner_name or "sandbox-worker", credential_id))
+            # 表归 mgmt：INSERT 走 mgmt public（INSERT 不带 scope/user_id/repo_key，范围由凭据承担）
+            from src.domains.mgmt import public as _mg_pub_ins
+            _mg_pub_ins.insert_sandbox_provider(
+                pid, platform, endpoint, _enc(body.api_key) if body.api_key else "",
+                _extra_json, 1, 10, _owner_name or "sandbox-worker", credential_id)
         # 模板登记（可空）
         _tpl_upserted = 0
         for t in (body.templates or []):
@@ -3898,17 +3895,14 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
             _tid = (t.get("template_id") or "").strip()
             if not _tid:
                 continue
-            c.execute("SELECT id FROM grape_t_sandbox_templates WHERE provider_id=? AND template_id=?", (pid, _tid))
-            if c.fetchone():
+            from src.domains.mgmt import public as _mg_pub_tpl
+            if _mg_pub_tpl.sandbox_template_id(pid, _tid):
                 continue
             from src.kernel.sandbox_uid import new_row_uid as _nru_tp
-            c.execute(
-                # [04c868c59 对账] provider 列已物理删除——INSERT 去掉该列
-                "INSERT INTO grape_t_sandbox_templates (id, name, provider_id, template_id, alias, description, "
-                "enabled, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (_nru_tp(), t.get("alias") or _tid, pid, _tid,
-                 t.get("alias") or "", t.get("description") or "", 1, _owner_name or "sandbox-worker",
-                 datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()))
+            _mg_pub_tpl.insert_sandbox_template(
+                _nru_tp(), t.get("alias") or _tid, pid, _tid,
+                t.get("alias") or "", t.get("description") or "", 1,
+                _owner_name or "sandbox-worker", datetime.now(timezone.utc).isoformat())
             _tpl_upserted += 1
         # [引擎探测 spec] 模板引擎探测结果 → binding UPSERT（detected 语义）
         # manual 恒赢：已有 manual binding 的 (provider_id, engine_type) 不降级不改写；
@@ -3927,9 +3921,8 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
             # 引擎不注册/绑定不回 detected、存量引擎行下线。此前 toggle 只改
             # grape_t_sandbox_templates.enabled，注册链路不读它 → 禁用 75s+ 引擎仍 online
             # （E2E 实证），「绑定引擎将下线」承诺无兑现端（凭据卡/引擎卡不同步根因）。
-            c.execute("SELECT id, enabled FROM grape_t_sandbox_templates WHERE provider_id=? AND template_id=?",
-                      (pid, _te_tid))
-            _tr = c.fetchone()
+            from src.domains.mgmt import public as _mg_pub_te
+            _tr = _mg_pub_te.sandbox_template_row(pid, _te_tid)
             if not _tr:
                 continue  # 模板未登记（本轮 templates 未带上）——跳过
             _tpl_db_id = _tr[0]
@@ -3943,10 +3936,8 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
                 # "Truncated incorrect DECIMAL value: ''"（M1 E2E 实测：worker 探测批
                 # provider-report 500，cloud 引擎注册链整链阻断）。binding 表列型为
                 # int 时字符串比较 MariaDB 仍数值兼容，不受影响。
-                c.execute(
-                    "UPDATE grape_t_engine_template_binding SET status='disabled', updated_at=? "
-                    "WHERE provider_id=? AND template_id=? AND status IN ('detected', '')",
-                    (_now_iso, pid, _tpl_db_id))
+                from src.domains.mgmt import public as _mg_pub_bd
+                _mg_pub_bd.disable_sandbox_template_bindings(pid, _tpl_db_id, _now_iso)
                 c.execute(
                     "UPDATE agent_runtimes SET status='offline', updated_at=? "
                     "WHERE runtime_type='cloud' AND provider_id=? AND template_id=?",
@@ -3961,10 +3952,8 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
                     continue  # 白名单外引擎不上 binding
                 # manual 恒赢：同 (provider_id, engine_type) 存在任意非 detected binding → 跳过
                 # （manual 语义按引擎级——手工绑过的引擎整体不被探测改写）
-                _manual_hits = c.execute(
-                    "SELECT COUNT(*) FROM grape_t_engine_template_binding WHERE provider_id=? AND engine_type=? "
-                    "AND status NOT IN ('detected', '')",
-                    (pid, _et)).fetchone()[0]
+                from src.domains.mgmt import public as _mg_pub_mh
+                _manual_hits = _mg_pub_mh.count_manual_sandbox_bindings(pid, _et)
                 if _manual_hits:
                     continue
                 # [多模板共用引擎修复 2026-11-04] UPSERT 按 (provider, engine, template)
@@ -3974,19 +3963,9 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
                 # 最后遍历的模板胜出，其余模板引擎列恒空（实测 s1/sg：4 模板同装
                 # hermes 只落 1 行 binding）。manual 路径（bind-engine API）本就按
                 # 三元组，仅探测上报这条窄了。
-                c.execute("SELECT id FROM grape_t_engine_template_binding WHERE provider_id=? AND engine_type=? AND template_id=?",
-                          (pid, _et, _tpl_db_id))
-                _br = c.fetchone()
-                if _br:
-                    c.execute("UPDATE grape_t_engine_template_binding SET status='detected', "
-                              "engine_version=?, updated_at=? WHERE id=?",
-                              ((eng.get("version") or "")[:64], _now_iso, _br[0]))
-                else:
-                    from src.kernel.sandbox_uid import new_row_uid as _nru_bd
-                    c.execute("INSERT INTO grape_t_engine_template_binding (id, provider_id, engine_type, template_id, "
-                              "status, engine_version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-                              (_nru_bd(), pid, _et, _tpl_db_id, "detected", (eng.get("version") or "")[:64],
-                               _now_iso, _now_iso))
+                from src.domains.mgmt import public as _mg_pub_up
+                _mg_pub_up.upsert_sandbox_template_binding(
+                    pid, _et, _tpl_db_id, (eng.get("version") or "")[:64], _now_iso)
                 _engines_bound += 1
         db.commit()
     log.info(f"sandbox provider report: cred={credential_id} platform={platform} provider_id={pid} "
