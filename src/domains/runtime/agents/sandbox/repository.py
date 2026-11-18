@@ -95,13 +95,9 @@ class SandboxRepository:
             (mode_str, degrade_str) — 查不到返回 ("", "")
         """
         try:
-            db, db_lock = self._get_session()
-            with db_lock:
-                row = db.execute(
-                    "SELECT sandbox_mode, degrade_policy FROM grape_t_engine_sandbox_config "
-                    "WHERE runtime_id=? AND engine_name=?",
-                    (runtime_id, engine_name)
-                ).fetchone()
+            # 表归 mgmt：SQL 在 mgmt public 一份
+            from src.domains.mgmt import public as _mg_mode
+            row = _mg_mode.engine_sandbox_mode(runtime_id, engine_name)
             if row:
                 return row[0] or "", row[1] or ""
         except Exception as e:

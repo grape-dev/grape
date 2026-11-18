@@ -3631,24 +3631,18 @@ def runtime_provider_active_sandboxes(provider_id: str,
     [安全修正] 与 provider-configs 同口径（用户裁定：rta_ 一律只查自己）——
     只能查自己凭据关联的 Provider。
     """
-    # 三库拓扑：provider_config 三方口径一致归 mgmt（table_ownership.json、
-    # table-owner.tsv、beta 三库实测），故 mgmt 优先，runtime 仅作兜底；
-    # cloud_sandboxes 归属尚未裁定（清单记 runtime、beta 实况 mgmt），保持
-    # runtime 优先。只在 1146/表不存在时切域，其它异常原样抛（不静默降级成
-    # 空计数，否则流控被绕过）。归属行与 max_sandboxes 合并成一次查询。
-    _own_rows = _fetch_across_domains(
-        "SELECT max_sandboxes FROM grape_t_sandbox_provider_config "
-        "WHERE id=? AND runtime_credential_id=?",
-        (provider_id, cred.id), ("mgmt", "runtime"))
-    if not _own_rows:
+    # 表归 mgmt：SQL 在 mgmt public 一份
+    from src.domains.mgmt import public as _mg_own
+    if not _mg_own.sandbox_provider_owned_by(provider_id, cred.id):
         raise HTTPException(status_code=403,
                             detail={"code": 403, "message": "provider not bound to this credential"})
-    max_sandboxes = (_own_rows[0][0] if _own_rows[0] else 10)
-    _cnt_rows = _fetch_across_domains(
-        "SELECT COUNT(*) FROM grape_t_cloud_sandboxes "
-        "WHERE provider_id=? AND state IN ('creating','running')",
-        (provider_id,), ("runtime", "mgmt"))
-    active_count = (_cnt_rows[0][0] if _cnt_rows else 0) or 0
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')",
+                  (provider_id,))
+        active_count = c.fetchone()[0] or 0
+        from src.domains.mgmt import public as _mg_max
+        max_sandboxes = _mg_max.sandbox_provider_max_sandboxes(provider_id) or 10
     return {"active_count": active_count, "max_sandboxes": max_sandboxes or 10}
 
 
@@ -3679,14 +3673,8 @@ def runtime_cloud_runtimes(cred: CredentialContext = Depends(_require_credential
             description="Returns distinct domains from grape_t_engine_sandbox_whitelist table. Worker uses this to build NetworkProxy whitelist.")
 def runtime_whitelist(cred: CredentialContext = Depends(_require_credential_ctx)):
     """[沙箱迁移] 下发沙箱白名单域名给 worker（worker 不直接查 DB）。"""
-    domains = []
-    from src.kernel.bulk_read import reader
-    with reader() as c:
-        c.execute("SELECT DISTINCT domain FROM grape_t_engine_sandbox_whitelist WHERE backend_name='*'")
-        rows = c.fetchall()
-    for row in rows:
-        if row[0]:
-            domains.append(row[0])
+    from src.domains.mgmt import public as _mg_wl
+    domains = [d for d in _mg_wl.engine_sandbox_whitelist_domains("*") if d]
     return {"domains": domains}
 
 
@@ -3696,13 +3684,8 @@ def runtime_whitelist(cred: CredentialContext = Depends(_require_credential_ctx)
 def runtime_sandbox_paths(backend_name: str = "",
                           cred: CredentialContext = Depends(_require_credential_ctx)):
     """[沙箱迁移] 下发沙箱路径配置给 worker。"""
-    paths = []
-    from src.kernel.bulk_read import reader
-    with reader() as c:
-        c.execute("SELECT path, access FROM grape_t_engine_sandbox_paths WHERE backend_name=?", (backend_name,))
-        rows = c.fetchall()
-    for row in rows:
-        paths.append({"path": row[0], "access": row[1]})
+    from src.domains.mgmt import public as _mg_paths
+    paths = [{"path": p, "access": a} for p, a in _mg_paths.engine_sandbox_paths_of(backend_name)]
     return {"paths": paths}
 
 
@@ -3758,14 +3741,12 @@ def get_engine_sandbox_config(user: dict = Depends(require_no_session_token)):
     _global_on = True
     _engines = []
     try:
-        from src.kernel.bulk_read import reader
-        with reader() as c:
-            c.execute("SELECT engine_type, sandbox_on FROM grape_t_engine_sandbox_toggle")
-            for _et, _on in c.fetchall():
-                if _et == "global":
-                    _global_on = bool(_on)
-                else:
-                    _engines.append({"engine_type": _et, "sandbox_on": bool(_on)})
+        from src.domains.mgmt import public as _mg_tg
+        for _et, _on in _mg_tg.engine_sandbox_toggles():
+            if _et == "global":
+                _global_on = bool(_on)
+            else:
+                _engines.append({"engine_type": _et, "sandbox_on": bool(_on)})
     except Exception:
         _global_on = os.environ.get("GRAPE_AGENT_SANDBOX", "on").lower() in ("1", "true", "on", "yes")
     return {"global_sandbox_on": _global_on, "engines": _engines}
@@ -3857,11 +3838,8 @@ def sandbox_provider_report(body: SandboxProviderReportBody,
         # 原 cred_id=0 兜底分支（cloud-local.key 时代无凭据上报）删除——端点本身
         # 已 _require_credential（必须 rta_），credential_id 恒>0，兜底为死代码；
         # Provider 只能由「生成沙箱凭据」诞生，生命周期=凭据生命周期。
-        c.execute(
-            "SELECT id, api_key_enc, extra_config FROM grape_t_sandbox_provider_config "
-            "WHERE runtime_credential_id=?",
-            (credential_id,))
-        row = c.fetchone()
+        from src.domains.mgmt import public as _mg_pc
+        row = _mg_pc.sandbox_provider_by_credential(credential_id) or None
         if row:
             pid, _old_key, _old_extra = row[0], row[1], (row[2] or "")
             _new_key = _enc(body.api_key) if body.api_key else _old_key

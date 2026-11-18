@@ -3078,6 +3078,97 @@ def sandbox_template_row(provider_id: str, template_id: str) -> tuple:
         return tuple(row) if row else ()
 
 
+# ── 沙箱配置读侧（runtime 执行链读管理面配置）────────────────────────────
+def sandbox_provider_owned_by(provider_id: str, credential_id: int) -> bool:
+    """provider 是否属于该凭据（worker 上报越权校验）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT 1 FROM grape_t_sandbox_provider_config "
+                  "WHERE id=%s AND runtime_credential_id=%s", (provider_id, credential_id))
+        return c.fetchone() is not None
+
+
+def sandbox_provider_max_sandboxes(provider_id: str) -> int:
+    """provider 允许的最大沙箱数（缺行返回 0）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT max_sandboxes FROM grape_t_sandbox_provider_config WHERE id=%s", (provider_id,))
+        row = c.fetchone()
+        return int((row or [0])[0] or 0)
+
+
+def sandbox_template_provider_of(template_id: str) -> tuple:
+    """template_id → (template_id, provider)，执行链解析模板归属用。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT template_id, provider FROM grape_t_sandbox_templates WHERE template_id=%s",
+                  (template_id,))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def engine_sandbox_mode(runtime_id, engine_name: str) -> tuple:
+    """(sandbox_mode, degrade_policy)；键是 (runtime_id, engine_name)。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT sandbox_mode, degrade_policy FROM grape_t_engine_sandbox_config "
+                  "WHERE runtime_id=%s AND engine_name=%s", (runtime_id, engine_name))
+        row = c.fetchone()
+        return tuple(row) if row else ()
+
+
+def engine_sandbox_provider_of(runtime_id, engine_name: str, allowed_providers) -> str:
+    """该 (runtime, engine) 的 sandbox_provider，仅当它在 allowed_providers 内。"""
+    keys = [str(x) for x in (allowed_providers or []) if x]
+    if not keys:
+        return ""
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"SELECT sandbox_provider FROM grape_t_engine_sandbox_config "
+                  f"WHERE runtime_id=%s AND engine_name=%s AND sandbox_provider IN ({ph})",
+                  (runtime_id, engine_name, *keys))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def any_engine_sandbox_provider(allowed_providers) -> str:
+    """任意一行落在 allowed_providers 内的 sandbox_provider（无 runtime 上下文时的 fallback）。"""
+    keys = [str(x) for x in (allowed_providers or []) if x]
+    if not keys:
+        return ""
+    ph = ",".join(["%s"] * len(keys))
+    with db_registry.cursor("mgmt") as c:
+        c.execute(f"SELECT sandbox_provider FROM grape_t_engine_sandbox_config "
+                  f"WHERE sandbox_provider IN ({ph}) LIMIT 2", tuple(keys))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
+def engine_sandbox_paths_of(backend_name: str) -> list[tuple]:
+    """后端挂载路径 (path, access) 列表。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT path, access FROM grape_t_engine_sandbox_paths WHERE backend_name=%s",
+                  (backend_name,))
+        return [tuple(r) for r in c.fetchall()]
+
+
+def engine_sandbox_toggles() -> list[tuple]:
+    """全部引擎的 (engine_type, sandbox_on)。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT engine_type, sandbox_on FROM grape_t_engine_sandbox_toggle")
+        return [tuple(r) for r in c.fetchall()]
+
+
+def engine_sandbox_whitelist_domains(backend_name: str) -> list[str]:
+    """该后端可访问的域名白名单（去重）。"""
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT DISTINCT domain FROM grape_t_engine_sandbox_whitelist WHERE backend_name=%s",
+                  (backend_name,))
+        return [str(r[0]) for r in c.fetchall()]
+
+
+def count_engine_sandbox_whitelist() -> int:
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT COUNT(*) FROM grape_t_engine_sandbox_whitelist")
+        return int((c.fetchone() or [0])[0] or 0)
+
+
 def disable_sandbox_template_bindings(provider_id: str, template_db_id, now_iso: str) -> int:
     """模板被禁用时把 detected/空态 binding 降级为 disabled。返回影响行数。"""
     with db_registry.cursor("mgmt") as c:

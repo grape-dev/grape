@@ -135,7 +135,8 @@ def ensure_sandbox_tables() -> None:
 
     # seed 官方域名（幂等——INSERT OR IGNORE + 表空检查）
     try:
-        count = db.execute("SELECT COUNT(*) FROM grape_t_engine_sandbox_whitelist").fetchone()[0]
+        from src.domains.mgmt import public as _mg_cnt
+        count = _mg_cnt.count_engine_sandbox_whitelist()
         if count == 0:
             _OFFICIAL_DOMAINS = [
                 ("opengw.clouddeveloper.club", "POST", "*", "https", 443),

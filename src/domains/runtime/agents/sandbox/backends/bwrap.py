@@ -285,12 +285,9 @@ def build_bwrap_argv(
     except Exception:
         # API 不可用时 fallback 到本地 DB（仅本机 worker 有 DB）
         try:
-            from src.kernel.bulk_read import reader
-            with reader() as _r:
-                rows = _r.execute(
-                    "SELECT path, access FROM grape_t_engine_sandbox_paths WHERE backend_name = ?",
-                    (exec_backend,)
-                ).fetchall()
+            # 表归 mgmt：SQL 在 mgmt public 一份
+            from src.domains.mgmt import public as _mg_paths
+            rows = _mg_paths.engine_sandbox_paths_of(exec_backend)
             for path, access in rows:
                 expanded = os.path.expanduser(path)
                 if access == 'ro':
