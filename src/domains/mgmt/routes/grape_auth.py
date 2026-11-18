@@ -2448,10 +2448,18 @@ def get_transfer_context(user: dict = Depends(require_jwt_only)):
     }
 
 class TransferBindBody(BaseModel):
-    """绑定转移确认请求体。"""
+    """绑定转移确认请求体。
+
+    access_token/refresh_token 可选：票据按设计不携带平台令牌（凭据不出库），
+    因此正常的"确认转移"请求里它们是空的——此时服务端把新绑定落成
+    status=4（已绑定、待重新授权）并在响应里回 needs_reauth，前端据此直接把
+    用户送去再授权一次；不再产出"status=1 但没有 token"的僵尸绑定。
+    """
     binding_ticket: str
     confirm: bool = False
     access_token: str = ""
+    refresh_token: str = ""
+    expires_in: int = 0
 
 @router.post("/transfer-bind")
 def transfer_bind(body: TransferBindBody, user: dict = Depends(require_jwt_only), request: Request = None):
@@ -2544,6 +2552,8 @@ def transfer_bind(body: TransferBindBody, user: dict = Depends(require_jwt_only)
                 external_name=ticket_data.get("external_name", ""),
                 external_avatar=ticket_data.get("external_avatar", ""),
                 access_token=body.access_token,
+                refresh_token=body.refresh_token,
+                expires_in=body.expires_in,
                 original_user_id=original_user_id,
             ):
                 _ga_db.rollback()
@@ -2589,9 +2599,25 @@ def transfer_bind(body: TransferBindBody, user: dict = Depends(require_jwt_only)
     _clear_user_repos_cache(user["id"])
     _clear_user_repos_cache(original_user_id)
 
-    log.info(f"Transfer bind: provider={provider}, external_id={external_id}, "
-             f"from user={original_user_id} to user={user['id']}")
+    # 6b. D109：转移也是一种"绑定"，关系行要跟着补（此前只在普通绑定路径调）
+    try:
+        _hook_platform_link(user["id"], provider)
+    except Exception as _hook_err:
+        log.warning(f"transfer_bind: platform link hook skipped: {_hook_err}")
 
+    log.info(f"Transfer bind: provider={provider}, external_id={external_id}, "
+             f"from user={original_user_id} to user={user['id']}, "
+             f"token={'yes' if body.access_token else 'no (needs_reauth)'}")
+
+    # 7. 没有令牌的转移 → 明确告诉前端"还需要授权一次"（新绑定是 status=4，
+    #    不是可用的 status=1）。此前这里返回"绑定转移成功"就结束了，用户看到的
+    #    是一个已绑定但永远拉不到仓库的平台。
+    if not str(body.access_token or "").strip():
+        return {
+            "message": "绑定转移成功，请再授权一次以启用仓库列表",
+            "needs_reauth": [provider],
+            "hint": f"请重新授权 {provider}：转移操作不携带平台令牌",
+        }
     return {"message": "绑定转移成功"}
 
 from fastapi import APIRouter, HTTPException, Request, Response, Depends, Form

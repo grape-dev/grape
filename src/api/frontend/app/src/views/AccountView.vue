@@ -191,6 +191,9 @@
               :key="rp.provider"
               :platform="rp"
               :has-pat="hasPat(rp.provider)"
+              :pat-broken="patBroken(rp.provider)"
+              :token-source="patSource(rp.provider)"
+              :oauth-login="oauthLogin(rp.provider)"
               @configure="openPatModal"
               @clear="clearPat"
             />
@@ -827,7 +830,7 @@ function showTransferConfirm(provider, ticket, token) {
         { binding_ticket: ticket, confirm: true, access_token: token || '' },
         15000
       )
-        .then(function () {
+        .then(function (resp) {
           G.window.localStorage.removeItem('repo_member_cache')
           try {
             const _u = JSON.parse(G.window.localStorage.getItem('user') || '{}')
@@ -838,6 +841,15 @@ function showTransferConfirm(provider, ticket, token) {
             /* ignore：与老代码同款静默降级 */
           }
           closeModal()
+          // 2026-11-18：转移票据按设计不携带平台令牌 → 新绑定是 status=4
+          // （已绑定、待授权）。此时不能再弹"绑定成功"就把人送到项目页（那里只会
+          // 是空的），必须立刻引导再授权一次，把 token 落到新绑定上。
+          const _need = (resp && resp.needs_reauth) || []
+          if (_need.length) {
+            G.app.showToast((resp && resp.hint) || t('transfer_need_reauth'))
+            openBind(provider)
+            return
+          }
           showBindSuccessToast(provider)
           navigateToRepos()
         })
@@ -1577,8 +1589,24 @@ const repoPlatforms = ref([])
 const platformCreds = ref({})
 const oauthCfg = ref({})
 function hasPat(provider) {
+  // 2026-11-18：只认"真的 PAT"（exists=true）。后端以前用 get_user_token_for 判存在性，
+  // OAuth 令牌会被算成 PAT → 只做过授权的账号也显示"PAT 已配置"，点清除又清不掉。
   const c = platformCreds.value[provider + '_pat']
-  return !!(c && Object.keys(c).length > 0)
+  return !!(c && c.exists === true)
+}
+// PAT 行在但解不开（密钥变更/记录损坏）→ 必须显示"已损坏，请重配"，不能显示"未配置"
+function patBroken(provider) {
+  const c = platformCreds.value[provider + '_pat']
+  return (c && c.broken) || ''
+}
+// 令牌来源：pat / oauth / none（凭据页要把"PAT 配置"与"登录授权提供"分开说）
+function patSource(provider) {
+  const auth = (platformCreds.value.platform_auth || {})[provider] || {}
+  return auth.token_source || ''
+}
+function oauthLogin(provider) {
+  const auth = (platformCreds.value.platform_auth || {})[provider] || {}
+  return auth.oauth_login || ''
 }
 // 令牌创建页直达链接：github/gitcode 官方预选参数常量 → 平台卡 pat_create_url；都没有不渲染
 function patCardUrl(card) {

@@ -204,6 +204,44 @@ def _repo_key_matches(repo_key: str, provider: str) -> bool:
     return parse_repo_key(repo_key or "")[0] == provider
 
 
+def _credential_broken_label(reason: str) -> str:
+    """凭据不可用的原因文案（两支：解不开 / 无可用令牌）。"""
+    if reason in ("decrypt_failed", "parse_failed"):
+        return "凭据无法解密（记录已损坏或密钥已变更）"
+    return "登录授权已失效（无可用令牌）"
+
+
+def _credential_broken_notice(broken_providers, broken_reason) -> dict:
+    """凭据失效平台的响应提示（口径乙，2026-11-18 用户拍板）。
+
+    坏平台仓库不进返回列表，但必须显式告知「某平台凭据失效，已隐藏其仓库」；
+    /repos/member 与 /repos/sync 同口径，禁止静默剔除。方案甲（把坏平台缓存行
+    当正常数据返回）留作有离线可见需求时的增强，且必须带 stale 标记与禁用操作。
+    """
+    providers = sorted(str(p) for p in (broken_providers or []))
+    if not providers:
+        return {}
+    _reason = broken_reason or {}
+    if len(providers) == 1:
+        _p = providers[0]
+        _hint = (f"{_p} 的{_credential_broken_label(_reason.get(_p, ''))}，"
+                 f"已隐藏其仓库，请重新配置 {_p} 的 PAT 或重新授权一次")
+    else:
+        _parts = [f"{p}（{_credential_broken_label(_reason.get(p, ''))}）" for p in providers]
+        _hint = ("以下平台的凭据失效：" + "、".join(_parts)
+                 + "；已隐藏其仓库，请重新配置 PAT 或重新授权")
+    return {"hint": _hint, "_credential_broken": providers, "_reauth_provider": providers[0]}
+
+
+def _drop_broken_platform_rows(rows, broken_providers) -> list:
+    """剔除凭据失效平台的仓库行（含缓存行）——口径乙：坏平台数据一律不展示。"""
+    _broken = {str(p) for p in (broken_providers or [])}
+    if not _broken or not rows:
+        return list(rows or [])
+    from src.kernel.repo_key import parse_repo_key
+    return [r for r in rows if parse_repo_key(r.get("repo_key") or "")[0] not in _broken]
+
+
 def _fetch_and_cache(user_id: int, api_token: str, provider: str = "gitcode") -> list[dict]:
     """从 VCS 拉取仓库列表，返回结果（不写缓存——由调用方合并后一次性写入）
 
@@ -624,8 +662,30 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     # PAT 是仓库执行凭据、不是身份绑定，只配 PAT 的账号同样可列仓。
     # token 不可用的平台不算"可列仓"（历史派生密钥解不出来 / 空 token）：否则必 401 重授权，
     # 把本可渲染引导页的入口打成报错（2026-11-16 yangaiwu 现场）。
-    _bound_providers = {i["provider"] for i in list_platform_links(user["id"])
+    _links = list_platform_links(user["id"])
+    # 2026-11-18：「用户声明过这个平台」与「这个平台的凭据现在可用」拆成两个集合。
+    # 只用一个布尔会把"配置在但坏了"折叠成"没配置"，用户看到的是引导页 + 错误文案，
+    # 而库里凭据行和仓库缓存其实都在（yangaiwu 现场：6 条 PAT 解不开 → 整块列表失踪）。
+    _declared_providers = {i["provider"] for i in _links if i.get("provider") in _listable}
+    _bound_providers = {i["provider"] for i in _links
                         if i.get("provider") in _listable and i.get("token_usable", True)}
+    _broken_providers = _declared_providers - _bound_providers
+    _broken_reason = {i["provider"]: str(i.get("credential_error") or "")
+                      for i in _links if i.get("provider") in _broken_providers}
+
+    def _broken_hint(providers) -> str:
+        """定向请求（400）用的单平台文案：说清原因 + 处置动作。"""
+        p = sorted(providers)[0]
+        return (f"{p} 的{_credential_broken_label(_broken_reason.get(p, ''))}，"
+                f"请到设置页重新配置 {p} 的 PAT，或重新授权一次")
+
+    # 口径乙（2026-11-18）：坏平台仓库一律不进返回列表，但每个 200 出口都必须带
+    # hint + _credential_broken —— member / sync 同口径，禁止静默剔除。
+    # 平台被本实例关闭（enabled=0）时用户面根本不存在该平台，别把它写进提示条。
+    from src.domains.platform.visibility import is_platform_visible as _is_platform_visible
+    _notice = _credential_broken_notice(
+        {p for p in _broken_providers if _is_platform_visible(p)}, _broken_reason)
+
     # 用户面可见性（2026-11-15 方案甲）：真源=平台行 enabled。disabled 平台对用户面不提供，
     # 内网/脚本面照旧可用（托管/建仓/bot/webhook 不经这里）。判定必须排在"无绑定早退"之前，
     # 否则"已禁用"会被解释成"你没绑定"（线上实跑抓到过的顺序 bug）。
@@ -635,32 +695,58 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
             "code": 403, "error_code": "PLATFORM_DISABLED",
             "message": f"{provider} 已在本实例对用户面关闭（grape_t_repo_platforms.enabled=0），用户面不可列仓"})
 
+    # 组织过滤参数（提前到这里：下面「无可用凭据」的缓存兜底也要用它）
+    org_id = user.get("org_id", 0)
+    _is_personal_org = False
+    if org_id:
+        from src.domains.mgmt.user.org_db import is_org_personal
+        _is_personal_org = is_org_personal(org_id)
+    _filter_org_id = 0 if _is_personal_org else org_id
+
     if not _bound_providers:
+        # 定向请求（?provider=<p>）不接受"降级成引导页"：调用方明确要这个平台的数据，
+        # 直接给出可处置的错误（凭据坏了 → CREDENTIAL_UNAVAILABLE，没绑 → 未配置）。
+        if provider in _listable:
+            if provider in _broken_providers:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400, "error_code": "CREDENTIAL_UNAVAILABLE",
+                    "needs_reauth": True, "provider": provider,
+                    "credential_error": _broken_reason.get(provider, ""),
+                    "message": _broken_hint({provider}),
+                })
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": f"{provider} API Token 未配置，请先绑定 {provider} 平台"})
         # D102-C: 纯登录渠道账号（华为是第一个实例——有登录无仓库平台绑定）
         # 返回 200 + 空列表 + 标记位（原 400 文案"请先通过 OAuth 登录"与用户
         # 刚 OAuth 登录完的事实自相矛盾）；前端按标记走"去绑定代码平台"引导页。
         # 2026-11-13 从 rebase 丢失中恢复（守卫 test_d102c_login_only_channel 红实锤）。
-        # 判据叠加「凭据可用性」后，这里是「没有可用绑定」的统一出口。此时要区分两种人：
+        # 判据叠加「凭据可用性」后，这里是「没有可用绑定」的统一出口。此时要区分三种人：
         #   ① 真没绑代码平台 → 引导去绑定；
         #   ② 绑了但 token 不可用（历史派生密钥解不出 / refresh 为空 / PAT 已清）
-        #      → 提示重新授权，否则文案会误导成"你绑的不是代码平台"（2026-11-16 现场）。
-        _dead = [i["provider"] for i in list_platform_links(user["id"])
-                 if not i.get("token_usable", True) and i.get("provider") in _listable]
+        #      → 提示重新授权，否则文案会误导成"你绑的不是代码平台"（2026-11-16 现场）；
+        #   ③ 凭据在但读不出来（密文解不开）
+        #      → 口径乙（2026-11-18 用户拍板）：该平台缓存仓库**也不展示**（旧数据
+        #        当正常数据返回会让用户点进去才发现不可用），只给可处置提示
+        #        「…已隐藏其仓库…」；member / sync 同口径。
         _hint = "绑定的登录渠道不是代码托管平台——绑定 Gitee/GitCode 等代码平台后，仓库会显示在这里"
-        _extra = {}
-        if _dead:
-            _hint = f"{_dead[0]} 登录授权已过期，请重新授权"
-            _extra = {"_reauth_provider": _dead[0]}
         return {
             "repos": [],
             "_no_vcs_binding": True,
-            "hint": _hint,
-            **_extra,
+            **(_notice or {"hint": _hint}),
         }
 
     # 需求 17: 前端显式指定 provider 时只拉该平台（可列仓平台集合=平台卡目录驱动）
     if provider in _listable:
         if provider not in _bound_providers:
+            if provider in _broken_providers:
+                # 已声明但凭据不可用：不再是"未配置"（文案会让人以为没绑），
+                # 给出可处置的错误码 + 重新配置提示。
+                raise HTTPException(status_code=400, detail={
+                    "code": 400, "error_code": "CREDENTIAL_UNAVAILABLE",
+                    "needs_reauth": True, "provider": provider,
+                    "credential_error": _broken_reason.get(provider, ""),
+                    "message": _broken_hint({provider}),
+                })
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"{provider} API Token 未配置，请先绑定 {provider} 平台"})
         _providers = [provider]
     else:
@@ -669,12 +755,6 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
         _providers = [p for p in _bound_providers if is_platform_visible(p)]
 
     # 优先读取 DB 缓存（未过期）——按组织过滤
-    org_id = user.get("org_id", 0)
-    _is_personal_org = False
-    if org_id:
-        from src.domains.mgmt.user.org_db import is_org_personal
-        _is_personal_org = is_org_personal(org_id)
-    _filter_org_id = 0 if _is_personal_org else org_id
     cached = user_db.get_user_repos(user["id"])
     synced_at = user_db.get_user_repos_synced_at(user["id"])
 
@@ -704,7 +784,8 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
         return repos_list
 
     if not refresh and cached and not _is_expired():
-        return {"repos": _filter_repos(user["id"], _filter_by_provider(cached), org_id=_filter_org_id), "_cached": True}
+        return {"repos": _filter_repos(user["id"], _drop_broken_platform_rows(_filter_by_provider(cached), _broken_providers), org_id=_filter_org_id),
+                "_cached": True, **_notice}
 
     # 缓存为空或已过期 → 从 VCS 拉取全部绑定平台仓库并合并
     # 每个平台独立 try/catch：一个平台拉取失败（如网络不通）不影响其他平台
@@ -751,8 +832,8 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
         # 部分成功也落库（只替换取到数据的平台，失败平台旧缓存保留）
         user_db.save_user_repos(user["id"], _deduped,
                                 providers=[p for p in _providers if p not in failed_providers])
-        return {"repos": _filter_repos(user["id"], _filter_by_provider(_deduped), org_id=_filter_org_id),
-                "_partial": True, "_reauth_provider": _reauth_provider}
+        return {"repos": _filter_repos(user["id"], _drop_broken_platform_rows(_filter_by_provider(_deduped), _broken_providers), org_id=_filter_org_id),
+                **_notice, "_partial": True, "_reauth_provider": _reauth_provider}
     # 有平台需要重新授权且无任何结果：
     # - 显式 ?provider=<p>（定向请求）→ 仍抛 401，调用方明确要该平台数据；
     # - 合并列表（默认工作区入口）→ 降级成「无可用绑定」引导页（200 + _no_vcs_binding）。
@@ -766,16 +847,19 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
                 "code": 401, "message": _hint, "action": _action,
                 "provider": _reauth_provider,
             })
-        return {
+        _base = {
             "repos": [],
             "_no_vcs_binding": True,
             "_reauth_provider": _reauth_provider,
             "hint": _hint,
         }
+        _base.update(_notice)   # 凭据失效原因优先于泛化的"授权过期"文案
+        return _base
 
     if not all_repos and failed_providers and cached:
-        # 全部平台都失败 → 用旧缓存兜底
-        return {"repos": _filter_repos(user["id"], _filter_by_provider(cached), org_id=_filter_org_id), "_cached": True, "_stale": True}
+        # 全部平台都失败 → 用旧缓存兜底（坏平台行按口径乙剔除，附提示不静默）
+        return {"repos": _filter_repos(user["id"], _drop_broken_platform_rows(_filter_by_provider(cached), _broken_providers), org_id=_filter_org_id),
+                "_cached": True, "_stale": True, **_notice}
     if not all_repos and failed_providers:
         # 确有平台拉取失败（且无旧缓存可兜底）→ 502
         raise HTTPException(status_code=502, detail={"code": 502, "message": "加载仓库列表失败，请稍后重试"})
@@ -815,10 +899,11 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
         log.warning(f"member: stale probe start failed (non-fatal): {e}")
 
     # 部分平台失败时附加提示
-    result = {"repos": _filter_repos(user["id"], _filter_by_provider(repos), org_id=_filter_org_id), "_cached": False}
+    result = {"repos": _filter_repos(user["id"], _drop_broken_platform_rows(_filter_by_provider(repos), _broken_providers), org_id=_filter_org_id), "_cached": False}
     if failed_providers:
         result["_partial"] = True
         result["_failed_providers"] = failed_providers
+    result.update(_notice)   # 凭据失效平台：仓库已剔除，但必须显式告知（口径乙）
     return result
 
 
@@ -833,9 +918,35 @@ def sync_repos(user: dict = Depends(require_org_member)):
     from src.domains.mgmt.auth.grape_account_db import list_platform_links
     _listable = _repo_listable_providers()
     # 可同步平台 = 身份行 ∪ 凭据域 <p>_pat（统一入口 list_platform_links，A 批）
-    _providers = [i["provider"] for i in list_platform_links(user["id"])
-                  if i.get("provider") in _listable]
+    # 2026-11-18：必须与 /repos/member 同口径只取 token_usable 的平台——
+    # 否则凭据不可用的平台也会被拿去拉仓，全部失败后统一抛 502「同步失败」，
+    # 用户点一次刷新只得到一句无关的错误（实测 12:51:16 两次）。
+    _links = list_platform_links(user["id"])
+    _providers = [i["provider"] for i in _links
+                  if i.get("provider") in _listable and i.get("token_usable", True)]
+    # 口径乙（2026-11-18）：部分平台凭据失效时也要显式提示「已隐藏其仓库」，
+    # 与 /repos/member 同一个 notice 构造器，禁止静默只同步好平台。
+    _broken_sync = {i["provider"] for i in _links
+                    if i.get("provider") in _listable and not i.get("token_usable", True)}
+    _broken_reason_sync = {i["provider"]: str(i.get("credential_error") or "")
+                           for i in _links if i.get("provider") in _broken_sync}
+    from src.domains.platform.visibility import is_platform_visible as _is_platform_visible_sync
+    _notice_sync = _credential_broken_notice(
+        {p for p in _broken_sync if _is_platform_visible_sync(p)}, _broken_reason_sync)
     if not _providers:
+        _broken = sorted(_broken_sync)   # 与上面的 notice 共用同一集合，别算两遍
+        if _broken:
+            _first = _broken[0]
+            _reason = next((str(i.get("credential_error") or "") for i in _links
+                            if i.get("provider") == _first), "")
+            _msg = (f"{_first} 的访问凭据无法解密（记录已损坏或密钥已变更），请重新配置 PAT 或重新授权"
+                    if _reason in ("decrypt_failed", "parse_failed")
+                    else f"{_first} 的登录授权已失效，请重新授权或配置 PAT")
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "error_code": "CREDENTIAL_UNAVAILABLE",
+                "needs_reauth": True, "providers": _broken,
+                "credential_error": _reason, "message": _msg,
+            })
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
 
     from src.domains.mgmt.user.repo_manager import _dialect_of as _dialect_of_sync
@@ -895,13 +1006,17 @@ def sync_repos(user: dict = Depends(require_org_member)):
         _msg = f"同步成功（{_reauth_provider} 授权已过期，请重新登录授权）"
         if _filter_org_id:
             return {"repos": _filter_repos(user["id"], repos, org_id=_filter_org_id),
-                    "message": _msg, "_partial": True, "_reauth_provider": _reauth_provider}
+                    **_notice_sync, "message": _msg, "_partial": True,
+                    "_reauth_provider": _reauth_provider}
         return {"repos": _filter_repos(user["id"], repos, org_id=0),
-                "message": _msg, "_partial": True, "_reauth_provider": _reauth_provider}
+                **_notice_sync, "message": _msg, "_partial": True,
+                "_reauth_provider": _reauth_provider}
     if _filter_org_id:
         # 非个人组织：已托管到其他组织的仓库不显示，未托管的显示
-        return {"repos": _filter_repos(user["id"], repos, org_id=_filter_org_id), "message": "同步成功"}
-    return {"repos": _filter_repos(user["id"], repos, org_id=0), "message": "同步成功"}
+        return {"repos": _filter_repos(user["id"], repos, org_id=_filter_org_id), "message": "同步成功",
+                **_notice_sync}
+    return {"repos": _filter_repos(user["id"], repos, org_id=0), "message": "同步成功",
+            **_notice_sync}
 
 
 @router.get("/check-name", operation_id="repos_check_name", summary="Check repo name availability", description="Checks whether a repository with the same name already exists under the current user.")

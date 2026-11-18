@@ -73,12 +73,16 @@ def refresh_token(request: Request, response: Response):
     return {"token": new_access_token}
 
 
-def _pat_platforms(user_id) -> "list[str]":
+def _pat_platforms(user_id) -> "list[str] | None":
     """系统支持的平台仓库中，该用户已配 PAT 的那些（D109 关系推导第二来源）。
 
     用户口径（2026-11-14）：「查询系统支持哪些平台仓库，再基于这些平台仓库查是否
     管理了对应的 PAT 凭据配置」。凭据域 `<p>_pat` 有 token 即视为已接入该平台——
     不依赖保存动作是否走到 hooks（存量数据、脚本写入、旧实例都覆盖到）。
+
+    2026-11-18：**扫描失败返回 None，不再返回 []**。空列表语义是"确实一个平台都
+    没配"，与"读取失败"必须分开——两者混用会让 `_prune_dangling_links` 把
+    "读失败"当成"来源全无"，把关系行成批撤销（实测 3 行同秒 revoked）。
     """
     try:
         from src.domains.mgmt.user.db import get_credential
@@ -86,16 +90,14 @@ def _pat_platforms(user_id) -> "list[str]":
 
         out = []
         for p in supported_platforms():
-            try:
-                cfg = get_credential(str(user_id), str(p), kind="pat")
-            except Exception:
-                cfg = None
+            cfg = get_credential(str(user_id), str(p), kind="pat")
             if cfg and (cfg.get("token") or cfg.get("api_token")):
                 out.append(str(p))
         return out
-    except Exception as e:  # 平台卡/凭据域不可用不影响主判据
+    except Exception as e:  # 平台卡/凭据域不可用 → 未知（None），调用方按"不知道"处理
         log.warning(f"pat platform scan skipped: {e}")
-        return []
+        return None
+
 
 
 def _merge_pat_platforms(active, pats) -> "list[str]":
@@ -117,18 +119,24 @@ def _backfill_pat_links(user_id, active, pats) -> None:
         log.warning(f"pat link backfill skipped: {e}")
 
 
-def _identity_providers(user_id: str) -> set:
-    """该用户的身份行平台集合（OAuth 登录/绑定只有这一处真源）。"""
+def _identity_providers(user_id: str) -> "set | None":
+    """该用户的身份行平台集合（OAuth 登录/绑定只有这一处真源）。
+
+    失败返回 None（"不知道"），不返回空集——空集会被剪枝逻辑当成"没有任何来源"。
+    2026-11-18 实测补洞：get_user_identities 内部把异常吞成空列表，只靠外层
+    try/except 永远拿不到异常，空集照样进剪枝 → 传 strict=True 让它抛，
+    这里再翻译成 None。
+    """
     try:
         from src.domains.mgmt.auth.grape_account_db import get_user_identities
 
-        return {str(i.get("provider") or "") for i in get_user_identities(str(user_id))}
-    except Exception as e:  # 身份域不可用 → 空集（只影响剪枝，不影响主判据）
+        return {str(i.get("provider") or "") for i in get_user_identities(str(user_id), strict=True)}
+    except Exception as e:
         log.warning(f"_identity_providers({user_id}) failed: {e}")
-        return set()
+        return None
 
 
-def _prune_dangling_links(user_id: str, active: "list[str]", pats: "list[str]") -> "list[str]":
+def _prune_dangling_links(user_id: str, active: "list[str]", pats: "list[str] | None") -> "list[str]":
     """关系行还在、但来源（身份行 / PAT 凭据）全无 → 撤销并从句柄里去掉。
 
     2026-11-16 实锤：清 PAT 的那次删除没有触发撤销钩子（或只删了凭据行），
@@ -136,17 +144,30 @@ def _prune_dangling_links(user_id: str, active: "list[str]", pats: "list[str]") 
     前端拿 `/auth/platform-links` 判「已接入」→ 进工作区拉仓 → 服务端无凭据，
     用户看到的是一个自相矛盾的状态（一个页面说已绑定、另一个报授权过期）。
     关系是**派生结论**：没有来源就必须撤销，不能靠"删除时必须记得调钩子"。
+
+    2026-11-18 fail-safe：撤销是**破坏性写**，只能在"确定来源全无"时做。任一来源
+    扫描本身失败（返回 None）→ 本次不剪枝，只记日志。此前的实现把"扫描异常"当成
+    "空集"参与计算，读一次失败就能把用户的平台关系成批撤掉（yangaiwu 现场：3 行
+    在 10:42:10 同一秒被 revoked，凭据却一直在库里）。
     """
-    sources = _identity_providers(user_id) | {str(p) for p in (pats or [])}
+    _identity = _identity_providers(user_id)
+    if _identity is None or pats is None:
+        log.warning("repo platform links prune skipped (source scan unknown): user=%s identity_known=%s pat_known=%s",
+                    user_id, _identity is not None, pats is not None)
+        return list(active or [])
+    sources = set(_identity) | {str(p) for p in (pats or [])}
     # 直接看凭据行（不依赖平台卡目录）：关系刚由「保存 PAT」写入时，哪怕目录/凭据解析
     # 暂时不可用，也不该把它剪掉 —— 只有「身份行与 PAT 行都没有」才算来源全无。
     try:
         from src.domains.mgmt.auth.grape_account_db import list_platform_links
 
-        sources |= {str(i.get("provider") or "") for i in list_platform_links(str(user_id))
+        # strict=True（2026-11-18）：这条扫描内部同样吞异常，缺了 PAT 来源的并集
+        # 会让「PAT-only 平台」被误判为来源全无 → 本函数是破坏性写，必须抛错后跳过。
+        sources |= {str(i.get("provider") or "") for i in list_platform_links(str(user_id), strict=True)
                     if str(i.get("source") or "") == "pat"}
     except Exception as e:
-        log.warning(f"_prune_dangling_links: source scan skipped: {e}")
+        log.warning(f"_prune_dangling_links: source scan skipped (no prune this round): {e}")
+        return list(active or [])
     dangling = [str(p) for p in (active or []) if str(p) not in sources]
     if not dangling:
         return list(active or [])
@@ -190,12 +211,19 @@ def _repo_platform_links(user_id: str) -> "dict | None":
         # 入口判据必须和 /repos/member 用同一口径：不可用不算已接入，并给出 needs_reauth
         # 让前端提示重新授权；否则一边说已绑定、一边说授权过期。
         _usable: set = set()
+        _broken: dict = {}
         try:
             from src.domains.mgmt.auth.grape_account_db import list_platform_links
 
             for _i in list_platform_links(str(user_id)):
-                if str(_i.get("provider") or "") and _i.get("token_usable", True):
-                    _usable.add(str(_i["provider"]))
+                _p = str(_i.get("provider") or "")
+                if not _p:
+                    continue
+                if _i.get("token_usable", True):
+                    _usable.add(_p)
+                elif _i.get("credential_error") or _i.get("source") == "pat":
+                    # 有凭据行/身份行但不可用：记下原因，供前端区分"没绑"与"绑了但坏了"
+                    _broken[_p] = str(_i.get("credential_error") or "credential_unusable")
         except Exception as e:
             log.warning(f"_repo_platform_links: usability scan skipped: {e}")
             _usable = set(active)   # 扫描失败时保守：不额外收紧（保持原行为）
@@ -203,6 +231,7 @@ def _repo_platform_links(user_id: str) -> "dict | None":
         pats = _pat_platforms(user_id)
         # 反向自愈（2026-11-16）：关系行在、来源全无 → 撤销；否则前端会拿一条
         # 「幽灵关系」判已接入，进工作区后再被 401/引导页打脸。
+        # （2026-11-18：pats 为 None = 扫描失败，_prune_dangling_links 内部会跳过剪枝）
         active = _prune_dangling_links(user_id, active, pats)
         merged = _merge_pat_platforms(active, pats)
         if len(merged) > len(active):
@@ -211,8 +240,18 @@ def _repo_platform_links(user_id: str) -> "dict | None":
         usable = sorted(p for p in merged if p in _usable)
         out = {"providers": usable, "has_any": bool(usable), "source": "table"}
         if _needs_reauth:
+            _first = _needs_reauth[0]
+            if _broken.get(_first) in ("decrypt_failed", "parse_failed"):
+                _hint = (f"{_first} 的访问凭据无法解密（记录已损坏或密钥已变更），"
+                         f"请重新配置 {_first} 的 PAT 或重新授权一次")
+            else:
+                _hint = f"{_first} 登录授权已过期，请重新授权"
             out["needs_reauth"] = _needs_reauth
-            out["hint"] = (f"{_needs_reauth[0]} 登录授权已过期，请重新授权")
+            out["hint"] = _hint
+        # 已声明但不可用的平台（不是 needs_reauth 的补集营销：这里只报"凭据坏了"的那部分）
+        _broken_out = {p: r for p, r in _broken.items() if p in merged}
+        if _broken_out:
+            out["credential_error"] = _broken_out
         return out
     except Exception as e:
         log.warning(f"repo platform link read failed, fallback to identities: {e}")

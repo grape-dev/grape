@@ -350,8 +350,20 @@ function confirmTransfer() {
   busy.value = true
   transferError.value = ''
   G.API.post('/auth/transfer-bind', { binding_ticket: transferTicket.value, confirm: true })
-    .then(function () {
+    .then(function (resp) {
       busy.value = false
+      // 2026-11-18：转移不携带平台令牌 → 新绑定是"待授权"状态。用户此刻手上
+      // 就有刚输入的 PAT，直接重新保存一次即可让凭据真正落地（否则转移完
+      // 账号页显示已绑定、项目页却什么都没有）。
+      const _need = (resp && resp.needs_reauth) || []
+      if (_need.length && (token.value || '').trim()) {
+        savePat()
+        return
+      }
+      if (_need.length) {
+        transferError.value = (resp && resp.hint) || t('transfer_need_reauth')
+        return
+      }
       bindOk()
     })
     .catch(function (e) {

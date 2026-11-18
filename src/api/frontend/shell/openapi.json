@@ -869,6 +869,16 @@
               }
             }
           },
+          "400": {
+            "description": "Credential unavailable (needs_reauth)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -908,6 +918,16 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Credential unavailable (needs_reauth)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
               }
             }
           }

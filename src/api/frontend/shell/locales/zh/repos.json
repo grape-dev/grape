@@ -138,5 +138,8 @@
     "go_github": "前往 GitHub 设置",
     "enter_repo": "先进入仓库",
     "come_back": "在 GitHub 设置完成后，回来重新托管或刷新页面"
+  },
+  "cred": {
+    "fix_btn": "去修复凭据"
   }
 }

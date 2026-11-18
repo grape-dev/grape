@@ -40,14 +40,25 @@ def client():
     def _fake_identities(uid):
         return [{"provider": "gitcode"}]
 
+    # 复现前置「用户已绑定 gitcode（token 有效）」：token 可用性是独立维度，
+    # 只有身份行、没有令牌的账号在 /repos 口径里属「凭据不可用」（2026-11-18
+    # CREDENTIAL_UNAVAILABLE），走不到拉取失败分支，本文件断言的是拉取链路。
+    def _fake_platform_links(uid):
+        return [{"provider": "gitcode", "source": "identity", "status": 1,
+                 "token_usable": True, "has_pat_token": False,
+                 "has_oauth_token": True, "external_login": "u_empty"}]
+
     def _fake_get_user_repos(uid):
         return []  # 无旧缓存
 
     def _fake_get_synced_at(uid):
         return None
 
-    def _fake_save(uid, repos):
+    def _fake_save(uid, repos, providers=None):
+        # 2026-11-18：真实签名带 providers=（只替换本次刷新成功的平台），
+        # 旧的 (uid, repos) 假桩会让调用方 TypeError → 500（QA 报告点名的存量脱钩）。
         _saved_repos["repos"] = list(repos)
+        _saved_repos["providers"] = list(providers or [])
         return True
 
     orig = (user_db.get_user_repos, user_db.get_user_repos_synced_at, user_db.save_user_repos)
@@ -57,12 +68,15 @@ def client():
 
     orig_acct = acct_db.get_user_identities
     acct_db.get_user_identities = _fake_identities
+    orig_links = acct_db.list_platform_links
+    acct_db.list_platform_links = _fake_platform_links
 
     app.dependency_overrides[get_current_user] = lambda: USER
     app.dependency_overrides[get_current_user_or_api_key] = lambda: USER
     yield TestClient(app)
     app.dependency_overrides.clear()
     acct_db.get_user_identities = orig_acct
+    acct_db.list_platform_links = orig_links
     user_db.get_user_repos, user_db.get_user_repos_synced_at, user_db.save_user_repos = orig
     _saved_repos.clear()
 

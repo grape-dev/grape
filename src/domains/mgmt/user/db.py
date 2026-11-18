@@ -471,11 +471,17 @@ def set_credential(user_id: "int | str", provider: str, config: dict, kind: str 
         log.warning(f"Set credential failed: {e}")
         return False
 
-def get_credentials(user_id: "int | str") -> list[dict]:
+def get_credentials(user_id: "int | str", include_unreadable: bool = False) -> list[dict]:
     """获取用户凭据（D32-补丁：从 user_credentials 表 + external_identities 读，不查 user_accounts）
 
     A2：返回 kind 维度；双写期旧复合键行（provider 形如 `<name>_pat/_oauth` 且
     kind='') 与对应的新形态行重复，这里过滤掉旧键行，调用方只看到归位形态。
+
+    include_unreadable=True（2026-11-18）：密文解不开/解析失败的行**也返回**，带
+    ``credential_error``（decrypt_failed / parse_failed）+ 空 config。默认 False 保
+    持老语义（调用方只看到"能用的凭据"），需要"配了但坏了"这个中间态的地方
+    （平台关系/项目页/凭据页）显式打开——否则用户看到的是"你没配置"，而不是
+    "你的配置坏了，请重新配置"。
     """
     result = []
     # 1. user_credentials 表（huawei_cloud/codearts/feishu 等非 OAuth 凭据）
@@ -501,8 +507,14 @@ def get_credentials(user_id: "int | str") -> list[dict]:
                 picked.pop((p, k))
     for (p, k), (_upd, cfg_json) in picked.items():
         try:
-            cfg = _load_credential_json(cfg_json) if cfg_json else {}
-            result.append({"provider": p, "kind": k or "", "config": cfg})
+            _err: dict = {}
+            cfg = _load_credential_json(cfg_json, errors=_err) if cfg_json else {}
+            entry = {"provider": p, "kind": k or "", "config": cfg}
+            if _err:
+                if not include_unreadable:
+                    continue
+                entry.update(_err)
+            result.append(entry)
         except Exception:
             pass
     # 2. external_identities（gitcode/github OAuth token）
@@ -519,7 +531,8 @@ def get_credentials(user_id: "int | str") -> list[dict]:
         log.warning(f"get_credentials: read external_identities failed: {e}")
     return result
 
-def get_credential(user_id: "int | str", provider: str, kind: str = "") -> dict | None:
+def get_credential(user_id: "int | str", provider: str, kind: str = "",
+                   diagnostics: "dict | None" = None) -> dict | None:
     """获取指定凭据（读侧自动解密，历史明文行兼容）。
 
     A2 双读序：① 归位形态 (provider, kind) → ② 旧复合键 f"{provider}_{kind}" →
@@ -529,6 +542,9 @@ def get_credential(user_id: "int | str", provider: str, kind: str = "") -> dict 
     理由：回退窗口里旧实例只写 `<p>_pat` 行，归位行会变成 stale 副本；只认归位形态
     就会把旧值读回来（用户看到"凭据莫名回退"）。同 updated_at 时归位形态优先，保持
     结果确定性。
+
+    diagnostics（2026-11-18）：传入 dict 时，若密文解不开会写入
+    ``credential_error=decrypt_failed``——调用方据此区分"没配置"与"配置坏了"。
     """
     cands = [(provider, kind or "", 0)]
     if kind:
@@ -547,7 +563,11 @@ def get_credential(user_id: "int | str", provider: str, kind: str = "") -> dict 
                     pick = cand
     if pick is None:
         return None
-    return _load_credential_json(pick[2]) or None
+    _err: dict = {}
+    cfg = _load_credential_json(pick[2], errors=_err)
+    if _err and diagnostics is not None:
+        diagnostics.update(_err)
+    return cfg or None
 
 def delete_credential(user_id: "int | str", provider: str, kind: str = "") -> bool:
     """删除凭据（A2：同时删归位行与双写期旧键行，避免残留可读副本）。"""
@@ -5936,17 +5956,37 @@ def get_task_gateway_base_url() -> str:
     """
     return _split_url_configured_value("task_gateway_base_url")
 
-def _load_credential_json(raw: str) -> dict:
+def _load_credential_json(raw: str, *, errors: "dict | None" = None) -> dict:
     """读侧统一解密+反序列化（N1 通道加密配套）。
 
     优先 decrypt()（密文格式 {kid}:{nonce}:{ct}），解密产物/明文行统一
     json.loads。decrypt 的明文兼容（无冒号分隔符原样返回）天然覆盖历史
-    明文行——读路径零迁移。解析失败返回 {}（与原 json.loads 失败语义一致，
-    不抛不阻断）。"""
+    明文行——读路径零迁移。
+
+    边界约束（2026-11-18 架构观察 5）：``errors`` 里的 ``credential_error_detail``
+    只给服务端日志/审计用，**不得进入任何 HTTP 响应**——响应面只允许出现
+    ``credential_error`` 代码值（decrypt_failed / parse_failed），避免解密实现细节外泄。
+
+    解析失败仍返回 {}（调用方零改动），但会把失败原因写进 ``errors``
+    （2026-11-18：凭据密文解不开时此前**完全静默**，上层只能看到"没有 token"，
+    于是把"配置在但坏了"误判成"没配置"，项目页整块回落引导页）。
+    """
     from src.domains.mgmt.auth.credential_crypto import decrypt
+    if not raw:
+        return {}
     try:
-        return json.loads(decrypt(raw))
-    except Exception:
+        plain = decrypt(raw)
+    except Exception as e:
+        if errors is not None:
+            errors["credential_error"] = "decrypt_failed"
+            errors["credential_error_detail"] = str(e)[:120] or type(e).__name__
+        return {}
+    try:
+        return json.loads(plain)
+    except Exception as e:
+        if errors is not None:
+            errors["credential_error"] = "parse_failed"
+            errors["credential_error_detail"] = str(e)[:120]
         return {}
 
 def _rebuild_webhook_url_for_provider(webhook_url: str, provider: str) -> str:

@@ -725,7 +725,12 @@
     "confirm_clear_pat_prefix": "确定清除 ",
     "confirm_clear_pat_suffix": " 已配置的 PAT？",
     "pat_clear_fallback_note": "\n清除后该平台将回落 OAuth 供给（OAuth 绑定不受影响）。",
-    "pat_clear_unbound_note": "\n该平台未绑定 OAuth：清除后为平台级解绑，该平台的项目将不再显示，可随时重新配置。"
+    "pat_clear_unbound_note": "\n该平台未绑定 OAuth：清除后为平台级解绑，该平台的项目将不再显示，可随时重新配置。",
+    "pat_badge_broken": "PAT 已损坏",
+    "pat_badge_oauth": "由登录授权提供",
+    "pat_broken_desc": "这条 PAT 记录无法解密（密钥变更或记录损坏），请重配 PAT 后仓库列表即可恢复",
+    "pat_oauth_desc": "该平台没有配置 PAT，仓库访问由登录授权（OAuth）提供；如需独立凭据请配置 PAT",
+    "transfer_need_reauth": "绑定已转移，请再授权一次以启用仓库列表"
   },
   "error": {
     "TOKEN_EXPIRED": "您的 Token 已过期或被撤销，请在设置页重新绑定 Token。",

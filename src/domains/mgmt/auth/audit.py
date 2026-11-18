@@ -21,6 +21,7 @@ EVENT_TYPES = frozenset({
     "email_change",                # 邮箱变更
     "bind",                        # 第三方绑定
     "unbind",                      # 第三方解绑
+    "transfer_bind",               # 绑定转移到另一个账号（此前不在白名单 → 转移动作没有任何审计行）
     "login_rename",                # 第三方登录名变更（Issue #497：external_id 不变、login 变）
     "account_disabled",            # 账号禁用
     "account_restored",            # 账号恢复

@@ -81,6 +81,15 @@
           <div class="error">{{ t('repos.load_failed') }}</div>
         </template>
         <template v-else>
+          <!-- 凭据坏了/过期时：后端按口径乙隐藏该平台仓库并回 hint（含"已隐藏其仓库"）；
+               * 页面必须把原因和修法显示出来，否则用户看到的就是凭空少一个平台的仓库 -->
+          <div v-if="projectsHint" class="rv-cred-hint">
+            <span class="rv-cred-hint-ic">⚠️</span>
+            <span class="rv-cred-hint-tx">{{ projectsHint }}</span>
+            <button v-if="projectsBroken.length" class="rv-cred-hint-btn" @click="goFixCredential">
+              {{ t('repos.cred.fix_btn') }}
+            </button>
+          </div>
           <div class="project-page">
             <div class="project-hero">
               <div class="project-hero-welcome">
@@ -389,6 +398,8 @@ const activeTab = ref('projects')
 const repos = ref([])
 const projectsLoaded = ref(false)
 const projectsError = ref('')
+const projectsHint = ref('')
+const projectsBroken = ref([])
 const searchQuery = ref('')
 const repoPage = ref(0)
 const platformFilter = ref('')
@@ -632,15 +643,38 @@ function openRepoUrl(r) {
 function loadProjects() {
   projectsLoaded.value = false
   projectsError.value = ''
+  projectsHint.value = ''
+  projectsBroken.value = []
   G.API.get('/repos/member')
     .then((d) => {
       repos.value = d.repos || []
+      // 后端在"凭据坏了/过期/只读到缓存"时会带 hint + _credential_broken——
+      // 以前这里整块丢掉，用户只看到空列表或旧数据，没有任何解释（2026-11-18）。
+      projectsHint.value = d.hint || ''
+      projectsBroken.value = d._credential_broken || (d._reauth_provider ? [d._reauth_provider] : [])
       projectsLoaded.value = true
     })
     .catch((e) => {
       projectsLoaded.value = true
       projectsError.value = e.message
+      const det = (e && e.detail) || {}
+      if (det.needs_reauth) {
+        projectsError.value = ''
+        projectsHint.value = det.message || ''
+        projectsBroken.value = det.providers || (det.provider ? [det.provider] : [])
+      }
     })
+}
+// 「去修复凭据」：账号页的凭据 tab（resolveInitialTab 支持 #account-<tab> 形态）
+function goFixCredential() {
+  window.location.hash = '#account-credentials'
+  if (G.app && typeof G.app.nav === 'function') {
+    try {
+      G.app.nav('account')
+    } catch (e) {
+      /* 老壳没有 nav 时靠 hash 也能进 */
+    }
+  }
 }
 function refresh() {
   refreshing.value = true
@@ -649,6 +683,10 @@ function refresh() {
       repoPage.value = 0
       if (G.app._clearCachedReposData) G.app._clearCachedReposData()
       repos.value = (d && d.repos) || []
+      // 口径乙（2026-11-18）：/repos/sync 与 /repos/member 同口径——凭据失效平台的
+      // 仓库不返回，但必须把 hint 显示出来，禁止"同步成功"后悄悄少一个平台的仓库。
+      projectsHint.value = (d && d.hint) || ''
+      projectsBroken.value = (d && d._credential_broken) || (d && d._reauth_provider ? [d._reauth_provider] : [])
       refreshing.value = false
       G.app.showToast(t('repos.sync.refresh_success'))
     })
@@ -1064,6 +1102,39 @@ defineExpose({
   margin: 0;
   border: none;
   background: none;
+}
+/* 凭据异常提示条：解释"为什么列表是空的/是旧的"，并提供一键去修复 */
+.rv-cred-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--y) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--y) 35%, transparent);
+  color: var(--t1);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.rv-cred-hint-ic {
+  flex: none;
+}
+.rv-cred-hint-tx {
+  flex: 1 1 auto;
+}
+.rv-cred-hint-btn {
+  flex: none;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--y) 60%, transparent);
+  background: transparent;
+  color: var(--a);
+  font-size: 12px;
+  cursor: pointer;
+}
+.rv-cred-hint-btn:hover {
+  background: color-mix(in srgb, var(--y) 16%, transparent);
 }
 .rv-content :deep(.template-card-item-name) {
   display: flex;

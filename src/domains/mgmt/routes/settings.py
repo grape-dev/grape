@@ -70,6 +70,10 @@ def _resolve_repo_key(owner_repo: str) -> str:
 
 @router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status", description="Returns the status of third-party credentials (VCS platform PATs from the platform-card catalog, plus huawei-cloud/codearts) for the current user. Credential secrets (AK/SK/tokens) are never returned in plaintext; only existence flags are exposed.")
 def get_credentials(user: dict = Depends(require_no_session_token), repo_key: str = ""):
+    # 契约登记（2026-11-18，#3200）：legacy 键 gitcode.api_token_exists / github.token_exists
+    # 由"含 OAuth 令牌"改为"仅凭据域 PAT"；令牌来源改由 platform_auth.token_source /
+    # oauth_bound 表达。仓内消费方为零（前端已改用 <p>_pat.exists + platform_auth），
+    # 仓外脚本若按旧语义判断"PAT 已配置"需同步调整。
     # D32: 从 user_credentials 表 + external_identities 读凭据，不查 user_accounts
     from src.api.deps import get_user_token_for
     from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvcs
@@ -81,14 +85,52 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
     from src.domains.runtime.vcs.providers import module_for as _vcs_module_for
 
     def _legacy_dedicated_pat(p: str) -> str:
+        """**仅**凭据域里的 PAT（不再回落到 OAuth 登录令牌）。
+
+        2026-11-18 修口径：原实现走 `get_user_token_for`，它的解析序是
+        「PAT 凭据域 → external_identities OAuth」，于是**只做过 OAuth 绑定、
+        根本没配 PAT** 的账号，凭据页也显示 gitcode/github 的 PAT「已配置」；
+        而清除按钮只删凭据域（有 OAuth 时按 D105k 只清 PAT 供给），删完再查
+        依然是 true → 用户看到「PAT 清不掉」。PAT 与 OAuth 是两种凭据形态
+        （A2 对象模型：PAT=仓库执行凭据，身份=OAuth），存在性必须分开报。
+        """
         try:
             if getattr(_vcs_module_for(p), "SETTINGS_TOKEN_FIELD_SUFFIX", "") == "token":
-                # 数据驱动取数：统一走 get_user_token_for 泛型链（按 provider 查
-                # 凭据域——对 gitcode 同样成立，get_user_token 与其同链仅多刷新）。
-                return get_user_token_for(user["username"], user_id=user["id"], provider=p)
+                _cfg = user_db.get_credential(user["id"], p, kind="pat") or {}
+                return str(_cfg.get("token") or "")
         except Exception:
             pass
         return ""
+
+    def _pat_state(p: str) -> dict:
+        """单平台凭据形态快照：PAT 是否存在/是否损坏 + OAuth 身份是否在 + 令牌来源。"""
+        _diag: dict = {}
+        _cfg = {}
+        try:
+            _cfg = user_db.get_credential(user["id"], p, kind="pat", diagnostics=_diag) or {}
+        except Exception:
+            _cfg, _diag = {}, {}
+        _pat_tok = str(_cfg.get("token") or _cfg.get("api_token") or "")
+        _oauth = _identities.get(p) or {}
+        _oauth_bound = bool(_oauth)
+        _oauth_token = bool(_oauth.get("has_oauth_token"))
+        _source = "pat" if _pat_tok else ("oauth" if _oauth_token else "none")
+        out = {
+            "exists": bool(_pat_tok),
+            "login": str(_cfg.get("login") or ""),
+            "oauth_bound": _oauth_bound,
+            "oauth_login": str(_oauth.get("external_login") or ""),
+            "token_source": _source,
+        }
+        if isinstance(_cfg, dict) and "workflows_write" in _cfg:
+            out["workflows_write"] = _cfg["workflows_write"]
+        if _diag.get("credential_error"):
+            # PAT 行在但读不出来（密钥变更/记录损坏）：不能报"没配置"，否则用户
+            # 会去重新配一遍而不知道旧记录坏了（也会让"清不掉"更难解释）。
+            out["exists"] = False
+            out["broken"] = _diag["credential_error"]
+        return out
+
     hw_cred = user_db.get_credential(user["id"], "huawei_cloud") or {}
     codearts_cred = user_db.get_credential(user["id"], "codearts") or {}
 
@@ -108,37 +150,56 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
     except Exception:
         _global_token_status = {"gitcode_expired": False, "github_expired": False}
 
+    _pat_states = {_p: _pat_state(_p) for _p in _vcs_platform_list}
+    _gc_state = _pat_states.get("gitcode") or _pat_state("gitcode")
+    _gh_state = _pat_states.get("github") or _pat_state("github")
+
     return {
         # ── legacy 兼容键（勿删：前端与既有测试消费；新代码请用 <p>_pat 泛型键）──
+        # 2026-11-18：语义修正——这三个键以前把 OAuth 登录令牌也算成 PAT
+        # （get_user_token_for 会回落 external_identities），于是 OAuth 绑定过的账号在
+        # 凭据页显示"PAT 已配置"，点清除又清不掉（清除只删凭据域）。现在只报**真 PAT**，
+        # 另用 token_source / oauth_bound 表达"令牌由登录授权提供"。
         "gitcode": {
             "api_token_exists": bool(_legacy_dedicated_pat("gitcode")),
             "account": user["username"],
             "auto_filled": True,
             "token_expired": (_identities.get("gitcode", {}).get("status", 0) == 4),
+            **_gc_state,
         },
         "github": {
-            "token_exists": bool(get_user_token_for(user["username"], user_id=user["id"], provider="github")),
+            "token_exists": bool(_gh_state.get("exists")),
             "login": _identities.get("github", {}).get("external_login", ""),
             "token_expired": (_identities.get("github", {}).get("status", 0) == 4),
+            **_gh_state,
         },
         "global_bot_token_status": _global_token_status,
         # D102-P：泛型平台 PAT 存在性（gitee/gitlab 等平台卡驱动平台）——
         # 只回存在性+login，不回 token 值（凭据 tab 清除按钮的判定数据源）。
+        # exists=False 但 broken≠空 = "配过、坏了"，前端要提示重配而不是当成没配。
         **{
             f"{_p}_pat": (
-                {"exists": True, "login": (_cred or {}).get("login", ""),
-                 **({"workflows_write": _cred["workflows_write"]}
-                    if isinstance(_cred, dict) and "workflows_write" in _cred else {})}
-                if (_cred := user_db.get_credential(user["id"], _p, kind="pat"))
-                # 存量专用字段平台（契约开关派生）：PAT 走专用字段（token 存 ei），
-                # 存在性对齐专用键——泛型 <p>_pat 凭据域未命中时回退
-                else (
-                    {"exists": True, "login": ""}
-                    if _legacy_dedicated_pat(_p)
-                    else {}
-                )
+                {
+                    "exists": st["exists"],
+                    "login": st["login"],
+                    **({"workflows_write": st["workflows_write"]} if "workflows_write" in st else {}),
+                    **({"broken": st["broken"]} if st.get("broken") else {}),
+                }
+                if (st["exists"] or st.get("broken") or st.get("oauth_bound"))
+                else {}
             )
-            for _p in _vcs_platform_list
+            for _p, st in _pat_states.items()
+        },
+        # 新增（2026-11-18）：令牌来源单列一眼可见——PAT 与"登录授权"是两种形态，
+        # 凭据页据此把"PAT 已配置"与"由 Gitee/GitCode 授权提供"分开显示。
+        "platform_auth": {
+            _p: {
+                "token_source": st["token_source"],
+                "oauth_bound": st["oauth_bound"],
+                "oauth_login": st["oauth_login"],
+                **({"pat_broken": st["broken"]} if st.get("broken") else {}),
+            }
+            for _p, st in _pat_states.items()
         },
         "huawei_cloud": {
             "ak_exists": bool(hw_cred.get("ak")),

@@ -725,7 +725,12 @@
     "confirm_clear_pat_prefix": "Clear the configured PAT for ",
     "confirm_clear_pat_suffix": "?",
     "pat_clear_fallback_note": "\nAfter clearing, this platform falls back to OAuth supply (the OAuth binding is unaffected).",
-    "pat_clear_unbound_note": "\nThis platform is not bound to OAuth: clearing unbinds the platform, its projects will no longer be listed, and you can reconfigure at any time."
+    "pat_clear_unbound_note": "\nThis platform is not bound to OAuth: clearing unbinds the platform, its projects will no longer be listed, and you can reconfigure at any time.",
+    "pat_badge_broken": "PAT unreadable",
+    "pat_badge_oauth": "Supplied by OAuth",
+    "pat_broken_desc": "This PAT record cannot be decrypted (key changed or record corrupted). Re-enter the PAT to restore the repo list",
+    "pat_oauth_desc": "No PAT configured for this platform; repo access comes from the OAuth login. Configure a PAT if you need a separate credential",
+    "transfer_need_reauth": "Binding transferred. Authorize once more to enable the repo list"
   },
   "error": {
     "TOKEN_EXPIRED": "Your token has expired or been revoked. Please re-bind your token in Settings.",

@@ -138,5 +138,8 @@
     "go_github": "Go to GitHub Settings",
     "enter_repo": "Enter Repository First",
     "come_back": "After setting up on GitHub, come back to re-host or refresh"
+  },
+  "cred": {
+    "fix_btn": "Fix credential"
   }
 }

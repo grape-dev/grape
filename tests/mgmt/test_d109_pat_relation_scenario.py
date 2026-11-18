@@ -41,6 +41,13 @@ from src.domains.platform.importer import run_startup_import
 c = sqlite3.connect({db!r})
 c.executescript(PLATFORM_OBJECT_DDL)
 c.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+# 2026-11-18：关系剪枝改 fail-safe——身份/凭据库读不出来时本轮不剪枝（读失败≠来源全无）。
+# 本场景要验的是"来源确实全无才撤销"，因此必须让身份库与凭据库可读（真实部署启动即建表），
+# 否则这里等价于"身份库不可读"，按新口径会正确地跳过剪枝。
+from src.domains.mgmt.schema_ddl import _EXTERNAL_IDENTITIES_DDL
+from src.domains.mgmt.user.db import _CREDENTIALS_DDL
+c.executescript(_EXTERNAL_IDENTITIES_DDL)
+c.executescript(_CREDENTIALS_DDL)
 c.commit(); c.close()
 
 with Session(get_engine()) as s:

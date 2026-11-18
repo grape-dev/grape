@@ -622,10 +622,15 @@ def find_identity_by_tombstone(provider: str, external_id: str) -> "dict | None"
     return _identity_lifecycle.find_tombstone(provider, external_id)
 
 
-def get_user_identities(grape_user_id: str) -> list[dict]:
+def get_user_identities(grape_user_id: str, strict: bool = False) -> list[dict]:
     """获取用户的所有第三方活跃绑定（不含 access_token，防止 token 泄露到前端）。
     D22: 只查 status=1 的活跃绑定。
     Issue #372 R10: 也返回 status=4（token 过期）的绑定，前端显示过期提示。
+
+    strict（2026-11-18）：默认 False 保持"读失败 → 空列表"的宽容语义；
+    需要区分"确实没有绑定"与"读不出来"的调用方（破坏性写路径，如
+    _prune_dangling_links）必须传 True——否则内部吞掉的异常会以空集身份
+    参与推断，把"读失败"当成"来源全无"，进而撤销用户真实的平台关系。
     """
     try:
         with _uow() as session:
@@ -639,9 +644,11 @@ def get_user_identities(grape_user_id: str) -> list[dict]:
                  "has_oauth_token": bool(getattr(d, "access_token", ""))} for d in ds]
     except Exception as e:
         log.warning(f"Get user identities failed: {e}")
+        if strict:
+            raise
         return []
 
-def list_platform_links(grape_user_id: str) -> list[dict]:
+def list_platform_links(grape_user_id: str, strict: bool = False) -> list[dict]:
     """用户在各平台的标识统一视图 = 身份行 ∪ 凭据域 `<p>_pat`（A 批裁定）。
 
     对象模型（2026-11-13 用户拍板）：PAT 是「仓库执行凭据」，不是身份绑定——
@@ -657,20 +664,29 @@ def list_platform_links(grape_user_id: str) -> list[dict]:
       has_pat_token 该平台是否同时有可用 PAT 凭据
     同 provider 两者并存时以身份行为准（归属来自 OAuth），PAT 只补标记与
     login（身份行缺 login 时）。
+
+    strict（2026-11-18）：三个来源扫描内部都吞异常（容错语义不变）；strict=True
+    时改成"任一来源扫描失败就抛错"，供破坏性写路径（_prune_dangling_links）把
+    "读不出来"与"确实没有"区分开——否则缺了来源的并集会误导剪枝逻辑。
     """
     out: list[dict] = []
     seen: set = set()
+    _degraded: list = []   # strict=True 时据此判定"来源未知"
     # token 可用性（2026-11-16 实锤）：身份行存在不等于凭据可用——历史 `derived:` 派生
     # 密钥在当前密钥下解不出来时，行还在、token 为空，调用方若只看"有没有身份行"就会
     # 去拉仓并必然 401（yangaiwu 现场：关系/身份都在，页面却提示授权过期）。
     _tokens: dict = {}
+    _token_errors: dict = {}
     try:
-        for _t in get_user_identities_with_tokens(grape_user_id):
+        for _t in get_user_identities_with_tokens(grape_user_id, errors=_token_errors):
             _tokens[str(_t.get("provider") or "")] = _t
     except Exception as e:
         log.warning(f"list_platform_links: token scan failed: {e}")
+        _degraded.append("token_scan")
     try:
-        for ident in get_user_identities(grape_user_id):
+        # strict 透传（2026-11-18）：内部吞异常时这里看不到 raise，identity_scan 的
+        # degraded 分支会变成死代码；strict=True 让"读不出来"能传到下面的统一抛错。
+        for ident in get_user_identities(grape_user_id, strict=strict):
             provider = str(ident.get("provider") or "")
             if not provider:
                 continue
@@ -680,14 +696,20 @@ def list_platform_links(grape_user_id: str) -> list[dict]:
             _tok = _tokens.get(provider) or {}
             item["token_usable"] = bool(str(_tok.get("access_token") or "").strip()
                                         or str(_tok.get("refresh_token") or "").strip())
+            if not item["token_usable"] and _token_errors.get(provider):
+                # OAuth 密文解不开（旧 kid / 换钥）：原因要和"没有令牌"区分开
+                item["credential_error"] = _token_errors[provider]
             out.append(item)
             seen.add(provider)
     except Exception as e:
         log.warning(f"list_platform_links: identity scan failed: {e}")
+        _degraded.append("identity_scan")
 
     try:
         from src.domains.mgmt.user.db import get_credentials
-        for cred in get_credentials(grape_user_id):
+        # include_unreadable=True（2026-11-18）：密文解不开的行不能再当"没配"——
+        # 那会把"配置坏了，请重配"渲染成"你绑的不是代码托管平台"，并把整块列表打回引导页。
+        for cred in get_credentials(grape_user_id, include_unreadable=True):
             provider = str(cred.get("provider") or "")
             kind = str(cred.get("kind") or "")
             if kind:
@@ -702,16 +724,25 @@ def list_platform_links(grape_user_id: str) -> list[dict]:
                 continue
             cfg = cred.get("config") or {}
             token = str(cfg.get("token") or "").strip() if isinstance(cfg, dict) else ""
+            _cred_err = str(cred.get("credential_error") or "")
+            _cred_err_detail = str(cred.get("credential_error_detail") or "")
             if platform in seen:
                 if token:
                     for item in out:
                         if item.get("provider") == platform:
                             item["has_pat_token"] = True
                             item["token_usable"] = True
+                            item.pop("credential_error", None)
+                            item.pop("credential_error_detail", None)
                             if not item.get("external_login"):
                                 item["external_login"] = str(cfg.get("login") or "")
+                elif _cred_err:
+                    for item in out:
+                        if item.get("provider") == platform:
+                            item["credential_error"] = _cred_err
+                            item["credential_error_detail"] = _cred_err_detail
                 continue
-            if not token:
+            if not token and not _cred_err:
                 continue
             out.append({
                 "provider": platform,
@@ -720,19 +751,26 @@ def list_platform_links(grape_user_id: str) -> list[dict]:
                 "external_name": "",
                 "external_avatar": "",
                 "created_at": "",
-                "status": 1,            # 可用凭据即视为该平台可用
+                # 凭据行在（哪怕解不开）也算"用户声明过这个平台"：status 保留 1，
+                # 可用性由 token_usable / credential_error 表达——两个维度不再混成一个布尔。
+                "status": 1,
                 "has_oauth_token": False,
                 "source": "pat",
-                "has_pat_token": True,
-                "token_usable": True,
+                "has_pat_token": bool(token),
+                "token_usable": bool(token),
+                **({"credential_error": _cred_err,
+                    "credential_error_detail": _cred_err_detail} if _cred_err else {}),
             })
             seen.add(platform)
     except Exception as e:
         log.warning(f"list_platform_links: credential scan failed: {e}")
+        _degraded.append("credential_scan")
+    if strict and _degraded:
+        raise RuntimeError(f"list_platform_links degraded: {','.join(_degraded)}")
     return out
 
 
-def get_user_identities_with_tokens(grape_user_id: str) -> list[dict]:
+def get_user_identities_with_tokens(grape_user_id: str, errors: "dict | None" = None) -> list[dict]:
     """获取用户的所有第三方活跃绑定（含 access_token/refresh_token）。
 
     仅供后端内部使用（get_credentials 等），不暴露到前端。
@@ -741,15 +779,32 @@ def get_user_identities_with_tokens(grape_user_id: str) -> list[dict]:
     Issue #372 §19: 查询条件与 get_user_identities 对齐，status IN (1, 4)——
     status=4（token 过期）的绑定也返回，调用方使用 token 时 API 会返回 401，
     由 R10 fail_task 检测逻辑处理，不影响安全。
+
+    errors（2026-11-18）：传入 dict 时按 provider 写入解密失败原因
+    （credential_error=decrypt_failed）——OAuth 密文用旧 kid 写入后同样解不开，
+    上层要能和"令牌过期/为空"区分开，否则用户只看到"登录授权已失效"。
     """
     try:
         with _uow() as session:
             ds = _iar.list_by_user_statuses(session, grape_user_id, statuses=(1, 4))
-        return [{"provider": d.provider, "external_login": d.external_login,
-                 "external_name": d.external_name, "external_avatar": d.external_avatar,
-                 "access_token": _safe_decrypt(d.access_token or ""),
-                 "refresh_token": _safe_decrypt(d.refresh_token or ""),
-                 "created_at": d.created_at, "status": d.status} for d in ds]
+        out = []
+        for d in ds:
+            item = {"provider": d.provider, "external_login": d.external_login,
+                    "external_name": d.external_name, "external_avatar": d.external_avatar,
+                    "access_token": "", "refresh_token": "",
+                    "created_at": d.created_at, "status": d.status}
+            for _field in ("access_token", "refresh_token"):
+                _raw = getattr(d, _field, "") or ""
+                if not _raw:
+                    continue
+                # _safe_decrypt 内部吞异常并返回 ""：有密文却解出空 = 解不开
+                item[_field] = _safe_decrypt(_raw)
+                if not item[_field]:
+                    item.setdefault("credential_error", "decrypt_failed")
+            if item.get("credential_error") and errors is not None:
+                errors[str(d.provider)] = item["credential_error"]
+            out.append(item)
+        return out
     except Exception as e:
         log.warning(f"Get user identities with tokens failed: {e}")
         return []
@@ -931,14 +986,32 @@ def transfer_business_data(from_user_id: str, to_user_id: str) -> bool:
 def transfer_external_identity_in_tx(cursor, new_user_id: str, provider: str,
                                       external_id: str, external_login: str = "",
                                       external_name: str = "", external_avatar: str = "",
-                                      access_token: str = "", original_user_id: str = "") -> bool:
+                                      access_token: str = "", refresh_token: str = "",
+                                      expires_in: int = 0,
+                                      original_user_id: str = "") -> bool:
     """在调用方事务内转移绑定关系（不加锁，不 commit）。
 
     与 transfer_external_identity 逻辑相同，但由调用方持有 db_lock 和事务。
+
+    2026-11-18：新增 refresh_token / expires_in，并修正「新绑定状态」——
+    没有令牌的转移结果**不能**落 status=1。此前的实现固定 status=1 + 空 token，
+    账号页显示"已绑定"、仓库页却因为这个平台没有可用凭据而整块消失（且 30 分钟后
+    仍然如此，因为没有任何东西会再触发授权）。现在：
+      - 有 token → status=1（ACTIVE），并写 expires_at；
+      - 无 token → status=4（TOKEN_EXPIRED，即"已绑定但需要重新授权"），前端据此
+        直接引导用户再授权一次，而不是给他一个看起来正常、实际不可用的绑定。
     """
     from src.domains.mgmt.auth.credential_crypto import encrypt
     import time as _time
     now = _time.strftime("%Y-%m-%d %H:%M:%S")
+    _has_token = bool(str(access_token or "").strip())
+    _status = 1 if _has_token else 4
+    _expires = ""
+    if _has_token and expires_in:
+        try:
+            _expires = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(_time.time() + int(expires_in)))
+        except Exception:
+            _expires = ""
     try:
         c = cursor
         # 1. 旧绑定标记为 transferred（status=0, 清 token）
@@ -967,16 +1040,18 @@ def transfer_external_identity_in_tx(cursor, new_user_id: str, provider: str,
             "DELETE FROM external_identities WHERE grape_user_id=? AND provider=? AND status IN (0, 4)",
             (new_user_id, provider),
         )
-        # 2. 创建新活跃绑定
+        # 2. 创建新绑定（无令牌 → status=4，见函数文档）
         c.execute(
             "INSERT INTO external_identities "
             "(id, grape_user_id, provider, external_id, external_login, "
-            "external_name, external_avatar, access_token, refresh_token) "
-            "VALUES (?, ?,?,?,?,?,?,?,?)",
+            "external_name, external_avatar, access_token, refresh_token, "
+            "token_expires_at, status) "
+            "VALUES (?, ?,?,?,?,?,?,?,?,?,?)",
             (uuid7_str(), new_user_id, provider, external_id, external_login,
              external_name, external_avatar,
-             encrypt(access_token) if access_token else "",
-             ""),
+             encrypt(access_token) if _has_token else "",
+             encrypt(refresh_token) if refresh_token else "",
+             _expires, _status),
         )
         return True
     except Exception as e:
