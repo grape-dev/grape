@@ -186,6 +186,8 @@
     "revoke_active_cancel": "Not now",
     "sandbox_conn_required": "required",
     "platform_unbound": "platform not bound - no detail",
+    "warn_sandbox_provider_registration_failed": "Sandbox platform registration failed: the credential was created but is not bound to a platform (no detail button). Check the server encryption key configuration and retry.",
+    "warn_unknown": "Completed with a warning: {{code}}",
     "platform_detail_btn_tip": "Open platform detail (info/templates/sandboxes)"
   },
   "toast": {

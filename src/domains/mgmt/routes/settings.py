@@ -25,6 +25,10 @@ from src.domains.runtime import public as _rt
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
+# 稳定的 warning code（响应里只回 code，文案由前端按 code 本地化；
+# 具体异常原文只进服务端日志，避免内部信息直出与中文字面量硬编码）
+SANDBOX_PROVIDER_REGISTRATION_FAILED = "sandbox_provider_registration_failed"
+
 def _check_login_method_before_unbind(user_id: str, provider: str):
     """P0-4: 手动令牌解绑前检查至少保留一种登录方式。
 
@@ -2049,10 +2053,11 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
         except Exception as _sb_e:
             # 不再静默：凭据已建成，但平台登记失败会让凭据变成"有凭据无平台"的孤儿
             # （设备卡片没有 provider_id → 详情按钮消失，且沙箱任务无法使用该平台）。
-            # 用 ERROR 记日志，并把原因回给调用方，由前端显式提示。
+            # 用 ERROR 记完整异常（含密钥/连接等内部细节只在日志里），响应只回稳定
+            # warning code，由前端按 code 本地化提示——避免原文直出泄露内部信息、
+            # 也不让英文界面吃中文句子。
             log.error(f"sandbox credential provider registration failed: {_sb_e}")
-            _sb_warnings.append(
-                f"沙箱平台登记失败（凭据已创建，但平台未绑定，详情按钮不会出现）：{_sb_e}")
+            _sb_warnings.append(SANDBOX_PROVIDER_REGISTRATION_FAILED)
 
     # 预构建 worker 安装包（异步）：凭据生成后即可一键安装，避免首次下载才打包
     # （首次构建含依赖 wheels 下载，耗时数秒至数分钟，放后台不阻塞响应）

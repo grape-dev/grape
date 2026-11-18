@@ -186,6 +186,8 @@
     "revoke_active_cancel": "暂不删除",
     "sandbox_conn_required": "(必填)",
     "platform_unbound": "未绑定平台，无详情",
+    "warn_sandbox_provider_registration_failed": "沙箱平台登记失败：凭据已创建，但平台未绑定（无详情按钮），请检查服务端加密密钥配置后重试。",
+    "warn_unknown": "操作已完成，但有告警：{{code}}",
     "platform_detail_btn_tip": "打开平台详情（信息/模板/沙箱）"
   },
   "toast": {

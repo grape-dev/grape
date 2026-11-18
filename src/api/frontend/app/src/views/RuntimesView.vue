@@ -1377,6 +1377,15 @@ const app = () => G.app
 function t(key, vars) {
   return G.I18N.t('runtimes.' + key, vars)
 }
+// 后端 warnings 只回稳定 code（不回异常原文）：文案在前端本地化，
+// 未登记的 code 走兜底文案并把 code 带上，便于排查。
+const WARN_I18N = {
+  sandbox_provider_registration_failed: 'credential.warn_sandbox_provider_registration_failed',
+}
+function warnText(code) {
+  const key = WARN_I18N[code]
+  return key ? t(key) : t('credential.warn_unknown', { code: String(code) })
+}
 function tc(key) {
   const v = G.I18N.t('common.' + key)
   return v && v !== 'common.' + key
@@ -2341,7 +2350,7 @@ function doCreateSandboxCredential() {
         // showToast 会先移除已有 toast：成功提示在前、登记告警在后，
         // 否则告警会被紧随其后的成功提示覆盖掉，用户永远看不到。
         app().showToast(t('credential.toast_generated'))
-        if (warns.length) app().showToast(warns[0])
+        if (warns.length) app().showToast(warnText(warns[0]))
       }
       if (cachedOk) {
         renderSb()
