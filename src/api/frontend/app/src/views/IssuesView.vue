@@ -3073,6 +3073,28 @@ function teardownListObserver() {
 }
 
 // ═══════════ 轮询（场景识别，30s） ═══════════
+// 加载看门狗：首屏数据若因「请求被静默取消」而永远不落地（loaded=false），
+// 页面会永久停在「加载中」。8s 兜底重拉一次；再 10s 仍空则显示错误+重试按钮。
+let _loadWatchdog = null
+function armLoadWatchdog() {
+  if (_loadWatchdog) clearTimeout(_loadWatchdog)
+  _loadWatchdog = setTimeout(function () {
+    _loadWatchdog = null
+    if (loaded.value || G.window._currentView !== 'tasks') return
+    try {
+      loadTasks()
+    } catch (e) {}
+    _loadWatchdog = setTimeout(function () {
+      _loadWatchdog = null
+      if (loaded.value || G.window._currentView !== 'tasks') return
+      loadError.value = t('load_failed', { msg: 'request aborted or timed out' })
+      loaded.value = true
+    }, 10000)
+  }, 8000)
+}
+function disarmLoadWatchdog() {
+  if (_loadWatchdog) { clearTimeout(_loadWatchdog); _loadWatchdog = null }
+}
 function startPoll() {
   if (pollTimer) clearInterval(pollTimer)
   pollTimer = setInterval(function () {
@@ -3146,8 +3168,10 @@ onMounted(function () {
   loadTakeovers()
   startPoll()
   loadDeployLink()
+  armLoadWatchdog()
 })
 onBeforeUnmount(function () {
+  disarmLoadWatchdog()
   stopPoll()
   teardownListObserver()
   if (deployLongPressTimer) clearTimeout(deployLongPressTimer)
