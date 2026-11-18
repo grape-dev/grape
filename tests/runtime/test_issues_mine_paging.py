@@ -33,6 +33,7 @@ def test_frontend_mine_branch_is_paged():
     assert "'/issues/mine?status=&repo_key='" in vue
     # mine URL 必须带 per_page + page
     assert "'&mode=time&per_page='" in vue, "mine 分支未带 per_page"
-    # usePaging 不应再排除 mine
-    assert "const usePaging = !!repo" in vue, (
-        "usePaging 仍把 mine 排除在外（全量拉取 → 4MB/3.6s）")
+    # 分页处理对两种视图都启用；URL 按 viewMode 分支（repo_all → 仓库接口，否则 mine）
+    assert "const usePaging = true" in vue, "usePaging 未对 mine 启用（全量拉取 → 4MB/3.6s）"
+    assert "const repoAll = viewMode.value === 'repo_all' && !!repo" in vue, (
+        "URL 分支未按 viewMode 区分（mine 会被打到仓库列表接口）")
