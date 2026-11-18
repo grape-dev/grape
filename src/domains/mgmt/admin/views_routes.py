@@ -10,7 +10,7 @@ router = APIRouter(tags=["admin"])
 
 @router.get("/capabilities", summary="全平台能力视图（派生，不含凭据）")
 def get_capabilities(admin: dict = Depends(require_admin)):
-    from src.domains.platform.capabilities import all_capabilities
+    from src.domains.platform.public import all_capabilities
 
     return {"capabilities": all_capabilities()}
 
@@ -19,6 +19,6 @@ def get_capabilities(admin: dict = Depends(require_admin)):
 def get_user_platforms(user_id: str = "", admin: dict = Depends(require_admin)):
     if not user_id:
         raise HTTPException(status_code=422, detail={"code": "VALIDATION", "field": "user_id"})
-    from src.domains.platform.capabilities import user_platform_view
+    from src.domains.platform.public import user_platform_view
 
     return {"user_id": user_id, "platforms": user_platform_view(user_id)}

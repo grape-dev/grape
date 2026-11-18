@@ -52,7 +52,7 @@ class MigrateRepoBody(BaseModel):
 # 又让「无任何线索」的托管请求默认打到 github（2026-11-14 gitee 仓库被当 GitHub 托管的根因之一）。
 def _default_token_provider_order() -> tuple[str, ...]:
     try:
-        from src.domains.platform.capabilities import hosting_providers
+        from src.domains.platform.public import hosting_providers
 
         return tuple(sorted(hosting_providers()))
     except Exception:
@@ -177,7 +177,7 @@ _HOOKS_404_DELETED_PROVIDERS = frozenset({"gitcode"})
 # 不能兜底成别的平台（否则 webhook 建到错误平台、repo_key 前缀错）。
 def _hosting_implemented_providers() -> frozenset:
     """D109 判据收敛：统一走能力视图（与 _MODULES 声明逐字节等价，test_d109_dual_predicate 对拍）。"""
-    from src.domains.platform.capabilities import hosting_providers
+    from src.domains.platform.public import hosting_providers
     return hosting_providers()
 
 # 仓库平台目录 = 平台卡（卡驱动，2026-11-12）：不再在 routes 里二分平台字面量。

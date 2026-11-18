@@ -13,7 +13,7 @@ router = APIRouter(prefix="/repo-platforms", tags=["admin"])
 
 
 def _item(r, bots=None, health=None) -> dict:
-    from src.domains.platform.capabilities import platform_capabilities
+    from src.domains.platform.public import platform_capabilities
     from src.domains.platform.visibility import is_platform_visible
 
     cap = platform_capabilities(r.provider)
@@ -81,7 +81,7 @@ def list_platforms(admin: dict = Depends(require_admin)):
         log.warning("repo-platforms: table read failed, fallback: %s", e)
 
     from src.domains.runtime.public import get_platform_card, list_vcs_platforms
-    from src.domains.platform.capabilities import platform_capabilities
+    from src.domains.platform.public import platform_capabilities
 
     out = []
     for provider in list_vcs_platforms():

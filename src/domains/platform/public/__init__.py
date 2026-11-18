@@ -30,3 +30,43 @@ def bump_epoch() -> int:
     from src.domains.platform.importer import bump_epoch as _impl
 
     return _impl()
+
+
+# --- 能力视图（platform.capabilities）--------------------------------------
+# mgmt 侧（admin/repos/repo_manager）原先直接 import capabilities 内部模块，
+# 现收敛到本模块。转发体保持函数内 import，调用点函数名不变。
+
+
+def hosting_providers() -> frozenset:
+    """可作为托管方的平台集合。"""
+    from src.domains.platform.capabilities import hosting_providers as _impl
+
+    return _impl()
+
+
+def known_providers() -> set:
+    """所有已知平台 provider 集合。"""
+    from src.domains.platform.capabilities import known_providers as _impl
+
+    return _impl()
+
+
+def platform_capabilities(provider: str) -> dict:
+    """单个平台的能力描述字典。"""
+    from src.domains.platform.capabilities import platform_capabilities as _impl
+
+    return _impl(provider)
+
+
+def all_capabilities(providers=None) -> dict:
+    """全平台能力汇总；providers 为空时取默认集合。"""
+    from src.domains.platform.capabilities import all_capabilities as _impl
+
+    return _impl(providers)
+
+
+def user_platform_view(user_id: str) -> dict:
+    """按用户维度汇总的平台视图。"""
+    from src.domains.platform.capabilities import user_platform_view as _impl
+
+    return _impl(user_id)

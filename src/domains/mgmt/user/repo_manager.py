@@ -1155,7 +1155,7 @@ def resolve_bot_username(provider: str) -> str:
 
 def _KNOWN_VCS_PROVIDERS():
     """D109 判据收敛：已知平台集合 = 能力视图（存量三平台 ∪ 平台卡 ∪ 表内平台）。"""
-    from src.domains.platform.capabilities import known_providers
+    from src.domains.platform.public import known_providers
     return known_providers()
 
 def _card_bot_username(provider: str) -> str:
