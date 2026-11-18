@@ -852,6 +852,32 @@ def _owned_skip(table: str, what: str = "") -> bool:
     return False
 
 
+def _migration_conn(domain: str, default=None):
+    """迁移专用：返回**拥有域**的连接；三库模式不可用时回落进程库。
+
+    背景：迁移注册表由 mgmt 进程统一跑，但 `_LEGACY_DOMAIN_LABELS` 只做了标注，
+    执行器还没按域分派连接。只碰 runtime/insight 表的迁移在 mgmt 连接上必然
+    1146 → 失败不盖章 → 每次启动重试。这里由迁移自己取 owner 连接。
+
+    配套：用 `_ensure_column(..., force=True)` 绕过「别家域」DDL 守卫
+    （守卫看的是**进程**归属，我们这里已经明确在 owner 库上操作）。
+    """
+    try:
+        from src.kernel import db_registry
+        # 只有在「该域确实有独立 DSN」时才切连接：单库/测试环境各域共用进程库，
+        # 切过去反而脱离调用方（含单测）绑定的连接。
+        if db_registry.lib_enabled() and db_registry.uses_own_dsn(domain) \
+                and db_registry.current_domain() != domain:
+            conn, _qualifier = db_registry.connection_for(domain)
+            if conn is not None:
+                return conn
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"_migration_conn({domain}) 不可用，回落进程库: {e}")
+    # default 让调用方把**函数内**导入的 db 传进来（单测会 monkeypatch
+    # session_manager.db，模块级全局引用是旧对象，直接 return db 会绕过补丁）
+    return default if default is not None else db
+
+
 def _index_table(ddl: str) -> str:
     """从 ``CREATE [UNIQUE] INDEX ... ON <table>(...)`` 取表名。"""
     try:
@@ -866,8 +892,8 @@ def _index_table(ddl: str) -> str:
 
 
 def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False,
-                   strict: bool = False):
-    if _owned_skip(tbl, "ensure column"):
+                   strict: bool = False, force: bool = False):
+    if not force and _owned_skip(tbl, "ensure column"):
         return False
     """Idempotent column add: PRAGMA check if column missing then ALTER.
 
@@ -1318,8 +1344,10 @@ def _fn_seed_agent_types_from_config() -> None:
         return
 
     inserted = 0
-    with db_lock:
-        c = db.cursor()
+    # agent_type 归 runtime 域：三库模式下 mgmt 连接里没有该表（1146），须在 owner 连接上补种
+    conn = _migration_conn("runtime")
+    with (db_lock if conn is db else nullcontext()):
+        c = conn.cursor()
         for agent_type, info in data.items():
             info = info or {}
             c.execute(
@@ -1335,7 +1363,7 @@ def _fn_seed_agent_types_from_config() -> None:
                 ),
             )
             inserted += c.rowcount if c.rowcount and c.rowcount > 0 else 0
-        db.commit()
+        conn.commit()
         # Spec 要求：补种成功后同步 meta.seeded_keys（与 _seed_from_json 的老轨记账一致），
         # 供后续诊断/去重对账；已存在该 key 时不改写（首轨种子已记）。
         if inserted > 0:
@@ -1348,7 +1376,7 @@ def _fn_seed_agent_types_from_config() -> None:
                     runtime_mig.UPSERT_META__FN_SEED_AGENT_TYPES_FROM_CON,
                     (",".join(sorted(seeded)),),
                 )
-                db.commit()
+                conn.commit()
     log.info(f"seed-agent-types: upserted {inserted} agent type(s) from agent-description.json")
 
 
@@ -4305,15 +4333,18 @@ def _migrate_issue_vcs_exists():
     ① 两个补列都传 strict=True，降级算法全失败时直接 raise；
     ② 补完再显式回验列存在，缺一个就 raise —— 印章只在 schema 真落地后才写。
     """
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.session_manager import db as _db, db_lock
     wanted = {"vcs_exists", "vcs_checked_at"}
-    with db_lock:
-        c = db.cursor()
-        _ensure_column(c, "issue", "vcs_exists", "INTEGER NOT NULL DEFAULT 1", strict=True)
+    # issue 归 runtime 域：三库模式下必须在该域连接上补列（mgmt 连接里没有 issue 表）
+    conn = _migration_conn("runtime", default=_db)
+    with (db_lock if conn is _db else nullcontext()):
+        c = conn.cursor()
+        _ensure_column(c, "issue", "vcs_exists", "INTEGER NOT NULL DEFAULT 1",
+                       strict=True, force=True)
         # TEXT 列带 DEFAULT 无法 INSTANT/INPLACE，须 allow_copy 兜底（issue 表行数级别可接受）
         _ensure_column(c, "issue", "vcs_checked_at", "TEXT DEFAULT NULL",
-                       allow_copy=True, strict=True)
-        db.commit()
+                       allow_copy=True, strict=True, force=True)
+        conn.commit()
         cols = {r[1] for r in c.execute("PRAGMA table_info(issue)").fetchall()}
         missing = wanted - cols
         if missing:
@@ -7336,11 +7367,16 @@ def _fn_chat_conversations_status_index() -> None:
     跨域守卫：chat_conversations 归 runtime，只有 owner 库能建索引。其它域的库里它是
     视图或不存在 → 抛 _NonOwnerObject，执行器跳过且不盖章（下次启动在该域仍跳过，
     真正的建索引发生在 runtime 的 worker 进程）。
-    SQL 只写 SQLite 通用语法：MySQL 的 TEXT 列做键必须带前缀长度，由 mysql_compat 的
-    CREATE INDEX 特判自动补 (191)；不要在这里手写 (32)，绕过兼容层直连会报 1170。
+    MySQL 的 TEXT 列做键必须带前缀长度：`status` 在建表 DDL 里是 TEXT，且没有任何迁移
+    把它改成 VARCHAR，所以 MySQL 分支显式写 `status(191)`（与 cleanup.py 的运行期写法一致）。
+    **不能指望 mysql_compat 的自动补前缀**——那段特判只匹配 `CREATE INDEX IF NOT EXISTS`
+    一种形式，裸 CREATE INDEX 在会话游标与域连接游标上都原样透传，MySQL 会报 1170。
+    也不能只写 (32)：191 是 utf8mb4 前缀索引的安全上限口径。
     """
-    with db_lock:
-        c = db.cursor()
+    # chat_conversations 归 runtime：三库模式下在 owner 连接上建索引，否则恒判「不在本库」
+    conn = _migration_conn("runtime")
+    with (db_lock if conn is db else nullcontext()):
+        c = conn.cursor()
         present = _table_present(c, "chat_conversations")
         is_base = _is_base_table(c, "chat_conversations") if present else True
     if not present:
@@ -7349,8 +7385,18 @@ def _fn_chat_conversations_status_index() -> None:
     if not is_base:
         raise _NonOwnerObject(
             "chat_conversations 在本库是视图（非 owner 域），状态索引由 runtime 库建")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_chat_conv_status ON chat_conversations(status)")
-    db.commit()
+    _c2 = conn.cursor()
+    if _mysql_backend():
+        # MySQL 不支持 CREATE INDEX IF NOT EXISTS（1064），重复索引只能按 1061 吞；
+        # 同时 TEXT 列必须带前缀长度（否则 1170），自动补前缀的兼容层特判只认 IF NOT EXISTS 形式
+        try:
+            _c2.execute("CREATE INDEX idx_chat_conv_status ON chat_conversations(status(191))")
+        except Exception as e:  # noqa: BLE001
+            if "1061" not in str(e) and "already exists" not in str(e).lower():
+                raise
+    else:
+        _c2.execute("CREATE INDEX IF NOT EXISTS idx_chat_conv_status ON chat_conversations(status)")
+    conn.commit()
 
 
 register_migration(
@@ -8787,7 +8833,9 @@ def _migration_1011_backfill_rederive_engine_uids(conn=None) -> dict:
     """
     from src.kernel.engine_uid import derive_engine_uid
     from src.domains.mgmt.user.db import rebase_engine_uid_references
-    conn = conn if conn is not None else db
+    # agent_runtimes / runtime_credentials 归 runtime 域：三库模式下预检与改绑都必须
+    # 在该域连接上做（mgmt 连接里没有这两张表 → 预检恒判「锚列未建成」→ 永不盖章）
+    conn = conn if conn is not None else _migration_conn("runtime")
     report = {"engines_total": 0, "engines_rederived": 0, "engines_unchanged": 0,
               "rebased": [], "rebase_reports": []}
 
@@ -9685,7 +9733,8 @@ def _fn_issue3055_ident_schema(conn=None):
         IssueIdentColumnsMigration,
     )
 
-    return IssueIdentColumnsMigration(conn=conn).run()
+    # issue / chat_conversations 归 runtime：三库模式下必须在该域连接上改列与建唯一索引
+    return IssueIdentColumnsMigration(conn=conn or _migration_conn("runtime")).run()
 
 
 # ===== Issue #3054：身份墓碑独立表（metadata_json → 唯一表 + 索引）=====

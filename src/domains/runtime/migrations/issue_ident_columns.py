@@ -241,9 +241,54 @@ class IssueIdentColumnsMigration:
             resolved = self._resolve_mysql_table(cursor, tbl)
             schema, table, qual = resolved
             for col in cols:
-                if self._widen_column(cursor, schema, table, qual, col):
-                    widened.append(f"{table}.{col}")
+                try:
+                    if self._widen_column(cursor, schema, table, qual, col):
+                        widened.append(f"{table}.{col}")
+                except Exception as e:  # noqa: BLE001
+                    # 1071 = 单索引字节上限：只有当该列所在唯一索引真的装不下时才腾字节。
+                    # 单库拓扑里 SHA 参与的是 (191) 前缀键、合计仍在 3072B 内，不必重建表。
+                    if "1071" not in str(e) or table != ISSUE_TABLE:
+                        raise
+                    if not self._narrow_sha_member_to_make_room(cursor, schema, table, qual):
+                        raise
+                    if self._widen_column(cursor, schema, table, qual, col):
+                        widened.append(f"{table}.{col}（收窄 release_candidate_sha 后）")
         return widened
+
+    def _narrow_sha_member_to_make_room(self, cursor, schema, table, qual) -> bool:
+        """给 `uq_issue_release_bind` 腾字节，否则放宽 parent_issue_number 必 1071。
+
+        该唯一索引 = repo_key(191) + parent_issue_number + release_candidate_sha
+        + release_bind_env。utf8mb4 下 repo_key 前缀 764B、sha(512) 2048B、env(64) 256B
+        （+父号 4B）刚好 3072B —— MySQL 单索引上限。把 parent_issue_number 放宽成
+        VARCHAR(191) 要多占 760B → 1071 key too long。
+
+        SHA 列只存 40/64 位十六进制，512 的宽度是历史随手写的。**先核对存量数据能装进
+        64 才收窄**（装不下就跳过并告警，让迁移停在「列未放宽」而不是静默截断数据）。
+        """
+        cursor.execute(
+            "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns "
+            "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND COLUMN_NAME='release_candidate_sha'",
+            (schema, table))
+        row = cursor.fetchone()
+        if not row or not row[0] or int(row[0]) <= 64:
+            return False
+        cursor.execute(
+            f"SELECT COUNT(*) FROM {qual} WHERE CHAR_LENGTH(release_candidate_sha) > 64")
+        too_long = (cursor.fetchone() or [0])[0]
+        if too_long:
+            log.warning(
+                f"[Issue #3055] {table}.release_candidate_sha 有 {too_long} 行超过 64 字符，"
+                f"不收窄（保持 {row[0]}）；parent_issue_number 会因索引容量无法放宽")
+            return False
+        cursor.execute(
+            f"ALTER TABLE {qual} MODIFY `release_candidate_sha` VARCHAR(64) "
+            f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT '', "
+            f"ALGORITHM=COPY, LOCK=SHARED")
+        log.info(
+            f"[Issue #3055] MySQL: {table}.release_candidate_sha VARCHAR({row[0]}) → 64 "
+            f"（为 uq_issue_release_bind 腾出索引字节，存量数据均已 ≤64）")
+        return True
 
     @staticmethod
     def _current_db(cursor) -> str:
@@ -297,7 +342,9 @@ class IssueIdentColumnsMigration:
         # 能 INPLACE 的只是纯加长/加索引。这里显式写 COPY + LOCK=SHARED，把「会重建表、
         # 期间允许并发读、写要等」这件事摆在字面上，避免运维误以为是瞬时 DDL。
         cursor.execute(
-            f"ALTER TABLE {qual} MODIFY `{col}` VARCHAR({VARCHAR_LEN}){suffix} "
+            # 逗号不能少：`MODIFY ... VARCHAR(191){suffix}, ALGORITHM=COPY` 才是合法语法，
+            # 漏掉会在任何 MySQL 上 1064（near 'ALGORITHM=COPY'），这条迁移因此从未落过库。
+            f"ALTER TABLE {qual} MODIFY `{col}` VARCHAR({VARCHAR_LEN}){suffix}, "
             f"ALGORITHM=COPY, LOCK=SHARED")
         log.info(f"[Issue #3055] MySQL: {table}.{col} INT → VARCHAR({VARCHAR_LEN})")
         return True

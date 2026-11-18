@@ -312,12 +312,14 @@ class TestMysqlBranch:
         alters = cursor.executed("ALTER TABLE")
         # 列宽语句显式标 COPY + LOCK=SHARED：INT→VARCHAR 是类型转换，MySQL 只支持 COPY，
         # 写 INPLACE 会报 1846 让迁移失败（评审建议过一次，这里用断言锁住不许改回去）
-        assert any(s.endswith("MODIFY `issue_number` VARCHAR(191) NOT NULL "
+        # 逗号不能少：MySQL 里 `MODIFY ... VARCHAR(191) NOT NULL, ALGORITHM=COPY`
+        # 才是合法语法（漏逗号是 1064，这条迁移此前从未在 MySQL 落过库）
+        assert any(s.endswith("MODIFY `issue_number` VARCHAR(191) NOT NULL, "
                               "ALGORITHM=COPY, LOCK=SHARED") for s in alters), alters
         assert not any("ALGORITHM=INPLACE" in s for s in alters), alters
         # chat_conversations.issue_number 的 DEFAULT 0 语义保留
         assert any("`chat_conversations` MODIFY `issue_number` VARCHAR(191) NOT NULL "
-                   "DEFAULT '0'" in s for s in alters), alters
+                   "DEFAULT '0', ALGORITHM=COPY" in s for s in alters), alters
         # repo_key 是 TEXT → 唯一索引带前缀长度；issue_number 已 VARCHAR 无需前缀
         create = cursor.executed(f"CREATE UNIQUE INDEX {UNIQUE_INDEX}")[0]
         assert "`repo_key`(191)" in create and "`issue_number`" in create, create
