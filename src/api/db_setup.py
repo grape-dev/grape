@@ -8458,6 +8458,10 @@ register_migration(
     "202611080012", "issue-646-backfill-uids", "backfill",
     lambda: _migration_646_backfill_uids(),
     domains=("runtime",))
+# 2026-11-18 三库核对：grape_t_cloud_sandboxes 归 runtime，但历史上前置在 mgmt 库建过
+# （mgmt 那份 0 行、runtime 反而缺）。迁移内容在 owner 域，只为把表补到正确库。
+from src.domains.runtime.migrations.ensure_cloud_sandboxes_table import MIGRATION as _M_CLOUD_SB
+register_migration(**_M_CLOUD_SB)
 register_migration(
     "202611080013", "issue-646-mysql-fks", "safe",
     lambda: _migration_646_mysql_fks(),

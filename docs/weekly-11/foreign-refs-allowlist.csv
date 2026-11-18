@@ -1,6 +1,7 @@
 table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,10
 agent_tasks,runtime,api,4
+backend_agents,runtime,api,6
 chat_conversations,runtime,api,1
 devops_pipeline_scene,mgmt,api,2
 engine_capabilities,runtime,api,1
@@ -13,8 +14,8 @@ grape_t_engine_template_binding,mgmt,runtime,1
 grape_t_external_identity_tombstones,mgmt,api,2
 grape_t_repo_credentials,insight,platform,2
 grape_t_repo_platforms,mgmt,api,5
-grape_t_schema_migrations,mgmt,api,1
 grape_t_user_repo_platform_link,mgmt,platform,1
+gsb_provider_route,mgmt,kernel,4
 meta,runtime,api,5
 meta,runtime,platform,1
 runtime_credentials,runtime,api,6

@@ -93,6 +93,12 @@ R8_WHITELIST: dict[str, dict[str, int]] = {
     "src/kernel/persistence/credential_usage_log.py": {"grape_t_credential_usage_log": 2},  # P3
     # src/kernel/outbound_ledger.py 已清零（代发台账的建表/索引引导与 6 条读写语句下沉
     # mgmt.public 的 ensure_outbound_ledger_table + outbound_ledger_* 原语）
+    # src/kernel/gsb/route_config.py —— 无法下沉，登记为长期例外：
+    #   gsb_provider_route 归 mgmt（与 gsb_service_registry 同库），但读写它的是 kernel 层的
+    #   路由配置缓存，任一进程都要按 owner 库直连（已用 owner_db("mgmt") 连对了库）。
+    #   要下沉到 mgmt.public 就得让 kernel import domains —— R1 明令禁止，因此这条
+    #   不是"待还的债"，是分层约束下的必然形态。2026-11-18 补登记该表时暴露。
+    "src/kernel/gsb/route_config.py": {"gsb_provider_route": 2},
 }
 
 _R8_WRITE_RE = re.compile(
@@ -107,7 +113,8 @@ def load_r8_owner(path: str) -> dict[str, str]:
         if path.endswith(".json"):
             import json as _json
             data = _json.loads(open(path, encoding="utf-8").read())
-            owner = dict(data.get("tables") or {})
+            _per = set(((data.get("_per_domain_tables") or {}).get("tables") or []))
+            owner = {k: v for k, v in (data.get("tables") or {}).items() if k not in _per}
         else:
             with open(path, encoding="utf-8") as f:
                 for line in f:
