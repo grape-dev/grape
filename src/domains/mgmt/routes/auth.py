@@ -111,10 +111,10 @@ def _backfill_pat_links(user_id, active, pats) -> None:
     if not missing:
         return
     try:
-        from src.domains.platform import hooks
+        from src.domains.platform.public import on_pat_saved
 
         for p in missing:
-            hooks.on_pat_saved(str(user_id), str(p))
+            on_pat_saved(str(user_id), str(p))
     except Exception as e:
         log.warning(f"pat link backfill skipped: {e}")
 
@@ -172,11 +172,11 @@ def _prune_dangling_links(user_id: str, active: "list[str]", pats: "list[str] | 
     if not dangling:
         return list(active or [])
     try:
-        from src.domains.platform import hooks
+        from src.domains.platform.public import on_pat_deleted
 
         for p in dangling:
             # 复用撤销钩子：它内部会再查一次「是否还有其它来源」，没有才真正写 revoked
-            hooks.on_pat_deleted(str(user_id), p)
+            on_pat_deleted(str(user_id), p)
         log.info(f"repo platform links pruned (no source left): user={user_id} providers={dangling}")
     except Exception as e:
         log.warning(f"repo platform links prune failed: user={user_id}: {e}")

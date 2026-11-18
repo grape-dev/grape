@@ -462,8 +462,8 @@ def set_credential(user_id: "int | str", provider: str, config: dict, kind: str 
             _mg_db.commit()
             if (kind or "") == "pat":
                 try:
-                    from src.domains.platform import hooks as _pl_pat_hooks
-                    _pl_pat_hooks.on_pat_saved(str(user_id), str(provider))
+                    from src.domains.platform.public import on_pat_saved
+                    on_pat_saved(str(user_id), str(provider))
                 except Exception as _hook_err:
                     log.warning(f"platform-link hook (pat saved) skipped: {_hook_err}")
             return True
@@ -587,8 +587,8 @@ def delete_credential(user_id: "int | str", provider: str, kind: str = "") -> bo
             _mg_db.commit()
             if (kind or "") == "pat" and deleted:
                 try:
-                    from src.domains.platform import hooks as _pl_pat_del_hooks
-                    _pl_pat_del_hooks.on_pat_deleted(str(user_id), str(provider))
+                    from src.domains.platform.public import on_pat_deleted
+                    on_pat_deleted(str(user_id), str(provider))
                 except Exception as _hook_err:
                     log.warning(f"platform-link hook (pat deleted) skipped: {_hook_err}")
             return deleted

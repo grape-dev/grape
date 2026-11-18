@@ -70,3 +70,46 @@ def user_platform_view(user_id: str) -> dict:
     from src.domains.platform.capabilities import user_platform_view as _impl
 
     return _impl(user_id)
+
+
+# --- 关系写入钩子（platform.hooks）-----------------------------------------
+# mgmt 侧（routes/auth、routes/grape_auth、routes/settings、user/db、
+# admin/user_repo_platform_link_routes）原先直接 import 内部模块 `platform.hooks`，
+# 现收敛到本模块。转发体保持函数内 import：调用期才解析 `hooks.<name>`，
+# 于是测试对 `platform.hooks.<name>` 的 monkeypatch 依然生效。
+# 全部钩子本身 fail-safe（内部 try/except 只告警），这里不再加壳，语义不变。
+
+
+def on_oauth_login(user_id: str, oauth_provider: str) -> None:
+    """OAuth 登录/绑定成功 → 建立用户↔平台仓库关系。"""
+    from src.domains.platform.hooks import on_oauth_login as _impl
+
+    return _impl(user_id, oauth_provider)
+
+
+def on_oauth_unbound(user_id: str, oauth_provider: str) -> None:
+    """解绑渠道 → 无其它来源时撤销用户↔平台仓库关系。"""
+    from src.domains.platform.hooks import on_oauth_unbound as _impl
+
+    return _impl(user_id, oauth_provider)
+
+
+def on_pat_saved(user_id: str, repo_provider: str) -> None:
+    """PAT 保存 → 建立用户↔平台仓库关系。"""
+    from src.domains.platform.hooks import on_pat_saved as _impl
+
+    return _impl(user_id, repo_provider)
+
+
+def on_pat_deleted(user_id: str, repo_provider: str) -> None:
+    """PAT 删除 → 无其它来源时撤销用户↔平台仓库关系。"""
+    from src.domains.platform.hooks import on_pat_deleted as _impl
+
+    return _impl(user_id, repo_provider)
+
+
+def on_platform_disabled(user_id: str, repo_provider: str) -> None:
+    """用户禁用该平台 → 写 disabled_by_user 关系档位。"""
+    from src.domains.platform.hooks import on_platform_disabled as _impl
+
+    return _impl(user_id, repo_provider)

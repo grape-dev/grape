@@ -2905,7 +2905,7 @@ def _cascade_pat_clear(user: dict, provider: str) -> dict:
     """
     from src.domains.mgmt.auth.grape_account_db import (
         get_user_identities, delete_external_identity, revoke_provider_credentials)
-    from src.domains.platform import hooks as _pl_hooks
+    from src.domains.platform.public import on_pat_deleted
     ident = next((i for i in get_user_identities(user["id"]) if i["provider"] == provider), None)
     has_oauth = bool(ident and ident.get("has_oauth_token"))
     _check_login_method_before_unbind(user["id"], provider)
@@ -2929,7 +2929,7 @@ def _cascade_pat_clear(user: dict, provider: str) -> dict:
     # 有 OAuth 保有 → 关系行保留；无 OAuth → revoke）。此路径不经过 delete_credential，
     # 漏掉这一步就会出现「PAT 清空、无 OAuth，但用户仍在项目页而进不了引导页」。
     try:
-        _pl_hooks.on_pat_deleted(str(user["id"]), str(provider))
+        on_pat_deleted(str(user["id"]), str(provider))
     except Exception as _e:
         log.warning(f"_cascade_pat_clear: platform-link hook skipped: {_e}")
     return {"oauth_kept": has_oauth}
