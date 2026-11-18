@@ -45,7 +45,9 @@ groups:
       # 不能用 Max_used_connections —— 那是历史峰值（高水位），分母用错会让比值长期贴近 1
       # 造成永久误报（实测：74/78=93.6% 报警，真实上限 8000，占用 0.93%）。
       - alert: GrapeDBPoolUsageHigh
-        expr: grape_db_threads_connected / clamp_min(grape_db_max_connections, 1) > 0.8
+        # 这两个值取自 MySQL SHOW GLOBAL STATUS，每个进程都会把同一份全局值报一遍
+        # （实测 8 条 series）。不做聚合会同时触发 8 条同名告警，所以取 max()。
+        expr: max(grape_db_threads_connected) / clamp_min(max(grape_db_max_connections), 1) > 0.8
         for: 5m
         labels:
           severity: warning
@@ -55,7 +57,8 @@ groups:
 
       # MySQL 连接中止
       - alert: GrapeDBAbortedConnects
-        expr: increase(grape_db_aborted_connects_total[10m]) > 5
+        # 同上：全局计数器被每个进程重复上报，先 max() 再算增量，避免 8 条重复告警。
+        expr: max(increase(grape_db_aborted_connects_total[10m])) > 5
         for: 5m
         labels:
           severity: warning
