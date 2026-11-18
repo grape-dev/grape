@@ -10,8 +10,14 @@
   · 组件/模块被新 import 进某条构建输入 → `sources` 集合变 → 必须同步登记
 
 真实构建输入 = `vite.config.js` 的 rollup entry（`src/views/entries/<name>.js`），
-以及它递归 import 的相对 `.js` / `.vue` 文件。不按「同名 .vue」的约定猜，因为 entry 会
-引入非同名组件（如 `repos-view.js` → `SettingsView.vue` → `LlmCredManager.vue`）。
+以及它递归 import 的相对 / `@/` 别名 `.js` / `.vue` 文件；entry 运行时注入的
+`assets/bridge.css` 也是该 chunk 的输入，一并纳入指纹。不按「同名 .vue」的约定猜，
+因为 entry 会引入非同名组件（如 `repos-view.js` → `SettingsView.vue` → `LlmCredManager.vue`）。
+
+`SHIPPED` 是「浏览器手上可能已有的 (版本号, 指纹)」，比 `FROZEN` 慢一拍：指纹变了而
+版本号还是已发布过的那个 → 红。它堵的是「改了源、只重冻指纹、`?v=` 原地不动」。
+源图本身扩容（新增别名解析、新增注入资源）时指纹会整体变，此时 `SHIPPED` 对未抬档的
+chunk 重订基线——这是代码可见的动作，不是重冻捷径。
 """
 import hashlib
 import re
@@ -29,8 +35,11 @@ ENTRY_DECL = re.compile(
     r"""(?:'([\w-]+)'|([A-Za-z_$][\w$]*))\s*:\s*fileURLToPath\(\s*"""
     r"""new URL\(\s*['"]\./src/views/entries/([\w-]+)\.js['"]"""
 )
-# 相对 import：`import X from './a.vue'` / `import './a.js'` / `import('./a')`
-IMPORT_REL = re.compile(r"""(?:from\s*|import\s*\(\s*|import\s+)['"](\.[^'"]+)['"]""")
+# import 说明符：相对路径 `./a.vue` 与 vite `@/` 别名（`@` -> app/src）
+IMPORT_REL = re.compile(r"""(?:from\s*|import\s*\(\s*|import\s+)['"]((?:\.|@/)[^'"]+)['"]""")
+ALIAS = "@"
+# entry 运行时注入的稳定 CSS 产物（名字 -> app/src 下的真实源）
+INJECTED_CSS = {"bridge.css": "styles/bridge.css"}
 # 页面引用：`/xxx-view.js?v=60`
 PAGE_VER = re.compile(r"/([A-Za-z0-9_.\-]+\.js)\?v=(\d+)")
 
@@ -39,29 +48,58 @@ PAGE_VER = re.compile(r"/([A-Za-z0-9_.\-]+\.js)\?v=(\d+)")
 FROZEN = {
     "account-view.js": ("60", "034ac9383784bb7f", ["components/BindDialog.vue", "components/CredRepoRow.vue", "components/PatDialog.vue", "views/AccountView.vue", "views/LlmCredManager.vue", "views/entries/account-view.js"]),
     "admin-view.js": ("46", "e59a18dcd51cee02", ["components/ui/AGHelp.vue", "components/ui/AGPill.vue", "lib/bot-summary.js", "views/AdminChannels.vue", "views/AdminPlatforms.vue", "views/AdminView.vue", "views/entries/admin-view.js"]),
-    "agent-view.js": ("50", "b7aeca615e092eda", ["views/AgentView.vue", "views/entries/agent-view.js"]),
-    "autopilot-view.js": ("53", "12b6a690bf0970d2", ["lib/repo-provider.js", "views/AutopilotView.vue", "views/entries/autopilot-view.js"]),
-    "chat-view.js": ("60", "7b820e2fa3b65d89", ["views/ChatView.vue", "views/entries/chat-view.js"]),
-    "dashboard-view.js": ("83", "6b9fe1a28eda3d46", ["lib/repo-provider.js", "views/DashboardView.vue", "views/entries/dashboard-view.js"]),
-    "event-view.js": ("57", "18ada96a42e66872", ["views/EventView.vue", "views/entries/event-view.js"]),
+    "agent-view.js": ("50", "f9a7f9bdba82c363", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "views/AgentView.vue", "views/entries/agent-view.js"]),
+    "autopilot-view.js": ("54", "3a1b62b5888bb891", ["lib/repo-provider.js", "styles/bridge.css", "views/AutopilotView.vue", "views/entries/autopilot-view.js"]),
+    "chat-view.js": ("60", "aff6d59cd544a0a3", ["lib/onboard.js", "views/ChatView.vue", "views/entries/chat-view.js"]),
+    "dashboard-view.js": ("84", "f37f59d1d426f301", ["lib/repo-provider.js", "styles/bridge.css", "views/DashboardView.vue", "views/entries/dashboard-view.js"]),
+    "event-view.js": ("58", "703f793dc2b3235e", ["styles/bridge.css", "views/EventView.vue", "views/entries/event-view.js"]),
     "feedback-dialog.js": ("50", "6ab1db5105a856d4", ["views/FeedbackDialog.vue", "views/entries/feedback-dialog.js"]),
     "forgot-view.js": ("1", "503253e492ecd273", ["views/ForgotView.vue", "views/entries/forgot-view.js"]),
-    "im-channel.js": ("54", "39e07d1e899fa8dc", ["views/ImChannel.vue", "views/entries/im-channel.js"]),
+    "im-channel.js": ("54", "18e46f9e514dddbc", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "lib/onboard.js", "views/ImChannel.vue", "views/entries/im-channel.js"]),
     "issues-view.js": ("62", "912b1bb72fdc636d", ["lib/boardRound.js", "views/IssuesView.vue", "views/entries/issues-view.js"]),
     "knowledge-view.js": ("49", "9e67a352975c636e", ["views/KnowledgeView.vue", "views/entries/knowledge-view.js"]),
     "login-view.js": ("2", "2003041303cafeb5", ["views/LoginView.vue", "views/entries/login-view.js"]),
-    "my-feedback-detail.js": ("50", "97dfae99aedbefd4", ["views/MyFeedbackDetail.vue", "views/entries/my-feedback-detail.js"]),
-    "my-feedback.js": ("50", "5b5bafe6239d2d35", ["views/MyFeedback.vue", "views/entries/my-feedback.js"]),
+    "my-feedback-detail.js": ("50", "f5b774c8263b4573", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "views/MyFeedbackDetail.vue", "views/entries/my-feedback-detail.js"]),
+    "my-feedback.js": ("50", "4c5998a63a7c9b27", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "views/MyFeedback.vue", "views/entries/my-feedback.js"]),
     "observability-view.js": ("57", "3955992d21777b46", ["views/ObservabilityView.vue", "views/entries/observability-view.js"]),
-    "onboarding-view.js": ("8", "115ddd48aa9f0e33", ["components/BindDialog.vue", "views/OnboardingView.vue", "views/entries/onboarding-view.js"]),
-    "organizations.js": ("50", "fe544b62f8f96b79", ["views/Organizations.vue", "views/entries/organizations.js"]),
+    "onboarding-view.js": ("9", "57f9ab1981a5a4c1", ["components/BindDialog.vue", "styles/bridge.css", "views/OnboardingView.vue", "views/entries/onboarding-view.js"]),
+    "organizations.js": ("50", "5f3800b99e562b90", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "views/Organizations.vue", "views/entries/organizations.js"]),
     "pipeline.js": ("54", "d84b05630234d9f0", ["views/Pipeline.vue", "views/entries/pipeline.js"]),
     "register-view.js": ("1", "3358ffefb36ef8d4", ["views/RegisterView.vue", "views/entries/register-view.js"]),
     "repos-view.js": ("59", "0fb2b932fc98fa4d", ["lib/repo-provider.js", "views/LlmCredManager.vue", "views/ReposView.vue", "views/SettingsView.vue", "views/TemplatesView.vue", "views/entries/repos-view.js"]),
-    "runtimes-view.js": ("76", "ba016e4008ced37b", ["views/RuntimesView.vue", "views/entries/runtimes-view.js"]),
-    "sandbox-view.js": ("8", "9176e8c88e6603fe", ["views/SandboxView.vue", "views/entries/sandbox-view.js"]),
-    "scene-market.js": ("58", "6049b47e1bf849e8", ["views/SceneCard.vue", "views/SceneMarket.vue", "views/entries/scene-market.js"]),
-    "skills-view.js": ("54", "882311f9f2ddcd0c", ["views/SkillsView.vue", "views/entries/skills-view.js"]),
+    "runtimes-view.js": ("77", "e0e5a0299ec7cd39", ["styles/bridge.css", "views/RuntimesView.vue", "views/entries/runtimes-view.js"]),
+    "sandbox-view.js": ("9", "cb2048aaf68f5ec1", ["styles/bridge.css", "views/SandboxView.vue", "views/entries/sandbox-view.js"]),
+    "scene-market.js": ("58", "fd117f417f9527a0", ["components/ui/AGButton.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "views/SceneCard.vue", "views/SceneMarket.vue", "views/entries/scene-market.js"]),
+    "skills-view.js": ("54", "d49b7b6128e0b3fb", ["components/ui/AGButton.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "views/SkillsView.vue", "views/entries/skills-view.js"]),
+}
+
+# 已发布过的 (版本号, 源指纹)：浏览器可能已缓存的那一版。
+SHIPPED = {
+    "account-view.js": ("60", "034ac9383784bb7f"),
+    "admin-view.js": ("46", "e59a18dcd51cee02"),
+    "agent-view.js": ("50", "f9a7f9bdba82c363"),
+    "autopilot-view.js": ("54", "3a1b62b5888bb891"),
+    "chat-view.js": ("60", "aff6d59cd544a0a3"),
+    "dashboard-view.js": ("84", "f37f59d1d426f301"),
+    "event-view.js": ("58", "703f793dc2b3235e"),
+    "feedback-dialog.js": ("50", "6ab1db5105a856d4"),
+    "forgot-view.js": ("1", "503253e492ecd273"),
+    "im-channel.js": ("54", "18e46f9e514dddbc"),
+    "issues-view.js": ("62", "912b1bb72fdc636d"),
+    "knowledge-view.js": ("49", "9e67a352975c636e"),
+    "login-view.js": ("2", "2003041303cafeb5"),
+    "my-feedback-detail.js": ("50", "f5b774c8263b4573"),
+    "my-feedback.js": ("50", "4c5998a63a7c9b27"),
+    "observability-view.js": ("57", "3955992d21777b46"),
+    "onboarding-view.js": ("9", "57f9ab1981a5a4c1"),
+    "organizations.js": ("50", "5f3800b99e562b90"),
+    "pipeline.js": ("54", "d84b05630234d9f0"),
+    "register-view.js": ("1", "3358ffefb36ef8d4"),
+    "repos-view.js": ("59", "0fb2b932fc98fa4d"),
+    "runtimes-view.js": ("77", "e0e5a0299ec7cd39"),
+    "sandbox-view.js": ("9", "cb2048aaf68f5ec1"),
+    "scene-market.js": ("58", "fd117f417f9527a0"),
+    "skills-view.js": ("54", "d49b7b6128e0b3fb"),
 }
 
 
@@ -86,7 +124,10 @@ def _page_versions() -> dict:
 
 
 def _resolve(base: Path, ref: str):
-    target = (base.parent / ref).resolve()
+    if ref.startswith(ALIAS + "/"):
+        target = (APP / ref[len(ALIAS) + 1:]).resolve()
+    else:
+        target = (base.parent / ref).resolve()
     if target.is_file():
         return target
     for suffix in (".js", ".vue", ".ts", ".json"):
@@ -102,10 +143,16 @@ def _sources_of(entry: Path, seen=None) -> set:
     if entry in seen:
         return seen
     seen.add(entry)
-    for ref in IMPORT_REL.findall(entry.read_text(encoding="utf-8")):
+    text = entry.read_text(encoding="utf-8")
+    for ref in IMPORT_REL.findall(text):
         target = _resolve(entry, ref)
         if target is not None:
             _sources_of(target, seen)
+    # entry 运行时会以 `'/static-vue/assets/' + f + '?v=N'` 注入这些产物，
+    # 它们的源不在 import 图里 —— 不纳入指纹就会出现「CSS 改了、注入版本没动」的旧缓存窗口。
+    for name, rel in INJECTED_CSS.items():
+        if f"'{name}'" in text:
+            seen.add((APP / rel).resolve())
     return seen
 
 
@@ -140,6 +187,9 @@ def test_every_entry_is_covered():
     assert on_disk == declared, (
         f"views/entries/ 与 vite.config.js 不一致："
         f"仅磁盘={sorted(on_disk - declared)} 仅配置={sorted(declared - on_disk)}")
+    assert set(SHIPPED) == set(FROZEN), (
+        f"SHIPPED 与 FROZEN 的 chunk 集合不一致：仅 FROZEN={sorted(set(FROZEN)-set(SHIPPED))} "
+        f"仅 SHIPPED={sorted(set(SHIPPED)-set(FROZEN))}")
     unlinked = sorted(b for b, (ver, _s, _l) in _bundles().items() if ver == NO_PAGE)
     assert not unlinked, f"这些 chunk 没有任何壳页以 ?v= 引用（无从判缓存）：{unlinked}"
 
@@ -161,6 +211,11 @@ def test_bundle_source_fingerprints_are_frozen():
             problems.append(
                 f"{bundle}: 源内容指纹变化（{f_sha} → {sha}）——改了源文件就必须 bump "
                 f"引用页面的 ?v= 并同步本表")
+        shipped = SHIPPED.get(bundle)
+        if shipped and sha != shipped[1] and ver == shipped[0]:
+            problems.append(
+                f"{bundle}: 源已变但仍沿用已发布的 ?v={ver}——老客户端会继续吃旧 chunk，"
+                f"必须抬档（并同步更新 SHIPPED）")
     for bundle in sorted(set(actual) - set(FROZEN)):
         problems.append(f"{bundle}: 新 chunk 未登记进 FROZEN")
     assert not problems, "前端 chunk 源指纹与冻结值不一致: " + "; ".join(problems)

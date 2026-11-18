@@ -78,7 +78,8 @@ fi
 # 语言包内容指纹/cacheVer 单调）与 node 前端用例此前不在本门禁内，导致「check-all exit 0」
 # 掩盖了 head 上真实失败的守卫。此处纳入统一门禁。
 "$PY" -m pytest -q tests/api/test_frontend_cache_version_ratchet.py \
-                      tests/api/test_i18n_locale_cache_ratchet.py || exit 1
+                      tests/api/test_i18n_locale_cache_ratchet.py \
+                      tests/api/test_frontend_bundle_source_ratchet.py || exit 1
 # G-01（QA 第 6 轮守卫轴）：异步阻塞棘轮——db_lock 长扫描会让心跳/claim/complete
 # 一起排队（实测 4 次复发为 nginx 504 + 引擎失联）。此前不在本门禁内，PR #1507
 # 曾以 +28 新增形态绕过所有「守卫全绿」自述。请求路径新增读一律走
