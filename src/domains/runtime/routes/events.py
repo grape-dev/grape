@@ -550,6 +550,37 @@ def _redispatch_pool_columns(old: dict) -> tuple:
     return ids, sel, scene_id, scene_uid, False
 
 
+def _redispatch_selector_zero_hit(pool_selector, agent_type: str,
+                                  repo_key: str = "", user_id: int = 0) -> str:
+    """selector 轨的入队前零命中校验（与首次派发 `_scene_pool_gate` 同尺）。
+
+    首次派发走 `_scene_pool_gate` → `selector_enqueue_failure_reason`：零命中**不入队**，
+    事件立即 failed（配置死/瞬时死文案分流）。重派此前没有这道闸：selector 模式照样
+    `runtime_id=0` 入队，任务 queued 挂到 `_check_stale_queued_tasks` 120s 才判死——与
+    「SRE 按引擎指定时空绑定立即 fail-closed」不同尺，也与首次派发不同尺。
+
+    返回 "" = 有健康命中引擎（可入队）；非空 = 人话原因（调用方不入队 + 事件 failed + 409）。
+    判据/文案复用 `selector_enqueue_failure_reason`，不在本处另写一套（防双尺漂移）。
+    """
+    import json as _json_zh
+    sel = pool_selector
+    if isinstance(sel, str):
+        try:
+            sel = _json_zh.loads(sel) if sel.strip() else {}
+        except Exception:
+            return ""
+    if not isinstance(sel, dict) or not (sel.get("tags") or []):
+        return ""
+    try:
+        from src.domains.runtime.engine.engine_select import selector_enqueue_failure_reason
+        return selector_enqueue_failure_reason(
+            sel, agent_type, repo_key=repo_key, user_id=user_id) or ""
+    except Exception as e:
+        # 校验本身异常不阻断重派（沿用场景读 fail-open 口径），交给 claim 侧与 120s 降级兜底
+        log.warning(f"[redispatch] selector zero-hit check failed for {repo_key}/{agent_type}: {e}")
+        return ""
+
+
 def _redispatch_pool_log_line(old: dict, pool_selector, pool_ids, scene_id) -> str:
     """重派池列归一的日志措辞（纯函数，QA 原子回归的 grey 面：日志条件化需可断言）。
 
@@ -1432,6 +1463,19 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 _pool_log_253 = _redispatch_pool_log_line(old, _rp_sel_253, _pool_253, _scene_253)
                 if _pool_log_253:
                     log.info(f"[redispatch] seq={seq} {_pool_log_253}")
+                # selector 轨入队前零命中校验（与首次派发 _scene_pool_gate 同尺）：命中 0 台
+                # 健康引擎则不入队、事件立即 failed + 409，而不是 queued 挂到 120s 降级判死。
+                if _rp_sel_253:
+                    _sel_dead_253 = _redispatch_selector_zero_hit(
+                        _rp_sel_253, old.get("agent_type") or "",
+                        repo_key=old.get("repo_key") or "", user_id=_scene_uid_253)
+                    if _sel_dead_253:
+                        from src.domains.runtime.pipeline.event_pipeline import _fail_event as _fail_evt_sel
+                        _fail_evt_sel(seq, _sel_dead_253,
+                                      diag={"code": "SELECTOR_NO_ENGINE",
+                                            "target_stage": "redispatch"})
+                        raise HTTPException(status_code=409, detail={
+                            "code": 409, "message": _sel_dead_253})
                 # 重派时重新解析路由：旧 task 快照的 runtime_id 可能为 0（120s 超时回收产物）。
                 # fallback 链：task.runtime_id → session.runtime_id → 拒派。
                 _rid = old.get("runtime_id") or 0

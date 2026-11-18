@@ -461,3 +461,25 @@ def test_columns_selector_mode_does_not_read_id_pool(monkeypatch):
     assert auth is True, "selector 模式不应因 id 池读取失败而回落快照/报全离线"
     assert ids == ""
     assert json.loads(sel) == {"tags": ["scope:global"]}
+
+
+# ===== 8) selector 轨入队前零命中校验（与首次派发 _scene_pool_gate 同尺） =====
+#
+# 首次派发零命中 → 不入队 + 事件 failed；重派此前没有这道闸，任务 queued 到 120s 才被判死，
+# 与「SRE 按引擎指定时空绑定立即 fail-closed」不同尺。这里复用
+# selector_enqueue_failure_reason 的文案分流，不另写一套判据。
+
+def test_selector_zero_hit_returns_reason_on_empty_pool(env):
+    """库里没有任何引擎带该标签 → 返回「无引擎满足标签」类原因（配置死）。"""
+    reason = events_route._redispatch_selector_zero_hit(
+        json.dumps({"tags": ["engine:no-such", "scope:global"]}), "sre",
+        repo_key="gitcode:x/y", user_id=0)
+    assert reason, "零命中必须返回人话原因（否则任务会 queued 挂到 120s 降级）"
+    assert "无引擎满足标签" in reason or "不在线" in reason
+
+
+def test_selector_zero_hit_silent_for_non_selector_inputs(env):
+    """空串 / 非法 JSON / 空 tags / None 都不是 selector 模式 → 不触发校验。"""
+    for value in ("", "{}", "not-json", json.dumps({"tags": []}), None, {"tags": []}):
+        assert events_route._redispatch_selector_zero_hit(
+            value, "qa", repo_key="gitcode:x/y") == "", f"{value!r} 不应判成零命中"
