@@ -1390,7 +1390,7 @@ function boardFetch(key, opts) {
         // 首屏例外：无旧帧时列到列渐进上屏——先到的列先渲染，最慢的列
         // 不再阻塞整个看板（每列 header 的 loaded/total 也随本列响应到达）。
         round.items[key] = items
-        if (!tasks.value.length && items.length) {
+        if (round.progressive && items.length) {
           mergeBoardItems(items)
           loaded.value = true
           loadError.value = ''
@@ -1480,7 +1480,12 @@ function loadBoardAll(opts) {
       : opts && opts.merge
         ? null
         : createBoardRound(Object.keys(BOARD_CURSOR_STATUSES))
-  if (round) boardRound.value = round
+  // 首屏渐进：无旧帧的整刷，每列到即渲（列头 loaded/total 随各列响应到达）；
+  // 有旧帧的刷新保持 #2649 原子替换（无中间态空板）。
+  if (round) {
+    round.progressive = !tasks.value.length
+    boardRound.value = round
+  }
   return Promise.all(
     Object.keys(BOARD_CURSOR_STATUSES).map((k) =>
       boardFetch(k, round ? Object.assign({}, opts, { round }) : opts)

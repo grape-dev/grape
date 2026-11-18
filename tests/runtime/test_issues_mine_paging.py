@@ -80,6 +80,7 @@ def test_board_first_render_is_progressive():
 
     vue = Path("src/api/frontend/app/src/views/IssuesView.vue").read_text(
         encoding="utf-8")
-    assert "if (!tasks.value.length && items.length)" in vue, (
-        "整刷回合没有首屏例外 → 最慢的列阻塞整个看板渲染")
-    assert "mergeBoardItems(items)\n          loaded.value = true" in vue
+    assert "round.progressive = !tasks.value.length" in vue, (
+        "回合创建时未标记首屏渐进 → 无法区分首屏/刷新")
+    assert "if (round.progressive && items.length)" in vue, (
+        "整刷回合没有首屏例外 → 最慢的列阻塞整个看板渲染（且首列之后到达的列仍被阻塞）")
