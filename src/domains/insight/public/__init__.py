@@ -727,8 +727,15 @@ def emit_event(event_type: str, task_id: str = "", payload=None) -> None:
     _bus.publish(_Event(type=event_type, task_id=task_id, payload=payload))
 
 
+def resolve_error_messages(errors: list, lang: str = "zh") -> list:
+    """R16.2.2: errors 数组按 error_code 补 localized_message（保留原文，JSON 友好）。"""
+    from src.domains.insight.routes.dashboard import _resolve_error_messages as _impl
+    return _impl(errors, lang)
+
+
 __all__ += ["list_alert_rules", "set_alert_rule_policy", "alert_severities",
             "alert_aggregate_modes", "obs_loop_snapshot", "obs_silent_targets",
             "unified_events", "metric_series", "metric_resolutions", "all_metrics",
             "metric_global_dim", "list_slo_summaries", "slo_detail", "create_slo",
-            "update_slo", "get_slo", "ingest_logs", "prometheus_registry", "emit_event"]
+            "update_slo", "get_slo", "ingest_logs", "prometheus_registry", "emit_event",
+            "resolve_error_messages"]

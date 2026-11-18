@@ -446,8 +446,8 @@ def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
         "repo_key": _repo,
     }
     # R16.2.2: 映射 error_code 到本地化文案
-    from src.domains.insight.routes.dashboard import _resolve_error_messages
-    task["errors"] = _resolve_error_messages(task["errors"])
+    from src.domains.insight.public import resolve_error_messages
+    task["errors"] = resolve_error_messages(task["errors"])
 
     # 关联需求（repo_key + issue_id 去 '#'）
     import re as _re
