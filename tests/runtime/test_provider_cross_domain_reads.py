@@ -87,7 +87,11 @@ def test_active_sandboxes_reads_both_queries_across_domains(monkeypatch):
     monkeypatch.setattr(rt, "_fetch_across_domains", fake)
     out = rt.runtime_provider_active_sandboxes("prov-1", types.SimpleNamespace(id=7))
     assert out == {"active_count": 3, "max_sandboxes": 25}
-    # 两条查询都按同一域序列自适应；归属行与 max_sandboxes 合并成一次查询
+    # 两条查询各自按归属域优先：provider_config 三方口径 mgmt → mgmt 优先；
+    # cloud_sandboxes 归属未裁定 → runtime 优先。都不是写死单域。
     assert len(calls) == 2
-    assert all(d == ("runtime", "mgmt") for _, _, d in calls)
+    by_table = {("provider_config" if "provider_config" in sql else "cloud_sandboxes"): dom
+                for sql, _, dom in calls}
+    assert by_table["provider_config"] == ("mgmt", "runtime")
+    assert by_table["cloud_sandboxes"] == ("runtime", "mgmt")
     assert calls[0][1] == ("prov-1", 7)

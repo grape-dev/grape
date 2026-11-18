@@ -3589,14 +3589,15 @@ def runtime_provider_configs(cred: CredentialContext = Depends(_require_credenti
     from src.kernel.crypto import decrypt
     providers = []
     # 三库拓扑：grape_t_sandbox_provider_config 归 mgmt，runtime_credentials 归 runtime，
-    # 单条跨域 JOIN 在 worker 进程库（runtime 域）必然 1146。拆两段读：
-    # provider 行走 _fetch_across_domains，凭据属性按 id 单独取。
+    # 单条跨域 JOIN 在 worker 进程库（runtime 域）必然 1146。拆两段读，各自按
+    # 归属域优先（provider→mgmt，凭据→runtime），只在 1146 时反向兜底。
     rows = _fetch_across_domains(
         "SELECT id, platform, endpoint, api_key_enc, extra_config, max_sandboxes "
         "FROM grape_t_sandbox_provider_config WHERE enabled=1 AND runtime_credential_id=?",
-        (cred.id,))
+        (cred.id,), ("mgmt", "runtime"))
     _rc_rows = _fetch_across_domains(
-        "SELECT name, scope, credential_uid FROM runtime_credentials WHERE id=?", (cred.id,))
+        "SELECT name, scope, credential_uid FROM runtime_credentials WHERE id=?",
+        (cred.id,), ("runtime", "mgmt"))
     _rc_name, credential_scope, _cred_uid = (_rc_rows[0] if _rc_rows else (None, None, None))
     for pid, platform, endpoint, api_key_enc, extra_json, max_sandboxes in rows:
         name = _rc_name
@@ -3630,14 +3631,15 @@ def runtime_provider_active_sandboxes(provider_id: str,
     [安全修正] 与 provider-configs 同口径（用户裁定：rta_ 一律只查自己）——
     只能查自己凭据关联的 Provider。
     """
-    # 三库拓扑：provider_config / cloud_sandboxes 的落库域取决于部署（归属清单记
-    # runtime，beta 实况在 mgmt），都不写死——统一走 _fetch_across_domains，
-    # 只在 1146/表不存在时切域；其它异常原样抛，不静默降级成空计数。
-    # 归属行与 max_sandboxes 合并成一次查询（同一行、同一域）。
+    # 三库拓扑：provider_config 三方口径一致归 mgmt（table_ownership.json、
+    # table-owner.tsv、beta 三库实测），故 mgmt 优先，runtime 仅作兜底；
+    # cloud_sandboxes 归属尚未裁定（清单记 runtime、beta 实况 mgmt），保持
+    # runtime 优先。只在 1146/表不存在时切域，其它异常原样抛（不静默降级成
+    # 空计数，否则流控被绕过）。归属行与 max_sandboxes 合并成一次查询。
     _own_rows = _fetch_across_domains(
         "SELECT max_sandboxes FROM grape_t_sandbox_provider_config "
         "WHERE id=? AND runtime_credential_id=?",
-        (provider_id, cred.id), ("runtime", "mgmt"))
+        (provider_id, cred.id), ("mgmt", "runtime"))
     if not _own_rows:
         raise HTTPException(status_code=403,
                             detail={"code": 403, "message": "provider not bound to this credential"})
