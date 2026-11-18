@@ -80,7 +80,7 @@ def list_platforms(admin: dict = Depends(require_admin)):
 
         log.warning("repo-platforms: table read failed, fallback: %s", e)
 
-    from src.domains.runtime.vcs.platform_card import get_platform_card, list_vcs_platforms
+    from src.domains.runtime.public import get_platform_card, list_vcs_platforms
     from src.domains.platform.capabilities import platform_capabilities
 
     out = []
@@ -88,8 +88,6 @@ def list_platforms(admin: dict = Depends(require_admin)):
         card = get_platform_card(provider)
         if card is None:
             continue
-        from src.domains.runtime.vcs.platform_card import PlatformCard  # noqa: F401
-
         out.append({
             "provider": provider, "name": card.name, "dialect": card.dialect,
             "host": card.host, "api_base": card.api_base, "api_auth": card.api_auth,

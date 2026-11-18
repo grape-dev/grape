@@ -65,7 +65,7 @@ def uow_write(fn):
     bump_epoch()
     try:
         from src.domains.mgmt.auth.providers import invalidate_provider_cache
-        from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
+        from src.domains.runtime.public import invalidate_platform_card_cache
 
         invalidate_provider_cache()
         invalidate_platform_card_cache()

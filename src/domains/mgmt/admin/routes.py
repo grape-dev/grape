@@ -224,7 +224,7 @@ def verify_platform_token(body: VerifyTokenBody, admin: dict = Depends(require_a
     # D88/S115：卡派生判定（消基线二元白名单——D71 登记收口项）。下游
     # config_store.verify_token D30/S50 已卡驱动（任何已配平台可用），白名单
     # 是入口与下游能力脱节的最后一米。未知平台照旧 400 INVALID_PROVIDER。
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     if get_platform_card(body.provider) is None:
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "INVALID_PROVIDER", "message": "provider must be gitcode or github"})
     if not body.token:
@@ -848,7 +848,7 @@ def vcs_platforms_list(admin: dict = Depends(require_admin)):
     import dataclasses as _dc
     import json as _json
     from src.domains.mgmt.user.db import get_meta_value
-    from src.domains.runtime.vcs.platform_card import get_platform_card, list_vcs_platforms
+    from src.domains.runtime.public import get_platform_card, list_vcs_platforms
     # D19：探活数据按平台并入各卡（meta bot_token_health，per-provider 结构）
     _h, _checked_at = {}, ""
     try:
@@ -888,8 +888,8 @@ def vcs_platforms_list(admin: dict = Depends(require_admin)):
             summary="Save vcs platform cards (validated by PlatformCard builder)")
 def vcs_platforms_put(body: VcsPlatformCardBody, admin: dict = Depends(require_admin)):
     import json as _json
-    from src.domains.runtime.vcs.platform_card import build_platform_card, PlatformCardError
-    from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
+    from src.domains.runtime.public import build_platform_card, PlatformCardError
+    from src.domains.runtime.public import invalidate_platform_card_cache
 
     cleaned = {}
     errors = []

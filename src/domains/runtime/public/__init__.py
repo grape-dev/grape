@@ -6816,3 +6816,76 @@ def derive_runtime_health(status: str, last_seen_at: str | None,
 # 原名别名：调用点只改模块路径，函数名保持不变（改动面最小）
 _engines_by_ids = engines_by_ids
 _norm_repo = norm_repo
+
+
+# ── 仓库平台卡 / VCS 客户端门面（2026-11-18）─────────────────────────────────
+# 外域（mgmt 路由与 user 域、contracts 本地适配）此前逐个
+#   from src.domains.runtime.vcs.platform_card import get_platform_card
+#   from src.domains.runtime.vcs.api_client import VcsApiClient
+# 直接 import runtime 内部实现模块（QA 跨域 import 清理项）。
+# 依赖方向收敛为 外域 → runtime.public；实现仍只有 vcs.* 一份。
+# 转发体一律函数内 import：vcs 内部模块在加载期会反向引用 mgmt.public，顶层 import 会成环。
+
+
+def get_platform_card(provider: str):
+    """按 provider 取平台卡快照（未注册 → None；内存缓存 TTL 300s）。"""
+    from src.domains.runtime.vcs.platform_card import get_platform_card as _impl
+
+    return _impl(provider)
+
+
+def list_vcs_platforms() -> list[str]:
+    """已注册（内置默认 + 表配置）的平台 provider 列表。"""
+    from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _impl
+
+    return _impl()
+
+
+def invalidate_platform_card_cache() -> None:
+    """主动失效平台卡内存缓存（表配置写入后调用）。"""
+    from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache as _impl
+
+    return _impl()
+
+
+def build_platform_card(provider: str, raw: dict):
+    """由原始配置构建并校验平台卡（非法配置抛 PlatformCardError）。"""
+    from src.domains.runtime.vcs.platform_card import build_platform_card as _impl
+
+    return _impl(provider, raw)
+
+
+def module_for(provider: str):
+    """取 provider 对应的 VCS 后端模块（providers 注册表口径）。"""
+    from src.domains.runtime.vcs.providers import module_for as _impl
+
+    return _impl(provider)
+
+
+def native_issue_number(value):
+    """issue 编号保持平台原生形态（int 平台返回 int；字符串 ident 平台返回 str）。"""
+    from src.domains.runtime.vcs.api_client import _native_issue_number as _impl
+
+    return _impl(value)
+
+
+# 原名别名：调用点只改模块路径，函数名保持不变（改动面最小）
+_native_issue_number = native_issue_number
+
+
+# 值对象/客户端类：属性访问时再导入（顶层 import 会成环，类也无法用转发函数包住）
+_LAZY_CLASS_ATTRS = {
+    "PlatformCard": ("src.domains.runtime.vcs.platform_card", "PlatformCard"),
+    "PlatformCardError": ("src.domains.runtime.vcs.platform_card", "PlatformCardError"),
+    "VcsApiClient": ("src.domains.runtime.vcs.api_client", "VcsApiClient"),
+}
+
+
+def __getattr__(name: str):
+    """PEP 562 懒导出类：`from src.domains.runtime.public import VcsApiClient` 可用。"""
+    target = _LAZY_CLASS_ATTRS.get(name)
+    if not target:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    return getattr(importlib.import_module(target[0]), target[1])

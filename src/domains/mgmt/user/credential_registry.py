@@ -99,7 +99,7 @@ def _known_platforms() -> tuple:
     （与 repos.py _supported_providers() 同口径）。
     """
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        from src.domains.runtime.public import list_vcs_platforms
         return tuple(sorted(set(list_vcs_platforms()) | {"gitcode", "github"}))
     except Exception:
         # 卡体系不可用（极端启动序）：回退内置四平台（含 gitlab，勿再漏）
@@ -151,7 +151,7 @@ def _is_dynamic_pat(key: str) -> bool:
     if not platform:
         return False
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         return get_platform_card(platform) is not None
     except Exception:
         # 卡体系不可用（极端启动序）：退回内置四平台判定，不放行未知键

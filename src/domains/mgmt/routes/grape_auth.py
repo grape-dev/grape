@@ -938,7 +938,7 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     # 在内置卡/内置渠道中恒在；config-only 平台须已配卡。
     try:
         from src.domains.mgmt.auth.providers import list_providers as _list_channels
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        from src.domains.runtime.public import list_vcs_platforms
         _allowed = set(_list_channels() or []) | set(list_vcs_platforms() or [])
     except Exception as _e:
         from src.kernel.config import log as _alog

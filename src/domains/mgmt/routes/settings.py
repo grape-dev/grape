@@ -76,13 +76,13 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
     # 仓外脚本若按旧语义判断"PAT 已配置"需同步调整。
     # D32: 从 user_credentials 表 + external_identities 读凭据，不查 user_accounts
     from src.api.deps import get_user_token_for
-    from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvcs
+    from src.domains.runtime.public import list_vcs_platforms as _lvcs
     _vcs_platform_list = list(_lvcs())  # D102-P 统一：全平台走泛型 <p>_pat 存在性键
     # S63 守卫收口（LABEL_COLOR 同款契约开关派生）：存量专用字段平台（表单键
     # <p>_token，provider 模块声明 SETTINGS_TOKEN_FIELD_SUFFIX="token"）的 PAT
     # 存在性回退不按平台名比较——按开关派生在下方 _legacy_dedicated_pat 里
     # 现取（get_user_token_for 按平台卡派生 provider），未声明平台恒空。
-    from src.domains.runtime.vcs.providers import module_for as _vcs_module_for
+    from src.domains.runtime.public import module_for as _vcs_module_for
 
     def _legacy_dedicated_pat(p: str) -> str:
         """**仅**凭据域里的 PAT（不再回落到 OAuth 登录令牌）。

@@ -45,7 +45,7 @@ def _provider_credential_columns(provider: str) -> tuple[str, str]:
     """
     tok_col = wh_col = ""
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         card = get_platform_card(provider) if provider else None
         if card is not None:
             tok_col = card.token_storage_field or ""

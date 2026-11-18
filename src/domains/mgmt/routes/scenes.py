@@ -66,7 +66,7 @@ def _branches_cache_invalidate(owner: str, repo: str):
     """按 owner/repo 失效两平台缓存键（建分支后立即可见）。"""
     with _branches_cache_lock:
         try:
-            from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
+            from src.domains.runtime.public import list_vcs_platforms as _lvp
             _pros = _lvp() or []
         except Exception:
             _pros = []
@@ -109,7 +109,7 @@ def _scene_user_provider(user: dict) -> str:
     禁止平台名字面量（gitee/gitlab/华为等一律由卡目录派生）。
     """
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        from src.domains.runtime.public import list_vcs_platforms
         _catalog = list(list_vcs_platforms())
     except Exception:
         _catalog = []
@@ -135,7 +135,7 @@ def _scene_user_login_via_card(user: dict, provider: str) -> str:
     （provider 无关包装器）。login 为空时按 401 抛错触发刷新（存量口径）。
     """
     from src.kernel.token_resolver import create_provider
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
 
     _prov = create_provider(provider)
     _card = get_platform_card(provider)
@@ -1337,7 +1337,7 @@ def _detect_repo_provider(owner: str, repo: str) -> str:
     """
     from src.domains.mgmt.user.db import db_lock, db
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+    from src.domains.runtime.public import list_vcs_platforms
 
     try:
         _provs = list(list_vcs_platforms())
@@ -1389,7 +1389,7 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
         provider = provider or _prov
     # 显式 provider：平台卡在册即采信（不再被双平台白名单打回猜测逻辑，
     # gitee/gitlab 显式传参生效）；否则按托管事实源判定。
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     if provider and get_platform_card(provider) is not None:
         _detected = provider
     else:
@@ -1408,8 +1408,8 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
 
     from src.domains.mgmt.user.db import get_repo_token_with_refresh
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.vcs.api_client import VcsApiClient
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import VcsApiClient
+    from src.domains.runtime.public import get_platform_card
     _card = get_platform_card(provider)
     _pname = _card.name if _card is not None else provider
     _rk = to_repo_key(f"{owner}/{repo}", provider=provider)
@@ -1464,7 +1464,7 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
         provider = provider or _prov
     # 显式 provider：平台卡在册即采信（不再被双平台白名单打回猜测逻辑，
     # gitee/gitlab 显式传参生效）；否则按托管事实源判定。
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import get_platform_card
     if provider and get_platform_card(provider) is not None:
         _detected = provider
     else:
@@ -1476,8 +1476,8 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
 
     from src.domains.mgmt.user.db import get_repo_token_with_refresh
     from src.kernel.repo_key import to_repo_key
-    from src.domains.runtime.vcs.api_client import VcsApiClient
-    from src.domains.runtime.vcs.platform_card import get_platform_card
+    from src.domains.runtime.public import VcsApiClient
+    from src.domains.runtime.public import get_platform_card
     _card = get_platform_card(provider)
     _pname = _card.name if _card is not None else provider
 

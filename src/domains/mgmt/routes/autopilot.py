@@ -645,7 +645,7 @@ def list_executions(
             rk = repo_key_map.get(tid, "")
             if rk:
                 try:
-                    from src.domains.runtime.vcs.api_client import _native_issue_number
+                    from src.domains.runtime.public import _native_issue_number
                     agent_task_ids = _find_agent_task_ids(rk, _native_issue_number(issue_number))
                 except Exception:
                     agent_task_ids = []
