@@ -9,10 +9,12 @@
   `tests/api/test_i18n_locale_cache_ratchet.py` 用「历史下界 + 内容指纹」守护；
 - 第三方 vendor 库版本随打包固定，走白名单。
 """
+import hashlib
 import re
 from pathlib import Path
 
 SHELL = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "shell"
+APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend" / "app" / "src"
 
 # 页面 → {模块: 冻结版本}（2026-11-13 缓存版本回填/统一后快照）
 FROZEN = {
@@ -110,3 +112,57 @@ def test_register_and_forgot_agree():
         for chunk in chunks:
             assert chunk in _scan(page), f"{page} 缺少专属 view chunk {chunk}"
             assert chunk not in _scan(other), f"{chunk} 不应出现在 {other} 上"
+
+
+# —— all-views.css「内容指纹 + 版本」绑定（架构守护第 8 轮 I-1 收口）——
+# `all-views.css` 是 vite 构建产物（不入库）：= bridge.css + ag-ui.css（AG 组件样式聚合）
+# + 各 view 的 scoped CSS 合并，`admin-view.css` 除外（AdminView.vue 的样式非 scoped、
+# 只进 admin.html，见 vite.config.js 的 viewCssMap 与合并逻辑）。此前它只有版本号冻结、
+# 无内容绑定——改了 scoped 样式却不动 `all-views.css?v=40` 时版本棘轮全绿，持缓存的
+# 客户端继续吃旧样式。本守卫直接指纹其**源**（仿 i18n 棘轮）：
+#   · 源集 = styles/bridge.css + 全部带 <style> 的 .vue（pages/ 未参与构建、admin 三件
+#     的 CSS 单独走 admin-view.css，均排除）；任一源文件内容变化 → 红。
+# 纪律：改上述任一源 → bump index.html 的 `all-views.css?v=`，并同步更新本处
+# （版本, 指纹）对与上方 FROZEN（同一次提交）。
+
+# all-views.css 与其源的（页面版本, 内容指纹）配对登记
+ALL_VIEWS = ("40", "f9276fc6e420d09b")
+
+# admin 三件：AdminView.vue（非 scoped，样式走 admin-view.css）+ 只被 admin chunk
+# 引用的 AdminChannels/AdminPlatforms（其 CSS 并入 admin-view.css，不进 all-views）
+ALL_VIEWS_EXCLUDED = {"AdminView.vue", "AdminChannels.vue", "AdminPlatforms.vue"}
+
+
+def _all_views_sources() -> list:
+    srcs = [APP / "styles" / "bridge.css"]
+    srcs += sorted(
+        p for p in APP.rglob("*.vue")
+        if "<style" in p.read_text(encoding="utf-8")
+        and p.relative_to(APP).parts[0] != "pages"
+        and p.name not in ALL_VIEWS_EXCLUDED
+    )
+    return srcs
+
+
+def _all_views_fingerprint() -> str:
+    h = hashlib.sha1()
+    for s in _all_views_sources():
+        h.update(str(s.relative_to(APP)).encode())
+        h.update(b"\0")
+        h.update(s.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+def test_all_views_css_content_bound_to_version():
+    """all-views.css 的源内容变了就必须抬版本并同步本文件的配对登记。"""
+    href = re.search(r"all-views\.css\?v=(\d+)", (SHELL / "index.html").read_text(encoding="utf-8"))
+    assert href, "index.html 未以 ?v= 引用 all-views.css"
+    actual_ver, actual_fp = href.group(1), _all_views_fingerprint()
+    reg_ver, reg_fp = ALL_VIEWS
+    assert (actual_ver, actual_fp) == (reg_ver, reg_fp), (
+        f"all-views.css 源内容/版本与登记不符：页面 ?v={actual_ver} 指纹={actual_fp}，"
+        f"登记 ?v={reg_ver} 指纹={reg_fp}——改了 bridge.css / AG 组件 / 任一 view 的 "
+        f"scoped 样式就必须 bump index.html 的 all-views.css?v=，"
+        f"并同步更新本文件 ALL_VIEWS 与 FROZEN（同一次提交）"
+    )
