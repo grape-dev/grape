@@ -191,3 +191,11 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_2133_recovery.py -v
+      - name: Org unassigned int/str visibility tests (issue #3167)
+        # Issue #3167 QA 审查修复（Required）：新增回归用例
+        # tests/mgmt/test_issue_3167_org_unassigned_int.py 此前未接入 CI，int org_id
+        # 导致的 500 与静默漏行回归只能靠人工本地 pytest；接入 linux-backend 门禁
+        # （先例 #1613/#1982/#2133/#2479 均由 QA 要求补齐）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/mgmt/test_issue_3167_org_unassigned_int.py -v
