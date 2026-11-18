@@ -1517,12 +1517,12 @@ class ImEngine:
                         # 直接交给本渠道 Sender —— 各渠道 Sender.send 都自己处理 metadata.raw_card
                         # （2026-11-18 实障：钉钉报 DingtalkAdapterApi has no attribute send_card_to_chat）。
                         _inst_id = str((inst or {}).get("installation_id") or (inst or {}).get("id") or "")
-                        _chan = ((getattr(engine, "supervisor", None) and
-                                  getattr(engine.supervisor, "_channels", {}) or {}).get(_inst_id))
-                        _sender = getattr(_chan[0], "_sender", None) if _chan else None
-                        if _sender is not None:
+                        # 走 Channel 公开契约（channel_for + send），不读 supervisor/_sender 私有属性
+                        _lookup = getattr(getattr(engine, "supervisor", None), "channel_for", None)
+                        _channel = _lookup(_inst_id) if _lookup is not None else None
+                        if _channel is not None:
                             from src.domains.runtime.im.channel.message import OutboundMessage
-                            _res = await _sender.send(OutboundMessage(
+                            _res = await _channel.send(OutboundMessage(
                                 chat_id=chat_id, text=text or "",
                                 metadata={"raw_card": raw_card, "kind": kind or "card"}))
                             if getattr(_res, "ok", False):
@@ -1552,13 +1552,12 @@ class ImEngine:
                     return await _f(ctx, chat_id, text, fallback_open_id=target_user,
                                     title=title, template=template)
                 _inst_id2 = str((inst or {}).get("installation_id") or (inst or {}).get("id") or "")
-                _chan2 = ((getattr(engine, "supervisor", None) and
-                           getattr(engine.supervisor, "_channels", {}) or {}).get(_inst_id2))
-                _sender2 = getattr(_chan2[0], "_sender", None) if _chan2 else None
-                if _sender2 is not None:
+                _lookup2 = getattr(getattr(engine, "supervisor", None), "channel_for", None)
+                _channel2 = _lookup2(_inst_id2) if _lookup2 is not None else None
+                if _channel2 is not None:
                     from src.domains.runtime.im.channel.message import OutboundMessage
-                    _res2 = await _sender2.send(OutboundMessage(chat_id=chat_id, text=text,
-                                                                metadata={"kind": kind or "card"}))
+                    _res2 = await _channel2.send(OutboundMessage(chat_id=chat_id, text=text,
+                                                                 metadata={"kind": kind or "card"}))
                     return (getattr(_res2, "message_id", "") or "ok") if getattr(_res2, "ok", False) else ""
                 return ""
             except Exception as e:

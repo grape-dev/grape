@@ -370,6 +370,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { ONBOARD_POLL_MS } from '@/lib/onboard.js'
 
 const G = globalThis
 const uid = Math.random().toString(36).slice(2, 8)
@@ -1505,7 +1506,7 @@ function pollOnboardStatus() {
       clearInterval(onboardTimer)
       onboardTimer = null
     }
-  }, 2000)
+  }, ONBOARD_POLL_MS)
 }
 function stopOnboardPoll() {
   if (onboardTimer) {

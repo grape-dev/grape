@@ -54,9 +54,26 @@ WECOM_CAPABILITIES = (Capability.TEXT | Capability.RICH_CARD | Capability.CARD_A
 REPLY_WINDOW_SECS = 24 * 3600.0   # 官方：收到消息回调后 24h 内可回复
 CHAT_DIR_TTL = 7 * 24 * 3600.0    # 会话类型台账（主动推送需要 chat_type）
 REQUEST_TIMEOUT = 10.0
+
+
+def _env_float(name: str, default: float) -> float:
+    """环境变量读取浮点阈值（非法/空值回落默认，绝不因配置错误打断建连）。"""
+    import os
+    raw = os.environ.get(name, "")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
 # 发送时若长连接还没建好（凭证刚保存/正在重连），先等这么久再判定失败：
 # 否则首条通知直接撞 "long connection is not established"，脚本/监控口径显示 failed。
-CONNECT_WAIT_SECS = 8.0
+# 取值来源（2026-11-18 本机实测，13 次握手样本）：established → subscribed 的 ack 时延
+# p50=0.177s / p95=0.189s / max=0.323s；8s ≈ 25× 实测上界，同时明显小于下面的
+# REQUEST_TIMEOUT(10s)，保证"等不到就显式失败"而不是把发送方挂死。
+# 需要按环境调整时用 GRAPE_WECOM_CONNECT_WAIT_SECS 覆盖（秒）。
+CONNECT_WAIT_SECS = _env_float("GRAPE_WECOM_CONNECT_WAIT_SECS", 8.0)
 CHUNK_BYTES = 512 * 1024          # 上传分片上限（base64 编码前）
 MAX_CHUNKS = 100
 MEDIA_LIMITS = {"file": 20 * 1024 * 1024, "image": 10 * 1024 * 1024,

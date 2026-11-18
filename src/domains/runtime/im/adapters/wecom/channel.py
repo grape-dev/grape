@@ -147,6 +147,9 @@ class WecomChannel(Channel):
         self._conn_seq = 0
         self._conn_started_at = 0.0
         self._kicks_this_conn = 0
+        # 累计"会话接管"事件数（公开只读计数，供 Supervisor 并入 flap 归因桶，
+        # 见 engine/metrics.py FLAP_CAUSES 的 takeover；架构审查 A13 要求可观测）
+        self.takeover_count = 0
         self.subscribed = False
         self.bot_id = bot_id
 
@@ -348,6 +351,7 @@ class WecomChannel(Channel):
             # 口径：第一次只告警、继续用这条连接（真断线由 90s 读超时 / ping 失败兜底）；
             # 同一条连接收到第二次 = 确实被别的新会话连续顶掉，才交给 Supervisor 重连。
             self._kicks_this_conn += 1
+            self.takeover_count += 1
             alive = time.monotonic() - (self._conn_started_at or time.monotonic())
             log.warning("[wecom:%s] ws#%d disconnected_event after %.1fs "
                         "(kicks_this_conn=%d)%s",

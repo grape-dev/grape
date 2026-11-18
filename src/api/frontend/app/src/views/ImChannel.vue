@@ -262,6 +262,7 @@
 <script setup>
 import { ref, reactive, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import AGCard from '@/components/ui/AGCard.vue'
+import { ONBOARD_POLL_MS } from '@/lib/onboard.js'
 import AGButton from '@/components/ui/AGButton.vue'
 
 const G = globalThis
@@ -580,7 +581,7 @@ function pollOnboard() {
         }
       })
       .catch(function () { stopOnboardTimers() })
-  }, 2000)
+  }, ONBOARD_POLL_MS)
 }
 
 function startOnboardCountdown() {

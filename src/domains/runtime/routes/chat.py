@@ -74,7 +74,19 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 # 孤儿轮次判定：user 行已落库、agent 行始终没有（执行进程死掉/任务丢失），
 # 超过这个时长就不再报 running，直接判「任务已中断」，避免页面永久"处理中"。
-# 取 30 分钟：正常长任务（多轮工具调用）远达不到，又不至于让用户白等半天。
+# 取值来源（2026-11-18 本机库 chat_messages 实测，可用 user→agent 配对样本 n=3）：
+# 轮次时长 27s / 182s / 318s（p50=182s，max=318s≈5.3min）；30min ≈ 5.6× 实测最长轮次。
+# 样本量小 → 必须可配置：GRAPE_CHAT_ORPHAN_TURN_TIMEOUT_SECS（秒），
+# 长任务占比高的部署把它调大即可，无需改代码。
+def _orphan_timeout_secs() -> float:
+    raw = os.environ.get("GRAPE_CHAT_ORPHAN_TURN_TIMEOUT_SECS", "")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 30 * 60.0
+    return value if value > 0 else 30 * 60.0
+
+
 ORPHAN_TURN_TIMEOUT_SECS = 30 * 60.0
 
 
@@ -1899,8 +1911,19 @@ async def update_chat_config(body: dict, request: Request,
         from src.domains.runtime.im.engine_wiring import revoke_installation, sync_installation
         _uid = str(user["id"])
         _old_channel = old_channel
-        if explicit_unbind and old_app_id:
-            if not revoke_installation("user", owner_user_id=_uid, app_id=old_app_id,
+        # 解绑：优先撤"本次请求仍看得见的旧 app"；若配置已在上一步被清空（old_app_id 为空，
+        # 典型场景 = 上一次解绑 revoke 失败返回 502 后用户重试），退化为按 provider 撤销
+        # 当前仍 active 的安装行 —— 否则重试路径恒跳过 revoke，返回 200 但 bot 继续工作
+        # （架构审查 I3：解绑不可自愈）。
+        _revoke_app = old_app_id
+        if explicit_unbind and not _revoke_app:
+            try:
+                _still_active = _get_provider_installation(user["id"], _old_channel) or {}
+                _revoke_app = str((_still_active.get("config") or {}).get("app_id", "") or "")
+            except Exception:
+                _revoke_app = ""
+        if explicit_unbind and _revoke_app:
+            if not revoke_installation("user", owner_user_id=_uid, app_id=_revoke_app,
                                        channel_type=_old_channel):
                 _inst_problem = "渠道安装未撤销（revoke 未命中）"
         elif _new_app:
@@ -2799,12 +2822,13 @@ def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token
         # 4=conversation_id 5=created_at
         conv_id = (rows[0][4] if rows and len(rows[0]) > 4 else "") or ""
         age = _turn_age_secs(rows[0][5] if rows and len(rows[0]) > 5 else "")
-        if age is not None and age > ORPHAN_TURN_TIMEOUT_SECS:
+        _orphan_timeout = _orphan_timeout_secs()
+        if age is not None and age > _orphan_timeout:
             log.info(f"chat task status: orphan turn {task_id} aged {int(age)}s "
                      f"→ error (no agent row)")
             return {"task_id": task_id, "status": "error", "result": "",
                     "text": "", "conversation_id": conv_id,
-                    "error": f"任务已中断（超过 {int(ORPHAN_TURN_TIMEOUT_SECS // 60)} 分钟无回复记录）",
+                    "error": f"任务已中断（超过 {int(_orphan_timeout // 60)} 分钟无回复记录）",
                     "source": "db"}
         return {"task_id": task_id, "status": "running", "result": "",
                 "text": "",
