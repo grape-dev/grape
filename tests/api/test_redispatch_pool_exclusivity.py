@@ -198,25 +198,93 @@ def test_switched_to_engine_list_writes_only_ids(env, monkeypatch):
     assert (row_sel or "") == "", "id 池轨不得残留 selector（claim 双闸门互斥）"
 
 
-# ===== 4) 接线守卫：非本机重派必须用解析结果，不得回到「快照原样透传」 =====
+# ===== 4) 接线守卫：真实调用路径的静态核查（不用字符串匹配） =====
+#
+# 教训：上一版守卫用 `assert "pool_engine_ids=_rp_ids_253" in src` 做「接线断言」，
+# 结果把一处未定义变量（NameError）当成期望值钉死，16 passed 全是恒绿摆设。
+# 现在改成 AST 级核查：解析 events.py，收集函数内真实绑定的名字（赋值/for/with/except/
+# 推导式/参数），再检查 `redispatch_event` 里所有被读取的局部名是否都有绑定来源。
 
-def test_redispatch_enqueue_uses_resolved_columns():
-    """源码级接线断言：终态重建入队不得再直接透传快照池列。
+import ast
+import builtins
 
-    上两层测的是解析函数；这里钉住「路由真的用了它」——否则函数再对，路径回到
-    `pool_selector=old.get("pool_selector")` 就又是同一个 bug（曾经发生过一次）。
 
-    local_only「本机重试」分支例外：它的语义就是钉住原引擎，快照池列与钉住的
-    runtime_id 必须同源，故保留一处快照透传（双池互斥由 enqueue_task 收口兜底）。
+def _bound_names(fn):
+    """函数内所有「有绑定来源」的名字（保守：任一位置赋值即视为已绑定）。"""
+    names = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            for a in getattr(node.args, "args", []) if hasattr(node, "args") else []:
+                names.add(a.arg)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                names.add((a.asname or a.name).split(".")[0])
+        elif isinstance(node, ast.Global) or isinstance(node, ast.Nonlocal):
+            names.update(node.names)
+    return names
+
+
+def _loaded_names(fn):
+    return {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+
+
+def test_redispatch_route_has_no_unbound_locals():
+    """`redispatch_event` 内每个被读取的名字都必须有绑定来源（否则运行时 NameError）。
+
+    这是回归守卫：曾把 `_rp_ids_253`（从未赋值）当期望值钉进字符串断言，导致终端重建
+    分支必抛 NameError 而 16 个用例全绿。
     """
     src_path = __import__("pathlib").Path(events_route.__file__)
-    src = src_path.read_text(encoding="utf-8")
-    assert "pool_selector=_rp_sel_253" in src, "终态重建入队未使用解析后的 selector"
-    assert "pool_engine_ids=_rp_ids_253" in src, "终态重建入队未使用解析后的 id 池"
-    assert "_redispatch_pool_columns(old)" in src, (
-        "终态重建分支未按场景成对解析池列")
-    snapshot_passthrough = 'pool_selector=old.get("pool_selector")'
-    assert src.count(snapshot_passthrough) == 1, (
-        "快照透传 selector 只允许留在 local_only「本机重试」分支，其余路径必须走解析")
-    assert src.find(snapshot_passthrough) < src.find("pool_selector=_rp_sel_253"), (
-        "剩下的快照透传必须位于终态重建解析之前（即 local_only 分支）")
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+    module_names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                module_names.add((a.asname or a.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            module_names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    module_names.add(t.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            module_names.add(node.target.id)
+    fns = [n for n in ast.walk(tree)
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "redispatch_event"]
+    assert fns, "events.py 里找不到 redispatch_event —— 路由被重命名了，守卫要同步"
+    fn = fns[0]
+    known = _bound_names(fn) | module_names | set(dir(builtins)) | {"__file__", "__name__"}
+    missing = sorted(_loaded_names(fn) - known)
+    assert not missing, f"redispatch_event 里存在未绑定的局部名（运行时 NameError）: {missing}"
+
+
+def test_redispatch_enqueue_passes_named_columns():
+    """`redispatch_event` 的每个 enqueue_task 都必须用「有绑定的局部名」传池两列。
+
+    这样既堵住未定义变量，也堵住回退成内联 `old.get(...)` 快照透传（曾经的真实缺陷形态）。
+    """
+    src_path = __import__("pathlib").Path(events_route.__file__)
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+    fn = [n for n in ast.walk(tree)
+          if isinstance(n, ast.FunctionDef) and n.name == "redispatch_event"][0]
+    known = _bound_names(fn)
+    calls = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "enqueue_task"]
+    assert len(calls) >= 2, f"redispatch_event 里应有两处 enqueue_task（本机重试 + 终态重建），实际 {len(calls)}"
+    for i, call in enumerate(calls):
+        kws = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        for key in ("pool_selector", "pool_engine_ids"):
+            assert key in kws, f"第 {i+1} 处 enqueue_task 缺少 {key} 实参"
+            val = kws[key]
+            assert isinstance(val, ast.Name), (
+                f"第 {i+1} 处 enqueue_task 的 {key} 是 {type(val).__name__}，"
+                f"必须传解析后的局部名（禁止内联快照透传）")
+            assert val.id in known, (
+                f"第 {i+1} 处 enqueue_task 的 {key}={val.id} 在作用域内没有绑定来源（NameError）")

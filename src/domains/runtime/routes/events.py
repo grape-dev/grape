@@ -959,6 +959,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         # 不换机器，因此池列仍取旧任务快照（按场景改写圈池会与钉住的 runtime_id 打架：
         # 场景切 selector 后原引擎不在标签命中集，bound claim 会被 selector 守卫 fail-closed）。
         # 双池互斥由 enqueue_task 单点收口兜底（见 service.enqueue_task）。
+        _pool_ids_l = old.get("pool_engine_ids") or ""
+        _pool_sel_l = old.get("pool_selector") or ""
         _new_task_id = enqueue_task(
             agent_session_id=old.get("agent_session_id") or "",
             runtime_id=_orig_rid,
@@ -984,8 +986,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             # （实测 t_9db5dc22d459 selector+s2(25) → 重派 t_71bf707a1555 空选择器
             # 被本机 2 抢走：沙箱场景静默失去圈池+隔离语义）。透传后 claim 按原
             # selector 圈池，与首次派发同一把尺子（同源 selector_candidate_engines）。
-            pool_selector=old.get("pool_selector") or "",
-            pool_engine_ids=old.get("pool_engine_ids") or "",
+            pool_selector=_pool_sel_l,
+            pool_engine_ids=_pool_ids_l,
             pool_engine_source=old.get("pool_engine_source") or "",
         )
         # 本机 direct 引擎 → 触发直接执行
@@ -1509,7 +1511,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     issue_session_id=_sid,
                     pool_tag=old.get("agent_type") or "" if is_plugin_mode() else "",
                     pool_agent_type=old.get("agent_type") or "" if is_plugin_mode() else "",
-                    pool_engine_ids=_rp_ids_253,
+                    pool_engine_ids=_pool_ids_253,
                     # [Issue #1208 补漏 2026-11-18] selector 与 id/uid 池三列互斥，此处已按
                     # 场景现行配置成对解析（selector 模式=id 池空；id/uid 模式=selector 空），
                     # 原「快照 selector 原样透传」会让场景改模式后的重派任务互斥死锁或退化成广播
