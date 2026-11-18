@@ -1166,6 +1166,18 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     if not runtime_id and not pool_agent_type:
         raise ValueError("runtime_id or pool_agent_type is required (确定路由 D3)")
     task_id = "t_" + uuid.uuid4().hex[:12]
+    # 双池互斥（Issue #1208 补漏，2026-11-18）：selector 与 id/uid 池三列语义互斥，但重派
+    # 终态重建路径会「重读场景 id 池 + 原样透传旧任务的 pool_selector」，使同一行同时挂两套
+    # 圈池语义 —— claim 第③级 selector 守卫排除池内引擎、池过滤又排除池外引擎，任务永远
+    # 抢不到引擎、事件长挂 running（实测 t_13f1ac8d9239：池=[17382(scope:repo)] +
+    # 选择器 {"tags":["scope:global"]}，每 4s 两条 skip 日志，且排队超时兜底因 selector
+    # 侧仍有健康命中引擎而不判死）。
+    # 入队单点收口：id 池非空即视为最新解析结果，丢弃与之冲突的 selector。
+    if (pool_selector or "").strip() and (pool_engine_ids or "").strip() not in ("", "[]"):
+        log.warning(f"enqueue_task: conflicting pool_engine_ids={pool_engine_ids} and "
+                    f"pool_selector={pool_selector} (task {task_id}); id pool wins, "
+                    f"dropping stale selector (three-column exclusivity)")
+        pool_selector = ""
     skill_files = {}
     # Issue #463 P2 扩展（2026-10-27）：skill_files URL/引用单写——技能在 OBS 有原始 zip
     # （file_path 非空，99% 的技能满足），DB 里再存一份完整内容拷贝属于双写：
