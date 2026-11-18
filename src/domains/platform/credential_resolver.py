@@ -81,15 +81,11 @@ def _channel_token(session, user_id: str, channel: str) -> str:
 
         from src.domains.mgmt.auth.credential_crypto import decrypt
 
-        row = session.execute(
-            text(
-                "SELECT access_token FROM external_identities "
-                "WHERE grape_user_id=:u AND provider=:p AND status IN (1,4) LIMIT 1"
-            ),
-            {"u": str(user_id), "p": channel},
-        ).fetchone()
-        if row and row[0]:
-            return decrypt(row[0])
+        # 表归 mgmt：SQL 在 mgmt public 一份（返回密文，解密仍在这里做）
+        from src.domains.mgmt import public as _mg_tok
+        _enc_tok = _mg_tok.channel_access_token(str(user_id), channel)
+        if _enc_tok:
+            return decrypt(_enc_tok)
     except Exception as e:
         log.warning("credential_resolver: channel token read failed %s/%s: %s", user_id, channel, e)
     return ""

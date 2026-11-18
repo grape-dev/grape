@@ -3080,6 +3080,19 @@ def sandbox_template_row(provider_id: str, template_id: str) -> tuple:
 
 # ── 沙箱配置读侧（runtime 执行链读管理面配置）────────────────────────────
 # ── 出口策略读侧（runtime 执行链按技能查放行策略）──────────────────────
+def channel_access_token(grape_user_id: str, provider: str) -> str:
+    """该用户在该渠道的 OAuth access_token 密文（status IN (1,4) 首条）；无行返回空串。
+
+    解密仍由调用方做（credential_crypto 归 mgmt，但明文不出域）。
+    """
+    with db_registry.cursor("mgmt") as c:
+        c.execute("SELECT access_token FROM external_identities "
+                  "WHERE grape_user_id=%s AND provider=%s AND status IN (1,4) LIMIT 1",
+                  (str(grape_user_id), provider))
+        row = c.fetchone()
+        return str(row[0] or "") if row else ""
+
+
 def egress_policy_for_skill(skill_name: str) -> str:
     """该技能的放行策略（skill_scope 降序取第一条）；无行返回空串。"""
     with db_registry.cursor("mgmt") as c:
