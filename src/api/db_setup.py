@@ -7642,31 +7642,11 @@ register_migration(
 
 # ===== 同域配对收口（2026-11-14 用户裁定「同域配对是错误配置」）=====
 
-def _fn_drop_same_domain_links() -> None:
-    """删除 oauth_provider == repo_provider 的关系行。
+# 迁移内容（含 SQL）住在 owner 域：src/domains/mgmt/migrations/drop_same_domain_links.py
+# 引导器只负责注册，不再持有本域表的 SQL。
+from src.domains.mgmt.migrations.drop_same_domain_links import MIGRATION as _M_DROP_SAME_DOMAIN
 
-    同域不是授权：渠道自己就是平台，运行时 `hooks._targets` 天然补上自己。
-    这些行是上一版"只认配置"留下的冗余数据（configs 里也配过同名对）。
-    """
-    from src.kernel.session_manager import db, db_lock
-
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT COUNT(*) FROM grape_t_channel_repo_link"
-                  " WHERE oauth_provider = repo_provider")
-        n = (c.fetchone() or [0])[0]
-        if n:
-            c.execute("DELETE FROM grape_t_channel_repo_link WHERE oauth_provider = repo_provider")
-        db.commit()
-    log.info(f"202611170033 清理同域配对关系行 {n} 条（同域由运行时隐式提供）")
-
-
-register_migration(
-    version="202611170033",
-    name="drop-same-domain-channel-links",
-    kind="backfill",  # 纯数据清理，无 DDL：不受 min_code_version 门槛约束
-    fn=_fn_drop_same_domain_links,
-)
+register_migration(**_M_DROP_SAME_DOMAIN)
 
 
 
