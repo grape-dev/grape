@@ -141,7 +141,7 @@
       </div>
 
       <!-- 右栏：对话面板 -->
-      <div id="convPanel" class="cd ev__convpanel">
+      <div id="convPanel" class="cd ev__convpanel" :class="{ 'ev__convpanel--fs': convFs }">
         <div class="ev__convhdr">
           <h3 class="ev__convtitle">{{ t('section_conversation', { name: agentName }) }}</h3>
           <div class="ev__convbtns">
@@ -152,8 +152,12 @@
             >
               {{ t('clear_conv_btn') }}
             </button>
-            <button class="ev__fsbtn" :title="t('fullscreen_title')" @click="toggleConvFullscreen">
-              {{ t('fullscreen_btn') }}
+            <button
+              class="ev__fsbtn"
+              :title="convFs ? t('exit_fullscreen_title') : t('fullscreen_title')"
+              @click="toggleConvFullscreen"
+            >
+              {{ convFs ? t('fullscreen_restore_btn') : t('fullscreen_btn') }}
             </button>
           </div>
         </div>
@@ -197,7 +201,7 @@
     <!-- ═══ 任务日志模态（SSE 实时 / 内联） ═══ -->
     <Teleport to="body">
       <div v-if="taskLog.open" class="ev__tl-overlay" @click.self="closeTaskLog">
-        <div class="ev__tl-box">
+        <div class="ev__tl-box" :class="{ 'ev__tl-box--fs': tlFs }">
           <div class="ev__tl-hdr">
             <span class="ev__tl-title"
               >{{ taskLog.inline ? t('log_title_inline') : t('log_title_realtime') }}
@@ -219,10 +223,10 @@
             <button
               v-if="!taskLog.inline"
               class="ev__tl-btn"
-              :title="t('fullscreen_title')"
+              :title="tlFs ? t('exit_fullscreen_title') : t('fullscreen_title')"
               @click="toggleTaskLogFullscreen"
             >
-              {{ t('fullscreen_btn') }}
+              {{ tlFs ? t('fullscreen_restore_btn') : t('fullscreen_btn') }}
             </button>
             <button class="ev__tl-btn" @click="closeTaskLog">{{ t('log_close') }}</button>
           </div>
@@ -1868,6 +1872,7 @@ function closeTaskLog() {
     tlStatusTimer = null
   }
   killBtnVisible.value = false
+  tlFs.value = false
 }
 G.window.openTaskLog = openTaskLog
 G.window.closeTaskLog = closeTaskLog
@@ -1878,13 +1883,22 @@ function toggleTaskLogFullscreen() {
   tlFs.value = !tlFs.value
 }
 
+// Esc 退出全屏（对话/任务日志），与事件页 v1 的键位一致
+function onFsKeydown(e) {
+  if (e.key !== 'Escape') return
+  if (tlFs.value) tlFs.value = false
+  if (convFs.value) convFs.value = false
+}
+
 onBeforeUnmount(function () {
   stopPoll()
   closeTaskLog()
+  document.removeEventListener('keydown', onFsKeydown)
   if (convStreamAbort) convStreamAbort.abort()
 })
 
 onMounted(function () {
+  document.addEventListener('keydown', onFsKeydown)
   if (data.value.seq) {
     lastFp = fingerprint(data.value)
     loadConversation()
@@ -2073,6 +2087,18 @@ onMounted(function () {
   height: 100%;
   overflow: hidden;
 }
+/* 对话全屏：CSS 类切换（DOM 不搬运），沿用事件页 v1 的 fixed 铺满语义 */
+.ev__convpanel--fs {
+  position: fixed;
+  inset: 0;
+  z-index: 1001;
+  height: auto;
+  border-radius: 0;
+  border: none;
+  padding: 18px;
+  box-sizing: border-box;
+  background: var(--bg, #11151c);
+}
 .ev__convhdr {
   flex-shrink: 0;
   display: flex;
@@ -2201,6 +2227,15 @@ onMounted(function () {
   width: 100vw;
   height: 100vh;
   border-radius: 0;
+}
+/* 任务日志全屏（按钮切换，不依赖浏览器 Fullscreen API） */
+.ev__tl-box--fs {
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+  border: none;
 }
 .ev__tl-hdr {
   display: flex;

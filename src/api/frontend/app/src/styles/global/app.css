@@ -496,10 +496,14 @@
 .chat-inpicker-btn:hover{color:var(--a);background:var(--bg)}
 .chat-inpicker-btn.active{color:var(--a);background:var(--a)11}
 .chat-picker-overlay{position:fixed;inset:0;z-index:997}
-.chat-picker-pop{position:fixed;width:280px;background:var(--c);border:1px solid var(--b);border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,.15);opacity:0;transform:translateY(8px) scale(.96);transition:all .2s cubic-bezier(.25,.1,.25,1);z-index:998;overflow:hidden}
+.chat-picker-pop{position:fixed;width:300px;background:var(--c);border:1px solid var(--b);border-radius:18px;box-shadow:0 24px 64px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.08);opacity:0;transform:translateY(6px) scale(.96);transform-origin:50% 100%;transition:opacity .18s cubic-bezier(.32,.72,0,1),transform .24s cubic-bezier(.32,.72,0,1);z-index:998;overflow:hidden}
 .chat-picker-pop.show{opacity:1;transform:translateY(0) scale(1)}
-.chat-picker-item:hover{background:var(--bg)}
-.chat-picker-item.active:hover{background:var(--a)22}
+/* 浮层行：整行可点，靠留白与 hover 底色分区，不画边框（统一面板口径） */
+.chat-picker-item{display:flex;align-items:center;gap:10px;min-height:38px;padding:0 10px;margin:1px 0;border-radius:10px;color:var(--t);cursor:pointer;transition:background .15s ease,color .15s ease}
+.chat-picker-item:hover{background:var(--hover-row)}
+.chat-picker-item.active{background:color-mix(in srgb,var(--a) 10%,transparent)}
+.chat-picker-item.active:hover{background:color-mix(in srgb,var(--a) 16%,transparent)}
+.chat-picker-item svg{flex-shrink:0}
 
 /* ===== Issue #199: 知识绑定操作 loading 态 + 进出场动画 ===== */
 /* Agent 标签 loading */
@@ -2456,13 +2460,13 @@
 }
 :root :is(.chat-del-pop, .chat-picker-pop, .cv__pop, .cv__delpop, .isk-popover) {
   background: var(--glass-strong) !important;
-  -webkit-backdrop-filter: blur(20px) !important;
-  backdrop-filter: blur(20px) !important;
-  border: 1px solid var(--hairline) !important;
-  border-radius: 14px !important;
+  -webkit-backdrop-filter: blur(24px) saturate(180%) !important;
+  backdrop-filter: blur(24px) saturate(180%) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 18px !important;
   box-shadow:
-    0 12px 32px rgba(0, 0, 0, 0.28),
-    0 2px 8px rgba(0, 0, 0, 0.16) !important;
+    0 24px 64px rgba(0, 0, 0, 0.24),
+    0 2px 8px rgba(0, 0, 0, 0.14) !important;
 }
 :root :is(.km-overlay, .ac__modal-mask, .apv-modal-ov, .isk-modal-ov, .rtv-modal-ov,
 .tv-modal-overlay, .modal-overlay, .create-repo-overlay, .eff-mask, .fb-overlay, .cv__onboard-mask) {
