@@ -826,7 +826,7 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
     """
     try:
         from src.api.session_store import get_issue_stage, get_issue_scene
-        from src.domains.mgmt.pipeline_config import get_pipeline_config
+        from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
         _issue_id = f"#{issue_number}"
         _st = get_issue_stage(repo_key, _issue_id) or {}
         _cur = (_st.get("stage") or "").strip()
@@ -919,7 +919,7 @@ def _pipeline_last_node_check(repo_key: str, issue_number, agent_type: str) -> b
     """完成的 agent 是否为该 issue 流水线末节点（next=='done' 或 next 无下游节点）。"""
     try:
         from src.api.session_store import get_issue_stage, get_issue_scene
-        from src.domains.mgmt.pipeline_config import get_pipeline_config
+        from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
         _issue_id = f"#{issue_number}"
         _st = get_issue_stage(repo_key, _issue_id) or {}
         _cur = (_st.get("stage") or "").strip()
@@ -1056,7 +1056,7 @@ def finalize_issue_to_pending_review(repo_key: str, issue_id: str, agent_type: s
 
         # 「全部节点 completed + 无阻断」检测：每个流水线节点的最新事件
         from src.api.session_store import get_issue_scene
-        from src.domains.mgmt.pipeline_config import get_pipeline_config
+        from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
         _scene = get_issue_scene(repo_key, _tag)
         _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
         _nodes = (get_pipeline_config(_scene_id, repo_key=repo_key) or {}).get("nodes") or []
@@ -2750,7 +2750,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     _auto_subtask_mode = 0
     if body.scene_id and body.scene_id != "vod-auto":
         try:
-            from src.domains.mgmt.pipeline_config import _query_scene_by_id
+            from src.domains.mgmt.public import _query_scene_by_id  # 跨域走 owner public
             _scene_obj = _query_scene_by_id(body.scene_id, repo_key=repo_key)
             if _scene_obj:
                 _nodes = _scene_obj.get("nodes", []) or []
@@ -3324,7 +3324,7 @@ def get_handoff_targets(repo_key: str, issue_number: int, current_scene_id: str 
     - 返回 {targets: [{id, name, display_name, description, work_branch, scene_type}],
             current_scene_id}。空列表照常返回（前端展示「无可用目标」，非静默失败）。
     """
-    from src.domains.mgmt.pipeline_config import get_scenes
+    from src.domains.mgmt.public import get_scenes  # 跨域走 owner public
     _cur = (current_scene_id or "").strip() or "default"
     targets = []
     try:
@@ -3381,7 +3381,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         return []
 
     from src.kernel.repo_key import to_repo_key, from_repo_key
-    from src.domains.mgmt.pipeline_config import get_pipeline_config
+    from src.domains.mgmt.public import get_pipeline_config  # 跨域走 owner public
 
     _keys = [(r[2] or "", f"#{r[3]}") for r in rows]
     _stage_map = _batch_fetch_issue_state(_keys)

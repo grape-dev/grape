@@ -6163,3 +6163,34 @@ _filter_repos = filter_repos
 _check_repo_member = check_repo_member
 _resolve_repo_key = resolve_repo_key
 _dispatch_finding_core = dispatch_finding_core
+
+
+# ---- 场景/流水线配置（pipeline_config 收口） ----
+
+def pipeline_config(scene_id: str = "default", repo_key: str = "", use_cache: bool = True) -> dict:
+    """取仓库场景的流水线配置（{name, display_name, nodes, onboarding, ...}）。"""
+    from src.domains.mgmt.pipeline_config import get_pipeline_config as _impl
+
+    return _impl(scene_id, repo_key=repo_key, use_cache=use_cache) or {}
+
+
+def scene_list(repo_key: str = "", limit: int = None, offset: int = 0, q: str = "",
+               sort: str = "id", minimal: bool = False) -> list:
+    """列出仓库场景（[{id, name, display_name, nodes, ...}]）。"""
+    from src.domains.mgmt.pipeline_config import get_scenes as _impl
+
+    return _impl(repo_key=repo_key, limit=limit, offset=offset, q=q,
+                 sort=sort, minimal=minimal) or []
+
+
+def scene_by_id(scene_id: str, repo_key: str = "") -> dict:
+    """按 scene_id 取单个仓库场景（缺省回退官方模板）。"""
+    from src.domains.mgmt.pipeline_config import _query_scene_by_id as _impl
+
+    return _impl(scene_id, repo_key=repo_key) or {}
+
+
+# 原名别名：调用点只换模块路径。
+get_pipeline_config = pipeline_config
+get_scenes = scene_list
+_query_scene_by_id = scene_by_id
