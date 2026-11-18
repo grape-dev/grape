@@ -5,18 +5,19 @@
 # 而源码没变的日子这些开销全是浪费。rsync 增量在同样的目录上实测 0.8s，且远端不存在"解包"这一步。
 #
 # 用法：
-#   SIBLING_PWD='...' bash scripts/sync_to_sibling.sh              # 同步 + 远端部署
-#   SIBLING_PWD='...' bash scripts/sync_to_sibling.sh --sync-only   # 只同步，不部署
-#   SIBLING=192.168.0.116 SIBLING_PWD='...' ...                     # 覆盖目标机
+#   SIBLING=<host> SIBLING_PWD='...' bash scripts/sync_to_sibling.sh   # 同步 + 远端部署
+#   SIBLING=<host> SIBLING_PWD='...' bash scripts/sync_to_sibling.sh --sync-only  # 只同步
+#   SIBLING=<兄弟机地址> SIBLING_PWD='...' ...                      # 指定目标机（必填）
 #
 # 需要 sshpass（已装）。口令从环境变量取，不写入任何文件。
 # 用 `sshpass -e`（读 SSHPASS 环境变量）而不是 `-p <口令>` —— 后者会把口令放进 argv，
 # `ps`/`/proc/*/cmdline` 一览即得（QA I-3）。环境变量只对本进程及其子进程可见。
 #
-# SIBLING 默认值是内网拓扑（192.168.0.116），开源分发时请由部署方覆盖，勿依赖该默认。
+# SIBLING 无默认值：由部署方显式传入，避免内网拓扑落进仓库。
 set -euo pipefail
 
-SIBLING="${SIBLING:-192.168.0.116}"
+# 必填：不设默认内网地址（开源合规 §1.1-1-5）
+SIBLING="${SIBLING:?需要 SIBLING（兄弟机地址，例如 <sibling-host>）}"
 SIBLING_PWD="${SIBLING_PWD:?需要 SIBLING_PWD（兄弟机 root 口令）}"
 DST="${DST:-/home/grape/grape-new-version2}"
 TENANT_DST="${TENANT_DST:-/home/orgtest/grape-new-version2}"
