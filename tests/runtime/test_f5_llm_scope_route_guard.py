@@ -66,6 +66,13 @@ def test_scope_route_uses_python_side_parse_and_public_lookup():
 def test_no_int_coercion_on_provider_id():
     """First-attempt regression ban: provider_id 不可 int() 强转（UUID 形态 spc.id 会炸→except 回落）。"""
     src = _src()
-    seg = src[src.find("F-5 修复"):]
-    assert seg
-    assert not re.search(r"int\(_pid\)", seg), "provider_id 被 int() 强转——UUID provider 行会异常回落 user 级"
+    # 锚点必须指向真实存在的取值行：旧锚点 `src.find("F-5 修复")` 在上游清理删掉该
+    # 注释后返回 -1、分段退化为文件末尾，断言恒真（变异测试不会报红）。
+    idx = src.find('.get("provider_id")')
+    assert idx != -1, "provider_id 取值行缺失——锚点失效，需按当前实现重锚"
+    line_start = src.rfind("\n", 0, idx) + 1
+    line_end = src.find("\n", idx)
+    value_line = src[line_start:line_end]
+    assert "provider_id" in value_line, "锚点未落在 provider_id 取值行上"
+    assert "int(" not in value_line, \
+        "provider_id 被 int() 强转——UUID provider 行会异常回落 user 级"

@@ -47,8 +47,14 @@ def test_empty_report_response_is_counted_as_pending():
     seg = _report_branch(_worker_src())
     assert "if _rep:" in seg, "空响应必须与成功分支分开处理（此前一律打成功日志）"
     assert "returned an empty response" in seg, "空响应缺少显式 WARNING"
-    empty_side = seg[seg.find("else:"):]
-    assert "_failed += 1" in empty_side, "空响应必须计入 pending（否则重试循环首轮即退出）"
+    # 切片必须收窄到 else 分支自身：segment 后面紧跟的 except 分支也含
+    # `_failed += 1`，切到段尾会让断言命中 except 的计数而恒过（变异测试会暴露）。
+    else_start = seg.find("else:")
+    except_start = seg.find("except Exception as _re:")
+    assert else_start != -1 and except_start > else_start, "空响应分支或其后 except 分支缺失"
+    empty_branch = seg[else_start:except_start]
+    assert "returned an empty response" in empty_branch, "WARNING 不在空响应分支内"
+    assert "_failed += 1" in empty_branch, "空响应必须计入 pending（否则重试循环首轮即退出）"
 
 
 def test_report_exception_is_counted_as_pending():
