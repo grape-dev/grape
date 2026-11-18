@@ -1672,7 +1672,8 @@ def _merge_duplicate_engine_rows_locked(credential_id: int, c, commit: bool) -> 
     # 指向存活行（否则 dup 行 uid 悬挂；MySQL FK RESTRICT 会拦截删除 → 注册静默失败）。
     _uid_ready = False
     try:
-        from src.domains.mgmt.user.db import _columns_exist
+        # 列探测实现归 runtime 域（refs_reconcile），同域直import，不再绕 mgmt.user.db
+        from src.domains.runtime.engine.refs_reconcile import columns_exist as _columns_exist
         _uid_ready = (_columns_exist(c, "agent_runtimes", ("engine_uid",))
                       and _columns_exist(c, "engine_capabilities", ("engine_uid",)))
     except Exception:

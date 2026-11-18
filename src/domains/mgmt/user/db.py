@@ -4365,26 +4365,12 @@ def ensure_credential_uid(credential_id: int, c=None) -> str:
     """Issue #646：确保凭据行有 credential_uid（UUIDv4，一次性终身不变）。
 
     注册/心跳链路调用；未迁移库（无列）返回 ''。可在已有 cursor/锁内复用 c。
+    实现与 SQL 全在 owner 域（runtime_credentials 归 runtime）：
+    `src.domains.runtime.public.ensure_credential_uid`。本壳只为既有 mgmt 调用面
+    与测试连接注入缝保留，不再持有判定逻辑。
     """
-    from src.kernel.engine_uid import new_credential_uid
-    own = c is None
-    if own:
-        c = db.cursor()
-    try:
-        # G-02/F1（守卫复检 201339604）：runtime_credentials 归 runtime——读/写经
-        # runtime public **可调用原语**（进 lib 注册面），游标由调用方传入：与 rebase/
-        # 回填同事务（跨连接读陈旧快照，#868 实测），且保留测试 fixture 的连接注入缝。
-        from src.domains.runtime import public as _rt_pub
-        existing = _rt_pub.credential_uid_by_id(c, credential_id)
-        if existing:
-            return existing
-        uid = new_credential_uid()
-        _rt_pub.set_credential_uid(c, credential_id, uid)
-        if own:
-            db.commit()
-        return uid
-    except Exception:
-        return ""
+    from src.domains.runtime import public as _rt_pub
+    return _rt_pub.ensure_credential_uid(credential_id, c)
 
 
 def _session_uid_mirror_sql(tbl: str) -> str:
@@ -4427,51 +4413,19 @@ def explicit_cleanup_runtime_references(c, runtime_ids: list, reason: str = "") 
 
 
 # ── Issue #868 交叉预警修正：engine_uid 派生源锚定后的存量回填/改绑 ──
-
-_UID_REF_TABLES = (
-    # (表名, 计数键, 引用列说明)
-    ("agent_type_runtime_pool", "pool_rows"),
-    ("engine_capabilities", "capability_rows"),
-    ("agent_tasks", "task_rows"),
-    ("task_messages", "task_message_rows"),
-    ("devops_agent_session", "devops_sessions"),
-    ("chat_agent_session", "chat_sessions"),
-)
+# 表清单与 SQL 随实现一并归 runtime 域（`runtime.public._ENGINE_UID_REF_TABLES`），
+# mgmt 侧不再保留第二份真源。
 
 
 def rebase_engine_uid_references(c, old_uid: str, new_uid: str) -> dict:
     """Issue #868：单个 engine_uid 变更的引用轨道整体改绑（old_uid → new_uid）。
 
-    交叉预警修正配套：云引擎 uid 派生源从「含四段名 name」切换为「不可变身份锚」后，
-    存量按旧键派生的 uid 需要重算回填；本函数保证改绑不留孤儿（池/能力/任务/
-    消息/会话 uid 轨道同步指向新 uid），并输出对账报告（不静默丢弃）。
-    缺列/缺表（未迁移旧库、chat 专用表历史库缺列）容错降级跳过。
-    old_uid == new_uid 或任一为空 → no-op（幂等）。
+    实现（引擎行 + 池/能力/任务/消息/会话 uid 轨道，碰的表全归 runtime）已在
+    owner 域：`src.domains.runtime.public.rebase_engine_uid_references`。本壳保留
+    mgmt 侧既有调用面（db_setup 启动期回填 / 测试连接注入缝），不再持有 SQL。
     """
-    report = {"engines_rebased": 0, "pool_rows": 0, "capability_rows": 0,
-              "task_rows": 0, "task_message_rows": 0,
-              "devops_sessions": 0, "chat_sessions": 0}
-    old_uid = (old_uid or "").strip()
-    new_uid = (new_uid or "").strip()
-    if not old_uid or not new_uid or old_uid == new_uid:
-        return report
-    try:
-        # agent_runtimes 归 runtime 域：SQL 在 runtime public 一份
-        from src.domains.runtime import public as _rt_public
-        report["engines_rebased"] = _rt_public.rename_runtime_engine_uid(old_uid, new_uid)
-    except Exception as _e:
-        log.warning(f"rebase_engine_uid_references agent_runtimes: {_e}")
-    for tbl, key in _UID_REF_TABLES:
-        if not _columns_exist(c, tbl, ("engine_uid",)):
-            continue
-        try:
-            report[key] = c.execute(
-                f"UPDATE {tbl} SET engine_uid=? WHERE engine_uid=?",
-                (new_uid, old_uid)).rowcount
-        except Exception as _e:
-            log.warning(f"rebase_engine_uid_references {tbl}: {_e}")
-    log.info("Issue #868 uid锚定改绑报告: " + json.dumps(report, ensure_ascii=False))
-    return report
+    from src.domains.runtime import public as _rt_public
+    return _rt_public.rebase_engine_uid_references(c, old_uid, new_uid)
 
 
 def rebase_engine_uids_by_anchor(c, anchor_rows: list) -> dict:

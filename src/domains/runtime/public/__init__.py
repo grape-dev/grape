@@ -1306,8 +1306,8 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                     f"AND host_name=? AND lower(name) NOT IN ({ph})",
                     (scope, owner_id, host_name, *names)).fetchall()]
                 if _stale_ids:
-                    from src.domains.mgmt.user.db import _rebind_runtime_references as _rb_stale
-                    _rb_stale(c, _stale_ids, 0, reason="refresh stale engines")
+                    # 同域：runtime 引用对账归本模块 public 原语（不再绕 mgmt.user.db）
+                    reconcile_for_caller(c, _stale_ids, 0, reason="refresh stale engines")
             except Exception as _se:
                 log.warning(f"upsert_local_runtimes stale-cleanup rebind skipped: {_se}")
             c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 "
@@ -1328,8 +1328,8 @@ def upsert_local_runtimes(agents: list[dict], scope: str, owner_id: str, host_na
                     "AND scope=? AND owner_id=? AND COALESCE(org_id, 0)=? AND COALESCE(host_name, '')=?",
                     (_n, _sc, _ow, _org, _host)).fetchone()
                 if _keep and _keep[0] and _keep[0] != _dup_id:
-                    from src.domains.mgmt.user.db import _rebind_runtime_references as _rb_dup
-                    _rb_dup(c, [_dup_id], _keep[0])
+                    # 同域：runtime 引用对账归本模块 public 原语（不再绕 mgmt.user.db）
+                    reconcile_for_caller(c, [_dup_id], _keep[0])
         except Exception as _re:
             log.warning(f"upsert_local_runtimes rebind-before-dedup skipped: {_re}")
         c.execute("DELETE FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
@@ -6533,6 +6533,83 @@ def set_credential_uid(cursor: Any, credential_id: int, uid: str) -> None:
 def credential_id_uid_pairs(cursor: Any) -> list[tuple]:
     """F1/A11：全表 (id, credential_uid) 对读原语（调用方游标，回填报表用）。"""
     return cursor.execute(SQL_CREDENTIAL_ID_UID_PAIRS, ()).fetchall()
+
+
+# ── 引擎 uid 轨道维护（2026-11-18 跨域 import 批次 · mgmt.user）──────────────
+# 迁移背景：runtime/routes/runtime.py 此前
+#   from src.domains.mgmt.user.db import ensure_credential_uid / rebase_engine_uid_references
+# 属跨域 import 别域内部模块；而这两条链路碰的表（runtime_credentials /
+# agent_runtimes / agent_type_runtime_pool / engine_capabilities / agent_tasks /
+# task_messages / devops_agent_session / chat_agent_session）按
+# `configs/table_ownership.json` **全归 runtime 域**。判定逻辑 + SQL 收到 owner 域
+# 一份；mgmt.user.db 的同名函数退化为转发壳（保留既有 import 面与测试缝），
+# 调用方照旧传自己的游标（runtime 进程内即 runtime 域连接，同事务语义不变）。
+_ENGINE_UID_REF_TABLES = (
+    # (表名, 计数键) —— 与 mgmt 侧历史口径逐项一致（Issue #868）
+    ("agent_type_runtime_pool", "pool_rows"),
+    ("engine_capabilities", "capability_rows"),
+    ("agent_tasks", "task_rows"),
+    ("task_messages", "task_message_rows"),
+    ("devops_agent_session", "devops_sessions"),
+    ("chat_agent_session", "chat_sessions"),
+)
+
+
+def ensure_credential_uid(credential_id: int, cursor: Any = None) -> str:
+    """确保凭据行有 credential_uid（UUIDv4，一次性终身不变）；未迁移旧库返回 ''。
+
+    cursor 传入即复用调用方事务（注册链路：credential_uid → engine_uid 派生同事务，
+    跨连接会读到陈旧快照）；不传则由本域自有 DSN 开事务。
+    """
+    from src.kernel.engine_uid import new_credential_uid
+
+    def _ensure(c) -> str:
+        existing = credential_uid_by_id(c, credential_id)
+        if existing:
+            return existing
+        uid = new_credential_uid()
+        set_credential_uid(c, credential_id, uid)
+        return uid
+
+    try:
+        if cursor is not None:
+            return _ensure(cursor)
+        with db_registry.cursor("runtime") as c:
+            return _ensure(c)
+    except Exception:  # noqa: BLE001  旧库缺列=降级空串（与历史行为一致）
+        return ""
+
+
+def rebase_engine_uid_references(cursor: Any, old_uid: str, new_uid: str) -> dict:
+    """单个 engine_uid 变更的引用轨道整体改绑（old_uid → new_uid），返回对账报告。
+
+    引擎行 uid 改绑 + 池/能力/任务/消息/会话 uid 轨道同步，不留孤儿；缺列/缺表
+    （未迁移旧库、历史 chat 专用库缺列）容错降级跳过。old_uid == new_uid 或任一
+    为空 → no-op（幂等）。游标由调用方给，保证与调用点同事务。
+    """
+    report = {"engines_rebased": 0, "pool_rows": 0, "capability_rows": 0,
+              "task_rows": 0, "task_message_rows": 0,
+              "devops_sessions": 0, "chat_sessions": 0}
+    old_uid = (old_uid or "").strip()
+    new_uid = (new_uid or "").strip()
+    if not old_uid or not new_uid or old_uid == new_uid:
+        return report
+    try:
+        report["engines_rebased"] = rename_runtime_engine_uid(old_uid, new_uid)
+    except Exception as _e:  # noqa: BLE001
+        log.warning(f"rebase_engine_uid_references agent_runtimes: {_e}")
+    for tbl, key in _ENGINE_UID_REF_TABLES:
+        if not columns_exist(cursor, tbl, ("engine_uid",)):
+            continue
+        try:
+            report[key] = cursor.execute(
+                f"UPDATE {tbl} SET engine_uid=? WHERE engine_uid=?",
+                (new_uid, old_uid)).rowcount
+        except Exception as _e:  # noqa: BLE001
+            log.warning(f"rebase_engine_uid_references {tbl}: {_e}")
+    log.info("Issue #868 uid锚定改绑报告: " + json.dumps(report, ensure_ascii=False))
+    return report
+
 
 # ── 跨域常量再导出（2026-11-18）────────────────────────────────────────────
 # insight 的告警求值（alerts.py / metric_rollup.py）要按 runtime 的失败判定口径

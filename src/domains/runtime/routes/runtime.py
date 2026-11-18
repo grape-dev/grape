@@ -398,9 +398,10 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
         # Issue #646：注册前确保凭据有 credential_uid（UUIDv4，一次性终身不变）；
         # engine_uid 由服务端按自然键（credential_uid|name|scope|owner_id|host_name）
         # 确定性派生（UUIDv5）——本机 worker 零配置，重复注册/表重建 uid 不漂移。
-        from src.domains.mgmt.user.db import ensure_credential_uid
+        # 这两条链路碰的表全归 runtime 域（configs/table_ownership.json），原语在
+        # 本域 public 一份；此前绕 mgmt.user.db 属跨域 import 别域内部模块。
+        from src.domains.runtime.public import ensure_credential_uid, rebase_engine_uid_references
         from src.kernel.engine_uid import derive_engine_uid, cloud_anchor_from_runtime_info
-        from src.domains.mgmt.user.db import rebase_engine_uid_references
         _cred_uid = ensure_credential_uid(credential_id, c)
         # local_skills：per-engine skill 列表，按 engine name 匹配 runtime 行
         skills_by_name = {}
