@@ -37,6 +37,8 @@ from __future__ import annotations
 import json
 import time
 
+from src.kernel.config import log
+
 from src.domains.mgmt.auth.identity_unbind import (
     IdentityUnbindGateway,
     statement_for_backend,

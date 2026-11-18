@@ -157,6 +157,13 @@
     {
       "domain": "runtime",
       "method": "GET",
+      "path": "/internal/business-table-counts",
+      "operation_id": "runtime_business_table_counts",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "GET",
       "path": "/internal/chat/conversations",
       "operation_id": "runtime_chat_conversations_list",
       "summary": ""
@@ -254,6 +261,13 @@
     },
     {
       "domain": "runtime",
+      "method": "POST",
+      "path": "/internal/reconcile-engine-references",
+      "operation_id": "runtime_reconcile_engine_refs",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
       "method": "GET",
       "path": "/internal/runtime-credentials/{runtime_id}",
       "operation_id": "runtime_credentials_meta",
@@ -318,6 +332,13 @@
     {
       "domain": "runtime",
       "method": "POST",
+      "path": "/internal/transfer-user-business-data",
+      "operation_id": "runtime_transfer_user_data",
+      "summary": ""
+    },
+    {
+      "domain": "runtime",
+      "method": "POST",
       "path": "/internal/xwrite/apply",
       "operation_id": "runtime_xwrite_apply",
       "summary": ""
@@ -326,6 +347,6 @@
   "counts": {
     "insight": 9,
     "mgmt": 12,
-    "runtime": 25
+    "runtime": 28
   }
 }
