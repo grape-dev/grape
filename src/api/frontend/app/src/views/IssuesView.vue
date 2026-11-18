@@ -744,7 +744,7 @@ const deployDraft = ref('')
 let deployLongPressTimer = null
 let pollTimer = null
 const PER_PAGE = 15 // 「我的需求」客户端分页（全量拉取后本地切页）
-const SERVER_PAGE = 30 // Issue #926：服务端分屏每屏条数（滚动追加）
+const SERVER_PAGE = 20 // Issue #926：服务端分屏每屏条数（滚动追加；看板列游标同款=每列一页 20 条）
 // Issue #926：服务端分页状态（仅「仓库全部」视图生效；我的需求条数有限，保持全量拉取）
 const tasksHasMore = ref(false) // 服务端 has_more，false 时停止滚动追加
 const tasksTotal = ref(null) // 服务端 total；null = 未给精确值（q 模式省 COUNT）
@@ -1115,9 +1115,8 @@ function repoOf() {
 const serverPagedView = computed(
   () => viewMode.value === 'repo_all' && taskView.value === 'list' && !!repoOf()
 )
-const boardPagedView = computed(
-  () => viewMode.value === 'repo_all' && taskView.value === 'board' && !!repoOf()
-)
+// 看板按列分页：仓库全部 / 我的需求 一视同仁（mine 也走列游标，各自一页懒加载）
+const boardPagedView = computed(() => taskView.value === 'board' && !!repoOf())
 const totalPages = computed(() => Math.max(1, Math.ceil(filtered.value.length / PER_PAGE)))
 function clampPage() {
   if (page.value > totalPages.value) page.value = 1
@@ -1172,7 +1171,8 @@ function toggleFilterStatus(k) {
   else filterStatuses.value.push(k)
   page.value = 1
   // Issue #926：状态筛选映射 statuses= 走服务端过滤 → 重置回第 1 屏重拉
-  if (repoOf() && viewMode.value === 'repo_all') resetAndLoad()
+  // mine 分页后同样要服务端过滤（本地过滤只作用于已加载页）
+  if (repoOf()) resetAndLoad()
 }
 function toggleFilterAssignee(a) {
   const i = filterAssignees.value.indexOf(a)
@@ -1357,12 +1357,14 @@ function boardFetch(key, opts) {
   cur.loading = true
   const seq = ++cur.seq
   const page = merge ? 1 : cur.page
+  // URL 按 viewMode 分支：仓库全部→仓库列表；我的需求→mine（statuses 下推同口径）
+  const baseMine =
+    viewMode.value === 'mine'
+      ? '/issues/mine?status=&repo_key=' + encodeURIComponent(repo.repoKey || (repo.owner + '/' + repo.name))
+      : '/issues/' + repo.owner + '/' + repo.name + '?status='
   let url =
-    '/issues/' +
-    repo.owner +
-    '/' +
-    repo.name +
-    '?sort_order=' +
+    baseMine +
+    '&sort_order=' +
     sortOrder.value +
     '&mode=time&per_page=' +
     SERVER_PAGE +
@@ -1370,7 +1372,7 @@ function boardFetch(key, opts) {
     page +
     '&statuses=' +
     encodeURIComponent(BOARD_CURSOR_STATUSES[key])
-  if (query.value) url += '&q=' + encodeURIComponent(query.value)
+  if (query.value && viewMode.value !== 'mine') url += '&q=' + encodeURIComponent(query.value)
   if (filterAssignees.value.length)
     url += '&creators=' + encodeURIComponent(filterAssignees.value.join(','))
   return API()
@@ -1384,8 +1386,15 @@ function boardFetch(key, opts) {
       cur.hasMore = !!d.has_more
       cur.total = d.total === null || d.total === undefined ? null : d.total
       if (round) {
-        // 整刷：先缓冲到回合，收敛后一次提交（无中间态空板）
+        // 整刷：先缓冲到回合，收敛后一次提交（无中间态空板）。
+        // 首屏例外：无旧帧时列到列渐进上屏——先到的列先渲染，最慢的列
+        // 不再阻塞整个看板（每列 header 的 loaded/total 也随本列响应到达）。
         round.items[key] = items
+        if (!tasks.value.length && items.length) {
+          mergeBoardItems(items)
+          loaded.value = true
+          loadError.value = ''
+        }
         if (settleBoardRound(round)) commitBoardRound(round)
         return
       }
@@ -2860,6 +2869,15 @@ function loadTasks(opts) {
     if (filterAssignees.value.length)
       apiUrl += '&creators=' + encodeURIComponent(filterAssignees.value.join(','))
   } else {
+    // mine 分页后状态过滤必须下推服务端：本地 filtered 只作用于已加载页，
+    // 30 条里没有该状态时会显示成空列表（曾出现「只显示处理中，其余列全空」）
+    const mineStatuses = [
+      ...new Set(
+        filterStatuses.value.reduce(function (acc, k) {
+          return acc.concat(TASK_STATUS_TO_API[k] || [])
+        }, [])
+      ),
+    ].join(',')
     apiUrl =
       '/issues/mine?status=&repo_key=' +
       encodeURIComponent(repoKey) +
@@ -2869,6 +2887,7 @@ function loadTasks(opts) {
       SERVER_PAGE +
       '&page=' +
       reqPage +
+      (mineStatuses ? '&statuses=' + encodeURIComponent(mineStatuses) : '') +
       (filterAssignees.value.length
         ? '&creators=' + encodeURIComponent(filterAssignees.value.join(','))
         : '')

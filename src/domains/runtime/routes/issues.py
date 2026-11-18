@@ -2116,6 +2116,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
                     mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
                     created_by_me: str = Query("", description="仅我创建的任务"),
                     assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
+                    statuses: str = Query("", description="多状态过滤(逗号分隔；Issue #926 列表同款)。与单 status 二选一，同时给出时以 statuses 为准"),
                     per_page: int = Query(0, ge=0, le=200, description="服务端分页：每页条数（Issue #926 同款；0=全量，兼容旧调用方）"),
                     page: int = Query(1, ge=1, description="服务端分页：页码（per_page>0 时生效）"),
                     user: dict = Depends(require_org_member)):
@@ -2157,6 +2158,20 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     if status:
         clauses.append("status=?")
         params.append(status)
+    # Issue #926 同款多状态过滤：statuses 优先于单 status（mine 列表分页后的服务端列过滤）
+    _st_list = [s.strip() for s in (statuses or "").split(",") if s.strip()]
+    if _st_list:
+        _allowed = {"active", "processing", "awaiting_input",
+                    "pending_review", "completed", "cancelled", "timeout_failed"}
+        _st_ok = [x for x in _st_list if x in _allowed]
+        if _st_ok:
+            # 单 status 子句若已压入则先移除（statuses 为准）
+            if status and "status=?" in clauses:
+                _si = clauses.index("status=?")
+                clauses.pop(_si)
+                params.pop(_si)
+            clauses.append(f"status IN ({','.join('?' * len(_st_ok))})")
+            params.extend(_st_ok)
     # 组织隔离
     if _filter_org_id:
         clauses.append("org_id=?")
