@@ -13,6 +13,8 @@ import time
 from contextlib import contextmanager
 from typing import Any
 
+from fastapi import Request
+
 from src.kernel import db_registry
 
 
@@ -6553,11 +6555,17 @@ def timeout_fail_signature() -> str:
 #   from src.domains.runtime.engine.scheduler import _get_exec_agent_task
 # 属跨域引内部实现（QA 顶层硬耦合清理项）。改为由 owner 域 public 提供入口。
 
-def require_credential(request):
+def require_credential(request: Request) -> int:
     """FastAPI 依赖：解析 Authorization 的 runtime 凭据，未授权抛 401。
 
     转发到 runtime.routes.runtime._require_credential（唯一实现），
     供 insight 等外域的端点直接用作 `Depends(...)`。
+
+    ⚠️ 形参注解 `Request` 是契约的一部分，不可省略（本模块 `from __future__ import
+    annotations` 下注解为字符串，FastAPI 靠模块全局名解析）：缺注解时 FastAPI 会把
+    `request` 当成**必填 query 参数**，端点对任何请求都先返回 422（凭据校验根本
+    没跑到），insight 的 POST /api/obs/logs/ingest 全量 422 即此故障形态。
+    返回值为 runtime_credentials.id（int），未授权由实现抛 HTTPException(401)。
     """
     from src.domains.runtime.routes.runtime import _require_credential as _impl
 
