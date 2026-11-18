@@ -2016,7 +2016,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     if cred_type not in ("worker", "sandbox"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"无效的凭据类型: {cred_type}（仅支持 worker/sandbox）"})
     if cred_type == "sandbox":
-        from src.domains.runtime.agents.sandbox.backends import get_cloud_registry
+        from src.domains.runtime.public import get_cloud_registry
         _cloud = get_cloud_registry()
         if not platform or platform not in _cloud:
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"沙箱凭据必须指定有效平台（当前支持: {', '.join(sorted(_cloud))}）"})
@@ -3676,7 +3676,7 @@ def health_sandbox_provider(provider_id: str, user: dict = Depends(require_no_se
     from src.kernel.crypto import decrypt
     _api_key = decrypt(prov["api_key_enc"]) if prov["api_key_enc"] else ""
 
-    from src.domains.runtime.agents.sandbox.backends import get_adapter
+    from src.domains.runtime.public import get_adapter
     adapter = get_adapter(_platform)
     if not adapter:
         return {"healthy": False, "reason": f"no adapter for platform '{_platform}'"}
@@ -3768,7 +3768,7 @@ def scan_sandbox_templates(provider_id: str, user: dict = Depends(require_no_ses
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限"})
 
     # 取 adapter 与配置（复用 health 的配置读取路径）
-    from src.domains.runtime.agents.sandbox.backends import get_adapter
+    from src.domains.runtime.public import get_adapter
     adapter = get_adapter(prow[0])
     if adapter is None:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"平台 {prow[0]} 无 adapter"})
@@ -3898,7 +3898,7 @@ def _provider_config_from_db(platform: str, provider_id: str | None = None) -> d
     _cred_name = (_brief.get(int(row[3]), ("",))[0] if row[3] else "")
     from src.kernel.crypto import decrypt
     _api_key = decrypt(row[2]) if row[2] else ""
-    from src.domains.runtime.agents.sandbox.backends import get_adapter
+    from src.domains.runtime.public import get_adapter
     adapter = get_adapter(row[0])
     if not adapter:
         return None
@@ -3911,7 +3911,7 @@ def _provider_config_from_db(platform: str, provider_id: str | None = None) -> d
 
 def _do_check_template(provider: str, template_id: str, provider_id: str | None = None) -> dict:
     """校验模板在平台侧是否可用。返回 {status, error}。"""
-    from src.domains.runtime.agents.sandbox.backends import default_registry
+    from src.domains.runtime.public import default_registry
     registry = default_registry()
     factory = registry.get(provider)
     if not factory:
@@ -3957,7 +3957,7 @@ def _do_check_template(provider: str, template_id: str, provider_id: str | None 
 def _validate_extra_config(platform: str, extra: dict) -> dict:
     """通过 adapter 校验 extra_config——必填+类型+白名单。
     不合法时 adapter 抛 ValueError，此处捕获转 HTTPException 400。"""
-    from src.domains.runtime.agents.sandbox.backends import get_adapter
+    from src.domains.runtime.public import get_adapter
     adapter = get_adapter(platform)
     if adapter:
         try:
@@ -4018,7 +4018,7 @@ def update_provider_config(provider: str, body: dict, user: dict = Depends(requi
     - api_key 传空字符串 → 清除（置空）
     """
     _require_admin(user)
-    from src.domains.runtime.agents.sandbox.backends import get_cloud_platforms
+    from src.domains.runtime.public import get_cloud_platforms
     if provider not in get_cloud_platforms():
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"platform 必须为 {get_cloud_platforms()}"})
 
@@ -4075,7 +4075,7 @@ def update_provider_config(provider: str, body: dict, user: dict = Depends(requi
 
 def _validate_platform(platform: str) -> str:
     """从 adapter registry 动态获取支持的平台列表。"""
-    from src.domains.runtime.agents.sandbox.backends import get_cloud_platforms
+    from src.domains.runtime.public import get_cloud_platforms
     supported = get_cloud_platforms()
     if platform not in supported:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"platform 必须为 {supported}"})
@@ -4088,7 +4088,7 @@ def _validate_platform(platform: str) -> str:
 def list_sandbox_platforms(user: dict = Depends(require_no_session_token)):
     """返回云沙箱平台列表 + 每个平台的 ui_schema。本地沙箱不在此列表中。
     按 adapter.priority 排序（小的优先），前端默认选第一个。"""
-    from src.domains.runtime.agents.sandbox.backends import get_all_adapters
+    from src.domains.runtime.public import get_all_adapters
     cloud_adapters = sorted(
         [a for a in get_all_adapters() if getattr(a, "is_cloud", True)],
         key=lambda a: getattr(a, "priority", 100),
@@ -4119,15 +4119,8 @@ def list_sandbox_engines(user: dict = Depends(require_no_session_token)):
     installable: Installer.install_cmd 非空 = 建箱时可自动安装（hermes/opencode）；
     False = 无安装脚本，只能预装进镜像（codearts 模式）。
     """
-    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
-    engines = []
-    for et, plugin in sorted(ENGINE_REGISTRY.items()):
-        engines.append({
-            "engine_type": et,
-            "display_name": et,
-            "installable": bool(getattr(plugin.installer, "install_cmd", "")),
-        })
-    return {"engines": engines}
+    from src.domains.runtime.public import engine_plugins_info
+    return {"engines": engine_plugins_info()}
 
 
 # ===== [沙箱迁移] 用户 LLM 凭据管理（feat/devbox-sandbox-integration 迁移）=====
@@ -4206,8 +4199,8 @@ def upsert_repo_llm_credential(body: RepoLLMCredentialBody, user: dict = Depends
     if not repo_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key 不能为空"})
     _require_repo_llm_admin(repo_key, user)
-    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
-    if body.engine_type not in {"common", *ENGINE_REGISTRY.keys()}:
+    from src.domains.runtime.public import has_engine_type
+    if body.engine_type != "common" and not has_engine_type(body.engine_type):
         raise HTTPException(400, detail={"code": 400, "message": f"invalid engine_type: {body.engine_type}"})
     VALID_PROVIDERS = {"openai", "azure", "deepseek", "zhipu", "moonshot", "qwen", "custom"}
     if body.provider not in VALID_PROVIDERS:
@@ -4283,8 +4276,8 @@ def create_llm_credential(body: LLMCredentialBody, user: dict = Depends(require_
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API key 不能为空"})
 
     # 白名单校验 engine_type（惰性导入防循环依赖）
-    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
-    if body.engine_type not in {"common", *ENGINE_REGISTRY.keys()}:
+    from src.domains.runtime.public import has_engine_type
+    if body.engine_type != "common" and not has_engine_type(body.engine_type):
         raise HTTPException(400, detail={"code": 400, "message": f"invalid engine_type: {body.engine_type}"})
 
     # provider 白名单——防止用户填不认识的 provider（如 anthropic），让错误在配置阶段暴露
@@ -4347,9 +4340,9 @@ def list_llm_credentials(user: dict = Depends(require_no_session_token)):
 @router.get("/llm-engine-types", operation_id="settings_llm_engine_types", summary="List available engine types for LLM credentials")
 def list_llm_engine_types(user: dict = Depends(require_no_session_token)):
     """返回引擎类型列表（common + ENGINE_REGISTRY keys）。"""
-    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
+    from src.domains.runtime.public import engine_types
     types = [{"value": "common", "label": "通用（兜底）"}]
-    for engine in ENGINE_REGISTRY.keys():
+    for engine in engine_types():
         types.append({"value": engine, "label": engine})
     return {"engine_types": types}
 

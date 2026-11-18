@@ -7414,3 +7414,83 @@ def set_gitcode_nickname(user_id, nickname: str) -> None:
     from src.domains.runtime.im.channel_directory import set_gitcode_nickname as _impl
 
     return _impl(user_id, nickname)
+
+
+# ── 云沙箱 adapter / 引擎注册表只读面（mgmt 管理面消费，2026-11-18 跨域收敛）──
+# 管理面（mgmt.routes.settings / sandbox_admin）原来直接 import runtime.agents.sandbox.*
+# 的内部模块。这里给等价原语，转发体一律函数内 import（内部模块加载期会反向引用别域）。
+def get_cloud_registry() -> dict:
+    """云沙箱平台 → Provider 类映射。"""
+    from src.domains.runtime.agents.sandbox.backends import get_cloud_registry as _impl
+
+    return _impl()
+
+
+def get_adapter(platform: str):
+    """取平台 adapter 实例；未注册平台返回 None。"""
+    from src.domains.runtime.agents.sandbox.backends import get_adapter as _impl
+
+    return _impl(platform)
+
+
+def get_all_adapters() -> list:
+    """全部 adapter 实例（本地 + 云）。"""
+    from src.domains.runtime.agents.sandbox.backends import get_all_adapters as _impl
+
+    return _impl()
+
+
+def get_cloud_platforms() -> list[str]:
+    """支持的云沙箱平台名列表。"""
+    from src.domains.runtime.agents.sandbox.backends import get_cloud_platforms as _impl
+
+    return _impl()
+
+
+def default_registry() -> Any:
+    """平台 → Provider 工厂映射（只读快照）。"""
+    from src.domains.runtime.agents.sandbox.backends import default_registry as _impl
+
+    return _impl()
+
+
+def engine_types() -> list[str]:
+    """云沙箱支持的引擎类型（ENGINE_REGISTRY 的键，保持注册顺序）。"""
+    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
+
+    return list(ENGINE_REGISTRY.keys())
+
+
+def has_engine_type(engine_type: str) -> bool:
+    """引擎类型是否已注册（严格比对，不含 "common" 兜底）。"""
+    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
+
+    return engine_type in ENGINE_REGISTRY
+
+
+def engine_plugins_info() -> list[dict]:
+    """引擎插件摘要（JSON 友好）：engine_type / display_name / installable。"""
+    from src.domains.runtime.agents.sandbox.backends.engine_strategies import ENGINE_REGISTRY
+
+    return [
+        {
+            "engine_type": et,
+            "display_name": et,
+            "installable": bool(getattr(plugin.installer, "install_cmd", "")),
+        }
+        for et, plugin in sorted(ENGINE_REGISTRY.items())
+    ]
+
+
+def invalidate_cache(backend_name: str | None = None) -> None:
+    """失效沙箱网络访问规则缓存（白名单 CRUD 后调用）。"""
+    from src.domains.runtime.agents.sandbox.whitelist import invalidate_cache as _impl
+
+    return _impl(backend_name)
+
+
+def refresh_whitelist_cache() -> None:
+    """刷新城墙域名白名单内存缓存（不直接暴露 _WhitelistCache 类）。"""
+    from src.domains.runtime.agents.sandbox.isolation.network import _WhitelistCache
+
+    _WhitelistCache.get().refresh()
