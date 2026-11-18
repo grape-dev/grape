@@ -68,7 +68,7 @@ FROZEN = {
     "register-view.js": ("1", "3358ffefb36ef8d4", ["views/RegisterView.vue", "views/entries/register-view.js"]),
     "repos-view.js": ("59", "0fb2b932fc98fa4d", ["lib/repo-provider.js", "views/LlmCredManager.vue", "views/ReposView.vue", "views/SettingsView.vue", "views/TemplatesView.vue", "views/entries/repos-view.js"]),
     "runtimes-view.js": ("77", "e0e5a0299ec7cd39", ["styles/bridge.css", "views/RuntimesView.vue", "views/entries/runtimes-view.js"]),
-    "sandbox-view.js": ("9", "cb2048aaf68f5ec1", ["styles/bridge.css", "views/SandboxView.vue", "views/entries/sandbox-view.js"]),
+    "sandbox-view.js": ("10", "6a5910e3f9562813", ["styles/bridge.css", "views/SandboxView.vue", "views/entries/sandbox-view.js"]),
     "scene-market.js": ("58", "fd117f417f9527a0", ["components/ui/AGButton.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "views/SceneCard.vue", "views/SceneMarket.vue", "views/entries/scene-market.js"]),
     "skills-view.js": ("54", "d49b7b6128e0b3fb", ["components/ui/AGButton.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "views/SkillsView.vue", "views/entries/skills-view.js"]),
 }

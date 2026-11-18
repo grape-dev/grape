@@ -156,7 +156,7 @@
           <!-- Provider 名=凭据名（Worker 设备页改凭据名全链跟随），编辑态只读展示 -->
           <input
             v-model="providerForm.name"
-            style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); color: var(--t); font-size: 13px; color: var(--t3); cursor: not-allowed"
+            style="width: 100%; padding: 8px; border: 1px solid var(--b); border-radius: 8px; background: var(--c); font-size: 13px; color: var(--t3); cursor: not-allowed"
             disabled
             :title="t('sbx.provider_name_hint')"
           >
