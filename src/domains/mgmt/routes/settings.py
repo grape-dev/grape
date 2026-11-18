@@ -993,6 +993,10 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         from src.domains.mgmt.user.org_db import is_org_personal
         _is_personal_org = is_org_personal(_org_id)
     _filter_org_id = "" if _is_personal_org else _org_id
+    # Issue #3167：可见性比较统一字符串口径（历史 integer org_id 行与 TEXT 用户
+    # org_id 同权），端点内预计算一次，避免逐行转换。
+    _org_self_key = _org_key(_org_id)
+    _org_filter_key = _org_key(_filter_org_id)
     now = __import__("time").time()
     visible_runtimes = []
     for rt in cached:
@@ -1000,22 +1004,21 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # 非个人组织：只显示 org_id 匹配的引擎（不含 global org_id=''）
         # 个人组织：只显示 org_id=''（全局/本机）和 org_id=自身个人组织的引擎，
         #           不显示其他非个人组织的引擎
-        rt_org_id = rt.get("org_id") or ""
         # 注册链把无组织写成 int 0 → TEXT 列落 '0'（与本机引擎行的 '' 同语义）。
-        # 不归一化时个人组织视图把 '0' 当「别的组织」跳过 → 沙箱云引擎全部不可见
+        # Issue #3167：_org_key 统一归一（哨兵族 ''/'0'/'None'/0/None 一律折叠 ''），
+        # 不归一时个人组织视图把 '0' 当「别的组织」跳过 → 沙箱云引擎全部不可见
         # （aw11 E-02 实测：个人组织视图下 13-18 行全被 org 过滤吃掉）。
-        if rt_org_id in ("0", 0):
-            rt_org_id = ""
+        rt_org_id = _org_key(rt)
         if _filter_org_id:
             # 非个人组织：严格 org_id 隔离
             # Issue #371：repo scope 引擎豁免——切换为仓库级后 org_id 可能对齐到仓库所属组织
             # （与当前查看组织不同），但仓库级设备对仓库成员可见（#277 仓库隔离口径），
             # 可见性最终由 _visible_credential 的 repo_key in user_repos 判定收敛，不越权。
-            if rt_org_id != _filter_org_id:
+            if rt_org_id != _org_filter_key:
                 _cred_early = cred_map.get(rt.get("credential_id") or 0) or {}
                 if _cred_early.get("scope") != "repo":
                     continue
-        elif _is_personal_org and rt_org_id and rt_org_id != _org_id:
+        elif _is_personal_org and rt_org_id and rt_org_id != _org_self_key:
             # Issue #338：个人归属 worker 引擎（凭据 scope=user 且 owner=当前用户）
             # 不受凭据创建时绑定的 org_id 隔离——归属判断以 _visible_credential 为准
             # （与 dashboard 个人组织视图 "global + 自己的 user scope worker" 语义一致）
@@ -1148,9 +1151,9 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     _devices_cached = cached
     if _filter_org_id:
         _devices_cred_map = {k: v for k, v in cred_map.items()
-                             if not _org_unassigned(v) and (v.get("org_id") or "") == _filter_org_id
+                             if not _org_unassigned(v) and _org_key(v) == _org_filter_key
                              or v.get("scope") == "repo"}
-        _devices_cached = [rt for rt in cached if (rt.get("org_id") or "") == _filter_org_id
+        _devices_cached = [rt for rt in cached if _org_key(rt) == _org_filter_key
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     elif _is_personal_org:
         # 个人组织：只保留 org_id=''（全局）和 org_id=自身 的凭据/引擎；
@@ -1161,10 +1164,10 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
         # user_repos 判定收敛，不越权。
         _devices_cred_map = {k: v for k, v in cred_map.items()
-                             if _org_unassigned(v) or (v.get("org_id") or "") == _org_id
+                             if _org_unassigned(v) or _org_key(v) == _org_self_key
                              or v.get("scope") == "repo"
                              or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
-        _devices_cached = [rt for rt in cached if (rt.get("org_id") or "") in ("", _org_id)
+        _devices_cached = [rt for rt in cached if _org_key(rt) in ("", _org_self_key)
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     devices = _build_runtime_devices(db, db_lock, _devices_cred_map, _visible_credential,
                                      valid_users, _devices_cached, now)
@@ -1675,13 +1678,16 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
     _org_id = user.get("org_id", "")
     _is_personal_org = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = "" if _is_personal_org else _org_id
+    # Issue #3167：可见性比较统一字符串口径（与 get_agent_runtimes 同源缺陷同修）。
+    _org_self_key = _org_key(_org_id)
+    _org_filter_key = _org_key(_filter_org_id)
     if _filter_org_id:
         # Issue #371：非个人组织严格隔离分支为 repo scope 增加豁免（与 #338 个人组织分支同口径），
         # repo scope 设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in user_repos 收敛。
-        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or "") == _filter_org_id
+        _local_runtimes = [rt for rt in _local_runtimes if _org_key(rt) == _org_filter_key
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
-                    if not _org_unassigned(v) and (v.get("org_id") or "") == _filter_org_id
+                    if not _org_unassigned(v) and _org_key(v) == _org_filter_key
                     or v.get("scope") == "repo"}
     elif _is_personal_org:
         # 个人组织：只保留 org_id=''（全局）和 org_id=自身 的凭据/引擎；
@@ -1691,10 +1697,10 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
         # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
         # user_repos 判定收敛，不越权。
         _local_runtimes = [rt for rt in _local_runtimes if _org_unassigned(rt)
-                           or (rt.get("org_id") or "") == _org_id
+                           or _org_key(rt) == _org_self_key
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
-                    if _org_unassigned(v) or (v.get("org_id") or "") == _org_id
+                    if _org_unassigned(v) or _org_key(v) == _org_self_key
                     or v.get("scope") == "repo"
                     or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
 
@@ -2994,11 +3000,32 @@ def _require_admin(user: dict):
 
 
 
+def _org_key(v) -> str:
+    """org_id 归一为可比较字符串（Issue #3167）。
+
+    历史库 runtime_credentials / agent_runtimes 的 org_id 存在 integer 行（旧
+    insert 未做 TEXT 归一），直接参与可见性比较时两处翻车：
+      ① int 值调 .strip() 抛 AttributeError → 引擎/设备端点必现 500；
+      ② '2' == 2 恒 False（不报错）→ 本应可见的引擎/设备被静默过滤。
+    故统一在此归一：
+      - 未归属哨兵族（None/''/0/0.0/False/'0'/'None'，含空白形态）一律折叠为 ''；
+      - 真实归属值归一为去空白字符串（5 / '5' / ' 5 ' → '5'）。
+    接受行 dict（取 org_id 字段）或裸 org_id 值，供端点判定与 _org_unassigned 共用。
+    """
+    if isinstance(v, dict):
+        v = v.get("org_id")
+    if not v:
+        return ""
+    key = str(v).strip()
+    return "" if key in ("0", "None") else key
+
+
 def _org_unassigned(v) -> bool:
     """org_id 未归属判定：''（D105 第三批哨兵）与历史脏值 '0'/'None'（旧 int 列
     时代 insert 归一遗留）同权——可见性过滤必须把未归属凭据对个人组织放行，
-    否则 s3/s4 这类 global 凭据在个人组织视图下会整批消失（实测根因）。"""
-    return (v.get("org_id") or "").strip() in ("", "0", "None")
+    否则 s3/s4 这类 global 凭据在个人组织视图下会整批消失（实测根因）。
+    Issue #3167：类型归一集中在 _org_key，历史 integer 行不再抛 .strip()。"""
+    return _org_key(v) == ""
 
 
 def _sb_cred_brief_map() -> dict:
