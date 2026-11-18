@@ -1837,13 +1837,13 @@ def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int = Depen
         "turn": body.turn, "cost_usd": body.cost_usd, "cost_status": body.cost_status,
     }
     try:
-        from src.domains.insight.observability.llm_usage import record_usage
+        from src.domains.insight.public import record_usage
         record_usage(task_id, [usage], source=body.source or "report")
     except Exception as e:      # 用量采集绝不能拖垮任务主链路
         log.warning(f"record usage ledger failed task={task_id}: {e}")
     # Prometheus 埋点(与台账同源,保留供外部 Prometheus 抓取)
     try:
-        from src.domains.insight.observability import record_llm_usage
+        from src.domains.insight.public import record_llm_usage
         record_llm_usage(body.provider, body.model, body.input, body.output,
                          body.cache_read or body.cache)
     except Exception:

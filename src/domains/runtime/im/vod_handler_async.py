@@ -368,8 +368,8 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
         if _token_result.level == "user":
             _user_token = _token_result.token
         # 用量采集（审计 2026-10-17）：VOD Bot 的 DIRECT 运行以前不记 token
-        from src.domains.insight.observability.master_usage import MasterRun, new_run_id
-        _mu = MasterRun("vod", new_run_id("vod"), engine=_be, cwd=wsd,
+        from src.domains.insight.public import master_run, new_run_id
+        _mu = master_run("vod", new_run_id("vod"), engine=_be, cwd=wsd,
                         session_id=runtime_session_id,
                         attr={"repo_key": repo_key,
                               "scene_id": evt.get("payload", {}).get("im_chat_id", "") or "",

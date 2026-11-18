@@ -1283,7 +1283,7 @@ def _extract_prompt_usage(result) -> dict | None:
         return None
     tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}
     try:
-        from src.domains.insight.observability.llm_usage import normalize_tokens
+        from src.domains.insight.public import normalize_tokens
         _n = normalize_tokens(usage)
         tok = {
             "input": _n.get("input_tokens", 0),

@@ -1829,8 +1829,8 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                     issue_number=(conv or {}).get("issue_number") or "")
                 _direct_env["IM_CHAT_ID"] = chat_id
                 # 用量采集（合并保留双方功能）：审计 2026-10-17 起 IM 直连也要记 token（P2-1 口径 B）
-                from src.domains.insight.observability.master_usage import MasterRun, new_run_id
-                _mu = MasterRun("im", new_run_id("im"), engine=backend, cwd=wsd,
+                from src.domains.insight.public import master_run, new_run_id
+                _mu = master_run("im", new_run_id("im"), engine=backend, cwd=wsd,
                                 session_id=oc_sid,
                                 attr={"repo_key": repo_key, "scene_id": chat_id or "",
                                       "agent_type": "chat", "user_id": int(user_id or 0),

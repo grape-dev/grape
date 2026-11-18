@@ -1311,7 +1311,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         _pipeline_tid = ""
         if repo_key and issue_id:
             try:
-                from src.domains.insight.observability.trace import pipeline_trace_id
+                from src.domains.insight.public import pipeline_trace_id
                 _pipeline_tid = pipeline_trace_id(repo_key, issue_id, task_id)
             except Exception:
                 pass
@@ -1339,7 +1339,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         _pipeline_tid = ""
         if repo_key and issue_id:
             try:
-                from src.domains.insight.observability.trace import pipeline_trace_id
+                from src.domains.insight.public import pipeline_trace_id
                 _pipeline_tid = pipeline_trace_id(repo_key, issue_id, task_id)
             except Exception:
                 pass
@@ -1409,7 +1409,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             pass
     # 可观察性埋点：任务入队
     try:
-        from src.domains.insight.observability import record_task_enqueued
+        from src.domains.insight.public import record_task_enqueued
         record_task_enqueued(task_id, event_type or agent_type or "other", runtime_id)
     except Exception:
         pass
@@ -1921,7 +1921,7 @@ def claim(runtime_id, expected_task_id=None, expected_event_seq=None, determinis
                 log.warning(f"claim: inject token failed for task {task_id}: {_te}")
         # 可观察性埋点：任务被 claim/dispatched
         try:
-            from src.domains.insight.observability import record_task_dispatched
+            from src.domains.insight.public import record_task_dispatched
             if task:
                 _queue_wait = -1
                 if task.get("created_at"):
@@ -3583,7 +3583,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None,
             log.warning(f"complete_task post-completion hooks failed: {_pe}")
     # 可观察性埋点：任务到达终态
     try:
-        from src.domains.insight.observability import record_task_terminal
+        from src.domains.insight.public import record_task_terminal
         _terminal = "completed" if exit_code == 0 else "failed"
         _run_s = -1
         _total_s = -1
@@ -4416,7 +4416,7 @@ def fail_task(task_id, error, exit_code=-1):
     log.warning(f"Task failed: {task_id} agent={_ft.get('agent_type', '')} repo={_ft.get('repo_key', '')} issue={_ft.get('issue_id', '') or '-'} skill={_ft.get('skill', '')} exit={exit_code} outcome=failed err={str(error)[:120]}")
     # 可观察性埋点：任务失败
     try:
-        from src.domains.insight.observability import record_task_terminal, record_task_failed
+        from src.domains.insight.public import record_task_terminal, record_task_failed
         _run_s = -1
         _total_s = -1
         if task:

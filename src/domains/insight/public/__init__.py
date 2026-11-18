@@ -483,3 +483,113 @@ def merge_gate_log_insert(row_id: str, repo_key: str, pr_number: int, phase: str
             "(id, repo_key, pr_number, phase, decision, hits_json, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (row_id, repo_key, int(pr_number or 0), phase, decision, hits_json, created_at))
+
+
+# ---------- 观测埋点 / 用量账本 / 反馈脱敏（observability 子包归 insight）----------
+#
+# 跨域调用方原本直接 import `insight.observability.<模块>` 的内部实现（mgmt / runtime 共 13 个
+# 文件、23 个调用点）。埋点口径与用量表都归本域，这些入口收回 public。
+#
+# 两条硬约束，改这里之前先读：
+# 1. 转发体一律**函数内 import**：observability 各模块在加载期会反向 import runtime / mgmt 的
+#    public（如 events → runtime 事件总线、master_usage → runtime.engine.usage_collect），
+#    顶层 import 会立刻成环。
+# 2. 转发**不改语义**：埋点函数本身已保证「绝不拖垮主链路」（内部 try/except），这里再包一层
+#    只会把真实 bug 藏进第二层 except。参数与返回值一律原样透传。
+
+
+def redact_issue_text(text: str | None, max_len: int = 2000) -> str:
+    """Issue 正文脱敏（feedback 落库前打码，出转时再打码一次兜存量明文；两层皆幂等）。"""
+    from src.domains.insight.observability.redact_issue_body import redact_issue_text as _impl
+    return _impl(text, max_len)
+
+
+def normalize_tokens(raw: dict) -> dict:
+    """把各家引擎的用量字段归一成 input/output/cache_read/cache_write/reasoning。"""
+    from src.domains.insight.observability.llm_usage import normalize_tokens as _impl
+    return _impl(raw)
+
+
+def pipeline_trace_id(repo_key: str, issue_id: str, task_id: str = "") -> str:
+    """流水线级 trace id（同一 (仓库, issue) 恒等；无 issue 退回任务级 id）。"""
+    from src.domains.insight.observability.trace import pipeline_trace_id as _impl
+    return _impl(repo_key, issue_id, task_id)
+
+
+def record_task_enqueued(task_id: str, source: str, runtime_id: int) -> None:
+    """任务入队埋点。"""
+    from src.domains.insight.observability import record_task_enqueued as _impl
+    return _impl(task_id, source, runtime_id)
+
+
+def record_task_dispatched(task_id: str, source: str, runtime_id: int,
+                           queue_wait_seconds: float = -1) -> None:
+    """任务被 claim / dispatched 埋点（含排队等待秒数，-1 表示未知）。"""
+    from src.domains.insight.observability import record_task_dispatched as _impl
+    return _impl(task_id, source, runtime_id, queue_wait_seconds)
+
+
+def record_task_terminal(task_id: str, source: str, runtime_id: int, terminal_status: str,
+                         run_seconds: float = -1, total_seconds: float = -1) -> None:
+    """任务到达终态埋点。"""
+    from src.domains.insight.observability import record_task_terminal as _impl
+    return _impl(task_id, source, runtime_id, terminal_status, run_seconds, total_seconds)
+
+
+def record_task_failed(task_id: str, source: str, runtime_id: int,
+                       failure_reason: str = "") -> None:
+    """任务失败埋点（与 `record_task_terminal` 分开：失败面额外记原因）。"""
+    from src.domains.insight.observability import record_task_failed as _impl
+    return _impl(task_id, source, runtime_id, failure_reason)
+
+
+def record_llm_usage(provider: str, model: str, input_tokens: int, output_tokens: int,
+                     cache_tokens: int = 0) -> None:
+    """Prometheus 侧 LLM token 埋点（与用量台账同源）。"""
+    from src.domains.insight.observability import record_llm_usage as _impl
+    return _impl(provider, model, input_tokens, output_tokens, cache_tokens)
+
+
+def record_usage(task_id: str, usages, source: str = "report", run_kind: str = "task",
+                 run_id: str = "", attr: dict | None = None) -> int:
+    """LLM 用量台账写入，返回实际写入/更新行数；异常在实现内吞掉，不上抛。"""
+    from src.domains.insight.observability.llm_usage import record_usage as _impl
+    return _impl(task_id, usages, source=source, run_kind=run_kind, run_id=run_id, attr=attr)
+
+
+def task_model_summary(task_id: str, runtime_id: int = 0) -> dict:
+    """任务执行模型的统一取值口径（用量优先、配置模型回落、皆空 unknown）。"""
+    from src.domains.insight.observability.llm_usage import task_model_summary as _impl
+    return _impl(task_id, runtime_id)
+
+
+def master_usage_for_task(task_id: str, engine: str, cwd: str = "", session_id: str = "",
+                          **kwargs) -> Any:
+    """取「通常有 agent_tasks 行」的一次运行用量采集器（透传 master_usage.for_task）。
+
+    返回的是进程内采集器对象（`MasterRun` 实例，`.start()/.finish()` 就地采集），
+    不是数据行——跨进程跑引擎的调用方仍应走 GSB，不在这里。
+    """
+    from src.domains.insight.observability.master_usage import for_task as _impl
+    return _impl(task_id, engine, cwd=cwd, session_id=session_id, **kwargs)
+
+
+def master_run(*args, **kwargs) -> Any:
+    """构造一次主控机内引擎运行的用量采集器（形状同 `master_usage.MasterRun`）。
+
+    只做构造转发：调用方拿到的是真实实例，`attr` 归属口径与直接构造完全一致。
+    """
+    from src.domains.insight.observability.master_usage import MasterRun as _impl
+    return _impl(*args, **kwargs)
+
+
+def new_run_id(prefix: str) -> str:
+    """给「一次运行」造主体标识（调用点拿不到现成 id 时用）。"""
+    from src.domains.insight.observability.master_usage import new_run_id as _impl
+    return _impl(prefix)
+
+
+__all__ += ["redact_issue_text", "normalize_tokens", "pipeline_trace_id",
+            "record_task_enqueued", "record_task_dispatched", "record_task_terminal",
+            "record_task_failed", "record_llm_usage", "record_usage",
+            "task_model_summary", "master_usage_for_task", "master_run", "new_run_id"]

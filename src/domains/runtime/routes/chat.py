@@ -778,9 +778,9 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
 
     def run_agent():
         nonlocal new_runtime_session_id, _send_error
-        from src.domains.insight.observability.master_usage import MasterRun, new_run_id
+        from src.domains.insight.public import master_run, new_run_id
         # 用量采集（审计 2026-10-17 + P2-1 口径 B）：本机直连 chat 引擎以前不记 token
-        _mu = MasterRun("chat", new_run_id("chat"), engine=backend_name,
+        _mu = master_run("chat", new_run_id("chat"), engine=backend_name,
                         cwd=_get_chat_cwd(user["id"], repo_key, conv_id),
                         session_id=runtime_session_id,
                         attr={"repo_key": repo_key, "scene_id": conv_id,
@@ -1068,9 +1068,9 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                 return
             collected = []
             worker_error = ""
-            from src.domains.insight.observability.master_usage import MasterRun
+            from src.domains.insight.public import master_run
             # 用量采集（审计 2026-10-17）：SSE 本机直连路径同样漏记 token
-            _mu = MasterRun("chat", chat_task_id, engine=backend_name,
+            _mu = master_run("chat", chat_task_id, engine=backend_name,
                             cwd=_get_chat_cwd(user["id"], repo_key, conv_id),
                             session_id=runtime_session_id,
                             attr={"repo_key": repo_key, "scene_id": conv_id,
@@ -2115,7 +2115,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
         def agent_fn():
             """agent generator — yield 事件 + finally 写 DB"""
             from src.domains.runtime.engine.executor import stream_chat_agent
-            from src.domains.insight.observability.master_usage import MasterRun
+            from src.domains.insight.public import master_run
             _final_text = ""
             _new_sid = ""
             _ctm_error_detail = ""  # R20.8.7: 保存 error 信息用于 401 标记
@@ -2123,7 +2123,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
             # 用量采集（审计 2026-10-17）：本机直连的 chat 引擎以前**一条 token 都不记**。
             # 归属口径 B：无 agent_tasks 行 → task_id 空、主体 run_id=chat_task_id；
             # 采集/写库失败只打日志，绝不影响对话主链路。
-            _mu = MasterRun("chat", chat_task_id, engine=backend_name, cwd=cwd,
+            _mu = master_run("chat", chat_task_id, engine=backend_name, cwd=cwd,
                             attr={"repo_key": repo_key, "scene_id": conv_id,
                                   "agent_type": "chat", "user_id": user["id"],
                                   "engine_id": int(rid or 0)})

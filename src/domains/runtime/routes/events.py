@@ -492,7 +492,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
 
     # Issue #1255：执行模型展示（用量优先、配置模型回落，与 task-logs info 同一取值函数）
     try:
-        from src.domains.insight.observability.llm_usage import task_model_summary
+        from src.domains.insight.public import task_model_summary
         _ms = task_model_summary(str(task_info.get("task_id") or ""),
                                  int(task_info.get("runtime_id") or 0))
     except Exception:
@@ -2431,7 +2431,7 @@ def _execute_conv_task(task_id: str, loop):
         _worker_final_text = ""
         _conv_error_detail = ""  # R20.8b.1: 保存 error 信息用于 401 标记
         # 用量采集（审计 2026-10-17）：本机直跑的事件对话以前不记 token
-        from src.domains.insight.observability.master_usage import for_task as _master_for_task
+        from src.domains.insight.public import master_usage_for_task as _master_for_task
         _mu = _master_for_task(task_id, "hermes", cwd=ws, session_id=oc_session_id,
                                seq=anchor_seq, repo_key=repo_key, agent_type=agent_type)
         _mu.start()

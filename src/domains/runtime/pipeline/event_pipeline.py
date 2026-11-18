@@ -6356,7 +6356,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
 
     # 用量采集（审计 2026-10-17）：DIRECT 模式跑在主控进程里，以前一条 token 都不记；
     # 有 agent_tasks 行 → run_kind='task'，归属自动反查，幂等键与 worker 侧一致。
-    from src.domains.insight.observability.master_usage import for_task as _master_for_task
+    from src.domains.insight.public import master_usage_for_task as _master_for_task
     _mu = _master_for_task(task_id, backend, cwd=ws, session_id=oc_session_id, seq=seq,
                            repo_key=repo_key, agent_type=agent_type,
                            engine_id=int(runtime_id or 0))
