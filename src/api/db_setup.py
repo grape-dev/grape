@@ -8462,6 +8462,10 @@ register_migration(
 # （mgmt 那份 0 行、runtime 反而缺）。迁移内容在 owner 域，只为把表补到正确库。
 from src.domains.runtime.migrations.ensure_cloud_sandboxes_table import MIGRATION as _M_CLOUD_SB
 register_migration(**_M_CLOUD_SB)
+# 2026-11-18 Issue #113/seq 9946：agent_runtimes 缺 runtime_type / runtime_info 两列，
+# claim 查询 1054 → 引擎不 spawn。迁移只在 runtime 域执行（列在该域的表上）。
+from src.domains.runtime.migrations.ensure_runtime_type_info_columns import MIGRATION as _M_RT_COLS
+register_migration(**_M_RT_COLS)
 register_migration(
     "202611080013", "issue-646-mysql-fks", "safe",
     lambda: _migration_646_mysql_fks(),
