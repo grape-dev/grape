@@ -1576,11 +1576,23 @@ def main():
                                    for t in _tpl_list if t.get("template_id")],
                         template_engines=_tpl_engines,
                     )
-                    log.info(f"sandbox provider reported: provider_id={_rep.get('provider_id', '')} "
-                             f"templates={_rep.get('templates_upserted', 0)} "
-                             f"engines_detected={_rep.get('engines_detected', 0)}")
+                    if _rep:
+                        log.info(f"sandbox provider reported: provider_id={_rep.get('provider_id', '')} "
+                                 f"templates={_rep.get('templates_upserted', 0)} "
+                                 f"engines_detected={_rep.get('engines_detected', 0)}")
+                    else:
+                        # The client swallows 5xx/timeout into an empty dict, so this used
+                        # to log "reported: templates=0" as if it had worked while the
+                        # platform stored nothing and no retry was scheduled. Count an
+                        # empty response as pending so _probe_retry_loop re-reports with
+                        # backoff until the data really lands.
+                        log.warning("sandbox provider report returned an empty response "
+                                    "(request failed), counted as pending: "
+                                    f"templates={len(_tpl_list)} engines={len(_tpl_engines)}")
+                        _failed += 1
                 except Exception as _re:
                     log.warning(f"sandbox provider report failed: {_re}")
+                    _failed += 1
             return _failed
 
         # 启动先跑一轮（注册后，不阻塞注册——本函数含建箱探测，耗时长）

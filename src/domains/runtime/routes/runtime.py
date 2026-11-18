@@ -1310,7 +1310,14 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
                     "llm_cred_hint": f"缺少 LLM 凭据：该任务使用{'仓库级' if _llm_mode == 'repo' else '个人级'}沙箱平台，"
                                      f"请在【{_src_zh} → LLM 凭据】为引擎 {engine_type or 'common'} 配置后重试"}
     except Exception as _e:
+        # Previously this only logged a WARNING and returned an empty env, which the
+        # worker reported as "no LLM credentials, config skipped" and the engine then
+        # turned into "No LLM provider configured" -- unreadable even for a user who
+        # had credentials configured. Fold the failure into an explicit missing marker
+        # with the reason so the task fails with something actionable.
         log.warning(f"task_env: attach LLM credentials failed: {_e}")
+        return {"env": env, "llm_cred_missing": True, "llm_cred_source": "error",
+                "llm_cred_hint": f"读取 LLM 凭据失败：{_e}（请检查 LLM 凭据配置或平台日志）"}
     return {"env": env}
 
 
