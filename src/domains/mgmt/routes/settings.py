@@ -1015,7 +1015,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     user=仅当前登录用户名下 user scope（含 owner=当前用户的本机引擎）。
     """
     from src.domains.mgmt.user import db as user_db
-    from src.domains.runtime.engine.instances import instance_name
+    from src.domains.runtime.public import instance_name
     from src.kernel.session_manager import db, db_lock
 
     uid = str(user.get("id") or "")
@@ -1114,7 +1114,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         rt["worker_name"] = cred["name"]
         # AIShell 显示名（2026-10-13）：出口统一转换 name/display_name，
         # 前端读 rt.name 的所有位置一次生效；内部路由键（DB 行本身）不变
-        from src.domains.runtime.engine.instances import to_display
+        from src.domains.runtime.public import to_display
         rt["display_name"] = to_display(rt.get("display_name") or rt["name"])
         rt["name"] = to_display(rt["name"])
         rt["worker_ip"] = cred["last_ip"]
@@ -1324,7 +1324,7 @@ def _engine_type_of(rt: dict) -> str:
     n = (rt.get("instance_name") or rt.get("name") or "").lower()
     if not n:
         return ""
-    from src.domains.runtime.engine.instances import canonical_engine
+    from src.domains.runtime.public import canonical_engine
 
     c = canonical_engine(n)
     if c == "aishell-dsh":
@@ -1541,8 +1541,8 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                       两个端点均已查询，传入复用避免二次全量扫描）
       now: 当前时间戳
     """
-    from src.domains.runtime.engine.health import derive_runtime_health
-    from src.domains.runtime.engine.instances import instance_name
+    from src.domains.runtime.public import derive_runtime_health
+    from src.domains.runtime.public import instance_name
     import json as _json
 
     devices = []
@@ -1570,7 +1570,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
             # agent_runtimes 归运行域：具名查询（任意拓扑）
             _lr_rows = _rt.read_all_any("runtimes_by_credential_full", (cid,))
         # AIShell 显示名（2026-10-13 收口补漏）：worker 设备视图的承载引擎列表
-        from src.domains.runtime.engine.instances import to_display as _td2
+        from src.domains.runtime.public import to_display as _td2
         runtimes = [
             {"id": x[0], "name": _td2(x[1]), "version": x[2], "healthy": bool(x[3]),
              "installed": bool(x[4]),
@@ -1624,7 +1624,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
     except Exception:
         pass
     _device_by_name = {d.get("device_name", ""): d for d in devices}
-    from src.domains.runtime.engine.instances import engine_mounts_to_credential as _mounts_to
+    from src.domains.runtime.public import engine_mounts_to_credential as _mounts_to
 
     for rt in local_runtimes:
         if (rt.get("credential_id") or 0) != 0:
@@ -1637,7 +1637,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
         rt["health"] = _runtime_health(rt, now)
         _hn = rt.get("host_name") or _local_hostname or ""
         rt["instance_name"] = instance_name(rt["name"], _hn, 0)
-        from src.domains.runtime.engine.instances import to_display as _td
+        from src.domains.runtime.public import to_display as _td
         rt["name"] = _td(rt["name"])
         target_device = next((d for d in devices
                               if _mounts_to(0, rt.get("host_name"), d.get("device_name", ""))), None)
@@ -2304,7 +2304,7 @@ def _cleanup_scene_engine_runtime_ids(rid_list: list):
     引擎绑定真实性同步：实现已抽至 engine_select.cleanup_scene_engine_bindings（与
     离线超阈值解绑共用），本函数保留为薄包装（调用点不变，行为等价）。
     """
-    from src.domains.runtime.engine.engine_select import cleanup_scene_engine_bindings
+    from src.domains.runtime.public import cleanup_scene_engine_bindings
     cleanup_scene_engine_bindings(rid_list)
 
 
@@ -2432,7 +2432,7 @@ def revoke_runtime_credential(cid: int, confirm: bool = False, user: dict = Depe
             _purged = _rt_purge.purge_runtime_credential(str(cid))
             _purged_rids = [int(x) for x in (_purged.get("rids") or [])]
             if _purged_rids:
-                from src.domains.runtime.engine.engine_select import cleanup_scene_engine_bindings as _csb_purge
+                from src.domains.runtime.public import cleanup_scene_engine_bindings as _csb_purge
                 # commit=False：修掉"在调用方事务中途提前提交"的旧缺陷
                 _csb_purge(_purged_rids, commit=False)
             db.commit()

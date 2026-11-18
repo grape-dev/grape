@@ -620,7 +620,7 @@ def collect_business_sampler():
     # 采集新快照
     try:
         from src.domains.runtime import public as runtime_public
-        from src.domains.runtime.engine.health import derive_runtime_health
+        from src.domains.runtime.public import derive_runtime_health
         from datetime import datetime, timezone, timedelta
 
         now_ts = _time.time()

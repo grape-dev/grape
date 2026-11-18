@@ -372,7 +372,7 @@ def get_engine_select_explain(repo: str = "", agent_type: str = "vod", scene_id:
     pool_engine_ids / selected。库内字段（healthy/online/last_seen）与 console 展示
     不一致的核对可由 candidates 字段直接完成。
     """
-    from src.domains.runtime.engine.engine_select import explain_engine_selection
+    from src.domains.runtime.public import explain_engine_selection
     try:
         return {"ok": True, **explain_engine_selection(repo, agent_type, scene_id=scene_id)}
     except Exception as e:
@@ -541,7 +541,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
     repo 参数：仓库名（requiredsa/hello-flask），过滤仅该仓库的任务。
     """
     from src.kernel.session_manager import db, db_lock
-    from src.domains.runtime.engine.health import derive_runtime_health
+    from src.domains.runtime.public import derive_runtime_health
     from datetime import datetime, timezone, timedelta
     import time as _time
 
@@ -882,7 +882,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     _dev_name = rhost or "本机直连"
                 else:
                     _dev_name = (rc_name or "").strip()
-                from src.domains.runtime.engine.instances import to_display as _td
+                from src.domains.runtime.public import to_display as _td
                 runtime_list.append({
                     "id": rid, "name": _td(rname or ""), "status": rstatus or "offline",
                     "health": health, "mode": mode,
@@ -1232,7 +1232,7 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
         runtime_map[(row[0], row[1])] = row[3] or 0
 
     # runtime_id → 引擎实例名映射（type-device_name 格式）
-    from src.domains.runtime.engine.instances import instance_name as _inst_name
+    from src.domains.runtime.public import instance_name as _inst_name
     _local_hostname = ""
     try:
         _local_hostname = engine_host()
@@ -1597,8 +1597,8 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     _filter_org_id = 0 if _is_personal_org else _org_id
     agent_engines = {}
     try:
-        from src.domains.runtime.engine.engine_select import query_engines
-        from src.domains.runtime.engine.instances import instance_name, to_display
+        from src.domains.runtime.public import query_engines
+        from src.domains.runtime.public import instance_name, to_display
         _uname = user.get("username") or ""
 
         # Issue #1310（对齐 origin/weekly-10 dashboard.py）：凭据名缓存，供前端引擎下拉展示

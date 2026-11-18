@@ -4606,7 +4606,7 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
 def _rows_to_runtimes(rows) -> list[dict]:
     """将 DB 行列表转为 runtime dict 列表（供 get_agent_runtimes / paged 复用）。"""
     # AIShell 显示名（2026-10-13）：出口统一转换 name/display_name（内部键不变）
-    from src.domains.runtime.engine.instances import to_display as _td
+    from src.domains.runtime.public import to_display as _td
     return [
         {"id": r[0], "name": _td(r[1]), "display_name": _td(r[2] or r[1]), "installed": bool(r[3]),
          "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),

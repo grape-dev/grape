@@ -438,7 +438,7 @@ def _platform_metrics() -> Dict[str, float]:
     try:
         from src.kernel.owner_db import db_pair
         db, db_lock = db_pair("insight")
-        from src.domains.runtime.engine.health import derive_runtime_health
+        from src.domains.runtime.public import derive_runtime_health
         online = 0
         for status, last_seen in _rt_alerts.alerts_credential_heartbeats():
             try:

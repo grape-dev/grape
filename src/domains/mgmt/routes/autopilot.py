@@ -357,7 +357,7 @@ def list_tasks(
              (r[2].split(":", 1)[1] if ":" in r[2] else r[2]) in _repo_base]
     # 引擎绑定真实性同步 §5.1b：绑定引擎已被系统 detach 的任务带提示（两表协同，不删绑定）
     try:
-        from src.domains.runtime.engine.engine_select import get_detached_engine_hints
+        from src.domains.runtime.public import get_detached_engine_hints
         import json as _json_hint
         _all_eids = set()
         for t in tasks:
@@ -410,7 +410,7 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
     task = _row_to_task(row)
     # 引擎绑定真实性同步 §5.1b：详情同样带 engine_detached 提示（与列表口径一致）
     try:
-        from src.domains.runtime.engine.engine_select import get_detached_engine_hints
+        from src.domains.runtime.public import get_detached_engine_hints
         # Issue #1011：读侧 uid 优先——uid 模式任务的绑定引擎解析为 id 参与提示
         _uids = [str(u).strip().lower() for u in (task.get("engine_runtime_uids") or [])]
         if _uids:

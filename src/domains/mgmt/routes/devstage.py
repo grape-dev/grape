@@ -44,7 +44,7 @@ def _annotate_worker_online(envs: list) -> None:
     if not envs:
         return
     from src.domains.runtime import public as runtime_public
-    from src.domains.runtime.engine.health import derive_runtime_health
+    from src.domains.runtime.public import derive_runtime_health
     from datetime import datetime, timezone
     now_ts = datetime.now(timezone.utc).timestamp()
     # 一次性查出所有未吊销凭据的 name → health（凭据表归 runtime 域，三库拓扑下

@@ -295,7 +295,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                         if brow[1]:
                             _d = _rt_agents.read_one_any("credential_device_name", (brow[1],))
                             _dev = _d[0] if _d else ""
-                        from src.domains.runtime.engine.instances import instance_name
+                        from src.domains.runtime.public import instance_name
                         instance_name_val = instance_name(brow[0], _dev or "", brow[1] or 0)
                 _sub_evts = []
                 try:
@@ -389,7 +389,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     pool = []
     _eids = []  # Issue #524: 场景声明引擎集合（声明配置），供 declared/effective 区分
     try:
-        from src.domains.runtime.engine.instances import instance_name
+        from src.domains.runtime.public import instance_name
         from src.api.pipeline_config import get_scene_engine_ids
         from src.kernel.session_manager import db, db_lock
         # Issue #1310：凭据名（runtime_credentials.name）查询；本机直连（cid=0）回退 host_name
@@ -453,7 +453,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
 
         _eids = get_scene_engine_ids(_scene_id, name, repo_key=repo_key, user_id=_uid)
         if _eids:
-            from src.domains.runtime.engine.engine_select import _engines_by_ids, load_engine_selection, _norm_repo
+            from src.domains.runtime.public import _engines_by_ids, load_engine_selection, _norm_repo
             _cfg = load_engine_selection()
             _repo = _norm_repo(repo_key)
             pool = _engines_by_ids(_eids, _repo, _cfg)
@@ -480,7 +480,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                             (_dev_scene, *_repo_keys))
                 _sr = _sc.fetchone()
             if _sr:
-                from src.domains.runtime.engine.engine_select import get_detached_engine_hints
+                from src.domains.runtime.public import get_detached_engine_hints
                 detached_engines = get_detached_engine_hints(scene_row_id=_sr[0])
     except Exception as _de:
         log.warning(f"get_agent_detail: detached_engines lookup failed: {_de}")
@@ -659,7 +659,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     # backends 显式提供 → 解析为 runtime_id 列表，更新当前场景 node；
     # 无场景则为空（全广播/兜底）。
     if body.backends is not None:
-        from src.domains.runtime.engine.instances import resolve_instance_id, scope_of_runtime
+        from src.domains.runtime.public import resolve_instance_id, scope_of_runtime
         from src.domains.mgmt.user.db import get_runtime_id_by_name
         rids = []
         for bn in body.backends:
@@ -785,7 +785,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         c = db.cursor()
         try:
             from src.domains.mgmt.user.db import ensure_default_backend, get_runtime_id_by_name
-            from src.domains.runtime.engine.instances import resolve_instance_id, scope_of_runtime
+            from src.domains.runtime.public import resolve_instance_id, scope_of_runtime
             # runtime_id：优先按 backends 集合首项解析；其次 body.backend；否则按类型名兜底
             _backend_for_rid = body.backend
             if not _backend_for_rid and body.backends:

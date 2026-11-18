@@ -415,7 +415,7 @@ def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "") -> 
     selector_dead_nodes: list[str] = []
     selector_offline_nodes: list[str] = []
     try:
-        from src.domains.runtime.engine.engine_select import (get_scene_pool_engine_ids as _gspei,
+        from src.domains.runtime.public import (get_scene_pool_engine_ids as _gspei,
                                                get_scene_engine_selector,
                                                selector_candidate_engines)
         for n in (cfg_nodes or []):
@@ -510,7 +510,7 @@ def engine_selector_preview(body: EngineSelectorPreviewBody,
     返回 engines：{runtime_id(str): {hit, reason}}，reason ∈
     selector/role/offline/stale/scope/capability（空 selector 时不做约束，由前端全命中处理）。
     """
-    from src.domains.runtime.engine.engine_select import selector_candidate_engines
+    from src.domains.runtime.public import selector_candidate_engines
     repo_key = _resolve_repo_key(body.repo) if body.repo else ""
     matched, dropped = selector_candidate_engines(
         {"tags": body.tags or []}, body.agent_type or "",
@@ -2163,8 +2163,8 @@ def _validate_scene_node_roles(nodes: list):
     Spec 注明（Issue #955）：空 id / 非 dict 节点静默放行——为兼容存量
     tag-only 节点与历史数据（此类节点无角色名可校验，读侧走 tag 兜底）。
     """
-    from src.domains.runtime.engine.engine_select import KNOWN_AGENT_ROLES
-    _roles = set(KNOWN_AGENT_ROLES)
+    from src.domains.runtime.public import known_agent_roles
+    _roles = known_agent_roles()
     for node in nodes:
         _id = (node.get("id") or "").strip() if isinstance(node, dict) else ""
         if _id and _id not in _roles:
@@ -2211,7 +2211,7 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     """
     from src.kernel.session_manager import db, db_lock
     from src.kernel.repo_key import from_repo_key
-    from src.domains.runtime.engine.engine_select import node_agent_role, validate_selector_tags
+    from src.domains.runtime.public import node_agent_role, validate_selector_tags
     _repo_norm = (from_repo_key(repo_key) or "").strip()
     for node in nodes:
         # Issue #955：节点 id 即角色名（id 优先、tag 兜底——兼容历史仅含 tag 的纯函数调用）
@@ -2482,7 +2482,7 @@ def _scene_copy_allowed_engines(repo_key: str, username: str, org_id: int = 0):
     口径对齐 dashboard agent_engines：SRE 仅 user+repo 两档；其它角色
     global+user+repo+local 四档；非个人组织按 org_id 隔离。
     """
-    from src.domains.runtime.engine.engine_select import query_engines
+    from src.domains.runtime.public import query_engines
     _filter_org = 0
     try:
         from src.domains.mgmt.user.org_db import is_org_personal
@@ -2942,7 +2942,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.kernel.repo_key import to_repo_key
     from src.kernel.session_manager import db, db_lock
     from src.api.session_store import upsert_agent_session
-    from src.domains.runtime.engine.engine_select import node_agent_role
+    from src.domains.runtime.public import node_agent_role
 
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
     cfg = get_pipeline_config(body.scene_id, repo_key=repo_key)
@@ -3028,7 +3028,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                     except Exception:
                         runtime_id = 0
                     if not runtime_id:
-                        from src.domains.runtime.engine.engine_select import resolve_default_engine
+                        from src.domains.runtime.public import resolve_default_engine
                         runtime_id = resolve_default_engine(repo_key, agent_type) or 0
                 receipt.update({
                     "status": "applied",

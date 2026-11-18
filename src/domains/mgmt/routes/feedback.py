@@ -135,7 +135,7 @@ def _collect_feedback_context(event_seq: int, user: dict):
             try:
                 ar = _rt_public.read_one_any("runtime_engine_attribution", (runtime_id,))
                 if ar:
-                    from src.domains.runtime.engine.instances import instance_name
+                    from src.domains.runtime.public import instance_name
                     engine = {
                         "runtime": row[5] or ar[4] or '',
                         "engine_instance": instance_name(ar[0] or "engine", ar[2] or "", ar[1] or 0),

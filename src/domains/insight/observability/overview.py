@@ -185,7 +185,7 @@ def _fetch_engines(user: Dict[str, Any], repo_keys: List[str]) -> Tuple[int, int
             _is_personal = False
     from src.domains.runtime.public import obs_overview_credential_status_rows_any
     try:
-        from src.domains.runtime.engine.health import derive_runtime_health
+        from src.domains.runtime.public import derive_runtime_health
     except Exception:
         derive_runtime_health = None
     try:
