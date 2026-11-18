@@ -520,7 +520,7 @@ def _pipeline_window(repo_keys: list, scene_filter: str, need: int):
         c.execute(
             f"SELECT COUNT(*) FROM (SELECT e.issue_id FROM events e {_join} "
             f"WHERE e.repo_key IN ({_ph}){_exclude_clause}{_scene_clause} "
-            f"GROUP BY e.issue_id)",
+            f"GROUP BY e.issue_id) AS total_window",
 
             (*repo_keys, *_scene_params))
         total = c.fetchone()[0]
