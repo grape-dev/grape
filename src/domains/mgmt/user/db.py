@@ -2530,7 +2530,7 @@ def get_global_github_bot_username() -> str:
     if _plat:
         return _plat
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         _card = get_platform_card("github")
         if _card is not None and _card.bot_username:
             return _card.bot_username
@@ -2562,7 +2562,7 @@ def get_global_bot_usernames() -> list[str]:
     except Exception:
         pass
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms, get_platform_card
+        from src.domains.runtime.public import list_vcs_platforms, get_platform_card
         for _p in list_vcs_platforms():
             _card = get_platform_card(_p)
             if _card is not None and _card.bot_username and _card.bot_username not in out:
@@ -3254,7 +3254,7 @@ def get_webhook_token_by_repo(full_name: str, provider: str = "") -> str:
             # 消除 `provider in (gitcode,github)` 二元枚举与列名映射硬编码；
             # 有列平台（gitcode/github 派生列名）行为不变。
             try:
-                from src.domains.runtime.vcs.platform_card import get_platform_card
+                from src.domains.runtime.public import get_platform_card
                 _wt_col = (getattr(get_platform_card(provider), "webhook_token_field", "") or "") \
                     if provider else ""
                 if _wt_col:
@@ -5880,7 +5880,7 @@ def _webhook_url_for_provider(base_url: str, provider: str) -> str:
     if not base_url:
         return base_url
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         _card = get_platform_card(provider)
         _path = getattr(_card, "webhook_path", "") if _card is not None else ""
     except Exception:
@@ -6016,7 +6016,7 @@ def _rebuild_webhook_url_for_provider(webhook_url: str, provider: str) -> str:
     if not webhook_url:
         return webhook_url
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
+        from src.domains.runtime.public import get_platform_card
         card = get_platform_card(provider)
     except Exception:
         card = None
@@ -6090,8 +6090,8 @@ def _path_b_prefix_clause(provider: str) -> str:
     存量数据）；其余平台（github/gitee 等）精确前缀。
     """
     try:
-        from src.domains.runtime.vcs.platform_card import _DEFAULT_CARDS_RAW
-        _default = next(iter(_DEFAULT_CARDS_RAW))
+        from src.domains.runtime.public import default_vcs_provider
+        _default = default_vcs_provider()
     except Exception:
         _default = ""
     if provider == _default:

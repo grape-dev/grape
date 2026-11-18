@@ -20,9 +20,9 @@ from src.kernel.config import log
 
 def _hosting_from_modules() -> frozenset:
     """旧判据原样（repos.py `_hosting_implemented_providers`）——对拍基准。"""
-    from src.domains.runtime.vcs.providers import _MODULES
+    from src.domains.runtime.public import hosting_full_flow_providers
 
-    return frozenset(p for p, m in _MODULES.items() if getattr(m, "HOSTING_FULL_FLOW", False))
+    return frozenset(hosting_full_flow_providers())
 
 
 def hosting_providers() -> frozenset:
@@ -32,7 +32,7 @@ def hosting_providers() -> frozenset:
 
 def _cards() -> set:
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        from src.domains.runtime.public import list_vcs_platforms
 
         return set(list_vcs_platforms())
     except Exception as e:  # 平台卡不可用时退回模块集合

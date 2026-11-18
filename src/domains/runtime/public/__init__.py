@@ -6862,6 +6862,30 @@ def module_for(provider: str):
     return _impl(provider)
 
 
+def pr_web_path(provider: str) -> str:
+    """provider 模块声明的 PR 网页路径（能力位缺失时回落 "pull"）。"""
+    from src.domains.runtime.vcs.providers import _MODULES as _mods
+
+    return getattr(_mods.get(provider), "PR_WEB_PATH", "pull") or "pull"
+
+
+def hosting_full_flow_providers() -> list[str]:
+    """声明支持托管全流程（HOSTING_FULL_FLOW）的 provider 列表。"""
+    from src.domains.runtime.vcs.providers import _MODULES as _mods
+
+    return sorted(p for p, m in _mods.items() if getattr(m, "HOSTING_FULL_FLOW", False))
+
+
+def default_vcs_provider() -> str:
+    """内置默认平台（平台卡声明序首）；不可用时返回空串。"""
+    try:
+        from src.domains.runtime.vcs.platform_card import _DEFAULT_CARDS_RAW as _raw
+
+        return next(iter(_raw), "")
+    except Exception:
+        return ""
+
+
 def native_issue_number(value):
     """issue 编号保持平台原生形态（int 平台返回 int；字符串 ident 平台返回 str）。"""
     from src.domains.runtime.vcs.api_client import _native_issue_number as _impl

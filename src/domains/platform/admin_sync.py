@@ -77,7 +77,7 @@ def sync_from_admin_payload(payload: dict) -> None:
 
             bump_epoch()
             from src.domains.mgmt.public import invalidate_provider_cache
-            from src.domains.runtime.vcs.platform_card import invalidate_platform_card_cache
+            from src.domains.runtime.public import invalidate_platform_card_cache
 
             invalidate_provider_cache()
             invalidate_platform_card_cache()

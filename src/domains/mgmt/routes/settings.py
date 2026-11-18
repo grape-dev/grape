@@ -501,7 +501,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # 因此没有 409/转移票据；空值=清除 PAT 凭据（identity 解绑走既有解绑流程）。
     _platform_tokens = explicit.get("platform_tokens") or {}
     if _platform_tokens:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
+        from src.domains.runtime.public import list_vcs_platforms
         _known_platforms = set(list_vcs_platforms())
         from src.domains.mgmt.user.db import set_credential
         for _p, _raw_tok in (_platform_tokens.items() if isinstance(_platform_tokens, dict) else []):
@@ -584,14 +584,14 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # （与凭据域 D31 存储口径一致）；模块缺失/未声明时回退 <p>_pat 泛型口径。
     _scope_warnings = []
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms as _lvp
+        from src.domains.runtime.public import list_vcs_platforms as _lvp
         _probe_platforms = _lvp()
     except Exception:
         # 卡目录不可用 → 不探测（不做平台名兜底：探测范围必须来自卡目录）
         _probe_platforms = []
     for _provider in _probe_platforms:
         try:
-            from src.domains.runtime.vcs.providers import module_for as _module_for
+            from src.domains.runtime.public import module_for as _module_for
             _suffix = getattr(_module_for(_provider), "SETTINGS_TOKEN_FIELD_SUFFIX", "pat")
         except Exception:
             _suffix = "pat"
@@ -602,7 +602,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                 try:
                     # D43/S63：探测 URL/鉴权形态按平台卡派生（query_token→参数、其余→头）
                     import requests as _req
-                    from src.domains.runtime.vcs.platform_card import get_platform_card
+                    from src.domains.runtime.public import get_platform_card
                     _card = get_platform_card(_provider)
                     if _card is None:
                         raise RuntimeError(f"platform card missing: {_provider}")
@@ -2937,8 +2937,8 @@ def _cascade_pat_clear(user: dict, provider: str) -> dict:
 def _pr_web_path_of(provider: str) -> str:
     """provider 模块 PR_WEB_PATH 能力位（前端链接权威）。"""
     try:
-        from src.domains.runtime.vcs.providers import _MODULES
-        return getattr(_MODULES.get(provider), "PR_WEB_PATH", "pull") or "pull"
+        from src.domains.runtime.public import pr_web_path
+        return pr_web_path(provider)
     except Exception:
         return "pull"
 

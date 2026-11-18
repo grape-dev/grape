@@ -64,7 +64,7 @@ def _descriptors_from_tables() -> "list[dict] | None":
 
 
 def _descriptors_from_cards() -> "list[dict]":
-    from src.domains.runtime.vcs.platform_card import get_platform_card, list_vcs_platforms
+    from src.domains.runtime.public import get_platform_card, list_vcs_platforms
 
     out = []
     for provider in list_vcs_platforms():
