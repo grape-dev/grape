@@ -1027,7 +1027,14 @@ def _get_enabled_tasks() -> list[dict]:
     from src.domains.mgmt import public as _mgmt_public
     rows = _mgmt_public.list_enabled_autopilot_tasks_any()
     tasks = []
+    skipped: list[str] = []
     for r in rows:
+        # 指令为空的任务不能派发：创建端已经拒收空指令（mgmt 路由 instruction_not_empty），
+        # 但存量行（历史数据/直接改库）仍然 enabled，调度器不拦的话会按 cron 反复生成
+        # 空壳 execution 与空壳 agent_task（实测每 30 分钟一次，且执行必然空转失败）。
+        if not (r[4] or "").strip():
+            skipped.append(f"{r[0]}({r[1]})")
+            continue
         tasks.append({
             "id": r[0], "name": r[1], "repo_key": r[2],
             "agent_type": r[3], "instruction": r[4], "skill_name": r[5],
@@ -1038,6 +1045,10 @@ def _get_enabled_tasks() -> list[dict]:
             # Issue #1011 姊妹字段：uid 绑定（非空优先，ids legacy 只读回落）
             "engine_runtime_uids": r[12] if len(r) > 12 else "",
         })
+    if skipped:
+        log.warning(
+            f"Autopilot: skipped {len(skipped)} enabled task(s) with empty instruction: "
+            f"{', '.join(skipped)}（补齐指令或停用后再派发）")
     return tasks
 
 def _is_cron_due(cron_expr: str, last_run: str) -> bool:
@@ -1295,6 +1306,11 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
 async def _execute_task(task: dict):
     """执行单个 autopilot 任务（含重试逻辑）。"""
     task_id = task["id"]
+    if not (task.get("instruction") or "").strip():
+        # 手动触发也走这里：空指令不可能产出有意义的任务，直接拒绝并留痕，
+        # 不要建 execution/agent_task 再在 agent 侧空转（见 _get_enabled_tasks 同名守卫）。
+        log.warning(f"Autopilot: task {task_id} has empty instruction, refuse to dispatch")
+        return
     if task_id in _RUNNING_TASKS:
         log.info(f"Autopilot: task {task_id} already running, skip")
         return
