@@ -14,7 +14,7 @@ router = APIRouter(prefix="/repo-platforms", tags=["admin"])
 
 def _item(r, bots=None, health=None) -> dict:
     from src.domains.platform.public import platform_capabilities
-    from src.domains.platform.visibility import is_platform_visible
+    from src.domains.platform.public import is_platform_visible
 
     cap = platform_capabilities(r.provider)
     return {

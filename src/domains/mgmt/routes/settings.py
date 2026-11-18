@@ -2952,7 +2952,7 @@ def list_vcs_platforms_public():
     # 平台可见性唯一口径（2026-11-15 方案甲）：平台行 `enabled`。
     # 判据单一实现见 src/domains/platform/visibility.py（/repos/member 403 也用同一份）。
     # meta.vcs_platforms_hidden 已退役（迁移 202611170021 把名单写成 enabled=0 并删键）。
-    from src.domains.platform.visibility import is_platform_visible
+    from src.domains.platform.public import is_platform_visible
     out = []
     for row in platform_descriptors():
         provider = str(row.get("provider") or "")

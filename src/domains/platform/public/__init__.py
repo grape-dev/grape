@@ -113,3 +113,10 @@ def on_platform_disabled(user_id: str, repo_provider: str) -> None:
     from src.domains.platform.hooks import on_platform_disabled as _impl
 
     return _impl(user_id, repo_provider)
+
+
+def is_platform_visible(provider: str) -> bool:
+    """该平台是否对**用户面**可见（真源 = 平台行 enabled，fail-open）。"""
+    from src.domains.platform.visibility import is_platform_visible as _impl
+
+    return _impl(provider)

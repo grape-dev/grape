@@ -682,14 +682,14 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     # 口径乙（2026-11-18）：坏平台仓库一律不进返回列表，但每个 200 出口都必须带
     # hint + _credential_broken —— member / sync 同口径，禁止静默剔除。
     # 平台被本实例关闭（enabled=0）时用户面根本不存在该平台，别把它写进提示条。
-    from src.domains.platform.visibility import is_platform_visible as _is_platform_visible
+    from src.domains.platform.public import is_platform_visible as _is_platform_visible
     _notice = _credential_broken_notice(
         {p for p in _broken_providers if _is_platform_visible(p)}, _broken_reason)
 
     # 用户面可见性（2026-11-15 方案甲）：真源=平台行 enabled。disabled 平台对用户面不提供，
     # 内网/脚本面照旧可用（托管/建仓/bot/webhook 不经这里）。判定必须排在"无绑定早退"之前，
     # 否则"已禁用"会被解释成"你没绑定"（线上实跑抓到过的顺序 bug）。
-    from src.domains.platform.visibility import is_platform_visible
+    from src.domains.platform.public import is_platform_visible
     if provider and not is_platform_visible(provider):
         raise HTTPException(status_code=403, detail={
             "code": 403, "error_code": "PLATFORM_DISABLED",
@@ -930,7 +930,7 @@ def sync_repos(user: dict = Depends(require_org_member)):
                     if i.get("provider") in _listable and not i.get("token_usable", True)}
     _broken_reason_sync = {i["provider"]: str(i.get("credential_error") or "")
                            for i in _links if i.get("provider") in _broken_sync}
-    from src.domains.platform.visibility import is_platform_visible as _is_platform_visible_sync
+    from src.domains.platform.public import is_platform_visible as _is_platform_visible_sync
     _notice_sync = _credential_broken_notice(
         {p for p in _broken_sync if _is_platform_visible_sync(p)}, _broken_reason_sync)
     if not _providers:
