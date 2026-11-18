@@ -13,7 +13,6 @@
     "admin_permission_menus": "mgmt",
     "admin_role_menu_rel": "mgmt",
     "admin_roles": "mgmt",
-    "admin_user_role_rel": "mgmt",
     "admin_users": "mgmt",
     "agent_runtimes": "runtime",
     "agent_shared_knowledge": "mgmt",
@@ -108,7 +107,6 @@
     "runtime_health_scores": "runtime",
     "grape_t_sandbox_provider_config": "mgmt",
     "grape_t_sandbox_templates": "mgmt",
-    "sandbox_whitelist": "mgmt",
     "scene_category": "runtime",
     "scene_engine_detach_log": "runtime",
     "scene_knowledge_ref": "mgmt",
@@ -123,7 +121,6 @@
     "takeover_sessions": "runtime",
     "task_messages": "runtime",
     "grape_t_task_proxy_tokens": "mgmt",
-    "template_usage": "mgmt",
     "unified_user_mapping": "mgmt",
     "uploaded_files": "mgmt",
     "user_accounts": "mgmt",
@@ -662,7 +659,7 @@
     ]
   },
   "_not_in_current_schema": {
-    "_comment": "以下名字只出现在旧库 grape_dev_mgmt / 打包脚本的种子表清单里，configs/table_ownership.json（权威）与当前代码均无它们：5 张是 2026-08-17 的历史备份快照，flyway_schema_history 是 Java 迁移遗留，credential_reveal_log 是 grape_t_credential_reveal_log 的旧名重复登记。2026-11-15 从 tables 里移除，避免三库缺口检查把它们报成『缺表』。",
+    "_comment": "以下名字【不算在用】，归属检查与三库缺口检查都跳过它们。两类来源：① 只出现在旧库 grape_dev_mgmt / 打包脚本的种子清单里，当前代码与 schema 都没有（5 张 2026-08-17 的历史备份快照、flyway_schema_history、credential_reveal_log 的旧名重复登记）；② 库里有表、但 src/ 与 scripts/ 全仓零引用（admin_user_role_rel / sandbox_whitelist / template_usage，2026-11-18 从 tables 段移入）。第二类如需恢复使用，把名字移回 tables 段并补上归属消费方即可。",
     "tables": {
       "credential_reveal_log": "mgmt",
       "backup_agent_runtimes_revoked_20260817": "mgmt",
@@ -670,7 +667,10 @@
       "backup_devops_agent_runtime_binding_20260827_234600": "mgmt",
       "backup_devops_agent_session_20260817": "mgmt",
       "backup_runtime_credentials_revoked_20260817": "mgmt",
-      "flyway_schema_history": "mgmt"
+      "flyway_schema_history": "mgmt",
+      "admin_user_role_rel": "mgmt",
+      "sandbox_whitelist": "mgmt",
+      "template_usage": "mgmt"
     }
   }
 }
