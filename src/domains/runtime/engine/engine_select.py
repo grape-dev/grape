@@ -168,6 +168,39 @@ def get_scene_engine_uids(scene_id: str, agent_type: str, repo_key: str = "",
         return []
 
 
+def resolve_redispatch_pool(*, scene_authoritative: bool, scene_engine_ids,
+                            scene_selector: dict | None,
+                            snapshot_engine_ids: str = "",
+                            snapshot_selector: str = "") -> tuple:
+    """重派（redispatch）的池列归一：三列互斥，返回 (pool_engine_ids, pool_selector)。
+
+    背景（Issue #1208 补漏，2026-11-18）：重派终态重建路径同时「按当前场景重读 id 池」与
+    「原样透传旧任务 pool_selector」，同一行挂两套圈池语义 → claim 第③级 selector 守卫排除
+    池内引擎、Issue #605 池过滤排除池外引擎，没有任何引擎能认领，事件长挂 running。
+    反方向同样丢语义：场景由 id/uid 池切成 selector 模式时，旧快照 selector 为空、场景 id 池
+    也为空 → 新任务两列皆空退化为全量广播，圈池静默失效。
+
+    口径：场景读成功（scene_authoritative）时以场景现行配置为准，与配置模式一一对应；
+    场景读不到才回落任务快照，且快照自身也按互斥归一（id 池非空即弃 selector，
+    与 enqueue_task 的单点收口同尺）。
+
+    返回值：scene_engine_ids 为 None（场景绑定全灭，#259/#653 fail-closed）时原样透传 None，
+    由调用方按既有语义报错；其余情况返回两个字符串列（selector 为 JSON 串或空）。
+    """
+    import json as _json
+    if scene_authoritative:
+        if scene_engine_ids is None:
+            return None, ""
+        if scene_selector:
+            # 场景现行 = selector 模式：id/uid 池必须清空（模式互斥，B-01 同尺）
+            return "", _json.dumps(scene_selector, ensure_ascii=False)
+        return (scene_engine_ids or ""), ""
+    ids = (snapshot_engine_ids or "").strip()
+    if ids and ids != "[]":
+        return snapshot_engine_ids, ""
+    return (snapshot_engine_ids or ""), (snapshot_selector or "")
+
+
 def _all_engines_snapshot() -> list:
     """全量引擎快照（selector 候选集底表）：agent_runtimes LEFT JOIN credentials。
 

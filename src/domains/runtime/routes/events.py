@@ -504,6 +504,44 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     return result
 
 
+def _redispatch_pool_columns(old: dict) -> tuple:
+    """重派池列解析（Issue #1208 补漏，2026-11-18）：返回 (pool_engine_ids, pool_selector)。
+
+    重派此前只重读场景 id 池、selector 走旧任务快照透传 —— 场景改过配置后两者不同源：
+      · selector → id/uid 池：新 id 池 + 旧 selector 并存，claim 双闸门互斥，无人能认领；
+      · id/uid 池 → selector：场景 id 池空、旧快照 selector 也空 → 两列皆空，圈池退化成广播。
+    本函数以「场景现行配置」为权威成对解析，未读到场景才回落快照，并交给
+    engine_select.resolve_redispatch_pool 做三列互斥归一。
+    """
+    repo_key = old.get("repo_key") or ""
+    issue_id = old.get("issue_id") or ""
+    agent_type = old.get("agent_type") or ""
+    snapshot_ids = old.get("pool_engine_ids") or ""
+    snapshot_sel = old.get("pool_selector") or ""
+    from src.domains.runtime.engine.engine_select import (
+        get_scene_engine_selector, get_scene_pool_engine_ids, resolve_redispatch_pool)
+    scene_id, scene_uid = "", 0
+    try:
+        from src.api.session_store import get_issue_scene
+        scene_id, scene_uid = get_issue_scene(repo_key, issue_id)
+    except Exception as e:
+        log.warning(f"[redispatch] pool columns: scene lookup failed for {repo_key}#{issue_id}: {e}")
+    if scene_id:
+        try:
+            ids = get_scene_pool_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=scene_uid)
+            sel = get_scene_engine_selector(scene_id, agent_type, repo_key=repo_key, user_id=scene_uid)
+            ids, sel = resolve_redispatch_pool(
+                scene_authoritative=True, scene_engine_ids=ids, scene_selector=sel,
+                snapshot_engine_ids=snapshot_ids, snapshot_selector=snapshot_sel)
+            return ids, sel, scene_id, scene_uid, True
+        except Exception as e:
+            log.warning(f"[redispatch] pool columns: scene={scene_id} read failed: {e}")
+    ids, sel = resolve_redispatch_pool(
+        scene_authoritative=False, scene_engine_ids="", scene_selector=None,
+        snapshot_engine_ids=snapshot_ids, snapshot_selector=snapshot_sel)
+    return ids, sel, scene_id, scene_uid, False
+
+
 @router.post("/{seq}/terminate", operation_id="events_terminate", summary="Terminate event", description="Forcefully terminates a running event task. Worker mode cancels the task (cancelled); direct mode fail_task + cancels the subprocess. The event is marked failed.")
 def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     """强行终止正在运行的事件任务。
@@ -917,6 +955,10 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             account=old.get("account") or "",
                             issue_number=old.get("issue_id") or "",
                             scene_id_override=_redispatch_scene_override(evt))
+        # [Issue #1208 补漏 2026-11-18] 本分支是 local_only「本机重试」，语义就是钉住原引擎、
+        # 不换机器，因此池列仍取旧任务快照（按场景改写圈池会与钉住的 runtime_id 打架：
+        # 场景切 selector 后原引擎不在标签命中集，bound claim 会被 selector 守卫 fail-closed）。
+        # 双池互斥由 enqueue_task 单点收口兜底（见 service.enqueue_task）。
         _new_task_id = enqueue_task(
             agent_session_id=old.get("agent_session_id") or "",
             runtime_id=_orig_rid,
@@ -1301,41 +1343,40 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 # ===== Issue #253 改动1：重派贴证 — 绑定从 issue 场景重读（不抄旧任务快照）=====
                 # 终态重建的新任务此前不带 pool_engine_ids：绑定引擎查询瞬时落空 → _rid=0
                 # → 新任务退化为无限制广播，池外全局 worker（'all' 标签）可抢走任务（#253 事故形态）。
+                # Issue #1208 补漏（2026-11-18）：池三列（id/uid 池 + selector）由 _redispatch_pool_columns
+                # 按「场景现行配置」成对解析——只重读 id 池 + 透传旧快照 selector 会让场景改模式后的
+                # 重派任务双池并存（互斥死锁）或两列皆空（退化成广播）。
                 _pool_253 = ""                      # 重读绑定（JSON 串；"" = 无绑定）
                 _pool_253_authoritative = False     # True = 场景存在且重读成功（以场景为准）
-                try:
-                    from src.api.session_store import get_issue_scene
-                    from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids
-                    _scene_253, _scene_uid_253 = get_issue_scene(old.get("repo_key") or "", old.get("issue_id") or "")
-                    if _scene_253:
-                        _rp_253 = get_scene_pool_engine_ids(
+                _pool_ids_253, _rp_sel_253, _scene_253, _scene_uid_253, _auth_253 = \
+                    _redispatch_pool_columns(old)
+                if _pool_ids_253 is None:
+                    # 绑定全灭 → 宁失败不跑飞：事件保持 failed + 人话原因（#259 通路）。
+                    # 早退在函数末尾 reset_event_terminal 之前 → 事件不会被掰回 running 悬挂。
+                    from src.domains.runtime.pipeline.event_pipeline import _fail_scene_all_offline
+                    _fail_scene_all_offline(seq, _scene_253, old.get("agent_type") or "",
+                                            context="Redispatch", repo_key=old.get("repo_key") or "")
+                    # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
+                    _msg_541 = "场景绑定的引擎全部离线，无法重派（请检查引擎在线状态）"
+                    try:
+                        from src.domains.runtime.engine.engine_select import scene_dispatch_failure_reason
+                        _msg_541 = scene_dispatch_failure_reason(
                             _scene_253, old.get("agent_type") or "",
-                            repo_key=old.get("repo_key") or "", user_id=_scene_uid_253)
-                        if _rp_253 is None:
-                            # 绑定全灭 → 宁失败不跑飞：事件保持 failed + 人话原因（#259 通路）。
-                            # 早退在函数末尾 reset_event_terminal 之前 → 事件不会被掰回 running 悬挂。
-                            from src.domains.runtime.pipeline.event_pipeline import _fail_scene_all_offline
-                            _fail_scene_all_offline(seq, _scene_253, old.get("agent_type") or "",
-                                                    context="Redispatch", repo_key=old.get("repo_key") or "")
-                            # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
-                            _msg_541 = "场景绑定的引擎全部离线，无法重派（请检查引擎在线状态）"
-                            try:
-                                from src.domains.runtime.engine.engine_select import scene_dispatch_failure_reason
-                                _msg_541 = scene_dispatch_failure_reason(
-                                    _scene_253, old.get("agent_type") or "",
-                                    repo_key=old.get("repo_key") or "",
-                                    user_id=_scene_uid_253) or _msg_541
-                            except Exception:
-                                pass
-                            raise HTTPException(status_code=409, detail={
-                                "code": 409,
-                                "message": _msg_541})
-                        _pool_253 = _rp_253 or ""
-                        _pool_253_authoritative = True
-                except HTTPException:
-                    raise
-                except Exception as _e253:
-                    log.warning(f"[redispatch] seq={seq} scene pool re-read failed: {_e253}")
+                            repo_key=old.get("repo_key") or "",
+                            user_id=_scene_uid_253) or _msg_541
+                    except Exception:
+                        pass
+                    raise HTTPException(status_code=409, detail={
+                        "code": 409,
+                        "message": _msg_541})
+                _pool_253 = _pool_ids_253 or ""
+                _pool_253_authoritative = _auth_253
+                if _rp_sel_253:
+                    log.info(f"[redispatch] seq={seq} scene {_scene_253 or '-'} is selector mode, "
+                             f"pool_engine_ids cleared (was {old.get('pool_engine_ids') or 'empty'})")
+                elif _pool_253 and (old.get("pool_selector") or ""):
+                    log.info(f"[redispatch] seq={seq} scene {_scene_253 or '-'} is engine-list mode, "
+                             f"stale pool_selector dropped (three-column exclusivity)")
                 # 重派时重新解析路由：旧 task 快照的 runtime_id 可能为 0（120s 超时回收产物）。
                 # fallback 链：task.runtime_id → session.runtime_id → 拒派。
                 _rid = old.get("runtime_id") or 0
@@ -1344,7 +1385,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 # 任务重派被贴证到本机 global 引擎并直跑，claim 侧 selector 守卫被完全旁路）。
                 # _rid=0 = 贴证广播合法结局（#521 守卫只入队不直跑），入队后由 claim_by_tag
                 # 的 selector 守卫（service._selector_guard_blocks）圈池认领——与首次派发同尺。
-                if old.get("pool_selector"):
+                if _rp_sel_253:
                     _rid = 0
                 # [selector 修复补丁] _rid=0 后不得进 fallback 链（session→pick_engine 会
                 # 重新选台无视圈池，实测又贴证到本机 2 直跑）——selector 任务保持 0 等认领
@@ -1468,13 +1509,11 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     issue_session_id=_sid,
                     pool_tag=old.get("agent_type") or "" if is_plugin_mode() else "",
                     pool_agent_type=old.get("agent_type") or "" if is_plugin_mode() else "",
-                    pool_engine_ids=_pool_253,
-                    # [#1208 selector 重派修复 2026-11-11] selector 场景终态重建透传
-                    # pool_selector——#253 贴证只重读 id 池（selector 场景恒空），不重读
-                    # selector；原实现漏传导致重派任务丢圈池语义、退化为广播抢单
-                    # （实测 selector+s2(25) 任务重派后被本机 2 抢走）。重放语义下原任务
-                    # 快照的 selector 即权威值（与 uid 池快照口径一致）。
-                    pool_selector=old.get("pool_selector") or "",
+                    pool_engine_ids=_rp_ids_253,
+                    # [Issue #1208 补漏 2026-11-18] selector 与 id/uid 池三列互斥，此处已按
+                    # 场景现行配置成对解析（selector 模式=id 池空；id/uid 模式=selector 空），
+                    # 原「快照 selector 原样透传」会让场景改模式后的重派任务互斥死锁或退化成广播
+                    pool_selector=_rp_sel_253,
                     pool_engine_source=old.get("pool_engine_source") or "",
                 )
                 # Issue #521：终态重建的实际有效任务 = 新任务，回执不得再返回旧（终态）task_id
