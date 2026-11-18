@@ -5713,3 +5713,73 @@ get_global_github_bot_token = global_github_bot_token
 get_repo_credential_value = repo_credential_value
 _decrypt_repo_secret = repo_secret_decrypt
 get_task_token = task_token
+
+
+# ── 跨域原语：mgmt.user 组织 / 仓库 / host 读取面（2026-11-18 batch 3）───────
+# insight 的 observability/routes、runtime 的 pipeline/im/routes/vcs 共 35 处函数内
+# `from src.domains.mgmt.user.{db,org_db,repo_manager} import <读函数>`，属跨域引
+# 别域内部实现。这里把这一批收敛成 public 具名入口（实现仍只有 mgmt.user 一份）。
+# is_org_personal / get_org_id_by_repo_key 在 mgmt.user.org_db，其余在 mgmt.user.db，
+# github_req 在 mgmt.user.repo_manager。
+
+
+def is_org_personal(org_id) -> bool:
+    """组织是否为个人组织（个人组织不隔离其他个人组织）。"""
+    from src.domains.mgmt.user.org_db import is_org_personal as _impl
+
+    return _impl(org_id)
+
+
+def get_org_id_by_repo_key(repo_key: str) -> str:
+    """按 repo_key 取所属组织 id（无归属返回空串）。"""
+    from src.domains.mgmt.user.org_db import get_org_id_by_repo_key as _impl
+
+    return _impl(repo_key)
+
+
+def get_user_repos(user_id: int, org_id: int = 0) -> list[dict]:
+    """某用户可见的仓库行（user_repos 视角）。"""
+    from src.domains.mgmt.user.db import get_user_repos as _impl
+
+    return _impl(user_id, org_id)
+
+
+def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False) -> list[dict]:
+    """某用户可见的托管仓库（full_name 无前缀、repo_key 带前缀）。"""
+    from src.domains.mgmt.user.db import get_managed_repos as _impl
+
+    return _impl(user_id, org_id, personal_org)
+
+
+def get_host_user_id(repo_key: str):
+    """仓库 host 用户 id（D105 后为 UUID TEXT，按字符串判定）。"""
+    from src.domains.mgmt.user.db import get_host_user_id as _impl
+
+    return _impl(repo_key)
+
+
+def resolve_skill_dispatch(skill_name: str, skill_id: int = 0, repo_key: str = "",
+                           user_id: "str | int" = "", scene_id: str = "",
+                           node_tag: str = "", agent_type: str = "") -> dict:
+    """派发技能解析：skill_id 权威直查 → 名字降级（user→repo→official）。"""
+    from src.domains.mgmt.user.db import resolve_skill_dispatch as _impl
+
+    return _impl(skill_name, skill_id, repo_key, user_id, scene_id, node_tag, agent_type)
+
+
+def get_browser_callback_url() -> str:
+    """浏览器面回调 base url（附件等外链用）。"""
+    from src.domains.mgmt.user.db import get_browser_callback_url as _impl
+
+    return _impl()
+
+
+def github_req(method: str, url: str, token: str = "", body: dict | None = None):
+    """GitHub REST 请求（Bearer token；失败抛异常）。"""
+    from src.domains.mgmt.user.repo_manager import _github_req as _impl
+
+    return _impl(method, url, token, body)
+
+
+# 原名别名：调用点只换模块路径，函数名与 `as` 别名一律不动。
+_github_req = github_req

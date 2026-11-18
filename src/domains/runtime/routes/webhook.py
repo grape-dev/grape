@@ -970,7 +970,7 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
                 return None
             # Issue #372: 检查 1b: 两仓 host_user_id 相同（路径 B 用户 token 托管场景）
             try:
-                from src.domains.mgmt.user.db import get_host_user_id
+                from src.domains.mgmt.public import get_host_user_id
                 # D105 后 host_user_id 是 UUID TEXT（get_host_user_id 返回 str）——
                 # 原 `_session_host > 0` 会对 str 抛 TypeError 并被下面的 except 吞掉，
                 # 导致 A2A 同信任域判定恒不成立（静默）。按该函数文档口径字符串判定。
@@ -1591,7 +1591,7 @@ async def a2a_status_endpoint(request: Request,
 
     # 鉴权：与 POST /api/a2a 同口径（用户级身份校验托管仓库 / 内部 bot、会话 token）
     if user and user.get("auth_type") in ("jwt", "api_key"):
-        from src.domains.mgmt.user.db import get_managed_repos
+        from src.domains.mgmt.public import get_managed_repos
         managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
         if repo_key not in managed:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权查询该仓库的 A2A 交接"})
@@ -2021,7 +2021,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
 
         _a2a_session_info = None
         if user and user.get("auth_type") in ("jwt", "api_key"):
-            from src.domains.mgmt.user.db import get_managed_repos
+            from src.domains.mgmt.public import get_managed_repos
             managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
             if repo_key not in managed:
                 raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
@@ -2390,7 +2390,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                          "handoff_result": HANDOFF_RESULT_FAILED,
                                          "source_seq": _source_seq,
                                          "message": _reason})
-                        from src.domains.mgmt.user.db import resolve_skill_dispatch
+                        from src.domains.mgmt.public import resolve_skill_dispatch
                         _res = resolve_skill_dispatch(
                             _pipe_skill, _node_sid, repo_key=repo_key,
                             user_id=_a2a_issue_uid, scene_id=_a2a_issue_scene,

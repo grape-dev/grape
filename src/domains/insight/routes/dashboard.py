@@ -563,7 +563,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
     stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=_stuck_minutes())).isoformat()
 
     # 组织隔离：非个人组织只显示该组织的引擎/凭据
-    from src.domains.mgmt.user.org_db import is_org_personal
+    from src.domains.mgmt.public import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal_org = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal_org else _org_id
@@ -1591,7 +1591,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     # 按 agent_type 标签过滤：只返回 tags 包含该 agent_type 或 "all" 的引擎
     # 返回全部引擎（含 offline/about_to_gc），前端通过状态徽章区分
     # 组织隔离：非个人组织只返回 org_id 匹配的引擎
-    from src.domains.mgmt.user.org_db import is_org_personal
+    from src.domains.mgmt.public import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal_org = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal_org else _org_id

@@ -1136,7 +1136,7 @@ def visible_runtime_dim_keys(user: Dict[str, Any], repo_keys: List[str]) -> List
         _is_personal = True
         if _org_id:
             try:
-                from src.domains.mgmt.user.org_db import is_org_personal
+                from src.domains.mgmt.public import is_org_personal
                 _is_personal = is_org_personal(_org_id)
             except Exception:
                 _is_personal = False

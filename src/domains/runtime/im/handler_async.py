@@ -179,7 +179,7 @@ async def _send_repo_card(ctx: "BotContext", egress: "HandlerEgress", chat_id: s
       - "sent"：卡片已发出（含渠道降级为文本后发出）；
       - "failed"：有仓库但卡片没发出去 → 调用方必须报"发送失败"，不得说没仓库。
     """
-    from src.domains.mgmt.user.db import get_managed_repos
+    from src.domains.mgmt.public import get_managed_repos
     from src.kernel.repo_key import from_repo_key
     repos = get_managed_repos(uid)
     if not repos:
@@ -392,7 +392,7 @@ def _autopilot_user_allowed(uid: int, repo_key: str) -> bool:
     if not uid or not repo_key:
         return False
     try:
-        from src.domains.mgmt.user.db import get_managed_repos
+        from src.domains.mgmt.public import get_managed_repos
         repos = get_managed_repos(uid) or []
         return any(r.get("repo_key") == repo_key for r in repos)
     except Exception as e:

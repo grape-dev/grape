@@ -968,7 +968,7 @@ def _resolve_bot_username(repo_key: str) -> str:
         if _bot_name:
             return _bot_name
         # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名
-        from src.domains.mgmt.user.db import get_host_user_id
+        from src.domains.mgmt.public import get_host_user_id
         _hid = get_host_user_id(_rk)
         # D105 后 host_user_id 是 UUID TEXT，返回 str —— `_hid > 0` 会对 str 抛
         # TypeError 并被外层 except 吞掉（登录名解析恒空）。按文档口径字符串判定。
@@ -2555,7 +2555,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         _sub_sid = resolve_scene_node_skill_id(repo_key, "qa", scene_id=_issue_scene,
                                                user_id=_issue_scene_uid)
         try:
-            from src.domains.mgmt.user.db import resolve_skill_dispatch
+            from src.domains.mgmt.public import resolve_skill_dispatch
             _res = resolve_skill_dispatch(skill_name, _sub_sid, repo_key=repo_key,
                                           user_id=_issue_scene_uid,
                                           scene_id=_issue_scene, node_tag="qa",
@@ -2585,7 +2585,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             # 同步更新 skill_id 和 skill_path，否则执行时仍用旧 skill_id 查到旧 skill
             # Issue #979: 节点 skill_id 权威优先（三档同名锁定用户选择的档位），
             # 无 id/失效 → 名字降级（user→repo→official）+ warning
-            from src.domains.mgmt.user.db import resolve_skill_dispatch
+            from src.domains.mgmt.public import resolve_skill_dispatch
             _node_sid = resolve_scene_node_skill_id(repo_key, agent_type, scene_id=_issue_scene,
                                                     user_id=_issue_scene_uid)
             _res = resolve_skill_dispatch(_pipe_skill, _node_sid, repo_key=repo_key,
@@ -3025,7 +3025,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             from src.domains.mgmt.public import get_meta_value as _gmv  # 跨域走 owner public
             try:
                 from src.kernel.session_manager import db as _db, db_lock as _dbl
-                from src.domains.mgmt.user.org_db import is_org_personal
+                from src.domains.mgmt.public import is_org_personal
                 log.info(f"Pipeline: acquiring db_lock for engine query, seq={seq}")
                 from src.domains.mgmt import public as _mgmt_public_org
                 with _dbl:
@@ -3105,20 +3105,20 @@ def _get_repo_api_token(repo_key: str) -> str:
 
 def _github_fetch_issue(owner: str, repo: str, issue_num: str, token: str) -> dict:
     """通过 GitHub API 获取 Issue 详情。失败抛异常。"""
-    from src.domains.mgmt.user.repo_manager import _github_req
+    from src.domains.mgmt.public import _github_req
     return _github_req("GET", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}", token=token)
 
 
 def _github_list_issue_comments(owner: str, repo: str, issue_num: str, token: str) -> list:
     """通过 GitHub API 获取 Issue 评论列表。失败抛异常。"""
-    from src.domains.mgmt.user.repo_manager import _github_req
+    from src.domains.mgmt.public import _github_req
     result = _github_req("GET", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}/comments?per_page=100", token=token)
     return result if isinstance(result, list) else []
 
 
 def _github_post_issue_comment(owner: str, repo: str, issue_num: str, body: str, token: str) -> dict:
     """通过 GitHub API 发 Issue 评论。失败抛异常。"""
-    from src.domains.mgmt.user.repo_manager import _github_req
+    from src.domains.mgmt.public import _github_req
     return _github_req("POST", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}/comments", token=token, body={"body": body})
 
 
@@ -6150,7 +6150,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # R20.25.4: 获取 user_token 用于脱敏（路径 B 仓库的 host 用户 token，agent 可能复述）
     _user_token_for_redact = ""
     try:
-        from src.domains.mgmt.user.db import get_host_user_id
+        from src.domains.mgmt.public import get_host_user_id
         _host_uid = str(get_host_user_id(repo_key) or "").strip()
         if _host_uid not in ("", "0"):
             from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id

@@ -384,7 +384,7 @@ def _resolve_issue_org_id(repo_key: str, explicit_org: str = "") -> str:
     - 无托管记录 / 无显式 org → 0（个人视图豁免 org 过滤，创建者仍可见）。
     """
     if repo_key:
-        from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
+        from src.domains.mgmt.public import get_org_id_by_repo_key
         org_id = get_org_id_by_repo_key(repo_key) or ""
         return "" if str(org_id) == "0" else str(org_id)  # D105-15：哨兵 0/'0' 统一 ''
     return explicit_org or ""
@@ -443,7 +443,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     # org 归属 = 仓库托管组织（repo 关联需求的唯一权威，issue-244-org-attribution-fix-design.md 方案 B）。
     # 不再信任调用方传入的任意 org_id（如请求上下文 user.org_id），杜绝 #244 式串货漂移；
     # 调用方传入的 org_id 仅与仓库值比对，不一致时告警并校准为仓库值。
-    from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
+    from src.domains.mgmt.public import get_org_id_by_repo_key
     _repo_org = get_org_id_by_repo_key(repo_key) or ""
     if org_id and org_id != _repo_org:
         log.warning(f"ensure_issue_task: org drift rejected repo={repo_key} issue=#{issue_number} "
@@ -2284,7 +2284,7 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
 def _post_github_issue(api_token: str, owner: str, repo: str, title: str,
                        body_text: str = "", assignee: str = "") -> dict:
     """创建 GitHub Issue（POST /repos/{owner}/{repo}/issues，JSON body + Bearer token）。"""
-    from src.domains.mgmt.user.repo_manager import _github_req
+    from src.domains.mgmt.public import _github_req
     body = {"title": title}
     if body_text:
         body["body"] = body_text
@@ -2317,7 +2317,7 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
 
 def _patch_github_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（GitHub 版）。"""
-    from src.domains.mgmt.user.repo_manager import _github_req
+    from src.domains.mgmt.public import _github_req
     _out = _github_req("PATCH", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}",
                        api_token, {"body": body_text})
     # Issue #453 台账（S21，第六轮补漏）：GitHub 多任务模式 patch issue body → issue_edit 记账
@@ -2894,7 +2894,7 @@ def _attach_save(owner: str, repo: str, issue_number, filename: str, content: by
     fpath = os.path.join(attach_dir, filename)
     with open(fpath, "wb") as f:
         f.write(content)
-    from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
+    from src.domains.mgmt.public import get_browser_callback_url as _bcb
     _base_url = (_bcb() or "").rstrip("/")
     return f"{_base_url}/static/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"
 
@@ -2952,7 +2952,7 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     # 本地降级
     attach_dir = _attach_base_dir(owner, repo, issue_number)
     # Issue #471 E1：附件 URL 是浏览器面地址——走 browser_callback_url
-    from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
+    from src.domains.mgmt.public import get_browser_callback_url as _bcb
     _base_url = (_bcb() or "").rstrip("/")
     result = []
     if os.path.isdir(attach_dir):

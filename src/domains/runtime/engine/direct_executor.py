@@ -209,7 +209,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # R20.25.4: 获取 user_token 用于脱敏（路径 B 仓库的 host 用户 token，agent 可能复述）
     _user_token_for_redact = ""
     try:
-        from src.domains.mgmt.user.db import get_host_user_id
+        from src.domains.mgmt.public import get_host_user_id
         _host_uid = get_host_user_id(repo_key)
         if str(_host_uid or "") not in ("", "0"):
             from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id

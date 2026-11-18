@@ -374,7 +374,7 @@ def obs_runtime_history(
     try:
         # 可见性谓词归 runtime 本域（与原 `_cred_visibility` 三口径同源，同一 helper）：
         # insight 侧不再拼 WHERE 片段、不再直查外域表。
-        from src.domains.mgmt.user.org_db import is_org_personal
+        from src.domains.mgmt.public import is_org_personal
         from src.domains.runtime import public as runtime_public
 
         _org_id = str(user.get("org_id") or "")

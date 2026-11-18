@@ -541,7 +541,7 @@ def _issue_attachments_batch_uncached(repo_keys: list[str]) -> dict[str, list[di
             else:
                 # 本地磁盘后端：一次 listdir 顶层目录 = 全部 issue 编号
                 from src.api.issues_center import _attach_base_dir
-                from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
+                from src.domains.mgmt.public import get_browser_callback_url as _bcb
                 _base_url = (_bcb() or "").rstrip("/")
                 base = _attach_base_dir(owner, rname, "")
                 if _os.path.isdir(base):
@@ -1980,7 +1980,7 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
     owner, rname = split_owner_repo(repo_key)
     comment_body = f"💬 **开发者澄清**\n\n{msg}"
     if _is_github:
-        from src.domains.mgmt.user.repo_manager import _github_req
+        from src.domains.mgmt.public import _github_req
         try:
             _gh_resp = _github_req("POST", f"https://api.github.com/repos/{owner}/{rname}/issues/{issue_number}/comments",
                         api_token, {"body": comment_body})
@@ -2161,7 +2161,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     """
     from src.api.issues_center import (_query_tasks, _build_assignee_filter, _build_creator_filter,
                                        _get_gitcode_user_by_user_id)
-    from src.domains.mgmt.user.org_db import is_org_personal
+    from src.domains.mgmt.public import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal else _org_id
@@ -2320,7 +2320,7 @@ def list_repo_issues(owner: str, repo: str,
       PR 伪卡片同口径过滤（statuses 匹配映射后的 task_status）。
     """
     from src.api.issues_center import _query_tasks, _build_assignee_filter, _build_creator_filter
-    from src.domains.mgmt.user.org_db import is_org_personal
+    from src.domains.mgmt.public import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal else _org_id
