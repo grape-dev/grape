@@ -12,7 +12,8 @@ import re, os, yaml
 FORBIDDEN_EXTS = {".exe", ".bat", ".jar", ".class", ".so", ".dll", ".bin", ".msi", ".apk"}
 # 文本脚本（官方规范 scripts/ 目录支持，zip 化保留权限位 + worker 物化恢复）
 # .mjs：Node ES Module 脚本，与 .js 同类文本脚本（#392 技能 scripts 常用格式）
-SCRIPT_EXTS = {".py", ".sh", ".js", ".mjs", ".ts", ".pl", ".rb", ".go", ".rs"}
+# .ps1：PowerShell 文本脚本，与 .sh 同级（#2674 Windows 跨平台技能包）
+SCRIPT_EXTS = {".py", ".sh", ".js", ".mjs", ".ts", ".pl", ".rb", ".go", ".rs", ".ps1"}
 ALLOWED_REF_EXTS = {".md", ".txt", ".json", ".yaml", ".yml"}
 REQUIRED_SECTIONS = ["## 场景", "## 知识", "## 步骤"]
 PROJECT_SKILLS = {"pr", "issue", "implementation", "build-debug", "deploy-guard",
@@ -102,6 +103,7 @@ def validate_skill(upload_dir: str, skill_name: str) -> list[str]:
                 errors.append(f"不允许上传可执行文件: {f}")
                 return errors
             if ext not in ALLOWED_REF_EXTS and ext not in SCRIPT_EXTS and ext not in ("", ".md", ".yaml", ".yml", ".json", ".txt"):
-                errors.append(f"不支持的文件类型: {f}")
+                allowed = " ".join(sorted(ALLOWED_REF_EXTS | SCRIPT_EXTS))
+                errors.append(f"不支持的文件类型: {f}（允许：{allowed}）")
 
     return errors
