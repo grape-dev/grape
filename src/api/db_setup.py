@@ -9571,12 +9571,12 @@ def _fn_category_dict_and_tags() -> None:
             c.execute(_CATEGORY_DICT_DDL)
             from src.domains.mgmt.user.db import seed_category_dict
             seed_category_dict()
+        # skill 归 runtime 域（configs/table_ownership.json），本迁移只跑 mgmt 域：
+        # 在这里补 skill 列会被归属守卫跳过、却因本迁移盖章而永久假绿 → 参考
+        # 202611180001（runtime 域）单独补。scene_market 归 mgmt，就地补。
         for _tbl, _col, _ddl in (
             ("scene_market", "cat_l1_id", "INTEGER DEFAULT 0"),
             ("scene_market", "cat_l2_id", "INTEGER DEFAULT 0"),
-            ("skill", "cat_l1_id", "INTEGER DEFAULT 0"),
-            ("skill", "cat_l2_id", "INTEGER DEFAULT 0"),
-            ("skill", "tags", "TEXT DEFAULT ''"),
         ):
             _ensure_column(c, _tbl, _col, _ddl)
         db.commit()
@@ -9596,6 +9596,34 @@ register_migration(
     kind="safe",
     fn=_fn_category_dict_and_tags,
 )
+
+
+def _fn_skill_classification_columns() -> None:
+    """Issue #2761：skill 补 cat_l1_id / cat_l2_id / tags（runtime 域）。
+
+    skill 表在 runtime 库（configs/table_ownership.json: tables.skill=runtime），而
+    202611171846 登记在 mgmt 域：mgmt 进程补这三列会被归属守卫跳过，迁移照样盖章，
+    runtime 进程又因域过滤不跑它 —— 结果是列永远不建，skill_sync 每轮 1054
+    （实测每次启动 146 条 ERROR）。本迁移把这三列放回属主域，strict 语义：任何一列
+    建不出来就抛错不盖章，下次启动重试。
+    """
+    with db_lock:
+        c = db.cursor()
+        for _col, _ddl in (("cat_l1_id", "INTEGER DEFAULT 0"),
+                           ("cat_l2_id", "INTEGER DEFAULT 0"),
+                           ("tags", "TEXT DEFAULT ''")):
+            _ensure_column(c, "skill", _col, _ddl, strict=True)
+        db.commit()
+
+
+register_migration(
+    version="202611180001",
+    name="issue2761-skill-classification-columns",
+    kind="safe",
+    fn=_fn_skill_classification_columns,
+    domains=("runtime",),
+)
+
 
 
 # ===== Issue #2761 复审（架构 A6/A12）：表名前缀 + 显式 id 迁迁移 =====

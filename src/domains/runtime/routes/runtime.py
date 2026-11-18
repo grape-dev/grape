@@ -3588,15 +3588,18 @@ def runtime_provider_configs(cred: CredentialContext = Depends(_require_credenti
     """
     from src.kernel.crypto import decrypt
     providers = []
-    from src.kernel.bulk_read import reader
-    with reader() as c:
-        # [范围由凭据承担] 附带 credential_scope（cloud_worker claim 全局任务 tags 判定用）
-        # [锚简化] 附带 credential_uid（凭据自身稳定键——worker 本地缓存键/工件命名换锚源）
-        c.execute("SELECT spc.id, rc.name AS name, spc.platform, spc.endpoint, spc.api_key_enc, spc.extra_config, spc.max_sandboxes, rc.scope, rc.credential_uid "
-                  "FROM grape_t_sandbox_provider_config spc LEFT JOIN runtime_credentials rc ON rc.id=spc.runtime_credential_id WHERE spc.enabled=1 AND spc.runtime_credential_id=?",
-                  (cred.id,))
-        rows = c.fetchall()
-    for pid, name, platform, endpoint, api_key_enc, extra_json, max_sandboxes, credential_scope, _cred_uid in rows:
+    # 三库拓扑：grape_t_sandbox_provider_config 归 mgmt，runtime_credentials 归 runtime，
+    # 单条跨域 JOIN 在 worker 进程库（runtime 域）必然 1146。拆两段读：
+    # provider 行走 _fetch_across_domains，凭据属性按 id 单独取。
+    rows = _fetch_across_domains(
+        "SELECT id, platform, endpoint, api_key_enc, extra_config, max_sandboxes "
+        "FROM grape_t_sandbox_provider_config WHERE enabled=1 AND runtime_credential_id=?",
+        (cred.id,))
+    _rc_rows = _fetch_across_domains(
+        "SELECT name, scope, credential_uid FROM runtime_credentials WHERE id=?", (cred.id,))
+    _rc_name, credential_scope, _cred_uid = (_rc_rows[0] if _rc_rows else (None, None, None))
+    for pid, platform, endpoint, api_key_enc, extra_json, max_sandboxes in rows:
+        name = _rc_name
         try:
             extra = json.loads(extra_json) if extra_json else {}
             api_key = decrypt(api_key_enc) if api_key_enc else ""
@@ -3627,15 +3630,16 @@ def runtime_provider_active_sandboxes(provider_id: str,
     [安全修正] 与 provider-configs 同口径（用户裁定：rta_ 一律只查自己）——
     只能查自己凭据关联的 Provider。
     """
-    with db_lock:
-        c = db.cursor()
-        _own = c.execute("SELECT 1 FROM grape_t_sandbox_provider_config WHERE id=? AND runtime_credential_id=?",
-                         (provider_id, cred.id)).fetchone()
+    # 三库拓扑：本函数涉及的两张表（provider_config / cloud_sandboxes）都归 mgmt，
+    # 在 worker 进程库上直读会 1146；provider 归属行走跨域读，计数走 mgmt reader。
+    from src.kernel.bulk_read import reader
+    _own = _fetch_across_domains(
+        "SELECT 1 FROM grape_t_sandbox_provider_config WHERE id=? AND runtime_credential_id=?",
+        (provider_id, cred.id))
     if not _own:
         raise HTTPException(status_code=403,
                             detail={"code": 403, "message": "provider not bound to this credential"})
-    with db_lock:
-        c = db.cursor()
+    with reader("mgmt") as c:
         c.execute("SELECT COUNT(*) FROM grape_t_cloud_sandboxes WHERE provider_id=? AND state IN ('creating','running')",
                   (provider_id,))
         active_count = c.fetchone()[0] or 0
