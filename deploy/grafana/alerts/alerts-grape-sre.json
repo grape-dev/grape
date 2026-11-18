@@ -1,0 +1,142 @@
+{
+ "rules": [
+  {
+   "orgID": 1,
+   "ruleGroup": "grape-sre",
+   "title": "业务进程不可达",
+   "condition": "C",
+   "isPaused": false,
+   "data": [
+    {
+     "refId": "A",
+     "relativeTimeRange": {
+      "from": 300,
+      "to": 0
+     },
+     "datasourceUid": "prometheus",
+     "model": {
+      "expr": "min by (job,host)(up{job=~\"grape-.+-(mgmt|event|worker|insight)\"})",
+      "refId": "A",
+      "instant": true,
+      "intervalMs": 60000,
+      "maxDataPoints": 43200
+     }
+    },
+    {
+     "refId": "C",
+     "datasourceUid": "__expr__",
+     "model": {
+      "type": "math",
+      "expression": "$A < 1",
+      "refId": "C",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200
+     }
+    }
+   ],
+   "noDataState": "OK",
+   "execErrState": "OK",
+   "for": "1m",
+   "annotations": {
+    "summary": "A business process stopped exposing /metrics; the process may be down.",
+    "runbook": "Open the process health dashboard, then check the service unit state on the affected host and compare both nodes."
+   },
+   "labels": {
+    "severity": "P1",
+    "team": "sre"
+   }
+  },
+  {
+   "orgID": 1,
+   "ruleGroup": "grape-sre",
+   "title": "节点指标抓取掉线",
+   "condition": "C",
+   "isPaused": false,
+   "data": [
+    {
+     "refId": "A",
+     "relativeTimeRange": {
+      "from": 300,
+      "to": 0
+     },
+     "datasourceUid": "prometheus",
+     "model": {
+      "expr": "min by (host)(up{job=~\"grape-.+-node\"})",
+      "refId": "A",
+      "instant": true,
+      "intervalMs": 60000,
+      "maxDataPoints": 43200
+     }
+    },
+    {
+     "refId": "C",
+     "datasourceUid": "__expr__",
+     "model": {
+      "type": "math",
+      "expression": "$A < 1",
+      "refId": "C",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200
+     }
+    }
+   ],
+   "noDataState": "OK",
+   "execErrState": "OK",
+   "for": "2m",
+   "annotations": {
+    "summary": "node_exporter for a host is not scrapeable; host-level panels go blind.",
+    "runbook": "Check node_exporter unit state and the metrics relay on that host."
+   },
+   "labels": {
+    "severity": "P2",
+    "team": "sre"
+   }
+  },
+  {
+   "orgID": 1,
+   "ruleGroup": "grape-sre",
+   "title": "入口 5xx 超阈值（排除 RUM 反代）",
+   "condition": "C",
+   "isPaused": false,
+   "data": [
+    {
+     "refId": "A",
+     "relativeTimeRange": {
+      "from": 300,
+      "to": 0
+     },
+     "datasourceUid": "prometheus",
+     "model": {
+      "expr": "100 * ((sum(rate(grape_http_requests_total{status=~\"5..\",route!=\"/faro/collect\"}[5m])) or vector(0)) / clamp_min(sum(rate(grape_http_requests_total[5m])), 1))",
+      "refId": "A",
+      "instant": true,
+      "intervalMs": 60000,
+      "maxDataPoints": 43200
+     }
+    },
+    {
+     "refId": "C",
+     "datasourceUid": "__expr__",
+     "model": {
+      "type": "math",
+      "expression": "$A > 10",
+      "refId": "C",
+      "intervalMs": 1000,
+      "maxDataPoints": 43200
+     }
+    }
+   ],
+   "noDataState": "OK",
+   "execErrState": "OK",
+   "for": "5m",
+   "annotations": {
+    "summary": "Server-side 5xx ratio above 10% (same threshold as deploy/alerts.yml GrapeHTTPErrorRateHigh), excluding the RUM relay route which answers 503 by design when no upstream is configured.",
+    "runbook": "Open the entry SLO dashboard, sort routes by 5xx, then correlate with process logs."
+   },
+   "labels": {
+    "severity": "P1",
+    "team": "sre"
+   }
+  }
+ ]
+}

@@ -1,0 +1,985 @@
+{
+ "uid": "grape-db-health",
+ "title": "Grape 数据库连接健康",
+ "tags": [
+  "grape",
+  "mysql",
+  "db"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "1m",
+ "editable": true,
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "env",
+    "label": "环境",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": "label_values(up{job=~\"grape-.*\"}, env)",
+    "refresh": 2,
+    "multi": false,
+    "includeAll": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    }
+   },
+   {
+    "name": "host",
+    "label": "节点",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": "label_values(up{job=~\"grape-.+-node\"}, host)",
+    "refresh": 2,
+    "multi": true,
+    "includeAll": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    }
+   },
+   {
+    "name": "role",
+    "label": "进程角色",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": "label_values(grape_http_requests_total{env=~\"$env\"}, role)",
+    "refresh": 2,
+    "multi": true,
+    "includeAll": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    }
+   }
+  ]
+ },
+ "annotations": {
+  "list": [
+   {
+    "name": "Annotations & Alerts",
+    "type": "dashboard",
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "enable": true,
+    "iconColor": "rgba(0,211,262,1)"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "id": 46,
+   "type": "row",
+   "title": "① 连接与异常（MySQL 全局计数，已去重）",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "id": 47,
+   "type": "stat",
+   "title": "连接总数",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(grape_db_threads_connected{env=~\"$env\"})",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "description": "max 去重：同一份 MySQL 全局值被多个进程各报一遍，不能用 sum"
+  },
+  {
+   "id": 48,
+   "type": "stat",
+   "title": "活跃连接占比",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 4,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * max(grape_db_threads_running{env=~\"$env\"}) / scalar(max(grape_db_threads_connected{env=~\"$env\"}))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 1,
+     "unit": "percent",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 50
+       }
+      ]
+     }
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 49,
+   "type": "stat",
+   "title": "中断连接（/分钟）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * max(rate(grape_db_aborted_connects_total{env=~\"$env\"}[10m]))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 1,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 10
+       },
+       {
+        "color": "red",
+        "value": 60
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "description": "连接被中断的速率。个位数正常；实测约 48/min，偏高，通常是应用侧超时或 MySQL wait_timeout 打断连接"
+  },
+  {
+   "id": 50,
+   "type": "stat",
+   "title": "新建连接（/分钟）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * max(rate(grape_db_threads_created_total{env=~\"$env\"}[10m]))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "description": "持续偏高说明连接池没复用（每次请求新开连接），是连接泄漏的早期信号"
+  },
+  {
+   "id": 51,
+   "type": "stat",
+   "title": "连接上限利用率",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * max(grape_db_threads_connected{env=~\"$env\"}) / scalar(max(grape_db_max_connections{env=~\"$env\"}))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 2,
+     "unit": "percent",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 60
+       },
+       {
+        "color": "red",
+        "value": 85
+       }
+      ]
+     }
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 52,
+   "type": "stat",
+   "title": "上报进程数",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 20,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(grape_db_threads_connected{env=~\"$env\",host=~\"$host\",role=~\"$role\"})",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "description": "应该等于环境内的业务进程数（当前 8）。掉一个说明有进程没上报，此时数值仍正确但覆盖不全"
+  },
+  {
+   "id": 53,
+   "type": "row",
+   "title": "② 趋势（去重后的全局值）",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 5,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "id": 54,
+   "type": "timeseries",
+   "title": "已连接",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 6,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(grape_db_threads_connected{env=~\"$env\"})",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "连接数"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "color": {
+      "mode": "palette-classic"
+     }
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 55,
+   "type": "timeseries",
+   "title": "活跃执行中",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 6,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(grape_db_threads_running{env=~\"$env\"})",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "活跃数"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "color": {
+      "mode": "palette-classic"
+     }
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 56,
+   "type": "timeseries",
+   "title": "中断连接速率",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 6,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * max(rate(grape_db_aborted_connects_total{env=~\"$env\"}[5m]))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "中断/分钟"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "color": {
+      "mode": "palette-classic"
+     },
+     "unit": "ops"
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 57,
+   "type": "timeseries",
+   "title": "新建连接速率",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 13,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "60 * max(rate(grape_db_threads_created_total{env=~\"$env\"}[5m]))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "新建/分钟"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "color": {
+      "mode": "palette-classic"
+     },
+     "unit": "ops"
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 58,
+   "type": "timeseries",
+   "title": "连接缓存（threads_cached）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 13,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(grape_db_threads_cached{env=~\"$env\"})",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "缓存连接数"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "color": {
+      "mode": "palette-classic"
+     }
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 59,
+   "type": "timeseries",
+   "title": "连接上限利用率",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 13,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * max(grape_db_threads_connected{env=~\"$env\"}) / scalar(max(grape_db_max_connections{env=~\"$env\"}))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "利用率"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "color": {
+      "mode": "palette-classic"
+     },
+     "unit": "percent"
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 60,
+   "type": "row",
+   "title": "③ 上报一致性（同一全局值，各进程应完全相同）",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 20,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "id": 61,
+   "type": "table",
+   "title": "每个进程看到的连接数",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 21,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (host,role)(grape_db_threads_connected{env=~\"$env\",host=~\"$host\",role=~\"$role\"})",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "__name__": true,
+       "env": true,
+       "job": true
+      },
+      "renameByName": {
+       "Value": "连接数",
+       "Value #A": "A",
+       "Value #B": "B",
+       "Value #C": "C"
+      }
+     }
+    }
+   ],
+   "options": {
+    "showHeader": true,
+    "sortBy": [
+     {
+      "displayName": "数值",
+      "desc": true
+     }
+    ]
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 62,
+   "type": "table",
+   "title": "每个进程看到的活跃数",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 21,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (host,role)(grape_db_threads_running{env=~\"$env\",host=~\"$host\",role=~\"$role\"})",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "__name__": true,
+       "env": true,
+       "job": true
+      },
+      "renameByName": {
+       "Value": "活跃数",
+       "Value #A": "A",
+       "Value #B": "B",
+       "Value #C": "C"
+      }
+     }
+    }
+   ],
+   "options": {
+    "showHeader": true,
+    "sortBy": [
+     {
+      "displayName": "数值",
+      "desc": true
+     }
+    ]
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 63,
+   "type": "text",
+   "title": "怎么读这张看板",
+   "gridPos": {
+    "x": 0,
+    "y": 29,
+    "w": 24,
+    "h": 6
+   },
+   "options": {
+    "mode": "markdown",
+    "content": "**这张看板回答一个问题：数据库连接层是不是健康的。**\n\n- 这些指标取自 MySQL 的 `SHOW GLOBAL STATUS`，是**服务端全局值**：四进程 × 两节点会各报一遍，数值完全相同。看板统一用 `max()` 去重，表里 8 行数值一致属正常，不一致才有问题。\n- 「中断连接」最值得看：个位数正常。实测约 48/min（是 8 条 series 各报的同一值，不是 384），说明有连接被超时或对端打断，通常来自应用侧超时设置或 MySQL `wait_timeout`。\n- 「新建连接」持续偏高 = 连接池没复用（连接泄漏的早期信号）。\n- 「上报进程数」掉下去说明有进程没上报，此时数值仍然正确但覆盖不全，配合任务流水线看板的进程存活一起判断。\n- 库级指标（容量、慢查询、QPS）需要 MySQL exporter 或已建好的 mysql 数据源，本版未覆盖，属第二批。",
+    "code": {
+     "language": "plaintext",
+     "showLineNumbers": false,
+     "showMiniMap": false
+    }
+   }
+  }
+ ]
+}

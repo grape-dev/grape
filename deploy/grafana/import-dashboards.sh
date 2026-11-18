@@ -25,6 +25,13 @@ GRAFANA_URL="${GRAFANA_URL:-http://127.0.0.1:3000}"
 GRAFANA_AUTH="${GRAFANA_AUTH:-admin:admin}"
 CHECK_ONLY=0
 [ "${1:-}" = "--check" ] && CHECK_ONLY=1
+_failed=0
+
+# 数据源 uid 映射：看板 JSON 里写的是某个环境的具体 uid，导入时按类型改写成目标环境的。
+# 不设就用默认值（首次用 API 建出来的 uid 就是这几个）。
+DS_UID_PROM="${GRAFANA_DS_PROM_UID:-prometheus}"
+DS_UID_LOKI="${GRAFANA_DS_LOKI_UID:-loki}"
+DS_UID_TEMPO="${GRAFANA_DS_TEMPO_UID:-tempo}"
 
 _api() {  # _api METHOD PATH [BODY_FILE]
   local m="$1" p="$2" body="${3:-}"
@@ -48,8 +55,13 @@ fi
 _ensure_ds() {  # name uid type url [database] [user]
   local name="$1" uid="$2" typ="$3" url="$4" db="${5:-}" usr="${6:-}"
   local body
+  # 按 uid 或 name 判重：Grafana 会拒同名数据源，只按 uid 判会每次都报一次假失败
   if _api GET /api/datasources | grep -q "\"uid\":\"$uid\""; then
     echo "  ds $uid: 已存在，跳过"
+    return 0
+  fi
+  if _api GET /api/datasources | grep -q "\"name\":\"$name\""; then
+    echo "  ds $name: 同名已存在（uid 不同），跳过 —— 需要时用 GRAFANA_DS_*_UID 指过去"
     return 0
   fi
   if [ "$CHECK_ONLY" = "1" ]; then
@@ -93,22 +105,133 @@ for f in "$DASH_DIR"/*.json; do
     continue
   fi
   body="$(mktemp)"
-  python3 - "$f" "$body" <<'PY'
+  python3 - "$f" "$body" "$DS_UID_PROM" "$DS_UID_LOKI" "$DS_UID_TEMPO" <<'PY'
 import json, sys
 src, out = sys.argv[1], sys.argv[2]
-json.dump({"dashboard": json.load(open(src, encoding="utf-8")),
-           "overwrite": True, "message": "imported from repo"}, open(out, "w", encoding="utf-8"), ensure_ascii=False)
+ds_map = {"prometheus": sys.argv[3], "loki": sys.argv[4], "tempo": sys.argv[5]}
+
+
+def remap(node):
+    """把看板里按类型写死的数据源 uid 换成目标环境的 uid。"""
+    if isinstance(node, dict):
+        if isinstance(node.get("type"), str) and node["type"] in ds_map and "uid" in node:
+            node["uid"] = ds_map[node["type"]]
+        for v in node.values():
+            remap(v)
+    elif isinstance(node, list):
+        for v in node:
+            remap(v)
+    return node
+
+
+dash = remap(json.load(open(src, encoding="utf-8")))
+json.dump({"dashboard": dash, "overwrite": True, "message": "imported from repo"},
+          open(out, "w", encoding="utf-8"), ensure_ascii=False)
 PY
   _resp="$(_api POST /api/dashboards/db "$body")"
   rm -f "$body"
   case "$_resp" in
     *'"status":"success"'*) echo "  看板 $_uid: 已导入（$_title）"; _shipped=$((_shipped+1)) ;;
-    *) echo "  看板 $_uid: 失败 -> ${_resp:0:160}" >&2 ;;
+    *) echo "  看板 $_uid: 失败 -> ${_resp:0:160}" >&2; _failed=$((_failed + 1)) ;;
   esac
 done
 
-if [ "$CHECK_ONLY" = "1" ]; then
+# 4) 告警规则（alerts/*.json）：按 (folder, title) 幂等 upsert
+#    不入库 repo 文件做任何改写 —— 文件夹归属与数据源 uid 都在内存里换成目标环境的值。
+_ensure_folder() {  # name -> uid
+  local name="$1"
+  _api GET /api/folders | python3 -c 'import json,sys
+try: fs=json.load(sys.stdin)
+except Exception: fs=[]
+print(next((f["uid"] for f in fs if f["title"]==sys.argv[1]), ""))' "$name"
+}
+
+_sync_alerts() {  # file folder_uid
+  local f="$1" fuid="$2"
+  local body
+  body="$(mktemp)"
+  python3 - "$f" "$body" "$fuid" "$DS_UID_PROM" "$DS_UID_LOKI" "$DS_UID_TEMPO" <<'PY'
+import json, sys
+src, out, fuid, prom, loki, tempo = sys.argv[1:7]
+ds_map = {"prometheus": prom, "loki": loki, "tempo": tempo}
+doc = json.load(open(src, encoding="utf-8"))
+rules = doc.get("rules", doc if isinstance(doc, list) else [])
+for r in rules:
+    r["folderUID"] = fuid            # 只在内存里改，不写回 repo 文件
+    for item in r.get("data", []):
+        uid = item.get("datasourceUid")
+        if uid in ds_map:
+            item["datasourceUid"] = ds_map[uid]
+json.dump(rules, open(out, "w", encoding="utf-8"), ensure_ascii=False)
+PY
+  _api GET /api/v1/provisioning/alert-rules | python3 - "$body" "$GRAFANA_URL" "$GRAFANA_AUTH" "$CHECK_ONLY" <<'PY'
+import base64, json, sys, urllib.request, urllib.error
+
+body_file, url, auth, check_only = sys.argv[1:5]
+hdrs = {"Authorization": "Basic " + base64.b64encode(auth.encode()).decode(),
+        "Content-Type": "application/json"}
+want = json.load(open(body_file, encoding="utf-8"))
+
+
+def req(method, path, payload=None):
+    data = json.dumps(payload).encode() if payload is not None else None
+    r = urllib.request.Request(url + path, data=data, method=method, headers=hdrs)
+    try:
+        raw = urllib.request.urlopen(r, timeout=30).read()
+        return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        return {"_err": e.code, "_body": e.read().decode()[:200]}
+
+
+have = req("GET", "/api/v1/provisioning/alert-rules")
+have = have if isinstance(have, list) else []
+index = {(r.get("folderUID"), r.get("title")): r for r in have}
+bad = 0
+for r in want:
+    key = (r.get("folderUID"), r.get("title"))
+    cur = index.get(key)
+    if check_only == "1":
+        print(f"  规则 {r['title']}: {'已存在（未比对内容）' if cur else '缺失（--check，不写）'}")
+        continue
+    r.pop("updated", None)
+    if cur:
+        r["uid"] = cur["uid"]
+        res = req("PUT", "/api/v1/provisioning/alert-rules/" + cur["uid"], r)
+        print(f"  规则 {r['title']}: 更新")
+    else:
+        r.pop("uid", None)
+        res = req("POST", "/api/v1/provisioning/alert-rules", r)
+        print(f"  规则 {r['title']}: 新建")
+    if isinstance(res, dict) and res.get("_err"):
+        bad += 1
+        print(f"    失败 {res['_err']} {res.get('_body', '')}", file=sys.stderr)
+sys.exit(1 if bad else 0)
+PY
+  local rc=$?
+  rm -f "$body"
+  [ "$rc" -ne 0 ] && _failed=$((_failed + 1))
+}
+
+if [ -d "$REPO/deploy/grafana/alerts" ]; then
+  GRAFANA_FOLDER="${GRAFANA_FOLDER:-Grape}"
+  _fuid="$(_ensure_folder "$GRAFANA_FOLDER")"
+  if [ -z "$_fuid" ] && [ "$CHECK_ONLY" != "1" ]; then
+    _fuid="$(_api POST /api/folders "$(python3 -c 'import json,sys;print(json.dumps({"title":sys.argv[1]}))' "$GRAFANA_FOLDER")" \
+      | python3 -c 'import json,sys;print(json.load(sys.stdin).get("uid",""))')"
+  fi
+  for f in "$REPO"/deploy/grafana/alerts/*.json; do
+    [ -f "$f" ] || continue
+    _sync_alerts "$f" "${_fuid:-}"
+  done
+fi
+
+if [ "$_failed" -ne 0 ]; then
+  echo "[grafana] 失败 ${_failed} 项（见上）" >&2
+  exit 1
+fi
+
+if [ "${CHECK_ONLY}" = "1" ]; then
   echo "[grafana] --check 完成，未写入任何东西"
 else
-  echo "[grafana] 完成，导入 $_shipped 个看板"
+  echo "[grafana] 完成，导入 ${_shipped} 个看板"
 fi

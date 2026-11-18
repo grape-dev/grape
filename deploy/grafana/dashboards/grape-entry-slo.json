@@ -1,0 +1,1152 @@
+{
+ "uid": "grape-entry-slo",
+ "title": "Grape 入口与 SLO",
+ "tags": [
+  "grape",
+  "slo",
+  "entry"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "1m",
+ "editable": true,
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "env",
+    "label": "环境",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": "label_values(up{job=~\"grape-.*\"}, env)",
+    "refresh": 2,
+    "multi": false,
+    "includeAll": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    }
+   },
+   {
+    "name": "host",
+    "label": "节点",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": "label_values(up{job=~\"grape-.+-node\"}, host)",
+    "refresh": 2,
+    "multi": true,
+    "includeAll": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    }
+   },
+   {
+    "name": "role",
+    "label": "进程角色",
+    "type": "query",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "prometheus"
+    },
+    "query": "label_values(grape_http_requests_total{env=~\"$env\"}, role)",
+    "refresh": 2,
+    "multi": true,
+    "includeAll": true,
+    "allValue": ".*",
+    "current": {
+     "text": "All",
+     "value": "$__all"
+    }
+   }
+  ]
+ },
+ "annotations": {
+  "list": [
+   {
+    "name": "Annotations & Alerts",
+    "type": "dashboard",
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "enable": true,
+    "iconColor": "rgba(0,211,262,1)"
+   }
+  ]
+ },
+ "panels": [
+  {
+   "id": 25,
+   "type": "row",
+   "title": "① 用户视角：入口还好吗",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "id": 26,
+   "type": "stat",
+   "title": "入口 QPS",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(grape_http_requests_total{env=~\"$env\",host=~\"$host\",role=~\"$role\"}[5m]))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 2,
+     "unit": "reqps"
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 27,
+   "type": "stat",
+   "title": "5xx 比例（真实错误）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 4,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * (sum(rate(grape_http_requests_total{env=~\"$env\",status=~\"5..\",route!=\"/faro/collect\"}[5m])) or vector(0)) / scalar(sum(rate(grape_http_requests_total{env=~\"$env\"}[5m])))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 2,
+     "unit": "percent",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 1
+       },
+       {
+        "color": "red",
+        "value": 3
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "description": "已排除 /faro/collect 的 503（RUM 反代未配置时的 feature-off 状态，单独面板可见）"
+  },
+  {
+   "id": 28,
+   "type": "stat",
+   "title": "4xx 比例",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * (sum(rate(grape_http_requests_total{env=~\"$env\",status=~\"4..\"}[5m])) or vector(0)) / scalar(sum(rate(grape_http_requests_total{env=~\"$env\"}[5m])))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 2,
+     "unit": "percent"
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 29,
+   "type": "stat",
+   "title": "服务端 p95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le)(rate(grape_http_request_duration_seconds_bucket{env=~\"$env\"}[30m])))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 3,
+     "unit": "s",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 1
+       },
+       {
+        "color": "red",
+        "value": 3
+       }
+      ]
+     }
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 30,
+   "type": "stat",
+   "title": "错误预算剩余（99% · 7d）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * (1 - (sum(increase(grape_http_requests_total{env=~\"$env\",status=~\"5..\",route!=\"/faro/collect\"}[7d])) / scalar(sum(increase(grape_http_requests_total{env=~\"$env\"}[7d])) * 0.01)))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 1,
+     "unit": "percent",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 20
+       },
+       {
+        "color": "green",
+        "value": 50
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "description": "SLO 目标 99%（与 src/domains/insight/observability/slo.py 的默认 target 一致），7 天滚动窗口。注意：环境新接入时 Prometheus 只有几小时数据，increase 会按现有数据估算，此时这一格接近「自接入以来」的口径"
+  },
+  {
+   "id": 31,
+   "type": "stat",
+   "title": "未匹配路由占比",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 20,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "100 * (sum(rate(grape_http_requests_total{env=~\"$env\",route=\"unmatched\"}[5m])) or vector(0)) / scalar(sum(rate(grape_http_requests_total{env=~\"$env\"}[5m])))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 2,
+     "unit": "percent",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 2
+       },
+       {
+        "color": "red",
+        "value": 5
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "description": "路由标签覆盖不到的比例。实测多数是被 Grafana 记成 unmatched 的静态资源请求（304/200 为主，真 404 只有千分之一），所以先看状态码再判断是不是「新接口没进路由标签」"
+  },
+  {
+   "id": 32,
+   "type": "row",
+   "title": "② 谁在吃流量 / 谁在报错",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 5,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "id": 33,
+   "type": "timeseries",
+   "title": "QPS · 按进程角色",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 6,
+    "w": 12,
+    "h": 7
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (role)(rate(grape_http_requests_total{env=~\"$env\",role=~\"$role\"}[5m]))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "{{role}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "color": {
+      "mode": "palette-classic"
+     },
+     "unit": "reqps"
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 34,
+   "type": "timeseries",
+   "title": "状态码分布",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 6,
+    "w": 12,
+    "h": 7
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (status)(rate(grape_http_requests_total{env=~\"$env\",role=~\"$role\"}[5m]))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "{{status}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "color": {
+      "mode": "palette-classic"
+     },
+     "unit": "reqps"
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 35,
+   "type": "timeseries",
+   "title": "5xx 比例 · 按路由 Top8",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 13,
+    "w": 12,
+    "h": 7
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "topk(8, 100 * (sum by (route)(rate(grape_http_requests_total{env=~\"$env\",status=~\"5..\"}[10m])) or vector(0)) / scalar(sum(rate(grape_http_requests_total{env=~\"$env\"}[10m]))))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "{{route}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "color": {
+      "mode": "palette-classic"
+     },
+     "unit": "percent"
+    },
+    "overrides": []
+   },
+   "description": "归因用：是哪个接口在制造错误，而不是只有总量"
+  },
+  {
+   "id": 36,
+   "type": "timeseries",
+   "title": "延迟分位 · 按角色",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 13,
+    "w": 12,
+    "h": 7
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le,role)(rate(grape_http_request_duration_seconds_bucket{env=~\"$env\",role=~\"$role\"}[10m])))",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "p50 · {{role}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le,role)(rate(grape_http_request_duration_seconds_bucket{env=~\"$env\",role=~\"$role\"}[10m])))",
+     "refId": "B",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "p95 · {{role}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.99, sum by (le,role)(rate(grape_http_request_duration_seconds_bucket{env=~\"$env\",role=~\"$role\"}[10m])))",
+     "refId": "C",
+     "editorMode": "code",
+     "range": true,
+     "legendFormat": "p99 · {{role}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     },
+     "color": {
+      "mode": "palette-classic"
+     },
+     "unit": "s"
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 37,
+   "type": "row",
+   "title": "③ 路由明细（Top 15）",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 20,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "id": 38,
+   "type": "table",
+   "title": "速率 Top15（按路由）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 21,
+    "w": 8,
+    "h": 9
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "topk(15, sum by (route)(rate(grape_http_requests_total{env=~\"$env\"}[30m]))) > 0",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "__name__": true,
+       "env": true,
+       "job": true
+      },
+      "renameByName": {
+       "Value": "速率",
+       "Value #A": "A",
+       "Value #B": "B",
+       "Value #C": "C"
+      }
+     }
+    }
+   ],
+   "options": {
+    "showHeader": true,
+    "sortBy": [
+     {
+      "displayName": "数值",
+      "desc": true
+     }
+    ]
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     },
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "description": "format=table 时不要把序列再 reduce，否则只剩一行"
+  },
+  {
+   "id": 39,
+   "type": "table",
+   "title": "5xx Top15（按路由）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 21,
+    "w": 8,
+    "h": 9
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "topk(15, sum by (route,status)(rate(grape_http_requests_total{env=~\"$env\",status=~\"5..\"}[30m]))) > 0",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "__name__": true,
+       "env": true,
+       "job": true
+      },
+      "renameByName": {
+       "Value": "速率",
+       "Value #A": "A",
+       "Value #B": "B",
+       "Value #C": "C"
+      }
+     }
+    }
+   ],
+   "options": {
+    "showHeader": true,
+    "sortBy": [
+     {
+      "displayName": "数值",
+      "desc": true
+     }
+    ]
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     },
+     "unit": "reqps"
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 40,
+   "type": "table",
+   "title": "p95 延迟 Top15（按路由）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 21,
+    "w": 8,
+    "h": 9
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "topk(15, histogram_quantile(0.95, sum by (le,route)(rate(grape_http_request_duration_seconds_bucket{env=~\"$env\"}[30m])))) > 0",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true,
+       "__name__": true,
+       "env": true,
+       "job": true
+      },
+      "renameByName": {
+       "Value": "p95",
+       "Value #A": "A",
+       "Value #B": "B",
+       "Value #C": "C"
+      }
+     }
+    }
+   ],
+   "options": {
+    "showHeader": true,
+    "sortBy": [
+     {
+      "displayName": "数值",
+      "desc": true
+     }
+    ]
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     },
+     "unit": "s"
+    },
+    "overrides": []
+   }
+  },
+  {
+   "id": 41,
+   "type": "row",
+   "title": "④ 应用错误日志（Loki · 仅 /internal 与 GSB 行）",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 30,
+    "w": 24,
+    "h": 1
+   },
+   "panels": []
+  },
+  {
+   "id": 42,
+   "type": "stat",
+   "title": "RUM 反代 503（feature-off）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 31,
+    "w": 4,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(grape_http_requests_total{env=~\"$env\",route=\"/faro/collect\",status=\"503\"}[5m])) or vector(0)",
+     "refId": "A",
+     "editorMode": "code",
+     "range": true
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "textMode": "auto",
+    "wideLayout": true
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "thresholds"
+     },
+     "decimals": 2,
+     "unit": "reqps",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 0.01
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "description": "GRAPE_FARO_UPSTREAM 未配置时 /faro/collect 固定 503（代码里的 feature-off 分支），不是故障；>0 说明前端在持续上报但数据被丢掉"
+  },
+  {
+   "id": 43,
+   "type": "logs",
+   "title": "内部调用失败日志（status=5xx）",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "gridPos": {
+    "x": 4,
+    "y": 31,
+    "w": 10,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "expr": "{job=~\"grape-.*\", env=~\"$env\"} |= \"status=5\"",
+     "refId": "A",
+     "queryType": "range"
+    }
+   ],
+   "options": {
+    "showTime": true,
+    "sortOrder": "Descending",
+    "wrapLogMessage": true,
+    "enableLogDetails": true
+   },
+   "description": "shipper 只推 /internal 与 GSB 行；这里过滤服务端记录的 status=5xx。空 = 内部总线调用无失败"
+  },
+  {
+   "id": 44,
+   "type": "timeseries",
+   "title": "日志行速率 · 按角色",
+   "datasource": {
+    "type": "loki",
+    "uid": "loki"
+   },
+   "gridPos": {
+    "x": 14,
+    "y": 31,
+    "w": 10,
+    "h": 8
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "loki",
+      "uid": "loki"
+     },
+     "refId": "A",
+     "expr": "sum by (role)(count_over_time({job=~\"grape-.*\", env=~\"$env\"}[5m]))",
+     "queryType": "range",
+     "legendFormat": "{{role}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "description": "日志 shipper 只推 /internal 与 GSB 相关行，所以这是「总线侧日志量」，不是全站日志量"
+  },
+  {
+   "id": 45,
+   "type": "text",
+   "title": "怎么读这张看板",
+   "gridPos": {
+    "x": 0,
+    "y": 39,
+    "w": 24,
+    "h": 6
+   },
+   "options": {
+    "mode": "markdown",
+    "content": "**这张看板回答一个问题：用户从入口看到的东西到底好不好。**\n\n- 进程全绿但这里 5xx 高 → 问题在网关/入口层或某个已被摘流的接口，不在业务代码。\n- 「5xx 比例」已排除 `/faro/collect`：该路由在 `GRAPE_FARO_UPSTREAM` 未配置时固定返回 503，是 feature-off 而非故障，单独用「RUM 反代 503」面板跟踪。归因表里仍能看到它，那是刻意保留的原始口径。\n- 「未匹配路由占比」当前约 8%，拆状态码看：绝大多数是静态资源的 200/304，真 404 极低。占比突然升高且伴随 404 上升，才是新增接口没进路由标签。\n- 「RUM 反代 503」为 0 表示 Faro 反代已配置并工作；持续 >0 说明 GRAPE_FARO_UPSTREAM 没配上，浏览器 RUM 数据在丢。\n- 「错误预算剩余」按 7 天窗口滚动；负数 = 已经透支 SLO，优先处理不是加面板。",
+    "code": {
+     "language": "plaintext",
+     "showLineNumbers": false,
+     "showMiniMap": false
+    }
+   }
+  }
+ ]
+}
