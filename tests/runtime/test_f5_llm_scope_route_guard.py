@@ -59,8 +59,8 @@ def test_scope_route_uses_python_side_parse_and_public_lookup():
     assert "scope, repo_key FROM runtime_credentials" in src, \
         "scope/repo_key 应在本域 runtime_credentials 上取"
     # miss 不静默：静默 except 是原缺陷的放大器——失败必须折算成显式 marker
-    assert '"llm_cred_missing": True' in src and '"llm_cred_source": "error"' in src, \
-        "凭据读取失败仍可能静默返回空 env（缺 llm_cred_missing 失败标记）"
+    assert '"llm_cred_missing": True' in src and '"llm_cred_source": "env_error"' in src, \
+        "env 组装失败仍可能静默返回空 env（缺 llm_cred_missing 失败标记）"
 
 
 def test_no_int_coercion_on_provider_id():

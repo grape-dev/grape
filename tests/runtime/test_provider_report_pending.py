@@ -59,11 +59,14 @@ def test_report_exception_is_counted_as_pending():
 
 def test_task_env_failure_returns_explicit_missing_marker():
     src = _routes_src()
-    idx = src.find("task_env: attach LLM credentials failed")
+    idx = src.find("task_env: env assembly failed")
     assert idx != -1, "task_env 的 LLM 凭据异常分支缺失"
     tail = src[idx:]
     branch = tail[: tail.find("return {\"env\": env}")]
     assert '"llm_cred_missing": True' in branch, \
         "凭据读取失败必须返回显式 llm_cred_missing（不能再回空 env）"
-    assert '"llm_cred_source": "error"' in branch, "失败来源需标注为 error，便于前端/日志区分"
-    assert "读取 LLM 凭据失败" in branch, "失败提示需带原因，不能只留引擎侧 No LLM provider configured"
+    assert '"llm_cred_source": "env_error"' in branch, \
+        "失败来源需与「用户确实没配凭据」区分（env_error，而非 user/repo/error）"
+    assert "任务环境准备失败" in branch, "提示需中性描述（本块涵盖取任务/场景/凭据多步）"
+    assert "_e}" not in branch.split("llm_cred_hint")[1], \
+        "用户可见提示不得回显原始异常（可能含库名/表名）"

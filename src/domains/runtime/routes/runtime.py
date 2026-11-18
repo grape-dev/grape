@@ -1313,11 +1313,14 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
         # Previously this only logged a WARNING and returned an empty env, which the
         # worker reported as "no LLM credentials, config skipped" and the engine then
         # turned into "No LLM provider configured" -- unreadable even for a user who
-        # had credentials configured. Fold the failure into an explicit missing marker
-        # with the reason so the task fails with something actionable.
-        log.warning(f"task_env: attach LLM credentials failed: {_e}")
-        return {"env": env, "llm_cred_missing": True, "llm_cred_source": "error",
-                "llm_cred_hint": f"读取 LLM 凭据失败：{_e}（请检查 LLM 凭据配置或平台日志）"}
+        # had credentials configured. The env is now failed explicitly instead of
+        # silently empty, but the attribution stays honest: this block covers env
+        # assembly (task/runtime lookups, scene reconcile, credential selection), so
+        # the user-facing hint must not claim the credentials are unreadable, and the
+        # raw exception (which can carry schema/table names) stays in the server log.
+        log.warning(f"task_env: env assembly failed: {_e}")
+        return {"env": env, "llm_cred_missing": True, "llm_cred_source": "env_error",
+                "llm_cred_hint": "任务环境准备失败（LLM 凭据注入阶段），请查看平台日志后重试"}
     return {"env": env}
 
 
