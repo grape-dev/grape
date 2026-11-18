@@ -131,11 +131,17 @@ def _git_retry(args: list[str], retries: int = 3, base_delay: float = 1.0) -> No
 def _ensure_grape_cli_wheel(whl_dir: str) -> str:
     """把 grape-cli 构建成 wheel 放入 wheels/（离线随包安装）。
 
-    - wheels/ 已含 `grape-*.whl` → 跳过；
-    - 否则懒拉 grape-cli 源码（浅克隆到 CACHE_DIR），`pip wheel` 产出到 wheels/；
+    - wheels/ 已含 `grape-*.whl` **且** `.grape-cli-built` 标记存在 → 跳过
+      （标记证明该 wheel 是本进程构建的当前快照）；
+    - 否则懒拉 grape-cli 源码（浅克隆到 CACHE_DIR），清掉旧 grape-*.whl（#896：
+      陈旧 wheel 缓存一旦过期永远过期——同文件名 pip wheel 报错、pip install
+      同版本号不重解压，缺 GRAPE_AUTH_FILE 的旧 CLI 随包下发永不自愈），
+      `pip wheel` 产出到 wheels/ 并写标记；
     - 失败仅告警：安装侧回退在线（现状兜底，不影响包构建）。
     """
-    if any(f.startswith("grape-") and f.endswith(".whl") for f in os.listdir(whl_dir)):
+    marker = os.path.join(whl_dir, ".grape-cli-built")
+    have = any(f.startswith("grape-") and f.endswith(".whl") for f in os.listdir(whl_dir))
+    if have and os.path.isfile(marker):
         return whl_dir
     src = os.path.join(CACHE_DIR, "grape-cli-src")
     try:
@@ -148,11 +154,22 @@ def _ensure_grape_cli_wheel(whl_dir: str) -> str:
                 _git_retry(["-C", src, "pull", "--ff-only"])
             except Exception:
                 pass  # 更新失败用已有缓存
+        # 重建前先清旧 grape-*.whl（#896）：陈旧 wheel（内容与远端 HEAD 不一致）
+        # 留在 wheels/ 会随包下发并骗过安装端版本判断，不允许存活。
+        # 删除失败仅告警不中断（占用等场景），由后续构建重试收敛。
+        for f in os.listdir(whl_dir):
+            if f.startswith("grape-") and f.endswith(".whl"):
+                try:
+                    os.remove(os.path.join(whl_dir, f))
+                except Exception as e:
+                    log.warning(f"worker_package: failed to remove stale grape wheel {f}: {e}")
         subprocess.run(
             [sys.executable, "-m", "pip", "wheel", "--no-cache-dir", src,
              "--no-deps", "-w", whl_dir],
             check=True, capture_output=True, text=True, timeout=600,
         )
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write("built")
         log.info(f"worker_package: grape-cli wheel built into {whl_dir}")
     except Exception as e:
         log.warning(f"worker_package: grape-cli wheel build failed (fallback online install): {e}")
@@ -428,8 +445,39 @@ WHEEL_PLATFORMS = [
 # deps explicitly here. Keep in sync with pyproject.toml [project.optional-dependencies] worker.
 # [沙箱迁移生效性修复 2026-11-10] 与 pyproject.toml [project.optional-dependencies] worker 同源
 # （离线 wheels 打包范围）——补 cubesandbox/requests/cryptography，与 install-worker.sh 对齐。
+# [2026-11-18 worker 离线安装事故] 缓存键曾只含 pyproject 内容指纹：升级窗口期旧进程用内存里的
+# 旧 WORKER_DEPS 下载 wheels，却把磁盘上新 pyproject 的指纹写进 .req-hash marker →
+# 重启后 marker 命中，缺 cubesandbox 的 wheels 被永久固化（线上 worker 实证：
+# src 代码已含 cubesandbox 后端，wheels 仍是无 cubesandbox 的 30 个旧包）。
+# 缓存键必须同时纳入 WORKER_DEPS 自身指纹 + 命中路径做依赖完备性校验，缺一个都重下。
 WORKER_DEPS = ["aiohttp>=3.9", "bcrypt>=4.0", "click>=8.0", "httpx>=0.24",
                "cubesandbox>=0.7", "requests>=2.31", "cryptography>=42"]
+
+
+def _dep_base_name(dep: str) -> str:
+    """依赖声明 → wheel 文件名里的 dist 基名（去版本约束；PEP 503 归一 - 和 . → _）。"""
+    base = re.split(r"[><=!~;\[ ]", dep, maxsplit=1)[0].strip().lower()
+    return base.replace("-", "_").replace(".", "_")
+
+
+def _missing_dep_wheels(whl_dir: str) -> list[str]:
+    """校验 wheels 目录覆盖 WORKER_DEPS 每个顶层依赖（至少一个同名 wheel），返回缺失清单。
+
+    覆盖两类静默缺口：
+    - 升级窗口期旧进程污染的缓存（marker 键与下载集合失配）；
+    - pip download 单次失败只告警不阻断（_pip_download_wheels 设计如此），
+      依赖缺失无任何硬信号，离线安装端才发现（那时已晚）。
+    """
+    try:
+        names = [f.lower() for f in os.listdir(whl_dir) if f.endswith(".whl")]
+    except Exception:
+        return list(WORKER_DEPS)
+    missing = []
+    for dep in WORKER_DEPS:
+        base = _dep_base_name(dep)
+        if not any(n.startswith(base + "-") for n in names):
+            missing.append(dep)
+    return missing
 
 
 def _pip_download_wheels(dest: str, platform_args: list[str], py_version: str) -> int:
@@ -455,8 +503,17 @@ def _pip_download_wheels(dest: str, platform_args: list[str], py_version: str) -
 
 
 def _wheels_cache_key(py_version: str) -> str:
-    """wheels 缓存键：py_version + 平台矩阵 + requirements 指纹（任一变更重新下载）。"""
-    return f"{py_version}:{'|'.join(p for p, _ in WHEEL_PLATFORMS)}:{_requirements_hash()}"
+    """wheels 缓存键：py_version + 平台矩阵 + requirements 指纹 + WORKER_DEPS 指纹。
+
+    WORKER_DEPS 指纹入键：键此前只含 pyproject 内容指纹，升级窗口期旧进程
+    （内存里还是旧依赖清单）下载的 wheels 会带着新 pyproject 指纹的 marker
+    骗过重启后的新进程，缺包缓存永久固化（2026-11-18 worker 离线事故，见
+    WORKER_DEPS 上方注释）。依赖清单自身入键后，旧 marker 自然失效触发重下。
+    """
+    h = hashlib.sha256("|".join(sorted(WORKER_DEPS)).encode("utf-8")).hexdigest()[:16]
+    # [:16] = 64bit 指纹宽度：沿用本模块指纹宽度约定（_python_fingerprint 等 [:8]）
+    # 的一族，依赖清单属低频变更面取更宽值，非配置/限额数值。
+    return f"{py_version}:{'|'.join(p for p, _ in WHEEL_PLATFORMS)}:{_requirements_hash()}:{h}"
 
 
 def _ensure_wheels(py_version: str = "") -> str:
@@ -481,7 +538,15 @@ def _ensure_wheels(py_version: str = "") -> str:
         pass
     has_whl = any(f.endswith(".whl") for f in os.listdir(WHEELS_DIR))
     if cur == old and has_whl:
-        return WHEELS_DIR
+        # 完备性校验（第二道防线）：marker 命中但依赖 wheel 缺失（旧进程污染 /
+        # 下载静默失败）→ 缓存视为失效，走下方重下路径自愈
+        _missing = _missing_dep_wheels(WHEELS_DIR)
+        if not _missing:
+            return WHEELS_DIR
+        log.warning(
+            f"worker_package: wheels cache hit but missing dep wheels "
+            f"{_missing}, redownloading (stale cache would break offline install)")
+        cur = ""  # 使 marker 比对失效，落进重下逻辑
     dl_py = py_version or f"{sys.version_info.major}.{sys.version_info.minor}"
     log.info(
         f"worker_package: downloading wheels for platforms "
@@ -499,8 +564,18 @@ def _ensure_wheels(py_version: str = "") -> str:
             log.info(f"worker_package: wheels ready for {label}")
         else:
             log.warning(f"worker_package: wheels download failed for {label} (install side will fall back online)")
+    # 下载后完备性校验：缺失项硬告警（此前 pip download 失败完全静默，只在
+    # 离线安装端爆雷）。缺失仍写 marker 防每次全量重试，但告警留痕可发现。
+    _missing = _missing_dep_wheels(WHEELS_DIR)
+    if _missing:
+        log.error(
+            f"worker_package: wheels incomplete after download, missing deps: "
+            f"{_missing} (offline installs of these will fall back online; "
+            f"check PIP_INDEX={PIP_INDEX} reachability)")
     with open(marker, "w", encoding="utf-8") as f:
-        f.write(cur)
+        # heal 路径 cur 被置空仅为绕过短路；写 marker 一律写当前完整键——
+        # 自愈成功后的下一次调用应命中短路，不再多一次全量重下（架构守护观察1）
+        f.write(cur or _wheels_cache_key(py_version))
     return WHEELS_DIR
 
 

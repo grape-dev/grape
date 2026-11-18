@@ -160,9 +160,12 @@ class TestEnsureWheelsMultiPlatform:
         def _fake(dest, platform_args, py_version):
             calls.append((tuple(platform_args), py_version))
             os.makedirs(dest, exist_ok=True)
-            n = len([f for f in os.listdir(dest) if f.endswith(".whl")])
-            with open(os.path.join(dest, f"dep-{n}-py3-none-any.whl"), "w", encoding="utf-8") as f:
-                f.write("dummy")
+            # 每次下载都产出覆盖 WORKER_DEPS 全部依赖的 wheel（完备性校验口径）
+            for dep in wp.WORKER_DEPS:
+                base = wp._dep_base_name(dep)
+                name = f"{base}-1.0-py3-none-any.whl"
+                with open(os.path.join(dest, name), "w", encoding="utf-8") as f:
+                    f.write("dummy")
             return 0
 
         return _fake
@@ -211,9 +214,10 @@ class TestEnsureWheelsMultiPlatform:
             if "--platform" in platform_args and "win_amd64" in platform_args:
                 return 1  # win_amd64 失败
             os.makedirs(dest, exist_ok=True)
-            n = len([f for f in os.listdir(dest) if f.endswith(".whl")])
-            with open(os.path.join(dest, f"dep-{n}-py3-none-any.whl"), "w", encoding="utf-8") as f:
-                f.write("dummy")
+            for dep in wp.WORKER_DEPS:
+                name = f"{wp._dep_base_name(dep)}-1.0-py3-none-any.whl"
+                with open(os.path.join(dest, name), "w", encoding="utf-8") as f:
+                    f.write("dummy")
             return 0
 
         monkeypatch.setattr(wp, "_pip_download_wheels", _fake)
@@ -229,6 +233,49 @@ class TestEnsureWheelsMultiPlatform:
         assert "manylinux2014_aarch64" in key
         assert "win_amd64" in key
 
+    def test_cache_key_contains_worker_deps(self, monkeypatch):
+        """缓存键包含 WORKER_DEPS 指纹——依赖清单变更（或旧进程写的旧清单
+        marker）触发重新下载（2026-11-18 worker 离线事故：升级窗口期旧进程
+        用旧清单下载却写入新 pyproject 指纹 marker，缺包缓存永久固化）。"""
+        import src.kernel.worker_package as wp
+        old = wp._wheels_cache_key("3.12")
+        monkeypatch.setattr(wp, "WORKER_DEPS",
+                            [d for d in wp.WORKER_DEPS if not d.startswith("cubesandbox")])
+        assert wp._wheels_cache_key("3.12") != old, \
+            "WORKER_DEPS 变更必须改变缓存键，否则旧 marker 不会失效"
+
+    def test_stale_cache_missing_dep_healed(self, monkeypatch, tmp_path):
+        """marker 命中但依赖 wheel 缺失 → 视为缓存失效强制重下（自愈已污染缓存）。"""
+        import src.kernel.worker_package as wp
+        wd = tmp_path / "wheels"
+        wd.mkdir()
+        monkeypatch.setattr(wp, "WHEELS_DIR", str(wd))
+        # 预置旧进程留下的缓存：marker 是当前键（含新 pyproject+deps 指纹），
+        # 但 wheels 缺 cubesandbox（旧清单下载的产物）
+        (wd / "aiohttp-3.9.5-py3-none-any.whl").write_text("x", encoding="utf-8")
+        (wd / ".req-hash").write_text(wp._wheels_cache_key("3.12"), encoding="utf-8")
+        calls = []
+        monkeypatch.setattr(wp, "_pip_download_wheels", self._fake_downloader(tmp_path, calls))
+        wp._ensure_wheels("3.12")
+        assert calls, "缺依赖的命中缓存不应短路，必须重新下载"
+        assert not wp._missing_dep_wheels(str(wd)), "重下后依赖应齐备"
+        # 架构守护观察1：自愈后 marker 必须写完整键（非空串）——第二次调用零下载
+        n = len(calls)
+        wp._ensure_wheels("3.12")
+        assert len(calls) == n, "自愈成功后的下一次调用应命中缓存短路，不再全量重下"
+        assert (wd / ".req-hash").read_text(encoding="utf-8").strip() == \
+            wp._wheels_cache_key("3.12")
+
+    def test_missing_dep_wheels_detection(self, tmp_path):
+        """_missing_dep_wheels 基名归一：-/_ 等价、版本约束剥除。"""
+        import src.kernel.worker_package as wp
+        wd = tmp_path / "wheels"
+        wd.mkdir()
+        assert wp._missing_dep_wheels(str(wd)) == list(wp.WORKER_DEPS), "空目录全部缺失"
+        (wd / "cubesandbox-0.8.0-py3-none-any.whl").write_text("x", encoding="utf-8")
+        assert "cubesandbox>=0.7" not in wp._missing_dep_wheels(str(wd))
+        assert "aiohttp>=3.9" in wp._missing_dep_wheels(str(wd))
+
 class TestGrapeCliWheel:
     def test_other_wheels_untouched_during_grape_build(self, monkeypatch, tmp_path):
         """#896 前置清理由只删 grape-*.whl——其他依赖 wheel（click 等）不动。"""
@@ -237,17 +284,23 @@ class TestGrapeCliWheel:
 
         click_whl = tmp_path / "click-8.1.7-py3-none-any.whl"
         click_whl.write_text("click-bytes", encoding="utf-8")
+        (tmp_path / "grape-1.0.0-py3-none-any.whl").write_text("g", encoding="utf-8")
+        # 本进程构建标记（#896 语义：有 wheel 无标记 = 陈旧，须重建；有标记才跳过）
+        (tmp_path / ".grape-cli-built").write_text("built", encoding="utf-8")
+        called = []
 
         def _fake_run(cmd, **kw):
+            called.append(cmd)
             if cmd[:3] == [sys.executable, "-m", "pip"] and "wheel" in cmd:
                 (tmp_path / "grape-1.0.0-py3-none-any.whl").write_text("g", encoding="utf-8")
             return SimpleNamespace(returncode=0)
 
         monkeypatch.setattr(wp, "CACHE_DIR", str(tmp_path))
-        monkeypatch.setattr(wp, "_git", lambda *a, **k: None)
+        monkeypatch.setattr(wp, "_git", lambda *a, **k: called.append("git"))
         monkeypatch.setattr(wp.subprocess, "run", _fake_run)
         wp._ensure_grape_cli_wheel(str(tmp_path))
         assert called == []  # 已有 wheel：什么都不做
+        assert click_whl.read_text(encoding="utf-8") == "click-bytes"
 
     def test_builds_wheel_when_missing(self, monkeypatch, tmp_path):
         """wheel 缺失 → 触发 clone + pip wheel 写入同一目录。"""
