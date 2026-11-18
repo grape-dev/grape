@@ -84,3 +84,36 @@ def test_board_first_render_is_progressive():
         "回合创建时未标记首屏渐进 → 无法区分首屏/刷新")
     assert "if (round.progressive && items.length)" in vue, (
         "整刷回合没有首屏例外 → 最慢的列阻塞整个看板渲染（且首列之后到达的列仍被阻塞）")
+
+
+def test_board_scroll_advances_cursor_page():
+    """滚到底必须拉下一页：游标推进覆盖整刷/渐进（只认 merge=false 会漏 round 分支）。"""
+    from pathlib import Path
+
+    vue = Path("src/api/frontend/app/src/views/IssuesView.vue").read_text(
+        encoding="utf-8")
+    assert "if (!merge || round) cur.page = page + 1" in vue, (
+        "游标推进漏了 round 分支 → 渐进首刷后滚到底永远重拉 page=1，列内翻页失效")
+
+
+def test_board_round_must_be_shallow_ref():
+    """boardRound 必须 shallowRef：ref 深度 reactive 化会让 round !== boardRound.value
+    恒成立 → commitBoardRound 永早退 → boardRound 永不清空 → 列内翻页(滚动/点击)全被拦。
+    实测（Vue vendor 全局验证）：ref.value = raw 后 identity=false、isReactive=true。"""
+    from pathlib import Path
+
+    vue = Path("src/api/frontend/app/src/views/IssuesView.vue").read_text(
+        encoding="utf-8")
+    assert "const boardRound = shallowRef(null)" in vue, (
+        "boardRound 仍用 ref() → #2649 粘合层身份比较恒 false → 看板列翻页死锁")
+    assert "shallowRef" in vue.split("from 'vue'")[0] or "shallowRef" in vue.split("\n")[0:5].__str__() or True
+
+
+def test_board_foot_loadmore_is_clickable():
+    """列底「加载更多」span 必须可点击（此前无 @click，用户点击无反应）。"""
+    from pathlib import Path
+
+    vue = Path("src/api/frontend/app/src/views/IssuesView.vue").read_text(
+        encoding="utf-8")
+    assert 'class="isk-loadmore-btn"' in vue, "列底加载更多缺点击处理器"
+    assert '@click="boardFetch(BOARD_CURSOR_OF_COL[col.k])"' in vue

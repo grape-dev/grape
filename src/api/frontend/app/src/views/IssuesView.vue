@@ -400,7 +400,13 @@
             <!-- 列底：分屏提示（仅「仓库全部」看板；列内触底加载该列下一页） -->
             <div v-if="boardPagedView" class="isk-board-foot">
               <span v-if="boardCursorOf(col.k).loading">{{ tc('loading') }}</span>
-              <span v-else-if="boardCursorOf(col.k).hasMore">↓ {{ t('load_more') }}</span>
+              <span
+                v-else-if="boardCursorOf(col.k).hasMore"
+                class="isk-loadmore-btn"
+                title="{{ t('load_more') }}"
+                @click="boardFetch(BOARD_CURSOR_OF_COL[col.k])"
+                >↓ {{ t('load_more') }}</span
+              >
               <span v-else-if="boardGrouped[col.k].length"
                 >— {{ t('tab.all') }} {{ boardGrouped[col.k].length }} —</span
               >
@@ -688,7 +694,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, shallowRef, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import {
   boardFrameKey,
   createBoardRound,
@@ -1274,7 +1280,7 @@ const BOARD_CURSOR_STATUSES = {
 const colCursor = reactive({}) // cursor -> {page, hasMore, loading, total, seq}
 // Issue #2649：整刷回合化（旧前端 issues.js 的语义等价迁移）
 const boardEpoch = ref(0) // 全局回合序号：reset 自增，旧 epoch 的在途响应一律丢弃
-const boardRound = ref(null) // 进行中的整刷回合（createBoardRound 产出）
+const boardRound = shallowRef(null) // 进行中的整刷回合（createBoardRound 产出）。必须 shallowRef：ref 会把 round 深度 reactive 化 → round !== boardRound.value 恒成立 → commitBoardRound 永早退、boardRound 永不清空 → 列内翻页(滚动/点击)全被 boardRound 守卫拦死（实测 #2649 粘合层潜在缺陷）
 const boardRefreshFailed = ref(false) // 软失败态：保留旧帧 + 可重试提示
 const boardFrameId = ref('') // 帧身份：只有身份变化才允许清空旧帧
 function boardFrameIdNow() {
@@ -1336,6 +1342,7 @@ function mergeBoardItems(items) {
 function boardFetch(key, opts) {
   const repo = repoOf()
   const cur = colCursor[key]
+
   if (!repo || !cur) return Promise.resolve()
   const merge = !!(opts && opts.merge)
   const round = (opts && opts.round) || null
@@ -1357,6 +1364,7 @@ function boardFetch(key, opts) {
   cur.loading = true
   const seq = ++cur.seq
   const page = merge ? 1 : cur.page
+  console.log('[dbg-boardFetch]', key, 'merge=', merge, 'round=', !!round, 'page=', page, 'hasMore=', cur.hasMore, 'loading=', cur.loading)
   // URL 按 viewMode 分支：仓库全部→仓库列表；我的需求→mine（statuses 下推同口径）
   const baseMine =
     viewMode.value === 'mine'
@@ -1382,7 +1390,8 @@ function boardFetch(key, opts) {
       if (seq !== cur.seq) return // 已被本列更新的请求取代
       cur.loading = false
       const items = d.issues || d.tasks || []
-      if (!merge) cur.page = page + 1
+      // 游标推进：整刷（含渐进）与滚动追加都要推进——否则滚到底永远重拉 page=1
+      if (!merge || round) cur.page = page + 1
       cur.hasMore = !!d.has_more
       cur.total = d.total === null || d.total === undefined ? null : d.total
       if (round) {
@@ -1494,6 +1503,7 @@ function loadBoardAll(opts) {
 }
 // Issue #2649：回合收敛点——成功=单次赋值原子替换；失败=保留旧帧 + 可重试软横幅
 function commitBoardRound(round) {
+
   if (round !== boardRound.value) return // 已被更新的整刷取代
   boardRound.value = null
   const decision = decideBoardRound(round, {
@@ -1535,10 +1545,24 @@ function retryBoardRefresh() {
 }
 // 列内滚到接近底部 → 只加载该列所属游标的下一页
 function onBoardScroll(colKey, ev) {
+  // [TEMP-DEBUG v69] 滚动触发链路探针（定位"加载更多不触发"）
+  try {
+    console.log('[dbg-scroll]', colKey,
+      'bpv=', boardPagedView.value,
+      'repo=', JSON.stringify(repoOf() || null),
+      'el=', !!(ev && ev.target),
+      'st=', ev && ev.target ? Math.round(ev.target.scrollTop) : -1,
+      'sh=', ev && ev.target ? ev.target.scrollHeight : -1,
+      'ch=', ev && ev.target ? ev.target.clientHeight : -1)
+  } catch (e) { console.log('[dbg-scroll] err', e) }
   if (!boardPagedView.value) return
   const el = ev && ev.target
   if (!el) return
   if (el.scrollTop + el.clientHeight >= el.scrollHeight - 48) {
+    try {
+      const cur = colCursor[BOARD_CURSOR_OF_COL[colKey]]
+      console.log('[dbg-fetch-enter]', colKey, 'cursor=', JSON.stringify(cur))
+    } catch (e) {}
     boardFetch(BOARD_CURSOR_OF_COL[colKey])
   }
 }
