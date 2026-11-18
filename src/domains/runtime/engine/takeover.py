@@ -264,15 +264,6 @@ def downstream_event_exists(repo_key: str, issue_id: str, agent_type: str, since
         return None
 
 
-def assert_no_active_takeover(repo_key: str, issue_id: str, agent_type: str = "") -> None:
-    """防重做守卫：接管中的节点禁止任何派发（A2A / a2a-redo / issues-resume 调用）。"""
-    sess = active_takeover_for(repo_key, issue_id, agent_type)
-    if sess:
-        raise TakeoverError(409, "already_taken_over",
-                            f"Issue {issue_id} 正被 {sess.get('username') or '用户'} 接管中（"
-                            f"takeover={sess.get('id')}），禁止再次派发")
-
-
 # ----------------------------------------------------------------------------- bundle
 
 def _issue_row(repo_key: str, issue_number: str) -> dict:

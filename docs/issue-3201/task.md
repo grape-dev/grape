@@ -8,3 +8,9 @@
 - [x] T6 测试：webhook/direct/A2A/过期自愈/跨 Issue/聚合/finish 顺序与计数
 
 验证命令：`pytest tests/test_takeover_dispatch_guard_3201.py tests/test_takeover_flow.py tests/test_takeover_event_guard.py -q`
+
+## 验收对照（追加清理项）
+
+| 项 | 结论 | 自检 |
+|----|------|------|
+| 全仓零调用点死函数 `assert_no_active_takeover` | 选 A：删除定义；显式派发入口（A2A / a2a-redo / issues-resume）继续统一走 `active_takeover_for`，常规 webhook / autopilot 派发走 `_create_direct_task` / `_enqueue_pipeline_task` 中的 `_skip_dispatch_for_takeover`，不新增第二套守门判断 | `git grep -n "assert_no_active_takeover" src tests` → 0 命中 |
