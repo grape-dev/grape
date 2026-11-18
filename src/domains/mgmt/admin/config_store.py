@@ -323,7 +323,7 @@ def save_config(payload: dict) -> dict:
         purge_legacy_secret_copies()
 
     # 3. D109：同步到平台对象表（表=运行时真源；fail-safe，不阻断旧保存路径）
-    from src.domains.platform.admin_sync import sync_from_admin_payload
+    from src.domains.platform.public import sync_from_admin_payload
     sync_from_admin_payload(payload)
 
     return read_public_config()

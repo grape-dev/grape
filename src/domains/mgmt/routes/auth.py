@@ -86,7 +86,7 @@ def _pat_platforms(user_id) -> "list[str] | None":
     """
     try:
         from src.domains.mgmt.user.db import get_credential
-        from src.domains.platform.registry import supported_platforms
+        from src.domains.platform.public import supported_platforms
 
         out = []
         for p in supported_platforms():

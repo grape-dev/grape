@@ -120,3 +120,33 @@ def is_platform_visible(provider: str) -> bool:
     from src.domains.platform.visibility import is_platform_visible as _impl
 
     return _impl(provider)
+
+
+# --- 平台目录（platform.registry）-----------------------------------------
+# mgmt 侧（routes/auth、routes/settings）原先直接 import registry 内部模块；
+# 两者都只读、返回 JSON 友好结构，转发即可，调用点函数名不变。
+
+
+def platform_descriptors() -> "list[dict]":
+    """系统支持的仓库平台描述（表优先，卡兜底；空列表也是答案）。"""
+    from src.domains.platform.registry import platform_descriptors as _impl
+
+    return _impl()
+
+
+def supported_platforms() -> "list[str]":
+    """系统支持的仓库平台 id 列表。"""
+    from src.domains.platform.registry import supported_platforms as _impl
+
+    return _impl()
+
+
+# --- 管理面 → 平台对象表同步（platform.admin_sync）------------------------
+# mgmt/admin/config_store 原先直接 import admin_sync 内部模块；幂等、失败不阻断。
+
+
+def sync_from_admin_payload(payload: dict) -> None:
+    """把管理面扁平 payload 同步进平台对象表（幂等；失败不阻断）。"""
+    from src.domains.platform.admin_sync import sync_from_admin_payload as _impl
+
+    return _impl(payload)

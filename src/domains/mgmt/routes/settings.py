@@ -2948,7 +2948,7 @@ def _pr_web_path_of(provider: str) -> str:
 def list_vcs_platforms_public():
     # D109 读路径：平台目录以对象模型为权威（grape_t_repo_platforms + caps），
     # 平台卡只是导入源（migrated 前/表未就绪时兜底）——见 kernel.platform_object.registry。
-    from src.domains.platform.registry import platform_descriptors
+    from src.domains.platform.public import platform_descriptors
     # 平台可见性唯一口径（2026-11-15 方案甲）：平台行 `enabled`。
     # 判据单一实现见 src/domains/platform/visibility.py（/repos/member 403 也用同一份）。
     # meta.vcs_platforms_hidden 已退役（迁移 202611170021 把名单写成 enabled=0 并删键）。
