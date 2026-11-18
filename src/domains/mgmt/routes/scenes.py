@@ -2206,6 +2206,9 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
        selector 与 ids/uids 任一非空双非空 400（保存端双非空拒绝）
     7. Issue #1208 D13 L1：selector 标签语法/值域硬阻断 400（未知前缀文案指引 label:；
        engine/scope 固定值域；scene 动态查 scene_market 活跃行）
+    8. SRE 节点 selector 模式：tags 必须含 scope:user 或 scope:repo → 否则 400
+       （claim 侧没有 SRE 专属 scope 层，边界只由 selector 的 scope 标签承担；与前端
+       SRE 弹窗只给「个人/仓库」两档对齐）
 
     校验失败抛 HTTPException(400)；失效 runtime_id 跳过（优雅降级）。
     """
@@ -2274,6 +2277,17 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
             raise HTTPException(status_code=400, detail={
                 "code": 400,
                 "message": "SRE Agent 不支持广播模式，请选择个人或仓库级机器（引擎列表不能为空）"})
+        # SRE 的 user/repo 边界在 claim 侧没有独立一层（_DEFAULT_ENGINE_ROLE_TAGS 空表、
+        # claim_by_tag 无 sre/scope 层、_selector_guard_blocks 只做标签 AND 匹配），实际边界
+        # 完全落在 selector 的 scope 标签上：不带 scope 的 selector 会被 global 档引擎认领。
+        # 保存端在此收紧，与前端 SRE 弹窗只给「个人/仓库」两档对齐（早于派发/认领，成本最低）。
+        if tag == "sre" and node.get("enabled") is not False and _sel_tags:
+            _sre_sel_scopes = {str(t or "").strip().lower() for t in _sel_tags}
+            if not (_sre_sel_scopes & {"scope:user", "scope:repo"}):
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": "SRE Agent 的引擎筛选必须包含 scope:user 或 scope:repo"
+                               "（SRE 禁止使用全局引擎，缺少 scope 标签的筛选会被全局引擎认领）"})
         if not eids and not uids:
             continue
         # Issue #646：绑定入口支持 uid（字符串）——先解析为 id（服务端校验），
