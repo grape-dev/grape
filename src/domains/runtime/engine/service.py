@@ -1059,7 +1059,7 @@ def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "
     skill = (skill or "").strip()
     if not skill:
         return True, "skill not configured", 0
-    from src.domains.mgmt.user.db import (
+    from src.domains.mgmt.public import (
         resolve_skill_id, get_skill_by_id, get_skill_path, get_skill_object_key,
     )
     sid = int(skill_id or 0)
@@ -1174,7 +1174,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     _skill_obs_key = ""
     if skill:
         try:
-            from src.domains.mgmt.user.db import resolve_skill_id, get_skill_path, get_skill_object_key, get_skill_by_id
+            from src.domains.mgmt.public import resolve_skill_id, get_skill_path, get_skill_object_key, get_skill_by_id
             if skill_id:
                 _sk = get_skill_by_id(skill_id)
                 if _sk:
@@ -1298,7 +1298,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     if not _server_url:
         try:
             # Issue #471 E1：任务下发的 server_url 是 worker 回连地址
-            from src.domains.mgmt.user.db import get_worker_connect_url
+            from src.domains.mgmt.public import get_worker_connect_url
             _server_url = get_worker_connect_url()
         except Exception:
             pass
@@ -1331,7 +1331,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     # Issue #646：任务落库前的引擎引用快照（uid + 展示名 + pool uid 镜像；
     # 未迁移旧库/引擎已删 → (None,'','')，不阻断任务创建）
     try:
-        from src.domains.mgmt.user.db import engine_ref_snapshot
+        from src.domains.mgmt.public import engine_ref_snapshot
         # Issue #1208：selector 任务两池列均空（pool_selector 承载圈池语义），
         # uid 镜像无源 → 不做快照（engine_ref_snapshot 空串入参返回空镜像）
         _snap = engine_ref_snapshot(runtime_id, pool_engine_ids or "")

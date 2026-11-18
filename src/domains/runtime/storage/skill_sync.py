@@ -179,7 +179,7 @@ async def sync_official_skills_to_obs() -> dict:
     返回 {"added": N, "updated": N, "skipped": N}。
     """
     from src.domains.runtime.storage import get_storage, skill_key, zip_cache_put, mem_cache_invalidate
-    from src.domains.mgmt.user.db import get_skill_content_hash, update_skill_content_hash
+    from src.domains.mgmt.public import get_skill_content_hash, update_skill_content_hash
 
     # 读 skill-description.json 获取官方技能清单
     json_path = os.path.join(CONFIG_DIR, "skill-description.json")

@@ -75,7 +75,7 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
     """
     from src.kernel.repo_key import to_repo_key
     from src.kernel.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
-    from src.domains.mgmt.user import db as user_db
+    from src.domains.mgmt import public as user_db
 
     repo_key = to_repo_key(repo, provider=provider)
     owner, _, repo_name = repo.partition("/")

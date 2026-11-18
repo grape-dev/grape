@@ -475,7 +475,7 @@ def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
             continue
         # 本机直连引擎（credential_id=0）必须为已知引擎类型（防幽灵 `default-cred0` 占位，见 engine-selection-design.md §7.3）
         if (m.get("credential_id") or 0) == 0:
-            from src.domains.mgmt.user.db import is_known_engine_name
+            from src.domains.mgmt.public import is_known_engine_name
             if not is_known_engine_name(m.get("name") or ""):
                 continue
         out.append(m)
@@ -1520,7 +1520,7 @@ def _candidate_reject_reasons(m: dict, cfg: dict, agent_type: str = "") -> list:
             reasons.append(f"stale_heartbeat>{_RUNTIME_STALE_SECONDS}s")
     if (m.get("credential_id") or 0) == 0:
         try:
-            from src.domains.mgmt.user.db import is_known_engine_name
+            from src.domains.mgmt.public import is_known_engine_name
             if not is_known_engine_name(m.get("name") or ""):
                 reasons.append("unknown_local_engine")
         except Exception:

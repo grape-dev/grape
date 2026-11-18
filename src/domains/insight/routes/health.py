@@ -29,7 +29,7 @@ def health():
     business_url = ""
     split_warning = ""
     try:
-        from src.domains.mgmt.user.db import (get_server_base_url, is_server_base_url_configured,
+        from src.domains.mgmt.public import (get_server_base_url, is_server_base_url_configured,
                                  get_server_base_url_warning,
                                  get_browser_callback_url, get_worker_connect_url,
                                  get_business_api_url, get_url_split_warning)

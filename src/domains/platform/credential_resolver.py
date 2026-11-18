@@ -54,7 +54,7 @@ class Credential:
 
 def _pat_token(user_id: str, repo_provider: str) -> str:
     try:
-        from src.domains.mgmt.user import db as user_db
+        from src.domains.mgmt import public as user_db
 
         cfg = user_db.get_credential(str(user_id), repo_provider, kind="pat") or {}
         return str(cfg.get("token") or "")

@@ -1374,7 +1374,7 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
     """
     from src.kernel.config import log as _log
     try:
-        from src.domains.mgmt.user.db import get_host_detail, set_host_status, _get_managed_webhook_id
+        from src.domains.mgmt.public import get_host_detail, set_host_status, _get_managed_webhook_id
         webhook_id = _get_managed_webhook_id(repo_key)
         detail = get_host_detail(repo_key)
         cur = detail.get("status", "")
@@ -1713,7 +1713,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     host_status = _check_host_status(owner, repo, _actual_repo_key)
     # Issue #2126: 同步透出失败步骤/原因与结构化缺失项
     try:
-        from src.domains.mgmt.user.db import get_host_detail
+        from src.domains.mgmt.public import get_host_detail
         _host_detail = get_host_detail(_actual_repo_key)
         _host_missing = _host_missing_items(host_status, _host_detail.get("step", ""))
     except Exception:

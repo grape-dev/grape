@@ -5783,3 +5783,206 @@ def github_req(method: str, url: str, token: str = "", body: dict | None = None)
 
 # 原名别名：调用点只换模块路径，函数名与 `as` 别名一律不动。
 _github_req = github_req
+
+
+# --- 跨域 import 收敛 batch：mgmt.user.db 转发面（调用方只换模块路径，函数名不动）---
+
+def get_host_detail(repo_key: str) -> Any:
+    """取仓库 host（部署）详情。"""
+    from src.domains.mgmt.user.db import get_host_detail as _impl
+
+    return _impl(repo_key)
+
+
+def set_host_status(repo_key: str, status: str = '', step: str = '', error: str = '') -> Any:
+    """写仓库 host 部署状态。"""
+    from src.domains.mgmt.user.db import set_host_status as _impl
+
+    return _impl(repo_key, status, step, error)
+
+
+def managed_webhook_id(repo_key: str) -> Any:
+    """取仓库绑定的管理 webhook id。"""
+    from src.domains.mgmt.user.db import _get_managed_webhook_id as _impl
+
+    return _impl(repo_key)
+
+
+def is_server_base_url_configured() -> Any:
+    """server base url 是否已配置。"""
+    from src.domains.mgmt.user.db import is_server_base_url_configured as _impl
+
+    return _impl()
+
+
+def get_server_base_url_warning() -> Any:
+    """server base url 配置告警文案（空=无告警）。"""
+    from src.domains.mgmt.user.db import get_server_base_url_warning as _impl
+
+    return _impl()
+
+
+def get_worker_connect_url() -> Any:
+    """worker 连接地址。"""
+    from src.domains.mgmt.user.db import get_worker_connect_url as _impl
+
+    return _impl()
+
+
+def get_business_api_url() -> Any:
+    """业务 API base url。"""
+    from src.domains.mgmt.user.db import get_business_api_url as _impl
+
+    return _impl()
+
+
+def get_url_split_warning() -> Any:
+    """多入口 URL 不一致告警文案（空=无告警）。"""
+    from src.domains.mgmt.user.db import get_url_split_warning as _impl
+
+    return _impl()
+
+
+def invalidate_global_bot_cache() -> Any:
+    """失效全局 bot 用户名缓存。"""
+    from src.domains.mgmt.user.db import _invalidate_global_bot_cache as _impl
+
+    return _impl()
+
+
+def is_known_engine_name(name: str) -> Any:
+    """是否为已登记引擎名。"""
+    from src.domains.mgmt.user.db import is_known_engine_name as _impl
+
+    return _impl(name)
+
+
+def get_skill_object_key(skill_id) -> Any:
+    """取技能对象存储 key。"""
+    from src.domains.mgmt.user.db import get_skill_object_key as _impl
+
+    return _impl(skill_id)
+
+
+def engine_ref_snapshot(runtime_id: int, pool_engine_ids: str = '') -> Any:
+    """引擎引用快照（JSON 友好）。"""
+    from src.domains.mgmt.user.db import engine_ref_snapshot as _impl
+
+    return _impl(runtime_id, pool_engine_ids)
+
+
+def get_host_vcs_username(repo_key: str, provider: str = '') -> Any:
+    """取仓库 host 的 VCS 用户名。"""
+    from src.domains.mgmt.user.db import get_host_vcs_username as _impl
+
+    return _impl(repo_key, provider)
+
+
+def get_global_bot_usernames_for(provider: str) -> Any:
+    """取该 provider 下全局 bot 用户名列表。"""
+    from src.domains.mgmt.user.db import get_global_bot_usernames_for as _impl
+
+    return _impl(provider)
+
+
+def get_runtime_id_by_engine_uid(engine_uid: str) -> Any:
+    """按 engine_uid 取 runtime 主键。"""
+    from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid as _impl
+
+    return _impl(engine_uid)
+
+
+def resolve_official_checker_skill(agent_type: str) -> Any:
+    """解析官方 checker 技能。"""
+    from src.domains.mgmt.user.db import resolve_official_checker_skill as _impl
+
+    return _impl(agent_type)
+
+
+def list_scene_market(q: str = '', category_id: int = 0, sort: str = 'latest', featured_only: int = 0, limit: int = 0, page: int = 1, page_size: int = 20, scope: str = '', repo_key: str = '', user_id: int = 0, cat_l1_id: int = 0, cat_l2_id: int = 0) -> Any:
+    """场景市场列表（分页）。"""
+    from src.domains.mgmt.user.db import list_scene_market as _impl
+
+    return _impl(q, category_id, sort, featured_only, limit, page, page_size, scope, repo_key, user_id, cat_l1_id, cat_l2_id)
+
+
+def get_all_managed_repos() -> Any:
+    """全部托管仓库。"""
+    from src.domains.mgmt.user.db import get_all_managed_repos as _impl
+
+    return _impl()
+
+
+def remove_managed_repo(repo_key: str) -> Any:
+    """删除托管仓库登记行。"""
+    from src.domains.mgmt.user.db import remove_managed_repo as _impl
+
+    return _impl(repo_key)
+
+
+def get_credential(user_id: 'int | str', provider: str, kind: str = '', diagnostics: 'dict | None' = None) -> Any:
+    """取用户凭据（诊断体可选）。"""
+    from src.domains.mgmt.user.db import get_credential as _impl
+
+    return _impl(user_id, provider, kind, diagnostics)
+
+
+def get_skill_hash_by_key(skill_name: str, scope: str, owner_id: str = '') -> Any:
+    """按 name+scope(+owner) 取技能内容 hash。"""
+    from src.domains.mgmt.user.db import get_skill_hash_by_key as _impl
+
+    return _impl(skill_name, scope, owner_id)
+
+
+def get_skill_hashes_by_name_scope(skill_name: str, scope: str) -> Any:
+    """按 name+scope 取多份技能 hash。"""
+    from src.domains.mgmt.user.db import get_skill_hashes_by_name_scope as _impl
+
+    return _impl(skill_name, scope)
+
+
+def get_skill_hash_by_id(skill_id: int) -> Any:
+    """按技能主键取内容 hash。"""
+    from src.domains.mgmt.user.db import get_skill_hash_by_id as _impl
+
+    return _impl(skill_id)
+
+
+def get_skill_content_hash(skill_name: str, scope: str = 'official') -> Any:
+    """取技能内容 hash（默认 official 域）。"""
+    from src.domains.mgmt.user.db import get_skill_content_hash as _impl
+
+    return _impl(skill_name, scope)
+
+
+def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str = '') -> Any:
+    """更新技能内容 hash。"""
+    from src.domains.mgmt.user.db import update_skill_content_hash as _impl
+
+    return _impl(skill_id, content_hash, file_path)
+
+
+def list_temp_uploaded_files_before(hours: int = 24) -> Any:
+    """列出 N 小时前的临时上传文件。"""
+    from src.domains.mgmt.user.db import list_temp_uploaded_files_before as _impl
+
+    return _impl(hours)
+
+
+def hard_delete_uploaded_file(file_id: int) -> Any:
+    """硬删除上传文件记录。"""
+    from src.domains.mgmt.user.db import hard_delete_uploaded_file as _impl
+
+    return _impl(file_id)
+
+
+def invalidate_user_repos(user_id: 'str | int') -> Any:
+    """失效用户仓库缓存。"""
+    from src.domains.mgmt.user.db import invalidate_user_repos as _impl
+
+    return _impl(user_id)
+
+
+# 原名别名：下划线内部名保持可用（调用点零改动）。
+_get_managed_webhook_id = managed_webhook_id
+_invalidate_global_bot_cache = invalidate_global_bot_cache

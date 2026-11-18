@@ -1058,7 +1058,7 @@ def _attach_skill_obs(task: dict) -> None:
         skill = (task.get("skill") or "").strip()
         if not skill:
             return
-        from src.domains.mgmt.user.db import resolve_skill_id, get_skill_object_key, get_skill_by_id
+        from src.domains.mgmt.public import resolve_skill_id, get_skill_object_key, get_skill_by_id
         _skill_id = task.get("skill_id") or 0
         _task_repo = task.get("repo_key") or ""
         _task_uid = task.get("user_id") or ""
@@ -1078,7 +1078,7 @@ def _attach_skill_obs(task: dict) -> None:
             # 官方检查器（worker 无库，服务端解析后以 skill_fallback 下发：名字 + id，
             # worker 物化其 zip 并提示 `grape skills detail --skill_id <id>`）
             try:
-                from src.domains.mgmt.user.db import resolve_official_checker_skill
+                from src.domains.mgmt.public import resolve_official_checker_skill
                 _fb = resolve_official_checker_skill(task.get("agent_type") or "")
                 if _fb and _fb.get("file_path"):
                     _okey = _fb.get("file_path")
@@ -1747,7 +1747,7 @@ def runtime_task_skill_zip(task_id: str, credential_id: int = Depends(_require_c
     if not skill:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "task has no skill"})
     try:
-        from src.domains.mgmt.user.db import resolve_skill_id, get_skill_object_key, get_skill_by_id
+        from src.domains.mgmt.public import resolve_skill_id, get_skill_object_key, get_skill_by_id
         from src.domains.runtime.storage import get_skill_zip_bytes
         _skill_id = task.get("skill_id") or 0
         _task_repo = task.get("repo_key") or ""
@@ -2448,7 +2448,7 @@ def _server_url() -> str:
         # Issue #471 E1（QA 建议）：register 响应的 server_url 是 worker 回连地址
         # （设备/CLI 回连服务端用），与 devstage RUNTIME_SERVER_URL / 任务 server_url
         # 同语义——对齐 get_worker_connect_url（未配置回退 server_base_url）。
-        from src.domains.mgmt.user.db import get_worker_connect_url
+        from src.domains.mgmt.public import get_worker_connect_url
         return get_worker_connect_url()
     except Exception:
         return ""
@@ -2964,7 +2964,7 @@ def list_scene_tags(user: dict = Depends(require_no_session_token)):
 
     返回格式：[{name, display_name, roles: ["vod","issue","coding","qa","sre"]}, ...]
     """
-    from src.domains.mgmt.user.db import list_scene_market
+    from src.domains.mgmt.public import list_scene_market
     scenes, _ = list_scene_market(limit=0)
     result = []
     for s in scenes:

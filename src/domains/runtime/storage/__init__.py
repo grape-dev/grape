@@ -540,7 +540,7 @@ def _db_hash_for_object_key(object_key: str, skill_name: str) -> tuple[str, int]
     - 查询失败/无行 → 返回 ("", 0)（调用方降级不阻塞读）
     """
     try:
-        from src.domains.mgmt.user.db import get_skill_hash_by_key, get_skill_hashes_by_name_scope
+        from src.domains.mgmt.public import get_skill_hash_by_key, get_skill_hashes_by_name_scope
         info = parse_skill_key(object_key)
         name = info.get("skill_name") or skill_name
         scope = info.get("scope") or ""
@@ -582,7 +582,7 @@ def _anchor_hash_for_sid(skill_id: int) -> tuple[str, bool]:
     DB 查询异常 → ("", True) 降级（不阻塞读，区别于"行不存在"）。
     """
     try:
-        from src.domains.mgmt.user.db import get_skill_hash_by_id
+        from src.domains.mgmt.public import get_skill_hash_by_id
         sid, db_hash, _, is_active = get_skill_hash_by_id(skill_id)
         if sid == 0:
             return ("", False)  # 行不存在（物理删除/换 id）

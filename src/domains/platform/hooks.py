@@ -111,7 +111,7 @@ def _kick_user_projects_refresh(user_id: str) -> None:
     """
     def _do():
         try:
-            from src.domains.mgmt.user.db import invalidate_user_repos
+            from src.domains.mgmt.public import invalidate_user_repos
 
             # P1-3：grape_accounts 主键自 D105 起是 UUIDv7 字符串，int() 必抛 ValueError
             # 并被下面 except 吞成 warning —— 全量 UUID 用户的关系变更刷新从未执行。

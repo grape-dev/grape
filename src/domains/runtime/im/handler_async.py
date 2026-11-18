@@ -1356,7 +1356,6 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
         chat_type = parsed.get("chat_type", "")
         if sender_open_id and chat_type == "p2p":
             try:
-                from src.domains.mgmt.user import db as user_db
                 from src.kernel.session_manager import bind_feishu_identity, get_feishu_open_id
                 uid = get_user_id_by_app_id(ctx.app_id)
                 if uid:

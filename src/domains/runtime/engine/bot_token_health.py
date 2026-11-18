@@ -134,7 +134,7 @@ def _update_global_token_status(provider: str, result: dict):
     超时/5xx (network) → 不改变标记状态（等下次检查）
     config (no token) → 不改变标记状态
     """
-    from src.domains.mgmt.user.db import set_meta_value, _invalidate_global_bot_cache
+    from src.domains.mgmt.public import set_meta_value, _invalidate_global_bot_cache
     status_key = f"global_{provider}_bot_token_status"
 
     if result["healthy"]:
@@ -161,7 +161,7 @@ async def _verify_repo_bot_tokens():
     R21.3.7: 超时/5xx 不标记
     """
     from src.kernel.token_resolver import create_provider
-    from src.domains.mgmt.user.db import set_meta_value, _invalidate_global_bot_cache
+    from src.domains.mgmt.public import set_meta_value, _invalidate_global_bot_cache
 
     # 查询有 bot token 的仓库
     repos_to_check = []

@@ -352,7 +352,7 @@ def _is_path_b_self_loop(repo_key: str, actor: str, event_type: str, issue_id: s
     except Exception:
         return False  # 查询失败降级为不检测（R20.1.7）
     # 条件 2: actor == host_vcs_username
-    from src.domains.mgmt.user.db import get_host_vcs_username
+    from src.domains.mgmt.public import get_host_vcs_username
     host_vcs_username = get_host_vcs_username(repo_key)
     if not host_vcs_username:
         return False  # R20.1.7: 查询失败降级为不检测
@@ -632,7 +632,7 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
 
     # Issue #646：任务落库前的引擎引用快照（uid + 展示名；未迁移旧库/引擎已删不阻断）
     try:
-        from src.domains.mgmt.user.db import engine_ref_snapshot
+        from src.domains.mgmt.public import engine_ref_snapshot
         _snap = engine_ref_snapshot(engine_id, "")
     except Exception:
         _snap = (None, "", "")
@@ -961,7 +961,7 @@ def _resolve_bot_username(repo_key: str) -> str:
         # 按 provider 取名（github 独立 meta 键、gitee 专属键、其余回落并集）——
         # 原来 else 分支取全平台并集 [0]，gitee 仓库可能拿到别家平台的 bot 名，
         # 导致 git 提交身份/审查人错乱（2026-11-14 深度检查）
-        from src.domains.mgmt.user.db import get_global_bot_usernames_for
+        from src.domains.mgmt.public import get_global_bot_usernames_for
 
         _us = get_global_bot_usernames_for(_prov)
         _bot_name = _us[0] if _us else ""
@@ -4400,7 +4400,7 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
             def _agent_type_checker_resolver(at):
                 # Issue #617：按名未命中 → 按 agent_type 回退官方检查器（DB 侧解析）
                 try:
-                    from src.domains.mgmt.user.db import (
+                    from src.domains.mgmt.public import (
                         resolve_official_checker_skill, get_skill_path)
                     _fb = resolve_official_checker_skill(at)
                     if not _fb:

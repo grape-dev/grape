@@ -1264,7 +1264,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     _cfg_uid = cfg.get("engine_uid") or ""
     if _cfg_uid and runtime_id:
         try:
-            from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
+            from src.domains.mgmt.public import get_runtime_id_by_engine_uid
             runtime_id = get_runtime_id_by_engine_uid(_cfg_uid) or runtime_id
         except Exception:
             pass
@@ -1466,7 +1466,7 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     cfg = _get_chat_config(user["id"])
     # Chat 后端可选面：本机直连（默认兜底，engine-selection-design.md §8.2）+ 个人引擎（scope=user，显式选择）
     from src.domains.runtime.engine.instances import instance_name
-    from src.domains.mgmt.user.db import is_known_engine_name
+    from src.domains.mgmt.public import is_known_engine_name
     from src.kernel.session_manager import db, db_lock
     backends = []
     # agent_runtimes / runtime_credentials 归 runtime：必须走归属域具名查询。
@@ -1809,7 +1809,7 @@ async def update_chat_config(body: dict, request: Request,
     _body_uid = body.get("engine_uid")
     if isinstance(_body_uid, str) and _body_uid.strip():
         from src.kernel.engine_uid import is_uid_str
-        from src.domains.mgmt.user.db import get_runtime_id_by_engine_uid
+        from src.domains.mgmt.public import get_runtime_id_by_engine_uid
         _u = _body_uid.strip().lower()
         if is_uid_str(_u):
             try:

@@ -623,7 +623,7 @@ def _load_cards() -> None:
         cards: dict[str, PlatformCard] = {}
         raw_cfg = ""
         try:
-            from src.domains.mgmt.user import db as user_db
+            from src.domains.mgmt import public as user_db
             raw_cfg = user_db.get_meta_value("vcs_providers_config") or ""
         except Exception as e:  # DB 未就绪（测试/启动早期）→ 走默认
             log.debug(f"platform_card: read meta failed ({e}), using defaults")

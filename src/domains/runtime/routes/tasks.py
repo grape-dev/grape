@@ -239,7 +239,7 @@ async def notify_task(body: TaskNotifyBody, request: Request,
     _agent_type = _session.get("agent_type", "") or "issue"
 
     # repo 已托管（repo_key 带前缀）
-    from src.domains.mgmt.user.db import get_all_managed_repos
+    from src.domains.mgmt.public import get_all_managed_repos
     managed = {r["repo_key"] for r in get_all_managed_repos()}
     if body.repo_key not in managed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未托管"})
@@ -337,7 +337,7 @@ def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_curr
     - 终态幂等：completed/failed/cancelled 不再覆盖（返回现状）。
     - 完成后任务 + 事件置为成功，不经过 evaluate_agent_output 启发。
     """
-    from src.domains.mgmt.user import db as _user_db
+    from src.domains.mgmt import public as _user_db
 
     if user.get("auth_type") == "session_token":
         task_id = user.get("session_key") or ""
@@ -501,7 +501,7 @@ def _require_repo_access(user: dict, repo_key: str):
         if user.get("repo_key") != repo_key:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库任务（作用域不匹配）"})
         return
-    from src.domains.mgmt.user import db as _user_db
+    from src.domains.mgmt import public as _user_db
     _managed = {r.get("repo_key") for r in _user_db.get_managed_repos(user.get("id") or 0)}
     if repo_key not in _managed:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该仓库任务"})
