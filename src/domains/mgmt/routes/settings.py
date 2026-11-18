@@ -2010,6 +2010,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
         cred_id = int(_cc_res.get("id") or 0)
     # [endpoint 直接入库] 沙箱凭据：同时在云沙箱 Provider 侧登记一条（幂等，按
     # runtime_credential_id 一凭据一 Provider）——生成时即写入平台连接信息（i7 移植）
+    _sb_warnings: list[str] = []
     if cred_type == "sandbox":
         try:
             _sb_scope = "system" if scope == "global" else "user"
@@ -2046,7 +2047,12 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
             log.info(f"sandbox credential created, provider registered: cred={cred_id} platform={platform} "
                      f"provider_id={_sb_pid} endpoint={_sb_endpoint or '(empty)'}")
         except Exception as _sb_e:
-            log.warning(f"sandbox credential provider registration failed (non-blocking): {_sb_e}")
+            # 不再静默：凭据已建成，但平台登记失败会让凭据变成"有凭据无平台"的孤儿
+            # （设备卡片没有 provider_id → 详情按钮消失，且沙箱任务无法使用该平台）。
+            # 用 ERROR 记日志，并把原因回给调用方，由前端显式提示。
+            log.error(f"sandbox credential provider registration failed: {_sb_e}")
+            _sb_warnings.append(
+                f"沙箱平台登记失败（凭据已创建，但平台未绑定，详情按钮不会出现）：{_sb_e}")
 
     # 预构建 worker 安装包（异步）：凭据生成后即可一键安装，避免首次下载才打包
     # （首次构建含依赖 wheels 下载，耗时数秒至数分钟，放后台不阻塞响应）
@@ -2055,8 +2061,11 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
         ensure_package_ready()
     except Exception as _e:
         log.warning(f"预构建 worker 安装包失败: {_e}")
-    return {"token": token, "id": cred_id, "name": name, "scope": scope, "owner": owner,
+    resp = {"token": token, "id": cred_id, "name": name, "scope": scope, "owner": owner,
             "cred_type": cred_type, "platform": platform, "message": "token 仅展示一次，请立即保存"}
+    if _sb_warnings:
+        resp["warnings"] = _sb_warnings
+    return resp
 
 @router.put("/runtime-credentials/{cid}", operation_id="settings_runtime_credential_rename", summary="Rename runtime credential", description="Renames a credential (worker name); globally unique, duplicates rejected. owner/scope unchanged.")
 def rename_runtime_credential(cid: str, body: RuntimeCredBody, user: dict = Depends(require_no_session_token)):

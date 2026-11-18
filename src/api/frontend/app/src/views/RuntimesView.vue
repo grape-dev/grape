@@ -390,7 +390,7 @@
                 >📋 {{ t('credential.platform_detail_btn') }}</button
               >
               <span v-if="!d.provider_id" class="rtv-plat-plain" :title="t('credential.goto_platform_page')"
-                >☁ {{ d.platform }}</span
+                >☁ {{ d.platform }} · {{ t('credential.platform_unbound') }}</span
               >
             </div>
             <div class="rtv-wcard-engines">
@@ -2322,6 +2322,8 @@ function doCreateSandboxCredential() {
       platform_ssl_cert_pem: (sbCredForm.certPem || '').trim(),
     })
     .then(function (d) {
+      // 平台登记失败会在响应里带 warnings（历史上这条失败被静默吞掉）
+      const warns = (d && d.warnings) || []
       const token = d.token || ''
       let serverUrl = G.window.location.origin
       let cachedOk = false
@@ -2336,7 +2338,10 @@ function doCreateSandboxCredential() {
         const oneCmd =
           'curl -fsSL ' + serverUrl + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + serverUrl
         sbCredResult.value = { name: name, scope: scope, platform: platform, token: token, oneCmd: oneCmd }
+        // showToast 会先移除已有 toast：成功提示在前、登记告警在后，
+        // 否则告警会被紧随其后的成功提示覆盖掉，用户永远看不到。
         app().showToast(t('credential.toast_generated'))
+        if (warns.length) app().showToast(warns[0])
       }
       if (cachedOk) {
         renderSb()

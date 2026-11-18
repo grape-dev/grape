@@ -185,6 +185,7 @@
     "revoke_active_ok": "Delete credential anyway",
     "revoke_active_cancel": "Not now",
     "sandbox_conn_required": "required",
+    "platform_unbound": "platform not bound - no detail",
     "platform_detail_btn_tip": "Open platform detail (info/templates/sandboxes)"
   },
   "toast": {

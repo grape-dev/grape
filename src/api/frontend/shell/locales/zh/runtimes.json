@@ -185,6 +185,7 @@
     "revoke_active_ok": "仍要删除凭据",
     "revoke_active_cancel": "暂不删除",
     "sandbox_conn_required": "(必填)",
+    "platform_unbound": "未绑定平台，无详情",
     "platform_detail_btn_tip": "打开平台详情（信息/模板/沙箱）"
   },
   "toast": {

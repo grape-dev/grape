@@ -46,6 +46,29 @@ def _startup_security_check():
     if not validate_jwt_secret():
         errors.append("JWT_SECRET 不安全：未配置强密钥（生产必须设置 JWT_SECRET 或密钥轮换池）")
 
+    # 1b. 数据库加密密钥（沙箱平台 api_key / 用户 LLM 凭据 api_key）——无条件探测。
+    # 缺密钥时：沙箱凭据的平台登记会失败（凭据建好、平台没绑，详情按钮消失），
+    # LLM 凭据也无法保存。历史上这条失败在调用处被吞成 WARNING，用户完全看不出原因。
+    # 生产环境按启动门禁处理（fail-closed）；开发/测试只告警不拦。
+    from src.kernel.crypto import key_status as _key_status
+    _ks = _key_status()
+    if not _ks.get("configured"):
+        _key_hint = (
+            "数据库加密密钥未配置（沙箱平台 api_key / 用户 LLM 凭据的加密密钥）。"
+            "配置方式二选一："
+            "① 写 /opt/grape/configs/crypto.json，内容 "
+            '{"encryption_key": "<32字节base64url>"}，权限必须 0600（chmod 600）；'
+            "② 或设环境变量 GRAPE_DB_ENCRYPTION_KEY=<32字节base64url>（systemd 用 "
+            "/etc/grape/grape.env，改完 systemctl daemon-reload && systemctl restart 'grape@*'）。"
+            "生成密钥：python3 -c \"import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())\"。"
+            "多主控实例必须使用同一把密钥。"
+            f"当前探测错误：{_ks.get('error')}"
+        )
+        if is_production():
+            errors.append(_key_hint)
+        else:
+            log.warning(f"[SECURITY] {_key_hint}")
+
     if not is_production():
         if errors:
             for e in errors:
@@ -82,7 +105,6 @@ def _startup_security_check():
     # 5. COOKIE_SECURE 校验（BUG-NEW-1: 生产环境必须启用 Secure cookie）
     if os.environ.get("COOKIE_SECURE", "false").lower() not in ("true", "1", "yes"):
         errors.append("生产环境必须设置 COOKIE_SECURE=true（refresh_token cookie 需要 Secure 标志）")
-
     # 6. OAuth redirect_uri 配置校验（需求 11：每个 provider 必须配置 redirect_uri）
     from src.domains.mgmt.auth.providers import get_provider, list_providers
     missing_redirect = [p for p in list_providers() if not (get_provider(p) or {}).get("redirect_uri")]

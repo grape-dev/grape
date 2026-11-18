@@ -21,6 +21,9 @@ except ImportError:
 
 _aesgcm = None  # type: ignore
 
+# configs/ 目录（crypto.py 位于 src/kernel/，上溯三级到仓根）
+_CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs")
+
 
 def _get_aesgcm():
     global _aesgcm
@@ -32,7 +35,7 @@ def _get_aesgcm():
         if not key_b64:
             try:
                 import json as _json
-                _crypto_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "crypto.json")
+                _crypto_path = os.path.join(_CONFIG_DIR, "crypto.json")
                 if os.path.isfile(_crypto_path):
                     # 权限检查：配置文件含明文密钥，必须 0600
                     _st = os.stat(_crypto_path)
@@ -43,12 +46,17 @@ def _get_aesgcm():
                     key_b64 = _cfg.get("encryption_key", "")
             except PermissionError:
                 raise  # fail-closed——权限过宽的 crypto.json 不允许加载
-            except Exception:
-                pass
+            except Exception as _e:
+                # 文件在、但读不出来（JSON 损坏/权限不足/IO 错误）要与"根本没配"区分开，
+                # 否则 key_status 会把运维引向"没配"而不是"配坏了"。
+                raise RuntimeError(f"crypto.json unreadable ({_CONFIG_DIR}): {_e}") from _e
         if not key_b64:
             raise RuntimeError("GRAPE_DB_ENCRYPTION_KEY not set (env or configs/crypto.json)")
         # key 是 base64url 编码的 32 字节（256 位）密钥
-        key = base64.urlsafe_b64decode(key_b64)
+        try:
+            key = base64.urlsafe_b64decode(key_b64)
+        except Exception as _e:
+            raise RuntimeError(f"GRAPE_DB_ENCRYPTION_KEY is not valid base64url: {_e}") from _e
         if len(key) != 32:
             raise RuntimeError(f"GRAPE_DB_ENCRYPTION_KEY must be 32 bytes (256-bit), got {len(key)}")
         _aesgcm = AESGCM(key)
@@ -88,3 +96,34 @@ def generate_key() -> str:
     """生成新密钥（运维部署时用）。返回 base64url 编码的 32 字节。"""
     import os as _os
     return base64.urlsafe_b64encode(_os.urandom(32)).decode()
+
+
+def key_status() -> dict:
+    """探测数据库加密密钥是否可用（不抛异常，供启动自检/健康检查用）。
+
+    返回 {configured, source, error}：
+      configured=True  → source 为 "env" 或 "file"，error 为空
+      configured=False → error 说明缺什么（缺失/长度不对/权限过宽/依赖缺失）
+
+    与 encrypt/decrypt 共用 _get_aesgcm 的同一套加载规则，避免"自检通过但
+    真正加密时失败"的口径分裂。
+    """
+    import os as _os
+    status = {"configured": False, "source": "", "error": ""}
+    if AESGCM is None:
+        status["error"] = "cryptography package not installed"
+        return status
+    if _os.environ.get("GRAPE_DB_ENCRYPTION_KEY", ""):
+        status["source"] = "env"
+    else:
+        _crypto_path = _os.path.join(_CONFIG_DIR, "crypto.json")
+        if _os.path.isfile(_crypto_path):
+            status["source"] = "file"
+    try:
+        _get_aesgcm()
+    except Exception as e:  # noqa: BLE001 — 自检要把原因透出，不当异常往上抛
+        status["error"] = str(e)
+        status["configured"] = False
+        return status
+    status["configured"] = True
+    return status
