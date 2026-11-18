@@ -1189,7 +1189,7 @@ function removeTag(form, idx) {
 }
 // C7：从技能包 SKILL.md frontmatter description 首句预填摘要（用户可改）
 function firstSentenceOfSkillMd(text) {
-  var raw = String(text || '').replace(/\r/g, '')
+  var raw = stripLeadingBom(text).replace(/\r/g, '')
   var m = raw.match(/^---\s*\n([\s\S]*?)\n---/)
   var desc = ''
   if (m) {
@@ -1492,7 +1492,7 @@ const detailVersion = computed(function () {
   var d = detail.value
   if (!d) return '—'
   if (d.version) return d.version
-  var m = (d.content || '').match(/^---[\s\S]*?^version:\s*(.+?)$/m)
+  var m = stripLeadingBom(d.content || '').match(/^---[\s\S]*?^version:\s*(.+?)$/m)
   return m ? m[1].trim() : '—'
 })
 const scopeLabel = computed(function () {
@@ -1675,7 +1675,7 @@ function sentenceClamp(text, min, max) {
   return acc.length >= min ? acc : ''
 }
 function skillMdDescription(content) {
-  var s = String(content || '')
+  var s = stripLeadingBom(content)
   var fm = s.match(/^---\r?\n([\s\S]*?)\r?\n---/)
   if (!fm) return ''
   var lines = fm[1].split(/\r?\n/)
@@ -2018,6 +2018,12 @@ function viewPkgMd() {
     .catch(function () {})
 }
 
+// Issue #3229：剥除首部 UTF-8 BOM（U+FEFF，可连续多个），避免 ^--- frontmatter 正则失配。
+// 无 BOM 时原样返回，行为不变。
+function stripLeadingBom(text) {
+  return String(text || '').replace(/^\uFEFF+/, '')
+}
+
 // ── YAML front matter 解析（Issue #232，与老 _parseYAMLFrontMatter 等价）──
 function parseYAMLFrontMatter(text) {
   var lines = text.split(/\r?\n/)
@@ -2084,6 +2090,7 @@ function escapeHtml(s) {
 }
 function renderSkillContent(rawContent) {
   if (!rawContent) return ''
+  rawContent = stripLeadingBom(rawContent)
   var fmMatch = rawContent.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/)
   if (!fmMatch) return G.window.renderMarkdown(rawContent)
   var entries = parseYAMLFrontMatter(fmMatch[1])
