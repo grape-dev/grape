@@ -1,5 +1,5 @@
 """Webhook & A2A 端点 — 集成事件管道"""
-import json, os, time
+import json, os, threading, time
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -9,6 +9,11 @@ from src.api.event_pipeline import run_pipeline, resolve_actor_account
 from src.api.a2a_dispatch import _on_handoff_dispatch, run_a2a_dispatch
 
 router = APIRouter(tags=["webhook"])
+
+# A2A 400 拒绝原因计数（进程内）：首现即 WARNING，同一原因之后每 50 次抽样一次，
+# 避免错误客户端刷屏又不至于完全失声。运维按 reason/字段即可定位是哪个调用方。
+_A2A_REJECT_HITS: dict[str, int] = {}
+_A2A_REJECT_LOCK = threading.Lock()
 
 
 # Issue #340：仓库删除 webhook 事件名（GitCode/GitHub，大小写不敏感匹配）
@@ -402,9 +407,9 @@ async def gitcode_webhook(request: Request):
 
     log.info(f"Webhook: extracted repo={repo}")
 
-    # 2. 用 repo 查 managed_repos 的预期 token
-    from src.user.db import get_webhook_token_by_repo
-    expected = get_webhook_token_by_repo(repo)
+    # 2. 用 repo 查 managed_repos 的预期 token（显式 provider，避免跨平台串号）
+    from src.user.db import get_webhook_tokens_by_repo
+    expected = get_webhook_tokens_by_repo(repo, "gitcode")
     log.info(f"Webhook: expected_token={'found' if expected else 'none (unmanaged repo)'}")
 
     # 3. 未托管仓库拒绝：不在 managed_repos 的仓库不接收事件（防止幽灵 webhook / 无主事件 / 绕过校验）
@@ -412,10 +417,10 @@ async def gitcode_webhook(request: Request):
         log.warning(f"Webhook rejected: unmanaged repo={repo}")
         return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
 
-    # 4. token 对比验证（Issue #860：hmac.compare_digest 恒定时间比较，防时序侧信道）
-    import hmac
-    if not hmac.compare_digest(str(token), str(expected)):
-        log.warning(f"Webhook rejected: token mismatch for repo={repo}")
+    # 4. token 对比验证（Issue #860：hmac.compare_digest 恒定时间比较 + provider 多候选逐个比对）
+    import hmac as _hmac
+    if not token or not any(_hmac.compare_digest(token, cand) for cand in expected):
+        log.warning(f"Webhook rejected: token mismatch for repo={repo}, candidates={len(expected)}")
         return JSONResponse(status_code=403, content={"code": 403, "message": "invalid webhook token"})
 
     log.info(f"Webhook: token OK, repo={repo}, event={event_header}")
@@ -429,7 +434,8 @@ async def gitcode_webhook(request: Request):
     # 5. 处理事件 — 异步执行，立即返回 200 避免 GitCode webhook 超时 (503)
     import asyncio as _aio
     loop = _aio.get_event_loop()
-    _aio.ensure_future(_aio.to_thread(run_pipeline, body, dict(request.headers),
+    _hdrs = {**dict(request.headers), "X-Grape-Webhook-Path": "/webhook/gitcode"}
+    _aio.ensure_future(_aio.to_thread(run_pipeline, body, _hdrs,
                                      account=repo, repo_key_override=f"gitcode:{repo}"))
     log.info(f"Webhook: pipeline scheduled async for repo={repo}, event={event_header}")
     return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
@@ -440,6 +446,70 @@ async def github_webhook(request: Request):
     """接收 GitHub Webhook 事件"""
     body = await request.body()
     return await _process_github_webhook(body, request.headers)
+
+
+@router.post("/webhook/gitlab")
+async def gitlab_webhook(request: Request):
+    """接收 GitLab Webhook 事件（自建 GitLab 同样适用）。
+
+    GitLab 使用 X-Gitlab-Event 标识事件类型、X-Gitlab-Token 做共享密钥校验。
+    """
+    body = await request.body()
+    event_header = request.headers.get("X-Gitlab-Event", "unknown")
+
+    client_host = request.client.host if request.client else "unknown"
+    log.info(f"GitLab Webhook: from ip={client_host}, event={event_header}, body_size={len(body)}")
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        log.warning("GitLab Webhook: invalid JSON body")
+        return JSONResponse(status_code=400, content={"code": 400, "message": "invalid body"})
+
+    project = payload.get("project", {}) if isinstance(payload.get("project"), dict) else {}
+    repo = project.get("path_with_namespace", "") or ""
+    if not repo:
+        # 部分事件（如 Release）把项目信息放在顶层 repository 字段
+        _rp = payload.get("repository") if isinstance(payload.get("repository"), dict) else {}
+        # 嵌套 namespace（group/subgroup/repo）必须保留整段，否则查不到 managed_repos
+        repo = (_rp.get("path_with_namespace") or _rp.get("full_name")
+                or _rp.get("name") or "")
+    if not repo:
+        log.warning("GitLab Webhook: could not extract repo from payload")
+        return JSONResponse(status_code=400, content={"code": 400, "message": "missing repository"})
+
+    log.info(f"GitLab Webhook: extracted repo={repo}, event={event_header}")
+
+    from src.user.db import get_webhook_tokens_by_repo
+    expected = get_webhook_tokens_by_repo(repo, "gitlab")
+    if not expected:
+        log.warning(f"GitLab Webhook rejected: unmanaged repo={repo}")
+        return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
+
+    # GitLab 项目 webhook 的 secret 通过 X-Gitlab-Token 明文头传递（非 HMAC）。
+    # 历史托管可能让上游 token 是随机 secret / 用户 token / bot token 中的任一个，
+    # 逐个比对同一托管行的合法候选，任一命中即通过（不打印密钥本身）。
+    import hmac as _hmac
+    token = request.headers.get("X-Gitlab-Token", "")
+    if not token or not any(_hmac.compare_digest(token, cand) for cand in expected):
+        log.warning(f"GitLab Webhook rejected: token mismatch for repo={repo}, "
+                    f"candidates={len(expected)}")
+        return JSONResponse(status_code=403, content={"code": 403, "message": "invalid webhook token"})
+
+    log.info(f"GitLab Webhook: verified, repo={repo}, event={event_header}")
+
+    # 仓库删除事件（GitLab 项目 Hook 不投递删除事件，保留统一入口兼容 System Hook）
+    if _is_repo_delete_event(event_header, payload):
+        result = _handle_repo_deleted(repo, "gitlab", f"event={event_header}")
+        status_code = 200 if result.get("status") == "repo_deleted" else 500
+        return JSONResponse(status_code=status_code, content=result)
+
+    import asyncio as _aio
+    _hdrs = {**dict(request.headers), "X-Grape-Webhook-Path": "/webhook/gitlab"}
+    _aio.ensure_future(_aio.to_thread(run_pipeline, body, _hdrs,
+                                     account=repo, repo_key_override=f"gitlab:{repo}"))
+    log.info(f"GitLab Webhook: pipeline scheduled async for repo={repo}, event={event_header}")
+    return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
 
 
 async def _process_github_webhook(body: bytes, headers) -> dict:
@@ -463,8 +533,8 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
 
     log.info(f"GitHub Webhook: extracted repo={repo}, event={event_header}")
 
-    from src.user.db import get_webhook_token_by_repo
-    expected = get_webhook_token_by_repo(repo)
+    from src.user.db import get_webhook_tokens_by_repo
+    expected = get_webhook_tokens_by_repo(repo, "github")
 
     if not expected:
         log.warning(f"GitHub Webhook rejected: unmanaged repo={repo}")
@@ -481,12 +551,18 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
         log.warning(f"GitHub Webhook rejected: missing signature & token for repo={repo}")
         return JSONResponse(status_code=401, content={"code": 401, "message": "missing signature or token"})
     if signature:
-        computed = hmac.new(expected.encode(), body, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(f"sha256={computed}", signature):
-            log.warning(f"GitHub Webhook rejected: signature mismatch for repo={repo}, body_size={len(body)}")
+        # provider 多候选逐个校验（hmac.compare_digest 恒定时间比较）：
+        # 历史托管/重建可能让上游 secret 与 DB 首选值不同，任一候选命中即通过。
+        _sig_ok = any(
+            hmac.compare_digest(
+                "sha256=" + hmac.new(cand.encode(), body, hashlib.sha256).hexdigest(),
+                signature)
+            for cand in expected)
+        if not _sig_ok:
+            log.warning(f"GitHub Webhook rejected: signature mismatch for repo={repo}, got_sha256={signature[:25]}..., body_size={len(body)}, candidates={len(expected)}")
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid signature"})
     else:
-        if not hmac.compare_digest(str(token_header), str(expected)):
+        if not token_header or not any(hmac.compare_digest(token_header, cand) for cand in expected):
             log.warning(f"GitHub Webhook rejected: token mismatch for repo={repo}")
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid token"})
 
@@ -503,20 +579,69 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
         return JSONResponse(status_code=status_code, content=result)
 
     import asyncio as _aio
-    _aio.ensure_future(_aio.to_thread(run_pipeline, body, dict(headers),
+    _hdrs = {**dict(headers), "X-Grape-Webhook-Path": "/webhook/github"}
+    _aio.ensure_future(_aio.to_thread(run_pipeline, body, _hdrs,
                                      account=repo, repo_key_override=f"github:{repo}"))
     log.info(f"GitHub Webhook: pipeline scheduled async for repo={repo}, event={event_header}")
     return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
 
 
+def _a2a_reject(request, reason: str, message: str, **fields):
+    """A2A 入口 400 统一出口：记录拒绝原因（含调用方线索）+ 抛 400。
+
+    原先各 400 分支只 raise 不带日志，运维只能看到 `POST /api/a2a status=400`，
+    无法判断是缺字段、格式错还是幂等键非法，只能靠猜。这里补上 reason 与字段快照。
+    """
+    key = reason + "|" + "|".join(f"{k}={str(v)[:60]}" for k, v in sorted(fields.items()))
+    with _A2A_REJECT_LOCK:
+        hits = _A2A_REJECT_HITS.get(key, 0) + 1
+        _A2A_REJECT_HITS[key] = hits
+    if hits == 1 or hits % 50 == 0:
+        _cli, _ua = "", ""
+        try:
+            if request is not None:
+                _cli = f"{request.client.host}:{request.client.port}" if request.client else ""
+                _ua = (request.headers.get("user-agent") or "")[:80]
+        except Exception:
+            pass
+        log.warning(
+            f"A2A rejected (400) reason={reason} message={message} occurrence={hits} "
+            f"client={_cli} ua={_ua} "
+            + " ".join(f"{k}={str(v)[:60]}" for k, v in sorted(fields.items())))
+    raise HTTPException(status_code=400, detail={"code": 400, "message": message})
+
+
+def _a2a_repository_error(repository) -> str:
+    """校验 A2A 的 repository 格式，返回错误文案（空串=通过）。
+
+    支持 GitCode/GitLab 的**嵌套 namespace**（`group/sub/repo`、`biz/jmbos/devops/ops-inspection`）。
+    历史实现限定"恰好一个 '/'"，与平台其他入口（如 POST /api/issues/{full_name}）不一致：
+    同一仓库在 Issue 链路正常，一到 A2A 交棒就恒 400，任务链断在交接那一步。
+    仍拒绝裸名（无 '/'）与含空段（`a//b`、`/a`）的输入。
+    """
+    if not isinstance(repository, str) or not repository.strip():
+        return "repository is required in 'owner/repo' format"
+    parts = [p.strip() for p in repository.split("/")]
+    if len(parts) < 2 or any(not p for p in parts):
+        return (f"invalid repository '{repository[:100]}': must be 'owner/repo' "
+                f"(nested namespace like 'group/sub/repo' is allowed, bare repo name is not)")
+    return ""
+
+
 def _resolve_a2a_repo_key(repository: str) -> str:
     """A2A 端点 repo_key 统一解析（Issue #544 审查修正②）。
 
-    - 已带 provider 前缀（github:/gitcode:）→ 幂等返回；
-    - 无前缀 → 查 managed_repos 反查实际 provider（github: / gitcode:）；
+    - 已带 provider 前缀（gitcode:/github:/gitlab:）→ 幂等返回；
+    - 无前缀 → 查 managed_repos 反查实际 provider（三平台全探）；
     - 未命中/查表异常 → 默认 gitcode。
     POST /api/a2a 与 GET /api/a2a/status 共用，保证两端点指纹/幂等键的
     repo_key 维度一致（否则 github 托管仓无前缀传入时核对接口假阴性）。
+
+    ⚠️ 必须探 gitlab：历史实现只探 github:/gitcode:，GitLab 托管仓（尤其是
+    `group/sub/repo` 这种多级 namespace）无前缀传入时恒被解析成
+    `gitcode:group/sub/repo` —— managed_repos 查不到 → 走可达性回退 →
+    拿 GitCode 去探一个 GitLab 仓库 → 404 → 400 repo_not_found。
+    与 knowledge.py `_resolve_repo_key` 的三前缀口径保持一致。
     """
     from src.repo_key import to_repo_key
     if not repository:
@@ -525,10 +650,12 @@ def _resolve_a2a_repo_key(repository: str) -> str:
         return to_repo_key(repository)
     try:
         from src.session_manager import db as _pdb, db_lock as _pdb_lock
+        _cands = [f"{_p}:{repository}" for _p in ("gitcode", "github", "gitlab")]
         with _pdb_lock:
             _pc = _pdb.cursor()
-            _pc.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?)",
-                        (f"github:{repository}", f"gitcode:{repository}"))
+            _pc.execute(
+                f"SELECT repo_key FROM managed_repos WHERE repo_key IN "
+                f"({','.join('?' * len(_cands))})", _cands)
             _pr = _pc.fetchone()
         if _pr:
             return _pr[0]
@@ -998,10 +1125,14 @@ async def a2a_status_endpoint(request: Request,
     - 否则按请求指纹（sha256(repo_key|issue|agent)[:16]，与 POST 留痕实现一致，不含 pr）查 payload 命中（含失败留痕）；
     - `agent` 为空时按指纹退化为 repo+issue 维度查全部 A2A 事件。
     """
-    if not repository or repository.count("/") != 1:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "repository is required in 'owner/repo' format"})
+    _repo_err = _a2a_repository_error(repository)
+    if _repo_err:
+        _a2a_reject(request, "status_repo_format", _repo_err,
+                    query=f"repository={repository} issue={issue_number}")
     if not issue_number or not str(issue_number).isdigit():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "issue_number is required (plain number)"})
+        _a2a_reject(request, "status_issue_number",
+                    "issue_number is required (plain number)",
+                    repo=repository, issue=str(issue_number)[:50])
 
     # repo_key 解析：与 POST /api/a2a 同口径（Issue #544 审查修正②：
     # 无前缀时经 managed_repos 反查 provider，github 托管仓不再假阴性）
@@ -1078,7 +1209,7 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
     """
     from src.repo_key import parse_repo_key
     _provider, _owner, _name = parse_repo_key(repo_key)
-    if _provider not in ("gitcode", "github") or not _owner or not _name:
+    if _provider not in ("gitcode", "github", "gitlab") or not _owner or not _name:
         return "unsupported"
 
     token = ""
@@ -1257,17 +1388,28 @@ def _a2a_pr_number(payload: dict) -> str:
 
 
 @router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Hand off to another agent (A2A)", description="Agent-to-Agent handoff: dispatches a new event to the target agent. Accepts JWT/session token/API key (public) plus internal bot-token.")
-async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None = Depends(get_user_or_none)):
+async def a2a_endpoint(request: Request, body: A2AHandoffBody | None = None,
+                       user: dict | None = Depends(get_user_or_none)):
     """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
+    if body is None:
+        # 空 body：FastAPI 原来直接 422（"Field required"，日志只有 Validation error），
+        # 调用方拿到的是框架术语。改为可操作的 400，并把 UA/IP 记进日志以定位是哪个客户端。
+        _a2a_reject(request, "empty_body",
+                    "empty body: expected JSON {\"agent\": \"qa\", \"payload\": "
+                    "{\"repository\": \"owner/repo\", \"issue_number\": \"1\"}}")
     agent_name = body.agent or ""
     payload = body.payload or {}
 
     if not agent_name:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing agent field"})
+        _a2a_reject(request, "missing_agent", "missing agent field",
+                    payload_keys=",".join(sorted(payload.keys())[:12]))
     if not payload.get("repository"):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
+        _a2a_reject(request, "missing_repository", "missing repository in payload",
+                    agent=agent_name)
     if not payload.get("issue_number"):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing issue_number in payload: 所有 A2A 事件必须关联一个 Issue"})
+        _a2a_reject(request, "missing_issue_number",
+                    "missing issue_number in payload: 所有 A2A 事件必须关联一个 Issue",
+                    agent=agent_name, repo=payload.get("repository"))
 
     # ── A2A 入口有效性校验（a2a-input-validation-fix）：内容错误必须同步 400 拒绝，
     # 不做"存在性检查"式的放通——否则 agent 拿到 ok 后直接结束任务，错误在异步派发
@@ -1275,18 +1417,26 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     # Issue #382/#395: repository 必须是字符串——str() 字符串化会让 dict 绕过格式校验，
     # 下游 repository.startswith 对 dict 抛 AttributeError → 500。
     if not isinstance(payload.get("repository"), str):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid repository: must be a string in 'owner/repo' format"})
+        _a2a_reject(request, "repository_not_str",
+                    "invalid repository: must be a string in 'owner/repo' format",
+                    agent=agent_name, repo_type=type(payload.get("repository")).__name__)
     repository_early = payload.get("repository") or ""
     issue_number_early = str(payload.get("issue_number") or "")
     # 1. agent 名必须在平台白名单内（agent 写错目标名时立刻暴露）
     if agent_name not in ("vod", "issue", "coding", "qa", "sre"):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid agent '{agent_name}': must be one of vod/issue/coding/qa/sre"})
+        _a2a_reject(request, "invalid_agent",
+                    f"invalid agent '{agent_name}': must be one of vod/issue/coding/qa/sre",
+                    agent=agent_name, repo=repository_early)
     # 2. issue_number 必须是纯数字（防止传 "#1"、issue 标题、随机文本）
     if not issue_number_early.isdigit():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid issue_number '{issue_number_early[:50]}': must be a plain number like '1' (no '#', no text)"})
-    # 3. repository 必须是 owner/repo 二段格式
-    if repository_early.count("/") != 1 or not all(p.strip() for p in repository_early.split("/")):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid repository '{repository_early[:100]}': must be full 'owner/repo' format, bare repo name is not accepted"})
+        _a2a_reject(request, "invalid_issue_number",
+                    f"invalid issue_number '{issue_number_early[:50]}': must be a plain number like '1' (no '#', no text)",
+                    agent=agent_name, repo=repository_early)
+    # 3. repository 格式：owner/repo 或嵌套 namespace（group/sub/repo），拒绝裸名与空段
+    _repo_err = _a2a_repository_error(repository_early)
+    if _repo_err:
+        _a2a_reject(request, "repo_format", _repo_err,
+                    agent=agent_name, issue=issue_number_early, repo=repository_early)
 
     repository = repository_early  # Issue #382/#395: 已校验为 str，直接复用，不再取原始对象
     # Issue #1668：不再用 repository（仓库属主）兜底 account；解析放到 repo_key/单号回填后。
@@ -1361,10 +1511,10 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     import re as _re_idem
     _idem_key = str(body.idempotency_key or payload.get("idempotency_key", "") or "").strip()
     if _idem_key and not _re_idem.fullmatch(r"[A-Za-z0-9_:.\-]{1,128}", _idem_key):
-        raise HTTPException(status_code=400, detail={
-            "code": 400,
-            "message": "invalid idempotency_key: 1-128 chars of [A-Za-z0-9_:.-] expected"
-                       " (derive it from source task_id + target agent, e.g. 'task-42:qa')"})
+        _a2a_reject(request, "invalid_idempotency_key",
+                    "invalid idempotency_key: 1-128 chars of [A-Za-z0-9_:.-] expected"
+                    " (derive it from source task_id + target agent, e.g. 'task-42:qa')",
+                    agent=agent_name, repo=repository_early, key=_idem_key)
 
 
     # ── Issue #544 L3：失败留痕 ──
@@ -1446,14 +1596,26 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     # 放行 + 幂等补录（自愈注册缺口，重复调用不产生重复行）
                     _a2a_register_repo(repo_key)
                 elif _verdict == "not_found":
-                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' not found on the Git platform (repo_key={repo_key}): 仓库不存在或 owner/repo 拼写错误，请校正后重试"})
+                    _a2a_reject(request, "repo_not_found",
+                                f"repository '{repository}' not found on the Git platform "
+                                f"(repo_key={repo_key}): 仓库不存在或 owner/repo 拼写错误，请校正后重试",
+                                agent=agent_name, repo=repository)
                 elif _verdict == "no_permission":
-                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' exists but the server has no access to it (repo_key={repo_key}): 请检查仓库权限或先在平台上托管该仓库"})
+                    _a2a_reject(request, "repo_no_permission",
+                                f"repository '{repository}' exists but the server has no access to it "
+                                f"(repo_key={repo_key}): 请检查仓库权限或先在平台上托管该仓库",
+                                agent=agent_name, repo=repository)
                 else:
                     # no_token / unreachable / unsupported：无法判定可达性 → 维持「未托管」安全默认
-                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' is not hosted on this Grape server (repo_key={repo_key}): 请检查 owner/repo 拼写，或先在平台上托管该仓库"})
+                    _a2a_reject(request, f"repo_unverifiable:{_verdict}",
+                                f"repository '{repository}' is not hosted on this Grape server "
+                                f"(repo_key={repo_key}): 请检查 owner/repo 拼写，或先在平台上托管该仓库",
+                                agent=agent_name, repo=repository)
             else:
-                raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' is not hosted on this Grape server (repo_key={repo_key}): 请检查 owner/repo 拼写，或先在平台上托管该仓库"})
+                _a2a_reject(request, "repo_not_hosted_anonymous",
+                            f"repository '{repository}' is not hosted on this Grape server "
+                            f"(repo_key={repo_key}): 请检查 owner/repo 拼写，或先在平台上托管该仓库",
+                            agent=agent_name, repo=repository)
 
         # ── Issue #755 方案B：issue_number 目标仓存在性校验（鉴权后，未认证不外呼）──
         # 跨仓 A2A 沿用源仓单号（目标仓 VCS 404）会污染异步链路：入口同步 400 拒绝

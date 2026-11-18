@@ -123,8 +123,8 @@ def test_provider_param_ignored_when_token_authoritative(_client, github_calls):
 
 
 def test_unknown_provider_rejected(_client):
-    """token 绑定未接入 provider（gitlab）→ 403 防御。"""
-    _override_user(f"gitlab:{OWNER}/{REPO}")
+    """token 绑定未接入 provider（bitbucket）→ 403 防御。"""
+    _override_user(f"bitbucket:{OWNER}/{REPO}")
     r = _get(_client, f"/api/git-repo/{OWNER}/{REPO}/branches")
     assert r.status_code == 403
     assert "未接入" in (r.json().get("detail", {}).get("message", ""))
@@ -187,7 +187,8 @@ def test_issues_crud_mapping(gitcode_calls, _client):
     assert r.status_code == 200
     last = gitcode_calls[-1]
     assert last["method"] == "PATCH"
-    assert last["body"].get("body") == "新正文内容"
+    # Issue #372 §30：update 会追加 grape-auto-comment 标记（既有约定）
+    assert "新正文内容" in (last["body"].get("body") or "")
     assert "state" not in last["body"]  # 未传字段不出现（空值过滤）
 
     r = client.patch(f"{base}/issues/7", json={"state": "open"})  # 空 body → 不污染 payload
@@ -743,14 +744,17 @@ class TestRepoCredentialProviderByPath:
         assert cred["provider"] == "github"
         assert cred["password"] == "gh_tok"
 
-    def test_unknown_path_prefix_falls_back(self, monkeypatch, _client):
-        """路径带未接入前缀（gitlab:）→ 不按前缀解析，回退会话主仓。"""
-        monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
+    def test_gitlab_path_prefix_is_supported(self, monkeypatch, _client):
+        """GitLab 已接入：路径带 gitlab: 前缀 → 按 GitLab 解析，clone_url 指向自建实例。"""
+        monkeypatch.setenv("GITLAB_BASE_URL", "https://gitlab.example.com")
+        monkeypatch.setattr("src.user.db.get_repo_token_with_refresh", lambda *a, **k: "gl_tok")
         _override_user(f"gitcode:{OWNER}/{REPO}")
         r = _client.get("/api/repos/gitlab:linked/hello/git-credential")
         assert r.status_code == 200
         cred = r.json()
-        assert cred["provider"] == "gitcode", "未知前缀应回退会话主仓（gitcode）"
+        assert cred["provider"] == "gitlab"
+        assert cred["clone_url"].startswith("https://gitlab.example.com/")
+        assert cred["username"] == "oauth2"
 
     def test_workspace_provider_follows_path_prefix(self, monkeypatch, _client):
         """workspace 接口共用 _repo_provider：带前缀路径 clone_url 按目标宿主生成。"""

@@ -1,7 +1,8 @@
 """git 基建：共享 bare mirror 基线 + Issue 级 git worktree（多 Issue 并行）。
 
 见 multi-issue-isolation-design.md §3.4.1。X 工作模型（用户拍板）：coding/qa/sre 使用本地 git 命令，
-跨平台复用（GitHub 只需在 _HOSTS 加映射）。
+跨平台复用（GitHub 走 _HOSTS 映射；GitLab 因支持自建实例与嵌套 namespace，
+由 clone_url_for 走 get_gitlab_base_url() 动态构造，不能用静态 _HOSTS）。
 
 - 基线：{WORKSPACE_DIR}/{owner}/{repo}/codebase/ 的 bare mirror（每机懒建立，fetch --prune 刷新）
 - worktree：{WORKSPACE_DIR}/{owner}/{repo}/issues/{issue_num}/{agent_type}/（任务 cwd，按 Issue 统一隔离）
@@ -102,6 +103,10 @@ def ensure_feature_branch(wt_dir: str, target_branch: str, base_branch: str,
 def clone_url_for(repo_key: str) -> str:
     from src.repo_key import parse_repo_key
     provider, owner, repo = parse_repo_key(repo_key)
+    if provider == "gitlab":
+        # 自建 GitLab 实例地址动态读取；owner/repo 可是 group/subgroup/repo 多段
+        from src.vcs.gitlab import get_gitlab_base_url
+        return f"{get_gitlab_base_url().rstrip('/')}/{owner}/{repo}.git"
     host = _HOSTS.get(provider, _HOSTS["gitcode"])
     return f"https://{host}/{owner}/{repo}.git"
 
@@ -391,6 +396,8 @@ def _write_askpass(issue_dir: str, repo_key: str = "") -> str:
     # R20.24.3: fallback 链加入 USER_*_TOKEN（路径 B 仓库用户 token）
     if repo_key.startswith("github:"):
         token_var = "${BOT_GITHUB_TOKEN:-${USER_GITHUB_TOKEN:-${BOT_TOKEN:-$BOT_GITCODE_TOKEN}}}"
+    elif repo_key.startswith("gitlab:"):
+        token_var = "${BOT_GITLAB_TOKEN:-${USER_GITLAB_TOKEN:-${BOT_TOKEN:-$BOT_GITCODE_TOKEN}}}"
     else:
         token_var = "${BOT_GITCODE_TOKEN:-${USER_GITCODE_TOKEN:-${BOT_TOKEN:-$BOT_GITHUB_TOKEN}}}"
     script = os.path.join(issue_dir, ".git-askpass.sh")

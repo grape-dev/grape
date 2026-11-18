@@ -161,6 +161,36 @@ def list_agent_types():
     } for r in rows]}
 
 
+def _agent_repo_key(owner: str, repo: str) -> str:
+    """解析 owner/repo 的真实 repo_key（优先 managed_repos 登记的三平台前缀）。"""
+    from src.repo_key import to_repo_key
+    _owner_repo = f"{owner}/{repo}"
+    _cands = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}", f"gitlab:{_owner_repo}"]
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?, ?)", tuple(_cands))
+            found = {r[0] for r in c.fetchall() if r[0]}
+        for k in _cands:
+            if k in found:
+                return k
+    except Exception:
+        pass
+    return to_repo_key(_owner_repo)
+
+
+def _agent_repo_keys(owner: str, repo: str) -> list[str]:
+    """跨 provider 三查候选（含 managed_repos 解析出的真实前缀）。"""
+    _owner_repo = f"{owner}/{repo}"
+    keys = [_agent_repo_key(owner, repo)]
+    for _p in ("gitcode", "github", "gitlab"):
+        _k = f"{_p}:{_owner_repo}"
+        if _k not in keys:
+            keys.append(_k)
+    return keys
+
+
 @router.get("/{name}/{owner}/{repo}", operation_id="agents_detail", summary="Get agent config", description="Returns the agent session config (runtime/skill/engine bindings) for name/owner/repo.")
 def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                      keyword: str = Query("", description="事件关键词搜索（seq/issue_id/event_type/title/summary/actor）"),
@@ -174,20 +204,14 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     if not meta:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"Agent 类型未配置: {name}"})
 
-    from src.repo_key import to_repo_key
-    _owner_repo = f"{owner}/{repo}"
-    repo_key = to_repo_key(_owner_repo)
+    repo_key = _agent_repo_key(owner, repo)
 
     # 权限校验：用户必须有权访问该仓库
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 
-    # 同时查 gitcode: 和 github: 前缀（用户可能切换了 provider）
-    _repo_keys = [repo_key]
-    if repo_key.startswith("gitcode:"):
-        _repo_keys.append(f"github:{_owner_repo}")
-    elif repo_key.startswith("github:"):
-        _repo_keys.append(f"gitcode:{_owner_repo}")
+    # 同时查三平台前缀（用户可能切换了 provider）
+    _repo_keys = _agent_repo_keys(owner, repo)
     _rk_placeholders = ",".join("?" * len(_repo_keys))
 
     # Issue #108: 归一化 issue_number → #N 格式，供前端高亮匹配
@@ -460,15 +484,17 @@ def clean_agent_session(name: str, owner: str, repo: str,
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
-    from src.repo_key import to_repo_key
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    repo_key = _agent_repo_key(owner, repo)
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
     from src.session_manager import db, db_lock
+    _repo_keys = _agent_repo_keys(owner, repo)
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE devops_agent_session SET runtime_session_id='' WHERE repo_key=? AND agent_type=?",
-                  (repo_key, name))
+        c.execute(
+            "UPDATE devops_agent_session SET runtime_session_id='' "
+            f"WHERE repo_key IN ({','.join('?' * len(_repo_keys))}) AND agent_type=?",
+            (*_repo_keys, name))
         updated = c.rowcount
         db.commit()
     log.info(f"Agent session cleaned: repo={repo_key}, agent={name}, rows={updated}")
@@ -481,8 +507,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
-    from src.repo_key import to_repo_key
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    repo_key = _agent_repo_key(owner, repo)
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 
@@ -712,3 +737,52 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             log.warning(f"VOD IM: sync grape_t_channel_installation failed: {e}")
 
     return {"message": "Agent 配置已更新", "session_id": session_id}
+
+
+def _split_agent_nested(full_name: str, allow_clean: bool = False):
+    """嵌套命名空间路径 → (owner, repo, is_clean)；不足两段返回 None。"""
+    _fn = (full_name or "").strip("/")
+    _is_clean = False
+    if allow_clean and _fn.endswith("/clean"):
+        _fn = _fn[: -len("/clean")]
+        _is_clean = True
+    parts = [p for p in _fn.split("/") if p]
+    if len(parts) < 2:
+        return None
+    return parts[0], "/".join(parts[1:]), _is_clean
+
+
+@router.get("/{name}/{full_name:path}", operation_id="agents_detail_nested",
+            summary="Get agent config (nested namespace)",
+            description="Nested-namespace variant of agents_detail for GitLab subgroups.")
+def get_agent_detail_nested(name: str, full_name: str, issue_number: str = "",
+                            keyword: str = Query("", description="事件关键词搜索（seq/issue_id/event_type/title/summary/actor）"),
+                            page: int = Query(1, ge=1, description="页码，从 1 开始"),
+                            page_size: int = Query(10, ge=1, le=100, description="每页条数"),
+                            user: dict = Depends(require_no_session_token)):
+    _pair = _split_agent_nested(full_name)
+    if not _pair:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+    return get_agent_detail(name, _pair[0], _pair[1], issue_number, keyword, page, page_size, user)
+
+
+@router.post("/{name}/{full_name:path}", operation_id="agents_nested_post",
+             summary="Clean agent session (nested namespace)",
+             description="Nested-namespace variant: trailing '/clean' triggers agents_clean.")
+def clean_agent_session_nested(name: str, full_name: str,
+                               user: dict = Depends(require_no_session_token)):
+    _pair = _split_agent_nested(full_name, allow_clean=True)
+    if not _pair or not _pair[2]:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+    return clean_agent_session(name, _pair[0], _pair[1], user)
+
+
+@router.put("/{name}/{full_name:path}", operation_id="agents_update_nested",
+            summary="Update agent config (nested namespace)",
+            description="Nested-namespace variant of agents_update for GitLab subgroups.")
+async def update_agent_config_nested(name: str, full_name: str, body: AgentConfig,
+                                     user: dict = Depends(require_no_session_token)):
+    _pair = _split_agent_nested(full_name)
+    if not _pair:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+    return await update_agent_config(name, _pair[0], _pair[1], body, user)

@@ -58,10 +58,11 @@ def _resolve_repo_key(owner_repo: str) -> str:
 @router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status", description="Returns the status of third-party credentials (gitcode/github/huawei-cloud/codearts) for the current user. Credential secrets (AK/SK/tokens) are never returned in plaintext; only existence flags are exposed.")
 def get_credentials(user: dict = Depends(require_no_session_token), repo_key: str = ""):
     # D32: 从 user_credentials 表 + external_identities 读凭据，不查 user_accounts
-    from src.api.deps import get_user_token, get_user_github_token_with_refresh
+    from src.api.deps import get_user_token, get_user_github_token_with_refresh, get_user_gitlab_token_with_refresh
     from src.auth.grape_account_db import get_user_identities
     gitcode_token = get_user_token(user["username"])
     github_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
+    gitlab_token = get_user_gitlab_token_with_refresh(user["username"], user_id=user["id"])
     identities = {ident["provider"]: ident for ident in get_user_identities(user["id"])}
     hw_cred = user_db.get_credential(user["id"], "huawei_cloud") or {}
     codearts_cred = user_db.get_credential(user["id"], "codearts") or {}
@@ -97,6 +98,11 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
             "token_exists": bool(github_token),
             "login": identities.get("github", {}).get("external_login", ""),
             "token_expired": _github_expired,
+        },
+        "gitlab": {
+            "token_exists": bool(gitlab_token),
+            "login": identities.get("gitlab", {}).get("external_login", ""),
+            "token_expired": identities.get("gitlab", {}).get("status", 0) == 4,
         },
         "global_bot_token_status": _global_token_status,
         "huawei_cloud": {
@@ -225,6 +231,7 @@ class UpdateCredentials(BaseModel):
     codearts_sk: str = ""
     github_token: str = ""
     gitcode_token: str = ""
+    gitlab_token: str = ""
     repo_key: str = ""
 
 
@@ -244,6 +251,11 @@ def _is_placeholder(value: str) -> bool:
         return True
     if v.startswith(("AK-demo-", "SK-demo-", "ghp_devopsbot_")):
         return True
+    # GitLab PAT 有固定前缀 glpat-（新建）或旧版不带前缀的 20 字符随机串，
+    # 即使包含 x 字符也是合法 token；xxxx 检查仅限无已知前缀的占位场景
+    if v.startswith("glpat-"):
+        # 真实 PAT 为 glpat- + 20 位随机串；过短或含 xxxx 仍是示例占位符
+        return len(v) < 16 or "xxxx" in v.lower()
     return "xxxx" in v.lower()
 
 
@@ -273,6 +285,11 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
     # GitHub Token（写入时需验证 token 并获取用户信息；清除时无需验证）
     if "github_token" in explicit:
         _gh_tok = (explicit["github_token"] or "").strip()
+        if _gh_tok and _is_placeholder(_gh_tok):
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "error_code": "TOKEN_FORMAT_INVALID",
+                "message": "GitHub token 格式不正确，请重新复制真实 token",
+            })
         if _gh_tok and not _is_placeholder(_gh_tok):
             # 验证 token 并获取 GitHub 用户信息
             try:
@@ -382,6 +399,11 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校
     # GitCode Token（写入时需验证 token 并获取用户信息；清除时无需验证）
     if "gitcode_token" in explicit:
         _gc_tok = (explicit["gitcode_token"] or "").strip()
+        if _gc_tok and _is_placeholder(_gc_tok):
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "error_code": "TOKEN_FORMAT_INVALID",
+                "message": "GitCode token 格式不正确，请重新复制真实 token",
+            })
         if _gc_tok and not _is_placeholder(_gc_tok):
             try:
                 import requests as _req
@@ -494,8 +516,168 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
             from src.auth.grape_account_db import delete_external_identity
             delete_external_identity(user["id"], "gitcode")
 
+    # GitLab Token（自建实例同样适用；写入时验证 token 并获取用户信息）
+    if "gitlab_token" in explicit:
+        _gl_tok = (explicit["gitlab_token"] or "").strip()
+        if _gl_tok and _is_placeholder(_gl_tok):
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "error_code": "TOKEN_FORMAT_INVALID",
+                "message": "GitLab token 格式不正确，请重新复制真实 token",
+            })
+        if _gl_tok and not _is_placeholder(_gl_tok):
+            try:
+                from src.user.repo_manager import _gitlab_req
+                from src.vcs.gitlab import get_gitlab_api_base
+                _gl_user = None
+                _base = get_gitlab_api_base()
+
+                # 降级校验链（GitLab 实例版本 / PAT scope 差异大，逐级放宽）：
+                # 1. /user —— 标准 OAuth 用户端点，需要 read_user 或 api scope
+                # 2. /groups —— 列出可见 group，只需要 api scope（PAT 常无 read_user 但有 api）
+                # 3. /projects/<known_id> —— 从已托管 GitLab 仓库拿 project ID
+                # 4. 以上全 401/403 —— 真无效
+                try:
+                    _gl_user = _gitlab_req("GET", f"{_base}/user", _gl_tok)
+                except Exception as _user_err:
+                    _gl_user = None
+                    _last_err = _user_err
+
+                    # 2. /groups（PAT 有 api scope 就能看到自己 group）
+                    try:
+                        _groups = _gitlab_req("GET", f"{_base}/groups", _gl_tok)
+                        if isinstance(_groups, list) and _groups:
+                            log.warning(f"GitLab /user 失败但 /groups 通过: {_user_err}")
+                            _g = _groups[0]
+                            _gl_user = {
+                                "id": f"pat_group_{_g.get('id', '')}",
+                                "username": f"pat_group_{_g.get('path', '')}",
+                                "name": _g.get("name", "GitLab PAT"),
+                                "_degraded": True,
+                            }
+                    except Exception as _grp_err:
+                        _last_err = _grp_err
+                        # 3. 已知托管项目 —— PAT 至少能访问它自己的项目
+                        try:
+                            from src.session_manager import db as _db, db_lock as _dl
+                            with _dl:
+                                _c = _db.cursor()
+                                # 只探测当前用户自己托管的 GitLab 项目，
+                                # 避免任意 PAT 借别人的托管仓通过校验
+                                _c.execute(
+                                    "SELECT repo_key FROM managed_repos "
+                                    "WHERE repo_key LIKE 'gitlab:%' AND host_user_id=? LIMIT 3",
+                                    (user.get("id", 0),),
+                                )
+                                _gl_keys = [r[0] for r in _c.fetchall()]
+                            for _gk in _gl_keys:
+                                _ns = _gk.split(":", 1)[-1]
+                                try:
+                                    _pj = _gitlab_req(
+                                        "GET", f"{_base}/projects/{_ns.replace('/', '%2F')}", _gl_tok,
+                                    )
+                                    if _pj.get("id"):
+                                        log.warning(f"GitLab /user+groups 失败但 /projects/{_ns} 通过: {_user_err}")
+                                        _gl_user = {
+                                            "id": f"pat_project_{_pj['id']}",
+                                            "username": f"pat_{_pj.get('path_with_namespace', _ns)}",
+                                            "name": _pj.get("namespace", {}).get("name", "GitLab PAT"),
+                                            "_degraded": True,
+                                        }
+                                        break
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
+
+                    if _gl_user is None:
+                        # 4. 全链路 401/403 → 真无效
+                        if "401" in str(_last_err) or "403" in str(_last_err):
+                            raise HTTPException(status_code=400, detail={
+                                "code": 400, "error_code": "TOKEN_INVALID",
+                                "message": "GitLab token 校验失败：请确认 token scope 包含 'api' 或 'read_user'（Project Access Token 至少需要 'api' scope）",
+                            })
+                        raise
+
+                gl_id = str((_gl_user or {}).get("id", ""))
+                gl_login = (_gl_user or {}).get("username", "")
+                if not gl_id and not (_gl_user or {}).get("_degraded"):
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400, "error_code": "TOKEN_INVALID",
+                        "message": "GitLab token 校验失败：未获取到用户信息",
+                    })
+                from src.auth.grape_account_db import (
+                    get_external_identity, get_external_identity_any_status,
+                    create_external_identity, save_binding_ticket,
+                    update_external_identity_tokens,
+                )
+                existing = get_external_identity("gitlab", gl_id)
+                if existing:
+                    if existing["grape_user_id"] != user["id"]:
+                        raise HTTPException(
+                            status_code=409,
+                            detail={"code": 409, "message": "该平台账号已被其他 Grape 账号绑定"},
+                        )
+                    _ok = update_external_identity_tokens(
+                        existing["grape_user_id"], "gitlab",
+                        access_token=_gl_tok,
+                        external_name=_gl_user.get("name", ""),
+                        clear_oauth_state=True,
+                    )
+                    if not _ok:
+                        raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+                else:
+                    any_status = get_external_identity_any_status("gitlab", gl_id)
+                    if any_status and any_status["status"] == 0 and any_status["grape_user_id"] != user["id"]:
+                        _ticket = save_binding_ticket(
+                            initiating_user_id=user["id"],
+                            provider="gitlab",
+                            external_id=gl_id,
+                            external_login=gl_login,
+                            external_name=_gl_user.get("name", ""),
+                            original_user_id=any_status["grape_user_id"],
+                        )
+                        if not _ticket:
+                            raise HTTPException(status_code=500, detail={"code": 500, "message": "生成转移票据失败"})
+                        raise HTTPException(
+                            status_code=409,
+                            detail={
+                                "code": 409,
+                                "message": "该平台账号曾绑定过其他账号，是否转移到当前账号？",
+                                "binding_ticket": _ticket,
+                                "need_transfer": True,
+                            },
+                        )
+                    _ok = create_external_identity(
+                        grape_user_id=user["id"], provider="gitlab",
+                        external_id=gl_id, external_login=gl_login,
+                        external_name=_gl_user.get("name", ""),
+                        access_token=_gl_tok,
+                    )
+                    if not _ok:
+                        log.error(f"GitLab bind FAILED: create_external_identity returned False for user={user['id']}, gl_id={gl_id}")
+                        raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+                log.info(f"GitLab token saved for user={user['username']}, gitlab_login={gl_login}")
+            except HTTPException:
+                raise
+            except RuntimeError as _e:
+                # UpstreamAPIError 也继承 RuntimeError；401/403/404 视为 token 无效
+                _msg = str(_e)
+                if "401" in _msg or "403" in _msg or "404" in _msg:
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400, "error_code": "TOKEN_INVALID",
+                        "message": "GitLab token 校验失败，请检查 token 有效性",
+                    })
+                raise HTTPException(status_code=502, detail={"code": 502, "message": f"GitLab token 验证失败: {_e}"})
+            except Exception as _e:
+                log.warning(f"GitLab token validation error: {_e}")
+                raise HTTPException(status_code=502, detail={"code": 502, "message": f"GitLab token 验证失败: {_e}"})
+        elif not _gl_tok:
+            _check_login_method_before_unbind(user["id"], "gitlab")
+            from src.auth.grape_account_db import delete_external_identity
+            delete_external_identity(user["id"], "gitlab")
+
     # 绑定/解绑平台后清理 user_repos 缓存——下次 /repos/member 会从 VCS 重新拉取
-    if "github_token" in explicit or "gitcode_token" in explicit:
+    if "github_token" in explicit or "gitcode_token" in explicit or "gitlab_token" in explicit:
         try:
             from src.session_manager import db as _sm_db, db_lock as _sm_dl
             with _sm_dl:
@@ -507,7 +689,8 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
 
     # FR-4/FR-10.1: PAT 保存后追加权限探测提示（不阻断保存）
     _scope_warnings = []
-    for _provider, _token_field in [("gitcode", "gitcode_token"), ("github", "github_token")]:
+    for _provider, _token_field in [("gitcode", "gitcode_token"), ("github", "github_token"),
+                                    ("gitlab", "gitlab_token")]:
         if _token_field in explicit:
             _tok = (explicit[_token_field] or "").strip()
             if _tok and not _is_placeholder(_tok):
@@ -517,6 +700,13 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                         _hooks_resp = _req.get(
                             f"https://gitcode.com/api/v5/user/repos?per_page=1",
                             params={"access_token": _tok}, timeout=10)
+                    elif _provider == "gitlab":
+                        # 自建 GitLab：动态 base URL，Bearer 与 PRIVATE-TOKEN 双头兼容
+                        from src.vcs.gitlab import get_gitlab_api_base
+                        _hooks_resp = _req.get(
+                            f"{get_gitlab_api_base()}/projects?per_page=1",
+                            headers={"Authorization": f"Bearer {_tok}", "PRIVATE-TOKEN": _tok},
+                            timeout=10)
                     else:
                         _hooks_resp = _req.get(
                             f"https://api.github.com/user/repos?per_page=1",
@@ -537,7 +727,10 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                         _c = _sm_db.cursor()
                         _c.execute("SELECT repo_key FROM managed_repos WHERE host_user_id=? AND host_user_id>0 LIMIT 5",
                                    (user["id"],))
-                        _path_b_repos = [r[0] for r in _c.fetchall()]
+                        # 按 provider 过滤：GitLab token 的提示不应统计 GitCode/GitHub 托管仓
+                        _path_b_repos = [r[0] for r in _c.fetchall()
+                                         if _provider == "gitcode"
+                                         or str(r[0] or "").startswith(f"{_provider}:")]
                     if _path_b_repos:
                         _scope_warnings.append(
                             f"{_provider}: 你是 {len(_path_b_repos)} 个仓库的 host（路径 B），"
@@ -664,7 +857,7 @@ def update_notifications(body: NotificationPrefs, user: dict = Depends(require_n
 
 # ====== GitCode Repo ======
 
-@router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo.")
+@router.get("/gitcode-repo/{owner:path}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo. owner supports nested namespaces (GitLab subgroups, e.g. biz/jmbos/devops).")
 def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     # R25.7: 用 TokenResolver.resolve() 替换 get_repo_token_with_refresh，返回 level 供前端分级显示
     from src.token_resolver import TokenResolver, create_provider_from_repo_key
@@ -716,7 +909,7 @@ class GitCodeRepoConfig(BaseModel):
     bot_username: str = "devops-bot"
 
 
-@router.put("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_update", summary="Update repo GitCode config", description="Updates GitCode config for a specific repo.")
+@router.put("/gitcode-repo/{owner:path}/{repo}", operation_id="settings_gitcode_repo_update", summary="Update repo GitCode config", description="Updates GitCode config for a specific repo. owner supports nested namespaces (GitLab subgroups, e.g. biz/jmbos/devops).")
 def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
                                      user: dict = Depends(require_no_session_token)):
     # 将 Bot Token / Bot Username 存储到 managed_repos（webhook_token 由托管流程自动维护）
@@ -2019,6 +2212,12 @@ def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_
                 c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
             except Exception as _e:
                 log.warning(f"revoke {cid}: 清理 session 失败: {_e}")
+            # chat 配置/会话同样会指向这些引擎；漏清则配置行长期悬空，
+            # 每次读配置都回落未配置并刷 "runtime_id=N 不存在" WARNING
+            try:
+                c.execute(f"UPDATE chat_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
+            except Exception as _e:
+                log.warning(f"revoke {cid}: 清理 chat_agent_session 失败: {_e}")
         # Issue #250: 物理删除 agent_runtimes 前清理场景配置 engine_runtime_ids 悬空引用
         _cleanup_scene_engine_runtime_ids(rid_list)
         # Issue #417：级联清理 engine_capabilities（否则悬空能力标签残留）

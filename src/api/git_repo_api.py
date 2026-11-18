@@ -1,15 +1,16 @@
 """Git 仓库统一接口（Issue-45 M3）：`/api/git-repo/{owner}/{repo}/...` 白名单资源端点。
 
 - 认证：`get_current_user_or_api_key`（对外安全路由，进 OpenAPI 契约）。
-- provider：**由认证 token 的 repo_key 前缀派生**（gitcode:/github:），不接受调用方参数，
-  `git_repo_provider_from_token` 设计（单一信息源，消除错配）；github/gitlab 预留（403）。
+- provider：**由认证 token 的 repo_key 前缀派生**（gitcode:/github:/gitlab:），不接受调用方参数，
+  `git_repo_provider_from_token` 设计（单一信息源，消除错配）；GitLab 通过 providers/gitlab.py
+  做原生 URL（/projects/{urlencode(owner/repo)}）与字段翻译，末端 catch-all 支持 group/subgroup 嵌套路径。
 - 白名单：只暴露 Issue/PR/评论/内容/分支/提交/标签/里程碑等资源端点，**无限制透传被拒**。
 - gitcode 后端：复用 `repo_manager._req` 调 `api.gitcode.com/api/v5`，token 取仓库 bot token。
 - git-credential / workspace 归 `/api/repos` 平台接口（本命名空间只做纯透传，见 2bac1c60）。
 
 出参结构 = gitcode 平台实际结构（与技能 `gitcode-api-reference.md` 一致，见 docs/openapi/10-git-repos.md）。
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.api.deps import get_current_user_or_api_key
@@ -277,7 +278,14 @@ def _vcs_url(owner: str, repo: str, subpath: str, params: dict | None = None,
     if provider not in _SUPPORTED_PROVIDERS:
         raise ValueError(f"Git provider 未支持: {provider}")
     import urllib.parse
-    api_base = _PROVIDER_MODULES[provider].API_BASE
+    mod = _PROVIDER_MODULES[provider]
+    # provider 可自带原生 URL 构造（如 GitLab：/projects/{urlencode(owner/repo)}/...）
+    if hasattr(mod, "build_url"):
+        try:
+            return mod.build_url(owner, repo, subpath, params)
+        except ValueError as e:
+            raise HTTPException(status_code=501, detail={"code": 501, "message": str(e)})
+    api_base = mod.API_BASE
     base = f"{api_base}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}"
     # Issue #714：subpath 以 / 为分隔逐段 percent-encode（+→%2B、中文→UTF-8、空格→%20），
     # / 保留路径分隔语义；纯 ASCII 段（/branches、issue 编号等）编码后不变，存量行为零变更。
@@ -1449,6 +1457,12 @@ def _resolve_pull_comment_note_id(p: str, owner: str, repo: str, number: int,
         raise HTTPException(status_code=422, detail={"code": 422, "message": "comment_id 不能为空"})
     if cid.isdigit():
         return cid
+    # GitLab 的 note id 本身就是数字，没有十六进制别名；且 GitLab 无全局
+    # /pulls/comments/{cid} 端点（note 必须挂在 /merge_requests/{iid}/notes 下）
+    if p == "gitlab":
+        raise HTTPException(status_code=422, detail={
+            "code": 422,
+            "message": "GitLab 评论 id 为数字 note_id，请使用评论列表返回的数字 id"})
     # 严格十六进制识别：全 hex 字符且至少含一个字母，避免纯数字串误判
     if not re.fullmatch(r"[0-9a-fA-F]+", cid) or not re.search(r"[a-fA-F]", cid):
         raise HTTPException(status_code=422, detail={
@@ -1506,7 +1520,10 @@ def update_pull_comment(owner: str, repo: str, number: int, comment_id: str, bod
     # Issue #623：comment_id 兼容十六进制 id——解析为数字 note_id 后走既有更新逻辑
     note_id = _resolve_pull_comment_note_id(p, owner, repo, number, comment_id,
                                             _repo_token(owner, repo, user, p))
-    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/comments/{note_id}", None, p),
+    # GitLab note 路径必须带 MR iid；gitcode/github 保留原有全局 /pulls/comments/{id}
+    _comment_path = (f"/pulls/{number}/comments/{note_id}" if p == "gitlab"
+                     else f"/pulls/comments/{note_id}")
+    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, _comment_path, None, p),
                     _repo_token(owner, repo, user, p), {"body": body.body})
 
 
@@ -1514,7 +1531,9 @@ def update_pull_comment(owner: str, repo: str, number: int, comment_id: str, bod
 def delete_pull_comment(owner: str, repo: str, number: int, comment_id: int,
                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # 上游 comment id 全局唯一（不含 PR number）：透传 DELETE /pulls/comments/{id}
-    return _vcs_req(p, "DELETE", _vcs_url(owner, repo, f"/pulls/comments/{comment_id}", None, p),
+    _comment_path = (f"/pulls/{number}/comments/{comment_id}" if p == "gitlab"
+                     else f"/pulls/comments/{comment_id}")
+    return _vcs_req(p, "DELETE", _vcs_url(owner, repo, _comment_path, None, p),
                     _repo_token(owner, repo, user, p))
 
 
@@ -1581,4 +1600,87 @@ def list_pull_files(owner: str, repo: str, number: int, page: int = Query(1, ge=
     resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/files",
                                        {"page": page, "per_page": per_page}, p),
                     _repo_token(owner, repo, user, p))
+    # GitLab /merge_requests/{iid}/changes 返回 {"changes": [...]}，归一成中性数组
+    if p == "gitlab" and isinstance(resp, dict):
+        resp = resp.get("changes") or []
+        for _f in resp:
+            if isinstance(_f, dict) and "filename" not in _f:
+                _f["filename"] = _f.get("new_path") or _f.get("old_path") or ""
     return _normalize_pull_files_diff(resp)
+
+
+# ---------------- 嵌套命名空间兜底（GitLab group/subgroup） ----------------
+# 两段式路由 /{owner}/{repo}/... 无法表达 owner 多段（如 biz/jmbos/devops/probehub）。
+# 这里用一条末尾 catch-all 接收任意段数路径：先用 managed_repos 的最长 full_name 前缀
+# 切出 (owner, repo, subpath)，再按 (方法, subpath) 找到已注册的 APIRoute，
+# 用其 get_route_handler 执行（复用原有依赖注入/校验/分发逻辑，不改动任何 handler）。
+_NESTED_METHODS = ["GET", "POST", "PATCH", "PUT", "DELETE"]
+
+
+def _managed_full_names() -> list[str]:
+    """managed_repos 中登记的仓库全路径（去掉 provider 前缀）。"""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            rows = db.cursor().execute("SELECT repo_key FROM managed_repos").fetchall()
+        out = []
+        for r in rows:
+            rk = (r[0] or "").strip()
+            if rk:
+                out.append(rk.split(":", 1)[1] if ":" in rk else rk)
+        return out
+    except Exception:
+        return []
+
+
+def _split_nested_path(fn: str) -> tuple[str, str, str]:
+    """biz/jmbos/devops/probehub/issues → (biz, jmbos/devops/probehub, issues)。
+
+    优先用 managed_repos 的最长全路径前缀；未登记时退化为「第一段=owner，其余=repo」。
+    """
+    best = ""
+    for name in _managed_full_names():
+        if (fn == name or fn.startswith(name + "/")) and len(name) > len(best):
+            best = name
+    if best:
+        owner, repo = best.split("/", 1)
+        return owner, repo, fn[len(best):].strip("/")
+    if "/" not in fn:
+        return "", "", ""
+    owner, repo = fn.split("/", 1)
+    return owner, repo, ""
+
+
+@router.api_route("/{full_name:path}", methods=_NESTED_METHODS,
+                  operation_id="gitrepo_nested", include_in_schema=False)
+async def gitrepo_nested(full_name: str, request: Request):
+    """嵌套命名空间入口：把 owner 多段路径重新分派到已注册的两段式路由。"""
+    from starlette.routing import Match
+
+    fn = (full_name or "").strip("/")
+    owner, repo, sub = _split_nested_path(fn)
+    if not owner or not repo:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "Repository not found"})
+
+    # 用占位 repo 构造可匹配路径，找到目标 APIRoute（跳过自身，避免递归）
+    probe_scope = dict(request.scope)
+    probe_scope["path"] = f"{router.prefix}/{owner}/__repo__" + (f"/{sub}" if sub else "")
+    target, child_scope = None, {}
+    for route in router.routes:
+        if getattr(route, "endpoint", None) is gitrepo_nested:
+            continue
+        matched, child = route.matches(probe_scope)
+        if matched == Match.FULL:
+            target, child_scope = route, child
+            break
+    if target is None:
+        raise HTTPException(status_code=404,
+                            detail={"code": 404, "message": f"Unsupported git-repo path: {sub or fn}"})
+
+    scope = dict(request.scope)
+    scope["path"] = f"{router.prefix}/{owner}/{repo}" + (f"/{sub}" if sub else "")
+    scope["path_params"] = dict(child_scope.get("path_params") or {})
+    scope["path_params"]["owner"] = owner
+    scope["path_params"]["repo"] = repo
+    scope["route"] = target
+    return await target.get_route_handler()(Request(scope, request._receive))

@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS devops_agent_session (
     skill TEXT DEFAULT '',
     backend_session_id TEXT DEFAULT '',
     repo_gitcode_token TEXT DEFAULT '',
+    repo_gitlab_token TEXT DEFAULT '',
     status TEXT DEFAULT 'idle',
     created_at TEXT DEFAULT (datetime('now')),
     last_active_at TEXT DEFAULT (datetime('now')),
@@ -657,6 +658,7 @@ CREATE TABLE IF NOT EXISTS login_whitelist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     gitcode_username VARCHAR(64) DEFAULT NULL,
     github_username TEXT DEFAULT '',
+    gitlab_username TEXT DEFAULT '',
     remark VARCHAR(128) DEFAULT '',
     created_by VARCHAR(64) DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
@@ -2360,17 +2362,23 @@ def _ensure_whitelist_columns():
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_login_whitelist_github ON login_whitelist(github_username) WHERE github_username != ''")
             except Exception as e:
                 log.warning(f"Create github_username unique index failed: {e}")
+            try:
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_login_whitelist_gitlab ON login_whitelist(gitlab_username) WHERE gitlab_username != ''")
+            except Exception as e:
+                log.warning(f"Create gitlab_username unique index failed: {e}")
     except Exception as e:
         log.warning(f"_ensure_whitelist_columns failed: {e}")
 
 def _init_scene_category_data():
-    """初始化 scene_category 表的 6 条分类数据（幂等）。
+    """初始化 scene_category 表的分类数据（幂等）。
 
-    技术方案 §2.1：通用/移动开发/基础设施/技能开发/AI应用/内容创作
+    技术方案 §2.1：通用/移动开发/基础设施/技能开发/AI应用/内容创作。
+    v2：补官方场景包新增的 swarm-dev（domain-swarm），否则同步时 category_id=0
+    并每轮刷 "category slug not found" 告警。
     """
     try:
         from src.user.db import get_meta_value, set_meta_value
-        if get_meta_value("scene_category_seeded") == "1":
+        if get_meta_value("scene_category_seeded_v2") == "1":
             return
         categories = [
             ("通用", "general", "⚙", 1),
@@ -2380,6 +2388,7 @@ def _init_scene_category_data():
             ("技能开发", "skill-dev", "🔧", 5),
             ("AI应用", "ai", "🤖", 6),
             ("内容创作", "content", "📝", 7),
+            ("多智能体协同", "swarm-dev", "🐝", 8),
         ]
         with db_lock:
             c = db.cursor()
@@ -2389,21 +2398,23 @@ def _init_scene_category_data():
                     (name, slug, icon, order_num),
                 )
             db.commit()
-        set_meta_value("scene_category_seeded", "1")
-        log.info("Seeded scene_category with 6 categories")
+        set_meta_value("scene_category_seeded_v2", "1")
+        log.info("Seeded scene_category with 8 categories")
     except Exception as e:
         log.warning(f"Init scene_category data failed: {e}")
 
 
 def _init_skill_category_data():
-    """初始化 skill_category 表的 15 条分类数据（幂等）。
+    """初始化 skill_category 表的 16 条分类数据（幂等）。
 
     Issue #179: 技能分类表独立化，对齐 scene_category 模式。
     Issue #222: 新增 code-hosting/browser-verify/meeting/other 4 个分类。
+    v3: 补 content-generation（novel-to-manga / nine-grid-storyboard /
+        narrated-explainer-video 等官方技能的 sub_scene），否则 category_id=0。
     """
     try:
         from src.user.db import get_meta_value, set_meta_value
-        if get_meta_value("skill_category_seeded_v2") == "1":
+        if get_meta_value("skill_category_seeded_v3") == "1":
             return
         categories = [
             ("AI辅助编码与评审", "ai-coding-review", "🤖", 1),
@@ -2421,6 +2432,7 @@ def _init_skill_category_data():
             ("浏览器验证", "browser-verify", "🌐", 13),
             ("会议", "meeting", "📅", 14),
             ("其他", "other", "📌", 15),
+            ("内容与多模态生成", "content-generation", "🎬", 16),
         ]
         with db_lock:
             c = db.cursor()
@@ -2430,8 +2442,8 @@ def _init_skill_category_data():
                     (name, slug, icon, order_num),
                 )
             db.commit()
-        set_meta_value("skill_category_seeded_v2", "1")
-        log.info("Seeded skill_category with 15 categories")
+        set_meta_value("skill_category_seeded_v3", "1")
+        log.info("Seeded skill_category with 16 categories")
     except Exception as e:
         log.warning(f"Init skill_category data failed: {e}")
 
@@ -5364,6 +5376,7 @@ def _migrate_tables():
         # R16.5.3: devops_agent_session 新增 token_status + repo_github_token 列
         "ALTER TABLE devops_agent_session ADD COLUMN token_status TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN repo_github_token TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN repo_gitlab_token TEXT DEFAULT ''",
         "ALTER TABLE agent_type ADD COLUMN default_backend_id INTEGER DEFAULT 0",
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",

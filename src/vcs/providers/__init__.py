@@ -5,10 +5,10 @@ provider 由 token repo_key 前缀决定；每 provider 一个模块，新增 pr
 """
 import re
 
-from . import gitcode, github
+from . import gitcode, github, gitlab
 from .base import apply_rules
 
-_MODULES = {"gitcode": gitcode, "github": github}
+_MODULES = {"gitcode": gitcode, "github": github, "gitlab": gitlab}
 
 
 def translate_inbound(provider: str, resource: str, op: str, neutral: dict,

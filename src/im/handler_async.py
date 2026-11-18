@@ -1694,6 +1694,10 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                         if repo_key.startswith("github:"):
                             from src.api.deps import get_user_github_token_with_refresh
                             user_token = get_user_github_token_with_refresh(_feishu_acc["username"], user_id) or ""
+                        elif repo_key.startswith("gitlab:"):
+                            from src.api.deps import get_user_gitlab_token_with_refresh
+                            user_token = get_user_gitlab_token_with_refresh(
+                                _feishu_acc["username"], user_id=user_id) or ""
                         else:
                             from src.api.deps import get_user_token_with_refresh
                             user_token = get_user_token_with_refresh(_feishu_acc["username"], user_id) or ""
@@ -2011,7 +2015,8 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
                     from src.token_service import detect_and_mark_expired
                     _feishu_error_code = detect_and_mark_expired(repo_key) or ""
                     if _feishu_error_code:
-                        _pName = "GitHub" if repo_key.startswith("github:") else "GitCode"
+                        _pName = ("GitLab" if repo_key.startswith("gitlab:")
+                                  else ("GitHub" if repo_key.startswith("github:") else "GitCode"))
                         output = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
                 except Exception as _fe:
                     log.warning(f"[Chat:{ctx.name}] post-exec 401 detect failed: {_fe}")

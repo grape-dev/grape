@@ -81,6 +81,8 @@ def _sync_skills_to_db(data: dict) -> int:
                 cat_map[row[0]] = row[1]
         except Exception:
             pass
+        # 同一轮里同一个未知 slug 只告警一次（避免一个分类下多个技能刷屏）
+        _unknown_sub_scenes: set[str] = set()
         for skill_name, info in data.items():
             try:
                 display_name = info.get("name", skill_name)
@@ -89,8 +91,12 @@ def _sync_skills_to_db(data: dict) -> int:
                 skill_path_val = info.get("path", skill_name)
                 sub_scene = info.get("sub_scene", "")
                 category_id = cat_map.get(sub_scene, 0)
-                if sub_scene and category_id == 0:
-                    logger.warning(f"skill '{skill_name}' sub_scene='{sub_scene}' has no matching skill_category slug, category_id=0")
+                if sub_scene and category_id == 0 and sub_scene not in _unknown_sub_scenes:
+                    _unknown_sub_scenes.add(sub_scene)
+                    logger.warning(
+                        f"skill category slug '{sub_scene}' not found in skill_category "
+                        f"(first seen on '{skill_name}'); affected skills keep category_id=0. "
+                        f"Seed it in src/api/db_setup.py _init_skill_category_data if official.")
                 row = c.execute(
                     "SELECT display_name, description, agent_type, skill_path, file_path, sub_scene, category_id FROM skill WHERE skill_name=? AND scope='official'",
                     (skill_name,)

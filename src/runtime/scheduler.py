@@ -331,6 +331,9 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
         if repo_key.startswith("github:"):
             from src.user.db import get_github_token
             repo_token = get_github_token(repo_key=repo_key) or ""
+        elif repo_key.startswith("gitlab:"):
+            from src.user.db import get_repo_token_with_refresh
+            repo_token = get_repo_token_with_refresh(repo_key) or ""
         else:
             from src.user.db import get_gitcode_token
             repo_token = get_gitcode_token(repo_key=repo_key) or ""

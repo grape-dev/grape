@@ -430,10 +430,30 @@ function _durHuman(sec) {
   return (Math.round(s / 8640) / 10) + I18N.t('observability.dur_unit_day');
 }
 
+// VCS Issue 外链：按平台分派（自建 GitLab 的实例域名与 /-/issues/ 路径均不同）
+function _obsVcsIssueLink(repoKey, issueNum) {
+  const rk = String(repoKey || '');
+  const num = String(issueNum || '').replace(/^#/, '');
+  if (!rk || !num) return '';
+  // 历史数据可能只带 org/repo 裸路径：按 GitCode 兜底补成标准 repo_key
+  const key = /^(gitcode|github|gitlab):/.test(rk) ? rk : ('gitcode:' + rk);
+  const repoPath = key.replace(/^(gitcode|github|gitlab):/, '');
+  let host = 'https://gitcode.com';
+  let issuePath = '/issues/';
+  if (key.indexOf('github:') === 0) {
+    host = 'https://github.com';
+  } else if (key.indexOf('gitlab:') === 0) {
+    issuePath = '/-/issues/';
+    try {
+      host = (window._vcsProviderBases && window._vcsProviderBases.gitlab)
+        || localStorage.getItem('vcs_gitlab_base') || 'https://gitlab.com';
+    } catch (e) { host = 'https://gitlab.com'; }
+  }
+  return host + '/' + repoPath + issuePath + num;
+}
+
 function _obsIssueUrl(e) {
-  const num = String(e.issue_id || '').replace(/^#/, '');
-  const path = String(e.repo_key || '').split(':').pop();
-  return (path && num) ? 'https://gitcode.com/' + path + '/issues/' + num : '';
+  return _obsVcsIssueLink(e.repo_key, e.issue_id);
 }
 
 // 注意：真实 I18N.t 在**缺键时返回 key 本身**（不是 undefined），所以 `t(k) || 兜底` 永远
@@ -3010,7 +3030,7 @@ function renderTimelineList(container, issues, repoKey) {
     const _workers = (_obsData.ops && _obsData.ops.workers && _obsData.ops.workers.list) || [];
     _workers.forEach(w => { if (w.device_name) _timelineDevIpMap[w.device_name] = w.last_ip || ''; });
   } catch(e) {}
-  _timelineGlobalRepoPath = stripRepoPrefix(repoKey || '');
+  _timelineGlobalRepoKey = repoKey || '';
   let html = section(I18N.t('observability.task_list'), I18N.t('observability.task_list_subtitle', {count: issues.length}));
   html += '<div style="margin-bottom:10px;display:flex;align-items:center;gap:8px">';
   html += '<input type="text" id="timelineSearchInput" placeholder="' + I18N.t('observability.search_tasks_placeholder') + '" value="' + _timelineSearch.replace(/"/g, '&quot;') + '" oninput="_timelineSearch=this.value;_timelinePage=0;_filterTimelineIssues()" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
@@ -3066,9 +3086,7 @@ function _filterTimelineIssues() {
     return _ip ? engine + ' (' + _ip + ')' : engine;
   }
   function _issueUrl(issueId, issueRepoKey) {
-    const num = (issueId || '').replace(/^#/, '');
-    const repoPath = stripRepoPrefix(issueRepoKey || '') || _timelineGlobalRepoPath;
-    return repoPath && num ? 'https://gitcode.com/' + repoPath + '/issues/' + num : '';
+    return _obsVcsIssueLink(issueRepoKey || _timelineGlobalRepoKey, issueId);
   }
 
   // 分页：先筛选，再按 _timelinePage/_timelinePageSize 切片
@@ -3139,7 +3157,7 @@ let _timelineIssues = [];
 let _timelineIssuesSorted = [];
 let _timelineSearch = '';
 let _timelineDevIpMap = {};
-let _timelineGlobalRepoPath = '';
+let _timelineGlobalRepoKey = '';
 let _issueViewMode = {};
 let _timelineCache = null;  // {repo, ts, issues} — 30s TTL 避免重复 fetch
 

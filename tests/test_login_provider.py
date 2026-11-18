@@ -115,11 +115,21 @@ class TestGetUserProviderAndToken:
         assert provider == "github"
         assert token == "gh_tok"
 
+    def test_gitlab_login_only_gitlab_token(self):
+        """login_provider=gitlab + gitlab token → 返回 gitlab"""
+        with patch("src.api.routes.repos.get_user_gitlab_token_with_refresh", return_value="gl_tok"), \
+             patch("src.api.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
+             patch("src.api.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
+            provider, token = _get_user_provider_and_token("ivan", login_provider="gitlab")
+        assert provider == "gitlab"
+        assert token == "gl_tok"
+
     def test_unknown_login_provider_fallback(self):
         """未知 login_provider 值 → fallback 到现有逻辑"""
         with patch("src.api.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
-            provider, token = _get_user_provider_and_token("ivan", login_provider="gitlab")
+             patch("src.api.routes.repos.get_user_token_with_refresh", return_value="gc_tok"), \
+             patch("src.api.routes.repos.get_user_gitlab_token_with_refresh", return_value=""):
+            provider, token = _get_user_provider_and_token("ivan", login_provider="bitbucket")
         assert provider == "github"
         assert token == "gh_tok"
 

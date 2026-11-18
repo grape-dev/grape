@@ -414,12 +414,14 @@ def test_issue_edit_ttl_not_used():
 
 def test_subtask_comment_ledgered():
     """S16-2：_post_subtask_completion_to_parent 的 GitCode 路径经
-    _gitcode_post_issue_comment_ledgered 记账——mock urllib 返回带 id 的响应。"""
+    _gitcode_post_issue_comment_ledgered 记账。
+
+    写侧已收敛到 VcsApiClient（不再裸 urllib），桩层随之下沉到客户端请求方法。
+    """
     _clean()
-    import urllib.request as _ur_req
-    fake_resp = MagicMock()
-    fake_resp.read.return_value = json.dumps({"id": 555001, "body": "ok"}).encode()
-    with patch.object(_ur_req, "urlopen", return_value=fake_resp):
+    from src.vcs.api_client import VcsApiClient
+    with patch.object(VcsApiClient, "_do_request",
+                       return_value={"id": 555001, "body": "ok"}):
         ep._gitcode_post_issue_comment_ledgered("test/i453led", "12", "### 子任务 #12 已完成", "tok",
                                                 repo_key=RK)
     assert ol.is_our_outbound("gitcode", RK, "issue_comment", "555001") is True
@@ -890,12 +892,8 @@ def test_subtask_comment_parent_issue_echo_blocked():
     该评论的 webhook 回流（父 issue 的 issue_comment）→ 台账命中拦。"""
     _clean()
     # 写侧：_gitcode_post_issue_comment_ledgered 发到父 issue #12（S16-2 已测入账）
-    from unittest.mock import MagicMock
-    import urllib.request as _ur_req
-    fake_resp = MagicMock()
-    # 无 with：urlopen 返回值即 resp，read() 直接可调
-    fake_resp.read.return_value = json.dumps({"id": 777001}).encode()
-    with patch.object(_ur_req, "urlopen", return_value=fake_resp):
+    from src.vcs.api_client import VcsApiClient
+    with patch.object(VcsApiClient, "_do_request", return_value={"id": 777001}):
         ep._gitcode_post_issue_comment_ledgered("test/i453led", "12", "### 子任务 #12 已完成", "tok",
                                                 repo_key=RK)
     # 读侧：父 issue 收到该评论的回流（评论 ID 命中）
@@ -1063,10 +1061,8 @@ def test_subtask_completion_real_chain_ledgered():
     """审查 P1-1：_post_subtask_completion_to_parent 真实调用链入账（非 helper 自证）——
     GitCode 分支经 ledgered 辅助读响应取 ID。"""
     _clean()
-    import urllib.request as _ur_req
-    fake_resp = MagicMock()
-    fake_resp.read.return_value = json.dumps({"id": 666001}).encode()
-    with patch.object(_ur_req, "urlopen", return_value=fake_resp):
+    from src.vcs.api_client import VcsApiClient
+    with patch.object(VcsApiClient, "_do_request", return_value={"id": 666001}):
         ep._post_subtask_completion_to_parent("test/i453led", "12", "5", "conclusion: 完成", "tok",
                                               repo_key=RK)
     assert ol.is_our_outbound("gitcode", RK, "issue_comment", "666001") is True
@@ -1075,10 +1071,8 @@ def test_subtask_completion_real_chain_ledgered():
 def test_all_subtasks_done_real_chain_ledgered():
     """审查 P1-1：_post_all_subtasks_done 真实调用链入账。"""
     _clean()
-    import urllib.request as _ur_req
-    fake_resp = MagicMock()
-    fake_resp.read.return_value = json.dumps({"id": 666002}).encode()
-    with patch.object(_ur_req, "urlopen", return_value=fake_resp):
+    from src.vcs.api_client import VcsApiClient
+    with patch.object(VcsApiClient, "_do_request", return_value={"id": 666002}):
         ep._post_all_subtasks_done("test/i453led", "5", [{"issue_id": "12", "stage": "done"}], "tok",
                                    repo_key=RK)
     assert ol.is_our_outbound("gitcode", RK, "issue_comment", "666002") is True

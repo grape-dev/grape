@@ -1,7 +1,7 @@
 """Issue #179: Skill 远程同步 + 技能分类表独立化 — 单元测试
 
 覆盖：
-- skill_category 表建表 + seed 15 分类
+- skill_category 表建表 + seed 16 分类
 - category_id 回填（sub_scene → slug 映射）
 - list_skill_categories / get_skill_category 查询
 - _sync_skills_to_db 写入 category_id + 变更检测
@@ -68,7 +68,7 @@ class TestSkillCategoryTable:
         with db_lock:
             c = db.cursor()
             c.execute("SELECT COUNT(*) FROM skill_category")
-            assert c.fetchone()[0] == 15
+            assert c.fetchone()[0] == 16
 
     def test_seed_data(self):
         with db_lock:
@@ -91,8 +91,18 @@ class TestSkillCategoryTable:
         with db_lock:
             c = db.cursor()
             c.execute("SELECT COUNT(DISTINCT slug), COUNT(*) FROM skill_category")
-            distinct, total = c.fetchone()
-            assert distinct == total == 15
+        distinct, total = c.fetchone()
+        assert distinct == total == 16
+
+    def test_content_generation_seeded(self):
+        """v3: 官方内容生成类技能（novel-to-manga 等）必须有分类，不能 category_id=0。"""
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT name, order_num FROM skill_category WHERE slug='content-generation'")
+            row = c.fetchone()
+            assert row is not None
+            assert row[0] == "内容与多模态生成"
+            assert row[1] == 16
 
 
 class TestCategoryBackfill:
@@ -134,7 +144,7 @@ class TestCategoryQueries:
     def test_list_skill_categories(self):
         from src.user.db import list_skill_categories
         cats = list_skill_categories()
-        assert len(cats) == 15
+        assert len(cats) == 16
         assert all("id" in c and "name" in c and "slug" in c for c in cats)
         # 按 order_num 排序
         order_nums = [c["order_num"] for c in cats]
@@ -240,7 +250,7 @@ class TestApiEndpoints:
         assert r.status_code == 200
         data = r.json()
         assert "categories" in data
-        assert len(data["categories"]) == 15
+        assert len(data["categories"]) == 16
 
     def test_agent_stats_returns_agents(self):
         headers = self._headers()

@@ -80,6 +80,12 @@ class TestDirectChatInjectsToken:
     def test_send_task_conv_injects_token(self, client, monkeypatch):
         """/chat/send direct + 任务会话 → stream_chat_agent 收到含 GRAPE_SESSION_TOKEN 的 env_extra。"""
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
+        # 本用例只验证 env_extra 注入，不验证上游 VCS token 解析。测试库里没有
+        # external_identities 行，真实解析会返回 NO_TOKEN_AVAILABLE，任务会话随即走
+        # TOKEN_EXPIRED 分支提前 return（stream_chat_agent 不被调用），断言恒为红。
+        # 桩掉 GitCode token，让用例聚焦被测行为。
+        monkeypatch.setattr("src.api.deps.get_user_token_with_refresh",
+                            lambda *a, **kw: "stub-gitcode-token")
         _seed_local_engine()
         cid = create_conversation(99902, "gitcode:owner/repo", title="Issue #2",
                                   conv_type="task", issue_number=2)
@@ -118,3 +124,5 @@ class TestDirectChatInjectsToken:
         env = captured.get("env_extra") or {}
         assert "GRAPE_SESSION_TOKEN" not in env
         assert "GRAPE_CLI_MODE" not in env
+        # 即使一般对话也要有网关地址，否则 grape-cli 回落到 localhost:8000
+        assert env.get("GRAPE_SERVER_URL", "").startswith("http")

@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS unified_user_mapping (
     feishu_name TEXT DEFAULT '',
     app_id TEXT DEFAULT '',               -- ★ 产生 feishu_open_id 的飞书 App（open_id 为 app 级，见 feishu-app-scoped-openid-fix.md）
     github_login TEXT DEFAULT '',
+    gitlab_user TEXT DEFAULT '',
     dingtalk_user_id TEXT DEFAULT '',
     updated_at TEXT DEFAULT (datetime('now'))
 )
@@ -272,6 +273,15 @@ try:
         log.info("Added unified_user_mapping.app_id column")
 except Exception as e:
     log.warning(f"Add unified_user_mapping.app_id failed: {e}")
+# 兼容列迁移：GitLab 用户名（provider 中性映射，避免 gitlab 落到 gitcode_user 串号）
+try:
+    _um_cols_gl = [r[1] for r in db.execute("PRAGMA table_info(unified_user_mapping)").fetchall()]
+    if "gitlab_user" not in _um_cols_gl:
+        db.execute("ALTER TABLE unified_user_mapping ADD COLUMN gitlab_user TEXT DEFAULT ''")
+        db.commit()
+        log.info("Added unified_user_mapping.gitlab_user column")
+except Exception as e:
+    log.warning(f"Add unified_user_mapping.gitlab_user failed: {e}")
 # 兼容旧列迁移（幂等）
 try:
     db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN auto_impl_enabled INTEGER DEFAULT 0")
@@ -937,7 +947,20 @@ def _chat_config_candidate_rows(c, user_id: int):
     return out
 
 
-def _chat_config_row_engine(c, runtime_id: int):
+# 已告警过的"配置指向失效引擎"组合（进程内）：自愈成功/无法自愈都只报一次，
+# 避免每条 chat 消息刷一条同样的 WARNING（历史上 runtime_id 悬空会无限刷）。
+_STALE_RUNTIME_WARNED: set[tuple[int, int]] = set()
+
+
+def _warn_stale_runtime_once(user_id: int, runtime_id: int, msg: str) -> None:
+    key = (user_id, runtime_id)
+    if key in _STALE_RUNTIME_WARNED:
+        return
+    _STALE_RUNTIME_WARNED.add(key)
+    log.warning(msg)
+
+
+def _chat_config_row_engine(c, runtime_id: int, user_id: int = 0):
     """解析配置行指向的引擎，返回 (backend_name, usable)。
 
     usable=False 覆盖既有的两种"按未配置处理"情形：引擎行已不存在、引擎名不是已知引擎。
@@ -948,18 +971,24 @@ def _chat_config_row_engine(c, runtime_id: int):
     brow = c.fetchone()
     if not brow or not brow[0]:
         # runtime_id 指向的引擎行已不存在（被删除）：视为未绑定，走本机直连兜底
-        log.warning(f"get_chat_config: runtime_id={runtime_id} 不存在（引擎行已删除），按未配置处理")
+        _warn_stale_runtime_once(
+            user_id, runtime_id,
+            f"get_chat_config: user_id={user_id} 配置行 runtime_id={runtime_id} 不存在"
+            f"（引擎行已删除），按未配置处理并由调用方自愈")
         return "", False
     from src.user.db import is_known_engine_name
     _n = (brow[0] or "").strip().lower()
     if not is_known_engine_name(_n):
         # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
-        log.warning(f"get_chat_config: runtime_id={runtime_id} 指向未知引擎 '{brow[0]}'，按未配置处理")
+        _warn_stale_runtime_once(
+            user_id, runtime_id,
+            f"get_chat_config: user_id={user_id} 配置行 runtime_id={runtime_id} 指向未知引擎 "
+            f"'{brow[0]}'，按未配置处理")
         return "", False
     return brow[0], True
 
 
-def _pick_chat_config_row(c, user_id: int):
+def _pick_chat_config_row(c, user_id: int, with_stale: bool = False):
     """按"写路径优先 + 不降级可用配置"挑出该用户的生效配置行。
 
     返回 (row_id, row, backend_name)：
@@ -967,17 +996,26 @@ def _pick_chat_config_row(c, user_id: int):
       · 候选全不可用           → 首个候选，runtime_id 置零（保持既有"按未配置处理"的兜底语义）
       · 无候选                 → (None, None, "")
 
+    with_stale=True 时追加第 4 项 stale_runtime_id：被选中那一行**原始**指向的、已失效的
+    引擎 id（0 表示没有悬空引用）。供 get_chat_config 做写侧自愈，不改变默认 3 元组
+    返回（scripts/diag 下的诊断脚本按 3 元组解包）。
+
     单独抽出来是为了让**诊断脚本/离线核查**能复用同一份逻辑（避免口径漂移）。
     """
     cands = _chat_config_candidate_rows(c, user_id)
     if not cands:
-        return None, None, ""
+        return (None, None, "", 0) if with_stale else (None, None, "")
+    stale_rid = 0
     for rid, cand in cands:
-        name, usable = _chat_config_row_engine(c, cand[0])
+        name, usable = _chat_config_row_engine(c, cand[0], user_id=user_id)
         if usable:
-            return rid, cand, name
+            return (rid, cand, name, stale_rid) if with_stale else (rid, cand, name)
+        # 记录首个（优先级最高）失效行的原始 runtime_id，供调用方自愈
+        if not stale_rid and cand[0]:
+            stale_rid = cand[0]
     rid, cand = cands[0]
-    return rid, (0,) + cand[1:], ""
+    _picked = (0,) + cand[1:]
+    return (rid, _picked, "", stale_rid) if with_stale else (rid, _picked, "")
 
 
 def get_chat_config(user_id: int) -> dict:
@@ -997,7 +1035,7 @@ def get_chat_config(user_id: int) -> dict:
         # 备注：weekly-08 线上另有一套等价实现（「已配置行优先 + id ASC」，见
         # chat-config-duplicate-row-unbind-fix-design.md）——同一问题的两种解法，本分支沿用下面这套
         # （canonical-first + 不降级；有 test_chat_config_row_selection.py 5 项钉住）。
-        picked_id, row, backend_name = _pick_chat_config_row(c, user_id)
+        picked_id, row, backend_name, stale_rid = _pick_chat_config_row(c, user_id, with_stale=True)
         if row is None:
             # 无配置：本机直连兜底 + 幂等物化默认 runtime_id（chat-agent-backend-resolution-fix.md §3.1）
             cfg = _chat_config_with_local_backend("", 0, "", 0, "", user_id=user_id)
@@ -1007,12 +1045,66 @@ def get_chat_config(user_id: int) -> dict:
                 except Exception as e:
                     log.warning(f"get_chat_config materialize default failed: {e}")
             return cfg
+        if stale_rid:
+            # 写侧自愈：配置行指向的引擎已被删除，把悬空指针改成**最终实际生效**的引擎
+            # （本机直连兜底后的 id；无可用引擎则为 0）。只 UPDATE 仍指向该失效 id 的行，
+            # 幂等且不碰别的配置；修完下次读不再判定，也不再刷 WARNING
+            #（悬空值此前只读兜底、永不落库，告警会跟着每条消息重复出现）。
+            try:
+                _cfg0 = _chat_config_with_local_backend(
+                    backend_name, row[0] or 0, row[1] or "", row[2] or 0,
+                    row[3] or "", row[4] or "", row[5] or "", "", user_id=user_id)
+                _heal = int(_cfg0.get("runtime_id") or 0)
+                _n = c.execute(
+                    "UPDATE chat_agent_session SET runtime_id=? "
+                    "WHERE user_id=? AND runtime_id=?", (_heal, user_id, stale_rid))
+                db.commit()
+                log.info(f"get_chat_config: user_id={user_id} 自愈悬空引擎引用 "
+                         f"runtime_id {stale_rid} → {_heal}（{getattr(_n, 'rowcount', 0) or 0} 行）")
+                _STALE_RUNTIME_WARNED.add((user_id, stale_rid))
+            except Exception as e:
+                log.warning(f"get_chat_config self-heal failed (user_id={user_id}, "
+                            f"runtime_id={stale_rid}): {e}")
+            return _cfg0
         if picked_id != f"sess-cfg-{user_id}" and backend_name:
             # 命中历史遗留行（写路径碰不到它）——仍需迁移合并，见诊断报告第三步
             log.info(f"get_chat_config: user_id={user_id} 命中历史遗留配置行 '{picked_id}'"
                      f"（写路径行为 'sess-cfg-{user_id}'），建议迁移合并")
         return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
                                                "", user_id=user_id)
+
+
+def purge_dangling_runtime_refs() -> int:
+    """清理所有指向已删除引擎行的 session 指针（幂等，只清悬空值，返回影响行数）。
+
+    根因：引擎行会被多条路径物理删除（settings 吊销凭据、devstage 删环境、
+    engine_select 合并去重、save_agent_runtimes 对账、db_setup 迁移），
+    但只有部分路径顺手把 `devops_agent_session.runtime_id` 归零，
+    `chat_agent_session.runtime_id` 完全没人管 → 配置行长期指向不存在的 id，
+    每次读配置都按"未配置"兜底并刷 WARNING。
+
+    这里做一次全量对账，不依赖调用方是否记得清理；启动期跑一遍即可覆盖存量脏数据。
+    """
+    total = 0
+    with db_lock:
+        c = db.cursor()
+        for table in ("chat_agent_session", "devops_agent_session"):
+            try:
+                cur = c.execute(
+                    f"UPDATE {table} SET runtime_id=0 "
+                    f"WHERE runtime_id IS NOT NULL AND runtime_id != 0 "
+                    f"AND runtime_id NOT IN (SELECT id FROM agent_runtimes)")
+                total += getattr(cur, "rowcount", 0) or 0
+            except Exception as e:
+                # 表不存在（老库/精简部署）等 → 跳过，不影响启动
+                log.warning(f"purge_dangling_runtime_refs: {table} skipped: {e}")
+        try:
+            db.commit()
+        except Exception as e:
+            log.warning(f"purge_dangling_runtime_refs commit failed: {e}")
+    if total:
+        log.info(f"purge_dangling_runtime_refs: 清理悬空 runtime_id 引用 {total} 行")
+    return total
 
 
 def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,

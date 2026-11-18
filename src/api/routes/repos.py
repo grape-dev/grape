@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from src.config import log, WORKSPACE_DIR
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
-from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_token_with_refresh, get_user_github_token_with_refresh, require_no_session_token, require_org_member
+from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_token_with_refresh, get_user_github_token_with_refresh, get_user_gitlab_token_with_refresh, require_no_session_token, require_org_member
 from src.api.oauth_token import with_oauth_token
 from src.api.org_context import resolve_org_context
 from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, get_bot_token_by_repo
@@ -62,12 +62,19 @@ def _get_user_provider_and_token(username: str, login_provider: str = "", user_i
         github_token = get_user_github_token_with_refresh(username, user_id=user_id)
         if github_token:
             return "github", github_token
+    elif login_provider == "gitlab":
+        gitlab_token = get_user_gitlab_token_with_refresh(username, user_id=user_id)
+        if gitlab_token:
+            return "gitlab", gitlab_token
     github_token = get_user_github_token_with_refresh(username, user_id=user_id)
     if github_token:
         return "github", github_token
     gitcode_token = get_user_token_with_refresh(username, user_id)
     if gitcode_token:
         return "gitcode", gitcode_token
+    gitlab_token = get_user_gitlab_token_with_refresh(username, user_id=user_id)
+    if gitlab_token:
+        return "gitlab", gitlab_token
     return "", ""
 
 
@@ -81,18 +88,22 @@ def _provider_from_hint(full_name: str) -> str:
         return "github"
     if f.startswith("gitcode:"):
         return "gitcode"
+    if f.startswith("gitlab:"):
+        return "gitlab"
     base = f.split(":", 1)[-1]  # 兼容已有前缀写法
     try:
         from src.session_manager import db, db_lock
         with db_lock:
             rows = db.cursor().execute(
-                "SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
-                ("github:" + base, "gitcode:" + base)).fetchall()
+                "SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?, ?) LIMIT 1",
+                ("github:" + base, "gitcode:" + base, "gitlab:" + base)).fetchall()
         for r in rows:
             if r[0].startswith("github:"):
                 return "github"
             if r[0].startswith("gitcode:"):
                 return "gitcode"
+            if r[0].startswith("gitlab:"):
+                return "gitlab"
     except Exception:
         pass
     return ""
@@ -111,6 +122,9 @@ def _provider_from_token(user: dict) -> tuple[str, str]:
     gc = get_user_token_with_refresh(user["username"], user.get("id", 0))
     if gc:
         return "gitcode", gc
+    gl = get_user_gitlab_token_with_refresh(user["username"], user_id=user.get("id", 0))
+    if gl:
+        return "gitlab", gl
     return "", ""
 
 
@@ -122,6 +136,14 @@ def _fetch_and_cache(user_id: int, api_token: str, provider: str = "gitcode") ->
         for r in repos:
             if not r.get("repo_key"):
                 r["repo_key"] = f"github:{r.get('full_name', '')}"
+    elif provider == "gitlab":
+        from src.user.repo_manager import fetch_gitlab_repos_with_role
+        repos = fetch_gitlab_repos_with_role(api_token)
+        if not repos:
+            log.warning("fetch_gitlab_repos_with_role returned empty (token may lack api scope)")
+        for r in repos:
+            if not r.get("repo_key"):
+                r["repo_key"] = f"gitlab:{r.get('full_name', '')}"
     else:
         repos = fetch_repos_with_role(api_token)
         # FR-5.4: 空结果可能是 token scope 受限，记 warning
@@ -197,6 +219,7 @@ def _filter_repos(user_id: int, repos: list[dict], org_id: int = 0) -> list[dict
             "is_joined": in_managed,
             "is_hosted": hosted,
             "created_at": r.get("created_at", "") or "",
+            "web_url": r.get("web_url", "") or "",
         })
     return result
 
@@ -223,7 +246,10 @@ def _probe_stale_repos(api_token: str, user_id: int):
 
     # FR-1.3/FR-20.3: token 能力前置检查——探活前验证 token 有效
     # 401 → 放弃整轮并标记"token 失效"；不做任何判定
-    if api_token:
+    # 只有确实存在 GitCode 托管仓时才打 gitcode.com，否则 GitLab/GitHub 用户 token 会被误发
+    _has_gitcode_repos = any(str(r.get("repo_key", "")).startswith("gitcode:")
+                             for r in all_repos)
+    if api_token and _has_gitcode_repos:
         try:
             _req = urllib.request.Request(
                 "https://gitcode.com/api/v5/user",
@@ -265,12 +291,22 @@ def _probe_stale_repos(api_token: str, user_id: int):
         except Exception:
             pass
 
+    gitlab_token = ""
+    try:
+        from src.api.deps import get_user_gitlab_token_with_refresh
+        from src.auth.grape_account_db import get_grape_account_by_id as _get_acc
+        _gl_acc = _get_acc(user_id) or {}
+        gitlab_token = get_user_gitlab_token_with_refresh(_gl_acc.get("username", ""), user_id=user_id)
+    except Exception:
+        pass
+
     gitcode_headers = {"Accept": "application/json", "Authorization": f"Bearer {api_token}"} if api_token else {}
     github_headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {github_token}",
         "User-Agent": "Grape-DevOps",
     } if github_token else {}
+    gitlab_headers = {"Accept": "application/json", "Authorization": f"Bearer {gitlab_token}"} if gitlab_token else {}
 
     # 第一步：并发查仓库是否存在（404 = 已删除）
     def _check_exists(item):
@@ -286,6 +322,13 @@ def _probe_stale_repos(api_token: str, user_id: int):
                 return None  # 无 GitHub token，跳过检查（不误判）
             url = f"https://api.github.com/repos/{owner}/{repo_name}"
             hdrs = github_headers
+        elif provider == "gitlab":
+            if not gitlab_token:
+                return None  # 无 GitLab token 时跳过，不误判
+            from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+            url = (f"{get_gitlab_api_base()}/projects/"
+                   f"{gitlab_project_path(owner, repo_name)}")
+            hdrs = gitlab_headers
         else:
             if not api_token:
                 return None
@@ -340,6 +383,13 @@ def _probe_stale_repos(api_token: str, user_id: int):
                 continue
             url = f"https://api.github.com/repos/{owner}/{repo_name}/hooks"
             hdrs = github_headers
+        elif provider == "gitlab":
+            if not gitlab_token:
+                continue
+            from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+            url = (f"{get_gitlab_api_base()}/projects/"
+                   f"{gitlab_project_path(owner, repo_name)}/hooks")
+            hdrs = gitlab_headers
         else:
             url = f"https://gitcode.com/api/v5/repos/{owner}/{repo_name}/hooks"
             hdrs = gitcode_headers
@@ -446,7 +496,7 @@ def _start_stale_probe_async(user: dict, providers: list[str]) -> None:
       请求路径不参与 as_completed / 不 join，不因探活阻塞接口返回。
     """
     import time as _time
-    if "gitcode" not in providers and "github" not in providers:
+    if not any(_p in providers for _p in ("gitcode", "github", "gitlab")):
         return  # 无任何平台 token，不探活
     uid = user.get("id", 0) or 0
     if not uid:
@@ -460,7 +510,8 @@ def _start_stale_probe_async(user: dict, providers: list[str]) -> None:
         _last_probe_ts[uid] = now
 
     # FR-21.3: 按用户绑定平台取主 token——有 gitcode 用 gitcode，否则用 github
-    _probe_provider = "gitcode" if "gitcode" in providers else "github"
+    _probe_provider = ("gitcode" if "gitcode" in providers
+                       else "github" if "github" in providers else "gitlab")
     def _run():
         try:
             token = with_oauth_token(user, _probe_provider, lambda t: t)
@@ -494,12 +545,12 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     # 只需确定用户绑定了哪些平台
     from src.auth.grape_account_db import get_user_identities
     _identities = get_user_identities(user["id"])
-    _bound_providers = {i["provider"] for i in _identities if i.get("provider") in ("gitcode", "github")}
+    _bound_providers = {i["provider"] for i in _identities if i.get("provider") in ("gitcode", "github", "gitlab")}
     if not _bound_providers:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
     # 需求 17: 前端显式指定 provider 时只拉该平台
-    if provider in ("gitcode", "github"):
+    if provider in ("gitcode", "github", "gitlab"):
         if provider not in _bound_providers:
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"{provider} API Token 未配置，请先绑定 {provider} 平台"})
         _providers = [provider]
@@ -537,10 +588,10 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
 
     def _filter_by_provider(repos_list):
         """按 provider 过滤缓存（repo_key 前缀匹配）"""
-        if provider in ("gitcode", "github") and len(_providers) == 1:
+        if provider in ("gitcode", "github", "gitlab") and len(_providers) == 1:
             pfx = provider + ":"
             return [r for r in repos_list if (r.get("repo_key", "").startswith(pfx) or
-                       (provider == "gitcode" and not r.get("repo_key", "").startswith("github:")))]
+                       (provider == "gitcode" and not r.get("repo_key", "").startswith(("github:", "gitlab:"))))]
         return repos_list
 
     if cached and not _is_expired():
@@ -595,7 +646,8 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     # 有平台需要重新授权且无任何结果 → 抛 401 让前端提示
     if _reauth_provider and not all_repos and not cached:
         raise HTTPException(status_code=401, detail={"code": 401,
-            "message": f"{_reauth_provider} 授权已过期，请重新登录授权", "action": "reauth_required"})
+            "message": f"{_reauth_provider} 授权已过期，请重新登录授权",
+            "action": "reauth_required", "provider": _reauth_provider})
 
     if not all_repos and failed_providers and cached:
         # 全部平台都失败 → 用旧缓存兜底
@@ -655,11 +707,11 @@ def sync_repos(user: dict = Depends(require_org_member)):
     # Issue #343 修复: 不再预获取 token（with_oauth_token 内部获取+预刷新）
     from src.auth.grape_account_db import get_user_identities
     _identities = get_user_identities(user["id"])
-    _providers = [i["provider"] for i in _identities if i.get("provider") in ("gitcode", "github")]
+    _providers = [i["provider"] for i in _identities if i.get("provider") in ("gitcode", "github", "gitlab")]
     if not _providers:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
 
-    if "gitcode" in _providers:
+    if "gitcode" in _providers or "github" in _providers:
         # 异步 + 节流启动失效托管探活（请求不等它，短时间不重复）
         try:
             _start_stale_probe_async(user, _providers)
@@ -746,6 +798,24 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
         except Exception as e:
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
 
+    if provider == "gitlab":
+        from src.user.repo_manager import _gitlab_req, get_user_gitlab_login
+        from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+        try:
+            login = get_user_gitlab_login(api_token)
+            if not login:
+                raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
+            _gitlab_req("GET", f"{get_gitlab_api_base()}/projects/{gitlab_project_path(login, name)}", api_token)
+            return {"exists": True, "full_name": f"{login}/{name}"}
+        except RuntimeError as e:
+            if "404" in str(e) or "Not Found" in str(e):
+                return {"exists": False}
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"检查失败: {e}"})
+
     from src.user.repo_manager import _req, get_user_gitcode_login
     try:
         login = get_user_gitcode_login(api_token)
@@ -784,6 +854,8 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         provider = body.provider
         if provider == "github":
             api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
+        elif provider == "gitlab":
+            api_token = get_user_gitlab_token_with_refresh(user["username"], user_id=user["id"])
         else:
             api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
     else:
@@ -795,6 +867,12 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         from src.user.repo_manager import create_github_repo as _create_gh_repo
         try:
             repo_info = _create_gh_repo(api_token=api_token, name=name, description=body.description, private=private)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {e}"})
+    elif provider == "gitlab":
+        from src.user.repo_manager import create_gitlab_repo as _create_gl_repo
+        try:
+            repo_info = _create_gl_repo(api_token=api_token, name=name, description=body.description, private=private)
         except Exception as e:
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {e}"})
     else:
@@ -816,6 +894,67 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     except Exception:
         pass
 
+    # GitLab：创建后托管走独立路径 B（用户 token + 随机 secret），不依赖全局 bot
+    if provider == "gitlab" and body.host_after_create:
+        import secrets as _secrets
+        from src.user.db import get_webhook_url
+        from src.repo_key import to_repo_key as _to_repo_key
+        from src.user.repo_manager import (
+            find_existing_gitlab_webhook, setup_gitlab_webhook, remove_gitlab_webhook,
+            update_gitlab_webhook_token,
+        )
+        _webhook_url = get_webhook_url()
+        if not _webhook_url:
+            try:
+                _rk = _to_repo_key(full_name, provider="gitlab")
+                user_db.add_managed_repo(_rk, owner, repo_name)
+                user_db.mark_user_repo_join(user["id"], _rk, is_join=True, is_admin=True)
+                user_db.set_host_status(_rk, "webhook_missing")
+            except Exception as _reg_e:
+                log.warning(f"create_new_repo(gitlab): fallback registration failed: {_reg_e}")
+            return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name,
+                    "hosted": False, "message": "仓库已创建，但 webhook_url 未配置，请稍后手动托管"}
+        _webhook_url = user_db.webhook_url_for_provider(_webhook_url, "gitlab")
+        _webhook_secret = _secrets.token_urlsafe(32)
+        try:
+            existing_id = find_existing_gitlab_webhook(api_token, owner, repo_name, _webhook_url)
+            if existing_id:
+                # GitLab 读不回已有 hook 的 token → 直接 PUT 覆盖成即将写库的 secret。
+                # 比「删旧重建」更稳：删除失败时也不会留下 DB/上游密钥不一致（403）。
+                update_gitlab_webhook_token(api_token, owner, repo_name,
+                                            existing_id, _webhook_secret)
+                hook_id = existing_id
+            else:
+                hook_id = setup_gitlab_webhook(
+                    api_token, owner, repo_name, _webhook_url, webhook_secret=_webhook_secret)
+            _rk = _to_repo_key(full_name, provider="gitlab")
+            user_db.add_managed_repo(_rk, owner, repo_name, webhook_id=hook_id,
+                                     host_user_id=user["id"], webhook_secret=_webhook_secret)
+            user_db.mark_user_repo_join(user["id"], _rk, is_join=True, is_admin=True)
+            from src.user.repo_manager import get_user_gitlab_login as _get_gl_login
+            _host_login = _get_gl_login(api_token)
+            if _host_login:
+                user_db.sync_host_vcs_username(_rk, _host_login)
+            user_db.set_host_status(_rk, "ok")
+            from src.api.session_store import ensure_default_agent_sessions
+            ensure_default_agent_sessions(_rk)
+        except Exception as e:
+            try:
+                _rk = _to_repo_key(full_name, provider="gitlab")
+                user_db.add_managed_repo(_rk, owner, repo_name)
+                user_db.mark_user_repo_join(user["id"], _rk, is_join=True, is_admin=True)
+                user_db.set_host_status(_rk, "partial")
+            except Exception as _reg_e:
+                log.warning(f"create_new_repo(gitlab): fallback registration failed: {_reg_e}")
+            return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name,
+                    "hosted": False, "message": f"仓库已创建，但托管失败: {e}"}
+        try:
+            _fetch_and_cache(user["id"], api_token, "gitlab")
+        except Exception:
+            pass
+        return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name,
+                "hosted": True, "message": "仓库创建并托管成功"}
+
     if body.host_after_create:
         from src.user.db import get_webhook_url
         webhook_url = get_webhook_url()
@@ -835,9 +974,9 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
             except Exception:
                 pass
             return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": False, "message": "仓库已创建，但 webhook_url 未配置，请稍后手动托管"}
-        # GitHub 仓库用 /webhook/github 路由
-        if provider == "github":
-            webhook_url = webhook_url.replace("/webhook/gitcode", "/webhook/github")
+        # 按 provider 切到对应 webhook 路由（兼容管理员自定义回调路径）
+        if provider in ("github", "gitlab"):
+            webhook_url = user_db.webhook_url_for_provider(webhook_url, provider)
         # Issue #372: 路径 B 支持——无全局 bot token 时用用户 token + 随机密钥
         import secrets as _secrets
         if provider == "github":
@@ -1038,7 +1177,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         provider = _provider_from_hint(body.full_name)
     # 剥离 provider 前缀（"github:owner/repo" / "gitcode:owner/repo"），下游统一用纯 owner/repo
     _raw = body.full_name
-    if ":" in _raw and _raw.split(":", 1)[0] in ("github", "gitcode"):
+    if ":" in _raw and _raw.split(":", 1)[0] in ("github", "gitcode", "gitlab"):
         _raw = _raw.split(":", 1)[1]
         body.full_name = _raw
     parts = _raw.split("/", 1)
@@ -1049,6 +1188,8 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
     # D44: 显式 provider > 仓库来源提示；仍无 → 按平台 token 可用性自动选择（github 优先，不以登录平台短路）
     if provider == "github":
         api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
+    elif provider == "gitlab":
+        api_token = get_user_gitlab_token_with_refresh(user["username"], user_id=user["id"])
     elif provider == "gitcode":
         api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
     else:
@@ -1071,16 +1212,17 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             "guidance": {
                 "tried": _tried,
                 "action": "Access this Web UI via public IP (auto-detect will trigger on login), or set webhook_url in Settings",
-                "example": "http://<public-ip>/webhook/gitcode"
+                "example": "http://<public-ip>/webhook/gitcode (GitHub/GitLab 会自动切换到对应回调路径)"
             }
         })
-    # GitHub 仓库用 /webhook/github 路由
-    if provider == "github":
-        webhook_url = webhook_url.replace("/webhook/gitcode", "/webhook/github")
+    # 按平台切换到对应 webhook 路由（自定义回调路径也能正确重写）
+    webhook_url = user_db.webhook_url_for_provider(webhook_url, provider)
 
     if not api_token:
         if provider == "github":
             raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "GitHub API Token 未配置，请重新绑定 GitHub 账号"})
+        if provider == "gitlab":
+            raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "GitLab Token 未配置，请重新绑定 GitLab 账号"})
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "GitCode Token 已过期且无法自动刷新，请重新登录"})
 
     # ===== GitHub 仓库托管 =====
@@ -1229,6 +1371,82 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             # Issue #455: 502 带上下文（stage/上游状态/retryable），原文仅落日志防泄露
             log.warning(f"host_repo GitHub failed: {e}")
             raise HTTPException(status_code=502, detail=_host_502_detail("github_host", e))
+
+    # ===== GitLab 仓库托管（路径 B：用户 token + 随机 webhook secret） =====
+    if provider == "gitlab":
+        import secrets as _secrets
+        from src.user.repo_manager import (
+            get_gitlab_project, find_existing_gitlab_webhook,
+            setup_gitlab_webhook, remove_gitlab_webhook,
+            update_gitlab_webhook_token,
+        )
+        from src.api.session_store import ensure_default_agent_sessions
+        repo_key = to_repo_key(body.full_name, provider="gitlab")
+
+        def _gl_precheck(token, _owner=owner, _repo=repo_name):
+            return get_gitlab_project(token, _owner, _repo)
+
+        try:
+            try:
+                _gl_info = with_oauth_token(user, "gitlab", _gl_precheck)
+            except RuntimeError as _gl_pre_err:
+                _gl_code = _upstream_status_code(_gl_pre_err)
+                log.warning(f"host_repo GitLab: permission pre-check failed: {_gl_pre_err}")
+                if _gl_code == 404:
+                    raise HTTPException(status_code=404, detail={
+                        "code": 404, "error_code": "REPO_NOT_FOUND",
+                        "message": f"仓库 {owner}/{repo_name} 不存在于 GitLab 或无权访问，请确认实例地址与仓库归属",
+                    })
+                if _gl_code in (401, 403):
+                    raise HTTPException(status_code=403, detail={
+                        "code": 403, "error_code": "PERMISSION_DENIED",
+                        "message": "无法访问该 GitLab 仓库：token 权限不足或非项目成员",
+                    })
+                raise
+
+            # GitLab 权限：Maintainer(40)+ 才能创建 webhook
+            _perm = (_gl_info.get("permissions") or {}) if isinstance(_gl_info, dict) else {}
+            _level = 0
+            for _k in ("project_access", "group_access"):
+                try:
+                    _level = max(_level, int((_perm.get(_k) or {}).get("access_level") or 0))
+                except (TypeError, ValueError):
+                    pass
+            if _level < 40:
+                raise HTTPException(status_code=403, detail={
+                    "code": 403, "error_code": "PERMISSION_DENIED",
+                    "message": "GitLab 托管需要 Maintainer 及以上项目权限（创建 webhook 所需）",
+                })
+
+            _webhook_secret = _secrets.token_urlsafe(32)
+            existing_id = find_existing_gitlab_webhook(api_token, owner, repo_name, webhook_url)
+            if existing_id:
+                # 读不回旧 hook 的 token → PUT 覆盖成即将写库的 secret，
+                # 保证上游与 DB 一致（删旧重建失败也不会留下 403 隐患）
+                update_gitlab_webhook_token(api_token, owner, repo_name,
+                                            existing_id, _webhook_secret)
+                hook_id = existing_id
+            else:
+                hook_id = setup_gitlab_webhook(
+                    api_token, owner, repo_name, webhook_url, webhook_secret=_webhook_secret)
+            from src.api.onboarding import cleanup_stale_repo_data
+            cleanup_stale_repo_data(repo_key)
+            user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id,
+                                     org_id=_org_id, host_user_id=user["id"],
+                                     webhook_secret=_webhook_secret)
+            user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
+            from src.user.repo_manager import get_user_gitlab_login
+            _host_login = get_user_gitlab_login(api_token)
+            if _host_login:
+                user_db.sync_host_vcs_username(repo_key, _host_login)
+            user_db.set_host_status(repo_key, "ok")
+            ensure_default_agent_sessions(repo_key)
+            return {"message": "仓库托管成功", "webhook_id": hook_id, "bot_collaborator_needed": False}
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.warning(f"host_repo GitLab failed: {e}")
+            raise HTTPException(status_code=502, detail=_host_502_detail("gitlab_host", e))
 
     # ===== GitCode 仓库托管 =====
     # Issue #345: 改用统一入口读取全局 bot 配置
@@ -1444,7 +1662,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         raise HTTPException(status_code=502, detail=_host_502_detail("host_setup", e))
 
 
-@router.post("/{owner}/{repo}/repair-host", operation_id="repos_repair_host", summary="Repair hosting", description="Self-heals an unfinished hosting flow (bot not joined / webhook missing). Idempotent; uses owner-token invite + bot-token webhook, skipping the invite when the bot is already a maintainer.")
+@router.post("/{owner:path}/{repo}/repair-host", operation_id="repos_repair_host", summary="Repair hosting", description="Self-heals an unfinished hosting flow (bot not joined / webhook missing). Idempotent; uses owner-token invite + bot-token webhook, skipping the invite when the bot is already a maintainer. owner supports nested namespaces (GitLab subgroups).")
 def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """方案 F-4：自愈未完成的托管流程（bot 未加入 / webhook 未创建），幂等。
 
@@ -1456,9 +1674,15 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
     from src.repo_key import to_repo_key, parse_repo_key
     from src.user.repo_manager import get_hosting_provider_config, _RateLimitedError
     from src.user.db import get_webhook_url, set_host_status
-    from src.api.deps import get_user_token_with_refresh, get_user_github_token_with_refresh
+    from src.api.deps import (get_user_token_with_refresh,
+                              get_user_github_token_with_refresh,
+                              get_user_gitlab_token_with_refresh)
+    from src.user.db import provider_for_full_name
 
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    # 路径里只有无前缀 full_name（嵌套 namespace 尤其如此），按托管登记解析
+    # provider，避免 GitLab 仓库被当成 gitcode: 用错 token / 回调地址 / DB 列。
+    _full_name = f"{owner}/{repo}"
+    repo_key = to_repo_key(_full_name, provider=provider_for_full_name(_full_name))
     from src.api.deps import check_repo_access
     from src.user.db import managed_repo_exists
 
@@ -1466,6 +1690,8 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
     _provider, _, _ = parse_repo_key(repo_key)
     if _provider == "github":
         api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
+    elif _provider == "gitlab":
+        api_token = get_user_gitlab_token_with_refresh(user["username"], user_id=user["id"])
     else:
         api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
     if not api_token:
@@ -1517,11 +1743,13 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
             "guidance": {
                 "tried": _tried,
                 "action": "Access this Web UI via public IP (auto-detect will trigger on login), or set webhook_url in Settings",
-                "example": "http://<public-ip>/webhook/gitcode"
+                "example": "http://<public-ip>/webhook/gitcode (GitHub/GitLab 会自动切换到对应回调路径)"
             }
         })
     if _cfg["webhook_url_suffix"] not in webhook_url:
-        webhook_url = webhook_url.replace("/webhook/gitcode", _cfg["webhook_url_suffix"])
+        import re as _re
+        webhook_url = _re.sub(r"/webhook/(gitcode|github|gitlab)$",
+                              _cfg["webhook_url_suffix"], webhook_url)
 
     # 1) bot 是否已是维护者（路径 A only；路径 B 跳过）
     bot_ok = True if _use_path_b else False
@@ -1531,6 +1759,27 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
             try:
                 _perm = get_github_repo_permissions(bot_token, owner, repo)
                 bot_ok = bool(_perm and (_perm.get("admin") or _perm.get("maintain") or _perm.get("push")))
+            except Exception:
+                bot_ok = False
+        elif _provider == "gitlab":
+            # GitLab：项目 permissions 的 project/group access_level >= 40（Maintainer）。
+            # 之前落到 GitCode 分支调 get_member_permission 会打错 API，导致
+            # repair_host 对 GitLab 恒判 bot 无权限并降级。
+            from src.user.repo_manager import get_gitlab_project
+
+            def _gl_perm(tok):
+                _info = get_gitlab_project(tok, owner, repo) or {}
+                _perm_gl = _info.get("permissions") or {}
+                _lvl = 0
+                for _k in ("project_access", "group_access"):
+                    try:
+                        _lvl = max(_lvl, int((_perm_gl.get(_k) or {}).get("access_level") or 0))
+                    except (TypeError, ValueError):
+                        pass
+                return _lvl >= 40
+
+            try:
+                bot_ok = _gl_perm(bot_token)
             except Exception:
                 bot_ok = False
         else:
@@ -1557,6 +1806,15 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
                         bot_ok = False
                 except Exception as _ge:
                     log.warning(f"repair_host GitHub: add collaborator failed: {_ge}")
+                    bot_ok = False
+            elif _provider == "gitlab":
+                # GitLab 无「待接受邀请」语义，add member 即生效；用托管人 token 邀请
+                from src.user.repo_manager import add_gitlab_member
+                try:
+                    add_gitlab_member(api_token, owner, repo, bot_username, "maintainer")
+                    bot_ok = _gl_perm(bot_token)
+                except Exception as _gle:
+                    log.warning(f"repair_host GitLab: bot invite failed: {_gle}")
                     bot_ok = False
             else:
                 # GitCode: add_collaborator + accept_invite + retry
@@ -1588,9 +1846,11 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
     # 路径 A: bot token 查/建；路径 B: 用户 token 查/建 + 随机密钥
     _wh_token = api_token if _use_path_b else bot_token
     if _provider == "github":
-        _wh_password = _webhook_secret  # GitHub setup_github_webhook 用 webhook_secret 参数
+        _wh_password = _webhook_secret  # setup_github_webhook 用 webhook_secret 参数
     else:
-        _wh_password = _webhook_secret if _use_path_b else bot_token  # GitCode setup_webhook 用 webhook_password 参数
+        # GitCode 用 webhook_password 参数；GitLab 用 webhook_secret 参数，
+        # 但取值口径相同：路径 B 随机密钥，路径 A bot token。
+        _wh_password = _webhook_secret if _use_path_b else bot_token
 
     _find_fn = _cfg["find_webhook"]
     _setup_fn = _cfg["setup_webhook"]
@@ -1622,11 +1882,27 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
                 hid = None
             except Exception as _re:
                 log.warning(f"repair_host: remove old webhook failed (will reuse): {_re}")
-                _webhook_secret = ""  # P1-1: 删失败时不写新密钥
-                _wh_token = ""  # §31: 也不写用户 token（刷新后 stale），让验证 loud fail
-                _wh_password = _webhook_secret
+                if _provider == "gitlab":
+                    # 读不回旧 hook 的 token → PUT 对齐到即将写库的密钥，
+                    # 保留 hid 跳过重建，DB 与上游仍一致（否则 webhook 持续 403）。
+                    from src.user.repo_manager import update_gitlab_webhook_token
+                    _effective = _webhook_secret if _use_path_b else bot_token
+                    try:
+                        update_gitlab_webhook_token(api_token, owner, repo, hid, _effective)
+                        log.info(f"repair_host: aligned existing GitLab hook {hid} token via PUT")
+                    except Exception as _ue:
+                        log.warning(f"repair_host: align GitLab hook token failed: {_ue}")
+                        _webhook_secret = ""
+                        _wh_token = ""
+                        _wh_password = ""
+                else:
+                    _webhook_secret = ""  # P1-1: 删失败时不写新密钥
+                    _wh_token = ""  # §31: 也不写用户 token（刷新后 stale），让验证 loud fail
+                    _wh_password = _webhook_secret
     if not hid:
-        if _provider == "github":
+        # GitLab 的 setup_webhook 与 GitHub 一样用 webhook_secret= 参数
+        # （webhook_password= 是 GitCode 专用，传错会 TypeError 导致修复失败）
+        if _provider in ("github", "gitlab"):
             hid = _setup_fn(_wh_token, owner, repo, webhook_url, webhook_secret=_wh_password)
         else:
             hid = _setup_fn(_wh_token, owner, repo, webhook_url, webhook_password=_wh_password)
@@ -1645,6 +1921,9 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
             "bot_username": (bot_username if not _use_path_b else ""),
             "host_user_id": (user["id"] if _use_path_b else 0),
             "webhook_secret": _webhook_secret,
+            # 路径 A 用 bot token / 用户 token 作 webhook 密钥时，必须清掉路径 B
+            # 残留的随机 secret，否则校验优先取到旧值 → webhook 持续 403。
+            "clear_webhook_secret": (not _use_path_b),
             _cfg["db_token_field"]: _db_wh_token,
             _cfg["db_bot_token_field"]: (bot_token if not _use_path_b else ""),
         }
@@ -1685,7 +1964,7 @@ class BotTokenBody(BaseModel):
     bot_token: str = ""
 
 
-@router.get("/bot-token/{owner}/{repo_name}", operation_id="repos_bot_token_get", summary="Get repository bot token", description="Returns whether the repository has a bound DevOps bot token.")
+@router.get("/bot-token/{owner:path}/{repo_name}", operation_id="repos_bot_token_get", summary="Get repository bot token", description="Returns whether the repository has a bound DevOps bot token. owner supports nested namespaces (GitLab subgroups).")
 def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(require_no_session_token)):
     """获取仓库绑定的 DevOps Bot Token 是否存在"""
     token = get_bot_token_by_repo(owner, repo_name)
@@ -1952,7 +2231,7 @@ def set_deploy_url(body: DeployUrlBody, user: dict = Depends(require_no_session_
     return {"message": "部署 URL 已更新", "deploy_url": deploy_url}
 
 
-@router.get("/deploy-url/{owner}/{repo_name}", operation_id="repos_deploy_url", summary="Get repository deployment URL", description="Returns the repository deployment access URL.")
+@router.get("/deploy-url/{owner:path}/{repo_name}", operation_id="repos_deploy_url", summary="Get repository deployment URL", description="Returns the repository deployment access URL. owner supports nested namespaces (GitLab subgroups).")
 def get_deploy_url(owner: str, repo_name: str, user: dict = Depends(require_no_session_token)):
     """获取仓库的部署访问 URL"""
     from src.repo_key import to_repo_key
@@ -2005,6 +2284,40 @@ def _check_unmanage_vcs_permission(user: dict, owner: str, repo_name: str, repo_
         if role not in ("admin", "maintain"):
             raise HTTPException(status_code=403, detail={
                 "code": 403, "message": f"解除托管需要 GitHub maintainer 及以上权限（当前角色：{role or '未知'}）"})
+        return
+    # GitLab：用 /user 取 username，再按项目 permissions.access_level>=40 判定 Maintainer
+    if repo_provider == "gitlab":
+        from src.user.repo_manager import _gitlab_req
+        from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+        _gl_api = get_gitlab_api_base()
+
+        def _get_gl_user(token):
+            return _gitlab_req("GET", f"{_gl_api}/user", token)
+        try:
+            user_data = with_oauth_token(user, "gitlab", _get_gl_user)
+        except HTTPException:
+            raise
+        vcs_login = (user_data or {}).get("username", "")
+        if not vcs_login:
+            raise HTTPException(status_code=502, detail={
+                "code": 502, "message": "无法获取当前用户 GitLab 身份"})
+        if vcs_login == owner:
+            return
+
+        def _check_gl_perm(token, _owner=owner, _repo=repo_name):
+            _pj = _gitlab_req(
+                "GET", f"{_gl_api}/projects/{gitlab_project_path(_owner, _repo)}", token)
+            _perm = (_pj or {}).get("permissions") or {}
+            _lvl = ((_perm.get("project_access") or {}).get("access_level", 0)
+                    or (_perm.get("group_access") or {}).get("access_level", 0))
+            return "maintain" if int(_lvl or 0) >= 40 else ""
+        try:
+            role = with_oauth_token(user, "gitlab", _check_gl_perm)
+        except HTTPException:
+            raise
+        if role != "maintain":
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "message": f"解除托管需要 GitLab Maintainer 及以上权限（当前角色：{role or '未知'}）"})
         return
     # GitCode（默认）
     from src.user.repo_manager import _req, get_member_permission, _RateLimitedError
@@ -2315,8 +2628,9 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
     from src.repo_key import to_repo_key as _rk
     gc_key = to_repo_key(body.full_name)  # 默认 gitcode:
     gh_key = _rk(body.full_name, provider="github")
+    gl_key = _rk(body.full_name, provider="gitlab")
 
-    # 判断实际存在的 repo_key（直接查 managed_repos 表）
+    # 判断实际存在的 repo_key（三平台候选，GitLab 不能漏否则解托管永远 404）
     repo_key = gc_key
     repo_provider = "gitcode"
     _repo_exists = False
@@ -2324,11 +2638,13 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
         from src.session_manager import db, db_lock
         with db_lock:
             c0 = db.cursor()
-            c0.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?)", (gh_key, gc_key))
+            c0.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?, ?)",
+                       (gh_key, gc_key, gl_key))
             row0 = c0.fetchone()
-            if row0 and row0[0].startswith("github:"):
-                repo_key = gh_key
-                repo_provider = "github"
+            if row0 and str(row0[0]).startswith("github:"):
+                repo_key, repo_provider = gh_key, "github"
+            elif row0 and str(row0[0]).startswith("gitlab:"):
+                repo_key, repo_provider = gl_key, "gitlab"
             _repo_exists = row0 is not None
     except Exception:
         pass  # 测试环境（mock）走默认 gitcode:
@@ -2352,6 +2668,14 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
             # Issue #345: 改用统一入口
             from src.user.db import get_global_github_bot_token
             api_token = get_global_github_bot_token()
+    elif repo_provider == "gitlab":
+        from src.api.deps import get_user_gitlab_token_with_refresh
+        api_token = get_user_gitlab_token_with_refresh(user["username"], user_id=user.get("id", 0))
+        if not api_token:
+            api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
+        if not api_token:
+            from src.user.db import get_meta_value
+            api_token = get_meta_value("global_bot_gitlab_token") or ""
     else:
         api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
         if not api_token:
@@ -2369,6 +2693,11 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
                 wh_id = _get_managed_webhook(repo_key)
                 if wh_id:
                     remove_github_webhook(api_token, owner, repo_name, wh_id)
+            elif repo_provider == "gitlab":
+                from src.user.repo_manager import _get_managed_webhook, remove_gitlab_webhook
+                wh_id = _get_managed_webhook(repo_key)
+                if wh_id:
+                    remove_gitlab_webhook(api_token, owner, repo_name, wh_id)
             else:
                 from src.user.repo_manager import _get_managed_webhook, remove_webhook
                 wh_id = _get_managed_webhook(repo_key)
@@ -2385,7 +2714,9 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
         repo_bot_username = ""
         for _r in user_db.get_managed_repos(user["id"]):
             if _r["repo_key"] == repo_key:
-                repo_bot_token = _r.get("bot_gitcode_token", "") or _r.get("bot_github_token", "") or ""
+                repo_bot_token = (_r.get("bot_gitcode_token", "")
+                                  or _r.get("bot_github_token", "")
+                                  or _r.get("bot_gitlab_token", "") or "")
                 repo_bot_username = _r.get("bot_username", "") or ""
                 break
         # 全局 bot 用户名
@@ -2394,6 +2725,10 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
         global_bot_username = ""
         if repo_provider == "github":
             global_bot_username = get_global_github_bot_username()
+        elif repo_provider == "gitlab":
+            from src.user.db import get_meta_value
+            _gl_names = get_meta_value("global_gitlab_bot_usernames") or ""
+            global_bot_username = _gl_names.split(",")[0].strip() if _gl_names else ""
         else:
             _us = get_global_bot_usernames()
             global_bot_username = _us[0] if _us else ""
@@ -2401,6 +2736,9 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
         if repo_provider == "github":
             from src.api.deps import get_user_github_token_with_refresh
             owner_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
+        elif repo_provider == "gitlab":
+            from src.api.deps import get_user_gitlab_token_with_refresh
+            owner_token = get_user_gitlab_token_with_refresh(user["username"], user_id=user.get("id", 0))
         else:
             owner_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
         # Issue #372: 路径 B 仓库（无 bot token）跳过 bot 协作者移除——托管时未邀请 bot
@@ -2412,6 +2750,10 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
                     if repo_provider == "github":
                         from src.user.repo_manager import remove_github_collaborator
                         _rm_ok = remove_github_collaborator(owner_token, owner, repo_name, global_bot_username)
+                    elif repo_provider == "gitlab":
+                        from src.user.repo_manager import remove_gitlab_member
+                        remove_gitlab_member(owner_token, owner, repo_name, global_bot_username)
+                        _rm_ok = True
                     else:
                         from src.user.repo_manager import remove_collaborator
                         _rm_ok = remove_collaborator(owner_token, owner, repo_name, global_bot_username)
@@ -2454,7 +2796,7 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
     return {"message": "已移除仓库，并已清空全部相关数据"}
 
 
-@router.get("/{owner}/{repo}/project-info", operation_id="repos_project_info", summary="Get project knowledge", description="Reads the authoritative project-knowledge baseline for a repository: files (full text) + meta (commit/branches/updated/degraded). Dual: user (JWT/API key) and session token (tk_, repo scope must match).")
+@router.get("/{owner:path}/{repo}/project-info", operation_id="repos_project_info", summary="Get project knowledge", description="Reads the authoritative project-knowledge baseline for a repository: files (full text) + meta (commit/branches/updated/degraded). Dual: user (JWT/API key) and session token (tk_, repo scope must match). owner supports nested namespaces (GitLab subgroups).")
 def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key)):
     """读取仓库的权威项目知识基线（repo 全局，多机共享，见 multi-issue-isolation-design.md §2.4）。
 
@@ -2503,7 +2845,7 @@ def _resolve_scene_recommend_repo_key(owner: str, repo: str) -> str:
     return to_repo_key(owner_repo)
 
 
-@router.get("/{owner}/{repo}/scene-recommend-config", operation_id="repos_scene_recommend_config_get", summary="Get scene recommend config", description="Reads the repository smart scene-recommend config (fallback scene + routing rules).")
+@router.get("/{owner:path}/{repo}/scene-recommend-config", operation_id="repos_scene_recommend_config_get", summary="Get scene recommend config", description="Reads the repository smart scene-recommend config (fallback scene + routing rules). owner supports nested namespaces (GitLab subgroups).")
 def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """读取仓库智能推荐配置（兜底场景 + 路由规则）。"""
     from src.user.db import get_scene_recommend_config
@@ -2511,7 +2853,7 @@ def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(requi
     return get_scene_recommend_config(repo_key)
 
 
-@router.put("/{owner}/{repo}/scene-recommend-config", operation_id="repos_scene_recommend_config_set", summary="Save scene recommend config", description="Saves the repository scene-recommend config. Self-checks on write: filters out rules whose scene_id is not in the current scene list; fallback_scene is required.")
+@router.put("/{owner:path}/{repo}/scene-recommend-config", operation_id="repos_scene_recommend_config_set", summary="Save scene recommend config", description="Saves the repository scene-recommend config. Self-checks on write: filters out rules whose scene_id is not in the current scene list; fallback_scene is required. owner supports nested namespaces (GitLab subgroups).")
 def save_scene_recommend_config(owner: str, repo: str, body: SceneRecommendConfigBody,
                                 user: dict = Depends(require_no_session_token)):
     """保存仓库智能推荐配置（兜底场景 + 路由规则）。
@@ -2550,10 +2892,19 @@ def save_scene_recommend_config(owner: str, repo: str, body: SceneRecommendConfi
 # git-credential / workspace 是 grape 自身能力（非 gitcode/github/gitlab 平台原生），
 # 故置于 /api/repos（grape 平台业务）而非 /api/git-repo（平台透传）。
 
-_SUPPORTED_PROVIDERS = {"gitcode", "github"}
+_SUPPORTED_PROVIDERS = {"gitcode", "github", "gitlab"}
 _GITCODE_API_BASE = "https://gitcode.com/api/v5"
 _GITHUB_API_BASE = "https://api.github.com"
 _CREDENTIAL_TTL = 600
+
+
+def _clone_url_for(provider: str, owner: str, repo: str) -> str:
+    """按 provider 构造 clone URL（GitLab 走自建实例地址，支持嵌套 namespace）。"""
+    if provider == "gitlab":
+        from src.vcs.gitlab import get_gitlab_base_url
+        return f"{get_gitlab_base_url().rstrip('/')}/{owner}/{repo}.git"
+    _host = "github.com" if provider == "github" else "gitcode.com"
+    return f"https://{_host}/{owner}/{repo}.git"
 
 
 def _provider_from_path(path: str) -> str:
@@ -2561,8 +2912,8 @@ def _provider_from_path(path: str) -> str:
 
     Issue #466 断点一：跨平台联合开发（GitHub 主仓 + GitCode 关联仓）下，会话 token
     的 repo_key 按主仓签发；关联仓换券请求须按路径中目标仓前缀（gitcode:/github:）
-    解析 provider，否则把 ghp_ token 发给 gitcode.com。仅识别已接入前缀（小写归一），
-    未知前缀（如 gitlab:）返回空由调用方回退。
+    解析 provider，否则把 ghp_ token 发给 gitcode.com。仅识别已接入前缀
+    （gitcode: / github: / gitlab:，小写归一），未知前缀返回空由调用方回退。
     """
     for seg in str(path or "").split("/"):
         if not seg:
@@ -2575,7 +2926,7 @@ def _provider_from_path(path: str) -> str:
 
 
 def _repo_provider(request: Request, user: dict = Depends(get_current_user_or_api_key)) -> str:
-    """Git provider（gitcode/github）。
+    """Git provider（gitcode/github/gitlab）。
 
     优先按请求路径目标仓 repo_key 前缀解析（Issue #466 跨平台关联仓换券）；
     路径无前缀时回退认证 token 的 repo_key 前缀（会话主仓，见
@@ -2694,6 +3045,25 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
                 return get_user_github_token_with_refresh(username, user_id=user.get("id", 0)) or "", "", None
             except Exception as e:
                 return _fail(_GIT_CREDENTIAL_STAGE_USER, e)
+    elif provider == "gitlab":
+        # rk 已在函数入口按 provider= 幂等构造（Issue #466），此处不再手工拼前缀。
+        def _bot():
+            try:
+                from src.user.db import get_repo_token_with_refresh
+                return get_repo_token_with_refresh(rk) or "", "", None
+            except Exception as e:
+                return _fail(_GIT_CREDENTIAL_STAGE_BOT, e)
+        def _user():
+            try:
+                from src.api.deps import get_user_gitlab_token_with_refresh
+                uid = user.get("id") or 0
+                username = user.get("username") or ""
+                if not username and uid > 0:
+                    from src.auth.grape_account_db import get_grape_account_by_id
+                    username = (get_grape_account_by_id(uid) or {}).get("username", "")
+                return get_user_gitlab_token_with_refresh(username, user_id=uid) or "", "", None
+            except Exception as e:
+                return _fail(_GIT_CREDENTIAL_STAGE_USER, e)
     else:
         def _bot():
             try:
@@ -2738,17 +3108,21 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
         })
         return tok
     stage = stage or _GIT_CREDENTIAL_STAGE_BOTH
+    _vcs = {"github": "GitHub", "gitlab": "GitLab"}.get(provider, "GitCode")
     _log_git_credential_failure(
         stage, provider, rk, user, exc,
         duration_ms=round((time.monotonic() - _start) * 1000),
     )
-    raise HTTPException(status_code=502, detail=_credential_502_detail(stage, provider=provider))
+    raise HTTPException(status_code=502, detail=_credential_502_detail(
+        stage, message=f"{_vcs} 仓库 token 解析失败", provider=provider,
+    ))
 
 
-@router.get("/{owner}/{repo}/git-credential", operation_id="repos_git_credential",
+@router.get("/{owner:path}/{repo}/git-credential", operation_id="repos_git_credential",
             summary="One-shot git platform credential (CLI internal, TTL)",
             description="One-shot short-lived platform credential for local git via CLI (in-process, never persisted). "
-                        "gitcode uses Basic auth with username x-access-token and the configured gitcode token as password. Session-only.")
+                        "gitcode uses Basic auth with username x-access-token and the configured gitcode token as password. Session-only. "
+                        "owner supports nested namespaces (GitLab subgroups).")
 def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
                             p: str = Depends(_repo_provider)):
     """返回 CLI 本地执行 git 所需的平台凭据（一次性/短期，进程内使用不落盘）。
@@ -2763,13 +3137,12 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
     _start = time.monotonic()
     try:
         token = _repo_platform_token(owner, repo, user, p)
-        _gh = "github.com" if p == "github" else "gitcode.com"
         _o = _strip_provider_prefix(owner)
         return {
             "provider": p,
-            "username": "x-access-token",
+            "username": "oauth2" if p == "gitlab" else "x-access-token",
             "password": token,
-            "clone_url": f"https://{_gh}/{_o}/{repo}.git",
+            "clone_url": _clone_url_for(p, _o, repo),
             "expires_in": _CREDENTIAL_TTL,
         }
     except HTTPException:
@@ -2784,10 +3157,9 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
         raise
 
 
-@router.get("/{owner}/{repo}/workspace", operation_id="repos_workspace", summary="Repository workspace path (local git via CLI)", description="Returns the grape-managed local workspace path for the repository (CLI local git on the server). Session-only.")
+@router.get("/{owner:path}/{repo}/workspace", operation_id="repos_workspace", summary="Repository workspace path (local git via CLI)", description="Returns the grape-managed local workspace path for the repository (CLI local git on the server). Session-only. owner supports nested namespaces (GitLab subgroups).")
 def get_repo_workspace(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
                        p: str = Depends(_repo_provider)):
     _o = _strip_provider_prefix(owner)
     ws = os.path.join(WORKSPACE_DIR, _o, repo)
-    _gh = "github.com" if p == "github" else "gitcode.com"
-    return {"workspace": ws, "clone_url": f"https://{_gh}/{_o}/{repo}.git"}
+    return {"workspace": ws, "clone_url": _clone_url_for(p, _o, repo)}

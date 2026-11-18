@@ -70,6 +70,41 @@ function _accountT(key, vars) {
   return key;
 }
 
+var _ACCOUNT_PROVIDER_NAMES = {gitcode: 'GitCode', github: 'GitHub', gitlab: 'GitLab'};
+function _accountProviderName(provider) {
+  if (_ACCOUNT_PROVIDER_NAMES[provider]) return _ACCOUNT_PROVIDER_NAMES[provider];
+  return provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : '';
+}
+
+// 令牌创建入口：GitHub/GitCode 固定地址；GitLab 用后端下发的 pat_url（自建实例可变）
+function _accountProviderPat(provider) {
+  if (provider === 'github') {
+    return {
+      url: 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps',
+      label: 'github.com',
+      helpKey: 'app.account.github_token_help'
+    };
+  }
+  if (provider === 'gitlab') {
+    var _info = null;
+    if (_accountProvidersData && _accountProvidersData.providers) {
+      _info = _accountProvidersData.providers.find(function(p) { return p.provider === 'gitlab'; });
+    }
+    var _url = (_info && _info.pat_url) || '';
+    if (!_url && typeof _vcsGitlabBase === 'function') {
+      _url = _vcsGitlabBase() + '/-/user_settings/personal_access_tokens';
+    }
+    if (!_url) _url = 'https://gitlab.com/-/user_settings/personal_access_tokens';
+    var _label = _url.split('://')[1] ? _url.split('://')[1].split('/')[0] : 'gitlab.com';
+    return {url: _url, label: _label, helpKey: 'app.account.gitlab_token_help'};
+  }
+  return {
+    url: 'https://gitcode.com/setting/token-classic/create',
+    label: 'gitcode.com',
+    helpKey: 'app.account.gitcode_token_help'
+  };
+}
+
 // ===== Profile tab =====
 function _accountLoadProfile() {
   API.get('/auth/me').then(function(d) {
@@ -109,6 +144,7 @@ function _accountLoadSecurity() {
   API.get('/auth/providers').then(function(providersData) {
     window._emailConfigured = !!(providersData && providersData.email_configured);
     _accountProvidersData = providersData;
+    if (typeof _cacheVcsProviders === 'function') _cacheVcsProviders(providersData);
     _accountRenderSecurity();
   }).catch(function() {
     window._emailConfigured = true; // 获取失败默认显示邮箱卡片
@@ -250,7 +286,7 @@ function _accountLoadCredentials() {
 function _accountRenderProviderRow(label, provider, bound, identity, expired) {
   var isZh = _accountIsZh();
   var icon = (typeof platformIcon === 'function') ? platformIcon(provider, 20) : '';
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountProviderName(provider);
 
   // R10: token 过期时显示过期提示 + 重新绑定按钮
   if (bound && expired) {
@@ -532,7 +568,7 @@ function _accountDoChangeEmail() {
 // 绑定方式选择弹窗（OAuth + 手动令牌）
 function _accountBindProvider(provider) {
   var isZh = _accountIsZh();
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountProviderName(provider);
   var icon = (typeof platformIcon === 'function') ? platformIcon(provider, 24) : '';
   var bindings = (_accountProfile && _accountProfile.bindings) || [];
   var alreadyBound = bindings.indexOf(provider) >= 0;
@@ -619,17 +655,12 @@ function _accountSwitchBindTab(tab) {
 }
 
 function _accountManualBindForm(provider, isZh, pName, oauthConfigured) {
-  // 令牌创建直达链接（实测 200 / 官方支持的预选参数）：
-  // - GitHub: scopes=repo 预勾选仓库权限，description 预填备注
-  // - GitCode: gitcode.com/settings/personal-access-tokens/new
-  var tokenCreateUrl = provider === 'github'
-    ? 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps'
-    : 'https://gitcode.com/setting/token-classic/create';
-  var tokenCreateLabel = provider === 'github' ? 'github.com' : 'gitcode.com';
+  // 令牌创建直达链接与帮助文案按平台区分（GitLab 地址来自后端 pat_url，兼容自建实例）
+  var _pat = _accountProviderPat(provider);
+  var tokenCreateUrl = _pat.url;
+  var tokenCreateLabel = _pat.label;
   // 帮助文案第一步做成超链接，直达令牌创建页（新标签页打开）
-  var helpSteps = provider === 'github'
-    ? (I18N.t('app.account.github_token_help'))
-    : (I18N.t('app.account.gitcode_token_help'));
+  var helpSteps = I18N.t(_pat.helpKey);
   // 单一直达入口（方案 A）：通栏按钮是唯一的令牌创建链接，帮助步骤保持纯文本
   // （步骤 2/3 是权限/复制指引有增量；第 1 步链接与按钮同目标，属重复入口，已移除）
   var createLinkBtn = '<a href="' + tokenCreateUrl + '" target="_blank" rel="noopener noreferrer" class="bt" '
@@ -855,7 +886,7 @@ function _accountConfirmBindSuccess(provider, btn, fromPostMessage) {
 
 function _accountShowBindSuccessToast(provider) {
   // 居中成功提示层——不依赖 modal，用户始终看到明确反馈
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountProviderName(provider);
   var overlay = document.createElement('div');
   overlay.id = 'bindSuccessToast';
   overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.15);backdrop-filter:blur(4px);animation:fadeBg .2s ease';
@@ -912,7 +943,7 @@ function _accountFetchTransferContext(provider, btn) {
 
 function _accountTranslateOAuthError(errorCode, provider) {
   if (!errorCode) return I18N.t('app.account.bind_failed');
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountProviderName(provider);
   // 复用已有的错误码翻译逻辑
   var errorKey = 'app.login.oauth_error_' + errorCode;
   var translated = I18N.t(errorKey);
@@ -928,7 +959,7 @@ function _accountTranslateOAuthError(errorCode, provider) {
 
 function _accountDoManualBind(provider) {
   var isZh = _accountIsZh();
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountProviderName(provider);
   var tokenEl = document.getElementById('manualTokenInput');
   var errEl = document.getElementById('manualBindError');
   var btn = document.getElementById('manualBindBtn');
@@ -947,7 +978,8 @@ function _accountDoManualBind(provider) {
   btn.dataset.origText = origText;
   if (errEl) errEl.style.display = 'none';
 
-  var field = provider === 'github' ? 'github_token' : 'gitcode_token';
+  var field = provider === 'github' ? 'github_token'
+            : provider === 'gitlab' ? 'gitlab_token' : 'gitcode_token';
   var body = {};
   body[field] = token;
 
@@ -981,10 +1013,20 @@ function _accountDoManualBind(provider) {
 }
 
 function _accountTranslateBindError(e, provider, isZh) {
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountProviderName(provider);
   var code = 0;
   if (e && e.detail && typeof e.detail === 'object') code = e.detail.code || 0;
   else if (e && e.status) code = e.status;
+  // 优先展示后端返回的 message（包含具体原因，如 scope 不足、实例不可达等）
+  var _detailMsg = (e && e.detail && e.detail.message) || '';
+  var _errorCode = (e && e.detail && e.detail.error_code) || '';
+  if (code === 400) {
+    if (_errorCode === 'TOKEN_FORMAT_INVALID') {
+      return I18N.t('app.account.token_format_invalid');
+    }
+    // TOKEN_INVALID 等：展示后端 message，让用户知道真实原因
+    return _detailMsg || I18N.t('app.account.token_format_invalid');
+  }
   switch (code) {
     case 401:
       return I18N.t('app.account.token_invalid_expired', {platform: pName});
@@ -992,15 +1034,13 @@ function _accountTranslateBindError(e, provider, isZh) {
       return I18N.t('app.account.already_bound_to_another');
     case 502:
       return I18N.t('app.account.network_error_retry');
-    case 400:
-      return I18N.t('app.account.token_format_invalid');
     default:
       return (e && e.message) || (I18N.t('app.account.bind_failed'));
   }
 }
 
 function _accountShowTransferConfirm(provider, ticket, token) {
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountProviderName(provider);
   var html = '<h3>' + I18N.t('app.account.transfer_confirm_title') + '</h3>' +
     '<p class="tx" style="margin-bottom:8px;line-height:1.5">' + I18N.t('app.account.transfer_confirm_msg', {platform: pName}) + '</p>' +
     '<p class="tx t2" style="margin-bottom:20px;line-height:1.5">' + I18N.t('app.account.transfer_confirm_desc') + '</p>' +
@@ -1141,7 +1181,7 @@ function _accountCleanupAfterUnbind(provider) {
 
 // R30: 解绑成功提示——含受影响仓库数量
 function _accountShowUnbindSuccess(provider, d, isZh) {
-  var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+  var pName = _accountProviderName(provider);
   var affected = (d && d.affected_repos) || 0;
   if (affected > 0) {
     app.showToast(I18N.t('app.account.platform_unbound', {platform: pName}),
@@ -1426,7 +1466,7 @@ function _accountShowDeleteAccount() {
       html += '<button class="bt bt-r" style="width:100%" onclick="_accountDaOauth(\'' + bindings[0] + '\')">' + (I18N.t('app.account.confirm_delete')) + '</button>';
     } else {
       bindings.forEach(function(p) {
-        var pName = p === 'github' ? 'GitHub' : 'GitCode';
+        var pName = _accountProviderName(p);
         html += '<button class="bt bt-o" style="width:100%;margin-bottom:6px" onclick="_accountDaOauth(\'' + p + '\')">' + pName + '</button>';
       });
     }

@@ -243,6 +243,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
       </div>
 
       <div class="card">
+        <div class="card-h"><h2><span data-i18n="admin.config.gitlab">GitLab 配置</span><span class="tag" data-i18n="admin.config.gitlab_desc">GitLab OAuth（支持自建实例）</span></h2></div>
+        <div class="f-row"><label>gitlab_bot_token</label><input id="f_gitlab_bot_token" type="password" placeholder="GitLab bot token (PAT, api scope)"><button class="s-btn" onclick="verifyToken('gitlab','f_gitlab_bot_token')" data-i18n="admin.config.verify">校验</button><span class="st" id="s_gitlab_bot_token"></span></div>
+        <div class="f-row"><label>oauth_base_url</label><input id="f_gitlab_oauth_base_url" placeholder="https://gitlab.example.com"></div>
+        <div class="f-row"><label>oauth_client_id</label><input id="f_gitlab_oauth_client_id" placeholder="GitLab OAuth Application ID"></div>
+        <div class="f-row"><label>oauth_client_secret</label><input id="f_gitlab_oauth_client_secret" type="password" placeholder="GitLab OAuth Application Secret"></div>
+        <div class="f-row"><label>oauth_redirect_uri</label><input id="f_gitlab_oauth_redirect_uri" data-i18n-placeholder="admin.config.auto_infer" placeholder="留空自动推断 /api/auth/callback/gitlab"></div>
+        <div class="hint" data-i18n="admin.config.gitlab_oauth_hint">GitLab → Admin → Applications：Scopes 勾选 api、read_user，Redirect URI 填 https://<你的域名>/api/auth/callback/gitlab</div>
+      </div>
+
+      <div class="card">
         <div class="card-h"><h2><span data-i18n="admin.config.bot_account">Bot 账户</span><span class="tag" data-i18n="admin.config.bot_account_desc">self-comment 检测</span></h2></div>
         <div class="f-row"><label>bot_usernames</label><input id="f_bot_usernames" data-i18n-placeholder="admin.config.bot_usernames_hint" placeholder="逗号分隔，如 grape_bot, dev-bot"></div>
         <div class="hint" data-i18n="admin.config.bot_usernames_fill_hint">手动填写或点击上方「校验」后用返回的用户名自动回填</div>
@@ -401,6 +411,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 <script src="/static/js/i18n.js?v=20261016-3"></script>
 <script src="/static/js/pwd-blocklist.js?v=3"></script><!-- admin 改密长度/黑名单预检（C 家族） -->
 <script>I18N.init('20261016-8');</script>
-<script src="/static/js/admin.js?v=20261030-16"></script>
+<script src="/static/js/admin.js?v=20261116-01"></script>
 </body>
 </html>

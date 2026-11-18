@@ -685,9 +685,11 @@ function _scenePipeRowHtml(p, sceneId, dashData) {
     return map[stage] ? map[stage] : stage;
   };
   const _issueNum = String(p.issue_id || '').replace(/^#/, '');
-  const _repoParts = (dashData.repo || '').replace(/^(gitcode|github):/, '').split('/');
-  const _issueHost = (dashData.repo || '').startsWith('github:') ? 'github.com' : 'gitcode.com';
-  const _issueUrl = (_issueNum && _repoParts.length === 2) ? `https://${_issueHost}/${_repoParts[0]}/${_repoParts[1]}/issues/${_issueNum}` : '';
+  const _issueRepoKey = dashData.repo || '';
+  const _repoParts = _issueRepoKey.replace(/^(gitcode|github|gitlab):/, '').split('/');
+  // 三平台分派（自建 GitLab 域名与 /-/issues/ 路径不同）+ 嵌套 namespace（段数>=2）
+  const _issueUrl = (_issueNum && _repoParts.length >= 2 && typeof _vcsUrl === 'function')
+    ? _vcsUrl(_issueRepoKey, '/issues/' + _issueNum) : '';
   const agentTags = ['vod', 'issue', 'coding', 'qa', 'sre'].map((at, j) => {
     const hasAgent = p.statuses && p.statuses[j] > 0;
     const cls = ['tg-v', 'tg-i', 'tg-c', 'tg-q', 'tg-s'][j];

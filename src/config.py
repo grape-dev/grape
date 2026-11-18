@@ -729,6 +729,11 @@ def is_gitcode_user_allowed(gitcode_login: str) -> bool:
     return is_user_allowed("gitcode_username", gitcode_login)
 
 
+def is_gitlab_user_allowed(gitlab_login: str) -> bool:
+    """白名单判定（GitLab 用户名）——委托通用函数。"""
+    return is_user_allowed("gitlab_username", gitlab_login)
+
+
 def is_github_user_allowed(github_login: str) -> bool:
     """白名单判定（GitHub 用户名）——委托通用函数。"""
     return is_user_allowed("github_username", github_login)

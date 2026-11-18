@@ -20,7 +20,7 @@ from fastapi import HTTPException
 def test_s1_u5_provider_whitelist():
     from src.api.routes.grape_auth import unbind_provider
     src = inspect.getsource(unbind_provider)
-    assert 'provider not in ("gitcode", "github")' in src
+    assert 'provider not in ("gitcode", "github", "gitlab")' in src
     with pytest.raises(HTTPException) as ei:
         unbind_provider(provider="foo", confirm=False, user={"id": -1}, request=None)
     assert ei.value.status_code == 400

@@ -374,6 +374,8 @@ def delete_environment(devstage_id: str, user: dict = Depends(require_no_session
                             ph = ",".join("?" * len(rids))
                             c.execute(f"DELETE FROM devops_agent_runtime_binding WHERE runtime_id IN ({ph})", rids)
                             c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rids)
+                            # chat 配置行也会指向该引擎，一并归零（否则读配置恒悬空告警）
+                            c.execute(f"UPDATE chat_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rids)
                         c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
                         c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
                         log.info(f"删除环境 {env_name} 的凭据 (id={cid}) 及关联 runtime")

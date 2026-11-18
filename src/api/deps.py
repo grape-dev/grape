@@ -402,6 +402,84 @@ def get_user_github_token(username: str) -> str:
     return _get_oauth_token_from_identity(username, "github")
 
 
+def get_user_gitlab_token(username: str) -> str:
+    """获取用户的 GitLab API Token（支持自建实例）。"""
+    return _get_oauth_token_from_identity(username, "gitlab")
+
+
+def get_user_gitlab_token_with_refresh(username: str, user_id: int = 0) -> str:
+    """获取用户 GitLab token，临近过期时预刷新（与 GitHub 版对称）。"""
+    import time as _time
+    token = _get_oauth_token_from_identity(username, "gitlab")
+    if token and user_id > 0:
+        from src.auth.grape_account_db import _has_refresh_token
+        if not _has_refresh_token(user_id, "gitlab"):
+            return token
+        cred = user_db.get_credential(user_id, "gitlab_oauth")
+        if cred:
+            now = int(_time.time())
+            token_expires_at = cred.get("token_expires_at", 0)
+            if isinstance(token_expires_at, str):
+                token_expires_at = _parse_utc_timestamp(token_expires_at)
+            # PAT 无固定过期时间：无 expires_at 视为长期有效。否则会用残留的
+            # OAuth refresh_token 去刷新 PAT 身份，失败后把有效 PAT 误标过期。
+            need_refresh = bool(token_expires_at) and (token_expires_at - now) < 600
+            if need_refresh:
+                new_token = _try_refresh_provider_token(user_id, "gitlab")
+                if not new_token:
+                    from src.auth.grape_account_db import mark_identity_expired
+                    try:
+                        mark_identity_expired(user_id, "gitlab")
+                    except Exception:
+                        pass
+                return new_token or token
+        return token
+    if user_id > 0 and not token:
+        # PAT / 账号未绑定 GitLab 的身份没有 refresh_token，此时调
+        # refresh_oauth_token 只会产生 "no refresh_token" 警告并返回空串。
+        # 直接短路，把降级交给上层（仓库 bot token 等），避免误报「授权过期」。
+        from src.auth.grape_account_db import _has_refresh_token
+        if not _has_refresh_token(user_id, "gitlab"):
+            return ""
+        return _try_refresh_provider_token(user_id, "gitlab") or ""
+    return token
+
+
+def _try_refresh_provider_token(user_id: int, provider: str) -> str | None:
+    """通用 OAuth token 刷新（带分布式锁），供 GitLab 等 provider 复用。"""
+    try:
+        from src.lock import acquire_lock, release_lock
+        _lock_name = f"oauth_refresh:{user_id}:{provider}"
+        if acquire_lock(_lock_name, ttl=30):
+            try:
+                return user_db.refresh_oauth_token(user_id, provider)
+            finally:
+                release_lock(_lock_name)
+        import time as _t
+        _t.sleep(1)
+        return _get_oauth_token_from_identity_by_id(user_id, provider)
+    except Exception as e:
+        log.warning(f"_try_refresh_provider_token({provider}): distributed lock failed: {e}")
+        return user_db.refresh_oauth_token(user_id, provider)
+
+
+def _get_oauth_token_from_identity_by_id(user_id: int, provider: str) -> str:
+    try:
+        from src.session_manager import db, db_lock
+        from src.auth.credential_crypto import decrypt
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT access_token FROM external_identities "
+                "WHERE grape_user_id=? AND provider=? AND status IN (1,4) LIMIT 1",
+                (user_id, provider),
+            ).fetchone()
+        if row and row[0]:
+            return decrypt(row[0])
+    except Exception:
+        pass
+    return ""
+
+
 def get_user_github_token_with_refresh(username: str, user_id: int = 0) -> str:
     """获取用户 GitHub token，过期时主动预刷新（Issue #343）。
 
@@ -445,6 +523,10 @@ def get_user_github_token_with_refresh(username: str, user_id: int = 0) -> str:
         return token
 
     if user_id > 0 and not token:
+        # 同 GitLab 版：PAT / 未绑定身份无 refresh_token，刷新只会产生噪音警告
+        from src.auth.grape_account_db import _has_refresh_token
+        if not _has_refresh_token(user_id, "github"):
+            return ""
         # R20.27.4: GitHub OAuth refresh 加分布式锁
         return _try_refresh_github_token(user_id) or ""
 
@@ -620,7 +702,15 @@ def get_bot_token(repo_owner: str = "", repo_name: str = "") -> str:
     if repo_owner and repo_name:
         from src.user.db import get_repo_token_with_refresh
         from src.repo_key import to_repo_key
-        return get_repo_token_with_refresh(to_repo_key(f"{repo_owner}/{repo_name}")) or ""
+        # 裸 owner/repo 不带 provider 前缀：按三平台依次探测，不能只试 gitcode:
+        _base = f"{repo_owner}/{repo_name}"
+        for _p in ("gitcode", "github", "gitlab"):
+            try:
+                _tok = get_repo_token_with_refresh(to_repo_key(_base, provider=_p)) or ""
+            except Exception:
+                _tok = ""
+            if _tok:
+                return _tok
     return ""
 
 
@@ -628,9 +718,10 @@ def require_devops_token(user: dict = Depends(get_current_user)) -> dict:
     """确保该端点只能由拥有 Bot Token 配置的管理员访问"""
     # 检查用户是否有任一托管仓库配置了 Bot Token
     repos = user_db.get_managed_repos(user["id"])
-    has_bot = any(r.get("bot_gitcode_token", "") for r in repos)
+    _bot_cols = ("bot_gitcode_token", "bot_github_token", "bot_gitlab_token")
+    has_bot = any(any(r.get(_col, "") for _col in _bot_cols) for r in repos)
     if not has_bot:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "DevOps Bot Token not configured, please configure it in GitCode Repo page"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "DevOps Bot Token not configured, please configure it in the Repo page"})
     return user
 
 
@@ -650,9 +741,9 @@ def check_repo_access(user: dict, repo_key: str) -> None:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "No permission to access this repository"})
     from src.repo_key import to_repo_key
     rk = to_repo_key(repo_key)
-    # 构建候选 repo_key 列表：原始 + 跨平台前缀（gitcode:↔github:）
+    # 构建候选 repo_key 列表：原始 + 跨平台前缀（gitcode:/github:/gitlab:）
     base = rk.split(":", 1)[1] if ":" in rk else rk
-    candidates = {f"gitcode:{base}", f"github:{base}"}
+    candidates = {f"gitcode:{base}", f"github:{base}", f"gitlab:{base}"}
     repos = user_db.get_managed_repos(uid)
     for r in repos:
         if r["repo_key"] in candidates:

@@ -78,7 +78,11 @@ class TestSyncComment:
                 "__init__": lambda self, *a, **k: None,
                 "post_issue_comment": lambda self, n, body: calls.append((n, body)) or {"id": 1}
             })
+        # 写侧已改为 create_client(repo_key) + get_repo_token_with_refresh，
+        # 桩层同步下沉（保留 VcsApiClient 桩兼容本类其余用例）。
         monkeypatch.setattr(vac, "VcsApiClient", client_impl)
+        monkeypatch.setattr(vac, "create_client", lambda rk, token="": client_impl())
+        monkeypatch.setattr(udb, "get_repo_token_with_refresh", lambda rk: token)
         monkeypatch.setattr(udb, "get_gitcode_token", lambda repo_key="": token)
         ok = ic.sync_issue_attachment_comment(
             f"{provider}:own/repo648", 85,
@@ -90,9 +94,12 @@ class TestSyncComment:
         assert ok is True
         assert calls == [(85, "## 附件\n[doc.md](http://u/doc.md)")]
 
-    def test_non_gitcode_skipped(self, monkeypatch):
+    def test_non_gitcode_supported(self, monkeypatch):
+        """GitHub / GitLab 附件同步也已接入统一客户端，不再短路跳过。"""
         ok, calls = self._run(monkeypatch, provider="github")
-        assert ok is False and calls == []
+        assert ok is True and calls
+        ok, calls = self._run(monkeypatch, provider="gitlab")
+        assert ok is True and calls
 
     def test_no_token(self, monkeypatch):
         ok, calls = self._run(monkeypatch, token="")
@@ -119,10 +126,13 @@ class TestSyncComment:
 
         monkeypatch.setattr(storage_mod, "get_storage", lambda: FakeStorage())
         calls = []
-        monkeypatch.setattr(vac, "VcsApiClient", type("C", (), {
+        _fake_client = type("C", (), {
             "__init__": lambda self, *a, **k: None,
             "post_issue_comment": lambda self, n, body: calls.append((n, body)) or {"id": 1}
-        }))
+        })
+        monkeypatch.setattr(vac, "VcsApiClient", _fake_client)
+        monkeypatch.setattr(vac, "create_client", lambda rk, token="": _fake_client())
+        monkeypatch.setattr(udb, "get_repo_token_with_refresh", lambda rk: "tok")
         monkeypatch.setattr(udb, "get_gitcode_token", lambda repo_key="": "tok")
         ok = ic.sync_issue_attachment_comment(
             "gitcode:own/repo648", 85,
@@ -180,10 +190,13 @@ class TestSyncComment:
 
         monkeypatch.setattr(storage_mod, "get_storage", lambda: BoomStorage())
         calls = []
-        monkeypatch.setattr(vac, "VcsApiClient", type("C", (), {
+        _fake_client = type("C", (), {
             "__init__": lambda self, *a, **k: None,
             "post_issue_comment": lambda self, n, body: calls.append((n, body)) or {"id": 1}
-        }))
+        })
+        monkeypatch.setattr(vac, "VcsApiClient", _fake_client)
+        monkeypatch.setattr(vac, "create_client", lambda rk, token="": _fake_client())
+        monkeypatch.setattr(udb, "get_repo_token_with_refresh", lambda rk: "tok")
         monkeypatch.setattr(udb, "get_gitcode_token", lambda repo_key="": "tok")
         ok = ic.sync_issue_attachment_comment(
             "gitcode:own/repo648", 85,

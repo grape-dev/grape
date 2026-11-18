@@ -70,22 +70,27 @@ def with_oauth_token(user: dict, provider: str, api_call_fn, *args, **kwargs):
     user_id = user["id"]
     username = user["username"]
 
-    # 获取 token（带预刷新）
+    # 获取 token（带预刷新，按 provider 分发）
     if provider == "gitcode":
         from src.api.deps import get_user_token_with_refresh
         token = get_user_token_with_refresh(username, user_id=user_id)
+    elif provider == "gitlab":
+        from src.api.deps import get_user_gitlab_token_with_refresh
+        token = get_user_gitlab_token_with_refresh(username, user_id=user_id)
     else:
         # Issue #343 修复: GitHub 也走预刷新逻辑（和 GitCode 完全对称）
         from src.api.deps import get_user_github_token_with_refresh
         token = get_user_github_token_with_refresh(username, user_id=user_id)
 
-    _provider_label = provider.capitalize()
+    _provider_label = {"gitcode": "GitCode", "github": "GitHub", "gitlab": "GitLab"}.get(
+        provider, provider.capitalize())
 
     if not token:
         raise HTTPException(status_code=401, detail={
             "code": 401,
             "message": f"{_provider_label} 授权已过期，请重新登录授权",
-            "action": "reauth_required"
+            "action": "reauth_required",
+            "provider": provider
         })
 
     try:
@@ -94,14 +99,18 @@ def with_oauth_token(user: dict, provider: str, api_call_fn, *args, **kwargs):
         if not _is_token_error(e):
             raise  # 非 token 错误不处理
 
-        # token 失效 → 尝试刷新
+        # token 失效 → 尝试刷新。PAT / 导入 token 没有 refresh_token，
+        # 刷新无意义且会打误导性警告，直接要求重新绑定（带 provider 供前端跳转）。
+        from src.auth.grape_account_db import _has_refresh_token
         log.info(f"with_oauth_token: token error for user={user_id}, provider={provider}, attempting refresh: {str(e)[:100]}")
-        new_token = refresh_oauth_token(user_id, provider)
+        new_token = (refresh_oauth_token(user_id, provider)
+                     if _has_refresh_token(user_id, provider) else None)
         if not new_token:
             raise HTTPException(status_code=401, detail={
                 "code": 401,
                 "message": f"{_provider_label} 授权已过期，请重新登录授权",
-                "action": "reauth_required"
+                "action": "reauth_required",
+                "provider": provider,
             })
 
         # 刷新成功 → 重试一次
@@ -113,7 +122,8 @@ def with_oauth_token(user: dict, provider: str, api_call_fn, *args, **kwargs):
                 raise HTTPException(status_code=401, detail={
                     "code": 401,
                     "message": f"{_provider_label} 授权已过期，请重新登录授权",
-                    "action": "reauth_required"
+                    "action": "reauth_required",
+                    "provider": provider,
                 })
             if _is_business_forbidden(e2):
                 # 重试后 403 但不含 token 关键词 → 业务权限不足

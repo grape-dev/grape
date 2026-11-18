@@ -202,32 +202,49 @@ class TestGetUserTokenWithRefreshPAT:
 class TestGetWebhookTokenByRepo:
     """测试 webhook 验证密钥优先。"""
 
+    # 多 provider 同名仓：查询改为 fetchall + 按 repo_key 精确匹配，
+    # 行结构 = (repo_key, webhook_secret, gitcode_wh_token, github_wh_token, gitlab_wh_token)
     def test_webhook_secret_takes_priority(self):
         """有 webhook_secret → 返回 webhook_secret（路径 B）。"""
         from src.user.db import get_webhook_token_by_repo
         with patch("src.user.db.db") as mock_db, patch("src.user.db.db_lock"):
             cursor = MagicMock()
-            cursor.fetchone.return_value = ("SECRET_123", "OLD_TOKEN", "")
+            cursor.fetchall.return_value = [
+                ("gitcode:owner/repo", "SECRET_123", "OLD_TOKEN", "", "")]
             mock_db.cursor.return_value = cursor
-            result = get_webhook_token_by_repo("owner/repo")
+            result = get_webhook_token_by_repo("owner/repo", provider="gitcode")
             assert result == "SECRET_123"
 
     def test_fallback_to_gitcode_webhook_token(self):
-        """无 webhook_secret → fallback 到 gitcode_webhook_token（路径 A）。"""
+        """无 webhook_secret → fallback 到对应平台的 webhook_token 列（路径 A）。"""
         from src.user.db import get_webhook_token_by_repo
         with patch("src.user.db.db") as mock_db, patch("src.user.db.db_lock"):
             cursor = MagicMock()
-            cursor.fetchone.return_value = ("", "OLD_BOT_TOKEN", "")
+            cursor.fetchall.return_value = [
+                ("gitcode:owner/repo", "", "OLD_BOT_TOKEN", "", "")]
             mock_db.cursor.return_value = cursor
-            result = get_webhook_token_by_repo("owner/repo")
+            result = get_webhook_token_by_repo("owner/repo", provider="gitcode")
             assert result == "OLD_BOT_TOKEN"
+
+    def test_provider_isolation_picks_gitlab_column(self):
+        """GitLab webhook 必须拿 gitlab_webhook_token，不能串到 GitCode/GitHub 列。"""
+        from src.user.db import get_webhook_token_by_repo
+        with patch("src.user.db.db") as mock_db, patch("src.user.db.db_lock"):
+            cursor = MagicMock()
+            cursor.fetchall.return_value = [
+                ("gitcode:owner/repo", "", "GC_TOKEN", "", ""),
+                ("gitlab:owner/repo", "", "", "", "GL_TOKEN"),
+            ]
+            mock_db.cursor.return_value = cursor
+            assert get_webhook_token_by_repo("owner/repo", provider="gitlab") == "GL_TOKEN"
+            assert get_webhook_token_by_repo("owner/repo", provider="gitcode") == "GC_TOKEN"
 
     def test_empty_repo_returns_empty(self):
         """无记录 → 空字符串。"""
         from src.user.db import get_webhook_token_by_repo
         with patch("src.user.db.db") as mock_db, patch("src.user.db.db_lock"):
             cursor = MagicMock()
-            cursor.fetchone.return_value = None
+            cursor.fetchall.return_value = []
             mock_db.cursor.return_value = cursor
             result = get_webhook_token_by_repo("unknown/repo")
             assert result == ""

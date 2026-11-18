@@ -11,6 +11,12 @@ _HOSTS = {"gitcode": "gitcode.com", "github": "github.com"}
 _API_BASES = {"gitcode": "https://gitcode.com/api/v5", "github": "https://api.github.com"}
 
 
+def _gitlab_bases() -> tuple[str, str]:
+    """(base_url, api_base) — 自建 GitLab 由配置决定。"""
+    from src.vcs.gitlab import get_gitlab_base_url, get_gitlab_api_base
+    return get_gitlab_base_url(), get_gitlab_api_base()
+
+
 class Repo:
     """仓库领域对象。"""
 
@@ -21,11 +27,18 @@ class Repo:
     @property
     def api_base(self) -> str:
         """返回该仓库对应平台的 API 基础 URL。"""
+        if self.provider == "gitlab":
+            return _gitlab_bases()[1]
         return _API_BASES.get(self.provider, _API_BASES["gitcode"])
 
     @property
     def clone_url(self) -> str:
         """返回仓库的 git clone URL。"""
+        if self.provider == "gitlab":
+            base = _gitlab_bases()[0]
+            _ssh = base.startswith("https://")
+            host_path = base.split("://", 1)[-1]
+            return f"https://{host_path}/{self.owner}/{self.name}.git" if _ssh else f"{base}/{self.owner}/{self.name}.git"
         host = _HOSTS.get(self.provider, _HOSTS["gitcode"])
         return f"https://{host}/{self.owner}/{self.name}.git"
 

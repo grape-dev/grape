@@ -399,6 +399,8 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     host_status TEXT DEFAULT '',     -- 托管状态（方案 F：''=完整 / bot_missing / webhook_missing / partial）
     bot_gitcode_token TEXT DEFAULT '',
     gitcode_webhook_token TEXT DEFAULT '',
+    bot_gitlab_token TEXT DEFAULT '',
+    gitlab_webhook_token TEXT DEFAULT '',
     bot_username TEXT DEFAULT '',
     host_user_id INTEGER DEFAULT 0,       -- Issue #372: 路径 B 托管用户 ID（无全局 bot token 时）
     webhook_secret TEXT DEFAULT '',       -- Issue #372: webhook 验证密钥（与 token 解耦）
@@ -645,7 +647,8 @@ def init_db():
         db.execute(_MANAGED_REPOS_DDL)
         db.execute(_OAUTH_STATES_DDL)
         # 兼容旧列迁移（幂等）：managed_repos 新增 github 列
-        for col in ["bot_github_token", "github_webhook_token"]:
+        for col in ["bot_github_token", "github_webhook_token",
+                    "bot_gitlab_token", "gitlab_webhook_token"]:
             try:
                 db.execute(f"ALTER TABLE managed_repos ADD COLUMN {col} TEXT DEFAULT ''")
             except Exception:
@@ -801,6 +804,12 @@ def init_db():
             db.execute("ALTER TABLE managed_repos ADD COLUMN host_vcs_username TEXT DEFAULT ''")
         except Exception:
             pass
+        # GitLab provider 托管列（TokenResolver.GitLabProvider 声明的字段须真实存在）
+        for _gl_col in ["bot_gitlab_token", "gitlab_webhook_token"]:
+            try:
+                db.execute(f"ALTER TABLE managed_repos ADD COLUMN {_gl_col} TEXT DEFAULT ''")
+            except Exception:
+                pass
         # 迁移 user_accounts 废弃字段 → 正确位置（须在 DROP COLUMN 之前执行）
         try:
             c = db.cursor()
@@ -1395,7 +1404,9 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
                      bot_gitcode_token: str = "", gitcode_webhook_token: str = "",
                      bot_username: str = "", dev_scene: str = "",
                      github_webhook_token: str = "", bot_github_token: str = "",
-                     org_id: int = 0, host_user_id: int = 0, webhook_secret: str = "") -> bool:
+                     org_id: int = 0, host_user_id: int = 0, webhook_secret: str = "",
+                     bot_gitlab_token: str = "", gitlab_webhook_token: str = "",
+                     clear_webhook_secret: bool = False) -> bool:
     """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。
 
     org_id > 0 时绑定到指定组织；org_id=0 时为全局（兼容旧逻辑）。
@@ -1424,14 +1435,17 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
                 # 路径 B rebind 时（调用方传 host_user_id=0 + bot_token 空）保留已有值。
                 if host_user_id > 0:
                     _final_host = host_user_id
-                elif bot_gitcode_token or bot_github_token:
-                    # 路径 A：显式传了 bot token → 清零 host_user_id
+                elif bot_gitcode_token or bot_github_token or bot_gitlab_token:
+                    # 路径 A：显式传了 bot token（含 GitLab）→ 清零 host_user_id
                     _final_host = 0
                 else:
                     # 未传 bot token → 保留已有 host_user_id（路径 B rebind / scene 变更等）
                     _final_host = _existing_host
-                # R14.12: webhook_secret 空串时保留已有值（防覆盖路径 B 密钥）
-                _final_secret = webhook_secret if webhook_secret else (existing[1] or "")
+                # R14.12: webhook_secret 空串时保留已有值（防覆盖路径 B 密钥）。
+                # clear_webhook_secret=True 用于路径 A（bot token 重建 webhook）显式清旧值，
+                # 否则旧随机 secret 会被校验层优先取到，导致 webhook 403。
+                _final_secret = ("" if clear_webhook_secret else
+                                 (webhook_secret if webhook_secret else (existing[1] or "")))
                 # R14.12: bot_token 空串时保留已有值（防 B→A 升级后覆盖 bot token）
                 _final_bot_gc = bot_gitcode_token if bot_gitcode_token else (existing[2] or "")
                 _final_bot_gh = bot_github_token if bot_github_token else (existing[3] or "")
@@ -1457,12 +1471,20 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
                 try:
                     c.execute(
                         "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id, host_user_id, webhook_secret) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id, host_user_id, webhook_secret))
+                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id, host_user_id, ("" if clear_webhook_secret else webhook_secret)))
                 except Exception:
                     # 列不存在时降级
                     c.execute(
                         "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                         (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id))
+            # GitLab provider 专属列（列由迁移保证存在；未迁移的旧库静默降级）
+            if bot_gitlab_token or gitlab_webhook_token:
+                try:
+                    c.execute(
+                        "UPDATE managed_repos SET bot_gitlab_token=?, gitlab_webhook_token=? WHERE repo_key=?",
+                        (bot_gitlab_token, gitlab_webhook_token, repo_key))
+                except Exception:
+                    pass
             db.commit()
             return True
     except Exception as e:
@@ -1757,8 +1779,7 @@ def _rebuild_webhook_with_bot_token(repo_key: str, bot_token: str, provider: str
     if not _wh_url:
         log.warning(f"_rebuild_webhook_with_bot_token: webhook_url not configured for {repo_key}")
         return ""
-    if provider == "github":
-        _wh_url = _wh_url.replace("/webhook/gitcode", "/webhook/github")
+    _wh_url = webhook_url_for_provider(_wh_url, provider)
     try:
         owner, repo_name = split_owner_repo(repo_key)
     except Exception:
@@ -1771,24 +1792,38 @@ def _rebuild_webhook_with_bot_token(repo_key: str, bot_token: str, provider: str
             if provider == "github":
                 from src.user.repo_manager import remove_github_webhook
                 remove_github_webhook(bot_token, owner, repo_name, _old_hook_id)
+            elif provider == "gitlab":
+                from src.user.repo_manager import remove_gitlab_webhook
+                remove_gitlab_webhook(bot_token, owner, repo_name, _old_hook_id)
             else:
                 from src.user.repo_manager import remove_webhook
                 remove_webhook(bot_token, owner, repo_name, _old_hook_id)
         except Exception as _re:
             log.warning(f"_rebuild_webhook_with_bot_token: remove old webhook failed for {repo_key}: {_re}")
-            # 删旧失败 → 不继续建新（旧 webhook 仍在，新建会创建第二个）
-            # 返回空串：调用方会清 webhook_secret 并写 bot token，
-            # 旧 webhook 的实际密码（旧 secret/token）与 DB 新值不匹配 → webhook 403
-            # 这是 loud fail（有日志），用户可 repair_host 恢复
+            # 删旧失败 → 不继续建新（旧 webhook 仍在，新建会创建第二个）。
+            # GitLab 可用 PUT 直接把旧 hook 的 token 对齐到 bot token，避免
+            # 调用方清掉旧 secret 后上游仍用旧密钥投递 → 持续 403。
+            if provider == "gitlab":
+                try:
+                    from src.user.repo_manager import update_gitlab_webhook_token
+                    update_gitlab_webhook_token(bot_token, owner, repo_name,
+                                                int(_old_hook_id), bot_token)
+                    return str(_old_hook_id)
+                except Exception as _ue:
+                    log.warning(f"_rebuild_webhook_with_bot_token: update old GitLab hook token failed: {_ue}")
+            # 其余平台：loud fail（有日志），用户可 repair_host 恢复
             return ""
     # 用 bot token 建新 webhook
     try:
         if provider == "github":
             from src.user.repo_manager import setup_github_webhook
             return str(setup_github_webhook(bot_token, owner, repo_name, _wh_url, webhook_secret=""))
-        else:
-            from src.user.repo_manager import setup_webhook
-            return str(setup_webhook(bot_token, owner, repo_name, _wh_url, webhook_password=bot_token))
+        if provider == "gitlab":
+            from src.user.repo_manager import setup_gitlab_webhook
+            return str(setup_gitlab_webhook(bot_token, owner, repo_name, _wh_url,
+                                           webhook_secret=bot_token))
+        from src.user.repo_manager import setup_webhook
+        return str(setup_webhook(bot_token, owner, repo_name, _wh_url, webhook_password=bot_token))
     except Exception as _se:
         log.error(f"_rebuild_webhook_with_bot_token: setup new webhook FAILED for {repo_key}: {_se}")
         return ""
@@ -1816,11 +1851,13 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
     except Exception as e:
         log.warning(f"update_managed_repo_bot_token: check existence failed: {e}")
         return {"ok": False, "warning": "", "related_repos": []}
-    provider = "github" if repo_key.startswith("github:") else "gitcode"
+    from src.repo_key import parse_repo_key
+    provider = parse_repo_key(repo_key)[0]
     # FR-6.2: 检测共用 bot token 的关联仓库（信任域影响提示）
     _related_repos = []
     try:
-        _bot_token_col = "bot_github_token" if provider == "github" else "bot_gitcode_token"
+        _bot_token_col = {"github": "bot_github_token", "gitlab": "bot_gitlab_token"}.get(
+            provider, "bot_gitcode_token")
         with db_lock:
             c = db.cursor()
             c.execute(f"SELECT repo_key FROM managed_repos WHERE {_bot_token_col}=? AND repo_key!=?",
@@ -2059,7 +2096,8 @@ def get_task_token(task: dict) -> str:
     为空时（路径 B 托管）通过实时获取（带自动刷新）。
     按 repo_key 前缀分流：github: → get_github_token，其他 → get_repo_token_with_refresh。
     """
-    tok = task.get("repo_gitcode_token") or ""
+    tok = (task.get("repo_gitcode_token") or task.get("repo_github_token")
+           or task.get("repo_gitlab_token") or "")
     if tok:
         return tok
     repo_key = task.get("repo_key") or ""
@@ -2146,8 +2184,9 @@ def get_webhook_verify_token(repo_key: str) -> str:
     except Exception as e:
         log.warning(f"get_webhook_verify_token: query webhook_secret failed: {e}")
     # 2. 查 webhook_token_field（路径 A bot token 写入的 webhook password）
-    _is_github = repo_key.startswith("github:")
-    _wt_field = "github_webhook_token" if _is_github else "gitcode_webhook_token"
+    _provider = repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode"
+    _wt_field = {"github": "github_webhook_token",
+                 "gitlab": "gitlab_webhook_token"}.get(_provider, "gitcode_webhook_token")
     try:
         with db_lock:
             c = db.cursor()
@@ -2185,7 +2224,8 @@ def get_host_vcs_username(repo_key: str, provider: str = "") -> str:
         log.warning(f"get_host_vcs_username: query managed_repos failed: {e}")
     # 2. fallback: 从 external_identities 查
     if not provider:
-        provider = "github" if repo_key.startswith("github:") else "gitcode"
+        from src.repo_key import parse_repo_key
+        provider, _, _ = parse_repo_key(repo_key)
     host_user_id = get_host_user_id(repo_key)
     if host_user_id > 0:
         try:
@@ -2255,36 +2295,41 @@ def _is_user_token_repo(repo_key: str) -> bool:
     # R22.2.5: 路径 B 仓库（host_user_id > 0）跳过 session token 查询——
     # 与 DevopsAgentSessionToken._fetch 的 host_user_id 守卫对齐（R22.2.4）。
     # 防止路径 A→B 降级后 session token 残留导致 _is_user_token_repo 误返回 False。
+    # 按 provider 选择 token 列，避免 GitLab 仓库误查 GitCode 列
+    _provider = repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode"
+    _session_col = {"github": "repo_github_token",
+                    "gitlab": "repo_gitlab_token"}.get(_provider, "repo_gitcode_token")
+    _bot_col = {"github": "bot_github_token",
+                "gitlab": "bot_gitlab_token"}.get(_provider, "bot_gitcode_token")
     _hid = get_host_user_id(repo_key)
     if _hid > 0:
-        # 路径 B 仓库：session token 层无关，直接跳到 bot_gitcode_token 检查
+        # 路径 B 仓库：session token 层无关，直接跳到 bot token 检查
         pass
     else:
-        # 路径 A: devops_agent_session.repo_gitcode_token
+        # 路径 A: devops_agent_session 的 provider 对应 token 列
         try:
             with db_lock:
                 c = db.cursor()
                 c.execute(
-                    "SELECT repo_gitcode_token FROM devops_agent_session "
-                    "WHERE repo_key=? AND repo_gitcode_token IS NOT NULL "
-                    "AND repo_gitcode_token!='' LIMIT 1",
+                    f"SELECT {_session_col} FROM devops_agent_session "
+                    f"WHERE repo_key=? AND {_session_col} IS NOT NULL "
+                    f"AND {_session_col}!='' LIMIT 1",
                     (repo_key,),
                 )
                 if c.fetchone():
                     return False
         except Exception:
             pass
-    # 路径 B: managed_repos.bot_gitcode_token
-    # R14.13: 路径 B 仓库（host_user_id > 0）跳过此层——与 get_repo_token_with_refresh 守卫对齐，
-    # 防止脏写入的 bot_gitcode_token 导致判断不一致
+    # 路径 B: managed_repos 的 provider 对应 bot token 列
+    # R14.13: 路径 B 仓库（host_user_id > 0）跳过此层，防止脏写入导致判断不一致
     if _hid == 0:
         try:
             with db_lock:
                 c = db.cursor()
                 c.execute(
-                    "SELECT bot_gitcode_token FROM managed_repos "
-                    "WHERE repo_key=? AND bot_gitcode_token IS NOT NULL "
-                    "AND bot_gitcode_token!='' LIMIT 1",
+                    f"SELECT {_bot_col} FROM managed_repos "
+                    f"WHERE repo_key=? AND {_bot_col} IS NOT NULL "
+                    f"AND {_bot_col}!='' LIMIT 1",
                     (repo_key,),
                 )
                 if c.fetchone():
@@ -2406,11 +2451,18 @@ def _query_path_b_repos(provider: str = "gitcode") -> list[dict]:
                     "WHERE (bot_github_token IS NULL OR bot_github_token='') "
                     "AND host_user_id > 0 AND repo_key LIKE 'github:%'"
                 )
+            elif provider == "gitlab":
+                c.execute(
+                    "SELECT repo_key, repo_owner, repo_name, host_user_id FROM managed_repos "
+                    "WHERE (bot_gitlab_token IS NULL OR bot_gitlab_token='') "
+                    "AND host_user_id > 0 AND repo_key LIKE 'gitlab:%'"
+                )
             else:
                 c.execute(
                     "SELECT repo_key, repo_owner, repo_name, host_user_id FROM managed_repos "
                     "WHERE (bot_gitcode_token IS NULL OR bot_gitcode_token='') "
-                    "AND host_user_id > 0 AND repo_key NOT LIKE 'github:%'"
+                    "AND host_user_id > 0 AND repo_key NOT LIKE 'github:%' "
+                    "AND repo_key NOT LIKE 'gitlab:%'"
                 )
             rows = c.fetchall()
         return [
@@ -2451,6 +2503,12 @@ def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitco
                 c.execute(
                     "UPDATE managed_repos SET bot_github_token=?, host_user_id=0, webhook_secret='', "
                     "bot_token_status='', github_webhook_token=?, webhook_id=? WHERE repo_key=?",
+                    (bot_token, webhook_token or bot_token, _wh_id, repo_key),
+                )
+            elif provider == "gitlab":
+                c.execute(
+                    "UPDATE managed_repos SET bot_gitlab_token=?, host_user_id=0, webhook_secret='', "
+                    "bot_token_status='', gitlab_webhook_token=?, webhook_id=? WHERE repo_key=?",
                     (bot_token, webhook_token or bot_token, _wh_id, repo_key),
                 )
             else:
@@ -2496,6 +2554,12 @@ def auto_upgrade_path_b_repos(provider: str, bot_token: str, bot_username: str):
                 acc = get_grape_account_by_id(host_user_id)
                 if acc and acc.get("username"):
                     host_token = get_user_github_token_with_refresh(acc["username"], host_user_id) or ""
+            elif provider == "gitlab":
+                from src.api.deps import get_user_gitlab_token_with_refresh
+                from src.auth.grape_account_db import get_grape_account_by_id
+                acc = get_grape_account_by_id(host_user_id)
+                if acc and acc.get("username"):
+                    host_token = get_user_gitlab_token_with_refresh(acc["username"], user_id=host_user_id) or ""
             else:
                 from src.api.deps import get_user_token_with_refresh
                 from src.auth.grape_account_db import get_grape_account_by_id
@@ -2520,6 +2584,13 @@ def auto_upgrade_path_b_repos(provider: str, bot_token: str, bot_username: str):
                 if not accept_github_invite(bot_token, owner, repo_name):
                     skipped += 1
                     log.warning(f"auto_upgrade: accept_github_invite failed for {repo['repo_key']}, skipping")
+                    continue
+            elif provider == "gitlab":
+                # GitLab 直接加成员（无邀请接受流程）；members 端点只接受数字 user_id
+                from src.user.repo_manager import add_gitlab_member
+                if not add_gitlab_member(host_token, owner, repo_name, bot_username, "maintainer"):
+                    skipped += 1
+                    log.warning(f"auto_upgrade: add_gitlab_member failed for {repo['repo_key']}, skipping")
                     continue
             else:
                 from src.user.repo_manager import add_collaborator, accept_invite_for_repo
@@ -2623,42 +2694,116 @@ def refresh_gitcode_oauth_token(user_id: int) -> str | None:
     return refresh_oauth_token(user_id, "gitcode")
 
 
-def get_webhook_token_by_repo(full_name: str) -> str:
-    """根据 full_name（owner/repo）查找 repo 的预期 webhook token（按 provider 分流）。
+def provider_for_full_name(full_name: str) -> str:
+    """按 managed_repos 登记解析 ``owner/repo``（可含嵌套 namespace）的真实 provider。
 
-    Issue #372: 优先返回 webhook_secret（路径 B 随机密钥，与 token 解耦），
-    为空时 fallback 到 gitcode_webhook_token / github_webhook_token（路径 A 兼容）。
+    URL / 前端常只带无前缀 full_name，``to_repo_key`` 默认补 ``gitcode:``，
+    会把 GitLab 仓库判成 GitCode。托管登记是 provider 的权威来源；未登记时
+    保持旧行为（gitcode）。多平台同名时优先非默认平台（gitlab > github > gitcode）。
+    """
+    _fn = (full_name or "").strip("/")
+    if not _fn:
+        return "gitcode"
+    try:
+        with db_lock:
+            rows = db.cursor().execute("SELECT repo_key FROM managed_repos").fetchall()
+        matched = []
+        for row in rows:
+            rk = (row[0] or "") if isinstance(row, (tuple, list)) else ""
+            if rk.split(":", 1)[-1] != _fn:
+                continue
+            _p = rk.split(":", 1)[0] if ":" in rk else "gitcode"
+            if _p in ("gitcode", "github", "gitlab") and _p not in matched:
+                matched.append(_p)
+        for _p in ("gitlab", "github", "gitcode"):
+            if _p in matched:
+                return _p
+    except Exception:
+        pass
+    return "gitcode"
+
+
+def get_webhook_tokens_by_repo(full_name: str, provider: str = "") -> list[str]:
+    """返回该仓库在指定 provider 下所有「合法」的 webhook 校验密钥候选。
+
+    历史托管/重建路径会让上游实际配置的 token 与 DB 首选值不一致，例如：
+    - 路径 B 随机 ``webhook_secret`` 残留，但 webhook 已被 bot token 重建；
+    - ``setup_gitlab_webhook(webhook_secret="")`` 实际把 api_token 写进 GitLab；
+    - 旧库缺 ``gitlab_webhook_token`` / ``bot_gitlab_token`` 列。
+    只返回单一首选值会稳定 403（X-Gitlab-Token mismatch）。校验方应逐个用
+    ``hmac.compare_digest`` 比对本函数返回的候选，任一命中即通过。
+
+    候选严格取自**同一 provider 的托管行**（webhook_secret / 平台 webhook_token /
+    bot token），不跨 provider 取别平台 token 列以免串号；仅当该 provider 行
+    完全不存在时，才把其他 provider 行的随机 webhook_secret 作为兼容兜底。
     """
     from src.repo_key import to_repo_key
-    with db_lock:
-        c = db.cursor()
-        # 同时查 gitcode: 和 github: 前缀
-        gc_key = to_repo_key(full_name)  # 默认 gitcode:
-        gh_key = to_repo_key(full_name, provider="github")
-        try:
-            c.execute(
-                "SELECT webhook_secret, gitcode_webhook_token, github_webhook_token FROM managed_repos WHERE repo_key IN (?, ?) ORDER BY webhook_secret DESC LIMIT 1",
-                (gc_key, gh_key)
-            )
-            row = c.fetchone()
-        except Exception:
-            # 列不存在时降级（兼容未迁移的库）
-            c.execute(
-                "SELECT gitcode_webhook_token, github_webhook_token FROM managed_repos WHERE repo_key IN (?, ?) ORDER BY gitcode_webhook_token DESC LIMIT 1",
-                (gc_key, gh_key)
-            )
-            row = c.fetchone()
-            if not row:
-                return ""
-            return row[1] or row[0] or ""
-        if not row:
-            return ""
-        # 优先 webhook_secret（路径 B），fallback 到 webhook_token（路径 A）
-        webhook_secret = row[0] or ""
-        if webhook_secret:
-            return webhook_secret
-        # GitHub 仓库有 github_webhook_token，GitCode 有 gitcode_webhook_token
-        return row[2] or row[1] or ""
+    prov = provider if provider in ("gitcode", "github", "gitlab") else "gitcode"
+    pref = to_repo_key(full_name, provider=prov)
+    keys = [pref] + [to_repo_key(full_name, provider=p)
+                     for p in ("gitcode", "github", "gitlab") if p != prov]
+    placeholders = ",".join("?" for _ in keys)
+    try:
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute(
+                    "SELECT repo_key, webhook_secret, gitcode_webhook_token, github_webhook_token, "
+                    "gitlab_webhook_token, bot_gitcode_token, bot_github_token, bot_gitlab_token "
+                    f"FROM managed_repos WHERE repo_key IN ({placeholders})", keys)
+                rows = c.fetchall() or []
+            except Exception:
+                # 逐级降级兼容未迁移旧库：尽量多保留列（bot 列缺失时仍能拿到
+                # gitlab_webhook_token，否则会只剩 webhook_secret 一个候选）。
+                try:
+                    c.execute(
+                        "SELECT repo_key, webhook_secret, gitcode_webhook_token, "
+                        "github_webhook_token, gitlab_webhook_token "
+                        f"FROM managed_repos WHERE repo_key IN ({placeholders})", keys)
+                    rows = [tuple(r) + ("", "", "") for r in (c.fetchall() or [])]
+                except Exception:
+                    try:
+                        c.execute(
+                            "SELECT repo_key, webhook_secret, gitcode_webhook_token, github_webhook_token "
+                            f"FROM managed_repos WHERE repo_key IN ({placeholders})", keys)
+                        rows = [tuple(r) + ("", "", "", "") for r in (c.fetchall() or [])]
+                    except Exception:
+                        return []
+    except Exception:
+        return []
+    by_key = {r[0]: r for r in rows}
+    # r = (repo_key, secret, gc_wh, gh_wh, gl_wh, bot_gc, bot_gh, bot_gl)
+    _cols = {"gitcode": (2, 5), "github": (3, 6), "gitlab": (4, 7)}
+    out: list[str] = []
+
+    def _add(v):
+        s = str(v or "")
+        if s and s not in out:
+            out.append(s)
+
+    main = by_key.get(pref)
+    if main:
+        _add(main[1])
+        for idx in _cols[prov]:
+            # 兼容只返回部分列的桩 / 极旧库（列数不足时跳过，不越界）
+            if idx < len(main):
+                _add(main[idx])
+    else:
+        # 路由 provider 与托管登记不一致的历史数据：只用随机 secret 兜底
+        for k in keys[1:]:
+            r = by_key.get(k)
+            if r:
+                _add(r[1])
+    return out
+
+
+def get_webhook_token_by_repo(full_name: str, provider: str = "") -> str:
+    """兼容旧调用方：返回首选 webhook 密钥；webhook 校验请用候选列表版本。
+
+    provider 由路由显式传入（gitcode/github/gitlab）。
+    """
+    toks = get_webhook_tokens_by_repo(full_name, provider)
+    return toks[0] if toks else ""
 
 
 def remove_managed_repo(repo_key: str) -> dict | None:
@@ -2873,6 +3018,19 @@ def get_server_base_url_warning() -> str:
         "或分别配置 browser_callback_url / worker_connect_url 后重启。"
         "配置示例见 configs/server-config.example.json。"
     )
+
+
+def webhook_url_for_provider(base_url: str, provider: str) -> str:
+    """按目标 provider 重写 webhook 回调地址。
+
+    配置里的 webhook_url 默认以 /webhook/gitcode 结尾，但管理员可能显式配成
+    /webhook/github 或自定义路径；简单的字符串 replace 在这种场景会静默不生效，
+    导致 GitLab webhook 注册到错误端点。
+    """
+    import re as _re
+    s = str(base_url or "").rstrip("/")
+    s = _re.sub(r"/webhook/(gitcode|github|gitlab)$", "", s)
+    return s + f"/webhook/{provider}"
 
 
 def get_webhook_url() -> str:
@@ -3156,7 +3314,9 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
         # fallback：从 user_credentials 读（迁移期兼容）
         rt = _read_refresh_token_from_credentials(user_id, provider)
     if not rt:
-        log.warning(f"refresh_oauth: no refresh_token for user={user_id}, provider={provider}")
+        # PAT / 导入 token 没有 refresh_token 是正常形态（不会过期，无需刷新）。
+        # 降为 debug，避免每次读 API 都打一条误导性的「授权异常」警告。
+        log.debug(f"refresh_oauth: skip, no refresh_token for user={user_id}, provider={provider}")
         return None
 
     client_id = get_meta_value(f"oauth_{provider}_client_id")

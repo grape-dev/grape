@@ -163,6 +163,34 @@ def _fetch_github_collaborators(owner: str, repo: str, api_token: str) -> list:
     return collabs
 
 
+def _fetch_gitlab_collaborators(owner: str, repo: str, api_token: str) -> list:
+    """分页拉取 GitLab 项目成员（含继承成员），字段归一为 GitCode 协作者口径。
+
+    GitLab v4: GET /projects/{urlencoded owner/repo}/members/all
+    自建实例地址由 get_gitlab_api_base() 动态解析；owner/repo 支持嵌套 namespace。
+    返回项含 nick_name（展示名）/ username / login，供上层按昵称匹配。
+    """
+    from src.user.repo_manager import _gitlab_req
+    from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+    base = f"{get_gitlab_api_base()}/projects/{gitlab_project_path(owner, repo)}/members/all"
+    collabs = []
+    page = 1
+    while page <= 50:
+        data = _gitlab_req("GET", f"{base}?per_page=100&page={page}", api_token)
+        if not isinstance(data, list) or not data:
+            break
+        for _m in data:
+            if not isinstance(_m, dict):
+                continue
+            _login = _m.get("username", "") or ""
+            _name = _m.get("name", "") or _login
+            collabs.append({"nick_name": _name, "username": _login, "login": _login})
+        if len(data) < 100:
+            break
+        page += 1
+    return collabs
+
+
 def _resolve_uid_by_platform_login(login: str, provider: str) -> int:
     """FR-21.2: 从 external_identities 按 platform login 查 grape_user_id。"""
     from src.session_manager import db, db_lock
@@ -760,6 +788,8 @@ class FeishuAsync:
         try:
             if provider == "github":
                 collabs = _fetch_github_collaborators(owner, repo, api_token)
+            elif provider == "gitlab":
+                collabs = _fetch_gitlab_collaborators(owner, repo, api_token)
             else:
                 collabs = _fetch_gitcode_collaborators(owner, repo, api_token)
         except Exception as e:
@@ -776,10 +806,10 @@ class FeishuAsync:
                 continue
             for m in members:
                 if m.get("name") == nick:
-                    if provider == "github":
-                        # FR-21.2: GitHub 协作者 login 是 GitHub 真名，不能写 gitcode_user 列
+                    if provider in ("github", "gitlab"):
+                        # FR-21.2: 非 GitCode 协作者 login 是平台真名，不能写 gitcode_user 列
                         # 先从 external_identities 查 grape_user_id，再只写飞书三列
-                        _uid = _resolve_uid_by_platform_login(login, "github")
+                        _uid = _resolve_uid_by_platform_login(login, provider)
                         if _uid:
                             from src.session_manager import bind_feishu_identity
                             bind_feishu_identity(_uid, m["open_id"], feishu_name=nick, app_id=ctx.app_id)

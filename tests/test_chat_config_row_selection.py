@@ -202,3 +202,83 @@ def test_no_rows_still_materializes_default():
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE id=?", (f"sess-cfg-{UID2}",))
             db.commit()
+
+
+# ---------------------------------------------------------------- ④ 悬空 runtime_id 自愈
+
+UID3 = 94003
+
+
+def _clean_uid3():
+    _clean(UID3)
+
+
+def _db_row_runtime_id(uid, row_id):
+    with db_lock:
+        c = db.cursor()
+        r = c.execute("SELECT runtime_id FROM chat_agent_session WHERE id=? AND user_id=?",
+                      (row_id, uid)).fetchone()
+        return r[0] if r else None
+
+
+def test_dangling_runtime_id_is_self_healed_in_db():
+    """配置行指向已删除引擎（runtime_id 悬空）→ 读配置时把指针改写成实际生效引擎。
+
+    线上形态：引擎行被对账/吊销删掉，`chat_agent_session.runtime_id` 没人清 →
+    每条 chat 消息都回落"未配置"并刷 `runtime_id=N 不存在（引擎行已删除）` WARNING。
+    只读兜底不改库时这条告警永不消失，必须写侧自愈。
+    """
+    _snap = _snapshot_runtime_ids(); _seed_engine(); _clean_uid3()
+    from src.session_manager import _STALE_RUNTIME_WARNED
+    _STALE_RUNTIME_WARNED.discard((UID3, R_GONE))
+    _row(UID3, f"sess-cfg-{UID3}", R_GONE, "2026-11-17 07:55:00")
+    try:
+        cfg = get_chat_config(UID3)
+        assert cfg["runtime_id"] != R_GONE, f"不得继续返回已删除引擎，实际 {cfg}"
+        assert _db_row_runtime_id(UID3, f"sess-cfg-{UID3}") == cfg["runtime_id"], \
+            "悬空指针必须落库自愈，否则下次读又回落未配置"
+    finally:
+        _clean_uid3(); _clean_engine(); _restore_runtimes(_snap); _reset_engine_cache()
+        _STALE_RUNTIME_WARNED.discard((UID3, R_GONE))
+
+
+def test_dangling_runtime_warning_only_once(caplog):
+    """同一 (user, 悬空 id) 的告警只打一次：不能每条消息刷一条。"""
+    import logging
+    from src.session_manager import _STALE_RUNTIME_WARNED
+    _snap = _snapshot_runtime_ids(); _seed_engine(); _clean_uid3()
+    _STALE_RUNTIME_WARNED.discard((UID3, R_GONE))
+    _row(UID3, "sess-cfg-94003-legacy", R_GONE, "2026-11-17 07:55:00")
+    caplog.set_level(logging.WARNING, logger="devops-bot")
+    try:
+        for _ in range(3):
+            get_chat_config(UID3)
+        hits = [r for r in caplog.records if "不存在（引擎行已删除）" in r.getMessage()]
+        assert len(hits) == 1, [r.getMessage() for r in caplog.records]
+    finally:
+        _clean_uid3(); _clean_engine(); _restore_runtimes(_snap); _reset_engine_cache()
+        _STALE_RUNTIME_WARNED.discard((UID3, R_GONE))
+
+
+def test_purge_dangling_runtime_refs_only_touches_dangling():
+    """全量对账：悬空引用归零，指向存活引擎的引用原样保留。"""
+    from src.session_manager import purge_dangling_runtime_refs
+    _snap = _snapshot_runtime_ids(); _seed_engine()
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (UID3,))
+        c.execute("INSERT OR REPLACE INTO chat_agent_session "
+                  "(id, user_id, repo_key, runtime_id, created_at, last_active_at) "
+                  "VALUES (?,?,?,?,datetime('now'),datetime('now'))",
+                  (f"sess-cfg-{UID3}", UID3, "", R_GONE))
+        c.execute("INSERT OR REPLACE INTO chat_agent_session "
+                  "(id, user_id, repo_key, runtime_id, created_at, last_active_at) "
+                  "VALUES (?,?,?,?,datetime('now'),datetime('now'))",
+                  (f"sess-task-{UID3}", UID3, "gradio:o/r", R_OK))
+        db.commit()
+    try:
+        purge_dangling_runtime_refs()
+        assert _db_row_runtime_id(UID3, f"sess-cfg-{UID3}") == 0, "悬空引用应归零"
+        assert _db_row_runtime_id(UID3, f"sess-task-{UID3}") == R_OK, "存活引擎的引用不得被改动"
+    finally:
+        _clean_uid3(); _clean_engine(); _restore_runtimes(_snap); _reset_engine_cache()

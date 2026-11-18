@@ -35,6 +35,14 @@ def get_event_header(headers: dict) -> tuple[str, str]:
         (event_type_header, source_name)
     """
     headers_lower = {k.lower(): v for k, v in headers.items()}
+    # webhook 路由显式带入的平台路径优先：反向代理未透传 X-Gitlab-Event 等
+    # 平台事件头时，仍能按 /webhook/{provider} 正确分发，不会降级成 GitCode。
+    _path = headers_lower.get("x-grape-webhook-path", "")
+    if _path:
+        _src = _WEBHOOK_PATH_MAP.get(_path, "")
+        if _src:
+            _key = _BACKENDS[_src].event_header_key.lower()
+            return headers_lower.get(_key, "unknown"), _src
     for source, backend in _BACKENDS.items():
         header_value = headers_lower.get(backend.event_header_key.lower())
         if header_value:

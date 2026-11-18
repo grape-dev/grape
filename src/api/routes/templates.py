@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from src.api.deps import require_no_session_token, require_org_member
 from src.config import log, CONFIG_DIR, EXAMPLE_DIR
 from src.user.repo_manager import create_repo, get_user_gitcode_login, push_template_to_repo
-from src.api.deps import get_user_token, get_user_token_with_refresh, get_user_github_token, get_user_github_token_with_refresh
+from src.api.deps import get_user_token, get_user_token_with_refresh, get_user_github_token, get_user_github_token_with_refresh, get_user_gitlab_token_with_refresh
 
 router = APIRouter(prefix="/api/project-templates", tags=["project-templates"])
 
@@ -76,6 +76,17 @@ def _load_global_bot_config(provider: str = "gitcode") -> tuple[str, str]:
     if provider == "github":
         bot_token = get_global_github_bot_token()
         bot_username = get_global_github_bot_username()
+    elif provider == "gitlab":
+        # GitLab 无独立的 bot username 配置项，直接用 bot token 查 /user 取 username
+        from src.user.db import get_meta_value
+        bot_token = (get_meta_value("global_bot_gitlab_token") or "").strip()
+        bot_username = ""
+        if bot_token:
+            try:
+                from src.user.repo_manager import get_user_gitlab_login
+                bot_username = get_user_gitlab_login(bot_token) or ""
+            except Exception:
+                bot_username = ""
     else:
         bot_token = get_global_gitcode_bot_token()
         us = get_global_bot_usernames()
@@ -127,6 +138,22 @@ def get_template_readme(template_id: str, user: dict = Depends(require_no_sessio
             if r.status_code == 200:
                 content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
                 return {"content": content, "source": "github"}
+        elif source_platform == "gitlab":
+            # 自建 GitLab：动态 base URL + 项目 default_branch（不能用 GitCode 固定域名）
+            from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+            _o, _, _r = source_repo.partition("/")
+            _proj_id = gitlab_project_path(_o, _r)
+            _api = get_gitlab_api_base()
+            _pat = os.environ.get("GITLAB_PAT", "")
+            headers = {"PRIVATE-TOKEN": _pat} if _pat else {}
+            _pj = requests.get(f"{_api}/projects/{_proj_id}", headers=headers, timeout=10)
+            _ref = (_pj.json() or {}).get("default_branch", "main") if _pj.status_code == 200 else "main"
+            for _fname in ("README.md", "readme.md"):
+                r = requests.get(
+                    f"{_api}/projects/{_proj_id}/repository/files/{_fname}/raw",
+                    params={"ref": _ref}, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    return {"content": r.text, "source": "gitlab"}
         else:
             url = f"https://gitcode.com/api/v5/repos/{source_repo}/contents/README.md"
             gitcode_pat = os.environ.get("GITCODE_PAT", "")
@@ -186,11 +213,13 @@ async def create_from_template(body: CreateTemplateRequest,
 
     # 按 provider 分流：前端显式传 provider 时用指定平台，否则自动选择
     from src.api.routes.repos import _get_user_provider_and_token
-    if body.provider in ("gitcode", "github"):
+    if body.provider in ("gitcode", "github", "gitlab"):
         if body.provider == "gitcode":
             api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-        else:
+        elif body.provider == "github":
             api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
+        else:
+            api_token = get_user_gitlab_token_with_refresh(user["username"], user_id=user.get("id", 0))
         provider = body.provider
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"{provider} API Token 未配置，请先绑定 {provider} 平台"})
@@ -213,6 +242,12 @@ async def create_from_template(body: CreateTemplateRequest,
             if not owner_login:
                 raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前 GitHub 用户身份"})
             create_github_repo(api_token, repo_name, description=tpl.get("description", ""))
+        elif provider == "gitlab":
+            from src.user.repo_manager import get_user_gitlab_login, create_gitlab_repo
+            owner_login = get_user_gitlab_login(api_token)
+            if not owner_login:
+                raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前 GitLab 用户身份"})
+            create_gitlab_repo(api_token, repo_name, description=tpl.get("description", ""))
         else:
             gitcode_login = get_user_gitcode_login(api_token)
             if not gitcode_login:

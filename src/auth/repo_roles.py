@@ -9,6 +9,8 @@
   （Maintainer 也能建 webhook）；本模块是「admin 终审」口径，仅 Owner/Admin 可确认。）
 - GitHub: GET /repos/{owner}/{repo}/collaborators/{username}/permission
   admin 判定：role_name == "admin" 或 permission == "admin" 或 username == owner。
+- GitLab: GET /projects/{urlencoded owner/repo}（自建实例动态 base URL）
+  admin 判定：permissions.project_access / group_access 的 access_level >= 50（Owner）。
 
 Fail-closed 原则：任何查询失败（网络/401/403/404/限流）一律返回 None（非 admin），
 宁可拒绝合法 admin（其可稍后重试），绝不放行无权限用户。
@@ -86,6 +88,34 @@ def _check_gitcode_admin(token: str, owner: str, repo: str, username: str) -> bo
     return bool(perm.get("admin")) if isinstance(perm, dict) else False
 
 
+def _get_gitlab_login(user: dict) -> str:
+    """取用户绑定的 GitLab 用户名。"""
+    try:
+        from src.auth.grape_account_db import get_user_identities_with_tokens
+        for ident in get_user_identities_with_tokens(user.get("id", 0) or 0):
+            if ident.get("provider") == "gitlab":
+                return ident.get("external_login", "") or ""
+    except Exception as e:
+        log.warning(f"repo_roles: get gitlab login failed (user={user.get('id')}): {e}")
+    return ""
+
+
+def _check_gitlab_admin(token: str, owner: str, repo: str, username: str) -> bool:
+    """GitLab admin 终审判定：项目/组 access_level >= 50（Owner）。"""
+    from src.user.repo_manager import _gitlab_req
+    from src.vcs.gitlab import get_gitlab_api_base, gitlab_project_path
+    data = _gitlab_req(
+        "GET", f"{get_gitlab_api_base()}/projects/{gitlab_project_path(owner, repo)}", token)
+    perm = (data or {}).get("permissions") or {}
+    for _key in ("project_access", "group_access"):
+        try:
+            if int(((perm.get(_key) or {}).get("access_level", 0)) or 0) >= 50:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
 def _check_github_admin(token: str, owner: str, repo: str, username: str) -> bool:
     """GitHub admin 判定。"""
     from src.user.repo_manager import get_github_collaborator_permission
@@ -110,10 +140,9 @@ def get_repo_admin_identity(user: dict, repo_key: str) -> "dict | None":
     if not owner or not repo or not user:
         return None
 
-    if provider == "github":
-        username = _get_github_login(user)
-    else:
-        username = _get_gitcode_login(user)
+    # 按 provider 取该平台绑定的用户名；GitLab 不能退化为 GitCode 身份
+    _login_getters = {"github": _get_github_login, "gitlab": _get_gitlab_login}
+    username = _login_getters.get(provider, _get_gitcode_login)(user)
     if not username:
         return None
 
@@ -124,11 +153,13 @@ def get_repo_admin_identity(user: dict, repo_key: str) -> "dict | None":
     # 实时查 VCS permission（with_oauth_token：预刷新 + 401 重试一次）
     try:
         from src.api.oauth_token import with_oauth_token
-        provider_name = "github" if provider == "github" else "gitcode"
+        provider_name = provider if provider in ("github", "gitlab", "gitcode") else "gitcode"
 
         def _check(token, _owner=owner, _repo=repo, _u=username, _p=provider):
             if _p == "github":
                 return _check_github_admin(token, _owner, _repo, _u)
+            if _p == "gitlab":
+                return _check_gitlab_admin(token, _owner, _repo, _u)
             return _check_gitcode_admin(token, _owner, _repo, _u)
 
         if with_oauth_token(user, provider_name, _check):

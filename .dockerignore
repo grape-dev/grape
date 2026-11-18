@@ -12,4 +12,22 @@ docs/
 skills/tools/
 skills/huawei-cloud-ecs-servers/
 branches-backup-*.bundle
-configs/
+# configs/ 整个排除 → 只排除敏感文件，保留 oauth-providers.json / server-config.json
+configs/global-bot-token.json
+configs/login-whitelist.json
+configs/db-backend.json
+configs/db-backend.json.*
+configs/db-backend.json.bak-*
+configs/runtime-config.json
+configs/patrol-config.json
+configs/vlm-config.json
+configs/SETUP-GUIDE.md
+configs/skill-description.json
+configs/scenes/
+configs/project-templates.json
+configs/admin.env
+configs/scene-sync.json
+configs/email.json
+configs/crypto.json
+configs/security.json
+configs/*.local.json

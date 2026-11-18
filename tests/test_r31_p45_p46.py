@@ -68,6 +68,58 @@ class TestDetectStaleOfficialScenes:
             n = _detect_stale_official_scenes({"hello-world"}, traversal_complete=True)
         assert n == 0
 
+    def test_renamed_scenes_not_reported_as_stale(self):
+        """旧名 skill-dev/api-skill-dev 已被上游改名 → 新名存在时不误报 stale。"""
+        from src.storage import scene_sync
+        scene_sync._last_stale_report = None
+        scene_sync._last_renamed_report = None
+        mock_db, _ = self._mock_db([(1, "api-skill-dev"), (2, "skill-dev")])
+        with patch("src.session_manager.db", mock_db), patch("src.session_manager.db_lock"):
+            n = scene_sync._detect_stale_official_scenes(
+                {"grape-skill-dev", "common-restapi-skill-dev"}, traversal_complete=True)
+        assert n == 0
+
+    def test_renamed_scene_logs_info_not_warning(self, caplog):
+        """改名残留：不刷 WARNING，只给一次性 INFO（仍然提醒管理员停用旧行）。"""
+        import logging
+        from src.storage import scene_sync
+        scene_sync._last_stale_report = None
+        scene_sync._last_renamed_report = None
+        caplog.set_level(logging.INFO, logger="src.storage.scene_sync")
+        mock_db, _ = self._mock_db([(1, "skill-dev")])
+        with patch("src.session_manager.db", mock_db), patch("src.session_manager.db_lock"):
+            scene_sync._detect_stale_official_scenes(
+                {"grape-skill-dev"}, traversal_complete=True)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert not any(r.levelno >= logging.WARNING and "stale official scenes" in r.getMessage()
+                       for r in caplog.records), msgs
+        assert any("renamed official scenes" in m and "skill-dev→grape-skill-dev" in m
+                   for m in msgs), msgs
+
+    def test_rename_map_requires_successor_in_repo(self):
+        """映射写错（新名不在仓库里）时不能吞掉真删除：仍按 stale 计数。"""
+        from src.storage import scene_sync
+        scene_sync._last_stale_report = None
+        scene_sync._last_renamed_report = None
+        mock_db, _ = self._mock_db([(1, "skill-dev")])
+        with patch("src.session_manager.db", mock_db), patch("src.session_manager.db_lock"):
+            # 仓库里只有 common-skill-dev，没有 grape-skill-dev → skill-dev 视为真删除
+            n = scene_sync._detect_stale_official_scenes(
+                {"common-skill-dev"}, traversal_complete=True)
+        assert n == 1
+
+    def test_only_active_rows_considered(self):
+        """查询只统计 is_active=1：管理员停用后不再反复告警。"""
+        from src.storage import scene_sync
+        scene_sync._last_stale_report = None
+        scene_sync._last_renamed_report = None
+        mock_db, mock_cursor = self._mock_db([(1, "hello-world")])
+        with patch("src.session_manager.db", mock_db), patch("src.session_manager.db_lock"):
+            scene_sync._detect_stale_official_scenes({"hello-world"}, traversal_complete=True)
+        sql = str(mock_cursor.execute.call_args_list[0]).replace(" ", "")
+        assert "source='official'" in sql
+        assert "is_active=1" in sql
+
 
 # ===== P46.4 skill stale 检测（只读）=====
 
@@ -453,12 +505,22 @@ class TestStandaloneWorkerRemoval:
         symbols = ["_scene_sync_worker", "start_scene_sync_scheduler",
                    "stop_scene_sync_scheduler"]
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        import re as _re
         for sym in symbols:
             r = subprocess.run(
                 ["grep", "-rn", sym, "--include=*.py", os.path.join(repo_root, "src")],
                 capture_output=True, text=True)
-            hits = [l for l in r.stdout.splitlines()
-                    if l.strip() and not l.split(":", 2)[-1].strip().startswith("#")]
+            hits = []
+            for l in r.stdout.splitlines():
+                if not l.strip():
+                    continue
+                # grep -rn 输出为 path:lineno:content。Windows 盘符本身带冒号，
+                # split(":", 2) 会把行号混进内容，导致注释行被误判为残留引用；
+                # 用正则剥离 "path:lineno:" 前缀再判注释。
+                _m = _re.match(r"^.*?:\d+:(.*)$", l)
+                _code = _m.group(1) if _m else l
+                if not _code.strip().startswith("#"):
+                    hits.append(l)
             assert not hits, f"residual reference to {sym}: {hits}"
 
 

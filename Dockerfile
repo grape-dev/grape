@@ -1,10 +1,32 @@
+# Node.js 运行时 + codex CLI（codex CLI 由 npm 包 @openai/codex 分发）
+# 在 node 阶段完成安装再整体复制进最终镜像，避免在 python 基础镜像里做全局 npm 安装
+# 时的 optionalDependency(平台包) 解析问题。
+FROM node:22-slim AS nodejs
+
+# 构建可传 --build-arg NPM_REGISTRY=<mirror> 切换源
+ARG NPM_REGISTRY=https://registry.npmjs.org
+ARG CODEX_VERSION=latest
+RUN npm config set registry ${NPM_REGISTRY} \
+    && npm install -g @openai/codex@${CODEX_VERSION} \
+    && codex --version \
+    && npm cache clean --force
+
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# 系统依赖——gcc/g++ 编译 C 扩展（bcrypt/cffi 等）
+# Node 运行时 + 全局包（含 codex）
+COPY --from=nodejs /usr/local/bin/node /usr/local/bin/node
+COPY --from=nodejs /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -sf ../lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex \
+    && codex --version
+
+# 系统依赖——gcc/g++ 编译 C 扩展（bcrypt/cffi 等）；
+# ripgrep 是 codex CLI 的检索依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ && \
+    gcc g++ ca-certificates ripgrep && \
     rm -rf /var/lib/apt/lists/*
 
 # Python 依赖（Issue #452: 使用完整 requirements.txt，生产部署需全部功能）
@@ -41,17 +63,26 @@ COPY . .
 
 # 默认 .env（Issue #452: SQLite + OBS 关闭，生产环境通过环境变量覆盖）
 # 审查修复: COPY .env.example .env，确保容器内始终有 /app/.env，不再依赖宿主 bind mount
-COPY .env.example .env
+#COPY .env.example .env
 
 # 时区
-ENV TZ=Asia/Shanghai
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+#ENV TZ=Asia/Shanghai
+#RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # Issue #452: 内网/Docker 环境关闭公网 IP 探测
 ENV GRAPE_AUTO_DETECT_URL=false
 
+# GitLab 自建实例地址——用环境变量绕开 DB meta 表尚未建好的时序问题
+# 优先级：环境变量 > DB meta > oauth-providers.json > gitlab.com
+# 部署时按需覆盖，例如：docker run -e GITLAB_BASE_URL=https://gitlab.example.com ...
+# ENV GITLAB_BASE_URL=https://gitlab.example.com
+
 EXPOSE 3000
+
+# entrypoint.sh 会自动 seed agent_runtimes.codex 再启动 uvicorn
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 # 只启动 3000 主服务——main:app 已包含所有路由（含 webhook + A2A + runtime API）
 # 不启动 8080——run_webhook:app 是冗余的，main:app 已注册 webhook_router（main.py 第 119 行）
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "3000", "--proxy-headers", "--forwarded-allow-ips=*"]
+ENTRYPOINT ["/entrypoint.sh"]
