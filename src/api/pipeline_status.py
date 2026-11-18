@@ -48,13 +48,15 @@ EVENT_STATUS_MAP = {
 DONE_STAGES = ("done", "pending_review")
 
 
-def compute_node_statuses(nodes, issue_events, current_stage):
+def compute_node_statuses(nodes, issue_events, current_stage,
+                          repo_key="", issue_id=""):
     """统一计算流水线节点状态。
 
     参数：
         nodes: 节点列表（来自场景配置或 AGENT_ORDER 兜底）
         issue_events: 该 Issue 的事件列表（按 seq ASC）
         current_stage: issue_state.stage
+        repo_key / issue_id: 提供时查询 active 接管，命中节点锁定 running（Issue #3201）
 
     返回：(nodes, statuses)
         nodes: 带 node_status 和 latest_event 的节点列表
@@ -64,11 +66,23 @@ def compute_node_statuses(nodes, issue_events, current_stage):
     nodes = [dict(n) for n in nodes]
     is_done = current_stage in DONE_STAGES
 
+    # Issue #3201：active 接管期间该节点状态固定 running，不被后续 completed 覆盖。
+    takeover_agent = ""
+    if repo_key and issue_id:
+        try:
+            from src.domains.runtime.engine.takeover import active_takeover_for
+            _tko = active_takeover_for(repo_key, issue_id)
+            if _tko:
+                takeover_agent = str(_tko.get("agent_type") or "")
+        except Exception as e:
+            log.warning(f"compute_node_statuses: takeover lookup failed: {e}")
+
     # 按 agent_type 分组，保留最新一条事件（后覆盖前；先按 seq 升序排序，不依赖调用方传入顺序）
+    # Issue #3201：skipped_takeover 是「被守门忽略」的事件，不参与最后一条事件映射。
     events_by_agent = {}
     for e in sorted(issue_events, key=lambda x: x.get("seq") or 0):
         at = e.get("agent_type", "")
-        if at:
+        if at and str(e.get("status") or "") != "skipped_takeover":
             events_by_agent[at] = e
 
     statuses = []
@@ -90,6 +104,10 @@ def compute_node_statuses(nodes, issue_events, current_stage):
                 status = STATUS_SKIPPED  # 流水线已结束但该节点未执行
             else:
                 status = STATUS_PENDING
+
+        if takeover_agent and nid == takeover_agent:
+            status = STATUS_RUNNING
+            n["takeover"] = True
 
         n["node_status"] = status
         n["latest_event"] = latest_event

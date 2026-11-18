@@ -304,7 +304,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
             pipe_cfg_cache[_scene_id] = _pipe_cfg
     _scene_nodes = (_pipe_cfg or {}).get("nodes", []) or [{"id": a, "tag": a} for a in AGENT_ORDER]
 
-    _nodes, stage_statuses = compute_node_statuses(_scene_nodes, issue_events, _stage)
+    _nodes, stage_statuses = compute_node_statuses(
+        _scene_nodes, issue_events, _stage, repo_key=repo_key, issue_id=issue_id)
 
     # 转换为原有数据格式（兼容前端 pipeline.js）
     stages = []

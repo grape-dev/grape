@@ -152,6 +152,10 @@ def list_takeovers(repo_key: str, issue_id: str = "", status: str = "active", li
     try:
         check_repo_access(user, repo_key)
         rows = svc.list_takeovers(repo_key, issue_id=issue_id, status=status, limit=limit)
+        for row in rows:
+            _skipped = svc.skipped_dispatch_count(row)
+            row["skipped_dispatches"] = _skipped
+            row["skipped_message"] = svc.skipped_dispatch_message(_skipped)
         return {"ok": True, "sessions": rows}
     except svc.TakeoverError as e:
         return _err(e)
@@ -167,9 +171,14 @@ def get_takeover(session_id: str, renew: int = 0,
             raise svc.TakeoverError(404, "not_found", "接管会话不存在")
         if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
             raise svc.TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
-        out = {"ok": True, "session": {k: v for k, v in sess.items() if k != "bundle_json"},
+        _skipped = svc.skipped_dispatch_count(sess)
+        _sess_view = {k: v for k, v in sess.items() if k != "bundle_json"}
+        _sess_view["skipped_dispatches"] = _skipped
+        out = {"ok": True, "session": _sess_view,
                "bundle": json.loads(sess.get("bundle_json") or "{}") if sess.get("bundle_json") else None,
-               "token_expires_at": sess.get("token_expires_at") or 0}
+               "token_expires_at": sess.get("token_expires_at") or 0,
+               "skipped_dispatches": _skipped,
+               "skipped_message": svc.skipped_dispatch_message(_skipped)}
         if renew:
             out["renew"] = svc.renew_takeover_session(session_id=session_id, user=user)
         return out

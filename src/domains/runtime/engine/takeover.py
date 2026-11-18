@@ -117,17 +117,73 @@ def get_session(session_id: str) -> dict | None:
 
 
 def active_takeover_for(repo_key: str, issue_id: str, agent_type: str = "") -> dict | None:
-    """查询该 Issue（可选：该 agent 节点）是否有进行中的接管。"""
-    sql = ("SELECT * FROM takeover_sessions WHERE status='active' "
-           "AND repo_key=? AND issue_id=?")
+    """查询该 Issue（可选：该 agent 节点）是否有进行中的接管。
+
+    自愈（Issue #3201）：token 已过期的 active 会话按不活跃处理，并与
+    list_takeovers 同口径把它转成 expired，避免过期接管永久冻结 Issue。
+    """
+    now = _now()
+    where = "status='active' AND repo_key=? AND issue_id=?"
     args: list[Any] = [repo_key, issue_id]
     if agent_type:
-        sql += " AND agent_type=?"
+        where += " AND agent_type=?"
         args.append(agent_type)
+    # 先把匹配范围内的过期会话转 expired（与 list_takeovers 同口径），
+    # 再只取未过期的 active；避免"最新一条恰好过期"时漏掉仍在有效期内的接管。
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"UPDATE takeover_sessions SET status=?, active_key=NULL, updated_at=? "
+                f"WHERE {where} AND token_expires_at > 0 AND token_expires_at < ?",
+                [ST_EXPIRED, _now_iso(), *args, now],
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"takeover: expire stale sessions failed: {e}")
     with db_lock:
         c = db.cursor()
-        c.execute(sql + " ORDER BY created_at DESC LIMIT 1", args)
+        c.execute(
+            f"SELECT * FROM takeover_sessions WHERE {where} "
+            f"AND (token_expires_at = 0 OR token_expires_at >= ?) "
+            f"ORDER BY created_at DESC LIMIT 1",
+            [*args, now],
+        )
         return _row_dict(c, c.fetchone())
+
+
+def skipped_dispatch_count(sess: dict | None) -> int:
+    """本次接管期间已被守门忽略的自动派发条数（events.status=skipped_takeover）。
+
+    以溯源的 event_seq 为下界：只统计接管开始后产生的事件，历史接管的忽略记录
+    不会串到本次会话。finish / 详情接口用它给面板展示「已忽略 N 条」。
+    """
+    if not sess:
+        return 0
+    repo_key = str(sess.get("repo_key") or "")
+    issue_id = str(sess.get("issue_id") or "")
+    event_seq = int(sess.get("event_seq") or 0)
+    if not repo_key or not issue_id:
+        return 0
+    if not issue_id.startswith("#"):
+        issue_id = f"#{issue_id}"
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT COUNT(*) FROM events WHERE repo_key=? AND issue_id=? "
+                "AND status='skipped_takeover' AND seq>?",
+                (repo_key, issue_id, event_seq),
+            )
+            row = c.fetchone()
+            return int(row[0] or 0) if row else 0
+    except Exception as e:
+        log.warning(f"takeover: count skipped dispatches failed: {e}")
+        return 0
+
+
+def skipped_dispatch_message(count: int) -> str:
+    return f"本次接管期间已忽略 {int(count or 0)} 条自动派发"
 
 
 def list_takeovers(repo_key: str, issue_id: str = "", status: str = "active",
@@ -1439,6 +1495,10 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
     if int(sess.get("user_id") or 0) != int(user.get("id") or 0):
         raise TakeoverError(403, "not_owner", "该接管会话不属于当前用户")
 
+    # Issue #3201：本次接管期间被守门忽略的自动派发条数（面板可观测）。
+    _skipped_count = skipped_dispatch_count(sess)
+    _skipped_message = skipped_dispatch_message(_skipped_count)
+
     # agent 已经用 request-finish 提交过内容 → 用户点确认时直接沿用（不被空 body 覆盖）
     if not summary and sess.get("summary"):
         summary = str(sess.get("summary") or "")
@@ -1470,12 +1530,21 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
     if sess.get("status") != ST_ACTIVE:
         retry = (sess.get("status") == ST_FINISHED and handoff == "a2a" and not sess.get("handoff_seq"))
         if not retry:
+            _sess_view = dict(sess)
+            _sess_view["skipped_dispatches"] = _skipped_count
             return {"ok": True, "changed": False, "status": sess.get("status"),
-                    "session": sess}
+                    "session": _sess_view,
+                    "skipped_dispatches": _skipped_count,
+                    "skipped_message": _skipped_message}
         _retry_handoff(sess, user, next_agent=next_agent, summary=summary,
                        auth_headers=auth_headers, base_url=base_url)
+        _sess_view = get_session(session_id) or sess
+        _sess_view = dict(_sess_view)
+        _sess_view["skipped_dispatches"] = _skipped_count
         return {"ok": True, "changed": False, "status": sess.get("status"),
-                "session": get_session(session_id)}
+                "session": _sess_view,
+                "skipped_dispatches": _skipped_count,
+                "skipped_message": _skipped_message}
 
     outcome = (outcome or "completed").lower()
     if outcome not in ("completed", "failed"):
@@ -1573,11 +1642,16 @@ def finish_takeover(*, session_id: str, user: dict, outcome: str = "completed",
                 log.debug(f"takeover.py best-effort skipped: {_e}")
 
     log.info(f"takeover: finished {session_id} event={outcome} next={next_agent_resolved or '-'} "
-             f"handoff_ok={handoff_result.get('ok')} done={is_done}")
+             f"handoff_ok={handoff_result.get('ok')} done={is_done} skipped={_skipped_count}")
+    _sess_view = get_session(session_id) or sess
+    _sess_view = dict(_sess_view)
+    _sess_view["skipped_dispatches"] = _skipped_count
     return {"ok": True, "changed": True, "status": ST_FINISHED,
             "event_status": event_status, "issue_stage": ("done" if is_done else next_agent_resolved),
             "next_agent": next_agent_resolved or next_agent,
-            "handoff": handoff_result, "session": get_session(session_id)}
+            "handoff": handoff_result, "session": _sess_view,
+            "skipped_dispatches": _skipped_count,
+            "skipped_message": _skipped_message}
 
 
 def _retry_handoff(sess: dict, user: dict, *, next_agent: str = "", summary: str = "",

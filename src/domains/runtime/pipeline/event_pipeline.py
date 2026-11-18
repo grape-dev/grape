@@ -579,6 +579,52 @@ def _task_insert_row(_cols, **kw):
     return tuple(kw[c] for c in _cols)
 
 
+def _takeover_issue_id(issue_id) -> str:
+    """归一化 Issue 号用于接管判定（#N；伪 Issue / #0 / 空串返回空）。"""
+    value = str(issue_id or "").strip()
+    if not value:
+        return ""
+    if not value.startswith("#"):
+        value = f"#{value}"
+    if value in ("#0",) or value.startswith("#pr_"):
+        return ""
+    return value
+
+
+def _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type) -> dict | None:
+    """Issue #3201：active 接管期间统一拦截自动派发。
+
+    命中后把事件置 ``skipped_takeover``（不建 task、不推进节点、不缓存重放），
+    并释放事件活跃守卫，避免被拦事件把 Issue 永久卡在 dedup 状态。
+    返回命中的接管会话；未命中返回 None。
+    """
+    issue_id = _takeover_issue_id(issue_id)
+    if not repo_key or not issue_id:
+        return None
+    try:
+        from src.domains.runtime.engine.takeover import active_takeover_for
+        sess = active_takeover_for(repo_key, issue_id)
+    except Exception as e:
+        log.warning(f"Pipeline: takeover guard check failed, allow dispatch: {e}")
+        return None
+    if not sess:
+        return None
+    if seq:
+        try:
+            from src.api.event_store import update_event_status, _release_guard_by_seq
+            update_event_status(
+                int(seq), "skipped_takeover",
+                result=(f"接管期间忽略自动派发（takeover={sess.get('id') or ''}，"
+                        f"user={sess.get('username') or ''}）"),
+            )
+            _release_guard_by_seq(int(seq))
+        except Exception as e:
+            log.warning(f"Pipeline: mark seq={seq} skipped_takeover failed: {e}")
+    log.info(f"Pipeline: takeover={sess.get('id')} active for {repo_key}{issue_id}, "
+             f"skip dispatch seq={seq} agent={agent_type}")
+    return sess
+
+
 def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
                         skill_path, engine_id, evt, issue_id="", skill_id=0,
                         skip_event_config=False):
@@ -590,6 +636,13 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     from src.api.session_store import get_or_create_agent_session
     from src.domains.runtime.engine.instances import runtime_instance_name
     from datetime import datetime, timezone
+
+    if not issue_id:
+        issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
+
+    # Issue #3201：建 task 的唯一出口统一守门（webhook / A2A / 重派 / autopilot）。
+    if _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type):
+        return ""
 
     inst_name = runtime_instance_name(engine_id) or backend or ""
     now = datetime.now(timezone.utc).isoformat()
@@ -618,9 +671,6 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             pass
 
     task_id = "t_" + uuid.uuid4().hex[:12]
-    # issue_id 优先用传参，兜底从 evt 解析
-    if not issue_id:
-        issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
     from src.kernel.repo_key import from_repo_key
 
     # 获取 bot token（按 provider 分流：GitHub 仓库用 get_github_token）
@@ -3574,6 +3624,10 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         pool_engine_source = "scene" if _scene_ctx else "auto"
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
+    # Issue #3201：webhook / 订阅 / 排队补派等所有入队路径统一守门；
+    # 命中 active 接管时不建 task，事件置 skipped_takeover（不重放）。
+    if _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type):
+        return
     # 1) 路由判定：
     #    runtime_id>0 → 确定性路由（指定引擎）
     #    runtime_id=0 + plugin 模式 → 无主池任务（广播），设 pool_agent_type 让引擎竞争认领
