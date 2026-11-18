@@ -752,6 +752,9 @@ const tasksLoading = ref(false) // 分屏请求在途（列表尾 sentinel 展�
 const tasksAppendLoading = ref(false) // 滚动追加在途（防并发重复拉同屏）
 let taskReqSeq = 0 // Issue #2984d027a：请求序号——重置类请求让旧在途响应失效
 let taskServerPage = 1 // 下一次要拉的服务端页码（成功后才推进）
+// 首屏请求被 silent abort（导航取消）后自动重拉一次；重拉再被取消才转终态，
+// 避免「同 hash 重复点菜单 → abort 旧请求但视图不重挂载 → 无人重发」造成永久加载中。
+let _silentAbortRetried = false
 const listScrollEl = ref(null) // 列表滚动容器（IntersectionObserver 的 root）
 const listSentinelEl = ref(null) // 列表尾部哨兵
 let listObserver = null
@@ -2978,7 +2981,29 @@ function loadTasks(opts) {
       if (seq !== taskReqSeq) return // 已被更新的请求取代，静默丢弃
       tasksAppendLoading.value = false
       tasksLoading.value = false
-      if (e.name === 'AbortError' && e.silent) return
+      // silent abort 只允许一种含义：用户确实离开了这个视图。
+      // 之前这里无条件 return，于是「视图还在、但请求被 nav signal 取消」也被当成
+      // 静默丢弃 —— 而那一刻已经没有别的请求会来置 loaded，页面就永久停在「加载中」，
+      // 直到 18s 后看门狗兜底报「加载失败: request aborted or timed out」。
+      // 实测证据：请求已返回 200、signal 却已 abort（st=200 且 ab=1），then 不执行、
+      // catch 静默 return，加载终态无人写。
+      if (e.name === 'AbortError' && e.silent) {
+        if (G.window._currentView !== 'tasks') return   // 真离开了：静默丢弃
+        if (loaded.value) return                        // 已有数据：保留旧帧，不打扰
+        // 视图还在且首屏仍空 → 先自动重拉一次（此刻导航已结束，新 signal 是活的）
+        if (!_silentAbortRetried) {
+          _silentAbortRetried = true
+          // 3s 窗口内只自动重拉一次：既让「被取消的首屏」有机会落地，
+          // 又不会在确实反复被取消时打成死循环。
+          setTimeout(function () { _silentAbortRetried = false }, 3000)
+          loadTasks()
+          return
+        }
+        // 重拉仍被取消 → 给可重试的终态，绝不让 loading 成为终态
+        loadError.value = t('load_failed', { msg: 'request aborted or timed out' })
+        loaded.value = true
+        return
+      }
       if (G.window._currentView !== 'tasks') return
       G.window._pendingTaskDetailId = null
       G.window._deeplinkIssueNumber = null
