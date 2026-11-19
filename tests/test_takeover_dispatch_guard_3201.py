@@ -399,13 +399,16 @@ def test_redispatch_allowed_after_takeover_closed(monkeypatch):
 
 
 def test_autopilot_dispatch_skips_under_active_takeover():
-    """R2：接管 active 期间 autopilot 不建 task，execution 置 skipped。"""
+    """R2：接管 active 期间 autopilot 不建 task，execution 置 skipped。
+
+    用真实 Issue 接管会话（#3201）触发：autopilot 无 issue 维度，守门按仓库判定，
+    不能再用合成键 #autopilot-x 自证。
+    """
     from src.domains.runtime.engine import scheduler as sch
 
     exec_id = 770400
     task = {"id": 3}
-    _issue_ref = sch._autopilot_issue_ref(task["id"])
-    _seed_takeover(exec_id, agent="issue", issue=f"#{_issue_ref}",
+    _seed_takeover(exec_id, agent="coding", issue=ISSUE,
                    session_id="tkos_3201_ap")
     with db_lock:
         c = db.cursor()
@@ -437,8 +440,7 @@ def test_autopilot_dispatch_allowed_after_takeover_closed(monkeypatch):
 
     exec_id = 770401
     task = {"id": 4, "created_by": 0}
-    _issue_ref = sch._autopilot_issue_ref(task["id"])
-    _seed_takeover(exec_id, agent="issue", issue=f"#{_issue_ref}",
+    _seed_takeover(exec_id, agent="coding", issue=ISSUE,
                    status="finished", session_id="tkos_3201_ap_closed")
     with db_lock:
         c = db.cursor()
@@ -463,6 +465,49 @@ def test_autopilot_dispatch_allowed_after_takeover_closed(monkeypatch):
         c = db.cursor()
         c.execute("SELECT status FROM autopilot_executions WHERE id=?", (exec_id,))
         assert c.fetchone()[0] == "dispatched"
+
+
+def test_execute_task_stops_on_skipped_without_retry(monkeypatch):
+    """R2：skipped 是守门终止态，不得进入重试循环（不新建 execution）。"""
+    import asyncio
+
+    from src.domains.runtime.engine import scheduler as sch
+
+    created: list[int] = []
+
+    def _create_execution(task_id, agent_type):
+        exec_id = 770500 + len(created)
+        created.append(exec_id)
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM autopilot_executions WHERE id=?", (exec_id,))
+            c.execute("INSERT INTO autopilot_executions (id, task_id, status) VALUES (?,?,?)",
+                      (exec_id, int(task_id), "running"))
+            db.commit()
+        return exec_id
+
+    def _run_agent(repo_key, task, exec_id):
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE autopilot_executions SET status='skipped', "
+                      "error='接管进行中，自动派发已拦截' WHERE id=?", (exec_id,))
+            db.commit()
+
+    monkeypatch.setattr(sch, "_create_execution", _create_execution)
+    monkeypatch.setattr(sch, "_execute_autopilot_agent", _run_agent)
+    monkeypatch.setattr(sch, "_compute_next_run", lambda cron: "")
+    monkeypatch.setattr(sch, "_update_task_run_info", lambda *a, **k: None)
+    monkeypatch.setattr(sch, "_BASE_RETRY_DELAY", 0)
+    monkeypatch.setattr(sch, "_MAX_RETRY_DELAY", 0)
+
+    task = {"id": 771, "name": "ap", "repo_key": REPO, "max_retry": 2, "cron": "* * * * *"}
+    asyncio.run(sch._execute_task(task))
+
+    assert len(created) == 1, f"skipped 不得重试，实际创建 {len(created)} 条 execution"
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status FROM autopilot_executions WHERE id=?", (created[0],))
+        assert c.fetchone()[0] == "skipped"
 
 
 # ===== R3：A2A direct / remote / 队列 drain 统一守门 =====
@@ -499,7 +544,7 @@ def test_a2a_direct_skips_and_does_not_start_agent_under_takeover(monkeypatch):
 
     assert res["status"] == "skipped", res
     assert res.get("seq") == seq
-    _started.assert_not_called(), "task_id 为空时不得启动 agent"
+    _started.assert_not_called()
     assert _task_count(seq) == 0
     assert _event_status(seq) == "skipped_takeover"
 

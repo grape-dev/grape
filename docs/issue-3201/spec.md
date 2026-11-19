@@ -2,7 +2,8 @@
 
 ## 目标
 
-接管（takeover）会话 active 时，同一 Issue 的自动派发（webhook / A2A / 重派 / autopilot）统一被拦截：
+接管（takeover）会话 active 时，同一 Issue 的自动派发（webhook / A2A / 重派）统一被拦截；
+autopilot 巡检任务无真实 Issue 维度，按其所辖仓库的 active 接管冻结：
 - 不建 task、不推进节点状态；
 - 被拦 webhook 事件入库并置 `status=skipped_takeover`，可审计、不排队重放；
 - A2A 入口返回 409 `already_taken_over`；

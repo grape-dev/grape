@@ -98,26 +98,24 @@ def _autopilot_issue_ref(task_id) -> str:
 def _skip_autopilot_for_takeover(repo_key, task, exec_id) -> bool:
     """Issue #3201：接管 active 期间 autopilot 派发同样统一拦截。
 
-    与 event_pipeline._skip_dispatch_for_takeover 同一判定源（active_takeover_for），
-    Issue 维度取 autopilot 任务的回链键（_autopilot_issue_ref，与 agent_tasks.issue_id
-    同值）。命中后执行记录置 ``skipped``、不建 task、不消耗重试次数，并日志留痕。
+    autopilot 巡检任务没有真实 Issue 维度（`_autopilot_issue_ref` 是纯字母统计合成键，
+    与真实接管会话的 `#<数字>` 永远不可能命中），因此按**仓库**判定：该仓库存在任一
+    active 接管（`active_takeover_in_repo`）即冻结自动派发。命中后执行记录置
+    ``skipped``、不建 task、不消耗重试次数，并日志留痕。
     返回 True 表示本次派发已被拦截，调用方须立即 return。
     """
-    issue_id = _autopilot_issue_ref((task or {}).get("id"))
-    if not repo_key or not issue_id:
+    if not repo_key:
         return False
     try:
-        from src.domains.runtime.engine.takeover import active_takeover_for
-        from src.domains.runtime.pipeline.event_pipeline import _takeover_issue_id
-        _iid = _takeover_issue_id(issue_id)
-        sess = active_takeover_for(repo_key, _iid) if _iid else None
+        from src.domains.runtime.engine.takeover import active_takeover_in_repo
+        sess = active_takeover_in_repo(repo_key)
     except Exception as e:
         log.warning(f"Autopilot exec {exec_id}: takeover guard check failed (allow): {e}")
         return False
     if not sess:
         return False
-    log.info(f"Autopilot exec {exec_id}: skipped — takeover {sess.get('id')} active for "
-             f"{repo_key}{_iid} (agent={sess.get('agent_type')})")
+    log.info(f"Autopilot exec {exec_id}: skipped — takeover {sess.get('id')} active in repo "
+             f"{repo_key} for {sess.get('issue_id')} (agent={sess.get('agent_type')})")
     _update_execution_result(exec_id, "skipped", error="接管进行中，自动派发已拦截")
     return True
 
@@ -1329,6 +1327,10 @@ async def _execute_task(task: dict):
 
             if exec_status == "success":
                 log.info(f"Autopilot: task {task_id} exec {exec_id} success (attempt {attempt})")
+                break
+            if exec_status == "skipped":
+                # Issue #3201：接管守门拦截 → 非失败，立即终止，不重试、不消耗执行次数
+                log.info(f"Autopilot: task {task_id} exec {exec_id} skipped under active takeover, stop")
                 break
             if exec_status == "cancelled":
                 # 用户杀死：立即停止，不再重试

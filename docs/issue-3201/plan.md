@@ -4,9 +4,10 @@
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| 冻结粒度 | 整 Issue（repo_key + issue） | 接管即冻结同一 Issue 的所有自动派发，避免逐节点漏判 |
-| 守门位置 | 建 task 出口：`_create_direct_task` + `_enqueue_pipeline_task` | 本分支 webhook 走 enqueue、A2A direct 走 direct；两个出口都收敛才不漏 |
-| 被拦事件 | 入库 `skipped_takeover` | 可审计、不建 task、不重放 |
+| 冻结粒度 | 整 Issue（repo_key + issue）；autopilot 为整仓库（repo_key） | 接管即冻结同一 Issue 的所有自动派发，避免逐节点漏判；autopilot 无真实 Issue 维度，按仓库级 active 接管判定 |
+| 守门位置 | 建 task 出口：`_create_direct_task` + `_enqueue_pipeline_task`；autopilot 两个入队点 | 本分支 webhook 走 enqueue、A2A direct 走 direct；两个出口都收敛才不漏 |
+| 被拦事件 | 入库 `skipped_takeover`；autopilot execution 置 `skipped` | 可审计、不建 task、不重放；skipped 为终止态，不进入重试 |
+| 重试语义 | `success` / `cancelled` / `skipped` 均终止，不消耗执行次数 | 守门拦截不是失败，重跑只会继续被拦并新建 execution |
 | force 旁路 | 不提供 | 接管卡住的正解是 abort |
 | 过期接管 | 查询时自愈为 `expired` | 与 `list_takeovers` 同口径，避免永久冻结 |
 

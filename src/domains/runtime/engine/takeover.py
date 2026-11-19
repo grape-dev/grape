@@ -152,6 +152,46 @@ def active_takeover_for(repo_key: str, issue_id: str, agent_type: str = "") -> d
         return _row_dict(c, c.fetchone())
 
 
+def active_takeover_in_repo(repo_key: str) -> dict | None:
+    """查询该仓库是否有进行中的接管（仓储级判定，Issue #3201 R2）。
+
+    autopilot 巡检任务没有真实 Issue 关联（`_autopilot_issue_ref` 产出 `autopilot-<字母>`
+    这类纯字母统计合成键），而真实接管会话的 issue_id 恒为 `#<数字>`——按 issue 维度
+    永远无法命中。autopilot 是仓库级任务，故以其所属仓库是否存在 active 接管为准。
+
+    自愈口径与 `active_takeover_for` 一致：token 已过期的 active 会话先转 expired，
+    再只取仍在有效期内的那条，避免过期接管永久冻结自动派发。
+    """
+    if not repo_key:
+        return None
+    now = _now()
+    where = "status='active' AND repo_key=?"
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"UPDATE takeover_sessions SET status=?, active_key=NULL, updated_at=? "
+                f"WHERE {where} AND token_expires_at > 0 AND token_expires_at < ?",
+                (ST_EXPIRED, _now_iso(), now),
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"takeover: expire stale sessions failed: {e}")
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT * FROM takeover_sessions WHERE {where} "
+                f"AND (token_expires_at = 0 OR token_expires_at >= ?) "
+                f"ORDER BY created_at DESC LIMIT 1",
+                [repo_key, now],
+            )
+            return _row_dict(c, c.fetchone())
+    except Exception as e:
+        log.warning(f"takeover: query repo takeover failed: {e}")
+        return None
+
+
 def skipped_dispatch_count(sess: dict | None) -> int:
     """本次接管期间已被守门忽略的自动派发条数（events.status=skipped_takeover）。
 
