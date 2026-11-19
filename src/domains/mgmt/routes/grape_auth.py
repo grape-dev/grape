@@ -14,7 +14,7 @@ import hashlib
 
 import time
 
-from fastapi import APIRouter, HTTPException, Request, Response, Depends
+from fastapi import APIRouter, HTTPException, Request, Response, Depends, Query
 
 from pydantic import BaseModel
 
@@ -1224,6 +1224,26 @@ def _oauth_error_redirect(request: Request, message: str, popup: bool = False):
     url = _build_redirect_url(request, "/", {"oauth_error": message}, popup=popup)
     return RedirectResponse(url=url, status_code=302)
 
+@router.get("/beta-apply/prefill", operation_id="auth_beta_apply_prefill",
+            summary="Beta-apply prefill via one-time ticket",
+            description="凭白名单拦截时签发的一次性票据换 {platform, username}。"
+                        "#3054 加固后第三方用户名不再进 URL；申请页拿 ticket 调本接口取预填值。"
+                        "票据单次消费、10 分钟 TTL；不匹配/过期返回 404（不给枚举面）。")
+def beta_apply_prefill(ticket: str = Query("", max_length=64,
+                                            description="白名单拦截跳转里携带的一次性票据")):
+    hit = _consume_beta_prefill_ticket(ticket)
+    if not hit:
+        raise HTTPException(status_code=404,
+                            detail={"code": 404, "error_code": "PREFILL_TICKET_INVALID",
+                                    "message": "预填票据无效或已过期，请手动填写"})
+    provider, username = hit
+    if not _WL_PROVIDER_KEY_RE.match(provider or ""):
+        raise HTTPException(status_code=404,
+                            detail={"code": 404, "error_code": "PREFILL_TICKET_INVALID",
+                                    "message": "预填票据无效或已过期，请手动填写"})
+    return {"platform": provider, "username": username}
+
+
 def _bind_error_redirect(request: Request, message: str, popup: bool = False):
     """绑定流程失败 → 重定向到用户中心并带错误提示。（P0-3：编码口径同 _oauth_error_redirect）"""
     from fastapi.responses import RedirectResponse
@@ -1233,6 +1253,34 @@ def _bind_error_redirect(request: Request, message: str, popup: bool = False):
 # P0-1（Issue #3054）：错误跳转里允许出现的 provider key 形态——渠道 key 只可能是
 # 小写标识符，第三方可控字符串（含 HTML/JS 元字符）一律不往 URL 里放。
 _WL_PROVIDER_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+# ── 白名单预填票据（beta-apply 自动填充）─────────────────────────────────────
+# 背景：#3054 加固把第三方用户名从跳转 URL 里拿掉了（防反射型 DOM XSS），代价是
+# 「申请内测」页的用户名预填断链。这里按 bind ticket 同模式补一条安全通路：
+# 拦截时服务端签发一次性票据 → URL 只带 ticket → 申请页凭票换 {platform, username}。
+# 票据为进程级单次消费 + 10 分钟 TTL：内容不落库、不经 URL 注入面，第三方可控
+# 数据只在服务端内存与受信任的取数接口之间流转。
+import secrets as _prefill_secrets
+import time as _prefill_time
+
+_BETA_PREFILL_TTL_S = 600.0
+_beta_prefill_tickets: "dict[str, tuple[float, str, str]]" = {}
+
+
+def _issue_beta_prefill_ticket(provider: str, external_login: str) -> str:
+    _now = _prefill_time.time()
+    for _k in [k for k, v in _beta_prefill_tickets.items() if v[0] < _now]:
+        _beta_prefill_tickets.pop(_k, None)
+    _ticket = _prefill_secrets.token_urlsafe(24)
+    _beta_prefill_tickets[_ticket] = (_now + _BETA_PREFILL_TTL_S, provider, external_login)
+    return _ticket
+
+
+def _consume_beta_prefill_ticket(ticket: str) -> "tuple[str, str] | None":
+    _hit = _beta_prefill_tickets.pop(str(ticket or ""), None)
+    if not _hit or _hit[0] < _prefill_time.time():
+        return None
+    return _hit[1], _hit[2]
 
 # D35 保留字列表
 _USERNAME_RESERVED = {"admin", "root", "system", "default", "api", "auth", "grape"}
@@ -1785,6 +1833,10 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         # external_login 来自第三方（可任意构造），拼进跳转 URL 后会被前端读取渲染，
         # 构成反射型 DOM XSS 面；provider 只接受渠道 key 形态。
         _wl_code = "WHITELIST:" + provider if _WL_PROVIDER_KEY_RE.match(provider or "") else "WHITELIST"
+        # 用户名预填改走一次性票据：URL 只带 ticket（第三方数据不出服务端），
+        # 申请页凭票换取 platform/username，单次消费 + 10 分钟 TTL。
+        if _WL_PROVIDER_KEY_RE.match(provider or ""):
+            _wl_code += ":" + _issue_beta_prefill_ticket(provider, external_login)
         return _oauth_error_redirect(request, _wl_code, popup=popup)
 
     oauth_email = user_info.get("email", "")
