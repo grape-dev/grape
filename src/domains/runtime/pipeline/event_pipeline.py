@@ -105,6 +105,23 @@ from src.domains.runtime.pipeline.account_env import (
     log_account_alert as _log_account_alert,
 )
 
+
+def __getattr__(name: str):
+    """PEP 562 惰性转发（Issue #699 Phase 3 + #3482 复审 Optional）：
+    direct 执行入口唯一实现在 direct_executor，旧 import 路径
+    ``from src.domains.runtime.pipeline.event_pipeline import _execute_agent ...``
+    此前依赖先 import src.api.event_pipeline 兼容层才被 setattr 注入，新进程
+    直接 import 抛 ImportError（单跑红、连跑绿）。此处按名转发到唯一实现并
+    缓存回模块命名空间——旧路径可用、patch(ep, ...) 仍作用于同一模块对象，
+    且不恢复旧副本的调用/分派（TC-3.2 源级守卫保持绿）。"""
+    if (name.startswith("_execute_agent") or name.startswith("start_direct")
+            or name.startswith("_DIRECT_")):
+        from src.domains.runtime.engine import direct_executor as _de
+        _val = getattr(_de, name)
+        globals()[name] = _val
+        return _val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 _COMMENT_EVENT_TYPES = ("issue_comment", "note_hook_pr")
 
 
