@@ -37,6 +37,38 @@ _SEEN_MSG_TTL = 86400 * 2
 
 _SEEN_MSG_MAX_LOAD = 2000
 
+# 飞书卡片消息请求体上限 30KB（超了报 230025 消息体长度超限）。
+# 10000 字回复 ≈ 30KB UTF-8 正文，json 后必然溢出 → 正文按 6000 字符切多张卡片顺序发送。
+FEISHU_CARD_TEXT_CHARS = 6000
+# 单个卡片元素（div/lark_md）内部 to_lark_md 还会按 max_len 截断，长单行必须先切到这个粒度
+FEISHU_ELEMENT_CHARS = 2000
+
+
+def _card_text_parts(text: str, budget: int = FEISHU_CARD_TEXT_CHARS) -> list[str]:
+    """把长正文按行切成 ≤budget 字符的若干块（单行超长按元素粒度硬切），保证每张卡片 <30KB。"""
+    text = text or ""
+    if len(text) <= budget:
+        return [text]
+    parts: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for line in text.split("\n"):
+        while len(line) > FEISHU_ELEMENT_CHARS:
+            # 单行超元素上限：单独硬切出一块，避免 to_lark_elements 元素级截断丢内容
+            if buf:
+                parts.append("\n".join(buf))
+                buf, size = [], 0
+            parts.append(line[:FEISHU_ELEMENT_CHARS])
+            line = line[FEISHU_ELEMENT_CHARS:]
+        if buf and size + len(line) + 1 > budget:
+            parts.append("\n".join(buf))
+            buf, size = [], 0
+        buf.append(line)
+        size += len(line) + 1
+    if buf:
+        parts.append("\n".join(buf))
+    return parts or [""]
+
 def _load_seen_msg_ids(app_id: str) -> set:
     try:
         from src.kernel.session_manager import db, db_lock
@@ -336,39 +368,46 @@ class FeishuAsync:
             return ""
         session = await self._get_session()
         url = f"{FEISHU_BASE}/im/v1/messages/{message_id}/reply"
-        elements = to_lark_elements(text, 2000)
-        # 每条卡片消息底部追加[帮助]按钮
-        elements.append({
-            "tag": "action",
-            "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}}]
-        })
-        card = {
-            "elements": elements,
-            "header": {"title": {"tag": "plain_text", "content": title}, "template": template},
-        }
-        payload = {
-            "msg_type": "interactive",
-            "content": json.dumps(card, ensure_ascii=False),
-        }
         headers = {"Authorization": f"Bearer {token}"}
-        try:
-            async with session.post(url, json=payload, headers=headers) as resp:
-                data = await resp.json()
-                _code = data.get("code", 0)
-                if _code != 0:
-                    ctx.metrics.messages_failed += 1
-                    ctx.metrics.last_error = f"reply_card api code={_code}: {data.get('msg','')}"
-                    log.warning(f"[{ctx.name}] reply_card api error: code={_code} msg={data.get('msg','')} msg_id={message_id}")
-                    return ""
-                reply_id = data.get("data", {}).get("message_id", "")
-                ctx.metrics.messages_sent += 1
-                log.debug(f"[{ctx.name}] reply_card: {text[:50]}")
-                return reply_id
-        except Exception as e:
-            ctx.metrics.messages_failed += 1
-            ctx.metrics.last_error = f"reply_card error: {e}"
-            log.warning(f"[{ctx.name}] reply_card failed: {e}")
-        return ""
+        # 与 send_card_to_chat 同口径：正文按 6000 字符切块，超 30KB 拆多张卡片续发
+        parts = _card_text_parts(text)
+        total = len(parts)
+        first_msg_id = ""
+        for idx, part in enumerate(parts):
+            elements = to_lark_elements(part, 2000)
+            # 每条卡片消息底部追加[帮助]按钮
+            elements.append({
+                "tag": "action",
+                "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}}]
+            })
+            _title = title if idx == 0 else f"{title}（续 {idx+1}/{total}）"
+            card = {
+                "elements": elements,
+                "header": {"title": {"tag": "plain_text", "content": _title}, "template": template},
+            }
+            payload = {
+                "msg_type": "interactive",
+                "content": json.dumps(card, ensure_ascii=False),
+            }
+            try:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    data = await resp.json()
+                    _code = data.get("code", 0)
+                    if _code != 0:
+                        ctx.metrics.messages_failed += 1
+                        ctx.metrics.last_error = f"reply_card api code={_code}: {data.get('msg','')}"
+                        log.warning(f"[{ctx.name}] reply_card api error: code={_code} msg={data.get('msg','')} msg_id={message_id} part={idx+1}/{total}")
+                        return first_msg_id
+                    reply_id = data.get("data", {}).get("message_id", "")
+                    ctx.metrics.messages_sent += 1
+                    log.debug(f"[{ctx.name}] reply_card: part={idx+1}/{total} {part[:50]}")
+                    first_msg_id = first_msg_id or reply_id
+            except Exception as e:
+                ctx.metrics.messages_failed += 1
+                ctx.metrics.last_error = f"reply_card error: {e}"
+                log.warning(f"[{ctx.name}] reply_card failed: {e}")
+                return first_msg_id
+        return first_msg_id
 
     async def download_image(self, ctx: BotContext, image_key: str, message_id: str = "") -> bytes:
         """Download image from Feishu API. Returns raw bytes.
@@ -452,65 +491,58 @@ class FeishuAsync:
             if not token:
                 return ""
             session = await self._get_session()
-            elements = to_lark_elements(text, 2000)
-            elements.append({
-                "tag": "action",
-                "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}}]
-            })
-            if actions:
-                elements.append({"tag": "action", "actions": actions})
-            card = {
-                "elements": elements,
-                "header": {"title": {"tag": "plain_text", "content": title}, "template": template},
-            }
-            card_content = json.dumps(card, ensure_ascii=False)
+            # 正文按 6000 字符切块：飞书卡片请求体上限 30KB（超了报 230025），
+            # 10000 字回复拆成多张卡片顺序发送（2026-11-19 放宽回复上限后新增）。
+            parts = _card_text_parts(text)
+            total = len(parts)
             headers = {"Authorization": f"Bearer {token}"}
-
-            # 第一次尝试：chat_id 方式
-            # receive_id 必须走请求体（query 里带 receive_id 的旧写法已被飞书判 230001
-            # invalid receive_id，2026-11-18 实测：query 形式 230001 / body 形式 0 success）
-            url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=chat_id"
-            payload = {"receive_id": chat_id, "msg_type": "interactive", "content": card_content}
-            try:
-                async with session.post(url, json=payload, headers=headers) as resp:
-                    data = await resp.json()
-                    code = data.get("code", -1)
-                    msg_id = data.get("data", {}).get("message_id", "")
-                    if code == 0:
-                        ctx.metrics.messages_sent += 1
-                        log.info(f"[{ctx.name}] send_card_to_chat ok: msg_id={msg_id} text={text[:50]}")
-                        return msg_id
+            first_msg_id = ""
+            for idx, part in enumerate(parts):
+                elements = to_lark_elements(part, 2000)
+                elements.append({
+                    "tag": "action",
+                    "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}}]
+                })
+                if actions and idx == 0:
+                    elements.append({"tag": "action", "actions": actions})
+                _title = title if idx == 0 else f"{title}（续 {idx+1}/{total}）"
+                card = {
+                    "elements": elements,
+                    "header": {"title": {"tag": "plain_text", "content": _title}, "template": template},
+                }
+                card_content = json.dumps(card, ensure_ascii=False)
+                # receive_id 必须走请求体（query 里带 receive_id 的旧写法已被飞书判 230001
+                # invalid receive_id，2026-11-18 实测：query 形式 230001 / body 形式 0 success）
+                msg_id, code, err = await self._post_chat_card(
+                    ctx, session, headers, chat_id, card_content)
+                if code != 0 and code == 230001 and fallback_open_id:
                     # P2P 私聊 chat_id 被拒绝 → 用 open_id 回退
-                    if code == 230001 and fallback_open_id:
-                        log.info(f"[{ctx.name}] chat_id rejected (P2P), retrying with open_id={fallback_open_id[:20]}")
-                    else:
-                        log.warning(f"[{ctx.name}] send_card_to_chat failed: code={code} msg={data.get('msg','')} chat_id={chat_id}")
-                        return ""
-            except Exception as e:
-                ctx.metrics.messages_failed += 1
-                ctx.metrics.last_error = f"send_card_to_chat error: {e}"
-                log.warning(f"[{ctx.name}] send_card_to_chat exception: {e}")
-                return ""
-
-            # 回退：open_id 方式
-            if fallback_open_id:
-                url2 = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=open_id"
-                payload2 = {"receive_id": fallback_open_id, "msg_type": "interactive", "content": card_content}
-                try:
-                    async with session.post(url2, json=payload2, headers=headers) as resp:
-                        data = await resp.json()
-                        code = data.get("code", -1)
-                        msg_id = data.get("data", {}).get("message_id", "")
-                        if code == 0:
-                            ctx.metrics.messages_sent += 1
-                            log.info(f"[{ctx.name}] send_card_to_chat(open_id fallback) ok: msg_id={msg_id} text={text[:50]}")
-                            return msg_id
-                        else:
-                            log.warning(f"[{ctx.name}] send_card_to_chat open_id fallback failed: code={code} msg={data.get('msg','')}")
-                except Exception as e:
+                    log.info(f"[{ctx.name}] chat_id rejected (P2P), retrying with open_id={fallback_open_id[:20]}")
+                    msg_id, code, err = await self._post_chat_card(
+                        ctx, session, headers, fallback_open_id, card_content, by_open_id=True)
+                if code != 0:
                     ctx.metrics.messages_failed += 1
-                    log.warning(f"[{ctx.name}] send_card_to_chat open_id fallback exception: {e}")
-            return ""
+                    ctx.metrics.last_error = f"send_card_to_chat code={code}: {err}"
+                    log.warning(f"[{ctx.name}] send_card_to_chat failed: code={code} msg={err} chat_id={chat_id} part={idx+1}/{total}")
+                    return first_msg_id
+                ctx.metrics.messages_sent += 1
+                log.info(f"[{ctx.name}] send_card_to_chat ok: msg_id={msg_id} part={idx+1}/{total} text={part[:50]}")
+                first_msg_id = first_msg_id or msg_id
+            return first_msg_id
+
+    async def _post_chat_card(self, ctx: BotContext, session, headers: dict, rid: str,
+                              card_content: str, by_open_id: bool = False):
+        """POST 一张卡片到会话；返回 (msg_id, code, err)。receive_id 走请求体，query 只带类型。"""
+        rtype = "open_id" if by_open_id else "chat_id"
+        url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type={rtype}"
+        payload = {"receive_id": rid, "msg_type": "interactive", "content": card_content}
+        try:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                data = await resp.json()
+                return (data.get("data", {}).get("message_id", ""),
+                        data.get("code", -1), data.get("msg", ""))
+        except Exception as e:
+            return "", -2, str(e)
 
     async def send_card_raw_to_chat(self, ctx: BotContext, chat_id: str, card: dict,
                                     fallback_open_id: str = "") -> str:

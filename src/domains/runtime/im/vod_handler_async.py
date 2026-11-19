@@ -12,6 +12,7 @@ from src.kernel.session_manager import db, db_lock
 from src.domains.runtime.engine.executor import consume_stream_async
 from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
 from src.kernel.token_service import is_auth_401_error
+from src.domains.runtime.im.reply_limits import MAX_REPLY_CHARS
 
 
 if TYPE_CHECKING:
@@ -642,7 +643,7 @@ async def process_vod_async(ctx: "BotContext", egress: "FeishuAsync", parsed: di
             # agent 主动跳过（对齐 chat），不回
             pass
         elif reply:
-            await egress.reply_card(ctx, msg_id, reply[:2000], title="VOD Agent", template="green")
+            await egress.reply_card(ctx, msg_id, reply[:MAX_REPLY_CHARS], title="VOD Agent", template="green")
         else:
             # 空回复（无引擎/出错/未生成）→ 明确提示，避免静默无回应（对齐 chat）
             await egress.reply_card(ctx, msg_id, "⚠️ 处理完成但未生成回复，请稍后重试或换个说法。", title="VOD Agent", template="green")
