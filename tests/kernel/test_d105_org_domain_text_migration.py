@@ -256,6 +256,68 @@ def test_new_ddl_declares_text(tmp_path, monkeypatch):
     assert not bad, f"新 DDL 未字符串亲和化: {bad}"
 
 
+def _mk_sqlite(tmp_path, stamped):
+    """最小 sqlite 库：一张 INT org_id 表 + 盖章表（可选已盖章）。"""
+    import sqlite3
+    conn = sqlite3.connect(str(tmp_path / "selfcheck.db"))
+    conn.execute("CREATE TABLE runtime_credentials (id INTEGER PRIMARY KEY, org_id INTEGER)")
+    conn.execute("CREATE TABLE grape_t_schema_migrations "
+                 "(version TEXT PRIMARY KEY, name TEXT, kind TEXT, applied_at TEXT)")
+    if stamped:
+        conn.execute("INSERT INTO grape_t_schema_migrations (version,name,kind,applied_at) "
+                     "VALUES ('202611190100','d105-org-domain-text-normalize','safe','x')")
+    conn.commit()
+    return conn
+
+
+def _run_selfcheck(tmp_path, monkeypatch, stamped):
+    """跑 _migrate_add_org_id_columns() 并返回日志文本。"""
+    import logging
+    from src.api import db_setup
+    from src.kernel import session_manager
+    conn = _mk_sqlite(tmp_path, stamped)
+    monkeypatch.setattr(db_setup, "db", conn)
+    monkeypatch.setattr(session_manager, "db", conn)
+    monkeypatch.setattr("src.kernel.mysql_compat.get_db_backend", lambda: "sqlite")
+    logs = []
+
+    class _H(logging.Handler):
+        def emit(self, rec):
+            logs.append(rec)
+
+    h = _H()
+    db_setup.log.addHandler(h)
+    old = db_setup.log.level
+    db_setup.log.setLevel(logging.INFO)
+    try:
+        db_setup._migrate_add_org_id_columns()
+    finally:
+        db_setup.log.removeHandler(h)
+        db_setup.log.setLevel(old)
+        conn.close()
+    return logs
+
+
+def test_selfcheck_info_before_migration(tmp_path, monkeypatch):
+    """升级首启：迁移还没盖章时，数值列只报 INFO（随后由迁移转换），不刷 ERROR。
+
+    同时锁住「补列循环中途抛错（缺表/非属主视图）也要继续自检」——早期版本
+    在 except 里直接 return，升级库会重新变回假绿。
+    """
+    logs = _run_selfcheck(tmp_path, monkeypatch, stamped=False)
+    msgs = [r.getMessage() for r in logs]
+    assert any("暂为数值型" in m for m in msgs), msgs
+    assert not [r for r in logs if r.levelname == "ERROR"], msgs
+
+
+def test_selfcheck_error_after_migration_stamped(tmp_path, monkeypatch):
+    """迁移已盖章却仍是数值列（转换没生效）→ 必须 ERROR，且点名表列。"""
+    logs = _run_selfcheck(tmp_path, monkeypatch, stamped=True)
+    errs = [r.getMessage() for r in logs if r.levelname == "ERROR"]
+    assert errs and "org_id 列仍是数值型" in errs[-1], [r.getMessage() for r in logs]
+    assert "runtime_credentials" in errs[-1]
+
+
 def test_mysql_backend_dispatches_to_widen(monkeypatch):
     """MySQL 后端必须分流到 _widen_mysql_org_ids。
 

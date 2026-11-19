@@ -485,17 +485,25 @@ def _migrate_add_org_id_columns():
             log.info("org_id columns ensured on all core tables")
     except Exception as e:
         log.warning(f"org_id column migration failed: {e}")
-        return
+        # 不 return：补列失败（如非属主库的视图/缺表）与类型自检是两件事，
+        # 自检必须照跑，否则「假绿」又会从这个口子溜回来。
     try:
         _bad = _org_columns_not_text()
     except Exception as e:  # noqa: BLE001
         log.warning(f"org_id type self-check skipped: {e}")
         return
     if _bad:
-        log.error(
-            "org_id 列仍是数值型，'' 哨兵写入会报 1366（新建凭据直接失败）: "
-            f"{_bad}；请确认注册式迁移 "
-            "d105-org-domain-text-normalize 已在**该表所属域的进程**里执行")
+        if not _org_text_migration_stamped():
+            # 首启升级的正常顺序：本函数先跑（列已存在→只补缺列），注册式迁移
+            # d105-org-domain-text-normalize 随后执行转换。此时不该刷 ERROR。
+            log.info(
+                "org_id 列暂为数值型（%d 列），将由迁移 d105-org-domain-text-normalize "
+                "在本域启动迁移链里转换", len(_bad))
+        else:
+            log.error(
+                "org_id 列仍是数值型，'' 哨兵写入会报 1366（新建凭据直接失败）: "
+                f"{_bad}；迁移 d105-org-domain-text-normalize 已盖章却未生效，"
+                "请确认该表所属域的进程已升级到本文本化版本")
 
 
 def _migrate_create_personal_orgs():
@@ -2314,6 +2322,29 @@ def _org_columns_not_text(conn=None) -> list:
                 and "CHAR" not in decl.upper() and "CLOB" not in decl.upper():
             bad.append((table, col, decl))
     return bad
+
+
+def _org_text_migration_stamped(conn=None) -> bool:
+    """org 域文本化迁移是否已盖章（表不存在 = 未盖章，首个启动的正常态）。
+
+    不用 try/except 兜底：MGMT/RUNTIME 域库里可能都缺盖章表，静默 except 会
+    把「查询本身坏了」也读成「未盖章」，反而掩盖问题。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+    from src.kernel.session_manager import db as _pdb
+    conn = conn if conn is not None else _pdb
+    c = conn.cursor()
+    if get_db_backend() == "mysql":
+        c.execute("SELECT COUNT(*) FROM information_schema.tables "
+                  "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='grape_t_schema_migrations'")
+    else:
+        c.execute("SELECT COUNT(*) FROM sqlite_master "
+                  "WHERE type='table' AND name='grape_t_schema_migrations'")
+    row = c.fetchone()
+    if not row or not row[0]:
+        return False
+    c.execute("SELECT 1 FROM grape_t_schema_migrations WHERE version='202611190100'")
+    return c.fetchone() is not None
 
 
 def _normalize_org_domain_text(conn) -> int:
