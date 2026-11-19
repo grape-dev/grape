@@ -234,6 +234,25 @@ class TestAlreadyExistsLastDefense:
         assert os.path.isfile(skill_md), "最后防线保留占用产物"
         assert not os.path.exists(wt + ".grape-collide-backup"), "备份目录应清理"
 
+    def test_merge_keeps_backup_when_asset_conflicts(self):
+        """QA 复审：同名文件未合并时不得删备份（「迁移不删除」红线）。"""
+        wt = repogit.issue_dir_for("gitcode:owner/repo", "coding", "23")
+        backup = wt + ".grape-collide-backup"
+        os.makedirs(backup, exist_ok=True)
+        os.makedirs(wt, exist_ok=True)
+        with open(os.path.join(backup, "a.txt"), "w", encoding="utf-8") as f:
+            f.write("backup-a\n")
+        with open(os.path.join(backup, "extra.txt"), "w", encoding="utf-8") as f:
+            f.write("extra\n")
+        with open(os.path.join(wt, "a.txt"), "w", encoding="utf-8") as f:
+            f.write("baseline-a\n")
+        assert repogit._merge_collided_assets(backup, wt) is False
+        assert os.path.isdir(backup), "未合并条目存在时备份必须保留（留证）"
+        assert os.path.isfile(os.path.join(backup, "a.txt"))
+        assert os.path.isfile(os.path.join(wt, "extra.txt")), "可合并条目应已迁入"
+        with open(os.path.join(wt, "a.txt"), encoding="utf-8") as f:
+            assert f.read() == "baseline-a\n", "同名文件以基线为准"
+
     def test_is_already_exists_collision(self):
         """错误特征匹配：真实 already exists stderr 命中；其它失败不命中。"""
         assert repogit._is_already_exists_collision(

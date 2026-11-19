@@ -1818,12 +1818,26 @@ def _create_worktree_with_session_gitdir(repo_key: str, issue_dir: str, base: st
         return False
 
 
-def _merge_collided_assets(backup_dir: str, target_dir: str) -> None:
+def _utc_stamp() -> str:
+    """UTC 时间戳（`YYYYmmddTHHMMSSZ`）：隔离目录命名的统一口径。"""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _merge_collided_assets(backup_dir: str, target_dir: str) -> bool:
     """Issue #3482：把迁移备份中的占用物（.skills 等物化产物）合并回重建后的目录。
 
     逐条目迁移：目标不存在则移入；同名目录递归合并；同名文件以重建后的基线为准
-    （追踪文件优先，物化产物不覆盖代码基线）；完成后清空备份目录。
+    （追踪文件优先，物化产物不覆盖代码基线）。
+
+    QA 复审修订：「迁移不删除」是红线——只要有条目未能合并（rename 失败 / 同名文件
+    冲突未迁走），就**保留备份目录**留证，不再无条件 `rmtree`，避免把没合并的
+    物化产物删掉。
+
+    Returns:
+        True = 全部合并完成，备份已清理；False = 有条目残留，备份保留（日志给路径）。
     """
+    leftover = False
     try:
         for name in os.listdir(backup_dir):
             if name == ".git":
@@ -1832,17 +1846,30 @@ def _merge_collided_assets(backup_dir: str, target_dir: str) -> None:
             dst = os.path.join(target_dir, name)
             if os.path.exists(dst):
                 if os.path.isdir(src) and os.path.isdir(dst):
-                    _merge_collided_assets(src, dst)
+                    if not _merge_collided_assets(src, dst):
+                        leftover = True
+                    continue
+                # 同名文件：以重建后的基线为准，源件留在备份里留证（不删）
+                leftover = True
+                log.warning(f"repogit: collided asset kept in backup (same name as baseline) "
+                            f"{src}")
                 continue
             try:
                 os.rename(src, dst)
             except OSError as e:
+                leftover = True
                 log.warning(f"repogit: merge collided asset failed "
                             f"{src} -> {dst}: {e}")
-        shutil.rmtree(backup_dir, ignore_errors=True)
+        if leftover:
+            log.warning(f"repogit: collided assets not fully merged, keep backup for audit: "
+                        f"{backup_dir}")
+        else:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+        return not leftover
     except Exception as e:
         log.warning(f"repogit: merge collided assets failed "
-                    f"{backup_dir} -> {target_dir}: {e}")
+                    f"{backup_dir} -> {target_dir}: {e} (backup kept: {backup_dir})")
+        return False
 
 
 def _is_platform_asset_name(name: str) -> bool:
@@ -1897,7 +1924,7 @@ def dispose_occupied_workdir_target(repo_key: str, issue_dir: str) -> dict:
         out["action"] = "cleared"
         return out
     from datetime import datetime, timezone
-    stale = f"{issue_dir}.stale-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    stale = f"{issue_dir}.stale-{_utc_stamp()}"
     try:
         os.rename(issue_dir, stale)
     except OSError as e:
@@ -1927,7 +1954,16 @@ def _recover_worktree_already_exists(repo_key: str, issue_dir: str, base: str,
     backup = issue_dir + ".grape-collide-backup"
     try:
         if os.path.isdir(backup):
-            shutil.rmtree(backup, ignore_errors=True)
+            # QA 复审修订：上次中断遗留的备份可能还有未合并的物化产物——不删除，
+            # 改为带时间戳隔离留证，再为新一轮腾出固定备份名。
+            _prev_stale = f"{backup}.stale-{_utc_stamp()}"
+            try:
+                os.rename(backup, _prev_stale)
+                log.warning(f"repogit: previous collided-asset backup quarantined "
+                            f"{repo_key}: {backup} -> {_prev_stale}")
+            except OSError as e:
+                log.warning(f"repogit: quarantine previous collided-asset backup failed "
+                            f"{repo_key}: {e}")
         moved = False
         try:
             os.rename(issue_dir, backup)
@@ -2744,6 +2780,12 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                                 repo_key, issue_dir, base, branch, base_branch,
                                 _branch_reused, token=token):
                             return None
+                        # QA 复审补充：恢复成功路径也要做写权限自检（与新建 worktree 同口径），
+                        # 元数据只读时迁移到会话 gitdir 并记录，不静默。
+                        _git_status = ensure_worktree_git_writable(repo_key, issue_dir, token=token)
+                        if not _git_status.get("writable"):
+                            log.warning(f"repogit: recovered worktree in read-only git mode "
+                                        f"{repo_key}: {_git_status.get('reason', '')}")
                     # Issue #2245：仅当 errno 判定目标确实只读/无权限时降级建树；其它失败
                     # （如分支已被其它 worktree 占用）降级会制造同分支双工作树，直接失败。
                     elif not _ro_reason:
