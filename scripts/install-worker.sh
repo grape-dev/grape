@@ -9,6 +9,12 @@
 #     [--dir ~/grape] \
 #     [--root] \
 #     [--engine auto|opencode|hermes|none]
+#     [--service-name <unit-name>]
+#
+# 同机多 worker（Issue #3418）：每个安装目录是一个独立实例。systemd unit 名默认按实例
+# 派生（普通 worker: runtime-agent-<dir 哈希>，沙箱: sandbox-worker-<cred_uid8>），
+# 可用 --service-name 显式指定；停/启进程只作用于本实例（unit / PIDFile / venv 前缀 +
+# 模块右边界），并在 /run/grape/worker-instances 登记，跨实例冲突 fail-fast。
 #
 # [同机多 cloud_worker spec §4.2] --type/--platform 已删除；--dir 保留（2026-11-12
 # 用户裁定：恢复原有参数语义）：
@@ -39,6 +45,7 @@ SERVER=""
 DEVICE=""
 INSTALL_DIR=""
 ROOT_MODE=0
+SERVICE_NAME_ARG="${SERVICE_NAME:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -46,6 +53,7 @@ while [ $# -gt 0 ]; do
     --server)  SERVER="$2"; shift 2 ;;
     --device)  DEVICE="$2"; shift 2 ;;
     --dir)     INSTALL_DIR="$2"; shift 2 ;;
+    --service-name) SERVICE_NAME_ARG="$2"; shift 2 ;;
     --root)    ROOT_MODE=1; shift ;;
     # [spec §4.2] --type/--platform 已删除（whoami 派生）——显式报错引导而非
     # 静默忽略，防旧文档命令装错形态。--dir 保留（原有参数，2026-11-12 裁定）。
@@ -107,7 +115,10 @@ CRED_KEY="$(printf '%s' "$CRED_UID" | cut -c1-8)"   # 凭据目录键=credential
 WORKER_MODULE="src.domains.runtime.engine.agent"
 [ "$CRED_TYPE" = "sandbox" ] && WORKER_MODULE="src.domains.runtime.engine.cloud_worker"
 # systemd 服务名 + 注册成功日志标记（沙箱与普通 worker 区分，同机共存不互杀）
-SERVICE_NAME="runtime-agent"
+# 普通 worker 的服务名在下方「实例身份」段按安装目录派生（Issue #3418）：
+# 写死 runtime-agent 时，同机第二个普通 worker 的 install/restart/rollback 会直接
+# 作用到第一个 worker 的 unit（2026-11-19 121.36.74.10 双 worker 互杀事故通道之一）。
+SERVICE_NAME=""
 REGISTER_LOG="RuntimeAgent registered"
 if [ "$CRED_TYPE" = "sandbox" ]; then
   SERVICE_NAME="sandbox-worker-$CRED_KEY"
@@ -170,6 +181,218 @@ fi
 START_SCRIPT="$INSTALL_DIR/start-worker.sh"
 ENV_FILE="$CFG_DIR/runtime.env"
 VERSION_FILE="$CFG_DIR/worker.version"
+
+# ===== 0. 实例身份 / 限域停止 / 实例注册表（Issue #3418）=====
+# 一个安装目录 = 一个 worker 实例。实例身份由 INSTALL_DIR（沙箱还叠加 CRED_KEY）派生，
+# 用于唯一 unit 名、PIDFile 归属校验、跨实例互斥登记——同一台机器上的任意多个
+# 异构 worker（普通/沙箱、不同入口模块）长期共存互不影响。
+regex_escape_path() {
+  printf '%s' "$1" | sed 's/[][\\{}().*^$+?|]/\\&/g'
+}
+if [ -z "${WORKER_INSTANCE_KEY:-}" ]; then
+  # cksum 十进制短哈希：POSIX 可用、跨主机稳定；沙箱已按凭据目录隔离，键叠加 CRED_KEY
+  if [ "$CRED_TYPE" = "sandbox" ]; then
+    WORKER_INSTANCE_KEY="sandbox-${CRED_KEY:-$(printf '%s' "$INSTALL_DIR" | cksum | awk '{print $1}')}"
+  else
+    WORKER_INSTANCE_KEY="$(printf '%s' "$INSTALL_DIR" | cksum | awk '{print $1}')"
+  fi
+fi
+_default_service_name() {
+  if [ "$CRED_TYPE" = "sandbox" ]; then
+    echo "sandbox-worker-${CRED_KEY}"
+    return 0
+  fi
+  if [ -f /etc/systemd/system/runtime-agent.service ] \
+     && grep -qxF "WorkingDirectory=$INSTALL_DIR" /etc/systemd/system/runtime-agent.service 2>/dev/null; then
+    echo "runtime-agent"        # 存量部署零变更：既有 runtime-agent 就是本目录
+    return 0
+  fi
+  echo "runtime-agent-${WORKER_INSTANCE_KEY}"
+}
+SERVICE_NAME="${SERVICE_NAME_ARG:-$(_default_service_name)}"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+
+# 实例注册表 + flock 跨实例互斥
+# 目录优先级：/run/grape/worker-instances（root，跨用户）→ $TMPDIR/grape-worker-instances-<uid>
+#             → $INSTALL_DIR/data/worker-instances（降级，仅同目录自洽，显式告警）
+# 登记为 key=value 行（worker 主机不保证有 jq）。
+REGISTRY_DIR="${GRAPE_WORKER_REGISTRY_DIR:-}"
+REGISTRY_LOCK="${GRAPE_WORKER_REGISTRY_LOCK:-}"
+_registry_paths() {
+  if [ -n "$REGISTRY_DIR" ] && [ -n "$REGISTRY_LOCK" ]; then
+    mkdir -p "$REGISTRY_DIR" 2>/dev/null || true
+    return 0
+  fi
+  if mkdir -p /run/grape/worker-instances 2>/dev/null && : >> /run/grape/worker-registry.lock 2>/dev/null; then
+    REGISTRY_DIR="/run/grape/worker-instances"
+    REGISTRY_LOCK="/run/grape/worker-registry.lock"
+    return 0
+  fi
+  _uid="$(id -u)"
+  if mkdir -p "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/grape-worker-instances-$_uid" 2>/dev/null; then
+    REGISTRY_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/grape-worker-instances-$_uid"
+    REGISTRY_LOCK="${REGISTRY_DIR%/}/../grape-worker-registry-$_uid.lock"
+    chmod 700 "$REGISTRY_DIR" 2>/dev/null || true
+    : >> "$REGISTRY_LOCK" 2>/dev/null || true
+    return 0
+  fi
+  REGISTRY_DIR="$INSTALL_DIR/data/worker-instances"
+  REGISTRY_LOCK="$INSTALL_DIR/data/worker-registry.lock"
+  mkdir -p "$REGISTRY_DIR" 2>/dev/null || true
+  : >> "$REGISTRY_LOCK" 2>/dev/null || true
+  log "Warning: no shared registry dir writable, instance registry falls back to $REGISTRY_DIR (cross-instance exclusion is weaker)"
+}
+_registry_acquire() {
+  _registry_paths
+  # 重定向失败时 `exec` 会终止非交互 shell，故先探测可写；且不要在此 `2>/dev/null`
+  # （那会永久静音后续所有错误输出，包括 fail 的提示）。
+  if ( : >>"$REGISTRY_LOCK" ) 2>/dev/null; then
+    exec 9>>"$REGISTRY_LOCK"
+    _REGISTRY_LOCK_OPEN=1
+    flock -w 15 9 2>/dev/null || log "Warning: could not lock $REGISTRY_LOCK within 15s, continuing"
+    _registry_prune
+  else
+    _REGISTRY_LOCK_OPEN=0
+    log "Warning: registry lock not writable ($REGISTRY_LOCK), continuing without cross-instance lock"
+  fi
+}
+_registry_release() {
+  if [ "${_REGISTRY_LOCK_OPEN:-0}" = "1" ] && [ -e "/proc/self/fd/9" ]; then
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
+  fi
+  _REGISTRY_LOCK_OPEN=0
+}
+_reg_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
+_reg_pid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+# 陈旧登记自愈：仅清理 PID 已不存在的登记（残留进程仍由 venv 前缀兜底匹配）
+_registry_prune() {
+  for _f in "$REGISTRY_DIR"/*.registry; do
+    [ -f "$_f" ] || continue
+    _p="$(_reg_field "$_f" pid)"
+    if ! _reg_pid_alive "$_p"; then
+      rm -f "$_f" 2>/dev/null || true
+    fi
+  done
+}
+# 冲突校验：同机其他安装目录已登记同一 unit → fail-fast（不动它的进程/unit）
+registry_guard() {
+  _registry_acquire
+  _conflict=""
+  for _f in "$REGISTRY_DIR"/*.registry; do
+    [ -f "$_f" ] || continue
+    _dir="$(_reg_field "$_f" install_dir)"
+    [ "$_dir" = "$INSTALL_DIR" ] && continue      # 本实例（同目录重装）
+    _unit="$(_reg_field "$_f" unit)"
+    if [ -n "$_unit" ] && [ "$_unit" = "$SERVICE_NAME" ]; then
+      _conflict="$_f"
+      break
+    fi
+  done
+  if [ -n "$_conflict" ]; then
+    log "!!! Live worker instance already owns this identity: $(tr '\n' ' ' < "$_conflict")"
+    log "!!! Refusing to stop/restart it. Use --service-name or a different --dir for a second worker."
+    _registry_release
+    fail "Instance conflict: unit $SERVICE_NAME belongs to install dir $(_reg_field "$_conflict" install_dir)"
+  fi
+  _registry_release
+  return 0
+}
+registry_register() {
+  _registry_acquire
+  mkdir -p "$REGISTRY_DIR" 2>/dev/null || true
+  cat > "$REGISTRY_DIR/${CRED_TYPE}-${WORKER_INSTANCE_KEY}.registry" <<EOF
+unit=$SERVICE_NAME
+install_dir=$INSTALL_DIR
+module=$WORKER_MODULE
+cred_type=$CRED_TYPE
+pid=${1:-}
+updated_at=$(date +%s)
+EOF
+  _registry_release
+}
+registry_clear() {
+  _registry_paths
+  rm -f "$REGISTRY_DIR/${CRED_TYPE}-${WORKER_INSTANCE_KEY}.registry" 2>/dev/null || true
+}
+
+# systemd 可用性检测：容器环境（如 DevSpace）PID 1 非 systemd，root 模式也必须回退 nohup
+_has_systemd() {
+  [ "$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')" = "systemd" ] && command -v systemctl >/dev/null 2>&1
+}
+
+# ===== 0.1 本实例进程限域停止（Issue #3418）=====
+DAEMON_PIDFILE="$INSTALL_DIR/data/worker.pid"
+AGENT_PIDFILE="$INSTALL_DIR/data/worker.agent.pid"
+
+# PID 归属校验：cmdline 必须指向本实例 venv 解释器或本实例启动脚本
+_pid_is_own() {
+  _pid="${1:-}"
+  [ -n "$_pid" ] && [ -r "/proc/$_pid/cmdline" ] || return 1
+  _cmdline="$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || true)"
+  case "$_cmdline" in
+    "$VENV/bin/python"*) return 0 ;;
+    "$VENV/bin/python3"*) return 0 ;;
+    *"$START_SCRIPT"*) return 0 ;;
+  esac
+  return 1
+}
+_stop_pidfile() {
+  _pf="${1:-}"
+  [ -f "$_pf" ] || return 0
+  _p="$(head -1 "$_pf" 2>/dev/null | tr -dc '0-9' || true)"
+  if [ -n "$_p" ] && _pid_is_own "$_p"; then
+    kill "$_p" 2>/dev/null || true
+    _n=0
+    while [ "$_n" -lt 10 ] && kill -0 "$_p" 2>/dev/null; do
+      sleep 1
+      _n=$((_n + 1))
+    done
+    if _pid_is_own "$_p"; then
+      kill -9 "$_p" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$_pf" 2>/dev/null || true
+}
+# 按 ERE 模式停进程：跳过自身与父进程（脚本 cmdline 可能含被测路径字面量）
+_kill_pids_matching() {
+  _kpat="${1:-}"
+  _ksig="${2:-TERM}"
+  [ -n "$_kpat" ] || return 0
+  for _kp in $(pgrep -f "$_kpat" 2>/dev/null || true); do
+    [ "$_kp" = "$$" ] && continue
+    [ "$_kp" = "$PPID" ] && continue
+    kill "-$_ksig" "$_kp" 2>/dev/null || true
+  done
+}
+stop_own_worker() {
+  log "Stopping this instance only (unit=${SERVICE_NAME}, dir=$INSTALL_DIR)"
+  registry_clear
+  # ① systemd：只停本实例 unit
+  if [ "$ROOT_MODE" = "1" ] && _has_systemd && [ -f "$SERVICE_FILE" ]; then
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    rm -f "$AGENT_PIDFILE" "$DAEMON_PIDFILE" 2>/dev/null || true
+    sleep 1
+  fi
+  # ② PIDFile（cmdline 校验，跨实例天然隔离）
+  _stop_pidfile "$AGENT_PIDFILE"
+  _stop_pidfile "$DAEMON_PIDFILE"
+  # ③ 兜底：本实例 venv 绝对路径前缀 + 模块右边界
+  _venv_pat="$(regex_escape_path "$VENV/bin/python")"
+  _kill_pids_matching "${_venv_pat}.*-m ${WORKER_MODULE_PAT}"
+  _start_pat="$(regex_escape_path "$START_SCRIPT")"
+  _kill_pids_matching "$_start_pat"
+  if pgrep -f "${_venv_pat}.*-m ${WORKER_MODULE_PAT}" >/dev/null 2>&1; then
+    sleep 2
+    _kill_pids_matching "${_venv_pat}.*-m ${WORKER_MODULE_PAT}" KILL
+  fi
+  sleep 1
+}
+# 本实例存活的 agent 主进程 PID（限域判活）
+own_agent_pids() {
+  _venv_pat="$(regex_escape_path "$VENV/bin/python")"
+  pgrep -f "${_venv_pat}.*-m ${WORKER_MODULE_PAT}" 2>/dev/null || true
+}
 
 # 目标机架构（Issue #515：worker 安装包按架构捆绑 python-x86_64/ python-aarch64/，
 # 安装端按 uname -m 选对应目录；amd64/arm64 为兼容别称）
@@ -291,20 +514,24 @@ restore_upgrade_backup() {
   if [ "$_mode" = "systemd" ]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl restart ${SERVICE_NAME:-runtime-agent} >/dev/null 2>&1 || true
+    if [ -n "${SERVICE_NAME:-}" ]; then
+      _rb_pid="$(systemctl show "$SERVICE_NAME" --property=MainPID --value 2>/dev/null || true)"
+      if [ -n "$_rb_pid" ]; then registry_register "$_rb_pid"; fi
+    fi
   else
     # 2026-10-08 follow-up：先杀残留的新进程再起旧版。注册超时路径（启动验证 30s
-    # 未 registered）调用本函数时，新 agent 进程可能仍存活——若不限域 pkill，
+    # 未 registered）调用本函数时，新 agent 进程可能仍存活——若不限域停进程，
     # 旧版起成功后新旧两进程并存，残留新进程可能反向注册击穿回滚。
-    # 限域模式与第 6 步停旧实例一致：按本安装目录 venv 绝对路径匹配，不误杀同机
-    # 其他安装/其他用户的 worker。
-    _rollback_pat="$(printf '%s' "$VENV/bin/python" | sed 's/[.\[*^$]/\\&/g')"
-    pkill -f "${_rollback_pat}.*-m ${_wm_pat}" >/dev/null 2>&1 || true
-    sleep 1
+    # Issue #3418：限域到本实例（systemd unit / PIDFile / venv 前缀 + 模块右边界），
+    # 不再按模块名正则扫同机其他安装目录的 worker。
+    stop_own_worker
     setsid nohup "$START_SCRIPT" >> "$INSTALL_DIR/data/worker.log" 2>&1 < /dev/null &
     disown 2>/dev/null || true
   fi
   sleep 5
-  if pgrep -f "$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g').*-m ${_wm_pat}" >/dev/null 2>&1; then
+  _rollback_pids="$(own_agent_pids)"
+  if [ -n "$_rollback_pids" ]; then
+    registry_register "$(printf '%s' "$_rollback_pids" | head -1)"
     log "Rollback OK: old agent restored and running"
     return 0
   fi
@@ -741,16 +968,18 @@ else
   log "Warning: codegraph check FAILED ('codegraph --version' not available); worker runs fine, knowledge baseline will be degraded"
 fi
 
-# ===== 6. 生成启动脚本并启动 =====
-# systemd 可用性检测：容器环境（如 DevSpace）通常无 systemd（PID 1 非 systemd），
-# 此时 root 模式也必须回退到 nohup/setsid，否则 systemctl restart 会 fail 退出。
-_has_systemd() {
-  [ "$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')" = "systemd" ] && command -v systemctl >/dev/null 2>&1
-}
+# ===== 6. 生成启动脚本并启动（Issue #3418：只作用于本实例）=====
+# _has_systemd 已在第 0 节定义（容器环境 PID 1 非 systemd → root 也回退 nohup）。
+# 跨实例互斥：同机其他安装目录已登记同一 unit → fail-fast，不动它的进程/unit。
+registry_guard
 
 if [ "$ROOT_MODE" = "1" ] && _has_systemd; then
-  # ---- root + systemd 可用：systemd 服务 ----
-  SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+  # ---- root + systemd 可用：systemd 服务（unit 名按实例派生）----
+  # 既有同名 unit 不属于本安装目录 → fail-fast，绝不静默覆盖/重启他人的 unit
+  if [ -f "$SERVICE_FILE" ] && ! grep -qxF "WorkingDirectory=$INSTALL_DIR" "$SERVICE_FILE" 2>/dev/null; then
+    log "!!! $SERVICE_FILE already exists and belongs to another install dir: $(grep -F 'WorkingDirectory=' "$SERVICE_FILE" 2>/dev/null | head -1)"
+    fail "systemd unit $SERVICE_NAME is owned by another worker instance; pass --service-name <unique-name> or use a separate --dir"
+  fi
   # [spec §6.3] 沙箱 worker: on-failure + 突发限制(心跳 401/403 连续 N=10 自杀后
   # 不被无限拉起成僵尸); 普通 worker 保持 always(现状)
   _RESTART_POLICY="always"
@@ -788,7 +1017,7 @@ WantedBy=multi-user.target
 EOF
   # Issue #1982：已装实例升级时，unit 文件可能保留旧模板（无 LimitNOFILE），
   # 用 drop-in 落地 fd 上限并 daemon-reload；新装/重装同样幂等生效。
-  _DROPIN_DIR="/etc/systemd/system/runtime-agent.service.d"
+  _DROPIN_DIR="/etc/systemd/system/${SERVICE_NAME}.service.d"
   mkdir -p "$_DROPIN_DIR"
   cat > "$_DROPIN_DIR/limit-nofile.conf" <<EOF
 [Service]
@@ -851,7 +1080,7 @@ EOF
     # "限域杀旧+restart"语义排除——restart 后同 unit 历史行仍在，故这里必须
     # 双条件：宽窗口有注册行 && 当前进程 cmd 含本实例 venv 路径）。
     if journalctl -u $SERVICE_NAME --since "-15 min" --no-pager 2>/dev/null | grep -q "$REGISTER_LOG"; then
-      if pgrep -f "${_pat:-$INSTALL_DIR}.*-m ${WORKER_MODULE_PAT}" >/dev/null 2>&1; then
+      if pgrep -f "$(regex_escape_path "$VENV/bin/python").*-m ${WORKER_MODULE_PAT}" >/dev/null 2>&1; then
         _reg_ok=1; break
       fi
     fi
@@ -863,7 +1092,9 @@ EOF
     sleep 3
   done
   if [ -n "$_reg_ok" ]; then
-    log "Started via systemd and registered ($SERVICE_NAME)"
+    _main_pid="$(systemctl show "$SERVICE_NAME" --property=MainPID --value 2>/dev/null || true)"
+    registry_register "${_main_pid:-}"
+    log "Started via systemd and registered ($SERVICE_NAME, pid ${_main_pid:-unknown})"
   elif restore_upgrade_backup systemd; then
     log "New agent registration timed out ($((_reg_timeout_loops * 3))s) -- rolled back to old version (new version may not reach the master)"
   else
@@ -887,12 +1118,14 @@ RESTART_WINDOW=3600
 RESTART_DELAY=5
 
 if [ "\$1" != "--no-daemon" ]; then
+  echo \$\$ > "$INSTALL_DIR/data/worker.pid"
   RESTART_COUNT=0
   WINDOW_START=\$(date +%s)
   while true; do
     echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Starting worker (attempt \$((RESTART_COUNT + 1)))..."
     "\$0" --no-daemon &
     WORKER_PID=\$!
+    echo \$WORKER_PID > "$INSTALL_DIR/data/worker.agent.pid"
     wait \$WORKER_PID
     EXIT_CODE=\$?
     NOW=\$(date +%s)
@@ -921,29 +1154,18 @@ set -a; . "$ENV_FILE"; set +a
 exec "$VENV/bin/python" -m ${WORKER_MODULE}
 EOF
   chmod +x "$START_SCRIPT"
-  # 停掉旧 daemon（start-worker.sh 的 bash 进程），防止旧 daemon 重启被杀的 worker → 双 daemon 循环竞争
-  # ⚠️ 匹配 start-worker.sh 进程：按脚本路径 + --no-daemon 模式（daemon 循环体特征）
-  #    仅杀本安装目录的 start-worker.sh，避免误杀同机其他安装目录的 daemon
-  _daemon_pat="$(printf '%s' "$START_SCRIPT" | sed 's/[.[\*^$]/\\&/g')"
-  pkill -f "${_daemon_pat}.*--no-daemon" >/dev/null 2>&1 || true
-  # 也杀 daemon 主进程（while true 循环体本身，--no-daemon 参数的父进程）
-  pkill -f "$_daemon_pat" >/dev/null 2>&1 || true
-  sleep 1
-  # 停掉旧 worker——限定到本安装目录自己的实例（按 venv python 路径匹配）
-  # ⚠️ 不能用裸 "python -m src.domains.runtime.engine.agent" 匹配：会误杀同机其他安装目录/其他用户
-  #    的 worker（2026-10-08 实测：root 升级 /opt/grape 时误杀 liufei ~/grape-worker 的
-  #    实例，恰好只因为 root 侧 cmdline 带 -u 才躲过反向误杀）。
-  #    匹配本实例实际启动命令的前缀："$VENV/bin/python" ... -m src.domains.runtime.engine.agent
-  #    （$VENV 展开为绝对路径，跨目录/跨用户天然隔离；pgrep -f 按子串匹配含路径）
-  _pat="$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g')"
+  # 停掉本实例旧进程（daemon + agent）：unit / PIDFile / venv 前缀 + 模块右边界，
+  # 三条限域都只覆盖本安装目录——同机其他 worker（不同 VENV、不同入口模块、
+  # 普通/沙箱混跑）不受影响；也不再需要按进程名扫 start-worker.sh。
+  _pat="$(regex_escape_path "$VENV/bin/python")"
   # 停旧进程前采样两样东西（都必须在新进程启动之前）：
   #   * PID 快照：判活只认启动后新增的 PID，否则旧实例忽略 SIGTERM 慢退出时会被判成功；
   #   * 日志水位：注册判据只认水位之后的行。若在启动后（哪怕判活窗口之后）采样，新 worker
   #     在窗口内写下的注册行会被当成历史行，永远读不到 → 健康新版被误判未注册并回滚。
   _pids_before=" $(pgrep -f "${_pat}.*-m ${WORKER_MODULE_PAT}" 2>/dev/null | tr '\n' ' ')"
   _log_start="$(log_line_watermark "$INSTALL_DIR/data/worker.log")"
-  pkill -f "${_pat}.*-m ${WORKER_MODULE_PAT}" >/dev/null 2>&1 || true
-  sleep 1
+  # 限域停止本实例（Issue #3418）：不再用裸模块名 pkill，避免误杀异构 worker
+  stop_own_worker
   # 脱离终端启动（setsid + nohup，退出 ssh 不中断）
   setsid nohup "$START_SCRIPT" >> "$INSTALL_DIR/data/worker.log" 2>&1 < /dev/null &
   disown 2>/dev/null || true
@@ -964,7 +1186,8 @@ EOF
   # [进度输出 2026-11-05] 静默轮询最长 240s，用户观感=卡住（实例 52 用户实测反馈）。
   # 每 30s 打一行进度点。判据只认水位之后新写入的行（历史注册行不算）。
   if wait_runtime_registered "$INSTALL_DIR/data/worker.log" "$((_log_start + 1))" "$REGISTER_LOG" "$_reg_timeout_loops"; then
-    log "Started in background and registered (pid $_alive), log: $INSTALL_DIR/data/worker.log"
+    registry_register "$_alive"
+    log "Started in background and registered (pid $_alive, unit $SERVICE_NAME), log: $INSTALL_DIR/data/worker.log"
   elif restore_upgrade_backup nohup; then
     log "New agent process alive but not registered within $((_reg_timeout_loops * 3))s -- rolled back (new version may not reach the master, e.g. a 502 window upgrade)"
   else
