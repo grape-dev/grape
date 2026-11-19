@@ -9892,162 +9892,29 @@ register_migration(
 )
 
 
-# ===== Issue #3168 技能详情页：skill 扩展列 + 版本/文件/评论表 =====
-def _fn_issue3168_skill_detail_schema() -> None:
-    """skill 表补 summary/download_count 列，建 skill_version/skill_file/skill_comment。
-
-    幂等：_ensure_column 先探测；CREATE TABLE IF NOT EXISTS 可重复执行。
-    skill 及三张扩展表归 runtime 域，故 domains=("runtime",)。
-    """
-    from src.domains.runtime.schema_ddl import (
-        _SKILL_VERSION_DDL, _SKILL_FILE_DDL, _SKILL_COMMENT_DDL,
-    )
-    with db_lock:
-        c = db.cursor()
-        if not _owned_skip("skill", "ensure column summary"):
-            _ensure_column(c, "skill", "summary", "TEXT DEFAULT ''", strict=True)
-            _ensure_column(c, "skill", "download_count", "INTEGER DEFAULT 0", strict=True)
-        for _name, _ddl in (("skill_version", _SKILL_VERSION_DDL),
-                            ("skill_file", _SKILL_FILE_DDL),
-                            ("skill_comment", _SKILL_COMMENT_DDL)):
-            if _owned_skip(_name, "create table"):
-                continue
-            c.execute(_ddl)
-        db.commit()
-
-
-register_migration(
-    # [rebase 到 arch-weekly-11 改号] 原用 202611180001/002，基线已分别被
-    # ensure-cloud-sandboxes-in-runtime / ensure-runtime-type-info-columns 占用（撞号守卫），
-    # 顺延到 202611181301/202611181302。
-    version="202611181301",
-    name="issue3168-skill-detail-schema",
-    kind="safe",
-    domains=("runtime",),
-    fn=_fn_issue3168_skill_detail_schema,
+# ===== Issue #3168 技能详情页 / #3202 分类收敛：迁移内容归 owner 域 =====
+# skill / skill_version / skill_file / skill_comment / skill_category 归 runtime，
+# grape_t_category_dict / scene_market 归 mgmt——SQL 一律住在 owner 域的
+# migrations 模块（跨域守卫 P0-2：api 层直写他域表 = 新增跨域引用），
+# 这里只做注册引导（模式同 ensure_runtime_type_info_columns / drop_same_domain_links）。
+# 版本号沿革（rebase 改号记录见各模块 docstring）：1301/1302 曾用
+# 202611180001/002（基线占用）→ 202611181201/1202（基线守卫钉空）→ 202611181301/1302；
+# 1303 原用 202611180003（基线 issue2761-skill-classification-columns 占用）。
+# 分类收敛按属主拆两条：202611180004（mgmt：字典停用 + scene_market 重挂）、
+# 202611181304（runtime：skill 重挂 + 老分类废止）——QA A11：混在一条无 domains=
+# 声明的迁移里，三库拓扑下 runtime 库的收敛会被静默跳过。
+from src.domains.runtime.migrations.skill_detail_tables import (
+    MIGRATION_SCHEMA as _M_SKILL_DETAIL_SCHEMA,
+    MIGRATION_BACKFILL as _M_SKILL_DETAIL_BACKFILL,
+    MIGRATION_INTRO_OVERRIDE as _M_SKILL_INTRO_OVERRIDE,
 )
+register_migration(**_M_SKILL_DETAIL_SCHEMA)
+register_migration(**_M_SKILL_DETAIL_BACKFILL)
 
+from src.domains.mgmt.migrations.category_collapse_dict import MIGRATION as _M_CAT_COLLAPSE_MGMT
+register_migration(**_M_CAT_COLLAPSE_MGMT)
 
-def _fn_issue3168_official_version_backfill() -> None:
-    """73 个官方技能各补一行 1.0.0（时间取 skill.created_at，不伪造中间版本）。"""
-    from src.kernel.id_gen import uuid7_str
-    with db_lock:
-        c = db.cursor()
-        if _owned_skip("skill_version", "backfill official versions"):
-            return
-        try:
-            rows = c.execute(
-                "SELECT s.id, s.created_at FROM skill s "
-                "WHERE s.scope='official' AND s.is_active=1 "
-                "AND NOT EXISTS (SELECT 1 FROM skill_version v WHERE v.skill_id=s.id)"
-            ).fetchall()
-        except Exception as exc:  # noqa: BLE001 - 表不存在时由 schema 迁移负责
-            log.warning(f"202611181302 official version backfill skipped: {exc}")
-            return
-        for sid, created_at in rows or []:
-            try:
-                c.execute(
-                    "INSERT INTO skill_version "
-                    "(id, skill_id, version, change_note, uploaded_at, uploaded_by) "
-                    "VALUES (?,?,?,?,?,?)",
-                    (uuid7_str(), int(sid), "1.0.0", "存量官方技能版本补录",
-                     created_at or "", "system"))
-            except Exception as exc:  # noqa: BLE001 - 单行失败不阻断
-                log.warning(f"202611181302 version row failed for skill {sid}: {exc}")
-        db.commit()
+from src.domains.runtime.migrations.skill_category_collapse import MIGRATION as _M_CAT_COLLAPSE_RT
+register_migration(**_M_CAT_COLLAPSE_RT)
 
-
-register_migration(
-    version="202611181302",
-    name="issue3168-official-skill-version-backfill",
-    kind="backfill",
-    domains=("runtime",),
-    fn=_fn_issue3168_official_version_backfill,
-)
-
-
-# ===== 分类收敛 202611180004：一级只留 IT研发/运营域/其他；老 skill.category_id 废止 =====
-def _fn_category_collapse_three_domains() -> None:
-    """一级分类收敛为 IT研发/运营域/其他（用户决策）。
-
-    - grape_t_category_dict：停用（is_active=0）除 it-rd/operations/other 外的一级
-      及其全部二级；运营域/其他 二级重新编号补齐；
-    - skill/scene_market：cat_l1_id 指向被停用一级的行改挂 1010（其他）；
-    - skill.category_id（老分类）：全部清零（老分类废止）。
-    幂等：纯 UPDATE，可重复执行。
-    """
-    keep_l1_slugs = ("it-rd", "operations", "other")
-    with db_lock:
-        c = db.cursor()
-        if _owned_skip("grape_t_category_dict", "collapse three domains"):
-            return
-        keep_ids = []
-        try:
-            rows = c.execute(
-                "SELECT id, slug FROM grape_t_category_dict WHERE level=1").fetchall()
-        except Exception as exc:  # noqa: BLE001
-            log.warning(f"202611180004 read dict failed: {exc}")
-            return
-        drop_ids = []
-        for rid, slug in rows or []:
-            rid = int(rid or 0)
-            (keep_ids if (slug or "") in keep_l1_slugs else drop_ids).append(rid)
-        if drop_ids:
-            marks = ",".join("?" for _ in drop_ids)
-            # 停用被删一级及其二级
-            c.execute(
-                f"UPDATE grape_t_category_dict SET is_active=0 "
-                f"WHERE parent_id IN ({marks})", tuple(drop_ids))
-            c.execute(
-                f"UPDATE grape_t_category_dict SET is_active=0 "
-                f"WHERE id IN ({marks})", tuple(drop_ids))
-            # 引用重映射：挂在被删一级下的 skill/scene_market 归入 1010（其他）
-            for tbl in ("skill", "scene_market"):
-                try:
-                    c.execute(
-                        f"UPDATE {tbl} SET cat_l1_id=1010 "
-                        f"WHERE cat_l1_id IN ({marks})", tuple(drop_ids))
-                except Exception as exc:  # noqa: BLE001
-                    log.warning(f"202611180004 remap {tbl}.cat_l1_id failed: {exc}")
-        # 老分类废止：skill.category_id 清零 + skill_category 全部停用
-        try:
-            c.execute("UPDATE skill SET category_id=0 WHERE category_id<>0")
-        except Exception as exc:  # noqa: BLE001
-            log.warning(f"202611180004 clear skill.category_id failed: {exc}")
-        try:
-            c.execute("UPDATE skill_category SET is_active=0 WHERE is_active=1")
-        except Exception as exc:  # noqa: BLE001
-            log.warning(f"202611180004 deactivate skill_category failed: {exc}")
-        db.commit()
-
-
-register_migration(
-    version="202611180004",
-    name="category-collapse-three-domains",
-    kind="safe",
-    fn=_fn_category_collapse_three_domains,
-)
-
-
-# ===== 概览 Tab 技能介绍可编辑：skill.intro_override（JSON，槽位→人工改写文本） =====
-def _fn_skill_intro_override_schema() -> None:
-    """skill 表补 intro_override 列（TEXT，存 JSON：{scope/steps/products/constraints/review}）。
-
-    幂等：_ensure_column 先探测。
-    """
-    with db_lock:
-        c = db.cursor()
-        if not _owned_skip("skill", "ensure column intro_override"):
-            _ensure_column(c, "skill", "intro_override", "TEXT DEFAULT ''", strict=True)
-        db.commit()
-
-
-register_migration(
-    # [rebase 到 arch-weekly-11 改号] 原用 202611180003，基线已被
-    # issue2761-skill-classification-columns 占用（撞号守卫），顺延到 202611181303。
-    version="202611181303",
-    name="skill-intro-override-schema",
-    kind="safe",
-    domains=("runtime",),
-    fn=_fn_skill_intro_override_schema,
-)
+register_migration(**_M_SKILL_INTRO_OVERRIDE)
