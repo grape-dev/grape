@@ -233,7 +233,7 @@ class TestSkillsObs:
         _restore()
 
     def test_upload_obs_creates_object_and_version(self, _obs_env):
-        """上传 → OBS 固定 key 对象存在、DB 记录 key；再次上传 → 同 key 覆盖（对象数不变）。"""
+        """上传 → OBS 固定 key 对象存在、DB 记录 key；再次上传（版本递增）→ 同 key 覆盖（对象数不变）。"""
         zip_bytes = _make_skill_zip("obs-test-upload")
         r = client.post("/api/skills/upload",
                         files={"file": ("obs-test-upload.zip", zip_bytes)},
@@ -253,9 +253,10 @@ class TestSkillsObs:
             assert "obs-test-upload/SKILL.md" in zf.namelist()
         n_objects_after_first = len(_obs_env.objects)
 
-        # 再次上传 → 同 key 原子覆盖（对象数不变，仍 1 个固定 key 对象）
+        # 再次上传（SKILL.md 版本号须递增，#3168 D6 守卫）→ 同 key 原子覆盖（对象数不变，仍 1 个固定 key 对象）
+        zip_bytes2 = _make_skill_zip("obs-test-upload", version="1.0.1")
         r2 = client.post("/api/skills/upload",
-                         files={"file": ("obs-test-upload.zip", zip_bytes)},
+                         files={"file": ("obs-test-upload.zip", zip_bytes2)},
                          data={"agent_type": "chat", "summary": "测试摘要"}, headers=_headers)
         assert r2.status_code == 200, r2.text
         with db_lock:
