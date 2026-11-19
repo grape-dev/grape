@@ -41,6 +41,7 @@ if (-not $NoDaemon) {
     $BootLogDir = Join-Path $WorkerDir "data\logs"
     if (-not (Test-Path $BootLogDir)) { New-Item -ItemType Directory -Force -Path $BootLogDir | Out-Null }
     $BootLog = Join-Path $BootLogDir "worker-boot.log"
+    # 轮转阈值来源：Spec Issue #3490 §Scope.3（启动日志超 5MB 轮转）。
     if ((Test-Path $BootLog) -and ((Get-Item $BootLog).Length -gt 5MB)) {
         Move-Item -Force $BootLog "$BootLog.1"
     }
