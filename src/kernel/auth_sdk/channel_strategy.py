@@ -21,6 +21,7 @@ vcs 方言模板同一条设计定律：**协议引擎是模板（写一次）�
 """
 from __future__ import annotations
 from src.kernel.config import log
+from src.kernel.ports import oauth as _oauth
 
 from dataclasses import dataclass
 
@@ -106,8 +107,7 @@ def get_channel_strategy(channel_type: str) -> "LoginChannelStrategy | None":
 
 def build_channel_strategy(provider: str) -> "LoginChannelStrategy":
     """按渠道卡构建策略（S40/S45）：type 未注册 → 拒绝；字段缺失 → 构建时拒绝并报字段名。"""
-    from src.domains.mgmt.auth.providers import get_provider
-    card = get_provider(provider) or {}
+    card = _oauth.get_provider(provider) or {}
     ctype = str(card.get("type") or "oauth2")  # 存量卡无 type = oauth2（向后兼容）
     strategy = get_channel_strategy(ctype)
     if strategy is None:
@@ -142,25 +142,23 @@ class OAuth2ChannelStrategy(LoginChannelStrategy):
 
     def initiate_auth(self, state: str, redirect_uri: str, card: dict,
                       extra_state: "dict | None" = None) -> dict:
-        from src.domains.mgmt.auth.providers import build_auth_url
         provider = card.get("provider_key") or ""
-        out = build_auth_url(provider, state, redirect_uri,
-                             extra_state_data=extra_state) or {}
+        out = _oauth.build_auth_url(provider, state, redirect_uri,
+                                    extra_state_data=extra_state) or {}
         return {"redirect_url": out.get("redirect_url", "")}
 
     def handle_callback(self, callback_input: dict, card: dict) -> IdentityClaims:
-        from src.domains.mgmt.auth.providers import exchange_token, get_user_info
         provider = card.get("provider_key") or ""
         code = str(callback_input.get("code") or "")
         redirect_uri = str(callback_input.get("redirect_uri") or "")
         if not code:
             raise ChannelAuthError("oauth2 callback missing code")
-        tokens, _err = exchange_token(provider, code, redirect_uri) or (None, "")
+        tokens, _err = _oauth.exchange_token(provider, code, redirect_uri) or (None, "")
         tokens = tokens or {}
         access_token = str(tokens.get("access_token") or "")
         if not access_token:
             raise ChannelAuthError("oauth2 token exchange returned no access_token")
-        user = get_user_info(provider, access_token) or {}
+        user = _oauth.get_user_info(provider, access_token) or {}
         return normalize_identity_claims(provider, user, {
             "id_field": card.get("id_field", "id"),
             "login_field": card.get("login_field", "login"),
@@ -189,7 +187,6 @@ class OidcChannelStrategy(OAuth2ChannelStrategy):
     }
 
     def handle_callback(self, callback_input: dict, card: dict) -> IdentityClaims:
-        from src.domains.mgmt.auth.providers import exchange_token, get_user_info
         provider = card.get("provider_key") or ""
         code = str(callback_input.get("code") or "")
         redirect_uri = str(callback_input.get("redirect_uri") or "")
@@ -200,7 +197,7 @@ class OidcChannelStrategy(OAuth2ChannelStrategy):
         if not tokens:
             if not code:
                 raise ChannelAuthError("oidc callback missing code")
-            tokens, _err = exchange_token(provider, code, redirect_uri) or (None, "")
+            tokens, _err = _oauth.exchange_token(provider, code, redirect_uri) or (None, "")
             tokens = tokens or {}
         access_token = str(tokens.get("access_token") or tokens.get("id_token") or "")
         if not access_token:
@@ -212,7 +209,7 @@ class OidcChannelStrategy(OAuth2ChannelStrategy):
         # 端点 404 时此兜底是唯一身份来源）
         user = {}
         try:
-            user = get_user_info(provider, access_token) or {}
+            user = _oauth.get_user_info(provider, access_token) or {}
         except Exception as e:
             user = {}
         if not user:
@@ -288,8 +285,7 @@ class SamlChannelStrategy(LoginChannelStrategy):
             raise ChannelAuthError("saml card missing idp_sso_url")
         # D28：state 持久化责任归策略（与 OAuth 走 build_auth_url 内部落库对称）。
         # 存储语义同 §10.6：redirect_uri 存入 state，回调从 RelayState 取回校验。
-        from src.domains.mgmt.user import db as user_db
-        user_db.save_oauth_state(
+        _oauth.save_oauth_state(
             state, str(card.get("provider_key") or ""),
             {**(extra_state or {}), "redirect_uri": redirect_uri})
         sep = "&" if "?" in idp_sso else "?"
