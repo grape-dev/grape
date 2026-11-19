@@ -1,4 +1,10 @@
-"""安全配置统一读取模块。
+"""安全配置统一读取模块（2026-11-18 从 mgmt.auth 迁入 kernel）。
+
+迁移原因：本模块只读 configs/security.json，无 DB、无业务逻辑，属基础设施配置；
+但 src/kernel/config.py 与 src/kernel/auth_sdk/jwt_utils.py 都需要它，
+它留在 src/domains/mgmt/auth/ 会造成 kernel → domain 的反向依赖（架构底线）。
+
+原始说明：安全配置统一读取模块。
 
 从 configs/security.json 读取安全配置（环境标识、JWT 密钥轮换、凭据加密密钥）。
 无 security.json 文件时全部使用默认值（开发模式）。
@@ -18,7 +24,7 @@ import base64
 import logging
 
 # 不从 src.kernel.config 导入（避免循环导入——config.py 导入本模块的 is_production）
-CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "configs"))
+CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "configs"))
 _SECURITY_CONFIG_PATH = os.path.join(CONFIG_DIR, "security.json")
 _config = None
 log = logging.getLogger("devops-bot")

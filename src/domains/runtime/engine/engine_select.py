@@ -213,6 +213,9 @@ def resolve_redispatch_pool(*, scene_authoritative: bool, scene_engine_ids,
 def _all_engines_snapshot() -> list:
     """全量引擎快照（selector 候选集底表）：agent_runtimes LEFT JOIN credentials。
 
+    档位列按 ``_engine_scope_info`` 同款口径取（QA 架构守护 I-1）：凭据列优先、
+    镜像列回退——claim_by_tag 读的是 runtime_credentials，只读 agent_runtimes 的
+    镜像列在注册时账号域不可用等场景会漂移，候选与认领两侧分叉。
     不做 scope/健康过滤（候选分层判定在 selector_candidate_engines）；
     查询异常返回空列表（零候选 → fail-closed 语义）。
     """
@@ -223,16 +226,73 @@ def _all_engines_snapshot() -> list:
             c.execute(
                 "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, "
                 "r.last_seen_at, COALESCE(r.scope,'global'), COALESCE(r.owner_id,''), "
-                "COALESCE(r.role_tags,'') "
-                "FROM agent_runtimes r ORDER BY r.id")
+                "COALESCE(r.role_tags,''), COALESCE(rc.scope,''), COALESCE(rc.owner_id,'') "
+                "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                "ORDER BY r.id")
             rows = c.fetchall()
         except Exception as e:
-            log.warning(f"_all_engines_snapshot failed: {e}")
-            return []
+            # 旧库/精简测试 schema 缺 runtime_credentials：退回镜像列（不阻断候选集）
+            log.warning(f"_all_engines_snapshot credential join failed, fallback to mirror columns: {e}")
+            try:
+                c.execute(
+                    "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, "
+                    "r.last_seen_at, COALESCE(r.scope,'global'), COALESCE(r.owner_id,''), "
+                    "COALESCE(r.role_tags,'') FROM agent_runtimes r ORDER BY r.id")
+                rows = [tuple(r) + ("", "") for r in c.fetchall()]
+            except Exception as e2:
+                log.warning(f"_all_engines_snapshot failed: {e2}")
+                return []
     return [{"runtime_id": r[0], "name": r[1] or "", "status": r[2] or "offline",
              "healthy": bool(r[3]), "installed": bool(r[4]), "credential_id": r[5] or 0,
-             "last_seen_at": r[6] or "", "scope": r[7] or "global", "owner_id": r[8] or "",
+             "last_seen_at": r[6] or "", "scope": (r[10] or r[7] or "global"),
+             "owner_id": (r[11] or r[8] or ""),
              "role_tags": r[9] or ""} for r in rows]
+
+
+def _selector_scope_blocks(m: dict, repo_key: str = "", user_id: int = 0) -> bool:
+    """Issue #1208：claim 第 ⑥ 级 scope 隔离在候选集里的同尺判定（2026-11-19）。
+
+    背景：selector 候选/命中预览此前对所有档位引擎一律放行（仅 SRE 收紧 global），
+    而 claim_by_tag 的 scope SQL 是隔离的——repo 档只认领本仓任务、user 档只认领
+    owner 本人创建的任务。于是别人的个人引擎、别的仓库的仓库级引擎被算成「命中」：
+    场景详情页徽章按全库候选计 6 台，弹窗按 dashboard 可见引擎计 4 台；更关键的是
+    入队 fail-closed 门禁（selector_enqueue_failure_reason）同样被这批永远认领不到的
+    引擎骗过，任务照常入队后没人接。
+
+    判定与 claim 同尺（agent_runtimes 的 scope/owner_id 是凭据的镜像列）：
+    - credential_id=0（本机直连）→ 不设限（claim 侧不查凭据 scope）；
+    - global → 不设限（可认领任意仓库的池任务）；
+    - user → owner_id 必须等于请求 user_id（claim 侧 t.user_id = owner 账号）；
+    - repo → repo_key 必须落在 claim_by_tag 同款三精确候选集（owner_id /
+      gitcode:owner_id / github:owner_id）内——不做去前缀归一，避免跨平台同
+      owner/repo 被放宽成「候选命中、claim 永远认不到」。
+    上下文缺失（user_id=0 / repo_key 空）或 owner_id 未落库时该维度不设限：调用方
+    没给上下文就无法判定，宁放行不误杀（与既有 fail-open 容错口径一致）。
+    """
+    if (m.get("credential_id") or 0) == 0:
+        return False
+    scope = (m.get("scope") or "global").strip().lower()
+    if scope == "global":
+        return False
+    owner = str(m.get("owner_id") or "").strip()
+    if not owner:
+        return False
+    if scope == "user":
+        if not user_id:
+            return False
+        try:
+            return int(owner) != int(user_id)
+        except (TypeError, ValueError):
+            return owner != str(user_id)
+    if scope == "repo":
+        if not repo_key:
+            return False
+        # 与 claim_by_tag 的 repo 档 SQL 逐字同源（service.py 2090 起：owner_id /
+        # gitcode:owner_id / github:owner_id 三精确候选）。去前缀归一比较会在
+        # 「owner 自带平台前缀」「跨平台同 owner/repo」两种形态下比 claim 宽松
+        # （QA 架构守护 I-2 指出的 fail-open 残留），故此处按三候选集合判定。
+        return repo_key not in (owner, f"gitcode:{owner}", f"github:{owner}")
+    return False
 
 
 def selector_candidate_engines(selector: dict, agent_type: str,
@@ -241,7 +301,7 @@ def selector_candidate_engines(selector: dict, agent_type: str,
 
     判定顺序即语义（对齐 claim 六层守卫，正交勿合并）：
       selector 匹配（agent_tags 派生快照）→ #658 角色硬过滤 → 健康尺子（#259 语义）→
-      SRE scope 过滤（user/repo 两档）。
+      SRE scope 收紧（user/repo 两档）→ 凭据 scope 隔离（第 ⑥ 级同尺）→ 能力行。
     返回 (matched, dropped)：matched 为通过全部过滤的引擎列表；
     dropped 为 [{"runtime_id", "name", "reason"}]，reason ∈ selector/role/offline/stale/scope，
     供命中预览分层标注与配置死/瞬时死分流判定复用。
@@ -270,6 +330,11 @@ def selector_candidate_engines(selector: dict, agent_type: str,
                 dropped.append({"runtime_id": rid, "name": m["name"], "reason": why})
                 continue
             if _is_sre and m.get("scope") not in ("user", "repo"):
+                dropped.append({"runtime_id": rid, "name": m["name"], "reason": "scope"})
+                continue
+            # 第 ⑥ 级 scope 隔离（claim_by_tag 同尺）：别人的 user 档引擎、别的仓库的
+            # repo 档引擎永远认领不到本场景任务，不能算命中（徽章/入队门禁同源）。
+            if _selector_scope_blocks(m, repo_key=repo_key, user_id=user_id):
                 dropped.append({"runtime_id": rid, "name": m["name"], "reason": "scope"})
                 continue
             # 能力行匹配（claim 第 1 级同款：精确 tag OR 'all'；tags 已含平铺行）

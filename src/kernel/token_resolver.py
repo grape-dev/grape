@@ -29,6 +29,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from src.kernel.config import log
+from src.kernel.ports import accounts as _accounts
+from src.kernel.ports import im as _im
+from src.kernel.ports import pipeline as _pipeline
+from src.kernel.ports import repos as _repos
+from src.kernel.ports import tokens as _tokens
+from src.kernel.ports import vcs_cards as _vcs_cards
 
 def get_bot_identity_token(repo_key: str) -> str:
     """回帖/评论专用：只解析 **bot 身份** token（仓库 bot → 全局 bot），不落用户 token。
@@ -259,11 +265,9 @@ class GenericVcsProvider(VCSProvider):
         if not owner:
             return ""
         try:
-            from src.domains.mgmt.auth.grape_account_db import (
-                get_grape_account_by_username, get_user_identities_with_tokens)
-            acc = get_grape_account_by_username(owner)
+            acc = _accounts.get_grape_account_by_username(owner)
             if acc:
-                for ident in get_user_identities_with_tokens(acc["id"]):
+                for ident in _accounts.get_user_identities_with_tokens(acc["id"]):
                     if ident.get("provider") == self.provider_name and ident.get("access_token"):
                         return ident["access_token"]
         except Exception as e:
@@ -491,8 +495,7 @@ class GenericVcsProvider(VCSProvider):
         provider = self._card.provider
         # —— ① PAT（用户显式配置）——
         try:
-            from src.domains.mgmt.user.db import get_credential
-            cfg = get_credential(user_id, provider, kind="pat") or {}
+            cfg = _tokens.get_credential(user_id, provider, kind="pat") or {}
             pat_token = str(cfg.get("token", "") or "")
         except Exception:
             pat_token = ""
@@ -521,75 +524,61 @@ class GitCodeProvider(GenericVcsProvider):
     """
 
     def __init__(self):
-        from src.domains.runtime.vcs.platform_card import get_platform_card
-        card = get_platform_card("gitcode")
+        card = _vcs_cards.get_platform_card("gitcode")
         if card is None:
-            from src.domains.runtime.vcs.platform_card import build_platform_card
-            card = build_platform_card("gitcode", {})
+            card = _vcs_cards.build_platform_card("gitcode", {})
         super().__init__(card)
 
     def get_user_login(self, token: str) -> str:
         # D85 迁移修复：身份探测委托存量网络缝 repo_manager.get_user_gitcode_login
         # （与 GitHubProvider 对称；verify_token 直连导致 mock 缝失效/实网调用）
-        from src.domains.mgmt.user.repo_manager import get_user_gitcode_login
-        return get_user_gitcode_login(token)
+        return _repos.get_user_gitcode_login(token)
 
     def add_collaborator(self, api_token, owner, repo, username, permission="maintainer"):
-        from src.domains.mgmt.user.repo_manager import add_collaborator
-        ok, _err = add_collaborator(api_token, owner, repo, username, permission)
+        ok, _err = _repos.add_collaborator(api_token, owner, repo, username, permission)
         return ok
 
     def remove_collaborator(self, api_token, owner, repo, username):
-        from src.domains.mgmt.user.repo_manager import remove_collaborator
         try:
-            remove_collaborator(api_token, owner, repo, username)
+            _repos.remove_collaborator(api_token, owner, repo, username)
             return True
         except Exception:
             return False
 
     def accept_collaborator_invite(self, bot_token, owner, repo):
         # D39/S59：存量邀请制语义（v5 邀请列表→匹配→接受）
-        from src.domains.mgmt.user.repo_manager import accept_invite_for_repo
-        return accept_invite_for_repo(bot_token, owner, repo)
+        return _repos.accept_invite_for_repo(bot_token, owner, repo)
 
     def create_repo(self, api_token, name, description="", private=False) -> dict:
         # D42/S62：存量委托（v5 form 语义）
-        from src.domains.mgmt.user.repo_manager import create_repo as _create_repo
-        return _create_repo(api_token=api_token, name=name, description=description, private=private)
+        return _repos.create_repo(api_token=api_token, name=name, description=description, private=private)
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
         # D42/S62：存量委托（含 429/5xx 退避）
-        from src.domains.mgmt.user.repo_manager import find_existing_webhook as _find
-        return _find(api_token, owner, repo, webhook_url)
+        return _repos.find_existing_webhook(api_token, owner, repo, webhook_url)
 
     def fetch_repos_with_role(self, api_token) -> "list[dict]":
         # D42/S62：存量委托（成员仓库+is_admin 标注）
-        from src.domains.mgmt.user.repo_manager import fetch_repos_with_role as _fetch
-        return _fetch(api_token)
+        return _repos.fetch_repos_with_role(api_token)
 
     def get_collaborator_permission(self, api_token, owner, repo, username):
         # D42/S62：存量委托（返回 permission dict，含 access_level）
-        from src.domains.mgmt.user.repo_manager import get_member_permission
-        return get_member_permission(api_token, owner, repo, username)
+        return _repos.get_member_permission(api_token, owner, repo, username)
 
     def list_collaborators(self, api_token, owner, repo):
         # D44/S66：存量委托（feishu_async 存量实现，含分页与字段形态）
-        from src.domains.runtime.im.feishu_async import _fetch_gitcode_collaborators
-        return _fetch_gitcode_collaborators(owner, repo, api_token)
+        return _im._fetch_gitcode_collaborators(owner, repo, api_token)
 
     def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
-        from src.domains.mgmt.user.repo_manager import setup_webhook
-        return setup_webhook(api_token, owner, repo, webhook_url, webhook_password=webhook_secret)
+        return _repos.setup_webhook(api_token, owner, repo, webhook_url, webhook_password=webhook_secret)
 
     def setup_repo_webhook(self, bot_token, owner, repo, webhook_url):
         # D38/S58：存量形态 v5 password=bot_token（形态在适配器，调用方零分支）
-        from src.domains.mgmt.user.repo_manager import setup_webhook
-        return setup_webhook(bot_token, owner, repo, webhook_url, webhook_password=bot_token)
+        return _repos.setup_webhook(bot_token, owner, repo, webhook_url, webhook_password=bot_token)
 
     def remove_webhook(self, api_token, owner, repo, hook_id):
-        from src.domains.mgmt.user.repo_manager import remove_webhook
         try:
-            remove_webhook(api_token, owner, repo, int(hook_id))
+            _repos.remove_webhook(api_token, owner, repo, int(hook_id))
             return True
         except Exception:
             return False
@@ -598,11 +587,9 @@ class GitHubProvider(GenericVcsProvider):
     """GitHub 平台（D22：GenericVcsProvider 基座 + 存量委托覆盖，同 GitCode 说明）。"""
 
     def __init__(self):
-        from src.domains.runtime.vcs.platform_card import get_platform_card
-        card = get_platform_card("github")
+        card = _vcs_cards.get_platform_card("github")
         if card is None:
-            from src.domains.runtime.vcs.platform_card import build_platform_card
-            card = build_platform_card("github", {})
+            card = _vcs_cards.build_platform_card("github", {})
         super().__init__(card)
         # resolve_repo_token/fetch_owner_identity_token 走 GenericVcsProvider 基类：
         # 卡能力位 owner_identity_token_fallback=true（configs/platforms/github.json）
@@ -610,64 +597,52 @@ class GitHubProvider(GenericVcsProvider):
         # ——与原 db.get_github_token 尾段（D32-补丁）同链等价。
 
     def get_user_login(self, token: str) -> str:
-        from src.domains.mgmt.user.repo_manager import get_user_github_login
-        return get_user_github_login(token)
+        return _repos.get_user_github_login(token)
 
     def add_collaborator(self, api_token, owner, repo, username, permission="push"):
-        from src.domains.mgmt.user.repo_manager import add_github_collaborator
-        return add_github_collaborator(api_token, owner, repo, username, permission)
+        return _repos.add_github_collaborator(api_token, owner, repo, username, permission)
 
     def remove_collaborator(self, api_token, owner, repo, username):
-        from src.domains.mgmt.user.repo_manager import remove_github_collaborator
         try:
-            remove_github_collaborator(api_token, owner, repo, username)
+            _repos.remove_github_collaborator(api_token, owner, repo, username)
             return True
         except Exception:
             return False
 
     def accept_collaborator_invite(self, bot_token, owner, repo):
         # D39/S59：存量邀请制语义（PATCH /user/repository_invitations）
-        from src.domains.mgmt.user.repo_manager import accept_github_invite
-        return accept_github_invite(bot_token, owner, repo)
+        return _repos.accept_github_invite(bot_token, owner, repo)
 
     def create_repo(self, api_token, name, description="", private=False) -> dict:
         # D42/S62：存量委托
-        from src.domains.mgmt.user.repo_manager import create_github_repo
-        return create_github_repo(api_token=api_token, name=name, description=description, private=private)
+        return _repos.create_github_repo(api_token=api_token, name=name, description=description, private=private)
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
         # D42/S62：存量委托（FR-5.1 空列表=None 不误判）
-        from src.domains.mgmt.user.repo_manager import find_existing_github_webhook as _find
-        return _find(api_token, owner, repo, webhook_url)
+        return _repos.find_existing_github_webhook(api_token, owner, repo, webhook_url)
 
     def fetch_repos_with_role(self, api_token) -> "list[dict]":
         # D42/S62：存量委托
-        from src.domains.mgmt.user.repo_manager import fetch_github_repos_with_role as _fetch
-        return _fetch(api_token)
+        return _repos.fetch_github_repos_with_role(api_token)
 
     def get_collaborator_permission(self, api_token, owner, repo, username):
         # D42/S62：存量委托（返回 role_name 字符串）
-        from src.domains.mgmt.user.repo_manager import get_github_collaborator_permission
-        return get_github_collaborator_permission(api_token, owner, repo, username)
+        return _repos.get_github_collaborator_permission(api_token, owner, repo, username)
 
     def list_collaborators(self, api_token, owner, repo):
         # D44/S66：存量委托（feishu_async 存量实现，含分页与字段形态）
-        from src.domains.runtime.im.feishu_async import _fetch_github_collaborators
-        return _fetch_github_collaborators(owner, repo, api_token)
+        return _im._fetch_github_collaborators(owner, repo, api_token)
 
     def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
-        from src.domains.mgmt.user.repo_manager import setup_github_webhook
-        return setup_github_webhook(api_token, owner, repo, webhook_url, webhook_secret)
+        return _repos.setup_github_webhook(api_token, owner, repo, webhook_url, webhook_secret)
 
     def setup_repo_webhook(self, bot_token, owner, repo, webhook_url):
         # D38/S58：存量形态 secret=""（bot token 不作 webhook 凭据，形态在适配器）
-        from src.domains.mgmt.user.repo_manager import setup_github_webhook
-        return setup_github_webhook(bot_token, owner, repo, webhook_url, "")
+        return _repos.setup_github_webhook(bot_token, owner, repo, webhook_url, "")
 
     def remove_webhook(self, api_token, owner, repo, hook_id):
-        from src.domains.mgmt.user.repo_manager import remove_github_webhook
         try:
-            remove_github_webhook(api_token, owner, repo, int(hook_id))
+            _repos.remove_github_webhook(api_token, owner, repo, int(hook_id))
             return True
         except Exception:
             return False
@@ -685,8 +660,7 @@ def create_provider(provider: str) -> VCSProvider:
     if cls is not None:
         return cls()
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
-        card = get_platform_card(provider)
+        card = _vcs_cards.get_platform_card(provider)
     except Exception:
         card = None
     if card is not None:
@@ -753,8 +727,7 @@ class TokenStrategy:
 
     def _get_host_user_id(self, repo_key: str) -> "str | int":
         """获取 host_user_id。子类复用避免重复 import。"""
-        from src.domains.mgmt.user.db import get_host_user_id
-        return get_host_user_id(repo_key)
+        return _tokens.get_host_user_id(repo_key)
 
     @abstractmethod
     def _fetch(self, repo_key: str) -> str:
@@ -807,8 +780,7 @@ class RepoBotToken(TokenStrategy):
         # S82：grape_t_repo_credentials 唯一权威（rc 优先无条件；列=历史回落）
         # D99：cred_type 归一='bot'（值域 {'bot','webhook'}，平台由 repo_key 承载）
         try:
-            from src.domains.mgmt.user.db import get_repo_credential_value, get_repo_credential_meta
-            _rc = get_repo_credential_meta(repo_key, "bot")
+            _rc = _tokens.get_repo_credential_meta(repo_key, "bot")
             if _rc and _rc.get("value"):
                 # D90-N4（拍板 1A/2B/3A）：bot token 消费审计（全量，Core 通道）
                 try:
@@ -841,14 +813,12 @@ class RepoBotToken(TokenStrategy):
         try:
             # managed_repos 归 mgmt：列名与语句都由归属域持有（本文件不再拼 SQL）。
             # 任意拓扑原语：自有 DSN → mgmt 连接；单库回落进程库（同一份语句）。
-            from src.domains.mgmt.public import repo_bot_token_from_legacy_column_any
-            raw = repo_bot_token_from_legacy_column_any(repo_key, field)
+            raw = _repos.repo_bot_token_from_legacy_column_any(repo_key, field)
             if raw:
                 # 挂账 #12 观测：log.warning 即采集（下线判据 = grep 此日志零命中）
                 log.warning(f"RepoBotToken: historical column fallback hit "
                             f"(rc miss) repo={repo_key} field={field}")
                 # N3：managed_repos 列同走通道加密，读侧解密（明文兼容覆盖存量）
-                from src.domains.mgmt.user.db import _decrypt_repo_secret
                 # F4/D106：legacy 列命中独立消费审计（回填期旧列消费可观测，
                 # 与 rc 命中审计分离——旧列消费清零是回落分支下线前置）
                 try:
@@ -859,7 +829,7 @@ class RepoBotToken(TokenStrategy):
                               repo_key=repo_key)
                 except Exception:
                     pass
-                return _decrypt_repo_secret(raw)
+                return _tokens.repo_secret_decrypt(raw)
         except Exception as e:
             log.warning(f"RepoBotToken._fetch: {e}")
         return ""
@@ -869,8 +839,7 @@ class RepoBotToken(TokenStrategy):
         if not repo_key:
             return False
         try:
-            from src.domains.mgmt.public import repo_bot_token_status_any
-            return repo_bot_token_status_any(repo_key) == "expired"
+            return _repos.repo_bot_token_status_any(repo_key) == "expired"
         except Exception as e:
             log.debug(f"RepoBotToken._is_expired: {e}")
         return False
@@ -880,8 +849,7 @@ class RepoBotToken(TokenStrategy):
         if not repo_key:
             return
         try:
-            from src.domains.mgmt.public import set_repo_bot_token_status_any
-            set_repo_bot_token_status_any(repo_key, "expired")
+            _repos.set_repo_bot_token_status_any(repo_key, "expired")
         except Exception as e:
             log.warning(f"RepoBotToken.mark_expired: {e}")
 
@@ -890,8 +858,7 @@ class RepoBotToken(TokenStrategy):
         if not repo_key:
             return
         try:
-            from src.domains.mgmt.public import set_repo_bot_token_status_any
-            set_repo_bot_token_status_any(repo_key, "")
+            _repos.set_repo_bot_token_status_any(repo_key, "")
         except Exception as e:
             log.warning(f"RepoBotToken.clear_expired: {e}")
 
@@ -917,8 +884,7 @@ class GlobalBotToken(TokenStrategy):
             return ""
         # 复用现有 _cached_get_meta 缓存逻辑
         # S87/D63：统一 get_global_bot_token_for（meta 派生键 + 存量两平台文件 fallback）
-        from src.domains.mgmt.user.db import get_global_bot_token_for
-        token = get_global_bot_token_for(self.provider.provider_name)
+        token = _tokens.get_global_bot_token_for(self.provider.provider_name)
         # D91：缺失告警（路径 A 全局 bot 是主力凭据，静默空串会让"配置错误不可见"
         # ——失败只在任务报错时暴露，运维无从区分"未配置"与"配置错/被误删"）。
         # 路径 A UserToken 不生效，此处空串=策略链必然失败，告警是唯一观测点。
@@ -932,27 +898,24 @@ class GlobalBotToken(TokenStrategy):
 
     def _is_expired(self, repo_key: str) -> bool:
         status_key = self.provider.global_bot_status_meta_key()
-        from src.domains.mgmt.user.db import get_meta_value
         try:
-            return get_meta_value(status_key) == "expired"
+            return _tokens.get_meta_value(status_key) == "expired"
         except Exception:
             return False
 
     def mark_expired(self, repo_key: str):
         status_key = self.provider.global_bot_status_meta_key()
-        from src.domains.mgmt.user.db import set_meta_value, _invalidate_global_bot_cache
         try:
-            set_meta_value(status_key, "expired")
-            _invalidate_global_bot_cache()
+            _tokens.set_meta_value(status_key, "expired")
+            _tokens.invalidate_global_bot_cache()
         except Exception as e:
             log.warning(f"GlobalBotToken.mark_expired: {e}")
 
     def clear_expired(self, repo_key: str):
         status_key = self.provider.global_bot_status_meta_key()
-        from src.domains.mgmt.user.db import set_meta_value, _invalidate_global_bot_cache
         try:
-            set_meta_value(status_key, "")
-            _invalidate_global_bot_cache()
+            _tokens.set_meta_value(status_key, "")
+            _tokens.invalidate_global_bot_cache()
         except Exception as e:
             log.warning(f"GlobalBotToken.clear_expired: {e}")
 
@@ -974,12 +937,11 @@ class UserToken(TokenStrategy):
         return "user"
 
     def _fetch(self, repo_key: str) -> str:
-        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
         host_user_id = self._get_host_user_id(repo_key)
         if str(host_user_id or "") in ("", "0"):
             return ""  # 路径 A 不走用户 token
         try:
-            account = get_grape_account_by_id(host_user_id)
+            account = _accounts.get_grape_account_by_id(host_user_id)
             if account and account.get("username"):
                 return self.provider.fetch_user_token(account["username"], host_user_id)
         except Exception as e:
@@ -991,20 +953,17 @@ class UserToken(TokenStrategy):
 
         供 read_stored_token() 调用——A2A 鉴权 / session 写入只需原始值。
         """
-        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
-        from src.domains.mgmt.auth.credential_crypto import decrypt
         host_user_id = self._get_host_user_id(repo_key)
         if str(host_user_id or "") in ("", "0"):
             return ""
         try:
-            account = get_grape_account_by_id(host_user_id)
+            account = _accounts.get_grape_account_by_id(host_user_id)
             if not account:
                 return ""
             # external_identities 归 mgmt：列序与 status IN (1, 4) 口径由归属域持有
-            from src.domains.mgmt.public import stored_access_token_any
-            raw = stored_access_token_any(account["id"], self.provider.provider_name)
+            raw = _accounts.stored_access_token_any(account["id"], self.provider.provider_name)
             if raw:
-                return decrypt(raw)
+                return _tokens.decrypt(raw)
         except Exception as e:
             log.warning(f"UserToken._fetch_stored: {e}")
         return ""
@@ -1021,14 +980,12 @@ class UserToken(TokenStrategy):
         host_user_id = self._get_host_user_id(repo_key)
         if str(host_user_id or "") in ("", "0"):
             return False  # 路径 A 仓库不走用户 token
-        from src.domains.mgmt.auth.grape_account_db import is_identity_expired
-        return is_identity_expired(host_user_id, self.provider.provider_name)
+        return _accounts.is_identity_expired(host_user_id, self.provider.provider_name)
 
     def mark_expired(self, repo_key: str):
         host_user_id = self._get_host_user_id(repo_key)
         if str(host_user_id or "") not in ("", "0"):
-            from src.domains.mgmt.auth.grape_account_db import mark_identity_expired
-            mark_identity_expired(host_user_id, self.provider.provider_name)
+            _accounts.mark_identity_expired(host_user_id, self.provider.provider_name)
 
     def clear_expired(self, repo_key: str):
         """用户重新绑定时 create/update_external_identity 已恢复 status=1，无需额外操作。"""
@@ -1198,7 +1155,6 @@ class TokenResolver:
         R21.3.5: 区分 401 和超时/5xx——只对 401 标记过期。
         R21.3.3: 原 R18.5.10 "超时视为验证失败" 设计取消。
         """
-        from src.domains.runtime.vcs.token_error import extract_http_status_from_exc
         for strategy in self.strategies:
             token = strategy._fetch(repo_key)  # 不检查过期标记，查原始值
             if token:
@@ -1212,7 +1168,7 @@ class TokenResolver:
                     return ""
                 except Exception as e:
                     # R21.3.5: 区分 401 和超时/5xx
-                    http_code = extract_http_status_from_exc(e)
+                    http_code = _vcs_cards.extract_http_status_from_exc(e)
                     if http_code == 401:
                         # token 验证 401 → 标记过期
                         strategy.mark_expired(repo_key)
@@ -1293,8 +1249,7 @@ class RepoBotTokenHandler(TokenActionHandler):
             return False
         try:
             # managed_repos 归 mgmt（原语句在 kernel 直连进程主库，三库拓扑下恒 1146）
-            from src.domains.mgmt.public import repo_bot_username_any
-            bot_username = repo_bot_username_any(result.repo_key)
+            bot_username = _repos.repo_bot_username_any(result.repo_key)
             return bool(bot_username) and actor == bot_username
         except Exception as e:
             log.debug(f"RepoBotTokenHandler.is_self_loop_actor: {e}")
@@ -1307,8 +1262,7 @@ class RepoBotTokenHandler(TokenActionHandler):
         # 仓库级 bot 过期 → fallback 到全局 bot
         if result.provider:
             try:
-                from src.domains.mgmt.user.db import get_global_bot_token_for
-                return get_global_bot_token_for(result.provider.provider_name) or ""
+                return _tokens.get_global_bot_token_for(result.provider.provider_name) or ""
             except Exception:
                 pass
         return ""
@@ -1337,8 +1291,7 @@ class GlobalBotTokenHandler(TokenActionHandler):
             return False
         try:
             # S87/D63：统一口径——provider 的全局 bot username 集合（github 单值源）
-            from src.domains.mgmt.user.db import get_global_bot_usernames_for
-            _bot_names = get_global_bot_usernames_for(result.provider.provider_name)
+            _bot_names = _tokens.get_global_bot_usernames_for(result.provider.provider_name)
             return actor in _bot_names if _bot_names else False
         except Exception:
             return False
@@ -1391,15 +1344,13 @@ class UserTokenHandler(TokenActionHandler):
         # 条件 1: 路径 B 仓库（通过 result.level == "user" 已确认）
         # 条件 2: actor == host_vcs_username
         try:
-            from src.domains.mgmt.user.db import get_host_vcs_username
-            host_vcs_username = get_host_vcs_username(result.repo_key, result.provider.provider_name if result.provider else "")
+            host_vcs_username = _accounts.get_host_vcs_username(result.repo_key, result.provider.provider_name if result.provider else "")
             if not host_vcs_username or actor != host_vcs_username:
                 return False
         except Exception:
             return False
         # 条件 4: 该 issue 有正在执行的 task
-        from src.domains.runtime.pipeline.event_pipeline import check_running_task
-        return check_running_task(result.repo_key, result.issue_id or "")
+        return _pipeline.check_running_task(result.repo_key, result.issue_id or "")
 
     def get_comment_token(self, result):
         # R25.3: 回帖链 best-effort——直接用 _fetch 读存储 token（绕过 _is_expired 检查）
@@ -1415,8 +1366,7 @@ class UserTokenHandler(TokenActionHandler):
         # 用户 token 完全不可用 → fallback 全局 bot token
         if result.provider:
             try:
-                from src.domains.mgmt.user.db import get_global_bot_token_for
-                return get_global_bot_token_for(result.provider.provider_name) or ""
+                return _tokens.get_global_bot_token_for(result.provider.provider_name) or ""
             except Exception:
                 pass
         return ""
@@ -1468,14 +1418,13 @@ def _post_comment_via_provider(provider: VCSProvider, repo_key: str,
     if not token or not repo_key or not issue_num:
         return False
     try:
-        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue, _is_github_repo
         from src.kernel.repo_key import from_repo_key
         _repo = from_repo_key(repo_key)
         if not _repo:
             return False
         # 复用现有 _post_result_to_issue 发评论（含去重、conclusion 提取等逻辑）
-        _post_result_to_issue(_repo, str(issue_num), body, token, agent_type, repo_key,
-                              agent_result=False)
+        _pipeline._post_result_to_issue(_repo, str(issue_num), body, token, agent_type, repo_key,
+                                        agent_result=False)
         return True
     except Exception as e:
         from src.kernel.config import log
@@ -1491,8 +1440,7 @@ def credential_workflows_write(user_id: str, provider: str) -> "bool | None":
     暴露 token scope）。声明位置：凭据域 <p>_pat 配置的 workflows_write 键。
     """
     try:
-        from src.domains.mgmt.user.db import get_credential
-        cfg = get_credential(user_id, provider, kind="pat") or {}
+        cfg = _tokens.get_credential(user_id, provider, kind="pat") or {}
         if "workflows_write" not in cfg:
             return None
         return cfg.get("workflows_write") is True
@@ -1527,11 +1475,9 @@ class GitLabProvider(GenericVcsProvider):
     _GL_MAINTAINER = 40  # GitLab access_level：Developer=30 / Maintainer=40
 
     def __init__(self):
-        from src.domains.runtime.vcs.platform_card import get_platform_card
-        card = get_platform_card("gitlab")
+        card = _vcs_cards.get_platform_card("gitlab")
         if card is None:
-            from src.domains.runtime.vcs.platform_card import build_platform_card
-            card = build_platform_card("gitlab", {})
+            card = _vcs_cards.build_platform_card("gitlab", {})
         super().__init__(card)
 
     def _pid(self, owner, repo) -> str:

@@ -2223,6 +2223,19 @@ function stopAuto() {
   }
   G.window._stopObsAutoRan = true
 }
+// Issue #2132 A3：页面不可见时停止 10s 轮询，切回前台立即刷新一次并恢复轮询。
+// 只在用户开着 autoOn 时生效；后台标签页不再空耗服务端采样与配额。
+function _obsVisibilityHandler() {
+  if (G.document.visibilityState === 'hidden') {
+    if (obsTimer) {
+      clearInterval(obsTimer)
+      obsTimer = null
+    }
+  } else if (autoOn.value && !obsTimer) {
+    refreshObs(true)
+    startAuto()
+  }
+}
 // app.js 离开 observability 时调（typeof 守卫契约）
 G.window.stopObsAuto = stopAuto
 
@@ -3789,6 +3802,8 @@ const ovKpiEngines = computed(() => {
 // ═══ 生命周期 ═══
 onMounted(function () {
   G.window._currentView = 'observability'
+  // Issue #2132 A3：可见性启停（后台停表、回前台立即刷一次）
+  G.document.addEventListener('visibilitychange', _obsVisibilityHandler)
   // [B3 深链] #observability/sandboxes?provider=N —— SandboxView「查看沙箱实例」入口
   let deepSbxProvider = 0
   let deepSbx = false
@@ -4263,6 +4278,7 @@ function effMetricText(x) {
 
 onBeforeUnmount(function () {
   stopAuto()
+  G.document.removeEventListener('visibilitychange', _obsVisibilityHandler)
   stopTaskLogPoll()
   G.document.removeEventListener('keydown', effEscKey)
   Object.keys(effCharts).forEach(function (k) {

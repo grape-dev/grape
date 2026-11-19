@@ -13,17 +13,7 @@ import secrets
 import time
 
 from src.kernel.config import log
-
-
-def _tokens_lib():
-    """令牌表（session_api_tokens / api_tokens）归 mgmt 域：SQL 在该域 public。
-
-    延迟导入：kernel 顶层不允许静态依赖 domains（check-arch R1），与
-    repo_migrate / repo_cleanup 的编排层同款写法 —— 调用时再取模块。
-    """
-    from src.domains.mgmt import public as _p
-
-    return _p
+from src.kernel.ports import tokens as _tokens
 
 # ---- 常量 ----
 SESSION_TOKEN_PREFIX = "tk_"
@@ -58,8 +48,8 @@ def issue_session_token(*, session_key: str, repo_key: str, agent_type: str,
     token = SESSION_TOKEN_PREFIX + secrets.token_urlsafe(32)
     try:
         # P2-7: 过期时间直接存整数（避免类型转换与 MySQL 索引问题）
-        _tokens_lib().session_token_insert(session_key, repo_key, agent_type, user_id,
-                                       _sha256(token), _now() + ttl)
+        _tokens.session_token_insert(session_key, repo_key, agent_type, user_id,
+                                     _sha256(token), _now() + ttl)
         return token
     except Exception as e:
         log.warning(f"Issue session token failed: {e}")
@@ -152,9 +142,9 @@ def inspect_session_token(token: str) -> dict:
     if not token.startswith(SESSION_TOKEN_PREFIX):
         return {"status": _NOT_SESSION_TOKEN}
     try:
-        # Tokens live in the mgmt domain; kernel must not import domains at
-        # module level (check-arch R1), so go through the domain public API.
-        row = _tokens_lib().session_token_by_sha(_sha256(token))
+        # 令牌表（session_api_tokens / api_tokens）归 mgmt 域：SQL 在该域 public，
+        # kernel 经 tokens 端口调用（端口在装配层绑定，kernel 不 import domains）。
+        row = _tokens.session_token_by_sha(_sha256(token))
     except Exception as e:
         log.warning(f"Inspect session token failed: {e}")
         return {"status": "unknown"}
@@ -210,7 +200,7 @@ def revoke_session_token(session_key: str) -> bool:
     而非立即 DELETE。agent complete 后仍需调 A2A（token mismatch 根因，seq#5613），
     宽限期内 verify_session_token 仍通过，过期后由 purge_expired_session_tokens 清理。"""
     try:
-        return _tokens_lib().session_token_set_expiry(
+        return _tokens.session_token_set_expiry(
             session_key, _now() + SESSION_TOKEN_REVOKE_GRACE) > 0
     except Exception as e:
         log.warning(f"Revoke session token failed: {e}")
@@ -220,7 +210,7 @@ def revoke_session_token(session_key: str) -> bool:
 def purge_expired_session_tokens() -> int:
     """TTL 兜底清理过期行，返回清理行数。"""
     try:
-        return _tokens_lib().session_token_delete_expired(_now())
+        return _tokens.session_token_delete_expired(_now())
     except Exception as e:
         log.warning(f"Purge expired session tokens failed: {e}")
         return 0
@@ -257,8 +247,8 @@ def rotate_session_token(*, session_key: str, repo_key: str, agent_type: str,
         # 「token 轮换 + agent_tasks.env_extra 快照回写」放进同一事务，三库独立后两张表
         # 分属 mgmt/runtime，跨库事务不可得 —— 本原语先落新 token（自提交），
         # 调用方随后回写快照，并靠自己的实例锁串行化、失败重试收敛。
-        _tokens_lib().session_token_rotate(session_key, repo_key, agent_type, user_id,
-                                       _sha256(token), now + ttl, now)
+        _tokens.session_token_rotate(session_key, repo_key, agent_type, user_id,
+                                     _sha256(token), now + ttl, now)
     except Exception as e:
         log.warning(f"Rotate session token failed for {session_key}: {e}")
         raise
@@ -293,8 +283,8 @@ def issue_takeover_token(*, task_id: str, repo_key: str, agent_type: str,
     key = takeover_session_key(task_id)
     expires_at = _now() + int(ttl)
     try:
-        _tokens_lib().session_token_insert(key, repo_key or "", agent_type or "", int(user_id or 0),
-                                       _sha256(token), expires_at, kind="takeover")
+        _tokens.session_token_insert(key, repo_key or "", agent_type or "", int(user_id or 0),
+                                     _sha256(token), expires_at, kind="takeover")
         return {"token": token, "token_sha256": _sha256(token),
                 "session_key": key, "expires_at": expires_at}
     except Exception as e:
@@ -307,7 +297,7 @@ def verify_takeover_token(token: str) -> dict | None:
     if not token.startswith(TAKEOVER_TOKEN_PREFIX):
         return None
     try:
-        row = _tokens_lib().session_token_by_sha(_sha256(token), kind="takeover")
+        row = _tokens.session_token_by_sha(_sha256(token), kind="takeover")
         if not row or int(row[5] or 0) <= _now():
             return None
         return {
@@ -327,7 +317,7 @@ def revoke_takeover_token(task_id_or_key: str) -> bool:
     """立即吊销接管 token（finish / abort 用）：DELETE，不留宽限期。"""
     key = takeover_session_key(task_id_or_key)
     try:
-        return _tokens_lib().session_token_delete_by_session(key, kind="takeover") > 0
+        return _tokens.session_token_delete_by_session(key, kind="takeover") > 0
     except Exception as e:
         log.warning(f"Revoke takeover token failed (key={key}): {e}")
         return False
@@ -337,7 +327,7 @@ def renew_takeover_token(task_id_or_key: str, new_expires_at: int) -> bool:
     """续期（由调用方按 issued_at + 上限算好目标时间，见设计文档 §2.5）。"""
     key = takeover_session_key(task_id_or_key)
     try:
-        return _tokens_lib().session_token_renew(key, "takeover", int(new_expires_at)) > 0
+        return _tokens.session_token_renew(key, "takeover", int(new_expires_at)) > 0
     except Exception as e:
         log.warning(f"Renew takeover token failed (key={key}): {e}")
         return False
@@ -355,7 +345,7 @@ def generate_api_token(user_id: int, name: str = "") -> dict | None:
     try:
         # created_at 用 UTC ISO（与其它表时间列一致，settings.py 经 normalize_event_time
         # 归一后给前端 +00:00 口径）；last_used_at 仍走 _now() 的秒级时间戳
-        _new_id = _tokens_lib().api_token_insert(user_id, _sha256(token), name, _utc_iso())
+        _new_id = _tokens.api_token_insert(user_id, _sha256(token), name, _utc_iso())
         return {"token": token, "id": _new_id}
     except Exception as e:
         log.warning(f"Generate api token failed: {e}")
@@ -367,11 +357,11 @@ def verify_api_token(token: str) -> dict | None:
     if not token.startswith(API_KEY_PREFIX):
         return None
     try:
-        row = _tokens_lib().api_token_by_sha(_sha256(token))
+        row = _tokens.api_token_by_sha(_sha256(token))
         if not row or row[4] != 0:
             return None
         try:
-            _tokens_lib().api_token_touch(row[0], str(_now()))
+            _tokens.api_token_touch(row[0], str(_now()))
         except Exception:
             pass
         return {"api_token_id": row[0], "user_id": row[1], "name": row[2], "scopes": row[3]}
@@ -383,7 +373,7 @@ def verify_api_token(token: str) -> dict | None:
 def revoke_api_token(user_id: int, token_id: int) -> bool:
     """吊销用户级 API Key（软删：revoked=1，保审计）。"""
     try:
-        return _tokens_lib().api_token_revoke(token_id, user_id) > 0
+        return _tokens.api_token_revoke(token_id, user_id) > 0
     except Exception as e:
         log.warning(f"Revoke api token failed: {e}")
         return False
@@ -392,7 +382,7 @@ def revoke_api_token(user_id: int, token_id: int) -> bool:
 def list_api_tokens(user_id: int) -> list[dict]:
     """列出用户全部未吊销 API Key（不含明文/sha256）。"""
     try:
-        rows = _tokens_lib().api_token_list(user_id)
+        rows = _tokens.api_token_list(user_id)
         return [
             {
                 "id": r[0],

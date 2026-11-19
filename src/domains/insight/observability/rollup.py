@@ -130,29 +130,39 @@ def runtime_history(runtime_ids: List[int], range_str: str = DEFAULT_RANGE) -> D
     # 桶内累加求平均（health 取桶内均值，避免尖刺）
     acc: Dict[str, Dict[int, Dict[str, float]]] = {}
     ph = ",".join("?" * len(runtime_ids))
+    # Issue #2132 A1：窗口下推到 SQL，避免把整张采样表全量拉回 Python 再过滤。
+    # 库内时间有裸 CST（"YYYY-MM-DD HH:MM:SS"，空格分隔）与 UTC ISO（"T" 分隔）两态：
+    # 单一起点串跨态字典序比较会错判（第 11 位 ' ' < 'T'），这里按两态分别给起点，
+    # OR 组合保证两种格式各自的窗口内行都被保留；无法归入两态的异常格式会被此谓词
+    # 排除——该部分数据不在本接口的既定契约内（写入侧统一为 ISO 后自然收敛）。
+    _start_iso = start.isoformat()
+    _start_raw = start.strftime("%Y-%m-%d %H:%M:%S")
     try:
         from src.kernel.owner_db import db_pair
         db, db_lock = db_pair("insight")
+        # Issue #2132 A2：锁只包 execute/fetchall，行转换与分桶聚合移到锁外执行。
         with db_lock:
             c = db.cursor()
             c.execute("SELECT runtime_id, sampled_at, cpu_percent, memory_percent, disk_percent,"
-                      f" health_score FROM obs_runtime_samples WHERE runtime_id IN ({ph})",
-                      tuple(int(x) for x in runtime_ids))
-            for rid, sampled_at, cpu, mem, disk, health in c.fetchall():
-                sdt = _dt(sampled_at)
-                if not sdt or sdt < start or sdt > now:
-                    continue
-                i = bx.get((start + timedelta(seconds=(int((sdt - start).total_seconds()) // bucket) * bucket)).isoformat())
-                if i is None:
-                    continue
-                key = str(rid)
-                slot = acc.setdefault(key, {}).setdefault(i, {"cpu": 0.0, "mem": 0.0, "disk": 0.0,
-                                                              "health": 0.0, "n": 0})
-                slot["cpu"] += float(cpu or 0)
-                slot["mem"] += float(mem or 0)
-                slot["disk"] += float(disk or 0)
-                slot["health"] += float(health or 0)
-                slot["n"] += 1
+                      f" health_score FROM obs_runtime_samples WHERE runtime_id IN ({ph})"
+                      " AND (sampled_at >= ? OR sampled_at >= ?)",
+                      tuple(int(x) for x in runtime_ids) + (_start_iso, _start_raw))
+            rows = c.fetchall()
+        for rid, sampled_at, cpu, mem, disk, health in rows:
+            sdt = _dt(sampled_at)
+            if not sdt or sdt < start or sdt > now:
+                continue
+            i = bx.get((start + timedelta(seconds=(int((sdt - start).total_seconds()) // bucket) * bucket)).isoformat())
+            if i is None:
+                continue
+            key = str(rid)
+            slot = acc.setdefault(key, {}).setdefault(i, {"cpu": 0.0, "mem": 0.0, "disk": 0.0,
+                                                          "health": 0.0, "n": 0})
+            slot["cpu"] += float(cpu or 0)
+            slot["mem"] += float(mem or 0)
+            slot["disk"] += float(disk or 0)
+            slot["health"] += float(health or 0)
+            slot["n"] += 1
     except Exception as e:
         log.warning(f"obs runtime_history failed: {e}")
 

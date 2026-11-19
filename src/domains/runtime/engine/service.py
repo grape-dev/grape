@@ -1003,6 +1003,22 @@ def load_project_info_with_obs(repo_key: str) -> tuple[dict, dict]:
         return {}, {}
 
 
+def warm_knowledge_cache(repo_key: str, agent_type: str = "", issue_id: str = "",
+                         scene_id: str = "") -> dict:
+    """Issue #2132 B1：知识缓存预热（在线程池中执行，建单侧在时延预算内等待）。
+
+    调 collect_knowledge_files 走一遍三源读取，把 OBS 内容灌进进程内缓存
+    （read_with_cache 的 hash 口径）；随后的 run_pipeline 再取同名条目即命中缓存、
+    不再打对象存储。失败只返回空 dict 并告警——预热是纯优化，绝不影响建单。
+    """
+    try:
+        return collect_knowledge_files(repo_key, agent_type=agent_type, issue_id=issue_id,
+                                       scene_id=scene_id)
+    except Exception as e:
+        log.warning(f"warm_knowledge_cache({repo_key}) failed: {e}")
+        return {}
+
+
 def collect_knowledge_files(repo_key: str, agent_type: str = "", issue_id: str = "",
                             scene_id: str = "") -> dict:
     """Issue #95：统一过滤知识文件，返回三批 {rel: {content, obs_key}}。
@@ -1040,6 +1056,21 @@ def collect_knowledge_files(repo_key: str, agent_type: str = "", issue_id: str =
     _know = {}
     try:
         _know = agent_knowledge_files(repo_key, agent_type=agent_type, issue_num=_inum, scene_id=_scene_id or "")
+    except Exception:
+        pass
+
+    # Issue #2132 B2 defensive cap: the collection SQLs already push down
+    # ORDER BY id DESC + LIMIT per repo; this catches oversized dicts built by
+    # monkeypatched/legacy call paths that bypass those queries. Rows arrive
+    # newest-first, so keeping the first limit entries preserves the newest ones;
+    # the drop is counted via record_knowledge_truncation, never silent.
+    try:
+        from src.api.knowledge import knowledge_entry_limit, record_knowledge_truncation
+        _limit = knowledge_entry_limit(repo_key)
+        if _limit and len(_know) > _limit:
+            record_knowledge_truncation(len(_know) - _limit, repo_key)
+            _keep = list(_know.keys())[:_limit]
+            _know = {k: _know[k] for k in _keep}
     except Exception:
         pass
 

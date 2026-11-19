@@ -6,6 +6,8 @@
 - 业务代码禁止自行拼/剥前缀，统一走本模块。
 """
 
+from src.kernel.ports import vcs_cards as _vcs_cards
+
 
 def to_repo_key(owner_repo: str, provider: str = "gitcode") -> str:
     """owner/repo → gitcode:owner/repo；已带前缀则幂等返回原值。"""
@@ -52,8 +54,7 @@ def _catalog_providers() -> set[str]:
     （对称，不会出现主路径可见、兜底不可见的 403），仍不引入字面量。
     """
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
-        return {str(p).lower() for p in list_vcs_platforms() if p}
+        return {str(p).lower() for p in _vcs_cards.list_vcs_platforms() if p}
     except Exception:
         return _catalog_providers_from_dir()
 
@@ -214,8 +215,7 @@ def repo_key_candidates(base: str) -> "list[str]":
     cands = [base] if ":" not in base else [base]
     stripped = base.split(":", 1)[-1]
     try:
-        from src.domains.runtime.vcs.platform_card import list_vcs_platforms
-        providers = list_vcs_platforms()
+        providers = _vcs_cards.list_vcs_platforms()
     except Exception:
         # 卡目录不可用：退化到内核层前缀目录（card 注册表 → 卡目录文件名扫描），
         # 仍不硬编码双平台；最坏情况只剩裸键自身（调用方按默认前缀处理）。
@@ -273,8 +273,7 @@ def pr_web_url(repo_key: str, pr_number) -> str:
 
 def _dialect_of(provider: str) -> str:
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
-        card = get_platform_card(provider)
+        card = _vcs_cards.get_platform_card(provider)
         if card is not None:
             return card.dialect
     except Exception:
@@ -293,8 +292,7 @@ def _host_for_provider(provider: str) -> str:
     if provider in _legacy:
         return _legacy[provider]
     try:
-        from src.domains.runtime.vcs.platform_card import get_platform_card
-        card = get_platform_card(provider)
+        card = _vcs_cards.get_platform_card(provider)
         if card is not None:
             return card.host
     except Exception:

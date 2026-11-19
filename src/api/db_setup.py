@@ -4928,6 +4928,15 @@ def init_database():
     if (os.environ.get("GRAPE_SKIP_DB_INIT") or "").strip().lower() in ("1", "true", "yes", "on"):
         log.info("GRAPE_SKIP_DB_INIT=1：跳过 schema 初始化/迁移（执行侧 agent 不需要建表）")
         return
+
+    # kernel 端口绑定（装配层职责）：kernel 只依赖 src.kernel.ports，实现由本层注入。
+    # 放在所有建表/迁移之前——kernel 的迁移前逻辑（如备份保留策略）也可能用到端口。
+    # 幂等：多个 server 进程、重复启动路径都安全。
+    try:
+        from src.api import contracts_wiring
+        contracts_wiring.bind_all(replace=True)
+    except Exception as _cw:
+        log.warning("kernel 端口绑定失败（kernel 侧 port 调用将 fail-fast）: %s", _cw)
     # 迁移前 DB 自动备份保留策略兜底（2026-10 磁盘告警：data/backups 曾堆到 63G 打满根盘）
     # 每次启动清理过量 pre-m0 备份，保留 DB_BACKUP_KEEP(默认5) 份
     try:

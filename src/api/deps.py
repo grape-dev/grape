@@ -6,7 +6,9 @@ import threading
 
 from fastapi import Header, HTTPException, Request, Depends
 
-from src.domains.mgmt.user import db as user_db
+# 依赖层原语走 owner 域 public（原 import mgmt.user.db 内部模块）
+from src.domains.mgmt import public as _mgmt_pub
+user_db = _mgmt_pub  # 调用点保持 user_db.xxx 形态，函数名由 public 提供
 
 from src.kernel.config import log
 

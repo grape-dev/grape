@@ -35,7 +35,7 @@ def _startup_security_check():
     其余检查（密钥轮换池、邮件、凭据加密、cookie、redirect_uri）保留生产门禁。
     """
     from src.kernel.config import log
-    from src.domains.mgmt.auth.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
+    from src.kernel.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
 
     errors = []
 
@@ -138,6 +138,16 @@ async def lifespan(app: FastAPI):
     # 引擎被判定失联 → 健康分强制 0）。
     init_database()
     _load_accounts()
+
+    # 沙箱配置面 6 表（white-list / paths / config / template / llm credential /
+    # proxy token）归 mgmt。它们原先由 runtime 的 ensure_sandbox_tables() 建，
+    # 而那个函数四个进程都会调 —— 三库拓扑下每进程建进自己的库。
+    # 这里只在 mgmt 进程建 + seed 官方域名，幂等，失败只告警不阻断启动。
+    try:
+        from src.domains.mgmt.sandbox_schema import ensure_sandbox_config_tables
+        ensure_sandbox_config_tables()
+    except Exception as _sse:
+        log.warning(f"沙箱配置面建表失败（不阻断启动）: {_sse}")
 
     # 生产环境启动安全门禁
     try:
