@@ -1500,7 +1500,9 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
         log.info(f"Pipeline: PR subscription extra dispatch seq={seq} scene={scene_id}")
         # 分派执行（Phase 3 #699）：broadcast/direct 统一 enqueue 入队，
         # 由本机引擎 local_claimer / 远端 worker 认领执行
-        from src.domains.runtime.engine.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
+        from src.domains.runtime.engine.engine_select import (pick_engine, engine_name,
+                                                              get_scene_pool_engine_ids,
+                                                              _repo_user_id)
         _engine_id = pick_engine(repo_key, "qa", fallback_runtime_id=0, scene_id=scene_id)
         if _engine_id is None:
             log.info(f"Pipeline: PR subscription extra: no engine for scene={scene_id}, mark failed")
@@ -1510,7 +1512,10 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
         # Phase 3 (#699)：direct 即时执行已移除，统一入队（status=queued）由本机引擎
         # local_claimer 认领执行；broadcast 与 direct 分派收敛为同一条 _enqueue_pipeline_task。
         # Issue #1208：入队三分叉 gate（selector 场景落 pool_selector，零命中 fail-closed）
-        _gm, _gp, _gf = _scene_pool_gate(scene_id, "qa", repo_key=repo_key)
+        # 2026-11-19 复审：任务归属用户与主订阅路径同源（_repo_user_id），gate 与任务行
+        # 同一把尺——否则 user 档候选按 user_id=0 走 fail-open，会放进永远认领不到的外档引擎。
+        _sub_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
+        _gm, _gp, _gf = _scene_pool_gate(scene_id, "qa", repo_key=repo_key, user_id=_sub_uid)
         if _gf:
             _fail_event(seq, _gf)
             return
@@ -1522,7 +1527,8 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
         _pool_sel = _gp["pool_selector"] if _gm == "selector" else ""
         _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                0, qa_skill, _engine_id, _pseudo_id,
-                               pool_engine_ids=_pool_ids or "", pool_selector=_pool_sel)
+                               pool_engine_ids=_pool_ids or "", user_id=_sub_uid,
+                               pool_selector=_pool_sel)
     except Exception as e:
         log.warning(f"Pipeline: PR subscription extra dispatch failed: {e}")
 
@@ -1592,7 +1598,10 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
         # Phase 3 (#699)：direct 即时执行已移除，统一入队（status=queued）由本机引擎
         # local_claimer 认领执行；broadcast 与 direct 分派收敛为同一条 _enqueue_pipeline_task。
         # Issue #1208：入队三分叉 gate（selector 场景落 pool_selector，零命中 fail-closed）
-        _gm, _gp, _gf = _scene_pool_gate(scene_id, "qa", repo_key=repo_key)
+        # 2026-11-19 复审：与主订阅路径同源取任务归属用户，gate 与任务行同一把尺
+        from src.domains.runtime.engine.engine_select import _repo_user_id as _rsub_uid_fn
+        _sub_uid = _rsub_uid_fn(repo_key, issue_creator=evt.get("actor", ""))
+        _gm, _gp, _gf = _scene_pool_gate(scene_id, "qa", repo_key=repo_key, user_id=_sub_uid)
         if _gf:
             _fail_event(seq, _gf)
             return
@@ -1604,7 +1613,8 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
         _pool_sel = _gp["pool_selector"] if _gm == "selector" else ""
         _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                0, qa_skill, _engine_id, _pseudo_id,
-                               pool_engine_ids=_pool_ids or "", pool_selector=_pool_sel)
+                               pool_engine_ids=_pool_ids or "", user_id=_sub_uid,
+                               pool_selector=_pool_sel)
 
         # 重派成功：把事件状态改回 running（重派前可能是 failed）
         from src.api.event_store import update_event_status
