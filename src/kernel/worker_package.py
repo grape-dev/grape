@@ -4,7 +4,12 @@
 写入临时文件缓存，代码变更后失效重建。产物由 GET /api/runtime/install/package
 （rta_ 鉴权）下发。
 """
-import hashlib, io, os, re, shutil, subprocess, sys, tarfile, threading
+import contextlib, hashlib, io, os, re, shutil, subprocess, sys, tarfile, threading
+
+try:
+    import fcntl  # 跨进程构建锁（Windows 无 fcntl → 退化为进程内锁）
+except Exception:  # noqa: BLE001
+    fcntl = None
 
 from src.kernel.config import log
 
@@ -120,6 +125,38 @@ MANIFEST = [
 ]
 
 _build_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _crossproc_lock():
+    """跨进程构建互斥。
+
+    mgmt/event/worker/insight 四个进程都会调 build_package()，进程内 threading.Lock
+    挡不住跨进程：多个进程同时写同一个 `PKG_PATH + ".tmp"`，tar 的 gzip 流被交叉
+    写入 → 生成的包截断（实测 `gzip: invalid compressed data--length error`，
+    79MB 的包解不开），worker 下载后安装必失败。
+    这里用 `PKG_PATH + ".lock"` 上的 flock 串行化；Windows 无 fcntl 时退化为无锁
+    （平台主控只跑 Linux，Windows 端只做安装，不会构建包）。
+    """
+    if fcntl is None:
+        yield
+        return
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        _fd = os.open(PKG_PATH + ".lock", os.O_CREAT | os.O_RDWR, 0o644)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"worker_package: cross-process lock unavailable: {e}")
+        yield
+        return
+    try:
+        fcntl.flock(_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(_fd, fcntl.LOCK_UN)
+        except Exception:  # noqa: BLE001
+            pass
+        os.close(_fd)
 
 
 def _is_excluded_arcname(arcname: str) -> bool:
@@ -824,7 +861,7 @@ def _cached_pkg_code_version() -> str:
 
 def build_package() -> str:
     """构建安装包并返回路径。缓存命中直接返回；代码变更后重建（原子替换）。"""
-    with _build_lock:
+    with _build_lock, _crossproc_lock():
         os.makedirs(CACHE_DIR, exist_ok=True)
         ver = package_version()
         cur = ""
@@ -851,7 +888,8 @@ def build_package() -> str:
         pythons = _find_pythons()
         ver = package_version(force=True)
 
-        tmp = PKG_PATH + ".tmp"
+        # 唯一临时名：即使锁失效（如 NFS 不认 flock），两个构建也不会互相截断
+        tmp = f"{PKG_PATH}.tmp.{os.getpid()}"
         members: list = []  # ("arc", bytes) 小文件 / ("arc", path, "path") 大文件流式
         # 内置 Python>=3.10 standalone（按架构分目录，Issue #515；无则靠系统 Python）
         # 依赖 wheels：按 bundle python 版本下载（匹配离线安装）；无 bundle 时按构建机。
