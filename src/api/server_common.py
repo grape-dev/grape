@@ -378,6 +378,14 @@ def init_process_db() -> None:
     if _os.environ.get("GRAPE_DOMAIN_LIB") == "1":
         from src.kernel.config import log as _log
         _log.info("three-database mode: skip full bootstrap (schema provisioned by P4)")
+        # kernel 端口绑定与建表/迁移无关，三库模式同样必须执行：insight 角色
+        # （dashboard 等按 repo_key 取权限的入口）若拿不到 vcs_cards 端口，
+        # repo_key 的平台前缀候选集会退化成空，非默认前缀仓库一律 403。
+        try:
+            from src.api import contracts_wiring as _contracts_wiring
+            _contracts_wiring.bind_all(replace=True)
+        except Exception as _cw:
+            _log.warning(f"three-database mode: kernel port binding failed ({_cw})")
         # 但本域登记的增量迁移仍要跑：台账（grape_t_schema_migrations）与 DDL 都落在
         # 本域库，归属守卫保证不会碰别域的表；只有 GRAPE_MIGRATION_OWNER 指定的那个
         # 进程执行（runtime=event / insight=insight / mgmt 由 init_database 走常规路径）。

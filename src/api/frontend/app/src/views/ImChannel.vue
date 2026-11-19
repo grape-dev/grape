@@ -8,12 +8,15 @@
         class="imc__banner"
         :style="{
           background: 'linear-gradient(135deg,' + cur.bg + ',' + cur.bgLight + ')',
-          borderColor: cur.color + '22',
+          borderColor: 'color-mix(in srgb, ' + cur.color + ' 26%, transparent)',
         }"
       >
         <div
           class="imc__banner-icon"
-          :style="{ background: cur.gradient, boxShadow: '0 6px 16px ' + cur.color + '44' }"
+          :style="{
+            background: cur.gradient,
+            boxShadow: '0 6px 16px color-mix(in srgb, ' + cur.color + ' 27%, transparent)',
+          }"
         >
           <svg
             width="24"
@@ -50,7 +53,10 @@
             :style="{
               borderColor: current === key ? p.color : undefined,
               background: current === key ? p.bg : undefined,
-              boxShadow: current === key ? '0 8px 24px ' + p.color + '22' : undefined,
+              boxShadow:
+                current === key
+                  ? '0 8px 24px color-mix(in srgb, ' + p.color + ' 16%, transparent)'
+                  : undefined,
             }"
             @click="p.disabled ? null : (current = key)"
           >
@@ -97,7 +103,10 @@
             <div class="imc__cfg-head">
               <div
                 class="imc__cfg-icon"
-                :style="{ background: cur.bgLight, borderColor: cur.color + '22' }"
+                :style="{
+              background: cur.bgLight,
+              borderColor: 'color-mix(in srgb, ' + cur.color + ' 26%, transparent)',
+            }"
               >
                 <img
                   :src="'/static/img/' + current + '.svg'"
@@ -146,7 +155,10 @@
 
           <div
             class="imc__help"
-            :style="{ background: cur.bgLight, borderColor: cur.color + '22' }"
+            :style="{
+              background: cur.bgLight,
+              borderColor: 'color-mix(in srgb, ' + cur.color + ' 26%, transparent)',
+            }"
           >
             <svg
               width="16"
@@ -173,10 +185,22 @@
                   target="_blank"
                   rel="noopener noreferrer"
                   class="imc__guide-link"
-                  :style="{ color: cur.color, borderColor: cur.color + '55' }"
+                  :style="{
+                    color: cur.color,
+                    borderColor: 'color-mix(in srgb, ' + cur.color + ' 55%, transparent)',
+                  }"
                   >{{ imt('guide_url_' + current) }} ↗</a
                 >
-                <button v-if="current === 'slack'" class="imc__guide-link" type="button" @click="copyManifest">
+                <button
+                  v-if="current === 'slack'"
+                  class="imc__guide-link"
+                  type="button"
+                  :style="{
+                    color: cur.color,
+                    borderColor: 'color-mix(in srgb, ' + cur.color + ' 55%, transparent)',
+                  }"
+                  @click="copyManifest"
+                >
                   {{ imt('guide_manifest_btn') }}
                 </button>
               </div>
@@ -276,19 +300,22 @@ const form = reactive({ app_id: '', app_secret: '' })
 
 // 2026-11-13：与后端 Type 枚举对齐的 6 个渠道（feishu/wecom/dingtalk/slack/telegram/wechat）。
 // 品牌色只用于卡片强调色与图标底，不写死凭据字段——字段由 FIELDS 表驱动。
+// 品牌色走 CSS 变量（.imc 里亮/暗两档）：Slack 的官方 #611F69 在暗底上几乎融进背景，
+// 暗色档统一提亮一档，其余渠道同理——内联拼接透明度的写法改用 color-mix。
 const platforms = {
-  feishu: { name: 'Feishu', color: '#3370FF' },
+  feishu: { name: 'Feishu', color: 'var(--imc-c-feishu)' },
   // 2026-11-16：微信提到飞书后面（更常用），顺序即左栏卡片顺序。
-  wechat: { name: 'WeChat', color: '#1AAD19' },
-  wecom: { name: 'WeCom', color: '#07C160' },
-  dingtalk: { name: 'DingTalk', color: '#1677FF' },
-  slack: { name: 'Slack', color: '#611F69' },
-  telegram: { name: 'Telegram', color: '#2AABEE' },
+  wechat: { name: 'WeChat', color: 'var(--imc-c-wechat)' },
+  wecom: { name: 'WeCom', color: 'var(--imc-c-wecom)' },
+  dingtalk: { name: 'DingTalk', color: 'var(--imc-c-dingtalk)' },
+  slack: { name: 'Slack', color: 'var(--imc-c-slack)' },
+  telegram: { name: 'Telegram', color: 'var(--imc-c-telegram)' },
 }
 for (const k of Object.keys(platforms)) {
-  platforms[k].bg = 'color-mix(in srgb, ' + platforms[k].color + ' 14%, transparent)'
-  platforms[k].bgLight = 'color-mix(in srgb, ' + platforms[k].color + ' 8%, transparent)'
-  platforms[k].gradient = 'linear-gradient(135deg,' + platforms[k].color + ',' + platforms[k].color + 'bb)'
+  const c = platforms[k].color
+  platforms[k].bg = 'color-mix(in srgb, ' + c + ' 14%, transparent)'
+  platforms[k].bgLight = 'color-mix(in srgb, ' + c + ' 9%, transparent)'
+  platforms[k].gradient = 'linear-gradient(135deg,' + c + ',color-mix(in srgb, ' + c + ' 72%, transparent))'
 }
 
 // 每个渠道的凭据字段：label 为完整 i18n key；placeholder 可选；readonly 用于扫码写入的渠道。
@@ -760,6 +787,31 @@ load()
 .imc {
   color: var(--c-text);
   font-family: var(--f-family);
+  /* 平台品牌色：亮色用官方色，暗色档提亮一档（深色品牌紫/绿在暗底上发闷、看不出是哪个渠道） */
+  --imc-c-feishu: #3370ff;
+  --imc-c-wechat: #1aad19;
+  --imc-c-wecom: #07c160;
+  --imc-c-dingtalk: #1677ff;
+  --imc-c-slack: #611f69;
+  --imc-c-telegram: #2aabee;
+}
+:root[data-theme-mode='dark'] .imc {
+  --imc-c-feishu: #7aa7ff;
+  --imc-c-wechat: #5ad35c;
+  --imc-c-wecom: #4fe08f;
+  --imc-c-dingtalk: #6bb2ff;
+  --imc-c-slack: #d69ce6;
+  --imc-c-telegram: #7ad6ff;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] .imc {
+    --imc-c-feishu: #7aa7ff;
+    --imc-c-wechat: #5ad35c;
+    --imc-c-wecom: #4fe08f;
+    --imc-c-dingtalk: #6bb2ff;
+    --imc-c-slack: #d69ce6;
+    --imc-c-telegram: #7ad6ff;
+  }
 }
 .imc__hint {
   text-align: center;
@@ -1068,6 +1120,9 @@ load()
   border: 1px solid transparent;
   border-radius: 999px;
   background: transparent;
+  /* <button> 不会继承链接的内联色，不写死就落回 UA 默认黑（暗色下等于看不见） */
+  color: var(--c-text-2);
+  font-family: inherit;
   font-size: 12px;
   cursor: pointer;
   text-decoration: none;
