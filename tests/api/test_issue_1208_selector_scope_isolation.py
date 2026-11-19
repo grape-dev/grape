@@ -48,10 +48,11 @@ def scope_db(monkeypatch):
 
 
 def _mk_engine(c, rid, name="opencode", cred=7, scope="repo", owner="o/r",
-               status="online"):
+               status="online", cred_scope=None, cred_owner=None):
     seen = _dt.datetime.now(_dt.timezone.utc).isoformat()
     c.execute("INSERT INTO runtime_credentials (id, scope, owner_id, status) "
-              "VALUES (?,?,?,'active')", (cred, scope, owner))
+              "VALUES (?,?,?,'active')",
+              (cred, cred_scope or scope, cred_owner if cred_owner is not None else owner))
     c.execute("INSERT INTO agent_runtimes (id, name, credential_id, scope, owner_id, status, "
               "healthy, installed, last_seen_at) VALUES (?,?,?,?,?,?,1,1,?)",
               (rid, name, cred, scope, owner, status, seen))
@@ -137,6 +138,44 @@ def test_enqueue_gate_rejects_when_only_foreign_engines_match(scope_db):
                owner="gitcode:And-ZJ2/hello-calculator")
     reason = selector_enqueue_failure_reason(SEL, "issue", repo_key=REPO, user_id=57)
     assert reason, "外档引擎不应被算作可承接命中"
+
+
+def test_user_owner_non_numeric_blocked(scope_db):
+    """owner_id 为用户名形态（非账号数字 id）→ 认领侧按 owner_name 反查账号，
+    候选侧无法证明匹配，按未命中处理（QA 架构守护 I-3 反例）。"""
+    from src.domains.runtime.engine.engine_select import selector_candidate_engines
+    _mk_engine(scope_db, 1, name="opencode", cred=11, scope="user", owner="songspace")
+    matched, dropped = selector_candidate_engines(SEL, "issue", repo_key=REPO, user_id=57)
+    assert _ids(matched) == []
+    assert _reason(dropped, 1) == "scope"
+
+
+def test_repo_owner_with_prefix_does_not_leak_cross_platform(scope_db):
+    """owner 自带平台前缀时，claim 的三候选拼出双前缀 → 跨平台同 owner/repo 认不到；
+    候选侧按同一候选集合判定，不得放宽（QA 架构守护 I-2）。"""
+    from src.domains.runtime.engine.engine_select import selector_candidate_engines
+    _mk_engine(scope_db, 1, name="opencode", cred=21, scope="repo",
+               owner="gitcode:o/r")
+    # 同平台：repo_key 与 owner 逐字相等 → 命中
+    matched, _dropped = selector_candidate_engines(SEL, "issue", repo_key="gitcode:o/r",
+                                                   user_id=57)
+    assert _ids(matched) == [1]
+    # 跨平台同路径：claim 不会认领 → 候选同样不得算命中
+    matched2, dropped2 = selector_candidate_engines(SEL, "issue", repo_key="github:o/r",
+                                                    user_id=57)
+    assert _ids(matched2) == []
+    assert _reason(dropped2, 1) == "scope"
+
+
+def test_credential_scope_wins_over_mirror_columns(scope_db):
+    """QA 架构守护 I-1：档位以凭据列为准（claim 读 credentials），镜像列漂移不得放行。"""
+    from src.domains.runtime.engine.engine_select import selector_candidate_engines
+    # 镜像列写成 global（看起来可认领任意仓库），凭据实际是别的仓库的 repo 档
+    _mk_engine(scope_db, 1, name="opencode", cred=21, scope="global", owner="",
+               cred_scope="repo", cred_owner="gitcode:And-ZJ2/hello-calculator")
+    matched, dropped = selector_candidate_engines(SEL, "issue", repo_key=REPO, user_id=57)
+    assert _ids(matched) == []
+    assert _reason(dropped, 1) == "scope"
 
 
 def test_preview_endpoint_marks_foreign_engines_scope(scope_db):

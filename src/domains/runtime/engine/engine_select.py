@@ -18,7 +18,7 @@ import time as _time
 from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.kernel.config import CONFIG_DIR, log
 from src.kernel.session_manager import db
-from src.kernel.repo_key import repo_key_in_params, from_repo_key
+from src.kernel.repo_key import repo_key_in_params
 from src.domains.runtime.engine.agent_tags import load_engine_tags
 
 _ENGINE_SELECTION_PATH = os.path.join(CONFIG_DIR, "engine-selection.json")
@@ -213,6 +213,9 @@ def resolve_redispatch_pool(*, scene_authoritative: bool, scene_engine_ids,
 def _all_engines_snapshot() -> list:
     """全量引擎快照（selector 候选集底表）：agent_runtimes LEFT JOIN credentials。
 
+    档位列按 ``_engine_scope_info`` 同款口径取（QA 架构守护 I-1）：凭据列优先、
+    镜像列回退——claim_by_tag 读的是 runtime_credentials，只读 agent_runtimes 的
+    镜像列在注册时账号域不可用等场景会漂移，候选与认领两侧分叉。
     不做 scope/健康过滤（候选分层判定在 selector_candidate_engines）；
     查询异常返回空列表（零候选 → fail-closed 语义）。
     """
@@ -223,15 +226,26 @@ def _all_engines_snapshot() -> list:
             c.execute(
                 "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, "
                 "r.last_seen_at, COALESCE(r.scope,'global'), COALESCE(r.owner_id,''), "
-                "COALESCE(r.role_tags,'') "
-                "FROM agent_runtimes r ORDER BY r.id")
+                "COALESCE(r.role_tags,''), COALESCE(rc.scope,''), COALESCE(rc.owner_id,'') "
+                "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
+                "ORDER BY r.id")
             rows = c.fetchall()
         except Exception as e:
-            log.warning(f"_all_engines_snapshot failed: {e}")
-            return []
+            # 旧库/精简测试 schema 缺 runtime_credentials：退回镜像列（不阻断候选集）
+            log.warning(f"_all_engines_snapshot credential join failed, fallback to mirror columns: {e}")
+            try:
+                c.execute(
+                    "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, "
+                    "r.last_seen_at, COALESCE(r.scope,'global'), COALESCE(r.owner_id,''), "
+                    "COALESCE(r.role_tags,'') FROM agent_runtimes r ORDER BY r.id")
+                rows = [tuple(r) + ("", "") for r in c.fetchall()]
+            except Exception as e2:
+                log.warning(f"_all_engines_snapshot failed: {e2}")
+                return []
     return [{"runtime_id": r[0], "name": r[1] or "", "status": r[2] or "offline",
              "healthy": bool(r[3]), "installed": bool(r[4]), "credential_id": r[5] or 0,
-             "last_seen_at": r[6] or "", "scope": r[7] or "global", "owner_id": r[8] or "",
+             "last_seen_at": r[6] or "", "scope": (r[10] or r[7] or "global"),
+             "owner_id": (r[11] or r[8] or ""),
              "role_tags": r[9] or ""} for r in rows]
 
 
@@ -271,7 +285,11 @@ def _selector_scope_blocks(m: dict, repo_key: str = "", user_id: int = 0) -> boo
     if scope == "repo":
         if not repo_key:
             return False
-        return (from_repo_key(owner) or "").strip().lower() != (from_repo_key(repo_key) or "").strip().lower()
+        # 与 claim_by_tag 的 repo 档 SQL 逐字同源（service.py 2090 起：owner_id /
+        # gitcode:owner_id / github:owner_id 三精确候选）。去前缀归一比较会在
+        # 「owner 自带平台前缀」「跨平台同 owner/repo」两种形态下比 claim 宽松
+        # （QA 架构守护 I-2 指出的 fail-open 残留），故此处按三候选集合判定。
+        return repo_key not in (owner, f"gitcode:{owner}", f"github:{owner}")
     return False
 
 
