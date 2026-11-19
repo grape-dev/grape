@@ -110,6 +110,9 @@ PORT_TARGETS: dict[str, tuple[str, ...]] = {
         "src.domains.mgmt.auth.credential_crypto",
         "src.domains.mgmt.auth.grape_account_db",
         "src.domains.runtime.public",
+        # 公开包装（bot cache invalidation / repo secret decrypt）只在此模块；
+        # 排在最后，先命中的候选优先，不改变既有符号解析。
+        "src.domains.mgmt.public",
     ),
     "repos": (
         "src.domains.mgmt.user.repo_manager",
