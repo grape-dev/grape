@@ -122,6 +122,10 @@ MANIFEST = [
     "pyproject.toml",
     # Issue #666 (M4): 随包下发 codegraph 离线安装脚本（降级/离线环境的预装入口）
     "scripts/install-codegraph.sh",
+    # 2026-11-19：worker 上 src.kernel.repo_key 的平台前缀兜底要读 configs/platforms/*.json；
+    # 老包不带该目录，每进程一条 `platform catalog fallback failed: <安装目录>\configs\platforms`
+    # （Windows 实测）。卡文件很小，随包下发后兜底与主控同源同集。
+    "configs/platforms/",
 ]
 
 _build_lock = threading.Lock()

@@ -4508,7 +4508,29 @@ if __name__ == "__main__":
     # --self-check：给安装/升级脚本用的「能否启动」预检（在停旧 worker 之前跑）。
     # 必须走同一段守卫表达式，这样同类平台差异（如 Windows 无 geteuid）在预检期就暴露。
     if "--self-check" in sys.argv[1:]:
-        print(f"self-check ok: platform={sys.platform} euid_guard={'root' if _euid_is_root else 'nonroot'}")
+        # 2026-11-19：除了守卫表达式，再多验一层「任务路径要用到的 public 面能否 import」。
+        # 事故：Windows worker 缺 fastapi，任务跑到 skill scope 解析才炸（`stream failed`），
+        # 安装脚本完全无法预知。这里把 worker 任务路径实际会 import 的跨域 public 面拉一遍，
+        # 缺依赖在预检期就 fail，升级直接中止、旧 worker 继续跑。
+        _missing = []
+        for _m in (
+            "src.domains.runtime.public",
+            "src.domains.mgmt.public",
+            "src.domains.insight.public",
+            "src.domains.runtime.engine.skill_materialize",
+            "src.kernel.repo_key",
+        ):
+            try:
+                __import__(_m)
+            except Exception as _ie:
+                _missing.append(f"{_m}: {type(_ie).__name__}: {_ie}")
+        if _missing:
+            print("self-check FAILED: worker task-path imports broken:", file=sys.stderr)
+            for _line in _missing:
+                print(f"  - {_line}", file=sys.stderr)
+            raise SystemExit(79)
+        print(f"self-check ok: platform={sys.platform} euid_guard={'root' if _euid_is_root else 'nonroot'} "
+              f"task_path_imports=5")
         raise SystemExit(0)
     if _euid_is_root and os.environ.get("GRAPE_ALLOW_ROOT_ENGINE") != "1":
         print("refusing to run the engine as root: workspace files would be root-owned and "

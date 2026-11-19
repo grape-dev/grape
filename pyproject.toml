@@ -74,6 +74,11 @@ worker = [
     "bcrypt>=4.0",
     "click>=8.0",
     "httpx>=0.24",
+    # 2026-11-19：worker 任务路径会经 src.domains.mgmt.user.db → src.domains.runtime.public
+    # 导入主控侧的 public 面，历史上有 fastapi 的顶层依赖渗进来，缺包时整条任务流
+    # `stream failed: No module named 'fastapi'`（Windows worker 实测）。根因已改成
+    # TYPE_CHECKING 类型注解，这里仍显式带上，避免再有路径把 API 层依赖当运行时依赖。
+    "fastapi>=0.110",
     # [沙箱迁移] cloud_worker 依赖: 平台 SDK + 白名单/网络代理(requests) + 凭据加密(cryptography)
     "cubesandbox>=0.7",
     "requests>=2.31",

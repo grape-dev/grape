@@ -81,25 +81,42 @@ def _repo_root_dir() -> str:
     旧实现用 dirname(dirname(abspath(__file__))) 得 `<repo>/src`，再拼
     configs/platforms → `<repo>/src/configs/platforms`（不存在），目录扫描
     恒空集且被 except 静默吞掉。
+
+    2026-11-19：worker 安装目录（`grape-worker/src/kernel/...`）在旧版本里没有
+    `configs/`，向上找不到就返回一个不存在的猜测路径，日志每进程一条
+    `platform catalog fallback failed: '<安装目录>/configs/platforms'`。
+    现在：① 支持 `GRAPE_CONFIG_DIR` 显式指定；② 卡目录已随 worker 包下发，
+    查找会命中它；③ 真找不到时返回空串，让调用方按「本安装未带卡」处理。
     """
     import os as _os
+    env_dir = _os.environ.get("GRAPE_CONFIG_DIR", "").strip()
+    if env_dir:
+        # GRAPE_CONFIG_DIR 允许指向仓库根或 configs 目录；返回「configs 的父目录」口径。
+        for cand in (env_dir, _os.path.join(env_dir, "configs")):
+            if _os.path.isdir(_os.path.join(cand, "platforms")):
+                return _os.path.dirname(cand.rstrip("/\\"))
     start = _os.path.dirname(_os.path.abspath(__file__))
     cur = start
     while cur and cur != _os.path.dirname(cur):
         if _os.path.isdir(_os.path.join(cur, "configs", "platforms")):
             return cur
         cur = _os.path.dirname(cur)
-    return _os.path.dirname(_os.path.dirname(start))
+    return ""
 
 
 def _catalog_providers_from_dir() -> set[str]:
     """卡目录兜底：configs/platforms/*.json 文件名即平台名（无字面量）。
 
-    失败/空集不再静默：打 warning 带解析出的目录，部署布局变化可定位。
+    缺席（未随包下发的安装，如老 worker）→ debug 一条，不当告警：该进程不用卡。
+    目录在但为空 → warning（部署布局异常，需定位）。
     """
+    import os as _os
+    root = _repo_root_dir()
+    if not root:
+        _log.debug("platform catalog not present in this install; provider catalog fallback skipped")
+        return set()
+    _dir = _os.path.join(root, "configs", "platforms")
     try:
-        import os as _os
-        _dir = _os.path.join(_repo_root_dir(), "configs", "platforms")
         names = {f[:-len(".json")].lower() for f in _os.listdir(_dir)
                  if f.endswith(".json")}
     except Exception as _e:

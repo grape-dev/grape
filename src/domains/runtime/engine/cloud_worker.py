@@ -1043,7 +1043,9 @@ async def _refresh_templates(client, config):
                     or r["runtime_info"] != _old_by_name[r["name"]]["runtime_info"]]
         _deleted = _old_names - _new_names
 
-        device = config.get("device_name") or os.uname().nodename
+        # os.uname 仅 Unix；Windows 上 AttributeError（2026-11-19）。走跨平台 adapter。
+        from src.domains.runtime.engine import os_adapter as _os_adapter
+        device = config.get("device_name") or _os_adapter.hostname()
 
         _new_rid_by_name: dict[str, int] = {}
         if _changed:
@@ -1454,7 +1456,8 @@ def main():
     async def _amain() -> int:
         """返回退出码供 main() 传给 sys.exit()。"""
         client = RuntimeClient(config["server_url"], worker_key)
-        device = config["device_name"] or os.uname().nodename
+        from src.domains.runtime.engine import os_adapter as _os_adapter
+        device = config["device_name"] or _os_adapter.hostname()
 
         # 查模板列表（GET /api/settings/sandbox-templates）
         try:

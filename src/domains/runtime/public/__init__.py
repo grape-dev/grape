@@ -11,9 +11,15 @@ from src.kernel.config import log
 import json
 import time
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from fastapi import Request
+# 2026-11-19：`Request` 只在 `require_credential(request: Request)` 的注解里出现，
+# 而本模块 `from __future__ import annotations` 使注解不求值 —— 运行期不需要 fastapi。
+# 顶层导入会让所有 import 本模块的进程（worker 任务路径经
+# src.domains.mgmt.user.db → runtime.public）在缺 fastapi 时整体崩掉，
+# 已致 Windows worker 带 skill 的任务 `stream failed: No module named 'fastapi'`。
+if TYPE_CHECKING:  # pragma: no cover - 仅类型检查
+    from fastapi import Request
 
 from src.kernel import db_registry
 
