@@ -21,6 +21,53 @@ GRAPE_CLI_REPO = os.environ.get("GRAPE_CLI_REPO", "https://gitcode.com/grape-dev
 # 免编译、自包含）。worker 端 install-worker.sh 在系统无 Python>=3.10 时用包内解释器建 venv。
 UV_PYTHON_DIR = os.path.expanduser(os.environ.get("UV_PYTHON_DIR", "~/.local/share/uv/python"))
 
+# legacy 入口 shim：随包下发，源码不进仓库 src/ 树。
+# 存量设备的 start-worker.sh / systemd unit / 第三方 wrapper 是旧版 install-worker.sh
+# 生成的，命令行里仍固化 `-m src.runtime.agent`（沙箱为 `-m src.runtime.cloud_worker`）。
+# #699 删掉 src/runtime/ 之后，这类设备「换了代码但没重跑安装脚本」一启动就
+# ModuleNotFoundError，现象是设备接入不上（AI devspace 一直等设备）。
+# 仓库树里不能恢复 src/runtime：tests/arch/test_domain_boundaries.py 要求它 import 失败，
+# test_issue_2010_src_top_level_layout.py 禁止 MANIFEST 出现 legacy 顶层路径。
+# 因此 shim 源码放 packaging/legacy-entry-src/，打包时映射成包内 src/runtime/*，
+# 只在设备侧生效；文件变化也进版本指纹，改 shim 会让设备重新拉包。
+LEGACY_ENTRY_SRC = os.path.join(ROOT, "packaging", "legacy-entry-src")
+LEGACY_ENTRY_FILES = (
+    "runtime/__init__.py",
+    "runtime/agent.py",
+    "runtime/cloud_worker.py",
+)
+
+
+def legacy_entry_members() -> list[tuple[str, str]]:
+    """(包内相对路径, 磁盘绝对路径)：legacy 入口 shim 的注入清单。"""
+    out: list[tuple[str, str]] = []
+    for rel in LEGACY_ENTRY_FILES:
+        fp = os.path.join(LEGACY_ENTRY_SRC, rel)
+        if os.path.isfile(fp):
+            out.append((f"src/{rel}", fp))
+    return out
+
+
+def require_legacy_entry_members() -> list[tuple[str, str]]:
+    """取注入清单，缺文件直接抛错（fail-closed）。
+
+    静默打出一个不含 src/runtime/* 的包，等于把「没重跑安装脚本的老设备」判死，
+    而且现象要等到设备换代码时才出现。部署目录漏拷 packaging/ 是真实风险
+    （本仓 clone 曾用 sparse-checkout 只勾 configs/deploy/docs/scripts/src/tests，
+    packaging/ 不在里面），所以宁可打包失败。
+    """
+    members = legacy_entry_members()
+    got = {arc for arc, _ in members}
+    missing = [f"src/{rel}" for rel in LEGACY_ENTRY_FILES if f"src/{rel}" not in got]
+    if missing:
+        raise RuntimeError(
+            "worker_package: legacy 入口 shim 源缺失: " + ", ".join(missing)
+            + f"（源目录 {LEGACY_ENTRY_SRC}）。缺了它打出的包不带 src/runtime/*，"
+            "旧启动脚本（-m src.runtime.agent / cloud_worker）的设备换代码后即 "
+            "ModuleNotFoundError。请检查部署是否漏拷 packaging/。"
+        )
+    return members
+
 # worker 运行闭包清单（整目录粒度，含运行时懒加载模块）。
 # 依据：src.domains.runtime.engine.agent 的 import 闭包（含 repogit/cleanup 等运行时 import）。
 # src/api/ 只列 worker 实际引用的模块：time_utils/event_store/event_archive/
@@ -247,6 +294,14 @@ def _manifest_version() -> str:
                     h.update(hashlib.sha256(fh.read()).hexdigest().encode("utf-8"))
             except Exception:
                 h.update(b"unreadable")
+    # legacy 入口 shim 也在包内，改了它必须让版本号变（否则设备不会重新拉包）
+    for arc, fp in legacy_entry_members():
+        h.update(arc.encode("utf-8"))
+        try:
+            with open(fp, "rb") as fh:
+                h.update(hashlib.sha256(fh.read()).hexdigest().encode("utf-8"))
+        except Exception:
+            h.update(b"unreadable")
     return h.hexdigest()[:16]
 
 
@@ -847,6 +902,11 @@ def build_package() -> str:
                 else:
                     arc = item.replace(os.sep, "/")
                     _add(arc, path)
+            # legacy 入口 shim：包内补 src/runtime/*，让旧启动脚本
+            # （`-m src.runtime.agent` / `src.runtime.cloud_worker`）在只剩 canonical
+            # 代码的设备上仍能起来。MANIFEST 不列它（arch 守卫禁止），只在构建期注入。
+            for _arc, _fp in require_legacy_entry_members():
+                _add(_arc, _fp)
             # 包内 VERSION 文件写入代码版本（仅 git commit，不含 wheels/python 指纹）
             # worker 端读此文件与主控 heartbeat 中的 latest_version 对比
             # 打包路径强制重算（不走 TTL 缓存）：确保版本戳与包内代码一致
