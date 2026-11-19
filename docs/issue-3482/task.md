@@ -43,3 +43,33 @@
 - [x] T16 **Nit**：`_materialize_workdir_and_skill_gate` 前补 PEP8 E302 空行
 - [x] T17 经验沉淀：`AGENTS.md` 写入「先建 worktree、后物化技能」仓内可执行约束
 - [x] T18 回归：#3482/#2245/repogit 相关 6 测试文件通过；`make lint`、`scripts/check-arch.py` PASS
+
+## 第四轮（QA 第三轮复审评论 202288032：2 Required + 1 Optional + 1 Nit 全处置）
+
+- [x] T19 **Required（D37/S57 脱敏守卫随迁）**：`tests/kernel/test_d37_token_resolution_unify.py`
+      `test_s57_redact_and_chat_sites_use_helper` 守卫指向
+      `direct_executor._execute_agent_inner`（脱敏块随 #699 唯一实现迁移落地处，
+      注释剥离后源级断言），chat 直连块守卫不变；该测试文件补入影响面清单
+      （T24 机械检索口径：引用被删符号 + getsource 源级守卫）
+- [x] T20 **Required（末节点人工闸随迁）**：旧副本独有的收尾钩子
+      `finalize_issue_to_pending_review(repo_key, issue_id, agent_type, source="exec")`
+      （末节点完成 → status=stage=pending_review 待人工 confirm-done，幂等）搬进
+      `direct_executor` 收尾钩子清单（#51 SRE 钩子之后、子任务 SRE 钩子之前，与
+      worker `complete_task()` pending_review 钩子同口径）；行为用例
+      `TestDirectLastNodePendingReviewHook::test_direct_completed_triggers_last_node_finalize`
+      驱动 `_execute_agent_inner` 走到 completed，断言钩子以 source="exec" 触发
+- [x] T21 **Optional（兼容层 import 顺序）**：canonical event_pipeline 增加 PEP 562
+      模块级 `__getattr__` 惰性转发（`_execute_agent`/`_execute_agent_inner`/
+      `start_direct_agent`/`_DIRECT_POOL` 及 `_DIRECT_*` 前缀族）——新进程直接
+      `from src.domains.runtime.pipeline.event_pipeline import _execute_agent ...`
+      不再抛 ImportError（`test_re_export_same_objects` 单跑转绿），TC-3.2 源级
+      守卫（event_pipeline 不得出现 start_direct_agent 字面量）保持绿，不新增模块级环
+- [x] T22 **Nit（PR 描述口径）**：PR #1825「第三轮修订」段 re_export 口径修正
+      （转绿依赖连跑顺序），补记第四轮修订段
+- [x] T23 经验沉淀：`AGENTS.md` 补「删除同名副本前先盘点」（收尾钩子清单 diff /
+      源级守卫机械检索 / 旧 import 路径不依赖 import 顺序）
+- [x] T24 回归：3 核心测试文件 61 passed（60 + 新增 T20 行为用例）；D37 守卫
+      单跑转绿；596 re_export 单跑转绿；699 TC32 保持绿；`make lint`、
+      `scripts/check-arch.py` PASS；既有失败（596 no_direct_pool_definition /
+      finalization、699 TC34 ×3、D37 fail_task）经 2a79aee0b pristine 复核为
+      merge 基线既有（test DB schema 漂移 / service.py 与基线一致），非本轮引入
