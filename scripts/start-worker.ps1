@@ -35,17 +35,33 @@ if (Test-Path $envFile) {
 
 # ===== daemon 模式（默认）=====
 if (-not $NoDaemon) {
+    # 子进程 stdout/stderr 落盘：Python logging 只覆盖 main() 之后的阶段；__main__ 早退
+    # （如平台不兼容、import 失败）发生在 logging 配置之前，隐藏窗口下 stderr 彻底丢失
+    # （2026-11-19：Windows worker 升级后 __main__ 抛 AttributeError 秒退，日志空白）。
+    $BootLogDir = Join-Path $WorkerDir "data\logs"
+    if (-not (Test-Path $BootLogDir)) { New-Item -ItemType Directory -Force -Path $BootLogDir | Out-Null }
+    $BootLog = Join-Path $BootLogDir "worker-boot.log"
+    if ((Test-Path $BootLog) -and ((Get-Item $BootLog).Length -gt 5MB)) {
+        Move-Item -Force $BootLog "$BootLog.1"
+    }
     $RestartCount = 0
     $WindowStart = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     while ($true) {
         $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         Write-Host "[$ts] Starting worker (attempt $($RestartCount + 1))..."
-        # 注意：不用 -NoNewWindow + -RedirectStandardOutput（隐藏窗口下静默返回 $null）
-        # Python logging 已写入 data/logs/devops-bot.log，不需要 stdout/stderr redirect
-        $proc = Start-Process -FilePath $Python -ArgumentList '-m','src.domains.runtime.engine.agent' `
+        # 用 cmd /c 做重定向：-WindowStyle Hidden 下 -RedirectStandardError 不可用
+        # （静默返回 $null），但 cmd 的 >> 重定向仍生效，且继承隐藏窗口、不阻塞。
+        $inner = '/c ""' + $Python + '" -m src.domains.runtime.engine.agent >> "' + $BootLog + '" 2>&1"'
+        $proc = Start-Process -FilePath $env:ComSpec -ArgumentList $inner `
             -WorkingDirectory $WorkerDir -WindowStyle Hidden -PassThru
         $proc.WaitForExit()
         $ExitCode = $proc.ExitCode
+        if ($ExitCode -ne 0) {
+            Write-Host "[$ts] Worker exited code=$ExitCode; last lines of ${BootLog}:"
+            if (Test-Path $BootLog) {
+                Get-Content $BootLog -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+            }
+        }
         if ($ExitCode -eq 42) {
             # Credential revoked by server (revoke) - restarting is pointless,
             # the token is dead. Stop the daemon; reinstall with a new credential.

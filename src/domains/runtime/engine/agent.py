@@ -4502,7 +4502,15 @@ if __name__ == "__main__":
     # fail-fast：引擎必须以任务属主身份运行。以 root 运行会在 grape-workspaces 下留下
     # root 拥有的目录，随后业务侧（grape）写 issue/<agent> 目录直接 EACCES ——
     # 2026-11-16 #96/#97 流水线卡死的真实根因（runtime-agent.service 里 User=root）。
-    if os.geteuid() == 0 and os.environ.get("GRAPE_ALLOW_ROOT_ENGINE") != "1":
+    # Windows 没有 os.geteuid（AttributeError），必须 hasattr 守卫：否则任何 Windows
+    # worker 升级到该版本都会在 __main__ 阶段秒退 → daemon 重试 10 次后放弃 → 升级即离线。
+    _euid_is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    # --self-check：给安装/升级脚本用的「能否启动」预检（在停旧 worker 之前跑）。
+    # 必须走同一段守卫表达式，这样同类平台差异（如 Windows 无 geteuid）在预检期就暴露。
+    if "--self-check" in sys.argv[1:]:
+        print(f"self-check ok: platform={sys.platform} euid_guard={'root' if _euid_is_root else 'nonroot'}")
+        raise SystemExit(0)
+    if _euid_is_root and os.environ.get("GRAPE_ALLOW_ROOT_ENGINE") != "1":
         print("refusing to run the engine as root: workspace files would be root-owned and "
               "business writes (issue/<agent> dirs) would fail with EACCES. "
               "Run as the task owner (User=grape) or set GRAPE_ALLOW_ROOT_ENGINE=1.",

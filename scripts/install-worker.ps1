@@ -636,6 +636,27 @@ try {
     Log "Warning: failed to download start-worker.ps1: $_ (non-blocking, worker can be started manually)"
 }
 
+# ===== 5.5 预检：新代码能否启动（必须在停旧 worker 之前）=====
+# 2026-11-19 教训：Windows worker 升级到 h-6678e67005b5 时，新代码 __main__ 里
+# os.geteuid() 无平台守卫 → 启动即 AttributeError 秒退 → daemon 重试 10 次后退出 →
+# 「升级成功但设备离线」，且隐藏窗口下 stderr 丢失、事后无从定位。
+# 预检只跑启动路径（--self-check），不连服务端、不注册，失败即中止升级并保留旧 worker。
+Log "Pre-check: new code startup self-check..."
+if (-not (Test-Path $VenvPy)) { Fail "Pre-check failed: venv python missing ($VenvPy)" }
+Push-Location $Dir
+try {
+    $precheckOut = & $VenvPy -m src.domains.runtime.engine.agent --self-check 2>&1
+    $precheckCode = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($precheckCode -ne 0) {
+    Log "!!! Pre-check FAILED (exit $precheckCode) - aborting upgrade BEFORE stopping the old worker !!!"
+    $precheckOut | Select-Object -First 20 | ForEach-Object { Log "    $_" }
+    Fail "New worker code cannot start (pre-check exit $precheckCode); old worker left untouched"
+}
+Log "Pre-check OK: $($precheckOut | Select-Object -First 1)"
+
 # 停掉旧 daemon（start-worker.ps1 的 powershell 进程），防止旧 daemon 重启被杀的 worker → 双 daemon 循环竞争
 # 按本安装目录的 start-worker.ps1 完整路径匹配，避免误杀同机其他 grape 安装的 daemon
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {

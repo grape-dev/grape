@@ -492,6 +492,28 @@ _smoke_check() {
 }
 _smoke_check || fail "New worker package import smoke check failed (bad package); upgrade aborted, old code untouched"
 
+# ===== 3.6 启动路径自检（--self-check，2026-11-19 Windows 升级即离线事故）=====
+# import 冒烟只覆盖 import 期；__main__ 块里的平台差异看不到。
+# 事故：Windows worker 升级到 h-6678e67005b5，__main__ 里裸 os.geteuid()（Windows 无此
+# 函数）→ AttributeError 秒退 → daemon 重试 10 次后退出 → 设备升级完就离线。
+# 这里跑与真实启动相同的入口（--self-check 在 root 守卫之后立刻退出，不连服务端）：
+# 失败则拒绝升级，旧进程仍在跑，零中断。
+_start_check() {
+  [ -x "$VENV/bin/python" ] || return 0   # venv 未建（首次安装）：由第 6 步启动验证兜底
+  ( cd "$INSTALL_DIR" && "$VENV/bin/python" -m src.domains.runtime.engine.agent --self-check >/tmp/.grape-self-check.$$ 2>&1 )
+  _sc_rc=$?
+  if [ "$_sc_rc" -eq 0 ]; then
+    log "New code startup self-check passed: $(tail -1 /tmp/.grape-self-check.$$ 2>/dev/null)"
+    rm -f /tmp/.grape-self-check.$$
+    return 0
+  fi
+  log "!!! New code startup self-check failed (exit $_sc_rc): $(tail -1 /tmp/.grape-self-check.$$ 2>/dev/null)"
+  log "!!! Upgrade rejected (old code untouched, worker keeps running the current version)"
+  rm -f /tmp/.grape-self-check.$$
+  return 1
+}
+_start_check || fail "New worker code cannot start (startup self-check failed); upgrade aborted, old code untouched"
+
 # restore_upgrade_backup <起服务方式>：恢复备份的旧代码并按传入方式重启 agent。
 # systemd: restore_upgrade_backup systemd；nohup: restore_upgrade_backup nohup
 restore_upgrade_backup() {
