@@ -11,15 +11,19 @@ from src.kernel.config import log
 import json
 import time
 from contextlib import contextmanager
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
-# 2026-11-19：`Request` 只在 `require_credential(request: Request)` 的注解里出现，
-# 而本模块 `from __future__ import annotations` 使注解不求值 —— 运行期不需要 fastapi。
-# 顶层导入会让所有 import 本模块的进程（worker 任务路径经
-# src.domains.mgmt.user.db → runtime.public）在缺 fastapi 时整体崩掉，
-# 已致 Windows worker 带 skill 的任务 `stream failed: No module named 'fastapi'`。
-if TYPE_CHECKING:  # pragma: no cover - 仅类型检查
+# 2026-11-19：`Request` 出现在 `require_credential(request: Request)` 的注解里。
+# 本模块 `from __future__ import annotations` 使注解是字符串，但 FastAPI 在运行期
+# 按**模块全局名**解析依赖签名：仅有 TYPE_CHECKING 导入会让注解停在
+# ForwardRef('Request')，端点把 request 当必填 query 参数 → 全量 422，且
+# `/openapi.json` 渲染抛 PydanticUserError。因此运行期必须可解析，同时 worker
+# 任务路径（经 src.domains.mgmt.user.db → runtime.public）不得因缺 fastapi 崩掉：
+# 顶层 try/except 导入，缺包时降级为 Any（仅 worker 场景，注解不参与业务）。
+try:  # pragma: no cover - 主控有 fastapi；worker 缺包走降级分支
     from fastapi import Request
+except ImportError:  # pragma: no cover - worker 无 web 框架
+    Request = Any  # type: ignore[assignment,misc]
 
 from src.kernel import db_registry
 

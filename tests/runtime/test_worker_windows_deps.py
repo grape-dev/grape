@@ -116,3 +116,38 @@ def test_worker_package_does_not_ship_configs():
     from src.kernel import worker_package
     assert not [m for m in worker_package.MANIFEST if m.startswith("configs")], \
         "configs/ 不得进 worker 包（tests/runtime/test_worker_package.py 亦有硬约束）"
+
+
+def test_require_credential_annotation_resolves_to_fastapi_request():
+    """FastAPI 按模块全局名解析依赖注解：`Request` 必须运行期可见。
+
+    回归形态：`Request` 只在 TYPE_CHECKING 下导入 → 注解停在
+    `ForwardRef('Request')` → 端点把 request 当必填 query 参数（全量 422），
+    `/openapi.json` 渲染抛 PydanticUserError。
+    """
+    import fastapi
+    from fastapi.dependencies.utils import get_typed_signature
+
+    from src.domains.runtime.public import require_credential
+
+    ann = get_typed_signature(require_credential).parameters["request"].annotation
+    assert ann is fastapi.Request, f"注解未解析为 fastapi.Request：{ann!r}"
+
+
+def test_require_credential_dependency_returns_401_not_422():
+    """挂 `Depends(require_credential)` 的端点：缺凭据应 401，而非 422。"""
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.domains.runtime.public import require_credential
+
+    app = FastAPI()
+
+    @app.get("/probe")
+    def _probe(credential_id: int = Depends(require_credential)):  # noqa: ARG001
+        return {"credential_id": credential_id}
+
+    app.openapi()  # 渲染不得抛 PydanticUserError（ForwardRef 未解析即抛）
+    with TestClient(app) as client:
+        resp = client.get("/probe")
+    assert resp.status_code == 401, f"期望 401（凭据校验），实际 {resp.status_code}: {resp.text[:400]}"
