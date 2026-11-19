@@ -644,10 +644,16 @@ try {
 Log "Pre-check: new code startup self-check..."
 if (-not (Test-Path $VenvPy)) { Fail "Pre-check failed: venv python missing ($VenvPy)" }
 Push-Location $Dir
+# Issue #429 同型：Stop 模式下原生命令的 2>&1 会把 stderr 行包装成终止性错误记录，
+# 预检这里会因此拿不到 $LASTEXITCODE（异常先抛出）。临时降级 EAP 执行后恢复，
+# 与 Invoke-PipQuiet 的口径一致，用 $LASTEXITCODE 判定真实成败。
+$prevPrecheckEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 try {
     $precheckOut = & $VenvPy -m src.domains.runtime.engine.agent --self-check 2>&1
     $precheckCode = $LASTEXITCODE
 } finally {
+    $ErrorActionPreference = $prevPrecheckEAP
     Pop-Location
 }
 if ($precheckCode -ne 0) {
