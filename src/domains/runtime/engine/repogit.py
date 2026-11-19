@@ -1516,9 +1516,9 @@ def probe_common_write(common_dir: str) -> tuple:
 def _is_readonly_git_failure(stderr: str) -> bool:
     """stderr 文案是否含只读线索（**仅日志线索**，不再作为降级判据）。
 
-    Issue #3482（D）：降级判据改为 `readonly_errno_reason()`——先 stat 目标目录再按
-    errno(EROFS/EACCES/EPERM) 判定。文案白名单是漏判来源（`already exists` 就漏在这里），
-    继续在文案上加词等于在同一脆弱点上叠加。
+    Issue #3482（D）：降级判据改为 `readonly_errno_reason()`——依次 stat 目标目录与
+    共享基线再按 errno(EROFS/EACCES/EPERM) 判定。文案白名单是漏判来源（`already
+    exists` 就漏在这里），继续在文案上加词等于在同一脆弱点上叠加。
     """
     text = (stderr or "").lower()
     if not text:
@@ -1535,24 +1535,8 @@ def _is_readonly_git_failure(stderr: str) -> bool:
 _READONLY_ERRNOS = (errno.EROFS, errno.EACCES, errno.EPERM)
 
 
-def readonly_errno_reason(target_dir: str) -> str:
-    """按 stat + errno 判定目标是否落在只读/无权限卷（Issue #3482 D）。
-
-    判据源不是 git 的 stderr 文案：
-    1. stat 目标目录——不存在则探测其父目录（建树失败时目录常已被 git 清理）；
-    2. 在探测目录上实写一次（与 git 写路径同一语义），捕获 errno；
-    3. **仅** EROFS / EACCES / EPERM 判只读；ENOSPC/EIO/EEXIST 等一律不算，
-       不许据此降级建树（降级会掩盖真实错误、制造同分支双工作树）。
-
-    Returns:
-        非空字符串 = 只读原因（`EROFS: Read-only file system` 形式，写日志/事件用）；
-        空字符串 = 非只读（或无法判定）。
-    """
-    try:
-        probe_dir = target_dir if os.path.isdir(target_dir) else (
-            os.path.dirname(target_dir) or target_dir)
-    except OSError:
-        probe_dir = os.path.dirname(target_dir) or target_dir
+def _probe_dir_ro_errno_reason(probe_dir: str) -> str:
+    """在单个目录上实写探测一次，命中只读 errno 返回原因，否则空串。"""
     if not probe_dir or not os.path.isdir(probe_dir):
         return ""
     probe = os.path.join(probe_dir, f".grape-ro-probe-{os.getpid()}-{threading.get_ident()}")
@@ -1568,6 +1552,43 @@ def readonly_errno_reason(target_dir: str) -> str:
         if e.errno in _READONLY_ERRNOS:
             return f"{errno.errorcode.get(e.errno, e.errno)}: {e.strerror or e}"
         return ""
+
+
+def readonly_errno_reason(target_dir: str, base_dir: str = "") -> str:
+    """按 stat + errno 判定只读/无权限卷（Issue #3482 D；复审 Required 扩探测面）。
+
+    判据源不是 git 的 stderr 文案：
+    1. 依次 stat **目标目录**与**共享基线目录**——目标不存在则探测其父目录
+       （建树失败时目录常已被 git 清理）；
+    2. 在探测目录上实写一次（与 git 写路径同一语义），捕获 errno；
+    3. **仅** EROFS / EACCES / EPERM 判只读；ENOSPC/EIO/EEXIST 等一律不算，
+       不许据此降级建树（降级会掩盖真实错误、制造同分支双工作树）。
+
+    #2245 明确支持的部署形态是「共享基线在只读卷、目标目录可写」——只探测目标
+    会漏判，`git worktree add` 因基线只读失败时被判 non-readonly → refuse degrade
+    → `ensure_issue_worktree` 返回 None → 任务 `workspace_unavailable`，而该场景
+    本应降级到会话级 gitdir 建树成功。因此基线目录（repo base / common dir）也是
+    探测面，任一命中即判只读，返回值以 `target:` / `base:` 前缀区分命中位置（日志
+    可观测）。
+
+    Returns:
+        非空字符串 = 只读原因（`target: EROFS: Read-only file system` 形式，写日志/事件用）；
+        空字符串 = 非只读（或无法判定）。
+    """
+    try:
+        _probe_target = target_dir if os.path.isdir(target_dir) else (
+            os.path.dirname(target_dir) or target_dir)
+    except OSError:
+        _probe_target = os.path.dirname(target_dir) or target_dir
+    _reason = _probe_dir_ro_errno_reason(_probe_target)
+    if _reason:
+        return f"target: {_reason}"
+    if base_dir:
+        _reason = _probe_dir_ro_errno_reason(
+            base_dir if os.path.isdir(base_dir) else (os.path.dirname(base_dir) or base_dir))
+        if _reason:
+            return f"base: {_reason}"
+    return ""
 
 
 def _is_already_exists_collision(stderr: str) -> bool:
@@ -2763,9 +2784,10 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                 if stderr:
                     # stderr 非空 = 重试后仍失败（或本就不需要重试）
                     # Issue #3482（D）：只读判据改判定源——stat 目标目录（不存在则父目录）
+                    # 与共享基线 base（复审 Required：#2245 只读基线/可写目标场景由 base 命中）
                     # 后按 errno(EROFS/EACCES/EPERM) 判；stderr 文案只保留为日志线索
                     # （`already exists` 正是被文案白名单漏掉的反例）。
-                    _ro_reason = readonly_errno_reason(issue_dir)
+                    _ro_reason = readonly_errno_reason(issue_dir, base)
                     _stderr_hint = ("readonly-keyword"
                                     if _is_readonly_git_failure(stderr) else "no-readonly-keyword")
                     log.warning(f"repogit worktree add failed {repo_key}: {stderr[:300]} "
