@@ -32,6 +32,12 @@ _SYNC_TIMERS: dict[str, threading.Timer] = {}
 _SYNC_LOCKS: dict[str, threading.Lock] = {}
 _GUARD = threading.Lock()
 
+# 新建组织自动仓库的默认分支：Grape 托管分支统一 grape- 前缀。
+# 存量组织仓库保持各自默认分支（不强制改名），读取路径必须按实际默认分支解析。
+ORG_REPO_DEFAULT_BRANCH = (os.environ.get("ORG_REPO_DEFAULT_BRANCH") or "grape-repo-knowledge").strip()
+# AI 分析产物分支：orphan 分支，只放仓库地图/分析结果，与默认分支隔离。
+ORG_REPO_ANALYSIS_BRANCH = (os.environ.get("ORG_REPO_ANALYSIS_BRANCH") or "grape-repo-analysis").strip()
+
 
 def _org_lock(org_id: str) -> threading.Lock:
     with _GUARD:
@@ -52,8 +58,8 @@ def schedule_sync(org_id: str, delay: float = _SYNC_DEBOUNCE_SECONDS) -> None:
         if old is not None:
             try:
                 old.cancel()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                log.debug(f"org-analysis timer cancel skipped: {exc}")
         timer = threading.Timer(delay, _fire, args=(org_id,))
         timer.daemon = True
         _SYNC_TIMERS[org_id] = timer
@@ -469,14 +475,17 @@ def _render_files(org_id: str) -> dict[str, str]:
     _put("org-context/repos/index.json", json.dumps(
         {"org_id": org_id, "repos": repo_index}, ensure_ascii=False, indent=2))
 
-    # 仓库地图（MD-first）：组织仓库内保留每仓 summary.md + index/README
-    try:
-        from src.domains.mgmt.org_repo_map import repo_map_markdown_files
+    # 仓库地图（MD-first）：默认只写独立分析分支 grape-repo-analysis，
+    # 不再混入组织仓库默认分支（与代码/上下文隔离）。需要兼容旧布局时设
+    # ORG_CONTEXT_SYNC_REPO_MAP=1。
+    if os.environ.get("ORG_CONTEXT_SYNC_REPO_MAP", "0").strip().lower() in ("1", "true", "yes", "on"):
+        try:
+            from src.domains.mgmt.org_repo_map import repo_map_markdown_files
 
-        for rel, content in (repo_map_markdown_files(org_id) or {}).items():
-            _put(rel, content)
-    except Exception as e:
-        log.warning(f"org-context sync: render repo-map failed org={org_id}: {e}")
+            for rel, content in (repo_map_markdown_files(org_id) or {}).items():
+                _put(rel, content)
+        except Exception as e:
+            log.warning(f"org-context sync: render repo-map failed org={org_id}: {e}")
 
     # 组织知识（active）
     for k in list_knowledge(org_id, status="active", limit=200):
@@ -580,6 +589,147 @@ def _clone_url(repo_key: str) -> str:
     return f"{hosts.get(provider, hosts['gitcode'])}/{owner}/{name}.git"
 
 
+_ANALYSIS_SYNC_TIMERS: dict[str, threading.Timer] = {}
+
+
+def schedule_analysis_sync(org_id: str, delay: float = _SYNC_DEBOUNCE_SECONDS) -> None:
+    """把 AI 分析产物同步到 grape-repo-analysis 分支（去抖）。"""
+    org_id = str(org_id or "")
+    if not org_id:
+        return
+
+    def _fire() -> None:
+        with _GUARD:
+            _ANALYSIS_SYNC_TIMERS.pop(org_id, None)
+        try:
+            sync_org_analysis_to_repo(org_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"org-analysis sync failed org={org_id}: {exc}")
+
+    with _GUARD:
+        old = _ANALYSIS_SYNC_TIMERS.pop(org_id, None)
+        if old is not None:
+            old.cancel()
+        timer = threading.Timer(delay, _fire)
+        timer.daemon = True
+        _ANALYSIS_SYNC_TIMERS[org_id] = timer
+        timer.start()
+
+
+def _clear_dir_except_git(work: str) -> None:
+    """清空工作副本里的业务文件（保留 .git），用于 orphan 分支首次提交。"""
+    try:
+        for name in os.listdir(work):
+            if name == ".git":
+                continue
+            path = os.path.join(work, name)
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"org-analysis sync clean failed work={work}: {exc}")
+
+
+def sync_org_analysis_to_repo(org_id: str) -> bool:
+    """把仓库地图/AI 分析产物同步到组织仓库的 grape-repo-analysis 分支。
+
+    分支为 orphan（首次）或独立数据分支：只包含 org-context/repo-map/ 与 README，
+    不碰组织仓库默认分支（grape-repo-knowledge 或存量 main）。
+    """
+    from src.domains.mgmt.org_repo_map import repo_map_markdown_files
+    from src.domains.mgmt.user.org_db import get_org
+    from src.kernel.repo_key import workspace_repo_dir
+
+    org = get_org(str(org_id)) or {}
+    repo_key = str(org.get("org_repo_key") or "")
+    if not org or org.get("is_personal") or not repo_key:
+        return False
+    files = repo_map_markdown_files(str(org_id)) or {}
+    if not files:
+        return False
+    try:
+        from src.api.deps import get_user_token_for_repo
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
+
+        owner_id = str(org.get("owner_id") or "")
+        acc = get_grape_account_by_id(owner_id) or {}
+        username = acc.get("username") or ""
+        token = get_user_token_for_repo(repo_key, username, owner_id) if username else ""
+        if not token:
+            log.warning(f"org-analysis sync: no token org={org_id} repo={repo_key}")
+            return False
+
+        work = os.path.join(workspace_repo_dir(repo_key), "grape-repo-analysis-sync")
+        _run = runtime_public.run_git
+        _scheme = runtime_public.clone_auth_scheme_for(repo_key)
+        if not os.path.isdir(os.path.join(work, ".git")):
+            os.makedirs(os.path.dirname(work), exist_ok=True)
+            clone = _run(["clone", "--depth", "1", _clone_url(repo_key), work],
+                         token=token, timeout=300, scheme=_scheme)
+            if clone is None or clone.returncode != 0:
+                log.warning(f"org-analysis sync: clone failed repo={repo_key}: "
+                            f"{(clone.stderr if clone else 'git exec failed')[:200]}")
+                return False
+
+        # 优先切到已存在的分析分支；不存在则创建 orphan 分支并清空主分支内容。
+        fetch = _run(["-C", work, "fetch", "origin", ORG_REPO_ANALYSIS_BRANCH,
+                      "--depth", "1"], token=token, timeout=180, scheme=_scheme)
+        if fetch is not None and fetch.returncode == 0:
+            co = _run(["-C", work, "checkout", "-B", ORG_REPO_ANALYSIS_BRANCH, "FETCH_HEAD"],
+                      token=token, timeout=120, scheme=_scheme)
+        else:
+            co = _run(["-C", work, "checkout", "--orphan", ORG_REPO_ANALYSIS_BRANCH],
+                      token=token, timeout=120, scheme=_scheme)
+            if co is None or co.returncode != 0:
+                co = _run(["-C", work, "checkout", "-B", ORG_REPO_ANALYSIS_BRANCH],
+                          token=token, timeout=120, scheme=_scheme)
+            # orphan 分支会把默认分支文件带进 index；清掉，保证分析分支与代码隔离
+            _run(["-C", work, "rm", "-rf", "--cached", "."], token=token, scheme=_scheme)
+            _clear_dir_except_git(work)
+        if co is None or co.returncode != 0:
+            log.warning(f"org-analysis sync: checkout failed repo={repo_key}: "
+                        f"{(co.stderr if co else 'git exec failed')[:200]}")
+            return False
+
+        # 覆盖写：删掉旧 repo-map，避免已解绑仓库的陈旧文件残留
+        shutil.rmtree(os.path.join(work, "org-context", "repo-map"), ignore_errors=True)
+        for rel, content in files.items():
+            path = os.path.join(work, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content if str(content).endswith("\n") else str(content) + "\n")
+        add = _run(["-C", work, "add", "-A"], token=token, scheme=_scheme)
+        if add is None or add.returncode != 0:
+            return False
+        diff = _run(["-C", work, "diff", "--cached", "--quiet"], token=token, scheme=_scheme)
+        if diff is not None and diff.returncode == 0:
+            return False
+        msg = f"chore(grape-repo-analysis): refresh AI repo map ({time.strftime('%Y-%m-%d %H:%M')})"
+        cm = _run(["-C", work, "-c", "user.name=Grape", "-c", "user.email=grape@local",
+                   "commit", "-m", msg], token=token, timeout=120, scheme=_scheme)
+        if cm is None or cm.returncode != 0:
+            log.warning(f"org-analysis sync: commit failed repo={repo_key}: "
+                        f"{(cm.stderr if cm else 'git exec failed')[:200]}")
+            return False
+        push = _run(["-C", work, "push", "origin",
+                     f"HEAD:refs/heads/{ORG_REPO_ANALYSIS_BRANCH}"],
+                    token=token, timeout=180, scheme=_scheme)
+        if push is None or push.returncode != 0:
+            log.warning(f"org-analysis sync: push failed repo={repo_key}: "
+                        f"{(push.stderr if push else 'git exec failed')[:200]}")
+            return False
+        log.info(f"org-analysis sync: pushed {len(files)} file(s) to "
+                 f"{repo_key}#{ORG_REPO_ANALYSIS_BRANCH}")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"org-analysis sync failed org={org_id}: {exc}")
+        return False
+
+
 def sync_org_context_to_repo(org_id: str) -> bool:
     """同步一次组织 `org-context/` 到组织仓库默认分支；返回是否有提交。
 
@@ -614,6 +764,7 @@ def sync_org_context_to_repo(org_id: str) -> bool:
                 return False
 
             work = os.path.join(workspace_repo_dir(repo_key), "org-context-sync")
+            _unborn = False
             _run = runtime_public.run_git
             _scheme = runtime_public.clone_auth_scheme_for(repo_key)
             if not os.path.isdir(os.path.join(work, ".git")):
@@ -628,25 +779,29 @@ def sync_org_context_to_repo(org_id: str) -> bool:
                 br = _run(["-C", work, "rev-parse", "--abbrev-ref", "HEAD"], token=token, scheme=_scheme)
                 _branch = (br.stdout or "").strip() if br is not None else ""
                 if not _branch or _branch == "HEAD":
-                    _branch = "main"
-                fetch = _run(["-C", work, "fetch", "origin", _branch, "--depth", "1"],
-                             token=token, timeout=180, scheme=_scheme)
-                if fetch is None or fetch.returncode != 0:
-                    log.warning(f"org-context sync: fetch failed repo={repo_key}")
-                    return False
-                # 单分支浅克隆可能没有 remote.origin.fetch refspec（无 origin/<branch>
-                # 引用），fetch 后统一用 FETCH_HEAD 对齐。
-                pull = _run(["-C", work, "reset", "--hard", "FETCH_HEAD"],
-                            token=token, timeout=120, scheme=_scheme)
-                if pull is None or pull.returncode != 0:
-                    log.warning(f"org-context sync: reset failed repo={repo_key}: "
-                                f"{(pull.stderr if pull else 'git exec failed')[:200]}")
-                    return False
+                    # 空仓（首次 push 前）：不 fetch，直接建默认分支
+                    _branch = ORG_REPO_DEFAULT_BRANCH
+                    _unborn = True
+                if not _unborn:
+                    fetch = _run(["-C", work, "fetch", "origin", _branch, "--depth", "1"],
+                                 token=token, timeout=180, scheme=_scheme)
+                    if fetch is None or fetch.returncode != 0:
+                        log.warning(f"org-context sync: fetch failed repo={repo_key}")
+                        return False
+                    # 单分支浅克隆可能没有 remote.origin.fetch refspec（无 origin/<branch>
+                    # 引用），fetch 后统一用 FETCH_HEAD 对齐。
+                    pull = _run(["-C", work, "reset", "--hard", "FETCH_HEAD"],
+                                token=token, timeout=120, scheme=_scheme)
+                    if pull is None or pull.returncode != 0:
+                        log.warning(f"org-context sync: reset failed repo={repo_key}: "
+                                    f"{(pull.stderr if pull else 'git exec failed')[:200]}")
+                        return False
 
             br = _run(["-C", work, "rev-parse", "--abbrev-ref", "HEAD"], token=token, scheme=_scheme)
             branch = (br.stdout or "").strip() if br is not None else ""
             if not branch or branch == "HEAD":
-                branch = "main"
+                branch = ORG_REPO_DEFAULT_BRANCH
+                _unborn = True
 
             _clean_managed_org_context(work)
             for rel, content in files.items():
@@ -673,6 +828,16 @@ def sync_org_context_to_repo(org_id: str) -> bool:
                             f"{(push.stderr if push else 'git exec failed')[:200]}")
                 return False
             log.info(f"org-context sync: pushed {len(files)} file(s) to {repo_key}#{branch}")
+            if _unborn and branch == ORG_REPO_DEFAULT_BRANCH:
+                try:
+                    from src.domains.mgmt.user.repo_manager import set_default_branch
+                    from src.kernel.repo_key import parse_repo_key
+
+                    _prov, _own, _repo = parse_repo_key(repo_key)
+                    if set_default_branch(token, _own, _repo, branch, provider=_prov):
+                        log.info(f"org-context sync: default branch set to {branch} for {repo_key}")
+                except Exception as _de:
+                    log.warning(f"org-context sync: set default branch failed repo={repo_key}: {_de}")
             return True
         except Exception as e:
             log.warning(f"org-context sync failed org={org_id}: {e}")

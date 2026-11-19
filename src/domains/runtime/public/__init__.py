@@ -7477,6 +7477,24 @@ async def trigger_task_now(task_id: int) -> dict:
     return await _impl(task_id)
 
 
+def seed_official_skill_if_missing(skill_name: str, display_name: str, description: str,
+                                   agent_type: str, skill_path: str) -> bool:
+    """启动期补齐官方技能行（幂等；skill 表归 runtime 域）。"""
+    from src.domains.runtime.storage.skill_sync import seed_official_skill_if_missing as _impl
+
+    return _impl(skill_name, display_name, description, agent_type, skill_path)
+
+
+async def trigger_task_now_with_params(task_id: int, params: dict | None = None) -> dict:
+    """立即触发一次任务调度，并把本次参数注入 prompt（组织 AI 分析单次运行）。
+
+    scheduler.trigger_task_now 是 async；本函数供 mgmt 域通过 public 调用。
+    """
+    from src.domains.runtime.engine.scheduler import trigger_task_now as _impl
+
+    return await _impl(task_id, params or {})
+
+
 def normalize_dedup_level(raw) -> str:
     """去重级别归一。"""
     from src.domains.runtime.engine.scheduler import normalize_dedup_level as _impl

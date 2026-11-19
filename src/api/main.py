@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from src.api import server_common
-from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, org_repos, org_dispatches, community, org_context_store, org_knowledge, org_audit
+from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, org_repos, org_dispatches, community, org_context_store, org_knowledge, org_audit, org_analysis
 from src.domains.mgmt.routes import categories as categories_routes
 from src.domains.runtime.routes import events, chat, pipeline, webhook, tasks, runtime, task_logs, issues
 
@@ -667,6 +667,7 @@ app.include_router(org_context_store.router)
 app.include_router(org_knowledge.router)
 # 组织审计只读查询（Issue #2260）
 app.include_router(org_audit.router)
+app.include_router(org_analysis.router)
 app.include_router(community.router)
 
 app.include_router(observability.router)

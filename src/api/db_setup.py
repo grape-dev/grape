@@ -10742,6 +10742,70 @@ def _fn_rename_org_tables_and_uuid_pk() -> None:
                 log.info("org uuid-pk: issue.org_context_snapshot_id -> TEXT (SQLite)")
 
 
+def _fn_add_autopilot_exec_params() -> None:
+    """Autopilot 执行记录补 params_json（组织 AI 分析单次运行参数）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "autopilot_executions", "params_json", "MEDIUMTEXT DEFAULT ''")
+            db.commit()
+    except Exception as exc:  # 缺表/别域库：不阻断（runtime 进程会在本域库补齐）
+        log.warning(f"autopilot_executions.params_json ensure skipped: {exc}")
+
+
+def _fn_seed_org_repo_analyzer_skill() -> None:
+    """注册组织 AI 分析技能（通过 runtime public，避免 api 直写 skill 表）。"""
+    try:
+        from src.domains.runtime import public as _rt_public
+
+        _rt_public.seed_official_skill_if_missing(
+            "org-repo-analyzer",
+            "组织仓库 AI 分析",
+            "组织关联仓库的 AI 能力分析（只读，输出结构化摘要并回传平台）",
+            "qa",
+            "qa/org-repo-analyzer",
+        )
+    except Exception as exc:  # 分库/缺表不阻断
+        log.warning(f"seed org-repo-analyzer skill skipped: {exc}")
+
+
+def _fn_create_org_repo_ai_table() -> None:
+    """组织仓库 AI 分析台账表（与确定性地图分表）。"""
+    from src.domains.mgmt.schema_ddl import _ORG_REPO_AI_DDL
+
+    with db_lock:
+        c = db.cursor()
+        c.execute(_ORG_REPO_AI_DDL)
+        db.commit()
+
+
+register_migration(
+    version="202611191120",
+    name="create-org-repo-ai-table",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_create_org_repo_ai_table,
+)
+
+
+register_migration(
+    version="202611191110",
+    name="seed-org-repo-analyzer-skill",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_seed_org_repo_analyzer_skill,
+)
+
+
+register_migration(
+    version="202611191100",
+    name="add-autopilot-execution-params",
+    kind="safe",
+    domains=("runtime",),
+    fn=_fn_add_autopilot_exec_params,
+)
+
+
 register_migration(
     version="202611191000",
     name="rename-org-tables-and-uuid-pk",

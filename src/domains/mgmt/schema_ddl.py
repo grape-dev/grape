@@ -932,3 +932,22 @@ CREATE TABLE IF NOT EXISTS grape_t_org_repo_map (
     updated_at     TEXT DEFAULT (datetime('now'))
 )
 """
+
+# ===== 组织仓库 AI 分析运行/结果台账（与确定性地图分表，避免互相清空）=====
+_ORG_REPO_AI_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_org_repo_ai (
+    org_id         TEXT NOT NULL DEFAULT '',
+    repo_key       TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT '',     -- queued / running / succeeded / failed / skipped
+    result_json    TEXT DEFAULT '',              -- 模型回传的原始结构化结果
+    error          TEXT DEFAULT '',
+    engine_id      INTEGER DEFAULT 0,
+    source_commit  TEXT DEFAULT '',
+    result_hash    TEXT DEFAULT '',
+    triggered_by   TEXT DEFAULT '',              -- link / schedule / manual
+    analyzed_at    TEXT DEFAULT '',
+    created_at     TEXT DEFAULT (datetime('now')),
+    updated_at     TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (org_id, repo_key)
+)
+"""

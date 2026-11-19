@@ -104,6 +104,7 @@
     "grape_t_org_dispatch_aggregate": "mgmt",
     "grape_t_org_dispatch_target": "mgmt",
     "grape_t_org_repo_map": "mgmt",
+    "grape_t_org_repo_ai": "mgmt",
     "organization": "mgmt",
     "outbound_content_ledger": "mgmt",
     "pipeline_instances": "mgmt",

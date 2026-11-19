@@ -255,8 +255,8 @@ def _create_org_repo(org: dict) -> str:
                 description=_repo_description(org),
                 private=private,
                 visibility="private" if private else "public",
-                auto_init=True,
-                default_branch="main",
+                auto_init=False,
+                default_branch="grape-repo-knowledge",
                 host_after_create=False,
                 provider=options["provider"],
                 owner=options["owner"],
@@ -313,6 +313,13 @@ def _bind_org_repo(org: dict, repo_key: str) -> None:
                     "via": "org_provision",
                 },
             )
+        try:
+            from src.domains.mgmt import org_analysis
+
+            org_analysis.ensure_analysis_automation(str(org["id"] or ""),
+                                                     actor_id=str(org.get("owner_id") or ""))
+        except Exception as _ae:
+            log.warning(f"org_provision analysis automation failed org={org.get('id')}: {_ae}")
         return
     code = {
         "protected": "ORG_REPO_PROTECTED",
@@ -577,6 +584,13 @@ def manual_bind_org_repo(org_id: str, repo_key: str, *, actor_id: str = "",
                 "scene_id": scene_id,
             },
         )
+
+        try:
+            from src.domains.mgmt import org_analysis
+
+            org_analysis.ensure_analysis_automation(org_id, actor_id=actor_id)
+        except Exception as _ae:
+            log.warning(f"org_provision manual bind analysis automation failed org={org_id}: {_ae}")
 
         return _serialize_org(get_org(org_id))
 

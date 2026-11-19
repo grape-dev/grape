@@ -505,7 +505,8 @@ def fetch_org_namespaces(provider: str, api_token: str) -> list[dict]:
 
 
 def create_repo(api_token: str, name: str, description: str = "", private: bool = False,
-                owner: str = "", path: str = "") -> dict:
+                owner: str = "", path: str = "", auto_init: bool = False,
+                default_branch: str = "main") -> dict:
     """创建空仓库（POST /api/v5/user/repos，指定 owner 时 POST /api/v5/orgs/{owner}/repos）。
 
     owner 为空 = 在 token 用户个人空间创建；owner 为组织 path 时在组织空间创建。
@@ -522,8 +523,8 @@ def create_repo(api_token: str, name: str, description: str = "", private: bool 
         "name": name,
         "description": description,
         "private": bool(private),
-        "auto_init": False,
-        "default_branch": "main",
+        "auto_init": bool(auto_init),
+        "default_branch": (default_branch or "main"),
         "repository_type": "code",
         "path": repo_path,
     }
@@ -539,6 +540,32 @@ def create_repo(api_token: str, name: str, description: str = "", private: bool 
     if not full_name:
         raise RuntimeError(f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
     return result
+
+def set_default_branch(api_token: str, owner: str, repo: str, branch: str,
+                       provider: str = "gitcode") -> bool:
+    """把已存在分支设为仓库默认分支（新组织仓库 grape-repo-knowledge 收口）。
+
+    GitHub/GitCode 建仓时对自定义 default_branch 支持不一致；统一在建出首个分支后
+    通过平台 API 校正。失败只返回 False，由调用方 best-effort 记录。
+    """
+    branch = (branch or "").strip()
+    if not (api_token and owner and repo and branch):
+        return False
+    prov = (provider or "gitcode").strip().lower()
+    try:
+        if prov == "github":
+            _github_req("PATCH", f"{_GITHUB_API_BASE}/repos/{owner}/{repo}",
+                        api_token, {"default_branch": branch})
+            return True
+        if prov == "gitcode":
+            _req("PATCH", f"{API_BASE}/repos/{urllib.parse.quote(owner, safe='')}/"
+                          f"{urllib.parse.quote(repo, safe='')}",
+                 api_token, {"default_branch": branch})
+            return True
+    except Exception as exc:
+        log.warning(f"set default branch failed provider={prov} {owner}/{repo} -> {branch}: {exc}")
+    return False
+
 
 def delete_gitcode_repo(api_token: str, owner: str, repo: str) -> bool:
     """删除 GitCode 仓库（DELETE /api/v5/repos/{owner}/{repo}）。
@@ -1273,7 +1300,8 @@ def check_github_is_collaborator(api_token: str, owner: str, repo: str, username
         return False
 
 def create_github_repo(api_token: str, name: str, description: str = "", private: bool = False,
-                       owner: str = "", path: str = "") -> dict:
+                       owner: str = "", path: str = "", auto_init: bool = False,
+                       default_branch: str = "") -> dict:
     """创建空仓库（个人空间 POST /user/repos，指定 owner 时 POST /orgs/{owner}/repos）。
 
     GitHub 的仓库路径恒等于仓库名，path 参数仅为与服务端统一签名而保留（忽略）。
@@ -1290,7 +1318,7 @@ def create_github_repo(api_token: str, name: str, description: str = "", private
         "name": name,
         "description": description,
         "private": bool(private),
-        "auto_init": False,
+        "auto_init": bool(auto_init),
     }
     endpoint = (f"{_GITHUB_API_BASE}/orgs/{urllib.parse.quote(owner, safe='')}/repos"
                 if owner else f"{_GITHUB_API_BASE}/user/repos")

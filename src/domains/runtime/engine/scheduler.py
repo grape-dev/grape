@@ -307,12 +307,33 @@ def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
         parts.extend(env_lines)
         parts.append("")
 
+    _run_params = task.get("_run_params") or {}
+    _is_org_analysis = False
+    try:
+        for _f in json.loads(task.get("custom_fields") or "[]"):
+            if str(_f.get("name") or "") == "GRAPE_MANAGED_BY" and \
+                    str(_f.get("value") or "") == "org-analysis":
+                _is_org_analysis = True
+                break
+    except Exception as _ce:  # noqa: BLE001
+        log.debug(f"Autopilot custom_fields parse skipped: {_ce}")
+    if _run_params:
+        parts.append("\n## 本次运行参数（JSON）\n")
+        parts.append("```json")
+        parts.append(json.dumps(_run_params, ensure_ascii=False, indent=2))
+        parts.append("```")
     parts.append("\n请执行以上任务指令，分析仓库代码/依赖/文档/配置等。")
-    parts.append("\n## 输出格式要求\n")
-    parts.append(_FINDINGS_FORMAT_TEMPLATE)
+    if _is_org_analysis:
+        parts.append("\n## 输出要求\n")
+        parts.append("严格按 org-repo-analyzer 技能执行：通过平台 API 获取上下文并回传结构化 JSON；"
+                     "不要输出 findings 列表，不要修改仓库代码，不要创建 Issue/PR。")
+    else:
+        parts.append("\n## 输出格式要求\n")
+        parts.append(_FINDINGS_FORMAT_TEMPLATE)
     parts.append("\n## 项目知识\n")
     parts.append("项目知识文档位于工作目录中，存在则用 read tool 读取。")
-    parts.append("\n执行以上指令，不要操作 GitCode Issue（不需要回帖/打标签/关 Issue），结果直接输出。")
+    if not _is_org_analysis:
+        parts.append("\n执行以上指令，不要操作 GitCode Issue（不需要回帖/打标签/关 Issue），结果直接输出。")
     return "\n".join(parts)
 
 def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
@@ -335,6 +356,27 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
 
     # 1. 选引擎
     engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=0)
+    # legacy 模式 / 无场景绑定时，按任务级 engine_runtime_ids 随机选健康引擎。
+    # 组织 AI 分析任务通过该路径实现「随机可用运行时」，不依赖场景绑定。
+    if engine_id is None:
+        try:
+            _raw_ids = task.get("engine_runtime_ids") or ""
+            _ids = json.loads(_raw_ids) if isinstance(_raw_ids, str) else _raw_ids
+            if isinstance(_ids, list) and _ids:
+                from src.domains.runtime.engine.engine_select import (
+                    _engines_by_ids, _health_ok, _norm_repo, load_engine_selection,
+                )
+                _members = _engines_by_ids(
+                    [int(x) for x in _ids if str(x).strip().isdigit()],
+                    _norm_repo(repo_key), load_engine_selection())
+                _healthy = [m for m in _members if _health_ok(m)]
+                if _healthy:
+                    import random as _random
+                    engine_id = _random.choice(_healthy)["runtime_id"]
+                    log.info(f"Autopilot exec {exec_id}: picked random task engine "
+                             f"id={engine_id} from {len(_healthy)} healthy")
+        except Exception as _se:
+            log.warning(f"Autopilot exec {exec_id}: task engine pick failed: {_se}")
     if engine_id is None:
         log.warning(f"Autopilot exec {exec_id}: no engine for {agent_type}")
         _update_execution_result(exec_id, "failed", error="无可用引擎")
@@ -1092,16 +1134,16 @@ def _compute_next_run(cron_expr: str) -> str:
     except Exception:
         return ""
 
-def _create_execution(task_id: int, agent_type: str) -> int:
-    """创建执行记录，返回 execution_id。"""
+def _create_execution(task_id: int, agent_type: str, params_json: str = "") -> int:
+    """创建执行记录，返回 execution_id。params_json 记录本次一次性触发参数。"""
     now_str = datetime.now().astimezone().isoformat()
     with db_lock:
         c = db.cursor()
         c.execute(
             "INSERT INTO autopilot_executions "
-            "(task_id, status, retry_count, started_at, created_at, agent_type) "
-            "VALUES (?, 'running', 0, ?, ?, ?)",
-            (task_id, now_str, now_str, agent_type)
+            "(task_id, status, retry_count, started_at, created_at, agent_type, params_json) "
+            "VALUES (?, 'running', 0, ?, ?, ?, ?)",
+            (task_id, now_str, now_str, agent_type, params_json or "")
         )
         db.commit()
         return c.lastrowid
@@ -1328,8 +1370,10 @@ async def _execute_task(task: dict):
         max_retry = task["max_retry"]
         agent_type = _FIXED_AGENT_TYPE
 
+        _run_params = task.get("_run_params") or {}
+        _params_json = json.dumps(_run_params, ensure_ascii=False) if _run_params else ""
         for attempt in range(max_retry + 1):
-            exec_id = _create_execution(task_id, agent_type)
+            exec_id = _create_execution(task_id, agent_type, _params_json)
             log.info(f"Autopilot: executing task {task_id} ('{task['name']}'), exec_id={exec_id}, attempt={attempt}")
 
             # 在线程池中执行 agent（不阻塞事件循环）
@@ -1759,8 +1803,8 @@ async def stop_scheduler():
         _scheduler_task = None
         log.info("Autopilot scheduler stopped")
 
-async def trigger_task_now(task_id: int) -> dict:
-    """手动触发任务执行（异步入口）。"""
+async def trigger_task_now(task_id: int, params: dict | None = None) -> dict:
+    """手动触发任务执行（异步入口）。params 作为本次一次性运行参数注入 prompt。"""
     # autopilot_tasks 归 mgmt：单行全列走归属域任意拓扑原语。
     # 原 lib 分支写的是 `c = lib.read_one(...).fetchone()`（元组再取 fetchone → AttributeError，
     # 且错赋给 c 让 row 未绑定），lib 可用时手动触发恒抛错——本批一并修正。
@@ -1780,5 +1824,6 @@ async def trigger_task_now(task_id: int) -> dict:
     }
     if task["id"] in _RUNNING_TASKS:
         return {"ok": False, "message": "task already running"}
+    task["_run_params"] = dict(params or {})
     asyncio.create_task(_execute_task(task))
     return {"ok": True, "message": "task triggered"}

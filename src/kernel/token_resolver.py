@@ -36,6 +36,21 @@ from src.kernel.ports import repos as _repos
 from src.kernel.ports import tokens as _tokens
 from src.kernel.ports import vcs_cards as _vcs_cards
 
+_CREATE_REPO_KWARG_PROVIDERS = {"gitcode", "github"}
+
+
+def create_repo_kwargs(provider: str, auto_init: bool = False,
+                       default_branch: str = "") -> dict:
+    """建仓可选参数（仅支持自定义默认分支/初始化的 provider 才透传）。
+
+    provider 差异收敛在 kernel 层，避免调用方（mgmt/repos.py）出现平台名比较。
+    """
+    if str(provider or "").lower() in _CREATE_REPO_KWARG_PROVIDERS:
+        return {"auto_init": bool(auto_init),
+                "default_branch": (default_branch or "main")}
+    return {}
+
+
 def get_bot_identity_token(repo_key: str) -> str:
     """回帖/评论专用：只解析 **bot 身份** token（仓库 bot → 全局 bot），不落用户 token。
 
@@ -556,10 +571,11 @@ class GitCodeProvider(GenericVcsProvider):
         return _repos.accept_invite_for_repo(bot_token, owner, repo)
 
     def create_repo(self, api_token, name, description="", private=False,
-                    owner="", path="") -> dict:
+                    owner="", path="", auto_init=False, default_branch="main") -> dict:
         # D42/S62：存量委托（v5 form 语义；owner=组织空间，path=仓库 URL 路径）
         return _repos.create_repo(api_token=api_token, name=name, description=description,
-                                  private=private, owner=owner, path=path)
+                                  private=private, owner=owner, path=path,
+                                  auto_init=auto_init, default_branch=default_branch)
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
         # D42/S62：存量委托（含 429/5xx 退避）
@@ -622,10 +638,11 @@ class GitHubProvider(GenericVcsProvider):
         return _repos.accept_github_invite(bot_token, owner, repo)
 
     def create_repo(self, api_token, name, description="", private=False,
-                    owner="", path="") -> dict:
+                    owner="", path="", auto_init=False, default_branch="") -> dict:
         # D42/S62：存量委托（owner=组织空间；GitHub 仓库路径恒等于 name，path 忽略）
         return _repos.create_github_repo(api_token=api_token, name=name, description=description,
-                                         private=private, owner=owner, path=path)
+                                         private=private, owner=owner, path=path,
+                                         auto_init=auto_init)
 
     def find_existing_webhook(self, api_token, owner, repo, webhook_url):
         # D42/S62：存量委托（FR-5.1 空列表=None 不误判）

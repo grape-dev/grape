@@ -40,17 +40,34 @@ class TransferRepoBody(BaseModel):
     target_org: str = ""
 
 
-def _schedule_repo_map_analysis(org_id: str, repo_key: str) -> None:
-    """仓库绑定后自动生成/刷新仓库地图（后台，不阻断绑定请求）。"""
+def _schedule_repo_map_analysis(org_id: str, repo_key: str, actor_id: str | int = 0) -> None:
+    """仓库绑定后自动触发 AI 分析（后台，不阻断绑定请求），并确保每日任务存在。
+
+    AI 调度失败时回落到确定性分析，保证仓库地图至少不是空态。
+    """
     def _run():
         try:
-            from src.domains.mgmt.org_repo_map import analyze_repo
+            from src.domains.mgmt import org_analysis
 
-            analyze_repo(org_id, repo_key)
+            org_analysis.ensure_analysis_automation(org_id, actor_id=actor_id)
+            result = org_analysis.request_repo_analysis(
+                org_id, repo_key, trigger="link", actor_id=actor_id)
+            if not result.get("ok"):
+                from src.domains.mgmt.org_repo_map import analyze_repo
+
+                analyze_repo(org_id, repo_key)
         except Exception as exc:  # noqa: BLE001 - best-effort
             from src.kernel.config import log
 
             log.warning(f"org repo map auto-analyze failed org={org_id} repo={repo_key}: {exc}")
+            try:
+                from src.domains.mgmt.org_repo_map import analyze_repo
+
+                analyze_repo(org_id, repo_key)
+            except Exception as fallback_exc:  # noqa: BLE001
+                from src.kernel.config import log as _log
+
+                _log.warning(f"org repo map deterministic fallback failed org={org_id} repo={repo_key}: {fallback_exc}")
 
     threading.Thread(
         target=_run, name=f"org-repo-map-{org_id}-{repo_key}", daemon=True,
@@ -235,7 +252,7 @@ def _bind_one(org: dict, org_id: str, user: dict, repo_key: str) -> dict:
         detail={"org_id": org_id, "repo_key": repo_key},
     )
     _schedule_context_sync(org_id)
-    _schedule_repo_map_analysis(org_id, repo_key)
+    _schedule_repo_map_analysis(org_id, repo_key, user["id"])
     return _repo_payload(row)
 
 
@@ -334,6 +351,14 @@ def transfer_repo(org_id: str, repo_key: str, body: TransferRepoBody,
     )
     _schedule_context_sync(org_id)
     _schedule_context_sync(target_org_id)
+    try:
+        from src.domains.mgmt import org_analysis
+
+        org_analysis.ensure_analysis_automation(target_org_id, actor_id=user["id"])
+    except Exception as ensure_exc:  # noqa: BLE001
+        from src.kernel.config import log as _log
+
+        _log.warning(f"org analysis automation ensure failed org={target_org_id}: {ensure_exc}")
     return _repo_payload(get_managed_repo_binding(source_key) or row)
 
 

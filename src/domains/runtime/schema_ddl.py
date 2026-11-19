@@ -524,6 +524,7 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
     status          TEXT NOT NULL DEFAULT 'pending',     -- pending/running/success/failed/retrying
     retry_count     INTEGER NOT NULL DEFAULT 0,          -- 已重试次数
     result          MEDIUMTEXT DEFAULT '',               -- 执行结果摘要
+    params_json     MEDIUMTEXT DEFAULT '',               -- 本次手动触发的运行参数（JSON）
     error           MEDIUMTEXT DEFAULT '',               -- 错误信息
     a2a_seq         INTEGER DEFAULT NULL,                -- 关联 agent_tasks.event_seq（=exec_id）
     started_at      TEXT DEFAULT '',                     -- 开始时间

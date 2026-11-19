@@ -341,6 +341,34 @@ def _detect_stale_official_skills(repo_skill_names: set, traversal_complete: boo
     return len(stale)
 
 
+def seed_official_skill_if_missing(skill_name: str, display_name: str, description: str,
+                                   agent_type: str, skill_path: str) -> bool:
+    """官方技能行幂等补齐（供启动期 seed；表归 runtime 域）。
+
+    不覆盖已有行：只 INSERT OR IGNORE；后续 sync_official_skills 会按
+    skill-description.json 更新元信息。
+    """
+    from src.kernel.owner_db import db_pair as _db_pair
+
+    _db, _db_lock = _db_pair("runtime")
+    try:
+        with _db_lock:
+            c = _db.cursor()
+            c.execute(
+                "INSERT OR IGNORE INTO skill "
+                "(skill_name, display_name, description, agent_type, skill_path, "
+                "scope, owner_id, content_hash, sub_scene, category_id, "
+                "cat_l1_id, cat_l2_id, tags) "
+                "VALUES (?, ?, ?, ?, ?, 'official', '', '', '', 0, 0, 0, '')",
+                (skill_name, display_name, description, agent_type, skill_path),
+            )
+            _db.commit()
+        return True
+    except Exception as exc:  # 缺表/分库未就绪：调用方降级
+        logger.warning(f"seed official skill skipped skill={skill_name}: {exc}")
+        return False
+
+
 async def sync_official_skills() -> dict:
     """完整同步：远程下载 → DB 同步（含 stale 检测）→ OBS 同步 → 串行场景同步。
 

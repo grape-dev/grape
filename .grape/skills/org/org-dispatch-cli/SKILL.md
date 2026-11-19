@@ -64,8 +64,22 @@ grape org dispatches target retry --org_id "$ORG_ID" --dispatch_id "$DISPATCH_ID
 
 ## 执行流程
 
+0. **读取 AI 仓库分析文档（优先）**
+   ```
+   GET $GRAPE_SERVER_URL/api/orgs/{ORG_ID}/repo-analysis/docs
+   Authorization: Bearer $GRAPE_SESSION_TOKEN
+   ```
+   返回 `repos[]`：`repo_key / full_name / purpose / domains / keywords /
+   interfaces / depends_on / confidence / summary_md`，文档分支为
+   `grape-repo-analysis`。
+   - 用「组织需求 + 上述文档」做 AI 选仓，生成 `targets` 与每个目标的匹配理由；
+   - `targets` 必须是组织关联仓库（组织自动仓库不参与下派）；
+   - 低置信度（无明确匹配 / confidence 低）时回落到
+     `GET /api/orgs/{id}/repo-map/recall?q=...` 的确定性召回；
+     仍无目标 → `NO_CONFIDENT_TARGET`，禁止静默全量下派；
+   - 把选择理由写入 `context.decisions` 与 description，便于审计。
 1. 校验 plan：组织 Issue 编号、目标列表、context 与 acceptance 完整。
-2. 调用 `grape org dispatches create`。服务端按组织、组织 Issue 与稳定 targets 集合幂等，
+2. 调用 `grape org dispatches create`（显式 targets）。服务端按组织、组织 Issue 与稳定 targets 集合幂等，
    客户端不额外传递幂等键。
 3. 输出 `dispatch_id`、dispatch 状态和每个 target 的 `repo_key`、`child_issue_number`、
    `status`、`error`。
