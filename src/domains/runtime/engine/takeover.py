@@ -172,7 +172,7 @@ def active_takeover_in_repo(repo_key: str) -> dict | None:
             c.execute(
                 f"UPDATE takeover_sessions SET status=?, active_key=NULL, updated_at=? "
                 f"WHERE {where} AND token_expires_at > 0 AND token_expires_at < ?",
-                (ST_EXPIRED, _now_iso(), now),
+                (ST_EXPIRED, _now_iso(), repo_key, now),
             )
             db.commit()
     except Exception as e:
