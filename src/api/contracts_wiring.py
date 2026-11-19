@@ -117,6 +117,9 @@ PORT_TARGETS: dict[str, tuple[str, ...]] = {
     "repos": (
         "src.domains.mgmt.user.repo_manager",
         "src.domains.mgmt.public",
+        # 仓库级联清理要读技能根目录常量 SKILL_DIR（skills/repo/{repo_key} 的父目录）；
+        # 该常量只在 mgmt.user.db 定义，排最后不影响上面两个候选的既有符号解析。
+        "src.domains.mgmt.user.db",
     ),
     "accounts": (
         "src.domains.mgmt.auth.grape_account_db",
