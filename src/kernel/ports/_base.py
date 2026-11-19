@@ -38,6 +38,22 @@ class Port(Protocol):
         ...
 
 
+_POST_BIND_HOOKS: list[Any] = []
+
+
+def on_bind(hook: Any) -> None:
+    """Register a kernel-side initialiser that must run once implementations exist.
+
+    Kernel modules used to do work at import time by calling a domain function
+    directly (schema bootstrap on the caller's connection). After the inversion the
+    same work has to go through a port, which is unbound at import time — resolving
+    it then would raise PortNotBound and break every early importer. Such a module
+    registers its deferred initialiser here instead; the assembly layer's `bind()`
+    calls fire it. Ports themselves stay fail-fast: a *use* while unbound still raises.
+    """
+    _POST_BIND_HOOKS.append(hook)
+
+
 class _Registry:
     """Process-wide port registry.
 
@@ -60,6 +76,10 @@ class _Registry:
                     f"is rebinding it deliberately"
                 )
             self._bindings[name] = impl
+        # 在绑钩子在锁外执行：钩子是 kernel 侧的延后初始化（例如 import 期不能碰端口的
+        # 建表引导），它们会再次读取端口，持锁调用会给自己上锁。
+        for hook in tuple(_POST_BIND_HOOKS):
+            hook(name)
 
     def get(self, name: str) -> Any:
         impl = self._bindings.get(name)
