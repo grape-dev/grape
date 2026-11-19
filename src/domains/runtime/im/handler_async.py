@@ -18,6 +18,8 @@ from src.kernel.config import log
 from src.kernel.config import WORKSPACE_DIR, SKILLS_DIR
 from src.domains.runtime.im.channel.card import Card
 
+from src.domains.runtime.im.reply_limits import MAX_REPLY_CHARS
+
 from src.kernel.session_manager import get_or_create_session, update_session, update_conversation, db
 
 from src.kernel.prompt_builder import build_chat_prompt, resolve_task_server_env
@@ -85,6 +87,9 @@ _pending_image_desc: dict[str, dict] = {}
 _MAX_INLINE_LEN = 1500
 
 _UPDATE_MIN_INTERVAL = 0.8
+
+# 终态回复正文上限（2026-11-19 由写死的 2000 放宽到 10000，口径见 reply_limits）
+_MAX_REPLY_CHARS = MAX_REPLY_CHARS
 
 def _set_pending_image(chat_id: str, desc: str):
     _pending_image_desc[chat_id] = {"desc": desc, "expires": time.time() + _PENDING_IMAGE_TTL}
@@ -1395,7 +1400,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                                     bind_feishu_identity(uid, bind_open_id, feishu_name=feishu_name,
                                                           app_id=ctx.app_id)
                                     _pending_binds.pop(key, None)
-                                    await egress.reply_text(ctx, msg_id, f"✅ 已确认，你的 GitCode 账号「{username}」已绑定当前飞书账号。")
+                                    await egress.reply_text(ctx, msg_id, f"✅ 已确认，你的 Grape 账号「{username}」已绑定当前飞书账号。")
                                     log.info(f"Chat: confirmed feishu mapping for {username} (app={ctx.app_id[:20]})")
                                     return
                                 elif _DENY_RE.match(text.strip()):
@@ -1404,7 +1409,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                                     return
                                 else:
                                     # 既不是确认也不是否认，重新提示
-                                    await egress.reply_text(ctx, msg_id, f"请问你的 GitCode 昵称是否是「{nickname or username}」？请回复「是」或「不是」。")
+                                    await egress.reply_text(ctx, msg_id, f"请问你的 Grape 账号昵称是否是「{nickname or username}」？请回复「是」或「不是」。")
                                     return
                             else:
                                 # 首次：发确认询问，不直接绑定
@@ -1413,7 +1418,7 @@ async def process_chat_async(ctx: "BotContext", egress: "HandlerEgress", parsed:
                                     "gitcode_nickname": nickname,
                                     "expires": now + _PENDING_TTL,
                                 }
-                                await egress.reply_text(ctx, msg_id, f"🤝 检测到你正在与我私聊。为绑定你的 GitCode 账号，请确认：\n你的 GitCode 昵称是否是「{nickname or username}」？\n回复「是」确认绑定，回复「不是」则取消。")
+                                await egress.reply_text(ctx, msg_id, f"🤝 检测到你正在与我私聊。为绑定你的 Grape 账号，请确认：\n你的 Grape 账号昵称是否是「{nickname or username}」？\n回复「是」确认绑定，回复「不是」则取消。")
                                 return
             except Exception as e:
                 log.warning(f"Chat: auto-bind feishu mapping failed: {e}")
@@ -1959,7 +1964,7 @@ async def _process_chat_inner_async(ctx: "BotContext", egress: "HandlerEgress",
         if output == "SKIP":
             log.info("Agent decided to SKIP (no reply needed)")
         elif output:
-            await egress.send_card_to_chat(ctx, chat_id, output[:2000], fallback_open_id=open_id)
+            await egress.send_card_to_chat(ctx, chat_id, output[:_MAX_REPLY_CHARS], fallback_open_id=open_id)
             # 共享消息存储：agent 答复回写当前 conversation，Web Chat Agent 页可见
             #（feishu-web-chat-unified-design.md §3.2）
             # Step 1：带 chat_task_id + 终态 generate_status（2=成功 / 3=失败），
