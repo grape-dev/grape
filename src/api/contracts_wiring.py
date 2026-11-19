@@ -130,7 +130,9 @@ PORT_TARGETS: dict[str, tuple[str, ...]] = {
     ),
     "accounts": (
         "src.domains.mgmt.auth.grape_account_db",
-        "src.domains.mgmt.auth.security_config",
+        # security_config 已迁入 kernel（kernel 不得依赖 domain），因此这里指向
+        # 内核自身模块，而不是还在 domains 下的陈旧路径。
+        "src.kernel.security_config",
         "src.domains.mgmt.auth",
         "src.domains.mgmt.public",
     ),
