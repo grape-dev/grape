@@ -18,7 +18,7 @@ import time as _time
 from src.kernel.host_identity import engine_host  # Issue #2094: 引擎/设备身份（GRAPE_HOSTNAME 可覆盖）
 from src.kernel.config import CONFIG_DIR, log
 from src.kernel.session_manager import db
-from src.kernel.repo_key import repo_key_in_params
+from src.kernel.repo_key import repo_key_in_params, from_repo_key
 from src.domains.runtime.engine.agent_tags import load_engine_tags
 
 _ENGINE_SELECTION_PATH = os.path.join(CONFIG_DIR, "engine-selection.json")
@@ -235,13 +235,53 @@ def _all_engines_snapshot() -> list:
              "role_tags": r[9] or ""} for r in rows]
 
 
+def _selector_scope_blocks(m: dict, repo_key: str = "", user_id: int = 0) -> bool:
+    """Issue #1208：claim 第 ⑥ 级 scope 隔离在候选集里的同尺判定（2026-11-19）。
+
+    背景：selector 候选/命中预览此前对所有档位引擎一律放行（仅 SRE 收紧 global），
+    而 claim_by_tag 的 scope SQL 是隔离的——repo 档只认领本仓任务、user 档只认领
+    owner 本人创建的任务。于是别人的个人引擎、别的仓库的仓库级引擎被算成「命中」：
+    场景详情页徽章按全库候选计 6 台，弹窗按 dashboard 可见引擎计 4 台；更关键的是
+    入队 fail-closed 门禁（selector_enqueue_failure_reason）同样被这批永远认领不到的
+    引擎骗过，任务照常入队后没人接。
+
+    判定与 claim 同尺（agent_runtimes 的 scope/owner_id 是凭据的镜像列）：
+    - credential_id=0（本机直连）→ 不设限（claim 侧不查凭据 scope）；
+    - global → 不设限（可认领任意仓库的池任务）；
+    - user → owner_id 必须等于请求 user_id（claim 侧 t.user_id = owner 账号）；
+    - repo → owner_id 的 owner/repo 必须等于当前 repo_key（去平台前缀比较）。
+    上下文缺失（user_id=0 / repo_key 空）或 owner_id 未落库时该维度不设限：调用方
+    没给上下文就无法判定，宁放行不误杀（与既有 fail-open 容错口径一致）。
+    """
+    if (m.get("credential_id") or 0) == 0:
+        return False
+    scope = (m.get("scope") or "global").strip().lower()
+    if scope == "global":
+        return False
+    owner = str(m.get("owner_id") or "").strip()
+    if not owner:
+        return False
+    if scope == "user":
+        if not user_id:
+            return False
+        try:
+            return int(owner) != int(user_id)
+        except (TypeError, ValueError):
+            return owner != str(user_id)
+    if scope == "repo":
+        if not repo_key:
+            return False
+        return (from_repo_key(owner) or "").strip().lower() != (from_repo_key(repo_key) or "").strip().lower()
+    return False
+
+
 def selector_candidate_engines(selector: dict, agent_type: str,
                                repo_key: str = "", user_id: int = 0) -> tuple:
     """Issue #1208 入队即时校验（§2.3 步骤 2）：selector 候选集 + 分层排除原因。
 
     判定顺序即语义（对齐 claim 六层守卫，正交勿合并）：
       selector 匹配（agent_tags 派生快照）→ #658 角色硬过滤 → 健康尺子（#259 语义）→
-      SRE scope 过滤（user/repo 两档）。
+      SRE scope 收紧（user/repo 两档）→ 凭据 scope 隔离（第 ⑥ 级同尺）→ 能力行。
     返回 (matched, dropped)：matched 为通过全部过滤的引擎列表；
     dropped 为 [{"runtime_id", "name", "reason"}]，reason ∈ selector/role/offline/stale/scope，
     供命中预览分层标注与配置死/瞬时死分流判定复用。
@@ -270,6 +310,11 @@ def selector_candidate_engines(selector: dict, agent_type: str,
                 dropped.append({"runtime_id": rid, "name": m["name"], "reason": why})
                 continue
             if _is_sre and m.get("scope") not in ("user", "repo"):
+                dropped.append({"runtime_id": rid, "name": m["name"], "reason": "scope"})
+                continue
+            # 第 ⑥ 级 scope 隔离（claim_by_tag 同尺）：别人的 user 档引擎、别的仓库的
+            # repo 档引擎永远认领不到本场景任务，不能算命中（徽章/入队门禁同源）。
+            if _selector_scope_blocks(m, repo_key=repo_key, user_id=user_id):
                 dropped.append({"runtime_id": rid, "name": m["name"], "reason": "scope"})
                 continue
             # 能力行匹配（claim 第 1 级同款：精确 tag OR 'all'；tags 已含平铺行）
