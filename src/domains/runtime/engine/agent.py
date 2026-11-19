@@ -20,6 +20,11 @@ import base64 as _b64
 import urllib.request as _urllib
 import shutil as _shutil
 
+# `--self-check` 任务路径 import 失败时的退出码：与 78（sysexits.h EX_CONFIG，
+# root 拒绝）区分；安装脚本按非零码中止升级并保留旧 worker。79 无标准定名，
+# 在此显式登记来源（Issue #3490 预检约定），仅供 scripts/install-worker.* 判定。
+_EXIT_PREFLIGHT_FAILED = 79
+
 # 方案 G: codearts per-task 权限隔离预写配置
 _CODEARTS_ALLOW_PERMS = [
     {"permission": "browser", "pattern": "*", "action": "ask"},
@@ -4528,7 +4533,7 @@ if __name__ == "__main__":
             print("self-check FAILED: worker task-path imports broken:", file=sys.stderr)
             for _line in _missing:
                 print(f"  - {_line}", file=sys.stderr)
-            raise SystemExit(79)
+            raise SystemExit(_EXIT_PREFLIGHT_FAILED)
         print(f"self-check ok: platform={sys.platform} euid_guard={'root' if _euid_is_root else 'nonroot'} "
               f"task_path_imports=5")
         raise SystemExit(0)
