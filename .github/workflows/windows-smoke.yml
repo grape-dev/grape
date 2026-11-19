@@ -28,7 +28,7 @@ jobs:
       - name: Windows prompt smoke tests (issue #351 + #452)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/runtime/test_issue_351_windows_prompt.py tests/runtime/test_os_adapter.py tests/runtime/test_issue_452_windows_install.py -v
+        run: python -m pytest tests/runtime/test_issue_351_windows_prompt.py tests/runtime/test_os_adapter.py tests/runtime/test_issue_452_windows_install.py tests/runtime/test_windows_euid_guard.py -v
 
   linux-backend:
     runs-on: ubuntu-latest
@@ -226,3 +226,11 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_2225_session_tmpdir.py tests/runtime/test_issue_2225_release_guard.py -v
+      - name: Worker package cross-process build lock regression tests (issue #3490)
+        # Issue #3490 QA 审查修复（Required）：新增用例 test_worker_package_build_lock.py
+        # 此前未接入 CI 门禁（先例 #1613/#1982/#2133/#2245 均由 QA 要求补齐）。
+        # 用例依赖 fcntl.flock 串行化跨进程构建，Windows 无 fcntl 会退化为无锁，
+        # 必须放 linux-backend job 才有效。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/kernel/test_worker_package_build_lock.py -v
