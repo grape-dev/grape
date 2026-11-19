@@ -6,7 +6,13 @@
 - 业务代码禁止自行拼/剥前缀，统一走本模块。
 """
 
+import logging
+
 from src.kernel.ports import vcs_cards as _vcs_cards
+
+# 与 src.kernel.config 同一 logger（stdlib 单例，同名字即同对象）：不引入
+# kernel→config 的导入依赖，同时保留统一的 handler/上下文过滤器。
+_log = logging.getLogger("devops-bot")
 
 
 def to_repo_key(owner_repo: str, provider: str = "gitcode") -> str:
@@ -46,28 +52,62 @@ def split_owner_repo(owner_repo: str) -> tuple[str, str]:
     return owner, repo
 
 
+def _warn(msg: str) -> None:
+    _log.warning(msg)
+
+
 def _catalog_providers() -> set[str]:
     """平台前缀名单：数据驱动单一入口，禁止平台字面量枚举。
 
     权威 = 平台卡注册表（configs/platforms/*.json + DB 卡，platform_card 统一
-    装载）；注册表导入失败时直接扫卡目录文件名兜底——与主路径同源同集
-    （对称，不会出现主路径可见、兜底不可见的 403），仍不引入字面量。
+    装载）；注册表导入失败**或返回空集**时直接扫卡目录文件名兜底——与主路径
+    同源同集（对称，不会出现主路径可见、兜底不可见的 403），仍不引入字面量。
+
+    空集不等于「没有平台」：未绑定 vcs_cards 端口的进程（装配缺失的 insight
+    角色等）调用注册表会抛 PortNotBound，已绑定但卡装载失败的进程会返回空集，
+    两者都必须兜底，否则本进程算出的候选集只剩裸键 —— 非默认前缀仓库在
+    check_repo_access 恒 403。
     """
     try:
-        return {str(p).lower() for p in _vcs_cards.list_vcs_platforms() if p}
+        providers = {str(p).lower() for p in _vcs_cards.list_vcs_platforms() if p}
     except Exception:
-        return _catalog_providers_from_dir()
+        providers = set()
+    return providers or _catalog_providers_from_dir()
+
+
+def _repo_root_dir() -> str:
+    """仓库根（含 configs/platforms 的目录）：向上查找，源码/部署层级变化都稳。
+
+    旧实现用 dirname(dirname(abspath(__file__))) 得 `<repo>/src`，再拼
+    configs/platforms → `<repo>/src/configs/platforms`（不存在），目录扫描
+    恒空集且被 except 静默吞掉。
+    """
+    import os as _os
+    start = _os.path.dirname(_os.path.abspath(__file__))
+    cur = start
+    while cur and cur != _os.path.dirname(cur):
+        if _os.path.isdir(_os.path.join(cur, "configs", "platforms")):
+            return cur
+        cur = _os.path.dirname(cur)
+    return _os.path.dirname(_os.path.dirname(start))
 
 
 def _catalog_providers_from_dir() -> set[str]:
-    """卡目录兜底：configs/platforms/*.json 文件名即平台名（无字面量）。"""
+    """卡目录兜底：configs/platforms/*.json 文件名即平台名（无字面量）。
+
+    失败/空集不再静默：打 warning 带解析出的目录，部署布局变化可定位。
+    """
     try:
         import os as _os
-        _dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                             "configs", "platforms")
-        return {f[:-len(".json")].lower() for f in _os.listdir(_dir) if f.endswith(".json")}
-    except Exception:
+        _dir = _os.path.join(_repo_root_dir(), "configs", "platforms")
+        names = {f[:-len(".json")].lower() for f in _os.listdir(_dir)
+                 if f.endswith(".json")}
+    except Exception as _e:
+        _warn(f"platform catalog fallback failed: {_e}")
         return set()
+    if not names:
+        _warn(f"platform catalog fallback empty: {_dir}")
+    return names
 
 
 def strip_provider_prefix(owner: str) -> str:
@@ -214,12 +254,10 @@ def repo_key_candidates(base: str) -> "list[str]":
         return []
     cands = [base] if ":" not in base else [base]
     stripped = base.split(":", 1)[-1]
-    try:
-        providers = _vcs_cards.list_vcs_platforms()
-    except Exception:
-        # 卡目录不可用：退化到内核层前缀目录（card 注册表 → 卡目录文件名扫描），
-        # 仍不硬编码双平台；最坏情况只剩裸键自身（调用方按默认前缀处理）。
-        providers = sorted(_catalog_providers())
+    # 候选集与目录兜底走同一入口（端口未绑定 / 端口返回空集都在
+    # _catalog_providers 内收敛）；直接调端口会把空集漏成「只有裸键」，
+    # 非默认前缀仓库随之在 check_repo_access 恒 403。
+    providers = sorted(_catalog_providers())
     for p in sorted(providers):
         _rk = f"{p}:{stripped}"
         if _rk not in cands:
