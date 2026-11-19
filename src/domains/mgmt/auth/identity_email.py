@@ -90,3 +90,24 @@ class ProviderEmailPolicy:
     def is_conflict_eligible(cls, email: str) -> bool:
         """是否参与 email 唯一/冲突判定（私有与空邮箱都不参与）。"""
         return cls.for_storage(email)[1] == 0
+
+    @classmethod
+    def is_valid(cls, email: str | None) -> bool:
+        """邮箱形态是否合法（Issue #3469 L：注册/改绑统一的格式校验口径）。
+
+        与 `for_storage` 同源：只判形态（本地部@域名带点），不判可投递性。
+        """
+        e = (email or "").strip().lower()
+        return bool(_EMAIL_SHAPE.match(e))
+
+    @classmethod
+    def is_deliverable(cls, email: str | None) -> bool:
+        """是否可作为收件地址（Issue #3469 D）：形态合法且非 provider 私有中转。
+
+        私有中转（noreply.*）与非邮箱形态字面串（'未公开邮箱'）都不可投递——
+        对这类"有 email 列但发不出信"的账号，业务上必须按"未绑定邮箱"处理。
+        """
+        e = (email or "").strip().lower()
+        if not e:
+            return False
+        return bool(_EMAIL_SHAPE.match(e)) and not cls.is_private(e)

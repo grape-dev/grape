@@ -80,7 +80,19 @@ def _parse_ts(value: str) -> float:
         return 0.0
 
 
-def out_track_id(user_id: int, kind: str, repo_key: str, issue_number: int,
+def norm_user_id(value):
+    """账号 id 归一：纯数字转 int（**对数字 id 的 sha1 输入完全不变**，跨进程幂等
+    单号不漂移），其余原样保留。
+
+    Issue #3510：D105 后 `grape_accounts.id` 是 UUIDv7 字符串，原实现裸
+    `int(user_id)` 直接 ValueError，被上游 except 吞掉 → 站内信静默丢失。
+    数字仍返回 int，是为了让 f-string 输出与历史一致（24 → "24"）。
+    """
+    s = str(value if value is not None else "").strip()
+    return int(s) if s.isdigit() else s
+
+
+def out_track_id(user_id, kind: str, repo_key: str, issue_number: int,
                  channel_type: str, installation_id: str, event_key: str = "") -> str:
     """跨进程幂等单号：sha1(uid|kind|repo|issue|channel|inst[|event])[:40]。
 
@@ -90,7 +102,7 @@ def out_track_id(user_id: int, kind: str, repo_key: str, issue_number: int,
     被历史行静默吞掉（架构守护 Critical-2）。
     """
     import hashlib
-    raw = f"{int(user_id or 0)}|{kind or ''}|{repo_key or ''}|{native_issue_number(issue_number or 0)}" \
+    raw = f"{norm_user_id(user_id) or 0}|{kind or ''}|{repo_key or ''}|{native_issue_number(issue_number or 0)}" \
           f"|{channel_type or ''}|{installation_id or ''}"
     if event_key:
         raw += f"|{event_key}"

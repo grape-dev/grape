@@ -528,6 +528,16 @@ const DEFAULTS = {
   close: '关闭',
   change_email_btn: '更换邮箱',
   set_email: '设置邮箱',
+  // Issue #3469 G/P：改绑二次认证标签 + 按 error_code 的失败文案（zh 兜底；en 取 locales）
+  current_password: '当前密码',
+  old_email_code: '原邮箱验证码',
+  err_email_format: '邮箱格式不正确，例如 you@example.com',
+  err_email_same: '新邮箱与当前邮箱相同',
+  err_email_taken: '该邮箱已被其他账号使用',
+  err_code_invalid: '验证码不正确',
+  err_code_expired: '验证码已过期，请重新获取',
+  err_need_second_factor: '请先完成二次认证（当前密码或原邮箱验证码）',
+  err_password_invalid: '当前密码不正确',
   // Issue #474：明文按需取回
   reveal_plaintext: '查看明文',
   hide_plaintext: '隐藏明文',
@@ -977,7 +987,8 @@ function onUnbindError(e) {
 
 // ── 密码/邮箱弹窗组 ──
 function showChangePassword() {
-  const hasEmail = profile.value && profile.value.email
+  // Issue #3469 验收 11：不可投递邮箱（noreply.* / 非邮箱字面串）不作为可用验证方式
+  const hasEmail = profile.value && profile.value.email && profile.value.email_deliverable !== false
   const html =
     '<h3>' +
     esc(t('change_password')) +
@@ -1040,7 +1051,8 @@ function showChangePassword() {
 }
 function showResetPassword() {
   const email = profile.value.email
-  if (!email || emailConfigured.value === false) {
+  // Issue #3469 验收 11：有 email 列但收不到信时不给重置入口
+  if (!email || profile.value.email_deliverable === false || emailConfigured.value === false) {
     if (emailConfigured.value === false) G.app.showToast(t('email_not_configured'))
     else G.app.showToast(t('set_password_needs_email'))
     return
@@ -1188,6 +1200,52 @@ function showSetPassword() {
     }
   })
 }
+// Issue #3469 P：改绑链 400 一律带 error_code，四种失败原因必须可区分；
+// 原来弹层只 showToast(e.message || '操作失败')，把「邮箱被占」和「验证码过期」压成一句。
+const CE_ERR_KEY = {
+  EMAIL_FORMAT: 'err_email_format',
+  EMAIL_SAME: 'err_email_same',
+  EMAIL_TAKEN: 'err_email_taken',
+  CODE_INVALID: 'err_code_invalid',
+  CODE_EXPIRED: 'err_code_expired',
+  NEED_SECOND_FACTOR: 'err_need_second_factor',
+  PASSWORD_INVALID: 'err_password_invalid',
+}
+function changeEmailErrText(e) {
+  const code = (e && (e.error_code || (e.detail && e.detail.error_code))) || ''
+  const key = CE_ERR_KEY[code]
+  if (key) {
+    const full = 'app.account.' + key
+    const v = G.I18N.t(full)
+    if (v && v !== full) return v
+    return DEFAULTS[key] || key
+  }
+  return (e && e.message) || '操作失败'
+}
+// Issue #3469 G：改绑前必须二次认证，因子档位由 send-code 返回的 require_factor 决定：
+//   password       → 当前密码框
+//   old_email_code → 原邮箱验证码框（后端已把确认码发到原邮箱）
+//   none           → 不渲染（无密码且原邮箱不可投递的账号靠这条自救，不得把改绑堵死）
+function renderChangeEmailFactor(root, factor) {
+  const host = root.querySelector('#ceFactor')
+  if (!host) return
+  factor = factor || 'none'
+  if (host.getAttribute('data-factor') === factor) return
+  host.setAttribute('data-factor', factor)
+  if (factor === 'password') {
+    host.innerHTML =
+      '<div class="srow"><label>' +
+      esc(t('current_password')) +
+      '</label><input type="password" id="ceCurPwd" class="kb-input" autocomplete="current-password"></div>'
+  } else if (factor === 'old_email_code') {
+    host.innerHTML =
+      '<div class="srow"><label>' +
+      esc(t('old_email_code')) +
+      '</label><input type="text" id="ceOldCode" class="kb-input" maxlength="6"></div>'
+  } else {
+    host.innerHTML = ''
+  }
+}
 function showChangeEmail() {
   if (emailConfigured.value === false) {
     G.app.showToast(t('email_not_configured'))
@@ -1213,6 +1271,8 @@ function showChangeEmail() {
     '<div class="srow"><label>' +
     esc(t('verification_code')) +
     '</label><input type="text" id="ceCode" class="kb-input" maxlength="6"></div>' +
+    // Issue #3469 G：二次认证因子输入框挂载点（send-code 拿到 require_factor 后再渲染）
+    '<div id="ceFactor"></div>' +
     '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">' +
     '<button class="bt bt-o" id="ceCancel">' +
     esc(t('cancel')) +
@@ -1228,16 +1288,18 @@ function showChangeEmail() {
         return
       }
       G.API.post('/auth/change-email/send-code', { new_email: email })
-        .then(function () {
+        .then(function (d) {
           G.app.showToast(t('code_sent'))
           const hintEl = root.querySelector('#ceStep2Hint')
           if (hintEl)
             hintEl.innerHTML = esc(t('code_sent_to_new_email')) + '：<b>' + esc(email) + '</b>'
           root.querySelector('#ceStep1').style.display = 'none'
           root.querySelector('#ceStep2').style.display = 'flex'
+          // Issue #3469 G：按后端 require_factor 渲染二次认证输入（none 时什么都不渲染）
+          renderChangeEmailFactor(root, d && d.require_factor)
         })
         .catch(function (e) {
-          G.app.showToast(e.message || '操作失败')
+          G.app.showToast(changeEmailErrText(e))
         })
     }
     root.querySelector('#ceCancel').onclick = closeModal
@@ -1248,14 +1310,39 @@ function showChangeEmail() {
         G.app.showToast(t('please_fill_all'))
         return
       }
-      G.API.post('/auth/change-email', { new_email: email, code: code })
+      const body = { new_email: email, code: code }
+      // Issue #3469 G：只把真正渲染出的因子字段塞进 body（none 时两者都不出现）
+      const pwdEl = root.querySelector('#ceCurPwd')
+      if (pwdEl) {
+        const curPwd = pwdEl.value.trim()
+        if (!curPwd) {
+          G.app.showToast(t('please_fill_all'))
+          return
+        }
+        body.password = curPwd
+      }
+      const oldCodeEl = root.querySelector('#ceOldCode')
+      if (oldCodeEl) {
+        const oldCode = oldCodeEl.value.trim()
+        if (!oldCode) {
+          G.app.showToast(t('please_fill_all'))
+          return
+        }
+        body.old_email_code = oldCode
+      }
+      G.API.post('/auth/change-email', body)
         .then(function () {
           closeModal()
           G.app.showToast(t('email_changed'), t('old_email_disabled'))
           loadTab()
         })
         .catch(function (e) {
-          G.app.showToast(e.message || '操作失败')
+          // 后端回 NEED_SECOND_FACTOR 且带 require_factor 时补渲染缺的因子框，
+          // 让用户就地补齐，不必重走 send-code（避免档位不一致时卡死）。
+          if (e && e.error_code === 'NEED_SECOND_FACTOR') {
+            renderChangeEmailFactor(root, (e.detail && e.detail.require_factor) || e.require_factor)
+          }
+          G.app.showToast(changeEmailErrText(e))
         })
     }
   })
@@ -1265,7 +1352,9 @@ function showChangeEmail() {
 function showDeleteAccount() {
   const hasPwd = profile.value ? profile.value.has_password : false
   const hasEmail = profile.value ? !!profile.value.email : false
-  const canVerifyByEmail = hasEmail && emailConfigured.value !== false
+  // Issue #3469 验收 11：邮箱验证方式的判据必须排除「不可投递」地址
+  // （noreply.* 私有中转等占位邮箱收不到验证码，不能当作能收码的验证通道）。
+  const canVerifyByEmail = hasEmail && !!profile.value.email_deliverable && emailConfigured.value !== false
   const bindings = (profile.value && profile.value.bindings) || []
   const methods = []
   if (hasPwd) methods.push({ id: 'pwd', label: t('verify_with_password') })

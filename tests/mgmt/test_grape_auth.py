@@ -343,12 +343,13 @@ class TestVerification:
             assert 0 <= int(code) <= 999999
 
     def test_all_scenes_defined(self):
-        """7 个场景全部定义。"""
-        assert len(SCENES) == 7
+        """场景集合全部定义（Issue #3469 G 新增 change_email_confirm）。"""
+        assert len(SCENES) == 8
         assert "register" in SCENES
         assert "reset_password" in SCENES
         assert "set_password" in SCENES
         assert "change_email" in SCENES
+        assert "change_email_confirm" in SCENES
         assert "unlock_account" in SCENES
         assert "delete_account" in SCENES
         assert "oauth_associate" in SCENES

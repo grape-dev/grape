@@ -71,6 +71,22 @@ from src.kernel.auth_sdk.cookie_utils import (
 
 router = APIRouter(prefix="/api/auth", tags=["grape-auth"])
 
+def _rate_limit_detail(verdict: dict) -> dict:
+    """限流/发码失败 → HTTP detail（Issue #3469：错误码必须可区分，别只剩 message）。
+
+    `send_code` / `check_rate_limit` 现在会给出 `error_code`（RATE_LIMITED / IP_LIMITED /
+    CODE_SEND_FAILED / CODE_STORE_FAILED）与 `retry_after`；这里原样带到响应。
+    """
+    # 限流判定自带 RATE_LIMITED / IP_LIMITED；到这里还没有码的是"发信/落库失败"，
+    # 兜底必须是 CODE_SEND_FAILED —— 否则 SMTP 挂了会被标成"被限流"（反向误标）。
+    detail = {"code": 429, "error_code": (verdict or {}).get("error_code") or "CODE_SEND_FAILED",
+              "message": (verdict or {}).get("message") or "请求过于频繁，请稍后再试"}
+    retry_after = (verdict or {}).get("retry_after")
+    if retry_after:
+        detail["retry_after"] = int(retry_after)
+    return detail
+
+
 def _get_client_ip(request: Request) -> str:
     # P2-1: 仅在配置了可信代理时才信任 X-Forwarded-For
     trusted_proxies = os.environ.get("TRUSTED_PROXY_IPS", "").strip()
@@ -189,6 +205,29 @@ class ChangeEmailSendCodeBody(BaseModel):
 class ChangeEmailBody(BaseModel):
     new_email: str
     code: str
+    # Issue #3469 G：改绑二次认证因子（按账号形态二选一；占位账号两者都空）
+    password: str = ""
+    old_email_code: str = ""
+
+
+def _email_change_error_detail(exc) -> dict:
+    """领域错误 → HTTP detail（字段顺序与历史一致；retry_after 有值才带）。"""
+    detail = {"code": exc.status, "error_code": exc.error_code, "message": exc.message}
+    retry_after = getattr(exc, "retry_after", 0)
+    if retry_after:
+        detail["retry_after"] = retry_after
+    return detail
+
+
+def _email_deliverable(account: dict | None) -> bool:
+    """账号当前邮箱是否可作为收件地址（Issue #3469 D）。
+
+    薄委托：判定单一来源在 auth/email_change.EmailChangePolicy（它再委托
+    identity_email.ProviderEmailPolicy）——路由里只留一行接线。
+    """
+    from src.domains.mgmt.auth.email_change import EmailChangePolicy
+
+    return EmailChangePolicy.is_deliverable(account)
 
 class DeleteAccountBody(BaseModel):
     password: str = ""
@@ -230,9 +269,16 @@ def register_send_code(body: RegisterSendCodeBody, request: Request):
     ip = _get_client_ip(request)
 
     # R7: 无邮箱配置降级——跳过验证码发送，提示前端直接注册
-    from src.domains.mgmt.auth.email_service import is_email_configured
+    from src.domains.mgmt.auth.email_service import is_email_configured, is_production_env
     if not is_email_configured():
-        return {"error_code": "EMAIL_NOT_CONFIGURED", "message": "Email service not configured, please register with username and password directly"}
+        if is_production_env():
+            # 复审 P2：生产环境 verify 侧已 fail-closed 503，发码侧却回 200 软提示，
+            # 用户按引导走到最后必然失败——两端口径必须一致。
+            raise HTTPException(status_code=503, detail={
+                "code": 503, "error_code": "EMAIL_NOT_CONFIGURED",
+                "message": "Email service not configured, please contact administrator"})
+        return {"error_code": "EMAIL_NOT_CONFIGURED",
+                "message": "Email service not configured, please register with username and password directly"}
 
     # 用户名校验
     username_err = _validate_username(body.username)
@@ -243,8 +289,9 @@ def register_send_code(body: RegisterSendCodeBody, request: Request):
     if is_username_taken(body.username):
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "USERNAME_TAKEN", "message": "用户名已被占用"})
 
-    # 邮箱格式
-    if not email or "@" not in email:
+    # 邮箱格式（Issue #3469 L 复审：与改绑侧同源，统一走 identity_email 形态定义）
+    from src.domains.mgmt.auth.identity_email import ProviderEmailPolicy
+    if not ProviderEmailPolicy.is_valid(email):
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "EMAIL_INVALID", "message": "邮箱格式不正确"})
 
     # 注册策略
@@ -259,12 +306,12 @@ def register_send_code(body: RegisterSendCodeBody, request: Request):
     if not already_registered:
         result = auth_verification.send_code(email, "register", ip)
         if not result["ok"]:
-            raise HTTPException(status_code=429, detail={"code": 429, "message": result["message"]})
+            raise HTTPException(status_code=429, detail=_rate_limit_detail(result))
     else:
         # 已注册邮箱：模拟限流检查，使 429 vs 200 不可区分
         rl_result = auth_verification.check_rate_limit(email, "register", ip)
         if not rl_result["ok"]:
-            raise HTTPException(status_code=429, detail={"code": 429, "message": rl_result["message"]})
+            raise HTTPException(status_code=429, detail=_rate_limit_detail(rl_result))
         # 通知原账号持有人（不发送验证码）
         try:
             from src.domains.mgmt.auth.email_service import get_email_service
@@ -286,8 +333,12 @@ def register_verify(body: RegisterVerifyBody, request: Request, response: Respon
     ip = _get_client_ip(request)
 
     # R7: 无邮箱配置降级——跳过验证码校验，email 允许为空，直接创建账号
-    from src.domains.mgmt.auth.email_service import is_email_configured
+    from src.domains.mgmt.auth.email_service import is_email_configured, is_production_env
     email_configured = is_email_configured()
+    # Issue #3469 K：生产环境邮件服务不可用时禁止静默降级——配置被删/改坏时
+    # 原逻辑会跳过验证码校验直接建号（裸奔且无告警），必须 fail-closed。
+    if not email_configured and is_production_env():
+        raise HTTPException(status_code=503, detail={"code": 503, "error_code": "EMAIL_NOT_CONFIGURED", "message": "Email service not configured, please contact administrator"})
 
     # 再次校验用户名和密码
     username_err = _validate_username(body.username)
@@ -424,12 +475,12 @@ def forgot_password_send_code(body: ForgotPasswordSendCodeBody, request: Request
     if account:
         result = auth_verification.send_code(email, "reset_password", ip)
         if not result["ok"]:
-            raise HTTPException(status_code=429, detail={"code": 429, "message": result["message"]})
+            raise HTTPException(status_code=429, detail=_rate_limit_detail(result))
     else:
         # 未注册邮箱：模拟限流检查，返回与已注册邮箱一致的响应
         rl_result = auth_verification.check_rate_limit(email, "reset_password", ip)
         if not rl_result["ok"]:
-            raise HTTPException(status_code=429, detail={"code": 429, "message": rl_result["message"]})
+            raise HTTPException(status_code=429, detail=_rate_limit_detail(rl_result))
 
     # 统一返回成功（邮箱不存在时也返回成功，不实际发送）
     return {"message": "验证码已发送"}
@@ -522,12 +573,14 @@ def set_password_send_code(user: dict = Depends(require_jwt_only), request: Requ
     if has_password(user["id"]):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "已设置密码，请使用修改密码"})
 
-    if not account["email"]:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "请先绑定邮箱"})
+    if not _email_deliverable(account):
+        # Issue #3469 D：noreply.* / 非邮箱字面串按"未绑定邮箱"处理——
+        # 发码必然 SMTP 拒收，返回 429 会让"请先绑定邮箱"分支永远不可达。
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "EMAIL_UNBOUND", "message": "请先绑定邮箱"})
 
     result = auth_verification.send_code(account["email"], "set_password", ip)
     if not result["ok"]:
-        raise HTTPException(status_code=429, detail={"code": 429, "message": result["message"]})
+        raise HTTPException(status_code=429, detail=_rate_limit_detail(result))
 
     return {"message": "验证码已发送"}
 
@@ -546,8 +599,9 @@ def set_password(body: SetPasswordBody, user: dict = Depends(require_jwt_only),
     if has_password(user["id"]):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "密码已设置，如需修改请使用修改密码功能"})
 
-    if not account["email"]:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "请先绑定邮箱"})
+    if not _email_deliverable(account):
+        # Issue #3469 D：与 send-code 同判据（不可投递=未绑定）
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "EMAIL_UNBOUND", "message": "请先绑定邮箱"})
 
     # 校验验证码
     result = auth_verification.verify_code(account["email"], "set_password", body.code)
@@ -589,68 +643,45 @@ def change_email_send_code(body: ChangeEmailSendCodeBody, user: dict = Depends(r
         raise HTTPException(status_code=503, detail={"code": 503, "error_code": "EMAIL_NOT_CONFIGURED", "message": "Email service not configured, please contact administrator"})
 
     ip = _get_client_ip(request) if request else ""
-    new_email = body.new_email.lower().strip()
+    # Issue #3469 G/P/Q：编排与判定全在领域服务（auth/email_change.py），路由只做映射
+    from src.domains.mgmt.auth.email_change import (
+        EmailChangeError, EmailChangeRequest, EmailChangeService,
+    )
 
-    if not new_email or "@" not in new_email:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "邮箱格式不正确"})
+    try:
+        result = EmailChangeService().request_code(
+            EmailChangeRequest(user_id=str(user["id"]), new_email=body.new_email, ip=ip))
+    except EmailChangeError as exc:
+        detail = _email_change_error_detail(exc)
+        if exc.require_factor is not None:
+            detail["require_factor"] = exc.require_factor.value
+        raise HTTPException(status_code=exc.status, detail=detail)
 
-    # BUG-12 修复：校验新旧邮箱不同
-    account = get_grape_account_by_id(user["id"])
-    old_email = account["email"] if account and account["email"] else ""
-    if old_email and new_email == old_email:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "新邮箱与当前邮箱相同"})
-
-    if is_email_registered(new_email):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "该邮箱已被占用"})
-
-    # 限流归属当前用户账号（非新邮箱），防止用他人邮箱触发验证码发送
-    # 首次设置邮箱时（old_email 为空）用用户 ID 作为限流 key
-    rl_key = old_email if old_email else f"user:{user['id']}"
-
-    result = auth_verification.send_code(new_email, "change_email", ip, rate_limit_key=rl_key)
-    if not result["ok"]:
-        raise HTTPException(status_code=429, detail={"code": 429, "message": result["message"]})
-
-    return {"message": "验证码已发送"}
+    return {"message": result.message, "require_factor": result.require_factor.value}
 
 @router.post("/change-email")
 def change_email(body: ChangeEmailBody, user: dict = Depends(require_jwt_only),
                  request: Request = None):
     """邮箱变更（或首次设置邮箱）。"""
     ip = _get_client_ip(request) if request else ""
-    new_email = body.new_email.lower().strip()
+    # Issue #3469 G/P/Q：二次因子、目标邮箱绑定、通知时机与失败原因都由领域服务裁决
+    from src.domains.mgmt.auth.email_change import (
+        EmailChangeCommand, EmailChangeError, EmailChangeService,
+    )
 
-    account = get_grape_account_by_id(user["id"])
-    old_email = account["email"] if account and account["email"] else ""
-
-    # 验证码验证：verify_code 必须用与 send_code 相同的 rl_key 查找
-    # send_code 将验证码存储在 email=rl_key 的记录中
-    rl_key = old_email if old_email else f"user:{user['id']}"
-    result = auth_verification.verify_code(rl_key, "change_email", body.code)
-    if not result["ok"]:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": result["message"]})
-
-    # 向旧邮箱发送通知
-    if old_email:
-        from src.domains.mgmt.auth.email_service import get_email_service
-        try:
-            get_email_service().send_notification(
-                old_email, "邮箱已变更",
-                "您的 Grape 账号邮箱已被更换。若非本人操作，请联系管理员。"
-            )
-        except Exception:
-            pass
-
-    # 更新邮箱
-    result = update_email(user["id"], new_email)
-    if result == "conflict":
-        raise HTTPException(status_code=409, detail={"code": 409, "message": "该邮箱已被占用"})
-    if not result:
-        raise HTTPException(status_code=500, detail={"code": 500, "message": "邮箱更新失败"})
+    try:
+        changed = EmailChangeService().commit(EmailChangeCommand(
+            user_id=str(user["id"]), new_email=body.new_email, code=body.code, ip=ip,
+            password=body.password, old_email_code=body.old_email_code))
+    except EmailChangeError as exc:
+        detail = _email_change_error_detail(exc)
+        if exc.require_factor is not None:
+            detail["require_factor"] = exc.require_factor.value
+        raise HTTPException(status_code=exc.status, detail=detail)
 
     auth_audit.log_audit("email_change", user_id=user["id"], ip=ip,
-                         detail={"old_email": auth_audit.mask_email(old_email),
-                                 "new_email": auth_audit.mask_email(new_email)})
+                         detail={"old_email": auth_audit.mask_email(changed.old_email),
+                                 "new_email": auth_audit.mask_email(body.new_email.lower().strip())})
 
     return {"message": "邮箱变更成功"}
 
@@ -668,12 +699,14 @@ def delete_account_send_code(user: dict = Depends(require_jwt_only), request: Re
     if not account:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "账号不存在"})
 
-    if not account["email"]:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "请先绑定邮箱"})
+    if not _email_deliverable(account):
+        # Issue #3469 D（复审补齐）：注销发码同样按"可投递"判定，
+        # 否则 noreply.* 账号点发送即 429，而"请先绑定邮箱"分支不可达。
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "EMAIL_UNBOUND", "message": "请先绑定邮箱"})
 
     result = auth_verification.send_code(account["email"], "delete_account", ip)
     if not result["ok"]:
-        raise HTTPException(status_code=429, detail={"code": 429, "message": result["message"]})
+        raise HTTPException(status_code=429, detail=_rate_limit_detail(result))
 
     return {"message": "验证码已发送"}
 
@@ -740,7 +773,9 @@ def delete_account(body: DeleteAccountBody, user: dict = Depends(require_jwt_onl
 
     # 重新认证（需求 14: 认证方式动态选择）
     has_password = bool(account["password_hash"])
-    has_email = bool(account["email"])
+    # Issue #3469 D：不可投递邮箱（noreply.* / 非邮箱字面串）按"未绑定邮箱"处理，
+    # 否则验证码分支必然失败、"请先绑定"提示永不出现。
+    has_email = _email_deliverable(account)
     if body.password:
         if not has_password or not auth_password.verify_password(body.password, account["password_hash"]):
             raise HTTPException(status_code=400, detail={"code": 400, "message": "密码错误"})
@@ -857,17 +892,20 @@ def unlock_send_code(body: UnlockSendCodeBody, request: Request):
     # BUG-5 修复：防枚举——账号不存在时不返回 404，统一返回"验证码已发送"。
     # P1-4 修复：账号不存在时也调 check_rate_limit，防止 200 vs 429 枚举 + DoS。
     account = get_grape_account_by_identifier(body.identifier)
-    if not account or not account["email"]:
+    if not account or not _email_deliverable(account):
         # 不存在账号：模拟限流检查，使 429 vs 200 不可区分
         rl_key = body.identifier.strip().lower() if body.identifier else ""
         rl_result = auth_verification.check_rate_limit(rl_key, "unlock_account", ip)
         if not rl_result["ok"]:
-            raise HTTPException(status_code=429, detail={"code": 429, "message": rl_result["message"]})
-        return {"message": "验证码已发送"}
+            raise HTTPException(status_code=429, detail=_rate_limit_detail(rl_result))
+        # Issue #3469 N3：账号不存在或邮箱不可投递都走这里（防枚举，不区分）。
+        # 回包给一条通用指引，避免用户"静默等一封永远不来的信"。
+        return {"message": "验证码已发送",
+                "hint": "若长时间未收到，请先绑定或更新账号邮箱"}
 
     result = auth_verification.send_code(account["email"], "unlock_account", ip)
     if not result["ok"]:
-        raise HTTPException(status_code=429, detail={"code": 429, "message": result["message"]})
+        raise HTTPException(status_code=429, detail=_rate_limit_detail(result))
 
     return {"message": "验证码已发送"}
 
@@ -877,7 +915,7 @@ def unlock(body: UnlockBody, request: Request):
     ip = _get_client_ip(request)
 
     account = get_grape_account_by_identifier(body.identifier)
-    if not account or not account["email"]:
+    if not account or not _email_deliverable(account):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "验证码无效或已过期"})
 
     result = auth_verification.verify_code(account["email"], "unlock_account", body.code)
@@ -1112,6 +1150,8 @@ def get_me(user: dict = Depends(require_no_session_token)):
     return {
         "username": account["username"],
         "email": account["email"],
+        # Issue #3469 D / 验收 11：前端 canVerifyByEmail 必须区分"有 email 列"与"能收信"
+        "email_deliverable": _email_deliverable(account),
         "nickname": account["nickname"],
         "avatar_url": account["avatar_url"],
         "has_password": has_password(user["id"]),
@@ -2154,11 +2194,11 @@ def oauth_associate_send_code(provider: str, body: OAuthAssociateSendCodeBody, r
     if account:
         result = auth_verification.send_code(email, "oauth_associate", ip)
         if not result["ok"]:
-            raise HTTPException(status_code=429, detail={"code": 429, "message": result["message"]})
+            raise HTTPException(status_code=429, detail=_rate_limit_detail(result))
     else:
         rl_result = auth_verification.check_rate_limit(email, "oauth_associate", ip)
         if not rl_result["ok"]:
-            raise HTTPException(status_code=429, detail={"code": 429, "message": rl_result["message"]})
+            raise HTTPException(status_code=429, detail=_rate_limit_detail(rl_result))
 
     return {"message": "验证码已发送"}
 

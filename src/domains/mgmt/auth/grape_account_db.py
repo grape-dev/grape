@@ -294,7 +294,10 @@ def get_grape_account_by_email(email: str) -> "dict | None":
                 "SELECT id, username, email, password_hash, nickname, avatar_url, "
                 "status, token_version, created_at, updated_at, last_login_at, email_verified, email_source, "
                 "email_is_placeholder, created_by_oauth "
-                "FROM grape_accounts WHERE email=?",
+                # Issue #3469 复审 P1：历史/异常数据里同 email 可能有多行（如禁用行
+                # + 新注册行），必须确定性优先取"活跃/冷静期"那一行，而不是 LIMIT 1 撞运气。
+                "FROM grape_accounts WHERE email=? "
+                "ORDER BY CASE WHEN status IN (1, 3) THEN 0 ELSE 1 END, updated_at DESC",
                 (email,),
             )
             row = c.fetchone()
@@ -384,15 +387,37 @@ def update_email(user_id: str, new_email: str) -> bool | str:
 
     D46 P1-1: 区分 UNIQUE 冲突，返回 "conflict" 让路由层报 409。
     返回值：True=成功，False=其他失败，"conflict"=邮箱已被占用。
+
+    Issue #3469 C：旧实现只 `SET email=?`，让邮箱身份三列与 email 值分叉——
+    - email_source 仍停在 provider → 解绑第三方时 clear_placeholder_email 命中
+      判据，把用户自己绑定的真实邮箱清成 NULL（C1）；
+    - email_verified 永远停在 0（C2）；
+    - email_is_placeholder 仍是 1 → is_email_registered 看不见该真实邮箱，
+      别人注册同邮箱时前置校验放行、最终撞唯一键（C3）。
+    故这里一条 UPDATE 同步四列：
+    - 写入真实邮箱：email_source='user'、email_is_placeholder=0、email_verified=1；
+    - 清空语义（空串/NULL）：email=NULL、email_source=NULL、
+      email_is_placeholder=1、email_verified=0（回到「无邮箱的占位账号」状态）。
+    时间列按铁律写 UTC 串（time.gmtime），不用本地时间。
     """
     new_email = (new_email or "").lower().strip() or None
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    if new_email:
+        sql = (
+            "UPDATE grape_accounts SET email=?, email_source='user', "
+            "email_is_placeholder=0, email_verified=1, updated_at=? WHERE id=?"
+        )
+        params = (new_email, now, user_id)
+    else:
+        sql = (
+            "UPDATE grape_accounts SET email=NULL, email_source=NULL, "
+            "email_is_placeholder=1, email_verified=0, updated_at=? WHERE id=?"
+        )
+        params = (now, user_id)
     try:
         with db_lock:
             c = _mg_db.cursor()
-            c.execute(
-                "UPDATE grape_accounts SET email=? WHERE id=?",
-                (new_email, user_id),
-            )
+            c.execute(sql, params)
             _mg_db.commit()
             return c.rowcount > 0
     except Exception as e:
@@ -511,12 +536,19 @@ def is_placeholder_email(email: str, email_source: str = "") -> bool:
 def is_email_registered(email: str) -> bool:
     """检查邮箱是否已注册（激活状态或冷静期）。
 
-    placeholder 邮箱（noreply.gitcode.com / noreply.github.com）不参与冲突检查——
-    它们是 OAuth 提供商生成的占位邮箱，不是用户真实邮箱。
+    私有/非邮箱形态（`is_placeholder_email()`，即 ProviderEmailPolicy.is_private：
+    noreply.* 中转邮箱与 '未公开邮箱' 这类字面串）不参与冲突检查——它们不是
+    用户真实邮箱，也不可收信。
 
     BUG-3 修复：status=3（冷静期）邮箱仍占唯一索引，
     需要参与冲突检查，否则 register 时 create_grape_account 因唯一约束失败返回 None，
     最终导致 500 而非业务提示。
+
+    Issue #3469 C3：原先 WHERE 带 `email_is_placeholder=0` 过滤，把「占位账号后来
+    绑定了真实邮箱」的行挡住了——但唯一索引只看 email 列，那行照样占键。于是别人用
+    同邮箱注册时前置校验通过、最终撞唯一键，兜底再查一次仍 False → 500。
+    故去掉该过滤：**只要 email 列持有该真实邮箱就参与冲突判定**，与唯一索引同口径。
+    另按 Issue #3469 O 的 '' 语义补 `email != ''`：空串不参与（脏数据行不制造假冲突）。
     """
     email = email.lower().strip()
     if is_placeholder_email(email):
@@ -524,10 +556,9 @@ def is_email_registered(email: str) -> bool:
     try:
         with db_lock:
             c = _mg_db.cursor()
-            # 排除占位账号（email_is_placeholder=1），占位邮箱不参与冲突检查
             c.execute(
-                "SELECT 1 FROM grape_accounts WHERE email=? AND status IN (1, 3) "
-                "AND (email_is_placeholder=0 OR email_is_placeholder IS NULL) LIMIT 1",
+                "SELECT 1 FROM grape_accounts WHERE email=? AND email != '' "
+                "AND status IN (0, 1, 3) LIMIT 1",
                 (email,),
             )
             return c.fetchone() is not None
@@ -1207,6 +1238,13 @@ def mark_account_merged(cursor, placeholder_user_id: str) -> bool:
 def clear_placeholder_email(user_id: str, provider: str) -> bool:
     """需求 10：清理 placeholder 邮箱（解绑时调用）。
 
+    Issue #3469 C1：判据必须**同时**满足 `email_is_placeholder=1` 与
+    `email_source == provider` 才清空——这两个条件正是「该 email 由这个第三方
+    提供商生成」的完整证据。只要其中任一不成立（尤其 update_email 写入真实邮箱后
+    email_source='user'、email_is_placeholder=0），就一律不动：解绑第三方不允许
+    删掉用户自己绑定的真实邮箱。此契约由本函数的条件与
+    tests/mgmt/test_issue_3469_email_identity.py 的「真实邮箱不被清」用例共同锁定。
+
     如果 email 是 placeholder 且 email_source == provider → 清空。
     否则不动，返回 True（非 placeholder 邮箱不需要清理）。
 
@@ -1223,12 +1261,17 @@ def clear_placeholder_email(user_id: str, provider: str) -> bool:
             if not row:
                 return True
             email, email_source, is_placeholder = row
+            # C1 契约：三条件同时成立才清（有邮箱 + 占位标记 + 来源就是本次解绑的 provider）
             if email and is_placeholder and email_source == provider:
                 import time as _t
-                now = _t.strftime("%Y-%m-%d %H:%M:%S")
+                # Issue #3469 D1：时间列统一 UTC 写入（复审指出本处曾用本地墙钟）
+                now = _t.strftime("%Y-%m-%d %H:%M:%S", _t.gmtime())
                 c.execute(
                     "UPDATE grape_accounts SET email=NULL, email_source=NULL, "
-                    "email_is_placeholder=0, updated_at=? WHERE id=?",
+                    # 清空后即"无邮箱"=占位语义；写 0 会造出 007 归一脚本要修的
+                    # 「email IS NULL 且 placeholder=0」形态（复审 D10 同源问题）
+                    # email_verified 一并归零（设计 D3：清空即未验证，007 不覆盖此形态）
+                    "email_is_placeholder=1, email_verified=0, updated_at=? WHERE id=?",
                     (now, user_id),
                 )
                 _mg_db.commit()

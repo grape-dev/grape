@@ -394,12 +394,8 @@ _NEW_TABLES.extend([
     ("binding_tickets", _BINDING_TICKETS_DDL),
 ])
 
-# grape_accounts email 唯一索引（D12: 统一用 NULL 表示无 email，普通唯一索引）
-# SQL 标准中 NULL 不参与唯一约束，多行 NULL 不冲突，SQLite 和 MySQL 行为一致
-_GRAPE_ACCOUNTS_INDEX_SQLITE = """
-CREATE UNIQUE INDEX IF NOT EXISTS uq_active_email
-ON grape_accounts(email)
-"""
+# grape_accounts 的「活跃 email 唯一」索引由迁移模块
+# `mgmt/migrations/active_email_uniqueness.py` 统一实现（新装/升级共用；Issue #3469 O）。
 
 # ===== Community tables (grape-website community page) =====
 _NEW_TABLES.extend([
@@ -737,8 +733,9 @@ def _create_tables():
         # audit_logs 索引（seq UNIQUE 约束——集群并发安全，DDL 中已有 UNIQUE，此索引兼容已有表）
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_seq "
         "ON audit_logs(seq)",
-        # grape_accounts email 唯一索引（D12: NULL + 普通唯一索引，SQLite + MySQL 统一）
-        _GRAPE_ACCOUNTS_INDEX_SQLITE,
+        # grape_accounts 的 email 唯一索引不在这里建（见循环后的
+        # `_ensure_active_email_index`）：Issue #3469 O 起它必须是部分索引，
+        # 而 MySQL 分支要走生成列等价实现，两栈共用一份建索引/复查代码。
         # obs_llm_usage 查询索引（任务/时间/模型/仓库四个下钻维度）
         "CREATE INDEX IF NOT EXISTS idx_obs_llm_task ON obs_llm_usage(task_id)",
         "CREATE INDEX IF NOT EXISTS idx_obs_llm_time ON obs_llm_usage(created_at)",
@@ -774,6 +771,24 @@ def _create_tables():
                 db.commit()
         except Exception as e:
             log.warning(f"Create index failed: {e}")
+
+    # Issue #3469 O：grape_accounts 的 email 唯一索引（新装库口径）。
+    # 不能用 `CREATE UNIQUE INDEX IF NOT EXISTS ... WHERE`——mysql_compat 会把 WHERE
+    # 丢掉建成**全列**唯一，正是本工单要修掉的旧形态。两栈共用一份实现，保证
+    # 「新装库」与「升级库（迁移 202611190101）」终态一致。
+    # 失败必须炸开（唯一约束缺失 = 活跃用户可重复邮箱，不能静默）；调用方
+    # `_run_all_migrations` 有兜底 try/except，不会把启动挂死。
+    # 域归属守卫：三库模式下 grape_accounts 只在 mgmt 是基表，别家域跳过（同建表口径）。
+    if not _owned_skip("grape_accounts", "ensure active email index"):
+        try:
+            with db_lock:
+                c = db.cursor()
+                _stats = ensure_active_email_index(c)
+                db.commit()
+            log.info(f"grape_accounts uq_active_email ready: {_stats}")
+        except Exception as e:
+            log.error(f"grape_accounts uq_active_email 建立/复查失败（新装库口径）: {e}")
+            raise
 
 
 def _mysql_backend() -> bool:
@@ -4134,6 +4149,45 @@ def _destructive_ddl(c, ddl: str, *, kind_hint: str = "cleanup",
             raise _MdlWaitTimeout(str(e))
         log.warning(f"_destructive_ddl failed（幂等可重试）: {ddl}: {e}")
     return True
+
+
+# ===== Issue #3469 O：uq_active_email 收敛为「仅活跃状态唯一」=====
+# 实现（SQLite 部分索引 / MySQL STORED 生成列 / 复查 / ''→NULL 归一）在
+# `src/domains/mgmt/migrations/active_email_uniqueness.py`（迁移对象）：
+# 巨型文件只留注册接线，方言与 DDL 集中在迁移模块里可单测、可复查。
+from src.domains.mgmt.migrations.active_email_uniqueness import (  # noqa: E402
+    ActiveEmailUniquenessMigration,
+    ensure_active_email_index,
+    migrate_active_email_uniqueness,
+)
+
+# ===== Issue #3469 I 复审：code_hash 装不下 "{kid}:{digest}" =====
+# 实现（MySQL MODIFY 加宽 + 复查；SQLite 无长度语义）在
+# `src/domains/mgmt/migrations/verification_hash_width.py`。
+from src.domains.mgmt.migrations.verification_hash_width import (  # noqa: E402
+    VerificationHashWidthMigration,
+    migrate_verification_hash_width,
+)
+
+register_migration(
+    version="202611190102",
+    name=VerificationHashWidthMigration.NAME,
+    kind="safe",
+    fn=migrate_verification_hash_width,
+    domains=("mgmt",),
+)
+
+
+register_migration(
+    # 版本号 = 源码当前最大号 202611190100（_ORG_TEXT_MIGRATION_VERSION）+ 1。
+    # 必须写字面量：tests/api/test_migration_track_guard.py 用 ast 静态解析注册链。
+    version="202611190101",
+    name=ActiveEmailUniquenessMigration.NAME,
+    # kind=backfill：本迁移会 UPDATE 存量行（email='' → NULL），不是纯 DDL。
+    kind="backfill",
+    fn=migrate_active_email_uniqueness,
+    domains=("mgmt",),
+)
 
 
 def _backfill_in_batches(c, sql_template: str, params: tuple = (),

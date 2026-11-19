@@ -283,6 +283,13 @@ def get_platform_links(user: dict = Depends(require_no_session_token)):
     return _links_payload(user["id"])
 
 
+def _email_deliverable(email: str | None) -> bool:
+    """邮箱是否可作为收件地址（Issue #3469 D / N4，判据单一来源）。"""
+    from src.domains.mgmt.auth.identity_email import ProviderEmailPolicy
+
+    return ProviderEmailPolicy.is_deliverable(email)
+
+
 @router.get("/profile", operation_id="auth_profile", summary="Get current user profile", description="Returns the current user profile. Supports JWT session, user API Key (grape_) or session token (tk_).")
 def get_profile(user: dict = Depends(require_no_session_token)):
     """用户信息——支持 JWT 会话 / grape_ API Key / tk_ 会话 token（Issue #69）。
@@ -319,6 +326,8 @@ def get_profile(user: dict = Depends(require_no_session_token)):
         "gitcode_bound": gitcode_bound,
         "github_bound": github_bound,
         "email_verified": acc.get("email_verified", 0),
+        # Issue #3469 N4：壳前端走本接口，判据与 /auth/me 同源，避免两套逻辑漂移
+        "email_deliverable": _email_deliverable(acc.get("email")),
     }
 
 

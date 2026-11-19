@@ -3062,6 +3062,54 @@ function openBetaApply() {
     }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
+  // Issue #3469 P：改绑链的 400 一律带 error_code（EMAIL_FORMAT / EMAIL_SAME /
+  // EMAIL_TAKEN / CODE_INVALID / CODE_EXPIRED / NEED_SECOND_FACTOR / PASSWORD_INVALID）。
+  // 原来弹层只 showToast(e.message)，四种失败原因被压成一句，用户分不清「邮箱被占」
+  // 和「验证码过期」。命中已知码走 I18N 文案，未知码回落 errMsg（保留后端 message）。
+  var CE_ERR_KEY = {
+    EMAIL_FORMAT: 'err_email_format',
+    EMAIL_SAME: 'err_email_same',
+    EMAIL_TAKEN: 'err_email_taken',
+    CODE_INVALID: 'err_code_invalid',
+    CODE_EXPIRED: 'err_code_expired',
+    NEED_SECOND_FACTOR: 'err_need_second_factor',
+    PASSWORD_INVALID: 'err_password_invalid'
+  };
+
+  function changeEmailErrMsg(e) {
+    var code = (e && e.error_code) || '';
+    var key = CE_ERR_KEY[code];
+    if (key) {
+      var full = 'app.login.' + key;
+      var localized = I18N.t(full);
+      if (localized && localized !== full) return localized;
+    }
+    return errMsg(e) || I18N.t('app.account.error_failed');
+  }
+
+  // Issue #3469 G：改绑前必须二次认证，因子由 send-code 返回的 require_factor 决定：
+  //   password      → 当前密码框
+  //   old_email_code → 原邮箱验证码框（后端已把确认码发到原邮箱，scene=change_email_confirm）
+  //   none          → 不渲染任何因子框（无密码且原邮箱不可投递的账号靠这条自救，
+  //                   前端不得因为「没因子可填」把改绑堵死）
+  // 幂等：同一因子重复调用不重复插入，按容器 data-factor 判断。
+  function _ceRenderFactor(factor) {
+    var host = document.getElementById('ceFactor');
+    if (!host) return;
+    factor = factor || 'none';
+    if (host.getAttribute('data-factor') === factor) return;
+    host.setAttribute('data-factor', factor);
+    if (factor === 'password') {
+      host.innerHTML = '<input class="obtn" id="ceCurPwd" type="password" autocomplete="current-password" placeholder="'
+        + I18N.t('app.login.current_password') + '">';
+    } else if (factor === 'old_email_code') {
+      host.innerHTML = '<input class="obtn" id="ceOldCode" type="text" maxlength="6"'
+        + ' placeholder="' + I18N.t('app.login.old_email_code') + '">';
+    } else {
+      host.innerHTML = '';
+    }
+  }
+
   function showChangeEmail() {
     var isZh = I18N.getLang()==='zh';
     var html = '<div style="display:flex;flex-direction:column;gap:8px">'
@@ -3072,6 +3120,8 @@ function openBetaApply() {
       + '<div id="ceStep2" style="display:none;flex-direction:column;gap:8px">'
       + '<p style="font-size:12px;color:var(--t2)" id="ceHint">' + I18N.t('app.login.code_sent_new_email') + '</p>'
       + '<input class="obtn" id="ceCode" type="text" placeholder="' + I18N.t('app.login.verification_code_short') + '" maxlength="6">'
+      // Issue #3469 G：二次认证因子输入框的挂载点（send-code 返回 require_factor 后再渲染）
+      + '<div id="ceFactor" style="display:flex;flex-direction:column;gap:8px"></div>'
       + '<button class="bt bt-p" onclick="app.doChangeEmail()">' + I18N.t('app.login.confirm_change_email') + '</button>'
       + '</div>'
       + '</div>';
@@ -3081,24 +3131,47 @@ function openBetaApply() {
   function sendChangeEmailCode() {
     var email = $('ceEmail').value.trim();
     if (!email) return showToast(I18N.t('app.login.enter_email'));
-    API.post('/auth/change-email/send-code', {new_email: email}).then(function() {
+    API.post('/auth/change-email/send-code', {new_email: email}).then(function(d) {
       showToast(I18N.t('app.login.code_sent'));
       var step1 = document.getElementById('ceStep1');
       var step2 = document.getElementById('ceStep2');
       if (step1) step1.style.display = 'none';
       if (step2) step2.style.display = 'flex';
-    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
+      // Issue #3469 G：按后端 require_factor 渲染二次认证输入（none 时什么都不渲染）
+      _ceRenderFactor(d && d.require_factor);
+    }).catch(function(e) { showToast(changeEmailErrMsg(e)); });
   }
 
   function doChangeEmail() {
     var email = $('ceEmail').value.trim();
     var code = $('ceCode').value.trim();
     if (!email || !code) return showToast(I18N.t('app.login.fill_all_fields'));
-    API.post('/auth/change-email', {new_email: email, code: code}).then(function() {
+    var body = {new_email: email, code: code};
+    // Issue #3469 G：只有真正渲染出的因子框才提交对应字段（none 时 body 里两者都不出现）
+    var pwdEl = document.getElementById('ceCurPwd');
+    if (pwdEl) {
+      var curPwd = pwdEl.value.trim();
+      if (!curPwd) return showToast(I18N.t('app.login.fill_all_fields'));
+      body.password = curPwd;
+    }
+    var oldCodeEl = document.getElementById('ceOldCode');
+    if (oldCodeEl) {
+      var oldCode = oldCodeEl.value.trim();
+      if (!oldCode) return showToast(I18N.t('app.login.fill_all_fields'));
+      body.old_email_code = oldCode;
+    }
+    API.post('/auth/change-email', body).then(function() {
       closeConfirm();
       showToast(I18N.t('app.login.email_changed'));
       renderSettings('account');
-    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
+    }).catch(function(e) {
+      // 后端回 NEED_SECOND_FACTOR 时带 require_factor：补渲染缺的因子框，让用户就地补，
+      // 不用重新走一遍 send-code（也避免「因子档位与前端渲染不一致」时用户卡死）。
+      if (e && e.error_code === 'NEED_SECOND_FACTOR') {
+        _ceRenderFactor((e.detail && e.detail.require_factor) || e.require_factor);
+      }
+      showToast(changeEmailErrMsg(e));
+    });
   }
 
   // ══ 绑定弹层：已组件化（app/src/components/BindDialog.vue）══
@@ -3125,6 +3198,28 @@ function openBetaApply() {
     _openBindModal(provider, true);
   }
 
+
+  function _shellEmailDeliverable() {
+    // Issue #3469 验收 11 / N4：判据以后端为准——/auth/profile 与 /auth/me 都返回
+    // email_deliverable（同一 ProviderEmailPolicy 来源）；下面的域名表只在老后端
+    // 没有该字段时兜底，避免两处判据长期漂移。
+    var p = (window.__grapeProfile || (window.G && G.user) || null);
+    if (!p) {
+      try { p = JSON.parse(localStorage.getItem('user') || 'null'); } catch (e) { p = null; }
+    }
+    if (p && typeof p.email_deliverable === 'boolean') return p.email_deliverable;
+    var e = (p && p.email) || '';
+    if (!e) return false;
+    // 形态 + 私有中转（与 identity_email.PRIVATE_EMAIL_DOMAINS 对齐）
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e).toLowerCase())) return false;
+    var d = String(e).toLowerCase().split('@')[1] || '';
+    var priv = ['noreply.gitcode.com','no-reply.gitcode.com','noreply.github.com','noreply.gitee.com','noreply.gitlab.com','noreply.gitee.io','privaterelay.appleid.com'];
+    for (var i = 0; i < priv.length; i++) {
+      if (d === priv[i] || d.slice(-(priv[i].length + 1)) === '.' + priv[i] || d.slice(-priv[i].length) === priv[i]) return false;
+    }
+    return true;
+  }
+
   function deleteAccount() {
     var isZh = I18N.getLang()==='zh';
     var html = '<div style="display:flex;flex-direction:column;gap:8px">'
@@ -3132,7 +3227,10 @@ function openBetaApply() {
       + '<div id="daStep1" style="display:flex;flex-direction:column;gap:8px">'
       + '<p style="font-size:12px;color:var(--t2)">' + I18N.t('app.login.choose_verify_method') + '</p>'
       + '<button class="bt bt-p" onclick="app._daChoosePwd()">' + I18N.t('app.login.verify_with_password') + '</button>'
-      + '<button class="bt bt-s" onclick="app._daChooseCode()">' + I18N.t('app.login.verify_with_code') + '</button>'
+      // Issue #3469 验收 11：不可投递邮箱（noreply.*/私有中转）不提供"邮箱验证码"方式
+      + ((_shellEmailDeliverable())
+          ? '<button class="bt bt-s" onclick="app._daChooseCode()">' + I18N.t('app.login.verify_with_code') + '</button>'
+          : '')
       + '</div>'
       + '<div id="daStepPwd" style="display:none;flex-direction:column;gap:8px">'
       + '<input class="obtn" id="daPwd" type="password" placeholder="' + I18N.t('app.login.enter_password') + '">'

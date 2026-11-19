@@ -7471,6 +7471,17 @@ async def notify_user(user_id: int, kind: str, text: str, *, repo_key: str = "",
                        conv_id=conv_id, targets=targets, engine=engine, dedupe=dedupe)
 
 
+def schedule_notify(user_id, kind: str, text: str, **kw) -> bool:
+    """通知（跨域契约：其他域只能经本函数发站内信/IM）。
+
+    Issue #3469 F：邮箱不可投递时的降级通道。有事件循环时 fire-and-forget，
+    没有时**同步入队**；返回值表示是否真的产生了通知动作（调用方不得再假定成功）。
+    """
+    from src.domains.runtime.im.notify import schedule_notify as _impl
+
+    return bool(_impl(user_id, kind, text, **kw))
+
+
 def outbox_counts() -> dict:
     """通知 outbox 计数（按状态）。"""
     from src.domains.runtime.im.outbox import counts as _impl

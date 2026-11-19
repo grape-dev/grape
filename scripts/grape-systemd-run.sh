@@ -61,6 +61,10 @@ if [ -n "$_3db_env" ]; then
     # shellcheck disable=SC1090
     set -a; . "$_3db_env"; set +a
     export GRAPE_DOMAIN_LIB="${GRAPE_DOMAIN_LIB:-1}"
+    # 三库 = MySQL 拓扑。DSN 只导出 host/port/user/password/name，**后端开关不含在内**：
+    # session_manager 的后端判定读 DEVOPS_DB_BACKEND > configs/db-backend.json > 默认 sqlite，
+    # 缺这一行时四个进程会各自落到本地 sqlite（db-guard 却照旧打印 DSN，看起来像连了库）。
+    export DEVOPS_DB_BACKEND=mysql
     case "$role" in
         mgmt)         _dsn="${GRAPE_DSN_MGMT:-}" ;;
         event|worker) _dsn="${GRAPE_DSN_RUNTIME:-}" ;;

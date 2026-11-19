@@ -458,7 +458,7 @@ _VERIFICATION_CODES_DDL = """
 CREATE TABLE IF NOT EXISTS verification_codes (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     email        VARCHAR(255) NOT NULL,
-    code_hash    VARCHAR(64) NOT NULL,
+    code_hash    VARCHAR(191) NOT NULL,   -- Issue #3469 I：存 "{kid}:{digest}"，64 装不下
     scene        VARCHAR(32) NOT NULL,
     ip           VARCHAR(64) DEFAULT '',
     attempts     INTEGER DEFAULT 0,

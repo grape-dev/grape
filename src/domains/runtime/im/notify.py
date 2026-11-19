@@ -198,7 +198,7 @@ def _db_cursor():
             log.debug(f"src/domains/runtime/im/notify.py cursor close skipped: {_e}")
 
 
-def active_targets(user_id: int) -> list[dict]:
+def active_targets(user_id) -> list[dict]:   # Issue #3510：接受 UUID 字符串
     """该用户可通知的安装：每渠道取最新一条 active（多渠并存全都要）。"""
     from src.domains.mgmt import public as mgmt_public
     out: list[dict] = []
@@ -388,7 +388,7 @@ async def _deliver(engine, target: dict, chat_id: str, card,
 
 
 def _make_payload(kind: str, text: str, repo_key: str, issue_number: int,
-                  conv_id: str, uid: int, note: str) -> dict:
+                  conv_id: str, uid, note: str) -> dict:
     """入队 payload（键集 = _PAYLOAD_KEYS，消费侧 build_cards_from_payload 同口径）。"""
     return {"kind": kind, "text": text, "repo_key": repo_key or "",
             "issue_number": native_issue_number(issue_number or 0), "conv_id": conv_id or "",
@@ -427,7 +427,7 @@ async def _backfill_existing_row(track: str, ctype: str,
     return True
 
 
-async def _handle_target(target: dict, *, uid: int, kind: str, text: str,
+async def _handle_target(target: dict, *, uid, kind: str, text: str,
                          repo_key: str, issue_number: int, conv_id: str,
                          note: str, eng, dedupe: bool, OB) -> None:
     """单渠道：入队 → 认领 → 投递 → 落终态（notify_user 的循环体，QA #1314 S2 抽取）。"""
@@ -547,7 +547,7 @@ async def _handle_target(target: dict, *, uid: int, kind: str, text: str,
             log.warning("[im-notify] outbox mark failed inst=%s: %s", inst, e)
 
 
-async def notify_user(user_id: int, kind: str, text: str, *,
+async def notify_user(user_id, kind: str, text: str, *,
                       repo_key: str = "", issue_number: int = 0, conv_id: str = "",
                       targets: Optional[Iterable[dict]] = None,
                       engine: Any = None, dedupe: bool = True) -> dict:
@@ -564,7 +564,7 @@ async def notify_user(user_id: int, kind: str, text: str, *,
          由持有该安装租约的 A 实例消费者接力（≤1s 轮询）；
       4. 同单号已存在（sent/sending/pending/failed...）→ 本轮不再投递（防重复发送）。
     """
-    uid = int(user_id or 0)
+    uid = _norm_uid(user_id)   # Issue #3510：UUID 账号不得 int() 强转
     if not uid:
         return {"skipped": "no_user", "sent": [], "failed": []}
     key = f"{uid}:{kind}:{repo_key}:{issue_number}"
@@ -607,16 +607,78 @@ async def notify_user(user_id: int, kind: str, text: str, *,
     return {"sent": sent, "failed": failed, "skipped": skipped}
 
 
-def schedule_notify(user_id: int, kind: str, text: str, **kw) -> None:
-    """fire-and-forget（调用方不等待通知发送，不阻塞主流程）。"""
-    uid = int(user_id or 0)
+def _norm_uid(value):
+    """user id 归一：纯数字转 int，其余（D105 后 grape_accounts.id 是 UUID）原样保留。
+
+    实现收敛在 `outbox.norm_user_id`（出单号与异步投递同一口径，Issue #3510）。
+    """
+    from src.domains.runtime.im.outbox import norm_user_id
+
+    return norm_user_id(value)
+
+
+def enqueue_user_notify(user_id, kind: str, text: str, *, dedupe: bool = True) -> bool:
+    """**同步**把通知写进 IM outbox（调用方在没有事件循环的线程里时用）。
+
+    与 `notify_user` 共用 active_targets / payload / out_track_id 口径，只是把
+    「入队」这一步同步做掉，投递仍交给 outbox 消费进程。返回是否至少入队一行；
+    没有任何可用安装（no_binding）也算入队（落 failed 行，运维可见），返回 True。
+    """
+    from src.domains.runtime.im import outbox as OB
+
+    uid = _norm_uid(user_id)
     if not uid:
-        return
+        return False
+    try:
+        targets = active_targets(uid)
+    except Exception as e:  # noqa: BLE001
+        log.warning("[im-notify] enqueue_user_notify targets failed user=%s: %s", uid, e)
+        return False
+    if not targets:
+        return False
+
+    queued = False
+    for target in targets:
+        inst = str(target.get("installation_id") or "")
+        ctype = str(target.get("channel_type") or "")
+        if not inst or not ctype:
+            continue
+        try:
+            cid = p2p_chat_id(inst) or ""
+            payload = _make_payload(kind, text, "", 0, "", uid, "")
+            track = OB.out_track_id(uid, kind, "", 0, ctype, inst)
+            if not cid:
+                OB.enqueue(out_track_id=track, installation_id=inst,
+                           channel_type=ctype, channel_chat_id="", payload=payload,
+                           expires_at=OB.new_expiry(), status="failed",
+                           last_error="no_binding", replace=not dedupe)
+                queued = True
+                continue
+            if OB.enqueue(out_track_id=track, installation_id=inst,
+                          channel_type=ctype, channel_chat_id=cid, payload=payload,
+                          expires_at=OB.new_expiry(), replace=not dedupe):
+                queued = True
+            else:
+                # 已有同 track 行（去重）：命中即视为已入队，不再重复投递
+                queued = True
+        except Exception as e:  # noqa: BLE001
+            log.warning("[im-notify] enqueue failed inst=%s: %s", inst, e)
+    return queued
+
+
+def schedule_notify(user_id, kind: str, text: str, **kw) -> bool:
+    """fire-and-forget；**没有事件循环时同步入队**（不再静默 skip）。
+
+    返回是否真的产生了一次通知动作（调度成功或入队成功），上层据此判断成败，
+    不再出现「no running loop, skip」却对外报成功（Issue #3469 复审 P1）。
+    """
+    uid = _norm_uid(user_id)
+    if not uid:
+        return False
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        log.info("[im-notify] no running loop, skip kind=%s user=%s", kind, uid)
-        return
+        return enqueue_user_notify(uid, kind, text)
     task = loop.create_task(notify_user(uid, kind, text, **kw))
 
     def _done(t: asyncio.Task) -> None:
@@ -626,6 +688,7 @@ def schedule_notify(user_id: int, kind: str, text: str, **kw) -> None:
             log.warning("[im-notify] task failed kind=%s user=%s: %s", kind, uid, e)
 
     task.add_done_callback(_done)
+    return True
 
 
 def notify_issue_event(repo_key: str, issue_number: "int | str", kind: str, text: str,

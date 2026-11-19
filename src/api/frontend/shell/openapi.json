@@ -73,6 +73,26 @@
                 "schema": {}
               }
             }
+          },
+          "400": {
+            "description": "No deliverable mailbox bound (EMAIL_UNBOUND)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (CODE_SEND_FAILED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -177,6 +197,36 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid email (EMAIL_FORMAT / EMAIL_SAME / EMAIL_TAKEN)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (CODE_SEND_FAILED / CHANGE_EMAIL_TOO_OFTEN)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Email service not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -226,6 +276,36 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Code or second factor rejected (CODE_INVALID / CODE_EXPIRED / NEED_SECOND_FACTOR / PASSWORD_INVALID / EMAIL_FORMAT / EMAIL_SAME)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Email already taken (EMAIL_TAKEN)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Email update failed (EMAIL_UPDATE_FAILED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
                 }
               }
             }
@@ -24637,19 +24717,29 @@
       "ChangeEmailBody": {
         "properties": {
           "new_email": {
-            "type": "string",
-            "title": "New Email"
+            "title": "New Email",
+            "type": "string"
           },
           "code": {
-            "type": "string",
-            "title": "Code"
+            "title": "Code",
+            "type": "string"
+          },
+          "password": {
+            "default": "",
+            "title": "Password",
+            "type": "string"
+          },
+          "old_email_code": {
+            "default": "",
+            "title": "Old Email Code",
+            "type": "string"
           }
         },
-        "type": "object",
         "required": [
           "new_email",
           "code"
         ],
+        "type": "object",
         "title": "ChangeEmailBody"
       },
       "ChangeEmailSendCodeBody": {
