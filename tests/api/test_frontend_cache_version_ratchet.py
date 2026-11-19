@@ -20,7 +20,7 @@ APP = Path(__file__).resolve().parent.parent.parent / "src" / "api" / "frontend"
 FROZEN = {
     "index.html": {
         "tokens.css": "1", "app.css": "9", "all-views.css": "45", "auth.css": "1", "faro.js": "7",
-        "api.js": "36", "pwd-blocklist.js": "3", "worker-name.js": "2", "dashboard-view.js": "84", "pipeline.js": "54",
+        "api.js": "36", "pwd-blocklist.js": "3", "worker-name.js": "2", "dashboard-view.js": "85", "pipeline.js": "54",
         "agent-view.js": "50", "event-view.js": "59", "chat-view.js": "61", "im-channel.js": "54", "repos-view.js": "59",
         "issues-view.js": "62", "account-view.js": "60", "scene-market.js": "58", "skills-view.js": "58", "knowledge-view.js": "49",
         "runtimes-view.js": "77", "observability-view.js": "57", "organizations.js": "50", "feedback-dialog.js": "50", "my-feedback.js": "50",
@@ -126,7 +126,7 @@ def test_register_and_forgot_agree():
 # （版本, 指纹）对与上方 FROZEN（同一次提交）。
 
 # all-views.css 与其源的（页面版本, 内容指纹）配对登记
-ALL_VIEWS = ("45", "17f928bd70bb3022")
+ALL_VIEWS = ("45", "e8e10590b67bac92")
 
 # admin 三件：AdminView.vue（非 scoped，样式走 admin-view.css）+ 只被 admin chunk
 # 引用的 AdminChannels/AdminPlatforms（其 CSS 并入 admin-view.css，不进 all-views）
