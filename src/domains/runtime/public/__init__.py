@@ -2795,26 +2795,26 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_intro_override_by_id": (
         "SELECT intro_override FROM skill WHERE id=?"),
     "skill_version_latest": (
-        "SELECT version, uploaded_at, uploaded_by, change_note FROM skill_version "
+        "SELECT version, uploaded_at, uploaded_by, change_note FROM grape_t_skill_version "
         "WHERE skill_id=? ORDER BY uploaded_at DESC, id DESC LIMIT 1"),
     "skill_versions_by_skill": (
-        "SELECT version, uploaded_at, uploaded_by, change_note FROM skill_version "
+        "SELECT version, uploaded_at, uploaded_by, change_note FROM grape_t_skill_version "
         "WHERE skill_id=? ORDER BY uploaded_at DESC, id DESC"),
     "skill_version_insert": (
-        "INSERT INTO skill_version (id, skill_id, version, change_note, uploaded_at, uploaded_by) "
+        "INSERT INTO grape_t_skill_version (id, skill_id, version, change_note, uploaded_at, uploaded_by) "
         "VALUES (?,?,?,?,?,?)"),
-    "skill_file_delete_by_skill": "DELETE FROM skill_file WHERE skill_id=?",
+    "skill_file_delete_by_skill": "DELETE FROM grape_t_skill_file WHERE skill_id=?",
     "skill_file_insert": (
-        "INSERT INTO skill_file (id, skill_id, path, size) VALUES (?,?,?,?)"),
+        "INSERT INTO grape_t_skill_file (id, skill_id, path, size) VALUES (?,?,?,?)"),
     "skill_files_by_skill": (
-        "SELECT path, size FROM skill_file WHERE skill_id=? ORDER BY path"),
-    "skill_file_count": "SELECT COUNT(*) FROM skill_file WHERE skill_id=?",
-    "skill_comment_count": "SELECT COUNT(*) FROM skill_comment WHERE skill_id=?",
+        "SELECT path, size FROM grape_t_skill_file WHERE skill_id=? ORDER BY path"),
+    "skill_file_count": "SELECT COUNT(*) FROM grape_t_skill_file WHERE skill_id=?",
+    "skill_comment_count": "SELECT COUNT(*) FROM grape_t_skill_comment WHERE skill_id=?",
     "skill_comments_page": (
-        "SELECT id, user_id, user_name, content, created_at FROM skill_comment "
+        "SELECT id, user_id, user_name, content, created_at FROM grape_t_skill_comment "
         "WHERE skill_id=? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"),
     "skill_comment_insert": (
-        "INSERT INTO skill_comment (id, skill_id, user_id, user_name, content, created_at) "
+        "INSERT INTO grape_t_skill_comment (id, skill_id, user_id, user_name, content, created_at) "
         "VALUES (?,?,?,?,?,?)"),
     # 相关技能候选池：热度前 N（与 mgmt 路由 _RELATED_POOL_SIZE 同值；QA B2：数值须具名）
     "skills_related_pool": (

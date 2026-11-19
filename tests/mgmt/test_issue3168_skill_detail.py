@@ -92,7 +92,7 @@ def test_decorate_skill_detail_exposes_detail_fields(monkeypatch):
 
 def test_skill_detail_tables_registered_and_migrations_are_runtime():
     names = {n for n, _ddl in db_setup._NEW_TABLES}
-    for n in ("skill_version", "skill_file", "skill_comment"):
+    for n in ("grape_t_skill_version", "grape_t_skill_file", "grape_t_skill_comment"):
         assert n in names
     versions = {m.version: m for m in db_setup._MIGRATIONS}
     assert versions["202611181301"].domains == ("runtime",)

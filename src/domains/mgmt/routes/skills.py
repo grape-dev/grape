@@ -122,6 +122,14 @@ _COMMENT_PAGE_MAX = 50
 # 加 5px 余量；单项文本 400 字对齐 _clean_summary 的概述截断口径（QA B2：数值须具名）。
 _INTRO_KEY_MAX = 32
 _INTRO_TEXT_MAX = 400
+# 列宽切片上限（与 schema_ddl 的列定义逐字一致，防双后端 silent truncation 漂移）：
+_VERSION_MAX = 64            # grape_t_skill_version.version VARCHAR(64)
+_UPLOADER_MAX = 64           # grape_t_skill_version.uploaded_by VARCHAR(64)
+_CHANGE_NOTE_MAX = 1000      # grape_t_skill_version.change_note TEXT，写入侧截断
+_FILE_PATH_MAX = 512         # grape_t_skill_file.path VARCHAR(512)
+_COMMENT_NAME_MAX = 128     # grape_t_skill_comment.user_name VARCHAR(128)
+# 评论分页缺省 20（UI「加载更多」步长），上限见 _COMMENT_PAGE_MAX。
+_COMMENT_PAGE_DEFAULT = 20
 
 
 def _clean_summary(text: str, limit: int = _SUMMARY_MAX) -> str:
@@ -175,17 +183,17 @@ def _record_skill_version(skill_id: int, version: str, change_note: str, user: d
     from src.kernel.id_gen import uuid7_str
     from datetime import datetime
     _rt_skills.exec_any("skill_version_insert", (
-        uuid7_str(), int(skill_id), (version or "1.0.0")[:64],
-        (change_note or "")[:1000],
+        uuid7_str(), int(skill_id), (version or "1.0.0")[:_VERSION_MAX],
+        (change_note or "")[:_CHANGE_NOTE_MAX],
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        str(user.get("username") or user.get("id") or "")[:64]))
+        str(user.get("username") or user.get("id") or "")[:_UPLOADER_MAX]))
     # C3 非查询操作审计：版本行写入留痕（上传/更新/重传共用，detail 不落包内容）
     from src.domains.mgmt.auth import audit as _skill_audit
     _skill_audit.log_audit("skill_version_created",
                            user_id=str(user.get("id") or ""),
                            operator_id=str(user.get("id") or ""),
                            detail={"skill_id": int(skill_id),
-                                   "version": (version or "1.0.0")[:64]})
+                                   "version": (version or "1.0.0")[:_VERSION_MAX]})
 
 
 def _validate_manual_summary(summary: str) -> str:
@@ -289,7 +297,7 @@ def _replace_skill_files(skill_id: int, entries: list[tuple[str, int]]) -> None:
     _rt_skills.exec_any("skill_file_delete_by_skill", (int(skill_id),))
     for path, size in entries:
         _rt_skills.exec_any(
-            "skill_file_insert", (uuid7_str(), int(skill_id), path[:512], int(size)))
+            "skill_file_insert", (uuid7_str(), int(skill_id), path[:_FILE_PATH_MAX], int(size)))
 
 
 def _ensure_official_skill_files(skill_id: int, scope: str, content: str) -> list[tuple[str, int]]:
@@ -1070,7 +1078,7 @@ def list_skill_comments(skill_id: int, page: int = 1, page_size: int = 20,
     """技能用户评论（D11）：默认最新在前，每页 20 条。"""
     _ensure_skill_access(skill_id, user)
     page = max(1, int(page or 1))
-    page_size = min(_COMMENT_PAGE_MAX, max(1, int(page_size or 20)))
+    page_size = min(_COMMENT_PAGE_MAX, max(1, int(page_size or _COMMENT_PAGE_DEFAULT)))
     total = int((_rt_skills.read_one_any("skill_comment_count", (int(skill_id),)) or [0])[0] or 0)
     rows = _rt_skills.read_all_any(
         "skill_comments_page", (int(skill_id), page_size, (page - 1) * page_size))
@@ -1102,7 +1110,7 @@ def create_skill_comment(skill_id: int, body: dict,
     name = user.get("username") or user.get("display_name") or "用户"
     _rt_skills.exec_any(
         "skill_comment_insert",
-        (cid, int(skill_id), str(user.get("id") or ""), str(name)[:128], content, now))
+        (cid, int(skill_id), str(user.get("id") or ""), str(name)[:_COMMENT_NAME_MAX], content, now))
     # C3 非查询操作审计：评论发布留痕（detail 只记标识与字数，不落评论原文）
     from src.domains.mgmt.auth import audit as _skill_audit
     _skill_audit.log_audit("skill_comment_posted",
@@ -1563,7 +1571,7 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
     """免传包更新技能元信息（C8）：tags/summary/description/category/agent_type。
 
     权限对齐 delete/update：official 403；user 需本人；repo 需当前用户托管该仓库。
-    版本号不变（不写 skill_version），仅刷新 updated_at。
+    版本号不变（不写 grape_t_skill_version），仅刷新 updated_at。
     """
     row = _rt_skills.read_one_any("skill_detail_by_id", (int(skill_id),))
     if not row:
@@ -1676,7 +1684,7 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
     _rt_skills.exec_any("skill_meta_patch_update", (
         new_desc, new_agent, int(new_category_id or 0), int(target_l1 or 0),
         int(target_l2 or 0), tags_json, new_summary,
-        str(user.get("username") or user.get("id") or "")[:64], int(skill_id)))
+        str(user.get("username") or user.get("id") or "")[:_UPLOADER_MAX], int(skill_id)))
     # C3 非查询操作审计：元信息免传包更新留痕（detail 只记字段名，不记值）
     from src.domains.mgmt.auth import audit as _skill_audit
     _skill_audit.log_audit("skill_meta_patched",

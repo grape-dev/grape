@@ -228,9 +228,9 @@ _NEW_TABLES = [
     ("event_route_config", _EVENT_ROUTE_CONFIG_DDL),
     ("agent_type", _AGENT_TYPE_DDL),
     ("skill", _SKILL_DDL),
-    ("skill_version", _SKILL_VERSION_DDL),
-    ("skill_file", _SKILL_FILE_DDL),
-    ("skill_comment", _SKILL_COMMENT_DDL),
+    ("grape_t_skill_version", _SKILL_VERSION_DDL),
+    ("grape_t_skill_file", _SKILL_FILE_DDL),
+    ("grape_t_skill_comment", _SKILL_COMMENT_DDL),
     ("grape_im_instance", _IM_INSTANCE_DDL),
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
     ("feishu_onboard_task", _FEISHU_ONBOARD_TASK_DDL),
@@ -10056,7 +10056,7 @@ register_migration(
 
 
 # ===== Issue #3168 技能详情页 / #3202 分类收敛：迁移内容归 owner 域 =====
-# skill / skill_version / skill_file / skill_comment / skill_category 归 runtime，
+# skill / grape_t_skill_version / grape_t_skill_file / grape_t_skill_comment 归 runtime（skill_category 归 mgmt），
 # grape_t_category_dict / scene_market 归 mgmt——SQL 一律住在 owner 域的
 # migrations 模块（跨域守卫 P0-2：api 层直写他域表 = 新增跨域引用），
 # 这里只做注册引导（模式同 ensure_runtime_type_info_columns / drop_same_domain_links）。

@@ -1,6 +1,6 @@
 """Issue #3168 技能详情页的 runtime 域迁移（202611181301/1302/1303）。
 
-skill / skill_version / skill_file / skill_comment 全部归 runtime
+skill / grape_t_skill_version / grape_t_skill_file / grape_t_skill_comment 全部归 runtime
 （configs/table_ownership.json），因此这三条迁移连同 SQL 一起住在本域
 migrations 下——src/api 层直写 runtime 表会被
 tests/arch/test_foreign_table_refs.py（P0-2 棘轮）计为新增跨域引用。
@@ -36,7 +36,7 @@ def _ensure_column(cur, table: str, column: str, ddl: str) -> None:
 
 
 def ensure_skill_detail_schema() -> None:
-    """skill 补 summary/download_count 列，建 skill_version/skill_file/skill_comment。
+    """skill 补 summary/download_count 列，建 grape_t_skill_version/grape_t_skill_file/grape_t_skill_comment。
 
     幂等：PRAGMA 先探测；CREATE TABLE IF NOT EXISTS 可重复执行。
     失败即 raise（执行器约定：抛错 = 不盖章，下次启动重试）。
@@ -50,9 +50,9 @@ def ensure_skill_detail_schema() -> None:
         c = db.cursor()
         _ensure_column(c, "skill", "summary", "TEXT DEFAULT ''")
         _ensure_column(c, "skill", "download_count", "INTEGER DEFAULT 0")
-        for _name, _ddl in (("skill_version", _SKILL_VERSION_DDL),
-                            ("skill_file", _SKILL_FILE_DDL),
-                            ("skill_comment", _SKILL_COMMENT_DDL)):
+        for _name, _ddl in (("grape_t_skill_version", _SKILL_VERSION_DDL),
+                            ("grape_t_skill_file", _SKILL_FILE_DDL),
+                            ("grape_t_skill_comment", _SKILL_COMMENT_DDL)):
             c.execute(_ddl)
         db.commit()
 
@@ -72,7 +72,7 @@ def backfill_official_skill_versions() -> None:
             rows = c.execute(
                 "SELECT s.id, s.created_at FROM skill s "
                 "WHERE s.scope='official' AND s.is_active=1 "
-                "AND NOT EXISTS (SELECT 1 FROM skill_version v WHERE v.skill_id=s.id)"
+                "AND NOT EXISTS (SELECT 1 FROM grape_t_skill_version v WHERE v.skill_id=s.id)"
             ).fetchall()
         except Exception as exc:  # noqa: BLE001 - 表不存在时由 1301 schema 迁移负责
             log.warning(f"202611181302 official version backfill skipped: {exc}")
@@ -80,7 +80,7 @@ def backfill_official_skill_versions() -> None:
         for sid, created_at in rows or []:
             try:
                 c.execute(
-                    "INSERT INTO skill_version "
+                    "INSERT INTO grape_t_skill_version "
                     "(id, skill_id, version, change_note, uploaded_at, uploaded_by) "
                     "VALUES (?,?,?,?,?,?)",
                     (uuid7_str(), int(sid), "1.0.0", "存量官方技能版本补录",

@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS skill (
 )
 """
 _VERSION_DDL = """
-CREATE TABLE IF NOT EXISTS skill_version (
+CREATE TABLE IF NOT EXISTS grape_t_skill_version (
     id TEXT PRIMARY KEY,
     skill_id INTEGER,
     version TEXT,
@@ -111,7 +111,7 @@ def _seed(sdb, name="issue3202-skill", scope="user", owner="7",
     sid = cur.lastrowid
     if version:
         conn.execute(
-            "INSERT INTO skill_version (id, skill_id, version, change_note, uploaded_at, uploaded_by) "
+            "INSERT INTO grape_t_skill_version (id, skill_id, version, change_note, uploaded_at, uploaded_by) "
             "VALUES (?,?,?,?,?,?)",
             (f"v-{sid}", sid, version, "初版", "2026-01-01 00:00:00", "7"))
     conn.commit()
@@ -209,7 +209,7 @@ def test_patch_updates_fields_refreshes_updated_at_keeps_version(sdb):
     assert row[3].startswith("自动审核")
     assert row[4] != old[0], "updated_at 应刷新"
     versions = sdb["conn"].execute(
-        "SELECT COUNT(*), MAX(version) FROM skill_version WHERE skill_id=?", (sid,)).fetchone()
+        "SELECT COUNT(*), MAX(version) FROM grape_t_skill_version WHERE skill_id=?", (sid,)).fetchone()
     assert versions == (1, "1.0.0"), "PATCH 不得新增版本行"
 
 

@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS skill (
 
 # 技能版本历史（Issue #3168 D6）：每次上传覆盖写一行，版本号强制递增。
 _SKILL_VERSION_DDL = """
-CREATE TABLE IF NOT EXISTS skill_version (
+CREATE TABLE IF NOT EXISTS grape_t_skill_version (
     id TEXT PRIMARY KEY,
     skill_id INTEGER NOT NULL,
     version VARCHAR(64) NOT NULL DEFAULT '',
@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS skill_version (
 
 # 技能包文件清单（Issue #3168 D9）：上传时解析 zip 落库，供资源 Tab 文件树。
 _SKILL_FILE_DDL = """
-CREATE TABLE IF NOT EXISTS skill_file (
+CREATE TABLE IF NOT EXISTS grape_t_skill_file (
     id TEXT PRIMARY KEY,
     skill_id INTEGER NOT NULL,
     path VARCHAR(512) NOT NULL DEFAULT '',
@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS skill_file (
 
 # 技能用户评论（Issue #3168 D11）：概览 Tab 底部评论区，纯文本。
 _SKILL_COMMENT_DDL = """
-CREATE TABLE IF NOT EXISTS skill_comment (
+CREATE TABLE IF NOT EXISTS grape_t_skill_comment (
     id TEXT PRIMARY KEY,
     skill_id INTEGER NOT NULL,
     user_id TEXT NOT NULL DEFAULT '',

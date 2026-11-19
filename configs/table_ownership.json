@@ -142,9 +142,9 @@
     "grape_t_guard_finding": "insight",
     "gsb_provider_route": "mgmt",
     "devops_pipeline_scene_uid_backup_1208": "mgmt",
-    "skill_version": "runtime",
-    "skill_file": "runtime",
-    "skill_comment": "runtime"
+    "grape_t_skill_version": "runtime",
+    "grape_t_skill_file": "runtime",
+    "grape_t_skill_comment": "runtime"
   },
   "views": {
     "admin_accounts": [
