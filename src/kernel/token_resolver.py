@@ -30,6 +30,7 @@ from typing import Optional
 
 from src.kernel.config import log
 from src.kernel.ports import accounts as _accounts
+from src.kernel.ports import pipeline as _pipeline
 from src.kernel.ports import repos as _repos
 from src.kernel.ports import tokens as _tokens
 from src.kernel.ports import vcs_cards as _vcs_cards
@@ -819,7 +820,6 @@ class RepoBotToken(TokenStrategy):
                 log.warning(f"RepoBotToken: historical column fallback hit "
                             f"(rc miss) repo={repo_key} field={field}")
                 # N3：managed_repos 列同走通道加密，读侧解密（明文兼容覆盖存量）
-                from src.domains.mgmt.user.db import _decrypt_repo_secret
                 # F4/D106：legacy 列命中独立消费审计（回填期旧列消费可观测，
                 # 与 rc 命中审计分离——旧列消费清零是回落分支下线前置）
                 try:
@@ -830,7 +830,7 @@ class RepoBotToken(TokenStrategy):
                               repo_key=repo_key)
                 except Exception:
                     pass
-                return _decrypt_repo_secret(raw)
+                return _tokens.repo_secret_decrypt(raw)
         except Exception as e:
             log.warning(f"RepoBotToken._fetch: {e}")
         return ""
@@ -906,19 +906,17 @@ class GlobalBotToken(TokenStrategy):
 
     def mark_expired(self, repo_key: str):
         status_key = self.provider.global_bot_status_meta_key()
-        from src.domains.mgmt.user.db import set_meta_value, _invalidate_global_bot_cache
         try:
-            set_meta_value(status_key, "expired")
-            _invalidate_global_bot_cache()
+            _tokens.set_meta_value(status_key, "expired")
+            _tokens.invalidate_global_bot_cache()
         except Exception as e:
             log.warning(f"GlobalBotToken.mark_expired: {e}")
 
     def clear_expired(self, repo_key: str):
         status_key = self.provider.global_bot_status_meta_key()
-        from src.domains.mgmt.user.db import set_meta_value, _invalidate_global_bot_cache
         try:
-            set_meta_value(status_key, "")
-            _invalidate_global_bot_cache()
+            _tokens.set_meta_value(status_key, "")
+            _tokens.invalidate_global_bot_cache()
         except Exception as e:
             log.warning(f"GlobalBotToken.clear_expired: {e}")
 
@@ -956,20 +954,17 @@ class UserToken(TokenStrategy):
 
         供 read_stored_token() 调用——A2A 鉴权 / session 写入只需原始值。
         """
-        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
-        from src.domains.mgmt.auth.credential_crypto import decrypt
         host_user_id = self._get_host_user_id(repo_key)
         if str(host_user_id or "") in ("", "0"):
             return ""
         try:
-            account = get_grape_account_by_id(host_user_id)
+            account = _accounts.get_grape_account_by_id(host_user_id)
             if not account:
                 return ""
             # external_identities 归 mgmt：列序与 status IN (1, 4) 口径由归属域持有
-            from src.domains.mgmt.public import stored_access_token_any
-            raw = stored_access_token_any(account["id"], self.provider.provider_name)
+            raw = _accounts.stored_access_token_any(account["id"], self.provider.provider_name)
             if raw:
-                return decrypt(raw)
+                return _tokens.decrypt(raw)
         except Exception as e:
             log.warning(f"UserToken._fetch_stored: {e}")
         return ""
@@ -986,14 +981,12 @@ class UserToken(TokenStrategy):
         host_user_id = self._get_host_user_id(repo_key)
         if str(host_user_id or "") in ("", "0"):
             return False  # 路径 A 仓库不走用户 token
-        from src.domains.mgmt.auth.grape_account_db import is_identity_expired
-        return is_identity_expired(host_user_id, self.provider.provider_name)
+        return _accounts.is_identity_expired(host_user_id, self.provider.provider_name)
 
     def mark_expired(self, repo_key: str):
         host_user_id = self._get_host_user_id(repo_key)
         if str(host_user_id or "") not in ("", "0"):
-            from src.domains.mgmt.auth.grape_account_db import mark_identity_expired
-            mark_identity_expired(host_user_id, self.provider.provider_name)
+            _accounts.mark_identity_expired(host_user_id, self.provider.provider_name)
 
     def clear_expired(self, repo_key: str):
         """用户重新绑定时 create/update_external_identity 已恢复 status=1，无需额外操作。"""
@@ -1163,7 +1156,6 @@ class TokenResolver:
         R21.3.5: 区分 401 和超时/5xx——只对 401 标记过期。
         R21.3.3: 原 R18.5.10 "超时视为验证失败" 设计取消。
         """
-        from src.domains.runtime.vcs.token_error import extract_http_status_from_exc
         for strategy in self.strategies:
             token = strategy._fetch(repo_key)  # 不检查过期标记，查原始值
             if token:
@@ -1177,7 +1169,7 @@ class TokenResolver:
                     return ""
                 except Exception as e:
                     # R21.3.5: 区分 401 和超时/5xx
-                    http_code = extract_http_status_from_exc(e)
+                    http_code = _vcs_cards.extract_http_status_from_exc(e)
                     if http_code == 401:
                         # token 验证 401 → 标记过期
                         strategy.mark_expired(repo_key)
@@ -1258,8 +1250,7 @@ class RepoBotTokenHandler(TokenActionHandler):
             return False
         try:
             # managed_repos 归 mgmt（原语句在 kernel 直连进程主库，三库拓扑下恒 1146）
-            from src.domains.mgmt.public import repo_bot_username_any
-            bot_username = repo_bot_username_any(result.repo_key)
+            bot_username = _repos.repo_bot_username_any(result.repo_key)
             return bool(bot_username) and actor == bot_username
         except Exception as e:
             log.debug(f"RepoBotTokenHandler.is_self_loop_actor: {e}")
@@ -1272,8 +1263,7 @@ class RepoBotTokenHandler(TokenActionHandler):
         # 仓库级 bot 过期 → fallback 到全局 bot
         if result.provider:
             try:
-                from src.domains.mgmt.user.db import get_global_bot_token_for
-                return get_global_bot_token_for(result.provider.provider_name) or ""
+                return _tokens.get_global_bot_token_for(result.provider.provider_name) or ""
             except Exception:
                 pass
         return ""
@@ -1302,8 +1292,7 @@ class GlobalBotTokenHandler(TokenActionHandler):
             return False
         try:
             # S87/D63：统一口径——provider 的全局 bot username 集合（github 单值源）
-            from src.domains.mgmt.user.db import get_global_bot_usernames_for
-            _bot_names = get_global_bot_usernames_for(result.provider.provider_name)
+            _bot_names = _tokens.get_global_bot_usernames_for(result.provider.provider_name)
             return actor in _bot_names if _bot_names else False
         except Exception:
             return False
@@ -1356,15 +1345,13 @@ class UserTokenHandler(TokenActionHandler):
         # 条件 1: 路径 B 仓库（通过 result.level == "user" 已确认）
         # 条件 2: actor == host_vcs_username
         try:
-            from src.domains.mgmt.user.db import get_host_vcs_username
-            host_vcs_username = get_host_vcs_username(result.repo_key, result.provider.provider_name if result.provider else "")
+            host_vcs_username = _accounts.get_host_vcs_username(result.repo_key, result.provider.provider_name if result.provider else "")
             if not host_vcs_username or actor != host_vcs_username:
                 return False
         except Exception:
             return False
         # 条件 4: 该 issue 有正在执行的 task
-        from src.domains.runtime.pipeline.event_pipeline import check_running_task
-        return check_running_task(result.repo_key, result.issue_id or "")
+        return _pipeline.check_running_task(result.repo_key, result.issue_id or "")
 
     def get_comment_token(self, result):
         # R25.3: 回帖链 best-effort——直接用 _fetch 读存储 token（绕过 _is_expired 检查）
@@ -1380,8 +1367,7 @@ class UserTokenHandler(TokenActionHandler):
         # 用户 token 完全不可用 → fallback 全局 bot token
         if result.provider:
             try:
-                from src.domains.mgmt.user.db import get_global_bot_token_for
-                return get_global_bot_token_for(result.provider.provider_name) or ""
+                return _tokens.get_global_bot_token_for(result.provider.provider_name) or ""
             except Exception:
                 pass
         return ""
@@ -1456,8 +1442,7 @@ def credential_workflows_write(user_id: str, provider: str) -> "bool | None":
     暴露 token scope）。声明位置：凭据域 <p>_pat 配置的 workflows_write 键。
     """
     try:
-        from src.domains.mgmt.user.db import get_credential
-        cfg = get_credential(user_id, provider, kind="pat") or {}
+        cfg = _tokens.get_credential(user_id, provider, kind="pat") or {}
         if "workflows_write" not in cfg:
             return None
         return cfg.get("workflows_write") is True
@@ -1492,11 +1477,9 @@ class GitLabProvider(GenericVcsProvider):
     _GL_MAINTAINER = 40  # GitLab access_level：Developer=30 / Maintainer=40
 
     def __init__(self):
-        from src.domains.runtime.vcs.platform_card import get_platform_card
-        card = get_platform_card("gitlab")
+        card = _vcs_cards.get_platform_card("gitlab")
         if card is None:
-            from src.domains.runtime.vcs.platform_card import build_platform_card
-            card = build_platform_card("gitlab", {})
+            card = _vcs_cards.build_platform_card("gitlab", {})
         super().__init__(card)
 
     def _pid(self, owner, repo) -> str:
