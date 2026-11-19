@@ -46,6 +46,9 @@ from src.kernel.gsb.client import (
     GsbRemoteTimeoutError,
     GsbRemoteUnreachableError,
 )
+# 能力端口：kernel 不 import src.domains；契约域 Provider 的注册实现由装配层
+# （src/api/contracts_wiring.py）绑定到 pipeline 端口，这里只在调用点解析。
+from src.kernel.ports import pipeline as _pipeline
 
 # Provider 注册表
 _PROVIDERS: dict[str, dict[str, Callable[[], Any] | None]] = {}
@@ -84,11 +87,13 @@ def register_provider(
 
 
 def _ensure_registered() -> None:
-    """首次调用时惰性注册 contracts Provider（避免模块级 import cycle）。"""
-    if not _PROVIDERS:
-        from src.domains.contracts import ensure_providers_registered
+    """首次调用时惰性注册 contracts Provider（避免模块级 import cycle）。
 
-        ensure_providers_registered()
+    注册动作（`ensure_providers_registered`）属契约域，经 pipeline 端口在调用点解析；
+    端口未绑定时 fail-fast 抛 PortNotBound，不再用域懒加载把故障推迟到别处。
+    """
+    if not _PROVIDERS:
+        _pipeline.ensure_providers_registered()
 
 
 # ---------------- 调用方进程域识别 + 禁止矩阵 ----------------
