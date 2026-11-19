@@ -26,6 +26,11 @@ import re
 import shutil
 
 from src.kernel.config import log
+# 能力端口：kernel 不 import src.domains；域实现在装配层 src/api/contracts_wiring.py 绑定。
+# 只在调用点解析（_accounts.x / _pipeline.x / _repos.x），不在模块级取符号。
+from src.kernel.ports import accounts as _accounts
+from src.kernel.ports import pipeline as _pipeline
+from src.kernel.ports import repos as _repos
 
 
 class RepoCleanupError(Exception):
@@ -109,19 +114,16 @@ def cascade_cleanup_repo_data(repo_key: str, owner: str, repo: str,
         log.warning(f"Cleanup skipped: invalid owner/repo {owner}/{repo}")
         return stats
 
-    from src.domains.mgmt import public as _mgmt_clean
-    from src.domains.runtime import public as _rt_clean
-
     # 跨库事务不可得：按域拆成两段级联（各自本域一个事务）；dry-run 只统计直删表，
     # 与原实现口径一致。两段都在「子表先删 → 直删 → 技能/幂等键」顺序内完成。
     try:
-        _rt_stats = _rt_clean.purge_repo_rows(keys, dry_run=bool(dry_run))
+        _rt_stats = _pipeline.purge_repo_rows(keys, dry_run=bool(dry_run))
     except Exception as e:
         log.warning(f"Cascade cleanup runtime segment failed (rolled back) {repo_key}: {e}")
         _audit(repo_key, trigger, operator_id, {"error": str(e), "rolled_back": True, "segment": "runtime"})
         raise RepoCleanupError(f"cascade cleanup failed: {e}") from e
     try:
-        _mg_stats = _mgmt_clean.purge_repo_rows(keys, dry_run=bool(dry_run))
+        _mg_stats = _repos.purge_repo_rows(keys, dry_run=bool(dry_run))
     except Exception as e:
         log.warning(f"Cascade cleanup mgmt segment failed after runtime committed {repo_key}: {e}")
         _audit(repo_key, trigger, operator_id,
@@ -141,8 +143,7 @@ def cascade_cleanup_repo_data(repo_key: str, owner: str, repo: str,
 
 def _audit(repo_key: str, trigger: str, operator_id: int, detail: dict) -> None:
     try:
-        from src.domains.mgmt.auth import audit as auth_audit
-        auth_audit.log_audit(
+        _accounts.log_audit(
             "repo_cascade_cleanup",
             user_id=operator_id,
             detail={"repo_key": repo_key, "trigger": trigger, **detail},
@@ -154,22 +155,20 @@ def _audit(repo_key: str, trigger: str, operator_id: int, detail: dict) -> None:
 def _cleanup_files(keys: list[str], owner: str, repo: str, stats: dict) -> None:
     """skill 目录 + workspace 知识基线目录清理（带 meta pending 补偿标记）。"""
     from src.kernel.session_manager import db, db_lock
-    from src.domains.runtime import public as _rt_clean
 
     def _mark_pending(k: str, on: bool):
         try:
             _key = f"cleanup_pending:{k}"
             if on:
-                _rt_clean.meta_set(_key, "1")
+                _pipeline.meta_set(_key, "1")
             else:
-                _rt_clean.meta_delete_keys([_key])
+                _pipeline.meta_delete_keys([_key])
         except Exception as e:
             log.warning(f"Cleanup pending mark failed ({k}): {e}")
 
     # 1. 仓库 skill 目录（skills/repo/{repo_key}/）
     try:
-        from src.domains.mgmt.user.db import SKILL_DIR
-        _repo_skills_base = os.path.join(os.path.dirname(SKILL_DIR), "repo")
+        _repo_skills_base = os.path.join(os.path.dirname(_repos.SKILL_DIR), "repo")
         for k in keys:
             _dir = os.path.join(_repo_skills_base, k)
             if os.path.isdir(_dir):
@@ -233,19 +232,16 @@ def retry_pending_file_cleanups() -> int:
     Returns:
         仍存在的 pending 标记数（0 = 全部清理完成）
     """
-    from src.domains.runtime import public as _rt_clean2
-
     pending = []
     try:
-        pending = _rt_clean2.meta_keys_like("cleanup_pending:")
+        pending = _pipeline.meta_keys_like("cleanup_pending:")
     except Exception as e:
         log.warning(f"Retry pending cleanups: read meta failed: {e}")
         return -1
 
-    from src.domains.mgmt.user.db import SKILL_DIR
     from src.kernel.config import WORKSPACE_DIR
     from src.kernel.repo_key import parse_repo_key, split_owner_repo, workspace_repo_dir
-    _repo_skills_base = os.path.join(os.path.dirname(SKILL_DIR), "repo")
+    _repo_skills_base = os.path.join(os.path.dirname(_repos.SKILL_DIR), "repo")
 
     remaining = 0
     for key in pending:
@@ -274,7 +270,7 @@ def retry_pending_file_cleanups() -> int:
                         done = False
         if done:
             try:
-                _rt_clean2.meta_delete_keys([key])
+                _pipeline.meta_delete_keys([key])
             except Exception:
                 pass
         else:
