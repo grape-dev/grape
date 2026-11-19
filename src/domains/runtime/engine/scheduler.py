@@ -94,6 +94,34 @@ def _autopilot_issue_ref(task_id) -> str:
         s = chr(ord("a") + r) + s
     return f"autopilot-{s}"
 
+
+def _skip_autopilot_for_takeover(repo_key, task, exec_id) -> bool:
+    """Issue #3201：接管 active 期间 autopilot 派发同样统一拦截。
+
+    与 event_pipeline._skip_dispatch_for_takeover 同一判定源（active_takeover_for），
+    Issue 维度取 autopilot 任务的回链键（_autopilot_issue_ref，与 agent_tasks.issue_id
+    同值）。命中后执行记录置 ``skipped``、不建 task、不消耗重试次数，并日志留痕。
+    返回 True 表示本次派发已被拦截，调用方须立即 return。
+    """
+    issue_id = _autopilot_issue_ref((task or {}).get("id"))
+    if not repo_key or not issue_id:
+        return False
+    try:
+        from src.domains.runtime.engine.takeover import active_takeover_for
+        from src.domains.runtime.pipeline.event_pipeline import _takeover_issue_id
+        _iid = _takeover_issue_id(issue_id)
+        sess = active_takeover_for(repo_key, _iid) if _iid else None
+    except Exception as e:
+        log.warning(f"Autopilot exec {exec_id}: takeover guard check failed (allow): {e}")
+        return False
+    if not sess:
+        return False
+    log.info(f"Autopilot exec {exec_id}: skipped — takeover {sess.get('id')} active for "
+             f"{repo_key}{_iid} (agent={sess.get('agent_type')})")
+    _update_execution_result(exec_id, "skipped", error="接管进行中，自动派发已拦截")
+    return True
+
+
 _FINDINGS_PATTERN = re.compile(
     r'<!--\s*autopilot-findings\s*(.*?)\s*-->',
     re.DOTALL
@@ -471,6 +499,10 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     """DIRECT 模式：本机 stream_devops_agent 执行。"""
     from src.domains.runtime.pipeline.event_pipeline import _create_direct_task
 
+    # Issue #3201：接管 active 期间不建 task、不起 agent（执行记录置 skipped）。
+    if _skip_autopilot_for_takeover(repo_key, task, exec_id):
+        return
+
     # 创建 agent_tasks 记录（用 exec_id 作为 event_seq，skip_event_config=True 不写 events 表）
     # P8-consistency：issue 回链键创建即落（无数字合成键，失败路径不丢统计），
     # 串行锁/工作目录/知识过滤均不受影响（见 _autopilot_issue_ref）。
@@ -637,6 +669,10 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
                             f"creator={task.get('created_by')}, enqueue without skill files")
         except Exception as _se:
             log.warning(f"Autopilot exec {exec_id}: pre-resolve skill '{skill_name}' failed: {_se}")
+
+    # Issue #3201：接管 active 期间不建 task（执行记录置 skipped，不消耗重试）。
+    if _skip_autopilot_for_takeover(repo_key, task, exec_id):
+        return
 
     try:
         task_id = enqueue_task(

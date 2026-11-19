@@ -3633,8 +3633,9 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
     # Issue #3201：webhook / 订阅 / 排队补派等所有入队路径统一守门；
     # 命中 active 接管时不建 task，事件置 skipped_takeover（不重放）。
+    # 返回空串供调用方（A2A dispatch）识别「已跳过」，不得当作派发成功。
     if _skip_dispatch_for_takeover(repo_key, seq, issue_id, agent_type):
-        return
+        return ""
     # 1) 路由判定：
     #    runtime_id>0 → 确定性路由（指定引擎）
     #    runtime_id=0 + plugin 模式 → 无主池任务（广播），设 pool_agent_type 让引擎竞争认领
@@ -3658,7 +3659,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                 log.info(f"Pipeline enqueue: legacy runtime_id=0 -> local direct engine {runtime_id} seq={seq}")
             else:
                 _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
-                return
+                return ""
     # Issue #630：技能物化完整性校验门禁（enqueue 前，fail-fast）——配置了技能但
     # 内容源全缺失（空壳技能行，如 sid=3276 vod-cli-crossrepo）时显式告警并阻断派发，
     # 不静默降级；技能未配置（推荐模式/无 skill）不阻断，official 内置包兜底放行。
@@ -3671,7 +3672,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                         f"skill={skill_name} sid={_gate_sid}: {_gate_reason}")
             _fail_event(seq, f"技能物化校验未通过，已阻断派发（skill={skill_name}）: "
                              f"{_gate_reason[:200]}")
-            return
+            return ""
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名。
     # 注意：engine_select v2 派发已选定具体引擎（runtime_id>0），无 pool_mode 路径；
     # 历史 pool 模式（runtime_id=0 + pool_agent_type）由 service.claim 兼容处理。
@@ -3732,7 +3733,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     except Exception as e:
         log.warning(f"Pipeline enqueue: prompt build failed: {e}")
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
-        return
+        return ""
 
     from src.kernel.prompt_builder import resolve_task_server_env
     # Issue #1660：REPO_OWNER/REPO_NAME 由 REPO_FULL_NAME 派生（缺失回退 repo_key 并告警），
@@ -3836,7 +3837,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     except Exception as e:
         log.warning(f"Pipeline enqueue: enqueue_task failed for seq={seq}: {e}")
         _fail_event(seq, f"enqueue_task error {str(e)[:150]}")
-        return
+        return ""
     _mode_tag = "plugin" if is_plugin_mode() else "legacy"
     log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()} dispatch={_mode_tag} pool_tag={_pool_tag or '-'}")
 
@@ -3844,6 +3845,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 本机 direct 引擎现由 local_claimer_loop 以一等认领者身份参与广播（与远端 worker 同一条
     # claim_by_tag 检查链：白名单/健康分/满载/scope 全约束）。此处的 self-run 会在入队同一毫秒
     # 抢跑绑定引擎的任务（2026-10-14 pvs-zombies-demo2 issue #4/#6 两轮事故根因），不再需要。
+    return tid or ""
 
 
 def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:

@@ -666,6 +666,32 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     from src.api.deps import check_repo_access
     check_repo_access(user, evt.get("repo_key", "") or "")
 
+    # Issue #3201：接管 active 期间"重派"同样统一拦截（spec 目标第 1 段点名重派）。
+    # 判定放在归属校验之后、任何建 task / 起 agent 分支之前：queued 复用直跑、local_only
+    # 复用与快照重建、终态重建、无关联任务重触发等分支全部收敛到这一处，避免只在
+    # 某个分支加判定而漏掉其余出口（重派会与本地接管会话双写同一 worktree）。
+    _tko_repo_key = evt.get("repo_key", "") or ""
+    _tko_issue_raw = evt.get("issue_id", "") or ""
+    if _tko_repo_key and _tko_issue_raw:
+        _tko_issue_id = ""
+        _tko_sess = None
+        try:
+            from src.domains.runtime.engine.takeover import active_takeover_for
+            from src.domains.runtime.pipeline.event_pipeline import _takeover_issue_id
+            _tko_issue_id = _takeover_issue_id(_tko_issue_raw)
+            _tko_sess = active_takeover_for(_tko_repo_key, _tko_issue_id) if _tko_issue_id else None
+        except Exception as _tko_e:
+            log.warning(f"[redispatch] takeover guard check failed (allow): {_tko_e}")
+        if _tko_sess:
+            log.info(f"[redispatch] seq={seq} blocked: {_tko_repo_key}{_tko_issue_id} "
+                     f"under active takeover {_tko_sess.get('id')} "
+                     f"(agent={_tko_sess.get('agent_type')})")
+            raise HTTPException(status_code=409, detail={
+                "code": 409,
+                "message": "接管进行中，已拦截重派（already_taken_over）",
+                "takeover_id": _tko_sess.get("id") or "",
+            })
+
     # Issue #587：重派操作强制审计留痕（actor/time/target_event/动作）
     _audit_admin_action(evt.get("repo_key", "") or "", seq, "redispatch", user)
 

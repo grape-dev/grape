@@ -3,6 +3,9 @@
 覆盖：
 - webhook / pipeline 入队（_enqueue_pipeline_task）不建 task，事件置 skipped_takeover；
 - direct 派发（_create_direct_task）同样被守门；
+- 手动重派（redispatch_event，含 local_only）同样被守门，接管结束后正常；
+- autopilot 派发同样被守门（execution 置 skipped），接管结束后正常；
+- A2A direct/remote 派发返回 skipped 且不启动 agent，队列 drain 不把 skipped 判成失败；
 - token 过期按不活跃处理（自愈），不永久冻结 issue；
 - 同仓其他 issue 不受影响；
 - A2A 入口返回 409 already_taken_over；
@@ -10,6 +13,7 @@
 - finish 先关会话再派发，并回传本次已忽略条数。
 """
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -28,6 +32,10 @@ def _clean():
                 c.execute(f"DELETE FROM {table} WHERE repo_key=?", (REPO,))
             except Exception:
                 pass
+        try:
+            c.execute("DELETE FROM autopilot_executions WHERE id BETWEEN 770000 AND 779999")
+        except Exception:
+            pass
         db.commit()
 
 
@@ -74,6 +82,18 @@ def _task_count(seq):
         c = db.cursor()
         c.execute("SELECT COUNT(*) FROM agent_tasks WHERE event_seq=?", (seq,))
         return int(c.fetchone()[0])
+
+
+def _seed_task(seq, task_id, status="running", runtime_id=0, agent="coding", issue=ISSUE):
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM agent_tasks WHERE id=?", (task_id,))
+        c.execute(
+            "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, repo_key, "
+            "issue_id, agent_type, prompt, status) VALUES (?,?,?,?,?,?,?,?,?)",
+            (task_id, f"s_{task_id}", runtime_id, seq, REPO, issue, agent, "p", status),
+        )
+        db.commit()
 
 
 @pytest.fixture(autouse=True)
@@ -311,3 +331,219 @@ def test_skipped_dispatch_count_stops_at_next_takeover():
     assert svc.skipped_dispatch_count(first_sess) == 2, "已结束会话计数必须冻结在下一次接管前"
     second_sess = svc.get_session("tkos_3201_b")
     assert svc.skipped_dispatch_count(second_sess) == 2
+
+
+# ===== R1：手动重派（redispatch_event）统一守门 =====
+
+
+def test_redispatch_blocked_under_active_takeover(monkeypatch):
+    """R1：接管 active 期间重派（含 local_only）→ 409，agent_tasks 零新增。"""
+    from fastapi import HTTPException
+
+    from src.api import deps as _deps
+    from src.domains.runtime.engine import service as svc
+    from src.domains.runtime.routes import events as ev
+
+    seq = 770200
+    _seed_event(seq, status="failed")
+    _seed_takeover(seq)
+    monkeypatch.setattr(_deps, "check_repo_access", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "_audit_admin_action", lambda *a, **k: None)
+
+    def _boom(*a, **k):
+        raise AssertionError("接管 active 期间重派不得建 task / 起 agent")
+
+    monkeypatch.setattr(svc, "enqueue_task", _boom)
+    monkeypatch.setattr(svc, "requeue_task", _boom)
+
+    for local_only in (False, True):
+        with pytest.raises(HTTPException) as ei:
+            ev.redispatch_event(seq, local_only=local_only, user={"username": "tester"})
+        assert ei.value.status_code == 409, ei.value.detail
+        assert "already_taken_over" in str(ei.value.detail)
+        assert _task_count(seq) == 0
+    # 事件状态不改写（重派被拦截不落任何派发态）
+    assert _event_status(seq) == "failed"
+
+
+def test_redispatch_allowed_after_takeover_closed(monkeypatch):
+    """R1 对照组：接管已结束 → 同一重派正常推进（证明不是一刀切拦截）。"""
+    from src.api import deps as _deps
+    from src.api import event_store as est
+    from src.domains.mgmt.user import db as udb
+    from src.domains.runtime.engine import service as svc
+    from src.domains.runtime.pipeline import event_pipeline as ep
+    from src.domains.runtime.routes import events as ev
+
+    seq = 770201
+    _seed_event(seq, status="running")
+    _seed_task(seq, "t_770201", status="running", runtime_id=7)
+    _seed_takeover(seq, status="finished", session_id="tkos_3201_closed")
+    monkeypatch.setattr(_deps, "check_repo_access", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "_audit_admin_action", lambda *a, **k: None)
+    monkeypatch.setattr(udb, "get_meta_value", lambda k: "")
+    monkeypatch.setattr(udb, "set_meta_value", lambda k, v: None)
+    monkeypatch.setattr(ep, "is_plugin_mode", lambda: False)
+    monkeypatch.setattr(est, "reset_event_terminal", MagicMock())
+    _requeue = MagicMock()
+    monkeypatch.setattr(svc, "requeue_task", _requeue)
+
+    res = ev.redispatch_event(seq, user={"username": "tester"})
+
+    assert res["status"] == "redispatched"
+    assert res["task_id"] == "t_770201"
+    _requeue.assert_called_once_with("t_770201")
+
+
+# ===== R2：autopilot 派发统一守门 =====
+
+
+def test_autopilot_dispatch_skips_under_active_takeover():
+    """R2：接管 active 期间 autopilot 不建 task，execution 置 skipped。"""
+    from src.domains.runtime.engine import scheduler as sch
+
+    exec_id = 770400
+    task = {"id": 3}
+    _issue_ref = sch._autopilot_issue_ref(task["id"])
+    _seed_takeover(exec_id, agent="issue", issue=f"#{_issue_ref}",
+                   session_id="tkos_3201_ap")
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM autopilot_executions WHERE id=?", (exec_id,))
+        c.execute("INSERT INTO autopilot_executions (id, task_id, status) VALUES (?,?,?)",
+                  (exec_id, task["id"], "pending"))
+        db.commit()
+
+    sch._execute_autopilot_remote(
+        REPO, task, exec_id, "issue", "", 0, "opencode", "inst", "/tmp/ws", "p",
+        "", "Agent", {}, "takeover3201/repo", {},
+    )
+
+    assert _task_count(exec_id) == 0, "接管期间 autopilot 不得建 task"
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status, error FROM autopilot_executions WHERE id=?", (exec_id,))
+        status, error = c.fetchone()
+    assert status == "skipped", f"execution 应为 skipped，实际 {status}"
+    assert "接管进行中" in (error or "")
+
+
+def test_autopilot_dispatch_allowed_after_takeover_closed(monkeypatch):
+    """R2 对照组：接管已结束 → autopilot 正常入队（证明不是一刀切）。"""
+    from src.api import session_store as sst
+    from src.domains.runtime.engine import scheduler as sch
+    from src.domains.runtime.engine import service as svc
+    from src.kernel import prompt_builder as pb
+
+    exec_id = 770401
+    task = {"id": 4, "created_by": 0}
+    _issue_ref = sch._autopilot_issue_ref(task["id"])
+    _seed_takeover(exec_id, agent="issue", issue=f"#{_issue_ref}",
+                   status="finished", session_id="tkos_3201_ap_closed")
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM autopilot_executions WHERE id=?", (exec_id,))
+        c.execute("INSERT INTO autopilot_executions (id, task_id, status) VALUES (?,?,?)",
+                  (exec_id, task["id"], "pending"))
+        db.commit()
+
+    monkeypatch.setattr(sst, "get_or_create_agent_session", lambda *a, **k: {"id": "as_ap"})
+    monkeypatch.setattr(sst, "get_or_create_issue_session", lambda *a, **k: {"id": "is_ap"})
+    monkeypatch.setattr(pb, "_resolve_server_url", lambda *a, **k: "")
+    _enq = MagicMock(return_value="t_ap_ok")
+    monkeypatch.setattr(svc, "enqueue_task", _enq)
+
+    sch._execute_autopilot_remote(
+        REPO, task, exec_id, "issue", "", 0, "opencode", "inst", "/tmp/ws", "p",
+        "", "Agent", {}, "takeover3201/repo", {},
+    )
+
+    _enq.assert_called_once()
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status FROM autopilot_executions WHERE id=?", (exec_id,))
+        assert c.fetchone()[0] == "dispatched"
+
+
+# ===== R3：A2A direct / remote / 队列 drain 统一守门 =====
+
+
+def _patch_a2a_legacy(monkeypatch, kind):
+    from src.domains.runtime.engine import engine_select as es
+    from src.domains.runtime.engine import service as svc
+    from src.domains.runtime.pipeline import event_pipeline as ep
+
+    monkeypatch.setattr(ep, "is_plugin_mode", lambda: False)
+    monkeypatch.setattr(es, "pick_engine", lambda *a, **k: 42)
+    monkeypatch.setattr(es, "engine_name", lambda *a, **k: "opencode")
+    monkeypatch.setattr(es, "get_scene_pool_engine_ids", lambda *a, **k: [])
+    monkeypatch.setattr(svc, "runtime_execution_kind", lambda rid: kind)
+    return ep
+
+
+def test_a2a_direct_skips_and_does_not_start_agent_under_takeover(monkeypatch):
+    """R3：direct 分支守门命中后必须不调用 start_direct_agent。"""
+    from src.api import a2a_dispatch as ad
+
+    seq = 770300
+    _seed_event(seq, status="running")
+    _seed_takeover(seq)
+    ep = _patch_a2a_legacy(monkeypatch, "direct")
+    _started = MagicMock()
+    monkeypatch.setattr(ep, "start_direct_agent", _started)
+
+    res = ad.run_a2a_dispatch(
+        REPO, seq, "coding", {"type": "a2a_event", "issue_id": ISSUE, "payload": {}},
+        skill_name="", issue_number="3201", repository="takeover3201/repo",
+    )
+
+    assert res["status"] == "skipped", res
+    assert res.get("seq") == seq
+    _started.assert_not_called(), "task_id 为空时不得启动 agent"
+    assert _task_count(seq) == 0
+    assert _event_status(seq) == "skipped_takeover"
+
+
+def test_a2a_remote_returns_skipped_under_takeover(monkeypatch):
+    """R3：remote/广播分支入队被守门 → 返回非 ok（skipped），不建 task。"""
+    from src.api import a2a_dispatch as ad
+
+    seq = 770301
+    _seed_event(seq, status="running")
+    _seed_takeover(seq)
+    _patch_a2a_legacy(monkeypatch, "queue_remote")
+
+    res = ad.run_a2a_dispatch(
+        REPO, seq, "coding", {"type": "a2a_event", "issue_id": ISSUE, "payload": {}},
+        skill_name="", issue_number="3201", repository="takeover3201/repo",
+    )
+
+    assert res["status"] == "skipped", res
+    assert res.get("seq") == seq
+    assert _task_count(seq) == 0
+    assert _event_status(seq) == "skipped_takeover"
+
+
+def test_a2a_queue_drain_skips_without_failing_event(monkeypatch):
+    """R3：队列已有 A2A 事件 → drain 后零 task、事件不被判 failed、不起 agent。"""
+    from src.domains.runtime.pipeline import event_pipeline as ep
+
+    qseq = 770302
+    _seed_event(qseq, status="queued")
+    _seed_takeover(qseq)
+    _patch_a2a_legacy(monkeypatch, "direct")
+    _started = MagicMock()
+    monkeypatch.setattr(ep, "start_direct_agent", _started)
+
+    ok = ep._claim_and_dispatch_queued(
+        qseq, REPO, "coding", ISSUE,
+        {"issue_number": "3201"},
+        {"dispatch": {"skill_name": "", "runtime_id": 42, "backend": "opencode",
+                      "evt": {"type": "a2a_event", "issue_id": ISSUE}}},
+        0,
+    )
+
+    assert ok is True, "skipped 应被 drain 视为已处理，不得走 _fail_event"
+    _started.assert_not_called()
+    assert _task_count(qseq) == 0
+    assert _event_status(qseq) == "skipped_takeover", "drain 不得把 skipped 改成 failed"
