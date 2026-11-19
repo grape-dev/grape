@@ -80,11 +80,15 @@ def _resolve_repo_key(repo: str) -> str:
     if ":" in repo:
         return rk
     try:
+        from src.kernel.repo_key import repo_key_candidates
+        # 2026-11-19：候选集必须在 db_lock **之前**算完。它内部要读平台卡
+        # （list_vcs_platforms → platform_card），而平台卡构建会走 DB 拿 db_lock；
+        # 「db_lock 里算候选集」与「平台卡构建里要 db_lock」反序 = 整进程 ABBA 死锁
+        # （2026-11-19 两次全站卡死）。锁内现在只剩一条纯 SELECT。
+        _rks = tuple(repo_key_candidates(repo))
         from src.kernel.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            from src.kernel.repo_key import repo_key_candidates
-            _rks = tuple(repo_key_candidates(repo))
             row = c.execute(f"SELECT repo_key FROM managed_repos WHERE repo_key IN ({','.join('?' * len(_rks))}) LIMIT 1",
                             _rks).fetchone()
             if row:
