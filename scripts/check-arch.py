@@ -257,6 +257,13 @@ WHITELIST: dict[str, dict[str, str]] = {
     "CYCLE:src.domains.runtime.vcs.providers+src.domains.runtime.vcs.providers.base": {
         "R5": "pre-existing vcs provider registration cycle (harmless init order)",
     },
+    "CYCLE:src.kernel.ports+src.kernel.ports._base": {
+        "R5": "kernel 端口包 __init__.py 只 re-export 自己的子模块（accounts/tokens/...）"
+              "与 _base 的公共符号；check-arch 对每个模块无条件补「父包边」(module -> 父包)，"
+              "与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边：子模块只 import "
+              "_base，_base 不 import 父包或任何兄弟端口，端口模块彼此也不互相 import。"
+              "与 IM 包同一口径的检查器误报。",
+    },
     "CYCLE:src.domains.runtime.im.channel+src.domains.runtime.im.channel.capability+src.domains.runtime.im.channel.channel+src.domains.runtime.im.channel.message+src.domains.runtime.im.channel.registry+src.domains.runtime.im.channel.types": {
         "R5": "IM 包 __init__.py 只 re-export 自己的子模块；check-arch 对每个模块无条件补「父包边」(module -> 父包)，与 __init__ -> 子模块的导入互指形成 SCC。运行期无回边（父包只导入子模块，子模块不反向取父包属性），属检查器口径误报；Phase 5 引入 contracts 注入后可自然消除。",
     },
