@@ -2777,6 +2777,16 @@ onMounted(function () {
   color: var(--y);
 }
 
+/* D2 主题令牌（QA 审查）：压在 accent 渐变上的前景白/白玻璃与主题无关
+   （两主题下渐变同底色，恒定前景）；官方徽标 / 编辑 chip 走 --y、--a 琥珀/主色族
+   令牌 + color-mix，深色主题随 tokens.css 的 data-theme 重定义自动适配。 */
+.sk {
+  --sk-on-accent: #fff;
+  --sk-glass-16: rgba(255, 255, 255, 0.16);
+  --sk-glass-20: rgba(255, 255, 255, 0.2);
+  --sk-glass-30: rgba(255, 255, 255, 0.3);
+}
+
 /* Issue #3202：卡片布局/标签分层（C2–C6） */
 .sk .rc {
   transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
@@ -2819,8 +2829,8 @@ onMounted(function () {
 .sk__card-logo--init {
   font-size: 16px;
   font-weight: 700;
-  color: #fff;
-  background: linear-gradient(145deg, #6366f1, #8b5cf6);
+  color: var(--sk-on-accent);
+  background: linear-gradient(145deg, var(--a), var(--pu));
 }
 .rc .rn,
 .feat-name {
@@ -2847,9 +2857,9 @@ onMounted(function () {
   line-height: 1.4;
   padding: 1px 7px;
   border-radius: 999px;
-  color: #8a6d1f;
-  background: #fdf3d6;
-  border: 1px solid #f0dc9a;
+  color: var(--y);
+  background: color-mix(in srgb, var(--y) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--y) 35%, transparent);
   white-space: nowrap;
 }
 .sk__agent-chip {
@@ -2907,7 +2917,7 @@ onMounted(function () {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: rgba(49, 104, 224, 0.1);
+  background: color-mix(in srgb, var(--a) 10%, transparent);
   border: none;
   color: var(--a);
 }
@@ -3002,13 +3012,13 @@ onMounted(function () {
   margin-top: 8px;
 }
 .sk__chip--feat {
-  background: rgba(255, 255, 255, 0.16);
-  border-color: rgba(255, 255, 255, 0.3);
-  color: #fff;
+  background: var(--sk-glass-16);
+  border-color: var(--sk-glass-30);
+  color: var(--sk-on-accent);
 }
 .sk__cat-tag--feat {
-  background: rgba(255, 255, 255, 0.2);
-  color: #fff;
+  background: var(--sk-glass-20);
+  color: var(--sk-on-accent);
 }
 .sk__scenes {
   color: var(--a);
@@ -3272,7 +3282,7 @@ onMounted(function () {
   align-items: center;
   justify-content: center;
   font-size: 24px;
-  color: #fff;
+  color: var(--sk-on-accent);
   border-radius: var(--rd);
   background: linear-gradient(145deg, var(--fg1, var(--a)), var(--fg2, var(--a-text)));
 }
@@ -3357,7 +3367,7 @@ onMounted(function () {
 .skd-btn-primary {
   background: var(--a);
   border-color: var(--a);
-  color: #fff;
+  color: var(--sk-on-accent);
 }
 .skd-like.liked {
   color: var(--a);
