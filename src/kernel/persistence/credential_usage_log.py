@@ -34,6 +34,9 @@ from sqlalchemy import insert, select
 from src.kernel.persistence.base import Base
 from src.kernel.persistence.masking import masked_repr
 from src.kernel.id_gen import uuid7_str  # D105 第二批：DB 主键 UUIDv7
+# 能力端口：kernel 不 import src.domains；凭据审计原语的实现在装配层
+# src/api/contracts_wiring.py 绑定到 tokens 端口，这里只在调用点解析。
+from src.kernel.ports import tokens as _tokens
 
 
 _DDL = """
@@ -171,11 +174,10 @@ def cleanup_expired_retention(force: bool = False) -> int:
               - datetime.timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     total = 0
     try:
-        # 归属 runtime 域：SQL 由 owner public 原语持有，kernel 只调用签名
+        # 归属 runtime 域：SQL 由 owner public 原语持有，kernel 只经 tokens 端口调用签名
         # （此前这里直接对 grape_t_credential_usage_log 发 SELECT/DELETE，是最后一处
         # 真实跨域基表直查；表归属见 configs/table_ownership.json）。
-        from src.domains.runtime import public as _rt_public
-        total = _rt_public.credential_usage_log_prune(cutoff, _DELETE_BATCH)
+        total = _tokens.credential_usage_log_prune(cutoff, _DELETE_BATCH)
         with _cleanup_lock:
             _cleanup_last_mono = time.monotonic()
         return total
@@ -245,11 +247,10 @@ def _flush_batch(batch: list[dict]) -> None:
              b.get("repo_key", ""), b["initiating_actor_id"],
              b["executor_context"], b["operation"], b["created_at"])
             for b in batch]
-    # 归属 runtime 域：写语句与表结构由 owner 域持有，kernel 只调用具名原语。
+    # 归属 runtime 域：写语句与表结构由 owner 域持有，kernel 只经 tokens 端口调用具名原语。
     # 连接语义由原语内部的线程本地连接保证（后台 flush 线程与主线程事务互不干扰），
     # 因此不再按 backend 手写 sqlite3 独立连接分支。
-    from src.domains.runtime import public as _rt_public
-    _rt_public.credential_usage_log_insert_many(rows)
+    _tokens.credential_usage_log_insert_many(rows)
 
 
 def _ensure_worker() -> None:
