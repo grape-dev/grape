@@ -33,6 +33,17 @@ async def lifespan(app: FastAPI):
     from src.kernel.db_registry import assert_role_database
     assert_role_database("event")
 
+    # kernel 端口绑定：GSB 注册/心跳经 pipeline 端口调契约域原语，未绑定会抛
+    # PortNotBound（现象：GSB register failed: service=xxx err=PortNotBound）。
+    # mgmt 在 db_setup.init_database() 里绑；本 server 不走那条路径，必须自己绑，
+    # 且要在 GSB startup 之前。
+    try:
+        from src.api import contracts_wiring as _cw
+        _cw.bind_all()
+    except Exception as _bw_e:
+        log.warning(f"kernel ports bind failed（GSB 注册可能失败）: {_bw_e}")
+
+
     # GSB：注册本进程 + 起 30s 心跳（失败只告警，不影响 event 启动）
     _gsb = getattr(app.state, "gsb", None)
     if _gsb is not None:
