@@ -254,3 +254,27 @@ def test_new_ddl_declares_text(tmp_path, monkeypatch):
         decl_id = _decl(c, "organization", "id")
         assert decl_id.strip().upper() == "TEXT", decl_id
     assert not bad, f"新 DDL 未字符串亲和化: {bad}"
+
+
+def test_mysql_backend_dispatches_to_widen(monkeypatch):
+    """MySQL 后端必须分流到 _widen_mysql_org_ids。
+
+    回归锚点：本函数早期只有 SQLite 实现（PRAGMA / sqlite_master），在 MySQL 上
+    直接 1064；升级库的 org_id 因此停在 INT，新代码写 '' 哨兵时报
+    (1366, "Incorrect integer value: '' for column 'org_id'")。这里只锁「分流」，
+    真类型转换由 tests/kernel/test_org_id_mysql_widen.py 在真 MySQL 上验。
+    """
+    from src.api import db_setup
+    from src.kernel import mysql_compat
+
+    seen = {}
+
+    def _fake_widen(conn=None):
+        seen["conn"] = conn
+        return 7
+
+    monkeypatch.setattr(mysql_compat, "get_db_backend", lambda: "mysql")
+    monkeypatch.setattr(db_setup, "_widen_mysql_org_ids", _fake_widen)
+    sentinel = object()
+    assert db_setup._normalize_org_domain_text(sentinel) == 7
+    assert seen["conn"] is sentinel

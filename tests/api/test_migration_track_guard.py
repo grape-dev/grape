@@ -106,3 +106,34 @@ def test_registered_versions_format():
     """版本号格式统一为 12 位数字（YYYYMMDD+4位序号），便于排序与人工核对。"""
     bad = [v for v in _registered_versions() if not (isinstance(v, str) and len(v) == 12 and v.isdigit())]
     assert not bad, f"迁移版本号格式不规范（应为 12 位数字）: {bad}"
+
+
+def test_org_domain_text_migration_registered_for_both_domains():
+    """D105 org 域字符串化必须注册，且 domains 同时覆盖 mgmt 与 runtime。
+
+    为什么锁死这条：该迁移的前身 `_normalize_org_domain_text` 只是 db_setup 里
+    一个「未注册」的函数，靠单测直接调用，MySQL 分支也缺，导致存量库 org_id
+    永远是 INT，新代码写 '' 哨兵时新建凭据报 1366。只登记一个域同样会复发：
+    mgmt 进程只跑 mgmt 库，runtime 库的 runtime_credentials/agent_tasks 等
+    8 张表没人转换。
+    """
+    found = []
+    for node in ast.walk(_tree()):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if (getattr(fn, "id", None) or getattr(fn, "attr", None)) != "register_migration":
+            continue
+        kws = {kw.arg: kw.value for kw in node.keywords}
+        nm = kws.get("name")
+        if not (isinstance(nm, ast.Constant) and nm.value == "d105-org-domain-text-normalize"):
+            continue
+        doms = kws.get("domains")
+        elts = getattr(doms, "elts", [])
+        found.append([e.value for e in elts if isinstance(e, ast.Constant)])
+
+    assert found, ("d105-org-domain-text-normalize 未注册：存量 MySQL 库的 org_id "
+                   "将保持 INT，新建 runtime 凭据报 1366")
+    assert len(found) == 1, f"同名迁移重复登记: {found}"
+    assert {"mgmt", "runtime"} <= set(found[0]), (
+        f"登记域不全: {found[0]}——缺哪个域，那个库的 org_id 就不会被转换")
