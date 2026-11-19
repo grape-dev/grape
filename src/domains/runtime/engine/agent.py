@@ -3655,10 +3655,13 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     from src.domains.runtime.engine import repogit
     _wt_repo_key = task.get("repo_key") or ""
     _wt_agent = task.get("agent_type") or ""
-    _num = None
+    _wt_wanted = False
+    _num = 0
     try:
         _num = repogit.issue_num_from(task.get("issue_id") or "")
-        if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
+        _wt_wanted = bool(repogit.is_git_agent(task.get("agent_type") or "") and _num
+                          and task.get("issue_session_id"))
+        if _wt_wanted:
             _wb = env.get("GRAPE_WORK_BRANCH", "")
             _wt = repogit.ensure_issue_worktree(
                 task.get("repo_key") or "", task.get("agent_type") or "",
@@ -3676,6 +3679,15 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                 if _blocked:
                     _res.dispose()
                     return _blocked
+                # Issue #3482（C）：关闭 fail-open——需要工作区却没建起来 = 错误，
+                # 不得让任务以「只读会话」跑完再 completed（缺交付物却无报错）。
+                # （合并注：#3713 凭据侧不可用已在上面临断，此处为非凭据失败的兜底阻断。）
+                _wt_msg = (f"[workspace_unavailable] Issue #{_num} "
+                           f"{task.get('agent_type') or ''} 工作区不可用：git worktree 创建失败；"
+                           f"任务置 failed，不以只读 completed 收尾")
+                log.error(f"task {tid} {_wt_msg}")
+                _res.dispose()
+                return {"_error": _wt_msg, "_started": False}
     except _WsBaselineError as _wb_err:
         log.error(f"task {tid} blocked by workspace baseline guard: {_wb_err} "
                   f"fields={_wb_err.to_dict()}")
@@ -3701,6 +3713,14 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                 _blocked = {"_error": f"worktree_failed: {e}", "_started": False}
             _res.dispose()
             return _blocked
+        if _wt_wanted:
+            _wt_msg = (f"[workspace_unavailable] Issue #{_num} "
+                       f"{task.get('agent_type') or ''} 工作区不可用：{str(e)[:300]}；"
+                       f"任务置 failed，不以只读 completed 收尾")
+            log.error(f"task {tid} {_wt_msg}")
+            _res.dispose()
+            return {"_error": _wt_msg, "_started": False}
+        log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
     # Issue #466: 传 env（含 GRAPE_LINKED_REPO_TOKENS，服务端派发时随 env_extra 下发），
     # token 解析 env 优先 → 本地 Repo.bot_token 回退

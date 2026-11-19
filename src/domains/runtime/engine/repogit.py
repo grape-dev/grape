@@ -9,7 +9,7 @@
   辅助脚本读已注入的 `$BOT_GITCODE_TOKEN`（不落盘、随目录清理）。
 """
 
-import base64, json, os, re, shutil, subprocess, sys, threading, time
+import base64, errno, json, os, re, shutil, subprocess, sys, threading, time
 
 from src.kernel import config
 
@@ -44,6 +44,12 @@ WORKSPACE_MARKER = ".grape-workspace.json"
 #（口径与 worktree_guard._ARTIFACT_DIR_PREFIXES 一致；.git-askpass* 由 _write_askpass 写入）
 _DIRT_IGNORE_NAMES = (WORKSPACE_MARKER, ".git-askpass.sh", ".git-askpass-wrapper.sh")
 _DIRT_IGNORE_PREFIXES = (".skills/", ".project-info/", ".knowledge/")
+
+# Issue #3482（B）：worktree 目标目录「已存在且无 .git」时的平台白名单产物——
+# 这些条目由平台物化生成、可重建，处置为清空后建树；出现其它条目即隔离留证。
+_PLATFORM_ASSET_NAMES = (WORKSPACE_MARKER, ".skills", ".project-info", ".knowledge",
+                         "_grape_stage2.py", ".git-askpass.sh", ".git-askpass-wrapper.sh")
+_PLATFORM_ASSET_PREFIXES = (".git-askpass", ".grape-")
 
 # GRAPE_WORKSPACE_TTL_HOURS：巡检回收阈值（默认 24h）
 # GRAPE_WORKSPACE_STRICT：基线分叉是否阻断任务（默认 1=开；0=降级 warn 继续复用）
@@ -1508,7 +1514,12 @@ def probe_common_write(common_dir: str) -> tuple:
 
 
 def _is_readonly_git_failure(stderr: str) -> bool:
-    """判断 git 失败是否由只读挂载/权限导致，避免对非只读错误盲目降级建树。"""
+    """stderr 文案是否含只读线索（**仅日志线索**，不再作为降级判据）。
+
+    Issue #3482（D）：降级判据改为 `readonly_errno_reason()`——先 stat 目标目录再按
+    errno(EROFS/EACCES/EPERM) 判定。文案白名单是漏判来源（`already exists` 就漏在这里），
+    继续在文案上加词等于在同一脆弱点上叠加。
+    """
     text = (stderr or "").lower()
     if not text:
         return False
@@ -1518,6 +1529,45 @@ def _is_readonly_git_failure(stderr: str) -> bool:
         "permission denied",
     )
     return any(marker in text for marker in markers)
+
+
+# Issue #3482（D）：唯一判只读的 errno 集合（与实写探测同一语义）
+_READONLY_ERRNOS = (errno.EROFS, errno.EACCES, errno.EPERM)
+
+
+def readonly_errno_reason(target_dir: str) -> str:
+    """按 stat + errno 判定目标是否落在只读/无权限卷（Issue #3482 D）。
+
+    判据源不是 git 的 stderr 文案：
+    1. stat 目标目录——不存在则探测其父目录（建树失败时目录常已被 git 清理）；
+    2. 在探测目录上实写一次（与 git 写路径同一语义），捕获 errno；
+    3. **仅** EROFS / EACCES / EPERM 判只读；ENOSPC/EIO/EEXIST 等一律不算，
+       不许据此降级建树（降级会掩盖真实错误、制造同分支双工作树）。
+
+    Returns:
+        非空字符串 = 只读原因（`EROFS: Read-only file system` 形式，写日志/事件用）；
+        空字符串 = 非只读（或无法判定）。
+    """
+    try:
+        probe_dir = target_dir if os.path.isdir(target_dir) else (
+            os.path.dirname(target_dir) or target_dir)
+    except OSError:
+        probe_dir = os.path.dirname(target_dir) or target_dir
+    if not probe_dir or not os.path.isdir(probe_dir):
+        return ""
+    probe = os.path.join(probe_dir, f".grape-ro-probe-{os.getpid()}-{threading.get_ident()}")
+    try:
+        fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        try:
+            os.unlink(probe)
+        except OSError as e:
+            log.warning(f"repogit readonly probe: failed to remove residual probe {probe}: {e}")
+        return ""
+    except OSError as e:
+        if e.errno in _READONLY_ERRNOS:
+            return f"{errno.errorcode.get(e.errno, e.errno)}: {e.strerror or e}"
+        return ""
 
 
 def _is_already_exists_collision(stderr: str) -> bool:
@@ -1664,13 +1714,16 @@ def ensure_worktree_git_writable(repo_key: str, wt_dir: str, token: str = "") ->
     """Issue #2245（M1/M2）：确保 worktree git 元数据可写；不可写时迁移或降级标注。
 
     Returns:
-        {writable, mode(native|relocated|readonly), gitdir, common_dir, reason, hint}
+        {writable, mode(native|relocated|readonly|missing), gitdir, common_dir, reason, hint}
     """
     out = {"writable": False, "mode": "readonly", "gitdir": "", "common_dir": "",
            "reason": "", "hint": ""}
     gitdir = resolve_gitdir(wt_dir)
     out["gitdir"] = gitdir
     if not gitdir:
+        # Issue #3482（C）：gitdir 不存在是**错误**（workspace 没建起来），不是只读降级。
+        # 只读语义只覆盖「gitdir 存在但不可写」；此处单独标 mode=missing 供上游显式失败。
+        out["mode"] = "missing"
         out["reason"] = "git dir not found"
         out["hint"] = ("No .git directory or gitdir pointer found in the worktree; "
                        "git baseline sync/commit/push are unavailable. Actionable: provide a "
@@ -1792,6 +1845,69 @@ def _merge_collided_assets(backup_dir: str, target_dir: str) -> None:
                     f"{backup_dir} -> {target_dir}: {e}")
 
 
+def _is_platform_asset_name(name: str) -> bool:
+    """Issue #3482（B）：条目是否为平台可重建产物（清空后可再生）。"""
+    if name in _PLATFORM_ASSET_NAMES:
+        return True
+    return name.startswith(_PLATFORM_ASSET_PREFIXES)
+
+
+def dispose_occupied_workdir_target(repo_key: str, issue_dir: str) -> dict:
+    """Issue #3482（B）：`git worktree add` 前处置「目标目录已存在且无 `.git`」。
+
+    判据走 stat（存在/非空/无 `.git`），**不依赖 git 的 stderr 文案**——文案是漏判来源
+    （上次残留目录、旧顺序下的物化产物都不在文案白名单里）。分流：
+
+    - 目录不存在 / 为空 → ``action=none``（git 可直接建树，零副作用）；
+    - 条目全部命中平台物化产物白名单（``.skills`` / ``.project-info`` / ``.knowledge`` /
+      ``_grape_stage2.py`` / ``.git-askpass*`` / ``.grape-*``）→ 清空后重建（``cleared``），
+      这些产物由本轮落盘重新生成；
+    - 含未知条目（用户文件 / 上一轮受限改动）→ 整体 ``os.rename`` 为
+      ``<dir>.stale-<ts>`` 隔离留证（``quarantined``），**不删除**；
+    - 处置本身失败（权限/跨设备）→ ``action=failed``，调用方按 workspace 不可用显式失败。
+
+    Returns:
+        ``{"action": none|cleared|quarantined|failed, "stale_path": str,
+        "unknown": [...], "reason": str}``
+    """
+    out = {"action": "none", "stale_path": "", "unknown": [], "reason": ""}
+    if not os.path.isdir(issue_dir):
+        return out
+    try:
+        names = sorted(os.listdir(issue_dir))
+    except OSError as e:
+        out.update(action="failed", reason=f"list target dir failed: {e}")
+        return out
+    names = [n for n in names if n != ".git"]
+    if not names:
+        return out
+    unknown = [n for n in names if not _is_platform_asset_name(n)]
+    if not unknown:
+        try:
+            for n in names:
+                p = os.path.join(issue_dir, n)
+                if os.path.isdir(p) and not os.path.islink(p):
+                    shutil.rmtree(p)
+                else:
+                    os.unlink(p)
+        except OSError as e:
+            out.update(action="failed", reason=f"clear platform assets failed: {e}",
+                       unknown=list(names))
+            return out
+        out["action"] = "cleared"
+        return out
+    from datetime import datetime, timezone
+    stale = f"{issue_dir}.stale-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    try:
+        os.rename(issue_dir, stale)
+    except OSError as e:
+        out.update(action="failed", reason=f"quarantine target dir failed: {e}",
+                   unknown=unknown)
+        return out
+    out.update(action="quarantined", stale_path=stale, unknown=unknown)
+    return out
+
+
 def _recover_worktree_already_exists(repo_key: str, issue_dir: str, base: str,
                                       branch: str, base_branch: str,
                                       branch_reused: bool, token: str = "") -> bool:
@@ -1886,6 +2002,22 @@ def inject_git_write_context(task: dict, env: dict, prompt: str) -> tuple:
             env.pop("GRAPE_GIT_READONLY", None)
             env.pop("GRAPE_GIT_READONLY_REASON", None)
             return prompt, status
+        if status.get("mode") == "missing":
+            # Issue #3482（C）：`git dir not found` 不再降级只读——工作区没建起来是一条
+            # 错误，标只读会让 agent 以「只读会话」收尾、任务 completed 却缺交付物。
+            # 这里只标注 workspace 缺失（上游建树入口据此把任务置 failed）。
+            env.pop("GRAPE_GIT_READONLY", None)
+            env.pop("GRAPE_GIT_READONLY_REASON", None)
+            env["GRAPE_GIT_WORKSPACE_MISSING"] = "true"
+            env["GRAPE_GIT_WORKSPACE_MISSING_REASON"] = status.get("reason") or ""
+            block = (
+                "\n\n[grape runtime] ERROR: workspace git dir is MISSING "
+                f"({status.get('gitdir') or '?'}: {status.get('reason') or 'unknown'}). "
+                "This is NOT a read-only session: the workspace baseline was never created. "
+                "Do NOT deliver a read-only conclusion; report this error "
+                "(machine-readable: GRAPE_GIT_WRITABLE=false, GRAPE_GIT_WORKSPACE_MISSING=true).\n"
+            )
+            return prompt + block, status
         env["GRAPE_GIT_READONLY"] = "true"
         env["GRAPE_GIT_READONLY_REASON"] = status.get("reason") or ""
         block = (
@@ -2461,6 +2593,26 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
             _has_git = os.path.isdir(issue_dir) and (
                 os.path.isdir(os.path.join(issue_dir, ".git"))
                 or os.path.isfile(os.path.join(issue_dir, ".git")))
+            # Issue #3482（B）：先 stat 目标目录再建树——目录已存在且无 `.git`
+            # （上次残留 / direct 端旧顺序下先物化的产物）时按内容分流处置：
+            # 平台产物 → 清空重建；含未知内容 → 隔离为 <dir>.stale-<ts> 后重建。
+            # 不再对「已存在」无动于衷、等 `git worktree add` 报 already exists。
+            if not _has_git and os.path.isdir(issue_dir):
+                _disp = dispose_occupied_workdir_target(repo_key, issue_dir)
+                if _disp["action"] == "failed":
+                    log.warning(f"repogit workspace.occupied_unrecoverable {repo_key} "
+                                f"issue={issue_num} agent={agent_type} path={issue_dir} "
+                                f"reason={_disp.get('reason', '')}")
+                    return None
+                if _disp["action"] == "cleared":
+                    log.warning(f"repogit workspace.occupied_cleared {repo_key} "
+                                f"issue={issue_num} agent={agent_type} path={issue_dir} "
+                                f"(platform assets removable, rebuilding worktree)")
+                elif _disp["action"] == "quarantined":
+                    log.warning(f"repogit workspace.occupied_quarantined {repo_key} "
+                                f"issue={issue_num} agent={agent_type} path={issue_dir} "
+                                f"stale={_disp.get('stale_path', '')} "
+                                f"unknown={','.join(_disp.get('unknown') or [])[:200]}")
             reuse = False
             # 拒绝复用但移除失败 → 保留的是「外来脏树」，不得重写归属标记（跳过标记落盘）
             foreign_kept = False
@@ -2574,20 +2726,29 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                             issue_num=issue_num, agent_type=agent_type)
                 if stderr:
                     # stderr 非空 = 重试后仍失败（或本就不需要重试）
+                    # Issue #3482（D）：只读判据改判定源——stat 目标目录（不存在则父目录）
+                    # 后按 errno(EROFS/EACCES/EPERM) 判；stderr 文案只保留为日志线索
+                    # （`already exists` 正是被文案白名单漏掉的反例）。
+                    _ro_reason = readonly_errno_reason(issue_dir)
+                    _stderr_hint = ("readonly-keyword"
+                                    if _is_readonly_git_failure(stderr) else "no-readonly-keyword")
+                    log.warning(f"repogit worktree add failed {repo_key}: {stderr[:300]} "
+                                f"(readonly_probe={_ro_reason or 'none'}, "
+                                f"stderr_hint={_stderr_hint})")
                     if (_is_already_exists_collision(stderr)
                             and not _has_git and os.path.isdir(issue_dir)):
-                        # Issue #3482：目标目录被 .skills 物化产物占用（已存在且
-                        # 无 .git）→ 迁移占用物重建 worktree，失败走会话级 gitdir
-                        # 兜底；不再落入 refuse degrade 误降级只读（direct 与
-                        # worker _execute_task 双路径共用本函数，行为一致）。
+                        # Issue #3482：最后一道防线（B 前置处置后仍撞竞态时）——迁移
+                        # 占用物重建 worktree，失败走会话级 gitdir 兜底，不落 refuse degrade。
+                        # direct 与 worker _execute_task 双路径共用本函数，行为一致。
                         if not _recover_worktree_already_exists(
                                 repo_key, issue_dir, base, branch, base_branch,
                                 _branch_reused, token=token):
                             return None
-                    # Issue #2245：仅当失败源于只读挂载/权限时降级建树；其它失败
+                    # Issue #2245：仅当 errno 判定目标确实只读/无权限时降级建树；其它失败
                     # （如分支已被其它 worktree 占用）降级会制造同分支双工作树，直接失败。
-                    elif not _is_readonly_git_failure(stderr):
-                        log.warning(f"repogit worktree add non-readonly failure, refuse degrade {repo_key}")
+                    elif not _ro_reason:
+                        log.warning(f"repogit worktree add non-readonly failure, refuse degrade "
+                                    f"{repo_key} (errno=non-readonly)")
                         return None
                     elif not _create_worktree_with_session_gitdir(
                             repo_key, issue_dir, base, branch, base_branch, token=token):
