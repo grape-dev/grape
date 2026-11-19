@@ -30,6 +30,7 @@ from typing import Optional
 
 from src.kernel.config import log
 from src.kernel.ports import accounts as _accounts
+from src.kernel.ports import im as _im
 from src.kernel.ports import pipeline as _pipeline
 from src.kernel.ports import repos as _repos
 from src.kernel.ports import tokens as _tokens
@@ -566,8 +567,7 @@ class GitCodeProvider(GenericVcsProvider):
 
     def list_collaborators(self, api_token, owner, repo):
         # D44/S66：存量委托（feishu_async 存量实现，含分页与字段形态）
-        from src.domains.runtime.im.feishu_async import _fetch_gitcode_collaborators
-        return _fetch_gitcode_collaborators(owner, repo, api_token)
+        return _im._fetch_gitcode_collaborators(owner, repo, api_token)
 
     def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
         return _repos.setup_webhook(api_token, owner, repo, webhook_url, webhook_password=webhook_secret)
@@ -631,8 +631,7 @@ class GitHubProvider(GenericVcsProvider):
 
     def list_collaborators(self, api_token, owner, repo):
         # D44/S66：存量委托（feishu_async 存量实现，含分页与字段形态）
-        from src.domains.runtime.im.feishu_async import _fetch_github_collaborators
-        return _fetch_github_collaborators(owner, repo, api_token)
+        return _im._fetch_github_collaborators(owner, repo, api_token)
 
     def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
         return _repos.setup_github_webhook(api_token, owner, repo, webhook_url, webhook_secret)
@@ -1419,14 +1418,13 @@ def _post_comment_via_provider(provider: VCSProvider, repo_key: str,
     if not token or not repo_key or not issue_num:
         return False
     try:
-        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue, _is_github_repo
         from src.kernel.repo_key import from_repo_key
         _repo = from_repo_key(repo_key)
         if not _repo:
             return False
         # 复用现有 _post_result_to_issue 发评论（含去重、conclusion 提取等逻辑）
-        _post_result_to_issue(_repo, str(issue_num), body, token, agent_type, repo_key,
-                              agent_result=False)
+        _pipeline._post_result_to_issue(_repo, str(issue_num), body, token, agent_type, repo_key,
+                                        agent_result=False)
         return True
     except Exception as e:
         from src.kernel.config import log
