@@ -3953,9 +3953,10 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
                 return _abort_task_terminal(task, engine_name, env, _res, started,
                                             "at final flush")
         # Issue #242: coding agent 成功完成后，向关联仓库提交 PR（在 cleanup 删 worktree 之前执行）
+        # Issue #3349：同步建 PR（同步 urllib）不能在事件循环线程内执行，卸载到工作线程
         if done is not None and not (isinstance(done, dict) and done.get("_error")):
             try:
-                _submit_linked_repo_prs(task, env)
+                await asyncio.to_thread(_submit_linked_repo_prs, task, env)
             except Exception as _e:
                 log.warning(f"linked PR submission failed for task {tid}: {_e}")
         # 可观测性：采集并上报 LLM 用量（引擎已退出，账本已落盘）

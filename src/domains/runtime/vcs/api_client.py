@@ -545,7 +545,8 @@ class VcsApiClient:
 
     # === Issue 查重（D36/S56 端口方法）===
 
-    def find_open_issue_by_title(self, title: str, max_pages: int = 1000) -> "int | None":
+    def find_open_issue_by_title(self, title: str, max_pages: int = 1000,
+                                timeout: int = 30) -> "int | None":
         """按标题查找同名 open Issue，返回其 number（无则 None）。
 
         D36/S56：策略归适配器内部——github 走 Search API 精确匹配
@@ -555,13 +556,13 @@ class VcsApiClient:
         重复建单（#343 契约）。调用方零平台分支（端口-适配器形态）。
         """
         try:
-            return self._find_open_issue_impl(title, max_pages)
+            return self._find_open_issue_impl(title, max_pages, timeout)
         except RuntimeError:
             raise
         except Exception as e:
             raise RuntimeError(f"幂等查重失败（token 可能失效）: {e}")
 
-    def _find_open_issue_impl(self, title: str, max_pages: int) -> "int | None":
+    def _find_open_issue_impl(self, title: str, max_pages: int, timeout: int = 30) -> "int | None":
         import urllib.parse as _up
         # D36/S56：策略按卡能力位分派（issue_search），不比平台名——
         # 有搜索端点的平台走精确匹配，无则分页遍历（第 5 平台配卡即得）
@@ -569,7 +570,7 @@ class VcsApiClient:
         if _card is not None and _card.issue_search:
             # 搜索端点策略：Search API 精确匹配（in:title + repo scope，#344 语义）
             _q = _up.quote(f'{title} in:title repo:{self.owner}/{self.repo} is:issue is:open')
-            data = self._request("GET", f"/search/issues?q={_q}&per_page=5")
+            data = self._request("GET", f"/search/issues?q={_q}&per_page=5", timeout=timeout)
             if isinstance(data, dict) and "error" in data:
                 raise RuntimeError(_dedup_error_text(data))
             if not isinstance(data, dict) or "items" not in data:
@@ -605,7 +606,7 @@ class VcsApiClient:
                 self._generic_path(
                     f"/repos/{self.owner}/{self.repo}/issues?state=open&per_page=50&page={page}",
                     f"/issues?state=opened&per_page=50&page={page}",
-                ))
+                ), timeout=timeout)
             if isinstance(data, dict):
                 if "error" in data:
                     raise RuntimeError(_dedup_error_text(data))

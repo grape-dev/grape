@@ -5279,6 +5279,49 @@ register_migration(
 )
 
 
+def _mig_issue3349_issue_repo_title_index() -> None:
+    """Issue #3349：建单查重改查平台库（`issue` 台账）→ 补 `(repo_key, title)` 索引。
+
+    查重 SQL 先按 `repo_key + title` 精确命中（索引定位，成本与仓内 issue 数无关）；
+    未命中再退回同仓 `TRIM(title)` 比对（兼容历史行标题两端带空白）。缺索引时每次
+    建单都要扫该仓库全部台账行，仓内 issue 越多越慢，正是本单要消除的线性成本。
+    幂等：索引已存在即跳过；失败只告警，不阻断启动（查重退回仓库级扫描仍可用）。
+    """
+    is_mysql = False
+    try:
+        from src.kernel.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    _idx = "idx_issue_repo_title"
+    with db_lock:
+        c = db.cursor()
+        try:
+            if is_mysql:
+                # MySQL 下 repo_key/title 是 TEXT，必须带前缀长度
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.statistics "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' "
+                    "AND INDEX_NAME=%s", (_idx,))
+                if c.fetchone()[0]:
+                    return
+                c.execute(f"CREATE INDEX {_idx} ON issue (repo_key(64), title(191))")
+            else:
+                c.execute("SELECT name FROM sqlite_master WHERE type='index' AND name=?", (_idx,))
+                if c.fetchone():
+                    return
+                c.execute(f"CREATE INDEX {_idx} ON issue (repo_key, title)")
+            db.commit()
+            log.info(f"Issue #3349: created index {_idx} on issue")
+        except Exception as e:
+            log.warning(f"Issue #3349 issue(repo_key,title) index failed (dedupe degrades to repo scan): {e}")
+
+
+register_migration(
+    "202611240003", "issue3349_issue_repo_title_index", "safe",  # Issue #3349: renumbered from 202611190001 (below baseline max 202611240002)
+    _mig_issue3349_issue_repo_title_index)
+
+
 def _ensure_case_insensitive_indexes():
     """Issue #348: 大小写不敏感唯一约束（DB 层纵深防御）。
 

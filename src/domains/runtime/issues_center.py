@@ -3060,20 +3060,128 @@ def _backfill_release_subissue_result(repo_key: str, issue_number: int,
         log.warning(f"_backfill_release_subissue_result write failed: {_e}")
         return False
 
+# ===== Issue #3349：建单查重与上游超时策略 =====
+# 背景：建单端点 `POST /api/issues/{owner}/{repo}` 是 async 路由，但查重曾逐页翻页
+# （state=open&per_page=50，上限 1000 页）。open issue 越多查重越慢，单个建单请求在
+# await 点之间独占事件循环，并发建单互相排队 → 超过网关 upstream timeout → 502。修法：
+#   ① 查重改查平台库（本地 `issue` 台账，索引定位，成本与 open issue 数无关）；
+#   ② 台账不可判定时才降级 VCS 探针，且**固定页数上限 + 显式单页超时**；
+#   ③ 所有 VCS 出站一律 `asyncio.to_thread`，不允许在 async 路由内同步阻塞。
+DEDUP_UPSTREAM_TIMEOUT = 8          # 查重探针单页超时（秒）
+DEDUP_FALLBACK_MAX_PAGES = 3        # 台账不可用时的降级扫描页数上限（成本有界）
+DEDUP_FALLBACK_PAGE_SIZE = 50       # 与存量 GitCode 查重页大小一致
+CREATE_HTTP_TIMEOUT = 15            # 建单 POST socket 超时（秒）
+CREATE_UPSTREAM_TIMEOUT = 25        # 建单请求级放弃阈值（秒，须显著小于网关 upstream timeout）
+CREATE_RECONCILE_TIMEOUT = 5        # 建单超时后的对账探针超时（秒）
+
+
+def _dedup_repo_key(owner: str, repo: str, provider: str = "gitcode") -> str:
+    """(owner, repo, provider) → 统一 repo_key（`provider:owner/repo`）。"""
+    from src.kernel.repo_key import to_repo_key
+    return to_repo_key(f"{owner}/{repo}", provider or "gitcode")
+
+
+_OPEN_ISSUE_LEDGER_SQL = (
+    "SELECT issue_number FROM issue "
+    "WHERE repo_key=? AND {title_match} AND vcs_exists=1 "
+    "  AND NOT (status='completed' AND completed_reason='issue_closed') "
+    "ORDER BY id DESC LIMIT 1"
+)
+
+
+def _find_open_issue_by_title_ledger(owner: str, repo: str, title: str,
+                                     provider: str = "gitcode") -> tuple[bool, int | None]:
+    """平台库（本地 `issue` 台账）幂等查重 —— Issue #3349 主路径。
+
+    台账行由两条链路写入：建单成功后的 `ensure_issue_task`、以及 webhook 回流建档，
+    因此「同仓同名 open Issue」在平台侧有完整记录，无需向 VCS 翻页。
+
+    查询分两步：① `repo_key + title` 精确命中（`idx_issue_repo_title` 索引定位，
+    成本与仓内 issue 数无关）；② 未命中再退回同仓 `TRIM(title)` 比对（兼容历史行
+    标题两端带空白，仓库级索引仍然生效）。
+
+    Returns:
+        (authoritative, issue_number)：
+        - ``(True, n)``   台账命中同名 open Issue → 直接复用该单号；
+        - ``(True, None)``该仓库已有台账，确认无同名 open Issue（台账权威，无需打 VCS）；
+        - ``(False, None)``该仓库无台账行或查询异常 → 调用方降级 VCS 探针。
+    """
+    repo_key = _dedup_repo_key(owner, repo, provider)
+    norm_title = (title or "").strip()
+    if not repo_key or not norm_title:
+        return False, None
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 「open」口径：VCS 侧未确认删除，且不是「已关闭」终态
+            # （issue_closed 回流会把 status 置 completed + completed_reason='issue_closed'，
+            #  关闭后同名重开仍应放行，见 Issue #343/#3349 口径一致性）。
+            row = c.execute(
+                _OPEN_ISSUE_LEDGER_SQL.format(title_match="title=?"),
+                (repo_key, norm_title)).fetchone()
+            if not row:
+                row = c.execute(
+                    _OPEN_ISSUE_LEDGER_SQL.format(title_match="TRIM(title)=?"),
+                    (repo_key, norm_title)).fetchone()
+            if row and row[0]:
+                return True, int(row[0])
+            has_any = c.execute("SELECT 1 FROM issue WHERE repo_key=? LIMIT 1",
+                                (repo_key,)).fetchone()
+        return (bool(has_any), None)
+    except Exception as e:
+        log.warning(f"dedup ledger query failed (degrade to VCS probe): repo={repo_key}: {e}")
+        return False, None
+
+
+def _find_open_issue_by_title_vcs(api_token: str, owner: str, repo: str, title: str,
+                                  provider: str = "gitcode",
+                                  max_pages: int = DEDUP_FALLBACK_MAX_PAGES,
+                                  timeout: int = DEDUP_UPSTREAM_TIMEOUT) -> int | None:
+    """VCS 有界查重探针（平台库不可用时的降级路径，Issue #3349）。
+
+    与存量全量翻页的差别：**不再翻到末页**——页数上限固定，单页显式超时，成本与
+    open issue 总数解耦。策略本体仍在 VcsApiClient.find_open_issue_by_title
+    （D36/S56 端口-适配器，GitHub 走 Search API 单请求精确匹配，其余平台按卡
+    方言分页/状态取值），这里只承载 #3349 的有界参数。
+
+    Raises:
+        RuntimeError: 查重失败（凭据失效/网络不可达/上游异常）——保持 Issue #343
+            「查重失败不放行」语义，避免静默重复建单。
+    """
+    from src.domains.runtime.vcs.api_client import create_client
+    _rk = f"{provider}:{owner}/{repo}"   # 恒带前缀：client 按 provider 选卡/策略
+    _client = create_client(_rk, api_token)
+    return _client.find_open_issue_by_title(title, max_pages=max(1, int(max_pages)),
+                                            timeout=timeout)
+
+
 def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
-                             provider: str = "gitcode") -> int | None:
+                             provider: str = "gitcode",
+                             use_ledger: bool = True,
+                             max_pages: int = DEDUP_FALLBACK_MAX_PAGES,
+                             timeout: int = DEDUP_UPSTREAM_TIMEOUT) -> int | None:
     """幂等查找：同仓库已存在同名 open Issue → 返回其 number（避免重复建 issue）。
 
     D36/S56：策略下沉 VcsApiClient.find_open_issue_by_title（端口-适配器形态，
     调用方零平台分支）——github Search API vs 分页遍历、分页终止、
     {data:[]}/list 响应形态、token 失效抛 RuntimeError（#343/#344 契约）
     全部在适配器内部实现并由 S55/S56 用例锁死。
+    Issue #3349：主路径改查平台库（本地 `issue` 台账，`(repo_key,title)` 索引
+    定位），台账无法判定时才降级到**有界** VCS 探针（固定页数 + 显式单页超时，
+    经适配器端口参数承载），使查重成本与 open issue 数解耦；调用方须用
+    `asyncio.to_thread` 卸载，禁止在 async 路由内直接同步调用。
+
     返回 issue number（找到）或 None（真没找到）。token 失效时抛 RuntimeError。
     """
-    from src.domains.runtime.vcs.api_client import create_client
-    _rk = f"{provider}:{owner}/{repo}"   # 恒带前缀：client 按 provider 选卡/策略
-    _client = create_client(_rk, api_token)
-    return _client.find_open_issue_by_title(title)
+    if use_ledger:
+        authoritative, num = _find_open_issue_by_title_ledger(owner, repo, title, provider=provider)
+        if num is not None:
+            return num
+        if authoritative:
+            return None
+    return _find_open_issue_by_title_vcs(api_token, owner, repo, title,
+                                          provider=provider, max_pages=max_pages,
+                                          timeout=timeout)
 
 
 def _gitcode_assignee_member_check(api_token: str, owner: str, repo: str, username: str) -> str:
@@ -3508,6 +3616,45 @@ async def trigger_pending_issue_pipeline(repo_key: str, issue_num, actor: str = 
     return {"ok": True, "issue_number": issue_num, "stage": "vod", "seq": _seq}
 
 
+def _is_upstream_timeout(exc: Exception) -> bool:
+    """判断异常是否为上游超时（socket 超时 / 请求级放弃 / urllib 超时包装）。
+
+    Issue #3349：建单超时必须走「对账 + 504 可判别失败」分支，不能与普通 5xx 混淆。
+    """
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    _msg = str(exc).lower()
+    return "timed out" in _msg or "timeout" in _msg
+
+
+async def _run_upstream(fn, *args, abandon_after: float = CREATE_UPSTREAM_TIMEOUT, **kwargs):
+    """同步上游调用卸载到工作线程，并施加请求级放弃阈值（Issue #3349）。
+
+    事件循环只等 ``await``，线程里跑的是同步 urllib/requests；超过 ``abandon_after``
+    立刻释放事件循环与请求。线程内的调用无法真正中断（可能仍在完成），因此调用方在
+    超时分支必须做一次对账探针，避免把「其实已建成」当成失败。
+    """
+    return await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), timeout=abandon_after)
+
+
+async def _reconcile_created_issue(api_token: str, owner: str, repo: str, title: str,
+                                   provider: str = "gitcode") -> int | None:
+    """建单超时后的对账探针：确认上游是否其实已经建成（Issue #3349）。
+
+    只查 VCS 最新一页（有界、短超时），命中即按建成处理（写台账 + 返回成功），
+    从而把「超时但已建成」和「超时且未建成」区分开；探针自身失败返回 None，
+    由调用方返回 504（retryable + 幂等键），重试会先查重，不会重复建单。
+    """
+    try:
+        return await _run_upstream(
+            _find_open_issue_by_title_vcs, api_token, owner, repo, title,
+            provider=provider, max_pages=1, timeout=CREATE_RECONCILE_TIMEOUT,
+            abandon_after=CREATE_RECONCILE_TIMEOUT + 5)
+    except Exception as e:
+        log.warning(f"create reconcile probe failed (report upstream_timeout): {e}")
+        return None
+
+
 async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user_or_api_key)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
 
@@ -3587,14 +3734,19 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 break
     except Exception:
         pass  # 查不到就用 grape username fallback
+    # Issue #3349: 建单幂等键（沿用查重键 owner/repo/title）——随 409/502/504 响应返回，
+    # 调用方重试时可直接对账「上一发到底有没有建成」。
+    _idempotency_key = f"{owner}/{rname}/{body.title.strip()}"
     # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
     # Issue #343: 查重失败（token 失效）时给明确提示，不静默放行导致重复建单
+    # Issue #3349: 查重（台账查询 + 可能的有界 VCS 探针）是同步 IO，必须离开事件循环，
+    # 否则上游变慢时单个建单请求会独占事件循环、并发建单整体排队 → 网关 502。
     try:
         # 同步 urllib 出站调用必须离开事件循环（否则 GitCode 慢响应会把整个进程卡住，
         # 实测单次 15~20s 期间所有 UI 请求一起排队）
         issue_num = await asyncio.to_thread(
             _find_open_issue_by_title, api_token, owner, rname, body.title.strip(),
-            provider=_provider)
+            provider=_provider, timeout=DEDUP_UPSTREAM_TIMEOUT)
     except RuntimeError as _dedup_err:
         from src.domains.runtime.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG, GITCODE_USER_TOKEN_INVALID_MSG
         if is_auth_error_exc(_dedup_err) and _using_user_token:
@@ -3605,7 +3757,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 try:
                     issue_num = await asyncio.to_thread(
                         _find_open_issue_by_title, api_token, owner, rname, body.title.strip(),
-                        provider=_provider)
+                        provider=_provider, timeout=DEDUP_UPSTREAM_TIMEOUT)
                 except RuntimeError as _dedup_err2:
                     _dedup_err = _dedup_err2
                 else:
@@ -3617,18 +3769,22 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     "code": 401,
                     "message": f"查重失败，{GITCODE_USER_TOKEN_INVALID_MSG}",
                     "action": "reauth_required",
+                    "idempotency_key": _idempotency_key,
                 })
         elif is_auth_error_exc(_dedup_err):
             raise HTTPException(status_code=502, detail={"code": 502,
-                                                         "message": f"查重失败，{BOT_TOKEN_INVALID_MSG}: {str(_dedup_err)[:200]}"})
+                                                         "message": f"查重失败，{BOT_TOKEN_INVALID_MSG}: {str(_dedup_err)[:200]}",
+                                                         "idempotency_key": _idempotency_key})
         else:
             raise HTTPException(status_code=502, detail={"code": 502,
-                                                         "message": f"查重失败: {str(_dedup_err)[:200]}"})
+                                                         "message": f"查重失败: {str(_dedup_err)[:200]}",
+                                                         "idempotency_key": _idempotency_key})
     created = False
     if issue_num is not None:
         raise HTTPException(status_code=409, detail={"code": 409,
                                                      "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
-                                                     "issue_number": issue_num})
+                                                     "issue_number": issue_num,
+                                                     "idempotency_key": _idempotency_key})
     if issue_num is None:
         # Issue #649: 本次建单请求级 trace_id（错误响应附带，便于排查定位）
         import uuid as _uuid
@@ -3636,7 +3792,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         # Issue #649: 显式 assignee + GitCode → 上游创建前预校验成员资格；
         # 非成员直接给出「非成员」语义错误（含 trace_id），不再无谓打上游 403 再误报。
         if (not _is_github) and assignee:
-            _member_state = _gitcode_assignee_member_check(api_token, owner, rname, assignee)
+            # Issue #3349：该预校验是一次同步 VCS 调用，卸载到线程，不占事件循环。
+            _member_state = await asyncio.to_thread(
+                _gitcode_assignee_member_check, api_token, owner, rname, assignee)
             if _member_state == "not_member":
                 raise HTTPException(status_code=403, detail={
                     "code": 403,
@@ -3686,10 +3844,36 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         # Issue #343 问题十一修复: 捕获建单 API 403/422，转成友好报错而非 500
         try:
             # D35/S55：统一建单入口（卡驱动；gitee 自动正确，存量平台内置卡对齐）
-            resp = await asyncio.to_thread(
+            # Issue #3349：建单 POST 卸载到工作线程 + 请求级放弃阈值（25s），
+            # 避免上游饱和时请求在网关排队到 upstream timeout（502）。
+            resp = await _run_upstream(
                 _create_issue_unified, api_token, _provider, owner, rname,
-                body.title.strip(), _desc_with_attach, assignee=assignee)
+                body.title.strip(), _desc_with_attach, assignee=assignee,
+                abandon_after=CREATE_UPSTREAM_TIMEOUT)
         except Exception as _create_err:
+            # Issue #3349：超时/放弃 ≠ 一定没建成。先做一次有界对账探针：
+            # 命中 → 视作建成并继续正常建档（不重复建单）；探不到 → 504 + 幂等键。
+            if _is_upstream_timeout(_create_err):
+                _reconciled_num = await _reconcile_created_issue(
+                    api_token, owner, rname, body.title.strip(), provider=_provider)
+                if _reconciled_num is not None:
+                    log.info(f"create_task: upstream timeout but issue #{_reconciled_num} exists "
+                             f"(reconciled) repo={repo_key} title={body.title.strip()[:80]}")
+                    resp = {"number": _reconciled_num, "reconciled": True}
+                    _create_err = None
+            if _create_err is not None and _is_upstream_timeout(_create_err):
+                raise HTTPException(status_code=504, detail={
+                    "code": 504,
+                    "error": "upstream_timeout",
+                    "message": f"创建 Issue 超时（{CREATE_UPSTREAM_TIMEOUT}s 内上游未返回），结果未知；"
+                               f"可用同一标题重试：重试会先按标题查重，若上游已建成将返回 409（含 issue_number），"
+                               f"不会重复建单。",
+                    "retryable": True,
+                    "idempotency_key": _idempotency_key,
+                    "trace_id": _trace_id,
+                    "verify_hint": f"可先 GET /api/issues/{owner}/{rname}?q={body.title.strip()} "
+                                   f"确认上游是否已建成，再决定是否重试",
+                })
             _err_msg = str(_create_err)
             # 从 RuntimeError 消息提取 HTTP code（格式: "failed (403): ..."）
             import re as _re
@@ -3701,10 +3885,11 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 if _renewed:
                     api_token = _renewed
                     try:
-                        resp = await asyncio.to_thread(
+                        resp = await _run_upstream(
                             _create_issue_unified, api_token, _provider, owner, rname,
                             body.title.strip(), _desc_with_attach,
-                                                     assignee=assignee)
+                            assignee=assignee,
+                            abandon_after=CREATE_UPSTREAM_TIMEOUT)
                     except Exception as _create_err2:
                         _create_err = _create_err2
                         _err_msg = str(_create_err2)
@@ -3904,12 +4089,17 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             log.warning(f"create_task: set_subtask_mode failed: {_e}")
         try:
             _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 自动判断是否拆分为子任务执行。"
+            # Issue #3349：PATCH 是同步 VCS 调用，卸载到工作线程（否则多任务模式建单同样阻塞事件循环）
             if _is_github:
                 # Issue #343: GitHub 写操作走 bot token
-                _patch_github_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
+                await asyncio.to_thread(
+                    _patch_github_issue_body, api_token, owner, rname, issue_num,
+                    (body.description or "") + _marker)
             else:
                 # Issue #343: GitCode 写操作走 bot token
-                _patch_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
+                await asyncio.to_thread(
+                    _patch_issue_body, api_token, owner, rname, issue_num,
+                    (body.description or "") + _marker)
         except HTTPException:
             raise  # reauth_required 需要传递给前端
         except Exception as _e:

@@ -62,7 +62,7 @@ def test_s70_gitee_user_token_derived(_no_preauth_user):
                           is_subtask_mode=0)
     seen = {}
 
-    def _fake_find(api_token, owner, repo, title, provider=""):
+    def _fake_find(api_token, owner, repo, title, provider="", **kwargs):  # #3349: accept timeout kwarg
         seen["find_token"] = api_token
         seen["find_provider"] = provider
         return None  # 无同名 → 走建单
@@ -120,7 +120,7 @@ def test_s70_gitcode_parity(_no_preauth_user):
                           is_subtask_mode=0)
     seen = {}
 
-    def _fake_find(api_token, owner, repo, title, provider=""):
+    def _fake_find(api_token, owner, repo, title, provider="", **kwargs):  # #3349: accept timeout kwarg
         seen["find_token"] = api_token
         return None
 
