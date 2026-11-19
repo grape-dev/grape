@@ -49,7 +49,7 @@ class OAuthStateStore:
 
     @classmethod
     def _attrs(cls) -> dict:
-        from src.domains.mgmt.auth.security_config import is_production
+        from src.kernel.security_config import is_production
 
         return {"max_age": cls.MAX_AGE, "httponly": True, "samesite": "lax",
                 "secure": is_production(), "path": "/"}

@@ -23,7 +23,7 @@ def _load_keys():
     if _loaded:
         return
 
-    from src.domains.mgmt.auth.security_config import get_credential_keys
+    from src.kernel.security_config import get_credential_keys
     raw = get_credential_keys()
 
     for pair in raw.split(","):
@@ -72,7 +72,7 @@ def encrypt(plaintext: str) -> str:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     except ImportError:
         # 生产环境（密钥非默认值）拒绝降级为明文
-        from src.domains.mgmt.auth.security_config import get_credential_keys
+        from src.kernel.security_config import get_credential_keys
         _keys_raw = get_credential_keys()
         if _keys_raw and not _keys_raw.startswith("dev:"):
             raise RuntimeError(

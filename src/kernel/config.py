@@ -388,7 +388,7 @@ COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() in ("1", "true",
 
 # 注意：此处禁止 import src.domains.mgmt.auth.*（worker 包含 config.py 但不含 src/domains/mgmt/auth/，
 # 顶层 import 会直接打崩 runtime-agent 启动，2026-10-14 五台 worker 心跳全断事故根因）。
-# 服务端如需 is_production，直接 from src.domains.mgmt.auth.security_config import is_production。
+# 服务端如需 is_production，直接 from src.kernel.security_config import is_production。
 # IS_PRODUCTION 常量已删除：全库零消费（死代码）。
 
 # JWT 密钥安全门禁
