@@ -120,10 +120,11 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
         except Exception as e:
             log.warning(f"Exec agent: session tmpdir cleanup failed: {e}")
 
+
 def _materialize_workdir_and_skill_gate(*, ws: str, repo_key: str, agent_type: str,
                                         skill_name: str, evt: dict, issue_id: str,
                                         prompt: str, engine_name: str, seq: int,
-                                        task_id: str) -> tuple:
+                                        task_id: str, agent_logs: list | None = None) -> tuple:
     """Issue #3482（A）+ Issue #887：工位物化 + 技能一致性硬校验（**建树之后**调用）。
 
     时序是本次缺陷的第一根因：物化会把 `.skills` / `.project-info` / `.knowledge`
@@ -132,6 +133,13 @@ def _materialize_workdir_and_skill_gate(*, ws: str, repo_key: str, agent_type: s
     「必须先建 worktree 再落地技能」（agent.py `_execute_task`，#711 方案 A），direct 端
     此前顺序相反，本函数把整段物化（含 `_skill_consistency` 校验，它依赖物化结果）
     整体下移到建树之后——不能只移一半。
+
+    Issue #3482 复审（Required，读侧随写侧下移）：#564 物化降级标注与 #887 技能
+    来源标注的读取块原在 `_execute_agent_inner` 里、于本函数**之前**执行——
+    `evt["_skill_materialize"]` / `evt[SKILL_CONSISTENCY_KEY]` 由物化写入，读侧
+    先于写侧执行恒得空值，direct 会话事件 agent_logs 里两行标注静默丢失（worker
+    端 agent.py 是物化后上报，两端口径分叉）。因此读侧也搬进本函数、紧跟物化
+    之后执行，`agent_logs` 由调用方传入原地追加。
 
     Returns:
         (prompt, ok)：ok=False 表示技能一致性拒绝执行（任务/事件已置 failed，调用方直接返回）。
@@ -146,6 +154,37 @@ def _materialize_workdir_and_skill_gate(*, ws: str, repo_key: str, agent_type: s
         ws, repo_key, agent_type, skill_name, evt, issue_id, prompt,
         engine_name=engine_name,
     )
+    # 读侧随写侧下移（见 docstring）：物化刚写完 evt 标注，此处读取才有值。
+    # Issue #564：技能物化降级标注落入事件 agent_logs（不静默空注入）
+    if agent_logs is not None:
+        try:
+            _sk_mat = evt.get("_skill_materialize") or {}
+            if _sk_mat.get("status") in ("fallback", "degraded"):
+                agent_logs.append({
+                    "time": datetime.utcnow().isoformat(),
+                    "type": "skill_materialize",
+                    "msg": f"skill materialize {_sk_mat.get('status')}: {_sk_mat.get('detail')}",
+                })
+        except Exception:
+            pass
+        # Issue #887：技能来源标注（绑定值 vs 实际值）落入事件 agent_logs
+        try:
+            from src.domains.runtime.engine.skill_materialize import SKILL_CONSISTENCY_KEY as _SCK2
+            _sk_src = evt.get(_SCK2) or {}
+            if _sk_src:
+                from src.domains.runtime.engine.task_log_stream import build_skill_source_message as _bssm
+                _sk_line = _bssm(_sk_src.get("bound") or "", _sk_src.get("actual") or "",
+                                 _sk_src.get("source") or "", ok=bool(_sk_src.get("ok")),
+                                 reason=_sk_src.get("reason") or "",
+                                 source_info=_sk_mat.get("source") or None,
+                                 drift=_sk_mat.get("drift") or None)
+                agent_logs.append({
+                    "time": datetime.utcnow().isoformat(),
+                    "type": "skill_source",
+                    "msg": ((_sk_line.get("data") or {}).get("text") or ""),
+                })
+        except Exception:
+            pass
     # Issue #887：direct 端执行前一致性硬校验——绑定 skill 未物化而工位本地缓存
     # 存在其它技能时拒绝执行（fail-fast，显式报错，不静默跑错流程）。
     # 契约键缺失（物化异常降级）→ 显式告警后放行，不静默当作通过。
@@ -359,35 +398,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _exec_done_stderr = ""
     tool_uses = []
     agent_logs = []
-    # Issue #564：技能物化降级标注落入事件 agent_logs（不静默空注入）
-    try:
-        _sk_mat = evt.get("_skill_materialize") or {}
-        if _sk_mat.get("status") in ("fallback", "degraded"):
-            agent_logs.append({
-                "time": datetime.utcnow().isoformat(),
-                "type": "skill_materialize",
-                "msg": f"skill materialize {_sk_mat.get('status')}: {_sk_mat.get('detail')}",
-            })
-    except Exception:
-        pass
-    # Issue #887：技能来源标注（绑定值 vs 实际值）落入事件 agent_logs
-    try:
-        from src.domains.runtime.engine.skill_materialize import SKILL_CONSISTENCY_KEY as _SCK2
-        _sk_src = evt.get(_SCK2) or {}
-        if _sk_src:
-            from src.domains.runtime.engine.task_log_stream import build_skill_source_message as _bssm
-            _sk_line = _bssm(_sk_src.get("bound") or "", _sk_src.get("actual") or "",
-                             _sk_src.get("source") or "", ok=bool(_sk_src.get("ok")),
-                             reason=_sk_src.get("reason") or "",
-                             source_info=_sk_mat.get("source") or None,
-                             drift=_sk_mat.get("drift") or None)
-            agent_logs.append({
-                "time": datetime.utcnow().isoformat(),
-                "type": "skill_source",
-                "msg": ((_sk_line.get("data") or {}).get("text") or ""),
-            })
-    except Exception:
-        pass
+    # （Issue #3482 复审 Required）#564/#887 的 agent_logs 标注读取块已随写侧整体
+    # 下移到 `_materialize_workdir_and_skill_gate`（物化之后）执行——此处（物化前）
+    # 读取恒为空，属顺序缺陷的第二半。
     # Issue #1660：REPO_OWNER/REPO_NAME 一律由 REPO_FULL_NAME（repository）派生，缺失回退 repo_key；
     # **禁止**用 exec_account（触发人账号/带前缀全名）充当 REPO_OWNER——否则触发人≠仓库 owner 时
     # 会注入 REPO_OWNER=<触发人>、REPO_NAME=""（反馈 2874）。Issue #94 的前缀剥离由派生入口统一处理。
@@ -506,11 +519,13 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # Issue #3482（A）：物化整体下移到建树之后——`.skills` / `.project-info` /
     # `.knowledge` 与 `_skill_consistency` 校验一并搬（不能只移一半），否则目标目录
     # 先被物化占住 → worktree add 报 already exists。
+    # agent_logs 随调用传入：#564/#887 标注在物化之后写入（读侧随写侧，复审 Required）。
     try:
         prompt, _mat_ok = _materialize_workdir_and_skill_gate(
             ws=ws, repo_key=repo_key, agent_type=agent_type, skill_name=skill_name,
             evt=evt, issue_id=issue_id, prompt=prompt,
-            engine_name=inst_name or backend or "", seq=seq, task_id=task_id)
+            engine_name=inst_name or backend or "", seq=seq, task_id=task_id,
+            agent_logs=agent_logs)
     except Exception as _mate:
         log.warning(f"Exec agent: direct workdir materialize failed: {_mate}")
         _mat_ok = True  # 物化异常降级放行（Issue #564：不静默空注入，已由 _materialize 记日志）
