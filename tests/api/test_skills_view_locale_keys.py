@@ -32,13 +32,34 @@ HUAWEI_KEYS = {
 }
 
 
+# 概览槽位（#3227）：tt('ov_' + k) 的动态键前缀——槽位集固定，展开校验
+_OV_SLOTS = ("scope", "steps", "products", "constraints", "review")
+
+
 def _key_defaults() -> list[str]:
+    """需要顶层可解析的全部文案键：KEY_DEFAULTS + tt()/tt2() 字面量 + ov_ 槽位展开。
+
+    覆盖面（QA 第 4 轮 Informational 2 建议的扩展）：
+    - KEY_DEFAULTS 全量 key（原有覆盖）；
+    - tt('...') / tt2('...') 的全部单引号字面量（含不在 KEY_DEFAULTS 的键，
+      如 scope_official——I18N 已有该键，但 KEY_DEFAULTS 没有兜底条目）；
+    - tt('ov_' + k) 动态键按槽位集展开为 ov_scope…ov_review。
+    """
     text = VUE.read_text(encoding="utf-8")
+    keys: list[str] = []
     m = re.search(r"const KEY_DEFAULTS = \{(.*?)\n\}", text, re.S)
     assert m, "SkillsView.vue 未找到 KEY_DEFAULTS"
-    keys = re.findall(r"^\s{2}([a-z0-9_]+):", m.group(1), re.M)
-    assert keys, "KEY_DEFAULTS 解析为空"
-    return keys
+    kd = re.findall(r"^\s{2}([a-z0-9_]+):", m.group(1), re.M)
+    assert kd, "KEY_DEFAULTS 解析为空"
+    keys += kd
+    literals = re.findall(r"""tt2?\(['"]([a-z0-9_]+)['"]\)""", text)
+    keys += [k for k, _ in ((l, 0) for l in literals)]
+    keys += [f"ov_{s}" for s in _OV_SLOTS]
+    seen, uniq = set(), []
+    for k in keys:
+        if k not in seen:
+            seen.add(k); uniq.append(k)
+    return uniq
 
 
 def _load(lang: str) -> dict:
