@@ -36,6 +36,10 @@ _OPCODE_FLAT_RESIDUAL_NAMES = frozenset({
 _SESSION_DIR_MARKER = ".grape-session-tmpdir"
 
 _DEAD_RUNTIME_MINUTES = int(os.environ.get("SWEEPER_DEAD_RUNTIME_MINUTES", "30"))
+# Issue #3352：有会话但长时间没有任何执行消息的 running 任务——worker 侧任务超时（1h）
+# 早该收尾，仍挂着说明 complete/fail 回报丢了（网关 504/断网）。这类僵尸按 6h 长超时回收
+# 太慢，期间一直占 `_real_active_count` 并发槽；这里给一个独立的空闲阈值。
+_RUNNING_IDLE_MINUTES = int(os.environ.get("SWEEPER_RUNNING_IDLE_MINUTES", "120"))
 
 # Issue #2281：sweeper 清理判据的对比基线。worktree 的未推送判定应以场景开发基线
 # （GRAPE_WORK_BRANCH）为准，而不是恒为 origin/main——否则基线分支上的正常提交会被
@@ -73,6 +77,8 @@ _QUEUED_STALE_TXT = "中断：queued 超时无 worker 认领（sweeper 兜底回
 _DEAD_RUNTIME_TXT = "中断：running/dispatched 悬空，所属 runtime 已离线或不存在（sweeper 兜底回收）"
 
 _LONG_RUNNING_TXT = "中断：running/dispatched 超长未收敛（sweeper 兜底回收，worker 任务超时阈值 1h）"
+_IDLE_RUNNING_TXT = ("中断：running 任务长时间无执行消息（complete/fail 回报丢失，"
+                     "sweeper 兜底回收并归还并发槽）")
 
 _DUAL_SIGNAL_TXT = "中断：双信号已齐（stream_ended+self_reported）但终态未收敛（sweeper 兜底回收）"
 
@@ -632,9 +638,22 @@ def _dt_age_minutes(s: str | None, now: float | None = None) -> float | None:
     _now = now if now is not None else time.time()
     return max(0.0, (_now - dt.timestamp()) / 60.0)
 
+def _task_idle_minutes(c, task_id, now: float) -> float | None:
+    """running 任务最近一次执行消息距今分钟数（无消息返回 None）。"""
+    try:
+        row = c.execute("SELECT MAX(created_at) FROM task_messages WHERE task_id=?",
+                        (task_id,)).fetchone()
+    except Exception as _e:  # noqa: BLE001
+        log.debug(f"sweeper: task {task_id} message idle probe failed: {_e}")
+        return None
+    ts = row[0] if row else None
+    return _dt_age_minutes(ts, now) if ts else None
+
+
 def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
                                  dead_runtime_minutes: int | None = None,
-                                 long_running_minutes: int | None = None) -> int:
+                                 long_running_minutes: int | None = None,
+                                 idle_running_minutes: int | None = None) -> int:
     """兜底回收悬空 agent_tasks（需求中心「运行中/雷达扫描」亮灯的直接依据）。
 
     现状：sweeper 只回收 events（sweep_stuck_events_once），完全不碰 agent_tasks。
@@ -660,6 +679,7 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
     q_stale = _QUEUED_STALE_MINUTES if queued_stale_minutes is None else int(queued_stale_minutes)
     d_stale = _DEAD_RUNTIME_MINUTES if dead_runtime_minutes is None else int(dead_runtime_minutes)
     l_stale = _long_running_minutes() if long_running_minutes is None else int(long_running_minutes)
+    i_stale = _RUNNING_IDLE_MINUTES if idle_running_minutes is None else int(idle_running_minutes)
     if l_stale <= d_stale:
         l_stale = d_stale  # 长超时阈值不得小于 runtime 死亡阈值（避免重叠误读）
 
@@ -676,9 +696,9 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
     try:
         with _sweep_cursor() as c:
             c.execute("SELECT id, event_seq, runtime_id, created_at, started_at, status, "
-                      "stream_ended, self_reported, exit_code "
+                      "stream_ended, self_reported, exit_code, runtime_session_id "
                       "FROM agent_tasks WHERE status IN ('queued','dispatched','running')")
-            for tid, event_seq, rid, created_at, started_at, status, stream_ended, self_reported, exit_code in c.fetchall():
+            for tid, event_seq, rid, created_at, started_at, status, stream_ended, self_reported, exit_code, rt_session in c.fetchall():
                 if stream_ended == 1 and self_reported == 1:
                     # 双信号齐 ≠ 失败：agent 已经跑完并自报终态，sweeper 只是补写主控漏掉的那一次
                     # 收敛。按它自报的 exit_code 决定方向，否则「跑完且成功」会被打成失败
@@ -698,6 +718,14 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
                     elif (rid and rid != 0 and rid not in online
                           and age is not None and age >= d_stale):
                         dead.append((tid, event_seq, _DEAD_RUNTIME_TXT, rid, False))
+                    elif str(rt_session or "").strip() and age is not None:
+                        # Issue #3352：有会话但长时间没有执行消息 —— 引擎在跑却不再产出，
+                        # 典型是 complete/fail 回报丢了（网关 504/断网），必须回收槽位。
+                        _idle = _task_idle_minutes(c, tid, now)
+                        if _idle is None:
+                            _idle = age   # 建会话后一条消息都没有 → 用任务年龄保守兜底
+                        if _idle >= i_stale:
+                            dead.append((tid, event_seq, _IDLE_RUNNING_TXT, rid, False))
     except Exception as e:
         log.warning(f"sweeper agent_tasks scan failed: {e}")
         return 0

@@ -1132,7 +1132,8 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         _webhook_secret = _secrets.token_urlsafe(32) if _use_path_b else ""
         try:
             _wh_token = _create_global_bot_token or api_token  # P2-7: 路径 A 用 bot token，路径 B 用用户 token
-            existing_id = _hcfg["find_webhook"](_wh_token, owner, repo_name, webhook_url)
+            existing_id = _host_call_with_ready_retry(
+                _hcfg["find_webhook"], _wh_token, owner, repo_name, webhook_url)
             repo_key = to_repo_key(full_name, provider=provider)
             wh_col = _hcfg["db_token_field"]
             _bot_token_col = _hcfg["db_bot_token_field"]
@@ -1154,8 +1155,8 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
                     host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
                 user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             else:
-                hook_id = _hcfg["setup_webhook"](
-                    _wh_token, owner, repo_name, webhook_url,
+                hook_id = _host_call_with_ready_retry(
+                    _hcfg["setup_webhook"], _wh_token, owner, repo_name, webhook_url,
                     **_hcfg["setup_webhook_kwargs"](_webhook_secret, _wh_token, _use_path_b))
                 # P1-2: 路径 B 成功时写空串（不写 stale 用户 token），webhook 验证依赖 webhook_secret
                 _db_wh_token = "" if _use_path_b else _wh_token
@@ -1347,6 +1348,27 @@ def _classify_host_error(err: Exception) -> str:
     if code >= 500 or code == 0:
         return "upstream_unavailable"
     return "host_failed"
+
+
+# Issue #3354：刚建仓立刻托管时，VCS 侧可能还没就绪（404 仓库不存在）——
+# 这是时序竞态，不是权限问题，等几秒就能成功。只对此类错误做有限退避重试，
+# 401/403/429/5xx 立即抛出（重试无意义或应由调用方/上游限流策略处理）。
+_HOST_REPO_READY_DELAYS = (2, 4, 8)
+
+
+def _host_call_with_ready_retry(fn, *args, **kwargs):
+    """对托管链路的单次上游调用做「仓库就绪」有限重试（仅 404/repo_not_found）。"""
+    _delays = _HOST_REPO_READY_DELAYS
+    for _i, _delay in enumerate(_delays + (None,)):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as _e:  # noqa: BLE001
+            if _delay is None or _classify_host_error(_e) != "repo_not_found":
+                raise
+            log.info(f"host_after_create: repo not ready yet ({_e}); "
+                     f"retry {_i + 1}/{len(_delays)} in {_delay}s")
+            time.sleep(_delay)
+    raise RuntimeError("host retry exhausted")  # pragma: no cover — 循环末轮必 raise
 
 
 def _host_http_error_code(detail) -> str:
