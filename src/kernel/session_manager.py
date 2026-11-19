@@ -31,7 +31,7 @@ def __getattr__(name: str):
         return getattr(port, symbol)()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-_db_path = os.environ.get("DEVOPS_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "data/sessions.db"))
+# 路径不再在 import 期定型：见 _LazyDB._build()，那里按当前 DEVOPS_DB_PATH 解析。
 db_lock = threading.RLock()
 
 
@@ -170,7 +170,9 @@ class _LazyDB:
                 os.makedirs(parent, exist_ok=True)
             except Exception:
                 pass
-        real = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
+        # timeout 保持 sqlite3 默认 5s（PRAGMA busy_timeout=5000 也是 5s）。
+        # 曾试过 30s，整域跑时每个拿不到锁的用例要多等 25s，累积到十几分钟看着像死锁。
+        real = sqlite3.connect(path, check_same_thread=False)
         # WAL + busy_timeout + synchronous=FULL：跨进程写安全，commit 时 fsync WAL
         try:
             real.execute("PRAGMA journal_mode=WAL")
