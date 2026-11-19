@@ -211,10 +211,11 @@ def test_patch_updates_fields_refreshes_updated_at_keeps_version(sdb):
     assert versions == (1, "1.0.0"), "PATCH 不得新增版本行"
 
 
-def test_patch_summary_truncates_to_50(sdb):
+def test_patch_summary_truncates_to_120(sdb):
+    # polish round 把 _SUMMARY_MAX 从 50 提到 120（卡片摘要双行），截断上限同步。
     sid = _seed(sdb)
-    r = _patch(sid, {"summary": "摘" * 80})
-    assert len(r["summary"]) <= 50
+    r = _patch(sid, {"summary": "摘" * 200})
+    assert len(r["summary"]) <= 120
 
 
 def test_patch_rejects_empty_summary(sdb):
