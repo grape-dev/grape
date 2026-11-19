@@ -470,6 +470,12 @@ def _migrate_add_org_id_columns():
 
     哨兵由 0 改为 ''：MySQL TEXT/VARCHAR 列与数值 0 比较会把非数字串强转 0
     （'abc'=0 为 TRUE），未归属行会被误匹配；空串在两种后端语义一致。
+
+    ⚠️ 本函数属**冻结老轨**（`_run_all_migrations()`，存量库不执行），只补**缺失**
+    列，不转换存量类型：老库里的 INT org_id 由注册式迁移
+    `d105-org-domain-text-normalize`（version=_ORG_TEXT_MIGRATION_VERSION）
+    负责 MODIFY 成字符串族，并在转换后自查列类型（QA M2：检查必须挂在会真正
+    在存量库执行的注册式迁移上，不能挂这里）。
     """
     try:
         with db_lock:
@@ -2203,14 +2209,171 @@ def _rebuild_organization_text_pk(c, cols) -> None:
                 log.warning(f"org text migration: index rebuild failed on organization.{_name}: {e}")
 
 
+# MySQL 侧 org 域列的目标类型（D105 第三批 MySQL 分支）。
+# 核心表 org_id 用 TEXT，与全新库 `ADD COLUMN org_id TEXT` 一致；
+# organization.id 是主键、org_member 上还挂着 UNIQUE(org_id,user_id)，
+# MySQL 不允许 TEXT 直接进索引/主键（1170），故这几个定长列用 VARCHAR(36)：
+# org 域 id 在 D105 后是 uuid7 字符串，36 位够用且保值（存量 1 → '1'）。
+_ORG_MYSQL_TEXT_COLS = (
+    # (table, column, target_type)
+    ("organization", "id", "VARCHAR(36)"),
+    ("organization", "owner_id", "VARCHAR(36)"),
+    ("org_member", "org_id", "VARCHAR(36)"),
+    ("org_member", "invited_by", "VARCHAR(36)"),
+    ("org_invitation", "org_id", "VARCHAR(36)"),
+    ("org_invitation", "inviter_id", "VARCHAR(36)"),
+) + tuple((_t, "org_id", "TEXT") for _t in _ORG_ID_TABLES)
+
+# 版本号单点定义：登记处与日志/自检引用同一常量，避免两处字面量漂移（QA I3）。
+_ORG_TEXT_MIGRATION_VERSION = "202611190100"
+
+
+def _widen_mysql_org_ids(conn=None) -> int:
+    """MySQL 侧 org 域列字符串化 + 哨兵 0 → ''（D105 第三批，升级库专用）。
+
+    为什么需要本函数：`_migrate_add_org_id_columns()` 只在列**缺失**时
+    `ADD COLUMN org_id TEXT`，对存量库已存在的 INT 列既不报错也不转换；
+    而 SQLite 的整表重建分支（`_normalize_org_domain_text`）用的是 PRAGMA /
+    sqlite_master，在 MySQL 上是 1064。结果：老 schema + 新代码的 MySQL 库，
+    任何一次新建 runtime 凭据都因「'' 写 int 列」报
+    `(1366, "Incorrect integer value: '' for column 'org_id'")`。
+
+    口径与 DDL 一致（`_ORGANIZATION_DDL` / `_ORG_MEMBER_DDL` 等）：org 域 id 为
+    字符串、'' 表示未归属/全局。存量整型值保值字符串化（1 → '1'，不重编号），
+    因此不会与既有 org_id 行错位。本函数幂等：已是字符串族的列零改动。
+    返回：实际 ALTER 的列数。
+
+    注意：`MODIFY COLUMN` 在 MySQL 上是 COPY 算法，会锁写整表——迁移在启动时
+    执行一次，大表（events / agent_tasks）请安排维护窗口或低峰期首启。
+    """
+    from src.kernel.session_manager import db as _pdb
+    conn = conn if conn is not None else _pdb
+    c = conn.cursor()
+    altered = 0
+    rewritten = 0
+    view_tables = []
+    for table, col, target in _ORG_MYSQL_TEXT_COLS:
+        # 本库不是该表 owner 时，拿到的是**跨域可更新视图**（三库拓扑）：ALTER 必
+        # 1346/1347，UPDATE 会穿透改写别域基表（架构守护 A11/B-1）。视图列是建
+        # 视图时的快照，转换只能由 owner 域进程做——本域跳过，owner 域跑同一条
+        # 登记迁移并盖章；视图可见性由 scripts/sync_domain_views.py 重建保证。
+        c.execute("SELECT TABLE_TYPE FROM information_schema.TABLES "
+                  "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s", (table,))
+        trow = c.fetchone()
+        if not trow:
+            continue                      # 表不在本库（三库分域的另一半），跳过
+        if str(trow[0]).upper() != "BASE TABLE":
+            view_tables.append(table)
+            continue
+        c.execute(
+            "SELECT IS_NULLABLE, DATA_TYPE, COLUMN_DEFAULT FROM information_schema.columns "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+            (table, col))
+        row = c.fetchone()
+        if not row:
+            continue                      # 表/列不在本库（三库分域的另一半），跳过
+        nullable, dtype, default = row[0], (row[1] or "").lower(), row[2]
+        if dtype not in ("char", "varchar", "tinytext", "text", "mediumtext", "longtext"):
+            suffix = " NOT NULL" if nullable == "NO" else ""
+            # 存量列的数值默认值（invited_by DEFAULT 0 一类）跟着列一起保留，
+            # 否则未显式赋值的 INSERT 会从 0 变成 NULL，哨兵口径不一致。
+            # TEXT/BLOB 在 MySQL 上只接受**表达式**默认值（DEFAULT ('')），
+            # 字面量 DEFAULT '0' 会报 1101，所以只对 VARCHAR 目标保留默认值。
+            if default not in (None, "") and target.lower().startswith("varchar"):
+                suffix += f" DEFAULT '{default}'"
+            # 危险 DDL 唯一入口（Issue #536 D4-2）：蓝绿共存期落后实例跳过，
+            # 且跳过必须**不盖章**（raise），否则列永远停在 INT（QA M3）。
+            if not _destructive_ddl(c, f"ALTER TABLE {table} MODIFY {col} {target}{suffix}"):
+                raise RuntimeError(
+                    f"org text normalize: ALTER {table}.{col} 被 cleanup 门槛拦下"
+                    "（本实例版本落后于 meta.min_code_version）→ 本次不盖章，下版本重试")
+            # _destructive_ddl 对非 MDL 异常只记 WARNING 仍返回 True（fail-open），
+            # 所以「转换成功」必须自己复检列型，否则日志与计数会把失败读成成功（QA I1）。
+            c.execute(
+                "SELECT DATA_TYPE FROM information_schema.columns "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+                (table, col))
+            got = str((c.fetchone() or [""])[0] or "").lower()
+            if got not in ("char", "varchar", "tinytext", "text", "mediumtext", "longtext"):
+                log.error(f"org text normalize (MySQL): {table}.{col} ALTER 后仍为 {got or '?'}")
+                raise RuntimeError(
+                    f"org text normalize: {table}.{col} MODIFY 未生效（仍为 {got or '?'}）"
+                    "→ 本次不盖章，下次启动重试")
+            altered += 1
+            log.info(f"org text normalize (MySQL): {table}.{col} {dtype} -> {target}{suffix}")
+        # 哨兵统一：0 / '0' / NULL → ''（与 SQLite 分支 #③ 同口径）。
+        # 先 LIMIT 1 探一下再写：已字符串化的库不让每次启动都全表 UPDATE 一遍
+        # （events / agent_tasks 是大表，QA I3）。
+        c.execute(f"SELECT 1 FROM {table} WHERE {col}='0' OR {col} IS NULL LIMIT 1")
+        if c.fetchone():
+            c.execute(f"UPDATE {table} SET {col}='' WHERE {col}='0' OR {col} IS NULL")
+            rewritten += getattr(c, "rowcount", 0) or 0
+    if view_tables:
+        log.info("org text normalize (MySQL): 跳过 %d 张跨域视图 %s（非本域 owner，"
+                 "由 owner 域进程转换，视图侧需 sync_domain_views 重建）",
+                 len(set(view_tables)), sorted(set(view_tables)))
+    if altered:
+        log.info(f"org text normalize (MySQL): {altered} column(s) widened, "
+                 f"{rewritten} sentinel row(s) rewritten")
+    return altered
+
+
+def _org_columns_not_text(conn=None) -> list:
+    """当前库里仍是数值型的 org 域列清单（迁移后校验用，不做 DDL）。
+
+    用途：注册式迁移 `d105-org-domain-text-normalize`（QA 命名）转换完成后自查——
+    `_destructive_ddl()` 内部对非 MDL 异常只记 WARNING 并返回 True（fail-open），
+    所以「ALTER 没成功」不能靠它的返回值判定，必须落到列类型实查。
+
+    口径对称（QA I2）：两种后端都按 `_ORG_MYSQL_TEXT_COLS` 的同一份清单检查，
+    organization.id 在 SQLite 分支同样纳入。
+    """
+    from src.kernel.mysql_compat import get_db_backend
+    from src.kernel.session_manager import db as _pdb
+    conn = conn if conn is not None else _pdb
+    c = conn.cursor()
+    bad = []
+    if get_db_backend() == "mysql":
+        for table, col, _target in _ORG_MYSQL_TEXT_COLS:
+            # 只统计基表：非 owner 域库里这张表是跨域视图，列型是建视图时的快照，
+            # 拿它判「转换未生效」会让该域永不盖章（在别域已转换的情况下反复 ERROR）。
+            c.execute(
+                "SELECT c.DATA_TYPE FROM information_schema.columns c "
+                "JOIN information_schema.tables t "
+                "  ON t.TABLE_SCHEMA=c.TABLE_SCHEMA AND t.TABLE_NAME=c.TABLE_NAME "
+                "WHERE c.TABLE_SCHEMA=DATABASE() AND c.TABLE_NAME=%s "
+                "  AND c.COLUMN_NAME=%s AND t.TABLE_TYPE='BASE TABLE'",
+                (table, col))
+            row = c.fetchone()
+            if row and (row[0] or "").lower() not in (
+                    "char", "varchar", "tinytext", "text", "mediumtext", "longtext"):
+                bad.append((table, col, row[0]))
+        return bad
+    for table, col, _target in _ORG_MYSQL_TEXT_COLS:
+        cols = c.execute(f"PRAGMA table_info({table})").fetchall()
+        decl = next((r[2] or "" for r in cols if r[1] == col), None)
+        if decl is not None and decl.strip().upper() not in ("TEXT",) \
+                and "CHAR" not in decl.upper() and "CLOB" not in decl.upper():
+            bad.append((table, col, decl))
+    return bad
+
+
 def _normalize_org_domain_text(conn) -> int:
-    """org 域 id TEXT 归一（SQLite 侧）：organization.id 主键 TEXT 化 + owner_id/
+    """org 域 id TEXT 归一：organization.id 主键 TEXT 化 + owner_id/
     org_id/inviter_id/invited_by/核心表 org_id 列 TEXT 亲和 + 哨兵 0 → ''。
+
+    SQLite 分支整表重建（PRAGMA / sqlite_master）；MySQL 分支走
+    `_widen_mysql_org_ids()`（information_schema + MODIFY COLUMN）。
+    早期实现只有 SQLite 分支且在 MySQL 上直接 1064——升级库的 org_id 因此
+    永远是 INT，新代码写 '' 哨兵时 1366（凭据生成失败）。
 
     幂等：id 已 TEXT、各列亲和已 TEXT 且无混型行、哨兵已 '' 时零改动。
     亲和非 TEXT（存量库旧 DDL）时整表重建——纯 CAST 会被 INTEGER 亲和翻回
     integer（202611091000 同口径实锤）。表/列不存在逐项跳过。
-    返回：重建路径 -1；否则改写行数。"""
+    返回：重建路径 -1；否则改写行数（MySQL 返回 ALTER 列数）。"""
+    from src.kernel.mysql_compat import get_db_backend
+    if get_db_backend() != "sqlite":
+        return _widen_mysql_org_ids(conn)
     c = conn.cursor()
     changed = 0
     rebuilt = False
@@ -9883,4 +10046,46 @@ register_migration(
     kind="safe",
     domains=("mgmt",),
     fn=_fn_category_columns_repair_mgmt,
+)
+
+
+# ===== 2026-11-19 补正：D105 第三批 org 域 TEXT 化从未在 MySQL 存量库执行 =====
+# 事故链：`_normalize_org_domain_text()` 只实现了 SQLite 分支（PRAGMA / sqlite_master
+# 整表重建），MySQL 上直接 1064；而 `_migrate_add_org_id_columns()` 只在列缺失时
+# `ADD COLUMN org_id TEXT`，对已存在的 INT 列既不报错也不转换。于是「老 schema +
+# 新代码」的 MySQL 库上，`org_id` 永远是 INT，而新代码把未归属/个人组织写成 ''
+# 哨兵 —— 新建 runtime 凭据必报 (1366, "Incorrect integer value: '' for column
+# 'org_id'")，前端「AI Devspace 云开发环境」卡片点创建即失败。
+# 修法：补 MySQL 分支（_widen_mysql_org_ids）+ 注册式迁移补齐存量库。
+# 号段核对（提交前）：源码 register_migration 与四套目标库
+# grape_t_schema_migrations 均未占用 202611190100。
+def _fn_normalize_org_domain_text() -> None:
+    """D105 第三批 org 域字符串化（存量补齐；幂等，按域进程各跑一次）。
+
+    只处理**本域库里存在**的表：三库拓扑下 mgmt 进程改 organization/org_member 等，
+    runtime 进程改 runtime_credentials/agent_tasks 等，缺表按项跳过。
+
+    转换后自查列类型：`_destructive_ddl()` 对非 MDL 异常只记 WARNING 并返回 True，
+    单靠它的返回值会「ALTER 失败也盖章」（QA M3/I2）。发现仍有数值列 → ERROR +
+    raise，执行器据此不盖章、下次启动重试——本函数属注册式迁移，存量库每次启动
+    都会跑到（QA M2）。
+    """
+    with db_lock:
+        n = _normalize_org_domain_text(db)
+        db.commit()
+    bad = _org_columns_not_text(db)
+    if bad:
+        log.error(f"org domain text normalize 后仍有数值列（'' 哨兵会报 1366）: {bad}")
+        raise RuntimeError(
+            f"org domain text normalize 未完成：{len(bad)} 列仍非字符串族 {bad}；"
+            "本次不盖章，下次启动重试（大表 MODIFY 是 COPY 锁写，需安排低峰/维护窗口）")
+    log.info(f"org domain text normalize 完成（本域改动: {n}）")
+
+
+register_migration(
+    version=_ORG_TEXT_MIGRATION_VERSION,
+    name="d105-org-domain-text-normalize",
+    kind="safe",
+    domains=("mgmt", "runtime"),
+    fn=_fn_normalize_org_domain_text,
 )

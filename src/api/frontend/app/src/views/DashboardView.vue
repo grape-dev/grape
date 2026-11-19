@@ -69,9 +69,16 @@
               <div class="ap-nd-skillbox">
                 <div class="ap-nd-lbl">{{ t('label_skill') }}</div>
                 <template v-if="node.enabled !== false">
-                  <div class="dbv-skillpick" @click.stop="openSkillDropdown(node.id, $event)">
-                    {{ node.skill_display_name || node.skill || t('select_skill') }}
-                  </div>
+                  <button
+                    type="button"
+                    class="ap-nd-engbtn dbv-skillbtn"
+                    :class="{ 'is-unset': !(node.skill_display_name || node.skill) }"
+                    @click.stop="openSkillModal(node.id)"
+                  >
+                    <span class="dbv-skillbtn-t">{{
+                      node.skill_display_name || node.skill || t('select_skill')
+                    }}</span>
+                  </button>
                 </template>
                 <span v-else class="ap-nd-none">{{ t('agent_disabled') }}</span>
               </div>
@@ -340,13 +347,17 @@
                   <div class="ap-nd-lbl">{{ t('label_skill') }}</div>
                   <!-- enabled=null（老场景未存该字段）视为启用，与 off 判定一致 -->
                   <template v-if="node.enabled !== false">
-                    <div
+                    <button
                       v-if="flowEditing"
-                      class="dbv-skillpick"
-                      @click.stop="openSkillDropdown(node.id, $event)"
+                      type="button"
+                      class="ap-nd-engbtn dbv-skillbtn"
+                      :class="{ 'is-unset': !(node.skill_display_name || node.skill) }"
+                      @click.stop="openSkillModal(node.id)"
                     >
-                      {{ node.skill_display_name || node.skill || t('select_skill') }}
-                    </div>
+                      <span class="dbv-skillbtn-t">{{
+                        node.skill_display_name || node.skill || t('select_skill')
+                      }}</span>
+                    </button>
                     <span v-else-if="nodeSkill(node)" class="dbv-skillname">{{
                       nodeSkill(node)
                     }}</span>
@@ -787,39 +798,88 @@
       </template>
     </template>
 
-    <!-- ═══ 技能下拉面板 ═══ -->
-    <Teleport to="body">
-      <div
-        v-if="skillPanel.open"
-        class="dbv-skillpanel"
-        :style="{ left: skillPanel.x + 'px', top: skillPanel.y + 'px', width: skillPanel.w + 'px' }"
-      >
-        <input
-          v-model="skillPanel.q"
-          class="dbv-skillsearch"
-          :placeholder="t('skill_search_placeholder')"
-        />
-        <div class="dbv-skilllist">
-          <div class="dbv-skillopt clear" @click="pickSkill('')">✕ {{ t('skill_clear') }}</div>
-          <template v-if="skillGroups.length">
-            <template v-for="g in skillGroups" :key="g.key">
-              <div class="dbv-skillgroup">{{ g.label }} ({{ g.items.length }})</div>
-              <div
-                v-for="s in g.items"
-                :key="skillKeyOf(s)"
-                :class="['dbv-skillopt', { sel: skillIsSelected(s) }]"
-                :title="s.description || ''"
-                @click="pickSkill(s.skill_name, skillKeyOf(s))"
-              >
-                <span v-if="skillIsSelected(s)" class="dbv-skillcheck">✓</span>
-                <span class="dbv-skillname-t">{{ s.display_name || s.skill_name }}</span>
-              </div>
+    <!-- ═══ 技能选择弹窗（2026-11-18 · 保时捷/香奈儿式排版：结构细线 + 字距 + 单一强调色） ═══ -->
+    <div v-if="skillPanel.open" class="rtv-modal-ov" @click.self="closeSkillModal()">
+      <div class="dbv-skillmodal">
+        <div class="skm-head">
+          <div class="skm-kicker">{{ t('skill_kicker') }}</div>
+          <h3 class="skm-title">{{ t('select_skill') }}</h3>
+          <div class="skm-sub">
+            <span class="skm-agent">{{ agentLabel(skillPanel.agentType) }}</span>
+            <span class="skm-dash">—</span>
+            <span class="skm-count">{{ skillPanel.skills.length }}</span>
+            <span class="skm-unit">{{ t('skill_unit') }}</span>
+          </div>
+        </div>
+
+        <div class="skm-search">
+          <input
+            v-model="skillPanel.q"
+            class="skm-input"
+            :placeholder="t('skill_search_placeholder')"
+          />
+          <span v-if="skillPanel.q" class="skm-qclear" @click="skillPanel.q = ''">✕</span>
+        </div>
+
+        <div class="skm-well">
+          <div class="skm-list">
+            <button
+              type="button"
+              class="skm-row skm-row--none"
+              :class="{ on: !skillPanel.current && !skillPanel.currentKey }"
+              @click="selectSkill('', '')"
+            >
+              <span class="skm-num">—</span>
+              <span class="skm-body">
+                <span class="skm-name">{{ t('skill_unbind') }}</span>
+              </span>
+              <span class="skm-tick"></span>
+            </button>
+            <template v-if="skillGroups.length">
+              <template v-for="g in skillGroups" :key="g.key">
+                <div class="skm-group">
+                  <span class="skm-glabel">{{ g.label }}</span>
+                  <i class="skm-gline"></i>
+                  <span class="skm-gcount">{{ String(g.items.length).padStart(2, '0') }}</span>
+                </div>
+                <button
+                  v-for="(s, si) in g.items"
+                  :key="skillKeyOf(s)"
+                  type="button"
+                  class="skm-row"
+                  :class="{ on: skillIsSelected(s) }"
+                  @click="selectSkill(s.skill_name, skillKeyOf(s))"
+                >
+                  <span class="skm-num">{{ String(si + 1).padStart(2, '0') }}</span>
+                  <span class="skm-body">
+                    <span class="skm-line1">
+                      <span class="skm-name">{{ s.display_name || s.skill_name }}</span>
+                      <span
+                        v-if="s.display_name && s.skill_name && s.display_name !== s.skill_name"
+                        class="skm-alias"
+                        >{{ s.skill_name }}</span
+                      >
+                    </span>
+                    <span v-if="s.description" class="skm-desc">{{ s.description }}</span>
+                  </span>
+                  <span class="skm-tick"></span>
+                </button>
+              </template>
             </template>
-          </template>
-          <div v-else class="dbv-skillnomatch">{{ t('skill_no_match') }}</div>
+            <div v-else class="skm-empty">{{ t('skill_no_match') }}</div>
+          </div>
+        </div>
+
+        <div class="skm-foot">
+          <button type="button" class="skm-ghost" @click="closeSkillModal()">
+            {{ t('cancel') }}
+          </button>
+          <button type="button" class="skm-cta" @click="confirmSkillPick()">
+            {{ t('confirm') }}
+          </button>
         </div>
       </div>
-    </Teleport>
+    </div>
 
     <!-- ═══ 引擎选择弹窗 ═══ -->
     <div v-if="engineModal.open" class="rtv-modal-ov" @click.self="closeEngineModal()">
@@ -1119,6 +1179,20 @@
       </div>
     </div>
 
+    <!-- ═══ 未保存改动的离开确认（2026-11-19） ═══ -->
+    <div v-if="leaveDlg.open" class="rtv-modal-ov" @click.self="stayEditing()">
+      <div class="dbv-copymodal">
+        <h3>{{ t('leave_unsaved_title') }}</h3>
+        <p class="dbv-copy-hint">{{ t('leave_unsaved_hint') }}</p>
+        <div class="dbv-copy-btns">
+          <button class="ap-btn" @click="stayEditing()">{{ t('stay_editing') }}</button>
+          <button class="ap-btn ap-btn-d" @click="confirmLeaveDirty()">
+            {{ t('discard_and_leave') }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══ 密钥明文取回（#885，密码二次确认） ═══ -->
     <div v-if="revealDlg.open" class="rtv-modal-ov" @click.self="closeReveal()">
       <div class="dbv-copymodal">
@@ -1369,7 +1443,7 @@ const newBranchRef = ref('main')
 const advFields = ref([])
 const linkedRepos = ref([])
 const linkedRepoOptions = ref([])
-// 技能下拉
+// 技能选择弹窗
 const skillPanel = reactive({
   open: false,
   agentType: '',
@@ -1378,9 +1452,6 @@ const skillPanel = reactive({
   currentKey: '',
   nameCounts: {},
   q: '',
-  x: 0,
-  y: 0,
-  w: 240,
   skills: [],
 })
 const skillPickCache = {}
@@ -1827,7 +1898,14 @@ function t(key, vars) {
     label_engine: '引擎',
     select_skill: '选择技能',
     select_engine: '选择引擎',
-    skill_clear: '清除选择',
+    skill_unbind: '不绑定技能',
+    skill_kicker: '技能绑定',
+    skill_unit: '项',
+    leave_unsaved_title: '有未保存的改动',
+    leave_unsaved_hint:
+      '这个场景的编辑还没保存，离开后刚才对技能、引擎和节点启用状态的修改会被丢弃，并退出编辑模式。',
+    stay_editing: '继续编辑',
+    discard_and_leave: '放弃并离开',
     skill_no_match: '无匹配技能',
     skill_search_placeholder: '搜索技能名称/描述',
     not_needed_in_scene: '此场景下不需要',
@@ -2702,9 +2780,10 @@ function toggleAgent(agentType) {
   else if (flowEditing.value) saveEditDraft(detail.value ? detail.value.id : '')
 }
 
-// ═══ 技能下拉（Issue #292 分组+搜索） ═══
-function openSkillDropdown(agentType, e) {
-  const rect = e.currentTarget.getBoundingClientRect()
+// ═══ 技能选择弹窗（Issue #292 分组+搜索） ═══
+// 2026-11-18：由「跟随点击定位的浮层下拉」改为与引擎选择同构的居中弹窗（用户口径），
+// 交互也随之对齐：点选只改高亮，确定才落库。
+function openSkillModal(agentType) {
   skillPanel.agentType = agentType
   const node = editNodes.value.find((n) => n.id === agentType)
   skillPanel.current = node ? node.skill || '' : ''
@@ -2712,12 +2791,7 @@ function openSkillDropdown(agentType, e) {
   skillPanel.currentId = node ? node.skill_id || 0 : 0
   skillPanel.currentKey = ''
   skillPanel.q = ''
-  skillPanel.x = rect.left
-  skillPanel.w = Math.max(rect.width, 240)
-  const estHeight = 320
-  let top = rect.bottom + 4
-  if (top + estHeight > G.window.innerHeight) top = Math.max(8, rect.top - estHeight - 4)
-  skillPanel.y = top
+  skillPanel.skills = []
   skillPanel.open = true
   // 加载技能
   const repo = currentRepo()
@@ -2826,17 +2900,92 @@ function pickSkill(skillName, skillKey) {
   if (mode.value === 'create') saveCreateDraft()
   else if (flowEditing.value) saveEditDraft(detail.value ? detail.value.id : '')
 }
+// 关闭引擎弹窗内的场景筛选下拉（技能面板改弹窗后，技能不再需要 outside-click 关闭）
 function onDocClick(e) {
-  // 关闭技能面板
-  if (
-    skillPanel.open &&
-    !e.target.closest('.dbv-skillpanel') &&
-    !e.target.closest('.dbv-skillpick')
-  ) {
-    skillPanel.open = false
-  }
-  // 关闭引擎弹窗内的场景筛选下拉
   if (engineModal.sceneDd && !e.target.closest('.dbv-ddwrap')) engineModal.sceneDd = false
+}
+// 2026-11-18：技能弹窗内点选只改高亮（current/currentKey），确定才调用 pickSkill 落库
+function selectSkill(skillName, skillKey) {
+  skillPanel.current = skillName || ''
+  skillPanel.currentKey = skillKey || ''
+  // 手工改选后旧 id 不再可信，交由 pickSkill 按唯一键从缓存重新解析
+  skillPanel.currentId = 0
+}
+function confirmSkillPick() {
+  pickSkill(skillPanel.current, skillPanel.currentKey)
+}
+function closeSkillModal() {
+  skillPanel.open = false
+}
+
+// ═══ 未保存改动的离开守卫（2026-11-19）═══
+// 场景编辑态下的改动只在前端 + 本地草稿，直接点侧栏/返回离开既不落库也不提示，
+// 用户会以为「改了没生效」。这里包一层 app.nav：有未保存改动先弹确认；
+// 确认离开则丢弃草稿并退出编辑态（= 用户口径「自动清空改动退出编辑模式」）。
+const leaveDlg = reactive({ open: false, nextView: '', nextParam: undefined })
+const editBaseline = ref('')
+let _origNav = null
+let _leaveBypass = false
+
+function editNodesSnapshot() {
+  return JSON.stringify(serializeNodes(editNodes.value))
+}
+function hasUnsavedEdit() {
+  return (
+    !!flowEditing.value && editBaseline.value !== '' && editNodesSnapshot() !== editBaseline.value
+  )
+}
+function installNavGuard() {
+  const a = G.app
+  if (!a || typeof a.nav !== 'function' || _origNav) return
+  _origNav = a.nav
+  a.nav = function (view, param) {
+    if (_leaveBypass) return _origNav.apply(a, arguments)
+    if (flowEditing.value && editBaseline.value !== '') {
+      if (hasUnsavedEdit()) {
+        // 有未保存改动 → 先确认，不拦就直接跳会静默丢改动
+        leaveDlg.nextView = view
+        leaveDlg.nextParam = param
+        leaveDlg.open = true
+        return
+      }
+      // 没改动 → 默认按「取消编辑」离开：退出编辑态并清掉草稿，再正常跳转（用户口径 2026-11-19）
+      discardUnsavedEdit()
+    }
+    return _origNav.apply(a, arguments)
+  }
+}
+function uninstallNavGuard() {
+  if (_origNav && G.app) {
+    G.app.nav = _origNav
+    _origNav = null
+  }
+}
+function stayEditing() {
+  leaveDlg.open = false
+}
+function discardUnsavedEdit() {
+  flowEditing.value = false
+  G.window._dashboardEditing = false
+  clearDashEditMode()
+  clearDashDraft(dashOwner.value, dashName.value, 'edit', detail.value ? detail.value.id : '')
+  editBaseline.value = ''
+  // 关掉可能开着的选择弹窗，避免它挂到下一个页面
+  skillPanel.open = false
+  engineModal.open = false
+}
+function confirmLeaveDirty() {
+  const v = leaveDlg.nextView
+  const p = leaveDlg.nextParam
+  leaveDlg.open = false
+  discardUnsavedEdit()
+  if (!v || !_origNav) return
+  _leaveBypass = true
+  try {
+    _origNav(v, p)
+  } finally {
+    _leaveBypass = false
+  }
 }
 
 // ═══ 引擎选择弹窗 ═══
@@ -3281,6 +3430,8 @@ function enterFlowEdit() {
           })
           const originalNodes = (sc && sc.pipeline && sc.pipeline.nodes) || []
           buildEditNodes(originalNodes, agents.value)
+          // 基线 = 服务端当前形态；若随后恢复了草稿，diff 自然为「有未保存改动」
+          editBaseline.value = editNodesSnapshot()
           flowEditing.value = true
           G.window._dashboardEditing = true
           saveDashEditMode('edit', detail.value.id)
@@ -3290,6 +3441,7 @@ function enterFlowEdit() {
         })
         .catch(function () {
           buildEditNodes(null, agents.value)
+          editBaseline.value = editNodesSnapshot()
           flowEditing.value = true
           G.window._dashboardEditing = true
         })
@@ -3377,6 +3529,7 @@ function saveSceneEdit() {
     .then(function () {
       G.window._dashboardEditing = false
       flowEditing.value = false
+      editBaseline.value = ''
       clearDashEditMode()
       clearDashDraft(dashOwner.value, dashName.value, 'edit', detail.value.id)
       app().showToast(t('scene_saved'))
@@ -3401,6 +3554,7 @@ function saveSceneEdit() {
 function cancelSceneEdit() {
   G.window._dashboardEditing = false
   flowEditing.value = false
+  editBaseline.value = ''
   clearDashEditMode()
   clearDashDraft(dashOwner.value, dashName.value, 'edit', detail.value.id)
 }
@@ -3750,7 +3904,9 @@ function saveSceneRecommend() {
 
 // ═══ 生命周期 ═══
 onMounted(function () {
+  // 引擎弹窗内的场景筛选下拉靠 outside-click 收起（技能面板已改弹窗，不再由这里关闭）
   document.addEventListener('click', onDocClick)
+  installNavGuard()
   if (props.initialData) {
     // renderDashboard(data) 契约：app.js 加载数据后注入
     renderDash(props.initialData)
@@ -3784,6 +3940,7 @@ onMounted(function () {
   }
 })
 onBeforeUnmount(function () {
+  uninstallNavGuard()
   document.removeEventListener('click', onDocClick)
   G.window._dashboardEditing = false
 })
@@ -4400,43 +4557,25 @@ onBeforeUnmount(function () {
   font-weight: 500;
   color: var(--t);
 }
-.dbv-skillpick {
-  position: relative;
-  width: 100%;
-  padding: 6px 26px 6px 12px;
-  /* 2026-11-16：原为「白底 + 0.5px 6% 黑内阴影」，压在同为近白的 .ap-nd 上等于无轮廓，
-     编辑态看着像纯文本、没人知道能点。改为真描边 + 低一档底色 + 右侧 ▾ 指示。 */
-  border: 1px solid var(--b);
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 500;
-  background: var(--bg);
-  color: var(--t);
-  outline: none;
-  cursor: pointer;
-  text-align: left;
+/* 技能触发按钮（2026-11-19 用户口径：不再用下拉框样式，改成跟「选择引擎」同款的文字按钮）。
+ * 外观完全复用 .ap-nd-engbtn（透明底 + hairline 描边 + 999px 药丸 + hover 转强调色），
+ * 这里只补：随内容变宽、超长省略、未选态更淡。 */
+.dbv-skillbtn {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+.dbv-skillbtn-t {
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transition: border-color 0.15s ease, background 0.15s ease;
 }
-.dbv-skillpick::after {
-  content: '▾';
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  font-size: 9px;
-  line-height: 1;
+.dbv-skillbtn.is-unset {
   color: var(--t3);
-  pointer-events: none;
-}
-.dbv-skillpick:hover {
-  border-color: color-mix(in srgb, var(--a) 55%, transparent);
-  background: color-mix(in srgb, var(--a) 8%, var(--bg));
-}
-.dbv-skillpick:hover::after {
-  color: var(--a);
 }
 .ap-nd-engbtn {
   font-size: 12px;
@@ -4824,83 +4963,376 @@ onBeforeUnmount(function () {
   font-size: 12px;
   color: var(--t3);
 }
-/* 技能下拉面板 */
-.dbv-skillpanel {
-  position: fixed;
-  z-index: 1001;
+/* ═══ 技能选择弹窗（2026-11-18 · 保时捷/香奈儿式排版 + 明确的可点框）═══
+ * 三层底色，一眼看清「哪里能点」：
+ *   ① 弹窗面板 var(--c) 实心面（不再透出页面，避免底色发灰）
+ *   ② 列表底槽 var(--bg) + 内描边 hairline，框住可滚动区域
+ *   ③ 每一行是 var(--c) 的圆角小卡 + 1px 描边；hover 描边转强调色，选中再加 3px 左缘实心条
+ * 排版仍是编辑式：微字距小标 + 负字距大标题 + tabular 规格行 + 单一实心 CTA。
+ * 滚动条与全局同一几何（6px / 圆角 3px），只是把颜色换成主题感知的 t3 透明度，
+ * 避免全局 rgba(0,0,0,.15) 在暗色玻璃上几乎看不见。 */
+.dbv-skillmodal {
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(88vh, 780px);
+  display: flex;
+  flex-direction: column;
   background: var(--c);
   border: 1px solid var(--hairline);
-  border-radius: 12px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
-  padding: 8px;
-  box-sizing: border-box;
+  border-radius: 18px;
+  box-shadow:
+    0 32px 80px rgba(0, 0, 0, 0.32),
+    0 2px 10px rgba(0, 0, 0, 0.14);
+  overflow: hidden;
 }
-.dbv-skillsearch {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 7px 10px;
-  border: 1px solid var(--hairline);
-  border-radius: 999px;
-  font-size: 12px;
-  background: var(--bg);
-  color: var(--t);
-  outline: none;
-  margin-bottom: 6px;
-  font-family: inherit;
-}
-.dbv-skilllist {
-  max-height: 260px;
-  overflow-y: auto;
-}
-.dbv-skillgroup {
-  margin: 6px 4px 4px;
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--t3);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.dbv-skillopt {
-  padding: 7px 10px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--t);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.dbv-skillopt:hover {
-  background: color-mix(in srgb, var(--a) 10%, transparent);
-}
-.dbv-skillopt.clear {
-  color: var(--t3);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
-  margin-bottom: 4px;
-}
-.dbv-skillopt.sel {
-  background: color-mix(in srgb, var(--a) 14%, transparent);
-}
-.dbv-skillopt.sel:hover {
-  background: color-mix(in srgb, var(--a) 14%, transparent);
-}
-.dbv-skillcheck {
-  color: var(--a-text);
-  font-weight: 700;
+.skm-head {
+  padding: 30px 32px 0;
   flex-shrink: 0;
 }
-.dbv-skillname-t {
+.skm-kicker {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.34em;
+  color: var(--t3);
+  text-transform: uppercase;
+}
+.skm-title {
+  margin: 13px 0 0;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.9px;
+  line-height: 1.1;
+  color: var(--t);
+}
+.skm-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--t3);
+}
+.skm-agent {
+  font-weight: 500;
+  color: var(--t2, var(--t));
+  letter-spacing: 0.02em;
+}
+.skm-dash {
+  opacity: 0.45;
+}
+.skm-count {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--t);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.skm-unit {
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: var(--t3);
+}
+.skm-search {
+  position: relative;
+  margin: 18px 32px 0;
+  flex-shrink: 0;
+}
+.skm-search::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--hairline);
+  transition: background 0.2s ease;
+}
+.skm-search:focus-within::after {
+  background: var(--a);
+}
+.skm-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--t);
+  font-family: inherit;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+  padding: 10px 28px 10px 12px;
+  outline: none;
+}
+.skm-input::placeholder {
+  color: var(--t3);
+  letter-spacing: 0.06em;
+}
+.skm-search:focus-within .skm-input {
+  border-color: var(--a);
+  background: var(--c);
+}
+.skm-qclear {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--t3);
+  cursor: pointer;
+  padding: 3px;
+}
+.skm-qclear:hover {
+  color: var(--t);
+}
+/* 底槽：把可滚动区域框出来 */
+.skm-well {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  margin: 14px 32px 0;
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.skm-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--t3) 45%, transparent) transparent;
+}
+.skm-list::-webkit-scrollbar {
+  width: 6px;
+}
+.skm-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.skm-list::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--t3) 45%, transparent);
+  border-radius: 3px;
+}
+.skm-list::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--t3) 68%, transparent);
+}
+/* 每一行 = 明确可点的小卡 */
+.skm-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  margin: 0 0 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--c);
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    box-shadow 0.16s ease;
+}
+.skm-row:last-child {
+  margin-bottom: 0;
+}
+.skm-row:hover {
+  border-color: color-mix(in srgb, var(--a) 40%, var(--hairline));
+  background: var(--hover-card, var(--c));
+}
+.skm-row:focus-visible {
+  outline: 2px solid var(--a);
+  outline-offset: 2px;
+}
+.skm-row.on {
+  border-color: color-mix(in srgb, var(--a) 62%, transparent);
+  background: color-mix(in srgb, var(--a) 7%, var(--c));
+  box-shadow: inset 3px 0 0 var(--a);
+}
+.skm-row--none {
+  background: transparent;
+  border-style: dashed;
+}
+.skm-row--none:hover {
+  background: var(--hover-card, var(--c));
+}
+.skm-num {
+  flex-shrink: 0;
+  width: 22px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--t3);
+  font-variant-numeric: tabular-nums;
+}
+.skm-body {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.skm-line1 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.skm-name {
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: -0.1px;
+  color: var(--t);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  transition: color 0.16s ease;
 }
-.dbv-skillnomatch {
-  padding: 14px 0;
-  text-align: center;
+.skm-row.on .skm-name {
+  font-weight: 600;
+  color: var(--a-text);
+}
+.skm-alias {
+  flex-shrink: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
   color: var(--t3);
+}
+.skm-desc {
+  font-size: 11.5px;
+  color: var(--t3);
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.skm-tick {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: right;
   font-size: 12px;
+  font-weight: 700;
+  color: var(--a-text);
+}
+.skm-row.on .skm-tick::after {
+  content: '✓';
+}
+.skm-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 8px 8px;
+}
+.skm-group:first-child {
+  padding-top: 6px;
+}
+.skm-glabel {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.28em;
+  color: var(--t3);
+}
+.skm-gline {
+  flex: 1;
+  height: 1px;
+  background: var(--hairline);
+}
+.skm-gcount {
+  flex-shrink: 0;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--t3);
+  font-variant-numeric: tabular-nums;
+}
+.skm-empty {
+  padding: 44px 0;
+  text-align: center;
+  font-size: 11.5px;
+  letter-spacing: 0.16em;
+  color: var(--t3);
+}
+.skm-foot {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 32px 20px;
+}
+.skm-ghost {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--t3);
+  font-family: inherit;
+  font-size: 12.5px;
+  letter-spacing: 0.06em;
+  padding: 9px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    color 0.16s ease,
+    background 0.16s ease,
+    border-color 0.16s ease;
+}
+.skm-ghost:hover {
+  color: var(--t);
+  border-color: var(--hairline);
+  background: var(--bg);
+}
+.skm-cta {
+  border: none;
+  background: var(--a);
+  color: var(--on-accent);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  padding: 10px 28px;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--a) 28%, transparent);
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.16s ease,
+    background 0.16s ease;
+}
+.skm-cta:hover {
+  background: var(--ah, var(--a));
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px color-mix(in srgb, var(--a) 36%, transparent);
+}
+.skm-cta:active {
+  transform: translateY(0) scale(0.99);
+}
+@media (max-width: 640px) {
+  .skm-head {
+    padding: 24px 20px 0;
+  }
+  .skm-search {
+    margin: 14px 20px 0;
+  }
+  .skm-well {
+    margin: 12px 20px 0;
+  }
+  .skm-foot {
+    padding: 14px 20px 18px;
+  }
+  .skm-title {
+    font-size: 22px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skm-row,
+  .skm-name,
+  .skm-cta,
+  .skm-ghost,
+  .skm-search::after {
+    transition: none !important;
+  }
 }
 /* 引擎弹窗 */
 .rtv-modal-ov {
@@ -5783,5 +6215,144 @@ onBeforeUnmount(function () {
   background: var(--bg);
   font-family: inherit;
   color: var(--t);
+}
+
+/* ═══ 引擎选择弹窗：视觉与技能弹窗同步（2026-11-18）═══
+ * 只改配色/描边/字体，不动结构、尺寸、两模式、筛选、分组折叠与底部按钮。
+ * 层级同技能弹窗：实心面板 → var(--bg) 底槽 → 每行 var(--c) 小卡。
+ * §23 全局「弹窗统一」用 !important 把 .dbv-engmodal 压成玻璃，这里用「遮罩>面板」双类 + !important 夺回控制权。 */
+.rtv-modal-ov .dbv-engmodal {
+  background: var(--c) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  border: 1px solid var(--hairline) !important;
+  border-radius: 18px !important;
+  box-shadow:
+    0 32px 80px rgba(0, 0, 0, 0.32),
+    0 2px 10px rgba(0, 0, 0, 0.14) !important;
+}
+.rtv-modal-ov .dbv-engmodal h3 {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.9px;
+  margin: 0 0 2px;
+}
+.dbv-eng-sub {
+  margin-bottom: 14px;
+  letter-spacing: 0.01em;
+}
+/* 两模式切换：细线分段控件（radio 仍可见，交互不变） */
+.dbv-engmodes {
+  background: var(--bg);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 3px 4px;
+  gap: 2px;
+}
+.dbv-engmodes label {
+  padding: 6px 12px;
+  border-radius: 8px;
+  transition: background 0.16s ease;
+}
+.dbv-engmodes label.on {
+  background: var(--c);
+  color: var(--a-text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+/* 列表底槽：把可滚区框出来 */
+.dbv-englist,
+.dbv-selpanel {
+  background: var(--bg);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+}
+.dbv-englist {
+  gap: 8px;
+  padding: 8px;
+}
+.dbv-selpanel {
+  padding: 10px 8px 8px;
+}
+/* 每行 = 明确可点的小卡 */
+.dbv-engitem {
+  background: var(--c);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    box-shadow 0.16s ease;
+}
+.dbv-engitem:hover {
+  border-color: color-mix(in srgb, var(--a) 40%, var(--hairline));
+  background: var(--hover-card, var(--c));
+}
+.dbv-engitem.on {
+  border-color: color-mix(in srgb, var(--a) 62%, transparent);
+  background: color-mix(in srgb, var(--a) 7%, var(--c));
+  box-shadow: inset 3px 0 0 var(--a);
+}
+/* 分组小标：同一套字距 */
+.dbv-enggroup,
+.dbv-selgroup-t,
+.dbv-selprevtitle {
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  color: var(--t3);
+}
+.dbv-enggroup {
+  margin: 12px 8px 6px;
+}
+.dbv-selgroup-t {
+  margin: 0 8px 6px;
+}
+.dbv-selprevtitle {
+  margin: 14px 8px 6px;
+}
+/* 搜索框：灰底细描边，聚焦转强调色 */
+.dbv-engsearch {
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 10px 12px;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease;
+}
+.dbv-engsearch:focus {
+  border-color: var(--a);
+  background: var(--c);
+}
+/* 标签模式：命中预览行同步小卡；Chip 选中收敛到唯一强调色 */
+.dbv-prevrow {
+  background: var(--c);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  box-shadow: none;
+}
+.dbv-prevrow.off {
+  background: color-mix(in srgb, var(--y) 8%, var(--c));
+  border-color: color-mix(in srgb, var(--y) 40%, transparent);
+}
+.dbv-selchip {
+  background: var(--c);
+  border: 1px solid var(--hairline);
+}
+.dbv-selchip:hover {
+  border-color: color-mix(in srgb, var(--a) 40%, var(--hairline));
+}
+.dbv-selchip.on {
+  background: var(--a);
+  border-color: var(--a);
+  color: var(--on-accent);
+}
+.dbv-selhint,
+.dbv-selsummary {
+  letter-spacing: 0.02em;
+}
+/* 底部：一条细线收口，按钮本身不动 */
+.dbv-engfoot {
+  border-top: 1px solid var(--hairline);
+  margin-top: 12px;
+  padding-top: 16px;
 }
 </style>

@@ -12,6 +12,7 @@ org_id/inviter_id/invited_by 及 13 张核心表 org_id 列为 INTEGER——grap
 """
 import os, sqlite3
 import importlib
+import logging
 import pytest
 
 from src.api.db_setup import (
@@ -254,3 +255,240 @@ def test_new_ddl_declares_text(tmp_path, monkeypatch):
         decl_id = _decl(c, "organization", "id")
         assert decl_id.strip().upper() == "TEXT", decl_id
     assert not bad, f"新 DDL 未字符串亲和化: {bad}"
+
+
+def _mk_sqlite(tmp_path, table="runtime_credentials", org_decl="INTEGER"):
+    """最小 sqlite 库：一张 org_id 列（亲和可指定）的核心表。"""
+    import sqlite3
+    conn = sqlite3.connect(str(tmp_path / "orgfn.db"))
+    conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, org_id {org_decl})")
+    conn.commit()
+    return conn
+
+
+def _bind(monkeypatch, conn):
+    from src.api import db_setup
+    from src.kernel import session_manager
+    monkeypatch.setattr(db_setup, "db", conn)
+    monkeypatch.setattr(session_manager, "db", conn)
+    monkeypatch.setattr("src.kernel.mysql_compat.get_db_backend", lambda: "sqlite")
+    return db_setup
+
+
+def test_registered_fn_refuses_to_stamp_when_columns_stay_numeric(tmp_path, monkeypatch):
+    """注册式迁移的转换后自查：仍有数值列 → ERROR + raise（执行器据此不盖章）。
+
+    这条守卫必须挂在 `_fn_normalize_org_domain_text` 而不是冻结老轨
+    `_migrate_add_org_id_columns()`（QA M2：老轨在存量库启动时根本不执行），
+    也用来兜住 `_destructive_ddl()` 对非 MDL 异常 fail-open 的问题（QA M3）。
+    """
+    from src.api import db_setup
+    conn = _mk_sqlite(tmp_path)
+    _bind(monkeypatch, conn)
+    # 模拟「转换函数没生效」：列保持 INT，不给它机会重建
+    monkeypatch.setattr(db_setup, "_normalize_org_domain_text", lambda c: 0)
+    errors = []
+
+    class _H(logging.Handler):
+        def emit(self, rec):
+            if rec.levelname == "ERROR":
+                errors.append(rec.getMessage())
+
+    h = _H()
+    db_setup.log.addHandler(h)
+    old = db_setup.log.level
+    db_setup.log.setLevel(logging.INFO)
+    try:
+        with pytest.raises(RuntimeError) as ei:
+            db_setup._fn_normalize_org_domain_text()
+    finally:
+        db_setup.log.removeHandler(h)
+        db_setup.log.setLevel(old)
+        conn.close()
+    assert "runtime_credentials" in str(ei.value)
+    assert errors and "仍有数值列" in errors[-1]
+
+
+def test_registered_fn_stamps_after_real_conversion(tmp_path, monkeypatch):
+    """真转换路径不抛错（sqlite 整表重建把 org_id 改为 TEXT 亲和）。"""
+    from src.api import db_setup
+    conn = _mk_sqlite(tmp_path)
+    _bind(monkeypatch, conn)
+    db_setup._fn_normalize_org_domain_text()
+    decl = next((r[2] for r in conn.execute("PRAGMA table_info(runtime_credentials)")
+                 if r[1] == "org_id"), "")
+    assert decl.strip().upper() == "TEXT", decl
+    conn.close()
+
+
+class _ScriptedCursor:
+    """最小游标替身：按 SQL 内容返回预设行，并记录执行过的语句。
+
+    用于在没有 MySQL 的环境里验证「先判 TABLE_TYPE、再谈 ALTER」的分支顺序
+    （架构守护 A11/B-1 的常驻护栏；真库行为由 test_org_id_mysql_widen 的 gated
+    用例覆盖）。
+    """
+
+    def __init__(self, table_types, column_rows=None):
+        self.table_types = table_types       # {table_name: "VIEW"|"BASE TABLE"}
+        self.column_rows = column_rows or {}  # {(table, col): (IS_NULLABLE, DATA_TYPE, DEFAULT)}
+        self.sql = []
+        self.executed = []                    # [(规范化 sql, params)] 逐条记录（含 UPSERT 参数）
+        self.rowcount = 0
+        self._rows = []
+
+    def execute(self, sql, params=None):
+        norm = " ".join(sql.split())
+        self.sql.append(norm)
+        self.executed.append((norm, params))
+        self._rows = []
+        if "FROM information_schema.TABLES" in sql:
+            t = (params or (None,))[0]
+            tt = self.table_types.get(t)
+            self._rows = [(tt,)] if tt else []
+        elif "information_schema.columns" in sql and "IS_NULLABLE" in sql:
+            key = tuple((params or (None, None))[:2])
+            row = self.column_rows.get(key, ("YES", "int", "0"))
+            self._rows = [row]                      # 存量 int 列（可覆写）
+        elif "information_schema.columns" in sql:
+            self._rows = [("int",)]                 # 类型复检
+        return self
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return self._rows
+
+    def close(self):
+        pass
+
+
+class _ScriptedConn:
+    def __init__(self, cursor):
+        self._c = cursor
+
+    def cursor(self):
+        return self._c
+
+    def commit(self):
+        pass
+
+
+def test_cross_domain_view_never_reaches_alter(monkeypatch):
+    """非基表必须在 ALTER/UPDATE 之前被跳过（A11 护栏，无 MySQL 也能跑）。
+
+    三库拓扑下非 owner 域库里这张表是跨域可更新视图：ALTER 必 1346/1347，
+    UPDATE 会穿透改写别域基表。锚点是「TABLE_TYPE 探测发生在任何写语句之前」。
+    """
+    from src.api import db_setup
+
+    cur = _ScriptedCursor({t: "VIEW" for t in db_setup._ORG_ID_TABLES})
+    monkeypatch.setattr("src.kernel.mysql_compat.get_db_backend", lambda: "mysql")
+    monkeypatch.setattr(db_setup, "_destructive_ddl",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("视图路径不该走到 _destructive_ddl")))
+    assert db_setup._widen_mysql_org_ids(_ScriptedConn(cur)) == 0
+    assert cur.sql, "至少应探测过一次 TABLE_TYPE"
+    assert not [s for s in cur.sql if s.upper().startswith(("ALTER", "UPDATE"))], cur.sql
+
+
+def test_cleanup_gate_rejection_blocks_stamping(monkeypatch):
+    """危险 DDL 被 cleanup 门槛拦下时必须 raise（不盖章），不能静默放过（QA B4）。
+
+    三库蓝绿共存期：落后实例（自身版本 < meta.min_code_version）不该做 MODIFY；
+    但「跳过」必须让执行器不盖章，否则版本号被盖死、列永远停在 INT。
+    """
+    from src.api import db_setup
+
+    cur = _ScriptedCursor({t: "BASE TABLE" for t in db_setup._ORG_ID_TABLES})
+    monkeypatch.setattr("src.kernel.mysql_compat.get_db_backend", lambda: "mysql")
+    monkeypatch.setattr(db_setup, "_destructive_ddl", lambda *a, **k: False)
+    with pytest.raises(RuntimeError) as ei:
+        db_setup._widen_mysql_org_ids(_ScriptedConn(cur))
+    assert "cleanup 门槛" in str(ei.value)
+    assert not [s for s in cur.sql if s.upper().startswith(("ALTER", "UPDATE"))], cur.sql
+
+
+def test_mysql_backend_dispatches_to_widen(monkeypatch):
+    """MySQL 后端必须分流到 _widen_mysql_org_ids。
+
+    回归锚点：本函数早期只有 SQLite 实现（PRAGMA / sqlite_master），在 MySQL 上
+    直接 1064；升级库的 org_id 因此停在 INT，新代码写 '' 哨兵时报
+    (1366, "Incorrect integer value: '' for column 'org_id'")。这里只锁「分流」，
+    真类型转换由 tests/kernel/test_org_id_mysql_widen.py 在真 MySQL 上验。
+    """
+    from src.api import db_setup
+    from src.kernel import mysql_compat
+
+    seen = {}
+
+    def _fake_widen(conn=None):
+        seen["conn"] = conn
+        return 7
+
+    monkeypatch.setattr(mysql_compat, "get_db_backend", lambda: "mysql")
+    monkeypatch.setattr(db_setup, "_widen_mysql_org_ids", _fake_widen)
+    sentinel = object()
+    assert db_setup._normalize_org_domain_text(sentinel) == 7
+    assert seen["conn"] is sentinel
+
+
+def test_cleanup_gate_blocks_widen_before_ddl_and_skips_stamp(monkeypatch):
+    """行为锁：cleanup 门槛拦下 → raise → 本次不盖章（无真 MySQL 也能跑）。
+
+    蓝绿共存期的落后实例（自身版本 < meta.min_code_version）：`_destructive_ddl()`
+    的 False 分支必须让 `_widen_mysql_org_ids()` 在**任何写语句之前** raise，
+    执行器以「fn 抛错 = 不盖章」为约定吞掉异常——否则 INT 列被盖章掩埋，下次
+    启动不再重试，org_id 永远停在 INT（'' 哨兵报 1366，QA M3）。三个锚点：
+    ① raise 文案点名 cleanup 门槛/不盖章/min_code_version（区别于 B3 的数值列自查）；
+    ② 注册式迁移整链执行后盖章表无 202611190100（异常被 :4361-4364 吞掉）；
+    ③ 拦截前只有 information_schema 只读探测（先判门槛后 DDL）。
+    """
+    from src.api import db_setup
+    from src.api.db_setup import Migration
+
+    monkeypatch.setattr("src.kernel.mysql_compat.get_db_backend", lambda: "mysql")
+    # 走真实 _destructive_ddl 的 False 分支（门槛拦截），而非整体 stub 它
+    monkeypatch.setattr(db_setup, "_cleanup_gate_passed", lambda: False)
+
+    # ①+③ 拦截路径：首列（organization.id）探测为 INT 基表列 → 门槛拦下 → raise
+    cur = _ScriptedCursor(
+        {"organization": "BASE TABLE"},
+        {("organization", "id"): ("NO", "int", None)})
+    with pytest.raises(RuntimeError) as ei:
+        db_setup._widen_mysql_org_ids(_ScriptedConn(cur))
+    msg = str(ei.value)
+    assert "被 cleanup 门槛拦下" in msg
+    assert "不盖章" in msg
+    assert "min_code_version" in msg
+    assert "仍有数值列" not in msg
+    # ③ 拦截前只有只读探测：DDL（ALTER/MODIFY）与写语句零执行
+    assert cur.executed, "应先做 TABLE_TYPE/列型探测"
+    assert not [s for s, _ in cur.executed
+                if "ALTER" in s.upper() or "MODIFY" in s.upper()], cur.sql
+    for s, _ in cur.executed:
+        assert s.upper().startswith("SELECT") and "information_schema" in s.lower(), s
+
+    # ② 注册式迁移整链：同一 fn 抛错 → 执行器吞掉 → 盖章表无该版本
+    cur2 = _ScriptedCursor(
+        {"organization": "BASE TABLE"},
+        {("organization", "id"): ("NO", "int", None)})
+    conn2 = _ScriptedConn(cur2)
+    monkeypatch.setattr(db_setup, "db", conn2)
+    registry = [Migration(
+        version=db_setup._ORG_TEXT_MIGRATION_VERSION,
+        name="d105-org-domain-text-normalize",
+        kind="safe",
+        fn=db_setup._fn_normalize_org_domain_text,
+        domains=("mgmt", "runtime"),
+    )]
+    # 不抛错即为执行器吞掉异常；盖章 UPSERT（INSERT OR REPLACE INTO
+    # grape_t_schema_migrations）参数中不得出现该版本号
+    db_setup._run_migrations_with_conn(conn2, registry=registry, allow_legacy=False)
+    stamped = [p for s, p in cur2.executed
+               if s.upper().startswith("INSERT") and p
+               and db_setup._ORG_TEXT_MIGRATION_VERSION in p]
+    assert not stamped, f"门槛拦截后不得盖章: {stamped}"
+    assert not [s for s, _ in cur2.executed
+                if "ALTER" in s.upper() or "MODIFY" in s.upper()], cur2.sql

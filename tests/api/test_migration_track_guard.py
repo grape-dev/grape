@@ -50,21 +50,49 @@ def _legacy_track_calls() -> set:
     return names
 
 
+def _module_str_consts(tree) -> dict:
+    """模块级 `NAME = "literal"` 常量表（version 允许引用常量，见 QA I3）。"""
+    consts = {}
+    for n in tree.body:
+        if (isinstance(n, ast.Assign) and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Name)
+                and isinstance(n.value, ast.Constant)
+                and isinstance(n.value.value, str)):
+            consts[n.targets[0].id] = n.value.value
+    return consts
+
+
+def _resolve_static_str(node, consts):
+    """字面量或模块级常量名 → 字符串；解析不出返回 None（调用方判红）。"""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return consts.get(node.id)
+    return None
+
+
 def _registered_versions() -> list:
-    """提取所有 register_migration(...) 的 version（位置参数或关键字参数）。"""
+    """提取所有 register_migration(...) 的 version（位置参数或关键字参数）。
+
+    version 可以是字面量，也可以是模块级字符串常量（`_resolve_static_str` 解出）；
+    解不出的表达式返回 None，由 test_registered_versions_format 判红，避免守卫
+    静默漏看某条注册。
+    """
+    tree = _tree()
+    consts = _module_str_consts(tree)
     versions = []
-    for node in ast.walk(_tree()):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
         if (getattr(fn, "id", None) or getattr(fn, "attr", None)) != "register_migration":
             continue
         if node.args:
-            versions.append(ast.literal_eval(node.args[0]))
+            versions.append(_resolve_static_str(node.args[0], consts))
         else:
             for kw in node.keywords:
                 if kw.arg == "version":
-                    versions.append(ast.literal_eval(kw.value))
+                    versions.append(_resolve_static_str(kw.value, consts))
     return versions
 
 
@@ -106,3 +134,34 @@ def test_registered_versions_format():
     """版本号格式统一为 12 位数字（YYYYMMDD+4位序号），便于排序与人工核对。"""
     bad = [v for v in _registered_versions() if not (isinstance(v, str) and len(v) == 12 and v.isdigit())]
     assert not bad, f"迁移版本号格式不规范（应为 12 位数字）: {bad}"
+
+
+def test_org_domain_text_migration_registered_for_both_domains():
+    """D105 org 域字符串化必须注册，且 domains 同时覆盖 mgmt 与 runtime。
+
+    为什么锁死这条：该迁移的前身 `_normalize_org_domain_text` 只是 db_setup 里
+    一个「未注册」的函数，靠单测直接调用，MySQL 分支也缺，导致存量库 org_id
+    永远是 INT，新代码写 '' 哨兵时新建凭据报 1366。只登记一个域同样会复发：
+    mgmt 进程只跑 mgmt 库，runtime 库的 runtime_credentials/agent_tasks 等
+    8 张表没人转换。
+    """
+    found = []
+    for node in ast.walk(_tree()):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if (getattr(fn, "id", None) or getattr(fn, "attr", None)) != "register_migration":
+            continue
+        kws = {kw.arg: kw.value for kw in node.keywords}
+        nm = kws.get("name")
+        if not (isinstance(nm, ast.Constant) and nm.value == "d105-org-domain-text-normalize"):
+            continue
+        doms = kws.get("domains")
+        elts = getattr(doms, "elts", [])
+        found.append([e.value for e in elts if isinstance(e, ast.Constant)])
+
+    assert found, ("d105-org-domain-text-normalize 未注册：存量 MySQL 库的 org_id "
+                   "将保持 INT，新建 runtime 凭据报 1366")
+    assert len(found) == 1, f"同名迁移重复登记: {found}"
+    assert {"mgmt", "runtime"} <= set(found[0]), (
+        f"登记域不全: {found[0]}——缺哪个域，那个库的 org_id 就不会被转换")
