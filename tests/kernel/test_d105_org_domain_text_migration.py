@@ -329,27 +329,36 @@ class _ScriptedCursor:
     用例覆盖）。
     """
 
-    def __init__(self, table_types):
+    def __init__(self, table_types, column_rows=None):
         self.table_types = table_types       # {table_name: "VIEW"|"BASE TABLE"}
+        self.column_rows = column_rows or {}  # {(table, col): (IS_NULLABLE, DATA_TYPE, DEFAULT)}
         self.sql = []
+        self.executed = []                    # [(规范化 sql, params)] 逐条记录（含 UPSERT 参数）
         self.rowcount = 0
         self._rows = []
 
     def execute(self, sql, params=None):
-        self.sql.append(" ".join(sql.split()))
+        norm = " ".join(sql.split())
+        self.sql.append(norm)
+        self.executed.append((norm, params))
         self._rows = []
         if "FROM information_schema.TABLES" in sql:
             t = (params or (None,))[0]
             tt = self.table_types.get(t)
             self._rows = [(tt,)] if tt else []
         elif "information_schema.columns" in sql and "IS_NULLABLE" in sql:
-            self._rows = [("YES", "int", "0")]      # 存量 int 列
+            key = tuple((params or (None, None))[:2])
+            row = self.column_rows.get(key, ("YES", "int", "0"))
+            self._rows = [row]                      # 存量 int 列（可覆写）
         elif "information_schema.columns" in sql:
             self._rows = [("int",)]                 # 类型复检
         return self
 
     def fetchone(self):
         return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return self._rows
 
     def close(self):
         pass
@@ -361,6 +370,9 @@ class _ScriptedConn:
 
     def cursor(self):
         return self._c
+
+    def commit(self):
+        pass
 
 
 def test_cross_domain_view_never_reaches_alter(monkeypatch):
@@ -420,3 +432,63 @@ def test_mysql_backend_dispatches_to_widen(monkeypatch):
     sentinel = object()
     assert db_setup._normalize_org_domain_text(sentinel) == 7
     assert seen["conn"] is sentinel
+
+
+def test_cleanup_gate_blocks_widen_before_ddl_and_skips_stamp(monkeypatch):
+    """行为锁：cleanup 门槛拦下 → raise → 本次不盖章（无真 MySQL 也能跑）。
+
+    蓝绿共存期的落后实例（自身版本 < meta.min_code_version）：`_destructive_ddl()`
+    的 False 分支必须让 `_widen_mysql_org_ids()` 在**任何写语句之前** raise，
+    执行器以「fn 抛错 = 不盖章」为约定吞掉异常——否则 INT 列被盖章掩埋，下次
+    启动不再重试，org_id 永远停在 INT（'' 哨兵报 1366，QA M3）。三个锚点：
+    ① raise 文案点名 cleanup 门槛/不盖章/min_code_version（区别于 B3 的数值列自查）；
+    ② 注册式迁移整链执行后盖章表无 202611190100（异常被 :4361-4364 吞掉）；
+    ③ 拦截前只有 information_schema 只读探测（先判门槛后 DDL）。
+    """
+    from src.api import db_setup
+    from src.api.db_setup import Migration
+
+    monkeypatch.setattr("src.kernel.mysql_compat.get_db_backend", lambda: "mysql")
+    # 走真实 _destructive_ddl 的 False 分支（门槛拦截），而非整体 stub 它
+    monkeypatch.setattr(db_setup, "_cleanup_gate_passed", lambda: False)
+
+    # ①+③ 拦截路径：首列（organization.id）探测为 INT 基表列 → 门槛拦下 → raise
+    cur = _ScriptedCursor(
+        {"organization": "BASE TABLE"},
+        {("organization", "id"): ("NO", "int", None)})
+    with pytest.raises(RuntimeError) as ei:
+        db_setup._widen_mysql_org_ids(_ScriptedConn(cur))
+    msg = str(ei.value)
+    assert "被 cleanup 门槛拦下" in msg
+    assert "不盖章" in msg
+    assert "min_code_version" in msg
+    assert "仍有数值列" not in msg
+    # ③ 拦截前只有只读探测：DDL（ALTER/MODIFY）与写语句零执行
+    assert cur.executed, "应先做 TABLE_TYPE/列型探测"
+    assert not [s for s, _ in cur.executed
+                if "ALTER" in s.upper() or "MODIFY" in s.upper()], cur.sql
+    for s, _ in cur.executed:
+        assert s.upper().startswith("SELECT") and "information_schema" in s.lower(), s
+
+    # ② 注册式迁移整链：同一 fn 抛错 → 执行器吞掉 → 盖章表无该版本
+    cur2 = _ScriptedCursor(
+        {"organization": "BASE TABLE"},
+        {("organization", "id"): ("NO", "int", None)})
+    conn2 = _ScriptedConn(cur2)
+    monkeypatch.setattr(db_setup, "db", conn2)
+    registry = [Migration(
+        version=db_setup._ORG_TEXT_MIGRATION_VERSION,
+        name="d105-org-domain-text-normalize",
+        kind="safe",
+        fn=db_setup._fn_normalize_org_domain_text,
+        domains=("mgmt", "runtime"),
+    )]
+    # 不抛错即为执行器吞掉异常；盖章 UPSERT（INSERT OR REPLACE INTO
+    # grape_t_schema_migrations）参数中不得出现该版本号
+    db_setup._run_migrations_with_conn(conn2, registry=registry, allow_legacy=False)
+    stamped = [p for s, p in cur2.executed
+               if s.upper().startswith("INSERT") and p
+               and db_setup._ORG_TEXT_MIGRATION_VERSION in p]
+    assert not stamped, f"门槛拦截后不得盖章: {stamped}"
+    assert not [s for s, _ in cur2.executed
+                if "ALTER" in s.upper() or "MODIFY" in s.upper()], cur2.sql
