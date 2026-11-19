@@ -41,7 +41,7 @@ _DEFAULT_SECRET = ""
 
 # 密钥轮换（kid）配置
 # 从 configs/security.json 读取（通过 security_config 模块）
-from src.domains.mgmt.auth.security_config import get_jwt_secret_keys, get_jwt_kid_current, is_production
+from src.kernel.security_config import get_jwt_secret_keys, get_jwt_kid_current, is_production
 
 _log = logging.getLogger("devops-bot")
 _SECRET_KEYS_RAW = get_jwt_secret_keys()

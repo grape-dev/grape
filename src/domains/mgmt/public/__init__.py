@@ -6226,3 +6226,53 @@ def gitcode_req_form(method: str, url: str, token: str, data):
     if resp.status_code >= 400:
         raise _impl.UpstreamAPIError(method, url, resp.status_code, resp.text)
     return resp.json() if resp.text.strip() else {}
+
+# ── 共享依赖层原语：token 刷新 / 凭据探测 / 组织上下文（2026-11-18）─────────
+# src/api/deps.py 与 src/api/org_context.py 是 api 组装层的共享依赖，此前直接
+# `from src.domains.mgmt.user import db as user_db` / `...user.org_db import (...)`。
+# api 层 import 各域 router 属组装职责，但依赖注入层拿内部 db 模块不是 —— 改走 public。
+
+
+def any_repo_credential_for_repos(repo_keys) -> bool:
+    """给定仓库集合里是否存在任一可用凭据。"""
+    from src.domains.mgmt.user.db import any_repo_credential_for_repos as _impl
+
+    return _impl(repo_keys)
+
+
+def refresh_oauth_token(*args, **kwargs):
+    """刷新 OAuth token（转发，签名以内部实现为准）。"""
+    from src.domains.mgmt.user.db import refresh_oauth_token as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def refresh_gitcode_oauth_token(*args, **kwargs):
+    """刷新 GitCode OAuth token（转发，签名以内部实现为准）。"""
+    from src.domains.mgmt.user.db import refresh_gitcode_oauth_token as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def org_by_slug(*args, **kwargs):
+    from src.domains.mgmt.user.org_db import get_org_by_slug as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def member_role(*args, **kwargs):
+    from src.domains.mgmt.user.org_db import get_member_role as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def personal_org_id(*args, **kwargs):
+    from src.domains.mgmt.user.org_db import get_personal_org_id as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def org_member(*args, **kwargs):
+    from src.domains.mgmt.user.org_db import is_org_member as _impl
+
+    return _impl(*args, **kwargs)

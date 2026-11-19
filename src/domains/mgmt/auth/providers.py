@@ -810,7 +810,7 @@ def get_redirect_uri(request, provider: str = "") -> str:
 
     # fallback 2：从 Host header 构造（开发环境直连）
     # 生产环境强制 https，防止 X-Forwarded-Proto 伪造
-    from src.domains.mgmt.auth.security_config import is_production
+    from src.kernel.security_config import is_production
     if is_production():
         scheme = "https"
     else:

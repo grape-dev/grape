@@ -16,9 +16,13 @@ from __future__ import annotations
 
 from fastapi import Request, HTTPException
 
-from src.domains.mgmt.user.org_db import (
-    get_org_by_slug, get_member_role, get_personal_org_id, is_org_member,
-)
+# 组织上下文原语走 owner 域 public（原 import mgmt.user.org_db 内部模块）
+from src.domains.mgmt import public as _mgmt_org
+
+get_org_by_slug = _mgmt_org.org_by_slug
+get_member_role = _mgmt_org.member_role
+get_personal_org_id = _mgmt_org.personal_org_id
+is_org_member = _mgmt_org.org_member
 
 
 def resolve_org_context(request: Request, user_id: str) -> str:
