@@ -112,22 +112,18 @@ def _ensure_help_page_generated():
 
 @pytest.fixture(scope="function", autouse=True)
 def _reset_db_path():
-    """每个测试前重置 DEVOPS_DB_PATH，并丢弃已建立的连接。
+    """每个测试前重置 DEVOPS_DB_PATH。
 
     防止其他测试模块 import 时改 env 导致后续测试拿到错误路径。
 
-    历史上这里刻意"不重绑 session_manager.db 连接"——因为那时 db 在 import 期就建好，
-    73 个模块在 module level `from src.kernel.session_manager import db` 持有同一个对象，
-    重绑不能让它们看到新连接。session_manager 改为惰性代理后，db 本身不再持有连接，
-    reset_db_connection() 会让下一次访问按**当前** DEVOPS_DB_PATH 重新建连，
-    因此各模块持有的代理自动跟随，写读一致。
+    ⚠ 这里**不**调 reset_db_connection()。试过（2026-11-19）：在每个用例前重置连接
+    会让 test_knowledge_board.py 从 24 passed 掉到 20 failed——那些用例依赖 session
+    级 fixture 建立的那条连接上尚未 commit 的状态（账号行等），重置后读到的是库文件
+    里的旧内容。session_manager 的惰性连接只保证「import 不建连」，换库后的重连要由
+    真正重建库的地方显式触发，不能挂在逐用例 fixture 上。
     """
-    from src.kernel.session_manager import reset_db_connection
-
     _test_db = os.path.join(ROOT, "data", "test_sessions.db")
     os.environ["DEVOPS_DB_PATH"] = _test_db
-    os.environ.pop("DEVOPS_DB_BACKEND", None)
-    reset_db_connection()
     yield
 
 @pytest.fixture(autouse=True)
