@@ -25,7 +25,7 @@ from fastapi import HTTPException
 
 from src.api import issues_center as ics
 from src.api.db_setup import init_database
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 init_database()
 
@@ -34,6 +34,8 @@ REPO = "dedup"
 REPO_KEY = f"gitcode:{OWNER}/{REPO}"
 
 USER = {"id": 1, "username": "u3349", "auth_type": "internal", "token": "tok3349"}
+# OAuth/JWT 用户（无 preauth bot token）：命中「401 → 刷新用户 GitCode token → 重试」分支
+USER_OAUTH = {"id": 1, "username": "u3349", "auth_type": "jwt"}
 
 
 def _body(title, description="d", scene_id=""):
@@ -101,16 +103,27 @@ def test_ledger_ignores_vcs_deleted_row(monkeypatch):
 
 # ===== 2. 降级 VCS 探针（有界 + 显式超时）=====
 
-def test_empty_ledger_falls_back_to_bounded_vcs_probe(monkeypatch):
-    """仓库无台账 → 降级 VCS 探针，但页数有上限、每页带显式超时。"""
+def _patch_vcs_adapter(monkeypatch, pages):
+    """降级探针走 D36/S55 端口-适配器（VcsApiClient），按 gitlab 用例同款手法桩
+    `_request`（记录 path/timeout），并屏蔽短 TTL 标题索引缓存保证逐页真实翻页。"""
     calls = []
 
-    def _fake_req(method, url, token="", body=None, timeout=30):
-        calls.append((url, timeout))
-        return [{"number": 900 + i, "title": f"其他-{len(calls)}-{i}", "state": "open"}
-                for i in range(ics.DEDUP_FALLBACK_PAGE_SIZE)]
+    def _fake_request(self, method, path, data=None, form=False, timeout=30):
+        calls.append((path, timeout))
+        return pages[min(len(calls) - 1, len(pages) - 1)]
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient._request", _fake_request)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client._open_title_get", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client._open_title_put", lambda *a, **k: None)
+    return calls
+
+
+def test_empty_ledger_falls_back_to_bounded_vcs_probe(monkeypatch):
+    """仓库无台账 → 降级 VCS 探针，但页数有上限、每页带显式超时。"""
+    _full_page = [{"number": 900 + i, "title": f"其他-{i}", "state": "open"}
+                  for i in range(ics.DEDUP_FALLBACK_PAGE_SIZE)]
+    calls = _patch_vcs_adapter(monkeypatch, [_full_page] * (ics.DEDUP_FALLBACK_MAX_PAGES + 3))
+
     assert ics._find_open_issue_by_title("tok", OWNER, REPO, "没人用过的标题") is None
     assert len(calls) == ics.DEDUP_FALLBACK_MAX_PAGES, "翻页必须受固定上限约束"
     assert all(c[1] == ics.DEDUP_UPSTREAM_TIMEOUT for c in calls), "每页必须带显式超时"
@@ -119,10 +132,7 @@ def test_empty_ledger_falls_back_to_bounded_vcs_probe(monkeypatch):
 
 
 def test_vcs_probe_hit_returns_number(monkeypatch):
-    def _fake_req(method, url, token="", body=None, timeout=30):
-        return [{"number": 45, "title": "探针命中标题", "state": "open"}]
-
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    _patch_vcs_adapter(monkeypatch, [[{"number": 45, "title": "探针命中标题", "state": "open"}]])
     assert ics._find_open_issue_by_title("tok", OWNER, REPO, "探针命中标题") == 45
 
 
@@ -141,10 +151,11 @@ def test_ledger_failure_degrades_to_vcs(monkeypatch):
 def _patch_create_path(monkeypatch, post):
     monkeypatch.setattr(ics, "_attach_list", lambda *a, **k: [])
     monkeypatch.setattr(ics, "ensure_issue_task", lambda *a, **k: 1)
-    monkeypatch.setattr(ics, "_post_gitcode_issue", post)
-    monkeypatch.setattr("src.user.db.get_repo_scene", lambda *a, **k: "")
-    monkeypatch.setattr("src.outbound_ledger.record_outbound", lambda *a, **k: None)
-    monkeypatch.setattr("src.api.event_pipeline.run_pipeline",
+    # D35/S55 后建单统一入口是 _create_issue_unified（卡驱动），桩它即覆盖建单 POST。
+    monkeypatch.setattr(ics, "_create_issue_unified", post)
+    monkeypatch.setattr("src.domains.mgmt.public.get_repo_scene", lambda *a, **k: "")
+    monkeypatch.setattr("src.kernel.outbound_ledger.record_outbound", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.pipeline.event_pipeline.run_pipeline",
                         lambda *a, **k: {"seq": 0})
 
 
@@ -241,6 +252,66 @@ async def test_retry_after_timeout_is_idempotent(monkeypatch):
     assert len(posts) == 1, "重试不得产生第二次建单"
 
 
+async def test_refresh_retry_timeout_keeps_504_semantics(monkeypatch):
+    """QA 审查（#3349）：401 刷新后的建单重试若超时，语义须与首次建单一致——
+    走有界对账探针；探不到 → 504 + retryable + 幂等键（不得落入 502 通用分支）。"""
+    tokens = []
+
+    def _post(*a, **k):
+        tokens.append(a[0] if a else "")
+        if len(tokens) == 1:
+            raise RuntimeError("failed (401): token expired")
+        time.sleep(1.0)  # 刷新后的重试挂起 → 请求级放弃
+        return {"number": 999}
+
+    _patch_create_path(monkeypatch, _post)
+    monkeypatch.setattr("src.api.deps.get_user_token_for_repo", lambda *a, **k: "tok-user")
+    monkeypatch.setattr(ics, "_find_open_issue_by_title", lambda *a, **k: None)
+    monkeypatch.setattr(ics, "CREATE_UPSTREAM_TIMEOUT", 0.2)
+    monkeypatch.setattr(ics, "CREATE_HTTP_TIMEOUT", 0.1)
+    monkeypatch.setattr(ics, "_refresh_user_gitcode_token", lambda *a, **k: "tok-refreshed")
+
+    async def _no_reconcile(*a, **k):
+        return None
+
+    monkeypatch.setattr(ics, "_reconcile_created_issue", _no_reconcile)
+
+    with pytest.raises(HTTPException) as ei:
+        await ics.create_task_via_issue(_body("刷新后重试超时"), USER_OAUTH)
+
+    exc = ei.value
+    assert exc.status_code == 504, "刷新重试超时须走 504 upstream_timeout，而非 502"
+    assert exc.detail["error"] == "upstream_timeout"
+    assert exc.detail["retryable"] is True
+    assert exc.detail["idempotency_key"] == f"{OWNER}/{REPO}/刷新后重试超时"
+    assert len(tokens) == 2, "401 → 刷新一次 → 重试一次，不得再多"
+
+
+async def test_refresh_retry_timeout_reconciled_counts_as_created(monkeypatch):
+    """QA 审查（#3349）：刷新后的建单重试超时、但对账探到上游已建成 → 按建成返回。"""
+    tokens = []
+
+    def _post(*a, **k):
+        tokens.append(a[0] if a else "")
+        if len(tokens) == 1:
+            raise RuntimeError("failed (401): token expired")
+        raise TimeoutError("timed out")
+
+    _patch_create_path(monkeypatch, _post)
+    monkeypatch.setattr("src.api.deps.get_user_token_for_repo", lambda *a, **k: "tok-user")
+    monkeypatch.setattr(ics, "_find_open_issue_by_title", lambda *a, **k: None)
+    monkeypatch.setattr(ics, "_refresh_user_gitcode_token", lambda *a, **k: "tok-refreshed")
+
+    async def _reconcile(*a, **k):
+        return 99
+
+    monkeypatch.setattr(ics, "_reconcile_created_issue", _reconcile)
+
+    result = await ics.create_task_via_issue(_body("刷新后重试对账命中"), USER_OAUTH)
+    assert result["created"] is True
+    assert result["issue_number"] == 99
+
+
 # ===== 6. 静态守卫 =====
 
 def test_no_bare_sync_vcs_calls_in_create_task_via_issue():
@@ -255,7 +326,7 @@ def test_no_bare_sync_vcs_calls_in_create_task_via_issue():
 
 
 def test_create_route_delegates_to_async_flow():
-    from src.api.routes import issues as issues_route
+    from src.domains.runtime.routes import issues as issues_route
     src = inspect.getsource(issues_route.create_issue)
     # 对外唯一创建入口是薄委托层：不内联任何同步 VCS 调用，
     # 全部经 create_task_via_issue 的 to_thread/_run_upstream 路径。

@@ -3842,6 +3842,30 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         if _attach_md:
             _desc_with_attach += _attach_md
         # Issue #343 问题十一修复: 捕获建单 API 403/422，转成友好报错而非 500
+
+        async def _reconcile_or_504() -> dict:
+            # Issue #3349：超时/放弃 ≠ 一定没建成。先做一次有界对账探针：
+            # 命中 → 视作建成并继续正常建档（不重复建单）；探不到 → 504 + 幂等键。
+            # 首次建单与 401 刷新后的建单重试共用本路径，超时语义保持一致。
+            _reconciled_num = await _reconcile_created_issue(
+                api_token, owner, rname, body.title.strip(), provider=_provider)
+            if _reconciled_num is not None:
+                log.info(f"create_task: upstream timeout but issue #{_reconciled_num} exists "
+                         f"(reconciled) repo={repo_key} title={body.title.strip()[:80]}")
+                return {"number": _reconciled_num, "reconciled": True}
+            raise HTTPException(status_code=504, detail={
+                "code": 504,
+                "error": "upstream_timeout",
+                "message": f"创建 Issue 超时（{CREATE_UPSTREAM_TIMEOUT}s 内上游未返回），结果未知；"
+                           f"可用同一标题重试：重试会先按标题查重，若上游已建成将返回 409（含 issue_number），"
+                           f"不会重复建单。",
+                "retryable": True,
+                "idempotency_key": _idempotency_key,
+                "trace_id": _trace_id,
+                "verify_hint": f"可先 GET /api/issues/{owner}/{rname}?q={body.title.strip()} "
+                               f"确认上游是否已建成，再决定是否重试",
+            })
+
         try:
             # D35/S55：统一建单入口（卡驱动；gitee 自动正确，存量平台内置卡对齐）
             # Issue #3349：建单 POST 卸载到工作线程 + 请求级放弃阈值（25s），
@@ -3851,29 +3875,10 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 body.title.strip(), _desc_with_attach, assignee=assignee,
                 abandon_after=CREATE_UPSTREAM_TIMEOUT)
         except Exception as _create_err:
-            # Issue #3349：超时/放弃 ≠ 一定没建成。先做一次有界对账探针：
-            # 命中 → 视作建成并继续正常建档（不重复建单）；探不到 → 504 + 幂等键。
+            # Issue #3349：超时/放弃走有界对账探针：命中按建成返回；探不到 504 + 幂等键。
             if _is_upstream_timeout(_create_err):
-                _reconciled_num = await _reconcile_created_issue(
-                    api_token, owner, rname, body.title.strip(), provider=_provider)
-                if _reconciled_num is not None:
-                    log.info(f"create_task: upstream timeout but issue #{_reconciled_num} exists "
-                             f"(reconciled) repo={repo_key} title={body.title.strip()[:80]}")
-                    resp = {"number": _reconciled_num, "reconciled": True}
-                    _create_err = None
-            if _create_err is not None and _is_upstream_timeout(_create_err):
-                raise HTTPException(status_code=504, detail={
-                    "code": 504,
-                    "error": "upstream_timeout",
-                    "message": f"创建 Issue 超时（{CREATE_UPSTREAM_TIMEOUT}s 内上游未返回），结果未知；"
-                               f"可用同一标题重试：重试会先按标题查重，若上游已建成将返回 409（含 issue_number），"
-                               f"不会重复建单。",
-                    "retryable": True,
-                    "idempotency_key": _idempotency_key,
-                    "trace_id": _trace_id,
-                    "verify_hint": f"可先 GET /api/issues/{owner}/{rname}?q={body.title.strip()} "
-                                   f"确认上游是否已建成，再决定是否重试",
-                })
+                resp = await _reconcile_or_504()
+                _create_err = None
             _err_msg = str(_create_err)
             # 从 RuntimeError 消息提取 HTTP code（格式: "failed (403): ..."）
             import re as _re
@@ -3891,7 +3896,14 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                             assignee=assignee,
                             abandon_after=CREATE_UPSTREAM_TIMEOUT)
                     except Exception as _create_err2:
-                        _create_err = _create_err2
+                        # Issue #3349（QA 审查）：刷新后的建单重试超时与首次建单保持同一语义——
+                        # 走有界对账探针（命中按建成返回；探不到 504 + 幂等键），
+                        # 不再落入下方按错误码提取的 502 通用分支。
+                        if _is_upstream_timeout(_create_err2):
+                            resp = await _reconcile_or_504()
+                            _create_err = None
+                        else:
+                            _create_err = _create_err2
                         _err_msg = str(_create_err2)
                         _codes = _re.findall(r'\((\d{3})\)', _err_msg)
                         _http_code = int(_codes[0]) if _codes else 0
