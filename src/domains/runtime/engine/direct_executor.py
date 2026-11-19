@@ -323,28 +323,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     ws = get_agent_workdir(repo_key, agent_type, issue_id, _pr_num)
     os.makedirs(ws, exist_ok=True)
 
-    # Issue #3441：任务启动 fail-fast——workdir 中的 Issue 编号与任务 Issue 编号
-    # 必须一致，不一致立即中止并输出含双方编号的显式错误（不静默继续）。
-    try:
-        from src.domains.runtime.engine.worktree_guard import (
-            validate_workdir_issue_consistency,
-        )
-        _wd_ok, _wd_msg = validate_workdir_issue_consistency(ws, issue_id, agent_type)
-        if not _wd_ok:
-            log.error(f"direct exec: {_wd_msg} (seq={seq})")
-            if task_id:
-                try:
-                    import json as _json
-                    from src.domains.runtime.engine.service import update_task_status
-                    update_task_status(task_id, "failed",
-                                        errors=_json.dumps([_wd_msg][:500]))
-                except Exception as _tue:
-                    log.warning(f"direct exec: failed to update task {task_id} to failed: {_tue}")
-            _fail_event(seq, _wd_msg, diag={"code": "WORKDIR_ISSUE_MISMATCH",
-                                             "phase": "workdir_validate"})
-            return
-    except Exception as _wve:
-        log.warning(f"direct exec: workdir issue consistency check failed (skipped, seq={seq}): {_wve}")
+    # Issue #3441 说明：direct 路径不做 workdir-Issue 一致性启动校验。
+    # 此处 ws 即由本任务 issue_id 经 get_agent_workdir（与校验器同源）派生，
+    # 「校验 ws 与 issue_id 一致」恒真（失败分支不可达）；
+    # 真正存在错配风险的入口是 worker 派发（cwd 来自外部 DB 派发记录），
+    # 已由 dependency_check 第 6 项 fail-fast 硬拦截统一把关。
+    # 此前此处的自校验块已按 QA 审查意见移除（不可达防御 + 无测试覆盖）。
 
     # 读取上次的 oc_session_id（用于延续对话上下文）——Issue 级执行会话优先，回退 repo 级
     # 注意：有关联 Issue 时只用该 Issue 自己的会话（每 Issue 独立 session，见 vod-agent-hang-rootcause-fix.md 方案 A）；

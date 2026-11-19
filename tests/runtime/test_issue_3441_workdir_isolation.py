@@ -70,6 +70,18 @@ class TestExtractWorkdirIssueNum:
         assert extract_workdir_issue_num("/root/grape-workspaces/org/test/coding-agent") == ""
         assert extract_workdir_issue_num("") == ""
 
+    def test_pr_subscription_pseudo_id_segment(self):
+        # PR 订阅伪 id（get_agent_workdir 对 #pr_<PR>_<scene> 生成 issues/pr_.../<agent>）
+        assert extract_workdir_issue_num(
+            "/ws/gitcode/org/test/issues/pr_257_default/qa") == "pr_257_default"
+
+    def test_string_issue_segment(self):
+        # Gitee 等平台的字符串型 Issue 标识
+        assert extract_workdir_issue_num(
+            "/ws/gitee/org/test/issues/IABC123/coding") == "IABC123"
+        assert extract_workdir_issue_num(
+            "/ws/test/coding/issues/IABC123") == "IABC123"
+
 
 class TestValidateWorkdirIssueConsistency:
     def test_match_passes(self):
@@ -96,6 +108,45 @@ class TestValidateWorkdirIssueConsistency:
         ok, msg = validate_workdir_issue_consistency(
             "/ws/gitcode/org/test/coding-agent", "", "coding")
         assert ok is True and msg == ""
+        ok, msg = validate_workdir_issue_consistency(
+            "/ws/gitcode/org/test/coding-agent", "0", "coding")
+        assert ok is True and msg == ""
+
+    def test_pr_subscription_pseudo_id_consistent(self):
+        """PR 订阅伪 id：issues/pr_... 段与去 # 后的任务标识按字符串相等 → 放行。
+
+        回归守卫：旧实现按首段数字提取（pr_257_default → 257）且正则只认纯数字，
+        会把合法 PR 订阅任务误判为 mismatch，叠加 dependency_check 硬拦截导致
+        启动即失败。
+        """
+        ok, msg = validate_workdir_issue_consistency(
+            "/ws/gitcode/org/test/issues/pr_257_default/qa", "#pr_257_default", "qa")
+        assert ok is True and msg == ""
+
+    def test_pr_subscription_pseudo_id_not_collapsed_to_digits(self):
+        """伪 id 不得被数字提取折叠：pr_257_default ≠ issues/257（字符串比较）。"""
+        ok, msg = validate_workdir_issue_consistency(
+            "/ws/gitcode/org/test/issues/257/qa", "#pr_257_default", "qa")
+        assert ok is False
+        assert "257" in msg and "pr_257_default" in msg
+
+    def test_string_issue_id_consistent(self):
+        # Gitee 字符串型 Issue 标识：workdir 段与任务标识字符串相等 → 放行
+        ok, msg = validate_workdir_issue_consistency(
+            "/ws/gitee/org/test/issues/IABC123/coding", "IABC123", "coding")
+        assert ok is True and msg == ""
+
+    def test_string_issue_id_mismatch(self):
+        ok, msg = validate_workdir_issue_consistency(
+            "/ws/gitee/org/test/issues/IABC124/coding", "IABC123", "coding")
+        assert ok is False
+        assert "IABC124" in msg and "IABC123" in msg
+
+    def test_numeric_id_in_workdir_not_matched_by_string_task(self):
+        # 任务为字符串标识时不得从 workdir 数字段放行（防止反向数字折叠）
+        ok, msg = validate_workdir_issue_consistency(
+            "/ws/gitcode/org/test/issues/257/qa", "pr_257_default", "qa")
+        assert ok is False
 
 
 class TestDependencyCheckGate:
@@ -125,3 +176,29 @@ class TestDependencyCheckGate:
         task = _base_task(agent_type="chat",
                           cwd="/ws/gitcode/org/test/issues/1588/coding")
         validate_task_dependencies(task, "opencode-test")
+
+    def test_pr_subscription_worker_task_passes(self, monkeypatch):
+        """PR 订阅 worker 任务（伪 id cwd + 伪 id issue_id）不再被误判 mismatch。"""
+        monkeypatch.setattr(
+            "src.kernel.token_service.resolve_repo_config_level",
+            lambda rk: type("L", (), {"level": "repo"})())
+        task = _base_task(issue_id="#pr_257_default",
+                          cwd="/ws/gitcode/org/test/issues/pr_257_default/qa",
+                          agent_type="qa")
+        validate_task_dependencies(task, "opencode-test")
+
+    def test_pr_subscription_pseudo_id_mismatch_still_blocked(self, monkeypatch):
+        """伪 id 与 workdir 段不一致（真错配）仍 fail-fast 硬拦截。"""
+        monkeypatch.setattr(
+            "src.kernel.token_service.resolve_repo_config_level",
+            lambda rk: type("L", (), {"level": "repo"})())
+        task = _base_task(issue_id="#pr_257_default",
+                          cwd="/ws/gitcode/org/test/issues/pr_258_default/qa",
+                          agent_type="qa")
+        try:
+            validate_task_dependencies(task, "opencode-test")
+            raised = None
+        except DependencyError as e:
+            raised = str(e)
+        assert raised is not None
+        assert "pr_258_default" in raised and "pr_257_default" in raised

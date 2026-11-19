@@ -50,9 +50,11 @@ from src.kernel.config import log
 
 BASELINE_SUFFIX = ".fidelity.json"
 
-# Issue #3441：workdir 路径中的 Issue 编号段（issues/<N>，兼容新旧两种布局——
-# 新 {provider}/{owner}/{repo}/issues/{n}/{agent} 与过渡期 {repo}/{agent}/issues/{n}）。
-_WORKDIR_ISSUE_RE = re.compile(r"(?:^|[\\/])issues[\\/](\d+)(?:[\\/]|$)")
+# Issue #3441：workdir 路径中的 Issue 标识段（issues/<segment>，兼容新旧两种布局——
+# 新 {provider}/{owner}/{repo}/issues/{segment}/{agent} 与过渡期 {repo}/{agent}/issues/{segment}）。
+# segment 为目录名原样字符串：与 get_agent_workdir/_issue_num_from 同口径，允许非数字标识
+# （PR 订阅伪 id #pr_<PR>_<scene> 生成 issues/pr_257_default/<agent>、Gitee 字符串 Issue 标识）。
+_WORKDIR_ISSUE_RE = re.compile(r"(?:^|[\\/])issues[\\/]([^\\/]+)(?:[\\/]|$)")
 
 # 产物路径白名单：这些前缀下的文件是可清理产物（复测清理对象），不做指纹保真
 _ARTIFACT_DIR_PREFIXES = (
@@ -1111,11 +1113,13 @@ def parse_issue_workdir(path: str, workspace_dir: str = "") -> tuple:
 
 
 def extract_workdir_issue_num(path: str) -> str:
-    """从 workdir 路径提取 `issues/<N>` 段中的 Issue 编号（Issue #3441）。
+    """从 workdir 路径提取 `issues/<segment>` 段中的 Issue 标识（Issue #3441）。
 
-    兼容新布局 {provider}/{owner}/{repo}/issues/{n}/{agent} 与过渡期
-    {repo}/{agent}/issues/{n}（正则只锚 issues/<N> 段，两种布局均命中）。
-    无法解析出编号 → 返回 ''。
+    兼容新布局 {provider}/{owner}/{repo}/issues/{segment}/{agent} 与过渡期
+    {repo}/{agent}/issues/{segment}（正则只锚 issues/<segment> 段，两种布局均命中）。
+    segment 取目录名原样字符串（非纯数字，与 get_agent_workdir 派生口径一致：
+    PR 订阅伪 id `pr_257_default`、Gitee 字符串 Issue 标识等均可解析）。
+    无法解析出标识 → 返回 ''。
     """
     try:
         m = _WORKDIR_ISSUE_RE.search(str(path or ""))
@@ -1126,22 +1130,26 @@ def extract_workdir_issue_num(path: str) -> str:
 
 def validate_workdir_issue_consistency(cwd: str, issue_id: str,
                                        agent_type: str = "") -> tuple:
-    """任务启动 fail-fast 校验：workdir 中的 Issue 编号必须与任务 Issue 编号一致。
+    """任务启动 fail-fast 校验：workdir 中的 Issue 标识必须与任务 Issue 标识一致。
 
     Issue #3441：并发 coding 任务曾共用同一 workdir 导致 HEAD/分支/提交互相污染
     （#3383 的提交父链混入 #3350 内容）。本校验在任务启动/就绪入口拦截
     「workdir 与任务 Issue 不一致」的错配派发，不静默继续。
 
+    比较口径（与 event_pipeline._issue_num_from/get_agent_workdir 一致）：
+    - 任务标识 = issue_id 去掉前导 `#` 后的字符串（不提取数字，兼容
+      PR 订阅伪 id `pr_257_default` 与字符串 Issue 标识）；
+    - workdir 标识 = `issues/<segment>` 目录名原样字符串；
+    - 二者按字符串相等比较。
+
     返回 (ok: bool, message: str)：
-    - 任务无 Issue 编号（push/#0 等非 Issue 任务）→ (True, "") 不校验；
-    - workdir 解析不出 issues/<N> 编号 → 按不一致处理（fail-fast，不静默放行）；
-    - 编号不一致 → (False, <含双方编号的显式错误>)。
+    - 任务无 Issue 标识（push/#0 等非 Issue 任务）→ (True, "") 不校验；
+    - workdir 解析不出 issues/<segment> 标识 → 按不一致处理（fail-fast，不静默放行）；
+    - 标识不一致 → (False, <含双方标识的显式错误>)。
     """
-    task_issue = ""
-    m = re.search(r"#?(\d+)", str(issue_id or ""))
-    if m:
-        task_issue = m.group(1)
-    # 与 event_pipeline._issue_num_from 同口径：#0/0/空 视为无关联 Issue 任务，不校验
+    # 与 event_pipeline._issue_num_from 同口径：仅去前导 #，按字符串比较；
+    # #0/0/空 视为无关联 Issue 任务，不校验
+    task_issue = str(issue_id or "").strip().lstrip("#").strip()
     if not task_issue or task_issue == "0":
         return True, ""
     workdir_issue = extract_workdir_issue_num(cwd)
