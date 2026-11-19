@@ -11,18 +11,19 @@ PRIMARY KEY 保证互斥。
 也不再直连进程库（kernel 里查 runtime 表在三库拓扑下必然 1146）。
 
 来源设计文档：docs/new-version3/knowledge-id-and-auth-design.md §2.6
+
+访问路径：本模块不再函数内延迟 import `runtime.public`，而是经 kernel 端口 `pipeline`
+调用那四个抢锁/续期/释放/清理原语（端口候选表已含 runtime.public —— 该端口承载 runtime/
+mgmt 两域的基础设施原语，锁协议属同类基础设施）。符号名与签名不变，解析在调用点发生，
+未绑定时由 PortNotBound 在调用处 fail-fast，kernel 侧不出现任何 domains import。
 """
 import socket
 import secrets
 import time
 
+from src.kernel.ports import pipeline as _pipeline
+
 _holder = f"{socket.gethostname()}-{secrets.token_hex(4)}"
-
-
-def _lock_api():
-    """延迟导入 runtime owner 域（kernel 顶层 import domains 会被 check-arch R1 拦）。"""
-    from src.domains.runtime import public as runtime_public
-    return runtime_public
 
 
 def acquire_lock(lock_key: str, ttl: int = 60, holder: str = "") -> bool:
@@ -34,7 +35,7 @@ def acquire_lock(lock_key: str, ttl: int = 60, holder: str = "") -> bool:
         避免同进程内不同调用方互相误删（QA 标注链路依赖这个语义）。
     """
     _h = (holder or "").strip() or _holder
-    return _lock_api().acquire_distributed_lock(lock_key, _h, ttl, int(time.time()))
+    return _pipeline.acquire_distributed_lock(lock_key, _h, ttl, int(time.time()))
 
 
 def release_lock(lock_key: str, holder: str = ""):
@@ -43,7 +44,7 @@ def release_lock(lock_key: str, holder: str = ""):
     holder: 与 acquire_lock 传入值一致时，只删该 holder 的锁（per-call 隔离）。
     """
     _h = (holder or "").strip() or _holder
-    _lock_api().release_distributed_lock(lock_key, _h)
+    _pipeline.release_distributed_lock(lock_key, _h)
 
 
 def renew_lock(lock_key: str, ttl: int = 60, holder: str = "") -> bool:
@@ -56,7 +57,7 @@ def renew_lock(lock_key: str, ttl: int = 60, holder: str = "") -> bool:
         分支写租约按 ``task_id:进程holder`` 续期（Issue #2028），缺省仍用实例级标识。
     """
     _h = (holder or "").strip() or _holder
-    return _lock_api().renew_distributed_lock(lock_key, _h, ttl, int(time.time()))
+    return _pipeline.renew_distributed_lock(lock_key, _h, ttl, int(time.time()))
 
 
 def cleanup_expired_locks():
@@ -65,4 +66,4 @@ def cleanup_expired_locks():
     只删不属于当前实例的过期锁，避免误删正在续期的锁。
     清理任务是防表膨胀兜底，业务抢锁不依赖定时清理。
     """
-    _lock_api().cleanup_expired_distributed_locks(int(time.time()), _holder)
+    _pipeline.cleanup_expired_distributed_locks(int(time.time()), _holder)
