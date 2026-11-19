@@ -178,6 +178,40 @@ def test_credential_scope_wins_over_mirror_columns(scope_db):
     assert _reason(dropped, 1) == "scope"
 
 
+def test_missing_credential_table_falls_back_to_mirror_columns(scope_db):
+    """QA 架构守护 I-3：缺 runtime_credentials（旧库/精简 schema）时按镜像列继续判定，
+    候选集不得因 join 失败退化成空集。"""
+    from src.domains.runtime.engine.engine_select import selector_candidate_engines
+    _mk_engine(scope_db, 1, name="opencode", cred=21, scope="repo", owner=REPO)
+    scope_db.execute("DROP TABLE runtime_credentials")
+    matched, _dropped = selector_candidate_engines(SEL, "issue", repo_key=REPO, user_id=57)
+    assert _ids(matched) == [1]
+
+
+def test_pr_subscription_enqueue_paths_thread_user_id():
+    """PR 订阅 extra/redispatch 两条入队路径必须传 task user id（复审 finding）：
+
+    否则 gate 按 user_id=0 走 fail-open，user 档外档引擎会骗过零命中门禁并入队。
+    静态守护：两条路径的 gate 与任务行都用同一个 _sub_uid。
+    """
+    import ast
+    import os
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "src", "domains", "runtime",
+                        "pipeline", "event_pipeline.py")
+    src = open(os.path.abspath(path), encoding="utf-8").read()
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    for name in ("_dispatch_pr_subscription_extra", "_dispatch_pr_subscription_redispatch"):
+        fn = funcs.get(name)
+        assert fn is not None, f"{name} 不存在（函数改名需同步本守护）"
+        seg = ast.get_source_segment(src, fn) or ""
+        assert '_scene_pool_gate(scene_id, "qa", repo_key=repo_key, user_id=_sub_uid)' in seg, \
+            f"{name}: _scene_pool_gate 未传 user_id"
+        tail = seg.split("_enqueue_pipeline_task", 1)
+        assert len(tail) == 2 and "user_id=_sub_uid" in tail[1][:400], \
+            f"{name}: _enqueue_pipeline_task 未传 user_id（任务行与 gate 不同尺）"
+
+
 def test_preview_endpoint_marks_foreign_engines_scope(scope_db):
     """预览接口与候选集同尺：外档引擎 hit=False / reason=scope（徽章不再多报）。"""
     from src.domains.mgmt.routes.scenes import EngineSelectorPreviewBody, engine_selector_preview

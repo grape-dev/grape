@@ -263,7 +263,9 @@ def _selector_scope_blocks(m: dict, repo_key: str = "", user_id: int = 0) -> boo
     - credential_id=0（本机直连）→ 不设限（claim 侧不查凭据 scope）；
     - global → 不设限（可认领任意仓库的池任务）；
     - user → owner_id 必须等于请求 user_id（claim 侧 t.user_id = owner 账号）；
-    - repo → owner_id 的 owner/repo 必须等于当前 repo_key（去平台前缀比较）。
+    - repo → repo_key 必须落在 claim_by_tag 同款三精确候选集（owner_id /
+      gitcode:owner_id / github:owner_id）内——不做去前缀归一，避免跨平台同
+      owner/repo 被放宽成「候选命中、claim 永远认不到」。
     上下文缺失（user_id=0 / repo_key 空）或 owner_id 未落库时该维度不设限：调用方
     没给上下文就无法判定，宁放行不误杀（与既有 fail-open 容错口径一致）。
     """
