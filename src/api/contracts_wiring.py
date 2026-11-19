@@ -155,6 +155,9 @@ PORT_TARGETS: dict[str, tuple[str, ...]] = {
         "src.domains.runtime.pipeline.event_pipeline",
         "src.domains.runtime.engine.repogit",
         "src.domains.runtime.public",
+        # 代发内容台账（outbound_content_ledger）的 DDL/读写原语归 mgmt 域，
+        # 由 kernel/outbound_ledger 经 pipeline 端口调用；排最后，不影响既有符号解析。
+        "src.domains.mgmt.public",
     ),
 }
 
