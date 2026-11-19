@@ -131,7 +131,7 @@ def _expand_templates(templates: list[dict]) -> list[dict]:
             _scope = "global"
         if not _platform or _platform == "disabled":
             continue
-        # v3：引擎列表从 binding 表返回的 engines 字段取（已 JOIN grape_t_engine_template_binding）
+        # v3：引擎列表从 mgmt 的模板绑定查询返回值里取（已随模板一并查出，见 mgmt.public）
         engines_raw = t.get("engines", "[]")
         try:
             _engines = json.loads(engines_raw) if isinstance(engines_raw, str) else (engines_raw or [])

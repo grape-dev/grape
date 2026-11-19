@@ -148,7 +148,7 @@ def _require_credential_ctx(request: Request) -> CredentialContext:
     """[沙箱迁移] 完整凭证上下文（新调用方）。
 
     解析 Authorization: Bearer rta_*** → sha256 → 查 runtime_credentials(status=active)。
-    user scope 时 LEFT JOIN user_accounts 解析 owner_id 为数值 ID。
+    user scope 时关联 mgmt 的账号表解析 owner_id 为数值 ID（经 mgmt.public，不直查）。
     """
     token = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
     if not token.startswith("rta_"):
@@ -3679,7 +3679,7 @@ def runtime_cloud_runtimes(cred: CredentialContext = Depends(_require_credential
 
 @router.get("/whitelist", operation_id="runtime_whitelist",
             summary="Dispatch sandbox whitelist domains to worker",
-            description="Returns distinct domains from grape_t_engine_sandbox_whitelist table. Worker uses this to build NetworkProxy whitelist.")
+            description="Returns the distinct sandbox whitelist domains owned by mgmt (via mgmt.public). Worker uses this to build NetworkProxy whitelist.")
 def runtime_whitelist(cred: CredentialContext = Depends(_require_credential_ctx)):
     """[沙箱迁移] 下发沙箱白名单域名给 worker（worker 不直接查 DB）。"""
     from src.domains.mgmt import public as _mg_wl
