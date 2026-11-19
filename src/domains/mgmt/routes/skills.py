@@ -111,6 +111,17 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 # ===== Issue #3168 技能详情页：摘要 / 版本 / 文件清单 / 评论 =====
 _SUMMARY_MAX = 120
 _COMMENT_MAX = 1000
+# 相关技能池：只取热度前 N 作为共享标签/同类型打分的候选（全库技能 ~10² 量级，
+# 300 覆盖全部活跃技能且打分开销有界；detail 页只展示前 _RELATED_SKILL_COUNT 条）。
+_RELATED_POOL_SIZE = 300
+# 详情页「相关技能」最多展示 6 张卡片（两行 3 列网格，UI 设计值）。
+_RELATED_SKILL_COUNT = 6
+# 评论分页上限：防止一次拉全表（默认 20，UI「加载更多」逐页取）。
+_COMMENT_PAGE_MAX = 50
+# 概览 intro 槽位（#3227）：键为固定槽位名（scope/steps/products/constraints/review）
+# 加 5px 余量；单项文本 400 字对齐 _clean_summary 的概述截断口径（QA B2：数值须具名）。
+_INTRO_KEY_MAX = 32
+_INTRO_TEXT_MAX = 400
 
 
 def _clean_summary(text: str, limit: int = _SUMMARY_MAX) -> str:
@@ -168,6 +179,13 @@ def _record_skill_version(skill_id: int, version: str, change_note: str, user: d
         (change_note or "")[:1000],
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         str(user.get("username") or user.get("id") or "")[:64]))
+    # C3 非查询操作审计：版本行写入留痕（上传/更新/重传共用，detail 不落包内容）
+    from src.domains.mgmt.auth import audit as _skill_audit
+    _skill_audit.log_audit("skill_version_created",
+                           user_id=str(user.get("id") or ""),
+                           operator_id=str(user.get("id") or ""),
+                           detail={"skill_id": int(skill_id),
+                                   "version": (version or "1.0.0")[:64]})
 
 
 def _validate_manual_summary(summary: str) -> str:
@@ -182,12 +200,25 @@ def _validate_manual_summary(summary: str) -> str:
 
 
 def _require_skill_summary(summary: str) -> str:
-    """Issue #3202：摘要录入必填（≤50 字由 _clean_summary 截断保证）。"""
+    """Issue #3202：摘要录入必填（≤120 字由 _clean_summary 截断保证）。"""
     s = (summary or "").strip()
     if not s:
         raise HTTPException(status_code=400, detail={
-            "code": 400, "message": "摘要不能为空（必填，≤50 字）"})
+            "code": 400, "message": "摘要不能为空（必填，≤120 字）"})
     return _validate_manual_summary(s)
+
+
+def _resolve_skill_summary(summary, description: str) -> str:
+    """上传/更新入口的摘要解析（QA A14 契约兼容）。
+
+    - 缺省（Form 字段未携带 → None）：从 SKILL.md 的 description 推导（清洗截断），
+      存量 CLI / API 客户端（`grape skills upload` 不带 summary）不受影响；
+    - 显式空值 / 纯空白：按 #3202 必填规则 400；
+    - 显式值：走 #3202 校验（禁流程链符号 + 截断）。
+    """
+    if summary is None:
+        return _clean_summary(description)
+    return _require_skill_summary(summary)
 
 
 def _system_tag_names() -> set[str]:
@@ -398,7 +429,7 @@ def _related_skills(skill_id: int, scope: str, agent_type: str, tags: list[str],
             "category_id": int(r[9] or 0),
         }))
     ranked.sort(key=lambda x: (-x[0], -x[1], -x[2]))
-    return [x[3] for x in ranked[:6]]
+    return [x[3] for x in ranked[:_RELATED_SKILL_COUNT]]
 
 
 def _decorate_skill_detail(payload: dict, user: dict, scope: str, content: str) -> dict:
@@ -1039,7 +1070,7 @@ def list_skill_comments(skill_id: int, page: int = 1, page_size: int = 20,
     """技能用户评论（D11）：默认最新在前，每页 20 条。"""
     _ensure_skill_access(skill_id, user)
     page = max(1, int(page or 1))
-    page_size = min(50, max(1, int(page_size or 20)))
+    page_size = min(_COMMENT_PAGE_MAX, max(1, int(page_size or 20)))
     total = int((_rt_skills.read_one_any("skill_comment_count", (int(skill_id),)) or [0])[0] or 0)
     rows = _rt_skills.read_all_any(
         "skill_comments_page", (int(skill_id), page_size, (page - 1) * page_size))
@@ -1072,6 +1103,13 @@ def create_skill_comment(skill_id: int, body: dict,
     _rt_skills.exec_any(
         "skill_comment_insert",
         (cid, int(skill_id), str(user.get("id") or ""), str(name)[:128], content, now))
+    # C3 非查询操作审计：评论发布留痕（detail 只记标识与字数，不落评论原文）
+    from src.domains.mgmt.auth import audit as _skill_audit
+    _skill_audit.log_audit("skill_comment_posted",
+                           user_id=str(user.get("id") or ""),
+                           operator_id=str(user.get("id") or ""),
+                           detail={"skill_id": int(skill_id), "comment_id": cid,
+                                   "chars": len(content)})
     return {"comment": {"id": cid, "user_id": str(user.get("id") or ""),
                         "user_name": name, "content": content, "created_at": now}}
 
@@ -1081,7 +1119,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                        scope: str = Form("user"), repo: str = Form(""), agent_type: str = Form(""),
                        category_id: int = Form(0), cat_l1_id: int = Form(0),
                        cat_l2_id: int = Form(0), tags: str = Form(""),
-                       summary: str = Form(""), change_note: str = Form(""),
+                       summary: "str | None" = Form(None), change_note: str = Form(""),
                        clear_category: bool = Form(False)):
     """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。category_id 可选（分类ID，Issue #179）。"""
     # 直接调用（非 FastAPI 注入）时 Form 默认值不是 bool，避免误判为「清空分类」
@@ -1168,7 +1206,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         # 从 SKILL.md Front Matter 提取描述（上传后技能列表需要展示）
         fm = parse_skill_frontmatter(skill_dir)
         description = fm.get("description", "") or ""
-        summary_value = _require_skill_summary(summary)
+        summary_value = _resolve_skill_summary(summary, description)
         incoming_version = (fm.get("version") or "").strip()
 
         import shutil
@@ -1342,7 +1380,7 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
                              user: dict = Depends(require_no_session_token),
                              agent_type: str = Form(""), category_id: str = Form(""),
                              cat_l1_id: int = Form(0), cat_l2_id: int = Form(0),
-                             tags: str = Form(""), summary: str = Form(""),
+                             tags: str = Form(""), summary: "str | None" = Form(None),
                              change_note: str = Form(""),
                              clear_category: bool = Form(False)):
     """按 skill_id 上传 ZIP 覆盖更新既有技能（Issue #561：卡片直接更新，免删了重传）。
@@ -1461,7 +1499,7 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
 
         fm = parse_skill_frontmatter(skill_dir)
         description = fm.get("description", "") or ""
-        summary_value = _require_skill_summary(summary)
+        summary_value = _resolve_skill_summary(summary, description)
         incoming_version = (fm.get("version") or "").strip()
         target_version = _next_skill_version(int(skill_id), incoming_version)
 
@@ -1518,7 +1556,7 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 @router.patch("/{skill_id}", operation_id="skills_patch_meta",
-              summary="Update skill metadata without re-uploading the package",
+              summary="Skill metadata edit without re-uploading the package",
               description="Issue #3202: updates tags/summary/description/category/agent_type in place. official skills are read-only (403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.")
 def patch_skill_meta(skill_id: int, body: dict = Body(...),
                      user: dict = Depends(require_no_session_token)):
@@ -1625,11 +1663,11 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
                     "code": 400, "message": "intro 的键值必须均为字符串"})
             key = k.strip()
             val = v.strip()
-            if not key or len(key) > 32:
+            if not key or len(key) > _INTRO_KEY_MAX:
                 continue
-            if len(val) > 400:
+            if len(val) > _INTRO_TEXT_MAX:
                 raise HTTPException(status_code=400, detail={
-                    "code": 400, "message": "intro 单项文本不得超过 400 字"})
+                    "code": 400, "message": f"intro 单项文本不得超过 {_INTRO_TEXT_MAX} 字"})
             if val:
                 cleaned_intro[key] = val
         _rt_skills.exec_any("skill_intro_override_update", (
@@ -1639,6 +1677,13 @@ def patch_skill_meta(skill_id: int, body: dict = Body(...),
         new_desc, new_agent, int(new_category_id or 0), int(target_l1 or 0),
         int(target_l2 or 0), tags_json, new_summary,
         str(user.get("username") or user.get("id") or "")[:64], int(skill_id)))
+    # C3 非查询操作审计：元信息免传包更新留痕（detail 只记字段名，不记值）
+    from src.domains.mgmt.auth import audit as _skill_audit
+    _skill_audit.log_audit("skill_meta_patched",
+                           user_id=str(user.get("id") or ""),
+                           operator_id=str(user.get("id") or ""),
+                           detail={"skill_id": int(skill_id),
+                                   "fields": sorted(set(body) & allowed)})
 
     latest = _rt_skills.read_one_any("skill_version_latest", (int(skill_id),))
     updated = _rt_skills.read_one_any("skill_detail_extra_by_id", (int(skill_id),))

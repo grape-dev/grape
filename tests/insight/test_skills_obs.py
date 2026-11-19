@@ -265,6 +265,27 @@ class TestSkillsObs:
         assert row2[0] == object_key, "重复上传应覆盖同一固定 key"
         assert len(_obs_env.objects) == n_objects_after_first, "覆盖不产生新对象"
 
+    def test_upload_without_summary_derives_from_description(self, _obs_env):
+        """QA A14 契约兼容：不带 summary 的存量客户端（如 `grape skills upload`）上传
+        → 200，摘要从 SKILL.md 的 description 推导；显式空值才 400。"""
+        zip_bytes = _make_skill_zip("obs-no-summary", version="1.0.0")
+        r = client.post("/api/skills/upload",
+                        files={"file": ("obs-no-summary.zip", zip_bytes)},
+                        data={"agent_type": "chat"}, headers=_headers)
+        assert r.status_code == 200, r.text
+        with db_lock:
+            row = db.execute(
+                "SELECT summary FROM skill WHERE skill_name='obs-no-summary' AND scope='user'"
+            ).fetchone()
+        assert row and row[0] == "obs test skill", row  # _make_skill_zip 默认 description
+
+        # 显式空字符串 → 按 #3202 必填规则 400
+        r2 = client.post("/api/skills/upload",
+                         files={"file": ("obs-empty-summary.zip",
+                                         _make_skill_zip("obs-empty-summary", version="1.0.0"))},
+                         data={"agent_type": "chat", "summary": "   "}, headers=_headers)
+        assert r2.status_code == 400, r2.text
+
     def test_upload_obs_rejects_binary_executables(self, _obs_env):
         """安全策略（validator FORBIDDEN_EXTS）：二进制可执行文件（.so/.exe）仍被拒绝。"""
         zip_bytes = _make_skill_zip("obs-test-script", binary_extra="scripts/libevil.so")

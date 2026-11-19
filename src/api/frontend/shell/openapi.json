@@ -11621,7 +11621,7 @@
         "tags": [
           "skills"
         ],
-        "summary": "Update skill metadata without re-uploading the package",
+        "summary": "Skill metadata edit without re-uploading the package",
         "description": "Issue #3202: updates tags/summary/description/category/agent_type in place. official skills are read-only (403); user skills require ownership; repo skills require the caller to manage the repo. Refreshes updated_at without creating a new version row.",
         "operationId": "skills_patch_meta",
         "parameters": [
@@ -24458,9 +24458,15 @@
             "default": ""
           },
           "summary": {
-            "type": "string",
-            "title": "Summary",
-            "default": ""
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
           },
           "change_note": {
             "type": "string",
@@ -24522,9 +24528,15 @@
             "default": ""
           },
           "summary": {
-            "type": "string",
-            "title": "Summary",
-            "default": ""
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
           },
           "change_note": {
             "type": "string",

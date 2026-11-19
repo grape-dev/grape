@@ -255,6 +255,10 @@ def task_brief(task_id: int) -> tuple | None:
         return tuple(row) if row else None
 
 
+# 相关技能候选池大小：热度前 N 进打分池（与 mgmt 路由 _RELATED_POOL_SIZE 同值；
+# 全库技能 ~10² 量级，300 覆盖全部活跃技能。QA B2：裸数字须具名+来源）。
+_SKILL_RELATED_POOL_SIZE = 300
+
 _SKILL_DETAIL_COLS = ("id", "skill_name", "display_name", "description", "agent_type",
                       "skill_path", "file_path", "scope", "owner_id", "content_hash")
 
@@ -2812,10 +2816,12 @@ _ANY_QUERIES: dict[str, str] = {
     "skill_comment_insert": (
         "INSERT INTO skill_comment (id, skill_id, user_id, user_name, content, created_at) "
         "VALUES (?,?,?,?,?,?)"),
+    # 相关技能候选池：热度前 N（与 mgmt 路由 _RELATED_POOL_SIZE 同值；QA B2：数值须具名）
     "skills_related_pool": (
         "SELECT id, skill_name, display_name, description, agent_type, scope, owner_id, tags, "
         "like_count, category_id, summary FROM skill "
-        "WHERE is_active=1 AND id<>? ORDER BY like_count DESC, id DESC LIMIT 300"),
+        "WHERE is_active=1 AND id<>? ORDER BY like_count DESC, id DESC LIMIT "
+        + str(_SKILL_RELATED_POOL_SIZE) + ""),
     # agent_runtimes
     "runtimes_all": (
         "SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, "

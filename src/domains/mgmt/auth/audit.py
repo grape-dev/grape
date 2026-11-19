@@ -60,6 +60,9 @@ EVENT_TYPES = frozenset({
     "sandbox_path_deleted",         # admin 删除沙箱文件系统路径
     "sandbox_config_updated",       # admin 更新沙箱配置（detail 含 config_id/mode/degrade_policy）
     "issue_terminal_disposition",   # 终态载体单人工处置（Issue #2816：new_carrier/reassign/close，detail 含 repo_key/issue_id/action/结果，不含 secret）
+    "skill_comment_posted",          # 技能详情页发表评论（Issue #3168 D11：detail 含 skill_id/comment_id/字数，不落评论原文）
+    "skill_meta_patched",            # 技能元信息免传包更新（Issue #3202：detail 含 skill_id/更新字段名列表，不记值）
+    "skill_version_created",         # 技能版本行写入（Issue #3168：detail 含 skill_id/version，上传/更新/重传共用）
 })
 
 
