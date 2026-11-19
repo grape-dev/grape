@@ -38,7 +38,7 @@ In scope：
 Out of scope：
 - 平台库（`issue` 台账）本身的写入链路（`ensure_issue_task` 已具备）；
 - 网关 upstream timeout 配置（非本仓库）；
-- `clarify` / `resume` 等其它端点的同步出站（各自独立缺陷单跟踪）。
+- `clarify` / `resume` 等其它端点的同步出站（独立缺陷单 #3428 跟踪；`scenes.py` 体验前检查端点的同类存量缺陷已按 QA 审查意见随 PR #1769 一并修复）。
 
 ## 4. 方案
 

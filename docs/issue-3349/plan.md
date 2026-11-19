@@ -18,7 +18,7 @@ DEDUP_UPSTREAM_TIMEOUT = 8      # 查重探针单页超时（秒）
 DEDUP_FALLBACK_MAX_PAGES = 3    # 台账不可用时的降级扫描上限（成本有界）
 CREATE_HTTP_TIMEOUT = 15        # 建单 POST socket 超时（秒）
 CREATE_UPSTREAM_TIMEOUT = 25    # 建单请求级放弃阈值（秒，须小于网关 upstream timeout）
-RECONCILE_TIMEOUT = 5           # 建单超时后的对账探针超时（秒）
+CREATE_RECONCILE_TIMEOUT = 5           # 建单超时后的对账探针超时（秒）
 ```
 
 ## 台账查重 SQL
