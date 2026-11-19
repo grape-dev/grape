@@ -299,6 +299,30 @@ class TestReadonlyErrnoJudgement:
         assert repogit.readonly_errno_reason(str(tmp_path)) == ""
         assert repogit.readonly_errno_reason(os.path.join(str(tmp_path), "gone")) == ""
 
+    def test_readonly_base_writable_target_judged_readonly(self, tmp_path, monkeypatch):
+        """Issue #3482 复审 Required：#2245 只读基线 + 可写目标——base 命中 errno
+        即判只读（前缀区分 target/base），否则该场景会误走 refuse degrade。"""
+        import errno as _errno
+        base = tmp_path / "base"
+        base.mkdir()
+        target = tmp_path / "ws" / "issues" / "1" / "coding"
+        target.mkdir(parents=True)
+        self._mock_errno(monkeypatch, str(base), _errno.EROFS)
+        reason = repogit.readonly_errno_reason(str(target), str(base))
+        assert reason.startswith("base:"), f"只读基线应标 base 命中: {reason}"
+        assert "EROFS" in reason
+
+    def test_readonly_target_prefix_distinguishes_location(self, tmp_path, monkeypatch):
+        import errno as _errno
+        self._mock_errno(monkeypatch, str(tmp_path), _errno.EACCES)
+        reason = repogit.readonly_errno_reason(str(tmp_path), "/no-such-base")
+        assert reason.startswith("target:") and "EACCES" in reason
+
+    def test_both_writable_not_readonly(self, tmp_path):
+        base = tmp_path / "b"
+        base.mkdir()
+        assert repogit.readonly_errno_reason(str(tmp_path), str(base)) == ""
+
 
 class TestWorkspaceMissingIsError:
     """Issue #3482（C）：`git dir not found` 不再降级只读。"""
