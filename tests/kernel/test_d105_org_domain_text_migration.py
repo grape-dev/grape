@@ -321,6 +321,62 @@ def test_registered_fn_stamps_after_real_conversion(tmp_path, monkeypatch):
     conn.close()
 
 
+class _ScriptedCursor:
+    """最小游标替身：按 SQL 内容返回预设行，并记录执行过的语句。
+
+    用于在没有 MySQL 的环境里验证「先判 TABLE_TYPE、再谈 ALTER」的分支顺序
+    （架构守护 A11/B-1 的常驻护栏；真库行为由 test_org_id_mysql_widen 的 gated
+    用例覆盖）。
+    """
+
+    def __init__(self, table_types):
+        self.table_types = table_types       # {table_name: "VIEW"|"BASE TABLE"}
+        self.sql = []
+        self.rowcount = 0
+        self._rows = []
+
+    def execute(self, sql, params=None):
+        self.sql.append(" ".join(sql.split()))
+        self._rows = []
+        if "FROM information_schema.TABLES" in sql:
+            t = (params or (None,))[0]
+            tt = self.table_types.get(t)
+            self._rows = [(tt,)] if tt else []
+        return self
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def close(self):
+        pass
+
+
+class _ScriptedConn:
+    def __init__(self, cursor):
+        self._c = cursor
+
+    def cursor(self):
+        return self._c
+
+
+def test_cross_domain_view_never_reaches_alter(monkeypatch):
+    """非基表必须在 ALTER/UPDATE 之前被跳过（A11 护栏，无 MySQL 也能跑）。
+
+    三库拓扑下非 owner 域库里这张表是跨域可更新视图：ALTER 必 1346/1347，
+    UPDATE 会穿透改写别域基表。锚点是「TABLE_TYPE 探测发生在任何写语句之前」。
+    """
+    from src.api import db_setup
+
+    cur = _ScriptedCursor({t: "VIEW" for t in db_setup._ORG_ID_TABLES})
+    monkeypatch.setattr("src.kernel.mysql_compat.get_db_backend", lambda: "mysql")
+    monkeypatch.setattr(db_setup, "_destructive_ddl",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("视图路径不该走到 _destructive_ddl")))
+    assert db_setup._widen_mysql_org_ids(_ScriptedConn(cur)) == 0
+    assert cur.sql, "至少应探测过一次 TABLE_TYPE"
+    assert not [s for s in cur.sql if s.upper().startswith(("ALTER", "UPDATE"))], cur.sql
+
+
 def test_mysql_backend_dispatches_to_widen(monkeypatch):
     """MySQL 后端必须分流到 _widen_mysql_org_ids。
 

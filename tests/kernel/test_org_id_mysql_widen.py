@@ -121,3 +121,34 @@ def test_widen_mysql_org_ids_converts_and_is_idempotent(scratch_db):
 
     # 幂等：第二遍零改动
     assert _widen_mysql_org_ids(scratch_db) == 0
+
+
+def test_cross_domain_view_is_skipped_not_written(scratch_db, monkeypatch):
+    """非 owner 库里同名的 org 表是跨域可更新视图 → 不 ALTER、不穿透过界写。
+
+    架构守护 A11/B-1 的咬合证明：视图列型是建视图时的快照，ALTER 必 1346/1347，
+    UPDATE 会改写 owner 基表。这里用同库视图模拟「本库非 owner」形态（代码只判
+    TABLE_TYPE，不依赖跨 schema）。
+    """
+    from src.api.db_setup import _org_columns_not_text, _widen_mysql_org_ids
+
+    # 本用例用裸 pymysql 连接，后端判定要显式指到 MySQL 分支（conftest 强制 sqlite）
+    monkeypatch.setattr("src.kernel.mysql_compat.get_db_backend", lambda: "mysql")
+
+    with scratch_db.cursor() as c:
+        # owner 侧基表（列仍是 int，模拟别域尚未转换）
+        c.execute("CREATE TABLE base_events (id INT PRIMARY KEY, org_id INT)")
+        c.execute("INSERT INTO base_events (id, org_id) VALUES (1, 0)")
+        c.execute("CREATE VIEW events AS SELECT id, org_id FROM base_events")
+
+    altered = _widen_mysql_org_ids(scratch_db)
+    # fixture 的 5 列基表照转；events 是视图 → 不计入
+    assert altered == 5, f"视图不应计入 altered，实际 {altered}"
+
+    with scratch_db.cursor() as c:
+        c.execute("SELECT org_id FROM base_events")
+        assert c.fetchall() == ((0,),)          # 没有穿透改写 owner 基表
+    assert "org_id" in _col_types(scratch_db, "events")   # 视图仍在、未被 ALTER
+
+    # 视图列快照不得把「转换未完成」判出来（否则非 owner 域永不盖章）
+    assert not [b for b in _org_columns_not_text(scratch_db) if b[0] == "events"]

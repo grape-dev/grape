@@ -2250,7 +2250,21 @@ def _widen_mysql_org_ids(conn=None) -> int:
     conn = conn if conn is not None else _pdb
     c = conn.cursor()
     altered = 0
+    rewritten = 0
+    view_tables = []
     for table, col, target in _ORG_MYSQL_TEXT_COLS:
+        # 本库不是该表 owner 时，拿到的是**跨域可更新视图**（三库拓扑）：ALTER 必
+        # 1346/1347，UPDATE 会穿透改写别域基表（架构守护 A11/B-1）。视图列是建
+        # 视图时的快照，转换只能由 owner 域进程做——本域跳过，owner 域跑同一条
+        # 登记迁移并盖章；视图可见性由 scripts/sync_domain_views.py 重建保证。
+        c.execute("SELECT TABLE_TYPE FROM information_schema.TABLES "
+                  "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s", (table,))
+        trow = c.fetchone()
+        if not trow:
+            continue                      # 表不在本库（三库分域的另一半），跳过
+        if str(trow[0]).upper() != "BASE TABLE":
+            view_tables.append(table)
+            continue
         c.execute(
             "SELECT IS_NULLABLE, DATA_TYPE, COLUMN_DEFAULT FROM information_schema.columns "
             "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
@@ -2273,12 +2287,34 @@ def _widen_mysql_org_ids(conn=None) -> int:
                 raise RuntimeError(
                     f"org text normalize: ALTER {table}.{col} 被 cleanup 门槛拦下"
                     "（本实例版本落后于 meta.min_code_version）→ 本次不盖章，下版本重试")
+            # _destructive_ddl 对非 MDL 异常只记 WARNING 仍返回 True（fail-open），
+            # 所以「转换成功」必须自己复检列型，否则日志与计数会把失败读成成功（QA I1）。
+            c.execute(
+                "SELECT DATA_TYPE FROM information_schema.columns "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+                (table, col))
+            got = str((c.fetchone() or [""])[0] or "").lower()
+            if got not in ("char", "varchar", "tinytext", "text", "mediumtext", "longtext"):
+                log.error(f"org text normalize (MySQL): {table}.{col} ALTER 后仍为 {got or '?'}")
+                raise RuntimeError(
+                    f"org text normalize: {table}.{col} MODIFY 未生效（仍为 {got or '?'}）"
+                    "→ 本次不盖章，下次启动重试")
             altered += 1
             log.info(f"org text normalize (MySQL): {table}.{col} {dtype} -> {target}{suffix}")
-        # 哨兵统一：0 / '0' / NULL → ''（与 SQLite 分支 #③ 同口径）
-        c.execute(f"UPDATE {table} SET {col}='' WHERE {col}='0' OR {col} IS NULL")
+        # 哨兵统一：0 / '0' / NULL → ''（与 SQLite 分支 #③ 同口径）。
+        # 先 LIMIT 1 探一下再写：已字符串化的库不让每次启动都全表 UPDATE 一遍
+        # （events / agent_tasks 是大表，QA I3）。
+        c.execute(f"SELECT 1 FROM {table} WHERE {col}='0' OR {col} IS NULL LIMIT 1")
+        if c.fetchone():
+            c.execute(f"UPDATE {table} SET {col}='' WHERE {col}='0' OR {col} IS NULL")
+            rewritten += getattr(c, "rowcount", 0) or 0
+    if view_tables:
+        log.info("org text normalize (MySQL): 跳过 %d 张跨域视图 %s（非本域 owner，"
+                 "由 owner 域进程转换，视图侧需 sync_domain_views 重建）",
+                 len(set(view_tables)), sorted(set(view_tables)))
     if altered:
-        log.info(f"org text normalize (MySQL): {altered} column(s) widened")
+        log.info(f"org text normalize (MySQL): {altered} column(s) widened, "
+                 f"{rewritten} sentinel row(s) rewritten")
     return altered
 
 
@@ -2299,9 +2335,14 @@ def _org_columns_not_text(conn=None) -> list:
     bad = []
     if get_db_backend() == "mysql":
         for table, col, _target in _ORG_MYSQL_TEXT_COLS:
+            # 只统计基表：非 owner 域库里这张表是跨域视图，列型是建视图时的快照，
+            # 拿它判「转换未生效」会让该域永不盖章（在别域已转换的情况下反复 ERROR）。
             c.execute(
-                "SELECT DATA_TYPE FROM information_schema.columns "
-                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+                "SELECT c.DATA_TYPE FROM information_schema.columns c "
+                "JOIN information_schema.tables t "
+                "  ON t.TABLE_SCHEMA=c.TABLE_SCHEMA AND t.TABLE_NAME=c.TABLE_NAME "
+                "WHERE c.TABLE_SCHEMA=DATABASE() AND c.TABLE_NAME=%s "
+                "  AND c.COLUMN_NAME=%s AND t.TABLE_TYPE='BASE TABLE'",
                 (table, col))
             row = c.fetchone()
             if row and (row[0] or "").lower() not in (
