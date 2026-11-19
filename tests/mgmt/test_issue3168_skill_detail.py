@@ -95,6 +95,6 @@ def test_skill_detail_tables_registered_and_migrations_are_runtime():
     for n in ("skill_version", "skill_file", "skill_comment"):
         assert n in names
     versions = {m.version: m for m in db_setup._MIGRATIONS}
-    assert versions["202611181201"].domains == ("runtime",)
-    assert versions["202611181202"].domains == ("runtime",)
-    assert versions["202611181202"].kind == "backfill"
+    assert versions["202611181301"].domains == ("runtime",)
+    assert versions["202611181302"].domains == ("runtime",)
+    assert versions["202611181302"].kind == "backfill"

@@ -9910,8 +9910,8 @@ def _fn_issue3168_skill_detail_schema() -> None:
 register_migration(
     # [rebase 到 arch-weekly-11 改号] 原用 202611180001/002，基线已分别被
     # ensure-cloud-sandboxes-in-runtime / ensure-runtime-type-info-columns 占用（撞号守卫），
-    # 顺延到 202611181201/202611181202。
-    version="202611181201",
+    # 顺延到 202611181301/202611181302。
+    version="202611181301",
     name="issue3168-skill-detail-schema",
     kind="safe",
     domains=("runtime",),
@@ -9933,7 +9933,7 @@ def _fn_issue3168_official_version_backfill() -> None:
                 "AND NOT EXISTS (SELECT 1 FROM skill_version v WHERE v.skill_id=s.id)"
             ).fetchall()
         except Exception as exc:  # noqa: BLE001 - 表不存在时由 schema 迁移负责
-            log.warning(f"202611181202 official version backfill skipped: {exc}")
+            log.warning(f"202611181302 official version backfill skipped: {exc}")
             return
         for sid, created_at in rows or []:
             try:
@@ -9944,12 +9944,12 @@ def _fn_issue3168_official_version_backfill() -> None:
                     (uuid7_str(), int(sid), "1.0.0", "存量官方技能版本补录",
                      created_at or "", "system"))
             except Exception as exc:  # noqa: BLE001 - 单行失败不阻断
-                log.warning(f"202611181202 version row failed for skill {sid}: {exc}")
+                log.warning(f"202611181302 version row failed for skill {sid}: {exc}")
         db.commit()
 
 
 register_migration(
-    version="202611181202",
+    version="202611181302",
     name="issue3168-official-skill-version-backfill",
     kind="backfill",
     domains=("runtime",),
@@ -10035,8 +10035,8 @@ def _fn_skill_intro_override_schema() -> None:
 
 register_migration(
     # [rebase 到 arch-weekly-11 改号] 原用 202611180003，基线已被
-    # issue2761-skill-classification-columns 占用（撞号守卫），顺延到 202611181203。
-    version="202611181203",
+    # issue2761-skill-classification-columns 占用（撞号守卫），顺延到 202611181303。
+    version="202611181303",
     name="skill-intro-override-schema",
     kind="safe",
     domains=("runtime",),
