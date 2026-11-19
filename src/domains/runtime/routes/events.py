@@ -1213,7 +1213,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
                 # 本机 direct 引擎 → 直接触发执行（复用原行，task_id 不变）
                 if _cid == 0:
                     try:
-                        from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
+                        from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name as _en
                         from src.kernel.repo_key import from_repo_key as _frk
                         _be = _en(_orig_rid) or ""
@@ -1288,7 +1288,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
         # 本机 direct 引擎 → 触发直接执行
         if _is_local_direct and _new_task_id:
             try:
-                from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
+                from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
                 from src.domains.runtime.engine.engine_select import engine_name as _en
                 from src.kernel.repo_key import from_repo_key as _frk
                 _be = _en(_orig_rid) or ""
@@ -1430,7 +1430,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
                     from src.domains.runtime.engine.service import runtime_credential_id
                     _cid = runtime_credential_id(_new_rid) or 0
                     if _cid == 0:
-                        from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
+                        from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name
                         from src.kernel.repo_key import from_repo_key as _frk2
                         _be = engine_name(_new_rid) or ""
@@ -1589,7 +1589,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
             try:
                 from src.domains.runtime.engine.service import runtime_credential_id
                 if (runtime_credential_id(_q_rid) or 0) == 0:
-                    from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
+                    from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
                     from src.domains.runtime.engine.engine_select import engine_name as _en
                     from src.kernel.repo_key import from_repo_key as _frk
                     _q_be = _en(_q_rid) or ""
@@ -1831,7 +1831,7 @@ def _redispatch_event(*, seq: int, local_only: bool = False, user: dict,
                 # 现贴证广播下 _rid=0 是合法结局（等绑定引擎认领），必须只入队不直跑。
                 if _is_local_direct and _new_task_id and _rid > 0:
                     try:
-                        from src.domains.runtime.pipeline.event_pipeline import _execute_agent, start_direct_agent
+                        from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
                         from src.domains.runtime.engine.engine_select import engine_name as _en
                         from src.kernel.repo_key import from_repo_key as _frk
                         _be = _en(_rid) or ""

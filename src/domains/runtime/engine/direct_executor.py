@@ -424,6 +424,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _repo_owner_env, _repo_name_env = _sor_env(exec_account or repository)
     env_extra["REPO_OWNER"] = _repo_owner_env
     env_extra["REPO_NAME"] = _repo_name_env
+    # base 侧 #3482-rebase 移植：env 供 agent 复述/脱敏定位（与 worker 口径一致）
+    env_extra["REPO_KEY"] = repo_key or repository
 
     # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     # Issue #427：PR 订阅 direct 派发（evt 带 _pr_sub_scene_id）同样按订阅场景注入

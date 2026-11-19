@@ -2739,8 +2739,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             "hint": "retry with the same idempotency_key, or verify via GET /api/a2a/status",
         }), _a2a_degraded)
     try:
-        from src.domains.runtime.pipeline.event_pipeline import _execute_agent
-        from src.kernel.session_manager import db_lock
+        from src.domains.runtime.engine.direct_executor import _execute_agent
+        from src.kernel.session_manager import db, db_lock
         backend = ""
         # payload.runtime_id 优先（接管场景：指定路由到本机 worker）
         runtime_id = int(payload.get("runtime_id", 0) or 0)
