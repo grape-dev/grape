@@ -65,7 +65,11 @@ class _Aggregate:
         return mod
 
     def __getattr__(self, name: str) -> Any:
-        if name.startswith("_"):
+        # 只拒双下划线（Python 内部协议，如 __deepcopy__/__wrapped__），
+        # **放行单下划线**：域的私有 helper（_fetch_gitcode_collaborators、
+        # _post_result_to_issue 等）在 kernel 侧确实需要，且没有公开等价物。
+        # 一律拒绝单下划线会把合法能力挡在端口外（实测卡住 3 处无法收敛）。
+        if name.startswith("__"):
             raise AttributeError(name)
         for label in self._names:
             try:
