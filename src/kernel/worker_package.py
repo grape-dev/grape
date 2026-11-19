@@ -122,10 +122,6 @@ MANIFEST = [
     "pyproject.toml",
     # Issue #666 (M4): 随包下发 codegraph 离线安装脚本（降级/离线环境的预装入口）
     "scripts/install-codegraph.sh",
-    # 2026-11-19：worker 上 src.kernel.repo_key 的平台前缀兜底要读 configs/platforms/*.json；
-    # 老包不带该目录，每进程一条 `platform catalog fallback failed: <安装目录>\configs\platforms`
-    # （Windows 实测）。卡文件很小，随包下发后兜底与主控同源同集。
-    "configs/platforms/",
 ]
 
 _build_lock = threading.Lock()
@@ -574,8 +570,13 @@ WHEEL_PLATFORMS = [
 # 重启后 marker 命中，缺 cubesandbox 的 wheels 被永久固化（线上 worker 实证：
 # src 代码已含 cubesandbox 后端，wheels 仍是无 cubesandbox 的 30 个旧包）。
 # 缓存键必须同时纳入 WORKER_DEPS 自身指纹 + 命中路径做依赖完备性校验，缺一个都重下。
+# 2026-11-19：fastapi 进清单——worker 任务路径历史上会经 mgmt.user.db →
+# runtime.public 触发 API 层导入，缺包时任务 `stream failed`。根因已改成
+# TYPE_CHECKING（运行期不再需要），此处仍随包下发：多一层保险，且与
+# pyproject [worker] extra 保持一致（parity 由测试守护）。
 WORKER_DEPS = ["aiohttp>=3.9", "bcrypt>=4.0", "click>=8.0", "httpx>=0.24",
-               "cubesandbox>=0.7", "requests>=2.31", "cryptography>=42"]
+               "cubesandbox>=0.7", "requests>=2.31", "cryptography>=42",
+               "fastapi>=0.110"]
 
 
 def _dep_base_name(dep: str) -> str:

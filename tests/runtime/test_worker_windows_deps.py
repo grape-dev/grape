@@ -107,8 +107,12 @@ def test_repo_key_reads_shipped_catalog(tmp_path, monkeypatch):
     assert got == {"gitcode", "github", "gitee"}, got
 
 
-def test_worker_package_ships_platform_catalog():
-    """MANIFEST 必须带上 configs/platforms/，否则 worker 端前缀兜底永远空集。"""
+def test_worker_package_does_not_ship_configs():
+    """设计约束：包内不得带 configs/（含主控 crypto/密钥样例）。
+
+    所以 worker 端「没有平台卡」是正常布局，repo_key 必须静默降级
+    （见上一条用例），而不是每进程打一条 WARNING。
+    """
     from src.kernel import worker_package
-    assert "configs/platforms/" in worker_package.MANIFEST
-    assert os.path.isdir(os.path.join(REPO, "configs", "platforms"))
+    assert not [m for m in worker_package.MANIFEST if m.startswith("configs")], \
+        "configs/ 不得进 worker 包（tests/runtime/test_worker_package.py 亦有硬约束）"
