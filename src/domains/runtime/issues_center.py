@@ -2406,6 +2406,22 @@ def _refresh_user_gitcode_token(user: dict) -> str:
         log.warning(f"create_task: refresh user gitcode token failed: {_e}")
         return ""
 
+def _knowledge_warm_budget() -> float:
+    """Issue #2132 B1 建单预热时延预算（秒），env KNOWLEDGE_WARM_BUDGET_SEC 可调。
+
+    非法/非正数回退默认 0.8s；预热是纯缓存优化，不能占满「建单 < 2s」的验收预算。
+    """
+    try:
+        _v = float(os.environ.get("KNOWLEDGE_WARM_BUDGET_SEC", "0.8"))
+    except (TypeError, ValueError):
+        return 0.8
+    return _v if _v > 0 else 0.8
+
+
+# 后台预热任务强引用（asyncio 只弱引用任务，不留引用会被 GC 掉）
+_knowledge_warm_tasks: set = set()
+
+
 async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user_or_api_key)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
 
@@ -2846,6 +2862,26 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             # 扫雷⑩ S3：create_task_via_issue 是 async 处理器，run_pipeline 同步
             # 全量执行会阻塞事件循环（建单卡顿最重处）——to_thread 卸载到线程池，
             # 语义保持同步等待完成（结果仍写入日志/返回链路）。
+            # Issue #2132 B1：预热知识缓存的时延预算——在预算内等缓存就绪（让本轮
+            # run_pipeline 的 collect_knowledge_files 命中缓存、少打 OBS），超预算就把
+            # 预热留在后台继续跑，建单返回不被对象存储读取拖住（预算 env
+            # KNOWLEDGE_WARM_BUDGET_SEC，默认 0.8s；预热失败仅告警，不影响建单主流程）。
+            import asyncio as _aio2132
+            try:
+                from src.domains.runtime.engine.service import warm_knowledge_cache
+                _warm = _aio2132.ensure_future(
+                    _aio2132.to_thread(warm_knowledge_cache, repo_key,
+                                       agent_type="", issue_id=f"{issue_num}"))
+                # 预算内等待；超时不取消任务（wait_for 的取消对 to_thread 只是丢弃等待，
+                # 线程继续跑；显式 shield 语义更直白，避免未来 warm 变协程后被真取消）
+                try:
+                    await _aio2132.wait_for(_aio2132.shield(_warm), timeout=_knowledge_warm_budget())
+                except _aio2132.TimeoutError:
+                    log.info("create_task: knowledge warm exceeded budget, continuing in background")
+                _knowledge_warm_tasks.add(_warm)
+                _warm.add_done_callback(_knowledge_warm_tasks.discard)
+            except Exception as _we:
+                log.debug(f"create_task: knowledge warm skipped: {_we}")
             _pipe_result = await asyncio.to_thread(
                 run_pipeline, _pipe_json.dumps(_pipe_payload).encode(), _pipe_headers,
                 account=repo_key, repo_key_override=repo_key)

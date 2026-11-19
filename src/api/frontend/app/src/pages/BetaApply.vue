@@ -491,9 +491,19 @@ onMounted(async () => {
   }
   const params = new URLSearchParams(window.location.search)
   const platform = params.get('platform')
-  const username = params.get('username')
+  const prefillTicket = params.get('prefill_ticket')
   if (platform) form.fAccountType = platform
-  if (username) form.fAccountName = username
+  // #3054 加固后用户名不再走 URL（XSS 面）；白名单拦截时服务端签发一次性
+  // 票据，这里凭票换 platform/username 恢复自动填充（单次消费、10 分钟 TTL，
+  // 失败静默降级为手动填写）。
+  if (prefillTicket) {
+    try {
+      const resp = await fetch('/api/auth/beta-apply/prefill?ticket=' + encodeURIComponent(prefillTicket))
+      const d = resp.ok ? await resp.json() : null
+      if (d && d.platform) form.fAccountType = d.platform
+      if (d && d.username) form.fAccountName = d.username
+    } catch (e) { /* 票据无效/过期：手动填写 */ }
+  }
 })
 
 function otherOr(value, otherValue, fallback) {

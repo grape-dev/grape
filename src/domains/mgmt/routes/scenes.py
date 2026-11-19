@@ -395,7 +395,8 @@ def pin_scene(scene_id: str, body: PinSceneRequest, request: Request,
             "is_pinned": 1 if body.pinned else 0}
 
 
-def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "") -> dict:
+def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "",
+                         user_id: int = 0) -> dict:
     """计算单个场景的引擎在线状态（Issue #501：从 with-pipeline 抽出，按需探测）。
 
     语义与原 with-pipeline 内联版完全一致：
@@ -433,7 +434,7 @@ def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "") -> 
                 # selector 节点：复用入队候选集查询（同一把尺子），红/黄分层
                 try:
                     _matched, _dropped = selector_candidate_engines(
-                        _sel, _tag, repo_key=repo_key)
+                        _sel, _tag, repo_key=repo_key, user_id=user_id)
                     if _matched:
                         pass  # 有健康命中 → 不标记
                     elif any(d.get("reason") in ("offline", "stale") for d in _dropped):
@@ -488,7 +489,8 @@ def get_scene_engine_status(scene_id: str, user: dict = Depends(require_no_sessi
     if cfg.get("fallback") or (cfg.get("scene_id") and cfg.get("scene_id") != scene_id):
         return {"scene_id": scene_id, "offline_nodes": [], "sre_unbound": False, "all_offline": False}
     cfg_nodes = cfg.get("nodes") or []
-    status = _scene_engine_status(scene_id, cfg_nodes, repo_key=repo_key)
+    status = _scene_engine_status(scene_id, cfg_nodes, repo_key=repo_key,
+                                  user_id=(user or {}).get("id", 0) or 0)
     status["scene_id"] = scene_id
     return status
 

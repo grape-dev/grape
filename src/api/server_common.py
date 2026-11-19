@@ -539,6 +539,15 @@ def attach_health(app: FastAPI, service_name: str = "server", readiness: bool = 
             result["runtimes"] = {"total": total, "online": online}
         except Exception as e:
             result["db_error"] = str(e)
+
+        # Issue #2132 B2/B3: knowledge read cache and truncation counters (hits /
+        # misses / evictions / truncated_files / truncated_batches / size / caps).
+        # Truncation is no longer visible only through warning logs.
+        try:
+            from src.api.knowledge import knowledge_cache_stats
+            result["knowledge_cache"] = knowledge_cache_stats()
+        except Exception as e:
+            result["knowledge_cache"] = {"error": str(e)}
         return result
 
     @app.get("/metrics")

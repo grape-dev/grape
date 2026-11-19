@@ -3227,7 +3227,7 @@ function openBetaApply() {
     showToast(translated && translated !== errorKey ? translated : decoded, 6000);
   }
 
-  function _showWhitelistGuidance(platform, username) {
+  function _showWhitelistGuidance(platform, prefillTicket) {
     // P0-1：platform 未转义时会被拼进 innerHTML 与 onclick 的 JS 字符串，未知 key 直接丢弃。
     if (!_isKnownOAuthProvider(platform)) return;
     var overlay = document.createElement('div');
@@ -3236,15 +3236,18 @@ function openBetaApply() {
     var platName = (typeof window.platformLabel === 'function' && window.platformLabel(platform)) || platform;
     // onclick 里的字符串：encodeURIComponent 不转义单引号，补 %27 防止跳出 JS 串
     var _platQ = encodeURIComponent(platform).replace(/'/g, '%27');
-    var _userQ = encodeURIComponent(username || '').replace(/'/g, '%27');
+    // #3054：第三方用户名不进 URL（XSS 面）；改带服务端一次性票据，申请页
+    // 凭票调 /auth/beta-apply/prefill 换 platform/username（自动填充恢复）。
+    // token_urlsafe 字符集 [A-Za-z0-9_-] 无 HTML/JS 元字符；仍防御性补 %27。
+    var _ticketQ = prefillTicket ? ('&prefill_ticket=' + encodeURIComponent(prefillTicket).replace(/'/g, '%27')) : '';
     overlay.innerHTML =
       '<div style="background:var(--c,#fff);border-radius:20px;padding:40px;text-align:center;width:400px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25)">'
         + '<div style="font-size:48px;margin-bottom:16px">🔒</div>'
         + '<h2 style="font-size:18px;font-weight:700;color:var(--t,#1d1d1f);margin-bottom:8px">' + I18N.t('app.login.whitelist_title') + '</h2>'
-        + '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:6px">' + I18N.t('app.login.whitelist_desc', {platform: _esc(platName), username: username ? ' <b>' + _esc(username) + '</b> ' : ' '}) + '</p>'
+        + '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:6px">' + I18N.t('app.login.whitelist_desc', {platform: _esc(platName), username: ' '}) + '</p>'
         + '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:24px">' + I18N.t('app.login.whitelist_apply_hint') + '</p>'
         + '<div style="display:flex;gap:8px;justify-content:center">'
-          + '<button onclick="window.location.href=\'/static/beta-apply.html?platform=' + _platQ + '&username=' + _userQ + '\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">' + I18N.t('app.login.whitelist_apply_btn') + '</button>'
+          + '<button onclick="window.location.href=\'/static/beta-apply.html?platform=' + _platQ + _ticketQ + '\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">' + I18N.t('app.login.whitelist_apply_btn') + '</button>'
           + '<button onclick="document.getElementById(\'whitelistModal\').remove()" style="padding:12px 24px;border:1px solid var(--b,#e3e6ee);border-radius:12px;background:transparent;color:var(--t,#1d1d1f);font-size:14px;font-weight:500;cursor:pointer">' + I18N.t('common.close') + '</button>'
         + '</div>'
       + '</div>';
