@@ -84,6 +84,20 @@ def _ensure_test_db():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _bind_kernel_ports(_ensure_test_db):
+    """把 kernel 端口绑定到真实域实现（生产在进程启动时做同一件事）。
+
+    src/kernel 只经 `src.kernel.ports.*` 触达域；未绑定即 PortNotBound。测试直接
+    驱动 kernel 函数、不走应用启动，故在测试库就绪后统一绑定一次。端口按属性惰性
+    解析，`patch("src.domains...")` 仍然生效。
+    """
+    from src.api.contracts_wiring import ensure_bound
+
+    ensure_bound()
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _ensure_help_page_generated():
     """测试前先把 help/ markdown 渲染为 src/api/frontend/shell/help.html。
 
