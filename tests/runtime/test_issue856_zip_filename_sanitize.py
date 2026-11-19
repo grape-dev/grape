@@ -37,11 +37,30 @@ CREATE TABLE IF NOT EXISTS skill (
     created_by VARCHAR(64) DEFAULT '',
     updated_by VARCHAR(64) DEFAULT '',
     is_active INTEGER DEFAULT 1,
+    is_featured INTEGER DEFAULT 0,
+    like_count INTEGER DEFAULT 0,
+    sub_scene TEXT DEFAULT '',
     category_id INTEGER DEFAULT 0,
+    cat_l1_id INTEGER DEFAULT 0,
+    cat_l2_id INTEGER DEFAULT 0,
+    tags TEXT DEFAULT '',
+    summary TEXT DEFAULT '',
+    download_count INTEGER DEFAULT 0,
+    intro_override TEXT DEFAULT '',
     content_hash VARCHAR(256) DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (skill_name, scope, owner_id)
+)
+"""
+_VERSION_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_skill_version (
+    id TEXT PRIMARY KEY,
+    skill_id INTEGER,
+    version TEXT,
+    change_note TEXT DEFAULT '',
+    uploaded_at TEXT DEFAULT '',
+    uploaded_by VARCHAR(64) DEFAULT ''
 )
 """
 
@@ -70,6 +89,7 @@ class _DB:
 def wdb(tmp_path, monkeypatch):
     conn = sqlite3_conn = __import__("sqlite3").connect(str(tmp_path / "t.db"))
     sqlite3_conn.execute(_SKILL_DDL)
+    conn.execute(_VERSION_DDL)
     sqlite3_conn.commit()
     db_obj = _DB(sqlite3_conn)
     # RLock（对齐生产 session_manager.db_lock）：log_audit 持锁内会再进
