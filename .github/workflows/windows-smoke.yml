@@ -28,7 +28,7 @@ jobs:
       - name: Windows prompt smoke tests (issue #351 + #452)
         env:
           GITCODE_API_TOKEN: test_token
-        run: python -m pytest tests/runtime/test_issue_351_windows_prompt.py tests/runtime/test_os_adapter.py tests/runtime/test_issue_452_windows_install.py tests/runtime/test_windows_euid_guard.py -v
+        run: python -m pytest tests/runtime/test_issue_351_windows_prompt.py tests/runtime/test_os_adapter.py tests/runtime/test_issue_452_windows_install.py tests/runtime/test_windows_euid_guard.py tests/runtime/test_worker_windows_deps.py -v
 
   linux-backend:
     runs-on: ubuntu-latest
