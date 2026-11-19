@@ -342,6 +342,10 @@ class _ScriptedCursor:
             t = (params or (None,))[0]
             tt = self.table_types.get(t)
             self._rows = [(tt,)] if tt else []
+        elif "information_schema.columns" in sql and "IS_NULLABLE" in sql:
+            self._rows = [("YES", "int", "0")]      # 存量 int 列
+        elif "information_schema.columns" in sql:
+            self._rows = [("int",)]                 # 类型复检
         return self
 
     def fetchone(self):
@@ -374,6 +378,23 @@ def test_cross_domain_view_never_reaches_alter(monkeypatch):
                             AssertionError("视图路径不该走到 _destructive_ddl")))
     assert db_setup._widen_mysql_org_ids(_ScriptedConn(cur)) == 0
     assert cur.sql, "至少应探测过一次 TABLE_TYPE"
+    assert not [s for s in cur.sql if s.upper().startswith(("ALTER", "UPDATE"))], cur.sql
+
+
+def test_cleanup_gate_rejection_blocks_stamping(monkeypatch):
+    """危险 DDL 被 cleanup 门槛拦下时必须 raise（不盖章），不能静默放过（QA B4）。
+
+    三库蓝绿共存期：落后实例（自身版本 < meta.min_code_version）不该做 MODIFY；
+    但「跳过」必须让执行器不盖章，否则版本号被盖死、列永远停在 INT。
+    """
+    from src.api import db_setup
+
+    cur = _ScriptedCursor({t: "BASE TABLE" for t in db_setup._ORG_ID_TABLES})
+    monkeypatch.setattr("src.kernel.mysql_compat.get_db_backend", lambda: "mysql")
+    monkeypatch.setattr(db_setup, "_destructive_ddl", lambda *a, **k: False)
+    with pytest.raises(RuntimeError) as ei:
+        db_setup._widen_mysql_org_ids(_ScriptedConn(cur))
+    assert "cleanup 门槛" in str(ei.value)
     assert not [s for s in cur.sql if s.upper().startswith(("ALTER", "UPDATE"))], cur.sql
 
 
