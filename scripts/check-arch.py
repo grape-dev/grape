@@ -12,7 +12,7 @@ Rules:
   R4  cross-domain imports (mgmt/runtime/insight)    (report-only; Phase 5
       must collapse them into src/domains/contracts)
   R5  no import cycles at module scope between
-      kernel/domains (hard; deferred in-function imports excluded)
+      kernel/domains (hard; includes deferred in-function imports)
   R6  kernel/domains must not import legacy top-level
       shim paths (src.config, src.api.jwt_utils, ...)             (hard)
   R7  removed legacy top-level paths must stay unimportable      (hard)
@@ -151,25 +151,23 @@ def scan_r8() -> list[tuple[str, str, str, int]]:
 
 
 # ── Whitelist: module -> {rule: reason} ────────────────────────────────────
-# Pre-existing deferred (function-level) imports kept working during Phase 1;
-# each entry carries the phase that will remove it.
+# Whitelist for pre-existing violations, each carrying the phase that removes it.
+# NOTE: R1/R2/R4 have always scanned deferred (in-function) imports via imports_of()
+# `all_imports` — the old 'deferred excluded' claim in this header was wrong and caused
+# 132 kernel->domains defer-imports to be mistaken for a checker blind spot.
 WHITELIST: dict[str, dict[str, str]] = {
     # R1/R2: kernel historically reaches up for lazy reads; Phase 5 contracts
     # will invert these dependencies.
     "src/kernel/config.py": {
-        "R1": "deferred meta get/set via mgmt.user.db; Phase 5 -> MgmtService",
         "R2": "deferred domain-agent routing lookup via src.api.routing; Phase 4/5",
     },
     "src/kernel/prompt_builder.py": {
-        "R1": "deferred reads from mgmt.user.db / runtime engine; Phase 5 contracts",
         "R2": "deferred reads from api session/event/issue stores; Phase 5 contracts",
     },
     "src/kernel/worker_package.py": {
-        "R1": "MANIFEST references domain code paths (packaging, not runtime import); Phase 5",
         "R2": "MANIFEST references src/api paths (packaging); Phase 5",
     },
     "src/kernel/token_resolver.py": {
-        "R1": "deferred token lookup via mgmt.user.db; Phase 5 -> MgmtService",
         "R2": "deferred token resolution via src.api.deps; Phase 5",
     },
     "src/kernel/repo_migrate.py": {
@@ -177,67 +175,12 @@ WHITELIST: dict[str, dict[str, str]] = {
         # 于是 managed_repos/meta/skill/user_repos 的 R8 计数被静默丢掉，等于豁免了 4 张表的
         # 跨域直查。合并为一个键，两类豁免同时生效。
         "managed_repos": 3, "meta": 2, "skill": 2, "user_repos": 4,
-        "R1": "deferred org/user lookups via mgmt.user.db; Phase 5",
     },  # P1：整体迁 mgmt 域（仓库维护；受 #2010 kernel 布局契约约束，需随契约一起改）
     "src/kernel/session_manager.py": {
-        "R1": "deferred feature flags via mgmt.user.db; Phase 5",
         "R2": "deferred timestamp helper via src.api.time_utils; Phase 5",
     },
-    "src/kernel/persistence/credential_usage_log.py": {
-        # 跨域基表直查已清零（foreign-refs 棘轮：grape_t_credential_usage_log 3 → 0）：
-        # 写语句与保留期清理都下沉到 runtime.public 的具名原语（insert_many / prune），
-        # kernel 只保留攒批、节流与后台 flush 线程调度 —— 因此这里的跨域依赖是
-        # 「调用 owner 原语」而不是「直接读写别人的表」，属允许形态。
-        "R1": {"targets": ["src.domains.runtime"],
-               "reason": "usage-log 表归 runtime 域；kernel 仅调度，SQL 由 runtime.public 持有"},
-    },
-    "src/kernel/repo_cleanup.py": {
-        "R1": "deferred repo state lookup via mgmt.user.db; Phase 5",
-    },
-    "src/kernel/lock.py": {
-        "R1": {"targets": ["src.domains.runtime"],
-              "reason": "deferred distributed-lock protocol via runtime.public "
-                        "(SQL moved to owner domain); due Phase 5 -> contracts"},
-    },
     "src/kernel/help_docs_sync.py": {
-        "R1": "deferred skill/user lookups via mgmt.user.db; Phase 5",
         "R2": "deferred app/openapi imports for help page generation; Phase 5",
-    },
-    "src/kernel/gsb/registry.py": {
-        "R1": {"targets": ["src.domains.mgmt"],
-              "reason": "deferred GSB registry SQL via mgmt.public "
-                        "(gsb_service_registry is mgmt-owned); due Phase 5 -> contracts"},
-    },
-    "src/kernel/outbound_ledger.py": {
-        "R1": {"targets": ["src.domains.mgmt", "src.domains.mgmt.public"],
-              "reason": "deferred outbound-ledger DDL/read-write primitives via mgmt.public "
-                        "(outbound_content_ledger is mgmt-owned); due Phase 5 -> contracts"},
-    },
-    "src/kernel/auth_sdk/jwt_utils.py": {
-        "R1": "deferred secret/credential keys via mgmt.auth.security_config; Phase 5",
-    },
-    "src/kernel/auth_sdk/auth_token.py": {
-        "R1": {"targets": ["src.domains.mgmt"],
-              "reason": "deferred token-table access via mgmt.public primitives "
-                        "(SQL already moved there); due Phase 5 -> contracts"},
-    },
-    # R1: multi-platform decoupling additions — all deferred (function-body) lookups;
-    # Phase 5 inverts them through src/domains/contracts.
-    "src/kernel/repo_key.py": {
-        "R1": {"targets": ["src.domains.runtime.vcs.platform_card"],
-              "reason": "deferred platform-card lookups; due Phase 5 -> contracts"},
-    },
-    "src/kernel/repo.py": {
-        "R1": {"targets": ["src.domains.runtime.vcs.platform_card"],
-              "reason": "deferred platform-card lookup; due Phase 5 -> contracts"},
-    },
-    "src/kernel/auth_sdk/channel_strategy.py": {
-        "R1": {"targets": ["src.domains.mgmt.auth.providers", "src.domains.mgmt.user"],
-              "reason": "deferred provider/strategy resolution; due Phase 5 -> contracts"},
-    },
-    "src/kernel/auth_sdk/provider_link.py": {
-        "R1": {"targets": ["src.domains.mgmt.auth.providers", "src.domains.runtime.vcs.platform_card"],
-              "reason": "deferred provider + vcs-card enumeration; due Phase 5 -> contracts"},
     },
     # R6: legacy shim imports due Phase 5 contracts. 两条旧 shim 条目（account_env / scenes）
     # 在实际导入清零后已删除——豁免面只保留仍存在的依赖，避免白名单漂移。
