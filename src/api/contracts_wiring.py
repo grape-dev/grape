@@ -139,6 +139,10 @@ PORT_TARGETS: dict[str, tuple[str, ...]] = {
         "src.domains.runtime.engine.instances",
         "src.domains.runtime.engine.service",
         "src.domains.runtime.public",
+        # 引擎解析的 id/名称映射原语（is_known_engine_name / get_runtime_id_by_name /
+        # ensure_default_backend / get_local_direct_runtime_id）只在该模块；排最后，
+        # 前面候选先命中，既有符号解析不变。
+        "src.domains.mgmt.user.db",
     ),
     "im": (
         "src.domains.runtime.im.feishu_async",

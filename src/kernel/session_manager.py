@@ -6,6 +6,11 @@ from datetime import datetime
 from src.kernel.config import log
 from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from src.api.time_utils import normalize_event_time
+# 能力端口：kernel 不 import src.domains；域实现在装配层 src/api/contracts_wiring.py 绑定。
+# 只在调用点解析（_accounts.x / _engines.x / _tokens.x），不在模块级取符号。
+from src.kernel.ports import accounts as _accounts
+from src.kernel.ports import engines as _engines
+from src.kernel.ports import tokens as _tokens
 # unified_user_mapping 归 mgmt 域：DDL / 启动引导 / 读写原语统一由该域 public lib 提供（P4 收口）
 from src.domains.mgmt import public as _mgmt_public
 # 会话主表 / 群绑定表 / 消息表归 runtime 域：SQL 与建表引导统一由该域 public lib 提供（P4 收口）
@@ -268,8 +273,7 @@ def get_feishu_open_id(gitcode_user, app_id=""):
     """
     if not gitcode_user:
         return None
-    from src.domains.mgmt.public import resolve_feishu_open_id
-    return _u2m_call(resolve_feishu_open_id, gitcode_user, app_id)
+    return _u2m_call(_accounts.resolve_feishu_open_id, gitcode_user, app_id)
 
 
 def bind_feishu_identity(user_id, open_id, feishu_name="", app_id=""):
@@ -281,14 +285,13 @@ def bind_feishu_identity(user_id, open_id, feishu_name="", app_id=""):
     if not user_id:
         return False
     # P4：unified_user_mapping 归 mgmt 域 —— 写语句在 mgmt public，本函数只做拓扑选择 + 提交
-    from src.domains.mgmt.public import bind_feishu_mapping_row
     _args = (user_id, open_id, feishu_name, app_id, datetime.now().isoformat())
     _conn = _u2m_conn()
     if _conn is None:
-        bind_feishu_mapping_row(*_args)
+        _accounts.bind_feishu_mapping_row(*_args)
         return True
     with db_lock:
-        bind_feishu_mapping_row(*_args, conn=_conn)
+        _accounts.bind_feishu_mapping_row(*_args, conn=_conn)
         db.commit()
         return True
 
@@ -321,15 +324,14 @@ def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_n
     if not gitcode_user:
         return False
     # P4：判定 + 写语句都在 mgmt public（sync_user_mapping），本函数只做拓扑选择与提交
-    from src.domains.mgmt.public import sync_user_mapping
     _args = (gitcode_user, open_id, feishu_name, gitcode_nickname, app_id, user_id,
              datetime.now().isoformat())
     _conn = _u2m_conn()
     if _conn is None:
-        _res = sync_user_mapping(*_args)
+        _res = _accounts.sync_user_mapping(*_args)
     else:
         with db_lock:
-            _res = sync_user_mapping(*_args, conn=_conn)
+            _res = _accounts.sync_user_mapping(*_args, conn=_conn)
             db.commit()
     if _res.get("action") == "skipped":
         # 无 user_id 也无已有记录：跳过（user_id 必须为真实 grape_accounts.id）
@@ -346,15 +348,13 @@ def set_feishu_open_id(repo_key, gitcode_user, open_id, feishu_name="", gitcode_
 
 def get_feishu_mapping(repo_key):
     """获取所有已知映射 {gitcode_user: {open_id, name, gitcode_nickname}}"""
-    from src.domains.mgmt.public import list_user_mappings
-    rows = _u2m_call(list_user_mappings)
+    rows = _u2m_call(_accounts.list_user_mappings)
     return {row[0] or row[1]: {"open_id": row[2], "name": row[3], "gitcode_nickname": row[4] or ""} for row in rows}
 
 
 def get_feishu_group_name_map(repo_key):
     """获取飞书群成员 {name: open_id}（从 unified_user_mapping 聚合得到）"""
-    from src.domains.mgmt.public import list_feishu_name_open_id_pairs
-    return {row[0]: row[1] for row in _u2m_call(list_feishu_name_open_id_pairs)}
+    return {row[0]: row[1] for row in _u2m_call(_accounts.list_feishu_name_open_id_pairs)}
 
 
 def get_auto_impl_enabled(repo_key):
@@ -639,12 +639,11 @@ def _chat_config_row_engine(runtime_id: int, engine_uid: str = "", c=None):
     uid 失效/未命中回退 runtime_id（id 兜底）。
     usable=False 覆盖既有的两种"按未配置处理"情形：引擎行已不存在、引擎名不是已知引擎。
     """
-    from src.domains.mgmt.user.db import is_known_engine_name
     if engine_uid:
         urow = _rt.read_one_any("agent_runtime_name_by_uid", (engine_uid,))
         if urow and urow[0]:
             _un = (urow[0] or "").strip().lower()
-            if is_known_engine_name(_un):
+            if _engines.is_known_engine_name(_un):
                 return urow[0], True
             log.warning(f"get_chat_config: engine_uid={engine_uid} 指向未知引擎 '{urow[0]}'，回退 runtime_id={runtime_id}")
         else:
@@ -657,7 +656,7 @@ def _chat_config_row_engine(runtime_id: int, engine_uid: str = "", c=None):
         log.warning(f"get_chat_config: runtime_id={runtime_id} 不存在（引擎行已删除），按未配置处理")
         return "", False
     _n = (brow[0] or "").strip().lower()
-    if not is_known_engine_name(_n):
+    if not _engines.is_known_engine_name(_n):
         # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
         log.warning(f"get_chat_config: runtime_id={runtime_id} 指向未知引擎 '{brow[0]}'，按未配置处理")
         return "", False
@@ -735,10 +734,9 @@ def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
     """
     if not backend and not runtime_id:
         try:
-            from src.domains.runtime.engine.engine_select import resolve_local_engine, engine_name
-            _rid = resolve_local_engine(user_id) or 0
+            _rid = _engines.resolve_local_engine(user_id) or 0
             if _rid:
-                backend = engine_name(_rid) or ""
+                backend = _engines.engine_name(_rid) or ""
                 runtime_id = _rid
         except Exception:
             pass
@@ -756,18 +754,15 @@ def _resolve_chat_runtime_id(backend: str) -> int:
     """
     if not backend:
         return 0
-    from src.domains.mgmt.user.db import ensure_default_backend, get_runtime_id_by_name, get_local_direct_runtime_id
-    from src.domains.runtime.engine.instances import resolve_instance_id, scope_of_runtime
-    _rid = resolve_instance_id(backend, scope="user")
-    if _rid is not None and scope_of_runtime(_rid) == "user":
+    _rid = _engines.resolve_instance_id(backend, scope="user")
+    if _rid is not None and _engines.scope_of_runtime(_rid) == "user":
         return _rid
     if "-" not in backend:
-        from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_REMOTE
-        if get_execution_mode() != EXEC_MODE_REMOTE:
-            _local = get_local_direct_runtime_id(backend)
+        if _engines.get_execution_mode() != _engines.EXEC_MODE_REMOTE:
+            _local = _engines.get_local_direct_runtime_id(backend)
             if _local:
                 return _local
-    return get_runtime_id_by_name(backend) or ensure_default_backend(backend) or 0
+    return _engines.get_runtime_id_by_name(backend) or _engines.ensure_default_backend(backend) or 0
 
 
 def _chat_config_engine_uid_rt(runtime_id: int) -> str:
@@ -810,7 +805,6 @@ def set_chat_config(user_id: int, **kwargs):
         runtime_id = _resolve_chat_runtime_id(data.get("backend") or "")
     # skill name → skill_id（若未显式传 skill_id）
     if data.get("skill") and not data.get("skill_id"):
-        from src.domains.mgmt.user.db import resolve_skill_id
-        data["skill_id"] = resolve_skill_id(data["skill"], user_id=user_id)
+        data["skill_id"] = _tokens.resolve_skill_id(data["skill"], user_id=user_id)
     _write_chat_config_row(user_id, runtime_id=runtime_id, skill=data["skill"],
                            skill_id=data.get("skill_id", 0))
