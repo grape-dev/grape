@@ -471,10 +471,11 @@ def _migrate_add_org_id_columns():
     哨兵由 0 改为 ''：MySQL TEXT/VARCHAR 列与数值 0 比较会把非数字串强转 0
     （'abc'=0 为 TRUE），未归属行会被误匹配；空串在两种后端语义一致。
 
-    ⚠️ 本函数只补**缺失**列，不转换存量类型：老库里的 INT org_id 由注册式
-    迁移 `d105-org-domain-text-normalize` 负责 MODIFY 成字符串族。转换前这里
-    会打 ERROR 把实情列出来——历史实现只打印 "org_id columns ensured"，
-    升级库看上去绿色，实际新代码写 '' 哨兵时必报 1366。
+    ⚠️ 本函数属**冻结老轨**（`_run_all_migrations()`，存量库不执行），只补**缺失**
+    列，不转换存量类型：老库里的 INT org_id 由注册式迁移
+    `d105-org-domain-text-normalize`（version=_ORG_TEXT_MIGRATION_VERSION）
+    负责 MODIFY 成字符串族，并在转换后自查列类型（QA M2：检查必须挂在会真正
+    在存量库执行的注册式迁移上，不能挂这里）。
     """
     try:
         with db_lock:
@@ -485,25 +486,6 @@ def _migrate_add_org_id_columns():
             log.info("org_id columns ensured on all core tables")
     except Exception as e:
         log.warning(f"org_id column migration failed: {e}")
-        # 不 return：补列失败（如非属主库的视图/缺表）与类型自检是两件事，
-        # 自检必须照跑，否则「假绿」又会从这个口子溜回来。
-    try:
-        _bad = _org_columns_not_text()
-    except Exception as e:  # noqa: BLE001
-        log.warning(f"org_id type self-check skipped: {e}")
-        return
-    if _bad:
-        if not _org_text_migration_stamped():
-            # 首启升级的正常顺序：本函数先跑（列已存在→只补缺列），注册式迁移
-            # d105-org-domain-text-normalize 随后执行转换。此时不该刷 ERROR。
-            log.info(
-                "org_id 列暂为数值型（%d 列），将由迁移 d105-org-domain-text-normalize "
-                "在本域启动迁移链里转换", len(_bad))
-        else:
-            log.error(
-                "org_id 列仍是数值型，'' 哨兵写入会报 1366（新建凭据直接失败）: "
-                f"{_bad}；迁移 d105-org-domain-text-normalize 已盖章却未生效，"
-                "请确认该表所属域的进程已升级到本文本化版本")
 
 
 def _migrate_create_personal_orgs():
@@ -2242,6 +2224,9 @@ _ORG_MYSQL_TEXT_COLS = (
     ("org_invitation", "inviter_id", "VARCHAR(36)"),
 ) + tuple((_t, "org_id", "TEXT") for _t in _ORG_ID_TABLES)
 
+# 版本号单点定义：登记处与日志/自检引用同一常量，避免两处字面量漂移（QA I3）。
+_ORG_TEXT_MIGRATION_VERSION = "202611190100"
+
 
 def _widen_mysql_org_ids(conn=None) -> int:
     """MySQL 侧 org 域列字符串化 + 哨兵 0 → ''（D105 第三批，升级库专用）。
@@ -2282,7 +2267,12 @@ def _widen_mysql_org_ids(conn=None) -> int:
             # 字面量 DEFAULT '0' 会报 1101，所以只对 VARCHAR 目标保留默认值。
             if default not in (None, "") and target.lower().startswith("varchar"):
                 suffix += f" DEFAULT '{default}'"
-            c.execute(f"ALTER TABLE {table} MODIFY {col} {target}{suffix}")
+            # 危险 DDL 唯一入口（Issue #536 D4-2）：蓝绿共存期落后实例跳过，
+            # 且跳过必须**不盖章**（raise），否则列永远停在 INT（QA M3）。
+            if not _destructive_ddl(c, f"ALTER TABLE {table} MODIFY {col} {target}{suffix}"):
+                raise RuntimeError(
+                    f"org text normalize: ALTER {table}.{col} 被 cleanup 门槛拦下"
+                    "（本实例版本落后于 meta.min_code_version）→ 本次不盖章，下版本重试")
             altered += 1
             log.info(f"org text normalize (MySQL): {table}.{col} {dtype} -> {target}{suffix}")
         # 哨兵统一：0 / '0' / NULL → ''（与 SQLite 分支 #③ 同口径）
@@ -2293,11 +2283,14 @@ def _widen_mysql_org_ids(conn=None) -> int:
 
 
 def _org_columns_not_text(conn=None) -> list:
-    """当前库里仍是数值型的 org 域列清单（启动自检用，不做 DDL）。
+    """当前库里仍是数值型的 org 域列清单（迁移后校验用，不做 DDL）。
 
-    用途：`_migrate_add_org_id_columns()` 原先只打印 "org_id columns ensured"，
-    对「列已存在但类型是 INT」这种升级库假绿。这里把实情报出来，由迁移
-    `d105-org-domain-text-normalize` 负责真正转换。
+    用途：注册式迁移 `d105-org-domain-text-normalize`（QA 命名）转换完成后自查——
+    `_destructive_ddl()` 内部对非 MDL 异常只记 WARNING 并返回 True（fail-open），
+    所以「ALTER 没成功」不能靠它的返回值判定，必须落到列类型实查。
+
+    口径对称（QA I2）：两种后端都按 `_ORG_MYSQL_TEXT_COLS` 的同一份清单检查，
+    organization.id 在 SQLite 分支同样纳入。
     """
     from src.kernel.mysql_compat import get_db_backend
     from src.kernel.session_manager import db as _pdb
@@ -2315,36 +2308,13 @@ def _org_columns_not_text(conn=None) -> list:
                     "char", "varchar", "tinytext", "text", "mediumtext", "longtext"):
                 bad.append((table, col, row[0]))
         return bad
-    for table, col in _ORG_DOMAIN_TEXT_COLS:
+    for table, col, _target in _ORG_MYSQL_TEXT_COLS:
         cols = c.execute(f"PRAGMA table_info({table})").fetchall()
         decl = next((r[2] or "" for r in cols if r[1] == col), None)
         if decl is not None and decl.strip().upper() not in ("TEXT",) \
                 and "CHAR" not in decl.upper() and "CLOB" not in decl.upper():
             bad.append((table, col, decl))
     return bad
-
-
-def _org_text_migration_stamped(conn=None) -> bool:
-    """org 域文本化迁移是否已盖章（表不存在 = 未盖章，首个启动的正常态）。
-
-    不用 try/except 兜底：MGMT/RUNTIME 域库里可能都缺盖章表，静默 except 会
-    把「查询本身坏了」也读成「未盖章」，反而掩盖问题。
-    """
-    from src.kernel.mysql_compat import get_db_backend
-    from src.kernel.session_manager import db as _pdb
-    conn = conn if conn is not None else _pdb
-    c = conn.cursor()
-    if get_db_backend() == "mysql":
-        c.execute("SELECT COUNT(*) FROM information_schema.tables "
-                  "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='grape_t_schema_migrations'")
-    else:
-        c.execute("SELECT COUNT(*) FROM sqlite_master "
-                  "WHERE type='table' AND name='grape_t_schema_migrations'")
-    row = c.fetchone()
-    if not row or not row[0]:
-        return False
-    c.execute("SELECT 1 FROM grape_t_schema_migrations WHERE version='202611190100'")
-    return c.fetchone() is not None
 
 
 def _normalize_org_domain_text(conn) -> int:
@@ -10053,15 +10023,26 @@ def _fn_normalize_org_domain_text() -> None:
 
     只处理**本域库里存在**的表：三库拓扑下 mgmt 进程改 organization/org_member 等，
     runtime 进程改 runtime_credentials/agent_tasks 等，缺表按项跳过。
+
+    转换后自查列类型：`_destructive_ddl()` 对非 MDL 异常只记 WARNING 并返回 True，
+    单靠它的返回值会「ALTER 失败也盖章」（QA M3/I2）。发现仍有数值列 → ERROR +
+    raise，执行器据此不盖章、下次启动重试——本函数属注册式迁移，存量库每次启动
+    都会跑到（QA M2）。
     """
     with db_lock:
         n = _normalize_org_domain_text(db)
         db.commit()
+    bad = _org_columns_not_text(db)
+    if bad:
+        log.error(f"org domain text normalize 后仍有数值列（'' 哨兵会报 1366）: {bad}")
+        raise RuntimeError(
+            f"org domain text normalize 未完成：{len(bad)} 列仍非字符串族 {bad}；"
+            "本次不盖章，下次启动重试（大表 MODIFY 是 COPY 锁写，需安排低峰/维护窗口）")
     log.info(f"org domain text normalize 完成（本域改动: {n}）")
 
 
 register_migration(
-    version="202611190100",
+    version=_ORG_TEXT_MIGRATION_VERSION,
     name="d105-org-domain-text-normalize",
     kind="safe",
     domains=("mgmt", "runtime"),

@@ -50,21 +50,49 @@ def _legacy_track_calls() -> set:
     return names
 
 
+def _module_str_consts(tree) -> dict:
+    """模块级 `NAME = "literal"` 常量表（version 允许引用常量，见 QA I3）。"""
+    consts = {}
+    for n in tree.body:
+        if (isinstance(n, ast.Assign) and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Name)
+                and isinstance(n.value, ast.Constant)
+                and isinstance(n.value.value, str)):
+            consts[n.targets[0].id] = n.value.value
+    return consts
+
+
+def _resolve_static_str(node, consts):
+    """字面量或模块级常量名 → 字符串；解析不出返回 None（调用方判红）。"""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return consts.get(node.id)
+    return None
+
+
 def _registered_versions() -> list:
-    """提取所有 register_migration(...) 的 version（位置参数或关键字参数）。"""
+    """提取所有 register_migration(...) 的 version（位置参数或关键字参数）。
+
+    version 可以是字面量，也可以是模块级字符串常量（`_resolve_static_str` 解出）；
+    解不出的表达式返回 None，由 test_registered_versions_format 判红，避免守卫
+    静默漏看某条注册。
+    """
+    tree = _tree()
+    consts = _module_str_consts(tree)
     versions = []
-    for node in ast.walk(_tree()):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
         if (getattr(fn, "id", None) or getattr(fn, "attr", None)) != "register_migration":
             continue
         if node.args:
-            versions.append(ast.literal_eval(node.args[0]))
+            versions.append(_resolve_static_str(node.args[0], consts))
         else:
             for kw in node.keywords:
                 if kw.arg == "version":
-                    versions.append(ast.literal_eval(kw.value))
+                    versions.append(_resolve_static_str(kw.value, consts))
     return versions
 
 
