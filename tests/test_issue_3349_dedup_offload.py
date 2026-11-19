@@ -257,6 +257,8 @@ def test_no_bare_sync_vcs_calls_in_create_task_via_issue():
 def test_create_route_delegates_to_async_flow():
     from src.api.routes import issues as issues_route
     src = inspect.getsource(issues_route.create_issue)
-    assert "async def" not in src.splitlines()[0] or True
+    # 对外唯一创建入口是薄委托层：不内联任何同步 VCS 调用，
+    # 全部经 create_task_via_issue 的 to_thread/_run_upstream 路径。
     assert "await create_task_via_issue(" in src
     assert "urlopen" not in src
+    assert "_req(" not in src, "async 路由不得内联同步 VCS 调用"
