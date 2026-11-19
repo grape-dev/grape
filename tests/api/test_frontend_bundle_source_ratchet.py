@@ -81,7 +81,7 @@ FROZEN = {
     "runtimes-view.js": ("77", "61", "10bdb0a8b8f7b101", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "styles/bridge.css", "views/RuntimesView.vue", "views/entries/runtimes-view.js"]),
     "sandbox-view.js": ("10", "2", "8d03e1cd818b1548", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "styles/bridge.css", "views/SandboxView.vue", "views/entries/sandbox-view.js"]),
     "scene-market.js": ("58", None, "fd117f417f9527a0", ["components/ui/AGButton.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "views/SceneCard.vue", "views/SceneMarket.vue", "views/entries/scene-market.js"]),
-    "skills-view.js": ("54", None, "d49b7b6128e0b3fb", ["components/ui/AGButton.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "views/SkillsView.vue", "views/entries/skills-view.js"]),
+    "skills-view.js": ("58", None, "d1f29d890fc38c78", ["components/ui/AGButton.vue", "components/ui/AGModal.vue", "components/ui/AGSelect.vue", "views/SkillsView.vue", "views/entries/skills-view.js"]),
 }
 
 
@@ -112,7 +112,7 @@ SHIPPED = {
     "runtimes-view.js": ("77", "61", "10bdb0a8b8f7b101", "df79e786f8268055"),
     "sandbox-view.js": ("10", "2", "8d03e1cd818b1548", "ce39afc3c912a737"),
     "scene-market.js": ("58", None, "fd117f417f9527a0", None),
-    "skills-view.js": ("54", None, "d49b7b6128e0b3fb", None),
+    "skills-view.js": ("58", None, "d1f29d890fc38c78", None),
 }
 
 
