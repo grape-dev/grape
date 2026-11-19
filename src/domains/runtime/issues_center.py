@@ -2384,6 +2384,12 @@ def create_standard_task(repo_key: str, title: str, description: str,
         except Exception as _le:
             log.warning(f"outbound_ledger record (create_standard_task) failed: {_le}")
         created = True
+        # Issue #3250：写回查重索引
+        try:
+            from src.domains.runtime.vcs.api_client import remember_open_issue_title
+            remember_open_issue_title(_provider, owner, rname, title.strip(), issue_num)
+        except Exception:
+            pass
     task_id = ensure_issue_task(repo_key, issue_num, title.strip(), description or "",
                                 assignee=assignee, event_type="onboarding")
     if not task_id:
@@ -2717,6 +2723,12 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         except Exception as _le:
             log.warning(f"outbound_ledger record (create issue) failed: {_le}")
         created = True
+        # Issue #3250：把新标题写回查重索引，批量造单后续不必再翻页
+        try:
+            from src.domains.runtime.vcs.api_client import remember_open_issue_title
+            remember_open_issue_title(_provider, owner, rname, body.title.strip(), issue_num)
+        except Exception:
+            pass
         # 附件从 pending 迁移到实际 issue_number（OBS: copy + delete old; 本地: rename）
         from src.domains.runtime.storage import get_storage
         _storage = get_storage()

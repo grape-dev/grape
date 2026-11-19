@@ -1006,8 +1006,9 @@ def _require_runtime_admin(runtime_id: int, user: dict) -> None:
     auth_type = user.get("auth_type", "jwt")
     if auth_type in ("session_token", "api_key"):
         return
-    with db_lock:
-        c = db.cursor()
+    # Issue #3350：引擎行在 runtime 域（注册/心跳写 runtime 库），必须按域取连接；
+    # 用进程库（mgmt）查 → runtime 库的引擎恒 404。
+    with _runtime_cursor() as c:
         c.execute("SELECT scope, owner_id, repo_key FROM agent_runtimes WHERE id=?", (runtime_id,))
         row = c.fetchone()
     if not row:
@@ -2904,13 +2905,12 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(require_n
     以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。
     写入顺序：先写 engine_capabilities，再 sync_agent_tags 回写 agent_tags。
     """
-    from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
     from src.domains.mgmt.public import sync_agent_tags
     tags = _apply_tag_rules(body.get("tags") or [])
     now = datetime.now(timezone.utc).isoformat()
-    with db_lock:
-        c = db.cursor()
+    # Issue #3350：engine_capabilities / agent_runtimes 归 runtime 域，按域取连接
+    with _runtime_cursor() as c:
         c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
         if not c.fetchone():
             raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
@@ -2929,7 +2929,8 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(require_n
         c.execute("UPDATE agent_runtimes SET tags_user_set=1 WHERE id=?", (runtime_id,))
         # 再回写 agent_tags（派生缓存，保持与 engine_capabilities 一致）
         sync_agent_tags(runtime_id)
-        db.commit()
+        if not _dbreg.uses_own_dsn("runtime"):
+            db.commit()
     log.info(f"Runtime tags set: rid={runtime_id} tags={tags} (engine_capabilities → agent_tags synced)")
     return {"tags": tags}
 
@@ -2943,16 +2944,16 @@ def set_runtime_max_concurrent(runtime_id: int, body: MaxConcurrentBody,
                                 user: dict = Depends(require_no_session_token)):
     """设置引擎级最大并发数（方案一：并发纯引擎级，标签只做路由）。"""
     _require_runtime_admin(runtime_id, user)  # 扫雷⑨-H3：归属校验
-    from src.kernel.session_manager import db, db_lock
     if body.max_concurrent < 1 or body.max_concurrent > 100:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "max_concurrent 必须在 1-100 之间"})
-    with db_lock:
-        c = db.cursor()
+    # Issue #3350：max_concurrent 列在 runtime 域的 agent_runtimes 上，按域取连接
+    with _runtime_cursor() as c:
         c.execute("SELECT 1 FROM agent_runtimes WHERE id=?", (runtime_id,))
         if not c.fetchone():
             raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime not found"})
         c.execute("UPDATE agent_runtimes SET max_concurrent=? WHERE id=?", (body.max_concurrent, runtime_id))
-        db.commit()
+        if not _dbreg.uses_own_dsn("runtime"):
+            db.commit()
     log.info(f"Runtime max_concurrent set: rid={runtime_id} max_concurrent={body.max_concurrent}")
     return {"max_concurrent": body.max_concurrent}
 

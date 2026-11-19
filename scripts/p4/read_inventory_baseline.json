@@ -1,5 +1,5 @@
 {
-  "files_scanned": 574,
+  "files_scanned": 575,
   "stats": {
     "total": 26,
     "bare": 26,
@@ -56,7 +56,7 @@
   "sites": [
     {
       "file": "src/api/db_setup.py",
-      "line": 1053,
+      "line": 1059,
       "func": "_copy_backend_to_runtime",
       "host": "api",
       "status": "bare",
@@ -69,7 +69,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 5858,
+      "line": 6021,
       "func": "_migrate_tables",
       "host": "api",
       "status": "bare",
@@ -82,7 +82,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 5861,
+      "line": 6024,
       "func": "_migrate_tables",
       "host": "api",
       "status": "bare",
@@ -95,7 +95,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 5863,
+      "line": 6026,
       "func": "_migrate_tables",
       "host": "api",
       "status": "bare",
@@ -108,7 +108,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 7761,
+      "line": 7924,
       "func": "_fn_seed_platform_bot",
       "host": "api",
       "status": "bare",
@@ -121,7 +121,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 7785,
+      "line": 7948,
       "func": "_fn_seed_platform_bot",
       "host": "api",
       "status": "bare",
@@ -134,7 +134,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 7798,
+      "line": 7961,
       "func": "_fn_seed_platform_bot",
       "host": "api",
       "status": "bare",
@@ -147,7 +147,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 7956,
+      "line": 8119,
       "func": "_fn_retire_vcs_platforms_hidden",
       "host": "api",
       "status": "bare",
@@ -160,7 +160,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8311,
+      "line": 8474,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -173,7 +173,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8316,
+      "line": 8479,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -186,7 +186,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8319,
+      "line": 8482,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -199,7 +199,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8351,
+      "line": 8514,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -212,7 +212,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8370,
+      "line": 8533,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -225,7 +225,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8409,
+      "line": 8572,
       "func": "_migration_646_backfill_uids",
       "host": "api",
       "status": "bare",
@@ -239,7 +239,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8675,
+      "line": 8838,
       "func": "_migration_868_backfill_session_uids",
       "host": "api",
       "status": "bare",
@@ -252,7 +252,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8802,
+      "line": 8965,
       "func": "_migration_1011_backfill_rederive_engine_uids",
       "host": "api",
       "status": "bare",
@@ -265,7 +265,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8809,
+      "line": 8972,
       "func": "_migration_1011_backfill_rederive_engine_uids",
       "host": "api",
       "status": "bare",
@@ -278,7 +278,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 8860,
+      "line": 9023,
       "func": "_backfill_missing_migration_reports",
       "host": "api",
       "status": "bare",
@@ -291,7 +291,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9300,
+      "line": 9463,
       "func": "_migration_1208_backfill_scene_uids",
       "host": "api",
       "status": "bare",
@@ -304,7 +304,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9342,
+      "line": 9505,
       "func": "_migration_1208_backfill_scene_uids",
       "host": "api",
       "status": "bare",
@@ -317,7 +317,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9408,
+      "line": 9571,
       "func": "_migration_1208_backfill_derived_agent_tags",
       "host": "api",
       "status": "bare",
@@ -331,7 +331,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9430,
+      "line": 9593,
       "func": "_migration_1208_backfill_derived_agent_tags",
       "host": "api",
       "status": "bare",
@@ -344,7 +344,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9775,
+      "line": 9938,
       "func": "_fn_issue3054_tombstone_table",
       "host": "api",
       "status": "bare",
@@ -357,7 +357,7 @@
     },
     {
       "file": "src/api/db_setup.py",
-      "line": 9793,
+      "line": 9956,
       "func": "_fn_issue3054_tombstone_table",
       "host": "api",
       "status": "bare",

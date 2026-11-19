@@ -31,6 +31,17 @@ def __getattr__(name: str):
         return getattr(port, symbol)()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
+def __getattr__(name: str):
+    """惰性兼容别名（PEP 562）：owner 域 DDL 快照只经端口取，kernel 不 import domains。"""
+    alias = _DDL_ALIASES.get(name)
+    if alias is not None:
+        port, symbol = alias
+        return getattr(port, symbol)()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+# 备份/迁移用的库文件路径（import 期定型）。注意：这**不是**连接用的路径——
+# 连接在 _LazyDB._build() 里按当时的 DEVOPS_DB_PATH 解析（见下方）。两者分开是
+# 有意的：备份要的是「文件在哪」，连接要的是「此刻该连哪个库」，测试会改 env。
 _db_path = os.environ.get("DEVOPS_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "data/sessions.db"))
 db_lock = threading.RLock()
 
@@ -111,29 +122,136 @@ def prune_db_backups(path: str, keep: int | None = None) -> int:
         return 0
 
 
-if _is_mysql_backend():
-    from src.kernel.mysql_compat import MySQLCompatDB, mysql_config
-    db = MySQLCompatDB(**mysql_config())
-    log.info(f"DB backend: MySQL RDS ({mysql_config()['host']}:{mysql_config()['port']}/{mysql_config()['database']})")
-else:
-    db = sqlite3.connect(_db_path, check_same_thread=False)
-    # WAL + busy_timeout + synchronous=FULL：跨进程写安全，commit 时 fsync WAL
-    try:
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA busy_timeout=5000")
-        db.execute("PRAGMA synchronous=FULL")  # FULL: commit 时 fsync WAL 到磁盘
-        db.execute("PRAGMA foreign_keys=ON")
-    except Exception as e:
-        log.warning(f"SQLite pragma setup failed: {e}")
-    # 分 Schema 灰度开关（Issue #699 Phase 2）：启用后 SQLite 表名带 mgmt_/rt_/ins_ 前缀，
-    # 业务代码经 kernel/db.qualify_sql 运行时改写，零改动无感。
-    try:
-        from src.kernel.db import schema_mode_enabled, SchemaSQLiteDB
-        if schema_mode_enabled():
-            db = SchemaSQLiteDB(db)
-            log.info("Schema mode enabled: SQLite table prefixes (mgmt_/rt_/ins_)")
-    except Exception as e:
-        log.warning(f"Schema mode wrap failed (fallback to plain sqlite): {e}")
+# ── 惰性连接（PEP 562 风格的代理）───────────────────────────────────────────────
+#
+# 历史实现在这里**模块级**建连：`import src.kernel.session_manager` 的瞬间就打开
+# 数据库并把 inode 绑死。全仓 103 个文件在 module level 写
+# `from src.kernel.session_manager import db`，于是：
+#
+#   1) 测试里 conftest 重建 data/test_sessions.db 之后，那 103 处早先绑定的连接
+#      仍指向**已 unlink 的旧 inode**，seed 进新库的行查不出来 → 表现成「单跑绿、
+#      整域跑红」的顺序敏感（tests/mgmt 整域 762 failed，单文件全绿）。
+#   2) DEVOPS_DB_PATH / DEVOPS_DB_BACKEND 必须在**任何**模块 import 之前定型，
+#      否则后续改环境变量不生效 —— 测试只能在 conftest 顶部靠「先删库再导入」
+#      这种脆弱顺序来规避。
+#
+# 改为惰性代理：模块级 `db` 是一个永不持有连接的壳，首次**真正使用**（execute /
+# cursor / commit …）时才建连。这样模块级 `from ... import db` 拿到的是代理，
+# 重建库/换 env 之后下一次访问自然拿到新连接，顺序不再敏感。
+#
+# 兼容性：代理转发全部属性，`db.execute(...)` / `with db_lock:` / `db.close()` 等
+# 既有写法一字不改；`isinstance(db, sqlite3.Connection)` 这类反射判断会失败，
+# 全仓无此用法（有则用 db.raw 取底层连接）。
+
+
+class _LazyDB:
+    """惰性数据库代理：首次访问属性时才建立真实连接。
+
+    线程安全：双检锁（模块内只有一个实例，竞争仅发生在首次访问）。
+    reset() 用于显式丢弃当前连接（测试重建库后调用，下次访问自动重连）。
+    """
+
+    __slots__ = ("_real", "_lock", "_building")
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_real", None)
+        object.__setattr__(self, "_lock", threading.RLock())
+        object.__setattr__(self, "_building", False)
+
+    def _build(self):
+        """建立真实连接（MySQL RDS 或 SQLite），按当前环境变量决定。"""
+        if _is_mysql_backend():
+            from src.kernel.mysql_compat import MySQLCompatDB, mysql_config
+            real = MySQLCompatDB(**mysql_config())
+            log.info(
+                "DB backend: MySQL RDS (%s:%s/%s)",
+                mysql_config()["host"], mysql_config()["port"], mysql_config()["database"],
+            )
+            return real
+
+        # 路径在**建连时**读，而不是 import 时——测试换 DEVOPS_DB_PATH 才有效。
+        path = os.environ.get(
+            "DEVOPS_DB_PATH",
+            os.path.join(os.path.dirname(__file__), "..", "..", "data/sessions.db"),
+        )
+        path = os.path.abspath(path)
+        parent = os.path.dirname(path)
+        if parent and not os.path.isdir(parent):
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except Exception:
+                pass
+        # timeout 保持 sqlite3 默认 5s（PRAGMA busy_timeout=5000 也是 5s）。
+        # 曾试过 30s，整域跑时每个拿不到锁的用例要多等 25s，累积到十几分钟看着像死锁。
+        real = sqlite3.connect(path, check_same_thread=False)
+        # WAL + busy_timeout + synchronous=FULL：跨进程写安全，commit 时 fsync WAL
+        try:
+            real.execute("PRAGMA journal_mode=WAL")
+            real.execute("PRAGMA busy_timeout=5000")
+            real.execute("PRAGMA synchronous=FULL")
+            real.execute("PRAGMA foreign_keys=ON")
+        except Exception as e:
+            log.warning(f"SQLite pragma setup failed: {e}")
+        # 分 Schema 灰度开关（Issue #699 Phase 2）：启用后 SQLite 表名带 mgmt_/rt_/ins_
+        try:
+            from src.kernel.db import schema_mode_enabled, SchemaSQLiteDB
+            if schema_mode_enabled():
+                real = SchemaSQLiteDB(real)
+                log.info("Schema mode enabled: SQLite table prefixes (mgmt_/rt_/ins_)")
+        except Exception as e:
+            log.warning(f"Schema mode wrap failed (fallback to plain sqlite): {e}")
+        return real
+
+    def get(self):
+        """返回真实连接（必要时建立）。"""
+        real = object.__getattribute__(self, "_real")
+        if real is not None:
+            return real
+        lock = object.__getattribute__(self, "_lock")
+        with lock:
+            real = object.__getattribute__(self, "_real")
+            if real is None:
+                real = self._build()
+                object.__setattr__(self, "_real", real)
+        return real
+
+    @property
+    def raw(self):
+        """底层真实连接（仅供需要 isinstance 判断的极少数调用方）。"""
+        return self.get()
+
+    def __getattr__(self, name: str):
+        # __slots__ 下 _real/_lock 走 object.__getattribute__，不会落到这里
+        return getattr(self.get(), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        setattr(self.get(), name, value)
+
+    def __repr__(self) -> str:
+        real = object.__getattribute__(self, "_real")
+        state = "connected" if real is not None else "not-yet-connected"
+        return f"<LazyDB {state}>"
+
+
+db = _LazyDB()
+
+
+def reset_db_connection() -> None:
+    """丢弃当前连接，下次访问自动重连（测试重建库后调用）。"""
+    lock = object.__getattribute__(db, "_lock")
+    with lock:
+        real = object.__getattribute__(db, "_real")
+        object.__setattr__(db, "_real", None)
+    if real is not None:
+        try:
+            real.close()
+        except Exception:
+            pass
+
+
+def db_connection_state() -> str:
+    """诊断用：'connected' / 'not-yet-connected'。"""
+    return "connected" if object.__getattribute__(db, "_real") is not None else "not-yet-connected"
 # chat_agent_session / repo_im_group_binding 归运行域：旧表迁移、建表、兼容列补齐语句只在
 # runtime public 一份。
 # unified_user_mapping 归 mgmt 域：同上，由该域 public 引导。

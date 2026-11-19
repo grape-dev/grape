@@ -8,9 +8,71 @@
 import json
 import os
 import re
+import threading
+import time
 import urllib.request
 import urllib.error
 from src.kernel.config import log
+
+
+# ── 建单幂等：open 标题索引缓存（Issue #3250）────────────────────────────────
+# 非 github 平台没有标题过滤参数，只能 `state=open&per_page=50&page=N` 全量翻页：
+# 积压越慢越贵（实测 grape-dev/grape 330 open = 7 页 4.5s；2000 open ≈ 30s+）。
+# 按仓库缓存「完整 open 标题 → number」索引，TTL 内：
+#   · 标题命中 → 直接返回；
+#   · 索引完整且标题不在 → 直接判「不存在」，不再翻页；
+# 新建成单成功后把标题写回缓存（remember_open_issue_title），批量造单不必每次翻页。
+# 语义边界：TTL 内平台外新建的同名 issue 可能漏判（原实现同样不防并发建单，可接受）。
+_OPEN_TITLE_TTL_SECONDS = float(os.environ.get("ISSUE_DEDUP_TITLE_CACHE_TTL", "60"))
+_OPEN_TITLE_MAX_REPOS = int(os.environ.get("ISSUE_DEDUP_TITLE_CACHE_REPOS_MAX", "200"))
+_open_title_cache: dict[tuple, dict] = {}
+_open_title_lock = threading.Lock()
+
+
+def _open_title_key(provider: str, owner: str, repo: str) -> tuple:
+    return ((provider or "").lower(), (owner or "").lower(), (repo or "").lower())
+
+
+def _open_title_get(provider: str, owner: str, repo: str) -> dict | None:
+    """取未过期的仓库标题索引；过期即丢弃。"""
+    key = _open_title_key(provider, owner, repo)
+    with _open_title_lock:
+        ent = _open_title_cache.get(key)
+        if not ent:
+            return None
+        if time.time() - ent.get("ts", 0) > _OPEN_TITLE_TTL_SECONDS:
+            _open_title_cache.pop(key, None)
+            return None
+        return ent
+
+
+def _open_title_put(provider: str, owner: str, repo: str,
+                    titles: dict, complete: bool) -> None:
+    key = _open_title_key(provider, owner, repo)
+    with _open_title_lock:
+        if key not in _open_title_cache and len(_open_title_cache) >= _OPEN_TITLE_MAX_REPOS:
+            # 简单容量上限：淘汰最旧的一条
+            _oldest = min(_open_title_cache, key=lambda k: _open_title_cache[k].get("ts", 0))
+            _open_title_cache.pop(_oldest, None)
+        _open_title_cache[key] = {"titles": dict(titles), "complete": bool(complete),
+                                  "ts": time.time()}
+
+
+def remember_open_issue_title(provider: str, owner: str, repo: str, title: str,
+                              number) -> None:
+    """建单成功后把标题写回索引（只更新已存在的缓存条目，不新建）。"""
+    if not title or number is None:
+        return
+    key = _open_title_key(provider, owner, repo)
+    with _open_title_lock:
+        ent = _open_title_cache.get(key)
+        if ent is not None:
+            ent["titles"][str(title).strip()] = number
+
+
+def invalidate_open_issue_title_cache(provider: str, owner: str, repo: str) -> None:
+    with _open_title_lock:
+        _open_title_cache.pop(_open_title_key(provider, owner, repo), None)
 
 
 # Issue #315: GitCode 编辑器上传图片（raw.gitcode.com/user-images/...）链接识别与鉴权下载。
@@ -491,7 +553,18 @@ class VcsApiClient:
                         return _native_issue_number(n)
             return None
         # 非 github：分页遍历（形态兼容 {data:[]}/items/records 与 list）
+        # Issue #3250：先查短 TTL 的仓库标题索引；命中/完整索引判无 → 不再翻页。
+        _title = title.strip()
+        _cached = _open_title_get(self.provider, self.owner, self.repo)
+        if _cached is not None:
+            if _title in _cached["titles"]:
+                return _cached["titles"][_title]
+            if _cached.get("complete"):
+                return None
+        _seen: dict = dict(_cached["titles"]) if _cached else {}
+        _found = None
         page = 1
+        _complete = False
         while page <= max_pages:
             data = self._request(
                 "GET", f"/repos/{self.owner}/{self.repo}/issues?state=open&per_page=50&page={page}")
@@ -504,20 +577,30 @@ class VcsApiClient:
             else:
                 items = data if isinstance(data, list) else []
             if not items:
+                _complete = True
                 break
             for it in items:
                 if not isinstance(it, dict):
                     continue
-                if str(it.get("title") or "").strip() == title.strip():
-                    st = str(it.get("state") or "").lower()
-                    if st in ("open", "opened", "active", "1", "todo"):
-                        n = it.get("number") or it.get("iid") or it.get("id")
-                        if n:
-                            return _native_issue_number(n)
+                _t = str(it.get("title") or "").strip()
+                st = str(it.get("state") or "").lower()
+                if not _t or st not in ("open", "opened", "active", "1", "todo"):
+                    continue
+                n = it.get("number") or it.get("iid") or it.get("id")
+                if not n:
+                    continue
+                _seen.setdefault(_t, _native_issue_number(n))
+                if _t == _title and _found is None:
+                    _found = _native_issue_number(n)
+                    break
+            if _found is not None:
+                break   # 早退：索引不完整（complete=False），仅用于同名复用
             if len(items) < 50:
+                _complete = True
                 break
             page += 1
-        return None
+        _open_title_put(self.provider, self.owner, self.repo, _seen, _complete)
+        return _found  # type: ignore[return-value]
 
     def get_issue_state(self, issue_number: int) -> str:
 
