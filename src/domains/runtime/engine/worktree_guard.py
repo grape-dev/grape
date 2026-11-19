@@ -50,6 +50,10 @@ from src.kernel.config import log
 
 BASELINE_SUFFIX = ".fidelity.json"
 
+# Issue #3441：workdir 路径中的 Issue 编号段（issues/<N>，兼容新旧两种布局——
+# 新 {provider}/{owner}/{repo}/issues/{n}/{agent} 与过渡期 {repo}/{agent}/issues/{n}）。
+_WORKDIR_ISSUE_RE = re.compile(r"(?:^|[\\/])issues[\\/](\d+)(?:[\\/]|$)")
+
 # 产物路径白名单：这些前缀下的文件是可清理产物（复测清理对象），不做指纹保真
 _ARTIFACT_DIR_PREFIXES = (
     "dist/", "build/", "out/", "node_modules/", "__pycache__/",
@@ -1104,6 +1108,60 @@ def parse_issue_workdir(path: str, workspace_dir: str = "") -> tuple:
         return f"{provider}:{owner}/{repo}", issue_part, agent
     except Exception:
         return "", "", ""
+
+
+def extract_workdir_issue_num(path: str) -> str:
+    """从 workdir 路径提取 `issues/<N>` 段中的 Issue 编号（Issue #3441）。
+
+    兼容新布局 {provider}/{owner}/{repo}/issues/{n}/{agent} 与过渡期
+    {repo}/{agent}/issues/{n}（正则只锚 issues/<N> 段，两种布局均命中）。
+    无法解析出编号 → 返回 ''。
+    """
+    try:
+        m = _WORKDIR_ISSUE_RE.search(str(path or ""))
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
+def validate_workdir_issue_consistency(cwd: str, issue_id: str,
+                                       agent_type: str = "") -> tuple:
+    """任务启动 fail-fast 校验：workdir 中的 Issue 编号必须与任务 Issue 编号一致。
+
+    Issue #3441：并发 coding 任务曾共用同一 workdir 导致 HEAD/分支/提交互相污染
+    （#3383 的提交父链混入 #3350 内容）。本校验在任务启动/就绪入口拦截
+    「workdir 与任务 Issue 不一致」的错配派发，不静默继续。
+
+    返回 (ok: bool, message: str)：
+    - 任务无 Issue 编号（push/#0 等非 Issue 任务）→ (True, "") 不校验；
+    - workdir 解析不出 issues/<N> 编号 → 按不一致处理（fail-fast，不静默放行）；
+    - 编号不一致 → (False, <含双方编号的显式错误>)。
+    """
+    task_issue = ""
+    m = re.search(r"#?(\d+)", str(issue_id or ""))
+    if m:
+        task_issue = m.group(1)
+    # 与 event_pipeline._issue_num_from 同口径：#0/0/空 视为无关联 Issue 任务，不校验
+    if not task_issue or task_issue == "0":
+        return True, ""
+    workdir_issue = extract_workdir_issue_num(cwd)
+    if not workdir_issue:
+        return False, (
+            f"workdir issue mismatch: cannot parse issue number from workdir "
+            f"'{cwd}' (expected issues/{task_issue}/... layout) but task is for "
+            f"issue #{task_issue} (agent={agent_type or 'unknown'}); aborting "
+            f"task start to prevent cross-issue worktree pollution "
+            f"(see docs/issue-3441/workdir-pollution-baseline-rebuild.md)"
+        )
+    if workdir_issue != task_issue:
+        return False, (
+            f"workdir issue mismatch: workdir '{cwd}' belongs to issue "
+            f"#{workdir_issue} but task is for issue #{task_issue} "
+            f"(agent={agent_type or 'unknown'}); aborting task start to prevent "
+            f"cross-issue worktree pollution "
+            f"(see docs/issue-3441/workdir-pollution-baseline-rebuild.md)"
+        )
+    return True, ""
 
 
 def guard_issue_workdir_removal(path: str, reason: str = "zombie_ttl",

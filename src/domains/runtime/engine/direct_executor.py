@@ -323,6 +323,29 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     ws = get_agent_workdir(repo_key, agent_type, issue_id, _pr_num)
     os.makedirs(ws, exist_ok=True)
 
+    # Issue #3441：任务启动 fail-fast——workdir 中的 Issue 编号与任务 Issue 编号
+    # 必须一致，不一致立即中止并输出含双方编号的显式错误（不静默继续）。
+    try:
+        from src.domains.runtime.engine.worktree_guard import (
+            validate_workdir_issue_consistency,
+        )
+        _wd_ok, _wd_msg = validate_workdir_issue_consistency(ws, issue_id, agent_type)
+        if not _wd_ok:
+            log.error(f"direct exec: {_wd_msg} (seq={seq})")
+            if task_id:
+                try:
+                    import json as _json
+                    from src.domains.runtime.engine.service import update_task_status
+                    update_task_status(task_id, "failed",
+                                        errors=_json.dumps([_wd_msg][:500]))
+                except Exception as _tue:
+                    log.warning(f"direct exec: failed to update task {task_id} to failed: {_tue}")
+            _fail_event(seq, _wd_msg, diag={"code": "WORKDIR_ISSUE_MISMATCH",
+                                             "phase": "workdir_validate"})
+            return
+    except Exception as _wve:
+        log.warning(f"direct exec: workdir issue consistency check failed (skipped, seq={seq}): {_wve}")
+
     # 读取上次的 oc_session_id（用于延续对话上下文）——Issue 级执行会话优先，回退 repo 级
     # 注意：有关联 Issue 时只用该 Issue 自己的会话（每 Issue 独立 session，见 vod-agent-hang-rootcause-fix.md 方案 A）；
     #       repo 级 session 仅用于无关联 Issue（push/#0）。

@@ -111,6 +111,22 @@ def validate_task_dependencies(task: dict, engine_name: str = "") -> None:
         # Log warning but don't block execution - some tasks may not need worktree
         log.warning(f"issue_session_id is empty for worktree agent {agent_type} (task={tid})")
 
+    # 6. Issue #3441：workdir-Issue 编号一致性校验（fail-fast 硬拦截，不静默继续）。
+    #    并发任务曾因错配 workdir 共享同一目录导致提交互相污染；启动入口
+    #    比对 workdir 路径中的 issues/<N> 编号与任务 issue_id，不一致即中止。
+    if agent_type in _GIT_AGENTS:
+        _cwd = task.get("cwd") or ""
+        try:
+            from src.domains.runtime.engine.worktree_guard import (
+                validate_workdir_issue_consistency,
+            )
+            _ok, _msg = validate_workdir_issue_consistency(_cwd, issue_id, agent_type)
+            if not _ok:
+                missing.append(_msg)
+        except Exception as _wce:
+            # 检查器自身故障不阻断任务（与第 4 项 token 探测同口径）
+            log.warning(f"workdir issue consistency check failed (skipped, task={tid}): {_wce}")
+
     if missing:
         log.error(f"Dependency check FAILED for task={tid} agent={agent_type}: {'; '.join(missing)}")
         raise DependencyError(missing)

@@ -66,7 +66,9 @@ class TestEventLoopBlock:
         """构造最小 task dict，供 _execute_task 使用。"""
         return {
             "id": "t_slow_1",
-            "cwd": "/tmp",
+            # Issue #3441：dependency_check 启动校验要求 cwd 与 issue_id 编号一致
+            #（本文件测事件循环调度，非 workdir 校验，用一致的 issues/<N> 布局即可）
+            "cwd": "/tmp/issues/5/vod",
             "prompt": "p",
             "runtime_session_id": "",
             "event_type": "issue_opened",
