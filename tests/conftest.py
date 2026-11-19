@@ -112,15 +112,22 @@ def _ensure_help_page_generated():
 
 @pytest.fixture(scope="function", autouse=True)
 def _reset_db_path():
-    """每个测试前重置 DEVOPS_DB_PATH。
+    """每个测试前重置 DEVOPS_DB_PATH，并丢弃已建立的连接。
 
     防止其他测试模块 import 时改 env 导致后续测试拿到错误路径。
-    注意：不重绑 session_manager.db 连接——73 个模块在 module level 导入了 db，
-    重绑 session_manager.db 不会更新它们的引用，反而导致写读不一致。
-    依赖 _ensure_test_db session fixture 在 session 开始时用正确 env 初始化表。
+
+    历史上这里刻意"不重绑 session_manager.db 连接"——因为那时 db 在 import 期就建好，
+    73 个模块在 module level `from src.kernel.session_manager import db` 持有同一个对象，
+    重绑不能让它们看到新连接。session_manager 改为惰性代理后，db 本身不再持有连接，
+    reset_db_connection() 会让下一次访问按**当前** DEVOPS_DB_PATH 重新建连，
+    因此各模块持有的代理自动跟随，写读一致。
     """
+    from src.kernel.session_manager import reset_db_connection
+
     _test_db = os.path.join(ROOT, "data", "test_sessions.db")
     os.environ["DEVOPS_DB_PATH"] = _test_db
+    os.environ.pop("DEVOPS_DB_BACKEND", None)
+    reset_db_connection()
     yield
 
 @pytest.fixture(autouse=True)

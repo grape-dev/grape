@@ -31,7 +31,10 @@ def __getattr__(name: str):
         return getattr(port, symbol)()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-# 路径不再在 import 期定型：见 _LazyDB._build()，那里按当前 DEVOPS_DB_PATH 解析。
+# 备份/迁移用的库文件路径（import 期定型）。注意：这**不是**连接用的路径——
+# 连接在 _LazyDB._build() 里按当时的 DEVOPS_DB_PATH 解析（见下方）。两者分开是
+# 有意的：备份要的是「文件在哪」，连接要的是「此刻该连哪个库」，测试会改 env。
+_db_path = os.environ.get("DEVOPS_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "data/sessions.db"))
 db_lock = threading.RLock()
 
 
