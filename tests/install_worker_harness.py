@@ -60,7 +60,9 @@ def build_harness(body, *, install_dir, venv=None, start_script=None, module=Non
     calls_log = calls_log or os.path.join(install_dir, "_calls.log")
     prelude = [
         "#!/usr/bin/env bash",
-        "set -u",
+        # 与脚本实跑保持同一套严格模式（scripts/install-worker.sh 的
+        # `set -euo pipefail`）：抽取段内的 errexit/pipefail 回归在测试中同样可见。
+        "set -euo pipefail",
         f"INSTALL_DIR={install_dir!r}",
         f"VENV={venv!r}",
         f"START_SCRIPT={start_script!r}",

@@ -1,6 +1,6 @@
 """Issue #3418：install-worker.sh 同机多 worker 限域回归（arch 线）。
 
-背景：121.36.74.10 上两个 worker 互相 SIGKILL，6 秒一轮死循环。本线（arch）worker 入口为
+背景：某生产主机上两个 worker 互相 SIGKILL，6 秒一轮死循环。本线（arch）worker 入口为
 `src.domains.runtime.engine.agent`，沙箱 worker 为
 `src.domains.runtime.engine.cloud_worker`；此前普通 worker 的 systemd unit 名写死
 `runtime-agent`，同机第二个实例的安装/升级/回滚会直接作用到第一个实例的 unit。
@@ -225,6 +225,120 @@ def test_systemd_unit_owned_by_other_dir_fails_fast():
         "写 unit 前必须校验既有 unit 的归属"
     assert "is owned by another worker instance" in text, \
         "归属冲突应 fail-fast 并给出明确提示"
+
+
+# --------------------------------------------------------------------------
+# PIDFile 限域层：_pid_is_own / _stop_pidfile（QA 审查前零覆盖，补齐第三层）
+# --------------------------------------------------------------------------
+
+def test_stop_pidfile_spares_foreign_pid_and_clears_file(tmp_path):
+    """PIDFile 指向他实例存活 PID：只清文件、绝不 kill 他实例进程。"""
+    dir_a, dir_b, registry, lock = _sandbox(tmp_path)
+    proc_b = _spawn_fake_worker(os.path.join(dir_b, ".venv"), SANDBOX_MODULE)
+    try:
+        agent_pf = os.path.join(dir_a, "data", "worker.agent.pid")
+        daemon_pf = os.path.join(dir_a, "data", "worker.pid")
+        with open(agent_pf, "w") as f:
+            f.write(f"{proc_b.pid}\n")
+        with open(daemon_pf, "w") as f:
+            f.write(f"{proc_b.pid}\n")
+        body = (
+            '_stop_pidfile "$AGENT_PIDFILE"\n'
+            '_stop_pidfile "$DAEMON_PIDFILE"\n'
+            f'if _pid_is_own "{proc_b.pid}"; then echo "OWN" >> "$CALLS"; '
+            'else echo "FOREIGN" >> "$CALLS"; fi\n'
+            'echo done\n'
+        )
+        h = harness.build_harness(body, install_dir=dir_a, module=AGENT_MODULE,
+                                  registry_dir=registry, registry_lock=lock)
+        r = harness.run(h)
+        assert r.returncode == 0, f"harness 失败: {r.stderr}"
+        assert proc_b.poll() is None, "PIDFile 记录他实例 PID 时不得误杀他实例进程"
+        assert not os.path.exists(agent_pf), "指向他实例 PID 的 pidfile 应被清理"
+        assert not os.path.exists(daemon_pf), "指向他实例 PID 的 pidfile 应被清理"
+        assert "FOREIGN" in _calls(dir_a), \
+            "_pid_is_own 应判定他实例 PID（cmdline 不含本实例 venv/启动脚本）为非本实例"
+    finally:
+        _kill_quietly(proc_b)
+
+
+def test_stop_pidfile_kills_own_residual_pid(tmp_path):
+    """PIDFile 指向本实例残留进程：限域停止本实例进程并清理 pidfile。"""
+    dir_a, _, registry, lock = _sandbox(tmp_path)
+    venv_a = os.path.join(dir_a, ".venv")
+    proc_a = _spawn_fake_worker(venv_a, AGENT_MODULE)
+    try:
+        agent_pf = os.path.join(dir_a, "data", "worker.agent.pid")
+        with open(agent_pf, "w") as f:
+            f.write(f"{proc_a.pid}\n")
+        body = (
+            f'if _pid_is_own "{proc_a.pid}"; then echo "OWN" >> "$CALLS"; else echo "FOREIGN" >> "$CALLS"; fi\n'
+            '_stop_pidfile "$AGENT_PIDFILE"\n'
+            'echo done\n'
+        )
+        h = harness.build_harness(body, install_dir=dir_a, module=AGENT_MODULE,
+                                  registry_dir=registry, registry_lock=lock)
+        r = harness.run(h)
+        assert r.returncode == 0, f"harness 失败: {r.stderr}"
+        assert "OWN" in _calls(dir_a), "cmdline 指向本实例 venv 的 PID 应判定为本实例"
+        assert _died_within(proc_a), "PIDFile 指向的本实例残留进程应被限域停止"
+        assert not os.path.exists(agent_pf), "停止后 pidfile 应被清理"
+    finally:
+        _kill_quietly(proc_a)
+
+
+def test_stop_pidfile_missing_or_garbage_is_noop(tmp_path):
+    """PIDFile 缺失 / 内容非 PID：不 kill、不报错，仅清掉垃圾文件。"""
+    dir_a, _, registry, lock = _sandbox(tmp_path)
+    garbage_pf = os.path.join(dir_a, "data", "worker.pid")
+    with open(garbage_pf, "w") as f:
+        f.write("not-a-pid\n")
+    body = (
+        '_stop_pidfile "$INSTALL_DIR/data/worker.agent.pid"\n'
+        '_stop_pidfile "$DAEMON_PIDFILE"\n'
+        'echo "done" >> "$CALLS"\n'
+    )
+    h = harness.build_harness(body, install_dir=dir_a, module=AGENT_MODULE,
+                              registry_dir=registry, registry_lock=lock)
+    r = harness.run(h)
+    assert r.returncode == 0, f"harness 失败: {r.stderr}"
+    assert "done" in _calls(dir_a)
+    assert not os.path.exists(garbage_pf), "垃圾 pidfile 应被清理"
+
+
+# --------------------------------------------------------------------------
+# --service-name 合法性校验（拼 root 路径 / systemctl 参数，必须 fail-fast）
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad_name", [
+    "../escape", "a b", "a;b", "a|b", "a(b)", "a/b", "a`id`b", "a$b",
+])
+def test_service_name_validation_rejects_unsafe_names(tmp_path, bad_name):
+    """非法 unit 名在构造 SERVICE_FILE 前必须 fail-fast（防穿越/注入）。"""
+    dir_a, _, registry, lock = _sandbox(tmp_path)
+    h = harness.build_harness(
+        'echo "UNIT=$SERVICE_NAME" >> "$CALLS"\n',
+        install_dir=dir_a, module=AGENT_MODULE, service_name_arg=bad_name,
+        registry_dir=registry, registry_lock=lock)
+    r = harness.run(h)
+    assert r.returncode != 0, f"非法 --service-name({bad_name!r}) 必须 fail-fast"
+    assert "invalid --service-name" in r.stderr, f"应给出明确的非法提示: {r.stderr}"
+    # 校验在写任何调用日志之前失败（fail 只走 stderr，不落 CALLS）
+    calls_path = os.path.join(dir_a, "_calls.log")
+    assert not os.path.exists(calls_path) or "UNIT=" not in open(calls_path).read(), \
+        "校验失败后不得继续执行"
+
+
+def test_service_name_validation_accepts_allowed_charset(tmp_path):
+    """合法字符集（字母/数字/_/./-）的 unit 名正常通过校验。"""
+    dir_a, _, registry, lock = _sandbox(tmp_path)
+    h = harness.build_harness(
+        'echo "UNIT=$SERVICE_NAME" >> "$CALLS"\necho done\n',
+        install_dir=dir_a, module=AGENT_MODULE, service_name_arg="runtime-agent.custom_1-x",
+        registry_dir=registry, registry_lock=lock)
+    r = harness.run(h)
+    assert r.returncode == 0, f"合法 --service-name 不应失败: {r.stderr}"
+    assert "UNIT=runtime-agent.custom_1-x" in _calls(dir_a)
 
 
 # --------------------------------------------------------------------------

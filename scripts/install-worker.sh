@@ -117,7 +117,7 @@ WORKER_MODULE="src.domains.runtime.engine.agent"
 # systemd 服务名 + 注册成功日志标记（沙箱与普通 worker 区分，同机共存不互杀）
 # 普通 worker 的服务名在下方「实例身份」段按安装目录派生（Issue #3418）：
 # 写死 runtime-agent 时，同机第二个普通 worker 的 install/restart/rollback 会直接
-# 作用到第一个 worker 的 unit（2026-11-19 121.36.74.10 双 worker 互杀事故通道之一）。
+# 作用到第一个 worker 的 unit（2026-11-19 某生产主机双 worker 互杀事故通道之一）。
 SERVICE_NAME=""
 REGISTER_LOG="RuntimeAgent registered"
 if [ "$CRED_TYPE" = "sandbox" ]; then
@@ -210,6 +210,12 @@ _default_service_name() {
   echo "runtime-agent-${WORKER_INSTANCE_KEY}"
 }
 SERVICE_NAME="${SERVICE_NAME_ARG:-$(_default_service_name)}"
+# unit 名合法性（Issue #3418 审查）：SERVICE_NAME 会被拼进 root 路径
+# /etc/systemd/system/${SERVICE_NAME}.service 并传给 systemctl，只允许
+# ^[A-Za-z0-9_.-]+$，防路径穿越与参数注入；非法值一律 fail-fast。
+case "$SERVICE_NAME" in
+  *[!A-Za-z0-9_.-]*) fail "invalid --service-name '$SERVICE_NAME': only [A-Za-z0-9_.-] characters are allowed" ;;
+esac
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 # 实例注册表 + flock 跨实例互斥
@@ -500,11 +506,11 @@ restore_upgrade_backup() {
     # [全新安装语义修复 2026-11-05] 实例 52 实测：全新安装无备份（本来就没有旧代码），
     # 此时报错"worker will stay offline"是错的——worker 根本不需要回滚，探测/注册
     # 都在正常跑。正确动作 = 不动它，直接确认状态返回成功。
-    if systemctl is-active --quiet "${SERVICE_NAME:-runtime-agent}" 2>/dev/null; then
+    if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
       log "No pre-upgrade backup (fresh install) -- nothing to roll back; new agent is ACTIVE, leaving it alone"
       return 0
     fi
-    log "Rollback failed: no backup ($_upgrade_backup_dir missing) and service is NOT active -- manual intervention needed: journalctl -u ${SERVICE_NAME:-runtime-agent}"
+    log "Rollback failed: no backup ($_upgrade_backup_dir missing) and service is NOT active -- manual intervention needed: journalctl -u $SERVICE_NAME"
     return 1
   fi
   rm -rf "$INSTALL_DIR/src"
@@ -513,7 +519,7 @@ restore_upgrade_backup() {
   log "Restored old code ($(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo unknown))"
   if [ "$_mode" = "systemd" ]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl restart ${SERVICE_NAME:-runtime-agent} >/dev/null 2>&1 || true
+    systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
     if [ -n "${SERVICE_NAME:-}" ]; then
       _rb_pid="$(systemctl show "$SERVICE_NAME" --property=MainPID --value 2>/dev/null || true)"
       if [ -n "$_rb_pid" ]; then registry_register "$_rb_pid"; fi
