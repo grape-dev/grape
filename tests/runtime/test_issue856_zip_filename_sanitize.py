@@ -72,7 +72,9 @@ def wdb(tmp_path, monkeypatch):
     sqlite3_conn.execute(_SKILL_DDL)
     sqlite3_conn.commit()
     db_obj = _DB(sqlite3_conn)
-    db_lock = threading.Lock()
+    # RLock（对齐生产 session_manager.db_lock）：log_audit 持锁内会再进
+    # _next_seq/_get_last_hash 重取同一把锁，非重入 Lock 会自死锁。
+    db_lock = threading.RLock()
     import src.kernel.session_manager as sm
     import src.domains.mgmt.user.db as user_db
     monkeypatch.setattr(sm, "db", db_obj)
