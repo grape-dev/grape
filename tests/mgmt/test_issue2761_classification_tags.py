@@ -43,9 +43,11 @@ def test_category_dict_seeded():
 
     rows = list_category_dict()
     l1 = [r for r in rows if r["level"] == 1]
-    assert len(l1) == 10, f"一级域应为 10 个，实得 {len(l1)}"
+    # 202611180004 分类收敛（用户决策）：一级域从 10 收敛为 3（IT研发/运营域/其他）
+    assert len(l1) == 3, f"一级域应为 3 个（收敛后），实得 {len(l1)}"
+    assert {r["name"] for r in l1} == {"IT研发", "运营域", "其他"}
     tree = list_category_tree()
-    assert len(tree) == 10
+    assert len(tree) == 3
     assert all(t["children"] for t in tree), "每个一级域都应有二级子类"
 
 
@@ -54,9 +56,9 @@ def test_category_tree_api():
 
     data = category_tree(scope="scene", user=USER)
     assert data["scope"] == "scene"
-    assert len(data["categories"]) == 10
+    assert len(data["categories"]) == 3
     assert data["categories"][0]["children"]
-    assert len(category_tree(scope="skill", user=USER)["categories"]) == 10
+    assert len(category_tree(scope="skill", user=USER)["categories"]) == 3
     with pytest.raises(HTTPException) as exc:
         category_tree(scope="bad", user=USER)
     assert exc.value.status_code == 400
@@ -69,7 +71,9 @@ def test_legacy_category_endpoints_keep_flat_list():
     scene = list_scene_categories(user=USER)
     assert scene["categories"] and scene["tree"]
     skill = list_categories(user=USER)
-    assert skill["categories"] and skill["tree"]
+    # 202611180004 老分类（skill_category/skill.category_id）废止：平铺列表为空，树走统一分类
+    assert skill["categories"] == []
+    assert skill["tree"]
 
 
 # ===== 标签规则 =====

@@ -10034,7 +10034,9 @@ def _fn_skill_intro_override_schema() -> None:
 
 
 register_migration(
-    version="202611180003",
+    # [rebase 到 arch-weekly-11 改号] 原用 202611180003，基线已被
+    # issue2761-skill-classification-columns 占用（撞号守卫），顺延到 202611181203。
+    version="202611181203",
     name="skill-intro-override-schema",
     kind="safe",
     domains=("runtime",),
