@@ -247,3 +247,90 @@ class TestFailClosedBehavior:
         result = asyncio.run(agent._execute_task_impl(_StubClient(), task, "oc-worker"))
         assert result.get("_started") is False
         assert "workspace_unavailable" in (result.get("_error") or "")
+
+
+class TestDirectLastNodePendingReviewHook:
+    """Issue #3482 第四轮 Required（收尾钩子随迁）：event_pipeline 旧副本删除后，
+    「末节点完成 → finalize_issue_to_pending_review(source="exec")」人工闸随
+    direct 入口唯一实现搬进 direct_executor 收尾清单——与 worker 端
+    complete_task() 的 pending_review 钩子同口径，a2a_dispatch / events(redispatch) /
+    webhook 三入口的末节点待人工确认不再断链。"""
+
+    def test_direct_completed_triggers_last_node_finalize(self, monkeypatch, tmp_path):
+        """direct 末节点 completed → 收尾必须调用 finalize_issue_to_pending_review，
+        且 source="exec"（幂等语义与旧副本一致），非 completed 收尾不触发。"""
+        import src.domains.runtime.pipeline.event_pipeline as ep
+        import src.domains.runtime.engine.service as svc
+        import src.domains.runtime.engine.executor as executor_mod
+        import src.api.event_store as event_store
+        import src.api.session_store as session_store
+        import src.domains.insight.public as insight_public
+        import src.domains.runtime.issues_center as issues_center
+        import src.domains.runtime.engine.instances as instances
+        import src.kernel.prompt_builder as pb
+
+        fails = []
+        monkeypatch.setattr(ep, "_fail_event",
+                            lambda seq, reason, exit_code=1, diag=None: fails.append(reason))
+        monkeypatch.setattr(ep, "get_agent_workdir", lambda *a, **k: str(tmp_path))
+        monkeypatch.setattr(ep, "resolve_actor_account", lambda evt, rk: "tester")
+        monkeypatch.setattr(ep, "get_agent_display_name", lambda at: at)
+        monkeypatch.setattr(ep, "_inject_scene_env", lambda *a, **k: None)
+        monkeypatch.setattr(ep, "_inject_issue_pr_env", lambda *a, **k: None)
+        monkeypatch.setattr(ep, "_inject_bot_agent_env", lambda *a, **k: None)
+        monkeypatch.setattr(ep, "_read_scene_linked_repos", lambda *a, **k: "")
+        monkeypatch.setattr(ep, "_post_result_to_issue", lambda *a, **k: None)
+        monkeypatch.setattr(ep, "_sync_issue_comments_to_conversation", lambda *a, **k: None)
+        monkeypatch.setattr(direct_executor, "_materialize_workdir_and_skill_gate",
+                            lambda **kw: (kw.get("prompt", ""), True))
+        monkeypatch.setattr(session_store, "get_or_create_issue_session",
+                            lambda rk, at, iid: {"id": "sess-3482"})
+        monkeypatch.setattr(session_store, "guard_issue_session_pointer",
+                            lambda s, backend: "")
+        monkeypatch.setattr(session_store, "is_subtask_mode_enabled",
+                            lambda rk, iid: False)
+        monkeypatch.setattr(event_store, "evaluate_agent_output",
+                            lambda at, tools, text: (True, text or "done"))
+        monkeypatch.setattr(event_store, "update_event_config", lambda *a, **k: None)
+        monkeypatch.setattr(event_store, "update_event_complete", lambda *a, **k: None)
+        monkeypatch.setattr(svc, "update_task_status", lambda *a, **k: None)
+        monkeypatch.setattr(svc, "set_task_signal", lambda *a, **k: None)
+        monkeypatch.setattr(pb, "build_devops_agent_prompt", lambda *a, **k: "p")
+        monkeypatch.setattr(pb, "resolve_task_server_env", lambda rid: {})
+        monkeypatch.setattr(instances, "runtime_instance_name", lambda rid: "oc-test")
+
+        class _StubUsage:
+            def start(self):
+                pass
+
+            def feed(self, *a, **k):
+                pass
+
+            def finish(self, *a, **k):
+                pass
+
+        monkeypatch.setattr(insight_public, "master_usage_for_task",
+                            lambda *a, **k: _StubUsage())
+
+        def _fake_stream(*a, **k):
+            yield ("done", {"exit_code": 0, "text": "task done", "oc_session_id": "",
+                            "errors": [], "stderr": ""})
+
+        monkeypatch.setattr(executor_mod, "stream_devops_agent", _fake_stream)
+
+        finals = []
+
+        def _fake_finalize(rk, iid, at, source="pipeline"):
+            finals.append((rk, iid, at, source))
+            return "pending_review"
+
+        monkeypatch.setattr(issues_center, "finalize_issue_to_pending_review", _fake_finalize)
+
+        evt = {"repo_key": "gitcode:owner/repo", "repository": "owner/repo",
+               "issue_id": "#3482", "type": "a2a_event", "payload": {}}
+        direct_executor._execute_agent_inner(
+            "gitcode:owner/repo", 778, "issue", "opencode", "issue", evt, 0, "t-3482")
+        assert not fails, f"unexpected fail_event during completed run: {fails}"
+        assert finals == [("gitcode:owner/repo", "#3482", "issue", "exec")], (
+            "direct 末节点完成必须触发 finalize_issue_to_pending_review(source=\"exec\") "
+            "人工闸（与 worker complete_task() 同口径），不得随旧副本删除而断链")

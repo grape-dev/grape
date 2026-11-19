@@ -1110,8 +1110,13 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as _e:
             log.warning(f"SRE → pending_review failed: {_e}")
 
-    # 末节点完成后 → 推进到「待人工确认」（与 event_pipeline 同一钩子清单）。
-    # 技能未显式置 pending-review 时由服务端兜底；函数自带 stage/末节点守卫，非末节点 noop。
+    # 末节点完成后 → 推进到「待人工确认」（人工闸 2026-11-17：不再自动结单）。
+    # 全部节点 completed + 无阻断 → status=stage=pending_review，等人工 confirm-done；
+    # failed/QA 阻断同样回退 pending_review 并保留原因标注。
+    # 函数自带 stage/末节点守卫，非末节点 noop。
+    # （Issue #3482 第四轮 Required：本钩子原在 event_pipeline 旧副本收尾清单内，随
+    #   #699 唯一实现迁移搬回此处——与 worker 端 complete_task() 的 pending_review 钩子
+    #   同口径，恢复 a2a_dispatch / events(redispatch) / webhook 三入口的人工闸。）
     if new_status == "completed" and issue_id and agent_type:
         try:
             from src.api.issues_center import finalize_issue_to_pending_review
