@@ -161,6 +161,39 @@ def test_expired_takeover_is_inactive_and_self_heals():
         assert c.fetchone() == ("expired", None)
 
 
+def test_expired_takeover_in_repo_self_heals_and_does_not_block_autopilot():
+    """R2 自愈：仓储级守门遇过期 active 会话必须真转 expired，且不再拦截自动派发。
+
+    回归点（PR #1676 第 6 轮复审）：active_takeover_in_repo 的自愈 UPDATE 占位符 4 个、
+    绑定参数只有 3 个（缺 repo_key），sqlite3 每次抛 ProgrammingError 被 except 吞掉，
+    自愈永不生效（过期会话仍为 active，仓储级守门持续冻结 autopilot）。
+    """
+    from src.domains.runtime.engine import takeover as svc
+    from src.domains.runtime.engine import scheduler as sch
+
+    exec_id = 770410
+    sid = _seed_takeover(exec_id, agent="coding", issue=ISSUE, expires_in=-10,
+                         session_id="tkos_3201_exp_repo")
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM autopilot_executions WHERE id=?", (exec_id,))
+        c.execute("INSERT INTO autopilot_executions (id, task_id, status) VALUES (?,?,?)",
+                  (exec_id, 5, "pending"))
+        db.commit()
+
+    assert svc.active_takeover_in_repo(REPO) is None
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status, active_key FROM takeover_sessions WHERE id=?", (sid,))
+        assert c.fetchone() == ("expired", None), "过期仓储级会话必须自愈为 expired"
+
+    assert sch._skip_autopilot_for_takeover(REPO, {"id": 5}, exec_id) is False
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status FROM autopilot_executions WHERE id=?", (exec_id,))
+        assert c.fetchone()[0] == "pending", "过期接管不得拦截 autopilot 派发"
+
+
 def test_takeover_on_one_issue_does_not_block_another():
     from src.domains.runtime.engine import takeover as svc
 
