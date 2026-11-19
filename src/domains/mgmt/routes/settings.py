@@ -2033,7 +2033,14 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     # 解析当前组织 org_id
     _org_id = user.get("org_id", "")
     _is_personal = is_org_personal(_org_id) if _org_id else True
-    _cred_org_id = "" if _is_personal else _org_id
+    # org_id 在 runtime_credentials 里是 int 列：MySQL STRICT_TRANS_TABLES 下把 '' 写进去
+    # 直接 1366 Incorrect integer value，表现为「添加设备」整条请求 500。
+    # 个人组织（绝大多数场景）无组织归属 → 归 0（与 agent_runtimes 的既有归一一致），
+    # 不写空串、也不写 None（该列 NOT NULL DEFAULT 0）。
+    try:
+        _cred_org_id = 0 if _is_personal else int(_org_id)
+    except (TypeError, ValueError):
+        _cred_org_id = 0
     token = "rta_" + secrets.token_urlsafe(32)
     # P3-5f-3：runtime_credentials 在 runtime 域；重名判定由原语以返回值上报
     # （若让唯一约束异常冒泡，意图会被判为可重试失败而无限重放）
