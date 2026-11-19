@@ -165,6 +165,10 @@ PORT_TARGETS: dict[str, tuple[str, ...]] = {
         # 代发内容台账（outbound_content_ledger）的 DDL/读写原语归 mgmt 域，
         # 由 kernel/outbound_ledger 经 pipeline 端口调用；排最后，不影响既有符号解析。
         "src.domains.mgmt.public",
+        # GSB 服务总线 Provider 的注册引导（ensure_providers_registered）归契约域：
+        # 与上面 GSB 注册表原语同属总线/路由基础设施，沿用同一端口。仅此模块提供该
+        # 符号且排最后，前面候选优先命中，既有符号解析不变。
+        "src.domains.contracts",
     ),
 }
 
