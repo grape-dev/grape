@@ -59,7 +59,7 @@ AG_AGGREGATE = "ag-ui.css"
 FROZEN = {
     "account-view.js": ("60", None, "034ac9383784bb7f", ["components/BindDialog.vue", "components/CredRepoRow.vue", "components/PatDialog.vue", "views/AccountView.vue", "views/LlmCredManager.vue", "views/entries/account-view.js"]),
     "admin-view.js": ("46", None, "e59a18dcd51cee02", ["components/ui/AGHelp.vue", "components/ui/AGPill.vue", "lib/bot-summary.js", "views/AdminChannels.vue", "views/AdminPlatforms.vue", "views/AdminView.vue", "views/entries/admin-view.js"]),
-    "agent-view.js": ("50", None, "f9a7f9bdba82c363", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "views/AgentView.vue", "views/entries/agent-view.js"]),
+    "agent-view.js": ("51", None, "06f9a9d9c11fc69d", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "views/AgentView.vue", "views/entries/agent-view.js"]),
     "autopilot-view.js": ("54", "60", "e586d0e94604d800", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "lib/repo-provider.js", "styles/bridge.css", "views/AutopilotView.vue", "views/entries/autopilot-view.js"]),
     "chat-view.js": ("61", None, "613b5554a773d619", ["lib/onboard.js", "views/ChatView.vue", "views/entries/chat-view.js"]),
     "dashboard-view.js": ("85", "61", "6987249862446785", ["components/ui/AGButton.vue", "components/ui/AGCard.vue", "components/ui/AGHelp.vue", "components/ui/AGInput.vue", "components/ui/AGModal.vue", "components/ui/AGNav.vue", "components/ui/AGPill.vue", "components/ui/AGSelect.vue", "components/ui/AGTable.vue", "components/ui/AGToast.vue", "lib/repo-provider.js", "styles/bridge.css", "views/DashboardView.vue", "views/entries/dashboard-view.js"]),
@@ -90,7 +90,7 @@ FROZEN = {
 SHIPPED = {
     "account-view.js": ("60", None, "034ac9383784bb7f", None),
     "admin-view.js": ("46", None, "e59a18dcd51cee02", None),
-    "agent-view.js": ("50", None, "f9a7f9bdba82c363", None),
+    "agent-view.js": ("51", None, "06f9a9d9c11fc69d", None),
     "autopilot-view.js": ("54", "60", "e586d0e94604d800", "3f9f3319ade97fe3"),
     "chat-view.js": ("61", None, "613b5554a773d619", None),
     "dashboard-view.js": ("85", "61", "6987249862446785", "654328b9208f445f"),

@@ -1,11 +1,15 @@
 /*
  * Issue #1310 — 引擎展示名（AgentView：卡片 + 事件表引擎列）
  *
- * 迁移说明：原测试沙箱执行 legacy agents.js/autopilot.js；Vue 迁移后为 engineText computed。
- *   1. 展示文本优先级：backend → backends 逗号拼接（不显示 undefined / null）
- *   2. 无引擎 → agents.engine.no_engine 占位，不空白
- *   3. 引擎圆点按引擎名映射（opencode/hermes/codearts/codex），未知引擎给空串不误导
- *   4. 事件表「引擎」列走同一口径
+ * 2026-11-19 产品裁定（A）：Agent 页头卡**不再**挂引擎 chip——它展示的是
+ * 「该 agent 会话最近绑定的引擎」（devops_agent_session → agent_runtimes），
+ * 多仓库共用同一 agent 时会显示别处会话残留的引擎，容易误读。
+ * 引擎绑定/健康在「引擎」页与「事件」页各有完整入口。
+ *
+ * 因此原「engineText 优先级 / 无引擎占位 / 圆点映射」三条断言随 chip 一并作废，
+ * 本文件改为守两条仍然成立的口径：
+ *   1. 头卡不渲染引擎 chip（防止有人顺手加回裸展示）；
+ *   2. 事件表「引擎」列仍在，空引擎显示 —（不是 undefined，也不是空白）。
  */
 const assert = require('assert');
 const fs = require('fs');
@@ -20,31 +24,15 @@ function check(name, fn) {
   console.log('  ✓ ' + name);
 }
 
-check('展示文本优先级与空值保护', function () {
-  const i = VIEW.indexOf('const engineText = computed(');
-  assert.ok(i > 0, '应有 engineText');
-  const b = VIEW.slice(i, i + 400);
-  assert.ok(/props\.data\.backend/.test(b), '优先 backend');
-  assert.ok(/backends\.join\('\, '\)/.test(b), '其次 backends 拼接');
-  assert.ok(/\|\| ''/.test(b), '空值应回落空串（不显示 undefined）');
+check('头卡不再渲染引擎 chip', function () {
+  assert.ok(VIEW.indexOf('ag__engine') < 0, 'Agent 头卡不应再有 ag__engine 区块');
+  assert.ok(VIEW.indexOf('engineText') < 0, 'engineText computed 应随 chip 一起移除');
+  assert.ok(VIEW.indexOf('engineDot') < 0, 'engineDot computed 应随 chip 一起移除');
 });
 
-check('无引擎有占位文案', function () {
-  assert.ok(/agents\.engine\.no_engine/.test(VIEW), '无引擎应显示占位');
-});
-
-check('引擎圆点按名映射、未知不硬编码', function () {
-  const i = VIEW.indexOf('const engineDot = computed(');
-  const b = VIEW.slice(i, i + 700);
-  for (const k of ['hermes', 'opencode', 'codearts', 'codex']) {
-    assert.ok(b.indexOf(k) >= 0, '应识别 ' + k);
-  }
-  assert.ok(/return ''/.test(b), '未知引擎应返回空串');
-});
-
-check('事件表引擎列同口径', function () {
+check('事件表引擎列口径保留', function () {
   assert.ok(/agents\.event\.table_engine/.test(VIEW), '事件表应有引擎列标题');
   assert.ok(/ev\.backend \|\| '—'/.test(VIEW), '空引擎显示 —（不是 undefined）');
 });
 
-console.log('\n#1310 全部通过 (' + passed + '/4)');
+console.log('\n#1310 全部通过 (' + passed + '/2)');
