@@ -29,25 +29,6 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 # 具体异常原文只进服务端日志，避免内部信息直出与中文字面量硬编码）
 SANDBOX_PROVIDER_REGISTRATION_FAILED = "sandbox_provider_registration_failed"
 
-def _check_login_method_before_unbind(user_id: str, provider: str):
-    """P0-4: 手动令牌解绑前检查至少保留一种登录方式。
-
-    与 grape_auth.py 的 unbind_provider 保持一致：
-    - 有密码 → 允许解绑
-    - 无密码但有其他活跃绑定（identity_count > 1）→ 允许解绑
-    - 无密码且只有当前这一条绑定 → 拒绝解绑
-    """
-    from src.domains.mgmt.auth.auth_guards import LoginMethodPolicy
-    if LoginMethodPolicy.would_lock_out(user_id):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": 400,
-                "message": "至少保留一种登录方式，请先设置 Grape 密码",
-                "need_set_password": True,
-            },
-        )
-
 def _resolve_repo_key(owner_repo: str) -> str:
     """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
     from src.kernel.repo_key import to_repo_key
@@ -2911,14 +2892,38 @@ def _cascade_pat_clear(user: dict, provider: str) -> dict:
     返回 {oauth_kept: bool}。
     """
     from src.domains.mgmt.auth.grape_account_db import (
-        get_user_identities, delete_external_identity, revoke_provider_credentials)
+        get_user_identities, delete_external_identity)
     from src.domains.platform.public import on_pat_deleted
-    ident = next((i for i in get_user_identities(user["id"]) if i["provider"] == provider), None)
+    # 破坏性写前必须 strict 读：「读失败」≠「没有绑定」——非 strict 读把异常吞成
+    # 空列表，会让下面的 has_oauth 判假 → 误删真正的 OAuth 身份行并清其 token
+    # （无密码账号就此变成 0 种登录方式）。读不出来就整体放弃，不做任何变更。
+    try:
+        idents = get_user_identities(user["id"], strict=True)
+    except Exception as _read_err:
+        log.warning(f"_cascade_pat_clear: identity read failed, abort without writes "
+                    f"(user={user['id']}, provider={provider}): {_read_err}")
+        raise HTTPException(status_code=500, detail={
+            "code": 500,
+            "message": "读取平台绑定失败，未做任何变更，请稍后重试",
+        })
+    ident = next((i for i in idents if i["provider"] == provider), None)
     has_oauth = bool(ident and ident.get("has_oauth_token"))
-    _check_login_method_before_unbind(user["id"], provider)
-    revoke_provider_credentials(user["id"], provider)
-    if not has_oauth:
-        delete_external_identity(user["id"], provider)
+    # 清 PAT 不是登录方式变更：有 OAuth 时身份行原样保留，无 OAuth 时删的是
+    # PAT 归属行（access_token 恒空）——两种形态都不减少可用登录方式，
+    # 因此这里不能套「至少保留一种登录方式」前置闸（会把本行本身数成最后
+    # 一种方式，无密码账号清 PAT 恒 400）。真正的登录保底在身份解绑路径
+    # （grape_auth.unbind_provider → UnbindGuard/KeepOnePredicate 原子裁决）。
+    # 清 PAT 只撤 PAT 凭据：revoke_provider_credentials 会连 kind='oauth' 一起删，
+    # 把该平台的 OAuth 刷新 fallback 一并清掉（与「清 PAT 就只清 PAT」不符；
+    # oauth 凭据行的撤销归身份解绑路径）。PAT 行可能是迁移前的 `<p>_pat`
+    # 复合键，delete_credential 内部已做新旧键双删。
+    from src.domains.mgmt.user.db import delete_credential as _delete_credential
+    _delete_credential(user["id"], provider, kind="pat")
+    if ident is not None and not has_oauth:
+        # 删的是 PAT 归属行而非登录凭据：keep-one 判据会把这一行数成最后
+        # 一种登录方式而恒拒绝（原子 UPDATE rowcount=0 → 静默不删），
+        # 变成「接口 200 但归属行残留」，故显式关闭。
+        delete_external_identity(user["id"], provider, require_keep_one=False)
         # D42：user_repos 缓存清理（仅平台级解绑；OAuth 共存时供给②接管，列表保留）
         try:
             from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl

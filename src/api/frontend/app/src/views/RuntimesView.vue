@@ -121,7 +121,7 @@
                 />
                 <span
                   class="rtv-tagpill"
-                  :style="{ background: SCENE_TAG_COLORS[s] || '#0b7a55' }"
+                  :style="{ '--tag': SCENE_TAG_COLORS[s] || 'var(--rtv-scn-default)' }"
                   >{{ sceneDisplayName(s) }}</span
                 >
               </label>
@@ -152,7 +152,7 @@
                   :style="{ accentColor: RT_TAG_COLORS[tg] || '#666' }"
                   @change="toggleMulti('tag', tg)"
                 />
-                <span class="rtv-tagpill" :style="{ background: RT_TAG_COLORS[tg] || '#666' }">{{
+                <span class="rtv-tagpill" :style="{ '--tag': RT_TAG_COLORS[tg] || 'var(--rtv-tg-all)' }">{{
                   rtTagLabel(tg)
                 }}</span>
               </label>
@@ -569,7 +569,7 @@
               />
               <span
                 class="rtv-tagpill"
-                :style="{ background: SCENE_TAG_COLORS[s.name] || '#0b7a55' }"
+                :style="{ '--tag': SCENE_TAG_COLORS[s.name] || 'var(--rtv-scn-default)' }"
                 >{{ s.display_name }}</span
               >
             </label>
@@ -594,7 +594,7 @@
                 :style="{ accentColor: RT_TAG_COLORS[tg] }"
                 @change="onEdTagChange(tg)"
               />
-              <span class="rtv-tagpill" :style="{ background: RT_TAG_COLORS[tg] }">{{
+              <span class="rtv-tagpill" :style="{ '--tag': RT_TAG_COLORS[tg] }">{{
                 rtTagLabel(tg)
               }}</span>
               <span class="rtv-tagdesc">{{
@@ -1191,11 +1191,13 @@ import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 const G = globalThis
 
 // ═══ 常量（与老代码一致） ═══
+// 配色：Tailwind 600（亮色）/ 400（暗色）双档，全部走页面内 CSS 变量，
+// 药丸只用「基色 14% 淡底 + 基色实字」，一个公式吃两主题。
 const RUNTIME_COLOR = {
-  online: 'var(--g)',
-  recently_lost: 'var(--y)',
+  online: 'var(--rtv-ok)',
+  recently_lost: 'var(--rtv-warn)',
   offline: 'var(--t3)',
-  about_to_gc: 'var(--r)',
+  about_to_gc: 'var(--rtv-bad)',
 }
 const HEALTH_NAMES = {
   online: 'online',
@@ -1203,76 +1205,61 @@ const HEALTH_NAMES = {
   offline: 'offline',
   about_to_gc: 'about_to_gc',
 }
+// 徽章底色由 CSS 用 color-mix 现算（16% / 暗色 22%），这里只留一个基色给圆点用
 const HEALTH_BADGE = {
-  online: { color: 'var(--g)', bg: '#dcfce7' },
-  recently_lost: { color: 'var(--y)', bg: '#fef3c7' },
-  offline: { color: 'var(--t3)', bg: '#eef0f3' },
-  about_to_gc: { color: 'var(--r)', bg: '#fee2e2' },
+  online: { color: 'var(--rtv-ok)', bg: 'var(--rtv-ok)' },
+  recently_lost: { color: 'var(--rtv-warn)', bg: 'var(--rtv-warn)' },
+  offline: { color: 'var(--t3)', bg: 'var(--t3)' },
+  about_to_gc: { color: 'var(--rtv-bad)', bg: 'var(--rtv-bad)' },
 }
 const SCOPE_BADGE_CFG = {
-  global: { label: '全局', color: '#3168e0', bg: '#e3edfd' },
-  repo: { label: '仓库', color: '#8b5cf6', bg: '#ede9fe' },
-  user: { label: '个人', color: '#1ca44c', bg: '#dcfce7' },
-  local: { label: '本机', color: '#0e7490', bg: '#cffafe' },
+  global: { label: '全局', color: 'var(--rtv-sc-global)', bg: 'var(--rtv-sc-global)' },
+  repo: { label: '仓库', color: 'var(--rtv-sc-repo)', bg: 'var(--rtv-sc-repo)' },
+  user: { label: '个人', color: 'var(--rtv-sc-user)', bg: 'var(--rtv-sc-user)' },
+  local: { label: '本机', color: 'var(--rtv-sc-local)', bg: 'var(--rtv-sc-local)' },
 }
 const SCOPE_LABELS = { global: '全局', user: '个人', repo: '仓库', local: '本机' }
 const ENGINE_DOT = {
-  opencode: '#3b82f6',
-  hermes: '#8b5cf6',
-  codearts: '#f59e0b',
-  codex: '#10a37f',
-  aishell: '#0a8cd8',
+  opencode: 'var(--rtv-en-opencode)',
+  hermes: 'var(--rtv-en-hermes)',
+  codearts: 'var(--rtv-en-codearts)',
+  codex: 'var(--rtv-en-codex)',
+  aishell: 'var(--rtv-en-aishell)',
 }
 const SCENE_TAG_COLORS = {
-  default: '#0b7a55',
-  'cloud-native': '#2563b0',
-  iac: '#9a6100',
-  'agent-dev': '#6d43c9',
-  'skill-dev': '#b02a6c',
-  'api-skill-dev': '#0b7f95',
-  'blog-publish': '#b52b2b',
+  default: 'var(--rtv-scn-default)',
+  'cloud-native': 'var(--rtv-scn-cloud-native)',
+  iac: 'var(--rtv-scn-iac)',
+  'agent-dev': 'var(--rtv-scn-agent-dev)',
+  'skill-dev': 'var(--rtv-scn-skill-dev)',
+  'api-skill-dev': 'var(--rtv-scn-api-skill-dev)',
+  'blog-publish': 'var(--rtv-scn-blog-publish)',
 }
 const RT_TAG_COLORS = {
-  all: '#4b4ec9',
-  vod: '#b02a6c',
-  issue: '#b52b2b',
-  coding: '#2563b0',
-  qa: '#6d43c9',
-  sre: '#9a6100',
+  all: 'var(--rtv-tg-all)',
+  vod: 'var(--rtv-tg-vod)',
+  issue: 'var(--rtv-tg-issue)',
+  coding: 'var(--rtv-tg-coding)',
+  qa: 'var(--rtv-tg-qa)',
+  sre: 'var(--rtv-tg-sre)',
 }
 const RT_TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre']
 const HEALTH_ORDER = { online: 0, recently_lost: 1, offline: 2, about_to_gc: 3 }
 const DEV_STATUS_COLORS = {
-  'cde.0000': '#6b7280',
-  'cde.0001': '#2563eb',
-  'cde.0002': '#16a34a',
-  'cde.0003': '#2563eb',
-  'cde.0004': '#16a34a',
-  'cde.0005': '#d97706',
-  'cde.0006': '#dc2626',
-  'cde.0007': '#d97706',
-  'cde.0008': '#d97706',
-  'cde.0009': '#9ca3af',
-  'cde.1001': '#dc2626',
-  'cde.1002': '#dc2626',
-  'cde.1003': '#dc2626',
-  'cde.1004': '#dc2626',
-}
-const DEV_STATUS_BGS = {
-  'cde.0000': '#f3f4f6',
-  'cde.0001': '#dbeafe',
-  'cde.0002': '#dcfce7',
-  'cde.0003': '#dbeafe',
-  'cde.0004': '#dcfce7',
-  'cde.0005': '#fef3c7',
-  'cde.0006': '#fee2e2',
-  'cde.0007': '#fef3c7',
-  'cde.0008': '#fef3c7',
-  'cde.0009': '#f9fafb',
-  'cde.1001': '#fee2e2',
-  'cde.1002': '#fee2e2',
-  'cde.1003': '#fee2e2',
-  'cde.1004': '#fee2e2',
+  'cde.0000': '#64748b',
+  'cde.0001': 'var(--rtv-sc-global)',
+  'cde.0002': 'var(--rtv-ok)',
+  'cde.0003': 'var(--rtv-sc-global)',
+  'cde.0004': 'var(--rtv-ok)',
+  'cde.0005': 'var(--rtv-warn)',
+  'cde.0006': 'var(--rtv-bad)',
+  'cde.0007': 'var(--rtv-warn)',
+  'cde.0008': 'var(--rtv-warn)',
+  'cde.0009': '#94a3b8',
+  'cde.1001': 'var(--rtv-bad)',
+  'cde.1002': 'var(--rtv-bad)',
+  'cde.1003': 'var(--rtv-bad)',
+  'cde.1004': 'var(--rtv-bad)',
 }
 const BUSY_STATES = ['cde.0001', 'cde.0003', 'cde.0005', 'cde.0006', 'cde.0007', 'cde.0008']
 const PAGE_SIZE = 20
@@ -1555,10 +1542,10 @@ function engineTagSummary(tags) {
   if (!shown.length)
     return `<span style="color:var(--t3);font-size:10px">${t('empty.unassigned')}</span>`
   return shown
-    .map(
-      (x) =>
-        `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color: var(--on-accent);background:${RT_TAG_COLORS[x] || '#666'};margin:0 2px">${esc(rtTagLabel(x)) || esc(x)}</span>`
-    )
+    .map((x) => {
+      const color = RT_TAG_COLORS[x] || 'var(--rtv-tg-all)'
+      return `<span style="font-size:10px;padding:1px 6px;border-radius:999px;font-weight:600;color:${color};background:color-mix(in srgb, ${color} 14%, transparent);margin:0 2px">${esc(rtTagLabel(x)) || esc(x)}</span>`
+    })
     .join('')
 }
 function sceneTagSummary(tags) {
@@ -1567,8 +1554,8 @@ function sceneTagSummary(tags) {
   return tags
     .map((x) => {
       const dn = sceneDisplayName(x)
-      const color = SCENE_TAG_COLORS[x] || '#10b981'
-      return `<span style="font-size:10px;padding:1px 6px;border-radius:999px;color: var(--on-accent);background:${color};margin:0 2px">${esc(dn)}</span>`
+      const color = SCENE_TAG_COLORS[x] || 'var(--rtv-scn-default)'
+      return `<span style="font-size:10px;padding:1px 6px;border-radius:999px;font-weight:600;color:${color};background:color-mix(in srgb, ${color} 14%, transparent);margin:0 2px">${esc(dn)}</span>`
     })
     .join('')
 }
@@ -2520,10 +2507,10 @@ function stopDevspaceAuto() {
   devspaceAuto.value = false
 }
 function devStatusColor(st) {
-  return DEV_STATUS_COLORS[st] || '#8d97a8'
+  return DEV_STATUS_COLORS[st] || '#94a3b8'
 }
 function devStatusBg(st) {
-  return DEV_STATUS_BGS[st] || '#f3f4f6'
+  return `color-mix(in srgb, ${DEV_STATUS_COLORS[st] || '#94a3b8'} 14%, transparent)`
 }
 function devStatusLabel(st) {
   return t('devspace.status.' + (st || 'unknown').replace(/\./g, '_'))
@@ -2772,6 +2759,34 @@ onBeforeUnmount(function () {
   --sh: 0 1px 3px rgba(0, 0, 0, 0.04);
   --on-accent: #fff;
   --chip-bg: #f5f6f8;
+  /* 配色：Tailwind 600 档（亮色）/ 400 档（暗色），色相语义固定
+     （green=健康、amber=警告、red=异常、blue=全局、violet=仓库/qa、pink=vod、cyan=本机）。
+     药丸 = 基色实字 + color-mix(基色 14%, transparent) 淡底；暗色底抬到 20%。 */
+  --rtv-ok: #059669;
+  --rtv-warn: #d97706;
+  --rtv-bad: #dc2626;
+  --rtv-sc-global: #2563eb;
+  --rtv-sc-repo: #7c3aed;
+  --rtv-sc-user: #059669;
+  --rtv-sc-local: #0891b2;
+  --rtv-en-opencode: #2563eb;
+  --rtv-en-hermes: #7c3aed;
+  --rtv-en-codearts: #d97706;
+  --rtv-en-codex: #059669;
+  --rtv-en-aishell: #0891b2;
+  --rtv-scn-default: #059669;
+  --rtv-scn-cloud-native: #2563eb;
+  --rtv-scn-iac: #d97706;
+  --rtv-scn-agent-dev: #7c3aed;
+  --rtv-scn-skill-dev: #db2777;
+  --rtv-scn-api-skill-dev: #0891b2;
+  --rtv-scn-blog-publish: #dc2626;
+  --rtv-tg-all: #4f46e5;
+  --rtv-tg-vod: #db2777;
+  --rtv-tg-issue: #ea580c;
+  --rtv-tg-coding: #2563eb;
+  --rtv-tg-qa: #7c3aed;
+  --rtv-tg-sre: #ca8a04;
   min-height: 100%;
 }
 /* 暗色档（2026-11-18 用户报「暗色下 Engines/Workers 卡片还是白底」）：
@@ -2793,92 +2808,52 @@ onBeforeUnmount(function () {
   --r: #ff453a;
   --sh: 0 1px 3px rgba(0, 0, 0, 0.5);
   --chip-bg: #2c2c2e;
+  --rtv-ok: #34d399;
+  --rtv-warn: #fbbf24;
+  --rtv-bad: #f87171;
+  --rtv-sc-global: #60a5fa;
+  --rtv-sc-repo: #a78bfa;
+  --rtv-sc-user: #34d399;
+  --rtv-sc-local: #22d3ee;
+  --rtv-en-opencode: #60a5fa;
+  --rtv-en-hermes: #a78bfa;
+  --rtv-en-codearts: #fbbf24;
+  --rtv-en-codex: #34d399;
+  --rtv-en-aishell: #22d3ee;
+  --rtv-scn-default: #34d399;
+  --rtv-scn-cloud-native: #60a5fa;
+  --rtv-scn-iac: #fbbf24;
+  --rtv-scn-agent-dev: #a78bfa;
+  --rtv-scn-skill-dev: #f472b6;
+  --rtv-scn-api-skill-dev: #22d3ee;
+  --rtv-scn-blog-publish: #f87171;
+  --rtv-tg-all: #818cf8;
+  --rtv-tg-vod: #f472b6;
+  --rtv-tg-issue: #fb923c;
+  --rtv-tg-coding: #60a5fa;
+  --rtv-tg-qa: #a78bfa;
+  --rtv-tg-sre: #facc15;
 }
 
-/* 暗色档：徽章/危险按钮的深色变体（2026-11-18 用户裁定）
- * —— pastel 徽章在深色卡片上太亮，改「同色系低透明度底 + 提亮字」；
- * —— 吊销按钮（.bt-r）由实心红改成「卡片同色底 + 红描边 + 红字」（危险但不高饱和铺色）。 */
-:root[data-theme-mode='dark'] .rtv .rtv-hbadge.online {
-  color: #30d158;
-  background: rgba(48, 209, 88, 0.18);
-}
-:root[data-theme-mode='dark'] .rtv .rtv-hbadge.recently_lost {
-  color: #ff9f0a;
-  background: rgba(255, 159, 10, 0.18);
-}
-:root[data-theme-mode='dark'] .rtv .rtv-hbadge.offline {
-  color: #aeaeb2;
-  background: rgba(235, 235, 245, 0.1);
-}
-:root[data-theme-mode='dark'] .rtv .rtv-hbadge.about_to_gc {
-  color: #ff453a;
-  background: rgba(255, 69, 58, 0.18);
-}
-:root[data-theme-mode='dark'] .rtv .rtv-sbadge.global {
-  color: #5b9eff;
-  background: rgba(41, 151, 255, 0.18);
-}
-:root[data-theme-mode='dark'] .rtv .rtv-sbadge.repo {
-  color: #bf9bff;
-  background: rgba(191, 155, 255, 0.18);
-}
-:root[data-theme-mode='dark'] .rtv .rtv-sbadge.user {
-  color: #30d158;
-  background: rgba(48, 209, 88, 0.18);
-}
-:root[data-theme-mode='dark'] .rtv .rtv-sbadge.local {
-  color: #5ad2e6;
-  background: rgba(90, 210, 230, 0.18);
-}
+/* 暗色档：危险按钮（.bt-r）由实心红改成「卡片同色底 + 红描边 + 红字」。
+ * 徽章/药丸不再各写一套暗色特例：统一 color-mix(基色, 提亮字 / 透明底)，基色由 --rtv-* 提档。 */
 :root[data-theme-mode='dark'] .rtv .bt-r {
   background: var(--c) !important;
   color: #ff453a !important;
   border: 1px solid color-mix(in srgb, #ff453a 55%, transparent) !important;
 }
 :root[data-theme-mode='dark'] .rtv .bt-r:hover {
-  background: color-mix(in srgb, #ff453a 16%, transparent) !important;
+  background: color-mix(in srgb, #ff453a 14%, transparent) !important;
   border-color: #ff453a !important;
 }
 @media (prefers-color-scheme: dark) {
-  :root[data-theme-mode='auto'] .rtv .rtv-hbadge.online {
-    color: #30d158;
-    background: rgba(48, 209, 88, 0.18);
-  }
-  :root[data-theme-mode='auto'] .rtv .rtv-hbadge.recently_lost {
-    color: #ff9f0a;
-    background: rgba(255, 159, 10, 0.18);
-  }
-  :root[data-theme-mode='auto'] .rtv .rtv-hbadge.offline {
-    color: #aeaeb2;
-    background: rgba(235, 235, 245, 0.1);
-  }
-  :root[data-theme-mode='auto'] .rtv .rtv-hbadge.about_to_gc {
-    color: #ff453a;
-    background: rgba(255, 69, 58, 0.18);
-  }
-  :root[data-theme-mode='auto'] .rtv .rtv-sbadge.global {
-    color: #5b9eff;
-    background: rgba(41, 151, 255, 0.18);
-  }
-  :root[data-theme-mode='auto'] .rtv .rtv-sbadge.repo {
-    color: #bf9bff;
-    background: rgba(191, 155, 255, 0.18);
-  }
-  :root[data-theme-mode='auto'] .rtv .rtv-sbadge.user {
-    color: #30d158;
-    background: rgba(48, 209, 88, 0.18);
-  }
-  :root[data-theme-mode='auto'] .rtv .rtv-sbadge.local {
-    color: #5ad2e6;
-    background: rgba(90, 210, 230, 0.18);
-  }
   :root[data-theme-mode='auto'] .rtv .bt-r {
     background: var(--c) !important;
     color: #ff453a !important;
     border: 1px solid color-mix(in srgb, #ff453a 55%, transparent) !important;
   }
   :root[data-theme-mode='auto'] .rtv .bt-r:hover {
-    background: color-mix(in srgb, #ff453a 16%, transparent) !important;
+    background: color-mix(in srgb, #ff453a 14%, transparent) !important;
     border-color: #ff453a !important;
   }
 }
@@ -2904,6 +2879,31 @@ onBeforeUnmount(function () {
     --r: #ff453a;
     --sh: 0 1px 3px rgba(0, 0, 0, 0.5);
     --chip-bg: #2c2c2e;
+    --rtv-ok: #34d399;
+    --rtv-warn: #fbbf24;
+    --rtv-bad: #f87171;
+    --rtv-sc-global: #60a5fa;
+    --rtv-sc-repo: #a78bfa;
+    --rtv-sc-user: #34d399;
+    --rtv-sc-local: #22d3ee;
+    --rtv-en-opencode: #60a5fa;
+    --rtv-en-hermes: #a78bfa;
+    --rtv-en-codearts: #fbbf24;
+    --rtv-en-codex: #34d399;
+    --rtv-en-aishell: #22d3ee;
+    --rtv-scn-default: #34d399;
+    --rtv-scn-cloud-native: #60a5fa;
+    --rtv-scn-iac: #fbbf24;
+    --rtv-scn-agent-dev: #a78bfa;
+    --rtv-scn-skill-dev: #f472b6;
+    --rtv-scn-api-skill-dev: #22d3ee;
+    --rtv-scn-blog-publish: #f87171;
+    --rtv-tg-all: #818cf8;
+    --rtv-tg-vod: #f472b6;
+    --rtv-tg-issue: #fb923c;
+    --rtv-tg-coding: #60a5fa;
+    --rtv-tg-qa: #a78bfa;
+    --rtv-tg-sre: #facc15;
   }
   :root[data-theme-mode='auto'] .rtv .bt-p {
     background: color-mix(in srgb, var(--a) 18%, transparent) !important;
@@ -3066,8 +3066,9 @@ onBeforeUnmount(function () {
   gap: 3px;
   padding: 2px 8px;
   border-radius: 999px;
-  background: #9a6100;
-  color: #fff;
+  --tag: var(--rtv-warn);
+  background: color-mix(in srgb, var(--tag) 14%, transparent);
+  color: var(--tag);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.4;
@@ -3096,9 +3097,10 @@ onBeforeUnmount(function () {
   font-size: 10px;
   padding: 2px 8px;
   border-radius: 999px;
-  background: #fee2e2;
-  color: #dc2626;
-  border: 1px solid #fecaca;
+  --tag: var(--rtv-bad);
+  background: color-mix(in srgb, var(--tag) 14%, transparent);
+  color: var(--tag);
+  border: 1px solid color-mix(in srgb, var(--tag) 32%, transparent);
   font-weight: 700;
 }
 /* B5：凭据卡沙箱平台行 */
@@ -3128,8 +3130,9 @@ onBeforeUnmount(function () {
 .rtv-vstale {
   font-size: 10px;
   font-weight: 600;
-  color: var(--y);
-  background: var(--chip-bg);
+  --tag: var(--rtv-warn);
+  color: var(--tag);
+  background: color-mix(in srgb, var(--tag) 14%, transparent);
   padding: 1px 8px;
   border-radius: 999px;
   margin-left: 4px;
@@ -3251,10 +3254,13 @@ onBeforeUnmount(function () {
 }
 .rtv-tagpill {
   font-size: 9px;
-  padding: 1px 7px;
+  padding: 1px 8px;
   border-radius: 999px;
-  color: var(--on-accent);
+  font-weight: 600;
+  color: var(--tag, var(--t3));
+  background: color-mix(in srgb, var(--tag, var(--t3)) 14%, transparent);
 }
+
 /* 汇总 */
 .rtv-summary {
   display: flex;
@@ -3325,22 +3331,20 @@ onBeforeUnmount(function () {
   padding: 3px 10px;
   border-radius: 999px;
   white-space: nowrap;
+  color: var(--tag, var(--t3));
+  background: color-mix(in srgb, var(--tag, var(--t3)) 14%, transparent);
 }
 .rtv-hbadge.online {
-  color: var(--g);
-  background: #dcfce7;
+  --tag: var(--rtv-ok);
 }
 .rtv-hbadge.recently_lost {
-  color: var(--y);
-  background: #fef3c7;
+  --tag: var(--rtv-warn);
 }
 .rtv-hbadge.offline {
-  color: var(--t3);
-  background: #eef0f3;
+  --tag: var(--t3);
 }
 .rtv-hbadge.about_to_gc {
-  color: var(--r);
-  background: #fee2e2;
+  --tag: var(--rtv-bad);
 }
 .rtv-dot7 {
   width: 7px;
@@ -3358,22 +3362,20 @@ onBeforeUnmount(function () {
   padding: 1px 8px;
   white-space: nowrap;
   vertical-align: middle;
+  color: var(--tag, var(--t3));
+  background: color-mix(in srgb, var(--tag, var(--t3)) 14%, transparent);
 }
 .rtv-sbadge.global {
-  color: #3168e0;
-  background: #e3edfd;
+  --tag: var(--rtv-sc-global);
 }
 .rtv-sbadge.repo {
-  color: #8b5cf6;
-  background: #ede9fe;
+  --tag: var(--rtv-sc-repo);
 }
 .rtv-sbadge.user {
-  color: #1ca44c;
-  background: #dcfce7;
+  --tag: var(--rtv-sc-user);
 }
 .rtv-sbadge.local {
-  color: #0e7490;
-  background: #cffafe;
+  --tag: var(--rtv-sc-local);
 }
 .rtv-ename {
   display: inline-flex;
@@ -3575,7 +3577,30 @@ onBeforeUnmount(function () {
   align-items: center;
   gap: 5px;
 }
+/* 暗色下 14% 淡底在近黑卡片上看不清，抬到 20%（同色系，不加饱和） */
+:root[data-theme-mode='dark'] .rtv :is(.rtv-hbadge, .rtv-sbadge, .rtv-tagpill) {
+  background: color-mix(in srgb, var(--tag, var(--t3)) 20%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme-mode='auto'] .rtv :is(.rtv-hbadge, .rtv-sbadge, .rtv-tagpill) {
+    background: color-mix(in srgb, var(--tag, var(--t3)) 20%, transparent);
+  }
+}
 /* 弹窗通用 */
+/* 弹窗材质：实心白底（亮色 #fff / 暗色 #1c1c1e），与卡片同材质。
+   全局 §23 会把这三个弹窗刷成 --glass-strong + 28px 模糊，暗色下透出页面渐变、
+   跟卡片不是一个材质，看着发虚；这里用 :root 前缀 + !important 压回实心底。 */
+:root .rtv-engdetail,
+:root .rtv-skilldetail,
+:root .rtv-scopemodal {
+  background: var(--c) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  border: 1px solid var(--b) !important;
+  box-shadow:
+    0 20px 50px rgba(0, 0, 0, 0.18),
+    0 2px 6px rgba(0, 0, 0, 0.06) !important;
+}
 .rtv-modal-ov {
   position: fixed;
   inset: 0;
@@ -3615,8 +3640,9 @@ onBeforeUnmount(function () {
 .rtv-localpill {
   font-size: 11px;
   font-weight: 600;
-  color: #0e7490;
-  background: #cffafe;
+  --tag: var(--rtv-sc-local);
+  color: var(--tag);
+  background: color-mix(in srgb, var(--tag) 14%, transparent);
   border-radius: 999px;
   padding: 1px 8px;
 }
@@ -3896,9 +3922,9 @@ onBeforeUnmount(function () {
   flex-shrink: 0;
 }
 .rtv-sb-close:hover {
-  background: #fee2e2;
-  color: #dc2626;
-  border-color: #fecaca;
+  background: color-mix(in srgb, var(--rtv-bad) 14%, transparent);
+  color: var(--rtv-bad);
+  border-color: color-mix(in srgb, var(--rtv-bad) 32%, transparent);
 }
 .rtv-sb-body {
   padding: 24px;
@@ -4047,11 +4073,11 @@ onBeforeUnmount(function () {
   align-items: flex-start;
   gap: 8px;
   padding: 10px 12px;
-  background: #fef3c7;
+  background: color-mix(in srgb, var(--rtv-warn) 14%, transparent);
   border-radius: 8px;
   margin-bottom: 14px;
   font-size: 12px;
-  color: #92400e;
+  color: var(--rtv-warn);
   line-height: 1.5;
 }
 .rtv-cred-lbl {

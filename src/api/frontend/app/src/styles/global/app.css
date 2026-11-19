@@ -2066,7 +2066,7 @@
 :root .template-card-item:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06) !important; background: var(--hover-card) !important; }
 :root .template-card-item-ic { border-radius: 50% !important; background: var(--s3) !important; }
 :root .template-card-item-name { font-weight: 600 !important; letter-spacing: -0.01em !important; }
-:root .tmpl-platform-tag { font-size: 9px !important; font-weight: 600 !important; padding: 2px 7px !important; border-radius: 4px !important; background: rgba(49,104,224,0.1) !important; color: #3168e0 !important; }
+:root .tmpl-platform-tag { font-size: 10px !important; font-weight: 600 !important; padding: 2px 8px !important; border-radius: 999px !important; background: color-mix(in srgb, var(--a) 12%, transparent) !important; color: var(--a-text) !important; letter-spacing: .3px; }
 :root .template-card-item-btn { border-radius: 999px !important; font-size: 12px !important; font-weight: 500 !important; transition: all 0.25s var(--apple-spring-ease) !important; }
 :root .tmpl-tab { border-radius: 8px !important; border: 1px solid var(--glass-border) !important; transition: all 0.25s var(--apple-spring-ease) !important; }
 :root .tmpl-tab-act { background: #0071e3 !important; color: #fff !important; border-color: transparent !important; box-shadow: 0 4px 14px rgba(0,113,227,0.25) !important; }
