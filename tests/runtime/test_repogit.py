@@ -121,6 +121,89 @@ class TestIssueWorktree:
         assert wt not in r.stdout
 
 
+class TestWorktreeAlreadyExistsRecovery:
+    """Issue #3482：目标目录被 .skills 物化产物占用（已存在且无 .git）时
+    `git worktree add` 报 already exists 的恢复分支。
+
+    direct（direct_executor._execute_agent_inner，物化先于建树）与 worker
+    （agent._execute_task，#711 先建树）双路径共用 ensure_issue_worktree，
+    在此对共享函数做同场景回归。
+    """
+
+    def _preset_occupied_skills_dir(self, issue_num="16"):
+        """预置 issues/<n>/coding/.skills（无 .git），模拟技能物化先于建树占用。"""
+        wt = repogit.issue_dir_for("gitcode:owner/repo", "coding", issue_num)
+        skill_md = os.path.join(wt, ".skills", "coding-cli-1", "SKILL.md")
+        os.makedirs(os.path.dirname(skill_md), exist_ok=True)
+        with open(skill_md, "w", encoding="utf-8") as f:
+            f.write("# skill\n")
+        return wt, skill_md
+
+    def test_occupied_dir_recovered_assets_preserved_and_writable(self):
+        """already exists → 迁移重建成功：.git 落位、.skills 产物保留、可 commit、
+        inject_git_write_context 不误置 GRAPE_GIT_READONLY。"""
+        wt, skill_md = self._preset_occupied_skills_dir()
+        got = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "16")
+        assert got == wt, "恢复分支应重建 worktree 并返回目标目录"
+        assert (os.path.isdir(os.path.join(wt, ".git"))
+                or os.path.isfile(os.path.join(wt, ".git"))), "重建后 .git 应落位"
+        assert os.path.isfile(skill_md), ".skills 物化产物应保留"
+        assert not os.path.exists(wt + ".grape-collide-backup"), "备份目录应清理"
+        # 可 commit（写型能力恢复）
+        with open(os.path.join(wt, "fix-3482.txt"), "w", encoding="utf-8") as f:
+            f.write("ok\n")
+        r = _git(["add", "fix-3482.txt"], wt)
+        assert r.returncode == 0
+        r = _git(["commit", "-m", "verify writable after recovery"], wt)
+        assert r.returncode == 0, "恢复后 worktree 必须可 commit"
+        # inject_git_write_context：解析到 gitdir、不置只读
+        env = {}
+        _prompt, status = repogit.inject_git_write_context(
+            {"repo_key": "gitcode:owner/repo", "agent_type": "coding",
+             "issue_id": "#16"}, env, "p")
+        assert status.get("writable") is True
+        assert env.get("GRAPE_GIT_WRITABLE") == "true"
+        assert "GRAPE_GIT_READONLY" not in env, "恢复后不得误置 GRAPE_GIT_READONLY"
+        assert env.get("GRAPE_GIT_DIR"), "gitdir 应可解析"
+
+    def test_recovery_fallback_to_session_gitdir(self, monkeypatch):
+        """迁移失败（rename 报错）→ 会话级 gitdir（clone --shared）兜底成功：
+        产物保留、.git 指针指向会话 gitdir、写上下文可用。"""
+        wt, skill_md = self._preset_occupied_skills_dir("17")
+        _real_rename = os.rename
+        _armed = {"on": True}
+
+        def _fail_backup_rename(src, dst):
+            if _armed["on"] and src == wt and dst == wt + ".grape-collide-backup":
+                raise OSError("cross-device link simulated")
+            return _real_rename(src, dst)
+
+        monkeypatch.setattr(os, "rename", _fail_backup_rename)
+        try:
+            got = repogit.ensure_issue_worktree("gitcode:owner/repo", "coding", "17")
+        finally:
+            _armed["on"] = False
+        assert got == wt, "兜底路径应返回目标目录"
+        assert os.path.isfile(os.path.join(wt, ".git")), "会话 gitdir 模式 .git 应为指针文件"
+        with open(os.path.join(wt, ".git"), encoding="utf-8") as f:
+            assert "gitdir:" in f.read()
+        assert os.path.isfile(skill_md), "兜底路径物化产物应原地保留"
+        env = {}
+        _prompt, status = repogit.inject_git_write_context(
+            {"repo_key": "gitcode:owner/repo", "agent_type": "coding",
+             "issue_id": "#17"}, env, "p")
+        assert status.get("writable") is True, "会话 gitdir 应可写"
+        assert "GRAPE_GIT_READONLY" not in env
+
+    def test_is_already_exists_collision(self):
+        """错误特征匹配：真实 already exists stderr 命中；其它失败不命中。"""
+        assert repogit._is_already_exists_collision(
+            "fatal: '/ws/issues/16/coding' already exists") is True
+        assert repogit._is_already_exists_collision(
+            "fatal: unable to access") is False
+        assert repogit._is_already_exists_collision("") is False
+
+
 class TestTokenNoPersist:
     def test_token_not_on_disk(self):
         repogit.ensure_repo_base("gitcode:owner/repo", token="sk_secret_123")

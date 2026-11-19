@@ -1520,6 +1520,15 @@ def _is_readonly_git_failure(stderr: str) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _is_already_exists_collision(stderr: str) -> bool:
+    """Issue #3482：识别 `git worktree add` 的目标目录被占用错误。
+
+    典型来源：direct 路径技能物化（`.skills/` 等）先于 worktree 创建落进目标目录
+    （目录存在但无 `.git`），`git worktree add` 报 fatal: '<path>' already exists。
+    """
+    return "already exists" in (stderr or "")
+
+
 def _session_git_config_args(repo_key: str, session: str, worktree: str) -> list:
     """会话 gitdir 的必要配置（工作区指向 + origin 凭据无关 URL）。"""
     return [
@@ -1753,6 +1762,100 @@ def _create_worktree_with_session_gitdir(repo_key: str, issue_dir: str, base: st
         return probe_git_write(session)[0]
     except Exception as e:
         log.warning(f"repogit: session worktree create failed: {e}")
+        return False
+
+
+def _merge_collided_assets(backup_dir: str, target_dir: str) -> None:
+    """Issue #3482：把迁移备份中的占用物（.skills 等物化产物）合并回重建后的目录。
+
+    逐条目迁移：目标不存在则移入；同名目录递归合并；同名文件以重建后的基线为准
+    （追踪文件优先，物化产物不覆盖代码基线）；完成后清空备份目录。
+    """
+    try:
+        for name in os.listdir(backup_dir):
+            if name == ".git":
+                continue
+            src = os.path.join(backup_dir, name)
+            dst = os.path.join(target_dir, name)
+            if os.path.exists(dst):
+                if os.path.isdir(src) and os.path.isdir(dst):
+                    _merge_collided_assets(src, dst)
+                continue
+            try:
+                os.rename(src, dst)
+            except OSError as e:
+                log.warning(f"repogit: merge collided asset failed "
+                            f"{src} -> {dst}: {e}")
+        shutil.rmtree(backup_dir, ignore_errors=True)
+    except Exception as e:
+        log.warning(f"repogit: merge collided assets failed "
+                    f"{backup_dir} -> {target_dir}: {e}")
+
+
+def _recover_worktree_already_exists(repo_key: str, issue_dir: str, base: str,
+                                      branch: str, base_branch: str,
+                                      branch_reused: bool, token: str = "") -> bool:
+    """Issue #3482：`git worktree add` 报 already exists 的恢复分支（direct/worker 共用）。
+
+    目标目录被 `.skills` 技能物化产物占用（已存在且无 `.git`）时，worktree add 报
+    fatal: '<path>' already exists；此前该错误不匹配只读特征 → 被判 non-readonly
+    failure refuse degrade → coding 会话误降级只读。恢复动作（对齐 #711 worker
+    修复语义，见 docs/new-version1/coding-worktree-skill-collision.md）：
+    1. 把占用目录原子迁移到同父级备份路径（保留物化产物，不删除）；
+    2. 重放 worktree add（分支 ref 存在 --force 复用，否则 -b 基于 origin/<base>）；
+    3. 成功后把备份中的物化产物合并回新 worktree；
+    4. 任一步失败 → 回滚迁移并改走会话级 gitdir（clone --shared）兜底——目标目录
+       原样保留产物，`.git` 指针落位后 `inject_git_write_context()` 可正常解析
+       gitdir，不再误置 GRAPE_GIT_READONLY。
+    """
+    backup = issue_dir + ".grape-collide-backup"
+    try:
+        if os.path.isdir(backup):
+            shutil.rmtree(backup, ignore_errors=True)
+        moved = False
+        try:
+            os.rename(issue_dir, backup)
+            moved = True
+            log.warning(f"repogit: worktree target occupied by non-git assets "
+                        f"(no .git), moved aside for rebuild {repo_key}: "
+                        f"{issue_dir} -> {backup}")
+        except OSError as e:
+            log.warning(f"repogit: move occupied dir aside failed, fallback to "
+                       f"session gitdir {repo_key}: {e}")
+        if moved:
+            if branch_reused:
+                r = _run_git(["-C", base, "worktree", "add", "--force", issue_dir,
+                              branch], token=token)
+            else:
+                r = _run_git(["-C", base, "worktree", "add", issue_dir, "-b", branch,
+                              f"origin/{base_branch}"], token=token)
+            if r is not None and r.returncode == 0:
+                _merge_collided_assets(backup, issue_dir)
+                log.warning(f"repogit: worktree rebuilt after already-exists "
+                            f"collision {repo_key}: {issue_dir} "
+                            f"(assets merged back)")
+                return True
+            _re_err = ((r.stderr if r is not None else "git exec failed") or "")[:200]
+            log.warning(f"repogit: worktree re-add after collision failed, "
+                        f"rollback {repo_key}: {_re_err}")
+            try:
+                if os.path.isdir(issue_dir):
+                    shutil.rmtree(issue_dir, ignore_errors=True)
+                os.rename(backup, issue_dir)
+            except OSError as e:
+                log.warning(f"repogit: rollback collided dir failed {repo_key}: {e}")
+        # 兜底：会话级 gitdir（clone --shared）——占用目录保持原样（含物化产物），
+        # `.git` 指针指向会话 gitdir，gitdir 可解析、不再误置只读。
+        if _create_worktree_with_session_gitdir(
+                repo_key, issue_dir, base, branch, base_branch, token=token):
+            if os.path.isdir(backup):
+                _merge_collided_assets(backup, issue_dir)
+            log.warning(f"repogit: worktree recovered via session gitdir after "
+                        f"already-exists collision {repo_key}: {issue_dir}")
+            return True
+        return False
+    except Exception as e:
+        log.warning(f"repogit: already-exists recovery failed {repo_key}: {e}")
         return False
 
 
@@ -2471,12 +2574,22 @@ def ensure_issue_worktree(repo_key: str, agent_type: str, issue_num, token: str 
                             issue_num=issue_num, agent_type=agent_type)
                 if stderr:
                     # stderr 非空 = 重试后仍失败（或本就不需要重试）
+                    if (_is_already_exists_collision(stderr)
+                            and not _has_git and os.path.isdir(issue_dir)):
+                        # Issue #3482：目标目录被 .skills 物化产物占用（已存在且
+                        # 无 .git）→ 迁移占用物重建 worktree，失败走会话级 gitdir
+                        # 兜底；不再落入 refuse degrade 误降级只读（direct 与
+                        # worker _execute_task 双路径共用本函数，行为一致）。
+                        if not _recover_worktree_already_exists(
+                                repo_key, issue_dir, base, branch, base_branch,
+                                _branch_reused, token=token):
+                            return None
                     # Issue #2245：仅当失败源于只读挂载/权限时降级建树；其它失败
                     # （如分支已被其它 worktree 占用）降级会制造同分支双工作树，直接失败。
-                    if not _is_readonly_git_failure(stderr):
+                    elif not _is_readonly_git_failure(stderr):
                         log.warning(f"repogit worktree add non-readonly failure, refuse degrade {repo_key}")
                         return None
-                    if not _create_worktree_with_session_gitdir(
+                    elif not _create_worktree_with_session_gitdir(
                             repo_key, issue_dir, base, branch, base_branch, token=token):
                         return None
                 else:
