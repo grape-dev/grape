@@ -24,7 +24,7 @@ from src.kernel.config import log, CONFIG_DIR
 
 def is_production_env() -> bool:
     """判断是否为生产环境。统一走 security_config.is_production()。"""
-    from src.domains.mgmt.auth.security_config import is_production
+    from src.kernel.security_config import is_production
     return is_production()
 
 

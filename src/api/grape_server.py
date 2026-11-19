@@ -35,7 +35,7 @@ def _startup_security_check():
     其余检查（密钥轮换池、邮件、凭据加密、cookie、redirect_uri）保留生产门禁。
     """
     from src.kernel.config import log
-    from src.domains.mgmt.auth.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
+    from src.kernel.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
 
     errors = []
 

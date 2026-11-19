@@ -6657,15 +6657,14 @@ def exec_agent_task(exec_id, agent_task_id: str = "", started_at: str = "",
     关联语义见 runtime.engine.scheduler._get_exec_agent_task：
     agent_task_id 非空按主键直查，为空走受约束兜底。
     """
-    from src.kernel import db_registry
-
-    try:
-        conn, _q = db_registry.connection_for("runtime")
-    except Exception:  # noqa: BLE001 - 取 owner 连接失败时回落进程库
-        from src.kernel.session_manager import db as conn
     from src.domains.runtime.engine.scheduler import _get_exec_agent_task as _impl
+    # 与内部实现同源：_get_exec_agent_task 原本就吃调用方游标，历史上调用方一直用
+    # 进程库（session_manager.db）。这里同样用进程库，保证 agent_tasks 在同一库内解析
+    # （曾经先试 db_registry.connection_for("runtime")，在单库测试环境会连到另一个库、
+    # 查不到数据而返回 None —— 契约测试随即红）。
+    from src.kernel.session_manager import db as _conn
 
-    cur = conn.cursor()
+    cur = _conn.cursor()
     row = _impl(cur, exec_id, agent_task_id, started_at, created_at)
     if not row:
         return None
