@@ -419,6 +419,57 @@ def _opt_bool(raw: dict, key: str) -> "bool | None":
     return None
 
 
+def _json_norm(v):
+    """卡字段比较用归一（None/""、tuple/list、dict 键序都不算差异）。"""
+    if v is None or v == "":
+        return '""'
+    if isinstance(v, (tuple, list)):
+        return json.dumps(list(v), sort_keys=True, ensure_ascii=False, default=str)
+    return json.dumps(v, sort_keys=True, ensure_ascii=False, default=str)
+
+
+# 卡字段回写形态里，这两个键在值对象上叫 *_overrides（PUT/GET 做别名转换）。
+_CARD_FIELD_ALIAS = {"event_map": "event_map_overrides", "fields": "fields_overrides"}
+# 非「定义字段」：由代码/凭据域派生，不参与覆盖比较。
+_CARD_OVERRIDE_SKIP = {"provider", "resources", "capabilities", "token_env"}
+
+
+def card_field_overrides(submitted: dict, card: "PlatformCard") -> dict:
+    """算出「管理面提交值 vs 当前生效卡」真正不同的字段（Issue #3580 A2 覆盖层）。
+
+    契约（显式写死，后续改这里先改这条注释）：
+    - 只记**变化过**的字段：把字段改回配置文件的值 → 该键不再出现 → 覆盖自动解除；
+    - 显式置空记为 ""（键存在即尊重，区别于「键缺席=不覆盖」）；
+    - 只用于 `source=config` 的派生行（配置文件是真源，写行会被下次导入冲回），
+      手建行（manual）照旧写行，不需要覆盖层。
+    """
+    import dataclasses as _dc
+
+    if card is None or not isinstance(submitted, dict):
+        return {}
+    cur = _dc.asdict(card)
+    out = {}
+    for k, v in submitted.items():
+        if not isinstance(k, str) or k in _CARD_OVERRIDE_SKIP:
+            continue
+        cur_v = cur.get(_CARD_FIELD_ALIAS.get(k, k))
+        if _json_norm(v) != _json_norm(cur_v):
+            out[k] = v
+    return out
+
+
+def apply_card_overrides(base_raws: dict, overrides: dict) -> None:
+    """把管理面覆盖层叠加到 raw 字典上（原地）。
+
+    叠加位置：文件卡 → meta `vcs_providers_config` → DB 表行 → **本覆盖层**。
+    覆盖层必须最后叠，否则表行（导入器每次启动回写）会把管理面改的字段冲回空值。
+    """
+    for provider, ov in (overrides or {}).items():
+        if provider not in base_raws or not isinstance(ov, dict) or not ov:
+            continue
+        base_raws[provider].update(ov)
+
+
 def build_platform_card(provider: str, raw: dict) -> PlatformCard:
     """Builder：dict → PlatformCard，校验失败抛 PlatformCardError（S18 校验面）。"""
     if not isinstance(provider, str):
@@ -682,6 +733,23 @@ _PLATFORM_CARD_COLUMNS = (
 # 2026-11-14：凭据能力表已删除；这些字段只在平台卡文件里声明（见 configs/platforms/*.json）
 
 
+def row_to_card_raw(row: dict) -> dict:
+    """表行 → 卡 raw：**空值列直接省略**（absent = 未声明），不写成 ""。
+
+    跨域读原语把 NULL 列统一成 ""；若照抄进 raw，可选枚举列（branch_create_form
+    / issue_write_form / pr_head_filter …）会被 Builder 当成「显式给了非法值」整卡
+    拒绝，`_build_cards` 于是回退文件卡——**表行加了也不生效**。2026-11-20 实锤：
+    部署实例启动日志每条都是「meta 合并卡非法（gitlab: branch_create_form 必须是
+    form/refs_sha: ''），回退文件卡」，管理面改 ca_bundle 保存成功但读回永远为空。
+    配置文件表达「未设置」就是「键缺席」，这里对齐同一语义；0/False 等有效假值保留。
+    """
+    return {
+        col: row.get(col)
+        for col in _PLATFORM_CARD_COLUMNS
+        if col not in _TABLE_SKIP and row.get(col) not in (None, "")
+    }
+
+
 def _raws_from_table() -> dict:
     """D109：表就绪后从 grape_t_repo_platforms（+caps）构造平台卡 raw。
 
@@ -701,11 +769,7 @@ def _raws_from_table() -> dict:
         # configs/platforms/*.json 解析 → "用户面不提供"不等于"内网不可用"
         # （方言/host/托管链路还要能工作）。与用户面目录的判据是两件事。
         for row in _mgmt_public.repo_platform_cards(enabled_only=True):
-            out[str(row.get("provider") or "")] = {
-                col: row.get(col) or ""
-                for col in _PLATFORM_CARD_COLUMNS
-                if col not in _TABLE_SKIP
-            }
+            out[str(row.get("provider") or "")] = row_to_card_raw(row)
         return {k: v for k, v in out.items() if k}
     except Exception as e:
         log.warning(f"repo_platforms table read failed, fallback to meta+file: {e}")
@@ -719,7 +783,7 @@ def builtin_cards_from_dir(dir_path: str) -> "dict[str, PlatformCard]":
             for p, raw in _builtin_raws_from_dir(dir_path).items()}
 
 
-def _build_cards() -> "dict[str, PlatformCard]":
+def _build_cards(include_overrides: bool = True) -> "dict[str, PlatformCard]":
     """无锁构建平台卡（meta > 文件 > 代码兜底 > DB 表）。
 
     2026-11-19：**调用本函数时不得持有 `_cache_lock`**。函数内部经
@@ -765,6 +829,17 @@ def _build_cards() -> "dict[str, PlatformCard]":
         for _p, _raw in _tbl_raws.items():
             _base_raws[_p] = dict(_raw)
         log.info(f"platform cards from table: {sorted(_tbl_raws)}")
+    # A2（Issue #3580）：管理面覆盖层必须最后叠。配置文件派生行（source=config）
+    # 在管理台改不动——写行会被下次启动的导入器按文件冲回，于是运维改了 ca_bundle
+    # 只看到「保存成功」而实际不生效。管理面改动的字段因此单独记在
+    # `vcs_platform_overrides`（只记变化过的键），读卡时覆盖文件与表行两层。
+    try:
+        from src.domains.mgmt import public as _ov_db
+        _raw_ov = _ov_db.get_meta_value("vcs_platform_overrides") or ""
+        if include_overrides and _raw_ov:
+            apply_card_overrides(_base_raws, json.loads(_raw_ov) or {})
+    except Exception as e:  # DB 未就绪/坏 JSON → 不影响文件卡
+        log.warning(f"platform_card: vcs_platform_overrides 应用失败: {e}")
     cards = {}
     for provider, raw in _base_raws.items():
         try:
@@ -802,6 +877,18 @@ def invalidate_platform_card_cache() -> None:
     with _cache_lock:
         _loaded = False
     log.info("platform card cache invalidated")
+
+
+def base_platform_card(provider: str) -> "PlatformCard | None":
+    """不带管理面覆盖层的卡（= 配置文件 + meta + 表行的结果）。
+
+    管理面保存时用它做 diff 基线：与它相同 → 不产生覆盖（等于「改回文件值」，
+    覆盖自动解除）；不同 → 只记变化的键。用生效卡做基线会把上一轮覆盖当成基线，
+    清空后仍留一条 `字段: ""` 的永久覆盖。
+    """
+    if not provider:
+        return None
+    return (_build_cards(include_overrides=False) or {}).get(provider)
 
 
 def get_platform_card(provider: str) -> "PlatformCard | None":
