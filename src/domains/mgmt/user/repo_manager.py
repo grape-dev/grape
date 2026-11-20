@@ -621,12 +621,19 @@ def _run_git(args: list[str], cwd: str, timeout: int = 120) -> str:
     """在指定目录执行 git 命令，返回 stdout。失败抛 RuntimeError。"""
     import subprocess
     try:
+        import os as _os
+        _env = dict(_os.environ)
+        # 一律非交互：没有 TTY/credential helper 时让 git 立刻失败并给出明确
+        # 错误，而不是尝试读密码（线上曾出现 "No such device or address"）
+        _env["GIT_TERMINAL_PROMPT"] = "0"
+        _env["GIT_ASKPASS"] = ""
         p = subprocess.run(
-            ["git"] + args,
+            ["git", "-c", "credential.helper="] + args,
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_env,
         )
     except FileNotFoundError:
         raise RuntimeError("服务器未安装 git CLI")
@@ -761,21 +768,22 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
             _pc_wf = _gpc(provider)
             _wf = (getattr(_pc_wf, "workflows_write", True) if _pc_wf is not None else True)
         _wf_denied = not _wf
+        # push 目标 URL：任何分支都必须携带真实 token。
+        # 历史 bug：受限分支（_wf_denied）曾拼 `https://***@host/...` —— 字面量
+        # "***" 当用户名、没有密码，子进程里没有 credential helper/TTY，
+        # git 直接报 `could not read Password for 'https://***@host':
+        # No such device or address`，模板代码 100% 写不进去（线上 502：
+        # 「仓库已创建但模板代码写入失败」）。
+        # 删 .github/workflows 的目的正是「用受限 token 也能推上去」，所以
+        # token 必须照常携带。
+        target_url = f"https://oauth2:{user_token}@{_tgt_host}/{owner_login}/{target_repo}.git"
         if _wf_denied:
-            # token 无 workflows 权限，push 含 .github/workflows 的仓库会被
-            # 拒绝——怪癖以卡 workflows_write=False 声明（github 内置卡）。
-            # push URL 沿用存量 "***" 置换形态（不携带真实 token，鉴权走 git
-            # credential helper），host 已从 github 卡派生。
-            target_url = f"https://***@{_tgt_host}/{owner_login}/{target_repo}.git"
+            # token 无 workflows 权限，push 含 .github/workflows 的仓库会被拒绝
+            # ——怪癖以卡 workflows_write=False 声明（github 内置卡）。
             _wf_dir = os.path.join(workdir, ".github", "workflows")
             if os.path.isdir(_wf_dir):
                 shutil.rmtree(_wf_dir, ignore_errors=True)
                 log.info(f"Removed .github/workflows from template (GitHub App token lacks workflow permission)")
-        else:
-            # gitcode 家族存量 clone 鉴权形态（oauth2 前缀）保持逐字节不变；
-            # host 已卡派生（修复真二分缺陷：gitee 等目标此前被硬编码推到
-            # gitcode.com）
-            target_url = f"https://oauth2:{user_token}@{_tgt_host}/{owner_login}/{target_repo}.git"
         if _run_git_has_origin(workdir):
             _run_git(["remote", "remove", "origin"], workdir)
         _run_git(["remote", "add", "origin", target_url], workdir)
