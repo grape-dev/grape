@@ -160,7 +160,7 @@ def test_reconcile_reads_real_db_rows(monkeypatch):
     monkeypatch.setattr(runtime_public, "has_inflight", lambda *a: False)
     monkeypatch.setattr(engine_service, "run_auto_advance_hook",
                         lambda *a, **kw: calls.append(a) or {"action": "a2a",
-                                                             "next_role": "qa"})
+                                                             "next_role": "qa", "seq": 901})
 
     stats = pr.reconcile_pipeline_progress()
 

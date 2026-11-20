@@ -1276,38 +1276,6 @@ async def patrol_loop():
                 # D23（实现后审计）：run_patrol_once 是持 db_lock 的同步全表扫描，
                 # 裸调会卡住整个事件循环——经 asyncio.to_thread 卸载（DB 车道竞争
                 # 仍在，但 API 事件循环不再被整轮冻结）。
-                # 流水线推进确定性兜底：任务 completed 但 stage 未前进 →
-                # 按场景 next/handoff 幂等推进（不依赖技能显式 handoff / 收尾钩子）。
-                try:
-                    from src.domains.insight.observability import loops
-                    from src.domains.runtime.engine.pipeline_reconcile import (
-                        reconcile_pipeline_progress,
-                    )
-                    _prog = await asyncio.to_thread(reconcile_pipeline_progress)
-                    loops.beat("pipeline_advance")
-                    if _prog.get("advanced"):
-                        log.info(f"[patrol] pipeline advance: {_prog['advanced']} "
-                                 f"node(s) advanced / {_prog.get('scanned', 0)} scanned")
-                        try:
-                            from src.domains.mgmt import public as mgmt_public
-                            mgmt_public.log_audit(
-                                "issue_pipeline_advanced",
-                                user_id=0, operator_id=0,
-                                detail={"source": "patrol",
-                                        "advanced": int(_prog.get("advanced") or 0),
-                                        "scanned": int(_prog.get("scanned") or 0),
-                                        "skipped": int(_prog.get("skipped") or 0),
-                                        "actions": (_prog.get("actions") or [])[:50]},
-                            )
-                        except Exception as _ae:
-                            log.warning(f"[patrol] pipeline advance audit failed: {_ae}")
-                except Exception as e:
-                    try:
-                        from src.domains.insight.observability import loops
-                        loops.fail("pipeline_advance", e)
-                    except Exception:
-                        pass
-                    log.warning(f"[patrol] pipeline advance reconcile failed: {e}")
                 # Issue #1667：排队 A2A 滞留兜底对账（终态旁路/竞态窗口的最终防线）。
                 # 无 repo 谓词 = 全仓 queued 扫描，但只派发「前序已不活跃」的行，
                 # 正常在途排队不受影响；持 db_lock 的同步段经 to_thread 卸载。

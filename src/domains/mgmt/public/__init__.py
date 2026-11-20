@@ -992,7 +992,7 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "health",
            # 组织下派快照读取口（A10 整改：runtime 引擎经 public 读取）
            "load_org_snapshot_files", "get_org_dispatch_snapshot",
-           "org_dispatch_terminal_statuses"]
+           "org_dispatch_terminal_statuses", "pipeline_transition", "node_role"]
 
 
 # ---------- 命名查询白名单（P4 读路径：runtime 域代码读 mgmt 表） ----------
@@ -6359,10 +6359,25 @@ def scene_by_id(scene_id: str, repo_key: str = "") -> dict:
     return _impl(scene_id, repo_key=repo_key) or {}
 
 
+def pipeline_transition(scene_id: str, agent_role: str, repo_key: str = "") -> dict:
+    """按角色解析节点推进信息（跨域契约口：runtime 聚合/推进节点解析）。"""
+    from src.domains.mgmt.pipeline_config import get_pipeline_transition as _impl
+
+    return _impl(scene_id, agent_role, repo_key=repo_key) or {}
+
+
+def node_role(node: dict) -> str:
+    """节点对外角色名（tag 优先、id 兜底；跨域契约口）。"""
+    from src.domains.mgmt.pipeline_config import node_role as _impl
+
+    return _impl(node) or ""
+
+
 # 原名别名：调用点只换模块路径。
 get_pipeline_config = pipeline_config
 get_scenes = scene_list
 _query_scene_by_id = scene_by_id
+get_pipeline_transition = pipeline_transition
 
 
 # ---- 出网口原语：mgmt.user.repo_manager 的 GitCode REST 通道（vcs provider 用） ----

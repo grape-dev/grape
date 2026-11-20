@@ -18,14 +18,26 @@
 |---|---|---|
 | ① 硬写入通道 | `POST /api/tasks/{id}/complete`、`/fail`（worker → 服务端） | 任务终态只由服务端落库；技能无需交办 |
 | ② 收尾钩子 | `complete_task()`、`event_pipeline._execute_agent_inner`、`direct_executor._execute_agent_inner` | 任务 completed 时按场景自动推进（幂等） |
-| ③ 周期对账 | `pipeline_reconcile.reconcile_pipeline_progress()`（Mgmt patrol，leader-gated） | 扫描"任务已完成但 stage 没动"的行，兜底推进 |
-| ④ 人工/运营接口 | `POST /api/patrol/pipeline-advance` | 立即跑一轮 ③，排障用 |
+| ③ 周期对账 | `pipeline_reconcile.reconcile_pipeline_progress()`（**Worker 进程**，5min） | 扫描"任务已完成但 stage 没动"的行，兜底推进 |
+| ④ 人工/运营接口 | `POST /api/patrol/pipeline-advance`（Mgmt → `runtime.public` 契约口） | 立即跑一轮 ③，排障用 |
 
 组织下派侧同样以 DB 为准：
 
 - `org_dispatch.sweep_once` → `_refresh_targets_from_issues`：子 Issue 状态 → target 终态；
 - 批次终态 → `_maybe_trigger_terminal_aggregate` → 聚合事件（queued 持久化，巡检补派）；
 - `finalize_org_issue_aggregation`：组织 Issue 评论 + 状态归一（服务端），不依赖技能。
+
+## 三库四进程约束
+
+- 对账器是 **runtime 域** 代码，周期循环跑在 **Worker 进程**（runtime 域），读本域库；
+  Mgmt 的 patrol 不再执行 runtime 逻辑。手动接口留在 Mgmt，但只经
+  `src.domains.runtime.public.reconcile_pipeline_progress` 契约口调用；
+- 对账读走 `bulk_read.reader("runtime")`（三库下取 runtime owner DSN，单库回落进程库）；
+- 推进副作用全部走契约/owner 通道：`pipeline_config`（mgmt `db_pair`）、
+  `event_store`（runtime `db_pair`）、`session_store`（runtime `*_any` 原语）、
+  `service.enqueue_task`（runtime 域代理连接）；
+- 组织下派（mgmt）不再 import runtime 域内部模块：建单/聚合收口/摘要/事件状态/
+  聚合重排统一走 `src.domains.runtime.public`。
 
 ## 对账谓词与守卫
 

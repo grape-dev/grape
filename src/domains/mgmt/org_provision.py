@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
-from src.api.pipeline_config import create_org_scene
+from src.domains.mgmt.pipeline_config import create_org_scene
 from src.domains.mgmt.auth.audit import log_audit
 from src.domains.mgmt.org_dispatch import DISPATCH_IN_FLIGHT
 from src.domains.mgmt.routes.repos import (
@@ -866,7 +866,7 @@ def _refresh_org_overview(org_id: str) -> None:
         scene_id = org.get("org_scene_id") or ""
         nodes: list = []
         try:
-            from src.api.pipeline_config import get_pipeline_config
+            from src.domains.mgmt.pipeline_config import get_pipeline_config
 
             cfg = get_pipeline_config(scene_id, repo_key=org.get("org_repo_key") or "") or {}
             nodes = cfg.get("nodes") or []

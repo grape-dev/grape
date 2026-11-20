@@ -1,7 +1,7 @@
 """组织需求跨仓下派编排（Issue #2112）。
 
 职责：下派批次状态机、目标场景解析、子 Issue 建单（复用
-``src.api.issues_center.create_task_via_issue``）、单目标取消/重试、状态汇总 sweeper。
+``runtime public create_task_via_issue``）、单目标取消/重试、状态汇总 sweeper。
 
 设计约束（见 docs/issue-2112/plan.md）：
 - 建单不复制：一律经 ``create_task_via_issue``，内部身份 + 目标仓库 bot token；
@@ -350,7 +350,7 @@ def _target_payload(t: dict, dispatch_payload: dict | None = None) -> dict:
     scene_name = ""
     if scene_id:
         try:
-            from src.api.pipeline_config import get_pipeline_config
+            from src.domains.mgmt.pipeline_config import get_pipeline_config
 
             cfg = get_pipeline_config(scene_id, repo_key=t["repo_key"]) or {}
             scene_name = str(cfg.get("display_name") or cfg.get("name") or "")
@@ -553,8 +553,6 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
                               snapshot_id: int = 0,
                               actor_user: dict | None = None) -> dict:
     """为单个目标创建/复用子 Issue，返回更新后的 target 行。"""
-    from src.api.issues_center import TaskCreateBody, create_task_via_issue
-
     repo_key = target["repo_key"]
     requested_scene = _requested_target_scene(dispatch, repo_key)
     resolved = _resolve_target_scene_detail(repo_key, requested_scene, user=actor_user)
@@ -580,19 +578,19 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
     child_description = (description or "")
     if scope_md:
         child_description = child_description.rstrip() + "\n" + scope_md
-    body = TaskCreateBody(
-        repo_key=repo_key,
-        title=child_title,
-        description=_child_description(
+    body = {
+        "repo_key": repo_key,
+        "title": child_title,
+        "description": _child_description(
             dispatch["org_repo_key"], native_issue_number(dispatch["org_issue_number"]),
             org_title or title, child_description, context,
             org_id=str(dispatch.get("org_id") or ""),
             dispatch_id=str(dispatch.get("id") or "")),
-        assignee="",
-        scene_id=scene_id,
-        is_subtask_mode=0,
-        org_context_snapshot_id=str(snapshot_id or ""),
-    )
+        "assignee": "",
+        "scene_id": scene_id,
+        "is_subtask_mode": 0,
+        "org_context_snapshot_id": str(snapshot_id or ""),
+    }
     _, owner, _ = parse_repo_key(repo_key)
     internal_user = {
         "id": actor_id,
@@ -610,7 +608,7 @@ async def _create_child_issue(dispatch: dict, target: dict, *, title: str,
                 "dispatch_id": str(dispatch.get("id") or ""),
                 "org_issue": native_issue_number(dispatch.get("org_issue_number")),
         }):
-            result = await create_task_via_issue(body, user=internal_user)
+            result = await runtime_public.create_task_via_issue(body, user=internal_user)
         issue_number = int(result.get("issue_number") or 0)
         created = bool(result.get("created", True))
         task_id = int(result.get("task_id") or result.get("issue_id") or 0)
@@ -1250,9 +1248,8 @@ def _maybe_trigger_terminal_aggregate(dispatch_id: str, status: str) -> None:
         return
     record = {"status": "finalized", "error": ""}
     try:
-        from src.api.issues_center import finalize_org_issue_aggregation
-
-        finalized = finalize_org_issue_aggregation(dispatch, targets, status)
+        finalized = runtime_public.finalize_org_issue_aggregation(
+            dispatch, targets, status)
         record["comment_posted"] = 1 if finalized.get("comment_posted") else 0
         record["issue_status"] = str(finalized.get("issue_status") or "")
         record["status"] = str(finalized.get("action") or "finalized")
@@ -1262,9 +1259,7 @@ def _maybe_trigger_terminal_aggregate(dispatch_id: str, status: str) -> None:
         log.warning(f"org-dispatch: finalize org issue failed dispatch={dispatch_id}: {exc}")
         record["error"] = str(exc)[:500]
     try:
-        from src.api.a2a_dispatch import trigger_org_aggregate
-
-        triggered = trigger_org_aggregate(dispatch, targets, status)
+        triggered = runtime_public.trigger_org_aggregate(dispatch, targets, status)
         if triggered.get("seq"):
             record["seq"] = int(triggered["seq"])
     except Exception as exc:
@@ -1280,22 +1275,21 @@ def _target_task_digests(target: dict) -> list[tuple[dict, dict]]:
     一个子 Issue 常有 coding/qa/sre 多次执行：分别保留「改了什么 / 验证了什么 /
     部署了什么」，只取最新一条会丢掉实现细节。
     """
-    from src.api.event_store import get_issue_task_digests, get_latest_task_digest
     from src.kernel.context_digest import build_digest
 
     t = target or {}
     repo_key = str(t.get("repo_key") or "")
     issue_no = native_issue_number(t.get("child_issue_number"))
     issue_ref = f"#{issue_no}" if issue_no else ""
-    memories = get_issue_task_digests(repo_key, issue_ref, limit=3)
+    memories = runtime_public.get_issue_task_digests(repo_key, issue_ref, limit=3)
     task_ref = str(t.get("child_task_id") or "")
     if task_ref.startswith("t_"):
-        selected = get_latest_task_digest(repo_key, "", task_id=task_ref)
+        selected = runtime_public.get_latest_task_digest(repo_key, "", task_id=task_ref)
         if selected and selected.get("task_id") not in {
                 m.get("task_id") for m in memories}:
             memories.insert(0, selected)
     if not memories:
-        latest = get_latest_task_digest(repo_key, issue_ref)
+        latest = runtime_public.get_latest_task_digest(repo_key, issue_ref)
         if latest:
             memories = [latest]
     out: list[tuple[dict, dict]] = []
@@ -1731,9 +1725,7 @@ def _cancel_inflight_agents(repo_key: str, issue_number) -> int:
             pass
         try:
             if at_seq:
-                from src.api.event_store import update_event_status
-
-                update_event_status(at_seq, "cancelled")
+                runtime_public.update_event_status(at_seq, "cancelled")
         except Exception:
             pass
     if running:

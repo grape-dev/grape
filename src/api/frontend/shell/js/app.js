@@ -1595,15 +1595,25 @@ function loadAgentTypes() {
     }
 
     var _knownOrg = (window._orgMetaById || {})[String(orgId)];
-    if (_knownOrg) {
+    // 元信息缓存命中还不够：必须以 __orgsList（_ensureOrgContext 的真源）为准。
+    // 新建组织可能先进了 _orgMetaById，但 __orgsList 还是创建前的旧列表；
+    // 此时走快路径会让 _ensureOrgContext 判定 id 无效 → 回落个人空间。
+    var _knownInList = (window.__orgsList || []).some(function(o) {
+      return String(o && o.id) === String(orgId);
+    });
+    if (_knownOrg && _knownInList) {
       if (!_knownOrg.is_personal) { _enterTeamOrgWorkbench(); return; }
       _loadOrgReposForSwitch(true);
       return;
     }
     // 组织信息还没缓存（例如从其它页面直接切）：补一次 /orgs 再决定落点。
+    // 必须同步刷新 window.__orgsList：否则 _ensureOrgContext / _updateTbOrgName
+    // 仍读创建前的旧列表，判定新 org id 无效后回落到个人组织，并把
+    // current_org_id 覆写为个人组织（创建组织后“回到个人空间”的根因）。
     API.get('/orgs').then(function(orgs) {
-      _cacheOrgs(orgs);
-      var target = (orgs || []).find(function(o) { return String(o.id) === String(orgId); });
+      window.__orgsList = orgs || [];
+      _cacheOrgs(window.__orgsList);
+      var target = (window.__orgsList).find(function(o) { return String(o.id) === String(orgId); });
       if (target && !target.is_personal) { _enterTeamOrgWorkbench(); return; }
       _loadOrgReposForSwitch(true);
     }).catch(function() { _loadOrgReposForSwitch(true); });

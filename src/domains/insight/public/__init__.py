@@ -630,6 +630,18 @@ def obs_loop_snapshot() -> list:
     return _impl.snapshot()
 
 
+def obs_loop_beat(name: str) -> None:
+    """跨域契约口：标记某个后台循环本轮正常（mgmt 触发 runtime 对账等）。"""
+    from src.domains.insight.observability import loops as _impl
+    _impl.beat(str(name))
+
+
+def obs_loop_fail(name: str, err: Any = "") -> None:
+    """跨域契约口：标记某个后台循环本轮失败。"""
+    from src.domains.insight.observability import loops as _impl
+    _impl.fail(str(name), err)
+
+
 def obs_silent_targets(include_retired: bool = True) -> dict:
     """静默目标名单（应报数却没报的设备/仓库）。"""
     from src.domains.insight.observability import gap as _impl

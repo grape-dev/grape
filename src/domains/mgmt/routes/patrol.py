@@ -183,19 +183,17 @@ async def pipeline_advance_run(body: PipelineAdvanceBody = None,
     ``grape a2a handoff``、收尾钩子是否执行，都不影响本口径。
     """
     from src.domains.mgmt.auth.audit import log_audit
-    from src.domains.runtime.engine.pipeline_reconcile import (
-        reconcile_pipeline_progress,
-    )
-    from src.domains.insight.observability import loops
+    from src.domains.runtime import public as _rt_public
+    from src.domains.insight import public as _insight_public
 
     b = body or PipelineAdvanceBody()
     limit = max(1, min(int(b.limit or 200), 1000))
     try:
         stats = await asyncio.to_thread(
-            reconcile_pipeline_progress, limit, b.lookback_hours)
-        loops.beat("pipeline_advance")
+            _rt_public.reconcile_pipeline_progress, limit, b.lookback_hours)
+        _insight_public.obs_loop_beat("pipeline_advance")
     except Exception as e:
-        loops.fail("pipeline_advance", e)
+        _insight_public.obs_loop_fail("pipeline_advance", e)
         raise
     uid = str(user.get("id") or 0)
     log_audit(

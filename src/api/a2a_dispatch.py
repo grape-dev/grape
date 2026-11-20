@@ -570,113 +570,13 @@ def run_a2a_dispatch(repo_key: str, seq: int, agent_name: str, evt: dict,
     return {"status": "ok", "seq": seq, "agent": agent_name}
 
 
-# ===== Issue #2251: 组织下派终态 → 幂等触发 org_aggregate（aggregate_recheck）=====
-
+# ===== Issue #2251: 组织下派终态 → 幂等触发 org_aggregate =====
+# 实现已下沉 runtime 域（a2a_aggregate），这里保留兼容入口；域间调用请走
+# ``src.domains.runtime.public.trigger_org_aggregate`` 契约口。
 def trigger_org_aggregate(dispatch: dict, targets: list[dict] | None,
                           terminal_status: str) -> dict:
-    """批次进入终态时幂等持久化一条 org_aggregate 重排事件。
-
-    - 幂等键：``org_agg:<dispatch_id>:<terminal_status>``（events 唯一索引兜底，
-      重复 sweep / 多实例并发都只落一条）；
-    - 事件以 ``status='queued'`` 持久化（``aggregate_recheck=true``），由巡检
-      ``reconcile_queued_a2a`` 按 ``_not_before`` 派发，进程重启不丢；
-    - 派发失败沿用 #2118 的退避重排 / 耗尽转 pending_review 路径。
-
-    返回 ``{"status": "queued"|"dedup"|"skipped", "seq": N}``。
-    """
-    from datetime import datetime, timezone
-
-    from src.api.event_store import append_event, find_event_by_idempotency_key
-    from src.config import log
-    from src.kernel.repo_key import from_repo_key
-
-    repo_key = str((dispatch or {}).get("org_repo_key") or "")
-    # D105/A12：org issue 编号是平台原生 ident（数字或 Gitee IK* 字符串），
-    # 不能用 int() 收口；dispatch.id 是 TEXT uuid，保持字符串。
-    issue_number = native_issue_number((dispatch or {}).get("org_issue_number") or "")
-    dispatch_id = str((dispatch or {}).get("id") or "")
-    scene_id = str((dispatch or {}).get("scene_id") or "") or "default"
-    if not repo_key or not is_actionable_issue_number(issue_number) or not dispatch_id:
-        return {"status": "skipped", "seq": 0}
-
-    idem = f"org_agg:{dispatch_id}:{str(terminal_status or '')}"[:128]
-    existing = find_event_by_idempotency_key(repo_key, idem)
-    if existing:
-        return {"status": "dedup", "seq": int(existing.get("seq") or 0)}
-
-    from src.api.pipeline_config import get_pipeline_config, get_pipeline_transition, node_role
-    transition = get_pipeline_transition(scene_id, "org_aggregate", repo_key=repo_key) or {}
-    node = transition.get("node") or {}
-    if not node:
-        # 自定义组织场景可能给聚合节点换了 id/tag，但技能语义仍是 org-aggregate-cli。
-        # 按技能兜底解析，避免聚合事件没有目标技能而永远派发不出去。
-        _cfg = get_pipeline_config(scene_id, repo_key=repo_key) or {}
-        node = next(
-            (n for n in (_cfg.get("nodes") or [])
-             if str(n.get("skill") or "") == "org-aggregate-cli"),
-            None,
-        ) or {}
-    role = node_role(node) or "qa"
-    repository = from_repo_key(repo_key) or repo_key
-    context = (
-        f"组织下派 #{dispatch_id} 已进入终态 {terminal_status}，请聚合各目标结果并收口组织 Issue"
+    from src.domains.runtime.a2a_aggregate import (
+        trigger_org_aggregate as _impl,
     )
-    payload = {
-        "repository": repository,
-        "account": repository,
-        "issue_number": str(issue_number),
-        "pr_number": "",
-        "context": context[:500],
-        "aggregate_recheck": True,
-        "aggregate_round": 1,
-        "org_id": str((dispatch or {}).get("org_id") or ""),
-        "dispatch_id": dispatch_id,
-        "terminal_status": str(terminal_status or ""),
-        "ref_seq": 0,
-        # 到点即可由巡检派发（sweeper 已确认批次终态）
-        "_not_before": datetime.now(timezone.utc).isoformat(),
-    }
-    _evt = {
-        "type": "a2a_event", "repository": repository, "account": repository,
-        "issue_id": f"#{issue_number}", "issue_number": str(issue_number),
-        "payload": {k: v for k, v in payload.items() if k != "_a2a_queue"},
-        "_a2a_context": context,
-    }
-    payload["_a2a_queue"] = {
-        "existing_seq": 0,
-        "dispatch": {
-            "skill_name": str(node.get("skill") or ""),
-            "skill_id": int(node.get("skill_id") or 0),
-            "skill_path": str(node.get("skill_path") or ""),
-            "runtime_id": 0,
-            "backend": "",
-            "evt": _evt,
-        },
-    }
-    try:
-        seq = append_event(
-            repo_key=repo_key, event_type="a2a_event",
-            title=f"组织聚合重排：dispatch #{dispatch_id} 终态 {terminal_status}",
-            issue_id=f"#{issue_number}", source="a2a", agent_type=role,
-            summary=f"A2A: → {role} (org aggregate recheck)",
-            payload=payload, status="queued", scene_id=scene_id,
-            idempotency_key=idem,
-        )
-    except Exception as exc:
-        log.warning(f"org-aggregate: persist recheck event failed dispatch={dispatch_id}: {exc}")
-        return {"status": "skipped", "seq": 0}
-    # Issue #2270：批次终态时才触发聚合节点，这里同步把组织 Issue stage 推进到
-    # 聚合角色（qa）。此前依赖 org_dispatch 节点提前 A2A 来推进 stage；改为「等
-    # 批次终态」后，必须由触发方负责 stage，否则聚合任务完成时 stage 仍是 coding，
-    # auto-advance 会因 stage 不匹配而跳过 finalize/pending_review。
-    try:
-        from src.api.session_store import set_issue_stage
-        set_issue_stage(repo_key, f"#{issue_number}", role, "org_aggregate")
-    except Exception as exc:
-        log.warning(f"org-aggregate: set issue stage failed issue=#{issue_number}: {exc}")
-    if seq <= 0:
-        # 撞幂等键：已有事件（负 seq），不再触发
-        return {"status": "dedup", "seq": abs(int(seq))}
-    log.info(f"org-aggregate: queued recheck event seq={seq} dispatch={dispatch_id} "
-             f"status={terminal_status} role={role} scene={scene_id}")
-    return {"status": "queued", "seq": int(seq)}
+
+    return _impl(dispatch, targets, terminal_status)

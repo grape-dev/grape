@@ -2256,7 +2256,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     """
     from src.api.issues_center import (_query_tasks, _build_assignee_filter, _build_creator_filter,
                                        resolve_issues_page_params, _get_gitcode_user_by_user_id)
-    from src.domains.mgmt.user.org_db import is_org_personal
+    from src.domains.mgmt.public import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal else _org_id
@@ -2454,7 +2454,7 @@ def list_repo_issues(owner: str, repo: str,
       PR 伪卡片同口径过滤（statuses 匹配映射后的 task_status）。
     """
     from src.api.issues_center import _query_tasks, _build_assignee_filter, _build_creator_filter, resolve_issues_page_params
-    from src.domains.mgmt.user.org_db import is_org_personal
+    from src.domains.mgmt.public import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal else _org_id

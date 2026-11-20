@@ -1,6 +1,7 @@
 table,owner_domain,consumer,refs
 agent_runtimes,runtime,api,10
 agent_tasks,runtime,api,4
+autopilot_tasks,mgmt,api,2
 backend_agents,runtime,api,6
 chat_conversations,runtime,api,1
 devops_pipeline_scene,mgmt,api,2

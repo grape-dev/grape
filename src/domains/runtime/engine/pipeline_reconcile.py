@@ -26,7 +26,6 @@ from datetime import datetime, timezone
 
 from src.kernel.config import log
 from src.kernel.issue_ident import is_actionable_issue_number, native_issue_number
-from src.kernel import session_manager as _sm
 
 # 只补偿"近期"完成任务，避免首次上线把历史 Issue 全部推进。
 _DEFAULT_LOOKBACK_HOURS = 6
@@ -63,7 +62,8 @@ def _age_seconds(ts) -> float | None:
         dt = dt.replace(tzinfo=timezone.utc)
     try:
         return (datetime.now(timezone.utc) - dt).total_seconds()
-    except Exception:
+    except Exception as _e:
+        log.debug(f"pipeline-advance: completed_at parse failed ({ts}): {_e}")
         return None
 
 
@@ -75,7 +75,7 @@ def _candidate_tasks(limit: int) -> list[dict]:
     """
     from src.kernel.bulk_read import reader
 
-    with reader() as c:
+    with reader("runtime") as c:
         c.execute(
             "SELECT id, repo_key, issue_id, agent_type, event_seq, completed_at "
             "FROM agent_tasks "
@@ -92,7 +92,7 @@ def _candidate_tasks(limit: int) -> list[dict]:
 def _issue_state(repo_key: str, issue_number: int) -> dict:
     from src.kernel.bulk_read import reader
 
-    with reader() as c:
+    with reader("runtime") as c:
         c.execute(
             "SELECT status, stage FROM issue WHERE repo_key=? AND issue_number=? "
             "ORDER BY id LIMIT 1",
@@ -133,8 +133,8 @@ def reconcile_pipeline_progress(limit: int = 200,
                 for _key in ("advanced", "scanned", "skipped"):
                     span.set_attribute(_key, int(stats.get(_key) or 0))
                 span.set_attribute("busy", bool(stats.get("busy")))
-            except Exception:
-                pass
+            except Exception as _se:
+                log.debug(f"pipeline-advance: span attribute failed: {_se}")
         try:
             org_metrics.observe_pipeline_advance(stats)
         except Exception as _e:  # 指标失败不影响收敛主流程
@@ -211,7 +211,10 @@ def _reconcile_locked(limit: int, lookback_hours: float | None) -> dict:
             stats["skipped"] += 1
             continue
         action = str((result or {}).get("action") or "")
-        if action in ("a2a", "recheck"):
+        _seq = int((result or {}).get("seq") or 0)
+        # append_event 撞幂等键会返回负 seq（已有事件）：不是本次推进，不能计入
+        # advanced；否则统计会虚高，且掩盖「历史自动事件失败/已存在」的真实状态。
+        if action in ("a2a", "recheck") and _seq > 0:
             stats["advanced"] += 1
             stats["actions"].append({
                 "task_id": task_id, "repo_key": repo_key, "issue_id": issue_id,

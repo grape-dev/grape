@@ -3675,7 +3675,7 @@ def _aggregate_round(task: dict) -> int:
         return 0
     try:
         with db_lock:
-            row = db.cursor().execute(
+            row = _rt_db.cursor().execute(
                 "SELECT payload FROM events WHERE seq=?", (int(seq),)).fetchone()
         if not row:
             return 0
@@ -3692,7 +3692,7 @@ def _aggregate_dispatch_ref(task: dict) -> int:
         return 0
     try:
         with db_lock:
-            row = db.cursor().execute(
+            row = _rt_db.cursor().execute(
                 "SELECT payload FROM events WHERE seq=?", (int(seq),)).fetchone()
         if not row:
             return 0

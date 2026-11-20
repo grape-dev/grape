@@ -2015,10 +2015,10 @@ def _pr_vcs_client(repo_key: str):
             return None
         token = ""
         if provider == "github":
-            from src.domains.mgmt.user.db import get_github_token as _get_gh
+            from src.domains.mgmt.public import get_github_token as _get_gh
             token = _get_gh(repo_key=repo_key) or ""
         else:
-            from src.domains.mgmt.user.db import get_repo_bot_token as _get_gc
+            from src.domains.mgmt.public import get_repo_bot_token as _get_gc
             token = _get_gc(repo_key=repo_key) or ""
         if not token:
             log.info(f"[im-notify] pr client repo={repo_key} reason=no_bot_token")
@@ -2039,10 +2039,10 @@ def _pr_vcs_client(repo_key: str):
             return None
         token = ""
         if provider == "github":
-            from src.domains.mgmt.user.db import get_github_token as _get_gh
+            from src.domains.mgmt.public import get_github_token as _get_gh
             token = _get_gh(repo_key=repo_key) or ""
         else:
-            from src.domains.mgmt.user.db import get_repo_bot_token as _get_gc
+            from src.domains.mgmt.public import get_repo_bot_token as _get_gc
             token = _get_gc(repo_key=repo_key) or ""
         if not token:
             log.info(f"[im-notify] pr client repo={repo_key} reason=no_bot_token")

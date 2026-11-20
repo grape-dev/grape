@@ -156,7 +156,8 @@ def _org_demand_rows(org_id: str) -> list[dict]:
 
 
 def _org_dispatch_rows(org_id: str) -> list[dict]:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("mgmt")
 
     with db_lock:
         c = db.cursor()
@@ -187,7 +188,8 @@ def _org_dispatch_rows(org_id: str) -> list[dict]:
 
 
 def _org_aggregate_map(org_id: str) -> dict[str, dict]:
-    from src.kernel.session_manager import db, db_lock
+    from src.kernel.owner_db import db_pair
+    db, db_lock = db_pair("mgmt")
 
     with db_lock:
         c = db.cursor()
