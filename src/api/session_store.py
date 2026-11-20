@@ -135,10 +135,13 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
     scene_id 初始为空，由 Task Center set_issue_scene 或智能推荐写入。
     """
     # Phase C3：写 issue 单表（无卡片行则建档最小行）
-    _sync_issue_fields(repo_key, issue_id, {
-        "stage": stage, "owner_agent": owner_agent, "assignee": assignee or "",
-        "a2a_seq": a2a_seq,
-    }, ensure_row=True, assignee=assignee)
+    # Issue #3646：assignee 只在**显式传入**时写——A2A 推进路径（`set_issue_stage(rk, iid, next, next)`）
+    # 只带角色不带责任人，原实现 `assignee or ""` 会把真实责任人一次推进就抹成空串，
+    # 流水线「当前责任人」随之退化为内部账号推断。
+    _fields = {"stage": stage, "owner_agent": owner_agent, "a2a_seq": a2a_seq}
+    if assignee:
+        _fields["assignee"] = assignee
+    _sync_issue_fields(repo_key, issue_id, _fields, ensure_row=True, assignee=assignee)
     from src.kernel.config import log
     log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee}")
 
@@ -173,6 +176,35 @@ def get_issue_assignee(repo_key: str, issue_id: str) -> str:
     """返回 Issue 责任人（GitCode assignee 用户名；无记录空）。"""
     st = get_issue_stage(repo_key, issue_id)
     return (st["assignee"] if st else "") or ""
+
+
+def sync_issue_assignee(repo_key: str, issue_id: str, assignee: str) -> bool:
+    """指派/更新事件把 VCS 当前 assignee 回填 Issue 卡片（Issue #3646）。
+
+    历史实现只在 `issue_opened` 初始化 assignee，而 A2A 推进路径又不携带责任人，
+    卡片 assignee 因此长期为空，流水线「当前责任人」只能靠 event actor 推断——
+    内部 Agent 账号（`gcw_*`）就是这样被展示出来的。
+
+    口径：
+    - 只写 `assignee` 单字段（不动 stage / owner_agent / updated_at，也不动 user_id 归属）；
+    - **仅空值回填**：已有非空责任人（人类或机器人接管值）一律不覆盖，人类责任人优先；
+    - 空 assignee / 非法 issue 标识 → 不写，返回 False。
+    """
+    _asg = str(assignee or "").strip()
+    _num = _issue_num_or_ident(issue_id)
+    if not _asg or not _num:
+        return False
+    try:
+        _st = get_issue_stage(repo_key, issue_id) or {}
+        if (_st.get("assignee") or "").strip():
+            return False
+        # 返回值取真实写入行数：无卡片行时不假装回填成功（对账口径）。
+        return bool(rt.update_issue_card_fields(repo_key, _num, {"assignee": _asg},
+                                                touch_updated_at=False))
+    except Exception as e:  # noqa: BLE001 - 回填是旁路，失败不阻断事件主流程
+        from src.kernel.config import log as _log
+        _log.warning(f"sync_issue_assignee failed for {repo_key} #{_num}: {e}")
+        return False
 
 
 def get_issue_scene(repo_key: str, issue_id: str) -> tuple:

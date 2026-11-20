@@ -5,6 +5,7 @@ from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
 from src.kernel.config import log
 from src.kernel.issue_ident import native_issue_number, is_native_issue_ident  # Issue #3055
+from src.domains.runtime.pipeline.owner_display import resolve_human_owner  # Issue #3646
 
 
 class _OwnedCursor:
@@ -358,8 +359,10 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
 
     involved_agents = [_nodes[i].get("name") or _nodes[i].get("id", "") for i, s in enumerate(stage_statuses) if s > 0]
 
-    # 责任人：优先 Issue assignee（issue_state.assignee，GitCode 真实指派，可为 grape_bot 或用户），
-    # 回退从事件 actor 推断（_get_latest_assignee 已因 payload 不含 assignee 而基本失效，保留兜底）。
+    # 责任人（Issue #3646）：**只展示人类**。优先级 ① issue_state.assignee（GitCode 真实指派）
+    # → ② 事件 payload 的 assignee → ③ 最近一次人类事件操作者；bot / Agent runtime 身份 /
+    # `gcw_*` 自动登录名一律过滤（#3644 曾因此把内部账号 gcw_3FZApeLT 当成人展示），
+    # 全为内部账号时回退当前阶段 Agent 显示名，绝不输出原始内部账号。
     current_owner = ""
     # _st 已在上方从 stage_map 获取
     def _resolve_feishu_name_cached(name):
@@ -372,29 +375,49 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
             feishu_name_cache[name] = result
         return result
 
+    # 内部账号名单：调用方批量查询结果优先；为空时懒加载一次全局名单（不做 N+1）
+    _owner_bots = bot_usernames
+    if not _owner_bots:
+        try:
+            from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
+            _owner_bots = set(get_all_bot_usernames() or ())
+        except Exception as _be:
+            # 不静默：名单缺失会让过滤退化为「仅按名字形态」，留可观测信号
+            log.warning(f"[pipeline] bot username batch fallback failed: {_be}")
+            _owner_bots = set()
+
+    # ① ② 指派候选：issue_state.assignee → 事件 payload 最新 assignee
+    _assignee_candidates = []
     if _st and _st.get("assignee"):
-        current_owner = _resolve_feishu_name_cached(_st["assignee"])
-    else:
-        assignee = _get_latest_assignee(issue_events)
-        if assignee:
-            current_owner = _resolve_feishu_name_cached(assignee)
-        else:
-            for i in range(len(stage_statuses) - 1, -1, -1):
-                if stage_statuses[i] > 0:
-                    agent = _nodes[i].get("id", "") if i < len(_nodes) else ""
-                    latest = stages[i].get("latest_event") or {}
-                    actor = latest.get("actor", "")
-                    if actor:
-                        _bots = bot_usernames if bot_usernames is not None else set()
-                        if not _bots:
-                            from src.domains.mgmt.public import get_all_bot_usernames  # 跨域走 owner public
-                            _bots = get_all_bot_usernames()
-                        if actor in _bots:
-                            from src.domains.runtime.pipeline.event_pipeline import get_agent_display_name
-                            current_owner = get_agent_display_name(agent)
-                        else:
-                            current_owner = actor
-                    break
+        _assignee_candidates.append(_st["assignee"])
+    _payload_assignee = _get_latest_assignee(issue_events)
+    if _payload_assignee:
+        _assignee_candidates.append(_payload_assignee)
+
+    # ③ 操作者候选：阶段倒序（不因最近 actor 是内部账号提前结束）→ 末位补最早一条事件的操作者
+    _actor_candidates = []
+    _owner_agent = ""
+    for i in range(len(stage_statuses) - 1, -1, -1):
+        if stage_statuses[i] <= 0:
+            continue
+        if not _owner_agent:
+            # 当前阶段 agent（全内部账号时用它的显示名兜底，与旧口径一致）
+            _owner_agent = _nodes[i].get("id", "") if i < len(_nodes) else ""
+        _actor = str(((stages[i].get("latest_event") or {}).get("actor") or "")).strip()
+        if _actor:
+            _actor_candidates.append(_actor)
+    for _e in issue_events:  # issue_events 按 seq 升序（最早在前）
+        _opener = str(_e.get("actor") or "").strip()
+        if _opener:
+            _actor_candidates.append(_opener)
+            break
+
+    _human_owner = resolve_human_owner(_assignee_candidates, _actor_candidates, _owner_bots)
+    if _human_owner:
+        current_owner = _resolve_feishu_name_cached(_human_owner)
+    elif _owner_agent:
+        from src.domains.runtime.pipeline.event_pipeline import get_agent_display_name
+        current_owner = get_agent_display_name(_owner_agent)
 
     # 生命周期阶段（issue_state.stage）：vod/issue/coding/qa/sre/done；无记录默认 vod
     stage = (_st.get("stage") if _st else "") or "vod"
@@ -689,7 +712,10 @@ def get_pipeline(owner: str, repo: str,
     _bot_usernames = set()
     try:
         from src.domains.mgmt import public as _mgmt_public_bots
+        # Issue #3646：repo 级 bot 之外并上全局 bot 名单（责任人过滤需要完整名单），
+        # 一次查询覆盖整页，避免 _get_issue_pipeline 内部按 issue 懒加载造成 N+1。
         _bot_usernames = set(_mgmt_public_bots.repo_bot_usernames_any(_repo_keys))
+        _bot_usernames |= set(_mgmt_public_bots.get_all_bot_usernames() or ())
     except Exception as _e:
         # 不静默：空集会让下方责任人推断退化为「直接显示 actor」（不区分 bot/用户），
         # 必须留可观测信号，否则展示口径错误无从发现。

@@ -2587,6 +2587,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     ensure_issue_task(repo_key, native_issue_number(_num3), title=_t3, assignee=_asg3,
                                       event_type=event_type, sender=_sender3)
                     log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or _sender3 or '(owner)'}")
+                    # Issue #3646：指派/更新事件把 VCS 当前 assignee 回填 Issue 卡片（仅空值回填，
+                    # 人类责任人不会被覆盖）——原仅 issue_opened 初始化，A2A 推进又不带责任人，
+                    # 卡片 assignee 长期为空让流水线「当前责任人」退化为内部账号推断。
+                    if _asg3:
+                        try:
+                            from src.api.session_store import sync_issue_assignee
+                            if sync_issue_assignee(repo_key, _iid3, _asg3):
+                                log.info(f"Pipeline: issue assignee backfilled #{_num3} assignee={_asg3}")
+                        except Exception as _asg_e:
+                            log.warning(f"Pipeline: issue assignee backfill skipped #{_num3}: {_asg_e}")
     except Exception as _e:
         log.warning(f"Pipeline: task-center sync failed: {_e}")
 
