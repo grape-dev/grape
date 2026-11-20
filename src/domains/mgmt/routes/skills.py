@@ -3,7 +3,7 @@
 from src.kernel.domain_db import cursor as _domain_cursor
 import io as _io
 
-import hashlib, os, tempfile, zipfile, json, shutil, stat as _stat
+import hashlib, os, re, tempfile, zipfile, json, shutil, stat as _stat
 
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response, Query, Body
 from pydantic import BaseModel
@@ -29,6 +29,37 @@ router = APIRouter(prefix="/api/skills", tags=["skills"])
 
 # 解压后总大小上限（zip 炸弹防护，见 obs-skill-storage-design.md §7）
 MAX_EXTRACT_BYTES = int(os.environ.get("SKILL_MAX_EXTRACT_BYTES", str(100 * 1024 * 1024)))
+
+#: 合规 repo 参数：可选 provider 前缀 + owner/repo（Issue #1790/#1786 移植）
+_REPO_PARAM_RE = re.compile(r"^(?:[a-z][a-z0-9_-]{1,20}:)?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _validate_repo_param(repo: str) -> None:
+    """repo 查询参数三态校验：未传 / 合规 owner/repo / 不合规。
+
+    不合规（裸仓库名、非法前缀、残留冒号、http/git@ 地址、多级路径）直接 400。
+    此前这类参数会被静默忽略、回退成官方列表——前端看起来是「这个仓没有技能」，
+    实际是参数写错了，故障被藏起来（#1790：「不再静默回退官方列表」）。
+    """
+    if repo is None:
+        return
+    raw = str(repo).strip()
+    if not raw:
+        return
+    if _REPO_PARAM_RE.match(raw):
+        return
+    hint = "需为 owner/repo（可带 provider 前缀）"
+    if ":" not in raw and "/" not in raw:
+        reason = "裸仓库名"
+    elif raw.count("/") > 1:
+        reason = "多级路径"
+    else:
+        reason = "非法前缀或残留冒号"
+    raise HTTPException(status_code=400, detail={
+        "code": 400,
+        "message": f"仓库参数不合规（{reason}）：{raw}；{hint}",
+    })
+
 
 def _resolve_repo_key(repo: str, strict: bool = False) -> str:
     """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。
