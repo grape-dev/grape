@@ -55,10 +55,46 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_587_event_convergence.py tests/runtime/test_terminate_event.py -v
+      - name: Runtime credential file regression tests (issue #2152)
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/runtime/test_dsh_runtime.py \
+            tests/runtime/test_executor_token_env.py -v
       - name: Labels dual-channel tests (issue #581)
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_581_labels_dual_channel.py -v
+      - name: Org dispatch & scene mgmt tests (issue #2112)
+        # Issue #2112 PR #1265 审查：tests/mgmt 下派用例此前未进门禁，回归只能靠人工。
+        # 显式接入下派 + 组织/场景相关用例，失败可阻断合并。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: |
+          python -m pytest tests/mgmt/test_org_dispatch.py tests/mgmt/test_org_repo_binding.py \
+            tests/mgmt/test_org_provisioning.py tests/mgmt/test_scene_env.py \
+            tests/mgmt/test_linked_repos.py tests/runtime/test_org_aggregate_wait.py -v
+      - name: Org context & knowledge tests (issue #2150)
+        # Issue #2150 PR #1278 审查：新用例此前未进门禁，回归只能靠人工。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/mgmt/test_org_context.py tests/mgmt/test_org_context_autoseed.py \
+            tests/mgmt/test_org_context_retention.py \
+            tests/mgmt/test_org_context_snapshot.py \
+            tests/api/test_event_store_context_digest.py -v
+      - name: Org audit query tests (issue #2260)
+        # Issue #2260 PR #1344 审查：组织审计查询用例此前未进门禁，回归只能靠人工。
+        # 覆盖鉴权/隔离/事件过滤/分页/since/脱敏（含深层嵌套 fail-closed）。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/mgmt/test_org_audit.py -v
+      - name: Org pipeline end-to-end integration tests (issue #2153)
+        # Issue #2153：组织主体链路（provisioning → 关联仓库 → 下派 → 聚合）端到端集成用例。
+        # 独立 integration marker：真实 DB + mock VCS adapter，无外网、无真实 worker。
+        # 默认回归通过 pytest.ini addopts 排除 integration，此处单独门禁执行。
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/integration -m integration -v
       - name: Engine uid migration tests (issue #646)
         env:
           GITCODE_API_TOKEN: test_token
@@ -101,6 +137,8 @@ jobs:
         run: python -m pytest tests/api/test_issue_1011_integration.py -v
       - name: Frontend source-assertion tests (issue #473)
         run: node tests/js/test_issue_473_range_filter.js
+      - name: Org pipeline page source-assertion tests (org detail split)
+        run: node tests/js/test_org_pipeline_page.js
       - name: IM adapter tests (issue #1613)
         # Issue #1613 QA 审查：IM 适配器用例此前未被流水线执行，回归无法被门禁发现；
         # 本仓测试树已按 src 对齐，IM 用例位于 tests/runtime/im/。
@@ -124,7 +162,8 @@ jobs:
           DDL_BASE: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: |
           python3 scripts/check-destructive-ddl.py "$DDL_BASE"
-          python -m pytest tests/api/test_issue_536_migrations.py tests/kernel/test_check_destructive_ddl.py -v
+          python -m pytest tests/api/test_issue_536_migrations.py tests/kernel/test_check_destructive_ddl.py \
+            tests/kernel/test_d105_org_user_text_migration.py tests/kernel/test_context_digest.py -v
       - name: OpenAPI contract endpoint completeness guard (issue #897)
         # Issue #897 P0：契约 v2.2.0 曾被 A 进程子集落盘覆盖，丢失 /api/a2a、
         # /api/tasks/* 等核心工作流端点导致 CLI 命令组不渲染。CI 卡点：
@@ -202,6 +241,10 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/runtime/test_issue_2133_recovery.py -v
+      - name: Organization provisioning and repo binding tests (issue #2090)
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/mgmt/test_org_provisioning.py tests/mgmt/test_org_repo_binding.py tests/mgmt/test_org_repo_picker.py tests/mgmt/test_repo_org_visibility.py tests/mgmt/test_org_delete_cleanup.py -q
       - name: Org unassigned int/str visibility tests (issue #3167)
         # Issue #3167 QA 审查修复（Required）：新增回归用例
         # tests/mgmt/test_issue_3167_org_unassigned_int.py 此前未接入 CI，int org_id

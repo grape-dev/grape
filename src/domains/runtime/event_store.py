@@ -1,5 +1,5 @@
 """Event Store — 事件记录与查询（shared events table）"""
-import json, threading, asyncio
+import json, re, threading, asyncio
 from datetime import datetime
 from src.kernel.owner_db import db_pair
 
@@ -9,6 +9,7 @@ from src.kernel.issue_ident import is_actionable_issue_number, normalize_issue_i
 from src.kernel.time_utils import normalize_event_time
 from src.kernel.event_payload_view import payload_view_from_json
 from src.kernel.a2a_context import a2a_event_context_key
+from src.kernel.context_digest import build_digest, render_compact
 
 _EVENTS_COLUMNS_CACHE = None
 
@@ -1402,15 +1403,35 @@ def get_events_grouped_by_issue(repo_key: str) -> dict[str, list[dict]]:
     return grouped
 
 
+def _is_org_scoped_repo(repo_key: str) -> bool:
+    """仅团队组织关联仓库启用富任务记忆；普通/个人仓库保持原有摘要逻辑。"""
+    try:
+        from src.domains.mgmt import public as _mgmt_public
+
+        org_id = _mgmt_public.get_repo_org_id(repo_key)
+        return bool(org_id) and not _mgmt_public.get_org_is_personal(str(org_id))
+    except Exception as exc:
+        # G-2：端口异常不能静默降级成「非组织仓库」，否则结构化任务记忆在单库
+        # 拓扑下会永久失效且不可观测。端口已在 mgmt public 内支持单库回退；这里
+        # 仅保留 fail-open 兜底并显式留痕（异常=配置/拓扑问题，需告警排查）。
+        log.warning(f"org-scoped repo check failed repo={repo_key}: {exc}")
+        return False
+
+
 def get_issue_summary(repo_key: str, max_issues: int = 10, exclude_issue: str = "") -> str:
     """按 Issue 聚类生成事件摘要文本，用于 Prompt 注入。
 
-    每条 Issue 包含：事件流（agent:type✓）+ 最新已完成事件的 result 摘要（截断 300 字符），
-    使 Chat Agent 能感知「部署已完成 / PR 已合并」等关键结论，避免重复追问用户已提供的信息。
-
-    exclude_issue：排除当前 Issue（issue-219 方向 A——当前 Issue 不应出现在自己的 pipeline 摘要中）。
-    比较时两侧均忽略 '#' 前缀，兼容 events.issue_id 存 "#5" 或 "5" 两种格式。
+    组织级仓库（managed_repos.org_id 非空）使用结构化任务记忆；
+    普通仓库保持既有 events.result 摘要逻辑，不受组织上下文改动影响。
     """
+    if _is_org_scoped_repo(repo_key):
+        return _get_org_issue_summary(repo_key, max_issues, exclude_issue)
+    return _get_legacy_issue_summary(repo_key, max_issues, exclude_issue)
+
+
+def _get_legacy_issue_summary(repo_key: str, max_issues: int = 10,
+                              exclude_issue: str = "") -> str:
+    """原有仓库级摘要：事件流 + events.result 最新摘要（保持原行为）。"""
     grouped = get_events_grouped_by_issue(repo_key)
     if not grouped:
         return ""
@@ -1442,6 +1463,249 @@ def get_issue_summary(repo_key: str, max_issues: int = 10, exclude_issue: str = 
             lines.append(f"    最新结论: {snippet}")
 
     return "Issue Pipeline:\n" + "\n".join(lines)
+
+
+def _get_org_issue_summary(repo_key: str, max_issues: int = 10, exclude_issue: str = "") -> str:
+    """组织级：按 Issue 聚类，优先消费结构化任务记忆（仅组织关联仓库调用）。
+
+    每条 Issue 包含：事件流（agent:type✓）+ 最新已完成事件的 result 摘要（截断 300 字符），
+    使 Chat Agent 能感知「部署已完成 / PR 已合并」等关键结论，避免重复追问用户已提供的信息。
+
+    exclude_issue：排除当前 Issue（issue-219 方向 A——当前 Issue 不应出现在自己的 pipeline 摘要中）。
+    比较时两侧均忽略 '#' 前缀，兼容 events.issue_id 存 "#5" 或 "5" 两种格式。
+    """
+    grouped = get_events_grouped_by_issue(repo_key)
+    if not grouped:
+        return ""
+
+    _ex = str(exclude_issue or "").lstrip("#")
+    lines = []
+    sorted_issues = sorted(grouped.keys(), key=lambda iid: grouped[iid][-1]["created_at"], reverse=True)[:max_issues]
+    if _ex:
+        sorted_issues = [iid for iid in sorted_issues if str(iid).lstrip("#") != _ex]
+
+    for iid in sorted_issues:
+        events = grouped[iid]
+        agent_flow = []
+        for ev in events:
+            agent = ev["agent_type"] or "?"
+            action = ev["event_type"]
+            status_icon = {"completed": "✓", "running": "▶", "failed": "✗", "pending": "○"}.get(ev["status"], "?")
+            agent_flow.append(f"{agent}:{action}{status_icon}")
+
+        title = events[0]["title"] or iid
+        lines.append(f"  {iid} {title} — {' → '.join(agent_flow)}")
+
+        # 优先消费 agent_tasks.result_text 的结构化结论（actions/conclusion/
+        # artifacts）；events.result 在流结束兜底时可能只是「任务已完成」占位，
+        # 不能代表任务真正产出了什么。缺失时再回退旧 result 摘要。
+        memories = get_issue_task_digests(repo_key, iid, limit=3)
+        digests = [
+            build_digest(
+                m["output"], agent_type=m.get("agent_type", ""),
+                status=m.get("status", ""), task_id=m.get("task_id", ""),
+                errors=m.get("errors", ""))
+            for m in memories if m.get("output")
+        ]
+        if digests:
+            compact = render_compact(digests[0])
+            if compact:
+                lines.append(f"    最新结论: {compact}")
+            # 不同角色回答不同问题：最新一条作为「最新结论」，其余角色按标签
+            # 补充实现/审查/部署结论，避免最新是 coding 时丢掉更早的 QA 结论。
+            seen_compact = {compact}
+            for role, label in (("coding", "实现"), ("qa", "审查"), ("sre", "部署")):
+                item = next(
+                    (d for d in digests if d.get("agent_type") == role), None)
+                role_compact = render_compact(item) if item else ""
+                if role_compact and role_compact not in seen_compact:
+                    lines.append(f"    {label}: {role_compact}")
+                    seen_compact.add(role_compact)
+            verification: list[str] = []
+            artifacts: list[str] = []
+            for digest in digests:
+                verification.extend(digest.get("verification") or [])
+                artifacts.extend(digest.get("artifacts") or [])
+            if verification:
+                lines.append(f"    验证: {'；'.join(verification)[:240]}")
+            if artifacts:
+                lines.append(f"    产物: {'；'.join(artifacts)[:240]}")
+            if not compact and not verification and not artifacts:
+                last_result = _get_latest_result(repo_key, iid)
+                if last_result:
+                    lines.append(f"    最新结论: {last_result[:300].strip()}…")
+        else:
+            last_result = _get_latest_result(repo_key, iid)
+            if last_result:
+                snippet = last_result[:300].replace("\n", " ").strip()
+                if len(last_result) > 300:
+                    snippet += "…"
+                lines.append(f"    最新结论: {snippet}")
+
+    return "Issue Pipeline:\n" + "\n".join(lines)
+
+
+_TASK_DIGEST_COLS = ("id, agent_type, status, skill, result_text, errors, "
+                     "created_at, completed_at")
+_TERMINAL_TASK_STATUSES = ("completed", "failed", "cancelled", "timeout_failed")
+
+# 任务记忆选择：不能只按「最新」取——PR 打开/标签回声/无变更复核等后续任务
+# 会把真正的实现卡片挤掉。这里按信息量打分，优先保留实现/修复/带产物的任务。
+_TASK_NOOP_RE = re.compile(
+    r"(?i)(本次无新增|无新增改动|无需新改动|无待处理动作|无新变更|"
+    r"仅核对|自身回声|未重复|不重复|无需重复|已交付成果|确认无需|"
+    r"任务已完成：级联收敛)")
+_TASK_IMPL_RE = re.compile(
+    r"(?i)(新增|实现|重构|修复|改造|补充测试|补齐|提交|推送|"
+    r"创建 PR|PR\s*#|分支 feat|迁移|升级|删除|替换|落地)")
+_TASK_ARTIFACT_RE = re.compile(
+    r"(?i)(PR\s*#|merge_requests?/|pull/|分支|commit|提交|comment id|"
+    r"评论 id|审核点|review)")
+
+
+def _task_memory_score(memory: dict) -> float:
+    """任务记忆信息量评分：实现/修复/验证/产物加分，无变更回声降权。"""
+    output = memory.get("output") or {}
+    if not isinstance(output, dict):
+        output = {"conclusion": str(output or "")}
+    text = " ".join([
+        str(output.get("conclusion") or ""),
+        str(output.get("issue_summary") or ""),
+        " ".join(str(x) for x in output.get("actions") or []),
+        " ".join(str(x) for x in output.get("artifacts") or []),
+    ])
+    actions = output.get("actions") or []
+    artifacts = " ".join(str(x) for x in output.get("artifacts") or [])
+    score = 0.0
+    if _TASK_NOOP_RE.search(text):
+        score -= 6.0
+    if _TASK_IMPL_RE.search(text):
+        score += 3.0
+    if _TASK_ARTIFACT_RE.search(artifacts):
+        score += 2.0
+    if re.search(r"(?i)(pytest|测试|passed|复跑|验证|pre-pr-check)", text):
+        score += 1.0
+    score += min(len(actions), 6) * 0.2
+    return score
+
+
+def _issue_id_variants(issue_id: str) -> list[str]:
+    base = str(issue_id or "").strip()
+    if not base:
+        return []
+    num = base.lstrip("#")
+    out: list[str] = []
+    for value in (base, num, f"#{num}"):
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _task_row_to_memory(row) -> dict:
+    raw = row[4] or ""
+    output = parse_agent_output_json(raw)
+    if output is None:
+        text = raw.strip()
+        output = {"conclusion": text} if text else None
+    return {
+        "task_id": row[0] or "",
+        "agent_type": row[1] or "",
+        "status": row[2] or "",
+        "skill": row[3] or "",
+        "output": output,
+        "raw": raw,
+        "errors": row[5] or "",
+        "created_at": row[6] or "",
+        "completed_at": row[7] or "",
+    }
+
+
+def get_issue_task_digests(repo_key: str, issue_id: str = "",
+                           agent_types: tuple[str, ...] = (
+                               "coding", "qa", "sre", "issue", "vod"),
+                           limit: int = 3) -> list[dict]:
+    """按角色取该 Issue 最新的终态任务摘要（每角色 1 条，按完成时间倒序）。
+
+    一个 Issue 往往经历 coding → qa → sre：不同角色的结论分别回答「改了什么」
+    「验证了什么」「部署了什么」。只取最新一条会丢掉实现细节，因此按角色保留。
+    """
+    variants = _issue_id_variants(issue_id)
+    if not repo_key or not variants:
+        return []
+    wanted = {str(x) for x in agent_types}
+    marks = ",".join("?" * len(variants))
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                f"SELECT {_TASK_DIGEST_COLS} FROM agent_tasks WHERE repo_key=? "
+                f"AND issue_id IN ({marks}) AND status IN "
+                f"({','.join('?' * len(_TERMINAL_TASK_STATUSES))}) "
+                "ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 100",
+                (repo_key, *variants, *_TERMINAL_TASK_STATUSES),
+            )
+            rows = c.fetchall()
+        except Exception as exc:
+            log.warning(f"read task digests failed repo={repo_key} "
+                        f"issue={issue_id}: {exc}")
+            return []
+    by_role: dict[str, list[dict]] = {}
+    for row in rows:
+        agent_type = row[1] or ""
+        if agent_type not in wanted:
+            continue
+        by_role.setdefault(agent_type, []).append(_task_row_to_memory(row))
+    selected: list[dict] = []
+    for agent_type, memories in by_role.items():
+        # 同角色取信息量最高的一条；无变更/回声任务只在前者不存在时保留。
+        best = max(
+            memories,
+            key=lambda m: (_task_memory_score(m),
+                           str(m.get("completed_at") or "")),
+        )
+        selected.append(best)
+    selected.sort(key=lambda m: str(m.get("completed_at") or ""), reverse=True)
+    return selected[:max(1, int(limit or 1))]
+
+
+def get_latest_task_digest(repo_key: str, issue_id: str = "",
+                           task_id: str = "") -> dict:
+    """读取任务的结构化产出摘要（优先指定 task_id，否则取该 Issue 最新终态任务）。
+
+    返回 ``{}`` 表示没有可用任务；否则含 task 元信息与解析后的 ``output``。
+    结构化字段由 agent 通过 ``grape tasks complete --json`` 写入 result_text。
+    """
+    if not repo_key:
+        return {}
+    variants = _issue_id_variants(issue_id)
+    with db_lock:
+        c = db.cursor()
+        try:
+            row = None
+            if task_id:
+                c.execute(
+                    f"SELECT {_TASK_DIGEST_COLS} FROM agent_tasks "
+                    "WHERE id=? AND repo_key=? LIMIT 1",
+                    (str(task_id), repo_key),
+                )
+                row = c.fetchone()
+            if row is None and variants:
+                # target.child_task_id 可能是历史 issue/seq 值而非 agent_tasks.id；
+                # 指定 id 查不到时回退到该 Issue 的最新终态任务，避免丢执行记忆。
+                marks = ",".join("?" * len(variants))
+                c.execute(
+                    f"SELECT {_TASK_DIGEST_COLS} FROM agent_tasks WHERE repo_key=? "
+                    f"AND issue_id IN ({marks}) AND status IN "
+                    f"({','.join('?' * len(_TERMINAL_TASK_STATUSES))}) "
+                    "ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 1",
+                    (repo_key, *variants, *_TERMINAL_TASK_STATUSES),
+                )
+                row = c.fetchone()
+        except Exception as exc:
+            log.warning(f"read latest task digest failed repo={repo_key} "
+                        f"issue={issue_id}: {exc}")
+            return {}
+    return _task_row_to_memory(row) if row else {}
 
 
 def _get_latest_result(repo_key: str, issue_id: str) -> str:

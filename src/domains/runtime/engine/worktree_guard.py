@@ -52,7 +52,7 @@ BASELINE_SUFFIX = ".fidelity.json"
 # 产物路径白名单：这些前缀下的文件是可清理产物（复测清理对象），不做指纹保真
 _ARTIFACT_DIR_PREFIXES = (
     "dist/", "build/", "out/", "node_modules/", "__pycache__/",
-    ".skills/", ".project-info/", ".knowledge/",
+    ".skills/", ".project-info/", ".knowledge/", ".org-context/",
 )
 
 _MAX_FILE_BYTES = 5 * 1024 * 1024  # 指纹/扫描单文件上限（超大文件跳过，防内存放大）

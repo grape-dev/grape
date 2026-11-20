@@ -18,6 +18,7 @@ TracerProvider + OTLP gRPC exporter + FastAPI 自动 HTTP span。
 """
 import os
 import platform
+import re
 from contextlib import contextmanager
 
 
@@ -61,6 +62,183 @@ def start_external_span(kind: str, target: str, attrs: dict | None = None):
         except Exception:
             pass
     return span
+
+
+@contextmanager
+def feature_span(name: str, attrs: dict | None = None):
+    """业务特性 span（A13：新增特性接入 Tempo 的最小切口）。
+
+    - name: span 名（如 ``org.provision`` / ``org.dispatch.create_child``）
+    - attrs: 业务属性（org_id/repo_key/action 等，不含凭据）
+    - OTel 未启用时零开销空上下文；异常记录 error.type/error.message。
+    """
+    if not otel_enabled():
+        yield None
+        return
+    from opentelemetry import trace
+    tracer = trace.get_tracer("grape.feature")
+    with tracer.start_as_current_span(name) as span:
+        for k, v in (attrs or {}).items():
+            try:
+                span.set_attribute(str(k)[:60], str(v)[:200])
+            except Exception:
+                pass
+        try:
+            yield span
+        except Exception as e:
+            span.set_attribute("error.type", type(e).__name__)
+            span.set_attribute("error.message", str(e)[:200])
+            span.record_exception(e)
+            raise
+
+
+def annotate_current_span(**attrs: object) -> None:
+    """给当前 span 追加属性（未启用 / 无活动 span 时零开销）。
+
+    总线客户端在真正发 HTTP 的那一层补 instance/status：dispatch 层只知道
+    service/method，解析出来的目标实例只有 client 拿得到。
+    """
+    if not otel_enabled():
+        return
+    try:
+        from opentelemetry import trace as _trace
+        span = _trace.get_current_span()
+        if span is None or not span.is_recording():
+            return
+        for key, value in attrs.items():
+            if value is None:
+                continue
+            span.set_attribute(str(key)[:60], str(value)[:200])
+    except Exception:  # noqa: BLE001 — 埋点失败不影响业务
+        return
+
+
+# 出站 span 命名：requests 自动插桩默认给 "GET"/"POST"，既看不出打的是谁，
+# 也没法按 URL 归并（P95 面板里全挤在一条 "GET" 上）。这里把 span 名改成
+# "METHOD /masked/path"，id 段（uuid / 长 hex / 纯数字）归一成 {id} 防基数爆炸。
+_ID_SEGMENT_RE = re.compile(
+    r"(?<=/)(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"|[0-9a-fA-F]{16,}|\d+)(?=/|$)"
+)
+
+
+def _mask_url_path(url: str) -> str:
+    try:
+        from urllib.parse import urlsplit
+        path = urlsplit(url or "").path or ""
+        return _ID_SEGMENT_RE.sub("{id}", path)[:120]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+_HTTP_METHOD_BYTES = (bytes, bytearray)
+
+
+def _method_of(request) -> str:
+    """httpx 的 Request.method 在某些版本/路径上是 bytes，直接拼进 span 名会得到 b'GET'。"""
+    method = getattr(request, "method", "HTTP")
+    if isinstance(method, _HTTP_METHOD_BYTES):
+        return method.decode("ascii", "ignore") or "HTTP"
+    return str(method)
+
+
+def _requests_request_hook(span, request) -> None:
+    """requests 出站：span 名 + 对端 + 超时，不用再点进 attributes 才能认。"""
+    if span is None or not span.is_recording():
+        return
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(getattr(request, "url", "") or "")
+        path = _mask_url_path(getattr(request, "url", ""))
+        span.update_name(f"{_method_of(request)} {path or '/'}")
+        if parts.hostname:
+            span.set_attribute("http.peer", parts.hostname)
+            span.set_attribute("server.address", parts.hostname)
+        if parts.port:
+            span.set_attribute("server.port", parts.port)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _requests_response_hook(span, request, response) -> None:
+    """requests 出站：状态码 / 重试次数 / 5xx 标 ERROR。"""
+    if span is None or not span.is_recording():
+        return
+    try:
+        status = getattr(response, "status_code", None)
+        if status is not None:
+            span.set_attribute("http.status_code", status)
+        elapsed = getattr(response, "elapsed", None)
+        if elapsed is not None:
+            span.set_attribute("http.elapsed_ms", int(elapsed.total_seconds() * 1000))
+        history = getattr(getattr(getattr(response, "raw", None), "retries", None),
+                          "history", None)
+        if history:
+            span.set_attribute("http.retries", len(history))
+        if status is not None and status >= 500:
+            from opentelemetry.trace import Status, StatusCode
+            span.set_status(Status(StatusCode.ERROR, f"HTTP {status}"))
+    except Exception:  # noqa: BLE001
+        return
+
+
+_HTTPX_INSTRUMENTED = False
+
+
+def _httpx_request_hook(span, request) -> None:
+    """httpx 出站：与 requests 同款命名（多数客户端走 httpx，requests 只覆盖旧代码）。"""
+    if span is None or not span.is_recording():
+        return
+    try:
+        url = str(getattr(request, "url", "") or "")
+        span.update_name(f"{_method_of(request)} {_mask_url_path(url) or '/'}")
+        host = getattr(getattr(request, "url", None), "host", None)
+        if host:
+            span.set_attribute("http.peer", host)
+            span.set_attribute("server.address", host)
+        port = getattr(getattr(request, "url", None), "port", None)
+        if port:
+            span.set_attribute("server.port", port)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _httpx_response_hook(span, request, response) -> None:
+    if span is None or not span.is_recording():
+        return
+    try:
+        status = getattr(response, "status_code", None)
+        if status is not None:
+            span.set_attribute("http.status_code", status)
+        ext = getattr(response, "extensions", None) or {}
+        elapsed = ext.get("elapsed") if isinstance(ext, dict) else None
+        if elapsed is not None:
+            span.set_attribute("http.elapsed_ms", int(elapsed.total_seconds() * 1000))
+        if status is not None and status >= 500:
+            from opentelemetry.trace import Status, StatusCode
+            span.set_status(Status(StatusCode.ERROR, f"HTTP {status}"))
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _install_httpx_instrumentor() -> None:
+    """httpx 客户端插桩（可选依赖：装了就启用，没装不影响其它埋点）。
+
+    2026-11-20 实测：beta 的出站调用绝大多数走 httpx（GSB 总线、LLM SDK），
+    只装 requests 插桩等于出站全黑——trace 里从 server span 直接跳到 callee。
+    """
+    global _HTTPX_INSTRUMENTED
+    if _HTTPX_INSTRUMENTED:
+        return
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        HTTPXClientInstrumentor().instrument(
+            request_hook=_httpx_request_hook,
+            response_hook=_httpx_response_hook,
+        )
+        _HTTPX_INSTRUMENTED = True
+    except Exception:  # noqa: BLE001
+        return
 
 
 @contextmanager
@@ -182,22 +360,41 @@ def init_otel(service_name: str):
         return None
 
 
+_REQUESTS_INSTRUMENTED = False
+
+
 def instrument_fastapi(app, service_name: str):
-    """FastAPI 自动 HTTP span（A/B/C/webhook 四入口通用）。幂等、失败不致命。"""
+    """FastAPI 自动 HTTP span（A/B/C/webhook 四入口通用）。幂等、失败不致命。
+
+    service.name 优先取 GRAPE_TRACE_SERVICE——betamulti-process 下四个入口都走
+    server_common.build_app，靠这个变量把 mgmt/event/worker/insight 分开，否则
+    只能拿到调用方硬编码的名字（曾出现四进程同叫 grape-server-a）。
+
+    app 上已经挂过 FastAPIInstrumentor 时直接返回：grape_server.py 在 build_app
+    之后又显式调用一次，没有这道闸门会产生重复 span。
+    """
     try:
         if not otel_enabled():
             return False
-        init_otel(service_name)
+        if getattr(app, "_is_instrumented_by_opentelemetry", False):
+            return True
+        _svc = os.environ.get("GRAPE_TRACE_SERVICE", "").strip() or service_name
+        init_otel(_svc)
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         # 剔除探针/指标路径，避免无意义 span 噪声（与 metrics 中间件同款口径）
         # 噪声端点剔除（2026-11-05）：worker 每 15s 的 claim/heartbeat/tags 刷屏 Tempo
         # 列表，把真正要看的任务 trace 挤出搜索窗口。任务生命周期另有专门 span
         # （task.*），协议面已在 metrics（/metrics）观测，trace 层保留完整请求以外的价值。
+        # 2026-11-20 实测修正：excluded_urls 是正则、按完整 path 匹配，原来写的
+        # "runtimes/.../tasks/claim"、"/runtime/heartbeat" 少了 api/ 前缀，一条都没命中，
+        # 结果 worker 的 claim/heartbeat 反而被全量埋点（legacy 路径本来排除 api/ping）。
+        # 2026-11-20 二次修正：一开始把 worker 轮询（claim/tags/heartbeat）排除了，
+        # 结果 nginx-gateway 的访问日志里绝大多数行（实测 800 行里 ~80%）属于这些
+        # 端点 → 日志里的 traceparent 在 Tempo 里查不到，点「调用链」是空页。
+        # 日志入口能点通比"trace 列表干净"更重要，故只保留真正无意义的排除项：
+        # 探针、静态资源、RUM 收集（浏览器侧另有 RUM trace）。
         FastAPIInstrumentor.instrument_app(app, excluded_urls=(
-            "health,healthz,readyz,metrics,"
-            "runtimes/[^/]+/tasks/claim,runtimes/[^/]+/tags,"
-            "/runtime/heartbeat,/runtime/register,"
-            "grape-worker[.]tar[.]gz,/runtime/install"
+            "health,healthz,readyz,metrics,api/ping,static,faro/collect"
         ))
         # DB span 采用「单一来源」策略（架构审查 P2-2）：只保留 mysql_compat.py 的
         # 手动埋点（start_db_span/end_db_span，带 db.operation/rowcount 且显式挂父上下文），
@@ -213,6 +410,20 @@ def instrument_fastapi(app, service_name: str):
                          "— duplicate db.query spans possible; disable one of them")
         except Exception:
             pass
+        # requests 出站 span：旧路径在 setup_tracing 里装了，新路径原来没有，
+        # 切过来会让 LLM（requests 直连）与 VCS/SCM 的调用从 trace 里消失。
+        global _REQUESTS_INSTRUMENTED
+        if not _REQUESTS_INSTRUMENTED:
+            try:
+                from opentelemetry.instrumentation.requests import RequestsInstrumentor
+                RequestsInstrumentor().instrument(
+                    request_hook=_requests_request_hook,
+                    response_hook=_requests_response_hook,
+                )
+                _REQUESTS_INSTRUMENTED = True
+            except Exception:
+                pass
+        _install_httpx_instrumentor()
         return True
     except Exception as e:
         try:
@@ -223,12 +434,51 @@ def instrument_fastapi(app, service_name: str):
         return False
 
 
-def start_db_span(sql: str):
+_SQL_STR_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
+_SQL_DQ_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+_SQL_IN_RE = re.compile(r"\bIN\s*\([^)]{0,400}\)", re.IGNORECASE)
+_SQL_CMP_NUM_RE = re.compile(r"([=<>!]=?|<>)\s*(\d+(?:\.\d+)?)")
+_SQL_TABLE_RE = re.compile(
+    r"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+`?([A-Za-z0-9_$.`]+)`?", re.IGNORECASE)
+_SQL_OP_RE = re.compile(r"\s*([A-Za-z]+)")
+
+
+def sanitize_sql(sql: str, limit: int = 512) -> str:
+    """把 SQL 里的「值」抹成占位符，只留形状。
+
+    目的：db.statement 会进 Tempo，原文里的邮箱 / token / 手机号不能再落第三处
+    （日志、DB、trace 已经三份）。只做三件事——字符串字面量、IN 列表、比较运算符
+    后面的数字；表名与列名保留，否则 span 就没有诊断价值了。
+    """
+    try:
+        s = _SQL_STR_RE.sub("?", sql)
+        s = _SQL_DQ_RE.sub('"?"', s)
+        s = _SQL_IN_RE.sub("IN (?)", s)
+        s = _SQL_CMP_NUM_RE.sub(r"\1 ?", s)
+        return s[:limit]
+    except Exception:
+        return "?"
+
+
+def _sql_table(sql: str) -> str:
+    """粗提取主表名（去掉库前缀），只用于 db.sql.table 属性。"""
+    try:
+        m = _SQL_TABLE_RE.search(sql)
+        return (m.group(1).replace("`", "").split(".")[-1] if m else "")[:64]
+    except Exception:
+        return ""
+
+
+def start_db_span(sql: str, db_name: str = ""):
     """SQL 执行 span（DB 阶段拆解 2026-11-05）：在 execute 调用点创建，自动挂当前
     请求 trace（contextvars 传播）。OTel 未启用/无有效父 span → None（零开销）。
 
     架构审查 P2-3：无父上下文时（后台线程/启动期 SQL）不建 span——否则每条 SQL
     都会成为独立 trace 的根，按采样率灌进 Tempo 产生大量孤儿 trace。
+
+    2026-11-20 补全排障必需属性：db.system / db.name（三库分得开）/ db.sql.table /
+    db.operation（完整首词，原来只取 6 个字符，INSERT 会被截成 INSERT）；同时把
+    statement 脱敏——原来是原文截断，邮箱与 token 直接进 Tempo。
     """
     if not otel_enabled():
         return None
@@ -238,30 +488,59 @@ def start_db_span(sql: str):
         _parent = _trace.get_current_span()
         if _parent is None or not _parent.get_span_context().is_valid:
             return None
-        _span = _trace.get_tracer(__name__).start_span("db.query")
+        _span = _trace.get_tracer(__name__).start_span("db.query", kind=_trace.SpanKind.CLIENT)
         if not _span.get_span_context().is_valid:
             return None
-        _span.set_attribute("db.statement", sql[:512])
-        _sys = (sql.lstrip()[:6]).upper()
-        _span.set_attribute("db.operation", _sys)
+        _m = _SQL_OP_RE.match(sql)
+        _op = (_m.group(1) if _m else "").upper()
+        _span.set_attribute("db.system", "mysql")
+        _span.set_attribute("db.operation", _op)
+        _span.set_attribute("db.statement", sanitize_sql(sql))
+        if db_name:
+            _span.set_attribute("db.name", str(db_name)[:64])
+        _tbl = _sql_table(sql)
+        if _tbl:
+            _span.set_attribute("db.sql.table", _tbl)
         return _span
     except Exception:
         return None
 
 
-def end_db_span(span, rowcount=None):
-    """结束 start_db_span 的 span；失败标记 error。"""
+def end_db_span(span, rowcount=None, exc=None):
+    """结束 start_db_span 的 span；失败标记 error（status + errno + 异常事件）。
+
+    原来只在 finally 里 end()，execute 抛异常时 span 不带任何错误标记，排障时
+    看起来像「成功的一跳」——这是 2026-11-20 修掉的坑。
+    """
     try:
         if span is None:
             return
+        if exc is not None:
+            try:
+                span.set_attribute("db.error", type(exc).__name__)
+                _errno = getattr(exc, "args", (None,))[0]
+                if isinstance(_errno, int):
+                    span.set_attribute("db.mysql_errno", _errno)
+            except Exception:
+                pass
+            try:
+                span.record_exception(exc)
+                from opentelemetry.trace import Status, StatusCode
+                span.set_status(Status(StatusCode.ERROR, str(exc)[:200]))
+            except Exception:
+                pass
         if rowcount is not None:
             try:
                 span.set_attribute("db.rowcount", int(rowcount))
             except Exception:
                 pass
-        span.end()
     except Exception:
         pass
+    finally:
+        try:
+            span.end()
+        except Exception:
+            pass
 
 
 def current_trace_context_headers() -> dict:

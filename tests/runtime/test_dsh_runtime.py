@@ -5,7 +5,12 @@
 见 /root/dsh_grape_docs/WORKER-ONBOARDING-AND-DSH-ENGINE-DESIGN.md §4.2.4。
 """
 import json
+import logging
 import os
+import re
+import stat
+import subprocess
+import time
 
 import pytest
 
@@ -247,40 +252,173 @@ def test_get_env_does_not_create_auth_file(rt, monkeypatch):
 
 
 def test_prepare_env_writes_token_file_after_merge(rt, tmp_path):
-    """env_extra 合并后调用 prepare_env，应生成 0600 文件且内容为 token。"""
-    import os
-
+    """env_extra 合并后调用 prepare_env，应在 cwd 生成 0600 文件且 git 不可见。"""
+    repo = tmp_path / "worktree"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
     env = rt.get_env()
     env.update({"GRAPE_SESSION_TOKEN": "tk_regression_token"})
-    rt.prepare_env(env)
+    auth_file = rt.prepare_env(env, cwd=str(repo))
 
-    auth_file = env.get("GRAPE_AUTH_FILE")
     assert auth_file, "prepare_env 应设置 GRAPE_AUTH_FILE"
+    assert env.get("GRAPE_AUTH_FILE") == auth_file
+    assert os.path.dirname(auth_file) == str(repo)
+    assert re.fullmatch(r"\.grape-sess-[0-9a-f]{8}\.tok", os.path.basename(auth_file))
     assert os.path.exists(auth_file)
-    assert oct(os.stat(auth_file).st_mode & 0o777) == "0o600"
-    with open(auth_file) as f:
+    assert stat.S_IMODE(os.stat(auth_file).st_mode) == 0o600
+    with open(auth_file, encoding="utf-8") as f:
         assert f.read() == "tk_regression_token"
-    os.unlink(auth_file)
+    exclude_path = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--git-path", "info/exclude"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if not os.path.isabs(exclude_path):
+        exclude_path = os.path.join(repo, exclude_path)
+    with open(exclude_path, encoding="utf-8") as f:
+        assert ".grape-sess-*.tok" in f.read().splitlines()
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],
+        check=True, capture_output=True, text=True,
+    )
+    assert status.stdout == ""
 
 
-def test_prepare_env_noop_without_token(rt, monkeypatch):
+def test_prepare_env_makes_missing_cwd(rt, tmp_path):
+    """工位目录可能尚未创建，prepare_env 必须先 makedirs 再落盘。"""
+    repo = tmp_path / "nested" / "worktree"
+    env = {"GRAPE_SESSION_TOKEN": "tk_nested"}
+    auth_file = rt.prepare_env(env, cwd=str(repo))
+    assert auth_file and os.path.dirname(auth_file) == str(repo)
+    assert os.path.isfile(auth_file)
+
+
+def test_prepare_env_registers_exclude_before_token_file(rt, tmp_path, monkeypatch):
+    """先注册 exclude 再创建 token，缩小 SIGKILL 后文件进入 git status 的窗口。"""
+    repo = tmp_path / "worktree"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    exclude_path = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--git-path", "info/exclude"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if not os.path.isabs(exclude_path):
+        exclude_path = os.path.join(str(repo), exclude_path)
+
+    original_open = os.open
+    observed = []
+
+    def checking_open(path, flags, *args, **kwargs):
+        if str(path).endswith(".tok"):
+            with open(exclude_path, encoding="utf-8") as f:
+                observed.append(".grape-sess-*.tok" in f.read().splitlines())
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", checking_open)
+    auth_file = rt.prepare_env({"GRAPE_SESSION_TOKEN": "tk_order"}, cwd=str(repo))
+
+    assert auth_file and os.path.isfile(auth_file)
+    assert observed == [True], "token 文件创建前 exclude 必须已包含匹配规则"
+
+
+def test_prepare_env_noop_without_token(rt, tmp_path):
     """没有 token 时不生成文件（其他引擎同样适用，走 env fallback）。"""
-    monkeypatch.delenv("GRAPE_SESSION_TOKEN", raising=False)
-    env = rt.get_env()
-    rt.prepare_env(env)
+    env = {}
+    auth_file = rt.prepare_env(env, cwd=str(tmp_path))
+    assert auth_file is None
     assert "GRAPE_AUTH_FILE" not in env
+    assert not list(tmp_path.glob(".grape-sess-*.tok"))
 
 
-def test_prepare_env_survives_unwritable_temp(rt, monkeypatch):
-    """写文件失败不阻断执行（保持 fallback 到 env 变量）。"""
+def test_prepare_env_without_cwd_falls_back_to_temp_and_warns(rt, caplog):
+    """无 cwd 保持 direct 执行可用，但必须 warning 留痕。"""
+    env = {"GRAPE_SESSION_TOKEN": "tk_temp_fallback"}
+    with caplog.at_level(logging.WARNING):
+        auth_file = rt.prepare_env(env)
+    assert auth_file and env["GRAPE_AUTH_FILE"] == auth_file
+    assert re.fullmatch(r"grape-sess-[a-z0-9_]+\.tok", os.path.basename(auth_file))
+    assert "cwd" in caplog.text.lower()
+
+
+def test_prepare_env_warns_when_git_path_empty(rt, tmp_path, caplog):
+    """非 git cwd 无 info/exclude 路径：保留 token 但 warning 必须可见。"""
+    env = {"GRAPE_SESSION_TOKEN": "tk_no_git"}
+    with caplog.at_level(logging.WARNING):
+        auth_file = rt.prepare_env(env, cwd=str(tmp_path))
+    assert auth_file and os.path.isfile(auth_file)
+    assert "info/exclude" in caplog.text
+
+
+def test_prepare_env_warns_when_git_path_registration_raises(rt, tmp_path, monkeypatch, caplog):
+    """git-path 注册异常不得阻断 token 穿透。"""
+    def boom(*args, **kwargs):
+        raise OSError("git unavailable")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    env = {"GRAPE_SESSION_TOKEN": "tk_git_error"}
+    with caplog.at_level(logging.WARNING):
+        auth_file = rt.prepare_env(env, cwd=str(tmp_path))
+    assert auth_file and os.path.isfile(auth_file)
+    assert "info/exclude" in caplog.text
+
+
+def test_prepare_env_survives_unwritable_temp(rt, monkeypatch, caplog):
+    """写文件失败不阻断执行，返回 None 并保留 warning。"""
     def boom(*a, **kw):
         raise OSError("disk full")
 
     monkeypatch.setattr("tempfile.mkstemp", boom)
     env = rt.get_env()
     env.update({"GRAPE_SESSION_TOKEN": "tk_x"})
-    rt.prepare_env(env)  # 不应抛
+    with caplog.at_level(logging.WARNING):
+        auth_file = rt.prepare_env(env)  # 不应抛
+    assert auth_file is None
     assert "GRAPE_AUTH_FILE" not in env
+    assert "prepare_env" in caplog.text
+
+
+def test_prepare_env_removes_partial_file_when_write_fails(rt, tmp_path, monkeypatch, caplog):
+    """cwd 文件写入半途失败时必须删除半成品，不能把残缺 token 留在工位。"""
+    real_write = os.write
+
+    def partial_write(fd, data):
+        real_write(fd, b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "write", partial_write)
+    env = {"GRAPE_SESSION_TOKEN": "tk_partial"}
+    with caplog.at_level(logging.WARNING):
+        auth_file = rt.prepare_env(env, cwd=str(tmp_path))
+
+    assert auth_file is None
+    assert "GRAPE_AUTH_FILE" not in env
+    assert not list(tmp_path.glob(".grape-sess-*.tok"))
+    assert "prepare_env" in caplog.text
+
+
+def test_prepare_env_removes_partial_temp_file_when_write_fails(rt, monkeypatch, caplog):
+    """无 cwd 的 temp 回退写入失败时也必须删除半成品。"""
+    import tempfile
+    real_write = os.write
+    real_mkstemp = tempfile.mkstemp
+    created = {}
+
+    def tracked_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        created["path"] = path
+        return fd, path
+
+    def partial_write(fd, data):
+        real_write(fd, b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tempfile, "mkstemp", tracked_mkstemp)
+    monkeypatch.setattr(os, "write", partial_write)
+    env = {"GRAPE_SESSION_TOKEN": "tk_temp_partial"}
+    with caplog.at_level(logging.WARNING):
+        auth_file = rt.prepare_env(env)
+
+    assert auth_file is None
+    assert "GRAPE_AUTH_FILE" not in env
+    assert created.get("path") and not os.path.exists(created["path"])
+    assert "prepare_env" in caplog.text
 
 # ===== executor 接线：prepare_env 钩子必须在 env_extra 合并后、Popen 前被调用 =====
 #
@@ -302,6 +440,7 @@ class _PrepareEnvRecorderBackend:
 
     def __init__(self):
         self.prepare_saw_token = None
+        self.prepare_saw_cwd = None
 
     def get_env(self, account="", user_id=0):
         return {}
@@ -312,16 +451,15 @@ class _PrepareEnvRecorderBackend:
     def parse_output(self, line):
         return None
 
-    def prepare_env(self, env):
+    def prepare_env(self, env, cwd=""):
         # prepare_env 执行时必须已能看到任务级 token（env_extra 合并之后）
         self.prepare_saw_token = env.get("GRAPE_SESSION_TOKEN", "")
+        self.prepare_saw_cwd = cwd
         env["PREPARE_ENV_MARK"] = "1"
 
 
-def _run_stream_capture_env(monkeypatch, backend, env_extra):
-    """跑 stream_agent 到 Popen，捕获传给子进程的最终 env（复用 token_env 测试的假件）。"""
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+def _run_stream_capture_env(cwd, backend, env_extra):
+    """跑 stream_agent 到 Popen，捕获传给子进程的最终 env。"""
     from unittest import mock
     import tests.runtime.test_executor_token_env as _tenv
 
@@ -334,32 +472,151 @@ def _run_stream_capture_env(monkeypatch, backend, env_extra):
          mock.patch("src.domains.mgmt.user.db.get_credentials", return_value=[]):
         from src.domains.runtime.engine.executor import stream_agent
         list(stream_agent(
-            prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
+            prompt="hi", cwd=cwd, session_id="", event_type="issue_opened",
             backend_name="fake", account="u", user_id=0, env_extra=env_extra,
             max_exec_seconds=60, repo_key="gitcode:owner/repo"))
     return fake_popen.captured
 
 
-def test_executor_calls_prepare_env_after_env_extra_merge():
+def test_executor_calls_prepare_env_after_env_extra_merge(tmp_path):
     """prepare_env 在 env_extra 合并后执行：能看到任务级 token，标记进 Popen env。"""
     backend = _PrepareEnvRecorderBackend()
-    final_env = _run_stream_capture_env(None, backend, {"GRAPE_SESSION_TOKEN": "tk_task_scoped"})
+    cwd = str(tmp_path)
+    final_env = _run_stream_capture_env(cwd, backend, {"GRAPE_SESSION_TOKEN": "tk_task_scoped"})
     assert backend.prepare_saw_token == "tk_task_scoped", \
         "prepare_env 必须在 env_extra（含任务级 GRAPE_SESSION_TOKEN）合并之后调用"
+    assert backend.prepare_saw_cwd == cwd, "prepare_env 必须收到 cwd 以在沙箱可见目录落盘"
     assert final_env.get("PREPARE_ENV_MARK") == "1", \
         "prepare_env 的就地修改必须落入 Popen 最终 env（非 ACP 后端 pre_exec 默认透传）"
 
 
-def test_executor_tolerates_backend_without_prepare_env():
-    """无 prepare_env 的后端（opencode/hermes/codex 等现状）不报错、env 不受影响。"""
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+def test_executor_supports_legacy_prepare_env_signature(tmp_path):
+    """自定义 runtime 仍使用 prepare_env(env) 时不能因新 cwd 参数静默失效。"""
+    class _LegacyPrepareEnvBackend(_PrepareEnvRecorderBackend):
+        def prepare_env(self, env):
+            env["PREPARE_ENV_MARK"] = "legacy"
+
+    final_env = _run_stream_capture_env(
+        str(tmp_path), _LegacyPrepareEnvBackend(), {"GRAPE_SESSION_TOKEN": "tk_legacy"})
+
+    assert final_env.get("PREPARE_ENV_MARK") == "legacy"
+
+
+class _PrepareAuthFileBackend:
+    """在 cwd 下创建真实 token 文件的假后端。"""
+
+    name = "fake"
+    binary = "true"
+    prompt_via_stdin = False
+
+    def __init__(self):
+        self.auth_file = ""
+
+    def get_env(self, account="", user_id=0):
+        return {}
+
+    def build_args(self, prompt, session_id):
+        return []
+
+    def parse_output(self, line):
+        return None
+
+    def prepare_env(self, env, cwd=""):
+        self.auth_file = os.path.join(cwd, ".grape-sess-deadbeef.tok")
+        with open(self.auth_file, "w", encoding="utf-8") as f:
+            f.write("tk_fake")
+        os.chmod(self.auth_file, 0o600)
+        env["GRAPE_AUTH_FILE"] = self.auth_file
+        return self.auth_file
+
+
+def test_executor_cleans_prepared_auth_file_after_task(tmp_path):
+    """正常结束时必须清理 cwd 下 prepare_env 创建的 token 文件。"""
+    backend = _PrepareAuthFileBackend()
+    keep = tmp_path / "keep.tok"
+    keep.write_text("not a session token", encoding="utf-8")
+    final_env = _run_stream_capture_env(str(tmp_path), backend, {"GRAPE_SESSION_TOKEN": "tk_task"})
+    assert final_env.get("GRAPE_AUTH_FILE") == backend.auth_file
+    assert not os.path.exists(backend.auth_file)
+    assert keep.exists(), "清理只应命中 .grape-sess-*.tok"
+
+
+def test_executor_keeps_fresh_auth_file_from_other_task(tmp_path):
+    """同一 cwd 内其他任务的新 token 不能被本次任务收尾误删。"""
+    backend = _PrepareAuthFileBackend()
+    other = tmp_path / ".grape-sess-othertask.tok"
+    other.write_text("tk_other", encoding="utf-8")
+
+    _run_stream_capture_env(str(tmp_path), backend, {"GRAPE_SESSION_TOKEN": "tk_task"})
+
+    assert backend.auth_file and not os.path.exists(backend.auth_file)
+    assert other.exists(), "只有本任务记录的 auth_file 应被直接清理"
+
+
+def test_executor_without_token_keeps_fresh_auth_file_from_other_task(tmp_path):
+    """本任务无 token 时只清陈旧残留，不得清掉其他任务正在使用的 token。"""
+    backend = _PrepareEnvRecorderBackend()
+    other = tmp_path / ".grape-sess-othertask.tok"
+    other.write_text("tk_other", encoding="utf-8")
+
+    _run_stream_capture_env(str(tmp_path), backend, {})
+
+    assert other.exists(), "无 token 的 prepare_env 不应触发全量 glob 删除"
+
+
+def test_executor_sweeps_stale_auth_file_from_crashed_task(tmp_path):
+    """SIGKILL 遗留的陈旧 token 由后续任务按 mtime 阈值清扫。"""
+    backend = _PrepareAuthFileBackend()
+    stale = tmp_path / ".grape-sess-crashed.tok"
+    stale.write_text("tk_stale", encoding="utf-8")
+    old = time.time() - 24 * 60 * 60
+    os.utime(stale, (old, old))
+    other = tmp_path / ".grape-sess-othertask.tok"
+    other.write_text("tk_other", encoding="utf-8")
+
+    _run_stream_capture_env(str(tmp_path), backend, {"GRAPE_SESSION_TOKEN": "tk_task"})
+
+    assert backend.auth_file and not os.path.exists(backend.auth_file)
+    assert not stale.exists(), "超过陈旧阈值的 token 应被清扫"
+    assert other.exists(), "新 token 不应被陈旧清扫误删"
+
+
+def test_executor_cleans_auth_file_when_stream_raises(tmp_path):
+    """异常路径也必须走 finally 清理，避免 token 残留。"""
+    class _ExplodingBackend(_PrepareAuthFileBackend):
+        def build_args(self, prompt, session_id):
+            raise RuntimeError("boom after prepare_env")
+
+    backend = _ExplodingBackend()
+    from src.domains.runtime.engine.executor import stream_agent
+    import tests.runtime.test_executor_token_env as _tenv
+    from unittest import mock
+
+    fake_popen = _tenv._FakePopen()
+    with mock.patch("src.domains.runtime.agents.executor.get_backend", return_value=backend), \
+         mock.patch("src.domains.runtime.agents.executor.subprocess.Popen", fake_popen), \
+         mock.patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/fake"), \
+         mock.patch("src.domains.runtime.agents.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.runtime.agents.executor._untrack_proc", lambda *a, **kw: None):
+        with pytest.raises(RuntimeError, match="boom after prepare_env"):
+            list(stream_agent(
+                prompt="hi", cwd=str(tmp_path), session_id="", event_type="issue_opened",
+                backend_name="fake", account="u", user_id=0,
+                env_extra={"GRAPE_SESSION_TOKEN": "tk_task"},
+                max_exec_seconds=60, repo_key="gitcode:owner/repo"))
+    assert backend.auth_file and not os.path.exists(backend.auth_file)
+
+
+def test_executor_tolerates_backend_without_prepare_env(tmp_path):
+    """无 prepare_env 的后端（opencode/hermes/codex 等现状）不报错、env/文件不受影响。"""
     from unittest import mock
     import tests.runtime.test_executor_token_env as _tenv
 
     class _PlainBackend(_tenv._FakeBackend):
         pass  # 无 prepare_env
 
+    stale = tmp_path / ".grape-sess-stale.tok"
+    stale.write_text("unmanaged", encoding="utf-8")
     fake_popen = _tenv._FakePopen()
     with mock.patch("src.domains.runtime.agents.executor.get_backend", return_value=_PlainBackend()), \
          mock.patch("src.domains.runtime.agents.executor.subprocess.Popen", fake_popen), \
@@ -369,25 +626,32 @@ def test_executor_tolerates_backend_without_prepare_env():
          mock.patch("src.domains.mgmt.user.db.get_credentials", return_value=[]):
         from src.domains.runtime.engine.executor import stream_agent
         list(stream_agent(
-            prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
+            prompt="hi", cwd=str(tmp_path), session_id="", event_type="issue_opened",
             backend_name="fake", account="u", user_id=0, env_extra={},
             max_exec_seconds=60, repo_key="gitcode:owner/repo"))
     assert "PREPARE_ENV_MARK" not in fake_popen.captured
+    assert "GRAPE_AUTH_FILE" not in fake_popen.captured
+    assert stale.exists(), "未调用 prepare_env 的后端不应触发 token 清理"
 
 
-def test_executor_swallows_prepare_env_failure():
-    """prepare_env 抛异常只告警不阻断执行（降级走 env 变量 fallback）。"""
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+def test_executor_swallows_prepare_env_failure(tmp_path):
+    """prepare_env 抛异常只告警不阻断执行；未返回的半成品由 runtime 自行收口。"""
     from unittest import mock
     import tests.runtime.test_executor_token_env as _tenv
 
     class _BoomBackend(_tenv._FakeBackend):
-        def prepare_env(self, env):
+        def __init__(self):
+            self.auth_file = ""
+
+        def prepare_env(self, env, cwd=""):
+            self.auth_file = os.path.join(cwd, ".grape-sess-badc0de.tok")
+            with open(self.auth_file, "w", encoding="utf-8") as f:
+                f.write("tk_fake")
             raise RuntimeError("boom")
 
+    backend = _BoomBackend()
     fake_popen = _tenv._FakePopen()
-    with mock.patch("src.domains.runtime.agents.executor.get_backend", return_value=_BoomBackend()), \
+    with mock.patch("src.domains.runtime.agents.executor.get_backend", return_value=backend), \
          mock.patch("src.domains.runtime.agents.executor.subprocess.Popen", fake_popen), \
          mock.patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/fake"), \
          mock.patch("src.domains.runtime.agents.executor._track_proc", lambda *a, **kw: None), \
@@ -395,7 +659,9 @@ def test_executor_swallows_prepare_env_failure():
          mock.patch("src.domains.mgmt.user.db.get_credentials", return_value=[]):
         from src.domains.runtime.engine.executor import stream_agent
         events = list(stream_agent(
-            prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
+            prompt="hi", cwd=str(tmp_path), session_id="", event_type="issue_opened",
             backend_name="fake", account="u", user_id=0, env_extra={},
             max_exec_seconds=60, repo_key="gitcode:owner/repo"))
     assert any(et == "done" for et, _ in events), "prepare_env 失败不应阻断执行流"
+    assert backend.auth_file and os.path.exists(backend.auth_file), \
+        "executor 不得按 glob 删除未记录到 _auth_state 的文件"

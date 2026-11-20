@@ -10,6 +10,8 @@ from src.domains.mgmt.user.repo_manager import fetch_repos_with_role, setup_webh
 from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_token_with_refresh, get_user_token_for, get_user_github_token_with_refresh, require_no_session_token, require_org_member
 from src.api.oauth_token import with_oauth_token
 from src.api.org_context import resolve_org_context
+from src.domains.mgmt.auth.audit import log_audit
+from src.domains.mgmt.user.org_db import transfer_managed_repo_to_org
 from src.domains.mgmt.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, repo_has_bot_credential, resolve_managed_repo_key
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
@@ -39,6 +41,8 @@ class CreateRepoBody(BaseModel):
     org: str = ""
     host_after_create: bool = False
     provider: str = ""  # R26: 用户指定创建到哪个平台
+    owner: str = ""     # 仓库所属空间（个人登录名或 VCS 组织 path）；空 = 个人空间
+    path: str = ""      # 仓库 URL 路径（GitCode 支持与 name 不同；GitHub 恒等于 name）
 
 
 class MigrateRepoBody(BaseModel):
@@ -260,10 +264,10 @@ def _fetch_and_cache(user_id: int, api_token: str, provider: str = "gitcode") ->
     return repos
 
 
-def _filter_repos(user_id: int, repos: list[dict], org_id: int = 0) -> list[dict]:
+def _filter_repos(user_id: int, repos: list[dict], org_id: str = "") -> list[dict]:
     """过滤仓库列表：返回用户身份可见的全部仓库（管理员 + 非管理员成员）。
 
-    org_id > 0 时组织隔离：
+    org_id 非空时组织隔离：
     - 已托管到当前组织的仓库 → 显示，is_hosted=true
     - 已托管到其他组织的仓库 → 隐藏（隔离）
     - 未托管的仓库 → 显示，用户可托管到当前组织
@@ -273,20 +277,25 @@ def _filter_repos(user_id: int, repos: list[dict], org_id: int = 0) -> list[dict
     from src.kernel.session_manager import db as _db, db_lock as _dbl
     managed = {}
     managed_org = {}
+    managed_org_name = {}
     managed_status = {}
     with _dbl:
         _c = _db.cursor()
         try:
-            _c.execute("SELECT repo_key, webhook_id, org_id, host_status FROM managed_repos")
+            _c.execute(
+                "SELECT m.repo_key, m.webhook_id, m.org_id, m.host_status, COALESCE(o.name,'') "
+                "FROM managed_repos m LEFT JOIN organization o ON o.id=m.org_id")
             for _r in _c.fetchall():
                 managed[_r[0]] = _r[1]
-                managed_org[_r[0]] = _r[2] or 0
+                managed_org[_r[0]] = _r[2] or ""
                 managed_status[_r[0]] = _r[3] or ""
+                managed_org_name[_r[0]] = _r[4] or ""
         except Exception:
             # 降级：不带 org_id
             for r in user_db.get_all_managed_repos():
                 managed[r["repo_key"]] = r["webhook_id"]
-                managed_org[r["repo_key"]] = 0
+                managed_org[r["repo_key"]] = ""
+                managed_org_name[r["repo_key"]] = ""
                 managed_status[r["repo_key"]] = r.get("host_status", "") or ""
     result = []
     for r in repos:
@@ -295,24 +304,14 @@ def _filter_repos(user_id: int, repos: list[dict], org_id: int = 0) -> list[dict
         is_admin = r.get("is_admin", False)
         in_managed = repo_key in managed
         hosted = in_managed and bool(managed.get(repo_key))
-        repo_org_id = managed_org.get(repo_key, 0)
+        repo_org_id = managed_org.get(repo_key, "")
 
         # 组织隔离：
-        # - org_id > 0（非个人组织）：已托管到其他组织的仓库不显示
-        # - org_id = 0（个人组织）：已托管到其他非个人组织的仓库不显示
-        #   （个人组织只显示全局托管 + 自身托管的仓库，不显示其他非个人组织的仓库）
-        # D42: 组织已删除时（org 不存在），不过滤该仓库（降级为未托管状态）
-        if in_managed and repo_org_id:
-            if org_id and repo_org_id != org_id:
-                continue
-            if not org_id:
-                # 个人组织：检查 repo_org_id 对应的组织是否是个人组织
-                from src.domains.mgmt.user.org_db import is_org_personal as _is_p
-                if not _is_p(repo_org_id):
-                    # D42: 检查组织是否仍然存在——已删除的组织不隔离
-                    from src.domains.mgmt.user.org_db import get_org as _get_org
-                    if _get_org(repo_org_id):
-                        continue
+        # - 团队组织（org_id 非空）：只显示该组织关联的仓库
+        # - 个人空间（org_id 为空）：显示该用户全部仓库（含已关联团队组织的仓库），
+        #   通过 org_id/org_name 给前端做组织徽标（Issue #2264：关联组织后仓库不应消失）
+        if in_managed and repo_org_id and org_id and repo_org_id != org_id:
+            continue
 
         role = "Admin" if is_admin else "Member"
         result.append({
@@ -328,6 +327,8 @@ def _filter_repos(user_id: int, repos: list[dict], org_id: int = 0) -> list[dict
             "is_hosted": hosted,
             "host_status": managed_status.get(repo_key, "") if in_managed else "",
             "created_at": r.get("created_at", "") or "",
+            "org_id": (managed_org.get(repo_key, "") if in_managed else ""),
+            "org_name": (managed_org_name.get(repo_key, "") if in_managed else ""),
         })
     return result
 
@@ -998,10 +999,10 @@ def sync_repos(user: dict = Depends(require_org_member)):
     user_db.save_user_repos(user["id"], repos,
                             providers=[p for p in _providers if p not in failed_providers])
 
-    org_id = user.get("org_id", 0)
+    org_id = user.get("org_id", "")
     # 个人组织不隔离（显示全量用户仓库），非个人组织才隔离
     from src.domains.mgmt.user.org_db import is_org_personal
-    _filter_org_id = 0 if is_org_personal(org_id) else org_id
+    _filter_org_id = "" if is_org_personal(org_id) else org_id
     if _has_reauth:
         _msg = f"同步成功（{_reauth_provider} 授权已过期，请重新登录授权）"
         if _filter_org_id:
@@ -1058,6 +1059,12 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名称不能为空"})
     if not _re.match(r'^[\w\-\.]+$', name):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名称只能包含字母、数字、下划线、连字符和点"})
+    owner = (body.owner or "").strip()
+    if owner and not _re.match(r'^[\w\-\.]+$', owner):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "所属空间只能包含字母、数字、下划线、连字符和点"})
+    repo_path = (body.path or "").strip()
+    if repo_path and not _re.match(r'^[\w\-\.]+$', repo_path):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库路径只能包含字母、数字、下划线、连字符和点"})
 
     if body.visibility in ("private", "public"):
         private = (body.visibility == "private")
@@ -1080,7 +1087,8 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     from src.kernel.token_resolver import create_provider
     try:
         repo_info = create_provider(provider).create_repo(
-            api_token=api_token, name=name, description=body.description, private=private)
+            api_token=api_token, name=name, description=body.description, private=private,
+            owner=owner, path=repo_path)
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建仓库失败: {e}"})
     if isinstance(repo_info, dict) and repo_info.get("error"):
@@ -1090,8 +1098,13 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     full_name = repo_info.get("full_name") or ""
     owner = repo_info.get("owner") or ""
     if isinstance(owner, dict):
-        owner = owner.get("login", "")
-    repo_name = repo_info.get("name") or name
+        owner = owner.get("login") or owner.get("username") or owner.get("name") or ""
+    # GitCode 建仓响应不带 owner 字段（只有 namespace/human_name），此前 owner 落空
+    # 导致 webhook 拼成 /repos//<name>/hooks → 404、托管永久 partial。统一从
+    # full_name 兜底解析，github/gitcode/其它卡路径口径一致。
+    if not owner and "/" in full_name:
+        owner = full_name.split("/", 1)[0]
+    repo_name = repo_info.get("name") or (full_name.split("/", 1)[1] if "/" in full_name else name)
 
     try:
         def _fetch(token, _uid=user["id"], _p=provider):
@@ -1125,6 +1138,7 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         _hcfg = get_hosting_provider_config(provider)
         if "/webhook/" in webhook_url:
             webhook_url = webhook_url.split("/webhook/", 1)[0] + _hcfg["webhook_url_suffix"]
+
         # Issue #372: 路径 B 支持——无全局 bot token 时用用户 token + 随机密钥
         import secrets as _secrets
         _create_global_bot_token = _hcfg["bot_token"]
@@ -1176,15 +1190,15 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
                 user_db.set_host_status(_repo_key, "partial", "host_setup", _host_error_text(_classify_host_error(e)))
             except Exception as _reg_e:
                 log.warning(f"create_new_repo: fallback registration failed: {_reg_e}")
-            return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": False, "message": f"仓库已创建，但托管失败: {e}"}
+            return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "provider": provider, "hosted": False, "message": f"仓库已创建，但托管失败: {e}"}
 
         try:
             _fetch_and_cache(user["id"], api_token, provider)
         except Exception:
             pass
-        return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": True, "message": "仓库创建并托管成功"}
+        return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "provider": provider, "hosted": True, "message": "仓库创建并托管成功"}
 
-    return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": False, "message": "仓库创建成功"}
+    return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "provider": provider, "hosted": False, "message": "仓库创建成功"}
 
 
 def _try_github_bot_collaborator(user_token: str, bot_token: str, bot_username: str,
@@ -1401,12 +1415,12 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
     """
     from src.kernel.repo_key import to_repo_key
     # 解析当前组织上下文：优先从 user dict（require_org_member 注入），其次从 request header
-    _org_id = user.get("org_id", 0) if isinstance(user, dict) else 0
+    _org_id = user.get("org_id", "") if isinstance(user, dict) else ""
     if not _org_id and request:
         try:
             _org_id = resolve_org_context(request, user["id"])
         except Exception:
-            _org_id = 0
+            _org_id = ""
     # ===== provider 判定：仓库来源优先于登录平台（host-repo-provider-routing-fix-design.md）=====
     if not provider:
         provider = _provider_from_hint(body.full_name)
@@ -2089,7 +2103,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
 
 @router.get("/managed", operation_id="repos_managed", summary="List managed repositories", description="Lists repositories hosted by the platform for the current user.")
 def list_managed_repos(user: dict = Depends(require_org_member)):
-    org_id = user.get("org_id", 0)
+    org_id = user.get("org_id", "")
     # 个人组织放宽 org 过滤（方案A）：与 /repos/member 大堂口径一致，
     # 侧边栏下拉框显示 user_repos.is_join=1 的仓库（不论托管在哪个组织）
     _personal_org = False
@@ -2111,6 +2125,11 @@ def list_managed_repos(user: dict = Depends(require_org_member)):
         # 与 /repos/bot-token 单仓接口同一口径——修复 gitee 仓凭据有值恒 false。
         "has_bot_token": user_db.repo_has_bot_credential(r["repo_key"]),
         "host_status": r.get("host_status", "") or "",
+        # Issue #2264：个人空间下拉也要能标出仓库所属组织
+        "org_id": r.get("org_id", "") or "",
+        "org_name": r.get("org_name", "") or "",
+        # 组织自动仓库标识：前端仓库下拉需要把它单独置顶显示为「组织仓库」
+        "is_org_repo": bool(r.get("is_org_repo")),
     } for r in repos]}
 
 
@@ -2541,7 +2560,11 @@ def migrate_repo(body: MigrateRepoBody, user: dict = Depends(require_no_session_
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT org_id FROM managed_repos WHERE repo_key=?", (repo_key,))
+            c.execute(
+                "SELECT COALESCE(org_id, 0), COALESCE(is_org_repo, 0) "
+                "FROM managed_repos WHERE repo_key=?",
+                (repo_key,),
+            )
             row = c.fetchone()
     except Exception as e:
         log.warning(f"migrate_repo: managed_repos lookup failed: {e}")
@@ -2550,10 +2573,16 @@ def migrate_repo(body: MigrateRepoBody, user: dict = Depends(require_no_session_
     if not row:
         raise HTTPException(status_code=404, detail={
             "code": 404, "message": "源仓库未托管，无法迁移"})
-    src_org_id = row[0] or 0
+    src_org_id = row[0] or ""
 
     # 校验 2：当前用户对源仓库有访问权
     check_repo_access(user, repo_key)
+    if int(row[1] or 0):
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "error_code": "ORG_REPO_PROTECTED",
+            "message": "组织自动仓库禁止迁移",
+        })
 
     # 校验 3：目标组织存在且当前用户是成员
     # target_owner 是 Grape organization.slug
@@ -2561,7 +2590,7 @@ def migrate_repo(body: MigrateRepoBody, user: dict = Depends(require_no_session_
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT o.id, o.is_personal, m.role "
+                "SELECT o.id, o.is_personal, o.max_repos, m.role "
                 "FROM organization o "
                 "JOIN org_member m ON m.org_id = o.id "
                 "WHERE o.slug = ? AND m.user_id = ?",
@@ -2576,46 +2605,56 @@ def migrate_repo(body: MigrateRepoBody, user: dict = Depends(require_no_session_
             "code": 403,
             "message": f"目标组织 '{target_owner}' 不存在或您不是该组织成员"})
     target_org_id = org_row[0]
+    target_max_repos = int(org_row[2] or 0)
 
     if target_org_id == src_org_id:
         raise HTTPException(status_code=400, detail={
             "code": 400, "message": "目标组织与源组织相同，无需迁移"})
 
-    # 执行 org_id 改写（repo_key 不变，只改 Grape 内的组织归属）
-    # 所有同时含 org_id + repo_key 列的表都要更新
-    # P3-5f-2：12 张表跨两个域 —— mgmt 表本地改，runtime 表由组合原语改（固定表清单，
-    # 不接受动态表名，避免跨域开任意写口子）。拆分后不可能单事务，故语义改为"按域分期"。
-    _MGMT_ORG_ID_TABLES = (
-        "managed_repos", "devops_pipeline_scene", "events",
-        "agent_shared_knowledge", "scene_market", "session_api_tokens",
+    transfer_result, updated = transfer_managed_repo_to_org(
+        repo_key,
+        src_org_id,
+        target_org_id,
+        user["id"],
+        max_repos=target_max_repos,
+        include_rows=True,
     )
-    try:
-        with db_lock:
-            c = db.cursor()
-            updated = 0
-            from src.kernel.domain_read import runtime_lib as _rt_lib_mg
-            _rt_mg = _rt_lib_mg(foreign_only=True)
-            if _rt_mg is not None:
-                try:
-                    _rt_res = _rt_mg.reassign_repo_org_id(repo_key, target_org_id)
-                    updated += sum(int(v or 0) for v in (_rt_res or {}).values())
-                    log.info(f"migrate_repo: runtime 侧 org_id 改写 {_rt_res}")
-                except Exception as _e_rt:
-                    log.warning(f"migrate_repo: runtime 侧 org_id 改写失败: {_e_rt}")
-            for tbl in _MGMT_ORG_ID_TABLES:
-                try:
-                    c.execute(
-                        f"UPDATE {tbl} SET org_id=? WHERE repo_key=?",
-                        (target_org_id, repo_key))
-                    if c.rowcount and c.rowcount > 0:
-                        updated += c.rowcount
-                except Exception as te:
-                    log.warning(f"migrate_repo: update {tbl}.org_id skipped: {te}")
-            db.commit()
-    except Exception as e:
-        log.warning(f"migrate_repo: org_id update failed: {e}")
-        raise HTTPException(status_code=500, detail={
-            "code": 500, "message": f"迁移失败（已回滚）: {e}"})
+    if transfer_result == "quota":
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "error_code": "ORG_REPO_QUOTA_EXCEEDED",
+            "message": "组织仓库数量已达上限",
+        })
+    if transfer_result == "busy":
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "error_code": "ORG_REPO_BUSY",
+            "message": "组织仓库绑定繁忙，请稍后重试",
+        })
+    if transfer_result == "protected":
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "error_code": "ORG_REPO_PROTECTED",
+            "message": "组织自动仓库禁止迁移",
+        })
+    if transfer_result != "transferred":
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "error_code": "REPO_ALREADY_BOUND",
+            "message": "仓库迁移条件已变化，请刷新后重试",
+        })
+
+    log_audit(
+        "org_repo_transfer",
+        user_id=user["id"],
+        operator_id=user["id"],
+        detail={
+            "repo_key": repo_key,
+            "source_org_id": src_org_id,
+            "target_org_id": target_org_id,
+            "via": "repos_migrate",
+        },
+    )
 
     log.info(f"repos/migrate: {repo_key} org {src_org_id}->{target_org_id} by user={user.get('id', 0)}, {updated} rows updated")
     return {

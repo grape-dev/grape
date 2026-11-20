@@ -38,9 +38,15 @@
   MISSING_CREDENTIAL / 认证失败，由 parse_output 如实上报为 error 事件。
 """
 import json
+import logging
 import os
+import secrets
+import subprocess
+import tempfile
 
 from .base import AgentRuntime
+
+log = logging.getLogger(__name__)
 
 
 class DshRuntime(AgentRuntime):
@@ -215,7 +221,7 @@ class DshRuntime(AgentRuntime):
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         return env
 
-    def prepare_env(self, env: dict) -> None:
+    def prepare_env(self, env: dict, cwd: str = "") -> "str | None":
         """任务级 env 合并之后的收尾钩子（dsh 专属 token 穿透）。
 
         dsh 的 subprocess 服务在 spawn bash 工具时会 scrub 掉父进程 env 里所有匹配
@@ -229,16 +235,77 @@ class DshRuntime(AgentRuntime):
         ⚠️ 必须在 env_extra 合并之后调用：GRAPE_SESSION_TOKEN 由平台按任务下发、
         存在 agent_tasks.env_extra 里，get_env() 阶段它还没进 env（历史 bug：#948
         把本逻辑写在 get_env 里，读到的永远是空串，临时文件从未生成）。
+
+        bwrap 沙箱把 /tmp 挂为私有 tmpfs，因此优先把 token 文件写入 cwd（工位目录）；
+        同时注册 .git/info/exclude，避免进程被 kill/超时后残留文件进入 git status。
+        返回实际落盘路径，供 executor 在任务结束时清理。
         """
         sess_tok = env.get("GRAPE_SESSION_TOKEN", "")
         if not sess_tok:
-            return
+            return None
+        auth_path = None
+        auth_file_created = False
         try:
-            import tempfile
-            fd, auth_path = tempfile.mkstemp(prefix="grape-sess-", suffix=".tok")
-            os.write(fd, sess_tok.encode("utf-8"))
-            os.close(fd)
-            os.chmod(auth_path, 0o600)
+            if cwd:
+                # 工位目录可能由执行器稍后创建；先 makedirs，否则 bwrap rw-bind 无目标。
+                os.makedirs(cwd, exist_ok=True)
+                try:
+                    # linked worktree 下 --git-path 返回 per-worktree exclude 路径；
+                    # --git-dir 会指向主仓，主仓 exclude 不作用于当前 worktree status。
+                    _excl = subprocess.run(
+                        ["git", "-C", cwd, "rev-parse", "--git-path", "info/exclude"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    _excl_path = (_excl.stdout or "").strip()
+                    if _excl_path:
+                        if not os.path.isabs(_excl_path):
+                            _excl_path = os.path.join(cwd, _excl_path)
+                        os.makedirs(os.path.dirname(_excl_path), exist_ok=True)
+                        _pat = ".grape-sess-*.tok"
+                        _exists = False
+                        if os.path.isfile(_excl_path):
+                            with open(_excl_path, encoding="utf-8") as _ef:
+                                _exists = _pat in _ef.read().splitlines()
+                        if not _exists:
+                            with open(_excl_path, "a", encoding="utf-8") as _ef:
+                                _ef.write(f"\n{_pat}\n")
+                    else:
+                        log.warning(
+                            "prepare_env: git-path info/exclude returned empty for cwd=%s "
+                            "(exclude not registered, token residue risk on crash)", cwd)
+                except Exception as _exc:
+                    log.warning(
+                        "prepare_env: failed to register .git/info/exclude for cwd=%s: %s "
+                        "(token residue risk on crash)", cwd, _exc)
+
+                # 先注册 exclude 再落盘：即使进程在两次操作之间被 SIGKILL，
+                # 后续 git status 也不会看到尚未被排除的 token 文件。
+                auth_path = os.path.join(cwd, f".grape-sess-{secrets.token_hex(4)}.tok")
+                fd = os.open(auth_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                auth_file_created = True
+                try:
+                    os.write(fd, sess_tok.encode("utf-8"))
+                finally:
+                    os.close(fd)
+            else:
+                log.warning(
+                    "prepare_env: cwd is empty; falling back to host temp file "
+                    "(may be invisible inside bwrap sandbox)")
+                fd, auth_path = tempfile.mkstemp(prefix="grape-sess-", suffix=".tok")
+                auth_file_created = True
+                try:
+                    os.write(fd, sess_tok.encode("utf-8"))
+                finally:
+                    os.close(fd)
+                os.chmod(auth_path, 0o600)
             env["GRAPE_AUTH_FILE"] = auth_path
-        except Exception:
-            pass  # 写文件失败不阻断执行（fallback 到 env 变量）
+            return auth_path
+        except Exception as _exc:
+            if auth_file_created and auth_path:
+                try:
+                    os.unlink(auth_path)
+                except OSError:
+                    pass
+            log.warning("prepare_env: failed to create token file for cwd=%s: %s "
+                        "(fallback to env token)", cwd or "<empty>", _exc)
+            return None

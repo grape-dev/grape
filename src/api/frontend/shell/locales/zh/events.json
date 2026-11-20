@@ -7,6 +7,7 @@
   "label_issue_summary": "Issue 摘要:",
   "prev_event_title": "上一个 {{name}} 事件",
   "next_event_title": "下一个 {{name}} 事件",
+  "nav_same_issue": "同需求 {{id}} 内",
   "status_success": "✅ 成功",
   "status_failed": "❌ 失败",
   "status_running_prefix": "⏳ ",

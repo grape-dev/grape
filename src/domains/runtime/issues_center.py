@@ -24,6 +24,8 @@ from src.api.deps import get_current_user_or_api_key
 
 from src.kernel.time_utils import normalize_event_time
 
+from src.kernel.issue_ident import is_actionable_issue_number, native_issue_number
+
 from src.kernel.config import log, WORKSPACE_DIR
 
 
@@ -818,6 +820,232 @@ def _next_is_last_node(next_value) -> bool:
         return False
     return next_value.strip() in _LAST_NODE_NEXT_VALUES
 
+
+# ===== Issue #2251: 组织下派聚合收口（组织 Issue 评论 + 状态归一）=====
+_ORG_AGG_TERMINAL_TARGETS = ("completed", "needs_review", "failed", "cancelled")
+_ORG_AGG_STATUS_LABEL = {
+    "completed": "已完成",
+    "needs_review": "待人工审核",
+    "partial_failed": "部分失败",
+    "failed": "失败",
+    "cancelled": "已取消",
+}
+_ORG_AGG_TARGET_LABEL = {
+    "completed": "completed",
+    "needs_review": "needs_review",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
+
+
+def _org_repo_bot_token(repo_key: str) -> str:
+    """按 provider 取组织仓库 bot token（best-effort，未配置返回空串）。"""
+    try:
+        from src.kernel.repo_key import parse_repo_key
+        provider, _, _ = parse_repo_key(repo_key)
+        from src.domains.mgmt import public as _mgmt_token
+        if provider == "github":
+            return _mgmt_token.get_github_token(repo_key=repo_key) or ""
+        return _mgmt_token.get_gitcode_token(repo_key=repo_key) or ""
+    except Exception as _e:
+        log.warning(f"org-aggregate: load bot token failed repo={repo_key}: {_e}")
+        return ""
+
+
+def _org_pr_link(repo_key: str, pr_number: int) -> str:
+    if not pr_number:
+        return ""
+    try:
+        from src.kernel.repo_key import parse_repo_key
+        provider, owner, name = parse_repo_key(repo_key)
+        host = "github.com" if provider == "github" else "gitcode.com"
+        return f"[#{int(pr_number)}](https://{host}/{owner}/{name}/pull/{int(pr_number)})"
+    except Exception:
+        return f"#{int(pr_number)}"
+
+
+def build_org_issue_aggregate_comment(dispatch: dict, targets: list[dict],
+                                     terminal_status: str) -> str:
+    """组织 Issue 聚合评论正文：结论 + 每个 target 的子 Issue/任务/PR + 待审/失败清单。"""
+
+    counts: dict[str, int] = {}
+    for t in targets:
+        st = str(t.get("status") or "")
+        counts[st] = counts.get(st, 0) + 1
+    label = _ORG_AGG_STATUS_LABEL.get(terminal_status, terminal_status)
+    stats = " / ".join(f"{k} {v}" for k, v in sorted(counts.items())) if counts else "无"
+    lines = [
+        f"## 组织需求聚合结论：{label}",
+        "",
+        f"- 批次：dispatch #{dispatch.get('id') or ''}",
+        f"- 批次状态：**{terminal_status}**",
+        f"- 目标统计：{stats}",
+        "",
+        "| 目标仓库 | 状态 | 子 Issue | 任务 | PR | 备注 |",
+        "|---|---|---|---|---|---|",
+    ]
+    pending_review: list[str] = []
+    failed: list[str] = []
+    for t in targets:
+        repo_key = str(t.get("repo_key") or "")
+        st = str(t.get("status") or "")
+        child = native_issue_number(t.get("child_issue_number") or "")
+        task_id = int(t.get("child_task_id") or 0)
+        child_cell = (f"[#{child}]({_vcs_issue_url(repo_key, child)})"
+                      if is_actionable_issue_number(child) else "-")
+        pr_cell = _org_pr_link(repo_key, int(t.get("pr_number") or 0)) or "-"
+        note = str(t.get("error") or "").replace("|", "\\|")[:200] or "-"
+        lines.append(
+            f"| {repo_key} | {_ORG_AGG_TARGET_LABEL.get(st, st or '-')} | {child_cell} | "
+            f"{task_id or '-'} | {pr_cell} | {note} |")
+        if st == "needs_review":
+            pending_review.append(f"- {repo_key}（子 Issue {child_cell}）：待人工审核")
+        elif st == "failed":
+            failed.append(f"- {repo_key}（子 Issue {child_cell}）：{note}")
+    if pending_review:
+        lines.extend(["", "### 待审目标", *pending_review])
+    if failed:
+        lines.extend(["", "### 失败目标", *failed])
+    if not targets:
+        lines.append("")
+        lines.append("无目标。")
+    lines.extend([
+        "",
+        "聚合由服务端组织流水线自动生成；仅当全部目标进入终态时才会收口。",
+    ])
+    return "\n".join(lines)
+
+
+def finalize_org_issue_aggregation(dispatch: dict, targets: list[dict],
+                                   terminal_status: str, *,
+                                   auto_finalize: bool = False) -> dict:
+    """Issue #2251：组织 Issue 幂等收口（聚合评论 + 最终状态归一）。
+
+    - 未全部终态 → ``{"action": "pending", "remaining": [...]}``，不写评论、不改状态
+      （禁止提前 pending_review）；
+    - 全部 cancelled / 批次 cancelled → 组织 Issue `cancelled`；
+    - auto_finalize 且全部 completed → `completed` + stage=done；
+    - 其余终态 → `pending_review`（needs_review / failed 原因已在评论列明）；
+    - 评论 best-effort（无 token / VCS 失败不阻断状态归一），调用方负责幂等触发。
+    """
+    org_repo_key = str(dispatch.get("org_repo_key") or "")
+    # D105/A12：org_issue_number 已放宽为平台原生 ident（数字或 Gitee IK* 字符串），
+    # dispatch.id 已改为 TEXT uuid 主键——两者都不能再 int() 强转（uuid 会直接
+    # ValueError，整条下派收口链路 500）。
+    issue_number = native_issue_number(dispatch.get("org_issue_number") or "")
+    dispatch_id = str(dispatch.get("id") or "")
+    if not org_repo_key or not is_actionable_issue_number(issue_number):
+        return {"action": "skipped", "reason": "no_org_issue"}
+
+    remaining = [
+        {"repo_key": t.get("repo_key") or "", "status": t.get("status") or ""}
+        for t in targets
+        if str(t.get("status") or "") not in _ORG_AGG_TERMINAL_TARGETS
+    ]
+    if remaining:
+        return {"action": "pending", "remaining": remaining,
+                "dispatch_id": dispatch_id, "issue_status": ""}
+
+    statuses = [str(t.get("status") or "") for t in targets]
+    comment_posted = False
+    comment_error = ""
+    body = build_org_issue_aggregate_comment(dispatch, targets, terminal_status)
+    _already_posted = False
+    if dispatch_id:
+        try:
+            from src.domains.mgmt import public as _mgmt_public
+
+            _already_posted = bool(
+                _mgmt_public.get_dispatch_aggregate_comment(
+                    dispatch_id, terminal_status))
+        except Exception as _e:
+            log.warning(f"org-aggregate: read comment flag failed dispatch={dispatch_id}: {_e}")
+    token = _org_repo_bot_token(org_repo_key)
+    if token and not _already_posted:
+        try:
+            from src.domains.runtime.vcs.api_client import VcsApiClient
+            from src.kernel.repo_key import parse_repo_key
+            provider, owner, name = parse_repo_key(org_repo_key)
+            VcsApiClient(provider, token, owner, name).post_issue_comment(issue_number, body)
+            comment_posted = True
+            log.info(f"org-aggregate: comment posted repo={org_repo_key} "
+                     f"issue=#{issue_number} dispatch={dispatch_id} status={terminal_status}")
+        except Exception as _e:
+            log.warning(f"org-aggregate: comment post failed repo={org_repo_key} "
+                        f"issue=#{issue_number}: {_e}")
+            comment_error = f"comment: {_e}"[:500]
+    elif _already_posted:
+        log.info(f"org-aggregate: comment already posted, skip dispatch={dispatch_id} "
+                 f"status={terminal_status}")
+    else:
+        log.info(f"org-aggregate: skip comment (no bot token) repo={org_repo_key} "
+                 f"issue=#{issue_number}")
+    if dispatch_id and comment_posted:
+        try:
+            from src.domains.mgmt import public as _mgmt_public
+
+            _mgmt_public.mark_dispatch_aggregate_comment(
+                dispatch_id, terminal_status)
+        except Exception as _e:
+            log.warning(f"org-aggregate: persist comment flag failed dispatch={dispatch_id}: {_e}")
+
+    all_completed = bool(statuses) and all(s == "completed" for s in statuses)
+    all_cancelled = bool(statuses) and all(s == "cancelled" for s in statuses)
+    if terminal_status == "cancelled" or all_cancelled:
+        target_status, reason = "cancelled", "org_dispatch_cancelled"
+    elif auto_finalize and all_completed:
+        target_status, reason = "completed", _AUTO_FINALIZED_REASON
+    else:
+        target_status, reason = "pending_review", ""
+
+    with db_lock:
+        c = db.cursor()
+        if reason:
+            c.execute(
+                "UPDATE issue SET status=?, completed_reason=?, completed_at=datetime('now') "
+                "WHERE repo_key=? AND issue_number=? AND status IN "
+                "('active','processing','awaiting_input','pending_review')",
+                (target_status, reason, org_repo_key, issue_number),
+            )
+        else:
+            c.execute(
+                "UPDATE issue SET status=?, completed_reason=NULL, completed_at=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status IN "
+                "('active','processing','awaiting_input','pending_review')",
+                (target_status, org_repo_key, issue_number),
+            )
+        db.commit()
+        _changed = c.rowcount > 0
+        c.execute(
+            "SELECT status FROM issue WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
+            (org_repo_key, issue_number),
+        )
+        _row = c.fetchone()
+    actual_status = (_row[0] if _row else "") or target_status
+    if target_status == "completed" or target_status == "cancelled":
+        try:
+            from src.api.session_store import set_issue_stage
+            set_issue_stage(org_repo_key, f"#{issue_number}",
+                            "done" if target_status == "completed" else target_status,
+                            "org_aggregate")
+        except Exception as _se:
+            log.warning(f"org-aggregate: set stage failed repo={org_repo_key} "
+                        f"issue=#{issue_number}: {_se}")
+    log.info(f"org-aggregate: finalized dispatch={dispatch_id} status={terminal_status} "
+             f"org_issue=#{issue_number} issue_status={actual_status} changed={_changed} "
+             f"comment={comment_posted}")
+    return {
+        "action": "finalized",
+        "dispatch_id": dispatch_id,
+        "terminal_status": terminal_status,
+        "issue_status": actual_status,
+        "changed": bool(_changed),
+        "comment_posted": comment_posted,
+        "comment_error": comment_error,
+        "remaining": [],
+    }
+
+
 def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
     """当前 issue.stage 是否为流水线末节点（next=='done' 或无下游节点）。
 
@@ -1567,6 +1795,8 @@ class TaskCreateBody(BaseModel):
     assignee: str = ""
     scene_id: str = ""
     is_subtask_mode: int = 0
+    # 内部字段：组织下派子任务的组织上下文快照引用（不参与普通建单）
+    org_context_snapshot_id: str = ""
 
 class TaskStatusBody(BaseModel):
     status: str = ""
@@ -2803,6 +3033,16 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                                 owner_user_id=str(user.get("id") or ""))
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
+    _snap_id = str(getattr(body, "org_context_snapshot_id", "") or "")
+    if _snap_id:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE issue SET org_context_snapshot_id=? "
+                "WHERE repo_key=? AND issue_number=?",
+                (_snap_id, repo_key, issue_num),
+            )
+            db.commit()
     # 5) 多任务模式（自动检测）→ Issue body 追加标记 + issue_state 标记
     if _auto_subtask_mode:
         try:
@@ -3417,11 +3657,11 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
     """
     _select = (
         "SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
-        "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number, parent_issue_id, created_by"
+        "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number, parent_issue_id, created_by, org_id"
         + (", user_id" if include_user_id else "")
         + ", vcs_exists, vcs_checked_at"
     )
-    _vcs_idx = 15 + (1 if include_user_id else 0)
+    _vcs_idx = 16 + (1 if include_user_id else 0)
     _limit_sql = ""
     if limit is not None and int(limit) > 0:
         _limit_sql = f" LIMIT {int(limit)} OFFSET {int(offset)}"
@@ -3509,6 +3749,8 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             "parent_issue_id": r[13] or "",
             # Issue #805: 创建人（issue.created_by，建档固化，不随 assignee 流转变化）
             "creator": r[14] or "",
+            # 组织需求/子单所属组织：需求中心据此加载组织下派详情。
+            "org_id": r[15] or "",
             "scene_id": _scene_id,
             "scene_name": _scene_name,
             "scene_source": _scene_source,
@@ -3528,7 +3770,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
                           else ("ok" if r[_vcs_idx + 1] else "unavailable")),
         }
         if include_user_id:
-            item["user_id"] = r[15] or 0
+            item["user_id"] = r[16] or 0
         tasks_out.append(item)
     return tasks_out
 

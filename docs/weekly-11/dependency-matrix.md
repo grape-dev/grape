@@ -1,7 +1,7 @@
 # 跨域依赖矩阵看板（P0-4 自动生成）
 
-> 生成时间：2026-11-18 15:57　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
-> 汇总：跨域表 **20** 张；跨域引用 **62** 处（23 个「表×消费域」对）；含归属域在内的 SQL 引用 1191 处
+> 生成时间：2026-11-19 11:37　口径：`scripts/foreign_table_refs.py`（只算 api/kernel/domains 运行代码）
+> 汇总：跨域表 **20** 张；跨域引用 **62** 处（23 个「表×消费域」对）；含归属域在内的 SQL 引用 1208 处
 
 ## 1. 域 × 域 跨域引用热力
 
@@ -33,7 +33,7 @@
 | `agent_tasks` | runtime | 4 | api 4 | C2 outbox 跨域写 | W1 | 30 |
 | `gsb_provider_route` | mgmt | 4 | kernel 4 |  | — | 1 |
 | `grape_t_engine_sandbox_whitelist` | mgmt | 3 | runtime 2 / api 1 |  | — | 5 |
-| `devops_pipeline_scene` | mgmt | 2 | api 2 | C1 归属重定（写路径挪进 owner 域） | — | 8 |
+| `devops_pipeline_scene` | mgmt | 2 | api 2 | C1 归属重定（写路径挪进 owner 域） | — | 9 |
 | `external_identities` | mgmt | 2 | api 1 / platform 1 | C2 outbox 跨域写 | W2 | 8 |
 | `grape_t_category_dict` | mgmt | 2 | api 2 |  | — | 3 |
 | `grape_t_external_identity_tombstones` | mgmt | 2 | api 2 |  | — | 1 |

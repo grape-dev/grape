@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Agentic DevOps API",
-    "version": "2.2.0"
+    "version": "2.2.3"
   },
   "paths": {
     "/api/auth/change-password": {
@@ -71,26 +71,6 @@
             "content": {
               "application/json": {
                 "schema": {}
-              }
-            }
-          },
-          "400": {
-            "description": "No deliverable mailbox bound (EMAIL_UNBOUND)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (CODE_SEND_FAILED)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
               }
             }
           }
@@ -197,36 +177,6 @@
                 }
               }
             }
-          },
-          "400": {
-            "description": "Invalid email (EMAIL_FORMAT / EMAIL_SAME / EMAIL_TAKEN)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited (CODE_SEND_FAILED / CHANGE_EMAIL_TOO_OFTEN)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Email service not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
           }
         },
         "security": [
@@ -276,36 +226,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Code or second factor rejected (CODE_INVALID / CODE_EXPIRED / NEED_SECOND_FACTOR / PASSWORD_INVALID / EMAIL_FORMAT / EMAIL_SAME)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Email already taken (EMAIL_TAKEN)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Email update failed (EMAIL_UPDATE_FAILED)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
                 }
               }
             }
@@ -949,16 +869,6 @@
               }
             }
           },
-          "400": {
-            "description": "Credential unavailable (needs_reauth)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -998,16 +908,6 @@
             "content": {
               "application/json": {
                 "schema": {}
-              }
-            }
-          },
-          "400": {
-            "description": "Credential unavailable (needs_reauth)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
               }
             }
           }
@@ -15524,6 +15424,59 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/issues/{issue_id}/reopen": {
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Reopen completed issue",
+        "description": "Reverts a mistakenly completed requirement back to processing: clears completed_at/completed_reason and blanks stage so it stops reading as done. Does NOT auto redispatch (re-dispatch from the event page when you want the pipeline to continue). Owner-only, multi-row idempotent; the platform Issue itself is not reopened.",
+        "operationId": "issues_reopen",
+        "parameters": [
+          {
+            "name": "issue_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Issue Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/issues/{issue_id}/pipeline": {
       "get": {
         "tags": [
@@ -16381,6 +16334,70 @@
               "title": "Assignees"
             },
             "description": "按创建人筛选(逗号分隔)"
+          },
+          {
+            "name": "creators",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "按创建人过滤(逗号分隔, Issue #805；前端 mine 分支同款参数，此前被静默丢弃)",
+              "default": "",
+              "title": "Creators"
+            },
+            "description": "按创建人过滤(逗号分隔, Issue #805；前端 mine 分支同款参数，此前被静默丢弃)"
+          },
+          {
+            "name": "statuses",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "多状态过滤(逗号分隔；Issue #926 列表同款)。与单 status 二选一，同时给出时以 statuses 为准",
+              "default": "",
+              "title": "Statuses"
+            },
+            "description": "多状态过滤(逗号分隔；Issue #926 列表同款)。与单 status 二选一，同时给出时以 statuses 为准"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "Issue #926：标题/编号模糊搜索（服务端过滤；前端 mine 分支已下推 &q=，此前被静默丢弃）",
+              "default": "",
+              "title": "Q"
+            },
+            "description": "Issue #926：标题/编号模糊搜索（服务端过滤；前端 mine 分支已下推 &q=，此前被静默丢弃）"
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 0,
+              "description": "服务端分页：每页条数（Issue #926 同款；0=全量，兼容旧调用方）",
+              "default": 0,
+              "title": "Per Page"
+            },
+            "description": "服务端分页：每页条数（Issue #926 同款；0=全量，兼容旧调用方）"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "服务端分页：页码（per_page>0 时生效）",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "服务端分页：页码（per_page>0 时生效）"
           }
         ],
         "responses": {
@@ -19518,7 +19535,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/KnowledgeUpdateBody"
+                "$ref": "#/components/schemas/src__domains__mgmt__routes__knowledge__KnowledgeUpdateBody"
               }
             }
           }
@@ -21309,7 +21326,7 @@
         "tags": [
           "orgs"
         ],
-        "summary": "列出当前用户加入的组织",
+        "summary": "List organizations",
         "operationId": "orgs_list",
         "responses": {
           "200": {
@@ -21338,7 +21355,7 @@
         "tags": [
           "orgs"
         ],
-        "summary": "创建组织",
+        "summary": "Create organization",
         "operationId": "orgs_create",
         "requestBody": {
           "content": {
@@ -21384,12 +21401,44 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/orgs/repo-namespaces": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "List repository namespaces",
+        "description": "创建组织弹窗的数据源：已绑定的 GitCode/GitHub 账号 + 可建仓的组织空间。\n\n每个 provider 返回 connected（是否已绑定 token）和 account/namespaces；\ntoken 失效仅影响该 provider（connected=false + error），不阻断另一平台。",
+        "operationId": "orgs_repo_namespaces",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/orgs/{org_id}": {
       "get": {
         "tags": [
           "orgs"
         ],
-        "summary": "获取组织详情",
+        "summary": "Get organization detail",
         "operationId": "orgs_detail",
         "parameters": [
           {
@@ -21439,7 +21488,7 @@
         "tags": [
           "orgs"
         ],
-        "summary": "更新组织信息",
+        "summary": "Update organization",
         "operationId": "orgs_update",
         "parameters": [
           {
@@ -21499,7 +21548,7 @@
         "tags": [
           "orgs"
         ],
-        "summary": "删除组织（个人组织不可删）",
+        "summary": "Delete organization",
         "operationId": "orgs_delete",
         "parameters": [
           {
@@ -21546,12 +21595,179 @@
         "x-token-scope": "user_only"
       }
     },
+    "/api/orgs/{org_id}/provision": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Get organization provisioning status",
+        "operationId": "orgs_provision_get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/provision/retry": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Retry organization provisioning",
+        "operationId": "orgs_provision_retry",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/provision/repo": {
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Manually bind organization repository",
+        "description": "Issue #2258：自动 provisioning 失败时，owner/admin 可将已托管仓库指定为组织仓库。",
+        "operationId": "orgs_provision_manual_bind",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualBindRepoBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
     "/api/orgs/search/users": {
       "get": {
         "tags": [
           "orgs"
         ],
-        "summary": "搜索用户（添加成员用）",
+        "summary": "Search users",
         "description": "按用户名模糊搜索用户（用于添加成员时的实时搜索）。",
         "operationId": "orgs_search_users",
         "parameters": [
@@ -21605,7 +21821,7 @@
         "tags": [
           "orgs"
         ],
-        "summary": "列出组织成员",
+        "summary": "List organization members",
         "operationId": "orgs_members_list",
         "parameters": [
           {
@@ -21655,7 +21871,7 @@
         "tags": [
           "orgs"
         ],
-        "summary": "添加成员",
+        "summary": "Add organization member",
         "operationId": "orgs_members_add",
         "parameters": [
           {
@@ -21717,7 +21933,7 @@
         "tags": [
           "orgs"
         ],
-        "summary": "修改成员角色",
+        "summary": "Update member role",
         "operationId": "orgs_members_update",
         "parameters": [
           {
@@ -21786,7 +22002,7 @@
         "tags": [
           "orgs"
         ],
-        "summary": "移除成员",
+        "summary": "Remove organization member",
         "operationId": "orgs_members_remove",
         "parameters": [
           {
@@ -21847,7 +22063,7 @@
         "tags": [
           "orgs"
         ],
-        "summary": "离开组织",
+        "summary": "Leave organization",
         "operationId": "orgs_leave",
         "parameters": [
           {
@@ -21858,6 +22074,2193 @@
               "type": "string",
               "title": "Org Id"
             }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/repos": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "List organization repositories",
+        "operationId": "org_repos_list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      },
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Link managed repository to organization",
+        "operationId": "org_repos_bind",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BindRepoBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/repos/available": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "List repositories available to link",
+        "description": "返回当前用户名下可关联的托管仓库（Issue #2263 多选列表）。",
+        "operationId": "org_repos_available",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/repos/batch": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Batch link managed repositories",
+        "description": "批量关联（Issue #2263）：前端多选后一次提交，逐个返回结果。",
+        "operationId": "org_repos_bind_batch",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BindReposBatchBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/repos/{repo_key}/transfer": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Transfer organization repository",
+        "operationId": "org_repos_transfer",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "repo_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferRepoBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/repos/{repo_key}": {
+      "delete": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Unlink organization repository",
+        "operationId": "org_repos_unbind",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "repo_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo Key"
+            }
+          },
+          {
+            "name": "confirm",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Confirm"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ConfirmBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/repo-map": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "List organization repository map",
+        "operationId": "org_repo_map_list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/orgs/{org_id}/repo-map/analyze": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Analyze all organization repositories",
+        "operationId": "org_repo_map_analyze_all",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/repo-map/recall": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Recall target repositories by requirement",
+        "operationId": "org_repo_map_recall",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 3,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/orgs/{org_id}/repo-map/{repo_key}": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Get repository map summary",
+        "operationId": "org_repo_map_detail",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "repo_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/orgs/{org_id}/repo-map/{repo_key}/analyze": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Analyze one organization repository",
+        "operationId": "org_repo_map_analyze_one",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "repo_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/dispatches": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Create organization cross-repo dispatch",
+        "operationId": "org_dispatches_create",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDispatchBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      },
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "List organization dispatches",
+        "operationId": "org_dispatches_list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "org_issue_number",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Org Issue Number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/orgs/{org_id}/dispatches/{dispatch_id}/context": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Get dispatch context snapshot",
+        "operationId": "org_dispatches_context",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "dispatch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Dispatch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/orgs/{org_id}/dispatches/{dispatch_id}": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Get organization dispatch detail",
+        "operationId": "org_dispatches_detail",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "dispatch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Dispatch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "dual"
+      }
+    },
+    "/api/orgs/{org_id}/dispatches/{dispatch_id}/cancel": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Cancel organization dispatch",
+        "operationId": "org_dispatches_cancel",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "dispatch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Dispatch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/dispatches/{dispatch_id}/targets/{repo_key}/retry": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Retry failed dispatch target",
+        "operationId": "org_dispatches_target_retry",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "dispatch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Dispatch Id"
+            }
+          },
+          {
+            "name": "repo_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Repo Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/context": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "List organization context",
+        "operationId": "org_context_list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 200,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Create organization context (draft)",
+        "operationId": "org_context_create",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContextBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/context/{ctx_id}": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Get organization context",
+        "operationId": "org_context_get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "ctx_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ctx Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Update organization context",
+        "operationId": "org_context_update",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "ctx_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ctx Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContextUpdateBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "delete": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Delete organization context",
+        "operationId": "org_context_delete",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "ctx_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ctx Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/context/{ctx_id}/publish": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Publish organization context",
+        "operationId": "org_context_publish",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "ctx_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ctx Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/context/{ctx_id}/deprecate": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Deprecate organization context",
+        "operationId": "org_context_deprecate",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "ctx_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ctx Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/knowledge": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "List organization knowledge",
+        "operationId": "org_knowledge_list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Tag"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 200,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Create organization knowledge (draft)",
+        "operationId": "org_knowledge_create",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__domains__mgmt__routes__org_knowledge__KnowledgeBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/knowledge/{knowledge_id}": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Get organization knowledge",
+        "operationId": "org_knowledge_get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "knowledge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Knowledge Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Update organization knowledge",
+        "operationId": "org_knowledge_update",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "knowledge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Knowledge Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__domains__mgmt__routes__org_knowledge__KnowledgeUpdateBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      },
+      "delete": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Delete organization knowledge",
+        "operationId": "org_knowledge_delete",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "knowledge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Knowledge Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/knowledge/{knowledge_id}/publish": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Publish organization knowledge",
+        "operationId": "org_knowledge_publish",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "knowledge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Knowledge Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/knowledge/{knowledge_id}/deprecate": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Deprecate organization knowledge",
+        "operationId": "org_knowledge_deprecate",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "knowledge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Knowledge Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/knowledge/{knowledge_id}/archive": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Archive organization knowledge",
+        "operationId": "org_knowledge_archive",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "knowledge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Knowledge Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "privateKey": []
+          },
+          {
+            "accessToken": []
+          }
+        ],
+        "x-token-scope": "user_only"
+      }
+    },
+    "/api/orgs/{org_id}/audit": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Query organization audit logs",
+        "operationId": "orgs_audit",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Org Id"
+            }
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "事件类型或前缀（如 org_repo_bind / org_repo_ / org_dispatch_）",
+              "default": "",
+              "title": "Event Type"
+            },
+            "description": "事件类型或前缀（如 org_repo_bind / org_repo_ / org_dispatch_）"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "每页条数，默认 50、最大 200（越界自动夹取）",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "每页条数，默认 50、最大 200（越界自动夹取）"
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "偏移量，负数自动夹取为 0",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "偏移量，负数自动夹取为 0"
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "起始时间 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS",
+              "default": "",
+              "title": "Since"
+            },
+            "description": "起始时间 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS"
           }
         ],
         "responses": {
@@ -24447,6 +26850,36 @@
         ],
         "title": "BetaApplyBody"
       },
+      "BindRepoBody": {
+        "properties": {
+          "repo_key": {
+            "type": "string",
+            "title": "Repo Key",
+            "default": ""
+          },
+          "full_name": {
+            "type": "string",
+            "title": "Full Name",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "BindRepoBody"
+      },
+      "BindReposBatchBody": {
+        "properties": {
+          "repo_keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Repo Keys",
+            "default": []
+          }
+        },
+        "type": "object",
+        "title": "BindReposBatchBody"
+      },
       "Body_feedback_upload": {
         "properties": {
           "file": {
@@ -24717,29 +27150,29 @@
       "ChangeEmailBody": {
         "properties": {
           "new_email": {
-            "title": "New Email",
-            "type": "string"
+            "type": "string",
+            "title": "New Email"
           },
           "code": {
-            "title": "Code",
-            "type": "string"
+            "type": "string",
+            "title": "Code"
           },
           "password": {
-            "default": "",
+            "type": "string",
             "title": "Password",
-            "type": "string"
+            "default": ""
           },
           "old_email_code": {
-            "default": "",
+            "type": "string",
             "title": "Old Email Code",
-            "type": "string"
+            "default": ""
           }
         },
+        "type": "object",
         "required": [
           "new_email",
           "code"
         ],
-        "type": "object",
         "title": "ChangeEmailBody"
       },
       "ChangeEmailSendCodeBody": {
@@ -24912,6 +27345,103 @@
         "type": "object",
         "title": "CompleteBodyV2"
       },
+      "ConfirmBody": {
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "title": "Confirm",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "ConfirmBody"
+      },
+      "ContextBody": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind",
+            "default": "brief"
+          },
+          "key": {
+            "type": "string",
+            "title": "Key",
+            "default": ""
+          },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "default": ""
+          },
+          "content": {
+            "type": "string",
+            "title": "Content",
+            "default": ""
+          },
+          "owner_id": {
+            "type": "string",
+            "title": "Owner Id",
+            "default": ""
+          },
+          "valid_until": {
+            "type": "string",
+            "title": "Valid Until",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "ContextBody"
+      },
+      "ContextUpdateBody": {
+        "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "owner_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Id"
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Until"
+          }
+        },
+        "type": "object",
+        "title": "ContextUpdateBody"
+      },
       "ConversationMessage": {
         "properties": {
           "message": {
@@ -25000,6 +27530,66 @@
           "content"
         ],
         "title": "CreateCommentBody"
+      },
+      "CreateDispatchBody": {
+        "properties": {
+          "org_issue_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Org Issue Number",
+            "default": ""
+          },
+          "targets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Targets"
+          },
+          "context": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "default": ""
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "default": ""
+          },
+          "scene_id": {
+            "type": "string",
+            "title": "Scene Id",
+            "default": ""
+          },
+          "done_when": {
+            "type": "string",
+            "title": "Done When",
+            "default": "issue_done"
+          }
+        },
+        "type": "object",
+        "title": "CreateDispatchBody"
       },
       "CreateEnvBody": {
         "properties": {
@@ -25126,6 +27716,31 @@
             "type": "string",
             "title": "Description",
             "default": ""
+          },
+          "repo_provider": {
+            "type": "string",
+            "title": "Repo Provider",
+            "default": ""
+          },
+          "repo_owner": {
+            "type": "string",
+            "title": "Repo Owner",
+            "default": ""
+          },
+          "repo_name": {
+            "type": "string",
+            "title": "Repo Name",
+            "default": ""
+          },
+          "repo_path": {
+            "type": "string",
+            "title": "Repo Path",
+            "default": ""
+          },
+          "repo_private": {
+            "type": "boolean",
+            "title": "Repo Private",
+            "default": true
           }
         },
         "type": "object",
@@ -25201,6 +27816,16 @@
           "provider": {
             "type": "string",
             "title": "Provider",
+            "default": ""
+          },
+          "owner": {
+            "type": "string",
+            "title": "Owner",
+            "default": ""
+          },
+          "path": {
+            "type": "string",
+            "title": "Path",
             "default": ""
           }
         },
@@ -26318,27 +28943,6 @@
           }
         ]
       },
-      "KnowledgeBody": {
-        "properties": {
-          "scope": {
-            "type": "string",
-            "title": "Scope",
-            "default": "issue"
-          },
-          "content": {
-            "type": "string",
-            "title": "Content",
-            "default": ""
-          },
-          "status": {
-            "type": "string",
-            "title": "Status",
-            "default": "accepted"
-          }
-        },
-        "type": "object",
-        "title": "KnowledgeBody"
-      },
       "KnowledgeEntryBody": {
         "properties": {
           "repo": {
@@ -26434,27 +29038,6 @@
         },
         "type": "object",
         "title": "KnowledgeRefUpdateBody"
-      },
-      "KnowledgeUpdateBody": {
-        "properties": {
-          "content": {
-            "type": "string",
-            "title": "Content",
-            "default": ""
-          },
-          "description": {
-            "type": "string",
-            "title": "Description",
-            "default": ""
-          },
-          "name": {
-            "type": "string",
-            "title": "Name",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "title": "KnowledgeUpdateBody"
       },
       "LLMCredentialBody": {
         "properties": {
@@ -26642,6 +29225,22 @@
           "username"
         ],
         "title": "LoginWhitelistBody"
+      },
+      "ManualBindRepoBody": {
+        "properties": {
+          "repo_key": {
+            "type": "string",
+            "title": "Repo Key",
+            "default": ""
+          },
+          "confirm": {
+            "type": "boolean",
+            "title": "Confirm",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "ManualBindRepoBody"
       },
       "MarketApplyBody": {
         "properties": {
@@ -28004,6 +30603,16 @@
             "type": "string",
             "title": "Access Token",
             "default": ""
+          },
+          "refresh_token": {
+            "type": "string",
+            "title": "Refresh Token",
+            "default": ""
+          },
+          "expires_in": {
+            "type": "integer",
+            "title": "Expires In",
+            "default": 0
           }
         },
         "type": "object",
@@ -28011,7 +30620,33 @@
           "binding_ticket"
         ],
         "title": "TransferBindBody",
-        "description": "绑定转移确认请求体。"
+        "description": "绑定转移确认请求体。\n\naccess_token/refresh_token 可选：票据按设计不携带平台令牌（凭据不出库），\n因此正常的\"确认转移\"请求里它们是空的——此时服务端把新绑定落成\nstatus=4（已绑定、待重新授权）并在响应里回 needs_reauth，前端据此直接把\n用户送去再授权一次；不再产出\"status=1 但没有 token\"的僵尸绑定。"
+      },
+      "TransferRepoBody": {
+        "properties": {
+          "target_org_id": {
+            "type": "string",
+            "title": "Target Org Id",
+            "default": ""
+          },
+          "target_slug": {
+            "type": "string",
+            "title": "Target Slug",
+            "default": ""
+          },
+          "target_owner": {
+            "type": "string",
+            "title": "Target Owner",
+            "default": ""
+          },
+          "target_org": {
+            "type": "string",
+            "title": "Target Org",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "TransferRepoBody"
       },
       "UnlockBody": {
         "properties": {
@@ -28214,6 +30849,11 @@
           "max_workers": {
             "type": "integer",
             "title": "Max Workers",
+            "default": 0
+          },
+          "max_repos": {
+            "type": "integer",
+            "title": "Max Repos",
             "default": 0
           }
         },
@@ -28889,6 +31529,177 @@
         "type": "object",
         "title": "StartBody"
       },
+      "src__domains__mgmt__routes__knowledge__KnowledgeUpdateBody": {
+        "properties": {
+          "content": {
+            "type": "string",
+            "title": "Content",
+            "default": ""
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "KnowledgeUpdateBody"
+      },
+      "src__domains__mgmt__routes__org_knowledge__KnowledgeBody": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "default": ""
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "default": ""
+          },
+          "content": {
+            "type": "string",
+            "title": "Content",
+            "default": ""
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags"
+          },
+          "applies_to": {
+            "type": "string",
+            "title": "Applies To",
+            "default": ""
+          },
+          "valid_until": {
+            "type": "string",
+            "title": "Valid Until",
+            "default": ""
+          },
+          "review_interval_days": {
+            "type": "integer",
+            "title": "Review Interval Days",
+            "default": 0
+          },
+          "owner_id": {
+            "type": "string",
+            "title": "Owner Id",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "KnowledgeBody"
+      },
+      "src__domains__mgmt__routes__org_knowledge__KnowledgeUpdateBody": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
+          "applies_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applies To"
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Until"
+          },
+          "review_interval_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Interval Days"
+          },
+          "owner_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Id"
+          }
+        },
+        "type": "object",
+        "title": "KnowledgeUpdateBody"
+      },
       "src__domains__mgmt__routes__sandbox_admin__ConfigBody": {
         "properties": {
           "sandbox_mode": {
@@ -29050,6 +31861,27 @@
         ],
         "title": "FeedbackBody"
       },
+      "src__domains__runtime__routes__events__KnowledgeBody": {
+        "properties": {
+          "scope": {
+            "type": "string",
+            "title": "Scope",
+            "default": "issue"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content",
+            "default": ""
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "accepted"
+          }
+        },
+        "type": "object",
+        "title": "KnowledgeBody"
+      },
       "src__domains__runtime__routes__runtime__ProgressBody": {
         "properties": {
           "summary": {
@@ -29091,6 +31923,29 @@
         },
         "type": "object",
         "title": "ProgressBody"
+      },
+      "FeedbackBody": {
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "title": "Seq"
+          },
+          "feedback_type": {
+            "type": "string",
+            "title": "Feedback Type",
+            "default": "create_issue"
+          },
+          "comment": {
+            "type": "string",
+            "title": "Comment",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "seq"
+        ],
+        "title": "FeedbackBody"
       }
     },
     "securitySchemes": {
@@ -29109,5 +31964,6 @@
         "name": "access_token"
       }
     }
-  }
+  },
+  "tags": []
 }

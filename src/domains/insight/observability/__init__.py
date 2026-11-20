@@ -95,8 +95,10 @@ HTTP_REQUEST_DURATION = Histogram(
 # GSB 跨域调用指标：收集器定义在 kernel（kernel 不能依赖 domains），
 # 这里把它们的收集器注册进本模块的 registry，/metrics 才能带出来。
 from src.kernel.gsb.metrics import install as _install_gsb_metrics
+from src.kernel.org_metrics import install as _install_org_metrics
 
 _install_gsb_metrics(registry)
+_install_org_metrics(registry)
 
 HTTP_IN_FLIGHT = Gauge(
     "grape_http_in_flight_requests",
@@ -141,7 +143,7 @@ def metrics_middleware(app):
             route = _route_pattern(request)
             labels = {"method": request.method, "route": route, "status": "500"}
             HTTP_REQUESTS_TOTAL.labels(**labels).inc()
-            HTTP_REQUEST_DURATION.labels(**labels).observe(duration)
+            HTTP_REQUEST_DURATION.labels(**labels).observe(duration, exemplar=_current_exemplar())
             raise
         finally:
             HTTP_IN_FLIGHT.dec()
@@ -151,8 +153,30 @@ def metrics_middleware(app):
         route = _route_pattern(request)
         labels = {"method": request.method, "route": route, "status": status}
         HTTP_REQUESTS_TOTAL.labels(**labels).inc()
-        HTTP_REQUEST_DURATION.labels(**labels).observe(duration)
+        HTTP_REQUEST_DURATION.labels(**labels).observe(duration, exemplar=_current_exemplar())
         return response
+
+
+def _current_exemplar() -> dict | None:
+    """把当前 span 的 trace_id/span_id 挂到指标上（OpenMetrics exemplar）。
+
+    排障价值：P95 面板上一个尖峰点下面能直接点进那条 trace，不用先按时间猜。
+    没有 OTel（未启用/采样丢弃）时返回 None，指标照常导出、只是没有 exemplar。
+    """
+    try:
+        from opentelemetry import trace as _trace
+        sp = _trace.get_current_span()
+        if sp is None:
+            return None
+        ctx = sp.get_span_context()
+        if ctx is None or not ctx.is_valid:
+            return None
+        return {
+            "trace_id": format(ctx.trace_id, "032x"),
+            "span_id": format(ctx.span_id, "016x"),
+        }
+    except Exception:
+        return None
 
 
 def _route_pattern(request) -> str:
@@ -175,14 +199,28 @@ def _route_pattern(request) -> str:
 # ===== /metrics 端点 =====
 
 
+def _openmetrics_body() -> tuple[bytes, str]:
+    """按 OpenMetrics 导出（exemplar 只有这个格式带得出去），失败回退旧格式。"""
+    try:
+        from prometheus_client.openmetrics.exposition import (
+            CONTENT_TYPE_LATEST as _OM_CT,
+            generate_latest as _om_generate_latest,
+        )
+        return _om_generate_latest(registry), _OM_CT
+    except Exception:
+        return generate_latest(registry), CONTENT_TYPE_LATEST
+
+
 def metrics_endpoint():
-    """返回 Prometheus exposition 格式的指标数据。"""
+    """返回 Prometheus exposition 格式的指标数据。
+
+    Prometheus 抓取时带 ``Accept: application/openmetrics-text;...``，这时返回
+    OpenMetrics（含 exemplar → trace_id）；其它调用方仍拿 0.0.4 文本。
+    """
     from fastapi.responses import Response
     on_metrics_scrape()   # DB/业务度量是"拉取时采样"，必须先刷新再导出（否则恒为 0）
-    return Response(
-        content=generate_latest(registry),
-        media_type=CONTENT_TYPE_LATEST,
-    )
+    body, ctype = _openmetrics_body()
+    return Response(content=body, media_type=ctype)
 
 
 # ===== Metrics HTTP Server（独立端口，参考 multica metrics/server.go）=====
@@ -213,9 +251,10 @@ def start_metrics_server():
         def do_GET(self):
             if self.path == "/metrics":
                 on_metrics_scrape()   # 刷新 DB/业务采样（拉取时采样，否则恒为 0）
-                body = generate_latest(registry)
+                want_om = "openmetrics" in (self.headers.get("Accept") or "").lower()
+                body, ctype = _openmetrics_body() if want_om else (generate_latest(registry), CONTENT_TYPE_LATEST)
                 self.send_response(200)
-                self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+                self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)

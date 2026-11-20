@@ -2111,7 +2111,7 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
     cwd = task.get("cwd") or ""
     if not cwd or not _os.path.isdir(cwd):
         return
-    for _sub in (".skills", ".project-info", ".knowledge"):
+    for _sub in (".skills", ".project-info", ".knowledge", ".org-context"):
         _p = _os.path.join(cwd, _sub)
         try:
             if _os.path.isdir(_p):
@@ -3066,9 +3066,25 @@ async def _execute_task_impl(client, task, engine_name: str = ""):
     try:
         know_files = json.loads(task.get("knowledge_files") or "{}")
         know_file_urls = json.loads(task.get("knowledge_file_urls") or "{}")
-        await _materialize_files(client, tid, know_files, know_file_urls, know_dir,
-                                 tag="knowledge")
+        # 组织快照单独物化到 .org-context/，不混入普通 .knowledge/
+        org_prefix = "org-context/"
+        org_files = {k[len(org_prefix):]: v for k, v in know_files.items()
+                     if str(k).startswith(org_prefix)}
+        org_urls = {k[len(org_prefix):]: v for k, v in know_file_urls.items()
+                    if str(k).startswith(org_prefix)}
+        regular_files = {k: v for k, v in know_files.items()
+                         if not str(k).startswith(org_prefix)}
+        regular_urls = {k: v for k, v in know_file_urls.items()
+                        if not str(k).startswith(org_prefix)}
+        if regular_files or regular_urls:
+            await _materialize_files(client, tid, regular_files, regular_urls,
+                                     know_dir, tag="knowledge")
         prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
+        if org_files or org_urls:
+            org_dir = _os.path.join(cwd, ".org-context")
+            await _materialize_files(client, tid, org_files, org_urls,
+                                     org_dir, tag="org-context")
+            prompt = prompt.replace("{{ORG_CONTEXT_DIR}}", org_dir)
     except Exception as e:
         log.warning(f"knowledge materialize failed: {e}")
 

@@ -276,6 +276,7 @@ CREATE TABLE IF NOT EXISTS issue (
     created_by       TEXT DEFAULT '',
     vcs_exists       INTEGER NOT NULL DEFAULT 1,
     vcs_checked_at   TEXT DEFAULT NULL,
+    org_context_snapshot_id TEXT NOT NULL DEFAULT '',  -- 组织快照 uuid（32 hex）
     created_at       TEXT DEFAULT (datetime('now')),
     completed_at     TEXT DEFAULT NULL
 )

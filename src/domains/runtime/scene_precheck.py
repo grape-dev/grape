@@ -26,6 +26,7 @@ REASON_CODES = (
     "skill_unresolvable",
     "scene_node_dangling",
     "scene_node_duplicate",
+    "org_scene_requires_org_repo",
 )
 
 _PREHECK_CONFIG_PATH = os.path.join(CONFIG_DIR, "scene-precheck.json")
@@ -206,9 +207,21 @@ def _skill_resolvable(node: dict, repo_key: str, user_id: str) -> bool:
         return False
     try:
         from src.domains.mgmt.public import resolve_skill_id  # 跨域走 owner public
-        return bool(resolve_skill_id(skill_name, repo_key=repo_key, user_id=user_id or ""))
+        if resolve_skill_id(skill_name, repo_key=repo_key, user_id=user_id or ""):
+            return True
     except Exception as e:
         log.warning(f"scene_precheck: resolve_skill_id failed (fail-open): {e}")
+        return True
+    # Issue #2118：skill 表无行（如 org-* 组织技能 sid=0）时复用派发链路同一
+    # 物化门禁 verify_skill_materializable——官方内置包可解析即放行，避免真实
+    # 建单前误报 skill_unresolvable；确实不可物化则保持拦截。
+    try:
+        from src.domains.runtime.engine.service import verify_skill_materializable
+        ok, _reason, _sid = verify_skill_materializable(
+            skill_name, skill_id=skill_id, repo_key=repo_key, user_id=user_id or "")
+        return bool(ok)
+    except Exception as e:
+        log.warning(f"scene_precheck: verify_skill_materializable failed (fail-open): {e}")
         return True
 
 def _ownership_problem(rows: list[dict], repo_key: str,
@@ -344,7 +357,7 @@ def _check_engine_binding(tag: str, is_sre: bool, eids: list[int], scene_id: str
             suggestion="启动引擎或重新选择在线机器后重试")
 
 def _check_skill(node: dict, tag: str, repo_key: str,
-                 cfg: dict, problems: list) -> None:
+                 cfg: dict, problems: list, user_id: str = "") -> None:
     from src.api.scene_skill_scope import evaluate, format_rebind_hint
     skill_name = str(node.get("skill") or "").strip()
     skill_id = _node_skill_id(node)
@@ -352,6 +365,16 @@ def _check_skill(node: dict, tag: str, repo_key: str,
         return
     result = evaluate(node, repo_key, "repo")
     if result["ok"]:
+        # Issue #2118 复审：scope 门禁对「不在 skill 表」的形态 fail-open（官方内置包
+        # 存量兼容），但建单前仍复用派发链路的物化门禁——确实不可物化的 ghost skill
+        # 必须在这里拦住，否则会建出永远跑不起来的死单。
+        if result.get("source") == "unresolved" and not _skill_resolvable(
+                node, repo_key, user_id):
+            _append_problem(
+                problems, cfg, "skill_unresolvable", tag, [],
+                message=f"节点 {tag} 的技能不可解析：{skill_name or skill_id}"
+                        "（skill 表无行且官方内置包不可物化）",
+                suggestion="重新选择技能、上传技能包，或确认技能名称拼写")
         return
     _suggestion = "重新选择技能或确认技能对当前用户/仓库可见"
     _cand = list(result.get("rebind_candidates") or [])
@@ -403,7 +426,7 @@ def _check_nodes(nodes: list, scene_id: str, repo_key: str, user,
         eids = _resolve_engine_refs(n)
         _check_engine_binding(tag, is_sre, eids, scene_id, repo_key, names, uids,
                               cfg, problems)
-        _check_skill(n, tag, repo_key, cfg, problems)
+        _check_skill(n, tag, repo_key, cfg, problems, user_id)
 
 def _scene_unresolved(scene: dict | None, scene_id: str) -> bool:
     return (not scene or scene.get("fallback")
@@ -461,6 +484,21 @@ def precheck_scene(scene_id: str, repo_key: str, user=None, explicit: bool = Tru
             if personal_nodes is not None:
                 scene = {"scene_id": scene_id, "nodes": personal_nodes}
         if _scene_unresolved(scene, scene_id):
+            # Issue #2118 复审：显式场景指向组织专用模板、而当前仓库非组织仓库时，
+            # 不能按「场景未解析」warning fail-open（随后仍会建单 → 死单）。这里
+            # fail-closed 明确阻断，避免普通仓库产出不可执行的组织场景任务。
+            problems = out["problems"]
+            try:
+                from src.api.pipeline_config import scene_is_org_scoped, _repo_is_org_repo
+                if scene_is_org_scoped(scene_id) and not _repo_is_org_repo(repo_key):
+                    _append_problem(
+                        problems, cfg, "org_scene_requires_org_repo", scene_id,
+                        message=f"场景 {scene_id} 是组织专用场景，当前仓库不是组织仓库，无法执行",
+                        suggestion="请在组织仓库中创建组织需求，或改用当前仓库可用的普通场景")
+                    out["ok"] = False
+                    return out
+            except Exception as e:
+                log.warning(f"scene_precheck: org-scope gate failed (fail-open): {e}")
             out["warnings"].append(f"scene not found: {scene_id}")
             return out
         nodes = scene.get("nodes") or []

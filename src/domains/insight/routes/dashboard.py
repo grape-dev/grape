@@ -1642,9 +1642,12 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                     continue
                 _seen_ids.add(_rid)
                 _deduped.append(e)
-            # 组织隔离过滤
+            # 组织隔离过滤（Issue #2265）：global 引擎（org_id=''）是平台共享资源，
+            # 团队组织同样可见/可用；只隔离「属于其它组织」的引擎。
             if _filter_org_id:
-                _deduped = [e for e in _deduped if (e.get("org_id") or 0) == _filter_org_id]
+                _deduped = [e for e in _deduped
+                            if not str(e.get("org_id") or "")
+                            or str(e.get("org_id")) == str(_filter_org_id)]
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      # Issue #1208：本机直连无凭据 device_name，展示名用 host_name 兜底（与设置页同口径）
                                      "name": instance_name(e["name"],

@@ -10,8 +10,9 @@
 <link rel="stylesheet" href="/static-vue/assets/css/tokens.css?v=2">
 <link rel="stylesheet" href="/static-vue/assets/css/app.css?v=10">
 <!-- view 级样式合并产物：阻塞加载，避免首帧无样式（见 vite closeBundle）-->
-<link rel="stylesheet" href="/static-vue/assets/viewcss/all-views.css?v=57">
-<link rel="stylesheet" href="/static-vue/assets/css/auth.css?v=1"><link rel="stylesheet" href="/static-vue/vendor/select2.min.css?v=1">
+<link rel="stylesheet" href="/static-vue/assets/viewcss/all-views.css?v=64">
+<link rel="stylesheet" href="/static-vue/assets/css/auth.css?v=1">
+<link rel="stylesheet" href="/static-vue/vendor/select2.min.css?v=1">
 <script>
 // Early theme application — prevents flash of unstyled content (FOUC).
 // Reads localStorage 'grapeTheme' before DOM renders. Default: Liquid Glass (apple).
@@ -21,7 +22,7 @@
 (function(){var p=new URLSearchParams(location.search);if(localStorage.getItem('token')||p.get('token')||p.get('exchange_code'))document.documentElement.setAttribute('data-logged-in','1');})();
 // Early i18n loading — hide [data-i18n] elements until i18n.js applies translations.
 // Only for non-zh users (zh fallback text in HTML is already correct).
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__ = '74';})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='79';})();
 // i18n 加载超时兜底：5 秒后强制移除隐藏状态
 setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
@@ -53,17 +54,11 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 <div class="logo-s" style="cursor:pointer" onclick="window.open('/','_blank')" data-i18n-title="app.back_to_website" title="返回官网"><img class="sq" src="/static/img/grape-logo.jpg?v=1" alt="A"><h1>Grape</h1></div>
 <div class="tagline">AI Native DevOps</div>
 </div>
-<div style="padding:0 12px;margin-top:8px;display:none">
-<div style="font-size:10px;color:var(--t3);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px" data-i18n="app.sidebar.organizations">组织</div>
-<div class="sb-sel">
-  <select id="orgSelect" onchange="app.switchOrg(this.value)" data-i18n-title="organizations.title" title="切换组织">
-    <option value="">加载中...</option>
-  </select>
-</div>
-<div style="font-size:10px;color:var(--t3);margin-top:4px;display:none"><a onclick="app.nav('organizations')" style="cursor:pointer;color:var(--a)" data-i18n="organizations.manage_orgs">管理组织 →</a></div>
-</div>
 <div style="padding:0 12px;margin-top:8px">
-<div style="font-size:10px;color:var(--t3);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px" data-i18n="app.nav.repos">仓库</div>
+<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+  <span style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:0.5px" data-i18n="app.nav.repos">仓库</span>
+  <span id="repoOrgBadge" data-i18n="app.repo.org_project" style="display:none;align-items:center;gap:3px;padding:2px 7px;border-radius:999px;background:linear-gradient(135deg,#3168e0,#7b3cf2);color:#fff;font-size:9px;font-weight:700;letter-spacing:.2px;line-height:1.5;box-shadow:0 2px 8px rgba(49,104,224,.35);white-space:nowrap">组织项目</span>
+</div>
 <div class="sb-sel"><select id="repoSelect" onchange="app.switchRepo(this.value)"><option value="" data-i18n="app.repo.select">选择仓库...</option></select></div>
 </div>
 <div class="sb-nav">
@@ -92,7 +87,6 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 <a id="nav-obs-cockpit" onclick="app.nav('observability')"><span class="ic">🧭</span><span data-i18n="app.nav.obs_cockpit">运行驾驶舱</span></a>
 <div class="grp" data-i18n="app.sidebar.settings">设置</div>
 <a id="nav-settings-gitcode" onclick="app.nav('settings','gitcode')"><span class="ic">⎘</span><span data-i18n="app.nav.gitcode_repo">仓库设置</span></a>
-<a id="nav-organizations" onclick="app.nav('organizations')" style="display:none"><span class="ic">🏢</span><span data-i18n="app.nav.organizations">组织管理</span></a>
 </div>
 <div class="sb-ft" id="sbFooter" style="position:relative">
 <div class="av" id="userAvatar" onclick="app._toggleUserMenu()" style="cursor:pointer">U</div>
@@ -132,6 +126,36 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 <script>
 // i18n.js is loaded with defer in <head> — it auto-inits.
 // Here we only update language switch labels after DOMContentLoaded.
+// ===== 启动看门狗（本地加固，内联执行：即使 app.js 加载/执行失败也能兜底）=====
+// 现象：个别浏览器状态会让 #pageContent 永远停在「加载中...」且不发任何 API 请求。
+// 15s 未渲染任何视图 → 首次清站点缓存重载一次；仍失败 → 明确报错 + 一键清登录态。
+(function () {
+  setTimeout(function () {
+    try {
+      if (window._currentView) return;
+      var pc = document.getElementById('pageContent');
+      if (!pc || !pc.querySelector('.loading')) return;
+      var last = 0;
+      try { last = parseInt(sessionStorage.getItem('boot_retry_at') || '0', 10) || 0; } catch (e) {}
+      if (Date.now() - last > 60000) {
+        try {
+          sessionStorage.setItem('boot_retry_at', String(Date.now()));
+          localStorage.removeItem('app_cache_ver');
+          sessionStorage.removeItem('currentRepo');
+        } catch (e) {}
+        console.warn('[boot-watchdog] 页面初始化超时，清理站点缓存后重载');
+        window.location.reload();
+        return;
+      }
+      pc.innerHTML = '<div style="padding:32px;max-width:520px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,sans-serif;text-align:center">' +
+        '<div style="font-size:15px;font-weight:600;color:#1d1d1f;margin-bottom:8px">页面初始化超时</div>' +
+        '<div style="font-size:13px;color:#6e6e73;line-height:1.6;margin-bottom:16px">前端脚本未能完成启动（已自动重试过一次）。请点下方按钮清除本地登录态后重新登录。</div>' +
+        '<button onclick="try{localStorage.clear()}catch(e){};try{sessionStorage.clear()}catch(e){};location.reload()" ' +
+        'style="padding:10px 18px;border:none;border-radius:10px;background:#0071e3;color:#fff;font-size:13px;font-weight:600;cursor:pointer">清除登录态并重新加载</button>' +
+        '</div>';
+    } catch (e) { /* 看门狗不得影响页面 */ }
+  }, 15000);
+})();
 document.addEventListener('DOMContentLoaded', function(){
   _updateLoginLangLabel();
   _updateAppLangLabel();
@@ -243,17 +267,17 @@ function _toggleAppLang(){
 <script type="module" src="/static-vue/viewjs/dashboard-view.js?v=86"></script>
 <script type="module" src="/static-vue/viewjs/pipeline.js?v=54"></script>
 <script type="module" src="/static-vue/viewjs/agent-view.js?v=51"></script>
-<script type="module" src="/static-vue/viewjs/event-view.js?v=60"></script><script type="module" src="/static-vue/viewjs/chat-view.js?v=61"></script>
+<script type="module" src="/static-vue/viewjs/event-view.js?v=61"></script><script type="module" src="/static-vue/viewjs/chat-view.js?v=61"></script>
 <script type="module" src="/static-vue/viewjs/im-channel.js?v=55"></script>
 <script type="module" src="/static-vue/viewjs/repos-view.js?v=64"></script>
-<script type="module" src="/static-vue/viewjs/issues-view.js?v=62"></script>
+<script type="module" src="/static-vue/viewjs/issues-view.js?v=66"></script>
 <script type="module" src="/static-vue/viewjs/account-view.js?v=60"></script>
 <script type="module" src="/static-vue/viewjs/scene-market.js?v=59"></script>
-<script type="module" src="/static-vue/viewjs/skills-view.js?v=58"></script>
+<script type="module" src="/static-vue/viewjs/skills-view.js?v=59"></script>
 <script type="module" src="/static-vue/viewjs/knowledge-view.js?v=49"></script>
-<script type="module" src="/static-vue/viewjs/runtimes-view.js?v=83"></script>
+<script type="module" src="/static-vue/viewjs/runtimes-view.js?v=87"></script>
 <script type="module" src="/static-vue/viewjs/observability-view.js?v=57"></script>
-<script type="module" src="/static-vue/viewjs/organizations.js?v=51"></script>
+<script type="module" src="/static-vue/viewjs/organizations.js?v=77"></script>
 <script type="module" src="/static-vue/viewjs/feedback-dialog.js?v=50"></script>
 <script type="module" src="/static-vue/viewjs/my-feedback.js?v=50"></script>
 <script type="module" src="/static-vue/viewjs/my-feedback-detail.js?v=50"></script>
@@ -261,7 +285,7 @@ function _toggleAppLang(){
 <script type="module" src="/static-vue/viewjs/sandbox-view.js?v=11"></script>
 <script src="/static/js/deeplink.js?v=1" defer></script><!-- 深链解析 /app/<owner>/<repo>/#tasks/N -->
 <script src="/static/js/platform-icons.js?v=2" defer></script><!-- 平台图标卡派生（D109 解耦：不写死 gitcode/github） -->
-<script src="/static/js/app.js?v=275" defer></script>
+<script src="/static/js/app.js?v=307" defer></script>
 <script type="module" src="/static-vue/viewjs/login-view.js?v=2"></script>
 <script type="module" src="/static-vue/viewjs/onboarding-view.js?v=9"></script>
 <script src="/static/js/auto-recovery.js?v=2" defer></script>

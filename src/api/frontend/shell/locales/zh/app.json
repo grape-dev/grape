@@ -357,7 +357,10 @@
     "back_to_website": "返回官网",
     "add_new": "新增仓库托管",
     "pick_first": "请先在仓库下拉里选择一个仓库",
-    "forbidden": "没有该仓库的访问权限，已切回仓库大厅"
+    "forbidden": "没有该仓库的访问权限，已切回仓库大厅",
+    "org_repo": "组织仓库",
+    "org_group": "组织",
+    "org_project": "组织项目"
   },
   "toast": {
     "theme_switched_default": "已切换到默认风格",

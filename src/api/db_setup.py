@@ -60,6 +60,11 @@ from src.domains.mgmt.schema_ddl import (
     _COMMUNITY_COMMENTS_DDL,
     _COMMUNITY_LIKES_DDL,
     CHANNEL_TABLE_DDL,
+    _ORG_DISPATCH_DDL,
+    _ORG_DISPATCH_TARGET_DDL,
+    _ORG_DISPATCH_AGGREGATE_DDL,
+    _ORG_CONTEXT_SNAPSHOT_DDL,
+    _ORG_CONTEXT_DDL,
 )
 from src.domains.runtime.schema_ddl import (
     _EVENTS_TABLE_DDL,
@@ -1112,6 +1117,8 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_session ON agent_tasks(agent_session_id)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_event ON agent_tasks(event_seq)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_issue_session ON agent_tasks(issue_session_id)",
+# Issue #2090: 解绑/派发拦截按 repo_key + status 查询
+        "CREATE INDEX IF NOT EXISTS idx_agent_tasks_repo_status ON agent_tasks(repo_key, status)",
         # ===== Issue #646: uid 稳定键索引（UNIQUE，NULL 多行合法——孤儿/历史行 uid=NULL 不冲突） =====
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runtimes_engine_uid ON agent_runtimes(engine_uid)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_credentials_credential_uid ON runtime_credentials(credential_uid)",
@@ -2072,6 +2079,9 @@ _ORG_DOMAIN_TEXT_COLS = (
     ("org_invitation", "org_id"),
     ("org_invitation", "inviter_id"),
     *[(t, "org_id") for t in _ORG_ID_TABLES],
+    # 组织下派/上下文表（本轮新增）：存量库旧 DDL 为 INTEGER org_id，随批 TEXT 化
+    ("grape_t_org_dispatch", "org_id"),
+    ("grape_t_org_context", "org_id"),
 )
 
 
@@ -2648,7 +2658,7 @@ _LEGACY_DOMAIN_LABELS = {
     "202611060004": ("runtime",),
     "202611070001": ("runtime",),
     "202611080004": ("runtime",),
-    "202611090001": ("runtime",),
+    "202611182015": ("runtime",),
     "202611100001": ("runtime",),
     "202611110004": ("runtime",),
     "202611110006": ("runtime",),
@@ -2862,7 +2872,9 @@ def _fn_ensure_im_channel_tables() -> None:
 
 
 register_migration(
-    version="202611182001",
+    # 2026-11-19 合并避让：目标库 202611182001 已由本仓 create-org-dispatch-tables
+    # 盖章（同号不同名），本迁移沿用原号会被判「已执行」而永久跳过、IM 渠道表不会建。
+    version="202611184000",
     name="ensure-im-channel-tables",
     kind="safe",
     fn=_fn_ensure_im_channel_tables,
@@ -3134,7 +3146,10 @@ def _fn_add_ap_exec_agent_task_id() -> None:
 register_migration(
     # 撞号避让（2026-11-09 变基）：weekly-10 已用 202611060003 给
     # backfill_events_terminal_completed_at，同号后登记项会被判「已执行」永久跳过。
-    version="202611090001",
+    # 2026-11-19 合并上游后再次避让：目标库 202611090001 已由
+    # session_api_tokens_agent_identity 盖章（同号不同名），本迁移沿用本仓既有号
+    # 202611182015（该号在库内盖章名即本迁移），否则会被永久跳过。
+    version="202611182015",
     name="add-autopilot-exec-agent-task-id",
     kind="safe",
     fn=_fn_add_ap_exec_agent_task_id,
@@ -4452,6 +4467,10 @@ def run_pending_migrations() -> None:
     下发 SET SESSION lock_wait_timeout=10（QA R1：专用连接上的 SET 对 DDL 无效）；
     执行器内每条 pending 迁移前还会再下发一次。
     """
+    # Issue #3527：不筛域全量迁移的真正入口在这里（server_common
+    # → init_database → run_pending_migrations），owner 为空时必须在此告警，
+    # 而不是只挂在 run_domain_migrations() 顶部（该入口 owner 为空直接 return）。
+    _warn_missing_migration_owner_if_multi_db("pending")
     _ensure_migration_session_lock_timeout()
     try:
         _run_migrations_with_conn(db)
@@ -4473,6 +4492,50 @@ def _ensure_migrations_ledger(conn) -> None:
     conn.commit()
 
 
+def _warn_missing_migration_owner_if_multi_db(call_site: str = "pending") -> None:
+    """多库 DSN 已配但 GRAPE_MIGRATION_OWNER 为空 → ERROR 级告警（含修复指引）。
+
+    Issue #3527：告警必须挂在真正跑迁移的入口，且按 call site 区分文案——
+    - "pending"：init_database() → run_pending_migrations() 的不筛域形态，
+      执行器按全量登记表跑迁移，非属主进程会把别域的表建进本域库
+      （沙箱同名空表遮蔽即此形态）；
+    - "domain"：run_domain_migrations()（GRAPE_DOMAIN_LIB=1）的域迁移入口，
+      owner 为空时该入口直接 return，本进程未执行任何域迁移。
+    worker 与 event 共用 runtime 库、按设计不跑迁移，owner 为空属正常，不告警。
+    """
+    try:
+        from src.kernel import db_registry as _dbreg
+        if not _dbreg.lib_enabled():
+            return
+    except Exception as _e:  # noqa: BLE001 - 判定失败不阻断启动
+        log.warning(f"迁移属主告警判定跳过（db_registry 不可用）: {_e}")
+        return
+    if (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip():
+        return
+    _roles = {
+        (os.environ.get("GRAPE_PROCESS_ROLE") or "").strip().lower(),
+        (os.environ.get("GRAPE_SERVICE_NAME") or "").strip().lower(),
+    }
+    if "worker" in _roles:
+        return
+    if call_site == "domain":
+        log.error(
+            "[migration-guard] 多库 DSN（GRAPE_DSN_MGMT/RUNTIME/INSIGHT）已配置，"
+            "但 GRAPE_MIGRATION_OWNER 为空：本进程未执行任何域迁移（域迁移入口直接跳过），"
+            "登记的增量迁移将停留在未盖章状态。"
+            "修复：启动脚本按角色导出 GRAPE_MIGRATION_OWNER —— mgmt=mgmt / event=runtime / "
+            "insight=insight / worker 留空；参考 scripts/grape-systemd-run.sh 与 deploy/deploy3db.sh。"
+        )
+        return
+    log.error(
+        "[migration-guard] 多库 DSN（GRAPE_DSN_MGMT/RUNTIME/INSIGHT）已配置，"
+        "但 GRAPE_MIGRATION_OWNER 为空：本进程将以「不筛域」形态执行全量迁移，"
+        "可能把别域的表建进本域库（Issue #3527 空表遮蔽的成因）。"
+        "修复：启动脚本按角色导出 GRAPE_MIGRATION_OWNER —— mgmt=mgmt / event=runtime / "
+        "insight=insight / worker 留空；参考 scripts/grape-systemd-run.sh 与 deploy/deploy3db.sh。"
+    )
+
+
 def run_domain_migrations() -> None:
     """三库模式：本域进程只跑本域登记的迁移（不跑 legacy 全量）。
 
@@ -4480,6 +4543,9 @@ def run_domain_migrations() -> None:
     runtime 表只由 event 进程跑（worker 与 event 共库，避免并发重复 DDL），
     insight 由 insight 进程跑；mgmt 仍走 init_database() 的常规路径。
     """
+    # Issue #3527：此处 owner 为空 → 直接 return，本进程未执行
+    # 任何域迁移，文案与 run_pending_migrations 的「不筛域跑全量」区分。
+    _warn_missing_migration_owner_if_multi_db("domain")
     domain = (os.environ.get("GRAPE_MIGRATION_OWNER") or "").strip().lower()
     if domain not in ("runtime", "insight"):
         return  # mgmt：init_database() 已经跑；worker：与 event 共库，不重复跑
@@ -7068,40 +7134,16 @@ CREATE TABLE devops_pipeline_scene_new (
 
 
 def _seed_official_scene_market_from_pipelines():
-    """官方场景种子导入 scene_market（从 configs/pipelines.json，仅首次）。
-
-    官方场景不再写入 devops_pipeline_scene（场景只与仓库关联）。
-    这里把官方场景作为模板种入 scene_market(source='official')，供场景市场展示与仓库应用复刻。
-    """
+    """官方场景增量导入 scene_market（委托 mgmt 域内实现，避免跨域 SQL）。"""
     try:
-        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
-        if get_meta_value("scene_market_seeded") == "1":
-            return
+        from src.domains.mgmt import public as _mgmt_public
+
         _pp = os.path.join(_CONFIG_DIR, "pipelines.json")
-        if not os.path.exists(_pp):
-            return
-        import json as _json
-        with open(_pp, "r", encoding="utf-8") as _f:
-            _pdata = _json.load(_f)
-        _imported = 0
-        with db_lock:
-            c = db.cursor()
-            for _sid, _scene in (_pdata.get("scenes") or {}).items():
-                _nodes = _json.dumps(_scene.get("nodes", []), ensure_ascii=False)
-                try:
-                    c.execute(
-                        mgmt_mig.INSERT_IGNORE_SCENE_MARKET__SEED_OFFICIAL_SCENE_MARKET_F,
-                        (_sid, _scene.get("name", _sid), _scene.get("name", _sid),
-                         _nodes, _scene.get("onboarding", "repo-onboarding")))
-                    _imported += 1
-                except Exception:
-                    pass
-            db.commit()
-        if _imported:
-            set_meta_value("scene_market_seeded", "1")
-        log.info(f"Seeded {_imported} official scenes from pipelines.json into the scene market table")
+        n = _mgmt_public.seed_official_scene_market(_pp)
+        if n:
+            log.info(f"Seeded official scene market: {n}")
     except Exception as e:
-        log.warning(f"Scene market seed import failed: {e}")
+        log.warning(f"Init scene market data failed: {e}")
 
 
 def _backfill_scene_display_names():
@@ -8350,6 +8392,7 @@ register_migration(
     kind="backfill",
     fn=_fn_retire_vcs_platforms_hidden,
 )
+
 # ==============================================================
 # ===== Issue #646: engine_uid / credential_uid 稳定键迁移 ============
 # 设计依据 Spec v3（Issue #646 评论）：UUIDv5 自然键派生（幂等防漂移）/
@@ -9173,31 +9216,12 @@ register_migration(
 # =============================================================================
 
 _SANDBOX_CONTROL_TABLES: list[tuple[str, str]] = [
-    ("grape_t_cloud_sandboxes", """
-CREATE TABLE IF NOT EXISTS grape_t_cloud_sandboxes (
-    id TEXT PRIMARY KEY,
-    issue_id VARCHAR(255) NOT NULL,
-    repo_key VARCHAR(255) NOT NULL,
-    sandbox_id VARCHAR(255) NOT NULL,
-    provider VARCHAR(64) NOT NULL,
-    provider_id TEXT DEFAULT '',
-    state VARCHAR(32) DEFAULT 'creating',
-    sandbox_url VARCHAR(512) DEFAULT '',
-    created_at TEXT,
-    last_refresh_at TEXT,
-    agent_installed INTEGER DEFAULT 0,
-    kill_attempts INTEGER DEFAULT 0,
-    task_id VARCHAR(255) DEFAULT '',
-    stage VARCHAR(64) DEFAULT '',
-    expire_at VARCHAR(32) DEFAULT '',
-    attempt INTEGER DEFAULT 0,
-    created_by INTEGER DEFAULT 0,
-    template_id VARCHAR(255) DEFAULT '',
-    template_name VARCHAR(255) DEFAULT '',
-    engine_type VARCHAR(64) DEFAULT '',
-    last_error TEXT DEFAULT '',
-    UNIQUE(sandbox_id)
-)"""),
+    # Issue #3527（2026-11-20）：grape_t_cloud_sandboxes 已从本组摘除。
+    # 该表归 runtime（configs/table_ownership.json: tables.grape_t_cloud_sandboxes=runtime），
+    # runtime 侧已有双实现：202611180001 ensure_cloud_sandboxes_table()（带所有权守卫）
+    # 与 src/domains/runtime/agents/sandbox/schema.py::ensure_sandbox_tables()。
+    # 保留在这里会让 mgmt 进程额外建出第三份同名空表，把沙箱列表读成 0 行。
+    # 本组剩余表全部归 mgmt；摘表不影响 202611110007 的 _ensure_column 列补齐段。
     ("grape_t_sandbox_templates", """
 CREATE TABLE IF NOT EXISTS grape_t_sandbox_templates (
     id TEXT PRIMARY KEY,
@@ -9375,10 +9399,17 @@ CREATE TABLE IF NOT EXISTS grape_t_egress_admin_exception (
 
 
 def _migration_sandbox_control_plane_schema() -> None:
-    """沙箱控制面表/列（i7 移植）。全部 IF NOT EXISTS/_ensure_column 幂等。"""
+    """沙箱控制面表/列（i7 移植）。全部 IF NOT EXISTS/_ensure_column 幂等。
+
+    Issue #3527：本组表全部归 mgmt；函数体逐表过归属守卫，使「已配 DSN 但未注入
+    迁移属主（不筛域）」形态下 runtime/insight 进程也不会越权建出 mgmt 同名空表。
+    grape_t_cloud_sandboxes 已摘出本组，由 runtime 域 202611180001 建表。
+    """
     with db_lock:
         c = db.cursor()
         for _name, ddl in _SANDBOX_CONTROL_TABLES:
+            if _owned_skip(_name, "create sandbox control table"):
+                continue
             c.execute(ddl)
         # [沙箱迁移] 沙箱凭据形态列：cred_type 区分普通 worker('worker')/沙箱 worker('sandbox')
         _ensure_column(c, "runtime_credentials", "cred_type", "TEXT DEFAULT 'worker'")
@@ -9421,24 +9452,31 @@ def _migration_sandbox_control_plane_schema() -> None:
             ("github.com", "GET", "*", "https", 443),
             ("github.com", "POST", "*", "https", 443),
         ]
-        for domain, method, path_prefix, scheme, port in _OFFICIAL_DOMAINS:
-            try:
-                from src.kernel.sandbox_uid import new_row_uid as _nru
-                c.execute(
-                    "INSERT OR IGNORE INTO grape_t_engine_sandbox_whitelist "
-                    "(id, backend_name, domain, method, path_prefix, scheme, port) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (_nru(), "*", domain, method, path_prefix, scheme, port))
-            except Exception:
-                pass
+        # 白名单种子表归 mgmt：非属主域跳过，否则守卫已跳过建表、这里 INSERT 会 1146。
+        if not _owned_skip("grape_t_engine_sandbox_whitelist", "seed sandbox whitelist"):
+            for domain, method, path_prefix, scheme, port in _OFFICIAL_DOMAINS:
+                try:
+                    from src.kernel.sandbox_uid import new_row_uid as _nru
+                    c.execute(
+                        "INSERT OR IGNORE INTO grape_t_engine_sandbox_whitelist "
+                        "(id, backend_name, domain, method, path_prefix, scheme, port) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (_nru(), "*", domain, method, path_prefix, scheme, port))
+                except Exception:
+                    pass
         db.commit()
 
 
 # [rebase 撞号 2026-11-12] 原 202611100003 与基线 scene-pin-columns（weekly-11 新批次
 # 迁移时已顺延到 003）撞号——同号迁移被判「已执行」永久跳过。顺延到 202611110007
 # （004-006 已被 #1208 selector 占用，007 空闲）。迁移为幂等 DDL，重跑无损。
+# [Issue #3527] 本迁移只剩 mgmt 归属表（grape_t_cloud_sandboxes 已摘出并由 runtime
+# 域的 202611180001 负责），显式声明 domains 避免缺省域语义随摘表漂移；函数体内的
+# runtime 列补齐段（runtime_credentials / agent_runtimes）由 _ensure_column 守卫跳过，
+# 真正落地在 runtime 域 202611170045 / 202611180002。
 register_migration(
     "202611110007", "issue-sandbox-control-plane-schema", "safe",
-    lambda: _migration_sandbox_control_plane_schema())
+    lambda: _migration_sandbox_control_plane_schema(),
+    domains=("mgmt",))
 # =====================================================================
 # ===== Issue #1208: selector 标签化调度迁移 ===========================
 # 版本号：202611110004/5/6。[撞号教训 2026-11-11] 原选 202611110001-003「全新日期
@@ -9674,7 +9712,7 @@ register_migration(
     lambda: _migration_1208_backfill_derived_agent_tags())
 
 register_migration(
-    "202611160001", "engine-template-binding-widen-3tuple", "safe",
+    "202611182014", "engine-template-binding-widen-3tuple", "safe",
     lambda: _migration_engine_template_binding_widen() or None)
 
 
@@ -9739,7 +9777,7 @@ def _fn_category_dict_and_tags() -> None:
 
     - 建 grape_t_category_dict 并落 10 个一级域及二级种子；
     - scene_market 补 cat_l1_id / cat_l2_id（mgmt 域；skill 的三列同号需求
-      归 runtime 域，见 202611180001）；
+      归 runtime 域，见 202611180003）；
     - scene_market.tags 旧逗号串就地回填为 [{name, source:"manual"}]；
     - 幂等：IF NOT EXISTS / _ensure_column / INSERT OR IGNORE / 已规范化行跳过。
     """
@@ -9751,7 +9789,7 @@ def _fn_category_dict_and_tags() -> None:
             seed_category_dict()
         # skill 归 runtime 域（configs/table_ownership.json），本迁移只跑 mgmt 域：
         # 在这里补 skill 列会被归属守卫跳过、却因本迁移盖章而永久假绿 → 参考
-        # 202611180001（runtime 域）单独补。scene_market 归 mgmt，就地补。
+        # 202611180003（runtime 域）单独补。scene_market 归 mgmt，就地补。
         for _tbl, _col, _ddl in (
             ("scene_market", "cat_l1_id", "INTEGER DEFAULT 0"),
             ("scene_market", "cat_l2_id", "INTEGER DEFAULT 0"),
@@ -9799,10 +9837,10 @@ def _fn_skill_classification_columns() -> None:
         db.commit()
 
 
-# [撞号修复 2026-11-18] 原用 202611180001，与同批 ensure-cloud-sandboxes-in-runtime 撞号。
-# 该号在 runtime 库已盖章（cloud-sandboxes），按「已发布保持原号、只改未发布的」规则，
-# 本迁移顺延到 003（002 被 ensure-runtime-type-info-columns 占用）。若沿用旧号，
-# 版本表会判「已执行」而永久跳过，skill 的三个分类列永远不会被加。
+# [撞号修复 2026-11-18] 原用 202611180001，与同批 ensure-cloud-sandboxes-in-runtime 撞号：
+# 同一 version 的登记行名已被 issue2761-skill-classification-columns 占用，
+# ensure-cloud-sandboxes-in-runtime 因此被判「已执行」而从未真跑。按「已发布保持原号、
+# 只改未发布的」规则，本迁移顺延到 003（002 被 ensure-runtime-type-info-columns 占用）。
 register_migration(
     version="202611180003",
     name="issue2761-skill-classification-columns",
@@ -10054,6 +10092,489 @@ register_migration(
     fn=_fn_issue3055_ident_schema,
 )
 
+# ===================== 组织（org）特性迁移：下派 / 上下文 / 知识库 =====================
+# 说明：这些表与列属本仓组织特性（Issue #2112/#2150/#2251/#2090/#2118），
+# 上游 arch-weekly-11 无同名迁移，故统一登记为注册式迁移（存量库启动补齐）；
+# 版本号统一重排到 202611183000+ 独立段：上游 arch-weekly-11 已占用
+# 202611170042~202611170047、202611171845/1846/2020/2100 与 202611182000+，
+# 原号段会撞号被版本表判「已执行」而永久跳过；迁移函数全部幂等，改号后存量库重跑安全。
+
+def _migrate_add_org_provision_columns():
+    """幂等补充组织 provisioning 与组织仓库关联字段。"""
+    with db_lock:
+        c = db.cursor()
+        for col, ddl in (
+            ("max_repos", "INTEGER DEFAULT 20"),
+            ("org_repo_key", "TEXT DEFAULT ''"),
+            ("org_scene_id", "TEXT DEFAULT ''"),
+            ("provision_status", "TEXT DEFAULT 'none'"),
+            ("provision_error", "TEXT DEFAULT ''"),
+            ("provisioned_at", "TEXT DEFAULT ''"),
+            ("provision_attempt", "TEXT DEFAULT ''"),
+        ):
+            _ensure_column(c, "organization", col, ddl)
+        _ensure_column(c, "managed_repos", "is_org_repo", "INTEGER DEFAULT 0")
+        _ensure_column(c, "managed_repos", "linked_by", "TEXT DEFAULT ''")
+        _ensure_column(c, "managed_repos", "linked_at", "TEXT DEFAULT ''")
+        db.commit()
+        log.info("organization provisioning columns ensured")
+
+
+register_migration(
+    version="202611183000",
+    name="add-org-provision-columns",
+    kind="safe",
+    fn=_migrate_add_org_provision_columns,
+)
+
+
+def _migrate_org_dispatch_tables() -> None:
+    """建 grape_t_org_dispatch / grape_t_org_dispatch_target 及索引（幂等）。"""
+    if _owned_skip("grape_t_org_dispatch", "create table"):
+        return
+    with db_lock:
+        c = db.cursor()
+        c.execute(_ORG_DISPATCH_DDL)
+        c.execute(_ORG_DISPATCH_TARGET_DDL)
+        c.execute(_ORG_DISPATCH_AGGREGATE_DDL)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_org_dispatch_org "
+            "ON grape_t_org_dispatch(org_id, created_at)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_grape_t_org_dispatch_target_dispatch "
+            "ON grape_t_org_dispatch_target(dispatch_id, status)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_grape_t_org_dispatch_aggregate_dispatch "
+            "ON grape_t_org_dispatch_aggregate(dispatch_id, terminal_status)"
+        )
+        # 批次级幂等键唯一索引：NULL 不参与唯一约束（SQLite/MySQL 一致），
+        # 存量 NULL 行互不冲突，新建批次各有唯一 key → 跨进程并发只有一条落库。
+        c.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_org_dispatch_idem "
+            "ON grape_t_org_dispatch(idempotency_key) WHERE idempotency_key IS NOT NULL"
+        )
+        db.commit()
+
+
+register_migration(
+    version="202611183001",
+    name="create-org-dispatch-tables",
+    kind="safe",
+    fn=_migrate_org_dispatch_tables,
+)
+
+
+def _fn_add_org_dispatch_idempotency_key() -> None:
+    """Issue #2112 审查 R1：存量库补 grape_t_org_dispatch.idempotency_key + 唯一索引。
+
+    已被建表迁移盖章的库不再跑该迁移，缺列会让 create_dispatch 的
+    INSERT 报 1054 且并发幂等失效，故单独补一条（幂等：_ensure_column / IF NOT EXISTS）。
+    """
+    if _owned_skip("grape_t_org_dispatch", "ensure idempotency index"):
+        return
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "grape_t_org_dispatch", "idempotency_key", "TEXT DEFAULT NULL", strict=True)
+        c.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_org_dispatch_idem "
+            "ON grape_t_org_dispatch(idempotency_key) WHERE idempotency_key IS NOT NULL"
+        )
+        db.commit()
+
+
+register_migration(
+    version="202611183002",
+    name="add-org-dispatch-idempotency-key",
+    kind="safe",
+    fn=_fn_add_org_dispatch_idempotency_key,
+)
+
+
+def _fn_add_org_dispatch_done_when_and_aggregate() -> None:
+    """Issue #2251：target 补 done_when + 建聚合触发幂等台账（存量库幂等）。
+
+    - 存量 target 回填 ``issue_done``（与列默认值一致，行为不突变）；
+    - ``grape_t_org_dispatch_aggregate`` 以 ``UNIQUE(dispatch_id, terminal_status)`` 承载
+      「聚合只触发一次」的幂等键。
+    """
+    if _owned_skip("grape_t_org_dispatch_target", "ensure done_when / aggregate"):
+        return
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "grape_t_org_dispatch_target", "done_when",
+                       "TEXT NOT NULL DEFAULT 'issue_done'", strict=True)
+        c.execute(_ORG_DISPATCH_AGGREGATE_DDL)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_grape_t_org_dispatch_aggregate_dispatch "
+            "ON grape_t_org_dispatch_aggregate(dispatch_id, terminal_status)"
+        )
+        db.commit()
+
+
+register_migration(
+    version="202611183003",
+    name="add-org-dispatch-done-when-and-aggregate",
+    kind="safe",
+    fn=_fn_add_org_dispatch_done_when_and_aggregate,
+)
+
+
+def _fn_migrate_org_scene_type() -> None:
+    """Issue #2118 复审：存量组织场景补写 scene_type='org'（幂等）。
+
+    create_org_scene 在本修复前只落 org_id/advanced_options，不写 scene_type；
+    已完成 provisioning 的组织不会再次走 create_org_scene，存量库里的
+    custom-org-* 场景因此仍是默认 standard，组织入口校验与 org-only 模板
+    解析全部失效。以 organization.org_scene_id 为权威来源，并用 provisioning
+    固定前缀兜底，只升级仍为 standard 的行，不覆盖其它自定义场景。
+    """
+    if _owned_skip("devops_pipeline_scene", "migrate org scene type") or \
+            _owned_skip("organization", "read org scene ids"):
+        return
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "devops_pipeline_scene", "scene_type",
+                       "TEXT DEFAULT 'standard'", allow_copy=True, strict=True)
+        db.commit()
+    from src.domains.mgmt import public as _mgmt_public
+
+    _mgmt_public.migrate_org_scene_type()
+
+
+register_migration(
+    version="202611183004",
+    name="migrate-existing-org-scene-type",
+    kind="safe",
+    fn=_fn_migrate_org_scene_type,
+)
+
+
+# ===== Issue #2150：组织上下文 + 组织知识库迁移（存量库幂等补建）=====
+def _fn_create_org_context_table() -> None:
+    """建 org_context 表 + 查询索引（CREATE IF NOT EXISTS 幂等）。"""
+    if _owned_skip("grape_t_org_context", "create table"):
+        return
+    with db_lock:
+        c = db.cursor()
+        c.execute(_ORG_CONTEXT_DDL)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_org_context_org "
+            "ON grape_t_org_context(org_id, kind, lifecycle_status)"
+        )
+        db.commit()
+
+
+register_migration(
+    version="202611183005",
+    name="create-org-context-table",
+    kind="safe",
+    fn=_fn_create_org_context_table,
+)
+
+
+def _fn_add_org_knowledge_columns() -> None:
+    """Issue #2150：agent_shared_knowledge 扩展组织知识生命周期/归属列（幂等补列）。
+
+    不改既有 status(accepted/rejected) 与 archived 语义——知识看板/注入逻辑仍读旧列，
+    新增 lifecycle_status 等独立列，避免既有链路回归。strict=True：失败抛出，由执行器
+    跳过不盖章、下次重试（防「列没建成却盖死版本号」事故）。
+    """
+    with db_lock:
+        c = db.cursor()
+        # TEXT NOT NULL DEFAULT 列在 MySQL 上 INSTANT/INPLACE 均不支持，必须
+        # allow_copy=True（项目规约 register_migration 自查第 3 条）。不加则 strict
+        # 抛错 → 迁移永不盖章，org knowledge 查询 1054。
+        _ensure_column(c, "agent_shared_knowledge", "lifecycle_status",
+                       "TEXT NOT NULL DEFAULT 'draft'", allow_copy=True, strict=True)
+        _ensure_column(c, "agent_shared_knowledge", "org_id",
+                       "TEXT NOT NULL DEFAULT ''", allow_copy=True, strict=True)
+        _ensure_column(c, "agent_shared_knowledge", "kind",
+                       "TEXT NOT NULL DEFAULT ''", allow_copy=True, strict=True)
+        _ensure_column(c, "agent_shared_knowledge", "tags",
+                       "TEXT NOT NULL DEFAULT ''", allow_copy=True, strict=True)
+        _ensure_column(c, "agent_shared_knowledge", "applies_to",
+                       "TEXT NOT NULL DEFAULT ''", allow_copy=True, strict=True)
+        _ensure_column(c, "agent_shared_knowledge", "valid_until",
+                       "TEXT NOT NULL DEFAULT ''", allow_copy=True, strict=True)
+        _ensure_column(c, "agent_shared_knowledge", "review_interval_days",
+                       "INTEGER NOT NULL DEFAULT 0", strict=True)
+        _ensure_column(c, "agent_shared_knowledge", "version",
+                       "INTEGER NOT NULL DEFAULT 1", strict=True)
+        _ensure_column(c, "agent_shared_knowledge", "last_reviewed_at",
+                       "TEXT NOT NULL DEFAULT ''", allow_copy=True, strict=True)
+        _ensure_column(c, "agent_shared_knowledge", "owner_id",
+                       "TEXT NOT NULL DEFAULT ''", allow_copy=True, strict=True)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ask_org_lifecycle "
+            "ON agent_shared_knowledge(org_id, kind, lifecycle_status)"
+        )
+        db.commit()
+
+
+register_migration(
+    version="202611183006",
+    name="add-org-knowledge-columns",
+    kind="safe",
+    fn=_fn_add_org_knowledge_columns,
+)
+
+
+def _fn_normalize_org_domain_text() -> None:
+    """D105 第三批：存量 SQLite 库 org 域 id TEXT 化（幂等）。
+
+    背景：organization.id 的 TEXT 主键 DDL 只在全新库生效。存量库建表时仍是
+    ``INTEGER PRIMARY KEY AUTOINCREMENT``，而 create_org 已改为写入 uuid7 字符串
+    （TEXT 主键）——旧库创建组织会直接 ``datatype mismatch``，组织 provisioning
+    全链路不可用。MySQL 环境的 org 域 TEXT 化已由历史迁移盖章，
+    这里只处理 SQLite 旧 DDL（PRAGMA 重建，见 _normalize_org_domain_text）。
+
+    SQLite：organization 整表重建 + 各 org_id 引用列 TEXT 亲和 + 哨兵 0 → ''；
+    若列已 TEXT 且无混型行则零改动（幂等）。
+    """
+    from src.kernel.session_manager import _is_mysql_backend, db as _db, db_lock as _db_lock
+    if _is_mysql_backend():
+        # MySQL：历史迁移已把 org 域改为 VARCHAR/TEXT，无需重复处理。
+        return
+    with _db_lock:
+        _normalize_org_domain_text(_db)
+        _db.commit()
+
+
+register_migration(
+    version="202611183007",
+    name="normalize-org-domain-text",
+    kind="safe",
+    fn=_fn_normalize_org_domain_text,
+)
+
+
+# ===== D105 第四批：组织域用户引用列 TEXT 化（Issue #2150/#2269）=====
+# grape_t_org_context.owner_id/created_by/updated_by、grape_t_org_dispatch.created_by、
+# agent_shared_knowledge.owner_id、managed_repos.linked_by 均存 user id。D105 后
+# 用户主键为 uuid7 字符串，INTEGER 亲和会混型不命中（SQLite）/严格模式写崩 1366
+# （MySQL）。DDL 已声明 TEXT，这里只归一存量库。
+_ORG_USER_TEXT_COLS = (
+    ("grape_t_org_dispatch", "created_by"),
+    ("grape_t_org_context", "owner_id"),
+    ("grape_t_org_context", "created_by"),
+    ("grape_t_org_context", "updated_by"),
+    ("agent_shared_knowledge", "owner_id"),
+    ("managed_repos", "linked_by"),
+)
+
+
+def _normalize_org_user_text_sqlite(conn) -> int:
+    """SQLite 侧：把上述列亲和 INTEGER → TEXT，存量值 CAST 保值，哨兵 0 → ''。
+
+    幂等：全部列已 TEXT 且无混型行/哨兵时返回 0；发生整表重建返回 -1。
+    表/列不存在逐项跳过（新库由 DDL 直接建 TEXT）。
+    """
+    c = conn.cursor()
+    changed = 0
+    rebuilt = False
+    by_table: dict[str, list[str]] = {}
+    for table, col in _ORG_USER_TEXT_COLS:
+        by_table.setdefault(table, []).append(col)
+    for table, cols in by_table.items():
+        tcols = c.execute(f"PRAGMA table_info({table})").fetchall()
+        if not tcols:
+            continue
+        decls = {r[1]: (r[2] or "").strip().upper() for r in tcols}
+        pending = [col for col in cols
+                   if col in decls and decls[col] != "TEXT"]
+        if pending:
+            _rebuild_table_text_columns(c, table, tcols, tuple(pending))
+            rebuilt = True
+            tcols = c.execute(f"PRAGMA table_info({table})").fetchall()
+        present = {r[1] for r in tcols}
+        for col in cols:
+            if col not in present:
+                continue
+            changed += c.execute(
+                f"UPDATE {table} SET {col}=CAST({col} AS TEXT) "
+                f"WHERE typeof({col})!='text'").rowcount
+            changed += c.execute(
+                f"UPDATE {table} SET {col}='' WHERE {col}='0'").rowcount
+    return -1 if rebuilt else changed
+
+
+def _widen_mysql_org_user_text() -> int:
+    """MySQL 侧：INT → VARCHAR(191) 放宽（保留非空约束，哨兵由应用层 '' 兜底）。"""
+    from src.kernel.session_manager import db as _db, db_lock as _db_lock
+
+    nullable = {("managed_repos", "linked_by")}
+    changed = 0
+    with _db_lock:
+        c = _db.cursor()
+        for table, col in _ORG_USER_TEXT_COLS:
+            row = c.execute(
+                "SELECT DATA_TYPE FROM information_schema.columns "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+                (table, col),
+            ).fetchone()
+            if not row:
+                continue
+            if str(row[0] or "").lower() in ("varchar", "char", "text", "mediumtext", "longtext"):
+                continue
+            spec = "VARCHAR(191) DEFAULT ''" if (table, col) in nullable \
+                else "VARCHAR(191) NOT NULL DEFAULT ''"
+            c.execute(f"ALTER TABLE {table} MODIFY {col} {spec}")
+            changed += 1
+        if changed:
+            _db.commit()
+    return changed
+
+
+def _fn_normalize_org_user_text() -> None:
+    from src.kernel.session_manager import (
+        _is_mysql_backend,
+        db as _db,
+        db_lock as _db_lock,
+    )
+
+    if any(_owned_skip(t, "normalize org user text") for t, _ in _ORG_USER_TEXT_COLS):
+        return
+    if _is_mysql_backend():
+        _widen_mysql_org_user_text()
+        return
+    with _db_lock:
+        _normalize_org_user_text_sqlite(_db)
+        _db.commit()
+
+
+register_migration(
+    version="202611183008",
+    name="normalize-org-user-text",
+    kind="safe",
+    fn=_fn_normalize_org_user_text,
+)
+
+
+# ===== 组织上下文快照表（2026-11-16）=====
+def _fn_create_org_context_snapshot() -> None:
+    if _owned_skip("grape_t_org_context_snapshot", "create table"):
+        return
+    with db_lock:
+        c = db.cursor()
+        c.execute(_ORG_CONTEXT_SNAPSHOT_DDL)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_org_context_snapshot_org_dispatch "
+            "ON grape_t_org_context_snapshot(org_id, dispatch_id)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_org_context_snapshot_demand "
+            "ON grape_t_org_context_snapshot(org_id, demand_id)"
+        )
+        db.commit()
+
+
+register_migration(
+    version="202611183009",
+    name="create-org-context-snapshot",
+    kind="safe",
+    fn=_fn_create_org_context_snapshot,
+)
+
+
+# ===== Issue #2150/org pipeline：issue 记录组织上下文快照引用 =====
+def _fn_add_issue_org_snapshot_column() -> None:
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "issue", "org_context_snapshot_id",
+                       "TEXT NOT NULL DEFAULT ''", strict=True)
+        db.commit()
+
+
+register_migration(
+    version="202611183010",
+    name="add-issue-org-context-snapshot",
+    kind="safe",
+    fn=_fn_add_issue_org_snapshot_column,
+)
+
+
+# ===== 组织仓库创建选项：平台 / 所属空间 / 仓库名 / 路径 / 可见性 =====
+def _fn_add_org_repo_create_options() -> None:
+    with db_lock:
+        c = db.cursor()
+        for col, ddl in (
+            ("org_repo_provider", "TEXT DEFAULT ''"),
+            ("org_repo_owner", "TEXT DEFAULT ''"),
+            ("org_repo_name", "TEXT DEFAULT ''"),
+            ("org_repo_path", "TEXT DEFAULT ''"),
+            ("org_repo_private", "INTEGER DEFAULT 1"),
+        ):
+            _ensure_column(c, "organization", col, ddl)
+        db.commit()
+
+
+register_migration(
+    version="202611183011",
+    name="add-org-repo-create-options",
+    kind="safe",
+    fn=_fn_add_org_repo_create_options,
+)
+
+# ===== 组织仓库地图（MD-first） =====
+def _fn_create_org_repo_map_table() -> None:
+    if _owned_skip("grape_t_org_repo_map", "create table"):
+        return
+    from src.domains.mgmt.org_repo_map import ensure_table
+
+    ensure_table()
+
+
+register_migration(
+    version="202611183012",
+    name="create-org-repo-map-table",
+    kind="safe",
+    fn=_fn_create_org_repo_map_table,
+)
+
+
+def _fn_widen_org_issue_ident() -> None:
+    """D105：组织下派/快照的 issue 编号列改 TEXT，支持 Gitee IK* 等非数字 ident。
+
+    SQLite 动态类型无需变更；MySQL 严格模式必须显式 MODIFY，否则写字符串直接 1366。
+    """
+    from src.kernel.session_manager import _is_mysql_backend
+
+    if not _is_mysql_backend():
+        return
+    if _owned_skip("grape_t_org_dispatch", "widen org issue ident"):
+        return
+    with db_lock:
+        c = db.cursor()
+        # Issue #536：MODIFY COLUMN 属破坏性 DDL，统一经 _destructive_ddl 收口；
+        # cleanup 门槛未过（蓝绿共存期落后实例）→ 不盖章，下版本重试。
+        _blocked = False
+        if not _destructive_ddl(
+                c, "ALTER TABLE grape_t_org_dispatch MODIFY COLUMN org_issue_number "
+                   "VARCHAR(191) NOT NULL DEFAULT ''", kind_hint="cleanup"):
+            _blocked = True
+        if not _destructive_ddl(
+                c, "ALTER TABLE grape_t_org_dispatch_target MODIFY COLUMN child_issue_number "
+                   "VARCHAR(191) DEFAULT ''", kind_hint="cleanup"):
+            _blocked = True
+        if not _destructive_ddl(
+                c, "ALTER TABLE grape_t_org_context_snapshot MODIFY COLUMN demand_id "
+                   "VARCHAR(191) NOT NULL DEFAULT ''", kind_hint="cleanup"):
+            _blocked = True
+        db.commit()
+        if _blocked:
+            raise RuntimeError(
+                "widen-org-issue-ident: MODIFY 被 cleanup 门槛拦下"
+                "（本实例版本落后于 meta.min_code_version）→ 本次不盖章，下版本重试")
+
+
+register_migration(
+    version="202611183013",
+    name="widen-org-issue-ident",
+    kind="safe",
+    fn=_fn_widen_org_issue_ident,
+)
 
 
 # ===== 2026-11-18 补正：category_dict 列被域归属守卫静默跳过（线上 1054） =====
@@ -10065,14 +10586,14 @@ register_migration(
 #   ② 按属主域各补一条幂等补正迁移，把已盖章库里缺失的列补上（存量库不会重跑老号）。
 _CATEGORY_COLUMN_PLANS = (
     # (属主域, 表, ((列, DDL), ...), 需重建视图的消费域)
-    # 只留 mgmt：skill 的三列归 runtime 域，已由 202611180001 补（基线自带），
+    # 只留 mgmt：skill 的三列归 runtime 域，已由 202611180003 补（基线自带），
     # 在这里重复补只会与它抢写同一批列（架构复审 F3 / 基线 085f736a5）。
     ("mgmt", "scene_market",
      (("cat_l1_id", "INTEGER DEFAULT 0"), ("cat_l2_id", "INTEGER DEFAULT 0")),
      ("insight", "runtime")),
 )
 
-# skill 的消费域视图：列由 202611180001 补，但 MariaDB 视图列清单在 CREATE 时固化，
+# skill 的消费域视图：列由 202611180003 补，但 MariaDB 视图列清单在 CREATE 时固化，
 # 补列不会让既有视图自愈 —— 读 mgmt/insight 上的 skill 视图仍 1054。本迁移只重建视图。
 _SKILL_VIEW_OWNER = "runtime"
 _SKILL_VIEW_TABLE = "skill"
@@ -10175,4 +10696,102 @@ register_migration(
     kind="safe",
     domains=("mgmt", "runtime"),
     fn=_fn_normalize_org_domain_text,
+)
+
+
+# ===== 2026-11-19 补正：org 新表前缀 + UUID 主键（A6/A12 复审整改）=====
+# 本 PR 新增的 6 张组织表最初按 org_* 命名、主键为 INTEGER AUTOINCREMENT。
+# 规则 A6 要求 grape 主控系统新增表统一 grape_t_xxx；A12 要求新增对象表唯一键
+# 不得自增（用 32 位 uuid）。新库由上面的建表迁移直接落正确形态；存量库
+# （202611183001~202611183013 已盖章）走本迁移：先按旧名→新名改名，再逐表把
+# 主键重建为 TEXT（UuidPkMigration 自省，存量整型 id CAST 字符串化保值），
+# 最后把引用列 dispatch_id / issue.org_context_snapshot_id 放宽为字符串。
+# 幂等：旧表不存在或新表已改名时跳过；已是 TEXT 主键时 UuidPkMigration 直接返回。
+_ORG_TABLE_RENAMES = (
+    ("org_dispatch", "grape_t_org_dispatch"),
+    ("org_dispatch_target", "grape_t_org_dispatch_target"),
+    ("org_dispatch_aggregate", "grape_t_org_dispatch_aggregate"),
+    ("org_context_snapshot", "grape_t_org_context_snapshot"),
+    ("org_context", "grape_t_org_context"),
+    ("org_repo_map", "grape_t_org_repo_map"),
+)
+
+
+def _fn_rename_org_tables_and_uuid_pk() -> None:
+    from src.kernel.session_manager import _is_mysql_backend
+
+    mysql = _is_mysql_backend()
+    with db_lock:
+        c = db.cursor()
+        for old, new in _ORG_TABLE_RENAMES:
+            if mysql:
+                old_ok = c.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s", (old,)
+                ).fetchone()[0]
+                new_ok = c.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s", (new,)
+                ).fetchone()[0]
+            else:
+                old_ok = bool(c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (old,)).fetchone())
+                new_ok = bool(c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (new,)).fetchone())
+            if old_ok and not new_ok:
+                c.execute(f"ALTER TABLE {old} RENAME TO {new}")
+                log.info(f"org table rename: {old} -> {new}")
+        db.commit()
+
+    # 主键整型→TEXT（SQLite 重建 / MySQL MODIFY；已是目标形态则零写入）
+    from src.api.uuid_pk_migration import UuidPkMigration
+
+    for _old, new in _ORG_TABLE_RENAMES:
+        UuidPkMigration(pk_table=new).run()
+
+    if mysql:
+        with db_lock:
+            c = db.cursor()
+            # Issue #536：MODIFY COLUMN 属破坏性 DDL，统一经 _destructive_ddl 收口。
+            # 缺表/已是字符串族由 _destructive_ddl 内部吞异常继续（幂等可重试）；
+            # cleanup 门槛未过 → 不盖章，下版本重试。
+            _blocked = False
+            for tbl in ("grape_t_org_dispatch_target",
+                        "grape_t_org_dispatch_aggregate",
+                        "grape_t_org_context_snapshot"):
+                if not _destructive_ddl(
+                        c, f"ALTER TABLE {tbl} MODIFY COLUMN dispatch_id VARCHAR(36) NOT NULL",
+                        kind_hint="cleanup"):
+                    _blocked = True
+            if not _destructive_ddl(
+                    c, "ALTER TABLE issue MODIFY COLUMN org_context_snapshot_id "
+                       "VARCHAR(36) NOT NULL DEFAULT ''", kind_hint="cleanup"):
+                _blocked = True
+            db.commit()
+            if _blocked:
+                raise RuntimeError(
+                    "rename-org-tables-and-uuid-pk: MODIFY 被 cleanup 门槛拦下"
+                    "（本实例版本落后于 meta.min_code_version）→ 本次不盖章，下版本重试")
+    else:
+        with db_lock:
+            c = db.cursor()
+            info = {r[1]: (r[2] or "").lower()
+                    for r in c.execute("PRAGMA table_info(issue)").fetchall()}
+            if info.get("org_context_snapshot_id") not in (None, "text"):
+                _rebuild_table_text_columns(
+                    c, "issue", c.execute("PRAGMA table_info(issue)").fetchall(),
+                    ("org_context_snapshot_id",))
+                c.execute(runtime_mig.UPDATE_ISSUE_ORG_CONTEXT_SNAPSHOT_ID_SENTINEL)
+                db.commit()
+                log.info("org uuid-pk: issue.org_context_snapshot_id -> TEXT (SQLite)")
+
+
+register_migration(
+    version="202611191000",
+    name="rename-org-tables-and-uuid-pk",
+    kind="safe",
+    domains=("mgmt", "runtime"),
+    fn=_fn_rename_org_tables_and_uuid_pk,
 )

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from contextlib import contextmanager
 
 from src.kernel.config import log
@@ -18,6 +19,39 @@ from src.kernel.issue_ident import native_issue_number  # Issue #3055
 from typing import Any
 
 from src.kernel import db_registry
+
+
+@contextmanager
+def _mgmt_cursor(write: bool = False):
+    """mgmt 域游标；单库/测试下回退到进程主库。"""
+    conn = None
+    fallback = False
+    try:
+        conn = db_registry.domain_db("mgmt")
+    except Exception:
+        conn = None
+    if conn is None:
+        from src.kernel import session_manager
+
+        conn = session_manager.db
+        fallback = True
+    c = conn.cursor()
+    try:
+        yield c
+        if write and fallback:
+            conn.commit()
+    except Exception:
+        if write and fallback:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
 
 # 表 → 允许读取的列（按需增补；新增列必须先登记）
 _TABLES: dict[str, set[str]] = {
@@ -28,6 +62,12 @@ _TABLES: dict[str, set[str]] = {
         "bot_token_status", "host_vcs_username", "host_step", "host_error", "host_updated_at",
         "bot_gitcode_token", "gitcode_webhook_token", "bot_github_token", "github_webhook_token",
     },
+    "organization": {"id", "is_personal", "org_scene_id"},
+    "devops_pipeline_scene": {
+        "id", "scene_id", "repo_key", "scene_type", "org_id", "is_active",
+        "name", "display_name", "nodes_json",
+    },
+    "grape_t_org_dispatch_aggregate": {"dispatch_id", "terminal_status", "status", "comment_posted"},
     "agent_shared_knowledge": {
         "id", "scope", "repo_key", "agent_type", "issue_num", "file_path", "status",
         "source_seq", "created_by", "created_at", "obs_key", "content_hash", "updated_at",
@@ -90,9 +130,24 @@ def fetch_rows(table: str, columns: list[str], where: str = "", params: tuple = 
         sql += f" ORDER BY {order_by}"
     if limit:
         sql += f" LIMIT {int(limit)}"
-    with db_registry.cursor("mgmt") as c:
-        c.execute(sql, params)
+    if db_registry.uses_own_dsn("mgmt"):
+        with db_registry.cursor("mgmt") as c:
+            c.execute(sql, params)
+            return [tuple(r) for r in c.fetchall()]
+    # 单库/测试拓扑：本域无自有 DSN，lib 连接不可用 → 回退进程主库（G-2）。
+    # 主库为 SQLite 时占位符是 `?`；单库 MySQL 仍用 `%s`。
+    from src.kernel import session_manager
+    from src.kernel.session_manager import _is_mysql_backend
+
+    c = session_manager.db.cursor()
+    try:
+        c.execute(sql if _is_mysql_backend() else sql.replace("%s", "?"), params)
         return [tuple(r) for r in c.fetchall()]
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
 
 
 def fetch_one(table: str, columns: list[str], where: str = "", params: tuple = (),
@@ -149,6 +204,114 @@ def get_repo_org_id(repo_key: str) -> Any:
     """仓库所属 org（managed_repos 无 id 列，按 repo_key 唯一键取）。"""
     row = fetch_one("managed_repos", ["org_id"], "repo_key=%s", (repo_key,), "repo_key")
     return row[0] if row else None
+
+
+def get_org_is_personal(org_id: str) -> bool:
+    """组织是否为个人空间（跨域只读口；无记录按 False）。"""
+    if not org_id:
+        return False
+    row = fetch_one("organization", ["is_personal"], "id=%s", (org_id,))
+    return bool(row[0]) if row else False
+
+
+def get_scene_org_metadata(scene_id: str, repo_key: str = "") -> dict[str, str]:
+    """场景的组织属性（scene_type/org_id）；仅取启用场景。"""
+    where = "scene_id=%s"
+    params: list = [scene_id]
+    if repo_key:
+        where += " AND repo_key=%s"
+        params.append(repo_key)
+    where += " AND is_active=1"
+    row = fetch_one("devops_pipeline_scene", ["scene_type", "org_id"], where, tuple(params))
+    return {
+        "scene_type": str(row[0] or "") if row else "",
+        "org_id": str(row[1] or "") if row else "",
+    }
+
+
+def migrate_org_scene_type() -> None:
+    """存量组织场景补写 scene_type='org'（mgmt 域内迁移）。"""
+    with _mgmt_cursor(write=True) as c:
+        org_scene_ids = [
+            r[0] for r in c.execute(
+                "SELECT org_scene_id FROM organization "
+                "WHERE org_scene_id IS NOT NULL AND org_scene_id<>''").fetchall()
+        ]
+        legacy = "(scene_type IS NULL OR scene_type='' OR scene_type='standard')"
+        prefix = "scene_id LIKE 'custom-org-%'"
+        if org_scene_ids:
+            marks = ",".join("?" * len(org_scene_ids))
+            c.execute(
+                f"UPDATE devops_pipeline_scene SET scene_type='org' "
+                f"WHERE {legacy} AND ({prefix} OR scene_id IN ({marks}))",
+                tuple(org_scene_ids),
+            )
+        else:
+            c.execute(
+                f"UPDATE devops_pipeline_scene SET scene_type='org' "
+                f"WHERE {legacy} AND {prefix}")
+
+
+def seed_official_scene_market(pipelines_path: str) -> int:
+    """从 configs/pipelines.json 增量种入官方场景模板（mgmt 域内）。"""
+    import json as _json
+    import os as _os
+
+    if not _os.path.exists(pipelines_path):
+        return 0
+    with open(pipelines_path, "r", encoding="utf-8") as fh:
+        data = _json.load(fh)
+    imported = 0
+    with _mgmt_cursor(write=True) as c:
+        for sid, scene in (data.get("scenes") or {}).items():
+            nodes = _json.dumps(scene.get("nodes", []), ensure_ascii=False)
+            scope = "org" if sid == "org" else "official"
+            if sid == "org":
+                c.execute(
+                    "UPDATE scene_market SET scope='org', display_name=?, "
+                    "description=?, nodes_json=?, onboarding=?, updated_at=datetime('now') "
+                    "WHERE name=? AND source='official' AND scope='official'",
+                    (scene.get("name", sid), scene.get("description", ""), nodes,
+                     scene.get("onboarding", "repo-onboarding"), sid),
+                )
+            c.execute(
+                "INSERT OR IGNORE INTO scene_market "
+                "(name, display_name, version, description, market_description, "
+                "category_id, is_featured, like_count, source, source_user_id, "
+                "recommended_template, nodes_json, onboarding, is_active, scope) "
+                "VALUES (?,?, '1.0.0', '', ?, 1, 0, 0, 'official', 0, '', ?, ?, 1, ?)",
+                (sid, scene.get("name", sid), scene.get("name", sid), nodes,
+                 scene.get("onboarding", "repo-onboarding"), scope),
+            )
+            if int(getattr(c, "rowcount", 0) or 0) > 0:
+                imported += 1
+    return imported
+
+
+def get_dispatch_aggregate_comment(dispatch_id: str, terminal_status: str) -> int:
+    """组织下派聚合评论是否已写（跨域只读口）。"""
+    row = fetch_one(
+        "grape_t_org_dispatch_aggregate", ["comment_posted"],
+        "dispatch_id=%s AND terminal_status=%s",
+        (str(dispatch_id), str(terminal_status)),
+    )
+    return int(row[0] or 0) if row else 0
+
+
+def mark_dispatch_aggregate_comment(dispatch_id: str, terminal_status: str) -> None:
+    """记录组织下派聚合评论已写（跨域写口，幂等）。"""
+    with _mgmt_cursor(write=True) as c:
+        c.execute(
+            "INSERT OR IGNORE INTO grape_t_org_dispatch_aggregate "
+            "(id, dispatch_id, terminal_status, status, comment_posted) "
+            "VALUES (?,?,?,'pending',1)",
+            (uuid.uuid4().hex, str(dispatch_id), str(terminal_status)),
+        )
+        c.execute(
+            "UPDATE grape_t_org_dispatch_aggregate SET comment_posted=1, "
+            "updated_at=datetime('now') WHERE dispatch_id=? AND terminal_status=?",
+            (str(dispatch_id), str(terminal_status)),
+        )
 
 
 def list_user_ids_by_open_id(open_id: str) -> list[str]:
@@ -826,7 +989,10 @@ __all__ = ['installation_active_row', 'installation_config_by_app', 'installatio
            "feishu_name_by_platform_column", "repo_bot_usernames_any",
            # 仓库所属 org（runtime/routes/tasks.py；任意拓扑：自有 DSN / 单库同一句）
            "repo_org_id_any",
-           "health"]
+           "health",
+           # 组织下派快照读取口（A10 整改：runtime 引擎经 public 读取）
+           "load_org_snapshot_files", "get_org_dispatch_snapshot",
+           "org_dispatch_terminal_statuses"]
 
 
 # ---------- 命名查询白名单（P4 读路径：runtime 域代码读 mgmt 表） ----------
@@ -6254,6 +6420,13 @@ def refresh_gitcode_oauth_token(*args, **kwargs):
     return _impl(*args, **kwargs)
 
 
+def org_by_id(*args, **kwargs):
+    """按 org_id 取组织行（不存在返回 None）。"""
+    from src.domains.mgmt.user.org_db import get_org as _impl
+
+    return _impl(*args, **kwargs)
+
+
 def org_by_slug(*args, **kwargs):
     from src.domains.mgmt.user.org_db import get_org_by_slug as _impl
 
@@ -6276,3 +6449,25 @@ def org_member(*args, **kwargs):
     from src.domains.mgmt.user.org_db import is_org_member as _impl
 
     return _impl(*args, **kwargs)
+
+
+# ── 组织下派快照读取口（A10 整改：runtime 引擎不得直连 mgmt 内部模块）──────
+def load_org_snapshot_files(snapshot_id: str) -> dict[str, str]:
+    """读取组织下派上下文快照正文（manifest 中的文件内容）。"""
+    from src.domains.mgmt.org_context_snapshot import load_snapshot_files as _impl
+
+    return _impl(snapshot_id)
+
+
+def get_org_dispatch_snapshot(dispatch_id: str) -> dict[str, Any]:
+    """组织下派批次只读快照（dispatch + targets）。"""
+    from src.domains.mgmt.org_dispatch import get_dispatch_snapshot as _impl
+
+    return _impl(dispatch_id)
+
+
+def org_dispatch_terminal_statuses() -> tuple[str, ...]:
+    """组织下派终态集合（供 runtime 引擎判定聚合是否可收口）。"""
+    from src.domains.mgmt.org_dispatch import DISPATCH_TERMINAL as _impl
+
+    return tuple(_impl)

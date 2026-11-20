@@ -51,8 +51,14 @@ check('isAbnormalEngine 以后端 health_abnormal 为准', function () {
 
 check('abnormalBorderColor 与应用规则', function () {
   const b = fnBody('abnormalBorderColor');
-  assert.ok(/h === 'about_to_gc' \|\| h === 'offline'\) return 'var\(--r\)'/.test(b), '红/灰态恒红');
-  assert.ok(/rt\.health_abnormal === true \? 'var\(--r\)' : ''/.test(b), 'false 时不给红框');
+  // 2026-11-20：红色由字面量 var(--r) 收口到语义变量 --bar-bad
+  // （浅色档 = var(--r) 纯红，与原口径等价；暗色档压暗到 color-mix(--r 55%, 卡片)，
+  //  否则深底上 #ff453a 整条 3px 纯红刺眼）。契约不变：红/灰态恒红、false 不给红框。
+  assert.ok(
+    /h === 'about_to_gc' \|\| h === 'offline'\) return 'var\(--bar-bad\)'/.test(b),
+    '红/灰态恒红（走 --bar-bad 语义变量）',
+  );
+  assert.ok(/rt\.health_abnormal === true \? 'var\(--bar-bad\)' : ''/.test(b), 'false 时不给红框');
 });
 
 check('卡片边框消费异常判定（两处传入 rt）', function () {

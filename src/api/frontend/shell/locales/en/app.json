@@ -357,7 +357,10 @@
     "back_to_website": "Back to website",
     "add_new": "Add new repository",
     "pick_first": "Pick a repository from the dropdown first",
-    "forbidden": "No access to this repository; back to the repository lobby"
+    "forbidden": "No access to this repository; back to the repository lobby",
+    "org_repo": "Organization repo",
+    "org_group": "Organization",
+    "org_project": "Organization project"
   },
   "toast": {
     "theme_switched_default": "Switched to Default theme",

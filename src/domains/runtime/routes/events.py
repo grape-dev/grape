@@ -289,21 +289,63 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
             "output": _structured,
             "logs": agent_logs or [],
         }
-    # 前后同 agent_type 同仓库事件 seq（供前端箭头导航，Issue #224: 增加 repo_key 过滤避免跨仓库导航）
+    # 前后导航 seq（供前端箭头）
+    # Issue #224 原口径 = 同 repo + 同 agent_type。实测在真实仓库里等于「跨需求乱跳」：
+    # 同一 agent 在不同需求之间来回串，用户在 EVENT 详情页点箭头根本不知道会去哪。
+    # 2026-11-20 主人口径：优先「同需求」（repo_key + issue_id）内的前后事件，且跨 agent_type
+    # 一起串（一个需求的事件本来就是 vod→issue→coding→qa→sre 一条链，串起来才叫"同需求"）。
+    # issue_id 为空（""/#0，非需求事件，如手工/管理类事件）时回退 #224 旧口径，避免把无关事件串成链。
     try:
         agent_type = row[5] or ""
         repo_key = row[1] or ""
+        issue_scope = (row[2] or "").strip()
+        if issue_scope in ("", "#0", "0"):
+            issue_scope = ""
+        prev_seq = next_seq = None
+        prev_agent = next_agent = ""
+        nav_scope = "agent"
         with db_lock:
             c2 = db.cursor()
-            c2.execute("SELECT MAX(seq) FROM events WHERE seq < ? AND agent_type=? AND repo_key=?", (seq, agent_type, repo_key))
-            prev_seq = c2.fetchone()[0]
-            c2.execute("SELECT MIN(seq) FROM events WHERE seq > ? AND agent_type=? AND repo_key=?", (seq, agent_type, repo_key))
-            next_seq = c2.fetchone()[0]
+            if issue_scope:
+                nav_scope = "issue"
+                # 历史行可能存 "#123"，也可能存裸 "123" —— 两种形态都算同一需求。
+                # 两种都查：当前行是裸形态时，也要能命中 #N 形态的历史行（反之亦然）。
+                _bare = issue_scope.lstrip("#")
+                _keys = tuple(dict.fromkeys((issue_scope, "#" + _bare, _bare)))
+                _phs = ",".join("?" for _ in _keys)
+                c2.execute(
+                    "SELECT seq, agent_type FROM events WHERE seq < ? AND repo_key=? "
+                    f"AND issue_id IN ({_phs}) ORDER BY seq DESC LIMIT 1",
+                    (seq, repo_key, *_keys))
+                _r = c2.fetchone()
+                if _r:
+                    prev_seq, prev_agent = _r[0], _r[1] or ""
+                c2.execute(
+                    "SELECT seq, agent_type FROM events WHERE seq > ? AND repo_key=? "
+                    f"AND issue_id IN ({_phs}) ORDER BY seq ASC LIMIT 1",
+                    (seq, repo_key, *_keys))
+                _r = c2.fetchone()
+                if _r:
+                    next_seq, next_agent = _r[0], _r[1] or ""
+            else:
+                c2.execute("SELECT MAX(seq) FROM events WHERE seq < ? AND agent_type=? AND repo_key=?", (seq, agent_type, repo_key))
+                prev_seq = c2.fetchone()[0]
+                c2.execute("SELECT MIN(seq) FROM events WHERE seq > ? AND agent_type=? AND repo_key=?", (seq, agent_type, repo_key))
+                next_seq = c2.fetchone()[0]
         result["prev_seq"] = prev_seq if prev_seq else 0
         result["next_seq"] = next_seq if next_seq else 0
+        # 目标事件的 agent_type / 判定口径：前端 tooltip 要用「上一条是谁」而不是当前事件的 agent
+        result["prev_agent"] = prev_agent
+        result["next_agent"] = next_agent
+        result["nav_scope"] = nav_scope
+        result["nav_issue_id"] = issue_scope
     except Exception:
         result["prev_seq"] = 0
         result["next_seq"] = 0
+        result["prev_agent"] = ""
+        result["next_agent"] = ""
+        result["nav_scope"] = "agent"
+        result["nav_issue_id"] = ""
     # M4：archive 结构化产出——优先 events.structured_output（weekly-05）；无则回退 event.json 段
     if "archive" not in result:
         try:

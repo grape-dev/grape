@@ -26,6 +26,7 @@ except ImportError:  # pragma: no cover - worker 无 web 框架
     Request = Any  # type: ignore[assignment,misc]
 
 from src.kernel import db_registry
+from src.kernel.issue_ident import native_issue_number
 
 
 def _rows(cur) -> list[dict[str, Any]]:
@@ -264,6 +265,160 @@ def task_brief(task_id: int) -> tuple | None:
         row = c.fetchone()
         return tuple(row) if row else None
 
+
+def issue_brief(repo_key: str, issue_number) -> dict[str, Any] | None:
+    """单 Issue 基础信息（跨域只读口，供 mgmt 组织编排使用）。"""
+    num = native_issue_number(issue_number)
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT id, repo_key, issue_number, title, task_description, status, stage, "
+            "scene_id, parent_issue_number FROM issue "
+            "WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
+            (repo_key, num),
+        )
+        row = c.fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row[0] or 0),
+        "repo_key": str(row[1] or ""),
+        "issue_number": native_issue_number(row[2]),
+        "title": str(row[3] or ""),
+        "task_description": str(row[4] or ""),
+        "status": str(row[5] or ""),
+        "stage": str(row[6] or ""),
+        "scene_id": str(row[7] or ""),
+        "parent_issue_number": native_issue_number(row[8]),
+    }
+
+
+def recent_issues(repo_key: str, limit: int = 100) -> list[dict[str, Any]]:
+    """某仓库最近 Issue（跨域只读口，供组织上下文渲染）。"""
+    limit = max(1, min(int(limit or 100), 500))
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT issue_number, title, task_description, status, stage, created_at "
+            "FROM issue WHERE repo_key=? ORDER BY issue_number DESC LIMIT ?",
+            (repo_key, limit),
+        )
+        rows = c.fetchall()
+    return [
+        {
+            "issue_number": native_issue_number(r[0]),
+            "title": str(r[1] or ""),
+            "description": str(r[2] or ""),
+            "status": str(r[3] or ""),
+            "stage": str(r[4] or ""),
+            "created_at": str(r[5] or ""),
+        }
+        for r in rows
+    ]
+
+
+def latest_task_status(repo_key: str, issue_id: str) -> str:
+    """某 Issue 最新 agent_task 状态；无任务返回空串。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT status FROM agent_tasks WHERE repo_key=? AND issue_id=? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (repo_key, str(issue_id)),
+        )
+        row = c.fetchone()
+    return str(row[0] or "") if row else ""
+
+
+def latest_event_brief(repo_key: str, issue_id: str) -> dict[str, Any] | None:
+    """某 Issue 最新事件（seq/event_type/status/result）。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT seq, event_type, status, result FROM events "
+            "WHERE repo_key=? AND issue_id=? ORDER BY seq DESC LIMIT 1",
+            (repo_key, str(issue_id)),
+        )
+        row = c.fetchone()
+    if not row:
+        return None
+    return {
+        "seq": int(row[0] or 0),
+        "event_type": str(row[1] or ""),
+        "status": str(row[2] or ""),
+        "result": str(row[3] or ""),
+    }
+
+
+def event_payload(seq: int) -> dict[str, Any] | None:
+    """按 seq 取事件 payload（跨域只读口）。"""
+    with _any_cursor() as c:
+        c.execute("SELECT payload FROM events WHERE seq=? LIMIT 1", (int(seq),))
+        row = c.fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        data = json.loads(row[0])
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def has_inflight_repo(repo_key: str) -> bool:
+    """某仓库是否仍有在途任务（解绑/迁移前守卫）。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT 1 FROM agent_tasks WHERE repo_key=? "
+            "AND status IN ('queued','dispatched','running','pending_self_report') LIMIT 1",
+            (repo_key,),
+        )
+        return bool(c.fetchone())
+
+
+def has_inflight(repo_key: str, issue_id: str) -> bool:
+    """Issue 是否还有在途任务/事件（避免把正在重试的目标误判失败）。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT 1 FROM agent_tasks WHERE repo_key=? AND issue_id=? "
+            "AND status IN ('pending','queued','dispatched','running') LIMIT 1",
+            (repo_key, str(issue_id)),
+        )
+        if c.fetchone():
+            return True
+        c.execute(
+            "SELECT 1 FROM events WHERE repo_key=? AND issue_id=? "
+            "AND status IN ('queued','running') LIMIT 1",
+            (repo_key, str(issue_id)),
+        )
+        return bool(c.fetchone())
+
+
+def cancel_inflight_tasks(repo_key: str, issue_id: str) -> int:
+    """取消某 Issue 在途任务（跨域写；返回影响行数）。"""
+    with _any_cursor(write=True) as c:
+        c.execute(
+            "UPDATE agent_tasks SET status='cancelled' WHERE repo_key=? AND issue_id=? "
+            "AND status IN ('queued','dispatched','running')",
+            (repo_key, str(issue_id)),
+        )
+        return int(c.rowcount or 0)
+
+
+def inflight_tasks(repo_key: str, issue_id: str) -> list[tuple]:
+    """某 Issue 在途任务 (id, event_seq)，供跨域取消/重试使用。"""
+    with _any_cursor() as c:
+        c.execute(
+            "SELECT id, event_seq FROM agent_tasks WHERE repo_key=? AND issue_id=? "
+            "AND status IN ('queued','dispatched','running')",
+            (repo_key, str(issue_id)),
+        )
+        return [tuple(r) for r in c.fetchall()]
+
+
+def clear_event_active_guard(repo_key: str, issue_id: str) -> int:
+    """清某 Issue 的活跃事件守卫（跨域写；返回影响行数）。"""
+    with _any_cursor(write=True) as c:
+        c.execute(
+            "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=?",
+            (repo_key, str(issue_id)),
+        )
+        return int(c.rowcount or 0)
 
 # 相关技能候选池大小：热度前 N 进打分池（与 mgmt 路由 _RELATED_POOL_SIZE 同值；
 # 全库技能 ~10² 量级，300 覆盖全部活跃技能。QA B2：裸数字须具名+来源）。
@@ -1850,7 +2005,10 @@ __all__ = ['ensure_issue_card', 'update_issue_card_fields', 'ensure_agent_sessio
            # 账号注销前置：在制任务数（src/domains/mgmt/routes/grape_auth.py；agent_tasks 本域）
            "inflight_task_count_any",
            # 派发前 runtime_id 有效性（src/api/pipeline_executor.py；agent_runtimes 本域）
-           "runtime_heartbeat_alive_any"]
+           "runtime_heartbeat_alive_any",
+           # 组织下派/上下文跨域写口（A10/A11 整改）
+           "cancel_issue_core", "cancel_task", "cancel_direct_task", "run_pipeline",
+           "run_git", "clone_auth_scheme_for", "storage_save_bytes", "storage_delete_object"]
 
 
 # ---------- N13：跨域写补偿应用端点（幂等分发） ----------
@@ -2665,8 +2823,10 @@ _ANY_QUERIES: dict[str, str] = {
         "SELECT payload, status FROM events WHERE repo_key=? AND issue_id=? "
         "AND event_type='a2a_event'"),
     "event_a2a_created_agent": (
+        # Issue #2118 复审：failed 的 a2a_event 不算「已交棒证据」——自动推进/重排
+        # 事件派发失败时仍会被巡检当成交棒成功，导致真断链被漏报、Issue 静默停链。
         "SELECT created_at, agent_type FROM events WHERE repo_key=? AND issue_id=? "
-        "AND event_type='a2a_event'"),
+        "AND event_type='a2a_event' AND COALESCE(status,'') != 'failed'"),
     # A2A 派发门禁（api/a2a_dispatch_guard.py）读路径：events / event_skipped 归本域。
     # 列序与原 SQL 逐字一致（调用方按下标解包）；谓词/排序/条数上限照抄原语句。
     "a2a_window_dedup_rows": (
@@ -7658,3 +7818,77 @@ def is_plugin_mode() -> bool:
     from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode as _impl
 
     return _impl()
+
+
+# ── 组织下派/上下文场景的跨域写口（A10/A11 整改，2026-11-19）──────────────
+# mgmt 的组织编排需要终止子任务、重触发流水线、把正文写 OBS、复用代码仓
+# git 工作副本。此前直接 import runtime 内部实现（issue_cancel / engine.service /
+# event_pipeline / storage / engine.repogit 私有函数），跨域契约隐式化。
+# 这里收敛为 public 具名入口，实现仍只有一份；调用方只依赖本模块。
+
+
+def cancel_issue_core(issue_id, *, user_id=None):
+    """取消一个 Issue 及其在途/未完成任务（与 runtime 内部同语义）。"""
+    from src.domains.runtime.issue_cancel import cancel_issue_core as _impl
+
+    return _impl(issue_id, user_id=user_id)
+
+
+def cancel_task(task_id) -> None:
+    """把指定 agent 任务置为 cancelled（引擎侧取消入口）。"""
+    from src.domains.runtime.engine.service import cancel_task as _impl
+
+    return _impl(task_id)
+
+
+def cancel_direct_task(seq: int) -> bool:
+    """取消排队/运行中的 direct 任务（按事件 seq）。"""
+    from src.domains.runtime.pipeline.event_pipeline import cancel_direct_task as _impl
+
+    return _impl(seq)
+
+
+def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
+                 repo_key_override: str = "", replay: bool = False) -> dict:
+    """事件处理管道入口（内部触发场景复用，Issue #2118 重试路径）。"""
+    from src.domains.runtime.pipeline.event_pipeline import run_pipeline as _impl
+
+    return _impl(raw_body, headers, account=account,
+                 repo_key_override=repo_key_override, replay=replay)
+
+
+def run_git(args: list, token: str = "", timeout: int = 900,
+            scheme: str = "x_access_token"):
+    """以平台鉴权方式执行 git 命令（返回 CompletedProcess 或 None）。"""
+    from src.domains.runtime.engine.repogit import _run_git as _impl
+
+    return _impl(args, token=token, timeout=timeout, scheme=scheme)
+
+
+def clone_auth_scheme_for(repo_key: str) -> str:
+    """仓库 clone 使用的鉴权注入方案标识（gitcode/github 各有口径）。"""
+    from src.domains.runtime.engine.repogit import _clone_auth_scheme_for as _impl
+
+    return _impl(repo_key)
+
+
+def storage_save_bytes(obs_key: str, data: bytes) -> bool:
+    """写对象存储；未配置存储后端时返回 False（调用方降级本地）。"""
+    from src.domains.runtime.storage import get_storage
+
+    storage = get_storage()
+    if storage is None:
+        return False
+    storage.save_bytes(obs_key, data)
+    return True
+
+
+def storage_delete_object(obs_key: str) -> bool:
+    """删除对象存储对象（幂等）；未配置存储后端时返回 False。"""
+    from src.domains.runtime.storage import get_storage
+
+    storage = get_storage()
+    if storage is None:
+        return False
+    storage.delete_object(obs_key)
+    return True

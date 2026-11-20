@@ -110,12 +110,21 @@ def build_app(
 
     _attach_request_log(app)
 
-    # 可选 tracing：GRAPE_OTLP_ENDPOINT 启用后，FastAPI/requests 自动埋点，
-    # span 经 Alloy:4317 转发到 Tempo（未启用时零开销）
+    # 可选 tracing，两条路径互斥、新路径优先：
+    #  - 新路径 OTEL_EXPORTER_OTLP_ENDPOINT → src/kernel/otel.py：FastAPI + requests
+    #    + db.query + task.* 全套 span（service.name 认 GRAPE_TRACE_SERVICE）；
+    #  - 旧路径 GRAPE_OTLP_ENDPOINT → insight/observability/tracing.py：只有 FastAPI
+    #    + requests，没有 DB/任务 span（保留兼容，别的环境仍在用）。
     try:
-        from src.domains.insight.observability.tracing import setup_tracing, instrument_fastapi_app
-        setup_tracing(service_default=f"grape-{title.lower().split(' ')[0]}")
-        instrument_fastapi_app(app)
+        from src.kernel.otel import otel_enabled as _kernel_otel_enabled
+        from src.kernel.otel import instrument_fastapi as _kernel_instrument
+        _role = title.lower().split(" ")[0]
+        if _kernel_otel_enabled():
+            _kernel_instrument(app, f"grape-{_role}")
+        else:
+            from src.domains.insight.observability.tracing import setup_tracing, instrument_fastapi_app
+            setup_tracing(service_default=f"grape-{_role}")
+            instrument_fastapi_app(app)
     except Exception as e:
         log.warning(f"tracing setup skipped: {e}")
 

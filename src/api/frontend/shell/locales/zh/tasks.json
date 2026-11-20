@@ -34,6 +34,9 @@
   "cancel_task_message": "确认取消此需求？取消后可恢复。",
   "task_done_toast": "需求已完成",
   "task_cancelled_toast": "需求已取消",
+  "reopen_task": "退回处理中",
+  "reopen_task_message": "把该已完成需求退回「处理中」？完成时间与完成原因会被清除，流水线不会自动重派（需要在事件页手动重派才会继续跑），操作会记录审计日志。仓库 Issue 不会被重新打开。",
+  "task_reopened_toast": "需求已退回处理中",
   "task_resumed_toast": "需求已恢复",
   "operation_failed": "操作失败: {{msg}}",
   "processing": "处理中…",
@@ -164,5 +167,15 @@
   "board": {
     "refresh_failed_keep": "看板刷新失败，已保留上次数据",
     "retry": "重试"
+  },
+  "dispatch": {
+    "title": "任务派发详情",
+    "batch": "批次",
+    "targets": "个目标",
+    "repo": "仓库",
+    "scene": "场景",
+    "issue": "Issue",
+    "status": "状态",
+    "empty": "尚未派发"
   }
 }

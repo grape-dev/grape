@@ -86,7 +86,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       event_type: str = "",
                       subtask_mode: int = -1,
                       sender: str = "",
-                      org_id: int = 0,
+                      org_id: str = "",
                       owner_user_id: int = 0) -> int | None:
     """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
 

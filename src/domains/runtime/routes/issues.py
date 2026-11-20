@@ -1168,38 +1168,9 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
 @router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="Cancel issue (stop pipeline)", description="Developer cancels the requirement from any stage: terminates agents and stops the pipeline.")
 async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """开发者取消需求：任何阶段可取消，Agent 终止 + 流水线停止。"""
-    from src.kernel.session_manager import db, db_lock
-    with db_lock:
-        c = _rt_db.cursor()
-        c.execute("SELECT status, repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
-                  (issue_id, user["id"]))
-        row = c.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-        status, repo_key, issue_number = row[0], row[1], row[2]
-        _issue_id = f"#{issue_number}" if issue_number else ""
-        if status == 'cancelled':
-            # Issue #1741：主卡已是 cancelled 时仍对同一需求的历史多行做幂等收口，
-            # 防止残留 awaiting_input 行继续出现在待澄清列表；并同步终止其残留 agent_tasks。
-            if repo_key and issue_number:
-                _cancel_issue_agents(c, repo_key, _issue_id)
-                cancel_issue_rows(c, repo_key, issue_number)
-                _rt_db.commit()
-            return {"ok": True, "already_cancelled": True}
-        if status == 'completed':
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "已完成需求不可取消"})
-        _cancelled_agents = _cancel_issue_agents(c, repo_key, _issue_id)
-        # Issue #1741：同一 repo_key+issue_number 的历史多行全量幂等取消，
-        # 避免只改单行时同需求其它行仍停留在待澄清列表；已完成/已取消行保持终态不受影响。
-        if repo_key and issue_number:
-            cancel_issue_rows(c, repo_key, issue_number)
-        else:
-            c.execute(
-                "UPDATE issue SET status='cancelled', completed_reason='user_cancelled', completed_at=datetime('now') WHERE id=?",
-                (issue_id,))
-        _rt_db.commit()
-    log.info(f"Issue #{issue_id} cancelled by user (agents={_cancelled_agents})")
-    return {"ok": True, "issue_id": issue_id, "status": "cancelled", "agents_cancelled": _cancelled_agents}
+    from src.domains.runtime.issue_cancel import cancel_issue_core
+
+    return cancel_issue_core(issue_id, user_id=user["id"])
 
 @router.post("/{issue_id}/resume", operation_id="issues_resume", summary="Resume cancelled issue", description="Resumes a cancelled requirement from its pre-cancel stage.")
 async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
@@ -1287,6 +1258,72 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
                 log.warning(f"Issue #{issue_id} resume re-dispatch failed: {_e}; {_candidates}")
     log.info(f"Issue #{issue_id} resumed by user")
     return {"ok": True, "issue_id": issue_id, "status": "processing"}
+
+@router.post("/{issue_id}/reopen", operation_id="issues_reopen", summary="Reopen completed issue", description="Reverts a mistakenly completed requirement back to processing: clears completed_at/completed_reason and blanks stage so it stops reading as done. Does NOT auto redispatch (re-dispatch from the event page when you want the pipeline to continue). Owner-only, multi-row idempotent; the platform Issue itself is not reopened.")
+async def reopen_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
+    """把误标完成的需求退回「处理中」（2026-11-20 主人口径 B）。
+
+    与 `resume`（cancelled→processing，自动续派）的区别：
+    - 只回状态 + 清完成信息 + **清空 stage**，不自动 A2A 派发，避免点一下就消耗引擎；
+      续跑由用户在事件页手动「重派」决定从哪一步开始；
+    - stage 必须清空：UI 的 `mapStatusL` 把 `stage='done'` 直接判成「已完成」，
+      留着 done 即使 status 已是 processing 也仍然显示已完成（等于按钮没生效）。
+    不碰平台 Issue（GitCode/GitHub issue 不重新打开）——#1408 撤销路径同口径。
+    """
+    from src.kernel.session_manager import db_lock
+    with db_lock:
+        c = _rt_db.cursor()
+        c.execute(
+            "SELECT status, repo_key, issue_number, stage, completed_at "
+            "FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
+            (issue_id, user["id"]))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+        cur_status, repo_key, issue_number, cur_stage, prev_completed_at = row[0], row[1], row[2], row[3], row[4]
+        if cur_status != "completed":
+            raise HTTPException(
+                status_code=400,
+                detail={"code": 400, "message": "仅已完成需求可回到处理中"})
+        # Issue #1741 口径：同一 repo_key+issue_number 可能有多行，全量幂等回退（不插新卡）。
+        if repo_key and issue_number:
+            c.execute(
+                "UPDATE issue SET status='processing', stage='', completed_at=NULL, "
+                "completed_reason=NULL, updated_at=datetime('now') "
+                "WHERE repo_key=? AND issue_number=? AND status='completed'",
+                (repo_key, issue_number))
+        else:
+            c.execute(
+                "UPDATE issue SET status='processing', stage='', completed_at=NULL, "
+                "completed_reason=NULL, updated_at=datetime('now') "
+                "WHERE id=? AND status='completed'",
+                (issue_id,))
+        if c.rowcount == 0:
+            # 并发下已被别的进程改走 → 与 _write_issue_status 同口径按 409 让前端刷新
+            _rt_db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={"code": 409, "message": "需求状态已变更，请刷新后重试"})
+        _rt_db.commit()
+    try:
+        from src.domains.mgmt.public import log_audit
+        log_audit("issue_reopened_from_completed", operator_id=user.get("id", 0) or 0,
+                  detail={
+                      "repo_key": repo_key,
+                      "issue_id": issue_id,
+                      "issue_number": issue_number,
+                      "from_status": cur_status,
+                      "to_status": "processing",
+                      "from_stage": cur_stage or "",
+                      "to_stage": "",
+                      "prev_completed_at": prev_completed_at or "",
+                      "auto_redispatch": False,
+                  })
+    except Exception as _e:
+        log.warning(f"issue-reopen: audit log failed (issue={issue_id}): {_e}")
+    log.info(f"Issue #{issue_id} reopened completed → processing by user {user.get('id', 0)} "
+             f"(stage cleared, no auto redispatch)")
+    return {"ok": True, "issue_id": issue_id, "status": "processing", "stage": ""}
 
 @router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
 async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
@@ -2576,6 +2613,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     repo_key 可选（缺省按 {owner}/{repo} 拼）。返回 {ok, issue_number, task_id, created, ...}
     """
     from src.api.issues_center import TaskCreateBody, create_task_via_issue
+    from src.api.org_context import validate_org_scene_entry
     _body = body or {}
     # D107/B2 补口（2026-11-11 实弹发现）：默认 repo_key 是裸名（{owner}/{repo}），
     # 建单链 _is_github 按前缀分流——裸名恒走 gitcode 链，github 仓（托管或 member）
@@ -2585,12 +2623,20 @@ async def create_issue(owner: str, repo: str, body: dict = None,
     if ":" not in _rk_in:
         from src.domains.mgmt.public import _resolve_repo_key as _resolve_rk
         _rk_in = _resolve_rk(f"{owner}/{repo}")
+    # Issue #2118：组织场景入口校验（org-only 模板只能由组织上下文使用）
+    _repo_key = _rk_in
+    _scene_id = _body.get("scene_id", "") or ""
+    validate_org_scene_entry(
+        _repo_key,
+        _scene_id,
+        str(user.get("org_id") or ""),
+    )
     b = TaskCreateBody(
-        repo_key=_rk_in,
+        repo_key=_repo_key,
         title=_body.get("title", "") or "",
         description=_body.get("description", "") or "",
         assignee=_body.get("assignee", "") or "",
-        scene_id=_body.get("scene_id", "") or "",
+        scene_id=_scene_id,
         is_subtask_mode=int(_body.get("is_subtask_mode") or 0),
         attachments=_body.get("attachments") or [],
     )

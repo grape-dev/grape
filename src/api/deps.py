@@ -342,6 +342,16 @@ def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) 
                                                      "message": "Session token not allowed on this endpoint (account/platform management)"})
     return user
 
+
+def require_org_api_user(user: dict = Depends(get_current_user_or_api_key)) -> dict:
+    """组织运行态 API 鉴权：允许 JWT / API Key / 任务会话 token（dual）。
+
+    组织流水线技能需要在 worker 会话 token 下调用组织仓库与下派接口。该依赖只负责
+    放行三类凭据；具体路由仍必须执行组织成员/管理员校验以及仓库或目标范围校验。
+    """
+    return user
+
+
 def require_jwt_only(user: dict = Depends(get_current_user_or_api_key)) -> dict:
     """高敏感账号管理端点鉴权 = 需要 `interactive_only` 能力（仅 JWT）。
 

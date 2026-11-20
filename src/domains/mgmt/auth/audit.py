@@ -6,6 +6,7 @@
 """
 import hashlib
 import json
+import re
 
 from src.kernel.config import log
 from src.kernel.session_manager import db, db_lock
@@ -51,6 +52,34 @@ EVENT_TYPES = frozenset({
     "scene_secret_reveal",          # 场景自定义变量密钥明文按需取回（Issue #885：二次确认后当次返回，detail 含 scene_id/repo_key/name，不落明文）
     "scene_pin",                    # 场景置顶/取消置顶（Issue #1735：仓库共享状态变更留痕，detail 含 scene_id/repo_key/pinned）
     "im_installation_change",       # IM 渠道安装变更（凭证保存/解绑/引擎启停/卡片配置；detail 只记动作与标识，不含 secret）
+    "org_repo_bind",                # 组织关联托管仓库
+    "org_repo_map_analyze",         # 组织仓库地图：单仓分析
+    "org_repo_map_analyze_all",     # 组织仓库地图：全量分析
+    "org_repo_unbind",              # 组织解绑普通关联仓库
+    "org_repo_transfer",            # 组织间迁移普通关联仓库
+    "org_provision_manual_bind",    # 组织手动绑定已有仓库为组织仓库（Issue #2258 兜底）
+    "org_provision_started",        # 组织供给开始（建仓/建场景/绑定）
+    "org_provision_completed",      # 组织供给完成
+    "org_provision_failed",         # 组织供给失败（含租约丢失）
+    # Issue #2112：组织需求跨仓下派（6 类事件，未登记会走 Unknown 分支丢弃）
+    "dispatch_created",             # 下派批次创建
+    "target_created",               # 单目标子 Issue 创建成功
+    "dispatch_completed",           # 下派全部目标成功收敛
+    "dispatch_partial_failed",      # 下派存在失败目标（含全部失败）
+    "dispatch_cancelled",           # 下派被取消
+    "target_retried",               # 单目标重试（复用既有子 Issue）
+    # Issue #2150：组织上下文与组织知识库（未登记会被静默丢弃）
+    "org_context_create",           # 组织上下文创建（draft）
+    "org_context_update",           # 组织上下文更新
+    "org_context_publish",          # 组织上下文发布（自动降级旧 active）
+    "org_context_deprecate",        # 组织上下文废弃
+    "org_context_delete",           # 组织上下文删除
+    "org_knowledge_create",         # 组织知识创建（draft）
+    "org_knowledge_update",         # 组织知识更新
+    "org_knowledge_publish",        # 组织知识发布（自动降级旧 active）
+    "org_knowledge_deprecate",      # 组织知识废弃
+    "org_knowledge_archive",        # 组织知识归档（终态，Issue #2150 契约 archived）
+    "org_knowledge_delete",         # 组织知识删除
     "cross_write_apply",            # 跨域补偿写应用（/internal/xwrite/apply：action/幂等键/调用方/结果摘要，detail 不落 payload 原文）
     "sandbox_whitelist_created",    # admin 新增沙箱五维白名单规则（PR #1507 F7：detail 只记标识，不记凭据）
     "sandbox_whitelist_updated",    # admin 更新沙箱白名单规则（detail 含 rule_id/backend/domain）
@@ -182,3 +211,236 @@ def mask_identifier(identifier: str) -> str:
     if len(identifier) <= 2:
         return identifier
     return f"{identifier[0]}***{identifier[-1]}"
+
+
+# ---------------------------------------------------------------------------
+# 组织审计查询（Issue #2260：只读，不改写入链路/哈希链）
+# ---------------------------------------------------------------------------
+
+# 组织相关事件前缀（组织事件名以此开头）
+_ORG_EVENT_PREFIXES = ("org_repo_", "org_context_", "org_knowledge_")
+
+# 跨仓下派事件（Issue #2112）：实际事件名为 dispatch_*/target_*，无 org_dispatch_ 前缀
+_DISPATCH_EVENT_TYPES = frozenset({
+    "dispatch_created",
+    "target_created",
+    "dispatch_completed",
+    "dispatch_partial_failed",
+    "dispatch_cancelled",
+    "target_retried",
+})
+
+# 组织审计事件全集（唯一来源：EVENT_TYPES 白名单 + 下派事件），查询只允许命中此集合
+ORG_AUDIT_EVENT_TYPES = frozenset(
+    e for e in EVENT_TYPES if e.startswith(_ORG_EVENT_PREFIXES)
+) | _DISPATCH_EVENT_TYPES
+
+# 前缀别名：用户可传的语义前缀 → 实际事件集合
+#   org_dispatch_ : 实际无此前缀，映射到 6 类下派事件（否则按字面过滤查不到下派记录）
+#   org_provision_: 组织供给 started/completed/failed（Issue #1820 C3 整改）
+_EVENT_TYPE_ALIASES = {
+    "org_dispatch_": _DISPATCH_EVENT_TYPES,
+    "org_provision_": frozenset({
+        "org_provision_started", "org_provision_completed", "org_provision_failed",
+    }),
+}
+
+# detail 脱敏键（归一化分词后按 token 精确/后缀匹配，覆盖 *_token/*_secret/camelCase/Header 式键名）
+#   只放语义明确的片段，避免误伤业务字段（如 repo_key / context_id / target_count）。
+_SENSITIVE_KEY_TOKENS = frozenset({
+    "token", "secret", "password", "passwd", "credential", "credentials",
+    "authorization", "cookie",
+})
+# 连写形态的后缀（camelCase/下划线/连字符归一后：apiKey→apikey、private_key→privatekey）
+_SENSITIVE_KEY_SUFFIXES = (
+    "token", "secret", "password", "passwd", "credential", "credentials",
+    "apikey", "privatekey", "accesskey", "signingkey", "secretkey", "sshkey",
+    "authorization", "cookie",
+)
+_CONTENT_KEY_TOKENS = frozenset({"content", "body", "text", "markdown", "prompt"})
+# 连写形态后缀：不含 text（"context" 以 text 结尾，误伤组织上下文键）
+_CONTENT_KEY_SUFFIXES = ("content", "body", "markdown", "prompt")
+_MASK_DETAIL_MAX_DEPTH = 3
+_REDACTED = "[REDACTED]"
+
+# 组织审计查询：行流式读取块大小（避免全量 fetchall 进内存）
+_ORG_AUDIT_FETCH_CHUNK = 200
+
+# 键名分词：驼峰边界先拆，再按非字母数字切分
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_KEY_SPLIT = re.compile(r"[^a-z0-9]+")
+_SINCE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?$")
+
+
+def _resolve_event_types(event_type: str) -> set:
+    """把查询输入解析为白名单内的事件集合（禁止把用户输入拼进 LIKE/IN）。
+
+    解析顺序：空 → 全集；精确命中；前缀别名（org_dispatch_/org_provision_）；
+    否则在 EVENT_TYPES 白名单内做前缀展开。未知前缀返回空集。
+    """
+    et = (event_type or "").strip()
+    if not et:
+        return set(ORG_AUDIT_EVENT_TYPES)
+    if et in ORG_AUDIT_EVENT_TYPES:
+        return {et}
+    alias_key = et if et.endswith("_") else et + "_"
+    if alias_key in _EVENT_TYPE_ALIASES:
+        return set(_EVENT_TYPE_ALIASES[alias_key])
+    return {e for e in ORG_AUDIT_EVENT_TYPES if e.startswith(et)}
+
+
+def _normalize_since(since: str) -> str:
+    """规范化 since：仅接受无时区的 YYYY-MM-DD / YYYY-MM-DD HH:MM:SS。"""
+    s = (since or "").strip()
+    if not s:
+        return ""
+    if not _SINCE_RE.fullmatch(s):
+        raise ValueError("since 仅支持 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS，不支持时区")
+    if len(s) == 10:
+        return s + " 00:00:00"
+    return s.replace("T", " ")
+
+
+def _parse_detail(raw) -> dict:
+    """detail 文本 → dict（非法/非对象 → 空 dict）。"""
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _org_matches(detail: dict, org_id: str) -> bool:
+    """组织归属匹配：主键 org_id；org_repo_transfer 只写 source/target 也需纳入。"""
+    for key in ("org_id", "source_org_id", "target_org_id"):
+        try:
+            if str(detail.get(key) or "") == str(org_id):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _key_tokens(key) -> list:
+    """键名归一化分词：camelCase / 连字符 / 下划线 / 空格统一拆成小写 token。
+
+    例：`X-Auth-Token` → [x, auth, token]；`clientSecret` → [client, secret]；
+    `repo_key` → [repo, key]（key 不在敏感集合，保留业务标识）。
+    """
+    spaced = _CAMEL_BOUNDARY.sub("_", str(key))
+    return [t for t in _KEY_SPLIT.split(spaced.lower()) if t]
+
+
+def _key_kind(key) -> str:
+    """键名分类：'content'（正文，剔除）/ 'sensitive'（敏感，替换）/ ''（保留）。"""
+    tokens = _key_tokens(key)
+    compact = "".join(tokens)
+    if any(t in _SENSITIVE_KEY_TOKENS for t in tokens) or compact.endswith(
+            _SENSITIVE_KEY_SUFFIXES):
+        return "sensitive"
+    if any(t in _CONTENT_KEY_TOKENS for t in tokens) or compact.endswith(
+            _CONTENT_KEY_SUFFIXES):
+        return "content"
+    return ""
+
+
+def mask_detail(value, _depth: int = 0):
+    """递归脱敏 detail（最深 3 层）：敏感键 → [REDACTED]，正文键直接剔除。
+
+    超出深度上限按 fail-closed 处理：整棵子树替换为 [REDACTED]，
+    不原样返回（否则深层嵌套的敏感数据会绕过脱敏直接外泄）。
+    """
+    if _depth > _MASK_DETAIL_MAX_DEPTH:
+        return _REDACTED
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            kind = _key_kind(k)
+            if kind == "content":
+                continue
+            if kind == "sensitive":
+                out[k] = _REDACTED
+                continue
+            out[k] = mask_detail(v, _depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [mask_detail(v, _depth + 1) for v in value]
+    return value
+
+
+def query_org_audit(org_id: str, event_type: str = "", limit: int = 50,
+                    offset: int = 0, since: str = "") -> dict:
+    """组织审计只读查询（Issue #2260）。
+
+    - 事件集合以 EVENT_TYPES 白名单展开（前缀/别名；未知前缀 → 空页），不拼接 LIKE。
+    - 组织隔离在 Python 解析 detail（匹配 org_id / source_org_id / target_org_id），
+      兼容 SQLite/MySQL 双后端（不用各家不一致的 JSON 函数）。
+    - 排序 `id DESC`；`total` 为匹配总数（与分页一致）；`limit` 夹取 1..200（默认 50），
+      `offset` 夹取 >=0；`since` 与 created_at 文本比较。
+    - 内存/CPU 有界：行按固定块流式读取（不全量 fetchall），`mask_detail` 只作用于
+      当前分页窗口内的记录（先切片后脱敏），审计量增长不会带来线性内存/脱敏开销。
+      `total` 仍需扫描候选行（detail 无派生列/索引，见后续 Issue）。
+
+    注：`org_provision_` 前缀对应组织供给 started/completed/failed 审计。
+    按空页返回，本次不新增写入。
+    """
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        offset = 0
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    event_types = _resolve_event_types(event_type)
+    if not event_types:
+        return {"items": [], "total": 0, "limit": limit, "offset": offset}
+
+    placeholders = ",".join("?" for _ in event_types)
+    sql = (
+        "SELECT id, seq, event_type, user_id, operator_id, ip, detail, created_at "
+        f"FROM audit_logs WHERE event_type IN ({placeholders})"
+    )
+    params: list = sorted(event_types)
+    since_norm = _normalize_since(since)
+    if since_norm:
+        sql += " AND created_at >= ?"
+        params.append(since_norm)
+    sql += " ORDER BY id DESC"
+
+    matched_total = 0
+    page: list = []
+    with db_lock:
+        c = db.cursor()
+        c.execute(sql, params)
+        cols = [d[0] for d in c.description]
+        detail_idx = cols.index("detail")
+        while True:
+            chunk = c.fetchmany(_ORG_AUDIT_FETCH_CHUNK)
+            if not chunk:
+                break
+            for row in chunk:
+                detail = _parse_detail(row[detail_idx])
+                if not _org_matches(detail, org_id):
+                    continue
+                matched_total += 1
+                # 先切片后脱敏：窗口外的行只计数，不构造记录、不做递归脱敏
+                if matched_total <= offset or len(page) >= limit:
+                    continue
+                rec = dict(zip(cols, row))
+                rec["detail"] = mask_detail(detail)
+                page.append(rec)
+
+    return {
+        "items": page,
+        "total": matched_total,
+        "limit": limit,
+        "offset": offset,
+    }

@@ -1,7 +1,7 @@
 """事件处理管道：归一化 → 路由 → 存储 → Agent 执行"""
 import json, os, re, time, uuid, threading
 from concurrent.futures import ThreadPoolExecutor, Future
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from src.kernel.config import log, WORKSPACE_DIR
 
 
@@ -630,13 +630,22 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
 
     # 获取 bot token（按 provider 分流：GitHub 仓库用 get_github_token）
 
+    dispatch_lease_key = ""
+    dispatch_lease = False
+    if repo_key:
+        from src.kernel.lock import acquire_lock_with_retry, repo_dispatch_lease_key
+        dispatch_lease_key = repo_dispatch_lease_key(repo_key)
+        dispatch_lease = acquire_lock_with_retry(dispatch_lease_key, ttl=30)
+        if not dispatch_lease:
+            log.error(f"create_direct_task: dispatch lease busy for repo={repo_key}")
+            return ""
+
     # Issue #646：任务落库前的引擎引用快照（uid + 展示名；未迁移旧库/引擎已删不阻断）
     try:
         from src.domains.mgmt.public import engine_ref_snapshot
         _snap = engine_ref_snapshot(engine_id, "")
     except Exception:
         _snap = (None, "", "")
-
     try:
         row = _task_insert_row(_TASK_COLUMNS_LIST,
             id=task_id, agent_session_id=agent_session_id, runtime_id=engine_id,
@@ -672,6 +681,10 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
         log.error(f"create_direct_task failed for seq={seq}（任务行未落库，事件将卡 running 被 sweeper 判 failed）: {e}",
                   exc_info=True)
         return ""
+    finally:
+        if dispatch_lease:
+            from src.kernel.lock import release_lock
+            release_lock(dispatch_lease_key)
     # 方案 E：direct 任务创建即开跑 → 事件置 running（@skip_event_config 的 autopilot 不写 events 表，跳过）
     if seq and not skip_event_config:
         try:
@@ -1740,6 +1753,72 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         log.warning(f"Pipeline subscription dispatch failed: {e}")
 
 
+def _org_scene_entry_role(repo_key: str, evt: dict, scene_id: str = "") -> str:
+    """Issue #2118：组织场景的入口节点角色（issue_opened 启动用）。
+
+    issue_opened 默认路由 vod；组织场景没有 vod 节点，首节点是
+    org_intake(tag=issue)。已绑定组织场景的 Issue 必须按场景首节点启动，
+    否则会被 not_in_scene 静默拦截，组织流水线永不开始。
+    非组织场景/无场景/解析异常返回空串（保持原 vod 行为）。
+
+    scene_id：调用方已等待/解析到的 Issue 场景绑定。传入时直接使用，避免
+    issue_opened 在 set_issue_scene 落库前二次查询再次落空（竞态回落 vod）。
+    """
+    try:
+        from src.api.pipeline_config import get_pipeline_config, node_role
+        from src.api.session_store import get_issue_scene
+
+        _scene_id = (scene_id or "").strip()
+        if not _scene_id:
+            _rid = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+            if not _rid:
+                return ""
+            _scene_id, _ = get_issue_scene(repo_key, _rid)
+        if not _scene_id:
+            return ""
+        _cfg = get_pipeline_config(_scene_id, repo_key=repo_key) or {}
+        if (_cfg.get("scene_type") or "standard") != "org":
+            return ""
+        _nodes = [n for n in (_cfg.get("nodes") or []) if isinstance(n, dict)]
+        if not _nodes:
+            return ""
+        return node_role(_nodes[0])
+    except Exception as e:
+        log.warning(f"org scene entry role resolve failed: {e}")
+        return ""
+
+
+def _resolve_issue_opened_agent(repo_key: str, evt: dict, attempts: int = 3,
+                                interval: float = 0.5) -> tuple[str, str, bool]:
+    """issue_opened 路由：先等待场景绑定落库，再判定组织首节点。
+
+    Task Center 建单时 GitCode webhook 可能先于 set_issue_scene 到达；若在等待
+    前判定 org 场景，会把组织 Issue 误路由到 vod（vod 不在组织场景节点内，
+    后续被 not_in_scene 静默拦截）。返回 (agent_type, existing_scene, is_recommend)。
+    """
+    _rid = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
+    _is_recommend = True
+    _existing_scene = ""
+    if _rid:
+        import time as _time
+        for _attempt in range(max(1, int(attempts))):
+            try:
+                from src.api.session_store import get_issue_scene
+                _existing_scene, _ = get_issue_scene(repo_key, _rid)
+                if _existing_scene:
+                    _is_recommend = False
+                    log.info(f"Pipeline: issue_opened 已有场景 {_existing_scene}"
+                             f"（attempt={_attempt + 1}），跳过推荐")
+                    break
+                if _attempt < int(attempts) - 1:
+                    _time.sleep(interval)
+            except Exception as _re:
+                log.warning(f"Pipeline: issue_opened scene check failed: {_re}")
+                break
+    _org_entry = _org_scene_entry_role(repo_key, evt, scene_id=_existing_scene)
+    return (_org_entry or "vod", _existing_scene, _is_recommend)
+
+
 def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                  repo_key_override: str = "", replay: bool = False) -> dict:
     """事件处理管道入口：归一化 → 路由 → 存储 → 返回结果
@@ -2220,29 +2299,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 3. 路由判定（D9 阶段矩阵 + 非 Issue 静态映射，替代 agent_type.subscribe_events，见 vod-skill-upgrade-plan §3.0.4）
     _is_scene_recommend = False  # 智能推荐模式标记
     if event_type == "issue_opened":
-        agent_type = "vod"
-        log.info(f"Pipeline: issue_opened -> VOD (stage init)")
-        # 判断是否需要推荐：issue_state 有 scene_id → 用户已选场景，跳过推荐
-        # GitCode 直接创建的 Issue 无 scene_id → 走智能推荐
-        # Task Center 创建 Issue 后 GitCode webhook 可能比 set_issue_scene 先到达，
-        # 最多重试 3 次、每次间隔 0.5s，等 scene_id 写入
-        _rid_early = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
-        _is_scene_recommend = True  # 默认走推荐
-        if _rid_early:
-            import time as _time
-            for _attempt in range(3):
-                try:
-                    from src.api.session_store import get_issue_scene
-                    _existing_scene, _ = get_issue_scene(repo_key, _rid_early)
-                    if _existing_scene:
-                        _is_scene_recommend = False
-                        log.info(f"Pipeline: issue_opened 已有场景 {_existing_scene}（attempt={_attempt+1}），跳过推荐")
-                        break
-                    if _attempt < 2:
-                        _time.sleep(0.5)
-                except Exception as _re:
-                    log.warning(f"Pipeline: issue_opened scene check failed: {_re}")
-                    break
+        # Issue #2118 复审修复：路由使用「等待后的场景绑定」结果。原先在
+        # 重试等待之前判定 org 场景，Task Center 建单竞态下 scene_id 尚未落库，
+        # 组织 Issue 会被当成普通 Issue 落到 vod。
+        agent_type, _existing_scene, _is_scene_recommend = \
+            _resolve_issue_opened_agent(repo_key, evt)
+        if agent_type != "vod":
+            log.info(f"Pipeline: issue_opened org scene -> {agent_type} (scene first node)")
+        else:
+            log.info("Pipeline: issue_opened -> VOD (stage init)")
         # project-info 后台刷新（服务端 codegraph 生成基线，不阻塞 webhook；见 codegraph-builder-plan.md）
         # Issue #200: 传入 bot token，私有仓库 git fetch 需认证 header
         try:
@@ -2378,8 +2443,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 _asg = actor or ""
                 if _asg:
                     log.info(f"Pipeline: issue_assignee API empty, fallback to actor={_asg} for {_rid}")
-            set_issue_stage(repo_key, _rid, "vod", "vod", assignee=_asg)
-            log.info(f"Pipeline: issue_state init vod for {_rid} assignee={_asg or 'none'}")
+            set_issue_stage(repo_key, _rid, agent_type or "vod", agent_type or "vod", assignee=_asg)
+            log.info(f"Pipeline: issue_state init {agent_type or 'vod'} for {_rid} assignee={_asg or 'none'}")
             # 子任务识别：Issue body 含 "## 父任务" + Issue 链接 → 标记 parent_issue_id
             _parent = _parse_parent_issue_from_payload(evt.get("payload", {}) or {})
             if _parent:
@@ -3435,6 +3500,49 @@ def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str
     return os.path.join(_base, f"{agent_type}-agent")
 
 
+def _rollback_auto_advance_stage(seq: int) -> None:
+    """Issue #2118 复审：自动推进事件失败 → 回滚被提前推进的 stage。
+
+    plugin/queue_remote 等异步路径下 stage 可能在派发尚未确认前就被写到下游；
+    一旦该下游 A2A 事件最终 failed，就应把 stage 退回原节点，避免「stage 指向
+    从未运行的下游」的静默断链。仅当事件携带 auto-advance `stage_guard`，且当前
+    stage 仍等于 `guard.to` 时回滚（幂等：stage 已被其它路径推进/收敛则不动）。
+    """
+    if not seq:
+        return
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key, issue_id, payload FROM events WHERE seq=?", (int(seq),))
+            row = c.fetchone()
+        if not row:
+            return
+        repo_key, issue_id, payload_raw = row[0] or "", row[1] or "", row[2] or ""
+        try:
+            payload = json.loads(payload_raw or "{}")
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        guard = payload.get("stage_guard")
+        if not isinstance(guard, dict):
+            return
+        from_stage = str(guard.get("from") or "").strip()
+        to_stage = str(guard.get("to") or "").strip()
+        if (not from_stage or not to_stage or from_stage == to_stage
+                or not repo_key or not issue_id):
+            return
+        from src.api.session_store import get_issue_stage, set_issue_stage
+        cur = (get_issue_stage(repo_key, issue_id) or {}).get("stage") or ""
+        if cur != to_stage:
+            return
+        set_issue_stage(repo_key, issue_id, from_stage, from_stage)
+        log.info(f"Pipeline: auto-advance rollback seq={seq} "
+                 f"stage {to_stage}->{from_stage} issue={issue_id}")
+    except Exception as e:
+        log.warning(f"Pipeline: auto-advance stage rollback failed seq={seq}: {e}")
+
+
 def _fail_event(seq: int, reason: str, exit_code: int = 1, diag: dict = None):
     """事件入队/启动失败 → 立即置 failed 终态（防卡 running 僵尸）。
 
@@ -3502,6 +3610,8 @@ def _fail_event(seq: int, reason: str, exit_code: int = 1, diag: dict = None):
             _rt_db.commit()
             if c.rowcount > 0:
                 log.info(f"Pipeline: synced agent_tasks event_seq={seq} -> failed")
+        # Issue #2118 复审：自动推进事件失败时回滚被提前推进的 stage（幂等）。
+        _rollback_auto_advance_stage(seq)
         log.info(f"Pipeline: event {seq} -> failed ({_result[:80]})")
     except Exception as e:
         log.warning(f"Pipeline: _fail_event failed for seq={seq}: {e}")
@@ -3513,6 +3623,101 @@ def _fail_event(seq: int, reason: str, exit_code: int = 1, diag: dict = None):
 _A2A_DRAIN_LOCK = threading.Lock()
 # 仍视为「前序未结束」的状态：排队事件只在这些前序终态后才应派发。
 _A2A_PRIOR_ACTIVE = ("running", "dispatched", "queued")
+
+
+def _aggregate_recheck_max_attempts() -> int:
+    try:
+        return max(1, int(os.environ.get("GRAPE_ORG_AGGREGATE_MAX_ATTEMPTS", "3")))
+    except Exception:
+        return 3
+
+
+def _delayed_recheck_due(payload: dict) -> bool:
+    """排队事件是否携带到点的 `_not_before` 延迟派发标记（Issue #2118 复审）。"""
+    if not isinstance(payload, dict) or not payload.get("_not_before"):
+        return False
+    try:
+        due = datetime.fromisoformat(str(payload.get("_not_before")).replace("Z", "+00:00"))
+    except Exception:
+        return False
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) >= due
+
+
+def _delayed_recheck_should_skip(repo_key: str, issue_id: str, agent_type: str,
+                                 payload: dict) -> bool:
+    """延迟重排事件到点后仍要复核：人工已改 stage 或 Issue 已收敛则不再补派。"""
+    if not isinstance(payload, dict) or not payload.get("aggregate_recheck"):
+        return False
+    # Issue #2266：组织聚合复核事件是跨节点收口（org_aggregate），组织 Issue 的
+    # stage 是 intake/owner（issue），不是 qa；按 stage != agent_type 判定会把它
+    # 永久跳过 → 复核事件一直 queued，组织流水线看起来「卡住」。
+    # 仅对普通 Issue 的延迟重排做 stage 漂移保护，组织聚合复核不参与该判定。
+    if payload.get("org_id") and payload.get("dispatch_id"):
+        return False
+    try:
+        from src.api.session_store import get_issue_stage
+        cur = (get_issue_stage(repo_key, issue_id) or {}).get("stage") or ""
+        if agent_type and cur and cur != agent_type:
+            log.info(f"a2a queue reconcile: delayed recheck skip issue={issue_id} "
+                     f"(stage='{cur}' != '{agent_type}')")
+            return True
+    except Exception:
+        pass
+    try:
+        from src.api.patrol import issue_terminal
+        if issue_terminal(repo_key, issue_id or ""):
+            log.info(f"a2a queue reconcile: delayed recheck skip issue={issue_id} (terminal)")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _requeue_or_degrade_aggregate_recheck(qseq: int, repo_key: str, agent_type: str,
+                                          issue_id: str, payload: dict, reason: str,
+                                          code: str) -> None:
+    """组织聚合重排事件派发失败：按退避重排，超过上限则转人工审核（Issue #2118 复审）。
+
+    - 重排：把事件置回 queued 并推后 `_not_before`，由巡检 reconcile 补派（持久化真源）；
+    - 降级：达到上限仍失败 → stage 置 pending_review 并 `_fail_event` 留痕，
+      避免组织 Issue 静默停在 qa（无引擎/异常路径都有可查询终态）。
+    """
+    try:
+        attempts = int((payload or {}).get("aggregate_attempt") or 0) + 1
+    except Exception:
+        attempts = 1
+    max_attempts = _aggregate_recheck_max_attempts()
+    if attempts <= max_attempts:
+        backoff = min(300, 30 * attempts)
+        next_at = (datetime.now(timezone.utc) + timedelta(seconds=backoff)).isoformat()
+        new_payload = dict(payload or {})
+        new_payload["aggregate_attempt"] = attempts
+        new_payload["_not_before"] = next_at
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("UPDATE events SET status='queued', payload=? WHERE seq=?",
+                          (json.dumps(new_payload, ensure_ascii=False), int(qseq)))
+                db.commit()
+            log.warning(f"a2a queue drain: aggregate recheck requeued seq={qseq} "
+                        f"attempt={attempts}/{max_attempts} backoff={backoff}s reason={reason[:120]}")
+        except Exception as _re:
+            log.warning(f"a2a queue drain: aggregate recheck requeue failed seq={qseq}: {_re}")
+            _fail_event(qseq, f"组织聚合重排失败（requeue 失败）：{str(reason)[:150]}",
+                        diag={"code": code, "phase": "aggregate_requeue"})
+        return
+    # 重试耗尽 → 转人工审核并留痕，保证有可查询终态
+    try:
+        from src.api.session_store import set_issue_stage
+        if repo_key and issue_id:
+            set_issue_stage(repo_key, issue_id, "pending_review", agent_type or "qa")
+    except Exception as _se:
+        log.warning(f"a2a queue drain: aggregate recheck pending_review failed seq={qseq}: {_se}")
+    _fail_event(qseq, f"组织聚合重排多次失败，已转人工审核：{str(reason)[:150]}",
+                diag={"code": code, "phase": "aggregate_exhausted",
+                      "attempts": attempts, "max_attempts": max_attempts})
 
 
 def _claim_and_dispatch_queued(qseq: int, repo_key: str, agent_type: str, issue_id: str,
@@ -3595,6 +3800,12 @@ def _claim_and_dispatch_queued(qseq: int, repo_key: str, agent_type: str, issue_
             return True
         if not isinstance(result, dict) or result.get("status") == "failed" or not result.get("seq"):
             _reason = (result or {}).get("error") if isinstance(result, dict) else ""
+            if isinstance(payload, dict) and payload.get("aggregate_recheck"):
+                _requeue_or_degrade_aggregate_recheck(
+                    qseq, repo_key, agent_type, issue_id, payload,
+                    str(_reason or "dispatch returned no task"),
+                    "a2a_queue_dispatch_failed")
+                return False
             _fail_event(qseq, f"A2A 排队派发失败（queue_seq={qseq}，前序 seq={prior_seq}）: "
                               f"{str(_reason or 'dispatch returned no task')[:200]}",
                         diag={"code": "a2a_queue_dispatch_failed",
@@ -3605,6 +3816,11 @@ def _claim_and_dispatch_queued(qseq: int, repo_key: str, agent_type: str, issue_
         return True
     except Exception as _de:
         log.warning(f"a2a queue drain: dispatch exception queue_seq={qseq}: {_de}")
+        if isinstance(payload, dict) and payload.get("aggregate_recheck"):
+            _requeue_or_degrade_aggregate_recheck(
+                qseq, repo_key, agent_type, issue_id, payload,
+                str(_de)[:150], "a2a_queue_dispatch_exception")
+            return False
         try:
             _fail_event(qseq, f"A2A 排队派发异常（queue_seq={qseq}，前序 seq={prior_seq}）: "
                               f"{str(_de)[:150]}",
@@ -3676,6 +3892,35 @@ def _active_prior_seqs(seqs) -> set:
         if str(_st or "").strip() in _A2A_PRIOR_ACTIVE:
             _active.add(int(_s))
     return _active
+
+
+def dispatch_delayed_recheck(seq: int) -> bool:
+    """Issue #2118 复审：按 seq 抢占并派发一条延迟重排的 queued 事件。
+
+    供聚合重排的内存定时器「低延迟快派」使用；真源是持久化事件，巡检 reconcile
+    会兜底补派。未处于 queued（已被派发/失败）则直接跳过，保证只派发一次。
+    """
+    if not seq:
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, repo_key, agent_type, issue_id, payload FROM events "
+                "WHERE seq=? AND event_type='a2a_event' AND status='queued' LIMIT 1",
+                (int(seq),))
+            row = c.fetchone()
+        if not row:
+            return False
+        parsed = _parse_queued_row(row)
+        if not parsed:
+            return False
+        qseq, repo_key, agent_type, issue_id, payload, qinfo, _linked = parsed
+        return _claim_and_dispatch_queued(qseq, repo_key, agent_type, issue_id,
+                                          payload, qinfo, 0)
+    except Exception as _e:
+        log.warning(f"a2a delayed recheck dispatch failed seq={seq}: {_e}")
+        return False
 
 
 def drain_queued_a2a(prior_seq: int) -> list:
@@ -3784,7 +4029,15 @@ def reconcile_queued_a2a(repo_key: str = "") -> list:
         dispatched = []
         for qseq, _repo, agent_type, issue_id, payload, qinfo, _linked_seqs in parsed_rows:
             if not _linked_seqs:
-                # 无关联前序（历史/异常行）：无法判定，交由人工排障，不盲目派发
+                # 无关联前序（历史/异常行）：无法判定，交由人工排障，不盲目派发。
+                # Issue #2118 复审例外：组织聚合「延迟重排」事件到点后由巡检补派——
+                # 持久化事件是重试真源，不依赖进程内定时器。
+                if _delayed_recheck_due(payload):
+                    if _delayed_recheck_should_skip(_repo, issue_id, agent_type, payload):
+                        continue
+                    if _claim_and_dispatch_queued(qseq, _repo, agent_type, issue_id,
+                                                  payload, qinfo, 0):
+                        dispatched.append(qseq)
                 continue
             if any(s in _prior_active for s in _linked_seqs):
                 continue
@@ -4016,6 +4269,18 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         pass
     _inject_scene_env(env_extra, repo_key, issue_id, agent_type,
                       scene_id_override=evt.get("_pr_sub_scene_id", ""))
+    # Issue #2266：组织聚合复核事件需要 DISPATCH_ID / ORG_ISSUE_NUMBER 供
+    # org-aggregate-cli 读取（技能输入契约）；此前技能只能从文本里猜。
+    try:
+        _payload_in = evt.get("payload") if isinstance(evt.get("payload"), dict) else evt
+        _disp_id = (evt.get("dispatch_id") or (_payload_in.get("dispatch_id") if isinstance(_payload_in, dict) else 0))
+        if _disp_id:
+            env_extra["DISPATCH_ID"] = str(_disp_id)
+        _issue_num_in = (evt.get("issue_number") or (_payload_in.get("issue_number") if isinstance(_payload_in, dict) else ""))
+        if _issue_num_in:
+            env_extra["ORG_ISSUE_NUMBER"] = str(_issue_num_in).lstrip("#")
+    except Exception:
+        pass
     # Issue #242: 注入关联仓库列表（coding agent 读取后初始化多仓库 worktree）
     try:
         _linked_repos = _read_scene_linked_repos(repo_key, issue_id)
@@ -4128,6 +4393,23 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
         env_extra["GRAPE_SCENE_ID"] = scene_id
         if not scene_id:
             return
+        # Issue #2266：组织流水线技能需要 org 上下文。此前只注入 GRAPE_SCENE_ID，
+        # org-intake/org-dispatch 拿不到 ORG_ID，只能猜（实测 agent 请求
+        # /api/orgs/1|2|3|test_team|testteam/... → 400/404，自动下派失效）。
+        try:
+            from src.api.pipeline_config import scene_is_org_scoped
+            if scene_is_org_scoped(scene_id):
+                from src.domains.mgmt.public import get_org_id_by_repo_key
+                _org_id = get_org_id_by_repo_key(repo_key)
+                if _org_id:
+                    env_extra["GRAPE_ORG_ID"] = _org_id
+                    env_extra["ORG_ID"] = _org_id
+                _num = str(issue_id or "").lstrip("#").strip()
+                if _num.isdigit():
+                    env_extra["ORG_ISSUE_NUMBER"] = _num
+        except Exception as _oe:
+            from src.kernel.config import log as _log
+            _log.warning(f"inject org env failed: {_oe}")
         from src.kernel.scene_custom_env import is_upper_name, is_reserved_name, normalize_scope
         from src.api.session_store import get_scene_advanced_options
         # 读 advanced_options 的 custom_fields（统一口径，避免重复裸 SQL）
@@ -4148,7 +4430,9 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
                 continue
             env_extra[name] = str(f.get("value", ""))
     except Exception as _e:
-        from src.kernel.config import log
+        # 注意：本函数内不得再写 `from src.kernel.config import log`——局部 import
+        # 会把 log 变成整个函数的局部变量，循环内的 log.warning 触发
+        # UnboundLocalError，导致首个被拒字段后所有 custom_fields 全部丢失。
         log.warning(f"inject scene env failed: {_e}")
 
 
@@ -4325,6 +4609,7 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
     # 1) project-info + knowledge 物化（Issue #95：统一调 collect_knowledge_files）
     proj_dir = os.path.join(ws, ".project-info")
     know_dir = os.path.join(ws, ".knowledge")
+    org_dir = os.path.join(ws, ".org-context")
     try:
         from src.domains.runtime.engine.service import collect_knowledge_files
         _collected = collect_knowledge_files(repo_key, agent_type=agent_type, issue_id=_issue)
@@ -4341,9 +4626,11 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
             except Exception:
                 pass
         prompt = prompt.replace("{{PROJECT_INFO_DIR}}", proj_dir)
-        # knowledge 物化（agent 沉淀知识）
+        # knowledge 物化（agent 沉淀知识）；org-context/ 单独落到 .org-context/
         for rel, meta in (_collected.get("knowledge") or {}).items():
-            _dest = os.path.join(know_dir, rel)
+            _is_org = str(rel).startswith("org-context/")
+            _dest = os.path.join(org_dir, str(rel)[len("org-context/"):]) if _is_org \
+                else os.path.join(know_dir, rel)
             try:
                 os.makedirs(os.path.dirname(_dest), exist_ok=True)
                 _content = meta.get("content", "") if isinstance(meta, dict) else str(meta)
@@ -4352,6 +4639,7 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
             except Exception:
                 pass
         prompt = prompt.replace("{{KNOWLEDGE_DIR}}", know_dir)
+        prompt = prompt.replace("{{ORG_CONTEXT_DIR}}", org_dir)
     except Exception as e:
         log.warning(f"direct knowledge materialize failed for {repo_key}: {e}")
 
@@ -4630,7 +4918,7 @@ def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = "",
     try:
         ws = get_agent_workdir(repo_key, agent_type, issue_id or "")
         import shutil as _shutil
-        for _sub in (".skills", ".project-info", ".knowledge"):
+        for _sub in (".skills", ".project-info", ".knowledge", ".org-context"):
             _p = os.path.join(ws, _sub)
             try:
                 if os.path.isdir(_p):
@@ -6355,9 +6643,25 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     try:
         from src.kernel.auth_sdk.auth_token import issue_session_token
         if repo_key and agent_type:
+            # Issue #2267：会话 token 必须携带任务归属用户 id。此前固定 user_id=0，
+            # 组织接口 _require_member(0, org) 恒 403 → org-intake 无法读取关联仓库 /
+            # 创建下派，组织流水线看起来毫无进展。
+            _tk_uid = 0
+            try:
+                if isinstance(evt, dict):
+                    _tk_uid = evt.get("user_id") or (evt.get("payload") or {}).get("user_id") or 0
+                if not _tk_uid and task_id:
+                    from src.kernel.session_manager import db as _sdb, db_lock as _sdl
+                    with _sdl:
+                        _r = _sdb.cursor().execute(
+                            "SELECT user_id FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                    _tk_uid = (_r[0] if _r else 0) or 0
+            except Exception as _uid_e:
+                from src.kernel.config import log as _uid_log
+                _uid_log.warning(f"session token owner uid resolve failed: {_uid_e}")
             env_extra["GRAPE_SESSION_TOKEN"] = issue_session_token(
                 session_key=task_id or f"d_{seq}",
-                repo_key=repo_key, agent_type=agent_type, user_id=0)
+                repo_key=repo_key, agent_type=agent_type, user_id=str(_tk_uid))
             # CLI 命令按 token 作用域过滤：agent 持 tk_ 会话 token → 只暴露 dual+session_only 命令
             # （见 grape-cli-mode-filter-design.md；避免 agent 打 user_only 接口 403 重试）
             env_extra["GRAPE_CLI_MODE"] = "WORKER"

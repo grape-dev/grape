@@ -118,3 +118,16 @@ def test_guard_disabled_for_sqlite_backend(monkeypatch):
     monkeypatch.setenv("DEVOPS_DB_NAME", "grape_dev_mgmt")
     assert own.guard_enabled() is False
     assert own.foreign_owner("agent_tasks") is None
+
+
+def test_org_feature_tables_are_registered():
+    """组织功能新增表必须登记 mgmt 归属，防止三库拆分重复建表。"""
+    for tbl in (
+        "grape_t_org_dispatch",
+        "grape_t_org_dispatch_target",
+        "grape_t_org_dispatch_aggregate",
+        "grape_t_org_context",
+        "grape_t_org_context_snapshot",
+        "grape_t_org_repo_map",
+    ):
+        assert own.owner_of(tbl) == "mgmt", f"{tbl} 未登记为 mgmt"

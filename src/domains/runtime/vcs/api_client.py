@@ -743,6 +743,53 @@ class VcsApiClient:
         return self._card_request("POST", f"/repos/{self.owner}/{self.repo}/branches",
             {"branch_name": branch_name, "refs": refs}, form=True)
 
+    def get_file(self, path: str, ref: str = "") -> dict:
+        """读取仓库任意文本文件（contents API，base64 解码）。
+
+        供仓库地图读取仓库自维护的 CAPABILITIES.md / REPO_MAP.md 等能力清单。
+        返回 {"content": <decoded>, "endpoint": <命中端点>}；未命中返回空 content。
+        """
+        path = str(path or "").strip().lstrip("/")
+        if not path:
+            return {"content": "", "endpoint": ""}
+        import base64
+        from urllib.parse import quote
+
+        if self._dialect_is_gitlab():
+            rinfo = self._card_request("GET", f"/projects/{self.owner}%2F{self.repo}")
+            default_branch = (
+                (rinfo or {}).get("default_branch", "main")
+                if isinstance(rinfo, dict) else "main"
+            )
+            branch = ref or default_branch
+            data = self._card_request(
+                "GET",
+                f"/projects/{self.owner}%2F{self.repo}/repository/files/"
+                f"{quote(path, safe='')}?ref={branch}",
+            )
+            content = (data or {}).get("content", "") if isinstance(data, dict) else ""
+            if content:
+                try:
+                    return {"content": base64.b64decode(content).decode("utf-8"),
+                            "endpoint": "gitlab_file"}
+                except Exception:
+                    return {"content": "", "endpoint": ""}
+            return {"content": "", "endpoint": ""}
+
+        suffix = f"?ref={ref}" if ref else ""
+        data = self._card_request(
+            "GET", f"/repos/{self.owner}/{self.repo}/contents/{path}{suffix}")
+        if not isinstance(data, dict) or data.get("error"):
+            return {"content": "", "endpoint": ""}
+        content = data.get("content", "")
+        if not content:
+            return {"content": "", "endpoint": ""}
+        try:
+            return {"content": base64.b64decode(content).decode("utf-8"),
+                    "endpoint": "contents"}
+        except Exception:
+            return {"content": "", "endpoint": ""}
+
     def get_readme(self) -> dict:
         """D44/S66：拉取仓库 README（读侧方言模板：形态按卡，token=构造时传入）。
 
