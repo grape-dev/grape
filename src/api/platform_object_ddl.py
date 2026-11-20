@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS grape_t_repo_platforms (
     pr_comment_endpoint TEXT NOT NULL DEFAULT '',      -- PR 评论端点族：issues（借 issue 评论接口）| 空=专用端点
     pr_labels_via_issues INTEGER NOT NULL DEFAULT 0,   -- 1=标签走 issues 接口
     workflows_write     INTEGER NOT NULL DEFAULT 0,    -- 1=允许写 .github/workflows（能力位；第二批迁能力矩阵）
+    create_repo_options INTEGER NOT NULL DEFAULT 0,   -- 1=建仓适配器接受 auto_init/default_branch
     legacy_token_symbol TEXT NOT NULL DEFAULT '',      -- 历史 token 取用函数名（deps.py PEP 562 动态解析用；兼容垫片，勿删）
     pat_create_url      TEXT NOT NULL DEFAULT '',      -- PAT 创建页直达链接（原 repo-credentials.json）
     token_storage_field TEXT NOT NULL DEFAULT '',      -- managed_repos 仓库 bot token 物理列名（''=无）

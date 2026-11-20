@@ -8005,6 +8005,37 @@ register_migration(
 )
 
 
+def _fn_add_platform_create_repo_options() -> None:
+    """grape_t_repo_platforms 补 create_repo_options 能力位（幂等）。"""
+    from src.kernel.mysql_compat import get_db_backend
+    from src.kernel.session_manager import db, db_lock
+
+    backend = get_db_backend()
+    with db_lock:
+        c = db.cursor()
+        cols = {row[1] for row in c.execute(
+            "PRAGMA table_info(grape_t_repo_platforms)").fetchall()}
+        if not cols:
+            log.info("202611201600 grape_t_repo_platforms 不存在，跳过补列")
+            return
+        if "create_repo_options" not in cols:
+            decl = "INTEGER NOT NULL DEFAULT 0" if backend == "mysql" else "INTEGER DEFAULT 0"
+            c.execute(f"ALTER TABLE grape_t_repo_platforms ADD COLUMN create_repo_options {decl}")
+            db.commit()
+            log.info("202611201600 平台卡补列 create_repo_options 完成")
+        else:
+            log.info("202611201600 平台卡 create_repo_options 已存在")
+
+
+register_migration(
+    version="202611201600",
+    name="add-platform-create-repo-options",
+    kind="safe",
+    domains=("mgmt",),
+    fn=_fn_add_platform_create_repo_options,
+)
+
+
 # 已盖章迁移的源码（含 docstring）是 checksum 冻结面：改动会让每次启动报"漂移"。
 # 因此下面的原 docstring 保持盖章时的原文；与事实不符之处在此更正：
 #   - meta 的 global_bot_*_token 是**历史明文**，本迁移会把它原样搬进 bot_token_enc
