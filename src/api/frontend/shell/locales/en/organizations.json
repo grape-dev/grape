@@ -33,7 +33,7 @@
     "repo_owner_hint": "The repository will be created under the selected account or organization space; organization spaces require create-repo permission on that platform.",
     "repo_owner_required": "Please select the repository namespace",
     "repo_name_label": "Repository name",
-    "repo_name_placeholder": "e.g. org-eng-team",
+    "repo_name_placeholder": "e.g. eng-team",
     "repo_name_hint": "Letters, digits, underscores, hyphens and dots only. Leave blank to derive from the organization slug.",
     "repo_name_invalid": "Repository name may only contain letters, digits, underscores, hyphens and dots",
     "repo_path_label": "Repository path",

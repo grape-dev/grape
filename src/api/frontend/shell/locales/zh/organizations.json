@@ -33,7 +33,7 @@
     "repo_owner_hint": "仓库将创建在所选账号或组织空间下；组织空间需要对应平台的建仓权限。",
     "repo_owner_required": "请选择仓库所属空间",
     "repo_name_label": "项目名称",
-    "repo_name_placeholder": "如：org-rd-team",
+    "repo_name_placeholder": "如：rd-team",
     "repo_name_hint": "仅限字母、数字、下划线、连字符和点；留空时按组织标识自动生成。",
     "repo_name_invalid": "项目名称只能包含字母、数字、下划线、连字符和点",
     "repo_path_label": "项目路径",

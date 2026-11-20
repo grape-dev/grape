@@ -951,7 +951,8 @@ function openRepoWorkspace(repo) {
 function autoNameFromSlug() {
   const raw = String(createForm.slug || createForm.name || '').trim().toLowerCase()
   const slug = raw.replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '')
-  return slug ? 'org-' + slug.slice(0, 60).replace(/-+$/g, '') : ''
+  // 新组织仓库名默认使用组织 slug，不再自动加 org- 前缀（显式输入仍优先）。
+  return slug ? slug.slice(0, 60).replace(/-+$/g, '') : ''
 }
 const autoRepoName = computed(() => autoNameFromSlug())
 const currentNamespaceProvider = computed(() => {

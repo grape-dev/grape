@@ -1309,11 +1309,16 @@ def create_github_repo(api_token: str, name: str, description: str = "", private
     if not api_token:
         raise RuntimeError("GitHub API Token 未配置")
     owner = (owner or "").strip()
+    target_branch = (default_branch or "").strip()
     # 所选 owner 是当前 token 用户本人时走个人空间：GitHub 的
     # POST /orgs/{login}/repos 对个人账号恒 404（创建组织弹窗默认选中的就是
     # 「个人」空间，曾导致 GitHub 组织仓库 provisioning 直接失败）。
     if owner and get_user_github_login(api_token).strip().lower() == owner.lower():
         owner = ""
+    # GitHub 建仓接口不支持 default_branch；自定义默认分支必须先用 auto_init
+    # 生成首个分支，再调分支改名接口（改名默认分支即默认分支改名）。
+    if target_branch and target_branch != "main":
+        auto_init = True
     body = {
         "name": name,
         "description": description,
@@ -1340,6 +1345,32 @@ def create_github_repo(api_token: str, name: str, description: str = "", private
     full_name = result.get("full_name", "")
     if not full_name:
         raise RuntimeError(f"创建仓库成功但未返回仓库信息: {json.dumps(result, ensure_ascii=False)[:200]}")
+    if target_branch and target_branch != "main":
+        initial_branch = str(result.get("default_branch") or "main").strip() or "main"
+        if initial_branch != target_branch:
+            _owner, _repo = full_name.split("/", 1) if "/" in full_name else (owner, name)
+            try:
+                _repo_url = (f"{_GITHUB_API_BASE}/repos/"
+                             f"{urllib.parse.quote(_owner, safe='')}/"
+                             f"{urllib.parse.quote(_repo, safe='')}")
+                _github_req(
+                    "POST",
+                    f"{_repo_url}/branches/"
+                    f"{urllib.parse.quote(initial_branch, safe='')}/rename",
+                    api_token,
+                    {"new_name": target_branch},
+                )
+                # GitHub 分支改名不会自动改默认分支，需再 PATCH 一次。
+                _github_req("PATCH", _repo_url, api_token,
+                            {"default_branch": target_branch})
+                result["default_branch"] = target_branch
+                log.info(
+                    f"create_github_repo: default branch {initial_branch} -> "
+                    f"{target_branch} for {full_name}")
+            except Exception as exc:  # noqa: BLE001 - 建仓成功但改名失败保留仓库
+                log.warning(
+                    f"create_github_repo: rename default branch failed "
+                    f"{full_name} {initial_branch}->{target_branch}: {exc}")
     return result
 
 def credential_workflows_write(user_id: str, provider: str) -> "bool | None":
