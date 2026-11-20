@@ -1,4 +1,4 @@
-# Grape 使用指导文档
+# 1. Grape 使用指导文档
 
 Grape 是一个多 Agent 协作的 DevOps 平台，通过 VOD/Issue/Coding/QA/SRE 五类 Agent 覆盖从需求分析到部署运维的全生命周期。平台对接 GitCode 代码托管，通过 Webhook 自动触发流水线，由 AI Agent 自主完成任务并提交 PR。
 
