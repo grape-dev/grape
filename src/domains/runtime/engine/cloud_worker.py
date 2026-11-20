@@ -418,7 +418,7 @@ async def _cloud_execute_task(client, task, engine_name: str = ""):
 
     和 agent.py 的 _execute_task 区别：
     - 不走 _remap_cwd（沙箱内 cwd 由 _run_cloud_sandbox 修正）
-    - 不走 git worktree（沙箱内 _clone_repo 已做）
+    - 不走 git worktree（仓库代码由 agent 自行获取：模板预置或 grape CLI git-repo）
     - 不走 codearts data dir
     - 每环节新建，任务结束主动 kill（不再 __exit__ refresh）
     - LLM key 从 /env API 获取（不查 DB）
